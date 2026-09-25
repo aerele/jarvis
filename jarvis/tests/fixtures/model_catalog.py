@@ -1,18 +1,14 @@
-"""Bundled fallback for the admin-owned LLM provider + model catalog.
+"""Test fixture: a copy of the admin provider + model catalog.
 
-GENERATED FILE. Do not edit by hand. Regenerate with:
-    python apps/jarvis/scripts/gen_bundled_catalog.py
-
-Returned whenever admin is unreachable or the Redis cache is cold, which
-includes every CI run. It therefore MIRRORS jarvis_admin_v2's PROVIDER_SEED
-exactly rather than trimming it: a shorter list here silently shrinks the
-catalog during an outage and breaks the tests that assert full model lists.
-NO secrets: ids, labels and display flags only.
+Test-only. The app has no model catalog of its own: it reads the admin's, with a
+per-site snapshot for outages (jarvis.catalog_store). CI has no admin, so the
+before_tests hook seeds the snapshot from this fixture. Refresh it from the admin
+seed when tests need newer models; it is never shipped to customers as data.
 """
 
 from __future__ import annotations
 
-BUNDLED_MODEL_CATALOG: list[dict] = [
+MODEL_CATALOG: list[dict] = [
 	{
 		"provider_id": "openai",
 		"catalog_id": "openai",

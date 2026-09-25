@@ -401,7 +401,9 @@ export const getPresetCatalog = () => call("jarvis.onboarding.get_preset_catalog
 // default_models) for the pool editor + subscription card. Independent of
 // get_chat_ui_settings so it also works in the onboarding wizard, which never
 // calls that. See jarvis.chat.api.get_model_catalog_ui.
-export const getModelCatalogUi = () => call("jarvis.chat.api.get_model_catalog_ui");
+// retry: an explicit Retry click, which skips the server's short failure backoff.
+export const getModelCatalogUi = (retry = false) =>
+	call("jarvis.chat.api.get_model_catalog_ui", retry ? { retry: 1 } : {});
 export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_status");
 // jarvis#840: the pre-chat preflight. Answers what readiness cannot -
 // { plugin, persona, usable: {state, detail} } - and never refuses: every

@@ -449,11 +449,11 @@ describe("maintenance hold banner + send gate", () => {
 		expect(chatSrc.slice(start, end)).toContain("!holdActive.value");
 	});
 
-	it("HARD-blocks: passes :disabled=holdActive to the Composer (greys the box + blocks typing)", () => {
+	it("HARD-blocks: disables the Composer during maintenance or bootstrap (greys the box + blocks typing)", () => {
 		const c = chatSrc.indexOf("<Composer");
 		expect(c, "ChatView must render the Composer").not.toBe(-1);
 		const end = chatSrc.indexOf(">", c);
-		expect(chatSrc.slice(c, end)).toContain(':disabled="holdActive"');
+		expect(chatSrc.slice(c, end)).toContain(':disabled="holdActive || booting"');
 	});
 
 	it("orders the send-gate maintenance branch between release-update and workspace-resetting", () => {
@@ -655,5 +655,54 @@ describe("update-banner visibility rules (Slice 3b review wave)", () => {
 		// The highest-traffic surface. Re-adding showWelcome here would hide the
 		// nudge from the users most likely to see only the welcome screen.
 		expect(sliceComputed("updateBannerVisible")).not.toContain("showWelcome");
+	});
+});
+
+// Mounting the 16k-line ChatView for one guard is not worth the harness, so these pin
+// the boot gate the same source-level way as the maintenance gate above. The runtime
+// behaviour (composer released after a stalled or failed boot call) is covered by
+// tests/e2e/chat-bootstrap.spec.js.
+describe("bootstrap send gate", () => {
+	const HERE = path.dirname(fileURLToPath(import.meta.url));
+	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+	const mountStart = chatSrc.indexOf("onMounted(async () => {");
+	const mountEnd = chatSrc.indexOf("\n});", mountStart);
+	const mountSrc = chatSrc.slice(mountStart, mountEnd);
+
+	it("send() bails while booting before any side effect, independent of the disabled composer", () => {
+		const start = chatSrc.indexOf("async function send(textArg, resendAck) {");
+		expect(start, "ChatView must still define send()").not.toBe(-1);
+		const firstStatement = chatSrc
+			.slice(start, chatSrc.indexOf("dismissFeedback();", start))
+			.split("\n")
+			.filter((line) => line.trim() && !line.trim().startsWith("//"));
+		expect(firstStatement[1].trim()).toBe("if (booting.value) return;");
+	});
+
+	it("clears booting in ONE finally whose try spans the settings await", () => {
+		expect(mountStart, "ChatView must still mount via onMounted(async ...)").not.toBe(-1);
+		const tryAt = mountSrc.indexOf("\n\ttry {");
+		const uiAwait = mountSrc.indexOf("await bootStep(uiP)");
+		const reset = mountSrc.indexOf("\t} finally {\n\t\tbooting.value = false;");
+		expect(tryAt).not.toBe(-1);
+		expect(uiAwait).toBeGreaterThan(tryAt);
+		expect(reset).toBeGreaterThan(uiAwait);
+		expect(chatSrc.match(/booting\.value = false/g)).toHaveLength(1);
+	});
+
+	it("bounds every boot network await with the deadline", () => {
+		const bootBody = mountSrc.slice(0, mountSrc.indexOf("booting.value = false"));
+		for (const unbounded of [
+			"await uiP",
+			"await convsP",
+			"await loadConversation(",
+			"await newChat()",
+		]) {
+			expect(bootBody, `boot must not ${unbounded} without bootStep`).not.toContain(
+				unbounded
+			);
+		}
+		expect(bootBody).toContain("await bootStep(convsP)");
+		expect(bootBody).toContain("await bootStep(loadConversation(first))");
 	});
 });

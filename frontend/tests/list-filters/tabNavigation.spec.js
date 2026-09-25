@@ -68,7 +68,10 @@ vi.mock("@/api", () => ({
 vi.mock("@/data/session", () => ({ session: { user: "u@x.com" }, sessionUser: "u@x.com" }));
 vi.mock("@vueuse/core", async () => {
 	const { ref } = await import("vue");
-	return { useStorage: (k, v) => ref(v) };
+	return {
+		useStorage: (k, v) => ref(v),
+		useElementSize: () => ({ width: ref(1280), height: ref(800) }),
+	};
 });
 vi.mock("@/lib/dashboardRestore", () => ({ builderCanvasFrame: () => "" }));
 

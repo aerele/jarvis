@@ -57,6 +57,7 @@ vi.mock("@/composables/useConfirm", () => ({
 }));
 
 import LlmPoolEditor from "./LlmPoolEditor.vue";
+import { MODEL_CATALOG_UI } from "@/lib/__fixtures__/modelCatalogUi.fixtures.js";
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 let serverPool;
@@ -85,11 +86,9 @@ beforeEach(() => {
 		model_statuses: [],
 	}));
 	api.getPresetCatalog.mockImplementation(async () => []);
-	api.getModelCatalogUi.mockImplementation(async () => ({
-		api_key_models: {},
-		subscription_models: {},
-		default_models: {},
-	}));
+	api.getModelCatalogUi.mockImplementation(async () =>
+		JSON.parse(JSON.stringify(MODEL_CATALOG_UI))
+	);
 	api.saveLlmPool.mockImplementation(async () => ({
 		apply_operation: { operation_id: "op1", state: "pending" },
 		idempotency_key: "K",

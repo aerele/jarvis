@@ -14,6 +14,7 @@ artifact.
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
 import re
 
@@ -172,26 +173,38 @@ def _media_lines(text: str):
 			yield i, m.group(1).strip().strip("`").strip()
 
 
+def _valid_media_path(path: str) -> bool:
+	"""Root-confined, non-traversal, allowed-image-extension check shared by the
+	``MEDIA:`` marker and the embedded-path detectors below."""
+	if not path.startswith(_MEDIA_ROOT):
+		return False
+	rel = path[len(_MEDIA_ROOT) :]
+	# ``..`` can't escape the media root (the gateway also realpath-confines),
+	# but reject it here so we never even send a traversal path.
+	if not rel or rel.startswith("/") or ".." in rel.split("/"):
+		return False
+	return path.lower().endswith(tuple(_IMAGE_EXTS))
+
+
 def detect_media_paths(text: str) -> list[str]:
-	"""Full absolute container paths for line-anchored, local, image-extension
-	``MEDIA:`` markers under the agent media root, capped per turn.
+	"""Full absolute container paths for a qualifying (root-confined,
+	non-traversal, image-extension) media reference, capped per turn:
+	line-anchored ``MEDIA:`` markers FIRST, then embedded-path lines (see
+	``_embedded_media_lines`` - the agent runtime's image/video/music tools'
+	deferred reply, e.g. ``Attachment: <path>``).
 
 	The gateway resolves the full path against its own media roots, so we pass
 	the whole path (not a relpath). External URLs, non-image files, and traversal
-	attempts are excluded here — they are still stripped from the reply by
-	``strip_media_lines`` (strip-but-don't-fetch)."""
+	attempts are excluded here — a ``MEDIA:`` line is still stripped from the
+	reply regardless (strip-but-don't-fetch, ``strip_media_lines``); an embedded
+	one is left untouched (see ``_embedded_media_lines``)."""
 	out: list[str] = []
-	exts = tuple(_IMAGE_EXTS)
 	for _, path in _media_lines(text):
-		if not path.startswith(_MEDIA_ROOT):
-			continue
-		rel = path[len(_MEDIA_ROOT) :]
-		# ``..`` can't escape the media root (the gateway also realpath-confines),
-		# but reject it here so we never even send a traversal path.
-		if not rel or rel.startswith("/") or ".." in rel.split("/"):
-			continue
-		if not path.lower().endswith(exts):
-			continue
+		if _valid_media_path(path):
+			out.append(path)
+			if len(out) >= _MAX_MEDIA_PER_TURN:
+				return out
+	for _, path in _embedded_media_lines(text):
 		out.append(path)
 		if len(out) >= _MAX_MEDIA_PER_TURN:
 			break
@@ -200,27 +213,85 @@ def detect_media_paths(text: str) -> list[str]:
 
 def strip_media_lines(text: str) -> str:
 	"""Remove EVERY line-anchored ``MEDIA:`` line from the visible reply — handled,
-	external, malformed, even a ``MEDIA:``-prefixed prose/fenced line.
+	external, malformed, even a ``MEDIA:``-prefixed prose/fenced line — PLUS any
+	line carrying a qualifying embedded media path (see ``_embedded_media_lines``).
 
-	Deliberately broader than the agent runtime (which keeps a ``MEDIA:``-prefixed
-	line whose payload is not a path, and preserves fenced examples): we favour
-	leak-safety over that fidelity (Q3 decision D2). Being fence-UNAWARE is
-	load-bearing — an unbalanced fence must never leave a real trailing marker."""
+	Deliberately broader than the agent runtime for ``MEDIA:`` (which keeps a
+	``MEDIA:``-prefixed line whose payload is not a path, and preserves fenced
+	examples): we favour leak-safety over that fidelity (Q3 decision D2). Being
+	fence-UNAWARE is load-bearing — an unbalanced fence must never leave a real
+	trailing marker. An embedded-path line is the OPPOSITE: only stripped when its
+	path actually qualifies — it is ordinary prose otherwise (e.g. a path outside
+	the media root, a traversal attempt, or a non-image extension), never leak-
+	safety-first, since it is not a dedicated protocol marker."""
 	if not text:
 		return text
 	drop = {i for i, _ in _media_lines(text)}
+	drop |= {i for i, _ in _embedded_media_lines(text)}
 	if not drop:
 		return text  # nothing to strip -> return verbatim (no line-ending normalisation)
 	kept = [ln for i, ln in enumerate(text.splitlines()) if i not in drop]
 	return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
+# --------------------------------------------------------------------------- #
+# Embedded-path media detection (image/video/music tool deferred replies).
+#
+# The agent runtime's image/video/music generation tools detach into a
+# background task and, ~25-30s later, restart the session with a model-authored reply that
+# NAMES the generated file's path in free text - "Attachment: <path>",
+# `path="<path>"`, or a markdown image `![alt](<path>)` - not a ``MEDIA:``
+# marker line (that is a distinct protocol the runtime uses for its own
+# "automatic" delivery fallback). The wording is model-authored and unstable;
+# the absolute path under the agent media root is the only stable anchor.
+# --------------------------------------------------------------------------- #
+
+# A path token: the media root followed by everything up to the first
+# whitespace / quote / paren / angle-bracket / comma / semicolon - the usual
+# terminators of "Attachment: <path>", 'path="<path>"' and markdown
+# "![alt](<path>)". Matched on ANY line, not just a dedicated marker line.
+_EMBEDDED_MEDIA_PATH = re.compile(re.escape(_MEDIA_ROOT) + r"[^\s\"'()<>,;]+")
+
+
+def _embedded_media_lines(text: str):
+	"""Yield ``(line_index, path)`` for lines carrying a QUALIFYING embedded
+	media path outside a ``MEDIA:`` marker. A line whose only candidate path is
+	NOT qualifying (outside the root, a traversal attempt, a non-image
+	extension) yields nothing for that line - it is ordinary prose and stays
+	completely untouched, never partially stripped. A line already claimed by a
+	``MEDIA:`` marker is skipped (that marker already owns the line)."""
+	if not isinstance(text, str):
+		return
+	marker_lines = {i for i, _ in _media_lines(text)}
+	for i, line in enumerate(text.splitlines()):
+		if i in marker_lines:
+			continue
+		for m in _EMBEDDED_MEDIA_PATH.finditer(line):
+			path = m.group(0)
+			if _valid_media_path(path):
+				yield i, path
+				break  # one image per line is all the tool ever emits
+
+
 def has_media_marker(text: str) -> bool:
 	"""True if the reply has ANY line-anchored ``MEDIA:`` directive — qualifying
-	(fetchable image) or not (``.pdf`` / external / traversal). Broader than
-	``detect_media_paths``: used to force the stored-content overwrite so that NO
-	recognized marker survives in stored content, even one we don't fetch."""
+	(fetchable image) or not (``.pdf`` / external / traversal). MEDIA:-only —
+	callers use this as a leak-safety gate for the dedicated protocol marker;
+	see ``has_embedded_media_path`` for the separate, narrower embedded-path
+	signal. Broader than ``detect_media_paths``: used to force the stored-
+	content overwrite so that no marker survives in stored content even when
+	stripping it leaves the reply empty."""
 	return next(_media_lines(text), None) is not None
+
+
+def has_embedded_media_path(text: str) -> bool:
+	"""True if the reply has any line ``strip_media_lines`` will remove for a
+	QUALIFYING embedded media path (outside a ``MEDIA:`` marker - see
+	``_embedded_media_lines``). Kept separate from ``has_media_marker``: an
+	embedded path is ordinary prose unless it fully qualifies, never a leak-
+	safety-first signal, so a caller must opt in explicitly rather than getting
+	it folded into the marker gate."""
+	return next(_embedded_media_lines(text), None) is not None
 
 
 def fetch_media(agent_url: str, token: str, source: str) -> bytes | None:
@@ -368,6 +439,137 @@ def seed_media(assistant_msg_name: str, agent_url: str, token: str, sources: lis
 		frappe.log_error(
 			title="chat worker: native media fetch returned no content",
 			message=f"{failures} of {len(sources)} media fetch(es) empty for {assistant_msg_name}",
+		)
+	if new_items:
+		_append_canvas_items(assistant_msg_name, new_items)
+	return new_items
+
+
+# --------------------------------------------------------------------------- #
+# Gateway-attached content blocks (image/video/audio/document on the final
+# chat message itself - the runtime's own buildManagedMediaBlock). Distinct
+# delivery mechanism from the MEDIA:/embedded-path text markers above: the
+# gateway serves these at a relative URL of its own, not a container path.
+# --------------------------------------------------------------------------- #
+
+_MEDIA_URL_ID_RE = re.compile(r"/([0-9a-f-]{36})/full")
+_MAX_MEDIA_URL_BYTES = 8 * 1024 * 1024
+
+
+def _media_url_id(url: str) -> str:
+	"""Dedup key for a media-block url: the attachment id segment (never the
+	full url, which embeds the session key)."""
+	m = _MEDIA_URL_ID_RE.search(url)
+	return m.group(1) if m else url
+
+
+def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | None = None) -> bytes | None:
+	"""GET one gateway-attached media block from the tenant's own gateway
+	(binary-safe, redirect-disabled, size-bounded). ``url`` is the RELATIVE
+	path the runtime put on the content block - validated by the caller
+	(``agent_client._valid_media_url``) before it ever reaches here. Rejects a
+	response whose content-type is neither ``image/*`` nor the block's own
+	declared ``mime_type`` (the gateway naming one thing and serving another is
+	itself a signal not to trust the body)."""
+	import requests
+
+	from jarvis.chat.canvas import _http_base
+
+	base = _http_base(agent_url)
+	if not base or not token:
+		return None
+	try:
+		with requests.get(
+			f"{base}{url}",
+			headers={"Authorization": f"Bearer {token}"},
+			timeout=15,
+			stream=True,
+			allow_redirects=False,
+		) as r:
+			if r.status_code != 200:
+				return None
+			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())):
+				return None
+			buf = bytearray()
+			for chunk in r.iter_content(64 * 1024):
+				buf += chunk
+				if len(buf) > _MAX_MEDIA_URL_BYTES:
+					return None
+	except Exception:
+		return None
+	return bytes(buf) or None
+
+
+def _media_url_filename(url: str, mime_type: str | None) -> str:
+	ext = (mimetypes.guess_extension(mime_type or "") or "").lower() if mime_type else ""
+	if ext not in _IMAGE_EXTS and ext not in (".mp4", ".webm", ".mp3", ".wav", ".pdf"):
+		ext = ext or ".bin"
+	base = re.sub(r"[^\w.\-]", "", _media_url_id(url))[-40:] or "attachment"
+	return "jarvis-media-" + base + ext
+
+
+def _canvas_type_for_mime(mime_type: str | None) -> str:
+	m = (mime_type or "").lower()
+	if m.startswith("image/"):
+		return "image"
+	if m.startswith("video/"):
+		return "video"
+	if m.startswith("audio/"):
+		return "audio"
+	return "file"
+
+
+def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: list[dict]) -> list[dict]:
+	"""Fetch each gateway-attached media block (``items`` = ``[{"url", "mime_type"},
+	...]``, from ``agent_client._chat_final_media_urls``), save it as a private
+	File on the assistant message, append to its ``canvas`` JSON, and return the
+	new canvas items. Same idempotent-dedup / best-effort shape as ``seed_media``
+	(dedup key = the attachment id, never the full session-key-bearing url) - safe
+	to call again on a retry. MUST run AFTER ``canvas.persist_canvases`` (wholesale
+	overwrite) for the same reason ``seed_media`` must."""
+	from frappe.utils.file_manager import save_file
+
+	if not items:
+		return []
+	seen = _existing_media_sources(assistant_msg_name)
+	new_items: list[dict] = []
+	failures = 0
+	for item in items:
+		url = item.get("url")
+		mime_type = item.get("mime_type")
+		if not url:
+			continue
+		key = _media_url_id(url)
+		if key in seen:
+			continue
+		content = fetch_media_url(agent_url, token, url, mime_type=mime_type)
+		if not content:
+			failures += 1
+			continue
+		try:
+			f = save_file(_media_url_filename(url, mime_type), content, MSG, assistant_msg_name, is_private=1)
+		except Exception:
+			frappe.log_error(
+				title="chat worker: save gateway media block failed",
+				message=frappe.get_traceback(),
+			)
+			continue
+		new_items.append(
+			{
+				"name": f.file_url,
+				"title": "Generated attachment",
+				"type": _canvas_type_for_mime(mime_type),
+				"file_url": f.file_url,
+				"source": key,  # attachment id - dedup key, never the session-bearing url
+			}
+		)
+		seen.add(key)
+
+	if failures:
+		frappe.log_error(
+			title="chat worker: gateway media block fetch returned no content",
+			message=f"{failures} of {len(items)} media block fetch(es) empty for {assistant_msg_name}",
 		)
 	if new_items:
 		_append_canvas_items(assistant_msg_name, new_items)

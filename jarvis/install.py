@@ -84,3 +84,9 @@ def after_install() -> None:
 			"The bundled jarvis/agents/registry.json is missing or empty; see the "
 			"'jarvis agent catalog: registry.json missing' Error Log entry."
 		)
+
+	# Best-effort and queued, unlike the checks above: a day-1 site may not know
+	# its admin yet. The hourly job and the settings page fetch again later.
+	from jarvis.catalog_store import enqueue_refresh_all
+
+	enqueue_refresh_all()

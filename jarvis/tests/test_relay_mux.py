@@ -134,6 +134,13 @@ def _chat_final_frame(run_id, session_key, text="hi"):
 	}
 
 
+def _chat_aborted_frame(run_id, session_key, text=None):
+	payload = {"runId": run_id, "sessionKey": session_key, "state": "aborted", "errorMessage": "aborted"}
+	if text:
+		payload["message"] = {"content": [{"type": "text", "text": text}]}
+	return {"type": "event", "event": "chat", "payload": payload}
+
+
 def _chat_failed_final_frame(run_id, session_key, stop_reason=None):
 	"""The LIVE shape of a chat final for a turn that produced nothing (#543):
 	no ``message`` key at all, and ``stopReason`` (when the runtime resolved one) at
@@ -558,6 +565,161 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# agent-yield continuation adoption (image/video/music tools' unconditional
+# background-detach abort): pump.on_terminal parks a just-terminaled lane with
+# ``await_continuation``; the deferred tool's follow-up run posts under a FRESH
+# runId on the SAME session_key, which ``_route_event`` must adopt.
+# --------------------------------------------------------------------------- #
+
+
+class TestRelayMuxYieldContinuation(FrappeTestCase):
+	def _mux(self, **kw):
+		return RelayMux(MagicMock(), "wb-target", **kw)
+
+	def test_await_continuation_keeps_lane_registered_and_flagged(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		self.assertTrue(mux.await_continuation("r1"))
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_await_continuation_false_when_lane_already_gone(self):
+		mux = self._mux()
+		self.assertFalse(mux.await_continuation("never-registered"))
+
+	def test_terminal_on_awaiting_lane_is_not_retired(self):
+		"""_apply must skip _retire_lane when on_terminal ITSELF parks the lane
+		(mux.await_continuation) while handling this exact terminal - the real
+		pump call sequence: the lane is still "active" (not yet awaiting) when
+		the frame is routed, and only becomes "awaiting" during on_terminal's
+		own callback. Pre-flagging the lane awaiting BEFORE the frame arrives is
+		a different case entirely (a stray dead-runId frame on an
+		already-parked lane) and the dead-runId stray-frame guard drops that
+		one before it ever reaches on_terminal - see the sibling stray tests."""
+		mux = self._mux()
+		recorded = []
+
+		def on_terminal(kind, payload):
+			recorded.append((kind, payload))
+			mux.await_continuation("r1")
+
+		mux.register_run("r1", LaneHandler(on_terminal=on_terminal), session_key="s1")
+		mux._classify(_chat_aborted_frame("r1", "s1"))
+		mux.dispatch()
+
+		self.assertEqual(len(recorded), 1)  # the handler still ran
+		self.assertIn("r1", mux._runs)  # but the lane was NOT retired
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_continuation_final_adopted_under_fresh_run_id_same_session(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		self.assertTrue(mux.await_continuation("r1"))
+		# The deferred tool's follow-up run: a DIFFERENT runId, SAME session_key.
+		mux._classify(_chat_final_frame("image_generate:xyz", "s1", "here is the image"))
+		mux.dispatch()
+		self.assertEqual(rec.terminal[0], "relay:final")
+		self.assertEqual(rec.terminal[1]["text"], "here is the image")
+		# A normal (non-awaiting) terminal retires the lane, now under its NEW key.
+		self.assertNotIn("r1", mux._runs)
+		self.assertNotIn("image_generate:xyz", mux._runs)
+
+	def test_continuation_aborted_on_fresh_run_id_still_adopted(self):
+		"""Item 3: a continuation that itself fails must also reach on_terminal -
+		not just a continuation final."""
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux._classify(_chat_aborted_frame("image_generate:xyz", "s1"))
+		mux.dispatch()
+		self.assertEqual(rec.terminal[0], "relay:error")
+		self.assertEqual(rec.terminal[1]["state"], "aborted")
+
+	def test_different_session_key_never_adopted(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		before = mux.stats()["stray_frames"]
+		mux._classify(_chat_final_frame("some-other-run", "OTHER-SESSION", "nope"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)  # never delivered to this lane
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+		self.assertIn("r1", mux._runs)  # still parked, waiting for the right session
+
+	def test_release_continuation_drops_the_parked_lane(self):
+		# Resolved by session_key, NOT a runId (the caller cannot know one once
+		# adoption may have moved it onto a fresh id).
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux.release_continuation("s1")
+		self.assertNotIn("r1", mux._runs)
+		# A late continuation frame after release is now an ordinary stray.
+		before = mux.stats()["stray_frames"]
+		mux._classify(_chat_final_frame("image_generate:late", "s1", "too late"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+
+	def test_release_continuation_after_adoption_finds_the_live_lane(self):
+		# A Stop landing AFTER the continuation is adopted (streaming, not yet
+		# terminaled) must still release the LIVE lane, not the dead original
+		# runId (which release_continuation never even sees any more).
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		# Adopt via a non-final chat frame (the continuation is streaming).
+		mux._classify(
+			{
+				"type": "event",
+				"event": "chat",
+				"payload": {"runId": "image_generate:xyz", "sessionKey": "s1", "state": "delta"},
+			}
+		)
+		mux.dispatch()
+		self.assertNotIn("r1", mux._runs)
+		self.assertFalse(mux._runs["image_generate:xyz"].awaiting)
+
+		mux.release_continuation("s1")
+
+		self.assertNotIn("image_generate:xyz", mux._runs)
+
+	def test_release_continuation_is_idempotent(self):
+		mux = self._mux()
+		mux.release_continuation("never-there")  # must not raise
+
+	def test_stray_frame_under_dead_runid_while_parked_is_dropped(self):
+		# Only a frame with a NEW runId on the same session_key may adopt the
+		# lane; a frame replaying the dead original runId (the gateway's own
+		# retired lane, e.g. a straggling delta) must be dropped, never routed.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		before = mux.stats()["stray_frames"]
+		mux._classify(_agent_frame("r1", "s1", "assistant", {"text": "late", "delta": "late"}))
+		mux.dispatch()
+		self.assertEqual(rec.deltas, [])
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+		self.assertTrue(mux._runs["r1"].awaiting)  # still parked, untouched
+
+	def test_chat_frame_replaying_the_dead_runid_does_not_self_adopt(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux._classify(_chat_final_frame("r1", "s1", "should never adopt itself"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+
+# --------------------------------------------------------------------------- #
 # Failed-final classification (#543): the LIVE runtime terminal shapes
 # --------------------------------------------------------------------------- #
 
@@ -648,6 +810,30 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertEqual(term[0], "relay:final")
 		self.assertEqual(term[1]["text"], "recovered on the fallback model")
 
+	def test_image_content_block_rides_terminal_payload_as_media_urls(self):
+		# The gateway attaches a generated image as a CONTENT BLOCK on the final
+		# message, not text - a distinct delivery mechanism from media_rels.
+		img_url = "/api/chat/media/outgoing/sk-enc/12345678-1234-1234-1234-123456789012/full.png"
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {
+					"content": [
+						{"type": "text", "text": "Here it is."},
+						{"type": "image", "url": img_url, "mimeType": "image/png"},
+					]
+				},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "Here it is.")
+		self.assertEqual(term[1]["media_urls"], [{"url": img_url, "mime_type": "image/png"}])
+
 	def test_final_with_an_empty_message_and_benign_stop_reason_stays_final(self):
 		# A final that DOES carry an assistant message with no text and a non-error
 		# stopReason is the one empty shape that is not evidence of failure.
@@ -664,6 +850,116 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		term = self._terminal_for([frame])
 		self.assertEqual(term[0], "relay:final")
 		self.assertIsNone(term[1]["text"])
+
+
+class TestRelayMuxYieldViaFinal(FrappeTestCase):
+	"""Corrected wire shape (verified live against the 2026.9.3 bundle): the
+	image/video/music tools' background-detach yield does NOT end with
+	``state=="aborted"`` - it ends through ``broadcastChatFinal``, a ``final``
+	whose assistant message is the runtime's own ``createYieldAbortedResponse``:
+	empty text, ``stopReason=="aborted"`` (never "error"), which can ride at
+	the top level, nested in ``message``, or with ``message`` omitted
+	entirely. Without ``_is_yield_aborted_final`` this reached
+	``_chat_final_failed`` and was misclassified as a hard failure
+	(FAILED_FINAL_ERROR) - see TestRelayMuxFailedFinal for that (still
+	correct) path for every OTHER empty/failed final."""
+
+	def _terminal_for(self, frames):
+		mux = RelayMux(MagicMock(), "yf-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		for frame in frames:
+			mux._classify(frame)
+		mux.dispatch()
+		return rec.terminal
+
+	def test_top_level_stop_reason_aborted_message_omitted_is_a_yield(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="aborted")])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_top_level_stop_reason_aborted_with_message_present_is_a_yield(self):
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"stopReason": "aborted",
+				"message": {"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_nested_message_stop_reason_aborted_is_a_yield(self):
+		# The transcript-projected shape: no top-level stopReason, only nested.
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_stop_reason_error_is_still_failed_final_not_a_yield(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="error")])
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
+
+	def test_real_text_beats_a_stray_aborted_stop_reason(self):
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"stopReason": "aborted",
+				"message": {"content": [{"type": "text", "text": "a real answer"}]},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "a real answer")
+
+	def test_bare_final_after_media_tool_start_is_a_yield(self):
+		# Corrected AGAIN (live e2e): the gateway settles a yielded run with NO
+		# message and NO stopReason at all when it produced no visible reply -
+		# wire-identical to a genuine failed_final. The only tell is whether a
+		# media-generation tool started during this run.
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "image_generate", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_bare_final_with_no_media_tool_stays_failed_final(self):
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "get_list", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
 
 
 # --------------------------------------------------------------------------- #

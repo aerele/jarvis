@@ -442,34 +442,32 @@ def compute_proxy_active(settings) -> bool:
 # catalog): xai and moonshot are both in that state today, so they stay on
 # the pool leg until a template arm + catalog id ship for them.
 def _upstream_has_renderer(upstream: str) -> bool:
-	"""True when the bundled provider catalog has a non-empty ``renderer_id``
-	for ``upstream``. Deliberately reads the BUNDLED (checked-into-git) catalog,
-	never the live admin one: this feeds a save-time, hot-chat-path decision
+	"""True when ``upstream`` has a fleet renderer (a non-empty ``renderer_id`` in
+	the admin seed). Deliberately reads reviewed code (_RENDERER_UPSTREAMS), never
+	the live admin catalog: this feeds a save-time, hot-chat-path decision
 	that must be a pure function of stored settings, and a live-fetched answer
 	would let admin silently move an ALREADY-PROVISIONED tenant between legs on
 	its own schedule - precisely the retroactive-move hazard the activation
 	gate below exists to rule out. Widening the renderable set is a deploy
-	(regenerate the bundle via scripts/gen_bundled_catalog.py), which is the
-	review gate this wants.
+	(edit _RENDERER_UPSTREAMS), which is the review gate this wants.
 	"""
-	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-	needle = (upstream or "").strip().lower()
-	if not needle:
-		return False
-	for provider in BUNDLED_MODEL_CATALOG:
-		pid = (provider.get("provider_id") or "").strip().lower()
-		cid = (provider.get("catalog_id") or "").strip().lower()
-		if needle in (pid, cid):
-			return bool((provider.get("renderer_id") or "").strip())
-	return False
+	return (upstream or "").strip().lower() in _RENDERER_UPSTREAMS
 
 
-_BASE_URL_BACKFILL_PROVIDERS = ("groq", "deepseek")
+# Provider wiring the save path needs, kept as reviewed code rather than read
+# from the live admin catalog: these answers must be a pure function of stored
+# settings (see the two functions around this). They mirror the admin seed's
+# renderer_id and default_base_url; a test compares them with the catalog fixture.
+_RENDERER_UPSTREAMS = frozenset({"openai", "anthropic"})
+_BASE_URL_BACKFILL = {
+	"groq": "https://api.groq.com/openai/v1",
+	"deepseek": "https://api.deepseek.com",
+}
+_BASE_URL_BACKFILL_PROVIDERS = tuple(_BASE_URL_BACKFILL)
 
 
 def _catalog_default_base_url(provider: str) -> str:
-	"""Return the bundled catalog's ``default_base_url`` for a normalized
+	"""Return the admin seed's ``default_base_url`` for a normalized
 	``provider`` id, or "" if it is not one of the providers this backfill
 	is scoped to.
 
@@ -479,22 +477,12 @@ def _catalog_default_base_url(provider: str) -> str:
 	chat turn on that model (jarvis#767). Deliberately narrowed to
 	_BASE_URL_BACKFILL_PROVIDERS (the issue's exact scope) rather than every
 	catalog provider with a default_base_url, so this fix cannot change the
-	emitted spec shape for any other provider. Reads the BUNDLED
-	(checked-into-git) catalog like _upstream_has_renderer above, for the
+	emitted spec shape for any other provider. Reads the reviewed
+	_BASE_URL_BACKFILL table like _upstream_has_renderer above, for the
 	same reason: a pure function of stored settings, never a live-fetched
 	admin catalog.
 	"""
-	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-	needle = (provider or "").strip().lower()
-	if needle not in _BASE_URL_BACKFILL_PROVIDERS:
-		return ""
-	for entry in BUNDLED_MODEL_CATALOG:
-		pid = (entry.get("provider_id") or "").strip().lower()
-		cid = (entry.get("catalog_id") or "").strip().lower()
-		if needle in (pid, cid):
-			return (entry.get("default_base_url") or "").strip()
-	return ""
+	return _BASE_URL_BACKFILL.get((provider or "").strip().lower(), "")
 
 
 def _lone_direct_capable(settings) -> bool:

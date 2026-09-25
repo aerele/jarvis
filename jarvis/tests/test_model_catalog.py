@@ -1,9 +1,11 @@
+import json
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import admin_client
+from jarvis import admin_client, catalog_store
+from jarvis.catalog_store import MODELS, SNAPSHOT_DT
 from jarvis.exceptions import AdminUnreachableError
 
 _PAYLOAD = [
@@ -31,181 +33,149 @@ _PAYLOAD = [
 
 
 def _clear_model_catalog_cache():
-	"""Drop both Redis keys get_model_catalog uses.
+	"""Drop the model catalog's Redis copy so reads fall through to the snapshot.
 
-	Must run in tearDown as well as setUp. These are keys in the REAL per-site
-	cache, and the success key has a 6 hour TTL, so a test that leaves the fake
-	_PAYLOAD cached hands it to any later test (in this file or another module in
-	the same worker) that calls get_model_catalog without mocking. Clearing only
-	on the way in protects this class and poisons everyone after it.
+	Runs in tearDown as well as setUp: the key lives in the REAL per-site cache, so
+	a test that leaves a fake payload cached hands it to later tests in any module.
 	"""
-	frappe.cache().delete_value(admin_client._MODEL_CATALOG_CACHE_KEY)
-	frappe.cache().delete_value(admin_client._MODEL_CATALOG_FAIL_KEY)
+	frappe.cache().delete_value(MODELS.cache_key)
+	frappe.cache().delete_value(f"{MODELS.cache_key}:failed")
 
 
-class TestGetModelCatalog(FrappeTestCase):
+def _snapshot_models() -> list:
+	return json.loads(frappe.db.get_single_value(SNAPSHOT_DT, "model_catalog") or "[]")
+
+
+class TestCatalogRead(FrappeTestCase):
+	"""read() is the hot path: it must never call the admin or write the DB."""
+
 	def setUp(self):
 		_clear_model_catalog_cache()
 		self.addCleanup(_clear_model_catalog_cache)
 
-	def test_fetches_and_caches_admin_catalog(self):
-		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD) as gp:
-			out = admin_client.get_model_catalog()
-		self.assertEqual(out, _PAYLOAD)
-		gp.assert_called_once()
-		self.assertIn("get_provider_catalog", gp.call_args.kwargs.get("path", ""))
-		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("must use cache")):
+	def test_redis_hit_is_returned_without_touching_the_admin(self):
+		frappe.cache().set_value(MODELS.cache_key, _PAYLOAD, expires_in_sec=60)
+		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("no admin")):
 			self.assertEqual(admin_client.get_model_catalog(), _PAYLOAD)
 
-	def test_cache_hit_short_circuits_network(self):
-		frappe.cache().set_value(
-			admin_client._MODEL_CATALOG_CACHE_KEY,
-			_PAYLOAD,
-			expires_in_sec=admin_client._MODEL_CATALOG_TTL_S,
-		)
-		with patch.object(admin_client, "_post_guest") as m:
-			result = admin_client.get_model_catalog()
-		self.assertEqual(result, _PAYLOAD)
-		m.assert_not_called()
-
-	def test_falls_back_to_bundled_when_admin_down_and_cache_empty(self):
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-		with patch.object(admin_client, "_post_guest", side_effect=AdminUnreachableError("down")):
+	def test_redis_miss_reads_the_snapshot_and_refills_redis(self):
+		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("no admin")):
 			out = admin_client.get_model_catalog()
-		self.assertEqual(out, BUNDLED_MODEL_CATALOG)
-		self.assertTrue(all("provider_id" in e and "models" in e for e in out))
+		self.assertTrue(out)
+		self.assertEqual(out, _snapshot_models())
+		self.assertEqual(frappe.cache().get_value(MODELS.cache_key), out)
 
-	def test_never_raises_on_any_exception(self):
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+	def test_no_redis_and_no_snapshot_is_an_empty_catalog(self):
+		# Only a site that never reached the admin gets here; callers treat [] as
+		# "catalog unavailable".
+		with patch.object(MODELS, "_load_snapshot", return_value=[]):
+			self.assertEqual(admin_client.get_model_catalog(), [])
 
-		with patch.object(admin_client, "_post_guest", side_effect=ValueError("scheme-less url")):
-			out = admin_client.get_model_catalog()
-		self.assertEqual(out, BUNDLED_MODEL_CATALOG)
-
-	def test_uses_a_short_timeout_not_the_150s_default(self):
-		# R3: this runs inside send_message. DEFAULT_TIMEOUT_S is 150.
-		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD) as gp:
-			admin_client.get_model_catalog()
-		self.assertLessEqual(gp.call_args.kwargs.get("timeout_s", 150), 10)
-
-	def test_a_failure_is_cached_so_the_hot_path_stops_retrying(self):
-		# R3: without negative caching a hanging admin costs EVERY chat send a
-		# full timeout. One failure must suppress the next call entirely.
-		frappe.cache().delete_value(admin_client._MODEL_CATALOG_FAIL_KEY)
-		with patch.object(admin_client, "_post_guest", side_effect=AdminUnreachableError("down")):
-			admin_client.get_model_catalog()
-		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("must not retry")) as gp:
-			out = admin_client.get_model_catalog()
-		gp.assert_not_called()
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-		self.assertEqual(out, BUNDLED_MODEL_CATALOG)
-
-	def test_an_empty_payload_also_trips_the_failure_marker(self):
-		frappe.cache().delete_value(admin_client._MODEL_CATALOG_FAIL_KEY)
-		with patch.object(admin_client, "_post_guest", return_value=[]):
-			admin_client.get_model_catalog()
-		self.assertTrue(frappe.cache().get_value(admin_client._MODEL_CATALOG_FAIL_KEY))
-
-
-class TestBundledCatalogMirrorsAdminSeed(FrappeTestCase):
-	def test_bundle_covers_every_provider_and_model(self):
-		# R4: the bundle IS what CI and every outage sees. If it drifts from the
-		# admin seed, tests pass locally (admin reachable) and fail on CI.
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-		self.assertEqual(len(BUNDLED_MODEL_CATALOG), 15)
-		by_id = {p["provider_id"]: p for p in BUNDLED_MODEL_CATALOG}
-		# Spot-check the entries the older trimmed draft dropped.
-		for pid in ("mistral", "groq", "together", "deepseek", "openrouter", "zai", "zai_coding"):
-			self.assertIn(pid, by_id, f"bundle is missing {pid}")
-		self.assertEqual(by_id["moonshot"]["subscription_label"], "Kimi (Moonshot)")
-		self.assertEqual(by_id["google"]["catalog_id"], "gemini")
-
-	def test_the_gemini_subscription_tier_is_gone(self):
-		# Google's chat subscription was removed 2026-08-19 (Google discontinued
-		# consumer login-with-Google for Gemini 2026-06-18): every gemini model
-		# now lives on the api_key tier only, the subscription tier is empty,
-		# and supports_subscription/renderer_id/auth_profile_id all reflect
-		# there being no OAuth flow left to render.
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
-		api = [m["model_id"] for m in g["models"] if m["tier"] == "api_key"]
-		subs = [m["model_id"] for m in g["models"] if m["tier"] == "subscription"]
-		self.assertEqual(subs, [])
-		self.assertFalse(g["supports_subscription"])
-		self.assertEqual(g["renderer_id"], "")
-		self.assertEqual(g["auth_profile_id"], "")
-		# "gemini-3.1-flash" 404s against a live key (measured 2026-07-28,
-		# "not found for API version v1beta") and stays absent; only the
-		# "-lite" variant is real, and it is now api_key-tier like every model.
-		self.assertNotIn("gemini-3.1-flash", api)
-		self.assertIn("gemini-3.1-flash-lite", api)
-		self.assertIn("gemini-2.5-pro", api)
-		self.assertIn("gemini-2.5-flash", api)
-		self.assertIn("gemini-3.6-flash", api)
-
-	def test_the_gemini_api_key_default_is_servable_on_a_free_key(self):
-		# A new customer's first Gemini key is usually a free-tier one, and Google
-		# grants pro-tier models ZERO free quota (gemini-2.5-pro returns 429 on
-		# one). The default therefore has to be a flash id, or the very first turn
-		# after a clean pool apply fails. Verified 2026-07-28 by calling
-		# :generateContent, not by reading models.list, which advertises ids that
-		# 404 on use.
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
-		g = next(p for p in BUNDLED_MODEL_CATALOG if p["provider_id"] == "google")
-		defaults = [m["model_id"] for m in g["models"] if m["tier"] == "api_key" and m["is_default"]]
-		self.assertEqual(defaults, ["gemini-3.6-flash"])
-
-
-class TestGetModelCatalogNeverRaises(FrappeTestCase):
-	"""The chat hot path (send_message) assumes this cannot raise."""
-
-	def setUp(self):
-		_clear_model_catalog_cache()
-		self.addCleanup(_clear_model_catalog_cache)
-
-	def test_a_redis_read_failure_degrades_instead_of_raising(self):
-		# The cache calls sit outside the inner try. Before this was guarded, a
-		# transient Redis blip during a cache READ propagated out of
-		# get_model_catalog into send_message, turning a hiccup into a 500 on
-		# every chat send.
-		#
-		# Patching frappe.cache also breaks anything else that touches the cache,
-		# which is the point: the guard must survive an unhealthy cache. It is
-		# also why the guard logs via frappe.logger() and not frappe.log_error --
-		# the latter writes an Error Log DOCUMENT and would raise from inside the
-		# handler here, defeating the guard entirely. This test caught exactly
-		# that.
-		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
-
+	def test_a_redis_failure_still_serves_the_snapshot(self):
+		# send_message calls this: a Redis blip must not become a 500. The guard
+		# logs through frappe.logger, since log_error needs a healthy cache and DB.
 		class _BoomCache:
 			def get_value(self, *a, **k):
 				raise ConnectionError("redis gone")
 
-			def set_value(self, *a, **k):
-				raise ConnectionError("redis gone")
+			set_value = get_value
 
-		with patch.object(admin_client.frappe, "cache", return_value=_BoomCache()):
-			out = admin_client.get_model_catalog()
-		self.assertEqual(out, BUNDLED_MODEL_CATALOG)
+		with patch.object(catalog_store.frappe, "cache", return_value=_BoomCache()):
+			# Redis is down but the snapshot is fine: the snapshot is still served.
+			self.assertEqual(admin_client.get_model_catalog(), _snapshot_models())
+		with (
+			patch.object(catalog_store.frappe, "cache", return_value=_BoomCache()),
+			patch.object(MODELS, "_load_snapshot", side_effect=RuntimeError("db gone")),
+		):
+			self.assertEqual(admin_client.get_model_catalog(), [])
 
-	def test_a_redis_write_failure_still_returns_the_payload_or_bundle(self):
-		class _ReadOnlyCache:
-			def get_value(self, *a, **k):
-				return None
 
-			def set_value(self, *a, **k):
-				raise ConnectionError("redis read-only")
+class TestCatalogRefresh(FrappeTestCase):
+	def setUp(self):
+		_clear_model_catalog_cache()
+		self.addCleanup(_clear_model_catalog_cache)
+		frappe.db.savepoint("catalog_refresh_test")
+		self.addCleanup(frappe.db.rollback, save_point="catalog_refresh_test")
 
-		with patch.object(admin_client.frappe, "cache", return_value=_ReadOnlyCache()):
-			with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD):
-				out = admin_client.get_model_catalog()
-		# The write failed, but the caller still gets a usable catalog.
-		self.assertTrue(isinstance(out, list) and out)
+	def test_a_successful_fetch_updates_redis_and_the_snapshot(self):
+		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD) as gp:
+			out = MODELS.refresh()
+		self.assertEqual(out, _PAYLOAD)
+		self.assertIn("get_provider_catalog", gp.call_args.kwargs["path"])
+		self.assertEqual(frappe.cache().get_value(MODELS.cache_key), _PAYLOAD)
+		self.assertEqual(_snapshot_models(), _PAYLOAD)
+		self.assertTrue(frappe.db.get_single_value(SNAPSHOT_DT, "model_catalog_fetched_at"))
+
+	def test_a_dict_envelope_is_unwrapped(self):
+		with patch.object(admin_client, "_post_guest", return_value={"data": _PAYLOAD}):
+			self.assertEqual(MODELS.refresh(), _PAYLOAD)
+
+	def test_uses_a_short_timeout(self):
+		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD) as gp:
+			MODELS.refresh()
+		self.assertLessEqual(gp.call_args.kwargs["timeout_s"], 10)
+
+	def test_admin_down_keeps_serving_the_snapshot(self):
+		before = _snapshot_models()
+		with patch.object(admin_client, "_post_guest", side_effect=AdminUnreachableError("down")):
+			out = MODELS.refresh()
+		self.assertEqual(out, before)
+		self.assertEqual(_snapshot_models(), before)
+
+	def test_a_failed_fetch_backs_off_but_a_forced_retry_does_not(self):
+		with patch.object(admin_client, "_post_guest", side_effect=AdminUnreachableError("down")):
+			MODELS.refresh()
+		with patch.object(admin_client, "_post_guest", side_effect=AssertionError("backing off")):
+			self.assertEqual(MODELS.refresh(), _snapshot_models())
+		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD) as gp:
+			self.assertEqual(MODELS.refresh(force=True), _PAYLOAD)
+		gp.assert_called_once()
+
+	def test_any_exception_is_contained(self):
+		# A scheme-less admin URL raises requests.MissingSchema, not an Admin* error.
+		with patch.object(admin_client, "_post_guest", side_effect=ValueError("scheme-less url")):
+			self.assertEqual(MODELS.refresh(), _snapshot_models())
+
+	def test_an_empty_answer_never_blanks_the_snapshot(self):
+		before = _snapshot_models()
+		with patch.object(admin_client, "_post_guest", return_value=[]):
+			self.assertEqual(MODELS.refresh(), before)
+		self.assertEqual(_snapshot_models(), before)
+
+	def test_an_unchanged_catalog_is_not_rewritten(self):
+		with patch.object(admin_client, "_post_guest", return_value=_PAYLOAD):
+			MODELS.refresh()
+		with (
+			patch.object(admin_client, "_post_guest", return_value=_PAYLOAD),
+			patch.object(catalog_store.frappe.db, "set_single_value") as write,
+		):
+			MODELS.refresh()
+		(values,) = [c.args[1] for c in write.call_args_list]
+		self.assertEqual(list(values), ["model_catalog_fetched_at"])
+
+	def test_refresh_all_covers_models_and_presets(self):
+		with (
+			patch.object(catalog_store.MODELS, "refresh") as models,
+			patch.object(catalog_store.PRESETS, "refresh") as presets,
+		):
+			catalog_store.refresh_all()
+		models.assert_called_once()
+		presets.assert_called_once()
+
+
+class TestProviderWiringMatchesTheCatalog(FrappeTestCase):
+	"""pool_serialize keeps two provider facts as reviewed code. Drift from the
+	admin seed (mirrored by the fixture) must fail here, not in a customer's save."""
+
+	def test_renderer_and_base_url_tables_match_the_fixture(self):
+		from jarvis.jarvis import pool_serialize as ps
+		from jarvis.tests.fixtures.model_catalog import MODEL_CATALOG
+
+		with_renderer = {p["provider_id"] for p in MODEL_CATALOG if (p.get("renderer_id") or "").strip()}
+		self.assertEqual(set(ps._RENDERER_UPSTREAMS), with_renderer)
+		by_id = {p["provider_id"]: p.get("default_base_url") for p in MODEL_CATALOG}
+		for provider, url in ps._BASE_URL_BACKFILL.items():
+			self.assertEqual(url, by_id[provider])
 
 
 def _clear_sub_model_cache():
@@ -243,9 +213,16 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 	def test_keys_exactly_match_todays_hardcoded_catalogue(self):
 		# The pinned regression the reviewer asked for: whatever the catalog says,
 		# the KEY SET must not move, or oauth/api.py and the desk tab break.
-		from jarvis._subscription_models import _SEED_SUBSCRIPTION_MODELS, SUBSCRIPTION_MODELS
+		from jarvis._subscription_models import SUBSCRIPTION_MODELS
+		from jarvis.tests.fixtures.model_catalog import MODEL_CATALOG
 
-		self.assertEqual(set(SUBSCRIPTION_MODELS), set(_SEED_SUBSCRIPTION_MODELS))
+		expected = {
+			p.get("subscription_label") or p["label"]
+			for p in MODEL_CATALOG
+			if any(m["tier"] == "subscription" for m in p["models"])
+		}
+		self.assertEqual(expected, {"OpenAI", "Anthropic", "xAI Grok", "Kimi (Moonshot)"})
+		self.assertEqual(set(SUBSCRIPTION_MODELS), expected)
 
 	def test_reads_values_from_the_catalog(self):
 		from jarvis import _subscription_models
@@ -275,9 +252,6 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 	def test_api_key_only_provider_is_excluded(self):
 		from jarvis import _subscription_models
 
-		# One real subscription provider so the catalog path is taken (an
-		# all-api-key payload has no subscription rows and falls back to the
-		# seed, which carries Anthropic since the Claude plan landed).
 		payload = [
 			{
 				"provider_id": "openai",
@@ -411,6 +385,26 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 		_clear_sub_model_cache()
 		self.addCleanup(_clear_model_catalog_cache)
 		self.addCleanup(_clear_sub_model_cache)
+		# The endpoint fetches the admin live first; CI has no admin to answer.
+		refresh = patch.object(catalog_store.MODELS, "refresh", return_value=_PAYLOAD)
+		refresh.start()
+		self.addCleanup(refresh.stop)
+
+	def test_reports_availability_and_catalog_base_urls(self):
+		from jarvis.chat.api import get_model_catalog_ui
+
+		with patch.object(catalog_store.MODELS, "refresh", return_value=_PAYLOAD):
+			out = get_model_catalog_ui()
+		self.assertTrue(out["catalog_available"])
+		self.assertEqual(out["provider_base_urls"], {"OpenAI": "https://api.openai.com/v1"})
+
+	def test_an_unavailable_catalog_is_reported_not_hidden(self):
+		from jarvis.chat.api import get_model_catalog_ui
+
+		with patch.object(catalog_store.MODELS, "refresh", return_value=[]):
+			out = get_model_catalog_ui()
+		self.assertFalse(out["catalog_available"])
+		self.assertEqual(out["subscription_models"], {})
 
 	def test_returns_the_three_catalog_slices_as_json_objects(self):
 		import json
@@ -420,7 +414,7 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 		from jarvis.chat.api import get_model_catalog_ui
 		from jarvis.tests import dumps_like_response
 
-		with patch.object(admin_client, "get_model_catalog", return_value=_PAYLOAD):
+		with patch.object(catalog_store.MODELS, "refresh", return_value=_PAYLOAD):
 			out = get_model_catalog_ui()
 		for key in ("api_key_models", "subscription_models", "default_models"):
 			self.assertIn(key, out)
@@ -448,7 +442,7 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 				],
 			}
 		]
-		with patch.object(admin_client, "get_model_catalog", return_value=payload):
+		with patch.object(catalog_store.MODELS, "refresh", return_value=payload):
 			out = get_model_catalog_ui()
 		self.assertIn("Kimi (Moonshot)", out["subscription_models"])
 		self.assertNotIn("Moonshot (Kimi)", out["subscription_models"])
@@ -511,9 +505,32 @@ class TestModelCatalogUiEndpoint(FrappeTestCase):
 				],
 			},
 		]
-		with patch.object(admin_client, "get_model_catalog", return_value=payload):
+		with patch.object(catalog_store.MODELS, "refresh", return_value=payload):
 			out = get_model_catalog_ui()
 		providers = {p["provider"] for p in out["subscription_connect_providers"]}
 		self.assertIn("OpenAI", providers)
 		self.assertNotIn("xAI Grok", providers)
 		self.assertNotIn("Google Gemini", providers)
+
+	def test_lists_come_from_the_fetched_catalog_even_if_caching_failed(self):
+		# Review finding: the flag came from refresh() while the lists re-read
+		# Redis/the snapshot, so a failed cache write gave "available" + empty lists.
+		from jarvis.chat.api import get_model_catalog_ui
+
+		with patch.object(admin_client, "get_model_catalog", return_value=[]):
+			out = get_model_catalog_ui()
+		self.assertTrue(out["catalog_available"])
+		self.assertEqual(out["subscription_models"], {"OpenAI": ["gpt-5.5"]})
+		self.assertEqual(out["default_models"], {"OpenAI": "gpt-5.5"})
+		self.assertEqual([p["provider"] for p in out["subscription_connect_providers"]], ["OpenAI"])
+
+
+class TestCatalogRefreshIsScheduled(FrappeTestCase):
+	def test_refresh_runs_hourly_after_migrate_and_install(self):
+		from jarvis import hooks
+
+		self.assertIn("jarvis.catalog_store.refresh_all", hooks.scheduler_events["hourly"])
+		self.assertIn("jarvis.catalog_store.enqueue_refresh_all", hooks.after_migrate)
+		self.assertEqual(hooks.before_tests, "jarvis.tests.catalog_seed.seed_catalog_snapshot")
+		with open(frappe.get_app_path("jarvis", "install.py")) as f:
+			self.assertIn("enqueue_refresh_all()", f.read())

@@ -22,6 +22,22 @@
 			{{ err }}
 			<button type="button" class="jv-mon-retry" @click="load">Retry</button>
 		</div>
+		<p
+			v-if="catalogState === 'loading'"
+			class="text-p-sm text-ink-gray-5"
+			style="margin: 0 0 12px"
+		>
+			Loading models…
+		</p>
+		<div
+			v-else-if="catalogState === 'unavailable'"
+			style="color: var(--red); font-size: 13px; margin-bottom: 12px"
+		>
+			Models are unavailable right now.
+			<button type="button" class="jv-mon-retry" @click="loadModelCatalog(true)">
+				Retry
+			</button>
+		</div>
 
 		<!-- ============================================================
          UNIFIED FAILOVER LIST + CONFIG SECTION (!singleMode only - the
@@ -139,7 +155,7 @@
 				<p v-else class="jv-flist-empty__msg">No models yet.</p>
 				<button
 					v-if="canEdit"
-					:disabled="!editable"
+					:disabled="!editable || !catalogReady"
 					@click="openAdd"
 					class="jv-btn jv-btn--primary jv-flist-addbtn"
 				>
@@ -571,7 +587,7 @@
 	           one is only for a pool that already has something to list. -->
 			<button
 				v-if="canEdit && !panel.open && (rows.length || showDirectRow)"
-				:disabled="!editable"
+				:disabled="!editable || !catalogReady"
 				@click="openAdd"
 				class="jv-btn jv-btn--primary jv-flist-addbtn jv-flist-addbtn--end"
 			>
@@ -1169,7 +1185,11 @@
 												v-else
 												type="button"
 												class="jv-cbtn jv-cbtn-primary"
-												:disabled="!editable || panelRow._connect.loading"
+												:disabled="
+													needsCatalog(panelRow) ||
+													!editable ||
+													panelRow._connect.loading
+												"
 												@click="
 													startConnect(
 														panelRow,
@@ -1523,7 +1543,7 @@
 					<button
 						v-if="panelAction"
 						type="button"
-						:disabled="!editable"
+						:disabled="!editable || !catalogReady"
 						class="jv-btn jv-btn--primary"
 						@click="panelAction.run()"
 					>
@@ -1600,7 +1620,7 @@
 							type="button"
 							class="jv-ct-card"
 							:class="{ on: m.credentialType === opt.value }"
-							@click="setCredType(m, opt.value)"
+							@click="pickCredType(m, opt.value)"
 							:disabled="!editable"
 							:aria-pressed="m.credentialType === opt.value"
 						>
@@ -1918,7 +1938,7 @@
 									<button
 										v-if="canEdit && !singleMode"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
-										:disabled="!editable"
+										:disabled="needsCatalog(m) || !editable"
 										@click="startConnect(m, ai)"
 										title="Re-authorize to mint fresh tokens"
 									>
@@ -1938,7 +1958,8 @@
 								v-if="canEdit && !singleMode && !(m._connect && m._connect.open)"
 								@click="startConnect(m)"
 								:disabled="
-									m._connect && m._connect.loading && !m._connect.authorizeUrl
+									needsCatalog(m) ||
+									(m._connect && m._connect.loading && !m._connect.authorizeUrl)
 								"
 								class="jv-pool-addrow"
 							>
@@ -2087,6 +2108,7 @@
 													type="button"
 													class="jv-cbtn jv-cbtn-primary"
 													:disabled="
+														needsCatalog(m) ||
 														!editable ||
 														(m._connect && m._connect.loading)
 													"
@@ -2239,7 +2261,7 @@
 
 			<button
 				v-if="isMulti && canEdit"
-				:disabled="!editable"
+				:disabled="!editable || !catalogReady"
 				@click="addModel"
 				class="jv-btn jv-btn--sm jv-btn--ghost"
 			>
@@ -2381,19 +2403,54 @@ const emit = defineEmits([
 const cfg = ref({ models: [], preset: "", routing_mode: "failover", proxy_active: false });
 const catalog = ref([]);
 // Admin-managed model catalog (jarvis.chat.api.get_model_catalog_ui): api-key
-// suggestions, subscription suggestions, and per-provider defaults. Fetched on
-// mount (see load()) independent of get_chat_ui_settings so this also works in
-// the onboarding wizard, which never calls that. Falls back to the built-in
-// literals below when the fetch fails or hasn't landed yet - never blank.
+// suggestions, subscription suggestions, per-provider defaults and base URLs.
+// Fetched live on mount (see load()) independent of get_chat_ui_settings so this
+// also works in the onboarding wizard, which never calls that.
 const modelCatalog = ref({
+	catalog_available: false,
+	provider_base_urls: {},
 	api_key_models: {},
 	subscription_models: {},
 	default_models: {},
 });
-// Chat-subscription suggestion table derived from the fetched catalog (falls
-// back to pool.js's built-in FALLBACK_SUB_MODELS via subModelSuggestions when
-// empty/unfetched). Passed to every defaultSubscriptionModel(...) call site so
-// an admin-changed subscription default is honoured everywhere, not just here.
+// "loading" | "ready" | "unavailable". The admin catalog is the only source of
+// model ids and defaults, so adding, connecting and saving wait for it (see
+// catalogReady) instead of guessing an id.
+const catalogState = ref("loading");
+const catalogReady = computed(() => catalogState.value === "ready");
+// Only work that would have to guess a model id waits for the catalog. A row that
+// already names its model (re-authorizing a saved account) never does.
+function needsCatalog(row) {
+	return !catalogReady.value && !((row && row.model) || "").trim();
+}
+async function loadModelCatalog(retry = false) {
+	catalogState.value = "loading";
+	try {
+		const res = await api.getModelCatalogUi(retry);
+		if (res) modelCatalog.value = res;
+		catalogState.value = res && res.catalog_available ? "ready" : "unavailable";
+	} catch (e) {
+		catalogState.value = "unavailable";
+	}
+	if (catalogReady.value) fillBlankModels();
+}
+// Rows created before the catalog landed (the onboarding wizard's first row, or a
+// provider picked in that moment) have no model yet: give them the catalog
+// defaults. Saved rows always name a model, so they are never touched.
+function fillBlankModels() {
+	for (const r of rows.value) {
+		if ((r.model || "").trim()) continue;
+		if (r.credentialType === "subscription") {
+			r.model = defaultSubscriptionModel(r.upstream, subscriptionSuggestions.value);
+		} else if (r.provider) {
+			r.model = providerDefaultModel(r.provider);
+			if (!(r.baseUrl || "").trim()) r.baseUrl = providerDefaultBaseUrl(r.provider);
+		}
+	}
+}
+// Chat-subscription suggestion table derived from the fetched catalog. Passed to
+// every defaultSubscriptionModel(...) call site so an admin-changed subscription
+// default is honoured everywhere, not just here.
 const subscriptionSuggestions = computed(() =>
 	subModelSuggestions(modelCatalog.value.subscription_models)
 );
@@ -2905,66 +2962,21 @@ const providerOptions = PROVIDER_LABELS.map((p) => p.label);
 // is now the source, so a model added in the admin desk shows up here with no
 // deploy. See modelSuggestionsForProvider below.
 //
-// Every `model` here MUST mirror that provider's api_key is_default in the admin
-// seed (jarvis_admin_v2/fleet/provider_catalog.py PROVIDER_SEED, whose generated
-// mirror is jarvis/_model_catalog.py). Nothing enforces that, so a catalog refresh
-// silently strands this copy: six of these were left behind by the 2026-07-26
-// refresh and preselected deprecated ids until 2026-08-06. Re-check the pair when
-// bumping either side.
-const PROVIDER_DEFAULTS = {
-	Anthropic: { model: "claude-sonnet-5", baseUrl: "https://api.anthropic.com" },
-	// "gpt-5.6" is this literal's FALLBACK value only, used before the catalog
-	// fetch lands or if it fails - providerDefaultModel() below prefers the
-	// catalog's is_default flag. Previously a stale "gpt-4o" here (fixed
-	// alongside the catalog wiring: PROVIDER_DEFAULTS.OpenAI predates the
-	// gpt-5.x rollout and was never updated).
-	OpenAI: { model: "gpt-5.6", baseUrl: "https://api.openai.com/v1" },
-	// Flash, not pro: Google grants pro-tier models zero free quota, so a
-	// gemini-2.5-pro fallback 429s on the free key most customers start with.
-	// Matches the catalog's api_key is_default, which this only stands in for.
-	"Google Gemini": {
-		model: "gemini-3.6-flash",
-		baseUrl: "https://generativelanguage.googleapis.com",
-	},
-	Mistral: { model: "mistral-large-latest", baseUrl: "https://api.mistral.ai/v1" },
-	// gpt-oss, not llama: Groq deprecated llama-3.3-70b-versatile on 2026-06-17
-	// and points migrations at the gpt-oss routes.
-	Groq: { model: "openai/gpt-oss-120b", baseUrl: "https://api.groq.com/openai/v1" },
-	"Together AI": {
-		model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-		baseUrl: "https://api.together.xyz/v1",
-	},
-	// deepseek-flash is DeepSeek's rolling name for the latest Flash (V4.1 Flash
-	// since 2026-09-10); deepseek-v4-flash is retired and deepseek-chat deprecated,
-	// so neither may be what a new key preselects.
-	DeepSeek: { model: "deepseek-flash", baseUrl: "https://api.deepseek.com" },
-	"Moonshot (Kimi)": { model: "kimi-k2.6", baseUrl: "https://api.moonshot.ai/v1" },
-	"xAI Grok": { model: "grok-4.5", baseUrl: "https://api.x.ai/v1" },
-	"GLM / Z.ai": { model: "glm-4.7", baseUrl: "https://api.z.ai/api/paas/v4" },
-	// GLM Coding Plan is a separate z.ai subscription from pay-as-you-go "GLM / Z.ai"
-	// above - a coding-plan key 402s with "insufficient balance" on the pay-as-you-go
-	// base URL even though it's perfectly valid on this one (see apiKeyModelHealth's
-	// targeted hint in pool.js for the exact trap this option exists to avoid).
-	"GLM / Z.ai (Coding Plan)": {
-		model: "glm-4.7",
-		baseUrl: "https://api.z.ai/api/coding/paas/v4",
-	},
-	OpenRouter: { model: "anthropic/claude-sonnet-4-6", baseUrl: "https://openrouter.ai/api/v1" },
-	"Ollama (local)": { model: "llama3", baseUrl: "http://host.docker.internal:11434/v1" },
-	"vLLM (local)": { model: "", baseUrl: "" },
-	"OpenAI-Compatible": { model: "", baseUrl: "" },
-};
+// Provider defaults (model + base URL) come from the same catalog: the api_key
+// is_default row and default_base_url. There is deliberately no literal here.
+function providerDefaultBaseUrl(label) {
+	return ((modelCatalog.value.provider_base_urls || {})[label] || "").trim();
+}
 function catalogVendorLabel(vid) {
 	return vid === "gemini" ? "Google Gemini" : providerLabel(vid);
 }
-// The api-key-tier model preselected for a provider. Prefers the admin-managed
-// catalog's is_default flag; falls back to the PROVIDER_DEFAULTS literal when
-// the catalog has no default for this label (fetch still pending, failed, or
-// the label has no api-key rows at all).
+// The api-key-tier model preselected for a provider: the admin catalog's
+// is_default row, or "" when it has none (OpenAI-Compatible / vLLM, where the
+// customer types their own id).
 function providerDefaultModel(label) {
 	const rows = (modelCatalog.value.api_key_models || {})[label] || [];
 	const flagged = rows.find((m) => m.is_default);
-	return (flagged && flagged.model_id) || (PROVIDER_DEFAULTS[label] || {}).model || "";
+	return (flagged && flagged.model_id) || "";
 }
 function modelSuggestionsForProvider(provider) {
 	const label = providerLabel(provider || "");
@@ -3329,6 +3341,7 @@ const pendingAddUid = computed(() => {
 // !footerless auto-save - which can fire while this panel is still open -
 // already includes it instead of silently dropping an in-progress connect.
 function openAdd() {
+	if (!catalogReady.value) return; // never add or connect with a guessed model id
 	const r = { ...newRow(), order: rows.value.length };
 	// Open a NEW row on Chat subscription. newRow() seeds credentialType "api_key"
 	// (it is the shape the row object defaults to), which meant "+ Add a model"
@@ -3442,7 +3455,7 @@ function testStatusHeadline(result) {
 function effectiveTestBaseUrl(row) {
 	const own = ((row && row.baseUrl) || "").trim();
 	if (own) return own;
-	return (PROVIDER_DEFAULTS[row && row.provider] || {}).baseUrl || "";
+	return providerDefaultBaseUrl(row && row.provider);
 }
 // Live, side-effect-free probe (jarvis.llm_key_probe.test_llm_api_key) of whatever is
 // currently typed into the panel - never persists, never touches the fleet/container, and
@@ -3673,6 +3686,7 @@ const panelAction = computed(() => {
 // the whole pool through a restart just to arrive broken, and the customer would
 // learn about it from a failed chat turn rather than from the button they pressed.
 async function connectApiKeyRow(row) {
+	if (!catalogReady.value) return; // never add or connect with a guessed model id
 	if (!row || busy.value.active) return;
 	err.value = "";
 	setApplyResult(null);
@@ -3837,6 +3851,13 @@ function newRow() {
 	};
 }
 
+// The user's credential-type click. It waits for the catalog so a saved row is
+// never re-derived to a blank model; the editor's own setCredType calls (load,
+// openAdd) run early on purpose and self-heal via fillBlankModels.
+function pickCredType(m, type) {
+	if (!catalogReady.value) return;
+	setCredType(m, type);
+}
 function setCredType(m, type) {
 	m.credentialType = type;
 	if (type === "subscription") {
@@ -3861,6 +3882,9 @@ function setCredType(m, type) {
 	}
 }
 function onProviderChange(m, newProvider) {
+	// A provider switch snaps model + base URL to catalog defaults. Before the
+	// catalog loads that would wipe a saved row's values, so refuse until then.
+	if (!catalogReady.value) return;
 	// Only act on an ACTUAL provider switch (re-selecting the same one is a no-op).
 	const changed = newProvider !== m.provider;
 	m.provider = newProvider;
@@ -3869,9 +3893,8 @@ function onProviderChange(m, newProvider) {
 	// leftover from the previous provider — so picking "GLM / Z.ai" gives glm-4.7,
 	// not whatever model was there before. Providers with no default model
 	// (OpenAI-Compatible / vLLM) clear the field so the user types their own.
-	const d = PROVIDER_DEFAULTS[m.provider] || {};
 	m.model = providerDefaultModel(m.provider);
-	m.baseUrl = d.baseUrl || "";
+	m.baseUrl = providerDefaultBaseUrl(m.provider);
 	// A stored key (hasKey) belongs to the OLD provider's key_ref, not this one -
 	// carrying it forward would either merge the wrong provider's secret on save
 	// (onboarding.py's merge-by-provider fallback keys on the NEW provider, so it
@@ -4214,6 +4237,7 @@ async function removeAccount(m, idx) {
 	if (!persisted) live.accounts = now;
 }
 function addModel() {
+	if (!catalogReady.value) return; // never add with a guessed model id
 	rows.value = [...rows.value, { ...newRow(), order: rows.value.length }];
 }
 
@@ -4379,6 +4403,7 @@ function connectErrorMessage(res, fallback) {
 	return CONNECT_ERROR_COPY[err.code] || err.message || fallback;
 }
 async function startConnect(m, reconnectIdx = null, opts = {}) {
+	if (needsCatalog(m)) return; // never connect with a guessed model id
 	if (!m._connect) m._connect = blankConnect();
 	// Simplified editor hides the model field - make sure a subscription row always
 	// carries a model id so the connect flow never dead-ends on an unfillable field.
@@ -4902,14 +4927,10 @@ async function load(opts = {}) {
 		try {
 			catalog.value = (await api.getPresetCatalog()) || [];
 		} catch (e) {
-			/* backend bundled fallback */
+			/* presets are optional here: the backend serves its snapshot or [] */
 		}
 	}
-	try {
-		modelCatalog.value = (await api.getModelCatalogUi()) || modelCatalog.value;
-	} catch (e) {
-		/* built-in literal fallbacks below cover this */
-	}
+	await loadModelCatalog();
 }
 
 // Stable string of the savable pool + preset - the cheap key the dirty-notice

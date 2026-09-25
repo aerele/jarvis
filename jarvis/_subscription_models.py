@@ -1,9 +1,10 @@
 """Subscription-tier model catalogue.
 
 The source of truth is the `Jarvis LLM Provider` doctype in jarvis_admin_v2,
-fetched via admin_client.get_model_catalog() (guest read, Redis cache, bundled
-fallback). The literals below are the SEED and the degraded-mode floor only;
-they are no longer edited to add a model. Add it in the admin desk.
+read through admin_client.get_model_catalog() (Redis, else this site's
+last-known-good snapshot; see jarvis.catalog_store). There is no model list in
+this app. Add a model in the admin desk. On a site that has never reached the
+admin the mappings are EMPTY: callers treat that as "catalog unavailable".
 
 SUBSCRIPTION_MODELS and DEFAULT_MODEL keep their names and dict-like behaviour
 deliberately (spec 6.3): chat/api.py and oauth/api.py import them at module
@@ -33,31 +34,9 @@ from collections.abc import Mapping
 
 import frappe
 
-# Google Gemini has no entry: its chat subscription was removed 2026-08-19 (Google
-# discontinued consumer login-with-Google for Gemini). Gemini stays available via
-# API key, which is served from the api_key-tier catalog, not this subscription seed.
-_SEED_SUBSCRIPTION_MODELS: dict[str, list[str]] = {
-	"OpenAI": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
-	"Anthropic": [
-		"claude-opus-5",
-		"claude-sonnet-5",
-		"claude-fable-5-1",
-		"claude-fable-5",
-		"claude-opus-4-8",
-		"claude-opus-4-7",
-		"claude-sonnet-4-6",
-		"claude-opus-4-6",
-	],
-	"xAI Grok": ["grok-4.3", "grok-build-0.1"],
-	"Kimi (Moonshot)": ["kimi-k2.7-code", "kimi-k2.6"],
-}
-
-_SEED_DEFAULT_MODEL: dict[str, str] = {
-	"OpenAI": "gpt-5.6-terra",
-	"Anthropic": "claude-opus-5",
-	"xAI Grok": "grok-4.3",
-	"Kimi (Moonshot)": "kimi-k2.7-code",
-}
+# Google Gemini has no subscription tier: its chat subscription was removed
+# 2026-08-19 (Google discontinued consumer login-with-Google for Gemini). Gemini stays
+# available via API key, served from the api_key-tier catalog.
 
 
 def _subscription_rows() -> dict[str, list[dict]]:
@@ -71,8 +50,14 @@ def _subscription_rows() -> dict[str, list[dict]]:
 		return cached
 	from jarvis import admin_client
 
+	out = _rows_from(admin_client.get_model_catalog() or [])
+	frappe.local._jarvis_sub_models = out
+	return out
+
+
+def _rows_from(catalog) -> dict[str, list[dict]]:
 	out: dict[str, list[dict]] = {}
-	for provider in admin_client.get_model_catalog() or []:
+	for provider in catalog:
 		rows = [m for m in provider.get("models") or [] if m.get("tier") == "subscription"]
 		if not rows:
 			continue
@@ -81,7 +66,6 @@ def _subscription_rows() -> dict[str, list[dict]]:
 		label = provider.get("subscription_label") or provider.get("label") or ""
 		if label:
 			out[label] = rows
-	frappe.local._jarvis_sub_models = out
 	return out
 
 
@@ -92,13 +76,11 @@ class _LazyModelMap(Mapping):
 	keep working unchanged per spec 6.3.
 	"""
 
-	def __init__(self, builder, seed):
+	def __init__(self, builder):
 		self._builder = builder
-		self._seed = seed
 
 	def _data(self):
-		rows = _subscription_rows()
-		return self._builder(rows) if rows else self._seed
+		return self._builder(_subscription_rows())
 
 	def __getitem__(self, k):
 		return self._data()[k]
@@ -125,5 +107,12 @@ def _defaults_from(rows) -> dict[str, str]:
 	return out
 
 
-SUBSCRIPTION_MODELS = _LazyModelMap(_models_from, _SEED_SUBSCRIPTION_MODELS)
-DEFAULT_MODEL = _LazyModelMap(_defaults_from, _SEED_DEFAULT_MODEL)
+def mappings_from(catalog: list) -> tuple[dict[str, list[str]], dict[str, str]]:
+	"""(subscription models, defaults) for an explicit catalog, bypassing the
+	request cache: for a caller that already holds a freshly fetched catalog."""
+	rows = _rows_from(catalog)
+	return _models_from(rows), _defaults_from(rows)
+
+
+SUBSCRIPTION_MODELS = _LazyModelMap(_models_from)
+DEFAULT_MODEL = _LazyModelMap(_defaults_from)

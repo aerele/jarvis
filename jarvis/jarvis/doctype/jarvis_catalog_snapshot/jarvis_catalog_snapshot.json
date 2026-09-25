@@ -1,0 +1,52 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Catalog Snapshot",
+ "module": "Jarvis",
+ "issingle": 1,
+ "custom": 0,
+ "engine": "InnoDB",
+ "hide_toolbar": 1,
+ "read_only": 1,
+ "description": "Last catalogs this site received from the Jarvis admin. Used only when the admin is unreachable. Written by jarvis.catalog_store; never edited by hand.",
+ "field_order": [
+  "model_catalog",
+  "model_catalog_fetched_at",
+  "preset_catalog",
+  "preset_catalog_fetched_at"
+ ],
+ "fields": [
+  {
+   "fieldname": "model_catalog",
+   "fieldtype": "JSON",
+   "label": "Model Catalog",
+   "read_only": 1
+  },
+  {
+   "fieldname": "model_catalog_fetched_at",
+   "fieldtype": "Datetime",
+   "label": "Model Catalog Fetched At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "preset_catalog",
+   "fieldtype": "JSON",
+   "label": "Preset Catalog",
+   "read_only": 1
+  },
+  {
+   "fieldname": "preset_catalog_fetched_at",
+   "fieldtype": "Datetime",
+   "label": "Preset Catalog Fetched At",
+   "read_only": 1
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 0
+}
