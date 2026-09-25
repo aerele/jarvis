@@ -16,6 +16,16 @@ const REFUSALS = {
 	target_missing: "The record this targets no longer exists. Nothing ran.",
 	tampered: "This action failed an integrity check. Nothing ran.",
 	unverifiable: "This action can no longer be verified on this site. Nothing ran.",
+	// approve_and_run (C5): the server keeps the response shape + one of these on
+	// every refusal, and the card stays Pending - keepsChatCard already keeps it
+	// (none of these mark pa_status settled), so only the words live here.
+	not_runnable: "This card no longer offers Approve & run. Use Confirm instead.",
+	needs_own_confirm:
+		"This action must be confirmed on its own, not run automatically. Use Confirm instead.",
+	skill_not_armed:
+		"The skill this would run is no longer armed. Use Confirm instead, or arm it again.",
+	storage_unavailable: "Couldn't reach confirmation storage. Try again in a moment.",
+	storage_outcome_unknown: "Lost track of whether that went through. Check before retrying.",
 };
 
 export function chatRefusalMessage(res) {
@@ -47,6 +57,15 @@ export function keepsChatCard(res) {
 export function isChatSettled(res) {
 	if (isSettled(res)) return true;
 	return !!res && !res.reason_code && !!res.error && res.error.type === "InvalidConfirmation";
+}
+
+// A card that settled (isChatSettled) still carries a SPECIFIC reason_code when
+// the server could name one (stale/target_missing/tampered/unverifiable, …) -
+// say that, not the opaque "another tab" guess reserved for a bare legacy
+// token with no reason_code at all (keepsChatCard already routes the "keep it"
+// case away from here).
+export function chatSettledReason(res) {
+	return res && res.ok === false && res.reason_code ? chatRefusalMessage(res) : "";
 }
 
 // Read-only line for a card that can no longer be acted on.

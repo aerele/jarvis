@@ -4720,7 +4720,7 @@ import {
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
-import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
+import { chatRefusalMessage, chatSettledReason, keepsChatCard } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7947,14 +7947,17 @@ async function confirmPending(pa) {
 			// way the card is spent - surface a brief note and dismiss.
 			if (r.error && r.error.type === "InvalidConfirmation") {
 				removePending(token);
-				// InvalidConfirmation is deliberately opaque (expired / used in another
-				// tab / a redis blip). Use the card's own wall-clock expiry for the right
-				// message instead of always blaming expiry (F15).
+				// A settled card (isChatSettled) still carrying a specific reason_code
+				// (stale/target_missing/tampered/unverifiable, …) says why. Only a
+				// bare legacy token (no reason_code at all) gets the opaque guess:
+				// use the card's own wall-clock expiry for the right one (F15).
+				const settledReason = chatSettledReason(r);
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
-					expired
-						? "This confirmation expired. Tell me the action again to retry it."
-						: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.",
+					settledReason ||
+						(expired
+							? "This confirmation expired. Tell me the action again to retry it."
+							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
 					{ type: "error" }
 				);
 				return;
@@ -8029,11 +8032,15 @@ async function approveAndRunPending(pa) {
 			}
 			if (r.error && r.error.type === "InvalidConfirmation") {
 				removePending(token);
+				// Mirrors confirmPending's InvalidConfirmation branch: a settled card
+				// carrying a specific reason_code says why, not the opaque guess.
+				const settledReason = chatSettledReason(r);
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
-					expired
-						? "This confirmation expired — tell me the action again to retry it."
-						: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again.",
+					settledReason ||
+						(expired
+							? "This confirmation expired — tell me the action again to retry it."
+							: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again."),
 					{ type: "error" }
 				);
 				return;
@@ -8082,9 +8089,13 @@ async function onTypedConfirmResolved(r) {
 			return;
 		}
 		if (r.error && r.error.type === "InvalidConfirmation") {
-			notify("That confirmation is no longer valid. Ask me to try the action again.", {
-				type: "error",
-			});
+			// Mirrors confirmPending's InvalidConfirmation branch: a settled card
+			// carrying a specific reason_code says why, not the opaque guess.
+			notify(
+				chatSettledReason(r) ||
+					"That confirmation is no longer valid. Ask me to try the action again.",
+				{ type: "error" }
+			);
 			return;
 		}
 		// The token was spent and the write failed. A durable "failed" receipt chip
