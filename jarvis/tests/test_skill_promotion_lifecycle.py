@@ -250,11 +250,17 @@ class TestMySkillPromotionEffectiveScope(PromotionLifecycleBase):
 
 
 class TestApprovalAfterSourceDeleted(PromotionLifecycleBase):
-	def test_approval_refused_with_clear_message_when_source_skill_deleted(self):
-		# #595 code review: a source skill deleted between request and decision
-		# must never default to "no scope = Org" (which used to surface the
-		# misleading "already shared at Org scope or wider") - it gets its own
-		# clear, short message instead, and the reviewer is left to reject.
+	"""#595 code review, hosted CI (run 36121732986): a source skill deleted
+	between request and decision must never default to "no scope = Org" (which
+	used to surface the misleading "already shared at Org scope or wider") - it
+	gets its own clear, short message instead. The FIRST fix threw that message
+	correctly on approve, but a REJECT of the same request then failed with a
+	raw ``LinkValidationError`` ("Could not find Skill: ...") because saving the
+	request re-validates its now-dangling ``skill`` Link before any of our own
+	checks run. ``decide_skill_promotion`` now checks existence up front for
+	both branches, and the reject save skips link validation."""
+
+	def _request_against_deleted_skill(self):
 		from jarvis.chat import custom_skills_api
 
 		skill = _mk_skill(USER_A, f"{PFX}-deleted")
@@ -262,15 +268,28 @@ class TestApprovalAfterSourceDeleted(PromotionLifecycleBase):
 			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
 		frappe.delete_doc(SKILL, skill.name, force=True, ignore_permissions=True)
 		frappe.db.commit()
+		return req
 
+	def test_approve_refused_with_clear_message(self):
+		from jarvis.chat import custom_skills_api
+
+		req = self._request_against_deleted_skill()
 		with _as(REVIEWER):
 			with self.assertRaisesRegex(frappe.ValidationError, "was deleted"):
 				custom_skills_api.decide_skill_promotion(req["request"], 1)
-		# Still Pending - the reviewer can reject it instead.
+		# Still Pending - nothing was stamped, so the reviewer can reject it next.
 		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+
+	def test_reject_still_succeeds_despite_the_dangling_link(self):
+		from jarvis.chat import custom_skills_api
+
+		req = self._request_against_deleted_skill()
 		with _as(REVIEWER):
 			rejected = custom_skills_api.decide_skill_promotion(req["request"], 0, note="skill gone")
+		self.assertTrue(rejected["ok"], rejected)
 		self.assertEqual(rejected["status"], "Rejected")
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Rejected")
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "reviewer"), REVIEWER)
 
 
 class TestAdministratorOwnedSourceApproves(PromotionLifecycleBase):

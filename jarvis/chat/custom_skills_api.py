@@ -824,15 +824,28 @@ def request_skill_promotion(
 	return {"ok": True, "request": req.name, "skill": doc.skill_name}
 
 
-def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
+def _stamp_decision(
+	req, reviewer: str, approved: bool, note: str, *, skip_link_validation: bool = False
+) -> None:
 	"""Write the terminal decision fields and commit. Shared by the approve and
 	reject branches of :func:`decide_skill_promotion`; the approve branch calls it
 	INSIDE the slug lock so the commit that publishes the shared copy happens while
-	the lock is still held (R2-SP-3a)."""
+	the lock is still held (R2-SP-3a).
+
+	``skip_link_validation`` (#595 code review, hosted CI): the source skill can be
+	DELETED between request and decision, leaving the request's ``skill`` Link
+	dangling. A plain ``save()`` re-validates every Link and raises a raw, unrelated
+	``LinkValidationError`` before this ever reaches the clearer message the caller
+	already gave the reviewer - and a REJECT of such a request must still succeed
+	(the reviewer is just acknowledging the skill is gone). The caller passes this
+	only when it already confirmed the skill is missing; no other Link on this
+	doctype (reviewer, target_role) can go stale in this same window."""
 	req.status = "Approved" if approved else "Rejected"
 	req.reviewer = reviewer
 	req.decided_at = frappe.utils.now_datetime()
 	req.decision_note = (note or "").strip()[:140] or None
+	if skip_link_validation:
+		req.flags.ignore_links = True
 	req.save(ignore_permissions=True)
 	frappe.db.commit()
 
@@ -892,9 +905,19 @@ def decide_skill_promotion(
 
 	approved = str(approve).strip().lower() in ("1", "true", "yes", "on")
 
+	# #595 code review (hosted CI): check the source skill's existence BEFORE any
+	# save/materialize. An approve of a deleted skill fails anyway (inside
+	# _materialize_promotion's own clearer check), but only AFTER the catalog
+	# lock; check it up front instead so nothing is contended for a decision that
+	# can never succeed. A REJECT must still be allowed to go through even though
+	# the skill is gone - see _stamp_decision's skip_link_validation.
+	skill_deleted = not frappe.db.exists(SKILL, req.skill)
+	if skill_deleted and approved:
+		frappe.throw(_("This skill was deleted, so it cannot be promoted."))
+
 	out: dict = {"ok": True, "status": "Approved" if approved else "Rejected"}
 	if not approved:
-		_stamp_decision(req, reviewer, False, note)
+		_stamp_decision(req, reviewer, False, note, skip_link_validation=skill_deleted)
 		return out
 
 	# Multi-role reviewer trim: the reviewer may NARROW a Role promotion to a SUBSET
