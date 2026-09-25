@@ -39,11 +39,13 @@ class TestCreateCard(FrappeTestCase):
 		self.assertIn("x", vals)
 		self.assertNotIn("SEE", vals)
 
-	def test_create_trigger_shows_enabled_default_when_omitted(self):
-		# jarvis#596: the model's create call often omits ``enabled`` and picks up
-		# the doctype default (on) - the card must say so instead of staying silent,
-		# which read as "created disabled" next to the ALWAYS-disabled managed
-		# Server Script a user finds in Desk.
+	def test_create_trigger_shows_enabled_from_would_when_omitted_from_values(self):
+		# jarvis#596: the model's create call often omits ``enabled`` in ``values``,
+		# but the real dry-run insert still applies the doctype default (on) and
+		# returns it in the perm-filtered ``would`` - the card must surface THAT
+		# resolved value instead of staying silent, which read as "created
+		# disabled" next to the ALWAYS-disabled managed Server Script a user
+		# finds in Desk.
 		would = {"name": "zz-596-1", "trigger_name": "Test", "enabled": 1}
 		card = build_card(
 			"create_doc",
@@ -66,6 +68,32 @@ class TestCreateCard(FrappeTestCase):
 		enabled_rows = [r for r in card["rows"] if r["label"] == "Enabled"]
 		self.assertEqual(len(enabled_rows), 1)
 		self.assertEqual(enabled_rows[0]["value"], "No")
+
+	def test_create_trigger_hides_enabled_when_absent_from_would(self):
+		# ``enabled`` missing from the perm-filtered ``would`` means it did not
+		# survive field-level read permissions - show nothing, never a guessed
+		# default (no hardcoded fallback).
+		would = {"name": "zz-596-3", "trigger_name": "Test"}
+		card = build_card(
+			"create_doc",
+			{"doctype": "Jarvis Trigger", "values": {"trigger_name": "Test"}},
+			{"would": would},
+		)
+		self.assertNotIn("Enabled", {r["label"] for r in card["rows"]})
+
+	def test_create_trigger_respects_max_rows(self):
+		# The forced Enabled row must never push the card past _MAX_ROWS: when the
+		# row list is already full of OTHER fields, it replaces the last row
+		# instead of growing past the cap.
+		values = {f"field_{i}": f"v{i}" for i in range(_MAX_ROWS)}
+		would = {"name": "zz-596-4", **values, "enabled": 1}
+		card = build_card(
+			"create_doc",
+			{"doctype": "Jarvis Trigger", "values": values},
+			{"would": would},
+		)
+		self.assertEqual(len(card["rows"]), _MAX_ROWS)
+		self.assertIn("Enabled", {r["label"] for r in card["rows"]})
 
 	def test_create_non_trigger_unaffected(self):
 		# The forced row is scoped to Jarvis Trigger only - an ordinary ToDo create
@@ -621,6 +649,40 @@ class TestBatchCreateContent(FrappeTestCase):
 		card = build_card("create_doc", args, {"would": would})
 		self.assertEqual(card["rows"], [{"doctype": "ToDo", "name": "T-1"}])
 		self.assertEqual(card["count"], 1)
+
+
+class TestBatchCreateTriggerEnabled(FrappeTestCase):
+	"""jarvis#596: the batch path has no per-item perm-filtered doc (see
+	_batch_create_card's docstring), so ``values`` - not ``would`` - is the
+	trustworthy source here, same as every other field the batch card renders."""
+
+	def _args(self, docs):
+		return {"docs": docs}
+
+	def test_batch_create_trigger_shows_enabled_from_values(self):
+		args = self._args([{"doctype": "Jarvis Trigger", "values": {"trigger_name": "Test", "enabled": 0}}])
+		would = {"created": [{"doctype": "Jarvis Trigger", "name": "zz-596-b1"}]}
+		card = build_card("create_doc", args, {"would": would})
+		rows = card["records"][0]["rows"]
+		row = next(r for r in rows if r["label"] == "Enabled")
+		self.assertEqual(row["value"], "No")
+
+	def test_batch_create_trigger_hides_enabled_when_absent_from_values(self):
+		args = self._args([{"doctype": "Jarvis Trigger", "values": {"trigger_name": "Test"}}])
+		would = {"created": [{"doctype": "Jarvis Trigger", "name": "zz-596-b2"}]}
+		card = build_card("create_doc", args, {"would": would})
+		rows = card["records"][0]["rows"]
+		self.assertNotIn("Enabled", {r["label"] for r in rows})
+
+	def test_batch_create_trigger_respects_max_rows(self):
+		values = {f"field_{i}": f"v{i}" for i in range(_MAX_ROWS)}
+		values["enabled"] = 1
+		args = self._args([{"doctype": "Jarvis Trigger", "values": values}])
+		would = {"created": [{"doctype": "Jarvis Trigger", "name": "zz-596-b3"}]}
+		card = build_card("create_doc", args, {"would": would})
+		rows = card["records"][0]["rows"]
+		self.assertEqual(len(rows), _MAX_ROWS)
+		self.assertIn("Enabled", {r["label"] for r in rows})
 
 
 class TestBulkEmailCard(FrappeTestCase):
