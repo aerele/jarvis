@@ -13,9 +13,14 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.canvas import detect_canvas_names, persist_canvases, strip_canvas_refs
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestCanvasEmbedDetection(FrappeTestCase):
@@ -24,7 +29,7 @@ class TestCanvasEmbedDetection(FrappeTestCase):
 		self.assertEqual(detect_canvas_names(text), ["documents/sales-dash-abc123/index.html"])
 
 	def test_embed_url_form_detected_via_canvas_path(self):
-		text = '[embed url="/__openclaw__/canvas/documents/cv_9/index.html" title="X" /]'
+		text = '[embed url="/__test_gateway__/canvas/documents/cv_9/index.html" title="X" /]'
 		self.assertEqual(detect_canvas_names(text), ["documents/cv_9/index.html"])
 
 	def test_plain_canvas_path_still_detected_and_deduped(self):
@@ -57,7 +62,7 @@ class TestCanvasEmbedStripping(FrappeTestCase):
 		self.assertIn('[embed ref="other" /]', out)
 
 	def test_url_form_marker_removed_without_residue(self):
-		text = 'Done [embed url="/__openclaw__/canvas/documents/cv_9/index.html" title="X" /] end'
+		text = 'Done [embed url="/__test_gateway__/canvas/documents/cv_9/index.html" title="X" /] end'
 		out = strip_canvas_refs(text, ["documents/cv_9/index.html"])
 		self.assertNotIn("[embed", out)
 		self.assertNotIn("cv_9", out)
@@ -76,12 +81,12 @@ class TestHostClientStripping(FrappeTestCase):
 
 		html = (
 			"<html><body><script>renderChart()</script>"
-			'<script>\nconst ws = new WebSocket("ws://" + location.host + "/__openclaw__/ws");\n</script>'
+			'<script>\nconst ws = new WebSocket("ws://" + location.host + "/__test_gateway__/ws");\n</script>'
 			"</body></html>"
 		)
 		out = _strip_host_client(html)
 		self.assertIn("renderChart()", out)
-		self.assertNotIn("__openclaw__/ws", out)
+		self.assertNotIn("__test_gateway__/ws", out)
 		self.assertNotIn("WebSocket", out)
 
 

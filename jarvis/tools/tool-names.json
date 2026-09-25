@@ -2,7 +2,7 @@
   "$comment": [
     "GENERATED FILE — do not hand-edit. Single source of truth for the Jarvis tool name set.",
     "Home: jarvis repo, jarvis/tools/tool-names.json, generated from jarvis/tools/registry.py.",
-    "Vendored copy: jarvis-openclaw-plugin, contracts/tool-names.json — byte-identical.",
+    "Vendored copy: Jarvis integration plugin repository, contracts/tool-names.json — byte-identical.",
     "",
     "Update flow:",
     "  1. change registry.py::_TOOL_NAMES (+ the tool module);",
@@ -10,7 +10,7 @@
     "     (jarvis test_tool_contract fails until this file matches the registry);",
     "  3. copy this file VERBATIM into the plugin repo at contracts/tool-names.json;",
     "  4. the plugin's tests/tool-contract.test.ts fails until src/tool-defs.ts,",
-    "     src/schemas.ts and openclaw.plugin.json carry exactly these names.",
+    "     src/schemas.ts and the plugin manifest carry exactly these names.",
     "",
     "'tools' = the names the plugin MUST expose, one descriptor each, as jarvis__<name>.",
     "'backend_only' = registry tools deliberately without a descriptor, and why.",

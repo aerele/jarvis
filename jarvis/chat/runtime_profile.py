@@ -1,8 +1,8 @@
 """Private, site-local mirror of the Admin transport profile.
 
-This is the additive rollout: a site with no stored profile still uses the
-legacy contract. Once stored, malformed data and connection mismatches fail
-explicitly. No network I/O, public API, or global/user default is involved.
+A valid Admin-supplied profile is required. Missing or malformed data and
+connection mismatches fail explicitly. No network I/O, public API, or
+global/user default is involved.
 """
 
 import hashlib
@@ -55,21 +55,13 @@ def _json(value):
 	return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def legacy_profile():
-	# Temporary rollout fallback. Remove only after fleet readiness verification.
-	from jarvis.chat import runtime_contract as legacy
-
-	return RuntimeProfile(
-		legacy.MESSAGE_METADATA_KEY,
-		legacy.CANVAS_ROUTE,
-		legacy.MEDIA_ROUTE,
-		legacy.LIVE_RELOAD_ROUTE,
-		legacy.MEDIA_ROOT,
-	)
-
-
 def validate(raw, connection=None):
-	"""Pure validation; exception messages never include the rejected values."""
+	"""Validate an authenticated Admin receipt, not authenticate its source.
+
+	The digest proves internal consistency. Image compatibility belongs to
+	Admin; local path checks and assignment binding remain mandatory.
+	Exception messages never include the rejected values.
+	"""
 	try:
 		if not isinstance(raw, dict) or len(_json(raw).encode()) > MAX_BYTES:
 			raise ValueError
@@ -93,10 +85,6 @@ def validate(raw, connection=None):
 		if not values["canvas_route"].endswith("/") or not values["media_root"].endswith("/"):
 			raise ValueError
 		profile = RuntimeProfile(**values)
-		# v1 is an immutable compatibility contract, including the security root.
-		# Do not accept a runtime change that would reinterpret already stored turns.
-		if profile != legacy_profile():
-			raise ValueError
 		contract = {k: raw[k] for k in ("schema_version", "profile_id", "values")}
 		if raw.get("revision") != hashlib.sha256(_json(contract).encode()).hexdigest():
 			raise ValueError
@@ -148,7 +136,7 @@ def persist(raw, settings, *, unavailable=False):
 	"""Called inside the serialized connection write, in the same transaction."""
 	anchor = _anchor(settings)
 	if not unavailable:
-		validate(raw, anchor)
+		profile = validate(raw, anchor)
 	record = {"profile": raw, "anchor": anchor, "fetched_at": datetime.now(UTC).isoformat()}
 	if unavailable:
 		record["unavailable"] = True
@@ -164,6 +152,17 @@ def persist(raw, settings, *, unavailable=False):
 	)
 	if row is not None and (row.parent != PARENT or row.defkey != KEY):
 		raise RuntimeProfileError(_ERROR)
+	if not unavailable and row and row.defvalue:
+		try:
+			previous = validate(json.loads(row.defvalue).get("profile"))
+		except (RuntimeProfileError, ValueError, TypeError, AttributeError):
+			# A valid authoritative sync may repair a corrupt local receipt.
+			previous = None
+		if previous is not None and profile != previous:
+			# v1 is immutable once accepted. In particular, a refresh cannot broaden
+			# the media root or reinterpret stored sequence metadata, even if its
+			# digest and newer assignment binding are internally consistent.
+			raise RuntimeProfileError(_ERROR)
 	if row is None:
 		frappe.get_doc(
 			{
@@ -190,7 +189,7 @@ def persist(raw, settings, *, unavailable=False):
 	frappe.db.after_commit.add(_invalidate)
 	frappe.db.after_rollback.add(_forget_snapshot)
 	_forget_snapshot()
-	setattr(frappe.local, _MEMO, (anchor, None if unavailable else validate(raw, anchor)))
+	setattr(frappe.local, _MEMO, (anchor, None if unavailable else profile))
 
 
 def clear():
@@ -219,48 +218,71 @@ def get_profile():
 	anchor = _anchor(frappe.get_single("Jarvis Settings"))
 	blob = frappe.db.get_value("DefaultValue", {"name": ROW, "parent": PARENT, "defkey": KEY}, "defvalue")
 	if blob is None:
-		profile = legacy_profile()
+		raise RuntimeProfileError(_ERROR)
+	if not isinstance(blob, str) or len(blob.encode()) > MAX_BYTES:
+		raise RuntimeProfileError(_ERROR)
+	digest = hashlib.sha256(blob.encode()).hexdigest()
+	try:
+		cached = frappe.cache().get_value(CACHE_KEY, use_local_cache=False)
+	except Exception:
+		cached = None
+	if (
+		isinstance(cached, dict)
+		and cached.get("digest") == digest
+		and cached.get("anchor") == anchor
+		and isinstance(cached.get("profile"), RuntimeProfile)
+	):
+		profile = cached["profile"]
 	else:
-		if not isinstance(blob, str) or len(blob.encode()) > MAX_BYTES:
-			raise RuntimeProfileError(_ERROR)
-		digest = hashlib.sha256(blob.encode()).hexdigest()
 		try:
-			cached = frappe.cache().get_value(CACHE_KEY, use_local_cache=False)
+			record = json.loads(blob)
+		except (ValueError, TypeError):
+			raise RuntimeProfileError(_ERROR) from None
+		profile = _checked_record(record, anchor)
+		try:
+			frappe.cache().set_value(
+				CACHE_KEY,
+				{
+					"digest": digest,
+					"anchor": anchor,
+					"profile": profile,
+				},
+				expires_in_sec=3600,
+			)
 		except Exception:
-			cached = None
-		if (
-			isinstance(cached, dict)
-			and cached.get("digest") == digest
-			and cached.get("anchor") == anchor
-			and isinstance(cached.get("profile"), RuntimeProfile)
-		):
-			profile = cached["profile"]
-		else:
-			try:
-				record = json.loads(blob)
-			except (ValueError, TypeError):
-				raise RuntimeProfileError(_ERROR) from None
-			profile = _checked_record(record, anchor)
-			try:
-				frappe.cache().set_value(
-					CACHE_KEY,
-					{
-						"digest": digest,
-						"anchor": anchor,
-						"profile": profile,
-					},
-					expires_in_sec=3600,
-				)
-			except Exception:
-				pass
+			pass
 	setattr(frappe.local, _MEMO, (anchor, profile))
 	return profile
 
 
-def _checked_record(record, anchor):
-	if not isinstance(record, dict) or record.get("anchor") != anchor or record.get("unavailable"):
+def _checked_record(record, anchor, *, allow_unavailable=False):
+	if (
+		not isinstance(record, dict)
+		or record.get("anchor") != anchor
+		or (record.get("unavailable") and not allow_unavailable)
+	):
 		raise RuntimeProfileError(_ERROR)
 	return validate(record.get("profile"), anchor)
+
+
+def get_saved_content_profile():
+	"""Only for sanitizing authorized stored HTML, never for gateway requests.
+
+	An unsupported serving runtime may retain a validated, assignment-bound
+	profile for old content. A missing, corrupt, or mismatched receipt still fails.
+	"""
+	try:
+		return get_profile()
+	except RuntimeProfileError:
+		pass
+	blob = frappe.db.get_value("DefaultValue", {"name": ROW, "parent": PARENT, "defkey": KEY}, "defvalue")
+	if not isinstance(blob, str) or len(blob.encode()) > MAX_BYTES:
+		raise RuntimeProfileError(_ERROR)
+	try:
+		record = json.loads(blob)
+	except ValueError:
+		raise RuntimeProfileError(_ERROR) from None
+	return _checked_record(record, _anchor(frappe.get_single("Jarvis Settings")), allow_unavailable=True)
 
 
 def ingest_current(data):
@@ -289,7 +311,7 @@ def status():
 	"""Server-side bench-console diagnostic; intentionally not whitelisted."""
 	blob = frappe.db.get_value("DefaultValue", ROW, "defvalue")
 	if not blob:
-		return {"state": "legacy_fallback"}
+		return {"state": "missing"}
 	try:
 		record = json.loads(blob)
 		_checked_record(record, _anchor(frappe.get_single("Jarvis Settings")))

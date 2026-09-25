@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 import frappe
 
 from jarvis.chat import runtime_profile as rp
+from jarvis.tests._gateway_fixtures import TEST_PROFILE
 from jarvis.tests.test_runtime_profile import connection, envelope
 
 
@@ -60,7 +61,7 @@ class TestRuntimeProfileDatabase(unittest.TestCase):
 		frappe.db.commit()
 		rp._forget_snapshot()
 		rp._invalidate()
-		self.assertEqual(rp.get_profile(), rp.legacy_profile())
+		self.assertEqual(rp.get_profile(), TEST_PROFILE)
 		self.assertEqual(frappe.db.count("DefaultValue", {"parent": rp.PARENT, "defkey": rp.KEY}), 1)
 		for user in ("Administrator", "Guest"):
 			defaults = frappe.defaults.get_defaults(user)
@@ -79,11 +80,12 @@ class TestRuntimeProfileDatabase(unittest.TestCase):
 		self.assertIsNone(frappe.cache().get_value(rp.CACHE_KEY))
 		self.assertFalse(hasattr(frappe.local, rp._MEMO))
 
-	def test_rolled_back_reset_cannot_leave_a_fallback_snapshot(self):
+	def test_reset_and_rollback_never_enable_a_missing_or_blocked_profile(self):
 		rp.persist(None, frappe.get_single("Jarvis Settings"), unavailable=True)
 		frappe.db.commit()
 		rp.clear()
-		self.assertEqual(rp.get_profile(), rp.legacy_profile())
+		with self.assertRaises(rp.RuntimeProfileError):
+			rp.get_profile()
 		frappe.db.rollback()
 		with self.assertRaises(rp.RuntimeProfileError):
 			rp.get_profile()
@@ -138,12 +140,12 @@ class TestRuntimeProfileDatabase(unittest.TestCase):
 			list(pool.map(lambda _: write(), range(2)))
 		frappe.db.rollback()
 		self.assertEqual(frappe.db.count("DefaultValue", {"parent": rp.PARENT, "defkey": rp.KEY}), 1)
-		self.assertEqual(rp.get_profile(), rp.legacy_profile())
+		self.assertEqual(rp.get_profile(), TEST_PROFILE)
 
 	def test_historical_canvas_is_sanitized_only_after_file_permission_check(self):
-		from jarvis.chat import api, canvas
+		from jarvis.chat import api
 
-		marker = rp.legacy_profile().live_reload_route
+		marker = TEST_PROFILE.live_reload_route
 		html = f'<script>chart()</script><script>new WebSocket("{marker}")</script>'
 		file = Mock(name="test-file")
 		file.get_content.return_value = html.encode()
@@ -159,7 +161,7 @@ class TestRuntimeProfileDatabase(unittest.TestCase):
 			patch.object(frappe.db, "get_value", return_value=row),
 			patch.object(frappe, "get_doc", return_value=file),
 			patch.object(frappe, "has_permission", return_value=False) as permission,
-			patch.object(canvas, "get_profile", return_value=rp.legacy_profile()),
+			patch.object(rp, "get_saved_content_profile", return_value=TEST_PROFILE),
 		):
 			with self.assertRaises(frappe.PermissionError):
 				api.get_canvas("test-message")
@@ -170,12 +172,13 @@ class TestRuntimeProfileDatabase(unittest.TestCase):
 			self.assertNotIn(marker, result["content"])
 
 	def test_saved_dashboard_still_renders_when_runtime_is_unavailable(self):
-		from jarvis.chat import canvas, dashboards_api
+		from jarvis.chat import dashboards_api
 
-		marker = rp.legacy_profile().live_reload_route
+		self.persist()
+		rp.persist(None, frappe.get_single("Jarvis Settings"), unavailable=True)
+		marker = TEST_PROFILE.live_reload_route
 		doc = frappe._dict(html=f'<script>chart()</script><script>new WebSocket("{marker}")</script>')
 		with (
-			patch.object(canvas, "get_profile", side_effect=rp.RuntimeProfileError("unavailable")),
 			patch.object(dashboards_api, "_filter_defs_for_detail", return_value=[]),
 			patch.object(dashboards_api.dashboard_permissions, "can_edit_dashboard", return_value=False),
 		):

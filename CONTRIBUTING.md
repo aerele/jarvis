@@ -8,6 +8,13 @@ inside the app.
 
 ## Branches and releases
 
+Runtime branding is checked by the `runtime-branding / check` CI job using an
+Admin-owned policy supplied through an Actions repository variable. Missing or
+mismatched policy fails the check. Coordinate policy changes with the Admin
+repository; do not copy policy contents into this app. For a local check, run
+`python -m jarvis.ci.runtime_branding --policy /path/to/admin/policies/jarvis-runtime-branding.json`
+from the app checkout. The scanner requires no Frappe site.
+
 | Branch | Role | What may merge into it |
 |---|---|---|
 | `develop` | default; all work lands here first | feature and fix PRs |
@@ -32,4 +39,3 @@ inside the app.
   match them (PR required, no force-push, no deletion).
 - On a release PR the same check also fails unless `__version__` moved up and its major
   matches the line, so a release cannot ship without the bump.
-

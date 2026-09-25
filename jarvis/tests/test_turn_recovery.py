@@ -14,9 +14,13 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import turn_recovery
 from jarvis.chat.turn_recovery import MSG as MSG_DT
-from jarvis.tests._gateway_fixtures import transcript_message
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
 
 SK = "sk_rec_unique_test"
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestTurnRecovery(FrappeTestCase):
@@ -201,7 +205,7 @@ class TestTurnRecovery(FrappeTestCase):
 			[
 				{
 					"role": "assistant",
-					"__openclaw": {"seq": 5},
+					"__test_gateway": {"seq": 5},
 					"content": [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
 				}
 			]
@@ -213,7 +217,7 @@ class TestTurnRecovery(FrappeTestCase):
 			[
 				{
 					"role": "assistant",
-					"__openclaw": {"seq": 5},
+					"__test_gateway": {"seq": 5},
 					"content": [{"type": "text", "text": {"unexpected": "dict"}}],
 					"text": 123,
 				}
@@ -430,7 +434,7 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_latest_assistant_text_min_seq_filters_out_older_message(self):
 		text = turn_recovery._latest_assistant_text(
 			[
-				{"role": "assistant", "__openclaw": {"seq": 5}, "content": "old"},
+				{"role": "assistant", "__test_gateway": {"seq": 5}, "content": "old"},
 			],
 			min_seq=7,
 		)
@@ -439,8 +443,8 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_latest_assistant_text_min_seq_keeps_strictly_newer_message(self):
 		text = turn_recovery._latest_assistant_text(
 			[
-				{"role": "assistant", "__openclaw": {"seq": 5}, "content": "old"},
-				{"role": "assistant", "__openclaw": {"seq": 9}, "content": "new"},
+				{"role": "assistant", "__test_gateway": {"seq": 5}, "content": "old"},
+				{"role": "assistant", "__test_gateway": {"seq": 9}, "content": "new"},
 			],
 			min_seq=7,
 		)
@@ -451,8 +455,8 @@ class TestTurnRecovery(FrappeTestCase):
 
 	def test_latest_assistant_text_max_seq_excludes_later_turns_message(self):
 		msgs = [
-			{"role": "assistant", "__openclaw": {"seq": 2}, "content": "GOLF"},
-			{"role": "assistant", "__openclaw": {"seq": 4}, "content": "HOTEL"},
+			{"role": "assistant", "__test_gateway": {"seq": 2}, "content": "GOLF"},
+			{"role": "assistant", "__test_gateway": {"seq": 4}, "content": "HOTEL"},
 		]
 		self.assertEqual(turn_recovery._latest_assistant_text(msgs, min_seq=0, max_seq=2), "GOLF")
 		self.assertEqual(turn_recovery._latest_assistant_text(msgs, min_seq=0), "HOTEL")
@@ -650,14 +654,14 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		# tools' unconditional background-detach abort - the turn parked here by
 		# the deadline/watchdog path when the yield-wait itself couldn't finish
 		# in time) must still seed its image, not just the text.
-		path = "/home/node/.openclaw/media/tool-image-generation/x.png"
+		path = "/srv/test-gateway/media/tool-image-generation/x.png"
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
 					{
 						"role": "assistant",
 						"content": f"Here it is.\nAttachment: {path}",
-						"__openclaw": {"seq": 2},
+						"__test_gateway": {"seq": 2},
 					},
 				]
 			}

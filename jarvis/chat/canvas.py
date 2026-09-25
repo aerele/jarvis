@@ -98,16 +98,10 @@ def _strip_host_client(text: str) -> str:
 
 
 def strip_saved_host_client(text: str) -> str:
-	"""Sanitize historical HTML at delivery, without making stored dashboards
-	depend on a live/ready runtime. The rollout fallback is safe here: this only
-	removes a script from already-authorized content, never fetches a remote file.
-	"""
-	from jarvis.chat.runtime_profile import RuntimeProfileError, legacy_profile
+	"""Sanitize authorized historical HTML using its validated local profile."""
+	from jarvis.chat.runtime_profile import get_saved_content_profile
 
-	try:
-		profile = get_profile()
-	except RuntimeProfileError:
-		profile = legacy_profile()
+	profile = get_saved_content_profile()
 	marker = profile.live_reload_route[1:]
 	return _SCRIPT_BLOCK.sub(lambda m: "" if marker in m.group(0) else m.group(0), text or "")
 
