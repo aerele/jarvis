@@ -165,7 +165,7 @@ class TestNoDocPerm(PendingActionTestMixin, FrappeTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				frappe.client.get(PA, name)
 			with self.assertRaises((PermissionDeniedError, frappe.PermissionError)):
-				query({"from": PA, "fields": ["name", "sealed_call", "open_key"], "limit": 5})
+				query({"from": PA, "select": ["name", "sealed_call", "open_key"], "limit": 5})
 			with self.assertRaises((PermissionDeniedError, frappe.PermissionError)):
 				assign_to(PA, name, user=SM_USER)
 		self.assertEqual(frappe.db.count("ToDo", {"reference_type": PA}), 0)
