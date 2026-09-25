@@ -71,12 +71,13 @@ def _llm_task_prompt(instruction: str, doctype: str, docname: str, doc_event: st
 	)
 
 
-def _complete(prompt: str, fenced: str, messages: list) -> tuple[str | None, str | None]:
-	"""Run one evaluation: try the tenant's agent gateway first, fall back to
-	OpenRouter only when the gateway doesn't expose llm-task (older/unconfigured
-	runtime) AND an OpenRouter/STT key is actually resolvable. Returns
-	``(reply, None)`` on success or ``(None, error_message)`` on failure. Never
-	raises.
+def _evaluate(prompt: str, fenced: str, messages: list) -> tuple[str | None, str | None]:
+	"""Typed fallback decision: try the tenant's agent gateway first, fall back
+	to OpenRouter only when the gateway doesn't expose llm-task (older/
+	unconfigured runtime) AND an OpenRouter/STT key is actually resolvable.
+	Returns ``(reply, None)`` on success or ``(None, error_message)`` on a
+	KNOWN failure. May still raise on anything outside that typed contract
+	(e.g. a DB error resolving Jarvis Settings) - ``_complete`` wraps this.
 
 	Imported lazily (background job only): ``llm_task_client``/``voice`` for
 	the two completion transports."""
@@ -104,6 +105,25 @@ def _complete(prompt: str, fenced: str, messages: list) -> tuple[str | None, str
 		# voice already secret-scrubs its messages.
 		return None, str(e)
 	return reply, None
+
+
+def _complete(prompt: str, fenced: str, messages: list) -> tuple[str | None, str | None]:
+	"""Run one evaluation. Returns ``(reply, None)`` on success or ``(None,
+	error_message)`` on failure. Never raises: anything outside ``_evaluate``'s
+	typed llm_task_client/voice contract (e.g. ``frappe.get_cached_doc("Jarvis
+	Settings")`` raising ``DoesNotExistError``, or a DB error) is caught here,
+	exactly like the pre-PR broad except that used to wrap openrouter_complete
+	directly - a trigger's background job must never escape run_llm_action's
+	never-raises contract. Never logs the bearer token (the traceback logged
+	below never contains it - see llm_task_client)."""
+	try:
+		return _evaluate(prompt, fenced, messages)
+	except Exception as e:
+		frappe.log_error(
+			title="Jarvis Trigger: LLM evaluation failed",
+			message=frappe.get_traceback(),
+		)
+		return None, str(e) or "LLM evaluation failed unexpectedly"
 
 
 def run_llm_action(

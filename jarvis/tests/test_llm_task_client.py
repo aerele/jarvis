@@ -186,6 +186,15 @@ class TestLLMTaskComplete(unittest.TestCase):
 			with self.assertRaises(lt.LLMTaskError):
 				lt.llm_task_complete("p", "i")
 
+	def test_settings_lookup_failure_propagates_untyped(self):
+		# Deliberately NOT wrapped in LLMTaskError: frappe.get_cached_doc("Jarvis
+		# Settings") failing (DoesNotExistError, a DB error) is outside this
+		# client's HTTP-transport contract. jarvis.triggers.llm_action._complete
+		# is the layer responsible for catching this into a Failed activity.
+		with patch("frappe.get_cached_doc", side_effect=RuntimeError("db unavailable")):
+			with self.assertRaises(RuntimeError):
+				lt.llm_task_complete("p", "i")
+
 	def test_headers_never_echoed_into_raised_error_message(self):
 		# The client builds its own error messages from the parsed gateway
 		# payload / a fixed literal - never from the request object (which

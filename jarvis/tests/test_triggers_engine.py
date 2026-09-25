@@ -545,6 +545,24 @@ class TestRunLLMAction(_TriggerTestCase):
 		self.assertEqual(rows[0].status, "Failed")
 		self.assertIn("timed out", rows[0].summary)
 
+	def test_untyped_client_exception_writes_failed_activity_without_raising(self):
+		# jarvis#1426 review finding: llm_task_complete can raise outside its own
+		# typed contract (e.g. frappe.get_cached_doc("Jarvis Settings") hitting a
+		# DoesNotExistError / DB error) - that must still resolve to a Failed
+		# activity, never escape run_llm_action.
+		trig = self._make_llm_trigger()
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=frappe.DoesNotExistError("Jarvis Settings")) as task,
+			patch(OPENROUTER_COMPLETE) as oc,
+		):
+			self._run(trig)  # must not raise
+		self.assertEqual(task.call_count, 1)
+		self.assertEqual(oc.call_count, 0)  # an untyped failure never falls back either
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
+		self.assertTrue(rows[0].summary)
+
 	def test_daily_cap_skips_with_one_skipped_marker(self):
 		trig = self._make_llm_trigger(cap=1)
 		with patch(LLM_TASK_COMPLETE, return_value="ok") as task:
