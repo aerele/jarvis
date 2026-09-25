@@ -73,6 +73,11 @@ class _Recorder:
 		self.deltas: list[tuple[int, str, str]] = []
 		self.tools: list[dict] = []
 		self.statuses: list[tuple[int, str]] = []
+		self.steps: list[tuple[int, str]] = []
+		self.step_raws: list[str | None] = []
+		self.shown: list[str] = []
+		# Every lane callback in arrival order, for ordering assertions.
+		self.order: list[str] = []
 		self.terminal: tuple[str, dict] | None = None
 		self.quarantined: str | None = None
 		self.closing: str | None = None
@@ -89,15 +94,25 @@ class _Recorder:
 			on_quarantine=self._on_quarantine,
 			on_closing=self._on_closing,
 			on_status=self._on_status,
+			on_step=self._on_step,
 		)
 
-	def _on_delta(self, seq, text, delta):
+	def _on_delta(self, seq, text, delta, shown=None):
 		if self.poison_delta_seq is not None and seq == self.poison_delta_seq:
 			raise RuntimeError(f"poison delta seq={seq}")
 		self.deltas.append((seq, text, delta))
+		# What the chat displays (step text removed); None means same as text.
+		self.shown.append(text if shown is None else shown)
+		self.order.append("delta")
+
+	def _on_step(self, seq, text, raw=None):
+		self.steps.append((seq, text))
+		self.step_raws.append(raw)
+		self.order.append("step")
 
 	def _on_tool(self, ev):
 		self.tools.append(ev)
+		self.order.append("tool")
 
 	def _on_status(self, seq, status):
 		if self.poison_status_seq is not None and seq == self.poison_status_seq:
@@ -1206,3 +1221,174 @@ class TestRelayMuxSessionModelParams(FrappeTestCase):
 		self.assertEqual(method, "sessions.patch")
 		self.assertIn("model", params, "the key must be PRESENT, not dropped")
 		self.assertEqual(params, {"key": "sk", "model": None})
+
+
+# --------------------------------------------------------------------------- #
+# Live step line: text written right before a lookup is a step, not the answer
+# --------------------------------------------------------------------------- #
+
+
+def _tool_data(phase, call_id="c1"):
+	return {"kind": "tool", "phase": phase, "name": "jarvis__get_list", "toolCallId": call_id}
+
+
+class TestRelayMuxSteps(FrappeTestCase):
+	"""Each connection shape seen live on e2e2 (2026-09-25): Claude's CLI streams
+	one growing text for the whole turn, the API-key loop (DeepSeek) streams one
+	segment per model call, and the ChatGPT-subscription harness sends its step
+	updates as ``preamble`` items that never reach the final text.
+
+	The stored mirror (``deltas`` text) always keeps the raw streamed text, so a
+	stop, error or recovery saves what streamed exactly as before; only what the
+	chat displays (``shown``) and the saved final drop the step text."""
+
+	def _run(self, frames, final_text, steps=None, register=True, mux=None, rec=None):
+		mux = mux or RelayMux(MagicMock(), "steps-target")
+		rec = rec or _Recorder()
+		if register:
+			mux.register_run("r1", rec.handler(), session_key="s1", steps=steps)
+		for stream, data in frames:
+			mux._classify(_agent_frame("r1", "s1", stream, data))
+		if final_text is not None:
+			mux._classify(_chat_final_frame("r1", "s1", final_text))
+		mux.dispatch()
+		return rec
+
+	def test_claude_growing_text_splits_step_from_answer(self):
+		step = "I'll count them now."
+		answer = "There are **3 customers** on this site."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.step_raws, [step])
+		# Displayed: the step, then blank while it moves to the step line, then only the answer.
+		self.assertEqual(rec.shown, [step, "", answer])
+		# Stored mirror never loses streamed text (a stop mid-lookup keeps it).
+		self.assertEqual([d[1] for d in rec.deltas], [step, step, full])
+		self.assertEqual(rec.order[:4], ["delta", "step", "delta", "tool"])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_api_key_segments_drop_the_glued_draft(self):
+		draft = (
+			"Its invoices:\n\n| not found |\n\nHold on, I need to actually pull the invoice list, one moment."
+		)
+		answer = "**West View** has the highest outstanding."
+		rec = self._run(
+			[
+				("assistant", {"text": draft, "delta": draft, "itemId": "assistant-1"}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				(
+					"assistant",
+					{"text": answer, "delta": answer, "itemId": "assistant-2", "replace": True},
+				),
+			],
+			draft + answer,
+		)
+		self.assertEqual(
+			[s[1] for s in rec.steps],
+			["Hold on, I need to actually pull the invoice list, one moment."],
+		)
+		self.assertEqual(rec.shown[-1], answer)
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_chatgpt_preamble_is_a_step_and_final_is_untouched(self):
+		rec = self._run(
+			[
+				(
+					"item",
+					{
+						"kind": "preamble",
+						"phase": "update",
+						"itemId": "m1",
+						"progressText": "Checking overdue invoices",
+					},
+				),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": "Three are overdue.", "delta": "Three are overdue."}),
+			],
+			"Three are overdue.",
+		)
+		self.assertEqual([s[1] for s in rec.steps], ["Checking overdue invoices"])
+		# Not in the reply text, so nothing to keep for a hop or to strip.
+		self.assertEqual(rec.step_raws, [None])
+		self.assertEqual(rec.terminal[1]["text"], "Three are overdue.")
+
+	def test_parallel_lookups_record_one_step(self):
+		step = "Checking both lists."
+		full = f"{step}\n\nDone: 3 and 5."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start", "c1")),
+				("item", _tool_data("start", "c2")),
+				("item", _tool_data("end", "c1")),
+				("item", _tool_data("end", "c2")),
+				("assistant", {"text": full, "delta": "\n\nDone: 3 and 5."}),
+			],
+			full,
+		)
+		self.assertEqual(len(rec.steps), 1)
+		self.assertEqual(rec.terminal[1]["text"], "Done: 3 and 5.")
+
+	def test_text_without_a_following_lookup_is_the_answer(self):
+		rec = self._run([("assistant", {"text": "Hello there", "delta": "Hello there"})], "Hello there")
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.terminal[1]["text"], "Hello there")
+
+	def test_answer_written_before_the_last_lookup_survives(self):
+		# A reply that ends by opening a confirmation card: the text before the
+		# tool call is the answer, so it is shown again and saved whole.
+		answer = "I have prepared a payment reminder. Please review it and confirm."
+		rec = self._run(
+			[
+				("assistant", {"text": answer, "delta": answer}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+			],
+			answer,
+		)
+		self.assertEqual(rec.shown, [answer, "", answer])
+		self.assertEqual(rec.order[-2:], ["tool", "delta"])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_stop_mid_lookup_keeps_the_streamed_text_stored(self):
+		# Review finding: a stop/error while a lookup runs settles with whatever
+		# the mirror holds. The mirror must still hold the streamed text.
+		step = "Let me check the invoices."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start")),
+			],
+			None,
+		)
+		self.assertTrue(all(d[1] == step for d in rec.deltas))
+		self.assertEqual(rec.shown[-1], "")
+
+	def test_hop_reattach_reseeds_steps(self):
+		# Review finding: a hop rebuilds the lane. Re-seeded with the steps the
+		# pump kept, the next growing-text frame still hides them and the saved
+		# reply is still stripped.
+		step = "Let me check the invoices."
+		answer = "Three are overdue."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+			steps=[step],
+		)
+		self.assertEqual(rec.shown, [answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)

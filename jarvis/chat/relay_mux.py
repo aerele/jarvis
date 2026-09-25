@@ -75,6 +75,7 @@ from jarvis.chat.agent_client import (
 	failed_final_error,
 )
 from jarvis.chat.events import parse_event
+from jarvis.chat.steps import display_line, strip_steps, visible_text
 from jarvis.exceptions import AgentUnreachableError
 
 _logger = logging.getLogger(__name__)
@@ -204,7 +205,7 @@ class _LaneEvent:
 	"""A decoded, class-tagged frame waiting to be applied to a lane."""
 
 	cls: str  # LOSSY | PRECIOUS
-	kind: str  # "delta" | "tool" | "terminal"
+	kind: str  # "delta" | "tool" | "status" | "step" | "terminal"
 	event_seq: int
 	data: dict
 
@@ -217,10 +218,12 @@ class LaneHandler:
 	thread that owns a frappe connection. All are optional (default no-op).
 
 	Callback signatures (see WP-1B report for the full contract):
-	  * ``on_delta(event_seq: int, text: str, delta: str)`` — a cumulative-mirror
-	    assistant delta (LOSSY). ``text`` is the full cumulative text; ``delta``
-	    is the incremental fragment. A raise ⇒ drop+count+CONTINUE the SAME lane
-	    (OAR-7): the next mirror supersedes it.
+	  * ``on_delta(event_seq: int, text: str, delta: str, shown: str | None)`` — a
+	    cumulative-mirror assistant delta (LOSSY). ``text`` is the full cumulative
+	    text (what gets stored); ``delta`` is the incremental fragment; ``shown`` is
+	    what the chat displays (``text`` minus step text, see
+	    ``jarvis.chat.steps``), None when it equals ``text``. A raise ⇒
+	    drop+count+CONTINUE the SAME lane (OAR-7): the next mirror supersedes it.
 	  * ``on_tool(event: dict)`` — a tool start/end frame (PRECIOUS). ``event``
 	    has ``event_seq, phase, tool_name, tool_call_id, status, title``. A raise
 	    ⇒ QUARANTINE this lane only.
@@ -239,14 +242,20 @@ class LaneHandler:
 	  * ``on_status(event_seq: int, status: str)`` — a transient run-status
 	    marker (e.g. an in-flight compaction) (LOSSY, like a delta): a raise
 	    drops the frame, counts it, and continues the same lane.
+	  * ``on_step(event_seq: int, text: str, raw: str | None)`` — the live step
+	    line: one line saying what the model is doing right now (LOSSY, never
+	    shown after the answer). ``raw`` is the step's full text when it is also
+	    in the reply, kept so a re-adopted lane can re-seed it. See
+	    ``jarvis.chat.steps``.
 	"""
 
-	on_delta: Callable[[int, str, str], None] | None = None
+	on_delta: Callable[[int, str, str, str | None], None] | None = None
 	on_tool: Callable[[dict], None] | None = None
 	on_terminal: Callable[[str, dict], None] | None = None
 	on_quarantine: Callable[[str], None] | None = None
 	on_closing: Callable[[str], None] | None = None
 	on_status: Callable[[int, str], None] | None = None
+	on_step: Callable[[int, str, str | None], None] | None = None
 
 
 class _Lane:
@@ -290,6 +299,13 @@ class _Lane:
 		# eventual final's terminal payload can be marked "yield_continuation"
 		# for the caller's post-settle rich-output step.
 		self.is_continuation = False
+		# Live step line (jarvis.chat.steps), reader-thread only like the fields
+		# above. ``stream_text`` is the last raw reply text, ``steps`` the step
+		# text recorded so far (in order, seeded on a hop re-attach), and
+		# ``shown_text`` what the chat displays: ``stream_text`` minus its steps.
+		self.stream_text = ""
+		self.steps: list[str] = []
+		self.shown_text = ""
 
 	def next_seq(self) -> int:
 		self.watermark += 1
@@ -576,16 +592,15 @@ class RelayMux:
 			return
 		kind = parsed.get("kind")
 		if kind == "assistant":
-			seq = lane.next_seq()
-			ev = _LaneEvent(
-				cls=LOSSY,
-				kind="delta",
-				event_seq=seq,
-				data={"text": parsed.get("text", ""), "delta": parsed.get("delta", "")},
-			)
+			ev = self._reply_delta(lane, parsed)
+		elif kind == "step":
+			self._offer_step(lane, parsed.get("text", ""))
+			return
 		elif kind == "tool":
 			if parsed.get("phase") == "start" and parsed.get("tool_name") in MEDIA_GEN_TOOL_NAMES:
 				lane.saw_media_tool_start = True
+			if parsed.get("phase") == "start":
+				self._move_pending_step(lane)
 			seq = lane.next_seq()
 			ev = _LaneEvent(
 				cls=PRECIOUS,
@@ -607,9 +622,53 @@ class RelayMux:
 				event_seq=seq,
 				data={"status": "compacting" if parsed.get("phase") == "start" else "compacted"},
 			)
-		else:  # pragma: no cover - parse_event only yields the four kinds above
+		else:  # pragma: no cover - parse_event only yields the kinds above
 			return
 		self._offer(lane, ev)
+
+	def _reply_delta(self, lane: _Lane, parsed: dict) -> _LaneEvent:
+		"""A reply-text frame. ``text`` stays raw (the stored mirror keeps exactly
+		what streamed, so a stop, error or recovery behaves as before); ``shown``
+		is what the chat displays, with recorded steps removed from the front."""
+		lane.stream_text = parsed.get("text", "")
+		lane.shown_text = visible_text(lane.stream_text, lane.steps)
+		return _LaneEvent(
+			cls=LOSSY,
+			kind="delta",
+			event_seq=lane.next_seq(),
+			data={"text": lane.stream_text, "delta": parsed.get("delta", ""), "shown": lane.shown_text},
+		)
+
+	def _move_pending_step(self, lane: _Lane) -> None:
+		"""Reply text written since the last step and followed by a tool call was
+		a step: show it on the step line and take it out of the live display."""
+		pending = visible_text(lane.stream_text, lane.steps).strip()
+		if not pending:
+			return
+		lane.steps.append(pending)
+		lane.shown_text = ""
+		self._offer_step(lane, pending, raw=pending)
+		self._offer(
+			lane,
+			_LaneEvent(
+				cls=LOSSY,
+				kind="delta",
+				event_seq=lane.next_seq(),
+				data={"text": lane.stream_text, "delta": "", "shown": ""},
+			),
+		)
+
+	def _offer_step(self, lane: _Lane, text: str, raw: str | None = None) -> None:
+		"""``raw`` is set for step text that is also in the reply (so the pump
+		keeps it across a hop); the ChatGPT harness's separate updates have none."""
+		line = display_line(text)
+		if line:
+			self._offer(
+				lane,
+				_LaneEvent(
+					cls=LOSSY, kind="step", event_seq=lane.next_seq(), data={"text": line, "raw": raw}
+				),
+			)
 
 	def _route_terminal(self, lane: _Lane, payload: dict) -> None:
 		state = payload.get("state")
@@ -644,7 +703,24 @@ class RelayMux:
 				# pump is the default transport, so this is the primary delivery path).
 				term_kind = "relay:final"
 				_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=lane.run_id)
-				term_payload = {"text": _red}
+				# The saved reply keeps only the answer: step text the model wrote
+				# before its tool calls was shown live and is removed here.
+				answer = strip_steps(_red, lane.steps)
+				if lane.steps and answer and answer != lane.shown_text:
+					# The text moved out as a step was the answer itself (e.g. a
+					# reply that ends by opening a confirmation card): put it back
+					# on screen before the terminal lands.
+					lane.shown_text = answer
+					self._offer(
+						lane,
+						_LaneEvent(
+							cls=LOSSY,
+							kind="delta",
+							event_seq=lane.next_seq(),
+							data={"text": lane.stream_text, "delta": "", "shown": answer},
+						),
+					)
+				term_payload = {"text": answer}
 				if _rels:  # fetchable media -> seed downstream (only set when present)
 					term_payload["media_rels"] = _rels
 				if _marked:  # any MEDIA: line stripped -> force the content overwrite
@@ -789,15 +865,18 @@ class RelayMux:
 		session_key: str = "",
 		start_seq: int = 0,
 		is_readopt: bool = False,
+		steps: list[str] | None = None,
 	) -> _Lane | None:
 		"""Create + install a lane in the run map. Used both for FRESH sends
 		(pre-registration under ``run_id``, OAR-15) and for reconnect rebuild /
 		retry-attach (the pump feeds the lane spec). When the poison-rate breaker
 		is OPEN and this is a RE-ADOPT, the mux REFUSES (returns ``None``) rather
-		than loop the run through the recovery budget again (OAR-7)."""
+		than loop the run through the recovery budget again (OAR-7). ``steps``
+		re-seeds the step text a re-adopted run already recorded before the hop."""
 		if is_readopt and self.is_breaker_open():
 			return None
 		lane = _Lane(run_id, handler, session_key=session_key, start_seq=start_seq)
+		lane.steps = list(steps or [])
 		with self._map_lock:
 			self._runs[run_id] = lane
 		return lane
@@ -918,13 +997,16 @@ class RelayMux:
 		try:
 			if ev.kind == "delta":
 				if h.on_delta is not None:
-					h.on_delta(ev.event_seq, ev.data["text"], ev.data["delta"])
+					h.on_delta(ev.event_seq, ev.data["text"], ev.data["delta"], ev.data.get("shown"))
 			elif ev.kind == "tool":
 				if h.on_tool is not None:
 					h.on_tool({"event_seq": ev.event_seq, **ev.data})
 			elif ev.kind == "status":
 				if h.on_status is not None:
 					h.on_status(ev.event_seq, ev.data["status"])
+			elif ev.kind == "step":
+				if h.on_step is not None:
+					h.on_step(ev.event_seq, ev.data["text"], ev.data.get("raw"))
 			elif ev.kind == "terminal":
 				if h.on_terminal is not None:
 					h.on_terminal(ev.data["terminal_kind"], ev.data["payload"])
