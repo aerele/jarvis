@@ -3,8 +3,8 @@
 The approver's values are a PATCH over the sealed values, one per doc. They can
 fill or correct fields, never change what the row is about:
 
-- locked: the dedup-key fields (tax id, party name) and fields that refer to
-  another record of the same batch;
+- locked: the dedup-key fields (tax id, party name, naming field) and fields that
+  refer to another record of the same batch;
 - refused: secret fields (shown masked), protected / unknown / layout fields,
   permlevel > 0 fields the approver can't write (never silently reset), ``name``
   unless the doctype is prompt-named, and a child row's keys; a child patch edits
@@ -47,7 +47,11 @@ def locked_fields(items: list[dict], index: int) -> dict[str, str]:
 	meta = frappe.get_meta(item["doctype"])
 	locked = {}
 	if held_parties.is_party_key(held_parties.item_key(item)):
-		for field in (held_parties.tax_field(meta), held_parties.title_field(meta)):
+		from jarvis.chat import held_sheets  # it imports this module
+
+		named = held_sheets.naming_field(item["doctype"])
+		named = named if named and item["values"].get(named) else None  # set: the key is made of it
+		for field in (held_parties.tax_field(meta), held_parties.title_field(meta), named):
 			if field:
 				locked[field] = _("It identifies this record: to change it, Skip or Use existing.")
 	others = _identities(items, index)

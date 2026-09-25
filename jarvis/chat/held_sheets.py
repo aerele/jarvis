@@ -270,19 +270,25 @@ def _key(value: str) -> str:
 	return value.strip().casefold()
 
 
-def deterministic_name(doctype: str, values: dict) -> str:
-	"""The name an insert will get, when the doctype names by a field or prompt."""
-	meta = frappe.get_meta(doctype)
-	auto = (meta.autoname or "").strip()
-	value = None
+def naming_field(doctype: str) -> str | None:
+	"""The value an insert takes its name from, when the doctype names by a field or
+	prompt (``name``)."""
+	auto = (frappe.get_meta(doctype).autoname or "").strip()
 	if auto.startswith("field:"):
-		value = values.get(auto[6:].strip())
-	elif auto.lower().startswith("prompt"):
-		value = values.get("name")
-	elif doctype in _BY_NAME:
+		return auto[6:].strip() or None
+	if auto.lower().startswith("prompt"):
+		return "name"
+	if doctype in _BY_NAME:
 		setting, by_name, field = _BY_NAME[doctype]
 		if frappe.defaults.get_global_default(setting) == by_name:
-			value = values.get(field)
+			return field
+	return None
+
+
+def deterministic_name(doctype: str, values: dict) -> str:
+	"""The name an insert will get, when the doctype names by a field or prompt."""
+	field = naming_field(doctype)
+	value = values.get(field) if field else None
 	return value.strip() if isinstance(value, str) else ""
 
 

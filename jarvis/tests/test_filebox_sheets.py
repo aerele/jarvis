@@ -506,6 +506,27 @@ class TestIdentity(_Base):
 		self.assertIn("already exists", res["error"]["message"])
 		self.assertEqual(self.sheets(), [])
 
+	def test_two_items_of_one_item_name_are_two_legacy_held_records(self):
+		"""An Item is known by its item_code (its naming field), not its item_name; the
+		title only without a naming field."""
+		one, two, again = (
+			_item(code, item_name="zz-fbs Bolt") for code in ("zz-fbs B-1", "zz-fbs B-2", "zz-fbs B-1")
+		)
+		keys = [held_parties.item_key({"op": "create", "name": "", **i}) for i in (one, two, again)]
+		self.assertEqual(keys, ["name:Item:zz fbs b 1", "name:Item:zz fbs b 2", "name:Item:zz fbs b 1"])
+		untitled = {"op": "create", "name": "", "doctype": "Item", "values": {"item_name": "zz-fbs Bolt"}}
+		self.assertEqual(held_parties.item_key(untitled), "name:Item:zz fbs bolt")
+		with patch.object(held_sheets, "enabled", return_value=False):  # the switch off
+			for item in (one, two, again):
+				self.assertIn("END your turn now", self.call("create_doc", item, self.conv())["data"]["note"])
+		held = frappe.get_all(PA, filters={"owner_user": OWNER, "kind": held_writes.HELD}, pluck="name")
+		self.assertEqual(len(held), 2)  # B-1 twice joins; B-2 waits apart
+		from jarvis.chat import held_edit
+
+		# Edit & create locks the field the key is made of.
+		locked = held_edit.locked_fields(held_parties.items_of("create_doc", one), 0)
+		self.assertIn("item_code", locked)
+
 
 class TestAddressIsNotAParty(_Base):
 	"""India Compliance adds ``gstin`` to Address: a second address carrying a GSTIN on

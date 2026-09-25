@@ -890,8 +890,12 @@ def _recent_keys(owner: str, merged: list[dict], outcome: list[dict]) -> list[st
 		record = merged[entry["index"]]
 		party = held_parties.party_of(record)
 		found = [f"gstin:{record['doctype']}:{party['gstin']}"] if party["gstin"] else []
-		if held_parties.norm_name(party["title"]):
-			found.append(f"name:{record['doctype']}:{held_parties.norm_name(party['title'])}")
+		# The held key's name: its naming field (an Item's item_code), else its title.
+		title = held_parties.norm_name(
+			held_sheets.deterministic_name(record["doctype"], record["values"]) or party["title"]
+		)
+		if title:
+			found.append(f"name:{record['doctype']}:{title}")
 		keys.update(_seal.open_key(owner, k) for k in found or [held_parties.item_key(record)])
 	return sorted(keys)
 

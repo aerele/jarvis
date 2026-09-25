@@ -2,9 +2,9 @@
 
 - ``items_of(tool, args)``: one ``{doctype, values, name, op}`` per record written;
 - ``item_key(item)``: the per-item dedup key, scoped by doctype: the normalised GSTIN
-  (``gstin``, else ERPNext's ``tax_id``), else the normalised party name, else a
-  canonical args hash (an update keys on its target + a hash of its changes; an
-  Address on its party, type and spot, as a sheet keys it);
+  (``gstin``, else ERPNext's ``tax_id``), else the normalised name (its naming field,
+  else its title), else a canonical args hash (an update keys on its target + a hash
+  of its changes; an Address on its party, type and spot, as a sheet keys it);
 - ``find_existing(...)``: records that already look like the party, read as the
   CURRENT user (callers impersonate the row's ``exec_user``)."""
 
@@ -113,18 +113,21 @@ def _digest(value) -> str:
 
 
 def item_key(item: dict) -> str:
+	from jarvis.chat import held_sheets  # it imports this module
+
 	if item["op"] == "update":
 		# Two different changes to one record are two decisions, never one row.
 		return f"doc:{item['doctype']}:{item['name']}:{_digest(item['values'])}"
 	if item["doctype"] == "Address":
-		from jarvis.chat import held_sheets  # it imports this module
-
 		return held_sheets.identities(item)[0]
 	party = party_of(item)
 	if party["gstin"]:
 		return f"gstin:{item['doctype']}:{party['gstin']}"
-	if norm_name(party["title"]):
-		return f"name:{item['doctype']}:{norm_name(party['title'])}"
+	# Its naming field when set (an Item's item_code), else its title.
+	named = _meta(item["doctype"]) and held_sheets.deterministic_name(item["doctype"], item["values"])
+	name = norm_name(named or party["title"])
+	if name:
+		return f"name:{item['doctype']}:{name}"
 	return "args:" + _digest({"doctype": item["doctype"], "values": item["values"]})
 
 

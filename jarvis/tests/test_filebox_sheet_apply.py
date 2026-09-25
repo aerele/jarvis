@@ -1105,6 +1105,18 @@ class TestResume(_ApplyBase):
 		self.assertEqual(held_writes._find_match(OWNER, [skipped]), (None, None, False))
 		self.assertEqual(held_writes._find_match(OTHER, [created]), (None, None, False))
 
+	def test_a_legacy_hold_knows_a_sheet_created_item_by_its_code(self):
+		_c, row = self.sheet_of(_item("zz-fbs I1", item_name="zz-fbs Bolt"))
+		self.applied(row.name)
+		same = held_parties.item_key(
+			{"op": "create", "name": "", **_item("zz-fbs I1", item_name="zz-fbs Nut")}
+		)
+		other = held_parties.item_key(
+			{"op": "create", "name": "", **_item("zz-fbs I2", item_name="zz-fbs Bolt")}
+		)
+		self.assertEqual(held_writes._find_match(OWNER, [same]), ("recent", row.name, False))
+		self.assertEqual(held_writes._find_match(OWNER, [other]), (None, None, False))
+
 	def test_a_rerun_preamble_quotes_the_sheets_outcome(self):
 		conv, row = self.sheet_of(_supplier())
 		self.applied(row.name)
