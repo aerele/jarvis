@@ -179,6 +179,39 @@ describe("PromotionRequestDialog multiselect (skills only)", () => {
 	});
 });
 
+describe("PromotionRequestDialog min-scope gating (#595)", () => {
+	// The skill's real effective shared scope (my_skill_promotion) is passed in as
+	// minScope, so the picker never offers a target the server will reject as
+	// "already shared at {scope} scope or wider".
+	const openWithMinScope = async (minScope) => {
+		const w = mount(PromotionRequestDialog, {
+			props: { modelValue: false, noun: "skill", multiple: true, minScope },
+		});
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		return w;
+	};
+	const scopeOptionValues = (w) =>
+		w.findAll("select.fc-select option").map((o) => o.element.value);
+
+	it("offers both Role and Org when nothing has been shared yet", async () => {
+		const w = await openWithMinScope("User");
+		expect(scopeOptionValues(w)).toEqual(["Role", "Org"]);
+	});
+
+	it("drops Role once the skill is already Role-shared, keeping Org for a further widen", async () => {
+		const w = await openWithMinScope("Role");
+		expect(scopeOptionValues(w)).toEqual(["Org"]);
+	});
+
+	it("offers nothing and disables Send once the skill is already Org-shared", async () => {
+		const w = await openWithMinScope("Org");
+		expect(w.find("select.fc-select").exists()).toBe(false);
+		expect(w.text()).toContain("nothing wider to promote it to");
+		expect(w.findComponent({ name: "Button" }).props("disabled")).toBe(true);
+	});
+});
+
 describe("portalled pickers stack above dialogs (source guard)", () => {
 	// frappe-ui portals Popover content to <body> with no z-index of its own, so a
 	// picker opened inside a dialog is painted over by the dialog's own overlay.

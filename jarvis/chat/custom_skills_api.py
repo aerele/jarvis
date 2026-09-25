@@ -675,6 +675,44 @@ def _promotion_roles(req_name: str, target_role: str = "") -> list[str]:
 	return rows or ([target_role] if target_role else [])
 
 
+def _effective_shared_scope(skill_name: str, skill_scope: str | None) -> tuple[str | None, str]:
+	"""The skill's CURRENT effective shared scope, resolved by lineage (R3-SP-2):
+	if ``skill_name`` is itself already a shared (Role/Org) row, that IS the
+	effective scope (a Role -> Org widen keeps promoting the same row); otherwise
+	the most recent shared copy materialized FROM it (``source_skill ==
+	skill_name``), if any - a private (User) source has at most one live shared
+	descendant. Returns ``(existing_name, scope)``; ``existing_name`` is ``None``
+	and ``scope`` is ``"User"`` when nothing has ever been shared.
+
+	Single source of truth for BOTH the request-time guard
+	(``request_skill_promotion``) and the approval-time guard
+	(``_materialize_promotion``) - #595 was exactly this pair drifting apart: the
+	request-time check used to read the SOURCE row's own ``scope`` column, which
+	never changes once a SEPARATE shared row is materialized from it, so a skill
+	already promoted to Org could be re-requested endlessly and only fail (with a
+	late, confusing error) at approval time.
+
+	Uses ``get_all`` (not ``get_list``): this is an internal lineage-integrity
+	lookup, not a listing served back to the caller, and the requester may have no
+	read permission on the system-owned shared row it can resolve to."""
+	live = (skill_scope or "Org").strip() or "Org"
+	if live == "Personal":
+		live = "User"
+	if live in ("Role", "Org"):
+		return skill_name, live
+	prior = frappe.get_all(
+		SKILL,
+		filters={"source_skill": skill_name, "scope": ("in", ("Role", "Org", ""))},
+		fields=["name", "scope"],
+		order_by="creation asc",
+		limit=1,
+	)
+	if not prior:
+		return None, "User"
+	scope = (prior[0].scope or "Org").strip() or "Org"
+	return prior[0].name, ("User" if scope == "Personal" else scope)
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def request_skill_promotion(
@@ -704,6 +742,20 @@ def request_skill_promotion(
 		frappe.throw(_("Promotion target must be Role or Org."))
 	if _SCOPE_RANK.get(to_scope, 0) <= _SCOPE_RANK.get(from_scope, 0):
 		frappe.throw(_("Promotion can only widen a skill's scope."))
+	# #595: ``from_scope`` above is only the SOURCE row's own scope column, which
+	# never changes when a widen materializes a SEPARATE shared row (only a
+	# further widen of an already-shared row reuses ``from_scope`` directly). Check
+	# the real lineage state too, so a skill already shared at/above ``to_scope``
+	# can't be re-requested - its approval would otherwise fail later in
+	# ``_materialize_promotion`` with the same message, after a reviewer already
+	# spent time on it. A legitimate further widen (Role -> Org after an approved
+	# Role promotion) is unaffected: the lineage's effective scope is still below
+	# Org, so this passes and the later approval check (same helper) agrees.
+	_existing_shared_name, effective_scope = _effective_shared_scope(doc.name, doc.scope)
+	if _SCOPE_RANK.get(to_scope, 0) <= _SCOPE_RANK.get(effective_scope, 0):
+		frappe.throw(_("This skill is already shared at {0} scope or wider.").format(effective_scope))
+	if frappe.db.exists(PROMO, {"skill": doc.name, "status": "Pending"}):
+		frappe.throw(_("A promotion request for this skill is already pending review."))
 	# Multi-role: a Role-scope request may name several roles; ``target_role`` is
 	# kept as the primary (first) for display + backward compatibility, and the
 	# full requested audience is ``target_roles``. Only roles the requester may
@@ -903,12 +955,17 @@ def _materialize_promotion(req, roles=None) -> dict:
 	reviewers by the controller guard. Called INSIDE the catalog-wide lock held by
 	:func:`decide_skill_promotion`. Returns ``{skill, materialized, push_projection?}``
 	folded into the decision result."""
-	src = frappe.get_doc(SKILL, req.skill)
-	live = (src.scope or "Org").strip() or "Org"
-	if live == "Personal":
-		live = "User"
-	if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(live, 0):
-		frappe.throw(_("The skill is already at or above the requested scope."))
+	# R3-SP-2 (lineage by SOURCE link, not slug), via the shared helper also used
+	# by the request-time guard (#595): resolves the existing shared row for this
+	# lineage, if any - the SOURCE itself when it's already Role/Org (a further
+	# widen), otherwise a prior shared copy materialized FROM it. Re-checked here
+	# (not just trusted from request time) because approval can lag a request by
+	# any amount of time, during which another approval may have shared it.
+	existing_name, effective_scope = _effective_shared_scope(
+		req.skill, frappe.db.get_value(SKILL, req.skill, "scope")
+	)
+	if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(effective_scope, 0):
+		frappe.throw(_("This skill is already shared at {0} scope or wider.").format(effective_scope))
 
 	# R2-SP-1 + R3-SP-4: approval binds to the IMMUTABLE request-time snapshot and
 	# NEVER reads the (mutable) live source at decision time — a live fallback would
@@ -956,27 +1013,10 @@ def _materialize_promotion(req, roles=None) -> dict:
 	# see ``_pushable_org_rows`` / TASK 11).
 	allowed_roles = [{"role": r} for r in roles]
 
-	# R3-SP-2 (lineage by SOURCE link, not slug). The container writes ONE
-	# custom-<slug> dir, so at most one SHARED (Role/Org) copy may carry a given slug —
-	# but the existing shared copy of THIS lineage must be found by its immutable
-	# source link, independent of the current slug, or a renamed source strands the
-	# prior copy and inserts a duplicate. Resolve it (under the caller's catalog-wide
-	# lock, committed before release):
-	#   * if the SOURCE itself is already a shared Role/Org row (a Role->Org widen),
-	#     THAT row is the existing shared copy — widen it in place, never a 2nd insert;
-	#   * otherwise (a private User source) find a prior shared copy materialized FROM
-	#     it (``source_skill == req.skill``), regardless of its current slug — so
-	#     User->Role then (rename) User->Org supersedes the ONE Role copy in place.
-	if live in ("Role", "Org"):
-		existing_name = src.name
-	else:
-		prior = frappe.get_all(
-			SKILL,
-			filters={"source_skill": req.skill, "scope": ("in", ("Role", "Org", ""))},
-			fields=["name"],
-			order_by="creation asc",
-		)
-		existing_name = prior[0].name if prior else None
+	# ``existing_name`` (resolved above, by immutable source link not slug) is the
+	# one prior shared copy of THIS lineage to widen in place, independent of its
+	# current slug - so a renamed source, or User->Role then User->Org, never
+	# strands an orphan copy or inserts a duplicate.
 
 	# Any OTHER shared row already holding the target slug is a DIFFERENT-lineage author
 	# of the same slug — a hard conflict (one container dir per slug). The lineage copy
@@ -1009,11 +1049,6 @@ def _materialize_promotion(req, roles=None) -> dict:
 			# snapshot content, so the lineage keeps exactly one shared copy at the new
 			# scope — no orphan Role copy, no dead-end for the requester.
 			shared = frappe.get_doc(SKILL, existing_name)
-			existing_scope = (shared.scope or "Org").strip() or "Org"
-			if existing_scope == "Personal":
-				existing_scope = "User"
-			if _SCOPE_RANK.get(req.to_scope, 0) <= _SCOPE_RANK.get(existing_scope, 0):
-				frappe.throw(_("This skill is already shared at {0} scope or wider.").format(existing_scope))
 			shared.skill_name = req.skill_name
 			shared.scope = req.to_scope
 			shared.target_role = target_role
@@ -1274,8 +1309,15 @@ def my_skill_promotion(name: str) -> dict:
 	Read-only, smallest addition (Skills-area promotion surfacing): the doctype
 	perms are ``All: read + if_owner``, but the SPA does not use generic
 	client.get_list anywhere, so this thin owner-scoped wrapper keeps the
-	house "one whitelisted method per read" idiom."""
+	house "one whitelisted method per read" idiom.
+
+	Also returns ``effective_scope`` (#595): the skill's REAL current shared
+	scope by lineage (same helper the request/approval guards use), not the
+	skill's own (possibly stale) ``scope`` column. The requester UI needs this
+	to know whether ANY wider target remains, since a Pending/Approved/Rejected
+	status alone can't tell it that."""
 	me = frappe.session.user
+	_, effective_scope = _effective_shared_scope(name, frappe.db.get_value(SKILL, name, "scope"))
 	rows = frappe.get_all(
 		PROMO,
 		filters={"skill": name, "owner": me},
@@ -1295,7 +1337,7 @@ def my_skill_promotion(name: str) -> dict:
 		limit=1,
 	)
 	if not rows:
-		return {}
+		return {"effective_scope": effective_scope}
 	r = rows[0]
 	return {
 		"name": r.name,
@@ -1310,6 +1352,7 @@ def my_skill_promotion(name: str) -> dict:
 		"decided_at": str(r.decided_at or ""),
 		"decision_note": r.decision_note or "",
 		"created": str(r.creation or ""),
+		"effective_scope": effective_scope,
 	}
 
 
