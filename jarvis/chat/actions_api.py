@@ -14,6 +14,7 @@ the receipt, so the agent stages the plan's next step without the user typing
 
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 from jarvis import audit
 from jarvis._session import impersonate
@@ -23,6 +24,7 @@ from jarvis.permissions import require_jarvis_user
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
+_TRIGGER_DOCTYPE = "Jarvis Trigger"
 
 # Child-grid columns can be any data-bearing fieldtype except nested tables
 # (no grid-in-grid in v1).
@@ -152,10 +154,27 @@ def _owns_conversation(conversation: str) -> bool:
 	return bool(conversation) and frappe.db.get_value(CONV, conversation, "owner") == frappe.session.user
 
 
+def _trigger_enabled_note(doctype: str, name: str) -> str:
+	"""jarvis#596: one short line on a Jarvis Trigger create/update receipt so
+	the user learns the real enabled state without opening the trigger, on
+	every approve route. Reads the saved row directly (not the tool's return
+	payload) so it is right regardless of which path called it."""
+	if doctype != _TRIGGER_DOCTYPE or not name:
+		return ""
+	enabled = frappe.db.get_value(doctype, name, "enabled")
+	if enabled is None:
+		return ""
+	if cint(enabled):
+		return " It is on. Desk shows its script as Disabled, which is expected."
+	return " It is paused. Turn it on from Triggers when you are ready."
+
+
 def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str:
 	if verb == "create" and submitted:
-		return f"Created and submitted {doctype} {name}."
-	return f"{_RECEIPT[verb]} {doctype} {name}."
+		text = f"Created and submitted {doctype} {name}."
+	else:
+		text = f"{_RECEIPT[verb]} {doctype} {name}."
+	return text + _trigger_enabled_note(doctype, name)
 
 
 def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args: dict, text: str) -> None:
@@ -911,7 +930,12 @@ def _confirm_receipt_text(record: dict, result) -> str:
 			)
 			return f"{desc} succeeded (return value could not be serialized for the receipt)."
 		return f"{desc} succeeded. Returned: {payload}"
-	return f"{desc} succeeded."
+	note = ""
+	args = record.get("args") if isinstance(record.get("args"), dict) else {}
+	if record.get("tool") in ("create_doc", "update_doc") and args.get("doctype") == _TRIGGER_DOCTYPE:
+		name = args.get("name") or (data.get("name") if isinstance(data, dict) else None)
+		note = _trigger_enabled_note(_TRIGGER_DOCTYPE, name)
+	return f"{desc} succeeded.{note}"
 
 
 def _dismiss_note(tool: str, args: dict) -> str:

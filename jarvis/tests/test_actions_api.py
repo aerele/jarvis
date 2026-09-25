@@ -281,6 +281,94 @@ class TestApplyAction(FrappeTestCase):
 		self.assertEqual(msgs[0].tool_name, "create_doc")
 		self.assertIn(r["name"], msgs[1].content)
 
+	def _trigger_values(self, **overrides):
+		values = {
+			"trigger_name": "zz-596-note",
+			"target_doctype": "ToDo",
+			"doc_event": "after_insert",
+			"action_type": "LLM",
+			"llm_instruction": "Say ok.",
+		}
+		values.update(overrides)
+		return values
+
+	def _last_assistant_content(self, conv) -> str:
+		msgs = frappe.get_all(
+			"Jarvis Chat Message",
+			filters={"conversation": conv, "role": "assistant"},
+			fields=["content"],
+			order_by="seq asc",
+		)
+		return msgs[-1].content
+
+	def test_create_trigger_receipt_reports_enabled_on(self):
+		# jarvis#596: the draft-panel receipt must state the real enabled state,
+		# not stay silent (the managed Server Script always shows Disabled).
+		conv = self._conv()
+		r = apply_action(
+			frappe.as_json(
+				{
+					"verb": "create",
+					"doctype": "Jarvis Trigger",
+					"values": self._trigger_values(),
+					"conversation": conv,
+				}
+			)
+		)
+		self._cleanup_doc("Jarvis Trigger", r["name"])
+		self.assertIn("It is on.", self._last_assistant_content(conv))
+
+	def test_create_trigger_receipt_reports_paused_when_disabled(self):
+		conv = self._conv()
+		r = apply_action(
+			frappe.as_json(
+				{
+					"verb": "create",
+					"doctype": "Jarvis Trigger",
+					"values": self._trigger_values(enabled=0),
+					"conversation": conv,
+				}
+			)
+		)
+		self._cleanup_doc("Jarvis Trigger", r["name"])
+		self.assertIn("It is paused.", self._last_assistant_content(conv))
+
+	def test_update_trigger_receipt_reports_current_state(self):
+		trig = frappe.get_doc({"doctype": "Jarvis Trigger", **self._trigger_values()}).insert(
+			ignore_permissions=True
+		)
+		self._cleanup_doc("Jarvis Trigger", trig.name)
+		conv = self._conv()
+		apply_action(
+			frappe.as_json(
+				{
+					"verb": "update",
+					"doctype": "Jarvis Trigger",
+					"name": trig.name,
+					"values": {"enabled": 0},
+					"conversation": conv,
+				}
+			)
+		)
+		self.assertIn("It is paused.", self._last_assistant_content(conv))
+
+	def test_create_other_doctype_receipt_has_no_trigger_note(self):
+		conv = self._conv()
+		r = apply_action(
+			frappe.as_json(
+				{
+					"verb": "create",
+					"doctype": "ToDo",
+					"values": {"description": "no note"},
+					"conversation": conv,
+				}
+			)
+		)
+		self._cleanup_doc("ToDo", r["name"])
+		content = self._last_assistant_content(conv)
+		self.assertNotIn("It is on.", content)
+		self.assertNotIn("It is paused.", content)
+
 	def test_conversation_ownership_enforced(self):
 		conv = self._conv()  # owner = Administrator
 		frappe.set_user("Guest")
@@ -482,6 +570,49 @@ class TestContinuation(FrappeTestCase):
 		self.assertNotIn("Returned:", text)
 		self.assertIn("-> TODO-9", text)
 		self.assertIn("succeeded", text)
+
+	def _make_trigger(self, **overrides):
+		values = {
+			"doctype": "Jarvis Trigger",
+			"trigger_name": "zz-596-confirm",
+			"target_doctype": "ToDo",
+			"doc_event": "after_insert",
+			"action_type": "LLM",
+			"llm_instruction": "Say ok.",
+			"enabled": 1,
+		}
+		values.update(overrides)
+		trig = frappe.get_doc(values).insert(ignore_permissions=True)
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Trigger", trig.name, force=True, ignore_permissions=True)
+		)
+		return trig
+
+	def test_confirm_receipt_trigger_create_reports_enabled_on(self):
+		# jarvis#596: the confirm-card approve route must carry the same note as
+		# the draft-panel apply route.
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		trig = self._make_trigger(enabled=1)
+		record = {"tool": "create_doc", "args": {"doctype": "Jarvis Trigger"}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": {"name": trig.name}})
+		self.assertIn("It is on.", text)
+
+	def test_confirm_receipt_trigger_update_reports_paused(self):
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		trig = self._make_trigger(enabled=0)
+		record = {"tool": "update_doc", "args": {"doctype": "Jarvis Trigger", "name": trig.name}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": {"name": trig.name}})
+		self.assertIn("It is paused.", text)
+
+	def test_confirm_receipt_other_doctype_has_no_trigger_note(self):
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		record = {"tool": "create_doc", "args": {"doctype": "ToDo"}}
+		text = _confirm_receipt_text(record, {"ok": True, "data": {"name": "TODO-9"}})
+		self.assertNotIn("It is on.", text)
+		self.assertNotIn("It is paused.", text)
 
 	def test_confirm_receipt_run_method_failure_reports_error_without_dump(self):
 		# A FAILED run_method still reports the (bounded) error, and never dumps a
