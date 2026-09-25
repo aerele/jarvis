@@ -752,6 +752,19 @@ class TestIsHandoverUnsupported(FrappeTestCase):
 		)
 		self.assertFalse(admin_client.is_handover_unsupported(exc))
 
+	def test_false_for_a_codeless_rejection_naming_subscription_connect_not_handover(self):
+		"""CR-4 (2026-09-25 review): is_handover_unsupported must NOT delegate to
+		is_method_not_found - that function's own code-less text fallback is
+		scoped to subscription_connect's dotted name
+		("api.tenant.subscription_connect"), an unrelated endpoint. A stale-admin
+		rejection naming THAT path (present, subscription_handover missing) must
+		not be misread as "handover unsupported"."""
+		exc = AdminValidationError(
+			"No fue posible encontrar el metodo api.tenant.subscription_connect solicitado",
+			exc_type="ValidationError",
+		)
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
+
 
 class TestPermanentRejectionClassification(FrappeTestCase):
 	"""jarvis #542: 502 is admin's answer BOTH to a gateway fault AND to its

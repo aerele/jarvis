@@ -79,7 +79,13 @@ class TestHandoverViaAdmin(FrappeTestCase):
 	"""_handover_via_admin(settings) - the per-call decision, exercised directly
 	(it never re-reads Jarvis Settings itself; only its _enqueued_* wrapper
 	does), same style as Task 8's tests calling lone_direct_handover_due
-	directly against a bare settings fixture."""
+	directly against a bare settings fixture.
+
+	CR-3 (2026-09-25 review): the return value is now the follow-up action the
+	caller must run AFTER releasing the admin-sync lock - None, "pool", or
+	"resync" - not a bool. Tests that only care "nothing further to do here"
+	assert assertIsNone; the fallback/resync cases are exercised through
+	_enqueued_handover_via_admin below, where the follow-up actually runs."""
 
 	def test_confirmed_handover_swaps_the_stamps_in_one_write(self):
 		from jarvis.jarvis.pool_serialize import compute_pool_mode, compute_proxy_active
@@ -88,9 +94,9 @@ class TestHandoverViaAdmin(FrappeTestCase):
 		with patch.object(
 			admin_client, "post_subscription_handover", return_value={"result": "ok", "status": "applied"}
 		) as mock_post:
-			fall_back = _handover_via_admin(settings)
+			follow_up = _handover_via_admin(settings)
 
-		self.assertFalse(fall_back)
+		self.assertIsNone(follow_up)
 		mock_post.assert_called_once()
 		self.assertEqual(mock_post.call_args.args[0], "openai")
 		self.assertTrue(settings.llm_direct_synced_at)
@@ -109,9 +115,9 @@ class TestHandoverViaAdmin(FrappeTestCase):
 				with patch.object(
 					admin_client, "post_subscription_handover", return_value={"result": result_value}
 				):
-					fall_back = _handover_via_admin(settings)
+					follow_up = _handover_via_admin(settings)
 
-				self.assertFalse(fall_back)
+				self.assertIsNone(follow_up)
 				self.assertEqual(settings.last_sync_status, _PENDING_HANDOVER_STATUS)
 				self.assertEqual(settings.llm_pool_synced_at, "2026-08-01 00:00:00")
 				self.assertIsNone(settings.llm_direct_synced_at)
@@ -122,25 +128,12 @@ class TestHandoverViaAdmin(FrappeTestCase):
 		with patch.object(
 			admin_client, "post_subscription_handover", side_effect=AdminUnreachableError("timeout")
 		):
-			fall_back = _handover_via_admin(settings)
+			follow_up = _handover_via_admin(settings)
 
-		self.assertFalse(fall_back)
+		self.assertIsNone(follow_up)
 		self.assertEqual(settings.last_sync_status, _PENDING_HANDOVER_STATUS)
 		self.assertIsNone(settings.llm_direct_synced_at)
 		self.assertEqual(settings.llm_pool_synced_at, "2026-08-01 00:00:00")
-
-	def test_rejected_records_failed_with_reason(self):
-		settings = _handover_ready_settings()
-		rejection = AdminRejectedError(
-			"admin returned a 502 error: bad spec", code="FleetConfigError", detail="bad spec"
-		)
-		with patch.object(admin_client, "post_subscription_handover", side_effect=rejection):
-			fall_back = _handover_via_admin(settings)
-
-		self.assertFalse(fall_back)
-		self.assertTrue((settings.last_sync_status or "").startswith("failed:"))
-		self.assertIn("bad spec", settings.last_sync_status)
-		self.assertIsNone(settings.llm_direct_synced_at)
 
 	def test_job_is_a_no_op_when_the_shape_moved_on(self):
 		"""A second model row appeared before the job ran (a race with a fresh
@@ -158,15 +151,39 @@ class TestHandoverViaAdmin(FrappeTestCase):
 			]
 		)
 		with patch.object(admin_client, "post_subscription_handover") as mock_post:
-			fall_back = _handover_via_admin(settings)
+			follow_up = _handover_via_admin(settings)
 
 		mock_post.assert_not_called()
-		self.assertFalse(fall_back)
+		self.assertIsNone(follow_up)
+
+	def test_never_paid_auth_records_not_paid_without_raising(self):
+		"""CR-5: mirrors _sync_via_admin's exemption - a never-paid 403 is an
+		ordinary billing state, not a genuine auth defect."""
+		settings = _handover_ready_settings()
+		auth_err = admin_client.AdminAuthError("forbidden", status_code=403, code="CUSTOMER_NOT_PAID")
+		with patch.object(admin_client, "post_subscription_handover", side_effect=auth_err):
+			follow_up = _handover_via_admin(settings)  # must not raise
+
+		self.assertIsNone(follow_up)
+		self.assertEqual(settings.last_sync_status, "failed: not paid (CUSTOMER_NOT_PAID)")
+
+	def test_other_auth_error_raises(self):
+		"""CR-5: any OTHER auth failure keeps today's behavior - terminal status,
+		then re-raise so the rq job surfaces it."""
+		settings = _handover_ready_settings()
+		auth_err = admin_client.AdminAuthError("token expired", status_code=401)
+		with patch.object(admin_client, "post_subscription_handover", side_effect=auth_err):
+			with self.assertRaises(admin_client.AdminAuthError):
+				_handover_via_admin(settings)
+
+		self.assertEqual(settings.last_sync_status, f"failed: auth: {auth_err}")
 
 
 class TestEnqueuedHandoverViaAdmin(FrappeTestCase):
-	"""_enqueued_handover_via_admin - the redis-locked worker, where the pool
-	fallback (settings._enqueue_pool_sync()) actually lives."""
+	"""_enqueued_handover_via_admin - the redis-locked worker, where the two
+	follow-up actions _handover_via_admin can report - a pool push
+	(settings._enqueue_pool_sync()) or a resync (request_resync) - actually
+	run, and only AFTER the admin-sync redis lock is released (CR-3)."""
 
 	def test_unsupported_handover_falls_back_to_the_pool_push(self):
 		settings = _handover_ready_settings()
@@ -183,6 +200,72 @@ class TestEnqueuedHandoverViaAdmin(FrappeTestCase):
 		# The unsupported branch returns before any status write - untouched.
 		self.assertEqual(settings.llm_pool_synced_at, "2026-08-01 00:00:00")
 		self.assertIsNone(settings.llm_direct_synced_at)
+
+	def test_rejected_falls_back_to_the_pool_push(self):
+		"""CR-2: a TERMINAL rejection (admin reached, permanently refused) must
+		not strand the workspace on "failed:" - it falls back exactly like the
+		unsupported case, and the pool push (not this function) owns the status
+		afterwards, so nothing here is written."""
+		settings = _handover_ready_settings()
+		settings._enqueue_pool_sync = MagicMock()
+		rejection = AdminRejectedError(
+			"admin returned a 502 error: bad spec", code="FleetConfigError", detail="bad spec"
+		)
+		with (
+			patch("frappe.get_single", return_value=settings),
+			patch.object(admin_client, "post_subscription_handover", side_effect=rejection) as mock_post,
+		):
+			_enqueued_handover_via_admin()
+
+		mock_post.assert_called_once()
+		settings._enqueue_pool_sync.assert_called_once()
+		self.assertEqual(settings.llm_pool_synced_at, "2026-08-01 00:00:00")
+		self.assertIsNone(settings.llm_direct_synced_at)
+		self.assertEqual(settings.last_sync_status, "", "stamps untouched - the pool push owns the status")
+
+	def test_non_unsupported_validation_rejection_falls_back_to_the_pool_push(self):
+		"""CR-2's other half: a business AdminValidationError (not the
+		missing-endpoint/unsupported shape) is just as terminal, so it takes the
+		same fallback."""
+		settings = _handover_ready_settings()
+		settings._enqueue_pool_sync = MagicMock()
+		rejection = admin_client.AdminValidationError("unusable oauth grant")
+		with (
+			patch("frappe.get_single", return_value=settings),
+			patch.object(admin_client, "post_subscription_handover", side_effect=rejection) as mock_post,
+		):
+			_enqueued_handover_via_admin()
+
+		mock_post.assert_called_once()
+		settings._enqueue_pool_sync.assert_called_once()
+		self.assertEqual(settings.last_sync_status, "", "stamps untouched - the pool push owns the status")
+
+	def test_not_due_with_pending_status_resyncs_after_the_lock(self):
+		"""CR-3: the shape moved on (no longer due) while a handover was left
+		pending - request_resync must run, and only AFTER the redis lock this
+		function held is released (it acquires the SAME lock itself)."""
+		settings = _handover_ready_settings(
+			last_sync_status=_PENDING_HANDOVER_STATUS,
+			models=[
+				_subscription_model(
+					order=0, model="gpt-5.5", accounts=[_account(upstream="openai", oauth_blob=_OAUTH_BLOB)]
+				),
+				_subscription_model(
+					order=1,
+					model="gpt-5.6",
+					accounts=[_account(upstream="openai", account_ref="ACC_002", oauth_blob=_OAUTH_BLOB)],
+				),
+			],
+		)
+		with (
+			patch("frappe.get_single", return_value=settings),
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.request_resync") as mock_resync,
+			patch.object(admin_client, "post_subscription_handover") as mock_post,
+		):
+			_enqueued_handover_via_admin()
+
+		mock_post.assert_not_called()
+		mock_resync.assert_called_once_with(settings)
 
 
 def _add_openai_subscription_row(settings, *, order=0, account_ref="ACC_1", oauth_blob=None):

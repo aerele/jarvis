@@ -2434,21 +2434,27 @@ HANDOVER_UNSUPPORTED_CODE = "HandoverUnsupported"
 def is_handover_unsupported(exc: Exception) -> bool:
 	"""Admin or its fleet host cannot do the handover yet: fall back to the pool push.
 
-	is_method_not_found's own translation-proof text fallback is scoped to
-	subscription_connect's dotted name (_SUBSCRIPTION_CONNECT_METHOD) - deliberately
-	left that way so it never widens for its OTHER, unrelated callers. A code-less
-	AdminValidationError whose text names subscription_handover's own dotted path
-	(_SUBSCRIPTION_HANDOVER_METHOD) - the same non-English-locale shape
-	is_method_not_found guards against for subscription_connect, where a translated
-	admin locale leaves only the interpolated dotted method name intact - is checked
-	here instead, so an old admin's missing-method rejection is still recognised."""
+	CR-4 (2026-09-25 review): deliberately does NOT delegate to is_method_not_found.
+	That function's own code-less text fallback also matches _SUBSCRIPTION_CONNECT_METHOD
+	("api.tenant.subscription_connect") - an unrelated dotted path - so a stale admin
+	rejection naming THAT endpoint (present, subscription_handover missing) used to be
+	misread as "handover unsupported" too. The code-less + exc_type gate is the same one
+	is_method_not_found uses (a coded or re-typed rejection can never be a bare missing-
+	method answer), computed inline here and checked only against the markers this
+	function actually cares about: Frappe's own fixed English marker
+	(_METHOD_NOT_FOUND_MARKER) or subscription_handover's own dotted path
+	(_SUBSCRIPTION_HANDOVER_METHOD) - the latter for a translated admin locale that
+	leaves only the interpolated method name intact."""
 	if getattr(exc, "code", "") == HANDOVER_UNSUPPORTED_CODE:
 		return True
 	if not isinstance(exc, AdminValidationError):
 		return False
-	if is_method_not_found(exc):
-		return True
-	return not getattr(exc, "code", "") and _SUBSCRIPTION_HANDOVER_METHOD in str(exc)
+	if getattr(exc, "code", ""):
+		return False
+	if getattr(exc, "exc_type", None) not in (None, "ValidationError"):
+		return False
+	text = str(exc)
+	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_HANDOVER_METHOD in text
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
