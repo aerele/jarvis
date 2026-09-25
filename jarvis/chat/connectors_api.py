@@ -903,10 +903,13 @@ def _setup_failure_message(exc: Exception) -> str:
 	The engine's own ``OAuthError`` is an expected refusal and carries the
 	provider's reason. Anything else is a fault, so its cause is logged (never the
 	row's credentials) and the person reads the generic sentence, not an exception
-	class name."""
+	class name. A fault raised through ``frappe.throw`` (Frappe's own "will get
+	truncated" check is one) has already queued its raw text as a server message,
+	and the SPA shows the FIRST one, so the queue is cleared here."""
 	if isinstance(exc, mcp_oauth.OAuthError):
 		return _oauth_error_message(exc.code, exc.detail)
 	frappe.logger("jarvis.connectors").warning("connector sign-in setup failed", exc_info=exc)
+	frappe.clear_messages()
 	return _oauth_error_message("")
 
 

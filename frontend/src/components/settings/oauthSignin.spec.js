@@ -12,7 +12,9 @@ vi.mock("@/api", () => api);
 
 // The interim tab's cosmetic HTML only needs a document that accepts
 // write()/close() - escapeHtml's real implementation isn't under test here.
-vi.mock("@/lib/errors", () => ({
+// errMessage stays real: which sentence a failure shows IS under test.
+vi.mock("@/lib/errors", async (importOriginal) => ({
+	...(await importOriginal()),
 	escapeHtml: (s) => s,
 }));
 
@@ -116,6 +118,22 @@ describe("oauthSignin", () => {
 		const result = await advancePoll(pending);
 
 		expect(result).toEqual({ status: "error", message: "You can't use this connector." });
+	});
+
+	it("shows the server's own sentence when the row cannot be created", async () => {
+		// frappe-ui's Error puts "<method> <ExceptionClass>" in e.message and the
+		// server's frappe.throw text in e.messages - the dialog must show the latter.
+		const err = new Error("jarvis.chat.connectors_api.add_connector ValidationError");
+		err.messages = ["We could not set up sign-in for this address."];
+
+		const result = await signIn(() => Promise.reject(err), { label: "Vendor" });
+
+		expect(result).toEqual({
+			status: "error",
+			message: "We could not set up sign-in for this address.",
+		});
+		expect(tab.close).toHaveBeenCalled();
+		expect(api.connectOauth).not.toHaveBeenCalled();
 	});
 
 	it("resolves closed once the tab is gone and one final check finds nothing", async () => {

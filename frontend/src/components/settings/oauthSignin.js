@@ -28,7 +28,7 @@
 // promise with {status:"cancelled"}. Safe to call after the promise has
 // already settled (a no-op then).
 import * as api from "@/api";
-import { escapeHtml } from "@/lib/errors";
+import { errMessage, escapeHtml } from "@/lib/errors";
 
 const POLL_INTERVAL_MS = 2000;
 // The server keeps a started sign-in's state for 10 minutes - matched here so
@@ -78,7 +78,7 @@ export function signIn(target, { label, agentName } = {}) {
 		// Belt and braces - nothing inside runSignIn should throw past its own
 		// try/catches, but an unhandled rejection here would otherwise leave
 		// the caller's promise pending forever.
-		resolveFn({ status: "error", message: (e && e.message) || "Could not sign in." });
+		resolveFn({ status: "error", message: errMessage(e, "Could not sign in.") });
 	});
 
 	return promise;
@@ -90,8 +90,10 @@ async function runSignIn(target, w, resolve, isSettled, setStopPolling) {
 		try {
 			name = await target();
 		} catch (e) {
+			// The server's own sentence (e.messages), never frappe-ui's "<method>
+			// <ExceptionClass>" e.message line, which is what a failed create showed.
 			closeTab(w);
-			resolve({ status: "error", message: (e && e.message) || "Could not sign in." });
+			resolve({ status: "error", message: errMessage(e, "Could not sign in.") });
 			return;
 		}
 	}
@@ -102,7 +104,7 @@ async function runSignIn(target, w, resolve, isSettled, setStopPolling) {
 		res = await api.connectOauth(name);
 	} catch (e) {
 		closeTab(w);
-		resolve({ status: "error", message: (e && e.message) || "Could not sign in." });
+		resolve({ status: "error", message: errMessage(e, "Could not sign in.") });
 		return;
 	}
 	if (isSettled()) return;
