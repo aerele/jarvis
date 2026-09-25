@@ -75,7 +75,7 @@ from jarvis.chat.agent_client import (
 	failed_final_error,
 )
 from jarvis.chat.events import parse_event
-from jarvis.chat.steps import display_line, strip_steps, visible_text
+from jarvis.chat.steps import display_line, is_step, remove_steps, strip_steps
 from jarvis.exceptions import AgentUnreachableError
 
 _logger = logging.getLogger(__name__)
@@ -300,10 +300,12 @@ class _Lane:
 		# for the caller's post-settle rich-output step.
 		self.is_continuation = False
 		# Live step line (jarvis.chat.steps), reader-thread only like the fields
-		# above. ``stream_text`` is the last raw reply text, ``steps`` the step
-		# text recorded so far (in order, seeded on a hop re-attach), and
+		# above. ``stream_text`` is the last raw reply text and ``since_tool`` the
+		# offset in it where the latest tool call started; ``steps`` is the step
+		# text recorded so far (in order, seeded on a hop re-attach) and
 		# ``shown_text`` what the chat displays: ``stream_text`` minus its steps.
 		self.stream_text = ""
+		self.since_tool = 0
 		self.steps: list[str] = []
 		self.shown_text = ""
 
@@ -629,33 +631,34 @@ class RelayMux:
 	def _reply_delta(self, lane: _Lane, parsed: dict) -> _LaneEvent:
 		"""A reply-text frame. ``text`` stays raw (the stored mirror keeps exactly
 		what streamed, so a stop, error or recovery behaves as before); ``shown``
-		is what the chat displays, with recorded steps removed from the front."""
-		lane.stream_text = parsed.get("text", "")
-		lane.shown_text = visible_text(lane.stream_text, lane.steps)
+		is what the chat displays, with recorded steps cut out."""
+		text = parsed.get("text", "")
+		if not text.startswith(lane.stream_text):
+			# An API-key model's next call starts a fresh segment.
+			lane.since_tool = 0
+		lane.stream_text = text
+		return self._shown_delta(lane, remove_steps(text, lane.steps), parsed.get("delta", ""))
+
+	def _move_pending_step(self, lane: _Lane) -> None:
+		"""At a tool call: if the reply text written since the previous tool call
+		is one short sentence, it was a step. Show it on the step line and take it
+		out of the live display. Anything longer stays in the reply."""
+		pending = remove_steps(lane.stream_text[lane.since_tool :], lane.steps).strip()
+		lane.since_tool = len(lane.stream_text)
+		if not is_step(pending):
+			return
+		lane.steps.append(pending)
+		self._offer_step(lane, pending, raw=pending)
+		self._offer(lane, self._shown_delta(lane, remove_steps(lane.stream_text, lane.steps)))
+
+	def _shown_delta(self, lane: _Lane, shown: str, delta: str = "") -> _LaneEvent:
+		"""The one delta shape: raw ``stream_text`` for the mirror, ``shown`` for the chat."""
+		lane.shown_text = shown
 		return _LaneEvent(
 			cls=LOSSY,
 			kind="delta",
 			event_seq=lane.next_seq(),
-			data={"text": lane.stream_text, "delta": parsed.get("delta", ""), "shown": lane.shown_text},
-		)
-
-	def _move_pending_step(self, lane: _Lane) -> None:
-		"""Reply text written since the last step and followed by a tool call was
-		a step: show it on the step line and take it out of the live display."""
-		pending = visible_text(lane.stream_text, lane.steps).strip()
-		if not pending:
-			return
-		lane.steps.append(pending)
-		lane.shown_text = ""
-		self._offer_step(lane, pending, raw=pending)
-		self._offer(
-			lane,
-			_LaneEvent(
-				cls=LOSSY,
-				kind="delta",
-				event_seq=lane.next_seq(),
-				data={"text": lane.stream_text, "delta": "", "shown": ""},
-			),
+			data={"text": lane.stream_text, "delta": delta, "shown": shown},
 		)
 
 	def _offer_step(self, lane: _Lane, text: str, raw: str | None = None) -> None:
@@ -707,19 +710,10 @@ class RelayMux:
 				# before its tool calls was shown live and is removed here.
 				answer = strip_steps(_red, lane.steps)
 				if lane.steps and answer and answer != lane.shown_text:
-					# The text moved out as a step was the answer itself (e.g. a
-					# reply that ends by opening a confirmation card): put it back
-					# on screen before the terminal lands.
-					lane.shown_text = answer
-					self._offer(
-						lane,
-						_LaneEvent(
-							cls=LOSSY,
-							kind="delta",
-							event_seq=lane.next_seq(),
-							data={"text": lane.stream_text, "delta": "", "shown": answer},
-						),
-					)
+					# The saved reply keeps text the live view had hidden (e.g. a
+					# short answer written before a card tool call): show it again
+					# before the terminal lands.
+					self._offer(lane, self._shown_delta(lane, answer))
 				term_payload = {"text": answer}
 				if _rels:  # fetchable media -> seed downstream (only set when present)
 					term_payload["media_rels"] = _rels

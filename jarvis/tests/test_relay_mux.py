@@ -1276,7 +1276,25 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.order[:4], ["delta", "step", "delta", "tool"])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
-	def test_api_key_segments_drop_the_glued_draft(self):
+	def test_api_key_step_segment_is_a_step(self):
+		step = "Checking the overdue invoices."
+		answer = "**West View** has the highest outstanding."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step, "itemId": "assistant-1"}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer, "itemId": "assistant-2", "replace": True}),
+			],
+			step + answer,  # the runtime glues per-call segments with no separator
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.shown, [step, "", answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_long_text_before_a_lookup_stays_in_the_reply(self):
+		# More than one short sentence may be answer, so it is never a step (a
+		# DeepSeek draft like this is saved as it streamed, as before).
 		draft = (
 			"Its invoices:\n\n| not found |\n\nHold on, I need to actually pull the invoice list, one moment."
 		)
@@ -1286,19 +1304,27 @@ class TestRelayMuxSteps(FrappeTestCase):
 				("assistant", {"text": draft, "delta": draft, "itemId": "assistant-1"}),
 				("item", _tool_data("start")),
 				("item", _tool_data("end")),
-				(
-					"assistant",
-					{"text": answer, "delta": answer, "itemId": "assistant-2", "replace": True},
-				),
+				("assistant", {"text": answer, "delta": answer, "itemId": "assistant-2", "replace": True}),
 			],
 			draft + answer,
 		)
-		self.assertEqual(
-			[s[1] for s in rec.steps],
-			["Hold on, I need to actually pull the invoice list, one moment."],
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.shown, [draft, answer])
+		self.assertEqual(rec.terminal[1]["text"], draft + answer)
+
+	def test_table_before_a_lookup_is_not_hidden(self):
+		# Review finding: table-only text must never be hidden, or it could come
+		# back duplicated after a hop.
+		table = "| a | b |\n|---|---|\n| 1 | 2 |"
+		rec = self._run(
+			[
+				("assistant", {"text": table, "delta": table}),
+				("item", _tool_data("start")),
+			],
+			None,
 		)
-		self.assertEqual(rec.shown[-1], answer)
-		self.assertEqual(rec.terminal[1]["text"], answer)
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.shown, [table])
 
 	def test_chatgpt_preamble_is_a_step_and_final_is_untouched(self):
 		rec = self._run(
@@ -1325,7 +1351,7 @@ class TestRelayMuxSteps(FrappeTestCase):
 
 	def test_parallel_lookups_record_one_step(self):
 		step = "Checking both lists."
-		full = f"{step}\n\nDone: 3 and 5."
+		full = f"{step}\n\nDone: 3 customers and 5 submitted sales invoices."
 		rec = self._run(
 			[
 				("assistant", {"text": step, "delta": step}),
@@ -1333,12 +1359,12 @@ class TestRelayMuxSteps(FrappeTestCase):
 				("item", _tool_data("start", "c2")),
 				("item", _tool_data("end", "c1")),
 				("item", _tool_data("end", "c2")),
-				("assistant", {"text": full, "delta": "\n\nDone: 3 and 5."}),
+				("assistant", {"text": full, "delta": "\n\nDone."}),
 			],
 			full,
 		)
 		self.assertEqual(len(rec.steps), 1)
-		self.assertEqual(rec.terminal[1]["text"], "Done: 3 and 5.")
+		self.assertEqual(rec.terminal[1]["text"], "Done: 3 customers and 5 submitted sales invoices.")
 
 	def test_text_without_a_following_lookup_is_the_answer(self):
 		rec = self._run([("assistant", {"text": "Hello there", "delta": "Hello there"})], "Hello there")
@@ -1346,8 +1372,8 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.terminal[1]["text"], "Hello there")
 
 	def test_answer_written_before_the_last_lookup_survives(self):
-		# A reply that ends by opening a confirmation card: the text before the
-		# tool call is the answer, so it is shown again and saved whole.
+		# A reply that ends by opening a confirmation card: two sentences, so
+		# never a step, and never hidden.
 		answer = "I have prepared a payment reminder. Please review it and confirm."
 		rec = self._run(
 			[
@@ -1357,9 +1383,27 @@ class TestRelayMuxSteps(FrappeTestCase):
 			],
 			answer,
 		)
-		self.assertEqual(rec.shown, [answer, "", answer])
-		self.assertEqual(rec.order[-2:], ["tool", "delta"])
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.shown, [answer])
 		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_short_answer_before_a_card_is_saved_and_shown_again(self):
+		# Review finding: a one-sentence answer, a card tool call, then a short
+		# remark. It looked like a step live, so the saved reply keeps it whole
+		# and the chat is shown the full text again before the terminal.
+		first = "You have 3 active customers."
+		full = f"{first}\n\nHere they are."
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": "\n\nHere they are."}),
+			],
+			full,
+		)
+		self.assertEqual(rec.shown[-1], full)
+		self.assertEqual(rec.terminal[1]["text"], full)
 
 	def test_stop_mid_lookup_keeps_the_streamed_text_stored(self):
 		# Review finding: a stop/error while a lookup runs settles with whatever
@@ -1380,7 +1424,7 @@ class TestRelayMuxSteps(FrappeTestCase):
 		# pump kept, the next growing-text frame still hides them and the saved
 		# reply is still stripped.
 		step = "Let me check the invoices."
-		answer = "Three are overdue."
+		answer = "Three invoices are overdue, the oldest by 42 days."
 		full = f"{step}\n\n{answer}"
 		rec = self._run(
 			[
