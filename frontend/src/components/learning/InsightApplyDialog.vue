@@ -95,7 +95,7 @@
 				v-if="phase === 'update' || phase === 'create'"
 				class="mt-3 text-sm text-ink-gray-5"
 			>
-				Confirming saves the skill and restarts your assistant briefly to load it.
+				Confirming saves the skill and updates your assistant.
 			</p>
 		</template>
 
