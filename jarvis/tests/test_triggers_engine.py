@@ -3,9 +3,10 @@ controller (validation + managed Server Script materialization) and the
 dispatch engine (``jarvis.triggers.engine`` / ``jarvis.triggers.llm_action``).
 
 Hermetic: every trigger / ToDo / activity row created here is tracked and
-deleted in tearDown; no network or LLM calls (``openrouter_complete`` is
-patched); Script execution runs with ``is_safe_exec_enabled`` patched ON so
-the suite passes on benches without ``server_script_enabled``.
+deleted in tearDown; no network or LLM calls (``llm_task_complete`` and
+``openrouter_complete`` are patched); Script execution runs with
+``is_safe_exec_enabled`` patched ON so the suite passes on benches without
+``server_script_enabled``.
 
 NOTE for the integrator: the "script throw blocks the save" test exercises the
 real ``doc_events "*"`` hook wiring, so it needs the app's hooks loaded (bench
@@ -18,9 +19,16 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.triggers import engine, llm_action
+from jarvis.triggers.llm_task_client import LLMTaskError, LLMTaskNotAvailableError
 
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
+
+# jarvis.triggers.llm_action._complete imports both transports lazily on every
+# call, so patching the source modules' attributes (not llm_action's) is
+# always seen.
+LLM_TASK_COMPLETE = "jarvis.triggers.llm_task_client.llm_task_complete"
+OPENROUTER_COMPLETE = "jarvis.chat.voice.openrouter_complete"
 
 # The controller module (its imported is_safe_exec_enabled is patched so
 # Script triggers validate on benches without server_script_enabled).
@@ -466,10 +474,40 @@ class TestRunLLMAction(_TriggerTestCase):
 			fired_by="Administrator",
 		)
 
-	def test_success_writes_success_activity(self):
+	def test_success_via_llm_task_writes_success_activity(self):
 		trig = self._make_llm_trigger()
-		with patch("jarvis.chat.voice.openrouter_complete", return_value="All good.") as oc:
+		with (
+			patch(LLM_TASK_COMPLETE, return_value="All good.") as task,
+			patch(OPENROUTER_COMPLETE) as oc,
+		):
 			self._run(trig)
+		self.assertEqual(task.call_count, 1)
+		self.assertEqual(oc.call_count, 0)  # gateway succeeded -> no fallback attempt
+		prompt, fenced = task.call_args.args[0], task.call_args.args[1]
+		self.assertIn("Check this todo for problems.", prompt)
+		self.assertIn("ToDo some-todo", prompt)
+		self.assertIn("on_update", prompt)
+		self.assertIn("<untrusted-data", fenced)
+		self.assertIn('"description": "x"', fenced)
+		# The untrusted snapshot only ever reaches the fenced input, never prompt.
+		self.assertNotIn('"description": "x"', prompt)
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Success")
+		self.assertEqual(rows[0].summary, "All good.")
+
+	def test_tool_not_available_falls_back_to_openrouter_when_key_configured(self):
+		trig = self._make_llm_trigger()
+		with (
+			patch(
+				LLM_TASK_COMPLETE, side_effect=LLMTaskNotAvailableError("Tool not available: llm-task")
+			) as task,
+			# Explicit key check (never inferred from a translated error string).
+			patch("jarvis.chat.voice._credentials", return_value=("or-key-123", "some/model")),
+			patch(OPENROUTER_COMPLETE, return_value="Fallback finding.") as oc,
+		):
+			self._run(trig)
+		self.assertEqual(task.call_count, 1)
 		self.assertEqual(oc.call_count, 1)
 		messages = oc.call_args.args[0]
 		self.assertEqual(messages[0]["role"], "system")
@@ -477,34 +515,50 @@ class TestRunLLMAction(_TriggerTestCase):
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].status, "Success")
-		self.assertEqual(rows[0].summary, "All good.")
+		self.assertEqual(rows[0].summary, "Fallback finding.")
 
-	def test_failure_writes_failed_activity(self):
+	def test_tool_not_available_without_key_records_update_message(self):
 		trig = self._make_llm_trigger()
-		with patch(
-			"jarvis.chat.voice.openrouter_complete",
-			side_effect=frappe.ValidationError("Speech-to-text is not configured on this site."),
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=LLMTaskNotAvailableError("Tool not available: llm-task")),
+			patch("jarvis.chat.voice._credentials", return_value=("", "some/model")),
+			patch(OPENROUTER_COMPLETE) as oc,
 		):
 			self._run(trig)
+		self.assertEqual(oc.call_count, 0)  # no key -> never even attempts the OpenRouter call
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].status, "Failed")
-		self.assertIn("not configured", rows[0].summary)
+		self.assertEqual(rows[0].summary, llm_action._NO_AGENT_UPDATE_MESSAGE)
+		self.assertNotIn("Speech-to-text", rows[0].summary)
+
+	def test_other_gateway_error_writes_failed_activity_without_raising(self):
+		trig = self._make_llm_trigger()
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=LLMTaskError("llm-task request timed out")),
+			patch(OPENROUTER_COMPLETE) as oc,
+		):
+			self._run(trig)  # must not raise
+		self.assertEqual(oc.call_count, 0)  # a non-availability error never falls back
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
+		self.assertIn("timed out", rows[0].summary)
 
 	def test_daily_cap_skips_with_one_skipped_marker(self):
 		trig = self._make_llm_trigger(cap=1)
-		with patch("jarvis.chat.voice.openrouter_complete", return_value="ok") as oc:
+		with patch(LLM_TASK_COMPLETE, return_value="ok") as task:
 			self._run(trig)  # 1 -> runs
 			self._run(trig)  # 2 == cap+1 -> one Skipped marker
 			self._run(trig)  # 3 -> silent
-		self.assertEqual(oc.call_count, 1)
+		self.assertEqual(task.call_count, 1)
 		rows = self._activities(trig.name)
 		self.assertEqual(sorted(r.status for r in rows), ["Skipped", "Success"])
 		skipped = next(r for r in rows if r.status == "Skipped")
 		self.assertIn("daily LLM cap reached (1)", skipped.summary)
 
 	def test_missing_or_disabled_trigger_is_silent(self):
-		with patch("jarvis.chat.voice.openrouter_complete", return_value="ok") as oc:
+		with patch(LLM_TASK_COMPLETE, return_value="ok") as task:
 			llm_action.run_llm_action(
 				trigger="no-such-trigger-zz",
 				doctype="ToDo",
@@ -516,5 +570,5 @@ class TestRunLLMAction(_TriggerTestCase):
 			trig = self._make_llm_trigger()
 			frappe.db.set_value(TRIGGER, trig.name, "enabled", 0, update_modified=False)
 			self._run(trig)
-		self.assertEqual(oc.call_count, 0)
+		self.assertEqual(task.call_count, 0)
 		self.assertEqual(self._activities(trig.name), [])
