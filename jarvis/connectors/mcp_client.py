@@ -459,7 +459,7 @@ class McpClient:
 		if not is_request and 200 <= status < 300:
 			return None
 		if status < 200 or status >= 300:
-			raise self._http_error(resp, status)
+			raise self._http_error(resp, status, is_request=is_request)
 
 		content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 		if content_type == "text/event-stream":
@@ -473,12 +473,13 @@ class McpClient:
 			raise McpError("Connector response did not match the request id.", kind=ERR_TRANSPORT)
 		return msg
 
-	def _http_error(self, resp, status: int) -> McpError:
+	def _http_error(self, resp, status: int, *, is_request: bool = True) -> McpError:
 		"""``code`` carries the HTTP status so the broker can count 5xx toward the
 		circuit breaker but leave 4xx (auth/bad request) out of it. A JSON 4xx body
 		is read (capped) so era detection can recognise a modern JSON-RPC error, and
 		so the message carries the provider's own reason: a bare "HTTP 403" tells
-		the person nothing about what to fix."""
+		the person nothing about what to fix. A refused notification gets the reason
+		but no ``rpc``: era detection and the broker's re-list only key on requests."""
 		raw = self._error_body(resp) if 400 <= status < 500 else b""
 		challenge = mcp_wire.challenge_params(resp.headers.get("WWW-Authenticate") or "")
 		reason = mcp_wire.error_reason(raw) or mcp_wire.clip_reason(challenge.get("error_description"))
@@ -486,7 +487,7 @@ class McpClient:
 			_http_message(status, reason, challenge.get("error")),
 			kind=ERR_HTTP,
 			code=status,
-			rpc=mcp_wire.parse_rpc_error(raw),
+			rpc=mcp_wire.parse_rpc_error(raw) if is_request else None,
 		)
 
 	def _error_body(self, resp) -> bytes:

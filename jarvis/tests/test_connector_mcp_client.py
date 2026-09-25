@@ -763,6 +763,16 @@ class TestHttpErrorMessage(unittest.TestCase):
 		self.assertEqual(cm.exception.code, 403)
 		self.assertIn("refused access (HTTP 403). It said: Drive MCP API is disabled.", str(cm.exception))
 
+	def test_refused_notification_never_carries_an_rpc_error(self):
+		# A -32020 on a request means header drift and makes the broker re-list tools;
+		# on a notification it must stay a plain http_error, as before this change.
+		seam = _Seam([_init_ok(), _rpc_error(-32020, status=400)])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.probe("https://api.example.com/mcp", "tok", protocol_version=LEGACY)
+		self.assertIsNone(cm.exception.rpc)
+		self.assertIn("(HTTP 400). It said: x.", str(cm.exception))
+
 	def test_other_status_keeps_the_code_and_adds_the_reason(self):
 		exc = self._probe_error(_json_resp({"error": {"code": 404, "message": "No such server"}}, status=404))
 		self.assertEqual(str(exc), "The connector returned an error (HTTP 404). It said: No such server.")
