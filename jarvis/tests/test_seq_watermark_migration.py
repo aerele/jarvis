@@ -119,6 +119,41 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 		execute()
 		self.assertEqual(self._new(), 9)
 
+	def test_reconciles_larger_legacy_value_even_when_new_is_nonzero(self):
+		self._set_cols(old=42, new=7)
+		execute()
+		self.assertEqual(self._cols(), (42, 42))
+
+	def test_reconciles_rollback_column_when_new_is_fresher(self):
+		self._set_cols(old=3, new=19)
+		execute()
+		self.assertEqual(self._cols(), (19, 19))
+
+	def test_after_migrate_handles_old_worker_writes_after_original_patch(self):
+		from jarvis import hooks
+
+		self._set_cols(old=7, new=0)
+		execute()
+		# A worker on the previous version writes after the one-shot patch.
+		self._set_cols(old=31, new=7)
+		value = frappe.db.sql(
+			f"SELECT {seq_watermark.wm_expr()} FROM `tab{MSG}` WHERE name=%s", (self.msg.name,)
+		)[0][0]
+		self.assertEqual(int(value), 31)
+		hook = "jarvis.chat.seq_watermark.reconcile_watermarks"
+		self.assertIn(hook, hooks.after_migrate)
+		frappe.get_attr(hook)()
+		self.assertEqual(self._cols(), (31, 31))
+		# Re-running normal migrate needs neither patch-log edits nor extra setup.
+		frappe.get_attr(hook)()
+		self.assertEqual(self._cols(), (31, 31))
+
+	def test_reconciliation_preserves_message_modified_timestamp(self):
+		before = frappe.db.get_value(MSG, self.msg.name, "modified")
+		self._set_cols(old=42, new=7)
+		seq_watermark.reconcile_watermarks()
+		self.assertEqual(frappe.db.get_value(MSG, self.msg.name, "modified"), before)
+
 	# ---- the transition compatibility layer (dual-write + GREATEST read) ----
 
 	def test_stamp_watermark_dual_writes_while_legacy_column_exists(self):
