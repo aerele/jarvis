@@ -22,6 +22,10 @@ _SCRIPT = "frappe.response['message'] = 'name is ' + (frappe.form_dict.get('who'
 _FLAGS_METHOD = "jarvis_test_flags_out"
 _FLAGS_SCRIPT = "frappe.flags['result'] = 'via flags: ' + (frappe.form_dict.get('who') or 'nobody')"
 
+# A non-single doctype whose controller has a whitelisted method
+# (Report.toggle_disable) for the doc-bound dispatch path.
+_REPORT = "jarvis_test_report"
+
 
 def _set_blocklist(value: str) -> None:
 	settings = frappe.get_single("Jarvis Settings")
@@ -52,12 +56,27 @@ class TestRunMethod(FrappeTestCase):
 		super().setUpClass()
 		cls._ensure_api_script(_API_METHOD, _SCRIPT)
 		cls._ensure_api_script(_FLAGS_METHOD, _FLAGS_SCRIPT)
+		if not frappe.db.exists("Report", _REPORT):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": _REPORT,
+					"ref_doctype": "ToDo",
+					"report_type": "Report Builder",
+					"is_standard": "No",
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
 
 	@classmethod
 	def tearDownClass(cls):
-		for name in (_API_METHOD, _FLAGS_METHOD):
-			if frappe.db.exists("Server Script", name):
-				frappe.delete_doc("Server Script", name, force=True, ignore_permissions=True)
+		for dt, name in (
+			("Server Script", _API_METHOD),
+			("Server Script", _FLAGS_METHOD),
+			("Report", _REPORT),
+		):
+			if frappe.db.exists(dt, name):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 		super().tearDownClass()
 
@@ -124,6 +143,36 @@ class TestRunMethod(FrappeTestCase):
 			self.assertNotIn("who", frappe.local.form_dict)
 		finally:
 			frappe.local.form_dict = frappe._dict({})
+
+	# --- doc-bound whitelisted controller method (doctype + name) ---
+
+	def test_calls_doc_method_with_args_and_name(self):
+		# Report.toggle_disable(disable) is a @frappe.whitelist() controller
+		# method; dispatch it against a specific document, passing args.
+		self.assertEqual(frappe.db.get_value("Report", _REPORT, "disabled"), 0)
+		run_method("toggle_disable", args={"disable": 1}, doctype="Report", name=_REPORT)
+		self.assertEqual(frappe.db.get_value("Report", _REPORT, "disabled"), 1)
+
+	def test_doc_method_unknown_method_raises(self):
+		with self.assertRaises(InvalidArgumentError):
+			run_method("no_such_controller_method", doctype="Report", name=_REPORT)
+
+	def test_doc_method_not_whitelisted_raises(self):
+		# `validate` exists on the controller but is NOT @frappe.whitelist()'d.
+		with self.assertRaises(PermissionDeniedError):
+			run_method("validate", doctype="Report", name=_REPORT)
+
+	def test_blocklist_blocks_doc_method_by_composed_name(self):
+		_set_blocklist("Report.toggle_disable")
+		with self.assertRaises(PermissionDeniedError):
+			run_method("toggle_disable", args={"disable": 1}, doctype="Report", name=_REPORT)
+
+	def test_blocklist_blocks_doc_method_by_wildcard(self):
+		# The blocklist target for a doc method is `<doctype>.<method>`, so
+		# `*.toggle_disable` blocks it on every doctype.
+		_set_blocklist("*.toggle_disable")
+		with self.assertRaises(PermissionDeniedError):
+			run_method("toggle_disable", args={"disable": 1}, doctype="Report", name=_REPORT)
 
 	# --- blocklist (Jarvis Settings.run_method_blocklist), fnmatch, fail-open ---
 

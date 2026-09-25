@@ -78,46 +78,56 @@ carries domain logic the schema doesn't express.
 
 ---
 
-## `run_method` - call a whitelisted method or Server Script API
+## `run_method` - call a whitelisted method, controller method, or Server Script API
 
 The escape hatch for `@frappe.whitelist()` methods the dedicated tools don't wrap
-(most often ERPNext's `make_*` document mappers) **and** for tenant-authored
-Server Script API endpoints.
+(most often ERPNext's `make_*` document mappers), for whitelisted **controller
+methods** on a DocType, **and** for tenant-authored Server Script API endpoints.
 
 ```python
-run_method(method: str, args: dict | None = None)
+run_method(method: str, args: dict | None = None,
+           doctype: str | None = None, name: str | int | None = None)
 ```
 
-- `method` is **classified**, not tried-and-fallen-back:
-  - a bare name registered as a **Server Script API** method (its `api_method`)
-    runs via the server-script executor - `args` reach it through
+- `method` is dispatched **by shape**, not tried-and-fallen-back:
+  - with `doctype` set, `method` is a whitelisted **controller method** on that
+    DocType's class, run against the `(doctype, name)` document - the same
+    dispatch Desk uses for a doc action (`name` defaults to the doctype for a
+    Single);
+  - else a bare name registered as a **Server Script API** method (its
+    `api_method`) runs via the server-script executor - `args` reach it through
     `frappe.form_dict`, exactly as the `/api/method` HTTP handler feeds them, and
     its output (`frappe.flags` or `frappe.response['message']`) comes back as a dict;
-  - anything else is a dotted path to a `@frappe.whitelist()` method, e.g.
+  - else a dotted path to a module-level `@frappe.whitelist()` method, e.g.
     `erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice`, called
     directly and returned verbatim (often a document dict).
-- The server-script map is the source of truth for which kind a name is; a
-  whitelisted dotted path can never collide with a bare `api_method`.
+- Absent `doctype`, the server-script map is the source of truth for which kind a
+  name is; a whitelisted dotted path can never collide with a bare `api_method`.
 - **Only registered API server scripts / whitelisted methods run.** Non-whitelisted
   or unresolvable names are rejected with `PermissionDeniedError` /
   `InvalidArgumentError`. Each target's own permission checks still apply (it runs
   as the chat user).
 
-**Example** - create a draft Sales Invoice from a Sales Order:
+**Examples** - a module mapper, and a controller method on a specific document:
 
 ```jsonc
-// tool args
+// module-level whitelisted method
 { "method": "erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice",
   "args": { "source_name": "SAL-ORD-2026-00042" } }
+// whitelisted controller method on one document
+{ "method": "set_status", "doctype": "Sales Order", "name": "SAL-ORD-2026-00042",
+  "args": { "status": "Closed" } }
 ```
 
 **Blocklist.** `Jarvis Settings.run_method_blocklist` (comma/newline-separated
-fnmatch patterns) categorically refuses matching targets - a whitelisted method's
-dotted path or a Server Script API method's name - before dispatch:
+fnmatch patterns) categorically refuses matching targets before dispatch - a
+whitelisted method's dotted path, a Server Script API method's name, or
+`<doctype>.<method>` for a controller method:
 
 ```
 frappe.*
 *.delete_doc
+Sales Order.set_status
 ```
 
 A match raises `PermissionDeniedError`. An empty field blocks nothing (fail-open);
