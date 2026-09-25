@@ -5,6 +5,7 @@ import {
 	refusalMessage,
 	outcomeMessage,
 	isSettled,
+	missingSummary,
 	statusLine,
 } from "./heldActions";
 
@@ -47,6 +48,19 @@ describe("heldActions copy", () => {
 		const failed = { reason_code: "failed", error: { message: "Supplier Group is required" } };
 		expect(refusalMessage(failed)).toBe("Couldn't create: Supplier Group is required");
 		expect(refusalMessage({})).toBe("This approval could not be completed.");
+		// Edit & create: the server names the field / record
+		for (const code of [
+			"needs_input",
+			"edit_refused",
+			"invalid",
+			"unreadable",
+			"pending_elsewhere",
+		]) {
+			expect(refusalMessage({ reason_code: code, error: { message: "server words" } })).toBe(
+				"server words"
+			);
+		}
+		expect(refusalMessage({ reason_code: "edit_unavailable" })).toContain("new records only");
 	});
 
 	it("tells the approver how many files continue", () => {
@@ -91,5 +105,11 @@ describe("heldActions copy", () => {
 		expect(statusLine({ status: "Failed", reason: "The action was interrupted." })).toBe(
 			"The action was interrupted."
 		);
+	});
+
+	it("summarises missing fields as the ladder does", () => {
+		expect(missingSummary(["A", "B", "C", "D", "E"])).toBe("A, B, C (+2 more)");
+		expect(missingSummary(["A", "A", "B"])).toBe("A, B");
+		expect(missingSummary([])).toBe("");
 	});
 });

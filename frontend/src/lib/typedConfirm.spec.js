@@ -98,15 +98,18 @@ describe("the card advertises both ways to approve", () => {
 		expect(src).toContain('v-if="pi === visiblePendingActions.length - 1"');
 	});
 
-	it("teaches bulk and selective forms only when there is a choice to make", () => {
-		// The selective example numbers must track the real card count, so the hint
-		// is built from `n` rather than a literal "1 and 3" that overshoots a 2-card
-		// stack. (Behaviour of the count itself is a component concern; here we only
-		// pin that the example is dynamic, not hardcoded out of range. We do NOT
-		// assert the absence of the literal "confirm 1 and 3" - it legitimately
-		// still appears in nearby explanatory comments.)
-		expect(src).toContain("confirm 1 and ${n}");
-		expect(src).toContain('or type "go ahead"');
+	it("builds the hint from the unit-tested helper, never for an Earlier card's bare phrase", () => {
+		// PR-3b: the hint text (dynamic numbers, and no bare "go ahead" for a card
+		// parked before the user's latest message) lives in lib/typedCardReply.js,
+		// whose behaviour is pinned by typedCardReply.spec.js.
+		expect(src).toContain(
+			"const typedApprovalHint = computed(() => hintFor(visiblePendingActions.value));"
+		);
+		expect(src).not.toContain('or type "go ahead"');
+	});
+
+	it("labels a card parked before the user's latest message Earlier", () => {
+		expect(src).toContain('<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"');
 	});
 
 	it("numbers the cards, since a typed selection picks by that number", () => {
@@ -121,6 +124,37 @@ describe("the card advertises both ways to approve", () => {
 		// for its text - a source grep passes even when a client drops expires_at,
 		// which is exactly how the Desk-widget wrong-write bug shipped.
 		expect(src).toContain("sortPendingCards(");
+	});
+});
+
+describe("a typed reply that goes on to Jarvis (decisions 13 and 14)", () => {
+	const at = src.indexOf("for (const t of r.tokens || []) removePending(t);");
+	const accepted = src.slice(at, at + 1200);
+
+	it("drops the cards a typed no discarded, without a mid-send reload", () => {
+		expect(accepted).toContain("for (const t of discardedTokens(r)) removePending(t);");
+		expect(accepted).not.toContain("loadConversation(");
+	});
+
+	it("ages the stack and raises the non-blocking older-card note", () => {
+		expect(accepted).toContain("markCardsEarlier(pendingActions.value, _spokeIn);");
+		expect(accepted).toContain(
+			'olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";'
+		);
+	});
+
+	it("keeps the note only while an older card is still on screen", () => {
+		expect(src).toContain("visiblePendingActions.value.some((pa) => !isRecentCard(pa))");
+		expect(src).toContain(
+			'<div class="jv-pending-older-note" role="status" aria-live="polite">'
+		);
+	});
+
+	it("honours a discard that rode a refused send (the admission race)", () => {
+		const refused = src.slice(src.indexOf("if (r && r.ok === false && !r.confirmed) {"));
+		expect(refused.slice(0, 400)).toContain(
+			"for (const t of discardedTokens(r)) removePending(t);"
+		);
 	});
 });
 
@@ -151,5 +185,22 @@ describe("a typed go-ahead is deliberately confirm-only (never approve_and_run)"
 		// without a second signal neither button could tell which one is running.
 		expect(src).toContain("const approveRunBusyToken = ref(null);");
 		expect(src).toContain("approveRunBusyToken.value = token;");
+	});
+});
+
+describe("the older-cards note", () => {
+	it("is a permanent polite live region whose text alone toggles", () => {
+		// A region inserted together with its text is often not announced, so it must
+		// stay mounted (no v-if / v-show) and only its content changes.
+		const at = src.indexOf('class="jv-pending-older-note"');
+		expect(at).toBeGreaterThan(-1);
+		const open = src.slice(src.lastIndexOf("<div", at), src.indexOf(">", at) + 1);
+		expect(open).toContain('role="status"');
+		expect(open).toContain('aria-live="polite"');
+		expect(open).not.toMatch(/v-if|v-show|v-else/);
+		expect(src.slice(at, src.indexOf("</div>", at))).toContain("{{ olderCardsNoteText }}");
+		expect(src).toMatch(
+			/const olderCardsNoteText = computed\(\(\) =>\s+showOlderCardsNote\.value/
+		);
 	});
 });

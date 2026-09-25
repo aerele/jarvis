@@ -5,36 +5,48 @@ in a ``file_box=1`` conversation, under the conversation lock (F7: commit, then
 ``FOR UPDATE`` as the first statement, then the reads; released before any
 auto-apply dispatch). Rules, first match wins:
 
-a. this conversation waits on a Pending held write -> every write is refused;
+a. this conversation waits on an undecided held write or a sealed sheet -> every
+   write is refused (a collecting sheet an older turn opened is sealed first: a
+   new turn never appends to it). With a collecting sheet (or ``file_box_sheets``
+   on) masters collect on it, Approval Requests apply and link to it, and a draft
+   waits while it holds records (or questions, before any draft): ``held_sheets``;
 b. ``update_wiki`` -> the gate's fenced wiki proposal;
 c. ``Jarvis Approval Request`` create/update -> applied (single, or an all-AR batch);
-d. a denied doctype in any item -> refused;
-e. a single create/update of a draft of a submittable doctype -> auto-applied;
+d. a denied doctype in any item -> refused; while a skill_conflict routing question
+   is Pending, every create/update is refused too (``filebox_skills``);
+e. a single create/update of a draft of a submittable doctype -> auto-applied, when
+   it is the doctype the followed File Box skill drafts (``filebox_skills``);
 f. any other create/update -> HELD on the Approval Board (a batch that includes a
    submittable doctype is refused instead);
 g. every other gated tool, and bulk forms of ungated writes -> refused, no preview.
 
 A held write is a sealed ``Jarvis Pending Action`` (kind ``file_box_held``), deduped
 per owner + party (``held_parties``): K files from one new vendor wait on ONE row.
+A create whose only problem is missing mandatory fields (the collect-mode
+classifier) goes back to the model once, then is held with ``needs_input`` for the
+approver to fill (Edit & create, decision 17).
 Its settlement marks every waiting conversation ``due``; ``resume_waiters`` then
 resumes each one at most once (``due -> claimed -> done``, ``done`` committed with
 the resume message itself) and the reconciler retries the rest."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
 import frappe
 
-from jarvis.chat import held_parties
+from jarvis.chat import filebox_skills, held_parties
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import (
 	DISCARDED,
 	EXECUTED,
 	FAILED,
 	PENDING,
+	SHEET,
 	TERMINAL,
+	filebox_migrated,
 	get_row,
 	lock_conversation,
 	rowcount,
@@ -61,6 +73,7 @@ DENIED_MODULES = frozenset(
 	}
 )
 RECENT_DECISION_S = 600  # a row decided this recently still answers for its records
+MISS_TTL_S = 3600  # "tries once": a first miss is remembered this long
 TITLE_MAX = 140
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -89,6 +102,16 @@ _UNAVAILABLE = (
 	"created. You may retry this exact call once; if it fails again, end your turn with a "
 	"one-line summary."
 )
+_NEEDS_INPUT_NOTE = (
+	"These records are waiting for a human to fill the missing fields on the Approval Board; "
+	"nothing was created. Do NOT retry them or create them another way. END your turn now: "
+	"this run resumes by itself once they are decided."
+)
+_FIRST_MISS = (
+	"Nothing was created: required fields are missing ({missing}). Fill them from the document "
+	"(look up valid values first) and call again. If the document doesn't give them, call again "
+	"unchanged: the record then waits for a human to fill them on the Approval Board."
+)
 _ASK_A_HUMAN = (
 	"Do not retry. If a human must do this, record it in a decision Approval Request and end your turn."
 )
@@ -100,11 +123,11 @@ def _refuse(code: str, message: str) -> dict:
 	return api._error(code, message)
 
 
-def _held(note: str) -> dict:
-	return {
-		"ok": True,
-		"data": {"status": "pending_confirmation", "held_for": "approval_board", "note": note},
-	}
+def _held(note: str, labels: list[str] | None = None) -> dict:
+	data = {"status": "pending_confirmation", "held_for": "approval_board", "note": note}
+	if labels:
+		data["needs_input"] = labels
+	return {"ok": True, "data": data}
 
 
 def waiting_on(conversation: str) -> str | None:
@@ -136,12 +159,19 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return _refuse("InvalidArgumentError", "args must be a JSON object; nothing was written.")
 	if tool == "call_connector" and api._connector_call_is_safe_read(args):
 		return None
+	from jarvis.chat import held_sheets
+
 	frappe.db.commit()
 	lock_conversation(conversation)
+	collected = None
 	try:
 		verdict, payload = _classify(tool, args, conversation)
 		if verdict == "hold":
 			return _hold(tool, args, conversation, payload)
+		if verdict in ("collect", "split"):
+			collected = held_sheets.collect(conversation, *payload)
+			if verdict == "collect" or not collected.get("ok"):
+				return collected
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(
@@ -154,16 +184,27 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		if tool == "create_doc" and result.get("ok"):
 			api._stamp_file_box_draft(conversation, result.get("data"))
 		return result
+	if verdict == "question":
+		return held_sheets.file_questions(tool, args, conversation)
+	if verdict == "split":
+		return held_sheets.file_split(args, conversation, collected)
 	return payload  # a refusal envelope, or None (fall through)
 
 
 def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	"""``(verdict, payload)``: ``refuse`` + envelope, ``pass`` + None, ``apply`` +
-	None, or ``hold`` + the items. Read-only, under the conversation lock."""
+	None, ``hold`` + the items, or with sheets ``question`` + None / ``collect`` or
+	``split`` + ``(master items, sheet)``. Under the conversation lock; writes only to
+	seal a collecting sheet an older turn opened (``seal_if_stale`` commits, re-locks)."""
 	from jarvis import api
+	from jarvis.chat import held_sheet_seal, held_sheets
 
 	if waiting_on(conversation):
 		return "refuse", _refuse("ApprovalPendingError", _PENDING_REFUSAL)
+	sheet = held_sheet_seal.seal_if_stale(conversation, held_sheets.live_sheet(conversation))
+	if sheet and held_sheets.paused(sheet):
+		return "refuse", _refuse("ApprovalPendingError", _PENDING_REFUSAL)
+	sheets = bool(sheet) or held_sheets.enabled()
 	if tool == "update_wiki":
 		return "pass", None
 	bulk = api._is_bulk_call(args) or tool == "create_docs"
@@ -183,11 +224,14 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	items = held_parties.items_of(tool, args)
 	doctypes = [i["doctype"] for i in items]
 	if items and all(dt == AR for dt in doctypes):
-		return "apply", None
+		return held_sheets.classify_questions(tool, items, conversation, sheet) if sheets else ("apply", None)
 	for dt in doctypes:
 		refusal = _denied(dt)
 		if refusal:
 			return "refuse", refusal
+	refusal = filebox_skills.routing_refusal(conversation)
+	if refusal:
+		return "refuse", refusal
 	submittable = [dt for dt in doctypes if frappe.get_meta(dt).is_submittable]
 	if submittable and bulk:
 		return "refuse", _refuse(
@@ -197,8 +241,11 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 			"draft by itself.",
 		)
 	if submittable and _is_draft(items[0]):
-		return "apply", None
-	return "hold", items
+		refusal = filebox_skills.target_refusal(conversation, items[0]["doctype"])
+		if not refusal and sheets:
+			refusal = held_sheets.draft_refusal(conversation, sheet)
+		return ("refuse", refusal) if refusal else ("apply", None)
+	return held_sheets.classify_masters(items, conversation, sheet) if sheets else ("hold", items)
 
 
 def _denied(doctype: str) -> dict | None:
@@ -220,6 +267,158 @@ def _is_draft(item: dict) -> bool:
 	if item["op"] == "create":
 		return True
 	return not frappe.db.get_value(item["doctype"], item["name"], "docstatus")
+
+
+# --------------------------------------------------------------------------- #
+# Missing mandatory fields (collect mode, decision 17)
+# --------------------------------------------------------------------------- #
+def collect_missing(tool: str, items: list[dict]) -> list[dict]:
+	"""Collect-mode dry-run of a create (A25/A27): every item is inserted in one
+	sandbox with ``ignore_mandatory`` and what is still missing is collected per
+	item and child row, never parsed from an error. ``[{doc_index, doctype,
+	parentfield?, idx?, fieldname}]``, or ``[]`` unless missing mandatory fields
+	the board can fill (permlevel 0, not secret, a form control) are the ONLY
+	problem. The inserts' hooks run under the dispatch-depth guard, as a tool's do."""
+	from jarvis.tools._preview_sandbox import preview_sandbox
+	from jarvis.tools.create_doc import _insert_one, _validate_create_args
+
+	if tool not in held_parties.CREATE_TOOLS or not items or any(i["op"] != "create" for i in items):
+		return []
+	missing = []
+	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
+	try:
+		with preview_sandbox():
+			for index, item in enumerate(items):
+				_validate_create_args(item["doctype"], item["values"])
+				doc = _insert_one(item["doctype"], item["values"], ignore_mandatory=True)
+				found = missing_fields(doc, index)
+				if found is None:
+					return []
+				missing += found
+	except Exception:
+		return []
+	finally:
+		frappe.local.jarvis_dispatch_depth -= 1
+		frappe.clear_messages()
+	return missing
+
+
+def missing_fields(doc, index: int) -> list[dict] | None:
+	"""The mandatory fields ``doc`` (inserted with ``ignore_mandatory``) still misses,
+	per child row too; None when one of them can't be filled on the board."""
+	from jarvis.chat._record_summary import is_secret
+	from jarvis.chat.api import _NON_EDIT_FIELDTYPES
+
+	missing = []
+	for d in (doc, *doc.get_all_children()):
+		for fieldname, _msg in d._get_missing_mandatory_fields():
+			df = d.meta.get_field(fieldname)
+			# Rows can't be added, nor secrets / non-form fields filled, on the board.
+			if not df or df.permlevel or df.fieldtype in _NON_EDIT_FIELDTYPES or is_secret(d.meta, fieldname):
+				return None
+			entry = {"doc_index": index, "doctype": doc.doctype, "fieldname": fieldname}
+			if d is not doc:
+				entry.update(parentfield=d.parentfield, idx=d.idx)
+			missing.append(entry)
+	return missing
+
+
+def _miss_key(conversation: str, key: str) -> str:
+	return f"jarvis:held_miss:{conversation}:{hashlib.sha256(key.encode()).hexdigest()[:32]}"
+
+
+def _missed_before(conversation: str, items: list[dict], needs_input: list[dict]) -> bool:
+	"""Tries once: True when a missing item's key already missed in this conversation
+	(then hold)."""
+	return seen_once(
+		_miss_key(conversation, held_parties.item_key(items[e["doc_index"]])) for e in needs_input
+	)
+
+
+def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
+	"""Tries once: True when one of ``keys`` was already seen. Records them for an
+	hour; a lost key just gives one more try, and a cache failure reads as seen
+	(never an endless retry loop). Raw ``get`` / ``set``: the wrappers
+	(``get_value``, ``exists``, ...) read an outage as a miss."""
+	keys = {frappe.cache.make_key(k) for k in keys}
+	try:
+		seen = any(frappe.cache.get(k) is not None for k in keys)
+		for k in keys:
+			frappe.cache.set(k, 1, ex=MISS_TTL_S)
+	except Exception:
+		frappe.log_error(title=f"jarvis.file_box.{event}", message=frappe.get_traceback())
+		return True
+	return seen
+
+
+def parse_needs_input(value) -> list[dict]:
+	try:
+		entries = json.loads(value) if isinstance(value, str) else value
+	except ValueError:
+		return []
+	return [e for e in entries or [] if isinstance(e, dict) and e.get("fieldname")]
+
+
+def needs_input_label(entry: dict) -> str:
+	"""A missing field's label (translated); a child field reads "<table> row n: <label>"."""
+	from frappe import _
+
+	meta = frappe.get_meta(entry["doctype"])
+	if not entry.get("parentfield"):
+		return _(meta.get_label(entry["fieldname"]))
+	table = meta.get_field(entry["parentfield"])
+	child = frappe.get_meta(table.options)
+	return _("{0} row {1}: {2}").format(
+		_(table.label or entry["parentfield"]), entry.get("idx"), _(child.get_label(entry["fieldname"]))
+	)
+
+
+def missing_labels(needs_input) -> list[str]:
+	"""Distinct labels of ``needs_input``, in order."""
+	labels = []
+	for entry in parse_needs_input(needs_input):
+		try:
+			label = needs_input_label(entry)
+		except Exception:
+			label = entry["fieldname"]
+		if label not in labels:
+			labels.append(label)
+	return labels
+
+
+def missing_summary(labels: list[str], top: int = 3) -> str:
+	"""``"A, B, C (+N more)"``."""
+	more = len(labels) - top
+	return ", ".join(labels[:top]) + (f" (+{more} more)" if more > 0 else "")
+
+
+def _miss_text(items: list[dict], needs_input: list[dict]) -> str:
+	"""Per record, for the model: ``Supplier Acme: Supplier Type; ...``."""
+	parts = []
+	for index in sorted({e["doc_index"] for e in needs_input}):
+		item = items[index]
+		title = held_parties.party_of(item)["title"] or f"#{index + 1}"
+		labels = missing_labels([e for e in needs_input if e["doc_index"] == index])
+		parts.append(f"{item['doctype']} {title}: {', '.join(labels)}")
+	return "; ".join(parts)
+
+
+def sibling_of(name: str, keys: list[str]):
+	"""Another held row (any owner) still answering for one of ``keys``: Pending,
+	Executing, or approved in the last 10 minutes. The Edit & create pre-check."""
+	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-RECENT_DECISION_S)
+	rows = frappe.db.sql(
+		"SELECT name, status, summary, owner_user, dedup_keys FROM `tabJarvis Pending Action`"
+		" WHERE kind=%(k)s AND name != %(n)s AND (status IN ('Pending', 'Executing')"
+		" OR (status='Executed' AND decided_at >= %(cut)s)) ORDER BY creation",
+		{"k": HELD, "n": name, "cut": cutoff},
+		as_dict=True,
+	)
+	for r in rows:
+		theirs = set(json.loads(r.dedup_keys or "[]"))
+		if any(_seal.open_key(r.owner_user, k) in theirs for k in keys):
+			return r
+	return None
 
 
 # --------------------------------------------------------------------------- #
@@ -295,12 +494,19 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 			f"{match['doctype']} {label} already exists (name: {match['name']}). Use it: leave it out "
 			"of this call and do not create it again.",
 		)
+	needs_input = []
 	try:
 		preview = api._run_preview(tool, args)
 	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		frappe.clear_messages()
-		frappe.db.commit()
-		return api._preview_error(e)
+		needs_input = collect_missing(tool, items)
+		if not needs_input:
+			frappe.db.commit()
+			return api._preview_error(e)
+		if not _missed_before(conversation, items, needs_input):
+			frappe.db.commit()
+			return _refuse("InvalidArgumentError", _FIRST_MISS.format(missing=_miss_text(items, needs_input)))
+		preview = None
 	frappe.clear_messages()
 	if not items:
 		frappe.db.commit()
@@ -309,7 +515,7 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 	owner = frappe.db.get_value(CONV, conversation, "owner") or frappe.session.user
 	for attempt in range(2):
 		try:
-			return _dedup_or_park(tool, args, conversation, items, keys, owner, preview)
+			return _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_input)
 		except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
 			# Another file parked the same party between our scan and our insert.
 			frappe.clear_messages()
@@ -337,10 +543,11 @@ def _recent_refusal(name: str) -> dict:
 	return _refuse("AlreadyApprovedError", _RECENT_NOTE.format(data=_safe_label_name(data)))
 
 
-def _dedup_or_park(tool, args, conversation, items, keys, owner, preview) -> dict:
+def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_input=()) -> dict:
 	from jarvis.chat import confirm_card
 	from jarvis.chat.pending_actions import park
 
+	labels = missing_labels(needs_input)
 	verdict, row, subset = _find_match(owner, keys)
 	if verdict == "recent":
 		return _recent_refusal(row)
@@ -348,7 +555,7 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview) -> dic
 		if not _join(row, conversation):
 			raise _Rescan(row)
 		frappe.db.commit()
-		return _held(_WAIT_NOTE if subset else _OVERLAP_NOTE)
+		return _held(_WAIT_NOTE if subset else _OVERLAP_NOTE, labels)
 	card = confirm_card.build_card(tool, args, preview)
 	title = held_title(items)
 	name = park(
@@ -362,15 +569,17 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview) -> dic
 		conversation=conversation,
 		dedup_key=_primary_key(keys),
 		dedup_keys=keys,
+		needs_input=list(needs_input) or None,
 	)
 	_notify(owner, conversation, title, name)
-	return _held(_WAIT_NOTE)
+	return _held(_NEEDS_INPUT_NOTE if needs_input else _WAIT_NOTE, labels)
 
 
 def _find_match(owner: str, keys: list[str]) -> tuple[str | None, str | None, bool]:
 	"""``("recent", name, _)`` when a row executing or approved in the last 10 minutes
-	shares a record; ``("join", name, subset)`` for the Pending row to wait on (a
-	superset row first); else ``(None, None, False)``."""
+	shares a record, or a sheet applied then created one; ``("join", name, subset)``
+	for the Pending row to wait on (a superset row first); else ``(None, None,
+	False)``."""
 	mine = {_seal.open_key(owner, k) for k in keys}
 	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-RECENT_DECISION_S)
 	rows = frappe.db.sql(
@@ -387,10 +596,34 @@ def _find_match(owner: str, keys: list[str]) -> tuple[str | None, str | None, bo
 			if r.status != PENDING:
 				return "recent", r.name, False
 			overlapping.append((r.name, mine <= theirs))
+	sheet = _recent_sheet(owner, mine, cutoff)
+	if sheet:
+		return "recent", sheet, False
 	for name, subset in overlapping:
 		if subset:
 			return "join", name, True
 	return ("join", overlapping[0][0], False) if overlapping else (None, None, False)
+
+
+def _recent_sheet(owner: str, mine: set, cutoff) -> str | None:
+	"""A sheet applied since ``cutoff`` that CREATED one of these records (its
+	``sheet_outcome`` keys; never a skipped or existing record)."""
+	if not filebox_migrated():
+		return None
+	rows = frappe.db.sql(
+		"SELECT name, sheet_outcome FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND owner_user=%(o)s"
+		" AND status='Executed' AND decided_at >= %(cut)s ORDER BY decided_at DESC LIMIT 50",
+		{"k": SHEET, "o": owner, "cut": cutoff},
+		as_dict=True,
+	)
+	for r in rows:
+		try:
+			theirs = (json.loads(r.sheet_outcome or "{}") or {}).get("keys") or []
+		except (ValueError, AttributeError):
+			continue
+		if mine & set(theirs):
+			return r.name
+	return None
 
 
 def _join(parent: str, conversation: str) -> bool:
@@ -460,6 +693,8 @@ _VERDICTS = {
 	"created": "the approver created the records this run was waiting on. " + _CARRY_ON,
 	"use_existing": "the approver chose an EXISTING record instead of creating a new one: use it. "
 	+ _CARRY_ON,
+	"edited": "the approver created the records on the Approval Board with their own values: use "
+	"the created record named in the data, not the values you proposed. " + _CARRY_ON,
 	"skipped": "the approver chose NOT to create these records. Do not create them, or anything "
 	"that needs them, another way. Stop processing this file and end with a one-line summary "
 	"saying it was skipped.",
@@ -474,7 +709,9 @@ _VERDICTS = {
 
 def _verdict(row) -> str:
 	if row.status == EXECUTED:
-		return "use_existing" if row.reason_code == "use_existing" else "created"
+		if row.reason_code == "use_existing":
+			return "use_existing"
+		return "edited" if row.edited else "created"
 	if row.status == DISCARDED:
 		return "skipped"
 	if row.status == FAILED:
@@ -490,13 +727,28 @@ def resume_message(row) -> str:
 	data = row.summary or "held records"
 	if row.result_name:
 		data += f" -> {row.result_doctype} {row.result_name}"
+	if row.status == EXECUTED and row.edited:
+		by = frappe.db.get_value("User", row.decided_by, "full_name") or row.decided_by
+		data += f" (created on the board by {by})"
+	verdict = _VERDICTS[_verdict(row)] + _batch_note(row)
+	return _SCAFFOLD.format(verdict=verdict, data=_safe_label_name(data))
+
+
+def _batch_note(row) -> str:
+	"""Bench text for an executed batch, outside the DATA quote. The count is the
+	per-record dedup keys (a needs_input hold parks without a card)."""
 	try:
-		card = json.loads(row.card) if row.card else {}
+		count = len(json.loads(row.dedup_keys or "[]"))
 	except ValueError:
-		card = {}
-	if row.status == EXECUTED and isinstance(card, dict) and int(card.get("count") or 0) > 1:
-		data += f" (all {card['count']} records of the batch; look the others up by the values you proposed)"
-	return _SCAFFOLD.format(verdict=_VERDICTS[_verdict(row)], data=_safe_label_name(data))
+		count = 0
+	if row.status != EXECUTED or count < 2:
+		return ""
+	if row.edited:
+		return (
+			f" All {count} records of the batch were created: the data names the first; look the "
+			"others up by name or tax id (their other values are the approver's)."
+		)
+	return f" All {count} records of the batch were created: look the others up by the values you proposed."
 
 
 def on_settled(conversation, items) -> None:
@@ -504,8 +756,13 @@ def on_settled(conversation, items) -> None:
 	waiter ``due`` and queue the resume, for the rows this call settles (D5)."""
 	from jarvis.chat.pending_actions import claim_settled
 
+	queue_resumes(claim_settled([i["name"] for i in items]))
+
+
+def queue_resumes(names) -> None:
+	"""Mark each settled row's waiters ``due`` and queue their resume (no commit)."""
 	now = frappe.utils.now_datetime()
-	for name in claim_settled([i["name"] for i in items]):
+	for name in names:
 		frappe.db.sql(
 			"UPDATE `tabJarvis Pending Action Waiter` SET resume_state='due', modified=%(now)s"
 			" WHERE parent=%(p)s AND parenttype='Jarvis Pending Action' AND IFNULL(resume_state, '')=''",
@@ -521,14 +778,15 @@ def on_settled(conversation, items) -> None:
 
 
 def resume_waiters(pa_name: str) -> int:
-	"""Resume every ``due`` waiter of a decided held row (the RQ job, and the
-	reconciler's ``HELD_RESUME`` retry). Returns how many resumed now."""
+	"""Resume every ``due`` waiter of a decided held row or ended sheet (the RQ job,
+	and the reconciler's ``HELD_RESUME`` retry). Returns how many resumed now."""
+	from jarvis.chat import held_sheet_seal
 	from jarvis.chat.pending_actions._reconcile import WAITER_MAX_ATTEMPTS
 
 	row = get_row(pa_name)
-	if not row or row.kind != HELD or row.status not in TERMINAL:
+	if not row or row.kind not in (HELD, SHEET) or row.status not in TERMINAL:
 		return 0
-	message = resume_message(row)
+	message = held_sheet_seal.resume_message(row) if row.kind == SHEET else resume_message(row)
 	resumed = 0
 	for waiter in waiters(pa_name):
 		if waiter.resume_state == "due" and (waiter.resume_attempts or 0) < WAITER_MAX_ATTEMPTS:

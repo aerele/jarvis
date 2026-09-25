@@ -535,6 +535,7 @@ class TestConversationFieldGuard(_Base):
 		("filebox_result_count", 3),
 		("filebox_last_error", "forged"),
 		("filebox_last_error_at", "2026-01-01 00:00:00"),
+		("filebox_rerun_at", "2026-01-01 00:00:00"),
 	)
 
 	def test_admin_save_is_refused(self):

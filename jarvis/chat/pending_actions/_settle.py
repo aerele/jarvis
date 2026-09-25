@@ -33,8 +33,12 @@ MAY_HAVE_EXTERNAL_EFFECT = frozenset({"call_connector", "run_method"})
 # callable is ``fn(conversation: str | None, items: list[dict]) -> None`` and MUST
 # call ``_store.claim_settled(names)`` inside the transaction that commits its
 # effect (D5), acting only for the names it returns. ``None`` = settle marks the
-# rows settled itself. PR-3a wires "chat".
-CONTINUATIONS: dict[str, str | None] = {"chat": None, "file_box_held": "jarvis.chat.held_writes.on_settled"}
+# rows settled itself.
+CONTINUATIONS: dict[str, str | None] = {
+	"chat": "jarvis.chat.actions_api.on_chat_settled",
+	"file_box_held": "jarvis.chat.held_writes.on_settled",
+	"file_box_sheet": "jarvis.chat.held_sheet_seal.on_settled",
+}
 
 _CHIP_BY_STATUS = {
 	EXECUTED: "confirmed",
@@ -102,7 +106,14 @@ def _deliver(item: dict) -> None:
 	from jarvis import api
 
 	# A legacy sweep may have mislabelled an executing card; its real outcome wins.
-	overwrite = ("cancelled", "superseded") if item["status"] in (EXECUTED, FAILED) else ()
+	# Supersede flipped its own chip in park's transaction: re-flip it so the chip
+	# publishes live (the dedupe-insert fallback never publishes).
+	if item["status"] in (EXECUTED, FAILED):
+		overwrite = ("cancelled", "superseded")
+	elif item["status"] == SUPERSEDED:
+		overwrite = ("superseded",)
+	else:
+		overwrite = ()
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",
@@ -116,6 +127,26 @@ def _deliver(item: dict) -> None:
 		from jarvis.chat import admission
 
 		admission.publish_action_confirmed(conv)
+
+
+def _announce(item: dict) -> None:
+	"""Tell the owner (and a different approver) the lane and badge changed. Best-effort."""
+	from jarvis.chat import events
+
+	for user in sorted({item["owner_user"], item["decided_by"]} - {None, ""}):
+		try:
+			events.publish_to_user(
+				user,
+				{
+					"kind": "action:settled",
+					"name": item["name"],
+					"action_kind": item["kind"],
+					"status": item["status"],
+					"conversation_id": item["conversation"] or "",
+				},
+			)
+		except Exception:
+			pass
 
 
 def _continue(kind: str, conversation: str | None, items: list[dict]) -> None:
@@ -165,7 +196,10 @@ def settle(name: str, *, force: bool = False) -> bool:
 		frappe.log_error(title="jarvis.pending_action.settle_failed", message=frappe.get_traceback())
 		frappe.db.commit()
 		return False
-	return bool(frappe.db.get_value("Jarvis Pending Action", name, "settled"))
+	done = bool(frappe.db.get_value("Jarvis Pending Action", name, "settled"))
+	if done:
+		_announce(item)
+	return done
 
 
 def settle_batch(batch_id: str) -> int:
@@ -197,6 +231,8 @@ def settle_batch(batch_id: str) -> int:
 			null_sealed([i["name"] for i in items])
 			frappe.db.commit()
 			settled += len(items)
+			for item in items:
+				_announce(item)
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(title="jarvis.pending_action.settle_failed", message=frappe.get_traceback())

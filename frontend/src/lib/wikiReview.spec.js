@@ -5,6 +5,7 @@ import {
 	proposalBody,
 	isLongBody,
 	dropperLabel,
+	landingMessage,
 } from "./wikiReview";
 
 describe("wikiReview helpers", () => {
@@ -42,5 +43,23 @@ describe("wikiReview helpers", () => {
 		expect(dropperLabel({ dropper_name: "Alice", dropper: "a@x.com" })).toBe("Alice");
 		expect(dropperLabel({ dropper: "a@x.com" })).toBe("a@x.com");
 		expect(dropperLabel({})).toBe("unknown");
+	});
+
+	it("maps a known apply_reason code to human copy", () => {
+		expect(landingMessage({ apply_reason: "page_full" })).toBe(
+			"The wiki page is full, so nothing was changed. Retry will keep failing until the page has room: record the note on another page, or reject it."
+		);
+	});
+
+	it("shows an unmapped apply_reason code as before (raw, in parens)", () => {
+		expect(landingMessage({ apply_reason: "busy" })).toBe(
+			"Approved, but the write did not land (busy). Retry to re-drive it."
+		);
+		expect(landingMessage({ apply_reason: null })).toBe(
+			"Approved, but the write did not land. Retry to re-drive it."
+		);
+		expect(landingMessage({})).toBe(
+			"Approved, but the write did not land. Retry to re-drive it."
+		);
 	});
 });

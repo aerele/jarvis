@@ -35,6 +35,17 @@
   "settle_attempts",
   "needs_input",
   "edited",
+  "collecting",
+  "collecting_turn",
+  "record_count",
+  "question_count",
+  "sheet_counts",
+  "needs_fix",
+  "sheet_outcome",
+  "apply_token",
+  "apply_request",
+  "apply_errors",
+  "stop_requested",
   "sealed_call",
   "sealed_settlement",
   "waiters"
@@ -45,7 +56,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Kind",
-   "options": "chat\nfile_box_held",
+   "options": "chat\nfile_box_held\nfile_box_sheet",
    "reqd": 1
   },
   {
@@ -62,7 +73,7 @@
    "fieldname": "reason_code",
    "fieldtype": "Select",
    "label": "Reason Code",
-   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing"
+   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck"
   },
   {
    "description": "Fixed bench text only; never tool args or error text.",
@@ -220,6 +231,87 @@
    "label": "Edited"
   },
   {
+   "default": "0",
+   "description": "Server-only. File Box sheets: 1 while the run is still adding records and questions; sealed (0) at turn end.",
+   "fieldname": "collecting",
+   "fieldtype": "Check",
+   "label": "Collecting",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the name of the Jarvis Chat Turn (its run_id) that opened the sheet; only that turn's end seals it.",
+   "fieldname": "collecting_turn",
+   "fieldtype": "Data",
+   "label": "Collecting Turn",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: records on the sheet (read without unsealing).",
+   "fieldname": "record_count",
+   "fieldtype": "Int",
+   "label": "Record Count",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: Approval Requests linked to the sheet.",
+   "fieldname": "question_count",
+   "fieldtype": "Int",
+   "label": "Question Count",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {doctype: records} for the board and File Box counts (read without the card).",
+   "fieldname": "sheet_counts",
+   "fieldtype": "JSON",
+   "label": "Sheet Counts",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {record index: sanitized error} for records that failed validation twice; a human fixes or skips them.",
+   "fieldname": "needs_fix",
+   "fieldtype": "JSON",
+   "label": "Needs Fix",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: per-record outcomes and question answers, kept after the seals are dropped (the resume message).",
+   "fieldname": "sheet_outcome",
+   "fieldtype": "JSON",
+   "label": "Sheet Outcome",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the running apply's token (its background job id); every job exit is a compare-and-set on it.",
+   "fieldname": "apply_token",
+   "fieldtype": "Data",
+   "label": "Apply Token",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the validated decisions of the last apply (kept when it bounces back to Pending, so the approver's edits survive).",
+   "fieldname": "apply_request",
+   "fieldtype": "JSON",
+   "label": "Apply Request",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {record index: error} from the last apply that rolled back (nothing was created).",
+   "fieldname": "apply_errors",
+   "fieldtype": "JSON",
+   "label": "Apply Errors",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: the run was stopped while its sheet was being applied; the apply ends without a resume.",
+   "fieldname": "stop_requested",
+   "fieldtype": "Check",
+   "label": "Stop Requested",
+   "permlevel": 1
+  },
+  {
    "description": "Fernet envelope of the exact call. NULLed at settle.",
    "fieldname": "sealed_call",
    "fieldtype": "Long Text",
@@ -243,7 +335,7 @@
  "in_create": 1,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-24 15:00:00.000000",
+ "modified": "2026-09-25 03:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Pending Action",
  "naming_rule": "Random",
