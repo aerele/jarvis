@@ -284,12 +284,13 @@ async function confirmApply() {
 		}
 		const skill =
 			(r && r.skill_name) || draft.skill_name || newSkill.value.skill_name || "skill";
+		const needsApply = !!(r && r.needs_apply);
 		toast.success(
-			phase.value === "create"
-				? `Skill “${skill}” created. It reaches your assistant with the next skills push.`
-				: `Skill “${skill}” updated. The change reaches your assistant with the next skills push.`
+			`Skill “${skill}” ${phase.value === "create" ? "created" : "updated"}.` +
+				(needsApply ? " Updating your assistant now." : "")
 		);
-		emit("applied", { skill_name: skill });
+		// the parent runs the push when needs_apply (a shared skill changed)
+		emit("applied", { skill_name: skill, needs_apply: needsApply });
 		emit("update:modelValue", false);
 	} catch (e) {
 		toast.error(errHtml(e)); // dialog stays open for retry / cancel

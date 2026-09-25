@@ -652,16 +652,25 @@ def pushed_skill_names() -> set[str]:
 	instruction bodies.
 
 	Read this as push ELIGIBILITY, not confirmed container state. It is recomputed
-	from current DB rows, and Apply is a separate explicit action (see
-	``decide_skill_promotion``: an approved skill joins the shared catalog on the
-	next Apply, never automatically). So between an Org approval and the operator
-	clicking Apply, a newly eligible skill is named as installed while its
-	directory does not exist yet. That window is pre-existing and much narrower
-	than the unconditional mislabelling this function replaced; closing it needs
-	per-row applied-state tracking, which the bench does not have (the sync status
-	is one bench-wide Single)."""
+	from current DB rows, and the push is a separate job: an Org approval (or an
+	insight applied to an Org skill) returns ``needs_apply`` and the reviewer's
+	client runs the Apply straight away (see :func:`is_pushable_skill`). So for the
+	~30s that push takes, a newly eligible skill is named as installed while its
+	directory does not exist yet. Closing that last window needs per-row
+	applied-state tracking, which the bench does not have (the sync status is one
+	bench-wide Single)."""
 	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
 	return {r.skill_name for r in rows[:MAX_SKILLS_PER_PUSH]}
+
+
+def is_pushable_skill(name: str) -> bool:
+	"""True when skill ``name`` is in the shared-container push set: the exact
+	:func:`_pushable_org_rows` eligibility (uncapped, so an over-cap row still says
+	yes and the strict Apply names the cap to the reviewer). Reviewer writes that
+	land a row here (an Org approval, an insight applied to an Org skill) return
+	it as ``needs_apply`` so the client pushes now instead of leaving the skill
+	unapplied until an unrelated restart."""
+	return any(r.name == name for r in _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS))
 
 
 def pushable_org_skill_count() -> int:

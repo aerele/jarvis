@@ -1007,13 +1007,17 @@
 
 					<!-- ────────── Skill promotions (User→Role/Org widen requests) ────────── -->
 					<template v-else>
-						<div class="min-w-0">
-							<div class="text-base font-semibold text-ink-gray-9">
-								Skill promotions
+						<div class="flex flex-wrap items-start justify-between gap-2">
+							<div class="min-w-0">
+								<div class="text-base font-semibold text-ink-gray-9">
+									Skill promotions
+								</div>
+								<div class="text-sm text-ink-gray-5">
+									Requests to widen a private skill to a role or the whole org
+								</div>
 							</div>
-							<div class="text-sm text-ink-gray-5">
-								Requests to widen a private skill to a role or the whole org
-							</div>
+							<!-- push progress after an Org approval (renders nothing while idle) -->
+							<SyncPill ref="promoSyncPill" />
 						</div>
 
 						<div
@@ -1674,7 +1678,7 @@
 		<InsightApplyDialog
 			v-model="insightApplyDialog.show"
 			:pattern="insightApplyDialog.row || {}"
-			@applied="afterAction"
+			@applied="onInsightApplied"
 		/>
 
 		<!-- "Ask the user" follow-up modal (Skills-area rework): the ask is
@@ -1822,6 +1826,7 @@ import { useRouter } from "vue-router";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import SyncPill from "./SyncPill.vue";
 import InsightApplyDialog from "@/components/learning/InsightApplyDialog.vue";
+import { applyCustomSkills } from "@/api";
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -1961,6 +1966,7 @@ const dExpanded = reactive({}); // name -> detail | "loading"
 const selected = ref(new Set());
 const selectedNames = computed(() => Array.from(selected.value));
 const syncPill = ref(null);
+const promoSyncPill = ref(null); // Skill promotions queue: push progress after an approval
 
 // apply lifecycle: applyActive keeps the Apply bar (and its SyncPill) mounted
 // through the apply->poll->done cycle even after pendingApplyCount drops to 0,
@@ -2395,6 +2401,7 @@ async function approveSkillPromotion(p) {
 	if (p.description_snapshot) message += ` Description: “${esc(p.description_snapshot)}”.`;
 	if (p.user_invocable_snapshot != null)
 		message += ` Slash-invocable: ${p.user_invocable_snapshot ? "yes" : "no"}.`;
+	if (p.to_scope === "Org") message += " Your assistant restarts briefly to load it.";
 	if (moved) message += " The push impact changed since the list loaded.";
 	if (warn) message += ` Note: ${esc(warn.message)}`;
 	confirmDialog({
@@ -2450,6 +2457,9 @@ async function decideSkillPromo(p, approve, note, ackProjection = null, approved
 		const done = formatPushProjection(r && r.push_projection);
 		if (approve && done) toast.success(`Skill promotion approved. ${done.message}`);
 		else toast.success(approve ? "Skill promotion approved" : "Skill promotion rejected");
+		// An approval that lands the skill in the shared push set is pushed now:
+		// nothing else would, until an unrelated container restart.
+		if (approve && r && r.needs_apply) promoSyncPill.value && promoSyncPill.value.apply();
 		fetchSkillPromotions("reset");
 		emit("changed");
 		return true;
@@ -2839,6 +2849,17 @@ async function submitReject() {
 function openInsightApply(row) {
 	insightApplyDialog.row = row;
 	insightApplyDialog.show = true;
+}
+// A shared skill the insight created or rewrote is pushed now (the dialog's
+// toast says so); nothing else would push it until a container restart.
+async function onInsightApplied(e) {
+	afterAction();
+	if (!(e && e.needs_apply)) return;
+	try {
+		await applyCustomSkills();
+	} catch (err) {
+		toast.error(errHtml(err));
+	}
 }
 
 // edit-then-approve modal
