@@ -94,6 +94,8 @@ export const previewDashboardSource = (tool, spec, filterDefs = [], filters = {}
 // current html/sources before changing them. theme: the selected theme key
 // (lowercase) — forwarded so the backend tells the agent which theme to design
 // for and the dashboards skill injects that theme's token+recipe cheatsheet.
+// approvalTokens: the pane's parked cards in the order shown, so a typed
+// "confirm 1" / "no" binds exactly those (like ChatView's send).
 export const sendDashboardChat = (
 	conversation,
 	message,
@@ -101,7 +103,8 @@ export const sendDashboardChat = (
 	editingName = "",
 	theme = "",
 	modelOverride = "",
-	thinkingOverride = null
+	thinkingOverride = null,
+	approvalTokens = []
 ) => {
 	const context = { page: "dashboards" };
 	if (dataMode === "static" || dataMode === "live") context.data_mode = dataMode;
@@ -117,6 +120,9 @@ export const sendDashboardChat = (
 		background: 0,
 		...(modelOverride ? { model_override: modelOverride } : {}),
 		...(thinkingOverride !== null ? { thinking_override: thinkingOverride } : {}),
+		...(approvalTokens && approvalTokens.length
+			? { approval_tokens: JSON.stringify(approvalTokens) }
+			: {}),
 	});
 };
 

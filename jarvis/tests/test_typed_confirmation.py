@@ -213,7 +213,15 @@ class TestTypedConfirmation(FrappeTestCase):
 		self.conv = "conv-typed-confirm"
 
 	def _card(self, token="tok-1"):
-		return {"token": token, "tool": "create_doc", "summary": "create Supplier"}
+		# The listing's shape: strict to this conversation, parked since the user
+		# last spoke (a bare "go ahead" binds only such cards, decision 6).
+		return {
+			"token": token,
+			"tool": "create_doc",
+			"summary": "create Supplier",
+			"conversation": self.conv,
+			"recent": True,
+		}
 
 	def _toks(self, cards):
 		"""The tokens a client displays, in the (created_at, token) order the panel
@@ -448,7 +456,7 @@ class TestTypedApprovalBindsToDisplayedTokens(FrappeTestCase):
 		self.conv = "conv-typed-confirm"
 
 	def _card(self, token, tool="create_doc", summary="do it"):
-		return {"token": token, "tool": tool, "summary": summary}
+		return {"token": token, "tool": tool, "summary": summary, "conversation": self.conv, "recent": True}
 
 	def test_a_number_pointing_at_an_expired_card_runs_nothing(self):
 		"""The exact wrong-card bug. Client showed [A=submit(1), B=delete(2)]. A

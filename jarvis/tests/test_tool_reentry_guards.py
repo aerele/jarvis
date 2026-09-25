@@ -31,6 +31,8 @@ POST_ONLY = (
 	"jarvis.chat.approvals_api.approve_wiki_write",
 	"jarvis.chat.approvals_api.retry_wiki_write",
 	"jarvis.chat.approvals_api.reject_wiki_write",
+	"jarvis.chat.approvals_api.decide_held_action",
+	"jarvis.chat.approvals_api.edit_and_create_held",
 	"jarvis.chat.actions_api.apply_action",
 	"jarvis.chat.macros_api.run_macro",
 	"jarvis.chat.admission.cancel_queued_turn",
@@ -39,6 +41,12 @@ POST_ONLY = (
 	"jarvis.chat.filebox.delete_inbound",
 	"jarvis.chat.filebox.delete_inbound_bulk",
 	"jarvis.chat.filebox.clear_processed_inbound",
+	"jarvis.chat.filebox.rerun_inbound",
+	"jarvis.chat.filebox.bulk_rerun_inbound",
+	"jarvis.chat.pending_actions.operator_fail",
+	"jarvis.chat.pending_actions.operator_settle",
+	"jarvis.chat.custom_skills_api.create_custom_skill",
+	"jarvis.chat.custom_skills_api.update_custom_skill",
 )
 
 # endpoint -> kwargs; each must refuse at dispatch depth > 0 before doing anything.
@@ -46,6 +54,8 @@ NESTED_REFUSED = {
 	"jarvis.chat.api.send_message": {"conversation": "zz-no-conv", "message": "confirm all"},
 	"jarvis.chat.api.retry_message": {"message": "zz-no-msg"},
 	"jarvis.chat.api.stop_run": {"conversation": "zz-no-conv"},
+	"jarvis.chat.api.archive_conversation": {"conversation": "zz-no-conv"},
+	"jarvis.chat.api.clear_chat_history": {},
 	"jarvis.chat.actions_api.confirm_tool": {"token": "zz-no-token"},
 	"jarvis.chat.actions_api.approve_and_run": {"token": "zz-no-token"},
 	"jarvis.chat.actions_api.dismiss_tool": {"token": "zz-no-token"},
@@ -56,6 +66,8 @@ NESTED_REFUSED = {
 	"jarvis.chat.approvals_api.approve_wiki_write": {"name": "zz-no-ar"},
 	"jarvis.chat.approvals_api.retry_wiki_write": {"name": "zz-no-ar"},
 	"jarvis.chat.approvals_api.reject_wiki_write": {"name": "zz-no-ar"},
+	"jarvis.chat.approvals_api.decide_held_action": {"name": "zz-no-pa", "action": "skip"},
+	"jarvis.chat.approvals_api.edit_and_create_held": {"name": "zz-no-pa", "values": "{}"},
 	"jarvis.chat.actions_api.apply_action": {"action": {"verb": "zz"}},
 	"jarvis.chat.admission.cancel_queued_turn": {"run_id": "zz-no-run"},
 	"jarvis.chat.agents_api.take_finding_to_chat": {"finding": "zz-no-finding"},
@@ -63,6 +75,20 @@ NESTED_REFUSED = {
 	"jarvis.chat.filebox.delete_inbound": {"conversation": "zz-no-conv"},
 	"jarvis.chat.filebox.delete_inbound_bulk": {"conversations": ["zz-no-conv"]},
 	"jarvis.chat.filebox.clear_processed_inbound": {},
+	"jarvis.chat.filebox.rerun_inbound": {"conversation": "zz-no-conv"},
+	"jarvis.chat.filebox.bulk_rerun_inbound": {"conversations": ["zz-no-conv"]},
+	"jarvis.chat.filebox.check_skill": {"skill": "zz-no-skill"},
+	"jarvis.chat.pending_actions.operator_fail": {"name": "zz-no-pa"},
+	"jarvis.chat.pending_actions.operator_settle": {"name": "zz-no-pa"},
+	"jarvis.chat.pending_actions.execute": {"name": "zz-no-pa"},
+	"jarvis.chat.pending_actions.discard": {"name": "zz-no-pa"},
+	"jarvis.chat.pending_actions.park": {
+		"kind": "chat",
+		"owner_user": "zz",
+		"exec_user": "zz",
+		"tool": "add_comment",
+		"args": {},
+	},
 }
 
 _PROBE = "zz_reentry_probe"
@@ -200,11 +226,17 @@ class TestRunMethodDenylist(FrappeTestCase):
 		("jarvis.chat.actions_api.dismiss_tool", {"token": "zz"}),
 		("jarvis.chat.approvals_api.decide", {"name": "zz", "decision": "yes"}),
 		("jarvis.chat.approvals_api.approve_wiki_write", {"name": "zz"}),
+		("jarvis.chat.approvals_api.decide_held_action", {"name": "zz", "action": "create"}),
+		("jarvis.chat.approvals_api.edit_and_create_held", {"name": "zz", "values": "{}"}),
 		("jarvis.chat.api.send_message", {"message": "confirm all"}),
 		("jarvis.chat.api.retry_message", {"message": "zz"}),
 		("jarvis.chat.api.stop_run", {"conversation": "zz"}),
+		("jarvis.chat.api.archive_conversation", {"conversation": "zz"}),
+		("jarvis.chat.api.clear_chat_history", {}),
 		("jarvis.chat.macros_api.run_macro", {"name": "zz"}),
 		("jarvis.api.call_tool", {"tool": "get_schema", "args": {"doctype": "ToDo"}}),
+		("jarvis.chat.pending_actions.operator_fail", {"name": "zz"}),
+		("jarvis.chat.pending_actions.operator_settle", {"name": "zz"}),
 	)
 
 	def test_denied_targets_are_refused_without_running(self):
@@ -225,7 +257,7 @@ class TestRunMethodDenylist(FrappeTestCase):
 		call.assert_not_called()
 
 	def test_non_denied_chat_method_still_runs(self):
-		# jarvis.chat.api is only denied for the three turn-entry endpoints.
+		# jarvis.chat.api is denied only for its five turn and archive endpoints.
 		self.assertIsInstance(run_method("jarvis.chat.api.list_tools"), list)
 
 	def test_prefix_is_a_module_boundary(self):

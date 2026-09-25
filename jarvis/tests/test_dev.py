@@ -169,6 +169,25 @@ class TestResetOnboardingWipe(FrappeTestCase):
 		self.assertEqual(frappe.db.count("Jarvis Macro", {"macro_name": "dev-reset-wipe"}), 1)
 
 
+class TestWipeCoversConversationLinks(FrappeTestCase):
+	# Linked to a conversation, yet outside the reset's content set.
+	KEEP = {"Jarvis Agent Run", "Jarvis Import Announcement"}
+
+	def test_every_doctype_linking_a_conversation_is_wiped_or_kept(self):
+		from jarvis.onboarding import _WIPE_DOCTYPES
+
+		linked = set(
+			frappe.get_all(
+				"DocField",
+				filters={"fieldtype": "Link", "options": "Jarvis Conversation", "parenttype": "DocType"},
+				pluck="parent",
+			)
+		)
+		self.assertEqual(linked - set(_WIPE_DOCTYPES) - self.KEEP, set())
+		wipe = list(_WIPE_DOCTYPES)
+		self.assertLess(wipe.index("Jarvis Pending Action Waiter"), wipe.index("Jarvis Pending Action"))
+
+
 class TestResetUnpairsTheContainer(FrappeTestCase):
 	"""The field wipe below clears this bench's device credentials, but the
 	PAIRING lives in the container: any surviving copy of that token would keep

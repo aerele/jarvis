@@ -74,7 +74,9 @@ def _cleanup() -> None:
 
 
 def _submittable_doctype() -> str | None:
-	return frappe.db.get_value("DocType", {"is_submittable": 1, "istable": 0, "issingle": 0}, "name")
+	from jarvis.tests._pending_action_helpers import draft_doctype
+
+	return draft_doctype()
 
 
 class _Base(FrappeTestCase):
@@ -533,6 +535,7 @@ class TestConversationFieldGuard(_Base):
 		("filebox_result_count", 3),
 		("filebox_last_error", "forged"),
 		("filebox_last_error_at", "2026-01-01 00:00:00"),
+		("filebox_rerun_at", "2026-01-01 00:00:00"),
 	)
 
 	def test_admin_save_is_refused(self):
