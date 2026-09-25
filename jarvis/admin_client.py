@@ -1264,6 +1264,34 @@ def post_subscription_connect(
 	)
 
 
+def post_subscription_handover(
+	provider: str,
+	blob: dict,
+	llm_provider: str,
+	*,
+	model: str,
+	base_url: str,
+	installed_apps: list[str] | None = None,
+) -> dict:
+	"""POST admin's ``api.tenant.subscription_handover`` (jarvis#1425): move a
+	proxied ChatGPT-only workspace to the direct leg. Same arguments as
+	``post_subscription_connect``; ``blob`` has ``id_token`` stripped. 270 s,
+	above admin's 240 s fleet leg. A lost response is safe to retry: the fleet
+	route is a no-op once the tenant is direct."""
+	return _post(
+		path=_m("api.tenant.subscription_handover"),
+		body={
+			"provider": provider,
+			"blob": blob,
+			"llm_provider": llm_provider,
+			"model": model,
+			"base_url": base_url,
+			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
+		},
+		timeout_s=270,
+	)
+
+
 # --- Claude browser sign-in relay (CLAUDE-LOGIN-CONTRACT.md) ---------------
 #
 # Jarvis never runs an OAuth exchange for Anthropic itself: the official
@@ -2397,6 +2425,16 @@ def is_method_not_found(exc: AdminValidationError) -> bool:
 		return False
 	text = str(exc)
 	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_CONNECT_METHOD in text
+
+
+HANDOVER_UNSUPPORTED_CODE = "HandoverUnsupported"
+
+
+def is_handover_unsupported(exc: Exception) -> bool:
+	"""Admin or its fleet host cannot do the handover yet: fall back to the pool push."""
+	if getattr(exc, "code", "") == HANDOVER_UNSUPPORTED_CODE:
+		return True
+	return isinstance(exc, AdminValidationError) and is_method_not_found(exc)
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:

@@ -18,6 +18,7 @@ from jarvis.admin_client import (
 	DEFAULT_TIMEOUT_S,
 	AdminAmbiguousError,
 	AdminAuthError,
+	AdminContractError,
 	AdminUnreachableError,
 	AdminValidationError,
 	post_update_llm_creds,
@@ -701,6 +702,27 @@ class TestIsMethodNotFound(FrappeTestCase):
 			"Failed to get method for command x with y", exc_type="DuplicateEntryError"
 		)
 		self.assertFalse(admin_client.is_method_not_found(exc))
+
+
+class TestIsHandoverUnsupported(FrappeTestCase):
+	"""jarvis#1425: is_handover_unsupported tells "fall back to the pool push"
+	apart from a real business rejection on subscription_handover."""
+
+	def test_true_for_the_handover_unsupported_contract_code(self):
+		exc = AdminContractError("handover not available", code="HandoverUnsupported")
+		self.assertTrue(admin_client.is_handover_unsupported(exc))
+
+	def test_true_for_a_method_not_found_validation_error(self):
+		exc = AdminValidationError(
+			"Failed to get method for command jarvis_admin_v2.api.tenant.subscription_handover with "
+			"module 'jarvis_admin_v2.api.tenant' has no attribute 'subscription_handover'",
+			exc_type="ValidationError",
+		)
+		self.assertTrue(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_an_ordinary_business_rejection(self):
+		exc = AdminContractError("provider mismatch", code="ProviderMismatch")
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
 
 
 class TestPermanentRejectionClassification(FrappeTestCase):
@@ -1785,6 +1807,64 @@ class TestPostSubscriptionConnect(FrappeTestCase):
 			captured["timeout"],
 			210,
 			"post_subscription_connect timeout must outlast admin's own admin->fleet budget",
+		)
+
+
+class TestPostSubscriptionHandover(FrappeTestCase):
+	"""jarvis#1425: moving a proxied ChatGPT-only workspace onto the direct
+	leg. Same combined-payload shape as post_subscription_connect, posted to
+	the handover dotted path with a longer budget (admin's own fleet leg here
+	is 240s, not subscription_connect's 210s)."""
+
+	def setUp(self):
+		_settings_for_admin()
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_happy_path_posts_combined_payload(self):
+		captured = {}
+		blob = {
+			"type": "oauth",
+			"provider": "openai",
+			"access": "AT-fresh",
+			"refresh": "RT-fresh",
+		}
+
+		def _fake_post(url, json=None, timeout=None, **_kw):
+			captured["url"] = url
+			captured["body"] = json
+			captured["timeout"] = timeout
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {"action": "handover"}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			result = admin_client.post_subscription_handover(
+				"openai",
+				blob,
+				"OpenAI",
+				model="gpt-5.5",
+				base_url="",
+			)
+		self.assertEqual(result, {"action": "handover"})
+		self.assertIn("subscription_handover", captured["url"])
+		self.assertEqual(
+			captured["body"],
+			{
+				"provider": "openai",
+				"blob": blob,
+				"llm_provider": "OpenAI",
+				"model": "gpt-5.5",
+				"base_url": "",
+				"installed_apps": frappe.get_installed_apps(),
+			},
+		)
+		# Must exceed admin's own admin->fleet handover budget (240s), the same
+		# each-layer-exceeds-the-one-below rule post_subscription_connect follows
+		# against its own 210s leg.
+		self.assertGreater(
+			captured["timeout"],
+			240,
+			"post_subscription_handover timeout must outlast admin's own admin->fleet budget",
 		)
 
 
