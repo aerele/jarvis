@@ -1,12 +1,12 @@
-"""Rename openclaw_* fields on Jarvis Settings to agent_* and jarvis_admin_*.
+"""Rename legacy runtime fields on Jarvis Settings to agent_* and jarvis_admin_*.
 
-Background: Phase 1 reserved two placeholder fields (openclaw_endpoint,
-openclaw_api_key) for the future SaaS control plane. Phase 3 finally
+Background: Phase 1 reserved two placeholder fields (the legacy endpoint field,
+the legacy API-key field) for the future SaaS control plane. Phase 3 finally
 fills that role with `jarvis_admin`, so the placeholders get their real
 names. The operator-tab fields (gateway URL/token/paths) get brand-
-neutral `agent_*` names so customers never see "openclaw" in the UI.
+neutral `agent_*` names so the UI does not expose upstream branding.
 
-Module file names (openclaw_bootstrap.py, etc.) are intentionally NOT
+Module file names (the retired bootstrap module, etc.) are intentionally NOT
 renamed - they're implementation detail, not customer-visible.
 
 Implementation note: Jarvis Settings is a Single DocType. Single DocTypes

@@ -1,9 +1,9 @@
 """Artifact handling for the chat surface — render agent's file outputs inline.
 
-agent's agent emits rich outputs (charts, reports, PDFs, images, exports) by
-writing a file under the container's ``~/.openclaw/canvas/`` (including
+The agent emits rich outputs (charts, reports, PDFs, images, exports) by
+writing a file under the container's canvas directory (including
 subdirectories) and referencing its path in the reply; the gateway serves it at
-``/__openclaw__/canvas/<path>``. The live WS stream does NOT carry file content
+the gateway canvas endpoint. The live WS stream does NOT carry file content
 blocks, so this is the mechanism for getting them.
 
 This module detects every artifact the agent referenced this turn, fetches it
@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 
 import frappe
+
+from jarvis.chat.runtime_profile import get_profile
 
 MSG = "Jarvis Chat Message"
 
@@ -64,7 +66,7 @@ _CANVAS_BARE = re.compile(rf"\S*?canvas/{_PATH}\.(?:{_EXTS})(?![\w])", re.IGNORE
 # agent 2026.6+ "hosted embed" markers. The runtime's own system prompt
 # teaches the model to publish rich HTML as a hosted canvas document and
 # reference it with ``[embed ref="<id>" title="..." /]`` (or an explicit
-# ``[embed url="/__openclaw__/canvas/..." /]``). The gateway serves ref
+# a hosted-canvas URL marker). The gateway serves ref
 # documents at ``canvas/documents/<id>/index.html``, so refs fold into the
 # same fetch/persist path as plain canvas file references.
 #
@@ -83,7 +85,7 @@ def _embed_ref_name(ref: str) -> str:
 
 
 # The canvas host appends its own client script to hosted documents (a
-# live-reload WebSocket + user-action channel on /__openclaw__/ws). Inside
+# live-reload WebSocket + user-action channel on the gateway live-reload endpoint). Inside
 # the Jarvis sandbox that channel cannot exist — the iframe CSP blocks all
 # egress — so the script is dead weight that logs a CSP violation on every
 # render. Drop any script block that references the host socket.
@@ -91,7 +93,23 @@ _SCRIPT_BLOCK = re.compile(r"<script\b.*?</script>", re.IGNORECASE | re.DOTALL)
 
 
 def _strip_host_client(text: str) -> str:
-	return _SCRIPT_BLOCK.sub(lambda m: "" if "__openclaw__/ws" in m.group(0) else m.group(0), text)
+	marker = get_profile().live_reload_route[1:]
+	return _SCRIPT_BLOCK.sub(lambda m: "" if marker in m.group(0) else m.group(0), text)
+
+
+def strip_saved_host_client(text: str) -> str:
+	"""Sanitize historical HTML at delivery, without making stored dashboards
+	depend on a live/ready runtime. The rollout fallback is safe here: this only
+	removes a script from already-authorized content, never fetches a remote file.
+	"""
+	from jarvis.chat.runtime_profile import RuntimeProfileError, legacy_profile
+
+	try:
+		profile = get_profile()
+	except RuntimeProfileError:
+		profile = legacy_profile()
+	marker = profile.live_reload_route[1:]
+	return _SCRIPT_BLOCK.sub(lambda m: "" if marker in m.group(0) else m.group(0), text or "")
 
 
 def detect_canvas_names(text: str) -> list[str]:
@@ -140,7 +158,7 @@ def fetch_canvas(agent_url: str, token: str, name: str) -> tuple[bytes, str] | N
 	base = _http_base(agent_url)
 	if not base or not token:
 		return None
-	url = f"{base}/__openclaw__/canvas/{name}"
+	url = f"{base}{get_profile().canvas_route}{name}"
 	try:
 		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
 	except Exception:
@@ -155,7 +173,7 @@ def _gateway_fakes_missing_canvas_as_ok(agent_url: str, token: str) -> bool:
 	HTTP 200, including one that cannot possibly exist.
 
 	When the runtime's own web UI ends up as the catch-all for unmatched
-	``/__openclaw__/canvas/...`` requests (its route never intercepted, for
+	the gateway canvas endpoint requests (its route never intercepted, for
 	whatever reason on that gateway build/version), it answers with HTTP 200
 	and its own app shell for ANY path — real artifact, wrong ref, or a
 	fabricated one alike. ``fetch_canvas`` only checks for a 200 with a body,
@@ -176,7 +194,7 @@ def _gateway_fakes_missing_canvas_as_ok(agent_url: str, token: str) -> bool:
 	if not base or not token:
 		return False
 	sentinel = f"documents/jarvis-canvas-probe-{uuid.uuid4().hex}/index.html"
-	url = f"{base}/__openclaw__/canvas/{sentinel}"
+	url = f"{base}{get_profile().canvas_route}{sentinel}"
 	try:
 		r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
 	except Exception:

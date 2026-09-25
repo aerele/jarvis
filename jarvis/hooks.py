@@ -68,7 +68,7 @@ def __getattr__(name: str):
 # refreshes against the same client_id we used to mint.
 #
 # Source:
-#   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
+#   OpenAI: upstream device-code implementation (see workspace integration reference)
 #
 # Google Gemini is deliberately absent - its consumer login-with-Google was
 # discontinued by Google 2026-06-18 (subscription removed 2026-08-19); Gemini

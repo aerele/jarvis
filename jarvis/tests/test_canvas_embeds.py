@@ -2,7 +2,7 @@
 
 agent 2026.6+ teaches the model to publish rich HTML as hosted canvas
 documents referenced by ``[embed ref="<id>" /]`` markers (or an explicit
-``/__openclaw__/canvas/...`` url). These must resolve to the same gateway
+the gateway canvas endpoint url). These must resolve to the same gateway
 fetch path as plain ``canvas/<path>.<ext>`` references, and the markers must
 be stripped from the visible reply once the artifact is persisted.
 """
@@ -125,6 +125,10 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 	def tearDown(self):
 		frappe.delete_doc(MSG, self.msg.name, force=True, ignore_permissions=True, delete_permanently=True)
 		frappe.delete_doc(CONV, self.conv.name, force=True, ignore_permissions=True, delete_permanently=True)
+		# persist_canvases commits the File/message, while deleting the attachment
+		# removes its disk content immediately. Commit cleanup too: a class rollback
+		# would otherwise restore File metadata pointing at the deleted test file.
+		frappe.db.commit()
 
 	def test_broken_gateway_persists_nothing_but_still_cleans_the_reply(self):
 		"""Sentinel probe 200s (the runtime shell answering for everything) ->

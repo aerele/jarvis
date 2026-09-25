@@ -283,8 +283,8 @@ class _DoubleGateway:
 
 	def arm_sessions_get(self, session_key: str, messages: list):
 		"""Arm the raw transcript ``sessions.get`` returns for a session key (used by
-		the pump's missed-terminal snapshot-recovery tail). Each message may carry an
-		``__openclaw.seq`` so the pump's watermark windowing (OARF-2) is exercised."""
+		the pump's missed-terminal snapshot-recovery tail). Each message may carry a
+		transcript metadata sequence field so the pump's watermark windowing (OARF-2) is exercised."""
 		self._sessions_get[session_key] = messages
 
 	def arm_sessions_list(self, rows: list):

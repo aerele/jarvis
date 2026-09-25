@@ -1,7 +1,7 @@
 """Transition test for the capture provider-key rename (v2_12 copy patch).
 
-Same shape as test_seq_watermark_migration: on an upgraded site the old
-openclaw_provider column survives model-sync as an orphan; on a fresh install it
+Same shape as test_seq_watermark_migration: on an upgraded site the legacy
+provider column survives model-sync as an orphan; on a fresh install it
 never exists. The upgrade shape is the one the patch exists for, so setUpClass
 CREATES the legacy column to simulate it rather than skipping (which would make
 this suite vacuous on every fresh CI site), and tearDownClass drops it again if we

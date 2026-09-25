@@ -14,6 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import turn_recovery
 from jarvis.chat.turn_recovery import MSG as MSG_DT
+from jarvis.tests._gateway_fixtures import transcript_message
 
 SK = "sk_rec_unique_test"
 
@@ -106,8 +107,8 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "user", "content": "q", "__openclaw": {"seq": 1}},
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("user", "q", seq=1),
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -123,16 +124,14 @@ class TestTurnRecovery(FrappeTestCase):
 
 	def test_uses_raw_session_messages_not_truncating_history(self):
 		# Content must come from get_session_messages (raw), never get_history (#1).
-		sess = self._fake_sess(
-			messages_by_key={SK: [{"role": "assistant", "content": "x", "__openclaw": {"seq": 1}}]}
-		)
+		sess = self._fake_sess(messages_by_key={SK: [transcript_message("assistant", "x", seq=1)]})
 		self._run(sess)
 		sess.get_history.assert_not_called()
 
 	def test_leaves_active_run_untouched(self):
 		sess = self._fake_sess(
 			active={SK},
-			messages_by_key={SK: [{"role": "assistant", "content": "x", "__openclaw": {"seq": 1}}]},
+			messages_by_key={SK: [transcript_message("assistant", "x", seq=1)]},
 		)
 		self._run(sess)
 		row = self._row()
@@ -176,9 +175,7 @@ class TestTurnRecovery(FrappeTestCase):
 		newer = self._add_msg(seq=2, started_min=-10, content="partial2")
 		frappe.db.commit()
 		sess = self._fake_sess(
-			messages_by_key={
-				SK: [{"role": "assistant", "content": "latest answer", "__openclaw": {"seq": 9}}]
-			}
+			messages_by_key={SK: [transcript_message("assistant", "latest answer", seq=9)]}
 		)
 		self._run(sess)
 		self.assertEqual(self._row(newer.name).content, "latest answer")
@@ -229,7 +226,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -249,7 +246,7 @@ class TestTurnRecovery(FrappeTestCase):
 	def test_recover_now_leaves_active_run_untouched(self):
 		sess = self._fake_sess(
 			active={SK},
-			messages_by_key={SK: [{"role": "assistant", "content": "x", "__openclaw": {"seq": 1}}]},
+			messages_by_key={SK: [transcript_message("assistant", "x", seq=1)]},
 		)
 		out, pub = self._run_now(sess)
 		self.assertEqual(out, "active")
@@ -308,7 +305,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -352,7 +349,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -386,7 +383,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the OLD reply", "__openclaw": {"seq": 5}},
+					transcript_message("assistant", "the OLD reply", seq=5),
 				]
 			}
 		)
@@ -403,7 +400,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the NEW reply", "__openclaw": {"seq": 9}},
+					transcript_message("assistant", "the NEW reply", seq=9),
 				]
 			}
 		)
@@ -420,7 +417,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -486,8 +483,8 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "GOLF", "__openclaw": {"seq": 2}},
-					{"role": "assistant", "content": "HOTEL", "__openclaw": {"seq": 4}},
+					transcript_message("assistant", "GOLF", seq=2),
+					transcript_message("assistant", "HOTEL", seq=4),
 				]
 			}
 		)
@@ -505,7 +502,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "HOTEL", "__openclaw": {"seq": 4}},
+					transcript_message("assistant", "HOTEL", seq=4),
 				]
 			}
 		)
@@ -535,7 +532,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -546,7 +543,7 @@ class TestTurnRecovery(FrappeTestCase):
 		sess2 = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -636,7 +633,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -676,7 +673,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)
@@ -701,7 +698,7 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
-					{"role": "assistant", "content": "the full answer", "__openclaw": {"seq": 2}},
+					transcript_message("assistant", "the full answer", seq=2),
 				]
 			}
 		)

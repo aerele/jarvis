@@ -14,6 +14,7 @@ from jarvis.chat import agent_session_pool, turn_handler, turn_message_binding
 from jarvis.chat.api import create_conversation, get_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
 from jarvis.exceptions import AgentUnreachableError
+from jarvis.tests._gateway_fixtures import transcript_message
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -932,8 +933,8 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		# turn's reply (that reply is already in the transcript at this point).
 		fake_sess = self._fake_sess([{"kind": "relay:final", "text": "hi"}])
 		fake_sess.get_session_messages.return_value = [
-			{"role": "assistant", "content": "old", "__openclaw": {"seq": 3}},
-			{"role": "user", "content": "q", "__openclaw": {"seq": 4}},
+			transcript_message("assistant", "old", seq=3),
+			transcript_message("user", "q", seq=4),
 		]
 		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
