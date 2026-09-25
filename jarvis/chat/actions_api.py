@@ -395,9 +395,11 @@ _CONFIRMATION_OUTCOME_UNKNOWN = {
 # ── "Approve & run" refusals (skill "Approve & run the plan", design §3.3/§3.4) ──
 # Stable "nothing changed" envelopes for approve_and_run. Each is returned WITHOUT
 # consuming the token (the card stays confirmable the ordinary way), mirroring the
-# non-consuming armed-refusal in _confirm_core.
+# non-consuming armed-refusal in _confirm_core. The reason_code tells a client the
+# card is still Pending (an InvalidConfirmation without one reads as a spent token).
 _APPROVE_RUN_NOT_RUNNABLE = {
 	"ok": False,
+	"reason_code": "not_runnable",
 	"error": {
 		"type": "InvalidConfirmation",
 		"message": (
@@ -408,6 +410,7 @@ _APPROVE_RUN_NOT_RUNNABLE = {
 
 _APPROVE_RUN_NOT_ARMED = {
 	"ok": False,
+	"reason_code": "skill_not_armed",
 	"error": {
 		"type": "InvalidConfirmation",
 		"message": (
@@ -419,6 +422,7 @@ _APPROVE_RUN_NOT_ARMED = {
 
 _APPROVE_RUN_MACRO_CONVERSATION = {
 	"ok": False,
+	"reason_code": "armed_run",
 	"error": {
 		"type": "InvalidConfirmation",
 		"message": "Approve & run isn't available in an armed macro run. Nothing was changed.",
@@ -427,6 +431,7 @@ _APPROVE_RUN_MACRO_CONVERSATION = {
 
 _APPROVE_RUN_NEVER_TOOL = {
 	"ok": False,
+	"reason_code": "needs_own_confirm",
 	"error": {
 		"type": "InvalidConfirmation",
 		"message": (
@@ -699,7 +704,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		guard_conv = passed_conv if passed_conv else record.get("conversation")
 		record = pending_confirm.consume(token, owner=frappe.session.user, conversation=guard_conv)
 	except pending_confirm.PendingConfirmStorageError as exc:
-		return _confirmation_storage_error(exc)
+		res = _confirmation_storage_error(exc)
+		unknown = res is _CONFIRMATION_OUTCOME_UNKNOWN
+		return {**res, "reason_code": "storage_outcome_unknown" if unknown else "storage_unavailable"}
 	if not record:
 		return _INVALID_CONFIRM
 

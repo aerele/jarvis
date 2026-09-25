@@ -12,6 +12,7 @@ FLUSHALL would wipe the shared bench's cache."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -721,6 +722,48 @@ class TestApproveAndRun(_Base):
 		self.assertEqual(res, late)
 		self.assertEqual(calls, [])
 		self.assertEqual(self.row(token).status, "Pending", "a refusal consumes nothing")
+
+	def test_every_refusal_carries_a_reason_code_and_keeps_the_card(self):
+		"""A refusal with no reason_code reads as a spent legacy token, so the client
+		dropped a card that was still Pending."""
+		skill = self._armed_skill()
+		covered = {"tool": "run_method", "args": {"method": "frappe.ping"}, "skill_docname": skill}
+		never = {"tool": "delete_doc", "args": {"doctype": "ToDo", "name": "pa-x"}, "skill_docname": skill}
+
+		def _set(doctype, name, field, value):
+			frappe.db.set_value(doctype, name, field, value, update_modified=False)
+			frappe.db.commit()
+
+		cases = [
+			("not_runnable", {**covered, "skill_docname": None}, None, None),
+			("needs_own_confirm", never, None, None),
+			("armed_run", covered, lambda c: _set("Jarvis Conversation", c, "skip_confirmation", 1), None),
+			("storage_unavailable", covered, None, pending_confirm.PendingConfirmStorageError),
+			("storage_outcome_unknown", covered, None, pending_confirm.PendingConfirmOutcomeUnknown),
+			(
+				"skill_not_armed",
+				covered,
+				lambda _: _set("Jarvis Custom Skill", skill, "allow_approve_run", 0),
+				None,
+			),
+		]
+		for code, mint, setup, store_down in cases:
+			with self.subTest(code):
+				conv = self.make_conv()
+				token = self.mint(conv, **mint)
+				if setup:
+					setup(conv)
+				peek = (
+					patch.object(pending_confirm, "peek", side_effect=store_down("store down"))
+					if store_down
+					else contextlib.nullcontext()
+				)
+				with peek, fake_dispatch() as calls, as_user(OWNER):
+					res = actions_api.approve_and_run(token, conv)
+				self.assertFalse(res["ok"])
+				self.assertEqual(res.get("reason_code"), code, res)
+				self.assertEqual(calls, [])
+				self.assertEqual(self.row(token).status, "Pending", "a refusal consumes nothing")
 
 	def test_a_stop_or_archive_during_step_one_keeps_the_run_closed(self):
 		"""Arming after step 1 re-checks, under the conversation lock, for a Stop or an
