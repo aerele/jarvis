@@ -1047,9 +1047,19 @@ def assemble_prompt(
 	# (the container has a single role-blind custom_skills dir), so for those the
 	# clause tells the agent to fetch the body with jarvis__get_skill rather than
 	# asserting a directory that does not exist.
-	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
+	from jarvis.chat.custom_skills import armed_skill_clause, invoked_skill_clause, learned_skill_clause
 
 	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
+	# Armed-skill first-write fix (issue #580, found on live e2e): silent once a
+	# run is already approved (autorun_run above takes over) or an armed macro
+	# is already running (armed_run above already tells the agent to call every
+	# write tool directly, create/update included) - only meaningful BEFORE
+	# either kind of run has opened.
+	armed_skill_run_clause = (
+		""
+		if (conv.skill_autorun or conv.skip_confirmation)
+		else armed_skill_clause(msg_row.get("content") or "", chat_user)
+	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -1152,7 +1162,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{armed_skill_run_clause}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"

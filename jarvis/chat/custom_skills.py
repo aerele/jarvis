@@ -443,6 +443,38 @@ def invoked_skill_clause(message: str) -> str:
 	return clause
 
 
+def armed_skill_clause(message: str, user: str) -> str:
+	"""Return a context clause when ``message`` invokes EXACTLY ONE custom
+	skill that resolves as live-ARMED for "Approve & run"
+	(:func:`resolve_armed_skill_docname`), or ``""`` otherwise.
+
+	Issue #580 (the real-world cause, found on live e2e): the persona's own
+	AGENTS.md always stages a create/update as a client-authored jarvis-action
+	draft card, never a direct tool call - and a card never reaches the
+	write-confirmation gate, so a skill armed for "Approve & run" whose FIRST
+	covered write is a create/update could never offer the run-wide approval,
+	even though it is armed. This clause tells the agent to stage that first
+	covered write as a direct tool call instead, so the bench parks it and can
+	show the offer. It is silent once a run is already approved
+	(``conv.skill_autorun``) - the caller gates on that, mirroring
+	``autorun_run`` above - and pure identity-plus-message, no side effects.
+
+	Slug-only, like :func:`invoked_skill_clause`: ``skill_name`` is validated
+	slug syntax at creation (``SLUG_RE`` - lowercase letters/digits/hyphens),
+	so it carries no free-form user text and needs no extra escaping."""
+	slugs = invoked_skill_slugs(message, user=user)
+	if len(slugs) != 1:
+		return ""
+	slug = next(iter(slugs))
+	if not resolve_armed_skill_docname(slug, user):
+		return ""
+	return (
+		f"; armed skill: Approve & run available for {prefixed_slug(slug)}: stage its "
+		"first covered write as a direct tool call, not a jarvis-action card, so the "
+		"user can approve the whole run once"
+	)
+
+
 def role_scoped_skill_rows(user: str, fields: list[str]) -> list:
 	"""Enabled, non-managed skills whose (non-empty) allowed_roles intersect ``user``'s
 	roles, projected onto ``fields``.

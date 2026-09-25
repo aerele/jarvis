@@ -26,7 +26,12 @@ from jarvis.chat import (
 	session_lifecycle,
 	turn_message_binding,
 )
-from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs, resolve_armed_skill_docname
+from jarvis.chat.custom_skills import (
+	armed_skill_clause,
+	invoked_skill_clause,
+	invoked_skill_slugs,
+	resolve_armed_skill_docname,
+)
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
@@ -695,6 +700,117 @@ class TestPushableOrgRowsMemoization(FrappeTestCase):
 		finally:
 			frappe.set_user(orig_user)
 		self.assertEqual(resolve_armed_skill_docname("orgres-memo-fresh", SLUGSET_USER_B), docname)
+
+
+class TestArmedSkillClause(FrappeTestCase):
+	"""armed_skill_clause(message, user) - issue #580's real-world fix. The
+	persona always stages a create/update as a jarvis-action draft card, which
+	never reaches the write-confirmation gate, so an armed skill's FIRST
+	covered write (usually a create/update) could never offer "Approve & run".
+	This clause tells the agent to stage that first write as a direct tool
+	call instead - the caller (turn_handler.assemble_prompt) is silent about it
+	once a run is already approved, exercised separately below."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_slugset_user(SLUGSET_USER_A)
+		_ensure_slugset_user(SLUGSET_USER_B)
+
+	def tearDown(self):
+		frappe.db.delete(SKILL, {"owner": SLUGSET_USER_A})
+		frappe.db.commit()
+
+	def test_armed_invoked_skill_gets_the_clause(self):
+		_make_skill(SLUGSET_USER_A, armed=True, name="armedclause-armed")
+		clause = armed_skill_clause("/armedclause-armed do it", SLUGSET_USER_A)
+		self.assertIn("armed skill: Approve & run available for custom-armedclause-armed", clause)
+
+	def test_unarmed_invoked_skill_gets_nothing(self):
+		_mk_slug_skill(SLUGSET_USER_A, "armedclause-unarmed")
+		self.assertEqual(armed_skill_clause("/armedclause-unarmed do it", SLUGSET_USER_A), "")
+
+	def test_two_invoked_skills_gets_nothing_even_when_both_armed(self):
+		# Mirrors _resolve_approve_run_offer's own "exactly one" rule (design
+		# §3.3): a co-invoked skill has no per-write attribution, so no offer.
+		_make_skill(SLUGSET_USER_A, armed=True, name="armedclause-a")
+		_make_skill(SLUGSET_USER_A, armed=True, name="armedclause-b")
+		clause = armed_skill_clause("/armedclause-a and /armedclause-b please", SLUGSET_USER_A)
+		self.assertEqual(clause, "")
+
+	def test_no_invoked_skill_gets_nothing(self):
+		self.assertEqual(armed_skill_clause("just a plain message, no slug here", SLUGSET_USER_A), "")
+
+
+class TestArmedSkillFirstWriteContext(FrappeTestCase):
+	"""End-to-end through turn_handler.assemble_prompt (the one place the
+	[Context:] bracket is built), mirroring TestApprovedRunContextClause's
+	shape: the armed-skill clause folds in on an ordinary turn, and is silent
+	once a run is already approved or an armed macro is already running - the
+	existing clauses for those states already tell the agent to call every
+	write tool directly."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+			frappe.db.delete(MSG, {"conversation": conv})
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+		frappe.db.delete(SKILL, {"owner": TEST_USER})
+		frappe.db.commit()
+
+	def _assembled(self, conv_doc, content: str) -> str:
+		from jarvis.chat.turn_handler import assemble_prompt
+
+		msg = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv_doc.name, "seq": 1, "role": "user", "content": content}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		ap = assemble_prompt(
+			conv_doc,
+			message_id=msg.name,
+			conversation_id=conv_doc.name,
+			context={},
+			attachments=[],
+			user=TEST_USER,
+		)
+		return ap.user_message
+
+	def test_clause_present_for_an_ordinary_turn_invoking_an_armed_skill(self):
+		_make_skill(TEST_USER, armed=True, name="ctxarmed-plain")
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)
+		prompt = self._assembled(doc, "/ctxarmed-plain do it")
+		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-plain", prompt)
+
+	def test_clause_absent_when_a_run_is_already_approved(self):
+		"""The existing "approved skill run" clause already tells the agent to
+		call every covered write directly - stacking the armed-skill clause on
+		top would be redundant noise on every turn of an already-open run."""
+		_make_skill(TEST_USER, armed=True, name="ctxarmed-autorun")
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)
+		doc.skill_autorun = 1
+		prompt = self._assembled(doc, "/ctxarmed-autorun do it")
+		self.assertNotIn("armed skill: Approve & run available", prompt)
+		self.assertIn("approved skill run: apply the plan's covered writes directly", prompt)
+
+	def test_clause_absent_when_an_armed_macro_is_already_running(self):
+		_make_skill(TEST_USER, armed=True, name="ctxarmed-macro")
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)
+		doc.skip_confirmation = 1
+		prompt = self._assembled(doc, "/ctxarmed-macro do it")
+		self.assertNotIn("armed skill: Approve & run available", prompt)
+		self.assertIn("armed macro run: apply changes directly", prompt)
 
 
 # --------------------------------------------------------------------------- #
