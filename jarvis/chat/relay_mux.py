@@ -651,8 +651,11 @@ class RelayMux:
 		if not is_step(pending):
 			return
 		lane.steps.append(pending)
-		self._offer_step(lane, pending, raw=pending)
+		# Hide it first, then show the step: the pump flushes batched deltas
+		# before publishing a step, so the bubble clears at once even on the
+		# Claude runtime, where no tool event follows to force that flush.
 		self._offer(lane, self._shown_delta(lane, remove_steps(lane.stream_text, lane.steps)))
+		self._offer_step(lane, pending, raw=pending)
 
 	def _shown_delta(self, lane: _Lane, shown: str, delta: str = "") -> _LaneEvent:
 		"""The one delta shape: raw ``stream_text`` for the mirror, ``shown`` for the chat."""
