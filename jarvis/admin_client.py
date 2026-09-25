@@ -1279,7 +1279,7 @@ def post_subscription_handover(
 	above admin's 240 s fleet leg. A lost response is safe to retry: the fleet
 	route is a no-op once the tenant is direct."""
 	return _post(
-		path=_m("api.tenant.subscription_handover"),
+		path=_m(_SUBSCRIPTION_HANDOVER_METHOD),
 		body={
 			"provider": provider,
 			"blob": blob,
@@ -2385,6 +2385,7 @@ def _contract_error(payload) -> dict:
 # the method name after it is the constant part).
 _METHOD_NOT_FOUND_MARKER = "Failed to get method for command"
 _SUBSCRIPTION_CONNECT_METHOD = "api.tenant.subscription_connect"
+_SUBSCRIPTION_HANDOVER_METHOD = "api.tenant.subscription_handover"
 
 
 def is_method_not_found(exc: AdminValidationError) -> bool:
@@ -2431,10 +2432,23 @@ HANDOVER_UNSUPPORTED_CODE = "HandoverUnsupported"
 
 
 def is_handover_unsupported(exc: Exception) -> bool:
-	"""Admin or its fleet host cannot do the handover yet: fall back to the pool push."""
+	"""Admin or its fleet host cannot do the handover yet: fall back to the pool push.
+
+	is_method_not_found's own translation-proof text fallback is scoped to
+	subscription_connect's dotted name (_SUBSCRIPTION_CONNECT_METHOD) - deliberately
+	left that way so it never widens for its OTHER, unrelated callers. A code-less
+	AdminValidationError whose text names subscription_handover's own dotted path
+	(_SUBSCRIPTION_HANDOVER_METHOD) - the same non-English-locale shape
+	is_method_not_found guards against for subscription_connect, where a translated
+	admin locale leaves only the interpolated dotted method name intact - is checked
+	here instead, so an old admin's missing-method rejection is still recognised."""
 	if getattr(exc, "code", "") == HANDOVER_UNSUPPORTED_CODE:
 		return True
-	return isinstance(exc, AdminValidationError) and is_method_not_found(exc)
+	if not isinstance(exc, AdminValidationError):
+		return False
+	if is_method_not_found(exc):
+		return True
+	return not getattr(exc, "code", "") and _SUBSCRIPTION_HANDOVER_METHOD in str(exc)
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:

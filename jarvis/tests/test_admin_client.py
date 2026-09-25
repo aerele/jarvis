@@ -724,6 +724,34 @@ class TestIsHandoverUnsupported(FrappeTestCase):
 		exc = AdminContractError("provider mismatch", code="ProviderMismatch")
 		self.assertFalse(admin_client.is_handover_unsupported(exc))
 
+	def test_true_for_a_translated_method_missing_rejection_naming_handover(self):
+		"""jarvis#1425 fix round 1: is_method_not_found's own text fallback is
+		scoped to subscription_connect's dotted name, so it never fires here - a
+		non-English admin locale that translated Frappe's "Failed to get method
+		for command" prose leaves only the interpolated dotted method name
+		intact. is_handover_unsupported must recognise THAT shape for
+		subscription_handover's own dotted name, or an old admin on a non-English
+		locale hard-fails instead of falling back to the pool push."""
+		exc = AdminValidationError(
+			"No fue posible encontrar el metodo api.tenant.subscription_handover solicitado",
+			exc_type="ValidationError",
+		)
+		self.assertTrue(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_a_codeless_rejection_naming_something_else(self):
+		exc = AdminValidationError("unusable oauth grant", exc_type="ValidationError")
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_a_coded_rejection_whose_text_happens_to_name_handover(self):
+		"""A structured code always wins: even if a business rejection's message
+		happens to mention the dotted path, a non-empty code means this is the
+		endpoint's OWN validation, not a missing-method rejection."""
+		exc = AdminContractError(
+			"provider mismatch while handling api.tenant.subscription_handover",
+			code="ProviderMismatch",
+		)
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
+
 
 class TestPermanentRejectionClassification(FrappeTestCase):
 	"""jarvis #542: 502 is admin's answer BOTH to a gateway fault AND to its
