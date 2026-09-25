@@ -1266,7 +1266,8 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.shown, [step, "", answer])
 		# Stored mirror never loses streamed text (a stop mid-lookup keeps it).
 		self.assertEqual([d[1] for d in rec.deltas], [step, step, full])
-		self.assertEqual(rec.order[:4], ["delta", "step", "delta", "tool"])
+		# The bubble is cleared before the step shows (the pump flushes on a step).
+		self.assertEqual(rec.order[:4], ["delta", "delta", "step", "tool"])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
 	def test_claude_tool_stream_boundary_moves_the_step(self):
