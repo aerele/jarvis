@@ -526,7 +526,7 @@ def _seed_tool_messages(owner: str, title: str, tool_names: list[str]) -> None:
 	conv.insert(ignore_permissions=True)
 	frappe.db.set_value(CONV, conv.name, "owner", owner, update_modified=False)
 	for i, tool_name in enumerate(tool_names, start=1):
-		frappe.get_doc(
+		row = frappe.get_doc(
 			{
 				"doctype": MSG,
 				"conversation": conv.name,
@@ -536,7 +536,9 @@ def _seed_tool_messages(owner: str, title: str, tool_names: list[str]) -> None:
 				"tool_name": tool_name,
 				"tool_status": "completed",
 			}
-		).insert(ignore_permissions=True)
+		)
+		row.flags.jarvis_server_write = True  # a server-written fixture (P0a guard)
+		row.insert(ignore_permissions=True)
 	frappe.db.commit()
 
 

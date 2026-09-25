@@ -15,12 +15,17 @@ Two transactional invariants, both from plan-check:
   class-level rollback isolation intact).
 """
 
+import difflib
+
 import frappe
 
 # The two enum-shaped invariants of this doctype, owned here and imported by the
 # whitelisted read + the Script Report so the pane, the report, and validation
 # can never silently diverge.
 OUTCOMES = frozenset({"applied", "failed", "discarded"})
+# Mirrors the doctype's provenance Select; an unknown value is coerced (and
+# logged) here rather than failing the insert and dropping the row.
+PROVENANCES = ("chat", "auto_apply", "macro", "skill", "request", "approval", "reviewer_approved")
 
 # The full, explicit safe projection for the metadata-only trail. The doctype has
 # NO content columns, so there is nothing content-adjacent to leak; the allowlist
@@ -54,6 +59,7 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 
 		if outcome not in OUTCOMES:
 			outcome = "applied"
+		provenance = _coerce_provenance(provenance, tool)
 		a = args if isinstance(args, dict) else {}
 
 		# _ref returns a 3-tuple (doctype, name, method); we keep the first two.
@@ -85,7 +91,7 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 				"actor_name": frappe.db.get_value("User", actor, "full_name", cache=True) or actor,
 				"tool": tool,
 				"outcome": outcome,
-				"provenance": provenance or "chat",
+				"provenance": provenance,
 				"provenance_name": provenance_name or "",
 				"ref_doctype": ref_doctype or "",
 				"ref_name": ref_name or "",
@@ -114,3 +120,15 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 			f"agent-write audit failed (tool={tool} actor={actor} outcome={outcome})", exc_info=True
 		)
 		return None
+
+
+def _coerce_provenance(provenance, tool) -> str:
+	if not provenance:
+		return "chat"
+	if provenance in PROVENANCES:
+		return provenance
+	coerced = (difflib.get_close_matches(str(provenance), PROVENANCES, n=1, cutoff=0.8) or ["chat"])[0]
+	frappe.logger("jarvis.agent_audit").warning(
+		f"agent-write audit: unknown provenance {provenance!r} for tool={tool} recorded as {coerced!r}"
+	)
+	return coerced
