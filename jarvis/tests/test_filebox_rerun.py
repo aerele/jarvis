@@ -250,6 +250,14 @@ class TestRerunSends(_Base):
 			res = filebox._rerun_one(conv)
 		self.assertTrue(res["ok"])
 
+	def test_a_rerun_gets_a_fresh_two_sheet_budget(self):
+		conv = self._failed()
+		frappe.db.set_value(CONV, conv, "filebox_sheet_count", 2, update_modified=False)
+		frappe.db.commit()
+		with as_user(USER), patch("jarvis.chat.api.send_message", return_value={"ok": True}):
+			filebox._rerun_one(conv)
+		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_sheet_count"), 0)
+
 	def test_reuses_the_pinned_skill(self):
 		conv = self._failed()
 		frappe.db.set_value(CONV, conv, "filebox_pinned_skill", filebox.OCR_DATA_ENTRY, update_modified=False)
@@ -261,9 +269,10 @@ class TestRerunSends(_Base):
 			filebox._rerun_one(conv)
 		self.assertIn(f"TAGGED skill: '{filebox.OCR_DATA_ENTRY}'", sm.call_args.kwargs["message"])
 
-	def test_a_pin_no_longer_usable_falls_back_to_auto_discovery(self):
+	def test_a_pin_no_longer_usable_asks_again_never_falls_back(self):
 		"""The stored pin is re-validated as the dropper NOW (disabled / deleted /
-		unshared since the drop), never trusted from the column."""
+		unshared since the drop), never trusted from the column - and an unusable one
+		files the skill_missing question instead of a silent auto run (K-D2)."""
 		conv = self._failed()
 		frappe.db.set_value(CONV, conv, "filebox_pinned_skill", "zz-fbr-gone-skill", update_modified=False)
 		frappe.db.commit()
@@ -272,9 +281,10 @@ class TestRerunSends(_Base):
 			patch("jarvis.chat.api.send_message", return_value={"ok": True}) as sm,
 		):
 			filebox._rerun_one(conv)
-		message = sm.call_args.kwargs["message"]
-		self.assertNotIn("zz-fbr-gone-skill", message)
-		self.assertNotIn("TAGGED skill", message)
+		sm.assert_not_called()
+		self.assertTrue(
+			frappe.db.exists("Jarvis Approval Request", {"conversation": conv, "routing": "skill_missing"})
+		)
 
 	def test_a_send_failure_is_stamped_as_the_new_error(self):
 		conv = self._failed()

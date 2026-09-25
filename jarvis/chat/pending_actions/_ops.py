@@ -1,5 +1,13 @@
 """Operator levers for a stuck ``Jarvis Pending Action`` (System Manager, POST,
-never from inside a tool). Each leaves an Error Log trail; row text stays fixed."""
+never from inside a tool). Each leaves an Error Log trail; row text stays fixed.
+
+The File Box sheet runbook: a sheet stuck collecting, sealed or executing is ended
+with ``operator_fail``; one still collecting ends ``stuck`` (its run is told the sheet
+got stuck while being listed, not that it could not be applied), as the reconciler
+fails one collecting past 2 h. One stuck unsettled is released with
+``operator_settle``. Either way its questions close and it keeps a valid, possibly
+empty, ``sheet_outcome``. Before rolling sheets back: switch ``file_box_sheets``
+off, let collecting sheets seal, then ``withdraw_all_held`` (or apply/skip them)."""
 
 from __future__ import annotations
 
@@ -11,6 +19,7 @@ from jarvis.chat.pending_actions._store import (
 	EXECUTING,
 	FAILED,
 	PENDING,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
 	claim_settled,
@@ -24,8 +33,9 @@ _OPERATOR_REASON = "Failed by an operator."
 
 @frappe.whitelist(methods=["POST"])
 def operator_fail(name: str, reason: str = "") -> dict:
-	"""End a Pending or Executing row as Failed. An Executing one may have run, so it
-	ends ``interrupted`` (chip "unknown"), never "nothing changed"."""
+	"""End a Pending (a collecting sheet too: ``stuck``) or Executing row as Failed. An
+	Executing one may have run, so it ends ``interrupted`` (chip "unknown"), never
+	"nothing changed"."""
 	refuse_in_tool_dispatch()
 	frappe.only_for("System Manager")
 	operator = authenticated_user()
@@ -34,7 +44,7 @@ def operator_fail(name: str, reason: str = "") -> dict:
 	if not row or row.status not in (PENDING, EXECUTING):
 		frappe.db.rollback()
 		return {"ok": False, "reason_code": "already_handled"}
-	code = "interrupted" if row.status == EXECUTING else "failed"
+	code = "interrupted" if row.status == EXECUTING else "stuck" if row.collecting else "failed"
 	_terminal_update(
 		row.name, [row.status], FAILED, reason_code=code, reason=_OPERATOR_REASON, decided_by=operator
 	)
@@ -59,7 +69,12 @@ def operator_settle(name: str) -> dict:
 		return {"ok": False, "reason_code": "already_handled"}
 	delivered = settle(row.name, force=True)
 	if not delivered:
-		null_sealed(claim_settled([row.name]))
+		won = claim_settled([row.name])
+		if won and row.kind == SHEET:
+			from jarvis.chat.held_sheet_seal import close_ended
+
+			close_ended(won)
+		null_sealed(won)
 	frappe.log_error(
 		title="jarvis.pending_action.operator_settle",
 		message=f"{row.name}: settled by {operator} (delivered={delivered})",
