@@ -113,7 +113,7 @@ class TestParkActionRow(FrappeTestCase):
 		self.assertTrue(rows[0].pending_card)  # card delivered on the durable row
 		self.assertFalse(rows[0].tool_args)  # NO raw args on a pending row
 		self.assertTrue(rows[0].tool_call_id)  # bound to the token
-		self.assertIsNotNone(rows[0].expires_at)  # countdown survives a reload
+		self.assertIsNone(rows[0].expires_at)  # PR-3b: a pending-action card never expires
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "actionrow-park-xyz"}))
 
 	def test_park_row_failure_rolls_back_token(self):
@@ -236,7 +236,8 @@ class TestFlipActionRow(FrappeTestCase):
 		self.assertEqual(rows[0]["tool_status"], "pending")
 		self.assertIsInstance(rows[0]["pending_card"], dict)  # parsed to a real object
 		self.assertTrue(rows[0]["tool_call_id"])
-		self.assertIsNotNone(rows[0]["expires_at"])  # client computes the countdown from this
+		self.assertIsNone(rows[0]["expires_at"])  # PR-3b: no countdown, the card never expires
+		self.assertTrue(rows[0]["recent"])  # parked since the last human message
 		with patch("jarvis.chat.api._dispatch_turn"):
 			confirm_tool(token, conversation=self.conv)
 		conv2 = get_conversation(self.conv)
@@ -249,6 +250,8 @@ class TestFlipActionRow(FrappeTestCase):
 		"""Task 1.4 (spec §9.3): the stop-run sweep flips a parked pending row to a
 		terminal 'cancelled' receipt (not a dangling 'pending' row), and nothing ran."""
 		_name, token = self._park("flip-cancel-xyz")
+		# The Stop pair: a pending action's row flips when the card sweep settles it.
+		pending_confirm.clear_for_conversation(self.owner, self.conv)
 		api.cancel_pending_action_rows(self.conv)
 		same = [r for r in self._rows() if r.tool_call_id == token]
 		self.assertEqual(len(same), 1)

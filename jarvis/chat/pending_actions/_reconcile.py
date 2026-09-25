@@ -11,13 +11,14 @@ from frappe.utils import add_to_date, now_datetime
 from jarvis.chat.pending_actions._settle import MAX_SETTLE_ATTEMPTS, settle, settle_batch
 from jarvis.chat.pending_actions._store import (
 	CANCELLED,
-	CHAT_TTL_S,
 	EXECUTING,
 	FAILED,
 	PENDING,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
 	_transition,
+	filebox_migrated,
 	rowcount,
 	table_ready,
 )
@@ -41,6 +42,10 @@ HELD_RESUME: str | None = "jarvis.chat.held_writes.resume_waiters"
 # ``fn(conversations)``: stamp waiters that failed past the budget on their
 # conversations (after the flips commit: conversation before waiter everywhere).
 HELD_FAILED: str | None = "jarvis.chat.held_writes.mark_resume_failed"
+# File Box sheets: seal stranded ones, fail stuck ones, close orphaned questions.
+SHEET_BACKSTOP: str | None = "jarvis.chat.held_sheet_seal.backstop"
+# A sheet being applied whose background job is gone goes back to Pending.
+SHEET_REAPER: str | None = "jarvis.chat.pending_actions._sheet.reap"
 
 
 def _log(title: str, message: str) -> None:
@@ -49,11 +54,13 @@ def _log(title: str, message: str) -> None:
 
 
 def _reap_interrupted() -> int:
+	"""Executing past ``INTERRUPT_AFTER_S``: Failed/interrupted. Never a sheet (its
+	apply is a background job: ``SHEET_REAPER`` asks RQ)."""
 	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
 	rows = frappe.db.sql(
 		"SELECT name, batch_id FROM `tabJarvis Pending Action` WHERE status='Executing' AND executing_at < %(c)s"
-		" ORDER BY executing_at LIMIT %(lim)s",
-		{"c": cutoff, "lim": _SCAN},
+		" AND kind != %(sheet)s ORDER BY executing_at LIMIT %(lim)s",
+		{"c": cutoff, "lim": _SCAN, "sheet": SHEET},
 		as_dict=True,
 	)
 	flipped = [r for r in rows if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted")]
@@ -155,32 +162,18 @@ def _retry_waiters() -> dict:
 
 
 def _cancel_disabled_owners() -> int:
+	# A collecting sheet is left to its turn end (sealed, then cancelled next run).
 	names = frappe.db.sql_list(
 		"SELECT pa.name FROM `tabJarvis Pending Action` pa LEFT JOIN `tabUser` u ON u.name = pa.owner_user"
-		" WHERE pa.status='Pending' AND (u.name IS NULL OR u.enabled = 0) LIMIT %(lim)s",
+		" WHERE pa.status='Pending'"
+		+ (" AND pa.collecting=0" if filebox_migrated() else "")
+		+ " AND (u.name IS NULL OR u.enabled = 0) LIMIT %(lim)s",
 		{"lim": _SCAN},
 	)
 	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="owner_disabled") == "ok"]
 	frappe.db.commit()
 	if moved:
 		_log("owner_disabled", "Cancelled (owner disabled or missing): " + ", ".join(moved))
-	for name in moved:
-		settle(name)
-	return len(moved)
-
-
-def _expire_chat_cards(conversation: str | None = None) -> int:
-	"""PR-3a keeps the 15-minute chat card life: an older Pending card is
-	``Cancelled``/``expired`` (chip ``expired``); ``conversation`` narrows it (a new
-	park clears its own conversation first). PR-3b removes this."""
-	where = " AND conversation=%(conv)s" if conversation else ""
-	names = frappe.db.sql_list(
-		"SELECT name FROM `tabJarvis Pending Action` WHERE kind='chat' AND status='Pending'"
-		f" AND creation < %(c)s{where} ORDER BY creation LIMIT %(lim)s",
-		{"c": add_to_date(now_datetime(), seconds=-CHAT_TTL_S), "lim": _SCAN, "conv": conversation},
-	)
-	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="expired") == "ok"]
-	frappe.db.commit()
 	for name in moved:
 		settle(name)
 	return len(moved)
@@ -215,12 +208,12 @@ def _warn_old_pending() -> int:
 	return count
 
 
-def _age_alert_deduped(now) -> bool:
+def _age_alert_deduped(now, title: str = _AGE_ALERT_TITLE) -> bool:
 	try:
 		return bool(
 			frappe.db.sql(
 				"SELECT name FROM `tabError Log` WHERE method=%(t)s AND creation >= %(s)s LIMIT 1",
-				{"t": _AGE_ALERT_TITLE, "s": add_to_date(now, hours=-_AGE_ALERT_DEDUPE_HOURS)},
+				{"t": title, "s": add_to_date(now, hours=-_AGE_ALERT_DEDUPE_HOURS)},
 			)
 		)
 	except Exception:
@@ -252,19 +245,29 @@ def _cards_health() -> dict:
 	return {"cards_open": open_n, "aged": aged}
 
 
+def _sheet_backstop() -> dict:
+	return frappe.get_attr(SHEET_BACKSTOP)() if SHEET_BACKSTOP else {}
+
+
+def _reap_sheets() -> int:
+	return len(frappe.get_attr(SHEET_REAPER)()) if SHEET_REAPER else 0
+
+
 def reconcile() -> dict:
 	"""``*/5`` cron: interrupted, lost settles, waiter retries, disabled owners,
-	expired and orphaned chat cards, and the health signals."""
+	orphaned chat cards, the File Box sheet backstop and reaper, and the health
+	signals. Chat cards never expire."""
 	if not table_ready():
 		return {}
 	out = {}
 	for step in (
 		_reap_interrupted,
+		_reap_sheets,
 		_settle_unsettled,
 		_retry_waiters,
 		_cancel_disabled_owners,
-		_expire_chat_cards,
 		_cancel_orphaned_chat,
+		_sheet_backstop,
 		_warn_old_pending,
 		_cards_health,
 	):

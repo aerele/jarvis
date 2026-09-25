@@ -192,38 +192,46 @@ def apply_patches(
 	errors = []
 	if len(patches) > len(items):
 		errors.append({"doc_index": len(items), "fieldname": "", "message": _("Unknown record.")})
-	merged = []
-	for index, item in enumerate(items):
-		patch = patches[index] if index < len(patches) else {}
-		meta = frappe.get_meta(item["doctype"])
-		locked = locked_fields(items, index)
-		prompt = (meta.autoname or "").lower().startswith("prompt")
-		writable = meta.get_permlevel_access("write", user=approver)
-		values = dict(item["values"])
-		fail = partial(_fail, errors, index)
-		for field, value in patch.items():
-			df = meta.get_field(field)
-			if df and df.fieldtype == "Table":
-				values[field] = _patch_rows(meta, df, item["values"].get(field), value, locked, fail)
-				continue
-			message = _field_error(
-				meta, field, value, item["values"].get(field), locked, field, prompt=prompt
-			)
+	merged = [
+		patch_one(items, index, patches[index] if index < len(patches) else {}, approver, errors, exec_user)
+		for index in range(len(items))
+	]
+	return merged, errors
+
+
+def patch_one(
+	items: list[dict], index: int, patch: dict, user: str, errors: list, exec_user: str | None = None
+) -> dict:
+	"""Doc ``index`` with ``patch`` applied (``apply_patches``' rules), fitted to the
+	permlevel access of ``user`` (who creates it); its refusals are appended to
+	``errors``."""
+	item = items[index]
+	meta = frappe.get_meta(item["doctype"])
+	locked = locked_fields(items, index)
+	prompt = (meta.autoname or "").lower().startswith("prompt")
+	writable = meta.get_permlevel_access("write", user=user)
+	values = dict(item["values"])
+	fail = partial(_fail, errors, index)
+	for field, value in patch.items():
+		df = meta.get_field(field)
+		if df and df.fieldtype == "Table":
+			values[field] = _patch_rows(meta, df, item["values"].get(field), value, locked, fail)
+			continue
+		message = _field_error(meta, field, value, item["values"].get(field), locked, field, prompt=prompt)
+		if message:
+			fail(field, message)
+		else:
+			values[field] = value
+	# Frappe resets a new doc's main fields the creator can't write (never a
+	# child row's, never for Administrator): refuse instead of losing the value.
+	if user != "Administrator":
+		for field, value in values.items():
+			message = _permlevel_error(meta, field, value, writable)
 			if message:
 				fail(field, message)
-			else:
-				values[field] = value
-		# Frappe resets a new doc's main fields the creator can't write (never a
-		# child row's, never for Administrator): refuse instead of losing the value.
-		if approver != "Administrator":
-			for field, value in values.items():
-				message = _permlevel_error(meta, field, value, writable)
-				if message:
-					fail(field, message)
-		if exec_user and exec_user != approver:
-			_unshown_errors(meta, item["values"], patch, exec_user, fail)
-		merged.append({**item, "values": values})
-	return merged, errors
+	if exec_user and exec_user != user:
+		_unshown_errors(meta, item["values"], patch, exec_user, fail)
+	return {**item, "values": values}
 
 
 def _fail(errors: list, index: int, field: str, message: str, **where) -> None:

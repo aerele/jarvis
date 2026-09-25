@@ -188,7 +188,7 @@
 		     full chat view just to click Approve -->
 		<div v-if="pendingCards.length" class="flex shrink-0 flex-col gap-2 border-t px-4 py-3">
 			<div
-				v-for="pa in pendingCards"
+				v-for="pa in orderedCards"
 				:key="pa.token"
 				class="flex flex-col gap-2 rounded-md p-3 ring-1 ring-outline-gray-modals"
 			>
@@ -394,6 +394,8 @@ import {
 } from "@/api";
 import { agentName } from "@/branding";
 import { errHtml, turnErrorInfo } from "@/lib/errors";
+import { sortPendingCards } from "@/lib/sortPendingCards";
+import { discardedTokens } from "@/lib/typedCardReply";
 import { compactFailureCopy } from "@/lib/compact";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 
@@ -772,6 +774,8 @@ function scheduleRefetch() {
 
 // ── parked confirmations (gated ERP writes park for human approval) ──────────
 const pendingCards = ref([]);
+// Server order, so a typed "confirm 1" / "discard 1" means the card shown first.
+const orderedCards = computed(() => sortPendingCards(pendingCards.value));
 
 async function refreshPending() {
 	if (!conversation.value) {
@@ -1015,8 +1019,24 @@ async function send(gotoMessageId = "") {
 				props.editingName,
 				props.theme,
 				modelOverride.value,
-				thinkingOverride.value
+				thinkingOverride.value,
+				orderedCards.value.map((c) => c.token)
 			)) || {};
+		for (const t of discardedTokens(r)) removeCard(t);
+		// A typed go-ahead ran the confirmation instead of a turn: no run events are
+		// coming, and nothing was persisted for the typed words.
+		if (r.confirmed) {
+			messages.value = messages.value.filter((m) => m.name !== tmpName);
+			for (const t of r.tokens || []) removeCard(t);
+			if (r.ok === false)
+				toast.error(
+					(r.error && r.error.message) || "That confirmation is no longer valid."
+				);
+			scheduleRefetch();
+			refreshPending();
+			emit("activity");
+			return;
+		}
 		if (r.ok === false) {
 			// rejected (single-flight guard / usage cap) - nothing persisted
 			messages.value = messages.value.filter((m) => m.name !== tmpName);

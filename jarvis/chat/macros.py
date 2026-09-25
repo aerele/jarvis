@@ -160,9 +160,22 @@ def _disarm_conversation(conversation: str | None) -> None:
 	the human-inert send-block (T4): the send-block already keeps a lingering flag
 	un-exploitable (send/retry are refused while set), but clearing keeps state clean
 	and stops any re-dispatched turn from running armed after the run is over. No-op
-	when unset. Caller commits (consistent with ``_cas_run_status``)."""
-	if conversation and frappe.db.get_value(CONV, conversation, "skip_confirmation"):
-		frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+	when unset. Caller commits (consistent with ``_cas_run_status``).
+
+	The run's cards are swept FIRST, while the flag still refuses a Confirm: cards
+	never expire, so one a stop, the stale reaper or a store blip left behind would
+	otherwise stay confirmable forever (the sweep commits the caller's work first)."""
+	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		return
+	from jarvis import api as _jarvis_api
+	from jarvis.chat import pending_confirm
+
+	pending_confirm.clear_for_conversation(frappe.db.get_value(CONV, conversation, "owner"), conversation)
+	try:
+		_jarvis_api.cancel_pending_action_rows(conversation)
+	except Exception:
+		frappe.log_error(title="jarvis.macro.disarm_sweep_failed", message=frappe.get_traceback())
+	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
 
 
 def _disarm_run_conversation(run_name: str) -> None:

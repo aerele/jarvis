@@ -23,6 +23,7 @@ const fileEl = ref(null);
 const STATUS = {
 	processing: { label: "Processing" },
 	needs_approval: { label: "Needs approval", tone: "is-warn" },
+	applying: { label: "Applying" },
 	draft_created: { label: "Draft created", tone: "is-done" },
 	no_draft: { label: "No draft" },
 	failed: { label: "Failed", tone: "is-failed" },

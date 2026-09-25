@@ -18,22 +18,23 @@ from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._park import target_state
 from jarvis.chat.pending_actions._settle import outcome_for, settle
 from jarvis.chat.pending_actions._store import (
-	CANCELLED,
 	CONV,
 	EXECUTED,
 	EXECUTING,
 	FAILED,
 	PENDING,
 	REASON_TEXT,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
-	chat_expired,
 	claim,
 	get_row,
 )
 from jarvis.permissions import is_valid_unattended_owner, refuse_in_tool_dispatch
 
-_PROVENANCE = {"chat": "chat", "file_box_held": "approval"}
+_PROVENANCE = {"chat": "chat", "file_box_held": "approval", SHEET: "approval"}
+# Kinds a System Manager may act on for another user (the File Box dropper's).
+_SM_KINDS = frozenset({"file_box_held", SHEET})
 _SYSTEM_MANAGER = "System Manager"
 
 
@@ -73,15 +74,18 @@ _IDENTITY = (
 )
 
 
-def authorize(row, approver: str, kind: str, conversation: str | None = None) -> tuple[bool, str | None]:
+def authorize(
+	row, approver: str, kind: str, conversation: str | None = None, *, acting: bool = True
+) -> tuple[bool, str | None]:
 	"""D1 owner rule + the replay guard (no lock). Returns ``(allowed, adopt)``:
 	chat rows are owner-only (an SM too); a System Manager may act on another user's
-	held row. A caller-passed conversation must be the row's, or an owned
+	held row or sheet. A sheet still collecting may be read (``acting=False``), never
+	acted on. A caller-passed conversation must be the row's, or an owned
 	conversation a conversation-less card adopts (D9)."""
-	if not row or row.kind != kind:
+	if not row or row.kind != kind or (acting and kind == SHEET and row.get("collecting")):
 		return False, None
 	if row.owner_user != approver and not (
-		kind == "file_box_held" and _SYSTEM_MANAGER in frappe.get_roles(approver)
+		kind in _SM_KINDS and _SYSTEM_MANAGER in frappe.get_roles(approver)
 	):
 		return False, None
 	passed = str(conversation or "").strip()
@@ -94,13 +98,7 @@ def authorize(row, approver: str, kind: str, conversation: str | None = None) ->
 
 
 def _preflight(row, approver: str, arm: ArmHook | None) -> dict | None:
-	"""Refusals under the row lock. The row stays Pending, except a chat card past its
-	15 minutes (PR-3a), which ends ``Cancelled``/``expired`` here (committed + settled)."""
-	if chat_expired(row):
-		_terminal_update(row.name, [PENDING], CANCELLED, reason_code="expired", decided_by=approver)
-		frappe.db.commit()
-		settle(row.name)
-		return _refusal("expired", REASON_TEXT["expired"], pa_status=CANCELLED, outcome="expired")
+	"""Refusals under the row lock; the row stays Pending."""
 	if row.conversation and frappe.db.get_value(CONV, row.conversation, "skip_confirmation"):
 		return _refusal(*_ARMED)
 	if arm:
@@ -180,7 +178,7 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 				row.tool,
 				args,
 				provenance=_PROVENANCE[row.kind],
-				provenance_name=row.name if row.kind == "file_box_held" else "",
+				provenance_name=row.name if row.kind != "chat" else "",
 			)
 			api._apply_run_method_read_filter(row.tool, result)
 	except Exception:
@@ -208,7 +206,7 @@ def _discard_failed_dispatch(row, args: dict, crash_tb: str, *, actor: str | Non
 		result=None,
 		outcome="failed",
 		provenance=_PROVENANCE[row.kind],
-		provenance_name=row.name if row.kind == "file_box_held" else "",
+		provenance_name=row.name if row.kind != "chat" else "",
 	)
 	if crash_tb:
 		frappe.log_error(title="jarvis.pending_action.dispatch_crashed", message=crash_tb)
@@ -235,15 +233,18 @@ def _result_ref(args: dict, result) -> tuple[str, str]:
 	return doctype or "", name or ""
 
 
-def _fail_unrun(row, approver: str, code: str, binding: str = "") -> dict:
-	"""Step 5: a seal or staleness failure ends the row without dispatching."""
-	_terminal_update(row.name, [PENDING], FAILED, reason_code=code, decided_by=approver)
+def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=None, defer=False) -> dict:
+	"""Step 5: a seal or staleness failure ends the row without dispatching. In a typed
+	batch it joins the batch and waits for ``settle_batch`` (ONE continuation)."""
+	cols = {"batch_id": batch_id} if batch_id else {}
+	_terminal_update(row.name, [PENDING], FAILED, reason_code=code, decided_by=approver, **cols)
 	if code in ("tampered", "unverifiable"):
 		frappe.log_error(
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()
-	settle(row.name)
+	if not defer:
+		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
 
 
@@ -305,13 +306,14 @@ def _execute_locked(
 	if refused:
 		frappe.db.rollback()
 		return refused
+	unrun = {"batch_id": batch_id, "defer": defer_continuation}
 	try:
 		call = _seal.unseal_call(row)
 	except _seal.SealError as e:
-		return _fail_unrun(row, approver, e.reason_code, e.binding)
+		return _fail_unrun(row, approver, e.reason_code, e.binding, **unrun)
 	stale = _stale_code(call.get("targets"))
 	if stale:
-		return _fail_unrun(row, approver, stale)
+		return _fail_unrun(row, approver, stale, **unrun)
 
 	if not claim(name, approver, batch_id=batch_id, adopted_conversation=adopt):
 		frappe.db.rollback()
