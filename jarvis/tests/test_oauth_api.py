@@ -485,7 +485,7 @@ class TestCompletePasteSigninFlow(_OAuthApiBase):
 		self.assertTrue(
 			sk.get("force"),
 			"complete_paste_signin must pass force=True so a no-diff "
-			"save still re-renders openclaw.json + restarts the container",
+			"save still re-renders the runtime configuration and restarts the container",
 		)
 
 		settings = frappe.get_single("Jarvis Settings")

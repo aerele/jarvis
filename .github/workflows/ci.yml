@@ -54,6 +54,9 @@ permissions:
   contents: read
 
 jobs:
+  runtime-branding:
+    uses: ./.github/workflows/runtime-branding.yml
+
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
   # even for a clone where nobody ran `pre-commit install`. Deliberately NOT in
   # the tests environment: this needs only python + node, and it should report in
