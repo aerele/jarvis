@@ -113,7 +113,7 @@ class TestParkActionRow(FrappeTestCase):
 		self.assertTrue(rows[0].pending_card)  # card delivered on the durable row
 		self.assertFalse(rows[0].tool_args)  # NO raw args on a pending row
 		self.assertTrue(rows[0].tool_call_id)  # bound to the token
-		self.assertIsNotNone(rows[0].expires_at)  # countdown survives a reload
+		self.assertIsNone(rows[0].expires_at)  # PR-3b: a pending-action card never expires
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "actionrow-park-xyz"}))
 
 	def test_park_row_failure_rolls_back_token(self):
@@ -192,7 +192,11 @@ class TestFlipActionRow(FrappeTestCase):
 
 	def test_direct_mint_confirm_falls_back_to_insert(self):
 		"""AC-flip fallback: a directly-minted token (no gate -> no pending row) still
-		yields exactly one confirmed receipt row (insert path)."""
+		yields exactly one confirmed receipt row (insert path). A LEGACY token (flag 0):
+		a pending action's mint inserts its display row itself."""
+		flag = patch.dict(frappe.conf, {"jarvis_pa_chat_cards": 0})
+		flag.start()
+		self.addCleanup(flag.stop)
 		token = pending_confirm.mint(
 			conversation=self.conv,
 			owner=self.owner,
@@ -232,7 +236,8 @@ class TestFlipActionRow(FrappeTestCase):
 		self.assertEqual(rows[0]["tool_status"], "pending")
 		self.assertIsInstance(rows[0]["pending_card"], dict)  # parsed to a real object
 		self.assertTrue(rows[0]["tool_call_id"])
-		self.assertIsNotNone(rows[0]["expires_at"])  # client computes the countdown from this
+		self.assertIsNone(rows[0]["expires_at"])  # PR-3b: no countdown, the card never expires
+		self.assertTrue(rows[0]["recent"])  # parked since the last human message
 		with patch("jarvis.chat.api._dispatch_turn"):
 			confirm_tool(token, conversation=self.conv)
 		conv2 = get_conversation(self.conv)
@@ -245,6 +250,8 @@ class TestFlipActionRow(FrappeTestCase):
 		"""Task 1.4 (spec §9.3): the stop-run sweep flips a parked pending row to a
 		terminal 'cancelled' receipt (not a dangling 'pending' row), and nothing ran."""
 		_name, token = self._park("flip-cancel-xyz")
+		# The Stop pair: a pending action's row flips when the card sweep settles it.
+		pending_confirm.clear_for_conversation(self.owner, self.conv)
 		api.cancel_pending_action_rows(self.conv)
 		same = [r for r in self._rows() if r.tool_call_id == token]
 		self.assertEqual(len(same), 1)
@@ -427,7 +434,6 @@ class TestActionCardHealth(FrappeTestCase):
 		self._insert_pending_row("dead_tok_quiet_xyz", self._stranded_ts())
 		with (
 			patch.object(session_lifecycle, "_STRANDED_ALERT", 10**9),
-			patch.object(session_lifecycle, "_CARDS_OPEN_ALERT", 10**9),
 			patch.object(frappe, "log_error") as le,
 		):
 			session_lifecycle.reconcile_action_cards()

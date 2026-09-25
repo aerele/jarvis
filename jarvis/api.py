@@ -18,7 +18,7 @@ from jarvis.exceptions import (
 )
 from jarvis.permissions import has_jarvis_access, refuse_in_tool_dispatch
 from jarvis.tools._result_guard import enforce_result_budget
-from jarvis.tools.registry import dispatch
+from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -208,7 +208,7 @@ def _dispatch_from_session(
 				# inside the deny branch, so the gate itself stays the first thing that
 				# runs and a malformed-args call is still refused on the contract.
 				try:
-					attempted = _parse_args(args)
+					attempted = _parse_args(args, tool)
 				except JarvisError:
 					attempted = {}
 				audit.record(
@@ -241,7 +241,7 @@ def _dispatch_from_session(
 			# dict shape the tool ran against (or the empty dict on a
 			# malformed-args rejection).
 			try:
-				parsed_args = _parse_args(args)
+				parsed_args = _parse_args(args, tool)
 			except InvalidArgumentError as e:
 				result = _error("InvalidArgumentError", str(e))
 				_persist_and_publish_tool_call(
@@ -537,6 +537,7 @@ def persist_tool_receipt(
 	armed_by_skill: str | None = None,
 	tool_call_id: str | None = None,
 	flip_token: str | None = None,
+	overwrite_outcomes: tuple = (),
 ) -> None:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
@@ -568,7 +569,11 @@ def persist_tool_receipt(
 	matching row), so the pre-action card and the post-action receipt are ONE durable
 	row. Falls back to the normal INSERT when there is no pending row to flip (a
 	directly-minted token, a File-Box auto-apply, or a token parked before this
-	shipped) - exactly one terminal row per token either way."""
+	shipped) - exactly one terminal row per token either way.
+
+	``overwrite_outcomes``: with ``flip_token``, also re-flip that token's row when it
+	already carries one of these chips (a pending-action settle whose executed or
+	failed outcome must replace a sweep's mislabelled ``cancelled``/``superseded``)."""
 	result = result or {}
 	# discarded/cancelled/superseded/expired executed NOTHING; unknown/partial's
 	# write state is UNVERIFIED (an interrupted or mid-dispatch outcome) - none of
@@ -638,6 +643,16 @@ def persist_tool_receipt(
 				{"conversation": conv_name, "tool_call_id": flip_token, "tool_status": "pending"},
 				"name",
 			)
+			if not existing and overwrite_outcomes:
+				existing = frappe.db.get_value(
+					"Jarvis Chat Message",
+					{
+						"conversation": conv_name,
+						"tool_call_id": flip_token,
+						"action_outcome": ["in", list(overwrite_outcomes)],
+					},
+					"name",
+				)
 			if existing:
 				frappe.db.set_value(
 					"Jarvis Chat Message",
@@ -707,7 +722,7 @@ def persist_tool_receipt(
 
 
 def persist_pending_action(
-	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int
+	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int | None
 ) -> None:
 	"""Write a durable role=tool PENDING row for a parked gated write (PR 1 of the
 	action-card overhaul) - the pre-action twin of ``persist_tool_receipt``. The card
@@ -716,20 +731,39 @@ def persist_pending_action(
 	list-pending resync (the single-shared-query fragility the overhaul removes).
 
 	Stores ONLY the perm-filtered card (``preview['card']`` - already secret-masked by
-	build_card) + the expiry. NEVER stores raw ``tool_args``: an unconfirmed (maybe-to-
+	build_card) + a legacy token's expiry. NEVER stores raw ``tool_args``: an unconfirmed (maybe-to-
 	be-discarded) row must not expose unmasked args via ``get_conversation``; args are
-	stamped only when the row flips to a receipt (persist_tool_receipt). The Redis
-	pending_confirm token stays the SOLE execution authority - this row is display-only.
+	stamped only when the row flips to a receipt (persist_tool_receipt). The card's
+	store (``Jarvis Pending Action``, or the legacy Redis token) stays the SOLE
+	execution authority - this row is display-only.
 
-	Idempotent on ``(conversation, token)`` via the shared FOR UPDATE + dedupe. RAISES
-	on failure so the gate FAIL-CLOSES (rolls the token back): a token with no delivery
-	row is exactly the invisible-card defect this overhaul kills, and the single-flight
-	guard would treat the orphan as a live card and wedge the retry."""
-	# Convert the token's epoch expiry to a SITE-timezone datetime the same way the
-	# codebase does (now_datetime + remaining seconds), so the row's countdown is
+	Idempotent on ``(conversation, token)`` via the shared FOR UPDATE + dedupe (a
+	pending action's row is already inserted by ``park``, so this is then a no-op).
+	RAISES on failure so the gate FAIL-CLOSES (rolls the token back): a token with no
+	delivery row is exactly the invisible-card defect this overhaul kills, and the
+	single-flight guard would treat the orphan as a live card and wedge the retry."""
+	# Commit-first so the FOR UPDATE is the transaction's first statement
+	# (REPEATABLE-READ discipline), matching persist_tool_receipt.
+	frappe.db.commit()
+	_insert_pending_row(conv_name, tool, preview, token, expires_at)
+	frappe.db.commit()
+
+
+def _insert_pending_row(
+	conv_name: str, tool: str, preview: dict | None, token: str, expires_at: int | None
+) -> str | None:
+	"""The pending row insert without any commit: ``persist_pending_action``'s core,
+	and ``pending_actions.park``'s ``display_row`` (same transaction as the card, so
+	the two land or roll back together). None when the conversation can't host a row
+	or the row already exists. ``expires_at`` None (a pending action) = never expires."""
+	# Convert a legacy token's epoch expiry to a SITE-timezone datetime the same way
+	# the codebase does (now_datetime + remaining seconds), so the row's countdown is
 	# correct regardless of an OS-vs-site timezone gap (Frappe Datetime fields are
 	# stored in the site timezone, not the OS timezone).
-	remaining = max(0, int(expires_at) - int(time.time()))
+	expires = None
+	if expires_at is not None:
+		remaining = max(0, int(expires_at) - int(time.time()))
+		expires = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining)
 	card = preview.get("card") if isinstance(preview, dict) else None
 	conv_owner = frappe.db.get_value("Jarvis Conversation", conv_name, "owner")
 	if not conv_owner:
@@ -738,12 +772,9 @@ def persist_pending_action(
 		# like a conv-less park: skip the row and let the owner-scoped list-pending
 		# backstop deliver the card. A genuine insert FAILURE on a REAL conversation
 		# still raises below, so the gate fail-closes (rolls the token back) as designed.
-		return
+		return None
 	with impersonate(conv_owner):
-		# Commit-first so the FOR UPDATE is the transaction's first statement
-		# (REPEATABLE-READ discipline), matching persist_tool_receipt.
-		frappe.db.commit()
-		_locked_insert_chat_message(
+		return _locked_insert_chat_message(
 			conv_name,
 			{
 				"role": "tool",
@@ -751,13 +782,12 @@ def persist_pending_action(
 				"tool_status": "pending",
 				"tool_call_id": token,
 				"pending_card": frappe.as_json(card) if card is not None else None,
-				"expires_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=remaining),
+				"expires_at": expires,
 				"content": f"{tool} → pending",
 			},
 			# (conversation, token) dedupe: a re-park of the same token is a no-op.
 			dedupe_filters={"conversation": conv_name, "tool_call_id": token},
 		)
-		frappe.db.commit()
 
 
 def cancel_pending_action_rows(conversation: str) -> None:
@@ -766,14 +796,24 @@ def cancel_pending_action_rows(conversation: str) -> None:
 	stopped run's parked card does NOT linger as a dangling 'pending' row - which would
 	otherwise show as a stale (soon 'expired') card on reload while its Redis token is
 	already swept. Best-effort per row; the flip runs as the conversation owner via
-	persist_tool_receipt (nothing executed -> no_write -> tool_status='')."""
+	persist_tool_receipt (nothing executed -> no_write -> tool_status='').
+	A pending action's row is left to its own settle (the PA sweep flipped the cards
+	it cancelled; an executing one must not show "cancelled")."""
 	rows = frappe.get_all(
 		"Jarvis Chat Message",
 		filters={"conversation": conversation, "role": "tool", "tool_status": "pending"},
 		fields=["tool_call_id", "tool_name"],
 	)
+	tokens = tuple(r.tool_call_id for r in rows if r.tool_call_id)
+	owned_by_pa = set()
+	if tokens and frappe.db.table_exists("Jarvis Pending Action"):
+		owned_by_pa = set(
+			frappe.db.sql_list(
+				"SELECT name FROM `tabJarvis Pending Action` WHERE name IN %(t)s", {"t": tokens}
+			)
+		)
 	for r in rows:
-		if not r.tool_call_id:
+		if not r.tool_call_id or r.tool_call_id in owned_by_pa:
 			continue
 		try:
 			persist_tool_receipt(
@@ -888,14 +928,46 @@ def publish_realtime_tool_result(
 	)
 
 
-def _parse_args(args: dict | str | None) -> dict:
-	"""Decode the args input into a dict + strip legacy identity markers.
+# P0d (decision 16): a batch key the model sends ALONGSIDE single-record args
+# (``create_doc({doctype, values, docs: []})``) means "no batch" - not "a
+# batch of nothing" - but ~20 tools route any non-None batch key straight to
+# batch mode and fail on the empty list. See the h400jb1fdk File Box incident.
+_BATCH_KEYS = ("docs", "names", "updates", "messages")
+
+# Tools whose signature carries a batch key ALONGSIDE the single-record form
+# (a ``doctype`` param), derived from the registry's own accepted-params map
+# so this can't drift from the tool signatures. This is also what naturally
+# excludes the two dual-form-shaped exceptions: ``create_docs`` (batch only -
+# no ``doctype`` param at all; keeps its own clear "docs must be non-empty"
+# error) and ``get_my_access`` (``docs`` is a query list of doctype/name
+# pairs to check access on, not a batch of writes - also no ``doctype`` param).
+_DUAL_FORM_TOOLS = frozenset(
+	name
+	for name, params in _ACCEPTED_PARAMS.items()
+	if "doctype" in params and params.intersection(_BATCH_KEYS)
+)
+
+
+def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
+	"""Decode the args input into a dict + strip legacy identity markers +
+	normalise an empty batch array for a dual-form tool (P0d).
 
 	Raises ``InvalidArgumentError`` (a JarvisError subclass) on JSON
 	parse failure - that mirrors what tools raise for malformed input
 	and lets ``_run_tool`` translate it via the same path. The previous
 	shape returned either a dict OR an error envelope dict, which made
 	every caller branch on the result type.
+
+	Mutates ``args`` IN PLACE when it is already a dict (only reassigning it
+	for a JSON-string/falsy input), so every downstream reader sharing the
+	same reference - persistence, the step timeline, held_writes, the gate,
+	preview, seal, dispatch - sees the identical normalised call. Runs before
+	all of them (``_run_tool``), which is what keeps the transcript and the
+	executed args in agreement.
+
+	``tool`` is optional (the delegate-denial call site parses args only for
+	an audit row, before ``tool`` gating even runs) - normalisation simply
+	no-ops without it, since there is nothing to key the dual-form check on.
 	"""
 	if isinstance(args, str):
 		try:
@@ -903,14 +975,22 @@ def _parse_args(args: dict | str | None) -> dict:
 		except json.JSONDecodeError as e:
 			raise InvalidArgumentError(f"args is not valid JSON: {e}")
 	args = args or {}
-	# Defensive: strip LLM-hallucinated "_user" / "_session" fields. The
-	# old MCP design used them as in-band identity carriers; Path A moved
-	# identity to HTTPS headers. If the LLM has been trained on the older
-	# convention it may emit these even though our tool schemas don't list
-	# them - dropping them silently keeps such calls dispatching cleanly.
 	if isinstance(args, dict):
+		# Defensive: strip LLM-hallucinated "_user" / "_session" fields. The
+		# old MCP design used them as in-band identity carriers; Path A moved
+		# identity to HTTPS headers. If the LLM has been trained on the older
+		# convention it may emit these even though our tool schemas don't list
+		# them - dropping them silently keeps such calls dispatching cleanly.
 		for legacy in ("_user", "_session", "_session_key"):
 			args.pop(legacy, None)
+		if tool in _DUAL_FORM_TOOLS:
+			tool_params = _ACCEPTED_PARAMS.get(tool, frozenset())
+			for key in _BATCH_KEYS:
+				# Only a key THIS tool actually declares - never touch one it
+				# doesn't accept (dispatch's own param filter would drop it
+				# anyway, but this keeps the persisted/audited args honest).
+				if key in tool_params and args.get(key) in ([], ""):
+					del args[key]
 	return args
 
 
@@ -1073,8 +1153,8 @@ FILE_BOX_WIKI_KIND = "file-box:"
 FILE_BOX_WIKI_FENCE = "file-box"
 # Approval Request `source` value for a HELD file-box wiki write-back proposal.
 # A wiki write from an unattended file-box run is no longer applied at drop time;
-# it is parked as a Pending row a Jarvis reviewer (NOT the dropper) approves before
-# it lands (separation of duties). Distinct from "File Box" (document-classification
+# it is parked as a Pending row a Jarvis reviewer (the dropper too, with a reviewer
+# role) approves before it lands. Distinct from "File Box" (document-classification
 # approvals) so it routes to the reviewer lane and off the customer decide board.
 FILE_BOX_WIKI_SOURCE = "File Box Wiki"
 # Irreversible/consequential subset - gated even when a user has auto-apply
@@ -2057,7 +2137,10 @@ def _file_box_wiki_write(
 	``FILE_BOX_WIKI_KIND`` - so it can only create/refresh its OWN file-box pages,
 	appends (never replaces), and is REFUSED (never overwrites) on a slug that
 	collides with a human/other page. A ``replace_body_md`` is downgraded to an
-	append. Mirrors ``jarvis.tools.record_app_wiki``. Returns a
+	append. ``refuse_overflow=True`` (W): an append/create that would exceed the
+	page's length cap is likewise REFUSED rather than clipped, so approved File
+	Box knowledge is never silently truncated; the outcome reads
+	``reason="page_full"``. Mirrors ``jarvis.tools.record_app_wiki``. Returns a
 	raw-update_wiki-compatible result dict the model reads (the caller wraps it in
 	the standard ``{ok, data}`` envelope)."""
 	from jarvis.chat.wiki import apply_extracted_page_updates
@@ -2084,6 +2167,10 @@ def _file_box_wiki_write(
 			allow_body_replace=False,
 			preserve_curated=True,
 			return_outcomes=True,
+			# W: never truncate an approved File Box note — refuse an overflowing
+			# append/create outright instead of _clip_body silently dropping the
+			# page's oldest knowledge.
+			refuse_overflow=True,
 		)
 		outcome = outcomes[0] if outcomes else {"slug": None, "ok": False, "reason": "skipped"}
 	except Exception:
@@ -2142,7 +2229,11 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	recorded for reviewer approval (never that it landed), so it does not
 	re-propose. Idempotent per (conversation, slug): a retried turn re-emitting
 	the same write folds into the existing Pending row instead of stacking
-	duplicates for the reviewer."""
+	duplicates for the reviewer.
+
+	W: refuses BEFORE creating the Approval Request when the note would overflow
+	the page (see :func:`jarvis.chat.wiki.file_box_append_would_overflow`) - a
+	reviewer should never see a proposal that can only ever land as page_full."""
 	slug = (args.get("slug") or "").strip()
 	if not slug:
 		# A slugless update_wiki is degenerate - the fenced funnel derives no page
@@ -2154,7 +2245,69 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	# the AR is stamped to them, and it is the provenance ``user=`` the reviewer
 	# replays the write under so the fenced own-pages rule keys on the dropper's
 	# namespace, not the reviewer's.
+	from jarvis.chat.approvals_api import wiki_digest
+
 	owner = frappe.db.get_value("Jarvis Conversation", conv, "owner") or frappe.session.user
+
+	# W pre-check: refuse BEFORE any Approval Request exists rather than filing one a
+	# reviewer can never approve. Mirrors — in a SEPARATE function, not one shared
+	# helper — the same merge arithmetic _file_box_wiki_write's funnel applies at
+	# land time, so "would overflow" here PREDICTS a page_full refusal there too;
+	# the two must be kept in sync by hand (a boundary test pins them in lockstep).
+	# This is advisory only: approve-time re-runs the real fenced merge under
+	# refuse_overflow=True and is the actual gate, so a failure here fails OPEN
+	# (log + let the proposal proceed) rather than blocking a legitimate note.
+	#
+	# target_user is always None here, not args.get("target_user"): the funnel's
+	# own `update` dict (_file_box_wiki_write, above) never forwards one either,
+	# so predicting an overflow check the land-time funnel never actually runs
+	# would be misleading.
+	from jarvis.chat.turn_handler import _safe_label_name
+	from jarvis.chat.wiki import (
+		MAX_BODY_LEN,
+		_log_page_full_refusal,
+		_normalize_slug,
+		file_box_append_would_overflow,
+	)
+
+	norm_slug = _normalize_slug(slug) or slug
+	try:
+		overflow = file_box_append_would_overflow(
+			slug,
+			args.get("append_md"),
+			args.get("replace_body_md"),
+			provenance_prefix=FILE_BOX_WIKI_FENCE,
+			scope=args.get("scope"),
+			target_user=None,
+			reader=owner,
+		)
+	except Exception:
+		frappe.log_error(title="jarvis.wiki.propose_overflow_check_failed", message=frappe.get_traceback())
+		overflow = {"overflow": False, "existing_len": 0, "readable": True}
+	if overflow["overflow"]:
+		incoming_len = len(str(args.get("append_md") or args.get("replace_body_md") or "").strip())
+		_log_page_full_refusal(norm_slug, existing_len=overflow["existing_len"], incoming_len=incoming_len)
+		safe_slug = _safe_label_name(norm_slug)
+		if overflow["existing_len"] <= 0:
+			# No existing text to blame - the note itself is too long for a new page.
+			reason = (
+				f"That note is too long on its own for a new wiki page '{safe_slug}' - "
+				"nothing was proposed. Shorten it, or split it across more than one note."
+			)
+		elif overflow["readable"]:
+			reason = (
+				f"The wiki page '{safe_slug}' is full ({overflow['existing_len']} of "
+				f"{MAX_BODY_LEN:,} characters) - nothing was proposed. Record this note on "
+				f"a related page (a different slug, e.g. '{safe_slug}-<topic>') or shorten it."
+			)
+		else:
+			# Never reveal how full an unreadable page is.
+			reason = (
+				f"The wiki page '{safe_slug}' can't take this note - nothing was proposed. "
+				"Record it on a different page or shorten it."
+			)
+		return {"ok": False, "reason": reason}
+
 	title = (args.get("title") or slug or "wiki note")[:100]
 	payload = json.dumps(args, default=str, sort_keys=True)
 	# Dedupe: one Pending wiki proposal per (conversation, slug). A retried turn
@@ -2176,11 +2329,19 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		# the refresh matches 0 rows and we fall through to a FRESH proposal - a
 		# re-emitted write must never rewrite what a reviewer already approved /
 		# rejected (they reviewed the payload they saw).
+		# The refresh re-mints the digest in the same UPDATE (F8).
 		frappe.db.sql(
 			"""update `tabJarvis Approval Request`
-			set wiki_payload=%s, title=%s, modified=%s, modified_by=%s
+			set wiki_payload=%s, wiki_digest=%s, title=%s, modified=%s, modified_by=%s
 			where name=%s and status='Pending'""",
-			(payload, title, frappe.utils.now(), frappe.session.user, existing),
+			(
+				payload,
+				wiki_digest(existing, conv, payload),
+				title,
+				frappe.utils.now(),
+				frappe.session.user,
+				existing,
+			),
 		)
 		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
 			existing = None
@@ -2206,9 +2367,20 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		)
 		# ignore_permissions: the permlevel-1 fields (status / wiki_payload /
 		# apply_status) and a row naming the dropper's conversation are both
-		# beyond what the file-box run's session may write directly.
+		# beyond what the file-box run's session may write directly. The server
+		# flag passes the AR tamper guard, which refuses every other writer.
+		doc.flags.jarvis_server_write = True
 		doc.insert(ignore_permissions=True)
 		name = doc.name
+		# Minted post-name, in the same transaction, over the STORED payload (the
+		# insert may have sanitized it; the raw-SQL refresh above stores it verbatim).
+		frappe.db.set_value(
+			"Jarvis Approval Request",
+			name,
+			"wiki_digest",
+			wiki_digest(name, doc.conversation, doc.wiki_payload),
+			update_modified=False,
+		)
 		# v16 set_user_and_timestamp stamps owner=session on insert; re-stamp the
 		# dropper AFTER (the idiom chat_asks.materialize_from_turn uses).
 		if doc.owner != owner:
@@ -2220,6 +2392,40 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		"approval": name,
 		"detail": "recorded for reviewer approval (not yet on the wiki)",
 	}
+
+
+def _stamp_file_box_draft(conv: str, data) -> None:
+	"""Record a File Box run's created draft (a SUBMITTABLE doctype) on its
+	conversation: the first draft is the row's result, later ones only count."""
+	doctype = data.get("doctype") if isinstance(data, dict) else None
+	name = data.get("name") if isinstance(data, dict) else None
+	if not (doctype and name):
+		return
+	try:
+		if not frappe.get_meta(doctype).is_submittable:
+			return
+	except frappe.DoesNotExistError:
+		return
+	frappe.db.sql(
+		"""UPDATE `tabJarvis Conversation`
+		SET filebox_result_doctype = IF(COALESCE(filebox_result_name, '') = '', %(dt)s, filebox_result_doctype),
+			filebox_result_name = IF(COALESCE(filebox_result_name, '') = '', %(name)s, filebox_result_name),
+			filebox_result_count = COALESCE(filebox_result_count, 0) + 1
+		WHERE name = %(conv)s""",
+		{"dt": doctype, "name": name, "conv": conv},
+	)
+
+
+def _single_flight_error() -> dict:
+	"""F16: a card already waits in this conversation. Cards never expire, so the
+	model must stop until the user answers it."""
+	return _error(
+		"ConfirmationPendingError",
+		"a confirmation card for a previous action is still awaiting the user in this "
+		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
+		"your turn now. The card does not expire: the user confirms or discards it, and "
+		"once they confirm you'll get a follow-up turn to continue with the next step.",
+	)
 
 
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
@@ -2263,9 +2469,26 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 	is_write = tool in _WRITE_TOOLS
 	try:
-		args = _parse_args(raw_args)
+		args = _parse_args(raw_args, tool)
 	except JarvisError as e:
 		return _error(type(e).__name__, str(e))
+
+	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
+	# unattended File Box run never reaches the preview / park / auto-apply paths
+	# below with a write the policy did not decide. None = not its call.
+	if conversation and is_write:
+		from jarvis.chat import held_writes
+
+		verdict = held_writes.apply(tool, args, conversation)
+		if verdict is not None:
+			return verdict
+	# File Box skill routing: only an eligible skill loads (and is recorded).
+	if conversation and tool == "get_skill":
+		from jarvis.chat import filebox_skills
+
+		verdict = filebox_skills.gate_get_skill(args, conversation)
+		if verdict is not None:
+			return verdict
 
 	# ``preview`` is read, not popped: dispatch() filters args to the tool's
 	# signature so the flag never reaches the tool anyway, and leaving ``args``
@@ -2375,7 +2598,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					)
 				else:
 					next_step = (
-						f"Split into batches of {_MAX_BATCH} and confirm each one before starting the next."
+						f"Split into batches of {_MAX_BATCH} and confirm each one before starting the "
+						"next (only one card can wait at a time: propose one batch, then end your turn)."
 					)
 				return _error(
 					"InvalidArgumentError",
@@ -2596,42 +2820,25 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						err_obj["message"] += " The approved request has also ended - re-approve to continue."
 				return result
 			# TTL-expired / no timestamp: fall through to the normal park.
-		# File Box fast-path (design A2): the ONE remaining path where a gated
-		# reversible create/update runs without a confirmation card - a File Box
-		# conversation, an unattended directed run where nobody can click a confirm
-		# card and review happens on the created Draft + the approval board. Admin
-		# Auto-Apply was REMOVED here (design A2); request-scoped "confirm all" is
-		# its user-facing replacement. Everything outside create/update - submit_doc
-		# and every destructive tool - ALWAYS parks; a bulk create/update (docs[] /
-		# updates[]) NEVER fast-paths (the batch card is the human checkpoint against
-		# a 20-doc mistake). file_box is server-set only and admin-gated against
-		# generic saves.
-		#
-		# conv is never a client claim - it is resolved server-side from the
-		# session_key upstream - so there is no owner to re-check here.
-		if conv and tool in _AUTO_APPLYABLE and not _is_bulk_call(args):
-			if _conv_flags.get("file_box"):
-				# Legacy provenance string: File Box shared the (now removed)
-				# Auto-Apply branch, so its audit rows have always been stamped
-				# "auto_apply" (a value the Jarvis Agent Write enum still carries).
-				# Kept as-is to avoid an enum migration; it reads as "an unattended
-				# direct-apply run".
-				return dispatch_confirmed(tool, args, provenance="auto_apply")
+		# File Box direct-apply (a draft of a submittable doctype) and the held
+		# writes are decided by held_writes.apply at the top of _run_tool; a File
+		# Box write never reaches this point except update_wiki (below). Its audit
+		# provenance stays "auto_apply" (the Jarvis Agent Write enum value).
 		# File Box unattended wiki write-back: route update_wiki through the
 		# append-only, provenance-FENCED funnel (never the raw update_wiki tool,
 		# which defaults scope=Org + ignore_permissions and can clobber a curated
 		# page). ``and file_box`` (NOT ``or``) keeps attended chat + admin auto_apply
-		# on the park-a-card path. Placed AFTER the create/update auto-apply
-		# (update_wiki is not in _AUTO_APPLYABLE, so that block skipped it) and BEFORE
-		# the single-flight so an unattended run never parks a wiki card. The wiki
+		# on the park-a-card path. Placed BEFORE the single-flight so an unattended
+		# run never parks a wiki card. The wiki
 		# kill-switch at the top of _run_tool already refused a wiki-off write before
-		# here; a bulk call falls through to the park.
+		# here; stray batch args never divert it to a park card (whose confirm would
+		# run the raw, unfenced tool).
 		# INVARIANT: a file_box conversation never also carries skip_confirmation /
 		# skill_autorun (drop_file sets ONLY file_box=1, and an unattended run arms no
 		# macro), so the armed-skip + skill-autorun covered-write branches above never
 		# pre-empt update_wiki into the RAW covered path (which would clobber a curated
 		# page). If that ever changes, this branch must move ABOVE them so the fence wins.
-		if conv and tool == "update_wiki" and _conv_flags.get("file_box") and not _is_bulk_call(args):
+		if conv and tool == "update_wiki" and _conv_flags.get("file_box"):
 			# REVIEW-BEFORE-LANDING: an unattended file-box run never writes the
 			# shared org wiki directly. HOLD the fenced write as a Pending reviewer
 			# proposal (approvals_api.approve_wiki_write replays it through the same
@@ -2648,16 +2855,12 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# This makes "batch 2's card appears only after batch 1 completes" a bench
 		# guarantee (not just persona discipline) and is the server-side
 		# single-flight for the confirm path. Auto-apply above is deliberately NOT
-		# gated by this (it parks no card).
-		#   STRICT conversation match: list_for_owner returns conversation-LESS
-		#   tokens under any filter (F1), so re-filter to record.conversation == conv
-		#   - an unrelated conv-less token (a rare session-resolution miss) must not
-		#   block a legitimate new card here.
+		# gated by this (it parks no card). Cards never expire, so an ignored card
+		# yields only to a proposal made after the user spoke again (D7 supersede,
+		# re-checked under park's lock). Strict on the conversation: a
+		# conversation-LESS token (F1) must not block a legitimate new card here.
 		try:
-			conversation_pending = conv and any(
-				t.get("conversation") == conv
-				for t in pending_confirm.list_for_owner(owner_user, conversation=conv, strict=True)
-			)
+			conversation_pending = conv and pending_confirm.blocks_new_card(owner_user, conv)
 		except pending_confirm.PendingConfirmStorageError:
 			return _error(
 				"ConfirmationUnavailableError",
@@ -2666,14 +2869,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"call once; if it still fails, tell the user and stop - do not loop.",
 			)
 		if conversation_pending:
-			return _error(
-				"ConfirmationPendingError",
-				"a confirmation card for a previous action is still awaiting the "
-				"user in this conversation. Only one runs at a time - do NOT retry "
-				"this call; stop and end your turn now. Once the user confirms the "
-				"pending card you'll get a follow-up turn to continue with the next "
-				"step.",
-			)
+			return _single_flight_error()
 		# Validate BEFORE parking. For a create/update (build-from-args) write,
 		# run the real call in the rollback sandbox now: a deterministic failure
 		# (missing mandatory field, bad link, no create permission) means the
@@ -2736,18 +2932,25 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if skill_docname and isinstance(preview.get("card"), dict):
 				preview["card"]["approve_run"] = True
 				preview["card"]["skill_slug"] = skill_slug
-		expires_at = int(time.time()) + pending_confirm._TTL_S
-		token = pending_confirm.mint(
-			conversation=conv,
-			owner=owner_user,
-			tool=tool,
-			args=args,
-			run_id=run_id,
-			exec_user=exec_user,
-			preview=preview,
-			expires_at=expires_at,
-			skill_docname=skill_docname,
-		)
+		# A pending-action card never expires; a legacy (Redis) token keeps its 15 minutes.
+		now_s = int(time.time())
+		expires_at = None if pending_confirm.pa_minting(conv) else now_s + pending_confirm._TTL_S
+		try:
+			token = pending_confirm.mint(
+				conversation=conv,
+				owner=owner_user,
+				tool=tool,
+				args=args,
+				run_id=run_id,
+				exec_user=exec_user,
+				preview=preview,
+				expires_at=expires_at,
+				skill_docname=skill_docname,
+			)
+		except pending_confirm.ConfirmationPendingError:
+			# Park re-checks single-flight under its lock: a card that could not be
+			# superseded after all (another actor holds it) is not a storage error.
+			return _single_flight_error()
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
 		# publish a card against a token whose record does not exist - that card is
@@ -2798,23 +3001,24 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# still surface it.
 		try:
 			origin_page = frappe.db.get_value("Jarvis Conversation", conv, "origin_page") or ""
+			# Same shared item shape the resync endpoint + run:end terminal use, so
+			# the live push can't drift from them (and gets the summary guard too).
+			item = pending_confirm._pending_item(
+				token=token,
+				tool=tool,
+				args=args,
+				preview=preview,
+				conversation=conv,
+				run_id=run_id,
+				expires_at=expires_at,
+				created_at=now_s,
+			)
 			events.publish_to_user(
 				owner_user,
-				# Same shared item shape the resync endpoint + run:end terminal use, so
-				# the live push can't drift from them (and gets the summary guard too).
 				{
 					"kind": "action:pending",
 					"origin_page": origin_page,
-					**pending_confirm._pending_item(
-						token=token,
-						tool=tool,
-						args=args,
-						preview=preview,
-						conversation=conv,
-						run_id=run_id,
-						expires_at=expires_at,
-						created_at=expires_at - pending_confirm._TTL_S,
-					),
+					**pending_confirm.with_recency([item])[0],
 				},
 			)
 		except Exception:

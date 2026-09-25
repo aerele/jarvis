@@ -117,6 +117,115 @@
    "description": "The skill_name a user pinned at File Box drop time (or ocr-data-entry, or empty for auto-discovery). Server-set only via drop_file after validating the caller may use it (get_skill); the directed prompt then tells the agent to follow this skill and skip find_skills discovery."
   },
   {
+   "fieldname": "filebox_source_file",
+   "fieldtype": "Data",
+   "label": "File Box Source File",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The File docname dropped into this File Box conversation. Server-set only (drop_file)."
+  },
+  {
+   "fieldname": "filebox_result_doctype",
+   "fieldtype": "Data",
+   "label": "File Box Result DocType",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "DocType of the first draft this File Box run created. Server-set only."
+  },
+  {
+   "fieldname": "filebox_result_name",
+   "fieldtype": "Data",
+   "label": "File Box Result Name",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Name of the first draft this File Box run created. Server-set only."
+  },
+  {
+   "fieldname": "filebox_result_count",
+   "fieldtype": "Int",
+   "label": "File Box Result Count",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Drafts this File Box run created. Server-set only."
+  },
+  {
+   "fieldname": "filebox_last_error",
+   "fieldtype": "Small Text",
+   "label": "File Box Last Error",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Why the last File Box send failed (cleared on a successful send). Server-set only."
+  },
+  {
+   "fieldname": "filebox_last_error_at",
+   "fieldtype": "Datetime",
+   "label": "File Box Last Error At",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "When filebox_last_error was stamped. Server-set only."
+  },
+  {
+   "fieldname": "filebox_rerun_at",
+   "fieldtype": "Datetime",
+   "label": "File Box Re-run At",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Claim-first stamp for rerun_inbound (AC8): set while a re-run is in flight, cleared once _send_inbound knows the outcome, so a double click sends once. A stuck claim self-heals past the orphan threshold. Server-set only."
+  },
+  {
+   "fieldname": "filebox_skills",
+   "fieldtype": "JSON",
+   "label": "File Box Skills",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The Custom Skills this File Box run followed, in load order: [{docname, slug, creates, pinned, at}] (creates is a snapshot, so a mid-run edit can't drop enforcement). The validated pin is recorded at drop. Reset on a re-run. Server-set only."
+  },
+  {
+   "fieldname": "filebox_skill_choice",
+   "fieldtype": "Data",
+   "label": "File Box Skill Choice",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The skill a human chose on a skill_conflict routing question; its recorded creates is the document type this run must draft. Reset on a re-run. Server-set only."
+  },
+  {
+   "fieldname": "filebox_skipped_at",
+   "fieldtype": "Datetime",
+   "label": "File Box Skipped At",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "When the owner chose 'Skip this file' on a skill_missing routing question: the row reads no_draft (\"Skipped by you\") until a later run. Server-set only."
+  },
+  {
+   "fieldname": "filebox_sheet_count",
+   "fieldtype": "Int",
+   "label": "File Box Sheet Count",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Approval sheets this File Box run opened (at most two per document: the second holds what only surfaces while drafting). Reset on a re-run. Server-set only."
+  },
+  {
+   "fieldname": "filebox_rerun_preamble",
+   "fieldtype": "Small Text",
+   "label": "File Box Re-run Preamble",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "A re-run's preamble (the earlier pass, quoted as data), kept while the re-run waits on a skill_missing routing question: 'Process with automatic skill selection' sends it, 'Skip this file' drops it. Server-set only."
+  },
+  {
    "fieldname": "request_autorun",
    "fieldtype": "Check",
    "label": "Request auto-run (typed 'confirm all')",

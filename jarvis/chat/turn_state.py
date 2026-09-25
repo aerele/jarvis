@@ -100,6 +100,7 @@ EFFECT_NAMES = (
 	"rich_outputs",
 	"enrich_cards",
 	"chat_asks",
+	"file_box_sheet_seal",
 	"macro_advance",
 	"auto_title",
 	"wiki_nudge",
@@ -113,7 +114,8 @@ EFFECT_NAMES = (
 # BEFORE the client reload a message:enriched publish triggers (finalize.py's
 # _effect_enrich_cards), so publishing ahead of it would show a bare card, a new
 # visible regression; chat_asks materializes the Approval Board fence from the
-# same reply; macro_advance/auto_title/wiki_nudge are the remaining turn-visible
+# same reply; file_box_sheet_seal puts a File Box document's approval sheet on the
+# board; macro_advance/auto_title/wiki_nudge are the remaining turn-visible
 # side effects; terminal_publish is the CDX-12 terminal re-publish backstop and
 # runs first in the canon, so it is effectively always settled by the time the
 # rest are. usage and telemetry_flush are ledger/telemetry work with no visible
@@ -128,6 +130,7 @@ VISIBLE_EFFECT_NAMES = (
 	"rich_outputs",
 	"enrich_cards",
 	"chat_asks",
+	"file_box_sheet_seal",
 	"macro_advance",
 	"auto_title",
 	"wiki_nudge",
