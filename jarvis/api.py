@@ -2655,11 +2655,36 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if conv
 			else None
 		) or {}
+		# File Box direct-apply (a draft of a submittable doctype) and the held
+		# writes are decided by held_writes.apply at the top of _run_tool; a File
+		# Box write never reaches this point except update_wiki (below). Its audit
+		# provenance stays "auto_apply" (the Jarvis Agent Write enum value).
+		# File Box unattended wiki write-back: route update_wiki through the
+		# append-only, provenance-FENCED funnel (never the raw update_wiki tool,
+		# which defaults scope=Org + ignore_permissions and can clobber a curated
+		# page). ``and file_box`` (NOT ``or``) keeps attended chat + admin auto_apply
+		# on the park-a-card path. Placed BEFORE the single-flight so an unattended
+		# run never parks a wiki card. The wiki
+		# kill-switch at the top of _run_tool already refused a wiki-off write before
+		# here; stray batch args never divert it to a park card (whose confirm would
+		# run the raw, unfenced tool). Placed ABOVE the armed-macro, skill-autorun and
+		# "confirm all" branches too, so no uncarded run pre-empts the fence into the
+		# raw covered write (a typed "confirm all" arms request_autorun on any chat).
+		if conv and tool == "update_wiki" and _conv_flags.get("file_box"):
+			# REVIEW-BEFORE-LANDING: an unattended file-box run never writes the
+			# shared org wiki directly. HOLD the fenced write as a Pending reviewer
+			# proposal (approvals_api.approve_wiki_write replays it through the same
+			# funnel on approval). Enforced HERE in the dispatch so the agent cannot
+			# bypass review by any prompt path. _propose_file_box_wiki_write returns
+			# the raw-update_wiki-compatible result as the DATA payload; wrap it in
+			# the standard envelope so the agent-session path's result["data"] read
+			# stays valid and the model reads it like a dispatched update_wiki result.
+			return {"ok": True, "data": _propose_file_box_wiki_write(args, conv)}
 		# Armed-skip bypass (macro skip-confirmation): an admin-armed macro's run
 		# conversation carries skip_confirmation=1 (stamped by run_macro), so the
 		# BROAD covered set - incl. run_method / submit / send_email / run_import -
 		# runs uncarded. This is distinct from and wider than the create/update-only
-		# File Box fast-path below. The irreversible trio (delete/cancel/amend) is NOT in
+		# File Box fast-path (held_writes.apply). The irreversible trio (delete/cancel/amend) is NOT in
 		# _ARMED_SKIP_COVERED, so it falls through to park (an armed macro that hits
 		# one stops the run - D5). Cheap frozenset membership test first; the
 		# kill-switch Settings read runs only when a covered write is actually armed.
@@ -2775,7 +2800,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# detector, sliding request_autorun_at within the TTL. The brake is NOT covered,
 		# so delete/cancel/amend/create_custom_skill/connector still park (the brake
 		# protects what the user has not seen). Placed AFTER the skill-autorun branch (an
-		# approved skill run keeps its own provenance) and BEFORE the File Box fast-path.
+		# approved skill run keeps its own provenance) and AFTER the File Box wiki fence.
 		# Bulk covered writes skip too (one approval covers the batch); the F16 over-size
 		# cap above still bounces an oversized batch.
 		if tool in _COVERED and _conv_flags.get("request_autorun"):
@@ -2820,34 +2845,6 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						err_obj["message"] += " The approved request has also ended - re-approve to continue."
 				return result
 			# TTL-expired / no timestamp: fall through to the normal park.
-		# File Box direct-apply (a draft of a submittable doctype) and the held
-		# writes are decided by held_writes.apply at the top of _run_tool; a File
-		# Box write never reaches this point except update_wiki (below). Its audit
-		# provenance stays "auto_apply" (the Jarvis Agent Write enum value).
-		# File Box unattended wiki write-back: route update_wiki through the
-		# append-only, provenance-FENCED funnel (never the raw update_wiki tool,
-		# which defaults scope=Org + ignore_permissions and can clobber a curated
-		# page). ``and file_box`` (NOT ``or``) keeps attended chat + admin auto_apply
-		# on the park-a-card path. Placed BEFORE the single-flight so an unattended
-		# run never parks a wiki card. The wiki
-		# kill-switch at the top of _run_tool already refused a wiki-off write before
-		# here; stray batch args never divert it to a park card (whose confirm would
-		# run the raw, unfenced tool).
-		# INVARIANT: a file_box conversation never also carries skip_confirmation /
-		# skill_autorun (drop_file sets ONLY file_box=1, and an unattended run arms no
-		# macro), so the armed-skip + skill-autorun covered-write branches above never
-		# pre-empt update_wiki into the RAW covered path (which would clobber a curated
-		# page). If that ever changes, this branch must move ABOVE them so the fence wins.
-		if conv and tool == "update_wiki" and _conv_flags.get("file_box"):
-			# REVIEW-BEFORE-LANDING: an unattended file-box run never writes the
-			# shared org wiki directly. HOLD the fenced write as a Pending reviewer
-			# proposal (approvals_api.approve_wiki_write replays it through the same
-			# funnel on approval). Enforced HERE in the dispatch so the agent cannot
-			# bypass review by any prompt path. _propose_file_box_wiki_write returns
-			# the raw-update_wiki-compatible result as the DATA payload; wrap it in
-			# the standard envelope so the agent-session path's result["data"] read
-			# stays valid and the model reads it like a dispatched update_wiki result.
-			return {"ok": True, "data": _propose_file_box_wiki_write(args, conv)}
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a
 		# second and tell the model to stop - the continuation turn fired after the

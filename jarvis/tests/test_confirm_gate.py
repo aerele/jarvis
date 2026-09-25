@@ -1461,6 +1461,30 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		disp.assert_not_called()
 		self.assertTrue(r["data"]["proposed"])
 
+	def test_file_box_update_wiki_proposes_under_an_uncarded_run(self):
+		# A typed "confirm all", an armed macro or an approved skill run never pre-empts
+		# the fence into the raw covered update_wiki.
+		now = frappe.utils.now_datetime()
+		for flags in (
+			{"request_autorun": 1, "request_autorun_at": now},
+			{"skip_confirmation": 1},
+			{"skill_autorun": 1, "skill_autorun_at": now, "skill_autorun_skill": "zz-armed-skill"},
+		):
+			with self.subTest(flags=sorted(flags)):
+				conv = self._conv(file_box=1, **flags)
+				with (
+					patch("jarvis.chat.wiki.wiki_enabled", return_value=True),
+					patch("jarvis.chat.wiki.apply_extracted_page_updates") as apply,
+					patch("jarvis.api.dispatch") as disp,
+				):
+					r = api._run_tool("update_wiki", dict(self._ARGS), conversation=conv)
+				apply.assert_not_called()
+				disp.assert_not_called()
+				self.assertTrue(r["data"]["proposed"])
+				self.assertEqual(
+					frappe.db.get_value("Jarvis Approval Request", r["data"]["approval"], "status"), "Pending"
+				)
+
 	def test_file_box_wiki_proposal_dedupes_on_retry(self):
 		# A retried turn re-emitting the same (conversation, slug) write folds into
 		# the existing Pending row rather than stacking duplicates for the reviewer.
