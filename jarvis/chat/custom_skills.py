@@ -276,7 +276,7 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	# rows, so a promoted-to-Org skill's `/slug` was silently unmatched for
 	# everyone but its (system) owner and its "Approve & run" arm could never be
 	# offered - the exact symptom of #580.
-	enabled |= {r.skill_name for r in _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)}
+	enabled |= {r.skill_name for r in _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)}
 	return {s for s in slugs if s in enabled}
 
 
@@ -290,8 +290,13 @@ def _supersede_promoted_lineage(own: dict, *pools: dict, sources: dict) -> None:
 	deliberately leaves it intact). Replace the stale own entry with the
 	descendant's (name, armed) and drop the descendant from its own pool, so
 	precedence and the ambiguity count both see ONE candidate for the lineage,
-	not two. A row without a recorded source (an unrelated same-named skill
-	elsewhere) is untouched and still shadows/competes exactly as before."""
+	not two. The DESCENDANT's own ``allow_approve_run`` is what counts either
+	way (code review on #580, security): an armed private source must never
+	auto-arm its still-unarmed shared copy, and an armed shared copy must not
+	be shadowed by an unarmed private source - promotion never carries the
+	flag, only an admin arming the shared copy directly does. A row without a
+	recorded source (an unrelated same-named skill elsewhere) is untouched and
+	still shadows/competes exactly as before."""
 	for pool in pools:
 		for desc_name, src_name in list(sources.items()):
 			if desc_name in pool and src_name in own:
@@ -370,7 +375,7 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 	# offer could never fire. Computed unconditionally (like shared_role above)
 	# so the ambiguity guard below still sees every candidate row.
 	org_wide: dict[str, int] = {}
-	for r in _pushable_org_rows(fields=("name", "skill_name", "allow_approve_run", "source_skill")):
+	for r in _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS):
 		if r.skill_name == slug:
 			org_wide[r.name] = int(r.allow_approve_run or 0)
 			if r.source_skill:
@@ -585,9 +590,14 @@ def personal_skill_clause(user: str | None = None) -> str:
 
 
 _PUSHABLE_FIELDS = ("name", "skill_name", "description", "user_invocable", "instructions")
-# The identity-only projection: enough to rank and name a pushable row, without
-# dragging every Org skill's 20k-char body onto the chat hot path.
-_PUSHABLE_ID_FIELDS = ("name", "skill_name")
+# The light, identity-plus-arming projection: enough to rank/name a pushable
+# row and resolve its "Approve & run" arm, without dragging every Org skill's
+# 20k-char body onto the chat hot path. Every per-turn caller
+# (invoked_skill_slugs, resolve_armed_skill_docname, pushed_skill_names,
+# apply_would_push) requests EXACTLY this tuple so they all hit the same
+# request-scoped memo below instead of each re-scanning the table.
+_PUSHABLE_LIGHT_FIELDS = ("name", "skill_name", "allow_approve_run", "source_skill")
+_PUSHABLE_ORG_ROWS_MEMO = "_jarvis_pushable_org_rows_light"
 
 
 def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELDS) -> list:
@@ -599,7 +609,23 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	reviewer's budget projection can never drift from what Apply actually does.
 	``owner`` scopes tests only; ``fields`` trims the projection for callers that
 	only need identity (``name`` + ``skill_name`` are load-bearing here: the
-	role-restriction filter and the sort key both read them)."""
+	role-restriction filter and the sort key both read them).
+
+	The default-scope, ``_PUSHABLE_LIGHT_FIELDS`` call (every per-turn caller -
+	a turn can call ``invoked_skill_slugs``, ``resolve_armed_skill_docname`` and
+	``pushed_skill_names`` more than once) is memoized on ``frappe.local`` for
+	the rest of THIS request: one table scan instead of one per caller. Scoped
+	narrowly - only that exact, hot-path signature is cached; a caller passing
+	``owner`` (tests only) or the heavier ``_PUSHABLE_FIELDS`` (an explicit push,
+	not a per-turn read) always scans fresh. The memo is cleared whenever a
+	Jarvis Custom Skill row is written (see the doctype's ``on_update``/
+	``on_trash``), so a skill created or armed mid-request is still seen by a
+	later call in the SAME request."""
+	memoize = owner is None and fields == _PUSHABLE_LIGHT_FIELDS
+	if memoize:
+		cached = getattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO, None)
+		if cached is not None:
+			return cached
 	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
 	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.
 	filters = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
@@ -621,7 +647,22 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	# the payload and the projection consume is this Python sort, so the two can
 	# never name different dropped skills across the push cap.
 	kept.sort(key=lambda r: _pushable_sort_key(r.skill_name, r.name))
+	if memoize:
+		setattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO, kept)
 	return kept
+
+
+def _clear_pushable_org_rows_memo() -> None:
+	"""Drop the request-scoped :func:`_pushable_org_rows` memo. Called from the
+	Jarvis Custom Skill doctype's ``on_update``/``on_trash`` (mirroring
+	``_clear_personal_clause_cache``'s pattern) so a skill created, armed, or
+	disabled mid-request - a promotion approval, an admin toggle - is visible to
+	the very next call in the SAME request rather than a stale cached scan."""
+	try:
+		if hasattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO):
+			delattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO)
+	except Exception:
+		pass
 
 
 def build_push_payload(owner: str | None = None, strict: bool = False) -> list[dict]:
@@ -721,7 +762,7 @@ def pushed_skill_names() -> set[str]:
 	directory does not exist yet. Closing that last window needs per-row
 	applied-state tracking, which the bench does not have (the sync status is one
 	bench-wide Single)."""
-	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
+	rows = _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)
 	return {r.skill_name for r in rows[:MAX_SKILLS_PER_PUSH]}
 
 
@@ -732,7 +773,7 @@ def apply_would_push(name: str) -> bool:
 	outright, so asking the client to run one would only fail right after a success
 	toast). An insight applied to an Org skill returns this as ``needs_apply`` so the
 	client pushes now instead of leaving the change out until an unrelated restart."""
-	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
+	rows = _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)
 	return len(rows) <= MAX_SKILLS_PER_PUSH and any(r.name == name for r in rows)
 
 

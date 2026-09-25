@@ -19,6 +19,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import (
 	actions_api,
+	custom_skills,
 	custom_skills_api,
 	finalize,
 	pending_confirm,
@@ -537,6 +538,12 @@ def _mk_org_skill(
 	if armed:
 		frappe.db.set_value(SKILL, doc.name, "allow_approve_run", 1, update_modified=False)
 		frappe.db.commit()
+		# A raw write (bypassing the doctype's admin-only guard, deliberately -
+		# it simulates an already-armed row) does not fire on_update, so it
+		# never clears _pushable_org_rows's request memo on its own. Do it here
+		# so a resolve_armed_skill_docname/invoked_skill_slugs call right after
+		# sees this arm, not a scan cached before it.
+		custom_skills._clear_pushable_org_rows_memo()
 	return doc.name
 
 
@@ -578,19 +585,36 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		self.assertIsNone(resolve_armed_skill_docname("orgres-shadow", SLUGSET_USER_A))
 
 	def test_promoted_lineage_resolves_to_the_org_copy_when_only_it_is_armed(self):
-		"""issue #580, the arm-after-promote order: the requester's own row (the
-		promotion source) was never armed; an admin armed the shared copy AFTER
-		promoting it. The org copy - the body actually pushed and run - must
-		supersede the stale own row, not be shadowed by it."""
+		"""issue #580, the ordinary promote-then-arm order: the requester's own
+		row (the promotion source) was never armed; an admin armed the shared
+		copy AFTERWARDS through the normal toggle. The org copy - the body
+		actually pushed and run, and the one a Jarvis Admin actually reviewed
+		before arming - must supersede the stale own row, not be shadowed by it."""
 		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-orgonly")
 		shared = _mk_org_skill("orgres-lineage-orgonly", armed=True, source_skill=priv)
 		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-orgonly", SLUGSET_USER_A), shared)
 
+	def test_armed_private_source_never_auto_arms_an_unarmed_org_copy(self):
+		"""Security (code review on #580): promotion never carries the arm, and
+		the lineage collapse must not either - only the shared/org copy's OWN
+		allow_approve_run counts. An armed private source sitting next to its
+		still-unarmed Org descendant must NOT auto-run; the descendant still
+		wins the lineage (it supersedes the stale source either way), it is
+		just correctly unarmed."""
+		priv = _make_skill(SLUGSET_USER_A, armed=True, name="orgres-lineage-privarmed")
+		shared = _mk_org_skill("orgres-lineage-privarmed", armed=False, source_skill=priv)
+		self.assertIsNone(resolve_armed_skill_docname("orgres-lineage-privarmed", SLUGSET_USER_A))
+		# Confirm it's the descendant governing (unarmed), not a fallback to the
+		# armed source: arming the descendant directly now offers it.
+		frappe.db.set_value(SKILL, shared, "allow_approve_run", 1, update_modified=False)
+		custom_skills._clear_pushable_org_rows_memo()  # raw write: on_update never fired
+		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-privarmed", SLUGSET_USER_A), shared)
+
 	def test_promoted_lineage_resolves_to_the_org_copy_when_both_are_armed(self):
-		"""issue #580, the arm-then-promote order: the source was armed BEFORE
-		promotion (and _materialize_promotion's carryover keeps it armed after).
-		Both halves of the same lineage being armed must resolve cleanly to the
-		org copy, not trip the ambiguity guard meant for unrelated duplicates."""
+		"""Both halves of the same lineage independently armed (an admin can arm
+		either the private skill or its promoted copy at any time) must resolve
+		cleanly to the org copy, not trip the ambiguity guard meant for unrelated
+		duplicates."""
 		priv = _make_skill(SLUGSET_USER_A, armed=True, name="orgres-lineage-botharmed")
 		shared = _mk_org_skill("orgres-lineage-botharmed", armed=True, source_skill=priv)
 		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-botharmed", SLUGSET_USER_A), shared)
@@ -606,6 +630,71 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		gets no candidate at all, armed or not."""
 		_mk_org_skill("orgres-restricted", armed=True, allowed_roles=["Sales Manager"])
 		self.assertIsNone(resolve_armed_skill_docname("orgres-restricted", SLUGSET_USER_B))
+
+
+def _is_pushable_org_scan(args, kwargs) -> bool:
+	"""True for the exact frappe.get_all call _pushable_org_rows issues (its
+	distinctive scope filter), so a counting spy can't be fooled by an
+	unrelated Jarvis Custom Skill read (e.g. role_scoped_skill_rows) that
+	happens to request the same field list."""
+	doctype = args[0] if args else kwargs.get("doctype")
+	if doctype != SKILL:
+		return False
+	return kwargs.get("filters", {}).get("scope") == ("in", ("Org", ""))
+
+
+class TestPushableOrgRowsMemoization(FrappeTestCase):
+	"""_pushable_org_rows's request-scoped memo (issue #580 code review, perf):
+	invoked_skill_slugs, resolve_armed_skill_docname and pushed_skill_names can
+	all run within ONE turn's gate; they must share a single table scan rather
+	than each re-scanning every enabled Org skill."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_slugset_user(SLUGSET_USER_A)
+		_ensure_slugset_user(SLUGSET_USER_B)
+
+	def setUp(self):
+		custom_skills._clear_pushable_org_rows_memo()
+
+	def tearDown(self):
+		for name in frappe.get_all(SKILL, filters={"skill_name": ["like", "orgres-memo-%"]}, pluck="name"):
+			frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		custom_skills._clear_pushable_org_rows_memo()
+
+	def test_one_turn_scans_the_light_projection_once(self):
+		_mk_org_skill("orgres-memo-once", armed=True)
+		real_get_all = frappe.get_all
+		scans = []
+
+		def counting_get_all(*args, **kwargs):
+			if _is_pushable_org_scan(args, kwargs):
+				scans.append(1)
+			return real_get_all(*args, **kwargs)
+
+		with patch.object(frappe, "get_all", side_effect=counting_get_all):
+			invoked_skill_slugs("/orgres-memo-once do it", user=SLUGSET_USER_B)
+			resolve_armed_skill_docname("orgres-memo-once", SLUGSET_USER_B)
+			custom_skills.pushed_skill_names()
+		self.assertEqual(len(scans), 1, "expected one shared scan across the whole turn, not one per caller")
+
+	def test_a_skill_armed_mid_turn_is_still_seen_within_the_same_turn(self):
+		"""Correctness over the memo: arming a skill through the real endpoint
+		(a doc.save(), which fires on_update) clears it, so a read right after
+		a mid-turn arm sees the fresh state, not a scan cached before the arm."""
+		from jarvis.chat import custom_skills_api
+
+		orig_user = frappe.session.user
+		frappe.set_user("Administrator")  # passes _guard_allow_approve_run_enable
+		try:
+			docname = _mk_org_skill("orgres-memo-fresh", armed=False)
+			self.assertIsNone(resolve_armed_skill_docname("orgres-memo-fresh", SLUGSET_USER_B))
+			custom_skills_api.update_custom_skill(name=docname, allow_approve_run=1)
+		finally:
+			frappe.set_user(orig_user)
+		self.assertEqual(resolve_armed_skill_docname("orgres-memo-fresh", SLUGSET_USER_B), docname)
 
 
 # --------------------------------------------------------------------------- #

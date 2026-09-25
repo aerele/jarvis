@@ -55,6 +55,20 @@ def _clear_personal_clause_cache(owner: str | None) -> None:
 		pass
 
 
+def _clear_pushable_org_rows_memo() -> None:
+	"""_pushable_org_rows (chat/custom_skills.py) memoizes its light Org-row scan
+	for the rest of the current request; drop it on any row change so a skill
+	created, armed/disarmed, enabled, or promoted mid-request (a promotion
+	approval, an admin toggle) is seen by the very next call in the SAME
+	request instead of a stale cached scan."""
+	try:
+		from jarvis.chat.custom_skills import _clear_pushable_org_rows_memo as _clear
+
+		_clear()
+	except Exception:
+		pass
+
+
 def _managed_flag_privileged(user: str | None = None) -> bool:
 	"""True for writes allowed to touch the engine-owned ``managed_by_learning``
 	flag: the compiler (which sets ``frappe.flags.jarvis_pattern_engine``),
@@ -213,10 +227,12 @@ class JarvisCustomSkill(Document):
 
 	def on_update(self):
 		_clear_personal_clause_cache(self.owner)
+		_clear_pushable_org_rows_memo()
 		self._sync_slug_reservation()
 
 	def on_trash(self):
 		_clear_personal_clause_cache(self.owner)
+		_clear_pushable_org_rows_memo()
 		self._release_slug_reservation()
 
 	def _sync_slug_reservation(self):
