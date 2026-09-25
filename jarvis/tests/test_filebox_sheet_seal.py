@@ -846,6 +846,7 @@ class TestBoard(_SealBase):
 		self.assert_no_seal(d)
 		self.assertEqual((d["kind"], d["can_act"], d["collecting"]), (_store.SHEET, 1, 0))
 		self.assertEqual((d["record_count"], d["question_count"]), (2, 1))
+		self.assertEqual(d["conversation"], conv, "the board links the chat")
 		self.assertEqual(d["card_sha256"], _seal.card_sha256(self.row(sealed.name)))
 		sup, addr = d["records"]
 		self.assertEqual((sup["category"], sup["doctype"], sup["op"]), ("party", "Supplier", "create"))

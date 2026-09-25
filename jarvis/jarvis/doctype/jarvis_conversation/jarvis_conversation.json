@@ -217,6 +217,15 @@
    "description": "Approval sheets this File Box run opened (at most two per document: the second holds what only surfaces while drafting). Reset on a re-run. Server-set only."
   },
   {
+   "fieldname": "filebox_rerun_preamble",
+   "fieldtype": "Small Text",
+   "label": "File Box Re-run Preamble",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "A re-run's preamble (the earlier pass, quoted as data), kept while the re-run waits on a skill_missing routing question: 'Process with automatic skill selection' sends it, 'Skip this file' drops it. Server-set only."
+  },
+  {
    "fieldname": "request_autorun",
    "fieldtype": "Check",
    "label": "Request auto-run (typed 'confirm all')",

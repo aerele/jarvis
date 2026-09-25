@@ -234,6 +234,8 @@ const props = defineProps({
 	// Called with each settled answer. A callback, not an emit: Vue drops an unmounted
 	// instance's emits, and switching rows mid-decision unmounts this detail.
 	onDecided: { type: Function, default: null },
+	// Called with "sheet" when the row turns out to be an approval sheet.
+	onKind: { type: Function, default: null },
 });
 const decided = (res) => props.onDecided && props.onDecided(res);
 
@@ -273,6 +275,7 @@ async function load() {
 	try {
 		const res = await getPendingAction(props.name);
 		if (id !== req) return;
+		if (res && res.kind === "file_box_sheet" && props.onKind) return props.onKind("sheet");
 		rec.value = res || null;
 	} catch (e) {
 		if (id !== req) return;

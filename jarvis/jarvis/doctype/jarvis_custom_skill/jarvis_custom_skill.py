@@ -43,6 +43,18 @@ SCOPES = ("User", "Role", "Org")
 SKILL_DOCTYPE = "Jarvis Custom Skill"
 
 
+class FileBoxCreatesError(frappe.ValidationError):
+	"""A ``file_box_creates`` File Box can't draft (the editor shows it on that field)."""
+
+
+def file_box_creates_filters() -> dict:
+	"""DocType filters a ``file_box_creates`` must match: a submittable document outside
+	the modules an unattended File Box run never writes (the editor's picker lists these)."""
+	from jarvis.chat.held_writes import DENIED_MODULES
+
+	return {"is_submittable": 1, "istable": 0, "module": ["not in", sorted(DENIED_MODULES)]}
+
+
 def _clear_personal_clause_cache(owner: str | None) -> None:
 	"""personal_skill_clause (chat/custom_skills.py) caches a per-user count of
 	enabled Personal rows for 300s; drop it on any row change so a skill saved
@@ -398,12 +410,13 @@ class JarvisCustomSkill(Document):
 			return
 		if self._scope_change_authorized():
 			return
-		prev = frappe.db.get_value(
-			self.doctype,
-			self.name,
-			["instructions", "description", "user_invocable", "file_box_creates", "use_in_file_box"],
-			as_dict=True,
-		)
+		from jarvis.chat.pending_actions._store import filebox_migrated
+
+		fields = ["instructions", "description", "user_invocable"]
+		file_box = filebox_migrated()  # code may be served ahead of the File Box columns
+		if file_box:
+			fields += ["file_box_creates", "use_in_file_box"]
+		prev = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True)
 		if not prev:
 			return
 		# File Box: the target doctype, and opting back in (0 -> 1); opting out is free.
@@ -411,8 +424,13 @@ class JarvisCustomSkill(Document):
 			(self.instructions or "") != (prev.instructions or "")
 			or (self.description or "") != (prev.description or "")
 			or int(self.user_invocable or 0) != int(prev.user_invocable or 0)
-			or (self.file_box_creates or "") != (prev.file_box_creates or "")
-			or (int(self.use_in_file_box or 0) and not int(prev.use_in_file_box or 0))
+			or (
+				file_box
+				and (
+					(self.get("file_box_creates") or "") != (prev.file_box_creates or "")
+					or (int(self.get("use_in_file_box") or 0) and not int(prev.use_in_file_box or 0))
+				)
+			)
 		)
 		if not changed:
 			return
@@ -468,18 +486,14 @@ class JarvisCustomSkill(Document):
 	def _validate_file_box_creates(self):
 		"""The File Box target must be a document a File Box run may draft: submittable
 		and outside the modules an unattended run never writes."""
-		if not self.file_box_creates:
+		if not self.get("file_box_creates"):
 			return
-		from jarvis.chat.held_writes import DENIED_MODULES
-
-		meta = frappe.db.get_value(
-			"DocType", self.file_box_creates, ["is_submittable", "istable", "module"], as_dict=True
-		)
-		if not meta or not meta.is_submittable or meta.istable or meta.module in DENIED_MODULES:
+		if not frappe.db.exists("DocType", {"name": self.file_box_creates, **file_box_creates_filters()}):
 			frappe.throw(
 				_(
 					"File Box creates must be a submittable document type File Box may draft (e.g. {0})."
-				).format("Purchase Invoice")
+				).format("Purchase Invoice"),
+				FileBoxCreatesError,
 			)
 
 	def _validate_unique_per_owner(self):
