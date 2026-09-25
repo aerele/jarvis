@@ -1,11 +1,8 @@
 <template>
-	<!-- One held File Box write, expanded under its lane row. The card is the
+	<!-- One held File Box write, in the board's right pane. The card is the
 	     server-built "what will be created" summary rendered by PendingCard (text
 	     interpolation only - the values are model-derived from a dropped file). -->
-	<div
-		class="border-t bg-surface-white px-5 py-4"
-		:aria-busy="loading || busy !== null ? 'true' : 'false'"
-	>
+	<div :aria-busy="loading || busy !== null ? 'true' : 'false'">
 		<div v-if="loading" class="flex justify-start">
 			<JvSpinner label="Loading the proposed record…" />
 		</div>
@@ -26,10 +23,87 @@
 				<PendingCard v-if="card" :card="card" details="" />
 				<div v-else class="text-base text-ink-gray-8">{{ rec.summary }}</div>
 			</div>
+			<p
+				v-if="missingLabels.length && rec.can_act"
+				class="mt-2 rounded bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
+			>
+				{{ __("Missing: {0}", [missingText]) }}
+			</p>
 
 			<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
 				{{ closedText }}
 			</div>
+
+			<section
+				v-else-if="editing"
+				class="mt-4 flex flex-col gap-3"
+				:aria-label="__('Edit & create')"
+				:aria-busy="formLoading ? 'true' : 'false'"
+			>
+				<JvSpinner v-if="formLoading" :label="__('Loading the form…')" />
+				<template v-else>
+					<div v-for="(f, i) in forms" :key="i" class="rounded-lg border p-3">
+						<div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+							<h3 class="text-sm font-medium text-ink-gray-8">
+								{{
+									forms.length > 1
+										? __("Record {0}: {1}", [i + 1, f.doctype])
+										: f.doctype
+								}}
+							</h3>
+							<a
+								:href="deskNewUrl(f.doctype, f.values, f.secret)"
+								target="_blank"
+								rel="noopener"
+								class="text-sm text-ink-gray-6 underline"
+								>{{ __("Open full form in Desk") }}</a
+							>
+						</div>
+						<DocFieldsForm
+							v-if="f.meta"
+							:meta="f.meta"
+							:values="f.values"
+							:needs-input="f.needs"
+							:locked="f.locked"
+							:errors="f.errors"
+							@update:values="(v) => (f.values = v)"
+						/>
+						<p v-else role="alert" class="text-sm text-ink-red-5">
+							{{
+								__(
+									"This form couldn't be loaded. Create it in the full form in Desk, then choose Use existing."
+								)
+							}}
+						</p>
+					</div>
+				</template>
+				<div
+					v-if="banner"
+					role="alert"
+					class="rounded bg-surface-red-1 px-3 py-2 text-sm text-ink-red-5"
+				>
+					{{ banner }}
+				</div>
+				<div class="flex flex-wrap items-center gap-2">
+					<Button
+						variant="solid"
+						:label="__('Create & continue')"
+						:loading="busy === 'edit'"
+						:disabled="busy !== null || formLoading || editBlocked || !!ended"
+						:aria-describedby="editBlocked ? editReasonId : undefined"
+						@click="submitEdit"
+					/>
+					<Button
+						variant="ghost"
+						:label="ended ? __('Close') : __('Cancel')"
+						:disabled="busy !== null"
+						@click="ended ? decided(ended) : (editing = false)"
+					/>
+				</div>
+				<p v-if="editBlocked" :id="editReasonId" class="text-sm text-ink-amber-3">
+					{{ __("Fill {0} first.", [editMissingText]) }}
+				</p>
+			</section>
 
 			<template v-else>
 				<div class="mt-4 flex flex-wrap items-center gap-2">
@@ -37,8 +111,16 @@
 						variant="solid"
 						label="Create & continue"
 						:loading="busy === 'create'"
-						:disabled="busy !== null"
+						:disabled="busy !== null || blocked"
+						:aria-describedby="blocked ? reasonId : undefined"
 						@click="decide('create')"
+					/>
+					<Button
+						v-if="rec.can_edit"
+						variant="subtle"
+						:label="__('Edit & create')"
+						:disabled="busy !== null"
+						@click="startEdit"
 					/>
 					<Button
 						v-if="rec.can_use_existing"
@@ -58,6 +140,9 @@
 						@click="decide('skip')"
 					/>
 				</div>
+				<p v-if="blocked" :id="reasonId" class="mt-2 text-sm text-ink-amber-3">
+					{{ __("Fill {0} — use Edit & create.", [missingText]) }}
+				</p>
 				<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">
 					{{ notice }}
 				</div>
@@ -127,13 +212,17 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Autocomplete, Button, toast } from "frappe-ui";
 import PendingCard from "@/components/PendingCard.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
-import { getPendingAction, decideHeldAction } from "@/api/approvals";
-import { searchLink } from "@/api";
+import DocFieldsForm from "@/components/forms/DocFieldsForm.vue";
+import { getPendingAction, decideHeldAction, editAndCreateHeld } from "@/api/approvals";
+import { getDoctypeFormMeta, searchLink } from "@/api";
+import { deskNewUrl, errorsByKey, patchOf, stillMissing } from "@/lib/heldEdit";
+import { __ } from "@/lib/i18n";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import { errMessage, escapeHtml } from "@/lib/errors";
 import {
 	filesWaiting,
 	isSettled,
+	missingSummary,
 	outcomeMessage,
 	refusalMessage,
 	skipLabel,
@@ -142,8 +231,13 @@ import {
 
 const props = defineProps({
 	name: { type: String, required: true },
+	// Called with each settled answer. A callback, not an emit: Vue drops an unmounted
+	// instance's emits, and switching rows mid-decision unmounts this detail.
+	onDecided: { type: Function, default: null },
+	// Called with "sheet" when the row turns out to be an approval sheet.
+	onKind: { type: Function, default: null },
 });
-const emit = defineEmits(["decided"]);
+const decided = (res) => props.onDecided && props.onDecided(res);
 
 const rec = ref(null);
 const loading = ref(true);
@@ -181,6 +275,7 @@ async function load() {
 	try {
 		const res = await getPendingAction(props.name);
 		if (id !== req) return;
+		if (res && res.kind === "file_box_sheet" && props.onKind) return props.onKind("sheet");
 		rec.value = res || null;
 	} catch (e) {
 		if (id !== req) return;
@@ -209,13 +304,13 @@ async function decide(action, useExisting) {
 		const res = (await decideHeldAction(props.name, action, useExisting)) || {};
 		if (res.ok) {
 			toast.success(escapeHtml(outcomeMessage(res)));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		const message = refusalMessage(res);
 		if (isSettled(res)) {
 			toast.error(escapeHtml(message));
-			emit("decided", res);
+			decided(res);
 			return;
 		}
 		notice.value = message;
@@ -232,6 +327,106 @@ async function decide(action, useExisting) {
 	}
 }
 
+// --- Missing fields + Edit & create (PR-2d) ---
+const reasonId = computed(() => "held-reason-" + props.name);
+const editReasonId = computed(() => "held-edit-reason-" + props.name);
+const needsInput = computed(() => (rec.value && rec.value.needs_input) || []);
+const missingLabels = computed(() => needsInput.value.map((e) => e.label));
+const missingText = computed(() => missingSummary(missingLabels.value));
+const blocked = computed(() => missingLabels.value.length > 0);
+
+const editing = ref(false);
+const formLoading = ref(false);
+const forms = ref([]); // per record: {doctype, meta, original, values, needs, locked, secret, errors}
+const banner = ref("");
+const ended = ref(null); // a terminal failure: the values stay on screen until Close
+const metaCache = {};
+
+const editMissing = computed(() =>
+	forms.value.flatMap((f, i) => stillMissing(needsInput.value, i, f.values))
+);
+const editBlocked = computed(() => editMissing.value.length > 0);
+const editMissingText = computed(() => missingSummary(editMissing.value.map((e) => e.label)));
+
+async function formMeta(doctype) {
+	if (!metaCache[doctype]) {
+		const res = await getDoctypeFormMeta(doctype);
+		if (!res || !res.ok) throw new Error("no form meta");
+		metaCache[doctype] = res;
+	}
+	return metaCache[doctype];
+}
+
+async function startEdit() {
+	if (!rec.value || busy.value !== null) return;
+	editing.value = true;
+	banner.value = "";
+	ended.value = null;
+	formLoading.value = true;
+	const hidden = __("Hidden: a secret value.");
+	forms.value = (rec.value.docs || []).map((d, i) => ({
+		doctype: d.doctype,
+		meta: null,
+		original: d.values || {},
+		values: { ...(d.values || {}) },
+		needs: needsInput.value.filter((e) => (e.doc_index || 0) === i),
+		locked: {
+			...(d.locked || {}),
+			...Object.fromEntries((d.secret || []).map((k) => [k, hidden])),
+		},
+		secret: d.secret || [],
+		errors: {},
+	}));
+	await Promise.all(
+		forms.value.map(async (f) => {
+			try {
+				f.meta = await formMeta(f.doctype);
+			} catch {
+				f.meta = null;
+			}
+		})
+	);
+	formLoading.value = false;
+}
+
+async function submitEdit() {
+	if (busy.value !== null || editBlocked.value || ended.value) return;
+	busy.value = "edit";
+	banner.value = "";
+	forms.value.forEach((f) => (f.errors = {}));
+	try {
+		const patches = forms.value.map((f) => patchOf(f.original, f.values));
+		const res = (await editAndCreateHeld(props.name, patches)) || {};
+		if (res.ok) {
+			toast.success(escapeHtml(outcomeMessage(res)));
+			decided(res);
+			return;
+		}
+		if (res.reason_code === "exists") {
+			// The party exists now: back to the decisions, straight to Use existing.
+			editing.value = false;
+			notice.value = refusalMessage(res);
+			await load();
+			if (rec.value && rec.value.can_use_existing) await focusExisting();
+			return;
+		}
+		forms.value.forEach((f, i) => (f.errors = errorsByKey(res.errors, i)));
+		banner.value = refusalMessage(res);
+		if (isSettled(res)) ended.value = res; // Failed after the claim: keep the values
+	} catch (e) {
+		banner.value = errMessage(e);
+	} finally {
+		busy.value = null;
+	}
+}
+
+// The board calls this when the row leaves its rail: show the settled status, but
+// never over a decision in flight or an open edit (a failure keeps its values).
+function refresh() {
+	if (busy.value === null && !editing.value) load();
+}
+
 onMounted(load);
 onBeforeUnmount(() => linkSearch.cleanup());
+defineExpose({ refresh });
 </script>

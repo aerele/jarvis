@@ -24,6 +24,7 @@ from jarvis.chat.pending_actions._store import (
 	FAILED,
 	PENDING,
 	REASON_TEXT,
+	SHEET,
 	TERMINAL,
 	_terminal_update,
 	claim,
@@ -31,7 +32,9 @@ from jarvis.chat.pending_actions._store import (
 )
 from jarvis.permissions import is_valid_unattended_owner, refuse_in_tool_dispatch
 
-_PROVENANCE = {"chat": "chat", "file_box_held": "approval"}
+_PROVENANCE = {"chat": "chat", "file_box_held": "approval", SHEET: "approval"}
+# Kinds a System Manager may act on for another user (the File Box dropper's).
+_SM_KINDS = frozenset({"file_box_held", SHEET})
 _SYSTEM_MANAGER = "System Manager"
 
 
@@ -71,15 +74,18 @@ _IDENTITY = (
 )
 
 
-def authorize(row, approver: str, kind: str, conversation: str | None = None) -> tuple[bool, str | None]:
+def authorize(
+	row, approver: str, kind: str, conversation: str | None = None, *, acting: bool = True
+) -> tuple[bool, str | None]:
 	"""D1 owner rule + the replay guard (no lock). Returns ``(allowed, adopt)``:
 	chat rows are owner-only (an SM too); a System Manager may act on another user's
-	held row. A caller-passed conversation must be the row's, or an owned
+	held row or sheet. A sheet still collecting may be read (``acting=False``), never
+	acted on. A caller-passed conversation must be the row's, or an owned
 	conversation a conversation-less card adopts (D9)."""
-	if not row or row.kind != kind:
+	if not row or row.kind != kind or (acting and kind == SHEET and row.get("collecting")):
 		return False, None
 	if row.owner_user != approver and not (
-		kind == "file_box_held" and _SYSTEM_MANAGER in frappe.get_roles(approver)
+		kind in _SM_KINDS and _SYSTEM_MANAGER in frappe.get_roles(approver)
 	):
 		return False, None
 	passed = str(conversation or "").strip()
@@ -92,7 +98,7 @@ def authorize(row, approver: str, kind: str, conversation: str | None = None) ->
 
 
 def _preflight(row, approver: str, arm: ArmHook | None) -> dict | None:
-	"""Non-consuming refusals under the row lock; the row stays Pending."""
+	"""Refusals under the row lock; the row stays Pending."""
 	if row.conversation and frappe.db.get_value(CONV, row.conversation, "skip_confirmation"):
 		return _refusal(*_ARMED)
 	if arm:
@@ -121,14 +127,37 @@ def _stale_code(targets) -> str | None:
 	return None
 
 
-def _handled(row) -> dict:
+def outcome_of(status: str | None, reason_code: str | None, tool: str | None) -> str | None:
+	"""The chip of a terminal row, None while it is Pending/Executing."""
+	return outcome_for(status, reason_code, tool) if status in TERMINAL else None
+
+
+def handled(row, message: str = _NOT_FOUND[1]) -> dict:
+	"""The refusal for a row that is no longer Pending (every reply carries
+	``reason_code`` / ``pa_status`` / ``outcome``)."""
 	code = "executing" if row.status == EXECUTING else "already_handled"
-	outcome = outcome_for(row.status, row.reason_code, row.tool) if row.status in TERMINAL else None
-	return _refusal(code, _NOT_FOUND[1], pa_status=row.status, outcome=outcome)
+	return _refusal(
+		code, message, pa_status=row.status, outcome=outcome_of(row.status, row.reason_code, row.tool)
+	)
 
 
-def _dispatch(row, args: dict) -> tuple[dict | None, bool, str]:
-	"""Run the sealed call as ``exec_user``. Returns ``(result, interfered, crash_tb)``.
+def value_free(fn, title: str, *args, **kwargs):
+	"""AC-U4: run ``fn`` so the unsealed call lives only in its frames; an escaping
+	error is logged without locals (``jarvis.pending_action.<title>``) and re-raised
+	value-free, unchained."""
+	try:
+		return fn(*args, **kwargs)
+	except Exception:
+		tb = frappe.get_traceback()
+		frappe.db.rollback()
+		frappe.log_error(title=f"jarvis.pending_action.{title}", message=tb)
+		frappe.db.commit()
+		raise ExecuteCrashed(_CRASHED) from None
+
+
+def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None, bool, str]:
+	"""Run the sealed call as ``exec_user`` (or ``user``: an Edit & create runs as the
+	approver). Returns ``(result, interfered, crash_tb)``.
 
 	``interfered``: the transaction was not ours start to finish. A mid-dispatch
 	commit (``run_import``, DDL) pops and runs the ``before_commit`` sentinel; a
@@ -144,12 +173,12 @@ def _dispatch(row, args: dict) -> tuple[dict | None, bool, str]:
 	crash_tb = ""
 	result = None
 	try:
-		with impersonate(row.exec_user):
+		with impersonate(user or row.exec_user):
 			result = api.dispatch_confirmed(
 				row.tool,
 				args,
 				provenance=_PROVENANCE[row.kind],
-				provenance_name=row.name if row.kind == "file_box_held" else "",
+				provenance_name=row.name if row.kind != "chat" else "",
 			)
 			api._apply_run_method_read_filter(row.tool, result)
 	except Exception:
@@ -160,7 +189,7 @@ def _dispatch(row, args: dict) -> tuple[dict | None, bool, str]:
 	return result, interfered, crash_tb
 
 
-def _discard_failed_dispatch(row, args: dict, crash_tb: str) -> None:
+def _discard_failed_dispatch(row, args: dict, crash_tb: str, *, actor: str | None = None) -> None:
 	"""Full rollback of a failed dispatch, then re-record what must survive it."""
 	from jarvis import agent_audit
 
@@ -171,16 +200,29 @@ def _discard_failed_dispatch(row, args: dict, crash_tb: str) -> None:
 	if hasattr(frappe.local, "_link_count"):
 		del frappe.local._link_count
 	agent_audit.record_write(
-		actor=row.exec_user,
+		actor=actor or row.exec_user,
 		tool=row.tool,
 		args=args,
 		result=None,
 		outcome="failed",
 		provenance=_PROVENANCE[row.kind],
-		provenance_name=row.name if row.kind == "file_box_held" else "",
+		provenance_name=row.name if row.kind != "chat" else "",
 	)
 	if crash_tb:
 		frappe.log_error(title="jarvis.pending_action.dispatch_crashed", message=crash_tb)
+
+
+def late_outcome(name: str, status: str, code: str | None, outcome: str) -> None:
+	"""The row moved on while the call ran (the reconciler's interrupted): its verdict
+	stands; the real outcome is appended and logged. Does not commit."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET reason=CONCAT(IFNULL(reason, ''), %(late)s) WHERE name=%(n)s",
+		{"n": name, "late": f" Late outcome: {outcome}."},
+	)
+	frappe.log_error(
+		title="jarvis.pending_action.late_outcome",
+		message=f"{name}: finished {status} ({code or 'ok'}) after the reconciler's verdict",
+	)
 
 
 def _result_ref(args: dict, result) -> tuple[str, str]:
@@ -191,15 +233,18 @@ def _result_ref(args: dict, result) -> tuple[str, str]:
 	return doctype or "", name or ""
 
 
-def _fail_unrun(row, approver: str, code: str, binding: str = "") -> dict:
-	"""Step 5: a seal or staleness failure ends the row without dispatching."""
-	_terminal_update(row.name, [PENDING], FAILED, reason_code=code, decided_by=approver)
+def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=None, defer=False) -> dict:
+	"""Step 5: a seal or staleness failure ends the row without dispatching. In a typed
+	batch it joins the batch and waits for ``settle_batch`` (ONE continuation)."""
+	cols = {"batch_id": batch_id} if batch_id else {}
+	_terminal_update(row.name, [PENDING], FAILED, reason_code=code, decided_by=approver, **cols)
 	if code in ("tampered", "unverifiable"):
 		frappe.log_error(
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()
-	settle(row.name)
+	if not defer:
+		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
 
 
@@ -224,18 +269,17 @@ def execute(
 	allowed, adopt = authorize(get_row(name) if name else None, approver, kind, conversation)
 	if not allowed:
 		return _refusal(*_NOT_FOUND)
-	try:
-		return _execute_locked(
-			name, approver, adopt, defer_continuation=defer_continuation, batch_id=batch_id, arm=arm
-		)
-	except Exception:
-		# AC-U4: the row and the unsealed call live only in the inner frames. Log the
-		# traceback without locals; re-raise value-free, unchained.
-		tb = frappe.get_traceback()
-		frappe.db.rollback()
-		frappe.log_error(title="jarvis.pending_action.execute_crashed", message=tb)
-		frappe.db.commit()
-		raise ExecuteCrashed(_CRASHED) from None
+	# AC-U4: the row and the unsealed call live only in the inner frames.
+	return value_free(
+		_execute_locked,
+		"execute_crashed",
+		name,
+		approver,
+		adopt,
+		defer_continuation=defer_continuation,
+		batch_id=batch_id,
+		arm=arm,
+	)
 
 
 def _execute_locked(
@@ -256,19 +300,20 @@ def _execute_locked(
 		frappe.db.commit()
 		if row.status in TERMINAL and not row.settled:
 			settle(name)
-		return _handled(row)
+		return handled(row)
 
 	refused = _preflight(row, approver, arm)
 	if refused:
 		frappe.db.rollback()
 		return refused
+	unrun = {"batch_id": batch_id, "defer": defer_continuation}
 	try:
 		call = _seal.unseal_call(row)
 	except _seal.SealError as e:
-		return _fail_unrun(row, approver, e.reason_code, e.binding)
+		return _fail_unrun(row, approver, e.reason_code, e.binding, **unrun)
 	stale = _stale_code(call.get("targets"))
 	if stale:
-		return _fail_unrun(row, approver, stale)
+		return _fail_unrun(row, approver, stale, **unrun)
 
 	if not claim(name, approver, batch_id=batch_id, adopted_conversation=adopt):
 		frappe.db.rollback()
@@ -315,15 +360,7 @@ def _execute_locked(
 		sealed_settlement=_seal.seal_settlement(name, {"result": result, "outcome": outcome}),
 	)
 	if not done:
-		# The reconciler already called it interrupted: its verdict stands.
-		frappe.db.sql(
-			"UPDATE `tabJarvis Pending Action` SET reason=CONCAT(IFNULL(reason, ''), %(late)s) WHERE name=%(n)s",
-			{"n": name, "late": f" Late outcome: {outcome}."},
-		)
-		frappe.log_error(
-			title="jarvis.pending_action.late_outcome",
-			message=f"{name}: finished {status} ({code or 'ok'}) after the reconciler's verdict",
-		)
+		late_outcome(name, status, code, outcome)
 	frappe.db.commit()
 
 	if ok and done and arm:

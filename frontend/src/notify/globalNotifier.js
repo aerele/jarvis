@@ -266,6 +266,10 @@ export function attachGlobalNotifier({ socket, router }) {
 				});
 				return;
 			}
+			case "action:settled":
+				// a card or held write was decided somewhere: the badge may have dropped
+				store.refreshApprovalsCount();
+				return;
 			case "trigger:activity": {
 				// A trigger run the user would want to hear about: Failed / Blocked
 				// always; Success only for LLM actions (the "warn me when…" case —

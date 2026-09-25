@@ -86,6 +86,27 @@ def _skill_names_shared_with(user: str) -> list[str]:
 	]
 
 
+def _file_box_cols(*fields: str) -> list[str]:
+	"""File Box's skill columns among ``fields``, once migrated (code may be served
+	ahead of migrate)."""
+	meta = frappe.get_meta(SKILL)
+	return [f for f in fields if meta.has_field(f)]
+
+
+def _shared_fields() -> list[str]:
+	# ``use_in_file_box``: the File Box pin picker offers only skills File Box may use.
+	return [
+		"name",
+		"skill_name",
+		"description",
+		"user_invocable",
+		"enabled",
+		*_file_box_cols("use_in_file_box"),
+		"owner",
+		"modified",
+	]
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def list_custom_skills() -> list[dict]:
@@ -98,7 +119,15 @@ def list_custom_skills() -> list[dict]:
 	own = frappe.get_all(
 		SKILL,
 		filters={"owner": me},
-		fields=["name", "skill_name", "description", "user_invocable", "enabled", "modified"],
+		fields=[
+			"name",
+			"skill_name",
+			"description",
+			"user_invocable",
+			"enabled",
+			*_file_box_cols("use_in_file_box"),
+			"modified",
+		],
 		order_by="skill_name asc",
 	)
 	# One grouped query for ALL own rows' share counts (was an N+1 count per
@@ -123,7 +152,7 @@ def list_custom_skills() -> list[dict]:
 		rows = frappe.get_all(
 			SKILL,
 			filters={"name": ["in", shared_names], "enabled": 1},
-			fields=["name", "skill_name", "description", "user_invocable", "enabled", "owner", "modified"],
+			fields=_shared_fields(),
 			order_by="skill_name asc",
 		)
 		for s in rows:
@@ -141,7 +170,7 @@ def list_custom_skills() -> list[dict]:
 		r
 		for r in role_scoped_skill_rows(
 			me,
-			["name", "skill_name", "description", "user_invocable", "enabled", "owner", "modified"],
+			_shared_fields(),
 		)
 		if r["name"] not in seen
 	]
@@ -279,9 +308,10 @@ def list_custom_skills_page(
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Custom Skill` WHERE {where}", params)[
 		0
 	][0]
+	file_box = "".join(f", {c}" for c in _file_box_cols("use_in_file_box", "file_box_creates"))
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, skill_name, description, user_invocable, enabled, modified, owner,
-			ifnull(scope, 'Org') AS scope
+			ifnull(scope, 'Org') AS scope{file_box}
 		FROM `tabJarvis Custom Skill`
 		WHERE {where}
 		ORDER BY {order}
@@ -358,10 +388,12 @@ def get_custom_skill(name: str) -> dict:
 		# UI's disable state - the server guard, not this flag, is authoritative.
 		"allow_approve_run": int(doc.get("allow_approve_run") or 0),
 		"can_arm": int(has_jarvis_admin_access(me)),
+		"use_in_file_box": int(doc.get("use_in_file_box") or 0),
+		"file_box_creates": doc.get("file_box_creates") or "",
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def create_custom_skill(
 	skill_name: str,
@@ -369,9 +401,20 @@ def create_custom_skill(
 	instructions: str,
 	user_invocable: int = 1,
 	enabled: int = 1,
+	use_in_file_box: int = 1,
+	file_box_creates: str | None = None,
 ) -> dict:
-	"""Create a skill. Validation (slug/caps) runs in the doctype's validate()."""
-	return _create_custom_skill_impl(skill_name, description, instructions, user_invocable, enabled)
+	"""Create a skill. Validation (slug/caps, the File Box target) runs in the
+	doctype's validate()."""
+	return _create_custom_skill_impl(
+		skill_name,
+		description,
+		instructions,
+		user_invocable,
+		enabled,
+		use_in_file_box=use_in_file_box,
+		file_box_creates=file_box_creates,
+	)
 
 
 def _create_custom_skill_impl(
@@ -382,6 +425,8 @@ def _create_custom_skill_impl(
 	enabled: int = 1,
 	scope: str | None = None,
 	ignore_permissions: bool = False,
+	use_in_file_box: int = 1,
+	file_box_creates: str | None = None,
 ) -> dict:
 	"""Undecorated core of :func:`create_custom_skill`. Split out so a trusted
 	server caller already authorized by its own gate can create a skill without
@@ -403,6 +448,8 @@ def _create_custom_skill_impl(
 		"instructions": instructions,
 		"user_invocable": int(user_invocable or 0),
 		"enabled": int(enabled or 0),
+		"use_in_file_box": int(use_in_file_box or 0),
+		"file_box_creates": file_box_creates or None,
 	}
 	if scope:
 		fields["scope"] = scope
@@ -422,7 +469,7 @@ def _create_custom_skill_impl(
 	return {"ok": True, "data": {"name": doc.name, "skill_name": doc.skill_name}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def update_custom_skill(
 	name: str,
@@ -432,8 +479,12 @@ def update_custom_skill(
 	user_invocable: int | None = None,
 	enabled: int | None = None,
 	allow_approve_run: int | None = None,
+	use_in_file_box: int | None = None,
+	file_box_creates: str | None = None,
 ) -> dict:
-	"""Update provided fields of a skill (owner-gated).
+	"""Update provided fields of a skill (owner-gated). ``file_box_creates=""``
+	clears the File Box target; the doctype validates it, and review-gates it and
+	``use_in_file_box`` 0 -> 1 on a Role/Org skill (``_guard_content_change``).
 
 	``allow_approve_run`` (the "Approve & run" arm) is owner-gated like every
 	other field here, but ENABLING it (0 -> 1) additionally requires a Jarvis
@@ -455,6 +506,10 @@ def update_custom_skill(
 		doc.enabled = int(enabled)
 	if allow_approve_run is not None:
 		doc.allow_approve_run = int(allow_approve_run)
+	if use_in_file_box is not None:
+		doc.use_in_file_box = int(use_in_file_box)
+	if file_box_creates is not None:
+		doc.file_box_creates = file_box_creates or None
 	# SR4-2: editing a SHARED (Role/Org) skill - an enable/disable, a rename, a
 	# reviewer content edit - changes the shared push budget or the reserved slug, so
 	# serialize it with promotion approvals on the catalog-wide lock, held THROUGH
@@ -468,6 +523,19 @@ def update_custom_skill(
 		doc.save()
 		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def file_box_doctypes(txt: str = "") -> list[str]:
+	"""The editor's "File Box creates" search: document types matching ``txt`` that
+	the doctype accepts there (the same rule, ``file_box_creates_filters``)."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import file_box_creates_filters
+
+	filters = file_box_creates_filters()
+	if txt:
+		filters["name"] = ["like", f"%{_lk(str(txt))}%"]
+	return frappe.get_all("DocType", filters=filters, pluck="name", order_by="name asc", limit=20)
 
 
 @frappe.whitelist()
@@ -735,6 +803,9 @@ def request_skill_promotion(
 			"instructions_snapshot": doc.instructions or "",
 			"description_snapshot": doc.description or "",
 			"user_invocable_snapshot": int(doc.user_invocable or 0),
+			# File Box routing publishes too (the reviewer sees it on the card).
+			"use_in_file_box_snapshot": int(doc.get("use_in_file_box") or 0),
+			"file_box_creates_snapshot": doc.get("file_box_creates") or None,
 			"from_scope": from_scope,
 			"to_scope": to_scope,
 			"target_role": target_role if to_scope == "Role" else None,
@@ -934,6 +1005,12 @@ def _materialize_promotion(req, roles=None) -> dict:
 	instructions = req.get("instructions_snapshot")
 	description = req.get("description_snapshot") or ""
 	user_invocable = int(req.get("user_invocable_snapshot"))
+	# File Box routing, as reviewed; the skill's validate() re-checks the target. A
+	# request older than these fields reads (1, None): what its skill then had.
+	file_box = {
+		"use_in_file_box": int(req.get("use_in_file_box_snapshot") or 0),
+		"file_box_creates": req.get("file_box_creates_snapshot") or None,
+	}
 	# ``roles`` is the reviewer-approved EFFECTIVE audience (the subset the reviewer
 	# kept — validated in ``decide_skill_promotion`` as a subset of the request). When
 	# not passed, fall back to the request's FULL ``target_roles`` child rows, then the
@@ -1021,6 +1098,7 @@ def _materialize_promotion(req, roles=None) -> dict:
 			shared.description = description
 			shared.instructions = instructions
 			shared.user_invocable = user_invocable
+			shared.update(file_box)
 			shared.enabled = 1
 			shared.save(ignore_permissions=True)
 			new_name = shared.name
@@ -1032,6 +1110,7 @@ def _materialize_promotion(req, roles=None) -> dict:
 					"description": description,
 					"instructions": instructions,
 					"user_invocable": user_invocable,
+					**file_box,
 					"enabled": 1,
 					"scope": req.to_scope,
 					"target_role": target_role,
@@ -1092,10 +1171,16 @@ def list_skill_promotion_requests(
 	where = " AND ".join(conds) or "1=1"
 
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
+	# File Box's snapshot columns, once migrated (code may be served ahead of migrate).
+	file_box = (
+		", use_in_file_box_snapshot, file_box_creates_snapshot"
+		if frappe.get_meta(PROMO).has_field("file_box_creates_snapshot")
+		else ""
+	)
 	rows = frappe.db.sql(
 		f"""SELECT name, skill, skill_name, from_scope, to_scope, target_role,
 			note, status, owner, creation, reviewer, decided_at, decision_note,
-			instructions_snapshot, description_snapshot, user_invocable_snapshot
+			instructions_snapshot, description_snapshot, user_invocable_snapshot{file_box}
 		FROM `tab{PROMO}`
 		WHERE {where}
 		ORDER BY creation DESC, name ASC
@@ -1191,6 +1276,10 @@ def list_skill_promotion_requests(
 		live = legacy_live.get(r.get("skill"))
 		return int(live.user_invocable or 0) if live else None
 
+	def _file_box_preview(r):
+		snap = r.get("use_in_file_box_snapshot")
+		return int(snap) if r.get("status") == "Pending" and snap is not None else None
+
 	def _projection(r):
 		# Server-side push-budget projection for a Pending Org promotion, sharing
 		# build_push_payload's exact logic (CDX-SP-2). The client renders THIS, not
@@ -1224,6 +1313,11 @@ def list_skill_promotion_requests(
 			# so the reviewer card + approve confirm render them alongside the body.
 			"description_snapshot": _desc_preview(r),
 			"user_invocable_snapshot": _ui_preview(r),
+			# File Box routing approval publishes (Pending rows only, as above).
+			"use_in_file_box_snapshot": _file_box_preview(r),
+			"file_box_creates_snapshot": (
+				(r.get("file_box_creates_snapshot") or "") if r.get("status") == "Pending" else ""
+			),
 			"push_projection": _projection(r),
 		}
 		for r in rows

@@ -153,7 +153,17 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     created_at: 1600,
     expires_at: 1700,
     approve_run: false,
+    recent: true,
   });
+});
+
+test("action:pending keeps the server's Earlier marking (decision 6)", () => {
+  const s = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "t1",
+    recent: false,
+  });
+  assert.equal(s.pending[0].recent, false);
 });
 
 // P1 (skill approve-and-run, §3.5): the widget is text-only and has no rich

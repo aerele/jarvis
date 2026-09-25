@@ -177,13 +177,17 @@ def resolve_on_user_message(conversation: str) -> None:
 	approval there is now answered in chat — flip it to "Answered" so the
 	board row never goes stale or double-answered. One indexed UPDATE
 	(conversation is search_index'd); decided rows are untouched, so a
-	board decide() that resumes the chat never re-flips its own row."""
+	board decide() that resumes the chat never re-flips its own row. A File Box
+	sheet's question is answered with its sheet, never here."""
+	from jarvis.jarvis.doctype.jarvis_approval_request.jarvis_approval_request import sheet_ready
+
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Answered', decision=%(decision)s,
 			decided_by=%(user)s, decided_at=%(now)s
 		where conversation=%(conversation)s
-		and status='Pending' and source='Chat'""",
+		and status='Pending' and source='Chat'"""
+		+ (" and IFNULL(sheet, '')=''" if sheet_ready() else ""),
 		{
 			"decision": _ANSWERED_DECISION,
 			"user": frappe.session.user,

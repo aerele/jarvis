@@ -76,6 +76,18 @@ def fake_dispatch(fn=None):
 		yield calls
 
 
+def draft_doctype() -> str | None:
+	"""A submittable doctype a File Box run may draft (outside its denied modules)."""
+	from jarvis.chat.held_writes import DENIED_MODULES
+
+	return frappe.db.get_value(
+		"DocType",
+		{"is_submittable": 1, "istable": 0, "issingle": 0, "module": ["not in", sorted(DENIED_MODULES)]},
+		"name",
+		order_by="name asc",
+	)
+
+
 def wipe_rows() -> None:
 	frappe.db.sql(
 		f"DELETE FROM `tab{WAITER}` WHERE parent IN (SELECT name FROM `tab{PA}` WHERE owner_user IN %(u)s)",

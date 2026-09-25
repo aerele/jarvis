@@ -3,7 +3,8 @@
 - ``items_of(tool, args)``: one ``{doctype, values, name, op}`` per record written;
 - ``item_key(item)``: the per-item dedup key, scoped by doctype: the normalised GSTIN
   (``gstin``, else ERPNext's ``tax_id``), else the normalised party name, else a
-  canonical args hash (an update keys on its target);
+  canonical args hash (an update keys on its target + a hash of its changes; an
+  Address on its party, type and spot, as a sheet keys it);
 - ``find_existing(...)``: records that already look like the party, read as the
   CURRENT user (callers impersonate the row's ``exec_user``)."""
 
@@ -88,36 +89,42 @@ def tax_field(meta) -> str | None:
 
 
 def is_party(doctype: str) -> bool:
-	"""A party master (it carries a tax identity): Supplier, Customer, ..."""
-	return bool(tax_field(_meta(doctype)))
+	"""A party master (it carries a tax identity): Supplier, Customer, ... Never an
+	Address: India Compliance puts its party's GSTIN on it, and a party has many."""
+	return doctype != "Address" and bool(tax_field(_meta(doctype)))
 
 
 def party_of(item: dict) -> dict:
-	"""``{doctype, title, gstin}`` for one item (empty strings when unknown)."""
+	"""``{doctype, title, gstin}`` for one item (empty strings when unknown). An
+	Address has no gstin here: one GSTIN sits on a party's several addresses."""
 	meta = _meta(item["doctype"])
 	values = item["values"]
-	tax = tax_field(meta)
+	tax = tax_field(meta) if item["doctype"] != "Address" else None
 	gstin = norm_gstin(values.get(tax)) if tax else ""
 	field = title_field(meta)
 	title = " ".join(str(values.get(field) or "").split()) if field else ""
 	return {"doctype": item["doctype"], "title": title or item.get("name") or "", "gstin": gstin}
 
 
+def _digest(value) -> str:
+	canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+	return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def item_key(item: dict) -> str:
 	if item["op"] == "update":
-		return f"doc:{item['doctype']}:{item['name']}"
+		# Two different changes to one record are two decisions, never one row.
+		return f"doc:{item['doctype']}:{item['name']}:{_digest(item['values'])}"
+	if item["doctype"] == "Address":
+		from jarvis.chat import held_sheets  # it imports this module
+
+		return held_sheets.identities(item)[0]
 	party = party_of(item)
 	if party["gstin"]:
 		return f"gstin:{item['doctype']}:{party['gstin']}"
 	if norm_name(party["title"]):
 		return f"name:{item['doctype']}:{norm_name(party['title'])}"
-	canonical = json.dumps(
-		{"doctype": item["doctype"], "values": item["values"]},
-		sort_keys=True,
-		separators=(",", ":"),
-		default=str,
-	)
-	return "args:" + hashlib.sha256(canonical.encode()).hexdigest()
+	return "args:" + _digest({"doctype": item["doctype"], "values": item["values"]})
 
 
 def is_party_key(key: str) -> bool:
@@ -125,10 +132,17 @@ def is_party_key(key: str) -> bool:
 
 
 def find_existing(
-	doctype: str, *, title: str = "", gstin: str = "", limit: int = MAX_CANDIDATES
+	doctype: str,
+	*,
+	title: str = "",
+	gstin: str = "",
+	limit: int = MAX_CANDIDATES,
+	ignore_permissions: bool = False,
 ) -> list[dict]:
 	"""Existing ``doctype`` records matching the GSTIN or the normalised name, as
-	``[{name, title, gstin}]``; permission-scoped to the current user."""
+	``[{name, title, gstin}]``; permission-scoped to the current user unless
+	``ignore_permissions``. A name match carrying a different tax id is another
+	registration, not this party."""
 	meta = _meta(doctype)
 	if not meta or meta.istable or meta.issingle:
 		return []
@@ -139,7 +153,13 @@ def find_existing(
 
 	def _scan(filters, cap):
 		try:
-			return frappe.get_list(doctype, filters=filters, fields=fields, limit_page_length=cap)
+			return frappe.get_list(
+				doctype,
+				filters=filters,
+				fields=fields,
+				limit_page_length=cap,
+				ignore_permissions=ignore_permissions,
+			)
 		except frappe.PermissionError:
 			return []
 
@@ -149,10 +169,16 @@ def find_existing(
 			found.setdefault(r.name, r)
 	want = norm_name(title)
 	if want:
-		token = max(want.split(), key=len)
+		raw = " ".join(str(title).split())
 		for column in [c for c in (field, "name") if c]:
-			for r in _scan([[column, "like", f"%{token}%"]], _LIKE_SCAN):
-				if want in (norm_name(r.get(field) if field else ""), norm_name(r.name)):
+			# The exact value first, then every token (never one token's first page).
+			for filters in ({column: raw}, [[column, "like", f"%{t}%"] for t in want.split()]):
+				for r in _scan(filters, _LIKE_SCAN):
+					if want not in (norm_name(r.get(field) if field else ""), norm_name(r.name)):
+						continue
+					theirs = norm_gstin(r.get(tax)) if tax else ""
+					if gstin and theirs and theirs != gstin:
+						continue
 					found.setdefault(r.name, r)
 	return [
 		{
