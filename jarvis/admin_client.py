@@ -1264,6 +1264,34 @@ def post_subscription_connect(
 	)
 
 
+def post_subscription_handover(
+	provider: str,
+	blob: dict,
+	llm_provider: str,
+	*,
+	model: str,
+	base_url: str,
+	installed_apps: list[str] | None = None,
+) -> dict:
+	"""POST admin's ``api.tenant.subscription_handover`` (jarvis#1425): move a
+	proxied ChatGPT-only workspace to the direct leg. Same arguments as
+	``post_subscription_connect``; ``blob`` has ``id_token`` stripped. 270 s,
+	above admin's 240 s fleet leg. A lost response is safe to retry: the fleet
+	route is a no-op once the tenant is direct."""
+	return _post(
+		path=_m(_SUBSCRIPTION_HANDOVER_METHOD),
+		body={
+			"provider": provider,
+			"blob": blob,
+			"llm_provider": llm_provider,
+			"model": model,
+			"base_url": base_url,
+			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
+		},
+		timeout_s=270,
+	)
+
+
 # --- Claude browser sign-in relay (CLAUDE-LOGIN-CONTRACT.md) ---------------
 #
 # Jarvis never runs an OAuth exchange for Anthropic itself: the official
@@ -2357,6 +2385,7 @@ def _contract_error(payload) -> dict:
 # the method name after it is the constant part).
 _METHOD_NOT_FOUND_MARKER = "Failed to get method for command"
 _SUBSCRIPTION_CONNECT_METHOD = "api.tenant.subscription_connect"
+_SUBSCRIPTION_HANDOVER_METHOD = "api.tenant.subscription_handover"
 
 
 def is_method_not_found(exc: AdminValidationError) -> bool:
@@ -2397,6 +2426,35 @@ def is_method_not_found(exc: AdminValidationError) -> bool:
 		return False
 	text = str(exc)
 	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_CONNECT_METHOD in text
+
+
+HANDOVER_UNSUPPORTED_CODE = "HandoverUnsupported"
+
+
+def is_handover_unsupported(exc: Exception) -> bool:
+	"""Admin or its fleet host cannot do the handover yet: fall back to the pool push.
+
+	CR-4 (2026-09-25 review): deliberately does NOT delegate to is_method_not_found.
+	That function's own code-less text fallback also matches _SUBSCRIPTION_CONNECT_METHOD
+	("api.tenant.subscription_connect") - an unrelated dotted path - so a stale admin
+	rejection naming THAT endpoint (present, subscription_handover missing) used to be
+	misread as "handover unsupported" too. The code-less + exc_type gate is the same one
+	is_method_not_found uses (a coded or re-typed rejection can never be a bare missing-
+	method answer), computed inline here and checked only against the markers this
+	function actually cares about: Frappe's own fixed English marker
+	(_METHOD_NOT_FOUND_MARKER) or subscription_handover's own dotted path
+	(_SUBSCRIPTION_HANDOVER_METHOD) - the latter for a translated admin locale that
+	leaves only the interpolated method name intact."""
+	if getattr(exc, "code", "") == HANDOVER_UNSUPPORTED_CODE:
+		return True
+	if not isinstance(exc, AdminValidationError):
+		return False
+	if getattr(exc, "code", ""):
+		return False
+	if getattr(exc, "exc_type", None) not in (None, "ValidationError"):
+		return False
+	text = str(exc)
+	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_HANDOVER_METHOD in text
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:

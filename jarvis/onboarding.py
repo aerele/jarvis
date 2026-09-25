@@ -766,7 +766,7 @@ def save_llm_pool(
 	_bust_chat_gate()
 
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import sync_pool_now
-	from jarvis.jarvis.pool_serialize import compute_pool_mode
+	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
 
 	apply_operation = None
 	resumable = False
@@ -783,7 +783,15 @@ def save_llm_pool(
 	# poll rather than after it. Keyed on llm_auth_mode, the same field
 	# _sync_via_admin branches on to cause the second restart - not re-derived.
 	readiness_budget_s = None
-	if compute_pool_mode(s):
+	if lone_direct_handover_due(s):
+		# jarvis#1425: Settings Apply always runs a due handover (this is how a
+		# workspace already stuck on the proxy moves). No apply-operation
+		# descriptor: the SPA follows the legacy readiness poll, sized like the
+		# direct subscription leg.
+		s._enqueue_handover()
+		mode = "legacy"
+		readiness_budget_s = 300
+	elif compute_pool_mode(s):
 		# The durable apply operation lives on the POOL path (admin creates it in
 		# update_llm_pool). Push synchronously and hand its descriptor back so the
 		# SPA follows ONE operation across save -> apply -> readiness.
@@ -2648,7 +2656,7 @@ def resync_llm() -> dict:
 		_stamp_converged_ok,
 		request_resync,
 	)
-	from jarvis.jarvis.pool_serialize import compute_pool_mode
+	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
 
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
@@ -2661,12 +2669,16 @@ def resync_llm() -> dict:
 		return {**_sync_status_payload(settings, status), "outcome": "not_configured", "leg": ""}
 
 	state, _reason = _admin_chat_readiness()
-	if state == "Ready":
+	if state == "Ready" and not lone_direct_handover_due(settings):
 		# READY MEANS NEVER PUSH, whether or not our own stamp lands. Making the push
 		# conditional on the stamp succeeding would restart a healthy container in
 		# precisely the situation this endpoint exists to handle gently: five writers
 		# race to record this same Ready, so losing that race is ordinary, and it
 		# means SOMEONE recorded it. The status below carries whatever landed.
+		# jarvis#1425: EXCEPT while a handover is due - the still-pooled container
+		# reporting Ready is exactly the state this endpoint must NOT stamp as
+		# converged, or the handover that request_resync below would enqueue never
+		# runs.
 		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
 			# The stamp's own commit gate only fires in a worker; this is a request.
 			frappe.db.commit()

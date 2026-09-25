@@ -263,3 +263,55 @@ class TestSaveLlmPoolForceProbe(_SaveOpBase):
 				expected,
 				f"force_probe={wire_value!r} should coerce to {expected!r}",
 			)
+
+
+class TestSaveLlmPoolHandover(_SaveOpBase):
+	"""Task 11 (S4): save_llm_pool runs a due handover itself (jarvis#1425).
+
+	save_llm_pool always sets ``suppress_pool_enqueue`` before its internal
+	``s.save()``, so on_update's own `elif lone_direct_handover_due(self):`
+	branch never gets a chance here - this endpoint needs its OWN check,
+	right where it decides between the pool and legacy-creds branches."""
+
+	def test_save_llm_pool_runs_the_handover_and_reports_legacy_300s(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		# Simulate a workspace that has already synced through the pool leg
+		# once - the non-retroactivity precondition lone_direct_handover_due
+		# requires. Same-connection write; save_llm_pool's own frappe.get_single
+		# below sees it without a commit.
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("llm_pool_synced_at", "2026-08-01 00:00:00", update_modified=False)
+
+		models = [
+			{
+				"provider": "openai",
+				"model": "gpt-5.5",
+				"tier": "strong",
+				"order": 0,
+				"subscription": {
+					"rotation": "sticky",
+					"accounts": [
+						{
+							"upstream": "openai",
+							"account_ref": "SUB_handover1",
+							"label": "me@x.com",
+							"oauth_blob": '{"provider":"openai","refresh_token":"rt"}',
+						}
+					],
+				},
+			}
+		]
+
+		with (
+			patch.object(JarvisSettings, "_enqueue_handover") as mock_handover,
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.sync_pool_now") as mock_sync,
+		):
+			out = onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
+
+		mock_handover.assert_called_once()
+		mock_sync.assert_not_called()
+		self.assertEqual(out["mode"], "legacy")
+		self.assertEqual(out["readiness_budget_s"], 300)
+		self.assertIsNone(out["apply_operation"])
+		self.assertFalse(out["resumable"])
