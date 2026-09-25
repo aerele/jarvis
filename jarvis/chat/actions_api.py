@@ -1208,13 +1208,19 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 			won.extend(claim_settled(names))
 			return bool(won)
 
+		ran = [i for i in decided if i["status"] == EXECUTED]
+		unknown = any(i["outcome"] in ("unknown", "partial") for i in decided)
+		# A mixed batch quotes what ran apart from what failed; an unverified outcome
+		# keeps its check-before-retrying scaffold over everything.
+		mixed = bool(ran) and len(ran) < len(decided) and not unknown
 		with impersonate(switch_to):
 			cont = enqueue_continuation(
 				conversation,
-				" ".join(_pa_receipt_text(i) for i in decided),
-				failed=any(i["status"] != EXECUTED for i in decided),
-				outcome="unknown" if any(i["outcome"] in ("unknown", "partial") for i in decided) else None,
+				" ".join(_pa_receipt_text(i) for i in decided if not (mixed and i["status"] == EXECUTED)),
+				failed=len(ran) < len(decided),
+				outcome="unknown" if unknown else None,
 				claim=_claim,
+				applied=" ".join(_pa_receipt_text(i) for i in ran) if mixed else None,
 			)
 		_stash_continuation(won or names, cont)
 		return

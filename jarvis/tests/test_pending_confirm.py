@@ -526,6 +526,34 @@ class TestConfirmAndSettle(_Base):
 		self.assertEqual(self.row(stale).batch_id, self.row(fine).batch_id)
 		self.assertEqual(len(self.user_rows(conv)), 1, "ONE continuation for the batch")
 
+	def test_a_mixed_typed_batch_continues_with_each_cards_outcome(self):
+		"""One card ran, one failed: the continuation must not say nothing changed."""
+		from jarvis.chat.api import _run_typed_batch
+
+		conv = self.make_conv()
+		ran = self.mint(conv)
+		failed = self.park(None)
+		self.set_col(failed, conversation=conv)
+
+		def _comment_fails(tool, args):
+			if tool == "add_comment":
+				raise RuntimeError("boom")
+			return {"name": "RESULT-1"}
+
+		items = [{"token": t, "position": i, "summary": ""} for i, t in enumerate((ran, failed), 1)]
+		with fake_dispatch(_comment_fails), as_user(OWNER):
+			out = _run_typed_batch(conv, items)
+		self.assertEqual([r["ok"] for r in out["results"]], [True, False])
+		[cont] = self.user_rows(conv)
+		self.assertNotIn("nothing was changed", cont.content)
+		self.assertNotIn("[System] Applied", cont.content, "a partly failed batch must not continue the plan")
+		applied, marker, not_applied = cont.content.partition("Not applied")
+		self.assertTrue(marker, cont.content)
+		self.assertIn("RESULT-1", applied)
+		self.assertNotIn("FAILED", applied)
+		self.assertIn("FAILED", not_applied)
+		self.assertNotIn("RESULT-1", not_applied)
+
 	def test_a_click_on_a_card_that_left_pending_reports_and_self_heals(self):
 		"""R-m3: the click paths route a pending action in any state to the executor, so
 		they answer its real reason_code / pa_status and settle a lost settle."""
