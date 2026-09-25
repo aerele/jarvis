@@ -4,6 +4,7 @@ from jarvis import announcement, maintenance_notice, release_notice
 from jarvis.permissions import (
 	has_jarvis_access,
 	has_jarvis_admin_access,
+	is_skill_reviewer,
 	support_scope,
 )
 
@@ -91,6 +92,9 @@ def get_context(context):
 		# System Managers too. Client gate is UX-only — every admin API
 		# re-checks require_jarvis_admin server-side.
 		"is_jarvis_admin": has_jarvis_admin_access(),
+		# Gates the sidebar's Skills review badge so only reviewers poll
+		# get_review_access (reviewer-guarded; it 403s everyone else).
+		"is_skill_reviewer": is_skill_reviewer(),
 		# Native Frappe per-user theme (Light/Dark/Automatic); the SPA maps it to
 		# light/dark/system so theme roams across devices without a Jarvis field.
 		"jarvis_desk_theme": frappe.db.get_value("User", frappe.session.user, "desk_theme") or "Automatic",

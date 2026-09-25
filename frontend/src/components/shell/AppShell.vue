@@ -234,7 +234,7 @@ useShortcuts([
 let _interval = null;
 function startInterval() {
 	if (_interval) return;
-	_interval = setInterval(() => store.refreshApprovalsCount(), 60000);
+	_interval = setInterval(() => store.refreshBadges(), 60000);
 }
 function stopInterval() {
 	if (_interval) {
@@ -247,13 +247,13 @@ function onVisibility() {
 	if (document.visibilityState === "visible") {
 		startInterval();
 		clearTimeout(_visTimer);
-		_visTimer = setTimeout(() => store.refreshApprovalsCount(), 2000);
+		_visTimer = setTimeout(() => store.refreshBadges(), 2000);
 	} else {
 		stopInterval();
 	}
 }
 const removeAfterEach = router.afterEach(() => {
-	store.refreshApprovalsCount();
+	store.refreshBadges();
 	// A tap that navigates from inside the phone drawer should leave it closed.
 	store.mobileDrawerOpen = false;
 });
@@ -272,7 +272,7 @@ onMounted(async () => {
 
 	// Sidebar fills without ChatView needing to be mounted (§3.1).
 	store.loadConversations();
-	store.refreshApprovalsCount();
+	store.refreshBadges();
 
 	// Fallback only (vite dev server serves index.html without the jinja boot
 	// injection, and older cached shells may miss the key): fetch the timezone
