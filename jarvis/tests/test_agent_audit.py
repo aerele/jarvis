@@ -188,6 +188,41 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		self.assertTrue(name)
 		self.assertEqual(frappe.db.get_value("Jarvis Agent Write", name, "outcome"), "applied")
 
+	def test_approval_provenances_are_recorded(self):
+		# AC10: #1368's reviewer_approved rows (and PR-2's approval rows) were
+		# silently dropped by the Select validation.
+		for prov in ("reviewer_approved", "approval"):
+			with self.subTest(provenance=prov):
+				name = agent_audit.record_write(
+					actor="Administrator",
+					tool="update_wiki",
+					args={"slug": "x"},
+					result={"ok": True},
+					outcome="applied",
+					provenance=prov,
+				)
+				self.assertTrue(name)
+				self.assertEqual(frappe.db.get_value("Jarvis Agent Write", name, "provenance"), prov)
+
+	def test_provenance_list_matches_the_doctype(self):
+		options = frappe.get_meta("Jarvis Agent Write").get_field("provenance").options.split("\n")
+		self.assertEqual(set(agent_audit.PROVENANCES), set(options))
+
+	def test_unknown_provenance_is_coerced_and_logged_not_dropped(self):
+		for given, stored in (("reviewer-approved", "reviewer_approved"), ("zzz", "chat")):
+			with self.subTest(given=given), m.patch.object(agent_audit.frappe, "logger") as log:
+				name = agent_audit.record_write(
+					actor="Administrator",
+					tool="create_doc",
+					args={"doctype": "ToDo"},
+					result={"name": "Z-2"},
+					outcome="applied",
+					provenance=given,
+				)
+				self.assertTrue(name)
+				self.assertEqual(frappe.db.get_value("Jarvis Agent Write", name, "provenance"), stored)
+				log.return_value.warning.assert_called_once()
+
 	def test_record_write_never_raises_on_construction_failure(self):
 		# Failure BEFORE the savepoint (doc construction) → logged + None, txn intact.
 		with m.patch("frappe.get_doc", side_effect=Exception("db down")):

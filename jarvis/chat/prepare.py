@@ -330,16 +330,23 @@ def _prepare_error(
 	"Could not prepare the message." would otherwise fall into the mid-run
 	"gateway" default and tell the customer to just retry a bug that a retry
 	will most likely reproduce."""
+	errored = False
 	try:
 		if assistant_msg:
 			frappe.db.set_value(MSG, assistant_msg, {"streaming": 0, "error": (error or "")[:1000]})
 		if ts.prepare_errored(run_id, version, error=error):
 			frappe.db.commit()
+			errored = True
 	except Exception:
 		try:
 			frappe.db.rollback()
 		except Exception:
 			pass
+	if errored:
+		# No settlement (so no finalize seal) on this edge: seal its File Box sheet here.
+		from jarvis.chat import held_sheet_seal
+
+		held_sheet_seal.after_turn(conversation, run_id)
 	if not code:
 		try:
 			from jarvis.chat.turn_handler import _classify_error

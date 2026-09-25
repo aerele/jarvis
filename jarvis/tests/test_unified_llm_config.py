@@ -3714,12 +3714,15 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 
 		@contextmanager
 		def _ctx():
-			prior = getattr(frappe.local, "job", None)
+			had_job, prior = hasattr(frappe.local, "job"), getattr(frappe.local, "job", None)
 			frappe.local.job = frappe._dict(method="test")
 			try:
 				yield
 			finally:
-				frappe.local.job = prior
+				if had_job:
+					frappe.local.job = prior
+				else:
+					del frappe.local.job  # a leftover None still reads as "in a job" to frappe
 
 		return _ctx()
 
