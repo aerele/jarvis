@@ -809,6 +809,16 @@ def _token_response(
 	return _json_result(payload)
 
 
+def _throw_truncated(*_args, **_kwargs):
+	"""Fail the way Frappe's own length check does: through ``frappe.throw``, which
+	queues the raw text as a server message BEFORE raising."""
+	frappe.throw("Scope will get truncated", frappe.CharacterLengthExceededError)
+
+
+def _server_messages() -> str:
+	return frappe.as_json(frappe.get_message_log())
+
+
 class _McpOauthTestCase(_ConnectorApiTestCase):
 	"""Fixtures for a Custom URL connector backed by the discovery engine."""
 
@@ -1185,7 +1195,7 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 			patch.object(
 				connectors_api.mcp_oauth_store,
 				"save_client",
-				side_effect=frappe.CharacterLengthExceededError("Scope will get truncated"),
+				side_effect=_throw_truncated,
 			),
 			self.assertRaises(frappe.ValidationError) as ctx,
 		):
@@ -1193,6 +1203,7 @@ class TestAddConnectorMcpOauth(_McpOauthTestCase):
 				preset="Custom URL", base_url=MCP_BASE_URL, scope="Personal", auth_method="OAuth"
 			)
 		self.assertIn("We could not set up sign-in", str(ctx.exception))
+		self.assertNotIn("truncated", _server_messages(), "the SPA shows the first server message")
 		self.assertFalse(
 			frappe.db.exists(CONNECTOR, {"key": "mcp_example_invalid", "owner": PLAIN_A}),
 			"a failed client save must not leave an unusable row behind",
@@ -2529,13 +2540,14 @@ class TestSelfHealGuards(_McpOauthTestCase):
 			patch.object(
 				connectors_api,
 				"_seed_static_client_from_catalog",
-				side_effect=frappe.CharacterLengthExceededError("Scope will get truncated"),
+				side_effect=_throw_truncated,
 			),
 		):
 			out = connectors_api.connect_oauth(name)
 		self.assertFalse(out.get("ok"))
 		self.assertEqual(out["error"]["code"], "oauth_not_configured")
 		self.assertIn("We could not set up sign-in", out["error"]["message"])
+		self.assertNotIn("truncated", _server_messages())
 		self.assertTrue(frappe.db.exists(CONNECTOR, name), "a heal never deletes the row")
 
 	def test_a_credentials_heal_that_fails_to_save_reads_friendly(self):
@@ -2546,12 +2558,13 @@ class TestSelfHealGuards(_McpOauthTestCase):
 			patch.object(
 				connectors_api,
 				"_seed_static_client_from_catalog",
-				side_effect=frappe.CharacterLengthExceededError("Scope will get truncated"),
+				side_effect=_throw_truncated,
 			),
 			self.assertRaises(frappe.ValidationError) as ctx,
 		):
 			connectors_api.set_oauth_client_credentials(name, "cid", "sec")
 		self.assertIn("We could not set up sign-in", str(ctx.exception))
+		self.assertNotIn("truncated", _server_messages())
 		self.assertTrue(frappe.db.exists(CONNECTOR, name), "a heal never deletes the row")
 
 	def test_relink_is_refused_when_the_client_describes_another_address(self):
