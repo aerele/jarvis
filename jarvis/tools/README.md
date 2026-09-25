@@ -78,21 +78,30 @@ carries domain logic the schema doesn't express.
 
 ---
 
-## `run_method` - call a whitelisted server method
+## `run_method` - call a whitelisted method or Server Script API
 
 The escape hatch for `@frappe.whitelist()` methods the dedicated tools don't wrap
-- most often ERPNext's `make_*` document mappers.
+(most often ERPNext's `make_*` document mappers) **and** for tenant-authored
+Server Script API endpoints.
 
 ```python
 run_method(method: str, args: dict | None = None)
 ```
 
-- `method` is a dotted path, e.g.
-  `erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice`.
-- **Only whitelisted methods run.** Non-whitelisted (or unresolvable) methods are
-  rejected with `PermissionDeniedError` / `InvalidArgumentError`. The method's own
-  permission checks still apply (it runs as the chat user).
-- Returns the method's return value verbatim (often a document dict).
+- `method` is **classified**, not tried-and-fallen-back:
+  - a bare name registered as a **Server Script API** method (its `api_method`)
+    runs via the server-script executor - `args` reach it through
+    `frappe.form_dict`, exactly as the `/api/method` HTTP handler feeds them, and
+    its output (`frappe.flags` or `frappe.response['message']`) comes back as a dict;
+  - anything else is a dotted path to a `@frappe.whitelist()` method, e.g.
+    `erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice`, called
+    directly and returned verbatim (often a document dict).
+- The server-script map is the source of truth for which kind a name is; a
+  whitelisted dotted path can never collide with a bare `api_method`.
+- **Only registered API server scripts / whitelisted methods run.** Non-whitelisted
+  or unresolvable names are rejected with `PermissionDeniedError` /
+  `InvalidArgumentError`. Each target's own permission checks still apply (it runs
+  as the chat user).
 
 **Example** - create a draft Sales Invoice from a Sales Order:
 
@@ -102,15 +111,18 @@ run_method(method: str, args: dict | None = None)
   "args": { "source_name": "SAL-ORD-2026-00042" } }
 ```
 
-**Allowlist (recommended in production).** Set a site-config list of fnmatch
-patterns to narrow what may ever be called:
+**Blocklist.** `Jarvis Settings.run_method_blocklist` (comma/newline-separated
+fnmatch patterns) categorically refuses matching targets - a whitelisted method's
+dotted path or a Server Script API method's name - before dispatch:
 
-```jsonc
-// site_config.json
-{ "jarvis_run_method_allowlist": ["erpnext.*.make_*", "frappe.client.*"] }
+```
+frappe.*
+*.delete_doc
 ```
 
-When set, any method not matching a pattern is rejected even if it is whitelisted.
+A match raises `PermissionDeniedError`. An empty field blocks nothing (fail-open);
+every `run_method` call still parks for a human confirmation card regardless, so
+the blocklist is the "never even offer these" hardstop, not the only boundary.
 
 ## `get_schema` - live introspection (the backbone)
 
@@ -140,11 +152,10 @@ Returns the live schema, not a stored copy:
 ## `preview` - dry-run on writes
 
 The write tools (`create_doc`, `update_doc`, `submit_doc`, `cancel_doc`,
-`amend_doc`, `delete_doc`) and `run_method` accept `preview: true`. The operation
-runs through all DocType validations with **every DB write rolled back** -
-commits are neutralized for the duration and the work is undone via a savepoint,
-so even a tool (or a `run_method` target) that calls `frappe.db.commit()`
-internally cannot persist:
+`amend_doc`, `delete_doc`) accept `preview: true`. The operation runs through all
+DocType validations with **every DB write rolled back** - commits are neutralized
+for the duration and the work is undone via a savepoint, so even a tool that
+calls `frappe.db.commit()` internally cannot persist:
 
 ```jsonc
 // args
@@ -160,6 +171,12 @@ fetched/computed fields) - or the validation error it would hit - before they
 confirm. Preview runs are never audited (nothing is committed). **Caveat:** DB
 effects are sandboxed, but external side effects in `on_submit` / `on_cancel`
 (emails, webhooks) are not rolled back.
+
+`run_method` is **not** in this set: it is always gated, so `preview: true` is
+rejected (`InvalidArgumentError`). Call it directly and the bench parks a
+confirmation card built from a described-intent summary of the blast radius -
+there is no sandboxed dry-run for it, since its target's inline non-DB side
+effects could fire unconfirmed. See the `run_method` section above.
 
 ## Audit logging
 
