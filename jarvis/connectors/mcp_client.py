@@ -456,10 +456,8 @@ class McpClient:
 			# dead id, and so a retry starts a genuinely fresh session.
 			self._session_id = None
 			raise McpError("MCP session expired.", kind=ERR_SESSION_EXPIRED)
-		if not is_request:
-			if 200 <= status < 300:
-				return None
-			raise McpError(f"Notification rejected (HTTP {status}).", kind=ERR_HTTP, code=status)
+		if not is_request and 200 <= status < 300:
+			return None
 		if status < 200 or status >= 300:
 			raise self._http_error(resp, status)
 

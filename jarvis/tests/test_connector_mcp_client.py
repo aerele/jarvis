@@ -754,6 +754,15 @@ class TestHttpErrorMessage(unittest.TestCase):
 			"The connector refused access (HTTP 403). Check with the provider that API access is turned on.",
 		)
 
+	def test_refused_notification_says_why_too(self):
+		body = {"error": {"code": 403, "message": "Drive MCP API is disabled."}}
+		seam = _Seam([_init_ok(), _json_resp(body, status=403)])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.probe("https://drivemcp.googleapis.com/mcp/v1", "tok", protocol_version=LEGACY)
+		self.assertEqual(cm.exception.code, 403)
+		self.assertIn("refused access (HTTP 403). It said: Drive MCP API is disabled.", str(cm.exception))
+
 	def test_other_status_keeps_the_code_and_adds_the_reason(self):
 		exc = self._probe_error(_json_resp({"error": {"code": 404, "message": "No such server"}}, status=404))
 		self.assertEqual(str(exc), "The connector returned an error (HTTP 404). It said: No such server.")
