@@ -168,6 +168,33 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		apply.assert_not_called()
 		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
 
+	def test_approve_refuses_while_the_wiki_is_off(self):
+		name = self._propose(self._conv())
+		with (
+			_funnel() as (apply, _),
+			_as(REVIEWER),
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=False),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				approvals_api.approve_wiki_write(name)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "status"), "Pending")
+
+	def test_retry_refuses_while_the_wiki_is_off(self):
+		name = self._propose(self._conv())
+		refused = [{"slug": "party-fake-co", "ok": False, "reason": "deadlock"}]
+		with _funnel(result=refused), _as(REVIEWER):
+			approvals_api.approve_wiki_write(name)
+		with (
+			_funnel() as (apply, _),
+			_as(REVIEWER),
+			patch("jarvis.chat.wiki.wiki_enabled", return_value=False),
+		):
+			with self.assertRaises(frappe.ValidationError):
+				approvals_api.retry_wiki_write(name)
+		apply.assert_not_called()
+		self.assertEqual(frappe.db.get_value(APPROVAL, name, "apply_status"), "Failed")
+
 	def test_dropper_with_a_reviewer_role_approves_their_own_note(self):
 		# The reviewer role is the gate, however many other reviewers the tenant has.
 		name = self._propose(self._conv())

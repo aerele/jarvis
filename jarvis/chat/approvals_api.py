@@ -818,6 +818,15 @@ def _wiki_proposal_or_throw(name: str):
 	return doc
 
 
+def _refuse_if_wiki_off() -> None:
+	"""#493: the "Enable Business Wiki" kill switch holds for a reviewed note too;
+	checked before any state change, so the proposal stays re-drivable."""
+	from jarvis.chat.wiki import WIKI_DISABLED_REASON, wiki_enabled
+
+	if not wiki_enabled():
+		frappe.throw(f"Can't land this wiki note: {WIKI_DISABLED_REASON} (Jarvis Settings).")
+
+
 def _dropper_of(doc) -> str | None:
 	"""The file-box dropper = owner of the linked conversation (the AR owner is
 	stamped to them too, but the conversation is the authoritative source)."""
@@ -1007,6 +1016,7 @@ def approve_wiki_write(name: str, expected_digest: str | None = None) -> dict:
 	refreshed or swapped proposal no longer matches it and is refused."""
 	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
+	_refuse_if_wiki_off()
 	if doc.status != "Pending":
 		frappe.throw(f"Proposal {name} is already {doc.status}")
 	if not doc.get("wiki_payload"):
@@ -1046,6 +1056,7 @@ def retry_wiki_write(name: str) -> dict:
 	reconciliation path for the one window approve can't cover atomically."""
 	refuse_in_tool_dispatch()
 	doc = _wiki_proposal_or_throw(name)
+	_refuse_if_wiki_off()
 	if doc.status != "Approved":
 		frappe.throw(f"Only an approved proposal can be retried (this is {doc.status})")
 	if (doc.get("apply_status") or "Pending") == "Applied":
