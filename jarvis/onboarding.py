@@ -123,8 +123,14 @@ def write_connection(data: dict) -> None:
 	if not isinstance(data, dict):
 		return
 	from jarvis._password_utils import set_settings_password
+	from jarvis.chat import runtime_profile
 
+	# Serialize authority receipt, connection, and profile as one DB transaction.
+	frappe.db.get_singles_dict("Jarvis Settings", for_update=True)
 	s = frappe.get_single("Jarvis Settings")
+	profile = getattr(data, "runtime_profile", None)
+	if isinstance(data, runtime_profile.ConnectionData):
+		runtime_profile.validate(profile, data)
 	# Capture the container this workspace pointed at BEFORE this write, so a
 	# reconnect that repoints it can be told apart from a daily sync that rewrites
 	# the same URL (which must not disturb an established claim).
@@ -210,7 +216,12 @@ def write_connection(data: dict) -> None:
 					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
 				)
 		if write_conn:
+			runtime_profile._forget_snapshot()
 			s.db_set("agent_url", data["agent_url"])
+			if isinstance(data, runtime_profile.ConnectionData):
+				runtime_profile.persist(profile, s)
+			elif data.get("runtime_profile_status") == "unsupported_runtime":
+				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
 				set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
@@ -263,7 +274,10 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	settings = frappe.get_single("Jarvis Settings")
 	api_key = settings.get_password("jarvis_admin_api_key", raise_exception=False) or ""
 	api_secret = settings.get_password("jarvis_admin_api_secret", raise_exception=False) or ""
-	if not (api_key and api_secret):
+	oauth_ready = settings.get("jarvis_admin_customer_email") and settings.get_password(
+		"jarvis_admin_customer_password", raise_exception=False
+	)
+	if not ((api_key and api_secret) or oauth_ready):
 		return {"synced": False, "reason": "not onboarded"}
 	get_conn_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
 	data = admin_client.get_connection(**get_conn_kwargs)
@@ -2335,7 +2349,7 @@ def save_llm_creds(
 	force: bool = False,
 ) -> dict:
 	"""Save LLM provider/model/auth mode + (api_key when applicable) and let
-	on_update re-render openclaw.json. Returns the on_update outcome
+	on_update re-render agent configuration. Returns the on_update outcome
 	(last_sync_status) so the page can tell the customer whether their
 	agent is fully ready.
 
@@ -2349,10 +2363,10 @@ def save_llm_creds(
 	in the complete_paste_signin path because that flow:
 	  - pushes the OAuth blob (which lives in auth-profiles.json, not
 	    Jarvis Settings, so the bench's diff classifier doesn't see it)
-	  - then needs fleet-agent to re-render openclaw.json AND restart
+	  - then needs fleet-agent to re-render agent configuration AND restart
 	    the container so agent picks up the new auth profile.
 	Without ``force=True``, a customer re-authorizing with the same
-	provider+model gets a stale openclaw.json + no restart, and agent
+	provider+model gets a stale agent configuration + no restart, and agent
 	keeps serving the previous (broken) state. Verified live 2026-06-11.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code

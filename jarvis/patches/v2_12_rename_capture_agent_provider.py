@@ -1,7 +1,6 @@
-"""Copy openclaw_provider into the renamed agent_provider column.
+"""Copy the legacy provider column into the renamed agent_provider column.
 
-The pending-OAuth-capture provider key was renamed openclaw_provider ->
-agent_provider (white-label). Frappe model-sync ADDS the new column blank and
+The pending-OAuth-capture provider key was renamed to agent_provider (white-label). Frappe model-sync ADDS the new column blank and
 leaves the old column in place (it never drops a removed field's column), so this
 post_model_sync patch copies the values across.
 
@@ -14,7 +13,7 @@ window is small but real - and silent, because a missing key returns the termina
 
 Clobber-safe + idempotent: it only fills a row whose new column is still blank
 from a non-blank old value, so a re-run can never overwrite a live value with a
-stale one. The old openclaw_provider column is RETAINED this release as the
+stale one. The legacy provider column is RETAINED this release as the
 rollback net; a later contract patch drops it once the rename is proven.
 """
 

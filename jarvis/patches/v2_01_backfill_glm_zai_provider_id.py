@@ -43,7 +43,7 @@ misclassifying unrelated custom-endpoint rows as GLM.
 Direct field update via frappe.db.set_value on the child row, bypassing
 Jarvis Settings.save()/on_update entirely (mirrors v1_seed_llm_models's
 insert-not-save pattern): this is a label-only correction of already-applied
-config, so it must not re-validate, re-render openclaw.json, or make any
+config, so it must not re-validate, re-render the gateway configuration, or make any
 admin/fleet-agent network call during bench migrate.
 """
 

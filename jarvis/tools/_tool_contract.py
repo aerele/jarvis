@@ -14,8 +14,8 @@ Each repo now tests itself against this artifact:
 
   * jarvis — ``jarvis/tests/test_tool_contract.py``: the registry equals
     ``tools`` + ``backend_only``, exactly, in both directions;
-  * jarvis-openclaw-plugin — ``tests/tool-contract.test.ts``: its descriptor
-    table and ``openclaw.plugin.json`` contracts equal ``tools``, exactly.
+  * Jarvis agent plugin — ``tests/tool-contract.test.ts``: its descriptor
+    table and the plugin manifest contracts equal ``tools``, exactly.
 
 UPDATE FLOW (mirrored in ``jarvis/tools/README.md`` → "Adding a tool"):
 
@@ -28,7 +28,7 @@ UPDATE FLOW (mirrored in ``jarvis/tools/README.md`` → "Adding a tool"):
   3. copy the regenerated ``tool-names.json`` VERBATIM to the plugin repo at
      ``contracts/tool-names.json`` (same bytes, same ``digest``);
   4. the plugin's contract test now fails until ``src/tool-defs.ts``,
-     ``src/schemas.ts`` and ``openclaw.plugin.json`` carry exactly those names.
+     ``src/schemas.ts`` and the plugin manifest carry exactly those names.
 
 No CI job can see both repos (the plugin repo is private; jarvis CI holds no
 cross-repo token), so step 3 is a human copy and only step 4 catches a stale
