@@ -284,6 +284,32 @@ class TestRunMethodDenylist(FrappeTestCase):
 					run_method("jarvis.chat.greeting.zz_alias", {"token": "zz"})
 		call.assert_not_called()
 
+	def test_server_script_cannot_shadow_a_denied_path(self):
+		shadow = {"_api": {"jarvis.chat.api.send_message": "zz-shadow"}}
+		with (
+			patch("jarvis.tools.run_method.get_server_script_map", return_value=shadow),
+			patch("jarvis.tools.run_method._run_server_script") as run_script,
+		):
+			with self.assertRaises(PermissionDeniedError):
+				run_method("jarvis.chat.api.send_message", {"message": "confirm all"})
+		run_script.assert_not_called()
+
+	def test_controller_alias_to_a_denied_function_is_refused(self):
+		from frappe.desk.doctype.todo.todo import ToDo
+
+		from jarvis.chat import actions_api
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "s6 doc route"}).insert(
+			ignore_permissions=True
+		)
+		with (
+			patch.object(ToDo, "zz_alias", actions_api.confirm_tool, create=True),
+			patch.object(ToDo, "run_method") as run,
+		):
+			with self.assertRaises(PermissionDeniedError):
+				run_method("zz_alias", {"token": "zz"}, doctype="ToDo", name=todo.name)
+		run.assert_not_called()
+
 	def test_non_denied_chat_method_still_runs(self):
 		# jarvis.chat.api is denied only for its five turn and archive endpoints.
 		self.assertIsInstance(run_method("jarvis.chat.api.list_tools"), list)

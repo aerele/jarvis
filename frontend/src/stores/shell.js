@@ -12,6 +12,7 @@ import { reactive, ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
 import * as api from "@/api";
+import { getReviewAccess } from "@/api/learning";
 import { errHtml } from "@/lib/errors";
 import { createBadgeTimer } from "@/lib/badgeTimer";
 import { needsOnboarding } from "@/onboarding/readiness.js";
@@ -26,6 +27,9 @@ const streamingConvId = ref(null); // written by ChatView only
 // wholesale on every write so Set mutations stay reactive.
 const unreadConvs = ref(new Set());
 const approvalsCount = ref(0);
+// Pending review work for a skill reviewer (skill + wiki promotions and
+// surfaced learned patterns): the same total as the Skills page Review tab.
+const reviewCount = ref(0);
 const settingsOpen = ref(false); // the shell SettingsDialog binds to this
 const settingsSection = ref("general"); // active pane key in the settings dialog
 // True while the active settings pane is applying a change it cannot safely be
@@ -364,7 +368,7 @@ async function loadConversations() {
 	_convsInflight = (async () => {
 		try {
 			conversations.value = (await api.listConversations()) || [];
-			refreshApprovalsCount(); // poll-on-activity parity (D12)
+			refreshBadges(); // poll-on-activity parity (D12)
 		} catch (e) {
 			toast.error(errHtml(e));
 		} finally {
@@ -399,6 +403,42 @@ function refreshApprovalsCount() {
 }
 function stopBadgeTimer() {
 	_badgeTimer.clear();
+}
+
+// Same triggers and de-dupe as refreshApprovalsCount. Reviewer-only: the
+// endpoint is reviewer-guarded, so nobody else ever calls it.
+// A call that lands mid-flight (e.g. review:pending racing a route-change
+// refresh) queues one re-read, since the running request may predate the row.
+let _reviewInflight = null;
+let _reviewAgain = false;
+function refreshReviewCount() {
+	if (!window.is_skill_reviewer) return Promise.resolve();
+	if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
+	if (_reviewInflight) {
+		_reviewAgain = true;
+		return _reviewInflight;
+	}
+	_reviewInflight = (async () => {
+		do {
+			_reviewAgain = false;
+			try {
+				const a = (await getReviewAccess()) || {};
+				reviewCount.value =
+					(a.pending_patterns || 0) +
+					(a.pending_promotions || 0) +
+					(a.pending_skill_promotions || 0);
+			} catch (e) {
+				/* badge is best-effort */
+			}
+		} while (_reviewAgain);
+		_reviewInflight = null;
+	})();
+	return _reviewInflight;
+}
+
+function refreshBadges() {
+	refreshApprovalsCount();
+	refreshReviewCount();
 }
 
 async function renameConversation(name, title) {
@@ -523,6 +563,7 @@ const store = reactive({
 	streamingConvId,
 	unreadConvs,
 	approvalsCount,
+	reviewCount,
 	settingsOpen,
 	settingsSection,
 	settingsApplying,
@@ -547,6 +588,8 @@ const store = reactive({
 	loadConversations,
 	refreshApprovalsCount,
 	stopBadgeTimer,
+	refreshReviewCount,
+	refreshBadges,
 	renameConversation,
 	toggleStar,
 	archiveConversation,
