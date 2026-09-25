@@ -924,6 +924,7 @@ def archive_conversation(conversation: str) -> dict:
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
 	doc.status = "Archived"
+	doc.sync_file_box_fields()  # a live run may have stamped them since the load
 	doc.save()
 	frappe.db.commit()
 	# Decision 12: archiving cancels its pending chat cards (held rows just stop
@@ -984,6 +985,7 @@ def rename_conversation(conversation: str, title: str) -> dict:
 		return {"ok": False, "reason": _("title is empty")}
 	doc = _get_owned_conversation(conversation)
 	doc.title = title
+	doc.sync_file_box_fields()
 	doc.save()
 	frappe.db.commit()
 	return {"ok": True, "data": {"title": title}}
@@ -997,6 +999,7 @@ def set_star(conversation: str, starred: str | int | bool) -> dict:
 	on = 1 if str(starred) in ("1", "true", "True", "on", "yes") else 0
 	doc = _get_owned_conversation(conversation)
 	doc.starred = on
+	doc.sync_file_box_fields()
 	doc.save()
 	frappe.db.commit()
 	return {"ok": True, "data": {"starred": on}}

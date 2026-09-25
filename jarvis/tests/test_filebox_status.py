@@ -602,6 +602,30 @@ class TestStaleConversationSave(_Base):
 			chat_api.enqueue_continuation(conv, "created Purchase Invoice PI-LIVE")
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_result_name"), "PI-LIVE")
 
+	def test_archive_rename_and_star(self):
+		"""The owner's archive / rename / star land while the run stamps a filebox_* field."""
+		real = chat_api._get_owned_conversation
+
+		def loaded_then_stamped(conversation):
+			doc = real(conversation)
+			frappe.db.set_value(CONV, conversation, "filebox_result_name", "PI-LIVE", update_modified=False)
+			return doc
+
+		for field, value, action in (
+			("title", "zz renamed", lambda c: chat_api.rename_conversation(c, "zz renamed")),
+			("starred", 1, lambda c: chat_api.set_star(c, 1)),
+			("status", "Archived", chat_api.archive_conversation),
+		):
+			with self.subTest(field):
+				conv = self._conv()
+				with (
+					_as(USER),
+					patch("jarvis.chat.api._get_owned_conversation", side_effect=loaded_then_stamped),
+				):
+					self.assertTrue(action(conv)["ok"])
+				row = frappe.db.get_value(CONV, conv, [field, "filebox_result_name"], as_dict=True)
+				self.assertEqual((row[field], row.filebox_result_name), (value, "PI-LIVE"))
+
 	def test_a_column_not_migrated_yet_is_skipped(self):
 		"""R-m4: new code before its migrate: the re-read names only migrated columns."""
 		from frappe.model.meta import Meta
