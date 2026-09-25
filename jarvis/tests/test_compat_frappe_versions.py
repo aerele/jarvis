@@ -199,6 +199,37 @@ class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
 		kinds, _ = compat._sheet_layout([["v"], [1], ["n/a"], [True]])
 		self.assertEqual(kinds, ["text"])
 
+	def test_decimal_amounts_blanks_and_mixed_dates(self):
+		"""Review follow-ups: SQL aggregates return Decimal; a stray " " is blank,
+		not text; a date-only value in a column with timestamps keeps a
+		date-only format instead of showing 00:00:00."""
+		from decimal import Decimal
+
+		data = [
+			["Total", "Due", "Last activity"],
+			[Decimal("1234.50"), datetime.date(2026, 6, 1), datetime.date(2026, 6, 1)],
+			[Decimal("99"), " ", datetime.datetime(2026, 6, 2, 9, 30)],
+		]
+		kinds, _ = compat._sheet_layout(data)
+		self.assertEqual(kinds, ["float", "date", "datetime"])
+		for label, build in _builders().items():
+			with self.subTest(builder=label):
+				rows = [list(r) for r in data]
+				ws = openpyxl.load_workbook(io.BytesIO(build([("S", rows)]))).worksheets[0]
+				self.assertEqual(ws["A2"].number_format, compat.XLSX_FLOAT_FORMAT)
+				self.assertEqual(ws["A3"].number_format, compat.XLSX_FLOAT_FORMAT)
+				self.assertTrue(ws["B2"].is_date)
+				self.assertNotIn("h", ws["C2"].number_format.lower())  # date only
+				self.assertIn("h", ws["C3"].number_format.lower())  # keeps its time
+
+	def test_openpyxl_header_date_keeps_its_date_format(self):
+		"""With no `columns`, export_excel takes the first row as the header, so
+		a date can land there; it must stay a formatted date, now also bold."""
+		rows = [[datetime.date(2026, 6, 1), "b"], [1, "x"]]
+		ws = openpyxl.load_workbook(io.BytesIO(compat._xlsx_bytes_openpyxl([("S", rows)]))).worksheets[0]
+		self.assertTrue(ws["A1"].is_date)
+		self.assertTrue(ws["A1"].font.b)
+
 
 class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 	"""``compat.permission_conditions`` must gate rows on either major.
