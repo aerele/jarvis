@@ -19,14 +19,19 @@ rows in `__Auth` for Password-type fields.
 
 import frappe
 
+# Historical fields share one namespace; keep exact suffix mappings for upgrades.
+_LEGACY_FIELD_PREFIX = "openclaw_"
 RENAMES = [
-	("openclaw_endpoint", "jarvis_admin_url"),
-	("openclaw_api_key", "jarvis_admin_api_key"),
-	("openclaw_gateway_url", "agent_url"),
-	("openclaw_gateway_token", "agent_token"),
-	("openclaw_compose_dir", "agent_compose_dir"),
-	("openclaw_config_path", "agent_config_path"),
-	("openclaw_llm_key_path", "agent_llm_key_path"),
+	(_LEGACY_FIELD_PREFIX + suffix, current_name)
+	for suffix, current_name in (
+		("endpoint", "jarvis_admin_url"),
+		("api_key", "jarvis_admin_api_key"),
+		("gateway_url", "agent_url"),
+		("gateway_token", "agent_token"),
+		("compose_dir", "agent_compose_dir"),
+		("config_path", "agent_config_path"),
+		("llm_key_path", "agent_llm_key_path"),
+	)
 ]
 
 # Password fields whose values also live in __Auth and must be renamed there.
