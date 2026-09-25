@@ -591,14 +591,20 @@ class TestSkillPromotionSurfacing(Part2Base):
 
 		skill = _mk_skill(USER_A, f"{PFX}-mine", scope="User")
 		with _as(USER_A):
-			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
+			# The owner, with no request yet, still gets effective_scope (#595): the
+			# requester UI needs it to know whether ANY wider target remains even
+			# before a first request exists - {} alone can't answer that.
+			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {"effective_scope": "User"})
 			req = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
 			mine = custom_skills_api.my_skill_promotion(skill.name)
 		self.assertEqual(mine["name"], req["request"])
 		self.assertEqual(mine["status"], "Pending")
 		self.assertEqual(mine["to_scope"], "Role")
 		self.assertEqual(mine["target_role"], "Sales User")
-		# another user gets nothing for the same skill (owner-scoped read)
+		# A non-owner gets exactly {} (owner-scoped read; #595 code review: the
+		# ownership check runs BEFORE effective_scope is even computed, so a
+		# non-owner never learns the shared-lineage state of a skill they don't
+		# own - unlike the owner-with-no-request case above).
 		with _as(USER_B):
 			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
 

@@ -248,6 +248,7 @@
 		noun="skill"
 		:busy="promoBusy"
 		:multiple="true"
+		:min-scope="myEffectiveScope"
 		@submit="submitPromotion"
 	/>
 
@@ -349,6 +350,7 @@ import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.v
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 import { getSkillsAreaCaps } from "@/api/personalise";
 import { requestSkillPromotion, mySkillPromotion } from "@/api/skills";
+import { isWiderScope } from "./promotionScope";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
@@ -442,6 +444,12 @@ const armDescription = computed(() => armToggleDescription(savedArmed.value, can
 // The owner of a private (User-scope) skill can ask a reviewer to widen it to a
 // role or the whole org. Learned rows are managed by the board, not promotion.
 const myPromo = ref(null); // {} | most-recent request for THIS skill (status chip)
+// The skill's REAL current shared scope by lineage (#595), from my_skill_promotion
+// - not skill.value.scope, which stays "User" forever on the private source even
+// after a shared copy is materialized from it. Always loaded, whether or not a
+// request row exists, so "can I promote further?" is answered correctly right
+// after an approval (no request in flight, but nothing wider may remain).
+const myEffectiveScope = ref("User");
 const promoDialog = ref(false);
 const promoBusy = ref(false);
 const canPromote = computed(
@@ -449,8 +457,8 @@ const canPromote = computed(
 		!props.isNew &&
 		canEdit.value &&
 		!!skill.value &&
-		(skill.value.scope || "User") === "User" &&
-		!skill.value.managed_by_learning
+		!skill.value.managed_by_learning &&
+		isWiderScope("Org", myEffectiveScope.value)
 );
 // Offer the action only when there is no request in flight; a Pending request
 // shows the status chip instead (a rejected one may be re-requested).
@@ -458,9 +466,11 @@ const promoPending = computed(() => !!(myPromo.value && myPromo.value.status ===
 
 async function loadMyPromo() {
 	myPromo.value = null;
+	myEffectiveScope.value = "User";
 	if (props.isNew || !props.id || !canEdit.value) return;
 	try {
 		const res = await mySkillPromotion(props.id);
+		myEffectiveScope.value = (res && res.effective_scope) || "User";
 		myPromo.value = res && res.status ? res : null;
 	} catch {
 		// best-effort chip; a failure must not disturb the page
