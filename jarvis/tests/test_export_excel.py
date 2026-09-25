@@ -129,3 +129,38 @@ class TestExportExcelMultiSheet(FrappeTestCase):
 			],
 		)
 		self.assertEqual(_load(_saved_bytes(m)).sheetnames, ["Summary", "Summary-2"])
+
+
+class TestExportExcelIsoDates(FrappeTestCase):
+	"""Issue #598: dates reach the tool as ISO text (rows go through JSON) and
+	used to land in Excel as text, which cannot sort or filter as dates. Only
+	strict ISO columns convert, all or nothing, so codes and names never do."""
+
+	def _body(self, rows):
+		from jarvis.tools.export_excel import _normalize
+
+		return _normalize(rows, None)[1:]
+
+	def test_iso_date_and_datetime_columns_become_real_dates(self):
+		import datetime
+
+		body = self._body(
+			[
+				{"d": "2026-06-01", "t": "2026-06-01 09:30:00", "blank": "2026-06-02"},
+				{"d": "2026-10-11", "t": "2026-10-11T18:05", "blank": ""},
+			]
+		)
+		self.assertEqual(body[0][0], datetime.date(2026, 6, 1))
+		self.assertEqual(body[1][1], datetime.datetime(2026, 10, 11, 18, 5))
+		self.assertEqual(body[0][2], datetime.date(2026, 6, 2))
+		self.assertEqual(body[1][2], "")  # blanks stay blank, the column still converts
+
+	def test_look_alikes_and_mixed_columns_stay_text(self):
+		body = self._body(
+			[
+				{"name": "2026-00012", "code": "00123", "bad": "2026-13-40", "mixed": "2026-06-01"},
+				{"name": "2026-00013", "code": "04", "bad": "2026-02-01", "mixed": "soon"},
+			]
+		)
+		self.assertEqual(body[0], ["2026-00012", "00123", "2026-13-40", "2026-06-01"])
+		self.assertEqual(body[1], ["2026-00013", "04", "2026-02-01", "soon"])
