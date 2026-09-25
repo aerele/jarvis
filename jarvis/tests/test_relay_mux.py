@@ -1269,6 +1269,25 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.order[:4], ["delta", "step", "delta", "tool"])
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
+	def test_claude_tool_stream_boundary_moves_the_step(self):
+		# The Claude CLI runtime sends no item/tool frames, only the tool stream.
+		step = "I'll find the top customer, then pull their recent invoices."
+		answer = "**West View Software Ltd.** has the highest outstanding at 2,29,000 INR."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("tool", {"phase": "start", "name": "mcp__jarvis__query", "toolCallId": "t1"}),
+				("tool", {"phase": "result", "toolCallId": "t1"}),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.tools, [])  # a boundary only, never a tool row
+		self.assertEqual(rec.shown, [step, "", answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
 	def test_api_key_step_segment_is_a_step(self):
 		step = "Checking the overdue invoices."
 		answer = "**West View** has the highest outstanding."

@@ -93,6 +93,11 @@ class TestParseEvent(FrappeTestCase):
 			ev = parse_event({"stream": "item", "data": {"kind": "preamble", "progressText": "checking"}})
 		self.assertEqual(ev["text"], "CHECKING")
 
+	def test_tool_stream_start_is_a_tool_boundary(self):
+		ev = parse_event({"stream": "tool", "data": {"phase": "start", "name": "Bash", "toolCallId": "t1"}})
+		self.assertEqual(ev, {"kind": "tool_boundary"})
+		self.assertIsNone(parse_event({"stream": "tool", "data": {"phase": "result", "toolCallId": "t1"}}))
+
 	def test_empty_preamble_and_answer_candidate_are_dropped(self):
 		self.assertIsNone(parse_event({"stream": "item", "data": {"kind": "preamble", "progressText": "  "}}))
 		self.assertIsNone(

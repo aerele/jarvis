@@ -1717,6 +1717,10 @@ class AgentSession:
 			},
 			"role": _ROLE,
 			"scopes": _REQUESTED_SCOPES,
+			# The Claude-subscription runtime reports tool calls only on the tool
+			# stream, which the gateway delivers to clients advertising this; the
+			# relay uses those starts to find the live step line's step text.
+			"caps": ["tool-events"],
 			"auth": auth,
 			"device": {
 				"id": creds.device_id,
