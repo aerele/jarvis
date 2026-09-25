@@ -421,7 +421,7 @@ class TestOnUpdateRoutesToHandover(_RT3SettingsTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertEqual(
 			settings.last_sync_status,
-			_PENDING_HANDOVER_STATUS,
+			f"{_PENDING_HANDOVER_STATUS} (attempt 1)",
 			"fixture: expected the narrowing save to leave the handover pending",
 		)
 
