@@ -1053,6 +1053,17 @@ def _materialize_promotion(req, roles=None) -> dict:
 			)
 			new.insert(ignore_permissions=True)
 			new_name = new.name
+			# Carry the source's "Approve & run" arm onto the freshly-materialized
+			# copy (issue #580): a User-scope skill an admin already armed must not
+			# go silently unarmed the moment it is promoted - the shared copy, not
+			# the now-secondary private original, is what the audience's `/slug`
+			# actually runs uncarded from here on. Raw write (like the owner
+			# reassignment below): the doctype guard requires a Jarvis Admin
+			# session to flip 0->1 and the approving reviewer need not hold that
+			# role. The "widen an existing shared copy in place" branch above needs
+			# no equivalent - it saves the SAME row, so its arm is never touched.
+			if int(src.allow_approve_run or 0):
+				frappe.db.set_value(SKILL, new_name, "allow_approve_run", 1, update_modified=False)
 	finally:
 		frappe.flags.jarvis_promotion_materialize = prev_flag
 	# Own the shared copy as the system identity, not the approving reviewer: the

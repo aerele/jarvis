@@ -334,6 +334,41 @@ class TestSkillPromotionWorkflow(Part2Base):
 			prefixed_slug(f"{PFX}-promote"), {p["slug"] for p in custom_skills.build_push_payload()}
 		)
 
+	def test_armed_source_keeps_its_arm_on_the_promoted_org_copy(self):
+		"""issue #580: an admin-armed private skill's ``allow_approve_run`` must
+		carry onto the fresh materialized Org copy. _materialize_promotion never
+		copied the flag (every other content field was), so promoting an already
+		-armed skill silently reset "Approve & run" the moment it went live for
+		the team - the shared copy nobody could then invoke into an armed run."""
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-armedpromote", scope="User")
+		frappe.db.set_value(SKILL, skill.name, "allow_approve_run", 1, update_modified=False)
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1)
+		shared_armed = frappe.db.get_value(
+			SKILL, {"skill_name": f"{PFX}-armedpromote", "scope": "Org"}, "allow_approve_run"
+		)
+		self.assertEqual(int(shared_armed or 0), 1)
+		# The requester's own row is untouched by promotion - still armed too.
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill.name, "allow_approve_run") or 0), 1)
+
+	def test_unarmed_source_leaves_the_promoted_org_copy_unarmed(self):
+		"""Negative control: promotion must not GRANT an arm the source never had."""
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-unarmedpromote", scope="User")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1)
+		shared_armed = frappe.db.get_value(
+			SKILL, {"skill_name": f"{PFX}-unarmedpromote", "scope": "Org"}, "allow_approve_run"
+		)
+		self.assertEqual(int(shared_armed or 0), 0)
+
 	def test_requester_cannot_self_approve(self):
 		from jarvis.chat import custom_skills_api
 

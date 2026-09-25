@@ -25,7 +25,7 @@ from jarvis.chat import (
 	session_lifecycle,
 	turn_message_binding,
 )
-from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
+from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs, resolve_armed_skill_docname
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
@@ -425,6 +425,11 @@ class TestInvokedSkillSlugs(FrappeTestCase):
 		frappe.set_user(self._orig)
 		for owner in (SLUGSET_USER_A, SLUGSET_USER_B):
 			frappe.db.delete(SKILL, {"owner": owner})
+		# Org-scope rows (org-wide fallback tests) reserve their slug in
+		# Jarvis Shared Skill Slug on save - a raw db.delete above never fires
+		# on_trash, so delete these properly to release the reservation.
+		for name in frappe.get_all(SKILL, filters={"skill_name": ["like", "org-%"]}, pluck="name"):
+			frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
 	def test_multi_slug_message_returns_the_set_of_both(self):
@@ -477,6 +482,101 @@ class TestInvokedSkillSlugs(FrappeTestCase):
 			"custom-clausecheck - call the jarvis__get_skill tool with each of those "
 			"names to read its instructions, then follow them",
 		)
+
+	def test_unrestricted_org_skill_is_invocable_by_anyone(self):
+		"""issue #580: an Org-scope skill with no allowed_roles is pushed into
+		EVERY container (_pushable_org_rows), so it must be invocable by ANY
+		user, not only owner/share/role holders. Before the fix, an Org-promoted
+		skill's `/slug` matched NOBODY but its (system) owner, so the "Approve &
+		run" offer - gated on len(invoked_skill_slugs(...)) == 1 - could never
+		even reach resolve_armed_skill_docname for a real chat user."""
+		_mk_org_skill("org-wide-slug")
+		self.assertEqual(
+			invoked_skill_slugs("/org-wide-slug do it", user=SLUGSET_USER_B),
+			{"org-wide-slug"},
+		)
+
+	def test_role_restricted_org_skill_still_needs_the_role(self):
+		"""Negative control: the org-wide fallback must NOT swallow role-restricted
+		Org rows (TASK 11) - a non-matching user still gets no match."""
+		_mk_org_skill("org-role-restricted", allowed_roles=["Sales Manager"])
+		self.assertEqual(
+			invoked_skill_slugs("/org-role-restricted do it", user=SLUGSET_USER_B),
+			set(),
+		)
+
+
+def _mk_org_skill(slug: str, *, armed: bool = False, allowed_roles=None) -> str:
+	"""An enabled, unrestricted Org-scope skill (or role-restricted when
+	``allowed_roles`` is given), owned by Administrator - the shape a real skill
+	promotion (_materialize_promotion) leaves behind. The engine flag bypasses
+	the reviewer-only scope-creation guard, which is proven elsewhere."""
+	prev = frappe.flags.jarvis_pattern_engine
+	frappe.flags.jarvis_pattern_engine = True
+	try:
+		doc = frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": slug,
+				"description": "org-wide test skill",
+				"instructions": "do the thing",
+				"scope": "Org",
+				"user_invocable": 1,
+				"allowed_roles": [{"role": r} for r in (allowed_roles or [])],
+			}
+		)
+		doc.insert(ignore_permissions=True)
+	finally:
+		frappe.flags.jarvis_pattern_engine = prev
+	frappe.db.commit()
+	if armed:
+		frappe.db.set_value(SKILL, doc.name, "allow_approve_run", 1, update_modified=False)
+		frappe.db.commit()
+	return doc.name
+
+
+class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
+	"""resolve_armed_skill_docname's org-wide fallback tier (issue #580): an
+	unrestricted Org-scope skill has no per-user owner/share/role row, so
+	without this tier its arm could never resolve for anyone but its (system)
+	owner - the exact bug an admin-armed, team-promoted skill hit."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_slugset_user(SLUGSET_USER_A)
+		_ensure_slugset_user(SLUGSET_USER_B)
+
+	def tearDown(self):
+		# Proper doc deletion (not a raw db.delete): an Org/Role-scope row
+		# reserves its slug in Jarvis Shared Skill Slug on save, released only
+		# by on_trash - a raw delete would leak the reservation across tests.
+		for name in frappe.get_all(SKILL, filters={"skill_name": ["like", "orgres-%"]}, pluck="name"):
+			frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def test_armed_org_wide_skill_resolves_for_a_plain_member(self):
+		docname = _mk_org_skill("orgres-armed", armed=True)
+		self.assertEqual(resolve_armed_skill_docname("orgres-armed", SLUGSET_USER_B), docname)
+
+	def test_unarmed_org_wide_skill_does_not_resolve(self):
+		_mk_org_skill("orgres-unarmed", armed=False)
+		self.assertIsNone(resolve_armed_skill_docname("orgres-unarmed", SLUGSET_USER_B))
+
+	def test_own_row_still_takes_precedence_over_an_armed_org_copy(self):
+		"""The owner's own row shadows the org-wide tier exactly as it shadows
+		the shared/role tier - unchanged precedence, org-wide is the last
+		fallback only. An unarmed own row still fails safe (no fallthrough)."""
+		_mk_slug_skill(SLUGSET_USER_A, "orgres-shadow")
+		_mk_org_skill("orgres-shadow", armed=True)
+		self.assertIsNone(resolve_armed_skill_docname("orgres-shadow", SLUGSET_USER_A))
+
+	def test_role_restricted_org_row_is_not_an_org_wide_candidate(self):
+		"""A role-restricted Org row (allowed_roles set) is reached via the
+		existing role tier, not the new org-wide fallback - a non-matching user
+		gets no candidate at all, armed or not."""
+		_mk_org_skill("orgres-restricted", armed=True, allowed_roles=["Sales Manager"])
+		self.assertIsNone(resolve_armed_skill_docname("orgres-restricted", SLUGSET_USER_B))
 
 
 # --------------------------------------------------------------------------- #

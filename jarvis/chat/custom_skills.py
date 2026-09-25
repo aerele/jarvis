@@ -219,9 +219,9 @@ def fetch_required_clause(lead_in: str, names) -> str:
 
 def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	"""Return the bare ``/slug`` tokens in ``message`` that resolve to a custom
-	skill ``user`` may invoke: owned by ``user``, shared with ``user``, or
-	reachable via a role ``user`` holds (the ``matched`` set
-	:func:`invoked_skill_clause` folds into its context clause).
+	skill ``user`` may invoke: owned by ``user``, shared with ``user``,
+	reachable via a role ``user`` holds, or an unrestricted Org-wide skill (the
+	``matched`` set :func:`invoked_skill_clause` folds into its context clause).
 
 	PURE identity parameter, not ambient session: resolved entirely under the
 	passed ``user``, never ``frappe.session.user``. A caller that must reason
@@ -238,8 +238,7 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 		return set()
 	# Only skills `user` OWNS or was SHARED with can be invoked by slug — so a
 	# skill shared with specific people isn't triggerable by others (even though
-	# it lives in the customer's shared container). Auto-pick by description is
-	# still bench-global (a container-level limitation).
+	# it lives in the customer's shared container).
 	enabled = {
 		r.skill_name
 		for r in frappe.get_all(
@@ -269,6 +268,15 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	# and managed learned skills are excluded here (they auto-inject, see
 	# learned_skill_clause).
 	enabled |= _role_scoped_invocable_names(user)
+	# Unrestricted Org rows (issue #580): an Org-scope skill with no allowed_roles
+	# is pushed into EVERY container (:func:`_pushable_org_rows`, the same set
+	# build_push_payload writes), so it is already loaded and invocable by ANY
+	# user - unlike a private/shared/role row it needs no per-user ownership
+	# check. Before this, invoked_skill_slugs only recognised owner/share/role
+	# rows, so a promoted-to-Org skill's `/slug` was silently unmatched for
+	# everyone but its (system) owner and its "Approve & run" arm could never be
+	# offered - the exact symptom of #580.
+	enabled |= {r.skill_name for r in _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)}
 	return {s for s in slugs if s in enabled}
 
 
@@ -276,17 +284,20 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
 	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
 
-	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role precedence - the ONE
-	definition of that owned/shared/role-scoped resolution, so the "Approve & run"
-	offer path (``jarvis.api._resolve_approve_run_offer``) and skill invocation can
-	no longer drift apart the way they had (each used to hand-duplicate this query;
+	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role/org-wide precedence -
+	the ONE definition of that resolution, so the "Approve & run" offer path
+	(``jarvis.api._resolve_approve_run_offer``) and skill invocation can no
+	longer drift apart the way they had (each used to hand-duplicate this query;
 	only :func:`role_scoped_skill_rows` was actually shared). The owner's OWN
-	enabled row wins the invocation; failing that, a shared or role-scoped enabled
-	row. ``allow_approve_run`` is read LIVE off the resolved row and must be 1.
+	enabled row wins the invocation; failing that, a shared or role-scoped
+	enabled row; failing that, an unrestricted Org-wide row (issue #580 - an
+	Org-promoted skill has no per-user owner/share/role row at all, so without
+	this tier it could never resolve for anyone but the system owner).
+	``allow_approve_run`` is read LIVE off the resolved row and must be 1.
 	Fail-safe on ambiguity - a slug can map to several rows across owned/shared/
-	role-scoped, so ``None`` when the winning tier holds 2+ rows OR when 2+ ARMED
-	invocable rows exist anywhere (an ambiguous arm cannot authorize a run). O(1)-
-	ish: a couple of indexed reads, no per-skill N+1."""
+	role-scoped/org-wide, so ``None`` when the winning tier holds 2+ rows OR when
+	2+ ARMED invocable rows exist anywhere (an ambiguous arm cannot authorize a
+	run). O(1)-ish: a few indexed reads, no per-skill N+1."""
 	# The owner's OWN enabled rows named `slug`.
 	own = {
 		r.name: int(r.allow_approve_run or 0)
@@ -318,17 +329,32 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 		if r.skill_name == slug:
 			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
 
-	# Precedence: the owner's own row wins; only fall through to shared/role when
-	# the owner has no own row for this slug.
-	tier = own if own else shared_role
+	# Unrestricted Org rows named `slug` (issue #580): pushed into EVERY
+	# container (:func:`_pushable_org_rows`, the same set build_push_payload
+	# writes), so an Org-wide skill is invocable by ANY user - not only its
+	# (system) owner. Without this tier, resolve_armed_skill_docname mirrored
+	# invoked_skill_slugs's blind spot: a promoted-to-Org skill could never
+	# resolve to an armed row for anyone but its owner, so its "Approve & run"
+	# offer could never fire. Computed unconditionally (like shared_role above)
+	# so the ambiguity guard below still sees every candidate row.
+	org_wide: dict[str, int] = {
+		r.name: int(r.allow_approve_run or 0)
+		for r in _pushable_org_rows(fields=("name", "skill_name", "allow_approve_run"))
+		if r.skill_name == slug
+	}
+
+	# Precedence: the owner's own row wins; then a shared/role row; an
+	# unrestricted Org row (invocable by everyone, so the weakest per-identity
+	# claim) is the last fallback.
+	tier = own or shared_role or org_wide
 	if len(tier) != 1:
 		return None  # no candidate, or an ambiguous winning tier -> fail safe
 	docname, armed = next(iter(tier.items()))
 	if not armed:
 		return None  # the row the owner would actually invoke is not armed
 	# Global ambiguity guard: refuse if the slug maps to 2+ ARMED invocable rows
-	# anywhere (owned + shared + role), even across tiers.
-	if sum(1 for v in {**shared_role, **own}.values() if v) != 1:
+	# anywhere (owned + shared + role + org-wide), even across tiers.
+	if sum(1 for v in {**org_wide, **shared_role, **own}.values() if v) != 1:
 		return None
 	return docname
 
