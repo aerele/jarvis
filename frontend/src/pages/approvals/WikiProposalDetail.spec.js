@@ -136,10 +136,22 @@ describe("WikiProposalDetail", () => {
 		await button(w, "Approve").trigger("click");
 		await flushPromises();
 		expect(toast.warning).toHaveBeenCalledWith(
-			"Approved, but the write did not land. Use Retry."
+			"Approved, but the write did not land. Retry to re-drive it."
 		);
 		expect(onChanged).toHaveBeenCalledTimes(1);
 		expect(onDecided).not.toHaveBeenCalled();
+	});
+
+	it("an approve that lands as page_full warns without pointing at Retry", async () => {
+		// MAJOR-1: page_full can never be fixed by retrying, so the toast must
+		// not say "Use Retry" the way an ordinary transient failure does.
+		api.approveWikiWrite.mockResolvedValue({ ok: true, applied: false, reason: "page_full" });
+		const w = mountWith();
+		await button(w, "Approve").trigger("click");
+		await flushPromises();
+		expect(toast.warning).toHaveBeenCalledWith(
+			"The wiki page is full, so nothing was changed. Retry will keep failing until the page has room: record the note on another page, or reject it."
+		);
 	});
 
 	it("a refused approve asks for a fresh list; it is not a decision", async () => {
@@ -183,18 +195,55 @@ describe("WikiProposalDetail", () => {
 		expect(onDecided).toHaveBeenCalledTimes(1);
 	});
 
-	it("offers Retry, not Approve, for an approved write that did not land", async () => {
+	it("offers Retry AND Reject for an approved write that did not land", async () => {
+		// MAJOR-1: Retry alone stranded a doomed row forever (page_full and the
+		// like never lands) with no way off the board - Reject is now offered
+		// alongside it, so a reviewer can say "won't land" instead.
 		const w = mountWith(
 			proposal({ status: "Approved", can_approve: 0, needs_retry: 1, apply_reason: "busy" })
 		);
 		expect(button(w, "Approve")).toBeFalsy();
-		expect(button(w, "Reject")).toBeFalsy();
+		expect(button(w, "Reject")).toBeTruthy();
 		expect(w.text()).toContain("did not land (busy)");
 		api.retryWikiWrite.mockResolvedValue({ ok: true, applied: true });
 		await button(w, "Retry").trigger("click");
 		await flushPromises();
 		expect(api.retryWikiWrite).toHaveBeenCalledWith("AR-1");
 		expect(onDecided).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects an approved write that never landed, next to Retry", async () => {
+		api.rejectWikiWrite.mockResolvedValue({ ok: true, status: "Rejected" });
+		const w = mountWith(
+			proposal({
+				status: "Approved",
+				can_approve: 0,
+				needs_retry: 1,
+				apply_reason: "page_full",
+			})
+		);
+		await button(w, "Reject").trigger("click");
+		await flushPromises();
+		expect(api.rejectWikiWrite).toHaveBeenCalledWith("AR-1");
+		expect(api.retryWikiWrite).not.toHaveBeenCalled();
+		expect(onDecided).toHaveBeenCalledTimes(1);
+	});
+
+	it("shows human copy for a page_full apply_reason, but still offers Retry", () => {
+		const w = mountWith(
+			proposal({
+				status: "Approved",
+				can_approve: 0,
+				needs_retry: 1,
+				apply_reason: "page_full",
+			})
+		);
+		expect(w.text()).toContain(
+			"The wiki page is full, so nothing was changed. Retry will keep failing until the page has room: record the note on another page, or reject it."
+		);
+		expect(w.text()).not.toContain("did not land (page_full)");
+		expect(button(w, "Retry")).toBeTruthy();
+		expect(button(w, "Reject")).toBeTruthy();
 	});
 
 	it("reports the outcome even after the board switched away mid-call", async () => {

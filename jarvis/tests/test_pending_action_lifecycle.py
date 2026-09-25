@@ -694,9 +694,10 @@ class TestTerminalWriter(_Base):
 	_ALLOWED = {
 		("chat/pending_actions/_store.py", "_terminal_update"),
 		("chat/pending_actions/_store.py", "claim"),
+		("chat/pending_actions/_store.py", "release_sheet"),
 	}
 
-	def test_only_terminal_update_and_claim_write_status(self):
+	def test_only_terminal_update_claim_and_release_sheet_write_status(self):
 		writers = set()
 		for dirpath, dirs, files in os.walk(self._ROOT):
 			dirs[:] = [d for d in dirs if d not in ("tests", "node_modules", "__pycache__")]

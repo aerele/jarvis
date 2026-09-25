@@ -59,9 +59,7 @@
 			</div>
 			<template v-else>
 				<div v-if="live.needs_retry" class="mt-3 text-sm text-ink-red-5">
-					Approved, but the write did not land{{
-						live.apply_reason ? ` (${live.apply_reason})` : ""
-					}}. Retry to re-drive it.
+					{{ landing }}
 				</div>
 
 				<div class="mt-4 flex flex-wrap items-center gap-2">
@@ -73,25 +71,23 @@
 						:disabled="busy !== null"
 						@click="retry"
 					/>
-					<template v-else>
-						<Button
-							v-if="live.can_approve"
-							variant="solid"
-							theme="green"
-							label="Approve"
-							:loading="busy === 'approve'"
-							:disabled="busy !== null || changed"
-							@click="approve"
-						/>
-						<Button
-							variant="subtle"
-							theme="red"
-							label="Reject"
-							:loading="busy === 'reject'"
-							:disabled="busy !== null"
-							@click="reject"
-						/>
-					</template>
+					<Button
+						v-else-if="live.can_approve"
+						variant="solid"
+						theme="green"
+						label="Approve"
+						:loading="busy === 'approve'"
+						:disabled="busy !== null || changed"
+						@click="approve"
+					/>
+					<Button
+						variant="subtle"
+						theme="red"
+						label="Reject"
+						:loading="busy === 'reject'"
+						:disabled="busy !== null"
+						@click="reject"
+					/>
 				</div>
 			</template>
 		</template>
@@ -109,7 +105,13 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { approveWikiWrite, rejectWikiWrite, retryWikiWrite } from "@/api";
 import { renderMarkdown } from "@/markdown";
 import { errHtml } from "@/lib/errors";
-import { proposalHeadline, proposalBody, isLongBody, dropperLabel } from "@/lib/wikiReview";
+import {
+	proposalHeadline,
+	proposalBody,
+	isLongBody,
+	dropperLabel,
+	landingMessage,
+} from "@/lib/wikiReview";
 
 const props = defineProps({
 	name: { type: String, required: true },
@@ -156,6 +158,7 @@ const summary = computed(() => (note.value.preview && note.value.preview.summary
 const body = computed(() => proposalBody(note.value));
 const bodyHtml = computed(() => renderMarkdown(body.value));
 const long = computed(() => isLongBody(note.value));
+const landing = computed(() => landingMessage(live.value));
 
 function reload() {
 	if (props.proposal) open(props.proposal);
@@ -170,8 +173,11 @@ async function approve() {
 			toast.success("Wiki note approved and recorded");
 			decided(r);
 		} else {
-			// approved, but the write did not land: the row stays, now as a retry
-			toast.warning("Approved, but the write did not land. Use Retry.");
+			// approved, but the write did not land: the row stays, now actionable
+			// (Retry, or Reject if it can't land at all). Reuse the same copy the
+			// needs_retry banner shows, so a page_full reason never tells the
+			// reviewer to "Use Retry" when Retry can only ever fail again.
+			toast.warning(landingMessage({ apply_reason: r && r.reason }));
 			listChanged(r);
 		}
 	} catch (e) {

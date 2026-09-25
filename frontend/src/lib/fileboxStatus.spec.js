@@ -5,6 +5,7 @@ import {
 	STATUS_OPTIONS,
 	statusBadge,
 	resultLink,
+	isLive,
 	canRerun,
 	bulkRerunToast,
 } from "./fileboxStatus";
@@ -14,6 +15,7 @@ describe("fileboxStatus", () => {
 		expect(STATUSES.map((s) => STATUS_BADGE[s].label)).toEqual([
 			"Processing",
 			"Needs approval",
+			"Applying",
 			"Draft created",
 			"No draft",
 			"Failed",
@@ -22,7 +24,15 @@ describe("fileboxStatus", () => {
 		expect(STATUS_BADGE.draft_created.theme).toBe("green");
 	});
 
-	it("offers All + the five statuses as filter options", () => {
+	it("reads a sheet being applied as Applying, live like processing", () => {
+		expect(statusBadge({ status: "applying" })).toEqual({ label: "Applying", theme: "blue" });
+		expect(isLive({ status: "applying" })).toBe(true);
+		expect(isLive({ status: "processing" })).toBe(true);
+		expect(isLive({ status: "needs_approval" })).toBe(false);
+		expect(isLive(null)).toBe(false);
+	});
+
+	it("offers All + every status as filter options", () => {
 		expect(STATUS_OPTIONS.map((o) => o.value)).toEqual(["", ...STATUSES]);
 	});
 
@@ -115,5 +125,21 @@ describe("fileboxStatus", () => {
 		expect(t.message).toContain("1 re-running · 2 skipped");
 		expect(t.message).toContain("&lt;img src=x onerror=alert(1)&gt;");
 		expect(t.message).not.toContain("<img");
+	});
+
+	it("counts a re-run waiting on a skill question apart from the sent ones", () => {
+		expect(bulkRerunToast({ sent: 1, needs_choice: 2, skipped: [] }, 3)).toEqual({
+			type: "info",
+			message: "1 re-running · 2 waiting for your choice on the Approval Board",
+		});
+		const t = bulkRerunToast(
+			{ sent: 0, needs_choice: 1, skipped: [{ conversation: "a", reason: "not found" }] },
+			2
+		);
+		expect(t.message).toBe(
+			"0 re-running · 1 waiting for your choice on the Approval Board · 1 skipped (not found)"
+		);
+		// an older server without the count still words the sent / skipped split
+		expect(bulkRerunToast({ skipped: [] }, 2).message).toBe("2 files re-running");
 	});
 });

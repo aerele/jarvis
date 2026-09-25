@@ -1,16 +1,17 @@
-// The Approval Board's "Needs your decision" rows: held File Box writes and the
-// viewer's own chat cards (list_pending_actions_lane), plus wiki notes for a skill
-// reviewer (list_wiki_write_proposals). Each source keeps its own endpoint and
-// authz; a non-reviewer's wiki 403 is silent and never asked again. Refetches
-// (debounced) on the realtime frames that mean "something is waiting or settled"
-// and when the tab becomes visible. All row text is model/user-derived: render it
-// as text, never HTML.
+// The Approval Board's "Needs your decision" rows: held File Box writes, approval
+// sheets and the viewer's own chat cards (list_pending_actions_lane), plus wiki
+// notes for a skill reviewer (list_wiki_write_proposals). Each source keeps its
+// own endpoint and authz; a non-reviewer's wiki 403 is silent and never asked
+// again. Refetches (debounced) on the realtime frames that mean "something is
+// waiting or settled" and when the tab becomes visible. All row text is
+// model/user-derived: render it as text, never HTML.
 import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
 import { listPendingActionsLane } from "@/api/approvals";
 import { listWikiWriteProposals } from "@/api";
 import { errMessage } from "@/lib/errors";
 import { filesWaiting } from "@/lib/heldActions";
 import { isPermissionDenied, proposalHeadline, dropperLabel } from "@/lib/wikiReview";
+import { sheetTitle } from "@/lib/sheet";
 
 const REFRESH_KINDS = new Set([
 	"action:pending",
@@ -18,6 +19,10 @@ const REFRESH_KINDS = new Set([
 	"action:confirmed",
 	"action:settled",
 ]);
+// a sheet's apply starting, ending or bouncing (not each progress step)
+const refreshes = (p) =>
+	REFRESH_KINDS.has(p.kind) ||
+	(p.kind === "sheet:progress" && (p.state !== "applying" || !p.done));
 const REFRESH_DEBOUNCE_MS = 1000;
 // the oldest wiki notes lead, so they must be the page fetched; 100 = the clamp max
 const WIKI_QUERY = { order: "oldest", page_length: 100 };
@@ -25,7 +30,35 @@ const PENDING = { label: "Pending", theme: "orange" };
 
 const words = (...parts) => parts.filter(Boolean).join(" ").toLowerCase();
 
+// A sheet still listing is shown but not opened from the rail (`collecting`).
+function sheetRow(r) {
+	const title = sheetTitle(r);
+	const collecting = !!r.collecting;
+	return {
+		key: "sheet:" + r.name,
+		kind: "sheet",
+		name: r.name,
+		status: r.status,
+		title,
+		meta:
+			(r.counts_line || "Approval sheet") +
+			(r.for_user ? " · dropped by " + r.for_user : ""),
+		document_type: "",
+		types: Object.keys(r.counts || {}),
+		collecting,
+		created_at: r.created_at || "",
+		badge: collecting
+			? { label: "Still listing…", theme: "gray" }
+			: r.status === "Executing"
+			? { label: "Applying…", theme: "blue" }
+			: PENDING,
+		search: words(title, r.counts_line, r.for_user),
+		raw: r,
+	};
+}
+
 function laneRow(r) {
+	if (r.kind === "file_box_sheet") return sheetRow(r);
 	const kind = r.kind === "chat" ? "chat" : "held";
 	const running = r.status === "Executing";
 	const title = r.summary || (kind === "chat" ? "Action waiting" : "New record");
@@ -74,6 +107,11 @@ export function actionRowType(row) {
 	return ((row && row.document_type) || "").trim() || "Unclassified";
 }
 
+// A sheet has a type per doctype it lists; any other row its one.
+export function actionRowTypes(row) {
+	return row && row.types && row.types.length ? row.types : [actionRowType(row)];
+}
+
 // The toolbar's search + type filter over the rows. Wiki notes carry no doctype,
 // so a specific type hides them.
 export function filterActionRows(rows, { search = "", document_type = "" } = {}) {
@@ -82,7 +120,7 @@ export function filterActionRows(rows, { search = "", document_type = "" } = {})
 		.toLowerCase();
 	return (rows || []).filter(
 		(r) =>
-			(!document_type || (r.kind !== "wiki" && actionRowType(r) === document_type)) &&
+			(!document_type || (r.kind !== "wiki" && actionRowTypes(r).includes(document_type))) &&
 			(!q || r.search.includes(q))
 	);
 }
@@ -171,7 +209,7 @@ export function useActionRows() {
 
 	let timer = null;
 	function onEvent(p) {
-		if (!p || !REFRESH_KINDS.has(p.kind) || timer) return;
+		if (!p || !refreshes(p) || timer) return;
 		timer = setTimeout(() => {
 			timer = null;
 			load();
