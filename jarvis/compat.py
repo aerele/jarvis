@@ -162,14 +162,14 @@ def _sheet_layout(data: list) -> tuple[list[str], list[float]]:
 	kinds: list[str] = []
 	widths: list[float] = []
 	for c in range(len(header)):
-		values = [r[c] for r in body if c < len(r) and r[c] is not None and r[c] != ""]
-		if values and all(isinstance(v, datetime.datetime) for v in values):
-			kind = "datetime"
-		elif values and all(isinstance(v, datetime.date) for v in values):
+		values = [r[c] for r in body if c < len(r) and not _xlsx_blank(r[c])]
+		if values and all(isinstance(v, datetime.date) for v in values):
+			# a date-only value keeps a date-only format even in a mixed column:
+			# the builders pick the date or datetime format per cell
 			kind = "datetime" if any(isinstance(v, datetime.datetime) for v in values) else "date"
 		elif values and all(isinstance(v, int) and not isinstance(v, bool) for v in values):
 			kind = "int"
-		elif values and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+		elif values and all(_xlsx_number(v) for v in values):
 			kind = "float"
 		else:
 			kind = "text"
@@ -189,6 +189,21 @@ def _sheet_layout(data: list) -> tuple[list[str], list[float]]:
 		longest = max([len(str(header[c]))] + [len(shown(v)) for v in values], default=0)
 		widths.append(min(max(longest + 2, _XLSX_MIN_WIDTH), _XLSX_MAX_WIDTH))
 	return kinds, widths
+
+
+def _xlsx_blank(v) -> bool:
+	"""Blank for layout purposes: the same rule export_excel uses (None, or
+	text that is empty after stripping), so a stray " " in a date column does
+	not demote the column the date conversion just produced."""
+	return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _xlsx_number(v) -> bool:
+	"""A real number for Excel: int, float or Decimal (what SQL aggregates
+	such as SUM() return), never bool."""
+	from decimal import Decimal
+
+	return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
 
 def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
@@ -211,18 +226,18 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
 	identically, then let it append a worksheet per tab, laid out by
 	:func:`_sheet_layout`: fitted widths, number and date formats per column,
 	a bold frozen header row and an autofilter over the data."""
+	import datetime
 	from io import BytesIO
 
 	import xlsxwriter
 	from frappe.utils.xlsxutils import XLSXStyleBuilder, make_xlsx
 
 	out = BytesIO()
+	# Dates default to the date-only format; a value that carries a time gets
+	# the datetime format per cell below, so a date never shows " 00:00:00".
 	wb = xlsxwriter.Workbook(
 		out,
-		{
-			"constant_memory": True,
-			"default_date_format": XLSXStyleBuilder.get_datetime_format(),
-		},
+		{"constant_memory": True, "default_date_format": XLSXStyleBuilder.get_date_format()},
 	)
 	# Style ids for make_xlsx's registry. Passing any styles switches off its
 	# built-in bold header, so the header row carries BOLD itself.
@@ -230,29 +245,39 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
 		{"bold": True},
 		{"num_format": XLSX_INT_FORMAT},
 		{"num_format": XLSX_FLOAT_FORMAT},
-		{"num_format": XLSXStyleBuilder.get_date_format(), "align": "right"},
-		{"num_format": XLSXStyleBuilder.get_datetime_format(), "align": "right"},
+		{"num_format": XLSXStyleBuilder.get_datetime_format()},
 	]
-	kind_style = {"int": 1, "float": 2, "date": 3, "datetime": 4}
+	number_style = {"int": 1, "float": 2}
+	# make_xlsx sets a width, then styles the column with a second set_column
+	# that resets it; the width is set again after it returns, with an equal
+	# format (a column format lands on a row only when that row is flushed).
+	width_formats = {k: wb.add_format(registry[i]) for k, i in number_style.items()}
 	for name, data in sheet_data:
 		kinds, widths = _sheet_layout(data)
-		# Formats go per cell, not per column: make_xlsx applies column styles
-		# with a second set_column that resets the width, and dates are written
-		# with the workbook's datetime default, which beats a column format.
+		column_styles = {c: [number_style[k]] for c, k in enumerate(kinds) if k in number_style}
+		# Only values that carry a time need a cell style, so a large export
+		# builds no per-cell map for plain numbers or dates.
 		cell_styles = {
-			(r, c): [kind_style[k]]
-			for c, k in enumerate(kinds)
-			if k in kind_style
+			(r, c): [3]
 			for r in range(1, len(data))
+			for c, v in enumerate(data[r])
+			if isinstance(v, datetime.datetime)
 		}
 		make_xlsx(  # adds a worksheet to `wb`, returns None
 			data,
 			name,
 			wb=wb,
 			column_widths=widths,
-			styles={"styles": registry, "row_styles": {0: [0]}, "cell_styles": cell_styles},
+			styles={
+				"styles": registry,
+				"row_styles": {0: [0]},
+				"column_styles": column_styles,
+				"cell_styles": cell_styles,
+			},
 		)
 		ws = wb.worksheets()[-1]
+		for c, (kind, width) in enumerate(zip(kinds, widths)):
+			ws.set_column(c, c, width, width_formats.get(kind))
 		ws.freeze_panes(1, 0)
 		if kinds:
 			ws.autofilter(0, 0, max(len(data) - 1, 0), len(kinds) - 1)
@@ -303,26 +328,23 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 				if isinstance(value, str) and next(ILLEGAL_CHARACTERS_RE.finditer(value), None):
 					value = ILLEGAL_CHARACTERS_RE.sub("", value)
 				kind = kinds[c] if c < len(kinds) else "text"
-				if r == 0:
-					# the row-level font above does not reach written cells in a
-					# write-only sheet; bold each header cell itself
-					cell = WriteOnlyCell(ws, value=value)
-					cell.font = Font(name="Calibri", bold=True)
-					clean_row.append(cell)
-				elif isinstance(value, datetime.date):  # datetime is a date subclass
+				cell = None
+				if isinstance(value, datetime.date):  # datetime is a date subclass
 					cell = WriteOnlyCell(ws, value=value)
 					cell.number_format = (
 						f"{date_format} {time_format}"
 						if isinstance(value, datetime.datetime)
 						else date_format
 					)
-					clean_row.append(cell)
-				elif kind in number_formats and isinstance(value, (int, float)):
+				elif r and kind in number_formats and _xlsx_number(value):
 					cell = WriteOnlyCell(ws, value=value)
 					cell.number_format = number_formats[kind]
-					clean_row.append(cell)
-				else:
-					clean_row.append(value)
+				if r == 0:
+					# the row-level font above does not reach written cells in a
+					# write-only sheet; bold each header cell itself
+					cell = cell or WriteOnlyCell(ws, value=value)
+					cell.font = Font(name="Calibri", bold=True)
+				clean_row.append(cell if cell is not None else value)
 			ws.append(clean_row)
 
 	out = BytesIO()
