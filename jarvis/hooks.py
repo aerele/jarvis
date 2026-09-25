@@ -216,6 +216,9 @@ after_install = "jarvis.install.after_install"
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	# Reconcile upgrades even when the original rename patch is already logged.
+	# Keep dual-column compatibility for old workers and rollback.
+	"jarvis.chat.seq_watermark.reconcile_watermarks",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows
 	# from the detector registry (best-effort; never blocks a migrate).
