@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import frappe
 
 from jarvis.chat import runtime_profile as rp
+from jarvis.tests._gateway_fixtures import TEST_PROFILE
 
 
 def connection():
@@ -22,7 +23,7 @@ def connection():
 
 
 def envelope():
-	contract = {"schema_version": 1, "profile_id": "gateway-v1", "values": asdict(rp.legacy_profile())}
+	contract = {"schema_version": 1, "profile_id": "gateway-v1", "values": asdict(TEST_PROFILE)}
 	return {
 		**contract,
 		"revision": hashlib.sha256(rp._json(contract).encode()).hexdigest(),
@@ -38,7 +39,7 @@ def envelope():
 class TestRuntimeProfileValidation(unittest.TestCase):
 	def test_valid_profile_is_immutable(self):
 		profile = rp.validate(envelope(), connection())
-		self.assertEqual(profile, rp.legacy_profile())
+		self.assertEqual(profile, TEST_PROFILE)
 		with self.assertRaises(FrozenInstanceError):
 			profile.canvas_route = "/changed/"
 
@@ -77,7 +78,7 @@ class TestRuntimeProfileValidation(unittest.TestCase):
 			with self.subTest(value=value), self.assertRaises(rp.RuntimeProfileError):
 				rp.validate(raw)
 
-	def test_cannot_broaden_media_root_or_reinterpret_old_transcripts(self):
+	def test_changed_values_require_matching_digest(self):
 		for key, value in (("media_root", "/home/node/"), ("message_metadata_key", "other_metadata")):
 			raw = envelope()
 			raw["values"][key] = value
@@ -144,9 +145,57 @@ class TestRuntimeProfileStorage(unittest.TestCase):
 	def record(self):
 		return {"anchor": self.anchor, "profile": envelope(), "fetched_at": "2026-09-25T00:00:00"}
 
-	def test_cold_legacy_site_uses_fallback_without_caching_absence(self):
-		self.assertEqual(rp.get_profile(), rp.legacy_profile())
+	def test_missing_profile_blocks_without_using_or_caching_a_fallback(self):
+		with self.assertRaisesRegex(rp.RuntimeProfileError, "sync the connection"):
+			rp.get_profile()
+		self.cache.get_value.assert_not_called()
 		self.cache.set_value.assert_not_called()
+		self.assertEqual(rp.status(), {"state": "missing"})
+
+	def test_first_sync_recovers_missing_profile_in_same_request(self):
+		with self.assertRaises(rp.RuntimeProfileError):
+			rp.get_profile()
+		with patch.object(rp.frappe, "get_doc"):
+			rp.persist(envelope(), self.settings)
+		self.assertEqual(rp.get_profile(), TEST_PROFILE)
+
+	def test_validly_resigned_refresh_cannot_change_accepted_contract(self):
+		self.db.get_value.return_value = frappe._dict(
+			parent=rp.PARENT, defkey=rp.KEY, defvalue=json.dumps(self.record())
+		)
+		for key, value in (("media_root", "/srv/"), ("message_metadata_key", "other_metadata")):
+			raw = envelope()
+			raw["values"][key] = value
+			raw["revision"] = hashlib.sha256(
+				rp._json({k: raw[k] for k in ("schema_version", "profile_id", "values")}).encode()
+			).hexdigest()
+			with self.subTest(key=key), self.assertRaises(rp.RuntimeProfileError):
+				rp.persist(raw, self.settings)
+		self.db.set_value.assert_not_called()
+		self.cache.delete_value.assert_not_called()
+
+	def test_saved_content_only_uses_valid_assignment_bound_last_good_profile(self):
+		self.db.get_value.return_value = json.dumps({**self.record(), "unavailable": True})
+		with self.assertRaises(rp.RuntimeProfileError):
+			rp.get_profile()
+		self.assertEqual(rp.get_saved_content_profile(), TEST_PROFILE)
+		with self.assertRaises(rp.RuntimeProfileError):
+			rp.get_profile()  # Sanitizing stored HTML must not re-enable live requests.
+		for blob in (None, "not json", json.dumps({**self.record(), "anchor": {}})):
+			self.db.get_value.return_value = blob
+			with self.subTest(blob=blob), self.assertRaises(rp.RuntimeProfileError):
+				rp.get_saved_content_profile()
+
+	def test_missing_profile_prevents_prompt_assembly_before_any_message_read(self):
+		with patch.object(frappe, "conf", frappe._dict()):
+			from jarvis.chat import turn_handler
+
+		with patch.object(turn_handler, "get_profile", side_effect=rp.RuntimeProfileError(rp._ERROR)):
+			with self.assertRaisesRegex(rp.RuntimeProfileError, "sync the connection"):
+				turn_handler.assemble_prompt(
+					None, message_id="test", conversation_id="test", context=None, attachments=[], user="test"
+				)
+		self.db.get_value.assert_not_called()
 
 	def test_redis_loss_uses_database_and_pins_snapshot(self):
 		self.cache.get_value.side_effect = ConnectionError
@@ -163,10 +212,10 @@ class TestRuntimeProfileStorage(unittest.TestCase):
 		self.cache.get_value.return_value = {
 			"digest": hashlib.sha256(blob.encode()).hexdigest(),
 			"anchor": self.anchor,
-			"profile": rp.legacy_profile(),
+			"profile": TEST_PROFILE,
 		}
 		with patch.object(rp, "validate", side_effect=AssertionError("warm cache revalidated")):
-			self.assertEqual(rp.get_profile(), rp.legacy_profile())
+			self.assertEqual(rp.get_profile(), TEST_PROFILE)
 			rp.get_profile()
 		self.db.get_value.assert_called_once()
 
@@ -182,7 +231,7 @@ class TestRuntimeProfileStorage(unittest.TestCase):
 		self.cache.get_value.return_value = {
 			"digest": hashlib.sha256(old_blob.encode()).hexdigest(),
 			"anchor": self.anchor,
-			"profile": rp.legacy_profile(),
+			"profile": TEST_PROFILE,
 		}
 		self.db.get_value.return_value = json.dumps({**self.record(), "unavailable": True})
 		with self.assertRaises(rp.RuntimeProfileError):

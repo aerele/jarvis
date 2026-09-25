@@ -28,6 +28,9 @@ permissions:
   contents: read
 
 jobs:
+  runtime-branding:
+    uses: ./.github/workflows/runtime-branding.yml
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45

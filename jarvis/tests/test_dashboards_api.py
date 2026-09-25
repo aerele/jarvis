@@ -29,6 +29,12 @@ from jarvis.permissions import (
 	ensure_jarvis_admin_role,
 	ensure_jarvis_user_role,
 )
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
 
 DASHBOARD = "Jarvis Dashboard"
 
