@@ -64,6 +64,6 @@ describe("apply after approve: servers flag it, the client runs it", () => {
 	it("no copy still promises a push that never comes", () => {
 		const flat = (t) => t.replace(/\s+/g, " ");
 		expect(flat(insightDialog)).not.toContain("next skills push");
-		expect(flat(insightDialog)).toContain("restarts your assistant briefly");
+		expect(flat(insightDialog)).toContain("updates your assistant");
 	});
 });

@@ -1862,9 +1862,7 @@ import {
 } from "@/api/review";
 // Org push-budget warning formatter (ruling 2 + CDX-SP-2) — a pure, node-tested
 // module that RENDERS the server's projection (never a client-side guess).
-// `projectionChanged` cues a reviewer when the push impact moved since list-load
-// (R2-SP-5; the authoritative reconfirm is server-enforced).
-import { formatPushProjection, projectionChanged } from "./promotionBudget";
+import { formatPushProjection } from "./promotionBudget";
 // HTML-escape for every untrusted value interpolated into a confirm message
 // (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
 import { esc } from "./escapeHtml";
@@ -2369,41 +2367,33 @@ async function approveSkillPromotion(p) {
 	// Confirm + publish the KEPT roles (the reviewer may have trimmed the request),
 	// not the original ask. keptRolesFor reads the live per-request selection.
 	const kept = keptRolesFor(p);
-	const target =
-		p.to_scope === "Role"
-			? `Role${kept.length === 1 ? "" : "s"}: ${esc(kept.join(", ") || "-")}`
-			: "Org";
-	const who =
-		p.to_scope === "Role" ? (kept.length === 1 ? "that role" : "those roles") : "everyone";
 	// Recompute the budget truth fresh; fall back to the list-load projection if the
-	// preflight call fails (never block the decision on a warning fetch).
+	// preflight call fails (never block the decision on a warning fetch). The server
+	// re-checks at decide time and asks for a fresh confirm if the catalog moved.
 	let ackProjection = p.push_projection || null;
-	let moved = false;
 	try {
 		const pre = await preflightSkillPromotion(p.name);
-		moved = projectionChanged(p.push_projection, pre && pre.push_projection);
 		ackProjection = (pre && pre.push_projection) || null;
 	} catch (e) {
-		// keep the list-load projection; the server re-checks again at decide time
+		// keep the list-load projection
 	}
-	const warn = formatPushProjection(ackProjection);
-	// Every untrusted value is HTML-escaped — the message renders through v-html
-	// (SAR-1). The snapshot's description + user-invocable flag are shown so the
-	// reviewer confirms the WHOLE content their approval publishes (R2-SP-2). The
-	// budget warning folds in as plain "Note:" copy (no ⚠ glyph — design.md:563;
-	// the on-card banner already carries the colored warning).
+	// Short on purpose: the card behind this dialog already shows the reviewed
+	// description, slash flag and instructions, and the full budget banner. The
+	// message renders through v-html (SAR-1), so role names are escaped.
 	let message =
-		`This publishes “${esc(p.skill_name)}” to ${target}, usable by ${who}, as a shared ` +
-		"copy of exactly the reviewed content. Your original private skill stays intact and " +
-		"editable; the shared copy is locked to reviewers.";
-	if (p.description_snapshot) message += ` Description: “${esc(p.description_snapshot)}”.`;
-	if (p.user_invocable_snapshot != null)
-		message += ` Slash-invocable: ${p.user_invocable_snapshot ? "yes" : "no"}.`;
-	if (p.to_scope === "Org") message += " Your assistant restarts briefly to load it.";
-	if (moved) message += " The push impact changed since the list loaded.";
-	if (warn) message += ` Note: ${esc(warn.message)}`;
+		p.to_scope === "Role"
+			? `People with ${esc(kept.join(", ") || "-")} can use it.`
+			: "Everyone in your org can use it. Your assistant picks it up in a few seconds.";
+	const warn = formatPushProjection(ackProjection);
+	if (warn) {
+		const limit = warn.projection.budget;
+		message +=
+			warn.level === "over"
+				? ` It goes over the ${limit}-skill limit, so your assistant cannot load it until a shared skill is removed.`
+				: ` It takes the last of the ${limit} shared-skill slots.`;
+	}
 	confirmDialog({
-		title: "Approve skill promotion?",
+		title: `Approve “${p.skill_name}”?`,
 		message,
 		onConfirm: async ({ hideDialog }) => {
 			hideDialog();
