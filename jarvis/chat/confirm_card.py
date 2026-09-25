@@ -58,6 +58,15 @@ from jarvis.chat._record_summary import (
 )
 
 _MAX_ROWS = 20  # cap fields / diff rows / batch bullets / targets shown
+
+# jarvis#596: Jarvis Trigger's own ``enabled`` field defaults to on, but a
+# create call that omits it (the common case - see the jarvis-triggers skill)
+# never shows an Enabled row on the card, because _create_card only renders
+# keys present in the caller's ``values``. A trigger's managed Server Script
+# is ALWAYS disabled by design (jarvis_trigger.py), so a card silent on
+# Enabled reads as "this was created off" to a user who then spots that
+# Disabled Server Script in Desk. Force the row in from the real default.
+_TRIGGER_DOCTYPE = "Jarvis Trigger"
 _BULK_KEYS = ("names", "updates", "docs", "messages")
 
 # tool -> present-tense verb for the "will <verb> this <doctype> <name>" card.
@@ -183,8 +192,25 @@ def _create_card(args: dict, would) -> dict:
 		rows.append({"label": _label(meta, key), "value": fmt(val, df)})
 		if len(rows) >= _MAX_ROWS:
 			break
+	_ensure_effective_enabled_row(doctype, meta, would, rows)
 	name = would.get("name") if isinstance(would, dict) else None
 	return {"kind": "create", "doctype": doctype, "name": name, "rows": rows, "tables": tables}
+
+
+def _ensure_effective_enabled_row(doctype: str, meta, would, rows: list) -> None:
+	"""jarvis#596: always show Jarvis Trigger's effective Enabled state on a
+	create card, even when the caller's ``values`` never set it. ``would`` is
+	the perm-filtered dry-run doc - the SAME default the real insert applies -
+	so this reads the value it will actually get, never a guess."""
+	if doctype != _TRIGGER_DOCTYPE:
+		return
+	label = _label(meta, "enabled")
+	if any(row["label"] == label for row in rows):
+		return
+	value = would.get("enabled") if isinstance(would, dict) else None
+	if value is None:
+		value = 1  # Jarvis Trigger.enabled schema default when the write omits it
+	rows.insert(0, {"label": label, "value": fmt(value, meta.get_field("enabled") if meta else None)})
 
 
 def _update_card(args: dict, would) -> dict:

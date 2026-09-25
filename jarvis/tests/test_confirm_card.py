@@ -39,6 +39,44 @@ class TestCreateCard(FrappeTestCase):
 		self.assertIn("x", vals)
 		self.assertNotIn("SEE", vals)
 
+	def test_create_trigger_shows_enabled_default_when_omitted(self):
+		# jarvis#596: the model's create call often omits ``enabled`` and picks up
+		# the doctype default (on) - the card must say so instead of staying silent,
+		# which read as "created disabled" next to the ALWAYS-disabled managed
+		# Server Script a user finds in Desk.
+		would = {"name": "zz-596-1", "trigger_name": "Test", "enabled": 1}
+		card = build_card(
+			"create_doc",
+			{
+				"doctype": "Jarvis Trigger",
+				"values": {"trigger_name": "Test", "target_doctype": "ToDo", "doc_event": "after_insert"},
+			},
+			{"would": would},
+		)
+		row = next(r for r in card["rows"] if r["label"] == "Enabled")
+		self.assertEqual(row["value"], "Yes")
+
+	def test_create_trigger_does_not_duplicate_enabled_when_set(self):
+		would = {"name": "zz-596-2", "trigger_name": "Test", "enabled": 0}
+		card = build_card(
+			"create_doc",
+			{"doctype": "Jarvis Trigger", "values": {"trigger_name": "Test", "enabled": 0}},
+			{"would": would},
+		)
+		enabled_rows = [r for r in card["rows"] if r["label"] == "Enabled"]
+		self.assertEqual(len(enabled_rows), 1)
+		self.assertEqual(enabled_rows[0]["value"], "No")
+
+	def test_create_non_trigger_unaffected(self):
+		# The forced row is scoped to Jarvis Trigger only - an ordinary ToDo create
+		# still shows nothing for a field the model never set.
+		card = build_card(
+			"create_doc",
+			{"doctype": "ToDo", "values": {"description": "x"}},
+			{"would": {"name": "T-1", "description": "x"}},
+		)
+		self.assertNotIn("Enabled", {r["label"] for r in card["rows"]})
+
 
 class TestUpdateCard(FrappeTestCase):
 	def test_update_shows_from_to_diff(self):
