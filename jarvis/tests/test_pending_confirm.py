@@ -751,3 +751,24 @@ class TestCardsHealth(_Base):
 			session_lifecycle.reconcile_action_cards()
 		titles = [c.kwargs.get("title") for c in le.call_args_list]
 		self.assertNotIn(session_lifecycle._ACTION_CARD_ALERT_TITLE, titles)
+
+
+class TestDbErrorsOnV15(FrappeTestCase):
+	"""The PR backports to v15, whose MariaDBExceptionUtil has no ``InterfaceError``."""
+
+	def setUp(self):
+		super().setUp()
+		owner = next(c for c in type(frappe.local.db).__mro__ if "InterfaceError" in vars(c))
+		saved = vars(owner)["InterfaceError"]
+		delattr(owner, "InterfaceError")
+		self.addCleanup(setattr, owner, "InterfaceError", saved)
+
+	def test_a_read_failure_still_surfaces_as_a_storage_error(self):
+		self.assertFalse(hasattr(frappe.db, "InterfaceError"))
+		with (
+			patch.object(pending_confirm, "_pa_ready", return_value=True),
+			patch.object(frappe.db, "sql", side_effect=frappe.db.OperationalError(2013, "lost")),
+		):
+			self.assertEqual(pending_confirm._select("name=%(n)s", {"n": "x"}, strict=False), [])
+			with self.assertRaises(pending_confirm.PendingConfirmStorageError):
+				pending_confirm._select("name=%(n)s", {"n": "x"}, strict=True)

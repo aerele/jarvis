@@ -58,7 +58,8 @@ _COLS = (
 
 
 def _db_errors() -> tuple:
-	return (frappe.db.OperationalError, frappe.db.InterfaceError)
+	# v15's MariaDBExceptionUtil has no InterfaceError.
+	return tuple(e for e in (frappe.db.OperationalError, getattr(frappe.db, "InterfaceError", None)) if e)
 
 
 def _pa_ready() -> bool:
