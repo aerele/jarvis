@@ -152,6 +152,9 @@ function tableNote(t) {
 			<div v-if="card.print_format" class="jv-pcard-kv">
 				<span>Print format</span><b>{{ card.print_format }}</b>
 			</div>
+			<div v-if="card.attachments?.length" class="jv-pcard-kv">
+				<span>Attachments</span><b>{{ card.attachments.join(", ") }}</b>
+			</div>
 			<details v-if="card.body" class="jv-pcard-expand" open>
 				<summary>Message</summary>
 				<pre class="jv-pcard-body">{{ card.body }}</pre>
@@ -189,6 +192,9 @@ function tableNote(t) {
 						</div>
 						<div v-if="m.bcc" class="jv-pcard-kv">
 							<span>Bcc</span><b>{{ m.bcc }}</b>
+						</div>
+						<div v-if="m.attachments?.length" class="jv-pcard-kv">
+							<span>Attachments</span><b>{{ m.attachments.join(", ") }}</b>
 						</div>
 						<pre v-if="m.body" class="jv-pcard-body">{{ m.body }}</pre>
 					</div>
