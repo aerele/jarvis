@@ -15,8 +15,9 @@ conversation instead of one held row each (``held_writes._classify`` calls in he
 
 ``open_key`` = HMAC(owner, "sheet:" + conversation) keeps one live sheet per
 conversation, and ``filebox_sheet_count`` caps a document at two. The
-``file_box_sheets`` switch gates new sheets only. Sealing and the board (S1b) and
-apply (S2) build on this."""
+``file_box_sheets`` switch gates new sheets only.
+
+Sealing and ended sheets: ``held_sheet_seal``; the board: ``held_sheet_board``."""
 
 from __future__ import annotations
 
@@ -88,6 +89,7 @@ _NEEDS_ATTENTION = (
 	"no more changes and END your turn with a one-line summary."
 )
 _STOPPED = "This run was stopped. Make no more changes: END your turn now."
+_STOPPED_NOTE = "(run stopped - no action taken)"
 _FULL = (
 	"This document's approval sheet is full ({cap} records): nothing was added. Stop and summarize: "
 	"this file needs attention. END your turn with a one-line summary."
@@ -135,7 +137,7 @@ def enabled() -> bool:
 # What the gates read (never the envelope: ``get_row`` when appending).
 _GATE_COLS = (
 	"name, status, collecting, collecting_turn, conversation, owner_user, exec_user, summary,"
-	" record_count, question_count"
+	" record_count, question_count, sheet_counts"
 )
 
 
@@ -161,7 +163,13 @@ def _sheet_count(conversation: str) -> int:
 	return frappe.utils.cint(frappe.db.get_value(CONV, conversation, "filebox_sheet_count"))
 
 
-def _live_turn(conversation: str) -> str:
+def _archived(conversation: str) -> bool:
+	"""The run-cancel signal an archive sets expires in 120s; the conversation's own
+	status never does, so a later write still refuses."""
+	return frappe.db.get_value(CONV, conversation, "status") == "Archived"
+
+
+def live_turn(conversation: str) -> str:
 	"""The in-flight turn (``collecting_turn``); "" without one (the legacy path)."""
 	from jarvis.chat.turn_state import NONTERMINAL_STATES
 
@@ -175,6 +183,16 @@ def _live_turn(conversation: str) -> str:
 		)
 		or ""
 	)
+
+
+def user_stopped(conversation: str, turn: str | None) -> bool:
+	"""A user Stop / archive: the run-cancel signal, or ``turn``'s cancel intent (still
+	set at the legacy end, which runs before admission clears it)."""
+	from jarvis.chat.turn_message_binding import is_run_cancel_requested
+
+	if is_run_cancel_requested(conversation):
+		return True
+	return bool(turn and frappe.utils.cint(frappe.db.get_value("Jarvis Chat Turn", turn, "cancel_requested")))
 
 
 def _identity_ok(conversation: str, owner: str, sheet) -> bool:
@@ -193,9 +211,7 @@ def _identity_ok(conversation: str, owner: str, sheet) -> bool:
 # Rule (a) with sheets (held_writes._classify, under the conversation lock)
 # --------------------------------------------------------------------------- #
 def _gate(conversation: str, sheet) -> dict | None:
-	from jarvis.chat.turn_message_binding import is_run_cancel_requested
-
-	if is_run_cancel_requested(conversation):
+	if user_stopped(conversation, live_turn(conversation)) or _archived(conversation):
 		return _refuse("FileBoxRefusedError", _STOPPED)
 	if not sheet and _sheet_count(conversation) >= MAX_SHEETS:
 		return _refuse("FileBoxRefusedError", _NEEDS_ATTENTION)
@@ -391,12 +407,14 @@ def _links(doctype: str, values: dict):
 						yield target, cell, (df.fieldname, i, cdf.fieldname)
 
 
-def _link_deps(records: list[dict]) -> None:
-	"""``depends_on`` = the other records each one links to (by doctype + name)."""
+def link_deps(records: list[dict], before: list[dict] | None = None) -> None:
+	"""``depends_on`` = the other records each one links to (by doctype + name, or by
+	the name it had in ``before``: the same records before an edit)."""
 	known: dict = {}
 	for j, r in enumerate(records):
-		for key in _ref_names(r):
-			known.setdefault((r["doctype"], key), j)
+		for version in (r, *(before[j : j + 1] if before else ())):
+			for key in _ref_names(version):
+				known.setdefault((version["doctype"], key), j)
 	for i, r in enumerate(records):
 		deps = {known.get((t, _key(v)), i) for t, v, _p in _links(r["doctype"], r["values"])}
 		r["depends_on"] = sorted(deps - {i})
@@ -413,7 +431,7 @@ def _closure(records: list[dict], targets: list[int]) -> list[int]:
 	return sorted(seen - set(targets))
 
 
-def _order(records: list[dict], idxs) -> list[int]:
+def order(records: list[dict], idxs) -> list[int]:
 	"""Dependencies first, else by index (a cycle breaks at its lowest index)."""
 	left, out = sorted(set(idxs)), []
 	while left:
@@ -460,7 +478,7 @@ def _merge(records: list[dict], new: list[dict]) -> tuple[list[dict], list[int]]
 		for i in [j, *_follow(records, old, record)]:
 			if i not in targets:
 				targets.append(i)
-	_link_deps(records)
+	link_deps(records)
 	return records, targets
 
 
@@ -506,13 +524,13 @@ def _relinked(record: dict, rename) -> tuple[dict, bool]:
 	return values, moved
 
 
-def _remapped(record: dict, remap: dict) -> dict:
+def remapped(record: dict, remap: dict) -> dict:
 	"""The record's values with links to replayed records renamed to their sandbox
 	names (a naming-series supplier)."""
 	return _relinked(record, lambda t, v: remap.get((t, _key(v))))[0]
 
 
-def _learn(record: dict, name: str, remap: dict) -> None:
+def learn(record: dict, name: str, remap: dict) -> None:
 	for key in _ref_names(record):
 		remap.setdefault((record["doctype"], key), name)
 
@@ -533,7 +551,7 @@ def _stand_in(record: dict, values: dict, remap: dict) -> None:
 	except Exception:
 		frappe.db.rollback(save_point=sp)
 		return
-	_learn(record, doc.name, remap)
+	learn(record, doc.name, remap)
 
 
 def _replay(record: dict, remap: dict) -> None:
@@ -543,7 +561,7 @@ def _replay(record: dict, remap: dict) -> None:
 
 	if record["op"] != "create":
 		return
-	values = _remapped(record, remap)
+	values = remapped(record, remap)
 	sp = _savepoint()
 	try:
 		doc = _insert_one(record["doctype"], values, ignore_mandatory=True)
@@ -553,7 +571,7 @@ def _replay(record: dict, remap: dict) -> None:
 		frappe.db.rollback(save_point=sp)
 		_stand_in(record, values, remap)
 		return
-	_learn(record, doc.name, remap)
+	learn(record, doc.name, remap)
 
 
 def _missing(record: dict, values: dict, index: int, remap: dict) -> list[dict] | None:
@@ -573,7 +591,7 @@ def _missing(record: dict, values: dict, index: int, remap: dict) -> list[dict] 
 	if not found:
 		frappe.db.rollback(save_point=sp)
 		return None
-	_learn(record, doc.name, remap)
+	learn(record, doc.name, remap)
 	return found
 
 
@@ -583,7 +601,7 @@ def _try(record: dict, index: int, remap: dict) -> tuple | None:
 	from jarvis.tools.create_doc import _insert_one, _validate_create_args
 	from jarvis.tools.update_doc import _update_one
 
-	values = _remapped(record, remap)
+	values = remapped(record, remap)
 	sp = _savepoint()
 	try:
 		if record["op"] == "update":
@@ -602,7 +620,7 @@ def _try(record: dict, index: int, remap: dict) -> tuple | None:
 			return "missing", missing
 		_stand_in(record, values, remap)
 		return "invalid", e
-	_learn(record, doc.name, remap)
+	learn(record, doc.name, remap)
 	return None
 
 
@@ -615,9 +633,9 @@ def _dry_run(records: list[dict], targets: list[int]) -> dict[int, tuple]:
 	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
 	try:
 		with preview_sandbox():
-			for j in _order(records, _closure(records, targets)):
+			for j in order(records, _closure(records, targets)):
 				_replay(records[j], remap)
-			for i in _order(records, targets):
+			for i in order(records, targets):
 				problem = _try(records[i], i, remap)
 				if problem:
 					problems[i] = problem
@@ -630,7 +648,7 @@ def _dry_run(records: list[dict], targets: list[int]) -> dict[int, tuple]:
 # --------------------------------------------------------------------------- #
 # Collect (append) and open
 # --------------------------------------------------------------------------- #
-def _name_of(record: dict) -> str:
+def name_of(record: dict) -> str:
 	if record["op"] != "create":
 		return held_writes._clean_title(record.get("name") or "")
 	values = record["values"]
@@ -639,7 +657,7 @@ def _name_of(record: dict) -> str:
 
 
 def _title(record: dict) -> str:
-	return held_writes._clean_title(f"{record['doctype']} {_name_of(record)}")
+	return held_writes._clean_title(f"{record['doctype']} {name_of(record)}")
 
 
 def _fix_text(e: Exception) -> str:
@@ -685,7 +703,7 @@ def _card(records: list[dict]) -> dict:
 				"doctype": r["doctype"],
 				"op": r["op"],
 				"name": r.get("name") or "",
-				"title": _name_of(r),
+				"title": name_of(r),
 				"category": r["category"],
 				"values": values,
 				"depends_on": r["depends_on"],
@@ -708,12 +726,15 @@ def _open(
 	primary waiter, never joined): the questions' stamp and the count commit with it.
 	Raises a unique-key error when a parallel call opened it first, and
 	``_NotOpened`` when a Stop landed while park re-locked or no question is left."""
+	from jarvis.chat.held_sheet_board import counts
 	from jarvis.chat.pending_actions import park
 	from jarvis.chat.turn_message_binding import is_run_cancel_requested
 
 	def _opened(doc):
-		if is_run_cancel_requested(conversation) or (
-			questions and not _stamp(doc.name, conversation, questions)
+		if (
+			is_run_cancel_requested(conversation)
+			or _archived(conversation)
+			or (questions and not _stamp(doc.name, conversation, questions))
 		):
 			raise _NotOpened
 		frappe.db.sql(
@@ -737,18 +758,28 @@ def _open(
 		needs_input=needs_input or None,
 		sheet={
 			"collecting": 1,
-			"collecting_turn": _live_turn(conversation),
+			"collecting_turn": live_turn(conversation),
 			"record_count": len(records),
+			"sheet_counts": counts(records),
 			"needs_fix": needs_fix or None,
 		},
 		display_row=_opened,
 	)
 
 
+def drop_waiters(name: str) -> None:
+	frappe.db.sql(
+		"DELETE FROM `tabJarvis Pending Action Waiter` WHERE parent=%(p)s AND parenttype='Jarvis Pending Action'",
+		{"p": name},
+	)
+
+
 def _tampered(sheet, e: _seal.SealError) -> dict:
-	"""A sheet whose envelope doesn't verify is failed, never re-sealed."""
+	"""A sheet whose envelope doesn't verify is failed, never re-sealed. Its run is
+	told to stop right here, so it is not resumed too."""
 	from jarvis.chat.pending_actions import settle
 
+	drop_waiters(sheet.name)
 	_terminal_update(sheet.name, [PENDING], FAILED, reason_code=e.reason_code)
 	frappe.log_error(
 		title=f"jarvis.file_box.sheet_{e.reason_code}", message=f"{sheet.name}: failed binding {e.binding}"
@@ -816,6 +847,8 @@ def _regate(conversation: str, sheet) -> dict | None:
 
 
 def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
+	from jarvis.chat.held_sheet_board import counts
+
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if not _identity_ok(conversation, owner, sheet):
 		frappe.db.commit()
@@ -844,7 +877,7 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 	needs_input = [
 		e for e in held_writes.parse_needs_input(row and row.needs_input) if e["doc_index"] not in targets
 	]
-	needs_fix = {k: v for k, v in _parse_fix(row and row.needs_fix).items() if int(k) not in targets}
+	needs_fix = {k: v for k, v in json_dict(row and row.needs_fix).items() if int(k) not in targets}
 	for i, (kind, detail) in problems.items():
 		if kind == "missing":
 			needs_input += detail
@@ -857,6 +890,7 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 			args={"records": records},
 			card=_card(records),
 			record_count=len(records),
+			sheet_counts=counts(records),
 			needs_input=needs_input or None,
 			needs_fix=needs_fix or None,
 			dedup_keys=_seal.canonical(keys),
@@ -868,12 +902,12 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 	return _added(records, targets, problems)
 
 
-def _parse_fix(value) -> dict:
+def json_dict(value) -> dict:
 	try:
-		fix = json.loads(value) if isinstance(value, str) else value
+		out = json.loads(value) if isinstance(value, str) else value
 	except ValueError:
 		return {}
-	return fix if isinstance(fix, dict) else {}
+	return out if isinstance(out, dict) else {}
 
 
 def _problem_refusal(conversation: str, records: list[dict], problems: dict) -> dict | None:
@@ -960,7 +994,8 @@ def link_to_sheet(conversation: str, names: list[str]) -> str | None:
 	questions-only one when there is none and one may open. Re-takes the
 	conversation lock; a new sheet, its stamp and its count commit together. Only
 	Pending, unlinked questions of this conversation (or none) link, never a wiki
-	proposal. The sheet's name, or None (they stay on the board)."""
+	proposal. The sheet's name, or None (they stay on the board; a stopped run's
+	close, so answering one never resumes it)."""
 	for _attempt in range(2):
 		try:
 			return _link_locked(conversation, names)
@@ -968,9 +1003,25 @@ def link_to_sheet(conversation: str, names: list[str]) -> str | None:
 			frappe.clear_messages()
 			frappe.db.rollback()
 		except _NotOpened:
-			return None
-	frappe.log_error(title="jarvis.file_box.sheet_link_failed", message=f"{conversation}: {names}")
+			frappe.db.rollback()
+			break
+	else:
+		frappe.log_error(title="jarvis.file_box.sheet_link_failed", message=f"{conversation}: {names}")
+	_close_if_stopped(conversation, names)
 	return None
+
+
+def _close_if_stopped(conversation: str, names: list[str]) -> None:
+	"""A stopped or archived run's unlinked questions close (the ``close_ended`` way)."""
+	lock_conversation(conversation)
+	if names and (user_stopped(conversation, live_turn(conversation)) or _archived(conversation)):
+		now = frappe.utils.now_datetime()
+		frappe.db.sql(
+			"UPDATE `tabJarvis Approval Request` SET status='Dismissed', decision=%(d)s, decided_at=%(now)s,"
+			" modified=%(now)s" + _LINKABLE,
+			{"d": _STOPPED_NOTE, "now": now, "n": tuple(names), "c": conversation, "wiki": _WIKI_SOURCE},
+		)
+	frappe.db.commit()
 
 
 # The questions a sheet may take (``%(n)s`` names, ``%(c)s`` the conversation).
@@ -981,6 +1032,8 @@ _LINKABLE = (
 
 
 def _link_locked(conversation: str, names: list[str]) -> str | None:
+	from jarvis.chat.held_sheet_seal import seal_if_stale
+
 	frappe.db.commit()
 	lock_conversation(conversation)
 	names = names and frappe.db.sql_list(
@@ -990,8 +1043,10 @@ def _link_locked(conversation: str, names: list[str]) -> str | None:
 	if not names:
 		frappe.db.commit()
 		return None
+	if user_stopped(conversation, live_turn(conversation)) or _archived(conversation):
+		raise _NotOpened
 	owner = frappe.db.get_value(CONV, conversation, "owner")
-	sheet = live_sheet(conversation)
+	sheet = seal_if_stale(conversation, live_sheet(conversation))
 	closed = not enabled() or _sheet_count(conversation) >= MAX_SHEETS
 	if (sheet and paused(sheet)) or (not sheet and closed) or not _identity_ok(conversation, owner, sheet):
 		frappe.db.commit()

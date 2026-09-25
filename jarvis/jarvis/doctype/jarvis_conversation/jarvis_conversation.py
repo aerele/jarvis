@@ -25,6 +25,7 @@ _FILEBOX_SERVER_FIELDS = (
 	"filebox_skill_choice",
 	"filebox_skipped_at",
 	"filebox_sheet_count",
+	"filebox_rerun_preamble",
 )
 
 

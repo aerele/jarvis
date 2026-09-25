@@ -236,6 +236,18 @@ describe("PendingActionDetail", () => {
 		expect(onDecided).toHaveBeenCalledTimes(1);
 	});
 
+	it("hands an approval sheet back to the board instead of rendering it", async () => {
+		const onKind = vi.fn();
+		api.getPendingAction.mockResolvedValue(
+			rec({ kind: "file_box_sheet", status: "Executed" })
+		);
+		const w = mount(PendingActionDetail, { props: { name: "PA-1", onDecided, onKind } });
+		await flushPromises();
+		expect(onKind).toHaveBeenCalledWith("sheet");
+		expect(button(w, "Create & continue")).toBeFalsy();
+		expect(w.find('[role="status"]').exists()).toBe(false);
+	});
+
 	it("a batch offers no Use existing", async () => {
 		const w = await mountWith(rec({ can_use_existing: 0, doctype: "" }));
 		expect(button(w, "Use existing")).toBeFalsy();

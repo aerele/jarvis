@@ -6,9 +6,10 @@ in a ``file_box=1`` conversation, under the conversation lock (F7: commit, then
 auto-apply dispatch). Rules, first match wins:
 
 a. this conversation waits on an undecided held write or a sealed sheet -> every
-   write is refused. With a collecting sheet (or ``file_box_sheets`` on) masters
-   collect on it, Approval Requests apply and link to it, and a draft waits while
-   it holds records (or questions, before any draft): ``held_sheets``;
+   write is refused (a collecting sheet an older turn opened is sealed first: a
+   new turn never appends to it). With a collecting sheet (or ``file_box_sheets``
+   on) masters collect on it, Approval Requests apply and link to it, and a draft
+   waits while it holds records (or questions, before any draft): ``held_sheets``;
 b. ``update_wiki`` -> the gate's fenced wiki proposal;
 c. ``Jarvis Approval Request`` create/update -> applied (single, or an all-AR batch);
 d. a denied doctype in any item -> refused; while a skill_conflict routing question
@@ -43,7 +44,9 @@ from jarvis.chat.pending_actions._store import (
 	EXECUTED,
 	FAILED,
 	PENDING,
+	SHEET,
 	TERMINAL,
+	filebox_migrated,
 	get_row,
 	lock_conversation,
 	rowcount,
@@ -191,13 +194,14 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	"""``(verdict, payload)``: ``refuse`` + envelope, ``pass`` + None, ``apply`` +
 	None, ``hold`` + the items, or with sheets ``question`` + None / ``collect`` or
-	``split`` + ``(master items, sheet)``. Read-only, under the conversation lock."""
+	``split`` + ``(master items, sheet)``. Under the conversation lock; writes only to
+	seal a collecting sheet an older turn opened (``seal_if_stale`` commits, re-locks)."""
 	from jarvis import api
-	from jarvis.chat import held_sheets
+	from jarvis.chat import held_sheet_seal, held_sheets
 
 	if waiting_on(conversation):
 		return "refuse", _refuse("ApprovalPendingError", _PENDING_REFUSAL)
-	sheet = held_sheets.live_sheet(conversation)
+	sheet = held_sheet_seal.seal_if_stale(conversation, held_sheets.live_sheet(conversation))
 	if sheet and held_sheets.paused(sheet):
 		return "refuse", _refuse("ApprovalPendingError", _PENDING_REFUSAL)
 	sheets = bool(sheet) or held_sheets.enabled()
@@ -573,8 +577,9 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_
 
 def _find_match(owner: str, keys: list[str]) -> tuple[str | None, str | None, bool]:
 	"""``("recent", name, _)`` when a row executing or approved in the last 10 minutes
-	shares a record; ``("join", name, subset)`` for the Pending row to wait on (a
-	superset row first); else ``(None, None, False)``."""
+	shares a record, or a sheet applied then created one; ``("join", name, subset)``
+	for the Pending row to wait on (a superset row first); else ``(None, None,
+	False)``."""
 	mine = {_seal.open_key(owner, k) for k in keys}
 	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-RECENT_DECISION_S)
 	rows = frappe.db.sql(
@@ -591,10 +596,34 @@ def _find_match(owner: str, keys: list[str]) -> tuple[str | None, str | None, bo
 			if r.status != PENDING:
 				return "recent", r.name, False
 			overlapping.append((r.name, mine <= theirs))
+	sheet = _recent_sheet(owner, mine, cutoff)
+	if sheet:
+		return "recent", sheet, False
 	for name, subset in overlapping:
 		if subset:
 			return "join", name, True
 	return ("join", overlapping[0][0], False) if overlapping else (None, None, False)
+
+
+def _recent_sheet(owner: str, mine: set, cutoff) -> str | None:
+	"""A sheet applied since ``cutoff`` that CREATED one of these records (its
+	``sheet_outcome`` keys; never a skipped or existing record)."""
+	if not filebox_migrated():
+		return None
+	rows = frappe.db.sql(
+		"SELECT name, sheet_outcome FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND owner_user=%(o)s"
+		" AND status='Executed' AND decided_at >= %(cut)s ORDER BY decided_at DESC LIMIT 50",
+		{"k": SHEET, "o": owner, "cut": cutoff},
+		as_dict=True,
+	)
+	for r in rows:
+		try:
+			theirs = (json.loads(r.sheet_outcome or "{}") or {}).get("keys") or []
+		except (ValueError, AttributeError):
+			continue
+		if mine & set(theirs):
+			return r.name
+	return None
 
 
 def _join(parent: str, conversation: str) -> bool:
@@ -727,8 +756,13 @@ def on_settled(conversation, items) -> None:
 	waiter ``due`` and queue the resume, for the rows this call settles (D5)."""
 	from jarvis.chat.pending_actions import claim_settled
 
+	queue_resumes(claim_settled([i["name"] for i in items]))
+
+
+def queue_resumes(names) -> None:
+	"""Mark each settled row's waiters ``due`` and queue their resume (no commit)."""
 	now = frappe.utils.now_datetime()
-	for name in claim_settled([i["name"] for i in items]):
+	for name in names:
 		frappe.db.sql(
 			"UPDATE `tabJarvis Pending Action Waiter` SET resume_state='due', modified=%(now)s"
 			" WHERE parent=%(p)s AND parenttype='Jarvis Pending Action' AND IFNULL(resume_state, '')=''",
@@ -744,14 +778,15 @@ def on_settled(conversation, items) -> None:
 
 
 def resume_waiters(pa_name: str) -> int:
-	"""Resume every ``due`` waiter of a decided held row (the RQ job, and the
-	reconciler's ``HELD_RESUME`` retry). Returns how many resumed now."""
+	"""Resume every ``due`` waiter of a decided held row or ended sheet (the RQ job,
+	and the reconciler's ``HELD_RESUME`` retry). Returns how many resumed now."""
+	from jarvis.chat import held_sheet_seal
 	from jarvis.chat.pending_actions._reconcile import WAITER_MAX_ATTEMPTS
 
 	row = get_row(pa_name)
-	if not row or row.kind != HELD or row.status not in TERMINAL:
+	if not row or row.kind not in (HELD, SHEET) or row.status not in TERMINAL:
 		return 0
-	message = resume_message(row)
+	message = held_sheet_seal.resume_message(row) if row.kind == SHEET else resume_message(row)
 	resumed = 0
 	for waiter in waiters(pa_name):
 		if waiter.resume_state == "due" and (waiter.resume_attempts or 0) < WAITER_MAX_ATTEMPTS:
