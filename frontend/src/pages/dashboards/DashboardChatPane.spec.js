@@ -272,3 +272,61 @@ describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 		expect(api.sendDashboardChat).toHaveBeenCalledTimes(1);
 	});
 });
+
+// D3: the pane's Approve/Dismiss used to always show one generic "may have
+// expired" toast on any ok:false besides a storage blip. Now that cards carry
+// a reason_code (stale/target_missing/tampered/unverifiable, busy, …), reuse
+// the SPA's chatCardActions mapping so the words - and the keep-vs-drop
+// decision - match ChatView's, instead of a second, cruder copy here.
+describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
+	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc" }];
+
+	it("settles a card as Failed with its specific reason, not the opaque guess", async () => {
+		const { listPendingConfirmations, confirmTool } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		confirmTool.mockResolvedValueOnce({
+			ok: false,
+			reason_code: "stale",
+			pa_status: "Failed",
+			error: { type: "InvalidConfirmation" },
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const approve = wrapper.findAll("button").find((b) => b.text() === "Approve");
+		await approve.trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("record changed"));
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Approve")).toHaveLength(0);
+	});
+
+	it("keeps a busy card on screen and says so, instead of dropping it", async () => {
+		const { listPendingConfirmations, confirmTool } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		confirmTool.mockResolvedValueOnce({ ok: false, reason_code: "busy" });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const approve = wrapper.findAll("button").find((b) => b.text() === "Approve");
+		await approve.trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith(
+			"This action is being handled right now. Try again in a moment."
+		);
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Approve")).toHaveLength(1);
+	});
+
+	it("dismiss shows the specific reason too", async () => {
+		const { listPendingConfirmations, dismissTool } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		dismissTool.mockResolvedValueOnce({ ok: false, reason_code: "executing" });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const dismiss = wrapper.findAll("button").find((b) => b.text() === "Dismiss");
+		await dismiss.trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("This action is already running.");
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Dismiss")).toHaveLength(1);
+	});
+});

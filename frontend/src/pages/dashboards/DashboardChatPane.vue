@@ -407,6 +407,7 @@ import {
 } from "@/api";
 import { agentName } from "@/branding";
 import { errHtml, turnErrorInfo } from "@/lib/errors";
+import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
 import { compactFailureCopy } from "@/lib/compact";
@@ -872,16 +873,22 @@ function cardMeta(pa) {
 	return [doc.dashboard_type, scope].filter(Boolean).join(" · ");
 }
 
+// D3: reuse the SPA's chatCardActions mapping (chatRefusalMessage/keepsChatCard)
+// for the words AND the keep-vs-drop decision, instead of one generic "may have
+// expired" guess for every ok:false. A bare legacy token (no reason_code at
+// all) still gets that guess - chatRefusalMessage falls back to it below.
 async function approve(pa) {
 	pa.busy = true;
 	let keepCard = false;
 	try {
 		const r = await confirmTool(pa.token, conversation.value);
 		if (r && r.ok === false) {
-			keepCard = confirmationStorageUnavailable(r);
+			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
 			toast.error(
-				keepCard
+				confirmationStorageUnavailable(r)
 					? r.error.message
+					: r.reason_code
+					? chatRefusalMessage(r)
 					: "Couldn't confirm. It may have expired. Ask again in the chat."
 			);
 		}
@@ -904,8 +911,14 @@ async function dismiss(pa) {
 	try {
 		const r = await dismissTool(pa.token, conversation.value);
 		if (r && r.ok === false) {
-			keepCard = confirmationStorageUnavailable(r);
-			toast.error((r.error && r.error.message) || "Could not discard this confirmation.");
+			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
+			toast.error(
+				confirmationStorageUnavailable(r)
+					? r.error.message
+					: r.reason_code
+					? chatRefusalMessage(r)
+					: (r.error && r.error.message) || "Could not discard this confirmation."
+			);
 		}
 	} catch (e) {
 		keepCard = true;

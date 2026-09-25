@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { renderMarkdown } from "@shared/markdown.js";
 import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js";
 import { denyOutcome } from "../lib/denyOutcome.js";
-import { keptCardMessage } from "../lib/keptCard.js";
+import { keptCardMessage, settledReasonMessage } from "../lib/keptCard.js";
 import Sheet from "./Sheet.vue";
 import PendingCard from "./PendingCard.vue";
 import * as api from "../api";
@@ -135,11 +135,16 @@ async function approve(mode = "step") {
 			// The token is single-use and short-lived: a stale card must say so
 			// rather than look like a failure the user can retry.
 			if (r.error?.type === "InvalidConfirmation") {
-				// InvalidConfirmation is deliberately opaque; use the card's own
-				// wall-clock expiry to say the right thing (F15).
-				error.value = pendingExpiry(props.action?.expires_at, Date.now()).expired
-					? `This confirmation expired. Tell ${agentName} the action again to retry it.`
-					: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`;
+				// A settled card (keptCardMessage returned "") still carrying a
+				// specific reason_code (stale/target_missing/tampered/unverifiable)
+				// says why. Only a bare legacy token (no reason_code at all) gets
+				// the opaque guess: use the card's own wall-clock expiry (F15).
+				const settledReason = settledReasonMessage(r);
+				error.value =
+					settledReason ||
+					(pendingExpiry(props.action?.expires_at, Date.now()).expired
+						? `This confirmation expired. Tell ${agentName} the action again to retry it.`
+						: `Couldn't confirm. It may have been handled elsewhere. Refresh, or ask ${agentName} to try again.`);
 				state.value = "review";
 				emit("resolved", props.action.token, "expired");
 				return;
