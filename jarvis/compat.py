@@ -140,7 +140,7 @@ def file_bytes(fdoc) -> bytes:
 	return content
 
 
-def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
+def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Build a one-or-many-tab .xlsx workbook and return its bytes.
 
 	Probes for ``XLSXStyleBuilder`` (the Frappe 16 rewrite) rather than for the
@@ -151,11 +151,11 @@ def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
 	try:
 		from frappe.utils.xlsxutils import XLSXStyleBuilder
 	except ImportError:
-		return _xlsx_bytes_openpyxl(sheet_data)
-	return _xlsx_bytes_xlsxwriter(sheet_data)
+		return _xlsx_bytes_openpyxl(sheet_data, charts=charts)
+	return _xlsx_bytes_xlsxwriter(sheet_data, charts=charts)
 
 
-def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
+def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Frappe 16: mirror ``make_xlsx``'s own workbook options so dates format
 	identically, then let it append a bold-header worksheet per tab."""
 	from io import BytesIO
@@ -171,13 +171,17 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
 			"default_date_format": XLSXStyleBuilder.get_datetime_format(),
 		},
 	)
-	for name, data in sheet_data:
+	for index, (name, data) in enumerate(sheet_data):
 		make_xlsx(data, name, wb=wb)  # adds a worksheet to `wb`, returns None
+		if charts and charts[index]:
+			from jarvis._xlsx_charts import add_xlsxwriter_charts
+
+			add_xlsxwriter_charts(wb, wb.worksheets()[-1], data, charts[index])
 	wb.close()
 	return out.getvalue()
 
 
-def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
+def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Frappe 15: build the workbook here instead of via ``make_xlsx``.
 
 	15's ``make_xlsx`` saves the whole workbook on every call and returns the
@@ -200,7 +204,7 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 	wb = openpyxl.Workbook(write_only=True)
 	date_format, time_format = get_excel_date_format()
 
-	for sheet_name, data in sheet_data:
+	for index, (sheet_name, data) in enumerate(sheet_data):
 		ws = wb.create_sheet(INVALID_TITLE_REGEX.sub(" ", sheet_name))
 		ws.row_dimensions[1].font = Font(name="Calibri", bold=True)
 		for row in data:
@@ -220,6 +224,10 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 				else:
 					clean_row.append(value)
 			ws.append(clean_row)
+		if charts and charts[index]:
+			from jarvis._xlsx_charts import add_openpyxl_charts
+
+			add_openpyxl_charts(ws, data, charts[index])
 
 	out = BytesIO()
 	wb.save(out)
