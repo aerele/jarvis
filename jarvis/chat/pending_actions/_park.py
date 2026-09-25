@@ -103,6 +103,7 @@ def park(
 	sheet: dict | None = None,
 	legacy_pending: Callable[[str], bool] | None = None,
 	display_row: Callable[[object], None] | None = None,
+	locked: bool = False,
 ) -> str:
 	"""Park ``tool(args)`` for a human decision and return the PA name.
 
@@ -114,6 +115,9 @@ def park(
 	- ``dedup_key`` / ``dedup_keys``: a held row's primary key (the unique ``open_key``)
 	  and every per-item key, stored keyed (HMAC) for the waiter subset rule.
 	- ``sheet``: a File Box sheet's own columns (``_SHEET_FIELDS``).
+	- ``locked``: the caller already holds the conversation lock in this transaction
+	  (its single-flight read under it): no commit or re-lock, which would let a
+	  parallel write of the conversation past that read before the insert.
 
 	Raises ``ConfirmationPendingError`` (single-flight) and ``frappe.PermissionError``
 	inside a tool call (S6)."""
@@ -126,9 +130,11 @@ def park(
 	waiters = list(waiters) or ([conversation] if kind in ("file_box_held", SHEET) and conversation else [])
 	if waiters and waiters[0] != conversation:
 		raise ValueError("park: the primary waiter must be the conversation")
-	frappe.db.commit()
+	if not locked:
+		frappe.db.commit()
 	try:
-		lock_conversation(conversation)
+		if not locked:
+			lock_conversation(conversation)
 		superseded = (
 			_check_single_flight(conversation, owner_user, legacy_pending)
 			if kind == "chat" and conversation

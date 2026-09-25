@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
+import time
 from unittest.mock import patch
 
 import frappe
@@ -20,7 +21,7 @@ from frappe.utils import add_to_date, now_datetime
 from jarvis import api
 from jarvis.chat import api as chat_api
 from jarvis.chat import approvals_api, filebox, held_parties, held_writes
-from jarvis.chat.pending_actions import _reconcile, _seal
+from jarvis.chat.pending_actions import _reconcile, _seal, park
 from jarvis.tests._pending_action_helpers import as_user, draft_doctype, ensure_user
 
 PA = "Jarvis Pending Action"
@@ -59,6 +60,19 @@ def _wipe():
 	frappe.db.delete("Notification Log", {"for_user": ["in", USERS]})
 	frappe.db.delete("Jarvis Agent Write", {"actor": ["in", USERS]})
 	frappe.db.commit()
+
+
+def _await_lock_wait(conversation: str, timeout: float = 30) -> None:
+	"""Until another connection waits on ``conversation``'s row lock (its FOR UPDATE)."""
+	deadline = time.monotonic() + timeout
+	while time.monotonic() < deadline:
+		if frappe.db.sql(
+			"SELECT 1 FROM information_schema.PROCESSLIST WHERE ID != CONNECTION_ID() AND INFO LIKE %(q)s",
+			{"q": f"%tabJarvis Conversation%{conversation}%FOR UPDATE%"},
+		):
+			return
+		time.sleep(0.05)
+	raise AssertionError("nothing queued on the conversation lock")
 
 
 class _Base(FrappeTestCase):
@@ -551,6 +565,79 @@ class TestDedup(_Base):
 		res = self.call("create_doc", _supplier("zz-fbh  राम ट्रेडर्स.", ""), self.conv())
 		self.assert_refused(res, "InvalidArgumentError")
 		self.assertIn("already exists", res["error"]["message"])
+
+	def test_a_parallel_held_write_of_the_run_is_refused_not_parked(self):
+		"""Park keeps the conversation lock from the single-flight check to its insert:
+		a parallel write of the same run (its own connection, queued on the lock) then
+		reads the held row and is refused, never parked beside it."""
+		conv = self.conv()
+		site, errors, out, real = frappe.local.site, [], {}, held_writes._find_match
+
+		def rival():
+			frappe.init(site=site)
+			frappe.connect()
+			try:
+				with as_user(OWNER):
+					out["res"] = api._run_tool(
+						"create_doc", _supplier("zz-fbh Other", OTHER_TAX), conversation=conv
+					)
+				frappe.db.commit()
+			except Exception as e:  # pragma: no cover
+				errors.append(e)
+			finally:
+				frappe.destroy()
+
+		def racing(*a):
+			if not hasattr(racing, "thread"):
+				racing.thread = threading.Thread(target=rival)
+				racing.thread.start()
+				_await_lock_wait(conv)
+			return real(*a)
+
+		with patch.object(held_writes, "_find_match", side_effect=racing):
+			self.assert_held(self.call("create_doc", _supplier(), conv))
+			racing.thread.join(timeout=60)
+		self.assertEqual(errors, [])
+		self.assert_refused(out["res"], "ApprovalPendingError")
+		[row] = self.rows()
+		self.assertEqual([w.conversation for w in self.waiters(row.name)], [conv])
+
+	def test_a_retry_after_the_lock_dropped_rechecks_the_single_flight(self):
+		"""The unique-key retry re-takes the conversation lock: a write of the same run
+		held meanwhile makes it refuse, never wait on a second row."""
+		self.call("create_doc", _supplier(), self.conv())  # holds the party's open_key
+		conv = self.conv()
+		misses = iter([(None, None, False)])  # the scan misses it: the insert collides
+		real_find, real_lock, locks = held_writes._find_match, held_writes.lock_conversation, []
+
+		def relock(c):
+			locks.append(c)
+			if len(locks) == 2:  # the retry: a parallel write of the run parked meanwhile
+				key = "name:Supplier:zz fbh other"
+				park(
+					kind=held_writes.HELD,
+					owner_user=OWNER,
+					exec_user=OWNER,
+					tool="create_doc",
+					args=_supplier("zz-fbh Other", ""),
+					summary="New supplier: zz-fbh Other",
+					conversation=c,
+					dedup_key=key,
+					dedup_keys=[key],
+				)
+			real_lock(c)
+
+		with (
+			patch.object(
+				held_writes, "_find_match", side_effect=lambda *a: next(misses, None) or real_find(*a)
+			),
+			patch.object(held_writes, "lock_conversation", side_effect=relock),
+		):
+			res = self.call("create_doc", _supplier(), conv)
+		self.assertEqual(len(locks), 2)
+		self.assert_refused(res, "ApprovalPendingError")
+		waited = frappe.db.sql_list(f"SELECT parent FROM `tab{WAITER}` WHERE conversation=%s", conv)
+		self.assertEqual(len(waited), 1)
 
 
 class TestDecideAndResume(_Base):

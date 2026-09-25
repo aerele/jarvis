@@ -524,6 +524,9 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 			frappe.db.rollback()
 		if attempt == 0:
 			lock_conversation(conversation)
+			if waiting_on(conversation):  # another write of this run was held while unlocked
+				frappe.db.commit()
+				return _refuse("ApprovalPendingError", _PENDING_REFUSAL)
 	frappe.log_error(
 		title="jarvis.file_box.hold_failed", message=f"{conversation}: {tool} could not be held after a retry"
 	)
@@ -570,6 +573,7 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_
 		dedup_key=_primary_key(keys),
 		dedup_keys=keys,
 		needs_input=list(needs_input) or None,
+		locked=True,
 	)
 	_notify(owner, conversation, title, name)
 	return _held(_NEEDS_INPUT_NOTE if needs_input else _WAIT_NOTE, labels)
