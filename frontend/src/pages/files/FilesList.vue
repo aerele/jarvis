@@ -57,7 +57,7 @@
 							class="w-72"
 							:options="skillOptions"
 							:modelValue="pinnedSkill"
-							placeholder="None (system default)"
+							placeholder="Automatic (File Box picks the matching skill)"
 							@update:modelValue="(o) => (pinnedSkill = o ? o.value : '')"
 						/>
 					</div>

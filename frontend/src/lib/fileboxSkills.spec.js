@@ -25,9 +25,9 @@ describe("fileboxSkills", () => {
 		expect(skillLabel(rows[3])).toBe("orphan · shared");
 	});
 
-	it("builds options: None + each skill File Box may use, keyed by skill_name (no OCR base)", () => {
+	it("builds options: Automatic + each skill File Box may use, keyed by skill_name (no OCR base)", () => {
 		const opts = skillOptions(rows);
-		expect(opts[0]).toEqual({ label: "None", value: "" });
+		expect(opts[0]).toEqual({ label: "Automatic", value: "" });
 		// the OCR base is NOT offered as an extra to layer on, nor a skill kept out of File Box
 		expect(opts.map((o) => o.value)).toEqual([
 			"",

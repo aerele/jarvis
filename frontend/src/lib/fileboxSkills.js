@@ -14,13 +14,13 @@ export function skillLabel(s) {
 	return `${s.skill_name} · shared`;
 }
 
-// The picker's options: "None" (system default only) + each accessible skill File
-// Box may use ("Use in File Box" on) to apply ALONGSIDE the system's chosen skill.
+// The picker's options: "Automatic" (File Box picks the matching skill) + each
+// accessible skill File Box may use ("Use in File Box" on) to pin instead.
 // The OCR / Data Entry skill is the system's own base, so it is not offered as an
 // extra to layer on.
 export function skillOptions(customSkills) {
 	return [
-		{ label: "None", value: "" },
+		{ label: "Automatic", value: "" },
 		...(customSkills || [])
 			.filter((s) => s.use_in_file_box)
 			.map((s) => ({ label: skillLabel(s), value: s.skill_name })),
