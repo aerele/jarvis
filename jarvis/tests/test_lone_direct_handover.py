@@ -30,9 +30,12 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import admin_client
 from jarvis.admin_client import AdminContractError, AdminRejectedError, AdminUnreachableError
 from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+	_HANDOVER_MAX_ATTEMPTS,
+	_PENDING_APPLYING_STATUS,
 	_PENDING_HANDOVER_STATUS,
 	JarvisSettings,
 	_enqueued_handover_via_admin,
+	_handover_attempt,
 	_handover_via_admin,
 	reconcile_pending_llm_sync,
 )
@@ -118,7 +121,11 @@ class TestHandoverViaAdmin(FrappeTestCase):
 					follow_up = _handover_via_admin(settings)
 
 				self.assertIsNone(follow_up)
-				self.assertEqual(settings.last_sync_status, _PENDING_HANDOVER_STATUS)
+				# 2026-09-25 review: the pending write now always carries the
+				# attempt suffix; the fixture starts with no pending-handover
+				# status at all (last_sync_status=""), so _handover_attempt reads
+				# 0 there and max(1, 0) is attempt 1.
+				self.assertEqual(settings.last_sync_status, f"{_PENDING_HANDOVER_STATUS} (attempt 1)")
 				self.assertEqual(settings.llm_pool_synced_at, "2026-08-01 00:00:00")
 				self.assertIsNone(settings.llm_direct_synced_at)
 				self.assertEqual(int(settings.proxy_active or 0), 1)
@@ -131,9 +138,21 @@ class TestHandoverViaAdmin(FrappeTestCase):
 			follow_up = _handover_via_admin(settings)
 
 		self.assertIsNone(follow_up)
-		self.assertEqual(settings.last_sync_status, _PENDING_HANDOVER_STATUS)
+		self.assertEqual(settings.last_sync_status, f"{_PENDING_HANDOVER_STATUS} (attempt 1)")
 		self.assertIsNone(settings.llm_direct_synced_at)
 		self.assertEqual(settings.llm_pool_synced_at, "2026-08-01 00:00:00")
+
+	def test_unreachable_outcome_keeps_the_current_attempt_number(self):
+		"""2026-09-25 review: a pending write must re-record the CURRENT attempt,
+		never reset it - only _enqueue_handover ever advances/resets the count."""
+		settings = _handover_ready_settings(last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt 2)")
+		with patch.object(
+			admin_client, "post_subscription_handover", side_effect=AdminUnreachableError("timeout")
+		):
+			follow_up = _handover_via_admin(settings)
+
+		self.assertIsNone(follow_up)
+		self.assertEqual(settings.last_sync_status, f"{_PENDING_HANDOVER_STATUS} (attempt 2)")
 
 	def test_job_is_a_no_op_when_the_shape_moved_on(self):
 		"""A second model row appeared before the job ran (a race with a fresh
@@ -299,6 +318,41 @@ def _add_openai_subscription_row(settings, *, order=0, account_ref="ACC_1", oaut
 	return row
 
 
+class TestHandoverAttempt(FrappeTestCase):
+	"""_handover_attempt(status) - the parser reconcile's retry budget (below)
+	is built on. Pure function, no fixture needed."""
+
+	def test_no_suffix_reads_as_attempt_one(self):
+		"""An old row written before this counter existed (or _enqueue_handover's
+		very first write) has no suffix at all - reads as attempt 1, not 0."""
+		self.assertEqual(_handover_attempt(_PENDING_HANDOVER_STATUS), 1)
+
+	def test_parses_the_attempt_suffix(self):
+		self.assertEqual(_handover_attempt(f"{_PENDING_HANDOVER_STATUS} (attempt 2)"), 2)
+
+	def test_an_unrelated_status_reads_as_zero(self):
+		"""Not a pending-handover status at all - the caller's is-this-a-handover
+		check and the parse gate are the same test."""
+		self.assertEqual(_handover_attempt("ok (moved to direct via admin)"), 0)
+		self.assertEqual(_handover_attempt(_PENDING_APPLYING_STATUS), 0)
+		self.assertEqual(_handover_attempt(""), 0)
+
+
+class TestEnqueueHandoverAttempt(FrappeTestCase):
+	"""JarvisSettings._enqueue_handover - the write side of the attempt counter."""
+
+	def test_a_user_initiated_apply_resets_the_attempt_budget(self):
+		"""A workspace already stuck at attempt 3 (reconcile has been retrying a
+		failing fleet) gets a FRESH budget the moment a user acts (on_update,
+		save_llm_pool, request_resync all call this with the default) - a user
+		action is not a continuation of a stuck automatic retry."""
+		settings = _handover_ready_settings(last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt 3)")
+		with patch("frappe.enqueue"):
+			JarvisSettings._enqueue_handover(settings)
+
+		self.assertEqual(settings.last_sync_status, f"{_PENDING_HANDOVER_STATUS} (attempt 1)")
+
+
 class TestOnUpdateRoutesToHandover(_RT3SettingsTestCase):
 	"""Task 11 (S4): `_on_update_unified_llm`'s pool branch must route a due
 	handover ahead of both the redundancy gate and the ordinary pool enqueue -
@@ -432,6 +486,60 @@ class TestReconcileRedrivesHandover(FrappeTestCase):
 		# The whole point: this returns BEFORE the probe, so a due handover is
 		# re-driven without ever asking admin.
 		mock_readiness.assert_not_called()
+
+
+class TestReconcileHandoverAttemptBudget(FrappeTestCase):
+	"""2026-09-25 review (production hazard): reconcile's re-drive of a due
+	handover must be BOUNDED. Each attempt stops and restarts the customer's
+	container, so a persistently failing fleet endpoint (e.g. doctor always
+	fails) must not be re-driven every */5 tick forever - that bounces chat
+	indefinitely. Skip a tick whose in-band job may still be running; past
+	that, count attempts and give up onto the pool push after
+	_HANDOVER_MAX_ATTEMPTS, leaving the workspace on the proxy (working)."""
+
+	def _reconcile_ready_settings(self, **overrides):
+		settings = _handover_ready_settings(**overrides)
+		settings.get_password = MagicMock(return_value="test-admin-key")
+		settings._enqueue_handover = MagicMock()
+		settings._enqueue_pool_sync = MagicMock()
+		return settings
+
+	def test_a_fresh_request_does_nothing_the_job_may_still_be_running(self):
+		settings = self._reconcile_ready_settings(
+			last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt 1)",
+			last_sync_requested_at=frappe.utils.now(),
+		)
+		with patch("frappe.get_single", return_value=settings):
+			reconcile_pending_llm_sync()
+
+		settings._enqueue_handover.assert_not_called()
+		settings._enqueue_pool_sync.assert_not_called()
+
+	def test_a_stale_attempt_one_bumps_to_attempt_two(self):
+		settings = self._reconcile_ready_settings(
+			last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt 1)",
+			last_sync_requested_at="2020-01-01 00:00:00",
+		)
+		with patch("frappe.get_single", return_value=settings):
+			reconcile_pending_llm_sync()
+
+		settings._enqueue_handover.assert_called_once_with(attempt=2)
+		settings._enqueue_pool_sync.assert_not_called()
+
+	def test_a_stale_attempt_at_the_max_gives_up_and_pushes_the_pool(self):
+		settings = self._reconcile_ready_settings(
+			last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt {_HANDOVER_MAX_ATTEMPTS})",
+			last_sync_requested_at="2020-01-01 00:00:00",
+		)
+		with (
+			patch("frappe.get_single", return_value=settings),
+			patch("frappe.log_error") as mock_log_error,
+		):
+			reconcile_pending_llm_sync()
+
+		settings._enqueue_pool_sync.assert_called_once()
+		settings._enqueue_handover.assert_not_called()
+		mock_log_error.assert_called_once()
 
 
 class TestResyncSkipsReadyDuringHandover(_RT3SettingsTestCase):

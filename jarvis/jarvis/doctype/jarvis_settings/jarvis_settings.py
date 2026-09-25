@@ -120,6 +120,41 @@ _PENDING_APPLYING_STATUS = "pending: admin applying config"
 # close a handover that never happened.
 _PENDING_HANDOVER_STATUS = "pending: handover to direct"
 
+# 2026-09-25 review (production hazard): a fleet-side handover failure that
+# REPEATS (e.g. doctor fails every attempt) reaches the site as a
+# non-permanent AdminUnreachableError, which _handover_via_admin records as
+# _PENDING_HANDOVER_STATUS - and reconcile_pending_llm_sync (*/5) re-drove
+# THAT unconditionally forever. Every attempt STOPS AND RESTARTS the
+# customer's container (that is what a handover push does), so an
+# unconditional re-drive against a persistently broken fleet endpoint would
+# bounce chat indefinitely with no way out. _HANDOVER_MAX_ATTEMPTS bounds it:
+# after this many attempts reconcile gives up and falls back to the pool push
+# instead (the sync that served this workspace before jarvis#1425 existed),
+# leaving the workspace on the proxy - working - until the next Apply tries
+# the handover again from a clean attempt-1 budget.
+_HANDOVER_MAX_ATTEMPTS = 3
+
+
+def _handover_attempt(status: str) -> int:
+	"""Parse the attempt counter off a pending-handover status
+	(``f"{_PENDING_HANDOVER_STATUS} (attempt N)"``).
+
+	Returns 0 when ``status`` is not a pending-handover status at all (the
+	caller's "is this even a handover?" check doubles as the parse gate).
+	Returns 1 for a pending-handover status with no attempt suffix - either an
+	old row written before this counter existed, or any other malformed
+	suffix; both read as "first attempt" rather than raising, since a parse
+	failure here must never crash the scheduled reconcile."""
+	status = status or ""
+	if not status.startswith(_PENDING_HANDOVER_STATUS):
+		return 0
+	suffix = status[len(_PENDING_HANDOVER_STATUS) :]
+	match = re.fullmatch(r" \(attempt (\d+)\)", suffix)
+	if not suffix or not match:
+		return 1
+	return int(match.group(1))
+
+
 # In-job fast-path convergence poll. Bounded well under the RQ envelope (see the
 # budget note above); anything not converged inside it is finished by the
 # scheduled safety net (reconcile_pending_llm_sync, every 5 min). Probes use a
@@ -1296,13 +1331,22 @@ class JarvisSettings(Document):
 			idempotency_key=idempotency_key,
 		)
 
-	def _enqueue_handover(self) -> None:
+	def _enqueue_handover(self, *, attempt: int = 1) -> None:
 		"""Queue the pool -> direct handover (jarvis#1425). Same queue, timeout,
-		lock and inline-in-tests rules as _enqueue_pool_sync."""
+		lock and inline-in-tests rules as _enqueue_pool_sync.
+
+		``attempt`` bounds retries against a persistently failing fleet handover
+		(2026-09-25 review, see _HANDOVER_MAX_ATTEMPTS): every attempt STOPS AND
+		RESTARTS the customer's container, so a fleet failure that repeats
+		forever must not re-drive unboundedly and bounce chat. Every
+		USER-initiated caller (on_update, save_llm_pool, request_resync) calls
+		this with the default - a user action is a fresh budget, not a
+		continuation of a stuck one. Only reconcile_pending_llm_sync passes a
+		higher attempt, counting up to _HANDOVER_MAX_ATTEMPTS before giving up."""
 		_write_settings_fields(
 			self,
 			{
-				"last_sync_status": _PENDING_HANDOVER_STATUS,
+				"last_sync_status": f"{_PENDING_HANDOVER_STATUS} (attempt {attempt})",
 				"last_sync_requested_at": frappe.utils.now(),
 				"llm_last_apply_fingerprint": "",
 			},
@@ -2680,9 +2724,12 @@ def _handover_via_admin(settings) -> str | None:
 
 	Stamps change in ONE write and only on a confirmed move: until then the pool
 	stamp keeps is_ready_for_chat open and proxy_active keeps Auto turns on the
-	proxy, which is still serving. Every unknown outcome records
-	_PENDING_HANDOVER_STATUS; a retry is safe because the fleet route is a no-op
-	once the tenant is direct.
+	proxy, which is still serving. Every unknown outcome re-records
+	_PENDING_HANDOVER_STATUS carrying the CURRENT attempt number (never
+	resetting it - see _HANDOVER_MAX_ATTEMPTS); a retry is safe because the
+	fleet route is a no-op once the tenant is direct, but the attempt count is
+	what lets reconcile_pending_llm_sync eventually give up on a fleet that
+	never converges instead of restarting the container forever.
 
 	CR-2 (2026-09-25 review): a TERMINAL rejection (admin reached, validated, and
 	permanently refused - AdminRejectedError, or an AdminValidationError that
@@ -2702,6 +2749,12 @@ def _handover_via_admin(settings) -> str | None:
 		if (settings.get("last_sync_status") or "").startswith(_PENDING_HANDOVER_STATUS):
 			return "resync"
 		return None
+	# Captured BEFORE any write below mutates settings in place (_write_settings_fields
+	# updates the in-memory doc too): every "still pending" write below re-records
+	# THIS attempt number, never resetting it - only _enqueue_handover (a fresh
+	# user action or reconcile's own bounded bump) ever advances it.
+	current_status = settings.get("last_sync_status") or ""
+	pending_status = f"{_PENDING_HANDOVER_STATUS} (attempt {max(1, _handover_attempt(current_status))})"
 	terminal_written = False
 	try:
 		provider, blob = _direct_subscription_blob(settings)
@@ -2721,7 +2774,7 @@ def _handover_via_admin(settings) -> str | None:
 		record_synced_snapshot()
 		_refresh_db_snapshot()
 		if result.get("result") != "ok":
-			_write_settings_fields(settings, {"last_sync_status": _PENDING_HANDOVER_STATUS})
+			_write_settings_fields(settings, {"last_sync_status": pending_status})
 		else:
 			now = frappe.utils.now()
 			landed = _write_settings_fields(
@@ -2735,7 +2788,7 @@ def _handover_via_admin(settings) -> str | None:
 				},
 			)
 			if not landed:
-				_write_settings_fields(settings, {"last_sync_status": _PENDING_HANDOVER_STATUS})
+				_write_settings_fields(settings, {"last_sync_status": pending_status})
 		_commit_terminal_sync_status()
 		terminal_written = True
 		from jarvis.account import _bust_chat_gate
@@ -2767,7 +2820,7 @@ def _handover_via_admin(settings) -> str | None:
 		)
 		return "pool"
 	except (admin_client.AdminUnreachableError, *_WRITE_CONFLICT_ERRORS):
-		_write_settings_fields(settings, {"last_sync_status": _PENDING_HANDOVER_STATUS})
+		_write_settings_fields(settings, {"last_sync_status": pending_status})
 		_commit_terminal_sync_status()
 		terminal_written = True
 	except admin_client.AdminRateLimitedError as e:
@@ -3060,6 +3113,35 @@ def reconcile_pending_llm_sync() -> None:
 		status = settings.get("last_sync_status") or ""
 		# jarvis#1425: a due handover is re-driven, never stamped: admin reports the
 		# still-pooled tenant Ready, and stamping would close a move that never ran.
+		if lone_direct_handover_due(settings) and status.startswith(_PENDING_HANDOVER_STATUS):
+			# 2026-09-25 review: bound the re-drive. Each attempt STOPS AND
+			# RESTARTS the customer's container - a fleet endpoint that fails
+			# every time (e.g. doctor always fails) would otherwise be re-driven
+			# on every */5 tick forever and bounce chat indefinitely. Skip a tick
+			# whose in-band job may still be running (same RQ envelope the job
+			# itself is bounded by); past that, count attempts and give up onto
+			# the pool push - the sync that served this workspace before
+			# jarvis#1425 existed - once _HANDOVER_MAX_ATTEMPTS is spent, leaving
+			# the workspace on the proxy (working) until the next Apply retries
+			# the handover from a clean attempt-1 budget.
+			requested_at = settings.get("last_sync_requested_at")
+			if requested_at and frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) < (
+				ADMIN_SYNC_RQ_TIMEOUT_S
+			):
+				return
+			attempt = _handover_attempt(status)
+			if attempt >= _HANDOVER_MAX_ATTEMPTS:
+				frappe.log_error(
+					title="Jarvis: handover gave up after 3 attempts, falling back to the pool push"
+				)
+				settings._enqueue_pool_sync()
+				return
+			settings._enqueue_handover(attempt=attempt + 1)
+			return
+		# Some OTHER pending status on a due workspace (e.g. a stale
+		# _PENDING_APPLYING_STATUS from before the shape narrowed to one ChatGPT
+		# account) - unrelated to the handover's own retry budget above, so this
+		# re-drives fresh at attempt 1, exactly as Task 11 left it.
 		if lone_direct_handover_due(settings) and status.startswith("pending:"):
 			settings._enqueue_handover()
 			return
