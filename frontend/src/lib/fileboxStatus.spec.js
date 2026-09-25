@@ -126,4 +126,20 @@ describe("fileboxStatus", () => {
 		expect(t.message).toContain("&lt;img src=x onerror=alert(1)&gt;");
 		expect(t.message).not.toContain("<img");
 	});
+
+	it("counts a re-run waiting on a skill question apart from the sent ones", () => {
+		expect(bulkRerunToast({ sent: 1, needs_choice: 2, skipped: [] }, 3)).toEqual({
+			type: "info",
+			message: "1 re-running · 2 waiting for your choice on the Approval Board",
+		});
+		const t = bulkRerunToast(
+			{ sent: 0, needs_choice: 1, skipped: [{ conversation: "a", reason: "not found" }] },
+			2
+		);
+		expect(t.message).toBe(
+			"0 re-running · 1 waiting for your choice on the Approval Board · 1 skipped (not found)"
+		);
+		// an older server without the count still words the sent / skipped split
+		expect(bulkRerunToast({ skipped: [] }, 2).message).toBe("2 files re-running");
+	});
 });

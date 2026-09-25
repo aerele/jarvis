@@ -56,22 +56,26 @@ export function canRerun(row) {
 }
 
 /**
- * The toast for a bulk Re-run response. Skip reasons are server text bound into
- * an HTML sink (frappe-ui Toast uses v-html), so they are escaped here.
+ * The toast for a bulk Re-run response. A re-run whose tagged skill is gone waits on
+ * a question (`needs_choice`), not sent. Skip reasons are server text bound into an
+ * HTML sink (frappe-ui Toast uses v-html), so they are escaped here.
  */
 export function bulkRerunToast(res, requested) {
 	const skipped = (res && res.skipped) || [];
-	const sent = res && res.sent != null ? res.sent : requested - skipped.length;
-	if (!skipped.length) {
+	const waiting = (res && res.needs_choice) || 0;
+	const sent = res && res.sent != null ? res.sent : requested - skipped.length - waiting;
+	if (!skipped.length && !waiting) {
 		return { type: "success", message: `${sent} file${sent === 1 ? "" : "s"} re-running` };
 	}
-	const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))]
-		.map(escapeHtml)
-		.join(", ");
-	return {
-		type: "info",
-		message: `${sent} re-running · ${skipped.length} skipped (${reasons})`,
-	};
+	const parts = [`${sent} re-running`];
+	if (waiting) parts.push(`${waiting} waiting for your choice on the Approval Board`);
+	if (skipped.length) {
+		const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))]
+			.map(escapeHtml)
+			.join(", ");
+		parts.push(`${skipped.length} skipped (${reasons})`);
+	}
+	return { type: "info", message: parts.join(" · ") };
 }
 
 /**

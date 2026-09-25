@@ -19,6 +19,7 @@ import json
 import re
 
 import frappe
+from frappe.rate_limiter import rate_limit
 
 from jarvis.chat import filebox_skills
 from jarvis.permissions import message_origin, refuse_in_tool_dispatch, require_jarvis_user
@@ -126,11 +127,20 @@ def _validated_pinned_skill(skill: str | None) -> dict | None:
 	must be eligible as a pin (``use_in_file_box``, not learned), so only a validated
 	slug (SLUG_RE) is ever embedded in the prompt or stored. UNIFORM: an unknown, an
 	inaccessible, an opted-out and a learned skill all return None (no oracle)."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
+		LEARNED_PREFIX,
+		MAX_SLUG_LEN,
+		RESERVED_PREFIX,
+	)
+
 	slug = (skill or "").strip()
 	if not slug:
 		return None
 	if slug == OCR_DATA_ENTRY:  # persona skill, no Custom Skill row - accept by literal
 		return {"docname": "", "slug": OCR_DATA_ENTRY, "creates": "", "pinned": True}
+	# Never a pin, so never looked up (a learned miss logs an Error Log).
+	if len(slug) > MAX_SLUG_LEN + len(RESERVED_PREFIX) or slug.lower().startswith(LEARNED_PREFIX):
+		return None
 	return filebox_skills.validated_pin(slug)
 
 
@@ -255,10 +265,13 @@ def drop_file(
 	_refuse_foreign_attachment(fdoc)
 
 	from jarvis.chat.api import create_conversation
+	from jarvis.chat.pending_actions._store import filebox_migrated
 
 	# Untrusted client slug -> the validated pin entry, or None.
 	requested = (skill or "").strip()
 	pin = _validated_pinned_skill(requested)
+	# Before the File Box migrate: no routing columns, an unusable pin runs unpinned.
+	routed = filebox_migrated()
 
 	conv_id = create_conversation()
 	title = (file_name or fdoc.file_name or "Inbound document")[:60]
@@ -275,7 +288,7 @@ def drop_file(
 			"title": f"File: {title}",
 			"file_box": 1,
 			"filebox_pinned_skill": pin["slug"] if pin else "",
-			"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None,
+			**({"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None} if routed else {}),
 			"filebox_source_file": fdoc.name,
 		},
 		update_modified=False,
@@ -290,7 +303,7 @@ def drop_file(
 	)
 	frappe.db.commit()
 
-	if requested and not pin:
+	if requested and not pin and routed:
 		filebox_skills.file_skill_missing(conv_id, requested)
 		return {"ok": True, "conversation_id": conv_id, "run_id": None, "reason": None, "needs_approval": 1}
 	if file_name:
@@ -302,6 +315,16 @@ def drop_file(
 		"run_id": res.get("run_id"),
 		"reason": res.get("reason"),
 	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+@rate_limit(limit=60, seconds=60)
+def check_skill(skill: str | None = None) -> dict:
+	"""Whether ``skill`` may tag the files dropped next: a bulk drop checks once
+	instead of filing a skill_missing question per file. Uniform (no oracle)."""
+	refuse_in_tool_dispatch()
+	return {"ok": True, "available": int(bool(_validated_pinned_skill(skill)))}
 
 
 # --------------------------------------------------------------------------- #
@@ -353,11 +376,13 @@ def _pending_waits_sql() -> str:
 
 	ready = sheet_ready()
 	sheet_clause = "AND IFNULL(ar.sheet, '') = ''" if ready else ""
+	routing = "ar.routing" if ready else "NULL"  # K1's column, migrated with S1a's
 	sheet_branch = (
 		f"""
 	UNION ALL
 	SELECT sp.conversation, sp.name AS item, sp.summary AS title, sp.creation, 'sheet' AS src,
-	       NULL AS needs_input, sp.sheet_counts AS counts, sp.question_count AS questions
+	       NULL AS needs_input, sp.sheet_counts AS counts, sp.question_count AS questions,
+	       NULL AS routing
 	FROM `tabJarvis Pending Action` sp
 	JOIN `tabJarvis Conversation` sc
 	  ON sc.name = sp.conversation AND sc.file_box = 1 AND {_conv_visible("sc")}
@@ -368,7 +393,7 @@ def _pending_waits_sql() -> str:
 	)
 	return f"""
 	SELECT ar.conversation, ar.name AS item, ar.title, ar.creation, 'ar' AS src, NULL AS needs_input,
-	       NULL AS counts, 0 AS questions
+	       NULL AS counts, 0 AS questions, {routing} AS routing
 	FROM `tabJarvis Approval Request` ar
 	JOIN `tabJarvis Conversation` ac
 	  ON ac.name = ar.conversation AND ac.file_box = 1 AND {_conv_visible("ac")}
@@ -376,7 +401,7 @@ def _pending_waits_sql() -> str:
 	  {sheet_clause}
 	UNION ALL
 	SELECT w.conversation, pa.name AS item, pa.summary AS title, pa.creation, 'pa' AS src, pa.needs_input,
-	       NULL AS counts, 0 AS questions
+	       NULL AS counts, 0 AS questions, NULL AS routing
 	FROM `tabJarvis Pending Action Waiter` w
 	JOIN `tabJarvis Pending Action` pa
 	  ON pa.name = w.parent AND pa.kind = 'file_box_held' AND pa.status IN ('Pending', 'Executing')
@@ -645,6 +670,9 @@ def _first_line(text: str | None, limit: int = 140) -> str:
 	return ""
 
 
+# A skill_missing routing question: the file waits, unstarted, for the owner's answer.
+NEEDS_CHOICE = "Waiting for your choice: the chosen skill isn't available"
+
 _FAILURES = {
 	"resume_failed": "Approved, but the run couldn't continue",
 	"no_start": "Couldn't start - the run never began",
@@ -678,6 +706,8 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 		return line, f"/approvals?held={quote(wait.item, safe='')}"
 	if status == "applying":
 		return _applying(wait)
+	if status == "needs_approval" and wait and wait.routing == filebox_skills.MISSING:
+		return NEEDS_CHOICE, f"/approvals/{quote(wait.item, safe='')}"
 	if status == "needs_approval":
 		n = int(r["pending_approvals"])
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
@@ -747,7 +777,7 @@ def _attach_results(rows: list[dict], me: str) -> None:
 	need = [r["name"] for r in rows if r["status"] == "needs_approval"]
 	if need:
 		for w in frappe.db.sql(
-			f"""SELECT w.conversation, w.item, w.title, w.src, w.needs_input, w.counts, w.questions
+			f"""SELECT w.conversation, w.item, w.title, w.src, w.needs_input, w.counts, w.questions, w.routing
 			FROM ({_pending_waits_sql()}) w
 			WHERE w.conversation IN %(names)s ORDER BY w.creation ASC""",
 			{"me": me, "names": need},
@@ -1122,7 +1152,7 @@ def _rerun_one(conversation: str) -> dict:
 	not owned / not eligible) - every check runs before any write, so a refusal
 	never leaves a partial claim (the ``_delete_one`` precedent). The send itself
 	never raises (``_send_inbound``'s contract)."""
-	from jarvis.chat.pending_actions._store import WAITER, lock_conversation
+	from jarvis.chat.pending_actions._store import WAITER, filebox_migrated, lock_conversation
 
 	me = frappe.session.user
 	doc = frappe.get_doc(CONV, conversation)  # DoesNotExistError if missing
@@ -1162,18 +1192,19 @@ def _rerun_one(conversation: str) -> dict:
 	)
 	held = _supersede_held(conversation)
 	# A fresh routing state (only the re-validated pin is recorded again) and a
-	# fresh two-sheet budget.
+	# fresh two-sheet budget, once migrated.
+	routed = filebox_migrated()
+	fresh = {
+		"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None,
+		"filebox_skill_choice": None,
+		"filebox_skipped_at": None,
+		"filebox_sheet_count": 0,
+		"filebox_rerun_preamble": None,
+	}
 	frappe.db.set_value(
 		CONV,
 		conversation,
-		{
-			"filebox_last_error": None,
-			"filebox_last_error_at": None,
-			"filebox_skills": json.dumps([pin]) if pin and pin["docname"] else None,
-			"filebox_skill_choice": None,
-			"filebox_skipped_at": None,
-			"filebox_sheet_count": 0,
-		},
+		{"filebox_last_error": None, "filebox_last_error_at": None, **(fresh if routed else {})},
 		update_modified=False,
 	)
 	frappe.cache.delete_value(filebox_skills.backstop_key(conversation))
@@ -1194,9 +1225,15 @@ def _rerun_one(conversation: str) -> dict:
 			frappe.db.rollback()
 			frappe.log_error(title="jarvis.file_box.rerun_settle_failed", message=frappe.get_traceback())
 
-	if requested and not pin:
-		# K-D2: an unavailable pin asks again, never a silent fallback to auto.
-		frappe.db.set_value(CONV, conversation, "filebox_rerun_at", None, update_modified=False)
+	if requested and not pin and routed:
+		# K-D2: an unavailable pin asks again, never a silent fallback to auto. The
+		# preamble waits with it: "Process" sends it (``_start_unpinned``).
+		frappe.db.set_value(
+			CONV,
+			conversation,
+			{"filebox_rerun_at": None, "filebox_rerun_preamble": preamble},
+			update_modified=False,
+		)
 		filebox_skills.file_skill_missing(conversation, requested)
 		return {
 			"ok": True,
@@ -1204,6 +1241,7 @@ def _rerun_one(conversation: str) -> dict:
 			"run_id": None,
 			"reason": None,
 			"needs_approval": 1,
+			"result": NEEDS_CHOICE,
 		}
 	res = _send_inbound(conversation, f, pin["slug"] if pin else None, preamble=preamble)
 	return {
@@ -1230,12 +1268,13 @@ def rerun_inbound(conversation: str) -> dict:
 @require_jarvis_user
 def bulk_rerun_inbound(conversations: str | list | None = None) -> dict:
 	"""Bulk re-run (the ``delete_inbound_bulk`` precedent): same per-row checks as
-	``rerun_inbound``, skipped (not fatal) when ineligible. Returns ``{sent,
-	skipped:[{conversation, reason}]}``."""
+	``rerun_inbound``, skipped (not fatal) when ineligible. A re-run whose skill is
+	no longer available waits on a routing question (``needs_choice``), not sent.
+	Returns ``{sent, needs_choice, skipped:[{conversation, reason}]}``."""
 	refuse_in_tool_dispatch()
 	raw = frappe.parse_json(conversations) if isinstance(conversations, str) else (conversations or [])
 	convs = [str(c) for c in raw if c] if isinstance(raw, list) else []
-	sent = 0
+	sent = needs_choice = 0
 	skipped: list[dict] = []
 	for conv in convs:
 		try:
@@ -1252,8 +1291,10 @@ def bulk_rerun_inbound(conversations: str | list | None = None) -> dict:
 			frappe.db.rollback()
 			skipped.append({"conversation": conv, "reason": str(e) or "error"})
 			continue
-		if res.get("ok"):
+		if res.get("needs_approval"):
+			needs_choice += 1
+		elif res.get("ok"):
 			sent += 1
 		else:
 			skipped.append({"conversation": conv, "reason": res.get("reason") or "couldn't start"})
-	return {"sent": sent, "skipped": skipped}
+	return {"sent": sent, "needs_choice": needs_choice, "skipped": skipped}

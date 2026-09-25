@@ -8,7 +8,9 @@ File Box run, the pin and the routing answers all use it. Followed skills are
 recorded on the server-only ``filebox_skills`` (with a snapshot of ``creates``);
 ``held_writes`` refuses a draft of any other doctype. An unavailable pin, or a
 discovered skill disagreeing with the pin, becomes a bench-filed routing Approval
-Request (``routing`` = skill_missing / skill_conflict) whose answer the bench applies."""
+Request (``routing`` = skill_missing / skill_conflict) whose answer the bench applies.
+Code served ahead of the migrate (``filebox_migrated``) routes nothing: no list, no
+record, no refusal, and a pin resolves as ``get_skill`` does."""
 
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import re
 import frappe
 
 from jarvis._responses import err
+from jarvis.chat.pending_actions._store import filebox_migrated
 
 SKILL = "Jarvis Custom Skill"
 CONV = "Jarvis Conversation"
@@ -124,6 +127,8 @@ def eligible_skills(dropper: str, pin: str | None = None) -> list:
 	row wins (as in ``get_skill``), so an opted-out own row hides the slug."""
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import prefetch_child_values
 
+	if not filebox_migrated():
+		return []
 	rows = frappe.db.sql(
 		f"""SELECT {", ".join(_FIELDS)} FROM `tabJarvis Custom Skill`
 		WHERE enabled = 1 AND (owner = %(u)s OR (use_in_file_box = 1
@@ -179,6 +184,8 @@ def _parse(raw) -> list[dict]:
 
 
 def recorded(conversation: str) -> list[dict]:
+	if not filebox_migrated():
+		return []
 	return _parse(frappe.db.get_value(CONV, conversation, "filebox_skills"))
 
 
@@ -208,7 +215,7 @@ def validated_pin(slug: str) -> dict | None:
 		row = resolve(slug, user, user)
 	except (InvalidArgumentError, PermissionDeniedError):
 		row = None
-	if not row or not is_eligible(row, user, row.name):
+	if not row or (filebox_migrated() and not is_eligible(row, user, row.name)):
 		frappe.logger("jarvis").info("file_box pin %r not usable by %s", slug, frappe.session.user)
 		return None
 	return entry(row, pinned=True)
@@ -223,9 +230,8 @@ def gate_get_skill(args, conversation: str) -> dict | None:
 	from jarvis.tools.find_skills import _require_system_user
 	from jarvis.tools.get_skill import payload
 
-	# file_box alone first: code served ahead of its migrate (deploy = migrate, then
-	# restart) keeps a non-File-Box get_skill off the routing columns.
-	if not frappe.db.get_value(CONV, conversation, "file_box"):
+	# Before the migrate a File Box get_skill is a plain one, as before routing.
+	if not filebox_migrated() or not frappe.db.get_value(CONV, conversation, "file_box"):
 		return None
 	conv = frappe.db.get_value(CONV, conversation, ["owner", "filebox_skills"], as_dict=True)
 	slug = str(args.get("skill_name") or "") if isinstance(args, dict) else ""
@@ -362,7 +368,9 @@ def _notify(owner: str, conversation: str, title: str, name: str) -> None:
 
 def routing_refusal(conversation: str) -> dict | None:
 	"""Drafts and master holds wait while a skill_conflict question is Pending."""
-	if frappe.db.exists(AR, {"conversation": conversation, "routing": CONFLICT, "status": "Pending"}):
+	if filebox_migrated() and frappe.db.exists(
+		AR, {"conversation": conversation, "routing": CONFLICT, "status": "Pending"}
+	):
 		return err("ApprovalPendingError", _ROUTING_PENDING)
 	return None
 
@@ -433,15 +441,19 @@ def sheet_answer(conversation: str, routing: str, decision: str) -> None:
 def skip_file(conversation: str) -> None:
 	"""'Skip this file': no run; the row reads no_draft ("Skipped by you")."""
 	frappe.db.set_value(
-		CONV, conversation, "filebox_skipped_at", frappe.utils.now_datetime(), update_modified=False
+		CONV,
+		conversation,
+		{"filebox_skipped_at": frappe.utils.now_datetime(), "filebox_rerun_preamble": None},
+		update_modified=False,
 	)
 	frappe.db.commit()
 
 
 def _start_unpinned(conversation: str) -> bool:
 	"""'Process with automatic skill selection': the first run starts now, as the
-	conversation OWNER (never the approver), without the pin. Never over a draft or
-	a live run (the re-run checks); claim-first, as a re-run."""
+	conversation OWNER (never the approver), without the pin, and with the re-run
+	preamble a re-run kept. Never over a draft or a live run (the re-run checks);
+	claim-first, as a re-run."""
 	from jarvis._session import impersonate
 	from jarvis.chat import approvals_api, filebox
 	from jarvis.chat.pending_actions._store import lock_conversation
@@ -457,6 +469,7 @@ def _start_unpinned(conversation: str) -> bool:
 			"file_box routing start refused for %s: a draft or a live run", conversation
 		)
 		return False
+	preamble = frappe.db.get_value(CONV, conversation, "filebox_rerun_preamble")
 	frappe.db.set_value(
 		CONV,
 		conversation,
@@ -465,29 +478,36 @@ def _start_unpinned(conversation: str) -> bool:
 			"filebox_skills": None,
 			"filebox_skill_choice": None,
 			"filebox_skipped_at": None,
+			"filebox_rerun_preamble": None,
 			"filebox_rerun_at": frappe.utils.now_datetime(),  # cleared by _send_inbound
 		},
 		update_modified=False,
 	)
 	frappe.db.commit()
-	f = filebox._source_file(conversation)
-	ok, switch_to = approvals_api.owner_run_identity(conversation)
-	if not (f and ok):
-		reason = "the original file is no longer available" if not f else "the file's owner can't run it"
-		frappe.db.set_value(
-			CONV,
-			conversation,
-			{
-				"filebox_last_error": f"Couldn't start: {reason}",
-				"filebox_last_error_at": frappe.utils.now_datetime(),
-				"filebox_rerun_at": None,
-			},
-			update_modified=False,
-		)
+	try:
+		f = filebox._source_file(conversation)
+		ok, switch_to = approvals_api.owner_run_identity(conversation)
+		if not (f and ok):
+			reason = "the original file is no longer available" if not f else "the file's owner can't run it"
+			frappe.db.set_value(
+				CONV,
+				conversation,
+				{
+					"filebox_last_error": f"Couldn't start: {reason}",
+					"filebox_last_error_at": frappe.utils.now_datetime(),
+					"filebox_rerun_at": None,
+				},
+				update_modified=False,
+			)
+			frappe.db.commit()
+			return False
+		with impersonate(switch_to), delegated_send():
+			return bool(filebox._send_inbound(conversation, f, None, preamble=preamble).get("ok"))
+	except Exception:
+		frappe.db.rollback()  # never leave the row "re-running" on a claim no send will clear
+		frappe.db.set_value(CONV, conversation, "filebox_rerun_at", None, update_modified=False)
 		frappe.db.commit()
-		return False
-	with impersonate(switch_to), delegated_send():
-		return bool(filebox._send_inbound(conversation, f, None).get("ok"))
+		raise
 
 
 def _resume(conversation: str, message: str) -> bool:
@@ -531,6 +551,8 @@ def target_refusal(conversation: str, doctype: str) -> dict | None:
 	skill declares one while eligible skills do, refuse once listing them."""
 	from jarvis.chat.held_writes import seen_once
 
+	if not filebox_migrated():
+		return None
 	conv = frappe.db.get_value(
 		CONV, conversation, ["owner", "filebox_skills", "filebox_skill_choice"], as_dict=True
 	)
