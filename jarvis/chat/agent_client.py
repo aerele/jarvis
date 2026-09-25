@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -137,6 +138,20 @@ _PRIMARY_AGENT_ID = "main"
 # jarvis/chat/api.py was bumped in lockstep so the worker has room
 # for this turn + pair + WS connect overhead.
 TURN_TIMEOUT_SECONDS = 600
+
+# openclaw's image/video/music generation tools unconditionally detach into a
+# background task on every normal chat session (no config switch): the
+# in-flight run is aborted with an EMPTY terminal (sessions_yield/turnHandoff),
+# then ~25-30s later a NEW run on the SAME sessionKey (a fresh runId) posts the
+# real reply. This bounds how long a turn waits for that follow-up before
+# falling back to today's error path. Comfortably inside TURN_TIMEOUT_SECONDS.
+YIELD_CONTINUATION_WAIT_S = 150
+
+# Polling granularity while waiting for the yield's continuation: short enough
+# that a user Stop pressed mid-wait (which cannot otherwise interrupt a single
+# long _recv call - the dead original runId will never post another frame) is
+# observed promptly.
+YIELD_CONTINUATION_POLL_S = 3.0
 
 # --- pinned one-shots (issue #531) ------------------------------------------
 #
@@ -404,6 +419,15 @@ def _chat_final_text(payload: dict) -> str | None:
 # the row's ``error`` field so the user sees an honest failure.
 _STREAM_ERROR_SENTINEL = "[assistant turn failed before producing content]"
 
+# The agent runtime's media-generation tools: calling one unconditionally
+# detaches the reply into a background task, and when that yielded run then
+# settles with no visible output the gateway's bare terminal (no message, no
+# stopReason - see YIELD_CONTINUATION_WAIT_S) is WIRE-IDENTICAL to a genuine
+# failed_final. The only signal that tells them apart is whether one of these
+# tools started during this same run - tracked where tool events are already
+# routed (relay_turn_events here; the mux lane in relay_mux.py for the pump).
+MEDIA_GEN_TOOL_NAMES = frozenset({"image_generate", "video_generate", "music_generate"})
+
 # User-facing text stamped on the assistant row's ``error`` field (and shown in
 # the chat) for such a failed final when openclaw gave us nothing better.
 # Generic on purpose: a ``state == "final"`` event carries no ``errorMessage``
@@ -497,6 +521,92 @@ def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	if not isinstance(msg, dict):
 		return True
 	return msg.get("stopReason") == "error"
+
+
+def _is_yield_aborted_final(payload: dict, text: str | None) -> bool:
+	"""True when a ``state == "final"`` chat event is actually the agent
+	runtime's image/video/music tools' unconditional background-detach yield
+	(sessions_yield/turnHandoff), NOT a real failure or a plain empty final.
+
+	Three positive signals, checked in order of directness (live-verified,
+	2026.9.3 bundle) - ANY one is sufficient:
+	  1. an explicit top-level ``yielded`` field (truthy) on the terminal -
+	     the runtime's own, unambiguous marker;
+	  2. ``stopReason == "aborted"`` (never "error"), top-level or nested in
+	     ``message`` - the ``createYieldAbortedResponse`` shape;
+	  3. (checked by the CALLER, not here - see ``MEDIA_GEN_TOOL_NAMES``) a
+	     bare final with none of the above, tied back to a media-gen tool
+	     start seen earlier on this run - the gateway sometimes settles with
+	     no message AND no stopReason AND no ``yielded`` field at all.
+	MUST be checked BEFORE ``_chat_final_failed`` - its "no message at all"
+	branch would otherwise classify signal 1/2's omitted-``message`` shape as
+	a hard failure (FAILED_FINAL_ERROR) instead of the deferred-reply wait.
+
+	A real (possibly partial) answer always wins, same rule as
+	``_chat_final_failed``. This intentionally does NOT check for
+	``stopReason == "error"`` - that stays failed_final, unchanged."""
+	if text:
+		return False
+	if payload.get("yielded"):
+		return True
+	if payload.get("stopReason") == "aborted":
+		return True
+	msg = payload.get("message")
+	return isinstance(msg, dict) and msg.get("stopReason") == "aborted"
+
+
+# The gateway attaches a generated image/video/audio/document as a CONTENT
+# BLOCK on the final chat message, not text - the runtime's own
+# buildManagedMediaBlock: {"type":"image"|"audio"|"video", "url": ..., ...} or
+# {"type":"attachment","attachment":{"url": ..., ...}} for a document. The url
+# is a RELATIVE path served by the tenant's own gateway (same host as
+# agent_url, same bearer token Jarvis already holds) - never an absolute URL,
+# a traversal, or any other prefix.
+_MEDIA_URL_RE = re.compile(r"^/api/chat/media/outgoing/[A-Za-z0-9%._~:@-]+/[0-9a-f-]{36}/full")
+# Mirrors generated_media._MAX_MEDIA_PER_TURN (a separate cap: these blocks are
+# a distinct delivery mechanism from the native MEDIA:/embedded-path markers).
+_MAX_MEDIA_URLS_PER_TURN = 8
+
+
+def _valid_media_url(url) -> bool:
+	if not isinstance(url, str) or not url:
+		return False
+	if ".." in url or "\\" in url:
+		return False
+	return bool(_MEDIA_URL_RE.match(url))
+
+
+def _chat_final_media_urls(payload: dict) -> list[dict]:
+	"""Extract qualifying media/attachment blocks from a chat final's
+	``message.content``: ``{"url": <relative path>, "mime_type": <str|None>}``,
+	capped per turn. A block with a missing/invalid url (absolute, traversal,
+	wrong prefix) is silently skipped - never fetched, never raises."""
+	msg = payload.get("message")
+	if not isinstance(msg, dict):
+		return []
+	content = msg.get("content")
+	if not isinstance(content, list):
+		return []
+	out: list[dict] = []
+	for block in content:
+		if not isinstance(block, dict):
+			continue
+		btype = block.get("type")
+		if btype in ("image", "audio", "video"):
+			url, mime = block.get("url"), block.get("mimeType")
+		elif btype == "attachment":
+			att = block.get("attachment")
+			if not isinstance(att, dict):
+				continue
+			url, mime = att.get("url"), att.get("mimeType")
+		else:
+			continue
+		if not _valid_media_url(url):
+			continue
+		out.append({"url": url, "mime_type": mime})
+		if len(out) >= _MAX_MEDIA_URLS_PER_TURN:
+			break
+	return out
 
 
 def _persisted_device_id() -> str:
@@ -1214,6 +1324,10 @@ class AgentSession:
 		# (the chat event is the single terminal path); it is the only frame
 		# that names the provider failure, so it is kept for a failed final.
 		failure_detail: str | None = None
+		# True once a media-generation tool call started this run - see
+		# MEDIA_GEN_TOOL_NAMES. Turns a would-be failed_final bare terminal into
+		# a yield instead (the two are wire-identical without this history).
+		saw_media_tool_start = False
 		while True:
 			remaining = deadline - time.monotonic()
 			if remaining <= 0:
@@ -1242,10 +1356,24 @@ class AgentSession:
 				state = payload.get("state")
 				if state == "final":
 					text = _chat_final_text(payload)
+					# The runtime's image/video/music tools' unconditional
+					# background-detach yield reaches THIS path too (not only
+					# state=="aborted" below): a `final` whose text is empty and
+					# whose stopReason (top-level or nested in message) is
+					# "aborted", not "error". Route it through the SAME
+					# relay:error/aborted shape the state=="aborted" branch
+					# yields, so the caller's yield-wait applies unchanged.
+					# MUST be checked before _chat_final_failed - that guard's
+					# "no message at all" branch would otherwise call this a
+					# hard failure instead of a deferred reply.
+					failed = _chat_final_failed(payload, text)
+					if _is_yield_aborted_final(payload, text) or (failed and saw_media_tool_start):
+						yield {"kind": "relay:error", "state": "aborted", "text": ""}
+						return
 					# A "final" whose assistant turn actually FAILED (stopReason
 					# error / stream-error sentinel) is surfaced as a terminal
 					# error, not a silent empty bubble. See _chat_final_failed.
-					if _chat_final_failed(payload, text):
+					if failed:
 						yield {
 							"kind": "relay:error",
 							"state": "failed_final",
@@ -1261,13 +1389,21 @@ class AgentSession:
 						_final["media_rels"] = _rels
 					if _marked:  # any MEDIA: line stripped -> force the content overwrite
 						_final["marker_stripped"] = True
+					_urls = _chat_final_media_urls(payload)
+					if _urls:  # gateway-attached image/video/audio/document content blocks
+						_final["media_urls"] = _urls
 					yield _final
 					return
 				if state in ("error", "aborted"):
+					# ``text`` lets the caller tell an openclaw-yield abort (empty)
+					# from a genuine partial-content abort - see
+					# relay_yield_continuation. Absent for a plain error/aborted
+					# today, so this is a harmless addition for every OTHER caller.
 					yield {
 						"kind": "relay:error",
 						"state": state,
 						"error": egress_rules.redact(payload.get("errorMessage") or state),
+						"text": _chat_final_text(payload) or "",
 					}
 					return
 				continue  # delta (150ms cumulative mirror) and unknown states: ignore
@@ -1282,7 +1418,96 @@ class AgentSession:
 				if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
 					failure_detail = str(parsed["error"])
 				continue
+			if (
+				parsed.get("kind") == "tool"
+				and parsed.get("phase") == "start"
+				and parsed.get("tool_name") in MEDIA_GEN_TOOL_NAMES
+			):
+				saw_media_tool_start = True
 			yield parsed
+
+	def relay_yield_continuation(
+		self,
+		session_key: str,
+		*,
+		soft_deadline_s: float,
+		cancel_check: Any = None,
+	) -> dict[str, Any]:
+		"""Wait for the follow-up ``chat`` terminal an openclaw-yield abort
+		(``relay_turn_events``' empty ``state == "aborted"``) posts on the SAME
+		``session_key`` under a FRESH runId (openclaw's image/video/music tools
+		unconditionally detach into a background task and restart the session
+		~25-30s later - see ``YIELD_CONTINUATION_WAIT_S``). Matches on
+		``sessionKey`` alone (the runId is unknown ahead of time).
+
+		Polls in ``YIELD_CONTINUATION_POLL_S`` chunks and calls ``cancel_check``
+		(when given) between them, so a user Stop pressed mid-wait is observed
+		promptly - the dead original runId will never itself post another frame,
+		so nothing on the wire would otherwise tell this loop to give up.
+
+		Non-``chat`` frames (the continuation's own tool/delta events) are
+		dropped: this call surfaces only the continuation's OUTCOME, not its
+		live stream - the deferred tool call already ran out of band and the
+		user was never shown it running.
+
+		NEVER raises. Terminal yields (mirrors ``relay_turn_events``):
+		  {"kind": "relay:final", "text": str, media_rels?: [...], marker_stripped?: True}
+		  {"kind": "relay:error", "state": "error"|"aborted"|"failed_final", "error": str}
+		  {"kind": "relay:interrupted", "reason": "deadline"|"transport"|"cancelled"}
+		"""
+		deadline = time.monotonic() + max(0.0, soft_deadline_s)
+		while True:
+			if cancel_check is not None and cancel_check():
+				return {"kind": "relay:interrupted", "reason": "cancelled"}
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				return {"kind": "relay:interrupted", "reason": "deadline"}
+			try:
+				frame = self._recv(min(YIELD_CONTINUATION_POLL_S, remaining))
+			except AgentUnreachableError as e:
+				try:
+					self.close()
+				except Exception:
+					pass
+				return {"kind": "relay:interrupted", "reason": "transport", "detail": str(e)}
+			if frame is None or frame.get("type") != "event" or frame.get("event") != "chat":
+				continue
+			payload = frame.get("payload") or {}
+			if payload.get("sessionKey") != session_key:
+				continue
+			state = payload.get("state")
+			if state == "final":
+				text = _chat_final_text(payload)
+				if _chat_final_failed(payload, text):
+					return {
+						"kind": "relay:error",
+						"state": "failed_final",
+						"error": failed_final_error(None),
+					}
+				_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=payload.get("runId"))
+				out: dict[str, Any] = {"kind": "relay:final", "text": _red}
+				if _rels:
+					out["media_rels"] = _rels
+				if _marked:
+					out["marker_stripped"] = True
+				_urls = _chat_final_media_urls(payload)
+				if _urls:  # gateway-attached image/video/audio/document content blocks
+					out["media_urls"] = _urls
+				# Marks this as the yield's continuation outcome (not an ordinary
+				# turn) so the caller's post-settle rich-output step knows it may
+				# need to harvest the actual media from separate later transcript
+				# messages when neither media_rels nor media_urls landed here -
+				# see turn_handler._harvest_post_yield_media.
+				out["yield_continuation"] = True
+				return out
+			if state in ("error", "aborted"):
+				return {
+					"kind": "relay:error",
+					"state": state,
+					"error": egress_rules.redact(payload.get("errorMessage") or state),
+					"text": _chat_final_text(payload) or "",
+				}
+			continue  # delta (cumulative mirror) / unknown chat states: keep waiting
 
 	def fire_agent(
 		self,

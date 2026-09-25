@@ -254,13 +254,23 @@ def _effect_rich_outputs(ctx: _Ctx) -> None:
 		return
 	from jarvis.chat import settlement, turn_handler
 
-	# Native-media paths ride the pump terminal_payload (set in relay_mux) onto the
-	# Turn row; re-read them here so the image is delivered on the pump (default)
-	# transport, not only on the direct-relay path (which passes media_rels inline).
+	# Native-media paths (and gateway-attached content-block urls) ride the pump
+	# terminal_payload (set in relay_mux) onto the Turn row; re-read them here so
+	# the image is delivered on the pump (default) transport, not only on the
+	# direct-relay path (which passes media_rels/media_urls inline).
 	payload = settlement._coerce_payload(frappe.db.get_value(TURN, ctx.run_id, "terminal_payload"))
 	media_rels = (payload or {}).get("media_rels") or None
+	media_urls = (payload or {}).get("media_urls") or None
+	yield_continuation = bool((payload or {}).get("yield_continuation"))
 	turn_handler.persist_rich_outputs(
-		am, ctx.conversation, ctx.owner, ctx.run_id, _turn_start_ms(ctx), media_rels=media_rels
+		am,
+		ctx.conversation,
+		ctx.owner,
+		ctx.run_id,
+		_turn_start_ms(ctx),
+		media_rels=media_rels,
+		media_urls=media_urls,
+		yield_continuation=yield_continuation,
 	)
 
 

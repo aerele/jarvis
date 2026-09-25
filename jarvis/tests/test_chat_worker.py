@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_session_pool, turn_handler
+from jarvis.chat import agent_session_pool, turn_handler, turn_message_binding
 from jarvis.chat.api import create_conversation, get_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
 from jarvis.exceptions import AgentUnreachableError
@@ -946,6 +946,193 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		self.assertEqual(row, 4)
 
 
+class TestRunAgentTurnAgentYield(FrappeTestCase):
+	"""the agent runtime's image/video/music tools unconditionally detach into a
+	background task and abort the in-flight run with an EMPTY terminal
+	(sessions_yield/turnHandoff). Legacy transport (relay_turn_events) must tell
+	that apart from a genuine user Stop, wait (bounded) for the deferred tool's
+	follow-up chat final on the same session_key, and deliver it as THIS turn's
+	reply on the SAME assistant message - never the generic "turn ended without
+	output" dead-end.
+	"""
+
+	def setUp(self):
+		agent_session_pool._POOL.clear()
+		_ensure_test_user()
+		self._orig_user = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations()
+		self.conv, self.user_msg = _make_conversation_with_user_message()
+
+	def tearDown(self):
+		_cleanup_user_conversations()
+		frappe.set_user(self._orig_user)
+
+	def _fake_sess(self, *, yield_result=None):
+		fake_sess = MagicMock()
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[{"kind": "relay:error", "state": "aborted", "text": ""}]
+		)
+		if yield_result is not None:
+			fake_sess.relay_yield_continuation.return_value = yield_result
+		return fake_sess
+
+	def _assistant_row(self, fields):
+		return frappe.db.get_value(
+			MSG,
+			{"conversation": self.conv, "role": "assistant"},
+			fields,
+			as_dict=isinstance(fields, list),
+		)
+
+	def test_user_stop_marker_set_skips_wait_and_marks_stopped(self):
+		# The cancel marker IS set (a real Stop) - relay_yield_continuation must
+		# never even be called, and today's aborted-stop handling applies as-is.
+		turn_message_binding.request_run_cancel(self.conv)
+		fake_sess = self._fake_sess()
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user") as pub:
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		fake_sess.relay_yield_continuation.assert_not_called()
+		row = self._assistant_row(["stopped", "streaming", "error"])
+		self.assertEqual(row["stopped"], 1)
+		self.assertEqual(row["streaming"], 0)
+		self.assertFalse(row["error"])
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("run:end", kinds)
+		self.assertNotIn("run:error", kinds)
+
+	def test_no_stop_marker_waits_and_consumes_the_continuation_final(self):
+		# No Stop was requested - the empty aborted terminal is a runtime yield.
+		# The deferred tool's follow-up run (a DIFFERENT runId, same
+		# session_key) is consumed as THIS turn's reply, on the SAME message.
+		fake_sess = self._fake_sess(yield_result={"kind": "relay:final", "text": "here is your image"})
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		fake_sess.relay_yield_continuation.assert_called_once()
+		kwargs = fake_sess.relay_yield_continuation.call_args.kwargs
+		self.assertIn("cancel_check", kwargs)
+		self.assertLessEqual(kwargs["soft_deadline_s"], 150)
+		row = self._assistant_row(["content", "stopped", "streaming", "error"])
+		self.assertEqual(row["content"], "here is your image")
+		self.assertFalse(row["stopped"])
+		self.assertEqual(row["streaming"], 0)
+		self.assertFalse(row["error"])
+
+	def test_continuation_media_rels_seed_the_image_on_the_same_message(self):
+		fake_sess = self._fake_sess(
+			yield_result={
+				"kind": "relay:final",
+				"text": "here it is",
+				"media_rels": ["/home/node/.openclaw/media/tool-image-generation/x.png"],
+			}
+		)
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				with patch("jarvis.chat.turn_handler.persist_rich_outputs") as rich:
+					run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		rich.assert_called_once()
+		assistant_name = frappe.db.get_value(MSG, {"conversation": self.conv, "role": "assistant"}, "name")
+		self.assertEqual(rich.call_args.args[0], assistant_name)  # the SAME message
+		self.assertEqual(
+			rich.call_args.kwargs.get("media_rels"),
+			["/home/node/.openclaw/media/tool-image-generation/x.png"],
+		)
+
+	def test_continuation_that_itself_fails_uses_failed_final_handling(self):
+		fake_sess = self._fake_sess(
+			yield_result={"kind": "relay:error", "state": "failed_final", "error": "the model gave up"}
+		)
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user") as pub:
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		row = self._assistant_row(["error", "stopped"])
+		self.assertIn("the model gave up", row["error"])
+		self.assertFalse(row["stopped"])
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("run:error", kinds)
+
+	def test_no_continuation_within_the_cap_falls_back_to_todays_error_path(self):
+		# Deadline: nobody stopped this turn, it just never got an answer - a real
+		# error card (failed_final's "turn ended without any output" text), NEVER
+		# the softer Stop shape (which would wrongly read as "you stopped this"
+		# and never settle errored).
+		from jarvis.chat.agent_client import FAILED_FINAL_ERROR
+
+		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "deadline"})
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user") as pub:
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		row = self._assistant_row(["stopped", "streaming", "error"])
+		self.assertFalse(row["stopped"])
+		self.assertEqual(row["streaming"], 0)
+		self.assertEqual(row["error"], FAILED_FINAL_ERROR)
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("run:error", kinds)
+		self.assertNotIn("run:end", kinds)
+
+	def test_transport_drop_during_the_wait_also_errors_not_stops(self):
+		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "transport"})
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user") as pub:
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		row = self._assistant_row(["stopped", "streaming"])
+		self.assertFalse(row["stopped"])
+		self.assertEqual(row["streaming"], 0)
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("run:error", kinds)
+
+	def test_stop_arriving_during_the_wait_is_honoured(self):
+		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "cancelled"})
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user") as pub:
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		row = self._assistant_row(["stopped", "streaming"])
+		self.assertEqual(row["stopped"], 1)
+		self.assertEqual(row["streaming"], 0)
+		kinds = [c.args[1]["kind"] for c in pub.call_args_list]
+		self.assertIn("run:end", kinds)
+
+	def test_aborted_with_partial_text_never_waits(self):
+		# A genuine partial-content abort (NOT an agent-yield) must never
+		# enter the continuation wait - today's aborted-stop handling applies
+		# directly, exactly as before this change.
+		fake_sess = MagicMock()
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[{"kind": "relay:error", "state": "aborted", "text": "partial answer so far"}]
+		)
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		fake_sess.relay_yield_continuation.assert_not_called()
+		row = self._assistant_row("stopped")
+		self.assertEqual(row, 1)
+
+	def test_a_final_on_a_different_session_key_is_never_consumed(self):
+		# relay_yield_continuation itself owns the session_key match (see
+		# TestRelayYieldContinuation); here we just pin that turn_handler passes
+		# THIS conversation's session_key through, not a hardcoded value.
+		fake_sess = self._fake_sess(yield_result={"kind": "relay:interrupted", "reason": "deadline"})
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		session_key = frappe.db.get_value("Jarvis Conversation", self.conv, "session_key")
+		args = fake_sess.relay_yield_continuation.call_args.args
+		self.assertEqual(args[0], session_key)
+
+
 class TestRunAgentTurnRelayStreamTelemetry(FrappeTestCase):
 	"""Follow-up (2026-07 review): the old ``_consume`` populated the
 	``stream_stats`` dict (first_event_ms, first_delta_ms,
@@ -1308,6 +1495,13 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 		frappe.set_user(TEST_USER)
 		_cleanup_user_conversations()
 		self.conv, self.user_msg = _make_conversation_with_user_message()
+		# This whole class models a REAL user Stop, which always sets the cancel
+		# marker BEFORE the aborted terminal ever arrives (stop_run -> agent
+		# chat.abort). Without it, an aborted terminal with no text (every
+		# frame list below) reads as an agent-yield and waits on
+		# relay_yield_continuation, which these tests never configure on their
+		# MagicMock session.
+		turn_message_binding.request_run_cancel(self.conv)
 
 	def tearDown(self):
 		_cleanup_user_conversations()
@@ -1407,6 +1601,28 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 		row = self._assistant_row(["content", "stopped", "streaming"])
 		self.assertEqual(row["stopped"], 0)
 		self.assertEqual(row["content"], "all done")
+		self.assertEqual(row["streaming"], 0)
+
+	def test_final_shaped_abort_with_stop_marker_still_settles_as_stop(self):
+		# relay_turn_events now ALSO yields this exact {"state":"aborted","text":
+		# ""} shape for a `final` whose stopReason is "aborted" (the corrected
+		# wire shape for the deferred-reply yield). Downstream classification
+		# (turn_handler) is shape-agnostic - it reads the cancel marker, not
+		# where the shape came from - so with the marker set (this class's
+		# setUp) it must settle as a stop, never wait on
+		# relay_yield_continuation, regardless of which wire path produced it.
+		fake_sess = MagicMock()
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[{"kind": "relay:error", "state": "aborted", "text": ""}]
+		)
+		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
+			with patch("jarvis.chat.worker.publish_to_user"):
+				run_agent_turn(self.conv, self.user_msg, run_id="r1")
+
+		fake_sess.relay_yield_continuation.assert_not_called()
+		row = self._assistant_row(["stopped", "streaming"])
+		self.assertEqual(row["stopped"], 1)
 		self.assertEqual(row["streaming"], 0)
 
 
