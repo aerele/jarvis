@@ -297,6 +297,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 		# the SPA's "No changes were saved" line stays truthful.
 		frappe.db.rollback()
 		err_obj = envelope["error"]
+		if verb == "create" and isinstance(e, frappe.MandatoryError):
+			_name_missing_fields(err_obj, doctype, values)
 		audit.record(
 			tool=f"apply_action.{verb}_doc",
 			args=args,
@@ -347,6 +349,43 @@ def apply_action(action: dict | str | None = None) -> dict:
 		resp["run_id"] = _cont.get("run_id")
 		resp["message_id"] = _cont.get("message_id")
 	return resp
+
+
+def _name_missing_fields(err_obj: dict, doctype: str, values: dict) -> None:
+	"""Turn a create's bare "Value missing" into the fields the person must fill.
+
+	Meta ``reqd`` can't say this: controllers fill many required fields on insert
+	(ERPNext sets a Sales Order's currency and price list). So the create is re-run
+	in a rollback sandbox with mandatory checks off and Frappe reports what is still
+	empty. Left untouched when anything else is also wrong, or a field can't be
+	filled in the draft panel (a table, a secret, permlevel > 0)."""
+	from jarvis.chat.held_writes import collect_missing
+
+	missing = collect_missing("create_doc", [{"op": "create", "doctype": doctype, "values": values}])
+	if not missing:
+		return
+	fields = [_missing_field_entry(doctype, m) for m in missing]
+	err_obj["fields"] = fields
+	err_obj["message"] = _("{0} needs a value for {1}.").format(
+		_(doctype), ", ".join(f["where"] for f in fields)
+	)
+	err_obj["hint"] = _("Fill it in, then create again.")
+
+
+def _missing_field_entry(doctype: str, missing: dict) -> dict:
+	meta = frappe.get_meta(doctype)
+	parentfield = missing.get("parentfield")
+	if not parentfield:
+		label = _(meta.get_label(missing["fieldname"]))
+		return {"fieldname": missing["fieldname"], "label": label, "where": label}
+	label = _(frappe.get_meta(meta.get_field(parentfield).options).get_label(missing["fieldname"]))
+	return {
+		"fieldname": missing["fieldname"],
+		"label": label,
+		"parentfield": parentfield,
+		"idx": missing.get("idx"),
+		"where": _("{0} row {1}: {2}").format(_(meta.get_label(parentfield)), missing.get("idx"), label),
+	}
 
 
 _INVALID_CONFIRM = {

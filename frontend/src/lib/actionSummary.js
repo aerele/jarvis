@@ -10,6 +10,21 @@ export function proposedFields(action) {
 		.map((f) => ({ label: f.label, value: f.value }));
 }
 
+// Required fields the model put on the card blank. Shown flagged so the person sees
+// what Confirm still needs, instead of the row silently vanishing (#603). Only fields
+// the model proposed: meta `reqd` alone is not the truth (controllers fill many).
+export function requiredBlanks(model) {
+	return (model.fields || [])
+		.filter(isRequiredBlank)
+		.map((f) => ({ label: f.label, value: "", missing: true }));
+}
+
+export function isRequiredBlank(field) {
+	return (
+		!!field.proposed && !!field.reqd && !field.read_only && !String(field.value ?? "").trim()
+	);
+}
+
 export function changedFields(model) {
 	return model.fields
 		.filter((f) => f.changed)
@@ -32,7 +47,12 @@ export function summarize(model, action = {}) {
 	if (model.verb === "update") {
 		return { kind: "update", headline, diff: changedFields(model), tables };
 	}
-	return { kind: "create", headline, rows: proposedFields(action), tables };
+	return {
+		kind: "create",
+		headline,
+		rows: [...proposedFields(action), ...requiredBlanks(model)],
+		tables,
+	};
 }
 
 // A create_docs batch parks one card. Its dry-run preview carries the created
