@@ -255,6 +255,19 @@ class TestRunMethodDenylist(FrappeTestCase):
 			("jarvis.chat.learned_api.batch_approve", {"names": ["zz"]}),
 			("jarvis.chat.learned_api.apply_learned_skills", {}),
 			("jarvis.chat.agents_api.promote_installation", {"installation": "zz"}),
+			("jarvis.chat.learned_api.reject_learned_pattern", {"name": "zz", "reason": "zz"}),
+			("jarvis.chat.learned_api.unapprove_learned_pattern", {"name": "zz"}),
+			("jarvis.chat.learned_api.acknowledge_learned_pattern", {"name": "zz"}),
+			("jarvis.chat.learned_api.restore_rejected_pattern", {"name": "zz"}),
+			("jarvis.chat.learned_api.snooze_learned_pattern", {"name": "zz", "days": 30}),
+			(
+				"jarvis.chat.learned_api.apply_insight_skill_update",
+				{"pattern_name": "zz", "action": "update"},
+			),
+			("jarvis.chat.custom_skills_api.apply_custom_skills", {}),
+			("jarvis.chat.custom_skills_api.share_custom_skill", {"name": "zz", "users": []}),
+			("jarvis.chat.agents_api.demote_installation", {"installation": "zz"}),
+			("jarvis.chat.agents_api.raise_activation_ceiling", {"customer": "zz", "justification": "zz"}),
 		):
 			with self.subTest(method=method):
 				with patch("frappe.call") as call:

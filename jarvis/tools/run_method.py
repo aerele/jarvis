@@ -38,13 +38,23 @@ _DENIED = frozenset(
 		"jarvis.chat.api.stop_run",
 		"jarvis.chat.api.archive_conversation",
 		"jarvis.chat.api.clear_chat_history",
-		# Reviewer sign-offs and org-wide pushes: a human decision, never the agent's.
+		# Reviewer sign-offs, sharing and org-wide pushes: a human decision, never the agent's.
 		"jarvis.chat.custom_skills_api.decide_skill_promotion",
+		"jarvis.chat.custom_skills_api.apply_custom_skills",
+		"jarvis.chat.custom_skills_api.share_custom_skill",
 		"jarvis.chat.learned_api.decide_promotion",
 		"jarvis.chat.learned_api.approve_learned_pattern",
 		"jarvis.chat.learned_api.batch_approve",
+		"jarvis.chat.learned_api.reject_learned_pattern",
+		"jarvis.chat.learned_api.unapprove_learned_pattern",
+		"jarvis.chat.learned_api.acknowledge_learned_pattern",
+		"jarvis.chat.learned_api.restore_rejected_pattern",
+		"jarvis.chat.learned_api.snooze_learned_pattern",
+		"jarvis.chat.learned_api.apply_insight_skill_update",
 		"jarvis.chat.learned_api.apply_learned_skills",
 		"jarvis.chat.agents_api.promote_installation",
+		"jarvis.chat.agents_api.demote_installation",
+		"jarvis.chat.agents_api.raise_activation_ceiling",
 	}
 )
 
