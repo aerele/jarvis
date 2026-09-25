@@ -125,6 +125,81 @@ class TestXlsxBytesAcrossMajors(FrappeTestCase):
 		self.assertEqual(rows, [["a", "b"], [1, "x"], [2, "y"]])
 
 
+def _builders():
+	"""Every workbook builder this bench can run, by label. The openpyxl one is
+	the Frappe 15 path; on a 16 bench it lacks only 15's date-format helper, so
+	a stand-in lets both engines be checked against one layout here. The 16
+	(xlsxwriter) path needs XLSXStyleBuilder and is skipped on a 15 bench."""
+	out = {"openpyxl": compat._xlsx_bytes_openpyxl}
+	try:
+		from frappe.utils.xlsxutils import XLSXStyleBuilder
+	except ImportError:
+		pass
+	else:
+		out["xlsxwriter"] = compat._xlsx_bytes_xlsxwriter
+	return out
+
+
+class TestXlsxLayoutAcrossBuilders(FrappeTestCase):
+	"""Issue #598: exports opened as a raw grid (no widths, numbers without
+	grouping, no frozen header or filter). Both engines must lay a sheet out
+	the same way, read back with openpyxl as Excel would."""
+
+	DATA = [
+		["Invoice", "Customer", "Posting Date", "Grand Total", "Qty", "Code"],
+		["ACC-SINV-2026-00012", "West View Software Ltd.", datetime.date(2026, 6, 1), 20000.0, 3, "00123"],
+		["ACC-SINV-2026-00013", "Grant Plastics", datetime.date(2026, 10, 11), 1234567.5, 12, "A-7"],
+	]
+
+	def setUp(self):
+		import frappe.utils.xlsxutils as xu
+
+		if not hasattr(xu, "get_excel_date_format"):
+			p = patch.object(
+				xu, "get_excel_date_format", create=True, return_value=("dd-mm-yyyy", "hh:mm:ss")
+			)
+			p.start()
+			self.addCleanup(p.stop)
+
+	def _sheet(self, build):
+		rows = [list(r) for r in self.DATA]
+		return openpyxl.load_workbook(io.BytesIO(build([("Invoices", rows)]))).worksheets[0]
+
+	def test_header_is_bold_frozen_and_filtered(self):
+		for label, build in _builders().items():
+			with self.subTest(builder=label):
+				ws = self._sheet(build)
+				self.assertTrue(ws["A1"].font.b)
+				self.assertEqual(ws.freeze_panes, "A2")
+				self.assertEqual(ws.auto_filter.ref, "A1:F3")
+
+	def test_numbers_and_dates_carry_formats_text_stays_general(self):
+		for label, build in _builders().items():
+			with self.subTest(builder=label):
+				ws = self._sheet(build)
+				self.assertEqual(ws["D2"].number_format, compat.XLSX_FLOAT_FORMAT)
+				self.assertEqual(ws["E2"].number_format, compat.XLSX_INT_FORMAT)
+				self.assertTrue(ws["C2"].is_date)
+				self.assertEqual(ws["F2"].value, "00123")  # a code, not a number
+				self.assertEqual(ws["F2"].number_format, "General")
+
+	def test_columns_are_sized_to_their_content(self):
+		kinds, widths = compat._sheet_layout([list(r) for r in self.DATA])
+		self.assertEqual(kinds, ["text", "text", "date", "float", "int", "text"])
+		self.assertEqual(widths[1], len("West View Software Ltd.") + 2)
+		self.assertEqual(widths[4], 8)  # short columns keep a usable minimum
+		long = compat._sheet_layout([["Note"], ["x" * 500]])[1]
+		self.assertEqual(long, [60])  # one long note cannot blow a column up
+		for label, build in _builders().items():
+			with self.subTest(builder=label):
+				ws = self._sheet(build)
+				self.assertGreaterEqual(ws.column_dimensions["B"].width, widths[1])
+
+	def test_mixed_column_stays_text(self):
+		kinds, _ = compat._sheet_layout([["v"], [1], ["n/a"], [True]])
+		self.assertEqual(kinds, ["text"])
+
+
 class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 	"""``compat.permission_conditions`` must gate rows on either major.
 
