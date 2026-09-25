@@ -67,11 +67,15 @@ def _ensure_user(email: str, roles: list[str]) -> str:
 
 def _sweep():
 	"""Committing cleanup: request/decide both commit, so rows survive the
-	per-test rollback and must be hard-deleted between tests."""
+	per-test rollback and must be hard-deleted between tests. Matched by
+	``skill_name`` prefix (not just owner) so an Administrator-owned promotion
+	request - owner "Administrator", never in the owner list below - is swept
+	too."""
 	frappe.db.rollback()
+	frappe.db.delete(SKILL_PROMO, {"skill_name": ["like", f"{PFX}-%"]})
+	frappe.db.delete(SKILL_PROMO, {"owner": ["in", [REVIEWER, REVIEWER_2, USER_A]]})
 	for n in frappe.get_all(SKILL, filters={"skill_name": ["like", f"{PFX}-%"]}, pluck="name"):
 		frappe.delete_doc(SKILL, n, force=True, ignore_permissions=True)
-	frappe.db.delete(SKILL_PROMO, {"owner": ["in", [REVIEWER, REVIEWER_2, USER_A]]})
 	if frappe.db.table_exists("Jarvis Shared Skill Slug"):
 		frappe.db.delete("Jarvis Shared Skill Slug", {"slug": ["like", f"{PFX}-%"]})
 	frappe.db.commit()
@@ -267,3 +271,44 @@ class TestApprovalAfterSourceDeleted(PromotionLifecycleBase):
 		with _as(REVIEWER):
 			rejected = custom_skills_api.decide_skill_promotion(req["request"], 0, note="skill gone")
 		self.assertEqual(rejected["status"], "Rejected")
+
+
+class TestAdministratorOwnedSourceApproves(PromotionLifecycleBase):
+	"""Live e2e2 defect found after the #595 fix: approving a promotion of a skill
+	OWNED BY Administrator always failed with "You already have a skill named
+	'...'". ``MANAGED_OWNER`` (the system identity every materialized shared copy
+	is owned by) IS "Administrator", so when the private source's own owner is
+	also literally "Administrator", the new shared copy collided with its own
+	lineage source on ``_validate_unique_per_owner``'s (owner, skill_name) check.
+
+	Fix: ``_validate_unique_per_owner`` (jarvis_custom_skill.py) now exempts the
+	LINEAGE PAIR specifically (self <-> self.source_skill), not the whole
+	cross-tier check - a genuine unrelated duplicate name under the same owner is
+	still real ambiguity for ``resolve_armed_skill_docname``'s owner-tier
+	resolution (it assumes at most one enabled row per (owner, slug)), so that
+	stays rejected below."""
+
+	def test_administrator_owned_private_skill_promotes_successfully(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill("Administrator", f"{PFX}-admin-owned")
+		with _as("Administrator"):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			out = custom_skills_api.decide_skill_promotion(req["request"], 1)
+		self.assertTrue(out["ok"], out)
+
+		materialized = out["materialized"]
+		self.assertEqual(frappe.db.get_value(SKILL, materialized, "scope"), "Org")
+		self.assertEqual(frappe.db.get_value(SKILL, materialized, "owner"), "Administrator")
+		self.assertEqual(frappe.db.get_value(SKILL, materialized, "source_skill"), skill.name)
+		# The private source is untouched (still User-scope, still Administrator's).
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "owner"), "Administrator")
+
+	def test_unrelated_duplicate_name_same_owner_still_rejected(self):
+		# Two SEPARATE (no lineage) Administrator-owned skills sharing a name is
+		# still a real clash - the lineage exemption must not swallow this.
+		_mk_skill("Administrator", f"{PFX}-admin-dup")
+		with self.assertRaisesRegex(frappe.ValidationError, "already have a skill named"):
+			_mk_skill("Administrator", f"{PFX}-admin-dup")

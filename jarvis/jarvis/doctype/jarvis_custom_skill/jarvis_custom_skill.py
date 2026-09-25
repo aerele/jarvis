@@ -468,12 +468,36 @@ class JarvisCustomSkill(Document):
 			from jarvis.chat.custom_skills import MANAGED_OWNER
 
 			owner = MANAGED_OWNER
+		# #595 code review: a materialized shared copy (scope Role/Org) is a
+		# SEPARATE row from its private lineage source (``source_skill``), owned by
+		# the system identity (MANAGED_OWNER) rather than the requester - but when
+		# the requester's OWN owner happens to already be MANAGED_OWNER (an
+		# Administrator-owned private skill), the copy and its own source collide
+		# on this exact (owner, skill_name) check. Exempt the LINEAGE PAIR only
+		# (not the whole cross-tier check): ``resolve_armed_skill_docname`` assumes
+		# at most one enabled row per (owner, slug) in an owner's OWN tier, so an
+		# UNRELATED duplicate name under the same owner is still a real ambiguity
+		# and stays rejected here. Symmetric so it also holds on a later save of
+		# the PRIVATE source itself (self.source_skill is empty there; look up
+		# anything descended FROM self instead).
+		exclude_names = {self.name or ""}
+		if self.source_skill:
+			exclude_names.add(self.source_skill)
+		elif self.name:
+			exclude_names.update(
+				frappe.get_list(
+					"Jarvis Custom Skill",
+					filters={"source_skill": self.name},
+					pluck="name",
+					ignore_permissions=True,
+				)
+			)
 		clash = frappe.db.exists(
 			"Jarvis Custom Skill",
 			{
 				"owner": owner,
 				"skill_name": self.skill_name,
-				"name": ["!=", self.name or ""],
+				"name": ["not in", list(exclude_names)],
 			},
 		)
 		if clash:
