@@ -276,7 +276,7 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
 			},
 		)
 		ws = wb.worksheets()[-1]
-		for c, (kind, width) in enumerate(zip(kinds, widths)):
+		for c, (kind, width) in enumerate(zip(kinds, widths, strict=True)):
 			ws.set_column(c, c, width, width_formats.get(kind))
 		ws.freeze_panes(1, 0)
 		if kinds:
