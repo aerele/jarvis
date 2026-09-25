@@ -2140,7 +2140,7 @@
 					     stray warming spinner masking the chip. -->
 					<div
 						v-if="
-							(activeTools.length || waiting) &&
+							(activeTools.length || waiting || liveStep) &&
 							!queuedTurn &&
 							!artifactKind &&
 							!gotoMorph &&
@@ -2155,6 +2155,16 @@
 							style="margin-top: 2px"
 						/>
 						<div style="flex: 1; min-width: 0; padding-top: 3px">
+							<!-- live step line: what the model says it is doing right now.
+							     Gone once the answer starts or the run ends. -->
+							<div
+								v-if="liveStep"
+								class="jv-livestep"
+								role="status"
+								aria-live="polite"
+							>
+								{{ liveStep }}
+							</div>
 							<!-- the single tool running right now -->
 							<div
 								v-if="showActivityDetail && currentTool"
@@ -5929,6 +5939,16 @@ const doneCount = computed(
 );
 const failedCount = computed(
 	() => visibleActiveTools.value.filter((t) => t.status === "error").length
+);
+// Live step line: the model's own "what I'm doing" sentence (run:step). Tied to the
+// run that sent it, so it disappears whenever that run stops being current (answer
+// landed, error, stop, conversation switch) without each teardown clearing it.
+// The first answer text clears it too. Never stored.
+const liveStepState = ref({ runId: null, text: "" });
+const liveStep = computed(() =>
+	liveStepState.value.runId && liveStepState.value.runId === currentRunId.value
+		? liveStepState.value.text
+		: ""
 );
 // ── Live status line ────────────────────────────────────────────────────────
 // Real progress instead of a blanket "Thinking…": phase transitions come from
@@ -10214,6 +10234,9 @@ function onEvent(p) {
 			waiting.value = false;
 			statusPhase.value = null;
 			recovering.value = null;
+			// Answer text is landing, so the step line has done its job. An empty
+			// mirror is the relay moving step text out of the reply: keep the line.
+			if (p.text) liveStepState.value = { runId: null, text: "" };
 			// Upsert: the message may not be loaded yet when the first delta
 			// arrives — add it so streaming text shows immediately (the bug fix).
 			let m = messages.value.find((x) => x.name === p.message_id);
@@ -10227,6 +10250,17 @@ function onEvent(p) {
 			m.content = revealer.receive(p.message_id, p.text);
 			m.streaming = true;
 			pumpReveal();
+			nextTick(scrollBottomIfPinned);
+			break;
+		}
+		case "run:step": {
+			// One line saying what the model is doing right now; a newer step
+			// replaces it. Fenced like tool events so a stale run can't set it.
+			if (pumpFenceReject(p)) break;
+			if (toolEventIsStale(p)) break;
+			pumpFenceAccept(p, false);
+			liveStepState.value = { runId: p.run_id || currentRunId.value, text: p.text || "" };
+			waiting.value = false;
 			nextTick(scrollBottomIfPinned);
 			break;
 		}
@@ -12979,6 +13013,14 @@ onUnmounted(() => {
 .jv-tooldone {
 	color: var(--text-3);
 	font-size: 12px;
+}
+/* live step line: the model's own "what I'm doing" sentence, above the tool rows */
+.jv-livestep {
+	font-size: 13.5px;
+	line-height: 1.45;
+	color: var(--text);
+	padding: 0 0 4px;
+	overflow-wrap: anywhere;
 }
 .jv-spin {
 	animation: jv-spin 0.8s linear infinite;

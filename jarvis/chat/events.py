@@ -3,6 +3,8 @@
 openclaw emits WebSocket events with shapes like:
   stream=lifecycle  data={phase: start|end|error, ...}
   stream=item       data={kind: tool, phase: start|end, name, toolCallId, status}
+  stream=item       data={kind: preamble, phase, itemId, progressText}  (step update)
+  stream=tool       data={phase: start|update|result, name, toolCallId}  (tool-events cap)
   stream=assistant  data={text: <cumulative>, delta: <incremental>}
 
 This module normalizes those into a flat dict the worker can act on, and
@@ -35,6 +37,12 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 		return out
 
 	if stream == "item":
+		if data.get("kind") == "preamble":
+			# The ChatGPT-subscription harness sends the model's "what I'm doing"
+			# updates as their own item, separate from the reply text. It becomes
+			# the chat's live step line (see jarvis.chat.steps).
+			text = egress_rules.redact(str(data.get("progressText") or "")).strip()
+			return {"kind": "step", "text": text} if text else None
 		if data.get("kind") != "tool":
 			return None
 		out = {
@@ -53,6 +61,13 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 		if data.get("title"):
 			out["tool_title"] = egress_rules.redact(data["title"])
 		return out
+
+	if stream == "tool":
+		# Only reaches us because the connect advertises "tool-events". Tool
+		# rows still come from the item stream; a start here only marks where
+		# a tool call began (the Claude-subscription runtime sends no item
+		# frames), so the relay can find step text before it.
+		return {"kind": "tool_boundary"} if data.get("phase") == "start" else None
 
 	if stream == "assistant":
 		# Redact the live stream (both transports funnel through here). Silent — no
