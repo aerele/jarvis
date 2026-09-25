@@ -1239,6 +1239,7 @@ def _insert_tool_start_row(conversation: str, tool_call_id: str, tool_name: str 
 		}
 	)
 	doc.flags.ignore_permissions = True
+	doc.flags.jarvis_server_write = True
 	doc.insert()
 	return doc.name
 
@@ -2168,6 +2169,7 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 			except Exception:
 				pass
 		frappe.db.commit()
+		_seal_file_box_sheet(rs.conversation, run_id)
 		if rs.owner:
 			# SUX-11: a definite pre-ack rejection is a real error — publish run:error
 			# with today's classification code + message_id (not a bare run:end).
@@ -2883,6 +2885,7 @@ def _settle_recover_errored(
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
 	frappe.db.commit()
+	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:
 		try:
 			ts._run_cas(
@@ -2904,6 +2907,14 @@ def _settle_recover_errored(
 			code=_classify_error(err),
 		)
 	return True
+
+
+def _seal_file_box_sheet(conversation: str | None, run_id: str) -> None:
+	"""An errored edge that bypasses settlement (so no finalize seal): seal the File
+	Box sheet this turn collected. Best-effort, never raises."""
+	from jarvis.chat import held_sheet_seal
+
+	held_sheet_seal.after_turn(conversation, run_id)
 
 
 def _park_recovering(ctx: PumpContext, run_id: str, *, reason: str) -> None:

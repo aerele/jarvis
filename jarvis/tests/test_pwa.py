@@ -45,6 +45,7 @@ from jarvis.www.jarvis_mobile import get_context
 # Stands in for the built worker. Content is irrelevant to the renderer — it
 # serves bytes — so this only has to be recognisable in an assertion.
 FIXTURE_SW = b"/* built worker */ self.skipWaiting()\n"
+_NO_REQUEST = object()
 
 
 def _resolve(path: str) -> str:
@@ -54,9 +55,19 @@ def _resolve(path: str) -> str:
 	returns None otherwise, and ``resolve_from_map`` then hands the path straight
 	back. Resolving without a request would make every assertion below pass
 	vacuously, which is precisely the bug this helper exists to prevent.
+
+	The previous ``frappe.local.request`` is restored so the fake GET never leaks
+	into later test modules (where it would trip POST-only endpoint checks).
 	"""
+	prev = getattr(frappe.local, "request", _NO_REQUEST)
 	set_request(method="GET", path=f"/{path}")
-	return resolve_path(path)
+	try:
+		return resolve_path(path)
+	finally:
+		if prev is _NO_REQUEST:
+			del frappe.local.request
+		else:
+			frappe.local.request = prev
 
 
 def _app_root() -> str:

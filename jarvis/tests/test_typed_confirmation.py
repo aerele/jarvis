@@ -11,7 +11,49 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import approval_phrases
-from jarvis.chat.api import _typed_approval_eligible, _typed_confirmation
+from jarvis.chat.api import (
+	_card_sort_key,
+	_ordered_parked_cards,
+	_typed_approval_eligible,
+	_typed_confirmation,
+)
+
+
+class TestCardSortKey(FrappeTestCase):
+	"""P0c: (created_at, token) is the server's own card order - direct unit
+	tests of the key function and the list it drives, independent of the typed-
+	confirmation plumbing (which sorts by the CLIENT's displayed order, not this
+	one)."""
+
+	def test_prefers_created_at_over_expires_at(self):
+		self.assertEqual(_card_sort_key({"created_at": 100, "expires_at": 999}), 100)
+
+	def test_falls_back_to_expires_at_when_created_at_is_missing(self):
+		self.assertEqual(_card_sort_key({"expires_at": 200}), 200)
+
+	def test_falls_back_to_zero_when_both_are_missing(self):
+		self.assertEqual(_card_sort_key({}), 0)
+
+	def test_ordered_parked_cards_sorts_by_created_at_then_token(self):
+		cards = [
+			{"token": "z", "created_at": 100},
+			{"token": "a", "created_at": 100},
+			{"token": "m", "created_at": 50},
+		]
+		with patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards):
+			out = _ordered_parked_cards("user@example.com", "conv-x")
+		self.assertEqual([c["token"] for c in out], ["m", "a", "z"])
+
+	def test_ordered_parked_cards_mixed_deploy_created_at_and_expires_at_agree(self):
+		# A pre-P0c record (expires_at only) sorting against a post-P0c one
+		# (created_at) must not scramble the order a human actually saw mint.
+		cards = [
+			{"token": "new", "created_at": 200},
+			{"token": "old", "expires_at": 100},  # minted before P0c shipped
+		]
+		with patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards):
+			out = _ordered_parked_cards("user@example.com", "conv-x")
+		self.assertEqual([c["token"] for c in out], ["old", "new"])
 
 
 class TestTypedApprovalGate(FrappeTestCase):
@@ -171,15 +213,31 @@ class TestTypedConfirmation(FrappeTestCase):
 		self.conv = "conv-typed-confirm"
 
 	def _card(self, token="tok-1"):
-		return {"token": token, "tool": "create_doc", "summary": "create Supplier"}
+		# The listing's shape: strict to this conversation, parked since the user
+		# last spoke (a bare "go ahead" binds only such cards, decision 6).
+		return {
+			"token": token,
+			"tool": "create_doc",
+			"summary": "create Supplier",
+			"conversation": self.conv,
+			"recent": True,
+		}
 
 	def _toks(self, cards):
-		"""The tokens a client displays, in the (expires_at, token) order the panel
+		"""The tokens a client displays, in the (created_at, token) order the panel
 		shows them - exactly what a real client now sends as ``approval_tokens``.
-		A typed number binds to THIS order, not to a list the server re-fetches."""
-		return [
-			c["token"] for c in sorted(cards, key=lambda c: (c.get("expires_at") or 0, c.get("token") or ""))
-		]
+		A typed number binds to THIS order, not to a list the server re-fetches.
+		Falls back to ``expires_at`` for a card with no ``created_at`` (P0c), same
+		as the server's own ``_card_sort_key``."""
+
+		def sort_key(c):
+			created_at = c.get("created_at")
+			return (
+				created_at if created_at is not None else (c.get("expires_at") or 0),
+				c.get("token") or "",
+			)
+
+		return [c["token"] for c in sorted(cards, key=sort_key)]
 
 	def test_a_lone_card_and_a_plain_go_ahead_runs_the_confirmation(self):
 		with (
@@ -288,6 +346,38 @@ class TestTypedConfirmation(FrappeTestCase):
 		core.assert_called_once()
 		self.assertEqual(core.call_args.args[0], "early")
 
+	def test_created_at_is_the_primary_sort_key_over_a_misleading_expires_at(self):
+		"""A non-uniform TTL could give a later-minted card an EARLIER
+		expires_at; created_at must still order it after the earlier mint."""
+		cards = [
+			dict(self._card("late"), created_at=200, expires_at=150),
+			dict(self._card("early"), created_at=100, expires_at=999),
+		]
+		with (
+			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
+			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			_typed_confirmation(self.user, self.conv, "confirm 1", self._toks(cards))
+		core.assert_called_once()
+		self.assertEqual(core.call_args.args[0], "early")
+
+	def test_a_missing_created_at_falls_back_to_expires_at(self):
+		"""A card minted before P0c shipped carries no created_at; a mixed
+		deploy must still number consistently against expires_at."""
+		cards = [
+			dict(self._card("late"), expires_at=200),  # pre-P0c record, no created_at
+			dict(self._card("early"), created_at=100, expires_at=100),
+		]
+		with (
+			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
+			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			_typed_confirmation(self.user, self.conv, "confirm 1", self._toks(cards))
+		core.assert_called_once()
+		self.assertEqual(core.call_args.args[0], "early")
+
 	def test_no_parked_card_falls_through(self):
 		with (
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[]),
@@ -366,7 +456,7 @@ class TestTypedApprovalBindsToDisplayedTokens(FrappeTestCase):
 		self.conv = "conv-typed-confirm"
 
 	def _card(self, token, tool="create_doc", summary="do it"):
-		return {"token": token, "tool": tool, "summary": summary}
+		return {"token": token, "tool": tool, "summary": summary, "conversation": self.conv, "recent": True}
 
 	def test_a_number_pointing_at_an_expired_card_runs_nothing(self):
 		"""The exact wrong-card bug. Client showed [A=submit(1), B=delete(2)]. A

@@ -2438,6 +2438,15 @@
 								<path d="M12 9v4M12 17h.01" />
 							</svg>
 							<span class="jv-action-title">Confirm before this runs</span>
+							<!-- Parked before the user's latest message: a bare "yes"/"no"
+							     no longer binds it, only its number or its buttons. -->
+							<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
+								>Earlier</span
+							>
+							<!-- Cards never expire: one that has waited over an hour says so. -->
+							<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
+								pendingAgeOf(pa)
+							}}</span>
 							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
 							     only appears when there is actually a choice to make. -->
 							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
@@ -2557,6 +2566,13 @@
 								Discard
 							</button>
 						</div>
+					</div>
+					<!-- A typed yes/no that bound no card went to Jarvis as a normal
+					     message; say so without blocking anything (decision 13). The
+					     live region stays mounted and only its text toggles, so the
+					     change is announced. -->
+					<div class="jv-pending-older-note" role="status" aria-live="polite">
+						{{ olderCardsNoteText }}
 					</div>
 				</div>
 			</div>
@@ -4678,6 +4694,7 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import { normDateVal as _normDateVal, panelField as _panelField } from "@/lib/docFields";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -4691,6 +4708,15 @@ import { shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
+import { reconcilePending } from "@/lib/pendingResync";
+import {
+	discardedTokens,
+	isRecentCard,
+	markCardsEarlier,
+	typedApprovalHint as hintFor,
+} from "@/lib/typedCardReply";
+import { proposedLabel } from "@/lib/cardAge";
+import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7152,45 +7178,6 @@ function _isLongVal(v) {
 	const s = String(v == null ? "" : v);
 	return s.length > 55 || s.includes("\n");
 }
-// Map a Frappe fieldtype → the edit control to render + its options payload.
-function _controlFor(fieldtype, options) {
-	switch (fieldtype) {
-		case "Link":
-			return ["link", options || ""]; // options = target doctype (searchLink)
-		case "Select":
-			return [
-				"select",
-				String(options || "")
-					.split("\n")
-					.map((o) => o.trim()),
-			];
-		case "Check":
-			return ["check", ""];
-		case "Date":
-			return ["date", ""];
-		case "Datetime":
-			return ["datetime", ""];
-		case "Time":
-			return ["time", ""];
-		case "Int":
-		case "Float":
-		case "Currency":
-		case "Percent":
-		case "Rating":
-			return ["number", ""];
-		case "Small Text":
-		case "Text":
-		case "Long Text":
-		case "Code":
-		case "Text Editor":
-		case "HTML Editor":
-		case "Markdown Editor":
-		case "JSON":
-			return ["text", ""];
-		default:
-			return ["data", ""];
-	}
-}
 // "Item Group" / "item_group" / "itemGroup" all → "itemgroup": the agent's
 // action JSON labels fields sometimes by display label, sometimes by fieldname.
 function _normKey(s) {
@@ -7289,54 +7276,6 @@ async function _formMeta(doctype) {
 	}
 	_formMetaCache[doctype] = r;
 	return r;
-}
-
-// Native date/time inputs REQUIRE canonical values (yyyy-mm-dd / yyyy-mm-ddThh:mm);
-// anything else — "2026-07-10 00:00:00", "10-07-2026" — renders the input EMPTY,
-// which read as "the date isn't picking". Normalize whatever the agent/doc gave us.
-function _normDateVal(fieldtype, v) {
-	const s = String(v == null ? "" : v).trim();
-	if (!s) return s;
-	if (fieldtype === "Date") {
-		let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-		if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-		m = s.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/); // dd-mm-yyyy / dd/mm/yyyy
-		if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-	}
-	if (fieldtype === "Datetime") {
-		let m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
-		if (m) return `${m[1]}T${m[2]}`;
-		m = s.match(/^(\d{4}-\d{2}-\d{2})$/);
-		if (m) return `${m[1]}T00:00`;
-	}
-	if (fieldtype === "Time") {
-		const m = s.match(/^(\d{2}:\d{2})/);
-		if (m) return m[1];
-	}
-	return s;
-}
-function _panelField(metaField, value) {
-	let [control, options] = _controlFor(metaField.fieldtype, metaField.options);
-	let v = value == null ? "" : String(value);
-	if (["date", "datetime", "time"].includes(control)) v = _normDateVal(metaField.fieldtype, v);
-	let orig = v;
-	if (control === "check") {
-		v = checkToYesNo(v);
-		orig = v;
-	}
-	if (control === "select" && Array.isArray(options) && v && !options.includes(v))
-		options = [v, ...options];
-	return {
-		fieldname: metaField.fieldname,
-		label: metaField.label,
-		control,
-		options,
-		fieldtype: metaField.fieldtype,
-		reqd: metaField.reqd,
-		read_only: metaField.read_only,
-		value: v,
-		orig,
-	};
 }
 
 // Build the draft model from an action + form meta (+ live doc for updates),
@@ -7782,26 +7721,34 @@ const approveRunBusyToken = ref(null);
 // Only the cards belonging to the conversation on screen render (a parked write
 // from another chat must not show here). The queue is already pruned to the
 // current conversation on load, but filter defensively for the template v-for.
-// Sorted the SAME way the server orders the parked list (mint order: expires_at
-// is mint time plus a fixed TTL, with the token breaking a same-second tie).
-// Load-bearing once a typed "confirm 1 and 3" can select by the number printed on
-// each card: if the screen and the server disagree about which card is number 1,
-// the wrong write runs. The queue's own arrival order is close but not identical,
-// since a resync merges cards in whatever order the store returned them.
+// Sorted in mint order (created_at, the token breaking a same-second tie;
+// expires_at is only the fallback for a pre-P0c record with no created_at), so the
+// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
+// numbered (approval_tokens), and a resync merges cards in whatever order the store
+// returned them.
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
-const typedApprovalHint = computed(() => {
-	const n = visiblePendingActions.value.length;
-	// The example must reference cards that actually exist: with two parked,
-	// "confirm 1 and 3" names a card 3 that is not there, so a user who copies it
-	// verbatim gets an out-of-range no-op. Use the real first and last numbers.
-	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
-});
+// An "Earlier" card (parked before the user's latest message) never gets the
+// bare-phrase hint: only its number binds it (lib/typedCardReply.js).
+const typedApprovalHint = computed(() => hintFor(visiblePendingActions.value));
+// The conversation whose last send was a typed yes/no that bound no card. The note
+// stays while an older card is still on screen there, and clears with the last one.
+const olderCardsNoteFor = ref("");
+const showOlderCardsNote = computed(
+	() =>
+		!!olderCardsNoteFor.value &&
+		olderCardsNoteFor.value === currentId.value &&
+		visiblePendingActions.value.some((pa) => !isRecentCard(pa))
+);
+const olderCardsNoteText = computed(() =>
+	showOlderCardsNote.value
+		? "An earlier action card is still waiting — use its buttons or the Approval Board."
+		: ""
+);
 const visiblePendingActions = computed(() =>
-	// Ordered by the shared, unit-tested comparator (sortPendingCards) so the
-	// numbers on screen match the server's (expires_at, token) order a typed
-	// "confirm N" resolves against. See lib/sortPendingCards.js.
+	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
+	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
 	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
 );
 
@@ -7843,9 +7790,9 @@ function pendingBatchOf(pa) {
 function pendingDetailsOf(pa) {
 	return pendingPreviewOf(pa);
 }
-// Wall-clock expiry (F15): a coarse tick flips a card to its "expired" state once
-// the 15-min token TTL lapses, so a stale card stops looking actionable. Real
-// enforcement stays server-side (confirming an expired token fails).
+// Wall-clock expiry (F15), legacy Redis cards only: a coarse tick flips one to its
+// "expired" state once its 15-min token TTL lapses. A pending-action card carries
+// no expires_at and never expires. Real enforcement stays server-side.
 const pendingNowMs = ref(Date.now());
 let _expiryTick = null;
 onMounted(() => {
@@ -7863,6 +7810,9 @@ onUnmounted(() => {
 });
 function pendingExpiredOf(pa) {
 	return pendingExpiry(pa && pa.expires_at, pendingNowMs.value).expired;
+}
+function pendingAgeOf(pa) {
+	return proposedLabel(pa && pa.created_at, pendingNowMs.value);
 }
 // Drop one card from the queue by its token (confirm-success / discard / expiry).
 function removePending(token) {
@@ -7894,7 +7844,12 @@ function pendingActionFromRow(m, convId) {
 		summary: "",
 		preview: { card: m.pending_card },
 		run_id: null,
+		// Server epoch on every pending row (a legacy one: its own creation); never a
+		// local-time parse (sortPendingCards falls back to expires_at when null).
+		created_at: m.created_at ?? null,
 		expires_at: _rowExpiresEpoch(m.expires_at),
+		seq: m.seq ?? null,
+		recent: m.recent !== false,
 	};
 }
 function seedPendingFromRows(msgs, convId) {
@@ -7910,8 +7865,18 @@ function seedPendingFromRows(msgs, convId) {
 		}
 	}
 }
+// Tokens with a Confirm/Discard RPC currently in flight (confirmPending /
+// discardPending / approveAndRunPending). While a token is in here, the 2.5 s
+// pending poll / resync must not re-show its card: the RPC's own response
+// already removed it, but a STALE resync request issued just before the RPC
+// committed can still return the token as live and race the removal, re-adding
+// a card the user already acted on. Cleared once the acting function's whole
+// settle sequence (removePending + reload) has run.
+const inflightTokens = new Set();
+
 function enqueuePending(card) {
 	if (!card || !card.token) return;
+	if (inflightTokens.has(card.token)) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
 	pendingActions.value.push({
 		conversation: card.conversation,
@@ -7920,7 +7885,10 @@ function enqueuePending(card) {
 		summary: card.summary || "",
 		preview: card.preview || null,
 		run_id: card.run_id || null,
+		created_at: card.created_at || null,
 		expires_at: card.expires_at || null,
+		seq: card.seq ?? null,
+		recent: card.recent !== false,
 		busy: false,
 		error: null,
 	});
@@ -7940,6 +7908,7 @@ async function confirmPending(pa) {
 	const cardById = () => pendingActions.value.find((x) => x.token === token);
 	pa.busy = true;
 	pa.error = null;
+	inflightTokens.add(token);
 	try {
 		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
@@ -7947,6 +7916,13 @@ async function confirmPending(pa) {
 				const card = cardById();
 				if (card) card.error = r.error;
 				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				// Not settled (busy, already running, identity refused, a stopping armed run): keep it.
+				const card = cardById();
+				if (card) card.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
 				return;
 			}
 			// Token gone/expired/used, or the executed tool reported failure. Either
@@ -7995,6 +7971,7 @@ async function confirmPending(pa) {
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
+		inflightTokens.delete(token);
 	}
 }
 // Approve & run (P1, skill approve-and-run): modeled on confirmPending above,
@@ -8016,6 +7993,7 @@ async function approveAndRunPending(pa) {
 	pa.busy = true;
 	pa.error = null;
 	approveRunBusyToken.value = token;
+	inflightTokens.add(token);
 	try {
 		const r = await api.approveAndRun(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
@@ -8023,6 +8001,12 @@ async function approveAndRunPending(pa) {
 				const card = cardById();
 				if (card) card.error = r.error;
 				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				const card = cardById();
+				if (card) card.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
 				return;
 			}
 			if (r.error && r.error.type === "InvalidConfirmation") {
@@ -8064,6 +8048,7 @@ async function approveAndRunPending(pa) {
 		const card = cardById();
 		if (card) card.busy = false;
 		approveRunBusyToken.value = null;
+		inflightTokens.delete(token);
 	}
 }
 // Resolution shared by the typed go-ahead and the Confirm button, so the two
@@ -8113,23 +8098,36 @@ async function discardPending(pa) {
 	const token = pa.token;
 	const conv = pa.conversation || currentId.value || "";
 	pa.busy = true;
+	// Outer try/finally guards the WHOLE settle sequence (including the reload
+	// below), not just the RPC, so a stale resync in flight during that reload
+	// still can't re-add this token (see inflightTokens above).
+	inflightTokens.add(token);
 	try {
-		const r = await api.dismissTool(token, conv);
-		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
-			pa.error = r.error;
-			notify(r.error.message, { type: "error" });
+		try {
+			const r = await api.dismissTool(token, conv);
+			if (r && r.ok === false && confirmationStorageUnavailable(r)) {
+				pa.error = r.error;
+				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				pa.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
+				return;
+			}
+		} catch (e) {
+			pa.error = { message: errMessage(e, "Could not discard.") };
 			return;
+		} finally {
+			pa.busy = false;
 		}
-	} catch (e) {
-		pa.error = { message: errMessage(e, "Could not discard.") };
-		return;
+		removePending(token);
+		// Re-fetch so the durable "discarded" chip shows in the thread.
+		await loadConversation(currentId.value);
+		store.loadConversations();
 	} finally {
-		pa.busy = false;
+		inflightTokens.delete(token);
 	}
-	removePending(token);
-	// Re-fetch so the durable "discarded" chip shows in the thread.
-	await loadConversation(currentId.value);
-	store.loadConversations();
 }
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
@@ -8174,12 +8172,16 @@ async function resyncPendingConfirmations(id, source) {
 	// or a stale token orphaned by a model restage) and ADD any a dropped
 	// action:pending push missed. Cards for other conversations, and in-flight
 	// (busy) confirms, are left untouched. Server truth (not a caught socket
-	// frame) decides what shows.
-	const live = new Set(items.map((it) => it.token));
-	pendingActions.value = pendingActions.value.filter(
-		(pa) => pa.conversation !== id || pa.busy || live.has(pa.token)
-	);
-	for (const it of items) {
+	// frame) decides what shows. A token whose Confirm/Discard RPC is in flight
+	// is never (re)added (P0c in-flight suppression) - see reconcilePending.
+	const { kept, toAdd } = reconcilePending(pendingActions.value, id, items, inflightTokens);
+	// Server truth also says which kept cards are still "recent" (decision 6).
+	const fresh = new Map(items.map((it) => [it.token, it]));
+	for (const pa of kept)
+		if (pa.conversation === id && fresh.has(pa.token))
+			pa.recent = fresh.get(pa.token).recent !== false;
+	pendingActions.value = kept;
+	for (const it of toAdd) {
 		enqueuePending({
 			conversation: it.conversation || id,
 			token: it.token,
@@ -8187,7 +8189,10 @@ async function resyncPendingConfirmations(id, source) {
 			summary: it.summary || "",
 			preview: it.preview || null,
 			run_id: it.run_id || null,
+			created_at: it.created_at || null,
 			expires_at: it.expires_at || null,
+			seq: it.seq ?? null,
+			recent: it.recent,
 		});
 	}
 }
@@ -9744,6 +9749,9 @@ async function send(textArg, resendAck) {
 		// duplicating them (the lifecycle tests anchor on the FIRST occurrence of
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
+			// A typed "no" whose send then lost the admission race still discarded its
+			// cards (the server says which); they must not linger as live offers.
+			for (const t of discardedTokens(r)) removePending(t);
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
 			// Nothing was persisted — recover it (below) so no work and no voice audio
@@ -9865,6 +9873,13 @@ async function send(textArg, resendAck) {
 			await onTypedConfirmResolved(r);
 			return;
 		}
+		// A typed "no" discarded these before its turn started: drop them now, no
+		// reload mid-send. The user just spoke, so every card still here is Earlier;
+		// a yes/no that bound none raises the non-blocking note (decision 13).
+		const _spokeIn = r?.conversation_id || sentFrom;
+		for (const t of discardedTokens(r)) removePending(t);
+		markCardsEarlier(pendingActions.value, _spokeIn);
+		olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -10030,7 +10045,10 @@ function onEvent(p) {
 				summary: p.summary || "",
 				preview: p.preview || null,
 				run_id: p.run_id || null,
+				created_at: p.created_at || null,
 				expires_at: p.expires_at || null,
+				seq: p.seq ?? null,
+				recent: p.recent,
 			});
 			// Keep pulling server truth for the rest of the turn: if THIS push
 			// arrived but a sibling's was dropped, the poll fills the gap.
@@ -15540,6 +15558,35 @@ onUnmounted(() => {
 	color: var(--cta-fg) !important;
 	border-color: var(--cta) !important;
 	filter: brightness(1.18);
+}
+/* Parked before the user's latest message: only its number binds it now. */
+.jv-pending-earlier {
+	margin-left: 6px;
+	padding: 1px 6px;
+	border-radius: 999px;
+	font-size: 11px;
+	color: var(--text-3);
+	background: var(--surface-2);
+}
+.jv-pending-age {
+	margin-left: 6px;
+	font-size: 11px;
+	color: var(--text-3);
+	white-space: nowrap;
+}
+.jv-pending-older-note {
+	margin: 4px 14px 8px;
+	font-size: 12px;
+	color: var(--text-3);
+}
+/* Empty, it stays in the accessibility tree but out of the thread's flex gap. */
+.jv-pending-older-note:empty {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
 }
 /* The card's position in the parked stack. It is a selector, not decoration:
    "confirm 2" means this one. */

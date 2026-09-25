@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // The store is a module singleton that reads matchMedia at import (the 820px
 // rail-collapse and 767px phone breakpoints). Stub it BEFORE import so both
@@ -27,11 +27,12 @@ vi.hoisted(() => {
 // shell.js pulls in frappe-ui + @/api (a frappe-ui resource tree that does not
 // resolve under vitest). None of it is exercised by these sidebar-state tests.
 vi.mock("frappe-ui", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
-vi.mock("@/api", () => ({}));
+vi.mock("@/api", () => ({ approvalsBadge: vi.fn() }));
 vi.mock("@/lib/errors", () => ({ errHtml: (e) => String(e) }));
 vi.mock("@/onboarding/readiness.js", () => ({ needsOnboarding: () => false }));
 
 const { useShellStore } = await import("./shell");
+const api = await import("@/api");
 const store = useShellStore();
 
 describe("shell store: spacious-view auto-collapse (Dashboard Builder)", () => {
@@ -73,5 +74,39 @@ describe("shell store: spacious-view auto-collapse (Dashboard Builder)", () => {
 		store.setSpaciousView(false); // leave
 		store.setSpaciousView(true); // come back
 		expect(store.sidebarCollapsed).toBe(true); // auto-collapse re-applies
+	});
+});
+
+describe("shell store: approvals badge", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		api.approvalsBadge.mockReset();
+	});
+	afterEach(() => {
+		store.stopBadgeTimer();
+		vi.useRealTimers();
+	});
+
+	it("refreshes again the moment the next chat card badges", async () => {
+		api.approvalsBadge
+			.mockResolvedValueOnce({ count: 2, next_in: 30 })
+			.mockResolvedValueOnce({ count: 3, next_in: null });
+		await store.refreshApprovalsCount();
+		expect(store.approvalsCount).toBe(2);
+		await vi.advanceTimersByTimeAsync(29 * 1000);
+		expect(api.approvalsBadge).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(2 * 1000);
+		expect(api.approvalsBadge).toHaveBeenCalledTimes(2);
+		expect(store.approvalsCount).toBe(3);
+		await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+		expect(api.approvalsBadge).toHaveBeenCalledTimes(2);
+	});
+
+	it("stops the pending refresh when the shell goes away", async () => {
+		api.approvalsBadge.mockResolvedValue({ count: 1, next_in: 5 });
+		await store.refreshApprovalsCount();
+		store.stopBadgeTimer();
+		await vi.advanceTimersByTimeAsync(60 * 1000);
+		expect(api.approvalsBadge).toHaveBeenCalledTimes(1);
 	});
 });

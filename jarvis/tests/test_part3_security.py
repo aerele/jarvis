@@ -598,3 +598,17 @@ class TestAgentScoping(Part3Base):
 		self.assertTrue(res["ok"])
 		self.assertIsNotNone(res["conversation"])
 		self.assertTrue(frappe.db.exists(CONVERSATION, conv_filters))
+
+	def test_take_finding_to_chat_seed_is_stamped_agent(self):
+		"""P0a: the seed send runs under message_origin("agent")."""
+		f = _mk_finding(USER_A, title=f"{PFX}-origin")
+		seen = []
+
+		def _send(**kw):
+			seen.append(frappe.flags.get("jarvis_message_origin"))
+			return {"ok": True, "run_id": "r1", "message_id": "m1"}
+
+		with _as(USER_A), patch("jarvis.chat.api.send_message", side_effect=_send):
+			agents_api.take_finding_to_chat(f.name)
+		self.assertEqual(seen, ["agent"])
+		self.assertIsNone(frappe.flags.get("jarvis_message_origin"))

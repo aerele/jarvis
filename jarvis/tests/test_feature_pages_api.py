@@ -6,7 +6,7 @@ hits, each filter facet, sort asc/desc + default, owner-scoping (a second user's
 rows are NEVER returned; System Manager sees all approvals), and filter-injection
 (unknown key throws). File Box additionally covers FB-1: cascade delete
 (approvals + messages + File + conversation), refuse-while-streaming, bulk skip
-of streaming/foreign rows, and clear-processed leaving processing/needs_approval.
+of streaming/foreign rows, and clear-processed leaving processing/needs_approval/failed.
 
 Uses ``unittest.TestCase`` (like test_agents_marketplace) with explicit
 commits + prefix-based cleanup, since these endpoints run raw owner-scoped SQL
@@ -191,6 +191,9 @@ def _mk_conv(owner, title, status="Active") -> str:
 	with _as(owner):
 		doc = frappe.get_doc({"doctype": CONV, "title": title, "status": status})
 		doc.insert(ignore_permissions=True)
+	if title.startswith("File: "):
+		# drop_file's server-set identity flag (the File Box list keys on it).
+		frappe.db.set_value(CONV, doc.name, "file_box", 1, update_modified=False)
 	frappe.db.commit()
 	return doc.name
 
@@ -482,7 +485,7 @@ class TestFileBoxPage(unittest.TestCase):
 		frappe.set_user("Administrator")
 		_wipe_all()
 		self.ids = {}
-		# 3 done, 1 error, 1 processing (no assistant msg), 1 processing (streaming),
+		# 3 no_draft, 1 failed, 1 processing (no assistant msg), 1 processing (streaming),
 		# 1 needs_approval. Plus a non-File-Box conv + an Archived File-Box conv.
 		self.ids["done0"] = c = _mk_conv(USER_A, "File: fp-a-uniquetoken-0001.pdf")
 		_add_msg(c, 1, "user", "process")
@@ -532,8 +535,8 @@ class TestFileBoxPage(unittest.TestCase):
 	def test_derived_status(self):
 		rows = {r["name"]: r for r in self._page(page_length=100)["rows"]}
 		self.assertEqual(len(rows), 7)  # plain + archived excluded
-		self.assertEqual(rows[self.ids["done2"]]["status"], "done")
-		self.assertEqual(rows[self.ids["error0"]]["status"], "error")
+		self.assertEqual(rows[self.ids["done2"]]["status"], "no_draft")
+		self.assertEqual(rows[self.ids["error0"]]["status"], "failed")
 		self.assertEqual(rows[self.ids["proc0"]]["status"], "processing")
 		self.assertEqual(rows[self.ids["stream0"]]["status"], "processing")
 		self.assertEqual(rows[self.ids["na0"]]["status"], "needs_approval")
@@ -647,14 +650,14 @@ class TestFileBoxPage(unittest.TestCase):
 		self.assertTrue(frappe.db.exists(CONV, stream))  # streaming row survived
 		self.assertTrue(frappe.db.exists(CONV, foreign))  # foreign row survived
 
-	def test_clear_processed_leaves_active(self):
+	def test_clear_processed_leaves_active_and_failed(self):
 		with _as(USER_A):
 			res = clear_processed_inbound()
 		self.assertTrue(res["ok"])
-		self.assertEqual(res["deleted"], 4)  # 3 done + 1 error
+		self.assertEqual(res["deleted"], 3)  # the 3 no_draft rows
 		remaining = self._page(page_length=100)["rows"]
-		self.assertEqual(len(remaining), 3)  # 2 processing + 1 needs_approval
-		self.assertTrue(all(r["status"] in ("processing", "needs_approval") for r in remaining))
+		self.assertEqual(len(remaining), 4)  # 2 processing + 1 needs_approval + 1 failed
+		self.assertTrue(all(r["status"] in ("processing", "needs_approval", "failed") for r in remaining))
 
 
 # =========================================================================== #

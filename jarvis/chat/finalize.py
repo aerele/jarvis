@@ -15,14 +15,15 @@ FORCE-DONE after ``FINALIZE_MAX_ATTEMPTS=3`` (turn_state.claim_effect), so a
 permanently-broken enrichment can NEVER strand a settled turn — the turn ALWAYS
 reaches ``done`` (D2 §1a). Finalize NEVER errors a settled turn (row 13 is the
 explicit NEVER transition): an errored/cancelled terminal runs only its
-macro-advance + telemetry hooks and stays terminal (no finalize_done).
+sheet-seal + macro-advance + telemetry hooks and stays terminal (no finalize_done).
 
 Ownership (WP-D / D1 Stage 4): canvas/rich outputs (#43/#44), chat-ask
-materialize (#45), macro advance + app-learning (#46/#47), auto-title (#50), wiki
-nudge (#51), USAGE (#42, R-4: the ≤4.5s gateway poll runs HERE off the critical
-path, with a (turn_id) idempotency guard so a replay can't double-count the soft
-cap), and telemetry (#49). ``run:end`` is settlement's (S5); this publishes
-``message:enriched`` once the visible subset of the above is done (jarvis#737).
+materialize (#45), the File Box sheet seal, macro advance + app-learning
+(#46/#47), auto-title (#50), wiki nudge (#51), USAGE (#42, R-4: the ≤4.5s gateway
+poll runs HERE off the critical path, with a (turn_id) idempotency guard so a
+replay can't double-count the soft cap), and telemetry (#49). ``run:end`` is
+settlement's (S5); this publishes ``message:enriched`` once the visible subset of
+the above is done (jarvis#737).
 
 Wired as the pump's ``enqueue_finalize`` seam target
 (``jarvis.chat.finalize.run_finalize``); tests drive it in-process.
@@ -301,6 +302,15 @@ def _effect_chat_asks(ctx: _Ctx) -> None:
 	chat_asks.materialize_from_turn(ctx.conversation, final.get("content") or "")
 
 
+def _effect_file_box_sheet_seal(ctx: _Ctx) -> None:
+	# A File Box run's approval sheet goes on the board once ITS turn ends - errored
+	# or system-cancelled too (the proposals stay valid); a user Stop discards it.
+	# Only the sheet this turn opened; a no-op read for every other conversation.
+	from jarvis.chat import held_sheet_seal
+
+	held_sheet_seal.seal_turn(ctx.conversation, ctx.run_id)
+
+
 def _effect_macro_advance(ctx: _Ctx) -> None:
 	# End an approved skill run at this terminal unless it is paused on a parked card
 	# (skill "Approve & run", design §3.4). THIS is the DEFAULT pump path (the Relay
@@ -539,6 +549,7 @@ _RUNNERS = {
 	"rich_outputs": _effect_rich_outputs,
 	"enrich_cards": _effect_enrich_cards,
 	"chat_asks": _effect_chat_asks,
+	"file_box_sheet_seal": _effect_file_box_sheet_seal,
 	"macro_advance": _effect_macro_advance,
 	"auto_title": _effect_auto_title,
 	"wiki_nudge": _effect_wiki_nudge,

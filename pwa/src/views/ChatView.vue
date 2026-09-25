@@ -36,7 +36,15 @@ import {
 	toolStatus,
 } from "../lib/blocks";
 import { spanBetween } from "../lib/time";
+import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
+import { mergePendingSources } from "../lib/pendingResync.js";
+import {
+	discardedTokens,
+	isRecentCard,
+	markCardsEarlier,
+	typedApprovalHint as hintFor,
+} from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
 import Composer from "../components/Composer.vue";
@@ -89,20 +97,22 @@ function toggleRaw(key) {
 }
 const attachments = ref([]);
 const pending = ref([]); // parked writes awaiting approval
-// Ordered the SAME way the server orders the parked list, because a typed
-// "confirm 2" selects by the number shown on the card. The store keeps tokens in
-// a Redis SET, which has no order at all, so without this the numbers on screen
-// and the numbers the server counts could disagree and the wrong write would run.
-// Tokens compare by code unit to match Python's byte order, not localeCompare.
-// Ordered by the shared, unit-tested comparator so the numbers on screen match
-// the server's (expires_at, token) order a typed "confirm N" resolves against.
+// A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
+// so the numbering must be stable: the shared, unit-tested comparator orders by
+// (created_at, token by code unit), whatever order the store listed them in.
 const orderedPending = computed(() => sortPendingCards(pending.value));
-// Typed approval works here as on the desktop, but only the desktop advertised
-// it. The selective example numbers track the real count so it never overshoots.
-const typedApprovalHint = computed(() => {
-	const n = orderedPending.value.length;
-	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
-});
+// Typed approval works here as on the desktop. An "Earlier" card (parked before the
+// user's latest message) never gets the bare-phrase hint: only its number binds it.
+const typedApprovalHint = computed(() => hintFor(orderedPending.value));
+// Set when a typed yes/no bound no card (it went to Jarvis as a message); shown while
+// an older card is still here, cleared with the last one (decision 13).
+const olderCardsNote = ref(false);
+const showOlderCardsNote = computed(
+	() => olderCardsNote.value && orderedPending.value.some((p) => !isRecentCard(p))
+);
+// A coarse clock for the "Proposed 3h ago" label on a card left waiting.
+const cardClock = ref(Date.now());
+let _cardClockTick = null;
 const settings = ref(null);
 
 // The turn in flight. Held separately from `messages` because it is not durable
@@ -118,6 +128,14 @@ const ignoredRuns = ref(new Set());
 // singleton is what actually delivers "the terminal marker outlives the view".
 
 const decision = ref(null);
+// The token whose Confirm/Discard RPC is currently in flight in the open
+// DecisionSheet (P0c). While set, loadPending's fresh reads must not re-show
+// its card: the RPC's own response already removed it, but a resync request
+// issued just before the RPC committed can still return the token as live.
+const inflightToken = ref(null);
+function onDecisionBusy(busy) {
+	inflightToken.value = busy ? decision.value && decision.value.token : null;
+}
 const preview = ref(null);
 const voiceOpen = ref(false);
 const menuOpen = ref(false);
@@ -321,7 +339,12 @@ function pendingActionFromRow(m, cid) {
 		summary: "",
 		preview: { card: m.pending_card },
 		run_id: null,
+		// Server epoch on every pending row (a legacy one: its own creation); never a
+		// local-time parse (sortPendingCards falls back to expires_at when null).
+		created_at: m.created_at ?? null,
 		expires_at: _rowExpiresEpoch(m.expires_at),
+		seq: m.seq ?? null,
+		recent: m.recent !== false,
 	};
 }
 
@@ -368,13 +391,13 @@ async function loadPending(source) {
 	// conversation's cards onto the new one (freshness guard, mirrors the SPA).
 	if (convId.value !== cid) return;
 	// On a blip keep the current cards; on a clean read the server list is authoritative
-	// for this conversation (resolved cards drop). Durable rows always apply.
+	// for this conversation (resolved cards drop). Durable rows always apply. Either
+	// fresh source is excluded from re-adding a token whose Confirm/Discard RPC is
+	// still in flight (P0c in-flight suppression) - see mergePendingSources. Only one
+	// DecisionSheet is ever open, so at most one token is ever in flight.
 	const base = fromBackstop === null ? pending.value : [];
-	const byToken = new Map();
-	for (const c of [...base, ...fromRows, ...(fromBackstop || [])]) {
-		if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
-	}
-	pending.value = [...byToken.values()];
+	const inflight = inflightToken.value ? new Set([inflightToken.value]) : new Set();
+	pending.value = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
 }
 
 // Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
@@ -500,6 +523,10 @@ async function send() {
 			await loadPending();
 			return;
 		}
+		// A typed "no" discarded these before its turn (even one that then lost the
+		// admission race): they must not linger as live approvals.
+		const discarded = discardedTokens(res);
+		if (discarded.size) pending.value = pending.value.filter((p) => !discarded.has(p.token));
 		if (res?.ok === false) {
 			sendBusy.value = false;
 			messages.value = messages.value.filter((m) => !m.optimistic);
@@ -526,6 +553,9 @@ async function send() {
 		// An accepted send proves the maintenance hold lifted - clear the strip + wake
 		// the avatar now instead of stranding them until a reload (self-heal).
 		clearHold();
+		// The user just spoke: every card still here is now Earlier.
+		markCardsEarlier(pending.value, res?.conversation_id || convId.value);
+		olderCardsNote.value = !!res?.older_cards_waiting;
 		// First send of a brand-new chat: adopt the id the backend just created,
 		// and put the row in the list without a refetch.
 		const id = res?.conversation_id;
@@ -708,7 +738,12 @@ function onEvent(p) {
 			// run the user STOPPED - its cards were swept server-side; don't resurrect them.
 			if (!ignored && Array.isArray(p.pending)) {
 				for (const card of p.pending) {
-					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					if (
+						!card.token ||
+						card.token === inflightToken.value ||
+						pending.value.some((x) => x.token === card.token)
+					)
+						continue;
 					pending.value.push({
 						token: card.token,
 						tool: card.tool || "",
@@ -716,7 +751,10 @@ function onEvent(p) {
 						preview: card.preview ?? null,
 						conversation: card.conversation || conv,
 						run_id: card.run_id,
+						created_at: card.created_at ?? null,
 						expires_at: card.expires_at ?? null,
+						seq: card.seq ?? null,
+						recent: card.recent !== false,
 					});
 				}
 			}
@@ -740,7 +778,12 @@ function onEvent(p) {
 			// user-STOPPED run is skipped (its cards were swept server-side).
 			if (!ignored && Array.isArray(p.pending)) {
 				for (const card of p.pending) {
-					if (!card.token || pending.value.some((x) => x.token === card.token)) continue;
+					if (
+						!card.token ||
+						card.token === inflightToken.value ||
+						pending.value.some((x) => x.token === card.token)
+					)
+						continue;
 					pending.value.push({
 						token: card.token,
 						tool: card.tool || "",
@@ -748,7 +791,10 @@ function onEvent(p) {
 						preview: card.preview ?? null,
 						conversation: card.conversation || conv,
 						run_id: card.run_id,
+						created_at: card.created_at ?? null,
 						expires_at: card.expires_at ?? null,
+						seq: card.seq ?? null,
+						recent: card.recent !== false,
 					});
 				}
 			}
@@ -756,7 +802,12 @@ function onEvent(p) {
 			break;
 
 		case "action:pending":
-			if (!p.token || pending.value.some((x) => x.token === p.token)) return;
+			if (
+				!p.token ||
+				p.token === inflightToken.value ||
+				pending.value.some((x) => x.token === p.token)
+			)
+				return;
 			pending.value.push({
 				token: p.token,
 				tool: p.tool || "",
@@ -764,7 +815,10 @@ function onEvent(p) {
 				preview: p.preview ?? null,
 				conversation: conv,
 				run_id: p.run_id,
+				created_at: p.created_at ?? null,
 				expires_at: p.expires_at ?? null,
+				seq: p.seq ?? null,
+				recent: p.recent !== false,
 			});
 			scrollToBottom();
 			// This push arrived; keep polling so a SIBLING card whose push was dropped
@@ -788,9 +842,15 @@ function onEvent(p) {
 	}
 }
 
-function onResolved(token) {
+function onResolved(token, kind) {
 	pending.value = pending.value.filter((p) => p.token !== token);
 	decision.value = null;
+	// A real discard (P0c: Deny now calls dismiss_tool) leaves a durable
+	// "discarded" receipt chip, but dismiss_tool fires no agent turn - so
+	// unlike Approve (whose continuation's run:start/run:end already reloads),
+	// nothing else here would ever show it. Approve needs no explicit reload:
+	// the run events do it.
+	if (kind === "denied") load();
 }
 
 const onResync = () => {
@@ -806,6 +866,7 @@ watch(
 		messages.value = [];
 		conversation.value = null;
 		pending.value = [];
+		olderCardsNote.value = false; // the note was about the previous conversation's cards
 		live.value = null;
 		sendBusy.value = false;
 		errorBanner.value = "";
@@ -826,6 +887,7 @@ onMounted(async () => {
 	if (!store.loaded) store.loadConversations();
 	load(true);
 	loadPending();
+	_cardClockTick = setInterval(() => (cardClock.value = Date.now()), 60000);
 	try {
 		settings.value = await api.getChatUiSettings();
 	} catch {
@@ -839,6 +901,7 @@ onUnmounted(() => {
 	window.removeEventListener("focus", wakePending);
 	document.removeEventListener("visibilitychange", onVisible);
 	stopPendingPoll();
+	clearInterval(_cardClockTick);
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
 });
 </script>
@@ -1055,11 +1118,16 @@ onUnmounted(() => {
 					(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
 					(p.summary || p.tool || `${agentName} needs your approval`)
 				"
+				:earlier="!isRecentCard(p)"
+				:proposed="proposedLabel(p.created_at, cardClock)"
 				@open="decision = p"
 			/>
+			<p v-if="showOlderCardsNote" class="jv-typehint">
+				An earlier action card is still waiting — tap it to approve or discard.
+			</p>
 		</div>
 		<!-- Both ways to approve, shown once under the stack. -->
-		<p v-if="orderedPending.length" class="jv-typehint">{{ typedApprovalHint }}</p>
+		<p v-if="typedApprovalHint" class="jv-typehint">{{ typedApprovalHint }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
@@ -1193,6 +1261,7 @@ onUnmounted(() => {
 		:streaming="sending"
 		@close="decision = null"
 		@resolved="onResolved"
+		@busy="onDecisionBusy"
 	/>
 	<FilePreviewSheet
 		:item="preview?.item"

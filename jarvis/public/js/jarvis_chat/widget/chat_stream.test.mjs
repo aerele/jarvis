@@ -134,6 +134,7 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     token: "t1",
     tool: "create_doc",
     summary: "Create ToDo",
+    created_at: 1600,
     expires_at: 1700,
   });
   s = applyEvent(s, {
@@ -141,6 +142,7 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     token: "t1",
     tool: "create_doc",
     summary: "Create ToDo",
+    created_at: 1600,
     expires_at: 1700,
   });
   assert.equal(s.pending.length, 1);
@@ -148,9 +150,20 @@ test("action:pending queues a confirmation, ignoring duplicate tokens", () => {
     token: "t1",
     tool: "create_doc",
     summary: "Create ToDo",
+    created_at: 1600,
     expires_at: 1700,
     approve_run: false,
+    recent: true,
   });
+});
+
+test("action:pending keeps the server's Earlier marking (decision 6)", () => {
+  const s = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "t1",
+    recent: false,
+  });
+  assert.equal(s.pending[0].recent, false);
 });
 
 // P1 (skill approve-and-run, §3.5): the widget is text-only and has no rich
@@ -205,27 +218,31 @@ test("pendingApproveRun: reads preview.card.approve_run, safe on junk input", ()
   assert.equal(pendingApproveRun(undefined), false);
 });
 
-test("action:pending carries expires_at so numbered typed approval sorts by mint time", () => {
-  // expires_at is the primary sort key the panel numbers cards by. If it is
-  // dropped here, orderedPending falls back to token order and diverges from the
-  // server, so a typed "confirm 2" can run the wrong card. Pin that it survives.
+test("action:pending carries created_at so numbered typed approval sorts by mint time", () => {
+  // created_at (P0c) is the primary sort key the panel numbers cards by. If it
+  // is dropped here, orderedPending falls back to expires_at/token order and
+  // can diverge from the server, so a typed "confirm 2" can run the wrong
+  // card. Pin that it survives.
   const s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "abc",
     tool: "delete_doc",
     summary: "Delete Customer",
+    created_at: 1802,
     expires_at: 1902,
   });
+  assert.equal(s.pending[0].created_at, 1802);
   assert.equal(s.pending[0].expires_at, 1902);
 });
 
-test("action:pending with no expires_at on the wire falls back to null, not undefined", () => {
+test("action:pending with no created_at/expires_at on the wire falls back to null, not undefined", () => {
   const s = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "z",
     tool: "submit_doc",
     summary: "Submit SO",
   });
+  assert.equal(s.pending[0].created_at, null);
   assert.equal(s.pending[0].expires_at, null);
 });
 
