@@ -16,12 +16,21 @@ Two shapes:
     building one by hand via ``exec`` leaves the file stranded in the container.
 """
 
+import datetime
+import re
+
 import frappe
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Dates reach this tool as ISO text (get_list/run_report rows go through JSON),
+# which Excel stores as text: no date sorting, no date filters. Only these two
+# strict shapes are read as dates, never looser ones: ERPNext names like
+# "2026-00012", codes like "00123" and phone numbers must stay text.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?$")
 
 
 def export_excel(
@@ -105,7 +114,32 @@ def _normalize(rows, columns) -> list:
 
 	if not header or not any(_nonempty(c) for r in body for c in r):
 		raise NoDataError("No data to prepare for Excel.")
+	_dates_from_iso_text(len(header), body)
 	return [header] + body
+
+
+def _dates_from_iso_text(width: int, body: list) -> None:
+	"""In place: turn a column of ISO date / datetime text into real dates, so
+	the workbook formats, sorts and filters them as dates. All or nothing per
+	column: one non-date value (or an impossible date like 2026-13-40) leaves
+	the whole column as text, so a mixed column is never half converted."""
+	for c in range(width):
+		values = [r[c] for r in body if c < len(r) and _nonempty(r[c])]
+		if not values or not all(isinstance(v, str) for v in values):
+			continue
+		if all(_ISO_DATE_RE.match(v.strip()) for v in values):
+			parse = datetime.date.fromisoformat
+		elif all(_ISO_DATETIME_RE.match(v.strip()) for v in values):
+			parse = datetime.datetime.fromisoformat
+		else:
+			continue
+		try:
+			parsed = {v: parse(v.strip()) for v in values}
+		except ValueError:
+			continue
+		for r in body:
+			if c < len(r) and _nonempty(r[c]):
+				r[c] = parsed[r[c]]
 
 
 def _workbook_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
