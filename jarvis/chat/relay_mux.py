@@ -598,6 +598,9 @@ class RelayMux:
 		elif kind == "step":
 			self._offer_step(lane, parsed.get("text", ""))
 			return
+		elif kind == "tool_boundary":
+			self._move_pending_step(lane)
+			return
 		elif kind == "tool":
 			if parsed.get("phase") == "start" and parsed.get("tool_name") in MEDIA_GEN_TOOL_NAMES:
 				lane.saw_media_tool_start = True
