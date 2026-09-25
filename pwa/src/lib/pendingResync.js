@@ -23,3 +23,16 @@ export function mergePendingSources(base, freshSources, inflightTokens) {
 	}
 	return [...byToken.values()];
 }
+
+// D1: a typed "no" (ChatView.vue's send(), discardedTokens) settles a card by
+// filtering it out of `pending.value`, but messages.value (fromRows' source)
+// keeps tool_status "pending" until the next load(). A resync racing that
+// window must not rebuild the card from that stale row. ChatView folds every
+// newly-settled token in here (persisting past the single RPC inflightToken
+// covers) and passes the running set as loadPending's exclusion, alongside
+// inflightToken, so mergePendingSources never re-admits either kind.
+export function withExcluded(exclusions, tokens) {
+	const out = new Set(exclusions || []);
+	for (const t of tokens || []) if (t) out.add(t);
+	return out;
+}

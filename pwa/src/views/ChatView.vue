@@ -38,7 +38,7 @@ import {
 import { spanBetween } from "../lib/time";
 import { proposedLabel } from "../lib/cardAge.js";
 import { sortPendingCards } from "../lib/sortPendingCards.js";
-import { mergePendingSources } from "../lib/pendingResync.js";
+import { mergePendingSources, withExcluded } from "../lib/pendingResync.js";
 import {
 	discardedTokens,
 	isRecentCard,
@@ -136,6 +136,13 @@ const inflightToken = ref(null);
 function onDecisionBusy(busy) {
 	inflightToken.value = busy ? decision.value && decision.value.token : null;
 }
+// D1: tokens a typed "no" discarded (send()'s discardedTokens, below). The
+// discard only filters pending.value; messages.value keeps tool_status
+// "pending" for that row until the next load(), so a resync racing that
+// window (the run-scoped poll, wake, or the menu re-check) must not rebuild
+// the card from it. Persists past the single RPC inflightToken covers -
+// reset only on a conversation switch (below).
+const settledTokens = ref(new Set());
 const preview = ref(null);
 const voiceOpen = ref(false);
 const menuOpen = ref(false);
@@ -396,7 +403,10 @@ async function loadPending(source) {
 	// still in flight (P0c in-flight suppression) - see mergePendingSources. Only one
 	// DecisionSheet is ever open, so at most one token is ever in flight.
 	const base = fromBackstop === null ? pending.value : [];
-	const inflight = inflightToken.value ? new Set([inflightToken.value]) : new Set();
+	const inflight = withExcluded(
+		settledTokens.value,
+		inflightToken.value ? [inflightToken.value] : []
+	);
 	pending.value = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
 }
 
@@ -526,7 +536,12 @@ async function send() {
 		// A typed "no" discarded these before its turn (even one that then lost the
 		// admission race): they must not linger as live approvals.
 		const discarded = discardedTokens(res);
-		if (discarded.size) pending.value = pending.value.filter((p) => !discarded.has(p.token));
+		if (discarded.size) {
+			pending.value = pending.value.filter((p) => !discarded.has(p.token));
+			// The transcript row (messages.value) stays "pending" until the next
+			// load() - keep these excluded from every merge until then (D1).
+			settledTokens.value = withExcluded(settledTokens.value, discarded);
+		}
 		if (res?.ok === false) {
 			sendBusy.value = false;
 			messages.value = messages.value.filter((m) => !m.optimistic);
@@ -866,6 +881,7 @@ watch(
 		messages.value = [];
 		conversation.value = null;
 		pending.value = [];
+		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
 		olderCardsNote.value = false; // the note was about the previous conversation's cards
 		live.value = null;
 		sendBusy.value = false;

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergePendingSources } from "./pendingResync.js";
+import fs from "node:fs";
+import { mergePendingSources, withExcluded } from "./pendingResync.js";
 
 // P0c in-flight suppression: a Confirm/Discard RPC in flight for token T must
 // not have its card re-added by a stale resync read racing the RPC's own
@@ -56,4 +57,38 @@ test("an in-flight token already resolved (removed from base) is not resurrected
 test("tolerates missing/empty inputs without throwing", () => {
 	assert.deepEqual(mergePendingSources(null, [null, undefined], new Set()), []);
 	assert.deepEqual(mergePendingSources([], [], new Set()), []);
+});
+
+// D1: a typed "no" only drops its cards from `pending.value` (ChatView.vue's
+// send()); the transcript row (messages.value) stays tool_status "pending"
+// until the next load(). A resync racing that window must not rebuild the
+// card from that stale row - the discarded token has to survive in the
+// exclusion set past the RPC that settled it, not just for the single RPC
+// mergePendingSources already guards (inflightTokens, above).
+test("withExcluded unions new tokens into the running exclusion set", () => {
+	const out = withExcluded(new Set(["a"]), ["b", "b", null, undefined]);
+	assert.deepEqual([...out].sort(), ["a", "b"]);
+	assert.deepEqual([...withExcluded(null, ["x"])], ["x"]);
+	assert.deepEqual([...withExcluded(new Set(["a"]), null)], ["a"]);
+});
+
+test("a token settled locally (typed no) is never resurrected by a stale transcript row", () => {
+	// ChatView's send() folds discardedTokens(res) into settledTokens via
+	// withExcluded; the next loadPending() must exclude it from fromRows even
+	// though messages.value is still the pre-send snapshot.
+	const settled = withExcluded(new Set(), ["x"]);
+	const staleFromRows = [{ token: "x" }];
+	const out = mergePendingSources([], [staleFromRows], settled);
+	assert.deepEqual(out, []);
+});
+
+test("ChatView folds a typed no's discarded tokens into loadPending's exclusion set", () => {
+	const src = fs.readFileSync(new URL("../views/ChatView.vue", import.meta.url), "utf8");
+	const settle = src.indexOf(
+		"settledTokens.value = withExcluded(settledTokens.value, discarded)"
+	);
+	assert.ok(settle > -1, "send() must fold discarded tokens into settledTokens");
+	const load = src.indexOf("async function loadPending(");
+	const inflight = src.indexOf("const inflight = withExcluded(", load);
+	assert.ok(inflight > -1, "loadPending must build its exclusion set from settledTokens");
 });

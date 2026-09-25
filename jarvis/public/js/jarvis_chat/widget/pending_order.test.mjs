@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   comparePendingCards,
+  discardedTokens,
   dropDiscarded,
   isRecentCard,
   keptCardMessage,
@@ -12,6 +13,8 @@ import {
   markCardsEarlier,
   sortPendingCards,
   typedApprovalHint,
+  withExcluded,
+  withoutTokens,
 } from "./pending_order.mjs";
 
 // The Desk widget shipped the wrong-write bug because its cards were built
@@ -107,8 +110,54 @@ test("a typed no's discarded cards leave the stack; nothing else does", () => {
     dropDiscarded(cards, res).map((c) => c.token),
     ["b"]
   );
-  assert.equal(dropDiscarded(cards, { ok: true }), cards);
+  assert.deepEqual(dropDiscarded(cards, { ok: true }), cards);
   assert.deepEqual(dropDiscarded(undefined, res), []);
+});
+
+test("discardedTokens reads send_message's typed_rejection", () => {
+  const res = {
+    typed_rejection: {
+      discarded: [{ token: "a" }, { token: "b" }],
+      skipped: [],
+    },
+  };
+  assert.deepEqual([...discardedTokens(res)], ["a", "b"]);
+  assert.equal(discardedTokens({ ok: true }).size, 0);
+  assert.equal(discardedTokens(undefined).size, 0);
+});
+
+// D1: a typed "no" only drops its cards from the on-screen stack (send()'s
+// dropDiscarded, below); messages.value keeps the row tool_status "pending"
+// until the next load(). resyncPending's rowItems rebuild from that stale
+// transcript on every poll, so a discarded token has to survive past that
+// single call - not just be filtered out of the merged result once.
+test("withExcluded unions new tokens into the running exclusion set", () => {
+  const out = withExcluded(new Set(["a"]), ["b", "b", null, undefined]);
+  assert.deepEqual([...out].sort(), ["a", "b"]);
+  assert.deepEqual([...withExcluded(null, ["x"])], ["x"]);
+});
+
+test("withoutTokens drops excluded entries, leaves the rest, tolerates empty inputs", () => {
+  const items = [{ token: "a" }, { token: "b" }];
+  assert.deepEqual(
+    withoutTokens(items, new Set(["a"])).map((c) => c.token),
+    ["b"]
+  );
+  assert.deepEqual(withoutTokens(items, new Set()), items);
+  assert.deepEqual(withoutTokens(items, null), items);
+  assert.deepEqual(withoutTokens(null, new Set(["a"])), []);
+});
+
+test("a token settled locally (typed no) is never resurrected by a stale transcript row", () => {
+  const settled = withExcluded(
+    new Set(),
+    discardedTokens({
+      typed_rejection: { discarded: [{ token: "x" }], skipped: [] },
+    })
+  );
+  const staleRowItems = [{ token: "x" }];
+  const merged = [...staleRowItems]; // what resyncPending would otherwise re-admit
+  assert.deepEqual(withoutTokens(merged, settled), []);
 });
 
 // Decision 6: a bare phrase binds only cards parked since the user last spoke, so
@@ -206,6 +255,24 @@ test("keptCardMessage: a refusal keeps the card unless it settled it, and says w
     undefined,
   ])
     assert.equal(keptCardMessage(res), "");
+});
+
+test("Panel.vue folds a typed no's discarded tokens into resyncPending's exclusion set", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+  const settle = src.indexOf(
+    "settledTokens = withExcluded(settledTokens, _discarded)"
+  );
+  assert.ok(
+    settle > -1,
+    "send() must fold discarded tokens into settledTokens"
+  );
+  const resync = src.indexOf("async function resyncPending(");
+  const excluded = src.indexOf("withoutTokens(merged, settledTokens)", resync);
+  assert.ok(
+    excluded > -1,
+    "resyncPending must exclude settledTokens from the merged result"
+  );
 });
 
 test("Panel.vue keeps a refused card instead of resolving it away", () => {

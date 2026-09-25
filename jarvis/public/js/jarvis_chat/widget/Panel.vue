@@ -800,6 +800,7 @@ import {
 	pendingApproveRun,
 } from "./chat_stream.mjs";
 import {
+	discardedTokens,
 	dropDiscarded,
 	isRecentCard,
 	keepEarlier,
@@ -807,6 +808,8 @@ import {
 	markCardsEarlier,
 	sortPendingCards,
 	typedApprovalHint as hintFor,
+	withExcluded,
+	withoutTokens,
 } from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
@@ -957,6 +960,11 @@ const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
+// D1: tokens a typed "no" discarded (dropDiscarded, below). messages.value keeps
+// tool_status "pending" for that row until the next load(), so resyncPending's
+// rowItems must not rebuild the card from it while stale. Persists past a
+// single resync - reset only on a conversation switch (startNewChat).
+let settledTokens = new Set();
 // A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
 // so the numbering must be stable: the shared, unit-tested comparator orders by
 // (created_at, token by code unit), whatever order the store listed them in.
@@ -1380,7 +1388,9 @@ async function resyncPending(source) {
 			rowItems,
 			backstop
 		);
-		stream.value = { ...stream.value, pending: merged };
+		// A token settled locally (a typed "no") must not be resurrected by
+		// rowItems' still-stale transcript row (D1).
+		stream.value = { ...stream.value, pending: withoutTokens(merged, settledTokens) };
 	} catch (e) {
 		/* leave whatever the live stream captured */
 	}
@@ -1497,6 +1507,7 @@ function startNewChat() {
 	stopPendingPoll(); // a poll from the conversation being left must not carry over
 	convId.value = "";
 	messages.value = [];
+	settledTokens = new Set(); // a settled token belonged to the conversation being left
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
 	// (list[0]) on reopen, and a wiped fence would readmit a superseded pump's
 	// straggler — the dead-banner resurrection the fence exists to prevent.
@@ -1758,6 +1769,10 @@ async function send() {
 		// A typed "no" discarded these cards server-side, even on a send that was then
 		// refused; they must not stay on screen as live offers.
 		stream.value = { ...stream.value, pending: dropDiscarded(stream.value.pending, res) };
+		// messages.value still shows these rows as "pending" until the next load() -
+		// keep them excluded from every resync until then (D1).
+		const _discarded = discardedTokens(res);
+		if (_discarded.size) settledTokens = withExcluded(settledTokens, _discarded);
 		// Fold this response into the shared maintenance state: raise on a "maintenance"
 		// refusal (and arm the lift-poll), clear once any send/confirm gets past the gate.
 		foldSend(res);

@@ -30,15 +30,39 @@ export function sortPendingCards(cards) {
   return [...(cards || [])].sort(comparePendingCards);
 }
 
-// A typed "no" discards its cards before the turn starts (send_message's
-// `typed_rejection`); drop them from the stack so they never linger as live
-// offers. Tolerates a server that sends no such field.
-export function dropDiscarded(cards, res) {
+// The tokens a typed "no" discarded (send_message's `typed_rejection`),
+// mirrors frontend/src/lib/typedCardReply.js / pwa/src/lib/typedCardReply.js.
+export function discardedTokens(res) {
   const d = res && res.typed_rejection && res.typed_rejection.discarded;
-  const gone = new Set((Array.isArray(d) ? d : []).map((x) => x && x.token));
-  return gone.size
-    ? (cards || []).filter((c) => !gone.has(c.token))
-    : cards || [];
+  return new Set(
+    (Array.isArray(d) ? d : []).map((x) => x && x.token).filter(Boolean)
+  );
+}
+
+// A typed "no" discards its cards before the turn starts; drop them from the
+// stack so they never linger as live offers. Tolerates a server that sends no
+// such field.
+export function dropDiscarded(cards, res) {
+  return withoutTokens(cards, discardedTokens(res));
+}
+
+// D1: dropDiscarded only settles the on-screen stack for one call; resyncPending
+// rebuilds rowItems from messages.value on every poll, and that transcript row
+// stays "pending" until the next load(). Send() folds each newly-discarded
+// token in here (mirrors the SPA/PWA's settledTokens) so a stale row can't
+// resurrect a card the user already sent "no" to.
+export function withExcluded(exclusions, tokens) {
+  const out = new Set(exclusions || []);
+  for (const t of tokens || []) if (t) out.add(t);
+  return out;
+}
+
+// Drop entries whose token is excluded - used to keep a locally-settled token
+// (withExcluded, above) out of a merge built from a stale transcript row or a
+// backstop read that raced the discard.
+export function withoutTokens(items, excluded) {
+  if (!excluded || !excluded.size) return items || [];
+  return (items || []).filter((c) => !excluded.has(c.token));
 }
 
 // Keep the card unless the Confirm answer settled it, with why (mirrors the SPA's
