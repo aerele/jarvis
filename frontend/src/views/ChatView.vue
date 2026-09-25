@@ -7477,14 +7477,17 @@ function isEditVerb(a) {
 }
 async function confirmSummary() {
 	const model = summaryState.value.model;
+	// Captured before the round-trip: a newer turn may replace the active action.
+	const a = activeAction.value;
 	if (!model || model.applying || convStreaming.value) return;
 	await applyDraft(0, model);
-	if (model.error && model.error.fields) await openDraftForMissing(model.error);
+	const stillShown = summaryState.value.model === model;
+	if (model.error && model.error.fields && stillShown) await openDraftForMissing(a, model.error);
 }
 // Confirm failed on empty required fields: open the edit panel on them, so the
-// person fills them in instead of hitting a dead end (#603).
-async function openDraftForMissing(error) {
-	const a = activeAction.value;
+// person fills them in instead of hitting a dead end (#603). A fresh model, like the
+// Edit button, so panel edits never leak into the card.
+async function openDraftForMissing(a, error) {
 	if (!a) return;
 	await openDraftPanel({ verb: a.verb || "create", ...a });
 	const p = draftPanel.value;

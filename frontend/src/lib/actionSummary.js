@@ -3,6 +3,7 @@
 // Summarization is MODEL-DRIVEN: the card renders the fields the model proposed and
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
+import { isFieldMissing } from "@/lib/draftApply";
 
 export function proposedFields(action) {
 	return (action.fields || [])
@@ -20,9 +21,7 @@ export function requiredBlanks(model) {
 }
 
 export function isRequiredBlank(field) {
-	return (
-		!!field.proposed && !!field.reqd && !field.read_only && !String(field.value ?? "").trim()
-	);
+	return !!field.proposed && !!field.reqd && isFieldMissing(field);
 }
 
 export function changedFields(model) {

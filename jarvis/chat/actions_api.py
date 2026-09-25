@@ -358,7 +358,11 @@ def _name_missing_fields(err_obj: dict, doctype: str, values: dict) -> None:
 	(ERPNext sets a Sales Order's currency and price list). So the create is re-run
 	in a rollback sandbox with mandatory checks off and Frappe reports what is still
 	empty. Left untouched when anything else is also wrong, or a field can't be
-	filled in the draft panel (a table, a secret, permlevel > 0)."""
+	filled in the draft panel (a table, a secret, permlevel > 0).
+
+	The re-run runs the doctype's hooks under the same sandbox as the create_doc
+	pre-park dry-run: DB writes and queued webhooks/notifications are dropped, an
+	inline HTTP call in a hook is not."""
 	from jarvis.chat.held_writes import collect_missing
 
 	missing = collect_missing("create_doc", [{"op": "create", "doctype": doctype, "values": values}])
