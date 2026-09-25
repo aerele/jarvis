@@ -24,8 +24,8 @@ jobs:
         env:
           # Immutable policy version: publish a new variable for each policy change.
           # No private repository credentials or policy contents ship in the app.
-          JARVIS_BRANDING_POLICY: ${{ vars.JARVIS_BRANDING_POLICY_3D31A0F227C18DDF }}
+          JARVIS_BRANDING_POLICY: ${{ vars.JARVIS_BRANDING_POLICY_3574EC48DDD19B35 }}
         run: >-
           python -m jarvis.ci.runtime_branding
           --policy-env JARVIS_BRANDING_POLICY
-          --expected-policy-sha256 3d31a0f227c18ddff3eda537e288082dec47bc14473e009cffc07d3f6bb03202
+          --expected-policy-sha256 3574ec48ddd19b359b364d773d2326fc81f10bdd21a09b11535ff634a0302061

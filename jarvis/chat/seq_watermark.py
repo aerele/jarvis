@@ -11,10 +11,11 @@ when ``bench migrate`` runs — but the transition has live traffic on both side
 * a rollback resumes old-code READERS of the legacy column — values written only to
   the new column are invisible to them.
 
-So for this compatibility release every write stamps BOTH columns and every read takes
-``GREATEST`` of the pair, whenever the legacy column still exists. A later contract
-patch drops the legacy column, at which point ``has_legacy_column`` turns False and
-both helpers collapse to the new column with no further code change.
+Every write therefore stamps BOTH columns and every read takes ``GREATEST`` of
+the pair while the legacy column exists. Normal migrations also reconcile both
+columns, including sites whose original rename patch already ran. No worker-drain
+gate or manual customer action is required for this compatibility step. Retiring
+the old column remains a separate deployment decision.
 """
 
 from __future__ import annotations
@@ -34,9 +35,30 @@ def has_legacy_column() -> bool:
 	mid-request."""
 	cached = getattr(frappe.local, "_jarvis_wm_legacy_col", None)
 	if cached is None:
-		cached = bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` LIKE %(c)s", {"c": _LEGACY_COL}))
+		cached = bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` WHERE Field = %(c)s", {"c": _LEGACY_COL}))
 		frappe.local._jarvis_wm_legacy_col = cached
 	return cached
+
+
+def reconcile_watermarks() -> None:
+	"""Idempotently preserve the effective fence in both columns on migrate.
+
+	Do not drop the legacy column: an old worker can still write after this
+	statement, and a rollback still needs its values. Runtime dual writes and
+	GREATEST reads cover that overlap. Fresh sites have no legacy column.
+	"""
+	# Migration may have changed the schema after this request's first lookup.
+	frappe.local._jarvis_wm_legacy_col = None
+	if not has_legacy_column():
+		return
+	effective = f"GREATEST(agent_seq_watermark, {_LEGACY_COL})"
+	frappe.db.sql(
+		f"""
+		UPDATE `tab{MSG}`
+		SET agent_seq_watermark = {effective}, {_LEGACY_COL} = {effective}
+		WHERE agent_seq_watermark <> {_LEGACY_COL}
+		"""
+	)
 
 
 def stamp_watermark(message_name: str, watermark: int) -> None:
