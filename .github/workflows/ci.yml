@@ -178,6 +178,8 @@ jobs:
         run: npm run install-frontend && npm run build-frontend
 
   tests:
+    env:
+      JARVIS_LEGACY_MIGRATION_FIXTURES: ${{ vars.JARVIS_LEGACY_MIGRATION_FIXTURES_6763DD766A33ABE8 }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -261,6 +263,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: app
+
+      - name: Validate Admin-owned upgrade fixtures for this checkout
+        working-directory: app
+        run: |
+          git rev-parse HEAD
+          python3 -m jarvis.tests._legacy_migration_fixtures
 
       - name: Record what this run actually tested against
         working-directory: /opt/frappe-bench
