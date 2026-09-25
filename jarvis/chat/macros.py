@@ -93,6 +93,8 @@ _MACRO_CHANGED_ERROR = (
 	"The macro was edited while this run was waiting for capacity, so the run could no "
 	"longer continue the way it started. Run it again."
 )
+# The capacity resume is a cron: its turn never binds a disabled user, Administrator or Guest.
+_OWNER_INELIGIBLE_ERROR = "The run's owner can no longer run unattended work, so the run was closed."
 
 # Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
 # them). The scheduled path reports the machine code instead and the scheduler
@@ -158,9 +160,22 @@ def _disarm_conversation(conversation: str | None) -> None:
 	the human-inert send-block (T4): the send-block already keeps a lingering flag
 	un-exploitable (send/retry are refused while set), but clearing keeps state clean
 	and stops any re-dispatched turn from running armed after the run is over. No-op
-	when unset. Caller commits (consistent with ``_cas_run_status``)."""
-	if conversation and frappe.db.get_value(CONV, conversation, "skip_confirmation"):
-		frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+	when unset. Caller commits (consistent with ``_cas_run_status``).
+
+	The run's cards are swept FIRST, while the flag still refuses a Confirm: cards
+	never expire, so one a stop, the stale reaper or a store blip left behind would
+	otherwise stay confirmable forever (the sweep commits the caller's work first)."""
+	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		return
+	from jarvis import api as _jarvis_api
+	from jarvis.chat import pending_confirm
+
+	pending_confirm.clear_for_conversation(frappe.db.get_value(CONV, conversation, "owner"), conversation)
+	try:
+		_jarvis_api.cancel_pending_action_rows(conversation)
+	except Exception:
+		frappe.log_error(title="jarvis.macro.disarm_sweep_failed", message=frappe.get_traceback())
+	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
 
 
 def _disarm_run_conversation(run_name: str) -> None:
@@ -757,6 +772,7 @@ def resume_waiting_capacity_runs() -> None:
 	if not rows:
 		return
 	from jarvis._redis_lock import redis_lock
+	from jarvis.permissions import is_valid_unattended_owner
 
 	for run_name in rows:
 		try:
@@ -786,6 +802,19 @@ def resume_waiting_capacity_runs() -> None:
 						"failed",
 						finished_at=frappe.utils.now(),
 						error=_MACRO_CHANGED_ERROR,
+					):
+						frappe.db.commit()
+						_publish_done(run, macro_doc, "failed")
+					else:
+						frappe.db.commit()
+					continue
+				if not is_valid_unattended_owner(frappe.db.get_value(CONV, run.conversation, "owner")):
+					if _cas_run_status(
+						run.name,
+						"waiting_capacity",
+						"failed",
+						finished_at=frappe.utils.now(),
+						error=_OWNER_INELIGIBLE_ERROR,
 					):
 						frappe.db.commit()
 						_publish_done(run, macro_doc, "failed")

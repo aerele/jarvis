@@ -2,6 +2,8 @@
 import { computed, ref, watch } from "vue";
 import { renderMarkdown } from "@shared/markdown.js";
 import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js";
+import { denyOutcome } from "../lib/denyOutcome.js";
+import { keptCardMessage } from "../lib/keptCard.js";
 import Sheet from "./Sheet.vue";
 import PendingCard from "./PendingCard.vue";
 import * as api from "../api";
@@ -10,11 +12,13 @@ import { agentName } from "@/branding";
 // Approve / deny a parked write.
 //
 // Approve calls confirm_tool with the one-time token — the ONLY path that runs
-// the parked call. Deny has no endpoint by design: dropping the card leaves the
-// token to expire server-side, which is exactly what "no" means. The native app
-// puts a biometric prompt in front of approve; the browser has no equivalent it
-// can trust, and this surface is already behind the Frappe session, so the
-// confirmation itself is the gate.
+// the parked call. Deny calls dismiss_tool (P0c): it consumes the token,
+// leaves a durable "discarded" receipt chip, and fires no agent turn, exactly
+// like the desktop SPA's Discard button. It sits behind a lightweight native
+// confirm ("Discard this action?") - a mis-tap must not silently veto a write
+// the user meant to approve. The native app puts a biometric prompt in front
+// of approve; the browser has no equivalent it can trust, and this surface is
+// already behind the Frappe session, so the confirmation itself is the gate.
 const props = defineProps({
 	action: { type: Object, default: null },
 	// PR-1: true while the parent reply is still streaming. A card is parked
@@ -23,7 +27,11 @@ const props = defineProps({
 	// continuation turn concurrently with the reply that parked it.
 	streaming: { type: Boolean, default: false },
 });
-const emit = defineEmits(["close", "resolved"]);
+// "busy" (P0c): true while EITHER Approve or Deny has an RPC in flight, so the
+// parent can exclude this card's token from its pending-list resync while it
+// settles (see ChatView.vue's inflightToken) - a stale resync must not
+// resurrect a card the user just acted on.
+const emit = defineEmits(["close", "resolved", "busy"]);
 
 const state = ref("review"); // review | busy | approved | denied
 const error = ref("");
@@ -73,10 +81,29 @@ const previewHtml = computed(() => {
 	return parts.length ? renderMarkdown(parts.join("\n\n")) : "";
 });
 
-function deny() {
+// P0c: Deny used to be a pure client-side dismiss (no endpoint, "let the
+// token expire" - see the file comment's history). It now calls dismiss_tool,
+// the same RPC the desktop SPA's Discard button uses, behind a lightweight
+// native confirm so a mis-tap can't silently veto a write the user meant to
+// approve.
+async function deny() {
 	if (state.value === "busy" || props.streaming) return;
-	state.value = "denied";
-	emit("resolved", props.action.token, "denied");
+	if (!window.confirm("Discard this action?")) return;
+	error.value = "";
+	state.value = "busy";
+	emit("busy", true);
+	try {
+		const r = await api.dismissTool(props.action.token, props.action.conversation);
+		const outcome = denyOutcome(r);
+		state.value = outcome.state;
+		error.value = outcome.error;
+		if (outcome.resolved) emit("resolved", props.action.token, outcome.resolved);
+	} catch (e) {
+		error.value = e?.message || "Couldn't discard this action.";
+		state.value = "review";
+	} finally {
+		emit("busy", false);
+	}
 }
 
 // mode "step" (default, low-friction): confirmTool, exactly as before - this
@@ -92,12 +119,19 @@ async function approve(mode = "step") {
 	error.value = "";
 	state.value = "busy";
 	approveMode.value = mode;
+	emit("busy", true);
 	try {
 		const r =
 			mode === "run"
 				? await api.approveAndRun(props.action.token, props.action.conversation)
 				: await api.confirmTool(props.action.token, props.action.conversation);
 		if (r && r.ok === false) {
+			const kept = keptCardMessage(r);
+			if (kept) {
+				error.value = kept;
+				state.value = "review";
+				return;
+			}
 			// The token is single-use and short-lived: a stale card must say so
 			// rather than look like a failure the user can retry.
 			if (r.error?.type === "InvalidConfirmation") {
@@ -119,6 +153,8 @@ async function approve(mode = "step") {
 	} catch (e) {
 		error.value = e?.message || "Couldn't run this action.";
 		state.value = "review";
+	} finally {
+		emit("busy", false);
 	}
 }
 </script>

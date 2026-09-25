@@ -84,8 +84,9 @@
 						</div>
 						<div class="max-w-2xl text-p-sm text-ink-gray-6">
 							Drop your files - single or in bulk - and leave them.
-							{{ agentName }} identifies each file's nature and processes it in the
-							background. If it needs your input, it asks in the
+							{{ agentName }} identifies each file's nature, processes it in the
+							background and shows what happened on each row - the draft it created,
+							or why it couldn't. If it needs your input, it asks in the
 							<!-- .stop keeps the link from also triggering the card's pickFiles
 							     (click) and from having Enter swallowed by the card's
 							     keydown.enter.prevent -->
@@ -149,17 +150,34 @@
 
 			<template #cell-status="{ row }">
 				<Badge
-					v-if="row.behind_chat && row.status === 'processing'"
 					variant="subtle"
-					theme="gray"
-					label="Waiting (behind chat)"
+					:theme="statusBadge(row).theme"
+					:label="statusBadge(row).label"
 				/>
-				<Badge
-					v-else
-					variant="subtle"
-					:theme="(STATUS_BADGE[row.status] || {}).theme || 'gray'"
-					:label="(STATUS_BADGE[row.status] || {}).label || row.status"
-				/>
+			</template>
+
+			<!-- one-line result; links open the approval (in-app) or the draft
+			     (Desk, new tab) without also opening the row's chat -->
+			<template #cell-result="{ row }">
+				<div class="min-w-0 truncate text-base text-ink-gray-7" :title="row.result || ''">
+					<a
+						v-if="resultLink(row) && resultLink(row).kind === 'desk'"
+						:href="resultLink(row).href"
+						target="_blank"
+						rel="noopener noreferrer"
+						class="text-ink-blue-3 hover:underline"
+						@click.stop
+						>{{ row.result }}</a
+					>
+					<router-link
+						v-else-if="resultLink(row)"
+						:to="resultLink(row).href"
+						class="text-ink-blue-3 hover:underline"
+						@click.stop
+						>{{ row.result }}</router-link
+					>
+					<span v-else>{{ row.result }}</span>
+				</div>
 			</template>
 
 			<template #cell-creation="{ row }">
@@ -167,6 +185,22 @@
 					<Tooltip :text="exactDate(row.creation)">
 						<div class="truncate text-base">{{ timeAgo(row.creation) }}</div>
 					</Tooltip>
+				</div>
+			</template>
+
+			<template #cell-_rerun="{ row }">
+				<div class="flex w-full items-center justify-end" @click.stop.prevent>
+					<Button
+						v-if="canRerun(row)"
+						variant="ghost"
+						icon="rotate-ccw"
+						size="sm"
+						:loading="rerunningRow === row.name"
+						:disabled="!!rerunningRow"
+						label="Re-run"
+						:tooltip="'Re-run'"
+						@click="rerunRow(row)"
+					/>
 				</div>
 			</template>
 
@@ -187,6 +221,7 @@
 			<template #select-actions="{ selections, unselectAll }">
 				<Dropdown
 					:options="[
+						{ label: 'Re-run', onClick: () => bulkRerun(selections, unselectAll) },
 						{ label: 'Delete', onClick: () => bulkDelete(selections, unselectAll) },
 					]"
 				>
@@ -210,7 +245,7 @@
 // File Box list - DESIGN-V3 §5.7 + §15.1: search quick filter (envelope
 // `search`), persistent drop card (click → picker, page-wide drag highlights
 // it, drop anywhere uploads) with per-file error chips, status quick filter
-// with ?status= deep link, date-range filter, processing poll (5s) +
+// with ?status= deep link, date-range filter, processing/applying poll (5s) +
 // visibilitychange refresh, per-row file preview (FilePreview dialog), bulk
 // delete with skip reasons, Clear Processed.
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
@@ -232,33 +267,30 @@ import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { agentName } from "@/branding";
-import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
+import {
+	STATUSES,
+	STATUS_OPTIONS,
+	statusBadge,
+	resultLink,
+	isLive,
+	canRerun,
+	bulkRerunToast,
+} from "@/lib/fileboxStatus";
 
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
 
 // ── list config ──────────────────────────────────────────────────────────────
-const STATUS_BADGE = {
-	done: { label: "Done", theme: "green" },
-	processing: { label: "Processing", theme: "blue" },
-	needs_approval: { label: "Needs approval", theme: "orange" },
-	error: { label: "Error", theme: "red" },
-};
-const STATUS_OPTIONS = [
-	{ label: "All", value: "" },
-	{ label: "Processing", value: "processing" },
-	{ label: "Needs approval", value: "needs_approval" },
-	{ label: "Done", value: "done" },
-	{ label: "Error", value: "error" },
-];
-const STATUSES = ["done", "processing", "needs_approval", "error"];
-
+// statuses, badges and result links live in @/lib/fileboxStatus (tested).
 const columns = [
 	{ label: "File", key: "title", width: 3 },
-	{ label: "Status", key: "status", width: "9rem" },
+	{ label: "Status", key: "status", width: "10rem" },
+	{ label: "Result", key: "result", width: 3 },
 	{ label: "Added", key: "creation", width: "8rem", align: "right" },
+	{ label: "", key: "_rerun", width: "3rem", align: "right" },
 	{ label: "", key: "_preview", width: "3rem", align: "right" },
 ];
 
@@ -373,11 +405,36 @@ function dismissDropError(key) {
 	dropErrors.value = dropErrors.value.filter((d) => d.key !== key);
 }
 
+// One check per batch: a tagged skill File Box can no longer use keeps every file
+// un-dropped (one toast), instead of one "skill not available" question per file.
+// A failed check lets the drop go ahead: drop_file validates the pin itself.
+async function pinUsable(pin) {
+	let res;
+	try {
+		res = await api.fileboxCheckSkill(pin);
+	} catch {
+		return true;
+	}
+	if (res && res.available) return true;
+	toast.error(
+		escapeHtml(
+			`The skill “${pin}” is no longer available for File Box, so nothing was added. ` +
+				"Choose another skill (or None) and add the files again."
+		)
+	);
+	pinnedSkill.value = "";
+	loadSkills();
+	return false;
+}
+
 async function uploadBatch(fileList) {
 	const files = Array.from(fileList || []);
 	if (!files.length) return;
+	const pin = pinnedSkill.value;
+	if (pin && !(await pinUsable(pin))) return;
 	const failures = [];
 	let okCount = 0;
+	let waiting = 0; // dropped, but waiting on a skill question (the pin went away mid-batch)
 	uploadingCount.value += files.length;
 	const run = (async () => {
 		await Promise.all(
@@ -387,10 +444,12 @@ async function uploadBatch(fileList) {
 					const res = await api.fileboxDrop(
 						up.file_url,
 						up.file_name,
-						pinnedSkill.value || undefined
+						pin || undefined,
+						up.name
 					);
 					if (!res || !res.ok) throw new Error((res && res.reason) || "drop failed");
 					okCount++;
+					if (res.needs_approval) waiting++;
 				} catch (e) {
 					failures.push({ name: file.name, error: errMsg(e) });
 				} finally {
@@ -406,9 +465,8 @@ async function uploadBatch(fileList) {
 			loading: `Uploading ${files.length} file${files.length === 1 ? "" : "s"}…`,
 			success: (n) =>
 				`Added ${n} file${n === 1 ? "" : "s"} to File Box` +
-				(pinnedSkill.value
-					? ` · tagged: ${pinnedLabel(pinnedSkill.value, customSkills.value)}`
-					: ""),
+				(pin ? ` · tagged: ${pinnedLabel(pin, customSkills.value)}` : "") +
+				(waiting ? ` · ${waiting} waiting for your choice` : ""),
 			error: () => "Upload failed",
 		});
 	} catch (e) {
@@ -416,6 +474,7 @@ async function uploadBatch(fileList) {
 	}
 	for (const f of failures) pushDropError(f.name, f.error);
 	if (okCount) resetLoad();
+	if (waiting) store.refreshApprovalsCount();
 }
 
 // ── page-wide drag state (highlights the drop card; drop anywhere uploads) ───
@@ -434,6 +493,45 @@ function onDragLeave() {
 function onDrop(ev) {
 	dragDepth.value = 0;
 	uploadBatch(ev.dataTransfer && ev.dataTransfer.files);
+}
+
+// ── inline Re-run (failed / no_draft only, AC8: never a second draft) ────────
+const rerunningRow = ref("");
+async function rerunRow(row) {
+	if (rerunningRow.value || !canRerun(row)) return;
+	rerunningRow.value = row.name;
+	try {
+		const res = await api.fileboxRerun(row.name);
+		if (res && res.ok === false)
+			toast.error(escapeHtml(res.reason || "Couldn't re-run this file"));
+		else if (res && res.needs_approval) {
+			// its tagged skill is gone: it waits on a question (the row's own words)
+			const words = res.result || "Waiting for your choice on the Approval Board";
+			toast.create({ type: "info", message: escapeHtml(words) });
+			store.refreshApprovalsCount();
+		} else toast.success("Re-running…");
+		resetLoad();
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		rerunningRow.value = "";
+	}
+}
+
+function bulkRerun(selections, unselectAll) {
+	const names = Array.from(selections || []);
+	if (!names.length) return;
+	(async () => {
+		try {
+			const res = await api.fileboxRerunBulk(names);
+			toast.create(bulkRerunToast(res, names.length));
+			if (res && res.needs_choice) store.refreshApprovalsCount();
+			unselectAll();
+			resetLoad();
+		} catch (e) {
+			toast.error(errHtml(e));
+		}
+	})();
 }
 
 // ── bulk delete + clear processed ────────────────────────────────────────────
@@ -475,7 +573,7 @@ function clearProcessed() {
 	confirmDialog({
 		title: "Clear processed documents?",
 		message:
-			"Deletes every done or errored document (with its file, messages, and approvals). Processing and needs-approval documents are kept.",
+			"Deletes every document marked Draft created or No draft (with its file, messages, and approvals). Failed, processing, and needs-approval documents, and files with wiki notes awaiting review, are kept. The drafts themselves are not touched.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await api.fileboxClearProcessed()) || {};
@@ -491,16 +589,16 @@ function clearProcessed() {
 	});
 }
 
-// ── freshness: poll while any visible row is processing + refetch on visible ──
+// ── freshness: poll while a row is processing/applying + refetch on visible ──
 let pollTimer = null;
 function onVisibility() {
 	if (document.visibilityState === "visible") refreshKeep();
 }
 onMounted(() => {
 	loadSkills();
-	// cheap tick: only refetches when a processing row is on screen
+	// cheap tick: only refetches when such a row is on screen
 	pollTimer = setInterval(() => {
-		if (rows.value.some((r) => r.status === "processing")) refreshKeep();
+		if (rows.value.some(isLive)) refreshKeep();
 	}, 5000);
 	document.addEventListener("visibilitychange", onVisibility);
 });

@@ -513,10 +513,17 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 		"Approval Board wiki-write review panel feed: a reviewer-gated actionable "
 		"slice (pending + failed-landing), not a browsable document list"
 	),
+	# The Approval Board's pending-actions lane (Jarvis Pending Action): Pending/Executing
+	# held File Box writes (owner-or-SM) and the caller's own chat cards, each kind
+	# capped, oldest first, with no filter/sort/page contract. The rows are sealed server
+	# records with no DocPerm, not a browsable document list, so there is no ListView.
+	"jarvis.chat.approvals_api.list_pending_actions_lane": (
+		"Approval Board pending-actions lane feed: capped slices of held writes "
+		"(owner-or-SM) and own chat cards, not a browsable document list"
+	),
 	"jarvis.chat.custom_skills_api.list_custom_skills": (
 		"composer '/' autocomplete feed for skills; unpaginated companion of the skills view"
 	),
-	"jarvis.chat.filebox.list_inbound": "unpaginated companion of file_box (list_inbound_page)",
 	"jarvis.chat.macros_api.list_macros": (
 		"Settings macro-runs dropdown feed; unpaginated companion of the macros view"
 	),

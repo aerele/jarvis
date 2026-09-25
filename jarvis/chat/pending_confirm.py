@@ -1,132 +1,143 @@
-"""Pending-confirmation token store for the write-safety confirmation gate
-(issue #186).
+"""Pending-confirmation store for the write-safety confirmation gate (issue #186).
 
-A mutating tool call that needs a human's go-ahead is parked here under a
-single-use token instead of running immediately. The gate itself (later
-task) mints a token when it intercepts such a call, shows the user a
-preview built from ``peek``, and only actually runs the call once
-``consume`` returns the stored record for the confirming click.
+A gated write is parked under a single-use token instead of running; only a human
+Confirm (``jarvis.chat.actions_api``) runs it. This module is the facade every
+caller imports; its public signatures predate the durable store and are kept.
 
-This module only owns the store - it does not decide which tools need
-confirmation and does not run anything.
+Since PR-3a a card in a real conversation is a ``Jarvis Pending Action`` row (the
+token is the row name): the card and its chat display row commit together, it
+survives Redis loss, and ``pending_actions.execute`` / ``discard`` act on it. The
+Redis store (``pending_confirm_legacy``) stays for dual-read until PR-4 (D4):
 
-Storage: ``frappe.cache()`` (Redis), one key per token, single round trip
-TTL so a token that nobody clicks self-expires instead of leaking forever.
+- ``mint`` parks a pending action, unless the ``jarvis_pa_chat_cards`` site flag is
+  0, the table is absent, or the conversation is not a real ``Jarvis Conversation``
+  (a conversation-less or stray id can host neither the row's Link nor a display
+  row) - those still mint a Redis token;
+- every read (``peek``, the lists, the gate's single-flight) unions both stores; a
+  token with no pending-action row is a legacy token;
+- a pending-action card never expires (a legacy token keeps its Redis 15 minutes);
+  the next proposal after a human message supersedes it instead (D7,
+  ``supersede_on_park``), and every listed card carries ``seq`` / ``recent`` for the
+  typed-reply scope (decision 6).
 
-Portability floor: this module runs on the CUSTOMER bench, whose Frappe/Redis
-versions vary. It must stay compatible down to **Frappe 15** and **Redis 6.0**.
-Do NOT reach for a RedisWrapper method missing from Frappe 15 (``expire_key``,
-the ``use_local_cache`` get_value kwarg) or a Redis >= 6.2-only command (``GETDEL``,
-``GETEX``, ``COPY``, ``SINTERCARD``, ...) - use an inherited ``redis.Redis``
-builtin or a MULTI/EXEC transaction instead.
-"""
+Pending-action rows are read with plain SELECTs, never unsealed on a list. A DB
+error there surfaces as ``PendingConfirmStorageError`` on a strict read, exactly
+like a Redis one, so no caller mistakes an outage for an empty store."""
 
 from __future__ import annotations
 
-import hashlib
-import json
-import pickle
-import secrets
 import time
 
 import frappe
-import redis.exceptions
 
-_TTL_S = 900  # 15 min; a confirmation token the user must click within
-_PREFIX = "jarvis:pending_confirm:"
-_CLAIM_PREFIX = "jarvis:pending_confirm:claim:"
-# Per-owner index: a Redis set of the owner's currently-live token ids, so the
-# resync endpoint can enumerate a user's own parked confirmations after a reload
-# or reconnect. TTL discipline: dead members
-# (token record expired/consumed) are pruned on read; the set key itself is
-# given a refreshed TTL on every mint so an emptied set self-expires.
-_OWNER_PREFIX = "jarvis:pending_confirm:owner:"
+from jarvis.chat import pending_confirm_legacy as legacy
+from jarvis.chat.pending_actions._park import ConfirmationPendingError  # re-exported for the gate
+from jarvis.chat.pending_confirm_legacy import (  # re-exported for callers
+	_CLAIM_PREFIX,
+	_OWNER_PREFIX,
+	_PREFIX,
+	_TTL_S,
+	PendingConfirmOutcomeUnknown,
+	PendingConfirmStorageError,
+	_claim_key,
+	_key,
+	_owner_key,
+	_pending_item,
+	args_hash,
+)
 
-
-def _key(token: str) -> str:
-	return _PREFIX + token
-
-
-def _owner_key(owner: str) -> str:
-	return _OWNER_PREFIX + owner
-
-
-def _claim_key(token: str) -> str:
-	return _CLAIM_PREFIX + token
-
-
-class PendingConfirmStorageError(RuntimeError):
-	"""Redis could not provide a definite pending-confirmation result."""
-
-
-class PendingConfirmOutcomeUnknown(PendingConfirmStorageError):
-	"""Redis may have committed a consume, but its durable claim is unreadable."""
+FLAG = "jarvis_pa_chat_cards"
+MSG = "Jarvis Chat Message"
+# Who "spoke" for the typed scope and D7 supersede: a board answer is the user too
+# (decision 11); automatic resumes never are.
+HUMAN_ORIGINS = ("human", "board_answer")
+_COLS = (
+	"name, kind, status, conversation, owner_user, exec_user, tool, run_id, preview,"
+	" skill_docname, summary, creation"
+)
 
 
-# --------------------------------------------------------------------------- #
-# cards_open gauge (BUILD-DIRECTIVE §1 — the WP-0 C-series gap, wired here)
-# --------------------------------------------------------------------------- #
-#
-# A live count of open confirmation cards: mint +1, consume -1, and EXPIRY
-# auto-pruned. Backed by a single site-scoped Redis ZSET scored by each token's
-# expiry epoch — reading purges expired members (ZREMRANGEBYSCORE) then ZCARD, so
-# a card nobody clicks decrements the gauge exactly when its TTL lapses without any
-# code running on expiry. This is OBSERVABILITY, not authority (the token records
-# remain the source of truth), so every op is best-effort. Raw ``execute_command``
-# with an explicit site-scoped key (mirrors the pump wake-bus) so ZADD/ZREM/ZCARD
-# all agree regardless of RedisWrapper's key prefixing.
-
-_GAUGE_SUFFIX = "jarvis:pending_confirm:open"
+def _db_errors() -> tuple:
+	return (frappe.db.OperationalError, frappe.db.InterfaceError)
 
 
-def _gauge_key() -> str:
-	local = getattr(frappe, "local", None)
-	db = (local.conf.get("db_name") if local else None) or getattr(local, "site", "") or ""
-	return f"{db}|{_GAUGE_SUFFIX}"
+def _pa_ready() -> bool:
+	from jarvis.chat.pending_actions._store import table_ready
 
-
-def cards_open_gauge() -> int:
-	"""Live count of open confirmation cards (expired members pruned on read)."""
 	try:
-		cache = frappe.cache()
-		key = _gauge_key()
-		cache.execute_command("ZREMRANGEBYSCORE", key, 0, int(time.time()))
-		return int(cache.execute_command("ZCARD", key) or 0)
+		return table_ready()
 	except Exception:
-		return 0
+		return False
 
 
-def _gauge_add(token: str, expires_at: int) -> None:
+def pa_minting(conversation: str | None) -> bool:
+	"""Whether a new card for ``conversation`` parks as a pending action (D4)."""
+	if not conversation or not frappe.utils.cint(frappe.conf.get(FLAG, 1)):
+		return False
+	return _pa_ready() and bool(frappe.db.exists("Jarvis Conversation", conversation))
+
+
+def _select(where: str, params: dict, *, strict: bool) -> list:
+	"""Chat pending-action rows matching ``where`` (sealed columns never read)."""
+	if not _pa_ready():
+		return []
 	try:
-		frappe.cache().execute_command("ZADD", _gauge_key(), int(expires_at), token)
-	except Exception:
-		pass
+		return frappe.db.sql(
+			f"SELECT {_COLS} FROM `tabJarvis Pending Action` WHERE kind='chat' AND {where}",
+			params,
+			as_dict=True,
+		)
+	except _db_errors() as exc:
+		frappe.logger("jarvis.pending_confirm").error("pending action read failed: %s", type(exc).__name__)
+		if strict:
+			raise PendingConfirmStorageError("pending action read failed") from exc
+		return []
 
 
-def _gauge_remove(token: str) -> None:
-	try:
-		frappe.cache().execute_command("ZREM", _gauge_key(), token)
-	except Exception:
-		pass
+def _live(row) -> bool:
+	return row.status == "Pending"
 
 
-def _emit_cards_open(source: str) -> None:
-	"""Mirror the gauge to the latency channel (the pilot greps ``cards_open`` for
-	the C-series). Best-effort."""
-	try:
-		from jarvis.chat.latency import get_logger
-
-		get_logger().info("cards_open gauge=%d source=%s", cards_open_gauge(), source)
-	except Exception:
-		pass
+def _epoch(dt) -> int:
+	"""Site-timezone ``dt`` as epoch seconds (the legacy records' clock)."""
+	age = frappe.utils.now_datetime() - frappe.utils.get_datetime(dt)
+	return int(time.time() - age.total_seconds())
 
 
-def args_hash(tool: str, args: dict) -> str:
-	"""Stable hash of the tool + its canonical args, so a token is bound to
-	the EXACT call. Canonical = json.dumps(args, sort_keys=True, default=str).
-	"""
-	canonical = json.dumps(args, sort_keys=True, default=str)
-	return hashlib.sha256(f"{tool}:{canonical}".encode()).hexdigest()
+def _record(row) -> dict:
+	"""A pending-action row in the legacy record shape (no args: never unsealed)."""
+	created = _epoch(row.creation)
+	preview = row.preview
+	if isinstance(preview, str):
+		preview = frappe.parse_json(preview) if preview else None
+	return {
+		"token": row.name,
+		"conversation": row.conversation or "",
+		"owner": row.owner_user,
+		"exec_user": row.exec_user,
+		"tool": row.tool,
+		"run_id": row.run_id or "",
+		"preview": preview,
+		"skill_docname": row.skill_docname or None,
+		"summary": row.summary or "",
+		"expires_at": None,
+		"created_at": created,
+		"pending_action": True,
+	}
+
+
+def _legacy_strict(strict: bool) -> bool:
+	"""With pending-action cards on, Redis holds only leftovers: its outage reads as
+	"no Redis card", so it never blocks a new card, the gate or a typed reply."""
+	return strict and not (frappe.utils.cint(frappe.conf.get(FLAG, 1)) and _pa_ready())
+
+
+def _legacy_pending(owner: str, conversation: str) -> bool:
+	"""Park's ``legacy_pending`` hook: a live Redis card strictly in ``conversation``."""
+	return any(
+		r.get("conversation") == conversation
+		for r in legacy.list_for_owner(owner, conversation=conversation, strict=_legacy_strict(True))
+	)
 
 
 def mint(
@@ -141,477 +152,361 @@ def mint(
 	expires_at: int | None = None,
 	skill_docname: str | None = None,
 ) -> str | None:
-	"""Store a pending call and return a fresh single-use token
-	(secrets.token_urlsafe(24)). The stored record carries conversation,
-	owner, tool, args (the full dict - this is the authoritative payload
-	that will execute), args_hash, run_id, exec_user, preview, skill_docname.
-	TTL _TTL_S.
-	Returns the token, or ``None`` when the park could not be stored (a transient
-	cache failure): the record+index must BOTH land or the caller must treat it as
-	a retryable failure and publish NO card - a token whose record does not exist is
-	an un-confirmable card that wedges the turn.
+	"""Park ``tool(args)`` for the owner's Confirm and return its single-use token,
+	or None when it could not be stored (the gate then publishes no card). Raises
+	``ConfirmationPendingError`` when a live card here refuses it (single-flight).
 
-	``preview`` is the park-time confirmation preview (dry-run "would" doc or
-	described-intent dict). It is stored so the resync endpoint can return it
-	verbatim instead of RE-running the dry-run - re-running fires unsandboxed
-	on_submit/on_cancel side effects on every reload/reconnect (F2). Tokens
-	minted before this field existed simply carry no ``preview``.
+	``owner`` is the conversation owner (who confirms); ``exec_user`` the identity
+	the confirmed call runs as (defaults to ``owner``); ``preview`` the park-time
+	preview (its ``card`` is what the chat renders); ``skill_docname`` the Approve &
+	run stamp; ``expires_at`` only bounds a legacy token. A pending action gets its
+	display row here, in park's transaction, so the gate's later
+	``persist_pending_action`` is a no-op; it never expires."""
+	if not pa_minting(conversation):
+		token = legacy.mint(
+			conversation=conversation,
+			owner=owner,
+			tool=tool,
+			args=args,
+			run_id=run_id,
+			exec_user=exec_user,
+			preview=preview,
+			expires_at=expires_at,
+			skill_docname=skill_docname,
+		)
+		return _supersede_for_legacy(conversation, owner, token) if token else None
+	from jarvis import api
+	from jarvis.chat import pending_actions
 
-	``owner`` is the CONVERSATION OWNER - the human who sees the card, clicks
-	Confirm, and whose browser is subscribed. Delivery + binding + confirm all
-	key off this identity. ``exec_user`` is the scoped model-execution identity
-	the confirmed write must run AS (so a confirm can never exceed the model
-	path's permission scope). It defaults to ``owner`` when omitted.
-
-	``skill_docname`` is the "Approve & run" trust stamp (skill "Approve & run
-	the plan", design §3.3): when the gate offers Approve & run on this card it
-	stamps the resolved Jarvis Custom Skill docname here, so a later
-	``approve_and_run`` endpoint can authorize the run off THIS exact row
-	(re-checking its arming live). ``None`` on every ordinary park - the token
-	then carries no offer and Approve & run is unavailable for it.
-	"""
-	token = secrets.token_urlsafe(24)
-	record = {
-		"conversation": conversation,
-		"owner": owner,
-		"exec_user": exec_user or owner,
-		"tool": tool,
-		"args": args,
-		"args_hash": args_hash(tool, args),
-		"run_id": run_id,
-		"preview": preview,
-		"skill_docname": skill_docname,
-		# Wall-clock expiry (epoch seconds) so the SPA can show a real countdown
-		# and distinguish a genuine TTL lapse from other confirm failures (F15).
-		# Defaults to now + TTL when the caller does not pass one, so every record
-		# carries it (the resync payload reads it straight off the record).
-		"expires_at": expires_at if expires_at is not None else int(time.time()) + _TTL_S,
-	}
-	cache = frappe.cache()
-	# Persist the record, index it under its owner, and VERIFY it landed - all three
-	# must hold or the park is a failure. Two ways a park silently breaks:
-	#   1. The owner-index write fails: an unindexed record is INVISIBLE to the resync
-	#      endpoint -> a confirmation card that never re-surfaces (the bulk-create card
-	#      that parked but never rendered).
-	#   2. set_value SUPPRESSES a transient redis ConnectionError, so the record itself
-	#      can fail to persist with no exception raised at all.
-	# In EITHER case, returning a token would make the gate publish a card whose token
-	# has no record -> an un-confirmable "expired" card that wedges the turn. So on ANY
-	# failure roll the writes back (no orphan), log LOUDLY (it was once a silent
-	# try/except: pass), and return None so the gate surfaces a RETRYABLE tool error and
-	# the model can simply call again.
 	try:
-		cache.set_value(_key(token), record, expires_in_sec=_TTL_S)
-		cache.sadd(_owner_key(owner), token)
-		# set_value swallows a redis blip, so confirm the record is really readable
-		# before we let a card be published against this token. A strict read keeps
-		# an outage distinct from a genuine persist miss. Retry one transient read
-		# once so a good park is not immediately torn down because its first verify
-		# reply was lost; a second failure still fails closed through the outer block.
-		try:
-			persisted = peek(token, strict=True)
-		except PendingConfirmStorageError as exc:
-			frappe.logger("jarvis.pending_confirm").error(
-				"park verification read failed; retrying once before rollback: %s",
-				type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
-			)
-			persisted = peek(token, strict=True)
-		if persisted is None:
-			raise RuntimeError("pending-confirm record did not persist")
+		summary = api._describe_call(tool, args or {})
+	except Exception:
+		summary = ""  # cosmetic: a card is never dropped over its label
+		frappe.log_error(
+			title="pending_confirm: confirmation summary build failed", message=frappe.get_traceback()
+		)
+	try:
+		return pending_actions.park(
+			kind="chat",
+			owner_user=owner,
+			exec_user=exec_user or owner,
+			tool=tool,
+			args=args,
+			card=preview.get("card") if isinstance(preview, dict) else None,
+			preview=preview,
+			summary=summary,
+			conversation=conversation,
+			skill_docname=skill_docname,
+			run_id=run_id,
+			legacy_pending=lambda conv: _legacy_pending(owner, conv),
+			display_row=lambda doc: api._insert_pending_row(conversation, tool, preview, doc.name, None),
+		)
+	except (frappe.PermissionError, ConfirmationPendingError):
+		raise
 	except Exception:
 		frappe.log_error(
-			title="pending_confirm: park failed; token not stored",
+			title="pending_confirm: park failed; token not stored", message=frappe.get_traceback()
+		)
+		return None
+
+
+def _supersede_for_legacy(conversation: str, owner: str, token: str) -> str | None:
+	"""D4: a legacy (Redis) mint still supersedes this conversation's pending-action
+	cards under D7, exactly as park would. Runs only once ``token`` is stored, so a
+	failed mint never retires the old card; any refusal or failure here removes
+	``token`` (``ConfirmationPendingError`` re-raised, else None)."""
+	if not conversation or not _pa_ready():
+		return token
+	from jarvis.chat.pending_actions._park import _check_single_flight
+	from jarvis.chat.pending_actions._settle import settle
+	from jarvis.chat.pending_actions._store import lock_conversation
+
+	frappe.db.commit()
+	try:
+		lock_conversation(conversation)
+		superseded = _check_single_flight(conversation, owner, None)
+		frappe.db.commit()
+	except ConfirmationPendingError:
+		frappe.db.rollback()
+		legacy.rollback_token(token, owner)
+		raise
+	except Exception:
+		frappe.db.rollback()
+		legacy.rollback_token(token, owner)
+		frappe.log_error(
+			title="jarvis.pending_confirm.legacy_supersede_failed",
 			message=frappe.get_traceback(),
 		)
-		for _rollback in (
-			lambda: cache.delete_value(_key(token)),
-			lambda: cache.srem(_owner_key(owner), token),
-		):
-			try:
-				_rollback()
-			except Exception:
-				pass
 		return None
-	# Refresh the owner-index set's TTL so an emptied set self-expires (see the module
-	# docstring). PURE HYGIENE - dead members are pruned on read regardless - so it must
-	# NEVER fail the park: a record that already persisted + verified is live and
-	# confirmable whether or not this TTL lands, which is why it sits OUTSIDE the try
-	# above. Uses the raw redis ``expire`` on the make_key'd set key (present on every
-	# supported Frappe version) rather than ``RedisWrapper.expire_key``. That wrapper
-	# is absent on Frappe 15; its AttributeError was caught by the park's old broad
-	# exception handler and rolled back a good record, taking down every gated card.
-	try:
-		cache.expire(cache.make_key(_owner_key(owner)), _TTL_S)
-	except Exception as exc:
-		# Best-effort hygiene (see above): must never fail the park. DEBUG (not a
-		# loud log - it is non-fatal and could be frequent) so a DURABLE failure
-		# (e.g. a Redis ACL that permits SADD but denies EXPIRE) is discoverable
-		# when the log level is raised, rather than silent forever.
-		frappe.logger("jarvis.pending_confirm").debug(
-			"owner-index TTL refresh failed (non-fatal): %s", type(exc).__name__
-		)
-	# cards_open gauge +1 (self-healing on expiry via the ZSET score). Bumped only
-	# after a successful persist+index+verify so the gauge never over-counts a
-	# rolled-back park.
-	_gauge_add(token, record["expires_at"])
-	_emit_cards_open("mint")
+	for name in superseded:
+		settle(name)
 	return token
 
 
 def rollback_token(token: str, owner: str) -> None:
-	"""Best-effort teardown of a just-minted token (record + owner-index member +
-	cards_open gauge), for the gate's FAIL-CLOSED path when the durable action-row
-	insert fails AFTER a successful mint. Mirrors mint's own internal rollback so no
-	orphan token lingers - an orphan would make the single-flight guard treat it as a
-	live pending card and wedge the retry. NEVER raises."""
+	"""Tear down a just-minted card the gate could not deliver. A pending action ends
+	``Cancelled`` and settled with no chip, its never-shown display row removed.
+	NEVER raises."""
 	if not token:
 		return
-	cache = frappe.cache()
-	for _rb in (
-		lambda: cache.delete_value(_key(token)),
-		lambda: cache.srem(_owner_key(owner), token),
-	):
-		try:
-			_rb()
-		except Exception:
-			pass
-	_gauge_remove(token)
-
-
-def _read_record(token: str, *, swallow: bool = True) -> dict | None:
-	"""Read the parked record directly from Redis, bypassing local cache.
-
-	The raw inherited ``GET`` is intentional. ``RedisWrapper.get_value`` suppresses
-	``ConnectionError`` and returns ``None``, which makes an outage indistinguishable
-	from an expired token. It can also read a worker-local value. Reading the
-	make_key'd key directly and unpickling it keeps Frappe 15 compatibility while
-	preserving the distinction between "absent" and "storage unavailable".
-
-	When ``swallow`` is false, Redis failures become
-	``PendingConfirmStorageError``. Best-effort background callers may keep the
-	default; user-facing confirm and resync paths use strict reads.
-	"""
-	cache = frappe.cache()
-	full_key = cache.make_key(_key(token))
-	frappe.local.cache.pop(full_key, None)
 	try:
-		raw = cache.get(full_key)
-	except redis.exceptions.RedisError as exc:
-		if not swallow:
-			raise PendingConfirmStorageError("pending-confirm record read failed") from exc
-		return None
-	return pickle.loads(raw) if raw is not None else None
+		rows = _select("name=%(n)s", {"n": token}, strict=True)
+	except Exception:
+		rows = []
+	if not rows:
+		legacy.rollback_token(token, owner)
+		return
+	from jarvis.chat.pending_actions._store import (
+		CANCELLED,
+		PENDING,
+		_terminal_update,
+		claim_settled,
+		null_sealed,
+	)
+
+	try:
+		if _terminal_update(token, [PENDING], CANCELLED, reason_code="cancelled"):
+			frappe.db.sql(
+				"DELETE FROM `tabJarvis Chat Message` WHERE tool_call_id=%(t)s AND tool_status='pending'",
+				{"t": token},
+			)
+			null_sealed(claim_settled([token]))
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis.pending_confirm.rollback_failed", message=frappe.get_traceback())
 
 
 def peek(token: str, *, strict: bool = False) -> dict | None:
-	"""Return the stored record (dict) without consuming it, or None if the
-	token is unknown/expired. Used to build the preview/UI event. Does NOT
-	validate ownership - callers that act on it must. ``strict=True`` preserves
-	storage failures instead of presenting them as an unknown token.
-	"""
+	"""The live record for ``token`` without consuming it, or None (unknown, used, or
+	a legacy token past its 15 minutes). Does NOT check ownership - callers that act
+	on it must.
+	``strict=True`` raises ``PendingConfirmStorageError`` instead of reading an
+	outage as "gone"."""
 	if not token:
 		return None
-	return _read_record(token, swallow=not strict)
+	rows = _select("name=%(n)s", {"n": token}, strict=strict)
+	if rows:
+		return _record(rows[0]) if _live(rows[0]) else None
+	return legacy.peek(token, strict=strict)
 
 
-def _claim_matches(cache, full_claim_key, claim_id: str) -> tuple[bool, bytes | None]:
-	"""Return whether a durable consume claim belongs to this request."""
-	stored_claim, stored_record = cache.hmget(full_claim_key, "claim", "record")
-	if isinstance(stored_claim, bytes):
-		stored_claim = stored_claim.decode()
-	return stored_claim == claim_id, stored_record
-
-
-def _get_and_delete(full_key, full_claim_key, claim_id: str) -> bytes | None:
-	"""Atomically claim and remove a raw token key, returning its pickled record.
-
-	``WATCH`` + ``MULTI/EXEC`` is supported by the Redis 6.0 floor and preserves a
-	single winner without ``GETDEL`` (Redis 6.2+). The transaction also writes a
-	short-lived claim containing the record. That claim is load-bearing when the
-	server commits ``EXEC`` but the client loses its reply: the same request can
-	recover its result, while a racing request has a different claim id and cannot
-	dispatch the write a second time.
-	"""
-	cache = frappe.cache()
-	pipe = cache.pipeline(transaction=True)
-	exec_attempted = False
-	try:
-		pipe.watch(full_key, full_claim_key)
-		raw = pipe.get(full_key)
-		if raw is None or pipe.exists(full_claim_key):
-			pipe.unwatch()
-			return None
-		pipe.multi()
-		pipe.hset(full_claim_key, mapping={"claim": claim_id, "record": raw})
-		pipe.expire(full_claim_key, _TTL_S)
-		pipe.delete(full_key)
-		exec_attempted = True
-		pipe.execute()
-		return raw
-	except redis.exceptions.WatchError:
-		return None
-	except redis.exceptions.RedisError as exc:
-		if not exec_attempted:
-			raise PendingConfirmStorageError("pending-confirm consume failed before commit") from exc
-		# EXEC may have committed even though its response never reached this
-		# process. Recover only our own durable claim; never infer success merely
-		# because the token disappeared, since a concurrent request may have won.
-		try:
-			ours, claimed_raw = _claim_matches(cache, full_claim_key, claim_id)
-		except redis.exceptions.RedisError as recovery_exc:
-			raise PendingConfirmOutcomeUnknown(
-				"pending-confirm consume outcome could not be recovered"
-			) from recovery_exc
-		if ours and claimed_raw is not None:
-			frappe.logger("jarvis.pending_confirm").error(
-				"consume transaction reply was lost; recovered this request's durable claim: %s",
-				type(exc).__name__,
-			)
-			return claimed_raw
-		if claimed_raw is not None:
-			return None  # another request's durable claim won
-		try:
-			pending_raw = cache.get(full_key)
-		except redis.exceptions.RedisError as recovery_exc:
-			raise PendingConfirmOutcomeUnknown(
-				"pending-confirm consume outcome could not be recovered"
-			) from recovery_exc
-		if pending_raw is not None:
-			raise PendingConfirmStorageError("pending-confirm consume was not committed") from exc
-		# No token and no durable claim is an indeterminate partial transaction.
-		# Never dispatch from the earlier snapshot and never call it ordinary expiry.
-		raise PendingConfirmOutcomeUnknown("pending-confirm consume outcome is unknown") from exc
-	finally:
-		try:
-			pipe.reset()
-		except redis.exceptions.RedisError:
-			pass
+def is_pending_action(token: str) -> bool:
+	"""``token`` names a chat pending action in any state: a click on a card that left
+	Pending still goes to the executor, which says why and settles a lost settle."""
+	return bool(token) and bool(_select("name=%(n)s", {"n": token}, strict=False))
 
 
 def consume(token: str, *, owner: str, conversation: str) -> dict | None:
-	"""Validate AND atomically single-use-consume. Returns the stored record
-	ONLY when: token exists, record.owner == owner, and (when the record has a
-	non-empty stored conversation) record.conversation == conversation. A record
-	whose stored conversation is "" carries no conversation binding and passes
-	that check for any caller conversation (owner + single-use still hold). On
-	success the token is deleted BEFORE returning (single use - a second consume
-	returns None). On any mismatch returns None and does NOT delete (so a
-	wrong-owner probe cannot burn a legitimate token).
+	"""Validate and single-use consume a legacy ``token`` (owner always; the stored
+	conversation when it has one), returning its record, or None without burning it.
 
-	Atomicity: ownership is checked first with a plain (non-destructive)
-	read, so a mismatched call never touches the stored key. Only once
-	ownership matches do we delete - and that delete is an atomic
-	claim-and-delete (``_get_and_delete``: WATCH plus a claim + DEL inside one
-	MULTI/EXEC transaction, portable to Redis < 6.2 which lacks GETDEL). If two
-	confirmed consumes race each other here, the server serializes the two
-	transactions: exactly one gets the pickled record back, the other gets
-	None. That is the single-use guarantee - it does not depend on
-	Python-level locking, which would not help anyway across separate
-	worker processes.
-	"""
+	A pending action has no legacy record, so it is never consumed (None, untouched):
+	it runs only through ``pending_actions.execute`` (claim-first, at most once) and
+	its sealed args never leave the executor."""
 	if not token:
 		return None
-	record = _read_record(token, swallow=False)
-	if not record:
-		return None
-	# Owner is the real security boundary and is always enforced.
-	if record.get("owner") != owner:
-		return None
-	# Conversation is a SECONDARY replay guard, not the boundary. A token minted
-	# without a resolvable conversation ("" - a session_key->conversation
-	# lookup miss) carries no conversation
-	# binding, so an owner-matched consume must still succeed even when the caller
-	# passes its current conversation id. Without this skip such a card is
-	# delivered to the owner but EVERY Confirm click fails here and shows a
-	# misleading "expired" toast (the card is un-confirmable for its full TTL).
-	# When a conversation WAS bound, it is still enforced.
-	stored_conv = record.get("conversation")
-	if stored_conv and stored_conv != conversation:
-		return None
-
-	cache = frappe.cache()
-	full_key = cache.make_key(_key(token))
-	full_claim_key = cache.make_key(_claim_key(token))
-	# Atomic get-and-delete. GETDEL would be the one-command way but it is
-	# redis-server >= 6.2 ONLY, and a customer bench may run older (a v6.0 server
-	# rejects it outright) - so _get_and_delete uses WATCH + a MULTI/EXEC transaction
-	# (durable claim then DEL as one indivisible unit) instead. That keeps the
-	# single-winner guarantee (of two concurrent confirms exactly one claims the
-	# record before DEL removes it) while working on every supported Redis version;
-	# a plain get-then-delete would reopen the very race the atomicity exists to close.
-	raw = _get_and_delete(full_key, full_claim_key, secrets.token_urlsafe(18))
-	frappe.local.cache.pop(full_key, None)
-	if raw is None:
-		return None
-	# cards_open gauge -1 (the card was consumed).
-	_gauge_remove(token)
-	_emit_cards_open("consume")
-	# Drop the now-dead token from the owner index (best effort - list_for_owner
-	# also prunes dead members on read, so a miss here self-heals).
-	try:
-		frappe.cache().srem(_owner_key(owner), token)
-	except Exception:
-		pass
-	return pickle.loads(raw)
+	return legacy.consume(token, owner=owner, conversation=conversation)
 
 
 def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool = False) -> list[dict]:
-	"""Return the owner's currently-live parked records (each with its ``token``
-	attached), newest-first is NOT guaranteed. Reads the per-owner index, peeks
-	each token, and:
-	  - prunes dead members (token record expired/consumed) from the index,
-	  - filters to records whose stored owner matches ``owner`` (defense in
-	    depth - never returns another user's token),
-	  - filters to ``conversation`` when one is given, EXCEPT conversation-less
-	    records ("") which carry no binding and surface under any filter (F1).
-
-	Never returns another user's tokens. Used by the resync endpoint so the SPA
-	can re-surface confirmation cards after a reload/reconnect. ``strict=True``
-	raises on any index/record read failure so a user-facing resync cannot mistake
-	an outage for an authoritative empty or partial list.
-	"""
+	"""The owner's live cards from both stores (each with its ``token``), unordered.
+	``conversation`` filters; a legacy conversation-less token still surfaces under
+	any filter (F1). Never another user's card. ``strict=True`` raises on a read
+	failure (on Redis only while it is the minting store, ``_legacy_strict``)."""
 	if not owner:
 		return []
-	try:
-		members = {
-			m.decode() if isinstance(m, bytes) else m
-			for m in (frappe.cache().smembers(_owner_key(owner)) or set())
-		}
-	except redis.exceptions.RedisError as exc:
-		frappe.logger("jarvis.pending_confirm").error(
-			"owner confirmation index read failed: %s", type(exc).__name__
-		)
-		if strict:
-			raise PendingConfirmStorageError("pending-confirm owner index read failed") from exc
-		return []
-	if not members:
-		return []
-	out: list[dict] = []
-	dead: list[str] = []
-	for token in members:
-		try:
-			record = _read_record(token, swallow=False)
-		except PendingConfirmStorageError as exc:
-			# TRANSIENT read blip on this token (Redis reachable enough for smembers,
-			# but this GET failed). Do NOT prune - the record may still be live, and
-			# pruning would orphan it from the index (invisible to every future resync
-			# for its full TTL). Skip it this round; a later clean resync re-surfaces it.
-			frappe.logger("jarvis.pending_confirm").error(
-				"owner confirmation record read failed; card was retained for retry: %s",
-				type(exc.__cause__).__name__ if exc.__cause__ else type(exc).__name__,
-			)
-			if strict:
-				raise
-			continue
-		if not record:
-			dead.append(token)
-			continue
-		if record.get("owner") != owner:
-			continue
-		# A conversation-less record ("" - see consume/F1) carries no binding, so
-		# surface it under ANY conversation filter: otherwise the card is
-		# confirmable while its live event is on screen but VANISHES on reload
-		# (resync drops it) for the full TTL - the SPA re-binds it to the current
-		# conversation. Bound records are still filtered to the asked conversation.
-		rec_conv = record.get("conversation")
-		if conversation is not None and rec_conv and rec_conv != conversation:
-			continue
-		out.append({**record, "token": token})
-	if dead:
-		try:
-			frappe.cache().srem(_owner_key(owner), *dead)
-		except Exception:
-			pass
-	return out
-
-
-def _pending_item(
-	*,
-	token: str,
-	tool: str,
-	args: dict,
-	preview: dict | None,
-	conversation: str,
-	run_id: str,
-	expires_at: int | None,
-) -> dict:
-	"""The ONE client-facing pending-confirmation item shape, shared by the live
-	``action:pending`` push (jarvis.api), the resync endpoint, and the ``run:end``
-	terminal - so the three cannot drift. Carries
-	``token``/``tool``/``preview``/``summary``/``conversation``/``run_id``/
-	``expires_at`` and NEVER the internal ``args``/``exec_user``/``args_hash``.
-
-	``summary`` is COSMETIC: if ``_describe_call`` throws it degrades to "" (and is
-	logged) - a confirmable card must NEVER be dropped because its human label failed
-	to build. That is the invisible-card bug this whole change closes."""
-	from jarvis.api import _describe_call
-
-	try:
-		summary = _describe_call(tool, args or {})
-	except Exception:
-		summary = ""
-		frappe.log_error(
-			title="pending_confirm: confirmation summary build failed",
-			message=frappe.get_traceback(),
-		)
-	return {
-		"token": token,
-		"tool": tool,
-		"preview": preview,
-		"summary": summary,
-		"conversation": conversation,
-		"run_id": run_id,
-		"expires_at": expires_at,
-	}
+	where, params = "owner_user=%(o)s AND status='Pending'", {"o": owner}
+	if conversation is not None:
+		where += " AND conversation=%(c)s"
+		params["c"] = conversation
+	cards = [_record(r) for r in _select(where, params, strict=strict)]
+	return cards + legacy.list_for_owner(owner, conversation=conversation, strict=_legacy_strict(strict))
 
 
 def list_items_for_owner(owner: str, conversation: str | None = None, *, strict: bool = False) -> list[dict]:
-	"""Client-facing pending-confirmation items for ``owner`` (optionally filtered to
-	``conversation``), each built through the shared ``_pending_item`` shape so the
-	resync endpoint and the ``run:end`` terminal cannot drift: a card missed on the
-	best-effort live push re-surfaces on the turn's (fenced, backstopped) terminal
-	without a manual reload. Item building never drops a record - only its cosmetic
-	summary can degrade (see ``_pending_item``)."""
-	return [
-		_pending_item(
-			token=r.get("token"),
-			tool=r.get("tool"),
-			args=r.get("args") or {},
-			preview=r.get("preview"),
-			conversation=r.get("conversation"),
-			run_id=r.get("run_id"),
-			expires_at=r.get("expires_at"),
+	"""Client-facing items for the owner's live cards (the resync endpoint and the
+	``run:end`` terminal), in the one ``_pending_item`` shape plus ``seq`` /
+	``recent`` (``with_recency``). A pending action's summary is the one stored at
+	park; a legacy card's is built here and degrades to "" rather than dropping the
+	card."""
+	items = []
+	for r in list_for_owner(owner, conversation=conversation, strict=strict):
+		if r.get("pending_action"):
+			items.append(
+				{k: r.get(k) for k in ("token", "tool", "preview", "summary", "conversation", "run_id")}
+				| {"expires_at": r["expires_at"], "created_at": r["created_at"]}
+			)
+			continue
+		items.append(
+			_pending_item(
+				token=r.get("token"),
+				tool=r.get("tool"),
+				args=r.get("args") or {},
+				preview=r.get("preview"),
+				conversation=r.get("conversation"),
+				run_id=r.get("run_id"),
+				expires_at=r.get("expires_at"),
+				created_at=r.get("created_at"),
+			)
 		)
-		for r in list_for_owner(owner, conversation=conversation, strict=strict)
+	return with_recency(items, strict=strict)
+
+
+def latest_human_seq(conversation: str) -> int | None:
+	"""The seq of the conversation's latest human user row. For the typed scope an
+	unset origin (a row older than the column) counts as human: a bare "yes" then
+	binds fewer cards, never more."""
+	return frappe.db.sql(
+		f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s AND role='user'"
+		" AND IFNULL(origin, '') IN %(o)s",
+		{"c": conversation, "o": ("", *HUMAN_ORIGINS)},
+	)[0][0]
+
+
+def with_recency(items: list[dict], *, strict: bool = False) -> list[dict]:
+	"""Stamp each item's ``seq`` (its chat display row) and ``recent``: parked after
+	the conversation's latest human message, so a bare typed "yes"/"no" may bind it
+	(decision 6). A card with no display row (conversation-less F1) is never recent."""
+	groups: dict[str, list[dict]] = {}
+	for it in items:
+		it["seq"], it["recent"] = None, False
+		if it.get("conversation") and it.get("token"):
+			groups.setdefault(it["conversation"], []).append(it)
+	try:
+		for conv, group in groups.items():
+			seqs = dict(
+				frappe.db.sql(
+					f"SELECT tool_call_id, seq FROM `tab{MSG}` WHERE conversation=%(c)s AND role='tool'"
+					" AND tool_call_id IN %(t)s",
+					{"c": conv, "t": tuple(i["token"] for i in group)},
+				)
+			)
+			latest = latest_human_seq(conv)
+			for it in group:
+				seq = seqs.get(it["token"])
+				it["seq"] = int(seq) if seq is not None else None
+				it["recent"] = seq is not None and (latest is None or seq > latest)
+	except _db_errors() as exc:
+		frappe.logger("jarvis.pending_confirm").error("card recency read failed: %s", type(exc).__name__)
+		if strict:
+			raise PendingConfirmStorageError("card recency read failed") from exc
+	return items
+
+
+def _supersedable(token: str, conversation: str) -> bool:
+	"""D7: the running turn's triggering message is a ``human`` / ``board_answer`` user
+	row (an unset origin is NOT human here) newer than this card's display row."""
+	from jarvis.chat import turn_message_binding
+
+	try:
+		msg = turn_message_binding.current_turn_message_id(conversation)
+	except Exception:
+		return False
+	if not msg:
+		return False
+	trigger = frappe.db.get_value(MSG, msg, ["conversation", "role", "origin", "seq"], as_dict=True)
+	if not trigger or trigger.conversation != conversation or trigger.role != "user":
+		return False
+	if trigger.origin not in HUMAN_ORIGINS:
+		return False
+	card = frappe.db.get_value(
+		MSG, {"conversation": conversation, "tool_call_id": token, "role": "tool"}, "seq"
+	)
+	return card is not None and trigger.seq > card
+
+
+def supersede_on_park(row, *, conversation: str, owner_user: str) -> bool:
+	"""``_park.SUPERSEDE_HOOK`` (D7), under park's conversation lock and never
+	committing: retire ``row`` as ``Superseded`` (SKIP LOCKED: a card another actor
+	holds stays and refuses the park), flip its chip, and end the autorun it paused
+	(A6). Park settles it after its commit (the DATA-quoted supersede note)."""
+	from jarvis.chat.pending_actions._store import PENDING, SUPERSEDED, _transition
+
+	if row.status != PENDING or row.conversation != conversation:
+		return False
+	if not _supersedable(row.name, conversation):
+		return False
+	if _transition(row.name, [PENDING], SUPERSEDED, reason_code="superseded") != "ok":
+		return False
+	frappe.db.sql(
+		f"UPDATE `tab{MSG}` SET tool_status='', action_outcome='superseded', pending_card=NULL,"
+		" content=%(content)s WHERE conversation=%(c)s AND tool_call_id=%(t)s AND tool_status='pending'",
+		{"c": conversation, "t": row.name, "content": f"{row.tool} → superseded"},
+	)
+	_end_paused_autorun(conversation)
+	return True
+
+
+def _end_paused_autorun(conversation: str) -> None:
+	"""A6 for supersede, without committing (park's transaction). The request-scoped
+	approval this very message armed ("..., confirm all") is its own, not the paused
+	run's, so it stays."""
+	from jarvis.chat import turn_message_binding
+
+	try:
+		trigger = turn_message_binding.current_turn_message_id(conversation) or ""
+	except Exception:
+		trigger = ""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Conversation` SET skill_autorun=0, skill_autorun_at=NULL,"
+		" skill_autorun_skill=NULL WHERE name=%(c)s AND skill_autorun=1",
+		{"c": conversation},
+	)
+	frappe.db.sql(
+		"UPDATE `tabJarvis Conversation` SET request_autorun=0, request_autorun_at=NULL,"
+		" request_autorun_msg=NULL WHERE name=%(c)s AND request_autorun=1"
+		" AND IFNULL(request_autorun_msg, '') != %(m)s",
+		{"c": conversation, "m": trigger},
+	)
+
+
+def blocks_new_card(owner: str, conversation: str) -> bool:
+	"""The gate's single-flight (F16), strict on ``conversation`` (a conversation-less
+	card never blocks here): a live card the next park could not supersede (D7), a
+	running one, or a live legacy token. Raises ``PendingConfirmStorageError`` when
+	the minting store can't answer."""
+	cards = [
+		c
+		for c in list_for_owner(owner, conversation=conversation, strict=True)
+		if c.get("conversation") == conversation
 	]
+	if any(not (c.get("pending_action") and _supersedable(c["token"], conversation)) for c in cards):
+		return True
+	return bool(_select("conversation=%(c)s AND status='Executing'", {"c": conversation}, strict=True))
 
 
 def clear_for_conversation(owner: str, conversation: str, run_id: str | None = None) -> int:
-	"""Delete all of ``owner``'s live tokens STRICTLY bound to ``conversation``
-	and return the count cleared. Conversation-less tokens ("") are left alone -
-	they carry no conversation binding and may belong to another view. Used when a
-	run is stopped so its parked confirmation cards cannot linger or resurface on
-	resync (F6). Best-effort: a token consumed concurrently just isn't counted.
-
-	``run_id``: when given AND the token itself carries a run_id, only that run's
-	cards are swept - so stopping one run does not consume a sibling run's
-	still-valid card. Nothing populates the token's run_id today (it is always
-	""), so the filter no-ops and the whole conversation is swept, which is the
-	intended behaviour for the single-run-per-conversation case."""
+	"""The Stop / armed-macro-stop sweep: retire the cards strictly bound to
+	``conversation`` and return how many. Pending actions go through
+	``pending_actions.cancel_for_conversation``, which COMMITS the caller's
+	transaction first (call this at a safe commit point) and also takes the
+	conversation off held writes it waits on; legacy tokens as before (``run_id``
+	scopes only those). Best-effort: never raises."""
 	if not owner or not conversation:
 		return 0
-	n = 0
-	for rec in list_for_owner(owner, conversation=conversation):
-		if rec.get("conversation") != conversation:
-			continue  # list_for_owner surfaces conv-less tokens under any filter
-		if run_id and rec.get("run_id") and rec.get("run_id") != run_id:
-			continue  # a sibling run's card (run_id is "" today, so this no-ops)
+	cleared = 0
+	if _pa_ready():
+		from jarvis.chat import pending_actions
+
 		try:
-			if consume(rec["token"], owner=owner, conversation=conversation) is not None:
-				n += 1
-		except PendingConfirmStorageError as exc:
-			frappe.logger("jarvis.pending_confirm").error(
-				"conversation confirmation cleanup failed; token retained when possible: %s",
-				type(exc).__name__,
+			cleared += len(pending_actions.cancel_for_conversation(conversation))
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				title="jarvis.pending_confirm.conversation_cleanup_failed", message=frappe.get_traceback()
 			)
-	return n
+	return cleared + legacy.clear_for_conversation(owner, conversation, run_id)
+
+
+def cards_open_gauge() -> int:
+	"""Open cards across both stores (observability only)."""
+	count = legacy.cards_open_gauge()
+	if _pa_ready():
+		try:
+			count += frappe.db.sql(
+				"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind='chat' AND status='Pending'"
+			)[0][0]
+		except Exception:
+			pass
+	return count

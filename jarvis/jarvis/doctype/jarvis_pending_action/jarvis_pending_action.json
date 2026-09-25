@@ -1,0 +1,348 @@
+{
+ "actions": [],
+ "allow_import": 0,
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-09-24 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "kind",
+  "status",
+  "reason_code",
+  "reason",
+  "tool",
+  "summary",
+  "card",
+  "preview",
+  "origin_conversation",
+  "conversation",
+  "adopted_conversation",
+  "owner_user",
+  "exec_user",
+  "decided_by",
+  "skill_docname",
+  "run_id",
+  "batch_id",
+  "open_key",
+  "dedup_keys",
+  "executing_at",
+  "decided_at",
+  "result_doctype",
+  "result_name",
+  "settled",
+  "settled_at",
+  "settle_attempts",
+  "needs_input",
+  "edited",
+  "collecting",
+  "collecting_turn",
+  "record_count",
+  "question_count",
+  "sheet_counts",
+  "needs_fix",
+  "sheet_outcome",
+  "apply_token",
+  "apply_request",
+  "apply_errors",
+  "stop_requested",
+  "sealed_call",
+  "sealed_settlement",
+  "waiters"
+ ],
+ "fields": [
+  {
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Kind",
+   "options": "chat\nfile_box_held\nfile_box_sheet",
+   "reqd": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Pending\nExecuting\nExecuted\nFailed\nDiscarded\nCancelled\nSuperseded",
+   "reqd": 1
+  },
+  {
+   "description": "Fixed bench code for how the row ended (or why a click was refused).",
+   "fieldname": "reason_code",
+   "fieldtype": "Select",
+   "label": "Reason Code",
+   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck"
+  },
+  {
+   "description": "Fixed bench text only; never tool args or error text.",
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason"
+  },
+  {
+   "fieldname": "tool",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Tool"
+  },
+  {
+   "description": "Plain text (HTML stripped before sealing), capped at 280 characters.",
+   "fieldname": "summary",
+   "fieldtype": "Small Text",
+   "ignore_xss_filter": 1,
+   "label": "Summary",
+   "read_only": 1,
+   "report_hide": 1
+  },
+  {
+   "description": "The permission-filtered confirmation card; bound into the seal by hash, so it is stored verbatim and rendered as text.",
+   "fieldname": "card",
+   "fieldtype": "JSON",
+   "ignore_xss_filter": 1,
+   "label": "Card",
+   "read_only": 1,
+   "report_hide": 1
+  },
+  {
+   "description": "The park-time preview; bound into the seal by hash.",
+   "fieldname": "preview",
+   "fieldtype": "JSON",
+   "ignore_xss_filter": 1,
+   "label": "Preview",
+   "read_only": 1,
+   "report_hide": 1
+  },
+  {
+   "description": "The conversation the action was proposed in. Immutable and sealed.",
+   "fieldname": "origin_conversation",
+   "fieldtype": "Data",
+   "label": "Origin Conversation"
+  },
+  {
+   "description": "Current primary conversation (a held row promotes the next waiter). Empty for a conversation-less chat card.",
+   "fieldname": "conversation",
+   "fieldtype": "Link",
+   "label": "Conversation",
+   "options": "Jarvis Conversation"
+  },
+  {
+   "description": "The owned conversation a conversation-less chat card was confirmed from.",
+   "fieldname": "adopted_conversation",
+   "fieldtype": "Data",
+   "label": "Adopted Conversation"
+  },
+  {
+   "description": "Data, not Link: a User rename must not rewrite a sealed identity.",
+   "fieldname": "owner_user",
+   "fieldtype": "Data",
+   "label": "Owner User"
+  },
+  {
+   "description": "The identity the sealed call runs as.",
+   "fieldname": "exec_user",
+   "fieldtype": "Data",
+   "label": "Exec User"
+  },
+  {
+   "fieldname": "decided_by",
+   "fieldtype": "Data",
+   "label": "Decided By"
+  },
+  {
+   "fieldname": "skill_docname",
+   "fieldtype": "Data",
+   "label": "Skill Docname"
+  },
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run ID"
+  },
+  {
+   "description": "Groups a typed multi-card approval so it settles with one continuation.",
+   "fieldname": "batch_id",
+   "fieldtype": "Data",
+   "label": "Batch ID",
+   "search_index": 1
+  },
+  {
+   "description": "HMAC(owner + dedup key); NULLed by every terminal transition.",
+   "fieldname": "open_key",
+   "fieldtype": "Data",
+   "label": "Open Key",
+   "unique": 1
+  },
+  {
+   "description": "Held rows: HMACs of the per-item dedup keys (the waiter subset rule). Kept after the row ends.",
+   "fieldname": "dedup_keys",
+   "fieldtype": "Small Text",
+   "label": "Dedup Keys",
+   "read_only": 1
+  },
+  {
+   "fieldname": "executing_at",
+   "fieldtype": "Datetime",
+   "label": "Executing At"
+  },
+  {
+   "fieldname": "decided_at",
+   "fieldtype": "Datetime",
+   "label": "Decided At"
+  },
+  {
+   "fieldname": "result_doctype",
+   "fieldtype": "Data",
+   "label": "Result DocType"
+  },
+  {
+   "fieldname": "result_name",
+   "fieldtype": "Data",
+   "label": "Result Name"
+  },
+  {
+   "default": "0",
+   "fieldname": "settled",
+   "fieldtype": "Check",
+   "label": "Settled"
+  },
+  {
+   "fieldname": "settled_at",
+   "fieldtype": "Datetime",
+   "label": "Settled At"
+  },
+  {
+   "default": "0",
+   "fieldname": "settle_attempts",
+   "fieldtype": "Int",
+   "label": "Settle Attempts"
+  },
+  {
+   "description": "Held rows only: [{doc_index, doctype, parentfield?, idx?, fieldname}] still to fill.",
+   "fieldname": "needs_input",
+   "fieldtype": "JSON",
+   "label": "Needs Input"
+  },
+  {
+   "default": "0",
+   "fieldname": "edited",
+   "fieldtype": "Check",
+   "label": "Edited"
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: 1 while the run is still adding records and questions; sealed (0) at turn end.",
+   "fieldname": "collecting",
+   "fieldtype": "Check",
+   "label": "Collecting",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the name of the Jarvis Chat Turn (its run_id) that opened the sheet; only that turn's end seals it.",
+   "fieldname": "collecting_turn",
+   "fieldtype": "Data",
+   "label": "Collecting Turn",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: records on the sheet (read without unsealing).",
+   "fieldname": "record_count",
+   "fieldtype": "Int",
+   "label": "Record Count",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: Approval Requests linked to the sheet.",
+   "fieldname": "question_count",
+   "fieldtype": "Int",
+   "label": "Question Count",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {doctype: records} for the board and File Box counts (read without the card).",
+   "fieldname": "sheet_counts",
+   "fieldtype": "JSON",
+   "label": "Sheet Counts",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {record index: sanitized error} for records that failed validation twice; a human fixes or skips them.",
+   "fieldname": "needs_fix",
+   "fieldtype": "JSON",
+   "label": "Needs Fix",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: per-record outcomes and question answers, kept after the seals are dropped (the resume message).",
+   "fieldname": "sheet_outcome",
+   "fieldtype": "JSON",
+   "label": "Sheet Outcome",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the running apply's token (its background job id); every job exit is a compare-and-set on it.",
+   "fieldname": "apply_token",
+   "fieldtype": "Data",
+   "label": "Apply Token",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: the validated decisions of the last apply (kept when it bounces back to Pending, so the approver's edits survive).",
+   "fieldname": "apply_request",
+   "fieldtype": "JSON",
+   "label": "Apply Request",
+   "permlevel": 1
+  },
+  {
+   "description": "Server-only. File Box sheets: {record index: error} from the last apply that rolled back (nothing was created).",
+   "fieldname": "apply_errors",
+   "fieldtype": "JSON",
+   "label": "Apply Errors",
+   "permlevel": 1
+  },
+  {
+   "default": "0",
+   "description": "Server-only. File Box sheets: the run was stopped while its sheet was being applied; the apply ends without a resume.",
+   "fieldname": "stop_requested",
+   "fieldtype": "Check",
+   "label": "Stop Requested",
+   "permlevel": 1
+  },
+  {
+   "description": "Fernet envelope of the exact call. NULLed at settle.",
+   "fieldname": "sealed_call",
+   "fieldtype": "Long Text",
+   "label": "Sealed Call",
+   "permlevel": 1
+  },
+  {
+   "description": "Fernet envelope of the outcome. NULLed at settle.",
+   "fieldname": "sealed_settlement",
+   "fieldtype": "Long Text",
+   "label": "Sealed Settlement",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "waiters",
+   "fieldtype": "Table",
+   "label": "Waiters",
+   "options": "Jarvis Pending Action Waiter"
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-25 03:00:00.000000",
+ "module": "Jarvis",
+ "name": "Jarvis Pending Action",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
