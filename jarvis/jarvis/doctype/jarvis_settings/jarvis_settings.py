@@ -940,6 +940,7 @@ class JarvisSettings(Document):
 			build_pool_payload,
 			compute_pool_mode,
 			compute_proxy_active,
+			lone_direct_handover_due,
 			validate_models,
 		)
 
@@ -1029,6 +1030,14 @@ class JarvisSettings(Document):
 				frappe.logger().debug(
 					"jarvis_settings: skipping async pool enqueue; caller pushes synchronously"
 				)
+			elif lone_direct_handover_due(self):
+				# jarvis#1425: a pooled workspace narrowed to one ChatGPT account.
+				# Checked BEFORE the redundancy gate so no save can push the pool
+				# spec while a handover is due. Background saves still only fire it
+				# when the config changed or the last sync did not end ok (the same
+				# rule _pool_sync_is_redundant encodes).
+				if not self._pool_sync_is_redundant():
+					self._enqueue_handover()
 			elif self._pool_sync_is_redundant():
 				frappe.logger().debug(
 					"jarvis_settings: skipping pool sync enqueue; pool state unchanged and last sync ok"
@@ -2795,7 +2804,15 @@ def request_resync(settings) -> str:
 	rule for a re-push of UNCHANGED creds after a non-ok status is "restart" anyway,
 	because a hot secret rotation cannot repair a container that never took the
 	config."""
-	from jarvis.jarvis.pool_serialize import compute_pool_mode
+	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
+
+	if lone_direct_handover_due(settings):
+		# jarvis#1425: a due handover pre-empts both legs - the pool leg would push
+		# the very spec the handover is retiring, and this settings config is still
+		# pool-shaped, so leaving this check out would fall into the pool branch
+		# below.
+		settings._enqueue_handover()
+		return "direct"
 
 	if compute_pool_mode(settings):
 		settings._enqueue_pool_sync()
@@ -2990,9 +3007,18 @@ def reconcile_pending_llm_sync() -> None:
 		if not admin_api_key and not customer_pw:
 			return
 
-		from jarvis.jarvis.pool_serialize import compute_pool_mode, has_configured_subscription_model
+		from jarvis.jarvis.pool_serialize import (
+			compute_pool_mode,
+			has_configured_subscription_model,
+			lone_direct_handover_due,
+		)
 
 		status = settings.get("last_sync_status") or ""
+		# jarvis#1425: a due handover is re-driven, never stamped: admin reports the
+		# still-pooled tenant Ready, and stamping would close a move that never ran.
+		if lone_direct_handover_due(settings) and status.startswith("pending:"):
+			settings._enqueue_handover()
+			return
 		# The evidence marker follows the SYNC LEG, so this is pool mode, not the
 		# narrower proxy_active (an agent-direct pool stamps llm_pool_synced_at).
 		pool_mode = compute_pool_mode(settings)
