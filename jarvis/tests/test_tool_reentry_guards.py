@@ -247,6 +247,21 @@ class TestRunMethodDenylist(FrappeTestCase):
 						run_method(method, args)
 				call.assert_not_called()
 
+	def test_human_decision_endpoints_are_refused_without_running(self):
+		for method, args in (
+			("jarvis.chat.custom_skills_api.decide_skill_promotion", {"request_name": "zz", "approve": 1}),
+			("jarvis.chat.learned_api.decide_promotion", {"name": "zz", "approve": 1}),
+			("jarvis.chat.learned_api.approve_learned_pattern", {"name": "zz"}),
+			("jarvis.chat.learned_api.batch_approve", {"names": ["zz"]}),
+			("jarvis.chat.learned_api.apply_learned_skills", {}),
+			("jarvis.chat.agents_api.promote_installation", {"installation": "zz"}),
+		):
+			with self.subTest(method=method):
+				with patch("frappe.call") as call:
+					with self.assertRaises(PermissionDeniedError):
+						run_method(method, args)
+				call.assert_not_called()
+
 	def test_alias_resolves_to_the_denied_function(self):
 		from jarvis.chat import actions_api, greeting
 
