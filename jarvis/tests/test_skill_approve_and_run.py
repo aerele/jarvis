@@ -506,11 +506,15 @@ class TestInvokedSkillSlugs(FrappeTestCase):
 		)
 
 
-def _mk_org_skill(slug: str, *, armed: bool = False, allowed_roles=None) -> str:
+def _mk_org_skill(
+	slug: str, *, armed: bool = False, allowed_roles=None, source_skill: str | None = None
+) -> str:
 	"""An enabled, unrestricted Org-scope skill (or role-restricted when
 	``allowed_roles`` is given), owned by Administrator - the shape a real skill
-	promotion (_materialize_promotion) leaves behind. The engine flag bypasses
-	the reviewer-only scope-creation guard, which is proven elsewhere."""
+	promotion (_materialize_promotion) leaves behind. ``source_skill`` links it
+	to a private row as its promotion lineage, exactly as materialize stamps it.
+	The engine flag bypasses the reviewer-only scope-creation guard, which is
+	proven elsewhere."""
 	prev = frappe.flags.jarvis_pattern_engine
 	frappe.flags.jarvis_pattern_engine = True
 	try:
@@ -523,6 +527,7 @@ def _mk_org_skill(slug: str, *, armed: bool = False, allowed_roles=None) -> str:
 				"scope": "Org",
 				"user_invocable": 1,
 				"allowed_roles": [{"role": r} for r in (allowed_roles or [])],
+				"source_skill": source_skill,
 			}
 		)
 		doc.insert(ignore_permissions=True)
@@ -563,13 +568,37 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		_mk_org_skill("orgres-unarmed", armed=False)
 		self.assertIsNone(resolve_armed_skill_docname("orgres-unarmed", SLUGSET_USER_B))
 
-	def test_own_row_still_takes_precedence_over_an_armed_org_copy(self):
-		"""The owner's own row shadows the org-wide tier exactly as it shadows
-		the shared/role tier - unchanged precedence, org-wide is the last
-		fallback only. An unarmed own row still fails safe (no fallthrough)."""
+	def test_unrelated_own_row_still_shadows_an_armed_org_copy(self):
+		"""An own row with NO promotion lineage to the org-wide row (a genuinely
+		unrelated skill that happens to share a slug) still shadows it exactly
+		as it shadows the shared/role tier - unchanged precedence. An unarmed
+		own row still fails safe (no fallthrough) when the two are unrelated."""
 		_mk_slug_skill(SLUGSET_USER_A, "orgres-shadow")
-		_mk_org_skill("orgres-shadow", armed=True)
+		_mk_org_skill("orgres-shadow", armed=True)  # no source_skill: unrelated
 		self.assertIsNone(resolve_armed_skill_docname("orgres-shadow", SLUGSET_USER_A))
+
+	def test_promoted_lineage_resolves_to_the_org_copy_when_only_it_is_armed(self):
+		"""issue #580, the arm-after-promote order: the requester's own row (the
+		promotion source) was never armed; an admin armed the shared copy AFTER
+		promoting it. The org copy - the body actually pushed and run - must
+		supersede the stale own row, not be shadowed by it."""
+		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-orgonly")
+		shared = _mk_org_skill("orgres-lineage-orgonly", armed=True, source_skill=priv)
+		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-orgonly", SLUGSET_USER_A), shared)
+
+	def test_promoted_lineage_resolves_to_the_org_copy_when_both_are_armed(self):
+		"""issue #580, the arm-then-promote order: the source was armed BEFORE
+		promotion (and _materialize_promotion's carryover keeps it armed after).
+		Both halves of the same lineage being armed must resolve cleanly to the
+		org copy, not trip the ambiguity guard meant for unrelated duplicates."""
+		priv = _make_skill(SLUGSET_USER_A, armed=True, name="orgres-lineage-botharmed")
+		shared = _mk_org_skill("orgres-lineage-botharmed", armed=True, source_skill=priv)
+		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-botharmed", SLUGSET_USER_A), shared)
+
+	def test_promoted_lineage_with_neither_armed_does_not_resolve(self):
+		priv = _mk_slug_skill(SLUGSET_USER_A, "orgres-lineage-neither")
+		_mk_org_skill("orgres-lineage-neither", armed=False, source_skill=priv)
+		self.assertIsNone(resolve_armed_skill_docname("orgres-lineage-neither", SLUGSET_USER_A))
 
 	def test_role_restricted_org_row_is_not_an_org_wide_candidate(self):
 		"""A role-restricted Org row (allowed_roles set) is reached via the

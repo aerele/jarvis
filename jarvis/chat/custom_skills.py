@@ -280,6 +280,26 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	return {s for s in slugs if s in enabled}
 
 
+def _supersede_promoted_lineage(own: dict, *pools: dict, sources: dict) -> None:
+	"""Collapse a promoted lineage in place: if a row in ``own`` was the SOURCE
+	of a shared/role/org-wide row (``source_skill``, stamped by
+	:func:`jarvis.chat.custom_skills_api._materialize_promotion`), that
+	descendant is the SAME conceptual skill, not a second independent claim -
+	it is the copy actually pushed to the container and run, while the private
+	original becomes a secondary, usually-stale leftover (issue #580: promotion
+	deliberately leaves it intact). Replace the stale own entry with the
+	descendant's (name, armed) and drop the descendant from its own pool, so
+	precedence and the ambiguity count both see ONE candidate for the lineage,
+	not two. A row without a recorded source (an unrelated same-named skill
+	elsewhere) is untouched and still shadows/competes exactly as before."""
+	for pool in pools:
+		for desc_name, src_name in list(sources.items()):
+			if desc_name in pool and src_name in own:
+				armed = pool.pop(desc_name)
+				del own[src_name]
+				own[desc_name] = armed
+
+
 def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
 	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
@@ -292,12 +312,17 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 	enabled row wins the invocation; failing that, a shared or role-scoped
 	enabled row; failing that, an unrestricted Org-wide row (issue #580 - an
 	Org-promoted skill has no per-user owner/share/role row at all, so without
-	this tier it could never resolve for anyone but the system owner).
+	this tier it could never resolve for anyone but the system owner). A
+	shared/org-wide row that is a PROMOTED COPY of the owner's own row
+	supersedes it instead of competing with it (:func:`_supersede_promoted_lineage`
+	- issue #580 again: without this, an admin who arms either half of a
+	promoted lineage independently of the other could never get an offer, or
+	got a false "ambiguous" refusal when both happened to be armed).
 	``allow_approve_run`` is read LIVE off the resolved row and must be 1.
-	Fail-safe on ambiguity - a slug can map to several rows across owned/shared/
-	role-scoped/org-wide, so ``None`` when the winning tier holds 2+ rows OR when
-	2+ ARMED invocable rows exist anywhere (an ambiguous arm cannot authorize a
-	run). O(1)-ish: a few indexed reads, no per-skill N+1."""
+	Fail-safe on ambiguity - a slug can map to several UNRELATED rows across
+	owned/shared/role-scoped/org-wide, so ``None`` when the winning tier holds
+	2+ rows OR when 2+ ARMED invocable rows exist anywhere (an ambiguous arm
+	cannot authorize a run). O(1)-ish: a few indexed reads, no per-skill N+1."""
 	# The owner's OWN enabled rows named `slug`.
 	own = {
 		r.name: int(r.allow_approve_run or 0)
@@ -308,8 +333,11 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 		)
 	}
 	# Enabled rows SHARED with the owner, or reachable via a role the owner holds,
-	# named `slug` (deduped - a row can be both shared and role-scoped).
+	# named `slug` (deduped - a row can be both shared and role-scoped). Also
+	# tracks each row's `source_skill` (its promotion lineage, if any) for the
+	# supersession pass below.
 	shared_role: dict[str, int] = {}
+	lineage: dict[str, str] = {}
 	shared_names = [
 		r.parent
 		for r in frappe.get_all(
@@ -322,12 +350,16 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 		for r in frappe.get_all(
 			"Jarvis Custom Skill",
 			filters={"enabled": 1, "name": ["in", shared_names], "skill_name": slug},
-			fields=["name", "allow_approve_run"],
+			fields=["name", "allow_approve_run", "source_skill"],
 		):
 			shared_role[r.name] = int(r.allow_approve_run or 0)
-	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run"]):
+			if r.source_skill:
+				lineage[r.name] = r.source_skill
+	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run", "source_skill"]):
 		if r.skill_name == slug:
 			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
+			if r.get("source_skill"):
+				lineage.setdefault(r.name, r.source_skill)
 
 	# Unrestricted Org rows named `slug` (issue #580): pushed into EVERY
 	# container (:func:`_pushable_org_rows`, the same set build_push_payload
@@ -337,15 +369,19 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 	# resolve to an armed row for anyone but its owner, so its "Approve & run"
 	# offer could never fire. Computed unconditionally (like shared_role above)
 	# so the ambiguity guard below still sees every candidate row.
-	org_wide: dict[str, int] = {
-		r.name: int(r.allow_approve_run or 0)
-		for r in _pushable_org_rows(fields=("name", "skill_name", "allow_approve_run"))
-		if r.skill_name == slug
-	}
+	org_wide: dict[str, int] = {}
+	for r in _pushable_org_rows(fields=("name", "skill_name", "allow_approve_run", "source_skill")):
+		if r.skill_name == slug:
+			org_wide[r.name] = int(r.allow_approve_run or 0)
+			if r.source_skill:
+				lineage.setdefault(r.name, r.source_skill)
 
-	# Precedence: the owner's own row wins; then a shared/role row; an
-	# unrestricted Org row (invocable by everyone, so the weakest per-identity
-	# claim) is the last fallback.
+	_supersede_promoted_lineage(own, shared_role, org_wide, sources=lineage)
+
+	# Precedence: the owner's own row wins (a promoted descendant now stands in
+	# for its stale source, per the supersession pass above); then a shared/role
+	# row; an unrestricted Org row (invocable by everyone, so the weakest
+	# per-identity claim) is the last fallback.
 	tier = own or shared_role or org_wide
 	if len(tier) != 1:
 		return None  # no candidate, or an ambiguous winning tier -> fail safe
