@@ -2200,6 +2200,63 @@ class TestPublishFencing(_PumpTestCase):
 		self.assertEqual(payload["message_id"], "msg1")
 		self.assertEqual(payload["pump_epoch"], ctx.epoch)
 
+	def test_on_step_publishes_run_step(self):
+		"""The live step line: ``on_step`` (relay_mux ``step`` lane event)
+		publishes a fenced ``run:step`` with the step text. Nothing is stored."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_step1",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_step1",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		captured = []
+		frappe.cache().delete_value(pump._run_steps_key("pmp_step1"))
+		with patch.object(ts, "publish_to_user", side_effect=lambda u, p: captured.append(p)):
+			handler.on_step(4, "Checking overdue invoices", "Checking overdue invoices.")
+			handler.on_step(5, "Now the customers", None)
+		self.assertEqual(len(captured), 2)
+		payload = captured[0]
+		self.assertEqual(payload["kind"], "run:step")
+		self.assertEqual(payload["text"], "Checking overdue invoices")
+		self.assertEqual(payload["conversation_id"], conv)
+		self.assertEqual(payload["run_id"], "pmp_step1")
+		self.assertEqual(payload["message_id"], "msg1")
+		self.assertEqual(payload["event_seq"], 4)
+		self.assertEqual(payload["pump_epoch"], ctx.epoch)
+		# Only step text that is also in the reply is kept for a hop re-attach.
+		self.assertEqual(pump._read_run_steps("pmp_step1"), ["Checking overdue invoices."])
+		frappe.cache().delete_value(pump._run_steps_key("pmp_step1"))
+
+	def test_on_delta_stores_raw_text_and_publishes_shown(self):
+		"""The stored mirror keeps exactly what streamed (a stop or error mid-lookup
+		saves it as before); the chat is sent the text with step text removed."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_shown1",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_shown1",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		stored, published = [], []
+		with (
+			patch.object(ts, "apply_delta", side_effect=lambda **kw: stored.append(kw["content"]) or True),
+			patch.object(ts, "publish_to_user", side_effect=lambda u, p: published.append(p)),
+		):
+			handler.on_delta(3, "Checking.\n\nThe answer", "The answer", "The answer")
+		self.assertEqual(stored, ["Checking.\n\nThe answer"])
+		self.assertEqual([p["text"] for p in published if p["kind"] == "assistant:delta"], ["The answer"])
+
 
 # --------------------------------------------------------------------------- #
 # CDX-4 — watchdog EFFECT scan (recover a lost enqueue_finalize)
