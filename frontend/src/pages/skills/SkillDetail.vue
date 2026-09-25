@@ -301,6 +301,7 @@ import PromotionRequestDialog from "@/components/skills/PromotionRequestDialog.v
 import PromotionStatusChip from "@/components/skills/PromotionStatusChip.vue";
 import { getSkillsAreaCaps } from "@/api/personalise";
 import { requestSkillPromotion, mySkillPromotion } from "@/api/skills";
+import { isWiderScope } from "./promotionScope";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo } from "@/utils/datetime";
 import { useJarvisTheme } from "@/theme";
@@ -388,7 +389,6 @@ const armDescription = computed(() => armToggleDescription(savedArmed.value, can
 // ── promotion (requester side, Skills-area promotion surfacing) ───────────────
 // The owner of a private (User-scope) skill can ask a reviewer to widen it to a
 // role or the whole org. Learned rows are managed by the board, not promotion.
-const SCOPE_RANK = { User: 0, Role: 1, Org: 2 };
 const myPromo = ref(null); // {} | most-recent request for THIS skill (status chip)
 // The skill's REAL current shared scope by lineage (#595), from my_skill_promotion
 // - not skill.value.scope, which stays "User" forever on the private source even
@@ -404,7 +404,7 @@ const canPromote = computed(
 		canEdit.value &&
 		!!skill.value &&
 		!skill.value.managed_by_learning &&
-		(SCOPE_RANK[myEffectiveScope.value] ?? 0) < SCOPE_RANK.Org
+		isWiderScope("Org", myEffectiveScope.value)
 );
 // Offer the action only when there is no request in flight; a Pending request
 // shows the status chip instead (a rejected one may be re-requested).

@@ -115,6 +115,7 @@
 import { ref, computed, watch } from "vue";
 import { Button, Dialog, FeatherIcon, FormControl, toast } from "frappe-ui";
 import { promotableTargetRoles } from "@/api/skills";
+import { isWiderScope } from "@/pages/skills/promotionScope";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -133,15 +134,13 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue", "submit"]);
 
-const SCOPE_RANK = { User: 0, Role: 1, Org: 2 };
 const ALL_TO_SCOPE_OPTIONS = [
 	{ label: "A role (a team)", value: "Role" },
 	{ label: "The whole organisation", value: "Org" },
 ];
-const TO_SCOPE_OPTIONS = computed(() => {
-	const floor = SCOPE_RANK[props.minScope] ?? -1;
-	return ALL_TO_SCOPE_OPTIONS.filter((o) => SCOPE_RANK[o.value] > floor);
-});
+const TO_SCOPE_OPTIONS = computed(() =>
+	ALL_TO_SCOPE_OPTIONS.filter((o) => isWiderScope(o.value, props.minScope))
+);
 // noun-keyed verb so the shared dialog reads naturally for a skill ("use") and
 // for a wiki page ("view") — SPX-10.
 const VERB = { skill: "use", page: "view" };

@@ -114,6 +114,12 @@ class PromotionLifecycleBase(FrappeTestCase):
 
 class TestDuplicatePendingRequestRejected(PromotionLifecycleBase):
 	def test_second_pending_request_for_same_skill_is_refused(self):
+		# The exists() check is now preceded by a `for_update` lock on the source
+		# skill row (#595 code review, TOCTOU): a concurrent second request blocks
+		# on that lock until the first's transaction commits, then sees the first
+		# request's COMMITTED Pending row. This sequential call exercises the same
+		# code path (lock -> exists() -> throw); a real concurrency test would need
+		# two threads/connections, which this suite doesn't set up.
 		from jarvis.chat import custom_skills_api
 
 		skill = _mk_skill(USER_A, f"{PFX}-dup")
@@ -221,3 +227,43 @@ class TestMySkillPromotionEffectiveScope(PromotionLifecycleBase):
 		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "scope"), "User")
 		self.assertEqual(mine["effective_scope"], "Org")
 		self.assertEqual(mine["status"], "Approved")
+
+	def test_non_owner_gets_nothing_even_once_the_skill_is_shared(self):
+		# #595 code review: my_skill_promotion used to compute effective_scope for
+		# ANY skill name with no ownership check - an info disclosure of another
+		# user's private skill's shared-lineage state. A non-owner must get the
+		# same bare {} whether or not the skill has ever been promoted.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-notmine")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req["request"], 1)
+
+		with _as(REVIEWER_2):
+			self.assertEqual(custom_skills_api.my_skill_promotion(skill.name), {})
+
+
+class TestApprovalAfterSourceDeleted(PromotionLifecycleBase):
+	def test_approval_refused_with_clear_message_when_source_skill_deleted(self):
+		# #595 code review: a source skill deleted between request and decision
+		# must never default to "no scope = Org" (which used to surface the
+		# misleading "already shared at Org scope or wider") - it gets its own
+		# clear, short message instead, and the reviewer is left to reject.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-deleted")
+		with _as(USER_A):
+			req = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		frappe.delete_doc(SKILL, skill.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+		with _as(REVIEWER):
+			with self.assertRaisesRegex(frappe.ValidationError, "was deleted"):
+				custom_skills_api.decide_skill_promotion(req["request"], 1)
+		# Still Pending - the reviewer can reject it instead.
+		self.assertEqual(frappe.db.get_value(SKILL_PROMO, req["request"], "status"), "Pending")
+		with _as(REVIEWER):
+			rejected = custom_skills_api.decide_skill_promotion(req["request"], 0, note="skill gone")
+		self.assertEqual(rejected["status"], "Rejected")
