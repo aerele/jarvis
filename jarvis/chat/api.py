@@ -927,6 +927,16 @@ def archive_conversation(conversation: str) -> dict:
 	frappe.db.commit()
 	# Decision 12: archiving cancels its pending chat cards (held rows just stop
 	# waiting). The archive itself is already committed; this must not undo it.
+	# A File Box run is signalled first, like Stop: a racing write opens no fresh sheet.
+	if doc.file_box:
+		try:
+			from jarvis.chat import turn_message_binding
+
+			turn_message_binding.request_run_cancel(doc.name)
+		except Exception:
+			frappe.log_error(
+				title="jarvis.pending_action.archive_signal_failed", message=frappe.get_traceback()
+			)
 	try:
 		from jarvis.chat import pending_actions
 
@@ -1833,6 +1843,16 @@ def send_message(
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_skill_autorun(conversation)
+
+	# I1 precedent (jarvis.chat.actions_api._open_skill_run): a File Box Stop sets a
+	# 120s run-cancel signal; a leftover one must not refuse THIS fresh turn's first
+	# sheet write (Stop -> Re-run within the window). clear_skill_autorun above only
+	# fires for an armed skill run, so a plain File Box conversation needs its own
+	# clear here, at the same "a real turn is about to be admitted" point.
+	if conv_doc.file_box:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.clear_run_cancel(conversation)
 
 	# A genuine new top-level message also ENDS any request-scoped "confirm all" run
 	# (design Layer B): the prior request is over, so its bulk approval must never carry
@@ -3089,6 +3109,17 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 			pump.request_cancel_conversation(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run pump cancel", message=frappe.get_traceback())
+	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
+	# independent run-cancel signal so an in-flight skill auto-run chain hard-stops
+	# at the bench within one covered write - in BOTH pump and legacy mode, and
+	# independent of whether the container honours the chat_abort below. Best-effort.
+	# Set before the sweeps: a File Box write racing them opens no fresh sheet.
+	try:
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.request_run_cancel(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run run-cancel signal", message=frappe.get_traceback())
 	# F6: a stopped run's parked cards must not linger or resurface on resync.
 	# Sweep this owner's live confirmation tokens for the conversation (best-effort).
 	try:
@@ -3115,7 +3146,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 			frappe.log_error(title="jarvis.pending_action.stop_drop_failed", message=frappe.get_traceback())
 	# Layer B: Halt also ENDS a request-scoped "confirm all" run, so its remaining
 	# fan-out re-cards. In its OWN try/except (not coupled to the token sweep above): the
-	# run-cancel signal below has a shorter TTL than request_autorun (900s), so if the
+	# run-cancel signal above has a shorter TTL than request_autorun (900s), so if the
 	# sweep raised on a DB hiccup and skipped this, a covered write in the gap could run
 	# uncarded. This explicit clear must fire regardless of the sweep's outcome.
 	try:
@@ -3124,16 +3155,6 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		api._request_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run request_autorun clear", message=frappe.get_traceback())
-	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
-	# independent run-cancel signal so an in-flight skill auto-run chain hard-stops
-	# at the bench within one covered write - in BOTH pump and legacy mode, and
-	# independent of whether the container honours the chat_abort above. Best-effort.
-	try:
-		from jarvis.chat import turn_message_binding
-
-		turn_message_binding.request_run_cancel(conversation)
-	except Exception:
-		frappe.log_error(title="stop_run run-cancel signal", message=frappe.get_traceback())
 	if not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")

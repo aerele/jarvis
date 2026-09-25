@@ -7,7 +7,7 @@ vi.mock("@/api", () => ({ listWikiWriteProposals: vi.fn() }));
 
 import * as approvals from "@/api/approvals";
 import * as api from "@/api";
-import { useActionRows, filterActionRows, actionRowType } from "./useActionRows";
+import { useActionRows, filterActionRows, actionRowType, actionRowTypes } from "./useActionRows";
 
 const held = (over = {}) => ({
 	name: "PA-1",
@@ -42,6 +42,25 @@ const wiki = (over = {}) => ({
 	dropper: "asha@example.com",
 	creation: "2026-09-01 11:00:00",
 	preview: { slug: "party-fake-co", page_type: "Reference", append_md: "note" },
+	...over,
+});
+
+const sheet = (over = {}) => ({
+	name: "PA-S1",
+	kind: "file_box_sheet",
+	status: "Pending",
+	summary: "Approval sheet: loreal.pdf",
+	file_name: "loreal.pdf",
+	conversation: "conv-1",
+	conversation_title: "Invoice from Loreal",
+	document_type: "",
+	collecting: 0,
+	record_count: 101,
+	question_count: 2,
+	counts: { Supplier: 1, Item: 100 },
+	counts_line: "1 supplier · 100 items · 2 questions",
+	for_user: "",
+	created_at: "2026-09-01 08:00:00",
 	...over,
 });
 
@@ -355,6 +374,86 @@ describe("useActionRows", () => {
 		expect(socket.off).toHaveBeenCalledWith("jarvis:event", handlers["jarvis:event"]);
 	});
 
+	it("a sheet reads as its file, its counts and its state; one still listing is marked", async () => {
+		approvals.listPendingActionsLane.mockResolvedValue({
+			rows: [
+				sheet(),
+				sheet({ name: "PA-S2", status: "Executing", for_user: "Asha" }),
+				sheet({
+					name: "PA-S3",
+					collecting: 1,
+					counts: {},
+					counts_line: "",
+					file_name: "",
+					conversation_title: "",
+				}),
+				sheet({ name: "PA-S4", file_name: "" }),
+			],
+		});
+		const w = host();
+		await flushPromises();
+		const [s1, s2, s3, s4] = w.vm.rows;
+		expect(s1).toMatchObject({
+			key: "sheet:PA-S1",
+			kind: "sheet",
+			title: "loreal.pdf",
+			meta: "1 supplier · 100 items · 2 questions",
+			types: ["Supplier", "Item"],
+			collecting: false,
+			badge: { label: "Pending", theme: "orange" },
+		});
+		expect(s2.meta).toBe("1 supplier · 100 items · 2 questions · dropped by Asha");
+		expect(s2.badge).toEqual({ label: "Applying…", theme: "blue" });
+		expect(s3).toMatchObject({
+			title: "Approval sheet",
+			meta: "Approval sheet",
+			collecting: true,
+			badge: { label: "Still listing…", theme: "gray" },
+		});
+		expect(s4.title).toBe("Invoice from Loreal"); // no file: its chat, never the summary
+		expect(actionRowTypes(s3)).toEqual(["Unclassified"]);
+		expect(keysOf(filterActionRows(w.vm.rows, { search: "LOREAL" }))).toEqual([
+			"sheet:PA-S1",
+			"sheet:PA-S2",
+			"sheet:PA-S4",
+		]);
+		expect(keysOf(filterActionRows(w.vm.rows, { search: "100 items" }))).toHaveLength(3);
+		expect(keysOf(filterActionRows(w.vm.rows, { document_type: "Item" }))).toEqual([
+			"sheet:PA-S1",
+			"sheet:PA-S2",
+			"sheet:PA-S4",
+		]);
+	});
+
+	it("refetches when a sheet's apply starts, ends or bounces, not on each step", async () => {
+		vi.useFakeTimers();
+		const handlers = {};
+		const socket = { on: (ev, fn) => (handlers[ev] = fn), off: vi.fn() };
+		host(socket);
+		await flushPromises();
+		const frame = (state, done) =>
+			handlers["jarvis:event"]({
+				kind: "sheet:progress",
+				name: "PA-S1",
+				state,
+				done,
+				total: 9,
+			});
+		const calls = () => approvals.listPendingActionsLane.mock.calls.length;
+		for (const [state, done, more] of [
+			["applying", 0, 1],
+			["applying", 10, 0],
+			["applied", 9, 1],
+			["returned", 0, 1],
+		]) {
+			const before = calls();
+			frame(state, done);
+			vi.advanceTimersByTime(1000);
+			await flushPromises();
+			expect(calls()).toBe(before + more);
+		}
+	});
+
 	it("refetches when the tab becomes visible", async () => {
 		const w = host();
 		await flushPromises();
@@ -367,6 +466,8 @@ describe("useActionRows", () => {
 		expect(approvals.listPendingActionsLane).toHaveBeenCalledTimes(2);
 	});
 });
+
+const keysOf = (list) => list.map((r) => r.key);
 
 describe("filterActionRows", () => {
 	const rows = [

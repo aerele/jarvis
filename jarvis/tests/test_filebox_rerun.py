@@ -250,6 +250,14 @@ class TestRerunSends(_Base):
 			res = filebox._rerun_one(conv)
 		self.assertTrue(res["ok"])
 
+	def test_a_rerun_gets_a_fresh_two_sheet_budget(self):
+		conv = self._failed()
+		frappe.db.set_value(CONV, conv, "filebox_sheet_count", 2, update_modified=False)
+		frappe.db.commit()
+		with as_user(USER), patch("jarvis.chat.api.send_message", return_value={"ok": True}):
+			filebox._rerun_one(conv)
+		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_sheet_count"), 0)
+
 	def test_reuses_the_pinned_skill(self):
 		conv = self._failed()
 		frappe.db.set_value(CONV, conv, "filebox_pinned_skill", filebox.OCR_DATA_ENTRY, update_modified=False)

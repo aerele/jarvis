@@ -1,14 +1,16 @@
 /**
  * File Box row status -> badge + the row's result link, in one place so the list,
  * its filters and the ?status= deep link agree. Mirrors the server ladder
- * (jarvis/chat/filebox.py): processing / needs_approval / draft_created / failed /
- * no_draft. The pre-ladder done / error values still render for a stale page.
+ * (jarvis/chat/filebox.py): processing / needs_approval / applying (an approval
+ * sheet being applied) / draft_created / failed / no_draft. The pre-ladder done /
+ * error values still render for a stale page.
  */
 import { escapeHtml } from "./errors";
 
 export const STATUS_BADGE = {
 	processing: { label: "Processing", theme: "blue" },
 	needs_approval: { label: "Needs approval", theme: "orange" },
+	applying: { label: "Applying", theme: "blue" },
 	draft_created: { label: "Draft created", theme: "green" },
 	no_draft: { label: "No draft", theme: "gray" },
 	failed: { label: "Failed", theme: "red" },
@@ -16,7 +18,19 @@ export const STATUS_BADGE = {
 	error: { label: "Failed", theme: "red" },
 };
 
-export const STATUSES = ["processing", "needs_approval", "draft_created", "no_draft", "failed"];
+export const STATUSES = [
+	"processing",
+	"needs_approval",
+	"applying",
+	"draft_created",
+	"no_draft",
+	"failed",
+];
+
+// Rows whose status moves on its own: the list polls while one is on screen.
+export function isLive(row) {
+	return !!row && (row.status === "processing" || row.status === "applying");
+}
 
 export const STATUS_OPTIONS = [
 	{ label: "All", value: "" },
@@ -42,22 +56,26 @@ export function canRerun(row) {
 }
 
 /**
- * The toast for a bulk Re-run response. Skip reasons are server text bound into
- * an HTML sink (frappe-ui Toast uses v-html), so they are escaped here.
+ * The toast for a bulk Re-run response. A re-run whose tagged skill is gone waits on
+ * a question (`needs_choice`), not sent. Skip reasons are server text bound into an
+ * HTML sink (frappe-ui Toast uses v-html), so they are escaped here.
  */
 export function bulkRerunToast(res, requested) {
 	const skipped = (res && res.skipped) || [];
-	const sent = res && res.sent != null ? res.sent : requested - skipped.length;
-	if (!skipped.length) {
+	const waiting = (res && res.needs_choice) || 0;
+	const sent = res && res.sent != null ? res.sent : requested - skipped.length - waiting;
+	if (!skipped.length && !waiting) {
 		return { type: "success", message: `${sent} file${sent === 1 ? "" : "s"} re-running` };
 	}
-	const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))]
-		.map(escapeHtml)
-		.join(", ");
-	return {
-		type: "info",
-		message: `${sent} re-running · ${skipped.length} skipped (${reasons})`,
-	};
+	const parts = [`${sent} re-running`];
+	if (waiting) parts.push(`${waiting} waiting for your choice on the Approval Board`);
+	if (skipped.length) {
+		const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))]
+			.map(escapeHtml)
+			.join(", ");
+		parts.push(`${skipped.length} skipped (${reasons})`);
+	}
+	return { type: "info", message: parts.join(" · ") };
 }
 
 /**
@@ -69,7 +87,7 @@ export function resultLink(row) {
 	const href = row && row.result_link;
 	if (typeof href !== "string") return null;
 	if (href.startsWith("/app/")) return { kind: "desk", href };
-	// "/approvals?held=<name>" opens a held File Box write on the board.
+	// "/approvals?held=<name>" opens a held File Box write or a sheet on the board.
 	if (href === "/approvals" || /^\/approvals[/?]/.test(href)) return { kind: "route", href };
 	return null;
 }

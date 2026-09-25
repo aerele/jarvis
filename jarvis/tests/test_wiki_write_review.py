@@ -789,6 +789,27 @@ class TestWikiPageFull(_WikiBase):
 		self.assertEqual(row.apply_reason, "page_full")
 		self.assertEqual(frappe.get_doc(WIKI, name).body_md, before)
 
+	def test_the_page_full_alert_never_commits_under_the_landing_claim(self):
+		# A commit there would release the AR row lock mid-funnel.
+		name = self._seed_page(body_len=200)
+		ar = self._propose()
+		frappe.db.set_value(WIKI, name, "body_md", "x" * (wiki.MAX_BODY_LEN - 10), update_modified=False)
+		title = "jarvis.file_box.wiki_page_full:party-fake-co"
+		frappe.db.delete("Error Log", {"method": title})
+		self.addCleanup(frappe.db.delete, "Error Log", {"method": title})
+		frappe.db.commit()
+		real_commit, under_claim = frappe.db.commit, []
+
+		def commit():
+			under_claim.append(frappe.db.get_value(APPROVAL, ar, "apply_status") == "Applying")
+			real_commit()
+
+		with patch("frappe.db.commit", side_effect=commit), _as(REVIEWER):
+			res = approvals_api.approve_wiki_write(ar)
+		self.assertEqual(res["reason"], "page_full")
+		self.assertNotIn(True, under_claim)
+		self.assertTrue(frappe.db.exists("Error Log", {"method": title}))  # lands with the outcome
+
 	# --- W-AC2: regression — under cap still appends ------------------------ #
 
 	def test_under_cap_append_still_lands(self):
@@ -928,6 +949,26 @@ class TestWikiPageFull(_WikiBase):
 		# slug + lengths only - never the note's content.
 		args = log.call_args.args
 		self.assertEqual(args[0], "party-fake-co")
+
+	def test_a_full_page_alerts_the_admin_once_a_day_per_page(self):
+		long_slug = "party-" + "x" * 134
+		titles = [
+			f"jarvis.file_box.wiki_page_full:{s}"[:140] for s in ("party-fake-co", "party-two", long_slug)
+		]
+		frappe.db.delete("Error Log", {"method": ["in", titles]})
+		self.addCleanup(frappe.db.delete, "Error Log", {"method": ["in", titles]})
+		for slug, existing in (
+			("party-fake-co", 10),
+			("party-fake-co", 20),
+			("party-two", 30),
+			(long_slug, 40),
+		):
+			wiki._log_page_full_refusal(slug, existing, 100)
+		logs = frappe.get_all(
+			"Error Log", {"method": ["in", titles]}, ["method", "error"], order_by="creation"
+		)
+		self.assertEqual([r.method for r in logs], titles)
+		self.assertIn("party-fake-co: existing=10 incoming=100", logs[0].error)
 
 	# --- MINOR-4: the DuplicateEntry -> merge branch also refuses overflow - #
 
