@@ -41,16 +41,9 @@
 				:tooltip="'Refresh'"
 				icon="refresh-cw"
 				:loading="loading"
-				@click="resetLoad()"
+				@click="refreshAll()"
 			/>
 		</div>
-
-		<!-- reviewer-only wiki write-back review lane (self-gating; hidden for
-		     non-reviewers and when nothing is pending) -->
-		<WikiReviewPanel />
-
-		<!-- held File Box writes (Pending Actions): self-contained, hidden when empty -->
-		<PendingActionLane />
 
 		<div class="flex min-h-0 flex-1">
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
@@ -97,7 +90,111 @@
 						</button>
 					</div>
 				</div>
+				<!-- "Needs your decision" (one inbox): held File Box writes, the
+				     viewer's own chat cards and, for a reviewer, wiki notes - each
+				     pauses a run until someone decides, so they lead. Pending view
+				     only; the toolbar's search + type filter apply. -->
+				<section v-if="showActions" class="border-b" aria-labelledby="actions-title">
+					<button
+						class="flex w-full items-center gap-1.5 px-4 pb-1 pt-3 text-left"
+						:aria-expanded="actionsOpen ? 'true' : 'false'"
+						aria-controls="actions-body"
+						@click="actionsOpen = !actionsOpen"
+					>
+						<FeatherIcon
+							:name="actionsOpen ? 'chevron-down' : 'chevron-right'"
+							class="size-3.5 shrink-0 text-ink-gray-5"
+							aria-hidden="true"
+						/>
+						<span
+							id="actions-title"
+							class="text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+							>Needs your decision ({{ decisionCount }})</span
+						>
+					</button>
+					<div v-if="actionsOpen" id="actions-body">
+						<div
+							v-if="actionsError"
+							role="alert"
+							class="flex items-center gap-3 px-4 py-2 text-sm"
+						>
+							<span class="min-w-0 flex-1 text-ink-red-5">{{ actionsError }}</span>
+							<Button
+								variant="subtle"
+								size="sm"
+								label="Try again"
+								@click="loadActions()"
+							/>
+						</div>
+						<div class="flex flex-col divide-y">
+							<!-- a sheet still listing shows, but opens nothing yet -->
+							<component
+								:is="a.collecting ? 'div' : 'button'"
+								v-for="a in visibleActions"
+								:key="a.key"
+								class="flex w-full items-start gap-3 px-4 py-3 text-left"
+								:class="
+									a.key === selectedKey
+										? 'bg-surface-selected shadow-sm'
+										: a.collecting
+										? ''
+										: 'hover:bg-surface-gray-2'
+								"
+								@click="a.collecting || onActionClick(a)"
+							>
+								<div class="min-w-0 flex-1">
+									<div class="truncate text-base text-ink-gray-9">
+										{{ a.title }}
+									</div>
+									<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+										{{ a.meta }}
+									</div>
+									<div class="mt-1 flex items-center gap-2">
+										<Badge
+											variant="subtle"
+											:theme="KIND_THEME[a.kind]"
+											:label="KIND_LABEL[a.kind]"
+										/>
+										<Badge
+											v-if="a.kind === 'held' || a.kind === 'chat'"
+											variant="subtle"
+											theme="gray"
+											:label="actionRowType(a)"
+										/>
+										<Tooltip :text="exactDate(a.created_at)">
+											<span
+												class="whitespace-nowrap text-sm text-ink-gray-5"
+												>{{ timeAgo(a.created_at) }}</span
+											>
+										</Tooltip>
+									</div>
+								</div>
+								<Badge
+									class="mt-0.5 shrink-0"
+									variant="subtle"
+									:theme="a.badge.theme"
+									:label="a.badge.label"
+								/>
+								<span v-if="a.collecting" class="sr-only"
+									>Opens for review once the run pauses.</span
+								>
+							</component>
+						</div>
+						<div
+							v-if="wikiTotal > wikiShown"
+							class="border-t px-4 py-2 text-sm text-ink-gray-5"
+						>
+							{{ wikiShown }} of {{ wikiTotal }} wiki notes
+						</div>
+					</div>
+				</section>
 				<template v-if="railRows.length">
+					<div
+						v-if="showActions"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+					>
+						Questions
+					</div>
 					<div class="flex flex-col divide-y">
 						<button
 							v-for="row in railRows"
@@ -150,14 +247,23 @@
 						/>
 						<div v-else />
 						<div class="text-sm text-ink-gray-5">
-							{{ railRows.length }} of {{ railTotal }}
+							{{ railRows.length }} of {{ railTotal }} questions
 						</div>
 					</div>
 				</template>
-				<!-- h-full centering only when the strip isn't occupying the column —
-				     otherwise the 100%-height block would force the rail to scroll -->
+				<!-- h-full centering only when the strip or the group isn't occupying
+				     the column — otherwise the 100%-height block would force the rail
+				     to scroll. Empty waits for the decision rows too, so it never
+				     flashes before they arrive. -->
 				<div
-					v-else-if="!loading"
+					v-else-if="loading || (isPending && !actionsLoaded)"
+					class="flex items-center justify-center"
+					:class="awaitingReply.length || showActions ? 'py-16' : 'h-full'"
+				>
+					<JvSpinner />
+				</div>
+				<div
+					v-else-if="!showActions"
 					class="flex flex-col items-center justify-center gap-3 px-6 text-center"
 					:class="awaitingReply.length ? 'py-16' : 'h-full'"
 				>
@@ -171,19 +277,74 @@
 						}}</span>
 					</div>
 				</div>
-				<div
-					v-else
-					class="flex items-center justify-center"
-					:class="awaitingReply.length ? 'py-16' : 'h-full'"
-				>
-					<JvSpinner />
-				</div>
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
 			<div class="flex-1 overflow-y-auto">
+				<!-- a held write / chat card / wiki note: its own detail, keyed so every
+				     selection mounts (and loads) a fresh one -->
+				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-8 py-6">
+					<div class="flex items-center gap-3">
+						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
+							{{ selectedAction ? selectedAction.title : KIND_LABEL[selectedKind] }}
+						</h1>
+						<!-- a row beyond the rail has only its kind for a heading: no chip
+						     repeating it -->
+						<template v-if="selectedAction">
+							<Badge
+								variant="subtle"
+								:theme="KIND_THEME[selectedKind]"
+								:label="KIND_LABEL[selectedKind]"
+							/>
+							<Badge
+								variant="subtle"
+								:theme="selectedAction.badge.theme"
+								:label="selectedAction.badge.label"
+							/>
+						</template>
+					</div>
+					<div class="mt-4">
+						<WikiProposalDetail
+							v-if="selectedKind === 'wiki'"
+							:key="selectedKey"
+							ref="actionDetail"
+							:name="selectedName"
+							:proposal="selectedAction ? selectedAction.raw : null"
+							:loaded="actionsLoaded"
+							:on-decided="settleSelected"
+							:on-changed="loadActions"
+						/>
+						<PendingChatDetail
+							v-else-if="selectedKind === 'chat'"
+							:key="selectedKey"
+							ref="actionDetail"
+							:name="selectedName"
+							:on-decided="settleSelected"
+						/>
+						<SheetDetail
+							v-else-if="selectedKind === 'sheet'"
+							:key="selectedKey"
+							ref="actionDetail"
+							:name="selectedName"
+							:on-decided="settleSelected"
+							:on-changed="loadActions"
+							:show-file-name="!selectedAction"
+						/>
+						<PendingActionDetail
+							v-else
+							:key="selectedKey"
+							ref="actionDetail"
+							:name="selectedName"
+							:on-decided="settleSelected"
+							:on-kind="correctSelected"
+						/>
+					</div>
+				</div>
+				<div v-else-if="actionLinkPending" class="flex h-full items-center justify-center">
+					<JvSpinner />
+				</div>
 				<div
-					v-if="!selectedId"
+					v-else-if="!selectedId"
 					class="flex h-full flex-col items-center justify-center gap-3 px-8 text-center"
 				>
 					<FeatherIcon name="inbox" class="size-7.5 text-ink-gray-5" />
@@ -505,6 +666,9 @@
 // (envelope.awaiting_reply — prose questions with no row behind them),
 // chat-sourced option-less rows hand off to the conversation ("Answer in
 // chat") instead of Approve/Reject, and the status filter gains "Answered".
+// One inbox: held File Box writes, approval sheets, chat cards and wiki notes are
+// rail rows in a "Needs your decision" group above the questions (Pending view),
+// each opening its own detail in the right pane; ?held= / ?wiki= deep-link them.
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -519,14 +683,22 @@ import {
 	toast,
 } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
-import WikiReviewPanel from "@/pages/approvals/WikiReviewPanel.vue";
-import PendingActionLane from "@/pages/approvals/PendingActionLane.vue";
+import PendingActionDetail from "@/pages/approvals/PendingActionDetail.vue";
+import PendingChatDetail from "@/pages/approvals/PendingChatDetail.vue";
+import SheetDetail from "@/pages/approvals/SheetDetail.vue";
+import WikiProposalDetail from "@/pages/approvals/WikiProposalDetail.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { useListPage } from "@/composables/useListPage";
+import {
+	useActionRows,
+	filterActionRows,
+	actionRowType,
+	actionRowTypes,
+} from "@/composables/useActionRows";
 import { useShellStore } from "@/stores/shell";
 import { session } from "@/data/session";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -534,6 +706,7 @@ import { getApproval } from "@/api/approvals";
 import * as api from "@/api";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { APPROVE_RE, REJECT_RE } from "@/lib/approvalVerbs";
 
 const route = useRoute();
 const router = useRouter();
@@ -601,22 +774,59 @@ const {
 	},
 });
 
+// ── "Needs your decision" rows (one inbox) ──────────────────────────────────
+const {
+	rows: actionRows,
+	loaded: actionsLoaded,
+	error: actionsError,
+	wikiShown,
+	wikiTotal,
+	load: loadActions,
+	remove: removeAction,
+} = useActionRows();
+const KIND_LABEL = {
+	held: "New record",
+	sheet: "Approval sheet",
+	chat: "Chat action",
+	wiki: "Wiki note",
+};
+const KIND_THEME = { held: "gray", sheet: "gray", chat: "blue", wiki: "gray" };
+const actionsOpen = ref(true);
+const isPending = computed(() => (filters.status || "Pending") === "Pending");
+// Pending view only; search narrows the rows (and their type counts), then the type
+const searchedActions = computed(() =>
+	isPending.value ? filterActionRows(actionRows.value, { search: search.value }) : []
+);
+const visibleActions = computed(() =>
+	filterActionRows(searchedActions.value, { document_type: filters.document_type || "" })
+);
+const showActions = computed(
+	() => isPending.value && (visibleActions.value.length > 0 || !!actionsError.value)
+);
+// counted like the badge: a sheet still listing waits on no one yet
+const decisionCount = computed(() => visibleActions.value.filter((a) => !a.collecting).length);
+
 // composable debounces search → resetLoad; the input just writes the ref
 function onSearch(v) {
 	search.value = v;
 }
 
-// document_type quick filter options from the page-1 facets ("Type (N)";
-// the server pre-labels blank types as "Unclassified")
+// document_type quick filter options from the page-1 facets ("Type (N)"; the
+// server pre-labels blank types as "Unclassified"), plus the held/chat rows'
+// doctypes and each sheet's (wiki notes carry none)
 const typeOptions = computed(() => {
-	const opts = [{ label: "All types", value: "" }];
+	const counts = new Map();
 	const facetRows = (facets.value && facets.value.document_type) || [];
-	if (facetRows.length) {
-		for (const f of facetRows) opts.push({ label: `${f.value} (${f.count})`, value: f.value });
-	} else if (initialType) {
-		// keep the deep-linked value selectable before facets arrive
-		opts.push({ label: initialType, value: initialType });
+	for (const f of facetRows) counts.set(f.value, f.count);
+	for (const r of searchedActions.value) {
+		if (r.kind === "wiki") continue;
+		for (const t of actionRowTypes(r)) counts.set(t, (counts.get(t) || 0) + 1);
 	}
+	const opts = [{ label: "All types", value: "" }];
+	for (const [value, count] of counts) opts.push({ label: `${value} (${count})`, value });
+	// keep the deep-linked value selectable before facets arrive
+	if (!facetRows.length && initialType && !counts.has(initialType))
+		opts.push({ label: initialType, value: initialType });
 	return opts;
 });
 
@@ -642,6 +852,8 @@ function setQuick(key, value) {
 	// status always travels explicitly (server defaults to Pending otherwise)
 	if (!next.status) next.status = "Pending";
 	setFilters(next);
+	// the decision rows are the Pending view's: leaving it lets go of one
+	if (next.status !== "Pending") selectedKey.value = "";
 	syncQuery();
 }
 // keep ?status=/?type= in the URL so deep links preserve the view (D32);
@@ -649,8 +861,11 @@ function setQuick(key, value) {
 function syncQuery() {
 	const q = { ...route.query };
 	const status = filters.status || "Pending";
-	if (status !== "Pending") q.status = status;
-	else delete q.status;
+	if (status !== "Pending") {
+		q.status = status;
+		delete q.held;
+		delete q.wiki;
+	} else delete q.status;
 	if (filters.document_type) q.type = filters.document_type;
 	else delete q.type;
 	router.replace({ query: q });
@@ -689,8 +904,73 @@ const railRows = computed(() => {
 // the seed sits outside the server's filtered total - count it explicitly
 const railTotal = computed(() => total.value + (railRows.value.length - rows.value.length));
 
+// A decision row's selection: "held:<pa>" | "sheet:<pa>" | "chat:<pa>" | "wiki:<ar>".
+// selectedId stays AR-only, so a PA name never reaches get_approval, docmeta or
+// comments.
+const selectedKey = ref("");
+const actionDetail = ref(null);
+const selectedKind = computed(() => selectedKey.value.slice(0, selectedKey.value.indexOf(":")));
+const selectedName = computed(() => selectedKey.value.slice(selectedKey.value.indexOf(":") + 1));
+const selectedAction = computed(
+	() => actionRows.value.find((r) => r.key === selectedKey.value) || null
+);
+
+function selectAction(key) {
+	if (!key || key === selectedKey.value) return;
+	paneReq++; // drop any in-flight get_approval
+	selectedKey.value = key;
+	selectedId.value = "";
+	selected.value = null;
+	paneError.value = "";
+	seedRow.value = null;
+}
+
+function withoutActionQuery(query) {
+	const q = { ...query };
+	delete q.held;
+	delete q.wiki;
+	return q;
+}
+
+// held writes and chat cards deep-link as ?held= (File Box's "Needs approval"
+// link), wiki notes as ?wiki=
+function onActionClick(row) {
+	selectAction(row.key);
+	const q = withoutActionQuery(route.query);
+	q[row.kind === "wiki" ? "wiki" : "held"] = row.name;
+	router.replace({ name: "ApprovalsList", query: q });
+}
+
+// ?held= wins over ?wiki=
+function actionLink() {
+	const { held, wiki } = route.query;
+	if (typeof held === "string" && held) return { wiki: false, name: held };
+	if (typeof wiki === "string" && wiki) return { wiki: true, name: wiki };
+	return null;
+}
+// held, sheet and chat share ?held=: the rows say which. A name beyond them (an
+// SM's backlog, a settled row) still opens as held; its detail says what became
+// of it (a sheet's reopens as one), and a later refresh that lists it as a chat
+// card or a sheet reopens it as one.
+let guessedHeld = "";
+function syncActionFromRoute() {
+	const link = actionLink();
+	if (!link) return;
+	if (link.wiki) return selectAction("wiki:" + link.name);
+	if (selectedKey.value && selectedKind.value !== "wiki" && selectedName.value === link.name)
+		return;
+	if (!actionsLoaded.value) return;
+	const row = actionRows.value.find((r) => r.kind !== "wiki" && r.name === link.name);
+	guessedHeld = row ? "" : link.name;
+	selectAction((row ? row.kind : "held") + ":" + link.name);
+}
+const actionLinkPending = computed(
+	() => !selectedKey.value && !!actionLink() && !actionsLoaded.value
+);
+
 function select(id) {
 	if (!id || (id === selectedId.value && !paneError.value)) return;
+	selectedKey.value = "";
 	// the seed row only earns its place while it is the selection
 	if (seedRow.value && seedRow.value.name !== id) seedRow.value = null;
 	selectedId.value = id;
@@ -732,7 +1012,11 @@ async function loadRecord(id, { keep = false } = {}) {
 function onRowClick(row) {
 	select(row.name);
 	// replace, not push - selection must not spam browser history
-	router.replace({ name: "ApprovalDetail", params: { id: row.name }, query: route.query });
+	router.replace({
+		name: "ApprovalDetail",
+		params: { id: row.name },
+		query: withoutActionQuery(route.query),
+	});
 }
 
 function openChat() {
@@ -788,8 +1072,8 @@ const showOptionChips = computed(() => {
 	if (opts.length === 1) return false;
 	if (opts.length === 2) {
 		const low = opts.map((o) => o.trim().toLowerCase());
-		const approveish = low.filter((o) => /^approve(d)?\b/.test(o)).length;
-		const rejectish = low.filter((o) => /^reject(ed)?\b/.test(o)).length;
+		const approveish = low.filter((o) => APPROVE_RE.test(o)).length;
+		const rejectish = low.filter((o) => REJECT_RE.test(o)).length;
 		if (approveish === 1 && rejectish === 1) return false;
 	}
 	return true;
@@ -966,26 +1250,75 @@ async function submitRestore() {
 // Splicing `rows` keeps Load More's start offset aligned with the server,
 // which no longer counts the row under the Pending filter either.
 function advanceAfterDecide(id) {
-	const at = railRows.value.findIndex((x) => x.name === id);
-	const idx = rows.value.findIndex((x) => x.name === id);
-	if (idx !== -1) {
-		rows.value.splice(idx, 1);
-		total.value = Math.max(0, total.value - 1);
-	}
-	if (seedRow.value && seedRow.value.name === id) seedRow.value = null;
-	if (selectedId.value !== id) return;
-	const rail = railRows.value;
-	const next = at === -1 ? rail[0] : rail[Math.min(at, rail.length - 1)];
-	if (next) {
-		select(next.name);
-		router.replace({ name: "ApprovalDetail", params: { id: next.name }, query: route.query });
-	} else {
+	advanceFrom("ar:" + id, () => {
+		const idx = rows.value.findIndex((x) => x.name === id);
+		if (idx !== -1) {
+			rows.value.splice(idx, 1);
+			total.value = Math.max(0, total.value - 1);
+		}
+		if (seedRow.value && seedRow.value.name === id) seedRow.value = null;
+	});
+}
+
+// The rail top to bottom as the viewer sees it: the open decision group, then
+// the questions. Any decided row advances through this one order.
+const railOrder = computed(() => [
+	...(showActions.value && actionsOpen.value ? visibleActions.value : [])
+		.filter((a) => !a.collecting)
+		.map((a) => ({ key: a.key, action: a })),
+	...railRows.value.map((r) => ({ key: "ar:" + r.name, row: r })),
+]);
+// A decision can answer after the board is gone (the user navigated away): it
+// still drops its row and refreshes the badge, but never navigates back here.
+let alive = true;
+onBeforeUnmount(() => (alive = false));
+function advanceFrom(key, drop) {
+	const at = railOrder.value.findIndex((e) => e.key === key);
+	const current = key === (selectedKey.value || (selectedId.value && "ar:" + selectedId.value));
+	drop();
+	if (!current || !alive) return;
+	const order = railOrder.value;
+	const next = at === -1 ? order[0] : order[Math.min(at, order.length - 1)];
+	if (next && next.action) onActionClick(next.action);
+	else if (next) onRowClick(next.row);
+	else {
 		paneReq++; // drop any in-flight load for the removed row
+		selectedKey.value = "";
 		selectedId.value = "";
 		selected.value = null;
 		paneError.value = "";
-		router.replace({ name: "ApprovalsList", query: route.query });
+		router.replace({ name: "ApprovalsList", query: withoutActionQuery(route.query) });
 	}
+}
+
+function onActionDecided(key) {
+	advanceFrom(key, () => removeAction(key));
+	store.refreshApprovalsCount();
+	if (alive) loadActions();
+}
+// Bound to the row's key, so an answer that lands after a switch unmounted its
+// detail still settles its own row (the details call it directly: Vue drops an
+// unmounted instance's emits). A computed, so the prop only changes with the key.
+const settleSelected = computed(() => {
+	const key = selectedKey.value;
+	return () => onActionDecided(key);
+});
+// A ?held= name the rows don't list opens as held; its detail says when it is a
+// sheet (one already applied, say), and it reopens as one.
+const correctSelected = computed(() => {
+	const key = selectedKey.value;
+	return (kind) => {
+		if (!alive || selectedKey.value !== key || selectedKind.value !== "held") return;
+		guessedHeld = "";
+		selectAction(kind + ":" + selectedName.value);
+	};
+});
+
+// Refresh re-reads the decision rows too: wiki notes have no realtime event, and
+// a System Manager gets none for other users' held rows.
+function refreshAll() {
+	resetLoad();
+	loadActions();
 }
 
 // ── selection wiring (after every ref it touches exists - the immediate
@@ -995,13 +1328,40 @@ function advanceAfterDecide(id) {
 watch(
 	() => route.params.id,
 	(id) => {
-		if (typeof id === "string" && id) select(id);
+		if (typeof id === "string" && id && !actionLink()) select(id);
 	},
 	{ immediate: true }
 );
-// auto-select the first row only when the route carries no :id
+// ?held= / ?wiki= → the decision row (a no-op when it is already open)
+watch([() => route.query.held, () => route.query.wiki, actionsLoaded], syncActionFromRoute, {
+	immediate: true,
+});
+// auto-select the first row only when the route carries no :id or decision link
 watch(rows, (r) => {
-	if (!route.params.id && !selectedId.value && r.length) select(r[0].name);
+	if (!route.params.id && !selectedId.value && !selectedKey.value && !actionLink() && r.length)
+		select(r[0].name);
+});
+// A refresh never yanks the pane: a selected held/chat/sheet row that left the rail
+// keeps its detail, which re-reads how it settled (a wiki note sees its row go
+// through its `proposal` prop). A ?held= name first opened as held is corrected
+// once the rows list it as a chat card or a sheet.
+watch(actionRows, (now, before) => {
+	const key = selectedKey.value;
+	if (guessedHeld && key === "held:" + guessedHeld) {
+		const row = now.find((r) => r.kind !== "wiki" && r.name === guessedHeld);
+		if (row) guessedHeld = "";
+		if (row && row.kind !== "held") return selectAction(row.key);
+	}
+	if (!key || selectedKind.value === "wiki") return;
+	const row = now.find((r) => r.key === key);
+	const was = (before || []).find((r) => r.key === key);
+	// a sheet that sealed or started applying re-reads itself
+	const moved =
+		row &&
+		was &&
+		row.kind === "sheet" &&
+		(row.status !== was.status || row.collecting !== was.collecting);
+	if ((moved || (!row && was)) && actionDetail.value) actionDetail.value.refresh();
 });
 
 // ── freshness: refetch on tab-visible (no realtime approval event today) ─────

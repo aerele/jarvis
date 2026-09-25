@@ -154,6 +154,8 @@ function applyAdmitted(s, p) {
         // Text-only signal (see pendingApproveRun) - never the preview/plan
         // itself, so the widget stays a plain confirm/deflect surface.
         approve_run: pendingApproveRun(p.preview),
+        // Parked since the user's latest message (decision 6); false = "Earlier".
+        recent: p.recent !== false,
       });
       return s;
 

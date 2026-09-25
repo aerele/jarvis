@@ -16,6 +16,10 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat.macros_api import summarize_macro, update_macro
+from jarvis.tests._pending_action_helpers import ensure_user
+
+# The capacity resume is a cron: it refuses a run whose owner is Administrator.
+RESUME_OWNER = "macro-resume-owner@example.com"
 
 MERGE_BLOCK = (
 	"Here you go:\n\n```jarvis-macro-merge\n"
@@ -76,6 +80,12 @@ class _MacroMergeBase(FrappeTestCase):
 			"Jarvis Macro", filters={"macro_name": ["like", "merge-test-%"]}, pluck="name"
 		):
 			frappe.delete_doc("Jarvis Macro", n, force=True, ignore_permissions=True)
+		frappe.db.commit()
+
+	def _resumable(self, conv, owner=None):
+		"""Hand a run's conversation to an eligible owner (the resume refuses Administrator)."""
+		owner = owner or ensure_user(RESUME_OWNER)
+		frappe.db.set_value("Jarvis Conversation", conv, "owner", owner, update_modified=False)
 		frappe.db.commit()
 
 
@@ -457,6 +467,7 @@ class TestMacroCapacityDefer(_MacroMergeBase):
 			res = macros.run_macro(m.name)
 		run_name = res["data"]["macro_run"]
 		self._cleanup_run(run_name)
+		self._resumable(res["data"]["conversation"])
 		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "waiting_capacity")
 		# Capacity frees: the resume cron re-attempts the SAME step, which now dispatches.
 		with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r1", "message_id": "m1"}) as enq:
@@ -485,6 +496,28 @@ class TestMacroCapacityDefer(_MacroMergeBase):
 		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "failed")
 		self.assertIn("busy", (frappe.db.get_value(self.RUN, run_name, "error") or "").lower())
 
+	def test_resume_fails_closed_for_an_ineligible_owner(self):
+		"""C2-3: the cron never binds a resumed turn to Administrator or a disabled user."""
+		from jarvis.chat import macros
+
+		disabled = ensure_user("macro-resume-disabled@example.com")
+		frappe.db.set_value("User", disabled, "enabled", 0)
+		frappe.db.commit()
+		self.addCleanup(lambda: (frappe.db.set_value("User", disabled, "enabled", 1), frappe.db.commit()))
+		for owner in ("Administrator", disabled):
+			with self.subTest(owner=owner):
+				overload = {"ok": False, "overloaded": True, "reason": "busy"}
+				with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
+					res = macros.run_macro(self._mk_two_step().name)
+				run_name = res["data"]["macro_run"]
+				self._cleanup_run(run_name)
+				self._resumable(res["data"]["conversation"], owner)
+				with patch("jarvis.chat.api._enqueue_turn") as enq:
+					macros.resume_waiting_capacity_runs()
+				enq.assert_not_called()
+				run = frappe.db.get_value(self.RUN, run_name, ["status", "error"], as_dict=True)
+				self.assertEqual((run.status, run.error), ("failed", macros._OWNER_INELIGIBLE_ERROR))
+
 
 class TestMacroStopResumeSerialization(_MacroMergeBase):
 	"""CDX-22 — the capacity-resume critical section is serialized with stop (state-fenced flip +
@@ -508,6 +541,7 @@ class TestMacroStopResumeSerialization(_MacroMergeBase):
 			res = macros.run_macro(self._mk_two_step().name)
 		run_name = res["data"]["macro_run"]
 		self.addCleanup(lambda: frappe.delete_doc(self.RUN, run_name, force=True, ignore_permissions=True))
+		self._resumable(res["data"]["conversation"])
 		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "waiting_capacity")
 		return run_name
 
@@ -611,6 +645,7 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 
 		res = macros.run_macro(macro.name)
 		run_name, conv = res["data"]["macro_run"], res["data"]["conversation"]
+		self._resumable(conv)
 		self.addCleanup(
 			lambda: (
 				frappe.delete_doc(self.RUN, run_name, force=True, ignore_permissions=True),

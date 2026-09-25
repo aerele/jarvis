@@ -41,8 +41,12 @@ POST_ONLY = (
 	"jarvis.chat.filebox.delete_inbound",
 	"jarvis.chat.filebox.delete_inbound_bulk",
 	"jarvis.chat.filebox.clear_processed_inbound",
+	"jarvis.chat.filebox.rerun_inbound",
+	"jarvis.chat.filebox.bulk_rerun_inbound",
 	"jarvis.chat.pending_actions.operator_fail",
 	"jarvis.chat.pending_actions.operator_settle",
+	"jarvis.chat.custom_skills_api.create_custom_skill",
+	"jarvis.chat.custom_skills_api.update_custom_skill",
 )
 
 # endpoint -> kwargs; each must refuse at dispatch depth > 0 before doing anything.
@@ -71,6 +75,9 @@ NESTED_REFUSED = {
 	"jarvis.chat.filebox.delete_inbound": {"conversation": "zz-no-conv"},
 	"jarvis.chat.filebox.delete_inbound_bulk": {"conversations": ["zz-no-conv"]},
 	"jarvis.chat.filebox.clear_processed_inbound": {},
+	"jarvis.chat.filebox.rerun_inbound": {"conversation": "zz-no-conv"},
+	"jarvis.chat.filebox.bulk_rerun_inbound": {"conversations": ["zz-no-conv"]},
+	"jarvis.chat.filebox.check_skill": {"skill": "zz-no-skill"},
 	"jarvis.chat.pending_actions.operator_fail": {"name": "zz-no-pa"},
 	"jarvis.chat.pending_actions.operator_settle": {"name": "zz-no-pa"},
 	"jarvis.chat.pending_actions.execute": {"name": "zz-no-pa"},
