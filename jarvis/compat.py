@@ -206,7 +206,7 @@ def _xlsx_number(v) -> bool:
 	return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
 
-def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
+def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Build a one-or-many-tab .xlsx workbook and return its bytes.
 
 	Probes for ``XLSXStyleBuilder`` (the Frappe 16 rewrite) rather than for the
@@ -217,11 +217,11 @@ def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
 	try:
 		from frappe.utils.xlsxutils import XLSXStyleBuilder
 	except ImportError:
-		return _xlsx_bytes_openpyxl(sheet_data)
-	return _xlsx_bytes_xlsxwriter(sheet_data)
+		return _xlsx_bytes_openpyxl(sheet_data, charts=charts)
+	return _xlsx_bytes_xlsxwriter(sheet_data, charts=charts)
 
 
-def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
+def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Frappe 16: mirror ``make_xlsx``'s own workbook options so dates format
 	identically, then let it append a worksheet per tab, laid out by
 	:func:`_sheet_layout`: fitted widths, number and date formats per column,
@@ -252,7 +252,7 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
 	# that resets it; the width is set again after it returns, with an equal
 	# format (a column format lands on a row only when that row is flushed).
 	width_formats = {k: wb.add_format(registry[i]) for k, i in number_style.items()}
-	for name, data in sheet_data:
+	for index, (name, data) in enumerate(sheet_data):
 		kinds, widths = _sheet_layout(data)
 		column_styles = {c: [number_style[k]] for c, k in enumerate(kinds) if k in number_style}
 		# Only values that carry a time need a cell style, so a large export
@@ -281,11 +281,15 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
 		ws.freeze_panes(1, 0)
 		if kinds:
 			ws.autofilter(0, 0, max(len(data) - 1, 0), len(kinds) - 1)
+		if charts and charts[index]:
+			from jarvis._xlsx_charts import add_xlsxwriter_charts
+
+			add_xlsxwriter_charts(wb, ws, data, charts[index])
 	wb.close()
 	return out.getvalue()
 
 
-def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
+def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Frappe 15: build the workbook here instead of via ``make_xlsx``.
 
 	15's ``make_xlsx`` saves the whole workbook on every call and returns the
@@ -310,7 +314,7 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 	date_format, time_format = get_excel_date_format()
 	number_formats = {"int": XLSX_INT_FORMAT, "float": XLSX_FLOAT_FORMAT}
 
-	for sheet_name, data in sheet_data:
+	for index, (sheet_name, data) in enumerate(sheet_data):
 		ws = wb.create_sheet(INVALID_TITLE_REGEX.sub(" ", sheet_name))
 		ws.row_dimensions[1].font = Font(name="Calibri", bold=True)
 		# Same layout as the 16 path. A write-only sheet takes widths, the
@@ -346,6 +350,10 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 					cell.font = Font(name="Calibri", bold=True)
 				clean_row.append(cell if cell is not None else value)
 			ws.append(clean_row)
+		if charts and charts[index]:
+			from jarvis._xlsx_charts import add_openpyxl_charts
+
+			add_openpyxl_charts(ws, data, charts[index])
 
 	out = BytesIO()
 	wb.save(out)
