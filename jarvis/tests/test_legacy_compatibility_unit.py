@@ -21,8 +21,7 @@ class TestCompatibilityContract(unittest.TestCase):
 		contract = compat._embedded()[1]
 		with self.assertRaises(FrozenInstanceError):
 			contract.watermark_column = "changed"
-		self.assertIsInstance(contract.settings_renames, tuple)
-		self.assertTrue(all(isinstance(pair, tuple) for pair in contract.settings_renames))
+		self.assertEqual(set(vars(contract)), {"watermark_column", "capture_provider_column"})
 
 	def test_request_reads_database_once_for_valid_missing_and_corrupt_mirrors(self):
 		for value in (compat._embedded()[0], None, "invalid"):
