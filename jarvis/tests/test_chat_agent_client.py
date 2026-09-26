@@ -145,6 +145,9 @@ class TestConnect(FrappeTestCase):
 		params = req["params"]
 		self.assertEqual(params["role"], "operator")
 		self.assertIn("operator.write", params["scopes"])
+		# The Claude-subscription runtime reports its tool calls only on the
+		# tool stream, which the gateway sends to clients that ask for it.
+		self.assertEqual(params["caps"], ["tool-events"])
 		self.assertEqual(params["auth"]["deviceToken"], creds.device_token)
 		self.assertEqual(params["device"]["id"], creds.device_id)
 		self.assertEqual(params["device"]["nonce"], "nonce-xyz")
