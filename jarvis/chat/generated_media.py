@@ -169,22 +169,6 @@ def _media_lines(text: str):
 			yield i, m.group(1).strip().strip("`").strip()
 
 
-<<<<<<< HEAD
-=======
-def _valid_media_path(path: str) -> bool:
-	"""Root-confined, non-traversal, allowed-image-extension check shared by the
-	``MEDIA:`` marker and the embedded-path detectors below."""
-	if not path.startswith(get_profile().media_root):
-		return False
-	rel = path[len(get_profile().media_root) :]
-	# ``..`` can't escape the media root (the gateway also realpath-confines),
-	# but reject it here so we never even send a traversal path.
-	if not rel or rel.startswith("/") or ".." in rel.split("/"):
-		return False
-	return path.lower().endswith(tuple(_IMAGE_EXTS))
-
-
->>>>>>> f088673 (feat(runtime): add private profiles and clean up runtime branding)
 def detect_media_paths(text: str) -> list[str]:
 	"""Full absolute container paths for line-anchored, local, image-extension
 	``MEDIA:`` markers under the agent media root, capped per turn.
@@ -196,9 +180,9 @@ def detect_media_paths(text: str) -> list[str]:
 	out: list[str] = []
 	exts = tuple(_IMAGE_EXTS)
 	for _, path in _media_lines(text):
-		if not path.startswith(_MEDIA_ROOT):
+		if not path.startswith(get_profile().media_root):
 			continue
-		rel = path[len(_MEDIA_ROOT) :]
+		rel = path[len(get_profile().media_root) :]
 		# ``..`` can't escape the media root (the gateway also realpath-confines),
 		# but reject it here so we never even send a traversal path.
 		if not rel or rel.startswith("/") or ".." in rel.split("/"):
@@ -228,49 +212,6 @@ def strip_media_lines(text: str) -> str:
 	return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
 
 
-<<<<<<< HEAD
-=======
-# --------------------------------------------------------------------------- #
-# Embedded-path media detection (image/video/music tool deferred replies).
-#
-# The agent runtime's image/video/music generation tools detach into a
-# background task and, ~25-30s later, restart the session with a model-authored reply that
-# NAMES the generated file's path in free text - "Attachment: <path>",
-# `path="<path>"`, or a markdown image `![alt](<path>)` - not a ``MEDIA:``
-# marker line (that is a distinct protocol the runtime uses for its own
-# "automatic" delivery fallback). The wording is model-authored and unstable;
-# the absolute path under the agent media root is the only stable anchor.
-# --------------------------------------------------------------------------- #
-
-# A path token: the media root followed by everything up to the first
-# whitespace / quote / paren / angle-bracket / comma / semicolon - the usual
-# terminators of "Attachment: <path>", 'path="<path>"' and markdown
-# "![alt](<path>)". Matched on ANY line, not just a dedicated marker line.
-_EMBEDDED_MEDIA_SUFFIX = r"[^\s\"'()<>,;]+"
-
-
-def _embedded_media_lines(text: str):
-	"""Yield ``(line_index, path)`` for lines carrying a QUALIFYING embedded
-	media path outside a ``MEDIA:`` marker. A line whose only candidate path is
-	NOT qualifying (outside the root, a traversal attempt, a non-image
-	extension) yields nothing for that line - it is ordinary prose and stays
-	completely untouched, never partially stripped. A line already claimed by a
-	``MEDIA:`` marker is skipped (that marker already owns the line)."""
-	if not isinstance(text, str):
-		return
-	pattern = re.compile(re.escape(get_profile().media_root) + _EMBEDDED_MEDIA_SUFFIX)
-	marker_lines = {i for i, _ in _media_lines(text)}
-	for i, line in enumerate(text.splitlines()):
-		if i in marker_lines:
-			continue
-		for m in pattern.finditer(line):
-			path = m.group(0)
-			if _valid_media_path(path):
-				yield i, path
-				break  # one image per line is all the tool ever emits
-
-
->>>>>>> f088673 (feat(runtime): add private profiles and clean up runtime branding)
 def has_media_marker(text: str) -> bool:
 	"""True if the reply has ANY line-anchored ``MEDIA:`` directive — qualifying
 	(fetchable image) or not (``.pdf`` / external / traversal). Broader than
