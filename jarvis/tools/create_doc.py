@@ -75,13 +75,18 @@ def _validate_create_args(doctype: str, values: dict) -> None:
 		raise PermissionDeniedError(f"no create permission on {doctype}")
 
 
-def _insert_one(doctype: str, values: dict) -> "frappe.model.document.Document":
+def _insert_one(
+	doctype: str, values: dict, *, ignore_mandatory: bool = False
+) -> "frappe.model.document.Document":
 	"""Build + insert ONE doc from ``values`` (guards already run). Returns the
-	inserted Document. Shared by the single and batch paths so they never drift."""
+	inserted Document. Shared by the single and batch paths so they never drift.
+	``ignore_mandatory``: the held-write classifier's sandbox (collect mode)."""
 	doc = frappe.new_doc(doctype)
 	for field, value in values.items():
 		doc.set(field, value)
 	_set_title_from_title_field(doc)
+	if ignore_mandatory:
+		doc.flags.ignore_mandatory = True
 	doc.insert()  # runs DocType validate() + on_insert hooks; sets autoname
 	return doc
 

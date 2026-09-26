@@ -14,6 +14,7 @@ import { toast } from "frappe-ui";
 import * as api from "@/api";
 import { getReviewAccess } from "@/api/learning";
 import { errHtml } from "@/lib/errors";
+import { createBadgeTimer } from "@/lib/badgeTimer";
 import { needsOnboarding } from "@/onboarding/readiness.js";
 
 // ---- state ------------------------------------------------------------------
@@ -375,14 +376,17 @@ async function loadConversations() {
 // AppShell fires this from four triggers (mount · route change · visibility ·
 // 60s interval) that often co-fire; the in-flight de-dupe coalesces them into
 // one request, and a hidden tab skips entirely (the visibility trigger
-// refreshes on return).
+// refreshes on return). A fifth: the moment the next chat card badges.
 let _approvalsInflight = null;
+const _badgeTimer = createBadgeTimer(() => refreshApprovalsCount());
 function refreshApprovalsCount() {
 	if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
 	if (_approvalsInflight) return _approvalsInflight;
 	_approvalsInflight = (async () => {
 		try {
-			approvalsCount.value = (await api.approvalsPendingCount()) || 0;
+			const badge = (await api.approvalsBadge()) || {};
+			approvalsCount.value = Number(badge.count) || 0;
+			_badgeTimer.schedule(badge.next_in);
 		} catch (e) {
 			/* badge is best-effort */
 		} finally {
@@ -390,6 +394,9 @@ function refreshApprovalsCount() {
 		}
 	})();
 	return _approvalsInflight;
+}
+function stopBadgeTimer() {
+	_badgeTimer.clear();
 }
 
 // Same triggers and de-dupe as refreshApprovalsCount. Reviewer-only: the
@@ -563,6 +570,7 @@ const store = reactive({
 	// actions
 	loadConversations,
 	refreshApprovalsCount,
+	stopBadgeTimer,
 	refreshReviewCount,
 	refreshBadges,
 	renameConversation,

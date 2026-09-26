@@ -85,6 +85,54 @@
 				</div>
 			</DocSection>
 
+			<DocSection label="File Box">
+				<div class="space-y-4">
+					<Switch
+						v-model="form.use_in_file_box"
+						label="Use in File Box"
+						:description="fileBoxDescription"
+						:disabled="fileBoxLocked"
+					/>
+					<!-- Link-style search over the types File Box may draft (the server's
+					     rule); its refusal on save shows here, not as a toast. The
+					     fieldset disables it while saving. -->
+					<fieldset
+						class="min-w-0"
+						:disabled="saving"
+						:aria-describedby="CREATES_HINT_ID"
+					>
+						<Autocomplete
+							v-if="canEdit"
+							label="File Box creates"
+							:options="createsOptions"
+							:modelValue="form.file_box_creates"
+							placeholder="Any document type"
+							@update:modelValue="setCreates"
+							@update:query="searchCreates"
+						/>
+						<FormControl
+							v-else
+							type="text"
+							label="File Box creates"
+							:modelValue="form.file_box_creates || 'Any document type'"
+							:disabled="true"
+						/>
+						<p
+							v-if="createsError"
+							:id="CREATES_HINT_ID"
+							class="mt-1.5 text-p-sm text-ink-red-4"
+							role="alert"
+						>
+							{{ createsError }}
+						</p>
+						<p v-else :id="CREATES_HINT_ID" class="mt-1.5 text-p-sm text-ink-gray-5">
+							The document type File Box drafts when it follows this skill (e.g.
+							Purchase Invoice), whatever the document's printed title says.
+						</p>
+					</fieldset>
+				</div>
+			</DocSection>
+
 			<DocSection label="Instructions">
 				<template #header-suffix>
 					<span class="text-ink-red-3 select-none" aria-hidden="true">*</span>
@@ -285,6 +333,7 @@ import {
 	Dropdown,
 	FormControl,
 	Switch,
+	Autocomplete,
 	toast,
 	confirmDialog,
 } from "frappe-ui";
@@ -306,6 +355,7 @@ import { useJarvisTheme } from "@/theme";
 import "@/assets/settings.css"; // shared jv-* primitives (overlay, jv-btn) for the discard dialog
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { isCreatesError } from "@/lib/fileboxSkills";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -324,6 +374,8 @@ const FIELDS = [
 	"user_invocable",
 	"enabled",
 	"allow_approve_run",
+	"use_in_file_box",
+	"file_box_creates",
 ];
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -339,6 +391,8 @@ const form = reactive({
 	user_invocable: true,
 	enabled: true,
 	allow_approve_run: false,
+	use_in_file_box: true,
+	file_box_creates: "",
 });
 // Whether THIS viewer may ENABLE "Approve & run" (Jarvis Admin / System Manager).
 // Server-provided (get_custom_skill.can_arm); the doctype guard is the real gate,
@@ -433,6 +487,64 @@ async function submitPromotion({ to_scope, target_role, target_roles, note }) {
 	}
 }
 
+// ── File Box: "Use in File Box" + "File Box creates" ─────────────────────────
+// A shared (Role/Org) skill: opting out is free, opting back in needs a reviewer
+// (the doctype's content guard), so a non-reviewer can't turn it on here.
+const FILE_BOX_HELP = "Let File Box use this skill automatically for matching documents";
+const fileBoxGated = computed(
+	() =>
+		canEdit.value &&
+		!isReviewer.value &&
+		!!skill.value &&
+		["Role", "Org"].includes(skill.value.scope)
+);
+const fileBoxLocked = computed(
+	() => readonly.value || (fileBoxGated.value && !snapshot.value.use_in_file_box)
+);
+const fileBoxDescription = computed(() => {
+	if (!fileBoxGated.value) return FILE_BOX_HELP;
+	return snapshot.value.use_in_file_box
+		? `${FILE_BOX_HELP}. Once off, only a reviewer can turn it back on for a shared skill.`
+		: `${FILE_BOX_HELP}. Only a reviewer can turn it on for a shared skill.`;
+});
+
+// The picker searches the types the server accepts there (submittable, not in a
+// denied module); a FileBoxCreatesError on save shows on the field.
+const CREATES_HINT_ID = "skill-file-box-creates-hint";
+const createsTypes = ref([]);
+const createsError = ref("");
+const createsOptions = computed(() => {
+	const names = [...createsTypes.value];
+	if (form.file_box_creates && !names.includes(form.file_box_creates))
+		names.unshift(form.file_box_creates);
+	return [
+		{ label: "Any document type", value: "" },
+		...names.map((n) => ({ label: n, value: n })),
+	];
+});
+let createsSeq = 0; // the latest search wins over a slower earlier one
+async function loadCreates(txt) {
+	const seq = ++createsSeq;
+	let names = [];
+	try {
+		names = (await api.fileBoxDoctypes(txt)) || [];
+	} catch {
+		// none listed
+	}
+	if (seq === createsSeq) createsTypes.value = names;
+}
+let createsTimer = null;
+function searchCreates(txt) {
+	clearTimeout(createsTimer);
+	createsTimer = setTimeout(() => loadCreates(txt), 250);
+}
+function setCreates(option) {
+	if (saving.value) return;
+	form.file_box_creates = (option && option.value) || "";
+	createsError.value = "";
+}
+onBeforeUnmount(() => clearTimeout(createsTimer));
+
 // Instructions markdown preview (goal item 1) - mirrors WikiPageDialog's
 // `previewing`/`previewHtml` pair exactly, scoped to this one field.
 const previewingInstructions = ref(false);
@@ -477,6 +589,8 @@ function seed(data) {
 	form.user_invocable = !!data.user_invocable;
 	form.enabled = !!data.enabled;
 	form.allow_approve_run = !!data.allow_approve_run;
+	form.use_in_file_box = data.use_in_file_box == null ? true : !!data.use_in_file_box;
+	form.file_box_creates = data.file_box_creates || "";
 	snapshot.value = { ...form };
 }
 
@@ -489,9 +603,11 @@ async function init() {
 	shareOpen.value = false;
 	docmeta.value = null;
 	canArm.value = false;
+	createsError.value = "";
 	if (props.isNew) {
 		skill.value = null;
 		seed({ user_invocable: 1, enabled: 1 });
+		loadCreates("");
 		return;
 	}
 	if (!props.id) return;
@@ -502,6 +618,7 @@ async function init() {
 		canArm.value = !!full.can_arm;
 		seed(full);
 		if (full.can_edit) {
+			loadCreates("");
 			docmeta.value = useDocmeta(DOCTYPE, props.id);
 			// created outside setup (async load / post-create replace) - fetch
 			// explicitly rather than relying on the composable's auto-load
@@ -557,6 +674,8 @@ async function save() {
 			// ignores the key) - a skill is never born armed; arming is a post-create
 			// admin edit through the update path. Sent uniformly for the update branch.
 			allow_approve_run: form.allow_approve_run ? 1 : 0,
+			use_in_file_box: form.use_in_file_box ? 1 : 0,
+			file_box_creates: form.file_box_creates || "",
 		};
 		if (props.isNew) {
 			const res = (await api.createCustomSkill(payload)) || {};
@@ -581,7 +700,8 @@ async function save() {
 			toast.success("Saved");
 		}
 	} catch (e) {
-		toast.error(errHtml(e));
+		if (isCreatesError(e)) createsError.value = errMsg(e);
+		else toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
 	}

@@ -25,6 +25,8 @@ from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
+	message_origin,
+	refuse_in_tool_dispatch,
 	require_jarvis_admin,
 	require_jarvis_user,
 )
@@ -2669,7 +2671,7 @@ def list_agent_activity_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def take_finding_to_chat(finding: str) -> dict:
 	"""Open a NEW conversation seeded with a finding's recorded facts so the
 	user can act on it with Jarvis. Owner-gated via ``check_permission("read")``
@@ -2679,6 +2681,7 @@ def take_finding_to_chat(finding: str) -> dict:
 	a remediation. Dispatched as a normal FOREGROUND turn (no ``background``
 	flag — unlike ``filebox.drop_file``'s unattended drop, the user lands in
 	the live chat), mirroring ``approvals_api.decide``'s resume send."""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(FINDING, finding)
 	doc.check_permission("read")  # S3 owner-gate (owner via if_owner, or SM)
 
@@ -2713,7 +2716,8 @@ def take_finding_to_chat(finding: str) -> dict:
 		"document and the recorded facts above; do not invent numbers, "
 		"documents or remediation steps the data does not support."
 	)
-	res = send_message(conversation=conv.name, message="\n".join(parts))
+	with message_origin("agent"):
+		res = send_message(conversation=conv.name, message="\n".join(parts))
 	if not res.get("ok"):
 		# jarvis#1062 polish: the conversation above is committed BEFORE the seed
 		# is attempted, so a validate_can_send failure (no model configured, over

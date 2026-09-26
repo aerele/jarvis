@@ -787,10 +787,16 @@ class TestListPendingConfirmations(FrappeTestCase):
 		cards surface, and the one whose summary failed degrades to "" (not vanishes).
 
 		(Supersedes the earlier assertion that a bad record was silently skipped -
-		that baked in the drop-the-card defect.)"""
+		that baked in the drop-the-card defect.)
+
+		LEGACY store (flag 0): a pending action's summary is built once at park (its
+		degrade is test_pending_confirm's), and single-flight allows one per chat."""
 		from jarvis.chat import pending_confirm
 		from jarvis.chat.actions_api import list_pending_confirmations
 
+		flag = patch.dict(frappe.conf, {"jarvis_pa_chat_cards": 0})
+		flag.start()
+		self.addCleanup(flag.stop)
 		conv = self._conv()
 		pending_confirm.mint(
 			conversation=conv,

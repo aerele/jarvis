@@ -160,7 +160,7 @@ class TestUserScopePageIsolation(FrappeTestCase):
 		# directly, a User-scope write never lands on another audience's page.
 		self.assertEqual(self._ingest_as(TWIN_A, "ALPHA-PRIVATE-FACT"), (1, 0))
 		name_a, _ = wiki.resolve_user_scope_page(TWIN_BASE_SLUG, TWIN_A)
-		applied = wiki._merge_update_into_page(
+		applied, _reason = wiki._merge_update_into_page(
 			name_a,
 			{"append_md": "- BETA-PRIVATE-FACT"},
 			"voice",
