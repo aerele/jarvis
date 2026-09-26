@@ -2755,35 +2755,6 @@
 					</template>
 				</Banner>
 
-				<!-- On-demand re-check (layered design, phase 1): a distinct affordance
-				     beside the jump arrow, shown only when scrolled up (never a resting
-				     control), to pull a parked confirmation the silent auto-heal missed.
-				     Labelled for a11y via title + aria-label. -->
-				<transition name="jv-rc">
-					<button
-						v-if="showScrollDown && !showWelcome && !booting"
-						type="button"
-						class="jv-recheck-float"
-						@click="recheckPending"
-						title="Show confirmation"
-						aria-label="Show a pending confirmation"
-					>
-						<svg
-							width="17"
-							height="17"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						>
-							<path d="M21 12a9 9 0 1 1-2.64-6.36" />
-							<path d="M21 3v6h-6" />
-						</svg>
-					</button>
-				</transition>
-
 				<!-- floats just above the composer; jumps the thread to the newest message -->
 				<transition name="jv-sd">
 					<button
@@ -7972,22 +7943,6 @@ async function discardPending(pa) {
 // action:pending event delivered before the page was open. Deduped by token
 // against whatever is already queued; freshness-guarded against a mid-flight
 // conversation switch.
-// PR-2: the always-present re-check lever's handler. Reseed from the durable rows
-// already loaded, then pull the Redis backstop; both dedup by token so it can't
-// double a card. Always gives a result so the click is never a silent no-op.
-async function recheckPending() {
-	if (!currentId.value) return;
-	const before = visiblePendingActions.value.length;
-	seedPendingFromRows(messages.value, currentId.value);
-	// "pill" tags this as the human-driven on-demand control (the ↻ beside the jump
-	// arrow) so the server can attribute how often the visible lever surfaces a card
-	// the silent auto-heal missed. The automatic resync callers pass no source.
-	await resyncPendingConfirmations(currentId.value, "pill");
-	const after = visiblePendingActions.value.length;
-	if (after > before) notify("Found a pending confirmation.", { type: "success" });
-	else if (after === 0) notify("Nothing is waiting for your confirmation.", {});
-}
-
 async function resyncPendingConfirmations(id, source) {
 	if (!id) return;
 	let items = null;
@@ -12000,55 +11955,6 @@ onUnmounted(() => {
 .jv-sd-leave-to {
 	opacity: 0;
 	transform: translateX(-50%) translateY(10px);
-}
-/* on-demand re-check — sits just left of the jump arrow, same float. Its transition
-   is opacity-only so it never fights the offset transform below. */
-.jv-recheck-float {
-	position: absolute;
-	left: 50%;
-	bottom: 100%;
-	margin-bottom: 12px;
-	transform: translateX(calc(-50% - 46px));
-	z-index: 20;
-	width: 38px;
-	height: 38px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0;
-	border-radius: 50%;
-	background: var(--surface);
-	color: var(--text-2);
-	border: 1px solid var(--border-2);
-	box-shadow: 0 6px 20px rgba(20, 20, 30, 0.18);
-	cursor: pointer;
-	transition: color 0.12s, border-color 0.12s, background 0.12s, box-shadow 0.12s;
-}
-.jv-recheck-float:hover {
-	color: var(--text);
-	border-color: var(--text-3);
-	box-shadow: 0 9px 24px rgba(20, 20, 30, 0.22);
-}
-.jv-recheck-float:active {
-	transform: translateX(calc(-50% - 46px)) scale(0.92);
-}
-.jv-recheck-float:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
-.jv-rc-enter-active,
-.jv-rc-leave-active {
-	transition: opacity 0.18s ease;
-}
-.jv-rc-enter-from,
-.jv-rc-leave-to {
-	opacity: 0;
-}
-@media (prefers-reduced-motion: reduce) {
-	.jv-rc-enter-active,
-	.jv-rc-leave-active {
-		transition: none;
-	}
 }
 /* response metrics (tools · time) */
 .jv-skillused {
