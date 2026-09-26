@@ -12,8 +12,8 @@ from jarvis.ci import inputs
 
 class TestCIInputs(unittest.TestCase):
 	def test_both_bundled_snapshots_validate(self):
-		for kind in ("policy", "fixture"):
-			self.assertEqual(json.loads(inputs.decode(kind))["version"], 1)
+		for kind, version in (("policy", 1), ("fixture", 2)):
+			self.assertEqual(json.loads(inputs.decode(kind))["version"], version)
 
 	def test_missing_or_malformed_snapshots_fail(self):
 		with tempfile.TemporaryDirectory() as directory, patch.object(inputs, "_DATA", Path(directory)):

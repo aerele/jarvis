@@ -1,8 +1,9 @@
 """Transition-safe access to the renamed snapshot-recovery watermark column.
 
 The white-label rename moved the legacy chat-message watermark column to
-``agent_seq_watermark``. The one-shot v2_10 copy patch only migrates rows that exist
-when ``bench migrate`` runs — but the transition has live traffic on both sides of it:
+``agent_seq_watermark``. The one-shot v2_10 copy patch (retired; every release since
+v1.0.0 ran it) only migrated rows that existed when ``bench migrate`` ran — but the
+transition has live traffic on both sides of it:
 
 * old-code RQ workers keep WRITING the legacy column until the post-migrate restart —
   a new-code reader that looks only at the new column sees 0 for those rows, and
@@ -12,10 +13,9 @@ when ``bench migrate`` runs — but the transition has live traffic on both side
   the new column are invisible to them.
 
 Every write therefore stamps BOTH columns and every read takes ``GREATEST`` of
-the pair while the legacy column exists. Normal migrations also reconcile both
-columns, including sites whose original rename patch already ran. No worker-drain
-gate or manual customer action is required for this compatibility step. Retiring
-the old column remains a separate deployment decision.
+the pair while the legacy column exists, so a late old-worker write or a
+rollback reader never loses the effective fence. Retiring the old column remains
+a separate deployment decision.
 """
 
 from __future__ import annotations
@@ -45,27 +45,6 @@ def has_legacy_column() -> bool:
 		)
 		frappe.local._jarvis_wm_legacy_col = cached
 	return cached
-
-
-def reconcile_watermarks() -> None:
-	"""Idempotently preserve the effective fence in both columns on migrate.
-
-	Do not drop the legacy column: an old worker can still write after this
-	statement, and a rollback still needs its values. Runtime dual writes and
-	GREATEST reads cover that overlap. Fresh sites have no legacy column.
-	"""
-	# Migration may have changed the schema after this request's first lookup.
-	frappe.local._jarvis_wm_legacy_col = None
-	if not has_legacy_column():
-		return
-	effective = f"GREATEST(agent_seq_watermark, {_legacy_column()})"
-	frappe.db.sql(
-		f"""
-		UPDATE `tab{MSG}`
-		SET agent_seq_watermark = {effective}, {_legacy_column()} = {effective}
-		WHERE agent_seq_watermark <> {_legacy_column()}
-		"""
-	)
 
 
 def stamp_watermark(message_name: str, watermark: int) -> None:

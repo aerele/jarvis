@@ -11,7 +11,7 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_SHA256 = "2c111a0706e96a13665b7e740a637d53474e19cda7ae4eb2fe9753d182345626"
+EXPECTED_SHA256 = "cbbfd08235082cebae6417476f662b2367ce6b6c605d4d57db3f1d3228afb5d4"
 VALUE_ENV = "JARVIS_LEGACY_MIGRATION_FIXTURES"
 FILE_ENV = "JARVIS_LEGACY_MIGRATION_FIXTURES_FILE"
 
@@ -27,16 +27,19 @@ def validate(raw, expected_sha256=EXPECTED_SHA256):
 		if not isinstance(raw, str) or not raw or len(raw.encode()) > 16_384:
 			raise ValueError
 		doc = json.loads(raw)
-		if (
-			set(doc) != {"version", "watermark", "capture_provider", "settings"}
-			or type(doc["version"]) is not int
+		if set(doc) != {"version", "watermark", "capture_provider"} or type(doc["version"]) is not int:
+			raise ValueError
+		# v2: the settings-rename and watermark-copy patches were retired, so only
+		# the provider column still has a patch; the watermark column is read by
+		# the runtime dual-write layer.
+		if doc["version"] != 2:
+			raise ValueError
+		for name, keys in (
+			("watermark", {"legacy_column"}),
+			("capture_provider", {"legacy_column", "patch"}),
 		):
-			raise ValueError
-		if doc["version"] != 1:
-			raise ValueError
-		for name in ("watermark", "capture_provider"):
 			entry = doc[name]
-			if not isinstance(entry, dict) or set(entry) != {"legacy_column", "patch"}:
+			if not isinstance(entry, dict) or set(entry) != keys:
 				raise ValueError
 			if not isinstance(entry["legacy_column"], str) or not re.fullmatch(
 				r"[a-z][a-z0-9_]{0,63}", entry["legacy_column"]
@@ -44,34 +47,11 @@ def validate(raw, expected_sha256=EXPECTED_SHA256):
 				raise ValueError
 			if entry["legacy_column"] in {"agent_seq_watermark", "agent_provider"}:
 				raise ValueError
-			if not isinstance(entry["patch"], str) or not re.fullmatch(
-				r"jarvis\.patches\.[a-z][a-z0-9_]*\.execute", entry["patch"]
+			if "patch" in keys and (
+				not isinstance(entry["patch"], str)
+				or not re.fullmatch(r"jarvis\.patches\.[a-z][a-z0-9_]*\.execute", entry["patch"])
 			):
 				raise ValueError
-		settings = doc["settings"]
-		if not isinstance(settings, dict) or set(settings) != {"legacy_patch", "patch", "renames"}:
-			raise ValueError
-		for key, suffix in (("legacy_patch", ""), ("patch", r"\.execute")):
-			if not isinstance(settings[key], str) or not re.fullmatch(
-				r"jarvis\.patches\.[a-z][a-z0-9_]*" + suffix, settings[key]
-			):
-				raise ValueError
-		renames = settings["renames"]
-		targets = {
-			"jarvis_admin_url",
-			"jarvis_admin_api_key",
-			"agent_url",
-			"agent_token",
-			"agent_compose_dir",
-			"agent_config_path",
-			"agent_llm_key_path",
-		}
-		if not isinstance(renames, dict) or len(renames) != 7:
-			raise ValueError
-		if set(renames.values()) != targets or set(renames) & targets:
-			raise ValueError
-		if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) for key in renames):
-			raise ValueError
 		if digest(doc) != expected_sha256:
 			raise ValueError
 		return doc
