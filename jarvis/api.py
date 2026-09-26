@@ -1,5 +1,6 @@
 import json
 import time
+from collections import deque
 
 import frappe
 from frappe.utils import strip_html
@@ -1677,6 +1678,9 @@ _ERROR_HINTS = {
 	"InvalidArgumentError": (
 		"Some of the values need attention - check the highlighted fields and try again."
 	),
+	"OutgoingEmailError": (
+		"Ask your administrator to configure an enabled default outgoing Email Account before retrying."
+	),
 	# JF-017. The agent's tool surface is fixed when it is published, so unlike a
 	# permission denial there is nothing the USER can change - the remedy is the
 	# bundle. (The delegate's own "retrying will not help" instruction rides in the
@@ -1769,6 +1773,9 @@ def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	elif isinstance(e, frappe.DuplicateEntryError):
 		# str(e) here is an args-tuple repr, not a message - clean it up.
 		code, message = "InvalidArgumentError", _duplicate_message(e)
+	elif isinstance(e, frappe.OutgoingEmailError):
+		code = "OutgoingEmailError"
+		message = strip_html(str(e)).strip() or "Outgoing email is not configured."
 	elif isinstance(e, frappe.ValidationError):
 		code = "InvalidArgumentError"
 		message = strip_html(str(e)).strip() or _flags_message() or type(e).__name__
@@ -1813,6 +1820,13 @@ def _dispatch_and_wrap(
 	mark = _msglog_mark()
 	sp = f"jarvis_{frappe.generate_hash(length=10)}" if is_write else None
 	if sp:
+		saved_queues = {
+			name: tuple(getattr(frappe.db, name)._functions)
+			for name in ("before_commit", "after_commit", "before_rollback", "after_rollback")
+			if hasattr(frappe.db, name)
+		}
+		realtime_log = getattr(frappe.local, "_realtime_log", None)
+		saved_realtime = list(realtime_log) if realtime_log is not None else None
 		frappe.db.savepoint(sp)
 	try:
 		data = dispatch(tool, args)
@@ -1832,6 +1846,16 @@ def _dispatch_and_wrap(
 				frappe.db.rollback(save_point=sp)
 			except Exception:
 				pass
+			else:
+				# SQL savepoint rollback leaves callbacks and realtime events queued.
+				for name, functions in saved_queues.items():
+					getattr(frappe.db, name)._functions = deque(functions)
+				if saved_realtime is None:
+					from frappe.realtime import clear_realtime_log
+
+					clear_realtime_log()
+				else:
+					frappe.local._realtime_log = saved_realtime
 		if is_write:
 			err_obj = envelope["error"]
 			audit.record(
