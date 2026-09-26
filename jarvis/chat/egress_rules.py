@@ -153,20 +153,23 @@ def redact_final_with_media(text, *, conversation=None, run_id=None):
 
 	- ``media_rels`` — local media paths (detected on the RAW text) to fetch + seed
 	  downstream as inline images (the fetchable-image subset).
-	- ``marker_stripped`` — True if ANY ``MEDIA:`` line was removed (a superset of
-	  ``media_rels``: also the non-fetchable ``.pdf`` / external / traversal markers).
-	  The content-write gate uses it to force the stored-content overwrite even when
-	  the stripped text is empty, so NO recognized marker survives in stored content.
-	- the marker line(s) are STRIPPED before :func:`redact_and_flag` runs, so the
-	  egress ``/home/node`` backstop can't eat the path first (which would both lose
-	  the image and fire a false tripwire) and no raw container path survives.
+	- ``marker_stripped`` — True if ANY ``MEDIA:`` line, or any qualifying embedded
+	  media path line (an image/video/music tool's deferred reply naming its file
+	  in free text - "Attachment: <path>", ``path="<path>"``, a markdown image),
+	  was removed. The content-write gate uses it to force the stored-content
+	  overwrite even when the stripped text is empty, so no recognized marker/
+	  path survives in stored content.
+	- the marker/path line(s) are STRIPPED before :func:`redact_and_flag` runs, so
+	  the egress ``/home/node`` backstop can't eat the path first (which would both
+	  lose the image and fire a false tripwire) and no raw container path survives.
 
 	Use at every terminal-text producer (direct relay, pump, recovery). Never raises
-	— detect/strip/has_media_marker are total and ``redact_and_flag`` fail-opens."""
+	— detect/strip/has_media_marker/has_embedded_media_path are total and
+	``redact_and_flag`` fail-opens."""
 	from jarvis.chat import generated_media
 
 	rels = generated_media.detect_media_paths(text)
-	marker_stripped = generated_media.has_media_marker(text)
+	marker_stripped = generated_media.has_media_marker(text) or generated_media.has_embedded_media_path(text)
 	stripped = generated_media.strip_media_lines(text)
 	return redact_and_flag(stripped, conversation=conversation, run_id=run_id), rels, marker_stripped
 
