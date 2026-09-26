@@ -38,6 +38,14 @@ describe("isFieldMissing", () => {
 	it("not required -> never missing", () => {
 		expect(isFieldMissing({ reqd: 0, read_only: 0, value: "" })).toBe(false);
 	});
+	it("named missing by the server -> missing even when meta says optional", () => {
+		expect(isFieldMissing({ reqd: 0, serverMissing: true, read_only: 0, value: "" })).toBe(
+			true
+		);
+		expect(isFieldMissing({ reqd: 0, serverMissing: true, read_only: 0, value: "x" })).toBe(
+			false
+		);
+	});
 });
 
 describe("readonlyDisplay", () => {
