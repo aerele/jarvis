@@ -51,6 +51,13 @@ _PAUSE_CAP_S = 0.01
 # --------------------------------------------------------------------------- #
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class _Recorder:
 	"""A lane callback set that records everything and signals completion. Poison
 	is injected by making a specific callback raise — integrity-class behaviour
