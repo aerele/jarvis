@@ -1,8 +1,9 @@
 """Transition-safe access to the renamed snapshot-recovery watermark column.
 
-The white-label rename moved ``Jarvis Chat Message.openclaw_seq_watermark`` to
-``agent_seq_watermark``. The one-shot v2_10 copy patch only migrates rows that exist
-when ``bench migrate`` runs — but the transition has live traffic on both sides of it:
+The white-label rename moved the legacy chat-message watermark column to
+``agent_seq_watermark``. The one-shot v2_10 copy patch (retired; every release since
+v1.0.0 ran it) only migrated rows that existed when ``bench migrate`` ran — but the
+transition has live traffic on both sides of it:
 
 * old-code RQ workers keep WRITING the legacy column until the post-migrate restart —
   a new-code reader that looks only at the new column sees 0 for those rows, and
@@ -11,18 +12,23 @@ when ``bench migrate`` runs — but the transition has live traffic on both side
 * a rollback resumes old-code READERS of the legacy column — values written only to
   the new column are invisible to them.
 
-So for this compatibility release every write stamps BOTH columns and every read takes
-``GREATEST`` of the pair, whenever the legacy column still exists. A later contract
-patch drops the legacy column, at which point ``has_legacy_column`` turns False and
-both helpers collapse to the new column with no further code change.
+Every write therefore stamps BOTH columns and every read takes ``GREATEST`` of
+the pair while the legacy column exists, so a late old-worker write or a
+rollback reader never loses the effective fence. Retiring the old column remains
+a separate deployment decision.
 """
 
 from __future__ import annotations
 
 import frappe
 
+from jarvis.legacy_compatibility import get_contract
+
 MSG = "Jarvis Chat Message"
-_LEGACY_COL = "openclaw_seq_watermark"
+
+
+def _legacy_column():
+	return get_contract().watermark_column
 
 
 def has_legacy_column() -> bool:
@@ -34,7 +40,9 @@ def has_legacy_column() -> bool:
 	mid-request."""
 	cached = getattr(frappe.local, "_jarvis_wm_legacy_col", None)
 	if cached is None:
-		cached = bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` LIKE %(c)s", {"c": _LEGACY_COL}))
+		cached = bool(
+			frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` WHERE Field = %(c)s", {"c": _legacy_column()})
+		)
 		frappe.local._jarvis_wm_legacy_col = cached
 	return cached
 
@@ -45,7 +53,7 @@ def stamp_watermark(message_name: str, watermark: int) -> None:
 	``modified`` — matches the previous ``update_modified=False`` write."""
 	cols = "agent_seq_watermark=%(w)s"
 	if has_legacy_column():
-		cols += f", {_LEGACY_COL}=%(w)s"
+		cols += f", {_legacy_column()}=%(w)s"
 	frappe.db.sql(
 		f"UPDATE `tab{MSG}` SET {cols} WHERE name=%(n)s",
 		{"w": int(watermark), "n": message_name},
@@ -59,5 +67,5 @@ def wm_expr(alias: str = "") -> str:
 	table alias prefix including the dot (e.g. ``"m."``)."""
 	col = f"{alias}agent_seq_watermark"
 	if has_legacy_column():
-		return f"GREATEST({col}, {alias}{_LEGACY_COL})"
+		return f"GREATEST({col}, {alias}{_legacy_column()})"
 	return col

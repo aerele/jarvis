@@ -374,8 +374,7 @@ export function buildSrcdoc(
 	// Under a standard (non-bespoke) theme, wrap the author's <style> contents in
 	// `@layer author` so the theme's `@layer theme` wins. Skipped for bespoke /
 	// no-theme, where author CSS stays unlayered and wins.
-	const prep = (s) =>
-		themeSpec && !bespoke ? wrapAuthorStyles(stripHostClient(s)) : stripHostClient(s);
+	const prep = (s) => (themeSpec && !bespoke ? wrapAuthorStyles(s) : s);
 	return (
 		`<!DOCTYPE html><html data-theme="${theme}"><head>` +
 		CSP_META +
@@ -664,15 +663,8 @@ function wrapAuthorStyles(html) {
 	return out;
 }
 
-// Dashboards saved before the gateway host-client strip landed carry a dead
-// agent live-reload script (a WebSocket to /__openclaw__/ws). It can't work
-// inside the sandbox (connect-src 'none' blocks it) and just logs a CSP
-// violation on every view — drop any <script> that references the host socket.
-function stripHostClient(html) {
-	return String(html || "").replace(/<script\b[\s\S]*?<\/script>/gi, (m) =>
-		m.includes("__openclaw__/ws") ? "" : m
-	);
-}
+// Runtime host scripts are removed by the authorized server HTML delivery paths.
+// Keep the profile and its endpoint identifiers out of this browser bundle.
 
 // Parent-side parse of the SAME #jarvis-sources block the runtime reads -
 // feeds the save dialog's detected-sources preview and the save payload.

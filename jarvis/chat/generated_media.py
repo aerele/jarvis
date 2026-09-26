@@ -20,6 +20,7 @@ import re
 import frappe
 
 from jarvis import admin_client
+from jarvis.chat.runtime_profile import get_profile
 
 MSG = "Jarvis Chat Message"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -130,7 +131,7 @@ def persist_generated_images(assistant_msg_name: str, conversation_id: str, turn
 # writes to the agent media store and emits a protocol marker
 # ``MEDIA:<abs path>`` on its own line when reply delivery falls back to
 # ``automatic`` mode. Unlike codex images, this file IS served by the container
-# gateway at ``/__openclaw__/assistant-media?source=<path>`` (the same gateway
+# gateway at the assistant-media endpoint with its source query parameter (the same gateway
 # that serves canvas artifacts), so we fetch it directly like ``canvas.py`` —
 # no fleet-agent host-pull. The marker is detected + stripped from the reply
 # BEFORE egress redaction (so the raw container path never leaks and the file
@@ -146,10 +147,6 @@ def persist_generated_images(assistant_msg_name: str, conversation_id: str, turn
 # already favours leak-safety over preserving a fenced example, so every such line
 # is consumed.
 _MEDIA_PREFIX = re.compile(r"^\s*MEDIA:\s*(.*?)\s*$", re.IGNORECASE)
-# Couples to the container HOME (fleet-agent compose). If the agent config dir is
-# ever renamed (Q2), update this literal AND the control-plane ``/home/node`` egress
-# rule together.
-_MEDIA_ROOT = "/home/node/.openclaw/media/"
 _MAX_MEDIA_PER_TURN = 8  # mirror canvas._MAX_CANVAS_PER_TURN (bound a hostile many-marker reply)
 _MAX_MEDIA_BYTES = 8 * 1024 * 1024  # bound worker memory; the source is LLM-influenced
 
@@ -183,9 +180,9 @@ def detect_media_paths(text: str) -> list[str]:
 	out: list[str] = []
 	exts = tuple(_IMAGE_EXTS)
 	for _, path in _media_lines(text):
-		if not path.startswith(_MEDIA_ROOT):
+		if not path.startswith(get_profile().media_root):
 			continue
-		rel = path[len(_MEDIA_ROOT) :]
+		rel = path[len(get_profile().media_root) :]
 		# ``..`` can't escape the media root (the gateway also realpath-confines),
 		# but reject it here so we never even send a traversal path.
 		if not rel or rel.startswith("/") or ".." in rel.split("/"):
@@ -242,7 +239,7 @@ def fetch_media(agent_url: str, token: str, source: str) -> bytes | None:
 	base = _http_base(agent_url)
 	if not base or not token:
 		return None
-	url = f"{base}/__openclaw__/assistant-media?source={quote(source, safe='')}"
+	url = f"{base}{get_profile().media_route}?source={quote(source, safe='')}"
 	try:
 		# 15s (tighter than canvas's 20s): seed_media shares the ~180s finalize hop
 		# with the canvas + imagegen fetches, so up to 8 media fetches must not
@@ -289,12 +286,12 @@ def _safe_media_filename(basename: str) -> str:
 def _media_dedup_key(source: str) -> str:
 	"""The canvas-item ``source`` / dedup key for a media path: the path RELATIVE to
 	the media root (e.g. ``tool-image-generation/<name>.png``), NEVER the full
-	``/home/node/.openclaw/...`` absolute path. The canvas item ships to the client
+	absolute path under the container runtime directory. The canvas item ships to the client
 	(live ``canvas`` event + raw on history reload) even though the frontend never
 	renders ``source``, so storing the absolute path would re-leak the runtime brand
 	+ container layout the rest of this change strips out. The relative form is
 	unique per image and brand/path-free."""
-	return source[len(_MEDIA_ROOT) :] if source.startswith(_MEDIA_ROOT) else source
+	return source[len(get_profile().media_root) :] if source.startswith(get_profile().media_root) else source
 
 
 def _existing_media_sources(assistant_msg_name: str) -> set[str]:
@@ -362,7 +359,7 @@ def seed_media(assistant_msg_name: str, agent_url: str, token: str, sources: lis
 
 	if failures:
 		# ONE aggregated signal per turn (not per file) so a silent fleet-wide
-		# degradation — e.g. a _MEDIA_ROOT / container-path drift where every marker
+		# degradation — e.g. a configured media-root / container-path drift where every marker
 		# is detected but every fetch 404s — surfaces in the Error Log instead of
 		# relying on a user complaint. Best-effort; never raises.
 		frappe.log_error(

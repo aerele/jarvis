@@ -17,7 +17,7 @@ for a failed check - it always returns a structured
 
 NOT the same thing as ``PUT /v1/containers/{name}/llm-pool``
 (``jarvis.admin_client.post_update_llm_pool``): that is a MUTATING apply on
-the fleet-agent that rotates secrets, rewrites the tenant's openclaw.json and
+the fleet-agent that rotates secrets, rewrites the tenant's agent configuration and
 can restart the container (10-30s chat outage). This probe never writes
 Jarvis Settings, never calls admin_client, and never touches the fleet or a
 container - it is a single side-effect-free HTTP round-trip straight from

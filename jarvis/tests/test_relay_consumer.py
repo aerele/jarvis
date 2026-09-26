@@ -35,6 +35,13 @@ def _chat_frame(run_id, session_key, state, **extra):
 	return {"type": "event", "event": "chat", "payload": payload}
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class TestRelayTurnEvents(FrappeTestCase):
 	def _sess(self, frames):
 		sess = AgentSession.__new__(AgentSession)  # bypass __init__/WS

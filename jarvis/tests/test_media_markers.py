@@ -8,12 +8,16 @@ import unittest
 from unittest.mock import Mock, patch
 
 from jarvis.chat import generated_media as gm
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 
-# Import the root rather than re-hardcoding it — a Q2 rename that updates the
-# production constant must not leave the tests validating the old path.
-_ROOT = gm._MEDIA_ROOT
+# Independent synthetic input: the consumer must honor the injected profile.
+_ROOT = "/srv/test-gateway/media/"
 _IMG = _ROOT + "tool-image-generation/black-hole---4de239c0-8d05-41e5-9f52-e404ee9f0b21.png"
 _IMG_REL = _IMG[len(_ROOT) :]
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestDetectMediaPaths(unittest.TestCase):
@@ -62,7 +66,7 @@ class TestDetectMediaPaths(unittest.TestCase):
 		self.assertEqual(gm.detect_media_paths("MEDIA:https://example.com/x.png"), [])
 
 	def test_outside_media_root_excluded(self):
-		self.assertEqual(gm.detect_media_paths("MEDIA:/home/node/.openclaw/credentials/x.png"), [])
+		self.assertEqual(gm.detect_media_paths("MEDIA:/srv/test-gateway/credentials/x.png"), [])
 		self.assertEqual(gm.detect_media_paths("MEDIA:/etc/passwd.png"), [])
 
 	def test_traversal_excluded(self):
@@ -154,9 +158,9 @@ class TestFetchMedia(unittest.TestCase):
 		self.assertEqual(out, b"PNGDATA")
 		args, kwargs = rget.call_args
 		url = args[0]
-		self.assertTrue(url.startswith("http://agent.host:9000/__openclaw__/assistant-media?source="))
+		self.assertTrue(url.startswith("http://agent.host:9000/__test_gateway__/assistant-media?source="))
 		# the path is URL-encoded (slashes -> %2F), not raw
-		self.assertNotIn("/home/node", url.split("source=", 1)[1])
+		self.assertNotIn("/srv/test-gateway", url.split("source=", 1)[1])
 		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok123")
 		self.assertFalse(kwargs["allow_redirects"])
 		self.assertTrue(kwargs["stream"])
