@@ -218,13 +218,14 @@ describe("every terminal in the view snaps the reveal", () => {
 describe("stale tool events cannot reopen the activity list", () => {
 	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
 
-	it("guards both tool events on a live run", () => {
+	it("guards both tool events and the step line on a live run", () => {
 		// The CDX-3 pump fence deliberately lets an epoch-less tool event through, so
 		// a straggler tool:start after run:end pushed a `running` entry that no
-		// tool:end would settle, leaving a spinner the user never opened.
+		// tool:end would settle, leaving a spinner the user never opened. The live
+		// step line (run:step) reopens the same activity block, so it needs it too.
 		expect(src).toContain("function toolEventIsStale(p)");
 		expect(src).toContain("if (!currentRunId.value) return true;");
 		const guards = src.match(/if \(toolEventIsStale\(p\)\) break;/g) || [];
-		expect(guards).toHaveLength(2); // tool:start AND tool:end
+		expect(guards).toHaveLength(3); // tool:start, tool:end AND run:step
 	});
 });
