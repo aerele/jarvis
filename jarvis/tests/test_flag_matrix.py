@@ -56,6 +56,13 @@ MSG = "Jarvis Chat Message"
 TURN = "Jarvis Chat Turn"
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class _FlagMatrixCase(_PipelineCase):
 	def setUp(self):
 		super().setUp()

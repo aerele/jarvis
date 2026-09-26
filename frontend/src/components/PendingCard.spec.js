@@ -183,3 +183,50 @@ describe("PendingCard plan outline (card.plan, additive)", () => {
 		expect(w.text()).toContain("+5 more");
 	});
 });
+
+describe("email attachments", () => {
+	it("shows filenames as text before approving a single email", () => {
+		const w = mount(PendingCard, {
+			props: {
+				card: {
+					kind: "email",
+					to: "recipient@example.invalid",
+					subject: "Report",
+					attachments: ["sales.xlsx", "<img src=x onerror=alert(1)>.pdf"],
+				},
+				details: "",
+			},
+		});
+		expect(w.text()).toContain("Attachments");
+		expect(w.text()).toContain("sales.xlsx");
+		expect(w.text()).toContain("<img src=x onerror=alert(1)>.pdf");
+		expect(w.find("img").exists()).toBe(false);
+	});
+	it("shows each batch message's own filenames", () => {
+		const w = mount(PendingCard, {
+			props: {
+				card: {
+					kind: "bulk_email",
+					count: 2,
+					messages: [
+						{
+							recipients: "a@example.invalid",
+							subject: "A",
+							attachments: ["sales.xlsx"],
+						},
+						{
+							recipients: "b@example.invalid",
+							subject: "B",
+							attachments: ["summary.pdf"],
+						},
+					],
+				},
+				details: "",
+			},
+		});
+		const messages = w.findAll(".jv-rec");
+		expect(messages[0].text()).toContain("sales.xlsx");
+		expect(messages[0].text()).not.toContain("summary.pdf");
+		expect(messages[1].text()).toContain("summary.pdf");
+	});
+});

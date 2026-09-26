@@ -416,7 +416,8 @@ class TestInsightSkillUpdate(unittest.TestCase):
 			skill_name=TARGET_SLUG,
 			updated_instructions="- New rule text.",
 		)
-		self.assertEqual(out, {"ok": True, "skill_name": TARGET_SLUG})
+		# an Org target is in the shared push set: the client must run the Apply
+		self.assertEqual(out, {"ok": True, "skill_name": TARGET_SLUG, "needs_apply": True})
 		self.assertEqual(frappe.db.get_value(SKILL, skill, "instructions"), "- New rule text.")
 		row = frappe.db.get_value(
 			JLP,
@@ -481,6 +482,7 @@ class TestInsightSkillUpdate(unittest.TestCase):
 		)
 		self.assertTrue(out["ok"])
 		self.assertEqual(out["skill_name"], "isu-test-acme-terms")
+		self.assertIs(out["needs_apply"], True)
 		row = frappe.get_all(
 			SKILL,
 			filters={"skill_name": "isu-test-acme-terms"},

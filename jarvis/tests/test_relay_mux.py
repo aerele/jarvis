@@ -51,6 +51,13 @@ _PAUSE_CAP_S = 0.01
 # --------------------------------------------------------------------------- #
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class _Recorder:
 	"""A lane callback set that records everything and signals completion. Poison
 	is injected by making a specific callback raise — integrity-class behaviour
@@ -283,8 +290,8 @@ class _DoubleGateway:
 
 	def arm_sessions_get(self, session_key: str, messages: list):
 		"""Arm the raw transcript ``sessions.get`` returns for a session key (used by
-		the pump's missed-terminal snapshot-recovery tail). Each message may carry an
-		``__openclaw.seq`` so the pump's watermark windowing (OARF-2) is exercised."""
+		the pump's missed-terminal snapshot-recovery tail). Each message may carry a
+		transcript metadata sequence field so the pump's watermark windowing (OARF-2) is exercised."""
 		self._sessions_get[session_key] = messages
 
 	def arm_sessions_list(self, rows: list):

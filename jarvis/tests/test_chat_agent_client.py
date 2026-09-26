@@ -603,7 +603,7 @@ class TestSelfHealOnStalePairing(FrappeTestCase):
 
 	# agent's REAL wire shape for a device-token auth rejection, captured
 	# verbatim from a live gateway (2026-07-09, reproduction against
-	# ghcr.io/openclaw/openclaw): the generic INVALID_REQUEST code with the
+	# gateway image): the generic INVALID_REQUEST code with the
 	# machine-readable reason only in error.details.authReason. This is what
 	# a bench actually receives after its tenant container is replaced (the
 	# gateway maps device-not-paired / token-mismatch / token-revoked all to
@@ -1037,7 +1037,7 @@ class TestSessionsListModelIdentity(FrappeTestCase):
 	``sessions.list`` row, so this pins that frame.
 
 	No live event carries it: both live ``emitChatFinal`` implementations in
-	ghcr.io/openclaw/openclaw:2026.6.8 build the terminal chat message fresh as
+	gateway image version 2026.6.8 build the terminal chat message fresh as
 	``{role, content, timestamp}``, and the lifecycle end/error frame carries only
 	``phase`` plus terminal metadata. The runtime logs
 	``model=... provider=...`` at agent end but never emits it. The durable

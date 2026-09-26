@@ -50,6 +50,9 @@ permissions:
   packages: read   # to pull the base image from GHCR
 
 jobs:
+  runtime-branding:
+    uses: ./.github/workflows/runtime-branding.yml
+
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
   # even for a clone where nobody ran `pre-commit install`. Deliberately NOT in
   # the tests container: this needs only python + node, and it should report in
@@ -258,6 +261,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: app
+
+      - name: Validate Admin-owned upgrade fixtures for this checkout
+        working-directory: app
+        run: |
+          git rev-parse HEAD
+          python3 -m jarvis.ci.inputs fixture --output "$RUNNER_TEMP/migration-fixture.json"
+          echo "JARVIS_LEGACY_MIGRATION_FIXTURES_FILE=$RUNNER_TEMP/migration-fixture.json" >> "$GITHUB_ENV"
 
       - name: Record what this run actually tested against
         working-directory: /opt/frappe-bench

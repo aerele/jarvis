@@ -777,6 +777,10 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	if typ in ("html", "svg"):
 		# Rendered inline in a sandboxed iframe srcdoc.
 		body = raw.decode("utf-8") if isinstance(raw, bytes) else (raw or "")
+		if typ == "html":
+			from jarvis.chat.canvas import strip_saved_host_client
+
+			body = strip_saved_host_client(body)
 		bg, fg = ("#16161a", "#ededf2") if int(dark or 0) else ("#fff", "#171717")
 		if typ == "svg":
 			body = (
