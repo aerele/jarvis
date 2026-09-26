@@ -214,3 +214,119 @@ describe("DashboardChatPane history menu", () => {
 		]);
 	});
 });
+
+describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
+	const cards = [
+		{ token: "tok-late", conversation: "conv1", tool: "create_doc", created_at: 200 },
+		{ token: "tok-early", conversation: "conv1", tool: "create_doc", created_at: 100 },
+	];
+
+	async function typeAndSend(wrapper, text) {
+		const box = wrapper.find("textarea");
+		await box.setValue(text);
+		await box.trigger("keydown", { key: "Enter" });
+		await flushPromises();
+	}
+
+	it("sends the cards' tokens in the order shown, like ChatView", async () => {
+		const { listPendingConfirmations } = await import("@/api");
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: cards } });
+		api.sendDashboardChat.mockClear();
+		const { wrapper } = mountPane();
+		await flushPromises();
+		await typeAndSend(wrapper, "discard 1");
+		expect(api.sendDashboardChat.mock.calls[0].at(-1)).toEqual(["tok-early", "tok-late"]);
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+	});
+
+	it("drops the card a typed no discarded", async () => {
+		const { listPendingConfirmations } = await import("@/api");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		api.sendDashboardChat.mockResolvedValueOnce({
+			ok: true,
+			conversation_id: "conv1",
+			typed_rejection: { discarded: [{ token: "tok-early", position: 1 }], skipped: [] },
+		});
+		await typeAndSend(wrapper, "discard 1");
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Approve")).toHaveLength(1);
+	});
+
+	it("never waits for a run a typed go-ahead did not start", async () => {
+		const { listPendingConfirmations } = await import("@/api");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		api.sendDashboardChat.mockResolvedValueOnce({
+			ok: true,
+			confirmed: true,
+			tokens: ["tok-early", "tok-late"],
+			conversation_id: "conv1",
+		});
+		await typeAndSend(wrapper, "yes");
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Approve")).toHaveLength(0);
+		// Not busy: the composer takes the next message straight away.
+		api.sendDashboardChat.mockClear();
+		await typeAndSend(wrapper, "thanks");
+		expect(api.sendDashboardChat).toHaveBeenCalledTimes(1);
+	});
+});
+
+// D3: the pane's Approve/Dismiss used to always show one generic "may have
+// expired" toast on any ok:false besides a storage blip. Now that cards carry
+// a reason_code (stale/target_missing/tampered/unverifiable, busy, …), reuse
+// the SPA's chatCardActions mapping so the words - and the keep-vs-drop
+// decision - match ChatView's, instead of a second, cruder copy here.
+describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
+	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc" }];
+
+	it("settles a card as Failed with its specific reason, not the opaque guess", async () => {
+		const { listPendingConfirmations, confirmTool } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		confirmTool.mockResolvedValueOnce({
+			ok: false,
+			reason_code: "stale",
+			pa_status: "Failed",
+			error: { type: "InvalidConfirmation" },
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const approve = wrapper.findAll("button").find((b) => b.text() === "Approve");
+		await approve.trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("record changed"));
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Approve")).toHaveLength(0);
+	});
+
+	it("keeps a busy card on screen and says so, instead of dropping it", async () => {
+		const { listPendingConfirmations, confirmTool } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		confirmTool.mockResolvedValueOnce({ ok: false, reason_code: "busy" });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const approve = wrapper.findAll("button").find((b) => b.text() === "Approve");
+		await approve.trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith(
+			"This action is being handled right now. Try again in a moment."
+		);
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Approve")).toHaveLength(1);
+	});
+
+	it("dismiss shows the specific reason too", async () => {
+		const { listPendingConfirmations, dismissTool } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
+		dismissTool.mockResolvedValueOnce({ ok: false, reason_code: "executing" });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const dismiss = wrapper.findAll("button").find((b) => b.text() === "Dismiss");
+		await dismiss.trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("This action is already running.");
+		expect(wrapper.findAll("button").filter((b) => b.text() === "Dismiss")).toHaveLength(1);
+	});
+});

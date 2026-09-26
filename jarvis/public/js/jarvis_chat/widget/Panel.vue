@@ -531,6 +531,8 @@
 						<b v-if="orderedPending.length > 1"
 							>{{ pi + 1 }} of {{ orderedPending.length }}: </b
 						>{{ p.summary || "Jarvis wants to make a change." }}
+						<!-- Parked before the user's latest message: only its number binds it. -->
+						<span v-if="!isRecentCard(p)" class="jvp-pending-earlier">Earlier</span>
 					</div>
 					<div class="jvp-pending-acts">
 						<!-- P1, skill approve-and-run (§3.5): this panel has NO rich-card
@@ -797,7 +799,18 @@ import {
 	visibleMessages,
 	pendingApproveRun,
 } from "./chat_stream.mjs";
-import { sortPendingCards } from "./pending_order.mjs";
+import {
+	discardedTokens,
+	dropDiscarded,
+	isRecentCard,
+	keepEarlier,
+	keptCardMessage,
+	markCardsEarlier,
+	sortPendingCards,
+	typedApprovalHint as hintFor,
+	withExcluded,
+	withoutTokens,
+} from "./pending_order.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
 	listConversations,
@@ -947,19 +960,18 @@ const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
-// Ordered the SAME way the server orders the parked list: a typed "confirm 2"
-// selects by the number shown here, and the store keeps tokens in a Redis SET
-// with no order of its own. Tokens compare by code unit so the tiebreak matches
-// the server's byte order rather than locale rules.
-// Ordered by the shared, unit-tested comparator so the numbers on screen match
-// the server's (expires_at, token) order a typed "confirm N" resolves against.
+// D1: tokens a typed "no" discarded (dropDiscarded, below). messages.value keeps
+// tool_status "pending" for that row until the next load(), so resyncPending's
+// rowItems must not rebuild the card from it while stale. Persists past a
+// single resync - reset only on a conversation switch (startNewChat).
+let settledTokens = new Set();
+// A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
+// so the numbering must be stable: the shared, unit-tested comparator orders by
+// (created_at, token by code unit), whatever order the store listed them in.
 const orderedPending = computed(() => sortPendingCards(stream.value.pending || []));
-// Typed approval works in the widget too, but only the desktop advertised it.
-// The selective example numbers track the real count so it never overshoots.
-const typedApprovalHint = computed(() => {
-	const n = orderedPending.value.length;
-	return n > 1 ? 'or type "confirm all", or "confirm 1 and ' + n + '"' : 'or type "go ahead"';
-});
+// Typed approval works in the widget too. An "Earlier" card never gets the
+// bare-phrase hint: only its number binds it (pending_order.mjs).
+const typedApprovalHint = computed(() => hintFor(orderedPending.value));
 const lastSent = ref("");
 // Prompt recall, matching the full chat: Up walks back through prompts sent from
 // this panel, Down walks forward and finally restores whatever was being typed.
@@ -1336,8 +1348,14 @@ async function resyncPending(source) {
 				token: m.tool_call_id,
 				tool: m.tool_name || "",
 				summary: m.tool_name || "",
+				// The row has no dedicated created_at field; its own creation
+				// timestamp is stamped in the same request as the mint and is close
+				// enough for ordering (the comparator falls back to expires_at
+				// anyway when this is missing).
+				created_at: toEpoch(m.creation),
 				expires_at: toEpoch(m.expires_at),
 				approve_run: !!(m.pending_card && m.pending_card.approve_run),
+				recent: m.recent !== false,
 			}));
 		const pc = await listPendingConfirmations(cid, source);
 		// A resync in flight across a startNewChat / conversation switch must not write the
@@ -1353,8 +1371,10 @@ async function resyncPending(source) {
 					token: r.token,
 					tool: r.tool || "",
 					summary: r.summary || r.preview || "",
+					created_at: r.created_at ?? null,
 					expires_at: r.expires_at ?? null,
 					approve_run: pendingApproveRun(r.preview),
+					recent: r.recent !== false,
 			  }))
 			: [];
 		const base = clean ? [] : stream.value.pending || [];
@@ -1362,7 +1382,15 @@ async function resyncPending(source) {
 		for (const c of [...base, ...rowItems, ...backstop]) {
 			if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
 		}
-		stream.value = { ...stream.value, pending: [...byToken.values()] };
+		const merged = keepEarlier(
+			[...byToken.values()],
+			stream.value.pending,
+			rowItems,
+			backstop
+		);
+		// A token settled locally (a typed "no") must not be resurrected by
+		// rowItems' still-stale transcript row (D1).
+		stream.value = { ...stream.value, pending: withoutTokens(merged, settledTokens) };
 	} catch (e) {
 		/* leave whatever the live stream captured */
 	}
@@ -1479,6 +1507,7 @@ function startNewChat() {
 	stopPendingPoll(); // a poll from the conversation being left must not carry over
 	convId.value = "";
 	messages.value = [];
+	settledTokens = new Set(); // a settled token belonged to the conversation being left
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
 	// (list[0]) on reopen, and a wiped fence would readmit a superseded pump's
 	// straggler — the dead-banner resurrection the fence exists to prevent.
@@ -1737,6 +1766,13 @@ async function send() {
 		const approvalTokens = orderedPending.value.map((p) => p.token);
 		const res = await sendMessage(convId.value, text, props.context, atts, approvalTokens);
 		if (res?.conversation_id) convId.value = res.conversation_id;
+		// A typed "no" discarded these cards server-side, even on a send that was then
+		// refused; they must not stay on screen as live offers.
+		stream.value = { ...stream.value, pending: dropDiscarded(stream.value.pending, res) };
+		// messages.value still shows these rows as "pending" until the next load() -
+		// keep them excluded from every resync until then (D1).
+		const _discarded = discardedTokens(res);
+		if (_discarded.size) settledTokens = withExcluded(settledTokens, _discarded);
 		// Fold this response into the shared maintenance state: raise on a "maintenance"
 		// refusal (and arm the lift-poll), clear once any send/confirm gets past the gate.
 		foldSend(res);
@@ -1780,7 +1816,13 @@ async function send() {
 			await load();
 			return;
 		}
-		stream.value = { ...stream.value, busy: true };
+		// The user just spoke: the cards they were shown are now Earlier, so a bare
+		// "go ahead" is no longer offered for them (decision 6).
+		stream.value = {
+			...stream.value,
+			pending: markCardsEarlier(stream.value.pending, approvalTokens),
+			busy: true,
+		};
 		ensureRealtime();
 		startPolling();
 	} catch (e) {
@@ -1813,7 +1855,11 @@ async function resolvePending(token) {
 	if (resolving.value) return;
 	resolving.value = token;
 	try {
-		await confirmTool(token, convId.value);
+		const kept = keptCardMessage(await confirmTool(token, convId.value));
+		if (kept) {
+			loadError.value = kept;
+			return;
+		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
 		loadError.value = "Could not confirm that action.";
@@ -3248,6 +3294,11 @@ defineExpose({ load, startNewChat, convId });
 	font-size: 13px;
 	line-height: 1.45;
 	color: var(--jv-ink);
+}
+.jvp-pending-earlier {
+	margin-left: 6px;
+	font-size: 11px;
+	opacity: 0.6;
 }
 .jvp-pending-acts {
 	display: flex;

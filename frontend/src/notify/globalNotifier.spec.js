@@ -18,6 +18,7 @@ const store = {
 	currentConvId: null,
 	conversations: [{ name: "conv-a", title: "Chat A" }],
 	approvalsCount: 0,
+	refreshApprovalsCount: vi.fn(),
 	refreshReviewCount: vi.fn(),
 };
 
@@ -196,6 +197,17 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 		});
 		expect(useToasts().value).toHaveLength(0);
 		expect(store.approvalsCount).toBe(1);
+	});
+
+	it("refreshes the approvals badge silently when a pending action settles", () => {
+		socket.emit({
+			kind: "action:settled",
+			name: "PA-1",
+			action_kind: "chat",
+			status: "Discarded",
+		});
+		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(1);
+		expect(useToasts().value).toHaveLength(0);
 	});
 
 	it("re-reads the reviewer badge on review:pending without a toast", () => {

@@ -298,3 +298,75 @@ class TestAgentNotes(_Base):
 		self.assertNotIn("[", safe)
 		self.assertNotIn("]", safe)
 		self.assertNotIn("`", safe)
+
+
+class TestNoWriteOutcomes(_Base):
+	"""P0b (§4.5 outcome table): superseded/expired/unknown/partial never claim
+	a completed/error tool_status - superseded/expired ran nothing, and
+	unknown/partial's write effect is unverified. All four join
+	discarded/cancelled in persist_tool_receipt's no-write set."""
+
+	def test_new_outcomes_never_set_a_completed_or_error_status(self):
+		from jarvis import api
+
+		conv = self._conv()
+		for outcome in ("superseded", "expired", "unknown", "partial"):
+			call_id = f"tc-{outcome}"
+			with patch("jarvis.api.publish_realtime_tool_result"):
+				api.persist_tool_receipt(
+					conv,
+					"create_doc",
+					{"doctype": "ToDo"},
+					# A truthy ok:True result: if the tuple were wrong this would
+					# misclassify as "completed" via envelope_ok.
+					{"ok": True, "data": {"name": f"rc-{outcome}"}},
+					action_outcome=outcome,
+					tool_call_id=call_id,
+				)
+			row = frappe.db.get_value(
+				"Jarvis Chat Message",
+				{"conversation": conv, "tool_call_id": call_id},
+				["tool_status", "action_outcome"],
+				as_dict=True,
+			)
+			self.assertEqual(row.tool_status, "", outcome)
+			self.assertEqual(row.action_outcome, outcome)
+
+
+class TestContinuationScaffoldMapping(FrappeTestCase):
+	"""P0b §4.5: the outcome -> continuation-prompt mapping. Nothing produces
+	unknown/partial yet (the PA executor is a later change), so this calls
+	``enqueue_continuation`` directly rather than through a real confirm."""
+
+	def _prompt(self, **kwargs):
+		from jarvis.chat import api as chat_api
+
+		with patch.object(chat_api, "_enqueue_turn", return_value={}) as enq:
+			chat_api.enqueue_continuation("conv-scaffold-x", "the receipt", **kwargs)
+		return enq.call_args.args[1]
+
+	def test_default_is_the_continue_the_plan_scaffold(self):
+		self.assertIn("Applied:", self._prompt())
+
+	def test_failed_selects_the_rolled_back_scaffold(self):
+		p = self._prompt(failed=True)
+		self.assertIn("could NOT be applied", p)
+		self.assertNotIn("Applied:", p)
+
+	def test_unknown_selects_the_check_before_retrying_scaffold(self):
+		p = self._prompt(outcome="unknown")
+		self.assertIn("could NOT be verified", p)
+		self.assertIn("check before retrying", p)
+
+	def test_partial_selects_the_same_check_before_retrying_scaffold(self):
+		self.assertIn("could NOT be verified", self._prompt(outcome="partial"))
+
+	def test_unknown_outcome_wins_over_a_stale_failed_flag(self):
+		# An unverified outcome must never read as a clean rollback, even if a
+		# caller also passed failed=True.
+		p = self._prompt(failed=True, outcome="unknown")
+		self.assertNotIn("could NOT be applied", p)
+		self.assertIn("could NOT be verified", p)
+
+	def test_an_unrelated_outcome_value_does_not_trip_the_unknown_scaffold(self):
+		self.assertIn("Applied:", self._prompt(outcome="confirmed"))
