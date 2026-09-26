@@ -3,7 +3,7 @@
 Before this change, session_lifecycle's daily sweep ARCHIVED a conversation
 idle past the retention window (status=Archived, auto_expired=1) and hid it from
 the sidebar, on the promise of a "separate follow-on purge" that was never
-built. The sweep now only frees the openclaw session and leaves the chat Active
+built. The sweep now only frees the agent session and leaves the chat Active
 and visible (nothing is hidden or deleted for idleness). Conversations the old
 sweep already auto-archived would otherwise stay hidden forever with no way to
 resume them, contradicting the new "your chats stay in your list" contract.

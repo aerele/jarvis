@@ -39,6 +39,7 @@ import frappe
 from jarvis._session import impersonate
 from jarvis.chat import seq_watermark
 from jarvis.chat import turn_state as ts
+from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
@@ -201,7 +202,10 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			try:
 				wm_msgs = sess.get_session_messages(session_key, limit=5)
 				watermark = max(
-					(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in wm_msgs),
+					(
+						((m or {}).get(get_profile().message_metadata_key) or {}).get("seq", 0)
+						for m in wm_msgs
+					),
 					default=0,
 				)
 				if watermark:
@@ -330,16 +334,23 @@ def _prepare_error(
 	"Could not prepare the message." would otherwise fall into the mid-run
 	"gateway" default and tell the customer to just retry a bug that a retry
 	will most likely reproduce."""
+	errored = False
 	try:
 		if assistant_msg:
 			frappe.db.set_value(MSG, assistant_msg, {"streaming": 0, "error": (error or "")[:1000]})
 		if ts.prepare_errored(run_id, version, error=error):
 			frappe.db.commit()
+			errored = True
 	except Exception:
 		try:
 			frappe.db.rollback()
 		except Exception:
 			pass
+	if errored:
+		# No settlement (so no finalize seal) on this edge: seal its File Box sheet here.
+		from jarvis.chat import held_sheet_seal
+
+		held_sheet_seal.after_turn(conversation, run_id)
 	if not code:
 		try:
 			from jarvis.chat.turn_handler import _classify_error

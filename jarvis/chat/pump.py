@@ -661,6 +661,36 @@ def _lease_mirror_key(target: str) -> str:
 	return f"jarvis:pump:lease:{target}"
 
 
+# --------------------------------------------------------------------------- #
+# Live step text (jarvis.chat.steps) kept across a hop
+# --------------------------------------------------------------------------- #
+
+# A run's recorded step text lives on its relay lane, which a hop rebuilds, so
+# the pump keeps a copy for _reattach_lane to re-seed. Best-effort: a lost copy
+# only means the saved reply keeps its step text, exactly as before this feature.
+RUN_STEPS_TTL_S = 3600
+
+
+def _run_steps_key(run_id: str) -> str:
+	return f"jarvis:pump:steps:{run_id}"
+
+
+def _append_run_step(run_id: str, raw: str) -> None:
+	try:
+		cache = frappe.cache()
+		steps = cache.get_value(_run_steps_key(run_id)) or []
+		cache.set_value(_run_steps_key(run_id), [*steps, raw], expires_in_sec=RUN_STEPS_TTL_S)
+	except Exception:
+		pass
+
+
+def _read_run_steps(run_id: str) -> list[str]:
+	try:
+		return list(frappe.cache().get_value(_run_steps_key(run_id)) or [])
+	except Exception:
+		return []
+
+
 def _write_lease_mirror(target: str) -> None:
 	try:
 		frappe.cache().set_value(_lease_mirror_key(target), "1", expires_in_sec=LEASE_MIRROR_TTL_S)
@@ -1243,6 +1273,7 @@ def _insert_tool_start_row(conversation: str, tool_call_id: str, tool_name: str 
 		}
 	)
 	doc.flags.ignore_permissions = True
+	doc.flags.jarvis_server_write = True
 	doc.insert()
 	return doc.name
 
@@ -1447,6 +1478,10 @@ class _RunState:
 	pending_seq: int | None = None
 	pending_text: str = ""
 	pending_delta: str = ""
+	# What the chat displays for ``pending_text`` (step text removed, see
+	# jarvis.chat.steps); None = same as ``pending_text``. Only the publish uses
+	# it: the stored mirror always keeps the raw text.
+	pending_shown: str | None = None
 	events_since_flush: int = 0
 	last_flush_mono: float = 0.0
 	# --- agent-yield continuation wait (image/video/music tools' unconditional
@@ -2185,6 +2220,7 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 			except Exception:
 				pass
 		frappe.db.commit()
+		_seal_file_box_sheet(rs.conversation, run_id)
 		if rs.owner:
 			# SUX-11: a definite pre-ack rejection is a real error — publish run:error
 			# with today's classification code + message_id (not a bare run:end).
@@ -2230,6 +2266,7 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	if rs.pending_seq is None:
 		return
 	seq, text, delta = rs.pending_seq, rs.pending_text, rs.pending_delta
+	shown = text if rs.pending_shown is None else rs.pending_shown
 	rs.pending_seq = None
 	rs.pending_delta = ""
 	rs.events_since_flush = 0
@@ -2250,7 +2287,8 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 			# already consumes — it renders on `assistant:delta` with {message_id,
 			# text} (cumulative mirror). publish_fenced adds (turn_id, event_seq) so
 			# the client dedupes a replayed frame. `delta` is the accumulated
-			# incremental fragment since the last flush.
+			# incremental fragment since the last flush. The stored mirror above is
+			# the raw text; the chat is sent `shown` (step text removed).
 			ts.publish_fenced(
 				rs.owner,
 				"assistant:delta",
@@ -2258,7 +2296,7 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 				run_id=rs.run_id,
 				event_seq=seq,
 				message_id=rs.assistant_message,
-				text=text,
+				text=shown,
 				delta=delta,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
@@ -2401,7 +2439,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	integrity class (LOSSY delta -> drop+count+continue; PRECIOUS tool/terminal ->
 	quarantine)."""
 
-	def on_delta(event_seq: int, text: str, delta: str) -> None:
+	def on_delta(event_seq: int, text: str, delta: str, shown: str | None = None) -> None:
 		# OARF-6: BATCH the cumulative mirror (relocated _AssistantContentBatcher).
 		# Record the latest cumulative text + accumulate the incremental delta, then
 		# flush (one apply_delta CAS + commit + publish for the whole batch) only
@@ -2409,11 +2447,14 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		# always flushes immediately (first-token latency, C1). agent already
 		# coalesces at ~150ms, so this is bench-side de-duplication of commits+
 		# publishes, not a change to what the user eventually sees (cumulative).
+		# ``shown`` (step text removed) is what the flush publishes; the mirror
+		# keeps ``text``.
 		if ctx.lease_lost:
 			return
 		try:
 			rs.pending_seq = event_seq
 			rs.pending_text = text
+			rs.pending_shown = shown
 			rs.pending_delta = (rs.pending_delta + delta) if rs.pending_delta else delta
 			rs.events_since_flush += 1
 			if rs.events_since_flush >= _DELTA_BATCH_SIZE or (
@@ -2458,6 +2499,32 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 				event_seq=event_seq,
 				message_id=rs.assistant_message,
 				status=status,
+				pump_epoch=ctx.epoch,
+				relay_target_id=ctx.relay_target_id,
+			)
+
+	def on_step(event_seq: int, text: str, raw: str | None = None) -> None:
+		# The live step line (jarvis.chat.steps). LOSSY like on_status: published,
+		# never stored on the message, and a newer step replaces it on screen.
+		# ``raw`` (step text that is also in the reply) is kept for a hop re-attach.
+		if ctx.lease_lost:
+			return
+		try:
+			_flush_deltas(ctx, rs)
+		except ts.LeaseLostExit:
+			ctx.lease_lost = rs.run_id
+			return
+		if raw:
+			_append_run_step(rs.run_id, raw)
+		if rs.owner:
+			ts.publish_fenced(
+				rs.owner,
+				"run:step",
+				conversation_id=rs.conversation,
+				run_id=rs.run_id,
+				event_seq=event_seq,
+				message_id=rs.assistant_message,
+				text=text,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
 			)
@@ -2514,6 +2581,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		on_quarantine=on_quarantine,
 		on_closing=on_closing,
 		on_status=on_status,
+		on_step=on_step,
 	)
 
 
@@ -2957,6 +3025,7 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 			session_key=rs.session_key,
 			start_seq=int(r.get("last_event_seq") or 0),
 			is_readopt=True,
+			steps=_read_run_steps(run_id),
 		)
 
 
@@ -3052,6 +3121,7 @@ def _settle_recover_errored(
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
 	frappe.db.commit()
+	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:
 		try:
 			ts._run_cas(
@@ -3073,6 +3143,14 @@ def _settle_recover_errored(
 			code=_classify_error(err),
 		)
 	return True
+
+
+def _seal_file_box_sheet(conversation: str | None, run_id: str) -> None:
+	"""An errored edge that bypasses settlement (so no finalize seal): seal the File
+	Box sheet this turn collected. Best-effort, never raises."""
+	from jarvis.chat import held_sheet_seal
+
+	held_sheet_seal.after_turn(conversation, run_id)
 
 
 def _park_recovering(ctx: PumpContext, run_id: str, *, reason: str) -> None:

@@ -3714,12 +3714,15 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 
 		@contextmanager
 		def _ctx():
-			prior = getattr(frappe.local, "job", None)
+			had_job, prior = hasattr(frappe.local, "job"), getattr(frappe.local, "job", None)
 			frappe.local.job = frappe._dict(method="test")
 			try:
 				yield
 			finally:
-				frappe.local.job = prior
+				if had_job:
+					frappe.local.job = prior
+				else:
+					del frappe.local.job  # a leftover None still reads as "in a job" to frappe
 
 		return _ctx()
 
@@ -5169,7 +5172,7 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 	save to the single-model leg. There _classify_llm_change compares only the
 	legacy mirror fields, and those are mirrored from models[0], so nothing it
 	looks at changed and it returned "reload" (rotate the secret file only).
-	Admin kept the old llm_pool_config, openclaw.json kept declaring the removed
+	Admin kept the old llm_pool_config, agent configuration kept declaring the removed
 	provider, and its llm_key_N.key stayed on disk.
 
 	These build settings-like objects in memory. Nothing here may touch the DB:

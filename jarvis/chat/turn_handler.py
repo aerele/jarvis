@@ -41,6 +41,7 @@ from jarvis import compat
 from jarvis.chat import agent_session_pool, seq_watermark, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
 
@@ -430,7 +431,7 @@ class _AssistantContentBatcher:
 # Provider label → agent provider id sent in the chat WS frame.
 #
 # Agent has two dispatch paths chosen at request time
-# (openclaw/src/agents/model-selection-cli.ts:6-20):
+# (see upstream model-selection details in the workspace integration reference):
 #
 #   - CLI backend: taken when isCliProvider(provider) returns true.
 #     Routes dispatch to a registered CliBackend that spawns an external
@@ -444,7 +445,7 @@ class _AssistantContentBatcher:
 # The two providers we currently support resolve to two different paths:
 #
 #   - OpenAI codex: codex IS a registered plugin harness
-#     (openclaw/extensions/codex/index.ts:34) whose allowlist accepts
+#     (see upstream provider registration in the workspace integration reference) whose allowlist accepts
 #     "openai" as the model-provider key. Use "openai" for the chat WS
 #     frame and the embedded codex-harness path handles the dispatch.
 #
@@ -460,7 +461,7 @@ _PROVIDER_LABEL_TO_AGENT_ID = {
 
 
 # The virtual model the fleet configures agent with whenever the proxy is active
-# (jarvis-fleet-agent compose.render_openclaw_config(model="jarvis-pool")). Bifrost
+# (fleet configuration uses model="jarvis-pool"). Bifrost
 # expands it into the pool's failover chain via its catch-all routing rule.
 #
 # The customer plane has to know this name because CLEARING a pin has to be an explicit
@@ -916,10 +917,15 @@ def _persona_clause(chat_user: str) -> str:
 	return ""
 
 
-def _advance_macro(conversation_id: str, *, errored: bool) -> None:
+def _advance_macro(conversation_id: str, *, errored: bool, run_id: str | None = None) -> None:
 	"""Chaining hook for the macro engine: if this conversation is a running
 	macro, advance it (enqueue the next step, or finish). Best-effort — a macro
-	bug must never affect the normal turn."""
+	bug must never affect the normal turn. Every legacy (pump-off) turn end passes
+	through here, so it also seals the File Box sheet ``run_id`` collected."""
+	if run_id:
+		from jarvis.chat import held_sheet_seal
+
+		held_sheet_seal.after_turn(conversation_id, run_id, legacy=True)
 	try:
 		from jarvis.chat import macros
 
@@ -990,6 +996,9 @@ def assemble_prompt(
 	bracket) but NOT cleared — the clear fires only after PROVEN delivery
 	(post-ack), which is the pump's job in managed-pump mode (R-2) and
 	``handle_chat_send``'s job on the legacy path."""
+	# Resolve before dispatch, outside the best-effort watermark block. A broken
+	# contract must not send a turn whose transcript cannot be recovered safely.
+	get_profile()
 	settings = frappe.get_single("Jarvis Settings")
 	# Fetch content + sender of THIS user message in one round-trip.
 	# msg_row.owner is the Frappe user who sent this turn, set by Frappe
@@ -1542,7 +1551,10 @@ def handle_chat_send(payload: dict) -> None:
 				try:
 					_wm_msgs = sess.get_session_messages(conv.session_key, limit=5)
 					watermark = max(
-						(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in _wm_msgs),
+						(
+							((m or {}).get(get_profile().message_metadata_key) or {}).get("seq", 0)
+							for m in _wm_msgs
+						),
 						default=0,
 					)
 					if watermark:
@@ -1693,7 +1705,7 @@ def handle_chat_send(payload: dict) -> None:
 			# in_flight for the identical resend, so true double-runs are
 			# confined to the ghost-run-already-finished case.
 			_publish_run_error(str(e), changed_data=False, exc=e)
-			_advance_macro(conversation_id, errored=True)
+			_advance_macro(conversation_id, errored=True, run_id=run_id)
 			_admission_settle(run_id, "errored", str(e))
 			return
 
@@ -1752,11 +1764,11 @@ def handle_chat_send(payload: dict) -> None:
 						"stopped": True,
 					},
 				)
-				_advance_macro(conversation_id, errored=True)
+				_advance_macro(conversation_id, errored=True, run_id=run_id)
 				_admission_settle(run_id, "cancelled")
 				return
 			_publish_run_error(err_text)
-			_advance_macro(conversation_id, errored=True)
+			_advance_macro(conversation_id, errored=True, run_id=run_id)
 			_admission_settle(run_id, "errored", err_text)
 			return
 		if terminal["kind"] == "relay:interrupted":
@@ -1852,7 +1864,7 @@ def handle_chat_send(payload: dict) -> None:
 			# already in an error path and re-raising would mask the
 			# original exception that RQ should see.
 			pass
-		_advance_macro(conversation_id, errored=True)
+		_advance_macro(conversation_id, errored=True, run_id=run_id)
 		# Backstop terminal: settle the Turn row errored + promote before the
 		# re-raise so a queued turn never waits on a crashed worker. Best-effort
 		# inside _admission_settle - it never masks the re-raised exception.
@@ -1866,6 +1878,7 @@ def handle_chat_send(payload: dict) -> None:
 	_advance_macro(
 		conversation_id,
 		errored=_turn_errored,
+		run_id=run_id,
 	)
 	_publish_to_user(
 		user,
@@ -2799,6 +2812,7 @@ def _handle_event_inner(
 						"streaming": 1,
 					}
 				)
+				doc.flags.jarvis_server_write = True
 				doc.insert(ignore_permissions=True)
 				frappe.db.commit()
 				tool_msg_by_call_id[tool_call_id] = doc.name

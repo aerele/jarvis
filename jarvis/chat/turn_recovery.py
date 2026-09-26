@@ -29,6 +29,7 @@ import frappe
 from jarvis.chat import egress_rules
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
+from jarvis.chat.runtime_profile import get_profile
 from jarvis.chat.seq_watermark import wm_expr
 
 MSG = "Jarvis Chat Message"
@@ -94,8 +95,10 @@ def _latest_assistant_raw(messages: list, *, min_seq: int = 0, max_seq: int | No
 	(observed live 2026-07-03: the parked row recovered with the next
 	question's reply). Messages with seq > max_seq belong to a later turn."""
 
+	metadata_key = get_profile().message_metadata_key
+
 	def seq(m):
-		return ((m or {}).get("__openclaw") or {}).get("seq", 0)
+		return ((m or {}).get(metadata_key) or {}).get("seq", 0)
 
 	for m in sorted(messages or [], key=seq, reverse=True):
 		if min_seq > 0 and seq(m) <= min_seq:
@@ -160,7 +163,11 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	and chat.turn_recovery). A macro chain that ends its turn via park-and-
 	recover (any post-ack interruption under the relay model) must still
 	step/terminate the macro, or the chain stalls forever. Best-effort: a
-	macro bug must never affect the recovery outcome."""
+	macro bug must never affect the recovery outcome. It also seals the File Box
+	sheet of the recovered turn (its Turn row is settled just before)."""
+	from jarvis.chat import held_sheet_seal
+
+	held_sheet_seal.after_turn(conversation_id, legacy=True)
 	try:
 		from jarvis.chat import macros
 

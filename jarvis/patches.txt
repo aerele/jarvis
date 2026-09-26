@@ -4,7 +4,8 @@
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
-jarvis.patches.v1_0_rename_openclaw_to_agent
+# The v1_0 settings-rename and v2_10 watermark-copy patches were retired: every
+# release since v1.0.0 has run them. Upgrade to v1.0.0 or later before this one.
 jarvis.patches.v1_1_titlecase_conversation_status
 jarvis.patches.v1_2_clear_legacy_admin_token
 jarvis.patches.v1_3_backfill_llm_auth_mode
@@ -39,7 +40,6 @@ jarvis.patches.v2_07_agent_run_capability_snapshot
 jarvis.patches.v2_08_drop_jarvis_account_page
 jarvis.patches.v2_09_backfill_persona_enabled
 jarvis.patches.v2_09_drop_selfhost_settings_fields
-jarvis.patches.v2_10_rename_openclaw_seq_watermark
 jarvis.patches.v2_10_backfill_chat_was_ready_at
 jarvis.patches.v2_12_rename_capture_agent_provider
 jarvis.patches.v2_12_backfill_role_skill_allowed_roles
@@ -61,3 +61,7 @@ jarvis.patches.v2_20_retire_admin_auto_apply
 jarvis.patches.v2_20_action_card_pending_index
 jarvis.patches.v2_21_drop_allow_custom_urls
 jarvis.patches.v2_22_query_source_fields_to_select
+jarvis.patches.v2_22_mint_wiki_proposal_digests
+jarvis.patches.v2_22_backfill_filebox_results
+jarvis.patches.v2_23_never_expire_chat_cards
+jarvis.patches.v2_24_backfill_skill_use_in_file_box

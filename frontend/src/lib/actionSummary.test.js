@@ -121,6 +121,55 @@ test("summarize(create): headline is empty string when the model provides no sum
 	assert.ok(out.rows.length >= 1); // proposed fields still render (graceful default)
 });
 
+// #603: a required field the model left blank used to vanish from the card, so the
+// person only learned about it when Confirm failed.
+const draftField = (fieldname, label, over) => ({
+	fieldname,
+	label,
+	value: "",
+	reqd: 0,
+	read_only: 0,
+	proposed: true,
+	...over,
+});
+
+test("summarize(create): a proposed required blank shows, flagged missing", () => {
+	const model = {
+		verb: "create",
+		fields: [
+			draftField("customer_name", "Customer Name", { value: "Acme", reqd: 1 }),
+			draftField("account_manager", "Account Manager", { reqd: 1 }),
+		],
+		tables: [],
+	};
+	const action = { fields: [{ label: "Customer Name", value: "Acme" }] };
+	assert.deepEqual(summarize(model, action).rows, [
+		{ label: "Customer Name", value: "Acme" },
+		{ label: "Account Manager", value: "", missing: true },
+	]);
+});
+
+test("summarize(create): an unproposed required field is not flagged (controllers fill many)", () => {
+	const model = {
+		verb: "create",
+		fields: [draftField("currency", "Currency", { reqd: 1, proposed: false })],
+		tables: [],
+	};
+	assert.deepEqual(summarize(model, {}).rows, []);
+});
+
+test("summarize(create): an optional or read-only blank is not flagged", () => {
+	const model = {
+		verb: "create",
+		fields: [
+			draftField("notes", "Notes"),
+			draftField("status", "Status", { reqd: 1, read_only: 1 }),
+		],
+		tables: [],
+	};
+	assert.deepEqual(summarize(model, {}).rows, []);
+});
+
 test("summarize(update): kind=update, mechanical diff, headline optional", () => {
 	const out = summarize(
 		{
@@ -342,4 +391,64 @@ test("receiptView: auto_applied counts like a real execution (from data), not th
 		"auto_applied"
 	);
 	assert.ok(v.targets[0].url.includes("TASK-9001"));
+});
+
+// P0b (§4.5 outcome table): every outcome gets its own honest chip, and the
+// copy is fixed literal text (not verb/subject composed) per the plan. A
+// truthy `result` proves each branch ignores it rather than trusting an
+// unconfirmed/unverified result the way "confirmed" does.
+const _HONEST_OUTCOMES = [
+	["cancelled", "muted", "Cancelled — not performed"],
+	["superseded", "muted", "Not confirmed — replaced by a newer proposal"],
+	["expired", "muted", "Expired — not performed"],
+	["unknown", "warning", "Outcome unknown — check before retrying"],
+	["partial", "warning", "Partly applied — check before retrying"],
+];
+for (const [outcome, tone, title] of _HONEST_OUTCOMES) {
+	test(`receiptView: ${outcome} renders its own honest chip, never confirmed`, () => {
+		const v = receiptView(
+			"create_doc",
+			{ doctype: "Task", name: "TASK-1" },
+			{ ok: true, data: { doctype: "Task", name: "TASK-1" } },
+			outcome
+		);
+		assert.equal(v.outcome, outcome);
+		assert.equal(v.icon, outcome);
+		assert.equal(v.tone, tone);
+		assert.equal(v.title, title);
+		assert.notEqual(v.icon, "confirmed");
+	});
+}
+
+test("receiptView: an unrecognised outcome value renders the NEUTRAL unknown chip, never confirmed", () => {
+	// A future outcome this build predates, or a malformed row - must never
+	// silently fall through to the confirmed/✓ path (the bug P0b closes).
+	const v = receiptView(
+		"create_doc",
+		{ doctype: "Task", name: "TASK-1" },
+		{ ok: true, data: { doctype: "Task", name: "TASK-1" } },
+		"some_future_outcome"
+	);
+	assert.equal(v.icon, "unknown");
+	assert.equal(v.tone, "warning");
+	assert.notEqual(v.icon, "confirmed");
+	assert.notEqual(v.title, "nothing changed");
+});
+
+test("receiptView: unknown/partial read names off the ARGS, not an unverified result", () => {
+	// The result claims TASK-9001 was created; unknown/partial cannot trust
+	// that (the write's real effect is unverified), so the chip must show
+	// what was PROPOSED (args), not the unverified result.
+	for (const outcome of ["unknown", "partial"]) {
+		const v = receiptView(
+			"create_doc",
+			{ doctype: "Task", name: "TASK-1" },
+			{ ok: true, data: { doctype: "Task", name: "TASK-9001" } },
+			outcome
+		);
+		assert.deepEqual(
+			v.targets.map((t) => t.name),
+			["TASK-1"]
+		);
+	}
 });

@@ -152,7 +152,7 @@ def extract_account_id(provider: str, access_token: str) -> str:
 
 	agent's codex auth resolver gates on this field: profiles without
 	an accountId are treated as unusable and chat fails with "No API key
-	found for provider openai". See openclaw/docs/concepts/oauth.md step
+	found for provider openai". See upstream OAuth documentation (see workspace integration reference) step
 	6 of the codex OAuth exchange.
 
 	OpenAI codex: ``payload["https://api.openai.com/auth"]["chatgpt_account_id"]``.

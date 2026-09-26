@@ -617,7 +617,14 @@ def main():
 
 	h = Harness(args.site, out_dir, quick=quick)
 	h.setup()
-	gateway = FakeGateway(cadence_ms=25.0, max_concurrent=4, lane_sim=True).start()
+	from jarvis.chat.runtime_profile import get_profile
+
+	gateway = FakeGateway(
+		message_metadata_key=get_profile().message_metadata_key,
+		cadence_ms=25.0,
+		max_concurrent=4,
+		lane_sim=True,
+	).start()
 	only = set(args.only.split(",")) if args.only else None
 	started = time.time()
 	try:
