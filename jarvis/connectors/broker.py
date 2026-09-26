@@ -403,7 +403,7 @@ def call(connector_key: str, action: str, args: dict | None = None, *, run_id: s
 		if isinstance(result, dict) and result.get("isError"):
 			# In-band tool-execution error (spec: isError:true) - a clean tool
 			# error, not a broker/transport failure.
-			message = _first_text(result) or "The connector reported an error."
+			message = mcp_wire.first_text(result) or "The connector reported an error."
 			_log(row, action, "tool_error", message, started, run_id, args, result)
 			refresh.after_call(row, "tool_error")
 			return {"ok": False, "error": {"code": "tool_error", "message": _clean(message)}}
@@ -616,13 +616,6 @@ def _response_bytes(result) -> int:
 		return len(frappe.as_json(result).encode("utf-8"))
 	except Exception:
 		return 0
-
-
-def _first_text(result: dict) -> str:
-	for item in result.get("content") or []:
-		if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-			return str(item["text"])
-	return ""
 
 
 def _clean(text: str) -> str:

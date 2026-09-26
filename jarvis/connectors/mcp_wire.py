@@ -1,7 +1,8 @@
 """Pure wire-level helpers for the MCP client: SSE frame parsing, JSON-RPC
-response matching, header value encoding, modern-era error recognition and the
-``x-mcp-header`` parameter mirroring the 2026-07-28 Streamable HTTP transport
-requires. No frappe import, no socket - everything here is unit-tested flat.
+response matching, header value encoding, modern-era error recognition, provider
+reasons in error bodies and the ``x-mcp-header`` parameter mirroring the
+2026-07-28 Streamable HTTP transport requires. No frappe import, no socket -
+everything here is unit-tested flat.
 
 Spec references (revision 2026-07-28): basic/transports/streamable-http
 (Request Metadata, Value Encoding, Custom Headers from Tool Parameters,
@@ -32,6 +33,12 @@ TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 _HEADER_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _SENTINEL_PREFIX = "=?base64?"
 _SENTINEL_SUFFIX = "?="
+# Quoted key="value" params in a WWW-Authenticate challenge, e.g.
+# ``Bearer error="invalid_request", resource_metadata="https://...", scope="a b"``.
+_CHALLENGE_PARAM_RE = re.compile(r'([A-Za-z][A-Za-z0-9_-]*)\s*=\s*"([^"]*)"')
+# Longest provider reason folded into an error message. It reaches the chat model
+# as well as the settings dialog, so a vendor's page-long error cannot flood either.
+REASON_MAX = 300
 
 
 # --------------------------------------------------------------------------- #
@@ -85,13 +92,8 @@ def matches_response(msg, request_id) -> bool:
 def parse_rpc_error(raw: bytes) -> dict | None:
 	"""The JSON-RPC ``error`` object in a 4xx body, or ``None`` when the body is
 	empty, not JSON, or not shaped like a JSON-RPC error response."""
-	if not raw:
-		return None
-	try:
-		msg = json.loads(raw.decode("utf-8"))
-	except (ValueError, UnicodeDecodeError):
-		return None
-	if not isinstance(msg, dict) or not isinstance(msg.get("error"), dict):
+	msg = _json_object(raw)
+	if msg is None or not isinstance(msg.get("error"), dict):
 		return None
 	err = msg["error"]
 	return err if isinstance(err.get("code"), int) else None
@@ -121,6 +123,60 @@ def pick_legacy_version(versions, accepted) -> str | None:
 	"""Newest version in ``versions`` that we also speak, else ``None``."""
 	common = [v for v in versions if v in accepted]
 	return max(common) if common else None
+
+
+# --------------------------------------------------------------------------- #
+# error bodies + challenges
+# --------------------------------------------------------------------------- #
+def error_reason(raw: bytes) -> str:
+	"""The provider's own reason in an HTTP error body, on one clipped line, or
+	``""``. Covers a JSON-RPC (or Google REST) ``error.message``, an OAuth
+	``error_description``, and an ``isError`` tool result: Google's MCP servers
+	send that last shape even on a 401/403."""
+	msg = _json_object(raw)
+	if msg is None:
+		return ""
+	err = msg.get("error")
+	result = msg.get("result")
+	if isinstance(err, dict):
+		text = err.get("message")
+	elif msg.get("error_description") or isinstance(err, str):
+		text = msg.get("error_description") or err
+	elif isinstance(result, dict) and result.get("isError"):
+		text = first_text(result)
+	else:
+		text = ""
+	return clip_reason(text)
+
+
+def first_text(result: dict) -> str:
+	"""The first text item of a tool result's ``content``, or ``""``."""
+	for item in result.get("content") or []:
+		if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+			return str(item["text"])
+	return ""
+
+
+def challenge_params(value: str) -> dict:
+	"""The quoted params of a ``WWW-Authenticate`` challenge (``error``,
+	``error_description``, ``scope``, ``resource_metadata``...)."""
+	return dict(_CHALLENGE_PARAM_RE.findall(value or ""))
+
+
+def clip_reason(text) -> str:
+	"""``text`` on one line, clipped to :data:`REASON_MAX`."""
+	text = " ".join(str(text or "").split())
+	return text if len(text) <= REASON_MAX else text[: REASON_MAX - 3].rstrip() + "..."
+
+
+def _json_object(raw: bytes) -> dict | None:
+	if not raw:
+		return None
+	try:
+		msg = json.loads(raw.decode("utf-8"))
+	except (ValueError, UnicodeDecodeError):
+		return None
+	return msg if isinstance(msg, dict) else None
 
 
 # --------------------------------------------------------------------------- #

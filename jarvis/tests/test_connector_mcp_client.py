@@ -692,3 +692,87 @@ class TestModernRequests(unittest.TestCase):
 		self.assertEqual(mcp_client.era_for_version(LEGACY), mcp_client.ERA_LEGACY)
 		self.assertEqual(mcp_client.era_for_version(MODERN), mcp_client.ERA_MODERN)
 		self.assertEqual(mcp_client.era_for_version("2027-01-01"), mcp_client.ERA_MODERN)
+
+
+class TestHttpErrorMessage(unittest.TestCase):
+	"""A refused request names what failed, the provider's own reason and the next
+	step, instead of a bare "Connector returned HTTP 403."."""
+
+	def _probe_error(self, resp) -> mcp_client.McpError:
+		seam = _Seam([resp])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.probe("https://drivemcp.googleapis.com/mcp/v1", "tok", protocol_version=LEGACY)
+		return cm.exception
+
+	def test_google_403_tool_result_reason_reaches_the_message(self):
+		body = {
+			"id": 1,
+			"jsonrpc": "2.0",
+			"result": {
+				"content": [{"text": "The caller does not have permission", "type": "text"}],
+				"isError": True,
+			},
+		}
+		exc = self._probe_error(_json_resp(body, status=403))
+		self.assertEqual(
+			str(exc),
+			"The connector refused access (HTTP 403). It said: The caller does not have permission. "
+			"Check with the provider that API access is turned on.",
+		)
+		self.assertEqual(exc.kind, mcp_client.ERR_HTTP)
+		self.assertEqual(exc.code, 403)
+		self.assertIsNone(exc.rpc)
+
+	def test_rest_style_403_keeps_the_rpc_error_and_the_reason(self):
+		body = {
+			"error": {"code": 403, "message": "Drive MCP API is disabled.", "status": "PERMISSION_DENIED"}
+		}
+		exc = self._probe_error(_json_resp(body, status=403))
+		self.assertIn("It said: Drive MCP API is disabled. Check with", str(exc))
+		self.assertEqual(exc.rpc["code"], 403)
+
+	def test_insufficient_scope_challenge_asks_for_every_permission(self):
+		challenge = (
+			'Bearer error="insufficient_scope", scope="a b", error_description="Needs the drive scope"'
+		)
+		exc = self._probe_error(_FakeResp(403, {"WWW-Authenticate": challenge}))
+		self.assertEqual(
+			str(exc),
+			"The connector needs permissions this sign-in did not grant (HTTP 403). "
+			"It said: Needs the drive scope. Connect it again and approve every permission.",
+		)
+
+	def test_401_asks_to_connect_again(self):
+		exc = self._probe_error(_FakeResp(401))
+		self.assertEqual(str(exc), "The connector did not accept the sign-in (HTTP 401). Connect it again.")
+
+	def test_html_error_page_is_not_shown(self):
+		exc = self._probe_error(_FakeResp(403, {"Content-Type": "text/html"}, [b"<html>Forbidden</html>"]))
+		self.assertEqual(
+			str(exc),
+			"The connector refused access (HTTP 403). Check with the provider that API access is turned on.",
+		)
+
+	def test_refused_notification_says_why_too(self):
+		body = {"error": {"code": 403, "message": "Drive MCP API is disabled."}}
+		seam = _Seam([_init_ok(), _json_resp(body, status=403)])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.probe("https://drivemcp.googleapis.com/mcp/v1", "tok", protocol_version=LEGACY)
+		self.assertEqual(cm.exception.code, 403)
+		self.assertIn("refused access (HTTP 403). It said: Drive MCP API is disabled.", str(cm.exception))
+
+	def test_refused_notification_never_carries_an_rpc_error(self):
+		# A -32020 on a request means header drift and makes the broker re-list tools;
+		# on a notification it must stay a plain http_error, as before this change.
+		seam = _Seam([_init_ok(), _rpc_error(-32020, status=400)])
+		with mock.patch.object(mcp_client.ssrf, "open_pinned_request", seam):
+			with self.assertRaises(mcp_client.McpError) as cm:
+				mcp_client.probe("https://api.example.com/mcp", "tok", protocol_version=LEGACY)
+		self.assertIsNone(cm.exception.rpc)
+		self.assertIn("(HTTP 400). It said: x.", str(cm.exception))
+
+	def test_other_status_keeps_the_code_and_adds_the_reason(self):
+		exc = self._probe_error(_json_resp({"error": {"code": 404, "message": "No such server"}}, status=404))
+		self.assertEqual(str(exc), "The connector returned an error (HTTP 404). It said: No such server.")
