@@ -831,7 +831,16 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 		if value is not None:
 			body[key] = value
 
-	return _post(path=_m("api.tenant.get_connection"), body=body, timeout_s=timeout_s)
+	from jarvis.chat.runtime_profile import RuntimeProfileError, ingest_current
+
+	data = _post(path=_m("api.tenant.get_connection"), body=body, timeout_s=timeout_s)
+	try:
+		ingest_current(data)
+	except RuntimeProfileError:
+		# Keep the last valid profile, but do not report this poll as ready.
+		data["chat_readiness"] = "Unavailable"
+		data["chat_readiness_reason"] = "Runtime configuration needs an administrator connection sync."
+	return data
 
 
 def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
@@ -1174,8 +1183,9 @@ def post_push_oauth_blob(provider: str, blob: dict) -> dict:
 
 	Timeout is bumped above the default 90s because the admin handler
 	chains to fleet-agent's PUT /auth-profile, which now runs
-	``openclaw doctor --fix --non-interactive`` (up to 60s, migrates the
-	legacy JSON store to SQLite on agent 2026.6.5+) plus
+	the runtime configuration migration command (see workspace integration
+	reference). It takes up to 60s and migrates the legacy JSON store to SQLite
+	on agent 2026.6.5+, followed by
 	``docker compose restart`` + healthz poll. Admin's own bound is 150s;
 	we give bench 180s to allow for the HTTPS round-trip and admin's
 	response serialization on top of that. The earlier 90s default ran
@@ -1207,7 +1217,7 @@ def post_subscription_connect(
 
 	Collapses what used to be two round trips out of ``jarvis_settings.py``'s
 	subscription "restart" leg - ``post_push_oauth_blob`` (the auth-profile
-	write) THEN ``post_update_llm_creds`` (the openclaw.json render + restart)
+	write) THEN ``post_update_llm_creds`` (the agent configuration render + restart)
 	- into one call, so the doctor+healthz work behind it runs once instead of
 	twice.
 
@@ -2512,6 +2522,9 @@ def _request_maybe_delivered(e: BaseException) -> bool:
 
 
 def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str) -> dict:
+	# Opt in only after this client can remove the private profile from JSON
+	# responses. Older Admin versions safely ignore this additive header.
+	headers = {**headers, "X-Jarvis-Runtime-Profile": "1"}
 	try:
 		resp = requests.post(url, json=body, headers=headers, timeout=timeout_s)
 	except (requests.ConnectionError, requests.Timeout) as e:
@@ -2711,4 +2724,6 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		if _permanent_rejection_code(envelope):
 			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
 		raise AdminUnreachableError(f"{code}: {msg}")
-	return envelope.get("data", envelope) if isinstance(envelope, dict) else envelope
+	from jarvis.chat.runtime_profile import private_connection
+
+	return private_connection(envelope.get("data", envelope) if isinstance(envelope, dict) else envelope)

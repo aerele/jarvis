@@ -73,6 +73,13 @@ def _make_conversation(owner: str, session_key: str) -> str:
 	return conv.name
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class TestSaveDashboardTool(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):

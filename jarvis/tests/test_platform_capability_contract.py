@@ -4,7 +4,7 @@ at the bench.
 The defect: a session-bound plugin call from a delegate run reached
 ``jarvis.api._run_tool`` without EVER being compared against the agent's declared
 ``tools_allow``. The container's ``tools.allow`` is CONFIGURATION (fleet renders it
-into openclaw.json); it is not authorization, so a compromised container/plugin or
+into agent configuration); it is not authorization, so a compromised container/plugin or
 a leaked per-run session bearer could call ANY registered tool the run-as user's
 Frappe roles permitted. And the write guard read the CURRENT (mutable)
 ``Jarvis Agent Listing.nature``/``.writes``, so editing a listing re-authorised an

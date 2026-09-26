@@ -1,6 +1,6 @@
-"""Openclaw event parsing + realtime publish wrapper.
+"""Agent event parsing + realtime publish wrapper.
 
-openclaw emits WebSocket events with shapes like:
+agent emits WebSocket events with shapes like:
   stream=lifecycle  data={phase: start|end|error, ...}
   stream=item       data={kind: tool, phase: start|end, name, toolCallId, status}
   stream=item       data={kind: preamble, phase, itemId, progressText}  (step update)
@@ -24,7 +24,7 @@ CHANNEL = "jarvis:event"
 
 
 def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
-	"""Normalize an openclaw WS frame to a flat dict, or return None to drop it."""
+	"""Normalize an agent WS frame to a flat dict, or return None to drop it."""
 	stream = payload.get("stream")
 	data = payload.get("data")
 	if not isinstance(data, dict):
@@ -53,7 +53,7 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 		}
 		if data.get("status"):
 			out["status"] = data["status"]
-		# openclaw's item events carry a human title it derives itself from
+		# agent's item events carry a human title it derives itself from
 		# the tool name + an arg summary (buildToolItemTitle ->
 		# inferToolMetaFromArgs, e.g. "get_list Sales Invoice"). Pass it
 		# through so the chat's live status line can say WHAT is being

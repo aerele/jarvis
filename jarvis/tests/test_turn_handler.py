@@ -18,6 +18,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_session_pool, turn_handler, worker
 from jarvis.exceptions import AgentUnreachableError
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -27,6 +28,11 @@ from jarvis.tests.test_chat_worker import (
 	_fake_event_stream,
 	_make_conversation_with_user_message,
 )
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
 
 MSG = "Jarvis Chat Message"
 

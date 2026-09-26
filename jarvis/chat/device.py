@@ -1,11 +1,11 @@
 """Chat-device pairing + signing helpers.
 
-Owns the customer-side half of openclaw's device-paired auth:
+Owns the customer-side half of agent's device-paired auth:
 - Generates an Ed25519 keypair on first chat, persists it in Jarvis Settings.
 - Calls admin's pair_chat_device endpoint to register the public side with the
-  customer's openclaw container; persists the returned bearer token.
-- Builds and signs the v3 device-auth payload openclaw verifies at every WS
-  connect (mirrors openclaw src/gateway/device-auth.ts:36).
+  customer's agent container; persists the returned bearer token.
+- Builds and signs the v3 device-auth payload agent verifies at every WS
+  connect (mirrors agent src/gateway/device-auth.ts:36).
 
 The keypair never leaves this bench. Admin only ever sees the public key.
 """
@@ -61,7 +61,7 @@ def _b64u_decode(s: str) -> bytes:
 
 
 def _derive_device_id(public_key_raw: bytes) -> str:
-	"""Mirrors openclaw's deriveDeviceIdFromPublicKey (sha256 hex)."""
+	"""Mirrors agent's deriveDeviceIdFromPublicKey (sha256 hex)."""
 	return hashlib.sha256(public_key_raw).hexdigest()
 
 
@@ -331,7 +331,7 @@ def _pair_mechanism_a(*, device_id: str, pub_b64u: str, priv: Ed25519PrivateKey)
 
 def _generate_and_pair() -> ChatDeviceCredentials:
 	"""Generate a fresh Ed25519 keypair, register it with admin (which
-	relays to the customer's openclaw container as a PairedDevice
+	relays to the customer's agent container as a PairedDevice
 	record), and persist the resulting credentials.
 
 	Used ONLY by ``rotate_chat_device`` now (the operator-triggered
@@ -415,7 +415,7 @@ def rotate_chat_device() -> dict:
 
 
 def clear_credentials() -> None:
-	"""Wipe persisted chat-device creds. Called when openclaw rejects an
+	"""Wipe persisted chat-device creds. Called when agent rejects an
 	existing pairing (token revoked, device not paired, etc.) so the next
 	chat attempt regenerates.
 
@@ -469,7 +469,7 @@ def session_device_is_stale(row_device_id: str, current_device_id: str) -> bool:
 def update_device_token(new_token: str, *, device_id: str) -> bool:
 	"""Persist a gateway-REISSUED device token for the current pairing.
 
-	openclaw's hello-ok can carry a rotated ``auth.deviceToken`` (the
+	agent's hello-ok can carry a rotated ``auth.deviceToken`` (the
 	gateway replaces the stored token whenever the existing entry no
 	longer lines up with the connect's scopes/issuer). The rotation is
 	already durable on the gateway side by the time the client sees
@@ -515,7 +515,7 @@ def update_device_token(new_token: str, *, device_id: str) -> bool:
 
 
 def _normalize_metadata(value: str) -> str:
-	"""Mirrors openclaw's normalizeDeviceMetadataForAuth: trim + ASCII lowercase
+	"""Mirrors agent's normalizeDeviceMetadataForAuth: trim + ASCII lowercase
 	(only [A-Z] → [a-z]; Unicode left alone, matching the deterministic
 	cross-runtime normalization the gateway uses)."""
 	trimmed = (value or "").strip()
@@ -535,9 +535,9 @@ def build_payload_v3(
 	platform: str = "linux",
 	device_family: str = "",
 ) -> str:
-	"""Byte-for-byte mirror of openclaw's buildDeviceAuthPayloadV3.
+	"""Byte-for-byte mirror of agent's buildDeviceAuthPayloadV3.
 
-	If openclaw rev-bumps the payload format we discover it as a
+	If agent rev-bumps the payload format we discover it as a
 	'device-signature' rejection on connect - the only fragile spot in
 	the whole transport rewrite, hence the explicit comment + the
 	corresponding test in tests/test_chat_device.py."""

@@ -32,7 +32,7 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 	   whoever Frappe's session resolves to; their permissions are what the
 	   tool sees. Guest is rejected.
 
-	2. **Plugin auth** (``jarvis-openclaw-plugin`` Path A): two custom headers
+	2. **Plugin auth** (Jarvis agent plugin, Path A): two custom headers
 	   are presented together:
 
 	   - ``X-Jarvis-Token`` - the shared ``agent_token`` secret
@@ -185,7 +185,7 @@ def _dispatch_from_session(
 			# When this session resolves to a marketplace-agent run, the only tools it
 			# may call are the ones its manifest declared and the bench snapshotted
 			# onto the run at launch. The container's tools.allow is configuration
-			# (fleet renders it into openclaw.json); it is not authorization, so a
+			# (fleet renders it into agent configuration); it is not authorization, so a
 			# compromised container/plugin or a leaked run bearer would otherwise
 			# reach ANY registered tool the run-as user's Frappe roles permit. Fails
 			# closed: a run with no snapshot and no legacy marker is refused outright.
