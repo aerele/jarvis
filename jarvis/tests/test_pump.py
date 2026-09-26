@@ -91,6 +91,13 @@ def _cleanup(user: str = TEST_USER) -> None:
 # --------------------------------------------------------------------------- #
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class _Recorder:
 	def __init__(self):
 		self.calls: list = []
