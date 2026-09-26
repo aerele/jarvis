@@ -90,3 +90,20 @@ export function panelField(metaField, value) {
 		orig,
 	};
 }
+
+// Mark the fields a failed create named (apply_action `error.fields`) on a draft
+// model. A field meta does not mark required (mandatory_depends_on) is added from
+// the form meta so the person can fill it. Child-row misses stay in the message.
+export function markMissing(model, missing, metaFields = []) {
+	for (const m of missing || []) {
+		if (m.parentfield) continue;
+		let field = model.fields.find((f) => f.fieldname === m.fieldname);
+		if (!field) {
+			const metaField = metaFields.find((f) => f.fieldname === m.fieldname);
+			if (!metaField) continue;
+			field = panelField(metaField, "");
+			model.fields.push(field);
+		}
+		field.serverMissing = true;
+	}
+}
