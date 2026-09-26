@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from "vue";
+import { isRequiredBlank } from "@/lib/actionSummary";
 
 const props = defineProps({
 	model: { type: Object, required: true },
@@ -16,12 +17,13 @@ const docTitle = computed(() => {
 		m.docName ? " · " + m.docName : ""
 	}`;
 });
-// Read-only fields to show: create -> the proposed (non-empty) fields; update ->
-// populated or changed fields (so the change shows in context).
+// Read-only fields to show: create -> the proposed (non-empty) fields plus required
+// ones the model left blank; update -> populated or changed fields (so the change
+// shows in context).
 const fields = computed(() =>
 	(props.model.fields || []).filter((f) => {
 		const set = String(f.value ?? "").trim() !== "";
-		return isUpdate.value ? set || f.changed : set;
+		return isUpdate.value ? set || f.changed : set || isRequiredBlank(f);
 	})
 );
 const tables = computed(() => (props.model.tables || []).filter((t) => (t.rows || []).length));
@@ -137,7 +139,12 @@ onBeforeUnmount(() => {
 					<div v-if="headline" class="dp-headline">{{ headline }}</div>
 					<dl v-if="fields.length" class="dp-fields">
 						<template v-for="f in fields" :key="f.fieldname">
-							<dt>{{ f.label }}</dt>
+							<dt>
+								{{ f.label
+								}}<span v-if="!isUpdate && isRequiredBlank(f)" class="dp-req">
+									*</span
+								>
+							</dt>
 							<dd :class="{ 'dp-changed': f.changed }">
 								<template v-if="f.changed"
 									><span class="dp-old">{{ f.orig || "(empty)" }}</span>
@@ -146,7 +153,7 @@ onBeforeUnmount(() => {
 										f.value || "(empty)"
 									}}</span></template
 								>
-								<template v-else>{{ f.value }}</template>
+								<template v-else>{{ f.value || "-" }}</template>
 							</dd>
 						</template>
 					</dl>
@@ -331,6 +338,9 @@ onBeforeUnmount(() => {
 	margin: 0;
 	font-size: 13.5px;
 	color: var(--text);
+}
+.dp-req {
+	color: var(--red);
 }
 .dp-changed .dp-old {
 	color: var(--text-3);

@@ -213,6 +213,10 @@ class TestApplyActionContract(FrappeTestCase):
 	def setUp(self):
 		frappe.flags.pop("error_message", None)
 		self.addCleanup(lambda: frappe.flags.pop("error_message", None))
+		# global_search's queue path asserts in tests on an unseeded site; skip it
+		# (built-in conf guard) so a real ToDo insert runs cleanly.
+		frappe.local.conf["disable_global_search"] = 1
+		self.addCleanup(lambda: frappe.local.conf.pop("disable_global_search", None))
 
 	def _conv(self) -> str:
 		conv = frappe.get_doc(
@@ -298,10 +302,6 @@ class TestApplyActionContract(FrappeTestCase):
 		# to fail so the create is the only real write, and we assert it vanished.
 		marker = "err-ux-rollback-marker-xyz"
 		self.assertFalse(frappe.db.exists("ToDo", {"description": marker}))
-		# global_search's queue path asserts in tests on an unseeded site; skip it
-		# (built-in conf guard) so the real insert -> rollback effect runs cleanly.
-		frappe.local.conf["disable_global_search"] = 1
-		self.addCleanup(lambda: frappe.local.conf.pop("disable_global_search", None))
 		with patch(
 			"jarvis.tools.submit_doc.submit_doc", side_effect=frappe.ValidationError("submit blocked")
 		):
@@ -320,3 +320,36 @@ class TestApplyActionContract(FrappeTestCase):
 		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
 		# the successful create was undone - nothing persisted
 		self.assertFalse(frappe.db.exists("ToDo", {"description": marker}))
+
+	# jarvis-admin-v2#603: a drafted card left a required field empty and the person
+	# only saw "check the highlighted fields" with nothing highlighted.
+	def _apply_todo(self, values: dict) -> dict:
+		# Swallow only apply_action's full rollback (it would drop the conversation);
+		# the dry-run sandbox's savepoint rollback must still really run.
+		real_rollback = frappe.db.rollback
+
+		def rollback(*args, **kwargs):
+			if args or kwargs.get("save_point"):
+				return real_rollback(*args, **kwargs)
+
+		with patch.object(frappe.db, "rollback", side_effect=rollback):
+			return apply_action(
+				frappe.as_json(
+					{"verb": "create", "doctype": "ToDo", "values": values, "conversation": self._conv()}
+				)
+			)
+
+	def test_missing_required_field_is_named(self):
+		todos = frappe.db.count("ToDo")
+		r = self._apply_todo({"priority": "Medium"})
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
+		self.assertEqual([f["fieldname"] for f in r["error"]["fields"]], ["description"])
+		self.assertEqual(r["error"]["message"], "ToDo needs a value for Description.")
+		self.assertEqual(frappe.db.count("ToDo"), todos, "the dry-run insert was rolled back")
+
+	def test_missing_field_with_another_error_keeps_generic_envelope(self):
+		# Naming only the empty field would hide the bad link, so nothing is named.
+		r = self._apply_todo({"priority": "Medium", "allocated_to": "nobody-603@example.invalid"})
+		self.assertFalse(r["ok"])
+		self.assertNotIn("fields", r["error"])
