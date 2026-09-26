@@ -21,7 +21,7 @@ import re
 import frappe
 
 from jarvis import admin_client
-from jarvis.chat.runtime_profile import get_profile
+from jarvis.chat.runtime_profile import RuntimeProfileError, get_profile
 
 MSG = "Jarvis Chat Message"
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -248,8 +248,15 @@ def strip_media_lines(text: str) -> str:
 # whitespace / quote / paren / angle-bracket / comma / semicolon - the usual
 # terminators of "Attachment: <path>", 'path="<path>"' and markdown
 # "![alt](<path>)". Matched on ANY line, not just a dedicated marker line.
-def _embedded_media_path_re() -> re.Pattern:
-	return re.compile(re.escape(get_profile().media_root) + r"[^\s\"'()<>,;]+")
+def _embedded_media_path_re() -> re.Pattern | None:
+	"""Pattern for a path under the runtime's media root, or None when the
+	runtime profile is not synced yet: a reply must never fail on that, it just
+	has no embedded media to deliver."""
+	try:
+		root = get_profile().media_root
+	except RuntimeProfileError:
+		return None
+	return re.compile(re.escape(root) + r"[^\s\"'()<>,;]+")
 
 
 def _embedded_media_lines(text: str):
@@ -261,11 +268,14 @@ def _embedded_media_lines(text: str):
 	``MEDIA:`` marker is skipped (that marker already owns the line)."""
 	if not isinstance(text, str):
 		return
+	pattern = _embedded_media_path_re()
+	if pattern is None:
+		return
 	marker_lines = {i for i, _ in _media_lines(text)}
 	for i, line in enumerate(text.splitlines()):
 		if i in marker_lines:
 			continue
-		for m in _embedded_media_path_re().finditer(line):
+		for m in pattern.finditer(line):
 			path = m.group(0)
 			if _valid_media_path(path):
 				yield i, path

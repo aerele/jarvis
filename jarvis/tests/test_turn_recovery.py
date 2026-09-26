@@ -654,7 +654,9 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		# tools' unconditional background-detach abort - the turn parked here by
 		# the deadline/watchdog path when the yield-wait itself couldn't finish
 		# in time) must still seed its image, not just the text.
-		path = "/home/node/.openclaw/media/tool-image-generation/x.png"
+		from jarvis.chat.runtime_profile import get_profile
+
+		path = get_profile().media_root + "tool-image-generation/x.png"
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
