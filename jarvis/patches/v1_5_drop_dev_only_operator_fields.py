@@ -1,7 +1,7 @@
 """Drop the three dev-only operator-tab fields that the unified-local-dev work removed.
 
-Safe: those fields were only ever written by openclaw_bootstrap (now deleted)
-and only read by openclaw_push (also deleted). In production they were never
+Safe: those fields were only ever written by the retired bootstrap module (now deleted)
+and only read by the retired push module (also deleted). In production they were never
 populated.
 """
 
