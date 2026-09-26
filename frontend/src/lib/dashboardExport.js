@@ -8,7 +8,7 @@
 //     every external fetch),
 //   - downloadPng(images, title): first captured image → Blob → <a download>,
 //   - downloadPdf(images, title): captured slides → lazy jspdf → one page per
-//     slide, page size = the slide's pixel size.
+//     slide, with a white page margin around the slide's original pixel size.
 
 let _libSource = null;
 export async function loadCaptureLib() {
@@ -53,6 +53,10 @@ export function downloadPng(images, title) {
 	setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+// 24 CSS pixels = 18pt (about 6.35mm) on each side. Grow the page rather than
+// shrinking the capture, so text and charts retain their original size.
+const PDF_MARGIN_PX = 24;
+
 export async function downloadPdf(images, title) {
 	if (!images || !images.length) throw new Error("Nothing was captured");
 	// jspdf only loads when a PDF export actually happens.
@@ -62,13 +66,19 @@ export async function downloadPdf(images, title) {
 		const w = Math.max(1, Math.round(img.w || 1));
 		const h = Math.max(1, Math.round(img.h || 1));
 		const orientation = w >= h ? "landscape" : "portrait";
+		const pageSize = [w + 2 * PDF_MARGIN_PX, h + 2 * PDF_MARGIN_PX];
 		if (!doc) {
 			// px_scaling: treat px as real pixels (jspdf otherwise rescales 96dpi→72).
-			doc = new jsPDF({ orientation, unit: "px", format: [w, h], hotfixes: ["px_scaling"] });
+			doc = new jsPDF({
+				orientation,
+				unit: "px",
+				format: pageSize,
+				hotfixes: ["px_scaling"],
+			});
 		} else {
-			doc.addPage([w, h], orientation);
+			doc.addPage(pageSize, orientation);
 		}
-		doc.addImage(img.dataUrl, "PNG", 0, 0, w, h);
+		doc.addImage(img.dataUrl, "PNG", PDF_MARGIN_PX, PDF_MARGIN_PX, w, h);
 	}
 	doc.save(slugify(title) + ".pdf");
 }
