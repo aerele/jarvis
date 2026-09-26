@@ -14,7 +14,7 @@ from jarvis.chat import agent_session_pool, turn_handler, turn_message_binding
 from jarvis.chat.api import create_conversation, get_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
 from jarvis.exceptions import AgentUnreachableError
-from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
+from jarvis.tests._gateway_fixtures import TEST_PROFILE, install_synthetic_runtime_profile, transcript_message
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -1022,11 +1022,12 @@ class TestRunAgentTurnAgentYield(FrappeTestCase):
 		self.assertFalse(row["error"])
 
 	def test_continuation_media_rels_seed_the_image_on_the_same_message(self):
+		media_path = TEST_PROFILE.media_root + "tool-image-generation/x.png"
 		fake_sess = self._fake_sess(
 			yield_result={
 				"kind": "relay:final",
 				"text": "here it is",
-				"media_rels": ["/home/node/.openclaw/media/tool-image-generation/x.png"],
+				"media_rels": [media_path],
 			}
 		)
 		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
@@ -1037,10 +1038,7 @@ class TestRunAgentTurnAgentYield(FrappeTestCase):
 		rich.assert_called_once()
 		assistant_name = frappe.db.get_value(MSG, {"conversation": self.conv, "role": "assistant"}, "name")
 		self.assertEqual(rich.call_args.args[0], assistant_name)  # the SAME message
-		self.assertEqual(
-			rich.call_args.kwargs.get("media_rels"),
-			["/home/node/.openclaw/media/tool-image-generation/x.png"],
-		)
+		self.assertEqual(rich.call_args.kwargs.get("media_rels"), [media_path])
 
 	def test_continuation_that_itself_fails_uses_failed_final_handling(self):
 		fake_sess = self._fake_sess(

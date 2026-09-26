@@ -135,8 +135,8 @@ _PRIMARY_AGENT_ID = "main"
 # for this turn + pair + WS connect overhead.
 TURN_TIMEOUT_SECONDS = 600
 
-# openclaw's image/video/music generation tools unconditionally detach into a
-# background task on every normal chat session (no config switch): the
+# The agent runtime's image/video/music generation tools unconditionally
+# detach into a background task on every normal chat session (no config switch): the
 # in-flight run is aborted with an EMPTY terminal (sessions_yield/turnHandoff),
 # then ~25-30s later a NEW run on the SAME sessionKey (a fresh runId) posts the
 # real reply. This bounds how long a turn waits for that follow-up before
@@ -1391,7 +1391,7 @@ class AgentSession:
 					yield _final
 					return
 				if state in ("error", "aborted"):
-					# ``text`` lets the caller tell an openclaw-yield abort (empty)
+					# ``text`` lets the caller tell an agent-yield abort (empty)
 					# from a genuine partial-content abort - see
 					# relay_yield_continuation. Absent for a plain error/aborted
 					# today, so this is a harmless addition for every OTHER caller.
@@ -1429,10 +1429,10 @@ class AgentSession:
 		soft_deadline_s: float,
 		cancel_check: Any = None,
 	) -> dict[str, Any]:
-		"""Wait for the follow-up ``chat`` terminal an openclaw-yield abort
+		"""Wait for the follow-up ``chat`` terminal an agent-yield abort
 		(``relay_turn_events``' empty ``state == "aborted"``) posts on the SAME
-		``session_key`` under a FRESH runId (openclaw's image/video/music tools
-		unconditionally detach into a background task and restart the session
+		``session_key`` under a FRESH runId (the agent runtime's image/video/music
+		tools unconditionally detach into a background task and restart the session
 		~25-30s later - see ``YIELD_CONTINUATION_WAIT_S``). Matches on
 		``sessionKey`` alone (the runId is unknown ahead of time).
 
