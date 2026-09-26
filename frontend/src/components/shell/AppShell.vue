@@ -303,6 +303,7 @@ onBeforeUnmount(() => {
 	document.removeEventListener("visibilitychange", onVisibility);
 	clearTimeout(_visTimer);
 	stopInterval();
+	store.stopBadgeTimer();
 	removeAfterEach();
 	if (_detachNotifier) _detachNotifier();
 });

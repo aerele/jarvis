@@ -50,6 +50,44 @@ from frappe.core.doctype.server_script.server_script_utils import get_server_scr
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
+# S6: Jarvis's own gate, turn-entry and decision endpoints are never a tool target
+# (``call_tool`` is allow_guest and ``frappe.call`` skips the HTTP-method check).
+# Matched on the RESOLVED function (whitelisted and controller-method routes), so an
+# alias cannot slip past, and on the name before a Server Script API lookup.
+_DENIED_PREFIXES = (
+	"jarvis.api.",
+	"jarvis.chat.actions_api.",
+	"jarvis.chat.approvals_api.",
+	"jarvis.chat.pending_actions.",
+	"jarvis.chat.macros_api.",
+)
+_DENIED = frozenset(
+	{
+		"jarvis.chat.api.send_message",
+		"jarvis.chat.api.retry_message",
+		"jarvis.chat.api.stop_run",
+		"jarvis.chat.api.archive_conversation",
+		"jarvis.chat.api.clear_chat_history",
+		# Reviewer sign-offs, sharing and org-wide pushes: a human decision, never the agent's.
+		"jarvis.chat.custom_skills_api.decide_skill_promotion",
+		"jarvis.chat.custom_skills_api.apply_custom_skills",
+		"jarvis.chat.custom_skills_api.share_custom_skill",
+		"jarvis.chat.learned_api.decide_promotion",
+		"jarvis.chat.learned_api.approve_learned_pattern",
+		"jarvis.chat.learned_api.batch_approve",
+		"jarvis.chat.learned_api.reject_learned_pattern",
+		"jarvis.chat.learned_api.unapprove_learned_pattern",
+		"jarvis.chat.learned_api.acknowledge_learned_pattern",
+		"jarvis.chat.learned_api.restore_rejected_pattern",
+		"jarvis.chat.learned_api.snooze_learned_pattern",
+		"jarvis.chat.learned_api.apply_insight_skill_update",
+		"jarvis.chat.learned_api.apply_learned_skills",
+		"jarvis.chat.agents_api.promote_installation",
+		"jarvis.chat.agents_api.demote_installation",
+		"jarvis.chat.agents_api.raise_activation_ceiling",
+	}
+)
+
 
 def run_method(
 	method: str,
@@ -99,6 +137,9 @@ def run_method(
 		return _run_doc_method(method, doctype, name, args)
 
 	_enforce_blocklist(method)
+	# By name too, so a Server Script API cannot shadow a denied endpoint's path.
+	if _is_denied_path(method):
+		raise PermissionDeniedError(f"method {method!r} cannot be called from a tool")
 
 	# Classify (not fall back): the server-script map is authoritative for
 	# whether a bare name is a Server Script API method.
@@ -141,6 +182,8 @@ def _run_whitelisted(method: str, args: dict | None) -> dict:
 		fn = frappe.get_attr(method)
 	except (AttributeError, ModuleNotFoundError, frappe.AppNotInstalledError):
 		raise InvalidArgumentError(f"unknown method: {method}")
+	if _is_denied(fn):
+		raise PermissionDeniedError(f"method {method!r} cannot be called from a tool")
 
 	# Enforce @frappe.whitelist(): raises frappe.PermissionError if not.
 	try:
@@ -157,6 +200,14 @@ def _run_whitelisted(method: str, args: dict | None) -> dict:
 		return frappe.call(fn, **(args or {}))
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to call {method}") from e
+
+
+def _is_denied(fn) -> bool:
+	return _is_denied_path(f"{getattr(fn, '__module__', '') or ''}.{getattr(fn, '__qualname__', '') or ''}")
+
+
+def _is_denied_path(path: str) -> bool:
+	return path in _DENIED or path.startswith(_DENIED_PREFIXES)
 
 
 def _run_server_script(docname: str, args: dict | None) -> dict:
@@ -205,9 +256,13 @@ def _run_doc_method(method: str, doctype: str, name: str | int | None, args: dic
 	except AttributeError:
 		raise InvalidArgumentError(f"unknown method: {method} on {doctype}")
 
+	func = getattr(bound, "__func__", bound)
+	if _is_denied(func):
+		raise PermissionDeniedError(f"method {doctype}.{method} cannot be called from a tool")
+
 	# Enforce @frappe.whitelist() on the underlying (unbound) controller function.
 	try:
-		frappe.is_whitelisted(getattr(bound, "__func__", bound))
+		frappe.is_whitelisted(func)
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"method {doctype}.{method} is not whitelisted") from e
 

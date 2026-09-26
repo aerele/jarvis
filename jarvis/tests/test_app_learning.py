@@ -702,6 +702,7 @@ class TestStartRun(_AppLearningTestCase):
 		self._convs.append(run.conversation)
 		self._zips.append(run.zip_path)
 		self.assertEqual(enq.call_args.kwargs.get("interactive"), False)
+		self.assertEqual(enq.call_args.kwargs.get("origin"), "system")
 
 	def test_zip_path_persisted_before_plan_so_a_plan_failure_leaves_no_orphan(self):
 		# Review P2: if planning fails after a successful snapshot, the run must
