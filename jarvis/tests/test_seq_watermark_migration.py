@@ -1,10 +1,10 @@
-"""Transition tests for the watermark rename: the v2_10 copy patch AND the
-dual-write/GREATEST-read compatibility layer (jarvis.chat.seq_watermark).
+"""Transition tests for the watermark rename's dual-write/GREATEST-read
+compatibility layer (jarvis.chat.seq_watermark).
 
 On an upgraded site the old column survives model-sync as an orphan; on a fresh
-install it never exists. The upgrade shape is the one the migration exists for —
-so instead of skipping when the column is absent (which made this suite vacuous
-on every fresh CI site), setUpClass CREATES the legacy column to simulate the
+install it never exists. The upgrade shape is the one the layer exists for, so
+instead of skipping when the column is absent (which made this suite vacuous on
+every fresh CI site), setUpClass CREATES the legacy column to simulate the
 upgrade, and tearDownClass drops it again if we added it (leaving a fresh site
 pristine).
 """
@@ -46,9 +46,7 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 
 	@classmethod
 	def setUpClass(cls):
-		fixture = load()["watermark"]
-		cls._legacy_column = fixture["legacy_column"]
-		cls._execute = staticmethod(frappe.get_attr(fixture["patch"]))
+		cls._legacy_column = load()["watermark"]["legacy_column"]
 		cls._added_legacy_col = False
 		super().setUpClass()
 		if not cls._legacy_col_exists():
@@ -100,63 +98,6 @@ class TestSeqWatermarkMigration(FrappeTestCase):
 			f"SELECT agent_seq_watermark, `{self._legacy_column}` FROM `tabJarvis Chat Message` WHERE name=%s",
 			(name or self.msg.name,),
 		)[0]
-
-	def _new(self):
-		return frappe.db.get_value(MSG, self.msg.name, "agent_seq_watermark")
-
-	# ---- the v2_10 one-shot copy ----
-
-	def test_copies_old_watermark_when_new_is_zero(self):
-		self._set_cols(old=42, new=0)
-		self._execute()
-		self.assertEqual(self._new(), 42)
-
-	def test_idempotent_does_not_clobber_a_migrated_row(self):
-		# already migrated: new set, old since zeroed -> a re-run must leave it alone
-		self._set_cols(old=0, new=5)
-		self._execute()
-		self.assertEqual(self._new(), 5)
-
-	def test_does_not_downgrade_when_new_already_fresher(self):
-		# new carries a fresher value than the stale old column -> never overwrite
-		self._set_cols(old=3, new=9)
-		self._execute()
-		self.assertEqual(self._new(), 9)
-
-	def test_reconciles_larger_legacy_value_even_when_new_is_nonzero(self):
-		self._set_cols(old=42, new=7)
-		self._execute()
-		self.assertEqual(self._cols(), (42, 42))
-
-	def test_reconciles_rollback_column_when_new_is_fresher(self):
-		self._set_cols(old=3, new=19)
-		self._execute()
-		self.assertEqual(self._cols(), (19, 19))
-
-	def test_after_migrate_handles_old_worker_writes_after_original_patch(self):
-		from jarvis import hooks
-
-		self._set_cols(old=7, new=0)
-		self._execute()
-		# A worker on the previous version writes after the one-shot patch.
-		self._set_cols(old=31, new=7)
-		value = frappe.db.sql(
-			f"SELECT {seq_watermark.wm_expr()} FROM `tab{MSG}` WHERE name=%s", (self.msg.name,)
-		)[0][0]
-		self.assertEqual(int(value), 31)
-		hook = "jarvis.chat.seq_watermark.reconcile_watermarks"
-		self.assertIn(hook, hooks.after_migrate)
-		frappe.get_attr(hook)()
-		self.assertEqual(self._cols(), (31, 31))
-		# Re-running normal migrate needs neither patch-log edits nor extra setup.
-		frappe.get_attr(hook)()
-		self.assertEqual(self._cols(), (31, 31))
-
-	def test_reconciliation_preserves_message_modified_timestamp(self):
-		before = frappe.db.get_value(MSG, self.msg.name, "modified")
-		self._set_cols(old=42, new=7)
-		seq_watermark.reconcile_watermarks()
-		self.assertEqual(frappe.db.get_value(MSG, self.msg.name, "modified"), before)
 
 	# ---- the transition compatibility layer (dual-write + GREATEST read) ----
 
