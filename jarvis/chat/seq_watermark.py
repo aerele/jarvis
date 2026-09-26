@@ -22,8 +22,13 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis.legacy_compatibility import get_contract
+
 MSG = "Jarvis Chat Message"
-_LEGACY_COL = "openclaw_seq_watermark"
+
+
+def _legacy_column():
+	return get_contract().watermark_column
 
 
 def has_legacy_column() -> bool:
@@ -35,7 +40,9 @@ def has_legacy_column() -> bool:
 	mid-request."""
 	cached = getattr(frappe.local, "_jarvis_wm_legacy_col", None)
 	if cached is None:
-		cached = bool(frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` WHERE Field = %(c)s", {"c": _LEGACY_COL}))
+		cached = bool(
+			frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` WHERE Field = %(c)s", {"c": _legacy_column()})
+		)
 		frappe.local._jarvis_wm_legacy_col = cached
 	return cached
 
@@ -51,12 +58,12 @@ def reconcile_watermarks() -> None:
 	frappe.local._jarvis_wm_legacy_col = None
 	if not has_legacy_column():
 		return
-	effective = f"GREATEST(agent_seq_watermark, {_LEGACY_COL})"
+	effective = f"GREATEST(agent_seq_watermark, {_legacy_column()})"
 	frappe.db.sql(
 		f"""
 		UPDATE `tab{MSG}`
-		SET agent_seq_watermark = {effective}, {_LEGACY_COL} = {effective}
-		WHERE agent_seq_watermark <> {_LEGACY_COL}
+		SET agent_seq_watermark = {effective}, {_legacy_column()} = {effective}
+		WHERE agent_seq_watermark <> {_legacy_column()}
 		"""
 	)
 
@@ -67,7 +74,7 @@ def stamp_watermark(message_name: str, watermark: int) -> None:
 	``modified`` — matches the previous ``update_modified=False`` write."""
 	cols = "agent_seq_watermark=%(w)s"
 	if has_legacy_column():
-		cols += f", {_LEGACY_COL}=%(w)s"
+		cols += f", {_legacy_column()}=%(w)s"
 	frappe.db.sql(
 		f"UPDATE `tab{MSG}` SET {cols} WHERE name=%(n)s",
 		{"w": int(watermark), "n": message_name},
@@ -81,5 +88,5 @@ def wm_expr(alias: str = "") -> str:
 	table alias prefix including the dot (e.g. ``"m."``)."""
 	col = f"{alias}agent_seq_watermark"
 	if has_legacy_column():
-		return f"GREATEST({col}, {alias}{_LEGACY_COL})"
+		return f"GREATEST({col}, {alias}{_legacy_column()})"
 	return col

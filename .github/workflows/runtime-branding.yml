@@ -23,4 +23,4 @@ jobs:
       - name: Enforce Admin-owned policy on this commit
         run: |
           python -m jarvis.ci.inputs policy --output "$RUNNER_TEMP/branding-policy.json"
-          python -m jarvis.ci.runtime_branding --policy "$RUNNER_TEMP/branding-policy.json" --expected-policy-sha256 0357c6f39bd98abf791a41adb859c01ad0c2caae5bed3a03f5bea2cd0c32aaba
+          python -m jarvis.ci.runtime_branding --policy "$RUNNER_TEMP/branding-policy.json" --expected-policy-sha256 86e42605f8ed3e1f73a8b9bf6ba111ef03343505c16ceb1a6ec696e57d261fd2

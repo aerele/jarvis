@@ -14,6 +14,22 @@ from jarvis.tests import _legacy_migration_fixtures as fixtures
 def sample():
 	return {
 		"version": 1,
+		"settings": {
+			"legacy_patch": "jarvis.patches.previous_settings",
+			"patch": "jarvis.patches.current_settings.execute",
+			"renames": {
+				"previous_" + name: name
+				for name in (
+					"jarvis_admin_url",
+					"jarvis_admin_api_key",
+					"agent_url",
+					"agent_token",
+					"agent_compose_dir",
+					"agent_config_path",
+					"agent_llm_key_path",
+				)
+			},
+		},
 		"watermark": {"legacy_column": "previous_watermark", "patch": "jarvis.patches.example.execute"},
 		"capture_provider": {
 			"legacy_column": "previous_provider",
