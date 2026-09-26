@@ -23,6 +23,7 @@ import frappe
 
 from jarvis import compat
 from jarvis._xlsx_charts import validate_charts
+from jarvis._xlsx_highlights import validate_highlights
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -40,6 +41,7 @@ def export_excel(
 	columns: list | None = None,
 	sheets: list | None = None,
 	charts: list | None = None,
+	highlights: list | None = None,
 ) -> dict:
 	"""Build an .xlsx and return ``{file_url, filename, title, mime_type,
 	size_bytes, name}``.
@@ -55,11 +57,20 @@ def export_excel(
 	``charts`` adds native editable column/bar/line/pie charts. Each specifies
 	``type``, ``categories`` (header name), ``values`` (numeric header names),
 	and optional ``title``. With ``sheets``, put charts inside each sheet.
+	``highlights`` adds native conditional formatting: exact ``column`` header,
+	``operator`` (gt/gte/lt/lte/eq/ne), numeric or literal text ``value`` (text:
+	only eq/ne), optional ``style`` (danger/warning/success/info; default warning)
+	and ``scope`` (cell/row; default cell). Put rules inside each sheet for a
+	multi-tab workbook. At most 12 rules per sheet; first matching rule wins on
+	overlap. Dates are unsupported. ``highlight_count`` counts rules, not matches.
 	"""
 	sheet_charts = []
+	sheet_highlights = []
 	if sheets is not None:
 		if charts is not None:
 			raise InvalidArgumentError("Put charts inside each sheet when using sheets")
+		if highlights is not None:
+			raise InvalidArgumentError("Put highlights inside each sheet when using sheets")
 		if not isinstance(sheets, list) or not sheets:
 			raise InvalidArgumentError("sheets must be a non-empty list of {title, rows}.")
 		sheet_data: list[tuple[str, list]] = []
@@ -74,17 +85,31 @@ def export_excel(
 			except NoDataError:
 				if spec.get("charts") is not None and spec.get("charts") != []:
 					raise InvalidArgumentError("A sheet with charts needs data") from None
+				if spec.get("highlights") is not None and spec.get("highlights") != []:
+					raise InvalidArgumentError("A sheet with highlights needs data") from None
 				continue  # skip an empty tab, keep the rest of the workbook
 			sheet_data.append((_unique_sheet_name(spec.get("title") or f"Sheet{i + 1}", used), data))
 			sheet_charts.append(validate_charts(spec.get("charts"), data))
+			sheet_highlights.append(
+				validate_highlights(spec.get("highlights"), data, sheet_name=sheet_data[-1][0])
+			)
 		# Every tab was empty → nothing to hand back (same rule as single-sheet).
 		if not sheet_data:
 			raise NoDataError("No data to prepare for Excel.")
 	else:
-		sheet_data = [((title or "Sheet1")[:31], _normalize(rows, columns))]
+		try:
+			data = _normalize(rows, columns)
+		except NoDataError:
+			if highlights is not None and highlights != []:
+				raise InvalidArgumentError("A sheet with highlights needs data") from None
+			raise
+		sheet_data = [((title or "Sheet1")[:31], data)]
 		sheet_charts.append(validate_charts(charts, sheet_data[0][1]))
+		sheet_highlights.append(
+			validate_highlights(highlights, sheet_data[0][1], sheet_name=sheet_data[0][0])
+		)
 
-	content = _workbook_bytes(sheet_data, charts=sheet_charts)
+	content = _workbook_bytes(sheet_data, charts=sheet_charts, highlights=sheet_highlights)
 
 	from frappe.utils.file_manager import save_file
 
@@ -98,6 +123,7 @@ def export_excel(
 		"size_bytes": int(fdoc.file_size or len(content)),
 		"name": fdoc.name,
 		"chart_count": sum(len(items) for items in sheet_charts),
+		"highlight_count": sum(len(items) for items in sheet_highlights),
 	}
 
 
@@ -156,7 +182,7 @@ def _dates_from_iso_text(width: int, body: list) -> None:
 				r[c] = parsed[r[c]]
 
 
-def _workbook_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
+def _workbook_bytes(sheet_data: list[tuple[str, list]], *, charts=None, highlights=None) -> bytes:
 	"""One workbook, a sheet per (name, data).
 
 	``frappe.utils.xlsxutils`` was rewritten from openpyxl to xlsxwriter in
@@ -164,7 +190,7 @@ def _workbook_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes
 	probes for the 16 API and picks one. Building this inline against the 16 API
 	made every export raise ``ModuleNotFoundError: xlsxwriter`` on a 15 bench.
 	"""
-	return compat.xlsx_bytes(sheet_data, charts=charts)
+	return compat.xlsx_bytes(sheet_data, charts=charts, highlights=highlights)
 
 
 def _unique_sheet_name(raw, used: set[str]) -> str:
