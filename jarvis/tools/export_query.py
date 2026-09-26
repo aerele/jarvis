@@ -38,6 +38,7 @@ def export_query(
 	format="xlsx",
 	title=None,
 	parent_doctype=None,
+	highlights=None,
 ) -> dict:
 	"""Export ``doctype`` rows matching ``filters`` to ``format`` (``xlsx``|``csv``).
 
@@ -48,7 +49,12 @@ def export_query(
 	the model context, so the export is complete (nothing truncated). Pass
 	``parent_doctype`` to export a child (Table) DocType, whose permission derives
 	from its parent. Raises ``NoDataError`` when nothing matches (an empty file would
-	look complete but hold nothing)."""
+	look complete but hold nothing).
+
+	``highlights`` (xlsx only) uses the same column/operator/value/style/scope
+	rules as export_excel, referring to exact exported field headers. Formatting
+	runs after cell sanitation, without returning source rows to the agent.
+	``highlight_count`` counts rules, not matching cells."""
 	fmt = str(format or "xlsx").lower()
 	if fmt not in _FORMATS:
 		raise InvalidArgumentError(f"format must be one of {sorted(_FORMATS)}, got {format!r}")
@@ -57,13 +63,16 @@ def export_query(
 	# Every fail-closed exit emits a telemetry outcome too (not just success), so the
 	# refused exports - the ones that would justify raising the ceiling - are visible.
 	try:
+		if fmt == "csv" and highlights is not None:
+			raise InvalidArgumentError("highlights requires format xlsx; CSV cannot store formatting")
 		model = resolvers.from_query(
 			doctype, filters=filters, fields=fields, order_by=order_by, parent_doctype=parent_doctype
 		)
 		if model.total == 0:
 			raise NoDataError(f"No {doctype} records match those filters - nothing to export.")
 		model.meta["title"] = title or doctype
-		env = save_export_file(f"x.{fmt}", render(model), title=title or doctype, mime_type=mime)
+		content = render(model, highlights=highlights) if fmt == "xlsx" else render(model)
+		env = save_export_file(f"x.{fmt}", content, title=title or doctype, mime_type=mime)
 	except (NoDataError, PermissionDeniedError, InvalidArgumentError) as e:
 		telemetry.record_export_event(
 			tool="export_query", fmt=fmt, rows=0, mode="sync", outcome=_outcome_for(e)
@@ -71,6 +80,8 @@ def export_query(
 		raise
 
 	env["total"] = model.total
+	if fmt == "xlsx":
+		env["highlight_count"] = model.meta["highlight_count"]
 	if model.meta.get("cells_truncated"):
 		env["cells_truncated"] = True
 		env["note"] = (
