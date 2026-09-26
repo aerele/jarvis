@@ -14,7 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import turn_recovery
 from jarvis.chat.turn_recovery import MSG as MSG_DT
-from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
+from jarvis.tests._gateway_fixtures import TEST_PROFILE, install_synthetic_runtime_profile, transcript_message
 
 SK = "sk_rec_unique_test"
 
@@ -654,16 +654,14 @@ class TestRecoveryRichOutputsAndWasRecovered(FrappeTestCase):
 		# tools' unconditional background-detach abort - the turn parked here by
 		# the deadline/watchdog path when the yield-wait itself couldn't finish
 		# in time) must still seed its image, not just the text.
-		from jarvis.chat.runtime_profile import get_profile
-
-		path = get_profile().media_root + "tool-image-generation/x.png"
+		path = TEST_PROFILE.media_root + "tool-image-generation/x.png"
 		sess = self._fake_sess(
 			messages_by_key={
 				SK: [
 					{
 						"role": "assistant",
 						"content": f"Here it is.\nAttachment: {path}",
-						"__openclaw": {"seq": 2},
+						"__test_gateway": {"seq": 2},
 					},
 				]
 			}

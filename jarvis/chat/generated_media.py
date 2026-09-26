@@ -244,6 +244,7 @@ def strip_media_lines(text: str) -> str:
 # the absolute path under the agent media root is the only stable anchor.
 # --------------------------------------------------------------------------- #
 
+
 # A path token: the media root followed by everything up to the first
 # whitespace / quote / paren / angle-bracket / comma / semicolon - the usual
 # terminators of "Attachment: <path>", 'path="<path>"' and markdown

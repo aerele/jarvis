@@ -35,7 +35,7 @@ def _chat_frame(run_id, session_key, state, **extra):
 	return {"type": "event", "event": "chat", "payload": payload}
 
 
-from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+from jarvis.tests._gateway_fixtures import TEST_PROFILE, install_synthetic_runtime_profile
 
 
 def setUpModule():
@@ -530,9 +530,7 @@ class TestRelayYieldContinuation(FrappeTestCase):
 		self.assertEqual(out, {"kind": "relay:final", "text": "done", "yield_continuation": True})
 
 	def test_final_extracts_and_strips_embedded_media_path(self):
-		from jarvis.chat.runtime_profile import get_profile
-
-		path = get_profile().media_root + "tool-image-generation/x---abcd1234.png"
+		path = TEST_PROFILE.media_root + "tool-image-generation/x---abcd1234.png"
 		sess = self._sess(
 			[
 				_chat_frame(
