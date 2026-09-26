@@ -202,8 +202,6 @@ jobs:
   # IMPORT those modules — so both erpnext AND hrms (version-15) must be installed, or those
   # tests error.
   tests:
-    env:
-      JARVIS_LEGACY_MIGRATION_FIXTURES: ${{ vars.JARVIS_LEGACY_MIGRATION_FIXTURES_6763DD766A33ABE8 }}
     runs-on: ubuntu-latest
     # From-scratch v15 bench build + the full unsharded suite. Headroom over the
     # v16 PR job (which restores a baked image and shards 4 ways): as the v15 gap
@@ -269,7 +267,8 @@ jobs:
         working-directory: app
         run: |
           git rev-parse HEAD
-          python3 -m jarvis.tests._legacy_migration_fixtures
+          python3 -m jarvis.ci.inputs fixture --output "$RUNNER_TEMP/migration-fixture.json"
+          echo "JARVIS_LEGACY_MIGRATION_FIXTURES_FILE=$RUNNER_TEMP/migration-fixture.json" >> "$GITHUB_ENV"
 
       - name: Record what this run actually tested against
         working-directory: /opt/frappe-bench
