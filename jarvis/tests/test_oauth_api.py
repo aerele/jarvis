@@ -485,7 +485,7 @@ class TestCompletePasteSigninFlow(_OAuthApiBase):
 		self.assertTrue(
 			sk.get("force"),
 			"complete_paste_signin must pass force=True so a no-diff "
-			"save still re-renders openclaw.json + restarts the container",
+			"save still re-renders the runtime configuration and restarts the container",
 		)
 
 		settings = frappe.get_single("Jarvis Settings")
@@ -507,7 +507,7 @@ class TestCompletePasteSigninFlow(_OAuthApiBase):
 		(e.g. _SUBSCRIPTION_MODELS tightened mid-flight, or a manually
 		seeded cache row), complete_paste_signin must re-coerce before
 		writing to the blob and save_llm_creds. Otherwise the customer's
-		container ends up rendering openclaw.json with the bad model and
+		container ends up rendering agent configuration with the bad model and
 		every chat turn fails."""
 		jwt = _jwt(
 			{

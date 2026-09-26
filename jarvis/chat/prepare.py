@@ -39,6 +39,7 @@ import frappe
 from jarvis._session import impersonate
 from jarvis.chat import seq_watermark
 from jarvis.chat import turn_state as ts
+from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
@@ -201,7 +202,10 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			try:
 				wm_msgs = sess.get_session_messages(session_key, limit=5)
 				watermark = max(
-					(((m or {}).get("__openclaw") or {}).get("seq", 0) for m in wm_msgs),
+					(
+						((m or {}).get(get_profile().message_metadata_key) or {}).get("seq", 0)
+						for m in wm_msgs
+					),
 					default=0,
 				)
 				if watermark:

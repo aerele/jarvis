@@ -1,7 +1,6 @@
-"""Copy openclaw_provider into the renamed agent_provider column.
+"""Copy the legacy provider column into the renamed agent_provider column.
 
-The pending-OAuth-capture provider key was renamed openclaw_provider ->
-agent_provider (white-label). Frappe model-sync ADDS the new column blank and
+The pending-OAuth-capture provider key was renamed to agent_provider (white-label). Frappe model-sync ADDS the new column blank and
 leaves the old column in place (it never drops a removed field's column), so this
 post_model_sync patch copies the values across.
 
@@ -14,11 +13,13 @@ window is small but real - and silent, because a missing key returns the termina
 
 Clobber-safe + idempotent: it only fills a row whose new column is still blank
 from a non-blank old value, so a re-run can never overwrite a live value with a
-stale one. The old openclaw_provider column is RETAINED this release as the
+stale one. The legacy provider column is RETAINED this release as the
 rollback net; a later contract patch drops it once the rename is proven.
 """
 
 import frappe
+
+from jarvis.legacy_compatibility import get_contract
 
 DT = "Jarvis Pending OAuth Capture"
 
@@ -27,14 +28,15 @@ def execute():
 	# The DocType is post-plan-05; a bench that predates it has no table to touch.
 	if not frappe.db.table_exists(DT):
 		return
+	legacy_column = get_contract().capture_provider_column
 	# Fresh install: the JSON only ever shipped agent_provider, so the old column
 	# never existed and there is nothing to copy.
-	if "openclaw_provider" not in frappe.db.get_table_columns(DT):
+	if legacy_column not in frappe.db.get_table_columns(DT):
 		return
 	frappe.db.sql(
-		"""
+		f"""
 		UPDATE `tabJarvis Pending OAuth Capture`
-		SET agent_provider = openclaw_provider
-		WHERE COALESCE(agent_provider, '') = '' AND COALESCE(openclaw_provider, '') != ''
+		SET agent_provider = `{legacy_column}`
+		WHERE COALESCE(agent_provider, '') = '' AND COALESCE(`{legacy_column}`, '') != ''
 		"""
 	)

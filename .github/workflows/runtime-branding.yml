@@ -1,0 +1,26 @@
+name: Runtime branding
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test generic scanner
+        run: python -m unittest jarvis.tests.test_branding_scanner
+      - name: Enforce Admin-owned policy on this commit
+        run: |
+          python -m jarvis.ci.inputs policy --output "$RUNNER_TEMP/branding-policy.json"
+          python -m jarvis.ci.runtime_branding --policy "$RUNNER_TEMP/branding-policy.json" --expected-policy-sha256 86e42605f8ed3e1f73a8b9bf6ba111ef03343505c16ceb1a6ec696e57d261fd2

@@ -189,5 +189,8 @@ def clear(settings) -> None:
 	connection is accepted on its own terms rather than being rejected as "older"
 	than a generation that belonged to the previous tenancy. The reset-onboarding
 	CLI clears the same two fields through ``settings_reset.CONNECTION``."""
+	from jarvis.chat.runtime_profile import clear as clear_runtime_profile
+
+	clear_runtime_profile()
 	settings.db_set(GEN_FIELD, 0)
 	settings.db_set(HANDLE_FIELD, "")

@@ -1567,7 +1567,9 @@ def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note
 		}
 	)
 	req.insert(ignore_permissions=True)
-	_publish_review_pending("promotion")
+	# after commit: reviewers re-read the pending count on this event, so the
+	# row must be visible by then (the skill path commits before publishing)
+	frappe.db.after_commit.add(lambda: _publish_review_pending("promotion"))
 	return {"ok": True, "request": req.name, "page": doc.slug}
 
 

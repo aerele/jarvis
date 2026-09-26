@@ -54,6 +54,9 @@ permissions:
   contents: read
 
 jobs:
+  runtime-branding:
+    uses: ./.github/workflows/runtime-branding.yml
+
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
   # even for a clone where nobody ran `pre-commit install`. Deliberately NOT in
   # the tests environment: this needs only python + node, and it should report in
@@ -257,6 +260,13 @@ jobs:
           # tooling floor, unrelated to the FC runtime.
           node-version: "18.16.0"
 
+      - name: Validate Admin-owned upgrade fixtures for this checkout
+        working-directory: app
+        run: |
+          git rev-parse HEAD
+          python3 -m jarvis.ci.inputs fixture --output "$RUNNER_TEMP/migration-fixture.json"
+          echo "JARVIS_LEGACY_MIGRATION_FIXTURES_FILE=$RUNNER_TEMP/migration-fixture.json" >> "$GITHUB_ENV"
+
       - name: System deps
         run: |
           sudo apt-get update
@@ -353,7 +363,8 @@ jobs:
         run: |
           # gevent: needed by jarvis/realtime/handlers.py (socketio_backend=python) and its
           # tests.
-          ./env/bin/pip install coverage gevent
+          # websockets: needed by the fake gateway imported by harness configuration tests.
+          ./env/bin/pip install coverage gevent websockets
           # run-parallel-tests shards by test FILE across --total-builds, so each
           # --build-number runs a disjoint quarter of the suite. --with-coverage is this
           # command's spelling of run-tests' --coverage (different click commands; do not
