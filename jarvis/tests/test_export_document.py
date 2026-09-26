@@ -492,7 +492,10 @@ class TestRichPipeline(_RichBase):
 				"<p>{{chart:0}}</p><p>{{chart:1}}</p>",
 				format="pdf",
 				content_is_html=True,
-				charts=[{"rows": [{"label": "{{chart:1}}", "value": "x", "pct": 1}]}, {"rows": []}],
+				charts=[
+					{"rows": [{"label": "{{chart:1}}", "value": "x", "pct": 1}]},
+					{"rows": [{"label": "Second", "value": "y", "pct": 2}]},
+				],
 			)
 		body = self._rich_doc_body()
 		# chart 0 rendered once with its literal label; chart 1 rendered once.

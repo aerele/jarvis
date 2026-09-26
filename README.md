@@ -110,3 +110,24 @@ On a private bench group:
 
 After installation, sign in as a System Manager, open `/jarvis/onboarding`, and
 follow the setup shown on screen.
+
+### Updating PDF chart support
+
+Deploy the backend and its Python requirements (including Matplotlib) before the
+matching plugin schema and PDF skill. No schema migration is required for numeric
+charts. Check a synthetic chart export after restarting workers: first-use font
+loading shares the document's 25-second render budget. The isolated chart worker
+uses bundled DejaVu Sans and disables external font-discovery commands.
+Font metadata is cached per serving process; restarts or worker
+recycling reset it, and a separate command-line warm-up does not warm web workers.
+A timeout saves no document; omitted charts are reported in
+`notes` and excluded from `chart_count`. Check these fields before treating a
+report as complete. An unavailable chart renderer requires checking the backend's
+installed dependencies; unsupported chart text can be preserved in a table.
+
+Once numeric charts have been exported, their private render sidecars also retain
+the typed chart specs for later regeneration. The plugin and persona can be
+rolled back first, but a backend rollback must retain typed-chart support or
+explicitly reject replay of those sidecars. Do not downgrade to the legacy-only
+chart parser: it can misread numeric charts as zero-width progress bars without a
+warning. Existing generated PDF files remain usable.
