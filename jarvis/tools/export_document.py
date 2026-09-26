@@ -68,6 +68,12 @@ from jarvis import telemetry
 from jarvis.exceptions import InvalidArgumentError, NoDataError
 from jarvis.tools._export import save_export_file, save_render_sidecar
 from jarvis.tools._export.document import db_templates as pdf_templates
+from jarvis.tools._export.document.charts import (
+	MAX_TYPED_CHARTS,
+	normalize_chart,
+	remaining_seconds,
+	render_charts,
+)
 from jarvis.tools._export.document.font_catalog import font_face_css, staged_fontconfig
 from jarvis.tools._export.document.furniture import (
 	build_brand_header,
@@ -148,7 +154,7 @@ def export_document(
 ) -> dict:
 	"""Render ``content`` and return ``{file_url, filename, title, mime_type,
 	size_bytes, name}`` for a private downloadable File (the rich path also adds
-	``notes``).
+	``notes`` and ``chart_count`` for distinct chart specs actually inserted).
 
 	``content`` is the composed document — Markdown by default (tables, headings,
 	lists all render), or raw HTML when ``content_is_html`` is set. ``format`` is
@@ -182,7 +188,11 @@ def export_document(
 	    footer and page numbers coexist (branding rides the running header).
 	  * ``page_size`` / ``orientation`` / ``margins_mm`` / ``page_numbers`` — page
 	    geometry (consumed by the rich path; they do NOT by themselves trigger it).
-	  * ``charts`` — a list of CSS-bar specs (``{"rows": [...]}``); reference each
+	  * ``charts`` — numeric ``type: bar|column|line|pie`` specs with rows of
+	    ``{label, value, series?}`` (optional title/caption/unit). Values are finite
+	    numbers, never formatted strings. Null or absent points are line gaps;
+	    other chart types require every category/series value. No type preserves
+	    legacy CSS bars (``{rows:[{label,value,pct}]}``). Reference each
 	    with a ``{{chart:N}}`` token in ``content`` and it is spliced in after
 	    sanitize. A token with no spec (or a spec with no token) is reported in
 	    ``notes`` rather than crashing.
@@ -190,9 +200,8 @@ def export_document(
 	Falsy rich kwargs (``header=""`` / ``charts=[]`` / ``theme=False`` /
 	``letterhead=None``) do NOT flip to the rich path — empty is not present.
 
-	SLICE-1 SCOPE (this release): rich means branding via **letterhead + CSS
-	components + CSS bar charts** only. No embedded images — no matplotlib/image
-	charts, no QR, no base64 logos (those are Slice 2). ``fmt_amount``/``fmt_pct``
+	Rich documents accept only tool-generated numeric chart images and
+	permission-checked brand logos, never caller images or SVG. ``fmt_amount``/``fmt_pct``
 	from ``_export.document.graphics`` return small HTML fragments meant for DIRECT
 	embedding into ``content`` (e.g. a table cell); do NOT pass their output
 	through ``kpi_tile``/``css_bar``, whose text escaping would double-escape the
@@ -270,6 +279,19 @@ def export_document(
 		else:
 			env = _render_plain(content, fmt, title, content_is_html)
 			outcome = "ok"
+	except TimeoutError:
+		telemetry.record_export_event(
+			tool="export_document",
+			fmt=fmt,
+			rows=0,
+			mode="sync",
+			outcome="rejected",
+			rich=rich,
+			detail="document render deadline exceeded",
+		)
+		raise InvalidArgumentError(
+			"Document rendering exceeded its time limit. Use fewer charts or less content and try again."
+		) from None
 	except (NoDataError, InvalidArgumentError) as exc:
 		# Emit on the fail-closed exits too (export_document previously emitted no
 		# telemetry at all — this closes that gap on both success and failure).
@@ -410,9 +432,14 @@ def _render_rich(
 	masthead → theme-wrap → render/compose → save. Returns the download envelope
 	plus a ``notes`` list carrying every degrade."""
 	start = time.monotonic()
+	deadline = start + _RENDER_TIMEOUT_S
 	charts = charts or []
+	if not isinstance(charts, list):
+		raise InvalidArgumentError("charts must be an array")
 	if len(charts) > _MAX_CHARTS:
 		raise InvalidArgumentError(f"charts exceeds the {_MAX_CHARTS}-chart limit")
+	if sum(isinstance(spec, Mapping) and "type" in spec for spec in charts) > MAX_TYPED_CHARTS:
+		raise InvalidArgumentError(f"charts exceeds the {MAX_TYPED_CHARTS} numeric-chart limit")
 	_guard_chart_rows(charts)
 	notes: list[str] = []
 	# A template can carry page geometry; apply it unless the caller passed a
@@ -444,11 +471,18 @@ def _render_rich(
 	body = sanitize_rich(body)
 	# 3. splice tool-generated chart HTML into {{chart:N}} tokens (AFTER sanitize —
 	#    this markup is tool-controlled, so it is trusted).
-	body = _splice_charts(body, charts, notes)
+	chart_stats = {}
+	chart_notes: list[str] = []
+	body = _splice_charts(body, charts, chart_notes, deadline=deadline, stats=chart_stats, colors=tpl["css"])
+	notes.extend(chart_notes)
 	# 4. emptiness guard on the BODY: never emit a blank PDF. The tool-built
 	#    masthead (below) is furniture, not content — a title alone is not a
 	#    document — so this checks the body's visible text, not the masthead.
 	if not _has_visible_content(body):
+		if charts and chart_notes:
+			# These are bounded, tool-authored chart diagnostics, not caller text
+			# or worker stderr. Preserve the cause when no download can carry notes.
+			raise InvalidArgumentError("No chart content could be rendered: " + "; ".join(chart_notes)[:1000])
 		raise NoDataError("No content to export after sanitization.")
 	# 5. resolve the brand once (default Letter Head logo → else company name +
 	#    address), for the masthead and the running header. Fail-safe.
@@ -548,16 +582,18 @@ def _render_rich(
 				# The 25s bound covers the whole render; subtract the pre-render work
 				# (md→HTML, sanitize, splice) already spent so the total stays under
 				# the plugin's 30s call_tool abort.
-				timeout=max(5, _RENDER_TIMEOUT_S - int(time.monotonic() - start)),
+				timeout=remaining_seconds(deadline),
 				font_config_file=fc_file,
 			)
 		payload = pdf_bytes if fmt == "pdf" else _pdf_to_png(pdf_bytes)
 
+	remaining_seconds(deadline)
 	if not payload:
 		raise InvalidArgumentError(f"{fmt} rendering produced no content.")
 	ext, mime = _FORMATS[fmt]
 	env = save_export_file(f"document.{ext}", payload, title or "Document", mime)
 	env["notes"] = notes
+	env["chart_count"] = chart_stats.get("chart_count", 0)
 	return env
 
 
@@ -587,7 +623,7 @@ def _has_visible_content(html_fragment: str) -> bool:
 	non-whitespace text — OR the presence of a spliced chart, whose colored bars
 	render even when every row label/value is blank."""
 	body = html_fragment or ""
-	if 'class="bar-chart"' in body:
+	if 'class="bar-chart"' in body or 'class="numeric-chart"' in body:
 		return True
 	text = _html.unescape(re.sub(r"<[^>]+>", "", body))
 	return bool(text.strip())
@@ -662,8 +698,10 @@ def _short_err(exc: Exception) -> str:
 	return f"{type(exc).__name__}: {exc}"[:200]
 
 
-def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
-	"""Replace each ``{{chart:N}}`` token with ``css_bar`` output for ``charts[N]``.
+def _splice_charts(
+	body: str, charts: list, notes: list[str], *, deadline=None, stats=None, colors=None
+) -> str:
+	"""Replace eligible ``{{chart:N}}`` text tokens with trusted chart markup.
 
 	Runs AFTER ``sanitize_rich`` so the tool-generated bar markup (which carries a
 	single clamped ``width:N%`` inline style) is trusted and not stripped.
@@ -679,6 +717,8 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 	Degrades, never crashes: a malformed ``rows`` value, a spec whose token is
 	absent, and a token with no matching spec are each reported in ``notes``. Orphan
 	tokens are removed so no literal ``{{chart:N}}`` junk survives."""
+	if stats is not None:
+		stats["chart_count"] = 0
 	if not charts and _CHART_TOKEN_RE.search(body) is None:
 		return body
 
@@ -687,12 +727,35 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 	# mis-reported as "placeholder not found".
 	referenced = {int(m.group(1)) for m in _CHART_TOKEN_RE.finditer(body)}
 
-	# Render each spec ONCE (or degrade to a note), keyed by index.
+	from bs4 import BeautifulSoup
+
+	soup = BeautifulSoup(body, "html.parser")
+	nodes = [node for node in soup.find_all(string=_CHART_TOKEN_RE) if not node.find_parent(["pre", "code"])]
+	# Repeated raster placeholders otherwise amplify a small caller body into
+	# unbounded base64 HTML. Count placements, not only distinct chart specs.
+	if sum(len(_CHART_TOKEN_RE.findall(str(node))) for node in nodes) > _MAX_CHARTS:
+		raise InvalidArgumentError(f"content exceeds the {_MAX_CHARTS}-chart-placeholder limit")
+	eligible = {int(m.group(1)) for node in nodes for m in _CHART_TOKEN_RE.finditer(str(node))}
+	# Render each eligible spec ONCE; unused specs do not start the chart worker.
 	rendered: dict[int, str] = {}
+	typed: dict[int, dict] = {}
 	for i, spec in enumerate(charts):
+		if i not in eligible:
+			continue
 		is_map = isinstance(spec, Mapping)
 		rows = spec.get("rows", []) if is_map else []
+		if is_map and "type" in spec:
+			try:
+				typed[i] = normalize_chart(spec)
+			except ValueError as exc:
+				# Validator errors are fixed messages, never caller values. The
+				# model can repair a rejected spec without seeing worker stderr.
+				notes.append(f"chart {i} could not be rendered: {exc}")
+				rendered[i] = ""
+			continue
 		try:
+			if not rows:
+				raise ValueError("chart rows cannot be empty")
 			# Forward the spec's optional title/caption (the plugin schema advertises
 			# them); css_bar escapes them and omits both when absent.
 			rendered[i] = css_bar(
@@ -701,16 +764,25 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 				caption=spec.get("caption") if is_map else None,
 			)
 		except Exception:
-			notes.append(f"chart {i} was provided but its rows were malformed and could not be rendered")
+			notes.append(f"chart {i} was provided but its spec was malformed and could not be rendered")
 			rendered[i] = ""  # its token is removed rather than left as junk
 
-	from bs4 import BeautifulSoup
-
-	soup = BeautifulSoup(body, "html.parser")
+	if typed:
+		try:
+			rendered.update(
+				render_charts(
+					typed,
+					deadline=deadline or time.monotonic() + _RENDER_TIMEOUT_S,
+					colors=colors,
+					notes=notes,
+				)
+			)
+		except ValueError:
+			for i in typed:
+				rendered[i] = ""
+				notes.append(f"chart {i} could not be rendered because the chart renderer was unavailable")
 	seen: set[int] = set()
-	for node in list(soup.find_all(string=_CHART_TOKEN_RE)):
-		if node.find_parent(["pre", "code"]):
-			continue  # a token shown as a literal code example stays literal
+	for node in nodes:
 		text = str(node)
 		pieces: list[str] = []
 		last = 0
@@ -726,14 +798,16 @@ def _splice_charts(body: str, charts: list, notes: list[str]) -> str:
 			node.insert_before(child)
 		node.extract()
 
-	for i in rendered:
+	for i in range(len(charts)):
 		if i not in referenced:
 			notes.append(
 				f"chart {i} was provided but its {{{{chart:{i}}}}} placeholder was not found in the content"
 			)
 	for idx in sorted(seen):
-		if idx not in rendered:
+		if idx >= len(charts):
 			notes.append(f"placeholder {{{{chart:{idx}}}}} has no matching chart spec")
+	if stats is not None:
+		stats["chart_count"] = sum(bool(rendered.get(idx)) for idx in seen)
 	return str(soup)
 
 

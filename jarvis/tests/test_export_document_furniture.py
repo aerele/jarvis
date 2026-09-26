@@ -30,7 +30,7 @@ import subprocess
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import frappe
 
@@ -39,6 +39,42 @@ from jarvis.tools._export.document import furniture
 from jarvis.tools._export.document.furniture import render_pdf, resolve_letterhead
 
 _HAS_SITE = bool(getattr(frappe.local, "site", None))
+
+
+class TestCompanyFooterPermissions(unittest.TestCase):
+	def test_denied_company_or_letterhead_never_reads_footer(self):
+		for denied in ("Company", "Letter Head"):
+			with (
+				self.subTest(denied=denied),
+				patch.object(frappe, "has_permission", side_effect=lambda dt, *a, **k: dt != denied),
+				patch.object(frappe, "db", new=Mock()) as db,
+				patch.object(frappe, "get_doc") as get_doc,
+			):
+				db.get_value.return_value = {"footer": "<p>Private footer</p>", "disabled": 0}
+				body, note = furniture.resolve_company_letterhead_footer(
+					{"Private Co": "Private LH"}, "Private Co"
+				)
+				self.assertEqual(body, "")
+				self.assertIn("permission", note)
+				self.assertNotIn("Private", note)
+				db.get_value.assert_not_called()
+				get_doc.assert_not_called()
+
+	def test_permitted_company_and_letterhead_render_footer(self):
+		with (
+			patch.object(frappe, "has_permission", return_value=True) as perm,
+			patch.object(frappe, "db", new=Mock()) as db,
+			patch.object(frappe, "get_doc", return_value={"company_name": "Demo Co"}),
+			patch.object(frappe, "render_template", return_value="<p>Approved footer</p>"),
+		):
+			db.get_value.return_value = {"footer": "<p>Approved footer</p>", "disabled": 0}
+			body, note = furniture.resolve_company_letterhead_footer({"Demo Co": "Demo LH"}, "Demo Co")
+			self.assertIn("Approved footer", body)
+			self.assertIsNone(note)
+			self.assertEqual(perm.call_count, 2)
+			perm.assert_any_call("Company", "read", doc="Demo Co")
+			perm.assert_any_call("Letter Head", "read", doc="Demo LH")
+
 
 # The security/fidelity flags that MUST appear on every render, unconditionally.
 _REQUIRED_FLAGS = [

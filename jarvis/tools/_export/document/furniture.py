@@ -713,6 +713,10 @@ def resolve_company_letterhead_footer(
 	if not lh_name:
 		return "", "no letter head is mapped for this company — rendered without a footer"
 	try:
+		if not frappe.has_permission("Company", "read", doc=comp) or not frappe.has_permission(
+			"Letter Head", "read", doc=lh_name
+		):
+			return "", "no permission to read the company letter head — rendered without a footer"
 		lh = frappe.db.get_value("Letter Head", lh_name, ["footer", "disabled"], as_dict=True)
 		if not lh:
 			return "", f"letter head {lh_name!r} not found — rendered without a footer"
