@@ -8,12 +8,14 @@ inside the app.
 
 ## Branches and releases
 
-Runtime branding is checked by the `runtime-branding / check` CI job using an
-Admin-owned policy supplied through an Actions repository variable. Missing or
-mismatched policy fails the check. Coordinate policy changes with the Admin
-repository; do not copy policy contents into this app. For a local check, run
-`python -m jarvis.ci.runtime_branding --policy /path/to/admin/policies/jarvis-runtime-branding.json`
-from the app checkout. The scanner requires no Frappe site.
+Runtime branding and upgrade tests use checksum-pinned snapshots of Admin-owned
+inputs, stored encoded under `jarvis/ci/data`. CI validates and decodes them into
+temporary files outside the checkout; no repository variables or credentials are
+needed. Review snapshot changes with their Admin source documents and checksum
+pins. Do not generate migration fixtures from production constants.
+
+For local validation, run `python -m jarvis.ci.inputs policy --output /tmp/jarvis-policy.json`
+then `python -m jarvis.ci.runtime_branding --policy /tmp/jarvis-policy.json`.
 
 | Branch | Role | What may merge into it |
 |---|---|---|
@@ -45,7 +47,8 @@ from the app checkout. The scanner requires no Frappe site.
 Legacy upgrade tests require the independently maintained Admin fixture. Set
 `JARVIS_LEGACY_MIGRATION_FIXTURES_FILE` to an absolute path to
 `integration_fixtures/legacy_migrations.json` in the Admin checkout before running
-these tests on a dedicated test site. CI supplies the same checksum-pinned JSON
-through a versioned Actions variable. Missing inputs fail the tests; do not copy
-the fixture into this repository. See Admin's
+these tests on a dedicated test site. For the pinned local snapshot, run
+`python -m jarvis.ci.inputs fixture --output /tmp/jarvis-migration-fixture.json`
+and set the environment variable to that file. CI uses this same snapshot. Missing inputs fail the tests; keep decoded copies
+outside this repository. See Admin's
 `jarvis_admin_v2/docs/legacy-migration-test-fixtures.md` for activation and commands.
