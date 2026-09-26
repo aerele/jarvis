@@ -231,8 +231,10 @@ _APPLIED = (
 	"the approver applied this document's approval sheet. Each answer below applies to its own "
 	"question only. Continue now: draft the document using exactly these records, by the names "
 	"given (a draft may already exist: look for it first and never create a second one), and do not "
-	"create any of these records again. If a master the draft needs was skipped, stop and end with "
-	"a one-line summary saying so."
+	"create any of these records again. A master listed above as skipped: stop and end with a "
+	"one-line summary saying so. A master the draft still needs that is not listed above was never "
+	"proposed - propose it now with create_doc (the bench holds it again), not a re-ask. An answer "
+	"below that decides to create a record: propose that record now with create_doc, the same way."
 )
 OUTCOME_CAP = 20000
 ANSWER_CAP = 1000
