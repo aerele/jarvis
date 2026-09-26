@@ -172,6 +172,12 @@ def _skills(user: str, since) -> str | None:
 	exactly the union of the per-row match sets). Rows are then walked
 	newest-first with a cheap substring prefilter, and the canonical function
 	makes the final per-row call - typically two round-trips in total.
+
+	``include_org_wide=False`` (code review on #580): an unrestricted Org-scope
+	skill is invocable by every user in the tenant, so a mention of one is not
+	evidence THIS user set up or personalized anything - it would otherwise
+	make "Skills" read as used for someone who only ever typed a slug everyone
+	shares, inflating the pulse survey's per-user signal.
 	"""
 	rows = frappe.get_all(
 		MSG,
@@ -187,14 +193,14 @@ def _skills(user: str, since) -> str | None:
 		limit_page_length=_SKILLS_SCAN_LIMIT,
 	)
 	contents = [(row.content or "") for row in rows]
-	resolved = invoked_skill_slugs("\n".join(contents), user=user)
+	resolved = invoked_skill_slugs("\n".join(contents), user=user, include_org_wide=False)
 	if not resolved:
 		return None
 	tokens = tuple(f"/{slug}" for slug in resolved)
 	for row, content in zip(rows, contents, strict=True):
 		if not any(token in content for token in tokens):
 			continue
-		if invoked_skill_slugs(content, user=user):
+		if invoked_skill_slugs(content, user=user, include_org_wide=False):
 			return _iso(row.creation)
 	return None
 

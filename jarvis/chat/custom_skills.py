@@ -217,10 +217,11 @@ def fetch_required_clause(lead_in: str, names) -> str:
 	)
 
 
-def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
+def invoked_skill_slugs(message: str, *, user: str, include_org_wide: bool = True) -> set[str]:
 	"""Return the bare ``/slug`` tokens in ``message`` that resolve to a custom
-	skill ``user`` may invoke: owned by ``user``, shared with ``user``, or
-	reachable via a role ``user`` holds (the ``matched`` set
+	skill ``user`` may invoke: owned by ``user``, shared with ``user``,
+	reachable via a role ``user`` holds, or (when ``include_org_wide``) an
+	unrestricted Org-wide skill (the ``matched`` set
 	:func:`invoked_skill_clause` folds into its context clause).
 
 	PURE identity parameter, not ambient session: resolved entirely under the
@@ -230,7 +231,15 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	a background continuation runs under) gets a truthful answer either way.
 	This is the single source of truth for "which skill(s) did this message
 	invoke" — no prose-clause parsing required.
-	"""
+
+	``include_org_wide=False`` (code review on #580 round 2) drops the
+	org-wide tier below: :func:`jarvis.chat.feature_usage._skills` uses it so
+	a mention of a globally-pushed Org skill - invocable by literally every
+	user, personalization the mentioning user never set up - does not count
+	as THIS user having used the "Skills" feature for the usage pulse survey.
+	The context-clause/offer callers (:func:`invoked_skill_clause`,
+	:func:`armed_skill_clause`) keep the default ``True``: for THOSE, an
+	Org-wide skill genuinely is invocable and must be named/offered."""
 	if not message or "/" not in message:
 		return set()
 	slugs = {s.lower() for s in _INVOKE_RE.findall(message)}
@@ -238,8 +247,7 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 		return set()
 	# Only skills `user` OWNS or was SHARED with can be invoked by slug — so a
 	# skill shared with specific people isn't triggerable by others (even though
-	# it lives in the customer's shared container). Auto-pick by description is
-	# still bench-global (a container-level limitation).
+	# it lives in the customer's shared container).
 	enabled = {
 		r.skill_name
 		for r in frappe.get_all(
@@ -269,24 +277,100 @@ def invoked_skill_slugs(message: str, *, user: str) -> set[str]:
 	# and managed learned skills are excluded here (they auto-inject, see
 	# learned_skill_clause).
 	enabled |= _role_scoped_invocable_names(user)
+	# Unrestricted Org rows (issue #580): an Org-scope skill with no allowed_roles
+	# is pushed into EVERY container (:func:`_pushable_org_rows`, the same set
+	# build_push_payload writes), so it is already loaded and invocable by ANY
+	# user - unlike a private/shared/role row it needs no per-user ownership
+	# check. Before this, invoked_skill_slugs only recognised owner/share/role
+	# rows, so a promoted-to-Org skill's `/slug` was silently unmatched for
+	# everyone but its (system) owner and its "Approve & run" arm could never be
+	# offered - the exact symptom of #580.
+	if include_org_wide:
+		enabled |= {r.skill_name for r in _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)}
 	return {s for s in slugs if s in enabled}
+
+
+_GET_SKILL_CONTENT_FIELDS = ("instructions", "description", "user_invocable")
+
+
+def _skill_served_content(name: str) -> tuple:
+	"""The exact ``(instructions, description, user_invocable)`` triple
+	:func:`jarvis.tools.get_skill.get_skill` would serve for row ``name`` - the
+	EXECUTABLE content, not the arm state. Used only to compare two rows in a
+	promoted lineage; missing row -> an empty/zero triple (never equal to a
+	real row's), so a raced delete fails safe."""
+	row = frappe.db.get_value("Jarvis Custom Skill", name, list(_GET_SKILL_CONTENT_FIELDS), as_dict=True)
+	if not row:
+		return ("", "", 0)
+	return (row.instructions or "", row.description or "", int(row.user_invocable or 0))
+
+
+def _supersede_promoted_lineage(own: dict, *pools: dict, sources: dict) -> None:
+	"""Collapse a promoted lineage in place: if a row in ``own`` was the SOURCE
+	of a shared/role/org-wide row (``source_skill``, stamped by
+	:func:`jarvis.chat.custom_skills_api._materialize_promotion`), that
+	descendant is the SAME conceptual skill, not a second independent claim -
+	it is the copy actually pushed to the container and run, while the private
+	original becomes a secondary, usually-stale leftover (issue #580: promotion
+	deliberately leaves it intact). Replace the stale own entry with the
+	descendant's (name, armed) and drop the descendant from its own pool, so
+	precedence and the ambiguity count both see ONE candidate for the lineage,
+	not two. The DESCENDANT's own ``allow_approve_run`` is what counts either
+	way (code review on #580, security): an armed private source must never
+	auto-arm its still-unarmed shared copy, and an armed shared copy must not
+	be shadowed by an unarmed private source - promotion never carries the
+	flag, only an admin arming the shared copy directly does.
+
+	TOCTOU fail-safe (code review on #580, security round 2):
+	:func:`jarvis.tools.get_skill.get_skill` serves the OWNER's OWN row over
+	any other match FOR THAT OWNER (its own-wins precedence), regardless of
+	what this function decides - and a private row's content is the owner's
+	to edit any time, with no reviewer gate. So authorizing an uncarded run
+	off the descendant's arm is only safe when the own row's content is
+	PROVABLY what get_skill would actually serve for it right now - i.e.
+	byte-identical to the descendant's reviewed content. On a mismatch this
+	drops BOTH the own row and the descendant for this owner (never lets the
+	descendant fall through via a lower tier): get_skill would still serve the
+	drifted own row for this owner no matter which docname is returned here,
+	so there is no armed docname this owner can safely be offered for this
+	slug. A row without a recorded source (an unrelated same-named skill
+	elsewhere) is untouched and still shadows/competes exactly as before."""
+	for pool in pools:
+		for desc_name, src_name in list(sources.items()):
+			if desc_name not in pool or src_name not in own:
+				continue
+			if _skill_served_content(src_name) != _skill_served_content(desc_name):
+				del own[src_name]
+				pool.pop(desc_name, None)
+				continue
+			armed = pool.pop(desc_name)
+			del own[src_name]
+			own[desc_name] = armed
 
 
 def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
 	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
 
-	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role precedence - the ONE
-	definition of that owned/shared/role-scoped resolution, so the "Approve & run"
-	offer path (``jarvis.api._resolve_approve_run_offer``) and skill invocation can
-	no longer drift apart the way they had (each used to hand-duplicate this query;
+	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role/org-wide precedence -
+	the ONE definition of that resolution, so the "Approve & run" offer path
+	(``jarvis.api._resolve_approve_run_offer``) and skill invocation can no
+	longer drift apart the way they had (each used to hand-duplicate this query;
 	only :func:`role_scoped_skill_rows` was actually shared). The owner's OWN
-	enabled row wins the invocation; failing that, a shared or role-scoped enabled
-	row. ``allow_approve_run`` is read LIVE off the resolved row and must be 1.
-	Fail-safe on ambiguity - a slug can map to several rows across owned/shared/
-	role-scoped, so ``None`` when the winning tier holds 2+ rows OR when 2+ ARMED
-	invocable rows exist anywhere (an ambiguous arm cannot authorize a run). O(1)-
-	ish: a couple of indexed reads, no per-skill N+1."""
+	enabled row wins the invocation; failing that, a shared or role-scoped
+	enabled row; failing that, an unrestricted Org-wide row (issue #580 - an
+	Org-promoted skill has no per-user owner/share/role row at all, so without
+	this tier it could never resolve for anyone but the system owner). A
+	shared/org-wide row that is a PROMOTED COPY of the owner's own row
+	supersedes it instead of competing with it (:func:`_supersede_promoted_lineage`
+	- issue #580 again: without this, an admin who arms either half of a
+	promoted lineage independently of the other could never get an offer, or
+	got a false "ambiguous" refusal when both happened to be armed).
+	``allow_approve_run`` is read LIVE off the resolved row and must be 1.
+	Fail-safe on ambiguity - a slug can map to several UNRELATED rows across
+	owned/shared/role-scoped/org-wide, so ``None`` when the winning tier holds
+	2+ rows OR when 2+ ARMED invocable rows exist anywhere (an ambiguous arm
+	cannot authorize a run). O(1)-ish: a few indexed reads, no per-skill N+1."""
 	# The owner's OWN enabled rows named `slug`.
 	own = {
 		r.name: int(r.allow_approve_run or 0)
@@ -297,8 +381,11 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 		)
 	}
 	# Enabled rows SHARED with the owner, or reachable via a role the owner holds,
-	# named `slug` (deduped - a row can be both shared and role-scoped).
+	# named `slug` (deduped - a row can be both shared and role-scoped). Also
+	# tracks each row's `source_skill` (its promotion lineage, if any) for the
+	# supersession pass below.
 	shared_role: dict[str, int] = {}
+	lineage: dict[str, str] = {}
 	shared_names = [
 		r.parent
 		for r in frappe.get_all(
@@ -311,36 +398,68 @@ def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
 		for r in frappe.get_all(
 			"Jarvis Custom Skill",
 			filters={"enabled": 1, "name": ["in", shared_names], "skill_name": slug},
-			fields=["name", "allow_approve_run"],
+			fields=["name", "allow_approve_run", "source_skill"],
 		):
 			shared_role[r.name] = int(r.allow_approve_run or 0)
-	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run"]):
+			if r.source_skill:
+				lineage[r.name] = r.source_skill
+	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run", "source_skill"]):
 		if r.skill_name == slug:
 			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
+			if r.get("source_skill"):
+				lineage.setdefault(r.name, r.source_skill)
 
-	# Precedence: the owner's own row wins; only fall through to shared/role when
-	# the owner has no own row for this slug.
-	tier = own if own else shared_role
+	# Unrestricted Org rows named `slug` (issue #580): pushed into EVERY
+	# container (:func:`_pushable_org_rows`, the same set build_push_payload
+	# writes), so an Org-wide skill is invocable by ANY user - not only its
+	# (system) owner. Without this tier, resolve_armed_skill_docname mirrored
+	# invoked_skill_slugs's blind spot: a promoted-to-Org skill could never
+	# resolve to an armed row for anyone but its owner, so its "Approve & run"
+	# offer could never fire. Computed unconditionally (like shared_role above)
+	# so the ambiguity guard below still sees every candidate row.
+	org_wide: dict[str, int] = {}
+	for r in _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS):
+		if r.skill_name == slug:
+			org_wide[r.name] = int(r.allow_approve_run or 0)
+			if r.source_skill:
+				lineage.setdefault(r.name, r.source_skill)
+
+	_supersede_promoted_lineage(own, shared_role, org_wide, sources=lineage)
+
+	# Precedence: the owner's own row wins (a promoted descendant now stands in
+	# for its stale source, per the supersession pass above); then a shared/role
+	# row; an unrestricted Org row (invocable by everyone, so the weakest
+	# per-identity claim) is the last fallback.
+	tier = own or shared_role or org_wide
 	if len(tier) != 1:
 		return None  # no candidate, or an ambiguous winning tier -> fail safe
 	docname, armed = next(iter(tier.items()))
 	if not armed:
 		return None  # the row the owner would actually invoke is not armed
 	# Global ambiguity guard: refuse if the slug maps to 2+ ARMED invocable rows
-	# anywhere (owned + shared + role), even across tiers.
-	if sum(1 for v in {**shared_role, **own}.values() if v) != 1:
+	# anywhere (owned + shared + role + org-wide), even across tiers.
+	if sum(1 for v in {**org_wide, **shared_role, **own}.values() if v) != 1:
 		return None
 	return docname
 
 
-def invoked_skill_clause(message: str) -> str:
+def invoked_skill_clause(message: str, user: str | None = None, *, slugs: set[str] | None = None) -> str:
 	"""Return the context-line clause(s) for any enabled custom skills the user
 	invoked via ``/slug`` in ``message``, or ``""`` if none match.
 
-	The matched set is :func:`invoked_skill_slugs`, resolved under the current
-	chat user (``frappe.session.user``) — this function's job is purely to turn
-	that set into the two clause shapes below, because only SOME invocable
-	skills physically exist in the container (issue #477):
+	``user`` defaults to ``frappe.session.user`` (unchanged call shape for
+	existing callers/tests); ``slugs``, when given, is the ALREADY-RESOLVED
+	:func:`invoked_skill_slugs` set - the turn-assembly caller resolves it
+	once under the chat user and passes it here AND to
+	:func:`armed_skill_clause` (code review on #580), so a turn that folds
+	both clauses pays for one table scan and can never have them disagree on
+	who "the user" is. Passing ``slugs`` makes ``message``/``user`` inert for
+	resolution (kept for the docstring's identity note and so a stale caller
+	that ignores the new params still behaves).
+
+	The matched set - resolved fresh under ``user`` when ``slugs`` is not
+	given - is turned into the two clause shapes below, because only SOME
+	invocable skills physically exist in the container (issue #477):
 
 	* skills the push actually writes (Org scope, no ``allowed_roles``, inside
 	  ``MAX_SKILLS_PER_PUSH``, see :func:`pushed_skill_names`) keep the original
@@ -359,7 +478,8 @@ def invoked_skill_clause(message: str) -> str:
 	The clause is folded INTO the worker's leading ``[Context: ...]`` line,
 	which the persona's AGENTS.md tells the agent to treat as system, not user.
 	"""
-	matched = sorted(invoked_skill_slugs(message, user=frappe.session.user))
+	user = user if user is not None else frappe.session.user
+	matched = sorted(slugs if slugs is not None else invoked_skill_slugs(message, user=user))
 	if not matched:
 		return ""
 	installed = pushed_skill_names()
@@ -374,6 +494,44 @@ def invoked_skill_clause(message: str) -> str:
 		[prefixed_slug(s) for s in off_disk],
 	)
 	return clause
+
+
+def armed_skill_clause(message: str, user: str, *, slugs: set[str] | None = None) -> str:
+	"""Return a context clause when ``message`` invokes EXACTLY ONE custom
+	skill that resolves as live-ARMED for "Approve & run"
+	(:func:`resolve_armed_skill_docname`), or ``""`` otherwise.
+
+	Issue #580 (the real-world cause, found on live e2e): the persona's own
+	AGENTS.md always stages a create/update as a client-authored jarvis-action
+	draft card, never a direct tool call - and a card never reaches the
+	write-confirmation gate, so a skill armed for "Approve & run" whose FIRST
+	covered write is a create/update could never offer the run-wide approval,
+	even though it is armed. This clause tells the agent to stage that first
+	covered write as a direct tool call instead, so the bench parks it and can
+	show the offer. It is silent once a run is already approved
+	(``conv.skill_autorun``) - the caller gates on that, mirroring
+	``autorun_run`` above - and pure identity-plus-message, no side effects.
+
+	``slugs``, when given, is the ALREADY-RESOLVED :func:`invoked_skill_slugs`
+	set for ``message``/``user`` (code review on #580): the turn-assembly
+	caller resolves it once and passes the SAME set here and to
+	:func:`invoked_skill_clause`, so a turn folding both clauses pays for one
+	table scan and both clauses key off the identical identity.
+
+	Slug-only, like :func:`invoked_skill_clause`: ``skill_name`` is validated
+	slug syntax at creation (``SLUG_RE`` - lowercase letters/digits/hyphens),
+	so it carries no free-form user text and needs no extra escaping."""
+	slugs = slugs if slugs is not None else invoked_skill_slugs(message, user=user)
+	if len(slugs) != 1:
+		return ""
+	slug = next(iter(slugs))
+	if not resolve_armed_skill_docname(slug, user):
+		return ""
+	return (
+		f"; armed skill: Approve & run available for {prefixed_slug(slug)}: stage its "
+		"first covered write as a direct tool call, not a jarvis-action card, so the "
+		"user can approve the whole run once"
+	)
 
 
 def role_scoped_skill_rows(user: str, fields: list[str]) -> list:
@@ -523,9 +681,14 @@ def personal_skill_clause(user: str | None = None) -> str:
 
 
 _PUSHABLE_FIELDS = ("name", "skill_name", "description", "user_invocable", "instructions")
-# The identity-only projection: enough to rank and name a pushable row, without
-# dragging every Org skill's 20k-char body onto the chat hot path.
-_PUSHABLE_ID_FIELDS = ("name", "skill_name")
+# The light, identity-plus-arming projection: enough to rank/name a pushable
+# row and resolve its "Approve & run" arm, without dragging every Org skill's
+# 20k-char body onto the chat hot path. Every per-turn caller
+# (invoked_skill_slugs, resolve_armed_skill_docname, pushed_skill_names,
+# apply_would_push) requests EXACTLY this tuple so they all hit the same
+# request-scoped memo below instead of each re-scanning the table.
+_PUSHABLE_LIGHT_FIELDS = ("name", "skill_name", "allow_approve_run", "source_skill")
+_PUSHABLE_ORG_ROWS_MEMO = "_jarvis_pushable_org_rows_light"
 
 
 def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELDS) -> list:
@@ -537,7 +700,23 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	reviewer's budget projection can never drift from what Apply actually does.
 	``owner`` scopes tests only; ``fields`` trims the projection for callers that
 	only need identity (``name`` + ``skill_name`` are load-bearing here: the
-	role-restriction filter and the sort key both read them)."""
+	role-restriction filter and the sort key both read them).
+
+	The default-scope, ``_PUSHABLE_LIGHT_FIELDS`` call (every per-turn caller -
+	a turn can call ``invoked_skill_slugs``, ``resolve_armed_skill_docname`` and
+	``pushed_skill_names`` more than once) is memoized on ``frappe.local`` for
+	the rest of THIS request: one table scan instead of one per caller. Scoped
+	narrowly - only that exact, hot-path signature is cached; a caller passing
+	``owner`` (tests only) or the heavier ``_PUSHABLE_FIELDS`` (an explicit push,
+	not a per-turn read) always scans fresh. The memo is cleared whenever a
+	Jarvis Custom Skill row is written (see the doctype's ``on_update``/
+	``on_trash``), so a skill created or armed mid-request is still seen by a
+	later call in the SAME request."""
+	memoize = owner is None and fields == _PUSHABLE_LIGHT_FIELDS
+	if memoize:
+		cached = getattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO, None)
+		if cached is not None:
+			return cached
 	# ("in", ("Org", "")) — not ("!=", "User") — because db_query wraps the
 	# "in" operator in ifnull(scope, ''), so legacy NULL-scope rows match ''.
 	filters = {"enabled": 1, "managed_by_learning": 0, "scope": ("in", ("Org", ""))}
@@ -559,7 +738,49 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	# the payload and the projection consume is this Python sort, so the two can
 	# never name different dropped skills across the push cap.
 	kept.sort(key=lambda r: _pushable_sort_key(r.skill_name, r.name))
+	if memoize:
+		setattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO, kept)
 	return kept
+
+
+def _clear_pushable_org_rows_memo() -> None:
+	"""Drop the request-scoped :func:`_pushable_org_rows` memo. Called from the
+	Jarvis Custom Skill doctype's ``on_update``/``on_trash`` (mirroring
+	``_clear_personal_clause_cache``'s pattern) so a skill created, armed, or
+	disabled mid-request - a promotion approval, an admin toggle - is visible to
+	the very next call in the SAME request rather than a stale cached scan."""
+	try:
+		if hasattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO):
+			delattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO)
+	except Exception:
+		pass
+
+
+# Fields _pushable_org_rows's query filters or projects (issue #580 code
+# review round 2): a raw write to any of these never fires the doctype's
+# on_update/on_trash - the ONLY other place the memo is cleared - so it must
+# route through set_skill_raw below instead of a bare frappe.db.set_value, or
+# a scan cached before the write silently outlives it for the rest of the
+# request. `owner`/`source_skill`/`skill_name` etc. are NOT in this set: they
+# don't feed _pushable_org_rows's filter or light projection, so a raw write
+# to them alone cannot desync it.
+_PUSHABLE_ORG_ROWS_MEMO_FIELDS = frozenset({"enabled", "scope", "allow_approve_run", "managed_by_learning"})
+
+
+def set_skill_raw(name: str, field_or_values, value=None, *, update_modified: bool = False) -> None:
+	"""Raw (validate()-bypassing) write to Jarvis Custom Skill ``name``,
+	clearing the :func:`_pushable_org_rows` memo when the write touches a
+	field the memo's query reads (see ``_PUSHABLE_ORG_ROWS_MEMO_FIELDS``).
+	Mirrors ``frappe.db.set_value``'s two call shapes - a single
+	``(field, value)`` pair, or a ``{field: value}`` dict for several fields
+	at once - so every raw write to arm/enable/scope on this doctype (an
+	admin kill-switch, a test fixture simulating an already-armed row, any
+	FUTURE such site) can go through here instead of hand-duplicating the
+	memo-clear at each call site."""
+	values = field_or_values if isinstance(field_or_values, dict) else {field_or_values: value}
+	frappe.db.set_value("Jarvis Custom Skill", name, values, update_modified=update_modified)
+	if _PUSHABLE_ORG_ROWS_MEMO_FIELDS & set(values):
+		_clear_pushable_org_rows_memo()
 
 
 def build_push_payload(owner: str | None = None, strict: bool = False) -> list[dict]:
@@ -659,7 +880,7 @@ def pushed_skill_names() -> set[str]:
 	directory does not exist yet. Closing that last window needs per-row
 	applied-state tracking, which the bench does not have (the sync status is one
 	bench-wide Single)."""
-	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
+	rows = _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)
 	return {r.skill_name for r in rows[:MAX_SKILLS_PER_PUSH]}
 
 
@@ -670,7 +891,7 @@ def apply_would_push(name: str) -> bool:
 	outright, so asking the client to run one would only fail right after a success
 	toast). An insight applied to an Org skill returns this as ``needs_apply`` so the
 	client pushes now instead of leaving the change out until an unrelated restart."""
-	rows = _pushable_org_rows(fields=_PUSHABLE_ID_FIELDS)
+	rows = _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)
 	return len(rows) <= MAX_SKILLS_PER_PUSH and any(r.name == name for r in rows)
 
 

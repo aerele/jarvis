@@ -125,6 +125,28 @@ class TestGetUsedFeatures(FrappeTestCase):
 		doc.insert(ignore_permissions=True)
 		return self._own("Jarvis Custom Skill", doc.name)
 
+	def _org_skill(self, slug: str) -> str:
+		"""An unrestricted Org-scope skill, invocable by anyone - NOT owned by
+		USER (mirrors a real promoted/team skill, unlike ``_skill`` above). The
+		engine flag bypasses the reviewer-only scope-creation guard."""
+		prev = frappe.flags.jarvis_pattern_engine
+		frappe.flags.jarvis_pattern_engine = True
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Jarvis Custom Skill",
+					"skill_name": slug,
+					"description": "feature usage org-wide test skill",
+					"instructions": "Do the thing.",
+					"enabled": 1,
+					"scope": "Org",
+				}
+			)
+			doc.insert(ignore_permissions=True)
+		finally:
+			frappe.flags.jarvis_pattern_engine = prev
+		return doc.name
+
 	def test_skills_detected_from_message_content(self):
 		conv = self._conv()
 		self._skill("recon-helper")
@@ -167,6 +189,26 @@ class TestGetUsedFeatures(FrappeTestCase):
 		self._skill("recon-helper")
 		self._msg(conv, 1, "user", hidden=1, content="run /recon-helper", own=True)
 		self.assertNotIn("skills", get_used_features(USER, self.since))
+
+	def test_skills_not_detected_for_an_org_wide_only_mention(self):
+		"""Code review on #580: an unrestricted Org-scope skill is invocable by
+		every user in the tenant, so mentioning one is not evidence THIS user
+		set up or personalized anything - it must not count as "Skills" usage
+		(_skills passes include_org_wide=False)."""
+		conv = self._conv()
+		self._org_skill("team-wide-helper")
+		self._msg(conv, 1, "user", hidden=0, content="run /team-wide-helper please", own=True)
+		self.assertNotIn("skills", get_used_features(USER, self.since))
+
+	def test_skills_still_detected_alongside_an_org_wide_mention(self):
+		"""A genuine own-skill mention still counts even in the same window as
+		an org-wide one - the exclusion is narrow, not a blanket suppression."""
+		conv = self._conv()
+		self._skill("recon-helper")
+		self._org_skill("team-wide-helper")
+		self._msg(conv, 1, "user", hidden=0, content="run /team-wide-helper please", own=True)
+		self._msg(conv, 2, "user", hidden=0, content="now /recon-helper too", own=True)
+		self.assertIn("skills", get_used_features(USER, self.since))
 
 	# ---------------------------------------------------------------- macros
 	def test_macros_detected(self):

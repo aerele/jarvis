@@ -334,6 +334,59 @@ class TestSkillPromotionWorkflow(Part2Base):
 			prefixed_slug(f"{PFX}-promote"), {p["slug"] for p in custom_skills.build_push_payload()}
 		)
 
+	def test_promotion_never_carries_the_arm_onto_a_fresh_org_copy(self):
+		"""issue #580 code review: promotion must NOT carry allow_approve_run,
+		armed or not - a fresh materialized copy always starts at 0. Carrying it
+		would both bypass _guard_allow_approve_run_enable (admin-only 0->1) and
+		trust the LIVE source's arm against the request's own immutable reviewed
+		snapshot (a TOCTOU: the source could be armed, by someone who never
+		reviewed this content, any time between the request and this decision).
+		A Jarvis Admin arms the new copy afterwards through the ordinary toggle."""
+		from jarvis.chat import custom_skills_api
+
+		armed_skill = _mk_skill(USER_A, f"{PFX}-armedpromote", scope="User")
+		frappe.db.set_value(SKILL, armed_skill.name, "allow_approve_run", 1, update_modified=False)
+		unarmed_skill = _mk_skill(USER_A, f"{PFX}-unarmedpromote", scope="User")
+		with _as(USER_A):
+			req_armed = custom_skills_api.request_skill_promotion(armed_skill.name, "Org")
+			req_unarmed = custom_skills_api.request_skill_promotion(unarmed_skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req_armed["request"], 1)
+			custom_skills_api.decide_skill_promotion(req_unarmed["request"], 1)
+		for slug in (f"{PFX}-armedpromote", f"{PFX}-unarmedpromote"):
+			shared_armed = frappe.db.get_value(
+				SKILL, {"skill_name": slug, "scope": "Org"}, "allow_approve_run"
+			)
+			self.assertEqual(int(shared_armed or 0), 0, f"{slug} copy must start unarmed")
+		# The armed source's own row is untouched by promotion - still armed.
+		self.assertEqual(int(frappe.db.get_value(SKILL, armed_skill.name, "allow_approve_run") or 0), 1)
+
+	def test_repromotion_leaves_an_existing_shared_copy_arm_untouched(self):
+		"""The "widen an existing shared copy in place" branch (Role -> Org here)
+		must not disturb whatever allow_approve_run an admin already set on that
+		shared copy - it is a save of the SAME row, not a fresh materialization."""
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-widenarm", scope="User")
+		with _as(USER_A):
+			req_role = custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Sales User")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req_role["request"], 1)
+		role_copy = frappe.db.get_value(
+			SKILL, {"skill_name": f"{PFX}-widenarm", "owner": "Administrator"}, "name"
+		)
+		frappe.db.set_value(SKILL, role_copy, "allow_approve_run", 1, update_modified=False)
+		from jarvis.chat.custom_skills import _clear_pushable_org_rows_memo
+
+		_clear_pushable_org_rows_memo()  # raw write: on_update never fired
+		with _as(USER_A):
+			req_org = custom_skills_api.request_skill_promotion(skill.name, "Org")
+		with _as(REVIEWER):
+			custom_skills_api.decide_skill_promotion(req_org["request"], 1)
+		# Same row, widened in place - its admin-set arm survives the re-promotion.
+		self.assertEqual(frappe.db.get_value(SKILL, role_copy, "scope"), "Org")
+		self.assertEqual(int(frappe.db.get_value(SKILL, role_copy, "allow_approve_run") or 0), 1)
+
 	def test_requester_cannot_self_approve(self):
 		from jarvis.chat import custom_skills_api
 
