@@ -363,7 +363,8 @@ jobs:
         run: |
           # gevent: needed by jarvis/realtime/handlers.py (socketio_backend=python) and its
           # tests.
-          ./env/bin/pip install coverage gevent
+          # websockets: needed by the fake gateway imported by harness configuration tests.
+          ./env/bin/pip install coverage gevent websockets
           # run-parallel-tests shards by test FILE across --total-builds, so each
           # --build-number runs a disjoint quarter of the suite. --with-coverage is this
           # command's spelling of run-tests' --coverage (different click commands; do not
