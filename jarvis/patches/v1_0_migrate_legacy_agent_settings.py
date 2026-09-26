@@ -6,8 +6,8 @@ fills that role with `jarvis_admin`, so the placeholders get their real
 names. The operator-tab fields (gateway URL/token/paths) get brand-
 neutral `agent_*` names so the UI does not expose upstream branding.
 
-Module file names (the retired bootstrap module, etc.) are intentionally NOT
-renamed - they're implementation detail, not customer-visible.
+The neutral patch respects historical completion records so previously retired
+settings are not resurrected on sites that already completed the rename.
 
 Implementation note: Jarvis Settings is a Single DocType. Single DocTypes
 store data as key/value rows in `tabSingles` rather than columns on a
@@ -19,34 +19,17 @@ rows in `__Auth` for Password-type fields.
 
 import frappe
 
-# Historical fields share one namespace; keep exact suffix mappings for upgrades.
-_LEGACY_FIELD_PREFIX = "openclaw_"
-RENAMES = [
-	(_LEGACY_FIELD_PREFIX + suffix, current_name)
-	for suffix, current_name in (
-		("endpoint", "jarvis_admin_url"),
-		("api_key", "jarvis_admin_api_key"),
-		("gateway_url", "agent_url"),
-		("gateway_token", "agent_token"),
-		("compose_dir", "agent_compose_dir"),
-		("config_path", "agent_config_path"),
-		("llm_key_path", "agent_llm_key_path"),
-	)
-]
-
-# Password fields whose values also live in __Auth and must be renamed there.
-PASSWORD_RENAMES = {
-	old_name: new_name
-	for old_name, new_name in RENAMES
-	if new_name in {"jarvis_admin_api_key", "agent_token"}
-}
+from jarvis.legacy_compatibility import get_contract
 
 
 def execute():
 	"""Rename each field's row in tabSingles + matching row in __Auth."""
+	contract = get_contract()
+	if frappe.db.exists("Patch Log", {"patch": contract.settings_patch, "skipped": 0}):
+		return
 	doctype = "Jarvis Settings"
 
-	for old_name, new_name in RENAMES:
+	for old_name, new_name in contract.settings_renames:
 		# Skip if no row exists under the old name (fresh install, or
 		# patch already applied).
 		existing = frappe.db.sql(
@@ -75,7 +58,9 @@ def execute():
 
 	# __Auth stores encrypted password values keyed by (doctype, name, fieldname).
 	# For Single DocTypes the `name` is the DocType name itself.
-	for old_name, new_name in PASSWORD_RENAMES.items():
+	for old_name, new_name in contract.settings_renames:
+		if new_name not in {"jarvis_admin_api_key", "agent_token"}:
+			continue
 		existing = frappe.db.sql(
 			"SELECT 1 FROM `__Auth` WHERE doctype = %s AND name = %s AND fieldname = %s LIMIT 1",
 			(doctype, doctype, old_name),
@@ -97,5 +82,9 @@ def execute():
 				(new_name, doctype, doctype, old_name),
 			)
 
+	# Record actual completion under the historical identity for rollback readers.
+	from frappe.modules.patch_handler import update_patch_log
+
+	update_patch_log(contract.settings_patch)
 	frappe.db.commit()
 	frappe.clear_cache(doctype=doctype)

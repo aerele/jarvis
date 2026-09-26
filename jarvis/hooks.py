@@ -210,7 +210,9 @@ website_redirects = [
 # needs that DocType sync does not produce has to be seeded here: the roles no
 # DocType names ("Knowledge Wiki Manager", the two support roles) plus the
 # Personalisation Settings defaults. See jarvis/install.py.
-after_install = "jarvis.install.after_install"
+after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_install"]
+
+before_migrate = "jarvis.legacy_compatibility.seed"
 
 # Keep the Agents Marketplace catalog (Jarvis Agent Listing) in lockstep with
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
