@@ -359,6 +359,7 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 			"description",
 			"token_hint",
 			"token_help_url",
+			"accepts_key",
 		}
 		for entry in entries:
 			self.assertEqual(set(entry), allowed, entry.get("name"))
