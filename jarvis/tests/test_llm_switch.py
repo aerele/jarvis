@@ -473,11 +473,27 @@ class TestSettleTriggersTryApply(FrappeTestCase):
 			admission.settle_turn("no-such-run-id", "done")
 		mock_try_apply.assert_called_once()
 
-	def test_settle_conversation_dispatching_defers_to_settle_turns_own_trigger(self):
-		"""CR-7 (2026 review fix wave, cleanup): settle_conversation_dispatching
-		no longer runs its own _try_llm_switch_apply() - settle_turn (called
-		below when a dispatching run_id is found) already does, in its own
-		finally. Keeping both fired try_apply() twice per settle."""
+	def test_settle_conversation_dispatching_triggers_try_apply_with_admission_disabled(self):
+		"""CR-7 reverted (2026 review, second pass): with admission_enabled()
+		False (today's default), settle_conversation_dispatching returns
+		before ever reaching settle_turn - its OWN finally is the ONLY
+		trigger on this path, so a prior "cleanup" round that removed it (on
+		the mistaken theory that settle_turn always runs it) meant a held
+		switch would never start once the last reply finished on the
+		recovery path. Restored."""
+		with (
+			patch.object(admission, "admission_enabled", return_value=False),
+			patch.object(llm_switch, "try_apply") as mock_try_apply,
+		):
+			admission.settle_conversation_dispatching("conv-1", "done")
+
+		mock_try_apply.assert_called_once()
+
+	def test_settle_conversation_dispatching_with_admission_enabled_still_triggers_try_apply(self):
+		"""The restored call also fires when admission IS enabled and a
+		dispatching run_id is found - settle_turn's own trigger and this
+		one both run (try_apply is idempotent, so the extra call is
+		harmless, not a real duplicate)."""
 		with (
 			patch.object(admission, "admission_enabled", return_value=True),
 			patch("frappe.db.get_value", return_value="turn-1"),
@@ -487,7 +503,8 @@ class TestSettleTriggersTryApply(FrappeTestCase):
 			admission.settle_conversation_dispatching("conv-1", "done")
 
 		mock_settle_turn.assert_called_once_with("turn-1", "done", error=None)
-		# settle_turn is mocked away here (its own try_apply trigger is
-		# test_settle_turn_triggers_try_apply above) - the point is that
-		# settle_conversation_dispatching no longer ALSO calls it.
-		mock_try_apply.assert_not_called()
+		# settle_turn is mocked away here (it would trigger try_apply itself
+		# too, in real code - see test_settle_turn_triggers_try_apply) - this
+		# asserts settle_conversation_dispatching's OWN restored trigger
+		# still fires regardless.
+		mock_try_apply.assert_called_once()

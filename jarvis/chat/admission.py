@@ -1010,19 +1010,27 @@ def settle_conversation_dispatching(conversation: str, terminal_state: str, erro
 	settle by conversation - per-conversation single-flight makes this
 	unambiguous. Best-effort + flag-gated.
 
-	CR-7 (2026 review fix wave, cleanup): does NOT run its own
-	``_try_llm_switch_apply()`` - ``settle_turn`` already does, in its own
-	``finally``, whenever a dispatching run_id is found and handed to it
-	below. Keeping both meant a single settle here fired ``try_apply()``
-	twice."""
-	if not admission_enabled():
-		return
+	CR-7 reverted (2026 review, second pass): a prior "cleanup" round removed
+	this function's own ``_try_llm_switch_apply()`` call on the theory that
+	``settle_turn`` below already runs it - true only when ``admission_enabled()``
+	is True AND a dispatching run_id is found. With admission OFF (today's
+	default), this ``finally`` is the ONLY trigger that fires when a reply ends
+	on this path, so removing it meant a held switch would never start once the
+	last reply finished. Restored - ``llm_switch.try_apply()`` is idempotent (a
+	no-op once applied, or with no active switch), so the occasional extra call
+	on the admission-enabled path (where ``settle_turn`` already triggered it)
+	is harmless, not a real duplicate."""
 	try:
-		run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
-	except Exception:
-		run_id = None
-	if run_id:
-		settle_turn(run_id, terminal_state, error=error)
+		if not admission_enabled():
+			return
+		try:
+			run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
+		except Exception:
+			run_id = None
+		if run_id:
+			settle_turn(run_id, terminal_state, error=error)
+	finally:
+		_try_llm_switch_apply()
 
 
 def mark_cancel_requested(conversation: str) -> None:

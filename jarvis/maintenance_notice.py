@@ -124,7 +124,24 @@ def check() -> dict:
 	open chat tab lifts the hold promptly when the operator/roll clears it. One admin
 	round-trip refreshes BOTH notices (release + maintenance) -- an active maintenance
 	poll therefore keeps the release mirror fresh too, not a wasted second call. The
-	round-trip is cached briefly so many gated tabs cost one call."""
+	round-trip is cached briefly so many gated tabs cost one call.
+
+	2026 review (second pass): also drives a held ``llm_switch`` forward, before
+	anything else here -- every open chat polls this endpoint WHILE the hold banner
+	is up (that is the whole point of the banner), so it is a trigger point
+	independent of a reply ending or the Settings page polling
+	``onboarding.get_llm_sync_status``. Guarded: never raises, and never changes
+	this function's own return shape -- a redis/DB blip degrades to "didn't
+	reconcile this poll", same as ``llm_switch.reconcile()``'s own contract."""
+	try:
+		from jarvis.chat import llm_switch
+
+		llm_switch.reconcile()
+	except Exception:
+		frappe.log_error(
+			title="maintenance_notice.check llm_switch.reconcile failed", message=frappe.get_traceback()
+		)
+
 	from jarvis import admin_client, release_notice
 
 	cache = frappe.cache()
