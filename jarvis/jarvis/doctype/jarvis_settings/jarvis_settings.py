@@ -629,23 +629,29 @@ def _switch_or_enqueue(settings, job: str, *, is_switch: bool, **kwargs) -> None
 	)
 
 
-def _finish_switch_run(run_id: str | None) -> None:
+def _finish_switch_run(run_id: str | None, *, crashed: bool) -> None:
 	"""Call from every switch-eligible worker's outer ``finally`` with the
 	``llm_switch_run_id`` the job was enqueued with (``None`` for a job the
-	switch never released - a plain, non-switch apply). Two review fix-wave
-	guarantees:
+	switch never released - a plain, non-switch apply) and whether THIS call
+	is unwinding through an uncaught exception (``crashed``).
 
-	- CR-0: ``llm_switch.finish()`` must NEVER see a non-terminal status. If
-	  this worker exited without ever reaching its own terminal write (an
-	  uncaught exception past its own inner backstop, or a genuine bug), the
-	  read below still finds ``last_sync_status`` starting with "pending:" -
-	  stamp the generic terminal failure here FIRST (the same guarded write +
-	  commit every worker's own backstop already uses) so the switch is
-	  handed a real outcome, never a status that says the work is still
-	  running.
-	- CR-2: the status read (and the stamp above) are wrapped in try/except so
-	  a DB hiccup here can never mask the worker's OWN real exception - the
-	  caller's ``finally`` must run to completion either way.
+	Live e2e finding (2026 review, third pass): a worker's own DELIBERATE
+	non-terminal-looking exit - the handover's bounded pending-retry
+	("pending: handover to direct (attempt N)" after a fleet 502/unreachable
+	admin/write conflict - see ``_handover_via_admin``) or a "skipped: ..."
+	is a NORMAL end of THIS run, not a crash, and reconcile_pending_llm_sync's
+	retry depends on that EXACT string surviving untouched. The CR-0 stamp
+	below only fires when ``crashed`` is True AND the status is still
+	non-terminal - i.e. the worker unwound via an exception WITHOUT ever
+	reaching its own terminal write (an uncaught exception past its own inner
+	backstop, or a genuine bug). A normal exit (``crashed=False``) always
+	passes whatever status the worker actually wrote straight through to
+	``llm_switch.finish()`` and the switch ends (or hands off a parked
+	``next``) on it - a later retry begins its OWN new switch, per spec.
+
+	CR-2 (kept): the status read (and the stamp above) are wrapped in
+	try/except so a DB hiccup here can never mask the worker's OWN real
+	exception propagating through the caller's ``finally``.
 
 	A no-op when ``run_id`` is falsy - a job the switch never released must
 	never end or hand off a switch it does not own (``llm_switch.finish()``
@@ -656,7 +662,7 @@ def _finish_switch_run(run_id: str | None) -> None:
 		return
 	try:
 		status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-		if not (status.startswith("ok") or status.startswith("failed:")):
+		if crashed and not (status.startswith("ok") or status.startswith("failed:")):
 			_write_settings_fields(
 				frappe._dict(), {"last_sync_status": "failed: unexpected error; see Error Log"}
 			)
@@ -667,6 +673,47 @@ def _finish_switch_run(run_id: str | None) -> None:
 		llm_switch.finish(run_id, status)
 	except Exception:
 		frappe.log_error(title="Jarvis: llm_switch.finish failed", message=frappe.get_traceback())
+
+
+def _finish_switch_run_after_followup(run_id: str | None) -> None:
+	"""Live e2e finding (2026 review, third pass, Bug 2): a switch-released
+	worker whose outcome is "hand off to a follow-up sync" (the handover's
+	"pool" fallback / "resync" re-drive - both set ``switch_continues = True``
+	and skip ``_finish_switch_run`` above, since the follow-up - not a
+	terminal write - owns what happens to this run) never called
+	``llm_switch.finish()`` at all. But the follow-up's OWN call
+	(``_enqueue_pool_sync``/``request_resync`` -> ``_switch_or_enqueue`` ->
+	``llm_switch.begin()``) finds the switch record still ``applied`` under
+	THIS run's ``run_id`` (we are still executing inside it) and PARKS itself
+	in ``rec["next"]`` instead of enqueuing - ``begin()``'s own "the current
+	run is already executing" branch. Nobody was ever calling
+	``finish(this_run_id, ...)`` to release that park, so the follow-up sat
+	queued forever and the switch never let go of chat until the 20-minute
+	TTL.
+
+	Call this AFTER the follow-up call (``settings._enqueue_pool_sync()`` /
+	``request_resync(settings)``) - it finishes THIS run, releasing whatever
+	the follow-up parked as a fresh run (new run_id, re-stamped pending
+	status, no second banner - see ``llm_switch.finish``'s own hand-off
+	logic). Must run AFTER the follow-up's own ``begin()`` call has actually
+	parked the job, or there is nothing in ``rec["next"]`` yet: ``begin()``
+	defers to ``frappe.db.after_commit`` when not inline, so this mirrors
+	that exactly - inline (tests / ``run_admin_sync_inline``), the follow-up's
+	own ``begin()`` already ran synchronously by the time it returns, so
+	finishing immediately is safe; otherwise this registers its OWN
+	``after_commit`` callback, added AFTER the follow-up's own registration -
+	Frappe's ``CallbackManager`` runs callbacks in registration order (a
+	plain FIFO queue), so this one runs second, after the park.
+
+	A no-op when ``run_id`` is falsy - a job the switch never released keeps
+	today's behavior untouched."""
+	if not run_id:
+		return
+	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
+	if run_inline:
+		_finish_switch_run(run_id, crashed=False)
+	else:
+		frappe.db.after_commit.add(lambda: _finish_switch_run(run_id, crashed=False))
 
 
 def _direct_subscription_blob(doc) -> tuple[str, dict]:
@@ -2299,6 +2346,7 @@ def _enqueued_sync_via_admin_pool(
 	from jarvis.jarvis.pool_serialize import build_pool_payload
 
 	switch_continues = False
+	crashed = False
 	try:
 		with redis_lock(
 			"jarvis_settings_admin_sync",
@@ -2559,6 +2607,17 @@ def _enqueued_sync_via_admin_pool(
 						_commit_terminal_sync_status()
 					except Exception:
 						pass
+	except BaseException:
+		# Live e2e finding (2026 review, third pass): distinguishes a genuine
+		# crash from every DELIBERATE terminal exit above (ok, pending-retry,
+		# failed, skipped) so _finish_switch_run only stamps its CR-0 backstop
+		# when this run unwound via an exception, never on a normal exit that
+		# happens to leave a non-ok/failed status (e.g. this job's own inner
+		# backstop already wrote "failed: unexpected error" for most
+		# exceptions - this outer catch is the belt for whatever slips past
+		# it, e.g. a JobTimeoutException raised between statements).
+		crashed = True
+		raise
 	finally:
 		if not switch_continues:
 			# _finish_switch_run (review fix wave) only finishes THIS run
@@ -2568,12 +2627,12 @@ def _enqueued_sync_via_admin_pool(
 			# the held switch must never clear or hand off someone else's
 			# hold. Every exit from this job EXCEPT the lock-race retry above
 			# is terminal for THIS run (ok, pending-retry, failed, skipped, or
-			# an uncaught exception reaching rq - CR-0's own backstop inside
-			# _finish_switch_run covers the case where THIS function's own
-			# inner backstop above somehow left last_sync_status non-terminal)
-			# - a later retry begins its OWN switch via a fresh
+			# a crash reaching rq - CR-0's own backstop inside
+			# _finish_switch_run covers only the crash case, never a
+			# deliberate non-terminal-looking status like a bounded retry) -
+			# a later retry begins its OWN switch via a fresh
 			# _enqueue_pool_sync() call, exactly like the handover leg.
-			_finish_switch_run(llm_switch_run_id)
+			_finish_switch_run(llm_switch_run_id, crashed=crashed)
 
 
 # How long the descriptor-obtain waits for the admin-sync lock before handing the
@@ -2816,6 +2875,7 @@ def _enqueued_sync_via_admin(
 	from jarvis._redis_lock import redis_lock
 
 	switch_continues = False
+	crashed = False
 	try:
 		with redis_lock(
 			"jarvis_settings_admin_sync",
@@ -2861,9 +2921,16 @@ def _enqueued_sync_via_admin(
 				return
 			settings = frappe.get_single("Jarvis Settings")
 			settings._sync_via_admin(action)
+	except BaseException:
+		# Live e2e finding (2026 review, third pass): see the pool worker's
+		# matching comment - distinguishes a genuine crash from a deliberate
+		# terminal exit so _finish_switch_run's CR-0 backstop never overwrites
+		# a normal, non-ok/failed outcome.
+		crashed = True
+		raise
 	finally:
 		if not switch_continues:
-			_finish_switch_run(llm_switch_run_id)
+			_finish_switch_run(llm_switch_run_id, crashed=crashed)
 
 
 def _enqueued_handover_via_admin(
@@ -2886,11 +2953,16 @@ def _enqueued_handover_via_admin(
 	  ``_switch_or_enqueue`` (review round 1: it OR's in
 	  ``llm_switch.is_active()``, so this still-open switch is picked up and
 	  retargeted there with no special-casing needed here; with no switch
-	  active - e.g. old data - it is today's plain enqueue, same as always);
+	  active - e.g. old data - it is today's plain enqueue, same as always).
+	  Live e2e finding (2026 review, third pass, Bug 2): the follow-up's own
+	  ``begin()`` call finds the switch still ``applied`` under THIS run (we
+	  are still executing inside it) and PARKS itself instead of enqueuing -
+	  nobody would ever release that park without
+	  ``_finish_switch_run_after_followup`` below finishing THIS run
+	  afterwards;
 	- a "resync" follow-up hands off to ``request_resync``, which re-drives
 	  the NOW-current config (handover retarget, or an ordinary pool push -
-	  same reasoning: ``request_resync``'s own calls flow through
-	  ``_switch_or_enqueue`` too);
+	  same reasoning, same park, same after-followup finish);
 	- every other outcome (a confirmed move, a bounded pending-retry, or a
 	  genuine failure - including one that re-raises) is terminal for THIS
 	  attempt, so the switch ends here (if it released this run - see
@@ -2901,6 +2973,7 @@ def _enqueued_handover_via_admin(
 
 	follow_up = None
 	switch_continues = False
+	crashed = False
 	try:
 		with redis_lock(
 			"jarvis_settings_admin_sync",
@@ -2928,12 +3001,22 @@ def _enqueued_handover_via_admin(
 		if follow_up == "pool":
 			frappe.get_single("Jarvis Settings")._enqueue_pool_sync()
 			switch_continues = True
+			_finish_switch_run_after_followup(llm_switch_run_id)
 		elif follow_up == "resync":
 			request_resync(frappe.get_single("Jarvis Settings"))
 			switch_continues = True
+			_finish_switch_run_after_followup(llm_switch_run_id)
+	except BaseException:
+		# Live e2e finding (2026 review, third pass): see the pool worker's
+		# matching comment - distinguishes a genuine crash from a deliberate
+		# terminal exit (including _handover_via_admin's own documented
+		# re-raise, which always writes its OWN terminal status first) so
+		# _finish_switch_run's CR-0 backstop never overwrites a normal outcome.
+		crashed = True
+		raise
 	finally:
 		if not switch_continues:
-			_finish_switch_run(llm_switch_run_id)
+			_finish_switch_run(llm_switch_run_id, crashed=crashed)
 
 
 def _handover_via_admin(settings) -> str | None:

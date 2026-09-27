@@ -132,6 +132,15 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 			mock_pub.reset_mock()
 			mock_enqueue.reset_mock()
 
+			# The retargeting caller's own pending stamp, exactly as any real
+			# enqueue path writes before reaching begin() - see
+			# TestHandoffPreservesPendingStatus for dedicated coverage of this
+			# field; here it just has to be captured into "next" too.
+			frappe.db.set_single_value(
+				"Jarvis Settings",
+				{"last_sync_status": "pending: provisioning container (pool)"},
+				update_modified=False,
+			)
 			with patch.object(llm_switch, "_inflight", return_value=5):
 				llm_switch.begin("jarvis.tests.job_b", other="kw")
 
@@ -140,7 +149,14 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 		rec = llm_switch.status()
 		self.assertTrue(rec["applied"])  # job_a's run is untouched
 		self.assertEqual(rec["job"], "jarvis.tests.job_a")
-		self.assertEqual(rec["next"], {"job": "jarvis.tests.job_b", "job_kwargs": {"other": "kw"}})
+		self.assertEqual(
+			rec["next"],
+			{
+				"job": "jarvis.tests.job_b",
+				"job_kwargs": {"other": "kw"},
+				"pending_status": "pending: provisioning container (pool)",
+			},
+		)
 
 	def test_finish_releases_a_parked_next_as_a_fresh_run(self):
 		"""The running job's own finish() call is what actually hands off a

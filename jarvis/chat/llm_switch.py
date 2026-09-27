@@ -461,3 +461,24 @@ def reconcile() -> None:
 			finish(rec.get("run_id"), last_status)
 	except Exception:
 		frappe.log_error(title="llm_switch.reconcile failed", message=frappe.get_traceback())
+
+
+def _reset_for_tests() -> None:
+	"""Test-only: clear the switch record. CI finding (2026 review, fourth
+	pass): the record lives in redis, which FrappeTestCase's per-test
+	transaction rollback does NOT touch - a test that begins a switch
+	(directly, or via any Jarvis Settings save that becomes one) and never
+	ends/finishes it leaks an ACTIVE switch into every later test in the same
+	process. ``maintenance_notice.boot_payload()`` then reports it as an
+	active hold - the send gate, the macro run gate, and any Settings save
+	that turns into a switch (parking behind the leaked, already-``applied``
+	record instead of actually running) all misbehave for whatever remains
+	of the redis key's 20-minute TTL. Call from ``setUp`` AND via
+	``addCleanup`` in every test class that can begin a switch or save LLM
+	config on Jarvis Settings - ``setUp`` matters too, so a leak from an
+	OLDER module cannot poison a class that never gets to run its own
+	cleanup first."""
+	try:
+		frappe.cache().delete_value(KEY)
+	except Exception:
+		frappe.log_error(title="llm_switch._reset_for_tests failed", message=frappe.get_traceback())
