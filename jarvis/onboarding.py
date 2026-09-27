@@ -792,16 +792,22 @@ def save_llm_pool(
 		mode = "legacy"
 		readiness_budget_s = 300
 	elif compute_pool_mode(s):
-		if s._is_pool_switch():
-			# jarvis#1425 follow-up (seamless switch, spec Part C): this Apply
-			# flips proxy_active (adding a model back turns the proxy back on, or
-			# a converge-teardown turns it off) - sync_pool_now would push
+		from jarvis.chat import llm_switch
+
+		if s._is_pool_switch() or llm_switch.is_active():
+			# jarvis#1425 follow-up (seamless switch, spec Part C; review round
+			# 2): this Apply either flips proxy_active itself (adding a model
+			# back turns the proxy back on, or a converge-teardown turns it
+			# off), OR a switch is ALREADY active for some other reason (e.g. a
+			# handover pending) - either way, sync_pool_now would push
 			# SYNCHRONOUSLY and recreate the container immediately, cutting
-			# whatever reply is in flight. Route through llm_switch instead, via
-			# the SAME async pool-sync path the background on_update case uses
-			# (it already carries this exact is_switch check) - no apply-operation
-			# descriptor, so the SPA follows the legacy readiness poll, sized like
-			# the handover leg above.
+			# whatever reply is in flight, or racing/bypassing the switch
+			# already holding chat. Route through llm_switch instead, via the
+			# SAME async pool-sync path the background on_update case uses
+			# (_enqueue_pool_sync -> _switch_or_enqueue carries this exact
+			# is_switch-or-is_active check) - no apply-operation descriptor, so
+			# the SPA follows the legacy readiness poll, sized like the
+			# handover leg above.
 			s._enqueue_pool_sync(idempotency_key=idempotency_key or None)
 			mode = "legacy"
 			readiness_budget_s = 300
