@@ -1306,6 +1306,43 @@ class TestSuxf2AckFailureContract(_PipelineCase):
 		# the customer a rejection is a brief hiccup worth retrying.
 		self.assertEqual(err.get("code"), "unreachable")
 
+	def test_definite_rejection_pokes_an_active_switch(self):
+		"""jarvis#1425 review (scoped re-review, 2026-09-27): a definite pre-ack
+		rejection moves the Turn out of dispatching without going through
+		invoke_settlement or turn_handler - poke it directly."""
+		from jarvis.chat import llm_switch
+		from jarvis.tests.test_pump import _RejectGateway
+
+		conv = self._mk_conv()
+		rid = "pmp_suxf2_switch"
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"ready",
+			version=2,
+			reserved=1,
+			assistant_message=amsg,
+			ready_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": f"sess-{rid}", "message": "hi"}),
+		)
+		double = _RejectGateway()
+		self._doubles.append(double)
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		with (
+			patch.object(llm_switch, "is_active", return_value=True) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			pump._dispatch_ready(ctx)
+			self._pump_until(ctx, lambda: self._state(rid) in ("errored", "recovering"))
+		self.assertEqual(self._state(rid), "errored")
+		is_active.assert_called_once()
+		try_apply.assert_called_once()
+
 
 # --------------------------------------------------------------------------- #
 # 10. SUXF-1 — every recovering/errored transition mirrors the Message row

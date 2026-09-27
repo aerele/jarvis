@@ -178,7 +178,7 @@ def invoke_settlement(
 	# raises - a reply must never fail because this poke did.
 	from jarvis.chat import llm_switch
 
-	llm_switch.apply_if_active()
+	llm_switch.apply_if_active(source="settlement.invoke_settlement")
 
 	# The maintained per-conversation turn counter that drives the once-per-session
 	# feedback popup. Runs BEFORE the terminal publish so the client's

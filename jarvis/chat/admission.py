@@ -1120,6 +1120,12 @@ def cancel_queued_turn(run_id: str) -> dict:
 				except Exception:
 					pass
 	frappe.db.commit()
+	if path == "preparing_ready":
+		# jarvis#1425 review (scoped re-review, 2026-09-27): preparing/ready are
+		# in-flight states (_INFLIGHT_STATES) - a user cancel leaves one.
+		from jarvis.chat import llm_switch
+
+		llm_switch.apply_if_active(source="admission.cancel_queued_turn")
 	if path is None:
 		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
 	try:

@@ -263,27 +263,38 @@ def try_apply(*, force: bool = False) -> bool:
 		return False
 
 
-def apply_if_active() -> None:
+def apply_if_active(source: str = "") -> None:
 	"""Poke a held switch forward right after a reply's own terminal write
 	commits (jarvis#1425 review, live e2e2, 2026-09-27): every terminal-write
 	call site across the chat surfaces - the legacy ``turn_handler`` exit AND
-	its error/abandon path, the Relay Pump's settlement (``chat/settlement.py``,
-	shared by every pump terminal - success, error, aborted, reconcile-owed,
-	recovery) and the pump's own budget-exhausted recovery-errored path that
-	settles without going through it - calls this immediately after ITS OWN
-	commit of ``streaming=0``, so the switch applies the moment nothing is
-	left in flight rather than waiting for the next poll (up to 60s on the
-	SPA's maintenance check). ONE cheap ``is_active()`` redis GET skips the
-	heavier lock-acquiring ``try_apply()`` on the overwhelming common case (no
-	switch held). Never raises - a reply must never fail because this poke
-	did. Idempotent with every other trigger (``settle_turn``,
-	``settle_conversation_dispatching``, another call site's own poke on the
-	same terminal) - calling it twice for one reply end is harmless."""
+	its error/abandon path, a pump lane's definite pre-ack rejection, the
+	Relay Pump's settlement (``chat/settlement.py``, shared by every pump
+	terminal - success, error, aborted, reconcile-owed, recovery) and the
+	pump's own budget-exhausted recovery-errored path that settles without
+	going through it - calls this immediately after ITS OWN commit of
+	``streaming=0`` (or the equivalent Turn-leaves-dispatching write), so the
+	switch applies the moment nothing is left in flight rather than waiting
+	for the next poll (up to 60s on the SPA's maintenance check). ONE cheap
+	``is_active()`` redis GET skips the heavier lock-acquiring ``try_apply()``
+	on the overwhelming common case (no switch held). Never raises - a reply
+	must never fail because this poke did. Idempotent with every other
+	trigger (``settle_turn``, ``settle_conversation_dispatching``, another
+	call site's own poke on the same terminal) - calling it twice for one
+	reply end is harmless.
+
+	``source`` (2026 review, scoped re-review): a short caller-supplied tag
+	(e.g. ``"pump.ack_failure"``, ``"settlement.invoke_settlement"``) folded
+	into the Error Log title on the rare failure path, so a poke that raised
+	says WHERE it was called from without anyone chasing a bare "failed"
+	across every call site."""
 	try:
 		if is_active():
 			try_apply()
 	except Exception:
-		frappe.log_error(title="llm_switch.apply_if_active failed", message=frappe.get_traceback())
+		title = "llm_switch.apply_if_active failed"
+		if source:
+			title = f"{title} ({source})"
+		frappe.log_error(title=title, message=frappe.get_traceback())
 
 
 def _try_apply_locked(*, force: bool) -> bool:
@@ -397,10 +408,13 @@ def _release_job_locked(
 	write (the run_id is generated BEFORE the enqueue call, not after, so there is
 	no window where the record reads ``applied: True`` under a STALE run_id).
 	Assumes the caller holds the ``jarvis_llm_switch`` lock. Shared by
-	``_try_apply_locked`` (a held switch's first release - ``pending_status`` stays
-	``None``, the caller's own pending stamp is still fresh) and ``finish()``
-	(handing off a parked ``next`` to a new run - ``pending_status`` is the string
-	captured when it was parked, see ``_begin_now``). Returns whether the enqueue
+	``_try_apply_locked`` (a held switch's first release, or releasing a
+	parked ``next`` after a heal - ``pending_status`` stays ``None`` for a
+	first release, the caller's own pending stamp is still fresh; it is the
+	parked string when releasing a ``next``, same as below) and ``finish()``
+	(handing off a parked ``next`` to a new run - ``pending_status`` is the
+	string captured when it was parked, see ``_begin_now``). Returns whether
+	the enqueue
 	landed; on failure, records ``applied: False`` so the next ``try_apply()``
 	trigger (a settle callback, a poller) retries instead of stranding the switch
 	for the full 20-minute TTL.

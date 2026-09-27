@@ -978,7 +978,7 @@ def _maybe_apply_llm_switch() -> None:
 	additive, and the poke is itself idempotent."""
 	from jarvis.chat import llm_switch
 
-	llm_switch.apply_if_active()
+	llm_switch.apply_if_active(source="turn_handler")
 
 
 @dataclass
