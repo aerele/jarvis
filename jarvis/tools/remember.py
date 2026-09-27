@@ -2,7 +2,7 @@
 
 Persists the agent's consolidated memory for whoever it is helping now, as one
 terse markdown blob (one line per fact) - the bench-owned, per-user replacement
-for openclaw's shared-workspace ``MEMORY.md``. Scope is implicit: the current user
+for the shared-workspace ``MEMORY.md``. Scope is implicit: the current user
 (``frappe.session.user``, resolved from the chat session by ``jarvis.api.call_tool``
 and set via ``impersonate(user)``). There is NO user argument, so the model cannot
 address another user's memory.
