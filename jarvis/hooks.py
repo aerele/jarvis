@@ -805,6 +805,16 @@ permission_query_conditions.update(
 		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.get_permission_query_conditions",
 	}
 )
+
+# Per-user agent memory: one row per user, and every list/report read is scoped to
+# the caller's own row (the remember/recall tools additionally key on
+# frappe.session.user in code). One user of a tenant can never enumerate a colleague's
+# memory even via a raw ORM list.
+permission_query_conditions.update(
+	{
+		"Jarvis User Memory": "jarvis.jarvis.doctype.jarvis_user_memory.jarvis_user_memory.get_permission_query_conditions",
+	}
+)
 has_permission.update(
 	{
 		"Jarvis Pending Action": f"{_PA_CONTROLLER}.has_permission",
