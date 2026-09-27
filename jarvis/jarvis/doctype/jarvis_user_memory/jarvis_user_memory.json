@@ -1,0 +1,43 @@
+{
+  "doctype": "DocType",
+  "name": "Jarvis User Memory",
+  "module": "Jarvis",
+  "issingle": 0,
+  "custom": 0,
+  "engine": "InnoDB",
+  "autoname": "hash",
+  "field_order": [
+    "user",
+    "content"
+  ],
+  "fields": [
+    {
+      "fieldname": "user",
+      "fieldtype": "Link",
+      "options": "User",
+      "label": "User",
+      "reqd": 1,
+      "unique": 1,
+      "in_list_view": 1,
+      "description": "The Frappe user this memory belongs to. One row per user (unique), so per-user isolation is a primary-key/unique-index guarantee regardless of write path or concurrency. The doc name is an opaque hash (autoname), so the user's email is never a doc name."
+    },
+    {
+      "fieldname": "content",
+      "fieldtype": "Long Text",
+      "label": "Content",
+      "description": "The agent's durable, terse memory blob for this user (one line per fact), curated and full-replaced by the remember tool. Treated as DATA, never instructions, by the agent. Bench-owned, per-user replacement for openclaw's shared-workspace MEMORY.md."
+    }
+  ],
+  "permissions": [
+    {
+      "role": "System Manager",
+      "read": 1,
+      "write": 1,
+      "create": 1,
+      "delete": 1
+    }
+  ],
+  "sort_field": "modified",
+  "sort_order": "DESC",
+  "track_changes": 1
+}
