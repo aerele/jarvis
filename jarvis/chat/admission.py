@@ -1008,18 +1008,21 @@ def settle_conversation_dispatching(conversation: str, terminal_state: str, erro
 	"""Recovery-path settle: close the (single-flight) dispatching Turn on this
 	conversation. turn_recovery works off Message rows and has no run_id, so we
 	settle by conversation - per-conversation single-flight makes this
-	unambiguous. Best-effort + flag-gated."""
+	unambiguous. Best-effort + flag-gated.
+
+	CR-7 (2026 review fix wave, cleanup): does NOT run its own
+	``_try_llm_switch_apply()`` - ``settle_turn`` already does, in its own
+	``finally``, whenever a dispatching run_id is found and handed to it
+	below. Keeping both meant a single settle here fired ``try_apply()``
+	twice."""
+	if not admission_enabled():
+		return
 	try:
-		if not admission_enabled():
-			return
-		try:
-			run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
-		except Exception:
-			run_id = None
-		if run_id:
-			settle_turn(run_id, terminal_state, error=error)
-	finally:
-		_try_llm_switch_apply()
+		run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
+	except Exception:
+		run_id = None
+	if run_id:
+		settle_turn(run_id, terminal_state, error=error)
 
 
 def mark_cancel_requested(conversation: str) -> None:

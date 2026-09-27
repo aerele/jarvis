@@ -629,26 +629,44 @@ def _switch_or_enqueue(settings, job: str, *, is_switch: bool, **kwargs) -> None
 	)
 
 
-def _end_switch_if_released(outcome: str) -> None:
-	"""End the active switch only if it RELEASED the job now finishing - i.e.
-	the record still shows ``applied: True``. jarvis#1425 review round 1
-	(Critical): a switch held but not yet applied (still waiting on an
-	in-flight reply, or the cap) must never be ended by a job that finishes
-	without having gone through it - the switch's own held job is still
-	sitting unenqueued, and ending here would clear the banner and promote
-	queued turns while nothing has actually moved. Call this from every
-	worker's terminal ``finally`` in place of ``llm_switch.end()`` directly.
-	A no-op when there is no active record, or the active one is still held
-	(not yet applied) - never raises (mirrors llm_switch's own never-raise
-	rule; do not edit llm_switch.py, so the guard lives here instead)."""
-	from jarvis.chat import llm_switch
+def _finish_switch_run(run_id: str | None) -> None:
+	"""Call from every switch-eligible worker's outer ``finally`` with the
+	``llm_switch_run_id`` the job was enqueued with (``None`` for a job the
+	switch never released - a plain, non-switch apply). Two review fix-wave
+	guarantees:
 
+	- CR-0: ``llm_switch.finish()`` must NEVER see a non-terminal status. If
+	  this worker exited without ever reaching its own terminal write (an
+	  uncaught exception past its own inner backstop, or a genuine bug), the
+	  read below still finds ``last_sync_status`` starting with "pending:" -
+	  stamp the generic terminal failure here FIRST (the same guarded write +
+	  commit every worker's own backstop already uses) so the switch is
+	  handed a real outcome, never a status that says the work is still
+	  running.
+	- CR-2: the status read (and the stamp above) are wrapped in try/except so
+	  a DB hiccup here can never mask the worker's OWN real exception - the
+	  caller's ``finally`` must run to completion either way.
+
+	A no-op when ``run_id`` is falsy - a job the switch never released must
+	never end or hand off a switch it does not own (``llm_switch.finish()``
+	re-checks the SAME thing against its own record, but that check happens
+	under the redis lock; this early return just skips the whole exercise
+	when there is provably nothing to do)."""
+	if not run_id:
+		return
 	try:
-		rec = llm_switch.status()
-		if rec and rec.get("applied"):
-			llm_switch.end(outcome)
+		status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		if not (status.startswith("ok") or status.startswith("failed:")):
+			_write_settings_fields(
+				frappe._dict(), {"last_sync_status": "failed: unexpected error; see Error Log"}
+			)
+			_commit_terminal_sync_status()
+			status = "failed: unexpected error; see Error Log"
+		from jarvis.chat import llm_switch
+
+		llm_switch.finish(run_id, status)
 	except Exception:
-		frappe.log_error(title="Jarvis: llm_switch end-if-released failed", message=frappe.get_traceback())
+		frappe.log_error(title="Jarvis: llm_switch.finish failed", message=frappe.get_traceback())
 
 
 def _direct_subscription_blob(doc) -> tuple[str, dict]:
@@ -2236,6 +2254,7 @@ def _enqueued_sync_via_admin_pool(
 	retry_left: int = ADMIN_SYNC_LOCK_RETRIES,
 	converge_teardown: bool = False,
 	idempotency_key: str | None = None,
+	llm_switch_run_id: str | None = None,
 ) -> None:
 	"""Background-queue wrapper for the proxy (pool) sync path.
 
@@ -2307,6 +2326,10 @@ def _enqueued_sync_via_admin_pool(
 						# Carry the operation's key so a lock-loss retry still dedupes to
 						# the operation the synchronous descriptor-obtain created (F2/F3).
 						idempotency_key=idempotency_key,
+						# Carry the switch's run token down the retry chain too (review
+						# fix wave) - the run only actually finishes (ends or hands off)
+						# once a level in the chain gets the lock and runs for real.
+						llm_switch_run_id=llm_switch_run_id,
 					)
 					switch_continues = True
 					return
@@ -2538,19 +2561,19 @@ def _enqueued_sync_via_admin_pool(
 						pass
 	finally:
 		if not switch_continues:
-			# _end_switch_if_released (review round 1, Critical) only ends the
-			# switch if IT released this run (record still shows applied=True) -
-			# a job that reached here WITHOUT going through the held switch (the
-			# review's bypass class) must never clear someone else's still-held
-			# hold. Every exit from this job EXCEPT the lock-race retry above is
-			# terminal for THIS run (ok, pending-retry, failed, skipped, or an
-			# uncaught exception reaching rq) - a later retry begins its OWN
-			# switch via a fresh _enqueue_pool_sync() call, exactly like the
-			# handover leg.
-			final_status = (
-				_frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-			)
-			_end_switch_if_released(final_status)
+			# _finish_switch_run (review fix wave) only finishes THIS run
+			# (llm_switch_run_id is None for a job the switch never released,
+			# and llm_switch.finish() itself re-checks the run_id against the
+			# active record) - a job that reached here WITHOUT going through
+			# the held switch must never clear or hand off someone else's
+			# hold. Every exit from this job EXCEPT the lock-race retry above
+			# is terminal for THIS run (ok, pending-retry, failed, skipped, or
+			# an uncaught exception reaching rq - CR-0's own backstop inside
+			# _finish_switch_run covers the case where THIS function's own
+			# inner backstop above somehow left last_sync_status non-terminal)
+			# - a later retry begins its OWN switch via a fresh
+			# _enqueue_pool_sync() call, exactly like the handover leg.
+			_finish_switch_run(llm_switch_run_id)
 
 
 # How long the descriptor-obtain waits for the admin-sync lock before handing the
@@ -2760,7 +2783,9 @@ def sync_pool_now(idempotency_key: str | None = None, force_probe: bool = False)
 	return outcome
 
 
-def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
+def _enqueued_sync_via_admin(
+	action: str, retry_left: int = ADMIN_SYNC_LOCK_RETRIES, llm_switch_run_id: str | None = None
+) -> None:
 	"""Background-queue wrapper: re-load Jarvis Settings + run _sync_via_admin.
 
 	Loading a fresh Single is necessary because the queue worker runs in a
@@ -2784,10 +2809,10 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 	sync job, which ``request_resync``'s "restart" branch now routes through
 	``_switch_or_enqueue`` (a switch can be active even on this leg - e.g. a
 	Resync re-driving a config that itself has no proxy notion at all, while
-	an UNRELATED pool switch elsewhere is held). ``_end_switch_if_released``
-	only ends the switch it actually released, so this is safe to call on
-	every action, switch or not - a no-op when no switch is active, or the
-	active one is still held by someone else."""
+	an UNRELATED pool switch elsewhere is held). ``_finish_switch_run`` only
+	finishes the run it was actually given (``llm_switch_run_id``, ``None``
+	for a plain, non-switch apply), so this is safe to call on every action,
+	switch or not."""
 	from jarvis._redis_lock import redis_lock
 
 	switch_continues = False
@@ -2819,6 +2844,9 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 						job_base=f"jarvis_settings_sync:{action}",
 						retry_left=retry_left,
 						action=action,
+						# Carry the switch's run token down the retry chain too
+						# (review fix wave) - see the pool worker's matching comment.
+						llm_switch_run_id=llm_switch_run_id,
 					)
 					switch_continues = True
 					return
@@ -2835,11 +2863,12 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 			settings._sync_via_admin(action)
 	finally:
 		if not switch_continues:
-			status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-			_end_switch_if_released(status)
+			_finish_switch_run(llm_switch_run_id)
 
 
-def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
+def _enqueued_handover_via_admin(
+	retry_left: int = ADMIN_SYNC_LOCK_RETRIES, llm_switch_run_id: str | None = None
+) -> None:
 	"""Worker for _enqueue_handover. Serialized with every other LLM sync on the
 	same redis lock; the follow-up action _handover_via_admin reports (a pool
 	fallback or a resync) runs AFTER the lock is released - CR-3 (2026-09-25
@@ -2865,7 +2894,7 @@ def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> N
 	- every other outcome (a confirmed move, a bounded pending-retry, or a
 	  genuine failure - including one that re-raises) is terminal for THIS
 	  attempt, so the switch ends here (if it released this run - see
-	  ``_end_switch_if_released``) and chat unblocks immediately; a later
+	  ``_finish_switch_run``) and chat unblocks immediately; a later
 	  retry (``reconcile_pending_llm_sync``) begins a NEW switch of its own -
 	  "a retry of a failed handover (attempt N) is a new switch"."""
 	from jarvis._redis_lock import redis_lock
@@ -2884,6 +2913,9 @@ def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> N
 						method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
 						job_base="jarvis_settings_sync:handover",
 						retry_left=retry_left,
+						# Carry the switch's run token down the retry chain too
+						# (review fix wave) - see the pool worker's matching comment.
+						llm_switch_run_id=llm_switch_run_id,
 					)
 					switch_continues = True
 					return
@@ -2901,8 +2933,7 @@ def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> N
 			switch_continues = True
 	finally:
 		if not switch_continues:
-			status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-			_end_switch_if_released(status)
+			_finish_switch_run(llm_switch_run_id)
 
 
 def _handover_via_admin(settings) -> str | None:

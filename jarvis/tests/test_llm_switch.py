@@ -115,11 +115,12 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 		self.assertFalse(second)
 		mock_enqueue.assert_called_once()  # still just the one from begin()
 
-	def test_begin_while_active_retargets_and_applies_now(self):
-		"""Review Focus 3: an already-APPLIED switch retargeted to a new job gets no
-		second banner and applies the new job immediately, even with replies still
-		in flight - the container is already restarting for the old job, so there
-		is nothing left to drain."""
+	def test_begin_while_applied_parks_next_and_does_not_enqueue(self):
+		"""2026 review fix wave ("retarget race", Important): a retarget that
+		arrives while the current run is already APPLIED (its job is running
+		RIGHT NOW) must NOT force-enqueue a second job for the same container -
+		it parks the newer config in rec["next"] instead. No second banner
+		either - the switch is already showing one."""
 		with (
 			patch.object(llm_switch, "_inflight", return_value=0),
 			patch("frappe.enqueue") as mock_enqueue,
@@ -135,11 +136,127 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 				llm_switch.begin("jarvis.tests.job_b", other="kw")
 
 		mock_pub.assert_not_called()  # no second "switching" banner
+		mock_enqueue.assert_not_called()  # no second, uncoordinated enqueue
+		rec = llm_switch.status()
+		self.assertTrue(rec["applied"])  # job_a's run is untouched
+		self.assertEqual(rec["job"], "jarvis.tests.job_a")
+		self.assertEqual(rec["next"], {"job": "jarvis.tests.job_b", "job_kwargs": {"other": "kw"}})
+
+	def test_finish_releases_a_parked_next_as_a_fresh_run(self):
+		"""The running job's own finish() call is what actually hands off a
+		parked `next` - a fresh run_id, applied stays True, enqueued - with NO
+		second "switching" broadcast (the switch never stopped being active
+		from the caller's point of view)."""
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.enqueue"),
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.begin("jarvis.tests.job_a")
+		run_id_a = llm_switch.status()["run_id"]
+
+		with patch.object(llm_switch, "_inflight", return_value=5):
+			llm_switch.begin("jarvis.tests.job_b", other="kw")
+
+		with (
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.publish_realtime") as mock_pub,
+		):
+			llm_switch.finish(run_id_a, "ok: moved")
+
+		mock_pub.assert_not_called()  # hand-off, not end - no "done" broadcast
 		mock_enqueue.assert_called_once()
 		args, kwargs = mock_enqueue.call_args
 		self.assertEqual(args[0], "jarvis.tests.job_b")
 		self.assertEqual(kwargs["other"], "kw")
-		self.assertTrue(llm_switch.status()["applied"])
+		rec = llm_switch.status()
+		self.assertTrue(rec["applied"])
+		self.assertEqual(rec["job"], "jarvis.tests.job_b")
+		self.assertIsNone(rec["next"])
+		self.assertNotEqual(rec["run_id"], run_id_a)  # a FRESH run
+
+	def test_finish_with_no_next_ends_the_switch(self):
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.enqueue"),
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.begin("jarvis.tests.job_a")
+		run_id = llm_switch.status()["run_id"]
+
+		with (
+			patch("frappe.publish_realtime") as mock_pub,
+			patch.object(admission, "promote_next") as mock_promote,
+		):
+			llm_switch.finish(run_id, "ok: moved")
+
+		self.assertIsNone(llm_switch.status())
+		mock_pub.assert_called_once_with(llm_switch.EVENT, {"state": "done", "outcome": "ok: moved"})
+		mock_promote.assert_called_once()
+
+	def test_finish_with_a_stale_run_id_does_nothing(self):
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.enqueue"),
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.begin("jarvis.tests.job_a")
+
+		with (
+			patch("frappe.publish_realtime") as mock_pub,
+			patch.object(admission, "promote_next") as mock_promote,
+		):
+			llm_switch.finish("some-other-run-id", "ok: moved")
+
+		self.assertIsNotNone(llm_switch.status())  # untouched
+		mock_pub.assert_not_called()
+		mock_promote.assert_not_called()
+
+	def test_finish_with_none_run_id_does_nothing(self):
+		with patch("frappe.publish_realtime") as mock_pub:
+			llm_switch.finish(None, "ok: moved")
+
+		mock_pub.assert_not_called()
+
+	def test_released_job_id_carries_the_run_suffix(self):
+		"""rq dedup treats a STARTED job like a QUEUED one, so reusing a
+		job_id across two releases could silently drop the newer one - the
+		run_id suffix makes every release's job_id unique."""
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.begin("jarvis.tests.fake_job", job_id="jarvis_settings_sync:pool", deduplicate=True)
+
+		run_id = llm_switch.status()["run_id"]
+		self.assertIsNotNone(run_id)
+		kwargs = mock_enqueue.call_args.kwargs
+		self.assertEqual(kwargs["job_id"], f"jarvis_settings_sync:pool:{run_id[:8]}")
+		self.assertEqual(kwargs["llm_switch_run_id"], run_id)
+
+	def test_begin_under_lock_contention_enqueues_directly(self):
+		"""CR-1: if the 2s wait for the jarvis_llm_switch lock expires, the
+		job must not be dropped - it runs untracked by the switch, exactly as
+		a non-switch apply would (its own plain job_id, no run token, no
+		switch record ever created)."""
+		fake_lock = MagicMock()
+		fake_lock.__enter__ = MagicMock(return_value=False)
+		fake_lock.__exit__ = MagicMock(return_value=False)
+		with (
+			patch("jarvis._redis_lock.redis_lock", return_value=fake_lock),
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.log_error") as mock_log,
+		):
+			llm_switch.begin("jarvis.tests.fake_job", job_id="jarvis_settings_sync:pool", deduplicate=True)
+
+		mock_log.assert_called_once()
+		mock_enqueue.assert_called_once()
+		args, kwargs = mock_enqueue.call_args
+		self.assertEqual(args[0], "jarvis.tests.fake_job")
+		self.assertEqual(kwargs["job_id"], "jarvis_settings_sync:pool")  # unsuffixed
+		self.assertNotIn("llm_switch_run_id", kwargs)
+		self.assertIsNone(llm_switch.status())  # no record was ever created
 
 
 class TestNeverRaises(_LlmSwitchTestCase):
@@ -226,13 +343,15 @@ class TestEnd(_LlmSwitchTestCase):
 
 
 class TestReconcile(_LlmSwitchTestCase):
-	def _applied_record(self):
+	def _applied_record(self, *, run_id="test-run-1", next_apply=None):
 		rec = {
 			"started_at": time.time(),
 			"deadline": time.time() + llm_switch.CAP_S,
 			"job": "jarvis.tests.fake_job",
 			"job_kwargs": {},
 			"applied": True,
+			"run_id": run_id,
+			"next": next_apply,
 		}
 		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
 
@@ -255,6 +374,32 @@ class TestReconcile(_LlmSwitchTestCase):
 		with patch.object(llm_switch, "end") as mock_end:
 			llm_switch.reconcile()
 		mock_end.assert_not_called()
+
+	def test_reconcile_hands_off_to_a_parked_next(self):
+		"""2026 review fix wave: reconcile() uses the SAME hand-off logic as a
+		worker's own finish() call - a terminal status with a parked `next`
+		releases it as a fresh run instead of ending."""
+		self._applied_record(next_apply={"job": "jarvis.tests.job_b", "job_kwargs": {"other": "kw"}})
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "ok: applied"}, update_modified=False
+		)
+
+		with (
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.publish_realtime") as mock_pub,
+		):
+			llm_switch.reconcile()
+
+		mock_pub.assert_not_called()  # hand-off, not end - no "done" broadcast
+		mock_enqueue.assert_called_once()
+		args, kwargs = mock_enqueue.call_args
+		self.assertEqual(args[0], "jarvis.tests.job_b")
+		self.assertEqual(kwargs["other"], "kw")
+		new_rec = llm_switch.status()
+		self.assertTrue(new_rec["applied"])
+		self.assertEqual(new_rec["job"], "jarvis.tests.job_b")
+		self.assertIsNone(new_rec["next"])
+		self.assertNotEqual(new_rec["run_id"], "test-run-1")
 		self.assertIsNotNone(llm_switch.status())
 
 
@@ -328,10 +473,21 @@ class TestSettleTriggersTryApply(FrappeTestCase):
 			admission.settle_turn("no-such-run-id", "done")
 		mock_try_apply.assert_called_once()
 
-	def test_settle_conversation_dispatching_triggers_try_apply(self):
+	def test_settle_conversation_dispatching_defers_to_settle_turns_own_trigger(self):
+		"""CR-7 (2026 review fix wave, cleanup): settle_conversation_dispatching
+		no longer runs its own _try_llm_switch_apply() - settle_turn (called
+		below when a dispatching run_id is found) already does, in its own
+		finally. Keeping both fired try_apply() twice per settle."""
 		with (
-			patch.object(admission, "admission_enabled", return_value=False),
+			patch.object(admission, "admission_enabled", return_value=True),
+			patch("frappe.db.get_value", return_value="turn-1"),
+			patch.object(admission, "settle_turn") as mock_settle_turn,
 			patch.object(llm_switch, "try_apply") as mock_try_apply,
 		):
-			admission.settle_conversation_dispatching("no-such-conversation", "done")
-		mock_try_apply.assert_called_once()
+			admission.settle_conversation_dispatching("conv-1", "done")
+
+		mock_settle_turn.assert_called_once_with("turn-1", "done", error=None)
+		# settle_turn is mocked away here (its own try_apply trigger is
+		# test_settle_turn_triggers_try_apply above) - the point is that
+		# settle_conversation_dispatching no longer ALSO calls it.
+		mock_try_apply.assert_not_called()

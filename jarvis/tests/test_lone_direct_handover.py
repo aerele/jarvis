@@ -34,9 +34,9 @@ from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 	_PENDING_APPLYING_STATUS,
 	_PENDING_HANDOVER_STATUS,
 	JarvisSettings,
-	_end_switch_if_released,
 	_enqueued_handover_via_admin,
 	_enqueued_sync_via_admin,
+	_finish_switch_run,
 	_handover_attempt,
 	_handover_via_admin,
 	_switch_or_enqueue,
@@ -795,27 +795,28 @@ class TestPoolSyncSwitchDetection(_RT3SettingsTestCase):
 
 
 class TestHandoverEndsTheSwitch(FrappeTestCase):
-	"""_enqueued_handover_via_admin ends the switch _enqueue_handover began on
-	every terminal outcome (ok, a bounded pending-retry, or a genuine failure)
-	- but ONLY if that switch actually released this run (review round 1,
-	Critical: _end_switch_if_released) - and defers ending (never ends it
-	here) on the pool/resync fallback - spec Part C: "A retry of a failed
-	handover (attempt N) is a new switch"."""
+	"""_enqueued_handover_via_admin finishes the run _enqueue_handover began
+	(via llm_switch.finish()) on every terminal outcome (ok, a bounded
+	pending-retry, or a genuine failure) - but ONLY the run it was actually
+	given (review fix wave: llm_switch_run_id) - and defers finishing (never
+	touches the switch here) on the pool/resync fallback - spec Part C: "A
+	retry of a failed handover (attempt N) is a new switch"."""
 
-	def _run_with_follow_up(self, settings, follow_up, *, last_sync_status, switch_status=None):
+	def _run_with_follow_up(
+		self, settings, follow_up, *, last_sync_status, run_id="test-run-1", switch_status=None
+	):
 		"""frappe.get_single -> settings (patched); _handover_via_admin patched
 		to report follow_up, with last_sync_status set to whatever the real
-		function would have written for that outcome - _enqueued_handover_via_admin
-		reads the CURRENT status straight from the DB to end() with, not from
-		this bare fixture, so frappe.db.get_value is patched to match.
+		function would have written for that outcome - _finish_switch_run
+		reads the CURRENT status straight from the DB, not from this bare
+		fixture, so frappe.db.get_value is patched to match.
 
 		``switch_status``: what llm_switch.status() reports to
-		_end_switch_if_released - defaults to an APPLIED record (this
-		attempt's own switch, released and ready to end), the shape every
-		"terminal outcome ends the switch" test below needs; pass an
-		unapplied record (or None) to exercise the release guard itself."""
+		llm_switch.finish() - defaults to an APPLIED record under the SAME
+		run_id (this attempt's own switch, released and ready to end), the
+		shape every "terminal outcome ends the switch" test below needs."""
 		if switch_status is None:
-			switch_status = {"applied": True, "job": "x"}
+			switch_status = {"applied": True, "run_id": run_id, "job": "x", "next": None}
 		settings.last_sync_status = last_sync_status
 		with (
 			patch("frappe.get_single", return_value=settings),
@@ -826,7 +827,7 @@ class TestHandoverEndsTheSwitch(FrappeTestCase):
 			patch("frappe.db.get_value", return_value=last_sync_status),
 			patch("jarvis.chat.llm_switch.status", return_value=switch_status),
 		):
-			_enqueued_handover_via_admin()
+			_enqueued_handover_via_admin(llm_switch_run_id=run_id)
 
 	def test_confirmed_move_ends_the_switch(self):
 		settings = _handover_ready_settings()
@@ -851,23 +852,35 @@ class TestHandoverEndsTheSwitch(FrappeTestCase):
 
 		mock_end.assert_called_once_with("failed: auth: token expired")
 
-	def test_a_terminal_outcome_never_ends_a_switch_it_did_not_release(self):
-		"""Review round 1 (Critical): if the active record is still HELD (not
-		applied - e.g. it belongs to a DIFFERENT, still-waiting switch), this
-		outcome must not end it, even though its own status write is
-		terminal."""
+	def test_a_terminal_outcome_with_a_stale_run_id_never_ends_the_switch(self):
+		"""Review fix wave: the active record now belongs to a DIFFERENT run
+		(e.g. a retarget moved it on while this attempt was executing) - this
+		attempt's own terminal outcome must not end or hand off a switch it
+		no longer owns."""
 		settings = _handover_ready_settings()
 		with patch("jarvis.chat.llm_switch.end") as mock_end:
 			self._run_with_follow_up(
 				settings,
 				None,
 				last_sync_status="ok (moved to direct via admin)",
-				switch_status={"applied": False, "job": "x"},
+				switch_status={"applied": True, "run_id": "some-other-run", "job": "x", "next": None},
 			)
 
 		mock_end.assert_not_called()
 
-	def test_pool_fallback_delegates_to_enqueue_pool_sync_and_never_ends_here(self):
+	def test_a_terminal_outcome_with_no_run_id_never_touches_the_switch(self):
+		"""This worker was never released by any switch
+		(llm_switch_run_id=None - e.g. old data, or a plain apply) - must
+		never call llm_switch.finish at all."""
+		settings = _handover_ready_settings()
+		with patch("jarvis.chat.llm_switch.finish") as mock_finish:
+			self._run_with_follow_up(
+				settings, None, last_sync_status="ok (moved to direct via admin)", run_id=None
+			)
+
+		mock_finish.assert_not_called()
+
+	def test_pool_fallback_delegates_to_enqueue_pool_sync_and_never_touches_the_switch_here(self):
 		"""The retarget-vs-plain-enqueue decision now lives entirely inside
 		_switch_or_enqueue (review round 1: it OR's in
 		llm_switch.is_active()), so this worker just calls
@@ -876,11 +889,11 @@ class TestHandoverEndsTheSwitch(FrappeTestCase):
 		TestSwitchOrEnqueueJoinsAnActiveSwitch below."""
 		settings = _handover_ready_settings()
 		settings._enqueue_pool_sync = MagicMock()
-		with patch("jarvis.chat.llm_switch.end") as mock_end:
+		with patch("jarvis.chat.llm_switch.finish") as mock_finish:
 			self._run_with_follow_up(settings, "pool", last_sync_status="")
 
 		settings._enqueue_pool_sync.assert_called_once_with()
-		mock_end.assert_not_called()
+		mock_finish.assert_not_called()
 
 
 class TestPollersCallSwitchReconcile(FrappeTestCase):
@@ -991,39 +1004,84 @@ class TestSwitchOrEnqueueJoinsAnActiveSwitch(FrappeTestCase):
 		mock_begin.assert_not_called()
 
 
-class TestEndSwitchIfReleased(FrappeTestCase):
-	"""Critical fix: a job finishing while an active switch record exists but
-	is still HELD (not applied - it was never released to run) must not end
-	it - that record belongs to a switch still waiting on an in-flight reply
-	or the cap, and ending it here would clear the banner and promote queued
-	turns while nothing has actually moved."""
+class TestFinishSwitchRun(FrappeTestCase):
+	"""Review fix wave: _finish_switch_run(run_id) is the shared per-worker
+	``finally`` hook - a no-op when run_id is falsy (this job was never
+	released by any switch), enforces CR-0 (llm_switch.finish() must never
+	see a non-terminal status), and otherwise hands off to
+	llm_switch.finish(run_id, status)."""
 
-	def test_does_not_end_a_held_unapplied_switch(self):
+	def test_no_run_id_is_a_no_op(self):
+		with patch("jarvis.chat.llm_switch.finish") as mock_finish:
+			_finish_switch_run(None)
+
+		mock_finish.assert_not_called()
+
+	def test_terminal_status_is_passed_through_unchanged(self):
 		with (
-			patch("jarvis.chat.llm_switch.status", return_value={"applied": False, "job": "x"}),
-			patch("jarvis.chat.llm_switch.end") as mock_end,
+			patch("frappe.db.get_value", return_value="ok (restart via admin)"),
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
-			_end_switch_if_released("ok (something)")
+			_finish_switch_run("run-1")
 
-		mock_end.assert_not_called()
+		mock_finish.assert_called_once_with("run-1", "ok (restart via admin)")
 
-	def test_ends_an_applied_switch(self):
+	def test_a_pending_status_is_never_handed_to_finish(self):
+		"""CR-0: llm_switch.finish() must never see a non-terminal status - if
+		the worker exited without its own terminal write ever landing (an
+		uncaught exception past its own inner backstop), stamp the generic
+		failure here first, guarded exactly like every worker's own
+		backstop (_write_settings_fields + _commit_terminal_sync_status)."""
 		with (
-			patch("jarvis.chat.llm_switch.status", return_value={"applied": True, "job": "x"}),
-			patch("jarvis.chat.llm_switch.end") as mock_end,
+			patch("frappe.db.get_value", return_value="pending: provisioning container"),
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._write_settings_fields"
+			) as mock_write,
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._commit_terminal_sync_status"
+			) as mock_commit,
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
-			_end_switch_if_released("ok (something)")
+			_finish_switch_run("run-1")
 
-		mock_end.assert_called_once_with("ok (something)")
+		mock_write.assert_called_once()
+		self.assertEqual(
+			mock_write.call_args.args[1],
+			{"last_sync_status": "failed: unexpected error; see Error Log"},
+		)
+		mock_commit.assert_called_once()
+		mock_finish.assert_called_once_with("run-1", "failed: unexpected error; see Error Log")
 
-	def test_no_active_record_is_a_no_op(self):
+	def test_an_ok_or_failed_prefixed_status_is_never_rewritten(self):
+		"""Sanity check the other half of the CR-0 gate: an already-terminal
+		status (either prefix) must pass through untouched, never re-stamped
+		as the generic failure."""
+		for status in ("ok (restart via admin)", "failed: auth: token expired"):
+			with self.subTest(status=status):
+				with (
+					patch("frappe.db.get_value", return_value=status),
+					patch(
+						"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._write_settings_fields"
+					) as mock_write,
+					patch("jarvis.chat.llm_switch.finish") as mock_finish,
+				):
+					_finish_switch_run("run-1")
+
+				mock_write.assert_not_called()
+				mock_finish.assert_called_once_with("run-1", status)
+
+	def test_a_failure_reading_status_is_logged_not_raised(self):
+		"""CR-2: guard the status read so a DB hiccup here can never mask the
+		worker's own real exception propagating through its finally."""
 		with (
-			patch("jarvis.chat.llm_switch.status", return_value=None),
-			patch("jarvis.chat.llm_switch.end") as mock_end,
+			patch("frappe.db.get_value", side_effect=RuntimeError("db down")),
+			patch("frappe.log_error") as mock_log,
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
-			_end_switch_if_released("ok (something)")
+			_finish_switch_run("run-1")  # must not raise
 
-		mock_end.assert_not_called()
+		mock_log.assert_called_once()
+		mock_finish.assert_not_called()
 
 
 class TestResyncJoinsAnActiveSwitch(_RT3SettingsTestCase):
@@ -1122,32 +1180,31 @@ class TestResyncJoinsAnActiveSwitch(_RT3SettingsTestCase):
 class TestDirectLegJobEndsAnAppliedSwitch(FrappeTestCase):
 	"""Important fix #2: _enqueued_sync_via_admin (the direct-leg worker
 	request_resync's "restart" branch can now reach through an active switch)
-	ends an applied switch in its finally, exactly like the pool and handover
-	jobs - and, symmetrically, never ends one it did not release."""
+	finishes the run it was given in its finally, exactly like the pool and
+	handover jobs - and never touches a switch it was not released by
+	(llm_switch_run_id=None)."""
 
 	def test_ends_an_applied_switch_after_the_sync_runs(self):
 		settings = _handover_ready_settings()
 		settings._sync_via_admin = MagicMock()
 		with (
 			patch("frappe.get_single", return_value=settings),
-			patch("jarvis.chat.llm_switch.status", return_value={"applied": True, "job": "x"}),
-			patch("jarvis.chat.llm_switch.end") as mock_end,
 			patch("frappe.db.get_value", return_value="ok (restart via admin)"),
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
-			_enqueued_sync_via_admin("restart")
+			_enqueued_sync_via_admin("restart", llm_switch_run_id="run-1")
 
 		settings._sync_via_admin.assert_called_once_with("restart")
-		mock_end.assert_called_once_with("ok (restart via admin)")
+		mock_finish.assert_called_once_with("run-1", "ok (restart via admin)")
 
-	def test_does_not_end_a_held_unapplied_switch(self):
+	def test_no_run_id_never_touches_the_switch(self):
 		settings = _handover_ready_settings()
 		settings._sync_via_admin = MagicMock()
 		with (
 			patch("frappe.get_single", return_value=settings),
-			patch("jarvis.chat.llm_switch.status", return_value={"applied": False, "job": "x"}),
-			patch("jarvis.chat.llm_switch.end") as mock_end,
 			patch("frappe.db.get_value", return_value="ok (restart via admin)"),
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
 			_enqueued_sync_via_admin("restart")
 
-		mock_end.assert_not_called()
+		mock_finish.assert_not_called()
