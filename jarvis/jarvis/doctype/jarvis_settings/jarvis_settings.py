@@ -579,39 +579,76 @@ def _stamp_pool_pending(settings) -> None:
 def _switch_or_enqueue(settings, job: str, *, is_switch: bool, **kwargs) -> None:
 	"""Route a due sync job through ``llm_switch.begin()`` when it is a PROXY
 	SWITCH (jarvis#1425 follow-up, plans/2026-09-27-seamless-llm-switch-design.md
-	Part C "What counts as a switch"); otherwise enqueue exactly as every sync
-	job already does today.
+	Part C "What counts as a switch") OR a switch is ALREADY active; otherwise
+	enqueue exactly as every sync job already does today.
+
+	jarvis#1425 review round 1 (Critical): the ``llm_switch.is_active()`` OR is
+	load-bearing, not an optimization. While a switch is HELD (a record exists
+	but has not yet applied - it is waiting for an in-flight reply or the cap),
+	``last_sync_status`` already reads ``"pending: ..."``, so
+	``_pool_sync_is_redundant`` never short-circuits an UNRELATED background
+	save (pattern-learning windows, chat-device writes) that reaches this
+	function too. That save's OWN ``is_switch`` computation can read False even
+	though a switch is live - e.g. a pool save's ``_is_pool_switch()`` compares
+	against a before-doc whose ``proxy_active`` is ALREADY the switch's target
+	value (the ORIGINAL switch-triggering save wrote it before the container
+	itself ever moved) - so without this OR, that background save would
+	``frappe.enqueue`` directly, run at once (the held job was never actually
+	enqueued, so job-id dedup cannot absorb it), recreate the container
+	mid-reply, and its own terminal write would then let the caller wrongly
+	end the ORIGINAL held switch out from under it. Routing it through
+	``begin()`` instead is always safe: every enqueued sync worker re-reads
+	Jarvis Settings live at run time, so an idempotent retarget to a NEWER
+	job never loses a config - it is a single job further to run.
 
 	``kwargs`` must be the SAME ``job_id``/``deduplicate``/... kwargs the
 	direct ``frappe.enqueue`` call used - ``llm_switch.begin()`` (and its own
 	``_enqueue`` helper) never choose them, they only supply the shared
 	queue/timeout/inline envelope (task-4-report.md, "Concerns for Task 5").
 
-	Mirrors ``_enqueue_pool_sync``'s/``_enqueue_handover``'s own
-	inline-in-tests rule, applied to whichever call this becomes: inline under
-	``frappe.flags.in_test``/``run_admin_sync_inline`` (so a test observes the
-	effect with no poll/commit needed), otherwise deferred until the caller's
-	save actually COMMITS - ``frappe.db.after_commit``, mirroring
-	``enqueue_after_commit``'s own rule by hand - so a save that rolls back
-	never raises the banner (or enqueues a job) for a switch that never
-	happened."""
-	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
-	if not is_switch:
-		frappe.enqueue(
-			job,
-			queue="long",
-			timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
-			enqueue_after_commit=not run_inline,
-			now=run_inline,
-			**kwargs,
-		)
-		return
+	``llm_switch.begin()`` is called directly and owns its own inline-vs-
+	after-commit decision (review round 1: an earlier version of this
+	function re-implemented that same inline/after_commit check and wrapped
+	``begin`` in a SECOND ``frappe.db.after_commit.add`` - harmless but
+	pointless double indirection). The non-switch ``frappe.enqueue`` branch
+	still makes that decision itself, mirroring ``_enqueue_pool_sync``'s/
+	``_enqueue_handover``'s own inline-in-tests rule."""
 	from jarvis.chat import llm_switch
 
-	if run_inline:
+	if is_switch or llm_switch.is_active():
 		llm_switch.begin(job, **kwargs)
-	else:
-		frappe.db.after_commit.add(lambda: llm_switch.begin(job, **kwargs))
+		return
+	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
+	frappe.enqueue(
+		job,
+		queue="long",
+		timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
+		enqueue_after_commit=not run_inline,
+		now=run_inline,
+		**kwargs,
+	)
+
+
+def _end_switch_if_released(outcome: str) -> None:
+	"""End the active switch only if it RELEASED the job now finishing - i.e.
+	the record still shows ``applied: True``. jarvis#1425 review round 1
+	(Critical): a switch held but not yet applied (still waiting on an
+	in-flight reply, or the cap) must never be ended by a job that finishes
+	without having gone through it - the switch's own held job is still
+	sitting unenqueued, and ending here would clear the banner and promote
+	queued turns while nothing has actually moved. Call this from every
+	worker's terminal ``finally`` in place of ``llm_switch.end()`` directly.
+	A no-op when there is no active record, or the active one is still held
+	(not yet applied) - never raises (mirrors llm_switch's own never-raise
+	rule; do not edit llm_switch.py, so the guard lives here instead)."""
+	from jarvis.chat import llm_switch
+
+	try:
+		rec = llm_switch.status()
+		if rec and rec.get("applied"):
+			llm_switch.end(outcome)
+	except Exception:
+		frappe.log_error(title="Jarvis: llm_switch end-if-released failed", message=frappe.get_traceback())
 
 
 def _direct_subscription_blob(doc) -> tuple[str, dict]:
@@ -2501,25 +2538,19 @@ def _enqueued_sync_via_admin_pool(
 						pass
 	finally:
 		if not switch_continues:
-			# A no-op when there is no active switch (an ordinary, non-switch pool
-			# sync) - llm_switch.end() itself guards that. Every exit from this job
-			# EXCEPT the lock-race retry above is terminal for this run (ok,
-			# pending-retry, failed, skipped, or an uncaught exception reaching rq),
-			# so end unconditionally here rather than at each individual write
-			# site above - a later retry begins its OWN switch via a fresh
-			# _enqueue_pool_sync() call, exactly like the handover leg.
-			from jarvis.chat import llm_switch
-
-			try:
-				final_status = (
-					_frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-				)
-				llm_switch.end(final_status)
-			except Exception:
-				_frappe.log_error(
-					title="Jarvis: llm_switch.end failed (pool sync)",
-					message=_frappe.get_traceback(),
-				)
+			# _end_switch_if_released (review round 1, Critical) only ends the
+			# switch if IT released this run (record still shows applied=True) -
+			# a job that reached here WITHOUT going through the held switch (the
+			# review's bypass class) must never clear someone else's still-held
+			# hold. Every exit from this job EXCEPT the lock-race retry above is
+			# terminal for THIS run (ok, pending-retry, failed, skipped, or an
+			# uncaught exception reaching rq) - a later retry begins its OWN
+			# switch via a fresh _enqueue_pool_sync() call, exactly like the
+			# handover leg.
+			final_status = (
+				_frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+			)
+			_end_switch_if_released(final_status)
 
 
 # How long the descriptor-obtain waits for the admin-sync lock before handing the
@@ -2748,49 +2779,64 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 	crosses container state in unpredictable ways. The lock yields one
 	serial run; the late arrival waits up to 60s for the early one to
 	finish, then runs against the now-current doc state.
-	"""
+
+	jarvis#1425 review round 1: this is also the direct-leg (single-model)
+	sync job, which ``request_resync``'s "restart" branch now routes through
+	``_switch_or_enqueue`` (a switch can be active even on this leg - e.g. a
+	Resync re-driving a config that itself has no proxy notion at all, while
+	an UNRELATED pool switch elsewhere is held). ``_end_switch_if_released``
+	only ends the switch it actually released, so this is safe to call on
+	every action, switch or not - a no-op when no switch is active, or the
+	active one is still held by someone else."""
 	from jarvis._redis_lock import redis_lock
 
-	with redis_lock(
-		"jarvis_settings_admin_sync",
-		# TTL must cover a healthy holder running to its rq SIGALRM - see
-		# ADMIN_SYNC_LOCK_TIMEOUT_S. A 120s TTL under a 600s job would
-		# expire mid-run and admit a concurrent container mutation.
-		timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
-		blocking_timeout_s=_sync_lock_wait_s(retry_left),
-	) as acquired:
-		if not acquired:
-			settings = frappe.get_single("Jarvis Settings")
-			if retry_left > 0:
-				# Same retry chain as the pool worker: a sibling sync may
-				# now legitimately hold the lock for minutes (600s
-				# envelope), so a single 60s wait + terminal "failed:
-				# skipped" would silently DROP this credential change -
-				# chat would keep running on the old key with only a
-				# status line to notice.
+	switch_continues = False
+	try:
+		with redis_lock(
+			"jarvis_settings_admin_sync",
+			# TTL must cover a healthy holder running to its rq SIGALRM - see
+			# ADMIN_SYNC_LOCK_TIMEOUT_S. A 120s TTL under a 600s job would
+			# expire mid-run and admit a concurrent container mutation.
+			timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+			blocking_timeout_s=_sync_lock_wait_s(retry_left),
+		) as acquired:
+			if not acquired:
+				settings = frappe.get_single("Jarvis Settings")
+				if retry_left > 0:
+					# Same retry chain as the pool worker: a sibling sync may
+					# now legitimately hold the lock for minutes (600s
+					# envelope), so a single 60s wait + terminal "failed:
+					# skipped" would silently DROP this credential change -
+					# chat would keep running on the old key with only a
+					# status line to notice.
+					frappe.logger().warning(
+						"jarvis_settings: admin sync (action=%s) lost the lock race; scheduling retry (%d left)",
+						action,
+						retry_left - 1,
+					)
+					_schedule_sync_lock_retry(
+						method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
+						job_base=f"jarvis_settings_sync:{action}",
+						retry_left=retry_left,
+						action=action,
+					)
+					switch_continues = True
+					return
 				frappe.logger().warning(
-					"jarvis_settings: admin sync (action=%s) lost the lock race; scheduling retry (%d left)",
+					"jarvis_settings: skipping admin sync (action=%s); "
+					"another worker held the lock past blocking timeout (retries exhausted)",
 					action,
-					retry_left - 1,
 				)
-				_schedule_sync_lock_retry(
-					method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
-					job_base=f"jarvis_settings_sync:{action}",
-					retry_left=retry_left,
-					action=action,
+				_write_settings_fields(
+					settings, {"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"}
 				)
 				return
-			frappe.logger().warning(
-				"jarvis_settings: skipping admin sync (action=%s); "
-				"another worker held the lock past blocking timeout (retries exhausted)",
-				action,
-			)
-			_write_settings_fields(
-				settings, {"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"}
-			)
-			return
-		settings = frappe.get_single("Jarvis Settings")
-		settings._sync_via_admin(action)
+			settings = frappe.get_single("Jarvis Settings")
+			settings._sync_via_admin(action)
+	finally:
+		if not switch_continues:
+			status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+			_end_switch_if_released(status)
 
 
 def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
@@ -2806,15 +2852,20 @@ def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> N
 	where the switch itself continues elsewhere:
 	- a lock-race retry re-enqueues the SAME job under this SAME switch
 	  (``switch_continues``);
-	- a "pool" follow-up RETARGETS the still-open switch to the pool job
-	  (idempotent - see ``llm_switch.begin``) instead of a second,
-	  uncoordinated enqueue, when one is active; with no switch active (e.g.
-	  old data) it falls back to today's plain ``_enqueue_pool_sync()``;
+	- a "pool" follow-up calls ``settings._enqueue_pool_sync()`` exactly as
+	  before Task 5 - the retarget decision now lives entirely inside
+	  ``_switch_or_enqueue`` (review round 1: it OR's in
+	  ``llm_switch.is_active()``, so this still-open switch is picked up and
+	  retargeted there with no special-casing needed here; with no switch
+	  active - e.g. old data - it is today's plain enqueue, same as always);
 	- a "resync" follow-up hands off to ``request_resync``, which re-drives
-	  the NOW-current config (handover retarget, or an ordinary pool push);
+	  the NOW-current config (handover retarget, or an ordinary pool push -
+	  same reasoning: ``request_resync``'s own calls flow through
+	  ``_switch_or_enqueue`` too);
 	- every other outcome (a confirmed move, a bounded pending-retry, or a
 	  genuine failure - including one that re-raises) is terminal for THIS
-	  attempt, so the switch ends here and chat unblocks immediately; a later
+	  attempt, so the switch ends here (if it released this run - see
+	  ``_end_switch_if_released``) and chat unblocks immediately; a later
 	  retry (``reconcile_pending_llm_sync``) begins a NEW switch of its own -
 	  "a retry of a failed handover (attempt N) is a new switch"."""
 	from jarvis._redis_lock import redis_lock
@@ -2843,37 +2894,15 @@ def _enqueued_handover_via_admin(retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> N
 				return
 			follow_up = _handover_via_admin(frappe.get_single("Jarvis Settings"))
 		if follow_up == "pool":
-			settings = frappe.get_single("Jarvis Settings")
-			from jarvis.chat import llm_switch
-
-			if llm_switch.is_active():
-				_stamp_pool_pending(settings)
-				_switch_or_enqueue(
-					settings,
-					"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin_pool",
-					is_switch=True,
-					job_id="jarvis_settings_sync:pool",
-					deduplicate=True,
-					converge_teardown=False,
-					idempotency_key=None,
-				)
-			else:
-				settings._enqueue_pool_sync()
+			frappe.get_single("Jarvis Settings")._enqueue_pool_sync()
 			switch_continues = True
 		elif follow_up == "resync":
 			request_resync(frappe.get_single("Jarvis Settings"))
 			switch_continues = True
 	finally:
 		if not switch_continues:
-			from jarvis.chat import llm_switch
-
-			try:
-				status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-				llm_switch.end(status)
-			except Exception:
-				frappe.log_error(
-					title="Jarvis: llm_switch.end failed (handover)", message=frappe.get_traceback()
-				)
+			status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+			_end_switch_if_released(status)
 
 
 def _handover_via_admin(settings) -> str | None:
@@ -3061,7 +3090,14 @@ def request_resync(settings) -> str:
 	``get_doc_before_save()``, which is None outside an actual save, and its own
 	rule for a re-push of UNCHANGED creds after a non-ok status is "restart" anyway,
 	because a hot secret rotation cannot repair a container that never took the
-	config."""
+	config.
+
+	jarvis#1425 review round 1: both legs must join an ALREADY-active switch
+	instead of racing it - the pool leg's ``_enqueue_pool_sync()`` already does
+	(``_switch_or_enqueue`` ORs in ``llm_switch.is_active()``); the direct leg
+	has no proxy_active notion of its own to compare (no before-doc here
+	either), so it passes that same "is a switch active right now" signal
+	explicitly instead of a plain ``frappe.enqueue``."""
 	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
 
 	if lone_direct_handover_due(settings):
@@ -3092,12 +3128,12 @@ def request_resync(settings) -> str:
 		settings,
 		{"last_sync_status": "pending: provisioning container", "last_sync_requested_at": frappe.utils.now()},
 	)
-	frappe.enqueue(
+	from jarvis.chat import llm_switch
+
+	_switch_or_enqueue(
+		settings,
 		"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
-		queue="long",
-		timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
-		enqueue_after_commit=not (frappe.flags.in_test or frappe.flags.run_admin_sync_inline),
-		now=bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline),
+		is_switch=llm_switch.is_active(),
 		job_id="jarvis_settings_sync:restart",
 		deduplicate=True,
 		action="restart",
