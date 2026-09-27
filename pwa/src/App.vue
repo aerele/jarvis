@@ -11,7 +11,8 @@ import { store } from "./store";
 import { sessionUser } from "./router";
 import { showBanner, showNotice } from "./noticeGate";
 import { showAnnouncement } from "./announcementGate";
-import { holdActive, holdText } from "./maintenanceGate";
+import { holdActive, holdText, raiseHold, recheck } from "./maintenanceGate";
+import { makeOnLlmSwitch } from "./llmSwitch";
 import { installBannerVisible } from "./lib/installBanner";
 import { prefs } from "./lib/prefs";
 import { agentName } from "@/branding";
@@ -106,13 +107,22 @@ function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
 }
 
+// Built once, outside onMounted, so on/off pair against the same function identity.
+const onLlmSwitch = makeOnLlmSwitch({ raiseHold, recheck });
+
 onMounted(() => {
 	socket?.on("jarvis:event", onEvent);
+	// Registered here (the app shell, mounted once for the whole session) rather
+	// than in ChatView, which mounts/unmounts per conversation route: the hold
+	// strip this drives is rendered in the shell's own template below and must
+	// show on every route, not only while a conversation happens to be open.
+	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	document.addEventListener("visibilitychange", onVisibility);
 });
 onUnmounted(() => {
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
 });
