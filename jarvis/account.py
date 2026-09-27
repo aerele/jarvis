@@ -954,8 +954,21 @@ def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
 
 	Fails closed and never raises: an unreachable admin, a non-Ready verdict or a
 	failed write all leave the provisioning verdict standing.
-	"""
+
+	jarvis#1425 review (live e2e2, 2026-09-27): while a switch is HELD, admin's
+	"Ready" is about the config BEFORE the switch (nothing new has been pushed
+	yet) - this is the most likely actual path that stamped a false "ok" +
+	llm_pool_synced_at live (a held direct->proxy switch leaves
+	llm_pool_synced_at None, so is_ready_for_chat's pool branch calls straight
+	into this). No admin call, no stamp, and no miss-cache write during a hold
+	(a miss-cache write here would also suppress the FIRST real poll once the
+	switch actually ends). The switch's own released worker owns convergence
+	through its own _converge_via_admin loop."""
 	try:
+		from jarvis.chat import llm_switch
+
+		if llm_switch.is_active():
+			return False
 		cache = frappe.cache()
 		if cache.get_value(_APPLY_CONFIRM_MISS_KEY, expires=True):
 			return False

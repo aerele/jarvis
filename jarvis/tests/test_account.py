@@ -1069,6 +1069,79 @@ class TestIsReadyForChatCohorts(FrappeTestCase):
 		self.assertEqual(out["reason"], "llm_credentials")
 
 
+class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
+	"""jarvis#1425 review (live e2e2, 2026-09-27): _confirm_apply_via_admin is
+	the most likely actual culprit of the live "ok" + llm_pool_synced_at
+	stamped through a held switch - is_ready_for_chat's pool exit calls
+	straight into it whenever llm_pool_synced_at is unstamped, which is
+	exactly the state a held direct->proxy switch leaves it in. Reuses
+	TestEstablishedWorkspaceStaysInAppMidApply's exact pool-mode fixture
+	shape (pool patched on, llm_pool_synced_at None, a real admin key) but,
+	unlike that class, does NOT bypass _confirm_apply_via_admin - it drives
+	the real function so the switch guard is actually exercised."""
+
+	_FIELDS = ("llm_pool_synced_at", "last_sync_status")
+
+	def setUp(self):
+		from jarvis._password_utils import set_settings_password
+
+		account._bust_chat_gate()
+		self._snap = account._settings_raw(self._FIELDS)
+		set_settings_password(
+			frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key", "test-only-switch-guard-key"
+		)
+		frappe.db.set_value(
+			"Jarvis Settings", "Jarvis Settings", "llm_pool_synced_at", None, update_modified=False
+		)
+		frappe.db.set_value(
+			"Jarvis Settings",
+			"Jarvis Settings",
+			"last_sync_status",
+			"pending: provisioning container (pool)",
+			update_modified=False,
+		)
+		frappe.cache().delete_value(account._APPLY_CONFIRM_MISS_KEY)
+		self._pool_on = patch.object(account, "compute_pool_mode", return_value=True)
+		self._pool_on.start()
+
+	def tearDown(self):
+		from jarvis._password_utils import clear_settings_password
+
+		self._pool_on.stop()
+		clear_settings_password(frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key")
+		for f, v in self._snap.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
+		frappe.cache().delete_value(account._APPLY_CONFIRM_MISS_KEY)
+		account._bust_chat_gate()
+
+	def test_a_held_switch_blocks_the_stamp_and_reads_not_ready(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}),
+		):
+			out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"], "a held switch must never confirm off the PRE-switch Ready")
+		self.assertEqual(out["reason"], "llm_provisioning")
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertFalse(settings.llm_pool_synced_at)
+		self.assertEqual(settings.last_sync_status, "pending: provisioning container (pool)")
+
+	def test_no_switch_keeps_todays_behavior(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=False),
+			patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}),
+		):
+			out = account.is_ready_for_chat()
+		self.assertTrue(out["ready"], "no switch: admin Ready must still confirm as before")
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertTrue(settings.llm_pool_synced_at)
+		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
+
+
 class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 	"""jarvis C2: a fully-onboarded, chatting customer who adds a model in
 	Settings > AI models flips their config into pool mode for the FIRST

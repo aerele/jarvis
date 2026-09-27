@@ -46,6 +46,18 @@ TTL_S = 1200
 CAP_S = 300
 EVENT = "jarvis:llm_switch"
 MESSAGE = "Updating your AI setup. Chat will be back in a moment."
+# Self-heal grace (2026 review, third pass, "lost release"): a released job's
+# enqueue can be lost after the record already reads applied:True - a rollback
+# after enqueue_after_commit registered it (the exact residual this session
+# flagged: a worker's own backstop re-raises after the enqueue call, so RQ's
+# execute_job rolls back the transaction the after_commit callback was
+# registered in), a worker killed before it ever started, or a redis blip on
+# the enqueue call itself. Without this, the record is stuck applied:True with
+# nothing behind it until the full TTL_S (20 minutes) - the banner and the
+# send hold stay up the whole time. RELEASE_GRACE_S bounds how long a
+# genuinely in-flight enqueue (rq dequeue latency, a slow worker pool) gets
+# before a missing/failed job is treated as lost rather than merely pending.
+RELEASE_GRACE_S = 30
 
 # admission._shard_inflight's legacy (non-Turn-row) leg freshness-gates a streaming
 # assistant Message's `modified` at admission._INFLIGHT_FRESH_SECONDS (180s) - tuned
@@ -246,13 +258,78 @@ def _try_apply_locked(*, force: bool) -> bool:
 	itself, which would deadlock against the caller's own held lock (the underlying
 	redis-py lock is not reentrant)."""
 	rec = status()
-	if rec is None or rec.get("applied"):
+	if rec is None:
 		return False
+	if rec.get("applied"):
+		healed = _heal_lost_release_locked(rec)
+		if healed is None:
+			return False
+		rec = healed
 	if not force:
 		past_deadline = time.time() >= rec.get("deadline", 0)
 		if not past_deadline and _inflight() > 0:
 			return False
 	return _release_job_locked(rec["job"], rec["job_kwargs"], rec)
+
+
+def _rq_job_id(job_kwargs: dict, run_id: str) -> str | None:
+	"""The exact (un-site-prefixed) rq job id a release will enqueue under, or
+	``None`` when the caller passed no ``job_id`` (an untracked/unswitched
+	enqueue never reaches here, but any future switch job without a job_id
+	would - self-heal then has nothing to check and stays a no-op, never a
+	false positive). Mirrors ``_enqueue``'s own suffixing exactly; kept as one
+	shared computation so the two can never drift apart."""
+	job_id = job_kwargs.get("job_id")
+	return f"{job_id}:{run_id[:8]}" if job_id else None
+
+
+def _heal_lost_release_locked(rec: dict) -> dict | None:
+	"""Self-heal a release whose enqueue never landed (2026 review, third
+	pass, "lost release" - see ``RELEASE_GRACE_S``'s module comment). Assumes
+	the caller holds the ``jarvis_llm_switch`` lock and that ``rec.get(
+	"applied")`` is true. Returns the healed record (``applied: False``) when
+	it flips the record, else ``None`` (nothing to do - stay applied).
+
+	Conservative by construction: skipped entirely in-process (inline mode
+	has no rq job to check - a fast ``now=True`` call already ran and either
+	finished the switch or is genuinely, legitimately pending for its own
+	reason); skipped inside the grace window (rq dequeue latency is normal);
+	skipped when the job is QUEUED/STARTED/anything but missing-or-FAILED
+	(alive, leave it); skipped unless ``last_sync_status`` still reads
+	"pending" (a terminal status means finish()/end() already own this,
+	or reconcile() will via the terminal-status branch - never race that)."""
+	if frappe.flags.in_test or frappe.flags.run_admin_sync_inline:
+		return None
+	released_at = rec.get("released_at")
+	if not released_at or (time.time() - released_at) <= RELEASE_GRACE_S:
+		return None
+	rq_job_id = rec.get("rq_job_id")
+	if rq_job_id:
+		try:
+			from frappe.utils.background_jobs import get_job_status
+
+			job_status = get_job_status(rq_job_id)
+		except Exception:
+			return None  # can't tell right now; never guess a job away
+		if job_status is not None:
+			value = getattr(job_status, "value", None) or str(job_status)
+			if value != "failed":
+				return None  # queued/started/finished/... - alive or already settled
+	last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+	if not last_status.startswith("pending"):
+		return None
+	frappe.log_error(
+		title="llm_switch: healing a lost release",
+		message=(
+			f"run_id={rec.get('run_id')!r} rq_job_id={rq_job_id!r} "
+			f"released_at={released_at!r} last_sync_status={last_status!r} - "
+			"the job is missing or failed past the grace window; re-releasing "
+			"under a fresh run_id."
+		),
+	)
+	healed = {**rec, "applied": False}
+	frappe.cache().set_value(KEY, healed, expires_in_sec=TTL_S)
+	return healed
 
 
 def _release_job_locked(
@@ -268,7 +345,12 @@ def _release_job_locked(
 	captured when it was parked, see ``_begin_now``). Returns whether the enqueue
 	landed; on failure, records ``applied: False`` so the next ``try_apply()``
 	trigger (a settle callback, a poller) retries instead of stranding the switch
-	for the full 20-minute TTL."""
+	for the full 20-minute TTL.
+
+	``released_at``/``rq_job_id`` (2026 review, third pass): recorded here, not
+	after the enqueue call, so a crash between the two (or the enqueue itself
+	losing the race - the exact "lost release" class) still leaves a record
+	``_heal_lost_release_locked`` can act on past the grace window."""
 	run_id = uuid.uuid4().hex
 	rec = {
 		**base_rec,
@@ -277,6 +359,8 @@ def _release_job_locked(
 		"applied": True,
 		"next": None,
 		"run_id": run_id,
+		"released_at": time.time(),
+		"rq_job_id": _rq_job_id(job_kwargs, run_id),
 	}
 	frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
 	try:
@@ -328,9 +412,9 @@ def _enqueue(job: str, kwargs: dict, run_id: str, *, pending_status: str | None 
 	_write_settings_fields(frappe._dict(), fields)
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	enqueue_kwargs = dict(kwargs)
-	job_id = enqueue_kwargs.get("job_id")
-	if job_id:
-		enqueue_kwargs["job_id"] = f"{job_id}:{run_id[:8]}"
+	rq_job_id = _rq_job_id(kwargs, run_id)
+	if rq_job_id:
+		enqueue_kwargs["job_id"] = rq_job_id
 	enqueue_kwargs["llm_switch_run_id"] = run_id
 	frappe.enqueue(
 		job,

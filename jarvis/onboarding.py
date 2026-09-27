@@ -2684,6 +2684,7 @@ def resync_llm() -> dict:
 	  * ``not_configured`` - nothing saved to re-drive; nothing was queued.
 	"""
 	from jarvis.account import _has_llm_config
+	from jarvis.chat import llm_switch
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 		_admin_chat_readiness,
 		_stamp_converged_ok,
@@ -2702,7 +2703,7 @@ def resync_llm() -> dict:
 		return {**_sync_status_payload(settings, status), "outcome": "not_configured", "leg": ""}
 
 	state, _reason = _admin_chat_readiness()
-	if state == "Ready" and not lone_direct_handover_due(settings):
+	if state == "Ready" and not lone_direct_handover_due(settings) and not llm_switch.is_active():
 		# READY MEANS NEVER PUSH, whether or not our own stamp lands. Making the push
 		# conditional on the stamp succeeding would restart a healthy container in
 		# precisely the situation this endpoint exists to handle gently: five writers
@@ -2711,7 +2712,11 @@ def resync_llm() -> dict:
 		# jarvis#1425: EXCEPT while a handover is due - the still-pooled container
 		# reporting Ready is exactly the state this endpoint must NOT stamp as
 		# converged, or the handover that request_resync below would enqueue never
-		# runs.
+		# runs. Same reasoning extends to any held switch (review, live e2e2,
+		# 2026-09-27): Ready describes the PRE-switch config, so a Resync click
+		# during a hold must fall through to request_resync below (which already
+		# joins an active switch) instead of stamping a config nothing has served
+		# yet.
 		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
 			# The stamp's own commit gate only fires in a worker; this is a request.
 			frappe.db.commit()
