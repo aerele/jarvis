@@ -1471,7 +1471,7 @@ class TestRelayMuxSteps(FrappeTestCase):
 # exactly what relay_mux.py's HARD INVARIANTS say the real reader thread looks
 # like - no inherited frappe.local (Python's contextvars do not propagate to a
 # new thread; frappe.local is a plain ContextVar-backed namespace, see
-# jarvis.chat.runtime_profile) - then call dispatch() on this test's own
+# frappe.utils.local.Local) - then call dispatch() on this test's own
 # FrappeTestCase thread, which does have one. That split is the whole fix.
 # --------------------------------------------------------------------------- #
 
@@ -1521,6 +1521,11 @@ class TestReaderThreadIsFrappeFree(FrappeTestCase):
 		# reads frappe.db and FAIL-OPENS to [] on any error - no crash, just a
 		# customer's control-plane redaction rule silently never applied.
 		egress_rules.persist([["acme", "remove"]])
+		# Belt and braces against get_rules()'s cache=True Single read, same as
+		# test_egress_rules._set_raw / test_egress_wiring._cache_rules: persist()
+		# already invalidates the per-request memo, but this also drops the
+		# document cache so the read that follows cannot serve a stale blob.
+		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
 		mux, rec = self._mux_with_lane()
 
 		step_frame = _agent_frame(

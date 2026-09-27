@@ -824,10 +824,17 @@ class RelayMux:
 		# pump is the default transport, so this is the primary delivery path).
 		red, rels, marked = egress_rules.redact_final_with_media(raw["text"], run_id=raw["run_id"])
 		# The saved reply keeps only the answer: step text the model wrote
-		# before its tool calls was shown live and is removed here.
-		answer = strip_steps(red, raw["steps"])
+		# before its tool calls was shown live and is removed here. ``red`` is
+		# already redacted, so match against REDACTED step text too - a raw step
+		# string containing a brand token would otherwise never be found in the
+		# now-scrubbed final and would survive (itself redacted, so no leak, but
+		# left sitting in the saved reply as ordinary content instead of being
+		# stripped like every other step).
+		redacted_steps = [egress_rules.redact(step) for step in raw["steps"]]
+		answer = strip_steps(red, redacted_steps)
 		reshow = None
-		if raw["steps"] and answer and answer != raw["shown_text"]:
+		shown_text = egress_rules.redact(raw["shown_text"])
+		if raw["steps"] and answer and answer != shown_text:
 			# The saved reply keeps text the live view had hidden (e.g. a short
 			# answer written before a card tool call): show it again before the
 			# terminal lands. The mirror stays the redacted full raw stream,
@@ -1122,7 +1129,21 @@ class RelayMux:
 			elif ev.kind == "terminal":
 				term_kind, term_payload, reshow = self._finalize_terminal(lane, ev)
 				if reshow is not None and h.on_delta is not None:
-					h.on_delta(reshow["seq"], reshow["text"], reshow["delta"], reshow["shown"])
+					# The reshow is a LOSSY delta in spirit (it only re-shows text a
+					# later delta would otherwise supersede): isolate its own raise
+					# so a transient on_delta fault (e.g. a flush hitting a DB
+					# blip) drops+continues, same as any other poison delta, and
+					# never quarantines the terminal that follows it.
+					try:
+						h.on_delta(reshow["seq"], reshow["text"], reshow["delta"], reshow["shown"])
+					except Exception:
+						lane.poison_count += 1
+						self._bump("deltas_dropped")
+						_logger.debug(
+							"relay_mux: poison reshow delta on run=%s dropped, terminal continues",
+							lane.run_id,
+							exc_info=True,
+						)
 				if h.on_terminal is not None:
 					h.on_terminal(term_kind, term_payload)
 				# The terminal is normally the last frame of a run — retire the
