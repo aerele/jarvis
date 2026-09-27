@@ -100,7 +100,11 @@ class TestUserMemoryTools(FrappeTestCase):
 		frappe.set_user(self.a)
 		remember(content="- secret-A")
 		frappe.set_user(self.b)
-		# get_all honors get_permission_query_conditions (and B has no DocPerm) - either
-		# way B enumerates none of A's rows.
-		rows = frappe.get_all("Jarvis User Memory", fields=["user"])
+		# The permission-CHECKED list path (get_list applies DocPerm +
+		# get_permission_query_conditions; get_all deliberately bypasses both). B is
+		# either denied outright (no DocPerm) or scoped to its own rows - never A's.
+		try:
+			rows = frappe.get_list("Jarvis User Memory", fields=["user"])
+		except frappe.PermissionError:
+			rows = []
 		self.assertNotIn(self.a, [r.user for r in rows])
