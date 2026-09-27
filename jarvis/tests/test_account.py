@@ -1080,7 +1080,13 @@ class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
 	unlike that class, does NOT bypass _confirm_apply_via_admin - it drives
 	the real function so the switch guard is actually exercised."""
 
-	_FIELDS = ("llm_pool_synced_at", "last_sync_status")
+	_FIELDS = (
+		"llm_pool_synced_at",
+		"last_sync_status",
+		"chat_was_ready_at",
+		"chat_ready_authority",
+		"last_sync_requested_at",
+	)
 
 	def setUp(self):
 		from jarvis._password_utils import set_settings_password
@@ -1090,19 +1096,26 @@ class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
 		set_settings_password(
 			frappe.get_single("Jarvis Settings"), "jarvis_admin_api_key", "test-only-switch-guard-key"
 		)
-		frappe.db.set_value(
-			"Jarvis Settings", "Jarvis Settings", "llm_pool_synced_at", None, update_modified=False
-		)
-		frappe.db.set_value(
-			"Jarvis Settings",
-			"Jarvis Settings",
-			"last_sync_status",
-			"pending: provisioning container (pool)",
-			update_modified=False,
+		self._write(
+			{
+				"llm_pool_synced_at": None,
+				"last_sync_status": "pending: provisioning container (pool)",
+				# A leaked established marker or a recent request timestamp from an
+				# earlier class would flip the hard llm_pool_provisioning reason to
+				# the soft llm_applying one - pin both away, same as
+				# TestEstablishedWorkspaceStaysInAppMidApply's own setUp.
+				"chat_was_ready_at": None,
+				"chat_ready_authority": "",
+				"last_sync_requested_at": None,
+			}
 		)
 		frappe.cache().delete_value(account._APPLY_CONFIRM_MISS_KEY)
 		self._pool_on = patch.object(account, "compute_pool_mode", return_value=True)
 		self._pool_on.start()
+
+	def _write(self, values: dict) -> None:
+		for f, v in values.items():
+			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", f, v, update_modified=False)
 
 	def tearDown(self):
 		from jarvis._password_utils import clear_settings_password
@@ -1123,7 +1136,7 @@ class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
 		):
 			out = account.is_ready_for_chat()
 		self.assertFalse(out["ready"], "a held switch must never confirm off the PRE-switch Ready")
-		self.assertEqual(out["reason"], "llm_provisioning")
+		self.assertEqual(out["reason"], "llm_pool_provisioning")
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertFalse(settings.llm_pool_synced_at)
 		self.assertEqual(settings.last_sync_status, "pending: provisioning container (pool)")

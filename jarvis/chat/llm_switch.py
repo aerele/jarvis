@@ -294,27 +294,37 @@ def _heal_lost_release_locked(rec: dict) -> dict | None:
 	has no rq job to check - a fast ``now=True`` call already ran and either
 	finished the switch or is genuinely, legitimately pending for its own
 	reason); skipped inside the grace window (rq dequeue latency is normal);
-	skipped when the job is QUEUED/STARTED/anything but missing-or-FAILED
-	(alive, leave it); skipped unless ``last_sync_status`` still reads
-	"pending" (a terminal status means finish()/end() already own this,
-	or reconcile() will via the terminal-status branch - never race that)."""
+	skipped with no ``rq_job_id`` to check at all (every real release stamps
+	one - see ``_release_job_locked`` - so this is a defensive "nothing to
+	act on" no-op, never a guess that a job is gone); skipped when the job is
+	QUEUED/STARTED/anything but missing-or-FAILED (alive, leave it); skipped
+	unless ``last_sync_status`` still reads "pending" (a terminal status means
+	finish()/end() already own this, or reconcile() will via the
+	terminal-status branch - never race that).
+
+	A parked ``next`` (a retarget that arrived while this now-lost run was
+	still "executing") is PROMOTED into the healed record - latest wins, same
+	as ``_begin_now``'s own not-yet-applied retarget - so a config change that
+	arrived after the lost release is never silently dropped in favour of the
+	stale one ``_try_apply_locked`` would otherwise re-release."""
 	if frappe.flags.in_test or frappe.flags.run_admin_sync_inline:
 		return None
 	released_at = rec.get("released_at")
 	if not released_at or (time.time() - released_at) <= RELEASE_GRACE_S:
 		return None
 	rq_job_id = rec.get("rq_job_id")
-	if rq_job_id:
-		try:
-			from frappe.utils.background_jobs import get_job_status
+	if not rq_job_id:
+		return None
+	try:
+		from frappe.utils.background_jobs import get_job_status
 
-			job_status = get_job_status(rq_job_id)
-		except Exception:
-			return None  # can't tell right now; never guess a job away
-		if job_status is not None:
-			value = getattr(job_status, "value", None) or str(job_status)
-			if value != "failed":
-				return None  # queued/started/finished/... - alive or already settled
+		job_status = get_job_status(rq_job_id)
+	except Exception:
+		return None  # can't tell right now; never guess a job away
+	if job_status is not None:
+		value = getattr(job_status, "value", None) or str(job_status)
+		if value != "failed":
+			return None  # queued/started/finished/... - alive or already settled
 	last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
 	if not last_status.startswith("pending"):
 		return None
@@ -328,6 +338,9 @@ def _heal_lost_release_locked(rec: dict) -> dict | None:
 		),
 	)
 	healed = {**rec, "applied": False}
+	next_apply = rec.get("next")
+	if next_apply:
+		healed = {**healed, "job": next_apply["job"], "job_kwargs": next_apply["job_kwargs"], "next": None}
 	frappe.cache().set_value(KEY, healed, expires_in_sec=TTL_S)
 	return healed
 

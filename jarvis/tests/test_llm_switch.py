@@ -667,6 +667,49 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 		self.assertIsNone(healed)
 		self.assertEqual(llm_switch.status(), rec)
 
+	def test_heal_with_no_rq_job_id_is_a_no_op(self):
+		"""Defensive only: every real release stamps rq_job_id (see
+		_release_job_locked); a record with none is never a "job confirmed
+		gone" guess."""
+		self._lost_release_record(released_at=time.time() - llm_switch.RELEASE_GRACE_S - 1)
+		self._stamp_pending_status()
+		rec = {**llm_switch.status(), "rq_job_id": None}
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		with patch("frappe.utils.background_jobs.get_job_status") as get_status:
+			healed = llm_switch._heal_lost_release_locked(rec)
+			get_status.assert_not_called()
+		self.assertIsNone(healed)
+
+	def test_heal_promotes_a_parked_next_instead_of_re_releasing_the_stale_job(self):
+		"""A retarget that arrived while this now-lost run was "executing"
+		parked in rec["next"] - healing must release THAT config, not the
+		stale one the lost run was carrying, or a config change made during
+		the loss window would be silently dropped."""
+		rec = {
+			"started_at": time.time() - 100,
+			"deadline": time.time() + 200,
+			"job": "jarvis.tests.stale_job",
+			"job_kwargs": {"job_id": "jarvis_settings_sync:pool"},
+			"applied": True,
+			"run_id": "stale-run",
+			"next": {
+				"job": "jarvis.tests.fresh_job",
+				"job_kwargs": {"job_id": "jarvis_settings_sync:pool", "fresh": True},
+				"pending_status": "pending: admin applying config",
+			},
+			"released_at": time.time() - llm_switch.RELEASE_GRACE_S - 1,
+			"rq_job_id": self._RQ_JOB_ID,
+		}
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		self._stamp_pending_status()
+		with patch("frappe.utils.background_jobs.get_job_status", return_value=None):
+			healed = llm_switch._heal_lost_release_locked(rec)
+		self.assertIsNotNone(healed)
+		self.assertEqual(healed["job"], "jarvis.tests.fresh_job")
+		self.assertEqual(healed["job_kwargs"], {"job_id": "jarvis_settings_sync:pool", "fresh": True})
+		self.assertIsNone(healed["next"])
+		self.assertFalse(healed["applied"])
+
 	def test_heal_leaves_a_terminal_status_alone(self):
 		"""A terminal last_sync_status means finish()/end() already own this (or
 		reconcile()'s own terminal-status branch will) - healing must never
