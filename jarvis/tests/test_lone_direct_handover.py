@@ -479,7 +479,17 @@ class TestOnUpdateRoutesToHandover(_RT3SettingsTestCase):
 			settings.save()  # no pool-relevant change
 
 		mock_pool.assert_not_called()
-		mock_handover.assert_not_called()
+		if mock_handover.called:
+			# Diagnostic only (2026 review, CI finding): a prior run failed here
+			# with no captured context on WHICH of _pool_sync_is_redundant's own
+			# conditions tripped - surface it without weakening the check itself.
+			from jarvis.chat import llm_switch
+
+			raise AssertionError(
+				"_enqueue_handover unexpectedly called - "
+				f"llm_switch.status()={llm_switch.status()!r} "
+				f"last_sync_status={frappe.db.get_value('Jarvis Settings', 'Jarvis Settings', 'last_sync_status')!r}"
+			)
 
 
 class TestReconcileRedrivesHandover(FrappeTestCase):

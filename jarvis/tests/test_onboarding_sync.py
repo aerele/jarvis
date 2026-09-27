@@ -527,7 +527,9 @@ class TestGetLlmSyncStatus(FrappeTestCase):
 				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness",
 				return_value=("Ready", ""),
 			),
-			patch.object(llm_switch, "is_active", return_value=True),
+			# jarvis#1425 review, fourth pass: the guard now reads
+			# llm_switch.blocks_stamp() (True unless applied AND awaiting_admin).
+			patch.object(llm_switch, "blocks_stamp", return_value=True),
 		):
 			out = onboarding.get_llm_sync_status()
 		self.assertEqual(out["last_sync_status"], "pending: admin applying config")

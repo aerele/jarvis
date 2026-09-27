@@ -553,6 +553,27 @@ class TestAwaitingAdmin(_LlmSwitchTestCase):
 		mock_end.assert_called_once()
 		self.assertTrue(mock_end.call_args.args[0].startswith("ok"))
 
+	def test_reconcile_ends_immediately_without_a_second_probe_when_already_terminal(self):
+		"""jarvis#1425 review, scoped re-review ("avoid the double admin
+		round-trip"): one of the four converged-ok guard sites just stamped
+		from its OWN Ready probe (or a failure landed) - reconcile() must end
+		the switch on that status directly, never spending a second admin
+		round-trip to re-learn what is already on the record."""
+		self._applied_record(run_id="run-1", awaiting_admin=True)
+		frappe.db.set_single_value(
+			"Jarvis Settings",
+			{"last_sync_status": "ok (converged via admin reconcile)"},
+			update_modified=False,
+		)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness") as readiness,
+			patch.object(llm_switch, "end") as mock_end,
+		):
+			llm_switch.reconcile()
+		readiness.assert_not_called()
+		mock_end.assert_called_once_with("ok (converged via admin reconcile)")
+
 	def test_reconcile_leaves_it_awaiting_when_admin_is_not_ready(self):
 		rec = self._applied_record(run_id="run-1", awaiting_admin=True)
 		with (

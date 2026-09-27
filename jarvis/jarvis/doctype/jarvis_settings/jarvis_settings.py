@@ -3576,6 +3576,13 @@ def reconcile_pending_llm_sync() -> None:
 				# once instead of waiting for the next tick.
 				if not llm_switch.blocks_stamp():
 					if _stamp_converged_ok(settings, is_pool=pool_mode):
+						# Explicit + idempotent, same pattern as
+						# llm_switch._reconcile_awaiting_admin's own call: this
+						# function runs as a scheduled job (frappe.local.job set),
+						# so _stamp_converged_ok's own internal call already
+						# committed - this is a harmless no-op repeat, kept for
+						# consistency with every other stamp-then-reconcile site.
+						_commit_terminal_sync_status()
 						llm_switch.reconcile()
 			return
 		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):

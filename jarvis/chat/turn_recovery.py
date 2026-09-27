@@ -211,6 +211,12 @@ def _finalize(row: dict, text: str, *, media_rels: list[str] | None = None) -> N
 		},
 	):
 		return  # another cycle already finalized this row
+	# jarvis#1425 review (scoped re-review, 2026-09-27): this leaves
+	# streaming=1/recovering=1 (an in-flight-adjacent state) right after its
+	# own commit above - poke a held switch forward.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="turn_recovery._finalize")
 	conv, owner, name = row["conversation"], row["owner"], row["name"]
 	# Phase-0 admission: a recovered turn is a terminal settlement of the
 	# conversation's dispatching Turn row - close it (done) + promote the next
@@ -306,6 +312,11 @@ def _error(row: dict, message: str) -> None:
 		},
 	):
 		return
+	# jarvis#1425 review (scoped re-review, 2026-09-27): poke a held switch
+	# forward right after this terminal write's own commit above.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="turn_recovery._error")
 	_admission_settle_conv(row["conversation"], "errored", message)
 	publish_to_user(
 		row["owner"],

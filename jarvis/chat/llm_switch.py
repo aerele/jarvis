@@ -721,9 +721,17 @@ def _reconcile_awaiting_admin(rec: dict) -> None:
 	raises - called from ``reconcile()``'s own try/except, but the throttle
 	check touches redis on its own before that guard, so it gets one too."""
 	run_id = rec.get("run_id")
+	status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+	# Already terminal (2026 review, "avoid the double admin round-trip"): one
+	# of the four converged-ok guard sites just stamped from ITS OWN Ready
+	# probe (or a failure landed via some other path) and is about to call
+	# (or just called) reconcile() right after - no need for a SECOND admin
+	# round-trip here to learn what is already on the record.
+	if status_now.startswith("ok") or status_now.startswith("failed:"):
+		finish(run_id, status_now)
+		return
 	awaiting_since = rec.get("awaiting_since") or 0
 	if time.time() - awaiting_since >= AWAIT_ADMIN_MAX_S:
-		status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
 		finish(run_id, status_now)
 		return
 	try:
@@ -735,6 +743,7 @@ def _reconcile_awaiting_admin(rec: dict) -> None:
 		return
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 		_admin_chat_readiness,
+		_commit_terminal_sync_status,
 		_stamp_converged_ok,
 	)
 	from jarvis.jarvis.pool_serialize import compute_pool_mode
@@ -743,8 +752,20 @@ def _reconcile_awaiting_admin(rec: dict) -> None:
 	if state != "Ready":
 		return
 	settings = frappe.get_single("Jarvis Settings")
-	if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
-		frappe.db.commit()
+	# 2026 review (standing Frappe rule, "no bare frappe.db.commit()"): this
+	# function can run inside account._confirm_apply_via_admin ->
+	# is_ready_for_chat on the desk-boot GET, whose own docstring warns a bare
+	# commit there would commit whatever else that GET happens to be
+	# carrying. _stamp_converged_ok already routes its own write through this
+	# SAME gated helper (commits only in a job/migrate context via
+	# frappe.local.job; a POST commits on its own at request end; a GET rolls
+	# back and the next probe re-confirms - acceptable, since the switch
+	# still only ends on admin's own Ready). The call below is a second,
+	# idempotent no-op in every context except one this function does not
+	# control - it is what makes calling this from ANY caller safe without
+	# knowing which context it is.
+	_stamp_converged_ok(settings, is_pool=compute_pool_mode(settings))
+	_commit_terminal_sync_status()
 	status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
 	finish(run_id, status_now)
 

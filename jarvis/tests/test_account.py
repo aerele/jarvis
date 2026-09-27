@@ -1131,7 +1131,9 @@ class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
 		from jarvis.chat import llm_switch
 
 		with (
-			patch.object(llm_switch, "is_active", return_value=True),
+			# jarvis#1425 review, fourth pass: the guard now reads
+			# llm_switch.blocks_stamp() (True unless applied AND awaiting_admin).
+			patch.object(llm_switch, "blocks_stamp", return_value=True),
 			patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}),
 		):
 			out = account.is_ready_for_chat()
@@ -1145,7 +1147,7 @@ class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
 		from jarvis.chat import llm_switch
 
 		with (
-			patch.object(llm_switch, "is_active", return_value=False),
+			patch.object(llm_switch, "blocks_stamp", return_value=False),
 			patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Ready"}),
 		):
 			out = account.is_ready_for_chat()

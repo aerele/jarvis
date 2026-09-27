@@ -4867,7 +4867,11 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
 		with (
 			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
-			patch.object(llm_switch, "is_active", return_value=True),
+			# jarvis#1425 review, fourth pass: the guard now reads
+			# llm_switch.blocks_stamp() (True unless applied AND awaiting_admin -
+			# a held-but-not-yet-applied switch always blocks), not a plain
+			# is_active() check.
+			patch.object(llm_switch, "blocks_stamp", return_value=True),
 		):
 			reconcile_pending_llm_sync()
 		settings = frappe.get_single("Jarvis Settings")
