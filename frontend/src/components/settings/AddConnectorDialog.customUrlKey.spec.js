@@ -110,3 +110,37 @@ describe("AddConnectorDialog: Custom URL key vs sign-in", () => {
 		expect(byLabel(wrapper, "Use a key instead").exists()).toBe(false);
 	});
 });
+
+describe("AddConnectorDialog: presets that refuse a key", () => {
+	const entry = (name, key, accepts_key) => ({
+		name,
+		key,
+		auth: "static",
+		category: "files",
+		description: name,
+		accepts_key,
+	});
+	const catalog = [
+		entry("Google Drive", "google_drive", false),
+		entry("GitHub", "github", true),
+	];
+
+	async function opened(preset) {
+		const wrapper = mount(AddConnectorDialog, {
+			props: { modelValue: false, preset, catalog },
+		});
+		await wrapper.setProps({ modelValue: true });
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("hides Use a key instead for a sign-in-only preset", async () => {
+		const wrapper = await opened("Google Drive");
+		expect(byLabel(wrapper, "Use a key instead").exists()).toBe(false);
+	});
+
+	it("keeps Use a key instead for a sign-in preset that takes keys", async () => {
+		const wrapper = await opened("GitHub");
+		expect(byLabel(wrapper, "Use a key instead").exists()).toBe(true);
+	});
+});

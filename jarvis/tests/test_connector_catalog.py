@@ -190,6 +190,7 @@ class TestToPublic(unittest.TestCase):
 			"description",
 			"token_hint",
 			"token_help_url",
+			"accepts_key",
 		}
 		for row in catalog.to_public():
 			self.assertEqual(set(row), allowed)
@@ -606,6 +607,40 @@ class TestAuthorizeParams(unittest.TestCase):
 			]
 		)
 		self.assertEqual(catalog.authorize_params_of("Acme", providers=added), {"prompt": "consent"})
+
+
+class TestAcceptsKey(unittest.TestCase):
+	"""`accepts_key=False` hides "Use a key instead" and refuses a key row for a
+	sign-in preset whose server takes only its own sign-in tokens."""
+
+	GOOGLE = {"Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"}
+
+	def test_only_google_refuses_a_key(self):
+		self.assertEqual({p.name for p in catalog.PROVIDERS if not p.accepts_key}, self.GOOGLE)
+
+	def test_accepts_key_of(self):
+		self.assertFalse(catalog.accepts_key_of("Google Drive"))
+		self.assertTrue(catalog.accepts_key_of("GitHub"))
+		self.assertTrue(catalog.accepts_key_of("Stripe"))
+		# Nothing is known about a Custom URL server, so a key stays on offer.
+		self.assertTrue(catalog.accepts_key_of(catalog.CUSTOM_URL))
+
+	def test_to_public_ships_the_flag(self):
+		public = {row["name"]: row["accepts_key"] for row in catalog.to_public()}
+		self.assertFalse(public["Google Drive"])
+		self.assertTrue(public["GitHub"])
+
+	def test_only_a_sign_in_preset_may_refuse_a_key(self):
+		for base in ("Stripe", "Microsoft Learn"):
+			bad = replace(catalog.by_name(base), name="Bad", key="bad", accepts_key=False)
+			with self.assertRaises(ValueError):
+				catalog.validate((bad,))
+
+	def test_overlay_may_not_change_it(self):
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay([{"name": "Gmail", "accepts_key": True}])
+		same = catalog.apply_overlay([{"name": "Gmail", "accepts_key": False}])
+		self.assertFalse(catalog.accepts_key_of("Gmail", providers=same))
 
 
 class TestGapAnalysisEntries(unittest.TestCase):

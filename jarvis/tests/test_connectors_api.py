@@ -229,6 +229,44 @@ class TestAddConnector(_ConnectorApiTestCase):
 		self.assertIs(out["enabled"], False)
 		self.assertEqual(frappe.db.get_value(CONNECTOR, out["name"], "enabled"), 0)
 
+	def test_sign_in_only_preset_refuses_a_key(self):
+		# Google's servers take only their own sign-in tokens (catalog accepts_key=False).
+		frappe.set_user(PLAIN_A)
+		before = frappe.db.count(CONNECTOR, {"preset": "Google Drive"})
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(preset="Google Drive", scope="Personal", credential="ya29.x")
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": "Google Drive"}), before)
+
+	def _google_key_doc(self):
+		return frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": "google_drive",
+				"label": "Google Drive",
+				"preset": "Google Drive",
+				"scope": "Personal",
+				"auth_method": "API Key",
+				"base_url": catalog.base_urls()["Google Drive"],
+				"credential": "ya29.x",
+			}
+		)
+
+	def test_raw_insert_of_a_key_row_for_a_sign_in_only_preset_is_refused(self):
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.PermissionError):
+			self._google_key_doc().insert()
+
+	def test_an_existing_key_row_for_a_sign_in_only_preset_still_saves(self):
+		# A row saved before accepts_key existed must still relabel or disable.
+		frappe.set_user(PLAIN_A)
+		doc = self._google_key_doc()
+		doc.insert(ignore_permissions=True)
+		self._connectors.append(doc.name)
+		doc.reload()
+		doc.label = "Drive (old key)"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Drive (old key)")
+
 
 class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 	"""Plaid ships disabled (its endpoint speaks the older transport). Disabled

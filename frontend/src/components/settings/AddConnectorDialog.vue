@@ -827,6 +827,9 @@ const showUseKeyInsteadLink = computed(
 	() =>
 		!isEdit.value &&
 		(cardKind.value === "signin" || cardKind.value === "register") &&
+		// Some servers take only their own sign-in tokens (Google); the catalog
+		// says so, and a Custom URL has no entry, so it keeps the option.
+		catalogEntry.value?.accepts_key !== false &&
 		(!rowName.value || isPlaceholder.value)
 );
 const showSignInInsteadLink = computed(
