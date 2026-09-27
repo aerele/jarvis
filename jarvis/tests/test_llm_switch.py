@@ -259,6 +259,141 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 		self.assertIsNone(llm_switch.status())  # no record was ever created
 
 
+class TestHandoffPreservesPendingStatus(_LlmSwitchTestCase):
+	"""2026 review, second pass (Critical): releasing a parked ``next`` must
+	re-stamp last_sync_status back to a pending string. The run being handed
+	off just wrote its OWN terminal status ("ok ..."/"failed: ...") over
+	last_sync_status before calling finish() - without the re-stamp, a
+	poller's reconcile() running right after the hand-off (every held-chat
+	poll runs one via maintenance_notice.check()) would read that STALE
+	terminal status, match it against the freshly-minted run_id finish() just
+	stored, and wrongly end the switch while the handed-off job is still
+	queued or running."""
+
+	def test_a_hand_off_re_stamps_pending_so_reconcile_does_not_end_it_early(self):
+		# A begins and applies (job A running) - its own caller stamped a
+		# pending status first, exactly as every real enqueue path does.
+		frappe.db.set_single_value(
+			"Jarvis Settings",
+			{"last_sync_status": "pending: provisioning container (pool)"},
+			update_modified=False,
+		)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.enqueue"),
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.begin("jarvis.tests.job_a", job_id="jarvis_settings_sync:pool", deduplicate=True)
+		run_id_a = llm_switch.status()["run_id"]
+
+		# B retargets while A is still running - a fresh save stamped its OWN
+		# pending status before this begin() call, same as any real caller.
+		frappe.db.set_single_value(
+			"Jarvis Settings",
+			{"last_sync_status": "pending: provisioning container (pool)"},
+			update_modified=False,
+		)
+		with patch.object(llm_switch, "_inflight", return_value=5):
+			llm_switch.begin(
+				"jarvis.tests.job_b", other="kw", job_id="jarvis_settings_sync:pool", deduplicate=True
+			)
+		self.assertEqual(
+			llm_switch.status()["next"]["pending_status"], "pending: provisioning container (pool)"
+		)
+
+		# A's worker finishes and writes ITS OWN terminal status over
+		# last_sync_status, then calls finish() - this is the hand-off.
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "ok (pool_update via admin)"}, update_modified=False
+		)
+		with (
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.publish_realtime") as mock_pub,
+		):
+			llm_switch.finish(run_id_a, "ok (pool_update via admin)")
+
+		mock_pub.assert_not_called()  # hand-off, not end - no "done" broadcast
+		mock_enqueue.assert_called_once()
+		rec = llm_switch.status()
+		self.assertIsNotNone(rec)
+		run_id_b = rec["run_id"]
+		self.assertNotEqual(run_id_b, run_id_a)
+		self.assertEqual(rec["job"], "jarvis.tests.job_b")
+		current_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status")
+		self.assertTrue(current_status.startswith("pending"), current_status)
+
+		# A reconcile() poll right after the hand-off must NOT end the switch -
+		# last_sync_status correctly reads pending again, not A's stale "ok".
+		with (
+			patch("frappe.publish_realtime") as mock_pub2,
+			patch.object(admission, "promote_next") as mock_promote2,
+		):
+			llm_switch.reconcile()
+		mock_pub2.assert_not_called()
+		mock_promote2.assert_not_called()
+		self.assertIsNotNone(llm_switch.status())
+
+		# B's own terminal write + finish(run_id_b) ends the switch for real.
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "ok (pool_update via admin)"}, update_modified=False
+		)
+		with (
+			patch("frappe.publish_realtime") as mock_pub3,
+			patch.object(admission, "promote_next") as mock_promote3,
+		):
+			llm_switch.finish(run_id_b, "ok (pool_update via admin)")
+		mock_pub3.assert_called_once()
+		mock_promote3.assert_called_once()
+		self.assertIsNone(llm_switch.status())
+
+	def test_a_parked_handover_preserves_its_attempt_string(self):
+		"""The fallback ("pending: applying") must never actually be needed
+		for a real handover park - the attempt suffix ("pending: handover to
+		direct (attempt N)") the handover's own enqueue path stamps must
+		survive the park/release round trip untouched, since
+		_handover_attempt() parses it later to bound retries."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import _PENDING_HANDOVER_STATUS
+
+		attempt_status = f"{_PENDING_HANDOVER_STATUS} (attempt 2)"
+		frappe.db.set_single_value(
+			"Jarvis Settings",
+			{"last_sync_status": "pending: provisioning container (pool)"},
+			update_modified=False,
+		)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.enqueue"),
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.begin("jarvis.tests.job_a", job_id="jarvis_settings_sync:pool", deduplicate=True)
+		run_id_a = llm_switch.status()["run_id"]
+
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": attempt_status}, update_modified=False
+		)
+		with patch.object(llm_switch, "_inflight", return_value=5):
+			llm_switch.begin(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
+				job_id="jarvis_settings_sync:handover",
+				deduplicate=True,
+			)
+
+		self.assertEqual(llm_switch.status()["next"]["pending_status"], attempt_status)
+
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "ok (pool_update via admin)"}, update_modified=False
+		)
+		with (
+			patch("frappe.enqueue"),
+			patch("frappe.publish_realtime"),
+		):
+			llm_switch.finish(run_id_a, "ok (pool_update via admin)")
+
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status"), attempt_status
+		)
+
+
 class TestNeverRaises(_LlmSwitchTestCase):
 	"""Fix round 1 (2026 review): begin()'s after-commit callback, try_apply() (which
 	backs a whitelisted poller via reconcile()) and reconcile() itself must never

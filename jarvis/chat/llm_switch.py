@@ -19,10 +19,20 @@ job-id dedup (STARTED reads like QUEUED to rq's dedup, so reusing a job_id
 across two releases could silently drop the newer one). A retarget that
 arrives while the current run is still executing does NOT force a second
 enqueue for the same container - it parks the newer job in ``rec["next"]``
-(latest wins); the running job's own ``finish(run_id, outcome)`` call releases
-it as a fresh run once it reports its outcome. ``finish()`` acts only when the
-caller's ``run_id`` still matches the active record's - a job that was never
-released by the switch (or has since been superseded) must not touch it."""
+(``{"job", "job_kwargs", "pending_status"}`` - latest wins); the running
+job's own ``finish(run_id, outcome)`` call releases it as a fresh run once it
+reports its outcome. ``finish()`` acts only when the caller's ``run_id``
+still matches the active record's - a job that was never released by the
+switch (or has since been superseded) must not touch it.
+
+2026 review, second pass (Critical): releasing a parked ``next`` re-stamps
+last_sync_status to its own captured ``pending_status`` (the string the
+caller stamped when it was parked) - the run being handed off just wrote ITS
+OWN terminal status over last_sync_status, and without the re-stamp a
+poller's ``reconcile()`` (every held-chat poll runs one, see
+``maintenance_notice.check()``) would read that stale terminal status,
+match it against the freshly-minted run_id, and wrongly end the switch while
+the handed-off job is still queued or running."""
 
 from __future__ import annotations
 
@@ -174,7 +184,29 @@ def _begin_now(job: str, kwargs: dict) -> None:
 				# reconcile() poll, once it reaches a terminal status) releases
 				# it as a FRESH run. No second banner - the switch is already
 				# showing one.
-				rec = {**rec, "next": {"job": job, "job_kwargs": kwargs}}
+				#
+				# 2026 review, second pass (Critical): also capture the
+				# "pending: ..." status the CALLER already stamped on Jarvis
+				# Settings before reaching begin() (every enqueue path stamps
+				# one first) - the currently-running job will overwrite
+				# last_sync_status with ITS OWN terminal outcome before this
+				# park is ever released, and without re-stamping it back at
+				# release time, a poller's reconcile() (maintenance_notice.check()
+				# runs on every held-chat poll) would read that STALE terminal
+				# status, match it against the NEW run_id finish() just minted,
+				# and wrongly end the switch while the handed-off job is still
+				# queued or running. The fallback only guards a state that
+				# should not occur - every existing enqueue path stamps
+				# "pending: ..." synchronously before calling begin().
+				pending_status = (
+					frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+				)
+				if not pending_status.startswith("pending"):
+					pending_status = "pending: applying"
+				rec = {
+					**rec,
+					"next": {"job": job, "job_kwargs": kwargs, "pending_status": pending_status},
+				}
 				frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
 				return
 			rec = {**rec, "job": job, "job_kwargs": kwargs, "next": None}
@@ -223,16 +255,20 @@ def _try_apply_locked(*, force: bool) -> bool:
 	return _release_job_locked(rec["job"], rec["job_kwargs"], rec)
 
 
-def _release_job_locked(job: str, job_kwargs: dict, base_rec: dict) -> bool:
+def _release_job_locked(
+	job: str, job_kwargs: dict, base_rec: dict, *, pending_status: str | None = None
+) -> bool:
 	"""Enqueue ``job`` under a FRESH run_id and store the resulting record in one
 	write (the run_id is generated BEFORE the enqueue call, not after, so there is
 	no window where the record reads ``applied: True`` under a STALE run_id).
 	Assumes the caller holds the ``jarvis_llm_switch`` lock. Shared by
-	``_try_apply_locked`` (a held switch's first release) and ``finish()`` (handing
-	off a parked ``next`` to a new run). Returns whether the enqueue landed; on
-	failure, records ``applied: False`` so the next ``try_apply()`` trigger (a
-	settle callback, a poller) retries instead of stranding the switch for the full
-	20-minute TTL."""
+	``_try_apply_locked`` (a held switch's first release - ``pending_status`` stays
+	``None``, the caller's own pending stamp is still fresh) and ``finish()``
+	(handing off a parked ``next`` to a new run - ``pending_status`` is the string
+	captured when it was parked, see ``_begin_now``). Returns whether the enqueue
+	landed; on failure, records ``applied: False`` so the next ``try_apply()``
+	trigger (a settle callback, a poller) retries instead of stranding the switch
+	for the full 20-minute TTL."""
 	run_id = uuid.uuid4().hex
 	rec = {
 		**base_rec,
@@ -244,7 +280,7 @@ def _release_job_locked(job: str, job_kwargs: dict, base_rec: dict) -> bool:
 	}
 	frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
 	try:
-		_enqueue(job, job_kwargs, run_id)
+		_enqueue(job, job_kwargs, run_id, pending_status=pending_status)
 	except Exception:
 		frappe.cache().set_value(KEY, {**rec, "applied": False}, expires_in_sec=TTL_S)
 		frappe.log_error(title="llm_switch._enqueue failed", message=frappe.get_traceback())
@@ -252,7 +288,7 @@ def _release_job_locked(job: str, job_kwargs: dict, base_rec: dict) -> bool:
 	return True
 
 
-def _enqueue(job: str, kwargs: dict, run_id: str) -> None:
+def _enqueue(job: str, kwargs: dict, run_id: str, *, pending_status: str | None = None) -> None:
 	"""Mirror JarvisSettings._enqueue_pool_sync / _enqueue_handover's enqueue rules
 	exactly (queue, timeout, inline-in-tests, enqueue_after_commit) and re-stamp
 	last_sync_requested_at - readiness' 15-minute applying window and the handover
@@ -267,6 +303,16 @@ def _enqueue(job: str, kwargs: dict, run_id: str) -> None:
 	like a QUEUED one for dedup purposes, so reusing a job_id across two releases
 	could silently drop the newer one.
 
+	``pending_status`` (2026 review, second pass, "stale terminal status on
+	hand-off"): set ONLY when releasing a job parked in ``next``. The run this
+	hand-off is replacing just wrote its OWN terminal status ("ok ..."/"failed:
+	...") over last_sync_status; re-stamping it back to the pending string the
+	parked job was stamped with when it parked - in the SAME write as
+	last_sync_requested_at, so no extra commit is needed - means a poller's
+	reconcile() running right after the hand-off reads "pending: ...", not the
+	PRIOR run's stale terminal status, and never wrongly ends the switch while
+	the handed-off job is still queued or running.
+
 	frappe._dict() (not frappe.get_single) is enough here: _write_settings_fields
 	only needs something to call .update() on, and the real write is the
 	frappe.db.set_single_value it already does - fetching the Single doc just to
@@ -276,7 +322,10 @@ def _enqueue(job: str, kwargs: dict, run_id: str) -> None:
 		_write_settings_fields,
 	)
 
-	_write_settings_fields(frappe._dict(), {"last_sync_requested_at": frappe.utils.now()})
+	fields = {"last_sync_requested_at": frappe.utils.now()}
+	if pending_status:
+		fields["last_sync_status"] = pending_status
+	_write_settings_fields(frappe._dict(), fields)
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	enqueue_kwargs = dict(kwargs)
 	job_id = enqueue_kwargs.get("job_id")
@@ -372,7 +421,12 @@ def finish(run_id: str | None, outcome: str) -> None:
 				return
 			next_apply = rec.get("next")
 			if next_apply:
-				_release_job_locked(next_apply["job"], next_apply["job_kwargs"], rec)
+				_release_job_locked(
+					next_apply["job"],
+					next_apply["job_kwargs"],
+					rec,
+					pending_status=next_apply.get("pending_status"),
+				)
 				return
 			should_end = True
 	except Exception:
