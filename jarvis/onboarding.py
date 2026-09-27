@@ -792,23 +792,37 @@ def save_llm_pool(
 		mode = "legacy"
 		readiness_budget_s = 300
 	elif compute_pool_mode(s):
-		# The durable apply operation lives on the POOL path (admin creates it in
-		# update_llm_pool). Push synchronously and hand its descriptor back so the
-		# SPA follows ONE operation across save -> apply -> readiness.
-		outcome = sync_pool_now(idempotency_key=idempotency_key or None, force_probe=force_probe)
-		apply_operation = outcome.get("apply_operation")
-		resumable = bool(outcome.get("resumable"))
-		retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
-		# An OLD admin (no plan-05 apply-operation) that succeeded WITHOUT a descriptor
-		# is a capability degrade, not a failure: report mode:"legacy" so the SPA falls
-		# back to the bounded fail-closed readiness poll instead of a support dead-end
-		# on a genuinely successful apply (F1).
-		mode = "legacy" if (apply_operation is None and outcome.get("legacy_capability")) else "operation"
-		if apply_operation and consumed_capture_ids:
-			# Audit only (best-effort): tie the adopted captures to the operation.
-			pending_capture.mark_consumed_by_operation(
-				consumed_capture_ids, apply_operation.get("operation_id")
-			)
+		if s._is_pool_switch():
+			# jarvis#1425 follow-up (seamless switch, spec Part C): this Apply
+			# flips proxy_active (adding a model back turns the proxy back on, or
+			# a converge-teardown turns it off) - sync_pool_now would push
+			# SYNCHRONOUSLY and recreate the container immediately, cutting
+			# whatever reply is in flight. Route through llm_switch instead, via
+			# the SAME async pool-sync path the background on_update case uses
+			# (it already carries this exact is_switch check) - no apply-operation
+			# descriptor, so the SPA follows the legacy readiness poll, sized like
+			# the handover leg above.
+			s._enqueue_pool_sync(idempotency_key=idempotency_key or None)
+			mode = "legacy"
+			readiness_budget_s = 300
+		else:
+			# The durable apply operation lives on the POOL path (admin creates it in
+			# update_llm_pool). Push synchronously and hand its descriptor back so the
+			# SPA follows ONE operation across save -> apply -> readiness.
+			outcome = sync_pool_now(idempotency_key=idempotency_key or None, force_probe=force_probe)
+			apply_operation = outcome.get("apply_operation")
+			resumable = bool(outcome.get("resumable"))
+			retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
+			# An OLD admin (no plan-05 apply-operation) that succeeded WITHOUT a descriptor
+			# is a capability degrade, not a failure: report mode:"legacy" so the SPA falls
+			# back to the bounded fail-closed readiness poll instead of a support dead-end
+			# on a genuinely successful apply (F1).
+			mode = "legacy" if (apply_operation is None and outcome.get("legacy_capability")) else "operation"
+			if apply_operation and consumed_capture_ids:
+				# Audit only (best-effort): tie the adopted captures to the operation.
+				pending_capture.mark_consumed_by_operation(
+					consumed_capture_ids, apply_operation.get("operation_id")
+				)
 	else:
 		# Single-model (creds) path: on_update enqueued the async creds sync, and
 		# admin's creds endpoint mints no apply operation, so there is no descriptor
@@ -2541,7 +2555,20 @@ def get_llm_sync_status() -> dict:
 	    needs no server-side change to reach the client). A corrupt/empty
 	    stored value for either list degrades to ``[]`` rather than ever
 	    500ing this poller.
+
+	    jarvis#1425 follow-up (seamless switch, spec Part C): this poller also
+	    drives ``llm_switch`` forward - ``reconcile()`` applies a held switch
+	    past its cap and ends one whose apply already reached a terminal
+	    status - since the SPA runs this poller every few seconds while an
+	    apply is pending, same as the scheduled ``reconcile_pending_llm_sync``.
 	"""
+	from jarvis.chat import llm_switch
+
+	try:
+		llm_switch.reconcile()
+	except Exception:
+		frappe.log_error(title="Jarvis: llm_switch.reconcile failed", message=frappe.get_traceback())
+
 	s = frappe.get_single("Jarvis Settings")
 	status = s.get("last_sync_status") or ""
 
