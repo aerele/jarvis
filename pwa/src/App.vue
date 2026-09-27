@@ -11,7 +11,7 @@ import { store } from "./store";
 import { sessionUser } from "./router";
 import { showBanner, showNotice } from "./noticeGate";
 import { showAnnouncement } from "./announcementGate";
-import { holdActive, holdText, raiseHold, recheck } from "./maintenanceGate";
+import { holdActive, holdText, raiseHold, clearHold, recheck } from "./maintenanceGate";
 import { makeOnLlmSwitch } from "./llmSwitch";
 import { installBannerVisible } from "./lib/installBanner";
 import { prefs } from "./lib/prefs";
@@ -108,7 +108,7 @@ function onVisibility() {
 }
 
 // Built once, outside onMounted, so on/off pair against the same function identity.
-const onLlmSwitch = makeOnLlmSwitch({ raiseHold, recheck });
+const onLlmSwitch = makeOnLlmSwitch({ raiseHold, clearHold, recheck });
 
 onMounted(() => {
 	socket?.on("jarvis:event", onEvent);

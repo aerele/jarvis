@@ -10,10 +10,13 @@
 // in isolation; the real gate is wired once at the call site (App.vue).
 export const SWITCH_MESSAGE = "Updating your AI setup. Chat will be back in a moment.";
 
-// gate: {raiseHold, recheck} - normally maintenanceGate's own exports, passed in by
-// the caller. Returns the socket handler. No new component: "switching" raises the
-// same hold App.vue already renders, "done" re-checks it (recheck() also stops the
-// hold's own poll once it clears).
+// gate: {raiseHold, clearHold, recheck} - normally maintenanceGate's own exports,
+// passed in by the caller. Returns the socket handler. No new component: "switching"
+// raises the same hold App.vue already renders; "done" clears it immediately (so the
+// strip never waits on the hold's own 60s idle poll, which is skipped outright while a
+// recheck from some other trigger is already in flight) and THEN rechecks the control
+// plane, which re-raises the hold if an unrelated operator maintenance notice is also
+// active.
 export function makeOnLlmSwitch(gate) {
 	return function onLlmSwitch(payload) {
 		switch (payload?.state) {
@@ -21,6 +24,7 @@ export function makeOnLlmSwitch(gate) {
 				gate.raiseHold(SWITCH_MESSAGE);
 				break;
 			case "done":
+				gate.clearHold();
 				gate.recheck();
 				break;
 			default:

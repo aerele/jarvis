@@ -5,9 +5,12 @@
 // apply, and {state: "done", outcome} once the apply has finished - no message on
 // either payload, so this module carries the ONE line of copy that matches the
 // server's own MESSAGE constant (llm_switch.MESSAGE) rather than round-tripping for
-// it. No new component: "switching" raises the same hold Banner.vue already renders,
-// "done" re-checks it (recheck() also stops the hold's own poll once it clears).
-import { raiseHold, recheck } from "@/maintenanceGate";
+// it. No new component: "switching" raises the same hold Banner.vue already renders;
+// "done" clears it immediately (so the banner never waits on the hold's own 60s idle
+// poll, which is skipped outright while a recheck from some other trigger is already
+// in flight) and THEN rechecks the control plane, which re-raises the hold if an
+// unrelated operator maintenance notice is also active.
+import { raiseHold, clearHold, recheck } from "@/maintenanceGate";
 
 // Kept identical to jarvis/chat/llm_switch.py MESSAGE. Duplicated (not fetched) so the
 // banner appears the instant the switch starts, before any round-trip could complete.
@@ -19,6 +22,7 @@ export function onLlmSwitch(payload) {
 			raiseHold(SWITCH_MESSAGE);
 			break;
 		case "done":
+			clearHold();
 			recheck();
 			break;
 		default:
