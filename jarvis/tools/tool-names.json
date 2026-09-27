@@ -18,11 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-<<<<<<< HEAD
-  "digest": "sha256:bb833f23a2899a266d34187a225a8334ffb2c7d82bc5cdb5dff2ccc801ad016b",
-=======
-  "digest": "sha256:7912c0a059a22a5d3af4b4e4f5a46b52d1778006c2180f23223a99a9d26a45b6",
->>>>>>> bdbe363 (fix(ci): regenerate tool-names.json for recall/remember; list test uses get_list)
+  "digest": "sha256:ff321012221837b21b8eebdecb176dbdfe3e888d79611274d10cb39006e4c87f",
   "tools": [
     "add_comment",
     "add_tag",
