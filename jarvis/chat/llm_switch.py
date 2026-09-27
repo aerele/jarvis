@@ -93,7 +93,12 @@ def begin(job: str, **kwargs) -> None:
 	re-drive) is re-targeted to the new job with NO second broadcast. If the active
 	switch had already applied, the container is already restarting for the OLD job
 	and there is nothing left to drain, so the retargeted job is applied right away;
-	otherwise the retarget just changes what the pending apply will run."""
+	otherwise the retarget just changes what the pending apply will run.
+
+	``_begin_now`` (queued here, or run inline) never raises: frappe's
+	CallbackManager does not wrap ``after_commit`` callbacks in try/except, so an
+	uncaught error here would surface in whatever request or job happens to trigger
+	the NEXT commit, whose own write already landed (2026 review round 1)."""
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	if run_inline:
 		_begin_now(job, kwargs)
@@ -102,24 +107,46 @@ def begin(job: str, **kwargs) -> None:
 
 
 def _begin_now(job: str, kwargs: dict) -> None:
-	rec = status()
-	if rec is None:
-		rec = {
-			"started_at": time.time(),
-			"deadline": time.time() + CAP_S,
-			"job": job,
-			"job_kwargs": kwargs,
-			"applied": False,
-		}
-		frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
-		_broadcast("switching")
-		try_apply()
-		return
+	"""Runs the whole check-then-create-or-retarget decision under the
+	``jarvis_llm_switch`` lock, end to end (2026 review round 1: the previous version
+	checked ``status()`` and created the record OUTSIDE any lock, so two concurrent
+	``begin()`` calls could both see no active record and both broadcast a
+	"switching" banner). A short bounded wait (unlike ``try_apply``'s non-blocking
+	acquire, which is called from many places and can just let a LATER trigger drive
+	the existing record forward): here, losing the race silently would drop this
+	call's own ``job`` on the floor, so it is worth a brief wait for the concurrent
+	``begin()``/``try_apply()`` to finish rather than a bare no-op."""
+	try:
+		from jarvis._redis_lock import redis_lock
 
-	was_applied = bool(rec.get("applied"))
-	rec = {**rec, "job": job, "job_kwargs": kwargs, "applied": False}
-	frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
-	try_apply(force=was_applied)
+		with redis_lock("jarvis_llm_switch", blocking_timeout_s=2.0) as acquired:
+			if not acquired:
+				frappe.log_error(
+					title="llm_switch.begin lock contended",
+					message=f"job={job!r} - a concurrent begin()/try_apply() held the lock past "
+					"the 2s wait; the record it left in place (if any) still drives forward via "
+					"the next settle/poller try_apply() trigger.",
+				)
+				return
+			rec = status()
+			if rec is None:
+				rec = {
+					"started_at": time.time(),
+					"deadline": time.time() + CAP_S,
+					"job": job,
+					"job_kwargs": kwargs,
+					"applied": False,
+				}
+				frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
+				_broadcast("switching")
+				_try_apply_locked(force=False)
+				return
+			was_applied = bool(rec.get("applied"))
+			rec = {**rec, "job": job, "job_kwargs": kwargs, "applied": False}
+			frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
+			_try_apply_locked(force=was_applied)
+	except Exception:
+		frappe.log_error(title="llm_switch.begin failed", message=frappe.get_traceback())
 
 
 def try_apply(*, force: bool = False) -> bool:
@@ -128,23 +155,48 @@ def try_apply(*, force: bool = False) -> bool:
 	switch - see begin()). Under a redis lock (a cache compare-and-set alone is not
 	atomic); the enqueued job's own job_id + deduplicate=True is the backstop against
 	a double-fire that slips past the lock. Safe to call from anywhere, any number of
-	times - a no-op when there is no active switch or it already applied."""
-	from jarvis._redis_lock import redis_lock
+	times - a no-op when there is no active switch or it already applied.
 
-	with redis_lock("jarvis_llm_switch") as acquired:
-		if not acquired:
-			return False
-		rec = status()
-		if rec is None or rec.get("applied"):
-			return False
-		if not force:
-			past_deadline = time.time() >= rec.get("deadline", 0)
-			if not past_deadline and _inflight() > 0:
+	Never raises (2026 review round 1): this backs a whitelisted poller
+	(``onboarding.get_llm_sync_status`` via ``reconcile()``, Task 5) as well as every
+	``settle_turn``/``settle_conversation_dispatching`` call, so a transient redis or
+	DB error here must degrade to "didn't apply this time", not a 500."""
+	try:
+		from jarvis._redis_lock import redis_lock
+
+		with redis_lock("jarvis_llm_switch") as acquired:
+			if not acquired:
 				return False
-		rec = {**rec, "applied": True}
-		frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
+			return _try_apply_locked(force=force)
+	except Exception:
+		frappe.log_error(title="llm_switch.try_apply failed", message=frappe.get_traceback())
+		return False
+
+
+def _try_apply_locked(*, force: bool) -> bool:
+	"""The actual apply decision + enqueue. Assumes the caller (``try_apply()`` or
+	``_begin_now()``) already holds the ``jarvis_llm_switch`` lock - never acquires it
+	itself, which would deadlock against the caller's own held lock (the underlying
+	redis-py lock is not reentrant)."""
+	rec = status()
+	if rec is None or rec.get("applied"):
+		return False
+	if not force:
+		past_deadline = time.time() >= rec.get("deadline", 0)
+		if not past_deadline and _inflight() > 0:
+			return False
+	frappe.cache().set_value(KEY, {**rec, "applied": True}, expires_in_sec=TTL_S)
+	try:
 		_enqueue(rec["job"], rec["job_kwargs"])
-		return True
+	except Exception:
+		# 2026 review round 1: don't strand the switch behind a record that says
+		# "applied" when the enqueue never landed - reset it so the next try_apply()
+		# trigger (a settle callback, a poller) retries instead of waiting out the
+		# full 20-minute TTL.
+		frappe.cache().set_value(KEY, {**rec, "applied": False}, expires_in_sec=TTL_S)
+		frappe.log_error(title="llm_switch._enqueue failed", message=frappe.get_traceback())
+		return False
+	return True
 
 
 def _enqueue(job: str, kwargs: dict) -> None:
@@ -201,11 +253,18 @@ def reconcile() -> None:
 	Precondition this relies on: the caller stamps a "pending: ..." last_sync_status
 	BEFORE begin() enqueues (every existing sync helper already does this), so seeing
 	"ok"/"failed:" here means THIS switch's apply landed, not a status left over from
-	before the switch started."""
-	try_apply()
-	rec = status()
-	if not rec or not rec.get("applied"):
-		return
-	last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
-	if last_status.startswith("ok") or last_status.startswith("failed:"):
-		end(last_status)
+	before the switch started.
+
+	Never raises (2026 review round 1): this backs ``get_llm_sync_status``, a
+	whitelisted endpoint the SPA polls - a transient redis/DB error must degrade to
+	"didn't reconcile this poll", not a 500 in front of the user."""
+	try:
+		try_apply()
+		rec = status()
+		if not rec or not rec.get("applied"):
+			return
+		last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		if last_status.startswith("ok") or last_status.startswith("failed:"):
+			end(last_status)
+	except Exception:
+		frappe.log_error(title="llm_switch.reconcile failed", message=frappe.get_traceback())

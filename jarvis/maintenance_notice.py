@@ -65,7 +65,7 @@ def _mirror_payload() -> dict:
 			"message": row.get("maintenance_message") or "",
 		}
 	except Exception:
-		frappe.log_error(title="maintenance_notice.boot_payload failed", message=frappe.get_traceback())
+		frappe.log_error(title="maintenance_notice._mirror_payload failed", message=frappe.get_traceback())
 		return {"active": False, "message": ""}
 
 

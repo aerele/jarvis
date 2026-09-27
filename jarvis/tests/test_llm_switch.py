@@ -142,6 +142,58 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 		self.assertTrue(llm_switch.status()["applied"])
 
 
+class TestNeverRaises(_LlmSwitchTestCase):
+	"""Fix round 1 (2026 review): begin()'s after-commit callback, try_apply() (which
+	backs a whitelisted poller via reconcile()) and reconcile() itself must never
+	raise - frappe's CallbackManager does not wrap after_commit callbacks in
+	try/except, and a raise out of a whitelisted endpoint is a 500 in front of the
+	user. Also covers the enqueue-failure reset (Fix 4): a switch must not get stuck
+	"applied" forever when the enqueue call itself blows up."""
+
+	def test_begin_after_commit_path_survives_inflight_error(self):
+		"""``_begin_now`` is exactly what the after_commit callback runs (inline here
+		only because frappe.flags.in_test makes begin() take the inline branch - the
+		function under test is identical either way)."""
+		with (
+			patch.object(llm_switch, "_inflight", side_effect=RuntimeError("redis down")),
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.publish_realtime"),
+			patch("frappe.log_error") as mock_log,
+		):
+			llm_switch.begin("jarvis.tests.fake_job")  # must not raise
+
+		mock_enqueue.assert_not_called()
+		mock_log.assert_called()
+		self.assertFalse(llm_switch.status()["applied"])
+
+	def test_reconcile_survives_a_lock_error(self):
+		with (
+			patch("jarvis._redis_lock.redis_lock", side_effect=RuntimeError("redis down")),
+			patch("frappe.log_error") as mock_log,
+		):
+			llm_switch.reconcile()  # must not raise
+
+		mock_log.assert_called()
+
+	def test_enqueue_failure_resets_applied_and_a_later_try_apply_enqueues(self):
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.publish_realtime"),
+			patch("frappe.enqueue", side_effect=[RuntimeError("boom"), None]) as mock_enqueue,
+			patch("frappe.log_error") as mock_log,
+		):
+			llm_switch.begin("jarvis.tests.fake_job")
+
+			self.assertFalse(llm_switch.status()["applied"])
+			mock_log.assert_called()
+
+			second = llm_switch.try_apply()
+
+		self.assertTrue(second)
+		self.assertEqual(mock_enqueue.call_count, 2)
+		self.assertTrue(llm_switch.status()["applied"])
+
+
 class TestEnd(_LlmSwitchTestCase):
 	def test_end_clears_and_broadcasts_and_promotes(self):
 		with (
