@@ -32,6 +32,13 @@ HARD INVARIANTS (this component is TRANSPORT-PURE):
     queue with an explicit overflow policy), NEVER invokes a lane callback, and
     NEVER sends. Lane application is caller-driven via ``dispatch`` so it runs
     on the pump's thread (which owns the DB connection).
+  * The reader makes NO ``egress_rules`` / ``generated_media`` / ``frappe.cache``
+    call either (a site DB read, same constraint as the write ban above): it
+    queues RAW text and lets ``dispatch()`` / ``_apply`` / ``_finalize_terminal``
+    - which run on the pump thread - redact and step-strip it before a lane
+    callback ever sees it (the #1449 regression was exactly this rule broken:
+    a reader-thread ``egress_rules`` call needs a site the reader does not
+    have).
   * The send path is serialized by the session's one ``_lock`` (reused here) so
     the reader loop and any RPC issuance never interleave partial frames.
   * No second reader ever touches ``_recv`` (R-15): one thread owns the socket
@@ -415,6 +422,10 @@ class RelayMux:
 		self._lanes_quarantined = 0
 		self._rpc_failed_on_close = 0
 		self._chat_delta_ignored = 0
+		# A reader-thread routing bug on a KNOWN lane (distinct from an ordinary
+		# stray/late/unknown frame): see _on_reader_fault. Should stay at 0 in
+		# healthy operation - any nonzero count here is a bug, not routine noise.
+		self._reader_errors = 0
 
 	# -- lifecycle ---------------------------------------------------------- #
 
@@ -576,14 +587,49 @@ class RelayMux:
 			self._bump("stray_frames")
 			return
 		if event == "agent":
-			self._route_agent(lane, payload)
+			try:
+				self._route_agent(lane, payload)
+			except Exception:
+				self._on_reader_fault(lane, "agent", payload)
 		elif event == "chat":
-			self._route_terminal(lane, payload)
+			try:
+				self._route_terminal(lane, payload)
+			except Exception:
+				self._on_reader_fault(lane, "chat", payload)
 		else:
 			self._bump("stray_frames")
 
+	def _on_reader_fault(self, lane: _Lane, event: str, payload: dict) -> None:
+		"""A routing bug on a KNOWN lane must never vanish as an ordinary stray
+		frame again (the #1449 regression: a Frappe call's AttributeError escaped
+		``_route_terminal``, was swallowed by ``_read_loop``'s generic classify
+		catch, and counted as a "stray_frames" - indistinguishable from harmless
+		wire noise. The run then sat ``streaming`` until the NEXT pump hop's
+		~90s snapshot-recovery poll, which is the whole bug).
+
+		Count it distinctly (``reader_errors``, see :meth:`stats`) and log it with
+		the stdlib logger - no Frappe logger on this thread. When the lost frame
+		was the run's own TERMINAL, do not let it wait for the natural hop
+		boundary: hand the lane to the pump's EXISTING precious-overflow
+		quarantine handoff (``_defer_quarantine`` -> ``dispatch()``'s
+		``_flush_deferred_quarantines`` -> ``on_quarantine`` -> the pump's
+		``_park_recovering``), so the turn parks toward recovery on the very next
+		``dispatch()`` call (a fraction of a second away) instead of at hop end."""
+		self._bump("reader_errors")
+		_logger.warning(
+			"relay_mux: reader thread error routing a %s frame for run=%s", event, lane.run_id, exc_info=True
+		)
+		if event == "chat" and payload.get("state") in ("final", "error", "aborted"):
+			with lane.lock:
+				if lane.state == "active":
+					lane.state = "quarantined"
+			self._defer_quarantine(lane, "reader_fault")
+
 	def _route_agent(self, lane: _Lane, payload: dict) -> None:
-		parsed = parse_event(payload)
+		# redact=False: this runs on the reader thread, which has no frappe.local
+		# site. The pump redacts the text fields itself, on its own thread, in
+		# _apply, right before they reach a lane callback.
+		parsed = parse_event(payload, redact=False)
 		if parsed is None or parsed.get("kind") == "lifecycle":
 			# lifecycle frames are dropped on the managed relay path (mirror of
 			# relay_turn_events); not a stray — it's an expected known-run drop.
@@ -680,6 +726,14 @@ class RelayMux:
 			)
 
 	def _route_terminal(self, lane: _Lane, payload: dict) -> None:
+		"""Classify the chat terminal frame and enqueue its RAW fields. PURE
+		Python only, top to bottom - no Frappe call lives on this path any more
+		(the #1449 regression: ``egress_rules``/``generated_media`` need a site DB
+		connection this reader thread does not have). The classifiers below
+		(``_chat_final_text`` etc.) are total, pure functions; the actual
+		media-marker handling, egress redaction and step-stripping now run on the
+		PUMP thread, in ``_finalize_terminal`` (called from ``_apply``, which
+		``dispatch()`` guarantees runs there)."""
 		state = payload.get("state")
 		if state == "final":
 			text = _chat_final_text(payload)
@@ -698,52 +752,38 @@ class RelayMux:
 				# the failed_final branch below - both of its "no message"/
 				# "no signal" guards would otherwise call this a hard failure
 				# instead of a deferred reply.
-				term_kind, term_payload = "relay:error", {"state": "aborted", "text": ""}
+				raw: dict = {"kind_hint": "yield_aborted"}
 			elif failed:
-				term_kind, term_payload = (
-					"relay:error",
-					{"state": "failed_final", "error": failed_final_error(lane.failure_detail)},
-				)
+				raw = {"kind_hint": "failed_final", "failure_detail": lane.failure_detail}
 			else:
-				# Not a failed-final -> consume the MEDIA marker, redact the surfaced
-				# reply + fire the once-per-turn tripwire (classification ran on raw
-				# text). media_rels rides term_payload -> the Turn row, where
-				# finalize._effect_rich_outputs re-reads it to seed the image (the
-				# pump is the default transport, so this is the primary delivery path).
-				term_kind = "relay:final"
-				_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=lane.run_id)
-				# The saved reply keeps only the answer: step text the model wrote
-				# before its tool calls was shown live and is removed here.
-				answer = strip_steps(_red, lane.steps)
-				if lane.steps and answer and answer != lane.shown_text:
-					# The saved reply keeps text the live view had hidden (e.g. a
-					# short answer written before a card tool call): show it again
-					# before the terminal lands.
-					self._offer(lane, self._shown_delta(lane, answer))
-				term_payload = {"text": answer}
-				if _rels:  # fetchable media -> seed downstream (only set when present)
-					term_payload["media_rels"] = _rels
-				if _marked:  # any MEDIA: line stripped -> force the content overwrite
-					term_payload["marker_stripped"] = True
-				_urls = _chat_final_media_urls(payload)
-				if _urls:  # gateway-attached image/video/audio/document content blocks
-					term_payload["media_urls"] = _urls
-				if lane.is_continuation:
-					# Marks this as the yield's continuation outcome so the
-					# caller's post-settle rich-output step (finalize.
-					# _effect_rich_outputs) knows it may need to harvest the
-					# actual media from separate later transcript messages when
-					# neither media_rels nor media_urls landed here.
-					term_payload["yield_continuation"] = True
+				# Not a failed-final. The pump will consume the MEDIA marker,
+				# redact the surfaced reply and step-strip it, then may need to
+				# re-show text the live view had hidden - BEFORE the terminal -
+				# so reserve that delta's seq now, on this thread (the sole
+				# next_seq() caller): whether it ends up used is decided later,
+				# on the pump thread, once egress redaction has run, but the
+				# ordering must be fixed here. An unused reserved seq just
+				# leaves a harmless gap in the watermark, same as any lossy drop.
+				raw = {
+					"kind_hint": "final",
+					"text": text,
+					"steps": list(lane.steps),
+					"shown_text": lane.shown_text,
+					"stream_text": lane.stream_text,
+					"is_continuation": lane.is_continuation,
+					"media_urls": _chat_final_media_urls(payload),
+					"run_id": lane.run_id,
+					"reshow_seq": lane.next_seq(),
+				}
 		elif state in ("error", "aborted"):
-			term_kind = "relay:error"
 			# "text" lets pump.on_terminal tell an agent-yield abort (empty)
 			# from a genuine partial-content abort (image/video/music tools'
 			# unconditional background-detach, see YIELD_CONTINUATION_WAIT_S).
 			# Harmless addition for every other consumer of this payload shape.
-			term_payload = {
+			raw = {
+				"kind_hint": "error",
 				"state": state,
-				"error": egress_rules.redact(payload.get("errorMessage") or state),
+				"error_message": payload.get("errorMessage") or state,
 				"text": _chat_final_text(payload) or "",
 			}
 		else:
@@ -753,13 +793,66 @@ class RelayMux:
 			self._bump("chat_delta_ignored")
 			return
 		seq = lane.next_seq()
-		ev = _LaneEvent(
-			cls=PRECIOUS,
-			kind="terminal",
-			event_seq=seq,
-			data={"terminal_kind": term_kind, "payload": term_payload},
-		)
+		ev = _LaneEvent(cls=PRECIOUS, kind="terminal", event_seq=seq, data=raw)
 		self._offer(lane, ev)
+
+	def _finalize_terminal(self, lane: _Lane, ev: _LaneEvent) -> tuple[str, dict, dict | None]:
+		"""The terminal's Frappe-dependent finishing work: consume the MEDIA
+		marker, redact the surfaced reply, step-strip it, and fire the
+		once-per-turn tripwire (classification already ran on raw text, on the
+		reader thread, in ``_route_terminal``). MUST run on the pump thread -
+		called from ``_apply``, which ``dispatch()`` guarantees; ``egress_rules``
+		and ``generated_media`` both need a live site DB connection, which is
+		exactly what the reader thread does not have (this file's HARD
+		INVARIANTS).
+
+		Returns ``(term_kind, term_payload, reshow)`` where ``reshow`` is the
+		pre-terminal "re-show text the live view had hidden" delta to apply
+		first, or ``None`` when no such delta is needed."""
+		raw = ev.data
+		kind_hint = raw["kind_hint"]
+		if kind_hint == "yield_aborted":
+			return "relay:error", {"state": "aborted", "text": ""}, None
+		if kind_hint == "failed_final":
+			error = failed_final_error(raw["failure_detail"])
+			return "relay:error", {"state": "failed_final", "error": error}, None
+		if kind_hint == "error":
+			error = egress_rules.redact(raw["error_message"])
+			return "relay:error", {"state": raw["state"], "error": error, "text": raw["text"]}, None
+		# kind_hint == "final". media_rels rides term_payload -> the Turn row,
+		# where finalize._effect_rich_outputs re-reads it to seed the image (the
+		# pump is the default transport, so this is the primary delivery path).
+		red, rels, marked = egress_rules.redact_final_with_media(raw["text"], run_id=raw["run_id"])
+		# The saved reply keeps only the answer: step text the model wrote
+		# before its tool calls was shown live and is removed here.
+		answer = strip_steps(red, raw["steps"])
+		reshow = None
+		if raw["steps"] and answer and answer != raw["shown_text"]:
+			# The saved reply keeps text the live view had hidden (e.g. a short
+			# answer written before a card tool call): show it again before the
+			# terminal lands. The mirror stays the redacted full raw stream,
+			# same as every other delta's "text" field.
+			reshow = {
+				"seq": raw["reshow_seq"],
+				"text": egress_rules.redact(raw["stream_text"]),
+				"delta": "",
+				"shown": answer,
+			}
+		term_payload = {"text": answer}
+		if rels:  # fetchable media -> seed downstream (only set when present)
+			term_payload["media_rels"] = rels
+		if marked:  # any MEDIA: line stripped -> force the content overwrite
+			term_payload["marker_stripped"] = True
+		if raw["media_urls"]:  # gateway-attached image/video/audio/document content blocks
+			term_payload["media_urls"] = raw["media_urls"]
+		if raw["is_continuation"]:
+			# Marks this as the yield's continuation outcome so the caller's
+			# post-settle rich-output step (finalize._effect_rich_outputs) knows
+			# it may need to harvest the actual media from separate later
+			# transcript messages when neither media_rels nor media_urls landed
+			# here.
+			term_payload["yield_continuation"] = True
+		return "relay:final", term_payload, reshow
 
 	def _offer(self, lane: _Lane, ev: _LaneEvent) -> None:
 		status = lane.offer(ev)
@@ -993,23 +1086,45 @@ class RelayMux:
 		return applied
 
 	def _apply(self, lane: _Lane, ev: _LaneEvent) -> None:
+		"""Apply one drained lane event via its pump-provided callback. This runs
+		on the PUMP thread (``dispatch()`` guarantees it), which is also where
+		``egress_rules`` (needs ``frappe.db``) is applied to every user-facing
+		text field the reader queued RAW: the reader thread has no site DB (this
+		file's HARD INVARIANTS), so it can only classify and buffer - never
+		redact."""
 		h = lane.handler
 		try:
 			if ev.kind == "delta":
 				if h.on_delta is not None:
-					h.on_delta(ev.event_seq, ev.data["text"], ev.data["delta"], ev.data.get("shown"))
+					text = egress_rules.redact(ev.data["text"])
+					delta = egress_rules.redact(ev.data["delta"])
+					shown = ev.data.get("shown")
+					if shown is not None:
+						shown = egress_rules.redact(shown)
+					h.on_delta(ev.event_seq, text, delta, shown)
 			elif ev.kind == "tool":
 				if h.on_tool is not None:
-					h.on_tool({"event_seq": ev.event_seq, **ev.data})
+					data = dict(ev.data)
+					if data.get("title"):
+						data["title"] = egress_rules.redact(data["title"])
+					h.on_tool({"event_seq": ev.event_seq, **data})
 			elif ev.kind == "status":
 				if h.on_status is not None:
 					h.on_status(ev.event_seq, ev.data["status"])
 			elif ev.kind == "step":
 				if h.on_step is not None:
-					h.on_step(ev.event_seq, ev.data["text"], ev.data.get("raw"))
+					# "raw" (unlike "text") stays UN-redacted: it reseeds lane.steps
+					# on a reconnect (pump._append_run_step/_read_run_steps), and
+					# lane.stream_text - which remove_steps() matches it against -
+					# is raw too, throughout this lane's life. Redacting only "raw"
+					# copy would break that substring match on the very next hop.
+					h.on_step(ev.event_seq, egress_rules.redact(ev.data["text"]), ev.data.get("raw"))
 			elif ev.kind == "terminal":
+				term_kind, term_payload, reshow = self._finalize_terminal(lane, ev)
+				if reshow is not None and h.on_delta is not None:
+					h.on_delta(reshow["seq"], reshow["text"], reshow["delta"], reshow["shown"])
 				if h.on_terminal is not None:
-					h.on_terminal(ev.data["terminal_kind"], ev.data["payload"])
+					h.on_terminal(term_kind, term_payload)
 				# The terminal is normally the last frame of a run — retire the
 				# lane so subsequent frames for this id count as stray. EXCEPT
 				# when on_terminal just parked it awaiting an agent-yield
@@ -1168,7 +1283,11 @@ class RelayMux:
 	def stats(self) -> dict:
 		"""Telemetry snapshot (Amendment I). ``stray_frames`` settles the demoted
 		"N workers discard everyone else's frames" question; ``deltas_dropped``
-		and ``lanes_quarantined`` expose the poison surface."""
+		and ``lanes_quarantined`` expose the poison surface. ``reader_errors``
+		(the #1449-regression counter) should stay 0 in healthy operation -
+		it counts a routing bug on a KNOWN lane, not routine wire noise; the
+		pump logs it in its per-hop telemetry line so a regression here is
+		visible without a live probe."""
 		with self._counter_lock:
 			return {
 				"stray_frames": self._stray_frames,
@@ -1176,6 +1295,7 @@ class RelayMux:
 				"lanes_quarantined": self._lanes_quarantined,
 				"rpc_failed_on_close": self._rpc_failed_on_close,
 				"chat_delta_ignored": self._chat_delta_ignored,
+				"reader_errors": self._reader_errors,
 				"breaker_open": self.is_breaker_open(),
 				"active_runs": len(self._runs),
 			}
