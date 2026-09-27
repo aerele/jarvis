@@ -1451,8 +1451,19 @@ class JarvisSettings(Document):
 		- last_sync_status starts with "ok": a prior failed/pending/skipped
 		  sync means the container may not hold the current pool, so an
 		  unchanged re-save is the operator's retry lever and must enqueue.
+		- no switch is active: jarvis#1425 review (live e2e2, 2026-09-27) - a
+		  poller must never stamp "ok" while a switch is held (see
+		  reconcile_pending_llm_sync / _reconcile_pending_applying), but this
+		  gate is a second line of defense against exactly that stamp: an "ok"
+		  recorded while the tenant's actual served config is still the
+		  PRE-switch one must never read as "already synced" for a later
+		  identical re-save.
 		"""
 		if self.flags.get("force_admin_sync"):
+			return False
+		from jarvis.chat import llm_switch
+
+		if llm_switch.is_active():
 			return False
 		before = self.get_doc_before_save()
 		if before is None:
@@ -3527,7 +3538,19 @@ def reconcile_pending_llm_sync() -> None:
 				# single-model tenants (is_ready_for_chat's first-activation gates).
 				# A lost race needs no handling here: this tick changes nothing and
 				# the next one (or the SPA's own poller) re-probes and re-stamps.
-				_stamp_converged_ok(settings, is_pool=pool_mode)
+				#
+				# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is
+				# HELD, admin's "Ready" verdict describes the PREVIOUS config
+				# (desired_version == applied_version - nothing new has been
+				# pushed yet), never the held config this poller thinks is
+				# outstanding. Stamping here would flip "ok" (and the synced
+				# marker) while the tenant is still serving the OLD leg, possibly
+				# forever if the switch record is then lost. The switch's own
+				# released worker owns the outcome through ITS OWN
+				# _converge_via_admin loop once it actually pushes; this poller
+				# just leaves the pending status alone and re-probes next tick.
+				if not llm_switch.is_active():
+					_stamp_converged_ok(settings, is_pool=pool_mode)
 			return
 		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
 			return

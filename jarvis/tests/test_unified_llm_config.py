@@ -4848,6 +4848,34 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_reconcile_does_not_stamp_while_a_switch_is_held(self):
+		"""jarvis#1425 review (live e2e2, 2026-09-27): admin's "Ready" while a
+		switch is held describes the PRE-switch config, not the held one -
+		stamping "ok" here would strand the tenant on a status that does not
+		match what it is actually serving. The switch's own released worker
+		converges and stamps once it actually pushes."""
+		from jarvis.chat import llm_switch
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		self._seed_pool()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		frappe.db.commit()
+		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
+		with (
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+			patch.object(llm_switch, "is_active", return_value=True),
+		):
+			reconcile_pending_llm_sync()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertFalse(
+			settings.llm_pool_synced_at, "a held switch must block the stamp even when admin reports Ready"
+		)
+		self.assertEqual(settings.last_sync_status, "pending: admin applying config")
+
 	def test_reconcile_noop_when_not_ready(self):
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 			reconcile_pending_llm_sync,

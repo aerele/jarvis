@@ -510,6 +510,49 @@ class TestGetLlmSyncStatus(FrappeTestCase):
 		out = onboarding.get_llm_sync_status()
 		self.assertFalse(out["pending"])
 
+	def test_pending_applying_does_not_converge_while_a_switch_is_held(self):
+		"""jarvis#1425 review (live e2e2, 2026-09-27): admin's "Ready" while a
+		switch is held describes the config BEFORE the switch, not the one this
+		poller thinks is outstanding - stamping "ok" here would strand the
+		tenant reading "ok" while it actually still serves the pre-switch leg.
+		The switch's own released worker converges once it actually pushes."""
+		from jarvis.chat import llm_switch
+
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		s.db_set("llm_pool_synced_at", None, update_modified=False)
+		frappe.db.commit()
+		with (
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness",
+				return_value=("Ready", ""),
+			),
+			patch.object(llm_switch, "is_active", return_value=True),
+		):
+			out = onboarding.get_llm_sync_status()
+		self.assertEqual(out["last_sync_status"], "pending: admin applying config")
+		self.assertTrue(out["pending"])
+		self.assertFalse(frappe.get_single("Jarvis Settings").llm_pool_synced_at)
+
+	def test_pending_applying_converges_when_no_switch_is_active(self):
+		"""Same admin verdict, no switch: today's converge behavior is unchanged."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		s.db_set("llm_pool_synced_at", None, update_modified=False)
+		frappe.db.commit()
+		with patch(
+			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness",
+			return_value=("Ready", ""),
+		):
+			out = onboarding.get_llm_sync_status()
+		self.assertTrue(out["last_sync_status"].startswith("ok"))
+		self.assertFalse(out["pending"])
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertTrue(
+			settings.llm_pool_synced_at or settings.llm_direct_synced_at,
+			"convergence must stamp whichever leg's marker applies",
+		)
+
 	def test_shape_has_expected_keys(self):
 		out = onboarding.get_llm_sync_status()
 		self.assertIn("last_sync_at", out)

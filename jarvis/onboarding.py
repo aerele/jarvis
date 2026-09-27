@@ -2761,12 +2761,22 @@ def _reconcile_pending_applying(settings) -> str | None:
 	is pending-applying, from the SPA. It is also the fastest way back: the moment a
 	sync worker records the pending marker, this poller is what converges it,
 	seconds later, without waiting for the */5 reconcile."""
+	from jarvis.chat import llm_switch
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 		_admin_chat_readiness,
 		_stamp_converged_ok,
 	)
 	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
+	# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is HELD, admin's
+	# "Ready" verdict is about the config BEFORE the switch (nothing new has been
+	# pushed yet), so stamping here would flip "ok" for a config the tenant is not
+	# actually serving - possibly permanently if the switch record is later lost.
+	# The switch's own released worker converges and stamps once it pushes;
+	# reconcile()/finish() own ending the switch. Stay pending; the next poll
+	# (or the switch's own end()) re-drives this.
+	if llm_switch.is_active():
+		return None
 	state, _reason = _admin_chat_readiness()
 	if state != "Ready":
 		return None
