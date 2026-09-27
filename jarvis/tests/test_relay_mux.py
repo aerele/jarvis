@@ -479,6 +479,40 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 		self.assertIsNone(mux.register_run("readopt", LaneHandler(), is_readopt=True))
 		self.assertIsNotNone(mux.register_run("fresh", LaneHandler()))  # fresh send still allowed
 
+	def test_stop_flushes_a_reader_fault_queued_right_before_teardown(self):
+		# Code-review finding: a reader fault (or precious-overflow) deferred
+		# right before hop teardown must not wait for a dispatch() call that
+		# may never come again this hop - stop() itself must flush it, or a
+		# lost terminal silently falls back to the ~90s snapshot-recovery path.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		frame = _chat_final_frame("r1", "s1", "hi")
+		with mock_patch.object(RelayMux, "_route_terminal", side_effect=RuntimeError("forced routing fault")):
+			mux._route_event(frame)
+		self.assertEqual(mux.stats()["reader_errors"], 1)
+		self.assertIsNone(rec.quarantined, "must not fire before stop()/dispatch() flushes it")
+		mux.stop()
+		self.assertEqual(rec.quarantined, "reader_fault")
+
+	def test_reader_fault_on_an_already_retired_lane_is_a_no_op(self):
+		# Code-review finding: a duplicate/replayed terminal frame racing the
+		# REAL terminal's own retirement must never fire on_quarantine for a
+		# turn that already settled, and must never feed the poison-rate
+		# breaker for a fault that is not an actual loss.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		lane = mux._runs["r1"]
+		mux._retire_lane(lane)  # simulate: the REAL terminal already applied
+		quarantined_before = mux.stats()["lanes_quarantined"]
+		mux._on_reader_fault(lane, "chat", {"state": "final"})
+		self.assertEqual(mux.stats()["reader_errors"], 1)  # still counted, just not quarantined
+		self.assertIsNone(rec.quarantined)
+		mux.dispatch()
+		self.assertIsNone(rec.quarantined, "a retired lane must never be quarantined")
+		self.assertEqual(mux.stats()["lanes_quarantined"], quarantined_before)
+
 	def test_rekey_run_retry_attach(self):
 		mux = self._mux()
 		rec = _Recorder()
@@ -741,6 +775,68 @@ class TestRelayMuxYieldContinuation(FrappeTestCase):
 		mux.dispatch()
 		self.assertIsNone(rec.terminal)
 		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_continuation_reshow_decision_uses_pump_owned_last_shown(self):
+		"""Code-review finding: the reshow decision used to compare against a
+		reader-thread snapshot (lane.shown_text at terminal-enqueue time). An
+		agent-yield continuation re-adopts the SAME lane onto a fresh run for a
+		second terminal, and if that continuation streams no deltas of its own
+		before settling, the reader-side snapshot still holds what was shown
+		BEFORE the FIRST terminal's own reshow ran - so the second terminal's
+		"should I reshow" decision used stale data (and would wrongly redo a
+		reshow the user has already seen). It must use lane.last_shown
+		(pump-thread-owned, updated by every on_delta including a reshow)."""
+		mux = self._mux()
+		deltas = []
+		terminals = []
+
+		def on_delta(seq, text, delta, shown=None):
+			deltas.append((seq, text, delta, shown))
+
+		def on_terminal(kind, payload):
+			terminals.append((kind, payload))
+			if len(terminals) == 1:
+				# Mimic the pump's real on_terminal: park this lane awaiting the
+				# deferred tool's follow-up run on the SAME session_key.
+				mux.await_continuation("r1")
+
+		mux.register_run("r1", LaneHandler(on_delta=on_delta, on_terminal=on_terminal), session_key="s1")
+
+		# A short answer written before a tool call: strip_steps keeps it
+		# whole (removing it would leave nothing), but the live view already
+		# hid it as a step - exactly the discrepancy that triggers a reshow.
+		step = "Let me check the invoices."
+		mux._classify(_agent_frame("r1", "s1", "assistant", {"text": step, "delta": step}))
+		mux._classify(_agent_frame("r1", "s1", "item", _tool_data("start")))
+		mux._classify(_agent_frame("r1", "s1", "item", _tool_data("end")))
+		mux._classify(_chat_final_frame("r1", "s1", step))
+		mux.dispatch()
+
+		self.assertEqual(len(terminals), 1)
+		kind1, payload1 = terminals[0]
+		self.assertEqual((kind1, payload1["text"]), ("relay:final", step))
+		self.assertTrue(mux._runs["r1"].awaiting, "await_continuation must have parked the lane")
+		lane = mux._runs["r1"]
+		self.assertEqual(lane.last_shown, step, "the reshow must update last_shown to the re-shown answer")
+		self.assertEqual(len(deltas), 3, "2 ordinary deltas + 1 reshow")
+
+		# The deferred tool's follow-up run lands on the SAME session_key under
+		# a FRESH runId, adopting this lane in place, and settles with NO
+		# deltas of its own before its own terminal.
+		mux._classify(_chat_final_frame("r2", "s1", step))
+		mux.dispatch()
+
+		self.assertEqual(len(terminals), 2)
+		kind2, payload2 = terminals[1]
+		self.assertEqual(kind2, "relay:final")
+		self.assertEqual(payload2["text"], step)
+		self.assertTrue(payload2.get("yield_continuation"))
+		# The decisive assertion: the second terminal's answer is IDENTICAL to
+		# what lane.last_shown already correctly holds, so NO further reshow
+		# is needed. A stale reader-side snapshot (lane.shown_text, left at ""
+		# from before the first reshow) would have disagreed and wrongly
+		# fired a second, needless reshow delta here.
+		self.assertEqual(len(deltas), 3, "the second terminal must not trigger a needless reshow")
 
 
 # --------------------------------------------------------------------------- #
@@ -1458,6 +1554,54 @@ class TestRelayMuxSteps(FrappeTestCase):
 		)
 		self.assertEqual(rec.shown, [answer])
 		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_egress_rule_spanning_a_step_boundary_still_strips_the_step(self):
+		# Code-review finding: redacting the whole final text and the recorded
+		# step SEPARATELY can diverge for a rule that only matches with
+		# surrounding context present - the step then no longer matches its
+		# (differently redacted) counterpart inside the redacted whole text and
+		# is left sitting in the saved reply instead of being stripped. Strip
+		# the RAW step from the RAW final FIRST (an exact, verbatim substring
+		# match that can never diverge), THEN redact the result once.
+		egress_rules.persist([[r"acme now\.\n\nSystems", "remove"]])
+		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
+		step = "Checking acme now."
+		full = f"{step}\n\nSystems are stable."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": "\n\nSystems are stable."}),
+			],
+			full,
+		)
+		self.assertEqual(rec.terminal[1]["text"], "Systems are stable.")
+
+	def test_forbidden_word_straddling_the_truncation_cut_never_leaks(self):
+		# Code-review finding: display_line's 160-char truncation used to run
+		# on the reader thread BEFORE redaction (on the pump thread) - a
+		# forbidden word straddling the cut left its surviving half-fragment
+		# un-redacted and visible. Redact the FULL raw step text first, THEN
+		# shape/truncate it with display_line.
+		from jarvis.chat import steps as chat_steps
+
+		egress_rules.persist([["acme", "remove"]])
+		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
+		prefix = "x" * (chat_steps.MAX_STEP_CHARS - 3)
+		long_text = f"{prefix}acme word."
+		self.assertGreater(len(long_text), chat_steps.MAX_STEP_CHARS)
+		mux = RelayMux(MagicMock(), "steps-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux._classify(_agent_frame("r1", "s1", "item", {"kind": "preamble", "progressText": long_text}))
+		mux.dispatch()
+		self.assertTrue(rec.steps, "no step line was recorded")
+		line = rec.steps[-1][1]
+		self.assertNotIn("ac", line)
+		# Prove truncation actually ran (the word was gone BEFORE the cut, not
+		# that the input was short to begin with).
+		self.assertTrue(line.endswith("…"), line)
 
 
 # --------------------------------------------------------------------------- #
