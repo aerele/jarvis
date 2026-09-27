@@ -103,8 +103,9 @@ _KEY_RE = re.compile(r"^[a-z0-9_-]+$")
 # endpoints are pinned here instead and each preset's client is seeded from them,
 # exactly like GitHub. And Google issues NO refresh token unless the authorize
 # request carries access_type=offline and prompt=consent, so those ride on every
-# Google preset's `authorize_params`. Declared ONCE so the five entries cannot
-# drift from each other.
+# Google preset's `authorize_params`. They take only Google's own sign-in tokens
+# ("Expected OAuth 2 access token"), so each entry sets accepts_key=False. Declared
+# ONCE so the five entries cannot drift from each other.
 _GOOGLE_ISSUER = "https://accounts.google.com"
 _GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -154,7 +155,13 @@ class Provider:
 	on a sign-in class (`static` / `dcr`) and rejects any reserved OAuth parameter
 	name, so a catalog entry can add to the request but never override the PKCE,
 	resource or redirect binding the flow sets. It is server-side only: never
-	shipped by `to_public`."""
+	shipped by `to_public`.
+
+	`accepts_key` is False on a sign-in preset whose server takes only its own
+	sign-in tokens (Google's MCP servers reject anything else, and a pasted Google
+	token expires within the hour), so the SPA hides "Use a key instead" and
+	`add_connector` refuses a key row for it. `validate` allows False only on a
+	sign-in class (`static` / `dcr`); a key or open preset always accepts a key."""
 
 	name: str
 	key: str
@@ -173,6 +180,7 @@ class Provider:
 	token_hint: str | None = None
 	token_help_url: str | None = None
 	authorize_params: tuple[tuple[str, str], ...] | None = None
+	accepts_key: bool = True
 
 
 def _freeze_authorize_params(value) -> tuple[tuple[str, str], ...] | None:
@@ -245,6 +253,8 @@ def validate(providers: tuple[Provider, ...]) -> None:
 			raise ValueError(
 				f"token_help_url must be https for {provider.name!r}: {provider.token_help_url!r}"
 			)
+		if not provider.accepts_key and provider.auth not in (AUTH_DCR, AUTH_STATIC):
+			raise ValueError(f"only a sign-in preset may refuse a key: {provider.name!r}")
 
 		if provider.authorize_params:
 			if provider.auth not in _AUTHORIZE_PARAMS_AUTHS:
@@ -537,6 +547,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
 		scopes="https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
 		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+		accepts_key=False,
 	),
 	Provider(
 		name="Google Calendar",
@@ -553,6 +564,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
 		scopes="https://www.googleapis.com/auth/calendar.calendarlist.readonly https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.events.freebusy",
 		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+		accepts_key=False,
 	),
 	Provider(
 		name="Calendly",
@@ -634,6 +646,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
 		scopes="https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
 		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+		accepts_key=False,
 	),
 	Provider(
 		name="Google Sheets",
@@ -650,6 +663,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
 		scopes="https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/spreadsheets",
 		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+		accepts_key=False,
 	),
 	Provider(
 		name="Google Docs",
@@ -666,6 +680,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
 		scopes="https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/documents.readonly https://www.googleapis.com/auth/documents",
 		authorize_params=_GOOGLE_AUTHORIZE_PARAMS,
+		accepts_key=False,
 	),
 	# --- design ------------------------------------------------------------
 	Provider(
@@ -955,6 +970,14 @@ def auth_of(name: str, *, providers: tuple[Provider, ...] = PROVIDERS) -> str | 
 	return provider.auth if provider else None
 
 
+def accepts_key_of(name: str, *, providers: tuple[Provider, ...] = PROVIDERS) -> bool:
+	"""Whether `name` may be connected with a pasted key. True for an unknown name
+	(a Custom URL row: nothing is known about its server) and for every preset
+	that does not opt out; disabled entries still resolve, matching `by_name`."""
+	provider = by_name(name, providers=providers)
+	return provider.accepts_key if provider else True
+
+
 def authorize_params_of(name: str, *, providers: tuple[Provider, ...] = PROVIDERS) -> dict[str, str]:
 	"""The extra authorize-request parameters for `name` as a plain dict, `{}`
 	when the preset declares none or is unknown (a Custom URL row, for one).
@@ -967,7 +990,7 @@ def authorize_params_of(name: str, *, providers: tuple[Provider, ...] = PROVIDER
 def to_public(*, providers: tuple[Provider, ...] = PROVIDERS) -> list[dict]:
 	"""The fields the SPA may see, enabled entries only, catalog order: name,
 	key, auth, category, logo, help_url, hint, description, token_hint,
-	token_help_url. Never `base_url`, the endpoint is server-pinned and never client
+	token_help_url, accepts_key. Never `base_url`, the endpoint is server-pinned and never client
 	input, and never `enabled` (a disabled entry is simply absent instead).
 	`token_hint` / `token_help_url` are public strings (paste-a-token guidance) the
 	SPA shows on the "use a token instead" fallback. `description` is the one-line
@@ -984,6 +1007,7 @@ def to_public(*, providers: tuple[Provider, ...] = PROVIDERS) -> list[dict]:
 			"description": provider.description,
 			"token_hint": provider.token_hint,
 			"token_help_url": provider.token_help_url,
+			"accepts_key": provider.accepts_key,
 		}
 		for provider in providers
 		if provider.enabled
@@ -1029,6 +1053,7 @@ def apply_overlay(
 		"token_hint",
 		"token_help_url",
 		"authorize_params",
+		"accepts_key",
 	)
 
 	for entry in overlay:
@@ -1068,6 +1093,7 @@ def apply_overlay(
 				token_hint=entry.get("token_hint"),
 				token_help_url=entry.get("token_help_url"),
 				authorize_params=_freeze_authorize_params(entry.get("authorize_params")),
+				accepts_key=entry.get("accepts_key", True),
 			)
 			result.append(provider)
 			by_existing[name] = provider

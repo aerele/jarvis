@@ -378,7 +378,7 @@
 							v-if="showSignInInsteadLink"
 							variant="ghost"
 							size="sm"
-							:label="`Sign in with ${form.preset} instead`"
+							:label="`Sign in with ${signinAppName} instead`"
 							class="text-ink-gray-5"
 							@click="switchAuthMethod('OAuth')"
 						/>
@@ -798,7 +798,9 @@ const cardKind = computed(() => {
 	}
 	if (form.preset === "Custom URL") {
 		if (!probeDone.value) return "need-check";
-		return customUrlOauth.active ? "signin" : "key";
+		// Check sets auth_method from the server; "Use a key instead" flips it, so
+		// honour it here the same way the edit branch above already does.
+		return customUrlOauth.active && form.auth_method === "OAuth" ? "signin" : "key";
 	}
 	const auth = catalogAuthOf(form.preset);
 	if (form.auth_method === "API Key") return auth === "open" ? "open" : "key";
@@ -825,6 +827,9 @@ const showUseKeyInsteadLink = computed(
 	() =>
 		!isEdit.value &&
 		(cardKind.value === "signin" || cardKind.value === "register") &&
+		// Some servers take only their own sign-in tokens (Google); the catalog
+		// says so, and a Custom URL has no entry, so it keeps the option.
+		catalogEntry.value?.accepts_key !== false &&
 		(!rowName.value || isPlaceholder.value)
 );
 const showSignInInsteadLink = computed(
