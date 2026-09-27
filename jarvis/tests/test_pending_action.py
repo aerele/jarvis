@@ -729,11 +729,42 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 			frappe.publish_realtime("pa_failed_event", {"x": 1}, user=OWNER, after_commit=True)
 			raise frappe.ValidationError("boom")
 
+		import sys
+
+		print(
+			"DBG entry",
+			getattr(frappe.local, "_realtime_log", "ABSENT"),
+			list(frappe.db.after_commit._functions),
+			list(frappe.db.after_rollback._functions),
+			file=sys.stderr,
+		)
 		with patch("frappe.realtime.emit_via_redis") as emit:
 			self._run(body)
+			print(
+				"DBG post-run",
+				getattr(frappe.local, "_realtime_log", "ABSENT"),
+				list(frappe.db.after_commit._functions),
+				list(frappe.db.after_rollback._functions),
+				emit.call_args_list,
+				file=sys.stderr,
+			)
 			self.assertNotIn("pa_failed_event", [c.args[0] for c in emit.call_args_list])
 			frappe.publish_realtime("pa_later_event", {"x": 2}, user=OWNER, after_commit=True)
+			print(
+				"DBG post-publish",
+				getattr(frappe.local, "_realtime_log", "ABSENT"),
+				list(frappe.db.after_commit._functions),
+				list(frappe.db.after_rollback._functions),
+				file=sys.stderr,
+			)
 			frappe.db.commit()
+			print(
+				"DBG post-commit",
+				getattr(frappe.local, "_realtime_log", "ABSENT"),
+				list(frappe.db.after_commit._functions),
+				emit.call_args_list,
+				file=sys.stderr,
+			)
 			self.assertIn("pa_later_event", [c.args[0] for c in emit.call_args_list])
 
 	def test_mid_dispatch_commit_then_failure_is_partial(self):

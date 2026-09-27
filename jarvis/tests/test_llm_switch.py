@@ -493,6 +493,39 @@ class TestEnd(_LlmSwitchTestCase):
 		mock_promote.assert_not_called()
 
 
+class TestPersistentCacheKey(_LlmSwitchTestCase):
+	"""Live e2e2 finding (2026-09-27): frappe.clear_cache()'s "everything" branch
+	deletes every site-prefixed redis key except one matched by the
+	``persistent_cache_keys`` hook - pump.py's watchdog stamping a __default via
+	frappe.db.set_default triggers exactly this full clear via
+	frappe.defaults._clear_cache, wiping an active switch record mid-hold or
+	mid-apply. hooks.py must list ``jarvis:llm_switch``."""
+
+	def test_clear_cache_does_not_wipe_an_active_switch_record(self):
+		rec = {
+			"started_at": time.time(),
+			"deadline": time.time() + 300,
+			"job": "jarvis.tests.fake_job",
+			"job_kwargs": {},
+			"applied": False,
+			"run_id": None,
+			"next": None,
+		}
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		frappe.cache().set_value("jarvis:test_non_persistent_probe", "x")
+		try:
+			frappe.clear_cache()
+			self.assertEqual(
+				llm_switch.status(), rec, "the hook must keep clear_cache() from wiping the switch record"
+			)
+			self.assertIsNone(
+				frappe.cache().get_value("jarvis:test_non_persistent_probe"),
+				"an ordinary key must still be cleared - proves the hook, not a no-op clear",
+			)
+		finally:
+			llm_switch._reset_for_tests()
+
+
 class TestReconcile(_LlmSwitchTestCase):
 	def _applied_record(self, *, run_id="test-run-1", next_apply=None):
 		rec = {
