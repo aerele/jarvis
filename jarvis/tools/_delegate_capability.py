@@ -3,7 +3,7 @@ enforced at the BENCH.
 
 Before this module the container-side ``tools.allow`` was the ONLY thing bounding
 which ``jarvis__*`` tools a marketplace-agent delegate could call. That list is
-CONFIGURATION (rendered into openclaw.json by fleet-agent), not authorization: a
+CONFIGURATION (rendered into agent configuration by fleet-agent), not authorization: a
 compromised container / plugin, or anyone holding a leaked per-run session bearer,
 could call ANY registered tool the run-as user's Frappe permissions happened to
 allow — ``jarvis__delete_doc`` from an auditor whose contract is four read tools.

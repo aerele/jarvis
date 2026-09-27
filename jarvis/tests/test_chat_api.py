@@ -312,6 +312,11 @@ class TestArchiveConversation(_ChatTestCase):
 
 
 from jarvis.chat.api import send_message
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestSendMessage(_ChatTestCase):

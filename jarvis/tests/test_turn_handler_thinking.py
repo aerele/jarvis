@@ -13,11 +13,16 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat import agent_session_pool
 from jarvis.chat.api import create_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
 	_ensure_test_user,
 )
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestThinkingDirectiveLeading(FrappeTestCase):

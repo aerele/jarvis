@@ -14,6 +14,7 @@ from jarvis.chat import agent_session_pool, turn_handler, turn_message_binding
 from jarvis.chat.api import create_conversation, get_conversation, send_message
 from jarvis.chat.worker import run_agent_turn
 from jarvis.exceptions import AgentUnreachableError
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -46,6 +47,10 @@ def _fake_event_stream(events: list[dict]):
 	"""Build a generator returning the given events (matching parse_event output)."""
 	for ev in events:
 		yield ev
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestRunAgentTurnHappyPath(FrappeTestCase):
@@ -932,8 +937,8 @@ class TestRunAgentTurnRelayTerminals(FrappeTestCase):
 		# turn's reply (that reply is already in the transcript at this point).
 		fake_sess = self._fake_sess([{"kind": "relay:final", "text": "hi"}])
 		fake_sess.get_session_messages.return_value = [
-			{"role": "assistant", "content": "old", "__openclaw": {"seq": 3}},
-			{"role": "user", "content": "q", "__openclaw": {"seq": 4}},
+			transcript_message("assistant", "old", seq=3),
+			transcript_message("user", "q", seq=4),
 		]
 		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
 			with patch("jarvis.chat.worker.publish_to_user"):
@@ -1028,7 +1033,7 @@ class TestRunAgentTurnAgentYield(FrappeTestCase):
 			yield_result={
 				"kind": "relay:final",
 				"text": "here it is",
-				"media_rels": ["/home/node/.openclaw/media/tool-image-generation/x.png"],
+				"media_rels": ["/srv/test-gateway/media/tool-image-generation/x.png"],
 			}
 		)
 		with patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess):
@@ -1041,7 +1046,7 @@ class TestRunAgentTurnAgentYield(FrappeTestCase):
 		self.assertEqual(rich.call_args.args[0], assistant_name)  # the SAME message
 		self.assertEqual(
 			rich.call_args.kwargs.get("media_rels"),
-			["/home/node/.openclaw/media/tool-image-generation/x.png"],
+			["/srv/test-gateway/media/tool-image-generation/x.png"],
 		)
 
 	def test_continuation_that_itself_fails_uses_failed_final_handling(self):

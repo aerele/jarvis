@@ -27,8 +27,14 @@ export function isFieldWritable(field, verb) {
 // Whether a main field should paint the required "missing" cue. Read-only fields are
 // excluded: the user can't fill them, so the amber "fill me" prompt (and the earlier
 // editable-input-that-discards-your-value trap) must not fire on them.
+// `serverMissing` is a field a failed create named (see docFields.markMissing), which
+// meta may not mark required (mandatory_depends_on).
 export function isFieldMissing(field) {
-	return !!field.reqd && !field.read_only && !String(field.value ?? "").trim();
+	return (
+		(!!field.reqd || !!field.serverMissing) &&
+		!field.read_only &&
+		!String(field.value ?? "").trim()
+	);
 }
 
 // Display form of a read-only main field's value in the muted static span. Empty ->

@@ -85,9 +85,8 @@ _REDIRECT_URI = "http://localhost:1455/auth/callback"
 # and chat/api.py declared lists - 2026-06-16 punch-list drift item).
 #
 # Catalog sync constraints: these values must match agent 2026.6.4's
-# bundled codex catalog (the version pinned by jarvis_admin.host_setup.
-# DEFAULT_OPENCLAW_IMAGE). The script at
-# jarvis-fleet-agent/scripts/verify-openclaw-assumptions.sh asserts at
+# bundled codex catalog (the version pinned by the admin host setup).
+# The fleet runtime-assumption verification script asserts at
 # image-bump time that the catalog still contains "gpt-5.5"; if it ever
 # fails because the catalog drifted, update jarvis/_subscription_models.py
 # + the JS mirrors atomically and re-run the script before bumping the

@@ -1,8 +1,8 @@
 """Jarvis Custom Skill DocType controller.
 
 One row per customer-authored skill. Each row renders to a SKILL.md that is
-pushed into the customer's agent container (under ``openclaw_state/
-custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
+pushed into the customer's agent container (under the runtime state directory,
+relative path ``custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
 read-only persona skills. Rows are owned by the Frappe user who created them
 (``if_owner`` permission); the push itself is bench-global (a Jarvis bench maps
 to one customer / one container) and is triggered explicitly via
@@ -63,6 +63,20 @@ def _clear_personal_clause_cache(owner: str | None) -> None:
 		from jarvis.chat.custom_skills import personal_skills_cache_key
 
 		frappe.cache().delete_value(personal_skills_cache_key(owner or frappe.session.user))
+	except Exception:
+		pass
+
+
+def _clear_pushable_org_rows_memo() -> None:
+	"""_pushable_org_rows (chat/custom_skills.py) memoizes its light Org-row scan
+	for the rest of the current request; drop it on any row change so a skill
+	created, armed/disarmed, enabled, or promoted mid-request (a promotion
+	approval, an admin toggle) is seen by the very next call in the SAME
+	request instead of a stale cached scan."""
+	try:
+		from jarvis.chat.custom_skills import _clear_pushable_org_rows_memo as _clear
+
+		_clear()
 	except Exception:
 		pass
 
@@ -232,10 +246,12 @@ class JarvisCustomSkill(Document):
 
 	def on_update(self):
 		_clear_personal_clause_cache(self.owner)
+		_clear_pushable_org_rows_memo()
 		self._sync_slug_reservation()
 
 	def on_trash(self):
 		_clear_personal_clause_cache(self.owner)
+		_clear_pushable_org_rows_memo()
 		self._release_slug_reservation()
 
 	def _sync_slug_reservation(self):

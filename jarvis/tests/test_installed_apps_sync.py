@@ -107,7 +107,7 @@ class TestInstalledAppsSync(FrappeTestCase):
 
 	def test_pool_tenant_takes_pool_leg(self):
 		"""Pool tenants MUST resync through the pool path - the
-		single-model restart would re-render openclaw.json in direct mode
+		single-model restart would re-render agent configuration in direct mode
 		and knock the container off Bifrost pool routing."""
 		stale = sorted(frappe.get_installed_apps())[:-1]
 		_set_snapshot(stale)

@@ -668,6 +668,9 @@ def _lease_mirror_key(target: str) -> str:
 # A run's recorded step text lives on its relay lane, which a hop rebuilds, so
 # the pump keeps a copy for _reattach_lane to re-seed. Best-effort: a lost copy
 # only means the saved reply keeps its step text, exactly as before this feature.
+# Reads pass expires=True: on Frappe v15 a plain read keeps a local copy (even of
+# "nothing") that a later TTL write does not refresh, so the second step of a
+# turn would overwrite the first.
 RUN_STEPS_TTL_S = 3600
 
 
@@ -678,7 +681,7 @@ def _run_steps_key(run_id: str) -> str:
 def _append_run_step(run_id: str, raw: str) -> None:
 	try:
 		cache = frappe.cache()
-		steps = cache.get_value(_run_steps_key(run_id)) or []
+		steps = cache.get_value(_run_steps_key(run_id), expires=True) or []
 		cache.set_value(_run_steps_key(run_id), [*steps, raw], expires_in_sec=RUN_STEPS_TTL_S)
 	except Exception:
 		pass
@@ -686,7 +689,7 @@ def _append_run_step(run_id: str, raw: str) -> None:
 
 def _read_run_steps(run_id: str) -> list[str]:
 	try:
-		return list(frappe.cache().get_value(_run_steps_key(run_id)) or [])
+		return list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or [])
 	except Exception:
 		return []
 

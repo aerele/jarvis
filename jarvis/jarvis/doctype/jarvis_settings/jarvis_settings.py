@@ -1046,13 +1046,13 @@ class JarvisSettings(Document):
 			# the legacy mirror fields - which are mirrored from models[0] and are
 			# UNCHANGED when the model that was removed was not the primary. It
 			# returns "reload", which merely rotates the secret file: admin keeps
-			# the old llm_pool_config, openclaw.json keeps declaring the removed
+			# the old llm_pool_config, agent configuration keeps declaring the removed
 			# provider, and that model's llm_key_N.key stays on disk. The agent can
 			# still fail over to a model the customer deleted, and the credential
 			# they may have been trying to revoke is never revoked.
 			#
 			# Forcing "restart" would not be enough: /llm-creds re-renders
-			# openclaw.json but never prunes llm_key_*.key, never rewrites
+			# agent configuration but never prunes llm_key_*.key, never rewrites
 			# docker-compose.yml, and never tears the Bifrost/cliproxy sidecars
 			# down. /llm-pool does all three, and llm_proxy.validate() accepts a
 			# single-model spec (it rejects only an EMPTY pool), so the honest
@@ -1350,7 +1350,7 @@ class JarvisSettings(Document):
 		``action`` is the classifier output:
 		- "reload" calls post_rotate_llm_secret (hot-rotate /secrets/llm.key
 		  for api-key rotation; no restart).
-		- "restart" calls post_update_llm_creds (re-render openclaw.json
+		- "restart" calls post_update_llm_creds (re-render agent configuration
 		  and restart container) - used for mode switches and
 		  provider/model/base_url changes.
 
@@ -1728,7 +1728,7 @@ class JarvisSettings(Document):
 
 		``flags.force_admin_sync`` (set by save_llm_creds(force=True))
 		overrides the no-diff gate and always returns 'restart' so the
-		complete_paste_signin path can re-render openclaw.json + restart
+		complete_paste_signin path can re-render agent configuration + restart
 		the container even when nothing structural changed on the bench.
 		"""
 		# Caller-forced sync (e.g. complete_paste_signin re-authorize):

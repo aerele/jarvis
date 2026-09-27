@@ -91,6 +91,13 @@ def _cleanup(user: str = TEST_USER) -> None:
 # --------------------------------------------------------------------------- #
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class _Recorder:
 	def __init__(self):
 		self.calls: list = []
@@ -2267,6 +2274,19 @@ class TestPublishFencing(_PumpTestCase):
 				("run:step", "I'll check the invoices."),
 			],
 		)
+
+	def test_step_cache_reads_never_pin_a_local_copy(self):
+		"""Frappe v15 keeps a local copy of a value read without expires=True, and a
+		TTL write does not refresh it, so the second step of a turn overwrote the
+		first (caught by the version-15 backport CI). Reads must not pin a copy."""
+		key = pump._run_steps_key("pmp_step3")
+		frappe.cache().delete_value(key)
+		self.assertEqual(pump._read_run_steps("pmp_step3"), [])
+		self.assertNotIn(frappe.cache().make_key(key), frappe.local.cache)
+		pump._append_run_step("pmp_step3", "One.")
+		pump._append_run_step("pmp_step3", "Two.")
+		self.assertEqual(pump._read_run_steps("pmp_step3"), ["One.", "Two."])
+		frappe.cache().delete_value(key)
 
 	def test_on_delta_stores_raw_text_and_publishes_shown(self):
 		"""The stored mirror keeps exactly what streamed (a stop or error mid-lookup
