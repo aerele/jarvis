@@ -3142,6 +3142,12 @@ def _settle_recover_errored(
 			error=err,
 			code=_classify_error(err),
 		)
+	# jarvis#1425 review (live e2e2, 2026-09-27): this path settles WITHOUT
+	# going through invoke_settlement (settlement.py's own poke does not cover
+	# it) - poke directly, right after this terminal's own commit(s) above.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active()
 	return True
 
 

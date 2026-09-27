@@ -167,6 +167,19 @@ def invoke_settlement(
 
 	frappe.db.commit()  # slot released; the NEXT turn can be promoted
 
+	# jarvis#1425 review (live e2e2, 2026-09-27): a Relay Pump reply's terminal
+	# write lands here, not in turn_handler.py's legacy exit - e2e2's actual
+	# replies run through the pump, so turn_handler._maybe_apply_llm_switch's
+	# own poke never fires for them. This ONE call site is shared by every pump
+	# terminal that reaches invoke_settlement (a normal terminal, an aborted
+	# stop, a reconcile-owed settle, and the recovery-settlement siblings), so
+	# poking here covers all of them at once, right after the commit that just
+	# released this slot. Cheap (one is_active() redis GET first) and never
+	# raises - a reply must never fail because this poke did.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active()
+
 	# The maintained per-conversation turn counter that drives the once-per-session
 	# feedback popup. Runs BEFORE the terminal publish so the client's
 	# ``session_feedback_status`` call on ``run:end`` already sees this turn counted.

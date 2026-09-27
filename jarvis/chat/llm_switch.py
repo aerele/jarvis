@@ -57,7 +57,18 @@ MESSAGE = "Updating your AI setup. Chat will be back in a moment."
 # send hold stay up the whole time. RELEASE_GRACE_S bounds how long a
 # genuinely in-flight enqueue (rq dequeue latency, a slow worker pool) gets
 # before a missing/failed job is treated as lost rather than merely pending.
-RELEASE_GRACE_S = 30
+#
+# 90s, not 30 (2026 review, scoped re-review): released_at is stamped when
+# _release_job_locked WRITES the record, but the actual rq enqueue only lands
+# at commit (enqueue_after_commit=True in production) - a releasing request or
+# job slow to commit could still look "lost" to a poller past a tighter grace
+# and get healed into a double-fire. The two runs would serialize on the
+# admin-sync redis lock and the older run's own finish() would be ignored (its
+# run_id no longer matches), so the worst case is one extra apply/restart, not
+# corruption - but a genuinely lost release is rare, and 90s plus one poll
+# cycle still beats the 20-minute TTL by far, so there is no real cost to
+# widening it.
+RELEASE_GRACE_S = 90
 
 # admission._shard_inflight's legacy (non-Turn-row) leg freshness-gates a streaming
 # assistant Message's `modified` at admission._INFLIGHT_FRESH_SECONDS (180s) - tuned
@@ -252,11 +263,42 @@ def try_apply(*, force: bool = False) -> bool:
 		return False
 
 
+def apply_if_active() -> None:
+	"""Poke a held switch forward right after a reply's own terminal write
+	commits (jarvis#1425 review, live e2e2, 2026-09-27): every terminal-write
+	call site across the chat surfaces - the legacy ``turn_handler`` exit AND
+	its error/abandon path, the Relay Pump's settlement (``chat/settlement.py``,
+	shared by every pump terminal - success, error, aborted, reconcile-owed,
+	recovery) and the pump's own budget-exhausted recovery-errored path that
+	settles without going through it - calls this immediately after ITS OWN
+	commit of ``streaming=0``, so the switch applies the moment nothing is
+	left in flight rather than waiting for the next poll (up to 60s on the
+	SPA's maintenance check). ONE cheap ``is_active()`` redis GET skips the
+	heavier lock-acquiring ``try_apply()`` on the overwhelming common case (no
+	switch held). Never raises - a reply must never fail because this poke
+	did. Idempotent with every other trigger (``settle_turn``,
+	``settle_conversation_dispatching``, another call site's own poke on the
+	same terminal) - calling it twice for one reply end is harmless."""
+	try:
+		if is_active():
+			try_apply()
+	except Exception:
+		frappe.log_error(title="llm_switch.apply_if_active failed", message=frappe.get_traceback())
+
+
 def _try_apply_locked(*, force: bool) -> bool:
 	"""The actual apply decision. Assumes the caller (``try_apply()`` or
 	``_begin_now()``) already holds the ``jarvis_llm_switch`` lock - never acquires it
 	itself, which would deadlock against the caller's own held lock (the underlying
-	redis-py lock is not reentrant)."""
+	redis-py lock is not reentrant).
+
+	A healed record (``_heal_lost_release_locked`` reset ``applied`` to
+	``False`` but left ``next`` alone) is released exactly like ``finish()``'s
+	own hand-off: if a retarget parked while the now-lost run was executing,
+	THAT config releases - never the stale one the lost run was carrying -
+	with its own captured ``pending_status`` re-stamped, same reason
+	``finish()`` re-stamps it (the lost run's own last write must not read as
+	this fresh run's terminal status)."""
 	rec = status()
 	if rec is None:
 		return False
@@ -269,6 +311,11 @@ def _try_apply_locked(*, force: bool) -> bool:
 		past_deadline = time.time() >= rec.get("deadline", 0)
 		if not past_deadline and _inflight() > 0:
 			return False
+	next_apply = rec.get("next")
+	if next_apply:
+		return _release_job_locked(
+			next_apply["job"], next_apply["job_kwargs"], rec, pending_status=next_apply.get("pending_status")
+		)
 	return _release_job_locked(rec["job"], rec["job_kwargs"], rec)
 
 
@@ -303,10 +350,11 @@ def _heal_lost_release_locked(rec: dict) -> dict | None:
 	terminal-status branch - never race that).
 
 	A parked ``next`` (a retarget that arrived while this now-lost run was
-	still "executing") is PROMOTED into the healed record - latest wins, same
-	as ``_begin_now``'s own not-yet-applied retarget - so a config change that
-	arrived after the lost release is never silently dropped in favour of the
-	stale one ``_try_apply_locked`` would otherwise re-release."""
+	still "executing") is left exactly as-is - ``_try_apply_locked`` releases
+	it in preference to the stale job (latest wins, same as ``_begin_now``'s
+	own not-yet-applied retarget, and with its captured ``pending_status``
+	re-stamped exactly like ``finish()``'s own hand-off), so a config change
+	that arrived after the lost release is never silently dropped."""
 	if frappe.flags.in_test or frappe.flags.run_admin_sync_inline:
 		return None
 	released_at = rec.get("released_at")
@@ -338,9 +386,6 @@ def _heal_lost_release_locked(rec: dict) -> dict | None:
 		),
 	)
 	healed = {**rec, "applied": False}
-	next_apply = rec.get("next")
-	if next_apply:
-		healed = {**healed, "job": next_apply["job"], "job_kwargs": next_apply["job_kwargs"], "next": None}
 	frappe.cache().set_value(KEY, healed, expires_in_sec=TTL_S)
 	return healed
 

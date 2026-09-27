@@ -848,6 +848,73 @@ class TestTwoWriterSettlement(_PipelineCase):
 # --------------------------------------------------------------------------- #
 
 
+class TestSettlementAppliesLlmSwitch(_PipelineCase):
+	"""jarvis#1425 review (live e2e2, 2026-09-27): e2e2's actual replies run
+	through the Relay Pump, not turn_handler.py's legacy exit - so the
+	llm_switch poke belongs on invoke_settlement's own winning commit, the
+	ONE choke point shared by every pump terminal (a normal terminal, an
+	aborted stop, a reconcile-owed settle, and the recovery-settlement
+	siblings all call it)."""
+
+	def _settle_a_terminal(self, *, rid: str):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		won, epoch = ts.lease_acquire(self._target, rid)
+		self.assertTrue(won)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"terminal_observed",
+			version=1,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			terminal_kind="relay:final",
+			terminal_payload=json.dumps({"text": "final answer"}),
+			terminal_observed_at=frappe.utils.now(),
+		)
+		deps = pump.PumpDeps()
+		deps.enqueue_finalize = _Recorder()
+		self._pubs.clear()
+		settlement.invoke_settlement(
+			rid,
+			relay_target_id=self._target,
+			epoch=epoch,
+			version=2,
+			terminal_kind="relay:final",
+			terminal_payload={"text": "final answer"},
+			assistant_message=None,
+			owner=self._orig_user,
+			conversation=conv,
+			deps=deps,
+		)
+		self.assertEqual(self._state(rid), "finalizing", "the settle must have actually won")
+
+	def test_settling_a_terminal_pokes_an_active_switch(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=True) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			self._settle_a_terminal(rid="pmp_switch_active")
+		is_active.assert_called_once()
+		try_apply.assert_called_once()
+
+	def test_settling_a_terminal_with_no_switch_takes_no_lock(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=False) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			self._settle_a_terminal(rid="pmp_switch_inactive")
+		is_active.assert_called_once()
+		try_apply.assert_not_called()
+
+
 class TestSux11ErrorContract(_PipelineCase):
 	def test_error_terminal_preserves_classification(self):
 		conv = self._mk_conv()

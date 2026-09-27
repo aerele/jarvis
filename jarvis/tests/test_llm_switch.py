@@ -21,6 +21,7 @@ is needed to observe their effects, mirroring how the existing
 """
 
 import time
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -615,6 +616,33 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 			"Jarvis Settings", {"last_sync_status": "pending: admin applying config"}, update_modified=False
 		)
 
+	@contextmanager
+	def _inline_flags_off(self):
+		"""frappe.flags.in_test is True for the whole suite, which makes
+		_heal_lost_release_locked's own inline-mode skip fire before any of its
+		real logic - flip both inline flags off (test_lone_direct_handover.py's
+		established save/restore pattern) so a direct _heal_lost_release_locked
+		call actually exercises the grace/rq-status/terminal-status checks
+		instead of short-circuiting on the flag every time (CI finding: 4 of 5
+		direct-call tests in this class were passing for the wrong reason -
+		the in_test skip, not the condition each one names - until this fix).
+		Keep the window as small as possible: only the heal call itself needs
+		it, never the record/status setup around it. Drains after_commit on
+		exit defensively - nothing in this class's heal-only calls registers
+		one, but a write to Jarvis Settings while in_test is off can make
+		unrelated Frappe machinery do so (same CI finding documented on
+		test_lone_direct_handover.py's TestSwitchBeginDeferredToAfterCommit)."""
+		original_in_test = frappe.flags.in_test
+		original_inline = frappe.flags.get("run_admin_sync_inline")
+		frappe.flags.in_test = False
+		frappe.flags.run_admin_sync_inline = False
+		try:
+			yield
+		finally:
+			frappe.flags.in_test = original_in_test
+			frappe.flags.run_admin_sync_inline = original_inline
+			frappe.db.after_commit.reset()
+
 	def test_reconcile_reheals_a_lost_release_past_grace_with_no_rq_job(self):
 		"""The end-to-end path the coordinator asked for: reconcile() (every held
 		chat's 60s check and get_llm_sync_status already call it) re-releases
@@ -651,8 +679,12 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 		self._lost_release_record(released_at=time.time() - llm_switch.RELEASE_GRACE_S - 1)
 		self._stamp_pending_status()
 		rec = llm_switch.status()
-		with patch("frappe.utils.background_jobs.get_job_status", return_value="queued"):
+		with (
+			self._inline_flags_off(),
+			patch("frappe.utils.background_jobs.get_job_status", return_value="queued") as get_status,
+		):
 			healed = llm_switch._heal_lost_release_locked(rec)
+			get_status.assert_called_once_with(self._RQ_JOB_ID)
 		self.assertIsNone(healed, "a queued job is alive; nothing to heal")
 		self.assertEqual(llm_switch.status(), rec, "an untouched record must be byte-identical")
 
@@ -661,7 +693,7 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 		self._lost_release_record(released_at=time.time() - 1)
 		self._stamp_pending_status()
 		rec = llm_switch.status()
-		with patch("frappe.utils.background_jobs.get_job_status") as get_status:
+		with self._inline_flags_off(), patch("frappe.utils.background_jobs.get_job_status") as get_status:
 			healed = llm_switch._heal_lost_release_locked(rec)
 			get_status.assert_not_called()  # never even worth the rq round-trip
 		self.assertIsNone(healed)
@@ -675,16 +707,16 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 		self._stamp_pending_status()
 		rec = {**llm_switch.status(), "rq_job_id": None}
 		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
-		with patch("frappe.utils.background_jobs.get_job_status") as get_status:
+		with self._inline_flags_off(), patch("frappe.utils.background_jobs.get_job_status") as get_status:
 			healed = llm_switch._heal_lost_release_locked(rec)
 			get_status.assert_not_called()
 		self.assertIsNone(healed)
 
-	def test_heal_promotes_a_parked_next_instead_of_re_releasing_the_stale_job(self):
-		"""A retarget that arrived while this now-lost run was "executing"
-		parked in rec["next"] - healing must release THAT config, not the
-		stale one the lost run was carrying, or a config change made during
-		the loss window would be silently dropped."""
+	def test_heal_marks_not_applied_and_leaves_a_parked_next_for_try_apply_to_release(self):
+		"""_heal_lost_release_locked's own job: flip applied to False and leave
+		``next`` untouched for _try_apply_locked to release - the promotion
+		(and the pending_status re-stamp) is that caller's job, verified end to
+		end below."""
 		rec = {
 			"started_at": time.time() - 100,
 			"deadline": time.time() + 200,
@@ -702,13 +734,65 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 		}
 		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
 		self._stamp_pending_status()
-		with patch("frappe.utils.background_jobs.get_job_status", return_value=None):
+		with (
+			self._inline_flags_off(),
+			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
+			patch("frappe.log_error") as mock_log,
+		):
 			healed = llm_switch._heal_lost_release_locked(rec)
+		mock_log.assert_called_once()
 		self.assertIsNotNone(healed)
-		self.assertEqual(healed["job"], "jarvis.tests.fresh_job")
-		self.assertEqual(healed["job_kwargs"], {"job_id": "jarvis_settings_sync:pool", "fresh": True})
-		self.assertIsNone(healed["next"])
 		self.assertFalse(healed["applied"])
+		self.assertEqual(healed["next"], rec["next"], "the promotion is _try_apply_locked's job, not heal's")
+
+	def test_reconcile_heals_and_promotes_a_parked_next_with_its_pending_status_restamped(self):
+		"""End to end: a lost release with a parked next -> reconcile() (via
+		try_apply()) releases the PARKED config, not the stale one, and
+		re-stamps last_sync_status to the string captured when it was parked -
+		exactly like finish()'s own hand-off - so a poller reading right after
+		never sees the lost run's own terminal write as this fresh run's."""
+		rec = {
+			"started_at": time.time() - 100,
+			"deadline": time.time() + 200,
+			"job": "jarvis.tests.stale_job",
+			"job_kwargs": {"job_id": "jarvis_settings_sync:pool"},
+			"applied": True,
+			"run_id": "stale-run",
+			"next": {
+				"job": "jarvis.tests.fresh_job",
+				"job_kwargs": {"job_id": "jarvis_settings_sync:pool", "fresh": True},
+				"pending_status": "pending: admin applying config (retargeted)",
+			},
+			"released_at": time.time() - llm_switch.RELEASE_GRACE_S - 1,
+			"rq_job_id": self._RQ_JOB_ID,
+		}
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		# The lost run's own last write - a poller must never mistake this for
+		# the parked (fresh) run's status once it releases.
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "pending: admin applying config"}, update_modified=False
+		)
+		with (
+			self._inline_flags_off(),
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
+			patch("frappe.enqueue") as mock_enqueue,
+			patch("frappe.log_error"),
+		):
+			llm_switch.reconcile()
+		frappe.db.after_commit.reset()
+		mock_enqueue.assert_called_once()
+		args, kwargs = mock_enqueue.call_args
+		self.assertEqual(args[0], "jarvis.tests.fresh_job")
+		self.assertTrue(kwargs.get("fresh"))
+		new_rec = llm_switch.status()
+		self.assertEqual(new_rec["job"], "jarvis.tests.fresh_job")
+		self.assertIsNone(new_rec["next"])
+		self.assertNotEqual(new_rec["run_id"], "stale-run")
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status"),
+			"pending: admin applying config (retargeted)",
+		)
 
 	def test_heal_leaves_a_terminal_status_alone(self):
 		"""A terminal last_sync_status means finish()/end() already own this (or
@@ -719,7 +803,10 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 			"Jarvis Settings", {"last_sync_status": "ok (restart via admin)"}, update_modified=False
 		)
 		rec = llm_switch.status()
-		with patch("frappe.utils.background_jobs.get_job_status", return_value=None):
+		with (
+			self._inline_flags_off(),
+			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
+		):
 			healed = llm_switch._heal_lost_release_locked(rec)
 		self.assertIsNone(healed)
 		self.assertEqual(llm_switch.status(), rec)

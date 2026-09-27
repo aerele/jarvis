@@ -967,22 +967,18 @@ def _maybe_apply_llm_switch() -> None:
 	that call. This is the DIRECT trigger at the assistant message's own
 	terminal write - streaming flips 1 -> 0 right before this runs, so
 	``llm_switch._inflight()``'s read (right after, inside ``try_apply``) sees
-	it. ``is_active()`` first is a single cheap redis GET that skips the
-	heavier lock-acquiring ``try_apply()`` on the overwhelming common case (no
-	switch held); never raises - a reply must never fail because the switch
-	poke did. Called on BOTH the success (clean lifecycle.end) and every
+	it. Called on BOTH the success (clean lifecycle.end) and every
 	error/abandon terminal (``_mark_errored``) exit of this worker, right
-	after the streaming=0 write's own commit. The existing settle_turn /
-	settle_conversation_dispatching triggers stay - this is additive, and
-	``try_apply()`` is itself idempotent (a no-op once applied or with
-	nothing held)."""
-	try:
-		from jarvis.chat import llm_switch
+	after the streaming=0 write's own commit. Delegates to
+	``llm_switch.apply_if_active()`` - the same shared poke ``chat/
+	settlement.py`` and the pump's own recovery-errored path call after
+	THEIR terminal writes, so a switch applies the moment nothing is left in
+	flight on every chat surface, not just this legacy one. The existing
+	settle_turn / settle_conversation_dispatching triggers stay - this is
+	additive, and the poke is itself idempotent."""
+	from jarvis.chat import llm_switch
 
-		if llm_switch.is_active():
-			llm_switch.try_apply()
-	except Exception:
-		frappe.log_error(title="chat worker: llm_switch.try_apply failed", message=frappe.get_traceback())
+	llm_switch.apply_if_active()
 
 
 @dataclass
