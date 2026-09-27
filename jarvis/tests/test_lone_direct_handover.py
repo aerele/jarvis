@@ -1073,6 +1073,43 @@ class TestFinishSwitchRun(FrappeTestCase):
 
 		mock_finish.assert_called_once_with("run-1", "ok (restart via admin)")
 
+	def test_pending_applying_on_a_normal_exit_awaits_admin_instead_of_finishing(self):
+		"""jarvis#1425 review, fourth pass ("the switch ends when the apply is
+		CONFIRMED, not when the worker stops waiting"): admin ACCEPTED the
+		push and this worker's own in-band convergence wait simply gave up -
+		the apply is still in progress on admin's side. finish() must NOT be
+		called (that would end the switch and clear the banner/send-hold
+		before the container actually finishes); await_admin() takes over."""
+		with (
+			patch("frappe.db.get_value", return_value=_PENDING_APPLYING_STATUS),
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
+			patch("jarvis.chat.llm_switch.await_admin") as mock_await,
+		):
+			_finish_switch_run("run-1", crashed=False)
+
+		mock_finish.assert_not_called()
+		mock_await.assert_called_once_with("run-1")
+
+	def test_pending_applying_on_a_crash_still_finishes_not_awaits(self):
+		"""A CRASH at this exact status is not the deliberate "admin accepted,
+		still converging" exit await_admin exists for - it is the CR-0
+		backstop's own territory (rewrite to the generic failure, then
+		finish), unchanged."""
+		with (
+			patch("frappe.db.get_value", return_value=_PENDING_APPLYING_STATUS),
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._write_settings_fields"
+			) as mock_write,
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._commit_terminal_sync_status"),
+			patch("jarvis.chat.llm_switch.finish") as mock_finish,
+			patch("jarvis.chat.llm_switch.await_admin") as mock_await,
+		):
+			_finish_switch_run("run-1", crashed=True)
+
+		mock_await.assert_not_called()
+		mock_write.assert_called_once()
+		mock_finish.assert_called_once_with("run-1", "failed: unexpected error; see Error Log")
+
 	def test_a_pending_status_on_a_normal_exit_is_never_rewritten(self):
 		"""The core of Bug 1: a bounded pending-retry is this run's OWN
 		deliberate, normal outcome - crashed=False must pass it straight

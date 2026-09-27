@@ -101,6 +101,59 @@ def is_active() -> bool:
 	return status() is not None
 
 
+def blocks_stamp() -> bool:
+	"""True when a converged-ok stamp must be refused right now (2026 review,
+	fourth pass, "awaiting admin"): a switch is HELD (not yet applied) or
+	applied but not yet confirmed as pushed. Admin's "Ready" during either of
+	those describes the config BEFORE the switch - stamping would strand the
+	tenant reading "ok" while it is not what is actually being served.
+
+	Once a released worker calls ``await_admin()`` (admin ACCEPTED the push;
+	only convergence confirmation is pending - ``rec["awaiting_admin"]``),
+	Ready now genuinely describes THIS config, and a stamp is correct. Every
+	poller that guards a converged-ok stamp on this (``onboarding.
+	_reconcile_pending_applying``, ``reconcile_pending_llm_sync``, ``account.
+	_confirm_apply_via_admin``, ``resync_llm``) must also call ``reconcile()``
+	right after a stamp that lands, so the switch ends on it immediately
+	rather than waiting for the next tick."""
+	rec = status()
+	if rec is None:
+		return False
+	return not (rec.get("applied") and rec.get("awaiting_admin"))
+
+
+def await_admin(run_id: str | None) -> None:
+	"""Called by a switch-released worker that exits normally with admin
+	having ACCEPTED the push but not yet confirmed convergence (
+	``_PENDING_APPLYING_STATUS`` - see ``jarvis_settings._finish_switch_run``,
+	which routes here instead of ``finish()`` for exactly this status). Ending
+	the switch here (the old behavior) cleared the banner and the send-hold
+	before the container actually finished restarting - a live e2e2 finding
+	(direct->proxy: switch released at 91.7s, admin's OWN converge-config job
+	then restarted the container at 201s/212s, chat open the whole time).
+
+	Sets ``rec["awaiting_admin"] = True`` + ``rec["awaiting_since"] =
+	time.time()`` under the lock, ``run_id``-matched exactly like ``finish()``
+	- a stale/superseded run must never touch a switch it no longer owns.
+	No-op if ``run_id`` is falsy or does not match the active record. Never
+	raises."""
+	if not run_id:
+		return
+	try:
+		from jarvis._redis_lock import redis_lock
+
+		with redis_lock("jarvis_llm_switch") as acquired:
+			if not acquired:
+				return
+			rec = status()
+			if rec is None or rec.get("run_id") != run_id:
+				return
+			rec = {**rec, "awaiting_admin": True, "awaiting_since": time.time()}
+			frappe.cache().set_value(KEY, rec, expires_in_sec=TTL_S)
+	except Exception:
+		frappe.log_error(title="llm_switch.await_admin failed", message=frappe.get_traceback())
+
+
 def _inflight() -> int:
 	"""Dual-signal inflight, mirroring admission._shard_inflight but with the legacy
 	leg widened to _SWITCH_FRESH_S (see the module comment). Turn-row `dispatching` is
@@ -365,8 +418,16 @@ def _heal_lost_release_locked(rec: dict) -> dict | None:
 	it in preference to the stale job (latest wins, same as ``_begin_now``'s
 	own not-yet-applied retarget, and with its captured ``pending_status``
 	re-stamped exactly like ``finish()``'s own hand-off), so a config change
-	that arrived after the lost release is never silently dropped."""
+	that arrived after the lost release is never silently dropped.
+
+	Skipped entirely when ``rec.get("awaiting_admin")`` (2026 review, fourth
+	pass): that worker's rq job finished ON PURPOSE (a normal exit -
+	``await_admin()`` is only ever called after the enqueued job returns) -
+	"missing from rq" is the EXPECTED state, not evidence of a lost release,
+	and self-heal must never re-release a config admin is still converging."""
 	if frappe.flags.in_test or frappe.flags.run_admin_sync_inline:
+		return None
+	if rec.get("awaiting_admin"):
 		return None
 	released_at = rec.get("released_at")
 	if not released_at or (time.time() - released_at) <= RELEASE_GRACE_S:
@@ -592,6 +653,24 @@ def finish(run_id: str | None, outcome: str) -> None:
 		end(outcome)
 
 
+#: Ceiling on how long an "awaiting admin" switch (a released worker exited
+#: normally with admin having ACCEPTED the push, per ``await_admin()``) waits
+#: for admin's own convergence to confirm before this poller gives up and
+#: ends the switch anyway with whatever status is currently recorded (2026
+#: review, fourth pass). Chat must not stay blocked indefinitely behind an
+#: admin apply that is taking unusually long; ``reconcile_pending_llm_sync``
+#: (the */5 scheduled safety net) or the next SPA poll finishes the "ok"
+#: stamp later, off the SAME converged-ok machinery, once admin does confirm.
+AWAIT_ADMIN_MAX_S = 600
+
+#: Throttle for the admin probe ``_reconcile_awaiting_admin`` makes on behalf
+#: of every held chat's maintenance poll - AT MOST ONE probe per this window,
+#: across every caller (a shared cache key, not per-request), so N open chats
+#: polling every few seconds do not turn into N concurrent admin round-trips.
+_AWAIT_ADMIN_PROBE_KEY = "jarvis:llm_switch_await_admin_probe"
+_AWAIT_ADMIN_PROBE_THROTTLE_S = 10
+
+
 def reconcile() -> None:
 	"""Poller hook (onboarding.get_llm_sync_status / reconcile_pending_llm_sync,
 	wired in Task 5): drive the held switch forward, then hand it off (release a
@@ -604,6 +683,13 @@ def reconcile() -> None:
 	"ok"/"failed:" here means THIS switch's apply landed, not a status left over from
 	before the switch started.
 
+	An "awaiting admin" record (``rec["awaiting_admin"]`` - the released
+	worker exited normally with admin having ACCEPTED the push; see
+	``await_admin()``) is NOT a terminal ``last_sync_status`` locally, so the
+	check above would never fire for it - handled separately by
+	``_reconcile_awaiting_admin`` (2026 review, fourth pass), which every held
+	chat's 60s maintenance check drives forward on its own throttled probe.
+
 	Never raises (2026 review round 1): this backs ``get_llm_sync_status``, a
 	whitelisted endpoint the SPA polls - a transient redis/DB error must degrade to
 	"didn't reconcile this poll", not a 500 in front of the user."""
@@ -612,11 +698,55 @@ def reconcile() -> None:
 		rec = status()
 		if not rec or not rec.get("applied"):
 			return
+		if rec.get("awaiting_admin"):
+			_reconcile_awaiting_admin(rec)
+			return
 		last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
 		if last_status.startswith("ok") or last_status.startswith("failed:"):
 			finish(rec.get("run_id"), last_status)
 	except Exception:
 		frappe.log_error(title="llm_switch.reconcile failed", message=frappe.get_traceback())
+
+
+def _reconcile_awaiting_admin(rec: dict) -> None:
+	"""Drive an "awaiting admin" switch forward: past ``AWAIT_ADMIN_MAX_S``,
+	end it with whatever status is currently recorded (the ceiling - chat
+	unblocks; a later poll/`*/5` reconcile finishes the "ok" stamp). Otherwise,
+	at most once per ``_AWAIT_ADMIN_PROBE_THROTTLE_S`` across every caller,
+	probe admin via the SAME readiness check ``onboarding.
+	_reconcile_pending_applying`` uses, stamp converged on Ready, then finish
+	the switch with whatever ``last_sync_status`` reads after that (whether
+	the stamp landed or not - a lost race means someone else already wrote
+	the same "ok", which is just as good a reason to end this run). Never
+	raises - called from ``reconcile()``'s own try/except, but the throttle
+	check touches redis on its own before that guard, so it gets one too."""
+	run_id = rec.get("run_id")
+	awaiting_since = rec.get("awaiting_since") or 0
+	if time.time() - awaiting_since >= AWAIT_ADMIN_MAX_S:
+		status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		finish(run_id, status_now)
+		return
+	try:
+		cache = frappe.cache()
+		if cache.get_value(_AWAIT_ADMIN_PROBE_KEY, expires=True):
+			return
+		cache.set_value(_AWAIT_ADMIN_PROBE_KEY, 1, expires_in_sec=_AWAIT_ADMIN_PROBE_THROTTLE_S)
+	except Exception:
+		return
+	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+		_admin_chat_readiness,
+		_stamp_converged_ok,
+	)
+	from jarvis.jarvis.pool_serialize import compute_pool_mode
+
+	state, _reason = _admin_chat_readiness()
+	if state != "Ready":
+		return
+	settings = frappe.get_single("Jarvis Settings")
+	if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
+		frappe.db.commit()
+	status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+	finish(run_id, status_now)
 
 
 def _reset_for_tests() -> None:

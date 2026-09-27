@@ -657,11 +657,34 @@ def _finish_switch_run(run_id: str | None, *, crashed: bool) -> None:
 	never end or hand off a switch it does not own (``llm_switch.finish()``
 	re-checks the SAME thing against its own record, but that check happens
 	under the redis lock; this early return just skips the whole exercise
-	when there is provably nothing to do)."""
+	when there is provably nothing to do).
+
+	``await_admin`` routing (2026 review, fourth pass, "the switch ends when
+	the apply is CONFIRMED, not when the worker stops waiting"): a NORMAL
+	exit (``crashed=False``) at exactly ``_PENDING_APPLYING_STATUS`` means
+	admin ACCEPTED the push and this worker's own in-band convergence wait
+	(``_converge_via_admin``'s ``_POOL_CONVERGE_DEADLINE_S``) simply gave up -
+	the apply is still IN PROGRESS on admin's side, not abandoned. Ending the
+	switch here (the old behavior) cleared the banner and the send-hold
+	before the container actually finished restarting (live e2e2: admin's own
+	converge-config job ran ~110-120s AFTER this worker gave up and restarted
+	the container while chat was open - exactly what the switch exists to
+	prevent). Routes to ``llm_switch.await_admin()`` instead of ``finish()``
+	so the switch stays held until admin's OWN Ready confirms it (see
+	``llm_switch.reconcile()``'s ``_reconcile_awaiting_admin``) or the
+	``AWAIT_ADMIN_MAX_S`` ceiling gives up. Matched on the EXACT status
+	string, not a bare "pending:" prefix, so the handover's OWN distinct
+	pending status (a bounded retry-later outcome per the comment above)
+	is UNCHANGED - it still ends the switch normally."""
 	if not run_id:
 		return
 	try:
 		status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		if not crashed and status == _PENDING_APPLYING_STATUS:
+			from jarvis.chat import llm_switch
+
+			llm_switch.await_admin(run_id)
+			return
 		if crashed and not (status.startswith("ok") or status.startswith("failed:")):
 			_write_settings_fields(
 				frappe._dict(), {"last_sync_status": "failed: unexpected error; see Error Log"}
@@ -3540,17 +3563,20 @@ def reconcile_pending_llm_sync() -> None:
 				# the next one (or the SPA's own poller) re-probes and re-stamps.
 				#
 				# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is
-				# HELD, admin's "Ready" verdict describes the PREVIOUS config
-				# (desired_version == applied_version - nothing new has been
-				# pushed yet), never the held config this poller thinks is
-				# outstanding. Stamping here would flip "ok" (and the synced
-				# marker) while the tenant is still serving the OLD leg, possibly
-				# forever if the switch record is then lost. The switch's own
-				# released worker owns the outcome through ITS OWN
-				# _converge_via_admin loop once it actually pushes; this poller
-				# just leaves the pending status alone and re-probes next tick.
-				if not llm_switch.is_active():
-					_stamp_converged_ok(settings, is_pool=pool_mode)
+				# HELD (not yet applied) or applied but not yet confirmed by
+				# admin, "Ready" describes the config BEFORE the switch, never
+				# the one this poller thinks is outstanding. Stamping here
+				# would flip "ok" (and the synced marker) while the tenant is
+				# still serving the OLD leg, possibly forever if the switch
+				# record is then lost. jarvis#1425 review, fourth pass: once
+				# the switch's own released worker calls await_admin() (admin
+				# ACCEPTED the push; only convergence confirmation pending),
+				# Ready genuinely describes THIS config and the stamp is
+				# correct - reconcile() right after ends the switch on it at
+				# once instead of waiting for the next tick.
+				if not llm_switch.blocks_stamp():
+					if _stamp_converged_ok(settings, is_pool=pool_mode):
+						llm_switch.reconcile()
 			return
 		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
 			return

@@ -463,6 +463,163 @@ class TestNeverRaises(_LlmSwitchTestCase):
 		self.assertTrue(llm_switch.status()["applied"])
 
 
+class TestAwaitingAdmin(_LlmSwitchTestCase):
+	"""jarvis#1425 review, fourth pass: "the switch ends when the apply is
+	CONFIRMED, not when the worker stops waiting." A released worker that
+	exits normally with admin having ACCEPTED the push (but not yet
+	confirmed convergence) calls await_admin() instead of finish() -
+	confirmed elsewhere (test_lone_direct_handover.py's
+	TestFinishSwitchRun). This class covers the switch-side mechanics:
+	await_admin() itself, blocks_stamp(), reconcile()'s awaiting_admin
+	branch (admin probe, throttle, ceiling), and self-heal's skip."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.cache().delete_value(llm_switch._AWAIT_ADMIN_PROBE_KEY)
+
+	def tearDown(self):
+		frappe.cache().delete_value(llm_switch._AWAIT_ADMIN_PROBE_KEY)
+		super().tearDown()
+
+	def _applied_record(self, *, run_id="run-1", awaiting_admin=False, awaiting_since=None):
+		rec = {
+			"started_at": time.time() - 100,
+			"deadline": time.time() + 200,
+			"job": "jarvis.tests.fake_job",
+			"job_kwargs": {"job_id": "jarvis_settings_sync:pool"},
+			"applied": True,
+			"run_id": run_id,
+			"next": None,
+		}
+		if awaiting_admin:
+			rec["awaiting_admin"] = True
+			rec["awaiting_since"] = awaiting_since if awaiting_since is not None else time.time()
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		return rec
+
+	# -- await_admin() -------------------------------------------------- #
+
+	def test_await_admin_marks_a_matching_run(self):
+		self._applied_record(run_id="run-1")
+		llm_switch.await_admin("run-1")
+		rec = llm_switch.status()
+		self.assertTrue(rec["awaiting_admin"])
+		self.assertIsNotNone(rec["awaiting_since"])
+
+	def test_await_admin_ignores_a_stale_run_id(self):
+		rec = self._applied_record(run_id="run-1")
+		llm_switch.await_admin("some-other-run")
+		self.assertEqual(llm_switch.status(), rec)
+
+	def test_await_admin_is_a_no_op_with_no_run_id(self):
+		rec = self._applied_record(run_id="run-1")
+		llm_switch.await_admin(None)
+		self.assertEqual(llm_switch.status(), rec)
+
+	# -- blocks_stamp() --------------------------------------------------- #
+
+	def test_blocks_stamp_false_with_no_switch(self):
+		self.assertFalse(llm_switch.blocks_stamp())
+
+	def test_blocks_stamp_true_when_held_and_not_yet_applied(self):
+		rec = {**self._applied_record(), "applied": False}
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		self.assertTrue(llm_switch.blocks_stamp())
+
+	def test_blocks_stamp_true_when_applied_but_not_yet_awaiting_admin(self):
+		self._applied_record(awaiting_admin=False)
+		self.assertTrue(llm_switch.blocks_stamp())
+
+	def test_blocks_stamp_false_when_applied_and_awaiting_admin(self):
+		self._applied_record(awaiting_admin=True)
+		self.assertFalse(llm_switch.blocks_stamp())
+
+	# -- reconcile()'s awaiting_admin branch ------------------------------- #
+
+	def test_reconcile_stamps_and_ends_on_admin_ready(self):
+		self._applied_record(run_id="run-1", awaiting_admin=True)
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "pending: admin applying config"}, update_modified=False
+		)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness",
+				return_value=("Ready", ""),
+			),
+			patch.object(llm_switch, "end") as mock_end,
+		):
+			llm_switch.reconcile()
+		mock_end.assert_called_once()
+		self.assertTrue(mock_end.call_args.args[0].startswith("ok"))
+
+	def test_reconcile_leaves_it_awaiting_when_admin_is_not_ready(self):
+		rec = self._applied_record(run_id="run-1", awaiting_admin=True)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness",
+				return_value=("Configuring", ""),
+			),
+			patch.object(llm_switch, "end") as mock_end,
+		):
+			llm_switch.reconcile()
+		mock_end.assert_not_called()
+		self.assertEqual(llm_switch.status(), rec)
+
+	def test_reconcile_throttles_the_admin_probe_across_calls(self):
+		"""At most one admin round-trip per _AWAIT_ADMIN_PROBE_THROTTLE_S,
+		regardless of how many callers (every held chat's own 60s check)
+		invoke reconcile() in that window."""
+		self._applied_record(run_id="run-1", awaiting_admin=True)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch(
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness",
+				return_value=("Configuring", ""),
+			) as readiness,
+		):
+			llm_switch.reconcile()
+			llm_switch.reconcile()
+		readiness.assert_called_once()
+
+	def test_reconcile_ends_it_at_the_ceiling_regardless_of_admin(self):
+		self._applied_record(
+			run_id="run-1", awaiting_admin=True, awaiting_since=time.time() - llm_switch.AWAIT_ADMIN_MAX_S - 1
+		)
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "pending: admin applying config"}, update_modified=False
+		)
+		with (
+			patch.object(llm_switch, "_inflight", return_value=0),
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._admin_chat_readiness") as readiness,
+			patch.object(llm_switch, "end") as mock_end,
+		):
+			llm_switch.reconcile()
+		readiness.assert_not_called()  # the ceiling short-circuits before ever probing
+		mock_end.assert_called_once_with("pending: admin applying config")
+
+	# -- self-heal skip ----------------------------------------------------- #
+
+	def test_heal_ignores_an_awaiting_admin_record(self):
+		"""The rq job finished ON PURPOSE (a normal exit) - "missing from rq"
+		is expected, not evidence of a lost release."""
+		rec = self._applied_record(run_id="run-1", awaiting_admin=True)
+		rec = {
+			**rec,
+			"released_at": time.time() - llm_switch.RELEASE_GRACE_S - 1,
+			"rq_job_id": "jarvis_settings_sync:pool:abcd1234",
+		}
+		frappe.cache().set_value(llm_switch.KEY, rec, expires_in_sec=llm_switch.TTL_S)
+		frappe.db.set_single_value(
+			"Jarvis Settings", {"last_sync_status": "pending: admin applying config"}, update_modified=False
+		)
+		with patch("frappe.utils.background_jobs.get_job_status") as get_status:
+			healed = llm_switch._heal_lost_release_locked(rec)
+			get_status.assert_not_called()
+		self.assertIsNone(healed)
+
+
 class TestEnd(_LlmSwitchTestCase):
 	def test_end_clears_and_broadcasts_and_promotes(self):
 		with (

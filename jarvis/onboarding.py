@@ -2703,7 +2703,7 @@ def resync_llm() -> dict:
 		return {**_sync_status_payload(settings, status), "outcome": "not_configured", "leg": ""}
 
 	state, _reason = _admin_chat_readiness()
-	if state == "Ready" and not lone_direct_handover_due(settings) and not llm_switch.is_active():
+	if state == "Ready" and not lone_direct_handover_due(settings) and not llm_switch.blocks_stamp():
 		# READY MEANS NEVER PUSH, whether or not our own stamp lands. Making the push
 		# conditional on the stamp succeeding would restart a healthy container in
 		# precisely the situation this endpoint exists to handle gently: five writers
@@ -2712,11 +2712,14 @@ def resync_llm() -> dict:
 		# jarvis#1425: EXCEPT while a handover is due - the still-pooled container
 		# reporting Ready is exactly the state this endpoint must NOT stamp as
 		# converged, or the handover that request_resync below would enqueue never
-		# runs. Same reasoning extends to any held switch (review, live e2e2,
-		# 2026-09-27): Ready describes the PRE-switch config, so a Resync click
-		# during a hold must fall through to request_resync below (which already
-		# joins an active switch) instead of stamping a config nothing has served
-		# yet.
+		# runs. Same reasoning extends to any held-but-not-yet-pushed switch
+		# (review, live e2e2, 2026-09-27): Ready describes the PRE-switch config,
+		# so a Resync click during a hold must fall through to request_resync
+		# below (which already joins an active switch) instead of stamping a
+		# config nothing has served yet. jarvis#1425, fourth pass: an applied
+		# AND awaiting_admin switch (admin already accepted the push) IS
+		# correct to stamp here - get_llm_sync_status() below already calls
+		# reconcile(), which ends that switch on this same stamp.
 		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
 			# The stamp's own commit gate only fires in a worker; this is a request.
 			frappe.db.commit()
@@ -2773,14 +2776,15 @@ def _reconcile_pending_applying(settings) -> str | None:
 	)
 	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
-	# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is HELD, admin's
-	# "Ready" verdict is about the config BEFORE the switch (nothing new has been
-	# pushed yet), so stamping here would flip "ok" for a config the tenant is not
-	# actually serving - possibly permanently if the switch record is later lost.
-	# The switch's own released worker converges and stamps once it pushes;
-	# reconcile()/finish() own ending the switch. Stay pending; the next poll
-	# (or the switch's own end()) re-drives this.
-	if llm_switch.is_active():
+	# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is HELD (not
+	# yet applied) or applied but not yet confirmed, admin's "Ready" verdict
+	# is about the config BEFORE the switch, so stamping here would flip "ok"
+	# for a config the tenant is not actually serving - possibly permanently
+	# if the switch record is later lost. jarvis#1425, fourth pass: once the
+	# switch's own released worker calls await_admin() (admin ACCEPTED the
+	# push), Ready genuinely describes THIS config and the stamp below is
+	# correct - reconcile() right after ends the switch on it at once.
+	if llm_switch.blocks_stamp():
 		return None
 	state, _reason = _admin_chat_readiness()
 	if state != "Ready":
@@ -2796,4 +2800,5 @@ def _reconcile_pending_applying(settings) -> str | None:
 	# this runs in a web request, where a GET would otherwise roll the terminal
 	# write back at request end.
 	frappe.db.commit()
+	llm_switch.reconcile()
 	return settings.get("last_sync_status")
