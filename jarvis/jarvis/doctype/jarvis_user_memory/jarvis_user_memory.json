@@ -25,7 +25,7 @@
       "fieldname": "content",
       "fieldtype": "Long Text",
       "label": "Content",
-      "description": "The agent's durable, terse memory blob for this user (one line per fact), curated and full-replaced by the remember tool. Treated as DATA, never instructions, by the agent. Bench-owned, per-user replacement for openclaw's shared-workspace MEMORY.md."
+      "description": "The agent's durable, terse memory blob for this user (one line per fact), curated and full-replaced by the remember tool. Treated as DATA, never instructions, by the agent. Bench-owned, per-user durable memory that replaces the agent's shared-workspace MEMORY.md."
     }
   ],
   "permissions": [
