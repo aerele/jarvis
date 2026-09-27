@@ -70,6 +70,11 @@ class TestErrorReason(unittest.TestCase):
 			b'"type":"text"}],"isError":true}}': "The caller does not have permission",
 			b'{"error":"invalid_token","error_description":"The token was revoked"}': "The token was revoked",
 			b'{"error":"forbidden"}': "forbidden",
+			# Razorpay's MCP server, verbatim; GitHub's REST errors have the same shape.
+			b'{"code":"OAUTH_BAD_TOKEN","message":"Bad token; invalid JSON"}': "Bad token; invalid JSON",
+			b'{"detail":"Not authenticated"}': "Not authenticated",
+			# The error object outranks a top-level message.
+			b'{"error":{"code":403,"message":"Specific"},"message":"Generic"}': "Specific",
 		}
 		for raw, expected in cases.items():
 			self.assertEqual(mcp_wire.error_reason(raw), expected)
@@ -80,6 +85,7 @@ class TestErrorReason(unittest.TestCase):
 			b"<html>Forbidden</html>",
 			b"[]",
 			b'{"jsonrpc":"2.0","id":1,"result":{"content":[]}}',
+			b'{"detail":[{"loc":["body"],"msg":"field required"}]}',
 		):
 			self.assertEqual(mcp_wire.error_reason(raw), "")
 

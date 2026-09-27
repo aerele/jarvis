@@ -131,8 +131,9 @@ def pick_legacy_version(versions, accepted) -> str | None:
 def error_reason(raw: bytes) -> str:
 	"""The provider's own reason in an HTTP error body, on one clipped line, or
 	``""``. Covers a JSON-RPC (or Google REST) ``error.message``, an OAuth
-	``error_description``, and an ``isError`` tool result: Google's MCP servers
-	send that last shape even on a 401/403."""
+	``error_description``, an ``isError`` tool result (Google's MCP servers send
+	that shape even on a 401/403), and a plain REST body's top-level ``message``
+	(Razorpay, GitHub) or ``detail`` (FastAPI servers)."""
 	msg = _json_object(raw)
 	if msg is None:
 		return ""
@@ -145,7 +146,7 @@ def error_reason(raw: bytes) -> str:
 	elif isinstance(result, dict) and result.get("isError"):
 		text = first_text(result)
 	else:
-		text = ""
+		text = next((msg[key] for key in ("message", "detail") if isinstance(msg.get(key), str)), "")
 	return clip_reason(text)
 
 
