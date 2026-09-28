@@ -382,6 +382,7 @@ def _dispatch(
 	"""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import agent_models
 
 	with redis_lock(_dispatch_lock_name(row.name), timeout_s=DISPATCH_LOCK_TTL_S) as acquired:
 		if not acquired:
@@ -424,6 +425,16 @@ def _dispatch(
 			# so the money decision is not read out of a liveness query.
 			frappe.set_user(original_user)
 			frappe.db.commit()
+			return
+		except agent_models.ModelRunRefused as e:
+			# The launch already failed its own run with the reason and logged the error.
+			frappe.set_user(original_user)
+			if e.token == "apply_in_progress":
+				_unclaim_slot(row, prev)  # the container was mid-apply: retry next sweep
+			else:
+				# Only a human or a platform upgrade fixes these: one notice, slot spent.
+				_notify_owner(row.owner, row, reason=str(e))
+				frappe.db.commit()
 			return
 		except Exception:
 			frappe.set_user(original_user)
@@ -800,6 +811,10 @@ def poll_dispatched_runs() -> int:
 MODEL_USED_BACKFILL_WINDOW_SECONDS = 1200
 MODEL_USED_BACKFILL_MIN_AGE_SECONDS = 60
 MODEL_USED_BACKFILL_BATCH = 20
+# A run the fleet keeps answering for without model_used is asked this often, then
+# skipped, so it cannot hold newer runs out of the batch for the whole window.
+MODEL_USED_BACKFILL_ATTEMPTS = 2
+MODEL_USED_BACKFILL_SCAN = 200
 
 
 def _backfill_model_used(now) -> int:
@@ -812,7 +827,7 @@ def _backfill_model_used(now) -> int:
 		RUN,
 		filters=[
 			["status", "in", ["completed", "partial", "failed", "stopped"]],
-			["model_source", "in", ["choice", "fallback", "pending_apply"]],
+			["model_source", "in", list(agent_models.PINNED_SOURCES)],
 			["model_rendered", "is", "set"],
 			["model_used", "is", "not set"],
 			["finished_at", ">", now - timedelta(seconds=MODEL_USED_BACKFILL_WINDOW_SECONDS)],
@@ -820,17 +835,33 @@ def _backfill_model_used(now) -> int:
 		],
 		pluck="name",
 		order_by="finished_at asc",
-		limit=MODEL_USED_BACKFILL_BATCH,
+		limit=MODEL_USED_BACKFILL_SCAN,
 		ignore_permissions=True,
 	)
-	stored = 0
+	cache = frappe.cache()
+	stored = asked = 0
+	pool = None
 	for name in rows:
+		if asked >= MODEL_USED_BACKFILL_BATCH:
+			break
+		key = f"jarvis:model_used_backfill:{name}"
+		tries = frappe.utils.cint(cache.get_value(key, expires=True))
+		if tries >= MODEL_USED_BACKFILL_ATTEMPTS:
+			continue
+		asked += 1
 		try:
 			state = _polled_state(admin_client.get_agent_run_status(name))
-		except Exception:
-			break  # relay trouble: the next tick retries inside the window
+		except Exception as e:
+			if _FLEET_UNKNOWN_RUN not in str(e).lower() and not isinstance(
+				e, admin_client.AdminValidationError
+			):
+				break  # relay trouble: the next tick retries inside the window
+			state = {}  # this run only
+		cache.set_value(key, tries + 1, expires_in_sec=MODEL_USED_BACKFILL_WINDOW_SECONDS)
 		if state.get("model_used"):
-			agent_models.record_model_used(name, state)
+			if pool is None:
+				pool = agent_models.model_pool()
+			agent_models.record_model_used(name, state, pool=pool)
 			stored += 1
 	if stored:
 		frappe.db.commit()
@@ -1394,13 +1425,20 @@ def _launch_audit(
 			title=f"jarvis agent-run dispatch failed: {run.name}",
 			message=frappe.get_traceback(),
 		)
-		if not_applied or model_token:
-			# Surface the actionable message straight to the SPA (a clean user error),
-			# not the raw AdminUnreachableError 502/500 the fleet verb produced. The
-			# failed Run + session teardown above are already committed, so this only
-			# swaps which exception the caller re-raises.
+		# Surface the actionable message straight to the SPA (a clean user error),
+		# not the raw AdminUnreachableError 502/500 the fleet verb produced. The
+		# failed Run + session teardown above are already committed, so this only
+		# swaps which exception the caller re-raises.
+		if not_applied:
+			frappe.throw(error_msg, title=_("Agent not applied"))
+		if model_token:
+			# Typed, so the scheduler can tell a retryable refusal from one a human fixes.
 			frappe.throw(
-				error_msg, title=_("Agent not applied") if not_applied else _("Agent model unavailable")
+				error_msg,
+				exc=agent_models.ModelRunRefused(model_token),
+				title=_("Workspace busy")
+				if model_token == "apply_in_progress"
+				else _("Agent model unavailable"),
 			)
 		raise
 
@@ -1881,6 +1919,8 @@ def _notify_owner(owner: str, row, reason: str | None = None) -> None:
 						"Jarvis Settings."
 					)
 					if is_budget
+					else f"A scheduled agent audit could not be started: {reason}"
+					if reason
 					else (
 						"A scheduled agent audit could not be started. It will retry on the next hourly run."
 					)

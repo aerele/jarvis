@@ -229,10 +229,11 @@
   },
   {
    "default": "0",
-   "description": "When on, marketplace agents that declare a minimum model tier run on one tenant-wide model chosen from your eligible models. Needs every fleet host on contract 1.43, else agent Apply fails with 'platform upgrade pending'. Off keeps today's behaviour.",
+   "description": "Require each agent's minimum model. Turned on by Jarvis support once your workspace is ready.",
    "fieldname": "enforce_agent_min_model",
    "fieldtype": "Check",
-   "label": "Enforce Agent Minimum Model"
+   "label": "Enforce Agent Minimum Model",
+   "permlevel": 2
   },
   {
    "fieldname": "branding_section",
@@ -1242,7 +1243,18 @@
    "role": "Jarvis Admin",
    "read": 1,
    "write": 1
+  },
+  {
+   "role": "System Manager",
+   "permlevel": 2,
+   "read": 1
+  },
+  {
+   "role": "Administrator",
+   "permlevel": 2,
+   "read": 1,
+   "write": 1
   }
  ],
- "modified": "2026-09-28 13:00:00.000000"
+ "modified": "2026-09-28 18:00:00.000000"
 }

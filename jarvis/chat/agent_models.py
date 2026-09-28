@@ -35,6 +35,8 @@ MAX_FALLBACKS = 3
 UNKNOWN = "unknown"
 # States whose row pins the delegate (legacy is pushed unpinned; needs_model blocked).
 _PINNED = ("auto", "chosen", "changed")
+# Run model_source values that ran on a pinned delegate (pool_default / blank did not).
+PINNED_SOURCES = ("choice", "fallback", "pending_apply")
 # Same groups admin's agent_models._PROVIDER_ALIAS_GROUPS accepts as one provider.
 _PROVIDER_ALIAS_GROUPS = (
 	frozenset({"gemini", "google"}),
@@ -172,8 +174,9 @@ def _pooled_candidates(settings) -> list[dict]:
 	return out
 
 
-def _direct_candidates(settings, index) -> list[dict]:
-	"""A direct tenant's configured provider: its catalog models on its own lane."""
+def _direct_candidates(settings) -> list[dict]:
+	"""A direct tenant's configured model only: the fleet renders nothing else for a
+	direct or OAuth shape, so any other catalog model could never be pinned."""
 	from jarvis.jarvis.pool_serialize import (
 		_credential_type,
 		_enabled_models,
@@ -192,25 +195,11 @@ def _direct_candidates(settings, index) -> list[dict]:
 		sub = (settings.get("llm_auth_mode") or "api_key") in ("oauth", "subscription")
 		key = normalize_provider(settings.get("llm_provider"))
 		own = (settings.get("llm_model") or "").strip()
-	if not key:
+	if not key or not own or "image" in own.lower():
 		return []
 	provider = key if _PROVIDER_RE.fullmatch(key) else ""
 	lane = "subscription" if sub else "api_key"
-	ids = [own] if own else []
-	for _keys, entry in index:
-		if not _is_entry(entry, key):
-			continue
-		rows = sorted(
-			entry.get("models") or [], key=lambda r: (r.get("sort_order") or 0, r.get("model_id") or "")
-		)
-		ids += [r.get("model_id") for r in rows if r.get("tier") == lane and r.get("model_id")]
-	out, seen = [], set()
-	for model in ids:
-		if model in seen or "image" in model.lower():
-			continue
-		seen.add(model)
-		out.append({"provider": provider, "model": model, "lane": lane, "key": key, "exact": True})
-	return out
+	return [{"provider": provider, "model": own, "lane": lane, "key": key, "exact": True}]
 
 
 def _is_entry(entry: dict, key: str) -> bool:
@@ -280,9 +269,7 @@ def model_pool(settings=None, catalog=None):
 
 	settings = settings if settings is not None else _pool_settings()
 	index = _catalog_index(catalog)
-	cands = (
-		_pooled_candidates(settings) if compute_pool_mode(settings) else _direct_candidates(settings, index)
-	)
+	cands = _pooled_candidates(settings) if compute_pool_mode(settings) else _direct_candidates(settings)
 	ranked = [_enrich(c, index) for c in cands]
 	# sort() is stable, so equal ranks keep pool order.
 	ranked.sort(key=lambda r: -r["capability_rank"])
@@ -389,8 +376,11 @@ def _insert_if_absent(agent: str, values: dict) -> bool:
 
 
 def _upsert(agent: str, values: dict):
-	"""Set ``values`` on the agent's row under its lock, creating it if absent."""
-	doc = _get_row(agent, for_update=True)
+	"""Set ``values`` on the agent's row under its lock, creating it if absent. A missing
+	key is inserted, never locked: FOR UPDATE on it gap-locks, and two concurrent first
+	picks deadlock. An existing row is locked directly (insert-first would take a shared
+	duplicate-key lock that two concurrent updates then both try to upgrade)."""
+	doc = _get_row(agent, for_update=True) if frappe.db.exists(CHOICE, agent) else None
 	if doc is None:
 		if _insert_if_absent(agent, values):
 			return frappe.get_doc(CHOICE, agent)
@@ -406,11 +396,15 @@ def _mark_dirty() -> None:
 	_mark_catalog_dirty()
 
 
-def _log_for_owners(agent: str, detail: str) -> None:
+def _log_for_owners(agent: str, detail: str, actor: str | None = None) -> None:
 	"""One ``model_changed`` activity row per installation, owned by its owner (the
-	feed is owner-scoped, and the change applies to all of them)."""
+	feed is owner-scoped, and the change applies to all of them). With no installation,
+	a human ``actor``'s change is still logged, to the actor."""
 	title = frappe.db.get_value(LISTING, agent, "title")
-	for inst in frappe.get_all(INSTALLATION, filters={"agent": agent}, fields=["name", "owner"]):
+	installs = frappe.get_all(INSTALLATION, filters={"agent": agent}, fields=["name", "owner"])
+	if not installs and actor:
+		installs = [frappe._dict(name=None, owner=actor)]
+	for inst in installs:
 		log_activity(
 			agent=agent,
 			agent_title=title,
@@ -615,7 +609,7 @@ def set_agent_model(agent: str, provider: str, model: str) -> dict:
 			"fleet_unresolved": 0,
 		},
 	)
-	_log_for_owners(listing.name, f"model set to {ref['model']} by {me}")
+	_log_for_owners(listing.name, f"model set to {ref['model']} by {me}", actor=me)
 	_mark_dirty()
 	frappe.db.commit()
 	return _model_view(listing)
@@ -642,7 +636,9 @@ def reset_agent_model(agent: str) -> dict:
 			"admin_rejected": None,
 		},
 	)
-	_log_for_owners(listing.name, f"model reset to {values.get('model') or 'none available'} by {me}")
+	_log_for_owners(
+		listing.name, f"model reset to {values.get('model') or 'none available'} by {me}", actor=me
+	)
 	_mark_dirty()
 	frappe.db.commit()
 	return _model_view(listing)
@@ -777,13 +773,19 @@ def model_keys(row) -> dict:
 	return {"model_choice": primary, "model_fallbacks": fallbacks[:MAX_FALLBACKS], "model_state": "ok"}
 
 
-def _admin_verdict(response) -> tuple[dict, set]:
-	"""Admin's ``model_choices`` report on an Apply: ({slug: refs it refused},
-	{slugs it blocked}). Refs come back as the ``provider/model`` labels we sent."""
+def _admin_report(response) -> dict | None:
+	"""Admin's ``model_choices`` report on an Apply; None from an admin without the
+	model-choice contract (it ignored the model keys)."""
 	data = response if isinstance(response, dict) else {}
 	report = data.get("model_choices")
 	if report is None and isinstance(data.get("data"), dict):
 		report = data["data"].get("model_choices")
+	return report if isinstance(report, dict) else None
+
+
+def _admin_verdict(report) -> tuple[dict, set]:
+	"""({slug: refs admin refused}, {slugs it blocked}) from its report. Refs come back
+	as the ``provider/model`` labels we sent."""
 	if not isinstance(report, dict):
 		return {}, set()
 	refused = {}
@@ -861,33 +863,67 @@ def push_scope(payload: list[dict]) -> dict | None:
 		return None
 
 
-def stamp_pushed(payload: list[dict], response=None, scope: dict | None = None) -> None:
+def stamp_pushed(payload: list[dict], response=None, scope: dict | None = None) -> bool:
 	"""After a successful push: record per row what the fleet now holds. A row whose
 	agent was not in the payload keeps its last stamp. ``scope`` is ``push_scope``
-	taken before the push."""
+	taken before the push. Each row commits on its own; False when any row was left
+	unstamped (the catalog then stays dirty)."""
 	from jarvis.chat.agent_catalog import AGENT_PREFIX
 
-	refused_by_slug, blocked = _admin_verdict(response)
+	report = _admin_report(response)
+	refused_by_slug, blocked = _admin_verdict(report)
+	if (refused_by_slug or blocked) and scope is None:
+		scope = refusal_scope()
 	sent = {(e.get("slug") or "")[len(AGENT_PREFIX) :]: e for e in payload or []}
+	complete = True
 	for name in frappe.get_all(CHOICE, pluck="name"):
 		entry = sent.get(name)
 		if entry is None:
 			continue
-		refused = refused_by_slug.get(entry["slug"], [])
-		is_blocked = entry["slug"] in blocked
-		want = _delivered(entry, refused, is_blocked)
-		doc = _get_row(name, for_update=True)
-		if doc is None:
-			continue  # the last uninstall removed it mid-push
-		if not (refused or is_blocked) and (doc.pushed_provider or "", doc.pushed_model or "") == want:
-			continue
-		if refused or is_blocked:
-			scope = scope or refusal_scope()
-			_take_admin_refusal(doc, entry, refused, want, scope)
-		doc.pushed_provider, doc.pushed_model = want
+		try:
+			if "model_state" in entry and report is None:
+				_note_unconfirmed(name, entry)
+				complete = False
+			else:
+				_stamp_row(
+					name, entry, refused_by_slug.get(entry["slug"], []), entry["slug"] in blocked, scope
+				)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			complete = False
+			frappe.log_error(
+				title=f"Jarvis: agent model stamp failed: {name}", message=frappe.get_traceback()
+			)
+	return complete
+
+
+def _stamp_row(name: str, entry: dict, refused: list, is_blocked: bool, scope: dict | None) -> None:
+	want = _delivered(entry, refused, is_blocked)
+	doc = _get_row(name, for_update=True)
+	if doc is None:
+		return  # the last uninstall removed it mid-push
+	if not (refused or is_blocked) and (doc.pushed_provider or "", doc.pushed_model or "") == want:
+		return
+	if refused or is_blocked:
+		_take_admin_refusal(doc, entry, refused, want, scope)
+	elif doc.note == _PLATFORM_NOTE:
+		doc.note = ""  # an admin with the model-choice contract took it
+	doc.pushed_provider, doc.pushed_model = want
+	doc.save(ignore_permissions=True)
+	if doc.flags.get("model_moved"):
+		_log_for_owners(name, doc.note)
+
+
+def _note_unconfirmed(name: str, entry: dict) -> None:
+	"""An admin without the model-choice contract ignored the keys: nothing was pinned,
+	so leave pushed_* as they were and say why the Apply stays pending."""
+	if entry.get("model_state") != "ok":
+		return
+	doc = _get_row(name, for_update=True)
+	if doc and doc.state in _PINNED and doc.note != _PLATFORM_NOTE:
+		doc.note = _PLATFORM_NOTE
 		doc.save(ignore_permissions=True)
-		if doc.flags.get("model_moved"):
-			_log_for_owners(name, doc.note)
 
 
 def is_platform_upgrade_pending(exc) -> bool:
@@ -966,12 +1002,22 @@ def gate_run(agent: str) -> dict:
 	return {"ok": True, "model_source": _source(row)}
 
 
+class ModelRunRefused(frappe.ValidationError):
+	"""A typed fleet run-start refusal; ``token`` is one of ``RUN_ERROR_TOKENS``."""
+
+	def __init__(self, token: str, *args):
+		super().__init__(*args)
+		self.token = token
+
+
 def run_error_token(exc) -> str | None:
-	"""The typed fleet refusal in ``exc`` (None with the flag off: today's handling)."""
-	if not is_enforced():
-		return None
+	"""The typed fleet refusal in ``exc``. ``apply_in_progress`` is recognised with the
+	flag off too (any container can be mid-apply); the rest only when enforced."""
 	text = str(exc)
-	return next((t for t in RUN_ERROR_TOKENS if f"{t}:" in text), None)
+	token = next((t for t in RUN_ERROR_TOKENS if f"{t}:" in text), None)
+	if token == "apply_in_progress" or (token and is_enforced()):
+		return token
+	return None
 
 
 def handle_run_error(agent: str, token: str) -> str:
@@ -1002,6 +1048,7 @@ def handle_run_error(agent: str, token: str) -> str:
 		return _("This agent has no usable model. Choose one on the agent page, then apply catalog changes.")
 	# delegate_model_unresolved: the fleet could not place the pushed model in its render.
 	doc = _get_row(agent, for_update=True) if is_enforced() else None
+	state = None
 	if doc and doc.state in _PINNED:
 		eligible = _usable(eligible_models(agent), doc.as_dict())
 		if eligible == UNKNOWN or _contains(eligible, doc.as_dict()):
@@ -1011,8 +1058,10 @@ def handle_run_error(agent: str, token: str) -> str:
 			).format(doc.model)
 			doc.save(ignore_permissions=True)
 		else:
-			_degrade(agent, eligible)
+			state = _degrade(agent, eligible).get("state")
 	frappe.db.commit()
+	if state == "needs_model":
+		return _blocked_message(agent)
 	return _(
 		"This agent's model could not be loaded on your workspace. Apply catalog changes, then run it again."
 	)
@@ -1051,19 +1100,21 @@ def _same_model(used: str, rendered: str) -> bool:
 	return used == rendered or used.rsplit("/", 1)[-1] == rendered.rsplit("/", 1)[-1]
 
 
-def record_model_used(run: str, state: dict) -> None:
-	"""Store the model the runtime reported; flag it when it is not what was rendered
-	or not eligible for the agent."""
+def record_model_used(run: str, state: dict, *, pool=None) -> None:
+	"""Store the model the runtime reported; flag a pinned run when it is not what was
+	rendered or not eligible for the agent (an unpinned run renders the pool, never a
+	floor-checked model). ``pool``: a batch caller's ``model_pool()``."""
 	used = (state or {}).get("model_used")
 	if not is_enforced() or not isinstance(used, dict) or not (used.get("model") or "").strip():
 		return
 	model = used["model"].strip()
 	provider = (used.get("provider") or "").strip()
-	cur = frappe.db.get_value(RUN, run, ["agent", "model_rendered"], as_dict=True) or {}
+	cur = frappe.db.get_value(RUN, run, ["agent", "model_rendered", "model_source"], as_dict=True) or {}
 	rendered = (cur.get("model_rendered") or "").strip()
-	below = bool(rendered) and not _same_model(model, rendered)
-	if not below and cur.get("agent") and min_model(cur["agent"]):
-		eligible = eligible_models(cur["agent"])
+	pinned = cur.get("model_source") in PINNED_SOURCES
+	below = pinned and bool(rendered) and not _same_model(model, rendered)
+	if pinned and not below and cur.get("agent") and min_model(cur["agent"]):
+		eligible = eligible_models(cur["agent"], pool=pool)
 		below = eligible != UNKNOWN and not any(_same_model(model, c["model"]) for c in eligible)
 	frappe.db.set_value(
 		RUN,

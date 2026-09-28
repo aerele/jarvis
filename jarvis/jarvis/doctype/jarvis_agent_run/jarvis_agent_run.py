@@ -76,3 +76,6 @@ def on_doctype_update():
 		["owner", "started_at", "creation"],
 		index_name="owner_started_creation_index",
 	)
+	# The 5-minute model_used backfill (agent_scheduler._backfill_model_used) ranges
+	# and sorts on finished_at over a 20-minute window.
+	frappe.db.add_index("Jarvis Agent Run", ["finished_at"], index_name="finished_at_index")
