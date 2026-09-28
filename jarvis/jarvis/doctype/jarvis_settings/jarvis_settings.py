@@ -843,6 +843,7 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
+		self._guard_agent_min_model_authority()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
 		# llm_auth_mode_changed is captured below: has_value_changed compares the
@@ -1151,6 +1152,28 @@ class JarvisSettings(Document):
 		if not self.flags.get("wiki_disabled_transition"):
 			return
 		wiki_mirror.enqueue_scrub(after_commit=True)
+
+	def _guard_agent_min_model_authority(self):
+		"""Security review F4: enforce_agent_min_model may change ONLY as
+		Administrator. Frappe's own permlevel gate (validate_higher_perm_levels,
+		runs before validate()) already reverts this permlevel-2 field for a user
+		genuinely lacking write access there - but a tenant System Manager can
+		self-grant that write via the Role Permission Manager
+		(permission_manager.update("Jarvis Settings", "System Manager", 2,
+		"write", 1)) and then save the flag for real. This is the backstop that
+		still refuses it: identity, not a grantable permission, is what decides
+		this field. Exempted for install/migrate/patch, which run trusted code
+		outside a session a customer controls."""
+		if frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch:
+			return
+		if frappe.session.user == "Administrator":
+			return
+		if not self.has_value_changed("enforce_agent_min_model"):
+			return
+		frappe.throw(
+			"Only an Administrator may change Enforce Agent Minimum Model.",
+			frappe.PermissionError,
+		)
 
 	def _agent_min_model_flip(self) -> str | None:
 		"""``"on"`` / ``"off"`` when this save flips enforce_agent_min_model, else None."""

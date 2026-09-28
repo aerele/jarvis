@@ -904,6 +904,9 @@ def _stamp_row(name: str, entry: dict, refused: list, is_blocked: bool, scope: d
 	if doc is None:
 		return  # the last uninstall removed it mid-push
 	if not (refused or is_blocked) and (doc.pushed_provider or "", doc.pushed_model or "") == want:
+		if doc.note == _PLATFORM_NOTE:  # a successful Apply outran the note it left behind
+			doc.note = ""
+			doc.save(ignore_permissions=True)
 		return
 	if refused or is_blocked:
 		_take_admin_refusal(doc, entry, refused, want, scope)
@@ -940,6 +943,8 @@ def _blocked_message(listing) -> str:
 
 
 def _source(row) -> str:
+	if not row.get("pushed_model"):
+		return "pool_default"  # picked but never pushed: fleet holds no pin, renders pool default
 	if (row.get("provider") or "", row.get("model") or "") != (
 		row.get("pushed_provider") or "",
 		row.get("pushed_model") or "",
