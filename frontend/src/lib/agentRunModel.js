@@ -7,16 +7,36 @@
  * off) carries neither `model_used` nor `model_rendered` - returns null, the
  * row's model line renders nothing.
  */
+
+// model_used/model_rendered carry the full stored ref - "openai/gpt-5",
+// "openai_compat/gpt-5.6-terra", "openrouter/anthropic/claude-x" - with the
+// provider/door as the FIRST path segment. Only the model id itself belongs
+// in the visible label (UX-1); the model id can itself contain '/' (an
+// openrouter-style ref), so only the first segment is stripped.
+function stripProviderPrefix(ref) {
+	const s = String(ref || "");
+	const i = s.indexOf("/");
+	return i === -1 ? s : s.slice(i + 1);
+}
+
 export function runModelInfo(run) {
 	const used = (run && run.model_used) || "";
 	const rendered = (run && run.model_rendered) || "";
-	const label = used || rendered;
-	if (!label) return null;
+	const raw = used || rendered;
+	if (!raw) return null;
+	const label = stripProviderPrefix(raw);
+	// `title` keeps the full raw ref (provider/door + model id) for a tooltip -
+	// the label alone can be ambiguous across providers/doors.
 	if (run.model_below_min) {
-		return { label, note: "Ran on a lower model after a provider failure", warn: true };
+		return {
+			label,
+			title: raw,
+			note: "Ran on a model below this agent's requirement.",
+			warn: true,
+		};
 	}
 	if (!used && rendered) {
-		return { label, note: "Model not verified", warn: false };
+		return { label, title: raw, note: "Model not verified", warn: false };
 	}
-	return { label, note: "", warn: false };
+	return { label, title: raw, note: "", warn: false };
 }

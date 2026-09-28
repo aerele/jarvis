@@ -58,7 +58,7 @@
 			<!-- T6: per-agent minimum model - blank on a legacy run. -->
 			<template v-if="modelInfo">
 				<span>·</span>
-				<span :class="modelInfo.warn ? 'text-ink-amber-3' : ''">
+				<span :class="modelInfo.warn ? 'text-ink-amber-3' : ''" :title="modelInfo.title">
 					Model: {{ modelInfo.label
 					}}<template v-if="modelInfo.note"> · {{ modelInfo.note }}</template>
 				</span>

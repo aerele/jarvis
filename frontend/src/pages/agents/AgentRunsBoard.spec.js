@@ -123,11 +123,26 @@ describe("T6: the rail's model line", () => {
 		);
 		const w = mountBoard();
 		await flushPromises();
-		expect(w.text()).toContain("Model: openai/gpt-5");
+		expect(w.text()).toContain("Model: gpt-5");
 		expect(w.text()).not.toContain("Model not verified");
 	});
 
-	it("flags a below-minimum run", async () => {
+	// UX-1: the raw ref (provider/door + model id) is only the FIRST '/' -
+	// strip that prefix from the visible label, but keep the full ref
+	// reachable as a tooltip (native `title`).
+	it("strips the provider/door prefix from the label, keeps the full ref as a title tooltip", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ model_used: "openai_compat/gpt-5.6-terra" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("Model: gpt-5.6-terra");
+		expect(w.text()).not.toContain("openai_compat/gpt-5.6-terra");
+		const line = w.findAll("div").find((d) => d.text().startsWith("Model:"));
+		expect(line.attributes("title")).toBe("openai_compat/gpt-5.6-terra");
+	});
+
+	it("flags a below-minimum run with neutral copy", async () => {
 		apiAgents.listRunsPage.mockResolvedValue(
 			envelope([
 				runRow({
@@ -139,7 +154,7 @@ describe("T6: the rail's model line", () => {
 		);
 		const w = mountBoard();
 		await flushPromises();
-		expect(w.text()).toContain("Ran on a lower model after a provider failure");
+		expect(w.text()).toContain("Ran on a model below this agent's requirement.");
 	});
 
 	it("shows 'Model not verified' when only model_rendered is known", async () => {

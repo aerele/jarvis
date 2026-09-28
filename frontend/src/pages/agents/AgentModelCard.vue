@@ -71,6 +71,14 @@
 						/>
 					</div>
 					<div class="mt-0.5 text-sm text-ink-gray-5">{{ requirementText }}</div>
+					<!-- UX-3 review fix: the "Pending apply" badge otherwise has no
+					     explanation once the transient savedNotice Banner above is
+					     gone (e.g. after a reload) - this is the persistent version of
+					     that same copy, suppressed only while savedNotice is already
+					     saying it. -->
+					<div v-if="pendingApplyText" class="mt-1 text-sm text-ink-gray-5">
+						{{ pendingApplyText }}
+					</div>
 					<div v-if="catalogUnknown" class="mt-1 text-sm text-ink-gray-5">
 						Model list unavailable — try again shortly.
 					</div>
@@ -251,6 +259,19 @@ const savedNoticeText = computed(() =>
 	savedNotice.value && savedNotice.value.canApply
 		? "Saved — apply catalog changes on the Agents page to use it."
 		: "Saved. An admin must apply changes before it takes effect."
+);
+// UX-3 review fix: savedNoticeText only exists while the transient Banner is
+// showing (right after THIS session saved a pick) - a "Pending apply" badge
+// surviving a reload had no explanation at all. Same copy, canApply-aware,
+// derived straight from info.pending_apply instead of the just-saved event -
+// suppressed while savedNotice is already saying the same thing, so it never
+// shows twice.
+const pendingApplyText = computed(() =>
+	pendingApply.value && !savedNotice.value
+		? props.canApply
+			? "Saved — apply catalog changes on the Agents page to use it."
+			: "Saved. An admin must apply changes before it takes effect."
+		: ""
 );
 function goToAgents() {
 	router.push({ name: "AgentsList" });

@@ -316,6 +316,25 @@ describe("AgentModelCard states", () => {
 		expect(w.find('[data-label="Connect a provider"]').exists()).toBe(false);
 	});
 
+	// Minor review fix: nothing runs in needs_model (paused) - "Your default
+	// model" implies a model is actually in use, which is not true here.
+	it("needs_model: the current-model label reads 'No model selected', not 'Your default model'", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			agent: "a",
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+			state: "needs_model",
+			choice: null,
+			pending_apply: 0,
+		});
+		apiAgents.getEligibleModels.mockResolvedValue(elig([], "ok"));
+		const w = mountCard();
+		await flushPromises();
+		expect(w.text()).toContain("No model selected");
+		expect(w.text()).not.toContain("Your default model");
+	});
+
 	it("unknown catalog: shows the try-again copy, never claims none eligible", async () => {
 		apiAgents.getAgentModel.mockResolvedValue({
 			agent: "a",
@@ -355,6 +374,86 @@ describe("AgentModelCard states", () => {
 			"None of your connected AI providers offer a model this agent needs."
 		);
 		expect(w.find('[data-label="Change"]').attributes("disabled")).toBeDefined();
+	});
+});
+
+describe("UX-3 review fix: a persistent explanation for the 'Pending apply' badge", () => {
+	function pendingInfo(overrides = {}) {
+		return {
+			agent: "a",
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+			state: "chosen",
+			choice: {
+				provider: "anthropic",
+				model: "claude-opus-5",
+				label: "Claude Opus 5",
+				capability_tier: "Frontier",
+			},
+			pending_apply: 1,
+			...overrides,
+		};
+	}
+
+	it("survives a reload (no just-saved event): a plain user is told to ask an admin", async () => {
+		apiAgents.getAgentModel.mockResolvedValue(pendingInfo());
+		apiAgents.getEligibleModels.mockResolvedValue(elig([OPUS]));
+		const w = mountCard({ canApply: false });
+		await flushPromises();
+		expect(w.text()).toContain("Pending apply");
+		expect(w.text()).toContain("Saved. An admin must apply changes before it takes effect.");
+	});
+
+	it("survives a reload: a reviewer (canApply) is told to apply it themselves", async () => {
+		apiAgents.getAgentModel.mockResolvedValue(pendingInfo());
+		apiAgents.getEligibleModels.mockResolvedValue(elig([OPUS]));
+		const w = mountCard({ canApply: true });
+		await flushPromises();
+		expect(w.text()).toContain("Saved — apply catalog changes on the Agents page to use it.");
+	});
+
+	it("says nothing when nothing is pending", async () => {
+		apiAgents.getAgentModel.mockResolvedValue(pendingInfo({ pending_apply: 0 }));
+		apiAgents.getEligibleModels.mockResolvedValue(elig([OPUS]));
+		const w = mountCard({ canApply: false });
+		await flushPromises();
+		expect(w.text()).not.toContain("An admin must apply changes");
+	});
+
+	it("does not duplicate the sentence while the just-saved Banner is already showing it", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			agent: "a",
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+			state: "chosen",
+			choice: {
+				provider: "anthropic",
+				model: "claude-opus-5",
+				label: "Claude Opus 5",
+				capability_tier: "Frontier",
+			},
+			pending_apply: 0,
+		});
+		apiAgents.getEligibleModels.mockResolvedValue(
+			elig([OPUS, { ...OPUS, provider: "openai", model: "gpt-5", label: "GPT-5" }])
+		);
+		apiAgents.setAgentModel.mockResolvedValue(pendingInfo());
+		const w = mountCard({ canApply: false });
+		await flushPromises();
+		await w.find('[data-label="Change"]').trigger("click");
+		await flushPromises();
+		await w.find('[data-testid="pick"]').trigger("click");
+		await flushPromises();
+
+		// The Banner AND the sr-only aria-live announcement (unrelated to this
+		// fix - liveMessage already mirrors the Banner's own text) both carry
+		// this sentence, so 2 is the correct baseline; the persistent
+		// pendingApplyText line must not add a THIRD.
+		const sentence = "Saved. An admin must apply changes before it takes effect.";
+		const occurrences = w.text().split(sentence).length - 1;
+		expect(occurrences).toBe(2);
 	});
 });
 
