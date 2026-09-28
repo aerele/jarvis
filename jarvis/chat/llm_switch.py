@@ -109,7 +109,15 @@ def message_for(user: str | None = None) -> str:
 	models editor, so whoever can change the models reads about their own change."""
 	from jarvis.permissions import has_jarvis_admin_access
 
-	return ADMIN_MESSAGE if has_jarvis_admin_access(user) else MESSAGE
+	try:
+		is_admin = has_jarvis_admin_access(user)
+	except Exception as e:
+		# The hold must stay reported even when the role lookup fails mid-switch;
+		# the everyone line reads correctly for any user. File log, not Error Log:
+		# this runs on every page load and poll while a switch is held.
+		frappe.logger().warning("llm_switch.message_for: role lookup failed for %s: %s", user, e)
+		return MESSAGE
+	return ADMIN_MESSAGE if is_admin else MESSAGE
 
 
 def blocks_stamp() -> bool:
