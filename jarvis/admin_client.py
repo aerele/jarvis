@@ -932,15 +932,17 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 		if value is not None:
 			body[key] = value
 
-	from jarvis.chat.runtime_profile import RuntimeProfileError, ingest_current
+	from jarvis.chat.runtime_profile import RuntimeProfileError, get_profile, ingest_current
 
 	data = _post(path=_m("api.tenant.get_connection"), body=body, timeout_s=timeout_s)
 	try:
 		ingest_current(data)
-	except RuntimeProfileError:
+		if data.get("chat_readiness") == "Ready":
+			get_profile()
+	except RuntimeProfileError as exc:
 		# Keep the last valid profile, but do not report this poll as ready.
 		data["chat_readiness"] = "Unavailable"
-		data["chat_readiness_reason"] = "Runtime configuration needs an administrator connection sync."
+		data["chat_readiness_reason"] = str(exc)
 	return data
 
 
