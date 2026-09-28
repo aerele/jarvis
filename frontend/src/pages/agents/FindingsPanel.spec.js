@@ -220,10 +220,21 @@ describe("T6: the run header's model line", () => {
 			baseRun({ model_used: "openai/gpt-5", model_rendered: "openai/gpt-5" })
 		);
 		await flushPromises();
-		expect(w.text()).toContain("Model: openai/gpt-5");
+		expect(w.text()).toContain("Model: gpt-5");
 	});
 
-	it("flags a below-minimum run", async () => {
+	// UX-1: strip the provider/door prefix from the label, keep the full raw
+	// ref reachable as a tooltip (native `title`).
+	it("strips the provider/door prefix from the label, keeps the full ref as a title tooltip", async () => {
+		const w = mountPanel(baseRun({ model_used: "anthropic-2/claude-opus-5" }));
+		await flushPromises();
+		expect(w.text()).toContain("Model: claude-opus-5");
+		expect(w.text()).not.toContain("anthropic-2/claude-opus-5");
+		const line = w.findAll("span").find((s) => s.text().startsWith("Model:"));
+		expect(line.attributes("title")).toBe("anthropic-2/claude-opus-5");
+	});
+
+	it("flags a below-minimum run with neutral copy", async () => {
 		const w = mountPanel(
 			baseRun({
 				model_used: "openai/gpt-4",
@@ -232,7 +243,7 @@ describe("T6: the run header's model line", () => {
 			})
 		);
 		await flushPromises();
-		expect(w.text()).toContain("Ran on a lower model after a provider failure");
+		expect(w.text()).toContain("Ran on a model below this agent's requirement.");
 	});
 
 	it("shows 'Model not verified' when only model_rendered is known", async () => {

@@ -18,7 +18,7 @@ vi.mock("frappe-ui", () => ({
 		name: "Button",
 		props: ["label", "disabled", "loading", "variant"],
 		emits: ["click"],
-		template: `<button :disabled="disabled" :data-label="label" @click="$emit('click')"><slot>{{ label }}</slot></button>`,
+		template: `<button :disabled="disabled" :data-loading="loading" :data-label="label" @click="$emit('click')"><slot>{{ label }}</slot></button>`,
 	},
 	Dialog: {
 		name: "Dialog",
@@ -89,7 +89,25 @@ describe("AgentInstallDialog auto-pick", () => {
 		expect(tierBadge).toBeTruthy();
 	});
 
-	it("changing the pick calls set_agent_model and updates the displayed model", async () => {
+	it("emits confirm when Install is clicked with the auto-pick untouched (no set_agent_model call)", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS] });
+		const w = mountDialog();
+		await flushPromises();
+		await w.find('[data-label="Install"]').trigger("click");
+		await flushPromises();
+		expect(w.emitted("confirm")).toHaveLength(1);
+		expect(apiAgents.setAgentModel).not.toHaveBeenCalled();
+	});
+});
+
+// UX-4 review fix: picking is now a LOCAL draft, not an immediate
+// set_agent_model call - the row must not change until Install is actually
+// confirmed. (Modified from the pre-fix version of this file, which asserted
+// the OPPOSITE - that picking called set_agent_model right away; that was
+// exactly the bug: Cancel after a pick used to leave a tenant-wide model
+// change behind for an agent that was never installed.)
+describe("AgentInstallDialog local draft (UX-4)", () => {
+	function mockTwoModels() {
 		apiAgents.getEligibleModels.mockResolvedValue({
 			catalog: "ok",
 			models: [
@@ -103,27 +121,72 @@ describe("AgentInstallDialog auto-pick", () => {
 				},
 			],
 		});
+	}
+
+	it("picking a different model updates the display but does NOT call set_agent_model", async () => {
+		mockTwoModels();
+		const w = mountDialog();
+		await flushPromises();
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain("GPT-5");
+		expect(apiAgents.setAgentModel).not.toHaveBeenCalled();
+	});
+
+	it("Cancel after picking a different model discards the draft - no network call ever happens", async () => {
+		mockTwoModels();
+		const w = mountDialog();
+		await flushPromises();
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click");
+		await flushPromises();
+		await w.find('[data-label="Cancel"]').trigger("click");
+		await flushPromises();
+		expect(apiAgents.setAgentModel).not.toHaveBeenCalled();
+		expect(w.emitted("update:modelValue")).toEqual([[false]]);
+	});
+
+	it("Install sends the changed draft first, then emits confirm only once it succeeds", async () => {
+		mockTwoModels();
 		apiAgents.setAgentModel.mockResolvedValue({});
 		const w = mountDialog();
 		await flushPromises();
 		await w.find('[data-label="Change"]').trigger("click");
 		await w.find('[data-testid="pick-other"]').trigger("click");
 		await flushPromises();
+		expect(w.emitted("confirm")).toBeUndefined();
+
+		await w.find('[data-label="Install"]').trigger("click");
+		await flushPromises();
 		expect(apiAgents.setAgentModel).toHaveBeenCalledWith("close-auditor", "openai", "gpt-5");
-		expect(w.text()).toContain("GPT-5");
+		expect(w.emitted("confirm")).toHaveLength(1);
 	});
 
-	it("emits confirm when Install is clicked", async () => {
-		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS] });
+	it("a failed set_agent_model surfaces the error and does NOT emit confirm / install", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockRejectedValue(new Error("model taken"));
 		const w = mountDialog();
 		await flushPromises();
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click");
+		await flushPromises();
+
 		await w.find('[data-label="Install"]').trigger("click");
-		expect(w.emitted("confirm")).toHaveLength(1);
+		await flushPromises();
+		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(1);
+		expect(w.emitted("confirm")).toBeUndefined();
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledWith("model taken");
 	});
 });
 
 describe("AgentInstallDialog double-submit guard", () => {
-	it("two rapid picks fire set_agent_model exactly once", async () => {
+	// UX-4: the guarded call moved from onPick (now a synchronous local
+	// update, no network) to the Install-confirm's set_agent_model send -
+	// this now exercises rapid Install clicks after a changed pick, not rapid
+	// picks.
+	it("two rapid Install clicks after a changed pick fire set_agent_model exactly once", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({
 			catalog: "ok",
 			models: [
@@ -146,18 +209,21 @@ describe("AgentInstallDialog double-submit guard", () => {
 		const w = mountDialog();
 		await flushPromises();
 		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click");
+		await flushPromises();
 
-		const pick = w.find('[data-testid="pick-other"]');
-		await pick.trigger("click");
-		await pick.trigger("click");
-		await pick.trigger("click");
+		const install = w.find('[data-label="Install"]');
+		await install.trigger("click"); // fires the in-flight request
+		await install.trigger("click"); // must be a no-op: saving is already true
+		await install.trigger("click");
 
 		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(1);
-		expect(w.find(".picker").attributes("data-saving")).toBe("true");
+		expect(w.emitted("confirm")).toBeUndefined();
 
 		resolveSet({});
 		await flushPromises();
 		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(1);
+		expect(w.emitted("confirm")).toHaveLength(1);
 	});
 });
 
@@ -214,5 +280,35 @@ describe("AgentInstallDialog open/close lifecycle", () => {
 		await w.setProps({ modelValue: true });
 		await flushPromises();
 		expect(apiAgents.getEligibleModels).toHaveBeenCalledTimes(1);
+	});
+
+	// UX-4: a draft picked in a PRIOR open must never survive into the next
+	// open (would otherwise silently resurrect a discarded pick).
+	it("a draft from a prior open never survives into the next open", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({
+			catalog: "ok",
+			models: [
+				OPUS,
+				{
+					provider: "openai",
+					model: "gpt-5",
+					label: "GPT-5",
+					capability_tier: "Advanced",
+					cost_note: "",
+				},
+			],
+		});
+		const w = mountDialog();
+		await flushPromises();
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain("GPT-5");
+
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Opus 5");
+		expect(w.text()).not.toContain("GPT-5");
 	});
 });

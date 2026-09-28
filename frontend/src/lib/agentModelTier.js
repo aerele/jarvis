@@ -85,6 +85,9 @@ export function isCatalogUnknown(eligible) {
 export function currentModelLabel(info) {
 	const choice = info && info.choice;
 	if (choice && (choice.label || choice.model)) return choice.label || choice.model;
+	// needs_model: nothing runs here (paused) - "Your default model" implies a
+	// model is actually in use, which is exactly what is not true.
+	if (info && info.state === "needs_model") return "No model selected";
 	return "Your default model";
 }
 

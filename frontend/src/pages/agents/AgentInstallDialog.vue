@@ -45,7 +45,12 @@
 							{{ pickedCostNote }}
 						</div>
 					</div>
-					<Button variant="subtle" label="Change" @click="showPicker = !showPicker" />
+					<Button
+						variant="subtle"
+						label="Change"
+						:disabled="saving"
+						@click="showPicker = !showPicker"
+					/>
 				</div>
 				<div v-if="showPicker" class="mt-3">
 					<AgentModelPicker
@@ -64,9 +69,9 @@
 				<Button
 					variant="solid"
 					label="Install"
-					:loading="installing"
-					:disabled="installing || loading || noneEligible || catalogUnknown"
-					@click="$emit('confirm')"
+					:loading="installing || saving"
+					:disabled="installing || saving || loading || noneEligible || catalogUnknown"
+					@click="confirmInstall"
 				/>
 			</div>
 		</template>
@@ -80,10 +85,13 @@
 // it shows the auto-picked model (best eligible) with a "Change" disclosure
 // that reuses the SAME AgentModelPicker the Model card's dialog uses.
 //
-// Picking a model here calls set_agent_model immediately (jarvis#T6: this is
-// deliberate, not a local draft) - the row it creates is exactly what
-// install_agent's plan_install finds already chosen and keeps, so Install
-// below never re-sends the pick itself, only confirms.
+// UX-4 review fix: picking a model here is a LOCAL draft only, not an
+// immediate set_agent_model call - the agent isn't installed yet, so Cancel
+// must be able to walk away leaving nothing changed. The draft is only sent
+// (set_agent_model) on Install confirm, and only when it actually differs
+// from the auto-pick; install_agent's own plan_install finds that row already
+// chosen and keeps it, so Install never re-sends a pick that matches the
+// auto-choice.
 import { ref, computed, watch } from "vue";
 import { Badge, Button, Dialog, toast } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
@@ -111,22 +119,29 @@ const emit = defineEmits(["update:modelValue", "confirm", "connect-provider"]);
 
 const loading = ref(false);
 const eligible = ref(null); // get_eligible_models()
-const picked = ref(null); // {provider, model} the row is currently set to
+// The server's own best-eligible auto-choice (load()-derived) - Install's
+// "did the draft actually change" comparison below is against THIS, not
+// against whatever the row happens to hold server-side.
+const autoPicked = ref(null); // {provider, model}
+const picked = ref(null); // {provider, model} - the LOCAL draft, starts == autoPicked
 const showPicker = ref(false);
 const liveMessage = ref("");
-// Double-submit guard - see AgentModelCard's onPick for the same pattern:
-// `saving` blocks a second onPick call synchronously AND disables every
-// picker option; the request id below is belt-and-braces against a
-// superseded response landing after a newer one already did (latest wins).
+// Double-submit guard for the Install-confirm's set_agent_model call (fired
+// only when the draft differs from the auto-pick) - see AgentModelCard's
+// onPick for the same pattern. onPick itself below needs no guard: it is now
+// a synchronous, local-only draft update, not a network call.
 const saving = ref(false);
-let pickReqId = 0;
+let confirmReqId = 0;
 
 async function load() {
 	loading.value = true;
 	try {
 		eligible.value = (await apiAgents.getEligibleModels(props.agentSlug)) || null;
 		const models = (eligible.value && eligible.value.models) || [];
-		if (models.length) picked.value = { provider: models[0].provider, model: models[0].model };
+		if (models.length) {
+			autoPicked.value = { provider: models[0].provider, model: models[0].model };
+			picked.value = { ...autoPicked.value };
+		}
 	} catch (e) {
 		eligible.value = null;
 		toast.error(errHtml(e));
@@ -141,6 +156,7 @@ watch(
 	(open) => {
 		if (!open) return;
 		showPicker.value = false;
+		autoPicked.value = null;
 		picked.value = null;
 		liveMessage.value = "";
 		saving.value = false;
@@ -174,24 +190,52 @@ function tierThemeOf(tier) {
 	return tierTheme(tier);
 }
 
-async function onPick({ provider, model }) {
-	if (saving.value) return;
+// UX-4: local draft only - no network call. The pick is only sent (if it
+// differs from the auto-choice) when Install is actually confirmed below.
+function onPick({ provider, model }) {
+	picked.value = { provider, model };
+	showPicker.value = false;
+	liveMessage.value = "Model selected.";
+}
+
+const draftChanged = computed(
+	() =>
+		!!(
+			picked.value &&
+			autoPicked.value &&
+			(picked.value.provider !== autoPicked.value.provider ||
+				picked.value.model !== autoPicked.value.model)
+		)
+);
+
+// UX-4: Install sends the draft pick FIRST (only when it actually differs
+// from the auto-choice - install_agent's plan_install already keeps a
+// matching row as-is) and only emits `confirm` - which the parent turns into
+// the real install_agent call - once that succeeds. A failed set_agent_model
+// surfaces its error and does not install, leaving the dialog open so the
+// pick can be retried or abandoned via Cancel.
+async function confirmInstall() {
+	if (saving.value || props.installing) return;
+	if (!draftChanged.value) {
+		emit("confirm");
+		return;
+	}
 	saving.value = true;
-	const id = ++pickReqId;
+	const id = ++confirmReqId;
 	try {
-		await apiAgents.setAgentModel(props.agentSlug, provider, model);
-		if (id !== pickReqId) return; // superseded - a newer pick already landed
-		picked.value = { provider, model };
-		showPicker.value = false;
-		liveMessage.value = "Model changed.";
+		await apiAgents.setAgentModel(props.agentSlug, picked.value.provider, picked.value.model);
+		if (id !== confirmReqId) return; // superseded - the dialog was reopened mid-flight
+		emit("confirm");
 	} catch (e) {
-		if (id === pickReqId) toast.error(errHtml(e));
+		if (id === confirmReqId) toast.error(errHtml(e));
 	} finally {
-		if (id === pickReqId) saving.value = false;
+		if (id === confirmReqId) saving.value = false;
 	}
 }
 
 function onClose(v) {
+	// Cancel/backdrop/Escape: the draft above is local-only and was never
+	// sent, so simply closing discards it - nothing to undo server-side.
 	emit("update:modelValue", !!v);
 }
 </script>
