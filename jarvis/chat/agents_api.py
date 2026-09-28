@@ -1110,11 +1110,14 @@ def _default_schedule_day_of_month(sched: dict) -> int | None:
 
 @frappe.whitelist()
 @require_jarvis_user
-def install_agent(agent_slug: str) -> dict:
+def install_agent(agent_slug: str, model_provider: str | None = None, model: str | None = None) -> dict:
 	"""Install a Published agent for the current user. The doctype validate()
 	enforces the per-owner cap + (owner, agent) uniqueness. Access-gated (deny by
 	default): a user an admin has not allowed for this agent — by role or by name —
-	is refused server-side (Jarvis Admin / System Manager always allowed)."""
+	is refused server-side (Jarvis Admin / System Manager always allowed).
+	``model_provider``/``model``: the installer's pick for the agent's tenant-wide
+	model, validated before and saved in the same request as the install (enforced
+	min-model only; ignored with the flag off)."""
 	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read
 	me = frappe.session.user
 	# FIX 11: an agent runs AS a named user (run_as_user defaults to the installer),
@@ -1154,8 +1157,9 @@ def install_agent(agent_slug: str) -> dict:
 	assert_installable(listing.name)
 	from jarvis.chat import agent_models
 
-	# Enforced min-model: a first install needs an eligible model (throws otherwise).
-	model_plan = agent_models.plan_install(listing)
+	# Enforced min-model: a first install needs an eligible model, and a pick must be
+	# eligible (throws otherwise, before anything is written).
+	model_plan = agent_models.plan_install(listing, model_provider, model)
 
 	sched = {}
 	try:
