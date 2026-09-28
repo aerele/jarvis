@@ -66,8 +66,13 @@ vi.mock("@/api", () => ({
 	getListFilterCapabilities: vi.fn(),
 }));
 vi.mock("@/api/approvals", () => ({ getApproval: vi.fn(), listPendingActionsLane: vi.fn() }));
-const refreshApprovalsCount = vi.fn();
-vi.mock("@/stores/shell", () => ({ useShellStore: () => ({ refreshApprovalsCount }) }));
+const shell = vi.hoisted(() => ({ store: null, refresh: vi.fn() }));
+const refreshApprovalsCount = shell.refresh;
+vi.mock("@/stores/shell", async () => {
+	const { reactive } = await import("vue");
+	shell.store = reactive({ approvalsCount: 0, refreshApprovalsCount: shell.refresh });
+	return { useShellStore: () => shell.store };
+});
 vi.mock("@/data/session", () => ({ session: { user: "me@example.com" } }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "5 minutes ago", exactDate: () => "" }));
 vi.mock("@/composables/useDocmeta", () => ({
@@ -273,6 +278,34 @@ describe("ApprovalsBoard one inbox", () => {
 		const w = await board();
 		expect(w.element.children).toHaveLength(3);
 		expect(w.element.children[2].contains(group(w).element)).toBe(true);
+	});
+
+	it("re-reads both lists when the sidebar badge moves (#616)", async () => {
+		const w = await board();
+		expect(w.text()).not.toContain("Question AR-3");
+		state.ar = [...state.ar, ar("AR-3")];
+		state.lane = [...state.lane, heldRow("PA-7", { summary: "New supplier: Late" })];
+		const before = [
+			api.listApprovalsPage.mock.calls.length,
+			approvals.listPendingActionsLane.mock.calls.length,
+		];
+		shell.store.approvalsCount += 2;
+		await flushPromises();
+		await flushPromises();
+		expect(api.listApprovalsPage.mock.calls.length).toBeGreaterThan(before[0]);
+		expect(approvals.listPendingActionsLane.mock.calls.length).toBeGreaterThan(before[1]);
+		expect(rail(w).text()).toContain("Question AR-3");
+		expect(group(w).text()).toContain("New supplier: Late");
+	});
+
+	it("re-reads the questions when the list route is re-entered", async () => {
+		const w = await board({}, { id: "AR-1" });
+		const calls = api.listApprovalsPage.mock.calls.length;
+		route.name = "ApprovalsList";
+		route.params = {};
+		await flushPromises();
+		expect(api.listApprovalsPage.mock.calls.length).toBeGreaterThan(calls);
+		expect(w.exists()).toBe(true);
 	});
 
 	it("lists every decision above the questions, as text, with kind and type chips", async () => {

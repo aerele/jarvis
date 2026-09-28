@@ -197,6 +197,8 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 		});
 		expect(useToasts().value).toHaveLength(0);
 		expect(store.approvalsCount).toBe(1);
+		// the +1 is optimistic: the server count is re-read right away
+		expect(store.refreshApprovalsCount).toHaveBeenCalledTimes(1);
 	});
 
 	it("refreshes the approvals badge silently when a pending action settles", () => {

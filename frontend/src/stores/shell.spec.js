@@ -104,6 +104,19 @@ describe("shell store: approvals badge", () => {
 		expect(api.approvalsBadge).toHaveBeenCalledTimes(2);
 	});
 
+	it("re-reads once when a refresh lands while one is in flight", async () => {
+		let release;
+		api.approvalsBadge
+			.mockImplementationOnce(() => new Promise((r) => (release = r)))
+			.mockResolvedValueOnce({ count: 0, next_in: null });
+		const first = store.refreshApprovalsCount();
+		store.refreshApprovalsCount(); // e.g. a board decision during a poll
+		release({ count: 1, next_in: null }); // read before the decision landed
+		await first;
+		expect(api.approvalsBadge).toHaveBeenCalledTimes(2);
+		expect(store.approvalsCount).toBe(0);
+	});
+
 	it("stops the pending refresh when the shell goes away", async () => {
 		api.approvalsBadge.mockResolvedValue({ count: 1, next_in: 5 });
 		await store.refreshApprovalsCount();
