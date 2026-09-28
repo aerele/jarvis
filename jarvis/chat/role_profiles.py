@@ -4,23 +4,14 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-<<<<<<< HEAD
 * **Tool tier**: the jarvis-plane role decides ``full`` (today's 94 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 27-tool drop
+  vs ``standard`` (65 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
-  drop list (denied fleet-wide for the white-label leak, not a tier call), so
-  the split is 67/27 with the 94-tool universe unchanged.
-=======
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 96 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
-  list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
-  drop list (denied fleet-wide for the white-label leak, not a tier call), the
-  MCP connector tools (``call_connector`` / ``list_connector_actions``)
-  were added to the allow list after, and ``memory_get`` / ``memory_search``
-  were pulled to the drop list (native cross-user memory, denied fleet-wide by
-  the fleet-agent; Jarvis uses per-user bench-owned memory), so the split is
-  67/29 with a 96-tool universe.
->>>>>>> f8562df (fix(memory): drop native memory_get/memory_search from standard tier)
+  drop list (denied fleet-wide for the white-label leak, not a tier call), and
+  ``memory_get`` / ``memory_search`` were pulled to the drop list (native
+  cross-user memory, denied fleet-wide by the fleet-agent; Jarvis uses per-user
+  bench-owned memory), so the split is 65/29 with the 94-tool universe
+  unchanged.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -167,14 +158,10 @@ _STANDARD_TOOLS_ALLOW = [
 
 
 def standard_tools_allow() -> list[str]:
-	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
-<<<<<<< HEAD
-	session_status pulled to the drop list for the fleet-wide white-label deny)."""
-=======
+	"""The 65-tool allow list for the ``standard`` tier (spec §3 sized 68;
 	session_status pulled to the drop list for the fleet-wide white-label deny;
-	the two MCP connector tools added after; memory_get/memory_search pulled to
-	the drop list for the fleet-wide native cross-user memory deny)."""
->>>>>>> f8562df (fix(memory): drop native memory_get/memory_search from standard tier)
+	memory_get/memory_search pulled to the drop list for the fleet-wide native
+	cross-user memory deny)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
