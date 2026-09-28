@@ -60,12 +60,15 @@ next pool sync or when the pool fingerprint changes.
 Drain (a move) strips immediately when the target host is below 1.43, its
 contract is unreadable, or the container has no render context: an evacuation
 never waits. Reconcile strips immediately only for an old host. For a drifted
-roster on a container with no render context it first waits for the queued
-reapply: no push and no restart, counted in the tenant's
-`config_reconcile_attempts`, with an ops alert at 3 attempts. Only on the 5th
-(last budgeted) attempt does it push the roster stripped, so the agents still
-land and the pending leg re-arms the choices later. An unreadable contract or
-context probe is retried the same way but never stripped.
+roster on a container with no render context (or an unreadable probe) it first
+waits for the queued reapply: no push and no restart. Waits count on their own
+Redis budget (`fleet:agent_models:wait:<tenant>`, 2h sliding TTL), separate
+from `config_reconcile_attempts`, with one ops alert at 3 waits and no give-up.
+On the 5th wait it pushes the roster stripped, so the agents still land and the
+pending leg re-arms the choices later; the budget resets when the choices are
+delivered or re-armed. The reapply is re-queued at most every 240s before the
+alert and hourly after it; post-alert probes run at most every 30 minutes per
+tenant.
 
 A scheduled run refused for a model reason (`delegate_*`, `render_context_missing`)
 records one failed run and one owner notice for that slot; it does not retry
