@@ -789,6 +789,83 @@ class TestInstall(AgentModelDBBase):
 		self.assertEqual(self._state().model, "gpt-frontier")
 
 
+class TestInstallWithPick(AgentModelDBBase):
+	"""The install request carries the installer's pick; no separate set_agent_model."""
+
+	def setUp(self):
+		super().setUp()
+		_flag(True)
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 0)
+		frappe.db.commit()
+
+	def _install_with(self, user, provider, model):
+		with _env(), _as(user):
+			return agents_api.install_agent(AGENT, model_provider=provider, model=model)["data"]["name"]
+
+	def _model_changed(self):
+		return frappe.get_all(
+			ACTIVITY,
+			filters={"action": "model_changed", "agent": AGENT},
+			fields=["owner", "installation", "detail"],
+		)
+
+	def test_an_eligible_pick_installs_and_becomes_the_chosen_row(self):
+		name = self._install_with(OWNER, "openai", "gpt-adv")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, name, "owner"), OWNER)
+		row = frappe.db.get_value(
+			CHOICE, AGENT, ["state", "provider", "model", "fallbacks", "changed_by"], as_dict=True
+		)
+		self.assertEqual((row.state, row.provider, row.model), ("chosen", "openai", "gpt-adv"))
+		self.assertEqual(row.changed_by, OWNER)
+		self.assertEqual(_refs(row.fallbacks), [{"provider": "openai", "model": "gpt-frontier"}])
+		self.assertEqual([(r.owner, r.installation) for r in self._model_changed()], [(OWNER, name)])
+		self.assertEqual(
+			frappe.utils.cint(frappe.db.get_single_value(SETTINGS, "agent_catalog_dirty", cache=False)), 1
+		)
+
+	def test_an_ineligible_pick_installs_nothing_and_leaves_the_row(self):
+		_choice(AGENT, state="chosen", provider="openai", model="gpt-frontier", fallbacks="[]")
+		for provider, model in (("openai", "gpt-std"), ("openai", "gpt-raw"), ("openai", "")):
+			with self.subTest(model=model), self.assertRaises(frappe.ValidationError):
+				self._install_with(OWNER, provider, model)
+		with _env(catalog=[]), _as(OWNER), self.assertRaises(frappe.ValidationError):
+			agents_api.install_agent(AGENT, model_provider="openai", model="gpt-adv")
+		self.assertFalse(frappe.db.exists(INSTALLATION, {"agent": AGENT}))
+		self.assertEqual((self._state().state, self._state().model), ("chosen", "gpt-frontier"))
+		self.assertEqual(self._model_changed(), [])
+
+	def test_no_pick_keeps_the_auto_choice(self):
+		self._install_with(OWNER, None, "")
+		self.assertEqual((self._state().state, self._state().model), ("auto", "gpt-frontier"))
+		self.assertEqual(self._model_changed(), [])
+
+	def test_a_later_installers_pick_updates_the_existing_row(self):
+		with _env():
+			first = _install(OWNER, AGENT)
+		self.assertEqual(self._state().state, "auto")
+		second = self._install_with(OTHER, "openai", "gpt-adv")
+		row = frappe.db.get_value(CHOICE, AGENT, ["state", "model", "changed_by"], as_dict=True)
+		self.assertEqual((row.state, row.model, row.changed_by), ("chosen", "gpt-adv", OTHER))
+		self.assertEqual(
+			{(r.owner, r.installation) for r in self._model_changed()}, {(OWNER, first), (OTHER, second)}
+		)
+
+	def test_a_subscription_lane_pick_keeps_its_empty_provider(self):
+		settings = _pool(_row("kimi-sub", cred="subscription", upstream="kimi", order=3))
+		with _env(settings=settings), _as(OWNER):
+			agents_api.install_agent(AGENT, model_provider="", model="kimi-sub")
+		row = self._state()
+		self.assertEqual((row.state, row.provider, row.model), ("chosen", "", "kimi-sub"))
+
+	def test_flag_off_ignores_the_pick(self):
+		_flag(False)
+		with _env(catalog=[]), _as(OWNER):  # even an ineligible pick + unreadable catalog
+			name = agents_api.install_agent(AGENT, model_provider="openai", model="gpt-std")["data"]["name"]
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+		self.assertFalse(frappe.db.exists(CHOICE, AGENT))
+		self.assertEqual(self._model_changed(), [])
+
+
 class TestFlagTransition(AgentModelDBBase):
 	def test_off_to_on_grandfathers_installed_agents_as_legacy(self):
 		_install(OWNER, AGENT)
