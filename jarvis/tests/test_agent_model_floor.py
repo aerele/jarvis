@@ -11,9 +11,11 @@ from contextlib import ExitStack, contextmanager
 from unittest.mock import MagicMock, patch
 
 import frappe
+from frappe.model.document import Document
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import agent_catalog, agent_models, agent_scheduler, agents_api
+from jarvis.chat.agent_activity import log_activity
 from jarvis.tests._agent_access import allow_listing_for
 
 CHOICE = "Jarvis Agent Model Choice"
@@ -864,6 +866,125 @@ class TestInstallWithPick(AgentModelDBBase):
 		self.assertTrue(frappe.db.exists(INSTALLATION, name))
 		self.assertFalse(frappe.db.exists(CHOICE, AGENT))
 		self.assertEqual(self._model_changed(), [])
+
+	def _install_shown(self, user=OWNER):
+		"""The dialog's unchanged shown model (gpt-adv), sent as ``pick_if_unpinned``."""
+		with _env(), _as(user):
+			res = agents_api.install_agent(
+				AGENT, model_provider="openai", model="gpt-adv", pick_if_unpinned=1
+			)
+		return res["data"]["name"]
+
+	def _row(self):
+		return frappe.db.get_value(CHOICE, AGENT, ["state", "model", "changed_by"], as_dict=True)
+
+	def test_a_shown_pick_fills_a_missing_or_unpinned_row(self):
+		for state in (None, "legacy", "needs_model"):
+			with self.subTest(state=state):
+				self._clean()
+				if state:
+					_choice(AGENT, state=state, provider="openai", model="gpt-std", fallbacks="[]")
+				self._install_shown()
+				row = self._row()
+				self.assertEqual((row.state, row.model, row.changed_by), ("chosen", "gpt-adv", OWNER))
+				self.assertEqual(len(self._model_changed()), 1)
+
+	def test_a_shown_pick_keeps_a_pinned_row(self):
+		for state in ("auto", "chosen", "changed"):
+			with self.subTest(state=state):
+				self._clean()
+				_choice(
+					AGENT,
+					state=state,
+					provider="openai",
+					model="gpt-frontier",
+					fallbacks="[]",
+					changed_by=OTHER,
+				)
+				name = self._install_shown()
+				self.assertTrue(frappe.db.exists(INSTALLATION, name))
+				row = self._row()
+				self.assertEqual((row.state, row.model, row.changed_by), (state, "gpt-frontier", OTHER))
+				self.assertEqual(self._model_changed(), [])
+
+	def test_a_shown_pick_keeps_a_pin_set_after_the_page_loaded(self):
+		# Decided under the row lock at write time, not from what the dialog read.
+		_choice(AGENT, state="legacy", fallbacks="[]")
+		real = agent_models.plan_install
+
+		def pinned_meanwhile(*args, **kwargs):
+			plan = real(*args, **kwargs)
+			frappe.db.set_value(
+				CHOICE,
+				AGENT,
+				{"state": "chosen", "provider": "openai", "model": "gpt-frontier", "changed_by": OTHER},
+			)
+			return plan
+
+		with patch.object(agent_models, "plan_install", side_effect=pinned_meanwhile):
+			name = self._install_shown()
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+		row = self._row()
+		self.assertEqual((row.state, row.model, row.changed_by), ("chosen", "gpt-frontier", OTHER))
+		self.assertEqual(self._model_changed(), [])
+
+	def test_a_changed_pick_still_overwrites_a_pinned_row(self):
+		_choice(
+			AGENT, state="chosen", provider="openai", model="gpt-frontier", fallbacks="[]", changed_by=OTHER
+		)
+		self._install_with(OWNER, "openai", "gpt-adv")
+		row = self._row()
+		self.assertEqual((row.state, row.model, row.changed_by), ("chosen", "gpt-adv", OWNER))
+
+
+def _deadlock(*args, **kwargs):
+	raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
+
+
+def _deadlocking_activity_insert():
+	real = Document.insert
+
+	def insert(doc, *args, **kwargs):
+		if doc.doctype == ACTIVITY:
+			_deadlock()
+		return real(doc, *args, **kwargs)
+
+	return patch.object(Document, "insert", insert)
+
+
+class TestDeadlocksAreNotSwallowed(AgentModelDBBase):
+	"""A deadlock rolls back the whole transaction, so a best-effort helper that
+	swallowed it would let install_agent report ok for an install that is gone."""
+
+	def setUp(self):
+		super().setUp()
+		_flag(True)
+
+	def test_a_deadlocked_dirty_flag_fails_the_install(self):
+		with patch.object(agents_api, "_bump_catalog_version", side_effect=_deadlock), _env(), _as(OWNER):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				agents_api.install_agent(AGENT, model_provider="openai", model="gpt-adv")
+		self.assertIn("try again", str(ctx.exception))
+
+	def test_a_deadlocked_activity_row_fails_the_install(self):
+		with _deadlocking_activity_insert(), _env(), _as(OWNER):
+			with self.assertRaises(frappe.QueryDeadlockError):
+				agents_api.install_agent(AGENT)
+
+	def test_other_errors_stay_best_effort(self):
+		boom = RuntimeError("boom")
+		with patch.object(agents_api, "_bump_catalog_version", side_effect=boom), _env(), _as(OWNER):
+			agents_api.install_agent(AGENT, model_provider="openai", model="gpt-adv")
+		self.assertEqual(self._state().model, "gpt-adv")
+
+	def test_a_deadlock_with_nothing_uncommitted_only_loses_its_own_write(self):
+		# e.g. the scheduler's run_started row, logged after the run committed.
+		frappe.db.commit()
+		with _deadlocking_activity_insert():
+			log_activity(agent=AGENT, agent_title="", installation=None, action="installed")
+		with patch.object(agents_api, "_bump_catalog_version", side_effect=_deadlock):
+			frappe.db.commit()
+			agents_api._mark_catalog_dirty()
 
 
 class TestFlagTransition(AgentModelDBBase):
