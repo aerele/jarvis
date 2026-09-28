@@ -4,9 +4,8 @@
 		:options="{ title: dialogTitle }"
 		@update:modelValue="onClose"
 	>
-		<!-- FE3-1: Dialog's default #body-header X closes unconditionally; this
-		     reproduces it (DialogTitle keeps reka's aria-labelledby, as in
-		     SettingsDialog.vue) with the close button gated like Cancel. -->
+		<!-- FE3-1: Dialog's default #body-header, with a labelled close button
+		     (DialogTitle keeps reka's aria-labelledby, as in SettingsDialog.vue). -->
 		<template #body-header>
 			<div class="mb-6 flex items-center justify-between">
 				<DialogTitle as="header">
@@ -14,13 +13,7 @@
 						{{ dialogTitle }}
 					</h3>
 				</DialogTitle>
-				<Button
-					variant="ghost"
-					icon="x"
-					label="Close"
-					:disabled="installing"
-					@click="onClose(false)"
-				/>
+				<Button variant="ghost" icon="x" label="Close" @click="onClose(false)" />
 			</div>
 		</template>
 		<template #body-content>
@@ -29,7 +22,16 @@
 			<div v-if="loading" class="mt-4 flex items-center gap-2 text-sm text-ink-gray-5">
 				<JvSpinner /> Loading eligible models…
 			</div>
-			<div v-else-if="catalogUnknown" class="mt-4 text-sm text-ink-gray-5">
+			<div v-else-if="loadFailed" class="mt-4 text-sm text-ink-gray-5">
+				Couldn't load the models this agent can use.
+				<button type="button" class="text-ink-gray-8 underline" @click="load">
+					Retry
+				</button>
+			</div>
+			<div
+				v-else-if="catalogUnknown && !usingExistingChoice"
+				class="mt-4 text-sm text-ink-gray-5"
+			>
 				Model list unavailable — try again shortly.
 			</div>
 			<div v-else-if="noneEligible" class="mt-4 text-sm text-ink-gray-5">
@@ -68,31 +70,31 @@
 						</div>
 					</div>
 					<Button
+						v-if="!catalogUnknown"
 						variant="subtle"
 						label="Change"
-						:disabled="installing"
 						@click="showPicker = !showPicker"
 					/>
 				</div>
+				<p class="mt-2 text-sm text-ink-gray-5">
+					This choice applies to everyone using this agent.
+				</p>
+				<p v-if="catalogUnknown" class="mt-1 text-sm text-ink-gray-5">
+					Model list unavailable — installing keeps this model.
+				</p>
 				<div v-if="showPicker" class="mt-3">
-					<AgentModelPicker
-						:eligible="eligible"
-						:current="pickedRef"
-						:saving="installing"
-						@select="onPick"
-					/>
+					<AgentModelPicker :eligible="eligible" :current="pickedRef" @select="onPick" />
 				</div>
 			</template>
 			<span class="sr-only" role="status" aria-live="polite">{{ liveMessage }}</span>
 		</template>
 		<template #actions>
 			<div class="flex justify-end gap-2">
-				<Button label="Cancel" :disabled="installing" @click="onClose(false)" />
+				<Button label="Cancel" @click="onClose(false)" />
 				<Button
 					variant="solid"
 					label="Install"
-					:loading="installing"
-					:disabled="installing || loading || noneEligible || catalogUnknown"
+					:disabled="!canConfirm"
 					@click="confirmInstall"
 				/>
 			</div>
@@ -109,7 +111,9 @@
 // with the draft when the server would not run it otherwise (changed, or a
 // legacy/needs_model row), and the parent sends it WITH install_agent, which
 // validates and saves it in the same request - so Cancel leaves nothing behind
-// and no separate save can race the install.
+// and no separate save can race the install. The row is read fresh on open; an
+// unchanged shown pick goes as `ifUnpinned`, so a pin set since never loses to it.
+// The dialog closes on confirm: the page's Install button shows progress/errors.
 import { ref, computed, watch } from "vue";
 import { Badge, Button, Dialog, toast } from "frappe-ui";
 import { DialogTitle } from "reka-ui";
@@ -129,12 +133,6 @@ const props = defineProps({
 	agentSlug: { type: String, required: true },
 	agentTitle: { type: String, default: "" },
 	requiredTier: { type: String, default: "" },
-	// EDGE2-1: get_agent_model()'s {state, choice} - a pinned row's choice is
-	// what runs unless changed, so it seeds the display.
-	modelInfo: { type: Object, default: null },
-	// The parent's install_agent is in flight: Install shows loading and
-	// Cancel/X/Escape are held so a close can't race it.
-	installing: { type: Boolean, default: false },
 	// has_jarvis_admin_access - gates the Connect-a-provider CTA, as in AgentModelCard.
 	isAdmin: { type: Boolean, default: false },
 });
@@ -143,15 +141,15 @@ const emit = defineEmits(["update:modelValue", "confirm", "connect-provider"]);
 const dialogTitle = computed(() => `Install ${props.agentTitle}?`);
 
 const loading = ref(false);
-const eligible = ref(null); // get_eligible_models()
+const eligible = ref(null); // get_eligible_models(); null after a failed load
 const autoPicked = ref(null); // {provider, model} - what is shown before any Change
 const picked = ref(null); // {provider, model} - the local draft
-// EDGE2-1: seeded from an existing tenant-wide row (props.modelInfo.choice).
+// EDGE2-1: seeded from an existing tenant-wide row (get_agent_model().choice).
 const usingExistingChoice = ref(false);
 // The row's own enriched choice - label/tier/cost when it left the eligible list.
 const existingMeta = ref(null);
 // A legacy/needs_model row is kept as-is by an install without a pick, so the
-// shown model must be sent even when unchanged.
+// shown model is sent even when unchanged (as ifUnpinned).
 const sendShown = ref(false);
 const showPicker = ref(false);
 const liveMessage = ref("");
@@ -182,10 +180,14 @@ async function load() {
 	const id = ++loadReqId;
 	loading.value = true;
 	try {
-		const res = (await apiAgents.getEligibleModels(props.agentSlug)) || null;
+		// RES7-1: the row seeds from this read, never the page's older copy.
+		const [res, info] = await Promise.all([
+			apiAgents.getEligibleModels(props.agentSlug),
+			apiAgents.getAgentModel(props.agentSlug),
+		]);
 		if (id !== loadReqId) return; // a newer open owns the display
-		eligible.value = res;
-		seed(props.modelInfo);
+		eligible.value = res || null;
+		seed(info || null);
 	} catch (e) {
 		if (id !== loadReqId) return;
 		eligible.value = null;
@@ -214,6 +216,7 @@ watch(
 
 const noneEligible = computed(() => isNoneEligible(eligible.value));
 const catalogUnknown = computed(() => isCatalogUnknown(eligible.value));
+const loadFailed = computed(() => !loading.value && !eligible.value);
 const requirementText = computed(() => requirementPhrase(props.requiredTier));
 
 const pickedRef = computed(() => picked.value);
@@ -231,6 +234,14 @@ const draftChanged = computed(
 	() => !!(picked.value && autoPicked.value && !sameRef(picked.value, autoPicked.value))
 );
 const alreadySetForEveryone = computed(() => usingExistingChoice.value && !draftChanged.value);
+// An unreadable catalog still installs over a pinned row left as it is (no pick sent).
+const canConfirm = computed(
+	() =>
+		!loading.value &&
+		!loadFailed.value &&
+		!noneEligible.value &&
+		(!catalogUnknown.value || alreadySetForEveryone.value)
+);
 const pickedLabel = computed(
 	() => (pickedMeta.value && (pickedMeta.value.label || pickedMeta.value.model)) || ""
 );
@@ -250,16 +261,17 @@ function onPick(m) {
 // An unchanged draft over a pinned row (or no row) sends no pick: the server
 // keeps the row, or auto-picks the same best eligible model.
 function confirmInstall() {
-	if (props.installing) return;
-	if (picked.value && (draftChanged.value || sendShown.value)) {
+	if (!canConfirm.value) return;
+	if (picked.value && draftChanged.value) {
 		emit("confirm", { ...picked.value });
+	} else if (picked.value && sendShown.value) {
+		emit("confirm", { ...picked.value, ifUnpinned: true });
 	} else {
 		emit("confirm");
 	}
 }
 
 function onClose(v) {
-	if (props.installing) return;
 	emit("update:modelValue", !!v);
 }
 </script>

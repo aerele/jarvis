@@ -648,8 +648,6 @@
 			:agent-slug="props.slug"
 			:agent-title="agent.title"
 			:required-tier="(modelInfo && modelInfo.required_tier) || ''"
-			:model-info="modelInfo"
-			:installing="installing"
 			:is-admin="isSM"
 			@confirm="onInstallDialogConfirm"
 			@connect-provider="goConnectProvider"
@@ -1044,7 +1042,8 @@ function install() {
 	}
 	return doInstall();
 }
-// `pick`: the dialog's changed model, if any - install_agent saves it with the install.
+// `pick`: the dialog's model to send, if any - install_agent saves it with the install.
+// The dialog closes here; the Install button carries progress and errors.
 function onInstallDialogConfirm(pick) {
 	if (installing.value) return;
 	installDialogOpen.value = false;

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
-// setAgentModel/getAgentModel stay mocked so "the dialog never calls them" is
-// asserted: the pick rides install_agent (the parent's call), never a separate save.
+// setAgentModel stays mocked so "the dialog never calls it" is asserted: the pick
+// rides install_agent (the parent's call), never a separate save. getAgentModel is
+// the dialog's own fresh read of the row on open (RES7-1).
 const apiAgents = vi.hoisted(() => ({
 	getEligibleModels: vi.fn(),
 	setAgentModel: vi.fn(),
@@ -90,14 +91,15 @@ const SONNET = {
 	cost_note: "$2.00 in / $6.00 out per 1M tokens",
 };
 
-function mountDialog(props = {}) {
+// `row`: what the dialog's own get_agent_model read returns on open.
+function mountDialog({ row = null, ...props } = {}) {
+	apiAgents.getAgentModel.mockResolvedValue(row);
 	return mount(AgentInstallDialog, {
 		props: {
 			modelValue: true,
 			agentSlug: "close-auditor",
 			agentTitle: "Close Auditor",
 			requiredTier: "Advanced",
-			installing: false,
 			...props,
 		},
 	});
@@ -115,8 +117,9 @@ async function pickOther(w) {
 
 function expectNoSeparateSave() {
 	expect(apiAgents.setAgentModel).not.toHaveBeenCalled();
-	expect(apiAgents.getAgentModel).not.toHaveBeenCalled();
 }
+
+const installBtn = (w) => w.find('[data-label="Install"]');
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -199,7 +202,7 @@ describe("AgentInstallDialog confirm carries the pick", () => {
 
 	it("never calls setAgentModel across pick, install, close and reopen", async () => {
 		mockTwoModels();
-		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		await pickOther(w);
 		await w.find('[data-label="Install"]').trigger("click");
@@ -214,43 +217,8 @@ describe("AgentInstallDialog confirm carries the pick", () => {
 	});
 });
 
-// The parent's install_agent is in flight: nothing in the dialog may close it or
-// send a second confirm.
-describe("AgentInstallDialog while the parent is installing", () => {
-	it("Install shows loading and is disabled; Change, Cancel and the header X are disabled", async () => {
-		mockTwoModels();
-		const w = mountDialog({ installing: true });
-		await flushPromises();
-		const install = w.find('[data-label="Install"]');
-		expect(install.attributes("data-loading")).toBe("true");
-		expect(install.attributes("disabled")).toBeDefined();
-		for (const label of ["Change", "Cancel", "Close"]) {
-			expect(w.find(`[data-label="${label}"]`).attributes("disabled")).toBeDefined();
-		}
-	});
-
-	it("Escape/backdrop (the Dialog's own update:modelValue) is ignored", async () => {
-		mockTwoModels();
-		const w = mountDialog({ installing: true });
-		await flushPromises();
-		w.findComponent({ name: "Dialog" }).vm.$emit("update:modelValue", false);
-		await flushPromises();
-		expect(w.emitted("update:modelValue")).toBeUndefined();
-	});
-
-	it("controls re-enable once installing clears", async () => {
-		mockTwoModels();
-		const w = mountDialog({ installing: true });
-		await flushPromises();
-		await w.setProps({ installing: false });
-		for (const label of ["Install", "Change", "Cancel", "Close"]) {
-			expect(w.find(`[data-label="${label}"]`).attributes("disabled")).toBeUndefined();
-		}
-	});
-});
-
 describe("AgentInstallDialog header close button (FE3-1)", () => {
-	it("closes like Cancel when not installing", async () => {
+	it("closes like Cancel", async () => {
 		mockTwoModels();
 		const w = mountDialog();
 		await flushPromises();
@@ -348,7 +316,7 @@ describe("AgentInstallDialog open/close lifecycle", () => {
 describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)", () => {
 	it("shows the existing chosen model; Install without Change emits no pick", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
-		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Sonnet 5");
 		expect(w.text()).not.toContain("Claude Opus 5");
@@ -361,7 +329,7 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 
 	it("Change away from the existing choice emits the new pick", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
-		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		await pickOther(w);
 		expect(w.text()).not.toContain("Already set for everyone using this agent.");
@@ -373,7 +341,7 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 
 	it("Change to the best eligible model is still a pick when a row holds another", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
-		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		await w.find('[data-label="Change"]').trigger("click");
 		await w.find('[data-testid="pick-opus"]').trigger("click");
@@ -387,7 +355,7 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 
 	it("an existing choice that has fallen out of the eligible list is still shown by its own label", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS] });
-		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Sonnet 5");
 		expect(w.text()).toContain("$2.00 in / $6.00 out per 1M tokens");
@@ -395,7 +363,7 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 
 	it("no existing row falls back to the auto-pick", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
-		const w = mountDialog({ modelInfo: null });
+		const w = mountDialog({ row: null });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(w.text()).not.toContain("Already set for everyone using this agent.");
@@ -407,7 +375,7 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 				catalog: "ok",
 				models: [OPUS, SONNET],
 			});
-			const w = mountDialog({ modelInfo: { state, choice: SONNET } });
+			const w = mountDialog({ row: { state, choice: SONNET } });
 			await flushPromises();
 			expect(w.text()).toContain("Already set for everyone using this agent.");
 			await w.find('[data-label="Install"]').trigger("click");
@@ -421,7 +389,7 @@ describe('AgentInstallDialog subscription-lane models (provider "")', () => {
 	it("seeds from an existing subscription-lane choice and matches it in the eligible list", async () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, KIMI] });
 		const w = mountDialog({
-			modelInfo: { state: "chosen", choice: { provider: "", model: "kimi-sub" } },
+			row: { state: "chosen", choice: { provider: "", model: "kimi-sub" } },
 		});
 		await flushPromises();
 		expect(w.text()).toContain("Kimi Sub");
@@ -448,25 +416,26 @@ describe('AgentInstallDialog subscription-lane models (provider "")', () => {
 });
 
 // install_agent keeps a legacy/needs_model row as-is without a pick, so the
-// shown model is sent even when unchanged - else the agent would not run it.
+// shown model is sent even when unchanged - else the agent would not run it. It
+// goes as ifUnpinned: the server keeps a row someone pinned since (RES7-1).
 describe("AgentInstallDialog over an unpinned row (legacy / needs_model)", () => {
 	it("legacy row + unchanged pick sends the shown model", async () => {
 		mockTwoModels();
-		const w = mountDialog({ modelInfo: { state: "legacy", choice: null } });
+		const w = mountDialog({ row: { state: "legacy", choice: null } });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(w.text()).not.toContain("Already set for everyone using this agent.");
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([
-			[{ provider: "anthropic", model: "claude-opus-5" }],
+			[{ provider: "anthropic", model: "claude-opus-5", ifUnpinned: true }],
 		]);
 		expectNoSeparateSave();
 	});
 
 	it("needs_model row keeping a stale model shows and sends the best eligible instead", async () => {
 		mockTwoModels();
-		const w = mountDialog({ modelInfo: { state: "needs_model", choice: SONNET } });
+		const w = mountDialog({ row: { state: "needs_model", choice: SONNET } });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(w.text()).not.toContain("Claude Sonnet 5");
@@ -474,16 +443,136 @@ describe("AgentInstallDialog over an unpinned row (legacy / needs_model)", () =>
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([
-			[{ provider: "anthropic", model: "claude-opus-5" }],
+			[{ provider: "anthropic", model: "claude-opus-5", ifUnpinned: true }],
 		]);
 	});
 
 	it("a changed pick over a legacy row is sent as picked", async () => {
 		mockTwoModels();
-		const w = mountDialog({ modelInfo: { state: "legacy", choice: null } });
+		const w = mountDialog({ row: { state: "legacy", choice: null } });
 		await flushPromises();
 		await pickOther(w);
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([[{ provider: "openai", model: "gpt-5" }]]);
+	});
+});
+
+// RES7-1: the row is read fresh on every open, never taken from the page's copy.
+describe("AgentInstallDialog reads the row fresh on open", () => {
+	it("reads the row for this agent alongside the eligible models", async () => {
+		mockTwoModels();
+		mountDialog();
+		await flushPromises();
+		expect(apiAgents.getAgentModel).toHaveBeenCalledWith("close-auditor");
+		expect(apiAgents.getEligibleModels).toHaveBeenCalledWith("close-auditor");
+	});
+
+	it("a pin set since the last open is shown and not overwritten", async () => {
+		mockTwoModels();
+		const w = mountDialog({ row: { state: "legacy", choice: null } });
+		await flushPromises();
+		await w.setProps({ modelValue: false });
+		apiAgents.getAgentModel.mockResolvedValue({ state: "chosen", choice: SONNET });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Sonnet 5");
+		await installBtn(w).trigger("click");
+		expect(w.emitted("confirm")).toEqual([[]]);
+	});
+
+	it("a slower row read from a prior open never overwrites the newer one", async () => {
+		mockTwoModels();
+		let resolveFirst;
+		apiAgents.getAgentModel
+			.mockReturnValueOnce(new Promise((resolve) => (resolveFirst = resolve)))
+			.mockResolvedValueOnce({ state: "chosen", choice: SONNET });
+		const w = mount(AgentInstallDialog, {
+			props: { modelValue: true, agentSlug: "close-auditor", agentTitle: "Close Auditor" },
+		});
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		resolveFirst({ state: "legacy", choice: null });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Sonnet 5");
+		await installBtn(w).trigger("click");
+		expect(w.emitted("confirm")).toEqual([[]]);
+	});
+});
+
+// RES7-2: a failed load is never an installable empty box.
+describe("AgentInstallDialog failed load", () => {
+	it("disables Install and offers Retry when the eligible models fail to load", async () => {
+		apiAgents.getEligibleModels.mockRejectedValueOnce(new Error("boom"));
+		const w = mountDialog();
+		await flushPromises();
+		expect(w.text()).toContain("Couldn't load the models this agent can use.");
+		expect(installBtn(w).attributes("disabled")).toBeDefined();
+		await installBtn(w).trigger("click");
+		expect(w.emitted("confirm")).toBeUndefined();
+
+		mockTwoModels();
+		await w
+			.findAll("button")
+			.find((b) => b.text() === "Retry")
+			.trigger("click");
+		await flushPromises();
+		expect(apiAgents.getEligibleModels).toHaveBeenCalledTimes(2);
+		expect(w.text()).toContain("Claude Opus 5");
+		expect(installBtn(w).attributes("disabled")).toBeUndefined();
+	});
+
+	it("an empty response or a failed row read is a failed load too", async () => {
+		for (const setup of [
+			() => apiAgents.getEligibleModels.mockResolvedValue(null),
+			() => {
+				mockTwoModels();
+				apiAgents.getAgentModel.mockRejectedValue(new Error("boom"));
+			},
+		]) {
+			const w = mountDialog();
+			setup();
+			await w.setProps({ modelValue: false });
+			await w.setProps({ modelValue: true });
+			await flushPromises();
+			expect(w.text()).toContain("Couldn't load the models this agent can use.");
+			expect(installBtn(w).attributes("disabled")).toBeDefined();
+		}
+	});
+});
+
+// RES7-3: an unreadable catalog does not block installing over a pinned row.
+describe("AgentInstallDialog unreadable catalog over a pinned row", () => {
+	it("keeps the pinned model, hides Change and installs with no pick", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "unknown", models: [] });
+		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Sonnet 5");
+		expect(w.text()).toContain("Model list unavailable — installing keeps this model.");
+		expect(w.find('[data-label="Change"]').exists()).toBe(false);
+		expect(installBtn(w).attributes("disabled")).toBeUndefined();
+		await installBtn(w).trigger("click");
+		expect(w.emitted("confirm")).toEqual([[]]);
+	});
+
+	it("still blocks Install over a legacy row (there is nothing to keep)", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "unknown", models: [] });
+		const w = mountDialog({ row: { state: "legacy", choice: null } });
+		await flushPromises();
+		expect(w.text()).toContain("Model list unavailable — try again shortly.");
+		expect(installBtn(w).attributes("disabled")).toBeDefined();
+	});
+});
+
+// UX7-1: the tenant-wide reach is always stated, not only when unchanged.
+describe("AgentInstallDialog tenant-wide copy", () => {
+	it("says the choice applies to everyone, before and after a Change", async () => {
+		mockTwoModels();
+		const w = mountDialog();
+		await flushPromises();
+		const line = "This choice applies to everyone using this agent.";
+		expect(w.text()).toContain(line);
+		await pickOther(w);
+		expect(w.text()).toContain(line);
 	});
 });
