@@ -4848,6 +4848,38 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_reconcile_does_not_stamp_while_a_switch_is_held(self):
+		"""jarvis#1425 review (live e2e2, 2026-09-27): admin's "Ready" while a
+		switch is held describes the PRE-switch config, not the held one -
+		stamping "ok" here would strand the tenant on a status that does not
+		match what it is actually serving. The switch's own released worker
+		converges and stamps once it actually pushes."""
+		from jarvis.chat import llm_switch
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		self._seed_pool()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		frappe.db.commit()
+		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
+		with (
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+			# jarvis#1425 review, fourth pass: the guard now reads
+			# llm_switch.blocks_stamp() (True unless applied AND awaiting_admin -
+			# a held-but-not-yet-applied switch always blocks), not a plain
+			# is_active() check.
+			patch.object(llm_switch, "blocks_stamp", return_value=True),
+		):
+			reconcile_pending_llm_sync()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertFalse(
+			settings.llm_pool_synced_at, "a held switch must block the stamp even when admin reports Ready"
+		)
+		self.assertEqual(settings.last_sync_status, "pending: admin applying config")
+
 	def test_reconcile_noop_when_not_ready(self):
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 			reconcile_pending_llm_sync,
@@ -5284,6 +5316,92 @@ class TestPushDirectSubscriptionBlobNoMatchInvariant(FrappeTestCase):
 		settings = _make_settings_with_models([])
 		with self.assertRaises(admin_client.AdminValidationError):
 			JarvisSettings._push_direct_subscription_blob(settings)
+
+
+class TestLoneDirectHandoverDue(FrappeTestCase):
+	"""jarvis#1425: a workspace that already synced through the pool leg but is
+	now down to ONE ChatGPT account is due for the fleet handover onto the
+	direct leg, instead of sitting on the proxy forever behind
+	_lone_direct_capable's non-retroactivity gate (jarvis#715/#755)."""
+
+	def _settings(self, *, upstream="openai", synced=True, models_rows=None):
+		rows = (
+			models_rows
+			if models_rows is not None
+			else [_subscription_model(order=0, accounts=[_account(upstream=upstream)])]
+		)
+		settings = _make_settings_with_models(rows)
+		if synced:
+			settings.llm_pool_synced_at = "2026-08-01 00:00:00"
+		return settings
+
+	def test_due_for_a_synced_lone_chatgpt_account(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="openai", synced=True)
+		self.assertTrue(lone_direct_handover_due(settings))
+		# Regression: the sync stamp keeps this OFF the direct-capable exception.
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_without_the_pool_sync_stamp(self):
+		"""A fresh connect takes the direct leg already (_lone_direct_capable), so
+		there is nothing to hand over."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="openai", synced=False)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertTrue(_lone_direct_capable(settings))
+
+	def test_not_due_for_a_synced_lone_claude_account(self):
+		"""Claude plans always sync through the pool leg and already run without a
+		proxy, so they are excluded even though the shape otherwise matches."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="anthropic", synced=True)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_two_accounts_on_the_one_model(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(
+			models_rows=[
+				_subscription_model(order=0, accounts=[_account(), _account(account_ref="ACC_002")])
+			],
+			synced=True,
+		)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_two_enabled_models(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(
+			models_rows=[
+				_subscription_model(order=0, accounts=[_account()]),
+				_subscription_model(order=1, model="gpt-5.6", accounts=[_account(account_ref="ACC_002")]),
+			],
+			synced=True,
+		)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_with_a_preset(self):
+		"""A preset always routes through the pool leg."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(synced=True)
+		settings.preset = "some-preset"
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_an_upstream_with_no_fleet_renderer(self):
+		"""xai has no fleet-template arm today (_upstream_has_renderer)."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="xai", synced=True)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
 
 
 class TestNativeClaudePickRouting(unittest.TestCase):

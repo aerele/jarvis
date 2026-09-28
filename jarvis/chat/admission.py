@@ -244,7 +244,7 @@ def _turn_dispatching_count_by_class(target: str, turn_class: str) -> int:
 	)[0][0]
 
 
-def _legacy_streaming_count(target: str) -> int:
+def _legacy_streaming_count(target: str, *, fresh_cutoff=None) -> int:
 	"""Conversations whose newest assistant Message is fresh-``streaming`` and
 	have NO owning ``dispatching`` Turn row - turns that started before the flag
 	flipped on. The ``NOT EXISTS`` de-dups only against a ``dispatching`` Turn
@@ -257,7 +257,15 @@ def _legacy_streaming_count(target: str) -> int:
 	Freshness is approximated from the assistant row's own ``modified`` (rather
 	than the conversation's newest-of-any-role, as api._conversation_busy uses);
 	a tool-heavy turn can look briefly stale, at worst under-counting by one
-	during a flag flip - a transitional signal, documented."""
+	during a flag flip - a transitional signal, documented.
+
+	``fresh_cutoff`` defaults to this module's own 180s window
+	(``_fresh_cutoff()``). ``jarvis.chat.llm_switch`` passes a wider one (900s):
+	a tool call in progress does not touch this row's ``modified`` at all (no
+	periodic write while it runs - traced against turn_handler's assistant
+	batcher, jarvis#1425 follow-up), so 180s is long enough to under-count a
+	live reply as idle and cut it. Every other caller keeps the default and
+	stays byte-identical."""
 	return frappe.db.sql(
 		f"""
 		SELECT COUNT(*) FROM (
@@ -276,7 +284,7 @@ def _legacy_streaming_count(target: str) -> int:
 			  )
 		) x
 		""",
-		{"fresh": _fresh_cutoff()},
+		{"fresh": fresh_cutoff if fresh_cutoff is not None else _fresh_cutoff()},
 	)[0][0]
 
 
@@ -834,7 +842,16 @@ def promote_next(target: str | None = None) -> int:
 	NOT the ``site_config`` mirror. So a stale/failed mirror can never make Phase-0
 	legacy-dispatch a queued row the row-authoritative pump already owns (row=pump/config=legacy),
 	nor suppress Phase-0's own promotion when the row is the ``legacy`` kill switch
-	(row=legacy/config=pump). The row decides ownership everywhere."""
+	(row=legacy/config=pump). The row decides ownership everywhere.
+
+	jarvis#1425 follow-up: a queued turn promoted mid-drain of an active
+	``llm_switch`` would delay the switch, and one promoted mid-apply would hit a
+	restarting agent - so this steps back entirely while a switch is held; ``end()``
+	promotes once it clears."""
+	from jarvis.chat import llm_switch
+
+	if llm_switch.is_active():
+		return 0
 	from jarvis.chat import pump
 
 	if target is None:
@@ -945,44 +962,75 @@ def _queue_wait_ms(run_id: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def _try_llm_switch_apply() -> None:
+	"""jarvis#1425 follow-up: a turn ending is one of the triggers that should nudge a
+	held ``llm_switch`` forward (the other end of promote_next's hold above). Called
+	from a ``finally`` in both settle hooks below so it always runs, even on the
+	flag-OFF / no-op / exception paths - unlike admission itself, a switch can be held
+	whether or not Phase-0 admission is enabled. Never breaks settling."""
+	try:
+		from jarvis.chat import llm_switch
+
+		llm_switch.try_apply()
+	except Exception:
+		frappe.log_error(title="admission._try_llm_switch_apply", message=frappe.get_traceback())
+
+
 def settle_turn(run_id: str, terminal_state: str, error: str | None = None) -> None:
 	"""Mark a dispatching Turn terminal (done/errored/cancelled) then promote.
 	Called AFTER the legacy terminal commit points, OUTSIDE the brittle region.
 	Guarded by the flag so flag-OFF is byte-identical. Best-effort: never
 	breaks the turn."""
-	if not admission_enabled():
-		return
 	try:
-		affected = _run_cas(
-			f"""UPDATE `tab{TURN}`
-			SET state=%(s)s, reserved=0, cancel_requested=0, done_at=%(now)s,
-			    error=%(err)s, version=version+1
-			WHERE name=%(r)s AND state='dispatching'""",
-			{"s": terminal_state, "now": _now(), "err": (error or "")[:1000], "r": run_id},
-		)
-		target = frappe.db.get_value(TURN, run_id, "relay_target_id") or DEFAULT_RELAY_TARGET
-		frappe.db.commit()
-	except Exception:
-		frappe.db.rollback()
-		frappe.log_error(title="admission.settle_turn", message=frappe.get_traceback())
-		return
-	if affected == 1:
-		promote_next(target)
+		if not admission_enabled():
+			return
+		try:
+			affected = _run_cas(
+				f"""UPDATE `tab{TURN}`
+				SET state=%(s)s, reserved=0, cancel_requested=0, done_at=%(now)s,
+				    error=%(err)s, version=version+1
+				WHERE name=%(r)s AND state='dispatching'""",
+				{"s": terminal_state, "now": _now(), "err": (error or "")[:1000], "r": run_id},
+			)
+			target = frappe.db.get_value(TURN, run_id, "relay_target_id") or DEFAULT_RELAY_TARGET
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="admission.settle_turn", message=frappe.get_traceback())
+			return
+		if affected == 1:
+			promote_next(target)
+	finally:
+		_try_llm_switch_apply()
 
 
 def settle_conversation_dispatching(conversation: str, terminal_state: str, error: str | None = None) -> None:
 	"""Recovery-path settle: close the (single-flight) dispatching Turn on this
 	conversation. turn_recovery works off Message rows and has no run_id, so we
 	settle by conversation - per-conversation single-flight makes this
-	unambiguous. Best-effort + flag-gated."""
-	if not admission_enabled():
-		return
+	unambiguous. Best-effort + flag-gated.
+
+	CR-7 reverted (2026 review, second pass): a prior "cleanup" round removed
+	this function's own ``_try_llm_switch_apply()`` call on the theory that
+	``settle_turn`` below already runs it - true only when ``admission_enabled()``
+	is True AND a dispatching run_id is found. With admission OFF (today's
+	default), this ``finally`` is the ONLY trigger that fires when a reply ends
+	on this path, so removing it meant a held switch would never start once the
+	last reply finished. Restored - ``llm_switch.try_apply()`` is idempotent (a
+	no-op once applied, or with no active switch), so the occasional extra call
+	on the admission-enabled path (where ``settle_turn`` already triggered it)
+	is harmless, not a real duplicate."""
 	try:
-		run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
-	except Exception:
-		run_id = None
-	if run_id:
-		settle_turn(run_id, terminal_state, error=error)
+		if not admission_enabled():
+			return
+		try:
+			run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
+		except Exception:
+			run_id = None
+		if run_id:
+			settle_turn(run_id, terminal_state, error=error)
+	finally:
+		_try_llm_switch_apply()
 
 
 def mark_cancel_requested(conversation: str) -> None:
@@ -1072,6 +1120,12 @@ def cancel_queued_turn(run_id: str) -> dict:
 				except Exception:
 					pass
 	frappe.db.commit()
+	if path == "preparing_ready":
+		# jarvis#1425 review (scoped re-review, 2026-09-27): preparing/ready are
+		# in-flight states (_INFLIGHT_STATES) - a user cancel leaves one.
+		from jarvis.chat import llm_switch
+
+		llm_switch.apply_if_active(source="admission.cancel_queued_turn")
 	if path is None:
 		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
 	try:
