@@ -789,6 +789,13 @@ watch(
 		adminData.value = null;
 		activation.value = null;
 		initialLoadSettled.value = false;
+		// FE-1 review fix: an install-confirm dialog left open across an
+		// in-app agent switch (e.g. via a route change while it was showing)
+		// otherwise silently reopens for the NEXT agent - it is keyed off a
+		// plain boolean, not per-agent state like `agent`/`activation` above.
+		installDialogOpen.value = false;
+		installError.value = "";
+		installing.value = false;
 		load().then(() => {
 			initialLoadSettled.value = true;
 			applyHash();

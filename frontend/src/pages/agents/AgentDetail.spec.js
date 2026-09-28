@@ -562,6 +562,35 @@ describe("T6: AgentModelCard remounts fresh per agent (:key)", () => {
 	});
 });
 
+describe("FE-1 review fix: the install-confirm dialog does not leak across an agent switch (mutation-verified - see the task report)", () => {
+	it("open on agent A, closed again once the slug switches to agent B", async () => {
+		routeMock.hash = "";
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+		});
+		apiAgents.getAgent.mockImplementation((agent_slug) =>
+			Promise.resolve(baseAgent({ agent_slug, name: agent_slug, installation: null }))
+		);
+		const w = mount(AgentDetail, { props: { slug: "agent-a" } });
+		await flushPromises();
+		await flushPromises();
+
+		await w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install")
+			.trigger("click");
+		await flushPromises();
+		expect(w.find(".agent-install-dialog").exists()).toBe(true);
+
+		await w.setProps({ slug: "agent-b" });
+		await flushPromises();
+		await flushPromises();
+		expect(w.find(".agent-install-dialog").exists()).toBe(false);
+	});
+});
+
 describe("Overview Access panel: roster for admins only, never for a non-admin (governance + #1062 polish)", () => {
 	it("shows only the caller's own allowed/not-allowed state for a non-admin payload (no all_roles)", async () => {
 		const fixture = baseAgent();

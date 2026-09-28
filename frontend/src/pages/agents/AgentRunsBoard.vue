@@ -110,6 +110,7 @@
 											? 'text-ink-amber-3'
 											: 'text-ink-gray-5'
 									"
+									:title="runModelInfo(row).title"
 								>
 									Model: {{ runModelInfo(row).label
 									}}<template v-if="runModelInfo(row).note">
