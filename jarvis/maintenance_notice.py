@@ -85,7 +85,7 @@ def boot_payload() -> dict:
 		from jarvis.chat import llm_switch
 
 		if llm_switch.is_active():
-			return {"active": True, "message": llm_switch.MESSAGE}
+			return {"active": True, "message": llm_switch.message_for()}
 	except Exception:
 		frappe.log_error(
 			title="maintenance_notice.boot_payload llm_switch check failed",

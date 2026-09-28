@@ -45,7 +45,10 @@ KEY = "jarvis:llm_switch"
 TTL_S = 1200
 CAP_S = 300
 EVENT = "jarvis:llm_switch"
-MESSAGE = "Updating your AI setup. Chat will be back in a moment."
+MESSAGE = "Your admin is updating the AI models. Please wait, chat will be back shortly."
+# The banner reaches every open chat, the admin who pressed Save included, so an admin
+# reads about their own change instead of "your admin".
+ADMIN_MESSAGE = "Applying your AI model changes. Chat will be back shortly."
 # Self-heal grace (2026 review, third pass, "lost release"): a released job's
 # enqueue can be lost after the record already reads applied:True - a rollback
 # after enqueue_after_commit registered it (the exact residual this session
@@ -99,6 +102,14 @@ def status() -> dict | None:
 
 def is_active() -> bool:
 	return status() is not None
+
+
+def message_for(user: str | None = None) -> str:
+	"""The banner line for ``user`` (default: the session user). Same gate as the AI
+	models editor, so whoever can change the models reads about their own change."""
+	from jarvis.permissions import has_jarvis_admin_access
+
+	return ADMIN_MESSAGE if has_jarvis_admin_access(user) else MESSAGE
 
 
 def blocks_stamp() -> bool:

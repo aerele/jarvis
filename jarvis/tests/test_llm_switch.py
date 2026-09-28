@@ -1005,9 +1005,20 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 
 class TestBootPayload(_LlmSwitchTestCase):
 	def test_boot_payload_reports_switch(self):
-		with patch.object(llm_switch, "is_active", return_value=True):
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=False),
+		):
 			payload = maintenance_notice.boot_payload()
 		self.assertEqual(payload, {"active": True, "message": llm_switch.MESSAGE})
+
+	def test_boot_payload_tells_the_admin_about_their_own_change(self):
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=True),
+		):
+			payload = maintenance_notice.boot_payload()
+		self.assertEqual(payload, {"active": True, "message": llm_switch.ADMIN_MESSAGE})
 
 	def test_operator_mirror_wins_over_switch(self):
 		maintenance_notice.persist({"active": True, "message": "up"})
