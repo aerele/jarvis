@@ -114,6 +114,20 @@ class _SettingsSingletonTestCase(FrappeTestCase):
 		for _f in ("chat_was_ready_at", "chat_ready_authority", "last_sync_requested_at"):
 			frappe.db.set_value("Jarvis Settings", "Jarvis Settings", _f, None, update_modified=False)
 		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		# CI finding (2026 review, fourth pass): the llm_switch record lives in
+		# redis, not the SQL transaction FrappeTestCase rolls back - a leaked,
+		# still-active switch from an earlier test (in this class OR an
+		# earlier module in the same process) makes maintenance_notice's
+		# hold report active, so any save here that reaches on_update's pool
+		# enqueue would park behind it instead of actually running, and any
+		# unrelated gate check (send gate, macro run gate) would refuse with
+		# reason "maintenance". Reset in setUp (a leak from an OLDER module
+		# must not poison even this class's FIRST test) and again via
+		# addCleanup (so a switch THIS test itself begins never survives it).
+		from jarvis.chat import llm_switch
+
+		llm_switch._reset_for_tests()
+		self.addCleanup(llm_switch._reset_for_tests)
 
 
 class TestOnUpdateClassification(_SettingsSingletonTestCase):

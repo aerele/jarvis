@@ -959,6 +959,29 @@ def _admission_settle(run_id: str, state: str, error: str | None = None) -> None
 		frappe.log_error(title="admission settle hook", message=frappe.get_traceback())
 
 
+def _maybe_apply_llm_switch() -> None:
+	"""jarvis#1425 review (live e2e2, 2026-09-27): on the DEFAULT chat path
+	(admission disabled, no Jarvis Chat Turn table - e2e2's shape), a normal
+	reply ending previously drove the held switch forward only through
+	``admission.settle_turn``'s own ``finally`` (``_try_llm_switch_apply``),
+	which needs a ``run_id`` this legacy path may not always carry cleanly to
+	that call. This is the DIRECT trigger at the assistant message's own
+	terminal write - streaming flips 1 -> 0 right before this runs, so
+	``llm_switch._inflight()``'s read (right after, inside ``try_apply``) sees
+	it. Called on BOTH the success (clean lifecycle.end) and every
+	error/abandon terminal (``_mark_errored``) exit of this worker, right
+	after the streaming=0 write's own commit. Delegates to
+	``llm_switch.apply_if_active()`` - the same shared poke ``chat/
+	settlement.py`` and the pump's own recovery-errored path call after
+	THEIR terminal writes, so a switch applies the moment nothing is left in
+	flight on every chat surface, not just this legacy one. The existing
+	settle_turn / settle_conversation_dispatching triggers stay - this is
+	additive, and the poke is itself idempotent."""
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="turn_handler")
+
+
 @dataclass
 class _PreparedPrompt:
 	"""The assembled, ready-to-send turn prompt + its bootstrap metadata. Produced
@@ -1801,6 +1824,7 @@ def handle_chat_send(payload: dict) -> None:
 		# Streaming exited cleanly via lifecycle.end
 		frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
 		frappe.db.commit()
+		_maybe_apply_llm_switch()
 
 		# Canvas + generated-image persistence and publish (extracted so
 		# snapshot recovery can deliver the same rich outputs for a turn
@@ -2602,6 +2626,7 @@ def _mark_errored(assistant_msg_name: str, error: str) -> None:
 		},
 	)
 	frappe.db.commit()
+	_maybe_apply_llm_switch()
 
 
 def _mark_recovering(assistant_msg_name: str) -> None:

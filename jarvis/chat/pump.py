@@ -2238,6 +2238,13 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 			except Exception:
 				pass
 		frappe.db.commit()
+		# jarvis#1425 review (live e2e2, 2026-09-27): a definite pre-ack
+		# rejection moves the Turn out of dispatching (ts.dispatch_errored
+		# above) without going through invoke_settlement or turn_handler -
+		# poke directly, right after this terminal's own commit.
+		from jarvis.chat import llm_switch
+
+		llm_switch.apply_if_active(source="pump._handle_ack_failure")
 		_seal_file_box_sheet(rs.conversation, run_id)
 		if rs.owner:
 			# SUX-11: a definite pre-ack rejection is a real error — publish run:error
@@ -3117,6 +3124,12 @@ def _mark_recovering_mirror(
 			pump_epoch=pump_epoch,
 			relay_target_id=relay_target_id,
 		)
+	# jarvis#1425 review (scoped re-review, 2026-09-27): recovering is NOT an
+	# in-flight state (admission._INFLIGHT_STATES) - a park here frees up
+	# capacity for a held switch exactly like a terminal write does.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump._mark_recovering_mirror")
 	return True
 
 
@@ -3160,6 +3173,12 @@ def _settle_recover_errored(
 			error=err,
 			code=_classify_error(err),
 		)
+	# jarvis#1425 review (live e2e2, 2026-09-27): this path settles WITHOUT
+	# going through invoke_settlement (settlement.py's own poke does not cover
+	# it) - poke directly, right after this terminal's own commit(s) above.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump._settle_recover_errored")
 	return True
 
 
@@ -3512,6 +3531,13 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 	# GAP 1 (Track B): record that the recovery machinery ran to completion, for the
 	# bench heartbeat's watchdog_last_completed_age signal.
 	frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+	# jarvis#1425 review (scoped re-review, 2026-09-27): this sweep moves turns out
+	# of every in-flight state (mark_recovering, cancel_queued_max_age,
+	# recover_to_queued, _settle_recover_errored - all inside _watchdog_shard) -
+	# one poke at the end covers the whole cycle instead of one per transition.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump.watchdog")
 	return summary
 
 
