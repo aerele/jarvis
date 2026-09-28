@@ -128,10 +128,12 @@ test("ChatView renders the badge through this module, not a forked copy", () => 
 test("the badge sits in the reply's existing meta row", () => {
 	// jv-* custom properties are not on :root and have no fallbacks, so new
 	// markup has to live inside an element the palette binding already reaches.
-	// The meta row does; a floating sibling would render unstyled.
+	// The meta row does; a floating sibling would render unstyled. T5c dropped
+	// the tool-count/elapsed spans from this row (now in StepsBox's folded
+	// head instead), so the badge is the only thing left gating it open.
 	assert.match(
 		chatViewSrc,
-		/toolCountOf\(m\) \|\| elapsedOf\(m\) \|\| modelBadgeOf\(m\)/,
+		/v-if="!m\.error && !m\.streaming && modelBadgeOf\(m\)"/,
 		"the meta row must open when the badge is the only thing to show"
 	);
 	assert.match(chatViewSrc, /class="jv-modelchip"/);

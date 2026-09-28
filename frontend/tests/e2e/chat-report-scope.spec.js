@@ -99,7 +99,11 @@ test("shows report scope without model narration and survives reload", async ({ 
 	await expect(scope.locator("xpath=ancestor::*[contains(@class, 'jv-amsg')][1]")).toContainText(
 		"No matching rows."
 	);
-	await expect(page.locator(".jv-activity-body")).toHaveCount(0);
+	// T5b/T5c: the tool-call accordion is StepsBox's #details now (its own
+	// .jv-steps-body), collapsed by default; ReportScope stays a sibling
+	// outside it (T5c lead decision), so this count-0 check still pins
+	// "collapsed", just on the new class.
+	await expect(page.locator(".jv-steps-body")).toHaveCount(0);
 	await page.reload();
 	await expect(scope).toHaveCount(1);
 	await expect(scope).toContainText("Example Company");
