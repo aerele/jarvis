@@ -263,3 +263,193 @@ class TestSaveLlmPoolForceProbe(_SaveOpBase):
 				expected,
 				f"force_probe={wire_value!r} should coerce to {expected!r}",
 			)
+
+
+class TestSaveLlmPoolHandover(_SaveOpBase):
+	"""Task 11 (S4): save_llm_pool runs a due handover itself (jarvis#1425).
+
+	save_llm_pool always sets ``suppress_pool_enqueue`` before its internal
+	``s.save()``, so on_update's own `elif lone_direct_handover_due(self):`
+	branch never gets a chance here - this endpoint needs its OWN check,
+	right where it decides between the pool and legacy-creds branches."""
+
+	def test_save_llm_pool_runs_the_handover_and_reports_legacy_300s(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		# Simulate a workspace that has already synced through the pool leg
+		# once - the non-retroactivity precondition lone_direct_handover_due
+		# requires. Same-connection write; save_llm_pool's own frappe.get_single
+		# below sees it without a commit.
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("llm_pool_synced_at", "2026-08-01 00:00:00", update_modified=False)
+
+		models = [
+			{
+				"provider": "openai",
+				"model": "gpt-5.5",
+				"tier": "strong",
+				"order": 0,
+				"subscription": {
+					"rotation": "sticky",
+					"accounts": [
+						{
+							"upstream": "openai",
+							"account_ref": "SUB_handover1",
+							"label": "me@x.com",
+							"oauth_blob": '{"provider":"openai","refresh_token":"rt"}',
+						}
+					],
+				},
+			}
+		]
+
+		with (
+			patch.object(JarvisSettings, "_enqueue_handover") as mock_handover,
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.sync_pool_now") as mock_sync,
+		):
+			out = onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
+
+		mock_handover.assert_called_once()
+		mock_sync.assert_not_called()
+		self.assertEqual(out["mode"], "legacy")
+		self.assertEqual(out["readiness_budget_s"], 300)
+		self.assertIsNone(out["apply_operation"])
+		self.assertFalse(out["resumable"])
+
+
+class TestSaveLlmPoolSwitch(_SaveOpBase):
+	"""Task 5 (jarvis#1425 follow-up, seamless proxy <-> direct switch, spec
+	Part C): a Settings Apply on an ALREADY-ESTABLISHED workspace that flips
+	proxy_active must route through llm_switch.begin() instead of the
+	SYNCHRONOUS sync_pool_now push, which would recreate the container
+	immediately and cut a reply in flight. A first-ever activation (nothing
+	running yet to protect) is never treated as a switch even though its
+	computed proxy_active can already be True - see
+	JarvisSettings._is_pool_switch's ever_synced guard."""
+
+	def _mark_already_synced_direct(self):
+		"""An established workspace currently serving DIRECT chat
+		(proxy_active 0, setUp's baseline) - the shape spec Part C protects:
+		an EXISTING customer's model change recreates an already-running
+		container, not a fresh signup."""
+		s = frappe.get_single("Jarvis Settings")
+		s.db_set("llm_direct_synced_at", "2026-08-01 00:00:00", update_modified=False)
+
+	def test_direct_to_proxy_settings_apply_calls_begin_not_sync_pool_now(self):
+		self._mark_already_synced_direct()
+		# A 2-model pool: one BYO api-key row plus one non-Claude chat
+		# subscription. proxy_active is False before this save and True after
+		# (a subscription forces the sidecar once >1 model rules out the
+		# lone-direct-capable carve-out).
+		models = [
+			{
+				"provider": "openai_compat",
+				"model": "gpt-4o",
+				"tier": "strong",
+				"order": 0,
+				"api_key": "sk-switch-1",
+				"base_url": "https://api.openai.com",
+			},
+			{
+				"provider": "openai",
+				"model": "gpt-5.5",
+				"tier": "strong",
+				"order": 1,
+				"subscription": {
+					"rotation": "sticky",
+					"accounts": [
+						{
+							"upstream": "openai",
+							"account_ref": "SUB_switch1",
+							"label": "sw@x.com",
+							"oauth_blob": '{"provider":"openai","refresh_token":"rt"}',
+						}
+					],
+				},
+			},
+		]
+
+		with (
+			patch("jarvis.chat.llm_switch.begin") as mock_begin,
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.sync_pool_now") as mock_sync,
+		):
+			out = onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
+
+		mock_begin.assert_called_once()
+		self.assertEqual(
+			mock_begin.call_args.args[0],
+			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin_pool",
+		)
+		self.assertEqual(mock_begin.call_args.kwargs.get("job_id"), "jarvis_settings_sync:pool")
+		mock_sync.assert_not_called()
+		self.assertEqual(out["mode"], "legacy")
+		self.assertEqual(out["readiness_budget_s"], 300)
+		self.assertIsNone(out["apply_operation"])
+		self.assertFalse(out["resumable"])
+
+	def test_settings_apply_joins_an_active_switch_even_when_this_save_is_not_one(self):
+		"""Review round 2: a save that does NOT itself flip proxy_active (a
+		2-model, all-api-key pool - proxy_active stays 0 throughout, so
+		_is_pool_switch() reads False) must still join an ALREADY-active
+		switch (e.g. a pending handover elsewhere) instead of pushing
+		sync_pool_now synchronously and racing/bypassing it."""
+		models = [
+			{
+				"provider": "openai_compat",
+				"model": "gpt-4o",
+				"tier": "strong",
+				"order": 0,
+				"api_key": "sk-a",
+				"base_url": "https://api.openai.com",
+			},
+			{
+				"provider": "openai_compat",
+				"model": "gpt-4o-mini",
+				"tier": "strong",
+				"order": 1,
+				"api_key": "sk-b",
+				"base_url": "https://api.openai.com",
+			},
+		]
+
+		with (
+			patch("jarvis.chat.llm_switch.is_active", return_value=True),
+			patch("jarvis.chat.llm_switch.begin") as mock_begin,
+			patch("jarvis.jarvis.doctype.jarvis_settings.jarvis_settings.sync_pool_now") as mock_sync,
+		):
+			out = onboarding.save_llm_pool(frappe.as_json(models), preset=None, routing_mode="failover")
+
+		mock_begin.assert_called_once()
+		self.assertEqual(
+			mock_begin.call_args.args[0],
+			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin_pool",
+		)
+		mock_sync.assert_not_called()
+		self.assertEqual(out["mode"], "legacy")
+		self.assertEqual(out["readiness_budget_s"], 300)
+		self.assertIsNone(out["apply_operation"])
+		self.assertFalse(out["resumable"])
+
+	def test_a_first_activation_is_not_a_switch_and_uses_sync_pool_now(self):
+		"""setUp's baseline (llm_pool_synced_at and llm_direct_synced_at both
+		unset) is a genuinely fresh workspace - even though this pool's lone
+		Kimi subscription computes proxy_active=True (Kimi has no agent-native
+		auth flow, so it is never lone-direct-capable - see
+		compute_proxy_active), there is no established container to protect,
+		so this first save must NOT be treated as a switch and must keep
+		using the synchronous descriptor-obtain path, exactly like
+		TestSaveReturnsDescriptor's identical fixture."""
+		view = self._capture()
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", side_effect=lambda **kw: _pool_ok()),
+			patch("jarvis.chat.llm_switch.begin") as mock_begin,
+		):
+			out = onboarding.save_llm_pool(
+				frappe.as_json(self._sub_models(view["capture_id"])),
+				preset=None,
+				routing_mode="failover",
+				idempotency_key="idem-first-activation",
+			)
+
+		mock_begin.assert_not_called()
+		self.assertEqual(out["mode"], "operation")

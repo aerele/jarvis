@@ -645,6 +645,31 @@ class TestCrashAfterClaim(PendingActionTestMixin, FrappeTestCase):
 
 
 class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
+	def setUp(self):
+		super().setUp()
+		# Task 5 CI finding: frappe.local._realtime_log (created by the first
+		# after_commit=True frappe.publish_realtime call, paired with a
+		# flush_realtime_log/clear_realtime_log callback on
+		# after_commit/after_rollback) can be orphaned - the pair drained
+		# (frappe.db.commit()/rollback() both unconditionally .reset() the OTHER
+		# manager without running it - see database.py) while an unrelated
+		# earlier-queued callback elsewhere in the same commit/rollback raises
+		# (frappe's CallbackManager does not wrap callbacks in try/except - see
+		# jarvis.chat.llm_switch.begin's own docstring on this exact risk),
+		# aborting CallbackManager.run() before flush_realtime_log's turn and
+		# leaving frappe.local._realtime_log existing with nothing left queued
+		# to ever flush it. Once orphaned, every later after_commit=True publish
+		# in this process silently no-ops (publish_realtime's `hasattr` guard
+		# assumes a callback is already registered). This surfaced only after
+		# CI shard rebalancing (two new test files added elsewhere in this
+		# branch shifted which tests share this shard/process with
+		# test_no_realtime_from_a_failed_dispatch_and_later_realtime_still_flows) -
+		# a pre-existing framework-level isolation gap, not a change to this
+		# class's own tests. Reset defensively so this class is never a victim
+		# of a leak from outside it.
+		if hasattr(frappe.local, "_realtime_log"):
+			del frappe.local._realtime_log
+
 	def _run(self, body, *, tool="add_comment", args=None):
 		conv = self.make_conv()
 		name = self.park(conv, tool=tool, args=args)

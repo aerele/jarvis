@@ -329,66 +329,18 @@ jobs:
       - name: Create test site + install apps
         working-directory: frappe-bench
         run: |
-<<<<<<< HEAD
-          bench new-site test_site \
+          bench new-site jarvis-ci.test \
             --db-host 127.0.0.1 \
             --mariadb-user-host-login-scope='%' \
             --mariadb-root-password root \
             --db-root-username root \
             --admin-password admin
-          bench --site test_site install-app erpnext hrms jarvis
-          bench --site test_site set-config allow_tests true
+          bench --site jarvis-ci.test install-app erpnext hrms jarvis
+          bench --site jarvis-ci.test set-config allow_tests true
           # Full suite creates far more than Frappe's default 60-users/60-min limit
           # (throttle_user_creation); raise it so no mid-suite fixture insert hits
           # "Throttled". -p stores an INT (a string limit breaks the count>limit compare).
-          bench --site test_site set-config -p throttle_user_limit 100000
-=======
-          bench set-config -g db_host mariadb
-          # Distinct Redis DB indices per role — Frappe assumes cache/queue/socketio do not share
-          # a keyspace.
-          bench set-config -g redis_cache "redis://redis:6379/0"
-          bench set-config -g redis_queue "redis://redis:6379/1"
-          bench set-config -g redis_socketio "redis://redis:6379/2"
-
-      - name: Add jarvis to the bench
-        working-directory: /opt/frappe-bench
-        run: |
-          cp -r "${GITHUB_WORKSPACE}/app" apps/jarvis
-          # Deliberately NOT `bench get-app`: that runs `yarn install --check-files` whenever
-          # package.json exists (bench/app.py), which here pulls @google/gemini-cli and, via
-          # postinstall, the whole Vue SPA's deps — 24s the Python suite never reads.
-          ./env/bin/pip install -e apps/jarvis
-          if ! grep -qxF jarvis sites/apps.txt; then
-            # apps.txt ships as "frappe\nerpnext\nhrms" with NO trailing newline. A naive append
-            # yields "hrmsjarvis" and frappe dies with ModuleNotFoundError: No module named
-            # 'hrmsjarvis'. Verified against the real image; do not remove this guard.
-            [ -z "$(tail -c1 sites/apps.txt)" ] || echo >> sites/apps.txt
-            echo jarvis >> sites/apps.txt
-          fi
-
-      - name: Create test site from the baked dump
-        working-directory: /opt/frappe-bench
-        run: |
-          # --source-sql (frappe/commands/site.py) creates the DB + user + site_config.json and
-          # loads the dump, which already has frappe/erpnext/hrms installed. Replaces ~113s of
-          # `install-app erpnext hrms` with a ~6s restore. `bench` defines no new-site of its own,
-          # so this forwards to frappe's, which is where --source-sql lives.
-          bench new-site jarvis-ci.test \
-            --db-host mariadb \
-            --mariadb-user-host-login-scope='%' \
-            --mariadb-root-password root \
-            --db-root-username root \
-            --admin-password admin \
-            --source-sql /opt/ci/test_site.sql
-          bench --site jarvis-ci.test install-app jarvis
-          bench --site jarvis-ci.test set-config allow_tests true
-          # The full suite creates far more than Frappe's default 60-users/60-min
-          # limit (throttle_user_creation), so a mid-suite fixture insert otherwise
-          # hits "Throttled" (flaky, depends on which module crosses the threshold).
-          # -p stores an INT: throttle_user_creation compares count > limit, and a
-          # string limit raises "TypeError: '>' not supported between int and str".
           bench --site jarvis-ci.test set-config -p throttle_user_limit 100000
->>>>>>> cf96685 (fix(branding): preserve saved content and direct upgrades)
 
       - name: Assert the site is what we think it is
         working-directory: frappe-bench
@@ -396,17 +348,10 @@ jobs:
           # Fail fast with a clear "missing app" instead of letting a partial install
           # surface later as confusing tier-2 mock.patch("erpnext...") import errors.
           #
-<<<<<<< HEAD
           # Take the JSON line specifically and leave stderr on the console: merging
           # stderr and taking `tail -1` would capture any late warning instead of the
           # JSON, failing a perfectly healthy site.
-          apps=$(bench --site test_site execute frappe.get_installed_apps | grep -m1 '^\[') || {
-=======
-          # Take the JSON line specifically, and leave stderr on the console. Merging stderr into
-          # stdout and taking `tail -1` would capture any late warning (e.g. a ResourceWarning at
-          # interpreter teardown) instead of the JSON, and fail a perfectly healthy site.
           apps=$(bench --site jarvis-ci.test execute frappe.get_installed_apps | grep -m1 '^\[') || {
->>>>>>> cf96685 (fix(branding): preserve saved content and direct upgrades)
             echo "could not parse installed apps from 'bench execute' output"; exit 1; }
           echo "installed apps: ${apps}"
           for a in frappe erpnext hrms jarvis; do
@@ -416,7 +361,6 @@ jobs:
       - name: Run tests + coverage (shard ${{ matrix.shard }} of 4)
         working-directory: frappe-bench
         run: |
-<<<<<<< HEAD
           # gevent: needed by jarvis/realtime/handlers.py (socketio_backend=python) and its
           # tests.
           # websockets: needed by the fake gateway imported by harness configuration tests.
@@ -425,16 +369,7 @@ jobs:
           # --build-number runs a disjoint quarter of the suite. --with-coverage is this
           # command's spelling of run-tests' --coverage (different click commands; do not
           # "fix" one to match the other).
-          bench --site test_site run-parallel-tests \
-=======
-          # coverage + gevent are already in the image's venv (gevent is needed by
-          # jarvis/realtime/handlers.py with socketio_backend=python, and its tests).
-          #
-          # The coverage flag is spelled --with-coverage on THIS command. run-tests spells
-          # the same thing --coverage (frappe/commands/testing.py). They are two different
-          # click commands; do not "fix" one to match the other.
           bench --site jarvis-ci.test run-parallel-tests \
->>>>>>> cf96685 (fix(branding): preserve saved content and direct upgrades)
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \

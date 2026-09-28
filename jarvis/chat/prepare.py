@@ -341,6 +341,11 @@ def _prepare_error(
 		if ts.prepare_errored(run_id, version, error=error):
 			frappe.db.commit()
 			errored = True
+			# jarvis#1425 review (scoped re-review, 2026-09-27): preparing is an
+			# in-flight state (admission._INFLIGHT_STATES) - this leaves it.
+			from jarvis.chat import llm_switch
+
+			llm_switch.apply_if_active(source="prepare._prepare_error")
 	except Exception:
 		try:
 			frappe.db.rollback()

@@ -822,3 +822,19 @@ has_permission.update(
 		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.has_permission",
 	}
 )
+
+# ---------------------------------------------------------------------------
+# llm_switch (jarvis#1425 follow-up)
+# ---------------------------------------------------------------------------
+# frappe.cache_manager.clear_cache()'s "everything" branch deletes every
+# site-prefixed redis key except one matched (as a PREFIX) by an entry here -
+# without this, any frappe.clear_cache() (e.g. pump.py's watchdog stamping a
+# __default via frappe.db.set_default, which frappe.defaults._clear_cache
+# turns into a full clear_cache()) wipes the active switch record mid-hold or
+# mid-apply: the banner clears, the poller sees no switch, and a still-running
+# handover/pool job's own finish() then hits a record that is simply gone
+# (live e2e2, 2026-09-27 - the record vanished at 18:26:04 and 18:42:07,
+# once before its job was ever released and once while the job was still
+# running). Redis locks (jarvis._redis_lock) are unaffected: they use
+# cache.lock() with a raw, unprefixed key, never this site-prefixed cache.
+persistent_cache_keys = ["jarvis:llm_switch"]
