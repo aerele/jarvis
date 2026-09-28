@@ -89,11 +89,7 @@ class TestRoleProfiles(FrappeTestCase):
 
 	def test_standard_tools_allow_excludes_drops_keeps_features(self):
 		allow = set(role_profiles.standard_tools_allow())
-<<<<<<< HEAD
-		self.assertEqual(len(allow), 65)
-=======
-		self.assertEqual(len(allow), 69)
->>>>>>> f50da07 (feat(role-profiles): standard tier can use per-user memory (remember/recall))
+		self.assertEqual(len(allow), 67)
 		for kept in (
 			"exec",
 			"read",
@@ -106,15 +102,10 @@ class TestRoleProfiles(FrappeTestCase):
 			"jarvis__run_import",
 			"jarvis__query",
 			"jarvis__save_dashboard",
-<<<<<<< HEAD
-=======
-			"jarvis__call_connector",
-			"jarvis__list_connector_actions",
 			# per-user bench memory: a standard-tier user must be able to save and
 			# read their own notes, or memory silently stops for them
 			"jarvis__remember",
 			"jarvis__recall",
->>>>>>> f50da07 (feat(role-profiles): standard tier can use per-user memory (remember/recall))
 		):
 			self.assertIn(kept, allow)
 		for dropped in (
@@ -130,27 +121,15 @@ class TestRoleProfiles(FrappeTestCase):
 		):
 			self.assertNotIn(dropped, allow)
 
-<<<<<<< HEAD
-	def test_tool_universe_is_94(self):
-		# standard_tools_allow() (65) + STANDARD_DROP_TOOLS (29) must
-		# reconstruct the full evidence-captured 94-tool universe with no
-		# overlap and no gap (spec §2).
-=======
-	def test_tool_universe_is_98(self):
-		# standard_tools_allow() (69) + STANDARD_DROP_TOOLS (29) must
-		# reconstruct the evidence-captured 94-tool universe plus the two MCP
-		# connector tools and the two per-user memory tools added after (98),
-		# with no overlap and no gap.
->>>>>>> f50da07 (feat(role-profiles): standard tier can use per-user memory (remember/recall))
+	def test_tool_universe_is_96(self):
+		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (29) must
+		# reconstruct the evidence-captured 94-tool universe plus the two
+		# per-user memory tools (96), with no overlap and no gap (spec §2).
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
 		self.assertEqual(len(drop), 29)
 		self.assertEqual(allow & drop, set())
-<<<<<<< HEAD
-		self.assertEqual(len(allow | drop), 94)
-=======
-		self.assertEqual(len(allow | drop), 98)
->>>>>>> f50da07 (feat(role-profiles): standard tier can use per-user memory (remember/recall))
+		self.assertEqual(len(allow | drop), 96)
 
 	def test_shared_core_membership(self):
 		shared = role_profiles.SHARED_CORE_SKILLS
@@ -1019,11 +998,7 @@ class TestSessionProfilePick(FrappeTestCase):
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_agent_id, "role-hr")
 		self.assertEqual(row.profile_tier, "standard")
-<<<<<<< HEAD
-		self.assertEqual(row.profile_n_tools, 65)
-=======
-		self.assertEqual(row.profile_n_tools, 69)
->>>>>>> f50da07 (feat(role-profiles): standard tier can use per-user memory (remember/recall))
+		self.assertEqual(row.profile_n_tools, 67)
 
 	def test_flag_off_uses_legacy_create_session_path(self):
 		settings = self._fake_settings(enable_role_profiles=False)
