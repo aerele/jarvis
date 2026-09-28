@@ -29,8 +29,19 @@ vi.mock("@/api", () => api);
 const apiAgents = vi.hoisted(() => ({
 	getAgent: vi.fn(),
 	getInstallationActivation: vi.fn(),
+	// T6: AgentDetail's own pre-install gate probe (getAgentModel/
+	// getEligibleModels). Left unconfigured (resolves undefined -> null) in
+	// every test below that doesn't care about it, which keeps
+	// shouldConfirmInstallModel()/canInstall() at today's behaviour - the
+	// per-agent-model UI itself (AgentModelCard/AgentInstallDialog) is stubbed
+	// out below and has its own dedicated spec files.
+	getAgentModel: vi.fn(),
+	getEligibleModels: vi.fn(),
 }));
 vi.mock("@/api/agents", () => apiAgents);
+
+const shellStoreMock = vi.hoisted(() => ({ openSettings: vi.fn() }));
+vi.mock("@/stores/shell", () => ({ useShellStore: () => shellStoreMock }));
 
 const apiDocmeta = vi.hoisted(() => ({
 	getDocmeta: vi.fn().mockResolvedValue(null),
@@ -148,6 +159,31 @@ vi.mock("@/pages/agents/ActivationPanel.vue", () => ({
 vi.mock("@/pages/agents/ConfigForm.vue", () => ({
 	default: { name: "ConfigForm", template: "<div />" },
 }));
+// T6: covered by their own spec files (AgentModelCard.spec.js /
+// AgentInstallDialog.spec.js) - stubbed here like every other Configure-tab
+// child, so this file only ever asserts AgentDetail's OWN wiring (props
+// passed in, events handled). `created` counts mounts (per :key remount) -
+// a real component instance is created fresh, a patched-in-place one is not.
+const modelCardMounts = vi.hoisted(() => ({ count: 0 }));
+vi.mock("@/pages/agents/AgentModelCard.vue", () => ({
+	default: {
+		name: "AgentModelCard",
+		props: ["agentSlug", "canApply", "isAdmin", "initialInfo", "initialEligible"],
+		emits: ["connect-provider"],
+		created() {
+			modelCardMounts.count++;
+		},
+		template: `<div class="agent-model-card" :data-agent-slug="agentSlug" />`,
+	},
+}));
+vi.mock("@/pages/agents/AgentInstallDialog.vue", () => ({
+	default: {
+		name: "AgentInstallDialog",
+		props: ["modelValue", "agentSlug", "agentTitle", "requiredTier", "installing", "isAdmin"],
+		emits: ["update:modelValue", "confirm", "connect-provider"],
+		template: `<div v-if="modelValue" class="agent-install-dialog" />`,
+	},
+}));
 vi.mock("@/components/learning/AppSourceConsentDialog.vue", () => ({
 	default: { name: "AppSourceConsentDialog", template: "<div />" },
 }));
@@ -218,6 +254,7 @@ async function mountDetail(agentFixture, activation = null) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	modelCardMounts.count = 0;
 	sessionMock.session.user = "owner@example.com";
 	routeMock.hash = "";
 });
@@ -323,6 +360,205 @@ describe("Install is disabled for an Administrator session (jarvis#1062 polish)"
 			.find((b) => b.attributes("data-label") === "Install");
 		expect(installBtn.attributes("disabled")).toBeUndefined();
 		expect(w.text()).not.toContain("Log in as a named user to install this agent.");
+	});
+});
+
+describe("T6: install-time model gate (flag on + the listing declares a min_model)", () => {
+	it("flag off: Install installs straight away, no confirm dialog", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 0,
+			min_model: { tier: "Advanced" },
+		});
+		api.installAgent.mockResolvedValue({ ok: true });
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		await installBtn.trigger("click");
+		await flushPromises();
+		expect(w.find(".agent-install-dialog").exists()).toBe(false);
+		expect(api.installAgent).toHaveBeenCalledWith("close-auditor");
+	});
+
+	it("flag on, no requirement: Install installs straight away too", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({ enforced: 1, min_model: null });
+		api.installAgent.mockResolvedValue({ ok: true });
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		await installBtn.trigger("click");
+		await flushPromises();
+		expect(w.find(".agent-install-dialog").exists()).toBe(false);
+		expect(api.installAgent).toHaveBeenCalled();
+	});
+
+	it("flag on + a requirement: Install opens the confirm dialog instead of installing", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+		});
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		await installBtn.trigger("click");
+		await flushPromises();
+		expect(w.find(".agent-install-dialog").exists()).toBe(true);
+		expect(api.installAgent).not.toHaveBeenCalled();
+	});
+
+	it("the dialog's confirm event installs, exactly like a direct click would", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+		});
+		api.installAgent.mockResolvedValue({ ok: true });
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		await w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install")
+			.trigger("click");
+		await flushPromises();
+		w.findComponent({ name: "AgentInstallDialog" }).vm.$emit("confirm");
+		await flushPromises();
+		expect(api.installAgent).toHaveBeenCalledWith("close-auditor");
+	});
+
+	it("a confirmed empty eligible set disables Install with the Unavailable-style reason", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+		});
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [] });
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		const installBtn = w
+			.findAllComponents({ name: "Button" })
+			.find((b) => b.props("label") === "Install");
+		expect(installBtn.props("disabled")).toBe(true);
+		expect(installBtn.props("tooltip")).toBe(
+			"None of your connected AI providers offer a model this agent needs."
+		);
+	});
+
+	it("an unreadable catalog does NOT pre-emptively disable Install (the server may still throw)", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+		});
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "unknown", models: [] });
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		const installBtn = w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install");
+		expect(installBtn.attributes("disabled")).toBeUndefined();
+	});
+});
+
+describe("T6: AgentModelCard mounts only once the probe settles (modelInfoSettled)", () => {
+	it("the card is absent while the probe is in flight, present once it resolves", async () => {
+		routeMock.hash = "#configure";
+		let resolveProbe;
+		apiAgents.getAgentModel.mockReturnValue(
+			new Promise((r) => {
+				resolveProbe = r;
+			})
+		);
+		apiAgents.getAgent.mockResolvedValue(
+			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
+		);
+		const w = mount(AgentDetail, { props: { slug: "close-auditor" } });
+		await flushPromises();
+		await flushPromises();
+		expect(w.find(".agent-model-card").exists()).toBe(false);
+		expect(apiAgents.getAgentModel).toHaveBeenCalledTimes(1);
+
+		resolveProbe({ enforced: 0, min_model: null, state: null });
+		await flushPromises();
+		expect(w.find(".agent-model-card").exists()).toBe(true);
+	});
+});
+
+describe("T6: loadModelInfo latest-wins guard (mutation-verified - see the task report)", () => {
+	it("a stale (superseded) response never overwrites the current agent's model info", async () => {
+		routeMock.hash = "";
+		apiAgents.getAgent.mockImplementation((agent_slug) =>
+			Promise.resolve(baseAgent({ agent_slug, name: agent_slug, installation: null }))
+		);
+		let resolveA, resolveB;
+		apiAgents.getAgentModel
+			.mockImplementationOnce(
+				() =>
+					new Promise((r) => {
+						resolveA = r;
+					})
+			)
+			.mockImplementationOnce(
+				() =>
+					new Promise((r) => {
+						resolveB = r;
+					})
+			);
+		const w = mount(AgentDetail, { props: { slug: "agent-a" } });
+		await flushPromises();
+		await w.setProps({ slug: "agent-b" });
+		await flushPromises();
+
+		// The CURRENT agent's (B's) probe resolves; the LEFT agent's (A's) probe
+		// - already in flight when the switch happened - resolves after it,
+		// carrying agent-a's (now stale) data.
+		resolveB({ enforced: 1, min_model: { tier: "Frontier" }, required_tier: "Frontier" });
+		await flushPromises();
+		resolveA({ enforced: 1, min_model: { tier: "Standard" }, required_tier: "Standard" });
+		await flushPromises();
+
+		// AgentInstallDialog's required-tier prop is driven straight off
+		// modelInfo.required_tier - B's value must win, A's late arrival must
+		// be dropped entirely.
+		expect(w.findComponent({ name: "AgentInstallDialog" }).props("requiredTier")).toBe(
+			"Frontier"
+		);
+	});
+});
+
+describe("T6: AgentModelCard remounts fresh per agent (:key)", () => {
+	it("a fresh agent slug creates a NEW card instance, not a patched-in-place one", async () => {
+		routeMock.hash = "#configure";
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: null,
+			state: "legacy",
+		});
+		apiAgents.getAgent.mockImplementation((agent_slug) =>
+			Promise.resolve(
+				baseAgent({
+					agent_slug,
+					name: agent_slug,
+					installation: installedInstallation({ enabled: 1 }),
+				})
+			)
+		);
+		const w = mount(AgentDetail, { props: { slug: "agent-a" } });
+		await flushPromises();
+		await flushPromises();
+		expect(w.find('[data-agent-slug="agent-a"]').exists()).toBe(true);
+		expect(modelCardMounts.count).toBe(1);
+
+		await w.setProps({ slug: "agent-b" });
+		await flushPromises();
+		await flushPromises();
+		expect(w.find('[data-agent-slug="agent-b"]').exists()).toBe(true);
+		expect(modelCardMounts.count).toBe(2); // a second `created` call - a fresh instance, not a patch
 	});
 });
 

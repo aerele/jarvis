@@ -55,6 +55,14 @@
 					<span>finished {{ timeAgo(run.finished_at) }}</span>
 				</Tooltip>
 			</template>
+			<!-- T6: per-agent minimum model - blank on a legacy run. -->
+			<template v-if="modelInfo">
+				<span>·</span>
+				<span :class="modelInfo.warn ? 'text-ink-amber-3' : ''">
+					Model: {{ modelInfo.label
+					}}<template v-if="modelInfo.note"> · {{ modelInfo.note }}</template>
+				</span>
+			</template>
 		</div>
 
 		<!-- Step timeline (jarvis#1062): the run's own narration, full width and
@@ -386,6 +394,7 @@ import RunStepTimeline from "./RunStepTimeline.vue";
 // @/lib/agentRunStatus exists to keep in step with the rail and the Activity
 // feed (jarvis#1062). A second table here is exactly the drift it prevents.
 import { STATUS_THEME, coverageWarned } from "@/lib/agentRunStatus";
+import { runModelInfo } from "@/lib/agentRunModel";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
 import TechnicalDetails from "@/components/doc/TechnicalDetails.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
@@ -533,6 +542,8 @@ const coverageNote = computed(() => {
 	return note.replace(/[.\s]+$/, "") || "some records were not reviewed";
 });
 const coverageDetails = computed(() => coverageExtract.value.details);
+// T6: per-agent minimum model - null on a legacy run (rendered as nothing).
+const modelInfo = computed(() => runModelInfo(props.run));
 
 // Scribe runs (Custom App Learning) write wiki pages, not findings: render the
 // pages tally + links instead of the findings machinery.

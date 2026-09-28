@@ -208,6 +208,40 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
+describe("T6: the run header's model line", () => {
+	it("renders nothing for a legacy run", async () => {
+		const w = mountPanel(baseRun({ model_used: "", model_rendered: "" }));
+		await flushPromises();
+		expect(w.text()).not.toContain("Model:");
+	});
+
+	it("shows the verified model", async () => {
+		const w = mountPanel(
+			baseRun({ model_used: "openai/gpt-5", model_rendered: "openai/gpt-5" })
+		);
+		await flushPromises();
+		expect(w.text()).toContain("Model: openai/gpt-5");
+	});
+
+	it("flags a below-minimum run", async () => {
+		const w = mountPanel(
+			baseRun({
+				model_used: "openai/gpt-4",
+				model_rendered: "openai/gpt-5",
+				model_below_min: 1,
+			})
+		);
+		await flushPromises();
+		expect(w.text()).toContain("Ran on a lower model after a provider failure");
+	});
+
+	it("shows 'Model not verified' when only model_rendered is known", async () => {
+		const w = mountPanel(baseRun({ model_used: "", model_rendered: "openai/gpt-5" }));
+		await flushPromises();
+		expect(w.text()).toContain("Model not verified");
+	});
+});
+
 describe("C1: Open Chat is gated on status, stopped renders a gray pill", () => {
 	it("hides Open Chat while the run is running, even with a conversation", async () => {
 		const w = mountPanel(baseRun({ status: "running", conversation: "CONV-0001" }));
