@@ -20,7 +20,6 @@ import { h } from "vue";
  */
 
 const api = vi.hoisted(() => ({
-	installAgent: vi.fn(),
 	uninstallAgent: vi.fn(),
 	setEnabled: vi.fn(),
 	setSchedule: vi.fn(),
@@ -49,6 +48,7 @@ const apiAgents = vi.hoisted(() => ({
 	// AgentModelCard/AgentInstallDialog themselves are stubbed via STUBS below.
 	getAgentModel: vi.fn(),
 	getEligibleModels: vi.fn(),
+	installAgent: vi.fn(),
 }));
 vi.mock("@/api/agents", () => apiAgents);
 
