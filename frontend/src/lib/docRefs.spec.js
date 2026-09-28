@@ -63,6 +63,20 @@ describe("collectDocRefs", () => {
 		expect(refs).toEqual({});
 	});
 
+	it("reads a still-streaming row whose payloads are already objects", () => {
+		const refs = collectDocRefs([
+			{
+				role: "tool",
+				tool_args: { doctype: "Sales Order" },
+				tool_result: {
+					ok: true,
+					data: { doctype: "Sales Order", name: "SAL-ORD-2026-00007" },
+				},
+			},
+		]);
+		expect(refs).toEqual({ "SAL-ORD-2026-00007": "Sales Order" });
+	});
+
 	it("survives unparsable and null tool payloads", () => {
 		const refs = collectDocRefs([
 			{ role: "tool", tool_args: "{", tool_result: "not json" },
