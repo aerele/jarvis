@@ -19,7 +19,10 @@ ROW = "jarvis-runtime-profile-v1"
 CACHE_KEY = "jarvis:runtime_profile:v1"
 MAX_BYTES = 16 * 1024
 _MEMO = "jarvis_runtime_profile_snapshot"
-_ERROR = "Runtime configuration is unavailable. Ask your Jarvis administrator to sync the connection."
+_ERROR = (
+	"Runtime configuration is unavailable. Ask your Jarvis administrator to sync the connection "
+	"and check that Jarvis Admin is up to date."
+)
 
 
 class RuntimeProfileError(frappe.ValidationError):
@@ -255,34 +258,86 @@ def get_profile():
 	return profile
 
 
-def _checked_record(record, anchor, *, allow_unavailable=False):
-	if (
-		not isinstance(record, dict)
-		or record.get("anchor") != anchor
-		or (record.get("unavailable") and not allow_unavailable)
-	):
+def _checked_record(record, anchor):
+	if not isinstance(record, dict) or record.get("anchor") != anchor or record.get("unavailable"):
 		raise RuntimeProfileError(_ERROR)
 	return validate(record.get("profile"), anchor)
 
 
-def get_saved_content_profile():
-	"""Only for sanitizing authorized stored HTML, never for gateway requests.
+@dataclass(frozen=True)
+class SavedContentProfile:
+	"""Sanitization only: deliberately carries no live gateway capabilities."""
 
-	An unsupported serving runtime may retain a validated, assignment-bound
-	profile for old content. A missing, corrupt, or mismatched receipt still fails.
+	live_reload_route: str
+
+
+def get_saved_content_profile():
+	"""Read historical HTML even when the live connection is absent or reset.
+
+	A validated saved receipt may describe a previous assignment: sanitization
+	never contacts that gateway. With no usable receipt, use the bundled historic
+	host-script marker. Neither path populates the live-profile memo or cache.
+	"""
+	from jarvis.legacy_compatibility import _embedded
+
+	blob = frappe.db.get_value("DefaultValue", {"name": ROW, "parent": PARENT, "defkey": KEY}, "defvalue")
+	if isinstance(blob, str) and len(blob.encode()) <= MAX_BYTES:
+		try:
+			profile = validate(json.loads(blob).get("profile"))
+			return SavedContentProfile(profile.live_reload_route)
+		except (RuntimeProfileError, ValueError, TypeError, AttributeError):
+			pass
+	return SavedContentProfile(_embedded()[1].live_reload_route)
+
+
+def ensure_ready(*, sync_connection=False):
+	"""Hydrate once on a ready-check when an upgrade has no usable receipt.
+
+	No network work is hidden in get_profile or on the reader thread. Admin can
+	only refresh the accepted assignment; an older Admin cannot mint readiness
+	without the local profile required by prompt preparation.
 	"""
 	try:
 		return get_profile()
 	except RuntimeProfileError:
-		pass
-	blob = frappe.db.get_value("DefaultValue", {"name": ROW, "parent": PARENT, "defkey": KEY}, "defvalue")
-	if not isinstance(blob, str) or len(blob.encode()) > MAX_BYTES:
-		raise RuntimeProfileError(_ERROR)
+		from jarvis import admin_client
+
+		try:
+			data = admin_client.get_connection(timeout_s=8)
+		except Exception:
+			raise RuntimeProfileError(_ERROR) from None
+		if sync_connection and isinstance(data, ConnectionData):
+			try:
+				return get_profile()
+			except RuntimeProfileError:
+				pass
+			# Only the migration hook may accept a newer authority receipt here.
+			# Ordinary viewers hydrate the accepted assignment without retargeting it.
+			from jarvis.onboarding import write_connection
+
+			write_connection(data)
+		return get_profile()
+
+
+def after_migrate():
+	"""Bootstrap existing sites before queued work resumes; retry via readiness.
+
+	An offline control plane must not fail bench migrate. Preserve valid receipts
+	and leave unavailable/mismatched assignments blocked until an authorized sync.
+	"""
+	settings = frappe.get_single("Jarvis Settings")
+	if not settings.get("agent_url"):
+		return
+	frappe.db.savepoint("runtime_profile_upgrade")
 	try:
-		record = json.loads(blob)
-	except ValueError:
-		raise RuntimeProfileError(_ERROR) from None
-	return _checked_record(record, _anchor(frappe.get_single("Jarvis Settings")), allow_unavailable=True)
+		ensure_ready(sync_connection=True)
+	except Exception:
+		# A failed connection write must not leave half an assignment in the
+		# migration transaction. The caller owns its commit; never commit here.
+		frappe.db.rollback(save_point="runtime_profile_upgrade")
+		_forget_snapshot()
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		frappe.logger("jarvis").warning("Runtime profile sync pending; readiness will retry.")
 
 
 def ingest_current(data):

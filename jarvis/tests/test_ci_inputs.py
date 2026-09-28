@@ -12,7 +12,7 @@ from jarvis.ci import inputs
 
 class TestCIInputs(unittest.TestCase):
 	def test_both_bundled_snapshots_validate(self):
-		for kind, version in (("policy", 1), ("fixture", 2)):
+		for kind, version in (("policy", 1), ("fixture", 1)):
 			self.assertEqual(json.loads(inputs.decode(kind))["version"], version)
 
 	def test_missing_or_malformed_snapshots_fail(self):

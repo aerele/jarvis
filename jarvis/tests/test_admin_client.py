@@ -100,6 +100,9 @@ def _fake_get_single(doctype, *args, **kwargs):
 
 
 def setUpModule():
+	from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+	install_synthetic_runtime_profile()
 	global _get_single_patcher
 	_get_single_patcher = patch("frappe.get_single", side_effect=_fake_get_single)
 	_get_single_patcher.start()

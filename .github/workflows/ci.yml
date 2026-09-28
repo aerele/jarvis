@@ -329,18 +329,18 @@ jobs:
       - name: Create test site + install apps
         working-directory: frappe-bench
         run: |
-          bench new-site test_site \
+          bench new-site jarvis-ci.test \
             --db-host 127.0.0.1 \
             --mariadb-user-host-login-scope='%' \
             --mariadb-root-password root \
             --db-root-username root \
             --admin-password admin
-          bench --site test_site install-app erpnext hrms jarvis
-          bench --site test_site set-config allow_tests true
+          bench --site jarvis-ci.test install-app erpnext hrms jarvis
+          bench --site jarvis-ci.test set-config allow_tests true
           # Full suite creates far more than Frappe's default 60-users/60-min limit
           # (throttle_user_creation); raise it so no mid-suite fixture insert hits
           # "Throttled". -p stores an INT (a string limit breaks the count>limit compare).
-          bench --site test_site set-config -p throttle_user_limit 100000
+          bench --site jarvis-ci.test set-config -p throttle_user_limit 100000
 
       - name: Assert the site is what we think it is
         working-directory: frappe-bench
@@ -351,7 +351,7 @@ jobs:
           # Take the JSON line specifically and leave stderr on the console: merging
           # stderr and taking `tail -1` would capture any late warning instead of the
           # JSON, failing a perfectly healthy site.
-          apps=$(bench --site test_site execute frappe.get_installed_apps | grep -m1 '^\[') || {
+          apps=$(bench --site jarvis-ci.test execute frappe.get_installed_apps | grep -m1 '^\[') || {
             echo "could not parse installed apps from 'bench execute' output"; exit 1; }
           echo "installed apps: ${apps}"
           for a in frappe erpnext hrms jarvis; do
@@ -369,7 +369,7 @@ jobs:
           # --build-number runs a disjoint quarter of the suite. --with-coverage is this
           # command's spelling of run-tests' --coverage (different click commands; do not
           # "fix" one to match the other).
-          bench --site test_site run-parallel-tests \
+          bench --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \
