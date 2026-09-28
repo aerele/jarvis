@@ -52,6 +52,17 @@ const OPUS = {
 	cost_note: "$5.00 in / $15.00 out per 1M tokens",
 };
 
+// A non-top existing tenant-wide pick (EDGE2-1) - distinct from OPUS above AND
+// from openai/gpt-5, which the AgentModelPicker mock's "pick other" button
+// always emits, so a Change-away test can tell the two apart.
+const SONNET = {
+	provider: "anthropic",
+	model: "claude-sonnet-5",
+	label: "Claude Sonnet 5",
+	capability_tier: "Advanced",
+	cost_note: "$2.00 in / $6.00 out per 1M tokens",
+};
+
 function mountDialog(props = {}) {
 	return mount(AgentInstallDialog, {
 		props: {
@@ -310,5 +321,156 @@ describe("AgentInstallDialog open/close lifecycle", () => {
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(w.text()).not.toContain("GPT-5");
+	});
+});
+
+// FE2-1 review fix: confirmReqId used to be bumped only inside confirmInstall,
+// so Cancel/Escape/backdrop (or a reopen) while setAgentModel was in flight
+// could not stop a stale success from emitting confirm - the agent installed
+// after the user had already cancelled. Cancel is now disabled and
+// onClose/reopen become no-ops/invalidations while saving.
+describe("AgentInstallDialog cancel-during-save guard (FE2-1)", () => {
+	function mockTwoModels() {
+		apiAgents.getEligibleModels.mockResolvedValue({
+			catalog: "ok",
+			models: [
+				OPUS,
+				{
+					provider: "openai",
+					model: "gpt-5",
+					label: "GPT-5",
+					capability_tier: "Advanced",
+					cost_note: "",
+				},
+			],
+		});
+	}
+	async function startChangedInstall(w) {
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click");
+		await flushPromises();
+		await w.find('[data-label="Install"]').trigger("click");
+		await flushPromises();
+	}
+
+	it("Cancel is disabled while a save is in flight", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // never resolves
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		expect(w.find('[data-label="Cancel"]').attributes("disabled")).toBeDefined();
+	});
+
+	it("Escape/backdrop (Dialog's own update:modelValue) is ignored while saving; once the save resolves, confirm still fires", async () => {
+		mockTwoModels();
+		let resolveSet;
+		apiAgents.setAgentModel.mockReturnValue(
+			new Promise((resolve) => {
+				resolveSet = resolve;
+			})
+		);
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+
+		// Simulate the Dialog component itself trying to close (Escape/backdrop) -
+		// same path Cancel's onClose(false) uses.
+		w.findComponent({ name: "Dialog" }).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(w.emitted("update:modelValue")).toBeUndefined(); // swallowed, not forwarded to the parent
+
+		resolveSet({});
+		await flushPromises();
+		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(1);
+		expect(w.emitted("confirm")).toHaveLength(1);
+	});
+
+	it("reopening while a prior confirmInstall request is in flight makes its stale resolution emit nothing", async () => {
+		mockTwoModels();
+		let resolveSet;
+		apiAgents.setAgentModel.mockReturnValue(
+			new Promise((resolve) => {
+				resolveSet = resolve;
+			})
+		);
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w); // 1st open's setAgentModel now pending
+
+		// Forced close+reopen past the saving guard (e.g. an external reset) -
+		// same component instance, modelValue toggled directly rather than via
+		// onClose.
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS] });
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+
+		resolveSet({}); // the FIRST open's request finally resolves
+		await flushPromises();
+		expect(w.emitted("confirm")).toBeUndefined();
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).not.toHaveBeenCalled();
+	});
+});
+
+// EDGE2-1 review fix: the dialog used to always recompute its auto-pick from
+// get_eligible_models, even when a tenant-wide `Jarvis Agent Model Choice` row
+// already existed (e.g. another installer pinned a non-top model) - plan_install
+// never overwrites that row, so the dialog showed a different model/tier/cost
+// than what would actually run.
+describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)", () => {
+	it("shows the existing chosen model (not the best-eligible one); Install without Change sends nothing", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
+		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Sonnet 5");
+		expect(w.text()).not.toContain("Claude Opus 5");
+		expect(w.text()).toContain("Already set for everyone using this agent.");
+
+		await w.find('[data-label="Install"]').trigger("click");
+		await flushPromises();
+		expect(apiAgents.setAgentModel).not.toHaveBeenCalled();
+		expect(w.emitted("confirm")).toHaveLength(1);
+	});
+
+	it("Change away from the existing choice sends setAgentModel with the new pick", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
+		apiAgents.setAgentModel.mockResolvedValue({});
+		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		await flushPromises();
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-other"]').trigger("click"); // emits openai/gpt-5
+		await flushPromises();
+		expect(w.text()).not.toContain("Already set for everyone using this agent.");
+
+		await w.find('[data-label="Install"]').trigger("click");
+		await flushPromises();
+		expect(apiAgents.setAgentModel).toHaveBeenCalledWith("close-auditor", "openai", "gpt-5");
+		expect(w.emitted("confirm")).toHaveLength(1);
+	});
+
+	it("an existing choice that has fallen out of the eligible list is still shown by its own label", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS] }); // SONNET no longer offered
+		const w = mountDialog({ modelInfo: { state: "chosen", choice: SONNET } });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Sonnet 5");
+		expect(w.text()).toContain("$2.00 in / $6.00 out per 1M tokens");
+	});
+
+	it("needs_model state (row exists but no choice) keeps today's auto-pick behaviour", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS] });
+		const w = mountDialog({ modelInfo: { state: "needs_model", choice: null } });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Opus 5");
+		expect(w.text()).not.toContain("Already set for everyone using this agent.");
+	});
+
+	it("no existing row falls back to today's auto-pick", async () => {
+		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "ok", models: [OPUS, SONNET] });
+		const w = mountDialog({ modelInfo: null });
+		await flushPromises();
+		expect(w.text()).toContain("Claude Opus 5");
+		expect(w.text()).not.toContain("Already set for everyone using this agent.");
 	});
 });
