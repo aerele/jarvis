@@ -74,7 +74,7 @@
 					<Button
 						variant="subtle"
 						label="Change"
-						:disabled="saving"
+						:disabled="saving || staleSavePending"
 						@click="showPicker = !showPicker"
 					/>
 				</div>
@@ -82,15 +82,15 @@
 					<AgentModelPicker
 						:eligible="eligible"
 						:current="pickedRef"
-						:saving="saving"
+						:saving="saving || staleSavePending"
 						@select="onPick"
 					/>
 				</div>
 			</template>
-			<!-- UX4-1: visible while a different-pick retry is waiting out a
-			     timed-out save that may still be writing - see confirmInstall. -->
-			<p v-if="finishingPreviousSave" class="mt-3 text-sm text-ink-gray-5">
-				Finishing the previous save…
+			<!-- FE5-1/UX4-1: visible while a timed-out save may still be writing -
+			     Change/Install are disabled for the same reason (see confirmInstall). -->
+			<p v-if="staleSavePending" class="mt-3 text-sm text-ink-gray-5">
+				{{ STALE_SAVE_NOTE }}
 			</p>
 			<span class="sr-only" role="status" aria-live="polite">{{ liveMessage }}</span>
 		</template>
@@ -101,7 +101,14 @@
 					variant="solid"
 					label="Install"
 					:loading="installing || saving"
-					:disabled="installing || saving || loading || noneEligible || catalogUnknown"
+					:disabled="
+						installing ||
+						saving ||
+						staleSavePending ||
+						loading ||
+						noneEligible ||
+						catalogUnknown
+					"
 					@click="confirmInstall"
 				/>
 			</div>
@@ -163,12 +170,19 @@ const dialogTitle = computed(() => `Install ${props.agentTitle}?`);
 // stalled request can no longer lock the dialog (Cancel disabled, close inert)
 // indefinitely.
 //
-// UX4-1 review fix: the ceiling only releases the DIALOG - frappe-ui's call()
-// has no AbortSignal to plumb into fetch, so the request itself keeps running
-// server-side. Timeout copy says so honestly, and `staleSave` below tracks it
-// so a retry can't silently race it.
+// UX4-1/FE5-1 review fix: the ceiling only releases the DIALOG - frappe-ui's
+// call() has no AbortSignal to plumb into fetch, so the request itself keeps
+// running server-side. Rather than let a retry race it, `staleSavePending`
+// below disables Change/Install (Cancel/X stay enabled - the user can always
+// leave) until that request settles, so a second write can never overlap the
+// first one.
 const SET_MODEL_TIMEOUT_MS = 15000;
 const TIMEOUT_MESSAGE = "Still saving your model choice. Wait a moment, then try again.";
+const STALE_SAVE_NOTE = "Still saving your model choice…";
+// Resilience: frappe-ui's call() has no timeout of its own - if the tracked
+// request never settles (network black hole), don't hold Change/Install
+// disabled forever. Force it closed and re-sync from the server instead.
+const STALE_SAVE_HARD_LIMIT_MS = 90000;
 
 const loading = ref(false);
 const eligible = ref(null); // get_eligible_models()
@@ -191,14 +205,14 @@ const liveMessage = ref("");
 // a synchronous, local-only draft update, not a network call.
 const saving = ref(false);
 let confirmReqId = 0;
-// UX4-1: the pick a timed-out setAgentModel may still be writing server-side.
-// A retry with this SAME pick just proceeds (idempotent - a duplicate write
-// changes nothing); a DIFFERENT pick waits for it to settle first (below).
-// Cleared once it settles, or the dialog closes/reopens.
-const staleSave = ref(null); // { provider, model }
-let staleRequest = null; // that save's own Promise, so a different-pick retry can await it
+// FE5-1: true from a timed-out setAgentModel until that SAME request settles
+// (or the hard limit above forces it closed) - never cleared by an open/close
+// transition, only by trackStaleSettle, so Change/Install stay disabled across
+// a close+reopen and a second write can never be sent while the first is
+// still unresolved server-side.
+const staleSavePending = ref(false);
+let staleRequest = null; // the timed-out request itself, so trackStaleSettle can await it
 let staleNeedsReseed = false; // a timeout happened and we haven't re-synced with the server since
-const finishingPreviousSave = ref(false); // true while a different-pick retry waits out staleRequest
 
 // Applies a get_agent_model-shaped `{ choice }` to the auto-pick/draft - the
 // EDGE2-1 seed rule, factored out so a post-timeout re-sync can reuse it
@@ -254,19 +268,26 @@ async function resyncAfterStaleSave() {
 
 // Attached once, at timeout time, to the ORIGINAL request. Fires on success
 // OR failure (`.then(fn, fn)`, never `.finally` - a `.finally` on a rejecting
-// promise re-throws into an unhandled rejection since nothing awaits it).
+// promise re-throws into an unhandled rejection since nothing awaits it) - AND
+// on the hard-limit timer if the request never settles at all. Whichever
+// fires first wins; the `staleRequest !== request` guard makes the other one
+// a no-op.
 function trackStaleSettle(request) {
 	staleRequest = request;
+	let hardLimitTimer;
 	const settled = () => {
-		if (staleRequest !== request) return; // superseded by a newer attempt already
+		if (staleRequest !== request) return; // superseded already (real settle or hard limit)
 		staleRequest = null;
-		staleSave.value = null;
+		clearTimeout(hardLimitTimer);
+		staleSavePending.value = false;
+		liveMessage.value = "";
 		if (props.modelValue) {
 			staleNeedsReseed = false;
 			resyncAfterStaleSave();
 		}
 	};
 	request.then(settled, settled);
+	hardLimitTimer = setTimeout(settled, STALE_SAVE_HARD_LIMIT_MS);
 }
 
 // Re-fetch fresh + reset every time the dialog opens; never carry a stale
@@ -274,10 +295,11 @@ function trackStaleSettle(request) {
 watch(
 	() => props.modelValue,
 	(open) => {
-		// Clear on ANY transition - a fresh open/close always starts its own
-		// idempotency check over.
-		staleSave.value = null;
-		finishingPreviousSave.value = false;
+		// FE5-1 review fix: staleSavePending/staleRequest track a save that may
+		// still be in flight server-side. An open/close transition never clears
+		// them - only trackStaleSettle (the tracked request settling, or its
+		// hard limit) may - so Change/Install stay disabled across a
+		// close+reopen until that write is actually done.
 		if (!open) return;
 		// FE2-1: a reopen (even one forced past onClose's saving guard below)
 		// must supersede any confirmInstall still awaiting a PRIOR open's
@@ -289,12 +311,18 @@ watch(
 		picked.value = null;
 		usingExistingChoice.value = false;
 		existingMeta.value = null;
-		liveMessage.value = "";
+		// FE5-2/UX5-1: restore the pending note (else "") rather than always
+		// blanking it - staleSavePending can still be true across a reopen.
+		liveMessage.value = staleSavePending.value ? STALE_SAVE_NOTE : "";
 		saving.value = false;
 		if (staleNeedsReseed) {
 			// UX4-1: a prior open's save timed out and may have landed since -
 			// re-fetch the real choice rather than trusting props.modelInfo.
 			staleNeedsReseed = false;
+			// CR5-4: cover the getAgentModel round-trip too, not just load()'s
+			// own fetch - otherwise Install could sit enabled next to an empty
+			// box for the gap before load() takes over the loading flag.
+			loading.value = true;
 			apiAgents
 				.getAgentModel(props.agentSlug)
 				.then((info) => load(info))
@@ -362,33 +390,20 @@ const draftChanged = computed(
 // surfaces its error and does not install, leaving the dialog open so the
 // pick can be retried or abandoned via Cancel.
 async function confirmInstall() {
-	if (saving.value || props.installing) return;
+	// FE5-1/correctness: the pending-state gate must be checked BEFORE the
+	// !draftChanged early return below - a reopen while a save is still
+	// pending re-seeds picked/autoPicked to the SAME value (draftChanged goes
+	// false) even though the original write hasn't settled yet; without this
+	// ordering that reseed would let Install fall through and emit `confirm`
+	// immediately. The template's :disabled already covers the normal path;
+	// this is the defense-in-depth backstop.
+	if (saving.value || props.installing || staleSavePending.value) return;
 	if (!draftChanged.value) {
 		emit("confirm");
 		return;
 	}
 	const wantProvider = picked.value.provider;
 	const wantModel = picked.value.model;
-
-	// UX4-1: a previous save may still be in flight (no AbortSignal to cancel
-	// it). Only a DIFFERENT pick needs to wait - the same pick is idempotent,
-	// so just fire it (below) without waiting.
-	if (
-		staleSave.value &&
-		(staleSave.value.provider !== wantProvider || staleSave.value.model !== wantModel)
-	) {
-		const guardId = confirmReqId;
-		saving.value = true;
-		finishingPreviousSave.value = true;
-		try {
-			await staleRequest;
-		} catch (e) {
-			// only needed it to be DONE, not to have succeeded
-		}
-		finishingPreviousSave.value = false;
-		if (guardId !== confirmReqId) return; // superseded while waiting (reopen/close)
-	}
-	staleSave.value = null;
 
 	saving.value = true;
 	const id = ++confirmReqId;
@@ -426,10 +441,12 @@ async function confirmInstall() {
 		// double-toasts.
 		if (timedOut && id === confirmReqId) {
 			saving.value = false;
-			// UX4-1: `request` keeps running server-side - remember it so a
-			// retry reacts correctly instead of racing it blind (see above).
-			staleSave.value = { provider: wantProvider, model: wantModel };
+			// UX4-1/FE5-1: `request` keeps running server-side - block a second
+			// write (Change/Install disabled via staleSavePending) instead of
+			// racing it, until it settles or the hard limit forces it closed.
+			staleSavePending.value = true;
 			staleNeedsReseed = true;
+			liveMessage.value = STALE_SAVE_NOTE; // FE5-2/UX5-1: announce it too
 			toast.error(errHtml(e));
 			confirmReqId++; // this request's own .then above must go quiet when it lands
 			trackStaleSettle(request);
@@ -451,10 +468,18 @@ function onClose(v) {
 	// confirm or a toast into a dialog that is now closed.
 	confirmReqId++;
 	// UX4-1: this is only "nothing to undo" when no save ever timed out - a
-	// timed-out save (staleSave/staleNeedsReseed) may still land server-side
-	// AFTER this close. Nothing to do about it here (no AbortSignal to cancel
-	// it with); the next open re-syncs from the server instead of trusting
-	// this local draft or props.modelInfo (see the watch above).
+	// timed-out save (staleSavePending/staleNeedsReseed) may still land
+	// server-side AFTER this close. Nothing to do about it here (no
+	// AbortSignal to cancel it with); the next open re-syncs from the server
+	// instead of trusting this local draft or props.modelInfo (see the watch
+	// above).
 	emit("update:modelValue", !!v);
 }
+
+// Test-only seam (same pattern as AgentModelCard's `load`/LlmPoolEditor's
+// exposes): the disabled Install button can never be clicked past the
+// staleSavePending guard in real use, so a defense-in-depth ordering check
+// (staleSavePending before !draftChanged, see confirmInstall) needs a direct
+// call to verify.
+defineExpose({ confirmInstall });
 </script>
