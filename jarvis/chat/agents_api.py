@@ -1152,6 +1152,10 @@ def install_agent(agent_slug: str) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(listing.name)
+	from jarvis.chat import agent_models
+
+	# Enforced min-model: a first install needs an eligible model (throws otherwise).
+	model_plan = agent_models.plan_install(listing)
 
 	sched = {}
 	try:
@@ -1204,6 +1208,7 @@ def install_agent(agent_slug: str) -> dict:
 		# "already installed" rather than a 500.
 		frappe.clear_last_message()
 		frappe.throw(_("You have already installed this agent."))
+	agent_models.apply_install_plan(listing.name, model_plan)
 	# No _mark_catalog_dirty(): installs start enabled=0, so the container's
 	# ENABLED set is unchanged — only enable/disable (and uninstalling an
 	# ENABLED install) make an Apply pending.
@@ -1585,6 +1590,9 @@ def uninstall_agent(installation: str) -> dict:
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
+	from jarvis.chat import agent_models
+
+	agent_models.on_uninstalled(doc.agent)
 	return {"ok": True}
 
 
@@ -1686,12 +1694,19 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 				"installation is in shadow. Promote it to live to run it."
 			)
 		)
+	from jarvis.chat import agent_models
 	from jarvis.chat.agent_scheduler import (
 		_is_app_learning,
 		_launch_audit,
 		_over_run_budget,
 		_valid_owner,
 	)
+
+	# Enforced min-model: re-checked live; a model that stopped qualifying moves to a
+	# stored fallback, and with none left the run is refused.
+	model_gate = agent_models.gate_run(doc.agent)
+	if not model_gate["ok"]:
+		frappe.throw(model_gate["message"], title=_("No eligible model"))
 
 	# CX5-2: the Custom App Learning agent's explicit, per-run app authorization.
 	# Refuse the launch outright when the admin named no app — a run with an empty
@@ -1784,7 +1799,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 			if run_as != original_user:
 				doc = frappe.get_doc(INSTALLATION, installation)  # re-fetch under run_as
 			result = _launch_audit(
-				doc, trigger="manual", source_apps=source_apps, initiating_human=triggering_human
+				doc,
+				trigger="manual",
+				source_apps=source_apps,
+				initiating_human=triggering_human,
+				model_gate=model_gate,
 			)
 	return {"ok": True, "data": result}
 
@@ -2891,7 +2910,8 @@ def _enqueued_push_agent_skills() -> None:
 				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
 			)
 			payload = build_agent_push_payload()
-			admin_client.post_push_agent_skills(agent_skills=payload)
+			scope = _model_push_scope(payload)
+			pushed = admin_client.post_push_agent_skills(agent_skills=payload)
 			# #458: END THIS WORKER'S TRANSACTION before the recheck, or the recheck
 			# cannot see a mutation at all and the guard above is inert. Two layers
 			# hid it: ``get_single_value`` defaults to ``cache=True`` and serves
@@ -2910,6 +2930,7 @@ def _enqueued_push_agent_skills() -> None:
 			# transaction, still covered by the try/except/finally and the trailing
 			# commit, so the "status is never left pending" invariant is unchanged.
 			frappe.db.commit()
+			_stamp_pushed_models(payload, pushed, scope)
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
 				"agent_skills_sync_status": f"ok (applied {len(payload)} via admin)",
@@ -2938,7 +2959,14 @@ def _enqueued_push_agent_skills() -> None:
 			_fail(f"failed: rate-limited; {retry_str}")
 			terminal_written = True
 		except admin_client.AdminValidationError as e:
-			_fail(f"failed: invalid: {e}")
+			from jarvis.chat.agent_models import is_platform_upgrade_pending
+
+			# 409 from admin: model choices need a newer fleet host; nothing was pushed.
+			_fail(
+				"failed: platform upgrade pending"
+				if is_platform_upgrade_pending(e)
+				else f"failed: invalid: {e}"
+			)
 			terminal_written = True
 		except Exception:
 			_fail("failed: unexpected error; see Error Log")
@@ -2951,6 +2979,26 @@ def _enqueued_push_agent_skills() -> None:
 				except Exception:
 					pass
 		frappe.db.commit()
+
+
+def _model_push_scope(payload: list[dict]) -> dict | None:
+	from jarvis.chat.agent_models import push_scope
+
+	return push_scope(payload)
+
+
+def _stamp_pushed_models(payload: list[dict], response=None, scope: dict | None = None) -> None:
+	"""Record per model-choice row what this push delivered (admin's ``model_choices``
+	report included). Independent of the dirty-clear version guard, and never allowed
+	to fail a push that landed."""
+	try:
+		from jarvis.chat.agent_models import stamp_pushed
+
+		stamp_pushed(payload, response, scope)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="Jarvis: agent model push stamp failed", message=frappe.get_traceback())
 
 
 def _fail(status: str) -> None:

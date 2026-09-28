@@ -16,6 +16,7 @@
   "agent_run_budget_monthly",
   "macro_step_budget_monthly",
   "activation_module_ceiling",
+  "enforce_agent_min_model",
   "branding_section",
   "agent_name",
   "brand_logo",
@@ -125,6 +126,7 @@
   "learned_skills_sync_status",
   "agent_catalog_dirty",
   "agent_catalog_version",
+  "last_validated_pool_fp",
   "role_profiles_pushed",
   "role_profiles_pushed_at",
   "role_profiles_config",
@@ -224,6 +226,13 @@
    "fieldname": "activation_module_ceiling",
    "fieldtype": "Int",
    "label": "Activation Module Ceiling (live agents, site-wide)"
+  },
+  {
+   "default": "0",
+   "description": "When on, marketplace agents that declare a minimum model tier run on one tenant-wide model chosen from your eligible models. Needs every fleet host on contract 1.43, else agent Apply fails with 'platform upgrade pending'. Off keeps today's behaviour.",
+   "fieldname": "enforce_agent_min_model",
+   "fieldtype": "Check",
+   "label": "Enforce Agent Minimum Model"
   },
   {
    "fieldname": "branding_section",
@@ -931,6 +940,14 @@
    "read_only": 1
   },
   {
+   "description": "Fingerprint of the LLM pool state the agent model choices were last re-validated against.",
+   "fieldname": "last_validated_pool_fp",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Validated Pool Fingerprint",
+   "read_only": 1
+  },
+  {
    "description": "JSON snapshot of the role-based agent profiles last pushed to admin (jarvis.chat.role_profiles.needed_profiles output). Compared against the freshly computed set on every sync to short-circuit an unchanged push.",
    "fieldname": "role_profiles_pushed",
    "fieldtype": "Small Text",
@@ -1227,5 +1244,5 @@
    "write": 1
   }
  ],
- "modified": "2026-09-23 10:00:00.000000"
+ "modified": "2026-09-28 13:00:00.000000"
 }
