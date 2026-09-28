@@ -36,7 +36,11 @@
   "wm_gl_max_modified",
   "permission_profile",
   "integrity_digest",
-  "canvas_ref"
+  "canvas_ref",
+  "model_rendered",
+  "model_used",
+  "model_below_min",
+  "model_source"
  ],
  "fields": [
   {
@@ -200,6 +204,36 @@
    "description": "The delegate's saved canvas/dashboard reference reported at writeback. Phase 4's save_dashboard resolves this into the Run.dashboard link."
   },
   {
+   "description": "Model ref the fleet rendered for the delegate at run start.",
+   "fieldname": "model_rendered",
+   "fieldtype": "Data",
+   "label": "Model Rendered",
+   "read_only": 1
+  },
+  {
+   "description": "provider/model the runtime reported it actually used. Blank = not verified.",
+   "fieldname": "model_used",
+   "fieldtype": "Data",
+   "label": "Model Used",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "The reported model differs from the rendered one or is below the agent's minimum.",
+   "fieldname": "model_below_min",
+   "fieldtype": "Check",
+   "label": "Model Below Minimum",
+   "read_only": 1
+  },
+  {
+   "description": "Where the run's model came from. Blank = legacy run (before per-agent models).",
+   "fieldname": "model_source",
+   "fieldtype": "Select",
+   "label": "Model Source",
+   "options": "\nchoice\nfallback\npending_apply\npool_default",
+   "read_only": 1
+  },
+  {
    "fieldname": "result_state",
    "fieldtype": "Select",
    "label": "Result State",
@@ -270,7 +304,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-04 20:30:00.000000",
+ "modified": "2026-09-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Run",
