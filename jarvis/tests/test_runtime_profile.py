@@ -124,7 +124,8 @@ class TestRuntimeProfileValidation(unittest.TestCase):
 
 class TestRuntimeProfileStorage(unittest.TestCase):
 	def setUp(self):
-		self.local = SimpleNamespace()
+		# Frappe v15's whitelist wrapper reads local.flags before invoking endpoints.
+		self.local = SimpleNamespace(flags=frappe._dict(in_test=True))
 		self.db = Mock()
 		self.cache = Mock()
 		self.cache.get_value.return_value = None
