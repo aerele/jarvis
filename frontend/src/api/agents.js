@@ -137,9 +137,18 @@ export const getAgentModel = (agent) => call(AM + "get_agent_model", { agent });
 //      model, label, lane_hint, capability_tier, capability_rank, cost_note}] }
 export const getEligibleModels = (agent) => call(AM + "get_eligible_models", { agent });
 
-// Pick the agent's tenant-wide model (applies to everyone using it) - callable
-// before install too, so an install-time pick is already the row install_agent
-// finds and keeps. -> the refreshed get_agent_model view.
+// Install for the current user. `pick` ({provider, model}, optional) is the
+// install dialog's changed model: install_agent validates and saves it as the
+// tenant-wide choice in the same request (ignored with the flag off).
+// -> { ok, data: { name, agent } }
+export const installAgent = (agent_slug, pick) =>
+	call(AG + "install_agent", {
+		agent_slug,
+		...(pick && pick.model ? { model_provider: pick.provider || "", model: pick.model } : {}),
+	});
+
+// Pick the agent's tenant-wide model (applies to everyone using it).
+// -> the refreshed get_agent_model view.
 export const setAgentModel = (agent, provider, model) =>
 	call(AM + "set_agent_model", { agent, provider, model });
 
