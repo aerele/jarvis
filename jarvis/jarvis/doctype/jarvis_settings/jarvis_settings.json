@@ -1251,10 +1251,15 @@
   },
   {
    "role": "Administrator",
+   "read": 1,
+   "write": 1
+  },
+  {
+   "role": "Administrator",
    "permlevel": 2,
    "read": 1,
    "write": 1
   }
  ],
- "modified": "2026-09-28 18:00:00.000000"
+ "modified": "2026-09-28 18:05:00.000000"
 }

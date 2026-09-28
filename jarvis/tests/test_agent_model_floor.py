@@ -544,6 +544,18 @@ class TestPushKeys(AgentModelDBBase):
 			(self._state(AGENT_C).pushed_provider, self._state(AGENT_C).pushed_model), ("openai", "gpt-std")
 		)
 
+	def test_a_confirmed_apply_clears_a_stale_platform_note_even_when_already_pinned(self):
+		"""RES2-3 (tenant): _stamp_row's pushed==want early return (nothing moved -
+		Apply merely reconfirmed an existing pin) must still clear a stale
+		"Platform upgrade pending" note, not just when pushed_* actually changes."""
+		_choice(
+			AGENT, state="chosen", provider="openai", model="gpt-adv", fallbacks="[]",
+			pushed_provider="openai", pushed_model="gpt-adv", note="Platform upgrade pending",
+		)  # fmt: skip
+		with patch("jarvis.admin_client.post_push_agent_skills", return_value={"ok": True, "data": _REPORT}):
+			agents_api._enqueued_push_agent_skills()
+		self.assertEqual(self._state().note or "", "")
+
 	def test_platform_upgrade_refusal_is_plain_text(self):
 		from jarvis.exceptions import AdminContractError
 
@@ -866,6 +878,14 @@ class TestRunGate(AgentModelDBBase):
 			frappe.db.set_value(CHOICE, AGENT, "pushed_model", "gpt-std")
 			self.assertEqual(agent_models.gate_run(AGENT)["model_source"], "pending_apply")
 			frappe.db.set_value(CHOICE, AGENT, "state", "legacy")
+			self.assertEqual(agent_models.gate_run(AGENT)["model_source"], "pool_default")
+
+	def test_a_picked_but_never_pushed_row_reports_pool_default_not_pending_apply(self):
+		"""COR2-1: legacy->chosen before any Apply (or a kept row after an OFF->ON
+		flip) has no pushed_model - the fleet holds no pin and renders the pool
+		default, so a run must not be stamped pending_apply (a PINNED source)."""
+		_choice(AGENT, state="chosen", provider="openai", model="gpt-adv", fallbacks="[]")
+		with _env():
 			self.assertEqual(agent_models.gate_run(AGENT)["model_source"], "pool_default")
 
 	def test_scheduler_records_and_advances_instead_of_retrying(self):
@@ -1685,3 +1705,50 @@ class TestHooksAndGates(AgentModelDBBase):
 			settings.enforce_agent_min_model = 1
 			settings.save()
 		self.assertFalse(agent_models.is_enforced())  # a System Manager save leaves it off
+
+	def test_self_granted_permlevel_write_still_cannot_flip_the_flag(self):
+		"""F4 (security review): a tenant System Manager who self-grants permlevel-2
+		write via the Role Permission Manager (the exact escalation this DocType is
+		vulnerable to without the identity guard) must still be refused - Frappe's
+		own permlevel gate no longer protects the field once that grant is real."""
+		from frappe import permissions as frappe_permissions
+		from frappe.core.page.permission_manager import permission_manager
+
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		with _as(ADMIN):
+			permission_manager.update(SETTINGS, "System Manager", 2, "write", 1)
+		frappe.db.commit()
+		try:
+			meta = frappe.get_meta(SETTINGS)
+			self.assertIn(2, meta.get_permlevel_access("write", user=ADMIN))  # the self-grant landed
+			with (
+				_as(ADMIN),
+				patch.object(JarvisSettings, "_on_update_unified_llm"),
+				patch.object(JarvisSettings, "_on_update_single_model_legacy"),
+				patch("frappe.enqueue"),
+				self.assertRaises(frappe.PermissionError),
+			):
+				settings = frappe.get_single(SETTINGS)
+				settings.enforce_agent_min_model = 1
+				settings.save()
+			self.assertFalse(agent_models.is_enforced())
+		finally:
+			frappe_permissions.reset_perms(SETTINGS)
+			frappe.clear_cache(doctype=SETTINGS)
+			frappe.db.commit()
+
+	def test_administrator_can_still_flip_the_flag(self):
+		"""Guard rail for the F4 fix: Administrator (the only intended authority)
+		is unaffected."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		with (
+			patch.object(JarvisSettings, "_on_update_unified_llm"),
+			patch.object(JarvisSettings, "_on_update_single_model_legacy"),
+			patch("frappe.enqueue"),
+		):
+			settings = frappe.get_single(SETTINGS)
+			settings.enforce_agent_min_model = 1
+			settings.save()
+		self.assertTrue(agent_models.is_enforced())
