@@ -22,8 +22,9 @@ TEST_PROFILE = RuntimeProfile(
 
 @contextmanager
 def synthetic_runtime_profile():
-	"""Inject the consumer boundary; production profile validation stays intact."""
+	"""Configured-connection fixture for consumers; profile-validation suites do not use it."""
 	with ExitStack() as stack:
+		stack.enter_context(patch("jarvis.chat.runtime_profile.get_profile", return_value=TEST_PROFILE))
 		for module in ("canvas", "generated_media", "turn_recovery", "prepare", "turn_handler"):
 			stack.enter_context(patch(f"jarvis.chat.{module}.get_profile", return_value=TEST_PROFILE))
 		stack.enter_context(

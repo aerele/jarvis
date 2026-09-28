@@ -784,6 +784,18 @@ def is_ready_for_chat() -> dict:
 	rather than raising or affecting the verdict above.
 	"""
 	verdict = _ready_verdict()
+	if verdict.get("ready"):
+		from jarvis.chat.runtime_profile import RuntimeProfileError, ensure_ready
+
+		try:
+			ensure_ready()
+		except RuntimeProfileError as exc:
+			verdict = {
+				"ready": False,
+				"reason": "container_unavailable",
+				"detail": str(exc),
+				"retryable": True,
+			}
 	try:
 		from jarvis.chat.pump import chat_worker_status
 

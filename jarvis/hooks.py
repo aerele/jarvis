@@ -221,6 +221,7 @@ before_tests = "jarvis.tests.catalog_seed.seed_catalog_snapshot"
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	"jarvis.chat.runtime_profile.after_migrate",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows
 	# from the detector registry (best-effort; never blocks a migrate).

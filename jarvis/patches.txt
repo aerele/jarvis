@@ -2,10 +2,12 @@
 # Patches added in this section will be executed before doctypes are migrated
 # Read docs to understand patches: https://docs.frappe.io/framework/user/en/database-migrations
 
+jarvis.patches.v1_0_migrate_legacy_agent_settings
+
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
-# The v1_0 settings-rename and v2_10 watermark-copy patches were retired: every
-# release since v1.0.0 has run them. Upgrade to v1.0.0 or later before this one.
+# Historical settings are renamed before model sync, including direct upgrades.
+# Watermark reads/writes retain both columns through the compatibility helper.
 jarvis.patches.v1_1_titlecase_conversation_status
 jarvis.patches.v1_2_clear_legacy_admin_token
 jarvis.patches.v1_3_backfill_llm_auth_mode

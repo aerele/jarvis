@@ -5482,3 +5482,9 @@ class TestNativeClaudePickRouting(unittest.TestCase):
 
 		with patch.object(th, "_session_model_for", return_value=("claude-sonnet-5", "anthropic")):
 			self.assertEqual(th._session_model_patch(frappe._dict()), (True, "anthropic/claude-sonnet-5"))
+
+
+def setUpModule():
+	from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+	install_synthetic_runtime_profile()
