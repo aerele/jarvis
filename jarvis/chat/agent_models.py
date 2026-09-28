@@ -375,16 +375,19 @@ def _insert_if_absent(agent: str, values: dict) -> bool:
 		return False
 
 
-def _upsert(agent: str, values: dict):
+def _upsert(agent: str, values: dict, keep=None):
 	"""Set ``values`` on the agent's row under its lock, creating it if absent. A missing
 	key is inserted, never locked: FOR UPDATE on it gap-locks, and two concurrent first
 	picks deadlock. An existing row is locked directly (insert-first would take a shared
-	duplicate-key lock that two concurrent updates then both try to upgrade)."""
+	duplicate-key lock that two concurrent updates then both try to upgrade).
+	``keep(row)``, checked under the lock: True leaves the row as it is (returns None)."""
 	doc = _get_row(agent, for_update=True) if frappe.db.exists(CHOICE, agent) else None
 	if doc is None:
 		if _insert_if_absent(agent, values):
 			return frappe.get_doc(CHOICE, agent)
 		doc = _get_row(agent, for_update=True)  # lost the insert race: update the winner
+	if keep and keep(doc):
+		return None
 	doc.update(values)
 	doc.save(ignore_permissions=True)
 	return doc
@@ -519,9 +522,13 @@ def _validated_pick(listing, provider, model) -> dict:
 	}
 
 
-def _apply_pick(agent: str, values: dict, actor: str) -> None:
-	"""Write a validated pick as the tenant-wide choice (last change wins), audited."""
-	_upsert(agent, {**values, "changed_by": actor, "changed_at": frappe.utils.now()})
+def _apply_pick(agent: str, values: dict, actor: str, if_unpinned: bool = False) -> None:
+	"""Write a validated pick as the tenant-wide choice (last change wins), audited.
+	``if_unpinned``: an installer's unchanged shown pick, applied only over no row or a
+	``legacy``/``needs_model`` one, so a pin set since their page loaded is kept."""
+	keep = (lambda row: row.state not in ("legacy", "needs_model")) if if_unpinned else None
+	if not _upsert(agent, {**values, "changed_by": actor, "changed_at": frappe.utils.now()}, keep=keep):
+		return
 	_log_for_owners(agent, f"model set to {values['model']} by {actor}", actor=actor)
 	_mark_dirty()
 
@@ -651,10 +658,13 @@ def reset_agent_model(agent: str) -> dict:
 # --------------------------------------------------------------------------- #
 # install / uninstall / flag
 # --------------------------------------------------------------------------- #
-def plan_install(listing, provider: str | None = None, model: str | None = None) -> dict | None:
+def plan_install(
+	listing, provider: str | None = None, model: str | None = None, if_unpinned: bool = False
+) -> dict | None:
 	"""Before an install inserts: the row to create afterwards, ``{"pick": row}`` for the
-	installer's own pick, or None. Throws when a first enforced install has no eligible
-	model, or when the pick is not eligible. With the flag off a pick is ignored."""
+	installer's own pick (``if_unpinned``: see ``_apply_pick``), or None. Throws when a
+	first enforced install has no eligible model, or when the pick is not eligible. With
+	the flag off a pick is ignored."""
 	if not is_enforced():
 		return None
 	picked = bool((provider or "").strip() or (model or "").strip())
@@ -664,7 +674,7 @@ def plan_install(listing, provider: str | None = None, model: str | None = None)
 	# snapshot and let the existence reads below see a concurrent last-uninstall.
 	frappe.db.commit()
 	if picked:  # same check as set_agent_model; the row is written after the install
-		return {"pick": _validated_pick(listing, provider, model)}
+		return {"pick": _validated_pick(listing, provider, model), "if_unpinned": bool(if_unpinned)}
 	# A plain read: FOR UPDATE on a missing key would gap-lock and deadlock two
 	# concurrent first installs; _insert_if_absent's unique name decides instead.
 	if frappe.db.exists(CHOICE, listing.name):
@@ -688,14 +698,12 @@ def apply_install_plan(agent: str, plan: dict | None) -> None:
 		return
 	try:
 		if "pick" in plan:
-			_apply_pick(agent, plan["pick"], frappe.session.user)
-			return
-		created = _insert_if_absent(agent, plan)
+			_apply_pick(agent, plan["pick"], frappe.session.user, if_unpinned=plan.get("if_unpinned"))
+		elif _insert_if_absent(agent, plan) and plan.get("state") != "legacy":
+			_mark_dirty()  # the allowed-listings leg now ships this agent pinned
 	except frappe.QueryDeadlockError:
 		# InnoDB rolled the whole transaction back (the install row too): retryable.
 		frappe.throw(_("Another change to this agent landed at the same moment. Please try again."))
-	if created and plan.get("state") != "legacy":
-		_mark_dirty()  # the allowed-listings leg now ships this agent pinned
 
 
 def on_uninstalled(agent: str) -> None:
