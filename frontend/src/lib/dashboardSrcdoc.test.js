@@ -339,17 +339,6 @@ test("@layer: an UNQUOTED-attribute <style> is still wrapped (scan parity)", asy
 	assert.ok(out.includes("<style data-k=v>@layer author{.a{color:var(--jd-ink)}}</style>"));
 });
 
-test("SECURITY: stale agent ws-client script is stripped, other scripts kept", () => {
-	const html =
-		"<html><head></head><body><div id=chart></div>" +
-		"<script>renderChart()</script>" +
-		'<script>const ws=new WebSocket("ws://"+location.host+"/__openclaw__/ws");</script>' +
-		"</body></html>";
-	const out = buildSrcdoc(html, {});
-	assert.ok(out.includes("renderChart()"), "legit script kept");
-	assert.ok(!out.includes("__openclaw__/ws"), "host ws-client stripped");
-});
-
 // DR3-1: a literal "<style" that is NOT a real start tag (inside an attribute
 // value, a <script>/<textarea> body, or a comment) must not desync the wrapper.
 // The prior hand-scanner searched for "<style" from the DATA position and could

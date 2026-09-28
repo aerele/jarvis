@@ -1,6 +1,6 @@
-"""Openclaw event parsing + realtime publish wrapper.
+"""Agent event parsing + realtime publish wrapper.
 
-openclaw emits WebSocket events with shapes like:
+agent emits WebSocket events with shapes like:
   stream=lifecycle  data={phase: start|end|error, ...}
   stream=item       data={kind: tool, phase: start|end, name, toolCallId, status}
   stream=item       data={kind: preamble, phase, itemId, progressText}  (step update)
@@ -23,17 +23,29 @@ from jarvis.chat import egress_rules
 CHANNEL = "jarvis:event"
 
 
-def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
-	"""Normalize an openclaw WS frame to a flat dict, or return None to drop it."""
+def parse_event(payload: dict[str, Any], *, redact: bool = True) -> dict[str, Any] | None:
+	"""Normalize an agent WS frame to a flat dict, or return None to drop it.
+
+	``redact=False`` skips every ``egress_rules.redact`` call and returns the RAW
+	text instead: the relay mux's reader thread (``relay_mux.py``) has no
+	``frappe.local`` site, so it parses with ``redact=False`` and the pump applies
+	``egress_rules`` itself, on its own thread, in ``RelayMux._apply`` /
+	``_finalize_terminal``, right before the text reaches a lane callback. The
+	direct (non-mux) relay path keeps the default ``True`` - it already runs with
+	a live Frappe connection, so redacting here, once, at parse time, is correct
+	and unchanged."""
 	stream = payload.get("stream")
 	data = payload.get("data")
 	if not isinstance(data, dict):
 		data = {}
 
+	def _redact(text: str) -> str:
+		return egress_rules.redact(text) if redact else text
+
 	if stream == "lifecycle":
 		out: dict[str, Any] = {"kind": "lifecycle", "phase": data.get("phase")}
 		if data.get("error"):
-			out["error"] = egress_rules.redact(data["error"])
+			out["error"] = _redact(data["error"])
 		return out
 
 	if stream == "item":
@@ -41,7 +53,7 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 			# The ChatGPT-subscription harness sends the model's "what I'm doing"
 			# updates as their own item, separate from the reply text. It becomes
 			# the chat's live step line (see jarvis.chat.steps).
-			text = egress_rules.redact(str(data.get("progressText") or "")).strip()
+			text = _redact(str(data.get("progressText") or "")).strip()
 			return {"kind": "step", "text": text} if text else None
 		if data.get("kind") != "tool":
 			return None
@@ -53,13 +65,13 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 		}
 		if data.get("status"):
 			out["status"] = data["status"]
-		# openclaw's item events carry a human title it derives itself from
+		# agent's item events carry a human title it derives itself from
 		# the tool name + an arg summary (buildToolItemTitle ->
 		# inferToolMetaFromArgs, e.g. "get_list Sales Invoice"). Pass it
 		# through so the chat's live status line can say WHAT is being
 		# fetched without the bench parsing raw args.
 		if data.get("title"):
-			out["tool_title"] = egress_rules.redact(data["title"])
+			out["tool_title"] = _redact(data["title"])
 		return out
 
 	if stream == "tool":
@@ -76,8 +88,8 @@ def parse_event(payload: dict[str, Any]) -> dict[str, Any] | None:
 		# deltas is contiguous here and matches.
 		return {
 			"kind": "assistant",
-			"text": egress_rules.redact(data.get("text", "")),
-			"delta": egress_rules.redact(data.get("delta", "")),
+			"text": _redact(data.get("text", "")),
+			"delta": _redact(data.get("delta", "")),
 		}
 
 	if stream == "compaction":

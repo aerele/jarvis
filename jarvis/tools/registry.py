@@ -181,6 +181,11 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# MCP connectors (GitHub / Atlassian / Linear / Stripe / custom gateways):
 	"call_connector",
 	"list_connector_actions",
+	# Per-user durable memory (bench-owned Jarvis User Memory, one row per user):
+	# recall reads the current user's blob, remember full-replaces it. Scope is
+	# frappe.session.user (no user arg), so the model cannot reach another user's memory.
+	"recall",
+	"remember",
 )
 
 

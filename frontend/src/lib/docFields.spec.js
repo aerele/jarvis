@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { controlFor, normDateVal, panelField } from "./docFields";
+import { controlFor, markMissing, normDateVal, panelField } from "./docFields";
 
 describe("docFields", () => {
 	it("maps a fieldtype to its control", () => {
@@ -42,5 +42,41 @@ describe("docFields", () => {
 		);
 		expect(date.value).toBe("2026-01-02");
 		expect(panelField({ fieldname: "x", label: "X", fieldtype: "Data" }, null).value).toBe("");
+	});
+});
+
+// #603: a failed create names the empty required fields; the edit panel marks them.
+describe("markMissing", () => {
+	const meta = [
+		{ fieldname: "account_manager", label: "Account Manager", fieldtype: "Data", reqd: 1 },
+		{ fieldname: "gstin", label: "GSTIN", fieldtype: "Data", reqd: 0 },
+	];
+
+	it("marks a field already on the panel", () => {
+		const model = { fields: [panelField(meta[0], "")] };
+		markMissing(model, [{ fieldname: "account_manager" }], meta);
+		expect(model.fields[0].serverMissing).toBe(true);
+	});
+
+	it("adds a field meta does not mark required, so it can be filled", () => {
+		const model = { fields: [] };
+		markMissing(model, [{ fieldname: "gstin" }], meta);
+		expect(model.fields.map((f) => [f.fieldname, f.serverMissing])).toEqual([["gstin", true]]);
+	});
+
+	it("leaves child-row and unknown fields to the message", () => {
+		const model = { fields: [] };
+		markMissing(
+			model,
+			[{ fieldname: "qty", parentfield: "items" }, { fieldname: "nope" }],
+			meta
+		);
+		expect(model.fields).toEqual([]);
+	});
+
+	it("tolerates an error with no named fields", () => {
+		const model = { fields: [] };
+		markMissing(model, undefined, meta);
+		expect(model.fields).toEqual([]);
 	});
 });

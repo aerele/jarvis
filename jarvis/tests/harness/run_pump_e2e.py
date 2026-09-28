@@ -84,7 +84,14 @@ class E2E:
 
 		ts._ensure_control_row(self.target)
 		self.frappe.db.commit()
-		self.gateway = FakeGateway(cadence_ms=15.0, max_concurrent=4, lane_sim=True).start()
+		from jarvis.chat.runtime_profile import get_profile
+
+		self.gateway = FakeGateway(
+			message_metadata_key=get_profile().message_metadata_key,
+			cadence_ms=15.0,
+			max_concurrent=4,
+			lane_sim=True,
+		).start()
 		log(f"FakeGateway up at {self.gateway.ws_url}; shard={self.target}")
 
 	def teardown(self):

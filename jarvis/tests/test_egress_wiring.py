@@ -34,6 +34,13 @@ def _cache_rules(rules=_RULES):
 	egress_rules._invalidate_memo()
 
 
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
+
 class TestParseEventRedaction(FrappeTestCase):
 	def setUp(self):
 		_cache_rules()

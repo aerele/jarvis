@@ -251,7 +251,7 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	model a turn is charged to and which model the transcript credits.
 
 	Wire shape, verified against the shipped bundle of
-	ghcr.io/openclaw/openclaw:2026.6.8 (``buildGatewaySessionRow``): the row
+	gateway image version 2026.6.8 (``buildGatewaySessionRow``): the row
 	carries ``model`` + ``modelProvider``, resolved as the session's SELECTED
 	override when it has one, else the RUNTIME identity persisted on the session
 	entry after the run (``entry.model`` / ``entry.modelProvider``). The runtime

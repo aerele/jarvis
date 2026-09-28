@@ -8,6 +8,15 @@ inside the app.
 
 ## Branches and releases
 
+Runtime branding and upgrade tests use checksum-pinned snapshots of Admin-owned
+inputs, stored encoded under `jarvis/ci/data`. CI validates and decodes them into
+temporary files outside the checkout; no repository variables or credentials are
+needed. Review snapshot changes with their Admin source documents and checksum
+pins. Do not generate migration fixtures from production constants.
+
+For local validation, run `python -m jarvis.ci.inputs policy --output /tmp/jarvis-policy.json`
+then `python -m jarvis.ci.runtime_branding --policy /tmp/jarvis-policy.json`.
+
 | Branch | Role | What may merge into it |
 |---|---|---|
 | `develop` | default; all work lands here first | feature and fix PRs |
@@ -33,3 +42,13 @@ inside the app.
 - On a release PR the same check also fails unless `__version__` moved up and its major
   matches the line, so a release cannot ship without the bump.
 
+## Upgrade regression tests
+
+Legacy upgrade tests require the independently maintained Admin fixture. Set
+`JARVIS_LEGACY_MIGRATION_FIXTURES_FILE` to an absolute path to
+`integration_fixtures/legacy_migrations.json` in the Admin checkout before running
+these tests on a dedicated test site. For the pinned local snapshot, run
+`python -m jarvis.ci.inputs fixture --output /tmp/jarvis-migration-fixture.json`
+and set the environment variable to that file. CI uses this same snapshot. Missing inputs fail the tests; keep decoded copies
+outside this repository. See Admin's
+`jarvis_admin_v2/docs/legacy-migration-test-fixtures.md` for activation and commands.

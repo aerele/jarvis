@@ -668,6 +668,9 @@ def _lease_mirror_key(target: str) -> str:
 # A run's recorded step text lives on its relay lane, which a hop rebuilds, so
 # the pump keeps a copy for _reattach_lane to re-seed. Best-effort: a lost copy
 # only means the saved reply keeps its step text, exactly as before this feature.
+# Reads pass expires=True: on Frappe v15 a plain read keeps a local copy (even of
+# "nothing") that a later TTL write does not refresh, so the second step of a
+# turn would overwrite the first.
 RUN_STEPS_TTL_S = 3600
 
 
@@ -678,7 +681,7 @@ def _run_steps_key(run_id: str) -> str:
 def _append_run_step(run_id: str, raw: str) -> None:
 	try:
 		cache = frappe.cache()
-		steps = cache.get_value(_run_steps_key(run_id)) or []
+		steps = cache.get_value(_run_steps_key(run_id), expires=True) or []
 		cache.set_value(_run_steps_key(run_id), [*steps, raw], expires_in_sec=RUN_STEPS_TTL_S)
 	except Exception:
 		pass
@@ -686,7 +689,7 @@ def _append_run_step(run_id: str, raw: str) -> None:
 
 def _read_run_steps(run_id: str) -> list[str]:
 	try:
-		return list(frappe.cache().get_value(_run_steps_key(run_id)) or [])
+		return list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or [])
 	except Exception:
 		return []
 
@@ -1702,6 +1705,17 @@ def run_pump_hop(
 		except Exception:
 			pass
 		ts.reset_lock_tracking()
+		# Mux telemetry (RelayMux.stats(), read after mux.stop() above - the
+		# counters are plain ints, safe to read post-stop). reader_errors is the
+		# #1449-regression counter: a reader-thread routing bug on a known lane
+		# should never happen and must be visible in the hop line, not only
+		# discoverable via a live probe.
+		mux_stats: dict = {}
+		if ctx.mux is not None:
+			try:
+				mux_stats = ctx.mux.stats()
+			except Exception:
+				mux_stats = {}
 		# C4 pump occupancy + hop_duration_ms (replaces the obsolete worker_hold in
 		# pump mode: a hop is a shared drain, not a held worker-per-turn).
 		_telemetry(
@@ -1712,6 +1726,10 @@ def run_pump_hop(
 			exit=outcome,
 			occupancy=ctx.peak_occupancy,
 			duration_ms=round((_monotonic() - hop_started_mono) * 1000.0, 1),
+			reader_errors=mux_stats.get("reader_errors", 0),
+			stray_frames=mux_stats.get("stray_frames", 0),
+			deltas_dropped=mux_stats.get("deltas_dropped", 0),
+			lanes_quarantined=mux_stats.get("lanes_quarantined", 0),
 		)
 	return {"acquired": True, "exit": outcome, "epoch": epoch}
 

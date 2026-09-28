@@ -792,6 +792,10 @@ def add_connector(
 		# request leaves, and refused again in the connector controller so a raw
 		# DocType write cannot take the shortcut this rejects.
 		frappe.throw(_("This app connects with a key, not a sign-in."))
+	if auth_method != oauth.OAUTH_AUTH_METHOD and not catalog.accepts_key_of(preset):
+		# Its server takes only its own sign-in tokens (catalog accepts_key=False), so a
+		# pasted key could never work. Refused here and again in the controller.
+		frappe.throw(_("This app connects with a sign-in, not a key."))
 
 	if preset == catalog.CUSTOM_URL:
 		resolved_base_url = (base_url or "").strip()

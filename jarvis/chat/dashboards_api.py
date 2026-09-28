@@ -179,6 +179,8 @@ def _filter_defs_for_detail(doc) -> list[dict]:
 def _dashboard_detail(doc) -> dict:
 	"""Full dashboard detail for the editor/viewer. ``can_edit`` tells the SPA
 	whether to offer the edit surfaces to this session user."""
+	from jarvis.chat.canvas import strip_saved_host_client
+
 	return {
 		"name": doc.name,
 		"dashboard_title": doc.dashboard_title,
@@ -188,7 +190,7 @@ def _dashboard_detail(doc) -> dict:
 		"scope": doc.scope,
 		"target_role": doc.target_role or "",
 		"target_user": doc.target_user or "",
-		"html": doc.html or "",
+		"html": strip_saved_host_client(doc.html or ""),
 		"sources": [
 			{"source_name": s.source_name, "tool": s.tool, "spec": s.spec or ""} for s in (doc.sources or [])
 		],

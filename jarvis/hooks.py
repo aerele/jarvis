@@ -68,7 +68,7 @@ def __getattr__(name: str):
 # refreshes against the same client_id we used to mint.
 #
 # Source:
-#   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
+#   OpenAI: upstream device-code implementation (see workspace integration reference)
 #
 # Google Gemini is deliberately absent - its consumer login-with-Google was
 # discontinued by Google 2026-06-18 (subscription removed 2026-08-19); Gemini
@@ -210,7 +210,9 @@ website_redirects = [
 # needs that DocType sync does not produce has to be seeded here: the roles no
 # DocType names ("Knowledge Wiki Manager", the two support roles) plus the
 # Personalisation Settings defaults. See jarvis/install.py.
-after_install = "jarvis.install.after_install"
+after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_install"]
+
+before_migrate = "jarvis.legacy_compatibility.seed"
 
 # Tests run without an admin; seed the catalog snapshot from test fixtures.
 before_tests = "jarvis.tests.catalog_seed.seed_catalog_snapshot"
@@ -839,6 +841,16 @@ permission_query_conditions.update(
 	{
 		"Jarvis Pending Action": f"{_PA_CONTROLLER}.get_permission_query_conditions",
 		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+	}
+)
+
+# Per-user agent memory: one row per user, and every list/report read is scoped to
+# the caller's own row (the remember/recall tools additionally key on
+# frappe.session.user in code). One user of a tenant can never enumerate a colleague's
+# memory even via a raw ORM list.
+permission_query_conditions.update(
+	{
+		"Jarvis User Memory": "jarvis.jarvis.doctype.jarvis_user_memory.jarvis_user_memory.get_permission_query_conditions",
 	}
 )
 has_permission.update(

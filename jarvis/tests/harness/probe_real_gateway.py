@@ -1,10 +1,10 @@
 """R-21 guard — re-assert the protocol facts the fake gateway reproduces
-against the REAL pinned agent 2026.6.8 runtime, read-only, in a THROWAWAY
+against an explicitly selected runtime image, read-only, in a THROWAWAY
 container (never the running pool).
 
 Methodology matches spikes S1/S2 (which established the ordering + payload facts
 at file:line against the vendored source and asserted SYMBOL PRESENCE in the
-2026.6.8 image): here we re-confirm, in the image the pool actually runs, that
+2026.6.8 image): here we re-confirm, in the operator-selected image, that
 the tokens the harness depends on are present in /app/dist —
 
   * ack semantics       chat.send handler + idempotencyKey (ack runId echoes it)
@@ -24,11 +24,10 @@ container is discarded. The running pool containers are never touched.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
-
-IMAGE = "ghcr.io/openclaw/openclaw:2026.6.8"
 
 # token -> what it evidences
 REQUIRED = {
@@ -43,7 +42,7 @@ REQUIRED = {
 }
 
 
-def _grep_count(token: str) -> tuple[int, str]:
+def _grep_count(token: str, image: str) -> tuple[int, str]:
 	"""Return (file_count, first_file) for token across /app/dist, via a
 	throwaway container. Non-zero file_count == present."""
 	# -rl lists files containing the token; -F fixed-string (dots are literal).
@@ -55,7 +54,7 @@ def _grep_count(token: str) -> tuple[int, str]:
 		"none",
 		"--entrypoint",
 		"/bin/sh",
-		IMAGE,
+		image,
 		"-c",
 		f"grep -rlF -- '{token}' /app/dist 2>/dev/null | head -50",
 	]
@@ -68,28 +67,28 @@ def _grep_count(token: str) -> tuple[int, str]:
 	return (len(files), first)
 
 
-def run() -> dict:
+def run(image: str) -> dict:
 	# image present?
-	have = subprocess.run(["docker", "images", "-q", IMAGE], capture_output=True, text=True).stdout.strip()
+	have = subprocess.run(["docker", "images", "-q", image], capture_output=True, text=True).stdout.strip()
 	if not have:
-		return {"ok": False, "error": f"image {IMAGE} not present locally; cannot run R-21 probe"}
+		return {"ok": False, "error": f"image {image} not present locally; cannot run R-21 probe"}
 
 	results = {}
 	all_pass = True
 	for token, why in REQUIRED.items():
-		count, first = _grep_count(token)
+		count, first = _grep_count(token, image)
 		present = count > 0
 		all_pass = all_pass and present
 		results[token] = {"present": present, "files": count, "example": first, "evidence": why}
 
 	return {
 		"ok": all_pass,
-		"image": IMAGE,
+		"image": image,
 		"method": "throwaway `docker run --rm --network none`; read-only grep of /app/dist; running pool untouched",
 		"note": (
 			"S2 line-verified the ack-BEFORE-lane-enqueue ordering (chat-DFeIryVW.js respond(true,ackPayload) "
 			"at ~:2520 precedes embedded-agent enqueueCommandInLane) against 2026.6.11 source; this probe "
-			"re-confirms the symbols exist in the pinned 2026.6.8 image the pool runs (parity), matching the "
+			"checks symbol presence in the selected image, matching the "
 			"S1/S2 presence-assertion methodology. A behavioral ordering probe against the live stack was "
 			"deliberately NOT run (R-21 is read-only)."
 		),
@@ -98,7 +97,10 @@ def run() -> dict:
 
 
 def main():
-	r = run()
+	parser = argparse.ArgumentParser(description=__doc__)
+	parser.add_argument("--image", required=True, help="Exact locally available runtime image to inspect")
+	args = parser.parse_args()
+	r = run(args.image)
 	print(json.dumps(r, indent=2))
 	sys.exit(0 if r.get("ok") else 1)
 

@@ -1,7 +1,7 @@
-"""Drop legacy bench-side OAuth fields (now owned by openclaw inside the container).
+"""Drop legacy bench-side OAuth fields (now owned by the agent inside the container).
 
-REV-1 of the openclaw subscription work moves OAuth credential state into
-the container's auth-profiles.json - openclaw refreshes tokens internally
+REV-1 of the agent subscription work moves OAuth credential state into
+the container's auth-profiles.json - the agent refreshes tokens internally
 via pi-ai. The bench no longer keeps refresh_token / access_token / expiry
 on Jarvis Settings.
 
