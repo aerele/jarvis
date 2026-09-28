@@ -1973,3 +1973,9 @@ class TestReadinessWorkerFields(FrappeTestCase):
 			r = account.is_ready_for_chat()
 			self.assertFalse(r.get("worker_warning"))
 			self.assertNotIn("worker_blocked", r)
+
+
+def setUpModule():
+	from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+	install_synthetic_runtime_profile()
