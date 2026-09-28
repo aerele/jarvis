@@ -15,7 +15,6 @@ import { mount, flushPromises } from "@vue/test-utils";
  */
 
 const api = vi.hoisted(() => ({
-	installAgent: vi.fn(),
 	runAgentNow: vi.fn(),
 	setAgentConfig: vi.fn(),
 	setAgentEnabled: vi.fn(),
@@ -28,6 +27,7 @@ vi.mock("@/api", () => api);
 
 const apiAgents = vi.hoisted(() => ({
 	getAgent: vi.fn(),
+	installAgent: vi.fn(),
 	getInstallationActivation: vi.fn(),
 	// T6: AgentDetail's own pre-install gate probe (getAgentModel/
 	// getEligibleModels). Left unconfigured (resolves undefined -> null) in
@@ -313,7 +313,7 @@ describe("doctypes_required renders as Reads these records chips", () => {
 
 describe("install-failure reason stays visible until the next attempt", () => {
 	it("shows the error inline under Install, not only via toast", async () => {
-		api.installAgent.mockRejectedValueOnce(new Error("no seats left"));
+		apiAgents.installAgent.mockRejectedValueOnce(new Error("no seats left"));
 		const w = await mountDetail(baseAgent({ installation: null }));
 		const installBtn = w
 			.findAll("button")
@@ -324,7 +324,7 @@ describe("install-failure reason stays visible until the next attempt", () => {
 	});
 
 	it("clears the inline error on the next attempt", async () => {
-		api.installAgent.mockRejectedValueOnce(new Error("no seats left"));
+		apiAgents.installAgent.mockRejectedValueOnce(new Error("no seats left"));
 		const w = await mountDetail(baseAgent({ installation: null }));
 		const installBtn = () =>
 			w.findAll("button").find((b) => b.attributes("data-label") === "Install");
@@ -332,7 +332,7 @@ describe("install-failure reason stays visible until the next attempt", () => {
 		await flushPromises();
 		expect(w.text()).toContain("no seats left");
 
-		api.installAgent.mockResolvedValueOnce({ ok: true });
+		apiAgents.installAgent.mockResolvedValueOnce({ ok: true });
 		await installBtn().trigger("click");
 		await flushPromises();
 		expect(w.text()).not.toContain("no seats left");
@@ -358,7 +358,7 @@ describe("Install is disabled for an Administrator session (jarvis#1062 polish)"
 			.find((b) => b.attributes("data-label") === "Install");
 		await installBtn.trigger("click");
 		await flushPromises();
-		expect(api.installAgent).not.toHaveBeenCalled();
+		expect(apiAgents.installAgent).not.toHaveBeenCalled();
 	});
 
 	it("a named (non-Administrator) user sees no such hint and can install", async () => {
@@ -377,7 +377,7 @@ describe("T6: install-time model gate (flag on + the listing declares a min_mode
 			enforced: 0,
 			min_model: { tier: "Advanced" },
 		});
-		api.installAgent.mockResolvedValue({ ok: true });
+		apiAgents.installAgent.mockResolvedValue({ ok: true });
 		const w = await mountDetail(baseAgent({ installation: null }));
 		await flushPromises();
 		const installBtn = w
@@ -386,12 +386,12 @@ describe("T6: install-time model gate (flag on + the listing declares a min_mode
 		await installBtn.trigger("click");
 		await flushPromises();
 		expect(w.find(".agent-install-dialog").exists()).toBe(false);
-		expect(api.installAgent).toHaveBeenCalledWith("close-auditor");
+		expect(apiAgents.installAgent).toHaveBeenCalledWith("close-auditor", undefined);
 	});
 
 	it("flag on, no requirement: Install installs straight away too", async () => {
 		apiAgents.getAgentModel.mockResolvedValue({ enforced: 1, min_model: null });
-		api.installAgent.mockResolvedValue({ ok: true });
+		apiAgents.installAgent.mockResolvedValue({ ok: true });
 		const w = await mountDetail(baseAgent({ installation: null }));
 		await flushPromises();
 		const installBtn = w
@@ -400,7 +400,7 @@ describe("T6: install-time model gate (flag on + the listing declares a min_mode
 		await installBtn.trigger("click");
 		await flushPromises();
 		expect(w.find(".agent-install-dialog").exists()).toBe(false);
-		expect(api.installAgent).toHaveBeenCalled();
+		expect(apiAgents.installAgent).toHaveBeenCalled();
 	});
 
 	it("flag on + a requirement: Install opens the confirm dialog instead of installing", async () => {
@@ -417,7 +417,7 @@ describe("T6: install-time model gate (flag on + the listing declares a min_mode
 		await installBtn.trigger("click");
 		await flushPromises();
 		expect(w.find(".agent-install-dialog").exists()).toBe(true);
-		expect(api.installAgent).not.toHaveBeenCalled();
+		expect(apiAgents.installAgent).not.toHaveBeenCalled();
 	});
 
 	it("the dialog's confirm event installs, exactly like a direct click would", async () => {
@@ -426,7 +426,7 @@ describe("T6: install-time model gate (flag on + the listing declares a min_mode
 			min_model: { tier: "Advanced" },
 			required_tier: "Advanced",
 		});
-		api.installAgent.mockResolvedValue({ ok: true });
+		apiAgents.installAgent.mockResolvedValue({ ok: true });
 		const w = await mountDetail(baseAgent({ installation: null }));
 		await flushPromises();
 		await w
@@ -436,7 +436,32 @@ describe("T6: install-time model gate (flag on + the listing declares a min_mode
 		await flushPromises();
 		w.findComponent({ name: "AgentInstallDialog" }).vm.$emit("confirm");
 		await flushPromises();
-		expect(api.installAgent).toHaveBeenCalledWith("close-auditor");
+		expect(apiAgents.installAgent).toHaveBeenCalledWith("close-auditor", undefined);
+	});
+
+	it("the dialog's changed pick rides the install call itself", async () => {
+		apiAgents.getAgentModel.mockResolvedValue({
+			enforced: 1,
+			min_model: { tier: "Advanced" },
+			required_tier: "Advanced",
+		});
+		apiAgents.installAgent.mockResolvedValue({ ok: true });
+		const w = await mountDetail(baseAgent({ installation: null }));
+		await flushPromises();
+		await w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Install")
+			.trigger("click");
+		await flushPromises();
+		const dialog = w.findComponent({ name: "AgentInstallDialog" });
+		dialog.vm.$emit("confirm", { provider: "openai", model: "gpt-5" });
+		dialog.vm.$emit("confirm", { provider: "openai", model: "gpt-5" }); // same tick: dropped
+		await flushPromises();
+		expect(apiAgents.installAgent).toHaveBeenCalledTimes(1);
+		expect(apiAgents.installAgent).toHaveBeenCalledWith("close-auditor", {
+			provider: "openai",
+			model: "gpt-5",
+		});
 	});
 
 	it("a confirmed empty eligible set disables Install with the Unavailable-style reason", async () => {

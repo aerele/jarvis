@@ -1044,15 +1044,17 @@ function install() {
 	}
 	return doInstall();
 }
-function onInstallDialogConfirm() {
+// `pick`: the dialog's changed model, if any - install_agent saves it with the install.
+function onInstallDialogConfirm(pick) {
+	if (installing.value) return;
 	installDialogOpen.value = false;
-	doInstall();
+	doInstall(pick);
 }
 
-async function doInstall() {
+async function doInstall(pick) {
 	installing.value = true;
 	installError.value = "";
-	const p = api.installAgent(props.slug);
+	const p = apiAgents.installAgent(props.slug, pick);
 	toast.promise(p, {
 		loading: "Installing…",
 		success: () => `${agent.value.title} installed`,
