@@ -4682,6 +4682,7 @@ import {
 	clearHold,
 	recheck as recheckMaintenance,
 } from "@/maintenanceGate";
+import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
@@ -11904,6 +11905,7 @@ onMounted(async () => {
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	document.addEventListener("visibilitychange", onVisibility);
 	// Auto-heal (layered design, phase 1): window `focus` closes the gap visibility
@@ -12113,6 +12115,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
 	window.removeEventListener("focus", onResync);

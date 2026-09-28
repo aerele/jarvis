@@ -668,6 +668,9 @@ def _lease_mirror_key(target: str) -> str:
 # A run's recorded step text lives on its relay lane, which a hop rebuilds, so
 # the pump keeps a copy for _reattach_lane to re-seed. Best-effort: a lost copy
 # only means the saved reply keeps its step text, exactly as before this feature.
+# Reads pass expires=True: on Frappe v15 a plain read keeps a local copy (even of
+# "nothing") that a later TTL write does not refresh, so the second step of a
+# turn would overwrite the first.
 RUN_STEPS_TTL_S = 3600
 
 
@@ -678,7 +681,7 @@ def _run_steps_key(run_id: str) -> str:
 def _append_run_step(run_id: str, raw: str) -> None:
 	try:
 		cache = frappe.cache()
-		steps = cache.get_value(_run_steps_key(run_id)) or []
+		steps = cache.get_value(_run_steps_key(run_id), expires=True) or []
 		cache.set_value(_run_steps_key(run_id), [*steps, raw], expires_in_sec=RUN_STEPS_TTL_S)
 	except Exception:
 		pass
@@ -686,7 +689,7 @@ def _append_run_step(run_id: str, raw: str) -> None:
 
 def _read_run_steps(run_id: str) -> list[str]:
 	try:
-		return list(frappe.cache().get_value(_run_steps_key(run_id)) or [])
+		return list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or [])
 	except Exception:
 		return []
 
@@ -1702,6 +1705,17 @@ def run_pump_hop(
 		except Exception:
 			pass
 		ts.reset_lock_tracking()
+		# Mux telemetry (RelayMux.stats(), read after mux.stop() above - the
+		# counters are plain ints, safe to read post-stop). reader_errors is the
+		# #1449-regression counter: a reader-thread routing bug on a known lane
+		# should never happen and must be visible in the hop line, not only
+		# discoverable via a live probe.
+		mux_stats: dict = {}
+		if ctx.mux is not None:
+			try:
+				mux_stats = ctx.mux.stats()
+			except Exception:
+				mux_stats = {}
 		# C4 pump occupancy + hop_duration_ms (replaces the obsolete worker_hold in
 		# pump mode: a hop is a shared drain, not a held worker-per-turn).
 		_telemetry(
@@ -1712,6 +1726,10 @@ def run_pump_hop(
 			exit=outcome,
 			occupancy=ctx.peak_occupancy,
 			duration_ms=round((_monotonic() - hop_started_mono) * 1000.0, 1),
+			reader_errors=mux_stats.get("reader_errors", 0),
+			stray_frames=mux_stats.get("stray_frames", 0),
+			deltas_dropped=mux_stats.get("deltas_dropped", 0),
+			lanes_quarantined=mux_stats.get("lanes_quarantined", 0),
 		)
 	return {"acquired": True, "exit": outcome, "epoch": epoch}
 
@@ -2220,6 +2238,13 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 			except Exception:
 				pass
 		frappe.db.commit()
+		# jarvis#1425 review (live e2e2, 2026-09-27): a definite pre-ack
+		# rejection moves the Turn out of dispatching (ts.dispatch_errored
+		# above) without going through invoke_settlement or turn_handler -
+		# poke directly, right after this terminal's own commit.
+		from jarvis.chat import llm_switch
+
+		llm_switch.apply_if_active(source="pump._handle_ack_failure")
 		_seal_file_box_sheet(rs.conversation, run_id)
 		if rs.owner:
 			# SUX-11: a definite pre-ack rejection is a real error — publish run:error
@@ -3099,6 +3124,12 @@ def _mark_recovering_mirror(
 			pump_epoch=pump_epoch,
 			relay_target_id=relay_target_id,
 		)
+	# jarvis#1425 review (scoped re-review, 2026-09-27): recovering is NOT an
+	# in-flight state (admission._INFLIGHT_STATES) - a park here frees up
+	# capacity for a held switch exactly like a terminal write does.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump._mark_recovering_mirror")
 	return True
 
 
@@ -3142,6 +3173,12 @@ def _settle_recover_errored(
 			error=err,
 			code=_classify_error(err),
 		)
+	# jarvis#1425 review (live e2e2, 2026-09-27): this path settles WITHOUT
+	# going through invoke_settlement (settlement.py's own poke does not cover
+	# it) - poke directly, right after this terminal's own commit(s) above.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump._settle_recover_errored")
 	return True
 
 
@@ -3494,6 +3531,13 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 	# GAP 1 (Track B): record that the recovery machinery ran to completion, for the
 	# bench heartbeat's watchdog_last_completed_age signal.
 	frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+	# jarvis#1425 review (scoped re-review, 2026-09-27): this sweep moves turns out
+	# of every in-flight state (mark_recovering, cancel_queued_max_age,
+	# recover_to_queued, _settle_recover_errored - all inside _watchdog_shard) -
+	# one poke at the end covers the whole cycle instead of one per transition.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump.watchdog")
 	return summary
 
 

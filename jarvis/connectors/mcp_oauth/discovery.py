@@ -33,7 +33,6 @@ budget, not the per-hop one, is what actually bounds a caller.
 from __future__ import annotations
 
 import json
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -43,10 +42,6 @@ from jarvis.connectors import mcp_wire
 from jarvis.connectors.mcp_oauth import transport as transport_module
 from jarvis.connectors.mcp_oauth.canonical import canonical_resource, resource_covers
 from jarvis.connectors.mcp_oauth.errors import OAuthDiscoveryError
-
-# Matches quoted key="value" params in a WWW-Authenticate challenge, e.g.
-# ``Bearer error="invalid_request", resource_metadata="https://...", scope="a b"``.
-_CHALLENGE_PARAM_RE = re.compile(r'([A-Za-z][A-Za-z0-9_-]*)\s*=\s*"([^"]*)"')
 
 _RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
 _AS_8414_PATH = "/.well-known/oauth-authorization-server"  # RFC 8414
@@ -123,10 +118,6 @@ class Discovery:
 	#: wire as the resource indicator, because a server that declares
 	#: ``https://host/mcp/`` may well reject the slashless form of its own name.
 	resource_declared: str = ""
-
-
-def _parse_www_authenticate(value: str) -> dict:
-	return dict(_CHALLENGE_PARAM_RE.findall(value))
 
 
 class _Budget:
@@ -239,7 +230,7 @@ def _challenge_params(result) -> dict:
 	challenge_header = result.headers.get("www-authenticate")
 	if not challenge_header:
 		return {}
-	return _parse_www_authenticate(challenge_header)
+	return mcp_wire.challenge_params(challenge_header)
 
 
 def _get_json(

@@ -1213,6 +1213,14 @@ def _materialize_promotion(req, roles=None) -> dict:
 			)
 			new.insert(ignore_permissions=True)
 			new_name = new.name
+			# Deliberately NOT carrying the source's "Approve & run" arm (owner
+			# decision, code review on #580): allow_approve_run stays 0 on a fresh
+			# copy. Copying it would both bypass _guard_allow_approve_run_enable
+			# (admin-only 0->1) and trust the LIVE source's arm state against the
+			# request's own IMMUTABLE reviewed snapshot (a TOCTOU - the source could
+			# be armed after the snapshot was taken, by someone who never reviewed
+			# THIS content). A Jarvis Admin arms the new copy afterwards through the
+			# existing toggle, same as any other skill.
 	finally:
 		frappe.flags.jarvis_promotion_materialize = prev_flag
 	# Own the shared copy as the system identity, not the approving reviewer: the

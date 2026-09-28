@@ -570,3 +570,58 @@ class TestCompactionEventPublishesRunStatus(FrappeTestCase):
 			)
 		statuses = [c.args[1]["status"] for c in pub.call_args_list if c.args[1]["kind"] == "run:status"]
 		self.assertEqual(statuses, ["compacting", "compacted"])
+
+
+class TestMaybeApplyLlmSwitch(FrappeTestCase):
+	"""jarvis#1425 review (live e2e2, 2026-09-27): on the default chat path a
+	normal reply ending must nudge a HELD switch forward directly at the
+	assistant message's own terminal write, not rely solely on admission's
+	settle hooks (which a run_id gap on this path can miss). Covers the
+	trigger itself plus its wiring into both terminal-write exits
+	(``_mark_errored`` for error/abandon; the clean lifecycle.end commit is
+	covered by TestRunAgentTurnRelayTerminals-style coverage in
+	test_chat_worker.py owning that path's behavior)."""
+
+	def test_calls_try_apply_when_a_switch_is_active(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			turn_handler._maybe_apply_llm_switch()
+		try_apply.assert_called_once()
+
+	def test_skips_try_apply_when_no_switch_is_active(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=False),
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			turn_handler._maybe_apply_llm_switch()
+		try_apply.assert_not_called()
+
+	def test_never_raises_when_llm_switch_blows_up(self):
+		from jarvis.chat import llm_switch
+
+		with patch.object(llm_switch, "is_active", side_effect=RuntimeError("redis down")):
+			turn_handler._maybe_apply_llm_switch()  # must not raise
+
+	def test_mark_errored_triggers_the_switch_poke_after_its_own_commit(self):
+		with (
+			patch("frappe.db.set_value") as set_value,
+			patch("frappe.db.commit") as commit,
+			patch.object(turn_handler, "_maybe_apply_llm_switch") as poke,
+		):
+			manager = MagicMock()
+			manager.attach_mock(set_value, "set_value")
+			manager.attach_mock(commit, "commit")
+			manager.attach_mock(poke, "poke")
+			turn_handler._mark_errored("m1", "boom")
+		# The poke must run, and strictly AFTER the terminal write's own commit -
+		# the whole point is that _inflight()'s read sees streaming=0 already.
+		names = [c[0] for c in manager.mock_calls]
+		self.assertIn("commit", names)
+		self.assertIn("poke", names)
+		self.assertLess(names.index("commit"), names.index("poke"))

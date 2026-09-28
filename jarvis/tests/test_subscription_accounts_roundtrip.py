@@ -76,6 +76,19 @@ class TestSubscriptionAccountsRoundTrip(_RT3SettingsTestCase):
 		s.db_set("preset", "", update_modified=False)
 		s.db_set("routing_mode", "failover", update_modified=False)
 		s.db_set("proxy_active", 0, update_modified=False)
+		# Task 5 finding: _is_pool_switch()'s "ever synced" guard reads
+		# llm_pool_synced_at/llm_direct_synced_at off get_doc_before_save(), and
+		# neither is in _SNAPSHOT_PLAIN_FIELDS (only restored at tearDownClass) -
+		# an earlier test method's self._save() in THIS class leaves
+		# llm_pool_synced_at stamped, so a later test's own "initial" self._save()
+		# (with proxy_active freshly reset to 0 above) reads as a real 0->1 proxy
+		# flip on an "ever synced" doc and is wrongly routed through the switch
+		# (llm_switch.begin, async job) instead of the direct sync_pool_now() the
+		# test's own with-block mock expects to be called inside. Reset both here
+		# so every test method starts from a true "never synced" baseline, same
+		# as test_save_llm_pool_operation.py's own setUp.
+		s.db_set("llm_pool_synced_at", None, update_modified=False)
+		s.db_set("llm_direct_synced_at", None, update_modified=False)
 		frappe.db.commit()
 
 	def _save(self):

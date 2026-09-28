@@ -959,6 +959,29 @@ def _admission_settle(run_id: str, state: str, error: str | None = None) -> None
 		frappe.log_error(title="admission settle hook", message=frappe.get_traceback())
 
 
+def _maybe_apply_llm_switch() -> None:
+	"""jarvis#1425 review (live e2e2, 2026-09-27): on the DEFAULT chat path
+	(admission disabled, no Jarvis Chat Turn table - e2e2's shape), a normal
+	reply ending previously drove the held switch forward only through
+	``admission.settle_turn``'s own ``finally`` (``_try_llm_switch_apply``),
+	which needs a ``run_id`` this legacy path may not always carry cleanly to
+	that call. This is the DIRECT trigger at the assistant message's own
+	terminal write - streaming flips 1 -> 0 right before this runs, so
+	``llm_switch._inflight()``'s read (right after, inside ``try_apply``) sees
+	it. Called on BOTH the success (clean lifecycle.end) and every
+	error/abandon terminal (``_mark_errored``) exit of this worker, right
+	after the streaming=0 write's own commit. Delegates to
+	``llm_switch.apply_if_active()`` - the same shared poke ``chat/
+	settlement.py`` and the pump's own recovery-errored path call after
+	THEIR terminal writes, so a switch applies the moment nothing is left in
+	flight on every chat surface, not just this legacy one. The existing
+	settle_turn / settle_conversation_dispatching triggers stay - this is
+	additive, and the poke is itself idempotent."""
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="turn_handler")
+
+
 @dataclass
 class _PreparedPrompt:
 	"""The assembled, ready-to-send turn prompt + its bootstrap metadata. Produced
@@ -1056,9 +1079,32 @@ def assemble_prompt(
 	# (the container has a single role-blind custom_skills dir), so for those the
 	# clause tells the agent to fetch the body with jarvis__get_skill rather than
 	# asserting a directory that does not exist.
-	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
+	from jarvis.chat.custom_skills import (
+		armed_skill_clause,
+		invoked_skill_clause,
+		invoked_skill_slugs,
+		learned_skill_clause,
+	)
 
-	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
+	# Resolve invoked_skill_slugs ONCE under chat_user (the message's actual
+	# sender, not frappe.session.user - which can be a pump worker's exec
+	# identity in managed-pump mode) and hand the SAME set to both clauses
+	# below (code review on #580): before this fix invoked_skill_clause
+	# resolved its own set under the ambient session user while
+	# armed_skill_clause resolved under chat_user, so the two could disagree
+	# on identity, and each paid for its own table scan.
+	turn_invoked_slugs = invoked_skill_slugs(user_message or "", user=chat_user)
+	skill_clause = invoked_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
+	# Armed-skill first-write fix (issue #580, found on live e2e): silent once a
+	# run is already approved (autorun_run above takes over) or an armed macro
+	# is already running (armed_run above already tells the agent to call every
+	# write tool directly, create/update included) - only meaningful BEFORE
+	# either kind of run has opened.
+	armed_skill_run_clause = (
+		""
+		if (conv.skill_autorun or conv.skip_confirmation)
+		else armed_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
+	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -1161,7 +1207,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{armed_skill_run_clause}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
@@ -1778,6 +1824,7 @@ def handle_chat_send(payload: dict) -> None:
 		# Streaming exited cleanly via lifecycle.end
 		frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
 		frappe.db.commit()
+		_maybe_apply_llm_switch()
 
 		# Canvas + generated-image persistence and publish (extracted so
 		# snapshot recovery can deliver the same rich outputs for a turn
@@ -2579,6 +2626,7 @@ def _mark_errored(assistant_msg_name: str, error: str) -> None:
 		},
 	)
 	frappe.db.commit()
+	_maybe_apply_llm_switch()
 
 
 def _mark_recovering(assistant_msg_name: str) -> None:

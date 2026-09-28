@@ -51,6 +51,7 @@ class JarvisConnector(Document):
 		self._validate_base_url()
 		self._guard_shared_scope()
 		self._guard_oauth_fields()
+		self._guard_key_accepted()
 		self._enforce_uniqueness()
 
 	def _pin_preset_base_url(self) -> None:
@@ -173,6 +174,22 @@ class JarvisConnector(Document):
 			# A key-only or no-credential app, or a preset the catalog does not carry
 			# at all. Neither has a sign-in, so neither may claim one.
 			frappe.throw(_("This app connects with a key, not a sign-in."), frappe.PermissionError)
+
+	def _guard_key_accepted(self) -> None:
+		"""A preset whose server takes only its own sign-in tokens (catalog
+		``accepts_key=False``, the Google presets) may not be saved as a key row: the
+		defense-in-depth copy of ``add_connector``'s refusal, for a raw DocType write.
+		Checked only when the row is new or its auth method or preset changes, so an
+		older key row still saves on a disable or relabel. Server writes under
+		``ignore_permissions`` skip it, as in ``_guard_oauth_fields``."""
+		from jarvis.connectors import catalog
+
+		if self.flags.ignore_permissions or (self.auth_method or "") == "OAuth":
+			return
+		if not (self.is_new() or self.has_value_changed("auth_method") or self.has_value_changed("preset")):
+			return
+		if not catalog.accepts_key_of(self.preset or ""):
+			frappe.throw(_("This app connects with a sign-in, not a key."), frappe.PermissionError)
 
 	def _guard_discovery_oauth(self) -> None:
 		"""Sign-in engine only (a Custom URL row, or a ``dcr``/``static`` catalog

@@ -221,6 +221,7 @@ before_tests = "jarvis.tests.catalog_seed.seed_catalog_snapshot"
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	"jarvis.chat.runtime_profile.after_migrate",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows
 	# from the detector registry (best-effort; never blocks a migrate).
@@ -843,9 +844,35 @@ permission_query_conditions.update(
 		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.get_permission_query_conditions",
 	}
 )
+
+# Per-user agent memory: one row per user, and every list/report read is scoped to
+# the caller's own row (the remember/recall tools additionally key on
+# frappe.session.user in code). One user of a tenant can never enumerate a colleague's
+# memory even via a raw ORM list.
+permission_query_conditions.update(
+	{
+		"Jarvis User Memory": "jarvis.jarvis.doctype.jarvis_user_memory.jarvis_user_memory.get_permission_query_conditions",
+	}
+)
 has_permission.update(
 	{
 		"Jarvis Pending Action": f"{_PA_CONTROLLER}.has_permission",
 		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.has_permission",
 	}
 )
+
+# ---------------------------------------------------------------------------
+# llm_switch (jarvis#1425 follow-up)
+# ---------------------------------------------------------------------------
+# frappe.cache_manager.clear_cache()'s "everything" branch deletes every
+# site-prefixed redis key except one matched (as a PREFIX) by an entry here -
+# without this, any frappe.clear_cache() (e.g. pump.py's watchdog stamping a
+# __default via frappe.db.set_default, which frappe.defaults._clear_cache
+# turns into a full clear_cache()) wipes the active switch record mid-hold or
+# mid-apply: the banner clears, the poller sees no switch, and a still-running
+# handover/pool job's own finish() then hits a record that is simply gone
+# (live e2e2, 2026-09-27 - the record vanished at 18:26:04 and 18:42:07,
+# once before its job was ever released and once while the job was still
+# running). Redis locks (jarvis._redis_lock) are unaffected: they use
+# cache.lock() with a raw, unprefixed key, never this site-prefixed cache.
+persistent_cache_keys = ["jarvis:llm_switch"]
