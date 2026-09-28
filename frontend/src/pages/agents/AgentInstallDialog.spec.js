@@ -4,6 +4,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 const apiAgents = vi.hoisted(() => ({
 	getEligibleModels: vi.fn(),
 	setAgentModel: vi.fn(),
+	getAgentModel: vi.fn(),
 }));
 vi.mock("@/api/agents", () => apiAgents);
 
@@ -41,7 +42,13 @@ vi.mock("./AgentModelPicker.vue", () => ({
 		name: "AgentModelPicker",
 		props: ["eligible", "loading", "current", "saving"],
 		emits: ["select"],
-		template: `<div class="picker" :data-saving="saving"><button data-testid="pick-other" @click="$emit('select', { provider: 'openai', model: 'gpt-5' })">pick other</button></div>`,
+		// "pick-third" is a distinct value from both the auto-pick (OPUS) and
+		// "pick-other" (openai/gpt-5) - needed for UX4-1's different-pick-retry
+		// tests, which need to tell a stale pick apart from a new one.
+		template: `<div class="picker" :data-saving="saving">
+			<button data-testid="pick-other" @click="$emit('select', { provider: 'openai', model: 'gpt-5' })">pick other</button>
+			<button data-testid="pick-third" @click="$emit('select', { provider: 'anthropic', model: 'claude-haiku-5' })">pick third</button>
+		</div>`,
 	},
 }));
 vi.mock("@/lib/errors", () => ({
@@ -554,7 +561,7 @@ describe("AgentInstallDialog confirmInstall client-side timeout (FE3-2)", () => 
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
 
-	it("a stalled setAgentModel times out: error toast, saving clears, no confirm", async () => {
+	it("a stalled setAgentModel times out: honest error toast, saving clears, no confirm", async () => {
 		mockTwoModels();
 		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // never resolves
 		const w = mountDialog();
@@ -564,7 +571,11 @@ describe("AgentInstallDialog confirmInstall client-side timeout (FE3-2)", () => 
 
 		await vi.advanceTimersByTimeAsync(15000);
 		const { toast } = await import("frappe-ui");
-		expect(toast.error).toHaveBeenCalledWith("Saving the model took too long. Try again.");
+		// UX4-1: the request is NOT actually cancelled (no AbortSignal to do it
+		// with), so the copy no longer claims otherwise.
+		expect(toast.error).toHaveBeenCalledWith(
+			"Still saving your model choice. Wait a moment, then try again."
+		);
 		expect(w.find('[data-label="Cancel"]').attributes("disabled")).toBeUndefined();
 		expect(w.find('[data-label="Close"]').attributes("disabled")).toBeUndefined();
 		expect(w.emitted("confirm")).toBeUndefined();
@@ -626,5 +637,115 @@ describe("AgentInstallDialog confirmInstall client-side timeout (FE3-2)", () => 
 		const { toast } = await import("frappe-ui");
 		await vi.advanceTimersByTimeAsync(15000);
 		expect(toast.error).not.toHaveBeenCalled();
+	});
+});
+
+// UX4-1 review fix: the timeout only released the DIALOG - it never cancelled
+// the stalled setAgentModel (call() has no AbortSignal to do it with). A
+// same-pick retry is idempotent and just proceeds; a different-pick retry
+// must wait for the stale one to settle first, or it could land after and
+// silently overwrite the newer tenant-wide choice.
+describe("AgentInstallDialog stale-save handling after a timeout (UX4-1)", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it("a stalled save then a SAME-pick retry proceeds immediately (idempotent, no wait)", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValueOnce(new Promise(() => {})); // 1st call stalls forever
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w); // picks openai/gpt-5, Install -> 1st call
+
+		await vi.advanceTimersByTimeAsync(15000);
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledWith(
+			"Still saving your model choice. Wait a moment, then try again."
+		);
+
+		apiAgents.setAgentModel.mockResolvedValueOnce({}); // the retry succeeds
+		await w.find('[data-label="Install"]').trigger("click"); // SAME pick (gpt-5)
+		await flushPromises();
+
+		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(2);
+		expect(apiAgents.setAgentModel).toHaveBeenLastCalledWith(
+			"close-auditor",
+			"openai",
+			"gpt-5"
+		);
+		expect(w.text()).not.toContain("Finishing the previous save");
+		expect(w.emitted("confirm")).toHaveLength(1);
+	});
+
+	it("a stalled save then a DIFFERENT-pick retry waits for the stale one to settle before sending the new pick", async () => {
+		mockTwoModels();
+		let resolveStale;
+		const calls = [];
+		apiAgents.setAgentModel.mockImplementation((_agent, provider, model) => {
+			calls.push(`${provider}/${model}`);
+			if (provider === "openai") {
+				return new Promise((resolve) => {
+					resolveStale = resolve;
+				});
+			}
+			return Promise.resolve({});
+		});
+		apiAgents.getAgentModel.mockResolvedValue({
+			choice: { provider: "anthropic", model: "claude-haiku-5", label: "Claude Haiku" },
+		});
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w); // picks openai/gpt-5, Install -> stalls
+
+		await vi.advanceTimersByTimeAsync(15000);
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledWith(
+			"Still saving your model choice. Wait a moment, then try again."
+		);
+
+		// Change to a DIFFERENT pick and retry.
+		await w.find('[data-label="Change"]').trigger("click");
+		await w.find('[data-testid="pick-third"]').trigger("click"); // anthropic/claude-haiku-5
+		await flushPromises();
+		await w.find('[data-label="Install"]').trigger("click");
+		await flushPromises();
+
+		// The new pick must NOT have been sent yet - still waiting on the stale one.
+		expect(calls).toEqual(["openai/gpt-5"]);
+		expect(w.text()).toContain("Finishing the previous save");
+		expect(w.emitted("confirm")).toBeUndefined();
+
+		resolveStale({}); // the stale save finally lands
+		await flushPromises();
+
+		expect(calls).toEqual(["openai/gpt-5", "anthropic/claude-haiku-5"]);
+		expect(w.emitted("confirm")).toHaveLength(1);
+	});
+
+	it("re-fetches the tenant-wide choice on reopen after a timeout, instead of trusting stale modelInfo", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // stalls forever
+		apiAgents.getAgentModel.mockResolvedValue({
+			choice: {
+				provider: "openai",
+				model: "gpt-5",
+				label: "GPT-5",
+				capability_tier: "Advanced",
+				cost_note: "",
+			},
+		});
+		const w = mountDialog({ modelInfo: null });
+		await flushPromises();
+		await startChangedInstall(w); // picks openai/gpt-5, Install -> stalls
+		await vi.advanceTimersByTimeAsync(15000);
+
+		// Close and reopen (props.modelInfo is still null - the parent hasn't
+		// re-fetched it).
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+
+		expect(apiAgents.getAgentModel).toHaveBeenCalledWith("close-auditor");
+		expect(w.text()).toContain("GPT-5");
+		expect(w.text()).toContain("Already set for everyone using this agent.");
 	});
 });
