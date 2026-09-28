@@ -648,6 +648,7 @@
 			:agent-slug="props.slug"
 			:agent-title="agent.title"
 			:required-tier="(modelInfo && modelInfo.required_tier) || ''"
+			:model-info="modelInfo"
 			:installing="installing"
 			:is-admin="isSM"
 			@confirm="onInstallDialogConfirm"
