@@ -1,9 +1,32 @@
 <template>
 	<Dialog
 		:modelValue="modelValue"
-		:options="{ title: `Install ${agentTitle}?` }"
+		:options="{ title: dialogTitle }"
 		@update:modelValue="onClose"
 	>
+		<!-- FE3-1 review fix: Dialog's own default #body-header renders an X that
+		     closes unconditionally - while saving it was inert (onClose ignores
+		     it) but, unlike Cancel, gave no disabled/aria-disabled signal. This
+		     reproduces that default (title markup + DialogTitle for the
+		     aria-labelledby reka wires up - see SettingsDialog.vue's #body
+		     override for the same requirement) with the close button gated the
+		     same way Cancel is. -->
+		<template #body-header>
+			<div class="mb-6 flex items-center justify-between">
+				<DialogTitle as="header">
+					<h3 class="text-2xl font-semibold leading-6 text-ink-gray-9">
+						{{ dialogTitle }}
+					</h3>
+				</DialogTitle>
+				<Button
+					variant="ghost"
+					icon="x"
+					label="Close"
+					:disabled="saving"
+					@click="onClose(false)"
+				/>
+			</div>
+		</template>
 		<template #body-content>
 			<p class="text-sm text-ink-gray-6">{{ requirementText }}</p>
 
@@ -97,6 +120,7 @@
 // auto-choice.
 import { ref, computed, watch } from "vue";
 import { Badge, Button, Dialog, toast } from "frappe-ui";
+import { DialogTitle } from "reka-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import AgentModelPicker from "./AgentModelPicker.vue";
 import * as apiAgents from "@/api/agents";
@@ -124,6 +148,16 @@ const props = defineProps({
 	isAdmin: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:modelValue", "confirm", "connect-provider"]);
+
+// Shared by the Dialog `options.title` (drives the mock/portal a11y name) and
+// the #body-header override below, so the two can never drift apart.
+const dialogTitle = computed(() => `Install ${props.agentTitle}?`);
+
+// FE3-2 review fix: ~15s ceiling on the Install-confirm's setAgentModel call -
+// same Promise.race idiom as OnboardingView's GSTIN fetch timeout - so a
+// stalled request can no longer lock the dialog (Cancel disabled, close inert)
+// indefinitely.
+const SET_MODEL_TIMEOUT_MS = 15000;
 
 const loading = ref(false);
 const eligible = ref(null); // get_eligible_models()
@@ -258,14 +292,49 @@ async function confirmInstall() {
 	}
 	saving.value = true;
 	const id = ++confirmReqId;
+	const request = apiAgents.setAgentModel(
+		props.agentSlug,
+		picked.value.provider,
+		picked.value.model
+	);
+	// FE3-2 review fix: `request` is the ONLY continuation of the real call, so
+	// it keeps respecting `id` even after the race below has given up on it -
+	// same guard as every other stale-attempt check in this file.
+	request.then(
+		() => {
+			if (id !== confirmReqId) return; // superseded - reopen/close, or the timeout below
+			saving.value = false;
+			emit("confirm");
+		},
+		(e) => {
+			if (id !== confirmReqId) return;
+			saving.value = false;
+			toast.error(errHtml(e));
+		}
+	);
+	let timedOut = false;
+	let timer;
 	try {
-		await apiAgents.setAgentModel(props.agentSlug, picked.value.provider, picked.value.model);
-		if (id !== confirmReqId) return; // superseded - the dialog was reopened mid-flight
-		emit("confirm");
+		await Promise.race([
+			request,
+			new Promise((_, reject) => {
+				timer = setTimeout(() => {
+					timedOut = true;
+					reject(new Error("Saving the model took too long. Try again."));
+				}, SET_MODEL_TIMEOUT_MS);
+			}),
+		]);
 	} catch (e) {
-		if (id === confirmReqId) toast.error(errHtml(e));
+		// A rejection of `request` itself is already handled by its own .then
+		// above - only act here for the timeout, so a genuine failure never
+		// double-toasts.
+		if (timedOut && id === confirmReqId) {
+			saving.value = false;
+			toast.error(errHtml(e));
+			confirmReqId++; // request may still resolve/reject later - keep it silent then
+		}
 	} finally {
-		if (id === confirmReqId) saving.value = false;
+		clearTimeout(timer);
 	}
 }
 
