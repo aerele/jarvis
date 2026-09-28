@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeOnLlmSwitch, SWITCH_MESSAGE } from "../llmSwitch.js";
+import { makeOnLlmSwitch, SWITCH_MESSAGE, SWITCH_MESSAGE_ADMIN } from "../llmSwitch.js";
 
 // llmSwitch.js takes no import of maintenanceGate.js (it pulls in vue + frappe-ui,
 // which node --test cannot load), so the handler is built from a fake gate here
@@ -27,6 +27,12 @@ test('raises the hold with the switch copy on state "switching"', () => {
 	assert.deepEqual(gate.calls.raiseHold, [SWITCH_MESSAGE]);
 	assert.equal(gate.calls.clearHold, 0);
 	assert.equal(gate.calls.recheck, 0);
+});
+
+test("tells a Jarvis admin about their own change", () => {
+	const gate = fakeGate();
+	makeOnLlmSwitch(gate, () => true)({ state: "switching" });
+	assert.deepEqual(gate.calls.raiseHold, [SWITCH_MESSAGE_ADMIN]);
 });
 
 test('on state "done", clears the hold BEFORE rechecking (ignoring the outcome) - so the strip never waits on the 60s idle poll', () => {

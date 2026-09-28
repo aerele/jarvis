@@ -10,12 +10,13 @@ vi.mock("@/maintenanceGate", () => ({
 	recheck: (...a) => recheckMock(...a),
 }));
 
-import { onLlmSwitch, SWITCH_MESSAGE } from "./llmSwitch.js";
+import { onLlmSwitch, SWITCH_MESSAGE, SWITCH_MESSAGE_ADMIN } from "./llmSwitch.js";
 
 beforeEach(() => {
 	raiseHoldMock.mockReset();
 	clearHoldMock.mockReset();
 	recheckMock.mockReset();
+	delete window.is_jarvis_admin;
 });
 
 describe("onLlmSwitch", () => {
@@ -24,6 +25,12 @@ describe("onLlmSwitch", () => {
 		expect(raiseHoldMock).toHaveBeenCalledWith(SWITCH_MESSAGE);
 		expect(clearHoldMock).not.toHaveBeenCalled();
 		expect(recheckMock).not.toHaveBeenCalled();
+	});
+
+	it("tells a Jarvis admin about their own change", () => {
+		window.is_jarvis_admin = true;
+		onLlmSwitch({ state: "switching" });
+		expect(raiseHoldMock).toHaveBeenCalledWith(SWITCH_MESSAGE_ADMIN);
 	});
 
 	it('on state "done", clears the hold BEFORE rechecking (ignoring the outcome) - so the banner never waits on the 60s idle poll', () => {
