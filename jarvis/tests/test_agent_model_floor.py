@@ -1752,3 +1752,11 @@ class TestHooksAndGates(AgentModelDBBase):
 			settings.enforce_agent_min_model = 1
 			settings.save()
 		self.assertTrue(agent_models.is_enforced())
+
+
+class TestRunIndex(FrappeTestCase):
+	def test_finished_at_is_indexed_by_schema_sync(self):
+		# The model_used backfill filters and sorts on finished_at; an index added
+		# outside search_index would be dropped by the next updatedb.
+		self.assertTrue(frappe.get_meta(RUN).get_field("finished_at").search_index)
+		self.assertTrue(frappe.db.get_column_index(f"tab{RUN}", "finished_at", unique=False))

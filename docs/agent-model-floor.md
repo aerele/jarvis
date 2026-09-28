@@ -54,8 +54,18 @@ next pool sync or when the pool fingerprint changes.
 | `render_context_missing` | The container has no `render_context.json` (never re-rendered since its host reached 1.43) | Run a no-op reapply for the tenant (`bulk_reapply_config`), then retry |
 | `delegate_blocked` | Admin/fleet marked the pinned model unusable | Row moves to `needs_model`; pick another model, Apply |
 | `delegate_model_unresolved` | The pushed model is not in the current render | Apply catalog changes; if it persists, check the pool still serves that provider |
-| `platform_upgrade_pending` on a tenant Apply (409) | Host fleet-agent below 1.43, or the container has no render context yet. Nothing was pushed or saved on admin | Upgrade the host (admin already queued a no-op reapply for a missing context), then Apply catalog changes again. Reconcile does not retry an Apply |
-| `platform_upgrade_pending` after a move / reconcile | Drain or reconcile stripped the choices (`agent_roster_models_pending = 1`, host event `agent_model_choice_stripped`); delegates run on the pool default | None: reconcile re-arms automatically once the host is on 1.43 and the render context exists |
+| `platform_upgrade_pending` on a tenant Apply (409) | Host fleet-agent below 1.43, or the container has no render context yet. Nothing was pushed or saved on admin. Event `agent_model_choice_refused` (with the reason); for a missing context also `agent_model_render_context_missing` | Old host: upgrade it, then Apply again (the rate-limit token was refunded). Missing context: admin queued a no-op reapply; wait a minute, then Apply again. This refusal keeps its rate-limit token, so don't retry in a loop. Reconcile does not retry an Apply |
+| `platform_upgrade_pending` after a move / reconcile | The choices were stripped (`agent_roster_models_pending = 1`, event `agent_model_choice_stripped`); delegates run on the pool default | None: reconcile re-arms automatically once the host is on 1.43 and the render context exists |
+
+Drain (a move) strips immediately when the target host is below 1.43, its
+contract is unreadable, or the container has no render context: an evacuation
+never waits. Reconcile strips immediately only for an old host. For a drifted
+roster on a container with no render context it first waits for the queued
+reapply: no push and no restart, counted in the tenant's
+`config_reconcile_attempts`, with an ops alert at 3 attempts. Only on the 5th
+(last budgeted) attempt does it push the roster stripped, so the agents still
+land and the pending leg re-arms the choices later. An unreadable contract or
+context probe is retried the same way but never stripped.
 
 A scheduled run refused for a model reason (`delegate_*`, `render_context_missing`)
 records one failed run and one owner notice for that slot; it does not retry
@@ -108,7 +118,9 @@ findings panel show it.
    `frappe.db.set_single_value("Jarvis Settings", "enforce_agent_min_model", 1)`
    followed by `jarvis.chat.agent_models.on_enforcement_enabled()` and a commit,
    or save it from Desk as Administrator. Tenant System Managers can see it but
-   not change it.
+   not change it: besides permlevel 2, `JarvisSettings.validate` refuses any
+   change by a user other than Administrator (a permlevel grant can be
+   self-assigned through Role Permission Manager).
 
 ## Rollback
 
