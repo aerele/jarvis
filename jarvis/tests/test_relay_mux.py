@@ -37,8 +37,10 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import egress_rules
+from jarvis.chat import steps as chat_steps
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
+from jarvis.chat.steps import is_preamble_step, is_step
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.harness import transcripts as _transcripts
 
@@ -1428,7 +1430,10 @@ class TestRelayMuxSteps(FrappeTestCase):
 		)
 		self.assertEqual(rec.steps, [])
 		self.assertEqual(rec.shown, [draft, answer])
-		self.assertEqual(rec.terminal[1]["text"], draft + answer)
+		# R6: neither segment is a recorded step, so strip_steps is a no-op,
+		# but the runtime's own glued-with-no-separator boundary is still
+		# joined back with a paragraph break (see TestJoinSegments).
+		self.assertEqual(rec.terminal[1]["text"], f"{draft}\n\n{answer}")
 
 	def test_table_before_a_lookup_is_not_hidden(self):
 		# Review finding: table-only text must never be hidden, or it could come
@@ -1466,6 +1471,216 @@ class TestRelayMuxSteps(FrappeTestCase):
 		# Not in the reply text, so nothing to keep for a hop or to strip.
 		self.assertEqual(rec.step_raws, [None])
 		self.assertEqual(rec.terminal[1]["text"], "Three are overdue.")
+
+	# -- T1 (R4/root-cause B): the pooled openai-completions runtime sends a --
+	# -- preamble item for text ALSO streaming as ordinary reply text. -------
+
+	def test_preamble_in_reply_hides_before_the_step_and_records_raw(self):
+		step = "I'll identify the customers with overdue invoices."
+		# strip_steps keeps the final whole when what remains is shorter than
+		# what it removed (a short-answer-before-a-card guard, see
+		# TestStripSteps): keep this answer longer than the step to isolate
+		# the preamble-hiding behaviour this test is actually about.
+		answer = "Three customers currently have invoices overdue: AlphaCo, BetaCo and GammaCo, all more than 30 days late."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "itemId": "m1", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		# In the reply, so it is kept for a hop re-seed (raw=text).
+		self.assertEqual(rec.step_raws, [step])
+		# Hidden BEFORE the step is offered, same order _move_pending_step uses.
+		self.assertEqual(rec.order[:4], ["delta", "delta", "step", "tool"])
+		# The tool boundary finds nothing left to move: no second step frame.
+		self.assertEqual(len(rec.steps), 1)
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_duplicate_preamble_is_not_recorded_or_offered_again(self):
+		step = "I'll check the overdue invoices for each customer."
+		answer = "Two invoices are overdue: one from AlphaCo Corp and one from BetaCo Inc, both significantly late."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{step}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{step}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])  # recorded/offered once
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_progressive_preamble_replaces_the_recorded_step(self):
+		# A growing prefix must REPLACE the recorded step, not sit alongside it
+		# - two partial entries in lane.steps would each cut only part of the
+		# reply text and leave a dangling remainder in the saved final.
+		partial = "I'll check the overdue"
+		full_step = "I'll check the overdue invoices for each customer."
+		answer = "Two invoices are overdue: one from AlphaCo Corp and one from BetaCo Inc, both significantly late."
+		rec = self._run(
+			[
+				("assistant", {"text": full_step, "delta": full_step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": partial}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": full_step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{full_step}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{full_step}\n\n{answer}",
+		)
+		self.assertEqual(len(rec.steps), 2)  # two live updates, one growing step
+		self.assertEqual(rec.steps[-1][1], full_step)
+		self.assertEqual(rec.terminal[1]["text"], answer)  # no dangling remainder
+
+	def test_preamble_not_in_the_reply_keeps_todays_path(self):
+		# The Codex-harness shape: the preamble text never rides the reply, so
+		# it is offered as a step with raw=None and the reply/final are untouched.
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "progressText": "Looking that up"}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": "Found it.", "delta": "Found it."}),
+			],
+			"Found it.",
+		)
+		self.assertEqual([s[1] for s in rec.steps], ["Looking that up"])
+		self.assertEqual(rec.step_raws, [None])
+		self.assertEqual(rec.terminal[1]["text"], "Found it.")
+
+	def test_two_sentence_preamble_up_to_320_is_hidden_live_kept_in_final(self):
+		# C1 (code review, supersedes plan R4's strip default): looser than
+		# is_step (one sentence only) for the LIVE hide - a runtime-flagged
+		# preamble up to MAX_PREAMBLE_STEP_CHARS is hidden live even when it is
+		# more than one sentence - but it is NOT stripped from the saved
+		# reply unless it is ALSO a one-sentence step (is_step). A two-sentence
+		# preamble is kept, joined back with a paragraph break exactly as it
+		# streamed (it was never glued here - the runtime already separated it
+		# with "\n\n" - so the join is a no-op and the final is untouched).
+		step = (
+			"I'll identify customers whose invoices are overdue. "
+			"Then I'll check each customer's outstanding balance."
+		)
+		answer = (
+			"Three customers currently have overdue invoices: AlphaCo Corp, BetaCo Inc and GammaCo "
+			"LLC, each more than 30 days late and unpaid."
+		)
+		full = f"{step}\n\n{answer}"
+		self.assertFalse(is_step(step))
+		self.assertTrue(is_preamble_step(step))
+		self.assertLessEqual(len(step), 320)
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])  # hidden live, offered as a step
+		# The final KEEPS the step text (unlike a stripped one), so it differs
+		# from what the live view showed - the pre-terminal reshow (existing
+		# mechanism, see _finalize_terminal) reveals it once more before the
+		# terminal lands.
+		self.assertEqual(rec.shown, [step, "", answer, full])
+		self.assertEqual(rec.terminal[1]["text"], full)  # kept whole in the saved reply
+
+	def test_c1_multi_sentence_preamble_survives_a_longer_continuation(self):
+		# Code review C1 finding, reproduced with the reviewer's own fixture
+		# (prove_strip_guard_gap.py): a plausible real answer opening - not
+		# throwaway narration - that the runtime nonetheless flags as a
+		# preamble, followed by a SECOND tool call and a LONGER continuation.
+		# strip_steps' "keep final whole when shorter" guard does not fire
+		# here (the remainder is longer, not shorter, than what would have
+		# been removed), so pre-C1 this sentence was silently dropped from
+		# both the live view (hidden as a step) and the saved reply (spliced
+		# out). It must now survive in the saved reply.
+		# Adapted from the reviewer's fixture with an explicit sentence break: the
+		# original (comma-joined) text is grammatically ONE is_step-shaped
+		# sentence (no inner ". "), so it would still be stripped under the new
+		# rule too - this genuinely two-sentence version is what the C1 fix is
+		# actually meant to protect.
+		preamble = (
+			"I checked the sales ledger and found twelve invoices raised this quarter. "
+			"Three of them are now more than sixty days past due and need immediate follow-up."
+		)
+		continuation = (
+			"Looking at the aging report, AlphaCo owes 82 days, BetaCo owes 71 days and "
+			"GammaCo owes 65 days. I'd recommend calling AlphaCo first since their balance "
+			"is both the oldest and the largest of the three overdue accounts by a wide margin."
+		)
+		full = f"{preamble}\n\n{continuation}"
+		self.assertFalse(is_step(preamble))
+		self.assertTrue(is_preamble_step(preamble))
+		rec = self._run(
+			[
+				("assistant", {"text": preamble, "delta": preamble}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": preamble}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{continuation}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [preamble])  # hidden live
+		self.assertEqual(rec.shown, [preamble, "", continuation, full])  # reshow, see above
+		# The finding sentence survives in the saved reply.
+		self.assertIn(preamble, rec.terminal[1]["text"])
+		self.assertEqual(rec.terminal[1]["text"], full)
+
+	def test_max_preamble_step_chars_zero_restores_todays_behaviour(self):
+		# R4 killswitch: with the constant at 0, an in-reply preamble is never
+		# hidden/recorded early - it is offered exactly as before this feature
+		# (raw=None), and whether it ends up a step at all is left to the
+		# unrelated is_step-driven tool-boundary path.
+		step = "I'll check the overdue invoices."
+		answer = "Three invoices are currently overdue and remain unpaid."
+		full = f"{step}\n\n{answer}"
+		with mock_patch.object(chat_steps, "MAX_PREAMBLE_STEP_CHARS", 0):
+			rec = self._run(
+				[
+					("assistant", {"text": step, "delta": step}),
+					("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+					("item", _tool_data("start")),
+					("item", _tool_data("end")),
+					("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+				],
+				full,
+			)
+		# The preamble frame is offered with raw=None (today's unconditional path).
+		self.assertEqual(rec.step_raws[0], None)
+		# is_step still independently recognises the same one-sentence text at
+		# the tool boundary and records/strips it there, same as pre-feature.
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	# -- T1 (R6): the saved-reply glue for a separator-free segment boundary --
+
+	def test_glue_inserted_at_a_segment_boundary_in_the_final(self):
+		first = "I checked the ledger but found no results. I'll try the archive next."
+		second = "The archive has three matching entries."
+		final_text = first + second  # the runtime glues per-call segments with no separator
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": second, "delta": second}),
+			],
+			final_text,
+		)
+		self.assertEqual(rec.steps, [])  # two sentences: not a step, stays in the reply
+		self.assertEqual(rec.terminal[1]["text"], f"{first}\n\n{second}")
 
 	def test_parallel_lookups_record_one_step(self):
 		step = "Checking both lists."
@@ -1584,8 +1799,6 @@ class TestRelayMuxSteps(FrappeTestCase):
 		# forbidden word straddling the cut left its surviving half-fragment
 		# un-redacted and visible. Redact the FULL raw step text first, THEN
 		# shape/truncate it with display_line.
-		from jarvis.chat import steps as chat_steps
-
 		egress_rules.persist([["acme", "remove"]])
 		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
 		prefix = "x" * (chat_steps.MAX_STEP_CHARS - 3)

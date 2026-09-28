@@ -5,9 +5,21 @@ reply glued a wrong first draft and a "Hold on" step onto the real answer, and a
 Claude-subscription reply that kept its "I'll count them now." step.
 """
 
+from unittest.mock import patch as mock_patch
+
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.steps import MAX_STEP_CHARS, display_line, is_step, remove_steps, strip_steps
+from jarvis.chat import steps as chat_steps
+from jarvis.chat.steps import (
+	MAX_PREAMBLE_STEP_CHARS,
+	MAX_STEP_CHARS,
+	display_line,
+	is_preamble_step,
+	is_step,
+	join_segments,
+	remove_steps,
+	strip_steps,
+)
 
 DEEPSEEK_DRAFT = (
 	"West View Software Ltd. is your biggest receivable at **2,29,000 INR** outstanding "
@@ -123,3 +135,113 @@ class TestStripSteps(FrappeTestCase):
 		self.assertEqual(strip_steps("Answer.", []), "Answer.")
 		self.assertEqual(strip_steps("", ["Checking."]), "")
 		self.assertIsNone(strip_steps(None, ["Checking."]))
+
+
+class TestIsPreambleStep(FrappeTestCase):
+	"""R4: the looser rule a runtime-flagged preamble is checked against when
+	its text is also streaming in the reply (relay_mux._route_preamble_step)."""
+
+	def test_one_short_sentence_is_accepted(self):
+		self.assertTrue(is_preamble_step("I'll check the overdue invoices."))
+
+	def test_two_sentences_up_to_the_limit_are_accepted(self):
+		# Looser than is_step: the runtime already flagged this as narration.
+		text = "I'll check the overdue invoices. Then I'll total them by customer."
+		self.assertFalse(is_step(text))
+		self.assertLessEqual(len(text), MAX_PREAMBLE_STEP_CHARS)
+		self.assertTrue(is_preamble_step(text))
+
+	def test_structural_text_is_rejected(self):
+		self.assertFalse(is_preamble_step("| a | b |"))
+		self.assertFalse(is_preamble_step("- first item"))
+		self.assertFalse(is_preamble_step("# Heading"))
+		self.assertFalse(is_preamble_step("> Quote"))
+		self.assertFalse(is_preamble_step("```code"))
+		self.assertFalse(is_preamble_step("Line one\nLine two"))
+
+	def test_over_the_limit_is_rejected(self):
+		self.assertFalse(is_preamble_step("word " * 100))
+
+	def test_empty_is_rejected(self):
+		self.assertFalse(is_preamble_step(""))
+		self.assertFalse(is_preamble_step("   "))
+
+	def test_zero_constant_rejects_everything(self):
+		# R4 killswitch: MAX_PREAMBLE_STEP_CHARS=0 must reject even a short
+		# one-sentence preamble that would otherwise pass, so relay_mux falls
+		# back to always offering the step (today's behaviour before this
+		# feature - see MAX_PREAMBLE_STEP_CHARS's docstring comment).
+		with mock_patch.object(chat_steps, "MAX_PREAMBLE_STEP_CHARS", 0):
+			self.assertFalse(is_preamble_step("I'll check the overdue invoices."))
+
+
+class TestJoinSegments(FrappeTestCase):
+	"""R6: the saved-reply glue for an API-key model's separator-free segment
+	boundaries ("...addresses.I couldn't find..." from the live capture)."""
+
+	def test_inserts_a_break_at_a_verbatim_tail(self):
+		text = "First segment done.Second segment starts."
+		self.assertEqual(
+			join_segments(text, ["First segment done."]),
+			"First segment done.\n\nSecond segment starts.",
+		)
+
+	def test_skips_a_tail_already_followed_by_whitespace(self):
+		text = "First segment.\n\nSecond segment."
+		self.assertEqual(join_segments(text, ["First segment."]), text)
+
+	def test_skips_a_tail_not_found(self):
+		text = "Answer only."
+		self.assertEqual(join_segments(text, ["Checking."]), text)
+
+	def test_real_fixture_glues_the_captured_boundary(self):
+		# Live capture (2026-09-28): the runtime glued two per-call segments
+		# with no separator at all.
+		text = "...usable email addresses.I couldn't find a usable email address for the customer."
+		tail = "...usable email addresses."
+		self.assertEqual(
+			join_segments(text, [tail]),
+			"...usable email addresses.\n\nI couldn't find a usable email address for the customer.",
+		)
+
+	def test_several_tails_join_in_order(self):
+		text = "One.Two.Three."
+		self.assertEqual(join_segments(text, ["One.", "Two."]), "One.\n\nTwo.\n\nThree.")
+
+	def test_no_tails_or_no_text_is_a_no_op(self):
+		self.assertEqual(join_segments("Answer.", []), "Answer.")
+		self.assertEqual(join_segments("", ["x"]), "")
+
+	# -- C2 (code review): boundary safety - never split a token/URL/word ----
+
+	def test_mid_url_boundary_is_never_broken(self):
+		# Code review C1 proof (prove_join_segments_midword.py): a tail whose
+		# capture point falls mid-word/mid-URL (lowercase both sides) must be
+		# left alone - neither side looks like a sentence end/start.
+		seg1_end = "See https://example.com/very-long-path-that-keeps-goin"
+		tail = seg1_end[-60:]
+		final_glued = seg1_end + "g-right-here for details."
+		self.assertEqual(join_segments(final_glued, [tail]), final_glued)
+
+	def test_curly_apostrophe_elsewhere_does_not_block_a_real_boundary(self):
+		# The reviewer's fixture, with the runtime's actual curly apostrophe
+		# (U+2019) in "couldn't" - irrelevant to the boundary check, which only
+		# looks at the characters immediately either side of the cut.
+		text = "...usable email addresses.I couldn’t find a usable email address for the customer."
+		tail = "...usable email addresses."
+		self.assertEqual(
+			join_segments(text, [tail]),
+			"...usable email addresses.\n\nI couldn’t find a usable email address for the customer.",
+		)
+
+	def test_boundary_inside_a_code_fence_is_skipped(self):
+		# Before/after alone would pass ("." then "N"), but the cut sits inside
+		# an OPEN fence (one "```" seen so far, odd) - never break code.
+		text = "```\nEnd of code.Next line here\n```"
+		tail = "End of code."
+		self.assertEqual(join_segments(text, [tail]), text)
+
+	def test_lowercase_continuation_is_not_a_boundary(self):
+		text = "The report was fetched.and then processed."
+		tail = "The report was fetched."
+		self.assertEqual(join_segments(text, [tail]), text)
