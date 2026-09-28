@@ -278,9 +278,14 @@ class TestRequestAutorunSendMessage(FrappeTestCase):
 		from jarvis.tests._transport_helpers import provision_legacy_site
 
 		provision_legacy_site(self)
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
-			with patch("frappe.enqueue"):
-				return chat_api.send_message(conv, message)
+		# The send gate reads site usage another suite may have left over its cap; the
+		# autorun flag is what's under test here, so it never depends on that.
+		with (
+			patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+			patch("frappe.enqueue"),
+		):
+			return chat_api.send_message(conv, message)
 
 	def test_new_top_level_message_resets_the_flag(self):
 		conv = _make_conv(TEST_USER)
