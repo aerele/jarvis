@@ -13,8 +13,24 @@ from jarvis.tests import _legacy_migration_fixtures as fixtures
 
 def sample():
 	return {
-		"version": 2,
-		"watermark": {"legacy_column": "previous_watermark"},
+		"version": 1,
+		"settings": {
+			"legacy_patch": "jarvis.patches.previous_settings",
+			"patch": "jarvis.patches.current_settings.execute",
+			"renames": {
+				"previous_" + name: name
+				for name in (
+					"jarvis_admin_url",
+					"jarvis_admin_api_key",
+					"agent_url",
+					"agent_token",
+					"agent_compose_dir",
+					"agent_config_path",
+					"agent_llm_key_path",
+				)
+			},
+		},
+		"watermark": {"legacy_column": "previous_watermark", "patch": "jarvis.patches.example.execute"},
 		"capture_provider": {
 			"legacy_column": "previous_provider",
 			"patch": "jarvis.patches.provider.execute",
@@ -36,33 +52,18 @@ class TestLegacyFixtureLoader(unittest.TestCase):
 
 	def test_bad_schema_identifiers_and_imports_fail_even_with_matching_digest(self):
 		cases = []
-		for section, field, values in (
-			(
-				"watermark",
-				"legacy_column",
-				["a`; DROP TABLE x; --", "has space", "agent_seq_watermark", "../file", None],
-			),
-			(
-				"capture_provider",
-				"patch",
-				["os.system", "jarvis.patches.a.execute()", "jarvis.patches.a;evil.execute", None],
-			),
+		for field, values in (
+			("legacy_column", ["a`; DROP TABLE x; --", "has space", "agent_seq_watermark", "../file", None]),
+			("patch", ["os.system", "jarvis.patches.a.execute()", "jarvis.patches.a;evil.execute", None]),
 		):
 			for value in values:
 				doc = sample()
-				doc[section][field] = value
+				doc["watermark"][field] = value
 				cases.append(doc)
-		for value in (True, 1, "2"):
+		for value in (True, 2, "1"):
 			doc = sample()
 			doc["version"] = value
 			cases.append(doc)
-		# v1 shapes: the retired settings section and watermark patch are rejected.
-		doc = sample()
-		doc["settings"] = {}
-		cases.append(doc)
-		doc = sample()
-		doc["watermark"]["patch"] = "jarvis.patches.example.execute"
-		cases.append(doc)
 		for doc in cases:
 			with self.subTest(doc=doc), self.assertRaises(ValueError):
 				fixtures.validate(json.dumps(doc), fixtures.digest(doc))

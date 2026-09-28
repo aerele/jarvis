@@ -185,3 +185,84 @@ class TestRuntimeProfileDatabase(unittest.TestCase):
 			result = dashboards_api._dashboard_detail(doc)
 			self.assertIn("chart()", result["html"])
 			self.assertNotIn(marker, result["html"])
+
+	def test_saved_html_remains_readable_after_connection_reset(self):
+		from jarvis.chat.canvas import strip_saved_host_client
+		from jarvis.legacy_compatibility import _embedded
+
+		self.persist()
+		frappe.db.commit()
+		rp.clear()
+		frappe.db.commit()
+		marker = _embedded()[1].live_reload_route
+		html = f'<h1>Saved</h1><script>chart()</script><script>new WebSocket("{marker}")</script>'
+		self.assertEqual(strip_saved_host_client(html), "<h1>Saved</h1><script>chart()</script>")
+		with self.assertRaises(rp.RuntimeProfileError):
+			rp.get_profile()
+
+	def test_upgrade_profile_is_durable_for_the_next_worker(self):
+		from jarvis import admin_client
+
+		data = rp.ConnectionData({**connection(), "chat_readiness": "Ready"}, envelope())
+		with (
+			patch.object(admin_client, "_post", return_value=data),
+			patch.object(frappe, "get_single", return_value=frappe._dict(connection())),
+		):
+			rp.after_migrate()
+		frappe.db.commit()
+		rp._forget_snapshot()
+		rp._invalidate()
+		self.assertEqual(rp.get_profile(), TEST_PROFILE)
+
+	def test_upgrade_accepts_authoritative_assignment_through_connection_guard(self):
+		from jarvis import admin_client
+
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("agent_url", connection()["agent_url"])
+		settings.db_set("tenant_authority_generation", 0)
+		settings.db_set("tenant_authority_handle", "")
+		data = rp.ConnectionData({**connection(), "chat_readiness": "Ready"}, envelope())
+
+		def anchor(settings):
+			return {
+				**self.anchor,
+				"agent_url": settings.get("agent_url"),
+				"tenant_authority_generation": int(settings.get("tenant_authority_generation") or 0),
+				"tenant_authority_handle": settings.get("tenant_authority_handle") or "",
+			}
+
+		with (
+			patch.object(rp, "_anchor", side_effect=anchor),
+			patch.object(admin_client, "_post", return_value=data),
+		):
+			rp.after_migrate()
+			self.assertEqual(rp.get_profile(), TEST_PROFILE)
+			self.assertEqual(
+				frappe.db.get_single_value("Jarvis Settings", "tenant_authority_generation", cache=False), 4
+			)
+		# No commit: teardown restores the site's original connection.
+
+	def test_failed_upgrade_connection_write_rolls_back_partial_assignment(self):
+		from jarvis import admin_client
+
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("agent_url", connection()["agent_url"])
+		settings.db_set("tenant_authority_generation", 0)
+		data = rp.ConnectionData({**connection(), "chat_readiness": "Ready"}, envelope())
+
+		def partial_write(_data):
+			frappe.db.set_single_value("Jarvis Settings", "tenant_authority_generation", 4)
+			raise RuntimeError("simulated connection write failure")
+
+		with (
+			patch.object(rp, "ingest_current"),
+			patch.object(admin_client, "_post", return_value=data),
+			patch("jarvis.onboarding.write_connection", side_effect=partial_write),
+		):
+			rp.after_migrate()
+		self.assertEqual(
+			frappe.db.get_single_value("Jarvis Settings", "tenant_authority_generation", cache=False), 0
+		)
+		self.assertFalse(frappe.db.exists("DefaultValue", rp.ROW))
+		with self.assertRaises(rp.RuntimeProfileError):
+			rp.get_profile()

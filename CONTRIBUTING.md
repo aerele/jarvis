@@ -52,3 +52,17 @@ these tests on a dedicated test site. For the pinned local snapshot, run
 and set the environment variable to that file. CI uses this same snapshot. Missing inputs fail the tests; keep decoded copies
 outside this repository. See Admin's
 `jarvis_admin_v2/docs/legacy-migration-test-fixtures.md` for activation and commands.
+
+
+The pinned upgrade fixture retains the historical settings mappings so direct
+upgrades do not require an intermediate release. The settings patch runs before
+model sync and preserves completed migration records and existing destination
+values, including encrypted credentials. The runtime profile is refreshed after
+migration when needed; an offline Admin does not fail migration. Readiness retries
+profile initialization and never advertises Ready without a usable local profile.
+Older Admin versions must be upgraded to supply that profile; existing valid
+receipts continue to work during an Admin outage or rollback.
+
+CI uses the dedicated `jarvis-ci.test` site so runtime-profile database tests run
+instead of skipping their `.test` safety check. Saved HTML sanitization has its
+own bundled historical contract and remains available during connection resets.
