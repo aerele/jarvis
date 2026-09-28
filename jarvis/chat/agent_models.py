@@ -502,6 +502,30 @@ def _catalog_unavailable() -> None:
 	frappe.throw(_(CATALOG_UNAVAILABLE_MESSAGE))
 
 
+def _validated_pick(listing, provider, model) -> dict:
+	"""A ``chosen`` row for the pick; throws unless it is in the usable eligible set."""
+	ref = {"provider": (provider or "").strip(), "model": (model or "").strip()}
+	eligible = _usable(eligible_models(listing), _row_rejections(listing.name))
+	if eligible == UNKNOWN:
+		_catalog_unavailable()
+	if not _contains(eligible, ref):
+		frappe.throw(_("That model doesn't meet this agent's requirement here. Pick one from the list."))
+	return {
+		"state": "chosen",
+		**ref,
+		"fallbacks": json.dumps(_fallbacks_for(ref, eligible)),
+		"note": "",
+		"fleet_unresolved": 0,
+	}
+
+
+def _apply_pick(agent: str, values: dict, actor: str) -> None:
+	"""Write a validated pick as the tenant-wide choice (last change wins), audited."""
+	_upsert(agent, {**values, "changed_by": actor, "changed_at": frappe.utils.now()})
+	_log_for_owners(agent, f"model set to {values['model']} by {actor}", actor=actor)
+	_mark_dirty()
+
+
 # --------------------------------------------------------------------------- #
 # SPA endpoints
 # --------------------------------------------------------------------------- #
@@ -590,27 +614,7 @@ def set_agent_model(agent: str, provider: str, model: str) -> dict:
 	against the live eligible set; marks the catalog dirty, never pushes."""
 	_require_enforced()
 	listing = _write_gate(agent)
-	ref = {"provider": (provider or "").strip(), "model": (model or "").strip()}
-	eligible = _usable(eligible_models(listing), _row_rejections(listing.name))
-	if eligible == UNKNOWN:
-		_catalog_unavailable()
-	if not _contains(eligible, ref):
-		frappe.throw(_("That model doesn't meet this agent's requirement here. Pick one from the list."))
-	me = frappe.session.user
-	_upsert(
-		listing.name,
-		{
-			"state": "chosen",
-			**ref,
-			"fallbacks": json.dumps(_fallbacks_for(ref, eligible)),
-			"note": "",
-			"changed_by": me,
-			"changed_at": frappe.utils.now(),
-			"fleet_unresolved": 0,
-		},
-	)
-	_log_for_owners(listing.name, f"model set to {ref['model']} by {me}", actor=me)
-	_mark_dirty()
+	_apply_pick(listing.name, _validated_pick(listing, provider, model), frappe.session.user)
 	frappe.db.commit()
 	return _model_view(listing)
 
@@ -647,14 +651,20 @@ def reset_agent_model(agent: str) -> dict:
 # --------------------------------------------------------------------------- #
 # install / uninstall / flag
 # --------------------------------------------------------------------------- #
-def plan_install(listing) -> dict | None:
-	"""Before an install inserts: the row to create afterwards, or None. Throws when
-	a first enforced install has no eligible model."""
-	if not is_enforced() or not min_model(listing):
+def plan_install(listing, provider: str | None = None, model: str | None = None) -> dict | None:
+	"""Before an install inserts: the row to create afterwards, ``{"pick": row}`` for the
+	installer's own pick, or None. Throws when a first enforced install has no eligible
+	model, or when the pick is not eligible. With the flag off a pick is ignored."""
+	if not is_enforced():
+		return None
+	picked = bool((provider or "").strip() or (model or "").strip())
+	if not picked and not min_model(listing):
 		return None
 	# REPEATABLE-READ discipline: install_agent has written nothing yet, so end the
 	# snapshot and let the existence reads below see a concurrent last-uninstall.
 	frappe.db.commit()
+	if picked:  # same check as set_agent_model; the row is written after the install
+		return {"pick": _validated_pick(listing, provider, model)}
 	# A plain read: FOR UPDATE on a missing key would gap-lock and deadlock two
 	# concurrent first installs; _insert_if_absent's unique name decides instead.
 	if frappe.db.exists(CHOICE, listing.name):
@@ -677,6 +687,9 @@ def apply_install_plan(agent: str, plan: dict | None) -> None:
 	if not plan:
 		return
 	try:
+		if "pick" in plan:
+			_apply_pick(agent, plan["pick"], frappe.session.user)
+			return
 		created = _insert_if_absent(agent, plan)
 	except frappe.QueryDeadlockError:
 		# InnoDB rolled the whole transaction back (the install row too): retryable.
