@@ -110,18 +110,27 @@ class TestRoleProfiles(FrappeTestCase):
 			"web_search",
 			"sessions_spawn",
 			"session_status",
+			"memory_get",
+			"memory_search",
 			"jarvis__record_agent_run",
 			"skill_workshop",
 		):
 			self.assertNotIn(dropped, allow)
 
+<<<<<<< HEAD
 	def test_tool_universe_is_94(self):
 		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (27) must
 		# reconstruct the full evidence-captured 94-tool universe with no
 		# overlap and no gap (spec §2).
+=======
+	def test_tool_universe_is_96(self):
+		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (29) must
+		# reconstruct the evidence-captured 94-tool universe plus the two MCP
+		# connector tools added after (96), with no overlap and no gap.
+>>>>>>> f8562df (fix(memory): drop native memory_get/memory_search from standard tier)
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
-		self.assertEqual(len(drop), 27)
+		self.assertEqual(len(drop), 29)
 		self.assertEqual(allow & drop, set())
 		self.assertEqual(len(allow | drop), 94)
 
