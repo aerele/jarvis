@@ -308,10 +308,30 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		_advance(row, now)
 		return
 
-	_dispatch(row, now, run_as=run_as, original_user=original_user, source_apps=source_apps)
+	# Enforced min-model: no eligible model left is a state only a human can fix, so
+	# record why and consume the slot instead of retrying hourly.
+	from jarvis.chat import agent_models
+
+	model_gate = agent_models.gate_run(row.agent)
+	if not model_gate["ok"]:
+		_record_failed(row, f"scheduled run skipped: {model_gate['message']}")
+		_advance(row, now)
+		return
+
+	_dispatch(
+		row, now, run_as=run_as, original_user=original_user, source_apps=source_apps, model_gate=model_gate
+	)
 
 
-def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[str] | None) -> None:
+def _dispatch(
+	row,
+	now,
+	*,
+	run_as: str,
+	original_user: str,
+	source_apps: list[str] | None,
+	model_gate: dict | None = None,
+) -> None:
 	"""Launch this installation's due audit exactly once (#672).
 
 	Dispatch is the one step of the sweep that can be executed twice for a single
@@ -387,7 +407,13 @@ def _dispatch(row, now, *, run_as: str, original_user: str, source_apps: list[st
 			inst = frappe.get_doc(INSTALLATION, row.name)
 			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
 			# it has no initiating human: the scheduler user (Administrator) is not one.
-			_launch_audit(inst, trigger="scheduled", source_apps=source_apps, initiating_human=None)
+			_launch_audit(
+				inst,
+				trigger="scheduled",
+				source_apps=source_apps,
+				initiating_human=None,
+				model_gate=model_gate,
+			)
 		except admin_client.AdminAmbiguousError:
 			# #743: the dispatch timed out and admin MAY be running this turn.
 			# ``_launch_audit`` deliberately left the run ``running``, so the slot must
@@ -747,6 +773,11 @@ def poll_dispatched_runs() -> int:
 				title=f"jarvis agent: run poll failed: {r.name}",
 				message=frappe.get_traceback(),
 			)
+	if not unreachable:
+		try:
+			_backfill_model_used(now)
+		except Exception:
+			frappe.log_error(title="jarvis agent: model_used backfill failed", message=frappe.get_traceback())
 	if unreachable:
 		# ONE line per sweep, not one per run: an admin outage would otherwise write an
 		# Error Log row for every in-flight run every five minutes.
@@ -760,6 +791,50 @@ def poll_dispatched_runs() -> int:
 			),
 		)
 	return terminalized
+
+
+# A run finished through its own writeback is never polled above, but the fleet
+# reports ``model_used`` only once it is terminal: ask once more for pinned runs
+# that finished recently (enforced min-model only, so flag-off admin traffic is
+# unchanged).
+MODEL_USED_BACKFILL_WINDOW_SECONDS = 1200
+MODEL_USED_BACKFILL_MIN_AGE_SECONDS = 60
+MODEL_USED_BACKFILL_BATCH = 20
+
+
+def _backfill_model_used(now) -> int:
+	from jarvis import admin_client
+	from jarvis.chat import agent_models
+
+	if not agent_models.is_enforced():
+		return 0
+	rows = frappe.get_all(
+		RUN,
+		filters=[
+			["status", "in", ["completed", "partial", "failed", "stopped"]],
+			["model_source", "in", ["choice", "fallback", "pending_apply"]],
+			["model_rendered", "is", "set"],
+			["model_used", "is", "not set"],
+			["finished_at", ">", now - timedelta(seconds=MODEL_USED_BACKFILL_WINDOW_SECONDS)],
+			["finished_at", "<", now - timedelta(seconds=MODEL_USED_BACKFILL_MIN_AGE_SECONDS)],
+		],
+		pluck="name",
+		order_by="finished_at asc",
+		limit=MODEL_USED_BACKFILL_BATCH,
+		ignore_permissions=True,
+	)
+	stored = 0
+	for name in rows:
+		try:
+			state = _polled_state(admin_client.get_agent_run_status(name))
+		except Exception:
+			break  # relay trouble: the next tick retries inside the window
+		if state.get("model_used"):
+			agent_models.record_model_used(name, state)
+			stored += 1
+	if stored:
+		frappe.db.commit()
+	return stored
 
 
 def _polled_state(payload) -> dict:
@@ -788,6 +863,16 @@ def _reconcile_polled_run(row, state: dict, now) -> bool:
 	(``{run_id, status: queued|running|completed|failed, error, finished_at, ...}``),
 	plus the synthetic ``missing`` this module uses for a relayed 404."""
 	status = (state.get("status") or "").strip().lower()
+	if state.get("model_used"):
+		# Observability only: it must never stop the run from terminalizing below.
+		try:
+			from jarvis.chat.agent_models import record_model_used
+
+			record_model_used(row.name, state)
+		except Exception:
+			frappe.log_error(
+				title=f"jarvis agent: model_used record failed: {row.name}", message=frappe.get_traceback()
+			)
 
 	# Every terminal branch below goes through ``_terminalize_stuck_run``, never through
 	# ``fail_run`` directly: the CA-4 scribe ruling is keyed on the run's OWN durable page
@@ -961,6 +1046,7 @@ def _launch_audit(
 	trigger: str,
 	source_apps: list[str] | None = None,
 	initiating_human: str | None = None,
+	model_gate: dict | None = None,
 ) -> dict:
 	"""Create the audit conversation + a ``running`` Jarvis Agent Run + enqueue
 	the triggering turn. MUST run as the installation owner (the scheduler
@@ -1070,6 +1156,15 @@ def _launch_audit(
 			)
 		)
 
+	# Enforced min-model backstop for a launch path that did not gate itself; the
+	# manual and scheduled paths pass the verdict they already reached.
+	from jarvis.chat import agent_models
+
+	if model_gate is None:
+		model_gate = agent_models.gate_run(inst.agent)
+		if not model_gate["ok"]:
+			frappe.throw(model_gate["message"], title=_("No eligible model"))
+
 	# #672: everything from here to the commit below is ONE unit. It used to be a
 	# sequence of pending inserts, so a throw anywhere in it (a rejected insert, a
 	# duplicate session key, a DB blip) left a ``running`` Jarvis Agent Run PENDING in
@@ -1135,6 +1230,7 @@ def _launch_audit(
 				"bundle_version": bundle_version,
 				"preparation_mode": preparation_mode,
 				"initiating_human": initiating_human,
+				"model_source": model_gate.get("model_source"),
 				**capability,
 			}
 		)
@@ -1198,7 +1294,7 @@ def _launch_audit(
 	from jarvis.chat.agent_catalog import registry_timeout_s
 
 	try:
-		admin_client.post_agent_run(
+		started = admin_client.post_agent_run(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
@@ -1250,8 +1346,23 @@ def _launch_audit(
 		# actually reads this message back on the Runs board (the Run row's owner is
 		# always the installation owner, never the run-as user), on both the manual
 		# and the cron path (run_due_agent_audits sweeps by owner too).
-		not_applied = "not an installed delegate" in str(e)
-		if not_applied:
+		# Enforced min-model: the fleet's typed refusals name what it thinks of the
+		# pushed model; each one updates the choice row and has its own sentence.
+		model_token = agent_models.run_error_token(e)
+		not_applied = not model_token and "not an installed delegate" in str(e)
+		error_msg = "agent-run dispatch failed; see Error Log"
+		if model_token:
+			# Never let the row bookkeeping (a lock wait on the choice row) keep this
+			# run from being failed and its session torn down below.
+			try:
+				error_msg = agent_models.handle_run_error(inst.agent, model_token)
+			except Exception:
+				model_token = None
+				frappe.log_error(
+					title=f"jarvis agent-run model error handling failed: {run.name}",
+					message=frappe.get_traceback(),
+				)
+		elif not_applied:
 			from jarvis.permissions import is_skill_reviewer
 
 			if is_skill_reviewer(owner):
@@ -1264,8 +1375,6 @@ def _launch_audit(
 					"This agent is not ready on your workspace yet. Ask your administrator "
 					"to apply catalog changes."
 				)
-		else:
-			error_msg = "agent-run dispatch failed; see Error Log"
 		frappe.db.set_value(
 			RUN,
 			run.name,
@@ -1285,13 +1394,23 @@ def _launch_audit(
 			title=f"jarvis agent-run dispatch failed: {run.name}",
 			message=frappe.get_traceback(),
 		)
-		if not_applied:
+		if not_applied or model_token:
 			# Surface the actionable message straight to the SPA (a clean user error),
 			# not the raw AdminUnreachableError 502/500 the fleet verb produced. The
 			# failed Run + session teardown above are already committed, so this only
 			# swaps which exception the caller re-raises.
-			frappe.throw(error_msg, title=_("Agent not applied"))
+			frappe.throw(
+				error_msg, title=_("Agent not applied") if not_applied else _("Agent model unavailable")
+			)
 		raise
+
+	# The fleet's rendered model ref rides the 202; best-effort, the run is live.
+	try:
+		agent_models.on_run_started(run.name, inst.agent, started)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis agent-run model stamp failed: {run.name}", message=frappe.get_traceback()
+		)
 
 	# STEP TIMELINE (#1062): the run's first step, and the only one the bench
 	# writes before the delegate says anything. It is recorded only after the 202

@@ -141,7 +141,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "ar-collections-operator",
@@ -207,7 +210,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "attendance-leave-integrity-auditor",
@@ -263,7 +269,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "bank-recon-operator",
@@ -324,7 +333,10 @@
         "schedule_frequency": "Weekly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "baseline-meter-auditor",
@@ -384,7 +396,10 @@
         "schedule_frequency": "Quarterly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "baseline-meter-auditor-helpdesk",
@@ -427,7 +442,10 @@
         "schedule_frequency": "Quarterly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "baseline-meter-auditor-hrms",
@@ -473,7 +491,10 @@
         "schedule_frequency": "Quarterly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "cash-limit-269st-40a3-auditor",
@@ -530,7 +551,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "close-auditor",
@@ -589,7 +613,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "custom-app-learning",
@@ -632,7 +659,10 @@
         "System Manager",
         "Jarvis Admin"
       ],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "cycle-count-planner-operator",
@@ -692,7 +722,10 @@
         "schedule_frequency": "Weekly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "dead-stock-ageing-auditor",
@@ -745,7 +778,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "deal-pipeline-ageing-auditor",
@@ -797,7 +833,10 @@
         "schedule_frequency": "Weekly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "duplicate-payment-hygiene-auditor",
@@ -857,7 +896,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "fefo-expiry-compliance-auditor",
@@ -910,7 +952,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "fixed-asset-depreciation-auditor",
@@ -965,7 +1010,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "grn-hygiene-auditor",
@@ -1020,7 +1068,10 @@
         "schedule_frequency": "Weekly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "gst-itc-recon-auditor",
@@ -1075,7 +1126,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "gst-return-prep-auditor",
@@ -1132,7 +1186,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "lead-hygiene-auditor",
@@ -1187,7 +1244,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "ledger-scrutiny-auditor",
@@ -1241,7 +1301,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "msme-43bh-auditor",
@@ -1294,7 +1357,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "negative-stock-valuation-auditor",
@@ -1353,7 +1419,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "payroll-prerun-auditor",
@@ -1414,7 +1483,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "reorder-replenishment-operator",
@@ -1477,7 +1549,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "sla-breach-ageing-auditor",
@@ -1528,7 +1603,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "statutory-payroll-compliance-auditor",
@@ -1585,7 +1663,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "statutory-payroll-deposit-status",
@@ -1633,7 +1714,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "stock-variance-auditor",
@@ -1681,7 +1765,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "tds-compliance-auditor",
@@ -1739,7 +1826,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": "2026-2027"
+      "validated_for_fy": "2026-2027",
+      "min_model": {
+        "tier": "Advanced"
+      }
     },
     {
       "agent_slug": "ticket-triage-operator",
@@ -1794,7 +1884,10 @@
         "schedule_frequency": "Daily"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Standard"
+      }
     },
     {
       "agent_slug": "vendor-ledger-recon-auditor",
@@ -1860,7 +1953,10 @@
         "schedule_frequency": "Monthly"
       },
       "default_allowed_roles": [],
-      "validated_for_fy": null
+      "validated_for_fy": null,
+      "min_model": {
+        "tier": "Advanced"
+      }
     }
   ]
 }

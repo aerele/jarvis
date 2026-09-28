@@ -855,6 +855,8 @@ class JarvisSettings(Document):
 		self.flags.wiki_disabled_transition = bool(self.has_value_changed("wiki_enabled")) and not (
 			frappe.utils.cint(getattr(self, "wiki_enabled", 0))
 		)
+		# A flip of the per-agent minimum model (on_update grandfathers / prompts Apply).
+		self.flags.agent_min_model_flip = self._agent_min_model_flip()
 
 		# Detect a new llm_api_key before _save_passwords() masks it to '****'.
 		current_key = getattr(self, "llm_api_key", None) or ""
@@ -1110,6 +1112,7 @@ class JarvisSettings(Document):
 		# #731: runs BEFORE the unified-LLM early returns below so a settings save
 		# that both reconfigures the LLM and disables the wiki still scrubs.
 		self._maybe_scrub_wiki_on_disable()
+		self._maybe_flip_agent_min_model()
 
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
@@ -1148,6 +1151,41 @@ class JarvisSettings(Document):
 		if not self.flags.get("wiki_disabled_transition"):
 			return
 		wiki_mirror.enqueue_scrub(after_commit=True)
+
+	def _agent_min_model_flip(self) -> str | None:
+		"""``"on"`` / ``"off"`` when this save flips enforce_agent_min_model, else None."""
+		if not self.has_value_changed("enforce_agent_min_model"):
+			return None
+		return "on" if frappe.utils.cint(self.get("enforce_agent_min_model")) else "off"
+
+	def _maybe_flip_agent_min_model(self):
+		"""OFF -> ON: existing installs keep today's unpinned model (``legacy`` rows)
+		until someone picks one. Either way a row that pins or blocks makes the next
+		Apply pending (ON -> OFF: pushes stop carrying model keys, admin clears them)."""
+		flip = self.flags.get("agent_min_model_flip")
+		if not flip:
+			return
+		from jarvis.chat import agent_models
+
+		if flip == "on":
+			agent_models.on_enforcement_enabled()
+		else:
+			agent_models.on_enforcement_disabled()
+		# This in-memory doc must not write the catalog flag/version back on a later save.
+		self.agent_catalog_dirty = frappe.utils.cint(
+			frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty", cache=False)
+		)
+		self.agent_catalog_version = frappe.utils.cint(
+			frappe.db.get_single_value("Jarvis Settings", "agent_catalog_version", cache=False)
+		)
+		# The dirty mark moved `modified`; keep this doc current so saving it again
+		# (a Desk form, a second save in one request) is not a TimestampMismatch.
+		# Raw text, exactly as load_from_db reads it back for check_if_latest.
+		row = frappe.db.sql(
+			"select `value` from `tabSingles` where `doctype`=%s and `field`='modified'", "Jarvis Settings"
+		)
+		if row and row[0][0]:
+			self.modified = row[0][0]
 
 	def _on_update_unified_llm(self):
 		"""New LLM path: validate → derive proxy_active/proxy_recommended →
@@ -3453,6 +3491,14 @@ def reconcile_pending_llm_sync() -> None:
 			llm_switch.reconcile()
 		except Exception:
 			frappe.log_error(title="Jarvis: llm_switch.reconcile failed", message=frappe.get_traceback())
+
+		# Per-agent models: re-validate the choices when the pool moved.
+		try:
+			from jarvis.chat import agent_models
+
+			agent_models.check_pool_fingerprint()
+		except Exception:
+			frappe.log_error(title="Jarvis: agent model pool check failed", message=frappe.get_traceback())
 
 		settings = frappe.get_single("Jarvis Settings")
 		# Un-onboarded: no admin credentials -> get_connection would just raise.
