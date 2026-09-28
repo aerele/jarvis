@@ -28,6 +28,20 @@ describe("installAgent", () => {
 		});
 	});
 
+	it("marks an unchanged shown pick so a row pinned since is kept", async () => {
+		await installAgent("close-auditor", {
+			provider: "openai",
+			model: "gpt-5",
+			ifUnpinned: true,
+		});
+		expect(frappeUi.call).toHaveBeenCalledWith(INSTALL, {
+			agent_slug: "close-auditor",
+			model_provider: "openai",
+			model: "gpt-5",
+			pick_if_unpinned: 1,
+		});
+	});
+
 	it("sends no model params without a pick", async () => {
 		await installAgent("close-auditor");
 		await installAgent("close-auditor", null);

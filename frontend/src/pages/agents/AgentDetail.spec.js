@@ -179,15 +179,7 @@ vi.mock("@/pages/agents/AgentModelCard.vue", () => ({
 vi.mock("@/pages/agents/AgentInstallDialog.vue", () => ({
 	default: {
 		name: "AgentInstallDialog",
-		props: [
-			"modelValue",
-			"agentSlug",
-			"agentTitle",
-			"requiredTier",
-			"modelInfo",
-			"installing",
-			"isAdmin",
-		],
+		props: ["modelValue", "agentSlug", "agentTitle", "requiredTier", "isAdmin"],
 		emits: ["update:modelValue", "confirm", "connect-provider"],
 		template: `<div v-if="modelValue" class="agent-install-dialog" />`,
 	},
@@ -561,26 +553,6 @@ describe("T6: loadModelInfo latest-wins guard (mutation-verified - see the task 
 		expect(w.findComponent({ name: "AgentInstallDialog" }).props("requiredTier")).toBe(
 			"Frontier"
 		);
-	});
-});
-
-// TST3-1 (EDGE2-1 wiring): AgentInstallDialog seeds its auto-pick from an
-// existing tenant-wide row via modelInfo.choice (get_agent_model()'s own
-// {state, choice}) - it must actually receive the SAME object AgentDetail
-// loaded, not just requiredTier peeled off it.
-describe("T6: AgentInstallDialog receives the loaded modelInfo (EDGE2-1 wiring)", () => {
-	it("passes modelInfo straight through as the modelInfo prop", async () => {
-		const info = {
-			enforced: 1,
-			min_model: { tier: "Advanced" },
-			required_tier: "Advanced",
-			state: "chosen",
-			choice: { provider: "anthropic", model: "claude-sonnet-5" },
-		};
-		apiAgents.getAgentModel.mockResolvedValue(info);
-		const w = await mountDetail(baseAgent({ installation: null }));
-		await flushPromises();
-		expect(w.findComponent({ name: "AgentInstallDialog" }).props("modelInfo")).toEqual(info);
 	});
 });
 

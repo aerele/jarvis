@@ -137,14 +137,16 @@ export const getAgentModel = (agent) => call(AM + "get_agent_model", { agent });
 //      model, label, lane_hint, capability_tier, capability_rank, cost_note}] }
 export const getEligibleModels = (agent) => call(AM + "get_eligible_models", { agent });
 
-// Install for the current user. `pick` ({provider, model}, optional) is the
-// install dialog's changed model: install_agent validates and saves it as the
-// tenant-wide choice in the same request (ignored with the flag off).
+// Install for the current user. `pick` ({provider, model, ifUnpinned?}, optional)
+// is the install dialog's model: install_agent validates and saves it as the
+// tenant-wide choice in the same request (ignored with the flag off). `ifUnpinned`
+// marks the unchanged shown model: it never replaces a row pinned since.
 // -> { ok, data: { name, agent } }
 export const installAgent = (agent_slug, pick) =>
 	call(AG + "install_agent", {
 		agent_slug,
 		...(pick && pick.model ? { model_provider: pick.provider || "", model: pick.model } : {}),
+		...(pick && pick.model && pick.ifUnpinned ? { pick_if_unpinned: 1 } : {}),
 	});
 
 // Pick the agent's tenant-wide model (applies to everyone using it).
