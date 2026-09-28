@@ -32,6 +32,7 @@ _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 # "2026-00012", codes like "00123" and phone numbers must stay text.
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISO_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?$")
+_INVALID_SHEET_NAME_RE = re.compile(r"[\[\]:*?/\\]")
 
 
 def export_excel(
@@ -81,7 +82,7 @@ def export_excel(
 		if not sheet_data:
 			raise NoDataError("No data to prepare for Excel.")
 	else:
-		sheet_data = [((title or "Sheet1")[:31], _normalize(rows, columns))]
+		sheet_data = [(_unique_sheet_name(title or "Sheet1", set()), _normalize(rows, columns))]
 		sheet_charts.append(validate_charts(charts, sheet_data[0][1]))
 
 	content = _workbook_bytes(sheet_data, charts=sheet_charts)
@@ -109,14 +110,20 @@ def _normalize(rows, columns) -> list:
 	— the same guards the single-sheet path has always applied, now shared by
 	every tab so one blank tab can't ship a user a workbook that opens empty.
 	"""
-	if not isinstance(rows, list) or not rows:
+	if rows is None or rows == []:
 		raise NoDataError("No data to prepare for Excel.")
+	if not isinstance(rows, list):
+		raise InvalidArgumentError("rows must be a list of dicts or a list of lists")
 
 	first = rows[0]
 	if isinstance(first, dict):
+		if not all(isinstance(r, dict) for r in rows):
+			raise InvalidArgumentError("All rows must be dicts when the first row is a dict")
 		header = list(columns) if columns else list(first.keys())
-		body = [[_cell(r.get(c)) for c in header] for r in rows if isinstance(r, dict)]
+		body = [[_cell(r.get(c)) for c in header] for r in rows]
 	elif isinstance(first, (list, tuple)):
+		if not all(isinstance(r, (list, tuple)) for r in rows):
+			raise InvalidArgumentError("All rows must be lists when the first row is a list")
 		if columns:
 			header, body = list(columns), [list(r) for r in rows]
 		else:
@@ -169,8 +176,8 @@ def _workbook_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes
 
 def _unique_sheet_name(raw, used: set[str]) -> str:
 	"""Excel sheet names are ≤31 chars and must be unique; de-dupe collisions
-	(after truncation) so a workbook with two 'Summary' tabs doesn't blow up."""
-	base = (str(raw) or "Sheet")[:31]
+	after sanitizing and truncating, before either workbook engine sees them."""
+	base = _INVALID_SHEET_NAME_RE.sub(" ", str(raw)).strip(" '")[:31].rstrip(" '") or "Sheet"
 	name, n = base, 2
 	while name.lower() in used:
 		suffix = f"-{n}"
