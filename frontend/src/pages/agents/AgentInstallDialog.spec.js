@@ -640,58 +640,21 @@ describe("AgentInstallDialog confirmInstall client-side timeout (FE3-2)", () => 
 	});
 });
 
-// UX4-1 review fix: the timeout only released the DIALOG - it never cancelled
-// the stalled setAgentModel (call() has no AbortSignal to do it with). A
-// same-pick retry is idempotent and just proceeds; a different-pick retry
-// must wait for the stale one to settle first, or it could land after and
-// silently overwrite the newer tenant-wide choice.
-describe("AgentInstallDialog stale-save handling after a timeout (UX4-1)", () => {
+// UX4-1/FE5-1 review fix: the timeout only released the DIALOG - it never
+// cancelled the stalled setAgentModel (call() has no AbortSignal to do it
+// with). A retry (same or different pick) used to be allowed to race that
+// stale request, and close+reopen could even bypass the wait-guard entirely
+// (FE5-1) or auto-reseed over an unsent new pick. The redesign makes a second
+// write impossible instead of racing it: Change/Install stay disabled - across
+// a close+reopen too - until the stale request actually settles (or a hard
+// limit forces it closed), while Cancel/Close stay enabled throughout.
+describe("AgentInstallDialog stale-save handling after a timeout (FE5-1/FE5-2/UX5-1)", () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
 
-	it("a stalled save then a SAME-pick retry proceeds immediately (idempotent, no wait)", async () => {
+	it("a stalled save disables Change/Install, keeps Cancel/Close enabled, and announces the note via aria-live", async () => {
 		mockTwoModels();
-		apiAgents.setAgentModel.mockReturnValueOnce(new Promise(() => {})); // 1st call stalls forever
-		const w = mountDialog();
-		await flushPromises();
-		await startChangedInstall(w); // picks openai/gpt-5, Install -> 1st call
-
-		await vi.advanceTimersByTimeAsync(15000);
-		const { toast } = await import("frappe-ui");
-		expect(toast.error).toHaveBeenCalledWith(
-			"Still saving your model choice. Wait a moment, then try again."
-		);
-
-		apiAgents.setAgentModel.mockResolvedValueOnce({}); // the retry succeeds
-		await w.find('[data-label="Install"]').trigger("click"); // SAME pick (gpt-5)
-		await flushPromises();
-
-		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(2);
-		expect(apiAgents.setAgentModel).toHaveBeenLastCalledWith(
-			"close-auditor",
-			"openai",
-			"gpt-5"
-		);
-		expect(w.text()).not.toContain("Finishing the previous save");
-		expect(w.emitted("confirm")).toHaveLength(1);
-	});
-
-	it("a stalled save then a DIFFERENT-pick retry waits for the stale one to settle before sending the new pick", async () => {
-		mockTwoModels();
-		let resolveStale;
-		const calls = [];
-		apiAgents.setAgentModel.mockImplementation((_agent, provider, model) => {
-			calls.push(`${provider}/${model}`);
-			if (provider === "openai") {
-				return new Promise((resolve) => {
-					resolveStale = resolve;
-				});
-			}
-			return Promise.resolve({});
-		});
-		apiAgents.getAgentModel.mockResolvedValue({
-			choice: { provider: "anthropic", model: "claude-haiku-5", label: "Claude Haiku" },
-		});
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // stalls forever
 		const w = mountDialog();
 		await flushPromises();
 		await startChangedInstall(w); // picks openai/gpt-5, Install -> stalls
@@ -702,23 +665,136 @@ describe("AgentInstallDialog stale-save handling after a timeout (UX4-1)", () =>
 			"Still saving your model choice. Wait a moment, then try again."
 		);
 
-		// Change to a DIFFERENT pick and retry.
-		await w.find('[data-label="Change"]').trigger("click");
-		await w.find('[data-testid="pick-third"]').trigger("click"); // anthropic/claude-haiku-5
+		expect(w.find('[data-label="Change"]').attributes("disabled")).toBeDefined();
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeDefined();
+		expect(w.find('[data-label="Cancel"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[data-label="Close"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[role="status"]').text()).toBe("Still saving your model choice…");
+	});
+
+	it("clicking the disabled Install while pending never sends a second setAgentModel", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // stalls forever
+		const w = mountDialog();
 		await flushPromises();
+		await startChangedInstall(w);
+		await vi.advanceTimersByTimeAsync(15000);
+
+		await w.find('[data-label="Install"]').trigger("click");
 		await w.find('[data-label="Install"]').trigger("click");
 		await flushPromises();
 
-		// The new pick must NOT have been sent yet - still waiting on the stale one.
-		expect(calls).toEqual(["openai/gpt-5"]);
-		expect(w.text()).toContain("Finishing the previous save");
+		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(1);
 		expect(w.emitted("confirm")).toBeUndefined();
+	});
 
-		resolveStale({}); // the stale save finally lands
+	it("Change/Install stay disabled across a close+reopen while the stale request is still pending", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // stalls forever
+		apiAgents.getAgentModel.mockResolvedValue({ choice: null });
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		await vi.advanceTimersByTimeAsync(15000);
+
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
 		await flushPromises();
 
-		expect(calls).toEqual(["openai/gpt-5", "anthropic/claude-haiku-5"]);
-		expect(w.emitted("confirm")).toHaveLength(1);
+		expect(w.find('[data-label="Change"]').attributes("disabled")).toBeDefined();
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeDefined();
+		expect(w.find('[role="status"]').text()).toBe("Still saving your model choice…");
+	});
+
+	it("once the stale request settles while open, it re-syncs from the server and re-enables Change/Install", async () => {
+		mockTwoModels();
+		let resolveStale;
+		apiAgents.setAgentModel.mockReturnValue(
+			new Promise((resolve) => {
+				resolveStale = resolve;
+			})
+		);
+		apiAgents.getAgentModel.mockResolvedValue({
+			choice: { provider: "openai", model: "gpt-5", label: "GPT-5", cost_note: "" },
+		});
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		await vi.advanceTimersByTimeAsync(15000);
+
+		resolveStale({});
+		await flushPromises();
+
+		expect(apiAgents.getAgentModel).toHaveBeenCalledWith("close-auditor");
+		expect(w.find('[data-label="Change"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[role="status"]').text()).toBe("");
+	});
+
+	// Correctness: a reopen re-seeds picked/autoPicked to the SAME value
+	// (draftChanged goes false) purely because it re-fetches the current
+	// tenant-wide row - which still reflects openai/gpt-5, the very pick the
+	// stale request is writing. The pending gate must still block Install here,
+	// or it would fall into the "!draftChanged -> emit confirm" path and
+	// install immediately while the write is unresolved.
+	// Note: the Install button is genuinely inert while `disabled` (JSDOM, like
+	// real browsers, never dispatches click to a disabled element's listeners -
+	// verified separately), so this scenario can only be reached in the UI if
+	// that binding is ever refactored away. Calling the exposed confirmInstall
+	// directly exercises the internal ordering as the real backstop it is.
+	it("blocks Install even when a reopen re-seeds the draft back to matching auto-pick while still pending", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // stalls forever
+		apiAgents.getAgentModel.mockResolvedValue({
+			choice: { provider: "openai", model: "gpt-5", label: "GPT-5", cost_note: "" },
+		});
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w); // picks openai/gpt-5, Install -> stalls
+		await vi.advanceTimersByTimeAsync(15000);
+
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		expect(w.text()).toContain("GPT-5"); // reseeded: picked === autoPicked now
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeDefined();
+
+		await w.vm.confirmInstall(); // bypass the (inert) disabled button on purpose
+		await flushPromises();
+
+		expect(apiAgents.setAgentModel).toHaveBeenCalledTimes(1); // no 2nd call
+		expect(w.emitted("confirm")).toBeUndefined();
+	});
+
+	// CR5-4: the reopen path's OWN getAgentModel round-trip (ahead of load())
+	// must also keep Install from sitting enabled next to an emptied box.
+	it("reopen after a timeout keeps Install disabled during the getAgentModel round-trip", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // stalls forever
+		let resolveGetAgentModel;
+		apiAgents.getAgentModel.mockReturnValue(
+			new Promise((resolve) => {
+				resolveGetAgentModel = resolve;
+			})
+		);
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		await vi.advanceTimersByTimeAsync(15000);
+
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+
+		expect(w.text()).toContain("Loading eligible models");
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeDefined();
+
+		resolveGetAgentModel({
+			choice: { provider: "openai", model: "gpt-5", label: "GPT-5", cost_note: "" },
+		});
+		await flushPromises();
+
+		expect(w.text()).toContain("GPT-5");
 	});
 
 	it("re-fetches the tenant-wide choice on reopen after a timeout, instead of trusting stale modelInfo", async () => {
@@ -747,5 +823,29 @@ describe("AgentInstallDialog stale-save handling after a timeout (UX4-1)", () =>
 		expect(apiAgents.getAgentModel).toHaveBeenCalledWith("close-auditor");
 		expect(w.text()).toContain("GPT-5");
 		expect(w.text()).toContain("Already set for everyone using this agent.");
+	});
+
+	// Resilience: frappe-ui's call() has no timeout of its own - a request that
+	// never settles at all (network black hole) must not hold Change/Install
+	// disabled until a page reload.
+	it("a request that never settles is force-released after the hard limit, re-syncing and re-enabling controls", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // never settles
+		apiAgents.getAgentModel.mockResolvedValue({
+			choice: { provider: "openai", model: "gpt-5", label: "GPT-5", cost_note: "" },
+		});
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		await vi.advanceTimersByTimeAsync(15000); // the 15s client-side timeout
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeDefined();
+
+		await vi.advanceTimersByTimeAsync(90000); // the hard limit
+		await flushPromises();
+
+		expect(apiAgents.getAgentModel).toHaveBeenCalledWith("close-auditor");
+		expect(w.find('[data-label="Change"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[role="status"]').text()).toBe("");
 	});
 });
