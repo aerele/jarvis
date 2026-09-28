@@ -2918,18 +2918,19 @@ def _enqueued_push_agent_skills() -> None:
 			# transaction, still covered by the try/except/finally and the trailing
 			# commit, so the "status is never left pending" invariant is unchanged.
 			frappe.db.commit()
-			_stamp_pushed_models(payload, pushed, scope)
+			stamped = _stamp_pushed_models(payload, pushed, scope)
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
 				"agent_skills_sync_status": f"ok (applied {len(payload)} via admin)",
 			}
 			# The container now matches the DB — clear the dirty flag ONLY on a
 			# successful push whose payload saw every mutation (version
-			# unchanged); failures and mid-push mutations leave it set.
+			# unchanged) and whose model stamps all landed; failures, mid-push
+			# mutations and an unstamped model row leave it set.
 			fresh = frappe.utils.cint(
 				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
 			)
-			if fresh == version:
+			if fresh == version and stamped:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_value(_SETTINGS, _SETTINGS, values)
 			terminal_written = True
@@ -2975,18 +2976,20 @@ def _model_push_scope(payload: list[dict]) -> dict | None:
 	return push_scope(payload)
 
 
-def _stamp_pushed_models(payload: list[dict], response=None, scope: dict | None = None) -> None:
+def _stamp_pushed_models(payload: list[dict], response=None, scope: dict | None = None) -> bool:
 	"""Record per model-choice row what this push delivered (admin's ``model_choices``
-	report included). Independent of the dirty-clear version guard, and never allowed
-	to fail a push that landed."""
+	report included). Never allowed to fail a push that landed; False when a row was
+	left unstamped, so the catalog stays dirty."""
 	try:
 		from jarvis.chat.agent_models import stamp_pushed
 
-		stamp_pushed(payload, response, scope)
+		stamped = stamp_pushed(payload, response, scope)
 		frappe.db.commit()
+		return stamped
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="Jarvis: agent model push stamp failed", message=frappe.get_traceback())
+		return False
 
 
 def _fail(status: str) -> None:
