@@ -44,6 +44,9 @@
 						<div v-if="pickedCostNote" class="mt-0.5 text-sm text-ink-gray-5">
 							{{ pickedCostNote }}
 						</div>
+						<div v-if="alreadySetForEveryone" class="mt-0.5 text-sm text-ink-gray-5">
+							Already set for everyone using this agent.
+						</div>
 					</div>
 					<Button
 						variant="subtle"
@@ -65,7 +68,7 @@
 		</template>
 		<template #actions>
 			<div class="flex justify-end gap-2">
-				<Button label="Cancel" @click="onClose(false)" />
+				<Button label="Cancel" :disabled="saving" @click="onClose(false)" />
 				<Button
 					variant="solid"
 					label="Install"
@@ -110,6 +113,11 @@ const props = defineProps({
 	agentSlug: { type: String, required: true },
 	agentTitle: { type: String, default: "" },
 	requiredTier: { type: String, default: "" },
+	// EDGE2-1: get_agent_model()'s {state, choice} - when a tenant-wide row
+	// already exists (another installer pinned a model), plan_install never
+	// overwrites it on install, so THIS is what will actually run. Seeds the
+	// dialog's auto-pick instead of recomputing our own from eligible models.
+	modelInfo: { type: Object, default: null },
 	installing: { type: Boolean, default: false },
 	// has_jarvis_admin_access - gates the Connect-a-provider CTA the same way
 	// AgentModelCard does (a plain user cannot reach the AI models pane).
@@ -124,6 +132,12 @@ const eligible = ref(null); // get_eligible_models()
 // against whatever the row happens to hold server-side.
 const autoPicked = ref(null); // {provider, model}
 const picked = ref(null); // {provider, model} - the LOCAL draft, starts == autoPicked
+// EDGE2-1: true when autoPicked/picked were seeded from an existing tenant-wide
+// row (props.modelInfo.choice) rather than our own get_eligible_models best-pick.
+const usingExistingChoice = ref(false);
+// The existing row's own enriched choice (label/tier/cost) - a fallback source
+// for pickedMeta when that model has since fallen out of the eligible list.
+const existingMeta = ref(null);
 const showPicker = ref(false);
 const liveMessage = ref("");
 // Double-submit guard for the Install-confirm's set_agent_model call (fired
@@ -138,7 +152,16 @@ async function load() {
 	try {
 		eligible.value = (await apiAgents.getEligibleModels(props.agentSlug)) || null;
 		const models = (eligible.value && eligible.value.models) || [];
-		if (models.length) {
+		const existing = props.modelInfo && props.modelInfo.choice;
+		if (existing && existing.provider && existing.model) {
+			// A tenant-wide row already exists (auto/chosen/changed all carry a
+			// choice) - install_agent's plan_install leaves it alone, so it is
+			// what will actually run. Show it instead of our own auto-pick.
+			usingExistingChoice.value = true;
+			autoPicked.value = { provider: existing.provider, model: existing.model };
+			picked.value = { ...autoPicked.value };
+			existingMeta.value = existing;
+		} else if (models.length) {
 			autoPicked.value = { provider: models[0].provider, model: models[0].model };
 			picked.value = { ...autoPicked.value };
 		}
@@ -155,9 +178,16 @@ watch(
 	() => props.modelValue,
 	(open) => {
 		if (!open) return;
+		// FE2-1: a reopen (even one forced past onClose's saving guard below)
+		// must supersede any confirmInstall still awaiting a PRIOR open's
+		// setAgentModel - its late resolution must never emit confirm or a
+		// toast into a dialog the user has since left.
+		confirmReqId++;
 		showPicker.value = false;
 		autoPicked.value = null;
 		picked.value = null;
+		usingExistingChoice.value = false;
+		existingMeta.value = null;
 		liveMessage.value = "";
 		saving.value = false;
 		load();
@@ -171,15 +201,21 @@ const requirementText = computed(() => requirementPhrase(props.requiredTier));
 
 const pickedRef = computed(() => picked.value);
 const pickedMeta = computed(() => {
+	const p = picked.value;
+	if (!p) return null;
 	const models = (eligible.value && eligible.value.models) || [];
-	return (
-		(picked.value &&
-			models.find(
-				(m) => m.provider === picked.value.provider && m.model === picked.value.model
-			)) ||
-		null
-	);
+	const fromEligible = models.find((m) => m.provider === p.provider && m.model === p.model);
+	if (fromEligible) return fromEligible;
+	// EDGE2-1: an existing tenant-wide pick that has since fallen out of the
+	// eligible list still needs a label/tier/cost to show - fall back to the
+	// row's own enriched choice rather than rendering nothing.
+	const em = existingMeta.value;
+	if (em && em.provider === p.provider && em.model === p.model) return em;
+	return null;
 });
+// EDGE2-1: shown next to the box while the draft still matches the seeded
+// existing row - hides the instant Change picks something else.
+const alreadySetForEveryone = computed(() => usingExistingChoice.value && !draftChanged.value);
 const pickedLabel = computed(
 	() => (pickedMeta.value && (pickedMeta.value.label || pickedMeta.value.model)) || ""
 );
@@ -234,8 +270,19 @@ async function confirmInstall() {
 }
 
 function onClose(v) {
-	// Cancel/backdrop/Escape: the draft above is local-only and was never
-	// sent, so simply closing discards it - nothing to undo server-side.
+	// FE2-1 review fix: Cancel/backdrop/Escape while confirmInstall's
+	// setAgentModel is in flight must not close the dialog - the save is
+	// sub-second, so just ignore the attempt and let it settle rather than
+	// risk a stale success emitting confirm (installing) after the user left.
+	// The Cancel button is also disabled while saving (see template).
+	if (saving.value) return;
+	// Belt-and-braces alongside the reopen-branch bump above: supersedes any
+	// confirmInstall this close raced past, so its resolution never emits
+	// confirm or a toast into a dialog that is now closed.
+	confirmReqId++;
+	// Cancel/backdrop/Escape outside a save: the draft above is local-only
+	// and was never sent, so simply closing discards it - nothing to undo
+	// server-side.
 	emit("update:modelValue", !!v);
 }
 </script>
