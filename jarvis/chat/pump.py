@@ -1705,6 +1705,17 @@ def run_pump_hop(
 		except Exception:
 			pass
 		ts.reset_lock_tracking()
+		# Mux telemetry (RelayMux.stats(), read after mux.stop() above - the
+		# counters are plain ints, safe to read post-stop). reader_errors is the
+		# #1449-regression counter: a reader-thread routing bug on a known lane
+		# should never happen and must be visible in the hop line, not only
+		# discoverable via a live probe.
+		mux_stats: dict = {}
+		if ctx.mux is not None:
+			try:
+				mux_stats = ctx.mux.stats()
+			except Exception:
+				mux_stats = {}
 		# C4 pump occupancy + hop_duration_ms (replaces the obsolete worker_hold in
 		# pump mode: a hop is a shared drain, not a held worker-per-turn).
 		_telemetry(
@@ -1715,6 +1726,10 @@ def run_pump_hop(
 			exit=outcome,
 			occupancy=ctx.peak_occupancy,
 			duration_ms=round((_monotonic() - hop_started_mono) * 1000.0, 1),
+			reader_errors=mux_stats.get("reader_errors", 0),
+			stray_frames=mux_stats.get("stray_frames", 0),
+			deltas_dropped=mux_stats.get("deltas_dropped", 0),
+			lanes_quarantined=mux_stats.get("lanes_quarantined", 0),
 		)
 	return {"acquired": True, "exit": outcome, "epoch": epoch}
 
