@@ -33,10 +33,12 @@ export function collectDocRefs(messages) {
 	return map;
 }
 
-// A missing, unparsable or null payload reads as an empty object.
-function parseJson(text) {
+// Persisted rows carry a JSON string, but a still-streaming row can carry the
+// already-parsed object. A missing, unparsable or null payload reads as {}.
+function parseJson(value) {
 	try {
-		return (text && JSON.parse(text)) || {};
+		const v = typeof value === "string" ? JSON.parse(value) : value;
+		return v || {};
 	} catch (e) {
 		return {};
 	}
