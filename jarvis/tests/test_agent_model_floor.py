@@ -25,6 +25,7 @@ FINDING = "Jarvis Agent Finding"
 SETTINGS = "Jarvis Settings"
 CONV = "Jarvis Conversation"
 SESSION = "Jarvis Chat Session"
+NOTICE = "Notification Log"
 
 # Module-owned listings (Advanced floor): a registry agent may carry other modules'
 # residual installs on a shared test site, which would turn a first install legacy.
@@ -105,6 +106,8 @@ CATALOG = [
 ]  # fmt: skip
 
 ADVANCED = frappe._dict(min_model=json.dumps({"tier": "Advanced"}))
+# What a model-choice admin returns on a keyed push that refused nothing.
+_REPORT = {"model_choices": {"rejected": [], "blocked": []}}
 STANDARD = frappe._dict(min_model=json.dumps({"tier": "Standard"}))
 
 
@@ -323,12 +326,27 @@ class TestAgentModelEligibility(FrappeTestCase):
 			(c["capability_tier"], c["lane_hint"], c["label"]), ("Frontier", "api_key", "GPT Frontier")
 		)
 
-	def test_direct_mode_uses_the_configured_providers_catalog_on_its_lane(self):
-		settings = _settings(_row("gpt-std"), preset="")
-		got = [(c["provider"], c["model"]) for c in self._eligible(ADVANCED, settings)]
-		self.assertEqual(got, [("openai", "gpt-frontier"), ("openai", "gpt-adv")])
+	def test_direct_mode_offers_only_the_configured_model(self):
+		# The fleet renders only the configured model for a direct / OAuth shape, so
+		# the provider's other catalog models (gpt-frontier, gpt-adv) could never be
+		# pinned: offering them made every auto-pick unrenderable.
+		std = _settings(_row("gpt-std"), preset="")
+		self.assertEqual(self._eligible(ADVANCED, std), [])  # below the floor: needs_model
+		self.assertEqual(
+			[(c["provider"], c["model"]) for c in self._eligible(STANDARD, std)], [("openai", "gpt-std")]
+		)
+		adv = _settings(_row("gpt-adv"), preset="")
+		self.assertEqual(
+			[(c["provider"], c["model"], c["capability_rank"]) for c in self._eligible(ADVANCED, adv)],
+			[("openai", "gpt-adv", 2)],
+		)
 		legacy = _settings(preset="", llm_provider="OpenAI", llm_model="gpt-std", llm_auth_mode="api_key")
-		self.assertEqual([c["model"] for c in self._eligible(ADVANCED, legacy)], ["gpt-frontier", "gpt-adv"])
+		self.assertEqual([c["model"] for c in agent_models.model_pool(legacy, CATALOG)], ["gpt-std"])
+		oauth = _settings(preset="", llm_provider="OpenAI", llm_model="gpt-sub", llm_auth_mode="oauth")
+		self.assertEqual(
+			[(c["model"], c["lane_hint"]) for c in agent_models.model_pool(oauth, CATALOG)],
+			[("gpt-sub", "subscription")],
+		)
 
 	def test_direct_mode_never_borrows_an_aliased_providers_models(self):
 		# Admin's direct allowlist is the configured provider's own catalog entry.
@@ -509,7 +527,11 @@ class TestPushKeys(AgentModelDBBase):
 			pushed_model="gpt-std",
 		)
 		# The dirty-clear guard refuses (version moves mid-push); stamping must not care.
-		post = MagicMock(side_effect=lambda **kw: agents_api._bump_catalog_version())
+		# A model-choice admin always reports on a keyed push (a bare response is a
+		# pre-contract admin that ignored the keys: see the unconfirmed-push test).
+		post = MagicMock(
+			side_effect=lambda **kw: agents_api._bump_catalog_version() or {"ok": True, "data": _REPORT}
+		)
 		with patch("jarvis.admin_client.post_push_agent_skills", post):
 			agents_api._enqueued_push_agent_skills()
 		self.assertTrue(post.called)
@@ -536,6 +558,62 @@ class TestPushKeys(AgentModelDBBase):
 			"failed: platform upgrade pending",
 		)
 		self.assertFalse(self._state().pushed_model)
+
+	def _dirty(self):
+		return frappe.utils.cint(frappe.db.get_single_value(SETTINGS, "agent_catalog_dirty", cache=False))
+
+	def test_a_keyed_push_an_old_admin_ignored_is_not_stamped(self):
+		# An admin without the model-choice contract drops the keys and reports nothing:
+		# the fleet pinned nothing, so the row must stay pending, not read delivered.
+		_choice(AGENT, state="chosen", provider="openai", model="gpt-adv", fallbacks="[]")
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 1)
+		frappe.db.commit()
+		with (
+			_env(),
+			patch("jarvis.admin_client.post_push_agent_skills", return_value={"ok": True, "data": {}}),
+		):
+			agents_api._enqueued_push_agent_skills()
+		row = self._state()
+		self.assertEqual((row.pushed_provider or "", row.pushed_model or ""), ("", ""))
+		self.assertEqual(row.note, "Platform upgrade pending")
+		self.assertEqual(self._dirty(), 1)
+		upgraded = {"ok": True, "data": _REPORT}
+		with _env(), patch("jarvis.admin_client.post_push_agent_skills", return_value=upgraded):
+			agents_api._enqueued_push_agent_skills()
+		row = self._state()
+		self.assertEqual((row.pushed_provider, row.pushed_model, row.note or ""), ("openai", "gpt-adv", ""))
+		self.assertEqual(self._dirty(), 0)
+
+	def test_one_failing_row_stamp_keeps_the_others_and_the_catalog_dirty(self):
+		_choice(AGENT, state="chosen", provider="openai", model="gpt-adv", fallbacks="[]")
+		_choice(AGENT_B, state="chosen", provider="openai", model="gpt-frontier", fallbacks="[]")
+		frappe.db.set_single_value(SETTINGS, "agent_catalog_dirty", 1)
+		frappe.db.commit()
+		real_get_all, real_get_row = frappe.get_all, agent_models._get_row
+
+		def failing_first(doctype, *args, **kwargs):
+			if doctype == CHOICE and kwargs.get("pluck") == "name":
+				return [AGENT_B, AGENT]
+			return real_get_all(doctype, *args, **kwargs)
+
+		def lock_wait_on_b(agent, for_update=False):
+			if agent == AGENT_B:
+				raise frappe.QueryTimeoutError("lock wait")
+			return real_get_row(agent, for_update=for_update)
+
+		with (
+			_env(),
+			patch("jarvis.admin_client.post_push_agent_skills", return_value={"ok": True, "data": _REPORT}),
+			patch.object(frappe, "get_all", side_effect=failing_first),
+			patch.object(agent_models, "_get_row", side_effect=lock_wait_on_b),
+		):
+			agents_api._enqueued_push_agent_skills()
+		self.assertEqual(self._state().pushed_model, "gpt-adv")
+		self.assertFalse(self._state(AGENT_B).pushed_model)
+		self.assertEqual(self._dirty(), 1)  # the next Apply re-stamps the failed row
+		self.assertTrue(
+			frappe.db.exists("Error Log", {"method": f"Jarvis: agent model stamp failed: {AGENT_B}"})
+		)
 
 
 class TestApiGates(AgentModelDBBase):
@@ -609,6 +687,15 @@ class TestApiGates(AgentModelDBBase):
 			agent_models.reset_agent_model(AGENT)
 		self.assertEqual((self._state().state, self._state().model), ("auto", "gpt-frontier"))
 
+	def test_a_pick_for_an_agent_nobody_installed_is_logged_to_the_actor(self):
+		_flag(True)
+		with _env(), _as(ADMIN):
+			agent_models.set_agent_model(AGENT_B, "openai", "gpt-adv")
+		logged = frappe.get_all(
+			ACTIVITY, filters={"action": "model_changed", "agent": AGENT_B}, fields=["owner", "installation"]
+		)
+		self.assertEqual([(r.owner, r.installation or "") for r in logged], [(ADMIN, "")])
+
 
 class TestInstall(AgentModelDBBase):
 	def setUp(self):
@@ -677,6 +764,17 @@ class TestInstall(AgentModelDBBase):
 		with patch.object(agent_models, "_get_row", side_effect=racing):
 			agent_models._upsert(AGENT, {"state": "chosen", "provider": "openai", "model": "gpt-adv"})
 		self.assertEqual((self._state().state, self._state().model), ("chosen", "gpt-adv"))
+
+	def test_a_first_pick_inserts_without_locking_the_missing_key(self):
+		# FOR UPDATE on a missing key takes a gap lock: two concurrent first picks deadlock.
+		with patch.object(agent_models, "_get_row", wraps=agent_models._get_row) as get_row:
+			agent_models._upsert(AGENT, {"state": "chosen", "provider": "openai", "model": "gpt-adv"})
+		get_row.assert_not_called()
+		self.assertEqual(self._state().model, "gpt-adv")
+		with patch.object(agent_models, "_get_row", wraps=agent_models._get_row) as get_row:
+			agent_models._upsert(AGENT, {"model": "gpt-frontier"})
+		get_row.assert_called_once_with(AGENT, for_update=True)  # an existing row: locked, then updated
+		self.assertEqual(self._state().model, "gpt-frontier")
 
 
 class TestFlagTransition(AgentModelDBBase):
@@ -869,6 +967,7 @@ class TestLaunchAndRunModel(AgentModelDBBase):
 		self.assertIn("Try again", self._run().error)
 
 	def test_model_used_and_below_min(self):
+		# Pinned runs (model_source "choice"): only they are floor-checked (COR-3).
 		cases = [
 			({"provider": "openai", "model": "gpt-adv"}, "openai/gpt-adv", 0),
 			({"provider": "openai", "model": "gpt-frontier"}, "openai/gpt-adv", 1),  # not what was rendered
@@ -883,6 +982,7 @@ class TestLaunchAndRunModel(AgentModelDBBase):
 					"trigger": "scheduled",
 					"status": "completed",
 					"model_rendered": rendered,
+					"model_source": "choice",
 				}
 			).insert(ignore_permissions=True)
 			with _env():
@@ -908,6 +1008,122 @@ class TestLaunchAndRunModel(AgentModelDBBase):
 		)
 		run = frappe.get_doc(RUN, self._launch(post)["run"])
 		self.assertEqual((run.model_rendered or "", run.model_source or ""), ("", ""))
+
+	def test_apply_in_progress_is_friendly_with_the_flag_off_too(self):
+		# Any container can be mid-apply; a flag-off tenant must not read "dispatch failed".
+		_flag(False)
+		with (
+			_env(),
+			patch("jarvis.admin_client.post_agent_run", self._fleet_error("apply_in_progress")),
+			patch.object(agent_catalog, "registry_tools_allow", return_value=["jarvis__get_doc"]),
+			_as(OWNER),
+			self.assertRaises(agent_models.ModelRunRefused) as ctx,
+		):
+			agents_api.run_agent_now(self.inst)
+		self.assertEqual(ctx.exception.token, "apply_in_progress")
+		self.assertIn("Try again", str(ctx.exception))
+		self.assertIn("Try again", self._run().error)
+		self.assertEqual(self._state().state, "chosen")
+		# Every other token keeps today's flag-off handling.
+		self.assertIsNone(agent_models.run_error_token(Exception("502: delegate_blocked: no")))
+
+	def test_unpinned_runs_are_never_flagged_below_min(self):
+		# A legacy / pool_default run renders the synthetic pool id, never an eligible model.
+		for source in ("pool_default", None):
+			run = frappe.get_doc(
+				{"doctype": RUN, "agent": AGENT, "installation": self.inst, "trigger": "scheduled",
+				 "status": "completed", "model_rendered": "openai_compat/jarvis-pool", "model_source": source}
+			).insert(ignore_permissions=True)  # fmt: skip
+			with _env():
+				agent_models.record_model_used(
+					run.name, {"model_used": {"provider": "openai", "model": "gpt-std"}}
+				)
+			got = frappe.db.get_value(RUN, run.name, ["model_used", "model_below_min"], as_dict=True)
+			self.assertEqual((got.model_used, got.model_below_min), ("openai/gpt-std", 0), source)
+
+
+class TestScheduledModelRefusals(AgentModelDBBase):
+	"""A typed fleet refusal on a scheduled slot: one failed run + one notice and the
+	slot spent, except apply_in_progress, which hands the slot back silently."""
+
+	def setUp(self):
+		super().setUp()
+		self.inst = _install(OWNER, AGENT)
+		_flag(True)
+		self.due = frappe.utils.add_days(frappe.utils.now_datetime(), -1)
+		frappe.db.set_value(
+			INSTALLATION,
+			self.inst,
+			{
+				"run_as_user": OWNER,
+				"schedule_enabled": 1,
+				"schedule_frequency": "daily",
+				"next_run_at": self.due,
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self._reset()
+
+	def tearDown(self):
+		self._reset()
+		super().tearDown()
+
+	def _reset(self):
+		frappe.db.rollback()
+		for dt, filters in ((NOTICE, {"for_user": OWNER}), (RUN, {"installation": self.inst})):
+			for name in frappe.get_all(dt, filters=filters, pluck="name"):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.delete(CHOICE, {"name": AGENT})
+		_choice(AGENT, state="chosen", provider="openai", model="gpt-adv", fallbacks="[]",
+			pushed_provider="openai", pushed_model="gpt-adv")  # fmt: skip
+		frappe.db.set_value(INSTALLATION, self.inst, "next_run_at", self.due, update_modified=False)
+		frappe.db.commit()
+
+	def _dispatch(self, token):
+		from jarvis.exceptions import AdminUnreachableError
+
+		row = frappe.get_all(
+			INSTALLATION,
+			filters={"name": self.inst},
+			fields=["name", "owner", "run_as_user", "agent", "schedule_frequency", "schedule_time",
+				"schedule_weekday", "schedule_day_of_month"],
+		)[0]  # fmt: skip
+		fleet = AdminUnreachableError(f"admin returned a 502 error: {token}: fleet says no")
+		with (
+			_env(),
+			patch("jarvis.admin_client.post_agent_run", side_effect=fleet),
+			patch.object(agent_catalog, "registry_tools_allow", return_value=["jarvis__get_doc"]),
+		):
+			agent_scheduler._dispatch(
+				row,
+				frappe.utils.now_datetime(),
+				run_as=OWNER,
+				original_user="Administrator",
+				source_apps=None,
+				model_gate={"ok": True, "model_source": "choice"},
+			)
+		runs = frappe.get_all(RUN, filters={"installation": self.inst}, fields=["status", "error"])
+		next_run = frappe.utils.get_datetime(frappe.db.get_value(INSTALLATION, self.inst, "next_run_at"))
+		return runs, frappe.db.count(NOTICE, {"for_user": OWNER}), next_run
+
+	def test_a_model_refusal_fails_the_slot_once_and_spends_it(self):
+		for token in ("delegate_model_unresolved", "render_context_missing", "delegate_blocked"):
+			self._reset()
+			runs, notices, next_run = self._dispatch(token)
+			self.assertEqual([r.status for r in runs], ["failed"], token)
+			self.assertEqual(notices, 1, token)
+			self.assertGreater(next_run, frappe.utils.now_datetime(), token)  # no hourly retry
+
+	def test_apply_in_progress_hands_the_slot_back_without_a_notice(self):
+		for flag in (True, False):
+			self._reset()
+			_flag(flag)
+			runs, notices, next_run = self._dispatch("apply_in_progress")
+			self.assertEqual(len(runs), 1, flag)  # the launch's own run, nothing recorded on top
+			self.assertIn("Try again", runs[0].error)
+			self.assertEqual(notices, 0, flag)
+			self.assertLess(next_run, frappe.utils.now_datetime(), flag)  # still due: retried next sweep
 
 
 class TestRevalidation(AgentModelDBBase):
@@ -1286,6 +1502,70 @@ class TestRunErrorsNeverStrandARun(AgentModelDBBase):
 		row = self._state()
 		self.assertEqual((row.state, row.model, row.fleet_unresolved), ("changed", "gpt-frontier", 0))
 
+	def test_unresolved_model_with_no_fallback_left_asks_for_a_pick(self):
+		frappe.db.set_value(
+			CHOICE, AGENT, {"model": "gpt-gone", "pushed_model": "gpt-gone", "fallbacks": "[]"}
+		)
+		frappe.db.commit()
+		with _env():
+			msg = agent_models.handle_run_error(AGENT, "delegate_model_unresolved")
+		self.assertEqual(self._state().state, "needs_model")
+		self.assertIn("Choose a model", msg)
+		self.assertNotIn("Apply catalog changes", msg)  # applying cannot help: nothing is pinned
+
+	def _finished_runs(self, *minutes_ago):
+		now = frappe.utils.now_datetime()
+		names = [
+			frappe.get_doc(
+				{"doctype": RUN, "agent": AGENT, "installation": self.inst, "trigger": "scheduled",
+				 "status": "completed", "model_source": "choice", "model_rendered": "openai/gpt-adv",
+				 "finished_at": frappe.utils.add_to_date(now, minutes=-m)}
+			).insert(ignore_permissions=True).name
+			for m in minutes_ago
+		]  # fmt: skip
+		frappe.db.commit()
+		return now, names
+
+	def test_backfill_continues_past_an_unknown_run_and_reads_the_pool_once(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		now, names = self._finished_runs(10, 8, 6)
+		used = {"provider": "openai", "model": "gpt-adv"}
+
+		def status(name):
+			if name == names[0]:
+				raise AdminUnreachableError("admin returned a 404 error: unknown agent run")
+			return {"ok": True, "data": {"status": "done", "model_used": used}}
+
+		with (
+			_env(),
+			patch("jarvis.admin_client.get_agent_run_status", side_effect=status),
+			patch.object(agent_models, "model_pool", wraps=agent_models.model_pool) as pool,
+		):
+			self.assertEqual(agent_scheduler._backfill_model_used(now), 2)
+		pool.assert_called_once()
+		got = [frappe.db.get_value(RUN, n, "model_used") or "" for n in names]
+		self.assertEqual(got, ["", "openai/gpt-adv", "openai/gpt-adv"])
+
+	def test_backfill_stops_on_relay_trouble_and_skips_exhausted_runs(self):
+		from jarvis.exceptions import AdminUnreachableError
+
+		now, (old, new) = self._finished_runs(10, 6)
+		down = MagicMock(side_effect=AdminUnreachableError("connection refused"))
+		with _env(), patch("jarvis.admin_client.get_agent_run_status", down):
+			agent_scheduler._backfill_model_used(now)
+		down.assert_called_once_with(old)  # the relay is down: stop, never burn an attempt
+		silent = MagicMock(return_value={"ok": True, "data": {"status": "done"}})
+		with (
+			_env(),
+			patch("jarvis.admin_client.get_agent_run_status", silent),
+			patch.object(agent_scheduler, "MODEL_USED_BACKFILL_BATCH", 1),
+		):
+			for _tick in range(agent_scheduler.MODEL_USED_BACKFILL_ATTEMPTS + 1):
+				agent_scheduler._backfill_model_used(now)
+		asked = [c.args[0] for c in silent.call_args_list]
+		self.assertEqual(asked, [old] * agent_scheduler.MODEL_USED_BACKFILL_ATTEMPTS + [new])
+
 
 class TestHooksAndGates(AgentModelDBBase):
 	def test_non_admin_may_set_a_model_only_on_a_published_listing(self):
@@ -1304,7 +1584,7 @@ class TestHooksAndGates(AgentModelDBBase):
 		_flag(True)
 		run = frappe.get_doc(
 			{"doctype": RUN, "agent": AGENT, "installation": inst, "trigger": "scheduled",
-			 "status": "completed", "model_rendered": "openai/gpt-std"}
+			 "status": "completed", "model_rendered": "openai/gpt-std", "model_source": "choice"}
 		).insert(ignore_permissions=True)  # fmt: skip
 		frappe.db.set_value(LISTING, AGENT, "min_model", None)
 		frappe.db.commit()
@@ -1384,3 +1664,24 @@ class TestHooksAndGates(AgentModelDBBase):
 				jarvis_settings.reconcile_pending_llm_sync()
 			hook.assert_called_once()
 			get_single.assert_called_once()  # the LLM reconcile still ran after the hook
+
+	def test_only_jarvis_support_can_turn_the_flag_on(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		meta = frappe.get_meta(SETTINGS)
+		df = meta.get_field("enforce_agent_min_model")
+		self.assertNotIn(df.permlevel, meta.get_permlevel_access("write", user=ADMIN))  # System Manager
+		self.assertIn(df.permlevel, meta.get_permlevel_access("read", user=ADMIN))
+		self.assertIn(df.permlevel, meta.get_permlevel_access("write", user="Administrator"))
+		for internal in ("fleet", "contract", "1.43"):
+			self.assertNotIn(internal, df.description)
+		with (
+			_as(ADMIN),
+			patch.object(JarvisSettings, "_on_update_unified_llm"),
+			patch.object(JarvisSettings, "_on_update_single_model_legacy"),
+			patch("frappe.enqueue"),
+		):
+			settings = frappe.get_single(SETTINGS)
+			settings.enforce_agent_min_model = 1
+			settings.save()
+		self.assertFalse(agent_models.is_enforced())  # a System Manager save leaves it off
