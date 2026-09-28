@@ -83,17 +83,26 @@ findings panel show it.
 
 ## Rollout
 
-1. Admin catalog fields (capability tiers) deploy first; nothing reads them yet.
-2. Fleet-agent 1.43 on every host.
-3. `bulk_reapply_config` for all tenants, then check each container's
-   integration-status `render_context_present` (a keyed push also queues the
-   no-op reapply itself, but the bulk pass avoids first-Apply refusals).
-4. Admin relay and floor.
+1. Admin catalog fields (capability tiers) and the admin relay/floor. They ship
+   in one branch and are safe together: keyless pushes are never probed, and
+   keyed pushes are refused on hosts below 1.43.
+2. The tenant app with the flag off. It is inert against any admin or fleet
+   version, and it treats the fleet's run-start `apply_in_progress` as a retry
+   (an older tenant app reports it as a failed dispatch).
+3. Fleet-agent 1.43 on every host.
+4. A no-op reapply for every tenant so each container writes its render
+   context. `bulk_reapply_config` takes at most 100 names and restarts them one
+   by one in a single request; for a whole fleet, queue them from the console
+   instead (`jarvis_admin_v2.fleet.creds.enqueue_config_apply(name)` per
+   tenant). Verify with `Jarvis Tenant.last_integration_detail` (the health
+   cron stores the integration status there): no row should report
+   `"render_context_present": false`. A keyed push also queues the reapply
+   itself, but this pass avoids first-Apply refusals.
 5. Curate tiers: set `capability_tier` on every model tenants use. A model_id's
    api-key and subscription rows must carry the same tier (the save refuses
    otherwise), so edit both lanes together. Uncurated models are never
    eligible, so a tenant turned on before curation has every install blocked.
-6. Store lint and registry with `min_model`, then the tenant app (flag off).
+6. Store lint and registry with `min_model`.
 7. Turn the flag on per tenant, canary first. The flag is operator-only
    (permlevel 2): as Administrator on the tenant site,
    `frappe.db.set_single_value("Jarvis Settings", "enforce_agent_min_model", 1)`
@@ -103,6 +112,10 @@ findings panel show it.
 
 ## Rollback
 
-Turn `enforce_agent_min_model` off and Apply catalog changes. The push carries
-no model keys, admin clears the tenant's `agent_roster_models`, and delegates
-return to the pool default. Choice rows are kept for when it is turned back on.
+As Administrator on the tenant site:
+`frappe.db.set_single_value("Jarvis Settings", "enforce_agent_min_model", 0)`,
+then `jarvis.chat.agent_models.on_enforcement_disabled()` and a commit (or save
+it off from Desk as Administrator). A reviewer then runs Apply catalog changes.
+The push carries no model keys, admin clears the tenant's `agent_roster_models`,
+and delegates return to the pool default. Choice rows are kept for when it is
+turned back on.
