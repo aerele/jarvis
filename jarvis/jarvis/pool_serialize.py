@@ -516,6 +516,13 @@ def _lone_direct_capable(settings) -> bool:
 	  clears it - see ``onboarding._DISCONNECTED_LLM_FIELDS``) before
 	  reconnecting.
 	"""
+	return _lone_direct_shape(settings) and not bool(getattr(settings, "llm_pool_synced_at", None))
+
+
+def _lone_direct_shape(settings) -> bool:
+	"""Every _lone_direct_capable condition EXCEPT the non-retroactivity stamp:
+	one enabled subscription model, one connected account, a renderable upstream,
+	no preset."""
 	if bool(settings.preset):
 		return False
 	enabled = _enabled_models(settings)
@@ -527,9 +534,20 @@ def _lone_direct_capable(settings) -> bool:
 	accounts = _model_accounts(m)
 	if len(accounts) != 1:
 		return False
-	if not _upstream_has_renderer(_field(accounts[0], "upstream")):
+	return _upstream_has_renderer(_field(accounts[0], "upstream"))
+
+
+def lone_direct_handover_due(settings) -> bool:
+	"""True when a workspace that has synced through the pool leg is now down to
+	ONE ChatGPT account (jarvis#1425). _lone_direct_capable keeps it on the pool
+	leg (the stamp is set), so the proxy would stay forever; this is the signal to
+	run the fleet handover instead of another pool push. Claude plans are
+	excluded: they always sync through the pool leg and already run without a
+	proxy."""
+	if not _lone_direct_shape(settings) or not getattr(settings, "llm_pool_synced_at", None):
 		return False
-	return not bool(getattr(settings, "llm_pool_synced_at", None))
+	account = _model_accounts(_enabled_models(settings)[0])[0]
+	return (_field(account, "upstream") or "").strip().lower() == "openai"
 
 
 def pool_primary_model(settings) -> str:

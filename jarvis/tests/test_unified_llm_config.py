@@ -5286,6 +5286,92 @@ class TestPushDirectSubscriptionBlobNoMatchInvariant(FrappeTestCase):
 			JarvisSettings._push_direct_subscription_blob(settings)
 
 
+class TestLoneDirectHandoverDue(FrappeTestCase):
+	"""jarvis#1425: a workspace that already synced through the pool leg but is
+	now down to ONE ChatGPT account is due for the fleet handover onto the
+	direct leg, instead of sitting on the proxy forever behind
+	_lone_direct_capable's non-retroactivity gate (jarvis#715/#755)."""
+
+	def _settings(self, *, upstream="openai", synced=True, models_rows=None):
+		rows = (
+			models_rows
+			if models_rows is not None
+			else [_subscription_model(order=0, accounts=[_account(upstream=upstream)])]
+		)
+		settings = _make_settings_with_models(rows)
+		if synced:
+			settings.llm_pool_synced_at = "2026-08-01 00:00:00"
+		return settings
+
+	def test_due_for_a_synced_lone_chatgpt_account(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="openai", synced=True)
+		self.assertTrue(lone_direct_handover_due(settings))
+		# Regression: the sync stamp keeps this OFF the direct-capable exception.
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_without_the_pool_sync_stamp(self):
+		"""A fresh connect takes the direct leg already (_lone_direct_capable), so
+		there is nothing to hand over."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="openai", synced=False)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertTrue(_lone_direct_capable(settings))
+
+	def test_not_due_for_a_synced_lone_claude_account(self):
+		"""Claude plans always sync through the pool leg and already run without a
+		proxy, so they are excluded even though the shape otherwise matches."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="anthropic", synced=True)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_two_accounts_on_the_one_model(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(
+			models_rows=[
+				_subscription_model(order=0, accounts=[_account(), _account(account_ref="ACC_002")])
+			],
+			synced=True,
+		)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_two_enabled_models(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(
+			models_rows=[
+				_subscription_model(order=0, accounts=[_account()]),
+				_subscription_model(order=1, model="gpt-5.6", accounts=[_account(account_ref="ACC_002")]),
+			],
+			synced=True,
+		)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_with_a_preset(self):
+		"""A preset always routes through the pool leg."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(synced=True)
+		settings.preset = "some-preset"
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_an_upstream_with_no_fleet_renderer(self):
+		"""xai has no fleet-template arm today (_upstream_has_renderer)."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="xai", synced=True)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+
 class TestNativeClaudePickRouting(unittest.TestCase):
 	"""An explicit Claude-plan pick routes to the claude-cli runtime with the provider
 	prefix, for ANY Anthropic subscription-tier id, not only the saved row.
