@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 const apiAgents = vi.hoisted(() => ({
@@ -16,7 +16,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	Button: {
 		name: "Button",
-		props: ["label", "disabled", "loading", "variant"],
+		props: ["label", "icon", "disabled", "loading", "variant"],
 		emits: ["click"],
 		template: `<button :disabled="disabled" :data-loading="loading" :data-label="label" @click="$emit('click')"><slot>{{ label }}</slot></button>`,
 	},
@@ -24,8 +24,14 @@ vi.mock("frappe-ui", () => ({
 		name: "Dialog",
 		props: ["modelValue", "options"],
 		emits: ["update:modelValue"],
-		template: `<div v-if="modelValue" class="dialog"><div class="dialog-title">{{ options && options.title }}</div><slot name="body-content" /><slot name="actions" /></div>`,
+		template: `<div v-if="modelValue" class="dialog"><slot name="body-header"><div class="dialog-title">{{ options && options.title }}</div></slot><slot name="body-content" /><slot name="actions" /></div>`,
 	},
+}));
+// FE3-1: AgentInstallDialog's #body-header override renders a real DialogTitle
+// (see SettingsDialog.spec.js for the same mock - injectDialogRootContext()
+// throws without a real DialogRoot ancestor, which the Dialog mock above isn't).
+vi.mock("reka-ui", () => ({
+	DialogTitle: { name: "DialogTitle", template: `<span><slot /></span>` },
 }));
 vi.mock("@/components/JvSpinner.vue", () => ({
 	default: { name: "JvSpinner", template: `<div class="spinner" />` },
@@ -472,5 +478,153 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(w.text()).not.toContain("Already set for everyone using this agent.");
+	});
+});
+
+function mockTwoModels() {
+	apiAgents.getEligibleModels.mockResolvedValue({
+		catalog: "ok",
+		models: [
+			OPUS,
+			{
+				provider: "openai",
+				model: "gpt-5",
+				label: "GPT-5",
+				capability_tier: "Advanced",
+				cost_note: "",
+			},
+		],
+	});
+}
+
+async function startChangedInstall(w) {
+	await w.find('[data-label="Change"]').trigger("click");
+	await w.find('[data-testid="pick-other"]').trigger("click");
+	await flushPromises();
+	await w.find('[data-label="Install"]').trigger("click");
+	await flushPromises();
+}
+
+// FE3-1 review fix: the default Dialog header X closes unconditionally, so
+// while saving it was inert (onClose ignores it) but gave no disabled signal,
+// unlike Cancel. The #body-header override's own close button must match
+// Cancel's gating exactly.
+describe("AgentInstallDialog header close button gated like Cancel (FE3-1)", () => {
+	it("is enabled before a save starts", async () => {
+		mockTwoModels();
+		const w = mountDialog();
+		await flushPromises();
+		expect(w.find('[data-label="Close"]').attributes("disabled")).toBeUndefined();
+	});
+
+	it("is disabled while a save is in flight, and re-enables once it settles", async () => {
+		mockTwoModels();
+		let resolveSet;
+		apiAgents.setAgentModel.mockReturnValue(
+			new Promise((resolve) => {
+				resolveSet = resolve;
+			})
+		);
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		expect(w.find('[data-label="Close"]').attributes("disabled")).toBeDefined();
+
+		resolveSet({});
+		await flushPromises();
+		expect(w.find('[data-label="Close"]').attributes("disabled")).toBeUndefined();
+	});
+
+	it("a click while disabled is a no-op, exactly like Cancel", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // never resolves
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		await w.find('[data-label="Close"]').trigger("click");
+		await flushPromises();
+		expect(w.emitted("update:modelValue")).toBeUndefined();
+	});
+});
+
+// FE3-2 review fix: confirmInstall used to await setAgentModel with no
+// client-side bound - a stalled request locked Cancel disabled and the close
+// icon inert forever. A ~15s ceiling now releases the dialog either way.
+describe("AgentInstallDialog confirmInstall client-side timeout (FE3-2)", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it("a stalled setAgentModel times out: error toast, saving clears, no confirm", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockReturnValue(new Promise(() => {})); // never resolves
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		expect(w.find('[data-label="Cancel"]').attributes("disabled")).toBeDefined();
+
+		await vi.advanceTimersByTimeAsync(15000);
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledWith("Saving the model took too long. Try again.");
+		expect(w.find('[data-label="Cancel"]').attributes("disabled")).toBeUndefined();
+		expect(w.find('[data-label="Close"]').attributes("disabled")).toBeUndefined();
+		expect(w.emitted("confirm")).toBeUndefined();
+	});
+
+	it("a late resolution after the timeout never emits confirm or a second toast", async () => {
+		mockTwoModels();
+		let resolveSet;
+		apiAgents.setAgentModel.mockReturnValue(
+			new Promise((resolve) => {
+				resolveSet = resolve;
+			})
+		);
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+
+		await vi.advanceTimersByTimeAsync(15000);
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledTimes(1);
+
+		resolveSet({}); // the stalled call finally settles, well past the timeout
+		await flushPromises();
+		expect(w.emitted("confirm")).toBeUndefined();
+		expect(toast.error).toHaveBeenCalledTimes(1);
+	});
+
+	it("a late REJECTION after the timeout never surfaces a second toast either", async () => {
+		mockTwoModels();
+		let rejectSet;
+		apiAgents.setAgentModel.mockReturnValue(
+			new Promise((_resolve, reject) => {
+				rejectSet = reject;
+			})
+		);
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+
+		await vi.advanceTimersByTimeAsync(15000);
+		const { toast } = await import("frappe-ui");
+		expect(toast.error).toHaveBeenCalledTimes(1);
+
+		rejectSet(new Error("model taken"));
+		await flushPromises();
+		expect(w.emitted("confirm")).toBeUndefined();
+		expect(toast.error).toHaveBeenCalledTimes(1);
+	});
+
+	it("a request that settles just under the deadline is unaffected", async () => {
+		mockTwoModels();
+		apiAgents.setAgentModel.mockResolvedValue({});
+		const w = mountDialog();
+		await flushPromises();
+		await startChangedInstall(w);
+		await flushPromises();
+		expect(w.emitted("confirm")).toHaveLength(1);
+
+		const { toast } = await import("frappe-ui");
+		await vi.advanceTimersByTimeAsync(15000);
+		expect(toast.error).not.toHaveBeenCalled();
 	});
 });
