@@ -87,6 +87,11 @@
 					/>
 				</div>
 			</template>
+			<!-- UX4-1: visible while a different-pick retry is waiting out a
+			     timed-out save that may still be writing - see confirmInstall. -->
+			<p v-if="finishingPreviousSave" class="mt-3 text-sm text-ink-gray-5">
+				Finishing the previous save…
+			</p>
 			<span class="sr-only" role="status" aria-live="polite">{{ liveMessage }}</span>
 		</template>
 		<template #actions>
@@ -157,7 +162,13 @@ const dialogTitle = computed(() => `Install ${props.agentTitle}?`);
 // same Promise.race idiom as OnboardingView's GSTIN fetch timeout - so a
 // stalled request can no longer lock the dialog (Cancel disabled, close inert)
 // indefinitely.
+//
+// UX4-1 review fix: the ceiling only releases the DIALOG - frappe-ui's call()
+// has no AbortSignal to plumb into fetch, so the request itself keeps running
+// server-side. Timeout copy says so honestly, and `staleSave` below tracks it
+// so a retry can't silently race it.
 const SET_MODEL_TIMEOUT_MS = 15000;
+const TIMEOUT_MESSAGE = "Still saving your model choice. Wait a moment, then try again.";
 
 const loading = ref(false);
 const eligible = ref(null); // get_eligible_models()
@@ -180,25 +191,46 @@ const liveMessage = ref("");
 // a synchronous, local-only draft update, not a network call.
 const saving = ref(false);
 let confirmReqId = 0;
+// UX4-1: the pick a timed-out setAgentModel may still be writing server-side.
+// A retry with this SAME pick just proceeds (idempotent - a duplicate write
+// changes nothing); a DIFFERENT pick waits for it to settle first (below).
+// Cleared once it settles, or the dialog closes/reopens.
+const staleSave = ref(null); // { provider, model }
+let staleRequest = null; // that save's own Promise, so a different-pick retry can await it
+let staleNeedsReseed = false; // a timeout happened and we haven't re-synced with the server since
+const finishingPreviousSave = ref(false); // true while a different-pick retry waits out staleRequest
 
-async function load() {
+// Applies a get_agent_model-shaped `{ choice }` to the auto-pick/draft - the
+// EDGE2-1 seed rule, factored out so a post-timeout re-sync can reuse it
+// without re-deriving from get_eligible_models.
+function seedFromExisting(existing) {
+	if (existing && existing.provider && existing.model) {
+		usingExistingChoice.value = true;
+		autoPicked.value = { provider: existing.provider, model: existing.model };
+		picked.value = { ...autoPicked.value };
+		existingMeta.value = existing;
+		return true;
+	}
+	usingExistingChoice.value = false;
+	existingMeta.value = null;
+	return false;
+}
+
+function reseedFrom(modelInfo) {
+	const existing = modelInfo && modelInfo.choice;
+	if (seedFromExisting(existing)) return;
+	const models = (eligible.value && eligible.value.models) || [];
+	if (models.length) {
+		autoPicked.value = { provider: models[0].provider, model: models[0].model };
+		picked.value = { ...autoPicked.value };
+	}
+}
+
+async function load(overrideModelInfo) {
 	loading.value = true;
 	try {
 		eligible.value = (await apiAgents.getEligibleModels(props.agentSlug)) || null;
-		const models = (eligible.value && eligible.value.models) || [];
-		const existing = props.modelInfo && props.modelInfo.choice;
-		if (existing && existing.provider && existing.model) {
-			// A tenant-wide row already exists (auto/chosen/changed all carry a
-			// choice) - install_agent's plan_install leaves it alone, so it is
-			// what will actually run. Show it instead of our own auto-pick.
-			usingExistingChoice.value = true;
-			autoPicked.value = { provider: existing.provider, model: existing.model };
-			picked.value = { ...autoPicked.value };
-			existingMeta.value = existing;
-		} else if (models.length) {
-			autoPicked.value = { provider: models[0].provider, model: models[0].model };
-			picked.value = { ...autoPicked.value };
-		}
+		reseedFrom(overrideModelInfo !== undefined ? overrideModelInfo : props.modelInfo);
 	} catch (e) {
 		eligible.value = null;
 		toast.error(errHtml(e));
@@ -206,11 +238,46 @@ async function load() {
 		loading.value = false;
 	}
 }
+
+// UX4-1: a save that timed out while open may still land after Close - the
+// draft/props.modelInfo can no longer be trusted, so pull the real tenant-wide
+// choice and re-seed from it instead.
+async function resyncAfterStaleSave() {
+	try {
+		const info = await apiAgents.getAgentModel(props.agentSlug);
+		if (!props.modelValue) return; // closed meanwhile - the next open re-syncs itself
+		reseedFrom(info);
+	} catch (e) {
+		// best-effort only - leaves the last known display in place
+	}
+}
+
+// Attached once, at timeout time, to the ORIGINAL request. Fires on success
+// OR failure (`.then(fn, fn)`, never `.finally` - a `.finally` on a rejecting
+// promise re-throws into an unhandled rejection since nothing awaits it).
+function trackStaleSettle(request) {
+	staleRequest = request;
+	const settled = () => {
+		if (staleRequest !== request) return; // superseded by a newer attempt already
+		staleRequest = null;
+		staleSave.value = null;
+		if (props.modelValue) {
+			staleNeedsReseed = false;
+			resyncAfterStaleSave();
+		}
+	};
+	request.then(settled, settled);
+}
+
 // Re-fetch fresh + reset every time the dialog opens; never carry a stale
 // pick from a previous open.
 watch(
 	() => props.modelValue,
 	(open) => {
+		// Clear on ANY transition - a fresh open/close always starts its own
+		// idempotency check over.
+		staleSave.value = null;
+		finishingPreviousSave.value = false;
 		if (!open) return;
 		// FE2-1: a reopen (even one forced past onClose's saving guard below)
 		// must supersede any confirmInstall still awaiting a PRIOR open's
@@ -224,7 +291,17 @@ watch(
 		existingMeta.value = null;
 		liveMessage.value = "";
 		saving.value = false;
-		load();
+		if (staleNeedsReseed) {
+			// UX4-1: a prior open's save timed out and may have landed since -
+			// re-fetch the real choice rather than trusting props.modelInfo.
+			staleNeedsReseed = false;
+			apiAgents
+				.getAgentModel(props.agentSlug)
+				.then((info) => load(info))
+				.catch(() => load());
+		} else {
+			load();
+		}
 	},
 	{ immediate: true }
 );
@@ -290,13 +367,32 @@ async function confirmInstall() {
 		emit("confirm");
 		return;
 	}
+	const wantProvider = picked.value.provider;
+	const wantModel = picked.value.model;
+
+	// UX4-1: a previous save may still be in flight (no AbortSignal to cancel
+	// it). Only a DIFFERENT pick needs to wait - the same pick is idempotent,
+	// so just fire it (below) without waiting.
+	if (
+		staleSave.value &&
+		(staleSave.value.provider !== wantProvider || staleSave.value.model !== wantModel)
+	) {
+		const guardId = confirmReqId;
+		saving.value = true;
+		finishingPreviousSave.value = true;
+		try {
+			await staleRequest;
+		} catch (e) {
+			// only needed it to be DONE, not to have succeeded
+		}
+		finishingPreviousSave.value = false;
+		if (guardId !== confirmReqId) return; // superseded while waiting (reopen/close)
+	}
+	staleSave.value = null;
+
 	saving.value = true;
 	const id = ++confirmReqId;
-	const request = apiAgents.setAgentModel(
-		props.agentSlug,
-		picked.value.provider,
-		picked.value.model
-	);
+	const request = apiAgents.setAgentModel(props.agentSlug, wantProvider, wantModel);
 	// FE3-2 review fix: `request` is the ONLY continuation of the real call, so
 	// it keeps respecting `id` even after the race below has given up on it -
 	// same guard as every other stale-attempt check in this file.
@@ -320,7 +416,7 @@ async function confirmInstall() {
 			new Promise((_, reject) => {
 				timer = setTimeout(() => {
 					timedOut = true;
-					reject(new Error("Saving the model took too long. Try again."));
+					reject(new Error(TIMEOUT_MESSAGE));
 				}, SET_MODEL_TIMEOUT_MS);
 			}),
 		]);
@@ -330,8 +426,13 @@ async function confirmInstall() {
 		// double-toasts.
 		if (timedOut && id === confirmReqId) {
 			saving.value = false;
+			// UX4-1: `request` keeps running server-side - remember it so a
+			// retry reacts correctly instead of racing it blind (see above).
+			staleSave.value = { provider: wantProvider, model: wantModel };
+			staleNeedsReseed = true;
 			toast.error(errHtml(e));
-			confirmReqId++; // request may still resolve/reject later - keep it silent then
+			confirmReqId++; // this request's own .then above must go quiet when it lands
+			trackStaleSettle(request);
 		}
 	} finally {
 		clearTimeout(timer);
@@ -340,18 +441,20 @@ async function confirmInstall() {
 
 function onClose(v) {
 	// FE2-1 review fix: Cancel/backdrop/Escape while confirmInstall's
-	// setAgentModel is in flight must not close the dialog - the save is
-	// sub-second, so just ignore the attempt and let it settle rather than
-	// risk a stale success emitting confirm (installing) after the user left.
-	// The Cancel button is also disabled while saving (see template).
+	// setAgentModel is in flight must not close the dialog - so just ignore
+	// the attempt and let it settle rather than risk a stale success emitting
+	// confirm (installing) after the user left. The Cancel button is also
+	// disabled while saving (see template).
 	if (saving.value) return;
 	// Belt-and-braces alongside the reopen-branch bump above: supersedes any
 	// confirmInstall this close raced past, so its resolution never emits
 	// confirm or a toast into a dialog that is now closed.
 	confirmReqId++;
-	// Cancel/backdrop/Escape outside a save: the draft above is local-only
-	// and was never sent, so simply closing discards it - nothing to undo
-	// server-side.
+	// UX4-1: this is only "nothing to undo" when no save ever timed out - a
+	// timed-out save (staleSave/staleNeedsReseed) may still land server-side
+	// AFTER this close. Nothing to do about it here (no AbortSignal to cancel
+	// it with); the next open re-syncs from the server instead of trusting
+	// this local draft or props.modelInfo (see the watch above).
 	emit("update:modelValue", !!v);
 }
 </script>
