@@ -12,14 +12,22 @@
 // unrelated operator maintenance notice is also active.
 import { raiseHold, clearHold, recheck } from "@/maintenanceGate";
 
-// Kept identical to jarvis/chat/llm_switch.py MESSAGE. Duplicated (not fetched) so the
-// banner appears the instant the switch starts, before any round-trip could complete.
-export const SWITCH_MESSAGE = "Updating your AI setup. Chat will be back in a moment.";
+// Kept identical to jarvis/chat/llm_switch.py MESSAGE / ADMIN_MESSAGE. Duplicated (not
+// fetched) so the banner appears the instant the switch starts, before any round-trip.
+export const SWITCH_MESSAGE =
+	"Your admin is updating the AI models. Please wait, chat will be back shortly.";
+export const SWITCH_MESSAGE_ADMIN = "Applying your AI model changes. Chat will be back shortly.";
+
+// Mirrors llm_switch.message_for(): window.is_jarvis_admin is the page boot flag
+// (jarvis/www/jarvis.py), the same gate as the AI models editor.
+export function switchMessage() {
+	return window.is_jarvis_admin ? SWITCH_MESSAGE_ADMIN : SWITCH_MESSAGE;
+}
 
 export function onLlmSwitch(payload) {
 	switch (payload?.state) {
 		case "switching":
-			raiseHold(SWITCH_MESSAGE);
+			raiseHold(switchMessage());
 			break;
 		case "done":
 			clearHold();

@@ -1,7 +1,7 @@
 import frappe
 
 from jarvis import announcement, maintenance_notice, release_notice
-from jarvis.permissions import has_jarvis_access
+from jarvis.permissions import has_jarvis_access, has_jarvis_admin_access
 
 no_cache = 1
 
@@ -34,6 +34,8 @@ def get_context(context):
 		# Rendered on the Account screen without costing a request.
 		"frappe_user_id": frappe.session.user,
 		"frappe_full_name": frappe.utils.get_fullname(frappe.session.user),
+		# Picks the AI-switch banner line (pwa/src/llmSwitch.js); UX only, like the SPA's.
+		"is_jarvis_admin": has_jarvis_admin_access(),
 	}
 	# Whitelabel branding (Phase 4): shipped to the PWA so it renders the custom
 	# name/logo and patches the tab title/favicon. Blank => Jarvis defaults.
