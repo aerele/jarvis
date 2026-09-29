@@ -1634,15 +1634,11 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.step_raws, [None])
 		self.assertEqual(rec.terminal[1]["text"], "Found it.")
 
-	def test_two_sentence_preamble_up_to_320_is_hidden_live_kept_in_final(self):
-		# C1 (code review, supersedes plan R4's strip default): looser than
-		# is_step (one sentence only) for the LIVE hide - a runtime-flagged
-		# preamble up to MAX_PREAMBLE_STEP_CHARS is hidden live even when it is
-		# more than one sentence - but it is NOT stripped from the saved
-		# reply unless it is ALSO a one-sentence step (is_step). A two-sentence
-		# preamble is kept, joined back with a paragraph break exactly as it
-		# streamed (it was never glued here - the runtime already separated it
-		# with "\n\n" - so the join is a no-op and the final is untouched).
+	def test_two_sentence_preamble_up_to_320_is_hidden_live_and_stripped_from_final(self):
+		# A runtime-flagged preamble up to MAX_PREAMBLE_STEP_CHARS is looser than
+		# is_step (one sentence only): hidden live even when it is more than one
+		# sentence, and stripped from the saved reply too (strip_preambles), so
+		# the live view and the saved reply agree and no reshow is needed.
 		step = (
 			"I'll identify customers whose invoices are overdue. "
 			"Then I'll check each customer's outstanding balance."
@@ -1666,28 +1662,15 @@ class TestRelayMuxSteps(FrappeTestCase):
 			full,
 		)
 		self.assertEqual([s[1] for s in rec.steps], [step])  # hidden live, offered as a step
-		# The final KEEPS the step text (unlike a stripped one), so it differs
-		# from what the live view showed - the pre-terminal reshow (existing
-		# mechanism, see _finalize_terminal) reveals it once more before the
-		# terminal lands.
-		self.assertEqual(rec.shown, [step, "", answer, full])
-		self.assertEqual(rec.terminal[1]["text"], full)  # kept whole in the saved reply
+		self.assertEqual(rec.shown, [step, "", answer])  # no reshow: the final matches the live view
+		self.assertEqual(rec.terminal[1]["text"], answer)
 
-	def test_c1_multi_sentence_preamble_survives_a_longer_continuation(self):
-		# Code review C1 finding, reproduced with the reviewer's own fixture
-		# (prove_strip_guard_gap.py): a plausible real answer opening - not
-		# throwaway narration - that the runtime nonetheless flags as a
-		# preamble, followed by a SECOND tool call and a LONGER continuation.
-		# strip_steps' "keep final whole when shorter" guard does not fire
-		# here (the remainder is longer, not shorter, than what would have
-		# been removed), so pre-C1 this sentence was silently dropped from
-		# both the live view (hidden as a step) and the saved reply (spliced
-		# out). It must now survive in the saved reply.
-		# Adapted from the reviewer's fixture with an explicit sentence break: the
-		# original (comma-joined) text is grammatically ONE is_step-shaped
-		# sentence (no inner ". "), so it would still be stripped under the new
-		# rule too - this genuinely two-sentence version is what the C1 fix is
-		# actually meant to protect.
+	def test_flagged_multi_sentence_preamble_is_stripped_even_before_a_longer_continuation(self):
+		# The runtime called this a progress update and the user saw it as a
+		# step, so it is stripped from the saved reply however long the
+		# continuation is (an earlier rule kept it, on the worry that a real
+		# answer opening could be flagged; the owner chose consistency with the
+		# live view instead).
 		preamble = (
 			"I checked the sales ledger and found twelve invoices raised this quarter. "
 			"Three of them are now more than sixty days past due and need immediate follow-up."
@@ -1711,9 +1694,59 @@ class TestRelayMuxSteps(FrappeTestCase):
 			full,
 		)
 		self.assertEqual([s[1] for s in rec.steps], [preamble])  # hidden live
-		self.assertEqual(rec.shown, [preamble, "", continuation, full])  # reshow, see above
-		# The finding sentence survives in the saved reply.
-		self.assertIn(preamble, rec.terminal[1]["text"])
+		self.assertEqual(rec.shown, [preamble, "", continuation])
+		self.assertEqual(rec.terminal[1]["text"], continuation)
+
+	def test_flagged_one_sentence_preamble_is_stripped_before_a_shorter_answer(self):
+		# strip_steps' "keep whole when shorter" guard used to keep the step in
+		# the saved reply and the reshow flashed it back into the answer.
+		step = "Checking your customer count."
+		answer = "You have **3 customers**."
+		full = f"{step}\n\n{answer}"
+		self.assertTrue(is_step(step))
+		self.assertLess(len(answer), len(step))
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.shown, [step, "", answer])  # no reshow
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_flagged_preamble_with_nothing_after_it_keeps_the_text_whole(self):
+		step = "I'll identify customers whose invoices are overdue. Then I'll check each balance."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+			],
+			step,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.terminal[1]["text"], step)
+
+	def test_reseeded_steps_after_a_hop_fall_back_to_the_is_step_rule(self):
+		# register_run(steps=...) carries texts only, no flags: a two-sentence
+		# step recorded before a hop is not is_step, so it stays in the saved
+		# reply (and is shown again by the reshow) exactly as before the flags.
+		step = "I found the standard report. I'm checking its filters before running it."
+		answer = "Three invoices are overdue, the oldest by 42 days."
+		full = f"{step}\n\n{answer}"
+		self.assertFalse(is_step(step))
+		rec = self._run(
+			[
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+			steps=[step],
+		)
 		self.assertEqual(rec.terminal[1]["text"], full)
 
 	def test_max_preamble_step_chars_zero_restores_todays_behaviour(self):
