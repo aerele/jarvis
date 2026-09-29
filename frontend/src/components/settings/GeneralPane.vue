@@ -86,7 +86,7 @@
 		<div class="mt-2">
 			<ToggleRow
 				title="Show tool activity"
-				help="Show the live tool steps with input and output above each reply. The tools count and time always show below."
+				help="Show the tools each reply used, with their inputs and outputs."
 				:modelValue="showActivityDetail"
 				@update:modelValue="setActivityDetail"
 			/>

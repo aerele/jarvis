@@ -136,6 +136,19 @@ class TestCallToolWithSessionHeader(FrappeTestCase):
 		self.assertEqual(kwargs["tool_name"], "get_schema")
 		self.assertEqual(kwargs["status"], "completed")
 
+	def test_realtime_tool_result_carries_the_saved_tool_call_id(self):
+		# The SPA binds a live report to its reply through this id (the
+		# "Reports consulted" card), the same way the saved rows do.
+		headers = {**_plugin_headers(self.session_key), "X-Jarvis-Tool-Call-Id": "call_live_1"}
+		with _patch_request(_FakeRequest(headers)):
+			with patch("jarvis.api.publish_realtime_tool_result") as pub:
+				call_tool("get_schema", args={"doctype": "Customer"})
+		pub.assert_called_once()
+		_, kwargs = pub.call_args
+		self.assertEqual(kwargs["tool_call_id"], "call_live_1")
+		saved = frappe.db.get_value(MSG, kwargs["tool_message_id"], "tool_call_id")
+		self.assertEqual(saved, "call_live_1")
+
 	def test_missing_session_header_now_rejected(self):
 		"""Path A v2 requires X-Jarvis-Session - there is no user header any
 		more, so without a session we cannot resolve identity."""
