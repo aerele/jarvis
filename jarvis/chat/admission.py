@@ -1062,12 +1062,14 @@ def mark_cancel_requested(conversation: str) -> None:
 
 	try:
 		txn.replay_on_conflict(unit, label=f"admission.mark_cancel_requested {conversation}")
-	except Exception:
+	except Exception as e:
 		try:
-			frappe.db.rollback()
+			# report_lost_race re-raises a non-conflict exception; this hook must
+			# never raise into stop_run (not wrapped there), so catch that re-raise
+			# and log it too instead of letting it propagate.
+			txn.report_lost_race(e, title="admission.mark_cancel_requested")
 		except Exception:
-			pass
-		frappe.log_error(title="admission.mark_cancel_requested", message=frappe.get_traceback())
+			frappe.log_error(title="admission.mark_cancel_requested", message=frappe.get_traceback())
 
 
 # --------------------------------------------------------------------------- #
@@ -1167,13 +1169,7 @@ def cancel_queued_turn(run_id: str) -> dict:
 	try:
 		result = txn.replay_on_conflict(unit, label=f"admission.cancel_queued_turn {run_id}")
 	except Exception as e:
-		if not txn.is_write_conflict(e):
-			raise
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		frappe.log_error(title="admission.cancel_queued_turn", message=frappe.get_traceback())
+		txn.report_lost_race(e, title="admission.cancel_queued_turn")
 		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
 
 	row, owner, path = result["row"], result["owner"], result["path"]

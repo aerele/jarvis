@@ -406,15 +406,17 @@ def recover_pending_turns(limit: int = 20) -> dict:
 					fresh=True,
 				)
 			except Exception as e:
-				if txn.is_write_conflict(e):
-					try:
-						frappe.db.rollback()
-					except Exception:
-						pass
-				frappe.log_error(
-					title="turn_recovery: ceiling row failed",
-					message=frappe.get_traceback(),
-				)
+				try:
+					# report_lost_race re-raises a non-conflict exception; this loop
+					# must not crash the whole cycle for ANY reason (same "never stop
+					# on one row" contract as the eligible loop below), so catch that
+					# re-raise and log it too instead of letting it propagate.
+					txn.report_lost_race(e, title="turn_recovery: ceiling row failed")
+				except Exception:
+					frappe.log_error(
+						title="turn_recovery: ceiling row failed",
+						message=frappe.get_traceback(),
+					)
 			else:
 				if won:
 					_error_side_effects(r, CEILING_ERROR_MESSAGE)

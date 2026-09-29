@@ -151,6 +151,11 @@ class TestSendMessageConversationRace(_ChatTestCase):
 				with (
 					patch.object(chat_api, "_ensure_session_key", return_value="agent:fake"),
 					patch("frappe.enqueue"),
+					# The send gate asks admin whether the subscription is suspended, from a
+					# short cache. When that cache is cold on a site with an admin URL, the
+					# (stubbed) call fails and logs Error Log rows in this transaction, which
+					# rightly makes the unit unsafe to replay. Not what this test is about.
+					patch("jarvis.chat.policy._subscription_suspended", return_value=False),
 				):
 					# thinking_override proves a field THIS send actually changed landed
 					# (last_active_at alone would be vacuous: before_insert already set

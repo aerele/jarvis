@@ -128,6 +128,10 @@ ACK_TIMEOUT_S = 15.0
 # DB-disconnect bounded backoff (D6 §6): after this many CONSECUTIVE slice-level
 # operational errors the pump PARKS the affected turns and exits (never spins).
 DB_BACKOFF_ATTEMPTS = 5
+# A slice step that keeps losing the same snapshot race: pause a little longer each time
+# (0.05 s, 0.10 s, ...) and after this many in a row stop retrying in place.
+WRITE_CONFLICT_ATTEMPTS = 5
+WRITE_CONFLICT_BACKOFF_S = 0.05
 DB_BACKOFF_BASE_S = 0.2
 DB_BACKOFF_CAP_S = 2.0
 
@@ -1683,6 +1687,7 @@ def run_pump_hop(
 
 	outcome = "handoff"
 	op_errors = 0
+	conflicts = 0  # consecutive slices lost to a snapshot race
 	try:
 		_reconcile_on_start(ctx)
 		slices = 0
@@ -1690,6 +1695,7 @@ def run_pump_hop(
 			try:
 				result = drain_slice(ctx)
 				op_errors = 0
+				conflicts = 0
 			except ts.LeaseLostExit:
 				outcome = "lease_lost"
 				break
@@ -1714,7 +1720,13 @@ def run_pump_hop(
 				ts.reset_lock_tracking()
 				# The database answered, so this is no step toward the disconnect park.
 				op_errors = 0
-				_telemetry("write_conflict", target=relay_target_id, error=str(e)[:200])
+				conflicts += 1
+				_telemetry("write_conflict", target=relay_target_id, attempt=conflicts, error=str(e)[:200])
+				if conflicts >= WRITE_CONFLICT_ATTEMPTS:
+					# The same race keeps winning: stop retrying in place and let the hop's
+					# crash handling take over rather than spin against a hot row.
+					raise
+				_sleep(WRITE_CONFLICT_BACKOFF_S * conflicts)
 				continue
 			slices += 1
 			if result == "idle_exit":
@@ -2356,6 +2368,13 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 # --------------------------------------------------------------------------- #
 
 
+def _resync_fresh(rs: "_RunState") -> None:
+	"""Before replaying a CAS that lost a snapshot race: re-read the version it fences
+	on, then drop the snapshot that read opened, so the replay runs on the present."""
+	rs.version = _resync_version(rs.run_id)
+	txn.fresh_snapshot()
+
+
 def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	"""OARF-6: flush the batched cumulative mirror — ONE ``apply_delta`` CAS +
 	commit + fenced ``assistant:delta`` publish for the whole accumulated batch.
@@ -2370,10 +2389,6 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	rs.pending_delta = ""
 	rs.events_since_flush = 0
 	rs.last_flush_mono = _monotonic()
-
-	def resync() -> None:
-		rs.version = _resync_version(rs.run_id)
-		txn.fresh_snapshot()
 
 	# The CAS writes the turn row and the reply row, both of which other connections
 	# write (Stop bumps the turn's version, a tool's web request writes the reply's
@@ -2391,7 +2406,7 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 			content=text,
 		),
 		label=f"pump delta flush {rs.run_id}:{seq}",
-		before_replay=resync,
+		before_replay=lambda: _resync_fresh(rs),
 	)
 	if won:
 		rs.version += 1
@@ -2506,15 +2521,10 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 	# hop's reach), so start it on the present, and if a plain read ever lands between
 	# the two, replay the CAS once from a fresh transaction instead of quarantining.
 	txn.fresh_snapshot()
-
-	def resync() -> None:
-		rs.version = _resync_version(rs.run_id)
-		txn.fresh_snapshot()
-
 	won = txn.replay_on_conflict(
 		lambda: ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload),
 		label=f"pump settle terminal {rs.run_id}",
-		before_replay=resync,
+		before_replay=lambda: _resync_fresh(rs),
 	)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
