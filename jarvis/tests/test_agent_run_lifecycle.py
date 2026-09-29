@@ -30,6 +30,7 @@ import time
 from unittest.mock import patch
 
 import frappe
+from frappe.model.document import Document
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_to_date, now_datetime
 
@@ -41,6 +42,21 @@ INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
 ACTIVITY = "Jarvis Agent Activity"
 SESSION = "Jarvis Chat Session"
+
+
+def _deadlocking_activity_insert():
+	"""RES8-2: make the trailing ``log_activity`` insert deadlock, exactly the shape
+	a real lock conflict takes — used to prove the teardown commit ahead of it means
+	the deadlock is swallowed (pending=0), not raised over already-committed work."""
+	real = Document.insert
+
+	def insert(doc, *args, **kwargs):
+		if doc.doctype == ACTIVITY:
+			raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
+		return real(doc, *args, **kwargs)
+
+	return patch.object(Document, "insert", insert)
+
 
 SLUG = "run-lifecycle-auditor"
 SCRIBE_SLUG = "run-lifecycle-scribe"
@@ -365,6 +381,19 @@ class TestStopAgentRun(RunLifecycleTestCase):
 		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
 		self.assertNotEqual(self._status(run), "running")
 
+	def test_a_deadlocked_activity_row_does_not_fail_the_stop(self):
+		"""RES8-2: teardown now commits before the trailing log_activity, so a
+		deadlock there is swallowed (pending=0), not raised over the already-
+		committed stop — and the session-bearer delete survives either way."""
+		inst = self._install()
+		run = self._run(inst)
+		key = frappe.db.get_value(RUN, run, "session_key")
+		with _deadlocking_activity_insert():
+			out = self._stop(run)
+		self.assertEqual(out["status"], "stopped")
+		self.assertEqual(self._status(run), "stopped")
+		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
+
 
 # --------------------------------------------------------------------------- #
 # A3 — poll_dispatched_runs
@@ -433,6 +462,27 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 		self.assertEqual(row.status, "failed")
 		self.assertIn("exit 137", row.error)
 		self.assertTrue(row.finished_at)
+
+	def test_a_deadlocked_activity_row_does_not_fail_the_termination(self):
+		"""RES8-2: ``_terminalize_failed`` now commits right after the teardown
+		delete, so a deadlock in the trailing log_activity is swallowed (pending=0)
+		rather than raised over the already-written failed status. Called directly
+		(not through the poll's own per-run try/except, which would swallow the old
+		bug too) so a regression here is actually caught."""
+		inst = self._install()
+		run = self._run(inst)
+		key = frappe.db.get_value(RUN, run, "session_key")
+		with _deadlocking_activity_insert():
+			agent_scheduler._terminalize_failed(
+				run,
+				agent=SLUG,
+				installation=inst,
+				session_key=key,
+				owner=self.owner,
+				error="boom",
+			)
+		self.assertEqual(self._status(run), "failed")
+		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
 
 	def test_a_young_run_is_never_polled(self):
 		"""A fresh dispatch is left alone entirely — no admin round trip per run per
@@ -579,6 +629,21 @@ class TestPollDispatchedRuns(RunLifecycleTestCase):
 		run = self._run(inst, slug=SCRIBE_SLUG, age_s=DISPATCHED_S, pages_written=4)
 		self._poll({run: self._fleet_completed(finished_ago_s=agent_scheduler.WRITEBACK_GRACE_SECONDS + 60)})
 		self.assertEqual(self._status(run), "completed")
+
+	def test_a_deadlocked_activity_row_does_not_fail_a_scribe_completion(self):
+		"""RES8-2 scribe branch of ``_terminalize_stuck_run``: the teardown commit
+		ahead of the trailing log_activity swallows a deadlock there (pending=0)
+		instead of losing the already-written completed status. Called directly
+		(not through the poll's own per-run try/except, which would swallow the old
+		bug too) so a regression here is actually caught."""
+		inst = self._install(SCRIBE_SLUG)
+		run = self._run(inst, slug=SCRIBE_SLUG, pages_written=4)
+		key = frappe.db.get_value(RUN, run, "session_key")
+		with _deadlocking_activity_insert():
+			result = agent_scheduler._terminalize_stuck_run(run, error="reaped", detail="reaped: test")
+		self.assertTrue(result)
+		self.assertEqual(self._status(run), "completed")
+		self.assertFalse(frappe.db.exists(SESSION, {"session_key": key}))
 
 	def test_a_scribe_with_a_zero_tally_is_rebuilt_from_page_provenance(self):
 		"""CA2-3: a stored tally of 0 is rebuilt from the pages themselves before any

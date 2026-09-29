@@ -576,6 +576,7 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 		frappe.db.set_value(RUN, run_name, values, update_modified=False)
 		frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
 		agent_runs.teardown_run_session(cur.session_key)
+		frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
 		log_activity(
 			agent=cur.agent,
 			agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
@@ -654,6 +655,7 @@ def _terminalize_failed(
 	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
 	# A8: the session bearer must not outlive the (now-failed) run.
 	agent_runs.teardown_run_session(session_key)
+	frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
 	log_activity(
 		agent=agent,
 		agent_title=frappe.db.get_value(LISTING, agent, "title") if agent else "",
