@@ -177,7 +177,10 @@ describe("every terminal in the view snaps the reveal", () => {
 
 	it("wires the revealer into assistant:delta", () => {
 		expect(src).toContain('import { createRevealer } from "@/lib/streamReveal";');
-		expect(src).toContain("m.content = revealer.receive(p.message_id, p.text);");
+		// T5a (live turn steps): only the ANSWER half of splitNarration's split
+		// paces into the row — a step candidate must not flash into the reply.
+		// See liveStepLine.spec.js for the narration split itself.
+		expect(src).toContain("m.content = revealer.receive(p.message_id, answer);");
 		// The old straight assignment is what made the text lurch.
 		expect(src).not.toContain("\t\t\tm.content = p.text;");
 	});
@@ -196,11 +199,15 @@ describe("every terminal in the view snaps the reveal", () => {
 		expect(src).toContain("flushReveal(m.name);"); // stopRun
 		expect(src).toContain("flushReveal(); // nothing is streaming anymore"); // clearStreamingActivity
 		expect(src).toContain("flushReveal(); // cancels the frame loop"); // onBeforeUnmount
-		expect(src).toMatch(/function resetRunState\(\) \{[\s\S]{0,220}flushReveal\(\);/);
+		// Window widened for the review-C3 comment resetRunState now carries
+		// (why no snapCandidateInto is needed here) — see liveStepLine.spec.js
+		// for the C3 fix itself.
+		expect(src).toMatch(/function resetRunState\(\) \{[\s\S]{0,700}flushReveal\(\);/);
 	});
 
 	it("snaps when the tab goes to the background, where rAF does not run", () => {
-		expect(src).toMatch(/onVisibility\(\)[\s\S]{0,220}else flushReveal\(\);/);
+		// Window widened for the review-C3 comment onVisibility now carries.
+		expect(src).toMatch(/onVisibility\(\)[\s\S]{0,700}else flushReveal\(\);/);
 	});
 
 	it("paints far less often than it animates, and pays back the skipped frames", () => {

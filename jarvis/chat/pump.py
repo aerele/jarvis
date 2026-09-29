@@ -688,8 +688,13 @@ def _append_run_step(run_id: str, raw: str) -> None:
 
 
 def _read_run_steps(run_id: str) -> list[str]:
+	# The cache appends every offered step, including each growing resend of
+	# one preamble; collapse them so a hop re-seed or a reload strips whole
+	# steps, never a stale prefix (jarvis.chat.steps.collapse_steps).
+	from jarvis.chat.steps import collapse_steps
+
 	try:
-		return list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or [])
+		return collapse_steps(list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or []))
 	except Exception:
 		return []
 
@@ -2539,8 +2544,14 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		except ts.LeaseLostExit:
 			ctx.lease_lost = rs.run_id
 			return
-		if raw:
-			_append_run_step(rs.run_id, raw)
+		# T2 (live-turn-steps): cache every step, not only ``raw`` ones, so a
+		# reload (jarvis.chat.api.get_conversation) can rebuild the live step
+		# list in direct/harness mode too, where a preamble never rides the
+		# reply text and ``raw`` is always None. ``remove_steps``/``strip_steps``
+		# both skip a cached entry that is not found in the text they are
+		# given (the harness case, by design), so caching the display-shaped
+		# ``text`` here is harmless for those callers.
+		_append_run_step(rs.run_id, raw or text)
 		if rs.owner:
 			ts.publish_fenced(
 				rs.owner,
