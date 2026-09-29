@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, seq_watermark, vision
+from jarvis.chat import agent_session_pool, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.runtime_profile import get_profile
@@ -420,8 +420,22 @@ class _AssistantContentBatcher:
 		flush happened (caller can use this for trace logging)."""
 		if self._pending_text is None:
 			return False
-		frappe.db.set_value(MSG, self.msg_name, "content", self._pending_text)
-		frappe.db.commit()
+		text = self._pending_text
+
+		def _write() -> None:
+			frappe.db.set_value(MSG, self.msg_name, "content", text)
+			frappe.db.commit()
+
+		# The buffered text can span up to _ASSISTANT_BATCH_INTERVAL_MS since the
+		# transaction's last commit. A competing write to the SAME reply row in that
+		# window (a jarvis__* tool's file card, tool_ownership.record_tool_owner) leaves
+		# this SET on a stale snapshot. Drop it right before the write, then replay once
+		# if it still loses the race: the write is an absolute overwrite (the latest
+		# cumulative text), safe to rerun. The fresh snapshot (and the others in
+		# handle_chat_send) commits only where this runs as an RQ job; on the socketio
+		# greenlet path no job is set, it is a no-op, and the replay alone covers it.
+		txn.fresh_snapshot()
+		txn.replay_on_conflict(_write, label=f"turn_handler content flush {self.msg_name}")
 		self._pending_text = None
 		self._events_since_flush = 0
 		self._last_flush_ms = self._now_ms()
@@ -1701,9 +1715,20 @@ def handle_chat_send(payload: dict) -> None:
 				# `stopped`, so a mid-sentence stop is finally distinguishable
 				# from a short reply. `stopped` means the abort LANDED - the
 				# several paths where stop_run never reaches here leave it 0.
-				frappe.db.set_value(MSG, assistant_msg.name, "stopped", 1)
-				frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
-				frappe.db.commit()
+				def _write_stopped() -> None:
+					frappe.db.set_value(MSG, assistant_msg.name, "stopped", 1)
+					frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
+					frappe.db.commit()
+
+				# The stream (sess.chat_send + relay_turn_events) can run for the rest of
+				# the turn since the transaction's last commit; drop that snapshot before
+				# this terminal write so a competing write on the same reply row in the
+				# meantime (a jarvis__* tool's file card, a retried content flush) does not
+				# escape to the outer except-Exception backstop below, which would mark the
+				# whole turn errored over a stop that actually landed. Both fields are
+				# absolute final values, safe to rerun whole on a lost race.
+				txn.fresh_snapshot()
+				txn.replay_on_conflict(_write_stopped, label=f"turn_handler stopped {run_id}")
 				_publish_to_user(
 					user,
 					{
@@ -1742,15 +1767,23 @@ def handle_chat_send(payload: dict) -> None:
 			)
 			_try_recover_now(conversation_id)
 			return
+
 		# relay:final - authoritative text beats the batcher tail. A media/marker-only
 		# reply strips to empty text but sets marker_stripped; overwrite (to "") anyway
 		# so the raw batcher tail can never survive the marker into stored content.
-		if terminal.get("text") or terminal.get("marker_stripped"):
-			frappe.db.set_value(MSG, assistant_msg.name, "content", terminal.get("text") or "")
+		def _write_terminal_content() -> None:
+			if terminal.get("text") or terminal.get("marker_stripped"):
+				frappe.db.set_value(MSG, assistant_msg.name, "content", terminal.get("text") or "")
+			# Streaming exited cleanly via lifecycle.end
+			frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
+			frappe.db.commit()
 
-		# Streaming exited cleanly via lifecycle.end
-		frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
-		frappe.db.commit()
+		# Same reasoning as the "stopped" terminal above: drop the transaction's
+		# snapshot right before this write (absolute final content + streaming=0, safe
+		# to rerun whole) so a competing write on the reply row does not escape to the
+		# outer except-Exception backstop and mark a turn errored that actually finished.
+		txn.fresh_snapshot()
+		txn.replay_on_conflict(_write_terminal_content, label=f"turn_handler terminal content {run_id}")
 		_maybe_apply_llm_switch()
 
 		# Canvas + generated-image persistence and publish (extracted so
@@ -2705,8 +2738,18 @@ def _handle_event_inner(
 		if phase in ("start", "end"):
 			from jarvis.chat.tool_ownership import record_tool_owner
 
-			record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
-			frappe.db.commit()
+			def _record_owner() -> None:
+				record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
+				frappe.db.commit()
+
+			# batcher.flush() just above can be a no-op (nothing pending), leaving this on
+			# the transaction's existing snapshot; drop it so record_tool_owner's FOR UPDATE
+			# reads the present. Same race that stalled exports ~80 s: a jarvis__* tool's web
+			# request commits the file card on this same reply row (api._maybe_attach_artifact)
+			# a few ms before this event arrives. record_tool_owner is read-append-if-missing-
+			# write under its own FOR UPDATE, so a replay from a fresh snapshot is safe.
+			txn.fresh_snapshot()
+			txn.replay_on_conflict(_record_owner, label=f"turn_handler tool owner {run_id}")
 		# jarvis__* tools execute through the backend call_tool path, which
 		# ALREADY persists a role=tool message carrying the full args + result
 		# (jarvis.api._persist_and_publish_tool_call). Persisting again here

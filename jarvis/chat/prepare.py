@@ -37,7 +37,7 @@ import time
 import frappe
 
 from jarvis._session import impersonate
-from jarvis.chat import seq_watermark
+from jarvis.chat import seq_watermark, txn
 from jarvis.chat import turn_state as ts
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
@@ -47,10 +47,14 @@ MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
 
 
-def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
-	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
-	returns a small status dict. Never raises out (a prepare crash must not kill the
-	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+def _claim_preparing_unit(run_id: str) -> dict:
+	"""Read the turn and attempt the ``queued`` -> ``preparing`` claim CAS as one
+	unit, replayed whole by ``txn.replay_on_conflict`` (P6): this job's first read
+	fixes a snapshot, and a competing commit on this row (promote, watchdog reclaim,
+	a user cancel) between that read and the claim CAS would otherwise crash the job
+	with 1020, breaking its "never raises out" contract. Losing the race for real
+	still resolves to the existing ``claim_lost``/state-skip outcome - a replay just
+	re-reads the present row before deciding."""
 	turn = frappe.db.get_value(
 		TURN,
 		run_id,
@@ -58,21 +62,49 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		as_dict=True,
 	)
 	if not turn:
-		return {"ok": False, "reason": "no turn"}
+		return {"turn": None, "claimed": False, "skipped": None}
 	if turn["state"] != "queued":
 		# Already claimed (this prepare was re-offered) or advanced/cancelled.
-		return {"ok": True, "skipped": turn["state"]}
-
-	conversation = turn["conversation"]
-	relay_target_id = relay_target_id or frappe.db.get_value(TURN, run_id, "relay_target_id")
-
+		return {"turn": turn, "claimed": False, "skipped": turn["state"]}
 	# (D2 #2) queued -> preparing FIRST: NULLs the reservation expiry so a slow
 	# prepare (22s/4-page PDF vision) is never reclaimed mid-flight (OAR-5). Requires
 	# the held credit (reserved=1, granted at promote). A lost CAS = another prepare
 	# won / the turn moved; no-op.
 	if not ts.claim_preparing(run_id, int(turn["version"])):
-		return {"ok": True, "skipped": "claim_lost"}
+		return {"turn": turn, "claimed": False, "skipped": "claim_lost"}
 	frappe.db.commit()
+	return {"turn": turn, "claimed": True, "skipped": None}
+
+
+def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
+	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
+	returns a small status dict. Never raises out (a prepare crash must not kill the
+	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+	try:
+		result = txn.replay_on_conflict(
+			lambda: _claim_preparing_unit(run_id), label=f"prepare.claim_preparing {run_id}", fresh=True
+		)
+	except Exception as e:
+		if not txn.is_write_conflict(e):
+			raise
+		# Exhausted the replay (rare: a third writer landed inside the retry window
+		# too) - the "never raises out" docstring still holds, so this resolves to
+		# the same claim_lost the ordinary lost-CAS path already returns.
+		try:
+			frappe.db.rollback()
+		except Exception:
+			pass
+		frappe.logger("jarvis.chat.prepare").warning("claim_preparing exhausted replay for %s: %s", run_id, e)
+		return {"ok": True, "skipped": "claim_lost"}
+
+	turn = result["turn"]
+	if turn is None:
+		return {"ok": False, "reason": "no turn"}
+	if not result["claimed"]:
+		return {"ok": True, "skipped": result["skipped"]}
+
+	conversation = turn["conversation"]
+	relay_target_id = relay_target_id or frappe.db.get_value(TURN, run_id, "relay_target_id")
 	version = int(turn["version"]) + 1
 
 	# Turn -> triggering-message binding (skill "Approve & run", design §3.3, correctness-C1):

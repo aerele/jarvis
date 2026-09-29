@@ -28,6 +28,8 @@ from datetime import datetime, timedelta
 
 import frappe
 
+from jarvis.chat import txn
+
 # The pool-mode "Auto" sentinel model id. turn_handler._session_model_for
 # patches an unpinned BIFROST-fronted pool conversation's agent SESSION to
 # this value (jarvis#299), so the gateway's sessions.list row reports it as
@@ -141,31 +143,49 @@ def get_or_create_user_settings(user: str):
 	"""Return the ``Jarvis User Settings`` doc for ``user``, creating it if
 	absent. Insert is ``ignore_permissions`` with an explicit ``owner=user`` so
 	the ``if_owner`` permlevel-0 grant holds even when an admin (not the owner)
-	triggered creation. Race-safe: a concurrent creator that wins the unique
-	constraint just makes us re-read theirs."""
-	existing = frappe.db.exists(USER_SETTINGS, {"user": user})
-	if existing:
-		return frappe.get_doc(USER_SETTINGS, existing)
-	try:
-		doc = frappe.get_doc(
-			{
-				"doctype": USER_SETTINGS,
-				"user": user,
-				"owner": user,
-			}
-		)
-		doc.insert(ignore_permissions=True)
-		# Frappe stamps ``owner`` from the session user at insert; force it back
-		# to the settings owner so ``if_owner`` holds after an admin-triggered
-		# create. update_modified=False keeps the audit stamp meaningful.
-		if frappe.db.get_value(USER_SETTINGS, doc.name, "owner") != user:
-			frappe.db.set_value(USER_SETTINGS, doc.name, "owner", user, update_modified=False)
-		return frappe.get_doc(USER_SETTINGS, doc.name)
-	except frappe.DuplicateEntryError:
-		# A racing turn/request created the row between our exists() and insert;
-		# the unique constraint on ``user`` (and the field:user autoname) is the
-		# guard. Read the winner's row.
-		return frappe.get_doc(USER_SETTINGS, {"user": user})
+	triggered creation.
+
+	The unit is ``exists() + insert() (+ the owner fix-up)`` as ONE thing inside
+	``txn.replay_on_conflict``: a concurrent creator that commits between our
+	``exists()`` and ``insert()`` can make the INSERT fail with the engine's 1020
+	(a stale-snapshot write conflict, not the unique-key ``DuplicateEntryError``
+	the ``except`` below expects) instead of landing cleanly or raising the
+	duplicate. When replay is safe (nothing else written in this transaction yet)
+	the rollback drops the stale snapshot and the rerun's own ``exists()`` finds
+	the winner's row - no exception reaches the caller. When it is NOT safe (a
+	caller already wrote earlier in this transaction, e.g. a finalize effect),
+	``replay_on_conflict`` re-raises to that caller, which is correct: replaying
+	just this insert here would publish it while the caller's own now-aborted
+	write stays lost."""
+
+	def unit():
+		existing = frappe.db.exists(USER_SETTINGS, {"user": user})
+		if existing:
+			return frappe.get_doc(USER_SETTINGS, existing)
+		try:
+			doc = frappe.get_doc(
+				{
+					"doctype": USER_SETTINGS,
+					"user": user,
+					"owner": user,
+				}
+			)
+			doc.insert(ignore_permissions=True)
+			# Frappe stamps ``owner`` from the session user at insert; force it back
+			# to the settings owner so ``if_owner`` holds after an admin-triggered
+			# create. update_modified=False keeps the audit stamp meaningful.
+			if frappe.db.get_value(USER_SETTINGS, doc.name, "owner") != user:
+				frappe.db.set_value(USER_SETTINGS, doc.name, "owner", user, update_modified=False)
+			return frappe.get_doc(USER_SETTINGS, doc.name)
+		except frappe.DuplicateEntryError:
+			# A racing turn/request created the row between our exists() and insert,
+			# and the unique constraint on ``user`` (the field:user autoname) caught
+			# it as an ordinary duplicate on OUR OWN still-valid snapshot (contrast
+			# the 1020 case above, which needs the rollback+rerun to see the
+			# winner). Read the winner's row directly, same snapshot.
+			return frappe.get_doc(USER_SETTINGS, {"user": user})
+
+	return txn.replay_on_conflict(unit, label="usage.get_or_create_user_settings")
 
 
 def fetch_fresh_session_row(sess, session_key: str, attempts: int = 3, delay_s: float = 1.5) -> dict | None:
@@ -412,9 +432,17 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 	                           effect pending to retry (force-done budget logs the loss).
 	Commits internally ONLY on the ``USAGE_RECORDED`` path (the standalone-caller
 	contract the usage tests rely on); the zero/retry paths do NOT commit, so a
-	finalize caller can roll back an uncommitted guard on retry. NEVER raises — a
-	usage-accounting bug must not break chat."""
+	finalize caller can roll back an uncommitted guard on retry. Never raises, with one
+	exception: a snapshot-isolation write conflict (``txn.is_write_conflict``) is
+	re-raised, because it has already aborted the caller's whole transaction and only
+	the caller can replay it (finalize's usage effect replays its guard + this call as
+	one unit). Any other usage-accounting bug still must not break chat."""
 	try:
+		# No fresh snapshot here, on purpose: this must not commit before its own commit
+		# below, or the retry paths would commit finalize's uncommitted guard CAS and a
+		# RETRY could never be rolled back (a permanently lost turn). finalize's usage
+		# effect takes the fresh snapshot BEFORE its guard and replays guard + this call
+		# as one unit (``_effect_usage``).
 		if not row or not row.get("totalTokensFresh"):
 			return USAGE_RETRY
 		raw_in = row.get("inputTokens")
@@ -444,7 +472,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		if delta <= 0:
 			# Task U1: attribution is still worth recording even though there is
 			# no token delta - the turn happened and this is the only record of
-			# WHO it happened for. Isolated + never raises (see the docstring).
+			# WHO it happened for. Isolated; raises only a write conflict (see the docstring).
 			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 			# C1 review: a zero-delta turn is still a real turn - the session's
 			# context snapshot (and, when this row reports one, its capacity)
@@ -483,35 +511,49 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 			"user": user,
 			"session_key": session_key,
 		}
+
 		# Month rollover done inside SQL so the read-modify-write is atomic:
 		# when usage_month already matches, add; otherwise reset the month
 		# buckets to this delta. total_tokens is all-time and never resets.
 		# The limit window (period_tokens) rolls the same way against the key
 		# for THIS row's limit_period; assignments run left to right, so the
 		# counter is updated before its key is overwritten.
-		frappe.db.sql(
-			f"""
-			UPDATE `tabJarvis User Settings`
-			SET
-				month_input_tokens = CASE WHEN usage_month = %(month)s
-					THEN month_input_tokens + %(in)s ELSE %(in)s END,
-				month_output_tokens = CASE WHEN usage_month = %(month)s
-					THEN month_output_tokens + %(out)s ELSE %(out)s END,
-				month_tokens = CASE WHEN usage_month = %(month)s
-					THEN month_tokens + %(delta)s ELSE %(delta)s END,
-				total_tokens = total_tokens + %(delta)s,
-				usage_month = %(month)s,
-				period_tokens = CASE
-					WHEN {_PERIOD_KEY_SQL} = '' THEN 0
-					WHEN period_key = {_PERIOD_KEY_SQL} THEN period_tokens + %(delta)s
-					ELSE %(delta)s END,
-				period_key = {_PERIOD_KEY_SQL},
-				last_usage_at = %(now)s,
-				modified = %(now)s
-			WHERE user = %(user)s
-			""",
-			params,
-		)
+		#
+		# Wrapped alone in replay_on_conflict: get_or_create_user_settings just
+		# above already resolves its OWN race, but this row can still have moved
+		# again (another turn on the same user, another session) between that
+		# call returning and this UPDATE running. The UPDATE is self-contained
+		# (its CASE arms read the row's CURRENT state, not a value fetched
+		# earlier), so a rollback-and-rerun after a lost race applies this
+		# delta exactly once, never zero and never twice: on the first attempt
+		# either the statement commits (done) or the engine aborts the whole
+		# transaction before anything lands (rerun starts clean).
+		def _accrue_settings():
+			frappe.db.sql(
+				f"""
+				UPDATE `tabJarvis User Settings`
+				SET
+					month_input_tokens = CASE WHEN usage_month = %(month)s
+						THEN month_input_tokens + %(in)s ELSE %(in)s END,
+					month_output_tokens = CASE WHEN usage_month = %(month)s
+						THEN month_output_tokens + %(out)s ELSE %(out)s END,
+					month_tokens = CASE WHEN usage_month = %(month)s
+						THEN month_tokens + %(delta)s ELSE %(delta)s END,
+					total_tokens = total_tokens + %(delta)s,
+					usage_month = %(month)s,
+					period_tokens = CASE
+						WHEN {_PERIOD_KEY_SQL} = '' THEN 0
+						WHEN period_key = {_PERIOD_KEY_SQL} THEN period_tokens + %(delta)s
+						ELSE %(delta)s END,
+					period_key = {_PERIOD_KEY_SQL},
+					last_usage_at = %(now)s,
+					modified = %(now)s
+				WHERE user = %(user)s
+				""",
+				params,
+			)
+
+		txn.replay_on_conflict(_accrue_settings, label="usage.record_turn_usage")
 		frappe.db.sql(
 			"""
 			UPDATE `tabJarvis Chat Session`
@@ -559,7 +601,12 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		if model:
 			try:
 				_upsert_model_usage(user, model, month, input_tokens, output_tokens, now)
-			except Exception:
+			except Exception as e:
+				# A write conflict has already aborted the WHOLE transaction (the aggregate
+				# delta above included): logging and carrying on would commit nothing and
+				# report RECORDED. Let it reach the caller's replay instead.
+				if txn.is_write_conflict(e):
+					raise
 				frappe.log_error(
 					title="jarvis usage: per-model write failed",
 					message=frappe.get_traceback(),
@@ -570,7 +617,11 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
 		frappe.db.commit()
 		return USAGE_RECORDED
-	except Exception:
+	except Exception as e:
+		# A write conflict is re-raised, not turned into a RETRY: finalize's usage effect
+		# replays its guard + this call as one unit from a fresh transaction.
+		if txn.is_write_conflict(e):
+			raise
 		frappe.log_error(
 			title="jarvis usage: record_turn_usage failed",
 			message=frappe.get_traceback(),
@@ -597,8 +648,10 @@ def _write_turn_usage_row(
 	call sites). May be ``{}`` when the session mapping is missing (blank-user
 	attribution row, U1's VALID_ZERO/unmapped-session case).
 
-	Wrapped end-to-end so a failure here can NEVER change ``record_turn_usage``'s
-	returned outcome or raise into the turn - the same isolation the per-model
+	Wrapped end-to-end so a failure here cannot change ``record_turn_usage``'s
+	returned outcome or raise into the turn (the one exception is a write conflict,
+	which has already aborted the whole transaction and is re-raised for the caller to
+	replay; see ``record_turn_usage``) - the same isolation the per-model
 	attribution write above uses, and for the same reason: this runs between the
 	aggregate UPDATEs and the outer commit (RECORDED path) or before any commit at
 	all (VALID_ZERO path), so a bare exception left to reach the caller would lose
@@ -629,7 +682,11 @@ def _write_turn_usage_row(
 			"day": frappe.utils.today(),
 		}
 		_insert_turn_usage_row(fields)
-	except Exception:
+	except Exception as e:
+		# Same as the per-model write: a write conflict aborted the whole transaction,
+		# so it must reach the caller's replay, not be logged as a lost row.
+		if txn.is_write_conflict(e):
+			raise
 		frappe.log_error(
 			title="jarvis usage: turn usage row write failed",
 			message=frappe.get_traceback(),

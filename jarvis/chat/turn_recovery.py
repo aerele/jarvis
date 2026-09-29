@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 import frappe
 
-from jarvis.chat import egress_rules
+from jarvis.chat import egress_rules, txn
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
 from jarvis.chat.runtime_profile import get_profile
@@ -304,8 +304,18 @@ def _admission_settle_conv(conversation: str, state: str, error: str | None = No
 		frappe.log_error(title="admission recovery settle", message=frappe.get_traceback())
 
 
-def _error(row: dict, message: str) -> None:
-	if not _conditional_clear(
+def _error_clear(row: dict, message: str) -> bool:
+	"""The row's terminal-error write: the conditional CAS + its own commit.
+	Returns True iff THIS call won the row (the caller's side effects should
+	then run), False if another cycle already finalized it (idempotency guard).
+
+	Split from the side effects below (P8, turn_recovery review) so the ceiling
+	loop can replay JUST this unit on a snapshot-race loss: replaying BOTH
+	together used to be wrong when the loss happened AFTER this write's own
+	commit (inside the side effects) - a retry's fresh `_conditional_clear` call
+	would then see the row already cleared, return False, and SKIP the side
+	effects that never actually ran on the failed attempt."""
+	return _conditional_clear(
 		row["name"],
 		{
 			"streaming": 0,
@@ -313,13 +323,17 @@ def _error(row: dict, message: str) -> None:
 			"error": message,
 			"was_recovered": 1,
 		},
-	):
-		return
+	)
+
+
+def _error_side_effects(row: dict, message: str) -> None:
+	"""Everything that follows a WON `_error_clear`. Run exactly once, never
+	inside a replayed unit (see `_error_clear`'s docstring)."""
 	# jarvis#1425 review (scoped re-review, 2026-09-27): poke a held switch
 	# forward right after this terminal write's own commit above.
 	from jarvis.chat import llm_switch
 
-	llm_switch.apply_if_active(source="turn_recovery._error")
+	llm_switch.apply_if_active(source="turn_recovery._error_side_effects")
 	_admission_settle_conv(row["conversation"], "errored", message)
 	publish_to_user(
 		row["owner"],
@@ -374,8 +388,37 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	live = []
 	for r in rows:
 		if _age_minutes(r["recovery_started_at"]) > _RECOVERY_CEILING_MINUTES:
-			_error(r, CEILING_ERROR_MESSAGE)
-			counts["errored"] += 1
+			# P8: same try/log shape as the eligible loop below (#13): a snapshot-race
+			# loss on this row's terminal write must not crash the whole cycle and
+			# strand every later row (including the eligible ones the loop below
+			# feeds from `live`). Only `_error_clear` (the CAS + its own commit) is
+			# replayed, NOT `_error_side_effects` (llm_switch, admission settle,
+			# publish, macro advance): those run AFTER that commit, so replaying
+			# them together with the CAS would re-run `_error_clear` on a fresh
+			# snapshot after a side-effect-stage conflict, find the row it just
+			# committed already cleared, and SILENTLY SKIP side effects that never
+			# actually ran on the failed attempt. Side effects run exactly once
+			# here, outside the replay, only when this attempt actually won the row.
+			try:
+				won = txn.replay_on_conflict(
+					lambda r=r: _error_clear(r, CEILING_ERROR_MESSAGE),
+					label=f"turn_recovery ceiling {r['name']}",
+					fresh=True,
+				)
+			except Exception as e:
+				if txn.is_write_conflict(e):
+					try:
+						frappe.db.rollback()
+					except Exception:
+						pass
+				frappe.log_error(
+					title="turn_recovery: ceiling row failed",
+					message=frappe.get_traceback(),
+				)
+			else:
+				if won:
+					_error_side_effects(r, CEILING_ERROR_MESSAGE)
+				counts["errored"] += 1
 		else:
 			live.append(r)
 	if not live:
@@ -468,7 +511,7 @@ def recover_now(conversation_id: str) -> str:
 	row, so the common case (run already finished when the stream was lost)
 	does not wait for the cron. Dedicated connection - the pooled WS may be
 	the very thing that just died. Idempotent vs the cron via
-	_conditional_clear inside _finalize/_error."""
+	_conditional_clear inside _finalize/_error_clear."""
 	rows = frappe.db.sql(
 		f"""
 		SELECT m.name, m.conversation, c.session_key, c.owner,

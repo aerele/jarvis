@@ -9,6 +9,7 @@ from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
 from jarvis._plugin_auth import PluginAuthError, validate_plugin_request
 from jarvis._session import impersonate
+from jarvis.chat import txn
 from jarvis.exceptions import (
 	CapabilityDeniedError,
 	FeatureDisabledError,
@@ -861,31 +862,54 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	if isinstance(notes, list) and notes:
 		item["notes"] = [str(n) for n in notes][:10]
 	MSG = "Jarvis Chat Message"
-	# Prefer the in-flight (streaming) assistant message; fall back to the latest.
-	rows = frappe.get_all(
-		MSG,
-		filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
-		order_by="seq desc",
-		limit=1,
-		pluck="name",
-	) or frappe.get_all(
-		MSG,
-		filters={"conversation": conv_name, "role": "assistant"},
-		order_by="seq desc",
-		limit=1,
-		pluck="name",
-	)
-	if not rows:
+
+	def _write_canvas() -> tuple[str, list] | None:
+		"""Row-locked read-append-write, replayable: two file tools finishing together
+		(or this call racing the pump's own canvas write) must not lose either card to a
+		plain read-then-blind-write, which raises nothing and just overwrites, no 1020 to
+		catch. No commit of our own here (policy: never a mid-request commit to dodge this
+		race): the only caller, persist_tool_receipt (api.py:723, verified the sole call
+		site), already committed at its own line 704 with nothing but a realtime publish
+		(no DB access) in between, and a replay's own rollback already starts the next
+		attempt's transaction fresh, so this unit's first statement, the get_all below, is
+		already the first read of a clean transaction either way.
+		"""
+		# Prefer the in-flight (streaming) assistant message; fall back to the latest.
+		rows = frappe.get_all(
+			MSG,
+			filters={"conversation": conv_name, "role": "assistant", "streaming": 1},
+			order_by="seq desc",
+			limit=1,
+			pluck="name",
+		) or frappe.get_all(
+			MSG,
+			filters={"conversation": conv_name, "role": "assistant"},
+			order_by="seq desc",
+			limit=1,
+			pluck="name",
+		)
+		if not rows:
+			return None
+		msg_name = rows[0]
+		existing = frappe.db.get_value(MSG, msg_name, "canvas", for_update=True)
+		items = frappe.parse_json(existing) if existing else []
+		if not isinstance(items, list):
+			items = []
+		if any(i.get("file_url") == file_url for i in items):
+			return None  # already attached (dedupe) - nothing changed, nothing to publish
+		items.append(item)
+		# update_modified=False: an artifact attach must never trip check_if_latest for
+		# a concurrent send/pump write holding this same reply row.
+		frappe.db.set_value(MSG, msg_name, "canvas", frappe.as_json(items), update_modified=False)
+		return msg_name, items
+
+	won = txn.replay_on_conflict(_write_canvas, label=f"attach artifact {conv_name}:{file_url}")
+	if won is None:
 		return
-	msg_name = rows[0]
-	existing = frappe.db.get_value(MSG, msg_name, "canvas")
-	items = frappe.parse_json(existing) if existing else []
-	if not isinstance(items, list):
-		items = []
-	if any(i.get("file_url") == file_url for i in items):
-		return  # already attached
-	items.append(item)
-	frappe.db.set_value(MSG, msg_name, "canvas", frappe.as_json(items))
+	msg_name, items = won
+	# Publish AFTER the winning commit (never inside the unit): a replay must not
+	# publish twice, and a realtime event for a card the transaction later loses
+	# would be worse than none.
 	frappe.db.commit()
 	frappe.publish_realtime(
 		"jarvis:event",
