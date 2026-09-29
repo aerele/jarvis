@@ -1,0 +1,115 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:agent",
+ "creation": "2026-09-28 12:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "agent",
+  "state",
+  "provider",
+  "model",
+  "fallbacks",
+  "note",
+  "changed_by",
+  "changed_at",
+  "pushed_provider",
+  "pushed_model",
+  "fleet_unresolved",
+  "admin_rejected"
+ ],
+ "fields": [
+  {
+   "fieldname": "agent",
+   "fieldtype": "Link",
+   "label": "Agent",
+   "options": "Jarvis Agent Listing",
+   "reqd": 1,
+   "unique": 1,
+   "in_list_view": 1,
+   "description": "One tenant-wide model per agent: the container runs ONE delegate per agent slug."
+  },
+  {
+   "default": "legacy",
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "options": "legacy\nauto\nchosen\nchanged\nneeds_model",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "legacy = pushed unpinned (today's behaviour); auto = best eligible picked by Jarvis; chosen = picked by a user; changed = moved to a fallback after the choice stopped being eligible; needs_model = nothing eligible, runs blocked."
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Data",
+   "label": "Provider",
+   "description": "Provider id exactly as the pool push sends it (\"\" for a pooled subscription row)."
+  },
+  {
+   "fieldname": "model",
+   "fieldtype": "Data",
+   "label": "Model",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "fallbacks",
+   "fieldtype": "JSON",
+   "label": "Fallbacks",
+   "description": "Up to 3 eligible {provider, model} refs, stored at validation time so the push is a pure read."
+  },
+  {
+   "fieldname": "note",
+   "fieldtype": "Small Text",
+   "label": "Note"
+  },
+  {
+   "fieldname": "changed_by",
+   "fieldtype": "Link",
+   "label": "Changed By",
+   "options": "User"
+  },
+  {
+   "fieldname": "changed_at",
+   "fieldtype": "Datetime",
+   "label": "Changed At"
+  },
+  {
+   "fieldname": "pushed_provider",
+   "fieldtype": "Data",
+   "label": "Pushed Provider",
+   "description": "The choice the last successful Apply sent; differs from provider/model while an Apply is pending."
+  },
+  {
+   "fieldname": "pushed_model",
+   "fieldtype": "Data",
+   "label": "Pushed Model"
+  },
+  {
+   "default": "0",
+   "fieldname": "fleet_unresolved",
+   "fieldtype": "Check",
+   "label": "Fleet Unresolved",
+   "description": "The fleet could not resolve the pushed model in the current render; cleared on the next successful run start."
+  },
+  {
+   "fieldname": "admin_rejected",
+   "fieldtype": "JSON",
+   "label": "Admin Rejected",
+   "description": "{fp, refs}: models admin refused for this workspace on the last Apply; excluded until the pool/catalog fingerprint changes."
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-28 13:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Agent Model Choice",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

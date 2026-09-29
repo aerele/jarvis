@@ -107,6 +107,66 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
+describe("T6: the rail's model line", () => {
+	it("shows nothing for a legacy run (neither field recorded)", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ model_used: "", model_rendered: "" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).not.toContain("Model:");
+	});
+
+	it("shows the verified model with no extra note", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ model_used: "openai/gpt-5", model_rendered: "openai/gpt-5" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("Model: gpt-5");
+		expect(w.text()).not.toContain("Model not verified");
+	});
+
+	// UX-1: the raw ref (provider/door + model id) is only the FIRST '/' -
+	// strip that prefix from the visible label, but keep the full ref
+	// reachable as a tooltip (native `title`).
+	it("strips the provider/door prefix from the label, keeps the full ref as a title tooltip", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ model_used: "openai_compat/gpt-5.6-terra" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("Model: gpt-5.6-terra");
+		expect(w.text()).not.toContain("openai_compat/gpt-5.6-terra");
+		const line = w.findAll("div").find((d) => d.text().startsWith("Model:"));
+		expect(line.attributes("title")).toBe("openai_compat/gpt-5.6-terra");
+	});
+
+	it("flags a below-minimum run with neutral copy", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([
+				runRow({
+					model_used: "openai/gpt-4",
+					model_rendered: "openai/gpt-5",
+					model_below_min: 1,
+				}),
+			])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("Ran on a model below this agent's requirement.");
+	});
+
+	it("shows 'Model not verified' when only model_rendered is known", async () => {
+		apiAgents.listRunsPage.mockResolvedValue(
+			envelope([runRow({ model_used: "", model_rendered: "openai/gpt-5" })])
+		);
+		const w = mountBoard();
+		await flushPromises();
+		expect(w.text()).toContain("Model not verified");
+	});
+});
+
 describe("C1: the rail's status theme covers stopped", () => {
 	it("renders the stopped status pill with the gray theme", async () => {
 		apiAgents.listRunsPage.mockResolvedValue(envelope([runRow({ status: "stopped" })]));

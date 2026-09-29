@@ -76,3 +76,4 @@ def on_doctype_update():
 		["owner", "started_at", "creation"],
 		index_name="owner_started_creation_index",
 	)
+	# finished_at index: DocType JSON search_index=1 (updatedb-managed, survives migrate).
