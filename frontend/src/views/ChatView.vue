@@ -10199,6 +10199,10 @@ function onEvent(p) {
 			// run is live (a chat runs one turn at a time); the enrichment reload
 			// later brings the same rows by name (@/lib/liveToolRows).
 			if (!currentRunId.value || !currentMsgId.value || !p.tool_message_id) break;
+			// A confirm/discard receipt belongs to the card's own turn, not this run
+			// (a card from an earlier reply can be confirmed while one is live); it
+			// renders as a chip from the transcript, as before this merged live rows.
+			if (p.action_outcome) break;
 			// A late result of the run that just ended or was stopped (its call
 			// was seen there) stays with that run; the reload files it there.
 			if (
@@ -10375,13 +10379,14 @@ function onEvent(p) {
 			// or until its deadline expires (jarvis#681: an enrichment that never lands
 			// must not leave a finished answer looking unfinished forever).
 			if (p.message_id) {
-				// A media tool's file (image, video, music) is attached by the
-				// enrichment itself, so that reply shows "finishing" at once.
-				const mediaTurn = activeTools.value.some((t) =>
-					MEDIA_YIELD_TOOLS.has(toolBaseName(t.name))
-				);
+				// The enrichment itself attaches a media tool's file (image, video,
+				// music) and fills record cards' fields, so those replies show
+				// "finishing" at once; any other one only if it is slow.
+				const visibleEnrichment =
+					activeTools.value.some((t) => MEDIA_YIELD_TOOLS.has(toolBaseName(t.name))) ||
+					(!!m && (m.content || "").includes("```jarvis-cards"));
 				if (p.enrichment_pending)
-					enrichmentTracker.mark(p.message_id, { immediate: mediaTurn });
+					enrichmentTracker.mark(p.message_id, { immediate: visibleEnrichment });
 				// NB: the CDX-3 fence entry is deliberately NOT cleared here — the
 				// terminated-epoch marker must persist to permanently block a later
 				// lower-epoch straggler (clearing it re-opened the stale-delta window).

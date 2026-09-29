@@ -79,6 +79,7 @@ class _Recorder:
 		self.statuses: list[tuple[int, str]] = []
 		self.steps: list[tuple[int, str]] = []
 		self.step_raws: list[str | None] = []
+		self.step_preambles: list[bool] = []
 		self.shown: list[str] = []
 		# Every lane callback in arrival order, for ordering assertions.
 		self.order: list[str] = []
@@ -109,9 +110,10 @@ class _Recorder:
 		self.shown.append(text if shown is None else shown)
 		self.order.append("delta")
 
-	def _on_step(self, seq, text, raw=None):
+	def _on_step(self, seq, text, raw=None, preamble=False):
 		self.steps.append((seq, text))
 		self.step_raws.append(raw)
+		self.step_preambles.append(preamble)
 		self.order.append("step")
 
 	def _on_tool(self, ev):
@@ -1342,11 +1344,13 @@ class TestRelayMuxSteps(FrappeTestCase):
 	stop, error or recovery saves what streamed exactly as before; only what the
 	chat displays (``shown``) and the saved final drop the step text."""
 
-	def _run(self, frames, final_text, steps=None, register=True, mux=None, rec=None):
+	def _run(self, frames, final_text, steps=None, register=True, mux=None, rec=None, preamble_steps=None):
 		mux = mux or RelayMux(MagicMock(), "steps-target")
 		rec = rec or _Recorder()
 		if register:
-			mux.register_run("r1", rec.handler(), session_key="s1", steps=steps)
+			mux.register_run(
+				"r1", rec.handler(), session_key="s1", steps=steps, preamble_steps=preamble_steps
+			)
 		for stream, data in frames:
 			mux._classify(_agent_frame("r1", "s1", stream, data))
 		if final_text is not None:
@@ -1369,6 +1373,7 @@ class TestRelayMuxSteps(FrappeTestCase):
 		)
 		self.assertEqual([s[1] for s in rec.steps], [step])
 		self.assertEqual(rec.step_raws, [step])
+		self.assertEqual(rec.step_preambles, [False])  # inferred at the tool boundary, not flagged
 		# Displayed: the step, then blank while it moves to the step line, then only the answer.
 		self.assertEqual(rec.shown, [step, "", answer])
 		# Stored mirror never loses streamed text (a stop mid-lookup keeps it).
@@ -1494,8 +1499,10 @@ class TestRelayMuxSteps(FrappeTestCase):
 			full,
 		)
 		self.assertEqual([s[1] for s in rec.steps], [step])
-		# In the reply, so it is kept for a hop re-seed (raw=text).
+		# In the reply, so it is kept for a hop re-seed (raw=text), flagged so the
+		# pump keeps the flag for that re-seed too.
 		self.assertEqual(rec.step_raws, [step])
+		self.assertEqual(rec.step_preambles, [True])
 		# Hidden BEFORE the step is offered, same order _move_pending_step uses.
 		self.assertEqual(rec.order[:4], ["delta", "delta", "step", "tool"])
 		# The tool boundary finds nothing left to move: no second step frame.
@@ -1731,10 +1738,29 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual([s[1] for s in rec.steps], [step])
 		self.assertEqual(rec.terminal[1]["text"], step)
 
-	def test_reseeded_steps_after_a_hop_fall_back_to_the_is_step_rule(self):
-		# register_run(steps=...) carries texts only, no flags: a two-sentence
-		# step recorded before a hop is not is_step, so it stays in the saved
-		# reply (and is shown again by the reshow) exactly as before the flags.
+	def test_reseeded_preamble_flags_still_strip_after_a_hop(self):
+		# /code-review finding: a pump hop (at most 90 s apart) used to re-seed the
+		# step texts without their flags, so a two-sentence preamble recorded
+		# before the hop came back into the saved answer. The pump now caches the
+		# flags too (pump._read_run_preambles) and re-seeds them.
+		step = "I found the standard report. I'm checking its filters before running it."
+		answer = "Three invoices are overdue, the oldest by 42 days."
+		full = f"{step}\n\n{answer}"
+		self.assertFalse(is_step(step))
+		rec = self._run(
+			[
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+			steps=[step],
+			preamble_steps=[step, "a flag whose step is gone"],
+		)
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_reseeded_steps_without_flags_fall_back_to_the_is_step_rule(self):
+		# A flag lost with the pump's cache: a two-sentence step recorded before
+		# the hop is not is_step, so it stays in the saved reply as before.
 		step = "I found the standard report. I'm checking its filters before running it."
 		answer = "Three invoices are overdue, the oldest by 42 days."
 		full = f"{step}\n\n{answer}"

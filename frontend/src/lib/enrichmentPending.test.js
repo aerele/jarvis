@@ -288,7 +288,7 @@ test("ChatView drives the affordance through this module, not a raw Set", () => 
 	);
 	assert.match(
 		chatViewSrc,
-		/enrichmentTracker\.mark\(p\.message_id, \{ immediate: mediaTurn \}\)/,
+		/enrichmentTracker\.mark\(p\.message_id, \{ immediate: visibleEnrichment \}\)/,
 		"run:end must mark through the tracker so the deadline is armed"
 	);
 	assert.match(

@@ -744,6 +744,30 @@ def _read_run_step_lines(run_id: str) -> list[dict]:
 		return []
 
 
+# Which cached raw steps the runtime flagged as preambles: the saved reply strips
+# those (relay_mux._finalize_terminal), so a hop must re-seed the flag with the text
+# or a preamble recorded before the hop comes back into the finished answer.
+def _run_preambles_key(run_id: str) -> str:
+	return f"jarvis:pump:preambles:{run_id}"
+
+
+def _append_run_preamble(run_id: str, raw: str) -> None:
+	try:
+		cache = frappe.cache()
+		flagged = cache.get_value(_run_preambles_key(run_id), expires=True) or []
+		if raw not in flagged:
+			cache.set_value(_run_preambles_key(run_id), [*flagged, raw], expires_in_sec=RUN_STEPS_TTL_S)
+	except Exception:
+		pass
+
+
+def _read_run_preambles(run_id: str) -> list[str]:
+	try:
+		return list(frappe.cache().get_value(_run_preambles_key(run_id), expires=True) or [])
+	except Exception:
+		return []
+
+
 def _write_lease_mirror(target: str) -> None:
 	try:
 		frappe.cache().set_value(_lease_mirror_key(target), "1", expires_in_sec=LEASE_MIRROR_TTL_S)
@@ -2700,7 +2724,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 				relay_target_id=ctx.relay_target_id,
 			)
 
-	def on_step(event_seq: int, text: str, raw: str | None = None) -> None:
+	def on_step(event_seq: int, text: str, raw: str | None = None, preamble: bool = False) -> None:
 		# The live step line (jarvis.chat.steps). LOSSY like on_status: published, and
 		# a newer step replaces it on screen. The published lines are also kept in the
 		# cache and saved on the reply at settlement (settlement._stamp_steps).
@@ -2723,6 +2747,8 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		# ``text`` is already redacted + display-shaped by the relay, so it is the
 		# copy that is stored on the reply and shown after a reload, never ``raw``.
 		_append_run_step_line(rs.run_id, text)
+		if preamble and raw:
+			_append_run_preamble(rs.run_id, raw)
 		if rs.owner:
 			ts.publish_fenced(
 				rs.owner,
@@ -3258,6 +3284,7 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 			start_seq=int(r.get("last_event_seq") or 0),
 			is_readopt=True,
 			steps=_read_run_steps(run_id),
+			preamble_steps=_read_run_preambles(run_id),
 		)
 
 
