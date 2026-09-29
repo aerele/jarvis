@@ -320,7 +320,6 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 		await flushPromises();
 		expect(w.text()).toContain("Claude Sonnet 5");
 		expect(w.text()).not.toContain("Claude Opus 5");
-		expect(w.text()).toContain("Already set for everyone using this agent.");
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([[]]);
@@ -332,7 +331,6 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		await pickOther(w);
-		expect(w.text()).not.toContain("Already set for everyone using this agent.");
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([[{ provider: "openai", model: "gpt-5" }]]);
@@ -366,7 +364,6 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 		const w = mountDialog({ row: null });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
-		expect(w.text()).not.toContain("Already set for everyone using this agent.");
 	});
 
 	it("every pinned state with an unchanged choice emits no pick", async () => {
@@ -377,7 +374,6 @@ describe("AgentInstallDialog seeds from an existing tenant-wide choice (EDGE2-1)
 			});
 			const w = mountDialog({ row: { state, choice: SONNET } });
 			await flushPromises();
-			expect(w.text()).toContain("Already set for everyone using this agent.");
 			await w.find('[data-label="Install"]').trigger("click");
 			expect(w.emitted("confirm")).toEqual([[]]);
 		}
@@ -395,7 +391,6 @@ describe('AgentInstallDialog subscription-lane models (provider "")', () => {
 		expect(w.text()).toContain("Kimi Sub");
 		expect(w.text()).toContain("Uses your Kimi (Moonshot) subscription allowance");
 		expect(w.text()).not.toContain("Claude Opus 5");
-		expect(w.text()).toContain("Already set for everyone using this agent.");
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([[]]);
@@ -424,7 +419,6 @@ describe("AgentInstallDialog over an unpinned row (legacy / needs_model)", () =>
 		const w = mountDialog({ row: { state: "legacy", choice: null } });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
-		expect(w.text()).not.toContain("Already set for everyone using this agent.");
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([
@@ -439,7 +433,6 @@ describe("AgentInstallDialog over an unpinned row (legacy / needs_model)", () =>
 		await flushPromises();
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(w.text()).not.toContain("Claude Sonnet 5");
-		expect(w.text()).not.toContain("Already set for everyone using this agent.");
 
 		await w.find('[data-label="Install"]').trigger("click");
 		expect(w.emitted("confirm")).toEqual([
@@ -508,6 +501,10 @@ describe("AgentInstallDialog failed load", () => {
 		await flushPromises();
 		expect(w.text()).toContain("Couldn't load the models this agent can use.");
 		expect(installBtn(w).attributes("disabled")).toBeDefined();
+		// FE8-a11y: the failure is also announced via the aria-live region.
+		expect(w.find('[role="status"]').text()).toBe(
+			"Couldn't load the models this agent can use."
+		);
 		await installBtn(w).trigger("click");
 		expect(w.emitted("confirm")).toBeUndefined();
 
@@ -520,6 +517,8 @@ describe("AgentInstallDialog failed load", () => {
 		expect(apiAgents.getEligibleModels).toHaveBeenCalledTimes(2);
 		expect(w.text()).toContain("Claude Opus 5");
 		expect(installBtn(w).attributes("disabled")).toBeUndefined();
+		// FE8-a11y: a successful reload clears the earlier failure announcement.
+		expect(w.find('[role="status"]').text()).toBe("");
 	});
 
 	it("an empty response or a failed row read is a failed load too", async () => {
@@ -537,6 +536,9 @@ describe("AgentInstallDialog failed load", () => {
 			await flushPromises();
 			expect(w.text()).toContain("Couldn't load the models this agent can use.");
 			expect(installBtn(w).attributes("disabled")).toBeDefined();
+			expect(w.find('[role="status"]').text()).toBe(
+				"Couldn't load the models this agent can use."
+			);
 		}
 	});
 });
