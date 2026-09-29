@@ -122,7 +122,11 @@ class TestApplyAction(FrappeTestCase):
 		self.assertEqual(len(doc.email_ids), 2)
 		self.assertEqual(doc.email_ids[1].email_id, "two@example.com")
 
-	def test_update_replaces_child_rows(self):
+	def test_update_edits_child_rows_by_name_and_keeps_unsent_fields(self):
+		# The panel sends each kept row's name (load_doc) and only the grid columns;
+		# a row's other fields (here is_primary) must survive, and a nameless row is
+		# added as new. Replaces the old wholesale-replace assertion (CR-3: that
+		# replace silently dropped every field the grid did not show).
 		c = frappe.get_doc(
 			{
 				"doctype": "Contact",
@@ -131,6 +135,7 @@ class TestApplyAction(FrappeTestCase):
 			}
 		).insert()
 		self._cleanup_doc("Contact", c.name)
+		row = c.email_ids[0].name
 		apply_action(
 			frappe.as_json(
 				{
@@ -139,7 +144,7 @@ class TestApplyAction(FrappeTestCase):
 					"name": c.name,
 					"values": {
 						"email_ids": [
-							{"email_id": "new1@example.com", "is_primary": 1},
+							{"name": row, "email_id": "new1@example.com"},
 							{"email_id": "new2@example.com"},
 						]
 					},
@@ -149,9 +154,22 @@ class TestApplyAction(FrappeTestCase):
 		)
 		doc = frappe.get_doc("Contact", c.name)
 		self.assertEqual(
-			sorted(e.email_id for e in doc.email_ids),
-			["new1@example.com", "new2@example.com"],
+			[(e.name == row, e.email_id, e.is_primary) for e in doc.email_ids],
+			[(True, "new1@example.com", 1), (False, "new2@example.com", 0)],
 		)
+
+	def test_load_doc_rows_carry_their_name(self):
+		# Without the row name the panel cannot say which saved row it edits.
+		c = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "DraftPanel Load Test",
+				"email_ids": [{"email_id": "a@example.com", "is_primary": 1}],
+			}
+		).insert()
+		self._cleanup_doc("Contact", c.name)
+		out = load_doc("Contact", c.name)
+		self.assertEqual(out["tables"]["email_ids"][0]["name"], c.email_ids[0].name)
 
 	def test_confirm_verbs_rejected_here(self):
 		# submit/cancel/delete/amend are confirm-as-proposed actions: they must

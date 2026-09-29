@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { controlFor, markMissing, normDateVal, panelField } from "./docFields";
+import { controlFor, markMissing, panelField } from "./docFields";
+import { normDateVal } from "./draftApply";
 
 describe("docFields", () => {
 	it("maps a fieldtype to its control", () => {

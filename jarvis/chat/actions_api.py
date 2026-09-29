@@ -114,7 +114,9 @@ def load_doc(doctype: str, name: str) -> dict:
 	tables = {}
 	for tf, spec in fm["tables"].items():
 		cols = [c["fieldname"] for c in spec["columns"]]
-		tables[tf] = [{c: row.get(c) for c in cols} for row in (doc.get(tf) or [])]
+		# Each row carries its name so an update edits THAT row (update_doc merges
+		# by name); without it, fields the grid does not show would be lost.
+		tables[tf] = [{"name": row.name, **{c: row.get(c) for c in cols}} for row in (doc.get(tf) or [])]
 	return {
 		"ok": True,
 		"doctype": doctype,

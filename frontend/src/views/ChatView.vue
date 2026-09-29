@@ -1299,6 +1299,15 @@
 												<div class="jv-summary-table-h">
 													{{ t.label }} ({{ t.count }})
 												</div>
+												<div
+													v-if="t.removed.length"
+													class="jv-rows-removed"
+													role="note"
+												>
+													Removes {{ t.removed.length }} saved
+													{{ t.removed.length === 1 ? "row" : "rows" }}:
+													{{ t.removed.join(", ") }}
+												</div>
 												<div class="jv-summary-gridwrap">
 													<table class="jv-summary-grid">
 														<thead
@@ -3902,6 +3911,15 @@
 							class="jv-draft-table"
 						>
 							<div class="jv-draft-table-title">{{ t.label }}</div>
+							<div
+								v-if="removedSavedRows(t).length"
+								class="jv-rows-removed"
+								role="note"
+							>
+								Saving removes {{ removedSavedRows(t).length }} saved
+								{{ removedSavedRows(t).length === 1 ? "row" : "rows" }}:
+								{{ removedSavedRows(t).join(", ") }}
+							</div>
 							<div class="jv-draft-gridwrap">
 								<table class="jv-grid">
 									<thead>
@@ -4275,11 +4293,7 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
-import {
-	markMissing,
-	normDateVal as _normDateVal,
-	panelField as _panelField,
-} from "@/lib/docFields";
+import { markMissing, panelField as _panelField } from "@/lib/docFields";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -4287,6 +4301,12 @@ import {
 	isFieldMissing,
 	isFieldWritable,
 	readonlyDisplay,
+	isRowKeyColumn,
+	overlaySavedRows,
+	removedSavedRows,
+	tableChanged,
+	tableRowsPayload,
+	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
@@ -6942,6 +6962,15 @@ async function buildDraftModel(a) {
 		try {
 			base = await api.loadDocForEdit(a.doctype, a.name);
 		} catch (e) {
+			// Without the saved rows the card cannot show which rows a proposed table
+			// keeps or removes, so never offer to apply one blind (CR-3).
+			if ((a.tables || []).length) {
+				const err = new Error(
+					"Could not load this record's saved rows, so I can't show what would change. Tell me to try again."
+				);
+				err.jvUserMessage = err.message;
+				throw err;
+			}
 			/* not editable → create-style view */
 		}
 	}
@@ -6979,15 +7008,15 @@ async function buildDraftModel(a) {
 	for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
 	for (const [tf, spec] of Object.entries(meta.tables || {})) {
 		const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-		const proposedRows = aTables[tf];
 		const baseRows = (base.tables || {})[tf] || [];
+		const proposedRows = aTables[tf] && overlaySavedRows(aTables[tf], baseRows);
 		if (!proposedRows && !metaField.reqd && !baseRows.length) continue;
 		// columns = child meta columns ∪ keys the agent used (unknown keys → data input)
 		const columns = spec.columns.slice();
 		const known = new Set(columns.map((c) => c.fieldname));
 		for (const r of proposedRows || []) {
 			for (const k of Object.keys(r)) {
-				if (!known.has(k)) {
+				if (!known.has(k) && isRowKeyColumn(k)) {
 					known.add(k);
 					columns.push({
 						fieldname: k,
@@ -7001,15 +7030,8 @@ async function buildDraftModel(a) {
 			}
 		}
 		const srcRows = proposedRows != null ? proposedRows : baseRows; // proposal REPLACES loaded rows
-		const rows = srcRows.map((r) => {
-			const o = {};
-			for (const c of columns)
-				o[c.fieldname] = _normDateVal(
-					c.fieldtype,
-					r[c.fieldname] == null ? "" : String(r[c.fieldname])
-				);
-			return o;
-		});
+		// Each row keeps its saved name (__name) so Apply edits THAT row (CR-3).
+		const rows = srcRows.map((r) => toPanelRow(columns, r));
 		if (!rows.length) rows.push(_blankRow(columns));
 		tables.push({
 			fieldname: tf,
@@ -7017,7 +7039,7 @@ async function buildDraftModel(a) {
 			child: spec.child_doctype,
 			columns,
 			rows,
-			origJson: JSON.stringify(verb === "update" ? baseRows : null),
+			origJson: JSON.stringify(verb === "update" ? baseRows : null), // raw saved rows
 		});
 	}
 	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
@@ -7280,21 +7302,11 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			.filter((r) => Object.keys(r).length);
 		if (p.verb === "create") {
 			if (rows.length) values[t.fieldname] = rows;
-		} else if (
-			JSON.stringify(rows) !==
-			JSON.stringify(
-				(JSON.parse(t.origJson) || []).map((r) =>
-					coerceRow(
-						t,
-						Object.fromEntries(
-							Object.entries(r).map(([k, v]) => [k, v == null ? "" : String(v)])
-						),
-						"update"
-					)
-				)
-			)
-		) {
-			values[t.fieldname] = rows;
+		} else if (tableChanged(t, JSON.parse(t.origJson))) {
+			// Only a changed table is sent: each saved row by name with just its
+			// changed cells, new rows in full; an unchanged one (incl. a Datetime/Time
+			// column) is never resent (CR-3).
+			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
 		}
 	}
 	p.applying = true;
@@ -15677,6 +15689,15 @@ onUnmounted(() => {
 	padding: 4px 0;
 	color: var(--text-2);
 	word-break: break-word;
+}
+.jv-rows-removed {
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	border-radius: 6px;
+	border: 1px solid var(--red-bd);
+	background: var(--red-bg);
+	color: var(--red);
+	font-size: 12px;
 }
 .jv-draft-table-title {
 	font-size: 12px;
