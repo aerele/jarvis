@@ -560,13 +560,13 @@ class TestSuggestionsStoreRace(_RaceCase):
 					)
 					other.commit()
 
-			real_goc = usage.get_or_create_user_settings
+			real_goc = usage.user_settings_name
 			goc = _race_once(real_goc, after=compete)
 			items = [{"title": "Race check", "prompt": "show my race check suggestion"}]
 			with (
 				snapshot_isolation_on(),
 				as_job(),
-				patch.object(usage, "get_or_create_user_settings", goc),
+				patch.object(usage, "user_settings_name", goc),
 			):
 				suggestions.store(user, items)
 			stored = frappe.db.get_value(USETT, {"user": user}, "prompt_suggestions")
@@ -605,13 +605,13 @@ class TestSuggestionsTouchRace(_RaceCase):
 					)
 					other.commit()
 
-			real_goc = usage.get_or_create_user_settings
+			real_goc = usage.user_settings_name
 			goc = _race_once(real_goc, after=compete)
 			before = frappe.utils.now_datetime()
 			with (
 				snapshot_isolation_on(),
 				as_job(),
-				patch.object(usage, "get_or_create_user_settings", goc),
+				patch.object(usage, "user_settings_name", goc),
 			):
 				suggestions.touch(user)
 			stamp = frappe.utils.get_datetime(

@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import frappe
 
-from jarvis.chat import admission, prepare, pump, stale_scan, turn_recovery
+from jarvis.chat import admission, prepare, pump, stale_scan, turn_recovery, txn
 from jarvis.chat import turn_state as ts
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.race_harness import (
@@ -278,6 +278,114 @@ class TestPrepareClaimRace(_RaceCase):
 		assert_fix_closes_race(self, scenario, check)
 
 
+class TestPrepareAttachPlaceholderRace(_RaceCase):
+	def test_attach_placeholder_replays_a_race_without_a_second_placeholder(self):
+		"""ts.attach_placeholder's CAS (full-diff review of #1527) races a competing
+		commit on the Turn row between a plain read and the CAS. Fix-off: 1020 out
+		of the unit. Fix-on: the replay's fresh _create_placeholder_locked call makes
+		a NEW placeholder and attaches it cleanly - exactly one placeholder ends up
+		on the conversation, never two (the first attempt's row is discarded before
+		the retry, inside _attach_placeholder_unit)."""
+
+		def scenario():
+			self._new_shard()
+			conv = self._mk_conv()
+			seed = self._mk_msg(conv)
+			rid = f"pmpr_{frappe.generate_hash(length=8)}"
+			self._mk_turn(conv, rid, seed, "preparing", version=2, reserved=1)
+
+			real = ts.attach_placeholder
+
+			def race():
+				open_read_view()  # the fresh transaction's own first read, fixed early
+				_compete(f"UPDATE `tab{TURN}` SET modified=NOW(6) WHERE name=%s", (rid,))
+
+			fenced = _race_once(real, before=race)
+
+			with snapshot_isolation_on(), as_job(), patch.object(ts, "attach_placeholder", fenced):
+				won, assistant_msg = txn.replay_on_conflict(
+					lambda: prepare._attach_placeholder_unit(conv, rid, 2),
+					label="test attach_placeholder",
+					fresh=True,
+				)
+			return conv, rid, won, assistant_msg
+
+		def check(res):
+			conv, rid, won, assistant_msg = res
+			self.assertTrue(won)
+			self.assertIsNotNone(assistant_msg)
+			self.assertEqual(frappe.db.get_value(TURN, rid, "assistant_message"), assistant_msg)
+			# Exactly one placeholder survives - a discarded first attempt never
+			# lingers next to the replay's fresh one.
+			self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "assistant"}), 1)
+
+		assert_fix_closes_race(self, scenario, check)
+
+
+class TestPrepareStoreDispatchPayloadRace(_RaceCase):
+	def test_store_dispatch_payload_replays_a_race(self):
+		"""ts.store_dispatch_payload's CAS (full-diff review of #1527) races a
+		competing commit on the Turn row between a plain read and the CAS - the
+		whole assemble+gateway-bootstrap phase before this call is the job's "slow
+		part", so a snapshot fixed before it can easily be stale by the time this
+		write runs."""
+
+		def scenario():
+			self._new_shard()
+			conv = self._mk_conv()
+			seed = self._mk_msg(conv)
+			rid = f"pmpr_{frappe.generate_hash(length=8)}"
+			self._mk_turn(conv, rid, seed, "preparing", version=5, reserved=1)
+
+			real = ts.store_dispatch_payload
+
+			def race():
+				open_read_view()
+				_compete(f"UPDATE `tab{TURN}` SET modified=NOW(6) WHERE name=%s", (rid,))
+
+			fenced = _race_once(real, before=race)
+
+			with snapshot_isolation_on(), as_job(), patch.object(ts, "store_dispatch_payload", fenced):
+				won = txn.replay_on_conflict(
+					lambda: prepare._store_dispatch_payload_unit(rid, 5, '{"session_key": "sk"}'),
+					label="test store_dispatch_payload",
+					fresh=True,
+				)
+			return rid, won
+
+		def check(res):
+			rid, won = res
+			self.assertTrue(won)
+			self.assertEqual(frappe.db.get_value(TURN, rid, "dispatch_payload"), '{"session_key": "sk"}')
+
+		assert_fix_closes_race(self, scenario, check)
+
+
+class TestPrepareExhaustedReplay(_RaceCase):
+	def test_attach_placeholder_exhausted_replay_discards_and_skips(self):
+		"""When attach_placeholder's CAS keeps losing to a write conflict across
+		EVERY replay attempt (patched to always raise the real exception class, not
+		a synthetic stand-in), run_prepare must still resolve to the existing
+		lost-branch shape - never raise out - and must not leave an orphan
+		placeholder behind from any attempt (each attempt discards its own before
+		the next one creates a fresh one)."""
+
+		def always_conflict(*_a, **_k):
+			raise frappe.QueryDeadlockError("exhausted-replay test: synthetic persistent conflict")
+
+		self._new_shard()
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		rid = f"pmpr_{frappe.generate_hash(length=8)}"
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=1)
+
+		with as_job(), patch.object(ts, "attach_placeholder", always_conflict):
+			result = prepare.run_prepare(rid, relay_target_id=self._target)
+
+		self.assertEqual(result, {"ok": True, "skipped": "attach_lost"})
+		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "assistant"}), 0)
+
+
 # --------------------------------------------------------------------------- #
 # P7 - stale_scan.scan_and_mark_errored (per-row units)
 # --------------------------------------------------------------------------- #
@@ -401,24 +509,23 @@ class TestOrphanSweepRowRace(_RaceCase):
 				patch("frappe.utils.background_jobs.get_workers", return_value=[]),
 				patch("jarvis.chat.api._redispatch_orphan", return_value={"ok": True, "dispatched": False}),
 				patch.object(stale_scan, "_heal_or_error_orphan", racing),
-				# Patched wholesale (not the specific logger instance) so this does not
-				# depend on frappe.logger's internal per-name caching: every call in
-				# this scope shares one MagicMock, so .return_value.warning collects
-				# every warning() call regardless of how many times frappe.logger(name)
-				# itself is invoked.
-				patch("frappe.logger") as logger_fn,
+				# The lost race is reported through txn.report_lost_race, which logs it
+				# once with frappe.log_error; record those calls instead of writing real
+				# Error Log rows on the site.
+				patch("frappe.log_error") as log_error,
 			):
 				errored = stale_scan._sweep_orphan_turns(frappe.utils.now_datetime())
-			return uid_a, uid_b, errored, logger_fn
+			return uid_a, uid_b, errored, log_error
 
 		def check(res):
-			uid_a, uid_b, errored, logger_fn = res
+			uid_a, uid_b, errored, log_error = res
 			# Row A lost the race this cycle: caught, logged, skipped - NOT retried,
 			# so its healing write never landed.
 			self.assertEqual(int(frappe.db.get_value(MSG, uid_a, "was_recovered") or 0), 0)
 			# Row B is unaffected: healed normally despite A's conflict.
 			self.assertEqual(int(frappe.db.get_value(MSG, uid_b, "was_recovered") or 0), 1)
-			self.assertEqual(logger_fn.return_value.warning.call_count, 1)
+			titles = [c.kwargs.get("title") for c in log_error.call_args_list]
+			self.assertEqual(titles.count("stale_scan: orphan row failed"), 1, titles)
 
 		assert_fix_closes_race(self, scenario, check)
 

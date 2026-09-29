@@ -227,13 +227,12 @@ def _clear_lock(conversation: str) -> None:
 	try:
 		txn.replay_on_conflict(_clear, label=f"chat: compact clear lock {conversation}")
 	except Exception as e:
-		if not txn.is_write_conflict(e):
-			raise
 		# Both attempts lost the race (or a write already pending made replay unsafe):
 		# the lock stays set until COMPACT_LOCK_SECONDS elapses - a bounded, customer-
 		# visible "still compacting" state, not silent data loss, so report it rather
-		# than crash run_compact's finally over a lock that self-heals.
-		frappe.log_error(title="chat: compact lock clear lost a write race", message=frappe.get_traceback())
+		# than crash run_compact's finally over a lock that self-heals. Anything that
+		# is not a write conflict is re-raised untouched by report_lost_race.
+		txn.report_lost_race(e, title="chat: compact lock clear lost a write race")
 
 
 def _gateway_session_row(sess, session_key: str) -> dict:

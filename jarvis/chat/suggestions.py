@@ -322,7 +322,7 @@ def touch(user: str) -> None:
 	txn.fresh_snapshot()
 
 	def write():
-		name = usage.get_or_create_user_settings(user).name
+		name = usage.user_settings_name(user)
 		frappe.db.set_value(
 			USETT, name, "prompt_suggestions_at", frappe.utils.now_datetime(), update_modified=False
 		)
@@ -346,7 +346,7 @@ def store(user: str, items: list[dict]) -> None:
 	txn.fresh_snapshot()
 
 	def write():
-		name = usage.get_or_create_user_settings(user).name
+		name = usage.user_settings_name(user)
 		frappe.db.set_value(
 			USETT,
 			name,

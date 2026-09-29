@@ -977,30 +977,26 @@ def _save_conv_or_friendly_error(fn, *, label: str, friendly_message: str):
 	"""Run a load+modify+doc.save() unit (see rename_conversation /
 	archive_conversation / set_star) through txn.replay_on_conflict, catching
 	only a genuine EXHAUSTED snapshot-isolation conflict (frappe.
-	QueryDeadlockError, checked via txn.is_write_conflict) at this endpoint
-	boundary and turning it into a friendly, catchable error instead of a raw
-	500. also=(frappe.TimestampMismatchError,): on a server without snapshot
-	isolation (MariaDB 10.x) the same lost race surfaces as Document.save's own
-	check_if_latest instead of the engine's 1020; valid here because every fn
-	reloads its document on each attempt, so the replay's check_if_latest
-	compares the present row against itself.
+	QueryDeadlockError) at this endpoint boundary and turning it into a
+	friendly, catchable error instead of a raw 500. also=(frappe.
+	TimestampMismatchError,): on a server without snapshot isolation (MariaDB
+	10.x) the same lost race surfaces as Document.save's own check_if_latest
+	instead of the engine's 1020; valid here because every fn reloads its
+	document on each attempt, so the replay's check_if_latest compares the
+	present row against itself.
 
-	A TimestampMismatchError that survives every replay is left to propagate
-	unchanged (Frappe already renders it as a clear message on its own). None of
-	rename_conversation / archive_conversation / set_star's frontend or pwa
-	callers check a resolved {"ok": False} shape, they only handle a rejected
-	call, so the friendly outcome here is a controlled frappe.throw, not a
-	returned dict."""
+	txn.report_lost_race re-raises anything that is not a write conflict
+	unchanged, so an exhausted TimestampMismatchError propagates as-is (Frappe
+	already renders it as a clear message on its own); a write conflict is
+	rolled back and logged there, and frappe.throw below turns it into the
+	friendly error. None of rename_conversation / archive_conversation /
+	set_star's frontend or pwa callers check a resolved {"ok": False} shape,
+	they only handle a rejected call, so the friendly outcome here is a
+	controlled frappe.throw, not a returned dict."""
 	try:
 		return txn.replay_on_conflict(fn, label=label, also=(frappe.TimestampMismatchError,))
 	except Exception as e:
-		if not txn.is_write_conflict(e):
-			raise
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		frappe.log_error(title=label, message=frappe.get_traceback())
+		txn.report_lost_race(e, title=label)
 		frappe.throw(friendly_message)
 
 
@@ -1871,6 +1867,15 @@ def send_message(
 	# user message included) and silently revert whatever they just wrote.
 	_conv_changes: dict = {}
 
+	def stage(field: str, value) -> None:
+		"""The ONE way to change a field on the conversation for this send: sets it
+		on conv_doc (so an in-request read, e.g. _resolve_model_and_provider below,
+		sees it) AND stages it into _conv_changes (what the targeted write further
+		down persists), so the two can never drift the way separate
+		conv_doc.X = / _conv_changes[X] = call sites could."""
+		setattr(conv_doc, field, value)
+		_conv_changes[field] = value
+
 	# A typed go-ahead on a parked confirmation card is the SAME act as clicking
 	# Confirm, so it runs the confirmation instead of becoming a chat turn. Placed
 	# here on purpose: ownership of the conversation is settled, but nothing has
@@ -1937,15 +1942,13 @@ def send_message(
 				"ok": False,
 				"reason": f"model {model_override!r} is not valid for {settings.llm_provider!r}",
 			}
-		conv_doc.model_override = model_override
-		_conv_changes["model_override"] = model_override
+		stage("model_override", model_override)
 
 	if thinking_override is not None:
 		level = (thinking_override or "").strip().lower()
 		if level not in _ALLOWED_THINKING:
 			return {"ok": False, "reason": f"invalid thinking level {thinking_override!r}"}
-		conv_doc.thinking_override = level
-		_conv_changes["thinking_override"] = level
+		stage("thinking_override", level)
 
 	# Per-model enforcement (fleet spec §7): now that the conversation (and any
 	# fresh model_override) is settled, resolve the effective model and re-check
@@ -1980,10 +1983,8 @@ def send_message(
 	# + drops the redis run-state) so an early return before that write still ends the
 	# run. clear_skill_autorun is itself best-effort.
 	if conv_doc.skill_autorun:
-		conv_doc.skill_autorun = 0
-		conv_doc.skill_autorun_at = None
-		_conv_changes["skill_autorun"] = 0
-		_conv_changes["skill_autorun_at"] = None
+		stage("skill_autorun", 0)
+		stage("skill_autorun_at", None)
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_skill_autorun(conversation)
@@ -2008,12 +2009,9 @@ def send_message(
 	# construction. If THIS message itself carries a 'confirm all' directive, the
 	# upfront-arm AFTER the write below re-arms on top of this reset.
 	if conv_doc.request_autorun:
-		conv_doc.request_autorun = 0
-		conv_doc.request_autorun_at = None
-		conv_doc.request_autorun_msg = None
-		_conv_changes["request_autorun"] = 0
-		_conv_changes["request_autorun_at"] = None
-		_conv_changes["request_autorun_msg"] = None
+		stage("request_autorun", 0)
+		stage("request_autorun_at", None)
+		stage("request_autorun_msg", None)
 		from jarvis import api as _jarvis_api
 
 		_jarvis_api._request_autorun_clear(conversation)
@@ -2034,7 +2032,7 @@ def send_message(
 	# "conversation:renamed" event. We leave it as "New chat" here so the sidebar
 	# never flashes the raw prompt (and greeting-only openers stay unnamed until a
 	# real prompt arrives).
-	_conv_changes["last_active_at"] = frappe.utils.now()
+	stage("last_active_at", frappe.utils.now())
 
 	# Remember which builder page owns this thread. Dashboard conversations have
 	# native, origin-scoped history and are excluded from main chat, so the marker
@@ -2047,7 +2045,7 @@ def send_message(
 	# discarded on a busy site. The parse is side-effect-free and reads the same
 	# two-value literal allow-list the enqueue payload applies further down.
 	if requested_origin and not existing_origin:
-		_conv_changes["origin_page"] = requested_origin
+		stage("origin_page", requested_origin)
 
 	def _write_conv() -> None:
 		# Row-locked re-read of the server-stamped File Box fields: a live File Box run
@@ -3653,13 +3651,20 @@ def _enqueue_turn(
 	# race to the SAME writers (auto-title, override endpoints, File Box stamps)
 	# and takes the just-inserted seed message down with it.
 	_conv_changes: dict = {}
+
+	def stage(field: str, value) -> None:
+		# The ONE way to change a field on the conversation for this call: see
+		# send_message's identical helper for why (sets conv_doc AND stages
+		# _conv_changes together, so an in-request read and the targeted write
+		# below can never drift apart).
+		setattr(conv_doc, field, value)
+		_conv_changes[field] = value
+
 	if model_override:
-		conv_doc.model_override = model_override
-		_conv_changes["model_override"] = model_override
+		stage("model_override", model_override)
 	if thinking_override is not None:
 		level = (thinking_override or "").strip().lower()
-		conv_doc.thinking_override = level
-		_conv_changes["thinking_override"] = level
+		stage("thinking_override", level)
 
 	# First turn of a fresh macro conversation needs a session_key.
 	# Continuation turns skip this: they always follow an existing turn, and a
@@ -3670,10 +3675,9 @@ def _enqueue_turn(
 	# empty (nothing written by THIS function yet) by the time the conversation
 	# write below runs.
 	if not hidden and not conv_doc.session_key:
-		conv_doc.session_key = _ensure_session_key(conv_doc.owner)
-		_conv_changes["session_key"] = conv_doc.session_key
+		stage("session_key", _ensure_session_key(conv_doc.owner))
 
-	_conv_changes["last_active_at"] = frappe.utils.now()
+	stage("last_active_at", frappe.utils.now())
 
 	def _write_conv() -> None:
 		# Row-locked re-read of the server-stamped File Box fields, same reasoning as
