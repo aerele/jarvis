@@ -1173,12 +1173,18 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 	message_id = None
 	committed = False
 	try:
+		# commit-first on EVERY path so each row lock below opens a fresh txn: the
+		# conversation lock, the fence CAS on the Turn, and record_tool_owner's FOR UPDATE
+		# on the reply row. A jarvis__ tool used to skip this, so its reply-row lock ran on
+		# a read view older than the web worker's file-card write to the same row; with
+		# innodb_snapshot_isolation on (MariaDB 11.6.2+) that lock fails 1020 "Record
+		# has changed", the lane is quarantined, and the answer waits ~80-90 s for the
+		# next hop. on_tool already flushed + committed any pending delta, so nothing
+		# durable is dropped here.
+		frappe.db.commit()
 		if need_lock:
-			# commit-first so the FOR UPDATE lock opens a fresh txn (rank-2 conversation
-			# lock; canonical order control->conversation->turn->message — no shard lock is
-			# held on the streaming path, so conversation-first is legal). on_tool already
-			# flushed + committed any pending delta, so nothing durable is dropped here.
-			frappe.db.commit()
+			# rank-2 conversation lock; canonical order control->conversation->turn->message
+			# (no shard lock is held on the streaming path, so conversation-first is legal).
 			ts._lock_conversation(conversation)
 		# CDX-15 fence: same-txn proof the turn is still streaming under epoch E.
 		if not ts.apply_tool_fenced(rs.run_id, rs.version, ctx.epoch, event_seq):

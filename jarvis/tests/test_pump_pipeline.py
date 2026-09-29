@@ -46,6 +46,22 @@ EFFECT = "Jarvis Turn Effect"
 SESSION = "Jarvis Chat Session"
 
 
+def _second_connection():
+	"""A SEPARATE DB connection, so a write commits while the pump's transaction is
+	open (a same-connection write would always be visible to it)."""
+	from frappe.database import get_db
+
+	conf = frappe.conf
+	return get_db(
+		socket=conf.db_socket,
+		host=conf.db_host,
+		port=conf.db_port,
+		user=conf.db_user or conf.db_name,
+		password=conf.db_password,
+		cur_db_name=conf.db_name,
+	)
+
+
 def setUpModule():
 	install_synthetic_runtime_profile()
 
@@ -1828,10 +1844,57 @@ class TestToolApplierEquivalence(_PipelineCase):
 			"recovery CAS bumped the CLEAN version exactly once",
 		)
 
+	# --------------------------------------------------------------------------- #
+	# 12. CDX-6 — usage honesty (no permanent 'recorded' on stale/missing data)
+	# --------------------------------------------------------------------------- #
 
-# --------------------------------------------------------------------------- #
-# 12. CDX-6 — usage honesty (no permanent 'recorded' on stale/missing data)
-# --------------------------------------------------------------------------- #
+	def test_jarvis_tool_owner_lock_sees_a_concurrent_reply_write(self):
+		# Export hang: the web worker attached a file card to the reply ~27 ms before the
+		# pump recorded a jarvis__ tool id on the same row. The jarvis__ path skipped the
+		# commit-first, so record_tool_owner's FOR UPDATE ran on an older read view; with
+		# innodb_snapshot_isolation that raises 1020 "Record has changed", the lane is
+		# quarantined and the answer waits ~80-90 s for the next hop. Reproduced here with
+		# a real second connection, not a mock.
+		try:
+			frappe.db.sql("SET SESSION innodb_snapshot_isolation = ON")
+		except Exception:
+			self.skipTest("this database has no innodb_snapshot_isolation")
+		self.addCleanup(frappe.db.sql, "SET SESSION innodb_snapshot_isolation = OFF")
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="export it")
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		rid = "pmp_tool_snapshot"
+		self._mk_turn(conv, rid, seed, "streaming", version=3, reserved=1, assistant_message=amsg)
+		frappe.db.commit()
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		rs = pump._RunState(
+			run_id=rid,
+			conversation=conv,
+			owner=TEST_USER,
+			assistant_message=amsg,
+			session_key="s",
+			version=int(frappe.db.get_value(TURN, rid, "version")),
+		)
+		frappe.db.commit()
+		# The pump's transaction reads the reply: its read view is taken here.
+		frappe.db.sql("SELECT content FROM `tabJarvis Chat Message` WHERE name=%s", amsg)
+		# The web worker saves the file card onto the same reply and commits.
+		other = _second_connection()
+		try:
+			other.sql(
+				"UPDATE `tabJarvis Chat Message` SET content=%s WHERE name=%s",
+				("partial [file card]", amsg),
+			)
+			other.commit()
+		finally:
+			other.close()
+		ev = {"event_seq": 1, "phase": "start", "tool_name": "jarvis__export", "tool_call_id": "tj1"}
+		pump._default_apply_tool(ctx, rs, ev)  # raised 1020 before the fix
+		row = frappe.db.sql(
+			"SELECT content, tool_call_ids FROM `tabJarvis Chat Message` WHERE name=%s", amsg, as_dict=True
+		)[0]
+		self.assertEqual(row.content, "partial [file card]", "the web worker's file card is kept")
+		self.assertEqual(json.loads(row.tool_call_ids), ["tj1"], "the jarvis__ tool id is recorded")
 
 
 class TestUsageHonesty(_PipelineCase):
