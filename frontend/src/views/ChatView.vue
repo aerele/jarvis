@@ -4189,6 +4189,7 @@ import { Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
+import { collectDocRefs } from "@/lib/docRefs";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
@@ -6713,36 +6714,8 @@ function render(text, streaming = false) {
 	_renderCache.set(key, out);
 	return out;
 }
-// {document name → DocType} harvested from THIS conversation's tool calls
-// (get_doc / create_doc / get_list / update_doc / …). We only ever linkify IDs
-// that actually came back from a tool, so we always know the DocType for the
-// Desk URL and never false-positive on arbitrary prose.
-const docRefs = computed(() => {
-	const map = {};
-	const add = (dt, name) => {
-		if (dt && typeof name === "string" && name.length >= 4) map[name] = dt;
-	};
-	for (const m of messages.value) {
-		if (m.role !== "tool") continue;
-		let args = {};
-		let res = {};
-		try {
-			args = m.tool_args ? JSON.parse(m.tool_args) : {};
-		} catch (e) {}
-		try {
-			res = m.tool_result ? JSON.parse(m.tool_result) : {};
-		} catch (e) {}
-		const dt = args.doctype;
-		if (args.name) add(dt, args.name);
-		const data = res && res.data;
-		if (Array.isArray(data)) {
-			for (const row of data) if (row && row.name) add(row.doctype || dt, row.name);
-		} else if (data && typeof data === "object") {
-			add(data.doctype || dt, data.name);
-		}
-	}
-	return map;
-});
+// {document name → DocType} harvested from THIS conversation's tool calls.
+const docRefs = computed(() => collectDocRefs(messages.value));
 const _escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Compiled once per docRefs change: matches any known doc name as a whole token
 // (not a substring of a longer id/word). Capped so a huge get_list can't build a
