@@ -403,3 +403,47 @@ test("receiptView: unknown/partial read names off the ARGS, not an unverified re
 		);
 	}
 });
+
+// CR-3: an update's table is its final set of rows, so a saved row the proposal
+// does not name is deleted. The card must say which, never remove it silently.
+test("lineItemSummary: an update lists the saved rows it would remove", () => {
+	const s = lineItemSummary({
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "item_code", label: "Item", fieldtype: "Link" },
+			{ fieldname: "qty", label: "Qty", fieldtype: "Float" },
+		],
+		rows: [{ __name: "r1", item_code: "Widget A", qty: "5" }],
+		origJson: JSON.stringify([
+			{ name: "r1", item_code: "Widget A", qty: 2 },
+			{ name: "r2", item_code: "Widget B", qty: 1 },
+		]),
+	});
+	assert.equal(s.count, 1);
+	assert.deepEqual(s.removed, ["Widget B"]);
+});
+
+test("summarize(update): a table emptied of saved rows still shows, with what it removes", () => {
+	const model = {
+		verb: "update",
+		fields: [],
+		tables: [
+			{
+				fieldname: "items",
+				label: "Items",
+				columns: [{ fieldname: "item_code", label: "Item", fieldtype: "Link" }],
+				rows: [],
+				origJson: JSON.stringify([{ name: "r1", item_code: "Widget A" }]),
+			},
+		],
+	};
+	const s = summarize(model, {});
+	assert.equal(s.tables.length, 1);
+	assert.deepEqual(s.tables[0].removed, ["Widget A"]);
+});
+
+test("lineItemSummary: a create (no saved rows) removes nothing", () => {
+	const s = lineItemSummary(createModel.tables[0]);
+	assert.deepEqual(s.removed, []);
+});

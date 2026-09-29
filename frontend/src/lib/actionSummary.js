@@ -3,6 +3,8 @@
 // Summarization is MODEL-DRIVEN: the card renders the fields the model proposed and
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
+// Relative, not "@/": actionSummary.test.js runs under plain `node --test`.
+import { removedSavedRows } from "./draftApply.js";
 
 export function proposedFields(action) {
 	return (action.fields || [])
@@ -23,12 +25,15 @@ export function lineItemSummary(table) {
 		count: table.rows.length,
 		columns: table.columns.map((c) => c.label),
 		rows: table.rows.map((r) => ({ cells: table.columns.map((c) => r[c.fieldname] ?? "") })),
+		removed: removedSavedRows(table),
 	};
 }
 
 export function summarize(model, action = {}) {
 	const headline = String(action.summary ?? "").trim();
-	const tables = (model.tables || []).filter((t) => (t.rows || []).length).map(lineItemSummary);
+	const tables = (model.tables || [])
+		.map(lineItemSummary)
+		.filter((t) => t.count || t.removed.length);
 	if (model.verb === "update") {
 		return { kind: "update", headline, diff: changedFields(model), tables };
 	}
