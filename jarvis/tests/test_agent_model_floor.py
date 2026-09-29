@@ -936,6 +936,31 @@ class TestInstallWithPick(AgentModelDBBase):
 		row = self._row()
 		self.assertEqual((row.state, row.model, row.changed_by), ("chosen", "gpt-adv", OWNER))
 
+	def test_an_ineligible_shown_pick_over_a_pinned_row_still_installs(self):
+		"""COR8-1: the row state is checked BEFORE validating an if-unpinned pick, so
+		a shown model that went ineligible since the dialog loaded (gpt-std - below
+		AGENT's Advanced floor) never refuses an install that would just keep the
+		existing pin (``_apply_pick``'s own keep would have discarded the pick anyway)."""
+		for state in ("auto", "chosen", "changed"):
+			with self.subTest(state=state):
+				self._clean()
+				_choice(
+					AGENT,
+					state=state,
+					provider="openai",
+					model="gpt-frontier",
+					fallbacks="[]",
+					changed_by=OTHER,
+				)
+				with _env(), _as(OWNER):
+					name = agents_api.install_agent(
+						AGENT, model_provider="openai", model="gpt-std", pick_if_unpinned=1
+					)["data"]["name"]
+				self.assertTrue(frappe.db.exists(INSTALLATION, name))
+				row = self._row()
+				self.assertEqual((row.state, row.model, row.changed_by), (state, "gpt-frontier", OTHER))
+				self.assertEqual(self._model_changed(), [])
+
 
 def _deadlock(*args, **kwargs):
 	raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
@@ -967,9 +992,21 @@ class TestDeadlocksAreNotSwallowed(AgentModelDBBase):
 		self.assertIn("try again", str(ctx.exception))
 
 	def test_a_deadlocked_activity_row_fails_the_install(self):
+		# RES8-1: still the same exception type (existing catches keep matching),
+		# now with a friendly message instead of the raw driver text.
 		with _deadlocking_activity_insert(), _env(), _as(OWNER):
-			with self.assertRaises(frappe.QueryDeadlockError):
+			with self.assertRaises(frappe.QueryDeadlockError) as ctx:
 				agents_api.install_agent(AGENT)
+		self.assertIn("try again", str(ctx.exception))
+
+	def test_a_deadlocked_dirty_flag_fails_a_model_pick_with_a_friendly_message(self):
+		# RES8-1 outside install (whose own catch would re-wrap it anyway).
+		with _env():
+			_install(OWNER, AGENT)
+		with patch.object(agents_api, "_bump_catalog_version", side_effect=_deadlock), _env(), _as(OWNER):
+			with self.assertRaises(frappe.QueryDeadlockError) as ctx:
+				agent_models.set_agent_model(AGENT, "openai", "gpt-adv")
+		self.assertIn("try again", str(ctx.exception))
 
 	def test_other_errors_stay_best_effort(self):
 		boom = RuntimeError("boom")

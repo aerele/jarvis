@@ -12,6 +12,7 @@ uncommitted writes, which re-raises so that operation is not reported as done.
 """
 
 import frappe
+from frappe import _
 
 ACTIVITY = "Jarvis Agent Activity"
 
@@ -48,7 +49,11 @@ def log_activity(*, agent, agent_title, installation, action, detail=None, run=N
 			frappe.db.set_value(ACTIVITY, doc.name, "owner", owner, update_modified=False)
 	except Exception as e:
 		if pending and isinstance(e, frappe.QueryDeadlockError):
-			raise
+			# Same exception type (existing catches still match), friendly message.
+			frappe.throw(
+				_("Another change landed at the same moment. Please try again."),
+				exc=frappe.QueryDeadlockError,
+			)
 		try:
 			frappe.log_error(
 				title="Jarvis: agent activity log failed",
