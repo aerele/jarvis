@@ -2,7 +2,7 @@
  * File Box row status -> badge + the row's result link, in one place so the list,
  * its filters and the ?status= deep link agree. Mirrors the server ladder
  * (jarvis/chat/filebox.py): processing / needs_approval / applying (an approval
- * sheet being applied) / draft_created / failed / no_draft. The pre-ladder done /
+ * sheet being applied) / draft_created / duplicate / failed / no_draft. The pre-ladder done /
  * error values still render for a stale page.
  */
 import { escapeHtml } from "./errors";
@@ -12,6 +12,7 @@ export const STATUS_BADGE = {
 	needs_approval: { label: "Needs approval", theme: "orange" },
 	applying: { label: "Applying", theme: "blue" },
 	draft_created: { label: "Draft created", theme: "green" },
+	duplicate: { label: "Duplicate", theme: "orange" },
 	no_draft: { label: "No draft", theme: "gray" },
 	failed: { label: "Failed", theme: "red" },
 	done: { label: "Done", theme: "green" },
@@ -23,9 +24,17 @@ export const STATUSES = [
 	"needs_approval",
 	"applying",
 	"draft_created",
+	"duplicate",
 	"no_draft",
 	"failed",
 ];
+
+// A draft that was since submitted, cancelled or deleted (server `result_state`).
+const DRAFT_STATE_BADGE = {
+	submitted: { label: "Submitted", theme: "green" },
+	cancelled: { label: "Cancelled", theme: "gray" },
+	deleted: { label: "Draft deleted", theme: "gray" },
+};
 
 // Rows whose status moves on its own: the list polls while one is on screen.
 export function isLive(row) {
@@ -43,16 +52,22 @@ export function statusBadge(row) {
 		return { label: "Waiting (behind chat)", theme: "gray" };
 	}
 	const status = (row && row.status) || "";
+	if (status === "draft_created" && DRAFT_STATE_BADGE[row.result_state]) {
+		return DRAFT_STATE_BADGE[row.result_state];
+	}
 	return STATUS_BADGE[status] || { label: status, theme: "gray" };
 }
 
 /**
- * Re-run (PR-5, AC8) is offered only on the viewer's own failed / no_draft rows -
- * never once a draft exists, never on a row merely shared with them.
+ * Re-run (PR-5, AC8) is offered only on the viewer's own failed / no_draft /
+ * duplicate rows - never once a draft exists, never on a row merely shared with them.
  */
 export function canRerun(row) {
 	const status = row && row.status;
-	return !!(row && row.is_owner) && (status === "failed" || status === "no_draft");
+	return (
+		!!(row && row.is_owner) &&
+		(status === "failed" || status === "no_draft" || status === "duplicate")
+	);
 }
 
 /**

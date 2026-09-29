@@ -377,21 +377,29 @@ async function loadConversations() {
 // 60s interval) that often co-fire; the in-flight de-dupe coalesces them into
 // one request, and a hidden tab skips entirely (the visibility trigger
 // refreshes on return). A fifth: the moment the next chat card badges.
+// A call that lands mid-flight (a decision racing a poll) queues one re-read,
+// since the running request may predate the change - as refreshReviewCount does.
 let _approvalsInflight = null;
+let _approvalsAgain = false;
 const _badgeTimer = createBadgeTimer(() => refreshApprovalsCount());
 function refreshApprovalsCount() {
 	if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
-	if (_approvalsInflight) return _approvalsInflight;
+	if (_approvalsInflight) {
+		_approvalsAgain = true;
+		return _approvalsInflight;
+	}
 	_approvalsInflight = (async () => {
-		try {
-			const badge = (await api.approvalsBadge()) || {};
-			approvalsCount.value = Number(badge.count) || 0;
-			_badgeTimer.schedule(badge.next_in);
-		} catch (e) {
-			/* badge is best-effort */
-		} finally {
-			_approvalsInflight = null;
-		}
+		do {
+			_approvalsAgain = false;
+			try {
+				const badge = (await api.approvalsBadge()) || {};
+				approvalsCount.value = Number(badge.count) || 0;
+				_badgeTimer.schedule(badge.next_in);
+			} catch (e) {
+				/* badge is best-effort */
+			}
+		} while (_approvalsAgain);
+		_approvalsInflight = null;
 	})();
 	return _approvalsInflight;
 }

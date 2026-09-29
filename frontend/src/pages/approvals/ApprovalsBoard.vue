@@ -1364,7 +1364,25 @@ watch(actionRows, (now, before) => {
 	if ((moved || (!row && was)) && actionDetail.value) actionDetail.value.refresh();
 });
 
-// ── freshness: refetch on tab-visible (no realtime approval event today) ─────
+// ── freshness ────────────────────────────────────────────────────────────────
+// The sidebar badge is re-counted on every route change, its 60s poll and
+// approval:new; a File Box question has no event of its own, and returning to the
+// board reuses this instance. So when the badge moves, the lists re-read too (#616).
+watch(
+	() => store.approvalsCount,
+	(now, before) => {
+		if (now === before) return;
+		refreshKeep();
+		loadActions();
+	}
+);
+// Re-entering the list (the sidebar link from a selected row) re-reads it too.
+watch(
+	() => route.name,
+	(name, before) => {
+		if (name === "ApprovalsList" && before && before !== name) refreshKeep();
+	}
+);
 function onVisibility() {
 	if (document.visibilityState === "visible") refreshKeep();
 }

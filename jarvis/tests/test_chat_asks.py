@@ -420,6 +420,27 @@ class TestResolveOnUserMessage(unittest.TestCase):
 		self.assertEqual(row.decided_by, USER_A)
 		self.assertTrue(row.decided_at)
 
+	def test_the_badge_is_told_only_when_a_row_was_answered(self):
+		with _as(USER_A), patch("jarvis.chat.chat_asks.publish_to_user") as pub:
+			resolve_on_user_message(self.conv)
+			resolve_on_user_message(self.conv)  # nothing left open: no event
+		pub.assert_called_once()
+		self.assertEqual(pub.call_args.args[1]["kind"], "action:settled")
+
+	def test_a_status_change_tells_the_owner_to_recount(self):
+		doc = frappe.get_doc(APPROVAL, self.other_pending)
+		with patch("jarvis.chat.events.publish_to_user") as pub:
+			doc.status, doc.decision = "Rejected", "no"
+			doc.flags.jarvis_server_write = True
+			doc.save(ignore_permissions=True)
+			doc.title = "renamed"  # no status change: no event
+			doc.save(ignore_permissions=True)
+			pub.assert_not_called()  # only once the save commits
+			frappe.db.commit()
+		pub.assert_called_once()
+		self.assertEqual(pub.call_args.args[0], USER_A)
+		self.assertEqual(pub.call_args.args[1]["kind"], "action:settled")
+
 	def test_answered_row_cannot_be_decided_again(self):
 		with _as(USER_A):
 			resolve_on_user_message(self.conv)
