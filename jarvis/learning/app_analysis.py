@@ -796,7 +796,7 @@ def _send_batch_turn(run, k: int) -> bool:
 	# interactive=False: analysis turns run at BACKGROUND priority so an
 	# up-to-40-turn run never jumps ahead of a real user's chat on the shared
 	# queue (the owner's "must not affect day-to-day operations" requirement).
-	out = api._enqueue_turn(run.conversation, prompt, interactive=False)
+	out = api._enqueue_turn(run.conversation, prompt, origin="system", interactive=False)
 	return _handle_enqueue_result(run, out, str(k))
 
 
@@ -811,7 +811,7 @@ def _send_final_turn(run) -> bool:
 	# interactive=False: analysis turns run at BACKGROUND priority so an
 	# up-to-40-turn run never jumps ahead of a real user's chat on the shared
 	# queue (the owner's "must not affect day-to-day operations" requirement).
-	out = api._enqueue_turn(run.conversation, prompt, interactive=False)
+	out = api._enqueue_turn(run.conversation, prompt, origin="system", interactive=False)
 	return _handle_enqueue_result(run, out, "final")
 
 

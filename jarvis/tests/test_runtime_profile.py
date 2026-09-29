@@ -124,7 +124,8 @@ class TestRuntimeProfileValidation(unittest.TestCase):
 
 class TestRuntimeProfileStorage(unittest.TestCase):
 	def setUp(self):
-		self.local = SimpleNamespace()
+		# Frappe v15's whitelist wrapper reads local.flags before invoking endpoints.
+		self.local = SimpleNamespace(flags=frappe._dict(in_test=True))
 		self.db = Mock()
 		self.cache = Mock()
 		self.cache.get_value.return_value = None
@@ -174,17 +175,25 @@ class TestRuntimeProfileStorage(unittest.TestCase):
 		self.db.set_value.assert_not_called()
 		self.cache.delete_value.assert_not_called()
 
-	def test_saved_content_only_uses_valid_assignment_bound_last_good_profile(self):
-		self.db.get_value.return_value = json.dumps({**self.record(), "unavailable": True})
+	def test_saved_content_survives_reset_without_enabling_live_requests(self):
+		from jarvis.chat.canvas import strip_saved_host_client
+		from jarvis.legacy_compatibility import _embedded
+
+		marker = _embedded()[1].live_reload_route
+		html = f'<h1>Saved</h1><script>chart()</script><script>new WebSocket("{marker}")</script>'
+		for blob in (None, "not json", "[]"):
+			self.db.get_value.return_value = blob
+			with self.subTest(blob=blob):
+				self.assertEqual(strip_saved_host_client(html), "<h1>Saved</h1><script>chart()</script>")
+				self.assertEqual(strip_saved_host_client("<h1>Static</h1>"), "<h1>Static</h1>")
+				with self.assertRaises(rp.RuntimeProfileError):
+					rp.get_profile()
+
+	def test_saved_content_retains_validated_route_across_assignment_change(self):
+		self.db.get_value.return_value = json.dumps({**self.record(), "unavailable": True, "anchor": {}})
+		self.assertEqual(rp.get_saved_content_profile().live_reload_route, TEST_PROFILE.live_reload_route)
 		with self.assertRaises(rp.RuntimeProfileError):
 			rp.get_profile()
-		self.assertEqual(rp.get_saved_content_profile(), TEST_PROFILE)
-		with self.assertRaises(rp.RuntimeProfileError):
-			rp.get_profile()  # Sanitizing stored HTML must not re-enable live requests.
-		for blob in (None, "not json", json.dumps({**self.record(), "anchor": {}})):
-			self.db.get_value.return_value = blob
-			with self.subTest(blob=blob), self.assertRaises(rp.RuntimeProfileError):
-				rp.get_saved_content_profile()
 
 	def test_missing_profile_prevents_prompt_assembly_before_any_message_read(self):
 		with patch.object(frappe, "conf", frappe._dict()):

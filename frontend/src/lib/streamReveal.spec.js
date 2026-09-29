@@ -177,7 +177,10 @@ describe("every terminal in the view snaps the reveal", () => {
 
 	it("wires the revealer into assistant:delta", () => {
 		expect(src).toContain('import { createRevealer } from "@/lib/streamReveal";');
-		expect(src).toContain("m.content = revealer.receive(p.message_id, p.text);");
+		// T5a (live turn steps): only the ANSWER half of splitNarration's split
+		// paces into the row — a step candidate must not flash into the reply.
+		// See liveStepLine.spec.js for the narration split itself.
+		expect(src).toContain("m.content = revealer.receive(p.message_id, answer);");
 		// The old straight assignment is what made the text lurch.
 		expect(src).not.toContain("\t\t\tm.content = p.text;");
 	});
@@ -196,11 +199,15 @@ describe("every terminal in the view snaps the reveal", () => {
 		expect(src).toContain("flushReveal(m.name);"); // stopRun
 		expect(src).toContain("flushReveal(); // nothing is streaming anymore"); // clearStreamingActivity
 		expect(src).toContain("flushReveal(); // cancels the frame loop"); // onBeforeUnmount
-		expect(src).toMatch(/function resetRunState\(\) \{[\s\S]{0,220}flushReveal\(\);/);
+		// Window widened for the review-C3 comment resetRunState now carries
+		// (why no snapCandidateInto is needed here) — see liveStepLine.spec.js
+		// for the C3 fix itself.
+		expect(src).toMatch(/function resetRunState\(\) \{[\s\S]{0,700}flushReveal\(\);/);
 	});
 
 	it("snaps when the tab goes to the background, where rAF does not run", () => {
-		expect(src).toMatch(/onVisibility\(\)[\s\S]{0,220}else flushReveal\(\);/);
+		// Window widened for the review-C3 comment onVisibility now carries.
+		expect(src).toMatch(/onVisibility\(\)[\s\S]{0,700}else flushReveal\(\);/);
 	});
 
 	it("paints far less often than it animates, and pays back the skipped frames", () => {
@@ -218,13 +225,14 @@ describe("every terminal in the view snaps the reveal", () => {
 describe("stale tool events cannot reopen the activity list", () => {
 	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
 
-	it("guards both tool events on a live run", () => {
+	it("guards both tool events and the step line on a live run", () => {
 		// The CDX-3 pump fence deliberately lets an epoch-less tool event through, so
 		// a straggler tool:start after run:end pushed a `running` entry that no
-		// tool:end would settle, leaving a spinner the user never opened.
+		// tool:end would settle, leaving a spinner the user never opened. The live
+		// step line (run:step) reopens the same activity block, so it needs it too.
 		expect(src).toContain("function toolEventIsStale(p)");
 		expect(src).toContain("if (!currentRunId.value) return true;");
 		const guards = src.match(/if \(toolEventIsStale\(p\)\) break;/g) || [];
-		expect(guards).toHaveLength(2); // tool:start AND tool:end
+		expect(guards).toHaveLength(3); // tool:start, tool:end AND run:step
 	});
 });

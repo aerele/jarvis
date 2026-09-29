@@ -364,8 +364,9 @@ $indent_rules
 	color: $red;
 }
 
-/* RAG status - safe directly on a <td>/<th>, or on a nested <span> chip. */
-.rag-red, .rag-amber, .rag-green {
+/* Only inline status chips use compact, non-wrapping typography. Table
+   highlights preserve cell padding, numeric alignment and ordinary wrapping. */
+span.rag-red, span.rag-amber, span.rag-green {
 	padding: 2pt 8pt;
 	border-radius: 3pt;
 	font-weight: 600;
@@ -375,6 +376,43 @@ $indent_rules
 .rag-red { background: $red_bg; color: $red; }
 .rag-amber { background: $amber_bg; color: $amber; }
 .rag-green { background: $green_bg; color: $green; }
+
+/* Rows override zebra/subtotal fills; explicit cells override every row color.
+   The zebra selectors match striping specificity without using !important. */
+table tr.rag-red > td, table tr.rag-red > th,
+table.zebra tbody tr.rag-red > td, table.zebra tbody tr.rag-red > th {
+	background: $red_bg; color: $red;
+}
+table tr.rag-amber > td, table tr.rag-amber > th,
+table.zebra tbody tr.rag-amber > td, table.zebra tbody tr.rag-amber > th {
+	background: $amber_bg; color: $amber;
+}
+table tr.rag-green > td, table tr.rag-green > th,
+table.zebra tbody tr.rag-green > td, table.zebra tbody tr.rag-green > th {
+	background: $green_bg; color: $green;
+}
+table tr td.rag-red, table tr th.rag-red,
+table.zebra tbody tr td.rag-red, table.zebra tbody tr th.rag-red {
+	background: $red_bg; color: $red;
+}
+table tr td.rag-amber, table tr th.rag-amber,
+table.zebra tbody tr td.rag-amber, table.zebra tbody tr th.rag-amber {
+	background: $amber_bg; color: $amber;
+}
+table tr td.rag-green, table tr th.rag-green,
+table.zebra tbody tr td.rag-green, table.zebra tbody tr th.rag-green {
+	background: $green_bg; color: $green;
+}
+
+/* Tool-generated raster only, inserted after caller HTML is sanitized. */
+.numeric-chart { margin: 12pt 0; page-break-inside: avoid; }
+.numeric-chart img {
+	display: block; width: auto; height: auto; margin: 0 auto;
+	max-width: 100%; max-height: ${chart_height}pt;
+}
+.numeric-chart .bar-chart-title, .numeric-chart .bar-chart-caption {
+	word-wrap: break-word; overflow-wrap: break-word;
+}
 
 /* --- callout: a bordered card, distinct from a shaded table row ------- */
 
@@ -580,7 +618,7 @@ def component_css(
 
 	Pure string composition - no I/O, no ``frappe``. Deterministic for a given
 	``(page_size, orientation, margins_mm, header)``. The geometry only affects the
-	full ``.cover`` height (``cover_height_pt``); every other rule is fixed.
+	full ``.cover`` and numeric chart image heights (``cover_height_pt``).
 	``header`` must reflect whether the render will have a running header (brand /
 	agent header / watermark), so the cover height accounts for the reserved top
 	margin. The default call ``component_css()`` (A4 / portrait / 15mm / no header)
@@ -607,6 +645,12 @@ def component_css(
 		**tokens,
 		indent_rules=indent_rules,
 		cover_height=cover_height_pt(page_size, orientation, margins_mm, header=header),
+		# Reserve title/caption lines, component margins and a following text
+		# line. The landscape/A5 real-render cases need this full allowance to
+		# avoid a footer-only trailing page; width:auto preserves aspect ratio.
+		chart_height=round(
+			max(20, cover_height_pt(page_size, orientation, margins_mm, header=header) - 170), 1
+		),
 	)
 	return base + scale_css
 

@@ -52,17 +52,20 @@ MAX_APPROVAL_LEN = 24
 
 _TRAILING_PUNCT = re.compile(r"[\s.!,]+$")
 _WHITESPACE = re.compile(r"\s+")
+# iOS/macOS keyboards and dictation type curly apostrophes ("don’t").
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'"})
 
 
 def normalise(text: str) -> str:
-	"""Lowercase, collapse whitespace, drop trailing punctuation.
+	"""Lowercase, straighten curly apostrophes, collapse whitespace, drop trailing
+	punctuation.
 
 	Only trailing punctuation is stripped. A message with INTERNAL punctuation
 	("yes, but wait") keeps it and therefore cannot match, which is the point.
 	A question mark is not stripped either: "confirm?" is a question about the
 	card, not an approval of it.
 	"""
-	return _TRAILING_PUNCT.sub("", _WHITESPACE.sub(" ", (text or "").strip().lower()))
+	return _TRAILING_PUNCT.sub("", _WHITESPACE.sub(" ", (text or "").translate(_QUOTES).strip().lower()))
 
 
 def is_approval(text: str) -> bool:
@@ -275,3 +278,87 @@ def parse_approval(text: str, count: int) -> list[int] | None:
 	if not picked or picked[0] < 1 or picked[-1] > count:
 		return None
 	return [n - 1 for n in picked]
+
+
+# ── typed rejection (decision 14) ───────────────────────────────────────────
+#
+# A whole-message "no" discards the cards parked since the user's last message and
+# STILL reaches the model as an ordinary message (it may answer Jarvis's own plain
+# question). Same whole-message rule as approval. Deliberately absent: cancel /
+# reject / decline (they name real ERP actions: cancel_doc, a workflow Reject),
+# "none" (a natural answer word), "stop" (Halt), "wait" / "hold on".
+REJECTION_PHRASES = frozenset(
+	{
+		"no",
+		"nope",
+		"nah",
+		"n",
+		"no thanks",
+		"no thank you",
+		"don't",
+		"do not",
+		"don't do it",
+		"discard",
+		"discard it",
+		"never mind",
+		"nevermind",
+		"forget it",
+	}
+)
+
+_REJECT_SWEEP = "discard all"
+# "discard 2", "skip 2", "drop 1 and 3".
+_REJECT_SELECT_RE = re.compile(r"^(?:discard|skip|drop)\s+(\d+(?:\s*(?:,|and|&)\s*\d+)*)$")
+
+APPROVE, REJECT, NEITHER = "approve", "reject", "neither"
+
+
+def looks_like_rejection(text: str) -> bool:
+	"""Cheap pre-filter, the rejection twin of ``looks_like_approval``."""
+	return bool(text) and len(text.strip()) <= MAX_SELECTION_LEN
+
+
+def is_reject_sweep(text: str) -> bool:
+	"""True when the whole message is the explicit sweep ("discard all")."""
+	return looks_like_rejection(text) and normalise(text) == _REJECT_SWEEP
+
+
+def is_numbered(text: str) -> bool:
+	"""True for a numbered pick ("confirm 2", "discard 1 and 3"): it names a card
+	explicitly, so it may target any visible card (decision 6)."""
+	if not looks_like_rejection(text):
+		return False
+	norm = normalise(text)
+	return bool(_SELECT_RE.match(norm) or _REJECT_SELECT_RE.match(norm))
+
+
+def parse_rejection(text: str, count: int) -> list[int] | None:
+	"""Which of ``count`` cards this message discards (0-based, sorted), or None when
+	it is not a rejection. An out-of-range number discards nothing."""
+	if not text or count < 1:
+		return None
+	raw = text.strip()
+	if len(raw) > MAX_SELECTION_LEN:
+		return None
+	norm = normalise(raw)
+	if (len(raw) <= MAX_APPROVAL_LEN and norm in REJECTION_PHRASES) or norm == _REJECT_SWEEP:
+		return list(range(count))
+	m = _REJECT_SELECT_RE.match(norm)
+	if not m:
+		return None
+	picked = sorted({int(n) for n in _NUMBER_RE.findall(m.group(1))})
+	if not picked or picked[0] < 1 or picked[-1] > count:
+		return None
+	return [n - 1 for n in picked]
+
+
+def classify_card_reply(text: str, count: int | None = None) -> str:
+	"""``approve`` / ``reject`` / ``neither`` for a whole message, pure and I/O-free.
+	Approval is parsed first. With no ``count`` a numbered pick is judged on its
+	shape; the caller range-checks it against the cards the client displayed."""
+	n = MAX_SELECTION_LEN if count is None else count
+	if parse_approval(text, n) is not None:
+		return APPROVE
+	if parse_rejection(text, n) is not None:
+		return REJECT
+	return NEITHER

@@ -63,12 +63,13 @@ export const triggerFollowupQuestion = (name, ask) =>
 // page_length}) PLUS coarse push-budget context {push_count, push_budget}. Rows:
 // {name, skill, skill_name, from_scope, to_scope, target_role, note, status,
 // requested_by, requested_by_name, created, reviewer, decided_at, decision_note,
-// body_excerpt, description_snapshot, user_invocable_snapshot, push_projection}.
-// `body_excerpt`/`description_snapshot`/`user_invocable_snapshot` are the FULL
-// immutable content approval publishes for Pending rows (not truncated live
-// excerpts — R2-SP-2 surfaces EVERY field materialization consumes); empty on a
-// decided row. `push_projection` is the server's truthful per-row Org push-budget
-// projection (render with formatPushProjection, never a client-side guess).
+// body_excerpt, description_snapshot, user_invocable_snapshot,
+// use_in_file_box_snapshot, file_box_creates_snapshot, push_projection}.
+// `body_excerpt` and the `*_snapshot` fields are the FULL immutable content
+// approval publishes for Pending rows (not truncated live excerpts — R2-SP-2
+// surfaces EVERY field materialization consumes); empty on a decided row.
+// `push_projection` is the server's truthful per-row Org push-budget projection
+// (render with formatPushProjection, never a client-side guess).
 export const listSkillPromotions = (p = {}) =>
 	call(CS + "list_skill_promotion_requests", {
 		status: p.status || "Pending",

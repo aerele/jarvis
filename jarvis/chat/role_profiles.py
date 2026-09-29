@@ -4,11 +4,14 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 94 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 27-tool drop
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 96 tools)
+  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
-  drop list (denied fleet-wide for the white-label leak, not a tier call), so
-  the split is 67/27 with the 94-tool universe unchanged.
+  drop list (denied fleet-wide for the white-label leak, not a tier call), and
+  ``memory_get`` / ``memory_search`` were pulled to the drop list (native
+  cross-user memory, denied fleet-wide by the fleet-agent; Jarvis uses per-user
+  bench-owned memory), and the per-user memory tools (``jarvis__remember`` /
+  ``jarvis__recall``) joined the allow list, so the split is 67/29 of 96.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -36,8 +39,9 @@ _SETTINGS = "Jarvis Settings"
 
 FULL_TIER_ROLES: frozenset[str] = frozenset({"Jarvis Admin", "System Manager"})
 
-# Verified drop list (27 tools; 26 per spec §3, plus session_status pulled here
-# for the fleet-wide white-label deny): app-learning tools (system-initiated
+# Verified drop list (29 tools; 26 per spec §3, plus session_status pulled here
+# for the fleet-wide white-label deny and memory_get/memory_search for the
+# fleet-wide native cross-user memory deny): app-learning tools (system-initiated
 # learning runs only, which always run `full`), session/infra tools (zero
 # references in live-tenant transcripts), file-editing tools (skills only
 # need `exec` + `read`), cron/browser (Frappe-side scheduling covers cron;
@@ -59,6 +63,10 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 		"sessions_history",
 		"sessions_yield",
 		"session_status",  # denied globally (white-label leak); not for the standard tier
+		# denied globally: the shared "main" agent's native memory is one cross-user
+		# store; Jarvis uses per-user bench-owned memory (jarvis__recall/remember).
+		"memory_get",
+		"memory_search",
 		"subagents",
 		"nodes",
 		"gateway",
@@ -76,7 +84,7 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-# The full 94-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# The full 96-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
 # sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl).
 # An allow list must be explicit here: deriving it at runtime from a live
 # agent container is not possible bench-side.
@@ -124,6 +132,8 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__query",
 	"jarvis__read_file",
 	"jarvis__read_wiki",
+	"jarvis__recall",
+	"jarvis__remember",
 	"jarvis__remove_tag",
 	"jarvis__report_pdf",
 	"jarvis__resolve_links",
@@ -142,8 +152,6 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__update_comment",
 	"jarvis__update_doc",
 	"jarvis__update_wiki",
-	"memory_get",
-	"memory_search",
 	"message",
 	"pdf",
 	"read",
@@ -153,7 +161,10 @@ _STANDARD_TOOLS_ALLOW = [
 
 def standard_tools_allow() -> list[str]:
 	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
-	session_status pulled to the drop list for the fleet-wide white-label deny)."""
+	session_status pulled to the drop list for the fleet-wide white-label deny;
+	memory_get/memory_search pulled to the drop list for the fleet-wide native
+	cross-user memory deny; the per-user bench memory tools remember/recall
+	added so standard-tier memory works)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 

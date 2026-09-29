@@ -180,7 +180,9 @@ def _create_card(args: dict, would) -> dict:
 		if val is None or (not isinstance(val, list) and str(val).strip() == ""):
 			continue
 		df = meta.get_field(key) if meta else None
-		rows.append({"label": _label(meta, key), "value": fmt(val, df)})
+		# A held create with missing fields has no dry-run doc: never echo a secret arg.
+		shown = "[hidden]" if is_secret(meta, key) else fmt(val, df)
+		rows.append({"label": _label(meta, key), "value": shown})
 		if len(rows) >= _MAX_ROWS:
 			break
 	name = would.get("name") if isinstance(would, dict) else None

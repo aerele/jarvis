@@ -13,6 +13,8 @@ dependencies = [
     # PDF -> image rasterization for native LLM vision (jarvis/chat/vision.py).
     # Permissive license only: pypdfium2 (Apache/BSD), NOT PyMuPDF (AGPL).
     "pypdfium2>=4",
+    # Numeric document charts render in an isolated, deadline-bound Agg worker.
+    "matplotlib~=3.10.9",
     # Browser-accurate CSS/HTML parsing for the dashboard theme-conformance
     # validator (jarvis/dashboards/theme_validator.py). A regex over untrusted
     # canvas CSS/HTML is bypassable (escapes/entities/nesting); the validator must

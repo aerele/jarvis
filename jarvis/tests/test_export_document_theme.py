@@ -69,6 +69,40 @@ def _has_tag_selector(css: str, tag: str) -> bool:
 
 
 class TestComponentCss(unittest.TestCase):
+	def test_chart_images_fit_page_height_without_stretching(self):
+		portrait = theme.component_css("A4", "portrait", 15)
+		landscape = theme.component_css("A5", "landscape", 15, header=True)
+		for css in (portrait, landscape):
+			rule = _rule_body(css, r"\.numeric-chart img")
+			self.assertIn("max-width: 100%", rule)
+			self.assertIn("width: auto", rule)
+			self.assertIn("height: auto", rule)
+			self.assertNotIn("width: 100%", rule.replace("max-width: 100%", ""))
+		portrait_height = float(
+			re.search(r"max-height:\s*([\d.]+)pt", _rule_body(portrait, r"\.numeric-chart img")).group(1)
+		)
+		landscape_height = float(
+			re.search(r"max-height:\s*([\d.]+)pt", _rule_body(landscape, r"\.numeric-chart img")).group(1)
+		)
+		self.assertLess(landscape_height, portrait_height)
+		self.assertLessEqual(
+			landscape_height + 170, theme.cover_height_pt("A5", "landscape", 15, header=True)
+		)
+
+	def test_table_highlights_beat_stripes_and_allow_cell_overrides(self):
+		css = theme.component_css()
+		for color in ("red", "amber", "green"):
+			row = f"table.zebra tbody tr.rag-{color} > td"
+			cell = f"table.zebra tbody tr td.rag-{color}"
+			self.assertIn(row, css)
+			self.assertIn(cell, css)
+			self.assertLess(css.index("tr.grouped td"), css.index(row))
+			# Equally specific cell rules come after all row colors, so even a
+			# red cell inside a green row retains its explicit exception status.
+			self.assertLess(css.index("table.zebra tbody tr.rag-green > th"), css.index(cell))
+		self.assertIn("span.rag-red, span.rag-amber, span.rag-green", css)
+		self.assertNotIn("\n.rag-red, .rag-amber, .rag-green {", css)
+
 	def test_non_empty(self):
 		css = theme.component_css()
 		self.assertTrue(isinstance(css, str))

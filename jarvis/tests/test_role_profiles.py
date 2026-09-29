@@ -102,6 +102,10 @@ class TestRoleProfiles(FrappeTestCase):
 			"jarvis__run_import",
 			"jarvis__query",
 			"jarvis__save_dashboard",
+			# per-user bench memory: a standard-tier user must be able to save and
+			# read their own notes, or memory silently stops for them
+			"jarvis__remember",
+			"jarvis__recall",
 		):
 			self.assertIn(kept, allow)
 		for dropped in (
@@ -110,20 +114,22 @@ class TestRoleProfiles(FrappeTestCase):
 			"web_search",
 			"sessions_spawn",
 			"session_status",
+			"memory_get",
+			"memory_search",
 			"jarvis__record_agent_run",
 			"skill_workshop",
 		):
 			self.assertNotIn(dropped, allow)
 
-	def test_tool_universe_is_94(self):
-		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (27) must
-		# reconstruct the full evidence-captured 94-tool universe with no
-		# overlap and no gap (spec §2).
+	def test_tool_universe_is_96(self):
+		# standard_tools_allow() (67) + STANDARD_DROP_TOOLS (29) must
+		# reconstruct the evidence-captured 94-tool universe plus the two
+		# per-user memory tools (96), with no overlap and no gap (spec §2).
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
-		self.assertEqual(len(drop), 27)
+		self.assertEqual(len(drop), 29)
 		self.assertEqual(allow & drop, set())
-		self.assertEqual(len(allow | drop), 94)
+		self.assertEqual(len(allow | drop), 96)
 
 	def test_shared_core_membership(self):
 		shared = role_profiles.SHARED_CORE_SKILLS

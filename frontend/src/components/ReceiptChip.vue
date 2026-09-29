@@ -2,14 +2,19 @@
   Post-action receipt chip. A gated ERP write (create / update / submit / cancel
   / delete / amend / apply_workflow / send_email, single or bulk), once the user
   clicks Confirm or Discard on its confirmation card, is replaced by THIS durable
-  chip in the transcript instead of the card just vanishing. Three outcomes:
-    ✓ confirmed  — the write ran (green)
-    ⊘ discarded  — the user declined; nothing ran (muted)
-    ✗ failed     — confirmed but errored / rolled back (red)
+  chip in the transcript instead of the card just vanishing. Outcomes:
+    ✓ confirmed              — the write ran (green)
+    ⚡ auto_applied           — ran uncarded under an armed macro/skill (green)
+    ⊘ discarded              — the user declined; nothing ran (muted)
+    ⊘ cancelled/superseded/expired — never answered; nothing ran (muted)
+    ✗ failed                 — confirmed but errored / rolled back (red)
+    ! unknown/partial        — outcome unverified; check before retrying (amber)
   Fed by a role="tool" Jarvis Chat Message whose `action_outcome` is set. All
-  wording + target links come from lib/actionSummary.receiptView (pure). Bulk
-  shows a name teaser collapsed and the full linked list expanded; failures show
-  the rolled-back reason behind a "why" toggle.
+  wording + target links come from lib/actionSummary.receiptView (pure), which
+  also NEUTRALIZES any outcome it doesn't recognise to the "unknown" chip -
+  never the confirmed/✓ path. Bulk shows a name teaser collapsed and the full
+  linked list expanded; failures show the rolled-back reason behind a "why"
+  toggle.
 -->
 <template>
 	<div class="jv-receipt" :class="'jv-receipt--' + view.tone">
@@ -28,7 +33,7 @@
 				<path d="M20 6 9 17l-5-5" />
 			</svg>
 			<svg
-				v-else-if="view.icon === 'discarded'"
+				v-else-if="['discarded', 'cancelled', 'superseded', 'expired'].includes(view.icon)"
 				width="14"
 				height="14"
 				viewBox="0 0 24 24"
@@ -40,6 +45,21 @@
 			>
 				<circle cx="12" cy="12" r="9" />
 				<path d="M5.6 5.6l12.8 12.8" />
+			</svg>
+			<svg
+				v-else-if="['unknown', 'partial'].includes(view.icon)"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			>
+				<circle cx="12" cy="12" r="9" />
+				<path d="M12 8v5" />
+				<path d="M12 16.5h.01" />
 			</svg>
 			<svg
 				v-else-if="view.icon === 'auto_applied'"
@@ -234,6 +254,10 @@ const ts = computed(() => {
 	border-color: var(--red-bd, color-mix(in srgb, var(--red) 32%, var(--border)));
 	background: var(--red-bg, var(--surface-2));
 }
+.jv-receipt--warning {
+	border-color: var(--amber-bd, color-mix(in srgb, var(--amber) 32%, var(--border)));
+	background: var(--amber-bg, var(--surface-2));
+}
 .jv-receipt-ico {
 	flex: none;
 	margin-top: 1px;
@@ -254,11 +278,18 @@ const ts = computed(() => {
 	font-size: 11px;
 	color: var(--text-3);
 }
-.jv-receipt-ico.discarded {
+.jv-receipt-ico.discarded,
+.jv-receipt-ico.cancelled,
+.jv-receipt-ico.superseded,
+.jv-receipt-ico.expired {
 	color: var(--text-3);
 }
 .jv-receipt-ico.failed {
 	color: var(--red);
+}
+.jv-receipt-ico.unknown,
+.jv-receipt-ico.partial {
+	color: var(--amber);
 }
 .jv-receipt-main {
 	flex: 1;

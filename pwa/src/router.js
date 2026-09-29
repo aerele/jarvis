@@ -7,7 +7,8 @@ import ChatsView from "./views/ChatsView.vue";
 //
 // The destinations are the native app's, and only those: New chat, Chats,
 // Business, File Box, plus the account and settings pages the drawer's foot
-// opens. Write approvals are answered in the chat that raised them.
+// opens. Chat write approvals are answered in the chat that raised them; File Box
+// approvals are decided on the desktop Approval Board (File Box rows say so).
 const routes = [
 	{ path: "/", name: "Chats", component: ChatsView },
 	{ path: "/login", name: "Login", component: () => import("./views/LoginView.vue") },

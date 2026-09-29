@@ -73,6 +73,37 @@ class TestParseEvent(FrappeTestCase):
 		ev = parse_event({"stream": "item", "data": {"kind": "thinking"}})
 		self.assertIsNone(ev)
 
+	def test_codex_preamble_becomes_a_step(self):
+		ev = parse_event(
+			{
+				"stream": "item",
+				"data": {
+					"kind": "preamble",
+					"phase": "update",
+					"itemId": "msg_1",
+					"progressText": "Checking the overdue invoices",
+					"source": "codex-app-server",
+				},
+			}
+		)
+		self.assertEqual(ev, {"kind": "step", "text": "Checking the overdue invoices"})
+
+	def test_step_text_is_redacted(self):
+		with patch("jarvis.chat.events.egress_rules.redact", side_effect=lambda s: s.upper()):
+			ev = parse_event({"stream": "item", "data": {"kind": "preamble", "progressText": "checking"}})
+		self.assertEqual(ev["text"], "CHECKING")
+
+	def test_tool_stream_start_is_a_tool_boundary(self):
+		ev = parse_event({"stream": "tool", "data": {"phase": "start", "name": "Bash", "toolCallId": "t1"}})
+		self.assertEqual(ev, {"kind": "tool_boundary"})
+		self.assertIsNone(parse_event({"stream": "tool", "data": {"phase": "result", "toolCallId": "t1"}}))
+
+	def test_empty_preamble_and_answer_candidate_are_dropped(self):
+		self.assertIsNone(parse_event({"stream": "item", "data": {"kind": "preamble", "progressText": "  "}}))
+		self.assertIsNone(
+			parse_event({"stream": "item", "data": {"kind": "answer_candidate", "progressText": "Answer"}})
+		)
+
 	def test_unknown_stream_returns_none(self):
 		ev = parse_event({"stream": "heartbeat", "data": {}})
 		self.assertIsNone(ev)

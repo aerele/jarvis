@@ -113,6 +113,48 @@ ADMIN_SYNC_LOCK_RETRIES = 4
 # status stays "pending: ..." and the UI shows a calm "finishing setup" state.
 _PENDING_APPLYING_STATUS = "pending: admin applying config"
 
+# jarvis#1425: a pooled workspace narrowed to one ChatGPT account is moving to
+# the direct leg. Distinct from _PENDING_APPLYING_STATUS on purpose: the SPA's
+# pending poller and the */5 reconcile stamp THAT one converged on an admin
+# "Ready", and admin says Ready for the still-pooled tenant, so reusing it would
+# close a handover that never happened.
+_PENDING_HANDOVER_STATUS = "pending: handover to direct"
+
+# 2026-09-25 review (production hazard): a fleet-side handover failure that
+# REPEATS (e.g. doctor fails every attempt) reaches the site as a
+# non-permanent AdminUnreachableError, which _handover_via_admin records as
+# _PENDING_HANDOVER_STATUS - and reconcile_pending_llm_sync (*/5) re-drove
+# THAT unconditionally forever. Every attempt STOPS AND RESTARTS the
+# customer's container (that is what a handover push does), so an
+# unconditional re-drive against a persistently broken fleet endpoint would
+# bounce chat indefinitely with no way out. _HANDOVER_MAX_ATTEMPTS bounds it:
+# after this many attempts reconcile gives up and falls back to the pool push
+# instead (the sync that served this workspace before jarvis#1425 existed),
+# leaving the workspace on the proxy - working - until the next Apply tries
+# the handover again from a clean attempt-1 budget.
+_HANDOVER_MAX_ATTEMPTS = 3
+
+
+def _handover_attempt(status: str) -> int:
+	"""Parse the attempt counter off a pending-handover status
+	(``f"{_PENDING_HANDOVER_STATUS} (attempt N)"``).
+
+	Returns 0 when ``status`` is not a pending-handover status at all (the
+	caller's "is this even a handover?" check doubles as the parse gate).
+	Returns 1 for a pending-handover status with no attempt suffix - either an
+	old row written before this counter existed, or any other malformed
+	suffix; both read as "first attempt" rather than raising, since a parse
+	failure here must never crash the scheduled reconcile."""
+	status = status or ""
+	if not status.startswith(_PENDING_HANDOVER_STATUS):
+		return 0
+	suffix = status[len(_PENDING_HANDOVER_STATUS) :]
+	match = re.fullmatch(r" \(attempt (\d+)\)", suffix)
+	if not suffix or not match:
+		return 1
+	return int(match.group(1))
+
+
 # In-job fast-path convergence poll. Bounded well under the RQ envelope (see the
 # budget note above); anything not converged inside it is finished by the
 # scheduled safety net (reconcile_pending_llm_sync, every 5 min). Probes use a
@@ -511,6 +553,192 @@ def _schedule_sync_lock_retry(*, method: str, job_base: str, retry_left: int, **
 	)
 
 
+def _stamp_pool_pending(settings) -> None:
+	"""The pending-provisioning status _enqueue_pool_sync always writes before
+	either enqueuing directly or handing off to llm_switch.begin(). Factored
+	out so the handover's pool fallback (which bypasses _enqueue_pool_sync
+	when a switch is already active - see _enqueued_handover_via_admin) still
+	stamps the exact same status a caller of _enqueue_pool_sync gets, so the
+	SPA poller and llm_switch.reconcile() see "pending: provisioning container
+	(pool)" instead of a stale handover status."""
+	_write_settings_fields(
+		settings,
+		{
+			"last_sync_status": "pending: provisioning container (pool)",
+			"last_sync_requested_at": frappe.utils.now(),
+			# See _enqueue_pool_sync's own comment: a pool excursion refreshes this
+			# timestamp and later lands an "ok" without going through the
+			# classifier, so a stale stamp here could absorb a direct re-save
+			# after the pool teardown even though /llm-pool never pushed the
+			# direct blob.
+			"llm_last_apply_fingerprint": "",
+		},
+	)
+
+
+def _switch_or_enqueue(settings, job: str, *, is_switch: bool, **kwargs) -> None:
+	"""Route a due sync job through ``llm_switch.begin()`` when it is a PROXY
+	SWITCH (jarvis#1425 follow-up, plans/2026-09-27-seamless-llm-switch-design.md
+	Part C "What counts as a switch") OR a switch is ALREADY active; otherwise
+	enqueue exactly as every sync job already does today.
+
+	jarvis#1425 review round 1 (Critical): the ``llm_switch.is_active()`` OR is
+	load-bearing, not an optimization. While a switch is HELD (a record exists
+	but has not yet applied - it is waiting for an in-flight reply or the cap),
+	``last_sync_status`` already reads ``"pending: ..."``, so
+	``_pool_sync_is_redundant`` never short-circuits an UNRELATED background
+	save (pattern-learning windows, chat-device writes) that reaches this
+	function too. That save's OWN ``is_switch`` computation can read False even
+	though a switch is live - e.g. a pool save's ``_is_pool_switch()`` compares
+	against a before-doc whose ``proxy_active`` is ALREADY the switch's target
+	value (the ORIGINAL switch-triggering save wrote it before the container
+	itself ever moved) - so without this OR, that background save would
+	``frappe.enqueue`` directly, run at once (the held job was never actually
+	enqueued, so job-id dedup cannot absorb it), recreate the container
+	mid-reply, and its own terminal write would then let the caller wrongly
+	end the ORIGINAL held switch out from under it. Routing it through
+	``begin()`` instead is always safe: every enqueued sync worker re-reads
+	Jarvis Settings live at run time, so an idempotent retarget to a NEWER
+	job never loses a config - it is a single job further to run.
+
+	``kwargs`` must be the SAME ``job_id``/``deduplicate``/... kwargs the
+	direct ``frappe.enqueue`` call used - ``llm_switch.begin()`` (and its own
+	``_enqueue`` helper) never choose them, they only supply the shared
+	queue/timeout/inline envelope (task-4-report.md, "Concerns for Task 5").
+
+	``llm_switch.begin()`` is called directly and owns its own inline-vs-
+	after-commit decision (review round 1: an earlier version of this
+	function re-implemented that same inline/after_commit check and wrapped
+	``begin`` in a SECOND ``frappe.db.after_commit.add`` - harmless but
+	pointless double indirection). The non-switch ``frappe.enqueue`` branch
+	still makes that decision itself, mirroring ``_enqueue_pool_sync``'s/
+	``_enqueue_handover``'s own inline-in-tests rule."""
+	from jarvis.chat import llm_switch
+
+	if is_switch or llm_switch.is_active():
+		llm_switch.begin(job, **kwargs)
+		return
+	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
+	frappe.enqueue(
+		job,
+		queue="long",
+		timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
+		enqueue_after_commit=not run_inline,
+		now=run_inline,
+		**kwargs,
+	)
+
+
+def _finish_switch_run(run_id: str | None, *, crashed: bool) -> None:
+	"""Call from every switch-eligible worker's outer ``finally`` with the
+	``llm_switch_run_id`` the job was enqueued with (``None`` for a job the
+	switch never released - a plain, non-switch apply) and whether THIS call
+	is unwinding through an uncaught exception (``crashed``).
+
+	Live e2e finding (2026 review, third pass): a worker's own DELIBERATE
+	non-terminal-looking exit - the handover's bounded pending-retry
+	("pending: handover to direct (attempt N)" after a fleet 502/unreachable
+	admin/write conflict - see ``_handover_via_admin``) or a "skipped: ..."
+	is a NORMAL end of THIS run, not a crash, and reconcile_pending_llm_sync's
+	retry depends on that EXACT string surviving untouched. The CR-0 stamp
+	below only fires when ``crashed`` is True AND the status is still
+	non-terminal - i.e. the worker unwound via an exception WITHOUT ever
+	reaching its own terminal write (an uncaught exception past its own inner
+	backstop, or a genuine bug). A normal exit (``crashed=False``) always
+	passes whatever status the worker actually wrote straight through to
+	``llm_switch.finish()`` and the switch ends (or hands off a parked
+	``next``) on it - a later retry begins its OWN new switch, per spec.
+
+	CR-2 (kept): the status read (and the stamp above) are wrapped in
+	try/except so a DB hiccup here can never mask the worker's OWN real
+	exception propagating through the caller's ``finally``.
+
+	A no-op when ``run_id`` is falsy - a job the switch never released must
+	never end or hand off a switch it does not own (``llm_switch.finish()``
+	re-checks the SAME thing against its own record, but that check happens
+	under the redis lock; this early return just skips the whole exercise
+	when there is provably nothing to do).
+
+	``await_admin`` routing (2026 review, fourth pass, "the switch ends when
+	the apply is CONFIRMED, not when the worker stops waiting"): a NORMAL
+	exit (``crashed=False``) at exactly ``_PENDING_APPLYING_STATUS`` means
+	admin ACCEPTED the push and this worker's own in-band convergence wait
+	(``_converge_via_admin``'s ``_POOL_CONVERGE_DEADLINE_S``) simply gave up -
+	the apply is still IN PROGRESS on admin's side, not abandoned. Ending the
+	switch here (the old behavior) cleared the banner and the send-hold
+	before the container actually finished restarting (live e2e2: admin's own
+	converge-config job ran ~110-120s AFTER this worker gave up and restarted
+	the container while chat was open - exactly what the switch exists to
+	prevent). Routes to ``llm_switch.await_admin()`` instead of ``finish()``
+	so the switch stays held until admin's OWN Ready confirms it (see
+	``llm_switch.reconcile()``'s ``_reconcile_awaiting_admin``) or the
+	``AWAIT_ADMIN_MAX_S`` ceiling gives up. Matched on the EXACT status
+	string, not a bare "pending:" prefix, so the handover's OWN distinct
+	pending status (a bounded retry-later outcome per the comment above)
+	is UNCHANGED - it still ends the switch normally."""
+	if not run_id:
+		return
+	try:
+		status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		if not crashed and status == _PENDING_APPLYING_STATUS:
+			from jarvis.chat import llm_switch
+
+			llm_switch.await_admin(run_id)
+			return
+		if crashed and not (status.startswith("ok") or status.startswith("failed:")):
+			_write_settings_fields(
+				frappe._dict(), {"last_sync_status": "failed: unexpected error; see Error Log"}
+			)
+			_commit_terminal_sync_status()
+			status = "failed: unexpected error; see Error Log"
+		from jarvis.chat import llm_switch
+
+		llm_switch.finish(run_id, status)
+	except Exception:
+		frappe.log_error(title="Jarvis: llm_switch.finish failed", message=frappe.get_traceback())
+
+
+def _finish_switch_run_after_followup(run_id: str | None) -> None:
+	"""Live e2e finding (2026 review, third pass, Bug 2): a switch-released
+	worker whose outcome is "hand off to a follow-up sync" (the handover's
+	"pool" fallback / "resync" re-drive - both set ``switch_continues = True``
+	and skip ``_finish_switch_run`` above, since the follow-up - not a
+	terminal write - owns what happens to this run) never called
+	``llm_switch.finish()`` at all. But the follow-up's OWN call
+	(``_enqueue_pool_sync``/``request_resync`` -> ``_switch_or_enqueue`` ->
+	``llm_switch.begin()``) finds the switch record still ``applied`` under
+	THIS run's ``run_id`` (we are still executing inside it) and PARKS itself
+	in ``rec["next"]`` instead of enqueuing - ``begin()``'s own "the current
+	run is already executing" branch. Nobody was ever calling
+	``finish(this_run_id, ...)`` to release that park, so the follow-up sat
+	queued forever and the switch never let go of chat until the 20-minute
+	TTL.
+
+	Call this AFTER the follow-up call (``settings._enqueue_pool_sync()`` /
+	``request_resync(settings)``) - it finishes THIS run, releasing whatever
+	the follow-up parked as a fresh run (new run_id, re-stamped pending
+	status, no second banner - see ``llm_switch.finish``'s own hand-off
+	logic). Must run AFTER the follow-up's own ``begin()`` call has actually
+	parked the job, or there is nothing in ``rec["next"]`` yet: ``begin()``
+	defers to ``frappe.db.after_commit`` when not inline, so this mirrors
+	that exactly - inline (tests / ``run_admin_sync_inline``), the follow-up's
+	own ``begin()`` already ran synchronously by the time it returns, so
+	finishing immediately is safe; otherwise this registers its OWN
+	``after_commit`` callback, added AFTER the follow-up's own registration -
+	Frappe's ``CallbackManager`` runs callbacks in registration order (a
+	plain FIFO queue), so this one runs second, after the park.
+
+	A no-op when ``run_id`` is falsy - a job the switch never released keeps
+	today's behavior untouched."""
+	if not run_id:
+		return
+	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
+	if run_inline:
+		_finish_switch_run(run_id, crashed=False)
+	else:
+		frappe.db.after_commit.add(lambda: _finish_switch_run(run_id, crashed=False))
+
+
 def _direct_subscription_blob(doc) -> tuple[str, dict]:
 	"""Find + validate the DIRECT leg's lone enabled subscription model's OAuth
 	blob, stripped of ``id_token``, ready to push or fold into a payload.
@@ -615,6 +843,7 @@ class JarvisSettings(Document):
 				self.llm_api_key = api_key_val
 
 	def validate(self):
+		self._guard_agent_min_model_authority()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
 		# llm_auth_mode_changed is captured below: has_value_changed compares the
@@ -627,6 +856,8 @@ class JarvisSettings(Document):
 		self.flags.wiki_disabled_transition = bool(self.has_value_changed("wiki_enabled")) and not (
 			frappe.utils.cint(getattr(self, "wiki_enabled", 0))
 		)
+		# A flip of the per-agent minimum model (on_update grandfathers / prompts Apply).
+		self.flags.agent_min_model_flip = self._agent_min_model_flip()
 
 		# Detect a new llm_api_key before _save_passwords() masks it to '****'.
 		current_key = getattr(self, "llm_api_key", None) or ""
@@ -882,6 +1113,7 @@ class JarvisSettings(Document):
 		# #731: runs BEFORE the unified-LLM early returns below so a settings save
 		# that both reconfigures the LLM and disables the wiki still scrubs.
 		self._maybe_scrub_wiki_on_disable()
+		self._maybe_flip_agent_min_model()
 
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
@@ -921,6 +1153,63 @@ class JarvisSettings(Document):
 			return
 		wiki_mirror.enqueue_scrub(after_commit=True)
 
+	def _guard_agent_min_model_authority(self):
+		"""Security review F4: enforce_agent_min_model may change ONLY as
+		Administrator. Frappe's own permlevel gate (validate_higher_perm_levels,
+		runs before validate()) already reverts this permlevel-2 field for a user
+		genuinely lacking write access there - but a tenant System Manager can
+		self-grant that write via the Role Permission Manager
+		(permission_manager.update("Jarvis Settings", "System Manager", 2,
+		"write", 1)) and then save the flag for real. This is the backstop that
+		still refuses it: identity, not a grantable permission, is what decides
+		this field. Exempted for install/migrate/patch, which run trusted code
+		outside a session a customer controls."""
+		if frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch:
+			return
+		if frappe.session.user == "Administrator":
+			return
+		if not self.has_value_changed("enforce_agent_min_model"):
+			return
+		frappe.throw(
+			"Only an Administrator may change Enforce Agent Minimum Model.",
+			frappe.PermissionError,
+		)
+
+	def _agent_min_model_flip(self) -> str | None:
+		"""``"on"`` / ``"off"`` when this save flips enforce_agent_min_model, else None."""
+		if not self.has_value_changed("enforce_agent_min_model"):
+			return None
+		return "on" if frappe.utils.cint(self.get("enforce_agent_min_model")) else "off"
+
+	def _maybe_flip_agent_min_model(self):
+		"""OFF -> ON: existing installs keep today's unpinned model (``legacy`` rows)
+		until someone picks one. Either way a row that pins or blocks makes the next
+		Apply pending (ON -> OFF: pushes stop carrying model keys, admin clears them)."""
+		flip = self.flags.get("agent_min_model_flip")
+		if not flip:
+			return
+		from jarvis.chat import agent_models
+
+		if flip == "on":
+			agent_models.on_enforcement_enabled()
+		else:
+			agent_models.on_enforcement_disabled()
+		# This in-memory doc must not write the catalog flag/version back on a later save.
+		self.agent_catalog_dirty = frappe.utils.cint(
+			frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty", cache=False)
+		)
+		self.agent_catalog_version = frappe.utils.cint(
+			frappe.db.get_single_value("Jarvis Settings", "agent_catalog_version", cache=False)
+		)
+		# The dirty mark moved `modified`; keep this doc current so saving it again
+		# (a Desk form, a second save in one request) is not a TimestampMismatch.
+		# Raw text, exactly as load_from_db reads it back for check_if_latest.
+		row = frappe.db.sql(
+			"select `value` from `tabSingles` where `doctype`=%s and `field`='modified'", "Jarvis Settings"
+		)
+		if row and row[0][0]:
+			self.modified = row[0][0]
+
 	def _on_update_unified_llm(self):
 		"""New LLM path: validate → derive proxy_active/proxy_recommended →
 		mirror models[0] into legacy fields → route to pool or single-model path.
@@ -933,6 +1222,7 @@ class JarvisSettings(Document):
 			build_pool_payload,
 			compute_pool_mode,
 			compute_proxy_active,
+			lone_direct_handover_due,
 			validate_models,
 		)
 
@@ -1022,6 +1312,14 @@ class JarvisSettings(Document):
 				frappe.logger().debug(
 					"jarvis_settings: skipping async pool enqueue; caller pushes synchronously"
 				)
+			elif lone_direct_handover_due(self):
+				# jarvis#1425: a pooled workspace narrowed to one ChatGPT account.
+				# Checked BEFORE the redundancy gate so no save can push the pool
+				# spec while a handover is due. Background saves still only fire it
+				# when the config changed or the last sync did not end ok (the same
+				# rule _pool_sync_is_redundant encodes).
+				if not self._pool_sync_is_redundant():
+					self._enqueue_handover()
 			elif self._pool_sync_is_redundant():
 				frappe.logger().debug(
 					"jarvis_settings: skipping pool sync enqueue; pool state unchanged and last sync ok"
@@ -1080,6 +1378,39 @@ class JarvisSettings(Document):
 		if before is None:
 			return False
 		return bool(compute_pool_mode(before))
+
+	def _is_pool_switch(self) -> bool:
+		"""True when THIS pool push flips proxy_active - the fleet must add or
+		remove the Bifrost/CLIProxy sidecars, exactly the switch spec Part C
+		guards (direct -> proxy, or the converge-teardown that removes them on
+		a shrink back to one model). Compared against the PRE-SAVE value from
+		``get_doc_before_save()``: ``_on_update_unified_llm`` step 2 has already
+		``db_set`` the NEW ``proxy_active`` onto ``self`` by the time routing
+		runs, so comparing self against itself would always read False.
+
+		Two cases read False regardless of the proxy_active comparison:
+		- A first-ever save (no before-doc) - nothing was running before it to
+		  disturb.
+		- A before-doc that has never completed EITHER sync leg
+		  (``llm_pool_synced_at``/``llm_direct_synced_at`` both unset) - a
+		  workspace onboarding for the first time has no established container
+		  serving chat yet, so there is nothing for the switch to protect. Spec
+		  Part C exists to stop a container recreation from cutting a reply
+		  ALREADY IN FLIGHT on an already-serving workspace; without this guard
+		  a brand-new subscription-only signup (whose lone model already
+		  computes proxy_active=True, e.g. Kimi - see compute_proxy_active) would
+		  show the "switching" banner on its very first save."""
+		from jarvis.jarvis.pool_serialize import compute_proxy_active
+
+		before = self.get_doc_before_save()
+		if before is None:
+			return False
+		ever_synced = bool(getattr(before, "llm_pool_synced_at", None)) or bool(
+			getattr(before, "llm_direct_synced_at", None)
+		)
+		if not ever_synced:
+			return False
+		return bool(compute_proxy_active(self)) != bool(getattr(before, "proxy_active", 0))
 
 	@staticmethod
 	def _pool_state_snapshot(doc) -> tuple:
@@ -1204,8 +1535,19 @@ class JarvisSettings(Document):
 		- last_sync_status starts with "ok": a prior failed/pending/skipped
 		  sync means the container may not hold the current pool, so an
 		  unchanged re-save is the operator's retry lever and must enqueue.
+		- no switch is active: jarvis#1425 review (live e2e2, 2026-09-27) - a
+		  poller must never stamp "ok" while a switch is held (see
+		  reconcile_pending_llm_sync / _reconcile_pending_applying), but this
+		  gate is a second line of defense against exactly that stamp: an "ok"
+		  recorded while the tenant's actual served config is still the
+		  PRE-switch one must never read as "already synced" for a later
+		  identical re-save.
 		"""
 		if self.flags.get("force_admin_sync"):
+			return False
+		from jarvis.chat import llm_switch
+
+		if llm_switch.is_active():
 			return False
 		before = self.get_doc_before_save()
 		if before is None:
@@ -1240,34 +1582,26 @@ class JarvisSettings(Document):
 		this worker, it passes the SAME key so the worker's admin call dedupes to the
 		operation already created - it converges + stamps the markers WITHOUT driving
 		a second push.
+
+		jarvis#1425 follow-up (seamless switch, spec Part C): when this push
+		flips ``proxy_active`` (direct -> proxy, or a converge-teardown that
+		removes the sidecars - see ``_is_pool_switch``), the job is routed
+		through ``llm_switch.begin()`` instead of enqueued directly, so the
+		container mutation waits for any reply in flight (or a 5-minute cap)
+		and every open chat is told first. Every other pool push (an ordinary
+		config change that leaves proxy_active where it was) is unaffected.
 		"""
 		# last_sync_requested_at (jarvis C2): stamped at this ENQUEUE moment, not
 		# when the apply lands, so account._provisioning_verdict can time-box how
 		# long a still-converging apply stays soft (llm_applying) instead of
 		# routing an established workspace to the setup wizard - see
-		# account._APPLYING_SOFT_WINDOW_S.
-		_write_settings_fields(
+		# account._APPLYING_SOFT_WINDOW_S. Also the status the SPA poller /
+		# llm_switch.reconcile() see the moment this save commits, switch or not.
+		_stamp_pool_pending(self)
+		_switch_or_enqueue(
 			self,
-			{
-				"last_sync_status": "pending: provisioning container (pool)",
-				"last_sync_requested_at": frappe.utils.now(),
-				# The jarvis#841 dedup stamp names a DIRECT-leg apply; a pool
-				# excursion refreshes this timestamp and later lands an "ok"
-				# without going through the classifier, so a stale stamp left
-				# here could absorb a direct re-save after the pool teardown
-				# even though /llm-pool never pushed the direct blob. Cleared,
-				# same as the disconnect/reset writers.
-				"llm_last_apply_fingerprint": "",
-			},
-		)
-		run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
-		# Budget rationale lives on ADMIN_SYNC_RQ_TIMEOUT_S.
-		frappe.enqueue(
 			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin_pool",
-			queue="long",
-			timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
-			enqueue_after_commit=not run_inline,
-			now=run_inline,
+			is_switch=self._is_pool_switch(),
 			# A teardown push carries its own job id. Sharing the ordinary one
 			# would let dedup drop it behind an already-queued normal sync, and
 			# the surviving job would run WITHOUT converge_teardown, hit the
@@ -1278,6 +1612,38 @@ class JarvisSettings(Document):
 			deduplicate=True,
 			converge_teardown=converge_teardown,
 			idempotency_key=idempotency_key,
+		)
+
+	def _enqueue_handover(self, *, attempt: int = 1) -> None:
+		"""Queue the pool -> direct handover (jarvis#1425). Same queue, timeout,
+		lock and inline-in-tests rules as _enqueue_pool_sync.
+
+		``attempt`` bounds retries against a persistently failing fleet handover
+		(2026-09-25 review, see _HANDOVER_MAX_ATTEMPTS): every attempt STOPS AND
+		RESTARTS the customer's container, so a fleet failure that repeats
+		forever must not re-drive unboundedly and bounce chat. Every
+		USER-initiated caller (on_update, save_llm_pool, request_resync) calls
+		this with the default - a user action is a fresh budget, not a
+		continuation of a stuck one. Only reconcile_pending_llm_sync passes a
+		higher attempt, counting up to _HANDOVER_MAX_ATTEMPTS before giving up.
+
+		jarvis#1425 follow-up (seamless switch, spec Part C): the handover is
+		ALWAYS a switch (it moves the workspace off the proxy entirely), so this
+		always routes through llm_switch.begin() rather than a direct enqueue."""
+		_write_settings_fields(
+			self,
+			{
+				"last_sync_status": f"{_PENDING_HANDOVER_STATUS} (attempt {attempt})",
+				"last_sync_requested_at": frappe.utils.now(),
+				"llm_last_apply_fingerprint": "",
+			},
+		)
+		_switch_or_enqueue(
+			self,
+			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
+			is_switch=True,
+			job_id="jarvis_settings_sync:handover",
+			deduplicate=True,
 		)
 
 	def _on_update_single_model_legacy(self):
@@ -2030,6 +2396,7 @@ def _enqueued_sync_via_admin_pool(
 	retry_left: int = ADMIN_SYNC_LOCK_RETRIES,
 	converge_teardown: bool = False,
 	idempotency_key: str | None = None,
+	llm_switch_run_id: str | None = None,
 ) -> None:
 	"""Background-queue wrapper for the proxy (pool) sync path.
 
@@ -2073,164 +2440,143 @@ def _enqueued_sync_via_admin_pool(
 	from jarvis._redis_lock import redis_lock
 	from jarvis.jarvis.pool_serialize import build_pool_payload
 
-	with redis_lock(
-		"jarvis_settings_admin_sync",
-		# TTL must cover a healthy holder running to its rq SIGALRM - see
-		# ADMIN_SYNC_LOCK_TIMEOUT_S. A 120s TTL under a 600s job would
-		# expire mid-run and admit a concurrent container mutation.
-		timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
-		blocking_timeout_s=_sync_lock_wait_s(retry_left),
-	) as acquired:
-		if not acquired:
-			settings = _frappe.get_single("Jarvis Settings")
-			if retry_left > 0:
+	switch_continues = False
+	crashed = False
+	try:
+		with redis_lock(
+			"jarvis_settings_admin_sync",
+			# TTL must cover a healthy holder running to its rq SIGALRM - see
+			# ADMIN_SYNC_LOCK_TIMEOUT_S. A 120s TTL under a 600s job would
+			# expire mid-run and admit a concurrent container mutation.
+			timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+			blocking_timeout_s=_sync_lock_wait_s(retry_left),
+		) as acquired:
+			if not acquired:
+				settings = _frappe.get_single("Jarvis Settings")
+				if retry_left > 0:
+					_frappe.logger().warning(
+						"jarvis_settings: pool admin sync lost the lock race; scheduling retry (%d left)",
+						retry_left - 1,
+					)
+					_schedule_sync_lock_retry(
+						method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings"
+						"._enqueued_sync_via_admin_pool",
+						job_base="jarvis_settings_sync:pool",
+						retry_left=retry_left,
+						# Carry the teardown intent down the retry chain: a level that
+						# dropped it would re-arm the pool-mode gate and skip (#550).
+						converge_teardown=converge_teardown,
+						# Carry the operation's key so a lock-loss retry still dedupes to
+						# the operation the synchronous descriptor-obtain created (F2/F3).
+						idempotency_key=idempotency_key,
+						# Carry the switch's run token down the retry chain too (review
+						# fix wave) - the run only actually finishes (ends or hands off)
+						# once a level in the chain gets the lock and runs for real.
+						llm_switch_run_id=llm_switch_run_id,
+					)
+					switch_continues = True
+					return
 				_frappe.logger().warning(
-					"jarvis_settings: pool admin sync lost the lock race; scheduling retry (%d left)",
-					retry_left - 1,
+					"jarvis_settings: skipping pool admin sync; "
+					"another worker held the lock past blocking timeout (retries exhausted)",
 				)
-				_schedule_sync_lock_retry(
-					method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings"
-					"._enqueued_sync_via_admin_pool",
-					job_base="jarvis_settings_sync:pool",
-					retry_left=retry_left,
-					# Carry the teardown intent down the retry chain: a level that
-					# dropped it would re-arm the pool-mode gate and skip (#550).
-					converge_teardown=converge_teardown,
-					# Carry the operation's key so a lock-loss retry still dedupes to
-					# the operation the synchronous descriptor-obtain created (F2/F3).
-					idempotency_key=idempotency_key,
-				)
-				return
-			_frappe.logger().warning(
-				"jarvis_settings: skipping pool admin sync; "
-				"another worker held the lock past blocking timeout (retries exhausted)",
-			)
-			# Terminal "failed:" write - clear any stale warnings/subscription_status
-			# from a prior successful apply alongside it (see
-			# _cleared_subscription_status_fields).
-			_write_settings_fields(
-				settings,
-				{
-					"last_sync_status": "failed: skipped (concurrent sync did not finish in time)",
-					**_cleared_subscription_status_fields(),
-				},
-			)
-			return
-
-		# Re-read CURRENT settings at run time (not a snapshot from job args)
-		# so a correction saved between enqueue and execution is included.
-		settings = _frappe.get_single("Jarvis Settings")
-
-		# Re-validate: the config may have changed between enqueue and run.
-		# If it is no longer a pool, skip the push. (Pool MODE, not proxy_active:
-		# a BYO api-key pool has no sidecar but is still pushed through /llm-pool.)
-		from jarvis.jarvis.pool_serialize import validate_models
-
-		revalidation_errors = validate_models(settings)
-		if revalidation_errors or not _pool_spec_pushable(settings, converge_teardown):
-			reason = "; ".join(revalidation_errors) if revalidation_errors else "no longer a pool"
-			_write_settings_fields(
-				settings, {"last_sync_status": f"skipped: no longer pool-valid after re-read ({reason})"}
-			)
-			return
-
-		spec, api_keys, oauth_blobs = build_pool_payload(settings)
-
-		terminal_written = False
-		try:
-			result = _post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=idempotency_key) or {}
-			# The push is the long part of this job; end the transaction so every
-			# status write below runs on a read view younger than it (#713).
-			_refresh_db_snapshot()
-			# CONVERGENCE STATUS, not HTTP success (C5/F2 + round-4 R4-P0-6).
-			# Admin deliberately returns HTTP 200 with status="applying" when the
-			# apply lock was busy, the fleet read timed out, or the applied-version
-			# CAS refused — the container is NOT yet on the new pool — and status=
-			# "blocked" when a subscription pool has no persisted OAuth blobs.
-			# Stamping the durable "ever applied" marker (llm_pool_synced_at) on
-			# those made is_ready_for_chat open chat on a container still running
-			# the stub. "blocked" is terminal-failed: only the customer
-			# re-authenticating fixes it, so no reconcile poll can converge it.
-			# Anything else short of a demonstrable "applied" converges via
-			# get_connection (the cheap in-job fast path — on Ready
-			# _stamp_converged_ok sets the markers) or records the pending state
-			# for the */5 reconcile to finish. A missing status (an admin too old
-			# to thread it) defaults to "applied" — its own contract predates this.
-			status = result.get("status") or "applied"
-			if status == "blocked":
+				# Terminal "failed:" write - clear any stale warnings/subscription_status
+				# from a prior successful apply alongside it (see
+				# _cleared_subscription_status_fields).
 				_write_settings_fields(
 					settings,
-					{"last_sync_status": "failed: subscription needs re-authentication (blocked)"},
+					{
+						"last_sync_status": "failed: skipped (concurrent sync did not finish in time)",
+						**_cleared_subscription_status_fields(),
+					},
 				)
-				_commit_terminal_sync_status()
-				terminal_written = True  # preserve this status past the finally backstop
 				return
-			if _is_applying_result(result) or status != "applied":
-				if not _converge_via_admin(settings, is_pool=True):
+
+			# Re-read CURRENT settings at run time (not a snapshot from job args)
+			# so a correction saved between enqueue and execution is included.
+			settings = _frappe.get_single("Jarvis Settings")
+
+			# Re-validate: the config may have changed between enqueue and run.
+			# If it is no longer a pool, skip the push. (Pool MODE, not proxy_active:
+			# a BYO api-key pool has no sidecar but is still pushed through /llm-pool.)
+			from jarvis.jarvis.pool_serialize import validate_models
+
+			revalidation_errors = validate_models(settings)
+			if revalidation_errors or not _pool_spec_pushable(settings, converge_teardown):
+				reason = "; ".join(revalidation_errors) if revalidation_errors else "no longer a pool"
+				_write_settings_fields(
+					settings, {"last_sync_status": f"skipped: no longer pool-valid after re-read ({reason})"}
+				)
+				return
+
+			spec, api_keys, oauth_blobs = build_pool_payload(settings)
+
+			terminal_written = False
+			try:
+				result = (
+					_post_pool_with_retry(spec, api_keys, oauth_blobs, idempotency_key=idempotency_key) or {}
+				)
+				# The push is the long part of this job; end the transaction so every
+				# status write below runs on a read view younger than it (#713).
+				_refresh_db_snapshot()
+				# CONVERGENCE STATUS, not HTTP success (C5/F2 + round-4 R4-P0-6).
+				# Admin deliberately returns HTTP 200 with status="applying" when the
+				# apply lock was busy, the fleet read timed out, or the applied-version
+				# CAS refused — the container is NOT yet on the new pool — and status=
+				# "blocked" when a subscription pool has no persisted OAuth blobs.
+				# Stamping the durable "ever applied" marker (llm_pool_synced_at) on
+				# those made is_ready_for_chat open chat on a container still running
+				# the stub. "blocked" is terminal-failed: only the customer
+				# re-authenticating fixes it, so no reconcile poll can converge it.
+				# Anything else short of a demonstrable "applied" converges via
+				# get_connection (the cheap in-job fast path — on Ready
+				# _stamp_converged_ok sets the markers) or records the pending state
+				# for the */5 reconcile to finish. A missing status (an admin too old
+				# to thread it) defaults to "applied" — its own contract predates this.
+				status = result.get("status") or "applied"
+				if status == "blocked":
+					_write_settings_fields(
+						settings,
+						{"last_sync_status": "failed: subscription needs re-authentication (blocked)"},
+					)
+					_commit_terminal_sync_status()
+					terminal_written = True  # preserve this status past the finally backstop
+					return
+				if _is_applying_result(result) or status != "applied":
+					if not _converge_via_admin(settings, is_pool=True):
+						_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+						_commit_terminal_sync_status()
+					terminal_written = True
+					return
+				# A stamp that lost a write-conflict race falls back to the pending
+				# marker so the SPA poller / the */5 reconcile finish it, exactly as a
+				# non-converged apply does (#713).
+				if not _stamp_pool_applied_ok(settings, result):
 					_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
 					_commit_terminal_sync_status()
 				terminal_written = True
-				return
-			# A stamp that lost a write-conflict race falls back to the pending
-			# marker so the SPA poller / the */5 reconcile finish it, exactly as a
-			# non-converged apply does (#713).
-			if not _stamp_pool_applied_ok(settings, result):
-				_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+			except admin_client.AdminAuthError as e:
+				_write_settings_fields(
+					settings,
+					{
+						"last_sync_at": _frappe.utils.now(),
+						"last_sync_status": f"failed: auth: {e}",
+						**_cleared_subscription_status_fields(),
+					},
+				)
 				_commit_terminal_sync_status()
-			terminal_written = True
-		except admin_client.AdminAuthError as e:
-			_write_settings_fields(
-				settings,
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: auth: {e}",
-					**_cleared_subscription_status_fields(),
-				},
-			)
-			_commit_terminal_sync_status()
-			terminal_written = True
-			_frappe.log_error(
-				title="Jarvis: admin auth failed (pool sync)",
-				message=_frappe.get_traceback(),
-			)
-		except admin_client.AdminRejectedError as e:
-			# jarvis #542, the structured half of the branch below: admin named
-			# the refusal itself (an ``error.code`` on _PERMANENT_REJECTION_CODES,
-			# e.g. FleetConfigError on an unknown provider slug) instead of only
-			# implying it through a "Your ..." sentence. Nothing was persisted, so
-			# no reconcile can ever finish it - terminal, with admin's reason.
-			reason = _admin_rejection_reason(e)
-			_write_settings_fields(
-				settings,
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: {reason}",
-					**_cleared_subscription_status_fields(),
-				},
-			)
-			_commit_terminal_sync_status()
-			terminal_written = True
-			_frappe.log_error(
-				title="Jarvis: admin rejected the LLM pool config",
-				message=_frappe.get_traceback(),
-			)
-			return
-		except admin_client.AdminUnreachableError as e:
-			# This fix (2026-07-23 out-of-quota trace): admin's fleet layer can
-			# raise a DEFINITIVE, already-decided rejection - e.g. a
-			# subscription-only pool's first activation whose probe came back
-			# exhausted (fleet's hard gate rolls back and NEVER records
-			# applied) - wrapped in this SAME AdminUnreachableError class as a
-			# genuine transient timeout/connection failure. There is nothing
-			# to converge to for that case (the account's own quota has to
-			# reset; no reconcile poll will ever see chat_readiness go
-			# "Ready" until it does), so the F2 handling below would strand
-			# the customer in "pending:" despite admin already knowing the
-			# real, customer-facing reason. Recognise it first and write it
-			# TERMINAL, exactly like the neighbouring auth/rate-limit/
-			# validation branches, before falling through to F2's converge.
-			reason = _admin_customer_facing_reason(str(e))
-			if reason:
+				terminal_written = True
+				_frappe.log_error(
+					title="Jarvis: admin auth failed (pool sync)",
+					message=_frappe.get_traceback(),
+				)
+			except admin_client.AdminRejectedError as e:
+				# jarvis #542, the structured half of the branch below: admin named
+				# the refusal itself (an ``error.code`` on _PERMANENT_REJECTION_CODES,
+				# e.g. FleetConfigError on an unknown provider slug) instead of only
+				# implying it through a "Your ..." sentence. Nothing was persisted, so
+				# no reconcile can ever finish it - terminal, with admin's reason.
+				reason = _admin_rejection_reason(e)
 				_write_settings_fields(
 					settings,
 					{
@@ -2241,90 +2587,147 @@ def _enqueued_sync_via_admin_pool(
 				)
 				_commit_terminal_sync_status()
 				terminal_written = True
-				_frappe.logger().info(
-					"jarvis_settings: pool sync rejected with a customer-facing reason: %s", reason
+				_frappe.log_error(
+					title="Jarvis: admin rejected the LLM pool config",
+					message=_frappe.get_traceback(),
 				)
 				return
-			# F2: an unreachable/timeout is NOT a lost apply. The admin persists
-			# desired-first (committed) and reconciles a late-landing apply, so
-			# writing a terminal "failed:" here is exactly the livelock that
-			# blocked onboarding - the container often applied the pool moments
-			# after the bench hung up. Converge instead: poll get_connection for
-			# chat_readiness == "Ready" (stamps the success markers on a hit);
-			# otherwise record PENDING (not failed) and let the */5 reconcile
-			# finish it. Only genuine auth/validation/rate-limit stay terminal.
-			if not _converge_via_admin(settings, is_pool=True):
-				_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
-				_commit_terminal_sync_status()
-				_frappe.logger().warning(
-					"jarvis_settings: pool sync admin-unreachable; recorded pending for reconcile (%s)",
-					e,
-				)
-			terminal_written = True
-		except admin_client.AdminRateLimitedError as e:
-			retry = e.retry_after_seconds or 0
-			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
-			_write_settings_fields(
-				settings,
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: rate-limited; {retry_str}",
-					**_cleared_subscription_status_fields(),
-				},
-			)
-			_commit_terminal_sync_status()
-			terminal_written = True
-			_frappe.logger().info(f"admin_client: pool sync rate-limited; retry_after={retry}s")
-		except admin_client.AdminValidationError as e:
-			_write_settings_fields(
-				settings,
-				{
-					"last_sync_at": _frappe.utils.now(),
-					"last_sync_status": f"failed: validation: {e}",
-					**_cleared_subscription_status_fields(),
-				},
-			)
-			_commit_terminal_sync_status()
-			terminal_written = True
-			_frappe.log_error(
-				title="Jarvis: admin validation failed (pool sync)",
-				message=_frappe.get_traceback(),
-			)
-		except _WRITE_CONFLICT_ERRORS:
-			# #713, the pool twin of the branch in _sync_via_admin, and a backstop for
-			# the same reason: the guarded writer already absorbs the status writes, so
-			# this catches a conflict raised by anything else in this body. Same
-			# reasoning either way:
-			# admin already has the config, only the bookkeeping lost a race, and the
-			# pending marker is the state three converging paths act on.
-			_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
-			_commit_terminal_sync_status()
-			terminal_written = True
-			_frappe.log_error(
-				title="Jarvis: LLM pool sync lost a write-conflict race (recorded pending)",
-				message=_frappe.get_traceback(),
-			)
-		finally:
-			# Commit is load-bearing - see the matching backstop in
-			# _sync_via_admin. Without it, a propagating exception (rq
-			# JobTimeoutException in particular: the pool POST alone may
-			# consume the whole HTTP budget) reaches execute_job's
-			# frappe.db.rollback() and the terminal write is undone,
-			# pinning the UI poller on "pending:" forever
-			# (JARVIS-2026-07-08, fault c).
-			if not terminal_written:
-				try:
+			except admin_client.AdminUnreachableError as e:
+				# This fix (2026-07-23 out-of-quota trace): admin's fleet layer can
+				# raise a DEFINITIVE, already-decided rejection - e.g. a
+				# subscription-only pool's first activation whose probe came back
+				# exhausted (fleet's hard gate rolls back and NEVER records
+				# applied) - wrapped in this SAME AdminUnreachableError class as a
+				# genuine transient timeout/connection failure. There is nothing
+				# to converge to for that case (the account's own quota has to
+				# reset; no reconcile poll will ever see chat_readiness go
+				# "Ready" until it does), so the F2 handling below would strand
+				# the customer in "pending:" despite admin already knowing the
+				# real, customer-facing reason. Recognise it first and write it
+				# TERMINAL, exactly like the neighbouring auth/rate-limit/
+				# validation branches, before falling through to F2's converge.
+				reason = _admin_customer_facing_reason(str(e))
+				if reason:
 					_write_settings_fields(
 						settings,
 						{
 							"last_sync_at": _frappe.utils.now(),
-							"last_sync_status": "failed: unexpected error; see Error Log",
+							"last_sync_status": f"failed: {reason}",
 							**_cleared_subscription_status_fields(),
 						},
 					)
 					_commit_terminal_sync_status()
-				except Exception:
-					pass
+					terminal_written = True
+					_frappe.logger().info(
+						"jarvis_settings: pool sync rejected with a customer-facing reason: %s", reason
+					)
+					return
+				# F2: an unreachable/timeout is NOT a lost apply. The admin persists
+				# desired-first (committed) and reconciles a late-landing apply, so
+				# writing a terminal "failed:" here is exactly the livelock that
+				# blocked onboarding - the container often applied the pool moments
+				# after the bench hung up. Converge instead: poll get_connection for
+				# chat_readiness == "Ready" (stamps the success markers on a hit);
+				# otherwise record PENDING (not failed) and let the */5 reconcile
+				# finish it. Only genuine auth/validation/rate-limit stay terminal.
+				if not _converge_via_admin(settings, is_pool=True):
+					_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+					_commit_terminal_sync_status()
+					_frappe.logger().warning(
+						"jarvis_settings: pool sync admin-unreachable; recorded pending for reconcile (%s)",
+						e,
+					)
+				terminal_written = True
+			except admin_client.AdminRateLimitedError as e:
+				retry = e.retry_after_seconds or 0
+				retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
+				_write_settings_fields(
+					settings,
+					{
+						"last_sync_at": _frappe.utils.now(),
+						"last_sync_status": f"failed: rate-limited; {retry_str}",
+						**_cleared_subscription_status_fields(),
+					},
+				)
+				_commit_terminal_sync_status()
+				terminal_written = True
+				_frappe.logger().info(f"admin_client: pool sync rate-limited; retry_after={retry}s")
+			except admin_client.AdminValidationError as e:
+				_write_settings_fields(
+					settings,
+					{
+						"last_sync_at": _frappe.utils.now(),
+						"last_sync_status": f"failed: validation: {e}",
+						**_cleared_subscription_status_fields(),
+					},
+				)
+				_commit_terminal_sync_status()
+				terminal_written = True
+				_frappe.log_error(
+					title="Jarvis: admin validation failed (pool sync)",
+					message=_frappe.get_traceback(),
+				)
+			except _WRITE_CONFLICT_ERRORS:
+				# #713, the pool twin of the branch in _sync_via_admin, and a backstop for
+				# the same reason: the guarded writer already absorbs the status writes, so
+				# this catches a conflict raised by anything else in this body. Same
+				# reasoning either way:
+				# admin already has the config, only the bookkeeping lost a race, and the
+				# pending marker is the state three converging paths act on.
+				_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+				_commit_terminal_sync_status()
+				terminal_written = True
+				_frappe.log_error(
+					title="Jarvis: LLM pool sync lost a write-conflict race (recorded pending)",
+					message=_frappe.get_traceback(),
+				)
+			finally:
+				# Commit is load-bearing - see the matching backstop in
+				# _sync_via_admin. Without it, a propagating exception (rq
+				# JobTimeoutException in particular: the pool POST alone may
+				# consume the whole HTTP budget) reaches execute_job's
+				# frappe.db.rollback() and the terminal write is undone,
+				# pinning the UI poller on "pending:" forever
+				# (JARVIS-2026-07-08, fault c).
+				if not terminal_written:
+					try:
+						_write_settings_fields(
+							settings,
+							{
+								"last_sync_at": _frappe.utils.now(),
+								"last_sync_status": "failed: unexpected error; see Error Log",
+								**_cleared_subscription_status_fields(),
+							},
+						)
+						_commit_terminal_sync_status()
+					except Exception:
+						pass
+	except BaseException:
+		# Live e2e finding (2026 review, third pass): distinguishes a genuine
+		# crash from every DELIBERATE terminal exit above (ok, pending-retry,
+		# failed, skipped) so _finish_switch_run only stamps its CR-0 backstop
+		# when this run unwound via an exception, never on a normal exit that
+		# happens to leave a non-ok/failed status (e.g. this job's own inner
+		# backstop already wrote "failed: unexpected error" for most
+		# exceptions - this outer catch is the belt for whatever slips past
+		# it, e.g. a JobTimeoutException raised between statements).
+		crashed = True
+		raise
+	finally:
+		if not switch_continues:
+			# _finish_switch_run (review fix wave) only finishes THIS run
+			# (llm_switch_run_id is None for a job the switch never released,
+			# and llm_switch.finish() itself re-checks the run_id against the
+			# active record) - a job that reached here WITHOUT going through
+			# the held switch must never clear or hand off someone else's
+			# hold. Every exit from this job EXCEPT the lock-race retry above
+			# is terminal for THIS run (ok, pending-retry, failed, skipped, or
+			# a crash reaching rq - CR-0's own backstop inside
+			# _finish_switch_run covers only the crash case, never a
+			# deliberate non-terminal-looking status like a bounded retry) -
+			# a later retry begins its OWN switch via a fresh
+			# _enqueue_pool_sync() call, exactly like the handover leg.
+			_finish_switch_run(llm_switch_run_id, crashed=crashed)
 
 
 # How long the descriptor-obtain waits for the admin-sync lock before handing the
@@ -2534,7 +2937,9 @@ def sync_pool_now(idempotency_key: str | None = None, force_probe: bool = False)
 	return outcome
 
 
-def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETRIES) -> None:
+def _enqueued_sync_via_admin(
+	action: str, retry_left: int = ADMIN_SYNC_LOCK_RETRIES, llm_switch_run_id: str | None = None
+) -> None:
 	"""Background-queue wrapper: re-load Jarvis Settings + run _sync_via_admin.
 
 	Loading a fresh Single is necessary because the queue worker runs in a
@@ -2553,49 +2958,322 @@ def _enqueued_sync_via_admin(action: str, retry_left: int = ADMIN_SYNC_LOCK_RETR
 	crosses container state in unpredictable ways. The lock yields one
 	serial run; the late arrival waits up to 60s for the early one to
 	finish, then runs against the now-current doc state.
-	"""
+
+	jarvis#1425 review round 1: this is also the direct-leg (single-model)
+	sync job, which ``request_resync``'s "restart" branch now routes through
+	``_switch_or_enqueue`` (a switch can be active even on this leg - e.g. a
+	Resync re-driving a config that itself has no proxy notion at all, while
+	an UNRELATED pool switch elsewhere is held). ``_finish_switch_run`` only
+	finishes the run it was actually given (``llm_switch_run_id``, ``None``
+	for a plain, non-switch apply), so this is safe to call on every action,
+	switch or not."""
 	from jarvis._redis_lock import redis_lock
 
-	with redis_lock(
-		"jarvis_settings_admin_sync",
-		# TTL must cover a healthy holder running to its rq SIGALRM - see
-		# ADMIN_SYNC_LOCK_TIMEOUT_S. A 120s TTL under a 600s job would
-		# expire mid-run and admit a concurrent container mutation.
-		timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
-		blocking_timeout_s=_sync_lock_wait_s(retry_left),
-	) as acquired:
-		if not acquired:
-			settings = frappe.get_single("Jarvis Settings")
-			if retry_left > 0:
-				# Same retry chain as the pool worker: a sibling sync may
-				# now legitimately hold the lock for minutes (600s
-				# envelope), so a single 60s wait + terminal "failed:
-				# skipped" would silently DROP this credential change -
-				# chat would keep running on the old key with only a
-				# status line to notice.
+	switch_continues = False
+	crashed = False
+	try:
+		with redis_lock(
+			"jarvis_settings_admin_sync",
+			# TTL must cover a healthy holder running to its rq SIGALRM - see
+			# ADMIN_SYNC_LOCK_TIMEOUT_S. A 120s TTL under a 600s job would
+			# expire mid-run and admit a concurrent container mutation.
+			timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+			blocking_timeout_s=_sync_lock_wait_s(retry_left),
+		) as acquired:
+			if not acquired:
+				settings = frappe.get_single("Jarvis Settings")
+				if retry_left > 0:
+					# Same retry chain as the pool worker: a sibling sync may
+					# now legitimately hold the lock for minutes (600s
+					# envelope), so a single 60s wait + terminal "failed:
+					# skipped" would silently DROP this credential change -
+					# chat would keep running on the old key with only a
+					# status line to notice.
+					frappe.logger().warning(
+						"jarvis_settings: admin sync (action=%s) lost the lock race; scheduling retry (%d left)",
+						action,
+						retry_left - 1,
+					)
+					_schedule_sync_lock_retry(
+						method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
+						job_base=f"jarvis_settings_sync:{action}",
+						retry_left=retry_left,
+						action=action,
+						# Carry the switch's run token down the retry chain too
+						# (review fix wave) - see the pool worker's matching comment.
+						llm_switch_run_id=llm_switch_run_id,
+					)
+					switch_continues = True
+					return
 				frappe.logger().warning(
-					"jarvis_settings: admin sync (action=%s) lost the lock race; scheduling retry (%d left)",
+					"jarvis_settings: skipping admin sync (action=%s); "
+					"another worker held the lock past blocking timeout (retries exhausted)",
 					action,
-					retry_left - 1,
 				)
-				_schedule_sync_lock_retry(
-					method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
-					job_base=f"jarvis_settings_sync:{action}",
-					retry_left=retry_left,
-					action=action,
+				_write_settings_fields(
+					settings, {"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"}
 				)
 				return
-			frappe.logger().warning(
-				"jarvis_settings: skipping admin sync (action=%s); "
-				"another worker held the lock past blocking timeout (retries exhausted)",
-				action,
+			settings = frappe.get_single("Jarvis Settings")
+			settings._sync_via_admin(action)
+	except BaseException:
+		# Live e2e finding (2026 review, third pass): see the pool worker's
+		# matching comment - distinguishes a genuine crash from a deliberate
+		# terminal exit so _finish_switch_run's CR-0 backstop never overwrites
+		# a normal, non-ok/failed outcome.
+		crashed = True
+		raise
+	finally:
+		if not switch_continues:
+			_finish_switch_run(llm_switch_run_id, crashed=crashed)
+
+
+def _enqueued_handover_via_admin(
+	retry_left: int = ADMIN_SYNC_LOCK_RETRIES, llm_switch_run_id: str | None = None
+) -> None:
+	"""Worker for _enqueue_handover. Serialized with every other LLM sync on the
+	same redis lock; the follow-up action _handover_via_admin reports (a pool
+	fallback or a resync) runs AFTER the lock is released - CR-3 (2026-09-25
+	review): both follow-ups themselves enqueue/acquire on this SAME lock, so
+	running either one while still holding it would self-contend inline (tests /
+	run_admin_sync_inline).
+
+	jarvis#1425 follow-up (seamless switch, spec Part C): ``_enqueue_handover``
+	always begins a switch, so this worker ends it on every outcome except one
+	where the switch itself continues elsewhere:
+	- a lock-race retry re-enqueues the SAME job under this SAME switch
+	  (``switch_continues``);
+	- a "pool" follow-up calls ``settings._enqueue_pool_sync()`` exactly as
+	  before Task 5 - the retarget decision now lives entirely inside
+	  ``_switch_or_enqueue`` (review round 1: it OR's in
+	  ``llm_switch.is_active()``, so this still-open switch is picked up and
+	  retargeted there with no special-casing needed here; with no switch
+	  active - e.g. old data - it is today's plain enqueue, same as always).
+	  Live e2e finding (2026 review, third pass, Bug 2): the follow-up's own
+	  ``begin()`` call finds the switch still ``applied`` under THIS run (we
+	  are still executing inside it) and PARKS itself instead of enqueuing -
+	  nobody would ever release that park without
+	  ``_finish_switch_run_after_followup`` below finishing THIS run
+	  afterwards;
+	- a "resync" follow-up hands off to ``request_resync``, which re-drives
+	  the NOW-current config (handover retarget, or an ordinary pool push -
+	  same reasoning, same park, same after-followup finish);
+	- every other outcome (a confirmed move, a bounded pending-retry, or a
+	  genuine failure - including one that re-raises) is terminal for THIS
+	  attempt, so the switch ends here (if it released this run - see
+	  ``_finish_switch_run``) and chat unblocks immediately; a later
+	  retry (``reconcile_pending_llm_sync``) begins a NEW switch of its own -
+	  "a retry of a failed handover (attempt N) is a new switch"."""
+	from jarvis._redis_lock import redis_lock
+
+	follow_up = None
+	switch_continues = False
+	crashed = False
+	try:
+		with redis_lock(
+			"jarvis_settings_admin_sync",
+			timeout_s=ADMIN_SYNC_LOCK_TIMEOUT_S,
+			blocking_timeout_s=_sync_lock_wait_s(retry_left),
+		) as acquired:
+			if not acquired:
+				if retry_left > 0:
+					_schedule_sync_lock_retry(
+						method="jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
+						job_base="jarvis_settings_sync:handover",
+						retry_left=retry_left,
+						# Carry the switch's run token down the retry chain too
+						# (review fix wave) - see the pool worker's matching comment.
+						llm_switch_run_id=llm_switch_run_id,
+					)
+					switch_continues = True
+					return
+				_write_settings_fields(
+					frappe.get_single("Jarvis Settings"),
+					{"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"},
+				)
+				return
+			follow_up = _handover_via_admin(frappe.get_single("Jarvis Settings"))
+		if follow_up == "pool":
+			frappe.get_single("Jarvis Settings")._enqueue_pool_sync()
+			switch_continues = True
+			_finish_switch_run_after_followup(llm_switch_run_id)
+		elif follow_up == "resync":
+			request_resync(frappe.get_single("Jarvis Settings"))
+			switch_continues = True
+			_finish_switch_run_after_followup(llm_switch_run_id)
+	except BaseException:
+		# Live e2e finding (2026 review, third pass): see the pool worker's
+		# matching comment - distinguishes a genuine crash from a deliberate
+		# terminal exit (including _handover_via_admin's own documented
+		# re-raise, which always writes its OWN terminal status first) so
+		# _finish_switch_run's CR-0 backstop never overwrites a normal outcome.
+		crashed = True
+		raise
+	finally:
+		if not switch_continues:
+			_finish_switch_run(llm_switch_run_id, crashed=crashed)
+
+
+def _handover_via_admin(settings) -> str | None:
+	"""Ask admin to move this workspace off the proxy. Returns the follow-up the
+	caller must run AFTER releasing the admin-sync lock: ``"pool"`` (today's pool
+	push - admin/fleet cannot do the handover, or permanently refused it) or
+	``"resync"`` (the shape moved on while a handover was pending; re-drive the
+	NOW-current config); ``None`` when nothing further is needed here.
+
+	Stamps change in ONE write and only on a confirmed move: until then the pool
+	stamp keeps is_ready_for_chat open and proxy_active keeps Auto turns on the
+	proxy, which is still serving. Every unknown outcome re-records
+	_PENDING_HANDOVER_STATUS carrying the CURRENT attempt number (never
+	resetting it - see _HANDOVER_MAX_ATTEMPTS); a retry is safe because the
+	fleet route is a no-op once the tenant is direct, but the attempt count is
+	what lets reconcile_pending_llm_sync eventually give up on a fleet that
+	never converges instead of restarting the container forever.
+
+	CR-2 (2026-09-25 review): a TERMINAL rejection (admin reached, validated, and
+	permanently refused - AdminRejectedError, or an AdminValidationError that
+	is_handover_unsupported does not recognise as a missing-endpoint deploy gap)
+	falls back to the pool push exactly like the unsupported case, instead of
+	stranding the workspace on a "failed:" status with no path off the proxy.
+	This never leaves a workspace worse off than before jarvis#1425 - the pool
+	push is the sync that applied this config before the handover existed - and
+	it is safe even if the fleet already moved the tenant, because the fleet's
+	pool apply hands the agent's live token back to CLIProxy rather than
+	discarding it."""
+	from jarvis import admin_client
+	from jarvis.installed_apps_sync import record_synced_snapshot
+	from jarvis.jarvis.pool_serialize import lone_direct_handover_due
+
+	if not lone_direct_handover_due(settings):
+		if (settings.get("last_sync_status") or "").startswith(_PENDING_HANDOVER_STATUS):
+			return "resync"
+		return None
+	# Captured BEFORE any write below mutates settings in place (_write_settings_fields
+	# updates the in-memory doc too): every "still pending" write below re-records
+	# THIS attempt number, never resetting it - only _enqueue_handover (a fresh
+	# user action or reconcile's own bounded bump) ever advances it.
+	current_status = settings.get("last_sync_status") or ""
+	pending_status = f"{_PENDING_HANDOVER_STATUS} (attempt {max(1, _handover_attempt(current_status))})"
+	terminal_written = False
+	try:
+		provider, blob = _direct_subscription_blob(settings)
+		llm_provider = (settings.llm_provider or "").strip()
+		if not llm_provider:
+			raise admin_client.AdminValidationError("handover: missing llm_provider (catalog provider)")
+		result = (
+			admin_client.post_subscription_handover(
+				provider,
+				blob,
+				llm_provider,
+				model=settings.llm_model or "",
+				base_url=settings.llm_base_url or "",
 			)
-			_write_settings_fields(
-				settings, {"last_sync_status": "failed: skipped (concurrent sync did not finish in time)"}
+			or {}
+		)
+		record_synced_snapshot()
+		_refresh_db_snapshot()
+		if result.get("result") != "ok":
+			_write_settings_fields(settings, {"last_sync_status": pending_status})
+		else:
+			now = frappe.utils.now()
+			landed = _write_settings_fields(
+				settings,
+				{
+					"llm_direct_synced_at": now,
+					"llm_pool_synced_at": None,
+					"proxy_active": 0,
+					"last_sync_at": now,
+					"last_sync_status": "ok (moved to direct via admin)",
+				},
 			)
-			return
-		settings = frappe.get_single("Jarvis Settings")
-		settings._sync_via_admin(action)
+			if not landed:
+				_write_settings_fields(settings, {"last_sync_status": pending_status})
+		_commit_terminal_sync_status()
+		terminal_written = True
+		from jarvis.account import _bust_chat_gate
+
+		_bust_chat_gate()
+		return None
+	except admin_client.AdminValidationError as e:
+		if admin_client.is_handover_unsupported(e):
+			terminal_written = True
+			return "pool"
+		# CR-2: a business rejection (bad spec, unknown provider, ...) is just as
+		# terminal as the missing-endpoint case above - admin was reached and will
+		# never accept this SAME request on retry - so it takes the same fallback
+		# rather than a "failed:" status with nothing to act on it. No status write
+		# here: the pool push that runs next owns last_sync_status.
+		terminal_written = True
+		frappe.log_error(
+			title="Jarvis: handover rejected, falling back to the pool push",
+			message=frappe.get_traceback(),
+		)
+		return "pool"
+	except admin_client.AdminRejectedError:
+		# CR-2: admin was REACHED and permanently refused this config - see the
+		# AdminValidationError branch above, which this mirrors exactly.
+		terminal_written = True
+		frappe.log_error(
+			title="Jarvis: handover rejected, falling back to the pool push",
+			message=frappe.get_traceback(),
+		)
+		return "pool"
+	except (admin_client.AdminUnreachableError, *_WRITE_CONFLICT_ERRORS):
+		_write_settings_fields(settings, {"last_sync_status": pending_status})
+		_commit_terminal_sync_status()
+		terminal_written = True
+	except admin_client.AdminRateLimitedError as e:
+		# No fallback here (CR-2 scope): a rate limit is not a rejection of THIS
+		# config, and the pool push would hit the very same admin-side bucket.
+		retry = e.retry_after_seconds or 0
+		_write_settings_fields(
+			settings,
+			{
+				"last_sync_at": frappe.utils.now(),
+				"last_sync_status": f"failed: rate-limited; retry_after={retry}s"
+				if retry
+				else "failed: rate-limited; retry shortly",
+			},
+		)
+		_commit_terminal_sync_status()
+		terminal_written = True
+	except admin_client.AdminAuthError as e:
+		# CR-5: mirrors _sync_via_admin's never-paid exemption. A never-paid 403 is
+		# an ordinary, recurring billing state (not a genuine auth defect, and not
+		# something a pool-push fallback would fix), so it is recorded and
+		# swallowed - no log_error, no raise, no rq alert on every sync attempt
+		# until the customer pays. Any OTHER auth failure keeps today's behavior.
+		from jarvis.account import _is_never_paid_403
+
+		never_paid = _is_never_paid_403(e)
+		_write_settings_fields(
+			settings,
+			{
+				"last_sync_at": frappe.utils.now(),
+				"last_sync_status": (
+					"failed: not paid (CUSTOMER_NOT_PAID)" if never_paid else f"failed: auth: {e}"
+				),
+			},
+		)
+		_commit_terminal_sync_status()
+		terminal_written = True
+		if not never_paid:
+			frappe.log_error(title="Jarvis: handover auth failed", message=frappe.get_traceback())
+			raise
+	finally:
+		if not terminal_written:
+			try:
+				_write_settings_fields(
+					settings,
+					{
+						"last_sync_at": frappe.utils.now(),
+						"last_sync_status": "failed: unexpected error; see Error Log",
+					},
+				)
+				_commit_terminal_sync_status()
+			except Exception:
+				pass
+	return None
 
 
 def request_resync(settings) -> str:
@@ -2621,8 +3299,23 @@ def request_resync(settings) -> str:
 	``get_doc_before_save()``, which is None outside an actual save, and its own
 	rule for a re-push of UNCHANGED creds after a non-ok status is "restart" anyway,
 	because a hot secret rotation cannot repair a container that never took the
-	config."""
-	from jarvis.jarvis.pool_serialize import compute_pool_mode
+	config.
+
+	jarvis#1425 review round 1: both legs must join an ALREADY-active switch
+	instead of racing it - the pool leg's ``_enqueue_pool_sync()`` already does
+	(``_switch_or_enqueue`` ORs in ``llm_switch.is_active()``); the direct leg
+	has no proxy_active notion of its own to compare (no before-doc here
+	either), so it passes that same "is a switch active right now" signal
+	explicitly instead of a plain ``frappe.enqueue``."""
+	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
+
+	if lone_direct_handover_due(settings):
+		# jarvis#1425: a due handover pre-empts both legs - the pool leg would push
+		# the very spec the handover is retiring, and this settings config is still
+		# pool-shaped, so leaving this check out would fall into the pool branch
+		# below.
+		settings._enqueue_handover()
+		return "direct"
 
 	if compute_pool_mode(settings):
 		settings._enqueue_pool_sync()
@@ -2644,12 +3337,12 @@ def request_resync(settings) -> str:
 		settings,
 		{"last_sync_status": "pending: provisioning container", "last_sync_requested_at": frappe.utils.now()},
 	)
-	frappe.enqueue(
+	from jarvis.chat import llm_switch
+
+	_switch_or_enqueue(
+		settings,
 		"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin",
-		queue="long",
-		timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
-		enqueue_after_commit=not (frappe.flags.in_test or frappe.flags.run_admin_sync_inline),
-		now=bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline),
+		is_switch=llm_switch.is_active(),
 		job_id="jarvis_settings_sync:restart",
 		deduplicate=True,
 		action="restart",
@@ -2806,8 +3499,30 @@ def reconcile_pending_llm_sync() -> None:
 	earlier. It converges from what admin already publishes instead, so a killed
 	worker, a dropped connection and a customer who closed the tab all land in the
 	same place on the next tick.
+
+	jarvis#1425 follow-up (seamless switch, spec Part C): this poller also
+	drives ``llm_switch`` forward on every tick - ``reconcile()`` applies a
+	held switch past its cap and ends one whose apply has already reached a
+	terminal ``last_sync_status`` - independent of, and before, the checks
+	below so it fires even on a tick that is otherwise a no-op for this
+	function's own logic.
 	"""
 	try:
+		from jarvis.chat import llm_switch
+
+		try:
+			llm_switch.reconcile()
+		except Exception:
+			frappe.log_error(title="Jarvis: llm_switch.reconcile failed", message=frappe.get_traceback())
+
+		# Per-agent models: re-validate the choices when the pool moved.
+		try:
+			from jarvis.chat import agent_models
+
+			agent_models.check_pool_fingerprint()
+		except Exception:
+			frappe.log_error(title="Jarvis: agent model pool check failed", message=frappe.get_traceback())
+
 		settings = frappe.get_single("Jarvis Settings")
 		# Un-onboarded: no admin credentials -> get_connection would just raise.
 		admin_api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
@@ -2817,9 +3532,47 @@ def reconcile_pending_llm_sync() -> None:
 		if not admin_api_key and not customer_pw:
 			return
 
-		from jarvis.jarvis.pool_serialize import compute_pool_mode, has_configured_subscription_model
+		from jarvis.jarvis.pool_serialize import (
+			compute_pool_mode,
+			has_configured_subscription_model,
+			lone_direct_handover_due,
+		)
 
 		status = settings.get("last_sync_status") or ""
+		# jarvis#1425: a due handover is re-driven, never stamped: admin reports the
+		# still-pooled tenant Ready, and stamping would close a move that never ran.
+		if lone_direct_handover_due(settings) and status.startswith(_PENDING_HANDOVER_STATUS):
+			# 2026-09-25 review: bound the re-drive. Each attempt STOPS AND
+			# RESTARTS the customer's container - a fleet endpoint that fails
+			# every time (e.g. doctor always fails) would otherwise be re-driven
+			# on every */5 tick forever and bounce chat indefinitely. Skip a tick
+			# whose in-band job may still be running (same RQ envelope the job
+			# itself is bounded by); past that, count attempts and give up onto
+			# the pool push - the sync that served this workspace before
+			# jarvis#1425 existed - once _HANDOVER_MAX_ATTEMPTS is spent, leaving
+			# the workspace on the proxy (working) until the next Apply retries
+			# the handover from a clean attempt-1 budget.
+			requested_at = settings.get("last_sync_requested_at")
+			if requested_at and frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) < (
+				ADMIN_SYNC_RQ_TIMEOUT_S
+			):
+				return
+			attempt = _handover_attempt(status)
+			if attempt >= _HANDOVER_MAX_ATTEMPTS:
+				frappe.log_error(
+					title="Jarvis: handover gave up after 3 attempts, falling back to the pool push"
+				)
+				settings._enqueue_pool_sync()
+				return
+			settings._enqueue_handover(attempt=attempt + 1)
+			return
+		# Some OTHER pending status on a due workspace (e.g. a stale
+		# _PENDING_APPLYING_STATUS from before the shape narrowed to one ChatGPT
+		# account) - unrelated to the handover's own retry budget above, so this
+		# re-drives fresh at attempt 1, exactly as Task 11 left it.
+		if lone_direct_handover_due(settings) and status.startswith("pending:"):
+			settings._enqueue_handover()
+			return
 		# The evidence marker follows the SYNC LEG, so this is pool mode, not the
 		# narrower proxy_active (an agent-direct pool stamps llm_pool_synced_at).
 		pool_mode = compute_pool_mode(settings)
@@ -2877,7 +3630,29 @@ def reconcile_pending_llm_sync() -> None:
 				# single-model tenants (is_ready_for_chat's first-activation gates).
 				# A lost race needs no handling here: this tick changes nothing and
 				# the next one (or the SPA's own poller) re-probes and re-stamps.
-				_stamp_converged_ok(settings, is_pool=pool_mode)
+				#
+				# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is
+				# HELD (not yet applied) or applied but not yet confirmed by
+				# admin, "Ready" describes the config BEFORE the switch, never
+				# the one this poller thinks is outstanding. Stamping here
+				# would flip "ok" (and the synced marker) while the tenant is
+				# still serving the OLD leg, possibly forever if the switch
+				# record is then lost. jarvis#1425 review, fourth pass: once
+				# the switch's own released worker calls await_admin() (admin
+				# ACCEPTED the push; only convergence confirmation pending),
+				# Ready genuinely describes THIS config and the stamp is
+				# correct - reconcile() right after ends the switch on it at
+				# once instead of waiting for the next tick.
+				if not llm_switch.blocks_stamp():
+					if _stamp_converged_ok(settings, is_pool=pool_mode):
+						# Explicit + idempotent, same pattern as
+						# llm_switch._reconcile_awaiting_admin's own call: this
+						# function runs as a scheduled job (frappe.local.job set),
+						# so _stamp_converged_ok's own internal call already
+						# committed - this is a harmless no-op repeat, kept for
+						# consistency with every other stamp-then-reconcile site.
+						_commit_terminal_sync_status()
+						llm_switch.reconcile()
 			return
 		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
 			return
