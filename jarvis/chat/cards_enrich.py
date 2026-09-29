@@ -183,12 +183,16 @@ def enrich_message(message_name: str, owner: str | None = None) -> None:
 	try:
 		txn.replay_on_conflict(_read_enrich_write, label=f"chat: enrich cards {message_name}", fresh=True)
 	except Exception as e:
-		if txn.is_write_conflict(e):
+		try:
 			# Both attempts lost the race, or a write already pending in this transaction
 			# made a replay unsafe (``replay_is_safe`` false before the first attempt): log
 			# it so a real pattern of lost enrichments is visible, but a card is a
-			# convenience, never worth failing the turn over.
-			frappe.log_error(title="chat: card enrichment lost a write race", message=frappe.get_traceback())
-		else:
+			# convenience, never worth failing the turn over. report_lost_race re-raises
+			# anything that is not a write conflict, caught below.
+			txn.report_lost_race(e, title="chat: card enrichment lost a write race")
+		except Exception:
+			# A non-conflict failure (malformed JSON deep in enrich_text, a permission
+			# error, ...) - this site logs it too rather than letting it escape, unlike
+			# report_lost_race's default of re-raising to the caller.
 			frappe.log_error(title="chat: card enrichment failed", message=frappe.get_traceback())
 		frappe.clear_messages()

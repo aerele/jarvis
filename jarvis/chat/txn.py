@@ -105,6 +105,24 @@ def replay_is_safe() -> bool:
 	)
 
 
+def report_lost_race(e: BaseException, *, title: str) -> None:
+	"""The shared end of a replay that still lost: call it from ``except Exception as e``
+	around a ``replay_on_conflict`` whose caller must not raise (a job that promises
+	never to raise out, an endpoint that answers with its own shape).
+
+	Anything that is not a write conflict is re-raised untouched. A write conflict
+	has already aborted the transaction on the server: roll Frappe's side back so the
+	next statement starts clean, and log it once under ``title``. The caller then
+	returns its own fallback."""
+	if not is_write_conflict(e):
+		raise e
+	try:
+		frappe.db.rollback()
+	except Exception:
+		pass
+	frappe.log_error(title=title, message=frappe.get_traceback())
+
+
 def replay_on_conflict(
 	fn: Callable[[], T],
 	*,

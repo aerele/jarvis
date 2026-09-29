@@ -233,6 +233,41 @@ class TestSliceAndHop(_RaceCase):
 
 		assert_fix_closes_race(self, scenario, check)
 
+	def test_a_race_that_keeps_winning_backs_off_then_stops_retrying(self):
+		# Loop control around the slice-level replay, with a real engine conflict on EVERY
+		# slice: it must pause a little longer each time and stop after the cap instead of
+		# spinning against a hot row.
+		self._new_shard()
+		conv = self._mk_conv()
+		calls: list = []
+		sleeps: list = []
+
+		def always_racing(ctx):
+			calls.append(1)
+			open_read_view()
+			_compete(f"UPDATE `tab{CONV}` SET title=%s WHERE name=%s", (f"renamed {len(calls)}", conv))
+			frappe.db.sql(f"SELECT name FROM `tab{CONV}` WHERE name=%s FOR UPDATE", conv)
+			return "continue"
+
+		deps = self._deps(double=self._double())
+		with (
+			snapshot_isolation_on(),
+			as_job(),
+			patch.object(pump, "drain_slice", always_racing),
+			patch.object(pump, "_sleep", sleeps.append),
+		):
+			try:
+				out = pump.run_pump_hop(self._target, deps=deps, max_slices=50)
+			except frappe.QueryDeadlockError:
+				out = None  # no hop-level catch-all yet: the capped conflict propagates
+		self.assertEqual(len(calls), pump.WRITE_CONFLICT_ATTEMPTS)
+		self.assertEqual(
+			sleeps, [pump.WRITE_CONFLICT_BACKOFF_S * n for n in range(1, pump.WRITE_CONFLICT_ATTEMPTS)]
+		)
+		if out is not None:
+			# With the M-01 hop-level catch-all (#1526) the capped conflict ends the hop as a crash.
+			self.assertEqual(out["exit"], "crashed")
+
 
 class TestTerminalRaces(_RaceCase):
 	def test_settlement_replays_a_race_on_the_reply_projection(self):

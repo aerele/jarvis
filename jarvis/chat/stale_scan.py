@@ -57,12 +57,6 @@ def scan_and_mark_errored() -> int:
 	errored = _sweep_orphan_turns(now)
 	for r in rows:
 		errored += _scan_one_row(r, now, managed_cutoff, error_cutoff)
-	# Still needed: _sweep_orphan_turns's second-strike branch (_heal_or_error_orphan)
-	# does err.insert() with no commit of its own (only its "overloaded" sub-branch
-	# commits explicitly), and when `rows` is empty here there is no _scan_one_row
-	# call left to flush it via its own fresh_snapshot(). A skipped/conflicted row
-	# above has nothing pending (its own unit already rolled back on loss).
-	frappe.db.commit()
 	return errored
 
 
@@ -97,15 +91,7 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 	try:
 		outcome = txn.replay_on_conflict(unit, label=f"stale_scan row {r['name']}", fresh=True)
 	except Exception as e:
-		if not txn.is_write_conflict(e):
-			raise
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		frappe.logger("jarvis.chat.stale_scan").warning(
-			"row %s lost a snapshot race, skipping this cycle: %s", r["name"], e
-		)
+		txn.report_lost_race(e, title="stale_scan: row failed")
 		return 0
 
 	if outcome == "errored":
@@ -234,15 +220,7 @@ def _sweep_orphan_turns(now) -> int:
 			if _heal_or_error_orphan(r, orig_attachments, orig_context):
 				errored += 1
 		except Exception as e:
-			if not txn.is_write_conflict(e):
-				raise
-			try:
-				frappe.db.rollback()
-			except Exception:
-				pass
-			frappe.logger("jarvis.chat.stale_scan").warning(
-				"orphan row %s lost a snapshot race, skipping this cycle: %s", r["name"], e
-			)
+			txn.report_lost_race(e, title="stale_scan: orphan row failed")
 	return errored
 
 
@@ -288,6 +266,11 @@ def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 		}
 	)
 	err.insert(ignore_permissions=True)
+	# The scan is a scheduler job, so nothing commits until it ends: make the error
+	# row durable before the publish below points the user's client at it. A failed
+	# insert never reaches here: the caller's report_lost_race rolls it back and the
+	# next scan retries the row.
+	frappe.db.commit()
 	if r.get("owner"):
 		publish_to_user(
 			r["owner"],

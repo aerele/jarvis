@@ -139,6 +139,14 @@ def tenant_wide_per_model_tokens(month: str) -> list[dict]:
 	)
 
 
+def user_settings_name(user: str) -> str:
+	"""The name of ``user``'s settings row, created if absent, without loading the whole
+	document: callers that only write a field or two by name (``suggestions.store`` /
+	``touch``) need nothing more. The create path is ``get_or_create_user_settings``'s
+	own, race handling included."""
+	return frappe.db.exists(USER_SETTINGS, {"user": user}) or get_or_create_user_settings(user).name
+
+
 def get_or_create_user_settings(user: str):
 	"""Return the ``Jarvis User Settings`` doc for ``user``, creating it if
 	absent. Insert is ``ignore_permissions`` with an explicit ``owner=user`` so
