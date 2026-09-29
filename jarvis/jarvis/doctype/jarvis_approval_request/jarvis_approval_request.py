@@ -104,6 +104,23 @@ class JarvisApprovalRequest(Document):
 
 	def on_update(self):
 		self._leave_trace_comment()
+		self._recount_badge()
+
+	def _recount_badge(self):
+		"""A Pending row decided, dismissed or restored moves the board badge: tell the
+		owner's other tabs and devices to re-count (the acting tab already does)."""
+		if not self.has_value_changed("status") or self.is_new():
+			return
+		from jarvis.chat.events import publish_to_user
+
+		owner = (
+			frappe.db.get_value("Jarvis Conversation", self.conversation, "owner")
+			if self.conversation
+			else None
+		)
+		payload = {"kind": "action:settled", "name": self.name, "status": self.status}
+		# after the commit, so a re-count never reads the row before its new status lands
+		frappe.db.after_commit.add(lambda: publish_to_user(owner or self.owner, payload))
 
 	def _leave_trace_comment(self):
 		"""Audit trail ON the business document: once this approval is

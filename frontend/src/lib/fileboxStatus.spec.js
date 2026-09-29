@@ -17,6 +17,7 @@ describe("fileboxStatus", () => {
 			"Needs approval",
 			"Applying",
 			"Draft created",
+			"Duplicate",
 			"No draft",
 			"Failed",
 		]);
@@ -85,9 +86,34 @@ describe("fileboxStatus", () => {
 		expect(resultLink(null)).toBeNull();
 	});
 
-	it("offers Re-run only for failed / no_draft (AC8)", () => {
+	it("labels a duplicate and a draft whose state moved on (#618, #619)", () => {
+		expect(statusBadge({ status: "duplicate" })).toEqual({
+			label: "Duplicate",
+			theme: "orange",
+		});
+		expect(STATUSES).toContain("duplicate");
+		expect(statusBadge({ status: "draft_created", result_state: "" }).label).toBe(
+			"Draft created"
+		);
+		expect(statusBadge({ status: "draft_created", result_state: "submitted" }).label).toBe(
+			"Submitted"
+		);
+		expect(statusBadge({ status: "draft_created", result_state: "cancelled" }).label).toBe(
+			"Cancelled"
+		);
+		expect(statusBadge({ status: "draft_created", result_state: "deleted" }).label).toBe(
+			"Draft deleted"
+		);
+		// result_state only reads on a drafted row
+		expect(statusBadge({ status: "no_draft", result_state: "submitted" }).label).toBe(
+			"No draft"
+		);
+	});
+
+	it("offers Re-run only for failed / no_draft / duplicate (AC8)", () => {
 		expect(canRerun({ status: "failed", is_owner: true })).toBe(true);
 		expect(canRerun({ status: "no_draft", is_owner: true })).toBe(true);
+		expect(canRerun({ status: "duplicate", is_owner: true })).toBe(true);
 		for (const status of [
 			"processing",
 			"needs_approval",
