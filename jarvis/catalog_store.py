@@ -30,11 +30,15 @@ CATALOG_UNAVAILABLE_MESSAGE = "Models are unavailable right now. Try again in a 
 
 
 class CatalogStore:
-	def __init__(self, kind: str, admin_method: str, unwrap_keys: tuple, cache_key: str):
+	def __init__(
+		self, kind: str, admin_method: str, unwrap_keys: tuple, cache_key: str, on_change: str | None = None
+	):
 		self.kind = kind
 		self.admin_method = admin_method
 		self.unwrap_keys = unwrap_keys
 		self.cache_key = cache_key
+		# Dotted path called after a refresh that changed the saved catalog.
+		self.on_change = on_change
 
 	def read(self) -> list:
 		cached = self._cached()
@@ -69,9 +73,15 @@ class CatalogStore:
 			return self.read()
 		self._cache(catalog)
 		try:
-			self._save_snapshot(catalog)
+			changed = self._save_snapshot(catalog)
 		except Exception:
+			changed = False
 			frappe.log_error(title=f"catalog_store: saving the {self.kind} catalog snapshot failed")
+		if changed and self.on_change:
+			try:
+				frappe.get_attr(self.on_change)()
+			except Exception:
+				frappe.log_error(title=f"catalog_store: {self.kind} catalog change hook failed")
 		return catalog
 
 	def _backing_off(self) -> bool:
@@ -118,7 +128,7 @@ class CatalogStore:
 		value = json.loads(raw) if isinstance(raw, str) else raw
 		return value if isinstance(value, list) else []
 
-	def _save_snapshot(self, catalog: list) -> None:
+	def _save_snapshot(self, catalog: list) -> bool:
 		# The catalog is rewritten only when it changed; the fetch time always moves
 		# so "how stale is this site's copy" is answerable during an outage.
 		new = json.dumps(catalog, sort_keys=True)
@@ -129,6 +139,7 @@ class CatalogStore:
 		if old != new:
 			values[self._field] = new
 		frappe.db.set_single_value(SNAPSHOT_DT, values)
+		return old != new
 
 	@property
 	def _field(self) -> str:
@@ -140,6 +151,7 @@ MODELS = CatalogStore(
 	admin_method="fleet.provider_catalog.get_provider_catalog",
 	unwrap_keys=("data",),
 	cache_key="jarvis:model_catalog",
+	on_change="jarvis.chat.agent_models.on_model_catalog_changed",
 )
 PRESETS = CatalogStore(
 	kind="preset",

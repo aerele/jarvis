@@ -20,7 +20,6 @@ import { h } from "vue";
  */
 
 const api = vi.hoisted(() => ({
-	installAgent: vi.fn(),
 	uninstallAgent: vi.fn(),
 	setEnabled: vi.fn(),
 	setSchedule: vi.fn(),
@@ -44,8 +43,16 @@ const apiAgents = vi.hoisted(() => ({
 	listAgentActivityPage: vi.fn(),
 	takeFindingToChat: vi.fn(),
 	listAgentsPage: vi.fn(),
+	// T6: AgentDetail's own pre-install gate probe - left unconfigured
+	// (resolves undefined -> null), which keeps today's install behaviour;
+	// AgentModelCard/AgentInstallDialog themselves are stubbed via STUBS below.
+	getAgentModel: vi.fn(),
+	getEligibleModels: vi.fn(),
+	installAgent: vi.fn(),
 }));
 vi.mock("@/api/agents", () => apiAgents);
+
+vi.mock("@/stores/shell", () => ({ useShellStore: () => ({ openSettings: vi.fn() }) }));
 
 const confirmDialog = vi.hoisted(() => vi.fn());
 vi.mock("frappe-ui", () => {
@@ -106,6 +113,8 @@ const STUBS = {
 	AgentRunsBoard: true,
 	ActivationPanel: true,
 	ConfigForm: true,
+	AgentModelCard: true,
+	AgentInstallDialog: true,
 	AppSourceConsentDialog: true,
 	JvSpinner: true,
 	ShadowChip: true,

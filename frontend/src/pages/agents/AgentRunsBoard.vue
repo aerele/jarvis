@@ -100,6 +100,23 @@
 										· {{ row.advisory_findings_count }} advisory
 									</span>
 								</div>
+								<!-- T6: per-agent minimum model - blank on a legacy run (recorded
+								     before per-agent models existed, or with the flag off). -->
+								<div
+									v-if="runModelInfo(row)"
+									class="mt-1 truncate text-sm"
+									:class="
+										runModelInfo(row).warn
+											? 'text-ink-amber-3'
+											: 'text-ink-gray-5'
+									"
+									:title="runModelInfo(row).title"
+								>
+									Model: {{ runModelInfo(row).label
+									}}<template v-if="runModelInfo(row).note">
+										· {{ runModelInfo(row).note }}</template
+									>
+								</div>
 								<!-- jarvis#1062 P1-7 (production-readiness audit): failed and
 								     stopped both showed "0 findings" with nothing to tell them
 								     apart without opening the run. A short reason line now
@@ -247,6 +264,7 @@ import { useListPage } from "@/composables/useListPage";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as apiAgents from "@/api/agents";
 import { STATUS_THEME, runReason, coverageWarned } from "@/lib/agentRunStatus";
+import { runModelInfo } from "@/lib/agentRunModel";
 
 const props = defineProps({
 	agentName: { type: String, required: true }, // listing docname (list_runs_page filter)

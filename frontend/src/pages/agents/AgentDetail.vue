@@ -361,6 +361,30 @@
 					/>
 				</section>
 
+				<!-- T6: tenant-wide per-agent minimum model. Mounted only once
+				     modelInfoSettled (the parent's OWN get_agent_model probe has
+				     resolved, success or failure) - mounting it the instant the tab
+				     shows would race the probe: initialInfo would still be null, so
+				     EVERY flag-off tenant's first visit would show the card's own
+				     duplicate fetch + a loading flash instead of nothing. Settled +
+				     succeeded -> seeds from initial-info/initial-eligible, never
+				     fetches. Settled + failed -> the card does its own fallback fetch,
+				     rendering nothing while THAT is in flight (its own outer gate drops
+				     `loading`, see AgentModelCard.vue) - flag-off still stays zero-DOM,
+				     a genuine failure still surfaces error+Retry. :key re-mounts fresh
+				     on every agent switch, so no per-agent state lingers from the
+				     card's `info = ref(props.initialInfo)` seed-at-setup pattern. -->
+				<AgentModelCard
+					v-if="modelInfoSettled"
+					:key="agent.name"
+					:agent-slug="agent.name"
+					:can-apply="canReview"
+					:is-admin="isSM"
+					:initial-info="modelInfo"
+					:initial-eligible="modelEligible"
+					@connect-provider="goConnectProvider"
+				/>
+
 				<!-- Configuration on the left/primary column, Schedule on the right -
 				     the same 2-col-on-lg+ pattern as the Admin tab (Access left,
 				     Installs right), same section-heading style
@@ -613,6 +637,21 @@
 			confirm-label="Start learning"
 			@confirm="startRun"
 		/>
+
+		<!-- T6: install-time model confirm - only ever opened when the flag is on
+		     AND the listing declares a min_model (shouldConfirmInstallModel).
+		     :key re-mounts fresh per agent, same reasoning as AgentModelCard above. -->
+		<AgentInstallDialog
+			v-if="agent"
+			:key="agent.name"
+			v-model="installDialogOpen"
+			:agent-slug="props.slug"
+			:agent-title="agent.title"
+			:required-tier="(modelInfo && modelInfo.required_tier) || ''"
+			:is-admin="isSM"
+			@confirm="onInstallDialogConfirm"
+			@connect-provider="goConnectProvider"
+		/>
 	</div>
 </template>
 
@@ -652,6 +691,8 @@ import TabBar from "@/components/list/TabBar.vue";
 import AgentRunsBoard from "@/pages/agents/AgentRunsBoard.vue";
 import ActivationPanel from "@/pages/agents/ActivationPanel.vue";
 import AgentAccessEditor from "@/pages/agents/AgentAccessEditor.vue";
+import AgentModelCard from "@/pages/agents/AgentModelCard.vue";
+import AgentInstallDialog from "@/pages/agents/AgentInstallDialog.vue";
 import ConfigForm from "@/pages/agents/ConfigForm.vue";
 import AppSourceConsentDialog from "@/components/learning/AppSourceConsentDialog.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
@@ -662,8 +703,10 @@ import * as apiAgents from "@/api/agents";
 import { renderMarkdown } from "@/markdown";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { session } from "@/data/session";
+import { useShellStore } from "@/stores/shell";
 import { parseListField } from "@/lib/parseListField";
 import { categoryTitle } from "@/lib/agentCategory";
+import { shouldConfirmInstallModel, isNoneEligible } from "@/lib/agentModelTier";
 import {
 	WEEKDAY_OPTIONS,
 	DAY_OF_MONTH_OPTIONS,
@@ -745,6 +788,13 @@ watch(
 		adminData.value = null;
 		activation.value = null;
 		initialLoadSettled.value = false;
+		// FE-1 review fix: an install-confirm dialog left open across an
+		// in-app agent switch (e.g. via a route change while it was showing)
+		// otherwise silently reopens for the NEXT agent - it is keyed off a
+		// plain boolean, not per-agent state like `agent`/`activation` above.
+		installDialogOpen.value = false;
+		installError.value = "";
+		installing.value = false;
 		load().then(() => {
 			initialLoadSettled.value = true;
 			applyHash();
@@ -821,6 +871,75 @@ function onActivationChanged(next) {
 	activation.value = next;
 }
 
+// ── T6: per-agent minimum model - the pre-install gate ───────────────────────
+// get_agent_model() works before AND after install (it is read-gated the same
+// as get_agent), so this one fetch feeds BOTH the Install button's
+// disablement/confirm-dialog decision below AND seeds AgentModelCard once
+// installed (initial-info/initial-eligible), so the card's OWN first fetch is
+// deduped away in the common case.
+const modelInfo = ref(null); // get_agent_model()
+const modelEligible = ref(null); // get_eligible_models() - only fetched when enforced
+// True once THIS agent's probe has resolved (success or failure) - gates when
+// AgentModelCard is allowed to mount (see its call site above): mounting it
+// before this settles would race the probe (initialInfo still null), making
+// the card do its own duplicate fetch, with its own loading flash, on every
+// single page load - not just the rare race this was originally caught in.
+const modelInfoSettled = ref(false);
+// Monotonic id: a slug switch can fire a second loadModelInfo() before the
+// first's network round-trip lands. Without this, an OUT-OF-ORDER response
+// (agent A's slow reply arriving after agent B's fast one) silently
+// overwrites modelInfo/modelEligible with the WRONG agent's data - the wrong
+// eligible list, the wrong install-confirm requirement. Checked after EVERY
+// await, not just the first, since the second (getEligibleModels) call is
+// its own separate await this can be superseded across.
+let modelInfoReqId = 0;
+async function loadModelInfo() {
+	if (!agent.value) {
+		modelInfo.value = null;
+		modelEligible.value = null;
+		modelInfoSettled.value = false;
+		return;
+	}
+	const id = ++modelInfoReqId;
+	const slug = agent.value.name;
+	modelInfoSettled.value = false;
+	let info = null;
+	let elig = null;
+	let failed = false;
+	try {
+		info = (await apiAgents.getAgentModel(slug)) || null;
+		if (id !== modelInfoReqId) return; // superseded - a newer probe owns the commit
+		elig = info && info.enforced ? (await apiAgents.getEligibleModels(slug)) || null : null;
+		if (id !== modelInfoReqId) return; // superseded mid-flight, after the 2nd call
+	} catch (e) {
+		// Best-effort: a failed probe must not block Install - it just falls back
+		// to today's behaviour (no confirm dialog, no pre-emptive disablement).
+		failed = true;
+	}
+	if (id !== modelInfoReqId) return; // superseded while the catch branch ran
+	modelInfo.value = failed ? null : info;
+	modelEligible.value = failed ? null : elig;
+	modelInfoSettled.value = true;
+}
+watch(
+	() => agent.value && agent.value.name,
+	(name) => {
+		if (name) loadModelInfo();
+		else {
+			modelInfoReqId++; // invalidate any in-flight probe for the agent just left
+			modelInfo.value = null;
+			modelEligible.value = null;
+			modelInfoSettled.value = false;
+		}
+	},
+	{ immediate: true }
+);
+
+const shellStore = useShellStore();
+function goConnectProvider() {
+	shellStore.openSettings("aimodels");
+}
+
 // ── hash-synced tabs (useActiveTabManager pattern) ───────────────────────────
 const tab = ref("overview");
 const runsBoard = ref(null);
@@ -881,13 +1000,22 @@ const installError = ref("");
 // disable Install client-side instead of letting the click round-trip into
 // a toast-only refusal.
 const isAdministratorSession = computed(() => session.user === "Administrator");
+// T6: pre-emptively block Install only on a CONFIRMED empty eligible set
+// (catalog "ok", zero models) - an unreadable catalog ("unknown") must not
+// block the click, since install_agent's own plan_install may still succeed
+// or throw its own plain-language error either way (surfaced via installError
+// below, same as any other install failure).
+const installNoneEligible = computed(
+	() => shouldConfirmInstallModel(modelInfo.value) && isNoneEligible(modelEligible.value)
+);
 const canInstall = computed(
 	() =>
 		!!(
 			agent.value &&
 			agent.value.allowed &&
 			agent.value.status === "Published" &&
-			!isAdministratorSession.value
+			!isAdministratorSession.value &&
+			!installNoneEligible.value
 		)
 );
 const installTooltip = computed(() => {
@@ -897,14 +1025,35 @@ const installTooltip = computed(() => {
 	// and naming who DOES have access is admin information anyway.
 	if (!agent.value.allowed)
 		return "You do not have access to this agent. Ask your administrator.";
+	if (installNoneEligible.value)
+		return "None of your connected AI providers offer a model this agent needs.";
 	return agent.value.status === "Coming Soon" ? "Coming soon" : "Not available to install";
 });
 
-async function install() {
+// T6: the confirm dialog only opens when the flag is on AND the listing
+// declares a min_model - off (or no requirement), Install behaves exactly as
+// before: one click, straight through to doInstall().
+const installDialogOpen = ref(false);
+function install() {
 	if (installing.value || !canInstall.value) return;
+	if (shouldConfirmInstallModel(modelInfo.value)) {
+		installDialogOpen.value = true;
+		return;
+	}
+	return doInstall();
+}
+// `pick`: the dialog's model to send, if any - install_agent saves it with the install.
+// The dialog closes here; the Install button carries progress and errors.
+function onInstallDialogConfirm(pick) {
+	if (installing.value) return;
+	installDialogOpen.value = false;
+	doInstall(pick);
+}
+
+async function doInstall(pick) {
 	installing.value = true;
 	installError.value = "";
-	const p = api.installAgent(props.slug);
+	const p = apiAgents.installAgent(props.slug, pick);
 	toast.promise(p, {
 		loading: "Installing…",
 		success: () => `${agent.value.title} installed`,
@@ -918,6 +1067,11 @@ async function install() {
 		return;
 	}
 	await load();
+	// A fresh install may have just created the agent's model-choice row
+	// (plan_install) - re-probe so the Model card AgentModelCard mounts into
+	// (Configure, right below) seeds from the POST-install state, not the
+	// pre-install snapshot this same ref held a moment ago.
+	await loadModelInfo();
 	installing.value = false;
 	setTab("configure");
 }

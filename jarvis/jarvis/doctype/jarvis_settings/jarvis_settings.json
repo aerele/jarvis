@@ -16,6 +16,7 @@
   "agent_run_budget_monthly",
   "macro_step_budget_monthly",
   "activation_module_ceiling",
+  "enforce_agent_min_model",
   "branding_section",
   "agent_name",
   "brand_logo",
@@ -125,6 +126,7 @@
   "learned_skills_sync_status",
   "agent_catalog_dirty",
   "agent_catalog_version",
+  "last_validated_pool_fp",
   "role_profiles_pushed",
   "role_profiles_pushed_at",
   "role_profiles_config",
@@ -224,6 +226,14 @@
    "fieldname": "activation_module_ceiling",
    "fieldtype": "Int",
    "label": "Activation Module Ceiling (live agents, site-wide)"
+  },
+  {
+   "default": "0",
+   "description": "Require each agent's minimum model. Turned on by Jarvis support once your workspace is ready.",
+   "fieldname": "enforce_agent_min_model",
+   "fieldtype": "Check",
+   "label": "Enforce Agent Minimum Model",
+   "permlevel": 2
   },
   {
    "fieldname": "branding_section",
@@ -931,6 +941,14 @@
    "read_only": 1
   },
   {
+   "description": "Fingerprint of the LLM pool state the agent model choices were last re-validated against.",
+   "fieldname": "last_validated_pool_fp",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Validated Pool Fingerprint",
+   "read_only": 1
+  },
+  {
    "description": "JSON snapshot of the role-based agent profiles last pushed to admin (jarvis.chat.role_profiles.needed_profiles output). Compared against the freshly computed set on every sync to short-circuit an unchanged push.",
    "fieldname": "role_profiles_pushed",
    "fieldtype": "Small Text",
@@ -1225,7 +1243,23 @@
    "role": "Jarvis Admin",
    "read": 1,
    "write": 1
+  },
+  {
+   "role": "System Manager",
+   "permlevel": 2,
+   "read": 1
+  },
+  {
+   "role": "Administrator",
+   "read": 1,
+   "write": 1
+  },
+  {
+   "role": "Administrator",
+   "permlevel": 2,
+   "read": 1,
+   "write": 1
   }
  ],
- "modified": "2026-09-23 10:00:00.000000"
+ "modified": "2026-09-28 18:05:00.000000"
 }
