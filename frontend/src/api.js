@@ -818,7 +818,6 @@ export const retryWikiWrite = (name) =>
 const AG = "jarvis.chat.agents_api.";
 export const listAgents = () => call(AG + "list_agents");
 export const getAgentInstallations = () => call(AG + "get_installations");
-export const installAgent = (agent_slug) => call(AG + "install_agent", { agent_slug });
 export const uninstallAgent = (installation) => call(AG + "uninstall_agent", { installation });
 export const setAgentEnabled = (installation, enabled) =>
 	call(AG + "set_enabled", { installation, enabled: enabled ? 1 : 0 });

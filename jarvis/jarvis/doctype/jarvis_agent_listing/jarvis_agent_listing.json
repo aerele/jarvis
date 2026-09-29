@@ -21,6 +21,7 @@
   "config_keys",
   "rule_tokens",
   "min_apps",
+  "min_model",
   "rule_pack",
   "writes",
   "skill_bundle",
@@ -133,6 +134,13 @@
    "description": "JSON array of required Frappe apps, e.g. [\"erpnext\"]."
   },
   {
+   "description": "Minimum model capability the agent's bundle declares, e.g. {\"tier\": \"Advanced\"}. Synced from the bundled registry.",
+   "fieldname": "min_model",
+   "fieldtype": "JSON",
+   "label": "Minimum Model",
+   "read_only": 1
+  },
+  {
    "fieldname": "rule_pack",
    "fieldtype": "Data",
    "label": "Rule Pack",
@@ -180,7 +188,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-03 13:00:00.000000",
+ "modified": "2026-09-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Listing",

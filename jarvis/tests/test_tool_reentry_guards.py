@@ -37,6 +37,7 @@ POST_ONLY = (
 	"jarvis.chat.macros_api.run_macro",
 	"jarvis.chat.admission.cancel_queued_turn",
 	"jarvis.chat.agents_api.take_finding_to_chat",
+	"jarvis.chat.agents_api.install_agent",  # writes the tenant-wide model: never on a GET
 	"jarvis.chat.filebox.drop_file",
 	"jarvis.chat.filebox.delete_inbound",
 	"jarvis.chat.filebox.delete_inbound_bulk",
