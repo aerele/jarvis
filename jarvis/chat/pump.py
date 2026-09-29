@@ -77,6 +77,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.chat import turn_state as ts
+from jarvis.chat import txn
 from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
@@ -1170,18 +1171,11 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 	conversation = rs.conversation
 	owns_row = (not is_jarvis) and bool(tool_call_id)  # pump owns the durable receipt
 	need_lock = owns_row and phase == "start"  # seq allocation under the conversation lock
-	message_id = None
-	committed = False
-	try:
-		# commit-first on EVERY path so each row lock below opens a fresh txn: the
-		# conversation lock, the fence CAS on the Turn, and record_tool_owner's FOR UPDATE
-		# on the reply row. A jarvis__ tool used to skip this, so its reply-row lock ran on
-		# a read view older than the web worker's file-card write to the same row; with
-		# innodb_snapshot_isolation on (MariaDB 11.6.2+) that lock fails 1020 "Record
-		# has changed", the lane is quarantined, and the answer waits ~80-90 s for the
-		# next hop. on_tool already flushed + committed any pending delta, so nothing
-		# durable is dropped here.
-		frappe.db.commit()
+
+	def fenced_step() -> tuple[bool, str | None]:
+		"""One attempt at the fenced tool mutation. Returns ``(committed, message_id)``;
+		``(False, None)`` is a benign 0-rows fence loss. Replayed whole by
+		``txn.replay_on_conflict`` when it loses a snapshot race."""
 		if need_lock:
 			# rank-2 conversation lock; canonical order control->conversation->turn->message
 			# (no shard lock is held on the streaming path, so conversation-first is legal).
@@ -1194,7 +1188,7 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 			# nothing, publish nothing, re-sync the version.
 			frappe.db.rollback()
 			rs.version = _resync_version(rs.run_id)
-			return
+			return False, None
 		# CDX-18: the fence CAS has WON — this uncommitted txn already advanced the Turn
 		# version + last_event_seq watermark. If the durable tool-row write or the atomic
 		# commit below now raises, RelayMux._apply catches the (precious) exception and
@@ -1202,25 +1196,52 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 		# its recovery CAS, and that commit would ALSO flush this half-done txn (watermark
 		# advanced, tool row missing => replay skips the precious event). Roll the partial
 		# txn back and re-sync the in-memory version from the durable row BEFORE the
-		# exception propagates, so quarantine/recovery starts from a FRESH transaction.
+		# exception propagates, so a replay, or quarantine/recovery, starts from a FRESH
+		# transaction.
 		try:
 			rs.version += 1
 			from jarvis.chat.tool_ownership import record_tool_owner
 
 			record_tool_owner(conversation, rs.assistant_message, tool_call_id)
+			row_id = None
 			if owns_row:
 				if phase == "start":
-					message_id = _insert_tool_start_row(conversation, tool_call_id, tool_name)
+					row_id = _insert_tool_start_row(conversation, tool_call_id, tool_name)
 				else:
-					message_id = _update_tool_end_row(
-						conversation, tool_call_id, event.get("status"), rs.run_id
-					)
+					row_id = _update_tool_end_row(conversation, tool_call_id, event.get("status"), rs.run_id)
 			frappe.db.commit()  # fence + durable tool row commit ATOMICALLY
-			committed = True
+			return True, row_id
 		except Exception:
 			frappe.db.rollback()
 			rs.version = _resync_version(rs.run_id)
 			raise
+
+	def before_replay() -> None:
+		# The rollback released every row lock; forget them in the lock-order tracker too,
+		# so the replay's conversation lock is not refused as out of order.
+		ts.reset_lock_tracking()
+
+	try:
+		# commit-first on EVERY path so each row lock below opens a fresh txn: the
+		# conversation lock, the fence CAS on the Turn, and record_tool_owner's FOR UPDATE
+		# on the reply row. A jarvis__ tool used to skip this, so its reply-row lock ran on
+		# a read view older than the web worker's file-card write to the same row; with
+		# innodb_snapshot_isolation on (MariaDB 11.6.2+) that lock fails 1020 "Record
+		# has changed", the lane is quarantined, and the answer waits ~80-90 s for the
+		# next hop. on_tool already flushed + committed any pending delta, so nothing
+		# durable is dropped here. (#1523; ``owned``: unconditional, as #1523 made it, and
+		# through ``txn`` so the race tests can switch it off.)
+		txn.fresh_snapshot(owned=True)
+		# The fence and the lock are locking statements, which open no snapshot, so after
+		# the commit above they read the present. Any plain read inside the step (a helper
+		# that reads before it locks, now or later) would open one again; replay the whole
+		# fenced step once from a fresh transaction instead of quarantining. A second loss
+		# quarantines, as before.
+		committed, message_id = txn.replay_on_conflict(
+			fenced_step,
+			label=f"pump tool event {rs.run_id}:{event_seq}",
+			before_replay=before_replay,
+		)
 	finally:
 		if need_lock:
 			ts.reset_lock_tracking()
@@ -1680,6 +1701,21 @@ def run_pump_hop(
 					break
 				_backoff_reconnect(op_errors)
 				continue
+			except Exception as e:
+				# A slice step (dispatch, cancel sweep, yield sweep) lost a snapshot race:
+				# ``QueryDeadlockError`` is not an ``OperationalError``, so without this
+				# it would end the hop with no handoff and no successor, stalling every
+				# turn on the shard until the next send or the */5 watchdog. The server
+				# has already aborted the transaction; roll Frappe's side back and let the
+				# next slice re-read the present. Anything else still propagates.
+				if not txn.is_write_conflict(e):
+					raise
+				frappe.db.rollback()
+				ts.reset_lock_tracking()
+				# The database answered, so this is no step toward the disconnect park.
+				op_errors = 0
+				_telemetry("write_conflict", target=relay_target_id, error=str(e)[:200])
+				continue
 			slices += 1
 			if result == "idle_exit":
 				outcome = "idle"
@@ -1796,6 +1832,14 @@ def drain_slice(ctx: PumpContext) -> str:
 	# RPC set shrank — that is drain progress even in a slice with no mux frame applied.
 	polled_progress = (len(ctx.pending_acks) + len(ctx.pending_recoveries)) < pending_before
 
+	# The prelude above reads with plain SELECTs (``_dispatch_ready``) and a lost CAS in it
+	# returns without committing, so the transaction can reach ``dispatch`` holding a
+	# snapshot up to a slice old. Every event handler below locks or writes rows a web
+	# request may have committed since (the reply row's file card), which snapshot
+	# isolation refuses with 1020: the ~80 s export stall. End it here so each event
+	# starts on the present. Nothing uncommitted is pending: each prelude step commits
+	# its own win.
+	txn.fresh_snapshot()
 	applied = ctx.mux.dispatch(block_s=SLICE_BLOCK_S) if ctx.mux is not None else 0
 	if ctx.lease_lost:
 		ts.lease_lost_exit(ctx.lease_lost)
@@ -2233,11 +2277,18 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 		_park_recovering(ctx, run_id, reason="ack-timeout")
 		return False
 	# Definite rejection.
-	turn = ts.read_turn(run_id)
-	if turn is None:
-		return False
 	err = str(exc)
-	if ts.dispatch_errored(run_id, int(turn["version"]), ctx.epoch, error=err):
+
+	def errored() -> bool | None:
+		"""dispatching->errored plus the placeholder's error stamp, committed together.
+		True on a win, False on a CAS loss, None when the turn is gone. Replayed whole
+		on a snapshot race: that race aborts the CAS too, so committing the rest would
+		publish run:error for a turn still marked dispatching."""
+		turn = ts.read_turn(run_id)
+		if turn is None:
+			return None
+		if not ts.dispatch_errored(run_id, int(turn["version"]), ctx.epoch, error=err):
+			return False
 		# Mark the placeholder errored (streaming off + error) so a reload renders the
 		# failure instead of a stuck spinner (matches legacy _mark_errored).
 		if rs.assistant_message:
@@ -2246,9 +2297,21 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 					f"UPDATE `tab{MSG}` SET streaming=0, error=%(e)s WHERE name=%(m)s",
 					{"e": err[:1000], "m": rs.assistant_message},
 				)
-			except Exception:
-				pass
+			except Exception as e:
+				if txn.is_write_conflict(e):
+					raise
+				# Any other failure costs only the placeholder stamp, as before; say so.
+				frappe.log_error(
+					title="pump: ack-failure placeholder stamp failed", message=frappe.get_traceback()
+				)
 		frappe.db.commit()
+		return True
+
+	txn.fresh_snapshot()
+	outcome = txn.replay_on_conflict(errored, label=f"pump ack failure {run_id}")
+	if outcome is None:
+		return False
+	if outcome:
 		# jarvis#1425 review (live e2e2, 2026-09-27): a definite pre-ack
 		# rejection moves the Turn out of dispatching (ts.dispatch_errored
 		# above) without going through invoke_settlement or turn_handler -
@@ -2307,13 +2370,28 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	rs.pending_delta = ""
 	rs.events_since_flush = 0
 	rs.last_flush_mono = _monotonic()
-	won = ts.apply_delta(
-		run_id=rs.run_id,
-		version=rs.version,
-		epoch=ctx.epoch,
-		event_seq=seq,
-		assistant_message=rs.assistant_message,
-		content=text,
+
+	def resync() -> None:
+		rs.version = _resync_version(rs.run_id)
+		txn.fresh_snapshot()
+
+	# The CAS writes the turn row and the reply row, both of which other connections
+	# write (Stop bumps the turn's version, a tool's web request writes the reply's
+	# file card). ``on_terminal`` runs this flush before settling, and a terminal is
+	# precious: a snapshot-race loss here would quarantine the turn. Start on the
+	# present and replay a lost race once (the version it fences on re-read first).
+	txn.fresh_snapshot()
+	won = txn.replay_on_conflict(
+		lambda: ts.apply_delta(
+			run_id=rs.run_id,
+			version=rs.version,
+			epoch=ctx.epoch,
+			event_seq=seq,
+			assistant_message=rs.assistant_message,
+			content=text,
+		),
+		label=f"pump delta flush {rs.run_id}:{seq}",
+		before_replay=resync,
 	)
 	if won:
 		rs.version += 1
@@ -2422,7 +2500,22 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 	rs.yield_deadline = None
 	rs.yield_payload = None
 	_clear_yield_pending(rs.run_id)
-	won = ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload)
+	# The CAS below writes the turn row, which Stop (``request_cancel``) also writes, and
+	# the flush before it can leave a plain read (a version re-sync) open. A terminal is
+	# precious (a raise here quarantines the lane inside ``RelayMux._apply``, out of the
+	# hop's reach), so start it on the present, and if a plain read ever lands between
+	# the two, replay the CAS once from a fresh transaction instead of quarantining.
+	txn.fresh_snapshot()
+
+	def resync() -> None:
+		rs.version = _resync_version(rs.run_id)
+		txn.fresh_snapshot()
+
+	won = txn.replay_on_conflict(
+		lambda: ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload),
+		label=f"pump settle terminal {rs.run_id}",
+		before_replay=resync,
+	)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
 			ts.lease_lost_exit(rs.run_id)
@@ -2981,17 +3074,30 @@ def _settle_recovered_final(
 		payload["media_rels"] = media_rels
 	if marker_stripped:
 		payload["marker_stripped"] = True
-	if not ts.mark_terminal_observed(run_id, v, ctx.epoch, "relay:final", payload):
-		if _epoch_lost(ctx, run_id):
-			ts.lease_lost_exit(run_id)
+
+	def observe() -> bool:
+		"""streaming->terminal_observed plus the recovery stamps, committed together.
+		Replayed whole on a snapshot race: that race aborts the CAS too, and settling on
+		a swallowed failure would find the turn still streaming and quietly do nothing."""
+		if not ts.mark_terminal_observed(run_id, v, ctx.epoch, "relay:final", payload):
+			if _epoch_lost(ctx, run_id):
+				ts.lease_lost_exit(run_id)
+			return False
+		try:
+			frappe.db.set_value(TURN, run_id, "was_recovered", 1, update_modified=False)
+			if r.get("assistant_message"):
+				frappe.db.set_value(MSG, r["assistant_message"], "recovering", 0, update_modified=False)
+		except Exception as e:
+			if txn.is_write_conflict(e):
+				raise
+			# Any other failure costs only the stamps, as before; say so.
+			frappe.log_error(title="pump: recovered-final stamps failed", message=frappe.get_traceback())
+		frappe.db.commit()
+		return True
+
+	txn.fresh_snapshot()
+	if not txn.replay_on_conflict(observe, label=f"pump recovered final {run_id}"):
 		return
-	try:
-		frappe.db.set_value(TURN, run_id, "was_recovered", 1, update_modified=False)
-		if r.get("assistant_message"):
-			frappe.db.set_value(MSG, r["assistant_message"], "recovering", 0, update_modified=False)
-	except Exception:
-		pass
-	frappe.db.commit()
 	owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 	ctx.deps.invoke_settlement(
 		run_id,
@@ -3331,18 +3437,34 @@ def request_cancel_conversation(relay_or_conversation: str) -> bool:
 	for cancellation (D2 #17, actor-fenced) and wake the pump so its cancel sweep
 	drives the out-of-band ``chat.abort`` + aborted terminal + settle-cancelled.
 	Best-effort; returns True iff a turn was flagged. NOT terminal itself — the pump
-	still owns the abort + settle."""
+	still owns the abort + settle.
+
+	W2: the read + ``ts.request_cancel`` CAS is one unit, replayed whole by
+	``txn.replay_on_conflict`` if it loses a snapshot race against the pump's own
+	promote/claim/dispatch/tool-event CASes on the same row: a lost Stop-mid-
+	stream would otherwise make settlement report an error instead of "stopped".
+	Called from ``stop_run`` only after ``admission.mark_cancel_requested``'s own
+	commit (and read-only work before that), so nothing is pending when this unit
+	starts and replay is always safe. ``ensure_pump``/``lpush_wake`` are non-DB
+	side effects, so they stay after the winning commit, not inside the unit."""
 	conversation = relay_or_conversation
-	row = frappe.db.get_value(
-		TURN,
-		{"conversation": conversation, "state": ["in", ("dispatching", "streaming")]},
-		["run_id", "version", "relay_target_id"],
-		as_dict=True,
-	)
-	if not row:
-		return False
-	if ts.request_cancel(row["run_id"], int(row["version"])):
-		frappe.db.commit()
+
+	def unit() -> tuple[bool, dict | None]:
+		row = frappe.db.get_value(
+			TURN,
+			{"conversation": conversation, "state": ["in", ("dispatching", "streaming")]},
+			["run_id", "version", "relay_target_id"],
+			as_dict=True,
+		)
+		if not row:
+			return False, None
+		won = ts.request_cancel(row["run_id"], int(row["version"]))
+		if won:
+			frappe.db.commit()
+		return won, row
+
+	won, row = txn.replay_on_conflict(unit, label=f"pump.request_cancel_conversation {conversation}")
+	if won and row:
 		ensure_pump(row["relay_target_id"])
 		lpush_wake(row["relay_target_id"], row["run_id"])
 		return True

@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 import frappe
 
-from jarvis.chat import admission, user_settings_api
+from jarvis.chat import admission, txn, user_settings_api
 from jarvis.chat.usage import current_month_key as _usage_month_key
 from jarvis.chat.usage import period_select_fields
 from jarvis.permissions import (
@@ -973,15 +973,61 @@ def create_conversation(origin_page: str = "") -> str:
 	return doc.name
 
 
+def _save_conv_or_friendly_error(fn, *, label: str, friendly_message: str):
+	"""Run a load+modify+doc.save() unit (see rename_conversation /
+	archive_conversation / set_star) through txn.replay_on_conflict, catching
+	only a genuine EXHAUSTED snapshot-isolation conflict (frappe.
+	QueryDeadlockError, checked via txn.is_write_conflict) at this endpoint
+	boundary and turning it into a friendly, catchable error instead of a raw
+	500. also=(frappe.TimestampMismatchError,): on a server without snapshot
+	isolation (MariaDB 10.x) the same lost race surfaces as Document.save's own
+	check_if_latest instead of the engine's 1020; valid here because every fn
+	reloads its document on each attempt, so the replay's check_if_latest
+	compares the present row against itself.
+
+	A TimestampMismatchError that survives every replay is left to propagate
+	unchanged (Frappe already renders it as a clear message on its own). None of
+	rename_conversation / archive_conversation / set_star's frontend or pwa
+	callers check a resolved {"ok": False} shape, they only handle a rejected
+	call, so the friendly outcome here is a controlled frappe.throw, not a
+	returned dict."""
+	try:
+		return txn.replay_on_conflict(fn, label=label, also=(frappe.TimestampMismatchError,))
+	except Exception as e:
+		if not txn.is_write_conflict(e):
+			raise
+		try:
+			frappe.db.rollback()
+		except Exception:
+			pass
+		frappe.log_error(title=label, message=frappe.get_traceback())
+		frappe.throw(friendly_message)
+
+
 @frappe.whitelist(methods=["POST"])
 def archive_conversation(conversation: str) -> dict:
 	"""Set status to archived (owner-only). The agent-side session is left in place."""
 	refuse_in_tool_dispatch()  # it cancels cards and drops held waiters
 	require_jarvis_access()
-	doc = _get_owned_conversation(conversation)
-	doc.status = "Archived"
-	doc.sync_file_box_fields()  # a live run may have stamped them since the load
-	doc.save()
+
+	def _save():
+		# Reloaded on EVERY attempt, including a replay: a stale doc's own
+		# `modified` would trip Document.save's check_if_latest regardless of the
+		# snapshot race, and a replay must save onto the CURRENT row, not the one
+		# this request started with. refuse_in_tool_dispatch/require_jarvis_access
+		# above are the only things that run before this, and neither writes, so
+		# replay_is_safe() holds for the first attempt.
+		doc = _get_owned_conversation(conversation)
+		doc.status = "Archived"
+		doc.sync_file_box_fields()  # a live run may have stamped them since the load
+		doc.save()
+		return doc
+
+	doc = _save_conv_or_friendly_error(
+		_save,
+		label=f"archive_conversation {conversation}",
+		friendly_message=_("Couldn't delete this chat right now. Please try again."),
+	)
 	frappe.db.commit()
 	# Decision 12: archiving cancels its pending chat cards (held rows just stop
 	# waiting). The archive itself is already committed; this must not undo it.
@@ -1039,10 +1085,22 @@ def rename_conversation(conversation: str, title: str) -> dict:
 	title = (title or "").strip()[:140]
 	if not title:
 		return {"ok": False, "reason": _("title is empty")}
-	doc = _get_owned_conversation(conversation)
-	doc.title = title
-	doc.sync_file_box_fields()
-	doc.save()
+
+	def _save() -> None:
+		# Reloaded on every attempt (see archive_conversation's _save for why).
+		# require_jarvis_access above and the title parsing here are read-only /
+		# in-memory, so nothing has written in this request before the first
+		# attempt: replay_is_safe() holds.
+		doc = _get_owned_conversation(conversation)
+		doc.title = title
+		doc.sync_file_box_fields()
+		doc.save()
+
+	_save_conv_or_friendly_error(
+		_save,
+		label=f"rename_conversation {conversation}",
+		friendly_message=_("Couldn't rename this chat right now. Please try again."),
+	)
 	frappe.db.commit()
 	return {"ok": True, "data": {"title": title}}
 
@@ -1053,10 +1111,21 @@ def set_star(conversation: str, starred: str | int | bool) -> dict:
 	chats are listed first and grouped under 'Starred' in the sidebar."""
 	require_jarvis_access()
 	on = 1 if str(starred) in ("1", "true", "True", "on", "yes") else 0
-	doc = _get_owned_conversation(conversation)
-	doc.starred = on
-	doc.sync_file_box_fields()
-	doc.save()
+
+	def _save() -> None:
+		# Reloaded on every attempt, same reasoning as archive_conversation /
+		# rename_conversation. require_jarvis_access above writes nothing, so
+		# replay_is_safe() holds for the first attempt.
+		doc = _get_owned_conversation(conversation)
+		doc.starred = on
+		doc.sync_file_box_fields()
+		doc.save()
+
+	_save_conv_or_friendly_error(
+		_save,
+		label=f"set_star {conversation}",
+		friendly_message=_("Couldn't update this chat right now. Please try again."),
+	)
 	frappe.db.commit()
 	return {"ok": True, "data": {"starred": on}}
 
@@ -1599,8 +1668,10 @@ def _typed_noop_note(kind: str, older: int) -> str:
 
 
 def _apply_typed_reply(conversation: str, snap: dict | None) -> dict:
-	"""R1: after ``conv_doc.save(); commit`` (whose stale doc would otherwise overwrite
-	``pending_agent_notes``, A22) and before dispatch. Discards the R0 snapshot through
+	"""R1: after the targeted conversation write + commit (a whole-document
+	``conv_doc.save()`` here would risk overwriting ``pending_agent_notes``, A22, with
+	a stale in-memory copy; the targeted write never touches that field) and before
+	dispatch. Discards the R0 snapshot through
 	``actions_api._dismiss_core`` (each card isolated), then appends ONE agent note:
 	the combined veto, or the no-op note when nothing was discarded. Cards the running
 	turn parked after R0 are never touched. Returns the response fields
@@ -1791,6 +1862,15 @@ def send_message(
 
 	_reject_send_into_armed_conversation(conv_doc)
 
+	# Every field this send changes on the conversation row is collected here and
+	# persisted as ONE locked, targeted write (see below, right before
+	# msg_doc.insert()) instead of a whole-document conv_doc.save(): the row is a
+	# shared write surface (auto-title, the model/thinking override endpoints,
+	# compaction, File Box stamps all touch it too), and a whole-document save would
+	# both lose the snapshot race to any of them (1020 aborts the WHOLE transaction,
+	# user message included) and silently revert whatever they just wrote.
+	_conv_changes: dict = {}
+
 	# A typed go-ahead on a parked confirmation card is the SAME act as clicking
 	# Confirm, so it runs the confirmation instead of becoming a chat turn. Placed
 	# here on purpose: ownership of the conversation is settled, but nothing has
@@ -1858,12 +1938,14 @@ def send_message(
 				"reason": f"model {model_override!r} is not valid for {settings.llm_provider!r}",
 			}
 		conv_doc.model_override = model_override
+		_conv_changes["model_override"] = model_override
 
 	if thinking_override is not None:
 		level = (thinking_override or "").strip().lower()
 		if level not in _ALLOWED_THINKING:
 			return {"ok": False, "reason": f"invalid thinking level {thinking_override!r}"}
 		conv_doc.thinking_override = level
+		_conv_changes["thinking_override"] = level
 
 	# Per-model enforcement (fleet spec §7): now that the conversation (and any
 	# fresh model_override) is settled, resolve the effective model and re-check
@@ -1893,13 +1975,15 @@ def send_message(
 	# falls through to a real send reaches here. hidden=1 continuations never reach
 	# send_message (they go via _enqueue_turn), so they are excluded by construction.
 	# Guarded on the in-memory flag so an ordinary send does no needless work. Clear
-	# it on the LOADED doc too (the conv_doc.save() below would otherwise re-persist
-	# the stale in-memory 1), and via the helper (which commits immediately + drops
-	# the redis run-state) so an early return before that save still ends the run.
-	# clear_skill_autorun is itself best-effort.
+	# it on the LOADED doc too (the targeted conversation write below would otherwise
+	# re-persist the stale in-memory 1), and via the helper (which commits immediately
+	# + drops the redis run-state) so an early return before that write still ends the
+	# run. clear_skill_autorun is itself best-effort.
 	if conv_doc.skill_autorun:
 		conv_doc.skill_autorun = 0
 		conv_doc.skill_autorun_at = None
+		_conv_changes["skill_autorun"] = 0
+		_conv_changes["skill_autorun_at"] = None
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_skill_autorun(conversation)
@@ -1916,17 +2000,20 @@ def send_message(
 
 	# A genuine new top-level message also ENDS any request-scoped "confirm all" run
 	# (design Layer B): the prior request is over, so its bulk approval must never carry
-	# into THIS message's writes. Set in-memory so the conv_doc.save() below persists 0,
-	# and clear immediately (raw) so an early return before that save still ends it. Same
-	# placement invariants as the skill reset above (after the typed-approval early-return
-	# and every no-turn-created reject). Continuations never reach send_message (they go
-	# via _enqueue_turn), so they are excluded by construction. If THIS message itself
-	# carries a 'confirm all' directive, the upfront-arm AFTER save() re-arms on top of
-	# this reset.
+	# into THIS message's writes. Set in-memory so the targeted conversation write below
+	# persists 0, and clear immediately (raw) so an early return before that write still
+	# ends it. Same placement invariants as the skill reset above (after the
+	# typed-approval early-return and every no-turn-created reject). Continuations never
+	# reach send_message (they go via _enqueue_turn), so they are excluded by
+	# construction. If THIS message itself carries a 'confirm all' directive, the
+	# upfront-arm AFTER the write below re-arms on top of this reset.
 	if conv_doc.request_autorun:
 		conv_doc.request_autorun = 0
 		conv_doc.request_autorun_at = None
 		conv_doc.request_autorun_msg = None
+		_conv_changes["request_autorun"] = 0
+		_conv_changes["request_autorun_at"] = None
+		_conv_changes["request_autorun_msg"] = None
 		from jarvis import api as _jarvis_api
 
 		_jarvis_api._request_autorun_clear(conversation)
@@ -1940,6 +2027,66 @@ def send_message(
 	# this text and the stored canvas, so no "📎 name" marker is needed here.
 	display_content = message.strip()
 	canvas_json = frappe.as_json([_att_canvas_item(a) for a in atts]) if atts else None
+
+	# Title is NOT taken from the raw first message anymore. The worker generates a
+	# concise, LLM-summarised title after the first substantive turn
+	# (jarvis.chat.title.maybe_autotitle, like ChatGPT/agent) and pushes it via a
+	# "conversation:renamed" event. We leave it as "New chat" here so the sidebar
+	# never flashes the raw prompt (and greeting-only openers stay unnamed until a
+	# real prompt arrives).
+	_conv_changes["last_active_at"] = frappe.utils.now()
+
+	# Remember which builder page owns this thread. Dashboard conversations have
+	# native, origin-scoped history and are excluded from main chat, so the marker
+	# must be durable data rather than a client-only routing hint. Stamp every
+	# qualifying builder send rather than only at creation so a pre-field legacy
+	# thread self-heals the next time the user continues it from its builder. Rides
+	# the SAME commit as the seed message below deliberately: admission.
+	# accept_or_queue rolls back on its overload-reject and duplicate-replay paths,
+	# so a stamp written in a later, separate transaction would be silently
+	# discarded on a busy site. The parse is side-effect-free and reads the same
+	# two-value literal allow-list the enqueue payload applies further down.
+	if requested_origin and not existing_origin:
+		_conv_changes["origin_page"] = requested_origin
+
+	def _write_conv() -> None:
+		# Row-locked re-read of the server-stamped File Box fields: a live File Box run
+		# can stamp them via frappe.db.set_value while this request holds conv_doc in
+		# memory, and the lock (taken here, inside sync_file_box_fields) is what makes
+		# the write below observe the CURRENT row, not this request's stale snapshot of
+		# it. _conv_changes never includes a File Box field, so this can only refresh
+		# conv_doc's in-memory copy, never clobber one.
+		#
+		# Jarvis Conversation has track_changes: 1, and the old conv_doc.save() this
+		# replaces created a Version row on every send. This is deliberate: these
+		# fields are bookkeeping stamps (activity time, per-send overrides, autorun
+		# resets), a Version row per message would be noise on the doctype's hottest
+		# write path, and a user's own edits (rename, star, archive) keep their own
+		# ORM write paths and stay versioned as before. Verified nothing reads Version
+		# history for Jarvis Conversation (backend, frontend, pwa, support tooling).
+		conv_doc.sync_file_box_fields()
+		frappe.db.set_value(CONV, conv_doc.name, _conv_changes, update_modified=False)
+
+	# Placed BEFORE msg_doc.insert(). For the common case, an ALREADY-EXISTING
+	# conversation passed in by the caller (every follow-up send, and every send
+	# this race actually happens on: autotitle only fires after a first turn, so
+	# the race needs one to exist), nothing has written in this transaction yet at
+	# this point (the skill/request-autorun clears above already committed, on
+	# their own, if they fired at all), so a lost snapshot race here, a concurrent
+	# auto-title, a model/thinking override endpoint call, or a File Box stamp
+	# landing on this same row, rolls back and retries from a fresh transaction
+	# with nothing else to lose. The old placement (a whole-document
+	# conv_doc.save() AFTER the insert) is what dropped the user's own message:
+	# MariaDB aborts the WHOLE transaction on 1020, insert included.
+	#
+	# NOT covered the same way: a brand-new chat (conversation="" or a reaped-conv
+	# fallback), where create_or_focus_empty already left an uncommitted write
+	# (frappe.db.set_value on an existing empty row at api.py:640, or a fresh
+	# Jarvis Conversation insert via create_conversation). replay_is_safe() then
+	# reads False and a conflict here re-raises instead of replaying, same as the
+	# pre-fix behaviour, since a brand-new/just-reused conversation has no
+	# concurrent writer yet in practice.
+	txn.replay_on_conflict(_write_conv, label="chat.send_message conversation")
 
 	# Persist the user message with next seq value
 	seq = _next_seq(conversation)
@@ -1967,38 +2114,12 @@ def send_message(
 		msg_doc.flags.ignore_permissions = True
 	msg_doc.insert()
 
-	# Title is NOT taken from the raw first message anymore. The worker
-	# generates a concise, LLM-summarised title after the first substantive
-	# turn (jarvis.chat.title.maybe_autotitle) — like ChatGPT/agent — and
-	# pushes it via a "conversation:renamed" event. We leave it as "New chat"
-	# here so the sidebar never flashes the raw prompt (and greeting-only
-	# openers stay unnamed until a real prompt arrives).
-	conv_doc.last_active_at = frappe.utils.now()
-
 	# session_key creation moved to the worker (turn_handler.handle_chat_send)
 	# so the browser-awaited POST never pays a WS connect + handshake. The
 	# worker creates it on its pooled connection and inserts the Jarvis Chat
 	# Session row BEFORE streaming starts (2026-07 latency plan, Phase 1.1).
 	first_turn = 1 if not conv_doc.session_key else 0
 
-	# Remember which builder page owns this thread. Dashboard conversations have
-	# native, origin-scoped history and are excluded from main chat, so the marker
-	# must be durable data rather than a client-only routing hint. Stamp every
-	# qualifying builder send rather than only at creation so a pre-field legacy
-	# thread self-heals the next time the user continues it from its builder.
-	#
-	# It rides the save+commit below deliberately: admission.accept_or_queue rolls
-	# back on its overload-reject and duplicate-replay paths, so a stamp written
-	# after that commit would be silently discarded on a busy site. The parse is
-	# side-effect-free and reads the same two-value literal allow-list the enqueue
-	# payload applies further down.
-	if requested_origin and not existing_origin:
-		conv_doc.origin_page = requested_origin
-
-	if _delegated:
-		conv_doc.flags.ignore_permissions = True
-	conv_doc.sync_file_box_fields()
-	conv_doc.save()
 	_claim = frappe.flags.get(SEND_CLAIM_FLAG)
 	if _claim is not None and not _claim():
 		frappe.db.rollback()
@@ -2014,8 +2135,8 @@ def send_message(
 	# through to the model. Detect the directive here and ARM the request-scoped auto-run
 	# for THIS turn's fan-out BEFORE the worker's covered writes hit the gate. Only a real
 	# interactive human send arms (never a delegated/background re-entry). Raw db_set AFTER
-	# conv_doc.save() so the save's reset above cannot clobber it, and bypassing the
-	# controller guard like every other server-side arm.
+	# the targeted conversation write above so its reset (request_autorun=0, if it fired)
+	# cannot clobber it, and bypassing the controller guard like every other server-side arm.
 	if not _delegated and not int(background or 0):
 		from jarvis.chat import approval_phrases
 
@@ -2966,9 +3087,16 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 
 	settings = frappe.get_single("Jarvis Settings")
 
-	# Empty / None clears the override.
+	# Empty / None clears the override. Wrapped in replay_on_conflict: nothing has
+	# written in this request's transaction yet (the reads above are all plain
+	# reads), so a lost snapshot race against a concurrent auto-title / send / File
+	# Box stamp on this row rolls back and retries from a fresh snapshot instead of
+	# surfacing a 500 and dropping the clear.
 	if not model:
-		frappe.db.set_value(CONV, conversation, "model_override", "", update_modified=False)
+		txn.replay_on_conflict(
+			lambda: frappe.db.set_value(CONV, conversation, "model_override", "", update_modified=False),
+			label=f"set_conversation_model clear {conversation}",
+		)
 		frappe.db.commit()
 		return {"ok": True, "data": {"effective_model": settings.llm_model or ""}}
 
@@ -2987,7 +3115,12 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 			},
 		}
 
-	frappe.db.set_value(CONV, conversation, "model_override", model, update_modified=False)
+	# Same reasoning as the clear branch above: this is the only write in the
+	# request's transaction so far, so a lost race here is always safe to replay.
+	txn.replay_on_conflict(
+		lambda: frappe.db.set_value(CONV, conversation, "model_override", model, update_modified=False),
+		label=f"set_conversation_model {conversation}",
+	)
 	frappe.db.commit()
 	return {"ok": True, "data": {"effective_model": model}}
 
@@ -3043,7 +3176,13 @@ def set_conversation_thinking(conversation: str, thinking: str | None = None) ->
 				"message": f"{thinking!r} is not a valid thinking level. Allowed: low, medium, high",
 			},
 		}
-	frappe.db.set_value(CONV, conversation, "thinking_override", level, update_modified=False)
+	# Nothing has written in this request's transaction yet at this point, so a lost
+	# snapshot race against a concurrent auto-title / send / File Box stamp on this
+	# row always replays safely instead of surfacing a 500.
+	txn.replay_on_conflict(
+		lambda: frappe.db.set_value(CONV, conversation, "thinking_override", level, update_modified=False),
+		label=f"set_conversation_thinking {conversation}",
+	)
 	frappe.db.commit()
 	return {"ok": True, "data": {"effective_thinking": level or "medium"}}
 
@@ -3549,18 +3688,57 @@ def _enqueue_turn(
 	this outcome: nothing is written and ``{ok: False, already_settled: True}``
 	comes back."""
 	conv_doc = frappe.get_doc(CONV, conversation)
+	# Every field this call changes on the conversation row is collected here and
+	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
+	# the same reasoning as send_message's targeted write (see there): a
+	# whole-document conv_doc.save() placed after the insert loses the snapshot
+	# race to the SAME writers (auto-title, override endpoints, File Box stamps)
+	# and takes the just-inserted seed message down with it.
+	_conv_changes: dict = {}
 	if model_override:
 		conv_doc.model_override = model_override
+		_conv_changes["model_override"] = model_override
 	if thinking_override is not None:
-		conv_doc.thinking_override = (thinking_override or "").strip().lower()
+		level = (thinking_override or "").strip().lower()
+		conv_doc.thinking_override = level
+		_conv_changes["thinking_override"] = level
 
 	# First turn of a fresh macro conversation needs a session_key.
 	# Continuation turns skip this: they always follow an existing turn, and a
 	# missing key is created by the worker on its pooled connection anyway
 	# (turn_handler.handle_chat_send), so the human's Apply/Confirm POST never
-	# pays - or fails on - a WS handshake here.
+	# pays - or fails on - a WS handshake here. _ensure_session_key inserts the
+	# Jarvis Chat Session row and commits on its own, so this transaction is still
+	# empty (nothing written by THIS function yet) by the time the conversation
+	# write below runs.
 	if not hidden and not conv_doc.session_key:
 		conv_doc.session_key = _ensure_session_key(conv_doc.owner)
+		_conv_changes["session_key"] = conv_doc.session_key
+
+	_conv_changes["last_active_at"] = frappe.utils.now()
+
+	def _write_conv() -> None:
+		# Row-locked re-read of the server-stamped File Box fields, same reasoning as
+		# send_message's targeted write: the lock is what makes the set_value below
+		# observe the CURRENT row, and _conv_changes never includes a File Box field.
+		#
+		# Same track_changes trade-off as send_message's own targeted write (see
+		# there): no Version row per continuation, deliberate, bookkeeping fields
+		# only, user edits keep their own versioned write paths.
+		conv_doc.sync_file_box_fields()
+		frappe.db.set_value(CONV, conv_doc.name, _conv_changes, update_modified=False)
+
+	# Placed BEFORE msg_doc.insert(). Nothing has written in THIS function's own
+	# transaction yet at this point, but whether a lost race here can safely replay
+	# also depends on the CALLER: macros_api.merge_runs (a commit right before the
+	# call) and macros.run_macro / resume_waiting_capacity_runs (both commit right
+	# before their _run_step/_run_merged call, which reaches here) are verified
+	# clean. macros.advance_after_turn's own call is NOT fully verified: it first
+	# runs _apply_merge_after_turn, whose write path was not traced end to end, so
+	# on that path replay_is_safe() may read False and a genuine race there
+	# re-raises instead of replaying, same as the pre-fix behaviour (no regression,
+	# just not newly protected).
+	txn.replay_on_conflict(_write_conv, label="chat._enqueue_turn conversation")
 
 	seq = _next_seq(conversation)
 	msg_doc = frappe.get_doc(
@@ -3581,10 +3759,6 @@ def _enqueue_turn(
 	if msg_doc.owner != conv_doc.owner:
 		# The worker's chat user is the seed row's owner: never a cron's Administrator.
 		frappe.db.set_value(MSG, msg_doc.name, "owner", conv_doc.owner, update_modified=False)
-	conv_doc.last_active_at = frappe.utils.now()
-	conv_doc.flags.ignore_permissions = True
-	conv_doc.sync_file_box_fields()
-	conv_doc.save()
 	if claim is not None and not claim():
 		frappe.db.rollback()
 		return {"ok": False, "already_settled": True}
