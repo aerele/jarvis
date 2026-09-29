@@ -207,6 +207,15 @@
    "description": "When the owner chose 'Skip this file' on a skill_missing routing question: the row reads no_draft (\"Skipped by you\") until a later run. Server-set only."
   },
   {
+   "fieldname": "filebox_duplicate_of",
+   "fieldtype": "Data",
+   "label": "File Box Duplicate Of",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "The owner's earlier File Box conversation whose file has the same bytes and whose draft still stands: the row reads duplicate, with no run, until a re-run. Server-set only."
+  },
+  {
    "fieldname": "filebox_sheet_count",
    "fieldtype": "Int",
    "label": "File Box Sheet Count",

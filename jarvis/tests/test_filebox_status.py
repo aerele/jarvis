@@ -86,6 +86,10 @@ class _Base(FrappeTestCase):
 		_ensure_user(OTHER)
 		_cleanup()
 		self.addCleanup(_cleanup)
+		# Stamps here name drafts that don't exist; the live-state wording has its own tests.
+		self.docstatus = patch("jarvis.chat.filebox._result_docstatus")
+		self.docstatus.start()
+		self.addCleanup(self.docstatus.stop)
 
 	def _conv(self, owner: str = USER, title: str = "x.pdf", file_box: int = 1, **fields) -> str:
 		with _as(owner):
@@ -838,3 +842,183 @@ class TestResultBackfillPatch(_Base):
 		self.assertFalse(frappe.db.get_value(CONV, plain, "filebox_result_name"))
 		patch_mod.execute()  # idempotent
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_result_count"), 2)
+
+
+class TestDraftState(_Base):
+	"""#618: a stamped draft that was later submitted, cancelled or deleted says so."""
+
+	def setUp(self):
+		super().setUp()
+		self.docstatus.stop()
+		with _as(USER):
+			self.todo = frappe.get_doc({"doctype": "ToDo", "description": "fbs-draft"}).insert(
+				ignore_permissions=True
+			)
+		self.addCleanup(frappe.db.delete, "ToDo", {"description": "fbs-draft"})
+		self.conv = self._conv(filebox_result_doctype="ToDo", filebox_result_name=self.todo.name)
+		self._answered(self.conv)
+
+	def test_a_draft_reads_as_created_until_its_state_moves(self):
+		row = self._row(self.conv)
+		self.assertEqual((row["status"], row["result_state"]), ("draft_created", ""))
+		self.assertEqual(row["result"], f"Draft ToDo {self.todo.name} created")
+		for docstatus, state in ((1, "submitted"), (2, "cancelled")):
+			frappe.db.set_value("ToDo", self.todo.name, "docstatus", docstatus, update_modified=False)
+			row = self._row(self.conv)
+			self.assertEqual((row["status"], row["result_state"]), ("draft_created", state))
+			self.assertEqual(row["result"], f"ToDo {self.todo.name} {state}")
+
+	def test_a_deleted_draft_says_deleted(self):
+		frappe.db.delete("ToDo", {"name": self.todo.name})
+		row = self._row(self.conv)
+		self.assertEqual(row["result_state"], "deleted")
+		self.assertEqual(row["result"], f"ToDo {self.todo.name} deleted")
+
+
+class TestCardConfirmParks(_Base):
+	"""#617/#618: a chat Confirm in a File Box conversation goes through the File Box
+	policy, never straight to the write, and only once with the turn end's park."""
+
+	CARD = '```jarvis-action\n{"kind":"doc","verb":"create","doctype":"ToDo","fields":[]}\n```'
+
+	def _apply(self, conv: str):
+		from jarvis.chat.actions_api import apply_action
+
+		action = {"verb": "create", "doctype": "ToDo", "values": {"description": "x"}, "conversation": conv}
+		with (
+			_as(USER),
+			patch("jarvis.tools.create_doc.create_doc", return_value={"name": "T-7"}) as create,
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+		):
+			return apply_action(frappe.as_json(action)), create
+
+	def test_a_file_box_confirm_parks_the_card_once(self):
+		conv = self._conv()
+		msg = self._msg(conv, 2, "assistant", "Here:\n\n" + self.CARD)
+		res, create = self._apply(conv)
+		create.assert_not_called()  # ToDo is denied to a File Box run: a board question
+		self.assertTrue(res["ok"])
+		self.assertIn("Approval Board", res["note"])
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": conv}), 1)
+		self.assertNotIn("jarvis-action", frappe.db.get_value(MSG, msg, "content"))
+		again, _ = self._apply(conv)  # the card is gone: nothing runs twice
+		self.assertEqual((again["ok"], again["error"]["code"]), (False, "FileBoxRefusedError"))
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": conv}), 1)
+
+	def test_an_ordinary_confirm_still_applies(self):
+		res, create = self._apply(self._conv(file_box=0))
+		self.assertTrue(res["ok"])
+		create.assert_called_once()
+
+
+class TestCardResultBackfillPatch(_Base):
+	def test_backfill_reads_a_card_receipt_from_its_tool_result(self):
+		from jarvis.patches import v2_25_backfill_filebox_card_results as patch_mod
+
+		dt = _submittable_doctype() or self.skipTest("no submittable doctype installed")
+		conv = self._conv()
+		self._msg(conv, 1, "user", "process")
+		self._msg(
+			conv,
+			2,
+			"tool",
+			tool_name="create_doc",
+			tool_status="completed",
+			tool_result=frappe.as_json({"ok": True, "data": {"doctype": dt, "name": "D-5"}}),
+		)
+		gone = self._conv()
+		self._msg(
+			gone,
+			1,
+			"tool",
+			tool_name="create_doc",
+			tool_status="completed",
+			tool_result=frappe.as_json({"ok": True, "data": {"doctype": dt, "name": "D-GONE"}}),
+		)
+		real = frappe.db.exists
+
+		def exists(doctype, name=None, *a, **k):
+			return name != "D-GONE" if doctype == dt else real(doctype, name, *a, **k)
+
+		with patch.object(frappe.db, "exists", side_effect=exists):
+			patch_mod.execute()
+			patch_mod.execute()  # idempotent
+		row = frappe.db.get_value(
+			CONV,
+			conv,
+			["filebox_result_doctype", "filebox_result_name", "filebox_result_count"],
+			as_dict=True,
+		)
+		self.assertEqual(
+			(row.filebox_result_doctype, row.filebox_result_name, row.filebox_result_count), (dt, "D-5", 1)
+		)
+		self.assertFalse(frappe.db.get_value(CONV, gone, "filebox_result_name"))
+
+
+class TestDuplicateDrop(_Base):
+	"""#619: the same bytes dropped again, while the first drop's draft stands, are held as
+	a Duplicate with no run; Re-run processes it anyway."""
+
+	def setUp(self):
+		super().setUp()
+		self.docstatus.stop()
+		with _as(USER):
+			self.todo = frappe.get_doc({"doctype": "ToDo", "description": "fbs-dup"}).insert(
+				ignore_permissions=True
+			)
+		self.addCleanup(frappe.db.delete, "ToDo", {"description": "fbs-dup"})
+
+	_file = TestDropFile._file
+	_drop = TestDropFile._drop
+
+	def _first(self, stamp: bool = True, owner: str = USER) -> str:
+		f = self._file(owner=owner)
+		with _as(owner), patch("jarvis.chat.api.send_message", return_value={"ok": True}):
+			conv = filebox.drop_file(file=f.name)["conversation_id"]
+		if stamp:
+			frappe.db.set_value(
+				CONV,
+				conv,
+				{"filebox_result_doctype": "ToDo", "filebox_result_name": self.todo.name},
+				update_modified=False,
+			)
+		return conv
+
+	def test_a_re_drop_of_a_drafted_file_is_a_duplicate_with_no_run(self):
+		first = self._first()
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_not_called()
+		self.assertEqual((res["ok"], res["run_id"], res["duplicate_of"]), (True, None, first))
+		row = self._row(res["conversation_id"])
+		self.assertEqual(row["status"], "duplicate")
+		self.assertEqual(row["result"], f"Duplicate of {PREFIX}invoice.txt · ToDo {self.todo.name}")
+		self.assertEqual(row["result_link"], f"/app/todo/{self.todo.name}")
+		with _as(USER):
+			page = filebox.list_inbound_page(page_length=100, filters={"status": "duplicate"})
+		self.assertEqual([r["name"] for r in page["rows"]], [res["conversation_id"]])
+
+	def test_no_duplicate_without_a_standing_draft_or_across_users(self):
+		self._first(stamp=False)
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_called_once()
+		self.assertNotIn("duplicate_of", res)
+		_cleanup()
+		self._first(owner=OTHER)
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_called_once()
+		_cleanup()
+		self._first()
+		frappe.db.delete("ToDo", {"name": self.todo.name})
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_called_once()
+
+	def test_a_rerun_processes_the_duplicate_from_scratch(self):
+		self._first()
+		res, _ = self._drop(file=self._file().name)
+		conv = res["conversation_id"]
+		with _as(USER), patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send:
+			filebox._rerun_one(conv)
+		send.assert_called_once()
+		self.assertIsNone(send.call_args.kwargs["preamble"])  # no "don't re-create" scaffold
+		self._msg(conv, 1, "user", "process this file")  # the re-run's user row
+		self.assertNotEqual(self._row(conv)["status"], "duplicate")
