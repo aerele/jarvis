@@ -121,6 +121,55 @@ test("summarize(create): headline is empty string when the model provides no sum
 	assert.ok(out.rows.length >= 1); // proposed fields still render (graceful default)
 });
 
+// #603: a required field the model left blank used to vanish from the card, so the
+// person only learned about it when Confirm failed.
+const draftField = (fieldname, label, over) => ({
+	fieldname,
+	label,
+	value: "",
+	reqd: 0,
+	read_only: 0,
+	proposed: true,
+	...over,
+});
+
+test("summarize(create): a proposed required blank shows, flagged missing", () => {
+	const model = {
+		verb: "create",
+		fields: [
+			draftField("customer_name", "Customer Name", { value: "Acme", reqd: 1 }),
+			draftField("account_manager", "Account Manager", { reqd: 1 }),
+		],
+		tables: [],
+	};
+	const action = { fields: [{ label: "Customer Name", value: "Acme" }] };
+	assert.deepEqual(summarize(model, action).rows, [
+		{ label: "Customer Name", value: "Acme" },
+		{ label: "Account Manager", value: "", missing: true },
+	]);
+});
+
+test("summarize(create): an unproposed required field is not flagged (controllers fill many)", () => {
+	const model = {
+		verb: "create",
+		fields: [draftField("currency", "Currency", { reqd: 1, proposed: false })],
+		tables: [],
+	};
+	assert.deepEqual(summarize(model, {}).rows, []);
+});
+
+test("summarize(create): an optional or read-only blank is not flagged", () => {
+	const model = {
+		verb: "create",
+		fields: [
+			draftField("notes", "Notes"),
+			draftField("status", "Status", { reqd: 1, read_only: 1 }),
+		],
+		tables: [],
+	};
+	assert.deepEqual(summarize(model, {}).rows, []);
+});
+
 test("summarize(update): kind=update, mechanical diff, headline optional", () => {
 	const out = summarize(
 		{
