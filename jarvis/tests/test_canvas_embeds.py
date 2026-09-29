@@ -2,7 +2,7 @@
 
 agent 2026.6+ teaches the model to publish rich HTML as hosted canvas
 documents referenced by ``[embed ref="<id>" /]`` markers (or an explicit
-``/__openclaw__/canvas/...`` url). These must resolve to the same gateway
+the gateway canvas endpoint url). These must resolve to the same gateway
 fetch path as plain ``canvas/<path>.<ext>`` references, and the markers must
 be stripped from the visible reply once the artifact is persisted.
 """
@@ -13,9 +13,14 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.canvas import detect_canvas_names, persist_canvases, strip_canvas_refs
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestCanvasEmbedDetection(FrappeTestCase):
@@ -24,7 +29,7 @@ class TestCanvasEmbedDetection(FrappeTestCase):
 		self.assertEqual(detect_canvas_names(text), ["documents/sales-dash-abc123/index.html"])
 
 	def test_embed_url_form_detected_via_canvas_path(self):
-		text = '[embed url="/__openclaw__/canvas/documents/cv_9/index.html" title="X" /]'
+		text = '[embed url="/__test_gateway__/canvas/documents/cv_9/index.html" title="X" /]'
 		self.assertEqual(detect_canvas_names(text), ["documents/cv_9/index.html"])
 
 	def test_plain_canvas_path_still_detected_and_deduped(self):
@@ -57,7 +62,7 @@ class TestCanvasEmbedStripping(FrappeTestCase):
 		self.assertIn('[embed ref="other" /]', out)
 
 	def test_url_form_marker_removed_without_residue(self):
-		text = 'Done [embed url="/__openclaw__/canvas/documents/cv_9/index.html" title="X" /] end'
+		text = 'Done [embed url="/__test_gateway__/canvas/documents/cv_9/index.html" title="X" /] end'
 		out = strip_canvas_refs(text, ["documents/cv_9/index.html"])
 		self.assertNotIn("[embed", out)
 		self.assertNotIn("cv_9", out)
@@ -76,12 +81,12 @@ class TestHostClientStripping(FrappeTestCase):
 
 		html = (
 			"<html><body><script>renderChart()</script>"
-			'<script>\nconst ws = new WebSocket("ws://" + location.host + "/__openclaw__/ws");\n</script>'
+			'<script>\nconst ws = new WebSocket("ws://" + location.host + "/__test_gateway__/ws");\n</script>'
 			"</body></html>"
 		)
 		out = _strip_host_client(html)
 		self.assertIn("renderChart()", out)
-		self.assertNotIn("__openclaw__/ws", out)
+		self.assertNotIn("__test_gateway__/ws", out)
 		self.assertNotIn("WebSocket", out)
 
 
@@ -125,6 +130,10 @@ class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 	def tearDown(self):
 		frappe.delete_doc(MSG, self.msg.name, force=True, ignore_permissions=True, delete_permanently=True)
 		frappe.delete_doc(CONV, self.conv.name, force=True, ignore_permissions=True, delete_permanently=True)
+		# persist_canvases commits the File/message, while deleting the attachment
+		# removes its disk content immediately. Commit cleanup too: a class rollback
+		# would otherwise restore File metadata pointing at the deleted test file.
+		frappe.db.commit()
 
 	def test_broken_gateway_persists_nothing_but_still_cleans_the_reply(self):
 		"""Sentinel probe 200s (the runtime shell answering for everything) ->

@@ -243,9 +243,16 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 	def test_keys_exactly_match_todays_hardcoded_catalogue(self):
 		# The pinned regression the reviewer asked for: whatever the catalog says,
 		# the KEY SET must not move, or oauth/api.py and the desk tab break.
-		from jarvis._subscription_models import _SEED_SUBSCRIPTION_MODELS, SUBSCRIPTION_MODELS
+		from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
+		from jarvis._subscription_models import SUBSCRIPTION_MODELS
 
-		self.assertEqual(set(SUBSCRIPTION_MODELS), set(_SEED_SUBSCRIPTION_MODELS))
+		bundled = {
+			p.get("subscription_label") or p["label"]
+			for p in BUNDLED_MODEL_CATALOG
+			if any(m["tier"] == "subscription" for m in p["models"])
+		}
+		self.assertEqual(bundled, {"OpenAI", "Anthropic", "xAI Grok", "Kimi (Moonshot)"})
+		self.assertEqual(set(SUBSCRIPTION_MODELS), bundled)
 
 	def test_reads_values_from_the_catalog(self):
 		from jarvis import _subscription_models
@@ -275,7 +282,24 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 	def test_api_key_only_provider_is_excluded(self):
 		from jarvis import _subscription_models
 
+		# One real subscription provider so the catalog path is taken (an
+		# all-api-key payload has no subscription rows and falls back to the
+		# seed, which carries Anthropic since the Claude plan landed).
 		payload = [
+			{
+				"provider_id": "openai",
+				"label": "OpenAI",
+				"supports_subscription": True,
+				"models": [
+					{
+						"model_id": "gpt-9.9",
+						"label": "gpt-9.9",
+						"tier": "subscription",
+						"is_default": True,
+						"sort_order": 0,
+					}
+				],
+			},
 			{
 				"provider_id": "anthropic",
 				"label": "Anthropic",
@@ -289,10 +313,11 @@ class TestSubscriptionModelsMappings(FrappeTestCase):
 						"sort_order": 0,
 					}
 				],
-			}
+			},
 		]
 		with patch.object(admin_client, "get_model_catalog", return_value=payload):
 			_clear_sub_model_cache()
+			self.assertIn("OpenAI", _subscription_models.SUBSCRIPTION_MODELS)
 			self.assertNotIn("Anthropic", _subscription_models.SUBSCRIPTION_MODELS)
 
 	def test_default_falls_back_to_first_row_when_none_flagged(self):

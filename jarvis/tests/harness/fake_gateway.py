@@ -77,6 +77,7 @@ class FakeGateway:
 	def __init__(
 		self,
 		*,
+		message_metadata_key: str,
 		cadence_ms: float = 25.0,
 		ack_delay_ms: float = 2.0,
 		ack_timeout_hold_ms: float = 2000.0,
@@ -85,6 +86,7 @@ class FakeGateway:
 		lane_dwell_ms: float = 0.0,
 		host: str = "127.0.0.1",
 	):
+		self.message_metadata_key = message_metadata_key
 		self.cadence_ms = cadence_ms
 		self.ack_delay_ms = ack_delay_ms
 		self.ack_timeout_hold_ms = ack_timeout_hold_ms
@@ -421,7 +423,7 @@ class FakeGateway:
 		# on this session was armed with inject.recover_via == "history", the
 		# durable transcript still holds the complete answer, so surface it as a
 		# role=assistant tail message the way sessions.get / chat.history would
-		# (agent stamps __openclaw:{seq,id}). Stage-B recovery probes read it.
+		# (agent stamps runtime metadata containing seq and id). Stage-B recovery probes read it.
 		if not session_key:
 			return []
 		with self._state_lock:
@@ -442,7 +444,7 @@ class FakeGateway:
 					{
 						"role": "assistant",
 						"content": inject["final_text"],
-						"__openclaw": {"seq": seq, "id": f"rec-{tl.run_id}"},
+						self.message_metadata_key: {"seq": seq, "id": f"rec-{tl.run_id}"},
 					}
 				)
 				seq += 1

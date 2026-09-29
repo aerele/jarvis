@@ -276,6 +276,70 @@ class TestAgentIdentity(unittest.TestCase):
 		self.assertEqual(int(frappe.db.get_value(INSTALLATION, clean, "scoped_visibility") or 0), 0)
 
 	# ------------------------------------------------------------------ #
+	# (c2) A12 read-gate understands child tables (readability rides the parent)
+	# ------------------------------------------------------------------ #
+	def test_run_as_read_gate_child_table_rides_parent(self):
+		"""A child DocType (``istable``) carries no DocPerm rows of its own, so a bare
+		``has_permission`` on it is False for every non-Administrator user. The A12
+		read-gate must instead check the child through a parent that embeds it: a run-as
+		user who can read the parent passes; one who cannot is refused; the non-child
+		path is unchanged."""
+		doc = frappe.new_doc(INSTALLATION)
+		child, parent = "Sales Invoice Item", "Sales Invoice"
+		reader = self.owner  # holds Accounts User (setUpClass) -> reads Sales Invoice
+
+		# The bare check the gate USED to do is False even for a legitimate reader —
+		# this is the Frappe behavior the fix works around, asserted as a canary.
+		self.assertTrue(frappe.has_permission(parent, "read", user=reader))
+		self.assertFalse(frappe.has_permission(child, "read", user=reader))
+		# The fixed check rides the parent: readable.
+		self.assertTrue(doc._run_as_can_read(child, reader))
+
+		# Negative: a bare System User who cannot read the parent is refused the child
+		# (the gate is not silently relaxed to "any child is readable").
+		noreader = _ensure_plain_user("aid-noaccounts@example.com")
+		try:
+			self.assertFalse(frappe.has_permission(parent, "read", user=noreader))
+			self.assertFalse(doc._run_as_can_read(child, noreader))
+			# Non-child path unchanged: an unreadable normal DocType stays refused.
+			self.assertFalse(doc._run_as_can_read("GL Entry", noreader))
+		finally:
+			frappe.delete_doc("User", noreader, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+	def test_run_as_read_gate_child_branches(self):
+		"""Cover _run_as_can_read's child-table branches: an orphan child (no embedding
+		parent -> fail-closed refuse), a STALE discovered parent (no longer a DocType ->
+		dropped by the existence guard -> refuse, never an uncaught DoesNotExistError/500),
+		and the any()-over-parents semantics (readable via at least ONE parent allows,
+		which an all() regression would wrongly refuse)."""
+		from unittest import mock
+
+		doc = frappe.new_doc(INSTALLATION)
+		reader, child = self.owner, "Sales Invoice Item"
+		HELP = "jarvis.tools.get_list._child_table_parents"
+
+		# Orphan: nothing embeds it -> no parent to ride -> refuse.
+		with mock.patch(HELP, return_value=[]):
+			self.assertFalse(doc._run_as_can_read(child, reader))
+
+		# Stale parent: a discovered name that is no longer a DocType is dropped by the
+		# existence guard, so the call refuses cleanly instead of raising a 500.
+		with mock.patch(HELP, return_value=["No Such Parent DocType ZZZ"]):
+			self.assertFalse(doc._run_as_can_read(child, reader))
+
+		# any(): readable via ONE embedding parent allows, even when another discovered
+		# parent is unreadable — pinning any() (an all() regression would flip this False).
+		def _perm(*a, **kw):
+			return kw.get("parent_doctype") == "Sales Invoice"
+
+		with (
+			mock.patch(HELP, return_value=["Sales Invoice", "Sales Order"]),
+			mock.patch("frappe.has_permission", side_effect=_perm),
+		):
+			self.assertTrue(doc._run_as_can_read(child, reader))
+
+	# ------------------------------------------------------------------ #
 	# (d) _launch_audit mints the session + stamps watermark/scope
 	# ------------------------------------------------------------------ #
 	def test_launch_audit_mints_session_and_stamps_watermark(self):

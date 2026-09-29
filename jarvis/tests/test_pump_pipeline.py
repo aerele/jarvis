@@ -36,6 +36,7 @@ import frappe
 
 from jarvis.chat import admission, finalize, prepare, pump, settlement
 from jarvis.chat import turn_state as ts
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
 from jarvis.tests.test_pump import TEST_USER, _PumpTestCase, _Recorder
 
 CONV = "Jarvis Conversation"
@@ -43,6 +44,10 @@ MSG = "Jarvis Chat Message"
 TURN = "Jarvis Chat Turn"
 EFFECT = "Jarvis Turn Effect"
 SESSION = "Jarvis Chat Session"
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class _FakeSess:
@@ -600,8 +605,8 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -632,9 +637,9 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "assistant", "content": "PRIOR ANSWER", "__openclaw": {"seq": 5}},
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
-				{"role": "assistant", "content": "RECOVERED ANSWER", "__openclaw": {"seq": 7}},
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
+				transcript_message("assistant", "RECOVERED ANSWER", seq=7),
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -658,12 +663,12 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		rid = "pmp_rec_media"
 		amsg, epoch = self._seed_streaming_gone(conv, rid, watermark=5)
 		double = self._double()
-		marker = "MEDIA:/home/node/.openclaw/media/tool-image-generation/black-hole---abcd1234.png"
+		marker = "MEDIA:/srv/test-gateway/media/tool-image-generation/black-hole---abcd1234.png"
 		double.arm_sessions_get(
 			"sess-rec",
 			[
-				{"role": "user", "content": "second question", "__openclaw": {"seq": 6}},
-				{"role": "assistant", "content": marker, "__openclaw": {"seq": 7}},
+				transcript_message("user", "second question", seq=6),
+				{"role": "assistant", "content": marker, "__test_gateway": {"seq": 7}},
 			],
 		)
 		ctx = self._ctx_for(double, epoch)
@@ -846,6 +851,73 @@ class TestTwoWriterSettlement(_PipelineCase):
 # --------------------------------------------------------------------------- #
 # 7. SUX-11 — error-payload contract preserved
 # --------------------------------------------------------------------------- #
+
+
+class TestSettlementAppliesLlmSwitch(_PipelineCase):
+	"""jarvis#1425 review (live e2e2, 2026-09-27): e2e2's actual replies run
+	through the Relay Pump, not turn_handler.py's legacy exit - so the
+	llm_switch poke belongs on invoke_settlement's own winning commit, the
+	ONE choke point shared by every pump terminal (a normal terminal, an
+	aborted stop, a reconcile-owed settle, and the recovery-settlement
+	siblings all call it)."""
+
+	def _settle_a_terminal(self, *, rid: str):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		won, epoch = ts.lease_acquire(self._target, rid)
+		self.assertTrue(won)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"terminal_observed",
+			version=1,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			terminal_kind="relay:final",
+			terminal_payload=json.dumps({"text": "final answer"}),
+			terminal_observed_at=frappe.utils.now(),
+		)
+		deps = pump.PumpDeps()
+		deps.enqueue_finalize = _Recorder()
+		self._pubs.clear()
+		settlement.invoke_settlement(
+			rid,
+			relay_target_id=self._target,
+			epoch=epoch,
+			version=2,
+			terminal_kind="relay:final",
+			terminal_payload={"text": "final answer"},
+			assistant_message=None,
+			owner=self._orig_user,
+			conversation=conv,
+			deps=deps,
+		)
+		self.assertEqual(self._state(rid), "finalizing", "the settle must have actually won")
+
+	def test_settling_a_terminal_pokes_an_active_switch(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=True) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			self._settle_a_terminal(rid="pmp_switch_active")
+		is_active.assert_called_once()
+		try_apply.assert_called_once()
+
+	def test_settling_a_terminal_with_no_switch_takes_no_lock(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=False) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			self._settle_a_terminal(rid="pmp_switch_inactive")
+		is_active.assert_called_once()
+		try_apply.assert_not_called()
 
 
 class TestSux11ErrorContract(_PipelineCase):
@@ -1239,6 +1311,43 @@ class TestSuxf2AckFailureContract(_PipelineCase):
 		# the customer a rejection is a brief hiccup worth retrying.
 		self.assertEqual(err.get("code"), "unreachable")
 
+	def test_definite_rejection_pokes_an_active_switch(self):
+		"""jarvis#1425 review (scoped re-review, 2026-09-27): a definite pre-ack
+		rejection moves the Turn out of dispatching without going through
+		invoke_settlement or turn_handler - poke it directly."""
+		from jarvis.chat import llm_switch
+		from jarvis.tests.test_pump import _RejectGateway
+
+		conv = self._mk_conv()
+		rid = "pmp_suxf2_switch"
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"ready",
+			version=2,
+			reserved=1,
+			assistant_message=amsg,
+			ready_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": f"sess-{rid}", "message": "hi"}),
+		)
+		double = _RejectGateway()
+		self._doubles.append(double)
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		with (
+			patch.object(llm_switch, "is_active", return_value=True) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			pump._dispatch_ready(ctx)
+			self._pump_until(ctx, lambda: self._state(rid) in ("errored", "recovering"))
+		self.assertEqual(self._state(rid), "errored")
+		is_active.assert_called_once()
+		try_apply.assert_called_once()
+
 
 # --------------------------------------------------------------------------- #
 # 10. SUXF-1 — every recovering/errored transition mirrors the Message row
@@ -1541,6 +1650,10 @@ class TestToolApplierEquivalence(_PipelineCase):
 			"jarvis__* tool receipt is NOT pump-owned",
 		)
 		self.assertFalse(frappe.db.exists(MSG, {"conversation": conv, "tool_call_id": "t2", "role": "tool"}))
+
+		assistant = frappe.db.get_value(TURN, rid, "assistant_message")
+		owned = frappe.db.get_value(MSG, assistant, "tool_call_ids")
+		self.assertEqual(set(json.loads(owned)), {"t1", "t2", "t3"})
 
 		# Lifecycle publishes fired for ALL three tools (3 start + 3 end), epoch-fenced.
 		starts = [p for p in self._pubs if p.get("kind") == "tool:start"]
@@ -2048,7 +2161,7 @@ class _ModelRowSess(_FakeSess):
 
 	The row is the REAL agent payload shape, not a convenience dict: the field
 	names and their casing are what ``buildGatewaySessionRow`` emits in
-	ghcr.io/openclaw/openclaw:2026.6.8 (``key``, ``model``, ``modelProvider``,
+	gateway image version 2026.6.8 (``key``, ``model``, ``modelProvider``,
 	``totalTokensFresh``, ``inputTokens``, ``outputTokens``, ``totalTokens``), so
 	``fetch_fresh_session_row`` and ``resolved_model_identity`` run for real
 	against the shape the gateway actually sends. A gateway rename would fail

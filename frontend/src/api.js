@@ -65,12 +65,6 @@ export const setStar = (conversation, starred) =>
 	call("jarvis.chat.api.set_star", { conversation, starred: starred ? 1 : 0 });
 export const retryMessage = (message) => call("jarvis.chat.api.retry_message", { message });
 export const getChatUiSettings = () => call("jarvis.chat.api.get_chat_ui_settings");
-// Toggle per-conversation "auto-apply changes" (skip the write-safety
-// confirmation before mutating ERP data). Off = confirm every gated write
-// (default). Enabling requires System Manager (a non-admin gets a 403);
-// disabling is always allowed for the owner. Response: {ok, data:{auto_apply}}.
-export const setAutoApply = (conversation, value) =>
-	call("jarvis.chat.api.set_auto_apply", { conversation, value: value ? 1 : 0 });
 // Estimated token usage (this chat / this month / total + monthly budget).
 // Response also carries a "measured" block (real gateway-recorded counters +
 // the caller's own monthly_token_limit) once the backend records usage —
@@ -154,6 +148,8 @@ export const setSidebarOrder = (order) =>
 // titles. Returns the server-side CACHE (and quietly queues a refresh when it is
 // stale) — never generates inline, so this is a cheap read. {ok, data:{suggestions:[]}}.
 export const getPromptSuggestions = () => call(US + "get_prompt_suggestions");
+export const getCapabilityCatalog = () => call(US + "get_capability_catalog");
+export const logCapabilityPick = (title) => call(US + "log_capability_pick", { title });
 // Jarvis Admin (or System Manager) only — server re-checks independently of
 // the client's window.is_jarvis_admin gate.
 export const adminListUserUsage = () => call(US + "admin_list_user_usage");
@@ -210,6 +206,8 @@ export const listCustomSkills = () => call(SK + "list_custom_skills");
 export const getCustomSkill = (name) => call(SK + "get_custom_skill", { name });
 export const createCustomSkill = (p) => call(SK + "create_custom_skill", p);
 export const updateCustomSkill = (p) => call(SK + "update_custom_skill", p);
+// The editor's "File Box creates" search: document types File Box may draft.
+export const fileBoxDoctypes = (txt) => call(SK + "file_box_doctypes", { txt: txt || "" });
 export const deleteCustomSkill = (name) => call(SK + "delete_custom_skill", { name });
 export const applyCustomSkills = () => call(SK + "apply_custom_skills");
 export const getCustomSkillsSyncStatus = () => call(SK + "get_custom_skills_sync_status");
@@ -292,8 +290,14 @@ export const dismissTool = (token, conversation) =>
 // Resync (issue #186, R3 fix for #3): re-surface the caller's own currently
 // parked confirmation cards after a reload/reconnect. Returns
 // {ok, data:{pending:[{token, tool, preview, summary, conversation, run_id}]}}.
-export const listPendingConfirmations = (conversation) =>
-	call(AC + "list_pending_confirmations", { conversation: conversation || "" });
+// `source` is an optional provenance tag (layered re-check design): the on-demand
+// controls pass "pill"/"menu" and the silent auto-heal passes "auto", so the backend
+// attributes per layer how often a card had to be re-surfaced (AC-detect rescue).
+export const listPendingConfirmations = (conversation, source) =>
+	call(AC + "list_pending_confirmations", {
+		conversation: conversation || "",
+		...(source ? { source } : {}),
+	});
 
 export async function sendMessage(
 	conversation,
@@ -601,6 +605,20 @@ export const completePoolAccountSignin = (nonce, redirectedUrl) =>
 		nonce,
 		redirected_url: redirectedUrl,
 	});
+// Claude Pro/Max signs in through the browser, the same shape xAI's bare-code
+// paste uses: begin starts the official Claude CLI's own sign-in inside the
+// tenant container and returns { login_id, authorize_url, expires_at }; the
+// customer opens authorize_url, approves, and pastes the code Anthropic shows
+// back. complete relays that code and captures the account (same capture-only
+// shape as completePoolAccountSignin) - no token ever crosses the wire.
+export const beginClaudeCliLogin = (model) =>
+	call("jarvis.oauth.api.begin_claude_cli_login", { model });
+export const completeClaudeCliLogin = (loginId, code) =>
+	call("jarvis.oauth.api.complete_claude_cli_login", { login_id: loginId, code });
+// Customer backed out before pasting a code: best-effort, tells fleet to kill
+// the detached CLI login and drop its transcript.
+export const cancelClaudeCliLogin = (loginId) =>
+	call("jarvis.oauth.api.cancel_claude_cli_login", { login_id: loginId });
 // Device-code (Kimi) capture: begin returns { device_flow:true, user_code,
 // verification_uri, interval }; poll on `interval` → { status:"pending" } until
 // the user approves, then the same capture-only { status:"ok", capture_id,
@@ -654,6 +672,15 @@ export const getAccount = () => call("jarvis.account.get_account");
 export const cancelPlanAtPeriodEnd = () => call("jarvis.account.cancel_plan_at_period_end");
 export const resumePlan = () => call("jarvis.account.resume_plan");
 export const reauthorizeAutopay = () => call("jarvis.account.reauthorize_autopay");
+// Past-Due pay-now, step one of two ("stop-autopay-to-pay"): neutralizes the
+// customer's still-live Razorpay mandate so the EXISTING reactivation grid
+// (can_reactivate) takes over for step two - this call never charges anything.
+// Unlike renewPlan, every refusal here (FeatureDisabled/NotEligible/
+// PAYMENT_UNDER_REVIEW/NoSubscription) is already reduced to a clean message by
+// the bench's onboarding._surface() before it reaches the browser, so this rides
+// the ordinary call() - no raw coded envelope to decode. Resolves {ok:true,
+// outcome:"neutralized"|"already_dead"|"already_active"}; a refusal rejects.
+export const stopAutopayToPay = () => call("jarvis.account.stop_autopay_to_pay");
 export const previewDowngrade = (targetPlan) =>
 	call("jarvis.account.preview_downgrade", { target_plan: targetPlan });
 export const startDowngrade = (targetPlan) =>
@@ -721,7 +748,7 @@ export async function uploadFile(file) {
 	if (!r.ok) throw new Error(`upload failed (${r.status})`);
 	const data = await r.json();
 	const f = data.message || data;
-	return { file_url: f.file_url, file_name: f.file_name || file.name };
+	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
 }
 
 // Branding logo/favicon: PUBLIC file (the favicon <link> and the PWA manifest
@@ -743,14 +770,19 @@ export async function uploadBrandAsset(file) {
 }
 
 // ── File Box: drop an inbound document, get a directed processing chat ──
-export const fileboxDrop = (file_url, file_name) =>
-	call("jarvis.chat.filebox.drop_file", { file_url, file_name });
-export const fileboxList = () => call("jarvis.chat.filebox.list_inbound", {});
+// `file` is the uploaded File's docname: an identical re-upload shares the
+// file_url, so the url alone could pick an earlier drop's File.
+export const fileboxDrop = (file_url, file_name, skill, file) =>
+	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill, file });
+// Whether a skill may still tag the next drop ({available}): a bulk drop checks once.
+export const fileboxCheckSkill = (skill) => call("jarvis.chat.filebox.check_skill", { skill });
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
 	call("jarvis.chat.approvals_api.list_approvals", { status });
-export const approvalsPendingCount = () => call("jarvis.chat.approvals_api.pending_count", {});
+// The badge `{count, next_in}`: next_in = seconds until the caller's next chat card
+// joins it (a chat card badges after 10 min), or null.
+export const approvalsBadge = () => call("jarvis.chat.approvals_api.pending_badge", {});
 export const decideApproval = (name, decision, approve = 1) =>
 	call("jarvis.chat.approvals_api.decide", { name, decision, approve });
 // Ignore a request off the board (no verdict, no chat resume); reversible.
@@ -759,6 +791,26 @@ export const dismissApproval = (name) =>
 export const restoreApproval = (name) =>
 	call("jarvis.chat.approvals_api.restore_approval", { name });
 
+// ── Wiki write-back review lane (reviewer-gated; review-before-landing) ──
+// A File Box run's wiki note is HELD as a proposal a Jarvis reviewer (the dropper
+// too, with a reviewer role) approves before it lands.
+// order: "newest" (the server default) or "oldest".
+export const listWikiWriteProposals = (p = {}) =>
+	call("jarvis.chat.approvals_api.list_wiki_write_proposals", {
+		status: p.status || "Actionable",
+		start: p.start || 0,
+		page_length: p.page_length || 20,
+		...(p.order ? { order: p.order } : {}),
+	});
+// expected_digest: the digest of the proposal the reviewer read (server refuses a
+// proposal that changed since).
+export const approveWikiWrite = (name, expected_digest) =>
+	call("jarvis.chat.approvals_api.approve_wiki_write", { name, expected_digest });
+export const rejectWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.reject_wiki_write", { name });
+export const retryWikiWrite = (name) =>
+	call("jarvis.chat.approvals_api.retry_wiki_write", { name });
+
 // ── Agents Marketplace: catalog, install/enable/schedule, apply, runs+findings ──
 // enable/disable + schedule + config are INSTANT (pure DB writes). Apply is the
 // only call that reconciles the container (install/uninstall/update → restart),
@@ -766,7 +818,6 @@ export const restoreApproval = (name) =>
 const AG = "jarvis.chat.agents_api.";
 export const listAgents = () => call(AG + "list_agents");
 export const getAgentInstallations = () => call(AG + "get_installations");
-export const installAgent = (agent_slug) => call(AG + "install_agent", { agent_slug });
 export const uninstallAgent = (installation) => call(AG + "uninstall_agent", { installation });
 export const setAgentEnabled = (installation, enabled) =>
 	call(AG + "set_enabled", { installation, enabled: enabled ? 1 : 0 });
@@ -837,6 +888,15 @@ export const fileboxClearProcessed = () => call("jarvis.chat.filebox.clear_proce
 // List JSON-encoded for parity with the other list-argument wrappers.
 export const fileboxDeleteBulk = (conversations) =>
 	call("jarvis.chat.filebox.delete_inbound_bulk", {
+		conversations: JSON.stringify(conversations || []),
+	});
+// rerun_inbound (PR-5, AC8): re-run a failed/no_draft file in place, claim-first.
+export const fileboxRerun = (conversation) =>
+	call("jarvis.chat.filebox.rerun_inbound", { conversation });
+// bulk_rerun_inbound: same per-row checks, skipped (not fatal) when ineligible;
+// a re-run whose tagged skill is gone waits on a question (`needs_choice`).
+export const fileboxRerunBulk = (conversations) =>
+	call("jarvis.chat.filebox.bulk_rerun_inbound", {
 		conversations: JSON.stringify(conversations || []),
 	});
 

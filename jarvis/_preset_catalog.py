@@ -58,6 +58,18 @@ BUNDLED_PRESET_CATALOG: list[dict] = [
 		],
 	},
 	{
+		"key": "deepseek-resilient",
+		"label": "DeepSeek — resilient",
+		"kind": "single_vendor",
+		"blurb": "One DeepSeek key. Your first model runs every turn; the other is a backup if it fails.",
+		"enabled": True,
+		"vendors": ["deepseek"],
+		"models": [
+			{"provider": "deepseek", "model": "deepseek-flash", "order": 0},
+			{"provider": "deepseek", "model": "deepseek-v4-pro", "order": 1},
+		],
+	},
+	{
 		"key": "cost-saver",
 		"label": "Cost-saver",
 		"kind": "cross_vendor",

@@ -141,8 +141,9 @@ tr.grouped th {
 	color: #b3261e;
 }
 
-/* RAG status - safe directly on a <td>/<th>, or on a nested <span> chip. */
-.rag-red, .rag-amber, .rag-green {
+/* Only inline status chips use compact, non-wrapping typography. Table
+   highlights preserve cell padding, numeric alignment and ordinary wrapping. */
+span.rag-red, span.rag-amber, span.rag-green {
 	padding: 2pt 8pt;
 	border-radius: 3pt;
 	font-weight: 600;
@@ -152,6 +153,43 @@ tr.grouped th {
 .rag-red { background: #fbe9e7; color: #b3261e; }
 .rag-amber { background: #fff4e0; color: #8a5a00; }
 .rag-green { background: #e6f4ea; color: #1e7d32; }
+
+/* Rows override zebra/subtotal fills; explicit cells override every row color.
+   The zebra selectors match striping specificity without using !important. */
+table tr.rag-red > td, table tr.rag-red > th,
+table.zebra tbody tr.rag-red > td, table.zebra tbody tr.rag-red > th {
+	background: #fbe9e7; color: #b3261e;
+}
+table tr.rag-amber > td, table tr.rag-amber > th,
+table.zebra tbody tr.rag-amber > td, table.zebra tbody tr.rag-amber > th {
+	background: #fff4e0; color: #8a5a00;
+}
+table tr.rag-green > td, table tr.rag-green > th,
+table.zebra tbody tr.rag-green > td, table.zebra tbody tr.rag-green > th {
+	background: #e6f4ea; color: #1e7d32;
+}
+table tr td.rag-red, table tr th.rag-red,
+table.zebra tbody tr td.rag-red, table.zebra tbody tr th.rag-red {
+	background: #fbe9e7; color: #b3261e;
+}
+table tr td.rag-amber, table tr th.rag-amber,
+table.zebra tbody tr td.rag-amber, table.zebra tbody tr th.rag-amber {
+	background: #fff4e0; color: #8a5a00;
+}
+table tr td.rag-green, table tr th.rag-green,
+table.zebra tbody tr td.rag-green, table.zebra tbody tr th.rag-green {
+	background: #e6f4ea; color: #1e7d32;
+}
+
+/* Tool-generated raster only, inserted after caller HTML is sanitized. */
+.numeric-chart { margin: 12pt 0; page-break-inside: avoid; }
+.numeric-chart img {
+	display: block; width: auto; height: auto; margin: 0 auto;
+	max-width: 100%; max-height: 586.9pt;
+}
+.numeric-chart .bar-chart-title, .numeric-chart .bar-chart-caption {
+	word-wrap: break-word; overflow-wrap: break-word;
+}
 
 /* --- callout: a bordered card, distinct from a shaded table row ------- */
 

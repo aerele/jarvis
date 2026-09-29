@@ -15,11 +15,13 @@
   "version",
   "publisher",
   "status",
+  "operator_visibility",
   "tools_required",
   "doctypes_required",
   "config_keys",
   "rule_tokens",
   "min_apps",
+  "min_model",
   "rule_pack",
   "writes",
   "skill_bundle",
@@ -93,6 +95,15 @@
    "in_standard_filter": 1
   },
   {
+   "default": "available",
+   "fieldname": "operator_visibility",
+   "fieldtype": "Select",
+   "label": "Operator Visibility",
+   "options": "available\nteaser\nhidden",
+   "in_standard_filter": 1,
+   "description": "Operator-controlled catalogue visibility (runtime overlay, survives catalog sync). available = shown normally; teaser = a masked 'coming soon' card (name/details hidden, not installable); hidden = removed from non-admin discovery, existing installs keep running. Operator/System-Manager state, NEVER written by the catalog sync (like allowed_roles)."
+  },
+  {
    "fieldname": "tools_required",
    "fieldtype": "Small Text",
    "label": "Tools Required (JSON)",
@@ -121,6 +132,13 @@
    "fieldtype": "Small Text",
    "label": "Min Apps (JSON)",
    "description": "JSON array of required Frappe apps, e.g. [\"erpnext\"]."
+  },
+  {
+   "description": "Minimum model capability the agent's bundle declares, e.g. {\"tier\": \"Advanced\"}. Synced from the bundled registry.",
+   "fieldname": "min_model",
+   "fieldtype": "JSON",
+   "label": "Minimum Model",
+   "read_only": 1
   },
   {
    "fieldname": "rule_pack",
@@ -170,7 +188,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-03 13:00:00.000000",
+ "modified": "2026-09-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Listing",

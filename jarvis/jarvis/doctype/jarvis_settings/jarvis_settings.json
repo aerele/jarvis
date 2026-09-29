@@ -16,6 +16,7 @@
   "agent_run_budget_monthly",
   "macro_step_budget_monthly",
   "activation_module_ceiling",
+  "enforce_agent_min_model",
   "branding_section",
   "agent_name",
   "brand_logo",
@@ -91,10 +92,12 @@
   "chat_device_token",
   "agent_tools_section",
   "run_query_doctype_allowlist",
+  "run_method_blocklist",
   "disable_armed_skip",
   "core_apps_override",
   "enable_customizations_clause",
   "enable_role_profiles",
+  "file_box_sheets",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -120,6 +123,7 @@
   "learned_skills_sync_status",
   "agent_catalog_dirty",
   "agent_catalog_version",
+  "last_validated_pool_fp",
   "role_profiles_pushed",
   "role_profiles_pushed_at",
   "role_profiles_config",
@@ -157,7 +161,10 @@
   "signup_context",
   "maintenance_notice_section",
   "maintenance_active",
-  "maintenance_message"
+  "maintenance_message",
+  "catalogue_visibility_section",
+  "catalogue_visibility_governed",
+  "catalogue_visibility_synced_at"
  ],
  "fields": [
   {
@@ -216,6 +223,14 @@
    "fieldname": "activation_module_ceiling",
    "fieldtype": "Int",
    "label": "Activation Module Ceiling (live agents, site-wide)"
+  },
+  {
+   "default": "0",
+   "description": "Require each agent's minimum model. Turned on by Jarvis support once your workspace is ready.",
+   "fieldname": "enforce_agent_min_model",
+   "fieldtype": "Check",
+   "label": "Enforce Agent Minimum Model",
+   "permlevel": 2
   },
   {
    "fieldname": "branding_section",
@@ -700,6 +715,13 @@
    "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
   },
   {
+   "fieldname": "run_method_blocklist",
+   "fieldtype": "Small Text",
+   "permlevel": 1,
+   "label": "run_method Blocklist",
+   "description": "Defense-in-depth restriction for the run_method agent tool. Comma- or newline-separated list of fnmatch patterns. When a pattern matches, run_method refuses to call that target - whether it is a whitelisted Python method (dotted path, e.g. 'frappe.*' or '*.delete_doc') or a Server Script API method (matched on its api_method name). Leave empty (default) to block nothing. Every run_method call still parks for a human confirmation card regardless; this list is the categorical 'never even offer these' hardstop."
+  },
+  {
    "fieldname": "disable_armed_skip",
    "fieldtype": "Check",
    "label": "Disable armed skip-confirmation (kill switch)",
@@ -727,6 +749,13 @@
    "read_only": 1,
    "hidden": 1,
    "description": "When on, a new chat session may be pinned to a role-based agent profile (a reduced tool set plus the matching skill set derived from the user's ERPNext roles) instead of the main agent - but only once that profile has actually been rendered on the agent side (see Role Profiles Pushed below). Off (default): every session uses the main agent, matching pre-role-profiles behavior exactly. Admin-owned mirror of the pulled role_profiles_config's `enabled` flag (spec B4) - never tenant-controllable; only jarvis.chat.role_profiles.sync_role_profile_config writes it. Reset to 0 between tenancies."
+  },
+  {
+   "fieldname": "file_box_sheets",
+   "fieldtype": "Check",
+   "label": "File Box: one approval sheet per document",
+   "default": "0",
+   "description": "On: a File Box run lists every missing master and question for a document on ONE approval sheet, applied at once with one resume. Off: each master waits on its own held row. Turning it off stops new sheets; open ones still collect and drain."
   },
   {
    "fieldname": "sync_tab",
@@ -890,6 +919,14 @@
    "fieldtype": "Int",
    "hidden": 1,
    "label": "Agent Catalog Version",
+   "read_only": 1
+  },
+  {
+   "description": "Fingerprint of the LLM pool state the agent model choices were last re-validated against.",
+   "fieldname": "last_validated_pool_fp",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Last Validated Pool Fingerprint",
    "read_only": 1
   },
   {
@@ -1144,6 +1181,28 @@
    "fieldtype": "Small Text",
    "label": "Maintenance Message",
    "read_only": 1
+  },
+  {
+   "fieldname": "catalogue_visibility_section",
+   "fieldtype": "Section Break",
+   "label": "Operator Catalogue Visibility",
+   "collapsible": 1,
+   "description": "Mirror of the operator's fleet-global agent-catalogue visibility policy, pulled from the control plane via get_connection (jarvis.catalogue_visibility). Read-only here; the pull is the only writer of a governed agent's operator_visibility."
+  },
+  {
+   "fieldname": "catalogue_visibility_governed",
+   "fieldtype": "Small Text",
+   "label": "Governed Catalogue Visibility",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON map {agent_slug: visibility} of the operator-governed agents last applied. Used to compute reverts (a slug dropped from the policy returns to 'available') and to hard-gate governed agents against tenant edits/installs. Empty {} = nothing governed; empty string = never pulled (or last pull kept last-known)."
+  },
+  {
+   "fieldname": "catalogue_visibility_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Catalogue Visibility Synced At",
+   "hidden": 1,
+   "read_only": 1
   }
  ],
  "permissions": [
@@ -1165,6 +1224,23 @@
    "role": "Jarvis Admin",
    "read": 1,
    "write": 1
+  },
+  {
+   "role": "System Manager",
+   "permlevel": 2,
+   "read": 1
+  },
+  {
+   "role": "Administrator",
+   "read": 1,
+   "write": 1
+  },
+  {
+   "role": "Administrator",
+   "permlevel": 2,
+   "read": 1,
+   "write": 1
   }
- ]
+ ],
+ "modified": "2026-09-28 18:05:00.000000"
 }

@@ -25,11 +25,17 @@ from jarvis.chat.api import (
 	get_canvas,
 	send_message,
 )
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
 	_ensure_test_user,
 )
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"

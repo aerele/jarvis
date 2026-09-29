@@ -46,6 +46,7 @@
 				v-if="doc"
 				ref="frame"
 				:key="frameKey"
+				:data-key="frameKey"
 				:srcdoc="doc"
 				sandbox="allow-scripts"
 				class="w-full border-0"
@@ -65,9 +66,9 @@
 
 <script setup>
 // DashboardCanvas - the sandboxed dashboard surface, shared by the builder
-// (mode="builder": fixed pane, sources executed ad-hoc via call_tool from the
-// spec the HTML itself declares) and the saved view page (mode="view": iframe
-// grows to its content, sources executed by name via run_dashboard_source -
+// (mode="builder": fixed pane, sources executed ad-hoc via preview_dashboard_source
+// from the spec the HTML itself declares) and the saved view page (mode="view":
+// iframe grows to its content, sources executed by name via run_dashboard_source -
 // the SERVER-stored spec is authoritative and the frame's spec is ignored).
 // The srcdoc is assembled by lib/dashboardSrcdoc (CSP + bridge runtime); the
 // echarts source only loads (dynamic ?raw import, its own chunk) when the
@@ -76,11 +77,11 @@
 import { ref, watch, onBeforeUnmount } from "vue";
 import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
-import { buildSrcdoc, parseSourcesBlock } from "@/lib/dashboardSrcdoc";
+import { buildSrcdoc, parseSourcesBlock, parseFiltersBlock } from "@/lib/dashboardSrcdoc";
 import { loadEchartsSource } from "@/lib/dashboardEcharts";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";
-import { runDashboardSource, callDashboardTool } from "@/api/dashboards";
+import { runDashboardSource, previewDashboardSource } from "@/api/dashboards";
 import { errMessage as errMsg } from "@/lib/errors";
 
 const props = defineProps({
@@ -92,11 +93,14 @@ const props = defineProps({
 	// look belongs to the dashboard, not the app shell - app dark mode does not
 	// restyle it, the picker does.
 	theme: { type: String, default: DEFAULT_THEME },
+	filters: { type: Object, default: () => ({}) }, // {fieldname: value} from the filter bar
 });
 
 // sources: the parsed #jarvis-sources list (save-dialog preview + payload);
+// filters: the parsed #jarvis-filters list (filter bar definitions);
 // state: "empty" | "loading" | "ready" | "error" for hosts that care.
-const emit = defineEmits(["sources", "state"]);
+const emit = defineEmits(["sources", "filters", "state", "filter-error"]);
+let filterDefs = [];
 
 const frame = ref(null);
 const doc = ref("");
@@ -184,6 +188,8 @@ watch(
 	() => props.html,
 	(h) => {
 		emit("sources", parseSourcesBlock(h));
+		filterDefs = parseFiltersBlock(h);
+		emit("filters", filterDefs);
 		rebuild();
 	},
 	{ immediate: true }
@@ -194,6 +200,16 @@ watch(
 watch(
 	() => props.theme,
 	() => rebuild()
+);
+
+// Filter value changes re-run the (already built) document's sources against
+// the new values - not immediate, so the initial mount does not double-build.
+watch(
+	() => JSON.stringify(props.filters || {}),
+	() => {
+		if (!hasSources) return; // static: nothing to re-fetch
+		rebuild();
+	}
 );
 
 // ── data bridge ──────────────────────────────────────────────────────────────
@@ -211,17 +227,22 @@ async function handleData(d) {
 	pendingData++;
 	let reply;
 	try {
-		// call_tool dispatches kwargs: query takes its DSL object under the
-		// `spec` kwarg; get_list/run_report take the object AS their kwargs.
-		const args = d.tool === "query" ? { spec: d.spec } : d.spec;
 		const env =
 			props.mode === "view"
-				? await runDashboardSource(props.dashboard && props.dashboard.name, d.name)
-				: await callDashboardTool(d.tool, args);
+				? await runDashboardSource(
+						props.dashboard && props.dashboard.name,
+						d.name,
+						props.filters || {}
+				  )
+				: await previewDashboardSource(d.tool, d.spec, filterDefs, props.filters || {});
 		if (env && env.ok) {
 			reply = { ok: true, rows: dataPayload(env.data) };
 		} else {
 			const err = (env && env.error) || {};
+			// FilterRequired names the empty field so the bar can highlight it
+			// (the tile itself already shows the message, via renderError).
+			if (err.code === "FilterRequired" && err.fieldname)
+				emit("filter-error", err.fieldname);
 			reply = {
 				ok: false,
 				error: {
@@ -259,15 +280,18 @@ let exportSeq = 0;
 async function exportAs(format, title) {
 	const lib = await loadCaptureLib();
 	const id = "x" + ++exportSeq;
+	// The watchdog fires only after this long with NO capture progress - so a big
+	// multi-slide dashboard that keeps producing slides is never killed by a fixed
+	// total cap, while a genuinely stuck capture still gives up. It is re-armed on
+	// each export:progress heartbeat (see onMessage).
+	const NO_PROGRESS_MS = 120000;
 	const result = new Promise((resolve, reject) => {
-		pendingExports[id] = {
-			resolve,
-			reject,
-			timer: setTimeout(() => {
+		const arm = () =>
+			setTimeout(() => {
 				delete pendingExports[id];
 				reject(new Error("Export timed out"));
-			}, 60000),
-		};
+			}, NO_PROGRESS_MS);
+		pendingExports[id] = { resolve, reject, arm, timer: arm() };
 	});
 	// pdf = the slide deck path (section.slide per page); png = one full-body shot
 	postToFrame({
@@ -306,6 +330,12 @@ function onMessage(e) {
 		if (props.mode === "view") frameH.value = Math.max(480, Math.ceil(d.height || 0));
 	} else if (d.type === "data") {
 		handleData(d);
+	} else if (d.type === "export:progress") {
+		// Each captured slide re-arms the watchdog: steady progress => keep waiting.
+		const p = pendingExports[d.id];
+		if (!p) return;
+		clearTimeout(p.timer);
+		p.timer = p.arm();
 	} else if (d.type === "export:result") {
 		const p = pendingExports[d.id];
 		if (!p) return;

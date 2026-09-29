@@ -12,10 +12,36 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+# Server-owned fields (P0a chat-row integrity): only a writer that sets
+# ``flags.jarvis_server_write`` may set them on insert or change them on save.
+# Deliberately NOT keyed on ignore_permissions, and REST cannot set flags.
+GUARDED_FIELDS = ("pending_card", "tool_call_id", "tool_status", "action_outcome", "tool_args", "origin")
+_JSON_FIELDS = frozenset({"pending_card", "tool_args"})
+
+
+def _norm(fieldname: str, value):
+	if value in (None, ""):
+		return None
+	if fieldname in _JSON_FIELDS and isinstance(value, str):
+		try:
+			return frappe.parse_json(value)
+		except ValueError:
+			return value
+	return value
+
 
 class JarvisChatMessage(Document):
 	def validate(self):
 		self._validate_conversation_owner()
+		self._guard_server_fields()
+
+	def _guard_server_fields(self):
+		if self.flags.jarvis_server_write:
+			return
+		before = None if self.is_new() else self.get_doc_before_save()
+		for f in GUARDED_FIELDS:
+			if _norm(f, self.get(f)) != _norm(f, before.get(f) if before else None):
+				frappe.throw(_("This chat message field can only be set by Jarvis."), frappe.PermissionError)
 
 	def _validate_conversation_owner(self):
 		"""Cross-link ownership guard (security review TASK 2).

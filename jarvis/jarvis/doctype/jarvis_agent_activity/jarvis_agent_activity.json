@@ -37,7 +37,7 @@
    "fieldname": "action",
    "fieldtype": "Select",
    "label": "Action",
-   "options": "installed\nuninstalled\nenabled\ndisabled\nschedule_changed\nconfig_changed\nrun_as_changed\nrun_started\nrun_completed\nrun_partial\nrun_failed\nrun_stopped",
+   "options": "installed\nuninstalled\nenabled\ndisabled\nschedule_changed\nconfig_changed\nrun_as_changed\nrun_started\nrun_completed\nrun_partial\nrun_failed\nrun_stopped\nmodel_changed",
    "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1
@@ -56,7 +56,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-07-06 09:00:00.000000",
+ "modified": "2026-09-28 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Agent Activity",

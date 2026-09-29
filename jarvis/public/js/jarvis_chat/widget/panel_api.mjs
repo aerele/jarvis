@@ -123,9 +123,13 @@ export const confirmTool = (token, conversation) =>
 // live cards from the `action:pending` realtime frame, but a card raised while
 // the panel was CLOSED (or a dropped realtime tail) would otherwise never show —
 // so load() calls this to restore them. Returns {ok, data:{pending:[...]}}.
-export const listPendingConfirmations = (conversation) =>
+// `source` is an optional provenance tag (layered re-check design): the on-demand
+// controls pass "pill"/"menu" and the silent auto-heal passes "auto", so the backend
+// attributes per layer how often a card had to be re-surfaced (AC-detect rescue).
+export const listPendingConfirmations = (conversation, source) =>
   call(ACTIONS + "list_pending_confirmations", {
     conversation: conversation || "",
+    ...(source ? { source } : {}),
   });
 
 // Chat-readiness verdict ({ready, reason, detail, billing_notice}) - see

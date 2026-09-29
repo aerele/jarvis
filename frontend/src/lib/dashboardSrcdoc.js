@@ -25,11 +25,13 @@ export const CSP_META =
 //   jarvis.data(name)        → Promise; `query`/`get_list` sources resolve with
 //                              the rows array; `run_report` sources resolve
 //                              with {columns, rows}. Rejections carry .code
-//                              ("PermissionError"|"NotFound"|"Timeout"|...).
+//                              ("PermissionError"|"NotFound"|"Timeout"
+//                              |"FilterRequired"|...).
 //   jarvis.ready()           → tells the parent boot finished (auto-posted on
 //                              DOMContentLoaded too).
 //   jarvis.renderError(el,e) → quiet inline per-widget error block.
-// Frames OUT: {jarvis:1, v:1, type:"data"|"ready"|"height"|"export:result", ...}
+// Frames OUT: {jarvis:1, v:1, type:"data"|"ready"|"height"|"export:progress"
+//   |"export:result", ...}
 // Frames IN (validated e.source === window.parent && d.jarvis === 1):
 //   {type:"data:result", id, ok, rows|error} · {type:"theme", dark} ·
 //   {type:"export", id, format:"png"|"slides", lib, pixelRatio}
@@ -123,10 +125,18 @@ export const RUNTIME_JS = `(function () {
 		},
 		renderError: function (el, err) {
 			if (!el) return;
-			var msg =
-				err && err.code === "PermissionError"
-					? "No permission to view this data"
-					: "Couldn't load this data";
+			// FilterRequired carries a server-composed, safe-to-show message
+			// ("Pick a value for <label> to load this data.") - every other
+			// non-permission code stays generic so internal error text never
+			// reaches a viewer.
+			var msg;
+			if (err && err.code === "PermissionError") {
+				msg = "No permission to view this data";
+			} else if (err && err.code === "FilterRequired") {
+				msg = err.message || "Pick a value to load this data.";
+			} else {
+				msg = "Couldn't load this data";
+			}
 			el.innerHTML = "";
 			var d = document.createElement("div");
 			d.textContent = msg;
@@ -168,11 +178,17 @@ export const RUNTIME_JS = `(function () {
 					: [];
 			if (!els.length) els = [document.body];
 			var pixelRatio = d.pixelRatio || 2;
-			// Browsers cap canvases near 16384px a side - drop to 1x past that.
+			// Cap the total raster work so large dashboards finish (and don't emit a
+			// huge PDF): drop to 1x past a browser canvas edge (~16384px a side) OR once
+			// the combined content area is big - a 2x capture is 4x the pixels to
+			// rasterize + encode, which is what pushed big dashboards past the timeout.
+			var totalArea = 0;
 			for (var i = 0; i < els.length; i++) {
+				totalArea += els[i].offsetWidth * els[i].offsetHeight;
 				var max = Math.max(els[i].offsetWidth, els[i].offsetHeight);
 				if (max * pixelRatio > 16384) pixelRatio = 1;
 			}
+			if (totalArea > 3000000) pixelRatio = 1;
 			// SEQUENTIAL captures: parallel toPng calls contend for layout/canvas.
 			var images = [];
 			var chain = Promise.resolve();
@@ -180,6 +196,15 @@ export const RUNTIME_JS = `(function () {
 				chain = chain.then(function () {
 					return captureOne(el, pixelRatio).then(function (img) {
 						images.push(img);
+						// Heartbeat after each slide: lets the parent distinguish "slow but
+						// progressing" from "stuck", so a big multi-slide dashboard is not
+						// killed by a fixed total cap (see exportAs's per-progress watchdog).
+						post({
+							type: "export:progress",
+							id: d.id,
+							done: images.length,
+							total: els.length,
+						});
 					});
 				});
 			});
@@ -349,8 +374,7 @@ export function buildSrcdoc(
 	// Under a standard (non-bespoke) theme, wrap the author's <style> contents in
 	// `@layer author` so the theme's `@layer theme` wins. Skipped for bespoke /
 	// no-theme, where author CSS stays unlayered and wins.
-	const prep = (s) =>
-		themeSpec && !bespoke ? wrapAuthorStyles(stripHostClient(s)) : stripHostClient(s);
+	const prep = (s) => (themeSpec && !bespoke ? wrapAuthorStyles(s) : s);
 	return (
 		`<!DOCTYPE html><html data-theme="${theme}"><head>` +
 		CSP_META +
@@ -639,15 +663,8 @@ function wrapAuthorStyles(html) {
 	return out;
 }
 
-// Dashboards saved before the gateway host-client strip landed carry a dead
-// agent live-reload script (a WebSocket to /__openclaw__/ws). It can't work
-// inside the sandbox (connect-src 'none' blocks it) and just logs a CSP
-// violation on every view — drop any <script> that references the host socket.
-function stripHostClient(html) {
-	return String(html || "").replace(/<script\b[\s\S]*?<\/script>/gi, (m) =>
-		m.includes("__openclaw__/ws") ? "" : m
-	);
-}
+// Runtime host scripts are removed by the authorized server HTML delivery paths.
+// Keep the profile and its endpoint identifiers out of this browser bundle.
 
 // Parent-side parse of the SAME #jarvis-sources block the runtime reads -
 // feeds the save dialog's detected-sources preview and the save payload.
@@ -687,6 +704,32 @@ export function parseSourcesBlock(html) {
 				return { source_name, tool, spec };
 			})
 			.filter(Boolean);
+	} catch (e) {
+		return [];
+	}
+}
+
+// Declared filters: <script type="application/json" id="jarvis-filters">
+// {"filters":[{fieldname,label,fieldtype,options,default?,reqd?}]}</script>.
+// Malformed -> [] here; the server rejects the block on save.
+export function parseFiltersBlock(html) {
+	const m = /<script[^>]*\bid\s*=\s*["']jarvis-filters["'][^>]*>([\s\S]*?)<\/script>/i.exec(
+		String(html || "")
+	);
+	if (!m) return [];
+	try {
+		const parsed = JSON.parse(m[1]);
+		const list = (parsed && parsed.filters) || [];
+		return list
+			.filter((f) => f && f.fieldname)
+			.map((f) => ({
+				fieldname: String(f.fieldname),
+				label: String(f.label || f.fieldname),
+				fieldtype: String(f.fieldtype || "Link"),
+				options: String(f.options || ""),
+				default: f.default == null ? "" : String(f.default),
+				reqd: f.reqd ? 1 : 0,
+			}));
 	} catch (e) {
 		return [];
 	}

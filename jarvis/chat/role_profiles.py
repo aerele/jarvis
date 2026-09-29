@@ -4,11 +4,14 @@ Spec: ``docs/superpowers/specs/2026-08-16-role-profile-agents-design.md``.
 
 Two independent axes, both curated data (spec §5), never runtime discovery:
 
-* **Tool tier**: the jarvis-plane role decides ``full`` (today's 94 tools)
-  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 27-tool drop
+* **Tool tier**: the jarvis-plane role decides ``full`` (today's 96 tools)
+  vs ``standard`` (67 tools; ``STANDARD_DROP_TOOLS`` is the 29-tool drop
   list). Spec §3 sized these 68/26; ``session_status`` was later pulled to the
-  drop list (denied fleet-wide for the white-label leak, not a tier call), so
-  the split is 67/27 with the 94-tool universe unchanged.
+  drop list (denied fleet-wide for the white-label leak, not a tier call), and
+  ``memory_get`` / ``memory_search`` were pulled to the drop list (native
+  cross-user memory, denied fleet-wide by the fleet-agent; Jarvis uses per-user
+  bench-owned memory), and the per-user memory tools (``jarvis__remember`` /
+  ``jarvis__recall``) joined the allow list, so the split is 67/29 of 96.
 * **Skill set**: ERPNext roles decide which of the 6 named skill sets
   (``SKILL_SETS``), plus the always-on ``SHARED_CORE_SKILLS``, a user's
   profile includes.
@@ -36,8 +39,9 @@ _SETTINGS = "Jarvis Settings"
 
 FULL_TIER_ROLES: frozenset[str] = frozenset({"Jarvis Admin", "System Manager"})
 
-# Verified drop list (27 tools; 26 per spec §3, plus session_status pulled here
-# for the fleet-wide white-label deny): app-learning tools (system-initiated
+# Verified drop list (29 tools; 26 per spec §3, plus session_status pulled here
+# for the fleet-wide white-label deny and memory_get/memory_search for the
+# fleet-wide native cross-user memory deny): app-learning tools (system-initiated
 # learning runs only, which always run `full`), session/infra tools (zero
 # references in live-tenant transcripts), file-editing tools (skills only
 # need `exec` + `read`), cron/browser (Frappe-side scheduling covers cron;
@@ -59,6 +63,10 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 		"sessions_history",
 		"sessions_yield",
 		"session_status",  # denied globally (white-label leak); not for the standard tier
+		# denied globally: the shared "main" agent's native memory is one cross-user
+		# store; Jarvis uses per-user bench-owned memory (jarvis__recall/remember).
+		"memory_get",
+		"memory_search",
 		"subagents",
 		"nodes",
 		"gateway",
@@ -76,7 +84,7 @@ STANDARD_DROP_TOOLS: frozenset[str] = frozenset(
 	}
 )
 
-# The full 94-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
+# The full 96-tool universe minus STANDARD_DROP_TOOLS, hardcoded explicit and
 # sorted (spec §2 evidence capture: ~/.claude/jobs/bce488ac/tmp/postfix-cap.jsonl).
 # An allow list must be explicit here: deriving it at runtime from a live
 # agent container is not possible bench-side.
@@ -124,6 +132,8 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__query",
 	"jarvis__read_file",
 	"jarvis__read_wiki",
+	"jarvis__recall",
+	"jarvis__remember",
 	"jarvis__remove_tag",
 	"jarvis__report_pdf",
 	"jarvis__resolve_links",
@@ -142,8 +152,6 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__update_comment",
 	"jarvis__update_doc",
 	"jarvis__update_wiki",
-	"memory_get",
-	"memory_search",
 	"message",
 	"pdf",
 	"read",
@@ -153,7 +161,10 @@ _STANDARD_TOOLS_ALLOW = [
 
 def standard_tools_allow() -> list[str]:
 	"""The 67-tool allow list for the ``standard`` tier (spec §3 sized 68;
-	session_status pulled to the drop list for the fleet-wide white-label deny)."""
+	session_status pulled to the drop list for the fleet-wide white-label deny;
+	memory_get/memory_search pulled to the drop list for the fleet-wide native
+	cross-user memory deny; the per-user bench memory tools remember/recall
+	added so standard-tier memory works)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 
@@ -199,7 +210,10 @@ SHARED_CORE_SKILLS: frozenset[str] = frozenset(
 # Skill-set additions on top of SHARED_CORE_SKILLS, spec §3 table.
 SKILL_SETS: dict[str, frozenset[str]] = {
 	"accounts": frozenset({"erpnext-accounts", "erpnext-assets", "india-compliance"}),
-	"sales": frozenset({"erpnext-selling", "erpnext-crm", "erpnext-support", "erpnext-telephony"}),
+	# "crm" is the standalone Frappe CRM app skill (distinct from ERPNext's own CRM
+	# module skill "erpnext-crm"); it rides the shared Sales roles like india-compliance
+	# rides the Accounts roles, since Frappe CRM defines no distinct role of its own.
+	"sales": frozenset({"erpnext-selling", "erpnext-crm", "erpnext-support", "erpnext-telephony", "crm"}),
 	"purchase": frozenset({"erpnext-buying", "erpnext-subcontracting", "erpnext-edi"}),
 	"stock-mfg": frozenset(
 		{
@@ -286,7 +300,13 @@ def resolve_profile(user: str) -> ProfileChoice:
 		skill_sets = get_skill_sets()
 		shared_core = get_shared_core()
 		skills = tuple(sorted(shared_core.union(*(skill_sets[key] for key in matched))))
-		agent_id = "role-" + "+".join(matched)
+		# Joined with "_", not "+": the agent runtime (2026.9.x) validates agent ids
+		# against ^[a-z0-9][a-z0-9_-]{0,63}$, and a "+" (e.g. a past
+		# "role-hr+projects" id) fails that check and exits the gateway with
+		# code 78 on every boot. Set keys themselves match
+		# _CONFIG_SET_KEY_RE (^[a-z][a-z0-9-]{0,30}$, no underscore), so "_"
+		# here can only ever be this separator, never ambiguous with a key.
+		agent_id = "role-" + "_".join(matched)
 		allow = get_tools_allow()
 		return ProfileChoice(
 			agent_id=agent_id,
@@ -306,7 +326,19 @@ def needed_profiles() -> list[dict]:
 	Skills here are persona skills only; custom/learned skill slugs are
 	unioned in by fleet at apply time for every profile, main included
 	(spec §7), not here.
+
+	Gated on the tenant's mirrored ``enable_role_profiles`` switch: a
+	disabled tenant returns ``[]`` unconditionally, so :func:`sync_role_profiles`
+	reconciles admin down to no role profiles at all. Before this gate the
+	switch only stopped ``resolve_profile`` from being consulted in chat
+	(``chat/api.py``) - it never stopped this push boundary, so a disabled
+	tenant could still have role profiles pushed and rendered into its
+	the agent config. :func:`resolve_profile` itself stays ungated here on
+	purpose (chat/api.py is the only caller that needs to gate chat use).
 	"""
+	if not frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False):
+		return []
+
 	user_names = frappe.get_all(
 		"Has Role",
 		filters={"role": "Jarvis User", "parenttype": "User"},
@@ -671,7 +703,9 @@ def get_tools_allow() -> list[str]:
 def sync_role_profile_config() -> dict:
 	"""Pull the admin-owned role-profile config, cache it, mirror the
 	admin-decided ``enable_role_profiles`` flag, and re-push role profiles
-	when the config's identity (``version``) changed since the last pull.
+	when the config's identity (``version``) changed since the last pull, OR
+	when the mirrored ``enable_role_profiles`` flag itself changed (see the
+	dedicated note on that below).
 
 	Never raises: this runs from the daily scheduler tick (and can be called
 	ad hoc via ``bench execute``), so every failure mode degrades rather than
@@ -704,6 +738,16 @@ def sync_role_profile_config() -> dict:
 	the NEXT tick sees ``version != previous_version`` again and retries the
 	push rather than silently going stale for up to a day.
 
+	The forced re-push ALSO fires when the mirrored ``enable_role_profiles``
+	flag changed, even if ``version`` did not: the admin config's ``version``
+	only bumps on an unrelated content edit (a set/mapping/tool-tier change),
+	so a bare enable/disable toggle would otherwise sit unreflected in this
+	tenant's pushed role profiles (and the fleet render built from them)
+	until some other config edit happened to bump the version too - up to
+	the next unrelated change rather than the next daily tick. This does
+	not touch ``role_profiles_config_version`` on its own: the version field
+	only ever advances on an actual version change, per the rule above.
+
 	Returns ``{"synced": bool}``.
 	"""
 	phase = "pull"
@@ -725,6 +769,7 @@ def sync_role_profile_config() -> dict:
 		phase = "store"
 		version = data["version"]
 		previous_version = frappe.db.get_single_value(_SETTINGS, "role_profiles_config_version", cache=False)
+		previous_flag = frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False)
 
 		frappe.db.set_value(
 			_SETTINGS,
@@ -734,15 +779,23 @@ def sync_role_profile_config() -> dict:
 				"role_profiles_config_synced_at": frappe.utils.now(),
 			},
 		)
-		frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", 1 if data["enabled"] else 0)
+		new_flag = 1 if data["enabled"] else 0
+		frappe.db.set_single_value(_SETTINGS, "enable_role_profiles", new_flag)
+		# Cast previous_flag to the same 0/1 shape before comparing: an
+		# unsynced mirror reads back as None, and a bare `None != new_flag`
+		# comparison would misreport every tenant's FIRST sync as a "flag
+		# changed" push trigger, which is already covered (and redundant)
+		# with the version-change branch below on a first sync anyway.
+		flag_changed = (1 if previous_flag else 0) != new_flag
 
-		if version != previous_version:
+		if version != previous_version or flag_changed:
 			phase = "push"
 			_invalidate_config_cache()
 			push_result = sync_role_profiles(force=True)
 			if not push_result.get("pushed"):
-				raise RuntimeError("role-profile push failed; config cached but version left unadvanced")
-			frappe.db.set_value(_SETTINGS, _SETTINGS, {"role_profiles_config_version": version})
+				raise RuntimeError("role-profile push failed; config cached but not re-pushed")
+			if version != previous_version:
+				frappe.db.set_value(_SETTINGS, _SETTINGS, {"role_profiles_config_version": version})
 
 		return {"synced": True}
 	except Exception:

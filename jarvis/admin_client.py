@@ -56,6 +56,15 @@ _OAUTH_EXPIRY_SKEW_S = 60
 # Upper bound the cache entry lives, so the refresh token outlives the
 # (~15min) access token; on entry expiry we re-mint with the password grant.
 _OAUTH_CACHE_TTL_S = 24 * 60 * 60
+# Frappe 16.35+ refuses the password grant outright (invalid_grant). After the
+# admin refuses it, skip the token endpoint for this long and use api_key:api_secret
+# directly, so each admin call does not pay a doomed round trip and an Error Log row.
+_OAUTH_REFUSED_KEY = "jarvis:admin_oauth_grant_refused"
+_OAUTH_REFUSED_TTL_S = 60 * 60
+# OAuth error codes that mean "this grant will not work here", as opposed to a blip.
+_OAUTH_REFUSAL_ERRORS = frozenset(
+	{"invalid_grant", "unsupported_grant_type", "unauthorized_client", "invalid_client"}
+)
 
 # The admin control-plane app namespace. SWITCH TO V2: v2 is now the default
 # control plane. Every admin /api/method path is built under this namespace via
@@ -923,7 +932,18 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 		if value is not None:
 			body[key] = value
 
-	return _post(path=_m("api.tenant.get_connection"), body=body, timeout_s=timeout_s)
+	from jarvis.chat.runtime_profile import RuntimeProfileError, get_profile, ingest_current
+
+	data = _post(path=_m("api.tenant.get_connection"), body=body, timeout_s=timeout_s)
+	try:
+		ingest_current(data)
+		if data.get("chat_readiness") == "Ready":
+			get_profile()
+	except RuntimeProfileError as exc:
+		# Keep the last valid profile, but do not report this poll as ready.
+		data["chat_readiness"] = "Unavailable"
+		data["chat_readiness_reason"] = str(exc)
+	return data
 
 
 def get_role_profile_config(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
@@ -1137,8 +1157,7 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 						raise
 			frappe.cache().delete_value(_OAUTH_CACHE_KEY)
 
-	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
-	api_secret = (settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip()
+	api_key, api_secret = _legacy_credentials(settings)
 	if not api_key or not api_secret:
 		raise AdminAuthError("not onboarded (no OAuth password and no api_key/secret)")
 	return _raise_for_admin_raw(_send({**bearer, "Authorization": f"token {api_key}:{api_secret}"}))
@@ -1166,6 +1185,27 @@ def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	if target_plan is not None:
 		body["target_plan"] = target_plan
 	return _post(path=_m("api.tenant.renew"), body=body)
+
+
+def stop_autopay_to_pay(requesting_user: str | None = None, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+	"""Past-Due pay-now, step one of two: ask admin to neutralize the customer's
+	still-live Razorpay mandate so the account's EXISTING reactivation grid
+	(``can_reactivate``) can take over for a fresh, one-shot payment through the
+	SAME renew/reactivate flow the billing page already runs. Never charges
+	anything itself - it only kills the auto-retry.
+
+	``requesting_user`` is the real human clicking the button (the bench's own
+	caller forwards ``frappe.session.user``) - admin's audit trail for who asked.
+
+	Returns admin's envelope verbatim: ``{"ok": true, "outcome":
+	"neutralized"|"already_dead"|"already_active"}``. A refusal (admin flag off,
+	no longer eligible, money under review, or no subscription) arrives as the
+	usual AdminAuthError/AdminContractError through _do_post's status routing."""
+	return _post(
+		path=_m("api.tenant.stop_autopay_to_pay"),
+		body={"requesting_user": requesting_user},
+		timeout_s=timeout_s,
+	)
 
 
 def post_update_llm_creds(
@@ -1246,8 +1286,9 @@ def post_push_oauth_blob(provider: str, blob: dict) -> dict:
 
 	Timeout is bumped above the default 90s because the admin handler
 	chains to fleet-agent's PUT /auth-profile, which now runs
-	``openclaw doctor --fix --non-interactive`` (up to 60s, migrates the
-	legacy JSON store to SQLite on agent 2026.6.5+) plus
+	the runtime configuration migration command (see workspace integration
+	reference). It takes up to 60s and migrates the legacy JSON store to SQLite
+	on agent 2026.6.5+, followed by
 	``docker compose restart`` + healthz poll. Admin's own bound is 150s;
 	we give bench 180s to allow for the HTTPS round-trip and admin's
 	response serialization on top of that. The earlier 90s default ran
@@ -1279,7 +1320,7 @@ def post_subscription_connect(
 
 	Collapses what used to be two round trips out of ``jarvis_settings.py``'s
 	subscription "restart" leg - ``post_push_oauth_blob`` (the auth-profile
-	write) THEN ``post_update_llm_creds`` (the openclaw.json render + restart)
+	write) THEN ``post_update_llm_creds`` (the agent configuration render + restart)
 	- into one call, so the doctor+healthz work behind it runs once instead of
 	twice.
 
@@ -1333,6 +1374,110 @@ def post_subscription_connect(
 			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
 		},
 		timeout_s=240,
+	)
+
+
+def post_subscription_handover(
+	provider: str,
+	blob: dict,
+	llm_provider: str,
+	*,
+	model: str,
+	base_url: str,
+	installed_apps: list[str] | None = None,
+) -> dict:
+	"""POST admin's ``api.tenant.subscription_handover`` (jarvis#1425): move a
+	proxied ChatGPT-only workspace to the direct leg. Same arguments as
+	``post_subscription_connect``; ``blob`` has ``id_token`` stripped. 270 s,
+	above admin's 240 s fleet leg. A lost response is safe to retry: the fleet
+	route is a no-op once the tenant is direct."""
+	return _post(
+		path=_m(_SUBSCRIPTION_HANDOVER_METHOD),
+		body={
+			"provider": provider,
+			"blob": blob,
+			"llm_provider": llm_provider,
+			"model": model,
+			"base_url": base_url,
+			"installed_apps": installed_apps if installed_apps is not None else frappe.get_installed_apps(),
+		},
+		timeout_s=270,
+	)
+
+
+# --- Claude browser sign-in relay (CLAUDE-LOGIN-CONTRACT.md) ---------------
+#
+# Jarvis never runs an OAuth exchange for Anthropic itself: the official
+# Claude Code CLI inside the tenant container does its own `claude auth
+# login`, and these three calls only relay the authorize URL out and the
+# pasted code back. No token ever crosses this boundary - admin's
+# claude_login_submit hands back an account_email (maybe blank) and a
+# subscription_type, never a credential.
+
+
+def post_claude_login_start(model: str) -> dict:
+	"""POST to admin's ``api.tenant.claude_login_start``, which resolves the
+	tenant's running container and relays to fleet-agent's
+	``POST /claude-login/start``: installs/enables the pinned Claude CLI if
+	needed and starts a detached, headless ``claude auth login`` inside the
+	container, returning the authorize URL it printed.
+
+	``model`` is the subscription model the customer picked (may be blank;
+	the caller coerces it against the catalog before this is called) - it is
+	only carried through for the login's own bookkeeping, not used to run the
+	CLI differently.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError as usual.
+	"""
+	return _post(
+		path=_m("api.tenant.claude_login_start"),
+		body={"model": model},
+	)
+
+
+def post_claude_login_submit(login_id: str, code: str) -> dict:
+	"""POST the customer's pasted code to admin's
+	``api.tenant.claude_login_submit``, relayed to fleet-agent's
+	``POST /claude-login/submit``: appends the code to the CLI's waiting
+	stdin and waits for it to confirm the sign-in.
+
+	``code`` is the only secret this call carries. It is sent as a JSON
+	body field (never a query string or a logged header), and
+	``_do_post``/``_extract_frappe_message`` never log request bodies - only
+	the URL and a truncated RESPONSE body reach ``frappe.log_error`` on a
+	transport failure, so the code itself is never written to Error Log.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError as usual. A wrong code is an
+		``AdminContractError`` carrying admin's ``invalid_code`` (or
+		equivalent) ``error.code`` - the caller keeps the login alive for a
+		retry rather than treating this like every other terminal rejection.
+	"""
+	return _post(
+		path=_m("api.tenant.claude_login_submit"),
+		body={"login_id": login_id, "code": code},
+	)
+
+
+def post_claude_login_cancel(login_id: str) -> dict:
+	"""POST to admin's ``api.tenant.claude_login_cancel``, relayed to
+	fleet-agent's ``POST /claude-login/cancel``: kills the detached CLI
+	process for this login and removes its transcript/stdin directory.
+
+	Best-effort from the caller's point of view (an already-expired or
+	already-cancelled login_id is not an error) - raises only on a genuine
+	transport/auth failure.
+
+	Raises:
+		AdminAuthError, AdminUnreachableError, AdminValidationError,
+		AdminRateLimitedError as usual.
+	"""
+	return _post(
+		path=_m("api.tenant.claude_login_cancel"),
+		body={"login_id": login_id},
 	)
 
 
@@ -2015,11 +2160,12 @@ def cancel_scheduled_downgrade() -> dict:
 	)
 
 
-def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
-	"""POST a form-encoded grant to admin's OAuth token endpoint. Returns the
-	token dict ({access_token, refresh_token, expires_in, ...}) on success, or
-	None on any failure (network, non-JSON, non-200, missing access_token) so
-	the caller can fall back. Never raises; never logs token material.
+def _oauth_token_request(admin_url: str, grant: dict) -> tuple[dict | None, str | None]:
+	"""POST a form-encoded grant to admin's OAuth token endpoint. Returns
+	``(token, None)`` on success, ``(None, error_code)`` when the admin definitively
+	refused the grant (4xx with an OAuth refusal code), and ``(None, None)`` on any
+	other failure (network, non-JSON, 5xx, missing access_token) so the caller can
+	fall back. Never raises; never logs token material.
 
 	Form-encoded (not JSON): Frappe's get_token reads ``request.form``.
 	"""
@@ -2040,7 +2186,7 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 			title="admin_client: oauth token network error",
 			message=f"url={url!r} grant={grant.get('grant_type')!r} error={e!r}",
 		)
-		return None
+		return None, None
 	try:
 		token = resp.json()
 	except ValueError:
@@ -2048,7 +2194,7 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 			title="admin_client: oauth token non-JSON response",
 			message=f"grant={grant.get('grant_type')!r} status={resp.status_code}",
 		)
-		return None
+		return None, None
 	if resp.status_code != 200 or not isinstance(token, dict) or not token.get("access_token"):
 		# invalid_grant / invalid_client / expired-or-revoked refresh, etc.
 		# Log the error code only (never the credentials) for triage.
@@ -2057,16 +2203,19 @@ def _oauth_token_request(admin_url: str, grant: dict) -> dict | None:
 			title="admin_client: oauth token request rejected",
 			message=(f"grant={grant.get('grant_type')!r} status={resp.status_code} error={err!r}"),
 		)
-		return None
-	return token
+		refused = 400 <= resp.status_code < 500 and err in _OAUTH_REFUSAL_ERRORS
+		return None, (err if refused else None)
+	return token, None
 
 
 def clear_cached_token() -> None:
 	"""Drop the cached bearer. Anything that rotates this bench's admin credentials
 	MUST call it: the cached token was minted from the old ones, stays valid for its
 	full TTL, and keeps authenticating as the PREVIOUS account - so a reconnected
-	bench asks about a customer it no longer is and sits on "still being set up"."""
+	bench asks about a customer it no longer is and sits on "still being set up".
+	New credentials also deserve a fresh try at the grant, so the refusal goes too."""
 	frappe.cache().delete_value(_OAUTH_CACHE_KEY)
+	frappe.cache().delete_value(_OAUTH_REFUSED_KEY)
 
 
 def _cache_oauth_token(token: dict) -> None:
@@ -2094,7 +2243,12 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 
 	Serves a cached access token until shortly before expiry. On a miss, tries
 	the refresh token (best-effort), then the password grant (the durable
-	bootstrap). ``force_refresh`` bypasses the cache to re-mint after a 401.
+	bootstrap). ``force_refresh`` skips the cached access token to re-mint after a 401.
+
+	Once the admin refuses the password grant (Frappe 16.35+), that grant is not
+	retried for ``_OAUTH_REFUSED_TTL_S`` and the caller uses api_key:api_secret,
+	which every signup and reconnect issues. The refusal is only remembered when
+	that fallback exists, and it never blocks a cached refresh token.
 	"""
 	username = (settings.jarvis_admin_customer_email or "").strip()
 	# Password field -> get_password decrypts the real value out of __Auth.
@@ -2103,23 +2257,34 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 		return None
 
 	cache = frappe.cache()
-	cached = {} if force_refresh else (cache.get_value(_OAUTH_CACHE_KEY, expires=True) or {})
+	cached = cache.get_value(_OAUTH_CACHE_KEY, expires=True) or {}
 	access = cached.get("access_token")
-	if access and (cached.get("access_expires_at", 0) - _OAUTH_EXPIRY_SKEW_S) > time.time():
+	# force_refresh (after a 401) distrusts the access token only. Its refresh token
+	# is still tried first: on Frappe 16.35+ it is the only grant left.
+	if (
+		not force_refresh
+		and access
+		and (cached.get("access_expires_at", 0) - _OAUTH_EXPIRY_SKEW_S) > time.time()
+	):
 		return access
 
 	token = None
 	refresh = cached.get("refresh_token")
 	if refresh:
-		token = _oauth_token_request(
+		token, refusal = _oauth_token_request(
 			admin_url,
 			{
 				"grant_type": "refresh_token",
 				"refresh_token": refresh,
 			},
 		)
-	if not token:
-		token = _oauth_token_request(
+		if refusal == "invalid_grant":
+			# invalid_grant on a refresh means the token itself is dead (expired /
+			# revoked, RFC 6749 5.2): drop it so later calls do not replay it. A blip
+			# or a client-level refusal keeps it for the next try.
+			cache.delete_value(_OAUTH_CACHE_KEY)
+	if not token and not cache.get_value(_OAUTH_REFUSED_KEY, expires=True):
+		token, refusal = _oauth_token_request(
 			admin_url,
 			{
 				"grant_type": "password",
@@ -2127,10 +2292,29 @@ def _admin_access_token(settings, admin_url: str, *, force_refresh: bool = False
 				"password": password,
 			},
 		)
+		# Remember it only when api_key:api_secret can take over. Without that
+		# fallback, retrying on the next call is the bench's only way back in (a
+		# refusal mid-onboarding can be a race that clears seconds later).
+		if refusal and _has_legacy_credentials(settings):
+			cache.set_value(_OAUTH_REFUSED_KEY, refusal, expires_in_sec=_OAUTH_REFUSED_TTL_S)
 	if not token:
 		return None
 	_cache_oauth_token(token)
 	return token["access_token"]
+
+
+def _legacy_credentials(settings) -> tuple[str, str]:
+	"""The native api_key and api_secret, blank when missing. Both are Password
+	fields: attribute access returns the masked "*****" placeholder, so
+	get_password decrypts the real value out of __Auth."""
+	return (
+		(settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip(),
+		(settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip(),
+	)
+
+
+def _has_legacy_credentials(settings) -> bool:
+	return all(_legacy_credentials(settings))
 
 
 def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
@@ -2185,10 +2369,7 @@ def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 			frappe.cache().delete_value(_OAUTH_CACHE_KEY)
 
 	# Legacy native api_key:api_secret (pre-OAuth customers / OAuth fallback).
-	# Both are Password fields - attribute access returns the masked "*****"
-	# placeholder; get_password decrypts the real value out of __Auth.
-	api_key = (settings.get_password("jarvis_admin_api_key", raise_exception=False) or "").strip()
-	api_secret = (settings.get_password("jarvis_admin_api_secret", raise_exception=False) or "").strip()
+	api_key, api_secret = _legacy_credentials(settings)
 	if not api_key or not api_secret:
 		raise AdminAuthError("not onboarded (Jarvis Settings: no OAuth password and no api_key/secret)")
 	headers = {
@@ -2317,6 +2498,7 @@ def _contract_error(payload) -> dict:
 # the method name after it is the constant part).
 _METHOD_NOT_FOUND_MARKER = "Failed to get method for command"
 _SUBSCRIPTION_CONNECT_METHOD = "api.tenant.subscription_connect"
+_SUBSCRIPTION_HANDOVER_METHOD = "api.tenant.subscription_handover"
 
 
 def is_method_not_found(exc: AdminValidationError) -> bool:
@@ -2357,6 +2539,35 @@ def is_method_not_found(exc: AdminValidationError) -> bool:
 		return False
 	text = str(exc)
 	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_CONNECT_METHOD in text
+
+
+HANDOVER_UNSUPPORTED_CODE = "HandoverUnsupported"
+
+
+def is_handover_unsupported(exc: Exception) -> bool:
+	"""Admin or its fleet host cannot do the handover yet: fall back to the pool push.
+
+	CR-4 (2026-09-25 review): deliberately does NOT delegate to is_method_not_found.
+	That function's own code-less text fallback also matches _SUBSCRIPTION_CONNECT_METHOD
+	("api.tenant.subscription_connect") - an unrelated dotted path - so a stale admin
+	rejection naming THAT endpoint (present, subscription_handover missing) used to be
+	misread as "handover unsupported" too. The code-less + exc_type gate is the same one
+	is_method_not_found uses (a coded or re-typed rejection can never be a bare missing-
+	method answer), computed inline here and checked only against the markers this
+	function actually cares about: Frappe's own fixed English marker
+	(_METHOD_NOT_FOUND_MARKER) or subscription_handover's own dotted path
+	(_SUBSCRIPTION_HANDOVER_METHOD) - the latter for a translated admin locale that
+	leaves only the interpolated method name intact."""
+	if getattr(exc, "code", "") == HANDOVER_UNSUPPORTED_CODE:
+		return True
+	if not isinstance(exc, AdminValidationError):
+		return False
+	if getattr(exc, "code", ""):
+		return False
+	if getattr(exc, "exc_type", None) not in (None, "ValidationError"):
+		return False
+	text = str(exc)
+	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_HANDOVER_METHOD in text
 
 
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
@@ -2472,6 +2683,9 @@ def _request_maybe_delivered(e: BaseException) -> bool:
 
 
 def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str) -> dict:
+	# Opt in only after this client can remove the private profile from JSON
+	# responses. Older Admin versions safely ignore this additive header.
+	headers = {**headers, "X-Jarvis-Runtime-Profile": "1"}
 	try:
 		resp = requests.post(url, json=body, headers=headers, timeout=timeout_s)
 	except (requests.ConnectionError, requests.Timeout) as e:
@@ -2671,4 +2885,6 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		if _permanent_rejection_code(envelope):
 			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
 		raise AdminUnreachableError(f"{code}: {msg}")
-	return envelope.get("data", envelope) if isinstance(envelope, dict) else envelope
+	from jarvis.chat.runtime_profile import private_connection
+
+	return private_connection(envelope.get("data", envelope) if isinstance(envelope, dict) else envelope)

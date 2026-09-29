@@ -134,12 +134,25 @@
 					<div
 						v-for="a in rows"
 						:key="a.agent_slug"
-						role="button"
-						tabindex="0"
-						class="flex cursor-pointer flex-col rounded-lg border bg-surface-white p-5 transition hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
-						@click="openAgent(a)"
-						@keydown.enter.prevent="openAgent(a)"
-						@keydown.space.prevent="openAgent(a)"
+						:role="a.masked ? 'img' : 'button'"
+						:tabindex="a.masked ? undefined : 0"
+						:aria-label="a.masked ? 'Coming soon — not yet available' : undefined"
+						:title="
+							a.install_disabled
+								? 'Made unavailable by the operator; installed but paused - open to uninstall'
+								: undefined
+						"
+						class="flex flex-col rounded-lg border bg-surface-white p-5 transition"
+						:class="
+							a.masked
+								? 'cursor-default select-none opacity-50'
+								: a.install_disabled
+								? 'cursor-pointer select-none opacity-60 hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
+								: 'cursor-pointer hover:bg-surface-gray-1 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3'
+						"
+						@click="!a.masked && openAgent(a)"
+						@keydown.enter.prevent="!a.masked && openAgent(a)"
+						@keydown.space.prevent="!a.masked && openAgent(a)"
 					>
 						<div class="flex items-start gap-3">
 							<!-- letter-avatar logo (listing has no image field) -->
@@ -163,8 +176,17 @@
 									>
 										{{ a.title }}
 									</span>
+									<!-- Operator-masked (teaser): a distinct locked treatment, NOT the
+									     registry status 'Coming Soon' badge. The real name never arrives
+									     here — the server sends title 'Coming soon' + an opaque slug. -->
+									<FeatherIcon
+										v-if="a.masked"
+										name="lock"
+										class="mt-0.5 size-4 shrink-0 text-ink-gray-4"
+										title="Coming soon — not yet available"
+									/>
 									<Badge
-										v-if="a.status === 'Coming Soon'"
+										v-else-if="a.status === 'Coming Soon'"
 										class="shrink-0"
 										variant="subtle"
 										theme="blue"
@@ -177,8 +199,18 @@
 										theme="red"
 										label="Deprecated"
 									/>
+									<!-- The operator withdrew this agent (teaser/hidden): the owner's
+									     install is shown DISABLED so they can still open + uninstall it,
+									     but it does not run until the operator makes it available again. -->
+									<Badge
+										v-else-if="a.install_disabled"
+										class="shrink-0"
+										variant="subtle"
+										theme="red"
+										label="Unavailable"
+									/>
 								</div>
-								<div class="truncate text-sm text-ink-gray-5">
+								<div v-if="!a.masked" class="truncate text-sm text-ink-gray-5">
 									by {{ a.publisher || "Unknown"
 									}}<template v-if="a.version"> · v{{ a.version }}</template>
 								</div>
@@ -186,10 +218,13 @@
 						</div>
 
 						<p class="mt-3 line-clamp-2 min-h-10 text-base leading-5 text-ink-gray-6">
-							{{ a.description }}
+							{{ a.masked ? "This agent is not available yet." : a.description }}
 						</p>
 
-						<div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm">
+						<div
+							v-if="!a.masked"
+							class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm"
+						>
 							<Badge
 								variant="outline"
 								theme="gray"

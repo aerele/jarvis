@@ -33,10 +33,14 @@ import time
 from unittest.mock import MagicMock
 from unittest.mock import patch as mock_patch
 
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.chat import egress_rules
+from jarvis.chat import steps as chat_steps
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
+from jarvis.chat.steps import is_preamble_step, is_step
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests.harness import transcripts as _transcripts
 
@@ -49,6 +53,13 @@ _PAUSE_CAP_S = 0.01
 # --------------------------------------------------------------------------- #
 # Recording lane handler
 # --------------------------------------------------------------------------- #
+
+
+from jarvis.tests._gateway_fixtures import TEST_PROFILE, install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class _Recorder:
@@ -66,6 +77,11 @@ class _Recorder:
 		self.deltas: list[tuple[int, str, str]] = []
 		self.tools: list[dict] = []
 		self.statuses: list[tuple[int, str]] = []
+		self.steps: list[tuple[int, str]] = []
+		self.step_raws: list[str | None] = []
+		self.shown: list[str] = []
+		# Every lane callback in arrival order, for ordering assertions.
+		self.order: list[str] = []
 		self.terminal: tuple[str, dict] | None = None
 		self.quarantined: str | None = None
 		self.closing: str | None = None
@@ -82,15 +98,25 @@ class _Recorder:
 			on_quarantine=self._on_quarantine,
 			on_closing=self._on_closing,
 			on_status=self._on_status,
+			on_step=self._on_step,
 		)
 
-	def _on_delta(self, seq, text, delta):
+	def _on_delta(self, seq, text, delta, shown=None):
 		if self.poison_delta_seq is not None and seq == self.poison_delta_seq:
 			raise RuntimeError(f"poison delta seq={seq}")
 		self.deltas.append((seq, text, delta))
+		# What the chat displays (step text removed); None means same as text.
+		self.shown.append(text if shown is None else shown)
+		self.order.append("delta")
+
+	def _on_step(self, seq, text, raw=None):
+		self.steps.append((seq, text))
+		self.step_raws.append(raw)
+		self.order.append("step")
 
 	def _on_tool(self, ev):
 		self.tools.append(ev)
+		self.order.append("tool")
 
 	def _on_status(self, seq, status):
 		if self.poison_status_seq is not None and seq == self.poison_status_seq:
@@ -132,6 +158,13 @@ def _chat_final_frame(run_id, session_key, text="hi"):
 			"message": {"content": content},
 		},
 	}
+
+
+def _chat_aborted_frame(run_id, session_key, text=None):
+	payload = {"runId": run_id, "sessionKey": session_key, "state": "aborted", "errorMessage": "aborted"}
+	if text:
+		payload["message"] = {"content": [{"type": "text", "text": text}]}
+	return {"type": "event", "event": "chat", "payload": payload}
 
 
 def _chat_failed_final_frame(run_id, session_key, stop_reason=None):
@@ -276,8 +309,8 @@ class _DoubleGateway:
 
 	def arm_sessions_get(self, session_key: str, messages: list):
 		"""Arm the raw transcript ``sessions.get`` returns for a session key (used by
-		the pump's missed-terminal snapshot-recovery tail). Each message may carry an
-		``__openclaw.seq`` so the pump's watermark windowing (OARF-2) is exercised."""
+		the pump's missed-terminal snapshot-recovery tail). Each message may carry a
+		transcript metadata sequence field so the pump's watermark windowing (OARF-2) is exercised."""
 		self._sessions_get[session_key] = messages
 
 	def arm_sessions_list(self, rows: list):
@@ -448,6 +481,40 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 		self.assertIsNone(mux.register_run("readopt", LaneHandler(), is_readopt=True))
 		self.assertIsNotNone(mux.register_run("fresh", LaneHandler()))  # fresh send still allowed
 
+	def test_stop_flushes_a_reader_fault_queued_right_before_teardown(self):
+		# Code-review finding: a reader fault (or precious-overflow) deferred
+		# right before hop teardown must not wait for a dispatch() call that
+		# may never come again this hop - stop() itself must flush it, or a
+		# lost terminal silently falls back to the ~90s snapshot-recovery path.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		frame = _chat_final_frame("r1", "s1", "hi")
+		with mock_patch.object(RelayMux, "_route_terminal", side_effect=RuntimeError("forced routing fault")):
+			mux._route_event(frame)
+		self.assertEqual(mux.stats()["reader_errors"], 1)
+		self.assertIsNone(rec.quarantined, "must not fire before stop()/dispatch() flushes it")
+		mux.stop()
+		self.assertEqual(rec.quarantined, "reader_fault")
+
+	def test_reader_fault_on_an_already_retired_lane_is_a_no_op(self):
+		# Code-review finding: a duplicate/replayed terminal frame racing the
+		# REAL terminal's own retirement must never fire on_quarantine for a
+		# turn that already settled, and must never feed the poison-rate
+		# breaker for a fault that is not an actual loss.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		lane = mux._runs["r1"]
+		mux._retire_lane(lane)  # simulate: the REAL terminal already applied
+		quarantined_before = mux.stats()["lanes_quarantined"]
+		mux._on_reader_fault(lane, "chat", {"state": "final"})
+		self.assertEqual(mux.stats()["reader_errors"], 1)  # still counted, just not quarantined
+		self.assertIsNone(rec.quarantined)
+		mux.dispatch()
+		self.assertIsNone(rec.quarantined, "a retired lane must never be quarantined")
+		self.assertEqual(mux.stats()["lanes_quarantined"], quarantined_before)
+
 	def test_rekey_run_retry_attach(self):
 		mux = self._mux()
 		rec = _Recorder()
@@ -558,6 +625,223 @@ class TestRelayMuxWhiteBox(FrappeTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# agent-yield continuation adoption (image/video/music tools' unconditional
+# background-detach abort): pump.on_terminal parks a just-terminaled lane with
+# ``await_continuation``; the deferred tool's follow-up run posts under a FRESH
+# runId on the SAME session_key, which ``_route_event`` must adopt.
+# --------------------------------------------------------------------------- #
+
+
+class TestRelayMuxYieldContinuation(FrappeTestCase):
+	def _mux(self, **kw):
+		return RelayMux(MagicMock(), "wb-target", **kw)
+
+	def test_await_continuation_keeps_lane_registered_and_flagged(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		self.assertTrue(mux.await_continuation("r1"))
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_await_continuation_false_when_lane_already_gone(self):
+		mux = self._mux()
+		self.assertFalse(mux.await_continuation("never-registered"))
+
+	def test_terminal_on_awaiting_lane_is_not_retired(self):
+		"""_apply must skip _retire_lane when on_terminal ITSELF parks the lane
+		(mux.await_continuation) while handling this exact terminal - the real
+		pump call sequence: the lane is still "active" (not yet awaiting) when
+		the frame is routed, and only becomes "awaiting" during on_terminal's
+		own callback. Pre-flagging the lane awaiting BEFORE the frame arrives is
+		a different case entirely (a stray dead-runId frame on an
+		already-parked lane) and the dead-runId stray-frame guard drops that
+		one before it ever reaches on_terminal - see the sibling stray tests."""
+		mux = self._mux()
+		recorded = []
+
+		def on_terminal(kind, payload):
+			recorded.append((kind, payload))
+			mux.await_continuation("r1")
+
+		mux.register_run("r1", LaneHandler(on_terminal=on_terminal), session_key="s1")
+		mux._classify(_chat_aborted_frame("r1", "s1"))
+		mux.dispatch()
+
+		self.assertEqual(len(recorded), 1)  # the handler still ran
+		self.assertIn("r1", mux._runs)  # but the lane was NOT retired
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_continuation_final_adopted_under_fresh_run_id_same_session(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		self.assertTrue(mux.await_continuation("r1"))
+		# The deferred tool's follow-up run: a DIFFERENT runId, SAME session_key.
+		mux._classify(_chat_final_frame("image_generate:xyz", "s1", "here is the image"))
+		mux.dispatch()
+		self.assertEqual(rec.terminal[0], "relay:final")
+		self.assertEqual(rec.terminal[1]["text"], "here is the image")
+		# A normal (non-awaiting) terminal retires the lane, now under its NEW key.
+		self.assertNotIn("r1", mux._runs)
+		self.assertNotIn("image_generate:xyz", mux._runs)
+
+	def test_continuation_aborted_on_fresh_run_id_still_adopted(self):
+		"""Item 3: a continuation that itself fails must also reach on_terminal -
+		not just a continuation final."""
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux._classify(_chat_aborted_frame("image_generate:xyz", "s1"))
+		mux.dispatch()
+		self.assertEqual(rec.terminal[0], "relay:error")
+		self.assertEqual(rec.terminal[1]["state"], "aborted")
+
+	def test_different_session_key_never_adopted(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		before = mux.stats()["stray_frames"]
+		mux._classify(_chat_final_frame("some-other-run", "OTHER-SESSION", "nope"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)  # never delivered to this lane
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+		self.assertIn("r1", mux._runs)  # still parked, waiting for the right session
+
+	def test_release_continuation_drops_the_parked_lane(self):
+		# Resolved by session_key, NOT a runId (the caller cannot know one once
+		# adoption may have moved it onto a fresh id).
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux.release_continuation("s1")
+		self.assertNotIn("r1", mux._runs)
+		# A late continuation frame after release is now an ordinary stray.
+		before = mux.stats()["stray_frames"]
+		mux._classify(_chat_final_frame("image_generate:late", "s1", "too late"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+
+	def test_release_continuation_after_adoption_finds_the_live_lane(self):
+		# A Stop landing AFTER the continuation is adopted (streaming, not yet
+		# terminaled) must still release the LIVE lane, not the dead original
+		# runId (which release_continuation never even sees any more).
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		# Adopt via a non-final chat frame (the continuation is streaming).
+		mux._classify(
+			{
+				"type": "event",
+				"event": "chat",
+				"payload": {"runId": "image_generate:xyz", "sessionKey": "s1", "state": "delta"},
+			}
+		)
+		mux.dispatch()
+		self.assertNotIn("r1", mux._runs)
+		self.assertFalse(mux._runs["image_generate:xyz"].awaiting)
+
+		mux.release_continuation("s1")
+
+		self.assertNotIn("image_generate:xyz", mux._runs)
+
+	def test_release_continuation_is_idempotent(self):
+		mux = self._mux()
+		mux.release_continuation("never-there")  # must not raise
+
+	def test_stray_frame_under_dead_runid_while_parked_is_dropped(self):
+		# Only a frame with a NEW runId on the same session_key may adopt the
+		# lane; a frame replaying the dead original runId (the gateway's own
+		# retired lane, e.g. a straggling delta) must be dropped, never routed.
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		before = mux.stats()["stray_frames"]
+		mux._classify(_agent_frame("r1", "s1", "assistant", {"text": "late", "delta": "late"}))
+		mux.dispatch()
+		self.assertEqual(rec.deltas, [])
+		self.assertEqual(mux.stats()["stray_frames"], before + 1)
+		self.assertTrue(mux._runs["r1"].awaiting)  # still parked, untouched
+
+	def test_chat_frame_replaying_the_dead_runid_does_not_self_adopt(self):
+		mux = self._mux()
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux.await_continuation("r1")
+		mux._classify(_chat_final_frame("r1", "s1", "should never adopt itself"))
+		mux.dispatch()
+		self.assertIsNone(rec.terminal)
+		self.assertTrue(mux._runs["r1"].awaiting)
+
+	def test_continuation_reshow_decision_uses_pump_owned_last_shown(self):
+		"""Code-review finding: the reshow decision used to compare against a
+		reader-thread snapshot (lane.shown_text at terminal-enqueue time). An
+		agent-yield continuation re-adopts the SAME lane onto a fresh run for a
+		second terminal, and if that continuation streams no deltas of its own
+		before settling, the reader-side snapshot still holds what was shown
+		BEFORE the FIRST terminal's own reshow ran - so the second terminal's
+		"should I reshow" decision used stale data (and would wrongly redo a
+		reshow the user has already seen). It must use lane.last_shown
+		(pump-thread-owned, updated by every on_delta including a reshow)."""
+		mux = self._mux()
+		deltas = []
+		terminals = []
+
+		def on_delta(seq, text, delta, shown=None):
+			deltas.append((seq, text, delta, shown))
+
+		def on_terminal(kind, payload):
+			terminals.append((kind, payload))
+			if len(terminals) == 1:
+				# Mimic the pump's real on_terminal: park this lane awaiting the
+				# deferred tool's follow-up run on the SAME session_key.
+				mux.await_continuation("r1")
+
+		mux.register_run("r1", LaneHandler(on_delta=on_delta, on_terminal=on_terminal), session_key="s1")
+
+		# A short answer written before a tool call: strip_steps keeps it
+		# whole (removing it would leave nothing), but the live view already
+		# hid it as a step - exactly the discrepancy that triggers a reshow.
+		step = "Let me check the invoices."
+		mux._classify(_agent_frame("r1", "s1", "assistant", {"text": step, "delta": step}))
+		mux._classify(_agent_frame("r1", "s1", "item", _tool_data("start")))
+		mux._classify(_agent_frame("r1", "s1", "item", _tool_data("end")))
+		mux._classify(_chat_final_frame("r1", "s1", step))
+		mux.dispatch()
+
+		self.assertEqual(len(terminals), 1)
+		kind1, payload1 = terminals[0]
+		self.assertEqual((kind1, payload1["text"]), ("relay:final", step))
+		self.assertTrue(mux._runs["r1"].awaiting, "await_continuation must have parked the lane")
+		lane = mux._runs["r1"]
+		self.assertEqual(lane.last_shown, step, "the reshow must update last_shown to the re-shown answer")
+		self.assertEqual(len(deltas), 3, "2 ordinary deltas + 1 reshow")
+
+		# The deferred tool's follow-up run lands on the SAME session_key under
+		# a FRESH runId, adopting this lane in place, and settles with NO
+		# deltas of its own before its own terminal.
+		mux._classify(_chat_final_frame("r2", "s1", step))
+		mux.dispatch()
+
+		self.assertEqual(len(terminals), 2)
+		kind2, payload2 = terminals[1]
+		self.assertEqual(kind2, "relay:final")
+		self.assertEqual(payload2["text"], step)
+		self.assertTrue(payload2.get("yield_continuation"))
+		# The decisive assertion: the second terminal's answer is IDENTICAL to
+		# what lane.last_shown already correctly holds, so NO further reshow
+		# is needed. A stale reader-side snapshot (lane.shown_text, left at ""
+		# from before the first reshow) would have disagreed and wrongly
+		# fired a second, needless reshow delta here.
+		self.assertEqual(len(deltas), 3, "the second terminal must not trigger a needless reshow")
+
+
+# --------------------------------------------------------------------------- #
 # Failed-final classification (#543): the LIVE runtime terminal shapes
 # --------------------------------------------------------------------------- #
 
@@ -648,6 +932,30 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertEqual(term[0], "relay:final")
 		self.assertEqual(term[1]["text"], "recovered on the fallback model")
 
+	def test_image_content_block_rides_terminal_payload_as_media_urls(self):
+		# The gateway attaches a generated image as a CONTENT BLOCK on the final
+		# message, not text - a distinct delivery mechanism from media_rels.
+		img_url = "/api/chat/media/outgoing/sk-enc/12345678-1234-1234-1234-123456789012/full.png"
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {
+					"content": [
+						{"type": "text", "text": "Here it is."},
+						{"type": "image", "url": img_url, "mimeType": "image/png"},
+					]
+				},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "Here it is.")
+		self.assertEqual(term[1]["media_urls"], [{"url": img_url, "mime_type": "image/png"}])
+
 	def test_final_with_an_empty_message_and_benign_stop_reason_stays_final(self):
 		# A final that DOES carry an assistant message with no text and a non-error
 		# stopReason is the one empty shape that is not evidence of failure.
@@ -664,6 +972,116 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		term = self._terminal_for([frame])
 		self.assertEqual(term[0], "relay:final")
 		self.assertIsNone(term[1]["text"])
+
+
+class TestRelayMuxYieldViaFinal(FrappeTestCase):
+	"""Corrected wire shape (verified live against the 2026.9.3 bundle): the
+	image/video/music tools' background-detach yield does NOT end with
+	``state=="aborted"`` - it ends through ``broadcastChatFinal``, a ``final``
+	whose assistant message is the runtime's own ``createYieldAbortedResponse``:
+	empty text, ``stopReason=="aborted"`` (never "error"), which can ride at
+	the top level, nested in ``message``, or with ``message`` omitted
+	entirely. Without ``_is_yield_aborted_final`` this reached
+	``_chat_final_failed`` and was misclassified as a hard failure
+	(FAILED_FINAL_ERROR) - see TestRelayMuxFailedFinal for that (still
+	correct) path for every OTHER empty/failed final."""
+
+	def _terminal_for(self, frames):
+		mux = RelayMux(MagicMock(), "yf-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		for frame in frames:
+			mux._classify(frame)
+		mux.dispatch()
+		return rec.terminal
+
+	def test_top_level_stop_reason_aborted_message_omitted_is_a_yield(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="aborted")])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_top_level_stop_reason_aborted_with_message_present_is_a_yield(self):
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"stopReason": "aborted",
+				"message": {"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_nested_message_stop_reason_aborted_is_a_yield(self):
+		# The transcript-projected shape: no top-level stopReason, only nested.
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"message": {"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_stop_reason_error_is_still_failed_final_not_a_yield(self):
+		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="error")])
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
+
+	def test_real_text_beats_a_stray_aborted_stop_reason(self):
+		frame = {
+			"type": "event",
+			"event": "chat",
+			"payload": {
+				"runId": "r1",
+				"sessionKey": "s1",
+				"state": "final",
+				"stopReason": "aborted",
+				"message": {"content": [{"type": "text", "text": "a real answer"}]},
+			},
+		}
+		term = self._terminal_for([frame])
+		self.assertEqual(term[0], "relay:final")
+		self.assertEqual(term[1]["text"], "a real answer")
+
+	def test_bare_final_after_media_tool_start_is_a_yield(self):
+		# Corrected AGAIN (live e2e): the gateway settles a yielded run with NO
+		# message and NO stopReason at all when it produced no visible reply -
+		# wire-identical to a genuine failed_final. The only tell is whether a
+		# media-generation tool started during this run.
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "image_generate", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term, ("relay:error", {"state": "aborted", "text": ""}))
+
+	def test_bare_final_with_no_media_tool_stays_failed_final(self):
+		term = self._terminal_for(
+			[
+				_agent_frame(
+					"r1",
+					"s1",
+					"item",
+					{"kind": "tool", "phase": "start", "name": "get_list", "toolCallId": "c1"},
+				),
+				_chat_failed_final_frame("r1", "s1"),
+			]
+		)
+		self.assertEqual(term[0], "relay:error")
+		self.assertEqual(term[1]["state"], "failed_final")
 
 
 # --------------------------------------------------------------------------- #
@@ -903,3 +1321,672 @@ class TestRelayMuxSessionModelParams(FrappeTestCase):
 		self.assertEqual(method, "sessions.patch")
 		self.assertIn("model", params, "the key must be PRESENT, not dropped")
 		self.assertEqual(params, {"key": "sk", "model": None})
+
+
+# --------------------------------------------------------------------------- #
+# Live step line: text written right before a lookup is a step, not the answer
+# --------------------------------------------------------------------------- #
+
+
+def _tool_data(phase, call_id="c1"):
+	return {"kind": "tool", "phase": phase, "name": "jarvis__get_list", "toolCallId": call_id}
+
+
+class TestRelayMuxSteps(FrappeTestCase):
+	"""Each connection shape seen live on e2e2 (2026-09-25): Claude's CLI streams
+	one growing text for the whole turn, the API-key loop (DeepSeek) streams one
+	segment per model call, and the ChatGPT-subscription harness sends its step
+	updates as ``preamble`` items that never reach the final text.
+
+	The stored mirror (``deltas`` text) always keeps the raw streamed text, so a
+	stop, error or recovery saves what streamed exactly as before; only what the
+	chat displays (``shown``) and the saved final drop the step text."""
+
+	def _run(self, frames, final_text, steps=None, register=True, mux=None, rec=None):
+		mux = mux or RelayMux(MagicMock(), "steps-target")
+		rec = rec or _Recorder()
+		if register:
+			mux.register_run("r1", rec.handler(), session_key="s1", steps=steps)
+		for stream, data in frames:
+			mux._classify(_agent_frame("r1", "s1", stream, data))
+		if final_text is not None:
+			mux._classify(_chat_final_frame("r1", "s1", final_text))
+		mux.dispatch()
+		return rec
+
+	def test_claude_growing_text_splits_step_from_answer(self):
+		step = "I'll count them now."
+		answer = "There are **3 customers** on this site."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.step_raws, [step])
+		# Displayed: the step, then blank while it moves to the step line, then only the answer.
+		self.assertEqual(rec.shown, [step, "", answer])
+		# Stored mirror never loses streamed text (a stop mid-lookup keeps it).
+		self.assertEqual([d[1] for d in rec.deltas], [step, step, full])
+		# The bubble is cleared before the step shows (the pump flushes on a step).
+		self.assertEqual(rec.order[:4], ["delta", "delta", "step", "tool"])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_claude_tool_stream_boundary_moves_the_step(self):
+		# The Claude CLI runtime sends no item/tool frames, only the tool stream.
+		step = "I'll find the top customer, then pull their recent invoices."
+		answer = "**West View Software Ltd.** has the highest outstanding at 2,29,000 INR."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("tool", {"phase": "start", "name": "mcp__jarvis__query", "toolCallId": "t1"}),
+				("tool", {"phase": "result", "toolCallId": "t1"}),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.tools, [])  # a boundary only, never a tool row
+		self.assertEqual(rec.shown, [step, "", answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_api_key_step_segment_is_a_step(self):
+		step = "Checking the overdue invoices."
+		answer = "**West View** has the highest outstanding."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step, "itemId": "assistant-1"}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer, "itemId": "assistant-2", "replace": True}),
+			],
+			step + answer,  # the runtime glues per-call segments with no separator
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		self.assertEqual(rec.shown, [step, "", answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_long_text_before_a_lookup_stays_in_the_reply(self):
+		# More than one short sentence may be answer, so it is never a step (a
+		# DeepSeek draft like this is saved as it streamed, as before).
+		draft = (
+			"Its invoices:\n\n| not found |\n\nHold on, I need to actually pull the invoice list, one moment."
+		)
+		answer = "**West View** has the highest outstanding."
+		rec = self._run(
+			[
+				("assistant", {"text": draft, "delta": draft, "itemId": "assistant-1"}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": answer, "delta": answer, "itemId": "assistant-2", "replace": True}),
+			],
+			draft + answer,
+		)
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.shown, [draft, answer])
+		# R6: neither segment is a recorded step, so strip_steps is a no-op,
+		# but the runtime's own glued-with-no-separator boundary is still
+		# joined back with a paragraph break (see TestJoinSegments).
+		self.assertEqual(rec.terminal[1]["text"], f"{draft}\n\n{answer}")
+
+	def test_table_before_a_lookup_is_not_hidden(self):
+		# Review finding: table-only text must never be hidden, or it could come
+		# back duplicated after a hop.
+		table = "| a | b |\n|---|---|\n| 1 | 2 |"
+		rec = self._run(
+			[
+				("assistant", {"text": table, "delta": table}),
+				("item", _tool_data("start")),
+			],
+			None,
+		)
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.shown, [table])
+
+	def test_chatgpt_preamble_is_a_step_and_final_is_untouched(self):
+		rec = self._run(
+			[
+				(
+					"item",
+					{
+						"kind": "preamble",
+						"phase": "update",
+						"itemId": "m1",
+						"progressText": "Checking overdue invoices",
+					},
+				),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": "Three are overdue.", "delta": "Three are overdue."}),
+			],
+			"Three are overdue.",
+		)
+		self.assertEqual([s[1] for s in rec.steps], ["Checking overdue invoices"])
+		# Not in the reply text, so nothing to keep for a hop or to strip.
+		self.assertEqual(rec.step_raws, [None])
+		self.assertEqual(rec.terminal[1]["text"], "Three are overdue.")
+
+	# -- T1 (R4/root-cause B): the pooled openai-completions runtime sends a --
+	# -- preamble item for text ALSO streaming as ordinary reply text. -------
+
+	def test_preamble_in_reply_hides_before_the_step_and_records_raw(self):
+		step = "I'll identify the customers with overdue invoices."
+		# strip_steps keeps the final whole when what remains is shorter than
+		# what it removed (a short-answer-before-a-card guard, see
+		# TestStripSteps): keep this answer longer than the step to isolate
+		# the preamble-hiding behaviour this test is actually about.
+		answer = "Three customers currently have invoices overdue: AlphaCo, BetaCo and GammaCo, all more than 30 days late."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "itemId": "m1", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])
+		# In the reply, so it is kept for a hop re-seed (raw=text).
+		self.assertEqual(rec.step_raws, [step])
+		# Hidden BEFORE the step is offered, same order _move_pending_step uses.
+		self.assertEqual(rec.order[:4], ["delta", "delta", "step", "tool"])
+		# The tool boundary finds nothing left to move: no second step frame.
+		self.assertEqual(len(rec.steps), 1)
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_duplicate_preamble_is_not_recorded_or_offered_again(self):
+		step = "I'll check the overdue invoices for each customer."
+		answer = "Two invoices are overdue: one from AlphaCo Corp and one from BetaCo Inc, both significantly late."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{step}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{step}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])  # recorded/offered once
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_progressive_preamble_replaces_the_recorded_step(self):
+		# A growing prefix must REPLACE the recorded step, not sit alongside it
+		# - two partial entries in lane.steps would each cut only part of the
+		# reply text and leave a dangling remainder in the saved final.
+		partial = "I'll check the overdue"
+		full_step = "I'll check the overdue invoices for each customer."
+		answer = "Two invoices are overdue: one from AlphaCo Corp and one from BetaCo Inc, both significantly late."
+		rec = self._run(
+			[
+				("assistant", {"text": full_step, "delta": full_step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": partial}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": full_step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{full_step}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{full_step}\n\n{answer}",
+		)
+		self.assertEqual(len(rec.steps), 2)  # two live updates, one growing step
+		self.assertEqual(rec.steps[-1][1], full_step)
+		self.assertEqual(rec.terminal[1]["text"], answer)  # no dangling remainder
+
+	def test_two_distinct_preambles_before_one_tool_call_are_both_hidden(self):
+		# Review round 7 F1: after the first preamble is recorded, the stretch
+		# since the last tool call still starts with its raw text; the second,
+		# distinct preamble follows it and must be recorded and hidden too.
+		first = "I found two customers with overdue invoices."
+		second = "I'm now checking their linked contacts."
+		answer = (
+			"Neither customer has a linked contact with an email address, so no reminders can go out yet."
+		)
+		text = f"{first} {second}"
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": first}),
+				("assistant", {"text": text, "delta": f" {second}"}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": second}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{text}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{text}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [first, second])
+		self.assertEqual(rec.step_raws, [first, second])  # both recorded, both hidden
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_second_preamble_that_grows_replaces_its_partial(self):
+		# Review round 8 F2: the runtime resends every preamble as it grows,
+		# including a second one in the same stretch. Its growth must replace
+		# its own partial, never fall back to the step line only or split the
+		# sentence into two steps at the tool call.
+		first = "I found two customers with overdue invoices."
+		partial = "I'm now checking"
+		second = "I'm now checking their linked contacts and open tickets."
+		# Longer than the two steps together, so strip_steps' short-answer guard
+		# (keep the final whole when less would remain than was removed) stays out.
+		answer = (
+			"Neither customer has a linked contact with an email address, so no reminders can go out yet; "
+			"add a contact email on Grant Plastics Ltd. and West View Software Ltd. first."
+		)
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": first}),
+				("assistant", {"text": f"{first} {partial}", "delta": f" {partial}"}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": partial}),
+				("assistant", {"text": f"{first} {second}", "delta": second[len(partial) :]}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": second}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{first} {second}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{first} {second}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [first, partial, second])
+		self.assertNotIn(None, rec.step_raws)  # every one recorded and hidden
+		self.assertEqual(rec.terminal[1]["text"], answer)  # no fragment left behind
+
+	def test_a_preamble_found_only_inside_the_answer_is_not_cut_from_it(self):
+		# Review [0]: the match is anchored to the start of the reply since the
+		# last tool call. A short preamble that merely occurs mid-answer keeps
+		# today's path (step line only) and the answer stays intact.
+		answer = (
+			"Based on what I see, the total is 500 INR across three invoices. Let me check the due dates."
+		)
+		rec = self._run(
+			[
+				("assistant", {"text": answer, "delta": answer}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": "I see."}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+			],
+			answer,
+		)
+		self.assertEqual(rec.step_raws, [None])  # offered on the step line only, never recorded
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_preamble_not_in_the_reply_keeps_todays_path(self):
+		# The Codex-harness shape: the preamble text never rides the reply, so
+		# it is offered as a step with raw=None and the reply/final are untouched.
+		rec = self._run(
+			[
+				("item", {"kind": "preamble", "phase": "update", "progressText": "Looking that up"}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": "Found it.", "delta": "Found it."}),
+			],
+			"Found it.",
+		)
+		self.assertEqual([s[1] for s in rec.steps], ["Looking that up"])
+		self.assertEqual(rec.step_raws, [None])
+		self.assertEqual(rec.terminal[1]["text"], "Found it.")
+
+	def test_two_sentence_preamble_up_to_320_is_hidden_live_kept_in_final(self):
+		# C1 (code review, supersedes plan R4's strip default): looser than
+		# is_step (one sentence only) for the LIVE hide - a runtime-flagged
+		# preamble up to MAX_PREAMBLE_STEP_CHARS is hidden live even when it is
+		# more than one sentence - but it is NOT stripped from the saved
+		# reply unless it is ALSO a one-sentence step (is_step). A two-sentence
+		# preamble is kept, joined back with a paragraph break exactly as it
+		# streamed (it was never glued here - the runtime already separated it
+		# with "\n\n" - so the join is a no-op and the final is untouched).
+		step = (
+			"I'll identify customers whose invoices are overdue. "
+			"Then I'll check each customer's outstanding balance."
+		)
+		answer = (
+			"Three customers currently have overdue invoices: AlphaCo Corp, BetaCo Inc and GammaCo "
+			"LLC, each more than 30 days late and unpaid."
+		)
+		full = f"{step}\n\n{answer}"
+		self.assertFalse(is_step(step))
+		self.assertTrue(is_preamble_step(step))
+		self.assertLessEqual(len(step), 320)
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [step])  # hidden live, offered as a step
+		# The final KEEPS the step text (unlike a stripped one), so it differs
+		# from what the live view showed - the pre-terminal reshow (existing
+		# mechanism, see _finalize_terminal) reveals it once more before the
+		# terminal lands.
+		self.assertEqual(rec.shown, [step, "", answer, full])
+		self.assertEqual(rec.terminal[1]["text"], full)  # kept whole in the saved reply
+
+	def test_c1_multi_sentence_preamble_survives_a_longer_continuation(self):
+		# Code review C1 finding, reproduced with the reviewer's own fixture
+		# (prove_strip_guard_gap.py): a plausible real answer opening - not
+		# throwaway narration - that the runtime nonetheless flags as a
+		# preamble, followed by a SECOND tool call and a LONGER continuation.
+		# strip_steps' "keep final whole when shorter" guard does not fire
+		# here (the remainder is longer, not shorter, than what would have
+		# been removed), so pre-C1 this sentence was silently dropped from
+		# both the live view (hidden as a step) and the saved reply (spliced
+		# out). It must now survive in the saved reply.
+		# Adapted from the reviewer's fixture with an explicit sentence break: the
+		# original (comma-joined) text is grammatically ONE is_step-shaped
+		# sentence (no inner ". "), so it would still be stripped under the new
+		# rule too - this genuinely two-sentence version is what the C1 fix is
+		# actually meant to protect.
+		preamble = (
+			"I checked the sales ledger and found twelve invoices raised this quarter. "
+			"Three of them are now more than sixty days past due and need immediate follow-up."
+		)
+		continuation = (
+			"Looking at the aging report, AlphaCo owes 82 days, BetaCo owes 71 days and "
+			"GammaCo owes 65 days. I'd recommend calling AlphaCo first since their balance "
+			"is both the oldest and the largest of the three overdue accounts by a wide margin."
+		)
+		full = f"{preamble}\n\n{continuation}"
+		self.assertFalse(is_step(preamble))
+		self.assertTrue(is_preamble_step(preamble))
+		rec = self._run(
+			[
+				("assistant", {"text": preamble, "delta": preamble}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": preamble}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{continuation}"}),
+			],
+			full,
+		)
+		self.assertEqual([s[1] for s in rec.steps], [preamble])  # hidden live
+		self.assertEqual(rec.shown, [preamble, "", continuation, full])  # reshow, see above
+		# The finding sentence survives in the saved reply.
+		self.assertIn(preamble, rec.terminal[1]["text"])
+		self.assertEqual(rec.terminal[1]["text"], full)
+
+	def test_max_preamble_step_chars_zero_restores_todays_behaviour(self):
+		# R4 killswitch: with the constant at 0, an in-reply preamble is never
+		# hidden/recorded early - it is offered exactly as before this feature
+		# (raw=None), and whether it ends up a step at all is left to the
+		# unrelated is_step-driven tool-boundary path.
+		step = "I'll check the overdue invoices."
+		answer = "Three invoices are currently overdue and remain unpaid."
+		full = f"{step}\n\n{answer}"
+		with mock_patch.object(chat_steps, "MAX_PREAMBLE_STEP_CHARS", 0):
+			rec = self._run(
+				[
+					("assistant", {"text": step, "delta": step}),
+					("item", {"kind": "preamble", "phase": "update", "progressText": step}),
+					("item", _tool_data("start")),
+					("item", _tool_data("end")),
+					("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+				],
+				full,
+			)
+		# The preamble frame is offered with raw=None (today's unconditional path).
+		self.assertEqual(rec.step_raws[0], None)
+		# is_step still independently recognises the same one-sentence text at
+		# the tool boundary and records/strips it there, same as pre-feature.
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	# -- T1 (R6): the saved-reply glue for a separator-free segment boundary --
+
+	def test_glue_inserted_at_a_segment_boundary_in_the_final(self):
+		first = "I checked the ledger but found no results. I'll try the archive next."
+		second = "The archive has three matching entries."
+		final_text = first + second  # the runtime glues per-call segments with no separator
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": second, "delta": second}),
+			],
+			final_text,
+		)
+		self.assertEqual(rec.steps, [])  # two sentences: not a step, stays in the reply
+		self.assertEqual(rec.terminal[1]["text"], f"{first}\n\n{second}")
+
+	def test_parallel_lookups_record_one_step(self):
+		step = "Checking both lists."
+		full = f"{step}\n\nDone: 3 customers and 5 submitted sales invoices."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start", "c1")),
+				("item", _tool_data("start", "c2")),
+				("item", _tool_data("end", "c1")),
+				("item", _tool_data("end", "c2")),
+				("assistant", {"text": full, "delta": "\n\nDone."}),
+			],
+			full,
+		)
+		self.assertEqual(len(rec.steps), 1)
+		self.assertEqual(rec.terminal[1]["text"], "Done: 3 customers and 5 submitted sales invoices.")
+
+	def test_text_without_a_following_lookup_is_the_answer(self):
+		rec = self._run([("assistant", {"text": "Hello there", "delta": "Hello there"})], "Hello there")
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.terminal[1]["text"], "Hello there")
+
+	def test_answer_written_before_the_last_lookup_survives(self):
+		# A reply that ends by opening a confirmation card: two sentences, so
+		# never a step, and never hidden.
+		answer = "I have prepared a payment reminder. Please review it and confirm."
+		rec = self._run(
+			[
+				("assistant", {"text": answer, "delta": answer}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+			],
+			answer,
+		)
+		self.assertEqual(rec.steps, [])
+		self.assertEqual(rec.shown, [answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_short_answer_before_a_card_is_saved_and_shown_again(self):
+		# Review finding: a one-sentence answer, a card tool call, then a short
+		# remark. It looked like a step live, so the saved reply keeps it whole
+		# and the chat is shown the full text again before the terminal.
+		first = "You have 3 active customers."
+		full = f"{first}\n\nHere they are."
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": "\n\nHere they are."}),
+			],
+			full,
+		)
+		self.assertEqual(rec.shown[-1], full)
+		self.assertEqual(rec.terminal[1]["text"], full)
+
+	def test_stop_mid_lookup_keeps_the_streamed_text_stored(self):
+		# Review finding: a stop/error while a lookup runs settles with whatever
+		# the mirror holds. The mirror must still hold the streamed text.
+		step = "Let me check the invoices."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start")),
+			],
+			None,
+		)
+		self.assertTrue(all(d[1] == step for d in rec.deltas))
+		self.assertEqual(rec.shown[-1], "")
+
+	def test_hop_reattach_reseeds_steps(self):
+		# Review finding: a hop rebuilds the lane. Re-seeded with the steps the
+		# pump kept, the next growing-text frame still hides them and the saved
+		# reply is still stripped.
+		step = "Let me check the invoices."
+		answer = "Three invoices are overdue, the oldest by 42 days."
+		full = f"{step}\n\n{answer}"
+		rec = self._run(
+			[
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": f"\n\n{answer}"}),
+			],
+			full,
+			steps=[step],
+		)
+		self.assertEqual(rec.shown, [answer])
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_egress_rule_spanning_a_step_boundary_still_strips_the_step(self):
+		# Code-review finding: redacting the whole final text and the recorded
+		# step SEPARATELY can diverge for a rule that only matches with
+		# surrounding context present - the step then no longer matches its
+		# (differently redacted) counterpart inside the redacted whole text and
+		# is left sitting in the saved reply instead of being stripped. Strip
+		# the RAW step from the RAW final FIRST (an exact, verbatim substring
+		# match that can never diverge), THEN redact the result once.
+		egress_rules.persist([[r"acme now\.\n\nSystems", "remove"]])
+		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
+		step = "Checking acme now."
+		full = f"{step}\n\nSystems are stable."
+		rec = self._run(
+			[
+				("assistant", {"text": step, "delta": step}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": full, "delta": "\n\nSystems are stable."}),
+			],
+			full,
+		)
+		self.assertEqual(rec.terminal[1]["text"], "Systems are stable.")
+
+	def test_forbidden_word_straddling_the_truncation_cut_never_leaks(self):
+		# Code-review finding: display_line's 160-char truncation used to run
+		# on the reader thread BEFORE redaction (on the pump thread) - a
+		# forbidden word straddling the cut left its surviving half-fragment
+		# un-redacted and visible. Redact the FULL raw step text first, THEN
+		# shape/truncate it with display_line.
+		egress_rules.persist([["acme", "remove"]])
+		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
+		prefix = "x" * (chat_steps.MAX_STEP_CHARS - 3)
+		long_text = f"{prefix}acme word."
+		self.assertGreater(len(long_text), chat_steps.MAX_STEP_CHARS)
+		mux = RelayMux(MagicMock(), "steps-target")
+		rec = _Recorder()
+		mux.register_run("r1", rec.handler(), session_key="s1")
+		mux._classify(_agent_frame("r1", "s1", "item", {"kind": "preamble", "progressText": long_text}))
+		mux.dispatch()
+		self.assertTrue(rec.steps, "no step line was recorded")
+		line = rec.steps[-1][1]
+		self.assertNotIn("ac", line)
+		# Prove truncation actually ran (the word was gone BEFORE the cut, not
+		# that the input was short to begin with).
+		self.assertTrue(line.endswith("…"), line)
+
+
+# --------------------------------------------------------------------------- #
+# Regression (#1449): the reader thread must be Frappe-free.
+#
+# Every OTHER test in this file drives frames through either the real reader
+# thread of a _DoubleGateway (a genuine background threading.Thread) or, for
+# TestRelayMuxSteps, straight through mux._classify on the TEST's own thread.
+# The tests below are deliberately the odd one out: they call
+# RelayMux._route_event directly from a BRAND NEW threading.Thread, matching
+# exactly what relay_mux.py's HARD INVARIANTS say the real reader thread looks
+# like - no inherited frappe.local (Python's contextvars do not propagate to a
+# new thread; frappe.local is a plain ContextVar-backed namespace, see
+# frappe.utils.local.Local) - then call dispatch() on this test's own
+# FrappeTestCase thread, which does have one. That split is the whole fix.
+# --------------------------------------------------------------------------- #
+
+
+def _drive_on_bare_thread(fn, *args, timeout=5.0) -> None:
+	"""Call ``fn(*args)`` from a genuine new OS thread with none of frappe's
+	contextvar-backed ``local`` state - what the mux's real reader thread has.
+	Every other frame-driving helper in this file calls straight through on the
+	test's own (Frappe-connected) thread, which is exactly what would hide the
+	#1449 regression."""
+	t = threading.Thread(target=fn, args=args)
+	t.start()
+	t.join(timeout=timeout)
+	assert not t.is_alive(), "reader-thread routing hung"
+
+
+class TestReaderThreadIsFrappeFree(FrappeTestCase):
+	def _mux_with_lane(self, run_id="r1", session_key="s1"):
+		mux = RelayMux(MagicMock(), "reader-fault-target")
+		rec = _Recorder()
+		mux.register_run(run_id, rec.handler(), session_key=session_key)
+		return mux, rec
+
+	def test_final_terminal_survives_a_reader_thread_with_no_frappe_site(self):
+		# generated_media.get_profile is what #1449 added to the reader path.
+		# This file's module fixture (install_synthetic_runtime_profile) mocks
+		# it away entirely - a plain Python attribute swap, thread-independent,
+		# which would hide the regression instead of reproducing it. Stand in
+		# with a function that touches frappe.local the same way the real one
+		# does: genuinely absent on a bare thread, genuinely present on this
+		# test's own FrappeTestCase thread.
+		def site_bound_profile():
+			_ = frappe.local.site  # AttributeError here on a bare thread - the #1449 crash
+			return TEST_PROFILE
+
+		mux, rec = self._mux_with_lane()
+		frame = _chat_final_frame("r1", "s1", text="hello there")
+		with mock_patch("jarvis.chat.generated_media.get_profile", site_bound_profile):
+			_drive_on_bare_thread(mux._route_event, frame)
+			applied = mux.dispatch()
+		self.assertEqual(applied, 1, "the terminal must be queued and applied, never silently dropped")
+		self.assertEqual(rec.terminal, ("relay:final", {"text": "hello there"}))
+		self.assertEqual(mux.stats()["reader_errors"], 0)
+
+	def test_egress_rule_applies_to_final_text_and_preamble_step(self):
+		# Older, separate defect on the same reader thread: egress_rules.get_rules()
+		# reads frappe.db and FAIL-OPENS to [] on any error - no crash, just a
+		# customer's control-plane redaction rule silently never applied.
+		egress_rules.persist([["acme", "remove"]])
+		# Belt and braces against get_rules()'s cache=True Single read, same as
+		# test_egress_rules._set_raw / test_egress_wiring._cache_rules: persist()
+		# already invalidates the per-request memo, but this also drops the
+		# document cache so the read that follows cannot serve a stale blob.
+		frappe.clear_document_cache(egress_rules.SETTINGS, egress_rules.SETTINGS)
+		mux, rec = self._mux_with_lane()
+
+		step_frame = _agent_frame(
+			"r1", "s1", "item", {"kind": "preamble", "progressText": "checking the acme ledger"}
+		)
+		_drive_on_bare_thread(mux._route_event, step_frame)
+		mux.dispatch()
+		self.assertTrue(rec.steps, "no step line was recorded")
+		self.assertNotIn("acme", rec.steps[-1][1])
+
+		final_frame = _chat_final_frame("r1", "s1", text="Found it in the acme ledger.")
+		_drive_on_bare_thread(mux._route_event, final_frame)
+		mux.dispatch()
+		self.assertIsNotNone(rec.terminal)
+		self.assertNotIn("acme", rec.terminal[1]["text"])
+
+	def test_reader_thread_fault_on_terminal_counts_and_fast_recovers(self):
+		# A forced exception while routing a KNOWN lane's terminal must never
+		# vanish as an ordinary stray frame again: it is counted distinctly
+		# (reader_errors) and handed to the pump's existing quarantine handoff
+		# so the run recovers on dispatch()'s very next call, not at hop end.
+		mux, rec = self._mux_with_lane()
+		frame = _chat_final_frame("r1", "s1", text="hi")
+		with mock_patch.object(RelayMux, "_route_terminal", side_effect=RuntimeError("forced routing fault")):
+			_drive_on_bare_thread(mux._route_event, frame)
+		self.assertEqual(mux.stats()["reader_errors"], 1)
+		self.assertIsNone(rec.terminal)
+		mux.dispatch()
+		self.assertEqual(rec.quarantined, "reader_fault")
+		self.assertIsNone(rec.terminal)

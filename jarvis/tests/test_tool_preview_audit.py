@@ -41,10 +41,11 @@ class TestPreview(FrappeTestCase):
 
 
 class TestWriteAudit(FrappeTestCase):
-	# NOTE: these exercise the inline write-audit seam with a NON-gated write
-	# (add_comment). The gated writes in _GATED_WRITES (create_doc etc.) no
-	# longer execute inline - they park for confirmation and are audited only
-	# when confirm_tool runs them; that path is covered in test_confirm_gate.
+	# NOTE: these exercise the inline write-audit seam. add_comment is gated as of
+	# design A1 (it parks), so the two seam tests patch it OUT of _GATED_WRITES to
+	# drive the inline path directly - the seam under test is "an inline write is
+	# audited", independent of which tool. Genuinely gated writes park for
+	# confirmation and are audited when confirm_tool runs them (test_confirm_gate).
 	def test_successful_write_is_audited(self):
 		todo = frappe.get_doc(
 			{
@@ -52,7 +53,10 @@ class TestWriteAudit(FrappeTestCase):
 				"description": "jarvis-test-audit-target",
 			}
 		).insert(ignore_permissions=True)
-		with patch("jarvis.api.audit.record") as rec:
+		with (
+			patch("jarvis.api.audit.record") as rec,
+			patch.object(api, "_GATED_WRITES", api._GATED_WRITES - {"add_comment"}),
+		):
 			r = api._run_tool(
 				"add_comment",
 				{
@@ -67,7 +71,10 @@ class TestWriteAudit(FrappeTestCase):
 		self.assertTrue(rec.call_args.kwargs["ok"])
 
 	def test_failed_write_is_audited_as_error(self):
-		with patch("jarvis.api.audit.record") as rec:
+		with (
+			patch("jarvis.api.audit.record") as rec,
+			patch.object(api, "_GATED_WRITES", api._GATED_WRITES - {"add_comment"}),
+		):
 			r = api._run_tool(
 				"add_comment",
 				{

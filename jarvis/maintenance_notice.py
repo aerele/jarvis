@@ -51,10 +51,13 @@ def persist(notice: dict | None) -> None:
 		frappe.log_error(title="maintenance_notice.persist failed", message=frappe.get_traceback())
 
 
-def boot_payload() -> dict:
-	"""``maintenance`` for context.boot and the send gate. active iff the mirror flag is
-	set (pure toggle -- the CP owns clearing it; this bench reflects the last-known state
-	until the next poll refreshes it). Fails to not-held on any read error."""
+def _mirror_payload() -> dict:
+	"""The operator/roll maintenance mirror alone, with no switch overlay. active iff
+	the mirror flag is set (pure toggle -- the CP owns clearing it; this bench reflects
+	the last-known state until the next poll refreshes it). Fails to not-held on any
+	read error. ``persist_from_connection`` reads only this, never ``boot_payload``'s
+	switch overlay below -- a proxy<->direct switch is bench-local and the CP has no
+	notion of it."""
 	try:
 		row = frappe.get_cached_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
 		return {
@@ -62,8 +65,33 @@ def boot_payload() -> dict:
 			"message": row.get("maintenance_message") or "",
 		}
 	except Exception:
-		frappe.log_error(title="maintenance_notice.boot_payload failed", message=frappe.get_traceback())
+		frappe.log_error(title="maintenance_notice._mirror_payload failed", message=frappe.get_traceback())
 		return {"active": False, "message": ""}
+
+
+def boot_payload() -> dict:
+	"""``maintenance`` for context.boot and the send gate (``policy._maintenance_hold``).
+
+	The operator/roll mirror wins when active (it is the higher-priority, CP-driven
+	hold). Otherwise, while a bench-local proxy<->direct switch is held open
+	(jarvis#1425 follow-up -- ``jarvis.chat.llm_switch``), reuse this same hold and
+	banner so the send gate, the boot flag and the SPA banner all key off one signal
+	instead of a second parallel mechanism. Fails to not-held on any error (a redis
+	blip must never block chat)."""
+	mirror = _mirror_payload()
+	if mirror.get("active"):
+		return mirror
+	try:
+		from jarvis.chat import llm_switch
+
+		if llm_switch.is_active():
+			return {"active": True, "message": llm_switch.message_for()}
+	except Exception:
+		frappe.log_error(
+			title="maintenance_notice.boot_payload llm_switch check failed",
+			message=frappe.get_traceback(),
+		)
+	return {"active": False, "message": ""}
 
 
 def persist_from_connection(conn: dict) -> None:
@@ -80,7 +108,7 @@ def persist_from_connection(conn: dict) -> None:
 	live, or this clears it every poll -- deploy the CP before the app, and set no hold until both
 	are live. The breadcrumb below is the diagnostic if that ordering is ever violated."""
 	if not conn.get("maintenance_supported"):
-		if boot_payload().get("active"):
+		if _mirror_payload().get("active"):
 			frappe.logger("jarvis").info(
 				"maintenance: clearing hold -- connection lacks maintenance_supported "
 				"(old/rolled-back control plane); confirm CP-before-app deploy order"
@@ -96,7 +124,24 @@ def check() -> dict:
 	open chat tab lifts the hold promptly when the operator/roll clears it. One admin
 	round-trip refreshes BOTH notices (release + maintenance) -- an active maintenance
 	poll therefore keeps the release mirror fresh too, not a wasted second call. The
-	round-trip is cached briefly so many gated tabs cost one call."""
+	round-trip is cached briefly so many gated tabs cost one call.
+
+	2026 review (second pass): also drives a held ``llm_switch`` forward, before
+	anything else here -- every open chat polls this endpoint WHILE the hold banner
+	is up (that is the whole point of the banner), so it is a trigger point
+	independent of a reply ending or the Settings page polling
+	``onboarding.get_llm_sync_status``. Guarded: never raises, and never changes
+	this function's own return shape -- a redis/DB blip degrades to "didn't
+	reconcile this poll", same as ``llm_switch.reconcile()``'s own contract."""
+	try:
+		from jarvis.chat import llm_switch
+
+		llm_switch.reconcile()
+	except Exception:
+		frappe.log_error(
+			title="maintenance_notice.check llm_switch.reconcile failed", message=frappe.get_traceback()
+		)
+
 	from jarvis import admin_client, release_notice
 
 	cache = frappe.cache()

@@ -180,7 +180,9 @@ def _create_card(args: dict, would) -> dict:
 		if val is None or (not isinstance(val, list) and str(val).strip() == ""):
 			continue
 		df = meta.get_field(key) if meta else None
-		rows.append({"label": _label(meta, key), "value": fmt(val, df)})
+		# A held create with missing fields has no dry-run doc: never echo a secret arg.
+		shown = "[hidden]" if is_secret(meta, key) else fmt(val, df)
+		rows.append({"label": _label(meta, key), "value": shown})
 		if len(rows) >= _MAX_ROWS:
 			break
 	name = would.get("name") if isinstance(would, dict) else None
@@ -524,6 +526,12 @@ def _recips(value) -> str:
 	return "" if value is None else str(value)
 
 
+def _email_attachment_names(attachments):
+	from jarvis.tools.send_email import resolve_email_attachments
+
+	return [fmt(f.file_name) for f in resolve_email_attachments(attachments)]
+
+
 def _email_card(args: dict) -> dict | None:
 	to = args.get("recipients") or args.get("to") or ""
 	return {
@@ -533,6 +541,7 @@ def _email_card(args: dict) -> dict | None:
 		"cc": fmt(_recips(args.get("cc") or "")),
 		"bcc": fmt(_recips(args.get("bcc") or "")),
 		"print_format": fmt(args.get("print_format") or ""),
+		"attachments": _email_attachment_names(args.get("attachments")),
 		"body": fmt(args.get("content") or args.get("message") or "", limit=_MAX_BODY),
 	}
 
@@ -559,6 +568,7 @@ def _bulk_email_card(messages: list) -> dict | None:
 				"cc": fmt(_recips(m.get("cc") or "")),
 				"bcc": fmt(_recips(m.get("bcc") or "")),
 				"subject": fmt(m.get("subject") or ""),
+				"attachments": _email_attachment_names(m.get("attachments")),
 				"body": fmt(m.get("content") or "", limit=_MAX_BULK_BODY),
 			}
 		)

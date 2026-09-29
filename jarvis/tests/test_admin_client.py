@@ -18,6 +18,7 @@ from jarvis.admin_client import (
 	DEFAULT_TIMEOUT_S,
 	AdminAmbiguousError,
 	AdminAuthError,
+	AdminContractError,
 	AdminUnreachableError,
 	AdminValidationError,
 	post_update_llm_creds,
@@ -99,6 +100,9 @@ def _fake_get_single(doctype, *args, **kwargs):
 
 
 def setUpModule():
+	from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+	install_synthetic_runtime_profile()
 	global _get_single_patcher
 	_get_single_patcher = patch("frappe.get_single", side_effect=_fake_get_single)
 	_get_single_patcher.start()
@@ -161,7 +165,7 @@ def _settings_for_oauth(
 	_ADMIN_SETTINGS.jarvis_admin_customer_password = password
 	_ADMIN_SETTINGS.jarvis_admin_api_key = api_key
 	_ADMIN_SETTINGS.jarvis_admin_api_secret = api_secret
-	frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+	admin_client.clear_cached_token()
 
 
 def _settings_clear_admin():
@@ -169,7 +173,7 @@ def _settings_clear_admin():
 	the whole of "not onboarded" - nothing is deleted and nothing to restore."""
 	_require_fake_settings()
 	_ADMIN_SETTINGS.reset()
-	frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+	admin_client.clear_cached_token()
 
 
 def _mock_response(status_code: int, json_body=None, text: str = ""):
@@ -701,6 +705,68 @@ class TestIsMethodNotFound(FrappeTestCase):
 			"Failed to get method for command x with y", exc_type="DuplicateEntryError"
 		)
 		self.assertFalse(admin_client.is_method_not_found(exc))
+
+
+class TestIsHandoverUnsupported(FrappeTestCase):
+	"""jarvis#1425: is_handover_unsupported tells "fall back to the pool push"
+	apart from a real business rejection on subscription_handover."""
+
+	def test_true_for_the_handover_unsupported_contract_code(self):
+		exc = AdminContractError("handover not available", code="HandoverUnsupported")
+		self.assertTrue(admin_client.is_handover_unsupported(exc))
+
+	def test_true_for_a_method_not_found_validation_error(self):
+		exc = AdminValidationError(
+			"Failed to get method for command jarvis_admin_v2.api.tenant.subscription_handover with "
+			"module 'jarvis_admin_v2.api.tenant' has no attribute 'subscription_handover'",
+			exc_type="ValidationError",
+		)
+		self.assertTrue(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_an_ordinary_business_rejection(self):
+		exc = AdminContractError("provider mismatch", code="ProviderMismatch")
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
+
+	def test_true_for_a_translated_method_missing_rejection_naming_handover(self):
+		"""jarvis#1425 fix round 1: is_method_not_found's own text fallback is
+		scoped to subscription_connect's dotted name, so it never fires here - a
+		non-English admin locale that translated Frappe's "Failed to get method
+		for command" prose leaves only the interpolated dotted method name
+		intact. is_handover_unsupported must recognise THAT shape for
+		subscription_handover's own dotted name, or an old admin on a non-English
+		locale hard-fails instead of falling back to the pool push."""
+		exc = AdminValidationError(
+			"No fue posible encontrar el metodo api.tenant.subscription_handover solicitado",
+			exc_type="ValidationError",
+		)
+		self.assertTrue(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_a_codeless_rejection_naming_something_else(self):
+		exc = AdminValidationError("unusable oauth grant", exc_type="ValidationError")
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_a_coded_rejection_whose_text_happens_to_name_handover(self):
+		"""A structured code always wins: even if a business rejection's message
+		happens to mention the dotted path, a non-empty code means this is the
+		endpoint's OWN validation, not a missing-method rejection."""
+		exc = AdminContractError(
+			"provider mismatch while handling api.tenant.subscription_handover",
+			code="ProviderMismatch",
+		)
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
+
+	def test_false_for_a_codeless_rejection_naming_subscription_connect_not_handover(self):
+		"""CR-4 (2026-09-25 review): is_handover_unsupported must NOT delegate to
+		is_method_not_found - that function's own code-less text fallback is
+		scoped to subscription_connect's dotted name
+		("api.tenant.subscription_connect"), an unrelated endpoint. A stale-admin
+		rejection naming THAT path (present, subscription_handover missing) must
+		not be misread as "handover unsupported"."""
+		exc = AdminValidationError(
+			"No fue posible encontrar el metodo api.tenant.subscription_connect solicitado",
+			exc_type="ValidationError",
+		)
+		self.assertFalse(admin_client.is_handover_unsupported(exc))
 
 
 class TestPermanentRejectionClassification(FrappeTestCase):
@@ -1788,6 +1854,64 @@ class TestPostSubscriptionConnect(FrappeTestCase):
 		)
 
 
+class TestPostSubscriptionHandover(FrappeTestCase):
+	"""jarvis#1425: moving a proxied ChatGPT-only workspace onto the direct
+	leg. Same combined-payload shape as post_subscription_connect, posted to
+	the handover dotted path with a longer budget (admin's own fleet leg here
+	is 240s, not subscription_connect's 210s)."""
+
+	def setUp(self):
+		_settings_for_admin()
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def test_happy_path_posts_combined_payload(self):
+		captured = {}
+		blob = {
+			"type": "oauth",
+			"provider": "openai",
+			"access": "AT-fresh",
+			"refresh": "RT-fresh",
+		}
+
+		def _fake_post(url, json=None, timeout=None, **_kw):
+			captured["url"] = url
+			captured["body"] = json
+			captured["timeout"] = timeout
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {"action": "handover"}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			result = admin_client.post_subscription_handover(
+				"openai",
+				blob,
+				"OpenAI",
+				model="gpt-5.5",
+				base_url="",
+			)
+		self.assertEqual(result, {"action": "handover"})
+		self.assertIn("subscription_handover", captured["url"])
+		self.assertEqual(
+			captured["body"],
+			{
+				"provider": "openai",
+				"blob": blob,
+				"llm_provider": "OpenAI",
+				"model": "gpt-5.5",
+				"base_url": "",
+				"installed_apps": frappe.get_installed_apps(),
+			},
+		)
+		# Must exceed admin's own admin->fleet handover budget (240s), the same
+		# each-layer-exceeds-the-one-below rule post_subscription_connect follows
+		# against its own 210s leg.
+		self.assertGreater(
+			captured["timeout"],
+			240,
+			"post_subscription_handover timeout must outlast admin's own admin->fleet budget",
+		)
+
+
 class TestPostSubscriptionDisconnect(FrappeTestCase):
 	def setUp(self):
 		_settings_for_admin()
@@ -2141,6 +2265,162 @@ class TestOAuthBearer(FrappeTestCase):
 		admin_client._cache_oauth_token({"access_token": "B", "expires_in": 900})
 		self.assertEqual(compat.cache_get_fresh(admin_client._OAUTH_CACHE_KEY)["access_token"], "B")
 		frappe.cache().delete_value(admin_client._OAUTH_CACHE_KEY)
+
+
+class TestOAuthGrantRefused(FrappeTestCase):
+	"""Frappe 16.35+ refuses grant_type=password. The bench must fall back to
+	api_key:api_secret and stop asking for an hour, but never treat a blip
+	(network error, 5xx) or a refused refresh token as that refusal."""
+
+	_route = TestOAuthBearer._route
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def _run(self, calls: int, token_response):
+		cap = {}
+		route = self._route(token_response=token_response, api_capture=cap)
+		with patch("requests.post", side_effect=route):
+			results = [admin_client.get_connection() for _ in range(calls)]
+		return cap, results
+
+	@staticmethod
+	def _refused(data=None):
+		return _mock_response(
+			400, json_body={"error": "invalid_grant", "error_description": "Invalid credentials given."}
+		)
+
+	def _refused_flag(self):
+		return compat.cache_get_fresh(admin_client._OAUTH_REFUSED_KEY)
+
+	def test_refusal_uses_legacy_and_is_remembered(self):
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		cap, results = self._run(3, self._refused)
+		self.assertEqual(results, [{"x": 1}] * 3)
+		# One doomed grant, then straight to the legacy header on every call.
+		self.assertEqual(len(cap["token_calls"]), 1)
+		self.assertEqual({h["Authorization"] for h in cap["api_headers"]}, {"token legacy-key:legacy-secret"})
+		self.assertEqual(self._refused_flag(), "invalid_grant")
+
+	def test_remembered_refusal_still_uses_a_cached_refresh_token(self):
+		# Frappe 16.35 still honours refresh_token: a bench holding one keeps its
+		# bearer; only the refused password grant is skipped.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-1", "access_expires_at": 0},
+		)
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		minted = _mock_response(200, json_body={"access_token": "ACCESS-2", "expires_in": 900})
+		cap, _ = self._run(1, minted)
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token"])
+		self.assertEqual(cap["api_headers"][0]["Authorization"], "Bearer ACCESS-2")
+
+	def test_refused_refresh_token_is_dropped_not_replayed(self):
+		# Refresh refused and password refusal remembered: the dead refresh token is
+		# dropped, so the next call makes no token request at all.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-DEAD", "access_expires_at": 0},
+		)
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		cap, _ = self._run(2, self._refused)
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token"])
+		self.assertEqual({h["Authorization"] for h in cap["api_headers"]}, {"token legacy-key:legacy-secret"})
+
+	def test_client_level_refusal_of_a_refresh_keeps_the_token(self):
+		# invalid_client says nothing about the refresh token itself: keep it and
+		# try it again next call rather than stranding the bench on the password.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-1", "access_expires_at": 0},
+		)
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		cap, _ = self._run(2, _mock_response(401, json_body={"error": "invalid_client"}))
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token", "refresh_token"])
+
+	def test_401_retry_uses_the_cached_refresh_token(self):
+		# The bearer is rejected mid-life; the re-mint must go through the cached
+		# refresh token (still honoured on 16.35), not straight to the password.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "ACCESS-1", "refresh_token": "REFRESH-1", "access_expires_at": 9e12},
+		)
+		minted = _mock_response(200, json_body={"access_token": "ACCESS-2", "expires_in": 900})
+
+		seen = []
+
+		def _api(headers):
+			# Record at call time: _post reuses one headers dict for the retry.
+			seen.append(headers["Authorization"])
+			if headers["Authorization"] == "Bearer ACCESS-1":
+				return _mock_response(
+					401, json_body={"message": {"ok": False, "error": {"code": "AuthError"}}}
+				)
+			return None
+
+		cap = {}
+		route = self._route(token_response=minted, api_capture=cap, api_response=_api)
+		with patch("requests.post", side_effect=route):
+			self.assertEqual(admin_client.get_connection(), {"x": 1})
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token"])
+		self.assertEqual(seen, ["Bearer ACCESS-1", "Bearer ACCESS-2"])
+
+	def test_refusal_is_not_remembered_without_a_legacy_fallback(self):
+		# No api_key:api_secret: remembering would lock the bench out for an hour, so
+		# every call keeps trying the grant (e.g. an onboarding race that clears).
+		_settings_for_oauth()
+		cap = {}
+		route = self._route(token_response=self._refused, api_capture=cap)
+		with patch("requests.post", side_effect=route):
+			for _ in range(2):
+				with self.assertRaises(AdminAuthError):
+					admin_client.get_connection()
+		self.assertEqual(len(cap["token_calls"]), 2)
+		self.assertIsNone(self._refused_flag())
+
+	def test_network_error_is_not_remembered(self):
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+
+		def _down(data):
+			raise requests.ConnectionError("admin unreachable")
+
+		cap, _ = self._run(2, _down)
+		# Still tried on the next call: a blip must not park the bench on api_key.
+		self.assertEqual(len(cap["token_calls"]), 2)
+		self.assertIsNone(self._refused_flag())
+
+	def test_server_error_is_not_remembered(self):
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		cap, _ = self._run(2, _mock_response(500, json_body={"error": "invalid_grant"}))
+		self.assertEqual(len(cap["token_calls"]), 2)
+		self.assertIsNone(self._refused_flag())
+
+	def test_refused_refresh_alone_is_not_remembered(self):
+		# An expired refresh token is refused with invalid_grant too; the password
+		# grant still works on this admin, so nothing may be remembered.
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		frappe.cache().set_value(
+			admin_client._OAUTH_CACHE_KEY,
+			{"access_token": "STALE", "refresh_token": "REFRESH-OLD", "access_expires_at": 0},
+		)
+		minted = _mock_response(200, json_body={"access_token": "ACCESS-2", "expires_in": 900})
+
+		def _grant(data):
+			return self._refused() if data["grant_type"] == "refresh_token" else minted
+
+		cap, _ = self._run(1, _grant)
+		self.assertEqual([c["grant_type"] for c in cap["token_calls"]], ["refresh_token", "password"])
+		self.assertEqual(cap["api_headers"][0]["Authorization"], "Bearer ACCESS-2")
+		self.assertIsNone(self._refused_flag())
+
+	def test_clear_cached_token_forgets_the_refusal(self):
+		frappe.cache().set_value(admin_client._OAUTH_REFUSED_KEY, "invalid_grant")
+		admin_client.clear_cached_token()
+		self.assertIsNone(self._refused_flag())
 
 
 class TestAdminUrlResolution(FrappeTestCase):

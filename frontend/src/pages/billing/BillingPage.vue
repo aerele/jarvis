@@ -113,6 +113,23 @@
 						@action="doReauthorize"
 					/>
 
+					<!-- can_stop_autopay_to_pay: a lapsed Past-Due sub whose Razorpay mandate is
+					     STILL retrying. Neither Renew nor the reactivation grid is offered while
+					     that mandate lives, so without this the customer has no move at all. Stopping
+					     it neutralizes the mandate and reloads, which flips can_reactivate true and
+					     surfaces the grid below. Reuses BillingNotice (theme="red" without solid =
+					     red SUBTLE, per PlanBillingPane's convention - the confirm dialog owns the
+					     deliberate step). !! guards the absent-key case so an older admin payload
+					     renders no CTA. -->
+					<BillingNotice
+						v-if="canStopAutopayToPay"
+						:message="STOP_AUTOPAY_BANNER"
+						action-label="Stop auto-retry & pay now"
+						theme="red"
+						:loading="busy === 'stopAutopay'"
+						@action="confirmStopAutopay"
+					/>
+
 					<!-- F12: next to the controls above that raise it, not the page foot. -->
 					<ErrorMessage v-if="actionErr" class="mb-4" :message="actionErr" />
 
@@ -578,6 +595,14 @@ const noOtherPlans = computed(() =>
 		? reactivationPlans.value.length === 0
 		: !upgradePlans.value.length && !downgradePlans.value.length
 );
+
+// can_stop_autopay_to_pay: true only for a lapsed Past-Due sub with a still-live
+// Razorpay mandate (non-trial, admin flag ON) - see get_account_summary. !! reads
+// an absent key the same as false (cross-repo deploy-order safety: an old admin
+// payload with no such key renders no CTA).
+const canStopAutopayToPay = computed(() => !!account.value.can_stop_autopay_to_pay);
+const STOP_AUTOPAY_BANNER =
+	"We're still auto-retrying a failed charge on your card for this past-due invoice. Stop the retries to pay another way and keep your subscription active.";
 
 // Plan changes are refused server-side while a cancellation or a switch is
 // already pending, so the cards disable rather than offer a button that 400s.
@@ -1062,6 +1087,41 @@ async function doReauthorize() {
 				retry: doReauthorize,
 			}),
 	});
+}
+
+function confirmStopAutopay() {
+	openConfirm({
+		title: "Stop auto-retry & pay now",
+		amount: "",
+		message:
+			"This cancels the current auto-charge attempt on your card and clears the way to pay again. Nothing is charged yet - you'll pick a plan and pay on the next step.",
+		confirmLabel: "Stop & continue",
+		run: doStopAutopay,
+	});
+}
+
+async function doStopAutopay() {
+	busy.value = "stopAutopay";
+	actionErr.value = "";
+	notice.value = "";
+	try {
+		const out = (await api.stopAutopayToPay()) || {};
+		if (out.outcome === "already_active") {
+			notice.value = "You're already paid - your subscription is active.";
+		} else if (out.outcome === "neutralized" || out.outcome === "already_dead") {
+			notice.value = "Auto-retry stopped - pick a plan below to pay.";
+		}
+		// "neutralized" (just killed the live mandate) and "already_dead" (already
+		// gone) both mean nothing is left auto-retrying: reload so can_reactivate flips
+		// and the grid appears. Reusing the reload for "already_active" is harmless.
+		await loadAccount();
+	} catch (e) {
+		// A refusal changed nothing - surface it, leave state exactly as it was, and
+		// never reload (same as every other action here).
+		actionErr.value = errMsg(e);
+	} finally {
+		busy.value = "";
+	}
 }
 
 async function doResume() {

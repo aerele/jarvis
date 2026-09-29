@@ -16,7 +16,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.api import _ARMED_SKIP_COVERED, _ARMED_SKIP_NEVER, _GATED_WRITES
 from jarvis.permissions import ensure_jarvis_user_role
-from jarvis.tests.test_auto_apply import (
+from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
 	_ensure_non_admin_user,
 	_make_conv,
@@ -210,8 +210,16 @@ class TestArmedSkipPartition(FrappeTestCase):
 			"never (always parks) - a tool in neither is an unclassified fail-open gap",
 		)
 
-	def test_irreversible_trio_never_skips(self):
-		self.assertEqual(_ARMED_SKIP_NEVER, frozenset({"cancel_doc", "delete_doc", "amend_doc"}))
+	def test_brake_is_the_trio_plus_create_custom_skill_and_call_connector(self):
+		# Unified brake (design A4): the irreversible trio + create_custom_skill (a
+		# consequential meta-write) + call_connector (opaque per-action reversibility)
+		# always park. The macro and skill modes now share ONE brake, so
+		# create_custom_skill NO LONGER skips inside an armed macro - a deliberate
+		# behaviour change from the pre-unification macro set that covered it.
+		self.assertEqual(
+			_ARMED_SKIP_NEVER,
+			frozenset({"cancel_doc", "delete_doc", "amend_doc", "create_custom_skill", "call_connector"}),
+		)
 
 	def test_run_method_is_covered(self):
 		# run_method gates in ordinary chat but skips inside an armed macro (D5).
@@ -565,6 +573,50 @@ class TestD5StopAndReport(FrappeTestCase):
 			for rec in pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
 			if rec.get("conversation") == conv
 		)
+
+	def test_every_terminal_path_sweeps_the_runs_cards_before_disarming(self):
+		"""C1: cards never expire, so a disarm that skipped the sweep (a stop, the stale
+		reaper, a finish after a store blip hid the card) would leave the run's
+		destructive card confirmable forever."""
+		from jarvis.chat import macros
+
+		for name, end in (
+			("c1-stop", macros.stop_macro_run),
+			("c1-reap", lambda run: macros._cas_run_status(run, "running", "failed")),
+			("c1-finish", lambda run: macros._finish(frappe.get_doc(self.RUN, run), "completed")),
+		):
+			with self.subTest(end=name):
+				run_name, conv = self._run_and_conv(armed=True, name=name)
+				self._park_delete_card(conv)
+				self.assertEqual(self._pending_count(conv), 1)
+				frappe.set_user(NON_ADMIN_USER)
+				end(run_name)
+				frappe.db.commit()
+				self.assertEqual(self._pending_count(conv), 0)
+				self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
+
+	def test_a_failed_sweep_keeps_the_run_armed(self):
+		"""Fail closed: disarming over a card the sweep could not cancel would leave the
+		unattended run's brake card confirmable forever."""
+		from jarvis.chat import actions_api, macros, pending_confirm
+
+		def _sweep_fails(conversation, **kw):
+			frappe.db.commit()  # the real sweep commits the caller's work first
+			raise RuntimeError("sweep failed")
+
+		run_name, conv = self._run_and_conv(armed=True, name="sweep-fails")
+		self._park_delete_card(conv)
+		[card] = pending_confirm.list_for_owner(NON_ADMIN_USER, conversation=conv)
+		frappe.set_user(NON_ADMIN_USER)
+		with patch("jarvis.chat.pending_actions.cancel_for_conversation", side_effect=_sweep_fails):
+			macros.stop_macro_run(run_name)
+		frappe.db.commit()
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "stopped")
+		self.assertEqual(self._pending_count(conv), 1)
+		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 1)
+		res = actions_api.confirm_tool(card["token"], conversation=conv)
+		self.assertEqual(res.get("reason_code"), "armed_run", res)
+		self.assertEqual(self._pending_count(conv), 1, "the refused Confirm consumed nothing")
 
 	def test_armed_run_stops_and_sweeps_when_step_parks(self):
 		from jarvis.chat import macros

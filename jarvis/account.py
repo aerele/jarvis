@@ -784,6 +784,18 @@ def is_ready_for_chat() -> dict:
 	rather than raising or affecting the verdict above.
 	"""
 	verdict = _ready_verdict()
+	if verdict.get("ready"):
+		from jarvis.chat.runtime_profile import RuntimeProfileError, ensure_ready
+
+		try:
+			ensure_ready()
+		except RuntimeProfileError as exc:
+			verdict = {
+				"ready": False,
+				"reason": "container_unavailable",
+				"detail": str(exc),
+				"retryable": True,
+			}
 	try:
 		from jarvis.chat.pump import chat_worker_status
 
@@ -954,8 +966,25 @@ def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
 
 	Fails closed and never raises: an unreachable admin, a non-Ready verdict or a
 	failed write all leave the provisioning verdict standing.
-	"""
+
+	jarvis#1425 review (live e2e2, 2026-09-27): while a switch is HELD (not
+	yet applied) or applied but not yet confirmed, admin's "Ready" is about
+	the config BEFORE the switch (nothing new has been pushed yet) - this is
+	the most likely actual path that stamped a false "ok" + llm_pool_synced_at
+	live (a held direct->proxy switch leaves llm_pool_synced_at None, so
+	is_ready_for_chat's pool branch calls straight into this). No admin call,
+	no stamp, and no miss-cache write during a hold (a miss-cache write here
+	would also suppress the FIRST real poll once the switch actually ends).
+	The switch's own released worker owns convergence through its own
+	_converge_via_admin loop. jarvis#1425, fourth pass: once that worker
+	calls await_admin() (admin ACCEPTED the push), Ready genuinely describes
+	THIS config and the stamp below is correct - reconcile() right after ends
+	the switch on it at once."""
 	try:
+		from jarvis.chat import llm_switch
+
+		if llm_switch.blocks_stamp():
+			return False
 		cache = frappe.cache()
 		if cache.get_value(_APPLY_CONFIRM_MISS_KEY, expires=True):
 			return False
@@ -972,6 +1001,7 @@ def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
 		# converged "ok" — which is the second face of #576, the Settings pane
 		# still showing "Applying to your agent" off that same field.
 		_stamp_converged_ok(settings, is_pool=is_pool)
+		llm_switch.reconcile()
 		return True
 	except Exception:
 		return False
@@ -1899,6 +1929,29 @@ def reauthorize_autopay() -> dict:
 	# plan-09 WS8: attest a token answer so BillingPage navigates to the
 	# admin-hosted mandate checkout (behaviour-neutral otherwise).
 	return onboarding_contract.augment_pay_page(_surface(admin_client.reauthorize_autopay))
+
+
+@frappe.whitelist()
+def stop_autopay_to_pay() -> dict:
+	"""Past-Due pay-now, step one of two: neutralize the customer's still-live
+	Razorpay mandate so the account's EXISTING reactivation grid (can_reactivate)
+	takes over for step two - the customer picks a plan and pays through the SAME
+	renew/reactivate flow already on this page. This call never charges anything.
+
+	Only reachable when get_account_summary's can_stop_autopay_to_pay was true (a
+	lapsed Past-Due sub, a still-live mandate, non-trial, admin flag ON) - admin
+	re-checks every one of those and answers a coded refusal (FeatureDisabled 403 /
+	NotEligible 409 / PAYMENT_UNDER_REVIEW 409 / NoSubscription 409) when they no
+	longer hold; _surface turns that into the same clean frappe.throw every other
+	billing action here uses.
+
+	require_jarvis_admin is the ONLY who-can-act gate (C1): the admin call is
+	single-identity, so there is nothing further to check bench-side. The real
+	human acting is forwarded as requesting_user for admin's audit trail. No
+	chat-gate bust: this only kills a mandate, it grants no entitlement.
+	"""
+	require_jarvis_admin()
+	return _surface(admin_client.stop_autopay_to_pay, requesting_user=frappe.session.user)
 
 
 @frappe.whitelist()

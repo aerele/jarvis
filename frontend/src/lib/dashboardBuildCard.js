@@ -249,7 +249,7 @@ export function restoreDashboardRunState(
 //
 // The builder's own canvas render component (DashboardCanvas.vue) is NOT
 // reused here: both its modes wire the live postMessage bridge
-// (callDashboardTool / runDashboardSource) so the document's queries
+// (previewDashboardSource / runDashboardSource) so the document's queries
 // actually run, and dashboardOpen.js documents that main chat deliberately
 // never does that ("main chat's canvas has no query-tool bridge... that is
 // accepted"). Auto-rendering that bridge for every dashboard message in a

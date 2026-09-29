@@ -333,3 +333,25 @@ def delegated_send():
 		yield
 	finally:
 		frappe.flags.jarvis_delegated_send = prev
+
+
+@contextmanager
+def message_origin(value: str):
+	"""Stamp ``origin`` on the user row an enclosed ``send_message`` inserts
+	(board answer, File-Box drop, agent finding). Server context only, like
+	``delegated_send``; ``origin`` is never a request argument."""
+	prev = frappe.flags.get("jarvis_message_origin")
+	frappe.flags.jarvis_message_origin = value
+	try:
+		yield
+	finally:
+		frappe.flags.jarvis_message_origin = prev
+
+
+def refuse_in_tool_dispatch() -> None:
+	"""S6 nesting guard: a gate or a human turn/decision endpoint is never entered
+	from inside a running tool (``tools.registry.dispatch`` owns the depth)."""
+	from jarvis.tools.registry import in_tool_dispatch
+
+	if in_tool_dispatch():
+		frappe.throw(frappe._("Not permitted inside a tool call"), frappe.PermissionError)

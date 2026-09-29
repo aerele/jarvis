@@ -28,6 +28,9 @@ permissions:
   contents: read
 
 jobs:
+  runtime-branding:
+    uses: ./.github/workflows/runtime-branding.yml
+
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -66,6 +69,13 @@ jobs:
         with:
           node-version: "24"   # frappe version-16 requires node >= 24
 
+      - name: Validate Admin-owned upgrade fixtures for this checkout
+        working-directory: app
+        run: |
+          git rev-parse HEAD
+          python3 -m jarvis.ci.inputs fixture --output "$RUNNER_TEMP/migration-fixture.json"
+          echo "JARVIS_LEGACY_MIGRATION_FIXTURES_FILE=$RUNNER_TEMP/migration-fixture.json" >> "$GITHUB_ENV"
+
       - name: System deps
         run: |
           sudo apt-get update
@@ -96,25 +106,25 @@ jobs:
       - name: Create test site + install apps
         working-directory: frappe-bench
         run: |
-          bench new-site test_site \
+          bench new-site jarvis-ci.test \
             --db-host 127.0.0.1 \
             --mariadb-user-host-login-scope='%' \
             --mariadb-root-password root \
             --db-root-username root \
             --admin-password admin
-          bench --site test_site install-app erpnext hrms jarvis
-          bench --site test_site set-config allow_tests true
+          bench --site jarvis-ci.test install-app erpnext hrms jarvis
+          bench --site jarvis-ci.test set-config allow_tests true
           # Full suite creates far more than Frappe's default 60-users/60-min limit
           # (throttle_user_creation); raise it so no mid-suite fixture insert hits
           # "Throttled". -p stores an INT (a string limit breaks the count>limit compare).
-          bench --site test_site set-config -p throttle_user_limit 100000
+          bench --site jarvis-ci.test set-config -p throttle_user_limit 100000
 
       - name: Run tests + coverage
         working-directory: frappe-bench
         run: |
           # gevent: needed by jarvis/realtime/handlers.py (socketio_backend=python) and its tests.
           ./env/bin/pip install coverage gevent
-          bench --site test_site run-tests --app jarvis --coverage
+          bench --site jarvis-ci.test run-tests --app jarvis --coverage
           # Enforced coverage floor. Baseline on 2026-07-02 was 87% (incl. test files, with
           # the 9 quarantined tests skipped). Ratchet UP over time; never down.
           ./env/bin/coverage report --data-file=sites/.coverage --fail-under=85

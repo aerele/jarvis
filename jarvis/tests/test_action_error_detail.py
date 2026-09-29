@@ -136,6 +136,25 @@ class TestTranslateWriteError(FrappeTestCase):
 		# enveloped, never leaks a traceback.
 		self.assertIsNone(api._translate_write_error(ValueError("boom"), api._msglog_mark()))
 
+	def test_outgoing_email_error_preserves_setup_message(self):
+		message = "Please setup default outgoing <b>Email Account</b>"
+		mark = api._msglog_mark()
+		frappe.msgprint(message)
+		env = api._translate_write_error(frappe.OutgoingEmailError(message), mark)
+		self.assertIsNotNone(env)
+		self.assertFalse(env["ok"])
+		self.assertEqual(env["error"]["code"], "OutgoingEmailError")
+		self.assertEqual(env["error"]["message"], "Please setup default outgoing Email Account")
+		self.assertIn("administrator", env["error"]["hint"])
+		self.assertIn("Email Account", env["error"]["hint"])
+		self.assertNotIn("detail", env["error"])
+		self.assertEqual(api._msglog_mark(), mark)
+
+	def test_outgoing_email_error_without_message_has_a_useful_fallback(self):
+		env = api._translate_write_error(frappe.OutgoingEmailError(), api._msglog_mark())
+		self.assertIsNotNone(env)
+		self.assertEqual(env["error"]["message"], "Outgoing email is not configured.")
+
 
 class TestDispatchAndWrapEnrichment(FrappeTestCase):
 	def setUp(self):
@@ -143,6 +162,76 @@ class TestDispatchAndWrapEnrichment(FrappeTestCase):
 		frappe.flags.pop("error_message", None)
 		self.addCleanup(lambda: frappe.flags.pop("error_message", None))
 		self.addCleanup(lambda: setattr(frappe.local, "message_log", []))
+
+	def test_missing_email_account_surfaces_after_single_and_batch_confirmation(self):
+		from frappe.core.doctype.communication.communication import Communication
+
+		from jarvis.chat.actions_api import _dispatch_call
+
+		for batch in (False, True):
+			with self.subTest(batch=batch):
+				doc = frappe.get_doc({"doctype": "ToDo", "description": "email-error-test"}).insert()
+				self.addCleanup(lambda name=doc.name: frappe.db.delete("ToDo", {"name": name}))
+				message = {
+					"doctype": "ToDo",
+					"name": doc.name,
+					"recipients": ["first@example.invalid", "second@example.invalid"],
+					"subject": f"Email error test {doc.name}",
+					"content": "Synthetic email; delivery is forbidden.",
+				}
+				args = {"messages": [message, dict(message)]} if batch else message
+				frappe.publish_realtime("email-test-prior", {"marker": doc.name}, after_commit=True)
+				prior_events = list(frappe.local._realtime_log)
+				with (
+					patch.object(Communication, "get_outgoing_email_account", return_value=None),
+					patch.object(Communication, "send_email") as send,
+					patch("frappe.sendmail", side_effect=AssertionError("real email forbidden")),
+					patch("frappe.enqueue", return_value=None),
+					patch("frappe.log_error") as crash_log,
+					patch("jarvis.api.audit.record") as audit,
+					patch("jarvis.agent_audit.record_write"),
+				):
+					env = _dispatch_call(
+						{"tool": "send_email", "args": args, "exec_user": frappe.session.user},
+						"test-email-token",
+						None,
+						"confirm dispatch crashed",
+					)
+				self.assertFalse(env["ok"])
+				self.assertEqual(env["error"]["code"], "OutgoingEmailError")
+				self.assertIn("missing email account", env["error"]["message"])
+				self.assertIn("Email Account", env["error"]["hint"])
+				self.assertFalse(frappe.db.exists("Communication", {"subject": message["subject"]}))
+				self.assertTrue(frappe.db.exists("ToDo", doc.name))
+				self.assertEqual(frappe.local._realtime_log, prior_events)
+				send.assert_not_called()
+				crash_log.assert_not_called()
+				self.assertFalse(audit.call_args.kwargs["ok"])
+				self.assertEqual(audit.call_args.kwargs["error_code"], "OutgoingEmailError")
+
+	def test_known_failure_restores_callbacks_and_an_absent_realtime_log(self):
+		from frappe.realtime import clear_realtime_log
+
+		clear_realtime_log()
+		queues = ("before_commit", "after_commit", "before_rollback", "after_rollback")
+		before = {name: tuple(getattr(frappe.db, name)._functions) for name in queues}
+
+		def fail(tool, args):
+			for name in queues:
+				getattr(frappe.db, name).add(lambda: None)
+			frappe.publish_realtime("failed-email-event", {}, after_commit=True)
+			raise frappe.OutgoingEmailError("No outgoing email account")
+
+		with (
+			patch("jarvis.api.dispatch", side_effect=fail),
+			patch("jarvis.api.audit.record"),
+			patch("jarvis.agent_audit.record_write"),
+		):
+			env = api.dispatch_confirmed("send_email", {})
+		self.assertFalse(env["ok"])
+		self.assertFalse(hasattr(frappe.local, "_realtime_log"))
+		for name in queues:
+			self.assertEqual(tuple(getattr(frappe.db, name)._functions), before[name])
 
 	def test_permission_failure_enriched_via_dispatch(self):
 		def fake(tool, args):

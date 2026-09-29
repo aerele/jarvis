@@ -8,7 +8,14 @@ import unicodedata
 import frappe
 from frappe.utils import cint, validate_email_address
 
-from jarvis import admin_client, announcement, maintenance_notice, onboarding_contract, release_notice
+from jarvis import (
+	admin_client,
+	announcement,
+	catalogue_visibility,
+	maintenance_notice,
+	onboarding_contract,
+	release_notice,
+)
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -116,8 +123,14 @@ def write_connection(data: dict) -> None:
 	if not isinstance(data, dict):
 		return
 	from jarvis._password_utils import set_settings_password
+	from jarvis.chat import runtime_profile
 
+	# Serialize authority receipt, connection, and profile as one DB transaction.
+	frappe.db.get_singles_dict("Jarvis Settings", for_update=True)
 	s = frappe.get_single("Jarvis Settings")
+	profile = getattr(data, "runtime_profile", None)
+	if isinstance(data, runtime_profile.ConnectionData):
+		runtime_profile.validate(profile, data)
 	# Capture the container this workspace pointed at BEFORE this write, so a
 	# reconnect that repoints it can be told apart from a daily sync that rewrites
 	# the same URL (which must not disturb an established claim).
@@ -203,7 +216,12 @@ def write_connection(data: dict) -> None:
 					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
 				)
 		if write_conn:
+			runtime_profile._forget_snapshot()
 			s.db_set("agent_url", data["agent_url"])
+			if isinstance(data, runtime_profile.ConnectionData):
+				runtime_profile.persist(profile, s)
+			elif data.get("runtime_profile_status") == "unsupported_runtime":
+				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
 				set_settings_password(s, "agent_token", data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
@@ -256,7 +274,10 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	settings = frappe.get_single("Jarvis Settings")
 	api_key = settings.get_password("jarvis_admin_api_key", raise_exception=False) or ""
 	api_secret = settings.get_password("jarvis_admin_api_secret", raise_exception=False) or ""
-	if not (api_key and api_secret):
+	oauth_ready = settings.get("jarvis_admin_customer_email") and settings.get_password(
+		"jarvis_admin_customer_password", raise_exception=False
+	)
+	if not ((api_key and api_secret) or oauth_ready):
 		return {"synced": False, "reason": "not onboarded"}
 	get_conn_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
 	data = admin_client.get_connection(**get_conn_kwargs)
@@ -273,6 +294,10 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(data.get("redaction_patterns"))
+	# Same cadence: mirror the operator's fleet-global agent-catalogue visibility policy.
+	# Marker-aware + KEEP-on-doubt (jarvis.catalogue_visibility) so an old/rolled-back CP
+	# never un-hides a withdrawn agent fleet-wide.
+	catalogue_visibility.persist_from_connection(data)
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}
@@ -576,7 +601,7 @@ def save_llm_pool(
 	System-Manager-gated. routing_mode is always 'failover' in v1. preset is an
 	admin-catalog key or None; validated against the fetched catalog."""
 	require_jarvis_admin()
-	# Same coercion convention as jarvis.chat.api.set_star / set_auto_apply: a
+	# Same coercion convention as jarvis.chat.api.set_star: a
 	# whitelisted call arrives over HTTP as a string most of the time, so an
 	# annotated `bool` param is trusted only after an explicit allowlist read,
 	# never truthy-cast directly.
@@ -748,7 +773,7 @@ def save_llm_pool(
 	_bust_chat_gate()
 
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import sync_pool_now
-	from jarvis.jarvis.pool_serialize import compute_pool_mode
+	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
 
 	apply_operation = None
 	resumable = False
@@ -765,24 +790,52 @@ def save_llm_pool(
 	# poll rather than after it. Keyed on llm_auth_mode, the same field
 	# _sync_via_admin branches on to cause the second restart - not re-derived.
 	readiness_budget_s = None
-	if compute_pool_mode(s):
-		# The durable apply operation lives on the POOL path (admin creates it in
-		# update_llm_pool). Push synchronously and hand its descriptor back so the
-		# SPA follows ONE operation across save -> apply -> readiness.
-		outcome = sync_pool_now(idempotency_key=idempotency_key or None, force_probe=force_probe)
-		apply_operation = outcome.get("apply_operation")
-		resumable = bool(outcome.get("resumable"))
-		retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
-		# An OLD admin (no plan-05 apply-operation) that succeeded WITHOUT a descriptor
-		# is a capability degrade, not a failure: report mode:"legacy" so the SPA falls
-		# back to the bounded fail-closed readiness poll instead of a support dead-end
-		# on a genuinely successful apply (F1).
-		mode = "legacy" if (apply_operation is None and outcome.get("legacy_capability")) else "operation"
-		if apply_operation and consumed_capture_ids:
-			# Audit only (best-effort): tie the adopted captures to the operation.
-			pending_capture.mark_consumed_by_operation(
-				consumed_capture_ids, apply_operation.get("operation_id")
-			)
+	if lone_direct_handover_due(s):
+		# jarvis#1425: Settings Apply always runs a due handover (this is how a
+		# workspace already stuck on the proxy moves). No apply-operation
+		# descriptor: the SPA follows the legacy readiness poll, sized like the
+		# direct subscription leg.
+		s._enqueue_handover()
+		mode = "legacy"
+		readiness_budget_s = 300
+	elif compute_pool_mode(s):
+		from jarvis.chat import llm_switch
+
+		if s._is_pool_switch() or llm_switch.is_active():
+			# jarvis#1425 follow-up (seamless switch, spec Part C; review round
+			# 2): this Apply either flips proxy_active itself (adding a model
+			# back turns the proxy back on, or a converge-teardown turns it
+			# off), OR a switch is ALREADY active for some other reason (e.g. a
+			# handover pending) - either way, sync_pool_now would push
+			# SYNCHRONOUSLY and recreate the container immediately, cutting
+			# whatever reply is in flight, or racing/bypassing the switch
+			# already holding chat. Route through llm_switch instead, via the
+			# SAME async pool-sync path the background on_update case uses
+			# (_enqueue_pool_sync -> _switch_or_enqueue carries this exact
+			# is_switch-or-is_active check) - no apply-operation descriptor, so
+			# the SPA follows the legacy readiness poll, sized like the
+			# handover leg above.
+			s._enqueue_pool_sync(idempotency_key=idempotency_key or None)
+			mode = "legacy"
+			readiness_budget_s = 300
+		else:
+			# The durable apply operation lives on the POOL path (admin creates it in
+			# update_llm_pool). Push synchronously and hand its descriptor back so the
+			# SPA follows ONE operation across save -> apply -> readiness.
+			outcome = sync_pool_now(idempotency_key=idempotency_key or None, force_probe=force_probe)
+			apply_operation = outcome.get("apply_operation")
+			resumable = bool(outcome.get("resumable"))
+			retry_after_seconds = int(outcome.get("retry_after_seconds") or 0)
+			# An OLD admin (no plan-05 apply-operation) that succeeded WITHOUT a descriptor
+			# is a capability degrade, not a failure: report mode:"legacy" so the SPA falls
+			# back to the bounded fail-closed readiness poll instead of a support dead-end
+			# on a genuinely successful apply (F1).
+			mode = "legacy" if (apply_operation is None and outcome.get("legacy_capability")) else "operation"
+			if apply_operation and consumed_capture_ids:
+				# Audit only (best-effort): tie the adopted captures to the operation.
+				pending_capture.mark_consumed_by_operation(
+					consumed_capture_ids, apply_operation.get("operation_id")
+				)
 	else:
 		# Single-model (creds) path: on_update enqueued the async creds sync, and
 		# admin's creds endpoint mints no apply operation, so there is no descriptor
@@ -2040,6 +2093,8 @@ _WIPE_DOCTYPES = (
 	"Jarvis Chat Turn",
 	"Jarvis Turn Effect",
 	"Jarvis Chat Session",
+	"Jarvis Pending Action Waiter",
+	"Jarvis Pending Action",
 	"Jarvis Conversation",
 	"Jarvis Voice Note",
 	# skills
@@ -2324,7 +2379,7 @@ def save_llm_creds(
 	force: bool = False,
 ) -> dict:
 	"""Save LLM provider/model/auth mode + (api_key when applicable) and let
-	on_update re-render openclaw.json. Returns the on_update outcome
+	on_update re-render agent configuration. Returns the on_update outcome
 	(last_sync_status) so the page can tell the customer whether their
 	agent is fully ready.
 
@@ -2338,10 +2393,10 @@ def save_llm_creds(
 	in the complete_paste_signin path because that flow:
 	  - pushes the OAuth blob (which lives in auth-profiles.json, not
 	    Jarvis Settings, so the bench's diff classifier doesn't see it)
-	  - then needs fleet-agent to re-render openclaw.json AND restart
+	  - then needs fleet-agent to re-render agent configuration AND restart
 	    the container so agent picks up the new auth profile.
 	Without ``force=True``, a customer re-authorizing with the same
-	provider+model gets a stale openclaw.json + no restart, and agent
+	provider+model gets a stale agent configuration + no restart, and agent
 	keeps serving the previous (broken) state. Verified live 2026-06-11.
 
 	Gated on System Manager (Sprint-1 Important from the 2026-06-16 code
@@ -2513,7 +2568,20 @@ def get_llm_sync_status() -> dict:
 	    needs no server-side change to reach the client). A corrupt/empty
 	    stored value for either list degrades to ``[]`` rather than ever
 	    500ing this poller.
+
+	    jarvis#1425 follow-up (seamless switch, spec Part C): this poller also
+	    drives ``llm_switch`` forward - ``reconcile()`` applies a held switch
+	    past its cap and ends one whose apply already reached a terminal
+	    status - since the SPA runs this poller every few seconds while an
+	    apply is pending, same as the scheduled ``reconcile_pending_llm_sync``.
 	"""
+	from jarvis.chat import llm_switch
+
+	try:
+		llm_switch.reconcile()
+	except Exception:
+		frappe.log_error(title="Jarvis: llm_switch.reconcile failed", message=frappe.get_traceback())
+
 	s = frappe.get_single("Jarvis Settings")
 	status = s.get("last_sync_status") or ""
 
@@ -2623,12 +2691,13 @@ def resync_llm() -> dict:
 	  * ``not_configured`` - nothing saved to re-drive; nothing was queued.
 	"""
 	from jarvis.account import _has_llm_config
+	from jarvis.chat import llm_switch
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 		_admin_chat_readiness,
 		_stamp_converged_ok,
 		request_resync,
 	)
-	from jarvis.jarvis.pool_serialize import compute_pool_mode
+	from jarvis.jarvis.pool_serialize import compute_pool_mode, lone_direct_handover_due
 
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
@@ -2641,12 +2710,23 @@ def resync_llm() -> dict:
 		return {**_sync_status_payload(settings, status), "outcome": "not_configured", "leg": ""}
 
 	state, _reason = _admin_chat_readiness()
-	if state == "Ready":
+	if state == "Ready" and not lone_direct_handover_due(settings) and not llm_switch.blocks_stamp():
 		# READY MEANS NEVER PUSH, whether or not our own stamp lands. Making the push
 		# conditional on the stamp succeeding would restart a healthy container in
 		# precisely the situation this endpoint exists to handle gently: five writers
 		# race to record this same Ready, so losing that race is ordinary, and it
 		# means SOMEONE recorded it. The status below carries whatever landed.
+		# jarvis#1425: EXCEPT while a handover is due - the still-pooled container
+		# reporting Ready is exactly the state this endpoint must NOT stamp as
+		# converged, or the handover that request_resync below would enqueue never
+		# runs. Same reasoning extends to any held-but-not-yet-pushed switch
+		# (review, live e2e2, 2026-09-27): Ready describes the PRE-switch config,
+		# so a Resync click during a hold must fall through to request_resync
+		# below (which already joins an active switch) instead of stamping a
+		# config nothing has served yet. jarvis#1425, fourth pass: an applied
+		# AND awaiting_admin switch (admin already accepted the push) IS
+		# correct to stamp here - get_llm_sync_status() below already calls
+		# reconcile(), which ends that switch on this same stamp.
 		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
 			# The stamp's own commit gate only fires in a worker; this is a request.
 			frappe.db.commit()
@@ -2696,12 +2776,23 @@ def _reconcile_pending_applying(settings) -> str | None:
 	is pending-applying, from the SPA. It is also the fastest way back: the moment a
 	sync worker records the pending marker, this poller is what converges it,
 	seconds later, without waiting for the */5 reconcile."""
+	from jarvis.chat import llm_switch
 	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 		_admin_chat_readiness,
 		_stamp_converged_ok,
 	)
 	from jarvis.jarvis.pool_serialize import compute_pool_mode
 
+	# jarvis#1425 review (live e2e2, 2026-09-27): while a switch is HELD (not
+	# yet applied) or applied but not yet confirmed, admin's "Ready" verdict
+	# is about the config BEFORE the switch, so stamping here would flip "ok"
+	# for a config the tenant is not actually serving - possibly permanently
+	# if the switch record is later lost. jarvis#1425, fourth pass: once the
+	# switch's own released worker calls await_admin() (admin ACCEPTED the
+	# push), Ready genuinely describes THIS config and the stamp below is
+	# correct - reconcile() right after ends the switch on it at once.
+	if llm_switch.blocks_stamp():
+		return None
 	state, _reason = _admin_chat_readiness()
 	if state != "Ready":
 		return None
@@ -2716,4 +2807,5 @@ def _reconcile_pending_applying(settings) -> str | None:
 	# this runs in a web request, where a GET would otherwise roll the terminal
 	# write back at request end.
 	frappe.db.commit()
+	llm_switch.reconcile()
 	return settings.get("last_sync_status")

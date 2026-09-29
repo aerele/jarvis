@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref } from "vue";
 import BrandMark from "../components/BrandMark.vue";
 import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
@@ -8,6 +8,8 @@ import * as api from "../api";
 import { store } from "../store";
 import { EFFORT, prefs, setPrefs, thinkingOf } from "../lib/prefs";
 import { feed } from "../lib/notifications";
+import { DEFAULT_STARTERS, normalizeStarters, starterTint } from "../lib/starters";
+import { pickStarterPrompt } from "../lib/fillComposer";
 import Sheet from "../components/Sheet.vue";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
@@ -22,6 +24,7 @@ const busy = ref(false);
 const error = ref("");
 const attachments = ref([]);
 const settings = ref(null);
+const starters = ref(DEFAULT_STARTERS);
 const modelSheet = ref(false);
 const voiceOpen = ref(false);
 const inputEl = ref(null);
@@ -80,6 +83,18 @@ function autoGrow() {
 	if (!el) return;
 	el.style.height = "auto";
 	el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+}
+
+// Tapping a starter FILLS the composer and focuses it - it never sends. The
+// user reviews (and can edit) before pressing send, which matters most for the
+// action-flavoured prompts.
+function useStarter(card) {
+	error.value = ""; // clear any stale send-failure banner before a fresh start
+	input.value = pickStarterPrompt(card);
+	nextTick(() => {
+		autoGrow();
+		inputEl.value?.focus();
+	});
 }
 
 async function send(text = input.value) {
@@ -158,11 +173,16 @@ function onKeydown(e) {
 }
 
 onMounted(async () => {
-	try {
-		settings.value = await api.getChatUiSettings();
-	} catch {
-		/* the screen still works without the model chip */
-	}
+	// Two independent reads - fire together so the starter grid isn't blocked on
+	// the model settings (and vice versa). The grid already shows DEFAULT_STARTERS
+	// from first paint, so a slow/failed suggestions read just leaves the defaults.
+	const [ui, sugg] = await Promise.allSettled([
+		api.getChatUiSettings(),
+		api.getPromptSuggestions(),
+	]);
+	if (ui.status === "fulfilled") settings.value = ui.value;
+	if (sugg.status === "fulfilled")
+		starters.value = normalizeStarters(sugg.value?.data?.suggestions);
 });
 onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)));
 </script>
@@ -210,6 +230,26 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	<div class="jv-hero">
 		<BrandMark :size="56" :mood="holdActive ? 'upgrading' : 'star'" />
 		<h1 class="jv-greeting">{{ greeting }}</h1>
+	</div>
+
+	<!-- Starter prompts: tap to prefill the composer (never sends). Shown from
+	     first paint (defaults, then personalised) and hidden once the user has a
+	     draft, so a tap can never clobber text they've started. -->
+	<div v-if="starters.length && !hasDraft" class="jv-starters">
+		<div class="jv-starters-grid">
+			<button
+				v-for="(s, i) in starters"
+				:key="`${s.title}-${i}`"
+				type="button"
+				class="jv-starter"
+				:class="`jv-tint-${starterTint(i)}`"
+				@click="useStarter(s)"
+			>
+				<span class="jv-starter-k">{{ s.title }}</span>
+				<span class="jv-starter-p">{{ s.prompt }}</span>
+			</button>
+		</div>
+		<p class="jv-starter-hint">Tap to start — you can edit before sending.</p>
 	</div>
 
 	<div class="jv-heroc jv-safe-bottom">
@@ -836,5 +876,68 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	to {
 		transform: rotate(360deg);
 	}
+}
+
+/* Starter prompts on the empty new-chat screen (Move A). */
+.jv-starters {
+	width: 100%;
+	margin: 0 0 4px;
+}
+/* On a short (e.g. landscape) viewport, drop the grid rather than push the
+   composer off-screen - this view has no document scroll. */
+@media (max-height: 640px) {
+	.jv-starters {
+		display: none;
+	}
+}
+.jv-starters-grid {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 8px;
+}
+@media (min-width: 420px) {
+	.jv-starters-grid {
+		grid-template-columns: 1fr 1fr;
+	}
+}
+.jv-starter {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	text-align: left;
+	min-height: 44px;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	background: var(--bg);
+	color: inherit;
+	cursor: pointer;
+}
+.jv-starter-k {
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+.jv-starter-p {
+	font-size: 13px;
+	line-height: 1.35;
+}
+/* Tint is a decorative background only; the label uses the inherited default
+   ink so its contrast passes AA on every tint, in both light and dark. */
+.jv-tint-a {
+	background: var(--green-bg);
+}
+.jv-tint-b {
+	background: var(--amber-bg);
+}
+.jv-tint-c {
+	background: var(--accent-bg);
+}
+.jv-starter-hint {
+	margin: 8px 2px 0;
+	font-size: 11px;
+	opacity: 0.6;
+	text-align: center;
 }
 </style>

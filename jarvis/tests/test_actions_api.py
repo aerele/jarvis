@@ -122,7 +122,11 @@ class TestApplyAction(FrappeTestCase):
 		self.assertEqual(len(doc.email_ids), 2)
 		self.assertEqual(doc.email_ids[1].email_id, "two@example.com")
 
-	def test_update_replaces_child_rows(self):
+	def test_update_edits_child_rows_by_name_and_keeps_unsent_fields(self):
+		# The panel sends each kept row's name (load_doc) and only the grid columns;
+		# a row's other fields (here is_primary) must survive, and a nameless row is
+		# added as new. Replaces the old wholesale-replace assertion (CR-3: that
+		# replace silently dropped every field the grid did not show).
 		c = frappe.get_doc(
 			{
 				"doctype": "Contact",
@@ -131,6 +135,7 @@ class TestApplyAction(FrappeTestCase):
 			}
 		).insert()
 		self._cleanup_doc("Contact", c.name)
+		row = c.email_ids[0].name
 		apply_action(
 			frappe.as_json(
 				{
@@ -139,7 +144,7 @@ class TestApplyAction(FrappeTestCase):
 					"name": c.name,
 					"values": {
 						"email_ids": [
-							{"email_id": "new1@example.com", "is_primary": 1},
+							{"name": row, "email_id": "new1@example.com"},
 							{"email_id": "new2@example.com"},
 						]
 					},
@@ -149,9 +154,22 @@ class TestApplyAction(FrappeTestCase):
 		)
 		doc = frappe.get_doc("Contact", c.name)
 		self.assertEqual(
-			sorted(e.email_id for e in doc.email_ids),
-			["new1@example.com", "new2@example.com"],
+			[(e.name == row, e.email_id, e.is_primary) for e in doc.email_ids],
+			[(True, "new1@example.com", 1), (False, "new2@example.com", 0)],
 		)
+
+	def test_load_doc_rows_carry_their_name(self):
+		# Without the row name the panel cannot say which saved row it edits.
+		c = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "DraftPanel Load Test",
+				"email_ids": [{"email_id": "a@example.com", "is_primary": 1}],
+			}
+		).insert()
+		self._cleanup_doc("Contact", c.name)
+		out = load_doc("Contact", c.name)
+		self.assertEqual(out["tables"]["email_ids"][0]["name"], c.email_ids[0].name)
 
 	def test_confirm_verbs_rejected_here(self):
 		# submit/cancel/delete/amend are confirm-as-proposed actions: they must
@@ -787,10 +805,16 @@ class TestListPendingConfirmations(FrappeTestCase):
 		cards surface, and the one whose summary failed degrades to "" (not vanishes).
 
 		(Supersedes the earlier assertion that a bad record was silently skipped -
-		that baked in the drop-the-card defect.)"""
+		that baked in the drop-the-card defect.)
+
+		LEGACY store (flag 0): a pending action's summary is built once at park (its
+		degrade is test_pending_confirm's), and single-flight allows one per chat."""
 		from jarvis.chat import pending_confirm
 		from jarvis.chat.actions_api import list_pending_confirmations
 
+		flag = patch.dict(frappe.conf, {"jarvis_pa_chat_cards": 0})
+		flag.start()
+		self.addCleanup(flag.stop)
 		conv = self._conv()
 		pending_confirm.mint(
 			conversation=conv,
@@ -825,3 +849,159 @@ class TestListPendingConfirmations(FrappeTestCase):
 		items = r["data"]["pending"]
 		self.assertEqual(len(items), 2)
 		self.assertEqual(sorted(it["summary"] for it in items), ["", "ok-summary"])
+
+	def test_pill_source_logs_rescue_with_source_tag(self):
+		"""AC-source-safety / observability: a user-driven pill re-check that surfaces a
+		card logs action_card_rescue WITH a validated source tag (so recoveries attribute
+		per layer)."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()
+		pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "x"},
+			run_id="",
+			preview={"p": True},
+		)
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			list_pending_confirmations(conversation=conv, source="pill")
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		self.assertTrue(any("action_card_rescue" in m and "source=%s" in m for m in msgs))
+		# the tag value is passed as an arg
+		tags = [
+			c.args[1]
+			for c in gl.return_value.info.call_args_list
+			if c.args and "action_card_rescue" in c.args[0]
+		]
+		self.assertIn("pill", tags)
+
+	def test_menu_and_recheck_sources_log_but_auto_does_not(self):
+		"""User-driven sources (recheck/menu/pill) are the 'delivery missed it, human acted'
+		signal and log; 'auto' fires constantly (focus/visibility/poll) so it stays SILENT
+		to avoid flooding the channel."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()
+		pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "y"},
+			run_id="",
+			preview={"p": True},
+		)
+
+		def _tags(source):
+			with patch("jarvis.chat.latency.get_logger") as gl:
+				list_pending_confirmations(conversation=conv, source=source)
+			return [
+				c.args[1]
+				for c in gl.return_value.info.call_args_list
+				if c.args and "action_card_rescue" in c.args[0]
+			]
+
+		self.assertIn("menu", _tags("menu"))
+		self.assertIn("recheck", _tags("recheck"))
+		self.assertEqual(_tags("auto"), [])  # auto is silent
+
+	def test_unknown_string_source_is_tagged_other_and_not_logged(self):
+		"""AC-source-safety: an unknown / injection-y STRING source must not crash and must
+		never reach the log raw - it clamps to the 'other' tag (not a user-driven rescue
+		source), so nothing is logged and no client string is emitted. (A non-string source
+		is separately rejected by Frappe's `str | None` whitelist validation, a clean 4xx,
+		before this code runs - so the `in {...}` membership test can never see a list.)"""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()
+		pending_confirm.mint(
+			conversation=conv,
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "z"},
+			run_id="",
+			preview={"p": True},
+		)
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			r = list_pending_confirmations(conversation=conv, source="weird\ninjected count=999")
+		self.assertTrue(r["ok"])  # no crash
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		# unknown source is NOT a user-driven rescue source -> nothing logged, nothing raw
+		self.assertFalse(any("action_card_rescue" in m for m in msgs))
+
+	def test_logged_conversation_is_newline_sanitized(self):
+		"""Log-injection guard: the client-supplied conversation must never reach the
+		rescue log line with embedded newlines (a forged 'action_card_rescue' line could
+		trip a false alert). A conversation-less token surfaces under any filter, so a
+		bogus conversation arg with a newline still reaches the log path."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		# conversation-less token surfaces under ANY conversation filter (F1)
+		pending_confirm.mint(
+			conversation="",
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "nl"},
+			run_id="",
+			preview={"p": True},
+		)
+		# a conv-less token lives ~900s and surfaces under any filter -> purge after this
+		# test so it can't leak into a later test FILE on a sharded runner.
+		self.addCleanup(lambda: _purge_pending_confirmations("Administrator"))
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			list_pending_confirmations(conversation="a\ninjected count=999", source="pill")
+		conv_args = [
+			c.args[3]
+			for c in gl.return_value.info.call_args_list
+			if c.args and "action_card_rescue" in c.args[0] and len(c.args) > 3
+		]
+		self.assertTrue(conv_args)  # it did log
+		for ca in conv_args:
+			self.assertNotIn("\n", ca)
+			self.assertNotIn("\r", ca)
+
+	def test_rescue_source_with_no_pending_does_not_log(self):
+		"""AC-source-safety: a user-driven re-check that surfaces NOTHING must NOT log a
+		rescue - the signal is 'a card surfaced', not 'the lever was clicked'. Guards the
+		`and items` flood-suppressor (a regression dropping it would log on every idle click)."""
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		conv = self._conv()  # nothing minted -> no pending
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			r = list_pending_confirmations(conversation=conv, source="pill")
+		self.assertTrue(r["ok"])
+		self.assertEqual(r["data"]["pending"], [])
+		msgs = [c.args[0] for c in gl.return_value.info.call_args_list if c.args]
+		self.assertFalse(any("action_card_rescue" in m for m in msgs))
+
+	def test_logged_conversation_is_length_capped(self):
+		"""AC-source-safety: the logged conversation is capped (<=64) so a client can't pad
+		a rescue line into a huge log entry. A conv-less token surfaces under any filter, so
+		an over-long conversation arg still reaches the log path."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import list_pending_confirmations
+
+		pending_confirm.mint(
+			conversation="",
+			owner="Administrator",
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": "cap"},
+			run_id="",
+			preview={"p": True},
+		)
+		self.addCleanup(lambda: _purge_pending_confirmations("Administrator"))
+		with patch("jarvis.chat.latency.get_logger") as gl:
+			list_pending_confirmations(conversation="Z" * 300, source="pill")
+		conv_args = [
+			c.args[3]
+			for c in gl.return_value.info.call_args_list
+			if c.args and "action_card_rescue" in c.args[0] and len(c.args) > 3
+		]
+		self.assertTrue(conv_args)
+		for ca in conv_args:
+			self.assertLessEqual(len(ca), 64)

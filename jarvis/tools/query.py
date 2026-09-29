@@ -353,6 +353,26 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 def _validate_spec_shape(spec: dict) -> None:
 	"""Top-of-pipe shape check. Catches obvious mistakes early so the
 	translator below can assume its inputs are well-formed."""
+	allowed_keys = {
+		"from",
+		"alias",
+		"joins",
+		"select",
+		"where",
+		"group_by",
+		"having",
+		"order_by",
+		"limit",
+		"offset",
+		"distinct",
+	}
+	unknown = set(spec) - allowed_keys
+	if unknown:
+		raise InvalidArgumentError(
+			f"unknown query spec keys: {', '.join(sorted(map(str, unknown)))}. "
+			"Use select for columns and aggregates, and where for filters. "
+			f"Allowed keys: {', '.join(sorted(allowed_keys))}"
+		)
 	if "from" not in spec or not isinstance(spec["from"], str):
 		raise InvalidArgumentError("spec.from must be a DocType name (string)")
 
@@ -1274,15 +1294,6 @@ def _build_predicate(p: dict, alias_map: dict, depth: int = 1) -> Criterion:
 # ORDER BY / LIMIT / OFFSET / DISTINCT are all noise. Reject up front
 # so the agent gets a clear error rather than building a spec the
 # qb side silently ignores.
-_SUBSPEC_DISALLOWED_FIELDS = (
-	"select",
-	"group_by",
-	"having",
-	"order_by",
-	"limit",
-	"offset",
-	"distinct",
-)
 
 
 def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *, negate: bool) -> Criterion:
@@ -1314,12 +1325,12 @@ def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *
 		raise InvalidArgumentError("EXISTS sub-spec must be a dict")
 	if "from" not in sub_spec or not isinstance(sub_spec["from"], str):
 		raise InvalidArgumentError("EXISTS sub-spec.from must be a DocType name (string)")
-	for forbidden in _SUBSPEC_DISALLOWED_FIELDS:
-		if forbidden in sub_spec:
-			raise InvalidArgumentError(
-				f"EXISTS sub-spec must not include {forbidden!r}; "
-				f"subqueries only carry from + alias + joins + where"
-			)
+	unknown = set(sub_spec) - {"from", "alias", "joins", "where"}
+	if unknown:
+		raise InvalidArgumentError(
+			f"EXISTS sub-spec must not include {', '.join(repr(key) for key in sorted(unknown, key=str))}; "
+			"subqueries only carry from + alias + joins + where. Use where for filters."
+		)
 
 	# Build the inner alias_map. The OUTER aliases stay reachable for
 	# correlated references via the ``$field`` marker; they're folded

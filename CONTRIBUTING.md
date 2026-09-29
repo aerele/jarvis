@@ -8,6 +8,15 @@ inside the app.
 
 ## Branches and releases
 
+Runtime branding and upgrade tests use checksum-pinned snapshots of Admin-owned
+inputs, stored encoded under `jarvis/ci/data`. CI validates and decodes them into
+temporary files outside the checkout; no repository variables or credentials are
+needed. Review snapshot changes with their Admin source documents and checksum
+pins. Do not generate migration fixtures from production constants.
+
+For local validation, run `python -m jarvis.ci.inputs policy --output /tmp/jarvis-policy.json`
+then `python -m jarvis.ci.runtime_branding --policy /tmp/jarvis-policy.json`.
+
 | Branch | Role | What may merge into it |
 |---|---|---|
 | `develop` | default; all work lands here first | feature and fix PRs |
@@ -33,3 +42,27 @@ inside the app.
 - On a release PR the same check also fails unless `__version__` moved up and its major
   matches the line, so a release cannot ship without the bump.
 
+## Upgrade regression tests
+
+Legacy upgrade tests require the independently maintained Admin fixture. Set
+`JARVIS_LEGACY_MIGRATION_FIXTURES_FILE` to an absolute path to
+`integration_fixtures/legacy_migrations.json` in the Admin checkout before running
+these tests on a dedicated test site. For the pinned local snapshot, run
+`python -m jarvis.ci.inputs fixture --output /tmp/jarvis-migration-fixture.json`
+and set the environment variable to that file. CI uses this same snapshot. Missing inputs fail the tests; keep decoded copies
+outside this repository. See Admin's
+`jarvis_admin_v2/docs/legacy-migration-test-fixtures.md` for activation and commands.
+
+
+The pinned upgrade fixture retains the historical settings mappings so direct
+upgrades do not require an intermediate release. The settings patch runs before
+model sync and preserves completed migration records and existing destination
+values, including encrypted credentials. The runtime profile is refreshed after
+migration when needed; an offline Admin does not fail migration. Readiness retries
+profile initialization and never advertises Ready without a usable local profile.
+Older Admin versions must be upgraded to supply that profile; existing valid
+receipts continue to work during an Admin outage or rollback.
+
+CI uses the dedicated `jarvis-ci.test` site so runtime-profile database tests run
+instead of skipping their `.test` safety check. Saved HTML sanitization has its
+own bundled historical contract and remains available during connection resets.
