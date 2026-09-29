@@ -2236,8 +2236,12 @@ class TestPublishFencing(_PumpTestCase):
 		self.assertEqual(payload["message_id"], "msg1")
 		self.assertEqual(payload["event_seq"], 4)
 		self.assertEqual(payload["pump_epoch"], ctx.epoch)
-		# Only step text that is also in the reply is kept for a hop re-attach.
-		self.assertEqual(pump._read_run_steps("pmp_step1"), ["Checking overdue invoices."])
+		# Every step is cached: the raw text of one that is also in the reply
+		# (a hop re-attach strips it) and the shown text of a harness step that
+		# never is, so a reload can rebuild the step list in direct mode too.
+		self.assertEqual(
+			pump._read_run_steps("pmp_step1"), ["Checking overdue invoices.", "Now the customers"]
+		)
 		frappe.cache().delete_value(pump._run_steps_key("pmp_step1"))
 
 	def test_on_step_publishes_a_held_back_hide_first(self):

@@ -83,7 +83,14 @@ from jarvis.chat.agent_client import (
 )
 from jarvis.chat.events import parse_event
 from jarvis.chat.generated_media import detect_media_paths, has_embedded_media_path, has_media_marker
-from jarvis.chat.steps import display_line, is_step, remove_steps, strip_steps
+from jarvis.chat.steps import (
+	display_line,
+	is_preamble_step,
+	is_step,
+	join_segments,
+	remove_steps,
+	strip_steps,
+)
 from jarvis.exceptions import AgentUnreachableError
 
 _logger = logging.getLogger(__name__)
@@ -121,6 +128,13 @@ DISPATCH_EVENT_BUDGET = 512
 # Default RPC ack window (mirrors CONNECT_TIMEOUT_SECONDS) when a caller does
 # not pass its own timeout_s.
 DEFAULT_RPC_TIMEOUT_S = 10.0
+
+# R6 saved-reply glue: how much of an earlier segment's tail to remember so a
+# later join can find the boundary verbatim in the runtime's glued final text.
+# Only used to LOCATE the boundary (a find(), not a reconstruction), so it
+# only needs to be longer than any text the runtime could plausibly repeat
+# right before a boundary by coincidence.
+SEGMENT_TAIL_CHARS = 60
 
 # Per-shard poison-rate circuit breaker (OAR-7). When more than THRESHOLD lanes
 # quarantine within WINDOW seconds the breaker OPENS: it fires the alarm
@@ -316,6 +330,16 @@ class _Lane:
 		self.since_tool = 0
 		self.steps: list[str] = []
 		self.shown_text = ""
+		# R6 saved-reply glue: the tail of each earlier segment (relay_mux
+		# module docstring / _reply_delta), reader-thread only like the steps
+		# above. Known limit: a pump hop rebuilds the lane from register_run's
+		# ``steps=`` (pump.py._reattach_lane), which re-seeds recorded steps
+		# but NOT this list - a hop mid-turn loses the boundaries recorded
+		# before it, so a segment glued right before a hop stays glued in the
+		# saved reply. Accepted (the same known limit steps.py's module
+		# docstring already documents for the pre-hop step text); no cache is
+		# built for it, deliberately (see the plan's R6 note).
+		self.segment_tails: list[str] = []
 		# PUMP-thread-owned record of the text the user last actually SAW via a
 		# delivered on_delta (including a terminal's reshow) - updated in
 		# _apply, read in _finalize_terminal for the reshow decision.
@@ -676,7 +700,7 @@ class RelayMux:
 		if kind == "assistant":
 			ev = self._reply_delta(lane, parsed)
 		elif kind == "step":
-			self._offer_step(lane, parsed.get("text", ""))
+			self._route_preamble_step(lane, parsed.get("text", ""))
 			return
 		elif kind == "tool_boundary":
 			self._move_pending_step(lane)
@@ -717,7 +741,15 @@ class RelayMux:
 		is what the chat displays, with recorded steps cut out."""
 		text = parsed.get("text", "")
 		if not text.startswith(lane.stream_text):
-			# An API-key model's next call starts a fresh segment.
+			# An API-key model's next call starts a fresh segment. Remember
+			# the outgoing segment's tail (R6) BEFORE it is overwritten below,
+			# so the terminal can later find this exact boundary in the
+			# runtime's glued-with-no-separator final text and re-insert a
+			# paragraph break there.
+			if lane.stream_text:
+				tail = lane.stream_text[-SEGMENT_TAIL_CHARS:]
+				if tail:
+					lane.segment_tails.append(tail)
 			lane.since_tool = 0
 		lane.stream_text = text
 		return self._shown_delta(lane, remove_steps(text, lane.steps), parsed.get("delta", ""))
@@ -736,6 +768,71 @@ class RelayMux:
 		# Claude runtime, where no tool event follows to force that flush.
 		self._offer(lane, self._shown_delta(lane, remove_steps(lane.stream_text, lane.steps)))
 		self._offer_step(lane, pending, raw=pending)
+
+	def _route_preamble_step(self, lane: _Lane, text: str) -> None:
+		"""A preamble update (events.parse_event's kind=="step", the runtime's
+		separate "item/kind=preamble" frame - root cause B, live capture
+		2026-09-25). The pooled openai-completions runtime sends this for text
+		that is ALSO streaming as ordinary reply text, so routing it straight to
+		_offer_step (as before this method existed) shows the same text twice:
+		on the step line and in the reply bubble, until the next tool call's
+		_move_pending_step catches up - or never, for narration longer than one
+		sentence (is_step's narrow rule), which then stays glued into the saved
+		reply too.
+
+		When the (stripped) text is already sitting in the reply written since
+		the last tool call AND passes ``is_preamble_step`` (R4, looser than
+		is_step - MAX_PREAMBLE_STEP_CHARS), treat it as that reply text arriving
+		early: record + hide it now, same order _move_pending_step uses at the
+		tool boundary, so the boundary later finds nothing left to move and never
+		double-offers. Otherwise (a genuine harness preamble never in the reply -
+		Codex direct mode - or text that fails is_preamble_step, including every
+		preamble when MAX_PREAMBLE_STEP_CHARS=0) keep today's path: offered on
+		the step line only, raw=None, untouched in the reply.
+		"""
+		stripped = (text or "").strip()
+		# Anchored: the preamble IS the reply written since the last tool call
+		# (or a growing prefix of it), or, once earlier preambles in that stretch
+		# are recorded, the reply that follows them. A bare substring test could
+		# match a short preamble ("I see.") inside the answer and cut it there.
+		region = lane.stream_text[lane.since_tool :]
+		# A step this text grows out of stays in ``rest``: removing its partial
+		# too would leave only the tail, and the grown text would not anchor.
+		rest = remove_steps(region, [s for s in lane.steps if not stripped.startswith(s)])
+		anchored = region.lstrip().startswith(stripped) or rest.lstrip().startswith(stripped)
+		if stripped and anchored and is_preamble_step(stripped):
+			self._record_preamble_step(lane, stripped)
+			return
+		self._offer_step(lane, text)
+
+	def _record_preamble_step(self, lane: _Lane, text: str) -> None:
+		"""Record an in-reply preamble as a step and hide it, same shape
+		_move_pending_step uses (hide delta first, then the step, raw=text).
+
+		The runtime resends the same progressText across update/end frames (and
+		sometimes a growing prefix of it): a duplicate of an already-recorded
+		step is dropped (never re-recorded, never re-offered); a text that
+		extends the last recorded step REPLACES it rather than appending, or a
+		stale shorter entry would still sit in lane.steps ahead of the longer
+		one and remove_steps would cut only the short prefix, leaving the rest
+		dangling in the saved reply.
+		"""
+		if text in lane.steps:
+			return
+		# A growing resend replaces the step it extends, in place, whichever
+		# recorded step that is (not only the last), so order and the cache
+		# collapse (steps.collapse_steps) agree. Only a step still in the reply
+		# since the last tool call can be growing; an older segment's step that
+		# merely prefixes this text must stay recorded, or it is never stripped.
+		region = lane.stream_text[lane.since_tool :]
+		for i, step in enumerate(lane.steps):
+			if text.startswith(step) and step in region:
+				lane.steps[i] = text
+				break
+		else:
+			lane.steps.append(text)
+		self._offer(lane, self._shown_delta(lane, remove_steps(lane.stream_text, lane.steps)))
+		self._offer_step(lane, text, raw=text)
 
 	def _shown_delta(self, lane: _Lane, shown: str, delta: str = "") -> _LaneEvent:
 		"""The one delta shape: raw ``stream_text`` for the mirror, ``shown`` for the chat."""
@@ -809,6 +906,10 @@ class RelayMux:
 					"kind_hint": "final",
 					"text": text,
 					"steps": list(lane.steps),
+					# R6: segment tails recorded so far (see _Lane.segment_tails)
+					# so _finalize_terminal can glue the runtime's separator-
+					# free segment boundaries back together on the pump thread.
+					"tails": list(lane.segment_tails),
 					"stream_text": lane.stream_text,
 					"is_continuation": lane.is_continuation,
 					"media_urls": _chat_final_media_urls(payload),
@@ -869,18 +970,40 @@ class RelayMux:
 		# happens to remove that neighbouring line.
 		rels = detect_media_paths(raw["text"])
 		marked = has_media_marker(raw["text"]) or has_embedded_media_path(raw["text"])
-		# Strip the RAW recorded steps from the RAW text FIRST, then redact the
-		# result ONCE. Both sides of strip_steps must be exact, verbatim
-		# substrings of the SAME text for its search to work; redacting the
-		# whole text and the recorded steps SEPARATELY (as this file briefly
-		# did) can diverge for a context-spanning egress rule - a pattern that
-		# only matches with surrounding text present redacts a step differently
-		# in isolation than it does inside the whole reply - so the step no
-		# longer matches its (differently-redacted) counterpart inside the
-		# final text and is left sitting in the saved reply instead of being
-		# stripped like every other step. Redacting once, after stripping,
-		# has no such divergence: there is only one piece of text and one pass.
-		stripped_of_steps = strip_steps(raw["text"], raw["steps"])
+		# R6: re-insert the paragraph break the runtime's own glued-segment
+		# boundaries dropped, BEFORE step-strip and redaction (a tail is a
+		# verbatim substring of the RAW text only; strip_steps below would
+		# already absorb an inserted break sitting right next to a step it
+		# removes, via remove_steps' own lstrip, so ordering it first is safe
+		# either way). Then strip the RAW recorded steps that qualify (see the
+		# C1 comment below) from the RAW text, then redact the result ONCE.
+		# Both sides of strip_steps must be
+		# exact, verbatim substrings of the SAME text for its search to work;
+		# redacting the whole text and the recorded steps SEPARATELY (as this
+		# file briefly did) can diverge for a context-spanning egress rule - a
+		# pattern that only matches with surrounding text present redacts a
+		# step differently in isolation than it does inside the whole reply -
+		# so the step no longer matches its (differently-redacted) counterpart
+		# inside the final text and is left sitting in the saved reply instead
+		# of being stripped like every other step. Redacting once, after
+		# stripping, has no such divergence: there is only one piece of text
+		# and one pass.
+		joined = join_segments(raw["text"], raw["tails"])
+		# C1 (code review, lead decision - supersedes plan R4's strip default):
+		# a runtime-flagged preamble longer than one sentence is still hidden
+		# LIVE (is_preamble_step, MAX_PREAMBLE_STEP_CHARS) but is NOT stripped
+		# from the saved reply - only a genuine one-sentence step (is_step,
+		# #1435's existing rule) is. is_preamble_step accepted anything up to
+		# 320 chars on the runtime's own say-so alone, and strip_steps' "keep
+		# final whole when shorter" guard does not catch a multi-sentence
+		# lead-in followed by a longer continuation (a plausible answer
+		# opening, not narration, stripped with no safety net - see the code
+		# review's C1 finding). Filtered HERE, statelessly, every time: a pump
+		# hop re-seeds ``lane.steps`` from the cache with no flag attached, so
+		# there is nothing to carry across a hop - is_step is re-applied fresh
+		# at every final.
+		strip_candidates = [step for step in raw["steps"] if is_step(step)]
+		stripped_of_steps = strip_steps(joined, strip_candidates)
 		answer, _, _ = egress_rules.redact_final_with_media(stripped_of_steps, run_id=raw["run_id"])
 		reshow = None
 		if raw["steps"] and answer and answer != lane.last_shown:
@@ -1027,7 +1150,10 @@ class RelayMux:
 		retry-attach (the pump feeds the lane spec). When the poison-rate breaker
 		is OPEN and this is a RE-ADOPT, the mux REFUSES (returns ``None``) rather
 		than loop the run through the recovery budget again (OAR-7). ``steps``
-		re-seeds the step text a re-adopted run already recorded before the hop."""
+		re-seeds the step text a re-adopted run already recorded before the hop.
+		R6 segment tails are NOT re-seeded here - see ``_Lane.segment_tails``'s
+		known-limit comment - so a segment boundary recorded before a hop is
+		not joined; a fresh lane always starts with an empty ``segment_tails``."""
 		if is_readopt and self.is_breaker_open():
 			return None
 		lane = _Lane(run_id, handler, session_key=session_key, start_seq=start_seq)
@@ -1244,7 +1370,16 @@ class RelayMux:
 				)
 			else:
 				# Poison PRECIOUS (terminal/tool): QUARANTINE this ONE lane; its
-				# neighbours keep streaming on the same socket (D5 §5).
+				# neighbours keep streaming on the same socket (D5 §5). Log the
+				# cause: the turn only finishes through snapshot recovery a hop
+				# later, and without the traceback that stall is undiagnosable.
+				_logger.warning(
+					"relay_mux: precious %s on run=%s seq=%s raised, quarantining",
+					ev.kind,
+					lane.run_id,
+					ev.event_seq,
+					exc_info=True,
+				)
 				self._quarantine(lane, "precious_fault")
 
 	# -- quarantine + circuit breaker (OAR-7) ------------------------------- #

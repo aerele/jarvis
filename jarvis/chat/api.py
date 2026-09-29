@@ -23,6 +23,7 @@ from jarvis.permissions import (
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
+TURN = "Jarvis Chat Turn"
 # frappe.flags key (server-only): a callable run inside send_message's user-row
 # transaction; False rolls the send back (a held resume's waiter ``done`` rides it).
 SEND_CLAIM_FLAG = "jarvis_send_claim"
@@ -708,6 +709,11 @@ def get_conversation(conversation: str) -> dict:
 	# A pending-action card renders from its row's card (the sealed record's own copy).
 	_pending_action_cards(messages)
 	_pending_recency(conversation, messages)
+	# T2 (live-turn-steps, R3): a still-streaming row's stored content keeps its
+	# step text by design (the RAW streaming mirror) - strip it and carry the
+	# run identity so a fresh tab opened mid-turn renders like a live one and
+	# can fence its own realtime events instead of starting from a null run.
+	_live_turn_steps(messages)
 	# canvas + pending_card are stored as JSON strings; hand the UI real objects (or None).
 	for m in messages:
 		if m.get("canvas"):
@@ -783,6 +789,52 @@ def _pending_recency(conversation: str, messages: list) -> None:
 	latest = latest_human_seq(conversation)
 	for m in pending:
 		m["recent"] = latest is None or (m.get("seq") or 0) > latest
+
+
+def _live_turn_steps(messages: list) -> None:
+	"""T2 (live-turn-steps): seed the reload contract for a still-streaming row.
+
+	One ``frappe.qb`` query finds every streaming row's run (no ``get_value``
+	loop), then each run's cached step text (the pump's best-effort
+	``jarvis:pump:steps:<run_id>`` copy - a lost cache only means the row
+	keeps its step text, same as before this feature) strips the live steps
+	out of ``content`` exactly as the SPA sees them mid-turn, and the run
+	identity rides along so a fresh tab can fence its own realtime events
+	(currentRunId, pump fence) instead of starting from a null one. A settled
+	row (``streaming=0``) is left untouched.
+	"""
+	streaming_names = [m["name"] for m in messages if m.get("streaming")]
+	if not streaming_names:
+		return
+	from jarvis.chat.pump import _read_run_steps
+	from jarvis.chat.steps import display_line, remove_steps
+
+	t = frappe.qb.DocType(TURN)
+	turns = (
+		frappe.qb.from_(t)
+		.select(t.name, t.assistant_message, t.last_event_seq, t.pump_epoch, t.state)
+		.where(t.assistant_message.isin(streaming_names))
+		.run(as_dict=True)
+	)
+	by_message = {row.assistant_message: row for row in turns}
+	for m in messages:
+		turn = by_message.get(m["name"])
+		if turn is None:
+			continue
+		steps = _read_run_steps(turn.name)
+		m["content"] = remove_steps(m.get("content") or "", steps)
+		live_steps = []
+		for step in steps:
+			line = display_line(step)
+			if line:
+				live_steps.append(line)
+		m["live_steps"] = live_steps
+		m["run_id"] = turn.name
+		m["last_event_seq"] = turn.last_event_seq
+		m["pump_epoch"] = turn.pump_epoch
+		# Lets a reload tell a run still streaming from one that already ended but
+		# whose row has not settled yet: the text of an ended run is the answer.
+		m["turn_state"] = turn.state
 
 
 @frappe.whitelist()
