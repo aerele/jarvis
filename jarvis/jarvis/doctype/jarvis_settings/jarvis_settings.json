@@ -1241,18 +1241,6 @@
    "read": 1,
    "write": 1
   }
-<<<<<<< HEAD
- ]
-=======
  ],
-<<<<<<< HEAD
-<<<<<<< HEAD
- "modified": "2026-09-28 13:00:00.000000"
->>>>>>> d0fda46 (feat(agents): per-agent minimum model tier with tenant-wide model choice)
-=======
- "modified": "2026-09-28 18:00:00.000000"
->>>>>>> e20b869 (fix(agents): model floor review fixes (direct mode, retries, stamping, flag access))
-=======
  "modified": "2026-09-28 18:05:00.000000"
->>>>>>> 6a4f996 (fix(agents): flag guard, valid DocPerms, durable run index, pool-default source)
 }
