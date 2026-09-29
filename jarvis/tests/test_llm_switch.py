@@ -20,6 +20,7 @@ is needed to observe their effects, mirroring how the existing
 ``_enqueue_pool_sync`` / ``_enqueue_handover`` tests rely on the same flag.
 """
 
+import os
 import time
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -1005,7 +1006,26 @@ class TestSelfHealLostRelease(_LlmSwitchTestCase):
 
 class TestBootPayload(_LlmSwitchTestCase):
 	def test_boot_payload_reports_switch(self):
-		with patch.object(llm_switch, "is_active", return_value=True):
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=False),
+		):
+			payload = maintenance_notice.boot_payload()
+		self.assertEqual(payload, {"active": True, "message": llm_switch.MESSAGE})
+
+	def test_boot_payload_tells_the_admin_about_their_own_change(self):
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=True),
+		):
+			payload = maintenance_notice.boot_payload()
+		self.assertEqual(payload, {"active": True, "message": llm_switch.ADMIN_MESSAGE})
+
+	def test_boot_payload_keeps_the_hold_when_the_role_lookup_fails(self):
+		with (
+			patch.object(llm_switch, "is_active", return_value=True),
+			patch("jarvis.permissions.has_jarvis_admin_access", side_effect=Exception("roles unavailable")),
+		):
 			payload = maintenance_notice.boot_payload()
 		self.assertEqual(payload, {"active": True, "message": llm_switch.MESSAGE})
 
@@ -1029,6 +1049,19 @@ class TestBootPayload(_LlmSwitchTestCase):
 		):
 			maintenance_notice.persist_from_connection({})  # no marker -> old-CP clear branch
 		self.assertFalse(maintenance_notice._mirror_payload()["active"])
+
+
+class TestSwitchCopyInSync(FrappeTestCase):
+	"""The SPA and the PWA raise the banner before any round trip, so each carries its
+	own copy of the two lines. A reworded line must change all three places."""
+
+	def test_spa_and_pwa_copies_match_the_server(self):
+		root = os.path.dirname(frappe.get_app_path("jarvis"))
+		for rel in ("frontend/src/llmSwitch.js", "pwa/src/llmSwitch.js"):
+			with open(os.path.join(root, rel)) as f:
+				text = f.read()
+			for line in (llm_switch.MESSAGE, llm_switch.ADMIN_MESSAGE):
+				self.assertIn(f'"{line}"', text, rel)
 
 
 class TestInflightWidenedWindow(FrappeTestCase):
