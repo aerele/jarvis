@@ -22,6 +22,8 @@ const emit = defineEmits(["applied", "dismissed"]);
 const state = ref("review"); // review | busy | done
 const error = ref("");
 const applied = ref(null);
+// A File Box chat's Confirm goes to the Approval Board: the server says what happened.
+const note = ref("");
 
 const isEmail = computed(() => props.action.kind === "email");
 const verb = computed(() => String(props.action.verb || "").toLowerCase());
@@ -94,6 +96,7 @@ async function apply() {
 			submit: props.action.submit ? 1 : 0,
 			conversation: props.conversation,
 			continue: props.action.continue ? 1 : 0,
+			card: props.action,
 		});
 		if (r?.ok === false) {
 			error.value = r.error?.message || r.reason || "Couldn't save that.";
@@ -101,6 +104,7 @@ async function apply() {
 			return;
 		}
 		applied.value = r?.data?.name || r?.name || "";
+		note.value = r?.note || "";
 		state.value = "done";
 		emit("applied", applied.value);
 	} catch (e) {
@@ -193,7 +197,10 @@ async function copyBody() {
 			>
 				<path d="M20 6 9 17l-5-5" />
 			</svg>
-			{{ verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
+			<template v-if="note">{{ note }}</template>
+			<template v-else>
+				{{ verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
+			</template>
 		</div>
 
 		<div v-else class="jv-action-foot">

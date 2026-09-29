@@ -7705,6 +7705,9 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			submit: submitFlag ? 1 : 0,
 			conversation: currentId.value || "",
 			continue: p.cont ? 1 : 0,
+			// which card this confirms: a File Box chat parks exactly this one
+			message: actionFor.value || "",
+			card: activeAction.value || null,
 		});
 		if (r && r.ok === false) {
 			// apply_action now returns the enriched {ok:false, error} envelope

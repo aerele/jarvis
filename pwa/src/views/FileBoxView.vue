@@ -25,6 +25,7 @@ const STATUS = {
 	needs_approval: { label: "Needs approval", tone: "is-warn" },
 	applying: { label: "Applying" },
 	draft_created: { label: "Draft created", tone: "is-done" },
+	duplicate: { label: "Duplicate", tone: "is-warn" },
 	no_draft: { label: "No draft" },
 	failed: { label: "Failed", tone: "is-failed" },
 	done: { label: "Done", tone: "is-done" },
