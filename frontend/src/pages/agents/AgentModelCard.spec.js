@@ -353,7 +353,7 @@ describe("AgentModelCard states", () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "unknown", models: [] });
 		const w = mountCard();
 		await flushPromises();
-		expect(w.text()).toContain("Model list unavailable — try again shortly.");
+		expect(w.text()).toContain("Model list unavailable. Try again shortly.");
 		expect(w.text()).not.toContain("None of your connected AI providers");
 	});
 
@@ -410,7 +410,7 @@ describe("UX-3 review fix: a persistent explanation for the 'Pending apply' badg
 		apiAgents.getEligibleModels.mockResolvedValue(elig([OPUS]));
 		const w = mountCard({ canApply: true });
 		await flushPromises();
-		expect(w.text()).toContain("Saved — apply catalog changes on the Agents page to use it.");
+		expect(w.text()).toContain("Saved. Apply catalog changes on the Agents page to use it.");
 	});
 
 	it("says nothing when nothing is pending", async () => {
@@ -506,7 +506,7 @@ describe("AgentModelCard save flow", () => {
 
 	it("reviewer (canApply) sees the apply-it-yourself copy", async () => {
 		const w = await openAndPick({ canApply: true });
-		expect(w.text()).toContain("Saved — apply catalog changes on the Agents page to use it.");
+		expect(w.text()).toContain("Saved. Apply catalog changes on the Agents page to use it.");
 	});
 
 	it("plain user (canApply=false) sees the ask-an-admin copy", async () => {

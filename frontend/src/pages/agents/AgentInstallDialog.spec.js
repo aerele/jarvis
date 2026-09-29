@@ -261,7 +261,7 @@ describe("AgentInstallDialog none-eligible / unknown catalog", () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "unknown", models: [] });
 		const w = mountDialog();
 		await flushPromises();
-		expect(w.text()).toContain("Model list unavailable — try again shortly.");
+		expect(w.text()).toContain("Model list unavailable. Try again shortly.");
 		expect(w.find('[data-label="Install"]').attributes("disabled")).toBeDefined();
 	});
 });
@@ -550,7 +550,7 @@ describe("AgentInstallDialog unreadable catalog over a pinned row", () => {
 		const w = mountDialog({ row: { state: "chosen", choice: SONNET } });
 		await flushPromises();
 		expect(w.text()).toContain("Claude Sonnet 5");
-		expect(w.text()).toContain("Model list unavailable — installing keeps this model.");
+		expect(w.text()).toContain("Model list unavailable. Installing keeps this model.");
 		expect(w.find('[data-label="Change"]').exists()).toBe(false);
 		expect(installBtn(w).attributes("disabled")).toBeUndefined();
 		await installBtn(w).trigger("click");
@@ -561,7 +561,7 @@ describe("AgentInstallDialog unreadable catalog over a pinned row", () => {
 		apiAgents.getEligibleModels.mockResolvedValue({ catalog: "unknown", models: [] });
 		const w = mountDialog({ row: { state: "legacy", choice: null } });
 		await flushPromises();
-		expect(w.text()).toContain("Model list unavailable — try again shortly.");
+		expect(w.text()).toContain("Model list unavailable. Try again shortly.");
 		expect(installBtn(w).attributes("disabled")).toBeDefined();
 	});
 });

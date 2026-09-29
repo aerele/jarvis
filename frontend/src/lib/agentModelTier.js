@@ -97,7 +97,7 @@ export function currentModelLabel(info) {
 export function stateBannerText(info) {
 	const state = info && info.state;
 	if (state === "legacy") {
-		return "Using your default model — choose one that meets this agent's requirement.";
+		return "Using your default model. Choose one that meets this agent's requirement.";
 	}
 	if (state === "changed") {
 		return `Your chosen model is no longer available, so this agent moved to ${currentModelLabel(
@@ -139,6 +139,6 @@ export function shouldShowNoteBanner(info) {
 export function noteBannerText(info, canApply) {
 	if (!shouldShowNoteBanner(info)) return "";
 	return canApply
-		? "This agent's model setup needs to be applied — apply catalog changes on the Agents page."
+		? "This agent's model setup needs to be applied. Apply catalog changes on the Agents page."
 		: "An admin needs to apply the latest agent changes.";
 }
