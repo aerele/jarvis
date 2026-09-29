@@ -10,7 +10,7 @@
 //
 //   live   - the step list: done steps muted, the current step with one
 //            sub-line, upcoming artifact phases as hollow rings
-//   folded - one line once the answer is showing: "Worked 48s · 5 lookups"
+//   folded - one line once the answer is showing: "Worked 48s · 5 tools"
 //   queued - the only line of a turn waiting for a slot
 //
 // Pure functions only, no Vue, so every rule is pinned by liveTurn.spec.js.
@@ -28,6 +28,16 @@ export const MAX_CANDIDATE_CHARS = 320;
 export const VISIBLE_DONE_STEPS = 2;
 
 const BLOCK_START = /^(?:\||#{1,6}\s|>|```|[-*+]\s|\d+[.)]\s)/;
+// Bold, underline-bold and code marks. The server drops the same marks from a
+// step (jarvis/chat/steps.py display_line), so typing narration matches the
+// step it becomes and an answer's first line never shows raw "**" in the box.
+const INLINE_MARK = /\*\*|__|`/g;
+
+// The current step of a turn that is setting up its agent session.
+export const SESSION_PREP = {
+	text: "Preparing your session",
+	sub: "The first reply takes a little longer",
+};
 
 /**
  * Record a step sentence, returning a NEW list (Vue reactivity).
@@ -40,26 +50,40 @@ const BLOCK_START = /^(?:\||#{1,6}\s|>|```|[-*+]\s|\d+[.)]\s)/;
  *
  * `slot` is the artifact phase that was current when the sentence arrived, so
  * on a file turn the sentence takes that phase's place and never moves as the
- * phases advance. Plain turns ignore it.
+ * phases advance. Plain turns ignore it. `ord` is the order this tab saw it in
+ * among the turn's steps and tool results (activityItems); a growing resend
+ * keeps the first one.
  *
- * @param {Array<{text: string, slot: number|null}>} steps
+ * @param {Array<{text: string, slot: number|null, ord?: number}>} steps
  * @param {string} text
  * @param {number|null} [slot]
- * @returns {Array<{text: string, slot: number|null}>}
+ * @param {number} [ord]
+ * @returns {Array<{text: string, slot: number|null, ord?: number}>}
  */
-export function addStep(steps, text, slot = null) {
+export function addStep(steps, text, slot = null, ord = undefined) {
 	const list = Array.isArray(steps) ? steps : [];
 	const t = String(text || "").trim();
 	if (!t || list.some((s) => s.text === t)) return list;
 	const last = list[list.length - 1];
 	if (last && t.startsWith(last.text)) return [...list.slice(0, -1), { ...last, text: t }];
 	if (last && last.text.startsWith(t)) return list;
-	return [...list, { text: t, slot: Number.isInteger(slot) && slot >= 0 ? slot : null }];
+	const step = { text: t, slot: Number.isInteger(slot) && slot >= 0 ? slot : null };
+	if (Number.isFinite(ord)) step.ord = ord;
+	return [...list, step];
 }
 
-/** Steps restored from the server after a reload carry no slot. */
-export function stepsFromTexts(texts) {
-	return (Array.isArray(texts) ? texts : []).reduce((list, t) => addStep(list, t), []);
+/**
+ * Steps restored from the server after a reload: no slot, and the server time
+ * each was seen at when it sent one (`times`, parallel to `texts`).
+ */
+export function stepsFromTexts(texts, times = []) {
+	return (Array.isArray(texts) ? texts : []).reduce((list, t, i) => {
+		const next = addStep(list, t);
+		const at = Array.isArray(times) ? times[i] : null;
+		if (next.length > list.length && typeof at === "string" && at)
+			next[next.length - 1].at = at;
+		return next;
+	}, []);
 }
 
 // Place narration on a file turn: each sentence in the slot of the phase it
@@ -104,38 +128,131 @@ export function isStepCandidate(text) {
  */
 export function splitNarration(shown, { ended = false } = {}) {
 	const text = String(shown || "");
-	if (!ended && isStepCandidate(text)) return { candidate: text.trim(), answer: "" };
+	if (!ended && isStepCandidate(text))
+		return { candidate: text.trim().replace(INLINE_MARK, ""), answer: "" };
 	return { candidate: "", answer: text };
 }
 
-const LOOKUP_TOOLS = new Set([
-	"query",
-	"run_report",
-	"resolve_links",
-	"read_file",
-	"describe_customizations",
-	"summarize_dataset",
-	"recall",
-	"read",
-	"web_search",
-	"web_fetch",
-]);
+/**
+ * The narration typing into the box after a reply delta (ChatView's
+ * liveCandidate). `next` is this delta's split: {runId, msgId, text (the
+ * candidate), answer, full (the reply text)}.
+ *
+ * The relay hides narration from the reply one frame before it sends the same
+ * sentence as a step (the hide delta, then run:step). Clearing the typing row
+ * on the hide made the box drop a row, or fall back to "Thinking" or
+ * "Preparing your session", for that frame. So when a delta of the same run
+ * empties the reply while a sentence was typing, the sentence is HELD on
+ * screen until run:step (or the next text) replaces it. A held candidate has
+ * no `full`: a terminal must never snap hidden narration in as the answer.
+ */
+export function candidateAfterDelta(prev, next) {
+	const { runId = null, msgId = null, text = "", answer = "", full = "" } = next || {};
+	const hidden =
+		!text &&
+		!String(answer).trim() &&
+		!!(prev && prev.text) &&
+		prev.runId === runId &&
+		prev.msgId === msgId;
+	if (hidden) return { runId, msgId, text: prev.text, full: "", held: true };
+	return { runId, msgId, text, full, held: false };
+}
 
-/** A tool that only reads (get_list, get_doc, query, recall, preview_doc, ...). */
-export function isLookupTool(name) {
-	const base = toolBaseName(name);
+/**
+ * Whether reply `msgName` already has saved tool rows the MODEL ran (they
+ * follow it until the next user row): a reload or a tab-focus resync mid-turn
+ * loads them, and they mean the turn has been working. The plugin's own memory
+ * recall at the start of a first turn (saved without a call id about half a
+ * second in) is session setup, so it does not count.
+ *
+ * @param {Array<{name: string, role: string, tool_name?: string, tool_call_id?: string|null}>} messages
+ * @param {string} msgName
+ */
+export function hasSavedModelTools(messages, msgName) {
+	const list = Array.isArray(messages) ? messages : [];
+	const at = list.findIndex((m) => m.name === msgName);
+	if (at === -1) return false;
+	for (let i = at + 1; i < list.length && list[i].role === "tool"; i++) {
+		const row = list[i];
+		if (row.tool_call_id || toolBaseName(row.tool_name) !== "recall") return true;
+	}
+	return false;
+}
+
+/**
+ * Whether a running turn is still setting up its agent session, with nothing
+ * of it on screen yet: no step, no narration typing, no tool started, no
+ * answer text. The first reply pays for creating the session and loading the
+ * system prompt, so the box says that instead of "Thinking".
+ *
+ * `sessionTurn` is the chat's first reply, or a turn the server flagged as
+ * creating a new session (run:status "waking"). `activeTools` is every tool
+ * started in the run, silent built-ins included. `savedTools` is true when the
+ * reply already has saved tool rows the model ran (hasSavedModelTools): the
+ * turn has been working, whatever this tab saw. Tool results that arrive live
+ * without a tool start (the plugin's memory recall) are deliberately not an
+ * input: they land about half a second into exactly these turns.
+ */
+export function isPreparingSession({
+	sessionTurn = false,
+	steps = [],
+	candidate = "",
+	activeTools = [],
+	savedTools = false,
+	answer = "",
+} = {}) {
+	if (!sessionTurn || savedTools) return false;
 	return (
-		LOOKUP_TOOLS.has(base) || /^(get|list|search|read|describe|find|fetch|preview)_/.test(base)
+		!steps.length &&
+		!String(candidate || "").trim() &&
+		!activeTools.length &&
+		!String(answer || "").trim()
 	);
 }
 
-/** "1 lookup" / "5 lookups", or "actions" once anything in the turn writes. */
+/**
+ * The expanded head's list: each step placed before the first tool row that
+ * came after it, the rows in their own order. Saved (or reloaded) steps carry
+ * `at` and saved rows `creation`, both site-time strings in one format, so they
+ * compare as strings; live steps and live tool rows carry `ord`, the order this
+ * tab saw them in. A server-timed item sorts before every counted one: it was
+ * loaded by the tab's last load, so it happened before anything seen live since
+ * (a tab-focus resync mid-turn mixes the two). An item with neither puts all
+ * steps first.
+ *
+ * @param {Array<{text: string, at?: string, ord?: number}>} steps
+ * @param {Array<{name: string, creation?: string, ord?: number}>} rows
+ * @returns {Array<{kind: "step", key: string, text: string} | {kind: "tool", key: string, row: object}>}
+ */
+export function activityItems(steps, rows) {
+	const list = (Array.isArray(steps) ? steps : []).filter((s) => s && s.text);
+	const tools = Array.isArray(rows) ? rows : [];
+	const stepItem = (s, i) => ({ kind: "step", key: `step-${i}`, text: s.text });
+	const toolItem = (row) => ({ kind: "tool", key: row.name, row });
+	const rank = (v) => (typeof v === "string" && v ? [0, v] : Number.isFinite(v) ? [1, v] : null);
+	const stepKey = (s) => rank(s.at != null ? s.at : s.ord);
+	const rowKey = (r) => rank(r.ord != null ? r.ord : r.creation);
+	const notAfter = (a, b) => (a[0] !== b[0] ? a[0] < b[0] : a[1] <= b[1]);
+	if ([...list.map(stepKey), ...tools.map(rowKey)].some((k) => !k))
+		return [...list.map(stepItem), ...tools.map(toolItem)];
+	const out = [];
+	let next = 0;
+	for (const row of tools) {
+		while (next < list.length && notAfter(stepKey(list[next]), rowKey(row))) {
+			out.push(stepItem(list[next], next));
+			next++;
+		}
+		out.push(toolItem(row));
+	}
+	for (; next < list.length; next++) out.push(stepItem(list[next], next));
+	return out;
+}
+
+/** "1 tool" / "5 tools": every tool the turn ran (turnToolNames). */
 export function countLabel(toolNames) {
-	const names = Array.isArray(toolNames) ? toolNames : [];
-	if (!names.length) return "";
-	const n = names.length;
-	const noun = names.every(isLookupTool) ? "lookup" : "action";
-	return `${n} ${noun}${n === 1 ? "" : "s"}`;
+	const n = Array.isArray(toolNames) ? toolNames.length : 0;
+	if (!n) return "";
+	return `${n} tool${n === 1 ? "" : "s"}`;
 }
 
 /**

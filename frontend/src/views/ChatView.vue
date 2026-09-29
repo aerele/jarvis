@@ -877,12 +877,11 @@
 									@toggle="toggleActivity(m.name)"
 								>
 									<template #details>
-										<div
-											v-for="t in activityByAssistant[m.name] || []"
-											:key="t.name"
-											class="jv-tool"
-											:class="{ open: toolOpen[t.name] }"
+										<template
+											v-for="item in activityDetailsFor(m)"
+											:key="item.key"
 										>
+<<<<<<< HEAD
 											<button
 												class="jv-tool-head"
 												@click="toggleTool(t.name)"
@@ -903,36 +902,93 @@
 												<span class="jv-tool-status">{{
 													t.tool_status
 												}}</span>
+=======
+											<div v-if="item.kind === 'step'" class="jv-tool-step">
+>>>>>>> d450d50 (feat(chat): "Preparing your session" on a first reply, and a finish that stays still [plan: 2026-09-29-first-turn-and-finish-glitches])
 												<svg
-													class="jv-tool-chev"
-													:class="{ open: toolOpen[t.name] }"
-													width="11"
-													height="11"
+													width="12"
+													height="12"
 													viewBox="0 0 24 24"
 													fill="none"
 													stroke="currentColor"
-													stroke-width="2.2"
+													stroke-width="2.4"
 													stroke-linecap="round"
 													stroke-linejoin="round"
+													aria-hidden="true"
 												>
-													<path d="M9 18l6-6-6-6" />
+													<path d="M20 6 9 17l-5-5" />
 												</svg>
-											</button>
-											<div v-if="toolOpen[t.name]" class="jv-tool-detail">
-												<template v-if="prettyJson(t.tool_args)">
-													<div class="jv-tool-io-k">Input</div>
-													<pre class="jv-tool-io">{{
-														prettyJson(t.tool_args)
-													}}</pre>
-												</template>
-												<template v-if="prettyJson(t.tool_result)">
-													<div class="jv-tool-io-k">Output</div>
-													<pre class="jv-tool-io">{{
-														prettyJson(t.tool_result)
-													}}</pre>
-												</template>
+												<span>{{ item.text }}</span>
 											</div>
-										</div>
+											<div
+												v-else
+												class="jv-tool"
+												:class="{ open: toolOpen[item.row.name] }"
+											>
+												<button
+													class="jv-tool-head"
+													@click="toggleTool(item.row.name)"
+												>
+													<span
+														class="jv-tool-dot"
+														:class="
+															item.row.tool_status === 'completed'
+																? 'ok'
+																: item.row.tool_status ===
+																  'running'
+																? 'run'
+																: 'err'
+														"
+													></span>
+													<ConnectorLogo
+														v-if="toolCallPreset(item.row)"
+														:preset="toolCallPreset(item.row)"
+														:size="13"
+													/>
+													<span class="jv-tool-name">{{
+														toolCallLabel(item.row)
+													}}</span>
+													<span class="jv-tool-status">{{
+														item.row.tool_status
+													}}</span>
+													<svg
+														class="jv-tool-chev"
+														:class="{ open: toolOpen[item.row.name] }"
+														width="11"
+														height="11"
+														viewBox="0 0 24 24"
+														fill="none"
+														stroke="currentColor"
+														stroke-width="2.2"
+														stroke-linecap="round"
+														stroke-linejoin="round"
+													>
+														<path d="M9 18l6-6-6-6" />
+													</svg>
+												</button>
+												<div
+													v-if="toolOpen[item.row.name]"
+													class="jv-tool-detail"
+												>
+													<template
+														v-if="prettyJson(item.row.tool_args)"
+													>
+														<div class="jv-tool-io-k">Input</div>
+														<pre class="jv-tool-io">{{
+															prettyJson(item.row.tool_args)
+														}}</pre>
+													</template>
+													<template
+														v-if="prettyJson(item.row.tool_result)"
+													>
+														<div class="jv-tool-io-k">Output</div>
+														<pre class="jv-tool-io">{{
+															prettyJson(item.row.tool_result)
+														}}</pre>
+													</template>
+												</div>
+											</div>
+										</template>
 									</template>
 								</StepsBox>
 								<!-- "Reports consulted" provenance card: a LEAD decision (T5c)
@@ -4075,6 +4131,7 @@ import { Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
+import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
 import { collectDocRefs } from "@/lib/docRefs";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
@@ -4115,10 +4172,10 @@ import {
 	supportAwaitingRoute,
 } from "@/lib/supportHeaderPill";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
-import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
+import { formatDate, formatLocalMs, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
 import { BOOT_TIMEOUT_MS, withDeadline } from "@/utils/bootDeadline";
-import { createEnrichmentPending } from "@/lib/enrichmentPending";
+import { createEnrichmentPending, ENRICHMENT_CUE_DELAY_MS } from "@/lib/enrichmentPending";
 import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
 import JvChart from "@/charts/JvChart.vue";
@@ -4204,9 +4261,14 @@ import {
 	detectArtifactKind,
 } from "@/lib/artifactActivityCard";
 import {
+	activityItems,
 	addStep,
+	candidateAfterDelta,
 	foldedHead,
+	hasSavedModelTools,
+	isPreparingSession,
 	liveBox,
+	SESSION_PREP,
 	splitNarration,
 	stepsFromTexts,
 	turnToolNames,
@@ -5287,6 +5349,9 @@ function tearDownActivityIfSettled() {
 // deadlines; this ref is only what the template reads.
 const enrichmentPending = ref(new Set()); // message_ids awaiting message:enriched
 const enrichmentTracker = createEnrichmentPending({
+	// Enrichment lands in 4-12 s (the usage poll) with nothing to show on a
+	// plain answer, so the cue only appears once it is actually stuck.
+	showAfterMs: ENRICHMENT_CUE_DELAY_MS,
 	onChange: (ids) => {
 		enrichmentPending.value = ids;
 	},
@@ -5442,16 +5507,34 @@ function snapCandidateInto(messageId) {
 	revealer.receive(messageId, full);
 	liveCandidate.value = { runId: null, msgId: null, text: "", full: "" };
 }
-// Seconds elapsed (the same span liveElapsedLabel formats) at the instant the
-// live turn's answer first showed text, so a folded head mid-turn ("Worked
-// 12s") freezes there instead of climbing with the ticking timer while a
-// tool keeps running after the answer opened. Reset at run:start.
-const liveAnswerShownAt = ref(null);
+// The run the server said is creating the chat's agent session (run:status
+// "waking", published before run:start): the box shows "Preparing your
+// session" for it until anything of the turn shows (sessionTurnFor below).
+const sessionPrepRunId = ref(null);
+// Tool rows the bench published live (tool:result) for the running reply,
+// merged into `transcript` below so the box count, its details and "Reports
+// consulted" are right before the answer lands (@/lib/liveToolRows).
+const liveToolRows = ref({ msgId: null, rows: [] });
+// The order this tab saw the running turn's steps and tool results in, so the
+// expanded head can place each step before the tool it led to (activityItems).
+let _activityOrd = 0;
+const nextActivityOrd = () => ++_activityOrd;
 // The turn that just ended, captured at run:end before teardown: its elapsed
-// seconds and the tools seen live. The settled head reads it until the
-// enrichment reload brings the saved duration and every tool row, so the line
-// never loses its time or drops its count in between (flow review F2).
+// seconds and the tools seen live. The settled head reads its seconds ahead
+// of the saved duration (the same span, within rounding) so the number the
+// tab showed while the answer streamed never changes when the turn settles
+// or the enrichment reload lands, and its tools until that reload brings
+// every tool row (flow review F2).
 const finishedRun = ref({ msgId: null, seconds: null, tools: [] });
+// The run's elapsed seconds on the clock the live box shows (nowMs ticks once a
+// second while busy), so the head keeps the number it last showed when the turn
+// settles. A turn parked for recovery stops the clock (busy goes false), so its
+// late answer reads the real time instead of the frozen one.
+function shownRunSeconds() {
+	if (!runStartMs.value) return null;
+	const now = busy.value && nowMs.value ? nowMs.value : Date.now();
+	return (now - runStartMs.value) / 1000;
+}
 // Turn states past streaming: the model is done writing (get_conversation's
 // turn_state for a reply row that has not settled yet).
 const RUN_ENDED_STATES = new Set([
@@ -5936,13 +6019,15 @@ const visibleMessages = computed(() =>
 // answer can show an expandable "Activity" list of the tool calls (with input
 // + output) that produced it — agent-style. Tool rows follow their
 // assistant placeholder in seq order, so we attach to the most recent
-// assistant message and reset on each user message.
-const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
+// assistant message and reset on each user message. Both read `transcript`:
+// the loaded messages plus the running reply's live tool rows.
+const transcript = computed(() => withLiveToolRows(messages.value, liveToolRows.value));
+const reportToolsByTurn = computed(() => reportToolsByAssistant(transcript.value));
 
 const activityByAssistant = computed(() => {
 	const map = {};
 	let cur = null;
-	for (const m of messages.value) {
+	for (const m of transcript.value) {
 		if (m.role === "user") cur = null;
 		else if (m.role === "assistant") {
 			cur = m.name;
@@ -5954,6 +6039,18 @@ const activityByAssistant = computed(() => {
 	}
 	return map;
 });
+// The expanded head of reply `m`: its steps (saved with the reply at
+// settlement, or the live ones before the reload brings them) in order with
+// its tool rows (activityItems).
+function activityDetailsFor(m) {
+	const saved = Array.isArray(m.steps) ? m.steps : [];
+	const steps = saved.length
+		? saved
+		: liveSteps.value.msgId === m.name
+		? liveSteps.value.steps
+		: [];
+	return activityItems(steps, activityByAssistant.value[m.name] || []);
+}
 const activityOpen = ref({});
 const toolOpen = ref({});
 // Whether replies reveal which tools + skills produced them. When off, the
@@ -6542,8 +6639,10 @@ function render(text, streaming = false) {
 	_renderCache.set(key, out);
 	return out;
 }
-// {document name → DocType} harvested from THIS conversation's tool calls.
-const docRefs = computed(() => collectDocRefs(messages.value));
+// {document name → DocType} harvested from THIS conversation's tool calls,
+// the running reply's live ones included (`transcript`), so its record names
+// are links as the answer lands rather than after the enrichment reload.
+const docRefs = computed(() => collectDocRefs(transcript.value));
 const _escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Compiled once per docRefs change: matches any known doc name as a whole token
 // (not a substring of a longer id/word). Capped so a huge get_list can't build a
@@ -7793,25 +7892,13 @@ function msgStamp(m) {
 function msgTime(m) {
 	const ts = msgStamp(m);
 	if (ts) return formatDate(ts, "h:mm A");
-	if (m.creation_browser)
-		return new Date(m.creation_browser).toLocaleTimeString([], {
-			hour: "numeric",
-			minute: "2-digit",
-		});
+	if (m.creation_browser) return formatLocalMs(m.creation_browser, "h:mm A");
 	return "";
 }
 function msgTimeFull(m) {
 	const ts = msgStamp(m);
 	if (ts) return exactDate(ts);
-	if (m.creation_browser)
-		return new Date(m.creation_browser).toLocaleString([], {
-			weekday: "short",
-			day: "numeric",
-			month: "short",
-			year: "numeric",
-			hour: "numeric",
-			minute: "2-digit",
-		});
+	if (m.creation_browser) return formatLocalMs(m.creation_browser, "ddd, MMM D, YYYY h:mm A");
 	return "";
 }
 // Day bucket for a message (timezone-safe via dayLabel), for the "Today /
@@ -8136,7 +8223,28 @@ function overrideFor(m) {
 		};
 	const preConnect = preConnectStatusLabel(statusPhase.value);
 	if (preConnect) return { text: "Starting", sub: preConnect };
+	if (
+		isPreparingSession({
+			sessionTurn: sessionTurnFor(m),
+			steps: stepsFor(m),
+			candidate: candidateFor(m),
+			activeTools: activeTools.value,
+			savedTools: !!m && hasSavedModelTools(messages.value, m.name),
+			answer: m ? m.content : "",
+		})
+	)
+		return SESSION_PREP;
 	return null;
+}
+// Whether the running turn (row `m`, or the in-flight row when null) is the
+// one setting up the chat's agent session: the chat's first reply (known the
+// moment it is sent), or a run the server flagged with run:status "waking"
+// (still statusPhase before run:start, sessionPrepRunId after it; covers a
+// chat whose session was recreated).
+function sessionTurnFor(m) {
+	if (statusPhase.value === "waking") return true;
+	if (sessionPrepRunId.value && sessionPrepRunId.value === currentRunId.value) return true;
+	return !messages.value.some((x) => x.role === "assistant" && (!m || x.name !== m.name));
 }
 // The live signals shared by every row that is currently the running turn —
 // the real row once one exists, and the synthetic in-flight row before it
@@ -8186,7 +8294,7 @@ function boxViewFor(m) {
 	if (!isLive || m.stopped || m.error) {
 		const fin = finishedRun.value.msgId === m.name ? finishedRun.value : null;
 		const head = foldedHead({
-			seconds: elapsedOf(m) || (fin && fin.seconds),
+			seconds: (fin && fin.seconds) || elapsedOf(m),
 			toolNames: toolNamesFor(m, fin && fin.tools),
 			finishing: enrichmentPending.value.has(m.name),
 			stopped: !!m.stopped,
@@ -8197,19 +8305,16 @@ function boxViewFor(m) {
 	}
 	const answerShowing = !!(m.content || "").trim();
 	if (!answerShowing || currentTool.value) return { mode: "live", ...liveBoxViewFor(m) };
-	// The answer is showing and nothing is running: fold, freezing the
-	// elapsed reading at the moment it first showed (liveAnswerShownAt)
-	// rather than the still-ticking live timer, so the head doesn't keep
-	// climbing under what already reads as a finished answer.
-	// A tab reloaded after the answer opened has no liveAnswerShownAt: read
-	// the (reload-seeded) run clock instead of showing no time at all.
-	const shownAt =
-		liveAnswerShownAt.value ??
-		(runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null);
+	// The answer is showing and nothing is running: fold. The head reads the
+	// run clock, still ticking while the answer streams, which is the span
+	// run:end stamps into finishedRun and the server saves, so the number
+	// never jumps when the turn settles (it used to freeze at the moment the
+	// answer first showed and then jump to the full span at run:end). A tab
+	// reloaded mid-answer reads the same reload-seeded clock.
 	return {
 		mode: "folded",
 		head: foldedHead({
-			seconds: shownAt,
+			seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
 			toolNames: toolNamesFor(m, visibleActiveTools.value),
 			showDetail: showActivityDetail.value,
 		}),
@@ -8697,13 +8802,12 @@ async function loadConversation(id) {
 				liveSteps.value = {
 					runId: _streaming.run_id,
 					msgId: _streaming.name,
-					steps: stepsFromTexts(_streaming.live_steps),
+					steps: stepsFromTexts(_streaming.live_steps, _streaming.live_step_times),
 				};
 				// A reload mid-narration gets the stored text of a sentence the
 				// relay has not moved into the step list yet. Split it exactly
 				// like a live delta (flow review F6): it types into the box
-				// instead of showing as the answer and folding the box, and a
-				// real answer already showing freezes the head's time.
+				// instead of showing as the answer and folding the box.
 				// A run that already ended (its row just has not settled yet) never
 				// sends this tab another terminal to snap a candidate back, so its
 				// text is the answer, however short (review E1).
@@ -8716,8 +8820,6 @@ async function loadConversation(id) {
 					full: _streaming.content || "",
 				};
 				_streaming.content = answer;
-				liveAnswerShownAt.value =
-					answer && runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null;
 				if (_streaming.pump_epoch != null) {
 					pumpFenceAccept(
 						{
@@ -8969,6 +9071,8 @@ function resetRunState() {
 	waiting.value = false;
 	activeTools.value = [];
 	currentRunId.value = null;
+	sessionPrepRunId.value = null;
+	liveToolRows.value = { msgId: null, rows: [] };
 	store.streamingConvId = null;
 	pendingFiles.value = [];
 	failedUploads.value = []; // a stale failure pill must not follow the user into a new chat
@@ -9735,9 +9839,14 @@ function onEvent(p) {
 			store.streamingConvId = null;
 			break;
 		case "run:status":
-			// Lightweight progress signal (e.g. waking a cold container) between
-			// run:start and the first token — keeps the connect window honest.
-			if (p.status === "waking") statusPhase.value = "waking";
+			// Lightweight progress signal between send and the first token.
+			// "waking" means this run creates the chat's agent session: the box
+			// shows "Preparing your session" until anything of the turn shows
+			// (sessionTurnFor), past the run:start that resets statusPhase.
+			if (p.status === "waking") {
+				statusPhase.value = "waking";
+				sessionPrepRunId.value = p.run_id || null;
+			}
 			// One-time device (re)pair (agent 9.3 connect-first): shown as
 			// "Setting up your assistant…" while the bench pairs with the gateway.
 			if (p.status === "pairing") statusPhase.value = "pairing";
@@ -9770,7 +9879,7 @@ function onEvent(p) {
 			currentRunId.value = p.run_id;
 			currentMsgId.value = p.message_id;
 			recovering.value = null;
-			liveAnswerShownAt.value = null;
+			liveToolRows.value = { msgId: p.message_id || null, rows: [] };
 			// T5a: there is no assistant row yet at this point (the message is
 			// created at pump promote, before the first token) — upsert a blank
 			// streaming one now instead of waiting for the first assistant:delta,
@@ -9857,14 +9966,15 @@ function onEvent(p) {
 			// back out. Steps themselves now persist for the whole turn (run:step
 			// above) — they are no longer cleared here.
 			const { candidate, answer } = splitNarration(p.text || "");
-			liveCandidate.value = {
+			// A hide delta (narration about to arrive as a run:step) keeps the
+			// sentence typing until the step replaces it (candidateAfterDelta).
+			liveCandidate.value = candidateAfterDelta(liveCandidate.value, {
 				runId: currentRunId.value,
 				msgId: currentMsgId.value,
 				text: candidate,
+				answer,
 				full: p.text || "",
-			};
-			if (answer && liveAnswerShownAt.value == null && runStartMs.value)
-				liveAnswerShownAt.value = (Date.now() - runStartMs.value) / 1000;
+			});
 			// Upsert: run:start (above) usually beats this to it now, but this
 			// stays as the fallback for a delta that somehow arrives first —
 			// streaming text must show immediately either way (the bug fix).
@@ -9889,6 +9999,28 @@ function onEvent(p) {
 			nextTick(scrollBottomIfPinned);
 			break;
 		}
+		case "tool:result":
+			// A bench tool returned and its row is saved (jarvis/api.py). No run
+			// id or epoch rides this event, so it only attaches while this chat's
+			// run is live (a chat runs one turn at a time); the enrichment reload
+			// later brings the same rows by name (@/lib/liveToolRows).
+			if (!currentRunId.value || !currentMsgId.value || !p.tool_message_id) break;
+			// A late result of the run that just ended or was stopped (its call
+			// was seen there) stays with that run; the reload files it there.
+			if (
+				p.tool_call_id &&
+				finishedRun.value.msgId !== currentMsgId.value &&
+				(finishedRun.value.tools || []).some((t) => t.id === p.tool_call_id)
+			)
+				break;
+			liveToolRows.value = {
+				msgId: currentMsgId.value,
+				rows: upsertToolRow(
+					liveToolRows.value.msgId === currentMsgId.value ? liveToolRows.value.rows : [],
+					toolRowFromResult(p, nextActivityOrd())
+				),
+			};
+			break;
 		case "run:step": {
 			// The model's own "what I'm doing" sentences, recorded for the whole
 			// turn (addStep dedupes/grows the last one — @/lib/liveTurn). Fenced
@@ -9906,8 +10038,16 @@ function onEvent(p) {
 			liveSteps.value = {
 				runId: rid,
 				msgId: currentMsgId.value,
-				steps: addStep(sameRun ? liveSteps.value.steps : [], p.text, slot),
+				steps: addStep(
+					sameRun ? liveSteps.value.steps : [],
+					p.text,
+					slot,
+					nextActivityOrd()
+				),
 			};
+			// The step takes over the sentence a hide delta held on screen.
+			if (liveCandidate.value.held)
+				liveCandidate.value = { ...liveCandidate.value, text: "", held: false };
 			waiting.value = false;
 			nextTick(scrollBottomIfPinned);
 			break;
@@ -9916,6 +10056,10 @@ function onEvent(p) {
 			if (pumpFenceReject(p)) break; // CDX-3 (epoch-less legacy tool events bypass)
 			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
+			// A sentence held through the relay's hide whose step never came
+			// (filtered on the pump thread) stops typing once the tool starts.
+			if (liveCandidate.value.held)
+				liveCandidate.value = { ...liveCandidate.value, text: "", held: false };
 			// See the matching guard in assistant:delta: a dropped "compacted"
 			// run:status frame must not leave compacting stuck true once the turn
 			// has visibly moved on.
@@ -9969,7 +10113,7 @@ function onEvent(p) {
 			if (p.message_id)
 				finishedRun.value = {
 					msgId: p.message_id,
-					seconds: runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null,
+					seconds: shownRunSeconds(),
 					tools: visibleActiveTools.value.map((t) => ({ id: t.id, name: t.name })),
 				};
 			// C2 self-heal: a parked confirmation card whose best-effort action:pending
@@ -10017,6 +10161,10 @@ function onEvent(p) {
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
+			// The copy bar shows with the answer, so give it a time now rather
+			// than when the enrichment reload brings the saved one (msgTime).
+			if (m && !m.modified && !m.creation && !m.creation_browser)
+				m.creation_browser = Date.now();
 			// One-off smile on the brand avatar the moment the answer lands. Success
 			// terminal only: the stop/abort path (stopRun) and the error case never
 			// reach here, and we still skip a row that resolved to an error or stopped
@@ -10033,7 +10181,13 @@ function onEvent(p) {
 			// or until its deadline expires (jarvis#681: an enrichment that never lands
 			// must not leave a finished answer looking unfinished forever).
 			if (p.message_id) {
-				if (p.enrichment_pending) enrichmentTracker.mark(p.message_id);
+				// A media tool's file (image, video, music) is attached by the
+				// enrichment itself, so that reply shows "finishing" at once.
+				const mediaTurn = activeTools.value.some((t) =>
+					MEDIA_YIELD_TOOLS.has(toolBaseName(t.name))
+				);
+				if (p.enrichment_pending)
+					enrichmentTracker.mark(p.message_id, { immediate: mediaTurn });
 				// NB: the CDX-3 fence entry is deliberately NOT cleared here — the
 				// terminated-epoch marker must persist to permanently block a later
 				// lower-epoch straggler (clearing it re-opened the stale-delta window).
@@ -10283,11 +10437,11 @@ function stopRun() {
 		// cursor happened to be.
 		snapCandidateInto(m.name);
 		flushReveal(m.name);
-		// "Stopped after 21s · 2 lookups": keep the run's time and tools for the
+		// "Stopped after 21s · 2 tools": keep the run's time and tools for the
 		// head, as run:end does, since a stop never gets a run:end of its own.
 		finishedRun.value = {
 			msgId: m.name,
-			seconds: runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null,
+			seconds: shownRunSeconds(),
 			tools: visibleActiveTools.value.map((t) => ({ id: t.id, name: t.name })),
 		};
 		m.streaming = false;
@@ -11993,6 +12147,22 @@ onUnmounted(() => {
 	border-radius: 8px;
 	background: var(--surface);
 	overflow: hidden;
+}
+/* A saved step in the expanded head, above the tool it led to: the live box's
+   done-row look (muted text, tick), not a card. */
+.jv-tool-step {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 3px 10px;
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--text-2);
+}
+.jv-tool-step svg {
+	flex: none;
+	margin-top: 3px;
+	color: var(--text-3);
 }
 .jv-tool-head {
 	display: flex;

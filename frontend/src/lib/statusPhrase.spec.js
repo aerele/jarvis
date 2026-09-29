@@ -7,11 +7,9 @@ describe("preConnectStatusLabel", () => {
 		expect(preConnectStatusLabel("pairing")).toBe("Setting up your assistant…");
 	});
 
-	it("renders the cold-container waking state", () => {
-		expect(preConnectStatusLabel("waking")).toBe("Waking up your assistant…");
-	});
-
 	it("returns null for every other phase so tool/thinking phrases win", () => {
+		// "waking" is the steps box's "Preparing your session" (liveTurn.SESSION_PREP).
+		expect(preConnectStatusLabel("waking")).toBeNull();
 		expect(preConnectStatusLabel("model")).toBeNull();
 		expect(preConnectStatusLabel("analyzing")).toBeNull();
 		expect(preConnectStatusLabel("compacting")).toBeNull();
