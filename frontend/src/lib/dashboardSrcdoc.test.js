@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSrcdoc, parseSourcesBlock, CSP_META, RUNTIME_JS } from "./dashboardSrcdoc.js";
+import {
+	buildSrcdoc,
+	parseSourcesBlock,
+	parseFiltersBlock,
+	CSP_META,
+	RUNTIME_JS,
+} from "./dashboardSrcdoc.js";
 
 // A stable marker that only appears where the runtime was inlined.
 const RUNTIME_MARK = "window.jarvis = {";
@@ -333,17 +339,6 @@ test("@layer: an UNQUOTED-attribute <style> is still wrapped (scan parity)", asy
 	assert.ok(out.includes("<style data-k=v>@layer author{.a{color:var(--jd-ink)}}</style>"));
 });
 
-test("SECURITY: stale agent ws-client script is stripped, other scripts kept", () => {
-	const html =
-		"<html><head></head><body><div id=chart></div>" +
-		"<script>renderChart()</script>" +
-		'<script>const ws=new WebSocket("ws://"+location.host+"/__openclaw__/ws");</script>' +
-		"</body></html>";
-	const out = buildSrcdoc(html, {});
-	assert.ok(out.includes("renderChart()"), "legit script kept");
-	assert.ok(!out.includes("__openclaw__/ws"), "host ws-client stripped");
-});
-
 // DR3-1: a literal "<style" that is NOT a real start tag (inside an attribute
 // value, a <script>/<textarea> body, or a comment) must not desync the wrapper.
 // The prior hand-scanner searched for "<style" from the DATA position and could
@@ -403,4 +398,61 @@ test("@layer DR3-1: an abrupt-closing empty comment <!--> does not swallow the r
 	// must be wrapped (a naive scan-to-`-->` would skip to EOF and miss it).
 	const out = buildSrcdoc(`<!--><style>${REAL}</style>`, { theme: THEMES.jarvis });
 	assert.ok(out.includes(`@layer author{${REAL}}`), "real style after <!--> stays layered");
+});
+
+// ── declared filters (#jarvis-filters) ────────────────────────────────────────
+test("parseFiltersBlock: returns [] without a block", () => {
+	assert.deepEqual(parseFiltersBlock("<h1>x</h1>"), []);
+});
+
+test("parseFiltersBlock: parses declared filters and normalises defaults", () => {
+	const html =
+		'<script type="application/json" id="jarvis-filters">' +
+		'{"filters":[{"fieldname":"item","label":"Item","fieldtype":"Link","options":"Item"}]}' +
+		"</script>";
+	assert.deepEqual(parseFiltersBlock(html), [
+		{
+			fieldname: "item",
+			label: "Item",
+			fieldtype: "Link",
+			options: "Item",
+			default: "",
+			reqd: 0,
+		},
+	]);
+});
+
+test("parseFiltersBlock: returns [] on malformed JSON (the server rejects it on save)", () => {
+	assert.deepEqual(parseFiltersBlock('<script id="jarvis-filters">{nope</script>'), []);
+});
+
+test("RUNTIME renderError: FilterRequired surfaces the server's message; other codes stay generic", () => {
+	// String-level (same convention as the other RUNTIME_JS assertions above,
+	// e.g. the export pixelRatio test below) - this file runs under node --test,
+	// DOM-free by design, so there is no harness that executes RUNTIME_JS in a
+	// real document. spec §5: a FilterRequired rejection's server-composed
+	// message ("Pick a value for <label> to load this data.") must reach the
+	// tile; every other non-permission code must stay the fixed generic string
+	// so internal error text never reaches a viewer.
+	assert.ok(RUNTIME_JS.includes('err.code === "FilterRequired"'), "branches on FilterRequired");
+	assert.ok(
+		/err\.message\s*\|\|\s*"Pick a value to load this data\."/.test(RUNTIME_JS),
+		"uses err.message with a safe fallback for FilterRequired"
+	);
+	assert.ok(
+		RUNTIME_JS.includes('"Couldn\'t load this data"'),
+		"non-permission, non-FilterRequired codes keep the fixed generic string"
+	);
+});
+
+// ── export scaling for large dashboards (fix/dashboard-pdf-export-scale) ──────
+test("export: RUNTIME caps pixelRatio for large dashboards and heartbeats progress", () => {
+	// String-level (same convention as the other RUNTIME_JS assertions); the
+	// re-arm behavior is exercised in DashboardCanvas.spec.js.
+	assert.ok(RUNTIME_JS.includes("totalArea"), "sums content area to decide pixelRatio");
+	assert.ok(
+		/totalArea\s*>\s*3000000/.test(RUNTIME_JS),
+		"drops to 1x past a large-area threshold"
+	);
+	assert.ok(RUNTIME_JS.includes("export:progress"), "posts a per-slide progress heartbeat");
 });

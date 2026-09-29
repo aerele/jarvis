@@ -6,7 +6,13 @@ import {
 	coerceRow,
 	isFieldMissing,
 	isFieldWritable,
+	isRowKeyColumn,
+	overlaySavedRows,
 	readonlyDisplay,
+	removedSavedRows,
+	tableChanged,
+	tableRowsPayload,
+	toPanelRow,
 } from "./draftApply";
 
 describe("isFieldWritable", () => {
@@ -114,5 +120,152 @@ describe("coerceRow", () => {
 			const t = { columns: [{ fieldname: "n", fieldtype: ft, read_only: 0 }] };
 			expect(coerceRow(t, { n: "3.5" }, "create")).toEqual({ n: 3.5 });
 		}
+	});
+});
+
+describe("child rows keep their name (CR-3: an update edits THAT row)", () => {
+	const cols = [
+		{ fieldname: "qty", fieldtype: "Float", read_only: 0 },
+		{ fieldname: "from_time", fieldtype: "Datetime", read_only: 0 },
+	];
+	const saved = { name: "row-1", qty: 2, from_time: "2026-09-01 09:30:00", project: "P-1" };
+
+	it("toPanelRow keeps the name out of the columns and normalizes dates", () => {
+		const r = toPanelRow(cols, saved);
+		expect(r).toEqual({ __name: "row-1", qty: "2", from_time: "2026-09-01T09:30" });
+	});
+	it("coerceRow sends the row name with the edited values", () => {
+		const t = { columns: cols };
+		expect(coerceRow(t, { ...toPanelRow(cols, saved), qty: "5" }, "update")).toEqual({
+			name: "row-1",
+			qty: 5,
+			from_time: "2026-09-01T09:30",
+		});
+	});
+	it("a new panel row has no name", () => {
+		const t = { columns: cols };
+		expect(coerceRow(t, { qty: "1", from_time: "" }, "update")).toEqual({ qty: 1 });
+	});
+	it("an untouched table with a Datetime column is NOT a change", () => {
+		const orig = [saved];
+		const t = { columns: cols, rows: orig.map((r) => toPanelRow(cols, r)) };
+		expect(tableChanged(t, orig)).toBe(false);
+	});
+	it("an edited cell is a change", () => {
+		const orig = [saved];
+		const t = { columns: cols, rows: [{ ...toPanelRow(cols, saved), qty: "3" }] };
+		expect(tableChanged(t, orig)).toBe(true);
+	});
+	it("a removed row is a change", () => {
+		const t = { columns: cols, rows: [] };
+		expect(tableChanged(t, [saved])).toBe(true);
+	});
+});
+
+describe("tableRowsPayload: an existing row sends only what changed", () => {
+	const cols = [
+		{ fieldname: "qty", fieldtype: "Float", read_only: 0 },
+		{ fieldname: "description", fieldtype: "Data", read_only: 0 },
+		{ fieldname: "from_time", fieldtype: "Datetime", read_only: 0 },
+	];
+	const saved = { name: "r1", qty: 2, description: "old", from_time: "2026-09-01 09:30:15" };
+	const table = (rows) => ({ columns: cols, rows });
+
+	it("an edited cell is sent with the row name, nothing else", () => {
+		const t = table([{ ...toPanelRow(cols, saved), qty: "5" }]);
+		expect(tableRowsPayload(t, [saved])).toEqual([{ name: "r1", qty: 5 }]);
+	});
+	it("a cleared cell is sent as null so it really clears", () => {
+		const t = table([{ ...toPanelRow(cols, saved), description: "" }]);
+		expect(tableRowsPayload(t, [saved])).toEqual([{ name: "r1", description: null }]);
+	});
+	it("an untouched Datetime keeps its seconds (never resent)", () => {
+		const t = table([{ ...toPanelRow(cols, saved), qty: "3" }]);
+		expect(tableRowsPayload(t, [saved])[0]).not.toHaveProperty("from_time");
+	});
+	it("a new row sends its filled cells, no name", () => {
+		const t = table([toPanelRow(cols, saved), { qty: "1", description: "", from_time: "" }]);
+		expect(tableRowsPayload(t, [saved])).toEqual([{ name: "r1" }, { qty: 1 }]);
+	});
+	it("a proposed row that carries a name edits that row", () => {
+		const proposed = {
+			name: "r1",
+			qty: 7,
+			description: "old",
+			from_time: "2026-09-01 09:30:15",
+		};
+		const t = table([toPanelRow(cols, proposed)]);
+		expect(tableRowsPayload(t, [saved])).toEqual([{ name: "r1", qty: 7 }]);
+	});
+	it("reordered rows are a change", () => {
+		const s2 = { name: "r2", qty: 1, description: "x", from_time: "" };
+		const t = table([toPanelRow(cols, s2), toPanelRow(cols, saved)]);
+		expect(tableChanged(t, [saved, s2])).toBe(true);
+	});
+	it("an added row is a change", () => {
+		const t = table([toPanelRow(cols, saved), { qty: "1", description: "", from_time: "" }]);
+		expect(tableChanged(t, [saved])).toBe(true);
+	});
+});
+
+describe("a proposal that names a kept row with only its changed cells", () => {
+	const columns = [
+		{ fieldname: "item_code", fieldtype: "Link" },
+		{ fieldname: "qty", fieldtype: "Float" },
+		{ fieldname: "rate", fieldtype: "Currency" },
+	];
+	const saved = [
+		{ name: "r1", item_code: "A", qty: 2, rate: 10 },
+		{ name: "r2", item_code: "B", qty: 1, rate: 5 },
+	];
+
+	it("is laid over the saved row, so no column it left out is blanked", () => {
+		const proposed = [{ name: "r1" }, { name: "r2", qty: 3 }];
+		const table = {
+			fieldname: "items",
+			columns,
+			rows: overlaySavedRows(proposed, saved).map((r) => toPanelRow(columns, r)),
+		};
+		expect(table.rows[1]).toMatchObject({ __name: "r2", item_code: "B", qty: "3", rate: "5" });
+		expect(tableChanged(table, saved)).toBe(true);
+		expect(tableRowsPayload(table, saved)).toEqual([{ name: "r1" }, { name: "r2", qty: 3 }]);
+	});
+
+	it("keeps a new row and an unknown name as proposed", () => {
+		expect(overlaySavedRows([{ item_code: "C" }, { name: "zz", qty: 1 }], saved)).toEqual([
+			{ item_code: "C" },
+			{ name: "zz", qty: 1 },
+		]);
+		expect(overlaySavedRows(null, saved)).toEqual([]);
+	});
+
+	it("never turns the row id or a __ key into a grid column", () => {
+		expect(["name", "__islocal", "qty"].map(isRowKeyColumn)).toEqual([false, false, true]);
+	});
+});
+
+describe("removedSavedRows", () => {
+	const columns = [
+		{ fieldname: "ro", fieldtype: "Data", read_only: 1 },
+		{ fieldname: "item_code", fieldtype: "Link" },
+	];
+	const origJson = JSON.stringify([
+		{ name: "r1", item_code: "A" },
+		{ name: "r2", item_code: "" },
+	]);
+
+	it("labels each dropped saved row by its first editable column, else its id", () => {
+		expect(removedSavedRows({ columns, rows: [], origJson })).toEqual(["A", "r2"]);
+	});
+
+	it("is empty when every saved row is kept, on a create, or on bad origJson", () => {
+		const rows = [{ __name: "r1" }, { __name: "r2" }, { item_code: "new" }];
+		expect(removedSavedRows({ columns, rows, origJson })).toEqual([]);
+		expect(removedSavedRows({ columns, rows: [], origJson: "null" })).toEqual([]);
+		expect(removedSavedRows({ columns, rows: [], origJson: "{bad" })).toEqual([]);
+	});
+
+	it("system keys are not grid columns either", () => {
+		expect(["idx", "parent", "creation", "doctype"].some(isRowKeyColumn)).toBe(false);
 	});
 });

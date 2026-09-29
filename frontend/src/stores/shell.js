@@ -12,7 +12,9 @@ import { reactive, ref, computed } from "vue";
 import { useStorage } from "@vueuse/core";
 import { toast } from "frappe-ui";
 import * as api from "@/api";
+import { getReviewAccess } from "@/api/learning";
 import { errHtml } from "@/lib/errors";
+import { createBadgeTimer } from "@/lib/badgeTimer";
 import { needsOnboarding } from "@/onboarding/readiness.js";
 
 // ---- state ------------------------------------------------------------------
@@ -25,6 +27,9 @@ const streamingConvId = ref(null); // written by ChatView only
 // wholesale on every write so Set mutations stay reactive.
 const unreadConvs = ref(new Set());
 const approvalsCount = ref(0);
+// Pending review work for a skill reviewer (skill + wiki promotions and
+// surfaced learned patterns): the same total as the Skills page Review tab.
+const reviewCount = ref(0);
 const settingsOpen = ref(false); // the shell SettingsDialog binds to this
 const settingsSection = ref("general"); // active pane key in the settings dialog
 // True while the active settings pane is applying a change it cannot safely be
@@ -52,7 +57,7 @@ const paletteOpen = ref(false);
 // and degrade gracefully (—/empty) on non-chat routes. Shape when set:
 //   { conversationId, sessionStats:{ msgCount,userMsgCount,assistantMsgCount,
 //       avgTokensPerMsg,convCount,starredCount,toolCount },
-//     convAutoApply, autoApplyNote, modelLabel, ui }
+//     modelLabel, ui }
 // Tool-call counts are deliberately NOT here: they are read from the persisted
 // rows (jarvis.chat.api.get_tool_activity), not from this live snapshot (#551).
 const chatContext = ref(null);
@@ -62,7 +67,7 @@ function setChatContext(v) {
 
 // Actions with chat side-effects, registered by ChatView while mounted so panes
 // can invoke them when present (and disable/hint when absent). ChatView
-// registers { toggleAutoApply, clearAllHistory }.
+// registers { clearAllHistory }.
 const settingsActions = reactive({});
 function registerSettingsActions(obj) {
 	Object.assign(settingsActions, obj || {});
@@ -357,7 +362,7 @@ async function loadConversations() {
 	_convsInflight = (async () => {
 		try {
 			conversations.value = (await api.listConversations()) || [];
-			refreshApprovalsCount(); // poll-on-activity parity (D12)
+			refreshBadges(); // poll-on-activity parity (D12)
 		} catch (e) {
 			toast.error(errHtml(e));
 		} finally {
@@ -371,21 +376,71 @@ async function loadConversations() {
 // AppShell fires this from four triggers (mount · route change · visibility ·
 // 60s interval) that often co-fire; the in-flight de-dupe coalesces them into
 // one request, and a hidden tab skips entirely (the visibility trigger
-// refreshes on return).
+// refreshes on return). A fifth: the moment the next chat card badges.
+// A call that lands mid-flight (a decision racing a poll) queues one re-read,
+// since the running request may predate the change - as refreshReviewCount does.
 let _approvalsInflight = null;
+let _approvalsAgain = false;
+const _badgeTimer = createBadgeTimer(() => refreshApprovalsCount());
 function refreshApprovalsCount() {
 	if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
-	if (_approvalsInflight) return _approvalsInflight;
+	if (_approvalsInflight) {
+		_approvalsAgain = true;
+		return _approvalsInflight;
+	}
 	_approvalsInflight = (async () => {
-		try {
-			approvalsCount.value = (await api.approvalsPendingCount()) || 0;
-		} catch (e) {
-			/* badge is best-effort */
-		} finally {
-			_approvalsInflight = null;
-		}
+		do {
+			_approvalsAgain = false;
+			try {
+				const badge = (await api.approvalsBadge()) || {};
+				approvalsCount.value = Number(badge.count) || 0;
+				_badgeTimer.schedule(badge.next_in);
+			} catch (e) {
+				/* badge is best-effort */
+			}
+		} while (_approvalsAgain);
+		_approvalsInflight = null;
 	})();
 	return _approvalsInflight;
+}
+function stopBadgeTimer() {
+	_badgeTimer.clear();
+}
+
+// Same triggers and de-dupe as refreshApprovalsCount. Reviewer-only: the
+// endpoint is reviewer-guarded, so nobody else ever calls it.
+// A call that lands mid-flight (e.g. review:pending racing a route-change
+// refresh) queues one re-read, since the running request may predate the row.
+let _reviewInflight = null;
+let _reviewAgain = false;
+function refreshReviewCount() {
+	if (!window.is_skill_reviewer) return Promise.resolve();
+	if (typeof document !== "undefined" && document.hidden) return Promise.resolve();
+	if (_reviewInflight) {
+		_reviewAgain = true;
+		return _reviewInflight;
+	}
+	_reviewInflight = (async () => {
+		do {
+			_reviewAgain = false;
+			try {
+				const a = (await getReviewAccess()) || {};
+				reviewCount.value =
+					(a.pending_patterns || 0) +
+					(a.pending_promotions || 0) +
+					(a.pending_skill_promotions || 0);
+			} catch (e) {
+				/* badge is best-effort */
+			}
+		} while (_reviewAgain);
+		_reviewInflight = null;
+	})();
+	return _reviewInflight;
+}
+
+function refreshBadges() {
+	refreshApprovalsCount();
+	refreshReviewCount();
 }
 
 async function renameConversation(name, title) {
@@ -500,6 +555,7 @@ const store = reactive({
 	streamingConvId,
 	unreadConvs,
 	approvalsCount,
+	reviewCount,
 	settingsOpen,
 	settingsSection,
 	settingsApplying,
@@ -522,6 +578,9 @@ const store = reactive({
 	// actions
 	loadConversations,
 	refreshApprovalsCount,
+	stopBadgeTimer,
+	refreshReviewCount,
+	refreshBadges,
 	renameConversation,
 	toggleStar,
 	archiveConversation,

@@ -16,9 +16,9 @@ set is `jarvis/tools/tool-names.json` (see the 3-way invariant below).
 
 Two tiers, one call mechanism:
 
-1. **Transport (TypeScript):** `jarvis-openclaw-plugin` exposes each tool to the
+1. **Transport (TypeScript):** The Jarvis agent plugin exposes each tool to the
    agent runtime - descriptors in `src/tool-defs.ts`, typed params in
-   `src/schemas.ts`, the contract list in `openclaw.plugin.json`. It calls back
+   `src/schemas.ts`, the contract list in the plugin manifest. It calls back
    to the bench over HTTP.
 2. **Execution (Python, in-process):** `jarvis.api.call_tool` is the whitelisted
    entry point. It authenticates the caller, resolves the user, runs
@@ -28,7 +28,7 @@ Two tiers, one call mechanism:
    boundary, not the tool code.
 
 A **3-way invariant** must hold for every change:
-`tool-defs.ts pythonNames == openclaw.plugin.json contracts == registry _TOOL_NAMES`.
+`tool-defs.ts pythonNames == plugin manifest contracts == registry _TOOL_NAMES`.
 
 It is no longer maintained by discipline. `jarvis/tools/tool-names.json` is the
 single artifact both repos test themselves against - generated from the registry
@@ -78,39 +78,61 @@ carries domain logic the schema doesn't express.
 
 ---
 
-## `run_method` - call a whitelisted server method
+## `run_method` - call a whitelisted method, controller method, or Server Script API
 
 The escape hatch for `@frappe.whitelist()` methods the dedicated tools don't wrap
-- most often ERPNext's `make_*` document mappers.
+(most often ERPNext's `make_*` document mappers), for whitelisted **controller
+methods** on a DocType, **and** for tenant-authored Server Script API endpoints.
 
 ```python
-run_method(method: str, args: dict | None = None)
+run_method(method: str, args: dict | None = None,
+           doctype: str | None = None, name: str | int | None = None)
 ```
 
-- `method` is a dotted path, e.g.
-  `erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice`.
-- **Only whitelisted methods run.** Non-whitelisted (or unresolvable) methods are
-  rejected with `PermissionDeniedError` / `InvalidArgumentError`. The method's own
-  permission checks still apply (it runs as the chat user).
-- Returns the method's return value verbatim (often a document dict).
+- `method` is dispatched **by shape**, not tried-and-fallen-back:
+  - with `doctype` set, `method` is a whitelisted **controller method** on that
+    DocType's class, run against the `(doctype, name)` document - the same
+    dispatch Desk uses for a doc action (`name` defaults to the doctype for a
+    Single);
+  - else a bare name registered as a **Server Script API** method (its
+    `api_method`) runs via the server-script executor - `args` reach it through
+    `frappe.form_dict`, exactly as the `/api/method` HTTP handler feeds them, and
+    its output (`frappe.flags` or `frappe.response['message']`) comes back as a dict;
+  - else a dotted path to a module-level `@frappe.whitelist()` method, e.g.
+    `erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice`, called
+    directly and returned verbatim (often a document dict).
+- Absent `doctype`, the server-script map is the source of truth for which kind a
+  name is; a whitelisted dotted path can never collide with a bare `api_method`.
+- **Only registered API server scripts / whitelisted methods run.** Non-whitelisted
+  or unresolvable names are rejected with `PermissionDeniedError` /
+  `InvalidArgumentError`. Each target's own permission checks still apply (it runs
+  as the chat user).
 
-**Example** - create a draft Sales Invoice from a Sales Order:
+**Examples** - a module mapper, and a controller method on a specific document:
 
 ```jsonc
-// tool args
+// module-level whitelisted method
 { "method": "erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice",
   "args": { "source_name": "SAL-ORD-2026-00042" } }
+// whitelisted controller method on one document
+{ "method": "set_status", "doctype": "Sales Order", "name": "SAL-ORD-2026-00042",
+  "args": { "status": "Closed" } }
 ```
 
-**Allowlist (recommended in production).** Set a site-config list of fnmatch
-patterns to narrow what may ever be called:
+**Blocklist.** `Jarvis Settings.run_method_blocklist` (comma/newline-separated
+fnmatch patterns) categorically refuses matching targets before dispatch - a
+whitelisted method's dotted path, a Server Script API method's name, or
+`<doctype>.<method>` for a controller method:
 
-```jsonc
-// site_config.json
-{ "jarvis_run_method_allowlist": ["erpnext.*.make_*", "frappe.client.*"] }
+```
+frappe.*
+*.delete_doc
+Sales Order.set_status
 ```
 
-When set, any method not matching a pattern is rejected even if it is whitelisted.
+A match raises `PermissionDeniedError`. An empty field blocks nothing (fail-open);
+every `run_method` call still parks for a human confirmation card regardless, so
+the blocklist is the "never even offer these" hardstop, not the only boundary.
 
 ## `get_schema` - live introspection (the backbone)
 
@@ -140,11 +162,10 @@ Returns the live schema, not a stored copy:
 ## `preview` - dry-run on writes
 
 The write tools (`create_doc`, `update_doc`, `submit_doc`, `cancel_doc`,
-`amend_doc`, `delete_doc`) and `run_method` accept `preview: true`. The operation
-runs through all DocType validations with **every DB write rolled back** -
-commits are neutralized for the duration and the work is undone via a savepoint,
-so even a tool (or a `run_method` target) that calls `frappe.db.commit()`
-internally cannot persist:
+`amend_doc`, `delete_doc`) accept `preview: true`. The operation runs through all
+DocType validations with **every DB write rolled back** - commits are neutralized
+for the duration and the work is undone via a savepoint, so even a tool that
+calls `frappe.db.commit()` internally cannot persist:
 
 ```jsonc
 // args
@@ -160,6 +181,12 @@ fetched/computed fields) - or the validation error it would hit - before they
 confirm. Preview runs are never audited (nothing is committed). **Caveat:** DB
 effects are sandboxed, but external side effects in `on_submit` / `on_cancel`
 (emails, webhooks) are not rolled back.
+
+`run_method` is **not** in this set: it is always gated, so `preview: true` is
+rejected (`InvalidArgumentError`). Call it directly and the bench parks a
+confirmation card built from a described-intent summary of the blast radius -
+there is no sandboxed dry-run for it, since its target's inline non-DB side
+effects could fire unconfirmed. See the `run_method` section above.
 
 ## Audit logging
 
@@ -199,8 +226,16 @@ Every **mutating** tool call is logged from the `_run_tool` choke-point
 5. Copy `jarvis/tools/tool-names.json` **verbatim** into the plugin repo at
    `contracts/tool-names.json` - same bytes, same `digest`. Its contract test
    then fails until you add the descriptor (`src/tool-defs.ts`), the typed schema
-   (`src/schemas.ts`) and the manifest contract (`openclaw.plugin.json`), and
+   (`src/schemas.ts`) and the plugin manifest contract, and
    rebuild `dist`. Nothing in CI can see both repos, so this copy is the one
    manual step - the plugin PR is where a stale copy surfaces.
 6. Add a row to `jarvis-persona/TOOLS.md`.
 7. Add tests under `jarvis/tests/` (happy path + validation + permission).
+
+## Workspace integration reference
+
+Exact upstream commands, configuration filenames, source citations and historical
+migration explanations are maintained outside this app checkout in the workspace
+file `docs/jarvis-runtime-integration-reference.md`. References to the workspace
+integration reference in source comments refer to that document. It is maintained
+with the workspace and is not included in the standalone app distribution.

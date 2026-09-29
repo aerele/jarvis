@@ -1,7 +1,9 @@
-"""Tests for jarvis.tools.run_method - whitelist-only dispatch, optional
-config allowlist, and input/permission errors. Runs against real Frappe
-(the whitelist gate is the security boundary; exercising it for real is
-more meaningful than mocking it)."""
+"""Tests for jarvis.tools.run_method - classify-and-dispatch between a
+whitelisted Python method (dotted path) and a Server Script API method
+(bare api_method name), plus the Jarvis Settings blocklist and input /
+permission errors. Runs against real Frappe (the whitelist gate and the
+server-script map are the real security boundary; exercising them for real
+is more meaningful than mocking them)."""
 
 from unittest.mock import patch
 
@@ -11,8 +13,91 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools.run_method import run_method
 
+# An API-type Server Script created once for the whole class. Its api_method
+# is a bare name (no dots), exactly what run_method must recognise as a
+# server script rather than a Python dotted path.
+_API_METHOD = "jarvis_test_say_my_name"
+_SCRIPT = "frappe.response['message'] = 'name is ' + (frappe.form_dict.get('who') or 'nobody')"
+
+# A second API script that returns via frappe.flags instead of frappe.response,
+# to cover run_method's flags-return branch.
+_FLAGS_METHOD = "jarvis_test_flags_out"
+_FLAGS_SCRIPT = "frappe.flags['result'] = 'via flags: ' + (frappe.form_dict.get('who') or 'nobody')"
+
+# A non-single doctype whose controller has a whitelisted method
+# (Report.toggle_disable) for the doc-bound dispatch path.
+_REPORT = "jarvis_test_report"
+
+
+def _set_blocklist(value: str) -> None:
+	# Write straight to the Single instead of doc.save(): saving Jarvis Settings
+	# fires its on_update control-plane sync, which raises AdminAuthError on a bench
+	# that isn't onboarded (e.g. CI's baked test site). set_single_value is how the
+	# rest of the suite sets Jarvis Settings fields in tests.
+	frappe.db.set_single_value("Jarvis Settings", "run_method_blocklist", value)
+	frappe.clear_document_cache("Jarvis Settings")
+
 
 class TestRunMethod(FrappeTestCase):
+	@staticmethod
+	def _ensure_api_script(name: str, script: str) -> None:
+		if not frappe.db.exists("Server Script", name):
+			frappe.get_doc(
+				{
+					"doctype": "Server Script",
+					"name": name,
+					"script_type": "API",
+					"api_method": name,
+					"allow_guest": 0,
+					"script": script,
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		# CI's baked test site does not enable server scripts (server_script_enabled
+		# in common_site_config). Frappe's own enable_safe_exec helper and
+		# enterClassContext are newer than Frappe v15, so patch the safe-exec gate
+		# directly - it works on v15 and v16 alike; addClassCleanup unpatches.
+		_safe_exec = patch("frappe.utils.safe_exec.is_safe_exec_enabled", return_value=True)
+		_safe_exec.start()
+		cls.addClassCleanup(_safe_exec.stop)
+		cls._ensure_api_script(_API_METHOD, _SCRIPT)
+		cls._ensure_api_script(_FLAGS_METHOD, _FLAGS_SCRIPT)
+		if not frappe.db.exists("Report", _REPORT):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": _REPORT,
+					"ref_doctype": "ToDo",
+					"report_type": "Report Builder",
+					"is_standard": "No",
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		for dt, name in (
+			("Server Script", _API_METHOD),
+			("Server Script", _FLAGS_METHOD),
+			("Report", _REPORT),
+		):
+			if frappe.db.exists(dt, name):
+				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		_set_blocklist("")
+
+	def tearDown(self):
+		_set_blocklist("")
+
+	# --- whitelisted Python method branch (unchanged behaviour) ---
+
 	def test_calls_whitelisted_method(self):
 		self.assertEqual(run_method("frappe.ping"), "pong")
 
@@ -23,9 +108,15 @@ class TestRunMethod(FrappeTestCase):
 		with self.assertRaises(PermissionDeniedError):
 			run_method("frappe.delete_doc", {"doctype": "ToDo", "name": "x"})
 
-	def test_unknown_method_raises(self):
+	def test_unknown_dotted_method_raises(self):
 		with self.assertRaises(InvalidArgumentError):
 			run_method("nope.not.a.real.method")
+
+	def test_unknown_bare_name_raises(self):
+		# A bare name that is neither a server-script api_method nor an
+		# importable attribute is still an unknown method.
+		with self.assertRaises(InvalidArgumentError):
+			run_method("definitely_not_a_server_script_or_method")
 
 	def test_blank_method_raises(self):
 		with self.assertRaises(InvalidArgumentError):
@@ -35,22 +126,86 @@ class TestRunMethod(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			run_method("frappe.ping", args="not-a-dict")
 
-	def test_allowlist_blocks_unmatched_method(self):
-		with patch.dict(frappe.local.conf, {"jarvis_run_method_allowlist": ["erpnext.*"]}):
-			with self.assertRaises(PermissionDeniedError):
-				run_method("frappe.ping")  # whitelisted, but not in the allowlist
-
-	def test_allowlist_permits_matched_method(self):
-		with patch.dict(frappe.local.conf, {"jarvis_run_method_allowlist": ["frappe.*"]}):
-			self.assertEqual(run_method("frappe.ping"), "pong")
-
-	def test_empty_allowlist_blocks_everything(self):
-		# [] is "block all", not "no restriction" (the falsy-empty pitfall).
-		with patch.dict(frappe.local.conf, {"jarvis_run_method_allowlist": []}):
-			with self.assertRaises(PermissionDeniedError):
-				run_method("frappe.ping")
-
 	def test_unknown_arg_is_rejected(self):
 		# A mistyped/extra arg must error, not be silently dropped by frappe.call.
 		with self.assertRaises(InvalidArgumentError):
 			run_method("frappe.ping", {"bogus_arg": 1})
+
+	# --- Server Script API branch (classified via the server-script map) ---
+
+	def test_calls_server_script_api(self):
+		self.assertEqual(run_method(_API_METHOD), {"message": "name is nobody"})
+
+	def test_server_script_receives_args(self):
+		# args are injected into frappe.form_dict, which the script reads.
+		self.assertEqual(run_method(_API_METHOD, {"who": "navin"}), {"message": "name is navin"})
+
+	def test_server_script_returns_flags(self):
+		# Covers the flags-return branch: a script that sets frappe.flags rather
+		# than frappe.response['message'].
+		self.assertEqual(run_method(_FLAGS_METHOD, {"who": "navin"}), {"result": "via flags: navin"})
+
+	def test_form_dict_restored_after_server_script(self):
+		frappe.local.form_dict = frappe._dict({"sentinel": "keep"})
+		try:
+			run_method(_API_METHOD, {"who": "x"})
+			self.assertEqual(frappe.local.form_dict.get("sentinel"), "keep")
+			self.assertNotIn("who", frappe.local.form_dict)
+		finally:
+			frappe.local.form_dict = frappe._dict({})
+
+	# --- doc-bound whitelisted controller method (doctype + name) ---
+
+	def test_calls_doc_method_with_args_and_name(self):
+		# Report.toggle_disable(disable) is a @frappe.whitelist() controller
+		# method; dispatch it against a specific document, passing args.
+		self.assertEqual(frappe.db.get_value("Report", _REPORT, "disabled"), 0)
+		run_method("toggle_disable", args={"disable": 1}, doctype="Report", name=_REPORT)
+		self.assertEqual(frappe.db.get_value("Report", _REPORT, "disabled"), 1)
+
+	def test_doc_method_unknown_method_raises(self):
+		with self.assertRaises(InvalidArgumentError):
+			run_method("no_such_controller_method", doctype="Report", name=_REPORT)
+
+	def test_doc_method_not_whitelisted_raises(self):
+		# `validate` exists on the controller but is NOT @frappe.whitelist()'d.
+		with self.assertRaises(PermissionDeniedError):
+			run_method("validate", doctype="Report", name=_REPORT)
+
+	def test_blocklist_blocks_doc_method_by_composed_name(self):
+		_set_blocklist("Report.toggle_disable")
+		with self.assertRaises(PermissionDeniedError):
+			run_method("toggle_disable", args={"disable": 1}, doctype="Report", name=_REPORT)
+
+	def test_blocklist_blocks_doc_method_by_wildcard(self):
+		# The blocklist target for a doc method is `<doctype>.<method>`, so
+		# `*.toggle_disable` blocks it on every doctype.
+		_set_blocklist("*.toggle_disable")
+		with self.assertRaises(PermissionDeniedError):
+			run_method("toggle_disable", args={"disable": 1}, doctype="Report", name=_REPORT)
+
+	# --- blocklist (Jarvis Settings.run_method_blocklist), fnmatch, fail-open ---
+
+	def test_blocklist_blocks_python_method(self):
+		_set_blocklist("frappe.*")
+		with self.assertRaises(PermissionDeniedError):
+			run_method("frappe.ping")
+
+	def test_blocklist_blocks_server_script(self):
+		_set_blocklist(_API_METHOD)
+		with self.assertRaises(PermissionDeniedError):
+			run_method(_API_METHOD)
+
+	def test_blocklist_fnmatch_wildcard_matches(self):
+		_set_blocklist("*ping")
+		with self.assertRaises(PermissionDeniedError):
+			run_method("frappe.ping")
+
+	def test_blocklist_unmatched_pattern_allows(self):
+		_set_blocklist("erpnext.*\n*.delete_doc")
+		self.assertEqual(run_method("frappe.ping"), "pong")
+
+	def test_empty_blocklist_blocks_nothing(self):
+		# Fail-open: an empty blocklist blocks nothing.
+		_set_blocklist("")
+		self.assertEqual(run_method("frappe.ping"), "pong")

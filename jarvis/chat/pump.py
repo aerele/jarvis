@@ -77,6 +77,7 @@ import frappe
 
 from jarvis import compat
 from jarvis.chat import turn_state as ts
+from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
 
@@ -660,6 +661,44 @@ def _lease_mirror_key(target: str) -> str:
 	return f"jarvis:pump:lease:{target}"
 
 
+# --------------------------------------------------------------------------- #
+# Live step text (jarvis.chat.steps) kept across a hop
+# --------------------------------------------------------------------------- #
+
+# A run's recorded step text lives on its relay lane, which a hop rebuilds, so
+# the pump keeps a copy for _reattach_lane to re-seed. Best-effort: a lost copy
+# only means the saved reply keeps its step text, exactly as before this feature.
+# Reads pass expires=True: on Frappe v15 a plain read keeps a local copy (even of
+# "nothing") that a later TTL write does not refresh, so the second step of a
+# turn would overwrite the first.
+RUN_STEPS_TTL_S = 3600
+
+
+def _run_steps_key(run_id: str) -> str:
+	return f"jarvis:pump:steps:{run_id}"
+
+
+def _append_run_step(run_id: str, raw: str) -> None:
+	try:
+		cache = frappe.cache()
+		steps = cache.get_value(_run_steps_key(run_id), expires=True) or []
+		cache.set_value(_run_steps_key(run_id), [*steps, raw], expires_in_sec=RUN_STEPS_TTL_S)
+	except Exception:
+		pass
+
+
+def _read_run_steps(run_id: str) -> list[str]:
+	# The cache appends every offered step, including each growing resend of
+	# one preamble; collapse them so a hop re-seed or a reload strips whole
+	# steps, never a stale prefix (jarvis.chat.steps.collapse_steps).
+	from jarvis.chat.steps import collapse_steps
+
+	try:
+		return collapse_steps(list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or []))
+	except Exception:
+		return []
+
+
 def _write_lease_mirror(target: str) -> None:
 	try:
 		frappe.cache().set_value(_lease_mirror_key(target), "1", expires_in_sec=LEASE_MIRROR_TTL_S)
@@ -1160,6 +1199,9 @@ def _default_apply_tool(ctx: "PumpContext", rs: "_RunState", event: dict) -> Non
 		# exception propagates, so quarantine/recovery starts from a FRESH transaction.
 		try:
 			rs.version += 1
+			from jarvis.chat.tool_ownership import record_tool_owner
+
+			record_tool_owner(conversation, rs.assistant_message, tool_call_id)
 			if owns_row:
 				if phase == "start":
 					message_id = _insert_tool_start_row(conversation, tool_call_id, tool_name)
@@ -1239,6 +1281,7 @@ def _insert_tool_start_row(conversation: str, tool_call_id: str, tool_name: str 
 		}
 	)
 	doc.flags.ignore_permissions = True
+	doc.flags.jarvis_server_write = True
 	doc.insert()
 	return doc.name
 
@@ -1443,8 +1486,21 @@ class _RunState:
 	pending_seq: int | None = None
 	pending_text: str = ""
 	pending_delta: str = ""
+	# What the chat displays for ``pending_text`` (step text removed, see
+	# jarvis.chat.steps); None = same as ``pending_text``. Only the publish uses
+	# it: the stored mirror always keeps the raw text.
+	pending_shown: str | None = None
 	events_since_flush: int = 0
 	last_flush_mono: float = 0.0
+	# --- agent-yield continuation wait (image/video/music tools' unconditional
+	# background-detach abort) --------------------------------------------------- #
+	# Non-None while this run is parked awaiting the deferred tool's follow-up
+	# chat final on the same session_key (see on_terminal / _yield_wait_sweep).
+	# ``yield_payload`` is the ORIGINAL empty-aborted terminal payload, stashed so
+	# a timeout settles EXACTLY as if no yield had been detected (today's error
+	# path, just delayed).
+	yield_deadline: float | None = None
+	yield_payload: dict | None = None
 
 
 @dataclass
@@ -1654,6 +1710,17 @@ def run_pump_hop(
 		except Exception:
 			pass
 		ts.reset_lock_tracking()
+		# Mux telemetry (RelayMux.stats(), read after mux.stop() above - the
+		# counters are plain ints, safe to read post-stop). reader_errors is the
+		# #1449-regression counter: a reader-thread routing bug on a known lane
+		# should never happen and must be visible in the hop line, not only
+		# discoverable via a live probe.
+		mux_stats: dict = {}
+		if ctx.mux is not None:
+			try:
+				mux_stats = ctx.mux.stats()
+			except Exception:
+				mux_stats = {}
 		# C4 pump occupancy + hop_duration_ms (replaces the obsolete worker_hold in
 		# pump mode: a hop is a shared drain, not a held worker-per-turn).
 		_telemetry(
@@ -1664,6 +1731,10 @@ def run_pump_hop(
 			exit=outcome,
 			occupancy=ctx.peak_occupancy,
 			duration_ms=round((_monotonic() - hop_started_mono) * 1000.0, 1),
+			reader_errors=mux_stats.get("reader_errors", 0),
+			stray_frames=mux_stats.get("stray_frames", 0),
+			deltas_dropped=mux_stats.get("deltas_dropped", 0),
+			lanes_quarantined=mux_stats.get("lanes_quarantined", 0),
 		)
 	return {"acquired": True, "exit": outcome, "epoch": epoch}
 
@@ -1689,6 +1760,9 @@ def drain_slice(ctx: PumpContext) -> str:
 	  5. propagate a lease loss signalled from a lane callback;
 	  6. cancel-requested sweep (out-of-band ``chat.abort`` then the aborted
 	     terminal + settle);
+	  6b. agent-yield continuation-wait sweep (expire runs past
+	      YIELD_CONTINUATION_WAIT_S with no follow-up run on the session_key —
+	      settle exactly as the original yield would have, just delayed);
 	  7. heartbeat + lease renew (0 rows ⇒ lease-loss exit);
 	  8. idle-exit conditional release (0 rows ⇒ CONTINUE, OAR-12).
 
@@ -1726,6 +1800,7 @@ def drain_slice(ctx: PumpContext) -> str:
 		return "transport_closed"
 
 	_cancel_sweep(ctx)
+	_yield_wait_sweep(ctx)  # OAR-image-defer: expire runs past YIELD_CONTINUATION_WAIT_S
 
 	# GAP 3 A2: progress = the slice did real drain work (promoted / dispatched a turn
 	# or applied a mux frame) OR the pump is correctly capacity-blocked (fail-closed:
@@ -2168,6 +2243,14 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 			except Exception:
 				pass
 		frappe.db.commit()
+		# jarvis#1425 review (live e2e2, 2026-09-27): a definite pre-ack
+		# rejection moves the Turn out of dispatching (ts.dispatch_errored
+		# above) without going through invoke_settlement or turn_handler -
+		# poke directly, right after this terminal's own commit.
+		from jarvis.chat import llm_switch
+
+		llm_switch.apply_if_active(source="pump._handle_ack_failure")
+		_seal_file_box_sheet(rs.conversation, run_id)
 		if rs.owner:
 			# SUX-11: a definite pre-ack rejection is a real error — publish run:error
 			# with today's classification code + message_id (not a bare run:end).
@@ -2213,6 +2296,7 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	if rs.pending_seq is None:
 		return
 	seq, text, delta = rs.pending_seq, rs.pending_text, rs.pending_delta
+	shown = text if rs.pending_shown is None else rs.pending_shown
 	rs.pending_seq = None
 	rs.pending_delta = ""
 	rs.events_since_flush = 0
@@ -2233,7 +2317,8 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 			# already consumes — it renders on `assistant:delta` with {message_id,
 			# text} (cumulative mirror). publish_fenced adds (turn_id, event_seq) so
 			# the client dedupes a replayed frame. `delta` is the accumulated
-			# incremental fragment since the last flush.
+			# incremental fragment since the last flush. The stored mirror above is
+			# the raw text; the chat is sent `shown` (step text removed).
 			ts.publish_fenced(
 				rs.owner,
 				"assistant:delta",
@@ -2241,7 +2326,7 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 				run_id=rs.run_id,
 				event_seq=seq,
 				message_id=rs.assistant_message,
-				text=text,
+				text=shown,
 				delta=delta,
 				pump_epoch=ctx.epoch,
 				relay_target_id=ctx.relay_target_id,
@@ -2267,6 +2352,114 @@ def _flush_all_pending(ctx: PumpContext) -> None:
 			frappe.log_error(title="pump.flush_pending", message=frappe.get_traceback())
 
 
+# A yielded run's in-memory ``rs.yield_deadline``/``rs.yield_payload`` live only
+# in THIS hop's process and do not survive a hop handoff/takeover (D6 §10.4 hops
+# rotate well inside YIELD_CONTINUATION_WAIT_S). This Redis marker is the
+# cross-hop signal: a new hop's reconcile (``_reattach_or_recover``) checks it
+# before doing its normal missed-terminal snapshot recovery, which would
+# otherwise race ahead and error the turn out the instant the gateway shows no
+# active run - exactly the state right after the yield, before the deferred
+# tool has posted its follow-up. TTL comfortably outlives the wait itself.
+_YIELD_PENDING_PREFIX = "jarvis_pump_yield_pending::"
+_YIELD_PENDING_TTL_S = YIELD_CONTINUATION_WAIT_S + 60
+
+
+def _mark_yield_pending(run_id: str) -> None:
+	try:
+		frappe.cache().set_value(_YIELD_PENDING_PREFIX + run_id, "1", expires_in_sec=_YIELD_PENDING_TTL_S)
+	except Exception:
+		pass  # best-effort - worst case a takeover mid-wait recovers a beat too eagerly
+
+
+def _clear_yield_pending(run_id: str) -> None:
+	try:
+		frappe.cache().delete_value(_YIELD_PENDING_PREFIX + run_id)
+	except Exception:
+		pass
+
+
+def _yield_pending(run_id: str) -> bool:
+	try:
+		return bool(frappe.cache().get_value(_YIELD_PENDING_PREFIX + run_id))
+	except Exception:
+		return False
+
+
+def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
+	"""True for an aborted terminal that is NOT a user Stop: empty/whitespace
+	text (a real partial-content abort still errors normally) AND the Turn row's
+	``cancel_requested`` is unset (the pump's OWN authoritative stop signal -
+	``_cancel_sweep`` is the only thing that drives a genuine user-stop aborted
+	terminal, and it always sets this first). A stale read here is safe either
+	way: if the flag flips to 1 immediately after, the yield-wait is entered but
+	the very next ``_cancel_sweep`` tick finds the Turn still `streaming` with
+	`cancel_requested=1` and settles it cancelled anyway (see on_terminal) - one
+	slice of latency, never a lost stop."""
+	if kind != "relay:error" or payload.get("state") != "aborted":
+		return False
+	if (payload.get("text") or "").strip():
+		return False
+	return not bool(frappe.db.get_value(TURN, run_id, "cancel_requested"))
+
+
+def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> None:
+	"""The CAS + settlement invocation ``on_terminal`` runs for an ordinary
+	terminal, factored out so ``_yield_wait_sweep`` can replay it VERBATIM for a
+	timed-out agent-yield wait (today's error path, just delayed - see
+	``_is_unprompted_yield``). Raises ``ts.LeaseLostExit`` on a lost epoch; the
+	caller converts that to ``ctx.lease_lost``.
+
+	ANY settlement (an ordinary terminal, the adopted continuation's own
+	terminal, or the sweep's timeout replay) ends a yield-wait if one was in
+	progress - clear it here, once, so a later ``_yield_wait_sweep`` tick can
+	never see stale fields and re-settle an already-settled turn."""
+	rs.yield_deadline = None
+	rs.yield_payload = None
+	_clear_yield_pending(rs.run_id)
+	won = ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload)
+	if not won:
+		if _epoch_lost(ctx, rs.run_id):
+			ts.lease_lost_exit(rs.run_id)
+		return
+	rs.version += 1
+	frappe.db.commit()
+	ctx.deps.invoke_settlement(
+		rs.run_id,
+		relay_target_id=ctx.relay_target_id,
+		epoch=ctx.epoch,
+		version=rs.version,
+		terminal_kind=kind,
+		terminal_payload=payload,
+		assistant_message=rs.assistant_message,
+		owner=rs.owner,
+		conversation=rs.conversation,
+		deps=ctx.deps,
+	)
+
+
+def _yield_wait_sweep(ctx: PumpContext) -> None:
+	"""Expire runs whose agent-yield continuation-wait (``on_terminal`` /
+	``_is_unprompted_yield``) has outrun ``YIELD_CONTINUATION_WAIT_S`` with
+	nothing landing on the session_key. Settles EXACTLY as ``on_terminal`` would
+	have at the original yield - today's error path, just delayed. Called every
+	slice, right after ``_cancel_sweep`` (a Stop mid-wait needs no handling
+	here - see on_terminal's comment)."""
+	now = _monotonic()
+	for rs in list(ctx.runs.values()):
+		if rs.yield_deadline is None or now < rs.yield_deadline:
+			continue
+		payload = rs.yield_payload  # captured BEFORE _settle_terminal clears it
+		if ctx.mux is not None:
+			# By session_key, never a runId: _route_event may already have
+			# adopted the continuation onto a fresh id by now.
+			ctx.mux.release_continuation(rs.session_key)
+		try:
+			_settle_terminal(ctx, rs, "relay:error", payload)
+		except ts.LeaseLostExit:
+			ctx.lease_lost = rs.run_id
+			return
+
+
 def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	"""Build the per-turn lane callbacks (they run ON THE PUMP THREAD inside
 	``mux.dispatch``). A ``LeaseLostExit`` raised inside a callback is CAUGHT and
@@ -2276,7 +2469,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 	integrity class (LOSSY delta -> drop+count+continue; PRECIOUS tool/terminal ->
 	quarantine)."""
 
-	def on_delta(event_seq: int, text: str, delta: str) -> None:
+	def on_delta(event_seq: int, text: str, delta: str, shown: str | None = None) -> None:
 		# OARF-6: BATCH the cumulative mirror (relocated _AssistantContentBatcher).
 		# Record the latest cumulative text + accumulate the incremental delta, then
 		# flush (one apply_delta CAS + commit + publish for the whole batch) only
@@ -2284,11 +2477,14 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		# always flushes immediately (first-token latency, C1). agent already
 		# coalesces at ~150ms, so this is bench-side de-duplication of commits+
 		# publishes, not a change to what the user eventually sees (cumulative).
+		# ``shown`` (step text removed) is what the flush publishes; the mirror
+		# keeps ``text``.
 		if ctx.lease_lost:
 			return
 		try:
 			rs.pending_seq = event_seq
 			rs.pending_text = text
+			rs.pending_shown = shown
 			rs.pending_delta = (rs.pending_delta + delta) if rs.pending_delta else delta
 			rs.events_since_flush += 1
 			if rs.events_since_flush >= _DELTA_BATCH_SIZE or (
@@ -2337,6 +2533,38 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 				relay_target_id=ctx.relay_target_id,
 			)
 
+	def on_step(event_seq: int, text: str, raw: str | None = None) -> None:
+		# The live step line (jarvis.chat.steps). LOSSY like on_status: published,
+		# never stored on the message, and a newer step replaces it on screen.
+		# ``raw`` (step text that is also in the reply) is kept for a hop re-attach.
+		if ctx.lease_lost:
+			return
+		try:
+			_flush_deltas(ctx, rs)
+		except ts.LeaseLostExit:
+			ctx.lease_lost = rs.run_id
+			return
+		# T2 (live-turn-steps): cache every step, not only ``raw`` ones, so a
+		# reload (jarvis.chat.api.get_conversation) can rebuild the live step
+		# list in direct/harness mode too, where a preamble never rides the
+		# reply text and ``raw`` is always None. ``remove_steps``/``strip_steps``
+		# both skip a cached entry that is not found in the text they are
+		# given (the harness case, by design), so caching the display-shaped
+		# ``text`` here is harmless for those callers.
+		_append_run_step(rs.run_id, raw or text)
+		if rs.owner:
+			ts.publish_fenced(
+				rs.owner,
+				"run:step",
+				conversation_id=rs.conversation,
+				run_id=rs.run_id,
+				event_seq=event_seq,
+				message_id=rs.assistant_message,
+				text=text,
+				pump_epoch=ctx.epoch,
+				relay_target_id=ctx.relay_target_id,
+			)
+
 	def on_terminal(kind: str, payload: dict) -> None:
 		if ctx.lease_lost:
 			return
@@ -2344,25 +2572,23 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			# Flush the last batched cumulative mirror before the terminal so the
 			# Message row holds the full streamed text if settlement carries no final.
 			_flush_deltas(ctx, rs)
-			won = ts.mark_terminal_observed(rs.run_id, rs.version, ctx.epoch, kind, payload)
-			if not won:
-				if _epoch_lost(ctx, rs.run_id):
-					ts.lease_lost_exit(rs.run_id)
-				return
-			rs.version += 1
-			frappe.db.commit()
-			ctx.deps.invoke_settlement(
-				rs.run_id,
-				relay_target_id=ctx.relay_target_id,
-				epoch=ctx.epoch,
-				version=rs.version,
-				terminal_kind=kind,
-				terminal_payload=payload,
-				assistant_message=rs.assistant_message,
-				owner=rs.owner,
-				conversation=rs.conversation,
-				deps=ctx.deps,
-			)
+			if _is_unprompted_yield(rs.run_id, kind, payload):
+				# the agent runtime's image/video/music tools unconditionally detach into a
+				# background task and abort THIS run with an empty terminal - and
+				# nobody asked to stop. Park (mux-side, session_key-keyed) instead
+				# of settling: the deferred tool's follow-up run lands on the SAME
+				# session_key under a fresh runId within YIELD_CONTINUATION_WAIT_S
+				# (_yield_wait_sweep enforces the bound; a Stop mid-wait is caught
+				# for free by the next _cancel_sweep - the Turn row is left
+				# `state='streaming'`, exactly like any other in-flight cancel).
+				if ctx.mux is not None and ctx.mux.await_continuation(rs.gateway_run_id or rs.run_id):
+					rs.yield_payload = payload
+					rs.yield_deadline = _monotonic() + YIELD_CONTINUATION_WAIT_S
+					_mark_yield_pending(rs.run_id)  # survives a hop handoff mid-wait
+					return
+				# No mux / lane already gone (e.g. a takeover retired it) - fall
+				# through and settle exactly as if no yield had been detected.
+			_settle_terminal(ctx, rs, kind, payload)
 		except ts.LeaseLostExit:
 			ctx.lease_lost = rs.run_id
 
@@ -2391,6 +2617,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		on_quarantine=on_quarantine,
 		on_closing=on_closing,
 		on_status=on_status,
+		on_step=on_step,
 	)
 
 
@@ -2417,6 +2644,7 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 	for r in rows:
 		run_id = r["run_id"]
 		rs = ctx.runs.get(run_id)
+		awaiting_continuation = bool(rs and rs.yield_deadline is not None)
 		session_key = (
 			rs.session_key if rs else _load_dispatch(_read_dispatch_row(run_id) or {}).get("session_key", "")
 		)
@@ -2424,10 +2652,17 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 		# its ack — the abort result is never consulted (the terminal frame arrives
 		# regardless and the mux cancels the future on stop), so a per-abort .result()
 		# wait would only stall the reactor. We record the aborted terminal from the
-		# row + settle below, independent of the abort ack.
+		# row + settle below, independent of the abort ack. A yielded run's
+		# ``gateway_run_id`` is the ORIGINAL run the agent runtime already retired (that is
+		# why we are here waiting) - target the abort at the session's current run
+		# instead of a dead id.
 		try:
 			if ctx.mux is not None and session_key:
-				ctx.mux.abort(session_key, r.get("gateway_run_id"), timeout_s=ACK_TIMEOUT_S)
+				ctx.mux.abort(
+					session_key,
+					None if awaiting_continuation else r.get("gateway_run_id"),
+					timeout_s=ACK_TIMEOUT_S,
+				)
 		except Exception:
 			pass
 		if not ts.record_aborted_terminal(run_id, r["state"], int(r["version"]), ctx.epoch):
@@ -2435,6 +2670,18 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 				ts.lease_lost_exit(run_id)
 			continue
 		frappe.db.commit()
+		if awaiting_continuation:
+			# The Stop won the race against the deferred tool's continuation -
+			# release the mux's parked (or already-adopted-but-not-yet-terminaled)
+			# lane by session_key, never a runId (adoption may already have moved
+			# it onto a fresh one) - so a LATE continuation frame is a harmless
+			# stray instead of leaking the live lane or adopting into an
+			# already-settled row.
+			rs.yield_deadline = None
+			rs.yield_payload = None
+			_clear_yield_pending(run_id)
+			if ctx.mux is not None:
+				ctx.mux.release_continuation(session_key)
 		owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 		try:
 			ctx.deps.invoke_settlement(
@@ -2589,7 +2836,21 @@ def _reattach_or_recover(ctx: PumpContext, r: dict, active_keys) -> None:
 	from a session-wide tail (which could hold a PRIOR turn's answer). OARF-5: the
 	recovery tail RPC is ISSUED non-blocking and resolved by ``_poll_recoveries``,
 	so a crash-reconcile of N gone turns does not serialize N×15s of blocking waits
-	off the delta-draining critical path."""
+	off the delta-draining critical path.
+
+	A turn a prior hop parked mid agent-yield-wait (``_YIELD_PENDING_PREFIX``
+	marker, since ``rs.yield_deadline`` is hop-local and does not survive a
+	takeover) is handed to the SAME durable ``recovering`` route the kill-switch
+	halt uses INSTEAD of the checks below: the gateway routinely shows the
+	session with no active run right after the yield (the foreground run was
+	already aborted) even though the deferred tool is still generating, so the
+	missed-terminal snapshot recovery below would find an empty transcript
+	window and error the turn out immediately, discarding the reply. Parking
+	lets ``turn_recovery``'s cron poll the transcript properly (its own longer
+	ceiling), with the media_rels wiring already threaded through it."""
+	if _yield_pending(r["run_id"]):
+		_park_recovering(ctx, r["run_id"], reason="agent-yield")
+		return
 	if r.get("state") == "streaming" and active_keys is not None and int(r.get("last_event_seq") or 0) > 0:
 		session_key = _load_dispatch(_read_dispatch_row(r["run_id"]) or {}).get("session_key")
 		if session_key and session_key not in active_keys:
@@ -2680,26 +2941,38 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	from jarvis.chat.turn_recovery import _latest_assistant_raw
 
 	raw = _latest_assistant_raw(messages, min_seq=pr.min_seq, max_seq=pr.max_seq)
-	text, _rels, marker_stripped = egress_rules.redact_final_with_media(raw)
+	text, rels, marker_stripped = egress_rules.redact_final_with_media(raw)
 	# A media/marker-only reply strips to "" but IS real in-window output — settle
 	# final with the clean (empty) text so the raw marker never lingers in stored
 	# content, rather than erroring and leaving the streamed tail. Parity with cron
 	# _recover_one. An empty window with no marker still errors honestly (Amendment D).
+	# ``rels`` rides through so a recovered deferred image-gen reply still seeds
+	# its image, not just the text (previously dropped here).
 	if text or marker_stripped:
-		_settle_recovered_final(ctx, pr.r, text, marker_stripped=marker_stripped)
+		_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
 	else:
 		_settle_recovered_errored(ctx, pr.r)
 
 
-def _settle_recovered_final(ctx: PumpContext, r: dict, text: str, *, marker_stripped: bool = False) -> None:
+def _settle_recovered_final(
+	ctx: PumpContext,
+	r: dict,
+	text: str,
+	*,
+	media_rels: list[str] | None = None,
+	marker_stripped: bool = False,
+) -> None:
 	"""Genuine missed-terminal recovery: advance streaming->terminal_observed under
 	this epoch with the in-window durable text, mark ``was_recovered`` (SUX-6 — the
 	client may do a visible replacement), and settle to final. ``marker_stripped``
 	rides the payload so settlement forces the content overwrite on a marker-only
-	reply (empty text) instead of keeping the raw streamed tail."""
+	reply (empty text) instead of keeping the raw streamed tail. ``media_rels``
+	rides it too so ``finalize._effect_rich_outputs`` seeds the image."""
 	run_id = r["run_id"]
 	v = int(r["version"])
 	payload = {"text": text}
+	if media_rels:
+		payload["media_rels"] = media_rels
 	if marker_stripped:
 		payload["marker_stripped"] = True
 	if not ts.mark_terminal_observed(run_id, v, ctx.epoch, "relay:final", payload):
@@ -2788,6 +3061,7 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 			session_key=rs.session_key,
 			start_seq=int(r.get("last_event_seq") or 0),
 			is_readopt=True,
+			steps=_read_run_steps(run_id),
 		)
 
 
@@ -2861,6 +3135,12 @@ def _mark_recovering_mirror(
 			pump_epoch=pump_epoch,
 			relay_target_id=relay_target_id,
 		)
+	# jarvis#1425 review (scoped re-review, 2026-09-27): recovering is NOT an
+	# in-flight state (admission._INFLIGHT_STATES) - a park here frees up
+	# capacity for a held switch exactly like a terminal write does.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump._mark_recovering_mirror")
 	return True
 
 
@@ -2883,6 +3163,7 @@ def _settle_recover_errored(
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
 	frappe.db.commit()
+	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:
 		try:
 			ts._run_cas(
@@ -2903,7 +3184,21 @@ def _settle_recover_errored(
 			error=err,
 			code=_classify_error(err),
 		)
+	# jarvis#1425 review (live e2e2, 2026-09-27): this path settles WITHOUT
+	# going through invoke_settlement (settlement.py's own poke does not cover
+	# it) - poke directly, right after this terminal's own commit(s) above.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump._settle_recover_errored")
 	return True
+
+
+def _seal_file_box_sheet(conversation: str | None, run_id: str) -> None:
+	"""An errored edge that bypasses settlement (so no finalize seal): seal the File
+	Box sheet this turn collected. Best-effort, never raises."""
+	from jarvis.chat import held_sheet_seal
+
+	held_sheet_seal.after_turn(conversation, run_id)
 
 
 def _park_recovering(ctx: PumpContext, run_id: str, *, reason: str) -> None:
@@ -3247,6 +3542,13 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 	# GAP 1 (Track B): record that the recovery machinery ran to completion, for the
 	# bench heartbeat's watchdog_last_completed_age signal.
 	frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+	# jarvis#1425 review (scoped re-review, 2026-09-27): this sweep moves turns out
+	# of every in-flight state (mark_recovering, cancel_queued_max_age,
+	# recover_to_queued, _settle_recover_errored - all inside _watchdog_shard) -
+	# one poke at the end covers the whole cycle instead of one per transition.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump.watchdog")
 	return summary
 
 

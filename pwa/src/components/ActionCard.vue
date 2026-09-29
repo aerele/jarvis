@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import * as api from "../api";
 import { agentName } from "@/branding";
+import { cardTableRemovals, cardTableSummary, cardTableValues } from "../lib/cardTables";
 
 // The agent proposes a document; a human applies it.
 //
@@ -22,6 +23,8 @@ const emit = defineEmits(["applied", "dismissed"]);
 const state = ref("review"); // review | busy | done
 const error = ref("");
 const applied = ref(null);
+// A File Box chat's Confirm goes to the Approval Board: the server says what happened.
+const note = ref("");
 
 const isEmail = computed(() => props.action.kind === "email");
 const verb = computed(() => String(props.action.verb || "").toLowerCase());
@@ -32,13 +35,17 @@ const heading = computed(
 		`${verb.value === "create" ? "Create" : "Update"} ${props.action.doctype || "record"}`
 );
 
-// No `tables` escape here, unlike the desktop: this card neither renders nor
-// applies child tables, so a block with no `fields` has nothing to show.
+// Child tables show as one summary line each (cardTableSummary), and the proposed
+// rows are applied as-is (cardTableValues): the server edits named rows in place and
+// refuses a nameless table on a document that already has rows. An update that
+// would delete saved rows is refused here (cardTableRemovals): the phone cannot
+// show which rows those are, so it never removes them (CR-3).
+const tableLines = computed(() => cardTableSummary(props.action));
 const invalid = computed(() => {
 	if (!isWrite.value) return "";
 	if (Array.isArray(props.action.docs))
 		return `This draft carries a \`docs\` batch, which is a create_doc payload rather than a card. Ask ${agentName} to apply them as a batch.`;
-	if (verb.value === "create" && !(props.action.fields || []).length)
+	if (verb.value === "create" && !(props.action.fields || []).length && !tableLines.value.length)
 		return "This draft has no fields to show.";
 	return "";
 });
@@ -71,6 +78,24 @@ async function apply() {
 			if (fieldname) values[fieldname] = f.value;
 			else unmapped.push(f.label);
 		}
+		try {
+			Object.assign(values, cardTableValues(props.action, meta));
+		} catch (e) {
+			error.value = `Not applying: ${e.message}. Ask ${agentName} to correct it.`;
+			state.value = "review";
+			return;
+		}
+		if (verb.value === "update" && (props.action.tables || []).length) {
+			const saved = await api.loadDoc(props.action.doctype, props.action.name || "");
+			const lost = cardTableRemovals(props.action, saved?.tables);
+			if (lost.length) {
+				error.value = `Not applying: this would remove ${lost.join(
+					" and "
+				)}, which this card can't show. Ask ${agentName} to keep those rows, or remove them on the desktop, where the card lists them.`;
+				state.value = "review";
+				return;
+			}
+		}
 		if (!Object.keys(values).length) {
 			error.value = "Couldn't match any of these fields on that document type.";
 			state.value = "review";
@@ -94,6 +119,7 @@ async function apply() {
 			submit: props.action.submit ? 1 : 0,
 			conversation: props.conversation,
 			continue: props.action.continue ? 1 : 0,
+			card: props.action,
 		});
 		if (r?.ok === false) {
 			error.value = r.error?.message || r.reason || "Couldn't save that.";
@@ -101,6 +127,7 @@ async function apply() {
 			return;
 		}
 		applied.value = r?.data?.name || r?.name || "";
+		note.value = r?.note || "";
 		state.value = "done";
 		emit("applied", applied.value);
 	} catch (e) {
@@ -176,6 +203,10 @@ async function copyBody() {
 				<span>{{ f.label }}</span>
 				<strong>{{ f.value || "—" }}</strong>
 			</div>
+			<div v-for="t in tableLines" :key="`t-${t.label}`" class="jv-field">
+				<span>{{ t.label }}</span>
+				<strong>{{ t.value }}</strong>
+			</div>
 		</div>
 
 		<div v-if="invalid || error" class="jv-action-err">{{ invalid || error }}</div>
@@ -193,7 +224,10 @@ async function copyBody() {
 			>
 				<path d="M20 6 9 17l-5-5" />
 			</svg>
-			{{ verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
+			<template v-if="note">{{ note }}</template>
+			<template v-else>
+				{{ verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
+			</template>
 		</div>
 
 		<div v-else class="jv-action-foot">

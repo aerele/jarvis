@@ -9,6 +9,12 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import turn_handler
 from jarvis.permissions import ensure_jarvis_user_role
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
 
 ROLED_USER = "jarvis-ctxid-roled@example.com"
 BASE_USER = "jarvis-ctxid-base@example.com"

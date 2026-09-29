@@ -12,6 +12,7 @@ Test surface:
 - Happy path against the always-populated ``tabDocType`` table
 """
 
+from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -44,6 +45,42 @@ def _patch_qb_run():
 
 class TestQuerySpecValidation(FrappeTestCase):
 	"""Top-of-pipe shape checks. Fail before any DB call."""
+
+	def test_rejects_fields_instead_of_select_before_query_execution(self):
+		with patch.object(query_mod, "_collect_doctypes") as collect:
+			with self.assertRaisesRegex(InvalidArgumentError, "select"):
+				query({"from": "Supplier", "fields": [{"agg": "count", "field": "name"}], "limit": 1})
+			collect.assert_not_called()
+
+	def test_rejects_unknown_top_level_keys(self):
+		for key in ("filters", "order", "selcet"):
+			with self.subTest(key=key):
+				with self.assertRaisesRegex(InvalidArgumentError, key):
+					query_mod._validate_spec_shape({"from": "Supplier", key: []})
+
+	def test_accepts_every_allowlisted_top_level_key(self):
+		spec = {
+			"from": "Sales Invoice",
+			"alias": "si",
+			"joins": [
+				{
+					"type": "left",
+					"doctype": "Sales Invoice Item",
+					"alias": "sii",
+					"on": {"sii.parent": "si.name"},
+				}
+			],
+			"select": ["si.customer", {"agg": "sum", "field": "sii.qty", "as": "total_qty"}],
+			"where": [{"field": "si.status", "op": "=", "value": "Submitted"}],
+			"group_by": ["si.customer"],
+			"having": [{"agg": "sum", "field": "sii.qty", "op": ">", "value": 100}],
+			"order_by": [{"field": "total_qty", "dir": "desc"}],
+			"limit": 100,
+			"offset": 10,
+			"distinct": True,
+		}
+		self.assertEqual(len(spec), 11)
+		query_mod._validate_spec_shape(spec)  # must not raise
 
 	def test_rejects_non_dict_spec(self):
 		with self.assertRaises(InvalidArgumentError):
@@ -3518,3 +3555,37 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		# Same key returns the identical cached object (frozenset), not a recompute.
 		self.assertIs(a1, a2)
 		self.assertIs(b1, b2)
+
+
+class TestExistsSpecShape(TestCase):
+	def test_unknown_nested_fields_fail_before_sql_construction(self):
+		from jarvis.tools.query import _build_exists_criterion
+
+		for op in (False, True):
+			for key in ("filters", "filter", "order", "select", "unexpected"):
+				with self.subTest(negate=op, key=key):
+					with self.assertRaisesRegex(InvalidArgumentError, "EXISTS sub-spec must not include"):
+						_build_exists_criterion({"from": "ToDo", key: []}, {}, 1, negate=op)
+
+
+class TestNestedQueryValidationIntegration(FrappeTestCase):
+	def test_nested_filter_is_not_silently_dropped(self):
+		frappe.set_user("Administrator")
+		for operator in ("exists", "not exists"):
+			inner = {
+				"from": "ToDo",
+				"alias": "inner_t",
+				"filters": [{"field": "inner_t.name", "op": "=", "value": "nonexistent-review-record"}],
+			}
+			spec = {
+				"from": "ToDo",
+				"alias": "outer_t",
+				"select": ["outer_t.name"],
+				"where": [{"op": operator, "value": inner}],
+			}
+			with self.assertRaisesRegex(InvalidArgumentError, "filters"):
+				query(spec)
+			inner["where"] = inner.pop("filters")
+			result = query(spec)
+			self.assertIn("nonexistent-review-record", result["sql"])
+			self.assertIn("EXISTS", result["sql"].upper())

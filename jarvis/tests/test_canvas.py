@@ -7,18 +7,23 @@ import unittest
 from unittest.mock import Mock, patch
 
 from jarvis.chat import canvas
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
 
 
 class TestCanvasDetection(unittest.TestCase):
 	def test_detect_html_svg_top_level(self):
 		self.assertEqual(
 			canvas.detect_canvas_names(
-				"Here's the chart: [x](/home/node/.openclaw/canvas/sales-this-month.svg)"
+				"Here's the chart: [x](/srv/test-gateway/canvas/sales-this-month.svg)"
 			),
 			["sales-this-month.svg"],
 		)
 		self.assertEqual(
-			canvas.detect_canvas_names("created [r](/home/node/.openclaw/canvas/report.html)"),
+			canvas.detect_canvas_names("created [r](/srv/test-gateway/canvas/report.html)"),
 			["report.html"],
 		)
 
@@ -26,7 +31,7 @@ class TestCanvasDetection(unittest.TestCase):
 		# The bug fix: artifacts in a subdir must be detected, path preserved.
 		self.assertEqual(
 			canvas.detect_canvas_names(
-				"[overdue](/home/node/.openclaw/canvas/charts/sales-orders-overdue-june-2026.html)"
+				"[overdue](/srv/test-gateway/canvas/charts/sales-orders-overdue-june-2026.html)"
 			),
 			["charts/sales-orders-overdue-june-2026.html"],
 		)
@@ -62,7 +67,7 @@ class TestCanvasDetection(unittest.TestCase):
 
 	def test_strip_removes_dead_link_incl_subdir(self):
 		out = canvas.strip_canvas_refs(
-			"Chart: [c](/home/node/.openclaw/canvas/charts/a.html)",
+			"Chart: [c](/srv/test-gateway/canvas/charts/a.html)",
 			["charts/a.html"],
 		)
 		self.assertNotIn("canvas/charts/a.html", out)
@@ -92,7 +97,7 @@ class TestGatewayFallbackDetection(unittest.TestCase):
 		self.assertFalse(result)
 		# Probed a name that cannot exist, through the same canvas route.
 		(url,), kwargs = get.call_args
-		self.assertIn("/__openclaw__/canvas/documents/", url)
+		self.assertIn("/__test_gateway__/canvas/documents/", url)
 		self.assertIn("index.html", url)
 		self.assertEqual(kwargs["headers"]["Authorization"], "Bearer tok")
 

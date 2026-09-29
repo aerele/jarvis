@@ -703,6 +703,7 @@
 							</div>
 						</button>
 					</div>
+					<CapabilityCatalog @select="onWelcomeSuggestion" />
 				</div>
 			</div>
 
@@ -864,63 +865,18 @@
 								/>
 							</template>
 							<template #above-body>
-								<!-- Activity: the tool calls (with input + output) that produced
-								     this answer — agent-style, collapsible. -->
-								<div
-									v-if="
-										showActivityDetail &&
-										(activityByAssistant[m.name] || []).length
-									"
-									class="jv-activity"
+								<!-- One box per turn (T5b, design canvas rule 2): boxViewByMsg
+								     (script) is the live/folded/null view boxViewFor built in
+								     T5a; StepsBox (components/chat/StepsBox.vue) is pure
+								     rendering of it, mode-switched, with null-head folded
+								     rendering nothing. #details is only mounted while open. -->
+								<StepsBox
+									v-if="boxViewByMsg[m.name]"
+									:view="boxViewByMsg[m.name]"
+									:open="!!activityOpen[m.name]"
+									@toggle="toggleActivity(m.name)"
 								>
-									<button
-										class="jv-activity-head"
-										@click="toggleActivity(m.name)"
-										:aria-expanded="!!isActivityOpen(m.name)"
-									>
-										<svg
-											class="jv-activity-chev"
-											:class="{ open: isActivityOpen(m.name) }"
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="2.2"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M9 18l6-6-6-6" />
-										</svg>
-										<svg
-											width="13"
-											height="13"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.8"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path
-												d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 1 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
-											/>
-										</svg>
-										<span class="jv-activity-count"
-											>{{ (activityByAssistant[m.name] || []).length }} tool
-											call{{
-												(activityByAssistant[m.name] || []).length === 1
-													? ""
-													: "s"
-											}}</span
-										>
-										<span
-											v-if="!isActivityOpen(m.name)"
-											class="jv-activity-preview"
-											>{{ activityNames(m.name) }}</span
-										>
-									</button>
-									<div v-if="isActivityOpen(m.name)" class="jv-activity-body">
+									<template #details>
 										<div
 											v-for="t in activityByAssistant[m.name] || []"
 											:key="t.name"
@@ -977,8 +933,16 @@
 												</template>
 											</div>
 										</div>
-									</div>
-								</div>
+									</template>
+								</StepsBox>
+								<!-- "Reports consulted" provenance card: a LEAD decision (T5c)
+								     overrides the plan line that moved this into StepsBox's
+								     #details — it stays always visible, independent of the box
+								     being open or even expandable (showActivityDetail off),
+								     because it is provenance for the ANSWER, not activity
+								     detail. See chat-report-scope.spec.js (upstream/develop
+								     version, restored). -->
+								<ReportScope :tools="reportToolsByTurn[m.name] || []" />
 								<!-- Phase-0 admission (SUXI-4): a cancelled/aged-out queued turn
 								     leaves a durable marker. Render it as a MUTED note, not the
 								     red error alert - the user (or the system) cancelled it; it
@@ -1127,10 +1091,13 @@
 											{{ m.error }}
 										</div>
 										<button
-											v-if="errorInfo(m).retryable"
+											v-if="
+												errorInfo(m).retryable &&
+												mi === visibleMessages.length - 1
+											"
 											class="jv-retry"
 											@click="retry(m.name)"
-											:disabled="retrying"
+											:disabled="retrying || busy"
 											:style="{
 												marginTop: '10px',
 												display: 'inline-flex',
@@ -1144,24 +1111,16 @@
 												fontFamily: 'inherit',
 												fontSize: '12px',
 												fontWeight: '550',
-												cursor: retrying ? 'default' : 'pointer',
-												opacity: retrying ? 0.6 : 1,
+												cursor: retrying || busy ? 'default' : 'pointer',
+												opacity: retrying || busy ? 0.6 : 1,
 											}"
 										>
-											{{ retrying ? "Retrying…" : "Retry" }}
+											{{ retrying || busy ? "Retrying…" : "Retry" }}
 										</button>
 									</div>
 								</div>
 							</template>
 							<template #below-body>
-								<!-- The user stopped this reply. A SIBLING of the body, not part of
-								     it: gated only on `stopped`, so it shows for a partial stop
-								     (content present) and an empty one alike, and the renderer can
-								     never mangle it. Muted, never an error tone - a deliberate stop
-								     is not a failure. -->
-								<div v-if="m.stopped" class="jv-stopped">
-									You stopped this reply.
-								</div>
 								<!-- rich action card the agent emits (doc confirm / email draft) -->
 								<template v-if="actionFor === m.name && activeAction">
 									<!-- email draft -->
@@ -1329,6 +1288,15 @@
 											>
 												<div class="jv-summary-table-h">
 													{{ t.label }} ({{ t.count }})
+												</div>
+												<div
+													v-if="t.removed.length"
+													class="jv-rows-removed"
+													role="note"
+												>
+													Removes {{ t.removed.length }} saved
+													{{ t.removed.length === 1 ? "row" : "rows" }}:
+													{{ t.removed.join(", ") }}
 												</div>
 												<div class="jv-summary-gridwrap">
 													<table class="jv-summary-grid">
@@ -1840,46 +1808,9 @@
 								</div>
 								<div class="jv-metabar">
 									<div
-										v-if="
-											!m.error &&
-											!m.streaming &&
-											(toolCountOf(m) || elapsedOf(m) || modelBadgeOf(m))
-										"
+										v-if="!m.error && !m.streaming && modelBadgeOf(m)"
 										class="jv-meta"
 									>
-										<span v-if="toolCountOf(m)" :title="activityNames(m.name)"
-											><svg
-												width="12"
-												height="12"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.8"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path
-													d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 1 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
-												/></svg
-											>{{ toolCountOf(m) }} tool{{
-												toolCountOf(m) === 1 ? "" : "s"
-											}}</span
-										>
-										<span v-if="elapsedOf(m)"
-											><svg
-												width="12"
-												height="12"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.8"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<circle cx="12" cy="12" r="9" />
-												<path d="M12 7v5l3 2" /></svg
-											>{{ elapsedLabel(m) }}</span
-										>
 										<!-- jarvis#560: names the model that actually wrote this
 										     reply, shown only when it is not the one the chat is
 										     set to now (a mid-thread switch, or a pool failover
@@ -1903,18 +1834,10 @@
 											>{{ modelBadgeOf(m) }}</span
 										>
 									</div>
-									<!-- SUX-7: subtle "finishing…" affordance while the Relay-Pump
-									     finalize job is still adding late enrichment (attachments /
-									     canvas / title); cleared by the message:enriched event. -->
 									<div
-										v-if="!m.streaming && enrichmentPending.has(m.name)"
-										class="jv-meta"
-										style="opacity: 0.6"
-										title="Finishing up. Attachments and extras are still being added"
+										v-if="!m.error && !m.streaming && m.content"
+										class="jv-msgbar"
 									>
-										<span>Finishing…</span>
-									</div>
-									<div v-if="!m.error && m.content" class="jv-msgbar">
 										<span
 											v-if="msgTime(m)"
 											class="jv-msgtime"
@@ -1967,317 +1890,30 @@
 						</Message>
 					</template>
 
-					<!-- pre-redirect morph line (jarvis#884): the working line morphs
-					     in place the instant the streaming reply's own jarvis-goto
-					     block is complete. Wins over the artifact card and the generic
-					     line below (a goto turn produces no artifact) — see the
-					     gotoMorph latch's own comment for why this renders off the
-					     latch, not off streamingGoto directly. Zero added delay: the
-					     run:end auto-redirect is untouched, this is only the visual for
-					     the beat before it fires (and the instant after, until the
-					     route actually changes). -->
-					<div v-if="gotoMorph && !queuedTurn" style="display: flex; gap: 12px">
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div class="jv-goto-morph" role="status" aria-live="polite">
-								<span class="jv-goto-chevrons" aria-hidden="true">
-									<svg
-										v-for="i in 3"
-										:key="i"
-										class="jv-goto-chevron"
-										:style="{ animationDelay: (i - 1) * 0.15 + 's' }"
-										width="10"
-										height="10"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="2.6"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M9 6l6 6-6 6" />
-									</svg>
-								</span>
-								<span class="jv-live-shim"
-									>Taking you to the Dashboards builder</span
-								>
-								<svg
-									class="jv-goto-arrow"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M5 12h14M13 5l7 7-7 7" />
-								</svg>
-							</div>
-						</div>
-					</div>
-					<!-- common artifact activity card (jarvis#884): one shared card for
-					     any artifact-producing main-chat turn — dashboard (builder
-					     origin, issue #858's own gate), pdf, spreadsheet, or image —
-					     replacing the dashboard-only card issue #874 shipped. Same turn
-					     gate as the generic activity line below (queued chip, and now
-					     the goto morph line, both win over it); mutually exclusive with
-					     the generic line so only one ever shows. Phases light up from
-					     real events only — a mount that joined the turn already in
-					     flight (no activeTools seen yet) shows the honest indeterminate
-					     header with no tick lit, rather than guessing "Understanding". -->
-					<div
-						v-if="artifactKind && (activeTools.length || waiting) && !queuedTurn"
-						class="jv-artifact-live"
-						style="display: flex; gap: 12px"
-					>
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div class="jv-artifact-card" role="status" aria-live="polite">
-								<span class="jv-artifact-head">
-									<svg
-										v-if="artifactKind === 'dashboard'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M18 20V10M12 20V4M6 20v-6" />
-									</svg>
-									<svg
-										v-else-if="artifactKind === 'pdf'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path
-											d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-										/>
-										<path d="M14 2v6h6" />
-									</svg>
-									<svg
-										v-else-if="artifactKind === 'spreadsheet'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<rect x="3" y="3" width="18" height="18" rx="2" />
-										<path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
-									</svg>
-									<svg
-										v-else-if="artifactKind === 'image'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<rect x="3" y="3" width="18" height="18" rx="2" />
-										<circle cx="8.5" cy="8.5" r="1.5" />
-										<path d="M21 15l-5-5L5 21" />
-									</svg>
-									<span class="jv-live-shim">{{ artifactTitle }}</span>
-								</span>
-								<ol class="jv-artifact-steps">
-									<li
-										v-for="(step, si) in artifactPhases"
-										:key="step.key"
-										class="jv-artifact-step"
-										:class="{
-											done: artifactTickIndex >= 0 && si < artifactTickIndex,
-											current: si === artifactTickIndex,
-										}"
-									>
-										<span class="jv-artifact-tick" aria-hidden="true"></span>
-										{{ step.label }}
-									</li>
-								</ol>
-							</div>
-						</div>
-					</div>
-					<!-- live tool activity + thinking (Claude Code style). Suppressed
-					     while a queued chip is showing (F2): whenever the accept says
-					     the turn is queued, the "Queued — ~N ahead" chip WINS over this
-					     "Working on it…" / warming placeholder — never both, and never a
-					     stray warming spinner masking the chip. -->
-					<div
-						v-if="
-							(activeTools.length || waiting) &&
-							!queuedTurn &&
-							!artifactKind &&
-							!gotoMorph &&
-							!compacting
-						"
-						style="display: flex; gap: 12px"
-					>
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<!-- the single tool running right now -->
-							<div
-								v-if="showActivityDetail && currentTool"
-								:key="currentTool.id"
-								class="jv-toolrow"
-							>
-								<svg
-									class="jv-spin"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--cta)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								>
-									<path d="M12 3a9 9 0 1 0 9 9" />
-								</svg>
-								<span
-									>{{ toolPhrase(currentTool) }}
-									<span
-										style="
-											font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-											font-size: 11px;
-											color: var(--cta);
-										"
-										>{{ currentTool.name }}</span
-									></span
-								>
-							</div>
-							<!-- compact tally of tools finished this turn -->
-							<div
-								v-if="showActivityDetail && doneCount"
-								class="jv-toolrow jv-tooldone"
-							>
-								<svg
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--green)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M20 6 9 17l-5-5" />
-								</svg>
-								<span
-									>{{ doneCount }} tool{{
-										doneCount === 1 ? "" : "s"
-									}}
-									done<template v-if="failedCount">
-										· {{ failedCount }} failed</template
-									></span
-								>
-							</div>
-							<div
-								v-if="
-									(!showActivityDetail ||
-										(waiting && !currentTool) ||
-										(!currentTool && statusPhase) ||
-										(!currentTool && !doneCount)) &&
-									!compacting
-								"
-								role="status"
-								aria-live="polite"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 7px;
-									padding-top: 4px;
-								"
-							>
-								<span
-									class="jv-live-shim"
-									style="font-size: 12px; color: var(--text-3)"
-									>{{ liveStatus
-									}}<span
-										v-if="liveElapsedLabel"
-										aria-hidden="true"
-										style="opacity: 0.75"
-									>
-										· {{ liveElapsedLabel }}</span
-									></span
-								>
-							</div>
-						</div>
-					</div>
+					<!-- T5b (design canvas rules 1-2): the goto-morph line, the artifact
+					     activity card, the generic tool/step line and the recovering
+					     banner that used to render here are gone — each turn now gets
+					     exactly ONE JarvisMark + ONE StepsBox: the real row's box is
+					     boxViewByMsg[m.name], mounted in Message's #above-body above;
+					     the synthetic in-flight row below (inFlightRowVisible) covers
+					     the turn before that row exists. gotoMorph's own
+					     navigation/hold-timer logic (dropGotoMorph, streamingGoto watch,
+					     GOTO_MORPH_HOLD_MS) is untouched — only this line's markup is
+					     gone, the redirect it drives still fires off run:end; its copy
+					     ("Taking you to the Dashboards builder") is reused verbatim by
+					     boxViewFor's override (T5a). Recovering keeps its own steps too
+					     (T5a's overrideFor + liveStepsForRun, keyed off msgId, not just
+					     currentRunId). -->
 
-					<!-- recovery: a parked turn finishing in the background (connection
-					     hiccup / compaction). The composer stays UNLOCKED and the answer
-					     lands later via the recovery path — fixes the silent limbo. -->
-					<div v-if="recovering" style="display: flex; gap: 12px">
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div
-								role="status"
-								aria-live="polite"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 7px;
-									font-size: 12px;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									class="jv-spin"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--text-3)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								>
-									<path d="M12 3a9 9 0 1 0 9 9" />
-								</svg>
-								<span>{{ recoveringLabel }}</span>
-							</div>
-						</div>
-					</div>
-
-					<!-- Compacting: older turns are being summarised (auto mid-turn, or a
-					     manual Compact chat / /compact). The composer stays LOCKED (a
-					     compact and a turn must never race the same context write). -->
+					<!-- Compacting: CROSS-TURN only now (a manual Compact / /compact
+					     with no turn running) — mid-turn compaction is the box's own
+					     "Reorganising this chat" override step (T5a overrideFor), so
+					     this banner steps aside whenever a turn already owns a row (the
+					     real one or the synthetic in-flight one). The composer stays
+					     LOCKED (a compact and a turn must never race the same context
+					     write). -->
 					<div
-						v-if="compacting"
+						v-if="compacting && !currentRunId && !inFlightRowVisible"
 						style="display: flex; gap: 12px"
 						data-testid="compacting-banner"
 					>
@@ -2357,49 +1993,22 @@
 						<span>Change saved</span>
 					</div>
 
-					<!-- Phase-0 admission (chat concurrency): the just-sent turn is
-					     QUEUED behind others (all in-flight slots taken). The composer
-					     stays unlocked; this chip shows the approximate position and a
-					     Cancel affordance. Retired when the turn is promoted (run:start),
-					     cancelled, or aged out. -->
-					<div v-if="queuedTurn" style="display: flex; gap: 12px">
-						<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
+					<!-- Synthetic in-flight row (design canvas rule 1): a turn is
+					     running (queued, or sent and waiting on run:start) with no
+					     assistant row yet to hang a mark + box on. inFlightRowVisible
+					     goes false the same tick run:start upserts the real row (T5a),
+					     so this never renders alongside it — exactly one mark per turn.
+					     StepsBox's own Cancel button (queued mode) calls the same
+					     cancelQueued the old chip's button did. -->
+					<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							:mood="queuedTurn ? 'star' : 'thinking'"
+							style="margin-top: 2px"
+						/>
 						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div
-								role="status"
-								aria-live="polite"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 10px;
-									font-size: 12px;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									class="jv-spin"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--text-3)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								>
-									<path d="M12 3a9 9 0 1 0 9 9" />
-								</svg>
-								<span>{{
-									queuedChipLabel(queuedTurn.position, queuedTurn.state)
-								}}</span>
-								<button
-									type="button"
-									class="jv-queued-cancel"
-									aria-label="Cancel this queued message"
-									@click="cancelQueued"
-								>
-									Cancel
-								</button>
-							</div>
+							<StepsBox :view="inFlightView" @cancel="cancelQueued" />
 						</div>
 					</div>
 
@@ -2429,6 +2038,15 @@
 								<path d="M12 9v4M12 17h.01" />
 							</svg>
 							<span class="jv-action-title">Confirm before this runs</span>
+							<!-- Parked before the user's latest message: a bare "yes"/"no"
+							     no longer binds it, only its number or its buttons. -->
+							<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
+								>Earlier</span
+							>
+							<!-- Cards never expire: one that has waited over an hour says so. -->
+							<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
+								pendingAgeOf(pa)
+							}}</span>
 							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
 							     only appears when there is actually a choice to make. -->
 							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
@@ -2548,6 +2166,13 @@
 								Discard
 							</button>
 						</div>
+					</div>
+					<!-- A typed yes/no that bound no card went to Jarvis as a normal
+					     message; say so without blocking anything (decision 13). The
+					     live region stays mounted and only its text toggles, so the
+					     change is announced. -->
+					<div class="jv-pending-older-note" role="status" aria-live="polite">
+						{{ olderCardsNoteText }}
 					</div>
 				</div>
 			</div>
@@ -2771,7 +2396,7 @@
 						v-model="input"
 						:attachments="composerAttachments"
 						:busy="busy"
-						:disabled="holdActive"
+						:disabled="holdActive || booting"
 						:canSend="canSend"
 						:sendTitle="voiceSendBlockReason"
 						:placeholder="composerPlaceholder"
@@ -4146,6 +3771,15 @@
 							class="jv-draft-table"
 						>
 							<div class="jv-draft-table-title">{{ t.label }}</div>
+							<div
+								v-if="removedSavedRows(t).length"
+								class="jv-rows-removed"
+								role="note"
+							>
+								Saving removes {{ removedSavedRows(t).length }} saved
+								{{ removedSavedRows(t).length === 1 ? "row" : "rows" }}:
+								{{ removedSavedRows(t).join(", ") }}
+							</div>
 							<div class="jv-draft-gridwrap">
 								<table class="jv-grid">
 									<thead>
@@ -4431,10 +4065,14 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
+import ReportScope from "@/components/chat/ReportScope.vue";
+import { reportToolsByAssistant } from "@/lib/reportScope";
+import { collectDocRefs } from "@/lib/docRefs";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
+import { isShowCardRequest } from "@/lib/showCardRequest";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
@@ -4471,18 +4109,21 @@ import {
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
 import { formatDate, exactDate, dayLabel } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
+import { BOOT_TIMEOUT_MS, withDeadline } from "@/utils/bootDeadline";
 import { createEnrichmentPending } from "@/lib/enrichmentPending";
 import { currentThreadModel, modelBadgeFor, modelBadgeTitleFor } from "@/utils/modelBadge";
 import { renderMarkdown } from "@/markdown";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
+import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
+import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
@@ -4505,11 +4146,13 @@ import {
 	clearHold,
 	recheck as recheckMaintenance,
 } from "@/maintenanceGate";
+import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import { panelField as _panelField } from "@/lib/docFields";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -4517,12 +4160,27 @@ import {
 	isFieldMissing,
 	isFieldWritable,
 	readonlyDisplay,
+	isRowKeyColumn,
+	overlaySavedRows,
+	removedSavedRows,
+	tableChanged,
+	tableRowsPayload,
+	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
+import { reconcilePending } from "@/lib/pendingResync";
+import {
+	discardedTokens,
+	isRecentCard,
+	markCardsEarlier,
+	typedApprovalHint as hintFor,
+} from "@/lib/typedCardReply";
+import { proposedLabel } from "@/lib/cardAge";
+import { chatRefusalMessage, chatSettledReason, keepsChatCard } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -4530,13 +4188,23 @@ import {
 	isDashboardBuildTurn,
 	isDashboardCanvas,
 	phaseTickIndex,
+	toolBaseName,
 } from "@/lib/dashboardBuildCard";
 import {
-	ARTIFACT_TITLES,
 	artifactBuildPhase,
 	artifactPhaseList,
 	detectArtifactKind,
 } from "@/lib/artifactActivityCard";
+import {
+	addStep,
+	foldedHead,
+	liveBox,
+	splitNarration,
+	stepsFromTexts,
+	turnToolNames,
+} from "@/lib/liveTurn";
+import { mergeCanvasItems } from "@/lib/canvasMerge";
+import { candidateTextFor } from "@/lib/candidateSnap";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
 import {
@@ -4905,11 +4573,6 @@ const updateBannerVisible = computed(
 		!hasUrgentAlert.value &&
 		!announcementVisible.value
 );
-// Per-conversation "auto-apply changes" (issue #186): seeded from
-// get_conversation().conversation.auto_apply on each load; the toggle reflects
-// THIS chat. autoApplyNote surfaces the admin-only-enable message.
-const convAutoApply = ref(false);
-const autoApplyNote = ref("");
 // Which builder page started this thread ("dashboards" / "triggers" / ""),
 // from get_conversation. A Dashboards build is an ordinary conversation in
 // this list; this is the only thing that says its html artifacts are
@@ -5526,25 +5189,6 @@ const usagePct = computed(() => {
 // for frappe-ui; the .jv-dark class + inline paletteVars below keep the jv-*
 // scoped styles untouched.
 const { theme, effectiveDark, paletteVars, setTheme, toggleTheme } = useJarvisTheme();
-// Flip "confirm before changes" for THIS conversation (issue #186). Optimistic;
-// reverts on failure. auto_apply=1 = skip confirmation (auto mode). Enabling is
-// admin-only server-side - a non-admin gets a 403, so we revert + show a note.
-async function toggleAutoApply() {
-	if (!currentId.value) return;
-	const next = convAutoApply.value ? 0 : 1;
-	autoApplyNote.value = "";
-	convAutoApply.value = !!next; // optimistic
-	try {
-		const r = await api.setAutoApply(currentId.value, next);
-		// Response envelope is {ok, data:{auto_apply}} - trust the server's value.
-		if (r && r.data && typeof r.data.auto_apply !== "undefined")
-			convAutoApply.value = !!r.data.auto_apply;
-	} catch (e) {
-		convAutoApply.value = !next; // revert
-		// Enabling requires System Manager; a non-admin gets a PermissionError (403).
-		if (next) autoApplyNote.value = "Only an administrator can enable auto-apply.";
-	}
-}
 
 // Phase 1: streaming/metrics, live tool activity, file input, mentions, stop
 const runStartMs = ref(0);
@@ -5588,6 +5232,12 @@ function clearStreamingActivity() {
 	currentRunId.value = null;
 	store.streamingConvId = null;
 	recovering.value = null;
+	// review C3: no separate snapCandidateInto needed here — this only runs
+	// once settledByFence/settledByRow is already true (the fence terminated
+	// or m.streaming is already false), which means the real terminal
+	// (run:end/run:error/stopRun) already ran its own snap+flush for this
+	// row inside that same synchronous handler, or the row's content is
+	// server-authoritative from a reload and about to be replaced anyway.
 	flushReveal(); // nothing is streaming anymore, so nothing may stay mid-reveal
 }
 // Tool events are only meaningful while their run is live. The CDX-3 pump fence
@@ -5725,11 +5375,6 @@ function flushReveal(id) {
 		_revealRaf = 0;
 	}
 }
-// requestAnimationFrame does not run in a background tab, so an animating reply
-// would freeze there until the user came back. Snap instead.
-function onVisibilityChange() {
-	if (document.hidden) flushReveal();
-}
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
 // Live COUNT + current-tool name exclude the agent's built-ins so the tally matches the
 // settled accordion (no 3→2 jump); raw activeTools still drives the "is working" gating.
@@ -5741,12 +5386,73 @@ const visibleActiveTools = computed(() =>
 const currentTool = computed(
 	() => [...visibleActiveTools.value].reverse().find((t) => t.status === "running") || null
 );
-const doneCount = computed(
-	() => visibleActiveTools.value.filter((t) => t.status !== "running").length
-);
-const failedCount = computed(
-	() => visibleActiveTools.value.filter((t) => t.status === "error").length
-);
+// Live step list (T5a, plan .claude/workflow/plans/2026-09-28-live-turn-steps.md):
+// the model's own "what I'm doing" sentences (run:step), recorded for the whole
+// turn instead of a single replaced line (@/lib/liveTurn's addStep dedupes a
+// repeat/grows the last one). `msgId` (T5b) rides alongside `runId` so a
+// recovering row (T5a's run:recovering clears currentRunId, by design — no
+// run is "live" from the fence's point of view once parked) can still show
+// what it already did: stepsFor(m) below falls back to msgId when the runId
+// gate misses. Never persisted client-side; a reload reseeds it from the
+// server's live_steps (see loadConversation below).
+const liveSteps = ref({ runId: null, msgId: null, steps: [] });
+// The steps a box should show for row `m` (or the in-flight synthetic row,
+// m === null): the current run's own steps while it IS the current run, else
+// — only for a real row — whatever was last recorded for THIS message (a
+// recovering row, parked after currentRunId was cleared).
+function stepsFor(m) {
+	if (liveSteps.value.runId && liveSteps.value.runId === currentRunId.value)
+		return liveSteps.value.steps;
+	if (m && liveSteps.value.msgId === m.name) return liveSteps.value.steps;
+	return [];
+}
+// Narration currently typing into the current step, not yet decided to be a
+// step or the answer (splitNarration, @/lib/liveTurn). Tied to the run/msg
+// the same way liveSteps is above; run:end below reads the RAW ref (before
+// currentRunId is cleared) to snap in a short final answer that never grew
+// past a step-candidate sentence.
+const liveCandidate = ref({ runId: null, msgId: null, text: "", full: "" });
+function candidateFor(m) {
+	if (liveCandidate.value.runId && liveCandidate.value.runId === currentRunId.value)
+		return liveCandidate.value.text;
+	if (m && liveCandidate.value.msgId === m.name) return liveCandidate.value.text;
+	return "";
+}
+// Review C3: a still-typing narration candidate never reached the revealer
+// (assistant:delta only ever paces the ANSWER half of splitNarration in), so
+// flushReveal(messageId) alone snaps to "" for as long as the shown text
+// still looked like a step — the bubble the user watched stream in goes
+// blank. Every terminal for a live message (run:end, run:error, stopRun)
+// must call this FIRST, before its own flushReveal, so the flush has real
+// text to snap to. candidateTextFor (@/lib/candidateSnap) is the pure
+// belongs-to-this-message decision; this just applies it and clears the ref
+// (a harmless no-op when the candidate already promoted to the answer on the
+// last delta — candidateTextFor returns null once there is nothing to feed).
+function snapCandidateInto(messageId) {
+	const full = candidateTextFor(liveCandidate.value, messageId, currentRunId.value);
+	if (full == null) return;
+	revealer.receive(messageId, full);
+	liveCandidate.value = { runId: null, msgId: null, text: "", full: "" };
+}
+// Seconds elapsed (the same span liveElapsedLabel formats) at the instant the
+// live turn's answer first showed text, so a folded head mid-turn ("Worked
+// 12s") freezes there instead of climbing with the ticking timer while a
+// tool keeps running after the answer opened. Reset at run:start.
+const liveAnswerShownAt = ref(null);
+// The turn that just ended, captured at run:end before teardown: its elapsed
+// seconds and the tools seen live. The settled head reads it until the
+// enrichment reload brings the saved duration and every tool row, so the line
+// never loses its time or drops its count in between (flow review F2).
+const finishedRun = ref({ msgId: null, seconds: null, tools: [] });
+// Turn states past streaming: the model is done writing (get_conversation's
+// turn_state for a reply row that has not settled yet).
+const RUN_ENDED_STATES = new Set([
+	"terminal_observed",
+	"finalizing",
+	"done",
+	"errored",
+	"cancelled",
+]);
 // ── Live status line ────────────────────────────────────────────────────────
 // Real progress instead of a blanket "Thinking…": phase transitions come from
 // the run's realtime events (run:start → tool:start/end → assistant:delta).
@@ -5785,11 +5491,14 @@ const TOOL_PHRASES = {
 	read_file: "Reading the file",
 	get_file_pages: "Reading the document",
 	run_method: "Running the operation",
+	get_linked_docs: "Finding linked records",
 	bash: "Reading reference material",
 	exec: "Reading reference material",
 	browser: "Browsing the web",
 	canvas: "Drawing the canvas",
-	image: "Generating the image",
+	image_generate: "Generating your image",
+	video_generate: "Generating your video",
+	music_generate: "Generating your music",
 };
 function toolPhrase(tool) {
 	if (!tool) return "";
@@ -5820,16 +5529,6 @@ function toolPhrase(tool) {
 	}
 	return tpl + "…";
 }
-const liveStatus = computed(() => {
-	// Pre-connect phases ("waking" / "pairing") win over tool/thinking phrases:
-	// the turn is still blocked on the WS connect, no tool is running yet.
-	const preConnect = preConnectStatusLabel(statusPhase.value);
-	if (preConnect) return preConnect;
-	if (currentTool.value) return toolPhrase(currentTool.value);
-	if (statusPhase.value === "analyzing") return "Analyzing the results…";
-	if (waiting.value || sending.value || statusPhase.value === "model") return "Working on it…";
-	return thinkingWord.value;
-});
 // Recovery banner copy: compaction (context overflow, retrying) vs a connection
 // hiccup. Both mean "still working, in the background" — not an error.
 // Renew CTA → the billing page, the only surface that takes payment.
@@ -6202,18 +5901,24 @@ const visibleMessages = computed(() =>
 		// which the accordion cannot hold.
 		if (m.role === "tool") return !!m.action_outcome || !!orphanToolFailures.value[m.name];
 		if (m.role !== "user" && m.role !== "assistant") return false;
-		// Hide a blank streaming placeholder. The live "Working on it…" indicator
-		// below the thread already renders the assistant logo + status for the
-		// in-flight turn; after a refresh or tab-switch the server's still-empty
-		// streaming row loads alongside it, so drawing both showed the assistant
-		// logo twice (once blank, once beside the status). A placeholder that has
-		// text, an error, or a canvas is a real reply and always renders.
+		// A blank streaming assistant row is either the live turn's own row —
+		// it IS the steps box now (run:start upserts it above; T5b mounts
+		// boxViewFor/StepsBox off it directly) — or a STALE one. Before T5a a
+		// separate "Working on it…" indicator rendered beside the thread and
+		// this row was always hidden while blank, which is why drawing both
+		// used to show the assistant logo twice (once blank, once beside the
+		// status). Only the stale case still hides: another still-streaming
+		// placeholder that is not (or no longer) the turn THIS tab has live —
+		// a missed terminal, a different in-flight turn, or a reload landing
+		// between runs. A placeholder that has text, an error, or a canvas is
+		// a real reply and always renders regardless.
 		if (
 			m.role === "assistant" &&
 			m.streaming &&
 			!(m.content || "").trim() &&
 			!m.error &&
-			!(m.canvas && m.canvas.length)
+			!(m.canvas && m.canvas.length) &&
+			!(currentRunId.value && m.name === currentMsgId.value)
 		)
 			return false;
 		return true;
@@ -6224,6 +5929,8 @@ const visibleMessages = computed(() =>
 // + output) that produced it — agent-style. Tool rows follow their
 // assistant placeholder in seq order, so we attach to the most recent
 // assistant message and reset on each user message.
+const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
+
 const activityByAssistant = computed(() => {
 	const map = {};
 	let cur = null;
@@ -6289,17 +5996,17 @@ const THINK_WORDS = ["Thinking\u2026"];
 const thinkTick = ref(0);
 let _thinkTimer = null;
 const thinkingWord = computed(() => THINK_WORDS[thinkTick.value % THINK_WORDS.length]);
-// Persisted per-reply tool count + duration so they survive a refresh (runMeta
-// is live-session only): count from the saved tool messages, duration on ONE
-// baseline shared with the live timer (CDX-20). The live value (runMeta.ms) is the
-// client-side run:start -> run:end span; the persisted value (reply_duration_ms,
-// stamped at settlement) is the server-side dispatching_at(run:start) -> settlement
-// span — the SAME boundary, so a reloaded reply matches its live reading within
-// network tolerance. reply_duration_ms is NULL on legacy (non-pump) rows, which fall
-// back to the modified-creation span (creation is NO LONGER rewritten as a metric).
-function toolCountOf(m) {
-	return (activityByAssistant.value[m.name] || []).length;
-}
+// Persisted per-reply duration so it survives a refresh (runMeta is
+// live-session only), on ONE baseline shared with the live timer (CDX-20).
+// The live value (runMeta.ms) is the client-side run:start -> run:end span;
+// the persisted value (reply_duration_ms, stamped at settlement) is the
+// server-side dispatching_at(run:start) -> settlement span — the SAME
+// boundary, so a reloaded reply matches its live reading within network
+// tolerance. reply_duration_ms is NULL on legacy (non-pump) rows, which fall
+// back to the modified-creation span (creation is NO LONGER rewritten as a
+// metric). Feeds the folded head's seconds (foldedHead, boxViewFor) — the
+// per-reply tool COUNT moved there too (toolNames.length), so toolCountOf
+// (T5c) is gone.
 function elapsedOf(m) {
 	const live = runMeta.value[m.name] && runMeta.value[m.name].ms;
 	if (live) return (live / 1000).toFixed(1);
@@ -6316,18 +6023,6 @@ function elapsedOf(m) {
 		if (d >= 0 && d < 1800) return d.toFixed(1);
 	}
 	return "";
-}
-// Response-duration label: keeps the sub-minute look (e.g. "12.4s") but rolls
-// over to minutes once it passes 60s (e.g. "1m 5s" / "2m").
-function elapsedLabel(m) {
-	const raw = elapsedOf(m);
-	if (!raw) return "";
-	const sec = parseFloat(raw);
-	if (sec < 60) return `${raw}s`;
-	const total = Math.round(sec);
-	const mm = Math.floor(total / 60),
-		ss = total % 60;
-	return ss ? `${mm}m ${ss}s` : `${mm}m`;
 }
 // Per-reply model attribution (jarvis#560). m.model / m.provider are stamped on
 // the assistant row at finalize and name the model that ACTUALLY answered, which
@@ -6355,11 +6050,6 @@ function toggleTool(name) {
 function toolLabel(n) {
 	return (n || "tool").replace(/^jarvis__/, "");
 }
-function activityNames(assistantName) {
-	return (activityByAssistant.value[assistantName] || [])
-		.map((t) => toolLabel(t.tool_name))
-		.join(", ");
-}
 // args/result are stored as JSON strings — pretty-print, and trim very large
 // payloads so a 10k-row result doesn't blow up the chat.
 function prettyJson(s) {
@@ -6381,6 +6071,15 @@ function prettyJson(s) {
 // True only until the initial conversation load finishes — keeps the welcome
 // screen from flashing on refresh before the open chat appears.
 const booting = ref(true);
+// Every boot await races a deadline (utils/bootDeadline.js): the composer and send() are gated
+// on `booting`, so one never-settling boot request would otherwise lock the composer for good.
+// window.__JARVIS_BOOT_TIMEOUT_MS is the e2e override (tests/e2e/chat-bootstrap.spec.js).
+let _bootTimedOut = false;
+function bootStep(p) {
+	return withDeadline(p, window.__JARVIS_BOOT_TIMEOUT_MS || BOOT_TIMEOUT_MS, () => {
+		_bootTimedOut = true;
+	});
+}
 const showWelcome = computed(
 	() =>
 		!booting.value &&
@@ -6413,6 +6112,7 @@ const headerSub = computed(() => {
 });
 const canSend = computed(
 	() =>
+		!booting.value &&
 		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
 		!sending.value &&
 		// A compaction (auto mid-turn, or one we started) must never race a turn
@@ -6649,7 +6349,9 @@ const triggerMode = ref(false);
 // "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
 const TRIGGER_PLACEHOLDER = "e.g. Warn me when a Sales Invoice over 1 lakh is submitted";
 const composerPlaceholder = computed(() =>
-	compacting.value
+	booting.value
+		? "Loading conversation…"
+		: compacting.value
 		? "Compacting this chat, try again in a moment"
 		: triggerMode.value
 		? TRIGGER_PLACEHOLDER
@@ -6832,36 +6534,8 @@ function render(text, streaming = false) {
 	_renderCache.set(key, out);
 	return out;
 }
-// {document name → DocType} harvested from THIS conversation's tool calls
-// (get_doc / create_doc / get_list / update_doc / …). We only ever linkify IDs
-// that actually came back from a tool, so we always know the DocType for the
-// Desk URL and never false-positive on arbitrary prose.
-const docRefs = computed(() => {
-	const map = {};
-	const add = (dt, name) => {
-		if (dt && typeof name === "string" && name.length >= 4) map[name] = dt;
-	};
-	for (const m of messages.value) {
-		if (m.role !== "tool") continue;
-		let args = {};
-		let res = {};
-		try {
-			args = m.tool_args ? JSON.parse(m.tool_args) : {};
-		} catch (e) {}
-		try {
-			res = m.tool_result ? JSON.parse(m.tool_result) : {};
-		} catch (e) {}
-		const dt = args.doctype;
-		if (args.name) add(dt, args.name);
-		const data = res && res.data;
-		if (Array.isArray(data)) {
-			for (const row of data) if (row && row.name) add(row.doctype || dt, row.name);
-		} else if (data && typeof data === "object") {
-			add(data.doctype || dt, data.name);
-		}
-	}
-	return map;
-});
+// {document name → DocType} harvested from THIS conversation's tool calls.
+const docRefs = computed(() => collectDocRefs(messages.value));
 const _escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Compiled once per docRefs change: matches any known doc name as a whole token
 // (not a substring of a longer id/word). Capped so a huge get_list can't build a
@@ -6948,45 +6622,6 @@ function answerConfirm(ok, label) {
 function _isLongVal(v) {
 	const s = String(v == null ? "" : v);
 	return s.length > 55 || s.includes("\n");
-}
-// Map a Frappe fieldtype → the edit control to render + its options payload.
-function _controlFor(fieldtype, options) {
-	switch (fieldtype) {
-		case "Link":
-			return ["link", options || ""]; // options = target doctype (searchLink)
-		case "Select":
-			return [
-				"select",
-				String(options || "")
-					.split("\n")
-					.map((o) => o.trim()),
-			];
-		case "Check":
-			return ["check", ""];
-		case "Date":
-			return ["date", ""];
-		case "Datetime":
-			return ["datetime", ""];
-		case "Time":
-			return ["time", ""];
-		case "Int":
-		case "Float":
-		case "Currency":
-		case "Percent":
-		case "Rating":
-			return ["number", ""];
-		case "Small Text":
-		case "Text":
-		case "Long Text":
-		case "Code":
-		case "Text Editor":
-		case "HTML Editor":
-		case "Markdown Editor":
-		case "JSON":
-			return ["text", ""];
-		default:
-			return ["data", ""];
-	}
 }
 // "Item Group" / "item_group" / "itemGroup" all → "itemgroup": the agent's
 // action JSON labels fields sometimes by display label, sometimes by fieldname.
@@ -7088,54 +6723,6 @@ async function _formMeta(doctype) {
 	return r;
 }
 
-// Native date/time inputs REQUIRE canonical values (yyyy-mm-dd / yyyy-mm-ddThh:mm);
-// anything else — "2026-07-10 00:00:00", "10-07-2026" — renders the input EMPTY,
-// which read as "the date isn't picking". Normalize whatever the agent/doc gave us.
-function _normDateVal(fieldtype, v) {
-	const s = String(v == null ? "" : v).trim();
-	if (!s) return s;
-	if (fieldtype === "Date") {
-		let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-		if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-		m = s.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/); // dd-mm-yyyy / dd/mm/yyyy
-		if (m) return `${m[3]}-${m[2]}-${m[1]}`;
-	}
-	if (fieldtype === "Datetime") {
-		let m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
-		if (m) return `${m[1]}T${m[2]}`;
-		m = s.match(/^(\d{4}-\d{2}-\d{2})$/);
-		if (m) return `${m[1]}T00:00`;
-	}
-	if (fieldtype === "Time") {
-		const m = s.match(/^(\d{2}:\d{2})/);
-		if (m) return m[1];
-	}
-	return s;
-}
-function _panelField(metaField, value) {
-	let [control, options] = _controlFor(metaField.fieldtype, metaField.options);
-	let v = value == null ? "" : String(value);
-	if (["date", "datetime", "time"].includes(control)) v = _normDateVal(metaField.fieldtype, v);
-	let orig = v;
-	if (control === "check") {
-		v = checkToYesNo(v);
-		orig = v;
-	}
-	if (control === "select" && Array.isArray(options) && v && !options.includes(v))
-		options = [v, ...options];
-	return {
-		fieldname: metaField.fieldname,
-		label: metaField.label,
-		control,
-		options,
-		fieldtype: metaField.fieldtype,
-		reqd: metaField.reqd,
-		read_only: metaField.read_only,
-		value: v,
-		orig,
-	};
-}
-
 // Build the draft model from an action + form meta (+ live doc for updates),
 // WITHOUT opening the panel - so the editable panel and later summary/preview
 // surfaces can share one construction path.
@@ -7175,6 +6762,15 @@ async function buildDraftModel(a) {
 		try {
 			base = await api.loadDocForEdit(a.doctype, a.name);
 		} catch (e) {
+			// Without the saved rows the card cannot show which rows a proposed table
+			// keeps or removes, so never offer to apply one blind (CR-3).
+			if ((a.tables || []).length) {
+				const err = new Error(
+					"Could not load this record's saved rows, so I can't show what would change. Tell me to try again."
+				);
+				err.jvUserMessage = err.message;
+				throw err;
+			}
 			/* not editable → create-style view */
 		}
 	}
@@ -7212,15 +6808,15 @@ async function buildDraftModel(a) {
 	for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
 	for (const [tf, spec] of Object.entries(meta.tables || {})) {
 		const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-		const proposedRows = aTables[tf];
 		const baseRows = (base.tables || {})[tf] || [];
+		const proposedRows = aTables[tf] && overlaySavedRows(aTables[tf], baseRows);
 		if (!proposedRows && !metaField.reqd && !baseRows.length) continue;
 		// columns = child meta columns ∪ keys the agent used (unknown keys → data input)
 		const columns = spec.columns.slice();
 		const known = new Set(columns.map((c) => c.fieldname));
 		for (const r of proposedRows || []) {
 			for (const k of Object.keys(r)) {
-				if (!known.has(k)) {
+				if (!known.has(k) && isRowKeyColumn(k)) {
 					known.add(k);
 					columns.push({
 						fieldname: k,
@@ -7234,15 +6830,8 @@ async function buildDraftModel(a) {
 			}
 		}
 		const srcRows = proposedRows != null ? proposedRows : baseRows; // proposal REPLACES loaded rows
-		const rows = srcRows.map((r) => {
-			const o = {};
-			for (const c of columns)
-				o[c.fieldname] = _normDateVal(
-					c.fieldtype,
-					r[c.fieldname] == null ? "" : String(r[c.fieldname])
-				);
-			return o;
-		});
+		// Each row keeps its saved name (__name) so Apply edits THAT row (CR-3).
+		const rows = srcRows.map((r) => toPanelRow(columns, r));
 		if (!rows.length) rows.push(_blankRow(columns));
 		tables.push({
 			fieldname: tf,
@@ -7250,7 +6839,7 @@ async function buildDraftModel(a) {
 			child: spec.child_doctype,
 			columns,
 			rows,
-			origJson: JSON.stringify(verb === "update" ? baseRows : null),
+			origJson: JSON.stringify(verb === "update" ? baseRows : null), // raw saved rows
 		});
 	}
 	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
@@ -7498,21 +7087,11 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			.filter((r) => Object.keys(r).length);
 		if (p.verb === "create") {
 			if (rows.length) values[t.fieldname] = rows;
-		} else if (
-			JSON.stringify(rows) !==
-			JSON.stringify(
-				(JSON.parse(t.origJson) || []).map((r) =>
-					coerceRow(
-						t,
-						Object.fromEntries(
-							Object.entries(r).map(([k, v]) => [k, v == null ? "" : String(v)])
-						),
-						"update"
-					)
-				)
-			)
-		) {
-			values[t.fieldname] = rows;
+		} else if (tableChanged(t, JSON.parse(t.origJson))) {
+			// Only a changed table is sent: each saved row by name with just its
+			// changed cells, new rows in full; an unchanged one (incl. a Datetime/Time
+			// column) is never resent (CR-3).
+			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
 		}
 	}
 	p.applying = true;
@@ -7526,6 +7105,9 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			submit: submitFlag ? 1 : 0,
 			conversation: currentId.value || "",
 			continue: p.cont ? 1 : 0,
+			// which card this confirms: a File Box chat parks exactly this one
+			message: actionFor.value || "",
+			card: activeAction.value || null,
 		});
 		if (r && r.ok === false) {
 			// apply_action now returns the enriched {ok:false, error} envelope
@@ -7579,26 +7161,34 @@ const approveRunBusyToken = ref(null);
 // Only the cards belonging to the conversation on screen render (a parked write
 // from another chat must not show here). The queue is already pruned to the
 // current conversation on load, but filter defensively for the template v-for.
-// Sorted the SAME way the server orders the parked list (mint order: expires_at
-// is mint time plus a fixed TTL, with the token breaking a same-second tie).
-// Load-bearing once a typed "confirm 1 and 3" can select by the number printed on
-// each card: if the screen and the server disagree about which card is number 1,
-// the wrong write runs. The queue's own arrival order is close but not identical,
-// since a resync merges cards in whatever order the store returned them.
+// Sorted in mint order (created_at, the token breaking a same-second tie;
+// expires_at is only the fallback for a pre-P0c record with no created_at), so the
+// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
+// numbered (approval_tokens), and a resync merges cards in whatever order the store
+// returned them.
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
-const typedApprovalHint = computed(() => {
-	const n = visiblePendingActions.value.length;
-	// The example must reference cards that actually exist: with two parked,
-	// "confirm 1 and 3" names a card 3 that is not there, so a user who copies it
-	// verbatim gets an out-of-range no-op. Use the real first and last numbers.
-	return n > 1 ? `or type "confirm all", or "confirm 1 and ${n}"` : 'or type "go ahead"';
-});
+// An "Earlier" card (parked before the user's latest message) never gets the
+// bare-phrase hint: only its number binds it (lib/typedCardReply.js).
+const typedApprovalHint = computed(() => hintFor(visiblePendingActions.value));
+// The conversation whose last send was a typed yes/no that bound no card. The note
+// stays while an older card is still on screen there, and clears with the last one.
+const olderCardsNoteFor = ref("");
+const showOlderCardsNote = computed(
+	() =>
+		!!olderCardsNoteFor.value &&
+		olderCardsNoteFor.value === currentId.value &&
+		visiblePendingActions.value.some((pa) => !isRecentCard(pa))
+);
+const olderCardsNoteText = computed(() =>
+	showOlderCardsNote.value
+		? "An earlier action card is still waiting — use its buttons or the Approval Board."
+		: ""
+);
 const visiblePendingActions = computed(() =>
-	// Ordered by the shared, unit-tested comparator (sortPendingCards) so the
-	// numbers on screen match the server's (expires_at, token) order a typed
-	// "confirm N" resolves against. See lib/sortPendingCards.js.
+	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
+	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
 	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
 );
 
@@ -7640,9 +7230,9 @@ function pendingBatchOf(pa) {
 function pendingDetailsOf(pa) {
 	return pendingPreviewOf(pa);
 }
-// Wall-clock expiry (F15): a coarse tick flips a card to its "expired" state once
-// the 15-min token TTL lapses, so a stale card stops looking actionable. Real
-// enforcement stays server-side (confirming an expired token fails).
+// Wall-clock expiry (F15), legacy Redis cards only: a coarse tick flips one to its
+// "expired" state once its 15-min token TTL lapses. A pending-action card carries
+// no expires_at and never expires. Real enforcement stays server-side.
 const pendingNowMs = ref(Date.now());
 let _expiryTick = null;
 onMounted(() => {
@@ -7661,6 +7251,9 @@ onUnmounted(() => {
 function pendingExpiredOf(pa) {
 	return pendingExpiry(pa && pa.expires_at, pendingNowMs.value).expired;
 }
+function pendingAgeOf(pa) {
+	return proposedLabel(pa && pa.created_at, pendingNowMs.value);
+}
 // Drop one card from the queue by its token (confirm-success / discard / expiry).
 function removePending(token) {
 	if (!token) return;
@@ -7672,8 +7265,58 @@ function confirmationStorageUnavailable(response) {
 }
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
+// PR-1: build a confirm-card queue item from a durable pending action-row (a
+// role="tool" Jarvis Chat Message with tool_status="pending"), so the card renders
+// from the reliable message pipeline. pendingCardOf reads preview.card unchanged.
+function _rowExpiresEpoch(s) {
+	if (!s) return null;
+	// The row's expires_at is a site-timezone datetime string; parse to epoch seconds
+	// for the countdown. Best-effort: a live push carries the authoritative epoch and
+	// the server enforces the real TTL, so null here just omits the client countdown.
+	const t = Date.parse(String(s).replace(" ", "T"));
+	return Number.isFinite(t) ? Math.round(t / 1000) : null;
+}
+function pendingActionFromRow(m, convId) {
+	return {
+		conversation: convId,
+		token: m.tool_call_id,
+		tool: m.tool_name,
+		summary: "",
+		preview: { card: m.pending_card },
+		run_id: null,
+		// Server epoch on every pending row (a legacy one: its own creation); never a
+		// local-time parse (sortPendingCards falls back to expires_at when null).
+		created_at: m.created_at ?? null,
+		expires_at: _rowExpiresEpoch(m.expires_at),
+		seq: m.seq ?? null,
+		recent: m.recent !== false,
+	};
+}
+function seedPendingFromRows(msgs, convId) {
+	for (const m of msgs || []) {
+		if (
+			m &&
+			m.role === "tool" &&
+			m.tool_status === "pending" &&
+			m.pending_card &&
+			m.tool_call_id
+		) {
+			enqueuePending(pendingActionFromRow(m, convId));
+		}
+	}
+}
+// Tokens with a Confirm/Discard RPC currently in flight (confirmPending /
+// discardPending / approveAndRunPending). While a token is in here, the 2.5 s
+// pending poll / resync must not re-show its card: the RPC's own response
+// already removed it, but a STALE resync request issued just before the RPC
+// committed can still return the token as live and race the removal, re-adding
+// a card the user already acted on. Cleared once the acting function's whole
+// settle sequence (removePending + reload) has run.
+const inflightTokens = new Set();
+
 function enqueuePending(card) {
 	if (!card || !card.token) return;
+	if (inflightTokens.has(card.token)) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
 	pendingActions.value.push({
 		conversation: card.conversation,
@@ -7682,7 +7325,10 @@ function enqueuePending(card) {
 		summary: card.summary || "",
 		preview: card.preview || null,
 		run_id: card.run_id || null,
+		created_at: card.created_at || null,
 		expires_at: card.expires_at || null,
+		seq: card.seq ?? null,
+		recent: card.recent !== false,
 		busy: false,
 		error: null,
 	});
@@ -7702,6 +7348,7 @@ async function confirmPending(pa) {
 	const cardById = () => pendingActions.value.find((x) => x.token === token);
 	pa.busy = true;
 	pa.error = null;
+	inflightTokens.add(token);
 	try {
 		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
@@ -7711,18 +7358,28 @@ async function confirmPending(pa) {
 				notify(r.error.message, { type: "error" });
 				return;
 			}
+			if (keepsChatCard(r)) {
+				// Not settled (busy, already running, identity refused, a stopping armed run): keep it.
+				const card = cardById();
+				if (card) card.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
+				return;
+			}
 			// Token gone/expired/used, or the executed tool reported failure. Either
 			// way the card is spent - surface a brief note and dismiss.
 			if (r.error && r.error.type === "InvalidConfirmation") {
 				removePending(token);
-				// InvalidConfirmation is deliberately opaque (expired / used in another
-				// tab / a redis blip). Use the card's own wall-clock expiry for the right
-				// message instead of always blaming expiry (F15).
+				// A settled card (isChatSettled) still carrying a specific reason_code
+				// (stale/target_missing/tampered/unverifiable, …) says why. Only a
+				// bare legacy token (no reason_code at all) gets the opaque guess:
+				// use the card's own wall-clock expiry for the right one (F15).
+				const settledReason = chatSettledReason(r);
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
-					expired
-						? "This confirmation expired. Tell me the action again to retry it."
-						: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.",
+					settledReason ||
+						(expired
+							? "This confirmation expired. Tell me the action again to retry it."
+							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
 					{ type: "error" }
 				);
 				return;
@@ -7757,6 +7414,7 @@ async function confirmPending(pa) {
 	} finally {
 		const card = cardById();
 		if (card) card.busy = false;
+		inflightTokens.delete(token);
 	}
 }
 // Approve & run (P1, skill approve-and-run): modeled on confirmPending above,
@@ -7778,6 +7436,7 @@ async function approveAndRunPending(pa) {
 	pa.busy = true;
 	pa.error = null;
 	approveRunBusyToken.value = token;
+	inflightTokens.add(token);
 	try {
 		const r = await api.approveAndRun(token, pa.conversation || currentId.value || "");
 		if (r && r.ok === false) {
@@ -7787,13 +7446,23 @@ async function approveAndRunPending(pa) {
 				notify(r.error.message, { type: "error" });
 				return;
 			}
+			if (keepsChatCard(r)) {
+				const card = cardById();
+				if (card) card.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
+				return;
+			}
 			if (r.error && r.error.type === "InvalidConfirmation") {
 				removePending(token);
+				// Mirrors confirmPending's InvalidConfirmation branch: a settled card
+				// carrying a specific reason_code says why, not the opaque guess.
+				const settledReason = chatSettledReason(r);
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
-					expired
-						? "This confirmation expired — tell me the action again to retry it."
-						: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again.",
+					settledReason ||
+						(expired
+							? "This confirmation expired — tell me the action again to retry it."
+							: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again."),
 					{ type: "error" }
 				);
 				return;
@@ -7826,6 +7495,7 @@ async function approveAndRunPending(pa) {
 		const card = cardById();
 		if (card) card.busy = false;
 		approveRunBusyToken.value = null;
+		inflightTokens.delete(token);
 	}
 }
 // Resolution shared by the typed go-ahead and the Confirm button, so the two
@@ -7841,9 +7511,13 @@ async function onTypedConfirmResolved(r) {
 			return;
 		}
 		if (r.error && r.error.type === "InvalidConfirmation") {
-			notify("That confirmation is no longer valid. Ask me to try the action again.", {
-				type: "error",
-			});
+			// Mirrors confirmPending's InvalidConfirmation branch: a settled card
+			// carrying a specific reason_code says why, not the opaque guess.
+			notify(
+				chatSettledReason(r) ||
+					"That confirmation is no longer valid. Ask me to try the action again.",
+				{ type: "error" }
+			);
 			return;
 		}
 		// The token was spent and the write failed. A durable "failed" receipt chip
@@ -7875,23 +7549,36 @@ async function discardPending(pa) {
 	const token = pa.token;
 	const conv = pa.conversation || currentId.value || "";
 	pa.busy = true;
+	// Outer try/finally guards the WHOLE settle sequence (including the reload
+	// below), not just the RPC, so a stale resync in flight during that reload
+	// still can't re-add this token (see inflightTokens above).
+	inflightTokens.add(token);
 	try {
-		const r = await api.dismissTool(token, conv);
-		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
-			pa.error = r.error;
-			notify(r.error.message, { type: "error" });
+		try {
+			const r = await api.dismissTool(token, conv);
+			if (r && r.ok === false && confirmationStorageUnavailable(r)) {
+				pa.error = r.error;
+				notify(r.error.message, { type: "error" });
+				return;
+			}
+			if (keepsChatCard(r)) {
+				pa.error = { message: chatRefusalMessage(r) };
+				notify(chatRefusalMessage(r), { type: "error" });
+				return;
+			}
+		} catch (e) {
+			pa.error = { message: errMessage(e, "Could not discard.") };
 			return;
+		} finally {
+			pa.busy = false;
 		}
-	} catch (e) {
-		pa.error = { message: errMessage(e, "Could not discard.") };
-		return;
+		removePending(token);
+		// Re-fetch so the durable "discarded" chip shows in the thread.
+		await loadConversation(currentId.value);
+		store.loadConversations();
 	} finally {
-		pa.busy = false;
+		inflightTokens.delete(token);
 	}
-	removePending(token);
-	// Re-fetch so the durable "discarded" chip shows in the thread.
-	await loadConversation(currentId.value);
-	store.loadConversations();
 }
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
@@ -7899,11 +7586,11 @@ async function discardPending(pa) {
 // action:pending event delivered before the page was open. Deduped by token
 // against whatever is already queued; freshness-guarded against a mid-flight
 // conversation switch.
-async function resyncPendingConfirmations(id) {
+async function resyncPendingConfirmations(id, source) {
 	if (!id) return;
 	let items = null;
 	try {
-		const r = await api.listPendingConfirmations(id);
+		const r = await api.listPendingConfirmations(id, source);
 		// ok:false is a transient store blip (the strict owner-index read). Keep
 		// whatever is already on screen and let the next poll tick retry; never
 		// wipe the queue on a single bad read (that was the fail-closed hole that
@@ -7920,12 +7607,16 @@ async function resyncPendingConfirmations(id) {
 	// or a stale token orphaned by a model restage) and ADD any a dropped
 	// action:pending push missed. Cards for other conversations, and in-flight
 	// (busy) confirms, are left untouched. Server truth (not a caught socket
-	// frame) decides what shows.
-	const live = new Set(items.map((it) => it.token));
-	pendingActions.value = pendingActions.value.filter(
-		(pa) => pa.conversation !== id || pa.busy || live.has(pa.token)
-	);
-	for (const it of items) {
+	// frame) decides what shows. A token whose Confirm/Discard RPC is in flight
+	// is never (re)added (P0c in-flight suppression) - see reconcilePending.
+	const { kept, toAdd } = reconcilePending(pendingActions.value, id, items, inflightTokens);
+	// Server truth also says which kept cards are still "recent" (decision 6).
+	const fresh = new Map(items.map((it) => [it.token, it]));
+	for (const pa of kept)
+		if (pa.conversation === id && fresh.has(pa.token))
+			pa.recent = fresh.get(pa.token).recent !== false;
+	pendingActions.value = kept;
+	for (const it of toAdd) {
 		enqueuePending({
 			conversation: it.conversation || id,
 			token: it.token,
@@ -7933,7 +7624,10 @@ async function resyncPendingConfirmations(id) {
 			summary: it.summary || "",
 			preview: it.preview || null,
 			run_id: it.run_id || null,
+			created_at: it.created_at || null,
 			expires_at: it.expires_at || null,
+			seq: it.seq ?? null,
+			recent: it.recent,
 		});
 	}
 }
@@ -7962,7 +7656,9 @@ function startPendingPoll() {
 			stopPendingPoll();
 			return;
 		}
-		resyncPendingConfirmations(currentId.value);
+		// "auto" tags the silent auto-heal poll (matches the PWA + widget), so the server's
+		// per-source rescue signal attributes recoveries correctly; auto is never logged.
+		resyncPendingConfirmations(currentId.value, "auto");
 		// Keep polling while a run is live; once it settles, run a couple of
 		// trailing reconciles (a terminal frame can be the dropped one) then stop.
 		if (currentRunId.value) _pendingPollIdle = 0;
@@ -8367,7 +8063,6 @@ const artifactKind = computed(() =>
 		? null
 		: detectArtifactKind(activeTools.value, { dashboardTurn: dashboardBuildTurn.value })
 );
-const artifactTitle = computed(() => ARTIFACT_TITLES[artifactKind.value] || "");
 const artifactPhaseKey = computed(() =>
 	artifactBuildPhase(artifactKind.value, {
 		activeTools: activeTools.value,
@@ -8378,6 +8073,149 @@ const artifactPhaseKey = computed(() =>
 const artifactPhases = computed(() => artifactPhaseList(artifactKind.value));
 const artifactTickIndex = computed(() =>
 	phaseTickIndex(artifactPhaseKey.value, artifactPhases.value)
+);
+// ── Turn view builders (T5a; T5b mounts these into StepsBox) ───────────────
+// One steps box per turn (design canvas rule 2): boxViewFor(m) is what a
+// single assistant row shows — live while it is the currently-running turn's
+// own row, folded once it has settled (or once mid-turn its answer is
+// showing with no tool running); inFlightView + inFlightRowVisible cover the
+// turn that is running but has no assistant row yet (before run:start's
+// upsert above gives it one).
+const MEDIA_YIELD_TOOLS = new Set([
+	"image_generate",
+	"imagegen",
+	"video_generate",
+	"music_generate",
+]);
+// The live box's `override`: whichever state currently owns the CURRENT
+// step, in precedence order. Only one ever applies to a given row at a time.
+function overrideFor(m) {
+	if (gotoMorph.value) return { text: "Taking you to the Dashboards builder" };
+	if (recovering.value && m && recovering.value.message_id === m.name) {
+		// agent-yield after a media tool means the model handed back control
+		// waiting on the asset (image/video/music), not a stalled connection.
+		const mediaSeen = activeTools.value.some((t) =>
+			MEDIA_YIELD_TOOLS.has(toolBaseName(t.name))
+		);
+		return {
+			text:
+				recovering.value.reason === "agent-yield" && mediaSeen
+					? "Waiting for the image"
+					: "Finishing in the background",
+			sub: recoveringLabel.value,
+		};
+	}
+	if (compacting.value)
+		return {
+			text: "Reorganising this chat",
+			sub: compactHintSeed.value ? `“${compactHintSeed.value}”` : "",
+		};
+	const preConnect = preConnectStatusLabel(statusPhase.value);
+	if (preConnect) return { text: "Starting", sub: preConnect };
+	return null;
+}
+// The live signals shared by every row that is currently the running turn —
+// the real row once one exists, and the synthetic in-flight row before it
+// does (`m` is null there, so overrideFor only skips its recovering branch,
+// and stepsFor/candidateFor only skip their msgId fallback, both of which
+// need a real message anyway). liveBox (@/lib/liveTurn) turns them into one
+// view.
+function liveBoxViewFor(m) {
+	return liveBox({
+		steps: stepsFor(m),
+		candidate: candidateFor(m),
+		activeTools: visibleActiveTools.value,
+		waiting: waiting.value,
+		statusPhase: statusPhase.value,
+		artifactKind: artifactKind.value,
+		elapsed: liveElapsedLabel.value,
+		showDetail: showActivityDetail.value,
+		toolPhrase: currentTool.value ? toolPhrase(currentTool.value) : "",
+		override: overrideFor(m),
+		idleText: thinkingWord.value,
+	});
+}
+/**
+ * The StepsBox view for one assistant row. Live while it is the
+ * currently-running turn's own row and either has no visible answer text yet
+ * or a tool is running (rule 6: the box folds once the answer shows AND no
+ * tool runs, and reopens if a tool starts again — re-evaluated every render,
+ * so no explicit "reopen" state is needed). Folded (the saved activity
+ * strip) once settled or mid-turn-but-answering. Null when there is nothing
+ * worth a line (foldedHead's own "old reply, no duration, no tools" case).
+ */
+// Saved tool rows plus tools seen live, never counted twice (liveTurn.turnToolNames).
+function toolNamesFor(m, liveTools) {
+	return turnToolNames(activityByAssistant.value[m.name] || [], liveTools);
+}
+function boxViewFor(m) {
+	if (!m || m.role !== "assistant") return null;
+	const isRecovering = recovering.value && recovering.value.message_id === m.name;
+	const isLive = isRecovering || (currentRunId.value && m.name === currentMsgId.value);
+	// A stopped or errored message is SETTLED the moment it stops/fails,
+	// whatever currentRunId still says (review C4): stopRun sets m.stopped
+	// synchronously but only clears currentRunId later, via the run's own
+	// eventual terminal event or the next turn's run:start, so isLive can
+	// stay true right after a Stop/error click. Route unconditionally to the
+	// same settled/folded branch below — one code path computes the
+	// stopped/failed head; the live-fold branch never sees these flags.
+	if (!isLive || m.stopped || m.error) {
+		const fin = finishedRun.value.msgId === m.name ? finishedRun.value : null;
+		const head = foldedHead({
+			seconds: elapsedOf(m) || (fin && fin.seconds),
+			toolNames: toolNamesFor(m, fin && fin.tools),
+			finishing: enrichmentPending.value.has(m.name),
+			stopped: !!m.stopped,
+			failed: !!m.error && errorInfo(m).code !== "cancelled",
+			showDetail: showActivityDetail.value,
+		});
+		return head ? { mode: "folded", head } : null;
+	}
+	const answerShowing = !!(m.content || "").trim();
+	if (!answerShowing || currentTool.value) return { mode: "live", ...liveBoxViewFor(m) };
+	// The answer is showing and nothing is running: fold, freezing the
+	// elapsed reading at the moment it first showed (liveAnswerShownAt)
+	// rather than the still-ticking live timer, so the head doesn't keep
+	// climbing under what already reads as a finished answer.
+	// A tab reloaded after the answer opened has no liveAnswerShownAt: read
+	// the (reload-seeded) run clock instead of showing no time at all.
+	const shownAt =
+		liveAnswerShownAt.value ??
+		(runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null);
+	return {
+		mode: "folded",
+		head: foldedHead({
+			seconds: shownAt,
+			toolNames: toolNamesFor(m, visibleActiveTools.value),
+			showDetail: showActivityDetail.value,
+		}),
+	};
+}
+// A turn is in flight (queued, or sent and waiting on run:start) but has no
+// assistant row yet to hang a box on — the synthetic row T5b renders (one
+// JarvisMark + StepsBox) reads these instead. False again the instant
+// run:start's upsert (above) gives the turn a real row.
+const inFlightRowVisible = computed(() => {
+	if (!queuedTurn.value && !busy.value) return false;
+	return !(currentMsgId.value && messages.value.some((m) => m.name === currentMsgId.value));
+});
+const inFlightView = computed(() =>
+	queuedTurn.value
+		? {
+				mode: "queued",
+				label: queuedChipLabel(queuedTurn.value.position, queuedTurn.value.state),
+		  }
+		: { mode: "live", ...liveBoxViewFor(null) }
+);
+// T5b: one call to boxViewFor per visible assistant row, memoised as a map
+// (not a per-render template call) so every #above-body reads the same
+// object instead of recomputing it once per row per re-render.
+const boxViewByMsg = computed(() =>
+	Object.fromEntries(
+		visibleMessages.value
+			.filter((m) => m.role === "assistant")
+			.map((m) => [m.name, boxViewFor(m)])
+	)
 );
 // Scaled-preview geometry for the finished-canvas thumbnail card (below);
 // fixed source viewport since the canvas itself has no set design width.
@@ -8711,6 +8549,12 @@ async function loadConversation(id) {
 	// with its stale, truncated target - a shortened answer with no spinner and no
 	// error, fixable only by a hard refresh. flushReveal() cancels the loop and
 	// clears all reveal state, so nothing survives to touch the new array.
+	//
+	// review C3: no snapCandidateInto needed — this is the "conversation
+	// switch, row reloads from server" case. `messages.value` is replaced
+	// with `d.messages` on the very next line, so whatever this flush snapped
+	// (blank candidate or not) is discarded immediately in favour of the
+	// server-authoritative row.
 	flushReveal();
 	messages.value = d?.messages || [];
 	// VR4-2: re-inject any failed optimistic bubbles whose send was rejected while THIS conversation
@@ -8735,14 +8579,16 @@ async function loadConversation(id) {
 	// clicked — and leave it gone for good when that refetch rejects.
 	originPage.value = d?.conversation?.origin_page || "";
 	originOf.value = id;
-	// Per-conversation auto-apply + a fresh confirm-card slate for this chat
-	// (issue #186): a pending write from another conversation must not linger.
-	convAutoApply.value = !!(d?.conversation && d.conversation.auto_apply);
-	autoApplyNote.value = "";
 	// Per-conversation confirm-card slate (issue #186): drop any parked cards from
 	// OTHER conversations, then re-surface this conversation's still-live parked
 	// confirmations (R3 fix for #3 - survives reload / reconnect).
 	pendingActions.value = pendingActions.value.filter((pa) => pa.conversation === id);
+	// PR-1 reliability: seed the confirm-card queue from THIS conversation's durable
+	// pending action-rows (get_conversation), so a reload shows a confirmable card even
+	// when the best-effort action:pending push was missed — the card rides the same
+	// reliable message pipeline as the reply text. resyncPendingConfirmations (the Redis
+	// backstop) below reconciles; enqueuePending dedups by token.
+	seedPendingFromRows(messages.value, id);
 	resyncPendingConfirmations(id);
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
@@ -8793,6 +8639,72 @@ async function loadConversation(id) {
 			waiting.value = !(_streaming.content || "").trim();
 			store.streamingConvId = id;
 			_resumed = true;
+			// T2's reload contract: for a still-streaming row get_conversation now
+			// also returns the run identity (run_id, last_event_seq, pump_epoch)
+			// and the server-recorded step sentences (live_steps — the row's
+			// content already has them stripped). Seed the client's own
+			// run/step/fence state from it so a fresh tab opened mid-turn attaches
+			// to the SAME run instead of waiting for a run:start that will never
+			// come (the run is already in progress). Tolerate the fields being
+			// absent (old backend) — everything below is a no-op then.
+			//
+			// Why the seed matters: toolEventIsStale reads ONLY currentRunId
+			// ("if (!currentRunId.value) return true"), and pumpFenceReject reads
+			// ONLY the fence map (an absent entry accepts — see eventFence.js). So
+			// with currentRunId left null, every run:step/tool:start/tool:end for
+			// this run would be dropped as stale until the run's own terminal
+			// (run:end/run:error) finally reloads the conversation — the step box
+			// would sit frozen at whatever live_steps carried until then. Setting
+			// currentRunId (and seeding the fence's watermark so an already-seen
+			// event doesn't replay) is what makes those later events attach.
+			if (_streaming.run_id) {
+				currentRunId.value = _streaming.run_id;
+				currentMsgId.value = _streaming.name;
+				// The run started before this tab loaded: start the elapsed clock
+				// from the reply row's creation so the current step's sub-line and
+				// the folded head still show real time (flow review F1). Ignored
+				// when the clocks disagree (a browser in another timezone).
+				const started = Date.parse(String(_streaming.creation || "").replace(" ", "T"));
+				const age = Date.now() - started;
+				if (Number.isFinite(started) && age >= 0 && age < 30 * 60 * 1000) {
+					runStartMs.value = started;
+					nowMs.value = Date.now();
+				}
+				liveSteps.value = {
+					runId: _streaming.run_id,
+					msgId: _streaming.name,
+					steps: stepsFromTexts(_streaming.live_steps),
+				};
+				// A reload mid-narration gets the stored text of a sentence the
+				// relay has not moved into the step list yet. Split it exactly
+				// like a live delta (flow review F6): it types into the box
+				// instead of showing as the answer and folding the box, and a
+				// real answer already showing freezes the head's time.
+				// A run that already ended (its row just has not settled yet) never
+				// sends this tab another terminal to snap a candidate back, so its
+				// text is the answer, however short (review E1).
+				const ended = RUN_ENDED_STATES.has(_streaming.turn_state);
+				const { candidate, answer } = splitNarration(_streaming.content || "", { ended });
+				liveCandidate.value = {
+					runId: _streaming.run_id,
+					msgId: _streaming.name,
+					text: candidate,
+					full: _streaming.content || "",
+				};
+				_streaming.content = answer;
+				liveAnswerShownAt.value =
+					answer && runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null;
+				if (_streaming.pump_epoch != null) {
+					pumpFenceAccept(
+						{
+							run_id: _streaming.run_id,
+							pump_epoch: _streaming.pump_epoch,
+							event_seq: _streaming.last_event_seq,
+						},
+						false
+					);
+				}
+			}
 		}
 	}
 	// Reconcile the sidebar streaming dot with the fetched state: if the store
@@ -9021,6 +8933,13 @@ function downloadSvgAsPng(svgEl) {
 function resetRunState() {
 	// Leaving the conversation: apply whatever is mid-reveal to the rows we are
 	// about to drop, so a reload of this chat cannot find a truncated message.
+	//
+	// review C3: every caller (selectConversation, newChat, the vanished-
+	// conversation watcher) either awaits loadConversation right after, which
+	// replaces `messages.value` wholesale from the server, or has already
+	// emptied `messages.value` itself — the row this might blank is either
+	// about to be discarded or already gone, same as loadConversation's own
+	// flush above.
 	flushReveal();
 	sending.value = false;
 	waiting.value = false;
@@ -9188,7 +9107,13 @@ function onDocClick(e) {
 	if (!e.target.closest(".jv-composer")) mention.value = { ...mention.value, open: false };
 }
 async function retry(messageId) {
-	if (retrying.value) return;
+	// Guard the WHOLE run, not just the enqueue: `retrying` clears in the finally
+	// below as soon as retryMessage() returns, but the turn keeps running (busy =
+	// sending || waiting) until the socket delivers the result. Without `busy`
+	// here the error card's Retry re-enables mid-run and every click launches
+	// another turn - the agent working "again and again". busy also blocks a
+	// retry while any other turn is in flight (single-flight chat).
+	if (retrying.value || busy.value) return;
 	retrying.value = true;
 	sending.value = true;
 	waiting.value = true;
@@ -9252,6 +9177,8 @@ function resendFailed(m) {
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg, resendAck) {
+	// Restoration must choose the destination before a send captures its conversation scope.
+	if (booting.value) return;
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
 	// send() directly (AskCard/answer/resend/prefill), not just the disabled composer. On the FIRST
 	// mid-session send holdActive is still false, so the detection branch below is preserved.
@@ -9281,6 +9208,24 @@ async function send(textArg, resendAck) {
 		if (compactCmd.hint) await runCompact(compactCmd.hint);
 		else openCompactDialog("");
 		return;
+	}
+	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
+	// parked card instantly (source="typed"), no model round-trip. Only when it ACTUALLY
+	// surfaces one do we swallow the message; otherwise it falls through to a normal send,
+	// so a false positive never eats a message and the persona "show it" backstop stays
+	// reachable. Main-composer sends only (not resend/prefill).
+	if (fromMain && currentId.value && !pendingFiles.value.length && isShowCardRequest(text)) {
+		const _typedConv = currentId.value;
+		const before = visiblePendingActions.value.length;
+		seedPendingFromRows(messages.value, _typedConv);
+		await resyncPendingConfirmations(_typedConv, "typed");
+		// Swallow ONLY if a card actually surfaced AND we're still on the same conversation
+		// (a switch during the await must not clear the new composer).
+		if (currentId.value === _typedConv && visiblePendingActions.value.length > before) {
+			input.value = "";
+			notify("Found a pending confirmation.", { type: "success" });
+			return;
+		}
 	}
 	// A compaction in flight must never race a turn writing the same context.
 	// canSend already darkens Send while compacting, but Enter routes here
@@ -9436,6 +9381,9 @@ async function send(textArg, resendAck) {
 		// duplicating them (the lifecycle tests anchor on the FIRST occurrence of
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
+			// A typed "no" whose send then lost the admission race still discarded its
+			// cards (the server says which); they must not linger as live offers.
+			for (const t of discardedTokens(r)) removePending(t);
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
 			// Nothing was persisted — recover it (below) so no work and no voice audio
@@ -9557,6 +9505,13 @@ async function send(textArg, resendAck) {
 			await onTypedConfirmResolved(r);
 			return;
 		}
+		// A typed "no" discarded these before its turn started: drop them now, no
+		// reload mid-send. The user just spoke, so every card still here is Earlier;
+		// a yes/no that bound none raises the non-blocking note (decision 13).
+		const _spokeIn = r?.conversation_id || sentFrom;
+		for (const t of discardedTokens(r)) removePending(t);
+		markCardsEarlier(pendingActions.value, _spokeIn);
+		olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
@@ -9718,7 +9673,10 @@ function onEvent(p) {
 				summary: p.summary || "",
 				preview: p.preview || null,
 				run_id: p.run_id || null,
+				created_at: p.created_at || null,
 				expires_at: p.expires_at || null,
+				seq: p.seq ?? null,
+				recent: p.recent,
 			});
 			// Keep pulling server truth for the rest of the turn: if THIS push
 			// arrived but a sibling's was dropped, the poll fills the gap.
@@ -9788,6 +9746,20 @@ function onEvent(p) {
 			currentRunId.value = p.run_id;
 			currentMsgId.value = p.message_id;
 			recovering.value = null;
+			liveAnswerShownAt.value = null;
+			// T5a: there is no assistant row yet at this point (the message is
+			// created at pump promote, before the first token) — upsert a blank
+			// streaming one now instead of waiting for the first assistant:delta,
+			// so the synthetic in-flight row (inFlightView) can hand off to the
+			// real row the instant it exists. Dedupe by name: a duplicate/replayed
+			// run:start (or one racing a delta that already upserted) must never
+			// add a second row for the same message.
+			if (p.message_id && !messages.value.some((x) => x.name === p.message_id)) {
+				messages.value = [
+					...messages.value,
+					{ name: p.message_id, role: "assistant", content: "", streaming: true },
+				];
+			}
 			// A live turn can park a confirmation card mid-run; pull the parked
 			// list on a short interval so a dropped action:pending push self-heals.
 			startPendingPoll();
@@ -9853,19 +9825,66 @@ function onEvent(p) {
 			waiting.value = false;
 			statusPhase.value = null;
 			recovering.value = null;
-			// Upsert: the message may not be loaded yet when the first delta
-			// arrives — add it so streaming text shows immediately (the bug fix).
+			// p.text is the reply so far with step text already removed
+			// server-side (T1). splitNarration (@/lib/liveTurn) splits what's left:
+			// a short one-line sentence still types into the current step
+			// (liveCandidate) instead of the answer, so narration the relay
+			// hasn't classified as a step yet doesn't flash into the reply and
+			// back out. Steps themselves now persist for the whole turn (run:step
+			// above) — they are no longer cleared here.
+			const { candidate, answer } = splitNarration(p.text || "");
+			liveCandidate.value = {
+				runId: currentRunId.value,
+				msgId: currentMsgId.value,
+				text: candidate,
+				full: p.text || "",
+			};
+			if (answer && liveAnswerShownAt.value == null && runStartMs.value)
+				liveAnswerShownAt.value = (Date.now() - runStartMs.value) / 1000;
+			// Upsert: run:start (above) usually beats this to it now, but this
+			// stays as the fallback for a delta that somehow arrives first —
+			// streaming text must show immediately either way (the bug fix).
 			let m = messages.value.find((x) => x.name === p.message_id);
 			if (!m) {
 				m = { name: p.message_id, role: "assistant", content: "", streaming: true };
 				messages.value = [...messages.value, m];
 			}
-			// Reveal paced rather than assigned. The first delta of a message comes
-			// back whole, so the row never renders empty (the view hides an empty
-			// streaming row, which would flicker the reply out just as it arrives).
-			m.content = revealer.receive(p.message_id, p.text);
+			// Reveal paced rather than assigned, and only the ANSWER portion: while
+			// the text is still a step candidate, `answer` is "" and the row's
+			// content stays empty — the box types it, not the reply. The
+			// revealer's own rules (lib/streamReveal.js) still hold: the first
+			// call for an id always returns its argument whole (never a
+			// half-revealed empty row), and "" -> real text a call later is an
+			// EXTENSION (everything startsWith("")), not a rewrite, so it paces in
+			// normally once text outgrows a step. The row no longer needs hiding
+			// while blank either way: visibleMessages (below) always shows the
+			// live turn's own row now, blank or not, because it IS the box.
+			m.content = revealer.receive(p.message_id, answer);
 			m.streaming = true;
 			pumpReveal();
+			nextTick(scrollBottomIfPinned);
+			break;
+		}
+		case "run:step": {
+			// The model's own "what I'm doing" sentences, recorded for the whole
+			// turn (addStep dedupes/grows the last one — @/lib/liveTurn). Fenced
+			// like tool events so a stale run can't add to it.
+			if (pumpFenceReject(p)) break;
+			if (toolEventIsStale(p)) break;
+			pumpFenceAccept(p, false);
+			const rid = p.run_id || currentRunId.value;
+			const sameRun = liveSteps.value.runId === rid;
+			// A file/dashboard turn's narration takes the place of whichever
+			// artifact phase is current when the sentence arrives (the same
+			// phaseTickIndex(artifactBuildPhase(...), artifactPhaseList(...)) the
+			// StepsBox header ticks off, T5a); plain turns pass null.
+			const slot = artifactKind.value ? artifactTickIndex.value : null;
+			liveSteps.value = {
+				runId: rid,
+				msgId: currentMsgId.value,
+				steps: addStep(sameRun ? liveSteps.value.steps : [], p.text, slot),
+			};
+			waiting.value = false;
 			nextTick(scrollBottomIfPinned);
 			break;
 		}
@@ -9904,9 +9923,13 @@ function onEvent(p) {
 		}
 		case "canvas": {
 			// Agent produced a chart/canvas this turn — attach + render inline.
+			// T5c: three backend producers (chart/dashboard/file) each publish
+			// their OWN partial item list, so a straight assignment let a late
+			// push wipe out an earlier one's item. mergeCanvasItems (pure,
+			// @/lib/canvasMerge) merges by name instead — see its own header.
 			const cm = messages.value.find((x) => x.name === p.message_id);
 			if (cm) {
-				cm.canvas = p.items;
+				cm.canvas = mergeCanvasItems(cm.canvas, p.items);
 				ensureCanvas(cm);
 			}
 			break;
@@ -9919,6 +9942,12 @@ function onEvent(p) {
 			// at pump_epoch E so ANY later lower-epoch straggler is blocked PERMANENTLY.
 			if (pumpFenceReject(p, true)) break;
 			pumpFenceAccept(p, true);
+			if (p.message_id)
+				finishedRun.value = {
+					msgId: p.message_id,
+					seconds: runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null,
+					tools: visibleActiveTools.value.map((t) => ({ id: t.id, name: t.name })),
+				};
 			// C2 self-heal: a parked confirmation card whose best-effort action:pending
 			// push was missed rides the terminal here (settlement/finalize), so it appears
 			// at turn-end WITHOUT a manual reload. Deduped by token (enqueuePending), so the
@@ -9953,6 +9982,11 @@ function onEvent(p) {
 			resyncPendingConfirmations(currentId.value);
 			// Defensive: if a promoted turn's run:start was missed, retire the chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
+			// A short final answer that never grew past a step candidate must
+			// still land in the reply, not stay typed into the step box (review
+			// C3) — snapCandidateInto feeds it back into the revealer so the
+			// flush below snaps the ANSWER in, not "".
+			snapCandidateInto(p.message_id);
 			// Snap BEFORE clearing `streaming`: the SUX-6 identical-skip below assumes
 			// the streamed text already equals the final text, which is only true once
 			// the reveal cursor has caught up.
@@ -10165,6 +10199,11 @@ function onEvent(p) {
 					[p.message_id]: { code: p.code || "", changed_data: p.changed_data },
 				};
 			}
+			// Review C3: re-feed a still-typing step candidate before the flush,
+			// or "whatever streamed before the error stays whole" below is false
+			// for the common case (the model's first sentence, still typing into
+			// the step box, at the moment the run errors).
+			snapCandidateInto(p.message_id);
 			flushReveal(p.message_id); // whatever streamed before the error stays whole
 			recovering.value = null;
 			waiting.value = false;
@@ -10212,9 +10251,21 @@ function stopRun() {
 	if (currentMsgId.value) stoppedMsgIds.value.add(currentMsgId.value);
 	const m = [...messages.value].reverse().find((x) => x.role === "assistant" && x.streaming);
 	if (m) {
-		// Stop keeps whatever streamed. Snap first so the marker lands on the text
-		// the run actually produced, not on wherever the cursor happened to be.
+		// Stop keeps whatever streamed. Re-feed a still-typing step candidate
+		// (review C3) before the flush, so "whatever streamed" is true even
+		// when the click lands while the model's first sentence is still
+		// typing into the step box, not the reply. Snap first so the marker
+		// lands on the text the run actually produced, not on wherever the
+		// cursor happened to be.
+		snapCandidateInto(m.name);
 		flushReveal(m.name);
+		// "Stopped after 21s · 2 lookups": keep the run's time and tools for the
+		// head, as run:end does, since a stop never gets a run:end of its own.
+		finishedRun.value = {
+			msgId: m.name,
+			seconds: runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null,
+			tools: visibleActiveTools.value.map((t) => ({ id: t.id, name: t.name })),
+		};
 		m.streaming = false;
 		if (m.name) stoppedMsgIds.value.add(m.name);
 		// A stop is a state of the turn, not prose: leave whatever streamed
@@ -11313,6 +11364,13 @@ function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
 	// Going to the background stops requestAnimationFrame, so anything mid-reveal
 	// would sit frozen until the user came back. Snap it instead.
+	//
+	// review C3: not a terminal — the turn (and its candidate) is still live,
+	// nothing here clears liveCandidate or currentRunId. A candidate whose
+	// target is still "" just shows blank for the tab-hidden duration; the
+	// run's own events keep arriving and its eventual real terminal (already
+	// fixed above) snaps the candidate in properly. onResync above also
+	// re-fetches on return-to-visible, which self-heals sooner in practice.
 	else flushReveal();
 }
 
@@ -11385,8 +11443,15 @@ onMounted(async () => {
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	document.addEventListener("visibilitychange", onVisibility);
+	// Auto-heal (layered design, phase 1): window `focus` closes the gap visibility
+	// misses (OS focus returning to an already-visible tab, e.g. multi-monitor). Routes
+	// through the same 2s-debounced onResync wake, so a focus+visibility co-fire = one
+	// resync. Card-agnostic (never gated on a known pending card) so it recovers a card
+	// the client doesn't yet know about.
+	window.addEventListener("focus", onResync);
 	// Live tool list for the "Tools available" count + /tool autocomplete
 	// (best-effort; falls back to the seeded core set on failure).
 	api.listTools()
@@ -11462,52 +11527,53 @@ onMounted(async () => {
 		thinkTick.value = busy.value ? thinkTick.value + 1 : 0;
 		if (busy.value) nowMs.value = Date.now();
 	}, 1000);
-	ui.value = (await uiP) || {};
-	// Reconcile the persona pill with the server's current value, so a persona
-	// switched on another device shows up here too. Adopt only, never a write
-	// (persist:false), since this is us catching up to the server, not a change.
-	if (ui.value.preferred_persona !== undefined) {
-		store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
-	}
-	// Offer recovery of any recording a prior session left un-transcribed (a tab
-	// crash / accidental reload) — only when dictation is actually enabled.
-	// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
-	// THIS tab's own fragments from the offer. Deferring it to the first startMic
-	// left the id null at load, so the exclusion never applied and the banner
-	// could offer — then adopt or discard — this tab's own live take.
-	if (ui.value && ui.value.stt_enabled && micRec.supported) {
-		_ensureVoiceSession();
-		_loadRecovery();
-	}
-	// Load custom skills so the "/" composer menu can offer them.
-	loadCustomSkills();
 	// "Discuss in chat" hand-off (Review tab → chatPrefill stash). Take the
 	// stash on EVERY mount — a stale prompt must never survive to pop into the
 	// composer on a later, unrelated visit — but only act on it when landing
 	// on the chat home (no /c/:id param).
 	const prefill = takeChatPrefill();
 	const applyPrefill = !route.params.id && !!(prefill && prefill.text);
+	// ONE try/finally spans the whole boot so nothing can leave `booting` (and the composer) stuck.
 	try {
-		await convsP;
+		ui.value = (await bootStep(uiP)) || {};
+		// Reconcile the persona pill with the server's current value, so a persona
+		// switched on another device shows up here too. Adopt only, never a write
+		// (persist:false), since this is us catching up to the server, not a change.
+		if (ui.value.preferred_persona !== undefined) {
+			store.setPreferredPersona(ui.value.preferred_persona, { persist: false });
+		}
+		// Offer recovery of any recording a prior session left un-transcribed (a tab
+		// crash / accidental reload) — only when dictation is actually enabled.
+		// _ensureVoiceSession FIRST: it mints _voiceSessionId, which is what excludes
+		// THIS tab's own fragments from the offer. Deferring it to the first startMic
+		// left the id null at load, so the exclusion never applied and the banner
+		// could offer — then adopt or discard — this tab's own live take.
+		if (ui.value && ui.value.stt_enabled && micRec.supported) {
+			_ensureVoiceSession();
+			_loadRecovery();
+		}
+		// Load custom skills so the "/" composer menu can offer them.
+		loadCustomSkills();
+		await bootStep(convsP);
 		if (applyPrefill) {
 			// The prompt must land as the FIRST message of a FRESH conversation.
 			// Restoring the last conversation here would both wipe the composer
 			// (the async restore races the prefill) and risk sending a drafted
 			// governance prompt into an unrelated thread's context.
 			_consumedNewChat = false; // newChat() below satisfies a pending request too
-			await newChat();
+			await bootStep(newChat());
 		} else if (route.query.new) {
 			// Desk FAB deep-link (jarvis_widget.bundle.js -> config.mjs NEW_CHAT_URL):
 			// ?new=1 means start a fresh conversation instead of restoring the last
 			// one. Strip the query so a refresh doesn't force ANOTHER new chat.
 			router.replace({ name: "Chat" });
 			_consumedNewChat = false; // newChat() below satisfies a pending request too
-			await newChat();
+			await bootStep(newChat());
 		} else if (_consumedNewChat) {
 			// New Chat was requested from another route while we booted —
 			// start on a fresh empty conversation instead of restoring.
 			_consumedNewChat = false;
-			await newChat();
+			await bootStep(newChat());
 		} else {
 			// Restore the chat the user was last on (survives refresh + duplicated
 			// tab) before falling back to the first sidebar entry, so a starred
@@ -11523,7 +11589,7 @@ onMounted(async () => {
 			if (first) {
 				currentId.value = first;
 				try {
-					await loadConversation(first);
+					await bootStep(loadConversation(first));
 				} catch (e) {
 					// The URL/stored conversation is gone (a reaped empty, a cleared or
 					// externally-deleted chat) — don't let the unhandled rejection abort
@@ -11543,6 +11609,17 @@ onMounted(async () => {
 		}
 	} finally {
 		booting.value = false; // reveal welcome/thread only after the first load
+	}
+	if (_bootTimedOut) {
+		// Recoverable, not a dead end: the composer is live again and whatever was still loading
+		// fills in when (if) it arrives; a reload retries the whole boot.
+		notify(
+			"Chat is taking longer than usual to load. You can keep typing, or reload to try again.",
+			{
+				type: "error",
+				duration: 10000,
+			}
+		);
 	}
 	// The thread (and its chart skeletons) only enter the DOM now that booting is
 	// false — loadConversation's earlier processMermaid pass ran against an empty
@@ -11567,10 +11644,14 @@ onMounted(async () => {
 	composerRef.value?.focusInput();
 });
 onBeforeUnmount(() => {
+	// review C3: the component itself is being torn down (route navigation
+	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	document.removeEventListener("visibilitychange", onVisibility);
+	window.removeEventListener("focus", onResync);
 	document.removeEventListener("pointerdown", onDocClick);
 	window.removeEventListener("keydown", onGlobalKey);
 	clearInterval(_thinkTimer);
@@ -11632,15 +11713,13 @@ watchEffect(() => {
 			starredCount: starredCount.value,
 			toolCount: toolCount.value,
 		},
-		convAutoApply: convAutoApply.value,
-		autoApplyNote: autoApplyNote.value,
 		modelLabel: modelLabel.value,
 		ui: ui.value,
 	});
 });
 onMounted(() => {
 	// Actions with chat side-effects the panes invoke when a chat is active.
-	store.registerSettingsActions({ toggleAutoApply, clearAllHistory });
+	store.registerSettingsActions({ clearAllHistory });
 });
 onUnmounted(() => {
 	store.setChatContext(null);
@@ -11882,58 +11961,9 @@ onUnmounted(() => {
 .jv-metabar:empty {
 	display: none;
 }
-/* Tool activity (agent-style): collapsible list of tool calls with I/O */
-.jv-activity {
-	margin: 0 0 10px;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	background: var(--surface-1);
-	overflow: hidden;
-}
-.jv-activity-head {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	width: 100%;
-	padding: 7px 11px;
-	background: transparent;
-	border: none;
-	cursor: pointer;
-	font-family: inherit;
-	font-size: 12px;
-	color: var(--text-2);
-	text-align: left;
-}
-.jv-activity-head:hover {
-	background: var(--surface-2);
-}
-.jv-activity-chev {
-	flex: none;
-	color: var(--text-3);
-	transition: transform 0.15s ease;
-}
-.jv-activity-chev.open {
-	transform: rotate(90deg);
-}
-.jv-activity-count {
-	font-weight: 600;
-	color: var(--text);
-	flex: none;
-}
-.jv-activity-preview {
-	color: var(--text-3);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	min-width: 0;
-}
-.jv-activity-body {
-	border-top: 1px solid var(--border);
-	padding: 5px;
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-}
+/* Tool activity (agent-style): the per-tool I/O list, mounted in StepsBox's
+   #details slot now (T5b); the collapsible strip itself is StepsBox's own
+   .jv-steps-* styles (components/chat/StepsBox.vue). */
 .jv-tool {
 	border: 1px solid var(--border);
 	border-radius: 8px;
@@ -12374,25 +12404,6 @@ onUnmounted(() => {
 	overflow: hidden;
 	white-space: nowrap;
 }
-/* live tool activity rows */
-.jv-toolrow {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	font-size: 12.5px;
-	color: var(--text-2);
-	padding: 2px 0;
-}
-.jv-toolrow b {
-	font-weight: 600;
-	color: var(--text);
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: 12px;
-}
-.jv-tooldone {
-	color: var(--text-3);
-	font-size: 12px;
-}
 .jv-spin {
 	animation: jv-spin 0.8s linear infinite;
 }
@@ -12485,82 +12496,6 @@ onUnmounted(() => {
 		animation: none;
 	}
 }
-/* Phase-0 admission: Cancel affordance on the queued chip. Text-button idiom
-   (design.md), muted until hover. */
-.jv-queued-cancel {
-	appearance: none;
-	background: transparent;
-	border: none;
-	padding: 2px 6px;
-	margin: 0;
-	font: inherit;
-	font-size: 12px;
-	color: var(--text-3);
-	text-decoration: underline;
-	cursor: pointer;
-	border-radius: 5px;
-}
-.jv-queued-cancel:hover {
-	color: var(--text-1);
-	background: var(--surface-gray-2, rgba(0, 0, 0, 0.05));
-}
-/* live-status label: a gentle breathing shimmer so the "Working on it…" line
-   reads as active on its own, without the old bouncing dots competing with the
-   avatar mark's motion next to it. Disabled under reduced-motion below. */
-.jv-live-shim {
-	animation: jv-live-shim 1.8s ease-in-out infinite;
-}
-@keyframes jv-live-shim {
-	0%,
-	100% {
-		opacity: 0.55;
-	}
-	50% {
-		opacity: 1;
-	}
-}
-/* pre-redirect morph line (jarvis#884): occupies the exact same single-row
-   box as the generic "Working on it…" status line it replaces (same
-   font-size/gap/padding-top), so the transcript never jumps when one morphs
-   into the other. Compositor-friendly only: the chevrons animate
-   transform+opacity, nothing else — no width/height/position/background
-   properties in the keyframe, so the loop never triggers layout or paint
-   beyond the small icons themselves. Disabled under reduced-motion below. */
-.jv-goto-morph {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	padding-top: 4px;
-	font-size: 12px;
-	color: var(--text-3);
-}
-.jv-goto-chevrons {
-	display: inline-flex;
-	align-items: center;
-	color: var(--cta);
-}
-.jv-goto-chevron {
-	margin-left: -5px;
-	animation: jv-goto-chevron-slide 1s ease-in-out infinite;
-}
-.jv-goto-chevron:first-child {
-	margin-left: 0;
-}
-@keyframes jv-goto-chevron-slide {
-	0%,
-	100% {
-		transform: translateX(0);
-		opacity: 0.4;
-	}
-	50% {
-		transform: translateX(3px);
-		opacity: 1;
-	}
-}
-.jv-goto-arrow {
-	flex: none;
-	color: var(--text-3);
-}
 /* visually-hidden live region for screen-reader announcements (UX #5) */
 .jv-sr {
 	position: absolute;
@@ -12586,22 +12521,12 @@ onUnmounted(() => {
 	.jv-spin {
 		animation: none;
 	}
-	.jv-live-shim {
-		animation: none;
-		opacity: 1;
-	}
 	.jv-tool-dot.run,
 	.jv-mic-dot {
 		animation: none;
 	}
-	.jv-artifact-tick,
 	.jv-dash-thumb-loading {
 		animation: none;
-	}
-	.jv-goto-chevron {
-		animation: none;
-		opacity: 1;
-		transform: none;
 	}
 	.jv-settings,
 	.jv-skills-modal {
@@ -12854,17 +12779,6 @@ onUnmounted(() => {
 	border-radius: 999px;
 	padding: 2px 10px;
 }
-/* "You stopped this reply." - a muted rule under the body, in the same
-   vocabulary as .jv-msgtime. Deliberately NOT --red: the user chose to stop,
-   and dressing their own click as a failure is a lie about what happened. */
-.jv-stopped {
-	margin-top: 8px;
-	padding-top: 7px;
-	border-top: 1px solid var(--border);
-	font-size: 11.5px;
-	color: var(--text-3);
-}
-
 /* ===== settings panel (slide-over console) ===== */
 /* The settings modal's CSS lived here (.jv-settings-overlay / .jv-settings, a
    760px shell) until the dialog was HOISTED to components/shell/SettingsDialog.vue
@@ -14216,81 +14130,6 @@ onUnmounted(() => {
 	color: var(--cta);
 }
 
-/* common artifact activity card (jarvis#884): one shared card for any
-   artifact-producing main-chat turn (dashboard/pdf/spreadsheet/image),
-   replacing the dashboard-only card issue #874 shipped. Height is fixed from
-   first paint — head row + all four phase rows always render, tick state
-   only changes color/scale, never the row count — so the card never grows
-   once mounted. */
-.jv-artifact-card {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-	max-width: 260px;
-	padding: 10px 12px;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	background: var(--surface);
-}
-.jv-artifact-head {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 12px;
-	color: var(--text-2);
-}
-.jv-artifact-steps {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	margin: 0;
-	padding: 0;
-	list-style: none;
-}
-.jv-artifact-step {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	font-size: 11.5px;
-	color: var(--text-3);
-}
-.jv-artifact-step.done,
-.jv-artifact-step.current {
-	color: var(--text-2);
-}
-.jv-artifact-step.current {
-	color: var(--text);
-	font-weight: 550;
-}
-/* Tick "lighting up" is a transform/opacity transition (addendum #2/#8),
-   never a keyframe loop — only the CURRENT tick's gentle pulse (reused
-   jv-live-shim, already opacity-only) is a loop, and that is removed under
-   reduced-motion below. background-color is swapped directly (no
-   transition on it), so a state change is one cheap repaint, not an
-   animated one. */
-.jv-artifact-tick {
-	flex: none;
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--border-2);
-	transform: scale(0.7);
-	opacity: 0.8;
-	transition: transform 0.2s ease, opacity 0.2s ease;
-}
-.jv-artifact-step.done .jv-artifact-tick,
-.jv-artifact-step.current .jv-artifact-tick {
-	transform: scale(1);
-	opacity: 1;
-}
-.jv-artifact-step.done .jv-artifact-tick {
-	background: var(--green);
-}
-.jv-artifact-step.current .jv-artifact-tick {
-	background: var(--cta);
-	animation: jv-live-shim 1.8s ease-in-out infinite;
-}
-
 /* confirm / cancel card for a pending ERP-mutating action */
 .jv-confirm {
 	display: flex;
@@ -15006,6 +14845,35 @@ onUnmounted(() => {
 	border-color: var(--cta) !important;
 	filter: brightness(1.18);
 }
+/* Parked before the user's latest message: only its number binds it now. */
+.jv-pending-earlier {
+	margin-left: 6px;
+	padding: 1px 6px;
+	border-radius: 999px;
+	font-size: 11px;
+	color: var(--text-3);
+	background: var(--surface-2);
+}
+.jv-pending-age {
+	margin-left: 6px;
+	font-size: 11px;
+	color: var(--text-3);
+	white-space: nowrap;
+}
+.jv-pending-older-note {
+	margin: 4px 14px 8px;
+	font-size: 12px;
+	color: var(--text-3);
+}
+/* Empty, it stays in the accessibility tree but out of the thread's flex gap. */
+.jv-pending-older-note:empty {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+}
 /* The card's position in the parked stack. It is a selector, not decoration:
    "confirm 2" means this one. */
 .jv-pending-num {
@@ -15403,6 +15271,15 @@ onUnmounted(() => {
 	padding: 4px 0;
 	color: var(--text-2);
 	word-break: break-word;
+}
+.jv-rows-removed {
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	border-radius: 6px;
+	border: 1px solid var(--red-bd);
+	background: var(--red-bg);
+	color: var(--red);
+	font-size: 12px;
 }
 .jv-draft-table-title {
 	font-size: 12px;

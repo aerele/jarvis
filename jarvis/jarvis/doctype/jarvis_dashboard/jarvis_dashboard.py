@@ -62,6 +62,7 @@ class JarvisDashboard(Document):
 		# Derived, never author-set: the html contract is "declared sources ->
 		# live data at view time", so the type simply reflects the sources table.
 		self.dashboard_type = "Connected" if (self.sources or []) else "Static"
+		self._validate_filters()
 
 	# ------------------------------------------------------------------ #
 	# validate
@@ -182,3 +183,47 @@ class JarvisDashboard(Document):
 					)
 				)
 			_validate_source_row({"source_name": row.source_name, "tool": row.tool, "spec": row.spec})
+
+	def _validate_filters(self):
+		"""Filters are builder-declared and only make sense with sources. Every
+		placeholder in a source must name a declared filter, and every declared
+		filter must be used by at least one source (a control that does nothing
+		would only confuse viewers). Runs on every insert/save from any entry point."""
+		from jarvis.chat.dashboard_filters import check_placeholders, validate_filter_defs
+
+		rows = [
+			{
+				"fieldname": (r.fieldname or "").strip(),
+				"label": (r.label or "").strip(),
+				"fieldtype": r.fieldtype or "",
+				"options": (r.options or "").strip(),
+				"default_value": (r.default_value or "").strip(),
+				"reqd": 1 if r.reqd else 0,
+			}
+			for r in (self.filters or [])
+		]
+		if rows and not (self.sources or []):
+			frappe.throw(
+				_(
+					"Filters need at least one data source. Make the dashboard data-connected or remove the filters block."
+				)
+			)
+		validate_filter_defs(rows)
+		for r, row in zip(self.filters or [], rows, strict=True):
+			r.update(row)
+		declared = {r["fieldname"] for r in rows}
+		used: set = set()
+		for s in self.sources or []:
+			try:
+				spec = frappe.parse_json(s.spec or "{}")
+			except Exception:
+				spec = None
+			if not isinstance(spec, dict):
+				continue  # _validate_sources already rejected it
+			try:
+				used |= check_placeholders(s.tool, spec, declared)
+			except Exception as e:
+				frappe.throw(_("Source '{0}': {1}").format(s.source_name, str(e)))
+		unused = sorted(declared - used)
+		if unused:
+			frappe.throw(_("Filter(s) not used by any source: {0}").format(", ".join(unused)))

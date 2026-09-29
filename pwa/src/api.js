@@ -19,13 +19,17 @@ export const renameConversation = (conversation, title) =>
 	call(CHAT + "rename_conversation", { conversation, title });
 export const setStar = (conversation, starred) =>
 	call(CHAT + "set_star", { conversation, starred: starred ? 1 : 0 });
-export const setAutoApply = (conversation, value) =>
-	call(CHAT + "set_auto_apply", { conversation, value: value ? 1 : 0 });
 
 // Model name for the chat header, the model/effort pickers, and whether the mic
 // is allowed to appear (STT is off unless the admin configured a transcription
 // key).
 export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
+
+// Starter prompts for the empty new-chat screen: a few example asks, synthesised
+// server-side from the user's own recent chats (the same endpoint the desktop
+// SPA uses). Lives in user_settings_api, not the CHAT namespace.
+export const getPromptSuggestions = () =>
+	call("jarvis.chat.user_settings_api.get_prompt_suggestions");
 
 // An empty `conversation` is allowed: the backend creates (or focuses) the
 // user's empty conversation and returns its id as `conversation_id`, which
@@ -103,17 +107,25 @@ export const listInbound = (start = 0, page_length = 20, search = "") =>
 		start,
 		page_length,
 	});
-export const dropFile = (file_url, file_name) =>
-	call("jarvis.chat.filebox.drop_file", { file_url, ...(file_name ? { file_name } : {}) });
+// `file` (the upload's docname) pins the exact File; file_url is the fallback.
+export const dropFile = (file_url, file_name, file) =>
+	call("jarvis.chat.filebox.drop_file", {
+		file_url,
+		...(file_name ? { file_name } : {}),
+		...(file ? { file } : {}),
+	});
 
 // ── Write approvals (the write-safety gate) ─────────────────────────────────
 // A tool that would change ERP data is parked server-side and announced as an
 // `action:pending` event carrying a one-time token. confirm_tool is the ONLY
-// path that runs the parked call. There is no deny endpoint by design: dropping
-// the card leaves the token to expire, which is exactly what "no" means.
-export const listPendingConfirmations = (conversation) =>
+// path that runs the parked call. `source` is an optional provenance tag
+// (layered re-check design): the on-demand controls pass "pill"/"menu" and the
+// silent auto-heal passes "auto", so the backend attributes per layer how
+// often a card had to be re-surfaced (AC-detect rescue).
+export const listPendingConfirmations = (conversation, source) =>
 	call("jarvis.chat.actions_api.list_pending_confirmations", {
 		conversation: conversation || "",
+		...(source ? { source } : {}),
 	});
 export const confirmTool = (token, conversation) =>
 	call("jarvis.chat.actions_api.confirm_tool", { token, conversation: conversation || "" });
@@ -122,6 +134,11 @@ export const confirmTool = (token, conversation) =>
 // Reachable only from a card whose preview.card.approve_run is true.
 export const approveAndRun = (token, conversation) =>
 	call("jarvis.chat.actions_api.approve_and_run", { token, conversation: conversation || "" });
+// Deny (P0c): consumes the token, leaves a durable "discarded" receipt chip,
+// and fires no agent turn - mirrors the desktop SPA's dismissTool. DecisionSheet
+// gates this behind its own "Discard this action?" confirm.
+export const dismissTool = (token, conversation) =>
+	call("jarvis.chat.actions_api.dismiss_tool", { token, conversation: conversation || "" });
 
 // ── Draft writes (the ```jarvis-action``` card) ─────────────────────────────
 // The other half of the write story, and the one the phone was missing entirely:
@@ -135,6 +152,9 @@ export const approveAndRun = (token, conversation) =>
 // the write wants fieldnames.
 export const getDoctypeFormMeta = (doctype) =>
 	call("jarvis.chat.actions_api.get_doctype_form_meta", { doctype });
+// Saved values + child rows (each with its `name`) of one document, write-gated.
+export const loadDoc = (doctype, name) =>
+	call("jarvis.chat.actions_api.load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call("jarvis.chat.actions_api.apply_action", { action: JSON.stringify(action) });
 
@@ -154,7 +174,7 @@ export async function uploadFile(file) {
 	if (!r.ok) throw new Error(`Couldn't upload ${file.name} (${r.status})`);
 	const data = await r.json();
 	const f = data.message || data;
-	return { file_url: f.file_url, file_name: f.file_name || file.name };
+	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
 }
 
 // Dictation goes through the SPA's module unchanged: same endpoint, same

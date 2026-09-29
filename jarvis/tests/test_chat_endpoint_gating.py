@@ -102,16 +102,20 @@ def _calls_a_guard(node: ast.FunctionDef) -> bool:
 
 def _iter_chat_endpoints():
 	"""Yield ``(module, funcname, node)`` for every whitelisted function under
-	jarvis/chat/ — AST-derived so a new endpoint is swept automatically."""
-	for fname in sorted(os.listdir(_CHAT_DIR)):
-		if not fname.endswith(".py"):
-			continue
-		path = os.path.join(_CHAT_DIR, fname)
-		with open(path, encoding="utf-8") as fh:
-			tree = ast.parse(fh.read(), filename=path)
-		for node in ast.walk(tree):
-			if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_whitelisted(node):
-				yield fname[:-3], node.name, node
+	jarvis/chat/ (subpackages included) — AST-derived so a new endpoint is swept
+	automatically."""
+	for dirpath, dirnames, files in os.walk(_CHAT_DIR):
+		dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+		for fname in sorted(files):
+			if not fname.endswith(".py"):
+				continue
+			path = os.path.join(dirpath, fname)
+			module = os.path.relpath(path, _CHAT_DIR)[:-3].replace(os.sep, ".")
+			with open(path, encoding="utf-8") as fh:
+				tree = ast.parse(fh.read(), filename=path)
+			for node in ast.walk(tree):
+				if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_whitelisted(node):
+					yield module, node.name, node
 
 
 class TestChatEndpointGating(FrappeTestCase):

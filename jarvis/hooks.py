@@ -68,13 +68,14 @@ def __getattr__(name: str):
 # refreshes against the same client_id we used to mint.
 #
 # Source:
-#   OpenAI: openclaw/extensions/openai/openai-codex-device-code.ts:5
+#   OpenAI: upstream device-code implementation (see workspace integration reference)
 #
 # Google Gemini is deliberately absent - its consumer login-with-Google was
 # discontinued by Google 2026-06-18 (subscription removed 2026-08-19); Gemini
 # is available via API key only.
-# Anthropic Claude is deliberately absent - agent has no compatible
-# adapter for Claude Pro/Max subscriptions.
+# Claude Pro/Max signs in through its own browser relay (oauth/api.py
+# begin/complete_claude_cli_login) into the native Claude CLI runtime; it does
+# not register a client in this generic OAuth map.
 def _env_or_default(name: str, default: str) -> str:
 	import os
 
@@ -209,12 +210,15 @@ website_redirects = [
 # needs that DocType sync does not produce has to be seeded here: the roles no
 # DocType names ("Knowledge Wiki Manager", the two support roles) plus the
 # Personalisation Settings defaults. See jarvis/install.py.
-after_install = "jarvis.install.after_install"
+after_install = ["jarvis.legacy_compatibility.seed", "jarvis.install.after_install"]
+
+before_migrate = "jarvis.legacy_compatibility.seed"
 
 # Keep the Agents Marketplace catalog (Jarvis Agent Listing) in lockstep with
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	"jarvis.chat.runtime_profile.after_migrate",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows
 	# from the detector registry (best-effort; never blocks a migrate).
@@ -300,6 +304,11 @@ scheduler_events = {
 			# installation) before the reaper below mislabelled it a duration timeout.
 			# Cheap no-op (one indexed status query) when nothing is in flight.
 			"jarvis.chat.agent_scheduler.poll_dispatched_runs",
+			# Jarvis Pending Action reconciler (§4.6): an Executing row past 10 min ->
+			# Failed/interrupted (never re-run), lost settles re-delivered, held waiter
+			# retries, disabled owners' cards cancelled, plus the cards_open gauge.
+			# Cheap no-op (indexed status scans) while the table is empty.
+			"jarvis.chat.pending_actions.reconcile",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -372,6 +381,19 @@ scheduler_events = {
 		# no-pending-card discriminators the gate and on_terminal_turn use. Cheap no-op
 		# (one indexed flag scan) when nothing is stranded.
 		"jarvis.chat.session_lifecycle.reap_stranded_skill_autorun",
+		# Request-scoped "confirm all" backstop (design Layer B): clear a STRANDED
+		# request_autorun flag - a "confirm all" run whose worker died mid-request, so no
+		# reset fired and its sliding timestamp froze. Same shape as the skill reaper (a
+		# conversation-flag scan past the sliding TTL, with the no-live-turn + no-pending-
+		# card discriminators). Cheap no-op (one indexed flag scan) when nothing is stranded.
+		"jarvis.chat.session_lifecycle.reap_stranded_request_autorun",
+		# Action-card DELIVERY health (AC-detect / plan-check B-8): the invisible-
+		# submit-card bug slipped through because nothing measured whether a minted
+		# card reached the screen. This tick gauges open cards + STRANDED pending
+		# action-rows (a card minted but never resolved, dead token) over a rolling
+		# window, logs both to the greppable latency channel, and alerts past a
+		# threshold. Read-only (never flips a row); cheap (one bounded scan + peeks).
+		"jarvis.chat.session_lifecycle.reconcile_action_cards",
 		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
 		# as its owner, never Administrator); budget-capped; advances only on a
 		# successful enqueue. See jarvis/chat/agent_scheduler.py.
@@ -392,6 +414,9 @@ scheduler_events = {
 	],
 	"daily": [
 		"jarvis.onboarding.sync_connection",
+		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
+		# in committed batches; never Pending/Executing or a held row still resuming.
+		"jarvis.chat.pending_actions.purge",
 		# C2 (2026-06-16 review): nudge operators when the bench's
 		# agent_token is approaching or past its configured max age.
 		# Daily is plenty - the warning window is 7 days.
@@ -535,8 +560,15 @@ doc_events["Jarvis Conversation"] = {
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
 		"jarvis.chat.import_announce.on_conversation_trash",
+		# Pending actions: cancel + delete its chat cards (never an Executing one) and
+		# drop it from held rows' waiters.
+		"jarvis.chat.pending_actions.on_conversation_trash",
 	],
 }
+
+# A pending action never blocks deleting the conversation it points at; the
+# on_trash hook above cleans it up instead.
+ignore_links_on_delete = ["Jarvis Pending Action"]
 
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
@@ -574,6 +606,11 @@ default_log_clearing_doctypes = {
 	# The controller's clear_old_logs filters announced=1 AND modified<cutoff, so a
 	# still-live (announced=0) row is never swept.
 	"Jarvis Import Announcement": 30,
+	# Manager-facing audit trail of agent ERP writes (one metadata-only row per
+	# executed/discarded write). Append-only, so retention is the only cleanup;
+	# 90 days matches the other Jarvis logs. Its clear_old_logs prunes on the
+	# indexed `at` column.
+	"Jarvis Agent Write": 90,
 }
 
 # Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
@@ -672,6 +709,10 @@ permission_query_conditions.update(
 		"Jarvis Agent Run": "jarvis.chat.agent_permissions.run_query_conditions",
 		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.finding_query_conditions",
 		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.activity_query_conditions",
+		# Catalogue-visibility boundary: a non-admin never LISTS a teaser/hidden
+		# agent it hasn't installed via generic REST/Desk (the SPA masks; the raw
+		# row would leak the real name).
+		"Jarvis Agent Listing": "jarvis.chat.agent_permissions.listing_query_conditions",
 	}
 )
 has_permission.update(
@@ -682,6 +723,9 @@ has_permission.update(
 		"Jarvis Agent Run": "jarvis.chat.agent_permissions.has_run_permission",
 		"Jarvis Agent Finding": "jarvis.chat.agent_permissions.has_finding_permission",
 		"Jarvis Agent Activity": "jarvis.chat.agent_permissions.has_activity_permission",
+		# Catalogue-visibility boundary: deny a non-admin READ of a teaser/hidden
+		# listing it hasn't installed (raw REST get / get_doc).
+		"Jarvis Agent Listing": "jarvis.chat.agent_permissions.has_listing_permission",
 	}
 )
 
@@ -748,3 +792,49 @@ has_permission.update(
 		"Jarvis Dashboard": "jarvis.chat.dashboard_permissions.has_dashboard_permission",
 	}
 )
+
+# ---------------------------------------------------------------------------
+# Jarvis Pending Action (sealed executable cards)
+# ---------------------------------------------------------------------------
+# No DocPerm rows and a deny-all at the ORM: no REST/Desk/tool path reads or
+# writes a row (sealed args, open_key). Every read goes through whitelisted
+# endpoints with explicit authz.
+_PA_CONTROLLER = "jarvis.jarvis.doctype.jarvis_pending_action.jarvis_pending_action"
+permission_query_conditions.update(
+	{
+		"Jarvis Pending Action": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+	}
+)
+
+# Per-user agent memory: one row per user, and every list/report read is scoped to
+# the caller's own row (the remember/recall tools additionally key on
+# frappe.session.user in code). One user of a tenant can never enumerate a colleague's
+# memory even via a raw ORM list.
+permission_query_conditions.update(
+	{
+		"Jarvis User Memory": "jarvis.jarvis.doctype.jarvis_user_memory.jarvis_user_memory.get_permission_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Pending Action": f"{_PA_CONTROLLER}.has_permission",
+		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.has_permission",
+	}
+)
+
+# ---------------------------------------------------------------------------
+# llm_switch (jarvis#1425 follow-up)
+# ---------------------------------------------------------------------------
+# frappe.cache_manager.clear_cache()'s "everything" branch deletes every
+# site-prefixed redis key except one matched (as a PREFIX) by an entry here -
+# without this, any frappe.clear_cache() (e.g. pump.py's watchdog stamping a
+# __default via frappe.db.set_default, which frappe.defaults._clear_cache
+# turns into a full clear_cache()) wipes the active switch record mid-hold or
+# mid-apply: the banner clears, the poller sees no switch, and a still-running
+# handover/pool job's own finish() then hits a record that is simply gone
+# (live e2e2, 2026-09-27 - the record vanished at 18:26:04 and 18:42:07,
+# once before its job was ever released and once while the job was still
+# running). Redis locks (jarvis._redis_lock) are unaffected: they use
+# cache.lock() with a raw, unprefixed key, never this site-prefixed cache.
+persistent_cache_keys = ["jarvis:llm_switch"]

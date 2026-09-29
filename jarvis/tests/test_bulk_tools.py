@@ -214,9 +214,9 @@ class TestCollabBulk(FrappeTestCase):
 
 
 class TestBulkWriteGating(FrappeTestCase):
-	"""A bulk write to a normally-UNGATED light collab tool (add_tag/comment)
-	must PARK a confirmation card (the plugin/persona promise one card per batch),
-	even though the single form of those tools executes immediately."""
+	"""A light collab write (add_tag/comment) PARKS a confirmation card. Its BULK
+	form always parked (the plugin/persona promise one card per batch); as of design
+	A1 the SINGLE form parks too (every real change asks)."""
 
 	def _todo(self, desc):
 		return frappe.get_doc({"doctype": "ToDo", "description": desc}).insert().name
@@ -228,11 +228,13 @@ class TestBulkWriteGating(FrappeTestCase):
 		# parked, not executed - neither doc got tagged
 		self.assertNotIn("jbulk-gate", frappe.get_value("ToDo", a, "_user_tags") or "")
 
-	def test_single_light_write_still_executes(self):
+	def test_single_light_write_now_parks(self):
+		# design A1: the single form now gates too (it executed inline before).
 		a = self._todo("jbulk-gate-single")
 		r = api._run_tool("add_tag", {"doctype": "ToDo", "name": a, "tag": "jbulk-single"})
-		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
-		self.assertIn("jbulk-single", frappe.get_value("ToDo", a, "_user_tags") or "")
+		self.assertEqual((r.get("data") or {}).get("status"), "pending_confirmation")
+		# parked, not executed - the tag was not applied
+		self.assertNotIn("jbulk-single", frappe.get_value("ToDo", a, "_user_tags") or "")
 
 	def test_read_batch_is_capped(self):
 		from jarvis.tools.get_doc import get_doc

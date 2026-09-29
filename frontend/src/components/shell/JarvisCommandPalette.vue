@@ -125,6 +125,12 @@ const navItems = computed(() => [
 		action: () => store.requestNewChat(router),
 	},
 	{
+		name: "nav-what-can-i-ask",
+		label: "What can I ask Jarvis?",
+		icon: "help-circle",
+		action: () => store.requestNewChat(router),
+	},
+	{
 		name: "nav-chat",
 		label: "Chat",
 		icon: "message-circle",

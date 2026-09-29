@@ -140,7 +140,73 @@ def file_bytes(fdoc) -> bytes:
 	return content
 
 
-def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
+# Number formats for inferred numeric columns: ERPNext's own report export uses
+# the same thousands-grouped shapes (``XLSXStyleBuilder._build_number_format``).
+# Decimals get a fixed 2 places: exported figures are overwhelmingly amounts.
+XLSX_INT_FORMAT = "#,##0"
+XLSX_FLOAT_FORMAT = "#,##0.00"
+_XLSX_MIN_WIDTH, _XLSX_MAX_WIDTH = 8, 60
+
+
+def _sheet_layout(data: list) -> tuple[list[str], list[float]]:
+	"""Per-column ``kind`` ("int" / "float" / "date" / "datetime" / "text") and
+	width for a ``[header] + body`` sheet, shared by both engines so a 15 and a
+	16 export read the same. A column gets a numeric or date kind only when
+	every non-blank body value has that type (bool is not a number); anything
+	mixed stays "text" and is written as-is. Width fits the longest header or
+	value as displayed, clamped so one long note cannot make a column unusable.
+	"""
+	import datetime
+
+	header, body = (data[0], data[1:]) if data else ([], [])
+	kinds: list[str] = []
+	widths: list[float] = []
+	for c in range(len(header)):
+		values = [r[c] for r in body if c < len(r) and not _xlsx_blank(r[c])]
+		if values and all(isinstance(v, datetime.date) for v in values):
+			# a date-only value keeps a date-only format even in a mixed column:
+			# the builders pick the date or datetime format per cell
+			kind = "datetime" if any(isinstance(v, datetime.datetime) for v in values) else "date"
+		elif values and all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+			kind = "int"
+		elif values and all(_xlsx_number(v) for v in values):
+			kind = "float"
+		else:
+			kind = "text"
+		kinds.append(kind)
+
+		def shown(v, kind=kind):
+			if kind == "int":
+				return f"{v:,}"
+			if kind == "float":
+				return f"{v:,.2f}"
+			if kind == "date":
+				return "00-00-0000"
+			if kind == "datetime":
+				return "00-00-0000 00:00:00"
+			return str(v)
+
+		longest = max([len(str(header[c]))] + [len(shown(v)) for v in values], default=0)
+		widths.append(min(max(longest + 2, _XLSX_MIN_WIDTH), _XLSX_MAX_WIDTH))
+	return kinds, widths
+
+
+def _xlsx_blank(v) -> bool:
+	"""Blank for layout purposes: the same rule export_excel uses (None, or
+	text that is empty after stripping), so a stray " " in a date column does
+	not demote the column the date conversion just produced."""
+	return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _xlsx_number(v) -> bool:
+	"""A real number for Excel: int, float or Decimal (what SQL aggregates
+	such as SUM() return), never bool."""
+	from decimal import Decimal
+
+	return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
+
+
+def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Build a one-or-many-tab .xlsx workbook and return its bytes.
 
 	Probes for ``XLSXStyleBuilder`` (the Frappe 16 rewrite) rather than for the
@@ -151,33 +217,79 @@ def xlsx_bytes(sheet_data: list[tuple[str, list]]) -> bytes:
 	try:
 		from frappe.utils.xlsxutils import XLSXStyleBuilder
 	except ImportError:
-		return _xlsx_bytes_openpyxl(sheet_data)
-	return _xlsx_bytes_xlsxwriter(sheet_data)
+		return _xlsx_bytes_openpyxl(sheet_data, charts=charts)
+	return _xlsx_bytes_xlsxwriter(sheet_data, charts=charts)
 
 
-def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]]) -> bytes:
+def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Frappe 16: mirror ``make_xlsx``'s own workbook options so dates format
-	identically, then let it append a bold-header worksheet per tab."""
+	identically, then let it append a worksheet per tab, laid out by
+	:func:`_sheet_layout`: fitted widths, number and date formats per column,
+	a bold frozen header row and an autofilter over the data."""
+	import datetime
 	from io import BytesIO
 
 	import xlsxwriter
 	from frappe.utils.xlsxutils import XLSXStyleBuilder, make_xlsx
 
 	out = BytesIO()
+	# Dates default to the date-only format; a value that carries a time gets
+	# the datetime format per cell below, so a date never shows " 00:00:00".
 	wb = xlsxwriter.Workbook(
 		out,
-		{
-			"constant_memory": True,
-			"default_date_format": XLSXStyleBuilder.get_datetime_format(),
-		},
+		{"constant_memory": True, "default_date_format": XLSXStyleBuilder.get_date_format()},
 	)
-	for name, data in sheet_data:
-		make_xlsx(data, name, wb=wb)  # adds a worksheet to `wb`, returns None
+	# Style ids for make_xlsx's registry. Passing any styles switches off its
+	# built-in bold header, so the header row carries BOLD itself.
+	registry = [
+		{"bold": True},
+		{"num_format": XLSX_INT_FORMAT},
+		{"num_format": XLSX_FLOAT_FORMAT},
+		{"num_format": XLSXStyleBuilder.get_datetime_format()},
+	]
+	number_style = {"int": 1, "float": 2}
+	# make_xlsx sets a width, then styles the column with a second set_column
+	# that resets it; the width is set again after it returns, with an equal
+	# format (a column format lands on a row only when that row is flushed).
+	width_formats = {k: wb.add_format(registry[i]) for k, i in number_style.items()}
+	for index, (name, data) in enumerate(sheet_data):
+		kinds, widths = _sheet_layout(data)
+		column_styles = {c: [number_style[k]] for c, k in enumerate(kinds) if k in number_style}
+		# Only values that carry a time need a cell style, so a large export
+		# builds no per-cell map for plain numbers or dates.
+		cell_styles = {
+			(r, c): [3]
+			for r in range(1, len(data))
+			for c, v in enumerate(data[r])
+			if isinstance(v, datetime.datetime)
+		}
+		make_xlsx(  # adds a worksheet to `wb`, returns None
+			data,
+			name,
+			wb=wb,
+			column_widths=widths,
+			styles={
+				"styles": registry,
+				"row_styles": {0: [0]},
+				"column_styles": column_styles,
+				"cell_styles": cell_styles,
+			},
+		)
+		ws = wb.worksheets()[-1]
+		for c, (kind, width) in enumerate(zip(kinds, widths, strict=True)):
+			ws.set_column(c, c, width, width_formats.get(kind))
+		ws.freeze_panes(1, 0)
+		if kinds:
+			ws.autofilter(0, 0, max(len(data) - 1, 0), len(kinds) - 1)
+		if charts and charts[index]:
+			from jarvis._xlsx_charts import add_xlsxwriter_charts
+
+			add_xlsxwriter_charts(wb, ws, data, charts[index])
 	wb.close()
 	return out.getvalue()
 
 
-def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
+def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	"""Frappe 15: build the workbook here instead of via ``make_xlsx``.
 
 	15's ``make_xlsx`` saves the whole workbook on every call and returns the
@@ -195,20 +307,32 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 	from frappe.utils.xlsxutils import ILLEGAL_CHARACTERS_RE, get_excel_date_format, handle_html
 	from openpyxl.cell import WriteOnlyCell
 	from openpyxl.styles import Font
+	from openpyxl.utils import get_column_letter
 	from openpyxl.workbook.child import INVALID_TITLE_REGEX
 
 	wb = openpyxl.Workbook(write_only=True)
 	date_format, time_format = get_excel_date_format()
+	number_formats = {"int": XLSX_INT_FORMAT, "float": XLSX_FLOAT_FORMAT}
 
-	for sheet_name, data in sheet_data:
+	for index, (sheet_name, data) in enumerate(sheet_data):
 		ws = wb.create_sheet(INVALID_TITLE_REGEX.sub(" ", sheet_name))
 		ws.row_dimensions[1].font = Font(name="Calibri", bold=True)
-		for row in data:
+		# Same layout as the 16 path. A write-only sheet takes widths, the
+		# frozen header and the filter only before the first append.
+		kinds, widths = _sheet_layout(data)
+		for c, width in enumerate(widths, start=1):
+			ws.column_dimensions[get_column_letter(c)].width = width
+		ws.freeze_panes = "A2"
+		if kinds:
+			ws.auto_filter.ref = f"A1:{get_column_letter(len(kinds))}{max(len(data), 1)}"
+		for r, row in enumerate(data):
 			clean_row = []
-			for item in row:
+			for c, item in enumerate(row):
 				value = handle_html(item) if isinstance(item, str) else item
 				if isinstance(value, str) and next(ILLEGAL_CHARACTERS_RE.finditer(value), None):
 					value = ILLEGAL_CHARACTERS_RE.sub("", value)
+				kind = kinds[c] if c < len(kinds) else "text"
+				cell = None
 				if isinstance(value, datetime.date):  # datetime is a date subclass
 					cell = WriteOnlyCell(ws, value=value)
 					cell.number_format = (
@@ -216,10 +340,20 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]]) -> bytes:
 						if isinstance(value, datetime.datetime)
 						else date_format
 					)
-					clean_row.append(cell)
-				else:
-					clean_row.append(value)
+				elif r and kind in number_formats and _xlsx_number(value):
+					cell = WriteOnlyCell(ws, value=value)
+					cell.number_format = number_formats[kind]
+				if r == 0:
+					# the row-level font above does not reach written cells in a
+					# write-only sheet; bold each header cell itself
+					cell = cell or WriteOnlyCell(ws, value=value)
+					cell.font = Font(name="Calibri", bold=True)
+				clean_row.append(cell if cell is not None else value)
 			ws.append(clean_row)
+		if charts and charts[index]:
+			from jarvis._xlsx_charts import add_openpyxl_charts
+
+			add_openpyxl_charts(ws, data, charts[index])
 
 	out = BytesIO()
 	wb.save(out)

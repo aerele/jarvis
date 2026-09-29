@@ -19,10 +19,12 @@ Grouped by the thing that would break if the change were wrong:
 
 import json
 import unittest
+from unittest.mock import patch
 
 import frappe
 import frappe.permissions
 
+from jarvis import catalogue_visibility
 from jarvis.chat import agent_catalog, agents_api
 from jarvis.patches import v2_18_agent_access_grandfather as grandfather
 from jarvis.tests._agent_access import allow_listing_for, clear_listing_access
@@ -710,3 +712,734 @@ def _mk_install(owner: str, reviewer: str | None = None) -> str:
 	frappe.db.set_value(INSTALLATION, doc.name, "owner", owner, update_modified=False)
 	frappe.db.commit()
 	return doc.name
+
+
+# --------------------------------------------------------------------------- #
+# Operator catalogue visibility overlay (available / teaser / hidden)
+# --------------------------------------------------------------------------- #
+class TestOperatorVisibility(AccessGovernanceCase):
+	"""The ``operator_visibility`` overlay is operator-owned RUNTIME state that must
+	survive registry re-sync, exactly like ``allowed_roles`` — otherwise every
+	``bench migrate`` would revert an operator's live availability/masking decision."""
+
+	def setUp(self):
+		super().setUp()
+		# Order-independence: a sibling test runs sync_agent_listings, which
+		# DEPRECATES this non-registry fixture as a side effect. Reset the baseline
+		# (Published + available) before every test so masking assertions hold.
+		self._reset_visibility()
+
+	def _reset_visibility(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_value(
+			LISTING,
+			SLUG,
+			{"operator_visibility": "available", "status": "Published"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+
+	def test_defaults_to_available(self):
+		# A freshly created listing is 'available' — the catalogue stays lit by default.
+		self.assertEqual(frappe.db.get_value(LISTING, SLUG, "operator_visibility"), "available")
+
+	def test_survives_catalog_resync(self):
+		self.addCleanup(self._reset_visibility)
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		agent_catalog.sync_agent_listings()
+		frappe.db.commit()
+		self.assertEqual(
+			frappe.db.get_value(LISTING, SLUG, "operator_visibility"),
+			"teaser",
+			"operator_visibility was clobbered by sync_agent_listings — it must stay out of the values dict",
+		)
+
+	def test_survives_resync_update_branch(self):
+		# The fixture (not in the registry) hits the DEPRECATE branch; a REAL registry
+		# listing hits the UPDATE branch (doc.update(values)) — the live path a periodic
+		# migrate takes for a real agent, and the one where an in-`values` field would clobber.
+		real = frappe.db.get_value(LISTING, {"name": ["!=", SLUG], "status": "Published"}, "name")
+		if not real:
+			self.skipTest("no real registry listing on this bench")
+		prev = frappe.db.get_value(LISTING, real, "operator_visibility")
+
+		def _restore():
+			frappe.set_user("Administrator")
+			frappe.db.set_value(LISTING, real, "operator_visibility", prev, update_modified=False)
+			frappe.db.commit()
+
+		self.addCleanup(_restore)
+		frappe.db.set_value(LISTING, real, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		agent_catalog.sync_agent_listings()
+		frappe.db.commit()
+		self.assertEqual(frappe.db.get_value(LISTING, real, "operator_visibility"), "teaser")
+
+	# -- masking (U2) ------------------------------------------------------- #
+	REAL_TITLE = "Access Governance Auditor"
+
+	def _set_vis(self, visibility):
+		self.addCleanup(self._reset_visibility)
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", visibility, update_modified=False)
+		frappe.db.commit()
+
+	def _list_as(self, user):
+		frappe.set_user(user)
+		try:
+			return agents_api.list_agents()
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_teaser_masks_name_for_a_plain_user(self):
+		# A teaser is a PUBLIC coming-soon card: shown to a plain user (bypasses the
+		# deny-by-default gate) but with the real name/slug/details never leaving the server.
+		self._set_vis("teaser")
+		rows = self._list_as(self.plain)
+		blob = json.dumps(rows, default=str)
+		self.assertNotIn(self.REAL_TITLE, blob, "real title leaked to a plain user")
+		self.assertNotIn(SLUG, blob, "real slug (= the name) leaked to a plain user")
+		masked = [r for r in rows if r.get("masked")]
+		self.assertTrue(masked, "teaser should surface as a masked card")
+		self.assertTrue(all(r.get("title") == "Coming soon" for r in masked))
+
+	def test_teaser_get_agent_by_guessed_slug_is_masked(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		out = agents_api.get_agent(SLUG)  # a non-admin guesses the real slug
+		blob = json.dumps(out, default=str)
+		self.assertNotIn(self.REAL_TITLE, blob)
+		self.assertEqual(out["masked"], 1)
+		self.assertEqual(out["title"], "Coming soon")
+		self.assertNotEqual(out["agent_slug"], SLUG)
+
+	def test_hidden_is_absent_and_get_agent_404s_for_a_plain_user(self):
+		self._set_vis("hidden")
+		self.assertNotIn(SLUG, json.dumps(self._list_as(self.plain), default=str))
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.DoesNotExistError):
+			agents_api.get_agent(SLUG)
+
+	def test_admin_also_sees_teaser_masked(self):
+		# The operator's decision is final for EVERY role — an admin no longer sees through a
+		# teaser. get_agent returns the masked 'coming soon' card; the real name never leaks.
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		out = agents_api.get_agent(SLUG)
+		self.assertEqual(out["masked"], 1)
+		self.assertEqual(out["title"], "Coming soon")
+		self.assertNotIn(self.REAL_TITLE, json.dumps(out, default=str))
+
+	def test_admin_does_not_see_hidden_in_catalogue(self):
+		# Hidden applies to admins too: absent from the catalogue and get_agent 404s.
+		self._set_vis("hidden")
+		self.assertNotIn(SLUG, [r.get("name") for r in self._list_as(self.admin)])
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.DoesNotExistError):
+			agents_api.get_agent(SLUG)
+
+	def test_masked_teaser_does_not_leak_the_roster_to_an_admin(self):
+		# A masked 'coming soon' card must NOT ship the real agent's access roster (esp.
+		# allowed_users = named emails) to ANY viewer, admin included — it would fingerprint the
+		# withdrawn agent the operator's decision now hides from every role.
+		allow_listing_for(SLUG, user=self.named)
+		self.addCleanup(clear_listing_access, SLUG)
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		det = agents_api.get_agent(SLUG)
+		self.assertEqual(det["masked"], 1)
+		self.assertNotIn(self.named, json.dumps(det, default=str), "allowed_users email leaked in detail")
+		self.assertIsNone(det.get("allowed_users"))
+		row = next((r for r in agents_api.list_agents() if r.get("masked")), None)
+		self.assertIsNotNone(row)
+		self.assertNotIn(self.named, json.dumps(row, default=str), "allowed_users email leaked in list")
+		self.assertIsNone(row.get("allowed_users"))
+
+	def test_list_agents_page_applies_visibility_to_admins(self):
+		# The headline fix on the paginated SPA browse endpoint: an admin's available tab masks a
+		# teaser and drops a hidden agent, same as any role.
+		def page():
+			frappe.set_user(self.admin)
+			try:
+				return agents_api.list_agents_page(tab="available", page_length=100)["rows"]
+			finally:
+				frappe.set_user("Administrator")
+
+		self._set_vis("teaser")
+		rows = page()
+		self.assertTrue(any(r.get("masked") for r in rows), "admin browse must mask a teaser")
+		self.assertNotIn(self.REAL_TITLE, json.dumps(rows, default=str))
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		self.assertNotIn(SLUG, [r["name"] for r in page()], "admin browse must drop a hidden agent")
+
+	def test_owner_sees_installed_teaser_disabled_not_unmasked(self):
+		# The owner still sees their own install (so they can view / uninstall it), but it is
+		# DISABLED while the operator keeps the agent teaser/hidden, and is NOT offered for
+		# discovery in the browse tabs (installed_only).
+		_mk_install(self.plain)
+		self._set_vis("teaser")
+		row = next((r for r in self._list_as(self.plain) if r.get("name") == SLUG), None)
+		self.assertIsNotNone(row, "owner lost sight of their own installed agent")
+		self.assertEqual(row.get("masked", 0), 0, "the owner sees the real agent they installed")
+		self.assertEqual(row.get("install_disabled"), 1, "installed teaser/hidden is disabled")
+		self.assertEqual(row.get("installed_only"), 1, "not offered in the browse tabs")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.assertEqual(agents_api.get_agent(SLUG).get("install_disabled"), 1)
+
+	def test_installed_teaser_absent_from_browse_present_in_installed(self):
+		# The owner's disabled install shows ONLY in the Installed tab, never the browse tabs.
+		_mk_install(self.plain)
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		avail = [r["name"] for r in agents_api.list_agents_page(tab="available", page_length=100)["rows"]]
+		inst = [r["name"] for r in agents_api.list_agents_page(tab="installed", page_length=100)["rows"]]
+		self.assertNotIn(SLUG, avail, "a withdrawn install must not appear in the browse catalogue")
+		self.assertIn(SLUG, inst, "the owner still sees their disabled install in the Installed tab")
+
+	# -- doctype boundary (U3): the raw REST / Desk path ------------------- #
+	def test_raw_get_list_hides_teaser_from_a_plain_user(self):
+		# The generic API bypasses the SPA masking; the boundary hook must keep a
+		# plain user from listing a teaser row (whose raw title is the real name).
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		rows = frappe.get_list(LISTING, filters={"name": SLUG}, fields=["name", "title"])
+		self.assertEqual(rows, [], "raw get_list leaked a teaser row to a plain user")
+
+	def test_raw_get_list_admin_still_sees_teaser(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		rows = frappe.get_list(LISTING, filters={"name": SLUG}, fields=["name", "title"])
+		self.assertEqual([r["title"] for r in rows], [self.REAL_TITLE])
+
+	def test_raw_get_doc_read_denied_for_teaser_to_a_plain_user(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			frappe.get_doc(LISTING, SLUG).check_permission("read")
+
+	def test_app_catalog_still_masks_teaser_after_boundary(self):
+		# Regression guard: the boundary hook (get_list) must NOT strip the teaser from
+		# the SPA catalog (_enriched_catalog uses get_all) — it stays, masked.
+		self._set_vis("teaser")
+		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
+		self.assertTrue(masked, "boundary hook wrongly removed the teaser from the SPA catalog")
+
+	# -- install/run gating + push (U4) ----------------------------------- #
+	def test_teaser_refuses_install_even_for_an_allowed_user(self):
+		# A teaser can be Published + role-granted; the overlay gate must still refuse
+		# a NEW install — distinct from the access gate.
+		self._set_vis("teaser")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		frappe.set_user(self.roled)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_admin_may_install_a_teaser(self):
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.assertTrue(agents_api.install_agent(SLUG)["ok"])
+
+	# -- run-time gate: a withdrawn agent's existing install does not run ---- #
+	def test_run_agent_now_refused_when_operator_withdraws(self):
+		# An existing install stops running (disabled) the moment the operator sets the agent
+		# teaser/hidden — the manual run gate refuses it (the install itself is untouched).
+		inst = _mk_install(self.plain)
+		frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		self._set_vis("hidden")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.run_agent_now(inst)
+
+	def test_run_gate_is_reversible_no_stored_state(self):
+		# The gate is derived from operator_visibility at run time (no stored state / no
+		# mutation of the install's enabled flag), so available restores runnability.
+		self.assertFalse(agents_api._agent_is_withdrawn(SLUG))
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		self.assertTrue(agents_api._agent_is_withdrawn(SLUG))
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "available", update_modified=False)
+		self.assertFalse(agents_api._agent_is_withdrawn(SLUG))
+
+	def test_scheduler_skips_a_withdrawn_agents_install(self):
+		# The daily sweep must not dispatch a run for a withdrawn agent; it advances the slot
+		# (no busy-retry) instead of launching.
+		from jarvis.chat import agent_scheduler
+
+		self._set_vis("hidden")
+		row = frappe._dict(
+			owner=self.plain,
+			agent=SLUG,
+			schedule_frequency="daily",
+			schedule_time="09:00:00",
+			installable=1,
+		)
+		with (
+			patch.object(agent_scheduler, "_launch_audit") as launch,
+			patch.object(agent_scheduler, "_advance") as adv,
+			patch.object(agent_scheduler, "_record_failed") as rec,
+		):
+			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), "Administrator", set())
+		launch.assert_not_called()
+		# Deliberately NOT recorded as a failed run (withdrawal is a normal reversible operator
+		# state the owner can't fix); the slot is advanced without a phantom last_run_at.
+		rec.assert_not_called()
+		adv.assert_called_once()
+		self.assertEqual(
+			adv.call_args.kwargs.get("stamp_last_run"), False, "no phantom last_run_at on the skip"
+		)
+
+	def test_owner_can_uninstall_a_withdrawn_agent(self):
+		# The disabled install stays removable: the owner can uninstall it while it is hidden.
+		inst = _mk_install(self.plain)
+		self._set_vis("hidden")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		agents_api.uninstall_agent(inst)
+		self.assertFalse(frappe.db.exists(INSTALLATION, inst), "owner could not uninstall a withdrawn agent")
+
+	def test_hidden_refuses_install_even_for_an_allowed_user(self):
+		# hidden is the more security-sensitive state (an operator withdrawal); give it
+		# its own explicit gate test rather than inferring it from the teaser path.
+		self._set_vis("hidden")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		frappe.set_user(self.roled)
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_leg1_push_excludes_a_hidden(self):
+		self._set_vis("hidden")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		slugs = [e["slug"] for e in agent_catalog.build_agent_push_payload()]
+		self.assertNotIn(SLUG, slugs)
+
+	def test_existing_install_survives_masking(self):
+		# Grandfathering: install while available, then the operator masks it — the
+		# existing install still validates on re-save (NOT wired into installability).
+		name = _mk_install(self.plain)
+		self._set_vis("teaser")
+		frappe.get_doc(INSTALLATION, name).save(ignore_permissions=True)  # must NOT raise
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+
+	def test_leg1_push_excludes_a_teaser(self):
+		# A granted, Published teaser must NOT be pre-provisioned onto containers.
+		self._set_vis("teaser")
+		allow_listing_for(SLUG, roles=[ROLE_GRANTED])
+		self.addCleanup(clear_listing_access, SLUG)
+		slugs = [e["slug"] for e in agent_catalog.build_agent_push_payload()]
+		self.assertNotIn(SLUG, slugs)
+
+	# -- write endpoint + audit (U5) -------------------------------------- #
+	def test_set_visibility_requires_system_manager(self):
+		# Operator-global state: a TENANT Jarvis Admin must NOT be able to flip it.
+		frappe.set_user(self.admin)  # Jarvis Admin, NOT System Manager
+		self.addCleanup(frappe.set_user, "Administrator")
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.set_operator_visibility(SLUG, "teaser")
+
+	def test_set_visibility_writes_and_audits(self):
+		self.addCleanup(self._reset_visibility)
+		frappe.set_user("Administrator")  # System Manager
+		res = agents_api.set_operator_visibility(SLUG, "teaser")
+		self.assertEqual(res["visibility"], "teaser")
+		self.assertEqual(frappe.db.get_value(LISTING, SLUG, "operator_visibility"), "teaser")
+		# Audit: the endpoint writes via doc.save() and the listing has track_changes,
+		# so every flip produces a Version (actor + before->after). Frappe suppresses
+		# Version ROWS under flags.in_test, so assert the mechanism here; the actual
+		# Version creation is verified out-of-band (console: count 1->2, data carries
+		# 'operator_visibility').
+		self.assertEqual(frappe.get_meta(LISTING).track_changes, 1)
+
+	def test_set_visibility_rejects_an_unknown_value(self):
+		frappe.set_user("Administrator")
+		with self.assertRaises(frappe.ValidationError):
+			agents_api.set_operator_visibility(SLUG, "bogus")
+
+	# -- full seam matrix (U7): list_agents_page + search ----------------- #
+	def test_teaser_masked_in_list_agents_page(self):
+		# The SPA calls list_agents_page (paginated), not list_agents — pin the mask there too.
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		env = agents_api.list_agents_page(tab="available", page_length=100)
+		blob = json.dumps(env["rows"], default=str)
+		self.assertNotIn(self.REAL_TITLE, blob)
+		self.assertNotIn(SLUG, blob)
+
+	def test_search_by_real_name_does_not_surface_a_teaser(self):
+		# Searching the real title or slug must not confirm a masked agent (search runs
+		# on the already-masked rows).
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		for term in ("Access Governance", "access-gov"):
+			env = agents_api.list_agents_page(tab="available", search=term, page_length=100)
+			blob = json.dumps(env["rows"], default=str)
+			self.assertNotIn(SLUG, blob, f"search '{term}' surfaced the masked slug")
+			self.assertNotIn(self.REAL_TITLE, blob, f"search '{term}' surfaced the real title")
+
+	# -- review-loop fix wave -------------------------------------------- #
+	def test_jarvis_admin_cannot_flip_visibility_via_generic_write(self):
+		# A tenant Jarvis Admin (NOT System Manager) has generic write on the listing but
+		# MUST NOT override operator-global visibility via Desk / set_value / REST — the
+		# controller validate() blocks the field change on every write surface.
+		self._set_vis("teaser")
+		frappe.set_user(self.admin)  # Jarvis Admin, not System Manager
+		self.addCleanup(frappe.set_user, "Administrator")
+		doc = frappe.get_doc(LISTING, SLUG)
+		doc.operator_visibility = "available"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_masked_get_agent_strips_identity_details(self):
+		# Defense-in-depth: a masked card carries NO fingerprinting metadata (nature,
+		# version, install_count, ...), not just a hidden title/slug.
+		self._set_vis("teaser")
+		frappe.set_user(self.plain)
+		self.addCleanup(frappe.set_user, "Administrator")
+		out = agents_api.get_agent(SLUG)
+		for f in ("nature", "version", "publisher", "category", "tools_required", "validated_for_fy"):
+			self.assertIsNone(out.get(f), f"masked get_agent leaked {f}")
+		self.assertEqual(out.get("install_count"), 0)
+
+	def test_masked_list_row_strips_identity_details(self):
+		self._set_vis("teaser")
+		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
+		self.assertTrue(masked)
+		for f in ("nature", "version", "publisher", "validated_for_fy"):
+			self.assertIsNone(masked[0].get(f), f"masked list row leaked {f}")
+		self.assertEqual(masked[0].get("install_count"), 0)
+
+	# The FUTURE-PROOF no-leak assertion: every value on a masked row is either an
+	# allow-listed safe key or falsy/None — so a NEW listing field added later defaults
+	# to "must be redacted" instead of silently leaking (a substring check can't do this).
+	_MASK_SAFE_TRUTHY = {
+		"masked",
+		"opaque_id",
+		"name",
+		"agent_slug",
+		"title",
+		"status",
+		"operator_visibility",
+		"allowed",
+	}
+
+	def test_masked_row_reveals_only_allow_listed_keys(self):
+		self._set_vis("teaser")
+		masked = [r for r in self._list_as(self.plain) if r.get("masked")]
+		self.assertTrue(masked)
+		for k, v in dict(masked[0]).items():
+			if k in self._MASK_SAFE_TRUTHY:
+				continue
+			self.assertFalse(v, f"masked row leaked a truthy value for '{k}': {v!r}")
+		self.assertEqual(masked[0]["title"], "Coming soon")
+		self.assertEqual(masked[0]["status"], "Coming Soon")
+		self.assertTrue(str(masked[0]["agent_slug"]).startswith("cs-"))
+
+	def test_opaque_id_is_not_a_plain_hash_of_the_slug(self):
+		# HMAC (per-site secret), not sha256(slug): else a non-admin precomputes it for
+		# every enumerable slug and recovers the identity.
+		import hashlib
+
+		naive = "cs-" + hashlib.sha256(SLUG.encode()).hexdigest()[:16]
+		self.assertNotEqual(agents_api._opaque_id(SLUG), naive)
+		self.assertEqual(agents_api._opaque_id("x"), agents_api._opaque_id("x"))  # stable
+		self.assertNotEqual(agents_api._opaque_id("x"), agents_api._opaque_id("y"))  # unique
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 - the operator's fleet-global visibility policy, pulled + applied.
+# The pull (catalogue_visibility.persist_from_connection) is the ONLY authoritative
+# writer of a governed agent's visibility; the two guards make a governed agent
+# read-only to the tenant and un-installable by anyone (the "disable" guarantee).
+# --------------------------------------------------------------------------- #
+class TestCatalogueVisibilityPull(AccessGovernanceCase):
+	SETTINGS = catalogue_visibility.SETTINGS
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user("Administrator")
+		self._reset_listing()
+		self._clear_governed()
+		self.addCleanup(self._reset_listing)
+		self.addCleanup(self._clear_governed)
+
+	def _reset_listing(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_value(
+			LISTING, SLUG, {"operator_visibility": "available", "status": "Published"}, update_modified=False
+		)
+		frappe.db.commit()
+
+	def _clear_governed(self):
+		frappe.db.set_value(
+			self.SETTINGS,
+			self.SETTINGS,
+			{"catalogue_visibility_governed": "", "catalogue_visibility_synced_at": None},
+			update_modified=False,
+		)
+		frappe.clear_document_cache(self.SETTINGS, self.SETTINGS)
+		frappe.db.commit()
+
+	def _govern(self, mapping):
+		frappe.db.set_value(
+			self.SETTINGS,
+			self.SETTINGS,
+			"catalogue_visibility_governed",
+			frappe.as_json(mapping),
+			update_modified=False,
+		)
+		frappe.clear_document_cache(self.SETTINGS, self.SETTINGS)
+		frappe.db.commit()
+
+	def _vis(self):
+		return frappe.db.get_value(LISTING, SLUG, "operator_visibility")
+
+	def _stored(self):
+		raw = frappe.db.get_value(self.SETTINGS, self.SETTINGS, "catalogue_visibility_governed")
+		return frappe.parse_json(raw) if raw else {}
+
+	@staticmethod
+	def _conn(supported=True, **kw):
+		c = {}
+		if supported:
+			c["agent_visibility_supported"] = True
+		c.update(kw)
+		return c
+
+	# -- marker discipline (KEEP on any doubt) ------------------------------ #
+	def test_absent_marker_keeps_last_applied(self):
+		# An old / rolled-back CP sends no marker: never un-hide a withdrawn agent fleet-wide.
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection({"agent_visibility": {}})  # no marker
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "hidden", "absent marker must KEEP, never revert")
+		self.assertEqual(self._stored(), {SLUG: "hidden"})
+
+	def test_marker_present_key_absent_keeps(self):
+		self._govern({SLUG: "teaser"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection(self._conn())  # marker, no agent_visibility key
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser", "a transient/partial payload must KEEP")
+
+	def test_malformed_payload_is_rejected_whole_and_keeps(self):
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		for bad in ([1, 2], "hidden", {SLUG: "nope"}, {SLUG: "hidden", 3: "teaser"}):
+			catalogue_visibility.persist_from_connection(self._conn(agent_visibility=bad))
+			frappe.db.commit()
+			self.assertEqual(self._vis(), "hidden", f"malformed payload {bad!r} must KEEP, not revert")
+			self.assertEqual(self._stored(), {SLUG: "hidden"})
+
+	# -- authoritative apply ------------------------------------------------ #
+	def test_populated_policy_applies_and_records(self):
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "teaser"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser")
+		self.assertEqual(self._stored(), {SLUG: "teaser"})
+		self.assertTrue(catalogue_visibility.is_operator_governed(SLUG))
+		self.assertIsNotNone(
+			frappe.db.get_value(self.SETTINGS, self.SETTINGS, "catalogue_visibility_synced_at")
+		)
+
+	def test_empty_policy_reverts_all_governed(self):
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "available", "an explicit empty policy is authoritative: revert all")
+		self.assertEqual(self._stored(), {})
+		self.assertFalse(catalogue_visibility.is_operator_governed(SLUG))
+
+	def test_drop_from_policy_reverts_that_slug(self):
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "hidden"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "hidden")
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={"other-slug": "teaser"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "available", "a slug dropped from the policy returns to available")
+
+	def test_unknown_slug_is_skipped_not_fatal(self):
+		catalogue_visibility.persist_from_connection(
+			self._conn(agent_visibility={"no-such-listing": "hidden", SLUG: "teaser"})
+		)
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser", "the known slug still applied")
+		# The unknown slug stays in the stored map so governance attaches if its listing syncs in.
+		self.assertEqual(self._stored().get("no-such-listing"), "hidden")
+
+	def test_apply_is_idempotent(self):
+		conn = self._conn(agent_visibility={SLUG: "teaser"})
+		catalogue_visibility.persist_from_connection(conn)
+		frappe.db.commit()
+		mod1 = frappe.db.get_value(LISTING, SLUG, "modified")
+		catalogue_visibility.persist_from_connection(conn)
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser")
+		self.assertEqual(
+			frappe.db.get_value(LISTING, SLUG, "modified"), mod1, "a no-op re-apply must not churn modified"
+		)
+
+	def test_persist_never_raises(self):
+		# A broken payload degrades (logged) rather than taking down sync_connection.
+		try:
+			catalogue_visibility.persist_from_connection(self._conn(agent_visibility=object()))
+		except Exception as e:
+			self.fail(f"persist_from_connection must never raise; raised {e!r}")
+
+	# -- T-GUARD: governed visibility is read-only to the tenant ------------ #
+	def test_governed_slug_is_read_only_even_to_system_manager(self):
+		# The real scenario: a tenant SM tries to UN-HIDE a governed-hidden agent.
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		doc = frappe.get_doc(LISTING, SLUG)  # session = Administrator (a System Manager)
+		doc.operator_visibility = "available"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_ungoverned_slug_keeps_phase1_sm_only_rule(self):
+		# Not governed: a System Manager may still set it locally; a non-SM Jarvis Admin cannot.
+		doc = frappe.get_doc(LISTING, SLUG)
+		doc.operator_visibility = "teaser"
+		doc.save()  # Administrator = SM, allowed
+		self.assertEqual(self._vis(), "teaser")
+		self._as(self.admin)  # Jarvis Admin, NOT System Manager
+		doc = frappe.get_doc(LISTING, SLUG)
+		doc.operator_visibility = "available"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_pull_writes_bypass_the_guard(self):
+		# The authoritative pull uses db.set_value, so it is never blocked by T-GUARD.
+		self._govern({SLUG: "hidden"})
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "teaser"}))
+		frappe.db.commit()
+		self.assertEqual(self._vis(), "teaser")
+
+	# -- T-INSTALL: hard-gate new installs of a governed teaser/hidden ------ #
+	def test_governed_hidden_blocks_new_install_even_for_admin(self):
+		self._govern({SLUG: "hidden"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		# Administrator is a Jarvis Admin/SM, yet a GOVERNED hidden agent is un-installable.
+		with self.assertRaises(frappe.PermissionError):
+			_mk_install(self.admin)
+
+	def test_governed_teaser_blocks_new_install_for_plain_user(self):
+		self._govern({SLUG: "teaser"})
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "teaser", update_modified=False)
+		frappe.db.commit()
+		allow_listing_for(SLUG, user=self.plain)
+		self._as(self.plain)
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_ungoverned_hidden_keeps_admin_dogfood_bypass(self):
+		# Tenant-LOCAL hidden (not governed): a Jarvis Admin may still dogfood-install it.
+		frappe.db.set_value(LISTING, SLUG, "operator_visibility", "hidden", update_modified=False)
+		frappe.db.commit()
+		name = _mk_install(self.admin)  # Administrator, no governance -> allowed (Phase-1)
+		self.assertTrue(frappe.db.exists(INSTALLATION, name))
+
+	def test_grandfathering_existing_install_survives_governed_hide(self):
+		# Create an enabled install while available, THEN the operator governs it hidden via the
+		# PULL path: the existing install must survive (is_new-only gate), keep shipping on the
+		# owner's roster, and the owner still sees it unmasked (owner carve-out).
+		allow_listing_for(SLUG, user=self.named)
+		name = _mk_install(self.named)
+		frappe.db.set_value(INSTALLATION, name, "enabled", 1, update_modified=False)
+		frappe.db.commit()
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "hidden"}))
+		frappe.db.commit()
+		self.assertTrue(frappe.db.exists(INSTALLATION, name), "grandfathered install must not be stripped")
+		self.assertEqual(frappe.db.get_value(INSTALLATION, name, "enabled"), 1)
+		self.assertEqual(self._vis(), "hidden")
+		self.assertIn(
+			f"agent-{SLUG}",
+			[e["slug"] for e in agent_catalog.build_agent_push_payload(owner=self.named)],
+			"a governed hide must not strip a grandfathered install's delivery from the roster",
+		)
+		frappe.set_user(self.named)
+		self.addCleanup(frappe.set_user, "Administrator")
+		row = next((r for r in agents_api.list_agents() if r["name"] == SLUG), None)
+		self.assertIsNotNone(row, "the owner still sees their installed agent (owner carve-out)")
+		self.assertFalse(row.get("masked"), "the owner's own installed agent is not masked")
+
+	# -- review-loop fix-wave regressions ---------------------------------- #
+	def test_pull_applies_as_a_non_system_manager_jarvis_admin(self):
+		# The manual "Sync now" / boot paths run as the CLICKING user — a tenant Jarvis Admin
+		# that is NOT a System Manager. The apply writes via db.set_value, so it must never hit
+		# the Phase-1 SM guard and throw (which never-raises would then swallow, silently
+		# applying nothing). Pin the session-independence against regression.
+		self._govern({SLUG: "teaser"})
+		frappe.set_user(self.admin)  # Jarvis Admin, NOT System Manager
+		self.addCleanup(frappe.set_user, "Administrator")
+		catalogue_visibility.persist_from_connection(self._conn(agent_visibility={SLUG: "hidden"}))
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+		self.assertEqual(self._vis(), "hidden", "the pull must apply regardless of the caller's role")
+
+	def test_governed_slug_hard_gated_even_when_listing_field_lags_available(self):
+		# Version-skew window: the slug is governed (in the keyset) but its local listing still
+		# reads 'available' (freshly bundle-synced, before the next pull re-asserts the value).
+		# The keyset is authoritative — the agent must be un-installable by anyone, incl. an
+		# allowed plain user, in that window.
+		self._govern({SLUG: "hidden"})
+		self.assertEqual(self._vis(), "available")  # field intentionally lagging
+		allow_listing_for(SLUG, user=self.plain)
+		self._as(self.plain)
+		with self.assertRaises(frappe.PermissionError):
+			agents_api.install_agent(SLUG)
+
+	def test_governed_map_read_error_fails_open_but_logs(self):
+		# A corrupt/failed keyset read fails OPEN (nothing governed) but must never be silent.
+		with (
+			patch("jarvis.catalogue_visibility.frappe.get_cached_value", side_effect=RuntimeError("boom")),
+			patch("jarvis.catalogue_visibility.frappe.log_error") as mock_log,
+		):
+			self.assertEqual(catalogue_visibility.governed_map(), {})
+			self.assertFalse(catalogue_visibility.is_operator_governed(SLUG))
+			mock_log.assert_called()
+
+	def test_marker_present_key_absent_does_not_log(self):
+		# A transient/partial payload (marker, no key) is a benign KEEP, not an error — it must
+		# not spew a daily "malformed policy" Error Log. (Binds the key-absent early return.)
+		with patch("jarvis.catalogue_visibility.frappe.log_error") as mock_log:
+			catalogue_visibility.persist_from_connection(self._conn())
+			frappe.db.commit()
+			mock_log.assert_not_called()
+
+	def test_available_entry_in_the_map_is_dropped_not_governed(self):
+		# Defense-in-depth: a non-conforming CP entry of 'available' is treated as ungoverned
+		# (dropped from the governed map), so the map only ever holds teaser/hidden and the
+		# guards' governed => teaser/hidden assumption always holds.
+		catalogue_visibility.persist_from_connection(
+			self._conn(agent_visibility={SLUG: "available", "other-agent": "hidden"})
+		)
+		frappe.db.commit()
+		self.assertEqual(self._stored(), {"other-agent": "hidden"})
+		self.assertFalse(catalogue_visibility.is_operator_governed(SLUG))

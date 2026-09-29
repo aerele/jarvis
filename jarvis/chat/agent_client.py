@@ -1,24 +1,20 @@
-"""Openclaw gateway client - direct WebSocket with device-paired auth.
+"""Agent gateway client - direct WebSocket with device-paired auth.
 
-WIRE-CONTRACT BOUNDARY - "openclaw" is retained on purpose here (and in
-chat/device.py, chat/events.py, agent_ws.py, chat/relay_mux.py, the
-tools/*contract* files, and agent_templates/openclaw.json.j2). These are the
-runtime's own protocol/config identity - the WS method names, the device-auth
-envelope, the ghcr.io/openclaw/openclaw image, the openclaw.json config and the
-__openclaw__/ws marker - and renaming them would silently break the plugin /
-fleet-agent / container. Everywhere else in the app the runtime is called
-"agent"; jarvis/tests/test_no_openclaw_leak.py enforces that split. Do NOT
-rename "openclaw" in this file.
+WIRE-CONTRACT BOUNDARY - preserve the runtime's exact protocol identifiers,
+device-auth envelope, image coordinates, configuration filenames and route
+markers. Renaming those would break the plugin, fleet executor or container.
+Use "agent" or "gateway" in explanatory prose. The runtime-branding test
+enforces this distinction, including in this module.
 
 Previously this module shelled out to `docker compose exec ... node -e <script>`
-so the WS connection would appear as loopback inside the container - openclaw
+so the WS connection would appear as loopback inside the container - agent
 strips self-declared `operator.write` scopes from non-loopback token-only
 clients, and the chat worker needed write scope for sessions.create.
 
-Now we do it the way openclaw was designed for: pair the customer bench as
+The gateway supports pairing the customer bench as
 a device once (via jarvis.chat.device.ensure_paired → admin → fleet-agent),
 and present an Ed25519-signed v3 device-auth envelope at every connect.
-openclaw verifies the signature against the registered public key, grants
+The gateway verifies the signature against the registered public key, grants
 the requested scopes, and the rest of the protocol (sessions.create, agent,
 event streaming) is identical to what the Node script used to do - only the
 transport changed from subprocess-pipes to direct WS frames.
@@ -27,7 +23,7 @@ Public surface: AgentSession.connect / create_session / chat_send /
 relay_turn_events / set_session_model / subscribe_session / get_history /
 get_session_messages / is_run_active / fire_agent / stream_agent_turn /
 close. The managed chat path now uses the relay pair (chat_send +
-relay_turn_events): the turn is owned by openclaw after the chat.send ack,
+relay_turn_events): the turn is owned by agent after the chat.send ack,
 streaming rides the broadcast agent frames, completion comes from the
 run-scoped chat event, and relay_turn_events never raises after entry -
 interruptions degrade to snapshot recovery instead of errors.
@@ -38,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -59,11 +56,11 @@ from jarvis.chat.device import (
 )
 from jarvis.chat.events import parse_event
 
-# Openclaw gateway's WS frame format. Looks JSON-RPC-shaped but has its
+# Agent gateway's WS frame format. Looks JSON-RPC-shaped but has its
 # own type discriminator (``"type": "req"|"res"|"event"``) rather than
 # JSON-RPC 2.0's ``"jsonrpc": "2.0"`` field, so a generic JSON-RPC
 # library doesn't fit. The frame builders here are the (small,
-# explicit) protocol seam between the bench and openclaw's WS;
+# explicit) protocol seam between the bench and agent's WS;
 # centralised so the next time we need to add a frame field (e.g.
 # trace IDs, span context) it lands in one place rather than at every
 # ws.send site. Punch-list item "JSON-RPC framing reinvented" from
@@ -71,7 +68,7 @@ from jarvis.chat.events import parse_event
 
 
 def _build_request_frame(method: str, params: dict, *, req_id: str | None = None) -> tuple[str, str]:
-	"""Build a serialised openclaw request frame.
+	"""Build a serialised agent request frame.
 
 	Returns (json_payload, req_id) - caller passes json_payload to
 	ws.send and uses req_id to match the response frame.
@@ -109,12 +106,12 @@ CONNECT_TIMEOUT_SECONDS = 10
 CONNECT_OPEN_DEADLINE_SECONDS = 25
 CONNECT_OPEN_RETRY_BACKOFF_SECONDS = 2.0
 
-# openclaw v2026.6.8 (issue #29385) enforces gateway.controlUi.allowedOrigins on
+# agent v2026.6.8 (issue #29385) enforces gateway.controlUi.allowedOrigins on
 # LAN binds since v2026.2.26 and no longer honors a "*" wildcard: a
 # `--bind lan` gateway seeds ["http://localhost:18789", "http://127.0.0.1:18789"]
 # (its own internal port, a fixed constant) as the ONLY allowed origins. Our
 # server-side WS client isn't a browser, so it just has to present an Origin
-# openclaw accepts — send one of the seeded values, NOT a bare "http://localhost"
+# agent accepts — send one of the seeded values, NOT a bare "http://localhost"
 # (which the old "*" config used to wave through and now gets rejected).
 _GATEWAY_ORIGIN = "http://127.0.0.1:18789"
 # The primary (default) agent id the fleet-agent template keys the main roster
@@ -122,15 +119,15 @@ _GATEWAY_ORIGIN = "http://127.0.0.1:18789"
 # explicit agent selection (see create_session).
 _PRIMARY_AGENT_ID = "main"
 # Wall-clock cap on one agent turn waiting for the WS lifecycle to
-# complete (final lifecycle "end" frame from openclaw). Was 180s when
-# the bench + openclaw container ran on the same host (sub-ms WS
+# complete (final lifecycle "end" frame from agent). Was 180s when
+# the bench + agent container ran on the same host (sub-ms WS
 # RTT); bumped to 600s after a Frappe-Cloud-hosted bench + Hetzner-
-# hosted openclaw deploy hit the 180s cap on multi-recipient
+# hosted agent deploy hit the 180s cap on multi-recipient
 # announcement turns. Each tool call now crosses the public internet
 # (~50-200ms WAN RTT depending on FC↔Hetzner region pairing); a
 # typical multi-step turn with ~30 tool calls + a 26-recipient batch
 # send hit ~4-8s of pure network overhead alone, then ran past the
-# 180s ceiling before openclaw emitted lifecycle-end. The row-guard
+# 180s ceiling before agent emitted lifecycle-end. The row-guard
 # walk-back (jarvis#134) cut the tool-call count meaningfully but
 # WAN latency is a structural floor; the timeout has to absorb it.
 # The matching RQ envelope ``_AGENT_TURN_WORKER_TIMEOUT`` in
@@ -138,12 +135,26 @@ _PRIMARY_AGENT_ID = "main"
 # for this turn + pair + WS connect overhead.
 TURN_TIMEOUT_SECONDS = 600
 
+# The agent runtime's image/video/music generation tools unconditionally
+# detach into a background task on every normal chat session (no config switch): the
+# in-flight run is aborted with an EMPTY terminal (sessions_yield/turnHandoff),
+# then ~25-30s later a NEW run on the SAME sessionKey (a fresh runId) posts the
+# real reply. This bounds how long a turn waits for that follow-up before
+# falling back to today's error path. Comfortably inside TURN_TIMEOUT_SECONDS.
+YIELD_CONTINUATION_WAIT_S = 150
+
+# Polling granularity while waiting for the yield's continuation: short enough
+# that a user Stop pressed mid-wait (which cannot otherwise interrupt a single
+# long _recv call - the dead original runId will never post another frame) is
+# observed promptly.
+YIELD_CONTINUATION_POLL_S = 3.0
+
 # --- pinned one-shots (issue #531) ------------------------------------------
 #
 # ``fire_agent`` / ``stream_agent_turn`` are the only two RPCs here that carry
 # an explicit model/provider, and passing either one COSTS the run its whole
 # failover chain. Verified against the shipped bundle of
-# ghcr.io/openclaw/openclaw:2026.6.8:
+# gateway image version 2026.6.8:
 #
 #   agent-command: hasExplicitRunOverride = Boolean(opts.provider || opts.model)
 #                  resolveEffectiveModelFallbacks({
@@ -161,21 +172,21 @@ TURN_TIMEOUT_SECONDS = 600
 # The pin is deliberate and must NOT be "fixed" by dropping it: prewarm exists
 # to warm ONE model's prefix cache (a failover would warm the wrong one), and
 # auto-title deliberately bills against a cheap model rather than the pool
-# primary. What was wrong was that the resulting openclaw log
+# primary. What was wrong was that the resulting agent log
 # (``decision=surface_error ... next=none``) read exactly like a dead chain.
 #
 # Both halves of the fix live here, at the boundary that actually puts model on
 # the wire, so they cannot drift from the RPC params:
 #
 #  1. a pinned run id is prefixed differently from an unpinned one, which makes
-#     openclaw's own ``embedded run failover decision: runId=... next=none``
+#     agent's own ``embedded run failover decision: runId=... next=none``
 #     line self-describing without cross-referencing anything;
 #  2. the bench logs one line per pinned turn naming the run id and the pinned
 #     model, so the jarvis-side log answers the question on its own too.
 #
-# openclaw uses the idempotency key verbatim as the run id
+# agent uses the idempotency key verbatim as the run id
 # (``const idem = request.idempotencyKey; const runId = idem;``), so the prefix
-# survives to every failover log line. Both must stay clear of openclaw's own
+# survives to every failover log line. Both must stay clear of agent's own
 # ``exec-approval-followup:`` key namespace, and stay well under the 200-char
 # console truncation.
 #
@@ -188,11 +199,11 @@ ONESHOT_RUN_PREFIX = "jarvis-oneshot-"
 
 
 def oneshot_run_id(kind: str, unique: str, *, model: str | None, provider: str | None) -> str:
-	"""Idempotency key (== openclaw run id) for a throwaway one-shot turn.
+	"""Idempotency key (== agent run id) for a throwaway one-shot turn.
 
 	``kind`` names the feature (title / polish / prewarm); ``unique`` is
 	whatever already made the caller's key unique, kept so the run id still
-	points back at its session. openclaw dedupes on this key, so ``unique``
+	points back at its session. agent dedupes on this key, so ``unique``
 	must stay per-call. Pass the same model/provider the turn will send: they
 	decide which prefix the run id gets."""
 	prefix = PINNED_ONESHOT_RUN_PREFIX if (model or provider) else ONESHOT_RUN_PREFIX
@@ -202,7 +213,7 @@ def oneshot_run_id(kind: str, unique: str, *, model: str | None, provider: str |
 def _log_pinned_oneshot(run_id: str, model: str | None, provider: str | None) -> None:
 	"""Record that this turn traded failover away for a pinned model.
 
-	Keyed on the run id so it joins straight onto openclaw's
+	Keyed on the run id so it joins straight onto agent's
 	``embedded run failover decision: runId=...`` line. Without this a
 	``next=none`` from a pinned one-shot is indistinguishable from an
 	exhausted chain (issue #531)."""
@@ -224,7 +235,7 @@ _CLIENT_MODE = "backend"
 _ROLE = "operator"
 _PLATFORM = "linux"  # informational; only affects the v3 signature payload
 
-# openclaw rejection codes that indicate the customer's stored pairing
+# agent rejection codes that indicate the customer's stored pairing
 # is stale for the CURRENT container (typically because admin re-provisioned
 # the tenant and the new container has no record of this deviceId). On
 # any of these we wipe + re-pair once. OTHER rejection codes
@@ -237,7 +248,7 @@ _PLATFORM = "linux"  # informational; only affects the v3 signature payload
 # embedding one of these tokens in its message text (think log lines,
 # diagnostic dumps, partial-match codes like ``device-not-paired-yet``).
 # The classifier now reads the structured ``.code`` attribute populated
-# at the raise site from openclaw's response envelope.
+# at the raise site from agent's response envelope.
 _STALE_PAIRING_CODES = frozenset(
 	{
 		"device-not-paired",
@@ -247,8 +258,8 @@ _STALE_PAIRING_CODES = frozenset(
 	}
 )
 
-# openclaw's ACTUAL wire shape for device-token auth failures (verified
-# 2026-07-09 against the ghcr.io/openclaw/openclaw image from 2026-06-16
+# agent's ACTUAL wire shape for device-token auth failures (verified
+# 2026-07-09 against the gateway image from 2026-06-16
 # AND current :latest, plus a live reproduction against a running
 # gateway): connect is rejected with the GENERIC ``error.code``
 # "INVALID_REQUEST" and the machine-readable reason lives in
@@ -257,12 +268,12 @@ _STALE_PAIRING_CODES = frozenset(
 # state reset), token mismatch (gateway rotated the stored token),
 # token revoked - to the single coarse reason "device_token_mismatch"
 # ("unauthorized: device token mismatch (rotate/reissue device token)").
-# The hyphenated reasons in _STALE_PAIRING_CODES are openclaw's INTERNAL
+# The hyphenated reasons in _STALE_PAIRING_CODES are agent's INTERNAL
 # verifyDeviceToken results; they never reach the wire as error.code, so
 # the code-only classifier alone never fired and the self-heal below was
 # dead code - a replaced tenant container permanently broke chat
 # (2026-07-08 post-deploy regression). _STALE_PAIRING_CODES is kept as a
-# belt-and-braces layer in case a future openclaw promotes the internal
+# belt-and-braces layer in case a future agent promotes the internal
 # reasons to wire codes.
 _STALE_PAIRING_AUTH_REASONS = frozenset(
 	{
@@ -285,7 +296,7 @@ _STALE_PAIRING_DETAIL_CODES = frozenset(
 
 
 def _is_stale_pairing(err: Exception) -> bool:
-	"""Return True iff ``err`` is an AgentUnreachableError that openclaw
+	"""Return True iff ``err`` is an AgentUnreachableError that agent
 	classified as a stale device pairing - via error.code (internal reason
 	set), error.details.authReason, or error.details.code (the real wire
 	shape for connect auth failures, see _STALE_PAIRING_AUTH_REASONS /
@@ -308,16 +319,16 @@ def _is_stale_pairing(err: Exception) -> bool:
 
 # --- Mechanism A: connect-first device pairing ------------------------------
 #
-# On a Mechanism-A tenant (openclaw 9.x) the bench has a STABLE keypair but no
+# On a Mechanism-A tenant (agent 9.x) the bench has a STABLE keypair but no
 # device token yet. It presents the shared gateway token (auth.token) on a
-# signed connect; openclaw answers NOT_PAIRED and opens a DURABLE pending pairing
+# signed connect; agent answers NOT_PAIRED and opens a DURABLE pending pairing
 # request, then closes the socket (WS 1008) with a pauseReconnect hint. The CP
 # has told the fleet-agent to poll + approve this deviceId; on the approved
-# reconnect openclaw issues the device token on hello-ok.auth.deviceToken. We
+# reconnect agent issues the device token on hello-ok.auth.deviceToken. We
 # drive that by reconnecting on OUR OWN timer, ignoring the pause hint.
 #
 # Bounded (D-e): ONE pairing episode per turn-that-needs-pairing, capped WELL
-# inside openclaw's ~5-min pending TTL and the chat-turn budget; fail-closed at
+# inside agent's ~5-min pending TTL and the chat-turn budget; fail-closed at
 # the cap (D-d). The deadline sits a little above the fleet-agent's
 # tens-of-seconds poll+approve window so an approval lands within one turn.
 PAIRING_APPROVAL_DEADLINE_SECONDS = 75
@@ -329,7 +340,7 @@ PAIRING_RECONNECT_BACKOFF_SECONDS = 3.0
 # _classify_error still files it under "unreachable" (assistant starting up).
 PAIRING_PENDING_USER_MESSAGE = "Still getting your assistant ready — try again in a moment."
 
-# openclaw's wire signal for "presented the gateway token, no paired device yet"
+# agent's wire signal for "presented the gateway token, no paired device yet"
 # (spike-proven on the real 9.3 dist, invariant #3): error.code NOT_PAIRED, and
 # on the generic INVALID_REQUEST envelope the machine-readable marker sits in
 # error.details.code = PAIRING_REQUIRED / error.details.{authReason,reason} =
@@ -345,8 +356,8 @@ _NOT_PAIRED_REASONS = frozenset({"not-paired"})
 
 
 def _is_not_paired(err: Exception) -> bool:
-	"""Return True iff ``err`` is openclaw's connect-first PENDING signal: the
-	bench presented the gateway token (bootstrap) and openclaw created/returned a
+	"""Return True iff ``err`` is agent's connect-first PENDING signal: the
+	bench presented the gateway token (bootstrap) and agent created/returned a
 	pending pairing request instead of authenticating.
 
 	Strictly typed, exactly like ``_is_stale_pairing``: only ``.code``/``.details``
@@ -390,7 +401,7 @@ def _chat_final_text(payload: dict) -> str | None:
 	return None
 
 
-# openclaw marks an assistant turn that FAILED before producing any content
+# agent marks an assistant turn that FAILED before producing any content
 # with ``stopReason == "error"`` and (in the raw transcript) this sentinel text
 # block. A terminal model failure - notably a precheck "Context overflow:
 # prompt too large for the model", which then deletes the session so there is
@@ -400,12 +411,21 @@ def _chat_final_text(payload: dict) -> str | None:
 # content. Without the guard below, ``relay_turn_events`` would map that to a
 # plain ``relay:final`` and the turn handler would write a silent, empty,
 # error-less assistant bubble (observed live 2026-07-21). Detecting it here, at
-# the openclaw->bench event boundary, lets the EXISTING relay:error path stamp
+# the gateway-to-bench event boundary, lets the EXISTING relay:error path stamp
 # the row's ``error`` field so the user sees an honest failure.
 _STREAM_ERROR_SENTINEL = "[assistant turn failed before producing content]"
 
+# The agent runtime's media-generation tools: calling one unconditionally
+# detaches the reply into a background task, and when that yielded run then
+# settles with no visible output the gateway's bare terminal (no message, no
+# stopReason - see YIELD_CONTINUATION_WAIT_S) is WIRE-IDENTICAL to a genuine
+# failed_final. The only signal that tells them apart is whether one of these
+# tools started during this same run - tracked where tool events are already
+# routed (relay_turn_events here; the mux lane in relay_mux.py for the pump).
+MEDIA_GEN_TOOL_NAMES = frozenset({"image_generate", "video_generate", "music_generate"})
+
 # User-facing text stamped on the assistant row's ``error`` field (and shown in
-# the chat) for such a failed final when openclaw gave us nothing better.
+# the chat) for such a failed final when agent gave us nothing better.
 # Generic on purpose: a ``state == "final"`` event carries no ``errorMessage``
 # (only ``stopReason``), so the exact cause cannot be named from that frame
 # alone; a context window too small for the conversation is the common one.
@@ -428,7 +448,7 @@ FAILED_FINAL_ERROR = (
 # spinning. A detail carrying either marker is dropped for the generic copy.
 _ERROR_DETAIL_REROUTE_MARKERS = ("context overflow", "aborted")
 
-# Cap on the appended provider detail. openclaw's own failure text is already
+# Cap on the appended provider detail. agent's own failure text is already
 # user-facing and self-truncating (~200 chars); this only stops a pathological
 # runtime from filling the Message.error column (settlement stores error[:1000]).
 _ERROR_DETAIL_MAX_CHARS = 400
@@ -436,7 +456,7 @@ _ERROR_DETAIL_MAX_CHARS = 400
 
 def failed_final_error(detail: str | None = None) -> str:
 	"""User-facing error text for a failed final, naming the provider reason
-	when openclaw gave one.
+	when agent gave one.
 
 	The run's lifecycle ``phase == "error"`` frame is the ONLY place the runtime
 	names the failure ("Google Generative AI API error (429): You exceeded your
@@ -461,7 +481,7 @@ def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	not a silent empty bubble.
 
 	The wire shapes this has to cover, verified against the shipped bundle of
-	ghcr.io/openclaw/openclaw:2026.6.8:
+	gateway image version 2026.6.8:
 
 	  * the LIVE relay emitters (``dist/server-chat-*.js`` and
 	    ``dist/embedded-backend-*.js``, both ``emitChatFinal``) build the payload
@@ -482,7 +502,7 @@ def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	    ``stopReason`` stays a normal empty-text relay:final.
 
 	A turn that produced no assistant text at all is NOT distinguishable here
-	from a hypothetical rich-output-only success - openclaw omits ``message``
+	from a hypothetical rich-output-only success - agent omits ``message``
 	for both. Surfacing the failure is the safer of the two: today's silence
 	renders a failed turn as an in-progress one that never resolves, whereas the
 	worst case in the other direction is an honest error on a turn that said
@@ -497,6 +517,92 @@ def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	if not isinstance(msg, dict):
 		return True
 	return msg.get("stopReason") == "error"
+
+
+def _is_yield_aborted_final(payload: dict, text: str | None) -> bool:
+	"""True when a ``state == "final"`` chat event is actually the agent
+	runtime's image/video/music tools' unconditional background-detach yield
+	(sessions_yield/turnHandoff), NOT a real failure or a plain empty final.
+
+	Three positive signals, checked in order of directness (live-verified,
+	2026.9.3 bundle) - ANY one is sufficient:
+	  1. an explicit top-level ``yielded`` field (truthy) on the terminal -
+	     the runtime's own, unambiguous marker;
+	  2. ``stopReason == "aborted"`` (never "error"), top-level or nested in
+	     ``message`` - the ``createYieldAbortedResponse`` shape;
+	  3. (checked by the CALLER, not here - see ``MEDIA_GEN_TOOL_NAMES``) a
+	     bare final with none of the above, tied back to a media-gen tool
+	     start seen earlier on this run - the gateway sometimes settles with
+	     no message AND no stopReason AND no ``yielded`` field at all.
+	MUST be checked BEFORE ``_chat_final_failed`` - its "no message at all"
+	branch would otherwise classify signal 1/2's omitted-``message`` shape as
+	a hard failure (FAILED_FINAL_ERROR) instead of the deferred-reply wait.
+
+	A real (possibly partial) answer always wins, same rule as
+	``_chat_final_failed``. This intentionally does NOT check for
+	``stopReason == "error"`` - that stays failed_final, unchanged."""
+	if text:
+		return False
+	if payload.get("yielded"):
+		return True
+	if payload.get("stopReason") == "aborted":
+		return True
+	msg = payload.get("message")
+	return isinstance(msg, dict) and msg.get("stopReason") == "aborted"
+
+
+# The gateway attaches a generated image/video/audio/document as a CONTENT
+# BLOCK on the final chat message, not text - the runtime's own
+# buildManagedMediaBlock: {"type":"image"|"audio"|"video", "url": ..., ...} or
+# {"type":"attachment","attachment":{"url": ..., ...}} for a document. The url
+# is a RELATIVE path served by the tenant's own gateway (same host as
+# agent_url, same bearer token Jarvis already holds) - never an absolute URL,
+# a traversal, or any other prefix.
+_MEDIA_URL_RE = re.compile(r"^/api/chat/media/outgoing/[A-Za-z0-9%._~:@-]+/[0-9a-f-]{36}/full")
+# Mirrors generated_media._MAX_MEDIA_PER_TURN (a separate cap: these blocks are
+# a distinct delivery mechanism from the native MEDIA:/embedded-path markers).
+_MAX_MEDIA_URLS_PER_TURN = 8
+
+
+def _valid_media_url(url) -> bool:
+	if not isinstance(url, str) or not url:
+		return False
+	if ".." in url or "\\" in url:
+		return False
+	return bool(_MEDIA_URL_RE.match(url))
+
+
+def _chat_final_media_urls(payload: dict) -> list[dict]:
+	"""Extract qualifying media/attachment blocks from a chat final's
+	``message.content``: ``{"url": <relative path>, "mime_type": <str|None>}``,
+	capped per turn. A block with a missing/invalid url (absolute, traversal,
+	wrong prefix) is silently skipped - never fetched, never raises."""
+	msg = payload.get("message")
+	if not isinstance(msg, dict):
+		return []
+	content = msg.get("content")
+	if not isinstance(content, list):
+		return []
+	out: list[dict] = []
+	for block in content:
+		if not isinstance(block, dict):
+			continue
+		btype = block.get("type")
+		if btype in ("image", "audio", "video"):
+			url, mime = block.get("url"), block.get("mimeType")
+		elif btype == "attachment":
+			att = block.get("attachment")
+			if not isinstance(att, dict):
+				continue
+			url, mime = att.get("url"), att.get("mimeType")
+		else:
+			continue
+		if not _valid_media_url(url):
+			continue
+		out.append({"url": url, "mime_type": mime})
+		if len(out) >= _MAX_MEDIA_URLS_PER_TURN:
+			break
+	return out
 
 
 def _persisted_device_id() -> str:
@@ -532,7 +638,7 @@ def _persisted_device_token() -> str:
 
 
 class AgentSession:
-	"""Direct WebSocket session to one tenant's openclaw gateway.
+	"""Direct WebSocket session to one tenant's agent gateway.
 
 	Public surface:
 	  AgentSession.connect(gateway_url) -> session
@@ -558,7 +664,7 @@ class AgentSession:
 			raise AgentUnreachableError("agent_url not set on Jarvis Settings")
 
 		# Two-shot self-heal for tenant re-provisioning: on the first attempt
-		# we use whatever paired creds the customer has; if openclaw rejects
+		# we use whatever paired creds the customer has; if agent rejects
 		# with a "your pairing is stale" marker (typical when admin replaced
 		# the container under us - new container has empty pairing state),
 		# we wipe + re-pair once and try again. A second stale signal is a
@@ -636,11 +742,11 @@ class AgentSession:
 		"""Connect-first device pairing (Mechanism A).
 
 		The bench has a stable keypair but NO device token. It presents the
-		gateway token (``auth.token``) on a signed connect; openclaw answers
+		gateway token (``auth.token``) on a signed connect; agent answers
 		NOT_PAIRED and opens a durable pending request (and closes the socket with
 		a pauseReconnect hint). The CP has already told the fleet-agent to poll +
 		approve this deviceId. We ignore the pause and reconnect on our own timer
-		until the approval lands, at which point openclaw issues the device token
+		until the approval lands, at which point agent issues the device token
 		on ``hello-ok.auth.deviceToken`` and we adopt it (steady state from there).
 
 		DISJOINT from the stale-pairing self-heal (``_repair_and_reconnect``): this
@@ -677,7 +783,7 @@ class AgentSession:
 					pass
 				if _is_not_paired(e):
 					# Still pending. Reconnect on our own timer within the deadline;
-					# openclaw's pauseReconnect hint is deliberately ignored.
+					# agent's pauseReconnect hint is deliberately ignored.
 					if time.monotonic() < deadline:
 						_logger.info(
 							"chat pairing: pending approval device_id=%s attempt=%d elapsed_ms=%d",
@@ -753,7 +859,7 @@ class AgentSession:
 				return websocket.create_connection(
 					gateway_url,
 					timeout=CONNECT_TIMEOUT_SECONDS,
-					# Origin must be in openclaw's controlUi.allowedOrigins, which
+					# Origin must be in agent's controlUi.allowedOrigins, which
 					# the LAN-bound gateway enforces + seeds (see _GATEWAY_ORIGIN).
 					origin=_GATEWAY_ORIGIN,
 				)
@@ -820,7 +926,7 @@ class AgentSession:
 		keypair, and only the last writer's keypair survived in Jarvis
 		Settings - the other N-1 workers held in-memory creds the admin
 		side didn't know about, then EACH of them re-paired again,
-		flapping admin/openclaw state. The Redis lock collapses the
+		flapping admin/gateway state. The Redis lock collapses the
 		convoy: one worker re-pairs, the rest wait, then read the fresh
 		keypair from Settings.
 
@@ -878,14 +984,14 @@ class AgentSession:
 		try:
 			res = self._request("sessions.create", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
 		except AgentUnreachableError as e:
-			# openclaw 2026.9+ makes a MULTI-AGENT roster (>=1 marketplace-agent
+			# agent 2026.9+ makes a MULTI-AGENT roster (>=1 marketplace-agent
 			# delegate installed) reject an unscoped session and demand the caller
 			# name an agent. Retry naming the primary agent (the fleet-agent template
 			# keys it "main" - see _PRIMARY_AGENT_ID). Kept as a fallback rather than
 			# sent upfront so single-agent tenants and pre-2026.9 gateways - whose
 			# sessions.create rejects an unknown agentId - are untouched.
 			#
-			# openclaw sends only the GENERIC code "INVALID_REQUEST" with details=None
+			# agent sends only the GENERIC code "INVALID_REQUEST" with details=None
 			# for this (verified against 2026.9.3), so - unlike the structured
 			# _STALE_PAIRING_* classifier above - the code alone can't distinguish it
 			# from other INVALID_REQUEST rejections; the message substring is the only
@@ -905,8 +1011,8 @@ class AgentSession:
 			raise AgentUnreachableError(f"sessions.create returned no key: {res}")
 		return key
 
-	# -- openclaw-native turn model (chat.send + chat.history + sessions.*) --
-	# Mirrors openclaw's own UI gateway client so the bench can drive a turn
+	# -- Gateway-native turn model (chat.send + chat.history + sessions.*) --
+	# Mirrors agent's own UI gateway client so the bench can drive a turn
 	# and reconcile from the durable transcript instead of holding the agent
 	# RPC's request stream. Each method below is a plain request/response.
 
@@ -921,7 +1027,7 @@ class AgentSession:
 		attachments: list[dict] | None = None,
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
 	) -> dict:
-		"""Start an agent turn via chat.send (openclaw's UI turn-start RPC).
+		"""Start an agent turn via chat.send (agent's UI turn-start RPC).
 
 		Returns the ack payload, e.g. {"runId": ..., "status": "in_flight"}.
 		The turn's output is delivered as session-scoped "chat" events (consume
@@ -948,7 +1054,7 @@ class AgentSession:
 		*,
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
 	) -> dict:
-		"""Abort in-flight run(s) on a session (openclaw chat.abort). With no
+		"""Abort in-flight run(s) on a session (agent chat.abort). With no
 		run_id, aborts ALL active runs on the session (safe here: one active run
 		per conversation). The gateway authorizes this from any connection
 		presenting the shared device id + operator scope, so the web process can
@@ -1011,7 +1117,7 @@ class AgentSession:
 	) -> dict:
 		"""Subscribe THIS connection to a session's message events via
 		sessions.messages.subscribe. After this the WS receives the session's
-		message event frames going forward. openclaw keeps no per-run delta
+		message event frames going forward. agent keeps no per-run delta
 		buffer, so this yields only FUTURE events - catch up via get_history /
 		get_session_messages on (re)connect."""
 		res = self._request(
@@ -1031,7 +1137,7 @@ class AgentSession:
 	) -> dict:
 		"""Snapshot the session's DISPLAY transcript via chat.history. Returns
 		{"sessionId", "messages", "thinkingLevel"} - the same projected display
-		messages openclaw's UI renders. The authoritative source of truth used
+		messages agent's UI renders. The authoritative source of truth used
 		to reconcile after a timeout / reconnect."""
 		res = self._request(
 			"chat.history",
@@ -1048,7 +1154,7 @@ class AgentSession:
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
 	) -> list:
 		"""Raw recent transcript tail via sessions.get. Returns the messages
-		list (each: role, content, __openclaw:{seq,id}); [] for an unknown or
+		list (each: role, content, runtime metadata containing seq and id); [] for an unknown or
 		empty session."""
 		res = self._request(
 			"sessions.get",
@@ -1117,7 +1223,7 @@ class AgentSession:
 		"""Drop the session's model override so the agent's configured default -
 		and, crucially, its ``model.fallbacks`` chain - applies again.
 
-		``sessions.patch`` with a NULL model takes openclaw's own isDefault
+		``sessions.patch`` with a NULL model takes agent's own isDefault
 		branch (2026.6.8 ``src/sessions/model-overrides.ts``), which deletes
 		``modelOverride``, ``providerOverride`` and ``modelOverrideSource``
 		together with the now-stale runtime model/contextTokens fields, then
@@ -1129,7 +1235,7 @@ class AgentSession:
 		caller can VERIFY the override is gone instead of trusting the ack.
 
 		NEVER call this for a key the gateway did not just report. Patching an
-		ABSENT key does not fail - openclaw creates the entry, mints a fresh
+		ABSENT key does not fail - agent creates the entry, mints a fresh
 		sessionId and drops the label."""
 		res = self._request(
 			"sessions.patch",
@@ -1166,7 +1272,7 @@ class AgentSession:
 		model param, so per-conversation overrides are applied to the session
 		before the send.
 
-		``model_ref=None`` sends ``{"model": null}``, which openclaw's ``isDefault``
+		``model_ref=None`` sends ``{"model": null}``, which agent's ``isDefault``
 		branch answers by DELETING the session's modelOverride, providerOverride and
 		modelOverrideSource. Use it to RESET a session to the agent's configured
 		default: an unoverridden session is the only shape that keeps
@@ -1191,7 +1297,7 @@ class AgentSession:
 		"""Consume broadcast events for a chat.send run until a terminal
 		``chat`` event, the soft deadline, or a transport drop.
 
-		Mirror of openclaw's own UI model: token/tool streaming comes from
+		Mirror of agent's own UI model: token/tool streaming comes from
 		the broadcast ``agent`` frames (retagged with the chat.send
 		clientRunId == run_id); completion comes ONLY from the run-scoped
 		``chat`` event (state final|aborted|error). agent ``lifecycle``
@@ -1214,6 +1320,10 @@ class AgentSession:
 		# (the chat event is the single terminal path); it is the only frame
 		# that names the provider failure, so it is kept for a failed final.
 		failure_detail: str | None = None
+		# True once a media-generation tool call started this run - see
+		# MEDIA_GEN_TOOL_NAMES. Turns a would-be failed_final bare terminal into
+		# a yield instead (the two are wire-identical without this history).
+		saw_media_tool_start = False
 		while True:
 			remaining = deadline - time.monotonic()
 			if remaining <= 0:
@@ -1242,10 +1352,24 @@ class AgentSession:
 				state = payload.get("state")
 				if state == "final":
 					text = _chat_final_text(payload)
+					# The runtime's image/video/music tools' unconditional
+					# background-detach yield reaches THIS path too (not only
+					# state=="aborted" below): a `final` whose text is empty and
+					# whose stopReason (top-level or nested in message) is
+					# "aborted", not "error". Route it through the SAME
+					# relay:error/aborted shape the state=="aborted" branch
+					# yields, so the caller's yield-wait applies unchanged.
+					# MUST be checked before _chat_final_failed - that guard's
+					# "no message at all" branch would otherwise call this a
+					# hard failure instead of a deferred reply.
+					failed = _chat_final_failed(payload, text)
+					if _is_yield_aborted_final(payload, text) or (failed and saw_media_tool_start):
+						yield {"kind": "relay:error", "state": "aborted", "text": ""}
+						return
 					# A "final" whose assistant turn actually FAILED (stopReason
 					# error / stream-error sentinel) is surfaced as a terminal
 					# error, not a silent empty bubble. See _chat_final_failed.
-					if _chat_final_failed(payload, text):
+					if failed:
 						yield {
 							"kind": "relay:error",
 							"state": "failed_final",
@@ -1261,13 +1385,21 @@ class AgentSession:
 						_final["media_rels"] = _rels
 					if _marked:  # any MEDIA: line stripped -> force the content overwrite
 						_final["marker_stripped"] = True
+					_urls = _chat_final_media_urls(payload)
+					if _urls:  # gateway-attached image/video/audio/document content blocks
+						_final["media_urls"] = _urls
 					yield _final
 					return
 				if state in ("error", "aborted"):
+					# ``text`` lets the caller tell an agent-yield abort (empty)
+					# from a genuine partial-content abort - see
+					# relay_yield_continuation. Absent for a plain error/aborted
+					# today, so this is a harmless addition for every OTHER caller.
 					yield {
 						"kind": "relay:error",
 						"state": state,
 						"error": egress_rules.redact(payload.get("errorMessage") or state),
+						"text": _chat_final_text(payload) or "",
 					}
 					return
 				continue  # delta (150ms cumulative mirror) and unknown states: ignore
@@ -1282,7 +1414,96 @@ class AgentSession:
 				if parsed is not None and parsed.get("phase") == "error" and parsed.get("error"):
 					failure_detail = str(parsed["error"])
 				continue
+			if (
+				parsed.get("kind") == "tool"
+				and parsed.get("phase") == "start"
+				and parsed.get("tool_name") in MEDIA_GEN_TOOL_NAMES
+			):
+				saw_media_tool_start = True
 			yield parsed
+
+	def relay_yield_continuation(
+		self,
+		session_key: str,
+		*,
+		soft_deadline_s: float,
+		cancel_check: Any = None,
+	) -> dict[str, Any]:
+		"""Wait for the follow-up ``chat`` terminal an agent-yield abort
+		(``relay_turn_events``' empty ``state == "aborted"``) posts on the SAME
+		``session_key`` under a FRESH runId (the agent runtime's image/video/music
+		tools unconditionally detach into a background task and restart the session
+		~25-30s later - see ``YIELD_CONTINUATION_WAIT_S``). Matches on
+		``sessionKey`` alone (the runId is unknown ahead of time).
+
+		Polls in ``YIELD_CONTINUATION_POLL_S`` chunks and calls ``cancel_check``
+		(when given) between them, so a user Stop pressed mid-wait is observed
+		promptly - the dead original runId will never itself post another frame,
+		so nothing on the wire would otherwise tell this loop to give up.
+
+		Non-``chat`` frames (the continuation's own tool/delta events) are
+		dropped: this call surfaces only the continuation's OUTCOME, not its
+		live stream - the deferred tool call already ran out of band and the
+		user was never shown it running.
+
+		NEVER raises. Terminal yields (mirrors ``relay_turn_events``):
+		  {"kind": "relay:final", "text": str, media_rels?: [...], marker_stripped?: True}
+		  {"kind": "relay:error", "state": "error"|"aborted"|"failed_final", "error": str}
+		  {"kind": "relay:interrupted", "reason": "deadline"|"transport"|"cancelled"}
+		"""
+		deadline = time.monotonic() + max(0.0, soft_deadline_s)
+		while True:
+			if cancel_check is not None and cancel_check():
+				return {"kind": "relay:interrupted", "reason": "cancelled"}
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				return {"kind": "relay:interrupted", "reason": "deadline"}
+			try:
+				frame = self._recv(min(YIELD_CONTINUATION_POLL_S, remaining))
+			except AgentUnreachableError as e:
+				try:
+					self.close()
+				except Exception:
+					pass
+				return {"kind": "relay:interrupted", "reason": "transport", "detail": str(e)}
+			if frame is None or frame.get("type") != "event" or frame.get("event") != "chat":
+				continue
+			payload = frame.get("payload") or {}
+			if payload.get("sessionKey") != session_key:
+				continue
+			state = payload.get("state")
+			if state == "final":
+				text = _chat_final_text(payload)
+				if _chat_final_failed(payload, text):
+					return {
+						"kind": "relay:error",
+						"state": "failed_final",
+						"error": failed_final_error(None),
+					}
+				_red, _rels, _marked = egress_rules.redact_final_with_media(text, run_id=payload.get("runId"))
+				out: dict[str, Any] = {"kind": "relay:final", "text": _red}
+				if _rels:
+					out["media_rels"] = _rels
+				if _marked:
+					out["marker_stripped"] = True
+				_urls = _chat_final_media_urls(payload)
+				if _urls:  # gateway-attached image/video/audio/document content blocks
+					out["media_urls"] = _urls
+				# Marks this as the yield's continuation outcome (not an ordinary
+				# turn) so the caller's post-settle rich-output step knows it may
+				# need to harvest the actual media from separate later transcript
+				# messages when neither media_rels nor media_urls landed here -
+				# see turn_handler._harvest_post_yield_media.
+				out["yield_continuation"] = True
+				return out
+			if state in ("error", "aborted"):
+				return {
+					"kind": "relay:error",
+					"state": state,
+					"error": egress_rules.redact(payload.get("errorMessage") or state),
+					"text": _chat_final_text(payload) or "",
+				}
+			continue  # delta (cumulative mirror) / unknown chat states: keep waiting
 
 	def fire_agent(
 		self,
@@ -1294,13 +1515,13 @@ class AgentSession:
 		provider: str | None = None,
 	) -> str:
 		"""Send one agent turn and return its runId after the ack, WITHOUT
-		consuming the event stream. openclaw keeps running the turn server
+		consuming the event stream. agent keeps running the turn server
 		side after we close (the run lane survives client disconnect), so this
 		is enough to warm the provider prompt cache. ``deliver`` is False so
 		the result stays session-only. ``_request`` drops the interleaved
 		event frames and returns the agent ack response.
 
-		Setting ``model`` / ``provider`` disables openclaw's failover for this
+		Setting ``model`` / ``provider`` disables agent's failover for this
 		run - see PINNED_ONESHOT_RUN_PREFIX."""
 		params = {
 			"message": message,
@@ -1330,11 +1551,11 @@ class AgentSession:
 		"""Send an `agent` request, then yield parsed events until lifecycle.end.
 
 		`model` / `provider` are optional per-turn overrides. When set, they
-		flow into openclaw's agent RPC params; the gateway honours them via
+		flow into agent's agent RPC params; the gateway honours them via
 		the operator.admin-scope-gated modelOverride path (our connect already
 		declares that scope), and the run loses its failover chain for the
-		duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, openclaw falls
-		back to agents.defaults.model.primary from openclaw.json AND keeps its
+		duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
+		back to agents.defaults.model.primary from agent configuration AND keeps its
 		fallbacks.
 
 		Yields the same parsed-event shape the worker used to consume from
@@ -1352,7 +1573,7 @@ class AgentSession:
 		if provider:
 			params["provider"] = provider
 		if attachments:
-			# Native vision input. openclaw's `agent` handler reads these and
+			# Native vision input. agent's `agent` handler reads these and
 			# normalizes them to the active provider's image blocks; the flat
 			# {type:"image", mimeType, fileName, content:<base64>} shape is what
 			# its gateway normalizer accepts.
@@ -1389,7 +1610,7 @@ class AgentSession:
 
 		# 2. Stream events for this run until lifecycle.end / .error.
 		# The run has started (we have the ack); a WS drop from here is
-		# RECOVERABLE - openclaw keeps running and persists the result - so tag
+		# RECOVERABLE - agent keeps running and persists the result - so tag
 		# it code="turn-timeout" to park for recovery, never a false error (#4).
 		while time.monotonic() < deadline:
 			try:
@@ -1426,7 +1647,7 @@ class AgentSession:
 		"""Receive connect.challenge → sign v3 payload → send connect → expect hello-ok.
 
 		Presents ``auth`` per connect mode and signs the v3 payload's token slot
-		with the SAME token (spike invariant #2 - openclaw derives the signature
+		with the SAME token (spike invariant #2 - agent derives the signature
 		token via ``resolveSignatureToken`` = ``auth.token ?? auth.deviceToken ??
 		auth.bootstrapToken``, so the two MUST match or the signature is rejected):
 		  - steady state (device token in hand): ``auth.deviceToken`` = device token
@@ -1456,7 +1677,7 @@ class AgentSession:
 
 		# 2. Sign + send the connect frame.
 		# Build the auth block first, then derive the token slot FROM it in
-		# openclaw's exact resolveSignatureToken precedence, so the presented
+		# agent's exact resolveSignatureToken precedence, so the presented
 		# token and the signed token can never drift (invariant #2). Bootstrap
 		# (no device token) presents auth.token=<gateway token>; steady state
 		# presents auth.deviceToken=<device token>.
@@ -1492,6 +1713,10 @@ class AgentSession:
 			},
 			"role": _ROLE,
 			"scopes": _REQUESTED_SCOPES,
+			# The Claude-subscription runtime reports tool calls only on the tool
+			# stream, which the gateway delivers to clients advertising this; the
+			# relay uses those starts to find the live step line's step text.
+			"caps": ["tool-events"],
 			"auth": auth,
 			"device": {
 				"id": creds.device_id,

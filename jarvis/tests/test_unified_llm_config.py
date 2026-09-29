@@ -6,10 +6,11 @@ Verifies:
 - Legacy llm_model, llm_api_key, llm_provider, llm_base_url, llm_auth_mode are read_only
 - Standalone Jarvis LLM Pool doctype no longer exists
 - Pool Model provider + base_url fields have depends_on on credential_type=='api_key'
-- Subscription Account upstream options do NOT contain 'anthropic'
+- Subscription Account upstream options include native-Claude 'anthropic'
 """
 
 import json
+import unittest
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -141,17 +142,27 @@ class TestUnifiedLLMConfigSchema(FrappeTestCase):
 		)
 
 	# ------------------------------------------------------------------ #
-	# Subscription Account — upstream must not include 'anthropic'
+	# Subscription Account — Anthropic is representable for native Claude CLI
 	# ------------------------------------------------------------------ #
 
-	def test_subscription_account_upstream_no_anthropic(self):
-		"""Subscription Account 'upstream' options must NOT contain 'anthropic' (ToS-banned)."""
-		self.assertIn("upstream", self.sub_account_fields)
-		options = self.sub_account_fields["upstream"].options or ""
-		option_list = [o.strip() for o in options.split("\n") if o.strip()]
-		self.assertNotIn(
-			"anthropic", option_list, "upstream options must not include 'anthropic' (ToS violation)"
+	def test_subscription_account_upstream_includes_anthropic(self):
+		"""Anthropic is stored here but never rendered into CLIProxyAPI."""
+		# Read the worktree source rather than the site's last-migrated metadata;
+		# isolated-worktree tests intentionally do not mutate the developer's site.
+		from pathlib import Path
+
+		doctype_path = (
+			Path(__file__).parents[1]
+			/ "jarvis"
+			/ "doctype"
+			/ "jarvis_llm_pool_subscription_account"
+			/ "jarvis_llm_pool_subscription_account.json"
 		)
+		fields = {f["fieldname"]: f for f in json.loads(doctype_path.read_text())["fields"]}
+		self.assertIn("upstream", fields)
+		options = fields["upstream"].get("options") or ""
+		option_list = [o.strip() for o in options.split("\n") if o.strip()]
+		self.assertIn("anthropic", option_list)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +532,82 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		self.assertNotIn("provider", entry, "subscription entry must not emit provider")
 		self.assertNotIn("base_url", entry, "subscription entry must not emit base_url")
 
+	def test_claude_subscription_serializes_as_native_cli_not_proxy_subscription(self):
+		# CLAUDE-LOGIN-CONTRACT.md: the browser sign-in flow captures no secret at
+		# all - the login-kind blob carries only a (possibly blank) account_email.
+		build_pool_payload, validate_models, _ = self._imports()
+		acc = _account(
+			upstream="anthropic",
+			account_ref="CLAUDE_001",
+			oauth_blob=json.dumps(
+				{
+					"type": "oauth",
+					"provider": "anthropic",
+					"credential_kind": "claude_cli_login",
+					"account_email": "me@example.com",
+				}
+			),
+		)
+		m = _subscription_model(provider="anthropic", model="claude-opus-4-8", order=0, accounts=[acc])
+		settings = _make_settings_with_models([m])
+		self.assertEqual(validate_models(settings), [])
+		spec, api_keys, oauth_blobs = build_pool_payload(settings)
+		entry = spec["models"][0]
+		self.assertEqual(entry["provider"], "anthropic_cli")
+		self.assertEqual(entry["key_ref"], "CLAUDE_001")
+		self.assertNotIn("subscription", entry)
+		self.assertEqual(api_keys, {})
+		self.assertEqual(oauth_blobs["CLAUDE_001"]["account_email"], "me@example.com")
+		self.assertNotIn("access", oauth_blobs["CLAUDE_001"])
+
+	def test_claude_subscription_with_the_old_setup_token_blob_is_rejected(self):
+		# The portable `claude setup-token` blob kind is REMOVED: a row still
+		# holding it (e.g. from before this migration) must fail validation and
+		# force a reconnect through the browser sign-in relay, never be silently
+		# accepted.
+		_, validate_models, _ = self._imports()
+		acc = _account(
+			upstream="anthropic",
+			account_ref="CLAUDE_001",
+			oauth_blob=json.dumps(
+				{
+					"type": "oauth",
+					"provider": "anthropic",
+					"credential_kind": "claude_setup_token",
+					"access": "sk-ant-oat" + ("x" * 48),
+				}
+			),
+		)
+		m = _subscription_model(provider="anthropic", model="claude-opus-4-8", order=0, accounts=[acc])
+		settings = _make_settings_with_models([m])
+		errors = validate_models(settings)
+		self.assertTrue(any("malformed" in e for e in errors), errors)
+
+	def test_codex_and_claude_supports_claude_primary_or_last(self):
+		_, validate_models, _ = self._imports()
+		claude_blob = json.dumps(
+			{
+				"type": "oauth",
+				"provider": "anthropic",
+				"credential_kind": "claude_cli_login",
+				"account_email": "me@example.com",
+			}
+		)
+		claude = _subscription_model(
+			provider="anthropic",
+			model="claude-opus-4-8",
+			order=0,
+			accounts=[_account(upstream="anthropic", account_ref="C", oauth_blob=claude_blob)],
+		)
+		codex = _subscription_model(order=1, accounts=[_account(upstream="openai", account_ref="O")])
+		self.assertEqual(validate_models(_make_settings_with_models([claude, codex])), [])
+		claude.order = 1
+		codex.order = 0
+		self.assertEqual(validate_models(_make_settings_with_models([codex, claude])), [])
+		api_fallback = _api_key_model(order=2)
+		errors = validate_models(_make_settings_with_models([codex, claude, api_fallback]))
+		self.assertTrue(any("first or last" in e for e in errors), errors)
+
 	# ------------------------------------------------------------------ #
 	# (c) Mixed upstream across accounts → validate_models error
 	# ------------------------------------------------------------------ #
@@ -682,6 +769,24 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		settings.preset = None
 		self.assertFalse(compute_pool_mode(settings))
 
+	def test_compute_pool_mode_true_for_a_lone_claude_subscription(self):
+		"""Claude is agent-direct but must use the pool sync leg, which owns
+		the native ``anthropic_cli`` wire marker and encrypted setup-token blob."""
+		from jarvis.jarvis.pool_serialize import compute_pool_mode, compute_proxy_active
+
+		settings = _make_settings_with_models(
+			[
+				_subscription_model(
+					provider="anthropic",
+					model="claude-opus-4-8",
+					accounts=[_account(upstream="anthropic")],
+				)
+			]
+		)
+		settings.preset = None
+		self.assertTrue(compute_pool_mode(settings))
+		self.assertFalse(compute_proxy_active(settings))
+
 	def test_compute_pool_mode_true_for_a_fresh_lone_google_subscription(self):
 		"""Google's chat subscription was removed 2026-08-19 (Google discontinued
 		login-with-Google for Gemini); the bundled catalog's google row now
@@ -779,6 +884,21 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 		_, _, compute_proxy_active = self._imports()
 		settings = _make_settings_with_models([_api_key_model(enabled=1)])
 		settings.preset = "Cost-saver"
+		self.assertFalse(compute_proxy_active(settings))
+
+	def test_compute_proxy_active_false_for_claude_cli_plus_api_key(self):
+		_, _, compute_proxy_active = self._imports()
+		settings = _make_settings_with_models(
+			[
+				_subscription_model(
+					provider="anthropic",
+					model="claude-opus-4-8",
+					order=0,
+					accounts=[_account(upstream="anthropic")],
+				),
+				_api_key_model(order=1),
+			]
+		)
 		self.assertFalse(compute_proxy_active(settings))
 
 	def test_compute_proxy_active_true_when_the_pool_holds_a_subscription(self):
@@ -994,19 +1114,29 @@ class TestPoolSerializeFromSettings(FrappeTestCase):
 			self.assertNotIn("key_ref", entry, "blank api_key model must not emit key_ref in spec")
 
 	# ------------------------------------------------------------------ #
-	# anthropic upstream → validate_models error
+	# Anthropic native-CLI credential envelope
 	# ------------------------------------------------------------------ #
 
-	def test_anthropic_upstream_in_subscription_is_a_validate_error(self):
-		"""Subscription account with upstream='anthropic' → validate_models error (ToS)."""
+	def test_anthropic_subscription_rejects_a_non_setup_token_blob(self):
+		"""Claude-plan rows cannot smuggle an API/OAuth token into the CLI path."""
 		_, validate_models, _ = self._imports()
-		acc = _account(upstream="anthropic")
-		m = _subscription_model(accounts=[acc])
+		acc = _account(
+			upstream="anthropic",
+			oauth_blob=json.dumps(
+				{
+					"type": "oauth",
+					"provider": "anthropic",
+					"credential_kind": "api_key",
+					"access": "sk-ant-api03-not-a-setup-token",
+				}
+			),
+		)
+		m = _subscription_model(provider="anthropic", model="claude-opus-4-8", accounts=[acc])
 		settings = _make_settings_with_models([m])
 		errors = validate_models(settings)
 		self.assertTrue(
-			any("anthropic" in e.lower() or "tos" in e.lower() or "upstream" in e.lower() for e in errors),
-			f"Expected anthropic upstream ToS error, got: {errors}",
+			any("setup-token" in e.lower() or "credential" in e.lower() for e in errors),
+			f"Expected a Claude setup-token envelope error, got: {errors}",
 		)
 
 	# ------------------------------------------------------------------ #
@@ -1476,18 +1606,25 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		super().tearDown()
 
 	@staticmethod
-	def _lone_sub_payload(upstream="openai", agent_provider="openai"):
-		blob = json.dumps(
-			{
-				"type": "oauth",
-				"provider": agent_provider,
-				"access": "AT-direct",
-				"refresh": "RT-direct",
-				# fleet's PUT /auth-profile schema is extra_forbidden - the push must
-				# strip this, exactly like complete_paste_signin's direct_blob does.
-				"id_token": "should-be-stripped",
-			}
-		)
+	def _lone_sub_payload(
+		upstream="openai",
+		agent_provider="openai",
+		model="gpt-5.5",
+		access="AT-direct",
+		credential_kind="",
+	):
+		blob_data = {
+			"type": "oauth",
+			"provider": agent_provider,
+			"access": access,
+			"refresh": "RT-direct",
+			# fleet's PUT /auth-profile schema is extra_forbidden - the push must
+			# strip this, exactly like complete_paste_signin's direct_blob does.
+			"id_token": "should-be-stripped",
+		}
+		if credential_kind:
+			blob_data["credential_kind"] = credential_kind
+		blob = json.dumps(blob_data)
 		return [
 			{
 				# jarvis#756: the SPA's own validatePool gate refuses a
@@ -1496,7 +1633,7 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 				# self.llm_provider, which admin's subscription_connect now
 				# requires.
 				"provider": agent_provider,
-				"model": "gpt-5.5",
+				"model": model,
 				"tier": "cheap",
 				"order": 0,
 				"subscription": {
@@ -1583,6 +1720,44 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 		self.assertNotEqual(
 			out.get("last_sync_status", ""), "", "the pool leg must have run and stamped a status"
 		)
+		mock_connect.assert_not_called()
+
+	def test_lone_claude_subscription_uses_native_pool_wire_not_legacy_direct(self):
+		"""Claude has no legacy /llm-creds renderer: its Claude-CLI marker and
+		login-capture envelope must cross the pool seam even without sidecars."""
+		from jarvis import onboarding
+
+		pool_calls = []
+		with (
+			frappe_patch(
+				"jarvis.admin_client.post_update_llm_pool",
+				side_effect=lambda **kw: pool_calls.append(kw) or {"action": "pool_update"},
+			),
+			frappe_patch("jarvis.admin_client.post_subscription_connect") as mock_connect,
+		):
+			out = onboarding.save_llm_pool(
+				frappe.as_json(
+					self._lone_sub_payload(
+						upstream="anthropic",
+						agent_provider="anthropic",
+						model="claude-opus-4-8",
+						# _lone_sub_payload's shared blob shape carries "access"/"refresh"/
+						# "id_token" for every upstream; validate_models's anthropic branch
+						# only checks type/provider/credential_kind, so the extra (unused)
+						# fields here are harmless - the browser sign-in blob itself never
+						# has them (see the claude_cli_login tests above).
+						access="unused-for-claude",
+						credential_kind="claude_cli_login",
+					)
+				),
+				preset=None,
+				routing_mode="failover",
+			)
+
+		self.assertTrue(pool_calls, "a lone Claude subscription must push /llm-pool")
+		self.assertEqual(pool_calls[0]["spec"]["models"][0]["provider"], "anthropic_cli")
+		self.assertEqual(int(frappe.get_single("Jarvis Settings").proxy_active or 0), 0)
+		self.assertNotEqual(out.get("last_sync_status", ""), "")
 		mock_connect.assert_not_called()
 
 
@@ -3093,6 +3268,83 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 		self.assertEqual(model, POOL_VIRTUAL_MODEL)
 		self.assertIsNone(provider)
 
+	def _pool_claude_and_chatgpt(self, claude_first):
+		"""A Claude-plan leg (native claude-cli) beside a ChatGPT leg (Bifrost)."""
+		from unittest.mock import patch
+
+		from jarvis import onboarding
+
+		claude = {
+			"provider": "Anthropic",
+			"model": "claude-opus-5",
+			"tier": "strong",
+			"order": 0 if claude_first else 1,
+			"subscription": {
+				"upstream": "anthropic",
+				"accounts": [
+					{
+						"upstream": "anthropic",
+						"account_ref": "CLAUDE_SESSION_1",
+						"label": "Claude subscription",
+						"oauth_blob": frappe.as_json(
+							{
+								"type": "oauth",
+								"provider": "anthropic",
+								"credential_kind": "claude_cli_login",
+								"account_email": "claude@example.com",
+							}
+						),
+					}
+				],
+			},
+		}
+		chatgpt = {
+			"model": "gpt-5.6-terra",
+			"tier": "cheap",
+			"order": 1 if claude_first else 0,
+			"subscription": {
+				"rotation": "sticky",
+				"accounts": [
+					{
+						"upstream": "openai",
+						"account_ref": "ACC_SUB_2",
+						"label": "sub@example.com",
+						"oauth_blob": '{"refresh_token":"fake-rt-secret"}',
+					}
+				],
+			},
+		}
+		with (
+			patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}),
+			patch("jarvis.admin_client.post_update_llm_creds"),
+		):
+			onboarding.save_llm_pool(frappe.as_json([claude, chatgpt]), preset=None, routing_mode="failover")
+		frappe.db.commit()
+
+	def test_session_model_for_pool_with_native_claude_leg_resets_in_both_orders(self):
+		"""Claude + ChatGPT is NOT a Bifrost chain, so the session must be RESET, never
+		pinned to "jarvis-pool".
+
+		Fleet renders the Claude leg as the claude-cli runtime and the ChatGPT leg as
+		the proxy route, and the agent owns the failover between them. The proxy-only
+		rule above would pin "jarvis-pool" (proxy_active is set for the ChatGPT
+		sibling): with ChatGPT primary that happens to equal the rendered default, but
+		with Claude primary the agent stores it as a USER override, every turn goes to
+		ChatGPT, and the fallback chain collapses to []. Seen live on 2026-09-19:
+		"configured fallbacks disabled by user model override".
+		"""
+		from jarvis.chat.worker import _session_model_for
+
+		for claude_first in (True, False):
+			with self.subTest(claude_first=claude_first):
+				self._pool_claude_and_chatgpt(claude_first)
+				settings = frappe.get_single("Jarvis Settings")
+				self.assertEqual(int(settings.proxy_active or 0), 1, "ChatGPT leg keeps the proxy")
+				conv = self._make_conv(model_override="")
+				model, provider = _session_model_for(conv)
+				self.assertIsNone(model)
+				self.assertIsNone(provider)
+
 	def test_session_model_for_stale_pin_resets_to_the_agent_default(self):
 		"""A pin naming a model the customer has since REMOVED from the pool resets the
 		session rather than leaking a dead model id through to agent.
@@ -3462,12 +3714,15 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 
 		@contextmanager
 		def _ctx():
-			prior = getattr(frappe.local, "job", None)
+			had_job, prior = hasattr(frappe.local, "job"), getattr(frappe.local, "job", None)
 			frappe.local.job = frappe._dict(method="test")
 			try:
 				yield
 			finally:
-				frappe.local.job = prior
+				if had_job:
+					frappe.local.job = prior
+				else:
+					del frappe.local.job  # a leftover None still reads as "in a job" to frappe
 
 		return _ctx()
 
@@ -4593,6 +4848,38 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_reconcile_does_not_stamp_while_a_switch_is_held(self):
+		"""jarvis#1425 review (live e2e2, 2026-09-27): admin's "Ready" while a
+		switch is held describes the PRE-switch config, not the held one -
+		stamping "ok" here would strand the tenant on a status that does not
+		match what it is actually serving. The switch's own released worker
+		converges and stamps once it actually pushes."""
+		from jarvis.chat import llm_switch
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		self._seed_pool()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		frappe.db.commit()
+		self._seed_admin_creds()  # after the commit; stays in the rolled-back txn
+		with (
+			patch("jarvis.admin_client.get_connection", return_value={"chat_readiness": "Ready"}),
+			# jarvis#1425 review, fourth pass: the guard now reads
+			# llm_switch.blocks_stamp() (True unless applied AND awaiting_admin -
+			# a held-but-not-yet-applied switch always blocks), not a plain
+			# is_active() check.
+			patch.object(llm_switch, "blocks_stamp", return_value=True),
+		):
+			reconcile_pending_llm_sync()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertFalse(
+			settings.llm_pool_synced_at, "a held switch must block the stamp even when admin reports Ready"
+		)
+		self.assertEqual(settings.last_sync_status, "pending: admin applying config")
+
 	def test_reconcile_noop_when_not_ready(self):
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 			reconcile_pending_llm_sync,
@@ -4917,7 +5204,7 @@ class TestLeavingPoolModeConvergence(FrappeTestCase):
 	save to the single-model leg. There _classify_llm_change compares only the
 	legacy mirror fields, and those are mirrored from models[0], so nothing it
 	looks at changed and it returned "reload" (rotate the secret file only).
-	Admin kept the old llm_pool_config, openclaw.json kept declaring the removed
+	Admin kept the old llm_pool_config, agent configuration kept declaring the removed
 	provider, and its llm_key_N.key stayed on disk.
 
 	These build settings-like objects in memory. Nothing here may touch the DB:
@@ -5029,3 +5316,175 @@ class TestPushDirectSubscriptionBlobNoMatchInvariant(FrappeTestCase):
 		settings = _make_settings_with_models([])
 		with self.assertRaises(admin_client.AdminValidationError):
 			JarvisSettings._push_direct_subscription_blob(settings)
+
+
+class TestLoneDirectHandoverDue(FrappeTestCase):
+	"""jarvis#1425: a workspace that already synced through the pool leg but is
+	now down to ONE ChatGPT account is due for the fleet handover onto the
+	direct leg, instead of sitting on the proxy forever behind
+	_lone_direct_capable's non-retroactivity gate (jarvis#715/#755)."""
+
+	def _settings(self, *, upstream="openai", synced=True, models_rows=None):
+		rows = (
+			models_rows
+			if models_rows is not None
+			else [_subscription_model(order=0, accounts=[_account(upstream=upstream)])]
+		)
+		settings = _make_settings_with_models(rows)
+		if synced:
+			settings.llm_pool_synced_at = "2026-08-01 00:00:00"
+		return settings
+
+	def test_due_for_a_synced_lone_chatgpt_account(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="openai", synced=True)
+		self.assertTrue(lone_direct_handover_due(settings))
+		# Regression: the sync stamp keeps this OFF the direct-capable exception.
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_without_the_pool_sync_stamp(self):
+		"""A fresh connect takes the direct leg already (_lone_direct_capable), so
+		there is nothing to hand over."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="openai", synced=False)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertTrue(_lone_direct_capable(settings))
+
+	def test_not_due_for_a_synced_lone_claude_account(self):
+		"""Claude plans always sync through the pool leg and already run without a
+		proxy, so they are excluded even though the shape otherwise matches."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="anthropic", synced=True)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_two_accounts_on_the_one_model(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(
+			models_rows=[
+				_subscription_model(order=0, accounts=[_account(), _account(account_ref="ACC_002")])
+			],
+			synced=True,
+		)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_two_enabled_models(self):
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(
+			models_rows=[
+				_subscription_model(order=0, accounts=[_account()]),
+				_subscription_model(order=1, model="gpt-5.6", accounts=[_account(account_ref="ACC_002")]),
+			],
+			synced=True,
+		)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_with_a_preset(self):
+		"""A preset always routes through the pool leg."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(synced=True)
+		settings.preset = "some-preset"
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+	def test_not_due_for_an_upstream_with_no_fleet_renderer(self):
+		"""xai has no fleet-template arm today (_upstream_has_renderer)."""
+		from jarvis.jarvis.pool_serialize import _lone_direct_capable, lone_direct_handover_due
+
+		settings = self._settings(upstream="xai", synced=True)
+		self.assertFalse(lone_direct_handover_due(settings))
+		self.assertFalse(_lone_direct_capable(settings))
+
+
+class TestNativeClaudePickRouting(unittest.TestCase):
+	"""An explicit Claude-plan pick routes to the claude-cli runtime with the provider
+	prefix, for ANY Anthropic subscription-tier id, not only the saved row.
+
+	Pure in-memory: no pool is saved (saving one clobbers the developer's site)."""
+
+	_ANTHROPIC_TIER = ["claude-opus-5", "claude-sonnet-5"]
+
+	def _settings(self, *, claude_leg: bool, api_key_row: str = ""):
+		rows = [frappe._dict(model="gpt-5.6-terra", enabled=1, credential_type="subscription")]
+		if claude_leg:
+			rows.append(frappe._dict(model="claude-opus-5", enabled=1, credential_type="subscription"))
+		if api_key_row:
+			rows.append(
+				frappe._dict(model=api_key_row, enabled=1, credential_type="api_key", provider="anthropic")
+			)
+		return frappe._dict(models=rows, proxy_active=1, llm_auth_mode="subscription")
+
+	def _resolve(self, override: str, *, claude_leg: bool = True, api_key_row: str = ""):
+		from jarvis.chat import turn_handler as th
+
+		settings = self._settings(claude_leg=claude_leg, api_key_row=api_key_row)
+		with (
+			patch.object(th.frappe, "get_single", return_value=settings),
+			patch.object(th, "compute_pool_mode", return_value=True),
+			patch.object(th, "has_native_claude_subscription", return_value=claude_leg),
+			# The Anthropic subscription tier under test, injected the way the catalog
+			# delivers it (rows), since the module no longer carries a seed literal.
+			patch(
+				"jarvis._subscription_models._subscription_rows",
+				return_value={
+					"OpenAI": [{"model_id": "gpt-5.6-terra", "tier": "subscription", "sort_order": 0}],
+					"Anthropic": [
+						{"model_id": m, "tier": "subscription", "sort_order": i}
+						for i, m in enumerate(self._ANTHROPIC_TIER)
+					],
+				},
+			),
+		):
+			return th._resolve_model_and_provider(frappe._dict(model_override=override))
+
+	def test_catalog_claude_id_beyond_the_saved_row_routes_to_the_plan(self):
+		self.assertEqual(self._resolve("claude-sonnet-5"), ("claude-sonnet-5", "anthropic"))
+
+	def test_saved_claude_row_is_prefixed_too(self):
+		self.assertEqual(self._resolve("claude-opus-5"), ("claude-opus-5", "anthropic"))
+
+	def test_saved_proxy_row_stays_bare(self):
+		self.assertEqual(self._resolve("gpt-5.6-terra"), ("gpt-5.6-terra", None))
+
+	def test_unsaved_proxy_catalog_id_still_lets_the_pool_route(self):
+		self.assertEqual(self._resolve("gpt-5.6-sol"), ("", None))
+
+	def test_claude_id_without_a_claude_leg_lets_the_pool_route(self):
+		self.assertEqual(self._resolve("claude-sonnet-5", claude_leg=False), ("", None))
+
+	def test_anthropic_api_key_row_is_not_hijacked_onto_the_plan(self):
+		"""A tenant may keep a Claude plan AND a separate Anthropic API-key row; the
+		same ids exist in both catalog tiers. A pin of the API-key row's model must
+		route to that row (bare id, agent-direct provider), never to the plan."""
+		self.assertEqual(
+			self._resolve("claude-sonnet-5", api_key_row="claude-sonnet-5"), ("claude-sonnet-5", None)
+		)
+		# The plan row and an unsaved plan id keep routing to the plan.
+		self.assertEqual(
+			self._resolve("claude-opus-5", api_key_row="claude-sonnet-5"), ("claude-opus-5", "anthropic")
+		)
+		self._ANTHROPIC_TIER = ["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8"]
+		self.assertEqual(
+			self._resolve("claude-opus-4-8", api_key_row="claude-sonnet-5"),
+			("claude-opus-4-8", "anthropic"),
+		)
+
+	def test_session_patch_carries_the_provider_prefix(self):
+		from jarvis.chat import turn_handler as th
+
+		with patch.object(th, "_session_model_for", return_value=("claude-sonnet-5", "anthropic")):
+			self.assertEqual(th._session_model_patch(frappe._dict()), (True, "anthropic/claude-sonnet-5"))
+
+
+def setUpModule():
+	from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+	install_synthetic_runtime_profile()

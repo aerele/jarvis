@@ -95,6 +95,8 @@ def sync_agent_listings() -> dict:
 	agents = reg.get("agents") or []
 	seen_slugs = set()
 	created = updated = 0
+	# Agents whose version or min_model moved: their model choices get re-validated.
+	requirement_moved = False
 
 	for a in agents:
 		slug = (a.get("agent_slug") or "").strip()
@@ -108,11 +110,13 @@ def sync_agent_listings() -> dict:
 		# the body from the private bundle store by slug and pushes it to fleet.
 		delivery = "delegate"
 
-		# NOTE: ``allowed_roles`` is deliberately ABSENT — it is bench-admin
-		# state (set via agents_api.set_agent_roles), not registry state. A
-		# re-sync must never clobber an admin's role restrictions: doc.update()
-		# only touches the keys given here, so the loaded child rows survive
-		# the save untouched.
+		# NOTE: ``allowed_roles`` and ``operator_visibility`` are deliberately
+		# ABSENT — both are operator/bench-admin state (roles via
+		# agents_api.set_agent_roles; visibility via set_operator_visibility),
+		# not registry state. A re-sync must never clobber them: doc.update()
+		# only touches the keys given here, so those fields survive the save
+		# untouched. operator_visibility is the runtime catalogue overlay
+		# (available/teaser/hidden) and MUST outlive every ``bench migrate``.
 		values = {
 			"agent_slug": slug,
 			"title": a.get("title") or slug,
@@ -165,10 +169,16 @@ def sync_agent_listings() -> dict:
 			"skill_bundle": frappe.as_json([]),
 			"default_schedule": frappe.as_json(a.get("default_schedule") or {}),
 			"validated_for_fy": a.get("validated_for_fy") or "",
+			# Minimum model capability the bundle declares ({"tier": ...}); None when absent.
+			"min_model": frappe.as_json(a["min_model"]) if isinstance(a.get("min_model"), dict) else None,
 		}
 
 		if frappe.db.exists(LISTING, slug):
 			doc = frappe.get_doc(LISTING, slug)
+			requirement_moved = requirement_moved or (
+				(doc.version or "") != values["version"]
+				or _parsed_json(doc.min_model) != _parsed_json(values["min_model"])
+			)
 			doc.update(values)
 			doc.flags.ignore_permissions = True
 			doc.save()
@@ -208,7 +218,20 @@ def sync_agent_listings() -> dict:
 				deprecated += 1
 
 	frappe.db.commit()
+	if requirement_moved:
+		from jarvis.chat.agent_models import enqueue_revalidation
+
+		enqueue_revalidation()
 	return {"created": created, "updated": updated, "deprecated": deprecated, "total": len(seen_slugs)}
+
+
+def _parsed_json(raw):
+	if not isinstance(raw, str):
+		return raw
+	try:
+		return json.loads(raw) if raw.strip() else None
+	except ValueError:
+		return raw
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +311,11 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 
 			_identity_cache[user] = (set(frappe.get_roles(user)), has_jarvis_admin_access(user))
 		return _identity_cache[user]
+
+	# Enforced per-agent models (empty with the flag off, so no key is added).
+	from jarvis.chat.agent_models import push_choices
+
+	choices = push_choices()
 
 	# Delegate metadata (tools_allow / timeout_s / nature / model) lives in the
 	# BUNDLED registry, never the customer DB; the enablement signal echoes it so
@@ -407,7 +435,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		# it carries NO per-install data — so every row for an agent would yield a
 		# byte-identical entry.
 		seen_agents.add(row.agent)
-		payload.append(_enablement_signal(listing.agent_slug, reg_by_slug))
+		payload.append(_enablement_signal(listing.agent_slug, reg_by_slug, choices))
 
 	# ── Leg 1: ALLOWED LISTINGS (jarvis#1062) ──────────────────────────────────
 	# Appended AFTER the install leg so ``seen_agents`` already holds everything
@@ -420,11 +448,16 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 		allowed_listings = frappe.get_all(
 			LISTING,
 			filters={"status": "Published"},
-			fields=["name", "agent_slug"],
+			fields=["name", "agent_slug", "operator_visibility"],
 			order_by="name asc",
 		)
 		for lst in allowed_listings:
 			if lst.name in seen_agents or lst.name not in granted:
+				continue
+			# Operator overlay: a teaser (coming-soon) / hidden (withdrawn) agent is not
+			# installable, so leg 1 must not pre-provision its delegate into a container.
+			# (Leg 2 — existing enabled installs — is untouched: grandfathering.)
+			if (lst.operator_visibility or "available") != "available":
 				continue
 			# Same reasoning as the install leg's ``installable`` check: an agent
 			# whose min_apps / required DocTypes are absent has no data to evaluate,
@@ -434,7 +467,7 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 			if not evaluate_installability(lst.name)[0]:
 				continue
 			seen_agents.add(lst.name)
-			payload.append(_enablement_signal(lst.agent_slug, reg_by_slug))
+			payload.append(_enablement_signal(lst.agent_slug, reg_by_slug, choices))
 
 	# Stable order regardless of which leg contributed an entry: the payload is a
 	# FULL RECONCILE that admin/fleet diffs against the container's current roster,
@@ -443,15 +476,18 @@ def build_agent_push_payload(owner: str | None = None) -> list[dict]:
 	return payload
 
 
-def _enablement_signal(agent_slug: str, reg_by_slug: dict) -> dict:
+def _enablement_signal(agent_slug: str, reg_by_slug: dict, choices: dict | None = None) -> dict:
 	"""The A2 enablement signal for one agent — body-free.
 
 	Admin resolves the SKILL from the private bundle store by slug (Phase 2C); the
 	body NEVER leaves it. Derived purely from the slug plus the BUNDLED registry,
 	which is why both legs of the roster can share it and why de-duping by slug is
-	safe: two sources for the same agent yield a byte-identical entry."""
+	safe: two sources for the same agent yield a byte-identical entry.
+
+	``choices`` (agent_models.push_choices) adds the model keys for an agent whose
+	choice row pins or blocks it; an agent without one keeps today's exact entry."""
 	meta = reg_by_slug.get(agent_slug) or {}
-	return {
+	entry = {
 		"slug": f"{AGENT_PREFIX}{agent_slug}",
 		"delivery": "delegate",
 		"tools_allow": meta.get("tools_allow") or [],
@@ -459,6 +495,12 @@ def _enablement_signal(agent_slug: str, reg_by_slug: dict) -> dict:
 		"timeout_s": meta.get("timeout_s"),
 		"nature": (meta.get("nature") or "").strip().lower(),
 	}
+	row = (choices or {}).get(agent_slug)
+	if row:
+		from jarvis.chat.agent_models import model_keys
+
+		entry.update(model_keys(row))
+	return entry
 
 
 def registry_timeout_s(agent_slug: str, default: int = 600) -> int:

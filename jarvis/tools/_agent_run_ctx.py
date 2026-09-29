@@ -86,3 +86,27 @@ def take_armed_by_skill() -> str | None:
 		except Exception:
 			setattr(frappe.local, _ARMED_SKILL_ATTR, None)
 	return val
+
+
+_REQUEST_APPLIED_ATTR = "jarvis_request_autorun_applied"
+
+
+def set_request_autorun_applied() -> None:
+	"""Record that the write just dispatched ran uncarded under a request-scoped
+	'confirm all' (design Layer B). Read once by the receipt persist so the row is
+	labelled ``auto_applied`` - a boolean marker with no armer name, because the user
+	themselves approved the whole request (no external macro/skill to attribute)."""
+	setattr(frappe.local, _REQUEST_APPLIED_ATTR, True)
+
+
+def take_request_autorun_applied() -> bool:
+	"""Read AND clear the request-autorun-applied marker (consume-once), so a
+	request-scoped write's receipt is labelled exactly once and the marker can never
+	leak onto the next, unrelated tool call in a reused request/worker."""
+	val = bool(getattr(frappe.local, _REQUEST_APPLIED_ATTR, False))
+	if hasattr(frappe.local, _REQUEST_APPLIED_ATTR):
+		try:
+			delattr(frappe.local, _REQUEST_APPLIED_ATTR)
+		except Exception:
+			setattr(frappe.local, _REQUEST_APPLIED_ATTR, False)
+	return val

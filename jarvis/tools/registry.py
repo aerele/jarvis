@@ -19,6 +19,8 @@ import importlib
 import inspect
 from collections.abc import Callable
 
+import frappe
+
 from jarvis.exceptions import InvalidArgumentError, ToolNotFoundError
 
 _TOOL_NAMES: tuple[str, ...] = (
@@ -171,6 +173,11 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"read_app_source",
 	"record_app_wiki",
 	"finish_app_learning_run",
+	# Per-user durable memory (bench-owned Jarvis User Memory, one row per user):
+	# recall reads the current user's blob, remember full-replaces it. Scope is
+	# frappe.session.user (no user arg), so the model cannot reach another user's memory.
+	"recall",
+	"remember",
 )
 
 
@@ -208,6 +215,11 @@ def list_tools() -> list[str]:
 	return sorted(_TOOLS.keys())
 
 
+def in_tool_dispatch() -> bool:
+	"""True while a tool body runs inside ``dispatch`` (the S6 nesting guard's signal)."""
+	return getattr(frappe.local, "jarvis_dispatch_depth", 0) > 0
+
+
 def dispatch(tool_name: str, args: dict):
 	if tool_name not in _TOOLS:
 		raise ToolNotFoundError(f"no such tool: {tool_name}")
@@ -235,4 +247,10 @@ def dispatch(tool_name: str, args: dict):
 		inspect.signature(fn).bind(**args)
 	except TypeError as e:
 		raise InvalidArgumentError(str(e))
-	return fn(**args)
+	# The ONLY dispatch site (normal, confirmed and preview), so the depth covers
+	# every tool body; gate/chat endpoints refuse while it is > 0.
+	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
+	try:
+		return fn(**args)
+	finally:
+		frappe.local.jarvis_dispatch_depth -= 1

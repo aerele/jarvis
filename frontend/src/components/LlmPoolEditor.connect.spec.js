@@ -29,6 +29,9 @@ const api = vi.hoisted(() => ({
 	beginPoolAccountSignin: vi.fn(),
 	completePoolAccountSignin: vi.fn(),
 	pollPoolAccountSignin: vi.fn(),
+	beginClaudeCliLogin: vi.fn(),
+	completeClaudeCliLogin: vi.fn(),
+	cancelClaudeCliLogin: vi.fn(),
 	getPendingOauthCaptures: vi.fn(),
 	cancelPendingOauthCapture: vi.fn(),
 	getLlmApplyOperation: vi.fn(),
@@ -660,5 +663,103 @@ describe("connect-flow error copy (finishConnect)", () => {
 		await w.vm.finishConnect(r);
 
 		expect(r._connect.error).toMatch(/couldn't connect the account/i);
+	});
+});
+
+// Claude browser sign-in (CLAUDE-LOGIN-CONTRACT.md): no token, no PKCE exchange -
+// startConnect relays to beginClaudeCliLogin (the official Claude CLI's own sign-in
+// running inside the tenant container), finishConnect relays the pasted code to
+// completeClaudeCliLogin. Same envelope, same startConnect/finishConnect functions
+// as every other upstream, just a different pair of api.js calls underneath.
+describe("Claude sign-in (startConnect/finishConnect via the claude-login relay)", () => {
+	async function beginClaudeSignin(w, { model = "claude-opus-5" } = {}) {
+		const r = w.vm.rows[0];
+		r.credentialType = "subscription";
+		r.upstream = "anthropic";
+		r.model = model;
+		api.beginClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: {
+				login_id: "login-abc",
+				authorize_url: "https://claude.com/cai/oauth/authorize?code=true",
+				expires_at: 0,
+			},
+		});
+		await w.vm.startConnect(r, null, { openTab: false });
+		await flushPromises();
+		expect(r._connect.loginId).toBe("login-abc"); // sanity: sign-in actually began
+		expect(api.beginPoolAccountSignin).not.toHaveBeenCalled();
+		r._connect.pastedUrl = "the-pasted-code-abcd1234";
+		return r;
+	}
+
+	it("startConnect calls beginClaudeCliLogin with the model, not beginPoolAccountSignin", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		expect(api.beginClaudeCliLogin).toHaveBeenCalledWith("claude-opus-5");
+		expect(r._connect.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize?code=true");
+	});
+
+	it("presents the bare-code paste step, same as xAI's code_only_paste", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		expect(w.vm.isCodeOnlyPaste(r.upstream)).toBe(true);
+		expect(w.vm.pasteTitle(r.upstream)).toBe("Paste the code");
+	});
+
+	it("finishConnect relays the pasted code to completeClaudeCliLogin, keyed by login_id", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: { capture_id: "cap1", account_ref: "CLAUDE_a", label: "Claude subscription" },
+		});
+
+		await w.vm.finishConnect(r);
+
+		expect(api.completeClaudeCliLogin).toHaveBeenCalledWith(
+			"login-abc",
+			"the-pasted-code-abcd1234"
+		);
+		expect(api.completePoolAccountSignin).not.toHaveBeenCalled();
+	});
+
+	it("an invalid code keeps the panel open with the backend's own actionable message", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: false,
+			error: { code: "invalid_code", message: "Check the pasted code and try again." },
+		});
+
+		await w.vm.finishConnect(r);
+
+		expect(r._connect.error).toBe("Check the pasted code and try again.");
+		expect(r._connect.loading).toBe(false);
+	});
+
+	it("cancelling the sign-in tells fleet to cancel the in-flight login", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+
+		w.vm.closeConnect(r);
+
+		expect(api.cancelClaudeCliLogin).toHaveBeenCalledWith("login-abc");
+	});
+
+	it("closing the whole panel also cancels an in-flight Claude login", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		w.vm.panel = {
+			...w.vm.panel,
+			open: true,
+			mode: "edit",
+			uid: r._uid,
+			source: "subscription",
+		};
+
+		w.vm.closePanel();
+
+		expect(api.cancelClaudeCliLogin).toHaveBeenCalledWith("login-abc");
 	});
 });

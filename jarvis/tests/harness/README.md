@@ -17,7 +17,7 @@ Zero product-code edits. Everything lives under `jarvis/tests/harness/`.
 | `turn_runner.py` | The faithful legacy turn: REAL `AgentSession` transport → REAL `_AssistantContentBatcher` + `_handle_event` (real DB commits + real publish fan-out). `WorkerPool(size=2)` = the 2-background-worker starvation bed. |
 | `probes.py` | Metric probes: first_token (from submit + from send), queue_wait, flush-gap (C3) + publish-gap, dwell (C4), the p50/p95/p99 summarizer, a REAL RQ canary (short+long every 10s) + Desk HTTP probe (C6), a real background flood, and stop-click→visible-stop (SUX-12). |
 | `run_baseline.py` | The orchestrator: all scenarios, the flag ON/OFF incident via the REAL `accept_or_queue` chokepoint, machine-readable + human results. |
-| `probe_real_gateway.py` | R-21 guard: read-only assertion of the protocol facts against the pinned agent 2026.6.8 image in a THROWAWAY `--network none --rm` container. |
+| `probe_real_gateway.py` | R-21 guard: read-only assertion of the protocol facts against an explicitly supplied local runtime image in a THROWAWAY `--network none --rm` container. |
 
 ## How to re-run everything (the pilot will)
 
@@ -47,8 +47,15 @@ Outputs in `--out`:
 ### 2. The R-21 real-gateway guard (once per run; needs docker + the image)
 
 ```bash
-env/bin/python apps/jarvis/jarvis/tests/harness/probe_real_gateway.py
+env/bin/python apps/jarvis/jarvis/tests/harness/probe_real_gateway.py --image "$JARVIS_RUNTIME_IMAGE"
 ```
+
+Set `JARVIS_RUNTIME_IMAGE` to the exact image under investigation (from the
+Admin deployment record); the probe has no default and does not pull images.
+Symbol presence does not prove behavioral compatibility or event ordering.
+
+The fake gateway receives the configured metadata key explicitly from each
+runner after site bootstrap. It does not infer a runtime contract on its thread.
 
 ### 3. Re-export the transcript fixtures
 

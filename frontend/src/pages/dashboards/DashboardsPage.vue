@@ -1,5 +1,5 @@
 <template>
-	<div class="flex h-full flex-col overflow-hidden">
+	<div class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
 		<!-- friendly no-access state: get_dashboards_caps rejected with a real 403
 		     (TriggersPage probe precedent - transient failures retry, never block) -->
 		<template v-if="accessDenied">
@@ -51,7 +51,7 @@
 			<div
 				v-show="activeTab === 'builder'"
 				ref="builderEl"
-				class="flex min-h-0 flex-1 flex-row"
+				class="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden"
 			>
 				<!-- canvas pane (the surface's one solid action lives here). On a
 				     phone the split can't hold two usable columns, so the canvas
@@ -59,18 +59,19 @@
 				     open (Hide chat brings it back). -->
 				<div
 					v-show="!isMobile || !chatOpen"
-					class="flex min-h-0 flex-1 flex-col"
+					class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
 					:class="resizing ? 'pointer-events-none select-none' : ''"
 				>
 					<div
-						class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4"
+						class="flex min-h-[56px] shrink-0 flex-wrap items-center justify-between gap-2 border-b px-4 py-2"
 					>
-						<div class="flex min-w-0 items-center gap-2">
+						<div class="flex min-w-0 max-w-full items-center gap-2">
 							<span class="text-base font-semibold text-ink-gray-9">Canvas</span>
 							<!-- informational (which dashboard is loaded), not a dirty
 							     warning - so gray, not orange (§1.2 hue = meaning) -->
 							<Badge
 								v-if="editingDetail"
+								class="min-w-0 truncate"
 								theme="gray"
 								variant="subtle"
 								:label="`Editing ${
@@ -78,7 +79,7 @@
 								}`"
 							/>
 						</div>
-						<div class="flex shrink-0 items-center gap-3">
+						<div class="flex min-w-0 flex-wrap items-center gap-2">
 							<Button
 								v-if="!chatOpen"
 								variant="ghost"
@@ -111,14 +112,31 @@
 							/>
 						</div>
 					</div>
+					<DashboardFilterBar
+						:defs="detectedFilters"
+						:modelValue="builderFilters"
+						:errors="builderFilterErrors"
+						@update:modelValue="onBuilderFilterChange"
+					/>
 					<DashboardCanvas
 						ref="canvasRef"
-						class="min-h-0 flex-1"
+						class="min-h-32 min-w-0 flex-1"
 						mode="builder"
 						:html="builderHtml"
 						:caps="caps"
 						:theme="builderTheme"
+						:filters="builderAppliedFilters"
 						@sources="(s) => (detectedSources = s)"
+						@filters="
+							(f) => {
+								detectedFilters = f;
+								initBuilderFilters(f);
+							}
+						"
+						@filter-error="
+							(name) =>
+								(builderFilterErrors = { ...builderFilterErrors, [name]: true })
+						"
 					/>
 				</div>
 
@@ -152,7 +170,7 @@
 					v-show="chatOpen"
 					ref="chatPane"
 					:class="isMobile ? 'w-full' : 'shrink-0 border-l'"
-					:style="isMobile ? {} : { width: chatPct + '%' }"
+					:style="isMobile ? {} : { width: chatWidth + 'px' }"
 					:caps="caps"
 					:theme="builderTheme"
 					:editing-name="agentEditingName"
@@ -209,7 +227,7 @@
 // proceeds with default caps rather than blocking an authorized user.
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { useStorage } from "@vueuse/core";
+import { useElementSize, useStorage } from "@vueuse/core";
 import { Badge, Breadcrumbs, Button, Dialog, Dropdown, FeatherIcon, toast } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
@@ -225,6 +243,7 @@ import {
 } from "@/api/dashboards";
 import { takeDashboardPrefill } from "@/composables/dashboardPrefill";
 import { gotoFiredKey } from "@/lib/chatGoto";
+import { debouncedFilterValues } from "@/lib/debouncedFilterValues";
 import { builderCanvasFrame } from "@/lib/dashboardRestore";
 import {
 	adoptionIdentity,
@@ -235,6 +254,7 @@ import {
 import { DEFAULT_THEME, THEME_OPTIONS, themeKey, themeLabel } from "@/lib/dashboardThemes";
 import DashboardCanvas from "./DashboardCanvas.vue";
 import DashboardChatPane from "./DashboardChatPane.vue";
+import DashboardFilterBar from "./DashboardFilterBar.vue";
 import SavedDashboardsTab from "./SavedDashboardsTab.vue";
 import SaveDashboardDialog from "./SaveDashboardDialog.vue";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
@@ -247,7 +267,19 @@ const router = useRouter();
 // never overwritten, see stores/shell.setSpaciousView). `isMobile` drops the
 // side-by-side split for a single-pane swap below the phone breakpoint.
 const shell = useShellStore();
-const isMobile = computed(() => shell.mobile);
+const MIN_CHAT_WIDTH = 320;
+const MIN_CANVAS_WIDTH = 360;
+const DIVIDER_WIDTH = 10;
+const builderEl = ref(null);
+const { width: builderWidth } = useElementSize(builderEl);
+// Use the available builder width as well as the phone breakpoint (the rail
+// may be expanded). Below this width two useful panes no longer fit.
+const isMobile = computed(
+	() =>
+		shell.mobile ||
+		(builderWidth.value > 0 &&
+			builderWidth.value < MIN_CHAT_WIDTH + MIN_CANVAS_WIDTH + DIVIDER_WIDTH)
+);
 
 const TABS = [
 	{ label: "Builder", value: "builder" },
@@ -295,6 +327,42 @@ const builderHtml = ref("");
 const editingDetail = ref(null); // full get_dashboard detail while editing
 const savedName = ref(""); // last save's name → the "View dashboard" link
 const detectedSources = ref([]); // parsed #jarvis-sources (DashboardCanvas emit)
+const detectedFilters = ref([]); // parsed #jarvis-filters (DashboardCanvas emit)
+const builderFilters = ref({}); // {fieldname: value} fed to the bar; updated immediately
+const builderAppliedFilters = ref({}); // debounced copy fed to the canvas
+const builderFilterErrors = ref({}); // {fieldname: true} for required-empty (DashboardCanvas emit)
+// Same 300ms debounce DashboardView uses: a pick updates the bar right away,
+// but the canvas (and its iframe remount) only sees it once the user stops.
+const builderFilterDebounce = debouncedFilterValues(builderFilters, builderAppliedFilters, () => {
+	builderFilterErrors.value = {};
+});
+function onBuilderFilterChange(v) {
+	builderFilterDebounce.onChange(v);
+}
+// Last-seen defs' fieldname set. Re-initialising on every "filters" emit
+// (the html watcher fires on any rebuild, not just a new filter set) would
+// clobber a value the user already picked; only a genuinely new set resets.
+let filterFieldnameKey = "";
+function initBuilderFilters(defs) {
+	const names = (defs || [])
+		.map((d) => d.fieldname)
+		.sort()
+		.join(",");
+	if (names === filterFieldnameKey) return;
+	filterFieldnameKey = names;
+	// A new filter set outdates any pending debounced apply and any error the
+	// canvas flagged against the OLD set - both would otherwise land after this.
+	builderFilterDebounce.cancel();
+	builderFilterErrors.value = {};
+	const next = {};
+	for (const d of defs || []) {
+		next[d.fieldname] = Object.prototype.hasOwnProperty.call(builderFilters.value, d.fieldname)
+			? builderFilters.value[d.fieldname]
+			: d.default || "";
+	}
+	builderFilters.value = next;
+	builderAppliedFilters.value = { ...next };
+}
 const saveOpen = ref(false);
 const chatPane = ref(null);
 const canvasRef = ref(null);
@@ -607,6 +675,12 @@ function clearBuilder() {
 	editingDetail.value = null;
 	savedName.value = "";
 	detectedSources.value = [];
+	detectedFilters.value = [];
+	builderFilterDebounce.cancel();
+	builderFilters.value = {};
+	builderAppliedFilters.value = {};
+	builderFilterErrors.value = {};
+	filterFieldnameKey = "";
 	builderTheme.value = DEFAULT_THEME;
 }
 
@@ -712,6 +786,19 @@ watch(
 // actual change). A future caller that adopts a row built by a DIFFERENT
 // conversation would need its own guard here; onDashboardSaved does not.
 function applyEditDetail(d, { deepLink = true } = {}) {
+	// A different saved dashboard: whatever the user picked belongs to the
+	// canvas that is about to be replaced, not this one. `onDashboardSaved`
+	// re-adopts the SAME row after every agent save and must NOT hit this -
+	// that is exactly the "keep the user's picks" case initBuilderFilters
+	// protects, so only a genuine identity change resets.
+	if (d.name !== editingName()) {
+		detectedFilters.value = [];
+		builderFilterDebounce.cancel();
+		builderFilters.value = {};
+		builderAppliedFilters.value = {};
+		builderFilterErrors.value = {};
+		filterFieldnameKey = "";
+	}
 	builderHtml.value = d.html || "";
 	editingDetail.value = d;
 	editingSticky.value = d.name;
@@ -1149,7 +1236,6 @@ watch(
 );
 
 // ── the drag-split (Sidebar's resize machinery, horizontal right panel) ──
-const builderEl = ref(null);
 const _split = useStorage("jarvis-dash-panel-w", 34);
 // GMeet-style right chat panel: persisted width %, plus a show/hide toggle.
 const chatOpen = useStorage("jarvis-dash-chat-open", true);
@@ -1158,16 +1244,27 @@ const chatPct = computed({
 	get: () => clampPct(_split.value),
 	set: (v) => (_split.value = clampPct(v)),
 });
+// Persist the preferred percentage, but constrain its rendered width on every
+// container resize. Reserve 360px for the canvas and 10px for the divider.
+const chatWidth = computed(() =>
+	Math.max(
+		MIN_CHAT_WIDTH,
+		Math.min(
+			builderWidth.value - MIN_CANVAS_WIDTH - DIVIDER_WIDTH,
+			(builderWidth.value * chatPct.value) / 100
+		)
+	)
+);
 const resizing = ref(false);
 let startX = 0;
 let startPct = 34;
 let containerW = 1;
 
 function startResize(e) {
-	if (e.button !== 0) return;
+	if (e.button !== 0 || isMobile.value) return;
 	resizing.value = true;
 	startX = e.clientX;
-	startPct = chatPct.value;
+	startPct = (chatWidth.value / builderWidth.value) * 100;
 	containerW = (builderEl.value && builderEl.value.getBoundingClientRect().width) || 1;
 	window.addEventListener("mousemove", onResize);
 	window.addEventListener("mouseup", stopResize);
@@ -1188,8 +1285,13 @@ function stopResize() {
 function resetSplit() {
 	chatPct.value = 34;
 }
+watch(isMobile, (singlePane) => {
+	if (singlePane) stopResize();
+});
 onBeforeUnmount(stopResize);
 onBeforeUnmount(() => shell.setSpaciousView(false));
+// A pending debounced filter apply must not fire after this page unmounts.
+onBeforeUnmount(() => builderFilterDebounce.cancel());
 
 // ── caps probe (403 vs transient, TriggersPage pattern) ──────────────────────
 function isPermissionError(e) {

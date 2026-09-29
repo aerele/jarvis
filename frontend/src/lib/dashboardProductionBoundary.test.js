@@ -69,7 +69,7 @@ test("the builder frees the window: auto-collapses the rail and swaps to single-
 	assert.match(page, /onBeforeUnmount\(\(\) => shell\.setSpaciousView\(false\)\)/);
 	// Below the phone breakpoint the side-by-side split can't hold two usable
 	// columns, so the canvas and chat swap full-width instead of squeezing.
-	assert.match(page, /const isMobile = computed\(\(\) => shell\.mobile\)/);
+	assert.match(page, /const isMobile = computed[\s\S]*?shell\.mobile/);
 	assert.match(page, /v-show="!isMobile \|\| !chatOpen"/); // canvas hidden while chat is open on mobile
 	assert.match(page, /v-show="chatOpen && !isMobile"/); // the drag divider is desktop-only
 	assert.match(page, /isMobile \? 'w-full' : 'shrink-0 border-l'/); // chat pane takes the full width on a phone

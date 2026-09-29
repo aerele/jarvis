@@ -72,11 +72,12 @@ import PersonaliseTab from "./PersonaliseTab.vue";
 import WikiTab from "./WikiTab.vue";
 import KnowledgeGraph from "@/pages/wiki/KnowledgeGraph.vue";
 import { renderer3dEnabled } from "wiki-graph-core";
-import { getReviewAccess } from "@/api/learning";
+import { useShellStore } from "@/stores/shell";
 import { getSkillsAreaCaps } from "@/api/personalise";
 
 const route = useRoute();
 const router = useRouter();
+const shell = useShellStore();
 // The same shared socket AppShell's global notifier listens on (main.js
 // provides it app-wide; null under ?nosocket/headless screenshots) - reused
 // here for the Personalise unanswered-count badge's realtime refresh instead
@@ -175,25 +176,23 @@ watch(
 	}
 );
 
+// the sidebar's poll / review:pending refresh keeps this tab's count current too
+watch(
+	() => shell.reviewCount,
+	(n) => {
+		if (reviewAllowed.value) learningPending.value = n;
+	}
+);
+
 async function refreshBadge() {
 	// The Review badge is reviewer-gated server-side (`get_review_access` is the
-	// reviewer-set probe) - skip the call entirely for viewers who can't reach
-	// Review at all, rather than relying on the catch to swallow the 403 silently.
+	// reviewer-set probe) - skip entirely for viewers who can't reach Review.
 	if (!reviewAllowed.value) return;
-	try {
-		// The Review tab holds THREE actionable queues - learned patterns, wiki
-		// promotions and skill promotions. Count all pending review work in one
-		// probe so a pending promotion (the wiki requester side is finally wired,
-		// and skills' reviewer queue is new) is never invisible on the tab.
-		// pending_patterns == the old pending_learned_count exactly.
-		const a = (await getReviewAccess()) || {};
-		learningPending.value =
-			(a.pending_patterns || 0) +
-			(a.pending_promotions || 0) +
-			(a.pending_skill_promotions || 0);
-	} catch (e) {
-		// best-effort badge; a transient failure must not disturb the page
-	}
+	// One source for the count: the shell store sums every pending review queue
+	// (learned patterns, wiki and skill promotions) for the sidebar Skills badge
+	// too, so a decision here clears both at once. Best-effort, never throws.
+	await shell.refreshReviewCount();
+	learningPending.value = shell.reviewCount;
 }
 
 // Realtime unanswered-count refresh (DESIGN.md §3/§6b: `personalise:question`

@@ -93,6 +93,8 @@ _MACRO_CHANGED_ERROR = (
 	"The macro was edited while this run was waiting for capacity, so the run could no "
 	"longer continue the way it started. Run it again."
 )
+# The capacity resume is a cron: its turn never binds a disabled user, Administrator or Guest.
+_OWNER_INELIGIBLE_ERROR = "The run's owner can no longer run unattended work, so the run was closed."
 
 # Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
 # them). The scheduled path reports the machine code instead and the scheduler
@@ -158,9 +160,29 @@ def _disarm_conversation(conversation: str | None) -> None:
 	the human-inert send-block (T4): the send-block already keeps a lingering flag
 	un-exploitable (send/retry are refused while set), but clearing keeps state clean
 	and stops any re-dispatched turn from running armed after the run is over. No-op
-	when unset. Caller commits (consistent with ``_cas_run_status``)."""
-	if conversation and frappe.db.get_value(CONV, conversation, "skip_confirmation"):
-		frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+	when unset. Caller commits (consistent with ``_cas_run_status``).
+
+	The run's cards are swept FIRST, while the flag still refuses a Confirm: cards
+	never expire, so one a stop, the stale reaper or a store blip left behind would
+	otherwise stay confirmable forever (the sweep commits the caller's work first).
+	A card the sweep left live keeps the flag (fail closed)."""
+	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		return
+	from jarvis import api as _jarvis_api
+	from jarvis.chat import pending_confirm
+
+	owner = frappe.db.get_value(CONV, conversation, "owner")
+	pending_confirm.clear_for_conversation(owner, conversation)
+	try:
+		_jarvis_api.cancel_pending_action_rows(conversation)
+	except Exception:
+		frappe.log_error(title="jarvis.macro.disarm_sweep_failed", message=frappe.get_traceback())
+	if pending_confirm.has_live_card(owner, conversation):
+		frappe.log_error(
+			title="jarvis.macro.disarm_withheld", message=f"{conversation}: a card outlived the sweep"
+		)
+		return
+	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
 
 
 def _disarm_run_conversation(run_name: str) -> None:
@@ -393,6 +415,16 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 					# destructive write. Consuming the token first makes a racing Confirm hit
 					# a dead token and be refused regardless of the flag (deterministic).
 					pending_confirm.clear_for_conversation(owner_user, run.conversation)
+					# PR-1: flip the swept row's pending card to a terminal 'cancelled'
+					# receipt so it doesn't linger as a dangling 'pending' row on reload.
+					try:
+						from jarvis import api as _jarvis_api
+
+						_jarvis_api.cancel_pending_action_rows(run.conversation)
+					except Exception:
+						frappe.log_error(
+							title="macro-stop cancel pending rows", message=frappe.get_traceback()
+						)
 					_finish(run, "failed", error=_armed_stop_message(run.current_step or 0, parked))
 					_publish_done(run, macro_doc, "failed")
 					return
@@ -617,6 +649,7 @@ def _run_step(run, macro_doc, index: int) -> bool:
 	out = api._enqueue_turn(
 		run.conversation,
 		(step.prompt or "").strip() + _skill_invocations(step),
+		origin="macro",
 		model_override=(step.model_override or None),
 		thinking_override=(step.thinking_override or None),
 	)
@@ -670,6 +703,7 @@ def _run_merged(run, macro_doc, merged_prompt: str) -> bool:
 	out = api._enqueue_turn(
 		run.conversation,
 		merged_prompt + _merged_skill_invocations(macro_doc),
+		origin="macro",
 		model_override=model_o,
 		thinking_override=think_o,
 	)
@@ -745,6 +779,7 @@ def resume_waiting_capacity_runs() -> None:
 	if not rows:
 		return
 	from jarvis._redis_lock import redis_lock
+	from jarvis.permissions import is_valid_unattended_owner
 
 	for run_name in rows:
 		try:
@@ -774,6 +809,19 @@ def resume_waiting_capacity_runs() -> None:
 						"failed",
 						finished_at=frappe.utils.now(),
 						error=_MACRO_CHANGED_ERROR,
+					):
+						frappe.db.commit()
+						_publish_done(run, macro_doc, "failed")
+					else:
+						frappe.db.commit()
+					continue
+				if not is_valid_unattended_owner(frappe.db.get_value(CONV, run.conversation, "owner")):
+					if _cas_run_status(
+						run.name,
+						"waiting_capacity",
+						"failed",
+						finished_at=frappe.utils.now(),
+						error=_OWNER_INELIGIBLE_ERROR,
 					):
 						frappe.db.commit()
 						_publish_done(run, macro_doc, "failed")

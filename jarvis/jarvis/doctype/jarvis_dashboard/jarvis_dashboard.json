@@ -16,6 +16,7 @@
   "target_user",
   "html",
   "sources",
+  "filters",
   "source_conversation"
  ],
  "fields": [
@@ -100,6 +101,13 @@
    "options": "Jarvis Dashboard Source",
    "label": "Data Sources",
    "description": "Declared data sources served live at view time as the viewing user."
+  },
+  {
+   "fieldname": "filters",
+   "fieldtype": "Table",
+   "label": "Filters",
+   "options": "Jarvis Dashboard Filter",
+   "description": "Builder-defined filters rendered above the dashboard; values are bound into the sources at view time."
   },
   {
    "fieldname": "source_conversation",

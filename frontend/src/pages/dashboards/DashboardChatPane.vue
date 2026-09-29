@@ -1,11 +1,17 @@
 <template>
-	<div class="flex h-full flex-col overflow-hidden bg-surface-white">
+	<div
+		class="flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto bg-surface-white"
+	>
 		<!-- header: this pane stays dashboard-native; it never hands the thread to
 		     the general chat surface. -->
-		<div class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4">
+		<div
+			class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4 py-2"
+		>
 			<div class="flex min-w-0 flex-col gap-0.5">
-				<span class="text-base font-semibold text-ink-gray-9">Describe a dashboard</span>
-				<span class="text-p-sm text-ink-gray-6"
+				<span class="truncate text-base font-semibold text-ink-gray-9"
+					>Describe a dashboard</span
+				>
+				<span class="truncate text-p-sm text-ink-gray-6"
 					>{{ agentName }} draws it on the canvas</span
 				>
 			</div>
@@ -36,7 +42,10 @@
 		</div>
 
 		<!-- transcript -->
-		<div ref="scroller" class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+		<div
+			ref="scroller"
+			class="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-auto break-words px-4 py-4 [overflow-wrap:anywhere]"
+		>
 			<div v-if="loadingTranscript && !bubbles.length" class="flex justify-center py-8">
 				<JvSpinner />
 			</div>
@@ -186,9 +195,12 @@
 		<!-- parked ERP-write confirmations (create/update Jarvis Dashboard…):
 		     rendered in-pane so a chat-driven save never dead-ends into the
 		     full chat view just to click Approve -->
-		<div v-if="pendingCards.length" class="flex shrink-0 flex-col gap-2 border-t px-4 py-3">
+		<div
+			v-if="pendingCards.length"
+			class="flex max-h-[25%] shrink-0 flex-col gap-2 overflow-y-auto border-t px-4 py-3"
+		>
 			<div
-				v-for="pa in pendingCards"
+				v-for="pa in orderedCards"
 				:key="pa.token"
 				class="flex flex-col gap-2 rounded-md p-3 ring-1 ring-outline-gray-modals"
 			>
@@ -234,6 +246,7 @@
 				ref="box"
 				v-model="draft"
 				rows="2"
+				style="max-height: min(180px, 15dvh)"
 				placeholder="Describe the dashboard…"
 				class="block w-full resize-none rounded border border-transparent bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-8 transition-colors placeholder-ink-gray-4 hover:border-outline-gray-modals hover:bg-surface-gray-3 focus:border-outline-gray-4 focus:bg-surface-white focus:shadow-sm focus:outline-none focus:ring-0 focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 				@keydown="onKeydown"
@@ -394,6 +407,9 @@ import {
 } from "@/api";
 import { agentName } from "@/branding";
 import { errHtml, turnErrorInfo } from "@/lib/errors";
+import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
+import { sortPendingCards } from "@/lib/sortPendingCards";
+import { discardedTokens } from "@/lib/typedCardReply";
 import { compactFailureCopy } from "@/lib/compact";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 
@@ -772,6 +788,8 @@ function scheduleRefetch() {
 
 // ── parked confirmations (gated ERP writes park for human approval) ──────────
 const pendingCards = ref([]);
+// Server order, so a typed "confirm 1" / "discard 1" means the card shown first.
+const orderedCards = computed(() => sortPendingCards(pendingCards.value));
 
 async function refreshPending() {
 	if (!conversation.value) {
@@ -855,16 +873,22 @@ function cardMeta(pa) {
 	return [doc.dashboard_type, scope].filter(Boolean).join(" · ");
 }
 
+// D3: reuse the SPA's chatCardActions mapping (chatRefusalMessage/keepsChatCard)
+// for the words AND the keep-vs-drop decision, instead of one generic "may have
+// expired" guess for every ok:false. A bare legacy token (no reason_code at
+// all) still gets that guess - chatRefusalMessage falls back to it below.
 async function approve(pa) {
 	pa.busy = true;
 	let keepCard = false;
 	try {
 		const r = await confirmTool(pa.token, conversation.value);
 		if (r && r.ok === false) {
-			keepCard = confirmationStorageUnavailable(r);
+			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
 			toast.error(
-				keepCard
+				confirmationStorageUnavailable(r)
 					? r.error.message
+					: r.reason_code
+					? chatRefusalMessage(r)
 					: "Couldn't confirm. It may have expired. Ask again in the chat."
 			);
 		}
@@ -887,8 +911,14 @@ async function dismiss(pa) {
 	try {
 		const r = await dismissTool(pa.token, conversation.value);
 		if (r && r.ok === false) {
-			keepCard = confirmationStorageUnavailable(r);
-			toast.error((r.error && r.error.message) || "Could not discard this confirmation.");
+			keepCard = confirmationStorageUnavailable(r) || keepsChatCard(r);
+			toast.error(
+				confirmationStorageUnavailable(r)
+					? r.error.message
+					: r.reason_code
+					? chatRefusalMessage(r)
+					: (r.error && r.error.message) || "Could not discard this confirmation."
+			);
 		}
 	} catch (e) {
 		keepCard = true;
@@ -1015,8 +1045,24 @@ async function send(gotoMessageId = "") {
 				props.editingName,
 				props.theme,
 				modelOverride.value,
-				thinkingOverride.value
+				thinkingOverride.value,
+				orderedCards.value.map((c) => c.token)
 			)) || {};
+		for (const t of discardedTokens(r)) removeCard(t);
+		// A typed go-ahead ran the confirmation instead of a turn: no run events are
+		// coming, and nothing was persisted for the typed words.
+		if (r.confirmed) {
+			messages.value = messages.value.filter((m) => m.name !== tmpName);
+			for (const t of r.tokens || []) removeCard(t);
+			if (r.ok === false)
+				toast.error(
+					(r.error && r.error.message) || "That confirmation is no longer valid."
+				);
+			scheduleRefetch();
+			refreshPending();
+			emit("activity");
+			return;
+		}
 		if (r.ok === false) {
 			// rejected (single-flight guard / usage cap) - nothing persisted
 			messages.value = messages.value.filter((m) => m.name !== tmpName);

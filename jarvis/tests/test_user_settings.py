@@ -31,6 +31,12 @@ from jarvis.permissions import (
 	has_jarvis_admin_access,
 	require_jarvis_admin,
 )
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+
+
+def setUpModule():
+	install_synthetic_runtime_profile()
+
 
 USETT = "Jarvis User Settings"
 SESSION = "Jarvis Chat Session"

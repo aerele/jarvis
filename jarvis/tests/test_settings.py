@@ -155,6 +155,7 @@ class TestJarvisSettings(FrappeTestCase):
 			self.assertEqual(self._tab_of(meta, fieldname), "account_tab")
 		for fieldname in (
 			"run_query_doctype_allowlist",
+			"run_method_blocklist",
 			"disable_armed_skip",
 			"core_apps_override",
 			"enable_customizations_clause",
@@ -198,6 +199,15 @@ class TestJarvisSettings(FrappeTestCase):
 		self.assertTrue(fields_by_name["last_sync_at"].read_only)
 		self.assertEqual(fields_by_name["last_sync_status"].fieldtype, "Long Text")
 		self.assertTrue(fields_by_name["last_sync_status"].read_only)
+
+	def test_permissions_pass_the_level_zero_validator(self):
+		"""DEP2-1: Administrator has a permlevel-2 DocPerm; Frappe's
+		check_level_zero_is_set throws on any validated DocType save (Role
+		Permission Manager, dev-mode reload) unless a level-0 row for the same
+		role exists too."""
+		from frappe.core.doctype.doctype.doctype import validate_permissions_for_doctype
+
+		validate_permissions_for_doctype("Jarvis Settings")  # must not throw
 
 
 class TestOnUpdateAdminDispatch(_SettingsSnapshotTestCase):

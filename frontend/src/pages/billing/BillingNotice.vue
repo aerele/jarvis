@@ -9,6 +9,7 @@
 		<Button
 			v-if="actionLabel"
 			:variant="solid ? 'solid' : 'subtle'"
+			:theme="theme || undefined"
 			:label="actionLabel"
 			:loading="loading"
 			@click="emit('action')"
@@ -25,6 +26,10 @@ defineProps({
 	/** Reserved for the one notice whose action is the page's primary move. */
 	solid: { type: Boolean, default: false },
 	loading: { type: Boolean, default: false },
+	/** Optional Button theme (e.g. "red"). Pair only with solid=false (the
+	 *  default) to stay red-SUBTLE - combining with solid would render red-SOLID
+	 *  and break the "confirm dialog owns the deliberate red step" convention. */
+	theme: { type: String, default: "" },
 });
 const emit = defineEmits(["action"]);
 </script>
