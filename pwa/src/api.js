@@ -152,6 +152,9 @@ export const dismissTool = (token, conversation) =>
 // the write wants fieldnames.
 export const getDoctypeFormMeta = (doctype) =>
 	call("jarvis.chat.actions_api.get_doctype_form_meta", { doctype });
+// Saved values + child rows (each with its `name`) of one document, write-gated.
+export const loadDoc = (doctype, name) =>
+	call("jarvis.chat.actions_api.load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call("jarvis.chat.actions_api.apply_action", { action: JSON.stringify(action) });
 
