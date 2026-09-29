@@ -853,7 +853,11 @@ class TestRuntimeProfilePersistNoEarlyCommit(_RaceCase):
 					receipt_rows = other.sql(
 						"SELECT COUNT(*) FROM `tabDefaultValue` WHERE parent=%s", parent
 					)[0][0]
-			self.assertEqual(live_agent_url[0][0] if live_agent_url else None, original_agent_url)
+			# An unset field reads back as SQL NULL (or no row) over the raw connection but
+			# as "" through get_single_value, which casts it; both mean "unset".
+			live_value = live_agent_url[0][0] if live_agent_url else None
+			self.assertNotEqual(live_value, sentinel_url)
+			self.assertEqual(live_value or "", original_agent_url or "")
 			self.assertEqual(receipt_rows, 0)
 		finally:
 			rp._forget_snapshot()
