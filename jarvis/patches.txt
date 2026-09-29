@@ -67,3 +67,4 @@ jarvis.patches.v2_22_mint_wiki_proposal_digests
 jarvis.patches.v2_22_backfill_filebox_results
 jarvis.patches.v2_23_never_expire_chat_cards
 jarvis.patches.v2_24_backfill_skill_use_in_file_box
+jarvis.patches.v2_25_backfill_filebox_card_results

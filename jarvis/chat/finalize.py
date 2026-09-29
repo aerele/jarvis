@@ -316,9 +316,15 @@ def _effect_file_box_sheet_seal(ctx: _Ctx) -> None:
 	# A File Box run's approval sheet goes on the board once ITS turn ends - errored
 	# or system-cancelled too (the proposals stay valid); a user Stop discards it.
 	# Only the sheet this turn opened; a no-op read for every other conversation.
-	from jarvis.chat import held_sheet_seal
+	# A completed reply's jarvis-action card goes through the File Box policy first,
+	# so a master it holds lands on this turn's sheet before the seal.
+	from jarvis.chat import filebox_cards, held_sheet_seal
 
-	held_sheet_seal.seal_turn(ctx.conversation, ctx.run_id)
+	try:
+		if not ctx.errored:
+			filebox_cards.park_from_turn(ctx.conversation, ctx.turn.get("assistant_message"))
+	finally:
+		held_sheet_seal.seal_turn(ctx.conversation, ctx.run_id)
 
 
 def _effect_macro_advance(ctx: _Ctx) -> None:

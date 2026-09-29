@@ -181,6 +181,11 @@ def resolve_on_user_message(conversation: str) -> None:
 	sheet's question is answered with its sheet, never here."""
 	from jarvis.jarvis.doctype.jarvis_approval_request.jarvis_approval_request import sheet_ready
 
+	open_filter = {"conversation": conversation, "status": "Pending", "source": "Chat"}
+	if sheet_ready():
+		open_filter["sheet"] = ["is", "not set"]
+	if not frappe.db.exists(APPROVAL, open_filter):
+		return
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Answered', decision=%(decision)s,
@@ -196,3 +201,7 @@ def resolve_on_user_message(conversation: str) -> None:
 		},
 	)
 	frappe.db.commit()
+	# The board badge counted it: tell the owner's shell to re-count.
+	owner = frappe.db.get_value(CONV, conversation, "owner")
+	if owner:
+		publish_to_user(owner, {"kind": "action:settled", "conversation_id": conversation})
