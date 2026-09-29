@@ -31,6 +31,7 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import run_atomic_batch
+from jarvis.tools._child_rows import merge_child_rows, row_values
 from jarvis.tools._delegate_write_caps import enforce_update
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
@@ -79,8 +80,18 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 	if not frappe.has_permission(doctype, ptype="write", doc=doc):
 		raise PermissionDeniedError(f"no write permission on {doctype} '{name}'")
 
+	# Child tables are merged by row name, never wholesale-replaced: a payload
+	# that omits a field (custom fields, so_detail links) must not erase it.
+	table_types = {df.fieldname: df.fieldtype for df in doc.meta.get_table_fields()}
 	for field, value in changes.items():
-		doc.set(field, value)
+		if table_types.get(field) == "Table":
+			merge_child_rows(doc, field, value)
+		elif table_types.get(field) and isinstance(value, list):
+			# Table MultiSelect rows are single links, replaced as a set; strip row
+			# names so a payload can never re-parent another document's row.
+			doc.set(field, [row_values(r) if isinstance(r, dict) else r for r in value])
+		else:
+			doc.set(field, value)
 	doc.save()  # runs DocType validate() and on_update hooks
 	return doc
 

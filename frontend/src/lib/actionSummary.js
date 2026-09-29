@@ -4,7 +4,7 @@
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
 // Relative, not "@/": actionSummary.test.js runs under plain `node --test`.
-import { isFieldMissing } from "./draftApply.js";
+import { isFieldMissing, removedSavedRows } from "./draftApply.js";
 
 export function proposedFields(action) {
 	return (action.fields || [])
@@ -38,12 +38,15 @@ export function lineItemSummary(table) {
 		count: table.rows.length,
 		columns: table.columns.map((c) => c.label),
 		rows: table.rows.map((r) => ({ cells: table.columns.map((c) => r[c.fieldname] ?? "") })),
+		removed: removedSavedRows(table),
 	};
 }
 
 export function summarize(model, action = {}) {
 	const headline = String(action.summary ?? "").trim();
-	const tables = (model.tables || []).filter((t) => (t.rows || []).length).map(lineItemSummary);
+	const tables = (model.tables || [])
+		.map(lineItemSummary)
+		.filter((t) => t.count || t.removed.length);
 	if (model.verb === "update") {
 		return { kind: "update", headline, diff: changedFields(model), tables };
 	}
@@ -152,8 +155,11 @@ export const PLAN_STEP_CAP = 20;
 // A gated write, once the user clicks Confirm or Discard, is replaced by a
 // DURABLE receipt chip instead of the card vanishing. These pure helpers turn
 // the tool + args + structured result into the chip's one-liner + target links,
-// for all three outcomes (confirmed / discarded / failed), single and bulk. The
-// verb table + result shapes mirror jarvis/tools/*.py and api._describe_call.
+// for every outcome (confirmed / discarded / failed / auto_applied / cancelled /
+// superseded / expired / unknown / partial), single and bulk. An outcome this
+// code doesn't recognise renders the same NEUTRAL chip as "unknown" - never the
+// confirmed/✓ path (P0b, §4.5 of the unified-pending-action plan). The verb
+// table + result shapes mirror jarvis/tools/*.py and api._describe_call.
 
 const RECEIPT_VERB = {
 	submit_doc: { past: "Submitted", present: "submit" },
@@ -193,11 +199,23 @@ function argCount(args) {
 	return 1;
 }
 
+// Outcomes with no CONFIRMED result to read: discarded/cancelled/superseded/
+// expired ran nothing, and unknown/partial's effect is unverified - none of
+// these should be trusted over the args the model proposed.
+const _NO_CONFIRMED_RESULT = new Set([
+	"discarded",
+	"cancelled",
+	"superseded",
+	"expired",
+	"unknown",
+	"partial",
+]);
+
 // The affected record names: from the structured result for a real execution,
-// else from the args (discarded — nothing ran; or a failed write whose {ok:false}
-// envelope carried no names).
+// else from the args (discarded/etc — nothing confirmed ran; or a failed write
+// whose {ok:false} envelope carried no names).
 function receiptNames(tool, args, data, outcome) {
-	if (outcome !== "discarded") {
+	if (!_NO_CONFIRMED_RESULT.has(outcome)) {
 		for (const k of ["submitted", "cancelled", "updated", "deleted"]) {
 			if (Array.isArray(data[k])) return data[k].slice();
 		}
@@ -292,16 +310,47 @@ export function receiptView(tool, args, result, outcome) {
 						count
 				  )} were ${verb.past.toLowerCase()}`
 				: `Failed, ${subject} was not ${verb.past.toLowerCase()}`;
+	} else if (outcome === "cancelled") {
+		// The run was stopped before the card was answered - never rendered as a
+		// success, and distinct from "discarded" (a discard is the user's own no).
+		icon = "cancelled";
+		tone = "muted";
+		title = "Cancelled — not performed";
+	} else if (outcome === "superseded") {
+		// A newer proposal replaced this one before it was answered.
+		icon = "superseded";
+		tone = "muted";
+		title = "Not confirmed — replaced by a newer proposal";
+	} else if (outcome === "expired") {
+		icon = "expired";
+		tone = "muted";
+		title = "Expired — not performed";
+	} else if (outcome === "unknown") {
+		// The run was interrupted mid-dispatch; whether it applied is unverified -
+		// this must NEVER read as confirmed or as "nothing changed".
+		icon = "unknown";
+		tone = "warning";
+		title = "Outcome unknown — check before retrying";
+	} else if (outcome === "partial") {
+		icon = "partial";
+		tone = "warning";
+		title = "Partly applied — check before retrying";
 	} else if (outcome === "auto_applied") {
 		// An armed macro ran this write WITHOUT a confirmation card. Render a distinct
 		// receipt (not an identical "confirmed" chip) so it never reads as a silent run.
 		icon = "auto_applied";
 		tone = "success";
 		title = `${verb.past} ${wfPrefix}${subject}, automatically, no confirmation`;
-	} else {
+	} else if (outcome === "confirmed") {
 		icon = "confirmed";
 		tone = "success";
 		title = `${verb.past} ${wfPrefix}${subject}`;
+	} else {
+		// A future/unrecognised outcome value - render NEUTRAL, same as "unknown".
+		// Never fall back to the confirmed/✓ path for a value this build predates.
+		icon = "unknown";
+		tone = "warning";
+		title = "Outcome unknown — check before retrying";
 	}
 	return { outcome, icon, tone, title, subject, doctype, action, count, targets, error };
 }

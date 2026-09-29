@@ -1144,12 +1144,14 @@
 									{{ p.note }}
 								</p>
 
-								<!-- snapshot description + invocation policy: EVERY field the
-								     approval publishes, so the reviewer decides on the whole
-								     content, not just the body (R2-SP-2). -->
+								<!-- snapshot description + invocation policy + File Box routing:
+								     EVERY field the approval publishes, so the reviewer decides on
+								     the whole content, not just the body (R2-SP-2). -->
 								<div
 									v-if="
-										p.description_snapshot || p.user_invocable_snapshot != null
+										p.description_snapshot ||
+										p.user_invocable_snapshot != null ||
+										promoFileBox(p)
 									"
 									class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-ink-gray-7"
 								>
@@ -1166,6 +1168,12 @@
 												? 'Slash-invocable'
 												: 'Not slash-invocable'
 										"
+									/>
+									<Badge
+										v-if="promoFileBox(p)"
+										variant="subtle"
+										:theme="p.use_in_file_box_snapshot ? 'blue' : 'gray'"
+										:label="promoFileBox(p)"
 									/>
 								</div>
 
@@ -1867,6 +1875,7 @@ import { formatPushProjection } from "./promotionBudget";
 // (ConfirmDialog renders `message` via v-html) — SAR-1 client belt.
 import { esc } from "./escapeHtml";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
+import { promoFileBox } from "@/lib/fileboxSkills";
 // Session user: a reviewer who is ALSO the requester can't decide their own
 // request (four-eyes); we disable + explain up front (SAR-4 / SPX-4).
 import { session } from "@/data/session";
@@ -2385,6 +2394,8 @@ async function approveSkillPromotion(p) {
 		p.to_scope === "Role"
 			? `People with ${esc(kept.join(", ") || "-")} can use it.`
 			: "Everyone in your org can use it. Your assistant picks it up in a few seconds.";
+	// File Box routing is published with the skill too.
+	if (promoFileBox(p)) message += ` ${esc(promoFileBox(p))}.`;
 	const warn = formatPushProjection(ackProjection);
 	if (warn) {
 		const limit = warn.projection.budget;

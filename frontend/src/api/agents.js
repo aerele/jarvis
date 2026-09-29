@@ -117,3 +117,42 @@ export const setAgentAccess = (agent_slug, roles, users, apply) =>
 // server-side. Admin-gated, like the editor it feeds.
 // -> [{ name, full_name }]
 export const searchUsers = (q) => call(AG + "search_users", { q: q || "" });
+
+// ── Per-agent minimum model (T6 tenant UI) ───────────────────────────────────
+// Inert unless Jarvis Settings.enforce_agent_min_model is on - every call below
+// still resolves (never throws for a plain read) with `enforced: 0` and no row
+// when it is off, so the SPA's own flag-off guard is just "did enforced come
+// back truthy", never a separate settings probe.
+const AM = "jarvis.chat.agent_models.";
+
+// The agent's tenant-wide model + its requirement, read-gated the same as
+// get_agent (works before AND after install - the pre-install confirm dialog
+// and the post-install Model card share this one call).
+// -> { agent, enforced, min_model, required_tier, state, choice, fallbacks,
+//      note, changed_by, changed_at, pending_apply, fleet_unresolved }
+export const getAgentModel = (agent) => call(AM + "get_agent_model", { agent });
+
+// The models this tenant may run the agent on, best-first.
+// -> { agent, required_tier, catalog: "ok"|"unknown", models: [{provider,
+//      model, label, lane_hint, capability_tier, capability_rank, cost_note}] }
+export const getEligibleModels = (agent) => call(AM + "get_eligible_models", { agent });
+
+// Install for the current user. `pick` ({provider, model, ifUnpinned?}, optional)
+// is the install dialog's model: install_agent validates and saves it as the
+// tenant-wide choice in the same request (ignored with the flag off). `ifUnpinned`
+// marks the unchanged shown model: it never replaces a row pinned since.
+// -> { ok, data: { name, agent } }
+export const installAgent = (agent_slug, pick) =>
+	call(AG + "install_agent", {
+		agent_slug,
+		...(pick && pick.model ? { model_provider: pick.provider || "", model: pick.model } : {}),
+		...(pick && pick.model && pick.ifUnpinned ? { pick_if_unpinned: 1 } : {}),
+	});
+
+// Pick the agent's tenant-wide model (applies to everyone using it).
+// -> the refreshed get_agent_model view.
+export const setAgentModel = (agent, provider, model) =>
+	call(AM + "set_agent_model", { agent, provider, model });
+
+// Admin-only: hand the choice back to Jarvis (best eligible, or needs_model).
+export const resetAgentModel = (agent) => call(AM + "reset_agent_model", { agent });

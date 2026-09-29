@@ -937,6 +937,297 @@ class TestCancelFlow(_PumpTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 7b. agent-yield continuation wait (image/video/music tools' unconditional
+# background-detach abort): on_terminal must tell a real yield apart from a
+# user Stop, park via the mux instead of settling, expire it via
+# _yield_wait_sweep if nothing lands, and let the EXISTING _cancel_sweep handle
+# a Stop mid-wait for free (the Turn row is left `state='streaming'`).
+# --------------------------------------------------------------------------- #
+
+
+class TestAgentYieldContinuation(_PumpTestCase):
+	def _streaming_turn(self, rid, ctx, *, cancel_requested=0, session_key=None):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"streaming",
+			version=4,
+			pump_epoch=ctx.epoch,
+			reserved=1,
+			assistant_message=amsg,
+			gateway_run_id=rid,
+			cancel_requested=cancel_requested,
+			dispatching_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": session_key or f"sess-{rid}", "message": "hi"}),
+		)
+		return conv, amsg
+
+	def _rs(self, rid, conv, amsg, *, session_key=None):
+		return pump._RunState(
+			run_id=rid,
+			conversation=conv,
+			owner=None,
+			assistant_message=amsg,
+			session_key=session_key or f"sess-{rid}",
+			version=4,
+			gateway_run_id=rid,
+		)
+
+	def test_unprompted_empty_abort_is_a_yield(self):
+		self.assertTrue(pump._is_unprompted_yield("r1", "relay:error", {"state": "aborted", "text": ""}))
+		self.assertTrue(pump._is_unprompted_yield("r1", "relay:error", {"state": "aborted", "text": "   "}))
+
+	def test_partial_text_abort_is_not_a_yield(self):
+		# A genuine partial-content abort must settle normally, not wait.
+		self.assertFalse(
+			pump._is_unprompted_yield("r1", "relay:error", {"state": "aborted", "text": "partial answer"})
+		)
+
+	def test_non_aborted_terminal_is_not_a_yield(self):
+		self.assertFalse(pump._is_unprompted_yield("r1", "relay:final", {"text": "hi"}))
+		self.assertFalse(pump._is_unprompted_yield("r1", "relay:error", {"state": "error", "text": ""}))
+
+	def test_cancel_requested_abort_is_not_a_yield(self):
+		# The pump's authoritative stop signal: a real user Stop must never wait.
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		self._mk_turn(conv, "pmp_yield_stop_check", seed, "streaming", version=1, cancel_requested=1)
+		self.assertFalse(
+			pump._is_unprompted_yield("pmp_yield_stop_check", "relay:error", {"state": "aborted", "text": ""})
+		)
+
+	def test_on_terminal_parks_instead_of_settling(self):
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield1"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		handler = ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=rs.session_key).handler
+
+		handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+
+		# NOT settled — still streaming, no terminal recorded, slot still held.
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIsNone(self._val(rid, "terminal_observed_at"))
+		self.assertEqual(int(self._val(rid, "reserved")), 1)
+		# Parked: the lane is kept, flagged, and rs remembers the payload/deadline.
+		self.assertTrue(ctx.mux._runs[rid].awaiting)
+		self.assertIsNotNone(rs.yield_deadline)
+		self.assertEqual(rs.yield_payload, {"state": "aborted", "text": ""})
+		# The Message row is untouched — no "stopped", no error.
+		row = frappe.db.get_value(MSG, amsg, ["stopped", "streaming", "error"], as_dict=True)
+		self.assertFalse(row["stopped"])
+		self.assertEqual(row["streaming"], 1)
+		self.assertFalse(row["error"])
+
+	def test_on_terminal_settles_normally_without_a_mux(self):
+		# No transport (ctx.mux is None) — await_continuation can't park it, so
+		# on_terminal must fall through and settle exactly as before this change.
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rid = "pmp_yield_nomux"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		handler = pump._make_handler(ctx, rs)
+
+		handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+
+		# Settled all the way (today's error path) - no mux means no parking.
+		self.assertEqual(self._state(rid), "errored")
+		self.assertIsNone(rs.yield_deadline)
+
+	def test_yield_wait_sweep_expires_and_settles_like_the_original_yield(self):
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_timeout"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=rs.session_key)
+		ctx.mux.await_continuation(rid)
+		rs.yield_payload = {"state": "aborted", "text": ""}
+		rs.yield_deadline = pump._monotonic() - 1  # already past the cap
+
+		pump._yield_wait_sweep(ctx)
+
+		# Settled EXACTLY as the original empty-aborted terminal would have —
+		# today's error path (cancel_requested was never set, so it settles
+		# errored, never cancelled - settlement's own cancel_requested gate).
+		self.assertEqual(self._state(rid), "errored")
+		self.assertIsNone(rs.yield_deadline)
+		self.assertIsNone(rs.yield_payload)
+		self.assertNotIn(rid, ctx.mux._runs)  # lane released
+
+	def test_yield_wait_sweep_ignores_runs_not_yet_due(self):
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rid = "pmp_yield_notyet"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		rs.yield_payload = {"state": "aborted", "text": ""}
+		rs.yield_deadline = pump._monotonic() + 999
+
+		pump._yield_wait_sweep(ctx)
+
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIsNotNone(rs.yield_deadline)
+
+	def test_stop_during_wait_is_settled_cancelled_by_the_existing_cancel_sweep(self):
+		# The Turn row was deliberately left `state='streaming'` by the yield
+		# branch, so a Stop pressed mid-wait needs NO special-case code here —
+		# the existing cancel_requested=1 sweep finds it on the very next tick,
+		# exactly like any other in-flight cancel.
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_stop"
+		conv, amsg = self._streaming_turn(rid, ctx)
+		rs = self._rs(rid, conv, amsg)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=rs.session_key)
+		ctx.mux.await_continuation(rid)
+		rs.yield_payload = {"state": "aborted", "text": ""}
+		rs.yield_deadline = pump._monotonic() + 999  # still well inside the wait
+
+		# The user hits Stop.
+		self.assertTrue(ts.request_cancel(rid, 4))
+		frappe.db.commit()
+
+		swept = pump._cancel_sweep(ctx)
+
+		self.assertEqual(swept, 1)
+		self.assertEqual(self._state(rid), "cancelled")
+		# The parked lane is released so a LATE continuation frame is a harmless
+		# stray instead of trying to adopt into an already-settled row.
+		self.assertIsNone(rs.yield_deadline)
+		self.assertIsNone(rs.yield_payload)
+		self.assertNotIn(rid, ctx.mux._runs)
+
+	def test_continuation_final_on_fresh_run_id_settles_the_turn(self):
+		"""End-to-end through the mux: the deferred tool's follow-up run (a
+		DIFFERENT runId, SAME session_key) is adopted and its final settles the
+		SAME Turn row/assistant message the original yielded run was on."""
+		from jarvis.tests.test_relay_mux import _chat_final_frame
+
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_cont"
+		sk = f"sess-{rid}"
+		conv, amsg = self._streaming_turn(rid, ctx, session_key=sk)
+		rs = self._rs(rid, conv, amsg, session_key=sk)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=sk)
+
+		# The original run yields (empty aborted) - on_terminal parks it.
+		ctx.mux._runs[rid].handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+		self.assertEqual(self._state(rid), "streaming")
+
+		# The deferred tool's follow-up run posts its final under a FRESH runId.
+		ctx.mux._classify(_chat_final_frame("image_generate:xyz", sk, "here is the image"))
+		ctx.mux.dispatch()
+
+		self.assertEqual(self._state(rid), "finalizing")
+		self.assertEqual(frappe.db.get_value(MSG, amsg, "content"), "here is the image")
+		self.assertNotIn(rid, ctx.mux._runs)
+		self.assertNotIn("image_generate:xyz", ctx.mux._runs)
+
+	def test_stop_after_adoption_releases_the_live_lane_not_the_dead_id(self):
+		"""A Stop landing AFTER the continuation is already adopted (streaming,
+		not yet terminaled) must release the LIVE lane via session_key - using
+		the stale gateway_run_id (the dead original run) would leak it."""
+		double = self._double()
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		rid = "pmp_yield_stop_postadopt"
+		sk = f"sess-{rid}"
+		conv, amsg = self._streaming_turn(rid, ctx, session_key=sk)
+		rs = self._rs(rid, conv, amsg, session_key=sk)
+		ctx.runs[rid] = rs
+		ctx.mux.register_run(rid, pump._make_handler(ctx, rs), session_key=sk)
+		ctx.mux._runs[rid].handler.on_terminal("relay:error", {"state": "aborted", "text": ""})
+
+		# The continuation is adopted (streaming, its own terminal not yet in).
+		ctx.mux._classify(
+			{
+				"type": "event",
+				"event": "chat",
+				"payload": {"runId": "cont-run", "sessionKey": sk, "state": "delta"},
+			}
+		)
+		ctx.mux.dispatch()
+		self.assertNotIn(rid, ctx.mux._runs)
+		self.assertIn("cont-run", ctx.mux._runs)
+
+		self.assertTrue(ts.request_cancel(rid, rs.version))
+		frappe.db.commit()
+		swept = pump._cancel_sweep(ctx)
+
+		self.assertEqual(swept, 1)
+		self.assertEqual(self._state(rid), "cancelled")
+		self.assertNotIn("cont-run", ctx.mux._runs)  # the LIVE lane was released
+
+
+# --------------------------------------------------------------------------- #
+# agent-yield wait vs a takeover: a new hop must not error-settle a parked
+# turn immediately (the gateway routinely shows no active run right after the
+# yield, before the deferred tool has posted anything) - it must park it into
+# the durable `recovering` route instead, same as a kill-switch halt.
+# --------------------------------------------------------------------------- #
+
+
+class TestYieldPendingSurvivesTakeover(_PumpTestCase):
+	def test_reattach_or_recover_parks_instead_of_error_settling(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		rid = "pmp_yield_takeover"
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"streaming",
+			version=1,
+			pump_epoch=ctx.epoch,
+			reserved=1,
+			assistant_message=amsg,
+			gateway_run_id=rid,
+			last_event_seq=3,
+			dispatching_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": f"sess-{rid}", "message": "hi"}),
+		)
+		pump._mark_yield_pending(rid)
+		r = {
+			"run_id": rid,
+			"state": "streaming",
+			"last_event_seq": 3,
+			"conversation": conv,
+			"assistant_message": amsg,
+		}
+
+		# active_keys=set() -> the gateway shows NO active run right now, exactly
+		# what happens right after a yield. Without the fix this would issue a
+		# recovery-tail against an empty transcript window and error immediately.
+		pump._reattach_or_recover(ctx, r, active_keys=set())
+
+		self.assertEqual(self._state(rid), "recovering")
+		row = frappe.db.get_value(MSG, amsg, ["streaming", "recovering"], as_dict=True)
+		self.assertEqual(row["recovering"], 1)
+		self.assertEqual(row["streaming"], 1)
+
+
+# --------------------------------------------------------------------------- #
 # 8. DB-disconnect -> bounded backoff -> park recovering -> exit hop
 # --------------------------------------------------------------------------- #
 
@@ -1915,6 +2206,115 @@ class TestPublishFencing(_PumpTestCase):
 		self.assertEqual(payload["run_id"], "pmp_status1")
 		self.assertEqual(payload["message_id"], "msg1")
 		self.assertEqual(payload["pump_epoch"], ctx.epoch)
+
+	def test_on_step_publishes_run_step(self):
+		"""The live step line: ``on_step`` (relay_mux ``step`` lane event)
+		publishes a fenced ``run:step`` with the step text. Nothing is stored."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_step1",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_step1",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		captured = []
+		frappe.cache().delete_value(pump._run_steps_key("pmp_step1"))
+		with patch.object(ts, "publish_to_user", side_effect=lambda u, p: captured.append(p)):
+			handler.on_step(4, "Checking overdue invoices", "Checking overdue invoices.")
+			handler.on_step(5, "Now the customers", None)
+		self.assertEqual(len(captured), 2)
+		payload = captured[0]
+		self.assertEqual(payload["kind"], "run:step")
+		self.assertEqual(payload["text"], "Checking overdue invoices")
+		self.assertEqual(payload["conversation_id"], conv)
+		self.assertEqual(payload["run_id"], "pmp_step1")
+		self.assertEqual(payload["message_id"], "msg1")
+		self.assertEqual(payload["event_seq"], 4)
+		self.assertEqual(payload["pump_epoch"], ctx.epoch)
+		# Every step is cached: the raw text of one that is also in the reply
+		# (a hop re-attach strips it) and the shown text of a harness step that
+		# never is, so a reload can rebuild the step list in direct mode too.
+		self.assertEqual(
+			pump._read_run_steps("pmp_step1"), ["Checking overdue invoices.", "Now the customers"]
+		)
+		frappe.cache().delete_value(pump._run_steps_key("pmp_step1"))
+
+	def test_on_step_publishes_a_held_back_hide_first(self):
+		"""The relay offers "hide the step from the bubble" (shown "") right before
+		the step. Batching can hold that delta back; the step must flush it first,
+		or on the Claude runtime (no tool event to force a flush) the step text
+		stays in the bubble for the whole lookup (seen live on e2e2)."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_step2",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_step2",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		rs.last_flush_mono = pump._monotonic()  # a flush just happened, so the next delta waits
+		published = []
+		with (
+			patch.object(ts, "apply_delta", return_value=True),
+			patch.object(ts, "publish_to_user", side_effect=lambda u, p: published.append(p)),
+			patch.object(pump, "_append_run_step"),
+		):
+			handler.on_delta(7, "I'll check the invoices.", "", "")
+			self.assertEqual(published, [])  # held back by the batcher
+			handler.on_step(8, "I'll check the invoices.", "I'll check the invoices.")
+		self.assertEqual(
+			[(p["kind"], p.get("text")) for p in published],
+			[
+				("assistant:delta", ""),
+				("run:step", "I'll check the invoices."),
+			],
+		)
+
+	def test_step_cache_reads_never_pin_a_local_copy(self):
+		"""Frappe v15 keeps a local copy of a value read without expires=True, and a
+		TTL write does not refresh it, so the second step of a turn overwrote the
+		first (caught by the version-15 backport CI). Reads must not pin a copy."""
+		key = pump._run_steps_key("pmp_step3")
+		frappe.cache().delete_value(key)
+		self.assertEqual(pump._read_run_steps("pmp_step3"), [])
+		self.assertNotIn(frappe.cache().make_key(key), frappe.local.cache)
+		pump._append_run_step("pmp_step3", "One.")
+		pump._append_run_step("pmp_step3", "Two.")
+		self.assertEqual(pump._read_run_steps("pmp_step3"), ["One.", "Two."])
+		frappe.cache().delete_value(key)
+
+	def test_on_delta_stores_raw_text_and_publishes_shown(self):
+		"""The stored mirror keeps exactly what streamed (a stop or error mid-lookup
+		saves it as before); the chat is sent the text with step text removed."""
+		conv = self._mk_conv()
+		deps = self._deps()
+		ctx = self._make_ctx(deps, with_mux=False)
+		rs = pump._RunState(
+			run_id="pmp_shown1",
+			conversation=conv,
+			owner="u@x",
+			assistant_message="msg1",
+			session_key="sess-pmp_shown1",
+			version=1,
+		)
+		handler = pump._make_handler(ctx, rs)
+		stored, published = [], []
+		with (
+			patch.object(ts, "apply_delta", side_effect=lambda **kw: stored.append(kw["content"]) or True),
+			patch.object(ts, "publish_to_user", side_effect=lambda u, p: published.append(p)),
+		):
+			handler.on_delta(3, "Checking.\n\nThe answer", "The answer", "The answer")
+		self.assertEqual(stored, ["Checking.\n\nThe answer"])
+		self.assertEqual([p["text"] for p in published if p["kind"] == "assistant:delta"], ["The answer"])
 
 
 # --------------------------------------------------------------------------- #

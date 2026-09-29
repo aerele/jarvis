@@ -316,21 +316,21 @@ jobs:
           # loads the dump, which already has frappe/erpnext/hrms installed. Replaces ~113s of
           # `install-app erpnext hrms` with a ~6s restore. `bench` defines no new-site of its own,
           # so this forwards to frappe's, which is where --source-sql lives.
-          bench new-site test_site \
+          bench new-site jarvis-ci.test \
             --db-host mariadb \
             --mariadb-user-host-login-scope='%' \
             --mariadb-root-password root \
             --db-root-username root \
             --admin-password admin \
             --source-sql /opt/ci/test_site.sql
-          bench --site test_site install-app jarvis
-          bench --site test_site set-config allow_tests true
+          bench --site jarvis-ci.test install-app jarvis
+          bench --site jarvis-ci.test set-config allow_tests true
           # The full suite creates far more than Frappe's default 60-users/60-min
           # limit (throttle_user_creation), so a mid-suite fixture insert otherwise
           # hits "Throttled" (flaky, depends on which module crosses the threshold).
           # -p stores an INT: throttle_user_creation compares count > limit, and a
           # string limit raises "TypeError: '>' not supported between int and str".
-          bench --site test_site set-config -p throttle_user_limit 100000
+          bench --site jarvis-ci.test set-config -p throttle_user_limit 100000
 
       - name: Assert the restored site is what we think it is
         working-directory: /opt/frappe-bench
@@ -341,7 +341,7 @@ jobs:
           # Take the JSON line specifically, and leave stderr on the console. Merging stderr into
           # stdout and taking `tail -1` would capture any late warning (e.g. a ResourceWarning at
           # interpreter teardown) instead of the JSON, and fail a perfectly healthy site.
-          apps=$(bench --site test_site execute frappe.get_installed_apps | grep -m1 '^\[') || {
+          apps=$(bench --site jarvis-ci.test execute frappe.get_installed_apps | grep -m1 '^\[') || {
             echo "could not parse installed apps from 'bench execute' output"; exit 1; }
           echo "installed apps: ${apps}"
           for a in frappe erpnext hrms jarvis; do
@@ -357,7 +357,7 @@ jobs:
           # The coverage flag is spelled --with-coverage on THIS command. run-tests spells
           # the same thing --coverage (frappe/commands/testing.py). They are two different
           # click commands; do not "fix" one to match the other.
-          bench --site test_site run-parallel-tests \
+          bench --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \

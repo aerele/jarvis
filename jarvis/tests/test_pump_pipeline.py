@@ -46,6 +46,22 @@ EFFECT = "Jarvis Turn Effect"
 SESSION = "Jarvis Chat Session"
 
 
+def _second_connection():
+	"""A SEPARATE DB connection, so a write commits while the pump's transaction is
+	open (a same-connection write would always be visible to it)."""
+	from frappe.database import get_db
+
+	conf = frappe.conf
+	return get_db(
+		socket=conf.db_socket,
+		host=conf.db_host,
+		port=conf.db_port,
+		user=conf.db_user or conf.db_name,
+		password=conf.db_password,
+		cur_db_name=conf.db_name,
+	)
+
+
 def setUpModule():
 	install_synthetic_runtime_profile()
 
@@ -853,6 +869,73 @@ class TestTwoWriterSettlement(_PipelineCase):
 # --------------------------------------------------------------------------- #
 
 
+class TestSettlementAppliesLlmSwitch(_PipelineCase):
+	"""jarvis#1425 review (live e2e2, 2026-09-27): e2e2's actual replies run
+	through the Relay Pump, not turn_handler.py's legacy exit - so the
+	llm_switch poke belongs on invoke_settlement's own winning commit, the
+	ONE choke point shared by every pump terminal (a normal terminal, an
+	aborted stop, a reconcile-owed settle, and the recovery-settlement
+	siblings all call it)."""
+
+	def _settle_a_terminal(self, *, rid: str):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		won, epoch = ts.lease_acquire(self._target, rid)
+		self.assertTrue(won)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"terminal_observed",
+			version=1,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			terminal_kind="relay:final",
+			terminal_payload=json.dumps({"text": "final answer"}),
+			terminal_observed_at=frappe.utils.now(),
+		)
+		deps = pump.PumpDeps()
+		deps.enqueue_finalize = _Recorder()
+		self._pubs.clear()
+		settlement.invoke_settlement(
+			rid,
+			relay_target_id=self._target,
+			epoch=epoch,
+			version=2,
+			terminal_kind="relay:final",
+			terminal_payload={"text": "final answer"},
+			assistant_message=None,
+			owner=self._orig_user,
+			conversation=conv,
+			deps=deps,
+		)
+		self.assertEqual(self._state(rid), "finalizing", "the settle must have actually won")
+
+	def test_settling_a_terminal_pokes_an_active_switch(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=True) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			self._settle_a_terminal(rid="pmp_switch_active")
+		is_active.assert_called_once()
+		try_apply.assert_called_once()
+
+	def test_settling_a_terminal_with_no_switch_takes_no_lock(self):
+		from jarvis.chat import llm_switch
+
+		with (
+			patch.object(llm_switch, "is_active", return_value=False) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			self._settle_a_terminal(rid="pmp_switch_inactive")
+		is_active.assert_called_once()
+		try_apply.assert_not_called()
+
+
 class TestSux11ErrorContract(_PipelineCase):
 	def test_error_terminal_preserves_classification(self):
 		conv = self._mk_conv()
@@ -1243,6 +1326,43 @@ class TestSuxf2AckFailureContract(_PipelineCase):
 		# ("unreachable"), not fall into the mid-run "gateway" default and tell
 		# the customer a rejection is a brief hiccup worth retrying.
 		self.assertEqual(err.get("code"), "unreachable")
+
+	def test_definite_rejection_pokes_an_active_switch(self):
+		"""jarvis#1425 review (scoped re-review, 2026-09-27): a definite pre-ack
+		rejection moves the Turn out of dispatching without going through
+		invoke_settlement or turn_handler - poke it directly."""
+		from jarvis.chat import llm_switch
+		from jarvis.tests.test_pump import _RejectGateway
+
+		conv = self._mk_conv()
+		rid = "pmp_suxf2_switch"
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"ready",
+			version=2,
+			reserved=1,
+			assistant_message=amsg,
+			ready_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": f"sess-{rid}", "message": "hi"}),
+		)
+		double = _RejectGateway()
+		self._doubles.append(double)
+		deps = self._deps(double=double)
+		ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		with (
+			patch.object(llm_switch, "is_active", return_value=True) as is_active,
+			patch.object(llm_switch, "try_apply") as try_apply,
+		):
+			pump._dispatch_ready(ctx)
+			self._pump_until(ctx, lambda: self._state(rid) in ("errored", "recovering"))
+		self.assertEqual(self._state(rid), "errored")
+		is_active.assert_called_once()
+		try_apply.assert_called_once()
 
 
 # --------------------------------------------------------------------------- #
@@ -1724,10 +1844,57 @@ class TestToolApplierEquivalence(_PipelineCase):
 			"recovery CAS bumped the CLEAN version exactly once",
 		)
 
+	# --------------------------------------------------------------------------- #
+	# 12. CDX-6 — usage honesty (no permanent 'recorded' on stale/missing data)
+	# --------------------------------------------------------------------------- #
 
-# --------------------------------------------------------------------------- #
-# 12. CDX-6 — usage honesty (no permanent 'recorded' on stale/missing data)
-# --------------------------------------------------------------------------- #
+	def test_jarvis_tool_owner_lock_sees_a_concurrent_reply_write(self):
+		# Export hang: the web worker attached a file card to the reply ~27 ms before the
+		# pump recorded a jarvis__ tool id on the same row. The jarvis__ path skipped the
+		# commit-first, so record_tool_owner's FOR UPDATE ran on an older read view; with
+		# innodb_snapshot_isolation that raises 1020 "Record has changed", the lane is
+		# quarantined and the answer waits ~80-90 s for the next hop. Reproduced here with
+		# a real second connection, not a mock.
+		try:
+			frappe.db.sql("SET SESSION innodb_snapshot_isolation = ON")
+		except Exception:
+			self.skipTest("this database has no innodb_snapshot_isolation")
+		self.addCleanup(frappe.db.sql, "SET SESSION innodb_snapshot_isolation = OFF")
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="export it")
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		rid = "pmp_tool_snapshot"
+		self._mk_turn(conv, rid, seed, "streaming", version=3, reserved=1, assistant_message=amsg)
+		frappe.db.commit()
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		rs = pump._RunState(
+			run_id=rid,
+			conversation=conv,
+			owner=TEST_USER,
+			assistant_message=amsg,
+			session_key="s",
+			version=int(frappe.db.get_value(TURN, rid, "version")),
+		)
+		frappe.db.commit()
+		# The pump's transaction reads the reply: its read view is taken here.
+		frappe.db.sql("SELECT content FROM `tabJarvis Chat Message` WHERE name=%s", amsg)
+		# The web worker saves the file card onto the same reply and commits.
+		other = _second_connection()
+		try:
+			other.sql(
+				"UPDATE `tabJarvis Chat Message` SET content=%s WHERE name=%s",
+				("partial [file card]", amsg),
+			)
+			other.commit()
+		finally:
+			other.close()
+		ev = {"event_seq": 1, "phase": "start", "tool_name": "jarvis__export", "tool_call_id": "tj1"}
+		pump._default_apply_tool(ctx, rs, ev)  # raised 1020 before the fix
+		row = frappe.db.sql(
+			"SELECT content, tool_call_ids FROM `tabJarvis Chat Message` WHERE name=%s", amsg, as_dict=True
+		)[0]
+		self.assertEqual(row.content, "partial [file card]", "the web worker's file card is kept")
+		self.assertEqual(json.loads(row.tool_call_ids), ["tj1"], "the jarvis__ tool id is recorded")
 
 
 class TestUsageHonesty(_PipelineCase):

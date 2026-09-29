@@ -44,14 +44,15 @@ CONV = "Jarvis Conversation"
 # canonical vocabulary ``turn_state.EFFECT_NAMES`` (never a local literal — the
 # insert seam rejects any name outside it). A relay:final success owes the FULL
 # vocabulary; an errored/cancelled terminal owes the macro-advance + telemetry
-# hooks (there is no rich output/title/usage to enrich, and its reply is already
-# terminal — finalize NEVER un-settles it). BOTH sets owe terminal_publish (CDX-12 /
-# R-5): the idempotent terminal re-publish backstop so a lost settlement terminal
-# (run:end / run:error) is redelivered off the durable row, on success AND error.
+# hooks and the File Box sheet seal (there is no rich output/title/usage to
+# enrich, and its reply is already terminal — finalize NEVER un-settles it).
+# BOTH sets owe terminal_publish (CDX-12 / R-5): the idempotent terminal
+# re-publish backstop so a lost settlement terminal (run:end / run:error) is
+# redelivered off the durable row, on success AND error.
 # If an effect is ever added that a SUCCESS does not owe, this stops being the whole
 # canon and must become an explicit subset of ``ts.EFFECT_NAMES``.
 FINAL_EFFECTS = ts.EFFECT_NAMES
-TERMINAL_EFFECTS = ("terminal_publish", "macro_advance", "telemetry_flush")
+TERMINAL_EFFECTS = ("terminal_publish", "file_box_sheet_seal", "macro_advance", "telemetry_flush")
 
 
 def invoke_settlement(
@@ -165,6 +166,19 @@ def invoke_settlement(
 		return
 
 	frappe.db.commit()  # slot released; the NEXT turn can be promoted
+
+	# jarvis#1425 review (live e2e2, 2026-09-27): a Relay Pump reply's terminal
+	# write lands here, not in turn_handler.py's legacy exit - e2e2's actual
+	# replies run through the pump, so turn_handler._maybe_apply_llm_switch's
+	# own poke never fires for them. This ONE call site is shared by every pump
+	# terminal that reaches invoke_settlement (a normal terminal, an aborted
+	# stop, a reconcile-owed settle, and the recovery-settlement siblings), so
+	# poking here covers all of them at once, right after the commit that just
+	# released this slot. Cheap (one is_active() redis GET first) and never
+	# raises - a reply must never fail because this poke did.
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="settlement.invoke_settlement")
 
 	# The maintained per-conversation turn counter that drives the once-per-session
 	# feedback popup. Runs BEFORE the terminal publish so the client's

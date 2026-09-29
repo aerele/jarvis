@@ -218,6 +218,7 @@ before_migrate = "jarvis.legacy_compatibility.seed"
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
 after_migrate = [
+	"jarvis.chat.runtime_profile.after_migrate",
 	"jarvis.chat.agent_catalog.after_migrate",
 	# Behavioural pattern learning: seed Jarvis Pattern Detector State rows
 	# from the detector registry (best-effort; never blocks a migrate).
@@ -303,6 +304,11 @@ scheduler_events = {
 			# installation) before the reaper below mislabelled it a duration timeout.
 			# Cheap no-op (one indexed status query) when nothing is in flight.
 			"jarvis.chat.agent_scheduler.poll_dispatched_runs",
+			# Jarvis Pending Action reconciler (§4.6): an Executing row past 10 min ->
+			# Failed/interrupted (never re-run), lost settles re-delivered, held waiter
+			# retries, disabled owners' cards cancelled, plus the cards_open gauge.
+			# Cheap no-op (indexed status scans) while the table is empty.
+			"jarvis.chat.pending_actions.reconcile",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -408,6 +414,9 @@ scheduler_events = {
 	],
 	"daily": [
 		"jarvis.onboarding.sync_connection",
+		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
+		# in committed batches; never Pending/Executing or a held row still resuming.
+		"jarvis.chat.pending_actions.purge",
 		# C2 (2026-06-16 review): nudge operators when the bench's
 		# agent_token is approaching or past its configured max age.
 		# Daily is plenty - the warning window is 7 days.
@@ -551,8 +560,15 @@ doc_events["Jarvis Conversation"] = {
 		# Slice B: delete the conversation's Jarvis Import Announcement rows so the
 		# Link never blocks deletion (LinkExistsError) or orphans the poll.
 		"jarvis.chat.import_announce.on_conversation_trash",
+		# Pending actions: cancel + delete its chat cards (never an Executing one) and
+		# drop it from held rows' waiters.
+		"jarvis.chat.pending_actions.on_conversation_trash",
 	],
 }
+
+# A pending action never blocks deleting the conversation it points at; the
+# on_trash hook above cleans it up instead.
+ignore_links_on_delete = ["Jarvis Pending Action"]
 
 # ---------------------------------------------------------------------------
 # Jarvis Triggers (user-defined doc-event automations)
@@ -776,3 +792,49 @@ has_permission.update(
 		"Jarvis Dashboard": "jarvis.chat.dashboard_permissions.has_dashboard_permission",
 	}
 )
+
+# ---------------------------------------------------------------------------
+# Jarvis Pending Action (sealed executable cards)
+# ---------------------------------------------------------------------------
+# No DocPerm rows and a deny-all at the ORM: no REST/Desk/tool path reads or
+# writes a row (sealed args, open_key). Every read goes through whitelisted
+# endpoints with explicit authz.
+_PA_CONTROLLER = "jarvis.jarvis.doctype.jarvis_pending_action.jarvis_pending_action"
+permission_query_conditions.update(
+	{
+		"Jarvis Pending Action": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.get_permission_query_conditions",
+	}
+)
+
+# Per-user agent memory: one row per user, and every list/report read is scoped to
+# the caller's own row (the remember/recall tools additionally key on
+# frappe.session.user in code). One user of a tenant can never enumerate a colleague's
+# memory even via a raw ORM list.
+permission_query_conditions.update(
+	{
+		"Jarvis User Memory": "jarvis.jarvis.doctype.jarvis_user_memory.jarvis_user_memory.get_permission_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Pending Action": f"{_PA_CONTROLLER}.has_permission",
+		"Jarvis Pending Action Waiter": f"{_PA_CONTROLLER}.has_permission",
+	}
+)
+
+# ---------------------------------------------------------------------------
+# llm_switch (jarvis#1425 follow-up)
+# ---------------------------------------------------------------------------
+# frappe.cache_manager.clear_cache()'s "everything" branch deletes every
+# site-prefixed redis key except one matched (as a PREFIX) by an entry here -
+# without this, any frappe.clear_cache() (e.g. pump.py's watchdog stamping a
+# __default via frappe.db.set_default, which frappe.defaults._clear_cache
+# turns into a full clear_cache()) wipes the active switch record mid-hold or
+# mid-apply: the banner clears, the poller sees no switch, and a still-running
+# handover/pool job's own finish() then hits a record that is simply gone
+# (live e2e2, 2026-09-27 - the record vanished at 18:26:04 and 18:42:07,
+# once before its job was ever released and once while the job was still
+# running). Redis locks (jarvis._redis_lock) are unaffected: they use
+# cache.lock() with a raw, unprefixed key, never this site-prefixed cache.
+persistent_cache_keys = ["jarvis:llm_switch"]

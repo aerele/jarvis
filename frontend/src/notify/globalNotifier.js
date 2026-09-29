@@ -245,8 +245,10 @@ export function attachGlobalNotifier({ socket, router }) {
 				return;
 			}
 			case "approval:new": {
-				// bump the badge NOW — the 60s poll reconciles later
+				// bump the badge NOW, then re-read the truth: a held write that joins an
+				// existing row, or a re-asked question, doesn't add one
 				store.approvalsCount = (store.approvalsCount || 0) + 1;
+				store.refreshApprovalsCount();
 				const conv = p.conversation_id || null;
 				const dashboardApproval = p.origin_page === "dashboards";
 				if (dashboardApproval && conv === dashboardsPaneConv() && !document.hidden) return;
@@ -266,6 +268,10 @@ export function attachGlobalNotifier({ socket, router }) {
 				});
 				return;
 			}
+			case "action:settled":
+				// a card or held write was decided somewhere: the badge may have dropped
+				store.refreshApprovalsCount();
+				return;
 			case "review:pending": {
 				// a skill or wiki promotion is waiting on this reviewer: re-read the
 				// sidebar Skills badge now (server truth, not +1; both queues share

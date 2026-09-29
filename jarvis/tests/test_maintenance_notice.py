@@ -114,6 +114,34 @@ class TestMaintenanceCheck(FrappeTestCase):
 			out = maintenance_notice.check()
 		self.assertTrue(out["active"])  # marker present + absent key -> keep last-known
 
+	def test_check_calls_llm_switch_reconcile(self):
+		"""2026 review (second pass): every open chat polling check() while the
+		hold banner is up must also drive a held switch forward - independent
+		of a reply ending or the Settings page's own poll."""
+		with (
+			patch("jarvis.chat.llm_switch.reconcile") as mock_reconcile,
+			patch("jarvis.admin_client.get_connection", return_value={"maintenance": {"active": False}}),
+			patch("jarvis.release_notice.persist"),
+		):
+			maintenance_notice.check()
+
+		mock_reconcile.assert_called_once()
+
+	def test_check_survives_llm_switch_reconcile_failure(self):
+		"""Guarded: a failure driving the switch must never raise out of
+		check() or change its own return shape - the mirror refresh below
+		still runs normally."""
+		with (
+			patch("jarvis.chat.llm_switch.reconcile", side_effect=RuntimeError("redis down")),
+			patch("jarvis.admin_client.get_connection", return_value={"maintenance": {"active": False}}),
+			patch("jarvis.release_notice.persist"),
+			patch("frappe.log_error") as mock_log,
+		):
+			out = maintenance_notice.check()  # must not raise
+
+		mock_log.assert_called()
+		self.assertEqual(out, {"active": False, "message": ""})
+
 	def test_check_old_cp_clears_not_strands(self):
 		# A rolled-back CP that no longer speaks maintenance (no marker) -> the bench CLEARS its
 		# mirror rather than stranding forever behind a hold the old CP can't lift (finding App-1/#3).

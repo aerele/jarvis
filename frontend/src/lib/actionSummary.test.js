@@ -392,3 +392,107 @@ test("receiptView: auto_applied counts like a real execution (from data), not th
 	);
 	assert.ok(v.targets[0].url.includes("TASK-9001"));
 });
+
+// P0b (§4.5 outcome table): every outcome gets its own honest chip, and the
+// copy is fixed literal text (not verb/subject composed) per the plan. A
+// truthy `result` proves each branch ignores it rather than trusting an
+// unconfirmed/unverified result the way "confirmed" does.
+const _HONEST_OUTCOMES = [
+	["cancelled", "muted", "Cancelled — not performed"],
+	["superseded", "muted", "Not confirmed — replaced by a newer proposal"],
+	["expired", "muted", "Expired — not performed"],
+	["unknown", "warning", "Outcome unknown — check before retrying"],
+	["partial", "warning", "Partly applied — check before retrying"],
+];
+for (const [outcome, tone, title] of _HONEST_OUTCOMES) {
+	test(`receiptView: ${outcome} renders its own honest chip, never confirmed`, () => {
+		const v = receiptView(
+			"create_doc",
+			{ doctype: "Task", name: "TASK-1" },
+			{ ok: true, data: { doctype: "Task", name: "TASK-1" } },
+			outcome
+		);
+		assert.equal(v.outcome, outcome);
+		assert.equal(v.icon, outcome);
+		assert.equal(v.tone, tone);
+		assert.equal(v.title, title);
+		assert.notEqual(v.icon, "confirmed");
+	});
+}
+
+test("receiptView: an unrecognised outcome value renders the NEUTRAL unknown chip, never confirmed", () => {
+	// A future outcome this build predates, or a malformed row - must never
+	// silently fall through to the confirmed/✓ path (the bug P0b closes).
+	const v = receiptView(
+		"create_doc",
+		{ doctype: "Task", name: "TASK-1" },
+		{ ok: true, data: { doctype: "Task", name: "TASK-1" } },
+		"some_future_outcome"
+	);
+	assert.equal(v.icon, "unknown");
+	assert.equal(v.tone, "warning");
+	assert.notEqual(v.icon, "confirmed");
+	assert.notEqual(v.title, "nothing changed");
+});
+
+test("receiptView: unknown/partial read names off the ARGS, not an unverified result", () => {
+	// The result claims TASK-9001 was created; unknown/partial cannot trust
+	// that (the write's real effect is unverified), so the chip must show
+	// what was PROPOSED (args), not the unverified result.
+	for (const outcome of ["unknown", "partial"]) {
+		const v = receiptView(
+			"create_doc",
+			{ doctype: "Task", name: "TASK-1" },
+			{ ok: true, data: { doctype: "Task", name: "TASK-9001" } },
+			outcome
+		);
+		assert.deepEqual(
+			v.targets.map((t) => t.name),
+			["TASK-1"]
+		);
+	}
+});
+
+// CR-3: an update's table is its final set of rows, so a saved row the proposal
+// does not name is deleted. The card must say which, never remove it silently.
+test("lineItemSummary: an update lists the saved rows it would remove", () => {
+	const s = lineItemSummary({
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "item_code", label: "Item", fieldtype: "Link" },
+			{ fieldname: "qty", label: "Qty", fieldtype: "Float" },
+		],
+		rows: [{ __name: "r1", item_code: "Widget A", qty: "5" }],
+		origJson: JSON.stringify([
+			{ name: "r1", item_code: "Widget A", qty: 2 },
+			{ name: "r2", item_code: "Widget B", qty: 1 },
+		]),
+	});
+	assert.equal(s.count, 1);
+	assert.deepEqual(s.removed, ["Widget B"]);
+});
+
+test("summarize(update): a table emptied of saved rows still shows, with what it removes", () => {
+	const model = {
+		verb: "update",
+		fields: [],
+		tables: [
+			{
+				fieldname: "items",
+				label: "Items",
+				columns: [{ fieldname: "item_code", label: "Item", fieldtype: "Link" }],
+				rows: [],
+				origJson: JSON.stringify([{ name: "r1", item_code: "Widget A" }]),
+			},
+		],
+	};
+	const s = summarize(model, {});
+	assert.equal(s.tables.length, 1);
+	assert.deepEqual(s.tables[0].removed, ["Widget A"]);
+});
+
+test("lineItemSummary: a create (no saved rows) removes nothing", () => {
+	const s = lineItemSummary(createModel.tables[0]);
+	assert.deepEqual(s.removed, []);
+});

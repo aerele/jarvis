@@ -278,22 +278,27 @@ class TestRequestAutorunSendMessage(FrappeTestCase):
 		from jarvis.tests._transport_helpers import provision_legacy_site
 
 		provision_legacy_site(self)
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
-			with patch("frappe.enqueue"):
-				return chat_api.send_message(conv, message)
+		# The send gate reads site usage another suite may have left over its cap; the
+		# autorun flag is what's under test here, so it never depends on that.
+		with (
+			patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+			patch("frappe.enqueue"),
+		):
+			return chat_api.send_message(conv, message)
 
 	def test_new_top_level_message_resets_the_flag(self):
 		conv = _make_conv(TEST_USER)
 		api._request_autorun_arm(conv, "")
 		res = self._send(conv, "just create one todo please")  # no directive
-		self.assertTrue(res["ok"])
+		self.assertTrue(res["ok"], res)
 		self.assertEqual(_flag(conv), 0, "a genuine new message ends the prior request run")
 
 	def test_upfront_confirm_all_arms_the_flag(self):
 		conv = _make_conv(TEST_USER)
 		self.assertEqual(_flag(conv), 0)
 		res = self._send(conv, "create 3 todos and submit them, confirm all")
-		self.assertTrue(res["ok"])
+		self.assertTrue(res["ok"], res)
 		self.assertEqual(_flag(conv), 1, "an upfront 'confirm all' arms the request run")
 
 	def test_reset_then_rearm_on_one_message_lands_armed(self):
@@ -301,13 +306,13 @@ class TestRequestAutorunSendMessage(FrappeTestCase):
 		api._request_autorun_arm(conv, "prior")  # a prior request left it armed
 		# a NEW compound "confirm all" (trailing directive) resets the prior then re-arms
 		res = self._send(conv, "start a fresh batch of orders, confirm all")
-		self.assertTrue(res["ok"])
+		self.assertTrue(res["ok"], res)
 		self.assertEqual(_flag(conv), 1, "the upfront arm rides AFTER the save's reset")
 
 	def test_plain_message_leaves_it_disarmed(self):
 		conv = _make_conv(TEST_USER)
 		res = self._send(conv, "what is the total outstanding?")
-		self.assertTrue(res["ok"])
+		self.assertTrue(res["ok"], res)
 		self.assertEqual(_flag(conv), 0)
 
 	def test_delegated_send_with_directive_does_not_arm(self):
@@ -675,5 +680,7 @@ class TestRequestAutorunContinuationDoesNotReset(FrappeTestCase):
 		api._request_autorun_arm(conv, "orig-msg")
 		# A continuation turn (hidden) - the create->submit chain's next hop.
 		with patch("frappe.enqueue"):
-			chat_api._enqueue_turn(conv, "[System] Applied: created the ToDo. Continue.", hidden=True)
+			chat_api._enqueue_turn(
+				conv, "[System] Applied: created the ToDo. Continue.", hidden=True, origin="continuation"
+			)
 		self.assertEqual(_flag(conv), 1, "a hidden continuation must NOT reset the request-scoped approval")

@@ -16,6 +16,7 @@ from jarvis.tools.find_skills import _maybe_prefetch_children, _require_system_u
 SKILL = "Jarvis Custom Skill"
 _CUSTOM_PREFIX = "custom-"
 _LEARNED_PREFIX = "learned-"
+_FILE_BOX_FIELDS = ("use_in_file_box", "file_box_creates")
 # One Error Log row per slug per 10 minutes (the throttle idiom of
 # _plugin_auth._should_audit_unsigned_reject): a tenant whose clause and whose
 # fetch check disagree would otherwise fill the log from every turn.
@@ -33,7 +34,24 @@ def get_skill(skill_name: str) -> dict:
 	advice on a context line. It re-derives the caller's roles at fetch time and
 	runs them through ``user_can_use_skill``, the same predicate that decided
 	whether to name the slug in the first place."""
-	user = _require_system_user()
+	return payload(resolve_skill(skill_name, _require_system_user()))
+
+
+def payload(row) -> dict:
+	return {
+		"skill_name": row.skill_name,
+		"description": row.description or "",
+		"instructions": row.instructions or "",
+		"scope": row.scope or "Org",
+		"enabled": int(row.enabled or 0),
+		"user_invocable": int(row.user_invocable or 0),
+	}
+
+
+def resolve_skill(skill_name: str, user: str, prefer=None):
+	"""The row ``get_skill`` serves ``user`` (enabled + visible, own row wins; else the
+	lowest ``prefer(row)`` key, ties in query order). Raises InvalidArgumentError
+	(unknown) / PermissionDeniedError (not visible)."""
 	raw = (skill_name or "").strip().lower()
 	if not raw:
 		raise InvalidArgumentError("skill_name is required")
@@ -62,6 +80,9 @@ def get_skill(skill_name: str) -> dict:
 			"target_role",
 			"enabled",
 			"user_invocable",
+			"managed_by_learning",
+			# File Box's columns, once migrated (code may be served ahead of migrate).
+			*(f for f in _FILE_BOX_FIELDS if frappe.get_meta(SKILL).has_field(f)),
 		],
 	)
 	if not rows:
@@ -78,15 +99,10 @@ def get_skill(skill_name: str) -> dict:
 		_audit_learned_miss(raw, user, "denied")
 		raise PermissionDeniedError(f"no access to skill: {skill_name}")
 
-	row = next((r for r in usable if r.owner == user), usable[0])
-	return {
-		"skill_name": row.skill_name,
-		"description": row.description or "",
-		"instructions": row.instructions or "",
-		"scope": row.scope or "Org",
-		"enabled": int(row.enabled or 0),
-		"user_invocable": int(row.user_invocable or 0),
-	}
+	own = next((r for r in usable if r.owner == user), None)
+	if own or not prefer:
+		return own or usable[0]
+	return min(usable, key=prefer)
 
 
 def _audit_learned_miss(slug: str, user: str, reason: str) -> None:

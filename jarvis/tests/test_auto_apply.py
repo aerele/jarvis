@@ -16,6 +16,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.tests._conv_helpers import CONV, _make_conv
+from jarvis.tests._pending_action_helpers import draft_doctype
 from jarvis.tests.test_chat_api import TEST_USER, _ensure_test_user
 
 
@@ -52,16 +53,14 @@ class TestAutoApplyRemoved(FrappeTestCase):
 		self.assertFalse(frappe.db.exists("ToDo", {"description": "auto-apply-removed-park"}))
 
 	def test_file_box_still_fast_paths_create(self):
-		# File Box is the ONE remaining direct-apply path and must keep working.
+		# File Box is the ONE remaining direct-apply path (a draft of a submittable
+		# doctype; masters are held for the Approval Board) and must keep working.
+		dt = draft_doctype() or self.skipTest("no submittable doctype installed")
 		conv = _make_conv(TEST_USER)
 		frappe.db.set_value(CONV, conv, "file_box", 1, update_modified=False)
 		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp:
-			api._run_tool(
-				"create_doc",
-				{"doctype": "ToDo", "values": {"description": "file-box-fast-path"}},
-				conversation=conv,
-			)
-		self.assertTrue(disp.called, "File Box still fast-paths a reversible create")
+			api._run_tool("create_doc", {"doctype": dt, "values": {"remark": "x"}}, conversation=conv)
+		self.assertTrue(disp.called, "File Box still fast-paths a draft create")
 		self.assertEqual(disp.call_args.kwargs.get("provenance"), "auto_apply")
 
 	def test_set_auto_apply_endpoint_is_removed(self):

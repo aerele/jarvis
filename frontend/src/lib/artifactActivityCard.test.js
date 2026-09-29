@@ -92,13 +92,23 @@ test("spreadsheet: export_excel or export_query, bare or jarvis__-prefixed", () 
 	);
 });
 
-test("image: the verified native imagegen tool, never the stale 'image' name", () => {
+test("image: the verified native imagegen/image_generate tools, never the stale 'image' name", () => {
 	assert.equal(detectArtifactKind([{ name: "imagegen", status: "running" }]), "image");
+	// T5c: the gateway runtime's own native tool (jarvis/chat/agent_client.py
+	// MEDIA_GEN_TOOL_NAMES), alongside the codex harness's "imagegen".
+	assert.equal(detectArtifactKind([{ name: "image_generate", status: "running" }]), "image");
 	// "image" is NOT a real tool_name (verified: absent from jarvis/tools/
 	// registry.py and the agent runtime's own native tool set) — it must not
 	// light the card, or a stray unrelated tool literally named "image" would.
 	assert.equal(detectArtifactKind([{ name: "image", status: "running" }]), null);
 	assert.equal(detectArtifactKind([{ name: "jarvis__image", status: "running" }]), null);
+});
+
+test("video_generate/music_generate are MEDIA_GEN_TOOL_NAMES siblings but never light the image card", () => {
+	// "Generating your image" would be the wrong title for a video or a song —
+	// only imagegen/image_generate are in IMAGE_TOOLS (T5c).
+	assert.equal(detectArtifactKind([{ name: "video_generate", status: "running" }]), null);
+	assert.equal(detectArtifactKind([{ name: "music_generate", status: "running" }]), null);
 });
 
 test("an unrecognised tool name never lights a kind", () => {
@@ -194,10 +204,18 @@ test("a spreadsheet turn's write tool (export_excel/export_query) lights the las
 	);
 });
 
-test("an image turn's write tool (imagegen) lights the last phase", () => {
+test("an image turn's write tool (imagegen or image_generate) lights the last phase", () => {
 	assert.equal(
 		artifactBuildPhase("image", {
 			activeTools: [{ name: "imagegen", status: "running" }],
+			statusPhase: null,
+			waiting: false,
+		}),
+		"publishing"
+	);
+	assert.equal(
+		artifactBuildPhase("image", {
+			activeTools: [{ name: "image_generate", status: "running" }],
 			statusPhase: null,
 			waiting: false,
 		}),
@@ -238,10 +256,14 @@ test("phaseTickIndex ticks the generalized phases when passed explicitly", () =>
 // ---- ChatView wiring: source-fenced, the same precedent as dashboardBuildCard.test.js ----
 
 test("ChatView imports the artifact-card helpers and detects the kind from real activity", () => {
+	// T5b: ARTIFACT_TITLES dropped from the import — the old card's own
+	// {{ artifactTitle }} span is gone; liveBox (@/lib/liveTurn) builds the
+	// StepsBox header's title straight from ARTIFACT_TITLES itself now.
 	assert.match(
 		chatSrc,
-		/import \{\s*ARTIFACT_TITLES,\s*artifactBuildPhase,\s*artifactPhaseList,\s*detectArtifactKind,\s*\} from "@\/lib\/artifactActivityCard";/
+		/import \{\s*artifactBuildPhase,\s*artifactPhaseList,\s*detectArtifactKind,\s*\} from "@\/lib\/artifactActivityCard";/
 	);
+	assert.doesNotMatch(chatSrc, /\bARTIFACT_TITLES\b/);
 	const gate = fnBody(chatSrc, "const artifactKind = computed(");
 	assert.match(gate, /detectArtifactKind\(activeTools\.value,/);
 	assert.match(gate, /dashboardTurn: dashboardBuildTurn\.value/);
@@ -251,17 +273,28 @@ test("ChatView imports the artifact-card helpers and detects the kind from real 
 	assert.match(gate, /gotoMorph\.value\s*\?\s*null\s*:/);
 });
 
-test("the common card is gated on artifactKind, mutually exclusive with the morph line and the generic activity line", () => {
+test("T5b: the standalone artifact card and the generic activity line are gone — artifactKind/artifactTickIndex now drive StepsBox's live view", () => {
+	assert.doesNotMatch(chatSrc, /class="jv-artifact-live"/);
+	assert.doesNotMatch(chatSrc, /class="jv-artifact-card"/);
+	assert.doesNotMatch(chatSrc, /\(activeTools\.length \|\| waiting \|\| liveStep\)/);
+	assert.doesNotMatch(chatSrc, /\bliveStep\b/); // the back-compat single-line computed is gone too
+	// run:step still places a file turn's sentence in the artifact phase
+	// that is current when it arrives (T5a), unchanged by the T5b re-mount.
+	const runStepStart = chatSrc.indexOf('case "run:step": {');
+	assert.notEqual(runStepStart, -1);
+	const runStep = chatSrc.slice(runStepStart, chatSrc.indexOf('case "tool:start": {'));
+	assert.match(runStep, /const slot = artifactKind\.value \? artifactTickIndex\.value : null;/);
+	// liveBoxViewFor (the shared builder behind both the real row and the
+	// synthetic in-flight one) still passes artifactKind straight to liveBox,
+	// which builds the same header + phase rows the old standalone card drew.
+	const liveBoxFn = fnBody(chatSrc, "function liveBoxViewFor(m) {");
+	assert.match(liveBoxFn, /artifactKind: artifactKind\.value,/);
+	// One box per turn (design canvas rule 2): a per-message MAP, not a
+	// per-render call, mounted in Message's #above-body.
+	assert.match(chatSrc, /const boxViewByMsg = computed\(\(\) =>\s*\n\tObject\.fromEntries\(/);
 	assert.match(
 		chatSrc,
-		/v-if="artifactKind && \(activeTools\.length \|\| waiting\) && !queuedTurn"/
-	);
-	// Also excludes a live compaction (F7): the compacting banner owns the row
-	// while a compact is in flight, so the generic activity line must not
-	// render alongside it either.
-	assert.match(
-		chatSrc,
-		/v-if="\s*\(activeTools\.length \|\| waiting\) &&\s*!queuedTurn &&\s*!artifactKind &&\s*!gotoMorph &&\s*!compacting\s*"/
+		/<StepsBox\s*\n\s*v-if="boxViewByMsg\[m\.name\]"\s*\n\s*:view="boxViewByMsg\[m\.name\]"/
 	);
 });
 
@@ -269,7 +302,17 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	assert.match(chatSrc, /const gotoMorph = ref\(null\);/);
 	const watchBody = fnBody(chatSrc, "watch(streamingGoto, (g) => {");
 	assert.match(watchBody, /if \(g\) gotoMorph\.value = g;/);
-	assert.match(chatSrc, /v-if="gotoMorph && !queuedTurn"/);
+	// T5b: the morph line's own markup (JarvisMark + jv-goto-morph) is gone —
+	// one box per turn now — but the latch and its navigation are untouched,
+	// and the exact copy is reused verbatim as boxViewFor's top-precedence
+	// override (overrideFor).
+	assert.doesNotMatch(chatSrc, /v-if="gotoMorph && !queuedTurn"/);
+	assert.doesNotMatch(chatSrc, /class="jv-goto-morph"/);
+	const overrideFn = fnBody(chatSrc, "function overrideFor(m) {");
+	assert.match(
+		overrideFn,
+		/if \(gotoMorph\.value\) return \{ text: "Taking you to the Dashboards builder" \};/
+	);
 	// cleared on the next turn / an error / a stop / leaving the conversation —
 	// deliberately NOT cleared in run:end, since surviving that instant (up to
 	// navigation) is the entire point of the latch.
@@ -289,7 +332,9 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	assert.match(runStart, /dropGotoMorph\(\);/);
 	const runErrorStart = chatSrc.indexOf('case "run:error":');
 	assert.notEqual(runErrorStart, -1);
-	const runError = chatSrc.slice(runErrorStart, runErrorStart + 2000);
+	// Window widened for the review-C3 snapCandidateInto comment run:error
+	// now carries ahead of its flushReveal call.
+	const runError = chatSrc.slice(runErrorStart, runErrorStart + 2200);
 	assert.match(runError, /dropGotoMorph\(\);/);
 	const stopRun = fnBody(chatSrc, "function stopRun() {");
 	assert.match(stopRun, /dropGotoMorph\(\);/);
