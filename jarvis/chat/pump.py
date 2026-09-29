@@ -688,8 +688,13 @@ def _append_run_step(run_id: str, raw: str) -> None:
 
 
 def _read_run_steps(run_id: str) -> list[str]:
+	# The cache appends every offered step, including each growing resend of
+	# one preamble; collapse them so a hop re-seed or a reload strips whole
+	# steps, never a stale prefix (jarvis.chat.steps.collapse_steps).
+	from jarvis.chat.steps import collapse_steps
+
 	try:
-		return list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or [])
+		return collapse_steps(list(frappe.cache().get_value(_run_steps_key(run_id), expires=True) or []))
 	except Exception:
 		return []
 

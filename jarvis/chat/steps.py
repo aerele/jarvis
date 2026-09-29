@@ -114,6 +114,29 @@ def remove_steps(text: str, steps: list[str]) -> str:
 	return out.strip() if out is not text else out
 
 
+def collapse_steps(steps: list[str]) -> list[str]:
+	"""Recorded steps with every superseded prefix replaced, order kept.
+
+	The runtime can send a preamble again as it grows ("I checked the ledger."
+	then "I checked the ledger and found stale entries."). The relay keeps only
+	the longer one, but the pump's cache appends both, and handing both to
+	``remove_steps`` cuts the short one first, so the long one no longer matches
+	and its tail is left dangling in the reply. A longer step takes the place
+	of the shorter one it extends; exact repeats and blanks are dropped.
+	"""
+	out: list[str] = []
+	for step in steps or []:
+		if not step or step in out:
+			continue
+		for i, kept in enumerate(out):
+			if step.startswith(kept):
+				out[i] = step
+				break
+		else:
+			out.append(step)
+	return out
+
+
 def strip_steps(final: str | None, steps: list[str]) -> str | None:
 	"""The saved reply: ``final`` minus its step text.
 

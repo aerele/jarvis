@@ -791,7 +791,16 @@ class RelayMux:
 		the step line only, raw=None, untouched in the reply.
 		"""
 		stripped = (text or "").strip()
-		if stripped and stripped in lane.stream_text[lane.since_tool :] and is_preamble_step(stripped):
+		# Anchored: the preamble IS the reply written since the last tool call
+		# (or a growing prefix of it), or, once earlier preambles in that stretch
+		# are recorded, the reply that follows them. A bare substring test could
+		# match a short preamble ("I see.") inside the answer and cut it there.
+		region = lane.stream_text[lane.since_tool :]
+		# A step this text grows out of stays in ``rest``: removing its partial
+		# too would leave only the tail, and the grown text would not anchor.
+		rest = remove_steps(region, [s for s in lane.steps if not stripped.startswith(s)])
+		anchored = region.lstrip().startswith(stripped) or rest.lstrip().startswith(stripped)
+		if stripped and anchored and is_preamble_step(stripped):
 			self._record_preamble_step(lane, stripped)
 			return
 		self._offer_step(lane, text)
@@ -810,8 +819,16 @@ class RelayMux:
 		"""
 		if text in lane.steps:
 			return
-		if lane.steps and text.startswith(lane.steps[-1]):
-			lane.steps[-1] = text
+		# A growing resend replaces the step it extends, in place, whichever
+		# recorded step that is (not only the last), so order and the cache
+		# collapse (steps.collapse_steps) agree. Only a step still in the reply
+		# since the last tool call can be growing; an older segment's step that
+		# merely prefixes this text must stay recorded, or it is never stripped.
+		region = lane.stream_text[lane.since_tool :]
+		for i, step in enumerate(lane.steps):
+			if text.startswith(step) and step in region:
+				lane.steps[i] = text
+				break
 		else:
 			lane.steps.append(text)
 		self._offer(lane, self._shown_delta(lane, remove_steps(lane.stream_text, lane.steps)))

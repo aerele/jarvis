@@ -5504,16 +5504,6 @@ function flushReveal(id) {
 		_revealRaf = 0;
 	}
 }
-// requestAnimationFrame does not run in a background tab, so an animating reply
-// would freeze there until the user came back. Snap instead.
-//
-// review C3: dead code (never registered as a "visibilitychange" listener —
-// onVisibility below is; grep confirms no other reference to this name), so
-// its flushReveal() call is unreachable. Not deleted: out of scope for the
-// C3/C4 fix, pre-existing, left for whoever owns cleaning this up.
-function onVisibilityChange() {
-	if (document.hidden) flushReveal();
-}
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
 // Live COUNT + current-tool name exclude the agent's built-ins so the tally matches the
 // settled accordion (no 3→2 jump); raw activeTools still drives the "is working" gating.

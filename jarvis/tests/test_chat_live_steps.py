@@ -125,6 +125,29 @@ class TestLiveTurnSteps(FrappeTestCase):
 		self.assertEqual(live["turn_state"], "finalizing")
 		self.assertEqual(live["content"], "There are 3 customers.")
 
+	def test_a_reload_strips_a_grown_preamble_whole_through_the_real_cache(self):
+		# Review [2]: the pump cache appends each growing resend; the reload must
+		# collapse them or it cuts the prefix and leaves the tail in the reply.
+		from jarvis.chat.pump import _run_steps_key
+
+		partial = "I checked the ledger"  # a streaming prefix of full
+		full = "I checked the ledger and found stale entries."
+		answer = "The ledger has 4 stale entries dated before April, all from the old import."
+		conv = self._conversation()
+		seed = self._message(conv, 1, "user", content="Check the ledger")
+		assistant = self._message(conv, 2, "assistant", content=f"{full}\n\n{answer}", streaming=1)
+		self._turn("run-livesteps-4", conv, seed, assistant, last_event_seq=3, pump_epoch=1)
+		key = _run_steps_key("run-livesteps-4")
+		frappe.cache().set_value(key, [partial, full], expires_in_sec=60)
+		try:
+			result = get_conversation(conv)
+		finally:
+			frappe.cache().delete_value(key)
+
+		live = {m["name"]: m for m in result["messages"]}[assistant]
+		self.assertEqual(live["content"], answer)
+		self.assertEqual(live["live_steps"], [full])
+
 	def test_a_step_not_found_in_content_is_skipped_not_stripped(self):
 		# remove_steps/strip_steps both skip a cached step that is not an exact
 		# substring of the text they are given (the direct/harness-mode shape,

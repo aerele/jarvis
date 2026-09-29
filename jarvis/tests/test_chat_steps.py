@@ -5,14 +5,18 @@ reply glued a wrong first draft and a "Hold on" step onto the real answer, and a
 Claude-subscription reply that kept its "I'll count them now." step.
 """
 
+import os
+import re
 from unittest.mock import patch as mock_patch
 
+import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import steps as chat_steps
 from jarvis.chat.steps import (
 	MAX_PREAMBLE_STEP_CHARS,
 	MAX_STEP_CHARS,
+	collapse_steps,
 	display_line,
 	is_preamble_step,
 	is_step,
@@ -245,3 +249,41 @@ class TestJoinSegments(FrappeTestCase):
 		text = "The report was fetched.and then processed."
 		tail = "The report was fetched."
 		self.assertEqual(join_segments(text, [tail]), text)
+
+
+class TestCollapseSteps(FrappeTestCase):
+	PARTIAL = "I checked the ledger"  # a streaming prefix of FULL
+	FULL = "I checked the ledger and found stale entries."
+
+	def test_a_growing_resend_replaces_the_prefix_it_extends(self):
+		self.assertEqual(collapse_steps([self.PARTIAL, self.FULL]), [self.FULL])
+
+	def test_the_longer_step_keeps_the_shorter_ones_place(self):
+		other = "I'm pulling the invoices."
+		self.assertEqual(collapse_steps([self.PARTIAL, other, self.FULL]), [self.FULL, other])
+
+	def test_repeats_and_blanks_are_dropped(self):
+		self.assertEqual(collapse_steps([self.FULL, "", self.FULL, None]), [self.FULL])
+		self.assertEqual(collapse_steps(None), [])
+
+	def test_collapsed_steps_strip_without_a_dangling_tail(self):
+		# The review's case: stripping [partial, full] cuts the partial first,
+		# the full step no longer matches and " and found stale entries." stays.
+		text = f"{self.FULL}\n\nThe ledger has 4 stale entries dated before April, all from the old import."
+		self.assertIn("and found stale entries", remove_steps(text, [self.PARTIAL, self.FULL]))
+		self.assertEqual(
+			remove_steps(text, collapse_steps([self.PARTIAL, self.FULL])),
+			"The ledger has 4 stale entries dated before April, all from the old import.",
+		)
+
+
+class TestPreambleLimitLockstep(FrappeTestCase):
+	def test_frontend_candidate_limit_matches_the_backend(self):
+		# frontend/src/lib/liveTurn.js MAX_CANDIDATE_CHARS must equal
+		# MAX_PREAMBLE_STEP_CHARS, or the SPA types into the step box text the
+		# relay leaves in the reply (or the reverse).
+		path = os.path.join(frappe.get_app_path("jarvis"), "..", "frontend", "src", "lib", "liveTurn.js")
+		with open(path, encoding="utf-8") as fh:
+			match = re.search(r"export const MAX_CANDIDATE_CHARS = (\d+);", fh.read())
+		self.assertIsNotNone(match)
+		self.assertEqual(int(match.group(1)), MAX_PREAMBLE_STEP_CHARS)

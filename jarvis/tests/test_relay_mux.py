@@ -1541,6 +1541,83 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.steps[-1][1], full_step)
 		self.assertEqual(rec.terminal[1]["text"], answer)  # no dangling remainder
 
+	def test_two_distinct_preambles_before_one_tool_call_are_both_hidden(self):
+		# Review round 7 F1: after the first preamble is recorded, the stretch
+		# since the last tool call still starts with its raw text; the second,
+		# distinct preamble follows it and must be recorded and hidden too.
+		first = "I found two customers with overdue invoices."
+		second = "I'm now checking their linked contacts."
+		answer = (
+			"Neither customer has a linked contact with an email address, so no reminders can go out yet."
+		)
+		text = f"{first} {second}"
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": first}),
+				("assistant", {"text": text, "delta": f" {second}"}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": second}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{text}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{text}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [first, second])
+		self.assertEqual(rec.step_raws, [first, second])  # both recorded, both hidden
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
+	def test_a_second_preamble_that_grows_replaces_its_partial(self):
+		# Review round 8 F2: the runtime resends every preamble as it grows,
+		# including a second one in the same stretch. Its growth must replace
+		# its own partial, never fall back to the step line only or split the
+		# sentence into two steps at the tool call.
+		first = "I found two customers with overdue invoices."
+		partial = "I'm now checking"
+		second = "I'm now checking their linked contacts and open tickets."
+		# Longer than the two steps together, so strip_steps' short-answer guard
+		# (keep the final whole when less would remain than was removed) stays out.
+		answer = (
+			"Neither customer has a linked contact with an email address, so no reminders can go out yet; "
+			"add a contact email on Grant Plastics Ltd. and West View Software Ltd. first."
+		)
+		rec = self._run(
+			[
+				("assistant", {"text": first, "delta": first}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": first}),
+				("assistant", {"text": f"{first} {partial}", "delta": f" {partial}"}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": partial}),
+				("assistant", {"text": f"{first} {second}", "delta": second[len(partial) :]}),
+				("item", {"kind": "preamble", "phase": "end", "progressText": second}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+				("assistant", {"text": f"{first} {second}\n\n{answer}", "delta": f"\n\n{answer}"}),
+			],
+			f"{first} {second}\n\n{answer}",
+		)
+		self.assertEqual([s[1] for s in rec.steps], [first, partial, second])
+		self.assertNotIn(None, rec.step_raws)  # every one recorded and hidden
+		self.assertEqual(rec.terminal[1]["text"], answer)  # no fragment left behind
+
+	def test_a_preamble_found_only_inside_the_answer_is_not_cut_from_it(self):
+		# Review [0]: the match is anchored to the start of the reply since the
+		# last tool call. A short preamble that merely occurs mid-answer keeps
+		# today's path (step line only) and the answer stays intact.
+		answer = (
+			"Based on what I see, the total is 500 INR across three invoices. Let me check the due dates."
+		)
+		rec = self._run(
+			[
+				("assistant", {"text": answer, "delta": answer}),
+				("item", {"kind": "preamble", "phase": "update", "progressText": "I see."}),
+				("item", _tool_data("start")),
+				("item", _tool_data("end")),
+			],
+			answer,
+		)
+		self.assertEqual(rec.step_raws, [None])  # offered on the step line only, never recorded
+		self.assertEqual(rec.terminal[1]["text"], answer)
+
 	def test_preamble_not_in_the_reply_keeps_todays_path(self):
 		# The Codex-harness shape: the preamble text never rides the reply, so
 		# it is offered as a step with raw=None and the reply/final are untouched.
