@@ -1044,7 +1044,11 @@ def _mark_catalog_dirty() -> None:
 		_bump_catalog_version()
 	except Exception as e:
 		if pending and isinstance(e, frappe.QueryDeadlockError):
-			raise
+			# RES8-1: same exception type (existing catches still match), friendly message.
+			frappe.throw(
+				_("Another change landed at the same moment. Please try again."),
+				exc=frappe.QueryDeadlockError,
+			)
 		frappe.log_error(title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback())
 
 
@@ -1942,6 +1946,7 @@ def stop_agent_run(run: str) -> dict:
 	from jarvis.chat import agent_runs
 
 	agent_runs.teardown_run_session(row.session_key)
+	frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
 	_try_abort_gateway_session(row.session_key, run)
 	log_activity(
 		agent=row.agent,

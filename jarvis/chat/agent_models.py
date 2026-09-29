@@ -674,6 +674,13 @@ def plan_install(
 	# snapshot and let the existence reads below see a concurrent last-uninstall.
 	frappe.db.commit()
 	if picked:  # same check as set_agent_model; the row is written after the install
+		if if_unpinned:
+			# COR8-1: the shown pick may have gone ineligible since the dialog loaded.
+			# _apply_pick's keep would discard it anyway once the row is pinned, so
+			# check state FIRST and skip validating it — an ineligible if-unpinned pick
+			# must not refuse an install that would just keep the existing pin.
+			if frappe.db.get_value(CHOICE, listing.name, "state") in _PINNED:
+				return None
 		return {"pick": _validated_pick(listing, provider, model), "if_unpinned": bool(if_unpinned)}
 	# A plain read: FOR UPDATE on a missing key would gap-lock and deadlock two
 	# concurrent first installs; _insert_if_absent's unique name decides instead.
