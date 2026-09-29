@@ -865,64 +865,18 @@
 								/>
 							</template>
 							<template #above-body>
-								<ReportScope :tools="reportToolsByTurn[m.name] || []" />
-								<!-- Activity: the tool calls (with input + output) that produced
-								     this answer — agent-style, collapsible. -->
-								<div
-									v-if="
-										showActivityDetail &&
-										(activityByAssistant[m.name] || []).length
-									"
-									class="jv-activity"
+								<!-- One box per turn (T5b, design canvas rule 2): boxViewByMsg
+								     (script) is the live/folded/null view boxViewFor built in
+								     T5a; StepsBox (components/chat/StepsBox.vue) is pure
+								     rendering of it, mode-switched, with null-head folded
+								     rendering nothing. #details is only mounted while open. -->
+								<StepsBox
+									v-if="boxViewByMsg[m.name]"
+									:view="boxViewByMsg[m.name]"
+									:open="!!activityOpen[m.name]"
+									@toggle="toggleActivity(m.name)"
 								>
-									<button
-										class="jv-activity-head"
-										@click="toggleActivity(m.name)"
-										:aria-expanded="!!isActivityOpen(m.name)"
-									>
-										<svg
-											class="jv-activity-chev"
-											:class="{ open: isActivityOpen(m.name) }"
-											width="12"
-											height="12"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="2.2"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M9 18l6-6-6-6" />
-										</svg>
-										<svg
-											width="13"
-											height="13"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.8"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path
-												d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 1 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
-											/>
-										</svg>
-										<span class="jv-activity-count"
-											>{{ (activityByAssistant[m.name] || []).length }} tool
-											call{{
-												(activityByAssistant[m.name] || []).length === 1
-													? ""
-													: "s"
-											}}</span
-										>
-										<span
-											v-if="!isActivityOpen(m.name)"
-											class="jv-activity-preview"
-											>{{ activityNames(m.name) }}</span
-										>
-									</button>
-									<div v-if="isActivityOpen(m.name)" class="jv-activity-body">
+									<template #details>
 										<div
 											v-for="t in activityByAssistant[m.name] || []"
 											:key="t.name"
@@ -979,8 +933,16 @@
 												</template>
 											</div>
 										</div>
-									</div>
-								</div>
+									</template>
+								</StepsBox>
+								<!-- "Reports consulted" provenance card: a LEAD decision (T5c)
+								     overrides the plan line that moved this into StepsBox's
+								     #details — it stays always visible, independent of the box
+								     being open or even expandable (showActivityDetail off),
+								     because it is provenance for the ANSWER, not activity
+								     detail. See chat-report-scope.spec.js (upstream/develop
+								     version, restored). -->
+								<ReportScope :tools="reportToolsByTurn[m.name] || []" />
 								<!-- Phase-0 admission (SUXI-4): a cancelled/aged-out queued turn
 								     leaves a durable marker. Render it as a MUTED note, not the
 								     red error alert - the user (or the system) cancelled it; it
@@ -1159,14 +1121,6 @@
 								</div>
 							</template>
 							<template #below-body>
-								<!-- The user stopped this reply. A SIBLING of the body, not part of
-								     it: gated only on `stopped`, so it shows for a partial stop
-								     (content present) and an empty one alike, and the renderer can
-								     never mangle it. Muted, never an error tone - a deliberate stop
-								     is not a failure. -->
-								<div v-if="m.stopped" class="jv-stopped">
-									You stopped this reply.
-								</div>
 								<!-- rich action card the agent emits (doc confirm / email draft) -->
 								<template v-if="actionFor === m.name && activeAction">
 									<!-- email draft -->
@@ -1845,46 +1799,9 @@
 								</div>
 								<div class="jv-metabar">
 									<div
-										v-if="
-											!m.error &&
-											!m.streaming &&
-											(toolCountOf(m) || elapsedOf(m) || modelBadgeOf(m))
-										"
+										v-if="!m.error && !m.streaming && modelBadgeOf(m)"
 										class="jv-meta"
 									>
-										<span v-if="toolCountOf(m)" :title="activityNames(m.name)"
-											><svg
-												width="12"
-												height="12"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.8"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path
-													d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 1 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
-												/></svg
-											>{{ toolCountOf(m) }} tool{{
-												toolCountOf(m) === 1 ? "" : "s"
-											}}</span
-										>
-										<span v-if="elapsedOf(m)"
-											><svg
-												width="12"
-												height="12"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.8"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<circle cx="12" cy="12" r="9" />
-												<path d="M12 7v5l3 2" /></svg
-											>{{ elapsedLabel(m) }}</span
-										>
 										<!-- jarvis#560: names the model that actually wrote this
 										     reply, shown only when it is not the one the chat is
 										     set to now (a mid-thread switch, or a pool failover
@@ -1908,18 +1825,10 @@
 											>{{ modelBadgeOf(m) }}</span
 										>
 									</div>
-									<!-- SUX-7: subtle "finishing…" affordance while the Relay-Pump
-									     finalize job is still adding late enrichment (attachments /
-									     canvas / title); cleared by the message:enriched event. -->
 									<div
-										v-if="!m.streaming && enrichmentPending.has(m.name)"
-										class="jv-meta"
-										style="opacity: 0.6"
-										title="Finishing up. Attachments and extras are still being added"
+										v-if="!m.error && !m.streaming && m.content"
+										class="jv-msgbar"
 									>
-										<span>Finishing…</span>
-									</div>
-									<div v-if="!m.error && m.content" class="jv-msgbar">
 										<span
 											v-if="msgTime(m)"
 											class="jv-msgtime"
@@ -1972,327 +1881,30 @@
 						</Message>
 					</template>
 
-					<!-- pre-redirect morph line (jarvis#884): the working line morphs
-					     in place the instant the streaming reply's own jarvis-goto
-					     block is complete. Wins over the artifact card and the generic
-					     line below (a goto turn produces no artifact) — see the
-					     gotoMorph latch's own comment for why this renders off the
-					     latch, not off streamingGoto directly. Zero added delay: the
-					     run:end auto-redirect is untouched, this is only the visual for
-					     the beat before it fires (and the instant after, until the
-					     route actually changes). -->
-					<div v-if="gotoMorph && !queuedTurn" style="display: flex; gap: 12px">
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div class="jv-goto-morph" role="status" aria-live="polite">
-								<span class="jv-goto-chevrons" aria-hidden="true">
-									<svg
-										v-for="i in 3"
-										:key="i"
-										class="jv-goto-chevron"
-										:style="{ animationDelay: (i - 1) * 0.15 + 's' }"
-										width="10"
-										height="10"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="2.6"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M9 6l6 6-6 6" />
-									</svg>
-								</span>
-								<span class="jv-live-shim"
-									>Taking you to the Dashboards builder</span
-								>
-								<svg
-									class="jv-goto-arrow"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="2"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M5 12h14M13 5l7 7-7 7" />
-								</svg>
-							</div>
-						</div>
-					</div>
-					<!-- common artifact activity card (jarvis#884): one shared card for
-					     any artifact-producing main-chat turn — dashboard (builder
-					     origin, issue #858's own gate), pdf, spreadsheet, or image —
-					     replacing the dashboard-only card issue #874 shipped. Same turn
-					     gate as the generic activity line below (queued chip, and now
-					     the goto morph line, both win over it); mutually exclusive with
-					     the generic line so only one ever shows. Phases light up from
-					     real events only — a mount that joined the turn already in
-					     flight (no activeTools seen yet) shows the honest indeterminate
-					     header with no tick lit, rather than guessing "Understanding". -->
-					<div
-						v-if="artifactKind && (activeTools.length || waiting) && !queuedTurn"
-						class="jv-artifact-live"
-						style="display: flex; gap: 12px"
-					>
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div class="jv-artifact-card" role="status" aria-live="polite">
-								<span class="jv-artifact-head">
-									<svg
-										v-if="artifactKind === 'dashboard'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M18 20V10M12 20V4M6 20v-6" />
-									</svg>
-									<svg
-										v-else-if="artifactKind === 'pdf'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path
-											d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-										/>
-										<path d="M14 2v6h6" />
-									</svg>
-									<svg
-										v-else-if="artifactKind === 'spreadsheet'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<rect x="3" y="3" width="18" height="18" rx="2" />
-										<path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
-									</svg>
-									<svg
-										v-else-if="artifactKind === 'image'"
-										width="14"
-										height="14"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.8"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<rect x="3" y="3" width="18" height="18" rx="2" />
-										<circle cx="8.5" cy="8.5" r="1.5" />
-										<path d="M21 15l-5-5L5 21" />
-									</svg>
-									<span class="jv-live-shim">{{ artifactTitle }}</span>
-								</span>
-								<ol class="jv-artifact-steps">
-									<li
-										v-for="(step, si) in artifactPhases"
-										:key="step.key"
-										class="jv-artifact-step"
-										:class="{
-											done: artifactTickIndex >= 0 && si < artifactTickIndex,
-											current: si === artifactTickIndex,
-										}"
-									>
-										<span class="jv-artifact-tick" aria-hidden="true"></span>
-										{{ step.label }}
-									</li>
-								</ol>
-							</div>
-						</div>
-					</div>
-					<!-- live tool activity + thinking (Claude Code style). Suppressed
-					     while a queued chip is showing (F2): whenever the accept says
-					     the turn is queued, the "Queued — ~N ahead" chip WINS over this
-					     "Working on it…" / warming placeholder — never both, and never a
-					     stray warming spinner masking the chip. -->
-					<div
-						v-if="
-							(activeTools.length || waiting || liveStep) &&
-							!queuedTurn &&
-							!artifactKind &&
-							!gotoMorph &&
-							!compacting
-						"
-						style="display: flex; gap: 12px"
-					>
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<!-- live step line: what the model says it is doing right now.
-							     Gone once the answer starts or the run ends. -->
-							<div
-								v-if="liveStep"
-								class="jv-livestep"
-								role="status"
-								aria-live="polite"
-							>
-								{{ liveStep }}
-							</div>
-							<!-- the single tool running right now -->
-							<div
-								v-if="showActivityDetail && currentTool"
-								:key="currentTool.id"
-								class="jv-toolrow"
-							>
-								<svg
-									class="jv-spin"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--cta)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								>
-									<path d="M12 3a9 9 0 1 0 9 9" />
-								</svg>
-								<span
-									>{{ toolPhrase(currentTool) }}
-									<span
-										style="
-											font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-											font-size: 11px;
-											color: var(--cta);
-										"
-										>{{ currentTool.name }}</span
-									></span
-								>
-							</div>
-							<!-- compact tally of tools finished this turn -->
-							<div
-								v-if="showActivityDetail && doneCount"
-								class="jv-toolrow jv-tooldone"
-							>
-								<svg
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--green)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M20 6 9 17l-5-5" />
-								</svg>
-								<span
-									>{{ doneCount }} tool{{
-										doneCount === 1 ? "" : "s"
-									}}
-									done<template v-if="failedCount">
-										· {{ failedCount }} failed</template
-									></span
-								>
-							</div>
-							<div
-								v-if="
-									(!showActivityDetail ||
-										(waiting && !currentTool) ||
-										(!currentTool && statusPhase) ||
-										(!currentTool && !doneCount)) &&
-									!compacting
-								"
-								role="status"
-								aria-live="polite"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 7px;
-									padding-top: 4px;
-								"
-							>
-								<span
-									class="jv-live-shim"
-									style="font-size: 12px; color: var(--text-3)"
-									>{{ liveStatus
-									}}<span
-										v-if="liveElapsedLabel"
-										aria-hidden="true"
-										style="opacity: 0.75"
-									>
-										· {{ liveElapsedLabel }}</span
-									></span
-								>
-							</div>
-						</div>
-					</div>
+					<!-- T5b (design canvas rules 1-2): the goto-morph line, the artifact
+					     activity card, the generic tool/step line and the recovering
+					     banner that used to render here are gone — each turn now gets
+					     exactly ONE JarvisMark + ONE StepsBox: the real row's box is
+					     boxViewByMsg[m.name], mounted in Message's #above-body above;
+					     the synthetic in-flight row below (inFlightRowVisible) covers
+					     the turn before that row exists. gotoMorph's own
+					     navigation/hold-timer logic (dropGotoMorph, streamingGoto watch,
+					     GOTO_MORPH_HOLD_MS) is untouched — only this line's markup is
+					     gone, the redirect it drives still fires off run:end; its copy
+					     ("Taking you to the Dashboards builder") is reused verbatim by
+					     boxViewFor's override (T5a). Recovering keeps its own steps too
+					     (T5a's overrideFor + liveStepsForRun, keyed off msgId, not just
+					     currentRunId). -->
 
-					<!-- recovery: a parked turn finishing in the background (connection
-					     hiccup / compaction). The composer stays UNLOCKED and the answer
-					     lands later via the recovery path — fixes the silent limbo. -->
-					<div v-if="recovering" style="display: flex; gap: 12px">
-						<JarvisMark
-							:size="28"
-							:radius="7"
-							mood="thinking"
-							style="margin-top: 2px"
-						/>
-						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div
-								role="status"
-								aria-live="polite"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 7px;
-									font-size: 12px;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									class="jv-spin"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--text-3)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								>
-									<path d="M12 3a9 9 0 1 0 9 9" />
-								</svg>
-								<span>{{ recoveringLabel }}</span>
-							</div>
-						</div>
-					</div>
-
-					<!-- Compacting: older turns are being summarised (auto mid-turn, or a
-					     manual Compact chat / /compact). The composer stays LOCKED (a
-					     compact and a turn must never race the same context write). -->
+					<!-- Compacting: CROSS-TURN only now (a manual Compact / /compact
+					     with no turn running) — mid-turn compaction is the box's own
+					     "Reorganising this chat" override step (T5a overrideFor), so
+					     this banner steps aside whenever a turn already owns a row (the
+					     real one or the synthetic in-flight one). The composer stays
+					     LOCKED (a compact and a turn must never race the same context
+					     write). -->
 					<div
-						v-if="compacting"
+						v-if="compacting && !currentRunId && !inFlightRowVisible"
 						style="display: flex; gap: 12px"
 						data-testid="compacting-banner"
 					>
@@ -2372,49 +1984,22 @@
 						<span>Change saved</span>
 					</div>
 
-					<!-- Phase-0 admission (chat concurrency): the just-sent turn is
-					     QUEUED behind others (all in-flight slots taken). The composer
-					     stays unlocked; this chip shows the approximate position and a
-					     Cancel affordance. Retired when the turn is promoted (run:start),
-					     cancelled, or aged out. -->
-					<div v-if="queuedTurn" style="display: flex; gap: 12px">
-						<JarvisMark :size="28" :radius="7" style="margin-top: 2px" />
+					<!-- Synthetic in-flight row (design canvas rule 1): a turn is
+					     running (queued, or sent and waiting on run:start) with no
+					     assistant row yet to hang a mark + box on. inFlightRowVisible
+					     goes false the same tick run:start upserts the real row (T5a),
+					     so this never renders alongside it — exactly one mark per turn.
+					     StepsBox's own Cancel button (queued mode) calls the same
+					     cancelQueued the old chip's button did. -->
+					<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">
+						<JarvisMark
+							:size="28"
+							:radius="7"
+							:mood="queuedTurn ? 'star' : 'thinking'"
+							style="margin-top: 2px"
+						/>
 						<div style="flex: 1; min-width: 0; padding-top: 3px">
-							<div
-								role="status"
-								aria-live="polite"
-								style="
-									display: flex;
-									align-items: center;
-									gap: 10px;
-									font-size: 12px;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									class="jv-spin"
-									width="13"
-									height="13"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="var(--text-3)"
-									stroke-width="2.4"
-									stroke-linecap="round"
-								>
-									<path d="M12 3a9 9 0 1 0 9 9" />
-								</svg>
-								<span>{{
-									queuedChipLabel(queuedTurn.position, queuedTurn.state)
-								}}</span>
-								<button
-									type="button"
-									class="jv-queued-cancel"
-									aria-label="Cancel this queued message"
-									@click="cancelQueued"
-								>
-									Cancel
-								</button>
-							</div>
+							<StepsBox :view="inFlightView" @cancel="cancelQueued" />
 						</div>
 					</div>
 
@@ -4519,6 +4104,7 @@ import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
+import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
@@ -4577,13 +4163,23 @@ import {
 	isDashboardBuildTurn,
 	isDashboardCanvas,
 	phaseTickIndex,
+	toolBaseName,
 } from "@/lib/dashboardBuildCard";
 import {
-	ARTIFACT_TITLES,
 	artifactBuildPhase,
 	artifactPhaseList,
 	detectArtifactKind,
 } from "@/lib/artifactActivityCard";
+import {
+	addStep,
+	foldedHead,
+	liveBox,
+	splitNarration,
+	stepsFromTexts,
+	turnToolNames,
+} from "@/lib/liveTurn";
+import { mergeCanvasItems } from "@/lib/canvasMerge";
+import { candidateTextFor } from "@/lib/candidateSnap";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
 import {
@@ -5611,6 +5207,12 @@ function clearStreamingActivity() {
 	currentRunId.value = null;
 	store.streamingConvId = null;
 	recovering.value = null;
+	// review C3: no separate snapCandidateInto needed here — this only runs
+	// once settledByFence/settledByRow is already true (the fence terminated
+	// or m.streaming is already false), which means the real terminal
+	// (run:end/run:error/stopRun) already ran its own snap+flush for this
+	// row inside that same synchronous handler, or the row's content is
+	// server-authoritative from a reload and about to be replaced anyway.
 	flushReveal(); // nothing is streaming anymore, so nothing may stay mid-reveal
 }
 // Tool events are only meaningful while their run is live. The CDX-3 pump fence
@@ -5748,11 +5350,6 @@ function flushReveal(id) {
 		_revealRaf = 0;
 	}
 }
-// requestAnimationFrame does not run in a background tab, so an animating reply
-// would freeze there until the user came back. Snap instead.
-function onVisibilityChange() {
-	if (document.hidden) flushReveal();
-}
 const activeTools = ref([]); // [{ id, name, status }] for the in-flight run
 // Live COUNT + current-tool name exclude the agent's built-ins so the tally matches the
 // settled accordion (no 3→2 jump); raw activeTools still drives the "is working" gating.
@@ -5764,22 +5361,73 @@ const visibleActiveTools = computed(() =>
 const currentTool = computed(
 	() => [...visibleActiveTools.value].reverse().find((t) => t.status === "running") || null
 );
-const doneCount = computed(
-	() => visibleActiveTools.value.filter((t) => t.status !== "running").length
-);
-const failedCount = computed(
-	() => visibleActiveTools.value.filter((t) => t.status === "error").length
-);
-// Live step line: the model's own "what I'm doing" sentence (run:step). Tied to the
-// run that sent it, so it disappears whenever that run stops being current (answer
-// landed, error, stop, conversation switch) without each teardown clearing it.
-// The first answer text clears it too. Never stored.
-const liveStepState = ref({ runId: null, text: "" });
-const liveStep = computed(() =>
-	liveStepState.value.runId && liveStepState.value.runId === currentRunId.value
-		? liveStepState.value.text
-		: ""
-);
+// Live step list (T5a, plan .claude/workflow/plans/2026-09-28-live-turn-steps.md):
+// the model's own "what I'm doing" sentences (run:step), recorded for the whole
+// turn instead of a single replaced line (@/lib/liveTurn's addStep dedupes a
+// repeat/grows the last one). `msgId` (T5b) rides alongside `runId` so a
+// recovering row (T5a's run:recovering clears currentRunId, by design — no
+// run is "live" from the fence's point of view once parked) can still show
+// what it already did: stepsFor(m) below falls back to msgId when the runId
+// gate misses. Never persisted client-side; a reload reseeds it from the
+// server's live_steps (see loadConversation below).
+const liveSteps = ref({ runId: null, msgId: null, steps: [] });
+// The steps a box should show for row `m` (or the in-flight synthetic row,
+// m === null): the current run's own steps while it IS the current run, else
+// — only for a real row — whatever was last recorded for THIS message (a
+// recovering row, parked after currentRunId was cleared).
+function stepsFor(m) {
+	if (liveSteps.value.runId && liveSteps.value.runId === currentRunId.value)
+		return liveSteps.value.steps;
+	if (m && liveSteps.value.msgId === m.name) return liveSteps.value.steps;
+	return [];
+}
+// Narration currently typing into the current step, not yet decided to be a
+// step or the answer (splitNarration, @/lib/liveTurn). Tied to the run/msg
+// the same way liveSteps is above; run:end below reads the RAW ref (before
+// currentRunId is cleared) to snap in a short final answer that never grew
+// past a step-candidate sentence.
+const liveCandidate = ref({ runId: null, msgId: null, text: "", full: "" });
+function candidateFor(m) {
+	if (liveCandidate.value.runId && liveCandidate.value.runId === currentRunId.value)
+		return liveCandidate.value.text;
+	if (m && liveCandidate.value.msgId === m.name) return liveCandidate.value.text;
+	return "";
+}
+// Review C3: a still-typing narration candidate never reached the revealer
+// (assistant:delta only ever paces the ANSWER half of splitNarration in), so
+// flushReveal(messageId) alone snaps to "" for as long as the shown text
+// still looked like a step — the bubble the user watched stream in goes
+// blank. Every terminal for a live message (run:end, run:error, stopRun)
+// must call this FIRST, before its own flushReveal, so the flush has real
+// text to snap to. candidateTextFor (@/lib/candidateSnap) is the pure
+// belongs-to-this-message decision; this just applies it and clears the ref
+// (a harmless no-op when the candidate already promoted to the answer on the
+// last delta — candidateTextFor returns null once there is nothing to feed).
+function snapCandidateInto(messageId) {
+	const full = candidateTextFor(liveCandidate.value, messageId, currentRunId.value);
+	if (full == null) return;
+	revealer.receive(messageId, full);
+	liveCandidate.value = { runId: null, msgId: null, text: "", full: "" };
+}
+// Seconds elapsed (the same span liveElapsedLabel formats) at the instant the
+// live turn's answer first showed text, so a folded head mid-turn ("Worked
+// 12s") freezes there instead of climbing with the ticking timer while a
+// tool keeps running after the answer opened. Reset at run:start.
+const liveAnswerShownAt = ref(null);
+// The turn that just ended, captured at run:end before teardown: its elapsed
+// seconds and the tools seen live. The settled head reads it until the
+// enrichment reload brings the saved duration and every tool row, so the line
+// never loses its time or drops its count in between (flow review F2).
+const finishedRun = ref({ msgId: null, seconds: null, tools: [] });
+// Turn states past streaming: the model is done writing (get_conversation's
+// turn_state for a reply row that has not settled yet).
+const RUN_ENDED_STATES = new Set([
+	"terminal_observed",
+	"finalizing",
+	"done",
+	"errored",
+	"cancelled",
+]);
 // ── Live status line ────────────────────────────────────────────────────────
 // Real progress instead of a blanket "Thinking…": phase transitions come from
 // the run's realtime events (run:start → tool:start/end → assistant:delta).
@@ -5818,11 +5466,14 @@ const TOOL_PHRASES = {
 	read_file: "Reading the file",
 	get_file_pages: "Reading the document",
 	run_method: "Running the operation",
+	get_linked_docs: "Finding linked records",
 	bash: "Reading reference material",
 	exec: "Reading reference material",
 	browser: "Browsing the web",
 	canvas: "Drawing the canvas",
-	image: "Generating the image",
+	image_generate: "Generating your image",
+	video_generate: "Generating your video",
+	music_generate: "Generating your music",
 };
 function toolPhrase(tool) {
 	if (!tool) return "";
@@ -5853,16 +5504,6 @@ function toolPhrase(tool) {
 	}
 	return tpl + "…";
 }
-const liveStatus = computed(() => {
-	// Pre-connect phases ("waking" / "pairing") win over tool/thinking phrases:
-	// the turn is still blocked on the WS connect, no tool is running yet.
-	const preConnect = preConnectStatusLabel(statusPhase.value);
-	if (preConnect) return preConnect;
-	if (currentTool.value) return toolPhrase(currentTool.value);
-	if (statusPhase.value === "analyzing") return "Analyzing the results…";
-	if (waiting.value || sending.value || statusPhase.value === "model") return "Working on it…";
-	return thinkingWord.value;
-});
 // Recovery banner copy: compaction (context overflow, retrying) vs a connection
 // hiccup. Both mean "still working, in the background" — not an error.
 // Renew CTA → the billing page, the only surface that takes payment.
@@ -6235,18 +5876,24 @@ const visibleMessages = computed(() =>
 		// which the accordion cannot hold.
 		if (m.role === "tool") return !!m.action_outcome || !!orphanToolFailures.value[m.name];
 		if (m.role !== "user" && m.role !== "assistant") return false;
-		// Hide a blank streaming placeholder. The live "Working on it…" indicator
-		// below the thread already renders the assistant logo + status for the
-		// in-flight turn; after a refresh or tab-switch the server's still-empty
-		// streaming row loads alongside it, so drawing both showed the assistant
-		// logo twice (once blank, once beside the status). A placeholder that has
-		// text, an error, or a canvas is a real reply and always renders.
+		// A blank streaming assistant row is either the live turn's own row —
+		// it IS the steps box now (run:start upserts it above; T5b mounts
+		// boxViewFor/StepsBox off it directly) — or a STALE one. Before T5a a
+		// separate "Working on it…" indicator rendered beside the thread and
+		// this row was always hidden while blank, which is why drawing both
+		// used to show the assistant logo twice (once blank, once beside the
+		// status). Only the stale case still hides: another still-streaming
+		// placeholder that is not (or no longer) the turn THIS tab has live —
+		// a missed terminal, a different in-flight turn, or a reload landing
+		// between runs. A placeholder that has text, an error, or a canvas is
+		// a real reply and always renders regardless.
 		if (
 			m.role === "assistant" &&
 			m.streaming &&
 			!(m.content || "").trim() &&
 			!m.error &&
-			!(m.canvas && m.canvas.length)
+			!(m.canvas && m.canvas.length) &&
+			!(currentRunId.value && m.name === currentMsgId.value)
 		)
 			return false;
 		return true;
@@ -6324,17 +5971,17 @@ const THINK_WORDS = ["Thinking\u2026"];
 const thinkTick = ref(0);
 let _thinkTimer = null;
 const thinkingWord = computed(() => THINK_WORDS[thinkTick.value % THINK_WORDS.length]);
-// Persisted per-reply tool count + duration so they survive a refresh (runMeta
-// is live-session only): count from the saved tool messages, duration on ONE
-// baseline shared with the live timer (CDX-20). The live value (runMeta.ms) is the
-// client-side run:start -> run:end span; the persisted value (reply_duration_ms,
-// stamped at settlement) is the server-side dispatching_at(run:start) -> settlement
-// span — the SAME boundary, so a reloaded reply matches its live reading within
-// network tolerance. reply_duration_ms is NULL on legacy (non-pump) rows, which fall
-// back to the modified-creation span (creation is NO LONGER rewritten as a metric).
-function toolCountOf(m) {
-	return (activityByAssistant.value[m.name] || []).length;
-}
+// Persisted per-reply duration so it survives a refresh (runMeta is
+// live-session only), on ONE baseline shared with the live timer (CDX-20).
+// The live value (runMeta.ms) is the client-side run:start -> run:end span;
+// the persisted value (reply_duration_ms, stamped at settlement) is the
+// server-side dispatching_at(run:start) -> settlement span — the SAME
+// boundary, so a reloaded reply matches its live reading within network
+// tolerance. reply_duration_ms is NULL on legacy (non-pump) rows, which fall
+// back to the modified-creation span (creation is NO LONGER rewritten as a
+// metric). Feeds the folded head's seconds (foldedHead, boxViewFor) — the
+// per-reply tool COUNT moved there too (toolNames.length), so toolCountOf
+// (T5c) is gone.
 function elapsedOf(m) {
 	const live = runMeta.value[m.name] && runMeta.value[m.name].ms;
 	if (live) return (live / 1000).toFixed(1);
@@ -6351,18 +5998,6 @@ function elapsedOf(m) {
 		if (d >= 0 && d < 1800) return d.toFixed(1);
 	}
 	return "";
-}
-// Response-duration label: keeps the sub-minute look (e.g. "12.4s") but rolls
-// over to minutes once it passes 60s (e.g. "1m 5s" / "2m").
-function elapsedLabel(m) {
-	const raw = elapsedOf(m);
-	if (!raw) return "";
-	const sec = parseFloat(raw);
-	if (sec < 60) return `${raw}s`;
-	const total = Math.round(sec);
-	const mm = Math.floor(total / 60),
-		ss = total % 60;
-	return ss ? `${mm}m ${ss}s` : `${mm}m`;
 }
 // Per-reply model attribution (jarvis#560). m.model / m.provider are stamped on
 // the assistant row at finalize and name the model that ACTUALLY answered, which
@@ -6389,11 +6024,6 @@ function toggleTool(name) {
 }
 function toolLabel(n) {
 	return (n || "tool").replace(/^jarvis__/, "");
-}
-function activityNames(assistantName) {
-	return (activityByAssistant.value[assistantName] || [])
-		.map((t) => toolLabel(t.tool_name))
-		.join(", ");
 }
 // args/result are stored as JSON strings — pretty-print, and trim very large
 // payloads so a 10k-row result doesn't blow up the chat.
@@ -8441,7 +8071,6 @@ const artifactKind = computed(() =>
 		? null
 		: detectArtifactKind(activeTools.value, { dashboardTurn: dashboardBuildTurn.value })
 );
-const artifactTitle = computed(() => ARTIFACT_TITLES[artifactKind.value] || "");
 const artifactPhaseKey = computed(() =>
 	artifactBuildPhase(artifactKind.value, {
 		activeTools: activeTools.value,
@@ -8452,6 +8081,149 @@ const artifactPhaseKey = computed(() =>
 const artifactPhases = computed(() => artifactPhaseList(artifactKind.value));
 const artifactTickIndex = computed(() =>
 	phaseTickIndex(artifactPhaseKey.value, artifactPhases.value)
+);
+// ── Turn view builders (T5a; T5b mounts these into StepsBox) ───────────────
+// One steps box per turn (design canvas rule 2): boxViewFor(m) is what a
+// single assistant row shows — live while it is the currently-running turn's
+// own row, folded once it has settled (or once mid-turn its answer is
+// showing with no tool running); inFlightView + inFlightRowVisible cover the
+// turn that is running but has no assistant row yet (before run:start's
+// upsert above gives it one).
+const MEDIA_YIELD_TOOLS = new Set([
+	"image_generate",
+	"imagegen",
+	"video_generate",
+	"music_generate",
+]);
+// The live box's `override`: whichever state currently owns the CURRENT
+// step, in precedence order. Only one ever applies to a given row at a time.
+function overrideFor(m) {
+	if (gotoMorph.value) return { text: "Taking you to the Dashboards builder" };
+	if (recovering.value && m && recovering.value.message_id === m.name) {
+		// agent-yield after a media tool means the model handed back control
+		// waiting on the asset (image/video/music), not a stalled connection.
+		const mediaSeen = activeTools.value.some((t) =>
+			MEDIA_YIELD_TOOLS.has(toolBaseName(t.name))
+		);
+		return {
+			text:
+				recovering.value.reason === "agent-yield" && mediaSeen
+					? "Waiting for the image"
+					: "Finishing in the background",
+			sub: recoveringLabel.value,
+		};
+	}
+	if (compacting.value)
+		return {
+			text: "Reorganising this chat",
+			sub: compactHintSeed.value ? `“${compactHintSeed.value}”` : "",
+		};
+	const preConnect = preConnectStatusLabel(statusPhase.value);
+	if (preConnect) return { text: "Starting", sub: preConnect };
+	return null;
+}
+// The live signals shared by every row that is currently the running turn —
+// the real row once one exists, and the synthetic in-flight row before it
+// does (`m` is null there, so overrideFor only skips its recovering branch,
+// and stepsFor/candidateFor only skip their msgId fallback, both of which
+// need a real message anyway). liveBox (@/lib/liveTurn) turns them into one
+// view.
+function liveBoxViewFor(m) {
+	return liveBox({
+		steps: stepsFor(m),
+		candidate: candidateFor(m),
+		activeTools: visibleActiveTools.value,
+		waiting: waiting.value,
+		statusPhase: statusPhase.value,
+		artifactKind: artifactKind.value,
+		elapsed: liveElapsedLabel.value,
+		showDetail: showActivityDetail.value,
+		toolPhrase: currentTool.value ? toolPhrase(currentTool.value) : "",
+		override: overrideFor(m),
+		idleText: thinkingWord.value,
+	});
+}
+/**
+ * The StepsBox view for one assistant row. Live while it is the
+ * currently-running turn's own row and either has no visible answer text yet
+ * or a tool is running (rule 6: the box folds once the answer shows AND no
+ * tool runs, and reopens if a tool starts again — re-evaluated every render,
+ * so no explicit "reopen" state is needed). Folded (the saved activity
+ * strip) once settled or mid-turn-but-answering. Null when there is nothing
+ * worth a line (foldedHead's own "old reply, no duration, no tools" case).
+ */
+// Saved tool rows plus tools seen live, never counted twice (liveTurn.turnToolNames).
+function toolNamesFor(m, liveTools) {
+	return turnToolNames(activityByAssistant.value[m.name] || [], liveTools);
+}
+function boxViewFor(m) {
+	if (!m || m.role !== "assistant") return null;
+	const isRecovering = recovering.value && recovering.value.message_id === m.name;
+	const isLive = isRecovering || (currentRunId.value && m.name === currentMsgId.value);
+	// A stopped or errored message is SETTLED the moment it stops/fails,
+	// whatever currentRunId still says (review C4): stopRun sets m.stopped
+	// synchronously but only clears currentRunId later, via the run's own
+	// eventual terminal event or the next turn's run:start, so isLive can
+	// stay true right after a Stop/error click. Route unconditionally to the
+	// same settled/folded branch below — one code path computes the
+	// stopped/failed head; the live-fold branch never sees these flags.
+	if (!isLive || m.stopped || m.error) {
+		const fin = finishedRun.value.msgId === m.name ? finishedRun.value : null;
+		const head = foldedHead({
+			seconds: elapsedOf(m) || (fin && fin.seconds),
+			toolNames: toolNamesFor(m, fin && fin.tools),
+			finishing: enrichmentPending.value.has(m.name),
+			stopped: !!m.stopped,
+			failed: !!m.error && errorInfo(m).code !== "cancelled",
+			showDetail: showActivityDetail.value,
+		});
+		return head ? { mode: "folded", head } : null;
+	}
+	const answerShowing = !!(m.content || "").trim();
+	if (!answerShowing || currentTool.value) return { mode: "live", ...liveBoxViewFor(m) };
+	// The answer is showing and nothing is running: fold, freezing the
+	// elapsed reading at the moment it first showed (liveAnswerShownAt)
+	// rather than the still-ticking live timer, so the head doesn't keep
+	// climbing under what already reads as a finished answer.
+	// A tab reloaded after the answer opened has no liveAnswerShownAt: read
+	// the (reload-seeded) run clock instead of showing no time at all.
+	const shownAt =
+		liveAnswerShownAt.value ??
+		(runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null);
+	return {
+		mode: "folded",
+		head: foldedHead({
+			seconds: shownAt,
+			toolNames: toolNamesFor(m, visibleActiveTools.value),
+			showDetail: showActivityDetail.value,
+		}),
+	};
+}
+// A turn is in flight (queued, or sent and waiting on run:start) but has no
+// assistant row yet to hang a box on — the synthetic row T5b renders (one
+// JarvisMark + StepsBox) reads these instead. False again the instant
+// run:start's upsert (above) gives the turn a real row.
+const inFlightRowVisible = computed(() => {
+	if (!queuedTurn.value && !busy.value) return false;
+	return !(currentMsgId.value && messages.value.some((m) => m.name === currentMsgId.value));
+});
+const inFlightView = computed(() =>
+	queuedTurn.value
+		? {
+				mode: "queued",
+				label: queuedChipLabel(queuedTurn.value.position, queuedTurn.value.state),
+		  }
+		: { mode: "live", ...liveBoxViewFor(null) }
+);
+// T5b: one call to boxViewFor per visible assistant row, memoised as a map
+// (not a per-render template call) so every #above-body reads the same
+// object instead of recomputing it once per row per re-render.
+const boxViewByMsg = computed(() =>
+	Object.fromEntries(
+		visibleMessages.value
+			.filter((m) => m.role === "assistant")
+			.map((m) => [m.name, boxViewFor(m)])
+	)
 );
 // Scaled-preview geometry for the finished-canvas thumbnail card (below);
 // fixed source viewport since the canvas itself has no set design width.
@@ -8785,6 +8557,12 @@ async function loadConversation(id) {
 	// with its stale, truncated target - a shortened answer with no spinner and no
 	// error, fixable only by a hard refresh. flushReveal() cancels the loop and
 	// clears all reveal state, so nothing survives to touch the new array.
+	//
+	// review C3: no snapCandidateInto needed — this is the "conversation
+	// switch, row reloads from server" case. `messages.value` is replaced
+	// with `d.messages` on the very next line, so whatever this flush snapped
+	// (blank candidate or not) is discarded immediately in favour of the
+	// server-authoritative row.
 	flushReveal();
 	messages.value = d?.messages || [];
 	// VR4-2: re-inject any failed optimistic bubbles whose send was rejected while THIS conversation
@@ -8869,6 +8647,72 @@ async function loadConversation(id) {
 			waiting.value = !(_streaming.content || "").trim();
 			store.streamingConvId = id;
 			_resumed = true;
+			// T2's reload contract: for a still-streaming row get_conversation now
+			// also returns the run identity (run_id, last_event_seq, pump_epoch)
+			// and the server-recorded step sentences (live_steps — the row's
+			// content already has them stripped). Seed the client's own
+			// run/step/fence state from it so a fresh tab opened mid-turn attaches
+			// to the SAME run instead of waiting for a run:start that will never
+			// come (the run is already in progress). Tolerate the fields being
+			// absent (old backend) — everything below is a no-op then.
+			//
+			// Why the seed matters: toolEventIsStale reads ONLY currentRunId
+			// ("if (!currentRunId.value) return true"), and pumpFenceReject reads
+			// ONLY the fence map (an absent entry accepts — see eventFence.js). So
+			// with currentRunId left null, every run:step/tool:start/tool:end for
+			// this run would be dropped as stale until the run's own terminal
+			// (run:end/run:error) finally reloads the conversation — the step box
+			// would sit frozen at whatever live_steps carried until then. Setting
+			// currentRunId (and seeding the fence's watermark so an already-seen
+			// event doesn't replay) is what makes those later events attach.
+			if (_streaming.run_id) {
+				currentRunId.value = _streaming.run_id;
+				currentMsgId.value = _streaming.name;
+				// The run started before this tab loaded: start the elapsed clock
+				// from the reply row's creation so the current step's sub-line and
+				// the folded head still show real time (flow review F1). Ignored
+				// when the clocks disagree (a browser in another timezone).
+				const started = Date.parse(String(_streaming.creation || "").replace(" ", "T"));
+				const age = Date.now() - started;
+				if (Number.isFinite(started) && age >= 0 && age < 30 * 60 * 1000) {
+					runStartMs.value = started;
+					nowMs.value = Date.now();
+				}
+				liveSteps.value = {
+					runId: _streaming.run_id,
+					msgId: _streaming.name,
+					steps: stepsFromTexts(_streaming.live_steps),
+				};
+				// A reload mid-narration gets the stored text of a sentence the
+				// relay has not moved into the step list yet. Split it exactly
+				// like a live delta (flow review F6): it types into the box
+				// instead of showing as the answer and folding the box, and a
+				// real answer already showing freezes the head's time.
+				// A run that already ended (its row just has not settled yet) never
+				// sends this tab another terminal to snap a candidate back, so its
+				// text is the answer, however short (review E1).
+				const ended = RUN_ENDED_STATES.has(_streaming.turn_state);
+				const { candidate, answer } = splitNarration(_streaming.content || "", { ended });
+				liveCandidate.value = {
+					runId: _streaming.run_id,
+					msgId: _streaming.name,
+					text: candidate,
+					full: _streaming.content || "",
+				};
+				_streaming.content = answer;
+				liveAnswerShownAt.value =
+					answer && runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null;
+				if (_streaming.pump_epoch != null) {
+					pumpFenceAccept(
+						{
+							run_id: _streaming.run_id,
+							pump_epoch: _streaming.pump_epoch,
+							event_seq: _streaming.last_event_seq,
+						},
+						false
+					);
+				}
+			}
 		}
 	}
 	// Reconcile the sidebar streaming dot with the fetched state: if the store
@@ -9097,6 +8941,13 @@ function downloadSvgAsPng(svgEl) {
 function resetRunState() {
 	// Leaving the conversation: apply whatever is mid-reveal to the rows we are
 	// about to drop, so a reload of this chat cannot find a truncated message.
+	//
+	// review C3: every caller (selectConversation, newChat, the vanished-
+	// conversation watcher) either awaits loadConversation right after, which
+	// replaces `messages.value` wholesale from the server, or has already
+	// emptied `messages.value` itself — the row this might blank is either
+	// about to be discarded or already gone, same as loadConversation's own
+	// flush above.
 	flushReveal();
 	sending.value = false;
 	waiting.value = false;
@@ -9903,6 +9754,20 @@ function onEvent(p) {
 			currentRunId.value = p.run_id;
 			currentMsgId.value = p.message_id;
 			recovering.value = null;
+			liveAnswerShownAt.value = null;
+			// T5a: there is no assistant row yet at this point (the message is
+			// created at pump promote, before the first token) — upsert a blank
+			// streaming one now instead of waiting for the first assistant:delta,
+			// so the synthetic in-flight row (inFlightView) can hand off to the
+			// real row the instant it exists. Dedupe by name: a duplicate/replayed
+			// run:start (or one racing a delta that already upserted) must never
+			// add a second row for the same message.
+			if (p.message_id && !messages.value.some((x) => x.name === p.message_id)) {
+				messages.value = [
+					...messages.value,
+					{ name: p.message_id, role: "assistant", content: "", streaming: true },
+				];
+			}
 			// A live turn can park a confirmation card mid-run; pull the parked
 			// list on a short interval so a dropped action:pending push self-heals.
 			startPendingPoll();
@@ -9968,32 +9833,65 @@ function onEvent(p) {
 			waiting.value = false;
 			statusPhase.value = null;
 			recovering.value = null;
-			// Answer text is landing, so the step line has done its job. An empty
-			// mirror is the relay moving step text out of the reply: keep the line.
-			if (p.text) liveStepState.value = { runId: null, text: "" };
-			// Upsert: the message may not be loaded yet when the first delta
-			// arrives — add it so streaming text shows immediately (the bug fix).
+			// p.text is the reply so far with step text already removed
+			// server-side (T1). splitNarration (@/lib/liveTurn) splits what's left:
+			// a short one-line sentence still types into the current step
+			// (liveCandidate) instead of the answer, so narration the relay
+			// hasn't classified as a step yet doesn't flash into the reply and
+			// back out. Steps themselves now persist for the whole turn (run:step
+			// above) — they are no longer cleared here.
+			const { candidate, answer } = splitNarration(p.text || "");
+			liveCandidate.value = {
+				runId: currentRunId.value,
+				msgId: currentMsgId.value,
+				text: candidate,
+				full: p.text || "",
+			};
+			if (answer && liveAnswerShownAt.value == null && runStartMs.value)
+				liveAnswerShownAt.value = (Date.now() - runStartMs.value) / 1000;
+			// Upsert: run:start (above) usually beats this to it now, but this
+			// stays as the fallback for a delta that somehow arrives first —
+			// streaming text must show immediately either way (the bug fix).
 			let m = messages.value.find((x) => x.name === p.message_id);
 			if (!m) {
 				m = { name: p.message_id, role: "assistant", content: "", streaming: true };
 				messages.value = [...messages.value, m];
 			}
-			// Reveal paced rather than assigned. The first delta of a message comes
-			// back whole, so the row never renders empty (the view hides an empty
-			// streaming row, which would flicker the reply out just as it arrives).
-			m.content = revealer.receive(p.message_id, p.text);
+			// Reveal paced rather than assigned, and only the ANSWER portion: while
+			// the text is still a step candidate, `answer` is "" and the row's
+			// content stays empty — the box types it, not the reply. The
+			// revealer's own rules (lib/streamReveal.js) still hold: the first
+			// call for an id always returns its argument whole (never a
+			// half-revealed empty row), and "" -> real text a call later is an
+			// EXTENSION (everything startsWith("")), not a rewrite, so it paces in
+			// normally once text outgrows a step. The row no longer needs hiding
+			// while blank either way: visibleMessages (below) always shows the
+			// live turn's own row now, blank or not, because it IS the box.
+			m.content = revealer.receive(p.message_id, answer);
 			m.streaming = true;
 			pumpReveal();
 			nextTick(scrollBottomIfPinned);
 			break;
 		}
 		case "run:step": {
-			// One line saying what the model is doing right now; a newer step
-			// replaces it. Fenced like tool events so a stale run can't set it.
+			// The model's own "what I'm doing" sentences, recorded for the whole
+			// turn (addStep dedupes/grows the last one — @/lib/liveTurn). Fenced
+			// like tool events so a stale run can't add to it.
 			if (pumpFenceReject(p)) break;
 			if (toolEventIsStale(p)) break;
 			pumpFenceAccept(p, false);
-			liveStepState.value = { runId: p.run_id || currentRunId.value, text: p.text || "" };
+			const rid = p.run_id || currentRunId.value;
+			const sameRun = liveSteps.value.runId === rid;
+			// A file/dashboard turn's narration takes the place of whichever
+			// artifact phase is current when the sentence arrives (the same
+			// phaseTickIndex(artifactBuildPhase(...), artifactPhaseList(...)) the
+			// StepsBox header ticks off, T5a); plain turns pass null.
+			const slot = artifactKind.value ? artifactTickIndex.value : null;
+			liveSteps.value = {
+				runId: rid,
+				msgId: currentMsgId.value,
+				steps: addStep(sameRun ? liveSteps.value.steps : [], p.text, slot),
+			};
 			waiting.value = false;
 			nextTick(scrollBottomIfPinned);
 			break;
@@ -10033,9 +9931,13 @@ function onEvent(p) {
 		}
 		case "canvas": {
 			// Agent produced a chart/canvas this turn — attach + render inline.
+			// T5c: three backend producers (chart/dashboard/file) each publish
+			// their OWN partial item list, so a straight assignment let a late
+			// push wipe out an earlier one's item. mergeCanvasItems (pure,
+			// @/lib/canvasMerge) merges by name instead — see its own header.
 			const cm = messages.value.find((x) => x.name === p.message_id);
 			if (cm) {
-				cm.canvas = p.items;
+				cm.canvas = mergeCanvasItems(cm.canvas, p.items);
 				ensureCanvas(cm);
 			}
 			break;
@@ -10048,6 +9950,12 @@ function onEvent(p) {
 			// at pump_epoch E so ANY later lower-epoch straggler is blocked PERMANENTLY.
 			if (pumpFenceReject(p, true)) break;
 			pumpFenceAccept(p, true);
+			if (p.message_id)
+				finishedRun.value = {
+					msgId: p.message_id,
+					seconds: runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null,
+					tools: visibleActiveTools.value.map((t) => ({ id: t.id, name: t.name })),
+				};
 			// C2 self-heal: a parked confirmation card whose best-effort action:pending
 			// push was missed rides the terminal here (settlement/finalize), so it appears
 			// at turn-end WITHOUT a manual reload. Deduped by token (enqueuePending), so the
@@ -10082,6 +9990,11 @@ function onEvent(p) {
 			resyncPendingConfirmations(currentId.value);
 			// Defensive: if a promoted turn's run:start was missed, retire the chip.
 			if (queuedTurn.value && queuedTurn.value.run_id === p.run_id) queuedTurn.value = null;
+			// A short final answer that never grew past a step candidate must
+			// still land in the reply, not stay typed into the step box (review
+			// C3) — snapCandidateInto feeds it back into the revealer so the
+			// flush below snaps the ANSWER in, not "".
+			snapCandidateInto(p.message_id);
 			// Snap BEFORE clearing `streaming`: the SUX-6 identical-skip below assumes
 			// the streamed text already equals the final text, which is only true once
 			// the reveal cursor has caught up.
@@ -10294,6 +10207,11 @@ function onEvent(p) {
 					[p.message_id]: { code: p.code || "", changed_data: p.changed_data },
 				};
 			}
+			// Review C3: re-feed a still-typing step candidate before the flush,
+			// or "whatever streamed before the error stays whole" below is false
+			// for the common case (the model's first sentence, still typing into
+			// the step box, at the moment the run errors).
+			snapCandidateInto(p.message_id);
 			flushReveal(p.message_id); // whatever streamed before the error stays whole
 			recovering.value = null;
 			waiting.value = false;
@@ -10341,9 +10259,21 @@ function stopRun() {
 	if (currentMsgId.value) stoppedMsgIds.value.add(currentMsgId.value);
 	const m = [...messages.value].reverse().find((x) => x.role === "assistant" && x.streaming);
 	if (m) {
-		// Stop keeps whatever streamed. Snap first so the marker lands on the text
-		// the run actually produced, not on wherever the cursor happened to be.
+		// Stop keeps whatever streamed. Re-feed a still-typing step candidate
+		// (review C3) before the flush, so "whatever streamed" is true even
+		// when the click lands while the model's first sentence is still
+		// typing into the step box, not the reply. Snap first so the marker
+		// lands on the text the run actually produced, not on wherever the
+		// cursor happened to be.
+		snapCandidateInto(m.name);
 		flushReveal(m.name);
+		// "Stopped after 21s · 2 lookups": keep the run's time and tools for the
+		// head, as run:end does, since a stop never gets a run:end of its own.
+		finishedRun.value = {
+			msgId: m.name,
+			seconds: runStartMs.value ? (Date.now() - runStartMs.value) / 1000 : null,
+			tools: visibleActiveTools.value.map((t) => ({ id: t.id, name: t.name })),
+		};
 		m.streaming = false;
 		if (m.name) stoppedMsgIds.value.add(m.name);
 		// A stop is a state of the turn, not prose: leave whatever streamed
@@ -11442,6 +11372,13 @@ function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
 	// Going to the background stops requestAnimationFrame, so anything mid-reveal
 	// would sit frozen until the user came back. Snap it instead.
+	//
+	// review C3: not a terminal — the turn (and its candidate) is still live,
+	// nothing here clears liveCandidate or currentRunId. A candidate whose
+	// target is still "" just shows blank for the tab-hidden duration; the
+	// run's own events keep arriving and its eventual real terminal (already
+	// fixed above) snaps the candidate in properly. onResync above also
+	// re-fetches on return-to-visible, which self-heals sooner in practice.
 	else flushReveal();
 }
 
@@ -11715,6 +11652,8 @@ onMounted(async () => {
 	composerRef.value?.focusInput();
 });
 onBeforeUnmount(() => {
+	// review C3: the component itself is being torn down (route navigation
+	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
@@ -12030,58 +11969,9 @@ onUnmounted(() => {
 .jv-metabar:empty {
 	display: none;
 }
-/* Tool activity (agent-style): collapsible list of tool calls with I/O */
-.jv-activity {
-	margin: 0 0 10px;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	background: var(--surface-1);
-	overflow: hidden;
-}
-.jv-activity-head {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	width: 100%;
-	padding: 7px 11px;
-	background: transparent;
-	border: none;
-	cursor: pointer;
-	font-family: inherit;
-	font-size: 12px;
-	color: var(--text-2);
-	text-align: left;
-}
-.jv-activity-head:hover {
-	background: var(--surface-2);
-}
-.jv-activity-chev {
-	flex: none;
-	color: var(--text-3);
-	transition: transform 0.15s ease;
-}
-.jv-activity-chev.open {
-	transform: rotate(90deg);
-}
-.jv-activity-count {
-	font-weight: 600;
-	color: var(--text);
-	flex: none;
-}
-.jv-activity-preview {
-	color: var(--text-3);
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	min-width: 0;
-}
-.jv-activity-body {
-	border-top: 1px solid var(--border);
-	padding: 5px;
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-}
+/* Tool activity (agent-style): the per-tool I/O list, mounted in StepsBox's
+   #details slot now (T5b); the collapsible strip itself is StepsBox's own
+   .jv-steps-* styles (components/chat/StepsBox.vue). */
 .jv-tool {
 	border: 1px solid var(--border);
 	border-radius: 8px;
@@ -12522,33 +12412,6 @@ onUnmounted(() => {
 	overflow: hidden;
 	white-space: nowrap;
 }
-/* live tool activity rows */
-.jv-toolrow {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	font-size: 12.5px;
-	color: var(--text-2);
-	padding: 2px 0;
-}
-.jv-toolrow b {
-	font-weight: 600;
-	color: var(--text);
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: 12px;
-}
-.jv-tooldone {
-	color: var(--text-3);
-	font-size: 12px;
-}
-/* live step line: the model's own "what I'm doing" sentence, above the tool rows */
-.jv-livestep {
-	font-size: 13.5px;
-	line-height: 1.45;
-	color: var(--text);
-	padding: 0 0 4px;
-	overflow-wrap: anywhere;
-}
 .jv-spin {
 	animation: jv-spin 0.8s linear infinite;
 }
@@ -12641,82 +12504,6 @@ onUnmounted(() => {
 		animation: none;
 	}
 }
-/* Phase-0 admission: Cancel affordance on the queued chip. Text-button idiom
-   (design.md), muted until hover. */
-.jv-queued-cancel {
-	appearance: none;
-	background: transparent;
-	border: none;
-	padding: 2px 6px;
-	margin: 0;
-	font: inherit;
-	font-size: 12px;
-	color: var(--text-3);
-	text-decoration: underline;
-	cursor: pointer;
-	border-radius: 5px;
-}
-.jv-queued-cancel:hover {
-	color: var(--text-1);
-	background: var(--surface-gray-2, rgba(0, 0, 0, 0.05));
-}
-/* live-status label: a gentle breathing shimmer so the "Working on it…" line
-   reads as active on its own, without the old bouncing dots competing with the
-   avatar mark's motion next to it. Disabled under reduced-motion below. */
-.jv-live-shim {
-	animation: jv-live-shim 1.8s ease-in-out infinite;
-}
-@keyframes jv-live-shim {
-	0%,
-	100% {
-		opacity: 0.55;
-	}
-	50% {
-		opacity: 1;
-	}
-}
-/* pre-redirect morph line (jarvis#884): occupies the exact same single-row
-   box as the generic "Working on it…" status line it replaces (same
-   font-size/gap/padding-top), so the transcript never jumps when one morphs
-   into the other. Compositor-friendly only: the chevrons animate
-   transform+opacity, nothing else — no width/height/position/background
-   properties in the keyframe, so the loop never triggers layout or paint
-   beyond the small icons themselves. Disabled under reduced-motion below. */
-.jv-goto-morph {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	padding-top: 4px;
-	font-size: 12px;
-	color: var(--text-3);
-}
-.jv-goto-chevrons {
-	display: inline-flex;
-	align-items: center;
-	color: var(--cta);
-}
-.jv-goto-chevron {
-	margin-left: -5px;
-	animation: jv-goto-chevron-slide 1s ease-in-out infinite;
-}
-.jv-goto-chevron:first-child {
-	margin-left: 0;
-}
-@keyframes jv-goto-chevron-slide {
-	0%,
-	100% {
-		transform: translateX(0);
-		opacity: 0.4;
-	}
-	50% {
-		transform: translateX(3px);
-		opacity: 1;
-	}
-}
-.jv-goto-arrow {
-	flex: none;
-	color: var(--text-3);
-}
 /* visually-hidden live region for screen-reader announcements (UX #5) */
 .jv-sr {
 	position: absolute;
@@ -12742,22 +12529,12 @@ onUnmounted(() => {
 	.jv-spin {
 		animation: none;
 	}
-	.jv-live-shim {
-		animation: none;
-		opacity: 1;
-	}
 	.jv-tool-dot.run,
 	.jv-mic-dot {
 		animation: none;
 	}
-	.jv-artifact-tick,
 	.jv-dash-thumb-loading {
 		animation: none;
-	}
-	.jv-goto-chevron {
-		animation: none;
-		opacity: 1;
-		transform: none;
 	}
 	.jv-settings,
 	.jv-skills-modal {
@@ -13010,17 +12787,6 @@ onUnmounted(() => {
 	border-radius: 999px;
 	padding: 2px 10px;
 }
-/* "You stopped this reply." - a muted rule under the body, in the same
-   vocabulary as .jv-msgtime. Deliberately NOT --red: the user chose to stop,
-   and dressing their own click as a failure is a lie about what happened. */
-.jv-stopped {
-	margin-top: 8px;
-	padding-top: 7px;
-	border-top: 1px solid var(--border);
-	font-size: 11.5px;
-	color: var(--text-3);
-}
-
 /* ===== settings panel (slide-over console) ===== */
 /* The settings modal's CSS lived here (.jv-settings-overlay / .jv-settings, a
    760px shell) until the dialog was HOISTED to components/shell/SettingsDialog.vue
@@ -14370,81 +14136,6 @@ onUnmounted(() => {
 	font-size: 12px;
 	font-weight: 550;
 	color: var(--cta);
-}
-
-/* common artifact activity card (jarvis#884): one shared card for any
-   artifact-producing main-chat turn (dashboard/pdf/spreadsheet/image),
-   replacing the dashboard-only card issue #874 shipped. Height is fixed from
-   first paint — head row + all four phase rows always render, tick state
-   only changes color/scale, never the row count — so the card never grows
-   once mounted. */
-.jv-artifact-card {
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-	max-width: 260px;
-	padding: 10px 12px;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	background: var(--surface);
-}
-.jv-artifact-head {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 12px;
-	color: var(--text-2);
-}
-.jv-artifact-steps {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	margin: 0;
-	padding: 0;
-	list-style: none;
-}
-.jv-artifact-step {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	font-size: 11.5px;
-	color: var(--text-3);
-}
-.jv-artifact-step.done,
-.jv-artifact-step.current {
-	color: var(--text-2);
-}
-.jv-artifact-step.current {
-	color: var(--text);
-	font-weight: 550;
-}
-/* Tick "lighting up" is a transform/opacity transition (addendum #2/#8),
-   never a keyframe loop — only the CURRENT tick's gentle pulse (reused
-   jv-live-shim, already opacity-only) is a loop, and that is removed under
-   reduced-motion below. background-color is swapped directly (no
-   transition on it), so a state change is one cheap repaint, not an
-   animated one. */
-.jv-artifact-tick {
-	flex: none;
-	width: 6px;
-	height: 6px;
-	border-radius: 50%;
-	background: var(--border-2);
-	transform: scale(0.7);
-	opacity: 0.8;
-	transition: transform 0.2s ease, opacity 0.2s ease;
-}
-.jv-artifact-step.done .jv-artifact-tick,
-.jv-artifact-step.current .jv-artifact-tick {
-	transform: scale(1);
-	opacity: 1;
-}
-.jv-artifact-step.done .jv-artifact-tick {
-	background: var(--green);
-}
-.jv-artifact-step.current .jv-artifact-tick {
-	background: var(--cta);
-	animation: jv-live-shim 1.8s ease-in-out infinite;
 }
 
 /* confirm / cancel card for a pending ERP-mutating action */
