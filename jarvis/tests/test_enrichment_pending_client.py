@@ -32,7 +32,7 @@ import frappe
 # the FILE itself as one passing unit, so an emptied or import-broken test file still
 # prints "pass 1" with a zero exit: asserting merely that a pass line exists, or that the
 # count is at least 1, proves nothing. Hold a floor comfortably above 1 (the file ships
-# 11 tests) so a gutted suite fails loudly instead of reading as green.
+# 17 tests) so a gutted suite fails loudly instead of reading as green.
 _MIN_EXPECTED_PASSES = 8
 
 

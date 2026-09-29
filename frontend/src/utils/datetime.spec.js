@@ -3,14 +3,30 @@ import { describe, it, expect, vi } from "vitest";
 // frappe-ui's ESM entry does not resolve under vitest (see LlmPoolEditor.spec.js) -
 // fmtElapsed itself is pure, but datetime.js imports frappe-ui at module scope, so
 // any spec importing this module needs the mock even though fmtElapsed never calls it.
-vi.mock("frappe-ui", () => ({
+vi.mock("frappe-ui", async () => ({
 	call: vi.fn(),
-	dayjs: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
+	// frappe-ui re-exports dayjs; the real one, so formatLocalMs is checked for real.
+	dayjs: (await vi.importActual("dayjs")).default,
 	dayjsLocal: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
 	getConfig: () => null,
 }));
 
-import { fmtElapsed } from "./datetime";
+import { fmtElapsed, formatLocalMs } from "./datetime";
+
+// A reply stamped in the browser at run:end shows its time in the same format
+// the server copy gets after the reload ("10:42 PM", never "22:42" first).
+describe("formatLocalMs", () => {
+	it("formats a browser epoch in the local zone with the caller's pattern", () => {
+		const ms = new Date(2026, 8, 29, 22, 42).getTime();
+		expect(formatLocalMs(ms, "h:mm A")).toBe("10:42 PM");
+		expect(formatLocalMs(ms, "ddd, MMM D, YYYY h:mm A")).toBe("Tue, Sep 29, 2026 10:42 PM");
+	});
+
+	it("is empty without a stamp", () => {
+		expect(formatLocalMs(0, "h:mm A")).toBe("");
+		expect(formatLocalMs(undefined, "h:mm A")).toBe("");
+	});
+});
 
 // jarvis#1062 C3: the running-run progress display's ticking elapsed-time
 // label - mm:ss under an hour, h:mm at/above it.

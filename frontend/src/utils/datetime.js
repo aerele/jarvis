@@ -19,6 +19,13 @@ export function formatDate(d, fmt) {
 	return d ? dayjsLocal(String(d)).format(fmt || "MMM D, YYYY") : "";
 }
 
+// A browser epoch (a row's local stamp before the server copy arrives) in the
+// same zone and format formatDate gives a server datetime, so the text does not
+// change when the server copy replaces the row.
+export function formatLocalMs(ms, fmt) {
+	return ms ? dayjs(ms).format(fmt || "MMM D, YYYY") : "";
+}
+
 // Epoch ms for a naive site-tz datetime string (SLA deadlines, creation), tz-aware
 // via dayjsLocal — so the duration/ordering math in lib/supportSla is correct for
 // any viewer's timezone, not just the site's. null for empty/invalid input.

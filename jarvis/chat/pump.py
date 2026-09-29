@@ -707,6 +707,43 @@ def _read_run_steps(run_id: str) -> list[str]:
 		return []
 
 
+# The PUBLISHED step lines (already redacted + display-shaped by the relay), kept
+# with their first-seen time so settlement can save them on the reply row. Unlike
+# the raw copy above, this one is safe to store and to show.
+RUN_STEP_LINES_MAX = 40
+
+
+def _run_step_lines_key(run_id: str) -> str:
+	return f"jarvis:pump:step_lines:{run_id}"
+
+
+def _append_run_step_line(run_id: str, text: str) -> None:
+	try:
+		cache = frappe.cache()
+		lines = cache.get_value(_run_step_lines_key(run_id), expires=True) or []
+		if any(line.get("text") == text for line in lines):
+			return
+		if lines and text.startswith(lines[-1]["text"]):
+			# A growing resend of the last step: new text, original first-seen time.
+			lines = [*lines[:-1], {"text": text, "at": lines[-1]["at"]}]
+		elif lines and lines[-1]["text"].startswith(text):
+			return
+		else:
+			lines = [*lines, {"text": text, "at": frappe.utils.now()}]
+		cache.set_value(
+			_run_step_lines_key(run_id), lines[:RUN_STEP_LINES_MAX], expires_in_sec=RUN_STEPS_TTL_S
+		)
+	except Exception:
+		pass
+
+
+def _read_run_step_lines(run_id: str) -> list[dict]:
+	try:
+		return list(frappe.cache().get_value(_run_step_lines_key(run_id), expires=True) or [])
+	except Exception:
+		return []
+
+
 def _write_lease_mirror(target: str) -> None:
 	try:
 		frappe.cache().set_value(_lease_mirror_key(target), "1", expires_in_sec=LEASE_MIRROR_TTL_S)
@@ -2664,8 +2701,9 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			)
 
 	def on_step(event_seq: int, text: str, raw: str | None = None) -> None:
-		# The live step line (jarvis.chat.steps). LOSSY like on_status: published,
-		# never stored on the message, and a newer step replaces it on screen.
+		# The live step line (jarvis.chat.steps). LOSSY like on_status: published, and
+		# a newer step replaces it on screen. The published lines are also kept in the
+		# cache and saved on the reply at settlement (settlement._stamp_steps).
 		# ``raw`` (step text that is also in the reply) is kept for a hop re-attach.
 		if ctx.lease_lost:
 			return
@@ -2682,6 +2720,9 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		# given (the harness case, by design), so caching the display-shaped
 		# ``text`` here is harmless for those callers.
 		_append_run_step(rs.run_id, raw or text)
+		# ``text`` is already redacted + display-shaped by the relay, so it is the
+		# copy that is stored on the reply and shown after a reload, never ``raw``.
+		_append_run_step_line(rs.run_id, text)
 		if rs.owner:
 			ts.publish_fenced(
 				rs.owner,
