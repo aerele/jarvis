@@ -43,6 +43,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat import pump
 from jarvis.chat import turn_state as ts
 from jarvis.chat.relay_mux import RelayMux
+from jarvis.chat.runtime_profile import RuntimeProfileError
 from jarvis.tests.test_relay_mux import _DoubleGateway
 
 CONV = "Jarvis Conversation"
@@ -1861,6 +1862,96 @@ class TestCleanHandoffSuccession(_PumpTestCase):
 		self.assertEqual(rec.calls[0][1]["transport_retry"], 1)
 		won, _ = ts.lease_acquire(self._target, "succ")
 		self.assertTrue(won, "successor can acquire after the no_transport release")
+
+	def _crashing_hop(self, *, transport_retry=0):
+		"""Run one hop over a live streaming turn whose drain raises a non-operational error."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		self._mk_turn(
+			conv, f"pmp_crash_{transport_retry}", seed, "streaming", version=1, assistant_message=amsg
+		)
+		deps = self._deps(double=self._double())
+		rec = _Recorder()
+		deps.enqueue_pump_job = rec
+		boom = RuntimeProfileError("profile unavailable")
+		with patch.object(pump, "drain_slice", side_effect=boom), patch.object(frappe, "log_error") as log:
+			res = pump.run_pump_hop(
+				self._target, deps=deps, soft_budget_s=999, transport_retry=transport_retry
+			)
+		return res, rec, log
+
+	def test_hop_crash_enqueues_successor_instead_of_dying(self):
+		"""M-01: an unexpected exception mid-hop (here the RuntimeProfileError a recovery
+		tail raises) must not end the RQ job successor-less, freezing every live reply on
+		the shard until the next send or the */5 watchdog."""
+		res, rec, log = self._crashing_hop()
+		self.assertEqual(res["exit"], "crashed")
+		self.assertEqual(rec.count, 1, "a crashed hop with live work enqueues a successor")
+		self.assertEqual(rec.calls[0][1]["transport_retry"], 1, "the retry budget is spent by one")
+		self.assertIn("pump.hop_crash", [c.kwargs.get("title") for c in log.call_args_list])
+		won, _ = ts.lease_acquire(self._target, "succ")
+		self.assertTrue(won, "the lease is released at once, not held for its TTL")
+
+	def test_repeated_hop_crash_stops_at_the_retry_budget(self):
+		"""A poison fault that crashes every hop is bounded: past the budget no successor
+		is enqueued (the watchdog revives) instead of a tight crash loop."""
+		res, rec, _ = self._crashing_hop(transport_retry=pump.TRANSPORT_RETRY_MAX)
+		self.assertEqual(res["exit"], "crashed")
+		self.assertEqual(rec.count, 0, "over the budget -> defer to the watchdog")
+		rid = f"pmp_crash_{pump.TRANSPORT_RETRY_MAX}"
+		self.assertEqual(self._state(rid), "recovering", "the live reply is parked, not left spinning")
+		won, _ = ts.lease_acquire(self._target, "succ")
+		self.assertTrue(won)
+
+	def test_recovery_tail_failure_is_isolated_to_its_turn(self):
+		"""M-01: a recovery tail that raises re-attaches THAT turn and lets the other
+		pending recoveries resolve; it never escapes to end the hop."""
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+
+		class _Done:
+			done = True
+
+			def result(self, _timeout):
+				return {"payload": {"messages": []}}
+
+		def pending(rid):
+			r = {"run_id": rid, "conversation": "c", "version": 1}
+			return pump._PendingRecovery(_Done(), 0.0, r, "s", 0, None)
+
+		ctx.pending_recoveries = {"bad": pending("bad"), "good": pending("good")}
+		resolved, reattached = [], []
+
+		def resolve(_ctx, pr, _frame):
+			if pr.r["run_id"] == "bad":
+				raise RuntimeProfileError("profile unavailable")
+			resolved.append(pr.r["run_id"])
+
+		with (
+			patch.object(pump, "_resolve_recovery_tail", side_effect=resolve),
+			patch.object(pump, "_reattach_lane", lambda _c, r: reattached.append(r["run_id"])),
+			patch.object(frappe, "log_error") as log,
+		):
+			pump._poll_recoveries(ctx)
+		self.assertEqual(resolved, ["good"], "the other turn's recovery still resolves")
+		self.assertEqual(reattached, ["bad"], "the failing turn re-attaches and keeps waiting")
+		self.assertEqual(ctx.pending_recoveries, {})
+		self.assertIn("pump.recovery_tail", [c.kwargs.get("title") for c in log.call_args_list])
+
+	def test_recovery_tail_lease_loss_still_takes_the_shared_exit(self):
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+
+		class _Done:
+			done = True
+
+			def result(self, _timeout):
+				return {}
+
+		r = {"run_id": "x", "conversation": "c", "version": 1}
+		ctx.pending_recoveries = {"x": pump._PendingRecovery(_Done(), 0.0, r, "s", 0, None)}
+		with patch.object(pump, "_resolve_recovery_tail", side_effect=ts.LeaseLostExit("x")):
+			with self.assertRaises(ts.LeaseLostExit):
+				pump._poll_recoveries(ctx)
 
 
 # --------------------------------------------------------------------------- #
