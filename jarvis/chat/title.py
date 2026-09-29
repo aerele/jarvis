@@ -27,6 +27,7 @@ import time
 
 import frappe
 
+from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
 
 CONV = "Jarvis Conversation"
@@ -415,7 +416,26 @@ def maybe_autotitle(conversation_id: str, user: str, *, gateway_url, model, prov
 	):
 		return
 
-	frappe.db.set_value(CONV, conversation_id, "title", new_title)
+	# The gateway call above is a 2-8s round trip; this job's snapshot (opened at its
+	# first read, well before the call) can be stale by the time we get here, and
+	# anything else that touched this row since (a user rename, a resend, another
+	# auto-title attempt) must win over a now-outdated generation. txn.fresh_snapshot()
+	# ends this job's own transaction so the write below opens on the present, and the
+	# "still unnamed" check is redone INSIDE the replayable unit (never the `title` read
+	# above, which is now stale) so a race landing between the fresh snapshot and the
+	# write is caught by the replay, not silently overwritten. update_modified=False:
+	# a title landing must never trip check_if_latest for a concurrent send holding the
+	# same row (jarvis.chat.api.send_message's own targeted conversation write).
+	def _write_title() -> bool:
+		current = frappe.db.get_value(CONV, conversation_id, "title")
+		if current and current != "New chat":
+			return False  # renamed (by the user or a prior attempt) since we started
+		frappe.db.set_value(CONV, conversation_id, "title", new_title, update_modified=False)
+		return True
+
+	landed = txn.replay_on_conflict(_write_title, label=f"autotitle {conversation_id}", fresh=True)
+	if not landed:
+		return
 	frappe.db.commit()
 	publish_to_user(
 		user,
