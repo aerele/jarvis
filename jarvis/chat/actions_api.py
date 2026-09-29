@@ -235,7 +235,6 @@ def apply_action(action: dict | str | None = None) -> dict:
 	if not conversation:
 		raise InvalidArgumentError("conversation is required")
 	_require_own_conversation(conversation)
-
 	# A Prompt-autonamed DocType (e.g. Server Script) has NO `name` FIELD - the
 	# human-entered document name arrives only as `name`, never inside `values`
 	# (the panel builds values from DocFields). Fold it in for a create so the doc
@@ -249,6 +248,31 @@ def apply_action(action: dict | str | None = None) -> dict:
 	if verb == "create" and name and "name" not in values:
 		if (frappe.get_meta(doctype).autoname or "").lower().startswith("prompt"):
 			values = {**values, "name": name}
+
+	# A File Box chat's card goes through the File Box policy (filebox_cards), whether
+	# the turn end or this Confirm gets to it first - never straight to the write. The
+	# policy only drafts, so a "Create & Submit" leaves the submit to a human.
+	if frappe.db.get_value(CONV, conversation, "file_box"):
+		from jarvis.chat import filebox_cards
+
+		card = a.get("card") if isinstance(a.get("card"), dict) else None
+		res = filebox_cards.park_confirmed(
+			conversation,
+			verb,
+			doctype,
+			name,
+			values,
+			card=card,
+			message=(a.get("message") or "").strip() or None,
+		)
+		if res.get("ok") and do_submit:
+			res["note"] += " " + _("Submit it from the document once it is reviewed.")
+		if res.get("ok") and do_continue:
+			try:
+				enqueue_continuation(conversation, res["note"])
+			except Exception:
+				frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
+		return res
 
 	from jarvis import api
 
