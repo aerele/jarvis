@@ -157,7 +157,7 @@ describe("currentModelLabel", () => {
 describe("stateBannerText / stateBannerType", () => {
 	it("legacy", () => {
 		expect(stateBannerText({ state: "legacy" })).toBe(
-			"Using your default model — choose one that meets this agent's requirement."
+			"Using your default model. Choose one that meets this agent's requirement."
 		);
 		expect(stateBannerType({ state: "legacy" })).toBe("info");
 	});
@@ -215,7 +215,7 @@ describe("noteBannerText - canApply-aware, never the raw backend note", () => {
 	it("a reviewer/admin (canApply) is told to apply it themselves, never the raw note", () => {
 		const text = noteBannerText(CARRYING, true);
 		expect(text).toBe(
-			"This agent's model setup needs to be applied — apply catalog changes on the Agents page."
+			"This agent's model setup needs to be applied. Apply catalog changes on the Agents page."
 		);
 		expect(text).not.toContain("finish updating this agent"); // never echoes the backend string
 	});

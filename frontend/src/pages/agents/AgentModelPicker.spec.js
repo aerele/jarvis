@@ -120,7 +120,7 @@ describe("AgentModelPicker non-happy states", () => {
 		const w = mount(AgentModelPicker, {
 			props: { eligible: { catalog: "unknown", models: [] } },
 		});
-		expect(w.text()).toContain("Model list unavailable — try again shortly.");
+		expect(w.text()).toContain("Model list unavailable. Try again shortly.");
 	});
 
 	it("shows an empty-eligible message when the catalog is confirmed empty", () => {

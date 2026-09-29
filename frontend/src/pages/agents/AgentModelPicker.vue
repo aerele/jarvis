@@ -4,7 +4,7 @@
 			<JvSpinner /> Loading models…
 		</div>
 		<div v-else-if="catalogUnknown" class="py-6 text-sm text-ink-gray-5">
-			Model list unavailable — try again shortly.
+			Model list unavailable. Try again shortly.
 		</div>
 		<div v-else-if="!models.length" class="py-6 text-sm text-ink-gray-5">
 			No eligible models right now.

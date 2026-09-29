@@ -32,7 +32,7 @@
 				v-else-if="catalogUnknown && !usingExistingChoice"
 				class="mt-4 text-sm text-ink-gray-5"
 			>
-				Model list unavailable — try again shortly.
+				Model list unavailable. Try again shortly.
 			</div>
 			<div v-else-if="noneEligible" class="mt-4 text-sm text-ink-gray-5">
 				None of your connected AI providers offer a model this agent needs.
@@ -77,7 +77,7 @@
 					This choice applies to everyone using this agent.
 				</p>
 				<p v-if="catalogUnknown" class="mt-1 text-sm text-ink-gray-5">
-					Model list unavailable — installing keeps this model.
+					Model list unavailable. Installing keeps this model.
 				</p>
 				<div v-if="showPicker" class="mt-3">
 					<AgentModelPicker :eligible="eligible" :current="pickedRef" @select="onPick" />

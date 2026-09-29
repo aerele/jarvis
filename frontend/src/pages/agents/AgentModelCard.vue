@@ -80,7 +80,7 @@
 						{{ pendingApplyText }}
 					</div>
 					<div v-if="catalogUnknown" class="mt-1 text-sm text-ink-gray-5">
-						Model list unavailable — try again shortly.
+						Model list unavailable. Try again shortly.
 					</div>
 					<div v-else-if="noneEligible" class="mt-1 text-sm text-ink-gray-5">
 						None of your connected AI providers offer a model this agent needs.
@@ -257,7 +257,7 @@ async function refreshEligible() {
 }
 const savedNoticeText = computed(() =>
 	savedNotice.value && savedNotice.value.canApply
-		? "Saved — apply catalog changes on the Agents page to use it."
+		? "Saved. Apply catalog changes on the Agents page to use it."
 		: "Saved. An admin must apply changes before it takes effect."
 );
 // UX-3 review fix: savedNoticeText only exists while the transient Banner is
@@ -269,7 +269,7 @@ const savedNoticeText = computed(() =>
 const pendingApplyText = computed(() =>
 	pendingApply.value && !savedNotice.value
 		? props.canApply
-			? "Saved — apply catalog changes on the Agents page to use it."
+			? "Saved. Apply catalog changes on the Agents page to use it."
 			: "Saved. An admin must apply changes before it takes effect."
 		: ""
 );
