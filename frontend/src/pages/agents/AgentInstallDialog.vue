@@ -65,9 +65,6 @@
 						<div v-if="pickedCostNote" class="mt-0.5 text-sm text-ink-gray-5">
 							{{ pickedCostNote }}
 						</div>
-						<div v-if="alreadySetForEveryone" class="mt-0.5 text-sm text-ink-gray-5">
-							Already set for everyone using this agent.
-						</div>
 					</div>
 					<Button
 						v-if="!catalogUnknown"
@@ -193,7 +190,14 @@ async function load() {
 		eligible.value = null;
 		toast.error(errHtml(e));
 	} finally {
-		if (id === loadReqId) loading.value = false;
+		if (id === loadReqId) {
+			loading.value = false;
+			// FE8-a11y: mirrors loadFailed (a thrown error OR an empty response) -
+			// announce the failure to screen readers, clear it once eligible loads.
+			liveMessage.value = eligible.value
+				? ""
+				: "Couldn't load the models this agent can use.";
+		}
 	}
 }
 
