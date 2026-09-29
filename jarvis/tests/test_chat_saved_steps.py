@@ -93,6 +93,25 @@ class TestStampSteps(FrappeTestCase):
 			settlement._stamp_steps("MSG-1", "run-1")
 		cas.assert_not_called()
 
+	def test_a_missing_column_settles_without_steps(self):
+		# Code ahead of its migrate: the reply must still settle.
+		with (
+			mock_patch.object(pump, "_read_run_step_lines", return_value=[{"text": "One", "at": "x"}]),
+			mock_patch.object(settlement.ts, "_run_cas", side_effect=RuntimeError("Unknown column")),
+			mock_patch.object(frappe.db, "is_missing_column", return_value=True),
+		):
+			settlement._stamp_steps("MSG-1", "run-1")
+
+	def test_any_other_write_error_still_raises(self):
+		# A snapshot race must reach txn.replay_on_conflict, never be swallowed.
+		with (
+			mock_patch.object(pump, "_read_run_step_lines", return_value=[{"text": "One", "at": "x"}]),
+			mock_patch.object(settlement.ts, "_run_cas", side_effect=RuntimeError("1020")),
+			mock_patch.object(frappe.db, "is_missing_column", return_value=False),
+			self.assertRaises(RuntimeError),
+		):
+			settlement._stamp_steps("MSG-1", "run-1")
+
 	def test_settlement_stamps_steps_right_after_the_duration(self):
 		src = inspect.getsource(settlement.invoke_settlement)
 		pattern = (
@@ -101,6 +120,32 @@ class TestStampSteps(FrappeTestCase):
 			r"_stamp_steps\(\s*am\s*,\s*run_id\s*\)"
 		)
 		self.assertRegex(src, re.compile(pattern))
+
+
+class TestRunPreambles(FrappeTestCase):
+	# Which cached raw steps the runtime flagged, so a pump hop re-seeds the flag
+	# and the saved reply still strips a preamble recorded before the hop.
+	def setUp(self):
+		self.run_id = f"preambles-test-{frappe.generate_hash(length=10)}"
+		self.addCleanup(frappe.cache().delete_value, pump._run_preambles_key(self.run_id))
+
+	def test_append_and_read(self):
+		self.assertEqual(pump._read_run_preambles(self.run_id), [])
+		pump._append_run_preamble(self.run_id, "I found the report. Checking filters.")
+		pump._append_run_preamble(self.run_id, "I found the report. Checking filters.")
+		pump._append_run_preamble(self.run_id, "Running it now.")
+		self.assertEqual(
+			pump._read_run_preambles(self.run_id),
+			["I found the report. Checking filters.", "Running it now."],
+		)
+
+	def test_on_step_keeps_the_flag_and_a_hop_reseeds_it(self):
+		on_step = inspect.getsource(pump._make_handler)
+		self.assertRegex(
+			on_step, r"if\s+preamble\s+and\s+raw\s*:\s*_append_run_preamble\(\s*rs\.run_id\s*,\s*raw\s*\)"
+		)
+		reattach = inspect.getsource(pump._reattach_lane)
+		self.assertRegex(reattach, r"preamble_steps\s*=\s*_read_run_preambles\(\s*run_id\s*\)")
 
 
 class TestLiveTurnSteps(FrappeTestCase):

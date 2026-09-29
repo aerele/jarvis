@@ -36,7 +36,8 @@ export const ENRICHMENT_PENDING_MAX_MS = 120000;
 // plain answer, adds nothing visible, so a "Finishing…" that appeared and vanished under
 // every reply read as a glitch in a turn that was already done. The line now marks a
 // finish that is actually stuck. A reply whose enrichment WILL add something (a
-// generated image, video or music file) is marked `immediate` and shows it at once.
+// generated image, video or music file, record cards' fields) is marked `immediate`
+// and shows it at once.
 export const ENRICHMENT_CUE_DELAY_MS = 15000;
 
 const noop = () => {};
