@@ -392,11 +392,19 @@ def _stamp_steps(assistant_message: str, run_id: str) -> None:
 		lines = pump._read_run_step_lines(run_id)
 	except Exception:
 		return
-	if lines:
+	if not lines:
+		return
+	try:
 		ts._run_cas(
 			f"UPDATE `tab{MSG}` SET steps=%(s)s WHERE name=%(m)s",
 			{"s": frappe.as_json(lines[: pump.RUN_STEP_LINES_MAX]), "m": assistant_message},
 		)
+	except Exception as e:
+		# Code running ahead of its migrate (no ``steps`` column yet): the reply
+		# settles without its steps rather than failing. Anything else, a snapshot
+		# race above all, must still reach txn.replay_on_conflict.
+		if not frappe.db.is_missing_column(e):
+			raise
 
 
 def _epoch_lost(run_id: str, epoch: int) -> bool:

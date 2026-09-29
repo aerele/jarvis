@@ -304,6 +304,8 @@ describe("live steps box wiring", () => {
 		);
 		// Steps and results carry this tab's arrival order for the expanded head.
 		expect(res).toContain("toolRowFromResult(p, nextActivityOrd())");
+		// A confirm/discard receipt is never merged into the live reply (/code-review).
+		expect(res).toContain("if (p.action_outcome) break;");
 		// The expanded head lists saved (or live) steps with the tool rows.
 		expect(src).toContain('v-for="item in activityDetailsFor(m)"');
 		expect(src).toContain(
