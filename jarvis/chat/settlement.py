@@ -33,7 +33,7 @@ import json
 
 import frappe
 
-from jarvis.chat import egress_rules
+from jarvis.chat import egress_rules, txn
 from jarvis.chat import turn_state as ts
 
 TURN = "Jarvis Chat Turn"
@@ -72,100 +72,114 @@ def invoke_settlement(
 	pump's CAS affects 0 rows and exits via ``lease_lost_exit`` (which rolls back
 	the uncommitted S1 message write). On a win, publishes the authoritative fenced
 	terminal event AFTER commit, then enqueues finalize. Never blocks."""
-	row = ts.read_turn(run_id)
-	if row is None:
-		return
-	# Already settled (finalizing/done/errored/cancelled) — a replayed/duplicate
-	# terminal. Idempotent no-op (the CAS below would also 0-row, but skip the work).
-	if row["state"] not in ("terminal_observed",):
-		return
-	v = int(row["version"])
-	kind = row.get("terminal_kind") or terminal_kind
-	am = assistant_message or row.get("assistant_message")
-	aborted = bool(row.get("cancel_requested")) and _is_aborted_payload(
-		row.get("terminal_kind"), terminal_payload
-	)
 
-	if aborted:
-		# Clean-stop terminal (D2 #19). The stop is a FLAG, not prose — keep whatever
-		# streamed; the SPA renders the marker from `stopped` (matches legacy).
-		if am:
-			ts._run_cas(f"UPDATE `tab{MSG}` SET stopped=1, streaming=0 WHERE name=%(m)s", {"m": am})
-		won = ts.settle_cancelled(run_id, v, epoch)
-		if won:
-			ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
-		pub_kind, pub_extra = "run:end", {"stopped": True}
-	elif kind == "relay:error":
-		err = _error_text(terminal_payload)
-		# Mark errored WITHOUT overwriting the streamed content (matches legacy
-		# _mark_errored: streaming=0 + error, content preserved). SUX-11: the code
-		# classification travels on the realtime event below.
-		if am:
-			ts._run_cas(
-				f"UPDATE `tab{MSG}` SET streaming=0, error=%(e)s WHERE name=%(m)s",
-				{"e": err[:1000], "m": am},
-			)
-		won = ts.settle_errored(run_id, v, epoch, error=err)
-		if won:
-			ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
-		pub_kind, pub_extra = "run:error", {"error": err, "code": _classify(err)}
-	else:
-		final_text = _final_text(terminal_payload)
-		# A media/marker-only reply strips to empty text; force the content overwrite
-		# whenever ANY MEDIA: marker was stripped, so the raw streamed batcher tail
-		# (which could carry the marker) can never survive into stored content. Coerce
-		# the payload — this boundary can receive a JSON string on the reconcile path.
-		_tp = _coerce_payload(terminal_payload)
-		marker_stripped = isinstance(_tp, dict) and bool(_tp.get("marker_stripped"))
-		# S1 final projection (final text beats the batcher tail); always clear
-		# streaming even when the terminal carried no text (matches legacy).
-		if am:
-			if final_text or marker_stripped:
-				ts._run_cas(
-					f"UPDATE `tab{MSG}` SET content=%(c)s, streaming=0 WHERE name=%(m)s",
-					{"c": final_text or "", "m": am},
-				)
-			else:
-				ts._run_cas(f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s", {"m": am})
-		won = ts.settle_finalizing(run_id, v, epoch, required_effects=FINAL_EFFECTS)
-		# SUX-6: was_recovered tells the client a VISIBLE replacement is legitimate
-		# (the answer changed via snapshot recovery); on the normal path it is 0 and
-		# the client skips re-rendering an identical terminal.
-		pub_kind, pub_extra = (
-			"run:end",
-			{
-				"enrichment_pending": True,
-				"was_recovered": bool(frappe.db.get_value(TURN, run_id, "was_recovered")),
-			},
+	def project():
+		"""The settlement transaction: projection + state advance + effects, committed as
+		one. Returns what the post-commit half needs, or None when there is nothing to
+		publish (already settled, or a benign loss rolled back). Replayed whole by
+		``txn.replay_on_conflict`` if it loses a snapshot race: the reply row it projects
+		into is also written by the tool's web request (the file card), and a precious
+		terminal that raised here would be quarantined for a whole pump hop."""
+		row = ts.read_turn(run_id)
+		if row is None:
+			return
+		# Already settled (finalizing/done/errored/cancelled): a replayed/duplicate
+		# terminal. Idempotent no-op (the CAS below would also 0-row, but skip the work).
+		if row["state"] not in ("terminal_observed",):
+			return
+		v = int(row["version"])
+		kind = row.get("terminal_kind") or terminal_kind
+		am = assistant_message or row.get("assistant_message")
+		aborted = bool(row.get("cancel_requested")) and _is_aborted_payload(
+			row.get("terminal_kind"), terminal_payload
 		)
 
-	# F4: stamp the REAL reply duration where the UI reads it (see _stamp_reply_duration).
-	# Runs inside the fenced txn: on a win it commits atomically with the projection; on a
-	# 0-rows loss it rolls back with the message write below.
-	if won and am:
-		_stamp_reply_duration(am, run_id)
-
-	if not won:
-		# OARF-3 / §10.11: a 0-rows settlement CAS is NOT unconditionally a lease
-		# loss. Re-read the row's epoch to disambiguate:
-		#   * epoch NO LONGER matches -> a takeover re-stamped us; route through the
-		#     ONE shared lease-loss exit (rollback undoes the uncommitted S1 message
-		#     write, stops writing/publishing; the pump's on_terminal wrapper converts
-		#     the LeaseLostExit to its shared exit).
-		#   * epoch INTACT + version drifted -> a legitimate concurrent actor moved
-		#     the row (e.g. the watchdog marked a stuck terminal_observed turn
-		#     recovering in the TOCTOU window between read_turn and this CAS). That is
-		#     an ordinary optimistic-concurrency loss, NOT a lease incident — rolling
-		#     back the S1 write and returning lets reconcile/watchdog own it; killing
-		#     the whole hop here would turn a benign drift into an availability
-		#     incident (every turn on the shard stalls up to LEASE_TTL_S).
-		if _epoch_lost(run_id, epoch):
-			ts.lease_lost_exit(run_id)
+		if aborted:
+			# Clean-stop terminal (D2 #19). The stop is a FLAG, not prose: keep whatever
+			# streamed; the SPA renders the marker from `stopped` (matches legacy).
+			if am:
+				ts._run_cas(f"UPDATE `tab{MSG}` SET stopped=1, streaming=0 WHERE name=%(m)s", {"m": am})
+			won = ts.settle_cancelled(run_id, v, epoch)
+			if won:
+				ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
+			pub_kind, pub_extra = "run:end", {"stopped": True}
+		elif kind == "relay:error":
+			err = _error_text(terminal_payload)
+			# Mark errored WITHOUT overwriting the streamed content (matches legacy
+			# _mark_errored: streaming=0 + error, content preserved). SUX-11: the code
+			# classification travels on the realtime event below.
+			if am:
+				ts._run_cas(
+					f"UPDATE `tab{MSG}` SET streaming=0, error=%(e)s WHERE name=%(m)s",
+					{"e": err[:1000], "m": am},
+				)
+			won = ts.settle_errored(run_id, v, epoch, error=err)
+			if won:
+				ts.insert_required_effects(run_id, TERMINAL_EFFECTS)
+			pub_kind, pub_extra = "run:error", {"error": err, "code": _classify(err)}
 		else:
-			frappe.db.rollback()
-		return
+			final_text = _final_text(terminal_payload)
+			# A media/marker-only reply strips to empty text; force the content overwrite
+			# whenever ANY MEDIA: marker was stripped, so the raw streamed batcher tail
+			# (which could carry the marker) can never survive into stored content. Coerce
+			# the payload: this boundary can receive a JSON string on the reconcile path.
+			_tp = _coerce_payload(terminal_payload)
+			marker_stripped = isinstance(_tp, dict) and bool(_tp.get("marker_stripped"))
+			# S1 final projection (final text beats the batcher tail); always clear
+			# streaming even when the terminal carried no text (matches legacy).
+			if am:
+				if final_text or marker_stripped:
+					ts._run_cas(
+						f"UPDATE `tab{MSG}` SET content=%(c)s, streaming=0 WHERE name=%(m)s",
+						{"c": final_text or "", "m": am},
+					)
+				else:
+					ts._run_cas(f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s", {"m": am})
+			won = ts.settle_finalizing(run_id, v, epoch, required_effects=FINAL_EFFECTS)
+			# SUX-6: was_recovered tells the client a VISIBLE replacement is legitimate
+			# (the answer changed via snapshot recovery); on the normal path it is 0 and
+			# the client skips re-rendering an identical terminal.
+			pub_kind, pub_extra = (
+				"run:end",
+				{
+					"enrichment_pending": True,
+					"was_recovered": bool(frappe.db.get_value(TURN, run_id, "was_recovered")),
+				},
+			)
 
-	frappe.db.commit()  # slot released; the NEXT turn can be promoted
+		# F4: stamp the REAL reply duration where the UI reads it (see _stamp_reply_duration).
+		# Runs inside the fenced txn: on a win it commits atomically with the projection; on a
+		# 0-rows loss it rolls back with the message write below.
+		if won and am:
+			_stamp_reply_duration(am, run_id)
+
+		if not won:
+			# OARF-3 / §10.11: a 0-rows settlement CAS is NOT unconditionally a lease
+			# loss. Re-read the row's epoch to disambiguate:
+			#   * epoch NO LONGER matches -> a takeover re-stamped us; route through the
+			#     ONE shared lease-loss exit (rollback undoes the uncommitted S1 message
+			#     write, stops writing/publishing; the pump's on_terminal wrapper converts
+			#     the LeaseLostExit to its shared exit).
+			#   * epoch INTACT + version drifted -> a legitimate concurrent actor moved
+			#     the row (e.g. the watchdog marked a stuck terminal_observed turn
+			#     recovering in the TOCTOU window between read_turn and this CAS). That is
+			#     an ordinary optimistic-concurrency loss, NOT a lease incident; rolling
+			#     back the S1 write and returning lets reconcile/watchdog own it; killing
+			#     the whole hop here would turn a benign drift into an availability
+			#     incident (every turn on the shard stalls up to LEASE_TTL_S).
+			if _epoch_lost(run_id, epoch):
+				ts.lease_lost_exit(run_id)
+			else:
+				frappe.db.rollback()
+			return
+
+		frappe.db.commit()  # slot released; the NEXT turn can be promoted
+		return row, am, pub_kind, pub_extra
+
+	settled = txn.replay_on_conflict(project, label=f"settlement {run_id}")
+	if settled is None:
+		return
+	row, am, pub_kind, pub_extra = settled
 
 	# jarvis#1425 review (live e2e2, 2026-09-27): a Relay Pump reply's terminal
 	# write lands here, not in turn_handler.py's legacy exit - e2e2's actual

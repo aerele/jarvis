@@ -37,6 +37,7 @@ import time
 import frappe
 
 from jarvis.chat import turn_state as ts
+from jarvis.chat import txn
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
@@ -384,16 +385,20 @@ def _effect_usage(ctx: _Ctx) -> None:
 	#     retries next cycle (never a silent permanent loss on a transient hiccup);
 	#   * a later finalize replay after a committed accrual sees usage_recorded=1
 	#     and no-ops (never double-count the soft monthly cap).
-	won = ts._run_cas(
-		f"UPDATE `tab{TURN}` SET usage_recorded=1 WHERE name=%(r)s AND usage_recorded=0",
-		{"r": ctx.run_id},
-	)
-	if won != 1:
-		return  # already recorded — never double-count
+	#
+	# Snapshot isolation: the guard, the reply-model stamp and the accrual are ONE unit,
+	# taken after the poll on a fresh snapshot and replayed whole if it loses a race (the
+	# settings row it accrues into is written by other turns of the same user). The unit
+	# never commits before record_turn_usage's own commit, so the retry contract above
+	# holds: a RETRY returns uncommitted and the runner's rollback undoes the guard.
+	guard_sql = f"UPDATE `tab{TURN}` SET usage_recorded=1 WHERE name=%(r)s AND usage_recorded=0"
 	if ctx.errored:
 		# An errored/cancelled turn accrues no usage; the guard commits with the
 		# effect (record only on a real completed run). Leave counters untouched.
+		ts._run_cas(guard_sql, {"r": ctx.run_id})
 		return
+	if frappe.db.get_value(TURN, ctx.run_id, "usage_recorded"):
+		return  # already recorded (skip the poll); the guard CAS below re-checks atomically
 	session_key = ctx.payload.get("session_key") or frappe.db.get_value(CONV, ctx.conversation, "session_key")
 	if not session_key:
 		# CDX-6: a SUCCESSFUL (non-errored) turn with no session key cannot be attributed
@@ -409,17 +414,29 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
-	# jarvis#560: attribute the reply BEFORE the freshness gate below. The row names
-	# the model whether or not its token counters have gone fresh yet, and an audit
-	# ("which model proposed this journal entry") must not be lost to a slow counter.
-	_stamp_reply_model(ctx, row)
+	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
+	# the unit below starts on the present. Nothing is pending: the runner committed its
+	# claim and this effect has only read so far.
+	txn.fresh_snapshot()
+
+	def unit():
+		if ts._run_cas(guard_sql, {"r": ctx.run_id}) != 1:
+			return None  # already recorded: never double-count
+		# jarvis#560: attribute the reply BEFORE the freshness gate below. The row names
+		# the model whether or not its token counters have gone fresh yet, and an audit
+		# ("which model proposed this journal entry") must not be lost to a slow counter.
+		_stamp_reply_model(ctx, row)
+		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
+
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
 	# rolls back the guard CAS above and RELEASES the effect to pending for the next
 	# cycle (subject to the bounded force-done budget, which logs the undercount at
 	# the cap). `recorded` / `valid_zero` return normally: the guard commits with the
 	# effect (done), never double-counting the soft monthly cap on a later replay.
-	outcome = _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
+	outcome = txn.replay_on_conflict(unit, label=f"finalize usage {ctx.run_id}")
+	if outcome is None:
+		return
 	if outcome == _usage.USAGE_RETRY:
 		raise _UsageRetry(f"usage not fresh for {ctx.run_id} (session {session_key})")
 
