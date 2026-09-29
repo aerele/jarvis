@@ -393,9 +393,11 @@ test("a custom source viewport is honoured", () => {
 // rather than a direct template gate.
 
 test("ChatView imports the thumbnail/origin helpers from dashboardBuildCard, not a private copy", () => {
+	// toolBaseName joined the import in T5a (live-turn-steps), for the
+	// recovering override's media-tool check (overrideFor, ChatView.vue).
 	assert.match(
 		chatSrc,
-		/import \{\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*\} from "@\/lib\/dashboardBuildCard";/
+		/import \{\s*dashboardThumbnailTransform,\s*isDashboardBuildTurn,\s*isDashboardCanvas,\s*phaseTickIndex,\s*toolBaseName,\s*\} from "@\/lib\/dashboardBuildCard";/
 	);
 	const gate = fnBody(chatSrc, "const dashboardBuildTurn = computed(");
 	assert.match(gate, /originPage: originPage\.value,/);

@@ -17,14 +17,18 @@
 // The image tool name was verified, not assumed: this app's own jarvis__
 // tool registry (jarvis/tools/registry.py) has no "image"/"imagegen" entry
 // at all — generated images come from the agent runtime's own NATIVE tool
-// (unprefixed, like "bash"/"exec"/"canvas"), named "imagegen" (the fleet
-// agent's own config template calls it "the agent runtime's native imagegen
-// tool"; the persona's AGENTS.md/TOOLS.md call it `imagegen` too). ChatView's
-// existing TOOL_PHRASES
-// and this file's own WRITE_TOOLS both carry a stale "image" entry that
-// backend evidence says never actually fires as a tool_name — left alone
-// there (out of scope, dashboard behaviour must stay exactly as it was), but
-// NOT copied into this generalized set. Only "imagegen" is wired here.
+// (unprefixed, like "bash"/"exec"/"canvas"). Two runtimes, two names: the
+// gateway's own MEDIA_GEN_TOOL_NAMES (jarvis/chat/agent_client.py) calls it
+// `image_generate` (alongside `video_generate`/`music_generate`, neither of
+// which belongs in an IMAGE card — see T5c below); the codex harness (the
+// fleet agent's own config template, and the persona's AGENTS.md/TOOLS.md)
+// calls its own native tool `imagegen`. ChatView's existing TOOL_PHRASES and
+// this file's own WRITE_TOOLS both carry a stale "image" entry that backend
+// evidence says never actually fires as a tool_name — left alone there (out
+// of scope, dashboard behaviour must stay exactly as it was), but NOT copied
+// into this generalized set. Only "imagegen" and "image_generate" are wired
+// here (T5c added the latter — NOT video_generate/music_generate: this
+// kind's title, "Generating your image", would be wrong for those).
 
 import {
 	dashboardBuildPhase,
@@ -34,7 +38,7 @@ import {
 
 const PDF_TOOLS = new Set(["download_pdf", "export_document"]);
 const SPREADSHEET_TOOLS = new Set(["export_excel", "export_query"]);
-const IMAGE_TOOLS = new Set(["imagegen"]);
+const IMAGE_TOOLS = new Set(["imagegen", "image_generate"]);
 
 // Same "Understanding -> data -> compose -> write" shape dashboardBuildPhase
 // already reads off real activeTools/statusPhase/waiting events; queried data
@@ -63,7 +67,8 @@ const ARTIFACT_WRITE_TOOLS = new Set([...PDF_TOOLS, ...SPREADSHEET_TOOLS, ...IMA
  * builder-origin gate (isDashboardBuildTurn), evaluated before any tool has
  * necessarily run, exactly like the #858/#874 card already did.
  *
- * Tool names arrive both bare (native tools: bash/exec/canvas/imagegen) and
+ * Tool names arrive both bare (native tools: bash/exec/canvas/imagegen/
+ * image_generate) and
  * jarvis__-prefixed (registry tools: download_pdf/export_excel/…) — stripped
  * the same way dashboardBuildCard.js does before matching.
  *
