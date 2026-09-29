@@ -433,8 +433,8 @@ def _auto_values(eligible, listing) -> dict:
 
 def _no_model_message(listing) -> str:
 	return _(
-		"This agent needs {0} model. None of your connected AI providers offer one yet — "
-		"connect a provider or ask an admin."
+		"This agent needs {0} model. None of your connected AI providers offer one yet. "
+		"Connect a provider or ask an admin."
 	).format(_tier_phrase(listing))
 
 
