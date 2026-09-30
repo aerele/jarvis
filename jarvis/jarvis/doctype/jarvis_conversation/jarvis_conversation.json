@@ -21,7 +21,9 @@
   "compacting_since",
   "agent_initiated",
   "turn_count",
-  "session_feedback_asked_at"
+  "session_feedback_asked_at",
+  "auto_mode",
+  "auto_mode_at"
  ],
  "fields": [
   {
@@ -259,6 +261,25 @@
    "hidden": 1,
    "no_copy": 1,
    "description": "The originating human Jarvis Chat Message name that armed request_autorun (record/observability only - correctness rides the new-message reset + sliding TTL, not a descent-check). Server-set only (db_set)."
+  },
+  {
+   "fieldname": "auto_mode",
+   "fieldtype": "Check",
+   "label": "Auto Mode",
+   "default": "0",
+   "hidden": 1,
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "Per-chat auto mode (#581): covered gated writes (_GATED_WRITES - _BRAKE) run without a confirmation card and return a receipt; the brake (delete/cancel/amend/create_custom_skill/call_connector) still parks. Chosen with the chat's FIRST human message and never turned off. Set only by send_message's locked _write_conv (raw db set_value); a generic save can neither enable nor disable it."
+  },
+  {
+   "fieldname": "auto_mode_at",
+   "fieldtype": "Datetime",
+   "label": "Auto Mode At",
+   "hidden": 1,
+   "no_copy": 1,
+   "read_only": 1,
+   "description": "When auto_mode was switched on (record/observability only). Server-set only (db set_value)."
   },
   {
    "fieldname": "status",
