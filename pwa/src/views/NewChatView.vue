@@ -11,6 +11,8 @@ import { feed } from "../lib/notifications";
 import { DEFAULT_STARTERS, normalizeStarters, starterTint } from "../lib/starters";
 import { pickStarterPrompt } from "../lib/fillComposer";
 import Sheet from "../components/Sheet.vue";
+import AutoModeToggle from "../components/AutoModeToggle.vue";
+import { autoModeView } from "../lib/autoMode";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -27,6 +29,18 @@ const settings = ref(null);
 const starters = ref(DEFAULT_STARTERS);
 const modelSheet = ref(false);
 const voiceOpen = ref(false);
+// Auto mode (#581): /c/new has no conversation row until the first send, so the
+// toggle is local state. `armed` is pre-set from the user's default; the warning
+// sheet shows only until they have acknowledged it once.
+const autoArmed = ref(false);
+// Not acknowledged until the server says so: an unloaded or failed settings read
+// asks (one extra confirm at worst), never skips the "not recommended" warning.
+const autoAcked = ref(false);
+const autoSheet = ref(false);
+const autoSaving = ref(false);
+const autoView = computed(() =>
+	autoModeView({ messageCount: 0, convAutoMode: 0, armed: autoArmed.value })
+);
 const inputEl = ref(null);
 const fileEl = ref(null);
 
@@ -111,6 +125,7 @@ async function send(text = input.value) {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
 			model: prefs.defaultModel || "",
 			thinking: thinkingOf(prefs.effort),
+			autoMode: autoView.value.on,
 		});
 		if (r?.ok === false || !r?.conversation_id) {
 			error.value = r?.reason || "Couldn't start that chat.";
@@ -124,6 +139,34 @@ async function send(text = input.value) {
 	} catch (e) {
 		error.value = e?.message || "Couldn't start that chat.";
 		busy.value = false;
+	}
+}
+
+let autoTouched = false;
+function toggleAuto() {
+	autoTouched = true;
+	if (autoArmed.value) {
+		autoArmed.value = false; // turning off never asks
+		return;
+	}
+	if (autoAcked.value) autoArmed.value = true;
+	else autoSheet.value = true;
+}
+
+async function confirmAuto() {
+	if (autoSaving.value) return;
+	autoSaving.value = true;
+	try {
+		await api.updateMySettings({ auto_mode_acknowledged: 1 });
+		autoAcked.value = true;
+		autoArmed.value = true;
+		autoSheet.value = false;
+	} catch (e) {
+		// Not saved: stay off and close, the next tap asks again.
+		autoSheet.value = false;
+		error.value = e?.message || "Couldn't turn on auto mode.";
+	} finally {
+		autoSaving.value = false;
 	}
 }
 
@@ -176,13 +219,21 @@ onMounted(async () => {
 	// Two independent reads - fire together so the starter grid isn't blocked on
 	// the model settings (and vice versa). The grid already shows DEFAULT_STARTERS
 	// from first paint, so a slow/failed suggestions read just leaves the defaults.
-	const [ui, sugg] = await Promise.allSettled([
+	const [ui, sugg, mine] = await Promise.allSettled([
 		api.getChatUiSettings(),
 		api.getPromptSuggestions(),
+		api.getMySettings(),
 	]);
 	if (ui.status === "fulfilled") settings.value = ui.value;
 	if (sugg.status === "fulfilled")
 		starters.value = normalizeStarters(sugg.value?.data?.suggestions);
+	// A failed read just means not pre-armed, and the first tap on the toggle asks.
+	if (mine.status === "fulfilled" && mine.value?.data) {
+		const d = mine.value.data;
+		autoAcked.value = !!d.auto_mode_acknowledged;
+		// Only pre-arm if the user has not already tapped it while this loaded.
+		if (d.default_auto_mode && !autoTouched) autoArmed.value = true;
+	}
 });
 onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)));
 </script>
@@ -352,6 +403,8 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 					</svg>
 				</button>
 
+				<AutoModeToggle :on="autoView.on" @toggle="toggleAuto" />
+
 				<span class="jv-spacer" />
 
 				<button
@@ -469,6 +522,41 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				</div>
 
 				<button class="jv-done" @click="modelSheet = false">Done</button>
+			</div>
+		</div>
+	</Sheet>
+
+	<!-- first-time auto mode warning -->
+	<Sheet :open="autoSheet" @close="autoSheet = false">
+		<div class="jv-msheet">
+			<div class="jv-msheet-head">
+				<span>Turn on auto mode?</span>
+				<button class="jv-x" aria-label="Close" @click="autoSheet = false">
+					<svg
+						viewBox="0 0 24 24"
+						width="16"
+						height="16"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.2"
+						stroke-linecap="round"
+					>
+						<path d="M18 6 6 18M6 6l12 12" />
+					</svg>
+				</button>
+			</div>
+			<div class="jv-msheet-body">
+				<p class="jv-autosheet-msg">
+					Jarvis will apply changes without asking first. Deletes, cancels and amends
+					still ask. Once a chat starts in auto mode, it stays in auto mode. Not
+					recommended if you're new to ERPNext or Jarvis.
+				</p>
+				<div class="jv-menu-actions">
+					<button class="jv-btn is-ghost" @click="autoSheet = false">Cancel</button>
+					<button class="jv-btn is-primary" :disabled="autoSaving" @click="confirmAuto">
+						Turn on auto mode
+					</button>
+				</div>
 			</div>
 		</div>
 	</Sheet>
@@ -859,6 +947,40 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	font-size: 15px;
 	font-weight: 600;
 	cursor: pointer;
+}
+.jv-autosheet-msg {
+	margin: 4px 8px 0;
+	font-size: 14px;
+	line-height: 1.5;
+	color: var(--ink7);
+}
+/* Sheet buttons: copied from ChatView's rename sheet. */
+.jv-menu-actions {
+	display: flex;
+	gap: 10px;
+	margin: 16px 8px 0;
+}
+.jv-btn {
+	flex: 1;
+	height: 46px;
+	border: 0;
+	border-radius: 12px;
+	font: inherit;
+	font-size: 15px;
+	font-weight: 600;
+	cursor: pointer;
+}
+.jv-btn.is-primary {
+	background: var(--accent-solid);
+	color: #fff;
+}
+.jv-btn.is-ghost {
+	border: 1px solid var(--border2);
+	background: var(--card);
+	color: var(--ink8);
+}
+.jv-btn:disabled {
+	opacity: 0.55;
 }
 .jv-spinner {
 	width: 16px;

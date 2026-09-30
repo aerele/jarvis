@@ -1,6 +1,8 @@
 <script setup>
 import { computed, ref } from "vue";
 import { agentName } from "@/branding";
+import AutoModeToggle from "./AutoModeToggle.vue";
+import { autoModeView } from "../lib/autoMode";
 
 // Attachments + dictation + send/stop. Split out of ChatView so the thread
 // screen stays about the thread.
@@ -11,6 +13,9 @@ const props = defineProps({
 	micEnabled: { type: Boolean, default: false },
 	// Hard block (Stream E maintenance hold): greys the box + kills typing/Send during a hold.
 	disabled: { type: Boolean, default: false },
+	// The loaded conversation's auto mode (#581). Chosen with the first message
+	// on the new-chat screen, so here it is only ever shown, locked.
+	autoMode: { type: Boolean, default: false },
 	placeholder: { type: String, default: () => `Message ${agentName}…` },
 });
 const emit = defineEmits([
@@ -22,6 +27,11 @@ const emit = defineEmits([
 	"mic",
 	"preview",
 ]);
+
+// messageCount is never 0 here: an empty chat is created through NewChatView.
+const autoView = computed(() =>
+	autoModeView({ messageCount: 1, convAutoMode: props.autoMode, armed: false })
+);
 
 const inputEl = ref(null);
 const fileEl = ref(null);
@@ -153,6 +163,8 @@ defineExpose({ reset });
 					/>
 				</svg>
 			</button>
+
+			<AutoModeToggle v-if="autoView.visible" :on="autoView.on" :locked="autoView.locked" />
 
 			<div class="jv-pill">
 				<textarea
