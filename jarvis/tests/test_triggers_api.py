@@ -344,12 +344,11 @@ class TestConditionTester(_TriggersApiTestCase):
 		self.assertEqual(frappe.db.count("Has Role", {"parent": sentinel}), before)
 
 	def test_manage_user_condition_cannot_call_document_methods(self):
-		# Defense in depth: even a manage-capable caller who legitimately reaches
-		# the tester cannot use the condition to write or read secrets, because it
-		# evaluates against a `_dict`, not a live Document — `db_insert` is not a
-		# method on the dict. The security property is that NOTHING is persisted
-		# (the `valid` flag itself is not load-bearing here: on a blank doc the
-		# tester tolerates the resulting TypeError as it does `None > 100000`).
+		# Defense in depth: even a manage-capable caller who reaches the tester
+		# cannot use the condition to write, because it evaluates against a
+		# methodless view (_ConditionDoc), not a live Document. `doc.update` and
+		# `doc.db_insert` are not fields, so they raise AttributeError; the call is
+		# a plain invalid-condition payload and nothing is persisted.
 		sentinel = "trigger-exploit-sentinel-admin@example.invalid"
 		exploit = (
 			'[doc.update({"parent": "%s", "parenttype": "User", '
@@ -359,8 +358,28 @@ class TestConditionTester(_TriggersApiTestCase):
 		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("Has Role", exploit)
 		self.assertTrue(r["ok"])  # a payload, never a 500
+		self.assertFalse(r["data"]["valid"])
 		frappe.set_user(self._orig_user)
 		self.assertEqual(frappe.db.count("Has Role", {"parent": sentinel}), before)
+
+	def test_unknown_field_is_reported_not_silently_valid(self):
+		# A mistyped field must be flagged, not silently resolve to None (which
+		# would let a broken condition read as valid and then never fire).
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("ToDo", 'doc.statuss == "Open"')
+		self.assertFalse(r["data"]["valid"])
+		self.assertIn("does not exist", r["data"]["error"])
+
+	def test_child_table_field_is_reachable(self):
+		# The methodless view must still resolve child-table rows so a real
+		# condition like doc.<child>[0].<field> behaves as it does at fire time.
+		# A plain frappe._dict would shadow a child table named like a dict method
+		# (e.g. `items`), breaking doc.items[0].qty on transaction doctypes; the
+		# wrapper resolves the field instead.
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("User", 'doc.roles[0].role != ""', docname=ADMIN_USER)
+		self.assertTrue(r["data"]["valid"])
+		self.assertTrue(r["data"]["would_fire"])
 
 	def test_error_text_does_not_echo_field_values(self):
 		# `{}[doc.<field>]` raises KeyError(<value>); the friendly error must not
