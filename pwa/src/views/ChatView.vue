@@ -1182,6 +1182,7 @@ onUnmounted(() => {
 		:attachments="attachments"
 		:mic-enabled="micEnabled"
 		:disabled="holdActive"
+		:auto-mode="!!conversation?.auto_mode"
 		@send="send"
 		@stop="stop"
 		@attach="attach"
