@@ -591,6 +591,85 @@ describe("stopped run explanation (jarvis#1062 polish)", () => {
 	});
 });
 
+describe("auditor finding explanations", () => {
+	async function showFinding(overrides = {}) {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [
+				{
+					name: "F-LEGACY",
+					severity: "note",
+					state: "open",
+					title: "",
+					detail_md: "",
+					ref_doctype: "Supplier",
+					ref_name: "SUPP-001",
+					amount: 0,
+					result_class: "derived_candidate",
+					confirmation_status: "unconfirmed",
+					match_basis: "The recorded tax details do not match.",
+					false_positive_path: "The identifier may be maintained in another field.",
+					...overrides,
+				},
+			],
+			total: 1,
+			has_more: false,
+		});
+		const wrapper = mountPanel(baseRun());
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("gives a legacy blank finding an identifiable title and honest result label", async () => {
+		const wrapper = await showFinding({ title: "   " });
+		const row = wrapper.find('[role="button"]');
+		expect(row.text()).toContain("Review Supplier SUPP-001");
+		expect(row.text()).toContain("Candidate for review");
+		expect(row.text()).toContain("Awaiting confirmation");
+		expect(wrapper.find('[data-testid="finding-amount"]').exists()).toBe(false);
+		wrapper.unmount();
+	});
+
+	it("exposes recorded evidence and alternative explanations for a blank legacy note", async () => {
+		const wrapper = await showFinding();
+		await wrapper.find('[role="button"]').trigger("click");
+		expect(wrapper.text()).toContain("did not record an explanation");
+		expect(wrapper.text()).toContain("Why it was flagged");
+		expect(wrapper.text()).toContain("The recorded tax details do not match.");
+		expect(wrapper.text()).toContain("What to rule out");
+		expect(wrapper.text()).toContain("The identifier may be maintained in another field.");
+		expect(wrapper.find('a[href="/app/supplier/SUPP-001"]').exists()).toBe(true);
+		wrapper.unmount();
+	});
+
+	it("keeps authored titles readable and retains nonzero amounts", async () => {
+		const title = "Possible duplicate payment against the same supplier invoice";
+		const wrapper = await showFinding({
+			title,
+			amount: 50000,
+			detail_md: "Review both entries.",
+		});
+		const heading = wrapper.find('[role="button"] .font-medium');
+		expect(heading.text()).toBe(title);
+		expect(heading.classes()).not.toContain("truncate");
+		expect(wrapper.get('[data-testid="finding-amount"]').text()).toBe("50,000");
+		await wrapper.find('[role="button"]').trigger("click");
+		expect(wrapper.text()).not.toContain("did not record an explanation");
+		wrapper.unmount();
+	});
+
+	it("renders structured evidence as text rather than executable HTML", async () => {
+		const evidence = '<img src=x onerror="alert(1)">';
+		const wrapper = await showFinding({
+			match_basis: evidence,
+			false_positive_path: evidence,
+		});
+		await wrapper.find('[role="button"]').trigger("click");
+		expect(wrapper.text()).toContain(evidence);
+		expect(wrapper.find("img").exists()).toBe(false);
+		wrapper.unmount();
+	});
+});
+
 describe("Discuss in chat honors ok/reason, not just conversation (jarvis#1062 polish)", () => {
 	function findingRow() {
 		return {
