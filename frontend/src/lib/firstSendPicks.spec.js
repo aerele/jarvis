@@ -67,3 +67,17 @@ describe("send() carries a new chat's picks", () => {
 		expect(sendCall.trimEnd().endsWith("_picks.thinking")).toBe(true);
 	});
 });
+
+describe("newChat() starts a chat with no pick", () => {
+	// The server hands a new chat out with no pick (a reused empty one is cleared),
+	// so the pill must not keep showing the previous chat's.
+	const at = src.indexOf("async function newChat() {");
+	const body = src.slice(at, src.indexOf("\nasync function ", at + 1));
+	const adopted = body.indexOf("currentId.value = conv?.name || conv;");
+
+	it("resets the model and effort picks once the new chat is adopted", () => {
+		expect(adopted).toBeGreaterThan(-1);
+		expect(body.indexOf('modelOverride.value = "";')).toBeGreaterThan(adopted);
+		expect(body.indexOf('thinkingOverride.value = "";')).toBeGreaterThan(adopted);
+	});
+});

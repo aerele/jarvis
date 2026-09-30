@@ -9446,6 +9446,11 @@ async function newChat() {
 	// an already-existing empty conversation, so this is a real reload (its
 	// own stored pick, if any), not just a reset to null.
 	connectorFocus.value = _loadConnectorFocusFor(currentId.value);
+	// The model and effort picks are per conversation too, and the server hands a
+	// new chat out with none (a reused empty one is cleared), so the pill must not
+	// keep showing the previous chat's pick.
+	modelOverride.value = "";
+	thinkingOverride.value = "";
 	// This conversation IS the unsaved new-chat composer getting its id. The recovered/typed
 	// new-chat draft (already restored into `input` by swapDraft above) and its still-retained
 	// voice records lived under the _NEW_CHAT_SCOPE sentinel — migrate draft + records + mirror +
