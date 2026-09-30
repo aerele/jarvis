@@ -548,12 +548,14 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 			<div class="jv-msheet-body">
 				<p class="jv-autosheet-msg">
 					Jarvis will apply changes without asking first. Deletes, cancels and amends
-					still ask. Once a chat starts in auto mode, it stays in auto mode. Not
-					recommended if you're new to ERPNext or Jarvis.
+					still ask. Once a chat starts in auto mode, it stays in auto mode.
+				</p>
+				<p class="jv-autosheet-msg is-warn">
+					Not recommended if you're new to ERPNext or Jarvis.
 				</p>
 				<div class="jv-menu-actions">
 					<button class="jv-btn is-ghost" @click="autoSheet = false">Cancel</button>
-					<button class="jv-btn is-primary" :disabled="autoSaving" @click="confirmAuto">
+					<button class="jv-btn is-danger" :disabled="autoSaving" @click="confirmAuto">
 						Turn on auto mode
 					</button>
 				</div>
@@ -954,6 +956,11 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	line-height: 1.5;
 	color: var(--ink7);
 }
+.jv-autosheet-msg.is-warn {
+	margin-top: 8px;
+	font-weight: 600;
+	color: var(--red);
+}
 /* Sheet buttons: copied from ChatView's rename sheet. */
 .jv-menu-actions {
 	display: flex;
@@ -970,8 +977,8 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 	font-weight: 600;
 	cursor: pointer;
 }
-.jv-btn.is-primary {
-	background: var(--accent-solid);
+.jv-btn.is-danger {
+	background: var(--red);
 	color: #fff;
 }
 .jv-btn.is-ghost {

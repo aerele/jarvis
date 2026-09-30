@@ -23,7 +23,7 @@ import { ref } from "vue";
 
 // The live request, or null when no dialog is open. The mounted ConfirmDialog is
 // the only reader; call sites never touch it directly.
-export const confirmState = ref(null); // { title, message, confirmLabel, cancelLabel, danger }
+export const confirmState = ref(null); // { title, message, warning, confirmLabel, cancelLabel, danger }
 let _resolve = null;
 
 export function confirm(opts = {}) {
@@ -37,6 +37,9 @@ export function confirm(opts = {}) {
 		confirmState.value = {
 			title: opts.title || "Are you sure?",
 			message: opts.message || "",
+			// Optional: one sentence shown on its own line under the message, in the
+			// danger colour (e.g. "Not recommended if ...").
+			warning: opts.warning || "",
 			confirmLabel: opts.confirmLabel || "Confirm",
 			cancelLabel: opts.cancelLabel || "Cancel",
 			// General-purpose: neutral (primary) by default. Destructive call sites MUST
