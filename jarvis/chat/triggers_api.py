@@ -400,13 +400,41 @@ def delete_triggers_bulk(names: str) -> dict:
 # --------------------------------------------------------------------------- #
 # condition dry test
 # --------------------------------------------------------------------------- #
+def _readonly_eval_doc(doc) -> "frappe._dict":
+	"""A methodless, field-permission-filtered view of ``doc`` for condition
+	evaluation.
+
+	``frappe.safe_eval`` only refuses ``_``-prefixed attribute names, so any
+	public ``Document`` method (``db_insert``, ``db_set``, ``run_method``,
+	``get_password``) stays callable on a live doc handed to it. ``as_dict``
+	returns a ``frappe._dict``: attribute access still resolves field values
+	(so ``doc.status == "Open"`` and ``doc.items[0].qty`` evaluate as before),
+	but it carries none of those methods, and its ``update`` is the plain
+	``dict.update`` — it mutates a throwaway copy and can never reach the DB.
+	``apply_fieldlevel_read_permissions`` first drops the permlevel fields the
+	caller cannot read, so the tester can neither branch on nor echo them.
+	The passed ``doc`` is a fresh ``get_doc`` / ``new_doc`` instance owned by the
+	caller, so mutating it here is safe."""
+	doc.apply_fieldlevel_read_permissions()
+	return doc.as_dict()
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def test_trigger_condition(target_doctype: str, condition: str = "", docname: str = "") -> dict:
 	"""READ-ONLY condition tester. Without ``docname``: compile/eval against an
 	empty doc (webhook-style validation). With ``docname`` (caller needs read
 	on that doc): also report whether the trigger WOULD fire. A bad expression
-	is a payload (``{valid: False, error}``), never a 500."""
+	is a payload (``{valid: False, error}``), never a 500.
+
+	Manage-gated exactly like create/update/delete: it evaluates a caller-supplied
+	expression server-side, so it must never be reachable by a plain Jarvis User.
+	The expression runs against a methodless, field-permission-filtered ``_dict``
+	view of the document (``_readonly_eval_doc``), never a live ``Document`` —
+	``frappe.safe_eval`` only blocks ``_``-prefixed attribute names, so a live doc
+	would let a condition call ``db_insert`` / ``db_set`` / ``run_method`` /
+	``get_password`` and write to (or read secrets from) any table."""
+	_require_manage()
 	target_doctype = (target_doctype or "").strip()
 	if not target_doctype or not frappe.db.exists("DocType", target_doctype):
 		frappe.throw(_("Unknown DocType: {0}").format(target_doctype))
@@ -422,6 +450,7 @@ def test_trigger_condition(target_doctype: str, condition: str = "", docname: st
 		doc = frappe.get_doc(target_doctype, docname)
 	else:
 		doc = frappe.new_doc(target_doctype)
+	safe_doc = _readonly_eval_doc(doc)
 
 	if not condition:
 		data: dict = {"valid": True}
@@ -430,7 +459,7 @@ def test_trigger_condition(target_doctype: str, condition: str = "", docname: st
 		return {"ok": True, "data": data}
 
 	try:
-		result = frappe.safe_eval(condition, eval_locals=eval_context(doc))
+		result = frappe.safe_eval(condition, eval_locals=eval_context(safe_doc))
 	except TypeError as e:
 		# On a BLANK doc (no docname) a TypeError is almost always a numeric
 		# field that is None on an empty doc (doc.grand_total > 100000) — the
@@ -470,7 +499,10 @@ def _friendly_condition_error(e: Exception, target_doctype: str) -> str:
 		).format(str(e))
 	if isinstance(e, AttributeError):
 		return _("That field does not exist on {0}: {1}").format(target_doctype, str(e))
-	return _("The condition could not be evaluated: {0}").format(str(e))
+	# Deliberately NOT ``str(e)``: a raw exception message can carry a field
+	# value (e.g. ``{}[doc.grand_total]`` raises ``KeyError(<value>)``), which
+	# would turn this error string into a read oracle. Keep it generic.
+	return _("The condition could not be evaluated — check the fields and operators used.")
 
 
 # --------------------------------------------------------------------------- #
