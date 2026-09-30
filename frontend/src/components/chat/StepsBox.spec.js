@@ -123,7 +123,7 @@ describe("StepsBox, folded mode", () => {
 		await btn.trigger("click");
 		expect(w.emitted("toggle")).toHaveLength(1);
 		expect(w.find(".jv-steps-head-label").text()).toBe("Worked 48s");
-		expect(w.find(".jv-steps-head-line").text()).toBe("Worked 48s · 3 lookups");
+		expect(w.find(".jv-steps-head-line").text()).toBe("Worked 48s · 3 tools");
 	});
 
 	it("renders a div with no chevron and no toggle when not expandable", async () => {
@@ -142,14 +142,14 @@ describe("StepsBox, folded mode", () => {
 		const head = foldedHead({ seconds: 52, toolNames: ["export_excel"], finishing: true });
 		const w = mount(StepsBox, { props: { view: { mode: "folded", head } } });
 		expect(w.find(".jv-steps-head-finishing").text()).toBe("finishing");
-		expect(w.find(".jv-steps-head-line").text()).toBe("Worked 52s · 1 action · finishing");
+		expect(w.find(".jv-steps-head-line").text()).toBe("Worked 52s · 1 tool · finishing");
 	});
 
 	it("never starts the line with a separator when the time is missing", () => {
-		// A tab reloaded mid-turn used to show "· 5 lookups" (flow review F3).
+		// A tab reloaded mid-turn used to show "· 5 tools" (flow review F3).
 		const head = foldedHead({ toolNames: ["get_doc", "query"], finishing: true });
 		const w = mount(StepsBox, { props: { view: { mode: "folded", head } } });
-		expect(w.find(".jv-steps-head-line").text()).toBe("2 lookups · finishing");
+		expect(w.find(".jv-steps-head-line").text()).toBe("2 tools · finishing");
 	});
 
 	it("shows the stopped subline on a second line", () => {
