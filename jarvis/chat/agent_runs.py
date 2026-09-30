@@ -21,6 +21,7 @@ from frappe.utils import getdate
 
 from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
+from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
 
 RUN = "Jarvis Agent Run"
@@ -175,15 +176,18 @@ def _fallback_dashboard_html(
 	order = {"blocker": 0, "warning": 1, "note": 2}
 	for f in sorted(findings or [], key=lambda x: (order.get(x.get("severity"), 3), str(x.get("ref_name")))):
 		sev = f.get("severity") or "note"
-		amt = f.get("amount") or 0
+		amt = f.get("amount")
 		try:
-			amt = f"{float(amt):,.2f}"
+			amt = "—" if amt is None or amt == "" else f"{float(amt):,.2f}"
 		except (TypeError, ValueError):
 			amt = _esc(amt)
 		# PP-1 strong-verb gate: an evaluator row is never confirmed_outcome, so the
 		# helper strips saved/recovered/prevented/… from the authored note.
+		finding_title, detail = finding_text(f)
 		safe_note = cr.render_value_text(
-			f.get("note"), f.get("result_class"), outcome_provenance=f.get("outcome_provenance")
+			detail or f"{finding_title}. No explanation was recorded for this finding.",
+			f.get("result_class"),
+			outcome_provenance=f.get("outcome_provenance"),
 		)
 		rows += (
 			f'<tr style="border-top:1px solid var(--jarvis-border,#e5e7eb)">'
@@ -696,15 +700,24 @@ def record_delegate_run(
 		token = f.get("token") or f.get("rule_id")
 		sev = f.get("severity") or "note"
 		counts[sev] = counts.get(sev, 0) + 1
-		note = f.get("note") or f.get("detail") or ""
+		title, note = finding_text(f)
 
 		existing = frappe.db.get_value(
 			FINDING,
 			{"owner": visibility_owner, "agent": agent, "fingerprint": fp, "state": "open"},
-			"name",
+			["name", "title", "detail_md"],
+			as_dict=True,
 		)
 		if existing:
-			frappe.db.set_value(FINDING, existing, "last_seen_run", run_doc.name, update_modified=False)
+			updates = {"last_seen_run": run_doc.name}
+			if not (existing.get("detail_md") or "").strip() and note:
+				updates["detail_md"] = note
+				fallback_title, _ = finding_text(
+					{"ref_doctype": f.get("ref_doctype"), "ref_name": f.get("ref_name")}
+				)
+				if not (existing.get("title") or "").strip() or existing.title == fallback_title:
+					updates["title"] = title
+			frappe.db.set_value(FINDING, existing.name, updates, update_modified=False)
 			continue
 
 		# PP-1: the epistemic class + its class-conditional metadata, already
@@ -725,7 +738,7 @@ def record_delegate_run(
 				"result_class": result_class,
 				# A2: authored, outcome-level text only (the evaluator's fixed-template
 				# note). No as-coded threshold / carve-out text.
-				"title": note[:140],
+				"title": title,
 				"detail_md": note,
 				"section": f.get("section") or "",
 				"effective_date": _safe_date(f.get("effective_date")),
