@@ -170,6 +170,9 @@ import { receiptView } from "@/lib/actionSummary";
 const props = defineProps({
 	// A role="tool" Jarvis Chat Message with a non-empty action_outcome.
 	message: { type: Object, required: true },
+	// The chat runs in auto mode (#581): its writes apply without a card because of
+	// the chat, not a per-request approval, so the "confirm all" line below is false.
+	autoMode: { type: Boolean, default: false },
 });
 
 const open = ref(false);
@@ -205,9 +208,14 @@ const armedSkill = computed(() => props.message.armed_by_skill || "");
 // Request-scoped "confirm all" (design Layer B): ran uncarded because the user
 // approved the whole request. Unlike a macro/skill run there is no external armer
 // NAME, so a bare auto_applied chip would carry no "why"; this fallback labels it.
-// Only for an auto_applied outcome with neither macro nor skill provenance.
+// Only for an auto_applied outcome with neither macro nor skill provenance, and
+// never in an auto-mode chat, where "Applied automatically" alone is the truth.
 const requestApproved = computed(
-	() => view.value.icon === "auto_applied" && !armedMacro.value && !armedSkill.value
+	() =>
+		view.value.icon === "auto_applied" &&
+		!armedMacro.value &&
+		!armedSkill.value &&
+		!props.autoMode
 );
 
 // A single-record outcome with a Desk link → show a compact "open" affordance

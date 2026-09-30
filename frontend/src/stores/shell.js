@@ -122,6 +122,42 @@ function setActivityDetail(v, { persist = true } = {}) {
 		);
 	}
 }
+// Per-chat auto mode (#581): the account-level default for new chats and the
+// one-time "not recommended" warning flag. Server-only (no localStorage cache):
+// a wrong cached default would silently pre-arm auto mode on a new device.
+const defaultAutoMode = ref(false);
+const autoModeAcknowledged = ref(false);
+// Optimistic write with revert on failure, so a rejected save never leaves the
+// switch or the pre-armed composer showing a value the server did not accept.
+function _saveAutoModeSetting(ref_, field, v) {
+	const prev = ref_.value;
+	ref_.value = !!v;
+	api.updateMySettings({ [field]: v ? 1 : 0 }).catch((e) => {
+		ref_.value = prev;
+		toast.error(errHtml(e));
+	});
+}
+function setDefaultAutoMode(v) {
+	_saveAutoModeSetting(defaultAutoMode, "default_auto_mode", v);
+}
+function acknowledgeAutoMode() {
+	_saveAutoModeSetting(autoModeAcknowledged, "auto_mode_acknowledged", true);
+}
+// Best-effort read for surfaces that need the two flags before Settings is ever
+// opened (the chat composer pre-arms from defaultAutoMode).
+async function loadAutoModeSettings() {
+	try {
+		const r = await api.getMySettings();
+		if (r && r.data) syncAutoModeFromServer(r.data);
+	} catch (e) {
+		/* keep the defaults: off, not yet acknowledged */
+	}
+}
+function syncAutoModeFromServer(data) {
+	if (data.default_auto_mode !== undefined) defaultAutoMode.value = !!data.default_auto_mode;
+	if (data.auto_mode_acknowledged !== undefined)
+		autoModeAcknowledged.value = !!data.auto_mode_acknowledged;
+}
 // Per-user persona voice (Jarvis default / Jara). Same localStorage-cache +
 // roaming-server pattern as activityDetail; a string, default "Jarvis". Voice
 // only — the agent's tools, permissions, and behaviour are identical either way.
@@ -262,6 +298,7 @@ async function toggleNotify() {
 // permission still can't fire one, so local state must reflect that.
 function syncSettingsFromServer(data) {
 	if (!data) return;
+	syncAutoModeFromServer(data);
 	if (data.activity_detail !== undefined)
 		setActivityDetail(!!data.activity_detail, { persist: false });
 	if (data.notify_enabled !== undefined) {
@@ -582,6 +619,8 @@ const store = reactive({
 	activityDetail,
 	notifyEnabled,
 	preferredPersona,
+	defaultAutoMode,
+	autoModeAcknowledged,
 	pendingNewChat,
 	paletteOpen,
 	sidebarPref,
@@ -608,6 +647,9 @@ const store = reactive({
 	registerSettingsActions,
 	clearSettingsActions,
 	setActivityDetail,
+	setDefaultAutoMode,
+	acknowledgeAutoMode,
+	loadAutoModeSettings,
 	setPreferredPersona,
 	toggleNotify,
 	syncSettingsFromServer,
