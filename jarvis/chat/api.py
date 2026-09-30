@@ -595,6 +595,15 @@ def search_workspace(search: str = "", limit: int = 6) -> dict:
 	return {"groups": groups}
 
 
+def _undo_first_send_auto_mode(conversation: str, conv_changes: dict) -> None:
+	"""Undo auto mode that THIS rejected send set (#581). The overload cleanup deletes
+	the chat's first message, so the chat never started and auto mode was never really
+	chosen; left on, create_or_focus_empty would hand this empty row back as a "New
+	chat" silently locked in auto mode. A no-op when this send did not set it."""
+	if conv_changes.get("auto_mode"):
+		frappe.db.set_value(CONV, conversation, {"auto_mode": 0, "auto_mode_at": None}, update_modified=False)
+
+
 @frappe.whitelist()
 def create_or_focus_empty(origin_page: str = "") -> str:
 	"""Return an empty active conversation for the current user, creating
@@ -746,6 +755,8 @@ def get_conversation(conversation: str) -> dict:
 			# builder page; "" for an ordinary chat. The SPA reads it to offer
 			# "Open in Dashboards" on a builder conversation's html artifacts.
 			"origin_page": doc.get("origin_page") or "",
+			# Per-chat auto mode (#581): 1 locks the composer toggle on.
+			"auto_mode": frappe.utils.cint(doc.get("auto_mode")),
 			"last_active_at": doc.last_active_at,
 		},
 		"messages": messages,
@@ -1740,6 +1751,7 @@ def send_message(
 	background: int = 0,
 	approval_tokens: str | list | None = None,
 	voice: bool = False,
+	auto_mode: int = 0,
 ) -> dict:
 	"""Validate, persist the user message, enqueue the worker.
 
@@ -1785,6 +1797,11 @@ def send_message(
 	`voice` (optional): True when this message's text came from mic dictation
 	rather than typing. Stamped verbatim onto the created user message's
 	`via_voice` column; no other behaviour changes.
+
+	`auto_mode` (optional, #581): 1 asks for per-chat auto mode. Honoured ONLY when
+	this is the chat's very first message and an interactive human send; otherwise
+	ignored (the flag never changes on a chat that already has messages). The
+	conversation's value after the send is returned as `auto_mode`.
 
 	Returns {ok: True, run_id, message_id, conversation_id} on success or
 	{ok: False, reason: str} on validation failure. A human (non-delegated) send
@@ -2008,8 +2025,10 @@ def send_message(
 	# 120s run-cancel signal; a leftover one must not refuse THIS fresh turn's first
 	# sheet write (Stop -> Re-run within the window). clear_skill_autorun above only
 	# fires for an armed skill run, so a plain File Box conversation needs its own
-	# clear here, at the same "a real turn is about to be admitted" point.
-	if conv_doc.file_box:
+	# clear here, at the same "a real turn is about to be admitted" point. An auto-mode
+	# chat (#581) needs the same: its covered writes check the signal too, so a Stop on
+	# a reply that made no write would otherwise refuse the next message's first write.
+	if conv_doc.file_box or conv_doc.get("auto_mode"):
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_run_cancel(conversation)
@@ -2067,8 +2086,9 @@ def send_message(
 		# can stamp them via frappe.db.set_value while this request holds conv_doc in
 		# memory, and the lock (taken here, inside sync_file_box_fields) is what makes
 		# the write below observe the CURRENT row, not this request's stale snapshot of
-		# it. _conv_changes never includes a File Box field, so this can only refresh
-		# conv_doc's in-memory copy, never clobber one.
+		# it. _conv_changes never includes a File Box field (auto_mode is written only
+		# by the set_value below), so this can only refresh conv_doc's in-memory copy,
+		# never clobber one.
 		#
 		# Jarvis Conversation has track_changes: 1, and the old conv_doc.save() this
 		# replaces created a Version row on every send. This is deliberate: these
@@ -2078,6 +2098,28 @@ def send_message(
 		# ORM write paths and stay versioned as before. Verified nothing reads Version
 		# history for Jarvis Conversation (backend, frontend, pwa, support tooling).
 		conv_doc.sync_file_box_fields()
+		# Auto mode (#581) is chosen with the chat's FIRST message only, by an interactive
+		# human send (never a delegated/background re-entry). Decided here, on every
+		# attempt, because replay_on_conflict may re-run this function: a replay re-decides
+		# from fresh data. A plain read on purpose: a FOR UPDATE read on an empty index
+		# range takes a gap lock, and two brand-new chats (where replay_is_safe() is False)
+		# could deadlock on their first inserts. Accepted residual race: two tabs sending
+		# the first message of ONE chat, the second blocked on the row lock above while the
+		# first commits. With innodb_snapshot_isolation the lock read raises 1020 and the
+		# replay re-decides correctly; without it this read can still see the pre-commit
+		# snapshot, so the chat may take the second tab's auto mode choice (never a choice
+		# nobody made). _next_seq accepts the same window. auto_mode is written only by
+		# this set_value, never by a File Box path.
+		_conv_changes.pop("auto_mode", None)
+		_conv_changes.pop("auto_mode_at", None)
+		if (
+			frappe.utils.cint(auto_mode)
+			and not _delegated
+			and not int(background or 0)
+			and not frappe.db.exists(MSG, {"conversation": conv_doc.name})
+		):
+			_conv_changes["auto_mode"] = 1
+			_conv_changes["auto_mode_at"] = frappe.utils.now_datetime()
 		frappe.db.set_value(CONV, conv_doc.name, _conv_changes, update_modified=False)
 
 	# Placed BEFORE msg_doc.insert(). For the common case, an ALREADY-EXISTING
@@ -2280,6 +2322,7 @@ def send_message(
 				from jarvis import api as _jarvis_api
 
 				_jarvis_api._request_autorun_clear(conversation)
+				_undo_first_send_auto_mode(conversation, _conv_changes)
 				frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="send_message overload seed cleanup", message=frappe.get_traceback())
@@ -2302,6 +2345,7 @@ def send_message(
 				from jarvis import api as _jarvis_api
 
 				_jarvis_api._request_autorun_clear(conversation)
+				_undo_first_send_auto_mode(conversation, _conv_changes)
 				frappe.db.commit()
 			except Exception:
 				frappe.log_error(title="send_message overload seed cleanup", message=frappe.get_traceback())
@@ -2324,6 +2368,7 @@ def send_message(
 		"run_id": run_id,
 		"message_id": msg_doc.name,
 		"conversation_id": conversation,
+		"auto_mode": frappe.utils.cint(frappe.db.get_value(CONV, conversation, "auto_mode")),
 		**_typed_out,
 	}
 	# Phase-0 admission: tell the SPA when the turn is queued (not yet
