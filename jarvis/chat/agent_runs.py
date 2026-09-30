@@ -700,13 +700,7 @@ def record_delegate_run(
 		token = f.get("token") or f.get("rule_id")
 		sev = f.get("severity") or "note"
 		counts[sev] = counts.get(sev, 0) + 1
-<<<<<<< HEAD
-		note = f.get("note") or f.get("detail") or ""
-=======
-		if advisory:
-			advisory_count += 1
 		title, note = finding_text(f)
->>>>>>> e158ce9 (fix(agents): make audit findings readable and preserve explanations)
 
 		existing = frappe.db.get_value(
 			FINDING,
