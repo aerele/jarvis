@@ -1195,7 +1195,8 @@ def _gating_badge(tool: str) -> str:
 	the SAME frozensets that gate in ``_run_tool`` so a badge can never disagree
 	with the default gate. NOT an absolute guarantee: the File Box fast-path, an
 	armed macro (skip_confirmation), an approved skill run (skill_autorun), and a
-	request-scoped "confirm all" (request_autorun) can run some tools uncarded -
+	request-scoped "confirm all" (request_autorun), and a per-chat auto mode
+	(auto_mode, chosen with the chat's first message) can run some tools uncarded -
 	the catalog legend says so. (Admin Auto-Apply was removed.) Total over any string.
 	"""
 	if tool not in _WRITE_TOOLS:
@@ -1977,6 +1978,13 @@ def _apply_run_method_read_filter(tool: str, result) -> None:
 			)
 
 
+def _auto_mode_fields() -> tuple[str, ...]:
+	"""``("auto_mode",)`` once the column exists, else ``()``. The gate reads the
+	conversation's flags by column name, so new code running ahead of its migrate must
+	not name a column the table does not have yet (every gated write would error)."""
+	return ("auto_mode",) if frappe.get_meta("Jarvis Conversation").has_field("auto_mode") else ()
+
+
 def _run_covered_write(
 	tool: str,
 	args: dict,
@@ -1987,7 +1995,8 @@ def _run_covered_write(
 	provenance_name: str | None,
 ) -> dict:
 	"""Shared core for a gate-branch COVERED WRITE that runs uncarded under an armed
-	macro (``skip_confirmation``) or an approved skill run (``skill_autorun``).
+	macro (``skip_confirmation``), an approved skill run (``skill_autorun``), a
+	request-scoped "confirm all" (``request_autorun``) or a per-chat auto mode (``auto_mode``).
 
 	The two gate branches drifted apart (each hand-rolled the dispatch + a subset of the
 	cross-cutting steps), so the review found real gaps - the skill branch leaked
@@ -2024,10 +2033,10 @@ def _run_covered_write(
 		_agent_run_ctx.set_armed_by_macro(provenance_name)
 	elif provenance_kind == "skill":
 		_agent_run_ctx.set_armed_by_skill(provenance_name)
-	elif provenance_kind == "request":
-		# Request-scoped "confirm all": a boolean marker (no armer name - the user
-		# themselves approved the whole request), so the receipt persist labels the row
-		# auto_applied just like the macro/skill paths.
+	elif provenance_kind in ("request", "auto_mode"):
+		# Request-scoped "confirm all" and per-chat auto mode (#581): a boolean marker
+		# (no armer name - the user themselves chose it), so the receipt persist labels
+		# the row auto_applied just like the macro/skill paths.
 		_agent_run_ctx.set_request_autorun_applied()
 	return result
 
@@ -2509,13 +2518,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					frappe.db.get_value(
 						"Jarvis Conversation",
 						conversation,
-						["skill_autorun", "request_autorun"],
+						["skill_autorun", "request_autorun", *_auto_mode_fields()],
 						as_dict=True,
 					)
 					if conversation
 					else None
 				) or {}
-				if _autorun_flags.get("skill_autorun") or _autorun_flags.get("request_autorun"):
+				if (
+					_autorun_flags.get("skill_autorun")
+					or _autorun_flags.get("request_autorun")
+					or _autorun_flags.get("auto_mode")
+				):
 					next_step = (
 						f"Split into batches of {_MAX_BATCH}; the approved run keeps executing "
 						"each batch automatically before the next one starts - there is nothing "
@@ -2574,6 +2587,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					"skill_autorun_skill",
 					"request_autorun",
 					"request_autorun_at",
+					*_auto_mode_fields(),
 				],
 				as_dict=True,
 			)
@@ -2770,6 +2784,31 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						err_obj["message"] += " The approved request has also ended - re-approve to continue."
 				return result
 			# TTL-expired / no timestamp: fall through to the normal park.
+		# Per-chat auto mode (#581): the user chose it with the chat's first message and
+		# it never turns off, so unlike request_autorun there is no TTL and a failed
+		# write does not end it. The brake is not covered, so delete/cancel/amend/
+		# create_custom_skill/connector writes still park below. Placed AFTER the
+		# request branch (an armed request keeps its own provenance and TTL) and after
+		# the File Box wiki fence. Halt refuses the write and clears the cancel signal
+		# but leaves the mode on (it is a chat property, not a run).
+		if tool in _COVERED and _conv_flags.get("auto_mode"):
+			from jarvis.chat import turn_message_binding
+
+			if turn_message_binding.is_run_cancel_requested(conv):
+				# Consumed like the skill/request branches: one Stop refuses one write.
+				# It cannot hold for the rest of the run, because the gate does not know
+				# which run a call belongs to and a lingering signal would also refuse a
+				# message that was already queued behind the stopped reply.
+				turn_message_binding.clear_run_cancel(conv)
+				return _error(RunHaltedError.__name__, "the run was halted")
+			return _run_covered_write(
+				tool,
+				args,
+				conv=conv,
+				owner_user=owner_user,
+				provenance_kind="auto_mode",
+				provenance_name="",
+			)
 		# Sequential confirmation (F16): at most ONE live confirmation card per
 		# conversation. If one is already awaiting the user here, REFUSE to park a
 		# second and tell the model to stop - the continuation turn fired after the
