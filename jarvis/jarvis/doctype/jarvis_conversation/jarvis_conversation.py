@@ -30,6 +30,12 @@ _FILEBOX_SERVER_FIELDS = (
 )
 
 
+# Per-chat auto mode (#581) stamps: written only by send_message's locked _write_conv
+# via ``frappe.db.set_value``. Re-read on the ORM save paths (never added to the File Box
+# forge guard) so a stale in-memory 0 can't trip _guard_auto_mode.
+_AUTO_MODE_SERVER_FIELDS = ("auto_mode", "auto_mode_at")
+
+
 class JarvisConversation(Document):
 	def before_insert(self):
 		if not self.last_active_at:
@@ -43,6 +49,7 @@ class JarvisConversation(Document):
 		self._guard_skip_confirmation_enable()
 		self._guard_skill_autorun_enable()
 		self._guard_request_autorun_enable()
+		self._guard_auto_mode()
 
 	def _guard_file_box_server_fields(self):
 		"""The File Box list reads these as ground truth (Draft created / Failed), so
@@ -60,11 +67,11 @@ class JarvisConversation(Document):
 			)
 
 	def sync_file_box_fields(self):
-		"""Re-read the server-stamped File Box fields, row-locked until commit: a live
-		run stamps them via ``db.set_value`` while a request holds this doc, and a stale
-		save would trip the guard (or revert the stamp). A field not migrated yet is
-		skipped (new code ahead of its migrate)."""
-		fields = [f for f in _FILEBOX_SERVER_FIELDS if self.meta.has_field(f)]
+		"""Re-read the server-stamped fields (File Box status + auto_mode), row-locked
+		until commit: a live run stamps them via ``db.set_value`` while a request holds
+		this doc, and a stale save would trip the guard (or revert the stamp). A field
+		not migrated yet is skipped (new code ahead of its migrate)."""
+		fields = [f for f in _FILEBOX_SERVER_FIELDS + _AUTO_MODE_SERVER_FIELDS if self.meta.has_field(f)]
 		if not fields:
 			return
 		current = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True, for_update=True)
@@ -165,4 +172,17 @@ class JarvisConversation(Document):
 			frappe.throw(
 				_("Enabling request auto-run requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
+			)
+
+	def _guard_auto_mode(self):
+		"""auto_mode is chosen with the chat's first human message and can never be
+		turned off. The one legitimate writer is send_message's locked _write_conv
+		(frappe.db.set_value, which bypasses this controller); every other path is refused."""
+		previous = self.get_doc_before_save()
+		was_on = bool(previous and previous.auto_mode)
+		if was_on and not self.auto_mode:
+			frappe.throw(_("Auto mode can't be turned off for this chat."), frappe.PermissionError)
+		if self.auto_mode and not was_on:
+			frappe.throw(
+				_("Auto mode can only be turned on with the chat's first message."), frappe.PermissionError
 			)

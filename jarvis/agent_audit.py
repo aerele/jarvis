@@ -25,7 +25,16 @@ import frappe
 OUTCOMES = frozenset({"applied", "failed", "discarded"})
 # Mirrors the doctype's provenance Select; an unknown value is coerced (and
 # logged) here rather than failing the insert and dropping the row.
-PROVENANCES = ("chat", "auto_apply", "macro", "skill", "request", "approval", "reviewer_approved")
+PROVENANCES = (
+	"chat",
+	"auto_apply",
+	"macro",
+	"skill",
+	"request",
+	"approval",
+	"reviewer_approved",
+	"auto_mode",
+)
 
 # The full, explicit safe projection for the metadata-only trail. The doctype has
 # NO content columns, so there is nothing content-adjacent to leak; the allowlist

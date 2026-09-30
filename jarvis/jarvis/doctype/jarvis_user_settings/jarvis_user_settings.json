@@ -12,6 +12,8 @@
     "prefs_section",
     "notify_enabled",
     "activity_detail",
+    "default_auto_mode",
+    "auto_mode_acknowledged",
     "preferred_persona",
     "support_context_copy_pref",
     "app_state_section",
@@ -72,6 +74,20 @@
       "fieldtype": "Check",
       "label": "Show Activity Detail",
       "default": "1"
+    },
+    {
+      "fieldname": "default_auto_mode",
+      "fieldtype": "Check",
+      "label": "Start New Chats In Auto Mode",
+      "default": "0",
+      "description": "Per-chat auto mode (#581): when 1 the composer pre-arms auto mode for each new chat. The chat's own flag is still fixed by its first message."
+    },
+    {
+      "fieldname": "auto_mode_acknowledged",
+      "fieldtype": "Check",
+      "label": "Auto Mode Warning Acknowledged",
+      "default": "0",
+      "description": "Set once the user has confirmed the first-time auto mode warning dialog, so it is not shown again."
     },
     {
       "fieldname": "preferred_persona",

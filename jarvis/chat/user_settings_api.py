@@ -124,6 +124,9 @@ def _settings_payload(doc) -> dict:
 		"user": doc.user,
 		"notify_enabled": cint(doc.notify_enabled),
 		"activity_detail": cint(doc.activity_detail),
+		# getattr: same migrate-window guard as preferred_persona below (#581).
+		"default_auto_mode": cint(getattr(doc, "default_auto_mode", 0)),
+		"auto_mode_acknowledged": cint(getattr(doc, "auto_mode_acknowledged", 0)),
 		# getattr, not a bare read: in the migrate window before preferred_persona
 		# syncs onto the doc's meta, doc.preferred_persona would AttributeError and
 		# 500 get_my_settings / update_my_settings. Default to Jarvis like the rest.
@@ -161,6 +164,8 @@ def update_my_settings(
 	activity_detail: int | None = None,
 	preferred_persona: str | None = None,
 	support_context_copy_pref: str | None = None,
+	default_auto_mode: int | None = None,
+	auto_mode_acknowledged: int | None = None,
 ) -> dict:
 	"""Update the caller's own chat preferences only. The usage limit and
 	counters (permlevel 1 / read-only) are never writable here."""
@@ -170,6 +175,10 @@ def update_my_settings(
 		doc.notify_enabled = 1 if sbool(notify_enabled) else 0
 	if activity_detail is not None:
 		doc.activity_detail = 1 if sbool(activity_detail) else 0
+	if default_auto_mode is not None:
+		doc.default_auto_mode = 1 if sbool(default_auto_mode) else 0
+	if auto_mode_acknowledged is not None:
+		doc.auto_mode_acknowledged = 1 if sbool(auto_mode_acknowledged) else 0
 	if preferred_persona is not None:
 		# Blank clears back to the default; otherwise it must be a known persona
 		# (this value rides the trusted [Context:] line in turn_handler).
