@@ -28,6 +28,15 @@ describe("autoModeView", () => {
 		expect(autoModeView({ messageCount: 3, convAutoMode: 0, armed: true })).toEqual(hidden);
 	});
 
+	it("keeps the approved warning copy, with the not-recommended line on its own", () => {
+		expect(AUTO_MODE_COPY.dialogMessage).toBe(
+			"Jarvis will apply changes without asking first. Deletes, cancels and amends still ask. Once a chat starts in auto mode, it stays in auto mode."
+		);
+		expect(AUTO_MODE_COPY.dialogWarning).toBe(
+			"Not recommended if you're new to ERPNext or Jarvis."
+		);
+	});
+
 	it("uses no em or en dashes in the shared copy", () => {
 		for (const v of Object.values(AUTO_MODE_COPY)) expect(v).not.toMatch(/[–—]/);
 	});

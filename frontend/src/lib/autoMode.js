@@ -21,7 +21,9 @@ export const AUTO_MODE_COPY = {
 	label: "Auto",
 	dialogTitle: "Turn on auto mode?",
 	dialogMessage:
-		"Jarvis will apply changes without asking first. Deletes, cancels and amends still ask. Once a chat starts in auto mode, it stays in auto mode. Not recommended if you're new to ERPNext or Jarvis.",
+		"Jarvis will apply changes without asking first. Deletes, cancels and amends still ask. Once a chat starts in auto mode, it stays in auto mode.",
+	// Shown on its own line, highlighted.
+	dialogWarning: "Not recommended if you're new to ERPNext or Jarvis.",
 	dialogConfirm: "Turn on auto mode",
 	dialogCancel: "Cancel",
 	settingsTitle: "Start new chats in auto mode",
