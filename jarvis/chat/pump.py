@@ -188,6 +188,9 @@ TRANSPORT_RETRY_MAX = 4
 # container was bounced under a live turn). A slug, not user-facing prose — ChatView
 # renders its own "interrupted" banner copy off the event.
 _TRANSPORT_LOST_REASON = "transport-lost"
+# M-01: the same park when the budget ran out on hops that CRASHED (not a lost socket),
+# so operators can tell a code fault from a gateway outage.
+_HOP_CRASHED_REASON = "hop-crashed"
 
 # Injection seams for timing (tests monkeypatch to remove real waits).
 _monotonic: Callable[[], float] = time.monotonic
@@ -1609,7 +1612,9 @@ def run_pump_hop(
 
 	``LeaseLostExit`` anywhere ⇒ the ONE shared exit (stop reading, no publishes,
 	hop returns). A persistent DB operational error ⇒ bounded backoff then park
-	the affected turns ``recovering`` and exit (never spin, D6 §6). ``max_slices``
+	the affected turns ``recovering`` and exit (never spin, D6 §6). Any OTHER
+	exception ⇒ roll back, log, and the bounded transport-exit succession (M-01): a
+	hop never ends successor-less while the shard has live work. ``max_slices``
 	/ ``soft_budget_s`` are test knobs; production uses the constants."""
 	deps = deps or _default_deps()
 	site = frappe.local.site
@@ -1705,6 +1710,22 @@ def run_pump_hop(
 			_schedule_successor_on_exit(ctx, transport_retry=transport_retry)
 	except ts.LeaseLostExit:
 		outcome = "lease_lost"
+	except Exception:
+		# M-01: any other exception (a RuntimeProfileError in a recovery tail, a deadlock
+		# the operational list does not cover, a bug in a sweep) used to leave the RQ job
+		# with NO successor: the lease stayed held for its TTL and every live reply on the
+		# shard froze until the next send or the */5 watchdog. Roll back the half-done txn,
+		# record it, and take the same bounded exit as a transport loss: an immediate
+		# successor while the retry budget lasts (a clean handoff resets it); past the
+		# budget the shard's turns are parked `recovering`, so customers see the banner,
+		# and the watchdog revives the shard.
+		outcome = "crashed"
+		try:
+			frappe.db.rollback()
+			frappe.log_error(title="pump.hop_crash", message=frappe.get_traceback())
+		except Exception:
+			pass
+		_schedule_successor_on_exit(ctx, transport_retry=transport_retry, reason=_HOP_CRASHED_REASON)
 	finally:
 		try:
 			wake.stop()
@@ -2904,7 +2925,19 @@ def _poll_recoveries(ctx: PumpContext) -> None:
 			# tail RPC timed out / unavailable — re-attach and keep waiting.
 			_reattach_lane(ctx, pr.r)
 			continue
-		_resolve_recovery_tail(ctx, pr, frame)
+		try:
+			_resolve_recovery_tail(ctx, pr, frame)
+		except ts.LeaseLostExit:
+			raise
+		except Exception:
+			# M-01: one turn's recovery must not end the hop for every other live reply on
+			# the shard (e.g. RuntimeProfileError while the profile resyncs). Roll back its
+			# half-done txn, record it, and re-attach, the same path as a timed-out tail:
+			# the turn keeps waiting, and the next hop's reconcile (or the watchdog)
+			# re-drives it from its durable state.
+			frappe.db.rollback()
+			frappe.log_error(title="pump.recovery_tail", message=frappe.get_traceback())
+			_reattach_lane(ctx, pr.r)
 
 
 def _recovery_window(r: dict) -> tuple[int, int | None]:
@@ -3411,7 +3444,9 @@ def _shard_has_live_work(target: str) -> bool:
 	)
 
 
-def _schedule_successor_on_exit(ctx: PumpContext, *, transport_retry: int) -> None:
+def _schedule_successor_on_exit(
+	ctx: PumpContext, *, transport_retry: int, reason: str = _TRANSPORT_LOST_REASON
+) -> None:
 	"""CDX-1 transport-exit succession. A non-handoff loop exit (transport_closed /
 	no_transport) must not leave live work successor-less. Epoch-guarded ATOMIC lease
 	release (``ts.lease_handoff`` forces the lease immediately acquirable + advances
@@ -3453,7 +3488,7 @@ def _schedule_successor_on_exit(ctx: PumpContext, *, transport_retry: int) -> No
 		# already superseded parks 0 rows and cannot disturb the new owner's turns.
 		budget_spent = transport_retry >= TRANSPORT_RETRY_MAX
 		if budget_spent and _shard_has_live_work(target):
-			_park_affected_recovering(ctx, reason=_TRANSPORT_LOST_REASON)
+			_park_affected_recovering(ctx, reason=reason)
 		if not ts.lease_handoff(target, ctx.epoch, next_hop, successor):
 			return  # stale — a takeover owns the shard; it drives succession
 		_clear_lease_mirror(target)
