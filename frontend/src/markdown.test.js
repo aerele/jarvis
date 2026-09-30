@@ -3,6 +3,26 @@ import assert from "node:assert/strict";
 
 import { renderMarkdown } from "./markdown.js";
 
+test("finding evidence links retain their document labels and local targets", () => {
+	const html = renderMarkdown(
+		"Compare [PAY-1](/app/payment-entry/PAY-1) and [PAY-2](/app/payment-entry/PAY-2)."
+	);
+	assert.ok(html.includes('href="/app/payment-entry/PAY-1"'));
+	assert.ok(html.includes('class="jv-md-link">PAY-1</a>'));
+	assert.ok(html.includes('class="jv-md-link">PAY-2</a>'));
+	assert.equal((html.match(/<a /g) || []).length, 2);
+	assert.ok(!html.includes("\u0000"));
+});
+
+test("local evidence links escape labels and only permit Desk paths", () => {
+	const html = renderMarkdown("[<img src=x>](/app/supplier/SUPP%2F001)");
+	assert.ok(html.includes('href="/app/supplier/SUPP%2F001"'));
+	assert.ok(html.includes("&lt;img src=x&gt;"));
+	assert.ok(!html.includes("<img"));
+	for (const target of ["javascript:alert(1)", "//example.com/x", "/private/file"])
+		assert.ok(!renderMarkdown(`[record](${target})`).includes("<a "));
+});
+
 // Agents line-break a Markdown TABLE CELL with <br> (GFM has no other way), and the
 // same suggestion text is also stored as a Frappe timeline Comment where <br> is the
 // correct, rendered form. The compact renderer escapes all HTML first (XSS-safe), which

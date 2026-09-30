@@ -5,6 +5,12 @@ import { extractTechnicalDetails } from "./findingText";
 // bundle-generated - these fixtures are lifted verbatim (or near-verbatim)
 // from the audit's own screenshots, not invented examples.
 describe("extractTechnicalDetails", () => {
+	it("preserves evidence paragraphs, lists and document links", () => {
+		const note =
+			"Possible duplicate payment.\n\n**Evidence:**\n- [PAY-1](/app/payment-entry/PAY-1)\n- [PAY-2](/app/payment-entry/PAY-2)\n\n**Next step:** Review both entries.";
+		expect(extractTechnicalDetails(note).text).toBe(note);
+	});
+
 	it("lifts a boolean evaluation flag out of its parenthetical", () => {
 		const { text, details } = extractTechnicalDetails(
 			"data-trust grade for Goods In Transit - ATD: FLAGGED (clears reorder gate: False)."

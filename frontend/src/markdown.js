@@ -5,7 +5,7 @@
 function esc(s) {
 	return String(s).replace(
 		/[&<>"]/g,
-		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]
 	);
 }
 
@@ -75,8 +75,12 @@ function inline(s) {
 	t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
 	t = t.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
 	t = t.replace(
-		/\[([^\]]+)\]\((https?:[^)]+)\)/g,
-		'<a href="$2" target="_blank" rel="noopener" class="jv-md-link">$1</a>'
+		/\[([^\]]+)\]\((https?:[^)]+|\u0000A(\d+)\u0000)\)/g,
+		(_match, label, target, appIndex) => {
+			const href =
+				appIndex === undefined ? target : esc(appPathHref(appLinks[Number(appIndex)]));
+			return `<a href="${href}" target="_blank" rel="noopener" class="jv-md-link">${label}</a>`;
+		}
 	);
 	// Restore both sentinel kinds in ONE pass that tracks whether we're already
 	// inside an <a> the http(s) link transform above just built (e.g. an agent

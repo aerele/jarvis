@@ -21,6 +21,7 @@ from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.agent_catalog import build_agent_push_payload
 from jarvis.chat.filebox import _clamp_page, _lk
+from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
@@ -2541,6 +2542,7 @@ def list_findings(
 		# confirmed_outcome with a resolving provenance link is neutralised server-side —
 		# no read surface (this list, FindingsPanel's v-html) can emit an unearned strong
 		# verb, and the guard holds by construction, not author discipline.
+		r["title"], r["detail_md"] = finding_text(r)
 		_rc = r.get("result_class")
 		_op = r.get("outcome_provenance")
 		if r.get("title"):

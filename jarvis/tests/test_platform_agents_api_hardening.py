@@ -221,6 +221,21 @@ class TestListFindingsStrongVerbGate(FrappeTestCase):
 			self.assertNotIn("saved", r[field].lower())
 			self.assertIn("[unverified]", r[field])
 
+	def test_blank_legacy_finding_has_a_title_without_fabricating_evidence(self):
+		_mk_finding(
+			self.user,
+			self.SLUG,
+			result_class="observed_fact",
+			title=" ",
+			detail_md="",
+			ref_doctype="Supplier",
+			ref_name="SUPP-LEGACY",
+		)
+		row = self._rows()[0]
+		self.assertEqual(row["title"], "Review Supplier SUPP-LEGACY")
+		self.assertEqual(row["detail_md"], "")
+		self.assertEqual(frappe.db.get_value(FINDING, row["name"], "detail_md"), "")
+
 	def test_confirmed_outcome_with_provenance_keeps_verb(self):
 		"""Control: a genuine confirmed_outcome row WITH a resolving outcome_provenance
 		link keeps the strong verb — the gate neutralises only UNEARNED claims."""
