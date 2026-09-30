@@ -1083,6 +1083,10 @@ def assemble_prompt(
 		if conv.skill_autorun
 		else ""
 	)
+	# Per-chat auto mode (#581): the user chose it with this chat's first message (server
+	# flag, never a client claim). Same shape as armed_run: tell the agent to call every
+	# covered write directly; the bench gate still parks the brake (delete/cancel/amend).
+	auto_run = "; auto mode: apply changes directly" if conv.get("auto_mode") else ""
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name it in the system context so the agent activates it
 	# deterministically (the agent has no documented user-invocable trigger).
@@ -1221,7 +1225,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{armed_skill_run_clause}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
