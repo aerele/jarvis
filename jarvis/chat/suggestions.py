@@ -31,6 +31,7 @@ import time
 
 import frappe
 
+from jarvis.chat import txn
 from jarvis.chat.title import (
 	_auth_fault_detail,
 	_clean,
@@ -305,24 +306,58 @@ def _strip_ornament(s: str) -> str:
 
 def touch(user: str) -> None:
 	"""Record an ATTEMPT without changing the suggestions. This is what makes the
-	refresh gate back off after a run that had nothing to say."""
+	refresh gate back off after a run that had nothing to say.
+
+	Runs inside a job (``refresh_job``), after the gateway call (or after a cheap
+	early-out that never made one - the commit is harmless either way). Writes via
+	``frappe.db.set_value`` rather than ``doc.db_set``: the FIRST ``db_set`` on a
+	freshly loaded doc calls ``load_doc_before_save``, an unneeded
+	``SELECT ... FOR UPDATE`` pre-read of the whole row for a write that only
+	touches one field (see ``jarvis_settings._write_settings_fields``'s docstring
+	for the same reasoning on Jarvis Settings). Going straight to ``set_value``
+	drops that pre-read and narrows the conflict surface to the field actually
+	written."""
 	from jarvis.chat import usage
 
-	doc = usage.get_or_create_user_settings(user)
-	doc.db_set("prompt_suggestions_at", frappe.utils.now_datetime(), update_modified=False)
+	txn.fresh_snapshot()
+
+	def write():
+		name = usage.user_settings_name(user)
+		frappe.db.set_value(
+			USETT, name, "prompt_suggestions_at", frappe.utils.now_datetime(), update_modified=False
+		)
+
+	txn.replay_on_conflict(write, label="suggestions.touch")
 	frappe.db.commit()
 
 
 def store(user: str, items: list[dict]) -> None:
-	"""Persist the cache + its stamp. db_set-style writes so the settings row's
-	modified time (and the gate revision that keys off it) does not churn.
-	Accepts plain strings too, so a caller (or a test) can pass either shape."""
+	"""Persist the cache + its stamp. ``update_modified=False`` writes so the
+	settings row's modified time (and the gate revision that keys off it) does
+	not churn. Accepts plain strings too, so a caller (or a test) can pass either
+	shape.
+
+	Same ``frappe.db.set_value`` + ``replay_on_conflict`` shape as ``touch`` above,
+	and for the same reason: this runs right after ``refresh_job``'s gateway call,
+	on a snapshot that call did nothing to refresh."""
 	from jarvis.chat import usage
 
 	rows = [{"title": "", "prompt": i} if isinstance(i, str) else i for i in items]
-	doc = usage.get_or_create_user_settings(user)
-	doc.db_set("prompt_suggestions", json.dumps(rows[:WANT]), update_modified=False)
-	doc.db_set("prompt_suggestions_at", frappe.utils.now_datetime(), update_modified=False)
+	txn.fresh_snapshot()
+
+	def write():
+		name = usage.user_settings_name(user)
+		frappe.db.set_value(
+			USETT,
+			name,
+			{
+				"prompt_suggestions": json.dumps(rows[:WANT]),
+				"prompt_suggestions_at": frappe.utils.now_datetime(),
+			},
+			update_modified=False,
+		)
+
+	txn.replay_on_conflict(write, label="suggestions.store")
 	frappe.db.commit()
 
 

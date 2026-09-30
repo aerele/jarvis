@@ -3,6 +3,16 @@ import re
 import frappe
 from frappe.model.document import Document
 
+# The write-conflict policy (#713) lives in jarvis.chat.txn so every shared-row writer
+# in chat uses the same rules; the private names stay for this module and its tests.
+# _WRITE_CONFLICT_ERRORS is still the ONE definition shared by _is_write_conflict and
+# the except clauses in both sync workers. Bound by name on purpose: this module keeps
+# its own #713 retry loop and its own tests (test_settings_sync_conflict), so
+# race_harness.fix_disabled() (which patches the txn module attributes) does not reach it.
+from jarvis.chat.txn import _WRITE_CONFLICT_ERRORS
+from jarvis.chat.txn import is_write_conflict as _is_write_conflict
+from jarvis.chat.txn import owns_transaction as _owns_transaction
+
 LLM_FIELDS_TRIGGERING_SYNC = (
 	"llm_provider",
 	"llm_model",
@@ -227,50 +237,6 @@ def _admin_chat_readiness(*, timeout_s: int = _POOL_CONVERGE_PROBE_TIMEOUT_S):
 #: commits inside the few milliseconds the retry takes.
 _SETTINGS_WRITE_ATTEMPTS = 3
 _SETTINGS_WRITE_BACKOFF_S = 0.05
-
-
-#: The exception classes that mean "another connection got there first". ONE
-#: definition, shared by ``_is_write_conflict`` and by the ``except`` clauses in
-#: both sync workers, so a later widening cannot reach the retry loop while
-#: silently missing the handlers, or the reverse.
-_WRITE_CONFLICT_ERRORS: tuple[type[BaseException], ...] = (frappe.QueryDeadlockError,)
-
-
-def _is_write_conflict(e: BaseException) -> bool:
-	"""Did MariaDB refuse this statement because another connection moved the row
-	after our transaction's snapshot opened (#713)?
-
-	The bench runs MariaDB 11.6+ with ``innodb_snapshot_isolation=ON``, where a
-	LOCKING read or write that meets a record newer than the transaction's read
-	view fails immediately with ER_CHECKREAD 1020 ("Record has changed since last
-	read") rather than waiting or re-reading. Frappe folds that into
-	``QueryDeadlockError`` alongside a true ER_LOCK_DEADLOCK 1213
-	(``frappe/database/mariadb/database.py``: ``is_deadlocked`` tests for both), so
-	one class covers both and both want the same treatment here: the write did not
-	land, nothing downstream of it ran, and a replay from a fresh snapshot is the
-	whole recovery.
-
-	Matching the frappe class rather than the errno is deliberate. The errno is not
-	reachable without unwrapping ``QueryDeadlockError``'s argument, and an older
-	MariaDB that reports the same lost race as a plain 1213 has to take this branch
-	too or the customer-facing half of the fix only works on 11.6+."""
-	return isinstance(e, _WRITE_CONFLICT_ERRORS)
-
-
-def _owns_transaction() -> bool:
-	"""May this code END the current transaction (commit or roll back)?
-
-	True only where this process started one and nothing upstream is depending on
-	it: a background job (``frappe.local.job`` is set exclusively by
-	``execute_job``) or a migrate patch, where committing between units is normal.
-
-	False in a web request, whose transaction belongs to the request: frappe commits
-	it on success and rolls it back on any exception, and code that ends it halfway
-	takes that decision away. False from ``bench execute`` and the CLI too, which is
-	imprecise (they do own their transaction) but harmless: the only thing withheld
-	there is a retry, and every caller treats a skipped retry as a lost race it will
-	re-attempt."""
-	return bool(getattr(frappe.local, "job", None) or frappe.flags.in_migrate)
 
 
 def _inside_a_save() -> bool:

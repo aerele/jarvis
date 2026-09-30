@@ -21,6 +21,7 @@ from datetime import timedelta
 import frappe
 from frappe.utils import now_datetime
 
+from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
 
 # Error genuinely-abandoned rows (no session) after this.
@@ -55,35 +56,57 @@ def scan_and_mark_errored() -> int:
 
 	errored = _sweep_orphan_turns(now)
 	for r in rows:
-		creation = r.get("creation")
-		recoverable = bool((r.get("session_key") or "").strip())
+		errored += _scan_one_row(r, now, managed_cutoff, error_cutoff)
+	return errored
+
+
+def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
+	"""One row's write as its own fresh-snapshot, replayable unit (P7). The scan
+	above takes ONE snapshot for the whole batch, but MariaDB's snapshot-isolation
+	check fires per WRITE, so a row this scan did not itself touch but another
+	writer (the pump, a web request) committed since the scan's read must not
+	crash the whole cycle - only this row is skipped (logged), every other row in
+	the batch still gets processed. Returns 1 iff this row was ERRORED (never
+	'recovering'), matching the caller's original count contract."""
+	creation = r.get("creation")
+	recoverable = bool((r.get("session_key") or "").strip())
+
+	def unit() -> str:
+		"""Returns 'errored', 'recovering' or 'skip'. Publish (a non-DB side effect)
+		happens AFTER the winning commit, outside this unit, so a replay can never
+		double-publish."""
 		if recoverable:
 			if creation and creation < managed_cutoff:
-				frappe.db.set_value(
-					MSG,
-					r["name"],
-					{
-						"recovering": 1,
-						"recovery_started_at": now,
-					},
-				)
-			continue
+				frappe.db.set_value(MSG, r["name"], {"recovering": 1, "recovery_started_at": now})
+				frappe.db.commit()
+				return "recovering"
+			return "skip"
 		# Orphaned / no session: genuinely unrecoverable.
 		if creation and creation < error_cutoff:
 			frappe.db.set_value(MSG, r["name"], {"streaming": 0, "error": _ABANDONED})
-			if r.get("owner"):
-				publish_to_user(
-					r["owner"],
-					{
-						"kind": "run:error",
-						"conversation_id": r["conversation"],
-						"message_id": r["name"],
-						"error": _ABANDONED,
-					},
-				)
-			errored += 1
-	frappe.db.commit()
-	return errored
+			frappe.db.commit()
+			return "errored"
+		return "skip"
+
+	try:
+		outcome = txn.replay_on_conflict(unit, label=f"stale_scan row {r['name']}", fresh=True)
+	except Exception as e:
+		txn.report_lost_race(e, title="stale_scan: row failed")
+		return 0
+
+	if outcome == "errored":
+		if r.get("owner"):
+			publish_to_user(
+				r["owner"],
+				{
+					"kind": "run:error",
+					"conversation_id": r["conversation"],
+					"message_id": r["name"],
+					"error": _ABANDONED,
+				},
+			)
+		return 1
+	return 0
 
 
 # Orphan sweep: recovery above keys on a streaming=1 ASSISTANT row, but that
@@ -184,55 +207,78 @@ def _sweep_orphan_turns(now) -> int:
 				job.cancel()
 			except Exception:
 				pass
-		# Lost (no job / canceled / dead-queue). Heal once, then surface.
-		if not int(r["was_recovered"] or 0):
-			# Stamp the recovery-attempt marker BEFORE re-dispatch so the redispatch's
-			# job id carries the ::a1 suffix and the shard-lock commit inside admission
-			# makes it durable. CDX-19 (residual): if that re-dispatch hits a FULL admission
-			# queue the redispatch returns {overloaded:True} WITHOUT creating a replacement
-			# Turn/job — the momentary overload must NOT consume the one healing strike, or the
-			# next scan would surface a spurious second-strike error. Reset the marker to 0 so a
-			# later scan retries once capacity frees.
-			frappe.db.set_value(MSG, r["name"], "was_recovered", 1, update_modified=False)
-			from jarvis.chat.api import _redispatch_orphan
-
-			_res = _redispatch_orphan(
-				r["conversation"],
-				r["name"],
-				attachments=orig_attachments,
-				context=orig_context,
-			)
-			if isinstance(_res, dict) and _res.get("overloaded"):
-				frappe.db.set_value(MSG, r["name"], "was_recovered", 0, update_modified=False)
-				frappe.db.commit()
-				frappe.logger("jarvis.chat.stale_scan").warning(
-					f"orphan redispatch deferred (site overloaded); will retry: {r['name']}"
-				)
-			continue
-		# Second strike: give the user the normal error + retry surface.
-		from jarvis.chat.api import _next_seq
-
-		err = frappe.get_doc(
-			{
-				"doctype": MSG,
-				"conversation": r["conversation"],
-				"seq": _next_seq(r["conversation"]),
-				"role": "assistant",
-				"content": "",
-				"streaming": 0,
-				"error": _ORPHAN_ERR,
-			}
-		)
-		err.insert(ignore_permissions=True)
-		if r.get("owner"):
-			publish_to_user(
-				r["owner"],
-				{
-					"kind": "run:error",
-					"conversation_id": r["conversation"],
-					"message_id": err.name,
-					"error": _ORPHAN_ERR,
-				},
-			)
-		errored += 1
+		# P7: this row's healing/erroring write is its own fresh-snapshot unit: a
+		# conflict here (another writer touched this row/conversation since the
+		# scan's read at the top) must not stop the sweep from healing the REST of
+		# the batch. Not replayed like the simpler streaming-row scan above: a
+		# redispatch and job.cancel() above are not blindly safe to re-run after a
+		# server-side abort (job.cancel() already fired once, a one-shot external
+		# effect), so a lost race here is caught, logged and this row is skipped -
+		# the next scan cycle picks it up again from the durable was_recovered marker.
+		try:
+			txn.fresh_snapshot()
+			if _heal_or_error_orphan(r, orig_attachments, orig_context):
+				errored += 1
+		except Exception as e:
+			txn.report_lost_race(e, title="stale_scan: orphan row failed")
 	return errored
+
+
+def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
+	"""One orphan row's write: heal (redispatch) on the first strike, error on the
+	second. Returns True iff the row was ERRORED (for the caller's count)."""
+	if not int(r["was_recovered"] or 0):
+		# Stamp the recovery-attempt marker BEFORE re-dispatch so the redispatch's
+		# job id carries the ::a1 suffix and the shard-lock commit inside admission
+		# makes it durable. CDX-19 (residual): if that re-dispatch hits a FULL admission
+		# queue the redispatch returns {overloaded:True} WITHOUT creating a replacement
+		# Turn/job: the momentary overload must NOT consume the one healing strike, or the
+		# next scan would surface a spurious second-strike error. Reset the marker to 0 so a
+		# later scan retries once capacity frees.
+		frappe.db.set_value(MSG, r["name"], "was_recovered", 1, update_modified=False)
+		from jarvis.chat.api import _redispatch_orphan
+
+		_res = _redispatch_orphan(
+			r["conversation"],
+			r["name"],
+			attachments=orig_attachments,
+			context=orig_context,
+		)
+		if isinstance(_res, dict) and _res.get("overloaded"):
+			frappe.db.set_value(MSG, r["name"], "was_recovered", 0, update_modified=False)
+			frappe.db.commit()
+			frappe.logger("jarvis.chat.stale_scan").warning(
+				f"orphan redispatch deferred (site overloaded); will retry: {r['name']}"
+			)
+		return False
+	# Second strike: give the user the normal error + retry surface.
+	from jarvis.chat.api import _next_seq
+
+	err = frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": r["conversation"],
+			"seq": _next_seq(r["conversation"]),
+			"role": "assistant",
+			"content": "",
+			"streaming": 0,
+			"error": _ORPHAN_ERR,
+		}
+	)
+	err.insert(ignore_permissions=True)
+	# The scan is a scheduler job, so nothing commits until it ends: make the error
+	# row durable before the publish below points the user's client at it. A failed
+	# insert never reaches here: the caller's report_lost_race rolls it back and the
+	# next scan retries the row.
+	frappe.db.commit()
+	if r.get("owner"):
+		publish_to_user(
+			r["owner"],
+			{
+				"kind": "run:error",
+				"conversation_id": r["conversation"],
+				"message_id": err.name,
+				"error": _ORPHAN_ERR,
+			},
+		)
+	return True

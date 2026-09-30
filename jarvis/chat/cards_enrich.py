@@ -30,7 +30,7 @@ import re
 import frappe
 
 from jarvis._session import impersonate
-from jarvis.chat import _record_summary
+from jarvis.chat import _record_summary, txn
 
 MSG = "Jarvis Chat Message"
 
@@ -144,9 +144,20 @@ def enrich_text(content: str, *, owner: str | None = None) -> str:
 
 def enrich_message(message_name: str, owner: str | None = None) -> None:
 	"""Read a ``Jarvis Chat Message``'s content, enrich its cards, and write the result
-	back when it changed. Idempotent (re-run is a no-op once cards carry fields) and
-	best-effort (never raises)."""
-	try:
+	back when it changed. Idempotent (re-run is a no-op once cards carry fields).
+
+	Runs as a finalize effect: the finalize runner commits before each effect, so this
+	job owns its transaction (``txn.owns_transaction()``). Up to ``_MAX_CARDS`` (20)
+	record-summary reads sit between the read of ``content`` and the write of the
+	enriched result, and a web request can write the SAME reply row in that window (a
+	file card from ``api._maybe_attach_artifact``, or another content write) - a snapshot
+	race that used to be swallowed by a bare ``except Exception: frappe.clear_messages()``
+	with no log, losing the enrichment silently forever. The read, the enrichment and the
+	write are now one unit in ``txn.replay_on_conflict(fresh=True)``: a lost race rolls
+	back and reruns the WHOLE unit from a fresh snapshot (so the retry's read sees the
+	winner's write), instead of only retrying the write against stale content."""
+
+	def _read_enrich_write() -> None:
 		row = frappe.db.get_value(MSG, message_name, ["content", "owner"], as_dict=True)
 		if not row or not row.get("content"):
 			return
@@ -162,5 +173,26 @@ def enrich_message(message_name: str, owner: str | None = None) -> None:
 			# modified here would flip modified_by to the worker and reintroduce the
 			# reply-duration inflation the finalize stamps deliberately avoid.
 			frappe.db.set_value(MSG, message_name, "content", new, update_modified=False)
-	except Exception:
+			# New commit (the old code had none): this closure is the whole
+			# replay_on_conflict unit, so the write must be durable before it returns -
+			# otherwise a later effect's own failure could roll this one back with it,
+			# and a retried replay would have no commit boundary to distinguish "landed"
+			# from "still pending".
+			frappe.db.commit()
+
+	try:
+		txn.replay_on_conflict(_read_enrich_write, label=f"chat: enrich cards {message_name}", fresh=True)
+	except Exception as e:
+		try:
+			# Both attempts lost the race, or a write already pending in this transaction
+			# made a replay unsafe (``replay_is_safe`` false before the first attempt): log
+			# it so a real pattern of lost enrichments is visible, but a card is a
+			# convenience, never worth failing the turn over. report_lost_race re-raises
+			# anything that is not a write conflict, caught below.
+			txn.report_lost_race(e, title="chat: card enrichment lost a write race")
+		except Exception:
+			# A non-conflict failure (malformed JSON deep in enrich_text, a permission
+			# error, ...) - this site logs it too rather than letting it escape, unlike
+			# report_lost_race's default of re-raising to the caller.
+			frappe.log_error(title="chat: card enrichment failed", message=frappe.get_traceback())
 		frappe.clear_messages()
