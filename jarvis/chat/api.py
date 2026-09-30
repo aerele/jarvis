@@ -694,6 +694,8 @@ def get_conversation(conversation: str) -> dict:
 			"pending_card",
 			"expires_at",
 			"canvas",
+			# The live steps the reply showed, saved at settlement: [{text, at}].
+			"steps",
 			"reply_duration_ms",
 			# jarvis#560: which model actually produced each reply. The SPA renders it
 			# on the bubble only when it differs from what the header pill implies, so
@@ -714,8 +716,13 @@ def get_conversation(conversation: str) -> dict:
 	# run identity so a fresh tab opened mid-turn renders like a live one and
 	# can fence its own realtime events instead of starting from a null run.
 	_live_turn_steps(messages)
-	# canvas + pending_card are stored as JSON strings; hand the UI real objects (or None).
+	# canvas + steps + pending_card are stored as JSON strings; hand the UI real objects (or None).
 	for m in messages:
+		if m.get("steps"):
+			try:
+				m["steps"] = frappe.parse_json(m["steps"])
+			except Exception:
+				m["steps"] = None
 		if m.get("canvas"):
 			try:
 				m["canvas"] = frappe.parse_json(m["canvas"])
@@ -806,7 +813,7 @@ def _live_turn_steps(messages: list) -> None:
 	streaming_names = [m["name"] for m in messages if m.get("streaming")]
 	if not streaming_names:
 		return
-	from jarvis.chat.pump import _read_run_steps
+	from jarvis.chat.pump import _read_run_step_lines, _read_run_steps
 	from jarvis.chat.steps import display_line, remove_steps
 
 	t = frappe.qb.DocType(TURN)
@@ -823,12 +830,20 @@ def _live_turn_steps(messages: list) -> None:
 			continue
 		steps = _read_run_steps(turn.name)
 		m["content"] = remove_steps(m.get("content") or "", steps)
-		live_steps = []
-		for step in steps:
-			line = display_line(step)
-			if line:
-				live_steps.append(line)
+		# The raw cache is unredacted (it must match the raw stream above), so the list
+		# a reloaded tab shows comes from the published, redacted lines; runs that
+		# predate them fall back to the raw copy.
+		lines = [line for line in _read_run_step_lines(turn.name) if line.get("text")]
+		live_steps = [line["text"] for line in lines]
+		if not live_steps:
+			for step in steps:
+				line = display_line(step)
+				if line:
+					live_steps.append(line)
 		m["live_steps"] = live_steps
+		# When each step was seen (site time, the tool rows' ``creation`` format), so the
+		# reloaded tab orders them among the saved tool rows the way the saved reply will.
+		m["live_step_times"] = [line.get("at") for line in lines]
 		m["run_id"] = turn.name
 		m["last_event_seq"] = turn.last_event_seq
 		m["pump_epoch"] = turn.pump_epoch

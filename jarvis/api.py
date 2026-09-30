@@ -707,6 +707,7 @@ def persist_tool_receipt(
 			user=conv_owner,
 			conversation_id=conv_name,
 			tool_message_id=msg_name,
+			tool_call_id=tool_call_id or flip_token or None,
 			tool_name=tool,
 			args=args,
 			result=result,
@@ -928,18 +929,22 @@ def publish_realtime_tool_result(
 	result: dict,
 	status: str,
 	action_outcome: str | None = None,
+	tool_call_id: str | None = None,
 ) -> None:
 	"""Wrapper around frappe.publish_realtime so tests can mock at this seam.
 
 	``action_outcome`` (confirmed/discarded/failed) rides along so the SPA can
 	render the row as a receipt chip immediately, without waiting for a full
-	transcript reload."""
+	transcript reload. ``tool_call_id`` is the id the row was saved with, so the
+	SPA can bind a live report to the reply it belongs to (the "Reports
+	consulted" card) the same way the saved rows do."""
 	frappe.publish_realtime(
 		"jarvis:event",
 		{
 			"kind": "tool:result",
 			"conversation_id": conversation_id,
 			"tool_message_id": tool_message_id,
+			"tool_call_id": tool_call_id,
 			"tool_name": tool_name,
 			"args": args,
 			"result": result,

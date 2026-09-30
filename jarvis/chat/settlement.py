@@ -152,6 +152,7 @@ def invoke_settlement(
 		# 0-rows loss it rolls back with the message write below.
 		if won and am:
 			_stamp_reply_duration(am, run_id)
+			_stamp_steps(am, run_id)
 
 		if not won:
 			# OARF-3 / §10.11: a 0-rows settlement CAS is NOT unconditionally a lease
@@ -378,6 +379,32 @@ def _stamp_reply_duration(assistant_message: str, run_id: str) -> None:
 		f"UPDATE `tab{MSG}` SET reply_duration_ms=%(d)s, modified=%(now)s WHERE name=%(m)s",
 		{"d": duration_ms, "now": frappe.utils.now(), "m": assistant_message},
 	)
+
+
+def _stamp_steps(assistant_message: str, run_id: str) -> None:
+	"""Save the steps the user watched with the reply, so the folded head can show them
+	later (after the turn and after a reload). They are the pump's published lines, already
+	redacted, read from its 1 h cache. Best-effort: a cache miss writes nothing. A plain write,
+	so the replay-on-conflict txn can run it again; ``modified`` is left to the duration stamp."""
+	from jarvis.chat import pump
+
+	try:
+		lines = pump._read_run_step_lines(run_id)
+	except Exception:
+		return
+	if not lines:
+		return
+	try:
+		ts._run_cas(
+			f"UPDATE `tab{MSG}` SET steps=%(s)s WHERE name=%(m)s",
+			{"s": frappe.as_json(lines[: pump.RUN_STEP_LINES_MAX]), "m": assistant_message},
+		)
+	except Exception as e:
+		# Code running ahead of its migrate (no ``steps`` column yet): the reply
+		# settles without its steps rather than failing. Anything else, a snapshot
+		# race above all, must still reach txn.replay_on_conflict.
+		if not frappe.db.is_missing_column(e):
+			raise
 
 
 def _epoch_lost(run_id: str, epoch: int) -> bool:
