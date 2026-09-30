@@ -306,7 +306,8 @@ export async function sendMessage(
 	attachments,
 	context,
 	approvalTokens,
-	voice
+	voice,
+	autoMode
 ) {
 	// Empty conversation is allowed: the backend creates (or focuses) an empty
 	// conversation itself and returns its id as `conversation_id` - saves the
@@ -317,6 +318,9 @@ export async function sendMessage(
 	// this payload. Omitted (not even `voice: 0`) for every ordinary typed
 	// send, matching every existing caller that doesn't pass this arg.
 	if (voice) args.voice = 1;
+	// Per-chat auto mode (#581): honoured server-side only with the chat's first
+	// message. Omitted (not even `auto_mode: 0`) for every send that doesn't ask.
+	if (autoMode) args.auto_mode = 1;
 	if (modelOverride) args.model_override = modelOverride;
 	if (attachments && attachments.length) args.attachments = JSON.stringify(attachments);
 	// The ordered tokens of the confirmation cards on screen. A typed "confirm 2"

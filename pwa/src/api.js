@@ -31,6 +31,12 @@ export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 export const getPromptSuggestions = () =>
 	call("jarvis.chat.user_settings_api.get_prompt_suggestions");
 
+// The caller's own prefs. Carries default_auto_mode and auto_mode_acknowledged
+// (#581); update_my_settings takes either. Returns {ok, data}.
+const US = "jarvis.chat.user_settings_api.";
+export const getMySettings = () => call(US + "get_my_settings");
+export const updateMySettings = (p) => call(US + "update_my_settings", p || {});
+
 // An empty `conversation` is allowed: the backend creates (or focuses) the
 // user's empty conversation and returns its id as `conversation_id`, which
 // saves the new-chat round-trip before the very first send.
@@ -41,7 +47,7 @@ export const getPromptSuggestions = () =>
 export const sendMessage = (
 	conversation,
 	message,
-	{ attachments = [], model, thinking, approvalTokens } = {}
+	{ attachments = [], model, thinking, approvalTokens, autoMode } = {}
 ) =>
 	call(CHAT + "send_message", {
 		conversation: conversation || "",
@@ -55,6 +61,9 @@ export const sendMessage = (
 		...(approvalTokens && approvalTokens.length
 			? { approval_tokens: JSON.stringify(approvalTokens) }
 			: {}),
+		// Auto mode (#581) is chosen with a chat's first message only; the server
+		// ignores it on any chat that already has messages.
+		...(autoMode ? { auto_mode: 1 } : {}),
 	});
 
 export const stopRun = (conversation, runId) =>

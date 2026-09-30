@@ -8,6 +8,12 @@
 // policy below so a future weakening can't silently make the promise false again
 // (as the old "Asks before it changes anything" wording did once auto_apply
 // existed).
+//
+// Per-chat auto mode (#581) does not weaken this promise: the tour says "By
+// default" on purpose. A chat the user starts in auto mode skips the confirmation
+// cards for covered changes (create, update, submit, emails, methods, bulk), but
+// deletes, cancels and amends still always ask, so the destructive clause stays
+// unconditionally true. The asserted string below is unchanged.
 
 // Destructive ops (delete/cancel/amend) are always braked - they require
 // confirmation in every mode. Kept as an explicit invariant the tour copy leans on.
