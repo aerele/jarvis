@@ -152,7 +152,7 @@
 			</div>
 
 			<!-- state-filter chips (all/open/acknowledged/resolved) -->
-			<div class="mt-5 flex items-center gap-2">
+			<div class="mt-5 flex flex-wrap items-center gap-2">
 				<Button
 					v-for="c in STATE_CHIPS"
 					:key="c.value"
@@ -200,7 +200,7 @@
 							role="button"
 							tabindex="0"
 							:aria-expanded="isExpanded(f.name)"
-							class="flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
+							class="flex w-full cursor-pointer flex-wrap items-start gap-3 px-3 py-3 hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 							@click="toggleExpand(f.name)"
 							@keydown.enter.prevent="toggleExpand(f.name)"
 							@keydown.space.prevent="toggleExpand(f.name)"
@@ -229,11 +229,33 @@
 							     unlabeled, truncated monospace column - engineering output
 							     ahead of the human summary. It now lives ONLY in the
 							     expanded finding's "Technical details" block, labelled. -->
-							<span class="min-w-0 flex-1 truncate text-base text-ink-gray-8">
-								{{ f.title }}
-							</span>
+							<div class="min-w-0 flex-1 basis-48">
+								<div class="break-words text-base font-medium text-ink-gray-9">
+									{{ findingTitle(f) }}
+								</div>
+								<div
+									v-if="f.ref_doctype && f.ref_name"
+									class="mt-1 break-words text-sm text-ink-gray-6"
+								>
+									{{ f.ref_doctype }} · {{ f.ref_name }}
+								</div>
+								<div
+									class="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-ink-gray-5"
+								>
+									<span v-if="RESULT_CLASS_LABEL[f.result_class]">
+										{{ RESULT_CLASS_LABEL[f.result_class] }}
+									</span>
+									<span v-if="f.result_class === 'derived_candidate'">
+										{{
+											CONFIRMATION_LABEL[f.confirmation_status] ||
+											"Awaiting confirmation"
+										}}
+									</span>
+								</div>
+							</div>
 							<span
-								v-if="f.amount != null && f.amount !== ''"
+								v-if="hasAmount(f)"
+								data-testid="finding-amount"
 								class="shrink-0 text-right text-base text-ink-gray-8"
 							>
 								{{ fmtAmount(f.amount) }}
@@ -275,7 +297,35 @@
 								v-html="renderMarkdown(displayFor(f.name).text)"
 							/>
 							<div v-else class="text-sm text-ink-gray-5">
-								No further detail recorded.
+								This run did not record an explanation for this finding. Review the
+								recorded evidence below or open the dashboard. Rerun the updated
+								auditor to obtain a complete explanation.
+							</div>
+
+							<div
+								v-if="f.match_basis || f.false_positive_path"
+								class="mt-4 space-y-3"
+							>
+								<div v-if="f.match_basis">
+									<h3 class="text-sm font-medium text-ink-gray-9">
+										Why it was flagged
+									</h3>
+									<p
+										class="mt-1 whitespace-pre-line break-words text-sm text-ink-gray-7"
+									>
+										{{ f.match_basis }}
+									</p>
+								</div>
+								<div v-if="f.false_positive_path">
+									<h3 class="text-sm font-medium text-ink-gray-9">
+										What to rule out
+									</h3>
+									<p
+										class="mt-1 whitespace-pre-line break-words text-sm text-ink-gray-7"
+									>
+										{{ f.false_positive_path }}
+									</p>
+								</div>
 							</div>
 
 							<div
@@ -591,6 +641,27 @@ function groupCount(group) {
 
 // title-case badge label (Blocker/Warning/Note) to match the group headers
 const SEVERITY_BADGE = { blocker: "Blocker", warning: "Warning", note: "Note" };
+const RESULT_CLASS_LABEL = {
+	observed_fact: "Recorded observation",
+	derived_candidate: "Candidate for review",
+	legal_scenario: "Rule-based scenario",
+	confirmed_outcome: "Confirmed outcome",
+};
+const CONFIRMATION_LABEL = {
+	unconfirmed: "Awaiting confirmation",
+	confirmed: "Confirmed",
+	rejected: "Rejected",
+};
+function findingTitle(finding) {
+	const title = String(finding.title || "").trim();
+	if (title) return title;
+	const reference = [finding.ref_doctype, finding.ref_name].filter(Boolean).join(" ");
+	return reference ? `Review ${reference}` : "Finding needs review";
+}
+function hasAmount(finding) {
+	const amount = Number(finding.amount);
+	return Number.isFinite(amount) && amount !== 0;
+}
 function severityBadgeLabel(sev) {
 	if (SEVERITY_BADGE[sev]) return SEVERITY_BADGE[sev];
 	const s = String(sev || "note");
