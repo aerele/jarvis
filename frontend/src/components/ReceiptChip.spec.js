@@ -18,10 +18,20 @@ describe("ReceiptChip auto-applied provenance", () => {
 		expect(w.text()).toContain("you approved this request");
 	});
 
+	it("says the user approved the request with the bolt icon in a normal chat", () => {
+		const w = mount(ReceiptChip, { props: { message: autoApplied } });
+		expect(w.find(".jv-receipt-automode").exists()).toBe(false);
+	});
+
 	it("drops the confirm-all line in an auto-mode chat", () => {
 		const w = mount(ReceiptChip, { props: { message: autoApplied, autoMode: true } });
 		expect(w.text()).not.toContain("you approved this request");
 		expect(w.find(".jv-receipt-armed").exists()).toBe(false);
+	});
+
+	it("shows the auto mode toggle's icon on an auto-mode receipt", () => {
+		const w = mount(ReceiptChip, { props: { message: autoApplied, autoMode: true } });
+		expect(w.find(".jv-receipt-automode").exists()).toBe(true);
 	});
 
 	it("keeps a macro's name in an auto-mode chat", () => {
@@ -29,5 +39,6 @@ describe("ReceiptChip auto-applied provenance", () => {
 			props: { message: { ...autoApplied, armed_by_macro: "Daily close" }, autoMode: true },
 		});
 		expect(w.text()).toContain("Daily close");
+		expect(w.find(".jv-receipt-automode").exists()).toBe(false);
 	});
 });
