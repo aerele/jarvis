@@ -2012,6 +2012,7 @@ class TestConvFlagsSingleQuery(FrappeTestCase):
 				"skill_autorun_skill",
 				"request_autorun",
 				"request_autorun_at",
+				"auto_mode",
 			],
 		)
 		self.assertTrue(flag_reads[0].kwargs.get("as_dict"), "flags read as_dict")

@@ -10,7 +10,7 @@ import { AUTO_MODE_COPY } from "@/lib/autoMode";
 export function useAutoModeConsent() {
 	const store = useShellStore();
 	const { confirm } = useConfirm();
-	async function ensureAutoModeConsent() {
+	async function ensureAutoModeConsent({ save = true } = {}) {
 		if (store.autoModeAcknowledged) return true;
 		const ok = await confirm({
 			title: AUTO_MODE_COPY.dialogTitle,
@@ -19,7 +19,7 @@ export function useAutoModeConsent() {
 			cancelLabel: AUTO_MODE_COPY.dialogCancel,
 		});
 		if (!ok) return false;
-		store.acknowledgeAutoMode();
+		store.acknowledgeAutoMode({ save });
 		return true;
 	}
 	return { ensureAutoModeConsent };

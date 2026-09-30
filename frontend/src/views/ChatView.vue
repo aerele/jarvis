@@ -8917,8 +8917,8 @@ async function loadConversation(id) {
 	// _loadConnectorFocusFor).
 	connectorFocus.value = null;
 	if (!id) {
-		messages.value = [];
 		resetAutoModeFor(true);
+		messages.value = [];
 		originPage.value = "";
 		originOf.value = "";
 		modelOverride.value = "";
@@ -9448,8 +9448,8 @@ async function newChat() {
 	// take scope to the real id via the shared promotion helper so the text follows the conversation
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
-	messages.value = [];
 	resetAutoModeFor(true);
+	messages.value = [];
 	// A brand-new chat is not in the recent list and loadConversation does not
 	// run here (the route watcher no-ops), so clear the last-loaded title;
 	// otherwise isExistingTitledConv keeps the previous conversation's title and
@@ -12053,8 +12053,8 @@ watch(
 			return;
 		if (!list.some((c) => c.name === currentId.value)) {
 			currentId.value = null;
-			messages.value = [];
 			resetAutoModeFor(true);
+			messages.value = [];
 			// loadConversation never runs on this path — the next send adopts the
 			// server id directly and the route watcher no-ops because currentId
 			// already equals it — so a builder origin left here would follow the
@@ -12244,9 +12244,9 @@ onMounted(async () => {
 					// the rest of boot. Drop cleanly to the welcome state and forget the
 					// dead id. newChat() now mints /c/:id URLs whose empty targets are
 					// hard-deleted after EMPTY_GRACE_DAYS, so a stale bookmark is routine.
+					resetAutoModeFor(true);
 					currentId.value = null;
 					messages.value = [];
-					resetAutoModeFor(true);
 					originPage.value = "";
 					originOf.value = "";
 					try {

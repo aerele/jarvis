@@ -2033,6 +2033,13 @@ def _apply_run_method_read_filter(tool: str, result) -> None:
 			)
 
 
+def _auto_mode_fields() -> tuple[str, ...]:
+	"""``("auto_mode",)`` once the column exists, else ``()``. The gate reads the
+	conversation's flags by column name, so new code running ahead of its migrate must
+	not name a column the table does not have yet (every gated write would error)."""
+	return ("auto_mode",) if frappe.get_meta("Jarvis Conversation").has_field("auto_mode") else ()
+
+
 def _run_covered_write(
 	tool: str,
 	args: dict,
@@ -2661,7 +2668,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					frappe.db.get_value(
 						"Jarvis Conversation",
 						conversation,
-						["skill_autorun", "request_autorun", "auto_mode"],
+						["skill_autorun", "request_autorun", *_auto_mode_fields()],
 						as_dict=True,
 					)
 					if conversation
@@ -2730,7 +2737,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					"skill_autorun_skill",
 					"request_autorun",
 					"request_autorun_at",
-					"auto_mode",
+					*_auto_mode_fields(),
 				],
 				as_dict=True,
 			)
@@ -2938,6 +2945,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from jarvis.chat import turn_message_binding
 
 			if turn_message_binding.is_run_cancel_requested(conv):
+				# Consumed like the skill/request branches: one Stop refuses one write.
+				# It cannot hold for the rest of the run, because the gate does not know
+				# which run a call belongs to and a lingering signal would also refuse a
+				# message that was already queued behind the stopped reply.
 				turn_message_binding.clear_run_cancel(conv)
 				return _error(RunHaltedError.__name__, "the run was halted")
 			return _run_covered_write(

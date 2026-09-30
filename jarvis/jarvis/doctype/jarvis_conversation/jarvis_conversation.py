@@ -178,11 +178,13 @@ class JarvisConversation(Document):
 		"""auto_mode is chosen with the chat's first human message and can never be
 		turned off. The one legitimate writer is send_message's locked _write_conv
 		(frappe.db.set_value, which bypasses this controller); every other path is refused."""
+		# .get(): new code can run ahead of its migrate, when the field is not on the doc.
 		previous = self.get_doc_before_save()
-		was_on = bool(previous and previous.auto_mode)
-		if was_on and not self.auto_mode:
+		was_on = bool(previous and previous.get("auto_mode"))
+		now_on = bool(self.get("auto_mode"))
+		if was_on and not now_on:
 			frappe.throw(_("Auto mode can't be turned off for this chat."), frappe.PermissionError)
-		if self.auto_mode and not was_on:
+		if now_on and not was_on:
 			frappe.throw(
 				_("Auto mode can only be turned on with the chat's first message."), frappe.PermissionError
 			)
