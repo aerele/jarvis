@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 
 import frappe
 
+from jarvis.chat import txn
+
 PARENT = "__jarvis_runtime_internal"
 KEY = "runtime_profile_v1"
 ROW = "jarvis-runtime-profile-v1"
@@ -135,11 +137,70 @@ def _forget_snapshot():
 		delattr(frappe.local, _MEMO)
 
 
+def _stored_receipt():
+	"""Non-locking read of the stored receipt row (or ``None``). No ``FOR UPDATE``:
+	safe to call before knowing whether this poll needs to write anything."""
+	return frappe.db.get_value("DefaultValue", ROW, ["parent", "defkey", "defvalue"], as_dict=True)
+
+
+def _matches_stored(row, unavailable: bool, profile) -> bool:
+	"""True when ``row`` already reflects this poll's outcome, so nothing needs to
+	change. v1 is immutable once accepted (the check inside ``_persist_locked``
+	below), so "the same validated profile" is the only shape a repeated poll for
+	an unchanged assignment ever produces - comparing the freshly
+	``fetched_at``-stamped blob byte for byte would never match, and would defeat
+	the entire point of comparing before taking any lock."""
+	if row is None or not row.defvalue or row.parent != PARENT or row.defkey != KEY:
+		return False
+	try:
+		stored = json.loads(row.defvalue)
+	except (ValueError, TypeError):
+		return False
+	if unavailable:
+		return bool(stored.get("unavailable"))
+	if stored.get("unavailable"):
+		return False
+	try:
+		stored_profile = validate(stored.get("profile"))
+	except RuntimeProfileError:
+		return False
+	return stored_profile == profile
+
+
 def persist(raw, settings, *, unavailable=False):
-	"""Called inside the serialized connection write, in the same transaction."""
+	"""Called inside the serialized connection write, in the same transaction.
+
+	Compares against the stored receipt BEFORE taking any lock: readiness polls
+	and the daily sync overwhelmingly report the SAME already-accepted
+	assignment, and ``frappe.db.get_singles_dict("Jarvis Settings",
+	for_update=True)`` used to lock the whole Settings row set on every single
+	one of them regardless. An unchanged poll now takes no lock and writes
+	nothing. A changed one still locks and writes, inside ``txn.replay_on_conflict``
+	so a lost snapshot race is replayed when safe and re-raised, never swallowed,
+	when it is not.
+
+	Never ``fresh=True`` here: a fresh snapshot COMMITS in a job or a migrate, and
+	this runs inside its callers' transaction (``onboarding.write_connection``
+	writes the connection, this receipt and the token as ONE transaction, and
+	``after_migrate`` guards it with a savepoint a commit would invalidate). When the
+	caller has already written, ``replay_is_safe()`` is False and a conflict goes back
+	to the caller, which owns the transaction."""
 	anchor = _anchor(settings)
-	if not unavailable:
-		profile = validate(raw, anchor)
+	profile = None if unavailable else validate(raw, anchor)
+	if _matches_stored(_stored_receipt(), unavailable, profile):
+		setattr(frappe.local, _MEMO, (anchor, profile))
+		return
+
+	def write():
+		_persist_locked(raw, anchor, profile, unavailable)
+
+	txn.replay_on_conflict(write, label="runtime_profile.persist")
+
+
+def _persist_locked(raw, anchor, profile, unavailable) -> None:
+	"""The locking write itself: one self-contained unit, safe to run again from a
+	fresh snapshot after a lost race (it re-reads ``row`` from scratch and takes
+	its own lock each time)."""
 	record = {"profile": raw, "anchor": anchor, "fetched_at": datetime.now(UTC).isoformat()}
 	if unavailable:
 		record["unavailable"] = True
@@ -341,12 +402,18 @@ def after_migrate():
 
 
 def ingest_current(data):
-	"""Readiness polls may refresh only the already accepted connection."""
+	"""Readiness polls may refresh only the already accepted connection.
+
+	Reads ``Jarvis Settings`` un-locked: the old ``frappe.db.get_singles_dict(...,
+	for_update=True)`` here locked the whole Settings row set on EVERY poll just to
+	compare the anchor, before ``persist`` even knew whether anything had changed.
+	``persist`` does its own non-locking compare and only takes a lock (Settings +
+	the DefaultValue row) on the path that actually writes, so nothing is lost by
+	reading the anchor here from the ordinary cached doc."""
 	raw = getattr(data, "runtime_profile", None)
 	unavailable = data.get("runtime_profile_status") == "unsupported_runtime"
 	if not isinstance(data, ConnectionData) and not unavailable:
 		return
-	frappe.db.get_singles_dict("Jarvis Settings", for_update=True)
 	settings = frappe.get_single("Jarvis Settings")
 	anchor = _anchor(settings)
 	if all(

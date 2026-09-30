@@ -41,6 +41,7 @@ import time
 
 import frappe
 
+from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_access
 
@@ -1036,10 +1037,20 @@ def settle_conversation_dispatching(conversation: str, terminal_state: str, erro
 def mark_cancel_requested(conversation: str) -> None:
 	"""stop_run hook: record cancel intent on the dispatching Turn (D2's
 	dispatching->cancel-intent transition). NOT terminal - the legacy worker's
-	aborted-terminal settles + promotes. Flag-gated, best-effort."""
+	aborted-terminal settles + promotes. Flag-gated, best-effort.
+
+	W2: the read + CAS is one unit, replayed whole by ``txn.replay_on_conflict``
+	if it loses a snapshot race against the pump's own CASes on this row (a lost
+	race here used to be silently dropped by the bare ``except``, with no log -
+	settlement then reports "error" instead of "stopped" for a mid-stream Stop).
+	Called from ``stop_run`` after only read-only work (``_get_owned_conversation``),
+	so nothing is pending when this unit starts and replay is always safe. This
+	hook must still never raise into ``stop_run`` (not wrapped there), so a
+	conflict that survives the replay is LOGGED, not silently dropped as before."""
 	if not admission_enabled():
 		return
-	try:
+
+	def unit() -> None:
 		run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
 		if run_id:
 			_run_cas(
@@ -1048,8 +1059,17 @@ def mark_cancel_requested(conversation: str) -> None:
 				{"r": run_id},
 			)
 			frappe.db.commit()
-	except Exception:
-		frappe.db.rollback()
+
+	try:
+		txn.replay_on_conflict(unit, label=f"admission.mark_cancel_requested {conversation}")
+	except Exception as e:
+		try:
+			# report_lost_race re-raises a non-conflict exception; this hook must
+			# never raise into stop_run (not wrapped there), so catch that re-raise
+			# and log it too instead of letting it propagate.
+			txn.report_lost_race(e, title="admission.mark_cancel_requested")
+		except Exception:
+			frappe.log_error(title="admission.mark_cancel_requested", message=frappe.get_traceback())
 
 
 # --------------------------------------------------------------------------- #
@@ -1086,40 +1106,75 @@ def cancel_queued_turn(run_id: str) -> dict:
 	Returns ``{"ok": True, "run_id", "path": "queued"|"preparing_ready"}`` so the
 	caller/UI knows which path won; ``{"ok": False, ...}`` when the turn already
 	advanced (e.g. dispatched) — the UI then KEEPS its chip until the server confirms
-	(no optimistic clear on failure)."""
+	(no optimistic clear on failure).
+
+	W1: the read (prelude) + state-routed CAS (+ placeholder cleanup) is ONE unit,
+	replayed whole by ``txn.replay_on_conflict``: the pump commits promote/claim/
+	dispatch CASes on this same row roughly every 0.2s, so a plain read here can
+	easily be stale by the time the CAS runs, which used to surface as a raw 500.
+	The prelude (the read + the owner check) is read-only, so re-running it on
+	replay just re-reads the present row/version - correct, not merely safe. On
+	exhaustion the conflict is caught at this endpoint boundary ONLY (never inside
+	the unit, which must stay a plain re-raise) and turned into the same
+	``{"ok": False, ...}`` shape a lost CAS already returns, logged rather than
+	surfaced as a 500."""
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
-	row = frappe.db.get_value(
-		TURN,
-		run_id,
-		["conversation", "state", "version", "relay_target_id", "seed_message", "assistant_message"],
-		as_dict=True,
-	)
-	if not row:
-		return {"ok": False, "reason": frappe._("This turn no longer exists.")}
-	owner = _assert_owner(row["conversation"])
 	from jarvis.chat import turn_state as ts
 
-	state = row["state"]
-	version = int(row["version"] or 0)
-	path = None
-	if state == "queued":
-		if ts.cancel_queued(run_id, version):
-			path = "queued"
-	elif state in ("preparing", "ready"):
-		if ts.cancel_preparing_or_ready(run_id, version):
-			path = "preparing_ready"
-			# Clean the assistant placeholder prepare attached so a reload never shows
-			# a stuck spinner for a cancelled turn (credit already released by the CAS).
-			if row.get("assistant_message"):
-				try:
-					_run_cas(
-						f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s",
-						{"m": row["assistant_message"]},
-					)
-				except Exception:
-					pass
-	frappe.db.commit()
+	def unit() -> dict:
+		row = frappe.db.get_value(
+			TURN,
+			run_id,
+			["conversation", "state", "version", "relay_target_id", "seed_message", "assistant_message"],
+			as_dict=True,
+		)
+		if not row:
+			return {"row": None, "owner": None, "path": None}
+		owner = _assert_owner(row["conversation"])
+		state = row["state"]
+		version = int(row["version"] or 0)
+		path = None
+		if state == "queued":
+			if ts.cancel_queued(run_id, version):
+				path = "queued"
+		elif state in ("preparing", "ready"):
+			if ts.cancel_preparing_or_ready(run_id, version):
+				path = "preparing_ready"
+				# Clean the assistant placeholder prepare attached so a reload never shows
+				# a stuck spinner for a cancelled turn (credit already released by the CAS).
+				if row.get("assistant_message"):
+					try:
+						_run_cas(
+							f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s",
+							{"m": row["assistant_message"]},
+						)
+					except Exception as e:
+						if txn.is_write_conflict(e):
+							# The server already aborted the WHOLE transaction on this
+							# statement - including the cancel CAS above, even though it
+							# looked like a local success. A bare swallow here used to
+							# let the unit fall through to `frappe.db.commit()` (a no-op
+							# on an already-aborted transaction) and report success while
+							# nothing landed. Re-raise so replay_on_conflict reruns the
+							# WHOLE unit from a fresh snapshot instead.
+							raise
+						frappe.log_error(
+							title="admission.cancel_queued_turn placeholder cleanup",
+							message=frappe.get_traceback(),
+						)
+		frappe.db.commit()
+		return {"row": row, "owner": owner, "path": path}
+
+	try:
+		result = txn.replay_on_conflict(unit, label=f"admission.cancel_queued_turn {run_id}")
+	except Exception as e:
+		txn.report_lost_race(e, title="admission.cancel_queued_turn")
+		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
+
+	row, owner, path = result["row"], result["owner"], result["path"]
+	if row is None:
+		return {"ok": False, "reason": frappe._("This turn no longer exists.")}
 	if path == "preparing_ready":
 		# jarvis#1425 review (scoped re-review, 2026-09-27): preparing/ready are
 		# in-flight states (_INFLIGHT_STATES) - a user cancel leaves one.
