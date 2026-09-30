@@ -818,7 +818,11 @@
 						</div>
 						<!-- receipt chip: a confirmed / discarded / failed gated write, shown
 						     inline in place of the confirmation card that used to vanish -->
-						<ReceiptChip v-else-if="m.role === 'tool'" :message="m" />
+						<ReceiptChip
+							v-else-if="m.role === 'tool'"
+							:message="m"
+							:auto-mode="!!convAutoMode"
+						/>
 						<!-- user -->
 						<Message
 							v-else-if="m.role === 'user'"
@@ -3138,6 +3142,175 @@
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
+<<<<<<< HEAD
+=======
+							<button
+								v-if="autoView.visible"
+								class="jv-iconbtn"
+								:title="autoModeTitle"
+								:disabled="holdActive"
+								:aria-disabled="autoView.locked ? 'true' : undefined"
+								@click="onAutoModeClick"
+								:aria-pressed="String(autoView.on)"
+								:style="{
+									height: '30px',
+									display: 'flex',
+									alignItems: 'center',
+									gap: '4px',
+									padding: autoView.on ? '0 8px' : '0',
+									width: autoView.on ? 'auto' : '30px',
+									justifyContent: 'center',
+									background: 'transparent',
+									border: autoView.on ? '1px solid var(--cta)' : 'none',
+									borderRadius: '7px',
+									cursor: autoView.locked ? 'default' : 'pointer',
+									color: autoView.on ? 'var(--cta)' : 'var(--text-3)',
+									fontSize: '12px',
+									fontWeight: '500',
+								}"
+							>
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.7"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path d="M13 2 4 14h7l-1 8 9-12h-7Z" />
+								</svg>
+								<span v-if="autoView.on">{{ AUTO_MODE_COPY.label }}</span>
+							</button>
+							<!-- Connector-focus pill: scope this conversation to one connected +
+							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
+							     in send()). Connectors are a default feature, so this is always
+							     shown, even before the first app is connected, so the picker's
+							     "Browse connectors" row is the way in; a focus already armed still
+							     shows the pill so it stays clearable even if that connector was
+							     since disabled. The pill's
+							     border/background live on this wrapping span (not on either
+							     button), because Composer.vue's own convention is that a remove
+							     control is a SIBLING button, never nested inside the one it sits
+							     on - the ×, below, is exactly that sibling, not a nested control.
+
+							     The picker itself is a frappe-ui Dropdown (same idiom as the
+							     header's support pill above) rather than a hand-rolled overlay:
+							     this span is its default-slot trigger, so open/close and
+							     outside-click/Escape are the component's, not ours - see
+							     connectorFocusMenuOptions and onConnectorFocusOpenChange below.
+							     side="top" because this toolbar sits at the BOTTOM of the
+							     composer, unlike the header pill which opens downward. The as-
+							     child trigger attaches its open-on-click behaviour to this span,
+							     so a click on either inner button bubbles up and opens the menu -
+							     the × must stop that bubbling (.stop) or clearing focus would
+							     reopen the picker in the same click. -->
+							<Dropdown
+								:options="connectorFocusMenuOptions"
+								side="top"
+								@update:open="onConnectorFocusOpenChange"
+							>
+								<span
+									class="jv-connfocus-pill"
+									:style="{
+										display: 'flex',
+										alignItems: 'center',
+										height: '30px',
+										padding: connectorFocus ? '0 2px 0 8px' : '0',
+										borderRadius: '7px',
+										border: connectorFocus
+											? '1px solid var(--border)'
+											: 'none',
+										background: connectorFocus
+											? 'var(--surface-1)'
+											: 'transparent',
+										color: connectorFocus ? 'var(--text)' : 'var(--text-3)',
+									}"
+								>
+									<button
+										class="jv-iconbtn"
+										:title="
+											connectorFocus
+												? `Focused on ${connectorFocus.label}. Click to change.`
+												: 'Focus this chat on one connected app'
+										"
+										:aria-pressed="String(!!connectorFocus)"
+										:style="{
+											height: '26px',
+											display: 'flex',
+											alignItems: 'center',
+											gap: '4px',
+											padding: 0,
+											width: connectorFocus ? 'auto' : '30px',
+											justifyContent: 'center',
+											background: 'transparent',
+											border: 'none',
+											borderRadius: '6px',
+											cursor: 'pointer',
+											color: 'inherit',
+											fontSize: '12px',
+											fontWeight: '500',
+										}"
+									>
+										<ConnectorLogo
+											v-if="connectorFocus"
+											:preset="connectorFocus.preset"
+											:size="14"
+										/>
+										<svg
+											v-else
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.7"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path d="M12 22v-5" />
+											<path d="M9 8V2" />
+											<path d="M15 8V2" />
+											<path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+										</svg>
+										<span
+											v-if="connectorFocus"
+											style="
+												max-width: 100px;
+												overflow: hidden;
+												text-overflow: ellipsis;
+												white-space: nowrap;
+											"
+											>{{ connectorFocus.label }}</span
+										>
+									</button>
+									<button
+										v-if="connectorFocus"
+										class="jv-iconbtn"
+										title="Clear focus"
+										aria-label="Clear connector focus"
+										style="
+											width: 20px;
+											height: 20px;
+											display: flex;
+											align-items: center;
+											justify-content: center;
+											background: transparent;
+											border: none;
+											border-radius: 50%;
+											cursor: pointer;
+											color: inherit;
+											font-size: 13px;
+											line-height: 1;
+										"
+										@click.stop="setConnectorFocus(null)"
+									>
+										×
+									</button>
+								</span>
+							</Dropdown>
+>>>>>>> 2f71d59 (feat(chat): auto mode toggle, warning and Settings default in the web app [plan: 2026-09-30-581-auto-mode])
 							<!-- The composer's own "Get help from a human" button used to live
 							     here (Task 6) - it's gone now that Support has one entry point,
 							     the headphones icon in the header (see supportEntryVisible near
@@ -4110,6 +4283,8 @@ import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
+import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
+import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
@@ -4817,12 +4992,82 @@ const supportMenuOptions = computed(() => [
 // this is belt-and-braces).
 onMounted(() => {
 	loadMyUsage();
+	store.loadAutoModeSettings();
 	if (supportOn) supportStore.refreshAwaiting().catch(() => {});
 });
 // One-shot "ground on wiki": when armed, the NEXT message carries a
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
 const groundNextTurn = ref(false);
+<<<<<<< HEAD
+=======
+// Per-chat auto mode (#581). `convAutoMode` mirrors the server's flag for the
+// shown chat (get_conversation, or the send response); `autoModeArmed` is the
+// local pre-send choice, pre-armed from the account default on an empty chat and
+// reset on every chat switch. messageCount ignores the optimistic/failed bubbles
+// so the toggle stays editable until the server confirms the first message.
+const convAutoMode = ref(0);
+const autoModeArmed = ref(false);
+// True once the server accepted a first message for the shown chat. The choice is
+// made from that moment, although the optimistic bubble keeps its tmp- name until
+// the reply starts (which can be a minute on a first session); without this the
+// toggle stayed visible and clickable on a chat that can no longer change.
+const autoModeDecided = ref(false);
+const { ensureAutoModeConsent } = useAutoModeConsent();
+const autoView = computed(() => {
+	const saved = messages.value.filter(
+		(m) => !m.failed && !String(m.name || "").startsWith("tmp-")
+	).length;
+	return autoModeView({
+		messageCount: autoModeDecided.value ? Math.max(1, saved) : saved,
+		convAutoMode: convAutoMode.value,
+		armed: autoModeArmed.value,
+	});
+});
+const autoModeTitle = computed(() =>
+	autoView.value.locked
+		? AUTO_MODE_COPY.tipLocked
+		: autoView.value.on
+		? AUTO_MODE_COPY.tipArmed
+		: AUTO_MODE_COPY.tipOff
+);
+// A chat with no messages and no auto mode starts from the account default;
+// anything else starts off.
+function resetAutoModeFor(isEmptyChat, serverAutoMode = 0) {
+	autoModeDecided.value = false;
+	convAutoMode.value = serverAutoMode ? 1 : 0;
+	autoModeArmed.value = !!isEmptyChat && !serverAutoMode && !!store.defaultAutoMode;
+}
+async function onAutoModeClick() {
+	const v = autoView.value;
+	// Locked: a chat in auto mode never turns it off. aria-disabled (not the
+	// disabled attribute) keeps the tooltip and colour, so the click is a no-op.
+	if (v.locked) return;
+	if (v.on) {
+		autoModeArmed.value = false;
+		return;
+	}
+	if (!(await ensureAutoModeConsent())) return;
+	autoModeArmed.value = true;
+}
+// The account default can arrive (or change in Settings) after an empty chat
+// was already shown; follow it there so "start new chats in auto mode" holds.
+watch(
+	() => store.defaultAutoMode,
+	(v) => {
+		if (!convAutoMode.value && autoView.value.visible) autoModeArmed.value = !!v;
+	}
+);
+// Connector-focus pill (composer control, MCP_CONNECTORS_PLAN.md): a soft
+// prompt-level nudge scoping this conversation to ONE connected+enabled
+// connector — NOT tool gating, the agent can still reach for anything, this
+// only tells it what to prefer. { key, label, preset } | null. Persisted per
+// conversation (see connectorFocusStore below) so it survives across turns
+// until the user clears it, unlike the one-shot groundNextTurn above.
+const connectorFocus = ref(null);
+const connectorFocusOptions = ref([]);
+const connectorFocusLoaded = ref(false);
+>>>>>>> 2f71d59 (feat(chat): auto mode toggle, warning and Settings default in the web app [plan: 2026-09-30-581-auto-mode])
 // (sidebar collapse machinery, per-conversation ⋯ menu and inline rename
 // moved to the app shell — stores/shell.js + components/shell/*, §3.7)
 const modelOverride = ref("");
@@ -8619,6 +8864,7 @@ async function loadConversation(id) {
 	createMenuOpen.value = false;
 	if (!id) {
 		messages.value = [];
+		resetAutoModeFor(true);
 		originPage.value = "";
 		originOf.value = "";
 		modelOverride.value = "";
@@ -8663,6 +8909,11 @@ async function loadConversation(id) {
 	// origin-scoped and carry the voice-release token, so the resend affordance survives a mid-send
 	// switch. Dedupe by name (a rejection that lands while we're on-screen already holds one).
 	messages.value = injectPendingBubbles(messages.value, _pendingSends.peek(id));
+	// Auto mode: the server flag always wins. The local armed choice is reset only
+	// on a real chat switch, never on an in-place resync of the chat on screen (a
+	// tab-focus reload must not undo what the user just toggled).
+	if (!_sameConv) resetAutoModeFor(!(d?.messages || []).length, d?.conversation?.auto_mode);
+	else convAutoMode.value = d?.conversation?.auto_mode ? 1 : 0;
 	// get_conversation returns {conversation: {...}, messages: [...]}. Reading
 	// d.model_override (one level too high) silently yielded undefined, so a
 	// saved pin always rendered as "Auto" after a reload.
@@ -9135,6 +9386,7 @@ async function newChat() {
 	// and a later send can release the records by the real scope instead of stranding them (R2-2/R3-2).
 	if (currentId.value) _promoteNewChatScope(currentId.value);
 	messages.value = [];
+	resetAutoModeFor(true);
 	// A brand-new chat is not in the recent list and loadConversation does not
 	// run here (the route watcher no-ops), so clear the last-loaded title;
 	// otherwise isExistingTitledConv keeps the previous conversation's title and
@@ -9412,6 +9664,9 @@ async function send(textArg, resendAck) {
 	// creation_browser: local send time so the hover timestamp shows before
 	// the server copy (with its site-tz creation) reconciles this tmp row
 	const tmpName = `tmp-${Date.now()}`;
+	// Auto mode is chosen with the chat's FIRST message only: decided here, before
+	// the optimistic bubble below lands in messages (autoView ignores it either way).
+	const _sendAutoMode = autoView.value.visible && !autoView.value.locked && autoView.value.on;
 	// Hold a stable REFERENCE to the optimistic bubble (VR4-2): a mid-send conversation switch
 	// replaces messages.value, so on rejection we mutate/re-inject THIS object rather than a
 	// messages.value.find() that returns nothing once the array was swapped by loadConversation().
@@ -9472,7 +9727,8 @@ async function send(textArg, resendAck) {
 			// computed above (for releasing local audio blobs) — non-empty iff this
 			// payload's text came from a dictation, so reuse it verbatim rather than
 			// adding new detection logic.
-			!!(_voiceAck && _voiceAck.length)
+			!!(_voiceAck && _voiceAck.length),
+			_sendAutoMode
 		);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
@@ -9635,6 +9891,21 @@ async function send(textArg, resendAck) {
 			// Same helper newChat() uses. Only currentId + the URL below stay gated on visibility.
 			if (_sentScope === _NEW_CHAT_SCOPE && r.conversation_id !== _NEW_CHAT_SCOPE)
 				_promoteNewChatScope(r.conversation_id);
+<<<<<<< HEAD
+=======
+			// Same visibility-independent reasoning as the promotion above: the pick
+			// this turn actually carried belongs to the conversation the server just
+			// created/used for it, whether or not that's still on screen.
+			if (_sentFocus) _saveConnectorFocusFor(r.conversation_id, _sentFocus);
+			// Mirror the server's flag from the send response itself (no reload needed).
+			// Only when the response carries it: a typed approval returns the confirmed
+			// form without the key, and that must not unlock an auto-mode chat.
+			// message_id marks an accepted send: from here the chat's choice is made.
+			if (_stillOnSentChat) {
+				if (r.message_id) autoModeDecided.value = true;
+				if ("auto_mode" in r) convAutoMode.value = r.auto_mode ? 1 : 0;
+			}
+>>>>>>> 2f71d59 (feat(chat): auto mode toggle, warning and Settings default in the web app [plan: 2026-09-30-581-auto-mode])
 			if (_stillOnSentChat) {
 				// Still on the chat we sent from — safe to reconcile it. Adopt the server's id when it
 				// differs (a brand-new chat that just got its id, or a stale/reaped conversation
@@ -11569,6 +11840,7 @@ watch(
 		if (!list.some((c) => c.name === currentId.value)) {
 			currentId.value = null;
 			messages.value = [];
+			resetAutoModeFor(true);
 			// loadConversation never runs on this path — the next send adopts the
 			// server id directly and the route watcher no-ops because currentId
 			// already equals it — so a builder origin left here would follow the
@@ -11753,6 +12025,7 @@ onMounted(async () => {
 					// hard-deleted after EMPTY_GRACE_DAYS, so a stale bookmark is routine.
 					currentId.value = null;
 					messages.value = [];
+					resetAutoModeFor(true);
 					originPage.value = "";
 					originOf.value = "";
 					try {
