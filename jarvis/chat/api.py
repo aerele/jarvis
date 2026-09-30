@@ -646,7 +646,14 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 		# Focusing an existing empty as the target of a New Chat is activity: bump
 		# its idle clock so the empty-reaper (session_lifecycle._reap_empty) can't
 		# delete it out from under a tab the user just opened onto it.
-		frappe.db.set_value(CONV, empty[0][0], "last_active_at", frappe.utils.now())
+		# It is also handed out as a FRESH chat, so it drops the model and effort pick
+		# an abandoned draft left on it: the caller's pill shows none, and a pick that
+		# survived here would run the first message on a model nobody chose for it.
+		frappe.db.set_value(
+			CONV,
+			empty[0][0],
+			{"last_active_at": frappe.utils.now(), "model_override": "", "thinking_override": ""},
+		)
 		return empty[0][0]
 	# Count only genuinely-new MAIN chats toward the business-greeting cadence
 	# (every third new chat surfaces the card). Dashboard history is a separate
@@ -2137,7 +2144,7 @@ def send_message(
 	#
 	# NOT covered the same way: a brand-new chat (conversation="" or a reaped-conv
 	# fallback), where create_or_focus_empty already left an uncommitted write
-	# (frappe.db.set_value on an existing empty row at api.py:640, or a fresh
+	# (frappe.db.set_value on an existing empty row in its reuse branch, or a fresh
 	# Jarvis Conversation insert via create_conversation). replay_is_safe() then
 	# reads False and a conflict here re-raises instead of replaying, same as the
 	# pre-fix behaviour, since a brand-new/just-reused conversation has no
