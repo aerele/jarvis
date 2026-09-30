@@ -5,7 +5,7 @@
 function esc(s) {
 	return String(s).replace(
 		/[&<>"]/g,
-		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]
+		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
 	);
 }
 
