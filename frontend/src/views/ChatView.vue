@@ -881,30 +881,7 @@
 											v-for="item in activityDetailsFor(m)"
 											:key="item.key"
 										>
-<<<<<<< HEAD
-											<button
-												class="jv-tool-head"
-												@click="toggleTool(t.name)"
-											>
-												<span
-													class="jv-tool-dot"
-													:class="
-														t.tool_status === 'completed'
-															? 'ok'
-															: t.tool_status === 'running'
-															? 'run'
-															: 'err'
-													"
-												></span>
-												<span class="jv-tool-name">{{
-													toolLabel(t.tool_name)
-												}}</span>
-												<span class="jv-tool-status">{{
-													t.tool_status
-												}}</span>
-=======
 											<div v-if="item.kind === 'step'" class="jv-tool-step">
->>>>>>> d450d50 (feat(chat): "Preparing your session" on a first reply, and a finish that stays still [plan: 2026-09-29-first-turn-and-finish-glitches])
 												<svg
 													width="12"
 													height="12"
@@ -940,13 +917,8 @@
 																: 'err'
 														"
 													></span>
-													<ConnectorLogo
-														v-if="toolCallPreset(item.row)"
-														:preset="toolCallPreset(item.row)"
-														:size="13"
-													/>
 													<span class="jv-tool-name">{{
-														toolCallLabel(item.row)
+														toolLabel(item.row.tool_name)
 													}}</span>
 													<span class="jv-tool-status">{{
 														item.row.tool_status
