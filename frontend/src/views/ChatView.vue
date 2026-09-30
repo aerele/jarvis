@@ -3147,45 +3147,6 @@
 								</svg>
 								<span v-if="groundNextTurn">Wiki</span>
 							</button>
-							<button
-								v-if="autoView.visible"
-								class="jv-iconbtn"
-								:title="autoModeTitle"
-								:disabled="holdActive"
-								:aria-disabled="autoView.locked ? 'true' : undefined"
-								@click="onAutoModeClick"
-								:aria-pressed="String(autoView.on)"
-								:style="{
-									height: '30px',
-									display: 'flex',
-									alignItems: 'center',
-									gap: '4px',
-									padding: autoView.on ? '0 8px' : '0',
-									width: autoView.on ? 'auto' : '30px',
-									justifyContent: 'center',
-									background: 'transparent',
-									border: autoView.on ? '1px solid var(--cta)' : 'none',
-									borderRadius: '7px',
-									cursor: autoView.locked ? 'default' : 'pointer',
-									color: autoView.on ? 'var(--cta)' : 'var(--text-3)',
-									fontSize: '12px',
-									fontWeight: '500',
-								}"
-							>
-								<svg
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M13 2 4 14h7l-1 8 9-12h-7Z" />
-								</svg>
-								<span v-if="autoView.on">{{ AUTO_MODE_COPY.label }}</span>
-							</button>
 							<!-- Connector-focus pill: scope this conversation to one connected +
 							     enabled app (soft prompt-level nudge — see sendCtx.focus_connector
 							     in send()). Connectors are a default feature, so this is always
@@ -3313,6 +3274,48 @@
 									</button>
 								</span>
 							</Dropdown>
+							<!-- Auto mode (#581): last in this group, after connectors. Same shape and
+							     on-state colour as the Wiki toggle; the icon is the two filled
+							     triangles Claude Code shows for its auto mode. -->
+							<button
+								v-if="autoView.visible"
+								class="jv-iconbtn"
+								:title="autoModeTitle"
+								:disabled="holdActive"
+								:aria-disabled="autoView.locked ? 'true' : undefined"
+								@click="onAutoModeClick"
+								:aria-pressed="String(autoView.on)"
+								:style="{
+									height: '30px',
+									display: 'flex',
+									alignItems: 'center',
+									gap: '4px',
+									padding: autoView.on ? '0 8px' : '0',
+									width: autoView.on ? 'auto' : '30px',
+									justifyContent: 'center',
+									background: 'transparent',
+									border: autoView.on ? '1px solid var(--cta)' : 'none',
+									borderRadius: '7px',
+									cursor: autoView.locked ? 'default' : 'pointer',
+									color: autoView.on ? 'var(--cta)' : 'var(--text-3)',
+									fontSize: '12px',
+									fontWeight: '500',
+								}"
+							>
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="currentColor"
+									stroke="currentColor"
+									stroke-width="1.6"
+									stroke-linejoin="round"
+								>
+									<path d="M5 7.5v9l6-4.5z" />
+									<path d="M13.5 7.5v9l6-4.5z" />
+								</svg>
+								<span v-if="autoView.on">{{ AUTO_MODE_COPY.label }}</span>
+							</button>
 							<!-- The composer's own "Get help from a human" button used to live
 							     here (Task 6) - it's gone now that Support has one entry point,
 							     the headphones icon in the header (see supportEntryVisible near

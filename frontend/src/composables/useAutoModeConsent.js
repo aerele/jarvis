@@ -15,8 +15,10 @@ export function useAutoModeConsent() {
 		const ok = await confirm({
 			title: AUTO_MODE_COPY.dialogTitle,
 			message: AUTO_MODE_COPY.dialogMessage,
+			warning: AUTO_MODE_COPY.dialogWarning,
 			confirmLabel: AUTO_MODE_COPY.dialogConfirm,
 			cancelLabel: AUTO_MODE_COPY.dialogCancel,
+			danger: true,
 		});
 		if (!ok) return false;
 		store.acknowledgeAutoMode({ save });

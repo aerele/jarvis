@@ -30,6 +30,7 @@
 				>
 					<div id="jv-confirm-title" class="jv-cdialog-title">{{ state.title }}</div>
 					<div v-if="state.message" class="jv-cdialog-msg">{{ state.message }}</div>
+					<div v-if="state.warning" class="jv-cdialog-warn">{{ state.warning }}</div>
 					<div class="jv-cdialog-foot">
 						<button class="jv-btn jv-btn--ghost" @click="settleConfirm(false)">
 							{{ state.cancelLabel }}
@@ -120,6 +121,13 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
 	font-size: 13.5px;
 	line-height: 1.5;
 	color: var(--text-2);
+}
+.jv-cdialog-warn {
+	margin-top: 8px;
+	font-size: 13.5px;
+	line-height: 1.5;
+	font-weight: 600;
+	color: var(--red);
 }
 .jv-cdialog-foot {
 	display: flex;
