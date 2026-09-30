@@ -112,7 +112,10 @@
 							/>
 						</div>
 					</div>
+					<!-- pb-4: the canvas sits flush under the bar here (the saved view
+					     gets the same 16px from its px-5 py-4 canvas wrapper) -->
 					<DashboardFilterBar
+						class="pb-4"
 						:defs="detectedFilters"
 						:modelValue="builderFilters"
 						:errors="builderFilterErrors"

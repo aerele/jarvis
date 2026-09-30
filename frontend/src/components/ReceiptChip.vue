@@ -61,6 +61,22 @@
 				<path d="M12 8v5" />
 				<path d="M12 16.5h.01" />
 			</svg>
+			<!-- Applied by the chat's auto mode (#581): the composer toggle's own icon,
+			     so the receipt and the control that caused it read as one thing. -->
+			<svg
+				v-else-if="autoModeApplied"
+				class="jv-receipt-automode"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="currentColor"
+				stroke="currentColor"
+				stroke-width="1.6"
+				stroke-linejoin="round"
+			>
+				<path d="M5 7.5v9l6-4.5z" />
+				<path d="M13.5 7.5v9l6-4.5z" />
+			</svg>
 			<svg
 				v-else-if="view.icon === 'auto_applied'"
 				width="14"
@@ -170,6 +186,9 @@ import { receiptView } from "@/lib/actionSummary";
 const props = defineProps({
 	// A role="tool" Jarvis Chat Message with a non-empty action_outcome.
 	message: { type: Object, required: true },
+	// The chat runs in auto mode (#581): its writes apply without a card because of
+	// the chat, not a per-request approval, so the "confirm all" line below is false.
+	autoMode: { type: Boolean, default: false },
 });
 
 const open = ref(false);
@@ -205,9 +224,23 @@ const armedSkill = computed(() => props.message.armed_by_skill || "");
 // Request-scoped "confirm all" (design Layer B): ran uncarded because the user
 // approved the whole request. Unlike a macro/skill run there is no external armer
 // NAME, so a bare auto_applied chip would carry no "why"; this fallback labels it.
-// Only for an auto_applied outcome with neither macro nor skill provenance.
+// Only for an auto_applied outcome with neither macro nor skill provenance, and
+// never in an auto-mode chat, where "Applied automatically" alone is the truth.
 const requestApproved = computed(
-	() => view.value.icon === "auto_applied" && !armedMacro.value && !armedSkill.value
+	() =>
+		view.value.icon === "auto_applied" &&
+		!armedMacro.value &&
+		!armedSkill.value &&
+		!props.autoMode
+);
+// The same receipt in an auto-mode chat: applied by the chat's auto mode, so it
+// carries the toggle's icon. A macro or skill run keeps the bolt even there.
+const autoModeApplied = computed(
+	() =>
+		view.value.icon === "auto_applied" &&
+		!armedMacro.value &&
+		!armedSkill.value &&
+		props.autoMode
 );
 
 // A single-record outcome with a Desk link → show a compact "open" affordance
