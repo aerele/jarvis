@@ -91,6 +91,12 @@
 				@update:modelValue="setActivityDetail"
 			/>
 			<ToggleRow
+				:title="AUTO_MODE_COPY.settingsTitle"
+				:help="AUTO_MODE_COPY.settingsHelp"
+				:modelValue="defaultAutoMode"
+				@update:modelValue="setDefaultAutoMode"
+			/>
+			<ToggleRow
 				title="Notify when a reply is ready"
 				:help="`Browser notification when ${agentName} finishes while you are in another tab.`"
 				:modelValue="notifyEnabled"
@@ -282,6 +288,8 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Button, toast } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { useConfirm } from "@/composables/useConfirm";
+import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
+import { AUTO_MODE_COPY } from "@/lib/autoMode";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import ToggleRow from "@/components/settings/ToggleRow.vue";
@@ -540,6 +548,16 @@ onMounted(async () => {
 const showActivityDetail = computed(() => store.activityDetail);
 function setActivityDetail(v) {
 	store.setActivityDetail(v);
+}
+// Per-chat auto mode default (#581). Turning it on while the first-time warning
+// has not been acknowledged opens the shared confirm first; Cancel leaves it off
+// (the Switch is controlled, so not writing the store leaves it showing off).
+// Turning it off never asks.
+const { ensureAutoModeConsent } = useAutoModeConsent();
+const defaultAutoMode = computed(() => !!store.defaultAutoMode);
+async function setDefaultAutoMode(v) {
+	if (v && !(await ensureAutoModeConsent())) return;
+	store.setDefaultAutoMode(v);
 }
 const notifyEnabled = computed(() => store.notifyEnabled);
 // Notification.permission is not reactive, so snapshot it on mount and again
