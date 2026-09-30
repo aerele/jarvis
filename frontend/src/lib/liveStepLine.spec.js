@@ -83,15 +83,15 @@ describe("live steps box wiring", () => {
 		expect(body).toContain(
 			"const slot = artifactKind.value ? artifactTickIndex.value : null;"
 		);
-		expect(body).toContain(
-			"steps: addStep(sameRun ? liveSteps.value.steps : [], p.text, slot),"
+		expect(body).toMatch(
+			/steps: addStep\(\s*sameRun \? liveSteps\.value\.steps : \[\],\s*p\.text,\s*slot,\s*nextActivityOrd\(\)\s*\)/
 		);
 	});
 
 	it("assistant:delta splits narration and paces only the answer into the reply", () => {
 		const body = caseBody("assistant:delta");
 		expect(body).toContain('splitNarration(p.text || "")');
-		expect(body).toContain("liveCandidate.value = {");
+		expect(body).toContain("liveCandidate.value = candidateAfterDelta(liveCandidate.value, {");
 		expect(body).toContain("runId: currentRunId.value,");
 		expect(body).toContain('full: p.text || "",');
 		// The reveal target is the ANSWER, not the raw text — a step candidate
@@ -99,6 +99,14 @@ describe("live steps box wiring", () => {
 		expect(body).toContain("m.content = revealer.receive(p.message_id, answer);");
 		// The old single-line clear-on-answer is gone: steps persist all turn.
 		expect(body).not.toContain("liveStepState");
+	});
+
+	it("run:step takes over a sentence the relay's hide delta held on screen", () => {
+		const body = caseBody("run:step");
+		const steps = body.indexOf("steps: addStep(");
+		const release = body.indexOf("if (liveCandidate.value.held)");
+		expect(steps).toBeGreaterThan(-1);
+		expect(release).toBeGreaterThan(steps); // same tick as the step: no empty frame
 	});
 
 	it("review C3: run:end, run:error and stopRun all snap a still-typing candidate before their own flush", () => {
@@ -155,7 +163,7 @@ describe("live steps box wiring", () => {
 
 	it("a reload seeds the run/step/fence state from the server's live-turn contract", () => {
 		expect(src).toContain(
-			"liveSteps.value = {\n\t\t\t\t\trunId: _streaming.run_id,\n\t\t\t\t\tmsgId: _streaming.name,\n\t\t\t\t\tsteps: stepsFromTexts(_streaming.live_steps),"
+			"liveSteps.value = {\n\t\t\t\t\trunId: _streaming.run_id,\n\t\t\t\t\tmsgId: _streaming.name,\n\t\t\t\t\tsteps: stepsFromTexts(_streaming.live_steps, _streaming.live_step_times),"
 		);
 		expect(src).toContain("currentRunId.value = _streaming.run_id;");
 		expect(src).toContain("pumpFenceAccept(");
@@ -199,9 +207,9 @@ describe("live steps box wiring", () => {
 		// branch decision sneaks in between.
 		expect(body.indexOf("if (", isLiveAt)).toBe(guardAt);
 		// One code path computes the stopped/failed head: the live-fold branch
-		// (liveAnswerShownAt) must never receive `stopped`/`failed` — patching
+		// (the run-clock head) must never receive `stopped`/`failed` — patching
 		// its arguments instead of routing earlier was the rejected fix.
-		const liveFoldAt = body.indexOf("liveAnswerShownAt.value");
+		const liveFoldAt = body.indexOf("seconds: runStartMs.value ?");
 		expect(liveFoldAt).toBeGreaterThan(guardAt);
 		const liveFoldCall = body.slice(liveFoldAt, liveFoldAt + 200);
 		expect(liveFoldCall).not.toContain("stopped:");
@@ -224,9 +232,6 @@ describe("live steps box wiring", () => {
 		expect(src).toMatch(/const RUN_ENDED_STATES = new Set\(\[[^\]]*"done"[^\]]*\]\)/);
 		expect(seed).toContain("_streaming.content = answer;");
 		expect(seed).toMatch(/liveCandidate\.value = \{[\s\S]{0,120}msgId: _streaming\.name,/);
-		expect(seed).toMatch(
-			/liveAnswerShownAt\.value =\s+answer && runStartMs\.value \? \(Date\.now\(\) - runStartMs\.value\) \/ 1000 : null;/
-		);
 	});
 
 	it("flow F1: a mid-turn reload starts the run clock from the reply row's creation", () => {
@@ -237,7 +242,7 @@ describe("live steps box wiring", () => {
 		expect(seed).toContain("runStartMs.value = started;");
 	});
 
-	it("flow F2: the folded head counts saved rows plus tools seen live, and keeps the run's time until the saved duration loads", () => {
+	it("flow F2: the folded head counts saved rows plus tools seen live, and keeps the tab's own run time over the saved duration", () => {
 		const end = caseBody("run:end");
 		expect(end).toContain("finishedRun.value = {");
 		expect(end.indexOf("finishedRun.value = {")).toBeLessThan(
@@ -245,11 +250,68 @@ describe("live steps box wiring", () => {
 		);
 		const at = src.indexOf("function boxViewFor(m) {");
 		const body = src.slice(at, src.indexOf("\n}", at));
-		expect(body).toContain("seconds: elapsedOf(m) || (fin && fin.seconds)");
+		expect(body).toContain("seconds: (fin && fin.seconds) || elapsedOf(m)");
 		expect(body).toContain("toolNames: toolNamesFor(m, fin && fin.tools)");
 		expect(body).toContain("toolNames: toolNamesFor(m, visibleActiveTools.value)");
 		expect(src).toContain(
 			"return turnToolNames(activityByAssistant.value[m.name] || [], liveTools);"
 		);
+	});
+
+	it("the head's time never jumps at the finish: the live fold reads the run clock run:end stamps", () => {
+		// e2e2 2026-09-29: the live fold froze at the moment the answer showed
+		// ("Worked 30s") and jumped to the run span at run:end ("Worked 32s").
+		const at = src.indexOf("function boxViewFor(m) {");
+		const body = src.slice(at, src.indexOf("\n}", at));
+		expect(body).toContain(
+			"seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,"
+		);
+		expect(caseBody("run:end")).toContain("seconds: shownRunSeconds(),");
+		// ...but only while that clock ticks: a recovered answer lands after busy
+		// went false at the park, and must not read the frozen clock (review D1).
+		expect(src).toContain("const now = busy.value && nowMs.value ? nowMs.value : Date.now();");
+		expect(src).not.toContain("liveAnswerShownAt");
+	});
+
+	it("a first reply prepares its session: waking survives run:start and nothing else shows yet", () => {
+		const status = caseBody("run:status");
+		expect(status).toContain("sessionPrepRunId.value = p.run_id || null;");
+		const at = src.indexOf("function overrideFor(m) {");
+		const body = src.slice(at, src.indexOf("\n}", at));
+		expect(body).toMatch(/isPreparingSession\(\{[\s\S]*sessionTurn: sessionTurnFor\(m\),/);
+		expect(body).toContain("return SESSION_PREP;");
+		// Pairing keeps its own copy and wins over it.
+		expect(body.indexOf("preConnectStatusLabel(statusPhase.value)")).toBeLessThan(
+			body.indexOf("return SESSION_PREP;")
+		);
+	});
+
+	it("tool results merge live, so the count and Reports consulted never change at the reload", () => {
+		const res = caseBody("tool:result");
+		expect(res).toContain(
+			"if (!currentRunId.value || !currentMsgId.value || !p.tool_message_id) break;"
+		);
+		expect(src).toContain(
+			"const transcript = computed(() => withLiveToolRows(messages.value, liveToolRows.value));"
+		);
+		expect(src).toContain(
+			"const reportToolsByTurn = computed(() => reportToolsByAssistant(transcript.value));"
+		);
+		const act = src.slice(src.indexOf("const activityByAssistant = computed(() => {"));
+		expect(act.slice(0, 200)).toContain("for (const m of transcript.value) {");
+		expect(caseBody("run:start")).toContain(
+			"liveToolRows.value = { msgId: p.message_id || null, rows: [] };"
+		);
+		// Steps and results carry this tab's arrival order for the expanded head.
+		expect(res).toContain("toolRowFromResult(p, nextActivityOrd())");
+		// A confirm/discard receipt is never merged into the live reply (/code-review).
+		expect(res).toContain("if (p.action_outcome) break;");
+		// The expanded head lists saved (or live) steps with the tool rows.
+		expect(src).toContain('v-for="item in activityDetailsFor(m)"');
+		expect(src).toContain(
+			"return activityItems(steps, activityByAssistant.value[m.name] || []);"
+		);
+		// Record names link as the answer lands, not after the reload.
+		expect(src).toContain("const docRefs = computed(() => collectDocRefs(transcript.value));");
 	});
 });

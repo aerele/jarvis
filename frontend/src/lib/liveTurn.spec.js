@@ -1,11 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
 	MAX_CANDIDATE_CHARS,
+	SESSION_PREP,
+	activityItems,
 	addStep,
+	candidateAfterDelta,
 	countLabel,
 	foldedHead,
 	formatWorked,
-	isLookupTool,
+	hasSavedModelTools,
+	isPreparingSession,
 	isStepCandidate,
 	liveBox,
 	splitNarration,
@@ -61,6 +65,11 @@ describe("addStep", () => {
 			{ text: S2, slot: null },
 		]);
 		expect(stepsFromTexts(undefined)).toEqual([]);
+		// With the server's times, a restored step keeps when it was seen.
+		expect(stepsFromTexts([S1, S2], ["2026-09-30 00:17:24.000000", null])).toEqual([
+			{ text: S1, slot: null, at: "2026-09-30 00:17:24.000000" },
+			{ text: S2, slot: null },
+		]);
 	});
 });
 
@@ -98,6 +107,200 @@ describe("narration candidate", () => {
 	it("the relay's empty mirror leaves nothing typing", () => {
 		expect(splitNarration("")).toEqual({ candidate: "", answer: "" });
 	});
+
+	it("types without markdown marks, the way the server shows the step", () => {
+		// e2e2 2026-09-29: an answer's first line typed into the box as
+		// "…for **Jarvis Agebt (Demo)**:" with the raw marks showing.
+		const line =
+			"Top customers as of 29-09-2026 for **Jarvis Agebt (Demo)**: `ACC-0001` __now__";
+		expect(splitNarration(line)).toEqual({
+			candidate: "Top customers as of 29-09-2026 for Jarvis Agebt (Demo): ACC-0001 now",
+			answer: "",
+		});
+		// The answer keeps its marks: only the box text is shaped.
+		expect(splitNarration(line, { ended: true }).answer).toBe(line);
+	});
+});
+
+describe("arrival order and the expanded head", () => {
+	it("a new step keeps the order it arrived in; a growing resend keeps its first", () => {
+		let steps = addStep([], "Checking", null, 1);
+		steps = addStep(steps, "Checking the ledger.", null, 4);
+		expect(steps).toEqual([{ text: "Checking the ledger.", slot: null, ord: 1 }]);
+		expect(addStep([], "No order")).toEqual([{ text: "No order", slot: null }]);
+	});
+
+	it("saved steps sit before the first tool row that came after them", () => {
+		const steps = [
+			{ text: "Checking the receivables register.", at: "2026-09-29 22:13:14.100000" },
+			{ text: "Running the summary.", at: "2026-09-29 22:13:29.000000" },
+		];
+		const rows = [
+			{ name: "t1", creation: "2026-09-29 22:13:15.278432" },
+			{ name: "t2", creation: "2026-09-29 22:13:23.039016" },
+			{ name: "t3", creation: "2026-09-29 22:13:30" },
+		];
+		expect(activityItems(steps, rows).map((i) => i.key)).toEqual([
+			"step-0",
+			"t1",
+			"t2",
+			"step-1",
+			"t3",
+		]);
+	});
+
+	it("live steps and live tool rows order by the arrival counter", () => {
+		const items = activityItems(
+			[
+				{ text: "A", ord: 2 },
+				{ text: "B", ord: 5 },
+			],
+			[
+				{ name: "recall", ord: 1 },
+				{ name: "query", ord: 3 },
+			]
+		);
+		expect(items.map((i) => i.key)).toEqual(["recall", "step-0", "query", "step-1"]);
+		expect(items[1]).toEqual({ kind: "step", key: "step-0", text: "A" });
+		expect(items[0].kind).toBe("tool");
+	});
+
+	it("after a tab-focus resync, what the reload loaded sorts before what arrived live", () => {
+		// e2e2 2026-09-30 (run 8): the resync saved the first-turn recall row
+		// (server time) before the step and the query arrived live (counter);
+		// the reload later showed recall, step, query - the live view must too.
+		const items = activityItems(
+			[{ text: "I’m checking your customer count.", slot: null, ord: 3 }],
+			[
+				{ name: "recall", creation: "2026-09-30 00:17:23.101000" },
+				{ name: "query", ord: 4 },
+			]
+		);
+		expect(items.map((i) => i.key)).toEqual(["recall", "step-0", "query"]);
+		// A step restored by the resync carries its server time the same way.
+		const restored = activityItems(
+			[
+				{ text: "A", at: "2026-09-30 00:17:24.000000" },
+				{ text: "B", ord: 7 },
+			],
+			[
+				{ name: "t1", creation: "2026-09-30 00:17:25.000000" },
+				{ name: "t2", ord: 8 },
+			]
+		);
+		expect(restored.map((i) => i.key)).toEqual(["step-0", "t1", "step-1", "t2"]);
+	});
+
+	it("an item with no key at all puts every step first", () => {
+		const items = activityItems(
+			[{ text: "A" }, { text: "B", ord: 9 }],
+			[{ name: "t1", creation: "2026-09-29 22:13:15" }]
+		);
+		expect(items.map((i) => i.key)).toEqual(["step-0", "step-1", "t1"]);
+		expect(activityItems([], []).length).toBe(0);
+		expect(activityItems(null, [{ name: "t1" }]).map((i) => i.key)).toEqual(["t1"]);
+	});
+});
+
+describe("narration held through the relay's hide", () => {
+	const typing = { runId: "r1", msgId: "m1", text: S3, full: S3, held: false };
+	const split = (full, over = {}) => ({
+		runId: "r1",
+		msgId: "m1",
+		...splitNarration(full),
+		...over,
+		full,
+		text: over.text ?? splitNarration(full).candidate,
+	});
+
+	it("a delta that empties the reply keeps the sentence typing, with no answer to snap", () => {
+		// e2e2 2026-09-29: the hide delta landed a frame before run:step and the
+		// box fell back to "Preparing your session" for that frame.
+		expect(candidateAfterDelta(typing, split(""))).toEqual({
+			runId: "r1",
+			msgId: "m1",
+			text: S3,
+			full: "",
+			held: true,
+		});
+	});
+
+	it("new text, an answer or another run replaces it as before", () => {
+		expect(candidateAfterDelta(typing, split("Checking"))).toMatchObject({
+			text: "Checking",
+			held: false,
+		});
+		const answer = "You have 3 customers.\n\nDetails";
+		expect(candidateAfterDelta(typing, split(answer))).toEqual({
+			runId: "r1",
+			msgId: "m1",
+			text: "",
+			full: answer,
+			held: false,
+		});
+		expect(candidateAfterDelta(typing, split("", { runId: "r2" }))).toMatchObject({
+			text: "",
+			held: false,
+		});
+		expect(candidateAfterDelta(null, split(""))).toMatchObject({ text: "", held: false });
+	});
+});
+
+describe("preparing the session", () => {
+	const quiet = { steps: [], candidate: "", activeTools: [], answer: "" };
+
+	it("a session turn with nothing on screen yet is preparing", () => {
+		expect(isPreparingSession({ ...quiet, sessionTurn: true })).toBe(true);
+	});
+
+	it("any sign of the turn ends it: a step, narration typing, a tool, answer text", () => {
+		const on = { ...quiet, sessionTurn: true };
+		expect(isPreparingSession({ ...on, steps: [{ text: S1, slot: null }] })).toBe(false);
+		expect(isPreparingSession({ ...on, candidate: "Checking" })).toBe(false);
+		expect(
+			isPreparingSession({ ...on, activeTools: [{ name: "query", status: "running" }] })
+		).toBe(false);
+		expect(isPreparingSession({ ...on, answer: "You have" })).toBe(false);
+		// A reload mid-turn: the tools this tab never saw start are saved rows.
+		expect(isPreparingSession({ ...on, savedTools: true })).toBe(false);
+		expect(isPreparingSession({ ...on, candidate: "   ", answer: "\n" })).toBe(true);
+	});
+
+	it("a reload mid-turn ends it only for tools the model ran, not the session's recall", () => {
+		// A tab-focus resync reloads the transcript; the plugin's recall row is
+		// saved ~0.5 s into every first turn with no call id.
+		const recall = { name: "t0", role: "tool", tool_name: "recall", tool_call_id: null };
+		const query = { name: "t1", role: "tool", tool_name: "query", tool_call_id: "call_1" };
+		const rows = [{ name: "u1", role: "user" }, { name: "a1", role: "assistant" }, recall];
+		expect(hasSavedModelTools(rows, "a1")).toBe(false);
+		expect(hasSavedModelTools([...rows, query], "a1")).toBe(true);
+		// A recall the model called itself carries a call id: that is work.
+		expect(
+			hasSavedModelTools([...rows.slice(0, 2), { ...recall, tool_call_id: "c" }], "a1")
+		).toBe(true);
+		// Tool rows of a later turn never count for this reply.
+		expect(
+			hasSavedModelTools([...rows.slice(0, 2), { name: "u2", role: "user" }, query], "a1")
+		).toBe(false);
+		expect(hasSavedModelTools(rows, "gone")).toBe(false);
+	});
+
+	it("a later turn of an ongoing session is never preparing", () => {
+		expect(isPreparingSession({ ...quiet, sessionTurn: false })).toBe(false);
+		expect(isPreparingSession()).toBe(false);
+	});
+
+	it("shows as the current step with its reason, keeping the elapsed time", () => {
+		const box = liveBox({ override: SESSION_PREP, elapsed: "8s", idleText: "Thinking" });
+		expect(box.rows).toEqual([
+			{
+				text: "Preparing your session",
+				state: "current",
+				sub: "The first reply takes a little longer · 8s",
+			},
+		]);
+		expect(box.announce).toBe("Preparing your session");
+	});
 });
 
 describe("folded head", () => {
@@ -106,7 +309,7 @@ describe("folded head", () => {
 			foldedHead({ seconds: "48.2", toolNames: ["get_doc", "jarvis__get_list", "query"] })
 		).toEqual({
 			label: "Worked 48s",
-			count: "3 lookups",
+			count: "3 tools",
 			finishing: false,
 			subline: "",
 			expandable: true,
@@ -114,19 +317,12 @@ describe("folded head", () => {
 		});
 	});
 
-	it("any write makes them actions", () => {
-		expect(countLabel(["get_list", "send_email"])).toBe("2 actions");
-		expect(countLabel(["get_doc"])).toBe("1 lookup");
+	it("counts every tool the turn ran, reads and writes alike", () => {
+		expect(countLabel(["get_list", "send_email"])).toBe("2 tools");
+		expect(countLabel(["get_doc"])).toBe("1 tool");
+		expect(countLabel(["recall", "query", "get_schema"])).toBe("3 tools");
 		expect(countLabel([])).toBe("");
-		expect(isLookupTool("jarvis__get_linked_docs")).toBe(true);
-		expect(isLookupTool("read")).toBe(true);
-		expect(isLookupTool("export_excel")).toBe(false);
-		// Memory recall and a record preview only read (flow review F4: a turn
-		// that recalled memory used to read "actions").
-		expect(isLookupTool("recall")).toBe(true);
-		expect(isLookupTool("jarvis__preview_doc")).toBe(true);
-		expect(isLookupTool("create_doc")).toBe(false);
-		expect(countLabel(["recall", "query", "get_schema"])).toBe("3 lookups");
+		expect(countLabel(undefined)).toBe("");
 	});
 
 	it("stop and failure keep the same line", () => {

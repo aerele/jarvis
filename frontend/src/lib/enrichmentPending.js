@@ -31,6 +31,15 @@
 // any healthy run, and short enough that nobody reads the line as permanent.
 export const ENRICHMENT_PENDING_MAX_MS = 120000;
 
+// How long a reply must still be awaiting enrichment before the line shows. Enrichment
+// lands in 4-12 s on a healthy bench (that same usage poll, plus its retry) and, for a
+// plain answer, adds nothing visible, so a "Finishing…" that appeared and vanished under
+// every reply read as a glitch in a turn that was already done. The line now marks a
+// finish that is actually stuck. A reply whose enrichment WILL add something (a
+// generated image, video or music file, record cards' fields) is marked `immediate`
+// and shows it at once.
+export const ENRICHMENT_CUE_DELAY_MS = 15000;
+
 const noop = () => {};
 
 /**
@@ -43,32 +52,50 @@ const noop = () => {};
  * called once per message that timed out, AFTER `onChange`, so the owner sees the
  * cleared state before it decides to resync.
  *
+ * `showAfterMs` holds a reply back from the emitted set until it has been pending that
+ * long (0, the default, shows it at once; `mark(id, { immediate: true })` skips it for
+ * one reply); `has()` and the deadline ignore it.
+ *
  * `setTimer` / `clearTimer` are injectable purely so the deadline behaviour is
  * testable without real time passing.
  */
 export function createEnrichmentPending(options = {}) {
 	const maxMs = options.maxMs != null ? options.maxMs : ENRICHMENT_PENDING_MAX_MS;
+	const showAfterMs = options.showAfterMs || 0;
 	const onChange = options.onChange || noop;
 	const onExpire = options.onExpire || noop;
 	const setTimer = options.setTimer || ((fn, ms) => setTimeout(fn, ms));
 	const clearTimer = options.clearTimer || ((handle) => clearTimeout(handle));
 
-	const timers = new Map(); // messageId -> timer handle
-	let ids = new Set(); // messageIds currently showing "Finishing…"
+	const timers = new Map(); // messageId -> deadline timer handle
+	const cueTimers = new Map(); // messageId -> show-the-line timer handle
+	let ids = new Set(); // messageIds awaiting message:enriched
+	let shown = new Set(); // of those, the ones pending long enough to show "Finishing…"
 
 	function emit() {
-		onChange(new Set(ids));
+		onChange(new Set(shown));
 	}
 
-	function cancelTimer(messageId) {
-		if (!timers.has(messageId)) return;
-		clearTimer(timers.get(messageId));
-		timers.delete(messageId);
+	function cancelTimers(messageId) {
+		for (const map of [timers, cueTimers]) {
+			if (!map.has(messageId)) continue;
+			clearTimer(map.get(messageId));
+			map.delete(messageId);
+		}
+	}
+
+	function show(messageId) {
+		cueTimers.delete(messageId);
+		if (!ids.has(messageId) || shown.has(messageId)) return;
+		shown.add(messageId);
+		emit();
 	}
 
 	function expire(messageId) {
 		timers.delete(messageId);
 		if (!ids.delete(messageId)) return; // already cleared by message:enriched
+		cancelTimers(messageId);
+		shown.delete(messageId);
 		emit();
 		onExpire(messageId);
 	}
@@ -81,31 +108,38 @@ export function createEnrichmentPending(options = {}) {
 		 * keeps re-announcing the same stuck turn would keep the line up indefinitely,
 		 * which is the very failure being fixed. The clock runs from the FIRST terminal.
 		 */
-		mark(messageId) {
+		mark(messageId, { immediate = false } = {}) {
 			if (!messageId || ids.has(messageId)) return false;
 			ids.add(messageId);
 			timers.set(
 				messageId,
 				setTimer(() => expire(messageId), maxMs)
 			);
-			emit();
+			if (showAfterMs > 0 && !immediate)
+				cueTimers.set(
+					messageId,
+					setTimer(() => show(messageId), showAfterMs)
+				);
+			else show(messageId);
 			return true;
 		},
 
 		/** `message:enriched` landed (or the caller otherwise knows enrichment settled). */
 		clear(messageId) {
 			if (!messageId || !ids.has(messageId)) return false;
-			cancelTimer(messageId);
+			cancelTimers(messageId);
 			ids.delete(messageId);
-			emit();
+			if (shown.delete(messageId)) emit(); // nothing shown yet: nothing to re-render
 			return true;
 		},
 
 		/** Drop everything and cancel every timer (component teardown). */
 		reset() {
-			for (const messageId of [...timers.keys()]) cancelTimer(messageId);
-			if (!ids.size) return;
+			for (const messageId of [...timers.keys(), ...cueTimers.keys()])
+				cancelTimers(messageId);
 			ids = new Set();
+			if (!shown.size) return;
+			shown = new Set();
 			emit();
 		},
 

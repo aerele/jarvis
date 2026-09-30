@@ -112,7 +112,7 @@
 			<span role="status" aria-live="polite" class="jv-steps-sr">{{ view.announce }}</span>
 		</div>
 
-		<!-- folded: "Worked 48s · 5 lookups", expandable only when there is
+		<!-- folded: "Worked 48s · 5 tools", expandable only when there is
 		     something to expand into (foldedHead.expandable). -->
 		<template v-else-if="view.mode === 'folded' && view.head">
 			<component
