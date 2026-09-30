@@ -179,6 +179,10 @@ def update_my_settings(
 		doc.default_auto_mode = 1 if sbool(default_auto_mode) else 0
 	if auto_mode_acknowledged is not None:
 		doc.auto_mode_acknowledged = 1 if sbool(auto_mode_acknowledged) else 0
+	# The default pre-arms every new chat with no dialog, so it can never be on while
+	# the one-time warning is unacknowledged (the app confirms before it enables it).
+	if cint(getattr(doc, "default_auto_mode", 0)):
+		doc.auto_mode_acknowledged = 1
 	if preferred_persona is not None:
 		# Blank clears back to the default; otherwise it must be a known persona
 		# (this value rides the trusted [Context:] line in turn_handler).

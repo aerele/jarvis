@@ -134,8 +134,12 @@ function _saveAutoModeSetting(ref_, field, v) {
 function setDefaultAutoMode(v) {
 	_saveAutoModeSetting(defaultAutoMode, "default_auto_mode", v);
 }
-function acknowledgeAutoMode() {
-	_saveAutoModeSetting(autoModeAcknowledged, "auto_mode_acknowledged", true);
+// save: false only marks it locally, for a caller whose next request records it
+// server-side anyway (turning the default on does): two saves of the same settings
+// row back to back can collide.
+function acknowledgeAutoMode({ save = true } = {}) {
+	if (save) _saveAutoModeSetting(autoModeAcknowledged, "auto_mode_acknowledged", true);
+	else autoModeAcknowledged.value = true;
 }
 // Best-effort read for surfaces that need the two flags before Settings is ever
 // opened (the chat composer pre-arms from defaultAutoMode).

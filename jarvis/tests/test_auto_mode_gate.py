@@ -125,6 +125,14 @@ class TestAutoModeGate(FrappeTestCase):
 		finally:
 			turn_message_binding.clear_run_cancel(conv)
 
+	def test_gate_does_not_name_the_column_before_its_migrate(self):
+		# New code can run ahead of bench migrate: the flag read must not select a
+		# column the table does not have yet, or every gated write would error.
+		self.assertEqual(api._auto_mode_fields(), ("auto_mode",))
+		meta = frappe.get_meta("Jarvis Conversation")
+		with patch.object(type(meta), "has_field", return_value=False):
+			self.assertEqual(api._auto_mode_fields(), ())
+
 	def test_failed_covered_write_keeps_mode(self):
 		conv = self._auto_conv()
 		failure = {"ok": False, "error": {"message": "boom"}}

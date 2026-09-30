@@ -556,7 +556,9 @@ function setActivityDetail(v) {
 const { ensureAutoModeConsent } = useAutoModeConsent();
 const defaultAutoMode = computed(() => !!store.defaultAutoMode);
 async function setDefaultAutoMode(v) {
-	if (v && !(await ensureAutoModeConsent())) return;
+	// save: false - the server records the acknowledgement with the default, so this
+	// stays one request (two saves of the settings row in a row can collide).
+	if (v && !(await ensureAutoModeConsent({ save: false }))) return;
 	store.setDefaultAutoMode(v);
 }
 const notifyEnabled = computed(() => store.notifyEnabled);

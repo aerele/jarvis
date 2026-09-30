@@ -2116,6 +2116,7 @@ def send_message(
 			frappe.utils.cint(auto_mode)
 			and not _delegated
 			and not int(background or 0)
+			and conv_doc.meta.has_field("auto_mode")  # new code ahead of its migrate
 			and not frappe.db.exists(MSG, {"conversation": conv_doc.name})
 		):
 			_conv_changes["auto_mode"] = 1
@@ -2368,7 +2369,9 @@ def send_message(
 		"run_id": run_id,
 		"message_id": msg_doc.name,
 		"conversation_id": conversation,
-		"auto_mode": frappe.utils.cint(frappe.db.get_value(CONV, conversation, "auto_mode")),
+		# This send's own decision, else the value re-read under the row lock in
+		# _write_conv (no extra query, and safe ahead of the migrate).
+		"auto_mode": 1 if _conv_changes.get("auto_mode") else frappe.utils.cint(conv_doc.get("auto_mode")),
 		**_typed_out,
 	}
 	# Phase-0 admission: tell the SPA when the turn is queued (not yet

@@ -214,6 +214,15 @@ class TestAutoMode(FrappeTestCase):
 		user_settings_api.update_my_settings(notify_enabled=1)
 		self.assertEqual(user_settings_api.get_my_settings()["data"]["default_auto_mode"], 1)
 
+	def test_enabling_the_default_records_the_acknowledgement(self):
+		# The default pre-arms new chats with no dialog, so it can never be on while the
+		# one-time warning is unacknowledged, whatever the caller sent.
+		out = user_settings_api.update_my_settings(default_auto_mode=1)
+		self.assertEqual(out["data"]["default_auto_mode"], 1)
+		self.assertEqual(out["data"]["auto_mode_acknowledged"], 1)
+		out = user_settings_api.update_my_settings(auto_mode_acknowledged=0)
+		self.assertEqual(out["data"]["auto_mode_acknowledged"], 1, "still on while the default is on")
+
 	def _overloaded_send(self, conv, branch, **kwargs):
 		"""A send that admission rejects as overloaded, through either cleanup branch:
 		'machine' (accept_or_queue) or 'legacy' (the _dispatch_turn reroute)."""
