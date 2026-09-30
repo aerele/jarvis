@@ -71,6 +71,34 @@ describe("sendMessage context forwarding", () => {
 		expect(JSON.parse(args.attachments)).toEqual([{ file_url: "/f.png" }]);
 	});
 
+	it("forwards a thinking level picked before the chat's first message", async () => {
+		// Ninth positional argument; a brand-new chat has no conversation to save
+		// the pick on, so it rides on the send (like model_override).
+		await sendMessage("", "hi", "gpt-x", undefined, undefined, undefined, false, false, "low");
+		const args = lastSendArgs();
+		expect(args.thinking_override).toBe("low");
+		expect(args.model_override).toBe("gpt-x");
+	});
+
+	it("omits thinking_override when no level was picked", async () => {
+		// The server treats a present-but-empty value as "clear the level", so an
+		// ordinary send must not carry the key at all.
+		await sendMessage("C1", "hi");
+		expect("thinking_override" in lastSendArgs()).toBe(false);
+		await sendMessage(
+			"C1",
+			"hi",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			false,
+			""
+		);
+		expect("thinking_override" in lastSendArgs()).toBe(false);
+	});
+
 	it("forwards the displayed confirmation-card tokens, in order, for a typed approval", async () => {
 		// The server resolves a typed "confirm 2" against THIS ordered list, so the
 		// wire contract must carry it verbatim - a dropped or reordered token would

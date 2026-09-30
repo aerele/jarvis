@@ -4289,6 +4289,7 @@ import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
+import { firstSendPicks } from "@/lib/firstSendPicks";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
@@ -9795,10 +9796,13 @@ async function send(textArg, resendAck) {
 		// is reachable ONLY through the card's own button (approveAndRunPending),
 		// by design (the typed shortcut pins to step-by-step, §3.5).
 		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
+		// A chat started from the home screen has no conversation to save a model or
+		// thinking pick on, so the first send carries it.
+		const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
 		const r = await api.sendMessage(
 			sentFrom,
 			text,
-			undefined,
+			_picks.model,
 			attachments,
 			sendCtx,
 			approvalTokens,
@@ -9807,7 +9811,8 @@ async function send(textArg, resendAck) {
 			// payload's text came from a dictation, so reuse it verbatim rather than
 			// adding new detection logic.
 			!!(_voiceAck && _voiceAck.length),
-			_sendAutoMode
+			_sendAutoMode,
+			_picks.thinking
 		);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
