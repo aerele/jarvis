@@ -192,6 +192,89 @@ class TestScheduledMacroIdentity(MacroSchedulerBase):
 
 
 # --------------------------------------------------------------------------- #
+# admin-v2#675 — say at SAVE that this owner's schedule will never run, instead of
+# accepting it and refusing every slot later
+# --------------------------------------------------------------------------- #
+class TestScheduleIsRefusedAtSaveForABarredOwner(MacroSchedulerBase):
+	"""The scheduler has always refused Administrator (#469). The form accepted the
+	schedule anyway and showed a "Next run", so the macro looked scheduled and simply
+	never ran."""
+
+	def _create(self, tag: str, **kw):
+		return macros_api.create_macro(
+			macro_name=f"{PFX}-{tag}", steps=[{"prompt": "p1"}], schedule_time="09:00", **kw
+		)
+
+	def test_administrator_cannot_put_a_new_macro_on_a_schedule(self):
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._create("admin-new", schedule_enabled=1)
+		self.assertIn("Administrator", str(ctx.exception))
+		self.assertFalse(frappe.db.exists(MACRO, {"macro_name": f"{PFX}-admin-new"}))
+
+	def test_administrator_cannot_switch_a_schedule_on(self):
+		name = self._create("admin-later", schedule_enabled=0)["data"]["name"]
+		with self.assertRaises(frappe.ValidationError):
+			macros_api.update_macro(name, schedule_enabled=1)
+		self.assertFalse(frappe.db.get_value(MACRO, name, "schedule_enabled"))
+
+	def test_administrator_can_still_save_and_edit_an_unscheduled_macro(self):
+		name = self._create("admin-manual", schedule_enabled=0)["data"]["name"]
+		macros_api.update_macro(name, description="still editable")
+		self.assertEqual(frappe.db.get_value(MACRO, name, "description"), "still editable")
+
+	def test_a_schedule_that_is_already_on_can_be_switched_off(self):
+		# A row scheduled before this gate existed must not be trapped: every save
+		# would be refused until the schedule is off, so switching it off has to work.
+		m = _mk_macro("Administrator", "admin-legacy")
+		macros_api.update_macro(m.name, schedule_enabled=0)
+		self.assertFalse(frappe.db.get_value(MACRO, m.name, "schedule_enabled"))
+
+	def test_a_named_user_can_still_schedule(self):
+		frappe.set_user(OWNER_OK)
+		try:
+			name = self._create("named", schedule_enabled=1)["data"]["name"]
+		finally:
+			frappe.set_user("Administrator")
+		self.assertTrue(frappe.db.get_value(MACRO, name, "next_run_at"))
+
+	def test_the_gate_follows_the_macros_owner_not_whoever_is_saving(self):
+		# The scheduler runs a macro as its OWNER. Administrator saving a named user's
+		# scheduled macro is saving a schedule that will run, so it must be accepted.
+		m = _mk_macro(OWNER_OK, "named-owner")
+		macros_api.update_macro(m.name, description="edited by Administrator", schedule_enabled=1)
+		self.assertEqual(frappe.db.get_value(MACRO, m.name, "description"), "edited by Administrator")
+
+	def test_an_already_scheduled_macro_says_how_to_get_unstuck(self):
+		# Every save of such a macro is refused, whatever was edited. The refusal has to
+		# name the way out, or the owner cannot tell why a rename failed.
+		m = _mk_macro("Administrator", "admin-legacy-edit")
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			macros_api.update_macro(m.name, description="just a rename")
+		self.assertIn("switch the schedule off", str(ctx.exception))
+
+	def test_the_form_is_told_why_from_the_macros_owner(self):
+		# The form used to decide this from the logged-in user, which disagrees with
+		# the server whenever someone opens a macro they do not own.
+		blocked = _mk_macro("Administrator", "reason-admin")
+		fine = _mk_macro(OWNER_OK, "reason-named")
+		self.assertIn("Administrator", macros_api.get_macro(blocked.name)["schedule_blocked_reason"])
+		self.assertEqual(macros_api.get_macro(fine.name)["schedule_blocked_reason"], "")
+
+	def test_a_disabled_owner_is_not_told_to_sign_in(self):
+		reason = macros_api._schedule_block_reason(OWNER_OFF)
+		self.assertIn("disabled", reason)
+		self.assertNotIn("Sign in", reason)
+
+	def test_an_owner_without_jarvis_access_is_blocked_too(self):
+		# The scheduler refuses on EITHER check; the save gate used to apply only one,
+		# so this owner's schedule was accepted and then skipped on every slot.
+		with patch("jarvis.permissions.has_jarvis_access", return_value=False):
+			reason = macros_api._schedule_block_reason(OWNER_OK)
+		self.assertIn("access", reason)
+		self.assertEqual(macros_api._schedule_block_reason(OWNER_OK), "")
+
+
+# --------------------------------------------------------------------------- #
 # #471 — failures are durable, honest, and terminalized
 # --------------------------------------------------------------------------- #
 class TestScheduledMacroFailures(MacroSchedulerBase):
