@@ -61,7 +61,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	Switch: {
 		name: "Switch",
-		props: ["modelValue", "label", "disabled"],
+		props: ["modelValue", "label", "disabled", "description"],
 		emits: ["update:modelValue"],
 		template: `<button :disabled="disabled" @click="$emit('update:modelValue', !modelValue)">{{ label }}</button>`,
 	},
@@ -99,6 +99,9 @@ vi.mock("@/pages/macros/StepsBuilder.vue", () => ({
 vi.mock("@/composables/useDocmeta", () => ({ useDocmeta: () => ({}) }));
 vi.mock("@/composables/macroPrefill", () => ({ takeMacroPrefill: () => null }));
 vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+// A named user is logged in throughout: the schedule switch for a SAVED macro must
+// follow what the server says about the macro's owner, not who is looking.
+vi.mock("@/data/session", () => ({ session: { user: "priya@example.com" } }));
 vi.mock("@/lib/errors", () => ({
 	errMessage: (e) => (e && e.message) || String(e),
 	errHtml: (e) => (e && e.message) || String(e),
@@ -257,5 +260,45 @@ describe("MacroDetail Schedule section: summary line reflects the SAVED snapshot
 		expect(nameControl).toBeTruthy();
 		await nameControl.vm.$emit("update:modelValue", "Renamed macro");
 		expect(w.text()).not.toContain("Scheduled monthly on the 15th at 9:00 am.");
+	});
+});
+
+describe("MacroDetail Schedule switch: an owner the scheduler will never run", () => {
+	const REASON =
+		"Scheduled macros cannot run as Administrator. Sign in as a named user to schedule a macro, or switch the schedule off to save this one.";
+
+	function scheduleSwitch(w) {
+		return w
+			.findAllComponents({ name: "Switch" })
+			.find((c) => c.props("label") === "Run on a schedule");
+	}
+
+	it("says why and cannot be switched ON while the schedule is off", async () => {
+		const w = await mountDetail(
+			baseMacro({ schedule_enabled: 0, schedule_blocked_reason: REASON })
+		);
+		const sw = scheduleSwitch(w);
+		expect(sw.props("description")).toBe(REASON);
+		expect(sw.props("disabled")).toBe(true);
+	});
+
+	it("says why but can still be switched OFF when the schedule is already on", async () => {
+		// Every save of such a macro is refused until the schedule is off, so the one
+		// control that gets the owner unstuck must stay usable.
+		const w = await mountDetail(
+			baseMacro({ schedule_enabled: 1, schedule_blocked_reason: REASON })
+		);
+		const sw = scheduleSwitch(w);
+		expect(sw.props("description")).toBe(REASON);
+		expect(sw.props("disabled")).toBe(false);
+	});
+
+	it("is an ordinary switch when the server reports no block", async () => {
+		const w = await mountDetail(
+			baseMacro({ schedule_enabled: 0, schedule_blocked_reason: "" })
+		);
+		const sw = scheduleSwitch(w);
+		expect(sw.props("description")).toBe("Jarvis runs this macro automatically.");
+		expect(sw.props("disabled")).toBe(false);
 	});
 });

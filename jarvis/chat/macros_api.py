@@ -247,6 +247,7 @@ def get_macro(name: str) -> dict:
 		"schedule_weekday": doc.schedule_weekday or None,
 		"schedule_day_of_month": doc.schedule_day_of_month or None,
 		"schedule_time": str(doc.schedule_time or ""),
+		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"next_run_at": str(doc.next_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
@@ -284,17 +285,31 @@ def _refuse_schedule_for_barred_owner(owner: str, schedule_enabled) -> None:
 	run an unscheduled macro, and can switch an existing schedule off."""
 	if not frappe.utils.cint(schedule_enabled):
 		return
+	reason = _schedule_block_reason(owner)
+	if reason:
+		frappe.throw(reason, title=_("This macro cannot be scheduled"))
+
+
+def _schedule_block_reason(owner: str) -> str:
+	"""Why a macro owned by ``owner`` cannot be on a schedule, or "" when it can.
+
+	The ONE wording for it: the save refusal above throws it and ``get_macro`` hands
+	it to the form, so what the form warns and what the server refuses cannot drift.
+	Judged from the macro's OWNER, the identity the scheduler would run as, never
+	from whoever is looking at the form."""
 	from jarvis.permissions import is_valid_unattended_owner
 
 	if is_valid_unattended_owner(owner):
-		return
-	frappe.throw(
-		_(
-			"Scheduled macros cannot run as {0}. Sign in as a named user to put a macro "
-			"on a schedule, or switch the schedule off to save it."
-		).format(owner),
-		title=_("This macro cannot be scheduled"),
-	)
+		return ""
+	if owner in ("Administrator", "Guest"):
+		return _(
+			"Scheduled macros cannot run as {0}. Sign in as a named user to schedule a "
+			"macro, or switch the schedule off to save this one."
+		).format(owner)
+	return _(
+		"Scheduled macros cannot run for {0} because the account is disabled. Switch "
+		"the schedule off to save this macro."
+	).format(owner)
 
 
 @frappe.whitelist()

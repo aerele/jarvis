@@ -158,7 +158,7 @@ import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
-import { nextRunState } from "@/lib/macroSchedule";
+import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml } from "@/lib/errors";
@@ -362,34 +362,19 @@ function scheduleLabel(row) {
 }
 // What the "Next run" cell says, or null for the "-" placeholder. A slot that has
 // passed is "Due now" / "Overdue", never the bare relative time ("5 minutes ago").
+// The wording and the states live in lib/macroSchedule (unit-tested); this only
+// feeds it the row and maps its tone to a colour.
+const NEXT_RUN_TONE = { warn: "text-ink-amber-3", muted: "text-ink-gray-5" };
 function nextRunCell(row) {
-	const { kind } = nextRunState({
+	const cell = describeNextRun({
 		scheduleEnabled: !!row.schedule_enabled,
 		enabled: !!row.enabled,
 		nextRunMs: toLocalMs(row.next_run_at),
 		nowMs: Date.now(),
+		when: exactDate(row.next_run_at),
+		relative: timeAgo(row.next_run_at),
 	});
-	const when = exactDate(row.next_run_at);
-	if (kind === "upcoming") return { text: timeAgo(row.next_run_at), hint: when, class: "" };
-	if (kind === "due")
-		return {
-			text: "Due now",
-			hint: `Was due ${when}. It starts on the next check.`,
-			class: "",
-		};
-	if (kind === "overdue")
-		return {
-			text: "Overdue",
-			hint: `Was due ${when} and has not started. Check the Runs tab for a failed attempt.`,
-			class: "text-ink-amber-3",
-		};
-	if (kind === "off")
-		return {
-			text: "Off",
-			hint: "This macro is turned off, so its scheduled runs are skipped.",
-			class: "text-ink-gray-4",
-		};
-	return null;
+	return cell && { ...cell, class: NEXT_RUN_TONE[cell.tone] || "" };
 }
 function toHHMM(t) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
