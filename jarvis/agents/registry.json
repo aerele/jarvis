@@ -87,7 +87,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "0.2.0",
-      "status": "Coming Soon",
+      "status": "Published",
       "description": "Reviews existing draft Purchase Invoices against exact PO and receipt links, cumulative invoice allocations and an explicitly configured price policy. Preview produces findings; live runs create evidence-backed human review requests. Never creates duplicate invoices, submits, pays, or certifies tax compliance. Manual runs only.",
       "tools_required": [
         "jarvis__get_purchase_match_inputs"
@@ -146,7 +146,7 @@
       "nature": "operator",
       "delivery": "delegate",
       "version": "0.2.0",
-      "status": "Coming Soon",
+      "status": "Published",
       "description": "Reviews submitted receivables and opening balances against typed payment-ledger evidence and recorded payment terms. Produces findings and neutral, unsent reminder text for a named reviewer. Detects India Compliance context when applicable. No sending, Dunning creation, reconciliation, posting, interest or write-offs. Manual runs only.",
       "tools_required": [
         "jarvis__get_receivables_review_inputs"

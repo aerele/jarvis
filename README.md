@@ -246,8 +246,9 @@ capacity degrades the review instead of silently sampling. Monetary finding tota
 remain zero; the note identifies each balance and currency without mixing currencies.
 
 Release requires paired bench registry/tool contract, plugin and private bundle delivery.
-Catalogue availability remains gated until deployment verification; do not fix it with
-a visibility-only change. Existing v0.1 configurations require explicit review settings.
+AP/AR v0.2 are Published in the private manifests and the paired bench registry.
+Publication does not change fleet visibility, promote preview installations or grant ERP
+writes. Existing v0.1 configurations require explicit review settings.
 Run `jarvis.tests.test_receivables_review` with `AR_ASSESSMENT_PATH` pointing to the
 private `assessment.py` for real submitted-invoice/payment-ledger/stale-review coverage.
 The private bundle tests import that runtime directly, not a separate policy oracle.
