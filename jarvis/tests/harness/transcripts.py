@@ -302,6 +302,41 @@ def _build() -> dict[str, dict]:
 		"terminal": {"kind": "failed_final", "stopReason": "stop"},
 	}
 
+	# admin-v2#656: after the chat's model changes, the runtime refuses to resume
+	# its live Claude CLI process and fails the run before producing anything. The
+	# failure discards the stale process, so the same message sent again under a
+	# fresh key starts a new one and succeeds. The pump re-sends exactly once.
+	stale_cli = "Managed CLI live session is no longer reusable. | cli_live_session_changed"
+	t["stale-cli-session"] = {
+		"name": "stale-cli-session",
+		"description": (
+			"Claude CLI live session refused after a model change: an error terminal with no "
+			"frames at all. The pump re-sends it once under a fresh key (admin-v2#656)."
+		),
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [],
+		"terminal": {"kind": "error", "state": "error", "errorMessage": stale_cli},
+	}
+	# Same error after output reached the user: re-sending would repeat it, so it settles.
+	t["stale-cli-session-after-output"] = {
+		"name": "stale-cli-session-after-output",
+		"description": "The stale-session error after a streamed delta: must settle, never re-send.",
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": _stream_text("Checking the invoices now."),
+		"terminal": {"kind": "error", "state": "error", "errorMessage": stale_cli},
+	}
+	# Any other error before output keeps today's behaviour: one attempt, then the card.
+	t["plain-error"] = {
+		"name": "plain-error",
+		"description": "An unrelated error terminal with no frames: settles errored, no re-send.",
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [],
+		"terminal": {"kind": "error", "state": "error", "errorMessage": "upstream closed the stream"},
+	}
+
 	return t
 
 
