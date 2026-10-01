@@ -447,10 +447,10 @@ function seed(data) {
 	});
 	form.steps = mapSteps(data.steps);
 	if (!form.steps.length) form.steps = [{ label: "", prompt: "", skills: [] }];
+	nextRunIsRetry.value = !!data.next_run_is_retry;
 	form.merged_prompt = data.merged_prompt || "";
 	mergeStatus.value = data.merge_status || "";
 	nextRunRaw.value = data.next_run_at || "";
-	nextRunIsRetry.value = !!data.next_run_is_retry;
 	snapshot.value = {
 		macro_name: form.macro_name,
 		description: form.description,
