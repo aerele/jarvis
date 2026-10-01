@@ -27,12 +27,28 @@ export function nextRunState({ scheduleEnabled, enabled, nextRunMs, nowMs }) {
 // What the list's "Next run" cell shows: { text, hint, tone }, or null for the "-"
 // placeholder. The cell used to print the bare relative time, so a slot waiting for
 // the sweep read "Next run: 5 minutes ago". `when` is the slot's exact date and
-// `relative` its relative time, both already formatted by the caller.
-export function nextRunCell({ scheduleEnabled, enabled, nextRunMs, nowMs, when, relative }) {
+// `relative` its relative time, both already formatted by the caller. `isRetry` is
+// the server's `next_run_is_retry`: the slot is a retry of a failed scheduled run,
+// at a time the owner did not choose (absent on a server that does not send it).
+export function nextRunCell({
+	scheduleEnabled,
+	enabled,
+	nextRunMs,
+	nowMs,
+	when,
+	relative,
+	isRetry = false,
+}) {
 	const { kind } = nextRunState({ scheduleEnabled, enabled, nextRunMs, nowMs });
+	if (kind === "upcoming" && isRetry)
+		return {
+			text: `Retry ${relative}`,
+			hint: `The last scheduled run failed. It will be tried again ${when}.`,
+			tone: "warn",
+		};
 	if (kind === "upcoming") return { text: relative, hint: when, tone: "" };
 	if (kind === "due")
-		return { text: "Due now", hint: `Was due ${when}. It should start shortly.`, tone: "" };
+		return { text: "Due now", hint: `Was due ${when}. It has not started yet.`, tone: "" };
 	if (kind === "overdue")
 		return {
 			text: "Overdue",
