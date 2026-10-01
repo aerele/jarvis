@@ -27,7 +27,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
-from jarvis.chat import macro_scheduler, macros
+from jarvis.chat import macro_scheduler, macros, macros_api
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -468,6 +468,77 @@ class TestStaleMacroRunReaper(MacroSchedulerBase):
 			frappe.db.commit()
 			self.assertEqual(macros.reap_stale_macro_runs(), 0)
 		self.assertEqual(frappe.db.get_value(RUN, name, "status"), "running")
+
+
+# --------------------------------------------------------------------------- #
+# admin-v2#675 — saving a macro must not move a slot that is already due, and a
+# schedule must read back as the time that was saved
+# --------------------------------------------------------------------------- #
+class TestScheduleSurvivesASave(MacroSchedulerBase):
+	"""The schedule form posts every field on every save. For a daily macro that
+	includes day-of-month ``0`` and weekday ``""``, which the API stores as ``None``
+	while the row holds ``0`` / ``""``, so the controller read every save as a
+	schedule change and recomputed ``next_run_at`` from now: a run that was due but
+	not swept yet moved to tomorrow, with nothing recorded."""
+
+	def _due_daily_macro(self, tag: str):
+		m = _mk_macro(OWNER_OK, tag)
+		frappe.db.set_value(MACRO, m.name, "schedule_time", "10:15:00", update_modified=False)
+		frappe.db.commit()
+		return m
+
+	def _save_from_the_form(self, m, **changes):
+		payload = {
+			"macro_name": m.macro_name,
+			"schedule_enabled": 1,
+			"schedule_frequency": "daily",
+			"schedule_time": "10:15",
+			"schedule_weekday": "",
+			"schedule_day_of_month": 0,
+			**changes,
+		}
+		frappe.set_user(OWNER_OK)
+		try:
+			macros_api.update_macro(m.name, **payload)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _next_run(self, m):
+		return get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+
+	def test_a_save_that_changes_no_schedule_field_keeps_the_due_slot(self):
+		m = self._due_daily_macro("resave")
+		before = self._next_run(m)
+		self._save_from_the_form(m, description="only the description changed")
+		self.assertEqual(self._next_run(m), before, "re-saving a macro dropped the run that was due")
+
+	def test_changing_the_time_still_reschedules(self):
+		m = self._due_daily_macro("retime")
+		self._save_from_the_form(m, schedule_time="11:30")
+		after = self._next_run(m)
+		self.assertEqual((after.hour, after.minute), (11, 30))
+		self.assertGreater(after, now_datetime())
+
+	def test_changing_the_day_anchor_still_reschedules(self):
+		m = self._due_daily_macro("reanchor")
+		before = self._next_run(m)
+		self._save_from_the_form(m, schedule_frequency="monthly", schedule_day_of_month=15)
+		after = self._next_run(m)
+		self.assertNotEqual(after, before)
+		self.assertEqual(after.day, 15)
+
+	def test_a_midnight_schedule_reads_back_as_midnight(self):
+		# timedelta(0) is falsy, so `schedule_time or ""` returned "" for 00:00 and the
+		# form fell back to its 09:00 default, which the next save then stored.
+		m = _mk_macro(OWNER_OK, "midnight", due=False)
+		frappe.db.set_value(MACRO, m.name, "schedule_time", "00:00:00", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(OWNER_OK)
+		try:
+			shown = macros_api.get_macro(m.name)["schedule_time"]
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(macro_scheduler.parse_schedule_seconds(shown), 0, f"midnight read back as {shown!r}")
 
 
 # --------------------------------------------------------------------------- #
