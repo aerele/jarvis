@@ -409,6 +409,88 @@ class TestScheduledMacroCaps(MacroSchedulerBase):
 
 
 # --------------------------------------------------------------------------- #
+# admin-v2#675 — the sweep runs every five minutes so a macro starts near the time
+# its owner set, while a slot that FAILED is still retried only about hourly
+# --------------------------------------------------------------------------- #
+SWEEP = "jarvis.chat.macro_scheduler.run_due_macros"
+
+
+class TestScheduledMacroCadence(MacroSchedulerBase):
+	def _dispatches(self, mock_run, m) -> int:
+		return [c.args[0] for c in mock_run.call_args_list].count(m.name)
+
+	def _let_the_cooldown_lapse(self, m) -> None:
+		slot = frappe.db.get_value(MACRO, m.name, "next_run_at")
+		frappe.cache().delete_value(macro_scheduler._cooldown_key(m.name, slot))
+
+	def test_the_sweep_is_registered_every_five_minutes_not_hourly(self):
+		from jarvis import hooks
+
+		self.assertIn(SWEEP, hooks.scheduler_events["cron"]["*/5 * * * *"])
+		self.assertNotIn(
+			SWEEP,
+			hooks.scheduler_events["hourly"],
+			"an hourly sweep starts a 10:15 macro at 11:00, which reads as 'never triggered'",
+		)
+
+	def test_a_failed_slot_is_not_retried_by_the_next_sweep(self):
+		m = _mk_macro(OWNER_OK, "cooldown")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")) as mock_run:
+			macro_scheduler.run_due_macros()
+			macro_scheduler.run_due_macros()
+		self.assertEqual(self._dispatches(mock_run, m), 1, "a failing macro was retried every sweep")
+		self.assertEqual(len(_runs_for(m.name)), 1, "one missed slot left more than one failed run")
+		notes = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": OWNER_OK, "subject": ["like", f"%{PFX}-cooldown%"]},
+			pluck="name",
+		)
+		self.assertEqual(len(notes), 1, "the owner was notified again by the very next sweep")
+
+	def test_a_failed_slot_is_retried_once_the_cooldown_lapses(self):
+		m = _mk_macro(OWNER_OK, "cooldown-lapsed")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")) as mock_run:
+			macro_scheduler.run_due_macros()
+			self._let_the_cooldown_lapse(m)
+			macro_scheduler.run_due_macros()
+		self.assertEqual(self._dispatches(mock_run, m), 2, "a failed slot was never retried")
+
+	def test_a_transient_block_is_not_relogged_by_the_next_sweep(self):
+		m = _mk_macro(OWNER_OK, "cooldown-block")
+		with (
+			patch("jarvis.chat.policy.validate_can_send", return_value=(False, "maintenance")),
+			patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r", "message_id": "m"}),
+		):
+			macro_scheduler.run_due_macros()
+			macro_scheduler.run_due_macros()
+		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
+
+	def test_a_slot_whose_bookkeeping_blew_up_is_not_dispatched_again_by_the_next_sweep(self):
+		# The dispatch SUCCEEDED and only the bookkeeping raised, so the slot is still
+		# due. Retrying it every sweep would run the macro for real every five minutes.
+		m = _mk_macro(OWNER_OK, "cooldown-boom")
+		with (
+			patch("jarvis.chat.macros.run_macro", return_value={"ok": True}) as mock_run,
+			patch.object(macro_scheduler, "_settle", side_effect=RuntimeError("bookkeeping blew up")),
+		):
+			macro_scheduler.run_due_macros()
+			macro_scheduler.run_due_macros()
+		self.assertEqual(self._dispatches(mock_run, m), 1)
+
+	def test_a_rescheduled_macro_is_not_held_by_its_old_slots_cooldown(self):
+		m = _mk_macro(OWNER_OK, "cooldown-moved")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")) as mock_run:
+			macro_scheduler.run_due_macros()
+			# The owner saves a new time: a different slot, due now.
+			frappe.db.set_value(
+				MACRO, m.name, "next_run_at", add_to_date(now_datetime(), minutes=-2), update_modified=False
+			)
+			frappe.db.commit()
+			macro_scheduler.run_due_macros()
+		self.assertEqual(self._dispatches(mock_run, m), 2, "the old slot's cooldown delayed the new one")
+
+
+# --------------------------------------------------------------------------- #
 # #471 — the stale-run reaper, and what it must NOT reap
 # --------------------------------------------------------------------------- #
 class TestStaleMacroRunReaper(MacroSchedulerBase):
