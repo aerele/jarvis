@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 vi.mock("frappe-ui", () => ({ call: vi.fn(async () => ({})) }));
 
 import { call } from "frappe-ui";
-import { sendMessage, setSidebarOrder } from "./api.js";
+import { sendMessage, setSidebarOrder, searchLink } from "./api.js";
 
 // The args object handed to `call("jarvis.chat.api.send_message", args)`.
 function lastSendArgs() {
@@ -18,6 +18,29 @@ function lastSendArgs() {
 }
 
 beforeEach(() => call.mockClear());
+
+describe("Link search field context", () => {
+	it("keeps mentions and other generic callers unchanged", async () => {
+		await searchLink("Item", "Demo");
+		expect(call).toHaveBeenCalledWith("frappe.desk.search.search_link", {
+			doctype: "Item",
+			txt: "Demo",
+			page_length: 8,
+		});
+	});
+	it("forwards field constraints with the parent and field identity", async () => {
+		const filters = [["Account", "company", "=", "Company A"]];
+		await searchLink("Account", "Pay", 8, "Purchase Invoice", "credit_to", filters);
+		expect(call).toHaveBeenCalledWith("frappe.desk.search.search_link", {
+			doctype: "Account",
+			txt: "Pay",
+			page_length: 8,
+			reference_doctype: "Purchase Invoice",
+			link_fieldname: "credit_to",
+			filters,
+		});
+	});
+});
 
 describe("sendMessage context forwarding", () => {
 	it("posts to the send_message endpoint with conversation + message", async () => {
