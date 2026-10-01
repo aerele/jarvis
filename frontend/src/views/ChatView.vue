@@ -3536,6 +3536,7 @@
 							>
 								<span
 									class="jv-connfocus-pill"
+									:class="{ 'jv-connfocus-pill--on': connectorFocus }"
 									:style="{
 										display: 'flex',
 										alignItems: 'center',
@@ -3560,7 +3561,7 @@
 										"
 										:aria-pressed="String(!!connectorFocus)"
 										:style="{
-											height: '26px',
+											height: connectorFocus ? '26px' : '30px',
 											display: 'flex',
 											alignItems: 'center',
 											gap: '4px',
@@ -3569,7 +3570,7 @@
 											justifyContent: 'center',
 											background: 'transparent',
 											border: 'none',
-											borderRadius: '6px',
+											borderRadius: connectorFocus ? '6px' : '7px',
 											cursor: 'pointer',
 											color: 'inherit',
 											fontSize: '12px',
@@ -15193,16 +15194,18 @@ onUnmounted(() => {
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
 }
-/* The connector-focus pill is a labeled chip, not a bare icon. The default
-   .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which painted the
-   whole pill black on the light theme. Give its inner buttons a subtle,
-   theme-aware surface hover instead, keeping the accent border and label
-   readable. (Dark already had a subtle hover; a matching override is below.) */
-.jv-connfocus-pill .jv-iconbtn:hover {
+/* The FOCUSED connector pill (--on) is a labeled chip, not a bare icon. The
+   default .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which
+   painted the whole pill black on the light theme. Give its inner buttons a
+   subtle, theme-aware surface hover instead, keeping the accent border and
+   label readable. Unfocused, the pill is a bare icon and falls through to the
+   shared .jv-iconbtn hover like Wiki and Auto. (Dark has a matching override
+   below.) */
+.jv-connfocus-pill--on .jv-iconbtn:hover {
 	background: var(--surface-2) !important;
 	color: var(--cta) !important;
 }
-.jv-connfocus-pill .jv-iconbtn:hover svg {
+.jv-connfocus-pill--on .jv-iconbtn:hover svg {
 	stroke: var(--cta) !important;
 }
 .jv-ctxbtn:hover {
@@ -18294,13 +18297,14 @@ onUnmounted(() => {
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
 }
-/* Connector-focus pill hover in dark: subtle surface, accent kept (matches the
-   light-theme override above rather than the bold neutral iconbtn hover). */
-.jv-dark .jv-connfocus-pill .jv-iconbtn:hover {
+/* Focused connector chip hover in dark: subtle surface, accent kept (matches
+   the light-theme override above rather than the bold neutral iconbtn hover).
+   The bare unfocused icon uses the shared .jv-dark .jv-iconbtn hover. */
+.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover {
 	background: var(--surface-3) !important;
 	color: var(--cta) !important;
 }
-.jv-dark .jv-connfocus-pill .jv-iconbtn:hover svg {
+.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover svg {
 	stroke: var(--cta) !important;
 }
 .jv-dark .jv-confirm-yes:hover,
