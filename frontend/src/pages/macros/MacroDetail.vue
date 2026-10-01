@@ -365,7 +365,7 @@ const scheduleSummary = computed(() => {
 	// A failed scheduled run is retried at a time the owner did not choose; say so,
 	// or "daily at 9:00 am. Next run: 11:17 am" reads as a contradiction.
 	const next = nextRunIsRetry.value
-		? `The last scheduled run failed. Retrying: ${nextRunAt.value}`
+		? `The last scheduled run failed (the Runs tab says why). Retrying: ${nextRunAt.value}`
 		: `Next run: ${nextRunAt.value}`;
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
