@@ -8,14 +8,20 @@ const KEY = "jarvis.prefs";
 
 // The UI names effort in plain words; the backend wants low/medium/high
 // (jarvis.chat.api._ALLOWED_THINKING). One map, so the wire value can never
-// drift from the label.
+// drift from the label. Balanced is the default, so it sends no level and the
+// workspace default applies, as on the web app. A level the model cannot take
+// fails the turn (jarvis-admin-v2#648).
 export const EFFORT = [
 	{ value: "Fast", thinking: "low", hint: "Quick replies" },
-	{ value: "Balanced", thinking: "medium", hint: "Default" },
+	{ value: "Balanced", thinking: "", hint: "Default" },
 	{ value: "Thorough", thinking: "high", hint: "Deep reasoning" },
 ];
 
-export const thinkingOf = (effort) => EFFORT.find((e) => e.value === effort)?.thinking || "medium";
+export const thinkingOf = (effort) => EFFORT.find((e) => e.value === effort)?.thinking ?? "";
+
+// get_chat_ui_settings lists no levels when the workspace's model cannot think.
+export const effortOffered = (ui) =>
+	Array.isArray(ui?.thinking_levels) && ui.thinking_levels.length > 0;
 
 function read() {
 	try {
