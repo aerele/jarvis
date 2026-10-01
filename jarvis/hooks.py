@@ -309,6 +309,18 @@ scheduler_events = {
 			# retries, disabled owners' cards cancelled, plus the cards_open gauge.
 			# Cheap no-op (indexed status scans) while the table is empty.
 			"jarvis.chat.pending_actions.reconcile",
+			# Fire any scheduled macros whose next_run_at has passed. Identity-safe
+			# (never binds an unattended turn to Administrator or a disabled owner),
+			# entitlement- and budget-gated, and it advances the schedule only when
+			# the slot was really consumed. See jarvis/chat/macro_scheduler.py.
+			#
+			# Every five minutes, NOT hourly (admin-v2#675): the schedule screen takes a
+			# time to the minute and shows it as "Next run", so an hourly sweep started a
+			# 10:15 macro at 11:00 and read as "scheduled macros never trigger". A slot
+			# that FAILED is still retried only about hourly (macro_scheduler's retry
+			# hold), so the faster sweep does not multiply failed runs or notifications.
+			# Cheap no-op (one query) when nothing is due.
+			"jarvis.chat.macro_scheduler.run_due_macros",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -362,11 +374,6 @@ scheduler_events = {
 		# render a "reconnect" banner instead of "Connected" until the
 		# user hits a ProviderAuthError mid-chat.
 		"jarvis.oauth.cron.poll_oauth_refresh_status",
-		# Fire any scheduled macros whose next_run_at has passed. Identity-safe
-		# (never binds an unattended turn to Administrator or a disabled owner),
-		# entitlement- and budget-gated, and it advances the schedule only when
-		# the slot was really consumed. See jarvis/chat/macro_scheduler.py.
-		"jarvis.chat.macro_scheduler.run_due_macros",
 		# #471 backstop: fail macro runs stuck `running` with no forward progress.
 		# A dispatch that raised leaves no turn behind, so the turn-end chaining
 		# hook that terminalizes a run never fires for it. Deliberately parked
