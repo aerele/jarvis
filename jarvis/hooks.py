@@ -323,8 +323,9 @@ scheduler_events = {
 			# Every five minutes, NOT hourly (admin-v2#675): the schedule screen takes a
 			# time to the minute and shows it as "Next run", so an hourly sweep started a
 			# 10:15 macro at 11:00 and read as "scheduled macros never trigger". A slot
-			# that FAILED is still retried only about hourly (macro_scheduler's retry
-			# hold), so the faster sweep does not multiply failed runs or notifications.
+			# that FAILED is still retried only about hourly (macro_scheduler._retry_later
+			# writes the retry time to the row), so the faster sweep does not multiply
+			# failed runs or notifications.
 			# Cheap no-op (one query) when nothing is due.
 			"jarvis.chat.macro_scheduler.run_due_macros",
 		],
