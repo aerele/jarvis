@@ -636,7 +636,11 @@ def summarize_macro(name: str) -> dict:
 	that invokes /macro-merge over the macro's steps. Returns the conversation
 	for the SPA to poll. The macro itself is untouched here."""
 	doc = frappe.get_doc(MACRO, name)
-	doc.check_permission("read")  # owner-gate (if_owner)
+	# Gated on WRITE, not read: a summary lands on the macro (merged_prompt,
+	# merge_status), and its turn runs in a chat created for whoever asks. On read
+	# alone, anyone who could SEE a macro could overwrite its owner's summary, and
+	# the throwaway chat belonged to the caller, not the macro's owner.
+	doc.check_permission("write")
 	steps = doc.steps or []
 	if len(steps) < 2:
 		frappe.throw(_("Nothing to merge — the macro has fewer than 2 steps."))
@@ -650,6 +654,11 @@ def summarize_macro(name: str) -> dict:
 	)
 	conv.flags.ignore_permissions = True
 	conv.insert()
+	# The throwaway chat belongs to the macro's OWNER, like every other row a macro
+	# creates (see run_macro). The engine only lands a summary from a conversation the
+	# macro's owner owns, so a chat left with Administrator would never land.
+	if doc.owner != frappe.session.user:
+		frappe.db.set_value("Jarvis Conversation", conv.name, "owner", doc.owner, update_modified=False)
 	payload = [{"n": i + 1, "label": s.label or "", "prompt": s.prompt or ""} for i, s in enumerate(steps)]
 	from jarvis.chat import api as chat_api
 
