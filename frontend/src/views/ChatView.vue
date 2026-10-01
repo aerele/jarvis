@@ -3687,6 +3687,9 @@
 						</button>
 					</div>
 					<div class="jv-draft-body">
+						<p v-if="draftLinkError" class="jv-draft-toast" role="alert">
+							{{ draftLinkError }}
+						</p>
 						<div v-if="draftPanel.updatedToast" class="jv-draft-toast">
 							Draft updated from chat
 						</div>
@@ -4211,6 +4214,7 @@ import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTool
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
+import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -6888,7 +6892,28 @@ function onOverlayBackdropClick(close) {
 }
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<ri>:<col>"
+<<<<<<< HEAD
 const draftLink = ref({ key: "", items: [], open: false, up: false });
+=======
+const draftLink = ref({ key: "", items: [], open: false, anchor: null });
+// The shared popup belongs to one search, not merely one field key. A blur
+// timer or response from an older search must not mutate the current popup.
+let draftLinkGeneration = 0;
+onBeforeUnmount(() => {
+	draftLinkGeneration++;
+});
+const draftLinkError = ref("");
+// Company / row dependency changes invalidate suggestions even if a request is
+// still pending or its field remains focused. Existing field values stay intact.
+watch(
+	() => draftLinkContext(draftPanel.value, draftLink.value.key),
+	(context) => {
+		if (draftLink.value.filterContext && context !== draftLink.value.filterContext)
+			draftLink.value = { ...draftLink.value, open: false, items: [] };
+	},
+	{ flush: "sync" }
+);
+>>>>>>> 9bb0af1 (fix(drafts): apply field filters to Link searches (#649))
 const _formMetaCache = {};
 
 async function _formMeta(doctype) {
@@ -7047,6 +7072,7 @@ async function buildDraftModel(a) {
 		// bench then dispatches a follow-up agent turn after Apply so the agent
 		// stages the next step without the user typing "continue".
 		cont: a.continue ? 1 : 0,
+		linkContext: { ...base.values, ...proposed },
 		fields,
 		tables,
 		tableMeta: meta.tables || {},
@@ -7084,12 +7110,18 @@ function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
 }
 function closeDraftPanel() {
+<<<<<<< HEAD
+=======
+	draftLinkGeneration++;
+	draftLinkError.value = "";
+>>>>>>> 9bb0af1 (fix(drafts): apply field filters to Link searches (#649))
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, up: false };
 }
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
+<<<<<<< HEAD
 	let up = false;
 	const el = ev && ev.target;
 	if (el && el.getBoundingClientRect)
@@ -7099,19 +7131,66 @@ async function onDraftLink(key, target, doctype, ev) {
 	try {
 		const r = await api.searchLink(doctype, target());
 		if (draftLink.value.key !== key) return; // user moved on
+=======
+	const generation = ++draftLinkGeneration;
+	const anchor = ev && ev.target;
+	draftLink.value = { key, items: [], open: true, anchor };
+	const search = draftLink.value;
+	draftLinkError.value = "";
+	if (!doctype) return;
+	try {
+		const args = draftLinkSearch(draftPanel.value, key);
+		const filterContext = JSON.stringify(args);
+		draftLink.value.filterContext = filterContext;
+		const r = await api.searchLink(
+			doctype,
+			target(),
+			8,
+			args.referenceDoctype,
+			args.linkFieldname,
+			args.filters
+		);
+		if (
+			generation !== draftLinkGeneration ||
+			draftLink.value !== search ||
+			draftLinkContext(draftPanel.value, key) !== filterContext
+		)
+			return;
+>>>>>>> 9bb0af1 (fix(drafts): apply field filters to Link searches (#649))
 		draftLink.value = {
 			key,
 			items: (r || [])
 				.map((x) => ({ value: x.value, label: x.description || "" }))
 				.slice(0, 8),
 			open: true,
+<<<<<<< HEAD
 			up,
+=======
+			anchor,
+			filterContext,
+>>>>>>> 9bb0af1 (fix(drafts): apply field filters to Link searches (#649))
 		};
 	} catch (e) {
-		/* menu stays empty */
+		if (generation === draftLinkGeneration && draftLink.value === search) {
+			draftLink.value = { ...draftLink.value, open: false, items: [] };
+			draftLinkError.value =
+				e instanceof DraftLinkFilterError
+					? e.message
+					: "Could not load this field's choices. Try again or open the document in ERPNext.";
+		}
 	}
 }
 function pickDraftLink(setter, item) {
+<<<<<<< HEAD
+=======
+	draftLinkGeneration++;
+	if (
+		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
+	) {
+		draftLink.value = { ...draftLink.value, open: false, items: [] };
+		return;
+	}
+>>>>>>> 9bb0af1 (fix(drafts): apply field filters to Link searches (#649))
 	setter(item.value);
 	draftLink.value = { key: "", items: [], open: false, up: false };
 }
