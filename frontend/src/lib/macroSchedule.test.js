@@ -64,6 +64,20 @@ test("nextRunCell: an upcoming slot keeps the relative time and the exact date",
 	assert.deepEqual(cell, { text: "in 5 minutes", hint: labels.when, tone: "" });
 });
 
+test("nextRunCell: a pending retry says it is a retry, not the schedule", () => {
+	// A failed scheduled run is retried at a time the owner never chose. Shown as a
+	// plain "in 55 minutes" it reads as the schedule itself.
+	const cell = nextRunCell({ ...scheduled, ...labels, nextRunMs: NOW + 5 * MIN, isRetry: true });
+	assert.equal(cell.text, "Retry in 5 minutes");
+	assert.equal(cell.tone, "warn");
+	assert.match(cell.hint, /failed/);
+});
+
+test("nextRunCell: the retry flag only matters while the slot is still ahead", () => {
+	const cell = nextRunCell({ ...scheduled, ...labels, nextRunMs: NOW - 5 * MIN, isRetry: true });
+	assert.equal(cell.text, "Due now");
+});
+
 test("nextRunCell: a due slot says so and names when it was due", () => {
 	const cell = nextRunCell({ ...scheduled, ...labels, nextRunMs: NOW - 5 * MIN });
 	assert.equal(cell.text, "Due now");

@@ -247,10 +247,10 @@ def get_macro(name: str) -> dict:
 		"schedule_weekday": doc.schedule_weekday or None,
 		"schedule_day_of_month": doc.schedule_day_of_month or None,
 		"schedule_time": str(doc.schedule_time or ""),
-		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"next_run_at": str(doc.next_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
+		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"steps": [
 			{
 				"label": s.label or "",
@@ -297,19 +297,25 @@ def _schedule_block_reason(owner: str) -> str:
 	it to the form, so what the form warns and what the server refuses cannot drift.
 	Judged from the macro's OWNER, the identity the scheduler would run as, never
 	from whoever is looking at the form."""
-	from jarvis.permissions import is_valid_unattended_owner
+	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
 
-	if is_valid_unattended_owner(owner):
-		return ""
 	if owner in ("Administrator", "Guest"):
 		return _(
 			"Scheduled macros cannot run as {0}. Sign in as a named user to schedule a "
 			"macro, or switch the schedule off to save this one."
 		).format(owner)
-	return _(
-		"Scheduled macros cannot run for {0} because the account is disabled. Switch "
-		"the schedule off to save this macro."
-	).format(owner)
+	# The same two checks, in the same order, as macro_scheduler._sweep_one.
+	if not is_valid_unattended_owner(owner):
+		return _(
+			"Scheduled macros cannot run for {0} because the account is disabled or no "
+			"longer exists. Switch the schedule off to save this macro."
+		).format(owner)
+	if not has_jarvis_access(owner):
+		return _(
+			"Scheduled macros cannot run for {0} because the account no longer has "
+			"access to Jarvis. Switch the schedule off to save this macro."
+		).format(owner)
+	return ""
 
 
 @frappe.whitelist()

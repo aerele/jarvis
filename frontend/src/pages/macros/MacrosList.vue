@@ -362,8 +362,9 @@ function scheduleLabel(row) {
 }
 // What the "Next run" cell says, or null for the "-" placeholder. A slot that has
 // passed is "Due now" / "Overdue", never the bare relative time ("5 minutes ago").
-// The wording and the states live in lib/macroSchedule (unit-tested); this only
-// feeds it the row and maps its tone to a colour.
+// The wording and the states live in lib/macroSchedule's nextRunCell (unit-tested,
+// imported here as describeNextRun); this wrapper only feeds it the row and maps its
+// tone to a colour.
 const NEXT_RUN_TONE = { warn: "text-ink-amber-3", muted: "text-ink-gray-5" };
 function nextRunCell(row) {
 	const cell = describeNextRun({
@@ -373,6 +374,7 @@ function nextRunCell(row) {
 		nowMs: Date.now(),
 		when: exactDate(row.next_run_at),
 		relative: timeAgo(row.next_run_at),
+		isRetry: !!row.next_run_is_retry,
 	});
 	return cell && { ...cell, class: NEXT_RUN_TONE[cell.tone] || "" };
 }
