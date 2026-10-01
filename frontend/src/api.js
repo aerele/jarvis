@@ -307,7 +307,8 @@ export async function sendMessage(
 	context,
 	approvalTokens,
 	voice,
-	autoMode
+	autoMode,
+	thinkingOverride
 ) {
 	// Empty conversation is allowed: the backend creates (or focuses) an empty
 	// conversation itself and returns its id as `conversation_id` - saves the
@@ -322,6 +323,8 @@ export async function sendMessage(
 	// message. Omitted (not even `auto_mode: 0`) for every send that doesn't ask.
 	if (autoMode) args.auto_mode = 1;
 	if (modelOverride) args.model_override = modelOverride;
+	// Omitted when empty: the server reads a present-but-empty value as "clear the level".
+	if (thinkingOverride) args.thinking_override = thinkingOverride;
 	if (attachments && attachments.length) args.attachments = JSON.stringify(attachments);
 	// The ordered tokens of the confirmation cards on screen. A typed "confirm 2"
 	// selects by the number the user sees, so the server must resolve that number
