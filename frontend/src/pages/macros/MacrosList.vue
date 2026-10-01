@@ -211,7 +211,7 @@ const columns = [
 	{ label: "Summary", key: "has_summary", width: "8rem" },
 	{ label: "Schedule", key: "schedule", width: "9rem" },
 	{ label: "Last run", key: "last_run_at", width: "8rem" },
-	// Wide enough for "Retry in 55 minutes", the usual retry cell, without an ellipsis.
+	// Wide enough for the retry cell ("Retry in 44 minutes") without an ellipsis.
 	{ label: "Next run", key: "next_run_at", width: "10rem" },
 	{ label: "", key: "_run", width: "4rem", align: "right" },
 ];
