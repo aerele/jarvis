@@ -134,6 +134,24 @@ def _mk_macro(owner: str, name: str, **extra):
 	return doc
 
 
+def _mk_macro_run(owner: str, macro: str, conversation: str, status: str = "running") -> str:
+	"""A run row the way the engine writes one: inserted server-side, then owned by
+	the macro's owner."""
+	doc = frappe.get_doc(
+		{
+			"doctype": MACRO_RUN,
+			"macro": macro,
+			"conversation": conversation,
+			"status": status,
+			"current_step": 0,
+			"total_steps": 1,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	_reassign(MACRO_RUN, doc.name, owner)
+	return doc.name
+
+
 def _mk_approval(owner: str, *, conversation=None, status="Pending", **extra):
 	doc = frappe.get_doc(
 		{
@@ -353,6 +371,72 @@ class TestMacroScoping(Part3Base):
 		# processed-as-skipped: schedule advanced past now.
 		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
 		self.assertGreater(nxt, now_datetime())
+
+	# --- A Macro Run row is engine state: its owner may read it, never write it --- #
+	# MAC-2 guarded CREATE only. An owner could still UPDATE their own run row over
+	# generic REST and repoint its `conversation` at another user's chat; the engine
+	# trusted the row and dispatched the next step there AS that user.
+
+	def test_owner_cannot_repoint_their_run_at_another_users_conversation(self):
+		ma = _mk_macro(USER_A, f"{PFX}-repoint")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		victim_conv = _mk_conv(USER_B)
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO_RUN, run)
+			doc.conversation = victim_conv
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+
+	def test_owner_cannot_edit_their_run_row(self):
+		# Setting a terminal status by hand skipped the code that disarms an armed
+		# run's conversation; `trigger` and `current_step` feed the unattended budget.
+		ma = _mk_macro(USER_A, f"{PFX}-edit")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO_RUN, run)
+			doc.status = "completed"
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+
+	def test_owner_cannot_delete_their_run_row(self):
+		ma = _mk_macro(USER_A, f"{PFX}-delete")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				frappe.delete_doc(MACRO_RUN, run)
+
+	def test_owner_can_still_read_their_run_row(self):
+		ma = _mk_macro(USER_A, f"{PFX}-read")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_A):
+			self.assertTrue(frappe.get_doc(MACRO_RUN, run).has_permission("read"))
+		with _as(USER_B):
+			self.assertFalse(frappe.get_doc(MACRO_RUN, run).has_permission("read"))
+
+	def test_stop_is_still_the_owners_and_only_the_owners(self):
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-stop")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				macros.stop_macro_run(run)
+		with _as(USER_A):
+			macros.stop_macro_run(run)
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "status"), "stopped")
+
+	def test_engine_never_advances_a_run_into_another_users_conversation(self):
+		# Defence in depth: even if a row is ever tampered with, the engine must not
+		# act on a run whose owner is not the owner of the conversation it points at.
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-engine")
+		victim_conv = _mk_conv(USER_B)
+		run = _mk_macro_run(USER_A, ma.name, victim_conv)
+		with patch("jarvis.chat.api._enqueue_turn") as dispatch:
+			macros.advance_after_turn(victim_conv, errored=False)
+		dispatch.assert_not_called()
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "status"), "failed")
 
 
 # --------------------------------------------------------------------------- #

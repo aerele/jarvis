@@ -389,6 +389,8 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 			if run.status != "running":  # stopped mid-flight, or already advanced
 				return
 			macro_doc = frappe.get_doc(MACRO, run.macro)
+			if _fail_if_not_one_owner(run, macro_doc):
+				return
 			steps = macro_doc.steps or []
 			total = min(run.total_steps or len(steps), len(steps))
 
@@ -579,7 +581,10 @@ def stop_macro_run(run_name: str) -> dict:
 	concurrent resume nor let one start new work after it. Serializes the two; the state-fenced CAS
 	in the resume path is the hard backstop if the lock's TTL ever lapses."""
 	run = frappe.get_doc(RUN, run_name)
-	run.check_permission("write")  # owner-gate the stop action
+	# Owner-gate the stop action. Checked on the row's owner, not via a "write"
+	# permission: run rows are read-only through the document API (macro_permissions).
+	if frappe.session.user not in (run.owner, "Administrator"):
+		frappe.throw(_("You can only stop your own macro runs."), frappe.PermissionError)
 	from jarvis._redis_lock import redis_lock
 
 	# The block body runs whether or not the lock is acquired — a stop must never be silently
@@ -790,6 +795,8 @@ def resume_waiting_capacity_runs() -> None:
 				if run.status != "waiting_capacity":
 					continue
 				macro_doc = frappe.get_doc(MACRO, run.macro)
+				if _fail_if_not_one_owner(run, macro_doc):
+					continue
 				attempts = int(run.capacity_attempts or 0) + 1
 				if attempts > _MAX_CAPACITY_ATTEMPTS:
 					_finish(
@@ -1175,6 +1182,40 @@ def notify_owner(owner: str, *, subject: str, body: str) -> None:
 		frappe.db.commit()
 	except Exception:
 		pass
+
+
+_OWNER_MISMATCH_ERROR = "This run was stopped: its macro and conversation do not belong to one user."
+
+
+def _fail_if_not_one_owner(run, macro_doc) -> bool:
+	"""True (and the run is failed) unless the run, its macro and its conversation all
+	belong to one user.
+
+	They do by construction: ``run_macro`` creates all three for the macro's owner. A
+	step is dispatched as the CONVERSATION's owner, so a run row pointing at someone
+	else's conversation would execute this macro's prompts under their identity. Run
+	rows are read-only to users (``macro_permissions``); this is the engine declining
+	to act on a row it did not write that way, whatever did.
+
+	Terminalized with a raw write, NOT ``_finish``: that disarms ``run.conversation``,
+	which here is a conversation this run has no claim on."""
+	conv_owner = frappe.db.get_value(CONV, run.conversation, "owner") if run.conversation else None
+	if run.owner == macro_doc.owner == conv_owner:
+		return False
+	frappe.log_error(
+		title=f"jarvis macro run owner mismatch: {run.name}",
+		message=(
+			f"run owner {run.owner!r}; macro {run.macro!r} owner {macro_doc.owner!r}; "
+			f"conversation {run.conversation!r} owner {conv_owner!r}"
+		),
+	)
+	frappe.db.set_value(
+		RUN,
+		run.name,
+		{"status": "failed", "finished_at": frappe.utils.now(), "error": _OWNER_MISMATCH_ERROR},
+	)
+	frappe.db.commit()
+	return True
 
 
 def _finish(run, status: str, error: str | None = None) -> None:
