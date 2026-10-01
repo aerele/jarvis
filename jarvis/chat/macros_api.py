@@ -214,8 +214,13 @@ def list_macros_page(
 			as_dict=True,
 		):
 			step_counts[x.parent] = x.n
+	from jarvis.chat.macro_scheduler import is_retry_pending
+
+	now = frappe.utils.now_datetime()
 	for r in rows:
 		r["step_count"] = step_counts.get(r.name, 0)
+		# Pure arithmetic on the row, no query: see get_macro.
+		r["next_run_is_retry"] = int(is_retry_pending(r, now))
 		# Time renders as a timedelta over raw SQL; stringify for a stable payload.
 		if r.get("schedule_time") is not None:
 			r["schedule_time"] = str(r["schedule_time"])
@@ -235,9 +240,14 @@ def get_macro(name: str) -> dict:
 	"""One macro incl. its ordered steps (owner-gated)."""
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
+	from jarvis.chat.macro_scheduler import is_retry_pending
+
 	return {
 		"name": doc.name,
 		"macro_name": doc.macro_name,
+		# A failed scheduled run is retried by writing the retry time to next_run_at;
+		# this tells the form that "Next run" is that retry, not the schedule's own slot.
+		"next_run_is_retry": int(is_retry_pending(doc)),
 		"description": doc.description or "",
 		"enabled": int(doc.enabled or 0),
 		"stop_on_error": int(doc.stop_on_error or 0),
