@@ -1073,6 +1073,168 @@ class TestFailedFinalSettlesAsError(_PipelineCase):
 
 
 # --------------------------------------------------------------------------- #
+# 7c. admin-v2#656: a refused Claude CLI live session is re-sent once
+# --------------------------------------------------------------------------- #
+
+
+class TestStaleCliSessionRedispatch(_PipelineCase):
+	"""After a chat's model changes, the runtime refuses to resume its live Claude
+	CLI process and fails the run before producing anything. The failure discards
+	the stale process, so the pump re-sends the same turn once, under a fresh
+	gateway key, on the same Turn row and placeholder. Real mux + gateway double +
+	settlement, so the assertions are on what the customer's browser reads back."""
+
+	def _drive(self, rid: str, transcript: str, *, retry_transcript: str = "success"):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="Reply with exactly one word: PONG")
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=0)
+		double = self._double()
+		double.arm(pump._gateway_key(rid, {"redispatch": 1}), retry_transcript)
+		keys: list = []
+		play = double._handle_chat_send
+
+		def record(req_id, params):
+			keys.append(params.get("idempotencyKey"))
+			return play(req_id, params)
+
+		double._handle_chat_send = record
+		deps = self._deps(double=double, prepare=self._prepare_stub(conv, double, transcript))
+		ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		self._pump_until(ctx, lambda: self._state(rid) in ("errored", "finalizing", "done"))
+		return keys
+
+	def _run_errors(self):
+		return [p for p in self._pubs if p.get("kind") == "run:error"]
+
+	def test_resends_once_under_a_fresh_key_and_answers_without_an_error(self):
+		rid = "pmp_cli_ok"
+		keys = self._drive(rid, "stale-cli-session")
+		self.assertEqual(keys, [rid, f"{rid}-r1"], "one re-send, under a fresh idempotency key")
+		self.assertIn(self._state(rid), ("finalizing", "done"), "the re-sent turn answers")
+		self.assertEqual(self._val(rid, "terminal_kind"), "relay:final")
+		self.assertEqual(self._val(rid, "gateway_run_id"), f"{rid}-r1")
+		self.assertEqual(json.loads(self._val(rid, "dispatch_payload"))["redispatch"], 1)
+		amsg = self._val(rid, "assistant_message")
+		self.assertFalse((frappe.db.get_value(MSG, amsg, "error") or "").strip(), "no error on the reply")
+		self.assertEqual(self._run_errors(), [], "the first failure never reaches the browser")
+		starts = [p for p in self._pubs if p.get("kind") == "run:start"]
+		self.assertEqual(len(starts), 2, "run:start again for the re-send")
+		self.assertEqual({p.get("message_id") for p in starts}, {amsg}, "same placeholder both times")
+
+	def test_a_second_refusal_settles_with_an_accurate_retryable_error(self):
+		rid = "pmp_cli_twice"
+		keys = self._drive(rid, "stale-cli-session", retry_transcript="stale-cli-session")
+		self.assertEqual(keys, [rid, f"{rid}-r1"], "bounded: exactly one re-send")
+		self.assertEqual(self._state(rid), "errored")
+		errs = self._run_errors()
+		self.assertEqual(len(errs), 1)
+		self.assertEqual(errs[0]["code"], "session-reset")
+		self.assertEqual(int(self._val(rid, "reserved")), 0, "slot released")
+
+	def test_no_resend_once_output_reached_the_user(self):
+		rid = "pmp_cli_output"
+		keys = self._drive(rid, "stale-cli-session-after-output")
+		self.assertEqual(keys, [rid], "a turn that streamed text is never re-sent")
+		self.assertEqual(self._state(rid), "errored")
+
+	def test_other_errors_settle_as_before(self):
+		rid = "pmp_cli_other"
+		keys = self._drive(rid, "plain-error")
+		self.assertEqual(keys, [rid])
+		self.assertEqual(self._state(rid), "errored")
+		self.assertEqual(len(self._run_errors()), 1)
+
+
+class TestTerminalBeforeAckPoll(_PipelineCase):
+	"""A run that fails at once can have its terminal applied in the same slice as its
+	ack, before the slice polled the ack. The arrived ack is processed first, so the
+	turn is ``streaming`` for the terminal's CAS instead of stranding until its deadline."""
+
+	class _Ack:
+		def __init__(self, done: bool, run_id: str):
+			self.done = done
+			self._run_id = run_id
+
+		def result(self, timeout=None):
+			return {"payload": {"runId": self._run_id, "status": "started"}}
+
+	def _dispatching(self, rid: str):
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="hi")
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"dispatching",
+			version=3,
+			pump_epoch=ctx.epoch,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			dispatch_payload=json.dumps({"session_key": f"sess-{rid}", "message": "hi"}),
+		)
+		rs = pump._RunState(
+			run_id=rid,
+			conversation=conv,
+			owner=None,
+			assistant_message=None,
+			session_key=f"sess-{rid}",
+			version=3,
+		)
+		return ctx, rs
+
+	def test_an_arrived_ack_is_processed_before_the_terminal(self):
+		rid = "pmp_ack_first"
+		ctx, rs = self._dispatching(rid)
+		ctx.pending_acks[rid] = pump._PendingAck(
+			fut=self._Ack(True, rid), deadline=0, rs=rs, drained_note_ids=None
+		)
+		self.assertTrue(pump._resolve_ack_first(ctx, rs))
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertEqual(self._val(rid, "gateway_run_id"), rid)
+		self.assertEqual(rs.version, 4, "the run state follows the CAS it just won")
+		self.assertNotIn(rid, ctx.pending_acks)
+
+	def test_an_ack_still_in_flight_is_left_for_the_poll(self):
+		rid = "pmp_ack_wait"
+		ctx, rs = self._dispatching(rid)
+		ctx.pending_acks[rid] = pump._PendingAck(
+			fut=self._Ack(False, rid), deadline=0, rs=rs, drained_note_ids=None
+		)
+		self.assertTrue(pump._resolve_ack_first(ctx, rs))
+		self.assertEqual(self._state(rid), "dispatching")
+		self.assertIn(rid, ctx.pending_acks)
+
+
+class TestRedispatchKeyAcrossAHandOff(_PipelineCase):
+	"""A hop that takes over a re-sent turn must re-attach its lane under the key the
+	gateway knows, not the bare run id, or the reply's frames go nowhere."""
+
+	def test_gateway_key(self):
+		self.assertEqual(pump._gateway_key("r", {}), "r")
+		self.assertEqual(pump._gateway_key("r", {"redispatch": 0}), "r")
+		self.assertEqual(pump._gateway_key("r", {"redispatch": 1}), "r-r1")
+
+	def test_reattach_uses_the_resend_key_before_the_ack(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="hi")
+		rid = "pmp_cli_reattach"
+		payload = json.dumps({"session_key": f"sess-{rid}", "message": "hi", "redispatch": 1})
+		self._mk_turn(
+			conv, rid, seed, "dispatching", version=4, pump_epoch=2, reserved=1, dispatch_payload=payload
+		)
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		registered = []
+		ctx.mux = type("_Mux", (), {"register_run": lambda self, key, *a, **k: registered.append(key)})()
+		pump._reattach_lane(
+			ctx,
+			{"run_id": rid, "conversation": conv, "version": 4, "gateway_run_id": None, "last_event_seq": 0},
+		)
+		self.assertEqual(registered, [f"{rid}-r1"])
+
+
+# --------------------------------------------------------------------------- #
 # 7c. jarvis#681: a SUCCESSFUL turn whose follow-up enrichment lane keeps failing
 # --------------------------------------------------------------------------- #
 
