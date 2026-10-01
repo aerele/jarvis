@@ -129,3 +129,11 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 		msg, thinking = self._capture_message_sent(context=None)
 		self.assertEqual(thinking, "high")
 		self.assertNotIn("/think", msg)
+
+	def test_proxy_route_sends_no_thinking(self):
+		"""A turn on the proxy route drops the stored level: the agent would answer
+		it with an error reply instead of running the turn (jarvis-admin-v2#648)."""
+		with patch("jarvis.chat.turn_handler._runs_on_proxy_route", return_value=True):
+			msg, thinking = self._capture_message_sent(context=None)
+		self.assertIn("what is the status?", msg)
+		self.assertIsNone(thinking)
