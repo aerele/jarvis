@@ -301,8 +301,8 @@ def _schedule_block_reason(owner: str) -> str:
 
 	if owner in ("Administrator", "Guest"):
 		return _(
-			"Scheduled macros cannot run as {0}. Sign in as a named user to schedule a "
-			"macro, or switch the schedule off to save this one."
+			"Scheduled macros cannot run as {0}. Create the macro from a named user's "
+			"account to schedule it, or switch the schedule off to save this one."
 		).format(owner)
 	# The same two checks, in the same order, as macro_scheduler._sweep_one.
 	if not is_valid_unattended_owner(owner):
