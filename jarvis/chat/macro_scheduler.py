@@ -45,7 +45,12 @@ _BARRED_OWNER = (
 	"Scheduled run skipped: this macro's owner may not run unattended work "
 	"(Administrator, a disabled account, or no Jarvis access)."
 )
-_DISPATCH_FAILED = "Scheduled run could not be started. It will retry in about an hour."
+_DISPATCH_FAILED = "Scheduled run could not be started."
+# Appended to a failure sentence once the outcome of scheduling the retry is KNOWN.
+# The record and the notification used to promise a retry unconditionally, including
+# when it could not be written or the owner had re-saved the schedule meanwhile.
+_WILL_RETRY = " It will retry within the hour."
+_NO_RETRY = " It will run again at its next scheduled time."
 
 # admin-v2#675: how long a slot that should be retried waits before the sweep tries it
 # again. The sweep runs every five minutes; retrying on every sweep would record a
@@ -56,7 +61,10 @@ _DISPATCH_FAILED = "Scheduled run could not be started. It will retry in about a
 # ``persistent_cache_keys``, and ``pump.watchdog`` triggers one every five minutes
 # (see the note on ``persistent_cache_keys`` in hooks.py), so a cache-held retry time
 # would not survive a single sweep.
-_RETRY_AFTER_S = 60 * 60
+#
+# 55 minutes, not 60: until a site migrates, this code still runs on the old HOURLY
+# job, and a retry exactly an hour out misses the next tick by seconds and waits two.
+_RETRY_AFTER_S = 55 * 60
 
 # #468: what the owner is told when the entitlement / budget gate refused the run.
 # Keyed on the machine codes `policy.validate_can_send` and `macros.entitlement_block`
@@ -74,24 +82,14 @@ _BLOCK_SENTENCE = {
 		"Scheduled run skipped: no AI model connection is configured. Connect a model and "
 		"runs resume on the next scheduled slot."
 	),
-	"release_update_required": (
-		"Scheduled run deferred: a Jarvis update is rolling out on this workspace. It will "
-		"retry in about an hour."
-	),
-	"workspace_resetting": (
-		"Scheduled run deferred: the workspace is being rebuilt. It will retry in about an hour."
-	),
-	"maintenance": (
-		"Scheduled run deferred: this workspace is being upgraded. It will retry in about an hour."
-	),
+	"release_update_required": ("Scheduled run deferred: a Jarvis update is rolling out on this workspace."),
+	"workspace_resetting": ("Scheduled run deferred: the workspace is being rebuilt."),
+	"maintenance": ("Scheduled run deferred: this workspace is being upgraded."),
 	BLOCK_STEP_BUDGET: (
 		"Scheduled run skipped: this month's budget for scheduled macro runs is used up. "
 		"Runs resume next month, or ask an admin to raise the budget in Jarvis Settings."
 	),
-	BLOCK_DISPATCH_FAILED: (
-		"Scheduled run could not be started: the agent turn was not dispatched. It will "
-		"retry in about an hour."
-	),
+	BLOCK_DISPATCH_FAILED: ("Scheduled run could not be started: the agent turn was not dispatched."),
 }
 
 # #468: a refusal that CLEARS ON ITS OWN within minutes does not consume the slot: it
@@ -150,9 +148,7 @@ def run_due_macros() -> None:
 				title=f"jarvis scheduled macro sweep failed: {m.name}",
 				message=frappe.get_traceback(),
 			)
-			if _retry_later(m, now, expected=m.next_run_at):
-				_record_failed(m, _DISPATCH_FAILED)
-				_notify_owner(m, _DISPATCH_FAILED)
+			_report_failure_before_claim(m, now)
 
 
 def _sweep_one(m, now, original_user: str) -> None:
@@ -199,18 +195,16 @@ def _sweep_one(m, now, original_user: str) -> None:
 		out = macros.run_macro(m.name, trigger="scheduled") or {}
 	except Exception:
 		frappe.set_user(original_user)
-		frappe.log_error(
-			title=f"jarvis scheduled macro failed: {m.name}",
-			message=frappe.get_traceback(),
-		)
+		traceback = frappe.get_traceback()
 		# #471: do NOT consume the slot, and record the failure where the OWNER can
 		# see it. Previously the schedule advanced regardless, so a run that never
 		# happened was indistinguishable from one that did. The retry is scheduled
-		# FIRST: the record and the notification below promise it, and if either of
-		# them failed first the claim would stand and nothing would retry.
-		_retry_later(m, now, expected=claimed)
-		_record_failed(m, _DISPATCH_FAILED)
-		_notify_owner(m, _DISPATCH_FAILED)
+		# FIRST, ahead of even the Error Log: everything after it can fail, and if it
+		# did so first the claim would stand and nothing would retry.
+		sentence = _DISPATCH_FAILED + _retry_clause(_retry_later(m, now, expected=claimed))
+		frappe.log_error(title=f"jarvis scheduled macro failed: {m.name}", message=traceback)
+		_record_failed(m, sentence)
+		_notify_owner(m, sentence)
 		return
 	finally:
 		if frappe.session.user != original_user:
@@ -238,11 +232,10 @@ def _settle(m, now, out: dict, claimed) -> None:
 		# run_macro already terminalized the run row it had created — the one that
 		# carries the conversation link — so recording a second one here would show the
 		# customer two failures for one missed slot. Schedule the retry, and notify.
-		_retry_later(m, now, expected=claimed)
-		_notify_owner(m, sentence)
+		_notify_owner(m, sentence + _retry_clause(_retry_later(m, now, expected=claimed)))
 		return
 	if reason in _TRANSIENT_BLOCKS:
-		_retry_later(m, now, expected=claimed)
+		sentence += _retry_clause(_retry_later(m, now, expected=claimed))
 		_record_failed(m, sentence)
 		_notify_owner(m, sentence)
 		return
@@ -277,30 +270,33 @@ def _claim_slot(m, now):
 
 
 def _retry_later(m, now, *, expected) -> bool:
-	"""Schedule ONE retry of this slot about an hour from now. True if it did.
+	"""Schedule ONE retry of this slot, ``_RETRY_AFTER_S`` from now. True only if this
+	call moved the schedule.
 
-	Compare-and-set on ``next_run_at``: the write lands only while the row still
-	holds ``expected`` (the value this sweep last knew it to hold), so a schedule the
-	owner saved in the meantime is never overwritten, and a slot that was already
-	claimed and dispatched is never re-armed.
+	Compare-and-set on ``next_run_at``, in ONE UPDATE: the write lands only while the
+	row still holds ``expected`` (the value this sweep last knew it to hold), so a
+	schedule the owner saved in the meantime is never overwritten, and a slot that was
+	already claimed and dispatched is never re-armed. The answer is the UPDATE's own
+	row count. Re-reading the row and comparing it to the retry time is wrong when the
+	retry is capped to the next natural slot: the claim already wrote that same value,
+	so a write that matched nothing read back as a success.
 
 	Never later than the next natural occurrence, so a retry cannot push a run past
 	its own next slot.
 
 	Never raises: it runs on failure paths, and failing to schedule a retry must not
-	abort the sweep for the macros behind this one. What that costs is the retry, so
-	it is logged."""
+	abort the sweep for the macros behind this one. False then; it is logged, and the
+	caller tells the owner the truth (``_retry_clause``)."""
 	try:
 		retry_at = min(add_to_date(now, seconds=_RETRY_AFTER_S), _next_occurrence(m, now))
-		frappe.db.set_value(
-			MACRO,
-			{"name": m.name, "next_run_at": expected},
-			"next_run_at",
-			retry_at,
-			update_modified=False,
+		frappe.db.sql(
+			f"UPDATE `tab{MACRO}` SET next_run_at=%(retry_at)s WHERE name=%(name)s AND next_run_at=%(expected)s",
+			{"retry_at": retry_at, "name": m.name, "expected": expected},
 		)
+		cursor = getattr(frappe.db, "_cursor", None)
+		landed = bool(cursor and cursor.rowcount == 1)  # read BEFORE commit resets it
 		frappe.db.commit()
-		return get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at")) == retry_at
+		return landed
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(
@@ -308,6 +304,40 @@ def _retry_later(m, now, *, expected) -> bool:
 			message=frappe.get_traceback(),
 		)
 		return False
+
+
+def _retry_clause(retry_scheduled: bool) -> str:
+	return _WILL_RETRY if retry_scheduled else _NO_RETRY
+
+
+def _report_failure_before_claim(m, now) -> None:
+	"""A macro's handling raised. Tell the owner only if it raised BEFORE the slot was
+	claimed, i.e. nothing was dispatched: then the slot is retried later and a failed
+	run is recorded, instead of the Error Log being the only trace.
+
+	The compare-and-set in ``_retry_later`` is what tells the two apart. It matches the
+	row only while the slot still holds the due value the sweep read. After a claim the
+	row holds the next occurrence, so nothing matches: the macro WAS dispatched, the
+	schedule has already moved on, and reporting a failed run would be false."""
+	if not _retry_later(m, now, expected=m.next_run_at):
+		return
+	sentence = _DISPATCH_FAILED + _WILL_RETRY
+	_record_failed(m, sentence)
+	_notify_owner(m, sentence)
+
+
+def is_retry_pending(row, now=None) -> bool:
+	"""True when ``next_run_at`` is a retry of a failed run rather than the schedule's
+	own next slot, so the screens can say so. A retry is written to ``next_run_at``, and
+	without this the owner sees a "Next run" at a time they never chose.
+
+	Derived, not stored: a natural slot always equals ``compute_next_run`` from now, and
+	a retry is by construction earlier than that."""
+	if not cint(row.get("schedule_enabled")) or not row.get("next_run_at"):
+		return False
+	now = now or now_datetime()
+	next_run_at = get_datetime(row.get("next_run_at"))
+	return next_run_at > now and next_run_at < _next_occurrence(row, now)
 
 
 def _stamp_last_run(m, now) -> None:
@@ -322,11 +352,11 @@ def _next_occurrence(m, now) -> datetime.datetime:
 	"""The next slot strictly after ``now``. Taken from *now*, not from the slot being
 	handled, so even a long outage yields ONE next slot rather than a backfill storm."""
 	return compute_next_run(
-		m.schedule_frequency,
-		m.schedule_time,
+		m.get("schedule_frequency"),
+		m.get("schedule_time"),
 		from_dt=now,
-		weekday=m.schedule_weekday,
-		day_of_month=m.schedule_day_of_month,
+		weekday=m.get("schedule_weekday"),
+		day_of_month=m.get("schedule_day_of_month"),
 	)
 
 
