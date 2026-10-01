@@ -246,7 +246,9 @@ def get_macro(name: str) -> dict:
 		"schedule_frequency": doc.schedule_frequency or "daily",
 		"schedule_weekday": doc.schedule_weekday or None,
 		"schedule_day_of_month": doc.schedule_day_of_month or None,
-		"schedule_time": str(doc.schedule_time or ""),
+		# `is None`, not truthiness: midnight is timedelta(0), which is falsy, so
+		# `or ""` sent the form "" and it fell back to (then saved) its 09:00 default.
+		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
 		"next_run_at": str(doc.next_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
