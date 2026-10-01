@@ -102,8 +102,10 @@
 			</template>
 
 			<template #cell-next_run_at="{ row }">
-				<Tooltip v-if="row.next_run_at" :text="exactDate(row.next_run_at)">
-					<div class="truncate text-base">{{ timeAgo(row.next_run_at) }}</div>
+				<Tooltip v-if="nextRunCell(row)" :text="nextRunCell(row).hint">
+					<div class="truncate text-base" :class="nextRunCell(row).class">
+						{{ nextRunCell(row).text }}
+					</div>
 				</Tooltip>
 				<span v-else class="text-base text-ink-gray-4">-</span>
 			</template>
@@ -154,8 +156,9 @@ import TabBar from "@/components/list/TabBar.vue";
 import { useListPage } from "@/composables/useListPage";
 import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
-import { timeAgo, exactDate } from "@/utils/datetime";
+import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
+import { nextRunState } from "@/lib/macroSchedule";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml } from "@/lib/errors";
@@ -356,6 +359,37 @@ function scheduleLabel(row) {
 	if (anchor) label = `${label} ${anchor}`;
 	const t = toHHMM(row.schedule_time);
 	return t ? `${label} · ${t}` : label;
+}
+// What the "Next run" cell says, or null for the "-" placeholder. A slot that has
+// passed is "Due now" / "Overdue", never the bare relative time ("5 minutes ago").
+function nextRunCell(row) {
+	const { kind } = nextRunState({
+		scheduleEnabled: !!row.schedule_enabled,
+		enabled: !!row.enabled,
+		nextRunMs: toLocalMs(row.next_run_at),
+		nowMs: Date.now(),
+	});
+	const when = exactDate(row.next_run_at);
+	if (kind === "upcoming") return { text: timeAgo(row.next_run_at), hint: when, class: "" };
+	if (kind === "due")
+		return {
+			text: "Due now",
+			hint: `Was due ${when}. It starts on the next check.`,
+			class: "",
+		};
+	if (kind === "overdue")
+		return {
+			text: "Overdue",
+			hint: `Was due ${when} and has not started. Check the Runs tab for a failed attempt.`,
+			class: "text-ink-amber-3",
+		};
+	if (kind === "off")
+		return {
+			text: "Off",
+			hint: "This macro is turned off, so its scheduled runs are skipped.",
+			class: "text-ink-gray-4",
+		};
+	return null;
 }
 function toHHMM(t) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
