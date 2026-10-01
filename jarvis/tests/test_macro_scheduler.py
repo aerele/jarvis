@@ -27,7 +27,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
-from jarvis.chat import macro_scheduler, macros
+from jarvis.chat import macro_scheduler, macros, macros_api
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -164,6 +164,53 @@ class TestScheduledMacroIdentity(MacroSchedulerBase):
 		self.assertEqual([r.status for r in runs], ["failed"])
 		self.assertEqual(runs[0].owner, OWNER_OFF, "the failed row is not visible to the owner")
 		self.assertIn("unattended", runs[0].error)
+
+
+# --------------------------------------------------------------------------- #
+# admin-v2#675 — say at SAVE that this owner's schedule will never run, instead of
+# accepting it and refusing every slot later
+# --------------------------------------------------------------------------- #
+class TestScheduleIsRefusedAtSaveForABarredOwner(MacroSchedulerBase):
+	"""The scheduler has always refused Administrator (#469). The form accepted the
+	schedule anyway and showed a "Next run", so the macro looked scheduled and simply
+	never ran."""
+
+	def _create(self, tag: str, **kw):
+		return macros_api.create_macro(
+			macro_name=f"{PFX}-{tag}", steps=[{"prompt": "p1"}], schedule_time="09:00", **kw
+		)
+
+	def test_administrator_cannot_put_a_new_macro_on_a_schedule(self):
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._create("admin-new", schedule_enabled=1)
+		self.assertIn("Administrator", str(ctx.exception))
+		self.assertFalse(frappe.db.exists(MACRO, {"macro_name": f"{PFX}-admin-new"}))
+
+	def test_administrator_cannot_switch_a_schedule_on(self):
+		name = self._create("admin-later", schedule_enabled=0)["data"]["name"]
+		with self.assertRaises(frappe.ValidationError):
+			macros_api.update_macro(name, schedule_enabled=1)
+		self.assertFalse(frappe.db.get_value(MACRO, name, "schedule_enabled"))
+
+	def test_administrator_can_still_save_and_edit_an_unscheduled_macro(self):
+		name = self._create("admin-manual", schedule_enabled=0)["data"]["name"]
+		macros_api.update_macro(name, description="still editable")
+		self.assertEqual(frappe.db.get_value(MACRO, name, "description"), "still editable")
+
+	def test_a_schedule_that_is_already_on_can_be_switched_off(self):
+		# A row scheduled before this gate existed must not be trapped: every save
+		# would be refused until the schedule is off, so switching it off has to work.
+		m = _mk_macro("Administrator", "admin-legacy")
+		macros_api.update_macro(m.name, schedule_enabled=0)
+		self.assertFalse(frappe.db.get_value(MACRO, m.name, "schedule_enabled"))
+
+	def test_a_named_user_can_still_schedule(self):
+		frappe.set_user(OWNER_OK)
+		try:
+			name = self._create("named", schedule_enabled=1)["data"]["name"]
+		finally:
+			frappe.set_user("Administrator")
+		self.assertTrue(frappe.db.get_value(MACRO, name, "next_run_at"))
 
 
 # --------------------------------------------------------------------------- #

@@ -272,6 +272,31 @@ def _step_skills(step) -> list[str]:
 		return []
 
 
+def _refuse_schedule_for_barred_owner(owner: str, schedule_enabled) -> None:
+	"""Refuse, at SAVE, a schedule the sweep will never run.
+
+	``macro_scheduler`` refuses to bind an unattended turn to Administrator, Guest or
+	a disabled user (#469). The save accepted the schedule regardless and computed a
+	"Next run", so the macro looked scheduled and every slot was then skipped
+	(admin-v2#675). Shares the scheduler's own rule, so the two cannot disagree.
+
+	Only a schedule that is ON is refused: an owner the rule bars can still keep and
+	run an unscheduled macro, and can switch an existing schedule off."""
+	if not frappe.utils.cint(schedule_enabled):
+		return
+	from jarvis.permissions import is_valid_unattended_owner
+
+	if is_valid_unattended_owner(owner):
+		return
+	frappe.throw(
+		_(
+			"Scheduled macros cannot run as {0}. Sign in as a named user to put a macro "
+			"on a schedule, or switch the schedule off to save it."
+		).format(owner),
+		title=_("This macro cannot be scheduled"),
+	)
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def create_macro(
@@ -291,6 +316,7 @@ def create_macro(
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
 	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 0 -> 1) is
 	admin-gated in the doctype validate()."""
+	_refuse_schedule_for_barred_owner(frappe.session.user, schedule_enabled)
 	doc = frappe.get_doc(
 		{
 			"doctype": MACRO,
@@ -368,6 +394,7 @@ def update_macro(
 	if merged_prompt is not None:
 		doc.merged_prompt = (merged_prompt or "").strip()
 		doc.merge_status = "ready" if doc.merged_prompt else ""
+	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
 	doc.save()
 	frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
