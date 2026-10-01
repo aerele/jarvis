@@ -41,12 +41,15 @@ class JarvisMacro(Document):
 		the engine reads its reply into this macro and deletes the chat with permissions
 		ignored (``macros._apply_merge_after_turn``). A user who could set it could name
 		any conversation. Every legitimate writer is server-side and uses a raw
-		``db.set_value``, which never reaches ``validate``; a save that CHANGES the field
-		is therefore never the engine."""
+		``db.set_value``, which never reaches ``validate``; so whatever a save carries
+		in this field is never the engine's, and the stored value always wins.
+
+		Restored silently rather than refused. A refusal would also hit an honest save
+		whose document was loaded a moment before the engine set or cleared the link
+		(a form left open while a summary starts or lands), and a Desk "Duplicate" of a
+		macro that is being summarized."""
 		before = self.get_doc_before_save()
-		previous = (before.get("merge_conversation") if before else "") or ""
-		if (self.merge_conversation or "") != previous:
-			frappe.throw(_("The summary link of a macro is set by the system."), frappe.PermissionError)
+		self.merge_conversation = (before.get("merge_conversation") if before else "") or ""
 
 	def _guard_skip_confirmation_enable(self):
 		"""ARM the macro = run its writes uncarded (the broad covered set, incl.
