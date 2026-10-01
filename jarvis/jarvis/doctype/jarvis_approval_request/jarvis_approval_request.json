@@ -13,6 +13,8 @@
   "run",
   "preparation_mode",
   "result_class",
+  "assessment_key",
+  "assessment_evidence",
   "document_type",
   "conversation",
   "question",
@@ -32,6 +34,20 @@
   "sheet"
  ],
  "fields": [
+  {
+   "fieldname": "assessment_key",
+   "fieldtype": "Data",
+   "label": "Assessment Review Key",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "assessment_evidence",
+   "fieldtype": "Long Text",
+   "label": "Assessment Review Evidence",
+   "read_only": 1,
+   "permlevel": 1
+  },
   {
    "fieldname": "title",
    "fieldtype": "Data",
@@ -57,7 +73,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "Source",
-   "options": "File Box\nChat\nFile Box Wiki"
+   "options": "File Box\nChat\nFile Box Wiki\nAgent Review"
   },
   {
    "description": "The business document type this decision concerns (e.g. Purchase Invoice). Blank = the document type itself is undetermined (Unclassified tab).",

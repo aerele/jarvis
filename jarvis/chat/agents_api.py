@@ -221,6 +221,7 @@ def _opaque_id(slug: str) -> str:
 _TEASER_STRIP_FIELDS = (
 	"category",
 	"nature",
+	"supports_manual_run",
 	"version",
 	"publisher",
 	"rule_pack",
@@ -544,6 +545,8 @@ def get_agent(agent_slug: str) -> dict:
 		"description": listing.description,
 		"category": listing.category,
 		"nature": listing.nature,
+		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
+		or listing.agent_slug in ("ap-3way-match-operator", "ar-collections-operator"),
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -608,6 +611,10 @@ def get_agent(agent_slug: str) -> dict:
 		i["schedule_time"] = str(i.schedule_time) if i.schedule_time else None
 		i["next_run_at"] = str(i.next_run_at) if i.next_run_at else None
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
+		if listing.agent_slug in ("ap-3way-match-operator", "ar-collections-operator"):
+			from jarvis.chat.operator_review import backend
+
+			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -1332,6 +1339,8 @@ def set_schedule(
 	if int(schedule_enabled or 0):
 		from jarvis.chat.agent_installability import assert_installable
 
+		if doc.agent in ("ap-3way-match-operator", "ar-collections-operator"):
+			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
@@ -1378,6 +1387,24 @@ def set_schedule(
 			"next_run_at": str(doc.next_run_at) if doc.next_run_at else None,
 		},
 	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_ap_review_defaults(company: str | None = None) -> dict:
+	"""Permission-bounded AP starter settings; this endpoint never saves configuration."""
+	from jarvis.chat.purchase_match import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_ar_review_defaults(company: str | None = None) -> dict:
+	"""Read-only AR suggestions, including company-bound fiscal years."""
+	from jarvis.chat.receivables_review import configuration_defaults
+
+	return configuration_defaults(company)
 
 
 @frappe.whitelist()
@@ -1686,7 +1713,10 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	assert_installable(doc.agent)
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe"):
+	if nature not in ("Auditor", "Scribe") and doc.agent not in (
+		"ap-3way-match-operator",
+		"ar-collections-operator",
+	):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)

@@ -86,27 +86,17 @@
       "domain": "ap",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "status": "Coming Soon",
-      "description": "Assembles the PO, Goods Receipt and captured vendor invoice for each payable and works the exception tail: raises one evidence-carrying Approval Request per line that does not tie out (short-receipt, price variance, missing GRN, duplicate bill), and stages a draft Purchase Invoice only for invoices whose lines are all clean. Proposes only; a human confirms and submits every posting.",
+      "description": "Reviews existing draft Purchase Invoices against exact PO and receipt links, cumulative invoice allocations and an explicitly configured price policy. Preview produces findings; live runs create evidence-backed human review requests. Never creates duplicate invoices, submits, pays, or certifies tax compliance. Manual runs only.",
       "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
+        "jarvis__get_purchase_match_inputs"
       ],
       "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
+        "jarvis__get_purchase_match_inputs",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "canvas",
+        "exec",
         "message"
       ],
       "doctypes_required": [
@@ -117,20 +107,13 @@
         "Purchase Receipt Item",
         "Purchase Invoice",
         "Purchase Invoice Item",
-        "Supplier",
-        "Item"
+        "Company"
       ],
-      "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Purchase Invoice",
-          "mode": "draft"
-        }
+      "rule_tokens": [
+        "ap3-match-v1"
       ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "ap-exception-family",
       "timeout_s": 600,
       "min_apps": [
@@ -144,7 +127,17 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "company",
+        "from_date",
+        "to_date",
+        "report_date",
+        "basis",
+        "review_scope",
+        "policy_version",
+        "price_tolerance_percent"
+      ]
     },
     {
       "agent_slug": "ar-collections-operator",
@@ -152,54 +145,32 @@
       "domain": "ar",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "status": "Coming Soon",
-      "description": "Sweeps the overdue receivables book each day, nets the true residual per invoice, and risk-ranks who to chase. Stages a docstatus-0 draft Dunning per overdue customer with an escalating-by-bucket letter, and raises one Jarvis Approval Request carrying the prioritised follow-up worklist with per-account evidence. It proposes only; a human reviews the tone, sends, calls, and submits or discards every artifact. It never sends, reconciles, posts, or writes off.",
+      "description": "Reviews submitted receivables and opening balances against typed payment-ledger evidence and recorded payment terms. Produces findings and neutral, unsent reminder text for a named reviewer. Detects India Compliance context when applicable. No sending, Dunning creation, reconciliation, posting, interest or write-offs. Manual runs only.",
       "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
+        "jarvis__get_receivables_review_inputs"
       ],
       "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
+        "jarvis__get_receivables_review_inputs",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
         "Jarvis Approval Request",
-        "Dunning",
         "Sales Invoice",
-        "Payment Entry",
-        "Payment Entry Reference",
         "Payment Ledger Entry",
+        "Payment Entry",
         "Journal Entry",
-        "Journal Entry Account",
         "Customer",
-        "Customer Credit Limit",
-        "Contact",
-        "Communication"
+        "Company"
       ],
-      "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Dunning",
-          "mode": "draft"
-        }
+      "rule_tokens": [
+        "ar-review-v1"
       ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 600,
       "min_apps": [
@@ -213,7 +184,17 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "company",
+        "from_date",
+        "to_date",
+        "report_date",
+        "basis",
+        "review_scope",
+        "policy_version",
+        "settlement_hold_days"
+      ]
     },
     {
       "agent_slug": "attendance-leave-integrity-auditor",

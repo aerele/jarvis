@@ -33,6 +33,9 @@
   "pages_json",
   "coverage_json",
   "scope_json",
+  "assessment_config_json",
+  "input_snapshot_json",
+  "assessment_output_json",
   "wm_row_count",
   "wm_gl_max_modified",
   "permission_profile",
@@ -44,6 +47,27 @@
   "model_source"
  ],
  "fields": [
+  {
+   "fieldname": "assessment_output_json",
+   "fieldtype": "Long Text",
+   "label": "Assessment Output Evidence",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "assessment_config_json",
+   "fieldtype": "Long Text",
+   "label": "Assessment Policy Snapshot",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "input_snapshot_json",
+   "fieldtype": "Long Text",
+   "label": "Assessment Input Evidence",
+   "read_only": 1,
+   "permlevel": 1
+  },
   {
    "fieldname": "agent",
    "fieldtype": "Link",
