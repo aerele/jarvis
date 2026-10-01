@@ -641,6 +641,9 @@ def summarize_macro(name: str) -> dict:
 	# alone, anyone who could SEE a macro could overwrite its owner's summary, and
 	# the throwaway chat belonged to the caller, not the macro's owner.
 	doc.check_permission("write")
+	from jarvis.chat import macros
+
+	macros.refuse_acting_for_barred_owner(doc.owner)
 	steps = doc.steps or []
 	if len(steps) < 2:
 		frappe.throw(_("Nothing to merge — the macro has fewer than 2 steps."))

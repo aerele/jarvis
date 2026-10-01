@@ -355,3 +355,33 @@ def refuse_in_tool_dispatch() -> None:
 
 	if in_tool_dispatch():
 		frappe.throw(frappe._("Not permitted inside a tool call"), frappe.PermissionError)
+
+
+class NotRenamable:
+	"""Mix into a controller whose records must never be renamed or merged.
+
+	A rename rewrites every link to the record in place, without the permission hook
+	or the ``validate`` of the records that hold those links. For owner-scoped engine
+	state that would move one user's rows onto another user's record: a run row
+	follows its conversation. So these records are not renamable, by any caller.
+
+	Refused at every step a rename passes through, so it does not depend on which
+	route started it."""
+
+	def rename(self, *args, **kwargs):
+		self._refuse_rename()
+
+	def _rename(self, *args, **kwargs):
+		self._refuse_rename()
+
+	def before_rename(self, *args, **kwargs):
+		self._refuse_rename()
+
+	def after_rename(self, *args, **kwargs):
+		self._refuse_rename()
+
+	def _refuse_rename(self):
+		frappe.throw(
+			frappe._("{0} records cannot be renamed or merged.").format(frappe._(self.doctype)),
+			frappe.PermissionError,
+		)
