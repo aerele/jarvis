@@ -5,7 +5,7 @@ which fires every enabled macro whose ``next_run_at`` has passed — running it 
 the macro's owner (so the result conversation is theirs) and advancing
 ``next_run_at`` for the next occurrence. The sweep was hourly, so a macro set for
 10:15 started at 11:00 and read as "never triggered" (admin-v2#675). A slot that
-FAILED is still retried only about hourly (``_retry_later``). Modeled on
+FAILED is retried 55 minutes later, not on every sweep (``_retry_later``). Modeled on
 ``jarvis.chat.stale_scan.scan_and_mark_errored``, hardened to match
 ``jarvis.chat.agent_scheduler``:
 
@@ -16,7 +16,7 @@ FAILED is still retried only about hourly (``_retry_later``). Modeled on
   owner can act on it, a Notification Log), instead of an Error Log only a System
   Manager can read; ``last_run_at`` is stamped only when the slot was actually
   consumed; and a dispatch that RAISED does not consume the slot: it is retried
-  about an hour later rather than looking like a success.
+  55 minutes later rather than looking like a success.
 * **#472** — the sweep is per-macro fault-isolated, and ``compute_next_run`` is
   TOTAL: no ``schedule_time`` value, however malformed, can make it raise. Both
   limbs matter because the schedule arithmetic used to run OUTSIDE the per-macro
@@ -93,7 +93,7 @@ _BLOCK_SENTENCE = {
 }
 
 # #468: a refusal that CLEARS ON ITS OWN within minutes does not consume the slot: it
-# is retried about an hour later (the sibling's O4 shape). Everything else is an
+# is retried 55 minutes later (the sibling's O4 shape). Everything else is an
 # entitlement decision that cannot clear inside the hour — consume the slot, or the
 # cadence relogs the same dead end 24 times a day.
 _TRANSIENT_BLOCKS = {
@@ -135,7 +135,7 @@ def run_due_macros() -> None:
 		# `schedule_time` the arithmetic could not use, but the guarantee wanted here is
 		# structural and not specific to that value: no single row can take the sweep
 		# down. A failure never CONSUMES the slot (#471): if this one blew up before the
-		# slot was claimed, it is retried about an hour later, with a failed run the
+		# slot was claimed, it is retried 55 minutes later, with a failed run the
 		# owner can see. If it blew up after the claim, the macro was already
 		# dispatched and the schedule has moved on, so there is nothing to retry.
 		try:
@@ -331,13 +331,22 @@ def is_retry_pending(row, now=None) -> bool:
 	own next slot, so the screens can say so. A retry is written to ``next_run_at``, and
 	without this the owner sees a "Next run" at a time they never chose.
 
-	Derived, not stored: a natural slot always equals ``compute_next_run`` from now, and
-	a retry is by construction earlier than that."""
+	Derived, not stored, from two things only a retry has. It is at most
+	``_RETRY_AFTER_S`` away, and it sits off the schedule's own minute: a slot is always
+	HH:MM:00 exactly, a retry is the failing sweep's clock plus the wait.
+
+	Not "earlier than ``compute_next_run`` from now". A weekly or monthly macro saved
+	without a day (every one from before #653) has no fixed slot to compare with: that
+	answer moves with the day you ask, so a healthy macro read as a failed one every
+	afternoon."""
 	if not cint(row.get("schedule_enabled")) or not row.get("next_run_at"):
 		return False
 	now = now or now_datetime()
 	next_run_at = get_datetime(row.get("next_run_at"))
-	return next_run_at > now and next_run_at < _next_occurrence(row, now)
+	if not now < next_run_at <= add_to_date(now, seconds=_RETRY_AFTER_S):
+		return False
+	secs = _time_to_seconds(row.get("schedule_time"))
+	return next_run_at.time() != datetime.time(secs // 3600, (secs % 3600) // 60)
 
 
 def _stamp_last_run(m, now) -> None:

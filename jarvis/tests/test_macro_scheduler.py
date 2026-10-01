@@ -21,6 +21,7 @@ so assertions are always scoped to this suite's own rows.
 
 from __future__ import annotations
 
+import datetime
 from unittest.mock import patch
 
 import frappe
@@ -604,6 +605,20 @@ class TestScheduledMacroCadence(MacroSchedulerBase):
 			macro_scheduler.run_due_macros()
 		self.assertIn("retry within the hour", _runs_for(m.name)[0].error)
 
+	def test_the_notification_says_it_will_retry_too(self):
+		# The notification is the only thing an owner sees at 03:00; the retry clause
+		# must not live on the failed-run row alone.
+		m = self._mk_retryable("retry-notified")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
+			macro_scheduler.run_due_macros()
+		bodies = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": OWNER_OK, "subject": ["like", f"%{m.macro_name}%"]},
+			pluck="email_content",
+		)
+		self.assertEqual(len(bodies), 1, bodies)
+		self.assertIn("retry within the hour", bodies[0])
+
 	def test_the_failure_does_not_promise_a_retry_that_was_not_scheduled(self):
 		m = self._mk_retryable("retry-not-promised")
 		with (
@@ -639,6 +654,64 @@ class TestScheduledMacroCadence(MacroSchedulerBase):
 		self._run_due()  # dispatched fine: next_run_at is now the schedule's own next slot
 		row = frappe.get_all(MACRO, filters={"name": m.name}, fields=["*"])[0]
 		self.assertFalse(macro_scheduler.is_retry_pending(row))
+
+	def test_a_weekly_or_monthly_macro_saved_without_a_day_is_not_reported_as_a_retry(self):
+		# Rows scheduled before the day picker (#653) carry no weekday / day of month.
+		# For them "the next occurrence from now" is seven days (or a month) from TODAY
+		# once today's time has passed, so it overtakes the stored slot every afternoon.
+		# Judged against that, a healthy macro read "The last scheduled run failed".
+		after_todays_time = datetime.datetime(2026, 10, 7, 11, 0)  # a Wednesday
+		for frequency, slot in (
+			("weekly", datetime.datetime(2026, 10, 12, 10, 15)),
+			("monthly", datetime.datetime(2026, 11, 5, 10, 15)),
+			# Less than the retry wait away, and still the schedule's own slot.
+			("weekly", datetime.datetime(2026, 10, 7, 11, 30)),
+		):
+			row = frappe._dict(
+				schedule_enabled=1,
+				schedule_frequency=frequency,
+				schedule_time=slot.strftime("%H:%M:00"),
+				schedule_weekday=None,
+				schedule_day_of_month=None,
+				next_run_at=slot,
+			)
+			self.assertFalse(macro_scheduler.is_retry_pending(row, after_todays_time), f"{frequency} {slot}")
+
+	def test_only_a_time_within_the_retry_wait_and_off_the_schedule_minute_is_a_retry(self):
+		now = datetime.datetime(2026, 10, 7, 11, 0, 4, 250)
+		row = frappe._dict(schedule_enabled=1, schedule_frequency="daily", schedule_time="09:00:00")
+		wait = macro_scheduler._RETRY_AFTER_S
+		row.next_run_at = add_to_date(now, seconds=wait)
+		self.assertTrue(macro_scheduler.is_retry_pending(row, now))
+		# Further out than any retry can be: a hand-set or seeded time, not a failure.
+		row.next_run_at = add_to_date(now, seconds=wait + 1)
+		self.assertFalse(macro_scheduler.is_retry_pending(row, now))
+		row.next_run_at = add_to_date(now, seconds=-1)
+		self.assertFalse(macro_scheduler.is_retry_pending(row, now), "a due slot is not a retry")
+		row.schedule_enabled = 0
+		row.next_run_at = add_to_date(now, seconds=wait)
+		self.assertFalse(macro_scheduler.is_retry_pending(row, now), "a switched-off schedule")
+
+	def test_the_retry_wait_fits_inside_the_hour_the_owner_is_told(self):
+		# The failed-run text says "within the hour", and until a site migrates the retry
+		# is picked up by the old HOURLY job: an hour or more would wait for two ticks.
+		# Twelve retries an hour is what the wait exists to prevent.
+		self.assertLess(macro_scheduler._RETRY_AFTER_S, 60 * 60)
+		self.assertGreaterEqual(macro_scheduler._RETRY_AFTER_S, 30 * 60)
+
+	def test_the_macros_list_reports_a_pending_retry_too(self):
+		from jarvis.chat import macros_api
+
+		m = self._mk_retryable("retry-flag-list")
+		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
+			macro_scheduler.run_due_macros()
+		frappe.set_user(OWNER_OK)
+		try:
+			rows = macros_api.list_macros_page(page_length=100)["rows"]
+		finally:
+			frappe.set_user("Administrator")
+		flags = {r["name"]: r["next_run_is_retry"] for r in rows}
+		self.assertEqual(flags[m.name], 1)
 
 	# --- the sweep never overwrites a schedule the owner saved meanwhile -------- #
 

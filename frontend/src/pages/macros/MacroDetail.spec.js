@@ -207,6 +207,27 @@ describe("MacroDetail Schedule section: seeding must not fabricate a day", () =>
 	});
 });
 
+describe("MacroDetail Schedule section: a pending retry is not shown as the schedule", () => {
+	// A failed scheduled run is retried at a time the owner never chose. Shown as a
+	// plain "Next run" it contradicts the schedule printed right before it.
+	const retrying = { next_run_at: "2026-10-01 11:17:04", next_run_is_retry: 1 };
+
+	it("says the last run failed, where to look, and when it retries", async () => {
+		const w = await mountDetail(baseMacro(retrying));
+		expect(w.text()).toContain("Scheduled daily at 9:00 am.");
+		expect(w.text()).toContain(
+			"The last scheduled run failed (the Runs tab says why). Retrying:"
+		);
+		expect(w.text()).not.toContain("Next run:");
+	});
+
+	it("an ordinary slot, or a server that sends no flag, still reads 'Next run'", async () => {
+		const w = await mountDetail(baseMacro({ next_run_at: "2026-10-02 09:00:00" }));
+		expect(w.text()).toContain("Next run:");
+		expect(w.text()).not.toContain("Retrying:");
+	});
+});
+
 describe("MacroDetail Schedule section: summary line reflects the SAVED snapshot only", () => {
 	it("shows the summary when clean and a next_run_at is present", async () => {
 		const w = await mountDetail(
