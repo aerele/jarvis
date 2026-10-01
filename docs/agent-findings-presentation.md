@@ -40,12 +40,6 @@ The current Currency field stores omitted amounts as zero, so the worklist omits
 zero amount badges instead of presenting them as measured financial exposure.
 The fallback dashboard distinguishes an omitted amount from an explicit zero.
 
-## Example
-
-The real findings component rendered with synthetic records (no customer data):
-
-![Candidate explanation, evidence links, review guidance, and qualitative finding](screenshots/agent-findings-explanations.png)
-
 ## Validation and rollout
 
 Regression tests cover all five evaluator classes, both sides of paired evidence,
