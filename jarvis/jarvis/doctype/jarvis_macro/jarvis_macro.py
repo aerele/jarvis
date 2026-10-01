@@ -32,7 +32,21 @@ class JarvisMacro(Document):
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._guard_skip_confirmation_enable()
+		self._guard_summary_link()
 		self._recompute_next_run()
+
+	def _guard_summary_link(self):
+		"""``merge_conversation`` is engine state, not a user field: it names the
+		throwaway chat a summary is being generated in. When a turn in that chat ends,
+		the engine reads its reply into this macro and deletes the chat with permissions
+		ignored (``macros._apply_merge_after_turn``). A user who could set it could name
+		any conversation. Every legitimate writer is server-side and uses a raw
+		``db.set_value``, which never reaches ``validate``; a save that CHANGES the field
+		is therefore never the engine."""
+		before = self.get_doc_before_save()
+		previous = (before.get("merge_conversation") if before else "") or ""
+		if (self.merge_conversation or "") != previous:
+			frappe.throw(_("The summary link of a macro is set by the system."), frappe.PermissionError)
 
 	def _guard_skip_confirmation_enable(self):
 		"""ARM the macro = run its writes uncarded (the broad covered set, incl.

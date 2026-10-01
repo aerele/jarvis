@@ -96,9 +96,14 @@ def has_macro_run_permission(doc, ptype: str = "read", user: str | None = None) 
 	MAC-2 guarded CREATE only, so an owner could still UPDATE their own row over
 	generic REST: repoint ``conversation`` at another user's chat (the engine then
 	ran the next step there AS that user), set a terminal ``status`` by hand
-	(skipping the code that disarms an armed run), or delete rows to reset their
-	budget. Refusing every write ptype here closes all three at once, and takes
-	effect on deploy without waiting for a migrate to re-sync the role rows."""
+	(skipping the code that disarms an armed run), or delete rows directly. Refusing
+	every write ptype here closes all three, and takes effect on deploy without
+	waiting for a migrate to re-sync the role rows.
+
+	NOT closed here: ``macros_api.delete_macro`` still removes a macro's run history
+	server-side, and the unattended budget is summed from surviving rows, so deleting
+	and recreating a macro resets it. That needs the budget to stop depending on rows
+	a user can make disappear."""
 	user = user or frappe.session.user
 	if ptype not in _RUN_READ_PTYPES:
 		return False
