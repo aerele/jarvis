@@ -50,6 +50,14 @@ export default [
     "status": false
   },
   {
+    "code": "session-reset",
+    "pattern": "\\bcli_live_session_(changed|missing)\\b|live session is no longer reusable",
+    "headline": "The model session restarted",
+    "hint": "This can happen right after switching models. Try again.",
+    "retryable": true,
+    "status": false
+  },
+  {
     "code": "unreachable",
     "pattern": "ws open failed|\\bunreachable\\b|connection timed out",
     "headline": "Jarvis could not reach the assistant",
