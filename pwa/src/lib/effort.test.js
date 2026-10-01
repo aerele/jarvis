@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { effortOffered, sendThinking, thinkingOf } from "./prefs.js";
+import { effortOffered, sendThinking, thinkingOf } from "./effort.js";
 
 test("thinkingOf: Balanced is the default, so it sends no level", () => {
 	assert.equal(thinkingOf("Balanced"), "");

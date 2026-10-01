@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import AppBar from "../components/AppBar.vue";
 import Sheet from "../components/Sheet.vue";
 import * as api from "../api";
-import { EFFORT, effortOffered, prefs, setPrefs } from "../lib/prefs";
+import { EFFORT, effortOffered } from "../lib/effort";
+import { prefs, setPrefs } from "../lib/prefs";
 import { applyTheme, theme } from "../lib/theme";
 import { agentName } from "@/branding";
 
