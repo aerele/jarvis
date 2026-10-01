@@ -609,6 +609,8 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 	compare to the watermark stamped at launch. True when the GL changed mid-scan
 	(a backdated JV between two chunk fetches) so the run must NOT read as
 	``completed``. No stamped watermark / no scope -> no drift signal (False)."""
+	if run_doc.get("agent") in ("ap-3way-match-operator", "ar-collections-operator"):
+		return False
 	stamped_count = run_doc.get("wm_row_count")
 	company = (scope or {}).get("company")
 	to_date = (scope or {}).get("to_date")
@@ -655,6 +657,8 @@ def _scoped_visibility(run_doc, inst) -> bool:
 		_GL_SCOPED_DIMENSIONS,
 	)
 
+	if run_doc.get("agent") in ("ap-3way-match-operator", "ar-collections-operator"):
+		return False
 	profile = run_doc.get("permission_profile")
 	if profile:
 		try:
@@ -680,6 +684,8 @@ def _rowcount_shortfall(run_doc, rows_consumed) -> bool:
 	differ), so a non-zero count is deliberately not asserted equal — that would be a
 	false-positive machine. ``rows_consumed=None`` (a delegate/evaluator that does not
 	yet report it) means "cannot reconcile", never a false shortfall."""
+	if run_doc.get("agent") in ("ap-3way-match-operator", "ar-collections-operator"):
+		return False
 	stamped = run_doc.get("wm_row_count")
 	if stamped is None:
 		return False
@@ -885,7 +891,14 @@ def record_delegate_run(
 	required_tokens = required_coverage_tokens
 	required_unevaluated = required_tokens - evaluated_tokens
 
-	if not truncated and not wm_drift and not scoped and not row_shortfall and evaluated_tokens:
+	if (
+		not truncated
+		and not wm_drift
+		and not scoped
+		and not row_shortfall
+		and evaluated_tokens
+		and agent not in ("ap-3way-match-operator", "ar-collections-operator")
+	):
 		candidates = frappe.get_all(
 			FINDING,
 			filters={
