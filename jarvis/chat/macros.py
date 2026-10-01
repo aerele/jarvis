@@ -190,6 +190,25 @@ def _disarm_run_conversation(run_name: str) -> None:
 	_disarm_conversation(frappe.db.get_value(RUN, run_name, "conversation"))
 
 
+def refuse_acting_for_barred_owner(owner: str) -> None:
+	"""Someone other than the owner is starting work that runs AS the owner (a run, a
+	summary). The owner is not at the keyboard, so this is an unattended turn and the
+	scheduler's two identity checks apply (#469, ``macro_scheduler._sweep_one``):
+	never for Administrator, Guest, a disabled account, or one without Jarvis access."""
+	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+	if owner == frappe.session.user:
+		return
+	if is_valid_unattended_owner(owner) and has_jarvis_access(owner):
+		return
+	frappe.throw(
+		_(
+			"This macro's owner ({0}) can no longer use Jarvis, so it cannot be run or summarized for them."
+		).format(owner),
+		frappe.PermissionError,
+	)
+
+
 # --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
@@ -198,7 +217,17 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	first step. Returns ``{ok, data:{macro_run, conversation}}``. ``trigger`` is
 	``manual`` (user clicked Run) or ``scheduled`` (the cron)."""
 	doc = frappe.get_doc(MACRO, macro_name)
-	doc.check_permission("read")  # owner-gate: get_doc alone doesn't enforce if_owner
+	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
+	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
+	# them), uncarded when the macro is armed. On read alone, anyone who could only
+	# SEE a macro (oversight, a read share) chose when its owner's steps ran. Checked
+	# on the owner directly, like stop_macro_run, not through "write": an owner's
+	# write comes from the Jarvis User role row, and an owner who holds another Jarvis
+	# role instead must still be able to run their own macro. The scheduler passes: it
+	# runs as the owner.
+	if frappe.session.user not in (doc.owner, "Administrator"):
+		frappe.throw(_("Only a macro's owner can run it."), frappe.PermissionError)
+	refuse_acting_for_barred_owner(doc.owner)
 	steps = doc.steps or []
 	if not steps:
 		frappe.throw(_("This macro has no steps."))
@@ -542,6 +571,8 @@ def _drop_summary_link_unless_one_owner(macro_name: str, conversation_id: str) -
 	engine declining to act on a link it did not write, whatever did. The conversation
 	is left exactly as it was."""
 	row = frappe.db.get_value(MACRO, macro_name, ["owner", "macro_name"], as_dict=True)
+	if not row:
+		return True  # the macro was deleted while its summary ran: nothing to land on
 	conv_owner = frappe.db.get_value(CONV, conversation_id, "owner")
 	if row.owner == conv_owner:
 		return False
