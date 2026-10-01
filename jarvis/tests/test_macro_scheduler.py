@@ -894,6 +894,126 @@ class TestStaleMacroRunReaper(MacroSchedulerBase):
 
 
 # --------------------------------------------------------------------------- #
+# admin-v2#675 — saving a macro must not move a slot that is already due, and a
+# schedule must read back as the time that was saved
+# --------------------------------------------------------------------------- #
+class TestScheduleSurvivesASave(MacroSchedulerBase):
+	"""The schedule form posts every field on every save. For a daily macro that
+	includes day-of-month ``0`` and weekday ``""``, which the API stores as ``None``
+	while the row holds ``0`` / ``""``, so the controller read every save as a
+	schedule change and recomputed ``next_run_at`` from now: a run that was due but
+	not swept yet moved to tomorrow, with nothing recorded."""
+
+	def _due_daily_macro(self, tag: str):
+		m = _mk_macro(OWNER_OK, tag)
+		frappe.db.set_value(MACRO, m.name, "schedule_time", "10:15:00", update_modified=False)
+		frappe.db.commit()
+		return m
+
+	def _save_from_the_form(self, m, **changes):
+		payload = {
+			"macro_name": m.macro_name,
+			"schedule_enabled": 1,
+			"schedule_frequency": "daily",
+			"schedule_time": "10:15",
+			"schedule_weekday": "",
+			"schedule_day_of_month": 0,
+			**changes,
+		}
+		frappe.set_user(OWNER_OK)
+		try:
+			macros_api.update_macro(m.name, **payload)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _next_run(self, m):
+		return get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
+
+	def test_a_save_that_changes_no_schedule_field_keeps_the_due_slot(self):
+		m = self._due_daily_macro("resave")
+		before = self._next_run(m)
+		self._save_from_the_form(m, description="only the description changed")
+		self.assertEqual(self._next_run(m), before, "re-saving a macro dropped the run that was due")
+
+	def test_changing_the_time_still_reschedules(self):
+		m = self._due_daily_macro("retime")
+		self._save_from_the_form(m, schedule_time="11:30")
+		after = self._next_run(m)
+		self.assertEqual((after.hour, after.minute), (11, 30))
+		self.assertGreater(after, now_datetime())
+
+	# The two anchor tests change ONLY the anchor. Changing the frequency as well would
+	# reschedule through `schedule_frequency` and prove nothing about the anchor compare.
+
+	def test_changing_only_the_day_of_month_still_reschedules(self):
+		m = self._due_daily_macro("reanchor-day")
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{"schedule_frequency": "monthly", "schedule_day_of_month": 10},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self._save_from_the_form(m, schedule_frequency="monthly", schedule_day_of_month=15)
+		after = self._next_run(m)
+		self.assertEqual(after.day, 15)
+		self.assertGreater(after, now_datetime())
+
+	def test_changing_only_the_weekday_still_reschedules(self):
+		m = self._due_daily_macro("reanchor-weekday")
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{"schedule_frequency": "weekly", "schedule_weekday": "Monday"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self._save_from_the_form(m, schedule_frequency="weekly", schedule_weekday="Thursday")
+		after = self._next_run(m)
+		self.assertEqual(after.strftime("%A"), "Thursday")
+		self.assertGreater(after, now_datetime())
+
+	def test_an_unchanged_anchor_keeps_the_due_slot(self):
+		m = self._due_daily_macro("same-anchor")
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{"schedule_frequency": "weekly", "schedule_weekday": "Monday"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		before = self._next_run(m)
+		self._save_from_the_form(m, schedule_frequency="weekly", schedule_weekday="Monday")
+		self.assertEqual(self._next_run(m), before)
+
+	def test_a_row_with_no_stored_time_keeps_its_due_slot_when_the_form_sends_the_default(self):
+		# A row written without a time runs at the 09:00 default. The form always posts
+		# a time, "09:00" for such a row. That is the same schedule, not a change.
+		m = _mk_macro(OWNER_OK, "no-time")
+		# Emptied by hand: Frappe 15 stamps every Time field of a new document with the
+		# current time, so there the fixture's row is NOT time-less on its own, and a
+		# form posting "09:00" over it is a real change that rightly reschedules.
+		frappe.db.set_value(MACRO, m.name, "schedule_time", None, update_modified=False)
+		frappe.db.commit()
+		before = self._next_run(m)
+		self._save_from_the_form(m, schedule_time="09:00")
+		self.assertEqual(self._next_run(m), before, "the first save of a time-less macro dropped its due run")
+
+	def test_a_midnight_schedule_reads_back_as_midnight(self):
+		# timedelta(0) is falsy, so `schedule_time or ""` returned "" for 00:00 and the
+		# form fell back to its 09:00 default, which the next save then stored.
+		m = _mk_macro(OWNER_OK, "midnight", due=False)
+		frappe.db.set_value(MACRO, m.name, "schedule_time", "00:00:00", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(OWNER_OK)
+		try:
+			shown = macros_api.get_macro(m.name)["schedule_time"]
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(macro_scheduler.parse_schedule_seconds(shown), 0, f"midnight read back as {shown!r}")
+
+
+# --------------------------------------------------------------------------- #
 # #472 — schedule_time is validated, and one bad row cannot abort the sweep
 # --------------------------------------------------------------------------- #
 class TestScheduleTimeValidation(MacroSchedulerBase):
