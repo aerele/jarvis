@@ -519,13 +519,57 @@ class TestScheduleSurvivesASave(MacroSchedulerBase):
 		self.assertEqual((after.hour, after.minute), (11, 30))
 		self.assertGreater(after, now_datetime())
 
-	def test_changing_the_day_anchor_still_reschedules(self):
-		m = self._due_daily_macro("reanchor")
-		before = self._next_run(m)
+	# The two anchor tests change ONLY the anchor. Changing the frequency as well would
+	# reschedule through `schedule_frequency` and prove nothing about the anchor compare.
+
+	def test_changing_only_the_day_of_month_still_reschedules(self):
+		m = self._due_daily_macro("reanchor-day")
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{"schedule_frequency": "monthly", "schedule_day_of_month": 10},
+			update_modified=False,
+		)
+		frappe.db.commit()
 		self._save_from_the_form(m, schedule_frequency="monthly", schedule_day_of_month=15)
 		after = self._next_run(m)
-		self.assertNotEqual(after, before)
 		self.assertEqual(after.day, 15)
+		self.assertGreater(after, now_datetime())
+
+	def test_changing_only_the_weekday_still_reschedules(self):
+		m = self._due_daily_macro("reanchor-weekday")
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{"schedule_frequency": "weekly", "schedule_weekday": "Monday"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self._save_from_the_form(m, schedule_frequency="weekly", schedule_weekday="Thursday")
+		after = self._next_run(m)
+		self.assertEqual(after.strftime("%A"), "Thursday")
+		self.assertGreater(after, now_datetime())
+
+	def test_an_unchanged_anchor_keeps_the_due_slot(self):
+		m = self._due_daily_macro("same-anchor")
+		frappe.db.set_value(
+			MACRO,
+			m.name,
+			{"schedule_frequency": "weekly", "schedule_weekday": "Monday"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		before = self._next_run(m)
+		self._save_from_the_form(m, schedule_frequency="weekly", schedule_weekday="Monday")
+		self.assertEqual(self._next_run(m), before)
+
+	def test_a_row_with_no_stored_time_keeps_its_due_slot_when_the_form_sends_the_default(self):
+		# A row written without a time runs at the 09:00 default. The form always posts
+		# a time, "09:00" for such a row. That is the same schedule, not a change.
+		m = _mk_macro(OWNER_OK, "no-time")
+		before = self._next_run(m)
+		self._save_from_the_form(m, schedule_time="09:00")
+		self.assertEqual(self._next_run(m), before, "the first save of a time-less macro dropped its due run")
 
 	def test_a_midnight_schedule_reads_back_as_midnight(self):
 		# timedelta(0) is falsy, so `schedule_time or ""` returned "" for 00:00 and the
