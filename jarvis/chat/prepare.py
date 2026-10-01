@@ -267,7 +267,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	payload = {
 		"session_key": conv.session_key or session_key,
 		"message": ap.user_message,
-		"thinking": (conv.thinking_override or "").strip() or None,
+		"thinking": turn_handler._turn_thinking(conv),
 		"attachments": managed_attachments,
 		"drained_note_ids": ap.drained_ids,
 		"chat_user": chat_user,
