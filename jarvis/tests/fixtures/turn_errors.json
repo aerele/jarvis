@@ -234,5 +234,13 @@
   {
     "error": "İnvalid api key",
     "code": "gateway"
+  },
+  {
+    "error": "Managed CLI live session is no longer reusable. | cli_live_session_changed",
+    "code": "session-reset"
+  },
+  {
+    "error": "Managed CLI live session is no longer reusable. | cli_live_session_missing",
+    "code": "session-reset"
   }
 ]
