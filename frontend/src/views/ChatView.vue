@@ -252,37 +252,6 @@
 										>
 									</span>
 								</button>
-								<button
-									v-if="currentId"
-									role="menuitem"
-									class="jv-create-item"
-									@click="
-										createMenuOpen = false;
-										openCompactDialog('');
-									"
-								>
-									<svg
-										width="17"
-										height="17"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="var(--text-2)"
-										stroke-width="1.7"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M8 3v4a1 1 0 0 1-1 1H3" />
-										<path d="M21 8h-4a1 1 0 0 1-1-1V3" />
-										<path d="M3 16h4a1 1 0 0 1 1 1v4" />
-										<path d="M16 21v-4a1 1 0 0 1 1-1h4" />
-									</svg>
-									<span class="jv-create-item-txt">
-										<span class="jv-create-item-t">Compact chat</span>
-										<span class="jv-create-item-s"
-											>Summarise older turns to free up space</span
-										>
-									</span>
-								</button>
 							</div>
 						</template>
 					</div>
