@@ -357,8 +357,14 @@ const breadcrumbs = computed(() => [
 ]);
 
 const nextRunAt = computed(() => exactDate(nextRunRaw.value));
-// Why this account cannot schedule, or "" when it can (see lib/macroSchedule).
-const scheduleBlocked = computed(() => cannotScheduleReason(session.user));
+// Why this macro cannot be on a schedule, or "" when it can. For a saved macro the
+// SERVER says, judged from the macro's owner (the identity the scheduler runs as),
+// so the warning and the save refusal can never disagree. A new macro has no owner
+// yet: it will be whoever saves it, so the logged-in account is the right question.
+const ownerBlockedReason = ref("");
+const scheduleBlocked = computed(() =>
+	props.isNew ? cannotScheduleReason(session.user) : ownerBlockedReason.value
+);
 // "Scheduled monthly on the 15th at 9:00 am. Next run: ..." - built from the
 // SAVED snapshot only (never the live draft), mirroring AgentDetail.vue's own
 // scheduleSummary exactly: blank while `dirty` (would narrate a schedule that
@@ -453,6 +459,7 @@ function seed(data) {
 	form.merged_prompt = data.merged_prompt || "";
 	mergeStatus.value = data.merge_status || "";
 	nextRunRaw.value = data.next_run_at || "";
+	ownerBlockedReason.value = data.schedule_blocked_reason || "";
 	snapshot.value = {
 		macro_name: form.macro_name,
 		description: form.description,
