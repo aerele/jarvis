@@ -683,6 +683,12 @@ class TestScheduledMacroCadence(MacroSchedulerBase):
 		wait = macro_scheduler._RETRY_AFTER_S
 		row.next_run_at = add_to_date(now, seconds=wait)
 		self.assertTrue(macro_scheduler.is_retry_pending(row, now))
+		# The commonest retry: the 09:00 run fails and is retried at 09:55, inside the
+		# schedule's own HOUR. Only the minute tells it from the slot.
+		at_the_slot = datetime.datetime(2026, 10, 7, 9, 0, 4, 250)
+		row.next_run_at = add_to_date(at_the_slot, seconds=wait)
+		self.assertTrue(macro_scheduler.is_retry_pending(row, at_the_slot))
+		row.next_run_at = add_to_date(now, seconds=wait)
 		# Further out than any retry can be: a hand-set or seeded time, not a failure.
 		row.next_run_at = add_to_date(now, seconds=wait + 1)
 		self.assertFalse(macro_scheduler.is_retry_pending(row, now))

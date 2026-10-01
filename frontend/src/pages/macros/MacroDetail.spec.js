@@ -216,7 +216,7 @@ describe("MacroDetail Schedule section: a pending retry is not shown as the sche
 		const w = await mountDetail(baseMacro(retrying));
 		expect(w.text()).toContain("Scheduled daily at 9:00 am.");
 		expect(w.text()).toContain(
-			"The last scheduled run failed (the Runs tab says why). Retrying:"
+			"The last scheduled run failed (Runs, on the Macros page, says why). Retrying:"
 		);
 		expect(w.text()).not.toContain("Next run:");
 	});
