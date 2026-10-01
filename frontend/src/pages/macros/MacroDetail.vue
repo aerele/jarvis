@@ -255,6 +255,7 @@ const saving = ref(false);
 const running = ref(false);
 const mergeStatus = ref(""); // '' | 'pending' | 'ready' | 'failed'
 const nextRunRaw = ref("");
+const nextRunIsRetry = ref(false);
 
 const form = reactive({
 	macro_name: "",
@@ -361,9 +362,14 @@ const scheduleSummary = computed(() => {
 	if (!snap || props.isNew || dirty.value || !snap.schedule_enabled) return "";
 	if (!nextRunAt.value) return "";
 	const anchor = scheduleAnchorPhrase(snap.schedule_frequency, snap.schedule_day);
+	// A failed scheduled run is retried at a time the owner did not choose; say so,
+	// or "daily at 9:00 am. Next run: 11:17 am" reads as a contradiction.
+	const next = nextRunIsRetry.value
+		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${nextRunAt.value}`
+		: `Next run: ${nextRunAt.value}`;
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
-		`at ${formatTime12h(snap.schedule_time)}. Next run: ${nextRunAt.value}`
+		`at ${formatTime12h(snap.schedule_time)}. ${next}`
 	);
 });
 
@@ -441,6 +447,7 @@ function seed(data) {
 	});
 	form.steps = mapSteps(data.steps);
 	if (!form.steps.length) form.steps = [{ label: "", prompt: "", skills: [] }];
+	nextRunIsRetry.value = !!data.next_run_is_retry;
 	form.merged_prompt = data.merged_prompt || "";
 	mergeStatus.value = data.merge_status || "";
 	nextRunRaw.value = data.next_run_at || "";
