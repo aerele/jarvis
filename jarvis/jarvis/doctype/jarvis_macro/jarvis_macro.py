@@ -141,9 +141,9 @@ class JarvisMacro(Document):
 			self.is_new()
 			or self.has_value_changed("schedule_enabled")
 			or self.has_value_changed("schedule_frequency")
-			or self.has_value_changed("schedule_time")
-			or self.has_value_changed("schedule_weekday")
-			or self.has_value_changed("schedule_day_of_month")
+			or self._time_changed()
+			or self._anchor_changed("schedule_weekday")
+			or self._anchor_changed("schedule_day_of_month")
 			or not self.next_run_at
 		)
 		if changed:
@@ -155,6 +155,32 @@ class JarvisMacro(Document):
 				weekday=self.schedule_weekday,
 				day_of_month=self.schedule_day_of_month,
 			)
+
+	def _anchor_changed(self, fieldname: str) -> bool:
+		"""``has_value_changed`` for the two optional anchors, treating every spelling of
+		"not set" as the same value.
+
+		The row holds ``0`` / ``""`` for an unset anchor, while a save from the form
+		arrives as ``None``. Compared raw, every save of a daily macro looked like a
+		schedule change and recomputed ``next_run_at`` from now, so a run that was due
+		but not swept yet silently moved to the next day (admin-v2#675)."""
+		before = self.get_doc_before_save()
+		if not before:
+			return True
+		return (before.get(fieldname) or None) != (self.get(fieldname) or None)
+
+	def _time_changed(self) -> bool:
+		"""Whether the time of day the macro RUNS at changed, compared as the scheduler
+		reads it (``_time_to_seconds``): a row with no stored time runs at the 09:00
+		default, so the form posting "09:00" for it is the same schedule, not a change.
+		It also makes "10:15" and a stored ``10:15:00`` equal without leaning on how the
+		framework happens to coerce a Time field."""
+		from jarvis.chat.macro_scheduler import _time_to_seconds
+
+		before = self.get_doc_before_save()
+		if not before:
+			return True
+		return _time_to_seconds(before.get("schedule_time")) != _time_to_seconds(self.schedule_time)
 
 
 def on_doctype_update():
