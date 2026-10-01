@@ -6,7 +6,7 @@ Configured DocField filters travel separately and retain Desk's override order.
 """
 
 
-def draft_link_query_filters(doctype, df):
+def draft_link_query_filters(doctype, df, parent_doctype=None, parentfield=None):
 	if df.fieldtype != "Link":
 		return []
 	# erpnext/accounts/doctype/purchase_invoice/purchase_invoice.js: credit_to.get_query
@@ -20,7 +20,12 @@ def draft_link_query_filters(doctype, df):
 	if df.options == "Warehouse":
 		if doctype == "Material Request" and df.fieldname in {"set_warehouse", "set_from_warehouse"}:
 			company = "eval:doc.company"
-		elif doctype == "Material Request Item" and df.fieldname == "warehouse":
+		elif (
+			doctype == "Material Request Item"
+			and parent_doctype == "Material Request"
+			and parentfield == "items"
+			and df.fieldname == "warehouse"
+		):
 			company = "eval:parent.company"
 		else:
 			return []
