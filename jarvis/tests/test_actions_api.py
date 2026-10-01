@@ -16,6 +16,59 @@ from jarvis.tests._transport_helpers import provision_legacy_site
 
 
 class TestFormMeta(FrappeTestCase):
+	def test_credit_to_exposes_scripted_and_configured_filters(self):
+		from copy import deepcopy
+		from unittest.mock import patch
+
+		real_get_meta = frappe.get_meta
+		meta = deepcopy(real_get_meta("Purchase Invoice"))
+		configured = '[["Account", "account_currency", "=", "eval:doc.currency"]]'
+		meta.get_field("credit_to").link_filters = configured
+		with patch(
+			"frappe.get_meta",
+			side_effect=lambda dt, *a, **kw: meta
+			if dt == "Purchase Invoice"
+			else real_get_meta(dt, *a, **kw),
+		):
+			result = get_doctype_form_meta("Purchase Invoice")
+		field = next(f for f in result["fields"] if f["fieldname"] == "credit_to")
+		self.assertEqual(field["link_filters"], configured)
+		self.assertEqual(
+			field["link_query_filters"],
+			[
+				["Account", "account_type", "=", "Payable"],
+				["Account", "is_group", "=", 0],
+				["Account", "company", "=", "eval:doc.company"],
+			],
+		)
+
+	def test_material_request_header_and_child_warehouse_context(self):
+		result = get_doctype_form_meta("Material Request")
+		field = next(f for f in result["fields"] if f["fieldname"] == "set_warehouse")
+		self.assertIn(["Warehouse", "company", "=", "eval:doc.company"], field["link_query_filters"])
+		child = next(f for f in result["tables"]["items"]["columns"] if f["fieldname"] == "warehouse")
+		self.assertEqual(
+			child["link_query_filters"],
+			[["Warehouse", "company", "=", "eval:parent.company"], ["Warehouse", "is_group", "=", 0]],
+		)
+
+	def test_custom_field_filters_are_preserved_without_invoice_rules(self):
+		from jarvis.chat.actions_api import _field_dict
+
+		configured = '[["Account", "is_group", "=", 1]]'
+		for parent, name in [("Custom Form", "credit_to"), ("Purchase Invoice", "custom_account")]:
+			field = _field_dict(
+				frappe._dict(
+					parent=parent,
+					fieldname=name,
+					fieldtype="Link",
+					options="Account",
+					link_filters=configured,
+				)
+			)
+			self.assertEqual(field["link_filters"], configured)
+			self.assertEqual(field["link_query_filters"], [])
+
 	def test_form_meta_includes_child_table(self):
 		# Sales Order is the marquee case: an `items` Table field plus its
 		# child columns must be present so the panel can render a grid.
