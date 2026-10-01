@@ -2333,15 +2333,20 @@ def _poll_acks(ctx: PumpContext) -> None:
 		if not done and _monotonic() <= pa.deadline:
 			continue  # still in flight, under the ack window — leave for a later slice
 		ctx.pending_acks.pop(run_id, None)
-		try:
-			# done -> returns the frame or raises the stored exc; not-done + past our
-			# deadline -> result(0) cleans up the mux map and raises the ack-timeout
-			# sentinel (the timeout, not a blocking wait).
-			ack = pa.fut.result(0)
-		except AgentUnreachableError as exc:
-			_handle_ack_failure(ctx, pa.rs, exc)
-			continue
-		_on_ack_success(ctx, pa, ack)
+		_settle_ack(ctx, pa)
+
+
+def _settle_ack(ctx: PumpContext, pa: _PendingAck) -> bool:
+	"""Process one popped ack. Done -> its frame, or the stored error; not done and
+	past our deadline -> ``result(0)`` cleans up the mux map and raises the ack-timeout
+	sentinel (the timeout, not a blocking wait). False when the ack failed."""
+	try:
+		ack = pa.fut.result(0)
+	except AgentUnreachableError as exc:
+		_handle_ack_failure(ctx, pa.rs, exc)
+		return False
+	_on_ack_success(ctx, pa, ack)
+	return True
 
 
 def _resolve_ack_first(ctx: PumpContext, rs: _RunState) -> bool:
@@ -2355,13 +2360,7 @@ def _resolve_ack_first(ctx: PumpContext, rs: _RunState) -> bool:
 	if pa is None or not pa.fut.done:
 		return True
 	ctx.pending_acks.pop(rs.run_id, None)
-	try:
-		ack = pa.fut.result(0)
-	except AgentUnreachableError as exc:
-		_handle_ack_failure(ctx, pa.rs, exc)
-		return False
-	_on_ack_success(ctx, pa, ack)
-	return True
+	return _settle_ack(ctx, pa)
 
 
 def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
@@ -2638,6 +2637,9 @@ def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payl
 		if _epoch_lost(ctx, rs.run_id):
 			ts.lease_lost_exit(rs.run_id)
 		return False
+	# Pump-owned transaction, as for every transition here: the requeue must be durable
+	# before the lane retires and the next slice re-sends it. A raise before this point
+	# leaves the turn streaming for the hop's own rollback and recovery.
 	frappe.db.commit()
 	# The next dispatch builds a fresh run state and lane; this one is done.
 	ctx.runs.pop(rs.run_id, None)
