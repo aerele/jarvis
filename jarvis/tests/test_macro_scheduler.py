@@ -567,6 +567,11 @@ class TestScheduleSurvivesASave(MacroSchedulerBase):
 		# A row written without a time runs at the 09:00 default. The form always posts
 		# a time, "09:00" for such a row. That is the same schedule, not a change.
 		m = _mk_macro(OWNER_OK, "no-time")
+		# Emptied by hand: Frappe 15 stamps every Time field of a new document with the
+		# current time, so there the fixture's row is NOT time-less on its own, and a
+		# form posting "09:00" over it is a real change that rightly reschedules.
+		frappe.db.set_value(MACRO, m.name, "schedule_time", None, update_modified=False)
+		frappe.db.commit()
 		before = self._next_run(m)
 		self._save_from_the_form(m, schedule_time="09:00")
 		self.assertEqual(self._next_run(m), before, "the first save of a time-less macro dropped its due run")
