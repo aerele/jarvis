@@ -541,17 +541,12 @@ def _drop_summary_link_unless_one_owner(macro_name: str, conversation_id: str) -
 	chat. The controller refuses a user changing ``merge_conversation``; this is the
 	engine declining to act on a link it did not write, whatever did. The conversation
 	is left exactly as it was."""
-	macro_owner = frappe.db.get_value(MACRO, macro_name, "owner")
+	row = frappe.db.get_value(MACRO, macro_name, ["owner", "macro_name"], as_dict=True)
 	conv_owner = frappe.db.get_value(CONV, conversation_id, "owner")
-	if macro_owner == conv_owner:
+	if row.owner == conv_owner:
 		return False
-	frappe.log_error(
-		title=f"jarvis.chat.macros.summary_owner_mismatch: {macro_name}",
-		message=(
-			f"macro {macro_name!r} owner {macro_owner!r}; "
-			f"conversation {conversation_id!r} owner {conv_owner!r}"
-		),
-	)
+	# State first, alarm second: if the log failed first the macro would stay
+	# "pending" with nothing left to revisit it.
 	frappe.db.set_value(
 		MACRO,
 		macro_name,
@@ -559,6 +554,25 @@ def _drop_summary_link_unless_one_owner(macro_name: str, conversation_id: str) -
 		update_modified=False,
 	)
 	frappe.db.commit()
+	# A conversation that no longer exists is an ordinary state ("delete all
+	# conversations" mid-summary), not a mismatch: no alarm for it.
+	if conv_owner is not None:
+		frappe.log_error(
+			title=f"jarvis.chat.macros.summary_owner_mismatch: {macro_name}",
+			message=(
+				f"macro {macro_name!r} owner {row.owner!r}; "
+				f"conversation {conversation_id!r} owner {conv_owner!r}"
+			),
+		)
+	# An open form learns the outcome ONLY from this event; without it the Run button
+	# sits on "summarizing" until a reload. Best-effort, like _finish_merge's own.
+	try:
+		publish_to_user(
+			row.owner,
+			{"kind": "macro:merged", "macro": macro_name, "macro_name": row.macro_name, "status": "failed"},
+		)
+	except Exception:
+		pass
 	return True
 
 
