@@ -108,6 +108,10 @@ async function openDraft(
 				if (delayFirst && !delayed) {
 					delayed = true;
 					await first;
+					if (delayFirst === "error") {
+						await route.fulfill({ status: 403, json: { message: "Search refused" } });
+						return;
+					}
 				}
 				// The service returns what these constraints permit, including the same
 				// misleading expense/other-company records reported in the screenshot.
@@ -165,7 +169,9 @@ async function openDraft(
 	};
 }
 
-test("Credit To offers only payable leaf accounts for the current Company", async ({ page }) => {
+test("Credit To offers only payable leaf accounts for the current Company", async ({
+	page,
+}, testInfo) => {
 	const { input, requests } = await openDraft(page);
 	await input.fill("cost");
 	await expect.poll(() => requests.some((r) => r.txt === "cost")).toBe(true);
@@ -184,6 +190,7 @@ test("Credit To offers only payable leaf accounts for the current Company", asyn
 	await input.fill("Pay");
 	await expect(menu.locator("button")).toHaveCount(1);
 	await expect(menu).toHaveText("Payables A");
+	await page.screenshot({ path: testInfo.outputPath("filtered-credit-to.png") });
 	await menu.locator("button").click();
 	await expect(input).toHaveValue("Payables A");
 });
@@ -259,4 +266,17 @@ test("a response for the previous Company cannot restore stale choices", async (
 	releaseFirst();
 	await page.waitForTimeout(250);
 	await expect(page.locator(".jv-action-linkmenu")).toHaveText("Payables B");
+});
+
+test("an older failed search cannot clear the newer suggestions", async ({ page }) => {
+	const { input, requests, releaseFirst } = await openDraft(page, { delayFirst: "error" });
+	await input.focus();
+	await expect.poll(() => requests.some((r) => r.doctype === "Account")).toBe(true);
+	await input.fill("Pay");
+	const menu = page.locator(".jv-action-linkmenu");
+	await expect(menu).toHaveText("Payables A");
+	releaseFirst();
+	await page.waitForTimeout(250);
+	await expect(menu).toHaveText("Payables A");
+	await expect(page.locator(".jv-draft-body [role=alert]")).toHaveCount(0);
 });
