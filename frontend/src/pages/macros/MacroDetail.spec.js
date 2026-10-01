@@ -101,7 +101,8 @@ vi.mock("@/composables/macroPrefill", () => ({ takeMacroPrefill: () => null }));
 vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
 // A named user is logged in throughout: the schedule switch for a SAVED macro must
 // follow what the server says about the macro's owner, not who is looking.
-vi.mock("@/data/session", () => ({ session: { user: "priya@example.com" } }));
+const session = vi.hoisted(() => ({ user: "priya@example.com" }));
+vi.mock("@/data/session", () => ({ session }));
 vi.mock("@/lib/errors", () => ({
 	errMessage: (e) => (e && e.message) || String(e),
 	errHtml: (e) => (e && e.message) || String(e),
@@ -151,6 +152,7 @@ async function mountDetail(macroFixture) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	session.user = "priya@example.com";
 });
 
 function saveBtn(w) {
@@ -291,6 +293,28 @@ describe("MacroDetail Schedule switch: an owner the scheduler will never run", (
 		const sw = scheduleSwitch(w);
 		expect(sw.props("description")).toBe(REASON);
 		expect(sw.props("disabled")).toBe(false);
+	});
+
+	it("a NEW macro asks about the logged-in account, since it has no owner yet", async () => {
+		session.user = "Administrator";
+		const w = mount(MacroDetail, {
+			props: { id: "", isNew: true },
+			global: { provide: { $socket: null } },
+		});
+		await flushPromises();
+		const sw = scheduleSwitch(w);
+		expect(sw.props("description")).toContain("Administrator");
+		expect(sw.props("disabled")).toBe(true);
+	});
+
+	it("a saved macro ignores who is logged in and follows the server", async () => {
+		// Administrator looking at a named user's macro: the server reports no block,
+		// so the logged-in account must not put one there.
+		session.user = "Administrator";
+		const w = await mountDetail(
+			baseMacro({ schedule_enabled: 0, schedule_blocked_reason: "" })
+		);
+		expect(scheduleSwitch(w).props("disabled")).toBe(false);
 	});
 
 	it("is an ordinary switch when the server reports no block", async () => {

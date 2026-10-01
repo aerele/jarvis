@@ -240,6 +240,14 @@ class TestScheduleIsRefusedAtSaveForABarredOwner(MacroSchedulerBase):
 		self.assertIn("disabled", reason)
 		self.assertNotIn("Sign in", reason)
 
+	def test_an_owner_without_jarvis_access_is_blocked_too(self):
+		# The scheduler refuses on EITHER check; the save gate used to apply only one,
+		# so this owner's schedule was accepted and then skipped on every slot.
+		with patch("jarvis.permissions.has_jarvis_access", return_value=False):
+			reason = macros_api._schedule_block_reason(OWNER_OK)
+		self.assertIn("access", reason)
+		self.assertEqual(macros_api._schedule_block_reason(OWNER_OK), "")
+
 
 # --------------------------------------------------------------------------- #
 # #471 — failures are durable, honest, and terminalized
