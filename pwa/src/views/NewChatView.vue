@@ -6,7 +6,7 @@ import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
 import * as api from "../api";
 import { store } from "../store";
-import { EFFORT, effortOffered, prefs, setPrefs, thinkingOf } from "../lib/prefs";
+import { EFFORT, effortOffered, prefs, sendThinking, setPrefs } from "../lib/prefs";
 import { feed } from "../lib/notifications";
 import { DEFAULT_STARTERS, normalizeStarters, starterTint } from "../lib/starters";
 import { pickStarterPrompt } from "../lib/fillComposer";
@@ -125,7 +125,7 @@ async function send(text = input.value) {
 		const r = await api.sendMessage("", t, {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
 			model: prefs.defaultModel || "",
-			thinking: effortOn.value ? thinkingOf(prefs.effort) : "",
+			thinking: sendThinking(settings.value, prefs.effort),
 			autoMode: autoView.value.on,
 		});
 		if (r?.ok === false || !r?.conversation_id) {

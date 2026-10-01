@@ -23,6 +23,10 @@ export const thinkingOf = (effort) => EFFORT.find((e) => e.value === effort)?.th
 export const effortOffered = (ui) =>
 	Array.isArray(ui?.thinking_levels) && ui.thinking_levels.length > 0;
 
+// The level a new chat sends. Settings still loading (or failed) keep the pick: the
+// server drops a level the turn's model cannot take.
+export const sendThinking = (ui, effort) => (ui && !effortOffered(ui) ? "" : thinkingOf(effort));
+
 function read() {
 	try {
 		const raw = JSON.parse(localStorage.getItem(KEY) || "{}");
