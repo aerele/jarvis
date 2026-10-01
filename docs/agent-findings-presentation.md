@@ -40,6 +40,22 @@ The current Currency field stores omitted amounts as zero, so the worklist omits
 zero amount badges instead of presenting them as measured financial exposure.
 The fallback dashboard distinguishes an omitted amount from an explicit zero.
 
+### AR review cards
+
+The Runs view groups the AR v0.2 `ar-review-v1` recorded explanation into a result,
+labelled balance and account details, review boundaries, and a separate unsent
+reminder draft when one was recorded. India Compliance field labels and original
+evidence are available in keyboard-accessible disclosures. All extracted content
+renders as escaped plain text, not HTML or Markdown supplied by a customer name.
+
+This is a display-only adapter for the existing, fixed-format explanation. It
+does not recalculate balances, change currencies or precision, infer settlement
+from the generic finding amount, or rewrite saved findings. Unrecognised or
+ambiguous explanations retain the original renderer; unknown India metadata stays
+visible verbatim. The complete original explanation remains accessible. AR rows
+say “Derived review” and retain their unconfirmed status rather than labelling a
+settled invoice as a collection candidate. Other agents keep their existing labels.
+
 ## Validation and rollout
 
 Regression tests cover all five evaluator classes, both sides of paired evidence,
