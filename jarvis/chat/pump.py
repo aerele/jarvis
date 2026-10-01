@@ -67,6 +67,7 @@ correct standalone; WP-1d replaces them with the full prepare/finalize jobs.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -1570,6 +1571,9 @@ class _RunState:
 	session_key: str
 	version: int
 	gateway_run_id: str | None = None
+	# The ``chat.send`` idempotency key this run went out under (``_gateway_key``);
+	# empty = the run id. Read through ``key``.
+	send_key: str = ""
 	# --- C1/C3/C4 telemetry bookkeeping (WP-1e; observability only) --------- #
 	accept_ms: int = 0  # epoch-ms of the turn's enqueued_at (C1 accept baseline)
 	first_delta_done: bool = False  # first streamed delta published this run?
@@ -1596,6 +1600,10 @@ class _RunState:
 	# path, just delayed).
 	yield_deadline: float | None = None
 	yield_payload: dict | None = None
+
+	@property
+	def key(self) -> str:
+		return self.send_key or self.run_id
 
 
 @dataclass
@@ -2259,6 +2267,7 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 		session_key=dispatch["session_key"],
 		version=int(turn["version"]) + 1,
 		gateway_run_id=None,
+		send_key=_gateway_key(run_id, dispatch),
 		accept_ms=_dt_to_ms(turn.get("enqueued_at")),
 	)
 	ctx.runs[run_id] = rs
@@ -2284,7 +2293,7 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 		fut = ctx.mux.send_chat(
 			rs.session_key,
 			dispatch["message"],
-			run_id,
+			rs.key,
 			handler,
 			timeout_s=ACK_TIMEOUT_S,
 			start_seq=int(turn.get("last_event_seq") or 0),
@@ -2324,15 +2333,34 @@ def _poll_acks(ctx: PumpContext) -> None:
 		if not done and _monotonic() <= pa.deadline:
 			continue  # still in flight, under the ack window — leave for a later slice
 		ctx.pending_acks.pop(run_id, None)
-		try:
-			# done -> returns the frame or raises the stored exc; not-done + past our
-			# deadline -> result(0) cleans up the mux map and raises the ack-timeout
-			# sentinel (the timeout, not a blocking wait).
-			ack = pa.fut.result(0)
-		except AgentUnreachableError as exc:
-			_handle_ack_failure(ctx, pa.rs, exc)
-			continue
-		_on_ack_success(ctx, pa, ack)
+		_settle_ack(ctx, pa)
+
+
+def _settle_ack(ctx: PumpContext, pa: _PendingAck) -> bool:
+	"""Process one popped ack. Done -> its frame, or the stored error; not done and
+	past our deadline -> ``result(0)`` cleans up the mux map and raises the ack-timeout
+	sentinel (the timeout, not a blocking wait). False when the ack failed."""
+	try:
+		ack = pa.fut.result(0)
+	except AgentUnreachableError as exc:
+		_handle_ack_failure(ctx, pa.rs, exc)
+		return False
+	_on_ack_success(ctx, pa, ack)
+	return True
+
+
+def _resolve_ack_first(ctx: PumpContext, rs: _RunState) -> bool:
+	"""A run that fails at once can have its terminal applied in the same slice as its
+	ack, before ``_poll_acks`` saw the ack, while the turn is still ``dispatching``:
+	every terminal CAS needs ``streaming``, so the turn would strand until its
+	deadline. The gateway acks before it runs anything and the reader resolves the
+	future on arrival, so a done ack is waiting here: process it first. False when
+	the ack itself failed (already handled, nothing left to settle)."""
+	pa = ctx.pending_acks.get(rs.run_id)
+	if pa is None or not pa.fut.done:
+		return True
+	ctx.pending_acks.pop(rs.run_id, None)
+	return _settle_ack(ctx, pa)
 
 
 def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
@@ -2341,9 +2369,9 @@ def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
 	loss routes through the shared lease-loss exit."""
 	rs = pa.rs
 	payload = ack.get("payload") or ack.get("result") or {}
-	gw = payload.get("runId") or rs.run_id
-	if gw != rs.run_id and ctx.mux is not None:
-		ctx.mux.rekey_run(rs.run_id, gw)
+	gw = payload.get("runId") or rs.key
+	if gw != rs.key and ctx.mux is not None:
+		ctx.mux.rekey_run(rs.key, gw)
 	rs.gateway_run_id = gw
 	if ts.mark_streaming(rs.run_id, rs.version, ctx.epoch, gateway_run_id=gw):
 		rs.version += 1
@@ -2583,6 +2611,42 @@ def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
 	return not bool(frappe.db.get_value(TURN, run_id, "cancel_requested"))
 
 
+def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
+	"""admin-v2#656: send a turn again ONCE when the runtime refused it before producing
+	anything because it would not resume a Claude CLI live session. The refusal
+	discards the stale process, so the same turn sent again starts a fresh one. The
+	Turn goes back to ``ready`` (same row, placeholder and stored prompt) and the next
+	``_dispatch_ready`` pass sends it under a fresh gateway key. The CAS refuses a turn
+	that streamed anything or was stopped, and a lost CAS settles exactly as before.
+	True = requeued, the caller must not settle it."""
+	if kind != "relay:error" or payload.get("state") != "error" or (payload.get("text") or "").strip():
+		return False
+	if not _REFUSED_CLI_SESSION_RE.search(payload.get("error") or ""):
+		return False
+	stored = _json_or_none(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
+	if not isinstance(stored, dict) or stored.get("redispatch"):
+		return False
+	flagged = json.dumps({**stored, "redispatch": 1})
+	txn.fresh_snapshot()
+	won = txn.replay_on_conflict(
+		lambda: ts.requeue_for_redispatch(rs.run_id, rs.version, ctx.epoch, flagged),
+		label=f"pump requeue refused session {rs.run_id}",
+		before_replay=lambda: _resync_fresh(rs),
+	)
+	if not won:
+		if _epoch_lost(ctx, rs.run_id):
+			ts.lease_lost_exit(rs.run_id)
+		return False
+	# Pump-owned transaction, as for every transition here: the requeue must be durable
+	# before the lane retires and the next slice re-sends it. A raise before this point
+	# leaves the turn streaming for the hop's own rollback and recovery.
+	frappe.db.commit()
+	# The next dispatch builds a fresh run state and lane; this one is done.
+	ctx.runs.pop(rs.run_id, None)
+	_telemetry("redispatch_refused_session", run_id=rs.run_id)
+	return True
+
+
 def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> None:
 	"""The CAS + settlement invocation ``on_terminal`` runs for an ordinary
 	terminal, factored out so ``_yield_wait_sweep`` can replay it VERBATIM for a
@@ -2766,9 +2830,13 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		if ctx.lease_lost:
 			return
 		try:
+			if not _resolve_ack_first(ctx, rs):
+				return
 			# Flush the last batched cumulative mirror before the terminal so the
 			# Message row holds the full streamed text if settlement carries no final.
 			_flush_deltas(ctx, rs)
+			if _redispatch_refused_session(ctx, rs, kind, payload):
+				return
 			if _is_unprompted_yield(rs.run_id, kind, payload):
 				# the agent runtime's image/video/music tools unconditionally detach into a
 				# background task and abort THIS run with an empty terminal - and
@@ -2778,7 +2846,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 				# (_yield_wait_sweep enforces the bound; a Stop mid-wait is caught
 				# for free by the next _cancel_sweep - the Turn row is left
 				# `state='streaming'`, exactly like any other in-flight cancel).
-				if ctx.mux is not None and ctx.mux.await_continuation(rs.gateway_run_id or rs.run_id):
+				if ctx.mux is not None and ctx.mux.await_continuation(rs.gateway_run_id or rs.key):
 					rs.yield_payload = payload
 					rs.yield_deadline = _monotonic() + YIELD_CONTINUATION_WAIT_S
 					_mark_yield_pending(rs.run_id)  # survives a hop handoff mid-wait
@@ -3270,12 +3338,13 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 		session_key=dispatch.get("session_key", ""),
 		version=int(r["version"]),
 		gateway_run_id=r.get("gateway_run_id"),
+		send_key=_gateway_key(run_id, dispatch),
 		accept_ms=_dt_to_ms(frappe.db.get_value(TURN, run_id, "enqueued_at")),
 		first_delta_done=True,  # a re-attach resumes mid-stream; first token already sent
 	)
 	ctx.runs[run_id] = rs
 	ctx.peak_occupancy = max(ctx.peak_occupancy, len(ctx.runs))
-	lane_key = r.get("gateway_run_id") or run_id
+	lane_key = r.get("gateway_run_id") or rs.key
 	if ctx.mux is not None:
 		ctx.mux.register_run(
 			lane_key,
@@ -4036,7 +4105,20 @@ def _load_dispatch(turn: dict) -> dict:
 		"thinking": payload.get("thinking"),
 		"attachments": payload.get("attachments"),
 		"drained_note_ids": payload.get("drained_note_ids") or [],
+		"redispatch": int(payload.get("redispatch") or 0),
 	}
+
+
+# admin-v2#656: the runtime will not resume a Claude CLI live session after the chat's
+# model changed. It fails the run before any output and discards the stale process,
+# so the same turn sent again starts a fresh one and works.
+_REFUSED_CLI_SESSION_RE = re.compile(r"\bcli_live_session_(changed|missing)\b")
+
+
+def _gateway_key(run_id: str, dispatch: dict) -> str:
+	"""The ``chat.send`` idempotency key, which the gateway echoes as the run id. A
+	re-sent turn needs a fresh one: a reused key attaches to (or replays) the old run."""
+	return f"{run_id}-r1" if dispatch.get("redispatch") else run_id
 
 
 def _clear_agent_notes_on_ack(conversation: str, drained_note_ids) -> None:

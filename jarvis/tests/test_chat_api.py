@@ -209,6 +209,19 @@ class TestCreateOrFocusEmpty(_ChatTestCase):
 		self.assertIn(filled, all_names)
 		self.assertNotIn(returned, all_names)
 
+	def test_reused_empty_starts_without_a_model_or_effort_pick(self):
+		# A draft abandoned after a pick is handed out again as a fresh chat. The
+		# caller's pill shows no pick, so one that survived here would run the first
+		# message on a model the user never chose for this chat.
+		existing = create_conversation()
+		frappe.db.set_value(CONV, existing, {"model_override": "gpt-x", "thinking_override": "low"})
+
+		self.assertEqual(create_or_focus_empty(), existing)
+
+		row = frappe.db.get_value(CONV, existing, ["model_override", "thinking_override"], as_dict=True)
+		self.assertFalse(row.model_override)
+		self.assertFalse(row.thinking_override)
+
 	def test_prefers_most_recent_empty(self):
 		older = create_conversation()
 		# Force older to have an earlier last_active_at
