@@ -489,6 +489,31 @@ class TestScheduledMacroCadence(MacroSchedulerBase):
 			macro_scheduler.run_due_macros()
 		self.assertEqual(self._dispatches(mock_run, m), 2, "the old slot's cooldown delayed the new one")
 
+	def test_the_slot_is_claimed_before_the_macro_is_dispatched(self):
+		# A worker killed after the dispatch must not leave the slot due, or the next
+		# sweep runs the macro a second time (duplicate writes when it is armed).
+		m = _mk_macro(OWNER_OK, "claim-first")
+		seen = {}
+
+		def dispatch(name, **kw):
+			if name == m.name:
+				seen["next_run_at"] = get_datetime(frappe.db.get_value(MACRO, name, "next_run_at"))
+			return {"ok": True}
+
+		with patch("jarvis.chat.macros.run_macro", side_effect=dispatch):
+			macro_scheduler.run_due_macros()
+		self.assertGreater(
+			seen["next_run_at"], now_datetime(), "the slot was still due while the macro was dispatching"
+		)
+
+	def test_a_slot_another_dispatcher_already_took_is_not_run_again(self):
+		m = _mk_macro(OWNER_OK, "claimed-elsewhere")
+		stale = frappe.get_all(MACRO, filters={"name": m.name}, fields=["*"])[0]
+		with patch("jarvis.chat.macros.run_macro", return_value={"ok": True}) as mock_run:
+			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user)
+			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user)
+		self.assertEqual(self._dispatches(mock_run, m), 1, "a stale read of a taken slot ran it twice")
+
 
 # --------------------------------------------------------------------------- #
 # #471 — the stale-run reaper, and what it must NOT reap
