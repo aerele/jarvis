@@ -69,6 +69,15 @@ class TestFormMeta(FrappeTestCase):
 			self.assertEqual(field["link_filters"], configured)
 			self.assertEqual(field["link_query_filters"], [])
 
+	def test_reused_child_table_does_not_inherit_another_forms_script(self):
+		from jarvis.chat.actions_api import _field_dict
+
+		df = frappe._dict(
+			parent="Material Request Item", fieldname="warehouse", fieldtype="Link", options="Warehouse"
+		)
+		for parent, parentfield in [("Custom Form", "items"), ("Material Request", "custom_items")]:
+			self.assertEqual(_field_dict(df, df.parent, parent, parentfield)["link_query_filters"], [])
+
 	def test_form_meta_includes_child_table(self):
 		# Sales Order is the marquee case: an `items` Table field plus its
 		# child columns must be present so the panel can render a grid.
