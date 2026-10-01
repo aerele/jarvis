@@ -165,8 +165,7 @@ def _hold_if_still_due(m) -> None:
 
 	Checked on the row, not at each early return, so every path that leaves a slot
 	due is covered, the ones added later included: a dispatch that raised, a
-	transient block, and bookkeeping that blew up AFTER a successful dispatch (which
-	would otherwise run the macro for real on every sweep).
+	transient block, and anything that blew up before the slot was claimed.
 
 	Never raises: this runs outside the per-macro guard, and a cache or DB blip here
 	must not abort the sweep for the macros behind it. Failing open only costs an
@@ -218,6 +217,8 @@ def _sweep_one(m, now, original_user: str) -> None:
 		_record_failed(m, _BARRED_OWNER)
 		_consume_slot(m, now)
 		return
+	if not _claim_slot(m, now):
+		return
 	try:
 		frappe.set_user(m.owner)
 		out = macros.run_macro(m.name, trigger="scheduled") or {}
@@ -228,11 +229,12 @@ def _sweep_one(m, now, original_user: str) -> None:
 			message=frappe.get_traceback(),
 		)
 		# #471: record the failure where the OWNER can see it, and do NOT consume
-		# the slot — next_run_at stays in the past so it is retried once its hold
-		# lapses. Previously the schedule advanced regardless, so a run that never
-		# happened was indistinguishable from one that did.
+		# the slot — hand it back so it is retried once its hold lapses. Previously
+		# the schedule advanced regardless, so a run that never happened was
+		# indistinguishable from one that did.
 		_record_failed(m, _DISPATCH_FAILED)
 		_notify_owner(m, _DISPATCH_FAILED)
+		_release_slot(m)
 		return
 	finally:
 		if frappe.session.user != original_user:
@@ -257,14 +259,45 @@ def _settle(m, now, out: dict) -> None:
 	if reason == BLOCK_DISPATCH_FAILED:
 		# run_macro already terminalized the run row it had created — the one that
 		# carries the conversation link — so recording a second one here would show the
-		# customer two failures for one missed slot. Notify, and leave the slot due.
+		# customer two failures for one missed slot. Notify, and hand the slot back.
 		_notify_owner(m, sentence)
+		_release_slot(m)
 		return
 	_record_failed(m, sentence)
 	_notify_owner(m, sentence)
 	if reason in _TRANSIENT_BLOCKS:
-		return  # leave next_run_at in the past: the slot is retried after its hold
+		_release_slot(m)  # due again: the slot is retried after its hold
+		return
 	_consume_slot(m, now)
+
+
+def _claim_slot(m, now) -> bool:
+	"""Take this slot BEFORE dispatching it. False means it is no longer ours to run.
+
+	The sweep used to dispatch first and move the schedule on afterwards. A worker
+	killed in between left the slot due with a run already executing, so the next
+	sweep ran the macro again: duplicate ERP writes when it is armed. Claiming first
+	trades that for a missed run if the worker dies before the dispatch, which is the
+	safe side, and is what ``agent_scheduler._claim_slot`` already does (#672).
+
+	Compare-and-set under a ROW LOCK: the sweep's ``get_all`` does not lock, so the
+	row in hand can be stale. Re-reading ``next_run_at`` for update and confirming it
+	is still due is what makes exactly one dispatcher run a slot, and stops a sweep
+	overwriting a schedule the owner saved a moment ago."""
+	frappe.db.commit()  # REPEATABLE-READ discipline: the FOR UPDATE read goes first
+	current = frappe.db.get_value(MACRO, m.name, "next_run_at", for_update=True)
+	if not current or get_datetime(current) > now:
+		frappe.db.commit()  # release the row lock
+		return False
+	_consume_slot(m, now, stamp_last_run=False)  # commits, releasing the row lock
+	return True
+
+
+def _release_slot(m) -> None:
+	"""Hand a claimed slot back after a launch that should be retried: put
+	``next_run_at`` back where the sweep found it, so the slot is due again."""
+	frappe.db.set_value(MACRO, m.name, "next_run_at", m.next_run_at, update_modified=False)
+	frappe.db.commit()
 
 
 def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
