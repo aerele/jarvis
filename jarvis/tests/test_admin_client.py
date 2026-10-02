@@ -1044,41 +1044,199 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		self.assertNotIn("svc_user", out)
 		self.assertEqual(out, "GET https://[REDACTED]@host.example/x failed")
 
-	def test_credential_query_parameters_are_redacted(self):
-		for param in ("token", "key", "sig", "signature", "api_key", "secret", "access_token"):
+	def test_the_whole_query_string_of_a_url_is_redacted(self):
+		# Every name gives the same output, so no subcase passes on the back of the
+		# keyword pattern (which knows api_key / secret / access_token and would leave
+		# "?api_key=[REDACTED]"): the query string goes whole, whatever is in it.
+		for param in ("token", "key", "sig", "signature", "api_key", "secret", "access_token", "page"):
 			for lead in ("?", "?page=2&"):
 				with self.subTest(param=param, lead=lead):
 					out = admin_client._scrub_secrets(
 						f"GET https://host.example/x{lead}{param}=Zq9vVALUE77 returned 403"
 					)
-					self.assertNotIn("Zq9vVALUE77", out)
-					self.assertIn("[REDACTED]", out)
-					self.assertIn("https://host.example/x", out)
-					self.assertIn("returned 403", out)
+					self.assertEqual(out, "GET https://host.example/x?[REDACTED] returned 403")
 
-	def test_a_query_parameter_beside_the_credential_survives(self):
-		out = admin_client._scrub_secrets("https://host.example/x?token=Zq9vVALUE77&page=2")
-		self.assertEqual(out, "https://host.example/x?token=[REDACTED]&page=2")
+	def test_a_presigned_url_loses_its_signature(self):
+		# A list of credential parameter names missed these: nothing in
+		# "X-Amz-Signature" or "X-Amz-Security-Token" is on such a list.
+		out = admin_client._scrub_secrets(
+			"403 Client Error: Forbidden for url: https://bucket.s3.amazonaws.com/b/k"
+			"?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE"
+			"&X-Amz-Signature=9f8a7b6c5d&X-Amz-Security-Token=FQoGZXIvYXdzE"
+		)
+		self.assertEqual(
+			out, "403 Client Error: Forbidden for url: https://bucket.s3.amazonaws.com/b/k?[REDACTED]"
+		)
+
+	def test_a_path_with_no_host_loses_its_query_string_too(self):
+		# The shape `requests` prints: "... with url: /path?query".
+		out = admin_client._scrub_secrets(
+			"Max retries exceeded with url: /api/v1/audio?key=Zq9vVALUE77 (Caused by X)"
+		)
+		self.assertEqual(out, "Max retries exceeded with url: /api/v1/audio?[REDACTED] (Caused by X)")
+
+	def test_scrubbing_a_long_adversarial_string_is_fast(self):
+		# The URL-userinfo pattern once rescanned a run of scheme characters from
+		# every word boundary in it: 68 s on 200 KB of "a.a.a.". Several callers pass
+		# an upstream's text uncapped, so every pattern has to be linear. Measured at
+		# about 25 ms each; the bound leaves room for a slow CI box.
+		import time
+
+		for label, text in (
+			("dotted run", "a." * 100000),
+			("hyphenated run", "de-ad-be-ef-" * 17000),
+			("scheme characters then a userinfo", "a+.-" * 50000 + "://x:y"),
+			("an unclosed quoted key", '"' + "token" * 40000),
+		):
+			with self.subTest(shape=label):
+				self.assertGreaterEqual(len(text), 200000)
+				started = time.perf_counter()
+				admin_client._scrub_secrets(text)
+				self.assertLess(time.perf_counter() - started, 0.5)
+
+	# (text, what must not survive). The security review's probe corpus, less the
+	# shapes this scrub does not claim (an unlabelled token, a short all-letter
+	# Bearer value, a header it has no name for).
+	_S = "S3CR3Tvalue9Zq"
+	_S2 = "OTHERs3cret77"
+	_LEAKS = (
+		(f"Authorization: Bearer {_S}", [_S]),
+		(f"authorization: bearer {_S}", [_S]),
+		(f"Authorization=Bearer {_S}", [_S]),
+		(f"Authorization:\tBearer\t{_S}", [_S]),
+		(f"Authorization: Bearer\n {_S}", [_S]),
+		(f"{{'Authorization': 'Bearer {_S}'}}", [_S]),
+		(f'{{"Authorization": "Bearer {_S}"}}', [_S]),
+		(f'{{"Authorization":"Bearer {_S}"}}', [_S]),
+		("Authorization: Basic dXNlcjpTM0NSM1R2YWx1ZTlacQ==", ["dXNlcjpTM0NSM1R2YWx1ZTlacQ"]),
+		(f"Authorization: token abcdef123456:{_S}", [_S, "abcdef123456"]),
+		(f"{{'Authorization': 'token abcdef123456:{_S}'}}", [_S, "abcdef123456"]),
+		('{"Authorization": "Basic dXNlcjpwYXNzd29yZA=="}', ["dXNlcjpwYXNzd29yZA"]),
+		(f"token abcdef123456:{_S}", [_S]),
+		(f"Proxy-Authorization: Basic {_S}==", [_S]),
+		(f"X-Api-Key: {_S}", [_S]),
+		(f"{{'X-Jarvis-Token': '{_S}'}}", [_S]),
+		(f"Bearer {_S}", [_S]),
+		(f"BEARER {_S}", [_S]),
+		("Bearer abcdefghijklmnopqrst", ["abcdefghijklmnopqrst"]),
+		("Bearer a1.b_c~d+e/f-g=", ["a1.b_c~d+e/f-g"]),
+		(f"Bearer tok_{_S}_tail", [_S, "_tail"]),
+		(f"Bearer abcdef123456:{_S}", [_S]),
+		(f"Bearer abc123:{_S}", [_S]),
+		(f"Bearer\n{_S}", [_S]),
+		(f"https://user:{_S}@host.example/path", [_S]),
+		("https://user:p%40ss9Zq@host.example/path", ["p%40ss9Zq"]),
+		(f"https://{_S}@github.com/org/repo.git", [_S]),
+		(f"https://:{_S}@host/x", [_S]),
+		(f"redis://:{_S}@redis.internal:6379/0", [_S]),
+		(f"https://user:pa@{_S}@host/x", [_S]),
+		(f"https://user:pa:{_S}@host/x", [_S]),
+		(f"redis://default:{_S}@10.0.0.4:6379/0", [_S]),
+		(f"mysql+pymysql://root:{_S}@db:3306/site", [_S]),
+		(f"HTTPS://u:{_S}@host/x", [_S]),
+		(f"https://h/x?token={_S}#frag", [_S]),
+		(f"https://h/x?a=1;token={_S}", [_S]),
+		(f"https://h/x?a=1&amp;token={_S}", [_S]),
+		(f"https://h/x?passwd={_S}", [_S]),
+		(f"https://h/cb?code={_S}&state=xyz", [_S]),
+		(f"https://s3/x?X-Amz-Credential=AKIA&X-Amz-Signature={_S}", [_S]),
+		(f"https://s3/x?X-Amz-Security-Token={_S}", [_S]),
+		(f"https://h/x?redirect=%2Fy%3Ftoken%3D{_S}", [_S]),
+		(f"grant_type=refresh_token&refresh_token={_S}&client_id=abc", [_S]),
+		(f"client_secret={_S}&x=1", [_S]),
+		(f'{{"api_key": "{_S}"}}', [_S]),
+		(f'{{"api_key":"{_S}"}}', [_S]),
+		(f'{{"token": "{_S}"}}', [_S]),
+		(f'{{"access_token": "{_S}", "expires": 3600}}', [_S]),
+		(f'{{"password": "correct horse {_S}"}}', [_S, "correct horse"]),
+		(f'{{"password": "an escaped \\" quote {_S}"}}', [_S]),
+		(f'{{"apiKey": "{_S}"}}', [_S]),
+		(f'{{"clientSecret": "{_S}"}}', [_S]),
+		(f"{{'api_secret': '{_S}'}}", [_S]),
+		(
+			f"body was {{'provider': 'p', 'model': 'm', 'api_key': '{_S}', 'auth_mode': 'api_key'}}",
+			[_S],
+		),
+		(f"body was {{'refresh_token': '{_S}'}}", [_S]),
+		(f"api_key={_S} is invalid", [_S]),
+		(f'password: "correct horse {_S}" was refused', [_S, "correct horse"]),
+		(f"line1\nAuthorization: Bearer {_S}\nline3 api_key={_S2}\nhttps://u:{_S}@h/x", [_S, _S2]),
+		("key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV rejected", ["ABCDEFGHIJKLMNOPQRSTUV"]),
+		("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM", ["SflKxwRJSMeKKF2QT4fwpM"]),
+		(f"401 Client Error: Unauthorized for url: https://u:{_S}@h/x?token={_S2}", [_S, _S2]),
+		("x" * 470 + f" api_key={_S}{_S2}", [_S, _S2]),
+	)
+
+	# Text that must come back exactly as it went in.
+	_PROSE = (
+		"the key = value pair",
+		"pass the token to the next step",
+		"see https://host.example:8443/docs for details",
+		"mail admin@host.example about https://host.example/x",
+		"write to user@host.com",
+		"https://host.example/x then mail user@host.com",
+		"Bearer",
+		"Bearer authentication failed",
+		"the Bearer token expired",
+		"Bearer authentication is misconfigured",
+		'Bearer realm="example"',
+		'WWW-Authenticate: Bearer error="invalid_token"',
+		"bearer cheque no 12345678 bounced",
+		"a signature is required",
+		"Did it work? key=value",
+		"Invalid field ?token= in filter",
+		"Sort by: key=posting_date",
+		"Step 3 failed: Sales Invoice SINV-2026-00012 not found",
+		"Time 10:30 - mail a:b@c.d",
+		"ratio 3:1@noon see http://a/b",
+		"docs at s3://bucket/a:b@c",
+		'macro "token=reset" step',
+		"'password': ['This field may not be blank.']",
+		"Could not find Party Type: Customer, Party: ACME & Sons",
+		"Failed to get method for command jarvis_admin_v2.api.subscription_connect with No module named x",
+		"[REDACTED]",
+	)
+
+	def test_no_secret_in_the_probe_corpus_survives(self):
+		for text, secrets in self._LEAKS:
+			with self.subTest(text=text[:80]):
+				out = admin_client._scrub_secrets(text)
+				for secret in secrets:
+					self.assertNotIn(secret, out)
+
+	def test_the_shapes_the_review_named_read_as_expected(self):
+		s = self._S
+		for text, expected in (
+			(f"redis://:{s}@host", "redis://[REDACTED]@host"),
+			(f"https://{s}@host", "https://[REDACTED]@host"),
+			(f'{{"api_key": "{s}"}}', '{"api_key": "[REDACTED]"}'),
+			(f"{{'Authorization': 'token abcdef123456:{s}'}}", "{'Authorization': '[REDACTED]'}"),
+			(f"Authorization: token abcdef123456:{s}", "Authorization=[REDACTED]"),
+			(f"Bearer abcdef123456:{s} was refused", "Bearer [REDACTED] was refused"),
+			# A port, then a query with an "@" in it, is not userinfo.
+			("https://host:8443?x=a@b failed", "https://host:8443?[REDACTED] failed"),
+		):
+			with self.subTest(text=text):
+				self.assertEqual(admin_client._scrub_secrets(text), expected)
 
 	def test_scrubbing_twice_changes_nothing(self):
-		raw = (
+		texts = [t for t, _ in self._LEAKS] + list(self._PROSE)
+		texts += [
 			"Authorization: Bearer abc123tokenvalue then Bearer zzz999tokenvalue at "
-			"https://u:p@host.example/x?sig=Zq9vVALUE77&page=2"
-		)
-		once = admin_client._scrub_secrets(raw)
-		self.assertEqual(admin_client._scrub_secrets(once), once)
+			"https://u:p@host.example/x?sig=Zq9vVALUE77&page=2",
+			"Authorization=[REDACTED]",
+			"Bearer [REDACTED]",
+			"https://[REDACTED]@host/x?[REDACTED]",
+			"x?Authorization: abc123def456",
+			f"password={self._S} secret: {self._S2}",
+		]
+		for raw in texts:
+			with self.subTest(raw=raw[:80]):
+				once = admin_client._scrub_secrets(raw)
+				self.assertEqual(admin_client._scrub_secrets(once), once)
 
 	def test_ordinary_prose_is_left_alone(self):
-		for text in (
-			"the key = value pair",
-			"pass the token to the next step",
-			"see https://host.example:8443/docs?page=2&sort=name for details",
-			"mail admin@host.example about https://host.example/x",
-			"Bearer",
-			"Bearer authentication failed",
-			"the Bearer token expired",
-			"a signature is required",
-		):
+		for text in self._PROSE:
 			with self.subTest(text=text):
 				self.assertEqual(admin_client._scrub_secrets(text), text)
 
