@@ -320,8 +320,7 @@ class TestTurnRecovery(FrappeTestCase):
 		advance.assert_called_once()
 		self.assertEqual(advance.call_args.args, (self.conv.name,))
 		self.assertFalse(advance.call_args.kwargs["errored"])
-		recovered = advance.call_args.kwargs["assistant_message"]
-		self.assertEqual(frappe.db.get_value(MSG_DT, recovered, "conversation"), self.conv.name)
+		self.assertEqual(advance.call_args.kwargs["assistant_message"], self.msg.name)
 
 	def test_error_advances_macro_with_errored_true(self):
 		old = self._add_msg(seq=2, started_min=-120)  # past the ceiling -> _error

@@ -89,9 +89,10 @@
       "label": "Finished At"
     },
     {
+      "description": "Why the run failed or stopped. On a completed run, a note (a step that only drafted a record). Empty when the run simply worked, or the user stopped it.",
       "fieldname": "error",
       "fieldtype": "Small Text",
-      "label": "Error"
+      "label": "Reason / Note"
     }
   ],
   "permissions": [

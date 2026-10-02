@@ -2,15 +2,19 @@
 
 A macro (``Jarvis Macro``) is an ordered list of prompts. Running one creates a
 fresh conversation and executes each prompt as its own agent turn, chained
-server-side: after a turn's ``run:end`` (or an error) the chaining hook in
-``jarvis.chat.turn_handler`` calls :func:`advance_after_turn`, which enqueues the
-next step. Because the steps run as turns in one conversation they share the
+server-side: every turn that ends calls :func:`advance_after_turn` (from
+``finalize``, ``turn_handler`` and ``turn_recovery``), and when the turn that ended
+is the run's CURRENT STEP the hook enqueues the next one, or ends the run. Other
+turns in the conversation (a typed message, a confirmation card's follow-up) do not
+move it. Because the steps run as turns in one conversation they share the
 agent session, so context accumulates across the macro — and the run survives
 a closed browser tab (unlike a frontend-driven loop).
 
 State lives in ``Jarvis Macro Run`` (``current_step`` = 1-based index of the step
-last started; ``status`` in queued/running/completed/failed/stopped). Progress is
-pushed to the owner's realtime channel as ``macro:progress`` / ``macro:done``.
+last started; ``status`` in queued/running/completed/failed/stopped; ``error`` = why
+a run failed or stopped, or a plain note on a completed one). Progress is pushed to
+the owner's realtime channel as ``macro:progress`` / ``macro:done``, and a run that
+ends with something to say leaves it as the last message of its conversation.
 
 A run also records the SHAPE it was dispatched in (``run_mode``, #470). Everything
 that re-enters a live run reads that snapshot rather than re-deriving the shape from
@@ -299,6 +303,11 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	)
 	run.flags.ignore_permissions = True
 	run.insert()
+	if trigger != "scheduled":
+		# ``last_run_at`` is what the list sorts "Last run" by. The scheduler stamps it
+		# for a slot it consumed (and deliberately not for one that never ran, #471); a
+		# manual run never stamped it, so a macro run by hand sorted as never run.
+		frappe.db.set_value(MACRO, doc.name, "last_run_at", frappe.utils.now(), update_modified=False)
 
 	# When run on behalf of another user (the scheduler runs as the owner, but be
 	# defensive), hand ownership of the owner-scoped rows over so they're visible
@@ -396,25 +405,30 @@ def _armed_stop_message(current_step: int, parked: dict) -> str:
 	)[:500]
 
 
-def _card_stop_message(current_step: int, total: int, parked: dict) -> str:
-	"""Why an UNARMED run ended at a step that parked a confirmation card.
+def _card_stop_message(current_step: int, total: int, parked: dict, *, scheduled: bool) -> str:
+	"""Why an UNARMED run ended at a step when a confirmation card was waiting.
 
 	The card is the user's to answer, so it is left alone (an armed run sweeps its
 	card, see ``_armed_stop_message``). The run does not wait for the answer: only one
 	card can be live in a conversation and a macro step cannot replace it, so any gated
 	write in a later step would be refused. Ending here, saying so, is the honest
-	outcome; it used to read ``completed`` with the write never applied."""
+	outcome; it used to read ``completed`` with the write never applied.
+
+	Says what the owner cannot guess: confirming the card applies that write but does
+	not bring the run back, and for a scheduled macro, what stops this happening every
+	time. The card's summary is built from the tool call's own arguments, so it gets
+	the same one-line bound as every other reason on the row."""
 	step = max(int(current_step or 0), 1)
-	what = parked.get("summary") or parked.get("tool") or "a confirmation"
-	if step >= total:
-		text = (
-			f"Step {step} is waiting for your confirmation ({what}). "
-			f"Confirm or discard it in the conversation."
-		)
-	else:
-		text = (
-			f"Stopped at step {step} of {total}: it is waiting for your confirmation ({what}). "
-			f"Confirm or discard it in the conversation. The steps after it did not run."
+	what = _one_line(parked.get("summary")) or str(parked.get("tool") or "").replace("_", " ")
+	text = f"Stopped at step {step} of {total}: a confirmation is waiting in the conversation"
+	text += f" ({what})." if what else "."
+	text += " You can still confirm or discard it there."
+	if step < total:
+		text += " The steps after it did not run, and confirming it will not resume them."
+	if scheduled:
+		text += (
+			" To let this macro run without stopping here, ask an administrator to"
+			" switch on Skip confirmation for it."
 		)
 	return text[:500]
 
@@ -422,28 +436,57 @@ def _card_stop_message(current_step: int, total: int, parked: dict) -> str:
 # Jarvis Chat Turn states after which the turn will produce nothing more.
 _TURN_ENDED = ("done", "errored", "cancelled")
 _TURN_FAILED = ("errored", "cancelled")
+_TURN_FIELDS = ["name", "seed_message", "assistant_message", "state", "error", "cancel_reason"]
 # One step's reason on a run row: several must fit the 500 characters of ``error``.
 _REASON_MAX = 120
 _STEP_STOPPED = "the step was stopped."
 _STEP_ERRORED = "the step ended with an error."
 
 
-def _current_step_message(conversation: str) -> str | None:
-	"""The user message of the step this run last dispatched: the latest
-	``origin="macro"`` row in its conversation. Every step is dispatched through
-	``_enqueue_turn(origin="macro")``, and a step deferred for capacity has its seed
-	deleted, so nothing else can be the latest."""
-	rows = frappe.get_all(
+def _macro_seeds(conversation: str, *, newest_first: bool = False, limit: int | None = None) -> list:
+	"""The run's step messages: every ``origin="macro"`` user row in its conversation.
+	Every step is dispatched through ``_enqueue_turn(origin="macro")``, and a step
+	deferred for capacity has its seed deleted, so these are the steps that went out."""
+	return frappe.get_all(
 		MSG,
 		filters={"conversation": conversation, "role": "user", "origin": "macro"},
-		order_by="seq desc",
-		limit=1,
-		pluck="name",
+		fields=["name", "seq"],
+		order_by="seq desc" if newest_first else "seq asc",
+		limit=limit,
 	)
-	return rows[0] if rows else None
 
 
-def _ended_turn_seed(run_id: str | None, seed_message: str | None, assistant_message: str | None):
+def _never_dispatched(conversation: str, latest, previous) -> bool:
+	"""Whether ``latest`` is a step message whose turn was never created.
+
+	``_enqueue_turn`` commits the message, THEN creates the turn. A worker that dies
+	between the two leaves a message no turn will ever end for. Treated as the current
+	step it would be the current step for good: every later event, including the
+	re-delivery of the step before it (which is what recovers this), would name
+	something else. Told apart by what a dispatched step always has on the turn-machine
+	path, a Turn row, and only when the step before it has one (so Turn rows are in
+	use here) and nothing was written to the conversation after it."""
+	if frappe.db.exists(TURN, {"seed_message": latest.name}):
+		return False
+	if not frappe.db.exists(TURN, {"seed_message": previous.name}):
+		return False
+	return not frappe.db.exists(MSG, {"conversation": conversation, "seq": [">", latest.seq]})
+
+
+def _current_step_message(conversation: str) -> str | None:
+	"""The user message of the step this run last dispatched: its latest macro
+	message, unless that one never became a turn (``_never_dispatched``)."""
+	seeds = _macro_seeds(conversation, newest_first=True, limit=2)
+	if not seeds:
+		return None
+	if len(seeds) > 1 and _never_dispatched(conversation, seeds[0], seeds[1]):
+		return seeds[1].name
+	return seeds[0].name
+
+
+def _ended_turn_seed(
+	conversation: str, run_id: str | None, seed_message: str | None, assistant_message: str | None
+):
 	"""The user message that started the turn that just ended, from whichever handle
 	the caller has: the message itself (the legacy worker), the Turn (finalize), or
 	the reply (turn recovery works from the assistant row). None when it cannot be
@@ -455,7 +498,10 @@ def _ended_turn_seed(run_id: str | None, seed_message: str | None, assistant_mes
 		if seed:
 			return seed
 	if assistant_message:
-		return frappe.db.get_value(TURN, {"assistant_message": assistant_message}, "seed_message")
+		# ``conversation`` is the indexed column; ``assistant_message`` alone is not.
+		return frappe.db.get_value(
+			TURN, {"conversation": conversation, "assistant_message": assistant_message}, "seed_message"
+		)
 	return None
 
 
@@ -466,8 +512,8 @@ def _is_the_steps_own_turn(conversation: str, seed: str | None) -> bool:
 	conversation accepts typed messages, a confirmed card runs a hidden follow-up turn,
 	and the finalize effect that calls the hook is retried. Each of those used to
 	advance the run: steps overlapped, the run finished early, and "Step N failed"
-	named the wrong step. Only the turn started by the latest macro message counts; a
-	re-delivered event for an earlier step no longer matches once the next is out."""
+	named the wrong step. Only the turn started by the current step's message counts;
+	a re-delivered event for an earlier step no longer matches once the next is out."""
 	current = _current_step_message(conversation)
 	if seed:
 		if current:
@@ -483,8 +529,8 @@ def _is_the_steps_own_turn(conversation: str, seed: str | None) -> bool:
 
 
 def _one_line(text: str | None) -> str:
-	"""A failure reason fit for a run row: one line, bounded, with the same scrubbing
-	the error already got on its way to the chat."""
+	"""Text fit for a run row: one line, bounded, with the same scrubbing an error
+	already got on its way to the chat."""
 	from jarvis.chat import egress_rules
 
 	line = " ".join(str(text or "").split())
@@ -492,37 +538,110 @@ def _one_line(text: str | None) -> str:
 	return line if len(line) <= _REASON_MAX else line[: _REASON_MAX - 1].rstrip() + "…"
 
 
+def _reads_as_a_sentence(line: str) -> bool:
+	"""Whether a turn's recorded error is already something to show an owner: it
+	starts like a sentence, ends like one, and carries no payload or exception name.
+	Most are not. A turn records whatever failed it: a provider's JSON, a transport
+	code, "unexpected worker error: KeyError"."""
+	if not line or not line[0].isupper() or line[-1] not in ".!?" or len(line.split()) < 3:
+		return False
+	return not any(mark in line for mark in ("{", "}", "Traceback", "Error:", "error:", "Exception"))
+
+
+def _plain_reason(raw) -> str:
+	"""``raw`` as a reason an owner can read, or "" when there is none to give.
+
+	A sentence is kept as it is. Anything else is classified by the same rules the
+	chat uses for a failed turn (``error_taxonomy``) and given that rule's headline, so
+	the run row says what the chat said, not the payload behind it."""
+	from jarvis.chat import error_taxonomy
+
+	line = _one_line(raw)
+	if not line:
+		return ""
+	# Judged on the whole text: a long sentence is still one after it is cut.
+	if _reads_as_a_sentence(" ".join(str(raw).split())):
+		return line
+	headline = error_taxonomy.headline_for(raw)
+	return _one_line(headline.rstrip(".") + ".") if headline else ""
+
+
 def _turn_failure_reason(turn) -> str:
-	"""Why a step's turn failed, in the words the turn recorded. A turn the user
-	stopped records none."""
-	reason = _one_line(turn.get("error") if turn else "")
-	if not reason and turn and turn.get("assistant_message"):
-		reason = _one_line(frappe.db.get_value(MSG, turn.get("assistant_message"), "error"))
-	if reason:
-		return reason
+	"""Why a step's turn failed. A turn the user stopped records nothing at all; one
+	the system cancelled (it waited too long in the queue) says so in
+	``cancel_reason`` only."""
+	if turn:
+		reply_error = (
+			frappe.db.get_value(MSG, turn.get("assistant_message"), "error")
+			if turn.get("assistant_message")
+			else None
+		)
+		for raw in (turn.get("error"), reply_error, turn.get("cancel_reason")):
+			reason = _plain_reason(raw)
+			if reason:
+				return reason
 	return _STEP_STOPPED if turn and turn.get("state") == "cancelled" else _STEP_ERRORED
+
+
+def _stopped_by_the_user(turn) -> bool:
+	"""A turn the user pressed Stop on: cancelled, with nothing recorded as to why
+	(a system cancel records its reason)."""
+	return bool(
+		turn and turn.get("state") == "cancelled" and not turn.get("error") and not turn.get("cancel_reason")
+	)
+
+
+def _ended_turn(seed: str | None, run_id: str | None):
+	"""The Turn row of the turn that just ended (None on the legacy path, which
+	writes none). By its own id when the caller has it: a retried step has several
+	turns for one message."""
+	if run_id:
+		turn = frappe.db.get_value(TURN, run_id, _TURN_FIELDS, as_dict=True)
+		if turn:
+			return turn
+	if not seed:
+		return None
+	rows = frappe.get_all(
+		TURN, filters={"seed_message": seed}, fields=_TURN_FIELDS, order_by="creation desc", limit=1
+	)
+	return rows[0] if rows else None
 
 
 def _step_turns(conversation: str) -> list:
 	"""The run's dispatched steps in order, each with its Turn row (None on the legacy
-	path, which writes none). Step N is the Nth macro message: a deferred step leaves
-	no message behind, so the count matches what actually ran."""
-	seeds = frappe.get_all(
-		MSG,
-		filters={"conversation": conversation, "role": "user", "origin": "macro"},
-		order_by="seq asc",
-		pluck="name",
-	)
+	path, which writes none). Step N is the Nth step message. Where Turn rows are in
+	use, a message that never became a turn (``_never_dispatched``) is not a step."""
+	seeds = [m.name for m in _macro_seeds(conversation)]
 	if not seeds:
 		return []
 	turns = frappe.get_all(
 		TURN,
 		filters={"seed_message": ["in", seeds]},
-		fields=["name", "seed_message", "assistant_message", "state", "error"],
+		fields=_TURN_FIELDS,
 		order_by="creation asc",
 	)
 	latest = {t.seed_message: t for t in turns}  # a retried step: its last turn counts
+	if latest:
+		seeds = [seed for seed in seeds if seed in latest]
 	return [latest.get(seed) for seed in seeds]
+
+
+def _failed_steps_note(failed: dict, total: int) -> str:
+	""" "Finished, but 2 of 5 steps failed. Step 2: ...; Step 4: ..." within the 500
+	characters the row holds, never cut in the middle of a reason."""
+	if total <= 1:
+		head = "Finished, but its only step failed."
+	else:
+		head = f"Finished, but {len(failed)} of {total} steps failed."
+	parts: list[str] = []
+	numbers = sorted(failed)
+	for position, number in enumerate(numbers):
+		piece = f" Step {number}: {failed[number]}"
+		if len(head) + sum(len(x) for x in parts) + len(piece) > 460:
+			parts.append(f" And {len(numbers) - position} more.")
+			break
+		parts.append(piece)
+	return head + "".join(parts)
 
 
 def _run_outcome(run, total: int, *, last_step_errored: bool) -> tuple[str, str]:
@@ -532,7 +651,10 @@ def _run_outcome(run, total: int, *, last_step_errored: bool) -> tuple[str, str]
 	going past a failed step, by the owner's choice; that never made it a run that
 	worked. And an unarmed step that creates or updates a record ends with a draft for
 	the user to apply: nothing is written until they do, and there is no signal the
-	run could wait on, so the run says which steps left one."""
+	run could wait on, so the run says which steps left one.
+
+	Earlier steps are read back from their Turn rows. Without Turn rows (the legacy
+	path) only the step that just ended is known, first-hand."""
 	from jarvis.chat import filebox_cards
 
 	steps = _step_turns(run.conversation)
@@ -556,8 +678,9 @@ def _run_outcome(run, total: int, *, last_step_errored: bool) -> tuple[str, str]
 	if last_step_errored and last not in failed:
 		failed[last] = _turn_failure_reason(steps[last - 1] if last <= len(steps) else None)
 	if failed:
-		reasons = "; ".join(f"Step {n}: {failed[n]}" for n in sorted(failed))
-		return "failed", f"Finished, but {len(failed)} of {total} steps failed. {reasons}"[:500]
+		if (run.get("run_mode") or "") == MODE_MERGED:
+			return "failed", f"The summarized run failed: {next(iter(failed.values()))}"[:500]
+		return "failed", _failed_steps_note(failed, total)
 	if drafted:
 		if len(drafted) == 1:
 			return "completed", (
@@ -598,23 +721,38 @@ def advance_after_turn(
 		if not run_name:
 			return
 		from jarvis._redis_lock import redis_lock
+		from jarvis.chat import txn
 
 		with redis_lock(f"jarvis_macro_run:{run_name}", timeout_s=60, blocking_timeout_s=10.0) as acquired:
 			if not acquired:
+				frappe.logger("jarvis").warning(
+					f"macro run {run_name}: a turn end was dropped, the run lock was busy for 10s"
+				)
 				return
+			# This transaction's snapshot was taken by the lookup above, BEFORE waiting
+			# for the lock. Everything below must see what the previous holder wrote
+			# (the next step dispatched, a Stop), or two deliveries of one step's end
+			# both dispatch the step after it.
+			txn.fresh_snapshot()
 			run = frappe.get_doc(RUN, run_name)
 			if run.status != "running":  # stopped mid-flight, or already advanced
 				return
-			# Decided under the lock: the previous holder may just have dispatched the
-			# next step, which is what makes a second delivery of this event stale.
-			seed = _ended_turn_seed(run_id, seed_message, assistant_message)
+			seed = _ended_turn_seed(conversation_id, run_id, seed_message, assistant_message)
 			if not _is_the_steps_own_turn(conversation_id, seed):
+				# Not an error: a typed message, a card's follow-up or a repeated
+				# event. Logged because a run that never moves is otherwise silent
+				# until the stale-run sweep, three hours on.
+				frappe.logger("jarvis").info(
+					f"macro run {run_name}: ignored a turn end that is not its current step "
+					f"(run_id={run_id!r}, seed={seed!r})"
+				)
 				return
 			macro_doc = frappe.get_doc(MACRO, run.macro)
 			if _fail_run_unless_one_owner(run, macro_doc):
 				return
 			steps = macro_doc.steps or []
 			total = min(run.total_steps or len(steps), len(steps))
+			merged = _run_mode(run, macro_doc) == MODE_MERGED
 
 			# A step that parked a confirmation card. A park returns ok:True, so
 			# `errored` is False: the only per-step signal is the parked token itself.
@@ -651,27 +789,65 @@ def advance_after_turn(
 			if parked:
 				# Unarmed: the card is the user's to answer and stays. The run ends here
 				# rather than chaining on and reporting "completed" (_card_stop_message).
-				_end_run(run, macro_doc, "stopped", _card_stop_message(run.current_step or 0, total, parked))
+				_end_run(
+					run,
+					macro_doc,
+					"stopped",
+					_card_stop_message(
+						run.current_step or 0,
+						total,
+						parked,
+						scheduled=(run.get("trigger") or "") == "scheduled",
+					),
+				)
 				return
 
 			step_number = max(int(run.current_step or 0), 1)  # never "Step 0" (first-step race)
 			if errored and macro_doc.stop_on_error:
-				turn = frappe.db.get_value(
-					TURN,
-					{"seed_message": seed} if seed else {"name": run_id or ""},
-					["state", "error", "assistant_message"],
-					as_dict=True,
-				)
-				_end_run(run, macro_doc, "failed", f"Step {step_number} failed: {_turn_failure_reason(turn)}")
+				turn = _ended_turn(seed, run_id)
+				if _stopped_by_the_user(turn):
+					# Their own Stop on the step: the run stopped, it did not fail.
+					stopped = f"Stopped at step {step_number} of {total}: the step was stopped"
+					stopped += ", so the steps after it did not run." if step_number < total else "."
+					_end_run(run, macro_doc, "stopped", stopped)
+					return
+				what = "The summarized run" if merged else f"Step {step_number}"
+				_end_run(run, macro_doc, "failed", f"{what} failed: {_turn_failure_reason(turn)}")
 				return
 
 			next_index = run.current_step or 0  # 0-based index of the next step
 			if next_index >= total:
-				status, note = _run_outcome(run, total, last_step_errored=errored)
+				try:
+					status, note = _run_outcome(run, total, last_step_errored=errored)
+				except Exception:
+					# Describing the run must never be what keeps it from ending.
+					frappe.log_error(title="jarvis macro outcome failed", message=frappe.get_traceback())
+					status, note = (
+						("failed", f"Step {step_number} failed: {_STEP_ERRORED}")
+						if errored
+						else ("completed", "")
+					)
 				_end_run(run, macro_doc, status, note)
 				return
 
-			_run_step(run, macro_doc, next_index)
+			try:
+				_run_step(run, macro_doc, next_index)
+			except Exception:
+				# The step's message may already be committed with no turn behind it
+				# (``_enqueue_turn`` commits, then dispatches). Nothing would ever end
+				# for it, so the run would sit `running` until the stale sweep. End it
+				# now, saying what happened, as ``run_macro`` does for the first step
+				# (#471) and the capacity resume for a resumed one (CDX-23).
+				frappe.log_error(
+					title=f"jarvis macro step dispatch failed: {run.name}", message=frappe.get_traceback()
+				)
+				_end_run(
+					run,
+					macro_doc,
+					"failed",
+					f"Step {next_index + 1} could not be started, so the run ended there. "
+					f"The steps before it already ran.",
+				)
 	except Exception:
 		frappe.log_error(title="jarvis macro advance failed", message=frappe.get_traceback())
 
@@ -871,6 +1047,9 @@ def stop_macro_run(run_name: str) -> dict:
 	# dropped. In the (rare) not-acquired case the resume path's status-fenced CAS still prevents a
 	# resume from clobbering this stop.
 	with redis_lock(f"jarvis_macro_run:{run_name}", timeout_s=60, blocking_timeout_s=_STOP_LOCK_BLOCK_S):
+		from jarvis.chat import txn
+
+		txn.fresh_snapshot()  # the status re-read below must not be from before the wait
 		# CDX-19: waiting_capacity is a live (non-terminal) run parked for capacity, so it must be
 		# stoppable too — otherwise the resume cron would keep re-attempting a run the user stopped.
 		if frappe.db.get_value(RUN, run_name, "status") in ("running", "waiting_capacity"):
@@ -1479,6 +1658,8 @@ def _fail_run_unless_one_owner(run, macro_doc) -> bool:
 	conv_owner = frappe.db.get_value(CONV, run.conversation, "owner") if run.conversation else None
 	if conv_owner is None:
 		_fail_run_in_place(run, _CONVERSATION_GONE_ERROR)
+		if run.owner == macro_doc.owner:
+			_announce(run, macro_doc, "failed", _CONVERSATION_GONE_ERROR)
 		return True
 	if run.owner == macro_doc.owner == conv_owner:
 		return False
@@ -1557,20 +1738,74 @@ _OUTCOME_SUBJECT = {
 	"stopped": "Macro run stopped",
 	"completed": "Macro run finished",
 }
+_CLOSING_MARK = {"failed": "✗ Macro failed.", "stopped": "■ Macro stopped.", "completed": "✓ Macro finished."}
+
+
+def _post_closing_message(run, status: str, note: str) -> None:
+	"""Leave the run's outcome IN its conversation, as the last message.
+
+	The run opens its conversation with "Running macro ..."; nothing closed it. The
+	reason a run failed or stopped lived on the run row and in a realtime event, so
+	someone opening the conversation later (from a notification, from the Runs tab, on
+	a phone) found a transcript that just ends. A message is the one thing every
+	surface already shows.
+
+	Only when there is something to say (a clean ``completed`` needs no epilogue).
+	Posted exactly once per run: the natural-key dedupe on (conversation, role,
+	run) is taken under the conversation lock, like the import announcement."""
+	if not note or not run.conversation:
+		return
+	conv = frappe.db.get_value(CONV, run.conversation, ["owner", "status"], as_dict=True)
+	if not conv or not conv.owner or conv.status == "Archived":
+		return
+	from jarvis._session import impersonate
+	from jarvis.api import _locked_insert_chat_message
+
+	message = None
+	with impersonate(conv.owner):
+		frappe.db.commit()  # commit-first: the FOR UPDATE is the first statement
+		message = _locked_insert_chat_message(
+			run.conversation,
+			{
+				"role": "assistant",
+				"content": f"{_CLOSING_MARK.get(status, 'Macro run ended.')} {note}",
+				"hidden": 0,
+				"ref_doctype": RUN,
+				"ref_name": run.name,
+			},
+			dedupe_filters={
+				"conversation": run.conversation,
+				"role": "assistant",
+				"ref_doctype": RUN,
+				"ref_name": run.name,
+			},
+		)
+		frappe.db.commit()
+	if message:
+		publish_to_user(
+			conv.owner,
+			{"kind": "macro:closed", "conversation_id": run.conversation, "message_id": message},
+		)
 
 
 def _announce(run, macro_doc, status: str, error: str = "") -> None:
-	"""Tell the owner how a run ended: the realtime event an open app listens for
-	and, for a SCHEDULED run that did not simply work, a Notification Log.
+	"""Tell the owner how a run ended: a closing message in the run's conversation,
+	the realtime event an open app listens for and, for a SCHEDULED run that did not
+	simply work, a Notification Log.
 
 	A realtime event reaches an open socket only, and nobody is watching a scheduled
 	run. Before this, a scheduled run that failed part-way told nobody: only the
 	scheduler's own refusals and the stale-run sweep wrote a notification. A manual
-	run writes none; whoever started it gets the event. Never raises."""
+	run writes none; whoever started it gets the event. Never raises: each part is
+	best-effort on top of the run row, which is the record."""
+	try:
+		_post_closing_message(run, status, error)
+	except Exception:
+		frappe.log_error(title="jarvis macro closing message failed", message=frappe.get_traceback())
 	try:
 		_publish_done(run, macro_doc, status, error)
 	except Exception:
-		pass
+		frappe.log_error(title="jarvis macro done event failed", message=frappe.get_traceback())
 	if (run.get("trigger") or "manual") != "scheduled" or not error:
 		return
 	notify_owner(
@@ -1581,7 +1816,9 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 
 
 def _end_run(run, macro_doc, status: str, error: str = "") -> None:
-	"""Terminalize a run and say so. The one way a run ends from the chaining and
-	resume paths, so no outcome is recorded without its owner being told."""
+	"""Terminalize a run and say so: how a run ends from the chaining hook and the
+	capacity resume. (``stop_macro_run`` and the owner-mismatch failure do not come
+	through here: the first is the user's own act, the second must not write to a
+	conversation the run has no claim on.)"""
 	_finish(run, status, error=error)
 	_announce(run, macro_doc, status, error)
