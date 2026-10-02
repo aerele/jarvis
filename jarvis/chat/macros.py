@@ -1224,10 +1224,13 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 	# ``owned``: in a web request the helper is otherwise a no-op; every caller comes
 	# here with nothing pending, and the commit below was coming regardless.
 	txn.fresh_snapshot(owned=True)
-	run = frappe.get_doc(RUN, run_name)
+	run = frappe.db.get_value(
+		RUN, run_name, ["name", "status", "conversation", "macro", "trigger"], as_dict=True
+	)
 	# CDX-19: waiting_capacity is a live (non-terminal) run parked for capacity, so it must be
 	# stoppable too — otherwise the resume cron would keep re-attempting a run the user stopped.
-	if run.status not in _LIVE_RUN_STATUSES:
+	# No row: the run was deleted while this call waited for its lock.
+	if not run or run.status not in _LIVE_RUN_STATUSES:
 		return False
 	extra = {"finished_at": frappe.utils.now()}
 	if reason:
