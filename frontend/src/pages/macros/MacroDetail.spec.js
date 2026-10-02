@@ -545,7 +545,7 @@ describe("MacroDetail Run: it runs what is SAVED, so it waits for a save", () =>
 		const w = await mountDetail(baseMacro());
 		const room = w.find('[data-testid="run-reason-room"]');
 		expect(room.exists()).toBe(true);
-		expect(room.classes()).toContain("min-h-4");
+		expect(room.classes()).toContain("min-h-5");
 		expect(room.text()).toBe("");
 		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
 		expect(room.element.contains(runReason(w).element)).toBe(true);
