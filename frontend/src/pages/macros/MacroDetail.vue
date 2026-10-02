@@ -34,6 +34,24 @@
 		</template>
 
 		<template #main>
+			<!-- How the last run went, when the owner needs telling: it failed, it is
+			     waiting on them, or a step only drafted a record. Nothing else on this
+			     page said, and a scheduled run fails with nobody watching. -->
+			<div
+				v-if="lastRunNote"
+				class="mb-4 flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+				:class="LAST_RUN_TONE[lastRunNote.tone] || 'text-ink-gray-7'"
+				role="status"
+			>
+				<span class="min-w-0 flex-1 break-words">{{ lastRunNote.text }}</span>
+				<router-link
+					v-if="lastRun && lastRun.conversation"
+					class="shrink-0 underline"
+					:to="'/c/' + lastRun.conversation"
+				>
+					Open the run
+				</router-link>
+			</div>
 			<DocSection label="Details">
 				<div class="space-y-4">
 					<FormControl
@@ -238,6 +256,7 @@ import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";
+import { lastRunLine } from "@/lib/macroRunOutcome";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -262,6 +281,11 @@ const saving = ref(false);
 const running = ref(false);
 const mergeStatus = ref(""); // '' | 'pending' | 'ready' | 'failed'
 const nextRunRaw = ref("");
+// The server's `last_run` for this macro (null when it never ran, undefined from a
+// server that does not send it yet).
+const lastRun = ref(null);
+const lastRunNote = computed(() => lastRunLine(lastRun.value));
+const LAST_RUN_TONE = { bad: "text-ink-red-4", warn: "text-ink-amber-3" };
 const nextRunIsRetry = ref(false);
 
 const form = reactive({
@@ -467,6 +491,7 @@ function seed(data) {
 	mergeStatus.value = data.merge_status || "";
 	nextRunRaw.value = data.next_run_at || "";
 	ownerBlockedReason.value = data.schedule_blocked_reason || "";
+	lastRun.value = data.last_run || null;
 	snapshot.value = {
 		macro_name: form.macro_name,
 		description: form.description,
