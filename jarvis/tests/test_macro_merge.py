@@ -83,9 +83,17 @@ class _MacroMergeBase(FrappeTestCase):
 		frappe.db.commit()
 
 	def _resumable(self, conv, owner=None):
-		"""Hand a run's conversation to an eligible owner (the resume refuses Administrator)."""
+		"""Hand a run to an eligible owner (the resume refuses Administrator).
+
+		The conversation, its run and the macro move TOGETHER, as ``run_macro`` creates
+		them: the engine refuses a run whose three records do not share one owner."""
 		owner = owner or ensure_user(RESUME_OWNER)
 		frappe.db.set_value("Jarvis Conversation", conv, "owner", owner, update_modified=False)
+		for run in frappe.get_all(
+			"Jarvis Macro Run", filters={"conversation": conv}, fields=["name", "macro"]
+		):
+			frappe.db.set_value("Jarvis Macro Run", run.name, "owner", owner, update_modified=False)
+			frappe.db.set_value("Jarvis Macro", run.macro, "owner", owner, update_modified=False)
 		frappe.db.commit()
 
 
