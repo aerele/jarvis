@@ -276,8 +276,8 @@ const hasMore = ref(false);
 const total = ref(null); // §8.3/D38: list_macro_runs gains `total`
 const loading = ref(false);
 // Why the last fetch failed. Shown in place of the empty state only: with rows on
-// screen the last-good rows stay and the toast says it. Cleared when a load the
-// user asked for starts, and when any fetch works.
+// screen the last-good rows stay and the toast says it. Cleared when any fetch
+// works, and when a load starts under filters other than the ones that failed.
 const error = ref("");
 const status = ref("");
 const macro = ref("");
@@ -328,6 +328,9 @@ const statCards = computed(() => {
 //     and runs once when the tab goes idle, however many events arrived.
 //   - a "keep" in flight gives way to a "reset" (which brings fresh rows anyway)
 //     or a "more" (after which it runs again).
+//   - a "keep" whose request has not answered in KEEP_LOST_MS gives way to the
+//     next "keep". Requests have no timeout, so a lost one would otherwise hold
+//     every later refresh back with nothing on screen to say so.
 // So the rows on screen were always fetched under the filters now selected, and
 // are only ever joined with rows fetched under those same filters. When a keep
 // could overtake a filter change, it spliced the new filter's first page over
@@ -338,6 +341,11 @@ let keepQueued = false;
 let disposed = false;
 // The filters the rows on screen were loaded under.
 let loadedFilters = "";
+// The filters the error on screen is about.
+let failedFilters = "";
+// When the keep in flight last sent a request.
+let keepSentAt = 0;
+const KEEP_LOST_MS = 30000;
 // A failing silent refresh is said once, not once per realtime event for as long
 // as the server is down. Any fetch that works re-arms it.
 let failureSaid = false;
@@ -362,6 +370,7 @@ async function fetchLoadedPages(filters, id) {
 	let start = 0;
 	while (start < want) {
 		const limit = Math.min(PAGE_MAX, want - start);
+		keepSentAt = Date.now();
 		res = (await api.listMacroRuns({ ...filters, limit, start })) || {};
 		if (id !== reqId) return null;
 		// A run that started between two requests pushes a row from the end of
@@ -381,20 +390,28 @@ async function fetchLoadedPages(filters, id) {
 async function fetchRuns(mode = "reset") {
 	if (disposed) return;
 	if (mode === "keep" && inFlight) {
-		keepQueued = true;
-		return;
+		const lost = inFlight === "keep" && Date.now() - keepSentAt > KEEP_LOST_MS;
+		if (!lost) {
+			keepQueued = true;
+			return;
+		}
 	}
-	// A keep this "more" is about to supersede runs again afterwards.
+	// A keep this "more" is about to supersede runs again afterwards. A keep that
+	// starts is the one any earlier event was waiting for.
 	if (mode === "more" && inFlight === "keep") keepQueued = true;
+	if (mode === "keep") keepQueued = false;
 	const id = ++reqId;
 	inFlight = mode;
 	const filters = { status: status.value, macro: macro.value };
 	const filtersKey = JSON.stringify(filters);
 	if (mode !== "keep") {
 		loading.value = true;
-		// A silent refresh leaves the error up until it works: there is no loading
-		// state to show in its place, and "No macro runs yet" would flash instead.
-		error.value = "";
+		// A retry under the filters that failed keeps the error up while it loads,
+		// so "Try again" shows its spinner (as ListPage does) and the pane does not
+		// blink blank. An error about other filters goes at once. A silent refresh
+		// leaves it up until it works: there is no loading state to show in its
+		// place, and "No macro runs yet" would flash instead.
+		if (filtersKey !== failedFilters) error.value = "";
 	}
 	try {
 		const res =
@@ -416,6 +433,7 @@ async function fetchRuns(mode = "reset") {
 	} catch (e) {
 		if (id !== reqId) return;
 		error.value = errMsg(e);
+		failedFilters = filtersKey;
 		// A refresh that fails keeps the last-good rows. A FILTER CHANGE that fails
 		// does not: the rows on screen belong to the filter that was left.
 		if (filtersKey !== loadedFilters) {
@@ -515,6 +533,9 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
 	disposed = true; // a refresh still waiting has nothing to refresh
+	// Whatever is in flight is now nobody's: a keep stops paging, and a failure
+	// is not toasted over the page the user went to.
+	reqId++;
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 });
 
