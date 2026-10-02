@@ -563,8 +563,11 @@ def _one_line(text: str | None) -> str:
 	from jarvis.chat import egress_rules
 
 	# Bounded before the scrub: only the first line's worth is kept anyway, and the
-	# credential patterns are slow on a very long payload.
-	line = " ".join(str(text or "")[:_SCRUB_INPUT_MAX].split())
+	# credential patterns are slow on a very long payload. Cut at a word boundary, so
+	# a credential is never left as a prefix the patterns no longer recognise.
+	line = " ".join(str(text or "").split())
+	if len(line) > _SCRUB_INPUT_MAX:
+		line = line[:_SCRUB_INPUT_MAX].rsplit(" ", 1)[0]
 	line = egress_rules.redact(_scrub_secrets(line) or "") or ""
 	return line if len(line) <= _REASON_MAX else line[: _REASON_MAX - 1].rstrip() + "…"
 
@@ -674,6 +677,10 @@ def _step_turns(conversation: str) -> list:
 	return [latest.get(seed) for seed in seeds]
 
 
+_DRAFT_GONE_HINT = (
+	"To create it, run that step again in a chat, or ask an administrator to switch on "
+	"Skip confirmation so the macro writes directly."
+)
 _DRAFTS_GONE_HINT = (
 	"To create them, run those steps again in a chat, or ask an administrator to switch on "
 	"Skip confirmation so the macro writes directly."
@@ -698,7 +705,7 @@ def _draft_note(drafted: list[int], last_step: int) -> str:
 			else f"Steps {numbers} drafted records that were not created: the macro did not wait, "
 			f"and the steps after them closed the drafts."
 		)
-		parts.append(_DRAFTS_GONE_HINT)
+		parts.append(_DRAFT_GONE_HINT if len(closed) == 1 else _DRAFTS_GONE_HINT)
 	if last_step in drafted:
 		parts.append(f"Step {last_step} left a draft for you to apply in the chat.")
 	return " ".join(parts)
