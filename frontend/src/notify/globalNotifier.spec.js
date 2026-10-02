@@ -249,6 +249,87 @@ describe("dashboard-origin attention stays in Dashboard Builder", () => {
 	});
 });
 
+describe("a failed macro run is announced", () => {
+	// Nothing outside the run's own conversation used to say a macro failed: a
+	// scheduled run that broke overnight was found by opening the Runs tab, or not.
+	const done = (over = {}) => ({
+		kind: "macro:done",
+		macro_run: "run-m",
+		macro: "macro-1",
+		macro_name: "Month-end close",
+		conversation: "conv-m",
+		status: "failed",
+		error: "Step 2 failed: no such customer",
+		trigger: "scheduled",
+		...over,
+	});
+
+	it("toasts the macro's name and the reason, and marks the run's chat unread", () => {
+		socket.emit(done());
+		const toasts = useToasts().value;
+		expect(toasts).toHaveLength(1);
+		expect(toasts[0].title).toBe("Macro failed: Month-end close");
+		expect(toasts[0].body).toBe("Step 2 failed: no such customer");
+		expect(store.markUnread).toHaveBeenCalledWith("conv-m");
+	});
+
+	it("opens the run's conversation when clicked", () => {
+		socket.emit(done());
+		useToasts().value[0].onClick();
+		expect(router.push).toHaveBeenCalledWith("/c/conv-m");
+	});
+
+	it("says nothing for a run that worked, or that stopped", () => {
+		socket.emit(done({ status: "completed", error: "" }));
+		socket.emit(done({ status: "stopped", error: "" }));
+		// Stopped at a confirmation card: the card already said "needs your confirmation".
+		socket.emit(
+			done({ status: "stopped", error: "Step 1 is waiting for your confirmation." })
+		);
+		expect(useToasts().value).toHaveLength(0);
+		expect(store.markUnread).not.toHaveBeenCalled();
+	});
+
+	it("does not announce one failure twice when the step's own error was just toasted", () => {
+		socket.emit(terminal({ kind: "run:error", conversation_id: "conv-m", error: "boom" }));
+		socket.emit(done());
+		expect(useToasts().value).toHaveLength(1);
+	});
+
+	it("still announces a failure that no step error preceded", () => {
+		// An armed run stopped at a confirmation it cannot show: no turn errored.
+		socket.emit(terminal({ kind: "run:error", conversation_id: "conv-other", error: "boom" }));
+		socket.emit(done());
+		expect(useToasts().value).toHaveLength(2);
+	});
+
+	it("stays quiet while the run's conversation is on screen", () => {
+		// ChatView's banner carries the reason there.
+		router.currentRoute.value = {
+			name: "Chat",
+			params: { id: "conv-m" },
+			meta: { chat: true },
+		};
+		store.currentConvId = "conv-m";
+		socket.emit(done());
+		expect(useToasts().value).toHaveLength(0);
+		expect(store.markUnread).not.toHaveBeenCalled();
+	});
+
+	it("announces a run that has no conversation left, and opens the Runs tab", () => {
+		socket.emit(done({ conversation: "" }));
+		const toasts = useToasts().value;
+		expect(toasts).toHaveLength(1);
+		toasts[0].onClick();
+		expect(router.push).toHaveBeenCalledWith("/macros/runs");
+	});
+
+	it("an event from a server that sends no reason is still announced", () => {
+		socket.emit(done({ macro_name: undefined, error: undefined }));
+		expect(useToasts().value[0].title).toBe("Macro failed");
+	});
+});
+
 describe("a hidden tab takes the browser-notification branch, not the toast", () => {
 	it("does not stack toasts while hidden", () => {
 		setHidden(true);

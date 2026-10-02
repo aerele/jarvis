@@ -10396,6 +10396,13 @@ function onEvent(p) {
 			setTimeout(processMermaid, 300);
 			break;
 		}
+		case "macro:closed": {
+			// A macro run ended with something to say and the bench posted it as the
+			// last message of this conversation (macros._post_closing_message). Same
+			// as import:finished below: re-read rather than splice it in by hand.
+			loadConversation(currentId.value);
+			break;
+		}
 		case "import:finished": {
 			// Slice B: a background CSV import finished and the bench already
 			// posted the "✓ ..." completion message into this conversation
