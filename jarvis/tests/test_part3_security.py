@@ -355,6 +355,17 @@ class TestMacroScoping(Part3Base):
 	def test_scheduler_skips_barred_owner(self):
 		# MAC-1: a due macro owned by a user who lost Jarvis access is skipped.
 		m = _mk_macro(OUTSIDER, f"{PFX}-sched", schedule_enabled=1)
+		# The sweep tells every Jarvis Admin on the site that this owner's schedules
+		# went off, and commits it: drop exactly the notices this test causes.
+		notices = {"subject": ["like", "Macro schedules switched off:%"]}
+		before = set(frappe.get_all("Notification Log", filters=notices, pluck="name"))
+
+		def drop_notices():
+			for n in set(frappe.get_all("Notification Log", filters=notices, pluck="name")) - before:
+				frappe.delete_doc("Notification Log", n, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+		self.addCleanup(drop_notices)
 		frappe.db.set_value(
 			MACRO,
 			m.name,
