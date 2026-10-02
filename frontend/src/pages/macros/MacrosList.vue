@@ -162,7 +162,11 @@ import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate, toLocalMs, formatTime12h } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
-import { lastRunCell as describeLastRun } from "@/lib/macroRunOutcome";
+import {
+	lastRunCell as describeLastRun,
+	deleteWarning,
+	stoppedRunsNote,
+} from "@/lib/macroRunOutcome";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml, escapeHtml } from "@/lib/errors";
@@ -311,24 +315,31 @@ async function runRow(row) {
 function bulkDelete(selections, unselectAll) {
 	const names = Array.from(selections || []);
 	if (!names.length) return;
+	// A macro that is running is stopped by the delete (server side). Said here for
+	// the selected rows this list knows to have a live run.
+	const lastRunOf = new Map((rows.value || []).map((r) => [r.name, r.last_run]));
+	const running = deleteWarning(names.map((n) => lastRunOf.get(n)));
 	confirmDialog({
 		title: `Delete ${names.length} macro${names.length === 1 ? "" : "s"}?`,
-		message: "Deletes the selected macros AND their run history. This can't be undone.",
+		message: `${
+			running ? `${running} ` : ""
+		}Deletes the selected macros AND their run history. This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await apiMacros.deleteMacrosBulk(names)) || {};
 				const skipped = res.skipped || [];
 				const deleted = res.deleted != null ? res.deleted : names.length - skipped.length;
+				const stopped = stoppedRunsNote(res);
 				if (skipped.length) {
 					const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))].join(
 						", "
 					);
 					toast.create({
-						message: `Deleted ${deleted} (skipped ${skipped.length}: ${reasons})`,
+						message: `Deleted ${deleted} (skipped ${skipped.length}: ${reasons})${stopped}`,
 						type: "info",
 					});
 				} else {
-					toast.success(`Deleted ${deleted} macro${deleted === 1 ? "" : "s"}`);
+					toast.success(`Deleted ${deleted} macro${deleted === 1 ? "" : "s"}${stopped}`);
 				}
 				unselectAll();
 				hideDialog();

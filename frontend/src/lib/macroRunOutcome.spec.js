@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { lastRunCell, lastRunLine, runDetail, macroDoneSignal } from "./macroRunOutcome.js";
+import {
+	lastRunCell,
+	lastRunLine,
+	runDetail,
+	macroDoneSignal,
+	deleteWarning,
+	stoppedRunsNote,
+} from "./macroRunOutcome.js";
 
 /**
  * How a macro run went, as the screens say it. Until now nothing outside the Runs
@@ -188,5 +195,44 @@ describe("macroDoneSignal: what a macro:done event is worth telling the user", (
 		expect(
 			macroDoneSignal(done({ status: "stopped", error: "Step 1 is waiting…" }))
 		).toBeNull();
+	});
+});
+
+describe("deleteWarning: what a delete confirmation adds for a macro that is running", () => {
+	const live = { status: "running" };
+	const parked = { status: "waiting_capacity" };
+	const done = { status: "completed" };
+
+	it("says the run will be stopped, for a run in progress or one waiting for capacity", () => {
+		expect(deleteWarning([live])).toBe("This macro is running. Deleting it stops the run.");
+		expect(deleteWarning([parked])).toBe("This macro is running. Deleting it stops the run.");
+	});
+
+	it("says nothing when the page knows of no live run", () => {
+		for (const lastRun of [done, { status: "failed" }, { status: "stopped" }, null, undefined])
+			expect(deleteWarning([lastRun])).toBe("");
+		expect(deleteWarning([])).toBe("");
+		expect(deleteWarning([done, null])).toBe("");
+	});
+
+	it("counts the running ones among several selected", () => {
+		expect(deleteWarning([live, done, null])).toBe(
+			"One of these macros is running. Deleting it stops the run."
+		);
+		expect(deleteWarning([live, done, parked])).toBe(
+			"2 of these macros are running. Deleting them stops their runs."
+		);
+	});
+});
+
+describe("stoppedRunsNote: what a delete's success toast adds when it stopped a run", () => {
+	it("says so, in the singular and the plural", () => {
+		expect(stoppedRunsNote({ stopped_runs: 1 })).toBe(". 1 run was stopped.");
+		expect(stoppedRunsNote({ stopped_runs: 3 })).toBe(". 3 runs were stopped.");
+	});
+
+	it("adds nothing when nothing was stopped, or for a server that does not say", () => {
+		for (const res of [{ stopped_runs: 0 }, {}, null, undefined, { stopped_runs: "x" }])
+			expect(stoppedRunsNote(res)).toBe("");
 	});
 });
