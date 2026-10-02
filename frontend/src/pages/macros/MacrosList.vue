@@ -333,6 +333,8 @@ function bulkDelete(selections, unselectAll) {
 
 // ── live merge updates: the Run gate flips when the summary lands ────────────
 function onEvent(p) {
+	// A run ended: the Last run cell of that macro is now out of date.
+	if (p && p.kind === "macro:done") return refreshKeep();
 	if (!p || p.kind !== "macro:merged") return;
 	refreshKeep();
 	if (p.status === "ready") {
@@ -382,16 +384,14 @@ const LAST_RUN_TONE = {
 	info: "text-ink-blue-3",
 };
 function lastRunCell(row) {
-	if (row.last_run === undefined) {
-		return row.last_run_at
-			? { text: timeAgo(row.last_run_at), hint: exactDate(row.last_run_at), class: "" }
-			: null;
-	}
 	const at = row.last_run && (row.last_run.finished_at || row.last_run.started_at);
 	const cell = describeLastRun({
 		lastRun: row.last_run,
 		when: at ? exactDate(at) : "",
 		relative: at ? timeAgo(at) : "",
+		legacy: row.last_run_at
+			? { when: exactDate(row.last_run_at), relative: timeAgo(row.last_run_at) }
+			: null,
 	});
 	return cell && { ...cell, class: LAST_RUN_TONE[cell.tone] || "" };
 }

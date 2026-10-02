@@ -737,16 +737,10 @@
 							><span class="jv-macrobar-chip">✓ Macro completed</span></template
 						>
 						<template v-else-if="macroRun.status === 'failed'"
-							><span class="jv-macrobar-chip">✗ Macro failed</span
-							><span v-if="macroRun.error" class="jv-macrobar-txt">{{
-								macroRun.error
-							}}</span></template
+							><span class="jv-macrobar-chip">✗ Macro failed</span></template
 						>
 						<template v-else-if="macroRun.status === 'stopped'"
-							><span class="jv-macrobar-chip">⏹ Macro stopped</span
-							><span v-if="macroRun.error" class="jv-macrobar-txt">{{
-								macroRun.error
-							}}</span></template
+							><span class="jv-macrobar-chip">⏹ Macro stopped</span></template
 						>
 					</div>
 					<template v-for="(m, mi) in visibleMessages" :key="m.name">
@@ -9849,22 +9843,13 @@ function onEvent(p) {
 	}
 	if (p.kind === "macro:done") {
 		if (p.conversation === currentId.value && macroRun.value) {
-			// `error` is why it ended that way (absent on an older server). A banner
-			// that carries a reason stays until the user leaves the conversation: four
-			// seconds is not long enough to read why a run failed.
-			macroRun.value = {
-				...macroRun.value,
-				status: p.status || "completed",
-				error: p.error || "",
-			};
+			macroRun.value = { ...macroRun.value, status: p.status || "completed" };
 			if (_macroDoneTimer) clearTimeout(_macroDoneTimer);
-			_macroDoneTimer = null;
-			if (!p.error)
-				_macroDoneTimer = setTimeout(() => {
-					if (macroRun.value && macroRun.value.conversation === p.conversation)
-						macroRun.value = null;
-					_macroDoneTimer = null;
-				}, 4000);
+			_macroDoneTimer = setTimeout(() => {
+				if (macroRun.value && macroRun.value.conversation === p.conversation)
+					macroRun.value = null;
+				_macroDoneTimer = null;
+			}, 4000);
 		}
 		patchMacroRunRow(p, true);
 		return;
@@ -10409,6 +10394,13 @@ function onEvent(p) {
 			enrichmentTracker.clear(p.message_id);
 			loadConversation(currentId.value);
 			setTimeout(processMermaid, 300);
+			break;
+		}
+		case "macro:closed": {
+			// A macro run ended with something to say and the bench posted it as the
+			// last message of this conversation (macros._post_closing_message). Same
+			// as import:finished below: re-read rather than splice it in by hand.
+			loadConversation(currentId.value);
 			break;
 		}
 		case "import:finished": {

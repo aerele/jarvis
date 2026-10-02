@@ -12,14 +12,22 @@
 // the "-" placeholder. A run that worked keeps showing WHEN it ran, as the cell
 // always did; one that did not says so in a word, with the reason on hover.
 // `when` is the run's exact date and `relative` its relative time, both already
-// formatted by the caller.
-export function lastRunCell({ lastRun, when, relative }) {
+// formatted by the caller. `legacy` is what the cell showed before the server sent
+// `last_run` (the scheduler's `last_run_at`, as { when, relative }); it is used only
+// when `lastRun` is undefined, i.e. an older server during a deploy.
+export function lastRunCell({ lastRun, when, relative, legacy }) {
+	if (lastRun === undefined)
+		return legacy && legacy.relative
+			? { text: legacy.relative, hint: legacy.when, tone: "" }
+			: null;
 	if (!lastRun || !lastRun.status) return null;
 	const reason = lastRun.error || "";
-	const withReason = reason ? `${when}. ${reason}` : when;
+	const withReason = [when, reason].filter(Boolean).join(". ");
 	switch (lastRun.status) {
 		case "completed":
-			return { text: relative, hint: withReason, tone: "" };
+			// "Completed" only when there is no time to show: an empty cell reads as
+			// "never ran".
+			return { text: relative || "Completed", hint: withReason, tone: "" };
 		case "failed":
 			return { text: "Failed", hint: withReason, tone: "bad" };
 		case "stopped":

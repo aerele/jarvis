@@ -41,6 +41,7 @@ vi.mock("frappe-ui", () => ({
 		create: vi.fn(),
 	},
 	confirmDialog: vi.fn(),
+	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<i />" },
 	Button: {
 		name: "Button",
 		props: ["label", "disabled", "loading", "variant", "iconLeft", "tooltip", "icon"],
@@ -235,37 +236,76 @@ describe("MacroDetail Schedule section: a pending retry is not shown as the sche
 
 describe("MacroDetail: how the last run went", () => {
 	// Nothing on the form said whether the macro worked the last time it ran.
+	const note = (w) => w.find('[data-testid="last-run-note"]');
+	const openChat = (w) =>
+		w.findAll("button").find((b) => b.attributes("data-label") === "Open the chat");
+
 	it("a failed last run is stated with its reason and a way to open it", async () => {
 		const w = await mountDetail(
 			baseMacro({
 				last_run: {
 					status: "failed",
-					error: "Step 2 failed: no such customer",
+					error: "Step 2 failed: The model is overloaded.",
 					conversation: "conv-run",
 				},
 			})
 		);
-		expect(w.text()).toContain("The last run failed. Step 2 failed: no such customer");
-		expect(w.html()).toContain("/c/conv-run");
+		expect(note(w).text()).toContain(
+			"The last run failed. Step 2 failed: The model is overloaded."
+		);
+		await openChat(w).trigger("click");
+		expect(router.push).toHaveBeenCalledWith("/c/conv-run");
 	});
 
-	it("a run waiting on a confirmation says what it is waiting for", async () => {
-		const reason = "Step 1 is waiting for your confirmation (Send email).";
+	it("a run stopped at a confirmation says so, and offers no chat it cannot open", async () => {
+		const reason =
+			"Stopped at step 1 of 2: a confirmation is waiting in the conversation (Send email).";
 		const w = await mountDetail(baseMacro({ last_run: { status: "stopped", error: reason } }));
-		expect(w.text()).toContain(reason);
-		expect(w.text()).not.toContain("Open the run");
+		expect(note(w).text()).toContain(reason);
+		expect(openChat(w)).toBeUndefined();
 	});
 
 	it("a last run that simply worked adds nothing to the form", async () => {
 		const w = await mountDetail(baseMacro({ last_run: { status: "completed", error: "" } }));
-		expect(w.find('[role="status"]').exists()).toBe(false);
+		expect(note(w).exists()).toBe(false);
 	});
 
 	it("a macro that never ran, or a server that sends no last run, adds nothing", async () => {
-		expect(
-			(await mountDetail(baseMacro({ last_run: null }))).find('[role="status"]').exists()
-		).toBe(false);
-		expect((await mountDetail(baseMacro())).find('[role="status"]').exists()).toBe(false);
+		expect(note(await mountDetail(baseMacro({ last_run: null }))).exists()).toBe(false);
+		expect(note(await mountDetail(baseMacro())).exists()).toBe(false);
+	});
+
+	it("is refreshed when a run of this macro ends, without touching the form", async () => {
+		// The owner clicks Run and watches it fail: the form must not still say the
+		// previous run was fine.
+		const handlers = [];
+		const socket = { on: (_e, fn) => handlers.push(fn), off: () => {} };
+		api.getMacro.mockResolvedValue(baseMacro({ last_run: null }));
+		const w = mount(MacroDetail, {
+			props: { id: "MACRO-1", isNew: false },
+			global: { provide: { $socket: socket } },
+		});
+		await flushPromises();
+		expect(note(w).exists()).toBe(false);
+
+		api.getMacro.mockResolvedValue(
+			baseMacro({
+				macro_name: "Renamed on the server",
+				last_run: { status: "failed", error: "Step 1 failed: The model is overloaded." },
+			})
+		);
+		handlers.forEach((fn) =>
+			fn({ kind: "macro:done", macro: "SOMEONE-ELSE", status: "failed" })
+		);
+		await flushPromises();
+		expect(note(w).exists()).toBe(false);
+
+		handlers.forEach((fn) => fn({ kind: "macro:done", macro: "MACRO-1", status: "failed" }));
+		await flushPromises();
+		expect(note(w).text()).toContain("The last run failed. Step 1 failed");
+		// Only the last-run line: the form is not re-seeded from the server.
+		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+		expect(w.text()).not.toContain("Renamed on the server");
 	});
 });
 
