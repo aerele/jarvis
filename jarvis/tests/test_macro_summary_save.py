@@ -23,6 +23,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import macros
 from jarvis.chat.macros_api import create_macro, get_macro, summarize_macro, update_macro
+from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN, MAX_STEPS, MAX_SUMMARY_LEN
 from jarvis.tests import race_harness
 from jarvis.tests._pending_action_helpers import ensure_user
 
@@ -103,6 +104,30 @@ class _SummarySaveBase(FrappeTestCase):
 		conv = self._conversation()
 		self._set_summary(name, text=text, status="pending", conversation=conv)
 		return conv
+
+	def _turn(self, conversation: str, state: str) -> str:
+		"""A Turn row of ``conversation`` in ``state``, as the dispatch leaves one."""
+		seed = frappe.get_doc(
+			{"doctype": MSG, "conversation": conversation, "seq": 1, "role": "user", "content": "summarize"}
+		)
+		seed.flags.ignore_permissions = True
+		seed.flags.jarvis_server_write = True
+		seed.insert()
+		turn = frappe.get_doc(
+			{
+				"doctype": TURN,
+				"run_id": frappe.generate_hash(length=16),
+				"conversation": conversation,
+				"relay_target_id": "t",
+				"turn_class": "interactive",
+				"state": state,
+				"seed_message": seed.name,
+			}
+		)
+		turn.flags.ignore_permissions = True
+		turn.insert()
+		frappe.db.commit()
+		return turn.name
 
 	def _summary(self, name: str) -> tuple:
 		"""The three summary columns exactly as stored (NULL stays None)."""
@@ -317,10 +342,10 @@ class TestASummaryWrittenByHand(_SummarySaveBase):
 		name = self._macro()
 		conv = self._pending(name)
 		saved = self._save(name, merged_prompt="My own wording.")
-		self.assertEqual(self._summary(name)[:2], ("My own wording.", "ready"))
+		self.assertEqual(self._summary(name), ("My own wording.", "ready", ""))
 		self.assertIs(saved["summarize"], False)
 		macros._apply_merge_after_turn(conv, errored=False)
-		self.assertEqual(self._summary(name)[:2], ("My own wording.", "ready"))
+		self.assertEqual(self._summary(name), ("My own wording.", "ready", ""))
 
 	def test_emptied_with_unchanged_steps_stays_empty(self):
 		name = self._macro()
@@ -659,6 +684,32 @@ class TestAStepChangeFromAnyWriter(_SummarySaveBase):
 		self._doc_save(name, prompt="Find the LOWEST outstanding customer", merged_prompt="My own wording.")
 		self.assertEqual(self._summary(name)[0], "My own wording.")
 
+	def test_a_summary_written_while_one_is_pending_wins_over_it(self):
+		# Desk, REST, the assistant's update_doc: the text was kept but "pending" and
+		# the link stayed, so the summary in flight landed over the hand-written one.
+		name = self._macro()
+		conv = self._pending(name, text=SUMMARY)
+		frappe.db.set_value(CONV, conv, "owner", OWNER, update_modified=False)
+		frappe.get_doc(
+			{"doctype": MSG, "conversation": conv, "seq": 2, "role": "assistant", "content": MERGE_REPLY}
+		).insert(ignore_permissions=True)
+		self._doc_save(name, merged_prompt="My own wording.")
+		self.assertEqual(self._summary(name), ("My own wording.", "ready", ""))
+		macros._apply_merge_after_turn(conv, errored=False)
+		self.assertEqual(self._summary(name), ("My own wording.", "ready", ""))
+
+	def test_a_summary_written_on_a_failed_macro_is_ready(self):
+		name = self._macro()
+		self._set_summary(name, text="", status="failed", conversation="")
+		self._doc_save(name, merged_prompt="My own wording.")
+		self.assertEqual(self._summary(name)[:2], ("My own wording.", "ready"))
+
+	def test_a_summary_emptied_by_a_document_save_has_no_status(self):
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		self._doc_save(name, merged_prompt="")
+		self.assertEqual(self._summary(name)[:2], ("", ""))
+
 	def test_a_summary_being_written_for_the_old_steps_does_not_land(self):
 		name = self._macro()
 		conv = self._pending(name)
@@ -764,35 +815,58 @@ class TestASaveWhileASummaryStarts(_SummarySaveBase):
 
 
 class TestAHandWrittenSummaryHasALimit(_SummarySaveBase):
-	"""It runs as ONE prompt in place of the steps, so it gets the limit one step's
-	prompt has. Without one, a save stored two million characters as "ready"."""
+	"""It runs in place of the steps, so it gets the size all the steps may have
+	together. Without a limit a save stored two million characters as "ready"; with
+	the limit of ONE step, a typo could not be fixed in a summary the model had
+	written longer than that (nothing limits the model's)."""
 
 	def test_one_that_is_too_long_is_refused_in_plain_words(self):
-		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
-
 		name = self._macro()
 		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
 		with self.assertRaises(frappe.ValidationError) as refused:
-			self._save(name, merged_prompt="z" * (MAX_PROMPT_LEN + 1), merged_prompt_edited=1)
-		self.assertIn(f"at most {MAX_PROMPT_LEN} characters", str(refused.exception))
+			self._save(name, merged_prompt="z" * (MAX_SUMMARY_LEN + 1), merged_prompt_edited=1)
+		self.assertIn(f"at most {MAX_SUMMARY_LEN} characters", str(refused.exception))
 		frappe.db.rollback()
 		self.assertEqual(self._summary(name)[:2], (SUMMARY, "ready"))
-		self._save(name, merged_prompt="z" * MAX_PROMPT_LEN, merged_prompt_edited=1)
-		self.assertEqual(len(self._summary(name)[0]), MAX_PROMPT_LEN)
+		self._save(name, merged_prompt="z" * MAX_SUMMARY_LEN, merged_prompt_edited=1)
+		self.assertEqual(len(self._summary(name)[0]), MAX_SUMMARY_LEN)
+
+	def test_the_limit_is_all_the_steps_together(self):
+		self.assertEqual(MAX_SUMMARY_LEN, MAX_STEPS * MAX_PROMPT_LEN)
 
 	def test_a_document_save_is_held_to_it_too(self):
-		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
-
 		name = self._macro()
 		doc = frappe.get_doc(MACRO, name)
-		doc.merged_prompt = "z" * (MAX_PROMPT_LEN + 1)
+		doc.merged_prompt = "z" * (MAX_SUMMARY_LEN + 1)
 		self.assertRaises(frappe.ValidationError, doc.save)
 
-	def test_a_long_summary_the_model_wrote_does_not_block_other_saves(self):
-		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
-
+	def test_a_summary_longer_than_one_step_can_be_edited(self):
+		# The model's summary of several long steps: one letter fixed, with a rename.
 		name = self._macro()
 		long = "A generated summary. " * (MAX_PROMPT_LEN // 10)
+		self.assertGreater(len(long), MAX_PROMPT_LEN)
+		self._set_summary(name, text=long, status="ready", conversation="")
+		fixed = long.replace("A generated", "The generated", 1).strip()
+		self._save(name, macro_name=f"{PFX}-typo", merged_prompt=fixed, merged_prompt_edited=1)
+		self.assertEqual(self._summary(name)[:2], (fixed, "ready"))
+
+	def test_one_already_over_the_limit_can_be_shortened_and_not_lengthened(self):
+		name = self._macro()
+		over = "y" * (MAX_SUMMARY_LEN + 500)
+		self._set_summary(name, text=over, status="ready", conversation="")
+		# Same length, one letter changed: still over the limit, and no longer.
+		self._save(name, merged_prompt="Y" + over[1:], merged_prompt_edited=1)
+		self.assertEqual(len(self._summary(name)[0]), MAX_SUMMARY_LEN + 500)
+		self._save(name, merged_prompt=over[:-100], merged_prompt_edited=1)
+		self.assertEqual(len(self._summary(name)[0]), MAX_SUMMARY_LEN + 400)
+		with self.assertRaises(frappe.ValidationError):
+			self._save(name, merged_prompt=over, merged_prompt_edited=1)
+		frappe.db.rollback()
+		self.assertEqual(len(self._summary(name)[0]), MAX_SUMMARY_LEN + 400)
+
+	def test_a_long_summary_the_model_wrote_does_not_block_other_saves(self):
+		name = self._macro()
+		long = "A generated summary. " * (MAX_SUMMARY_LEN // 10)
 		self._set_summary(name, text=long, status="ready", conversation="")
 		self._save(name, macro_name=f"{PFX}-long-summary", merged_prompt=long.strip(), merged_prompt_edited=0)
 		self.assertEqual(self._summary(name)[:2], (long, "ready"))
@@ -804,8 +878,8 @@ class TestResummarizeOnRequest(_SummarySaveBase):
 	one is pending" for good and Run stays refused. Re-summarize in the menu passes
 	``force``: the pending summary is given up and a new one started."""
 
-	def _stuck(self, name: str) -> str:
-		conv = self._pending(name)
+	def _stuck(self, name: str, text: str | None = None) -> str:
+		conv = self._pending(name, text=text)
 		frappe.db.set_value(CONV, conv, "owner", OWNER, update_modified=False)
 		frappe.get_doc(
 			{"doctype": MSG, "conversation": conv, "seq": 2, "role": "assistant", "content": MERGE_REPLY}
@@ -845,16 +919,93 @@ class TestResummarizeOnRequest(_SummarySaveBase):
 			self.assertEqual(summarize_macro(name, force=0), {"ok": True, "conversation": stuck})
 		enqueue.assert_not_called()
 
-	def test_a_new_summary_that_cannot_be_dispatched_leaves_nothing_pending(self):
+	def test_a_chat_whose_turn_has_ended_is_deleted(self):
 		name = self._macro()
 		stuck = self._stuck(name)
+		self._turn(stuck, "errored")
+		with patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED):
+			summarize_macro(name, force=1)
+		self.assertFalse(frappe.db.exists(CONV, stuck))
+
+	def test_a_chat_whose_turn_is_live_is_left_to_finish(self):
+		"""Deleting a conversation removes its Turn rows, and the pump reads a Turn
+		that is gone as a lost lease: its hop ends with no successor and every live
+		reply on the site waits for the lease to run out. So the summary given up is
+		not deleted while its turn runs. The mark has moved, and that is enough: its
+		result matches no macro and is ignored, without an alarm."""
+		for state in ("queued", "streaming", "finalizing"):
+			with self.subTest(state=state):
+				name = self._macro()
+				stuck = self._stuck(name, text=SUMMARY)
+				turn = self._turn(stuck, state)
+				with patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED) as enqueue:
+					started = summarize_macro(name, force=1)
+				enqueue.assert_called_once()
+				moved = (SUMMARY, "pending", started["conversation"])
+				self.assertNotEqual(started["conversation"], stuck)
+				self.assertEqual(self._summary(name), moved)
+				self.assertTrue(frappe.db.exists(CONV, stuck))
+				self.assertEqual(frappe.db.get_value(TURN, turn, "state"), state)
+				self.assertEqual(frappe.db.count(MSG, {"conversation": stuck}), 2)
+				# Its turn ends later: nothing lands, nothing is logged, its chat stays.
+				alarms = {"method": ["like", f"%summary_owner_mismatch: {name}%"]}
+				macros._apply_merge_after_turn(stuck, errored=False)
+				self.assertEqual(self._summary(name), moved)
+				self.assertEqual(frappe.db.count("Error Log", alarms), 0)
+				self.assertTrue(frappe.db.exists(CONV, stuck))
+
+	def test_a_new_summary_that_cannot_be_dispatched_leaves_the_one_it_replaced(self):
+		# Nothing was started, so nothing is given up: the stored text, the mark and
+		# the chat of the summary being written are as they were, and it still lands.
+		for failure in (
+			{"side_effect": RuntimeError("the gateway went away")},
+			{"return_value": {"overloaded": True, "reason": "busy"}},
+		):
+			with self.subTest(failure=failure):
+				name = self._macro()
+				stuck = self._stuck(name, text=SUMMARY)
+				turn = self._turn(stuck, "streaming")
+				title = f"Merge: {frappe.db.get_value(MACRO, name, 'macro_name')}"
+				with patch("jarvis.chat.api._enqueue_turn", **failure):
+					if "side_effect" in failure:
+						self.assertRaises(frappe.ValidationError, summarize_macro, name, force=1)
+					else:
+						self.assertEqual(summarize_macro(name, force=1), {"ok": False, "reason": "busy"})
+				frappe.db.rollback()
+				self.assertEqual(self._summary(name), (SUMMARY, "pending", stuck))
+				self.assertTrue(frappe.db.exists(TURN, turn))
+				self.assertEqual(frappe.db.count(CONV, {"title": title}), 0)
+				macros._apply_merge_after_turn(stuck, errored=False)
+				self.assertEqual(self._summary(name), ("A late result.", "ready", ""))
+
+	def test_one_that_cannot_be_dispatched_leaves_a_chat_that_has_no_turn_row(self):
+		# The legacy transport writes no Turn rows: whether that summary is still
+		# running is not knowable, so it is left as it was, chat included.
+		name = self._macro()
+		stuck = self._stuck(name, text=SUMMARY)
 		with (
 			patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("the gateway went away")),
 			self.assertRaises(frappe.ValidationError),
 		):
 			summarize_macro(name, force=1)
 		frappe.db.rollback()
-		self.assertEqual(self._summary(name)[1:], ("", ""))
+		self.assertEqual(self._summary(name), (SUMMARY, "pending", stuck))
+		self.assertTrue(frappe.db.exists(CONV, stuck))
+
+	def test_one_that_cannot_be_dispatched_does_not_put_back_a_summary_that_has_ended(self):
+		# The turn of the one being replaced ended meanwhile (the same outage that
+		# stopped the dispatch ends it too). Its result was ignored while the mark was
+		# away, so the mark put back would wait on nothing, for good.
+		name = self._macro()
+		stuck = self._stuck(name, text=SUMMARY)
+		self._turn(stuck, "errored")
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("the gateway went away")),
+			self.assertRaises(frappe.ValidationError),
+		):
+			summarize_macro(name, force=1)
+		frappe.db.rollback()
+		self.assertEqual(self._summary(name), (SUMMARY, "", ""))
 		self.assertFalse(frappe.db.exists(CONV, stuck))
 
 	def test_a_chat_that_is_not_the_owners_is_left_alone(self):
