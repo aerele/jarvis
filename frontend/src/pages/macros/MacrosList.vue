@@ -95,8 +95,10 @@
 			</template>
 
 			<template #cell-last_run_at="{ row }">
-				<Tooltip v-if="row.last_run_at" :text="exactDate(row.last_run_at)">
-					<div class="truncate text-base">{{ timeAgo(row.last_run_at) }}</div>
+				<Tooltip v-if="lastRunCell(row)" :text="lastRunCell(row).hint">
+					<div class="truncate text-base" :class="lastRunCell(row).class">
+						{{ lastRunCell(row).text }}
+					</div>
 				</Tooltip>
 				<span v-else class="text-base text-ink-gray-4">-</span>
 			</template>
@@ -159,6 +161,7 @@ import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
+import { lastRunCell as describeLastRun } from "@/lib/macroRunOutcome";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml } from "@/lib/errors";
@@ -330,6 +333,8 @@ function bulkDelete(selections, unselectAll) {
 
 // ── live merge updates: the Run gate flips when the summary lands ────────────
 function onEvent(p) {
+	// A run ended: the Last run cell of that macro is now out of date.
+	if (p && p.kind === "macro:done") return refreshKeep();
 	if (!p || p.kind !== "macro:merged") return;
 	refreshKeep();
 	if (p.status === "ready") {
@@ -367,6 +372,29 @@ function scheduleLabel(row) {
 // imported here as describeNextRun); this wrapper only feeds it the row and maps its
 // tone to a colour.
 const NEXT_RUN_TONE = { warn: "text-ink-amber-3", muted: "text-ink-gray-5" };
+
+// What the "Last run" cell says, or null for the "-" placeholder. It used to print
+// a bare time, and only for scheduled runs, so a macro whose last run failed looked
+// the same as one that worked. The decision lives in lib/macroRunOutcome.js; this
+// wrapper feeds it the row. A server that sends no `last_run` yet keeps the old cell.
+const LAST_RUN_TONE = {
+	bad: "text-ink-red-4",
+	warn: "text-ink-amber-3",
+	muted: "text-ink-gray-5",
+	info: "text-ink-blue-3",
+};
+function lastRunCell(row) {
+	const at = row.last_run && (row.last_run.finished_at || row.last_run.started_at);
+	const cell = describeLastRun({
+		lastRun: row.last_run,
+		when: at ? exactDate(at) : "",
+		relative: at ? timeAgo(at) : "",
+		legacy: row.last_run_at
+			? { when: exactDate(row.last_run_at), relative: timeAgo(row.last_run_at) }
+			: null,
+	});
+	return cell && { ...cell, class: LAST_RUN_TONE[cell.tone] || "" };
+}
 function nextRunCell(row) {
 	const cell = describeNextRun({
 		scheduleEnabled: !!row.schedule_enabled,
