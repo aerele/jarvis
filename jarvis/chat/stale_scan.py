@@ -115,14 +115,35 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 # ~420s after a hard kill while RQ's stale worker registration lingers) has no
 # assistant row at all, so without this sweep it would hang as an unanswered
 # user message forever.
+#
+# A seed that has a `Jarvis Chat Turn` row is NOT an orphan, whatever that Turn's
+# state, and the candidate query below excludes it. The sweep predates the turn
+# machine: its liveness probe is the legacy RQ job id, which the Relay Pump never
+# creates, so under the pump every probe read "no job" and a turn that was only
+# WAITING (`queued`, or `preparing` before its placeholder is attached: neither has
+# an assistant row yet) looked dead after 180s. The sweep then re-dispatched it, and
+# since admission is idempotent on run_id and not on the seed, that made a SECOND
+# Turn for the same message. The pump is single-flight per conversation, so the two
+# ran one after the other: the message was answered twice, and on an armed macro
+# conversation a step's writes happened twice.
+#   - Non-terminal Turn: the machine's own watchdog bounds every such state
+#     (pump.watchdog once the pump is configured, admission.sweep otherwise), so
+#     there is nothing here to heal.
+#   - Terminal Turn with no reply row (the pump's queue age-out writes no transcript
+#     marker; a cancel whose marker write failed): that is a verdict, not a lost
+#     dispatch. Re-running it would answer a message the user was told had been
+#     cancelled, and would overturn a user's own cancel.
+# What still heals is what the sweep was written for: a message the machine never
+# saw (pure legacy, or the Turn insert that follows the committed seed never ran).
 ORPHAN_MIN_AGE_SECONDS = 180  # past any normal dequeue delay
 ORPHAN_MAX_AGE_SECONDS = 3 * 3600  # don't touch history predating job ids
 _ORPHAN_ERR = "Run was never started (no worker picked it up)."
 
 
 def _sweep_orphan_turns(now) -> int:
-	"""Find user messages with no assistant row after them, decide from the
-	RQ job's actual state, and heal or surface them. Returns rows errored."""
+	"""Find user messages with no assistant row after them and no Turn of their
+	own, decide from the RQ job's actual state, and heal or surface them. Returns
+	rows errored."""
 	from frappe.utils.background_jobs import (
 		get_job,
 		get_job_status,
@@ -140,6 +161,8 @@ def _sweep_orphan_turns(now) -> int:
 			SELECT 1 FROM `tabJarvis Chat Message` a
 			WHERE a.conversation = m.conversation
 			  AND a.role = 'assistant' AND a.seq > m.seq)
+		  AND NOT EXISTS (
+			SELECT 1 FROM `tabJarvis Chat Turn` t WHERE t.seed_message = m.name)
 		""",
 		{
 			"lo": now - timedelta(seconds=ORPHAN_MAX_AGE_SECONDS),
