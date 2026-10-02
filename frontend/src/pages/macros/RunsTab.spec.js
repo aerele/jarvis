@@ -174,12 +174,35 @@ describe("RunsTab: a load that failed", () => {
 		expect(tryAgainBtn(w)).toBeUndefined();
 	});
 
-	it("takes the error down while the retry is in flight", async () => {
+	it("keeps the error up, with Try again busy, while the retry is in flight", async () => {
+		// As ListPage does. Taking the error down left a blank pane until the answer,
+		// and the button never showed that it was working.
+		api.listMacroRuns.mockRejectedValueOnce(new Error("The server is not reachable."));
+		const { w } = mountTab();
+		await flushPromises();
+		expect(tryAgainBtn(w).props("loading")).toBe(false);
+		const retry = deferred();
+		api.listMacroRuns.mockReturnValueOnce(retry.promise);
+		await tryAgainBtn(w).trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain("Couldn't load macro runs");
+		expect(w.text()).not.toContain("No macro runs yet");
+		expect(tryAgainBtn(w).props("loading")).toBe(true);
+		expect(refreshBtn(w).props("loading")).toBe(true);
+		retry.reject(new Error("Still not reachable."));
+		await flushPromises();
+		expect(w.text()).toContain("Still not reachable.");
+		expect(w.text()).not.toContain("The server is not reachable.");
+		expect(tryAgainBtn(w).props("loading")).toBe(false);
+	});
+
+	it("a filter change from the error state takes the error down while it loads", async () => {
+		// The error was about the filter that was left.
 		api.listMacroRuns.mockRejectedValueOnce(new Error("The server is not reachable."));
 		const { w } = mountTab();
 		await flushPromises();
 		api.listMacroRuns.mockReturnValueOnce(deferred().promise);
-		await tryAgainBtn(w).trigger("click");
+		setStatus(w, "failed");
 		await flushPromises();
 		expect(w.text()).not.toContain("Couldn't load macro runs");
 		expect(w.text()).not.toContain("No macro runs yet");
@@ -539,6 +562,121 @@ describe("RunsTab: a realtime refresh with more than 100 rows loaded", () => {
 		footer(w).vm.$emit("loadMore");
 		await flushPromises();
 		expect(sent[sent.length - 1].args).toEqual(expect.objectContaining({ start: 500 }));
+	});
+});
+
+describe("RunsTab: a realtime refresh that never answers", () => {
+	it("holds the next one back for a while, then lets it through", async () => {
+		// The request layer has no timeout. A refresh whose request was lost used to
+		// hold every later one back until the user pressed something.
+		const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+		try {
+			const sent = gated(() => runs(0, 3));
+			const { w, emit } = mountTab();
+			sent[0].answer();
+			await flushPromises();
+			emit({ kind: "macro:progress" });
+			await flushPromises();
+			expect(sent).toHaveLength(2); // the refresh, never answered
+
+			clock.mockReturnValue(1_000_000 + 29_000);
+			emit({ kind: "macro:progress" });
+			await flushPromises();
+			expect(sent).toHaveLength(2); // still within the wait: queued, not sent
+
+			clock.mockReturnValue(1_000_000 + 31_000);
+			emit({ kind: "macro:done" });
+			await flushPromises();
+			expect(sent).toHaveLength(3);
+
+			// The late answer of the lost one is ignored; the new one is applied, and
+			// the event that was queued behind the lost one does not ask a second time.
+			sent[1].answer();
+			await flushPromises();
+			sent[2].answer();
+			await flushPromises();
+			expect(names(w)).toEqual(["run-000", "run-001", "run-002"]);
+			expect(sent).toHaveLength(3);
+			expect(toast.error).not.toHaveBeenCalled();
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("a refresh that is slow page by page is not taken for lost", async () => {
+		// The wait is counted from the last request sent, not from the first.
+		const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+		try {
+			const sent = gated(() => runs(0, 300));
+			const { w, emit } = mountTab();
+			sent[0].answer();
+			await flushPromises();
+			for (let n = 1; n <= 5; n++) {
+				footer(w).vm.$emit("loadMore");
+				await flushPromises();
+				sent[n].answer();
+				await flushPromises();
+			}
+			expect(names(w)).toHaveLength(120);
+			emit({ kind: "macro:progress" });
+			await flushPromises();
+			expect(sent).toHaveLength(7); // page 1 of the refresh
+			clock.mockReturnValue(1_000_000 + 25_000);
+			sent[6].answer();
+			await flushPromises();
+			expect(sent).toHaveLength(8); // page 2, sent 25 s in
+			clock.mockReturnValue(1_000_000 + 40_000);
+			emit({ kind: "macro:progress" });
+			await flushPromises();
+			expect(sent).toHaveLength(8); // 15 s since page 2 went: it waits
+		} finally {
+			clock.mockRestore();
+		}
+	});
+});
+
+describe("RunsTab: leaving the tab", () => {
+	it("a refresh part-way through its pages stops paging", async () => {
+		const sent = gated(() => runs(0, 300));
+		const { w, emit } = mountTab();
+		sent[0].answer();
+		await flushPromises();
+		for (let n = 1; n <= 5; n++) {
+			footer(w).vm.$emit("loadMore");
+			await flushPromises();
+			sent[n].answer();
+			await flushPromises();
+		}
+		emit({ kind: "macro:progress" });
+		await flushPromises();
+		expect(sent).toHaveLength(7);
+		w.unmount();
+		sent[6].answer();
+		await flushPromises();
+		expect(sent).toHaveLength(7); // page 2 is never asked for
+	});
+
+	it("a refresh that fails afterwards says nothing", async () => {
+		const sent = gated(() => runs(0, 3));
+		const { w, emit } = mountTab();
+		sent[0].answer();
+		await flushPromises();
+		emit({ kind: "macro:progress" });
+		await flushPromises();
+		w.unmount();
+		sent[1].fail("The server is not reachable.");
+		await flushPromises();
+		expect(toast.error).not.toHaveBeenCalled();
+	});
+
+	it("a load that fails afterwards says nothing", async () => {
+		const sent = gated(() => runs(0, 3));
+		const { w } = mountTab();
+		await flushPromises();
+		w.unmount();
+		sent[0].fail("The server is not reachable.");
+		await flushPromises();
+		expect(toast.error).not.toHaveBeenCalled();
 	});
 });
 
