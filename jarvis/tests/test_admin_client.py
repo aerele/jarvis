@@ -1089,13 +1089,16 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		("closing brackets after a query", "x?a=1" + ")]" * 100000),
 		("an unclosed quoted value", 'password: "' + "a\\" * 100000),
 		("a token key with no secret", "token " + "a" * 200000),
+		("closing punctuation after a query", "x?a=1" + "),'" * 70000),
+		("header words in one run", "x-" * 100000),
+		("one long header name", "x-" + "a-" * 100000),
 	)
 
 	def test_every_pattern_is_fast_on_a_long_adversarial_string(self):
 		# The URL-userinfo pattern once rescanned a run of scheme characters from every
 		# word boundary in it, and the JWT pattern from every "-eyJ". The patterns are
 		# timed here WITHOUT the input cap, so the cap is not what makes this pass.
-		# Measured locally at 35 ms or less each; the bound leaves room for a slow CI box.
+		# Measured locally at 50 ms or less each; the bound leaves room for a slow CI box.
 		import time
 
 		for label, text in self._SLOW_SHAPES:
@@ -1126,8 +1129,10 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 
 		with patch.object(admin_client, "_SECRET_PATTERNS", ((Recording(), ""),)):
 			admin_client._scrub_secrets("word " * cap)
-		self.assertEqual(len(seen), 1)
+		# Once on the capped input, once more on the text as cut for the message.
+		self.assertEqual(len(seen), 2)
 		self.assertLessEqual(seen[0], cap)
+		self.assertLessEqual(seen[1], admin_client._MAX_MESSAGE_CHARS)
 
 	def test_the_input_cap_never_returns_an_unscrubbed_tail(self):
 		cap = admin_client._MAX_SCRUB_INPUT_CHARS
@@ -1152,6 +1157,70 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 				out = admin_client._scrub_secrets(text)
 				self.assertEqual(out, expected)
 				self.assertEqual(admin_client._scrub_secrets(out), out)
+
+	def test_a_long_body_with_one_early_space_keeps_its_first_characters(self):
+		# The cut went back to the LAST whitespace wherever it was, which here is the
+		# one after "Error:", and the operator was left with "Error: ...[truncated]".
+		# It now goes back at most _MAX_CUT_BACKOFF_CHARS, else stays at the cap.
+		body = 'Error: {"exc_type":"ValidationError","exception":"' + "x" * 30000 + '"}'
+		out = admin_client._scrub_secrets(body)
+		self.assertEqual(out, body[: admin_client._MAX_MESSAGE_CHARS] + " ...[truncated]")
+		self.assertEqual(admin_client._scrub_secrets(out), out)
+
+	def test_the_cut_still_goes_back_to_whitespace_that_is_near_the_cap(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		near = admin_client._MAX_CUT_BACKOFF_CHARS - 10
+		seen = []
+
+		class Recording:
+			def sub(self, _replacement, text):
+				seen.append(text)
+				return text
+
+		with patch.object(admin_client, "_SECRET_PATTERNS", ((Recording(), ""),)):
+			admin_client._scrub_secrets("x" * (cap - near) + " " + key * 10)
+		self.assertEqual(seen[0], "x" * (cap - near))
+
+	def test_the_truncation_marker_survives_a_second_scrub(self):
+		# The keyword and Authorization patterns allow whitespace after "=" or ":",
+		# so " ...[truncated]" was read as the value and replaced.
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		for label, text, expected in (
+			(
+				"keyword, then a long run",
+				"password= " + "A" * (cap + 50),
+				"password=[REDACTED] ...[truncated]",
+			),
+			(
+				"header, then a long run",
+				"Authorization: " + "A" * (cap + 50),
+				"Authorization=[REDACTED] ...[truncated]",
+			),
+			("a marked text that ends in a keyword", "password= ...[truncated]", "password= ...[truncated]"),
+			("the same, a header", "Authorization: ...[truncated]", "Authorization: ...[truncated]"),
+			("the same, a quoted key", '{"api_key": ...[truncated]', '{"api_key": ...[truncated]'),
+			("the message cut lands after a keyword", "x" * 489 + " password: hunter2", None),
+			("the message cut lands after a header", "x" * 484 + " Authorization: Bearer abc123", None),
+			("the input cut lands after a keyword", "api_key= " + "A" * (cap - 9) + " tail", None),
+		):
+			with self.subTest(case=label):
+				out = admin_client._scrub_secrets(text)
+				self.assertTrue(out.endswith(" ...[truncated]"), out[-40:])
+				if expected is not None:
+					self.assertEqual(out, expected)
+				self.assertEqual(admin_client._scrub_secrets(out), out)
+				self.assertEqual(out.count("...[truncated]"), 1)
+
+	def test_a_value_the_message_cut_leaves_open_is_redacted_on_the_first_pass(self):
+		# The value runs over two lines, so the quoted-key pattern leaves it in the
+		# full text. Cut for the message it is an open value at the end of the text.
+		s = self._S
+		text = "x" * 470 + ' {"api_key": "' + s + s + "\n" + s + '"}'
+		out = admin_client._scrub_secrets(text)
+		self.assertNotIn(s[:6], out)
+		self.assertLessEqual(len(out), admin_client._MAX_MESSAGE_CHARS + len(" ...[truncated]"))
+		self.assertEqual(admin_client._scrub_secrets(out), out)
 
 	def test_text_at_the_input_cap_is_not_marked_as_cut(self):
 		cap = admin_client._MAX_SCRUB_INPUT_CHARS
@@ -1294,6 +1363,33 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		(f"https://h/x?ids=[1,2]&session={_S}", [_S]),
 		(f"https://h/x?a=1\\u0026session={_S}", [_S]),
 		(f"see (https://h/x?session={_S}), then retry", [_S]),
+		# Closing brackets, commas and apostrophes INSIDE a query string, with more
+		# of it after them: the redaction stopped there and left the rest.
+		(f"https://h/x?ids=[1],[2]&session={_S}", [_S]),
+		(f"https://h/x?filter=(a),(b)&session={_S}", [_S]),
+		(f"https://h/x?a=[[1,2],[3,4]]&session={_S}", [_S]),
+		(f"https://h/x?name='a','b'&session={_S}", [_S]),
+		(f"https://h/x?a=1),session={_S}", [_S]),
+		(f"https://h/x?a='1',b=2&session={_S}", [_S]),
+		(f"https://h/x?a=1\\'&session={_S}", [_S]),
+		# The same characters in a parameter NAME.
+		(f"https://h/x?a,b={_S}", [_S]),
+		(f"https://h/x?a)b={_S}", [_S]),
+		(f"https://h/x?a(1)=2&session={_S}", [_S]),
+		(f"https://h/x?it's=2&session={_S}", [_S]),
+		(f"a=1&token=x),{_S}", [_S]),
+		# token KEY:SECRET with no digit on either side.
+		("token abcdefabcdefabc:fedcbafedcbafed", ["abcdefabcdefabc", "fedcbafedcbafed"]),
+		("token ABCDEFGHIJKLMNO:abcdefghijklmno", ["ABCDEFGHIJKLMNO", "abcdefghijklmno"]),
+		("token abcdefgh:ABCDEFGHIJ", ["ABCDEFGHIJ"]),
+		("token abcdef:ghijklmn", ["ghijklmn"]),
+		# A header named X-...-Token / -Key / -Secret, not in a dict.
+		(f"X-Jarvis-Token: {_S}", [_S]),
+		(f"x-jarvis-token:{_S}", [_S]),
+		(f"X-Auth-Token: {_S}", [_S]),
+		(f"X-Amz-Security-Token={_S}", [_S]),
+		(f"X-Hub-Shared-Secret: {_S}", [_S]),
+		(f"sent X-Api-Key: {_S} and X-Jarvis-Token: {_S2}", [_S, _S2]),
 		# A sentence that ends in a keyword and a colon, then the next JSON pair.
 		(f'{{"error": "bad password:", "api_key": "{_S}"}}', [_S]),
 		(f"{{'error': 'invalid secret:', 'api_key': '{_S}'}}", [_S]),
@@ -1341,7 +1437,9 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		"https://erp.example.com,admin@example.com",
 		'{"url":"https://erp.example.com","email":"bob@example.com"}',
 		"<https://erp.example.com>bob@example.com",
-		# "token word:word" with no digit in it is a sentence, not a key and its secret.
+		# "token word:word", short words with no digit, is a sentence, not a key and
+		# its secret.
+		"the token ABCDEF:GHIJKL pair",
 		"token refresh:failed",
 		"token missing:please sign in again",
 		"Token invalid:expired",
@@ -1352,6 +1450,8 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		"What?! really=yes",
 		"x = a ? b : c",
 		"WHERE name=? AND owner=?",
+		"Invalid field (?token=) in filter",
+		"x-ray key: value",
 	)
 
 	# (text, what it reads as). A URL's query string goes; what follows the URL stays.
@@ -1386,6 +1486,18 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		("https://h/x?a=(1)&b=2 failed", "https://h/x?[REDACTED] failed"),
 		("https://h/x?ids=1,2,3&b=2 failed", "https://h/x?[REDACTED] failed"),
 		("https://h/x?name=O'Brien&b=2 failed", "https://h/x?[REDACTED] failed"),
+		("https://h/x?ids=[1],[2]&b=2 failed", "https://h/x?[REDACTED] failed"),
+		# The punctuation a URL ends in is handed back, a sentence's full stop too.
+		("see https://h/x?a=1. Then retry", "see https://h/x?[REDACTED]. Then retry"),
+		("{'url': 'https://h/x?a=1', 'status': 500}", "{'url': 'https://h/x?[REDACTED]', 'status': 500}"),
+		(
+			'{\\"url\\": \\"https://h/x?a=1\\", \\"n\\": 1}',
+			'{\\"url\\": \\"https://h/x?[REDACTED]\\", \\"n\\": 1}',
+		),
+		("a=1&token=abc123), then retry", "a=1&token=[REDACTED]), then retry"),
+		# With no space after the closing quote the scrub cannot tell where the URL
+		# ends, so everything up to the next space goes.
+		("url='https://h/x?a=1',status=500 failed", "url='https://h/x?[REDACTED] failed"),
 	)
 
 	def test_what_follows_a_url_is_kept(self):
@@ -1424,6 +1536,10 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 			(f'{{\\"api_key\\": \\"{s}\\"}}', '{\\"api_key\\": \\"[REDACTED]\\"}'),
 			(f"{{'api_key': b'{s}'}}", "{'api_key': '[REDACTED]'}"),
 			(f"token abcdef123456:{s}", "token [REDACTED]"),
+			("token abcdefabcdefabc:fedcbafedcbafed was refused", "token [REDACTED] was refused"),
+			(f"https://h/x?ids=[1],[2]&session={s} returned 403", "https://h/x?[REDACTED] returned 403"),
+			(f"X-Jarvis-Token: {s} was sent", "X-Jarvis-Token=[REDACTED] was sent"),
+			(f'X-Jarvis-Token: "{s}"', "X-Jarvis-Token=[REDACTED]"),
 			# A keyword and its value on two lines stay on two lines.
 			(f"password:\n{s} next", "password=\n[REDACTED] next"),
 		):
@@ -1452,6 +1568,13 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 			'"token": "}?a=1\\" \n',
 			"?&sig=,",
 			"x?a=1].b=2",
+			# A "?" the named parameter handed back was redacted as a query string,
+			# and that marker was the parameter's value on the second pass.
+			"#sig=?##sig=%b",
+			"&token=.;?#sig=access_token;key=",
+			"{@eyJ;key=token://[REDACTED]@?#sig=@b'",
+			"a=1&token=[REDACTED]), then",
+			"x?a=[REDACTED]]",
 		]
 		for raw in texts:
 			with self.subTest(raw=raw[:80]):
@@ -1471,6 +1594,7 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 			+ ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"]
 			+ ["[REDACTED]", "=[REDACTED]", "?[REDACTED]", "://[REDACTED]@"]
 			+ ['"token": "', "'secret': '", '\\"', "&token=", "#sig=", ";key=", "?a=1", "password:"]
+			+ ["X-Jarvis-Token", "x-", "-key", "token abcdefgh:", "),", "',", " ...[truncated]"]
 		)
 		rng = random.Random(20261002)
 		for _ in range(20000):
