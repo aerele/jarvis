@@ -27,7 +27,7 @@ from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.tests import test_macro_run_outcome as outcome
 from jarvis.tests._pending_action_helpers import ensure_user
-from jarvis.tests.race_harness import other_connection
+from jarvis.tests.race_harness import other_connection, snapshot_isolation_on
 
 CONV = outcome.CONV
 MACRO = outcome.MACRO
@@ -73,7 +73,8 @@ def _age(message: str, seconds: int = 300) -> None:
 class IdentityBase(outcome.MacroRunOutcomeBase):
 	"""Macro runs on a shard of this test's own. The accept gate is the real one (it
 	reads the shard row), a turn the pump accepts stays ``queued`` because nothing
-	wakes a pump, and a legacy job is recorded, not enqueued."""
+	wakes a pump, and a legacy job is recorded, not enqueued. Both connections run
+	with the snapshot-isolation check on."""
 
 	def setUp(self):
 		super().setUp()
@@ -81,6 +82,11 @@ class IdentityBase(outcome.MacroRunOutcomeBase):
 		ts._ensure_control_row(self._target)
 		self._conf = {k: frappe.local.conf.get(k) for k in ("jarvis_pump_enabled", admission.FLAG)}
 		self._set_mode("pump")
+		# As production runs (MariaDB 11.6.2+): a write on a row another connection
+		# moved since this transaction's snapshot fails with 1020 (``jarvis.chat.txn``).
+		strict = snapshot_isolation_on()
+		strict.__enter__()
+		self.addCleanup(strict.__exit__, None, None, None)
 		self._jobs: list[dict] = []
 		real_enqueue = frappe.enqueue
 
@@ -213,6 +219,7 @@ class IdentityBase(outcome.MacroRunOutcomeBase):
 		mine, user = frappe.local.db, frappe.session.user
 		with other_connection() as other:
 			frappe.local.db = other
+			other.sql("SET SESSION innodb_snapshot_isolation=ON")  # as the first connection
 			try:
 				fn()
 				other.commit()
