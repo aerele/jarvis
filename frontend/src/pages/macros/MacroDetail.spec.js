@@ -239,6 +239,19 @@ describe("MacroDetail: how the last run went", () => {
 	const note = (w) => w.find('[data-testid="last-run-note"]');
 	const openChat = (w) =>
 		w.findAll("button").find((b) => b.attributes("data-label") === "Open the chat");
+	const nameControl = (w) =>
+		w.findAllComponents({ name: "FormControl" }).find((c) => c.attributes("label") === "Name");
+	const withSocket = async (macro) => {
+		const handlers = [];
+		const socket = { on: (_e, fn) => handlers.push(fn), off: () => {} };
+		api.getMacro.mockResolvedValue(macro);
+		const w = mount(MacroDetail, {
+			props: { id: "MACRO-1", isNew: false },
+			global: { provide: { $socket: socket } },
+		});
+		await flushPromises();
+		return { w, emit: (p) => handlers.forEach((fn) => fn(p)) };
+	};
 
 	it("a failed last run is stated with its reason and a way to open it", async () => {
 		const w = await mountDetail(
@@ -250,9 +263,8 @@ describe("MacroDetail: how the last run went", () => {
 				},
 			})
 		);
-		expect(note(w).text()).toContain(
-			"The last run failed. Step 2 failed: The model is overloaded."
-		);
+		expect(note(w).text()).toContain("The last run failed");
+		expect(note(w).text()).toContain("Step 2 failed: The model is overloaded.");
 		await openChat(w).trigger("click");
 		expect(router.push).toHaveBeenCalledWith("/c/conv-run");
 	});
@@ -261,6 +273,7 @@ describe("MacroDetail: how the last run went", () => {
 		const reason =
 			"Stopped at step 1 of 2: a confirmation is waiting in the conversation (Send email).";
 		const w = await mountDetail(baseMacro({ last_run: { status: "stopped", error: reason } }));
+		expect(note(w).text()).toContain("The last run stopped before it finished");
 		expect(note(w).text()).toContain(reason);
 		expect(openChat(w)).toBeUndefined();
 	});
@@ -277,16 +290,11 @@ describe("MacroDetail: how the last run went", () => {
 
 	it("is refreshed when a run of this macro ends, without touching the form", async () => {
 		// The owner clicks Run and watches it fail: the form must not still say the
-		// previous run was fine.
-		const handlers = [];
-		const socket = { on: (_e, fn) => handlers.push(fn), off: () => {} };
-		api.getMacro.mockResolvedValue(baseMacro({ last_run: null }));
-		const w = mount(MacroDetail, {
-			props: { id: "MACRO-1", isNew: false },
-			global: { provide: { $socket: socket } },
-		});
-		await flushPromises();
+		// previous run was fine. And it must not throw away what they were typing.
+		const { w, emit } = await withSocket(baseMacro({ last_run: null }));
 		expect(note(w).exists()).toBe(false);
+		await nameControl(w).vm.$emit("update:modelValue", "Half-typed name");
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
 
 		api.getMacro.mockResolvedValue(
 			baseMacro({
@@ -294,18 +302,41 @@ describe("MacroDetail: how the last run went", () => {
 				last_run: { status: "failed", error: "Step 1 failed: The model is overloaded." },
 			})
 		);
-		handlers.forEach((fn) =>
-			fn({ kind: "macro:done", macro: "SOMEONE-ELSE", status: "failed" })
-		);
+		emit({ kind: "macro:done", macro: "SOMEONE-ELSE", status: "failed" });
 		await flushPromises();
 		expect(note(w).exists()).toBe(false);
 
-		handlers.forEach((fn) => fn({ kind: "macro:done", macro: "MACRO-1", status: "failed" }));
+		emit({ kind: "macro:done", macro: "MACRO-1", status: "failed" });
 		await flushPromises();
-		expect(note(w).text()).toContain("The last run failed. Step 1 failed");
-		// Only the last-run line: the form is not re-seeded from the server.
-		expect(saveBtn(w).attributes("disabled")).toBeDefined();
-		expect(w.text()).not.toContain("Renamed on the server");
+		expect(note(w).text()).toContain("Step 1 failed: The model is overloaded.");
+		// Only the last-run notice changed: the unsaved edit is still in the field and
+		// still waiting to be saved.
+		expect(nameControl(w).props("modelValue")).toBe("Half-typed name");
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
+	});
+
+	it("a refresh that lands after the user opened another macro is dropped", async () => {
+		const { w, emit } = await withSocket(baseMacro({ last_run: null }));
+		let landLate;
+		api.getMacro.mockImplementation(
+			(id) =>
+				new Promise((resolve) => {
+					if (id === "MACRO-1")
+						landLate = () =>
+							resolve(
+								baseMacro({
+									last_run: { status: "failed", error: "Macro one failed." },
+								})
+							);
+					else resolve(baseMacro({ name: "MACRO-2", last_run: null }));
+				})
+		);
+		emit({ kind: "macro:done", macro: "MACRO-1", status: "failed" });
+		await w.setProps({ id: "MACRO-2" });
+		await flushPromises();
+		landLate();
+		await flushPromises();
+		expect(note(w).exists()).toBe(false);
 	});
 });
 
