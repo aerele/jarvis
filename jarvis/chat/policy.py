@@ -13,9 +13,10 @@ enforcement, ``"subscription_suspended"`` for billing,
 bench, and ``"maintenance"`` during an upgrade maintenance hold. Worker
 health is never a gate here: RQ's worker registry can read zero
 while every worker is alive (see ``jarvis.chat.pump._registry_is_stale``), and a
-turn nobody picks up is bounded elsewhere: under the Relay Pump by the pump's
-watchdog (queue age-out), and for a message that never got a Turn (legacy
-transport included) by the orphan sweep (``stale_scan``).
+turn nobody picks up is owned elsewhere: under the Relay Pump by the pump's
+watchdog (queue age-out; not every waiting state is bounded, see the notes in
+``stale_scan``), and for a message that never got a Turn (legacy transport
+included) by the orphan sweep (``stale_scan``).
 """
 
 from __future__ import annotations

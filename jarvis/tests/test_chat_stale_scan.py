@@ -18,6 +18,7 @@ from jarvis.chat import turn_state as ts
 from jarvis.chat.api import create_conversation
 from jarvis.chat.stale_scan import scan_and_mark_errored
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+from jarvis.tests.race_harness import open_read_view, other_connection
 from jarvis.tests.test_chat_api import (
 	TEST_USER,
 	_cleanup_user_conversations,
@@ -498,6 +499,68 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 		self.assertEqual(self._turns(seed), ["cancelled"], "no second Turn")
 		self.assertEqual(self._strikes(seed), 0, "no strike used")
 		self.assertEqual(self._replies(conv), [])
+
+	def _other_writer_appends(self, conv: str) -> int:
+		"""Another writer commits one more row at the end of the conversation, from a
+		real second connection, so this connection's open read view cannot see it.
+		Returns the seq it took."""
+		with other_connection() as other:
+			seq = (
+				other.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%s", (conv,))[0][0] or 0
+			) + 1
+			now = frappe.utils.now()
+			other.sql(
+				f"""INSERT INTO `tab{MSG}` (name, creation, modified, owner, modified_by,
+					conversation, seq, role, content) VALUES (%s, %s, %s, %s, %s, %s, %s, 'user', 'again')""",
+				(frappe.generate_hash(length=10), now, now, TEST_USER, TEST_USER, conv, seq),
+			)
+			other.commit()
+		return seq
+
+	def _seqs(self, conv: str) -> list[tuple]:
+		frappe.db.commit()  # this helper's own read must not be answered from an old view
+		return [
+			(m.seq, m.role)
+			for m in frappe.get_all(
+				MSG, filters={"conversation": conv}, fields=["seq", "role"], order_by="seq asc, creation asc"
+			)
+		]
+
+	def test_the_age_out_marker_takes_a_seq_after_a_row_committed_during_the_tick(self):
+		# The watchdog's live notice reads the conversation, which under REPEATABLE READ
+		# opens the read view. A row another writer commits after that is invisible to a
+		# later plain MAX(seq), so the marker used to take that row's seq. The marker
+		# must allocate from a fresh view.
+		conv, _seed = self._mk_aged_out_candidate("orph_aged_seq")
+		real_publish = pump._publish_cancelled
+		taken = []
+
+		def publish_then_a_concurrent_write(r, reason):
+			real_publish(r, reason)
+			taken.append(self._other_writer_appends(conv))
+
+		with patch.object(pump, "_publish_cancelled", publish_then_a_concurrent_write):
+			summary = self._watchdog_tick()
+
+		self.assertEqual(summary["aged_out"], 1)
+		self.assertEqual(taken, [2], "the other writer took the next seq")
+		self.assertEqual(
+			self._seqs(conv), [(1, "user"), (2, "user"), (3, "assistant")], "no two rows share a seq"
+		)
+
+	def test_the_cancel_marker_does_not_allocate_its_seq_from_the_callers_read_view(self):
+		# The helper itself, as its other two callers reach it (user cancel, Phase-0
+		# age-out): after a commit and then some read on this connection.
+		conv = self._mk_conv()
+		self._mk_msg(conv)
+		open_read_view()
+		self.assertEqual(self._other_writer_appends(conv), 2)
+
+		admission._write_cancel_marker(conv, admission.USER_CANCEL_REASON)
+
+		self.assertEqual(
+			self._seqs(conv), [(1, "user"), (2, "user"), (3, "assistant")], "no two rows share a seq"
+		)
 
 	def test_a_cancel_whose_marker_was_lost_is_not_run_again(self):
 		# A user cancel normally leaves an assistant marker row, which already keeps

@@ -142,7 +142,9 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 #         a pre-dispatch `recovering` one has no owner there.
 #     Before the exclusion these ended, by accident, in the second strike's "never
 #     started" row (after a duplicate Turn). They now stay unanswered until the user
-#     cancels. The bound belongs in the watchdog.
+#     cancels, where the state allows it (a user cancel acts on `queued`, `preparing`
+#     and `ready` only, so not on a pre-dispatch `recovering` Turn). The bound belongs
+#     in the watchdog.
 #   - Terminal Turn with no reply row: a verdict, not a lost dispatch. Re-running it
 #     would answer a message the user was told had been cancelled, and would overturn
 #     a user's own cancel. The pump's queue age-out used to be the common source; it
