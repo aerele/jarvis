@@ -504,7 +504,8 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 		self.assertEqual(
 			row.error,
 			"Step 1 drafted a record that was not created: the macro did not wait, "
-			"and the next step closed the draft. " + macros._DRAFTS_GONE_HINT,
+			"and the next step closed the draft. To create it, run that step again in a chat, "
+			"or ask an administrator to switch on Skip confirmation so the macro writes directly.",
 		)
 
 	def test_a_draft_from_the_last_step_is_still_there_to_apply(self):
@@ -1099,6 +1100,19 @@ class TestWhatIsWrittenIsSafeToShow(MacroRunOutcomeBase):
 		reason = macros._plain_reason(raw)
 		self.assertNotIn("sk-live-1234567890abcdef", reason)
 		self.assertTrue(reason.startswith("The request to the provider failed"))
+
+	def test_a_long_reason_is_cut_between_words_before_it_is_scrubbed(self):
+		# A long labelled secret shrinks to a marker once scrubbed, which pulls the text
+		# after it into the line that is kept. Cut mid-token at the input bound, a second
+		# credential there would be left as a prefix the scrub patterns no longer match.
+		raw = (
+			"The call failed with api_key="
+			+ "A" * (macros._SCRUB_INPUT_MAX - 42)
+			+ " then sk-live-1234567890abcdefghijklmnop was rejected."
+		)
+		line = macros._one_line(raw)
+		self.assertIn("[REDACTED]", line, "premise: the long secret was scrubbed")
+		self.assertNotIn("sk-", line)
 
 	def test_a_cards_summary_cannot_become_a_link_or_formatting(self):
 		parked = {"summary": "Send [the report](https://evil.example) to **everyone** `now`"}
