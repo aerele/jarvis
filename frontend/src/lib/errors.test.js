@@ -392,6 +392,7 @@ test("retryable is pinned per code", () => {
 		"service-unavailable",
 		"timeout",
 		"connection",
+		"session-reset",
 		"gateway",
 	]);
 	for (const { code } of rules) {

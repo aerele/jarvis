@@ -214,8 +214,13 @@ def list_macros_page(
 			as_dict=True,
 		):
 			step_counts[x.parent] = x.n
+	from jarvis.chat.macro_scheduler import is_retry_pending
+
+	now = frappe.utils.now_datetime()
 	for r in rows:
 		r["step_count"] = step_counts.get(r.name, 0)
+		# Pure arithmetic on the row, no query: see get_macro.
+		r["next_run_is_retry"] = int(is_retry_pending(r, now))
 		# Time renders as a timedelta over raw SQL; stringify for a stable payload.
 		if r.get("schedule_time") is not None:
 			r["schedule_time"] = str(r["schedule_time"])
@@ -235,9 +240,14 @@ def get_macro(name: str) -> dict:
 	"""One macro incl. its ordered steps (owner-gated)."""
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
+	from jarvis.chat.macro_scheduler import is_retry_pending
+
 	return {
 		"name": doc.name,
 		"macro_name": doc.macro_name,
+		# A failed scheduled run is retried by writing the retry time to next_run_at;
+		# this tells the form that "Next run" is that retry, not the schedule's own slot.
+		"next_run_is_retry": int(is_retry_pending(doc)),
 		"description": doc.description or "",
 		"enabled": int(doc.enabled or 0),
 		"stop_on_error": int(doc.stop_on_error or 0),
@@ -246,10 +256,13 @@ def get_macro(name: str) -> dict:
 		"schedule_frequency": doc.schedule_frequency or "daily",
 		"schedule_weekday": doc.schedule_weekday or None,
 		"schedule_day_of_month": doc.schedule_day_of_month or None,
-		"schedule_time": str(doc.schedule_time or ""),
+		# `is None`, not truthiness: midnight is timedelta(0), which is falsy, so
+		# `or ""` sent the form "" and it fell back to (then saved) its 09:00 default.
+		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
 		"next_run_at": str(doc.next_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
+		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"steps": [
 			{
 				"label": s.label or "",
@@ -272,6 +285,51 @@ def _step_skills(step) -> list[str]:
 		return []
 
 
+def _refuse_schedule_for_barred_owner(owner: str, schedule_enabled) -> None:
+	"""Refuse, at SAVE, a schedule the sweep will never run.
+
+	``macro_scheduler`` refuses to bind an unattended turn to Administrator, Guest or
+	a disabled user (#469). The save accepted the schedule regardless and computed a
+	"Next run", so the macro looked scheduled and every slot was then skipped
+	(admin-v2#675). Shares the scheduler's own rule, so the two cannot disagree.
+
+	Only a schedule that is ON is refused: an owner the rule bars can still keep and
+	run an unscheduled macro, and can switch an existing schedule off."""
+	if not frappe.utils.cint(schedule_enabled):
+		return
+	reason = _schedule_block_reason(owner)
+	if reason:
+		frappe.throw(reason, title=_("This macro cannot be scheduled"))
+
+
+def _schedule_block_reason(owner: str) -> str:
+	"""Why a macro owned by ``owner`` cannot be on a schedule, or "" when it can.
+
+	The ONE wording for it: the save refusal above throws it and ``get_macro`` hands
+	it to the form, so what the form warns and what the server refuses cannot drift.
+	Judged from the macro's OWNER, the identity the scheduler would run as, never
+	from whoever is looking at the form."""
+	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+	if owner in ("Administrator", "Guest"):
+		return _(
+			"Scheduled macros cannot run as {0}. Create the macro from a named user's "
+			"account to schedule it, or switch the schedule off to save this one."
+		).format(owner)
+	# The same two checks, in the same order, as macro_scheduler._sweep_one.
+	if not is_valid_unattended_owner(owner):
+		return _(
+			"Scheduled macros cannot run for {0} because the account is disabled or no "
+			"longer exists. Switch the schedule off to save this macro."
+		).format(owner)
+	if not has_jarvis_access(owner):
+		return _(
+			"Scheduled macros cannot run for {0} because the account no longer has "
+			"access to Jarvis. Switch the schedule off to save this macro."
+		).format(owner)
+	return ""
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def create_macro(
@@ -291,6 +349,7 @@ def create_macro(
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
 	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 0 -> 1) is
 	admin-gated in the doctype validate()."""
+	_refuse_schedule_for_barred_owner(frappe.session.user, schedule_enabled)
 	doc = frappe.get_doc(
 		{
 			"doctype": MACRO,
@@ -368,6 +427,7 @@ def update_macro(
 	if merged_prompt is not None:
 		doc.merged_prompt = (merged_prompt or "").strip()
 		doc.merge_status = "ready" if doc.merged_prompt else ""
+	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
 	doc.save()
 	frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}

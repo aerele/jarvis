@@ -80,11 +80,16 @@
 
 			<DocSection label="Schedule">
 				<div class="space-y-4">
+					<!-- An account the scheduler refuses (Administrator) is told so here
+					     and cannot switch a schedule ON; the server refuses that save
+					     too. Switching an existing schedule OFF stays possible. -->
 					<Switch
 						v-model="form.schedule_enabled"
 						label="Run on a schedule"
-						:description="`${agentName} runs this macro automatically.`"
-						:disabled="saving"
+						:description="
+							scheduleBlocked || `${agentName} runs this macro automatically.`
+						"
+						:disabled="saving || (!!scheduleBlocked && !form.schedule_enabled)"
 					/>
 					<div v-if="form.schedule_enabled" class="flex items-start gap-4">
 						<FormControl
@@ -231,6 +236,8 @@ import {
 import * as api from "@/api";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { session } from "@/data/session";
+import { cannotScheduleReason } from "@/lib/macroSchedule";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -255,6 +262,7 @@ const saving = ref(false);
 const running = ref(false);
 const mergeStatus = ref(""); // '' | 'pending' | 'ready' | 'failed'
 const nextRunRaw = ref("");
+const nextRunIsRetry = ref(false);
 
 const form = reactive({
 	macro_name: "",
@@ -350,6 +358,14 @@ const breadcrumbs = computed(() => [
 ]);
 
 const nextRunAt = computed(() => exactDate(nextRunRaw.value));
+// Why this macro cannot be on a schedule, or "" when it can. For a saved macro the
+// SERVER says, judged from the macro's owner (the identity the scheduler runs as),
+// so the warning and the save refusal can never disagree. A new macro has no owner
+// yet: it will be whoever saves it, so the logged-in account is the right question.
+const ownerBlockedReason = ref("");
+const scheduleBlocked = computed(() =>
+	props.isNew ? cannotScheduleReason(session.user) : ownerBlockedReason.value
+);
 // "Scheduled monthly on the 15th at 9:00 am. Next run: ..." - built from the
 // SAVED snapshot only (never the live draft), mirroring AgentDetail.vue's own
 // scheduleSummary exactly: blank while `dirty` (would narrate a schedule that
@@ -361,9 +377,14 @@ const scheduleSummary = computed(() => {
 	if (!snap || props.isNew || dirty.value || !snap.schedule_enabled) return "";
 	if (!nextRunAt.value) return "";
 	const anchor = scheduleAnchorPhrase(snap.schedule_frequency, snap.schedule_day);
+	// A failed scheduled run is retried at a time the owner did not choose; say so,
+	// or "daily at 9:00 am. Next run: 11:17 am" reads as a contradiction.
+	const next = nextRunIsRetry.value
+		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${nextRunAt.value}`
+		: `Next run: ${nextRunAt.value}`;
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
-		`at ${formatTime12h(snap.schedule_time)}. Next run: ${nextRunAt.value}`
+		`at ${formatTime12h(snap.schedule_time)}. ${next}`
 	);
 });
 
@@ -441,9 +462,11 @@ function seed(data) {
 	});
 	form.steps = mapSteps(data.steps);
 	if (!form.steps.length) form.steps = [{ label: "", prompt: "", skills: [] }];
+	nextRunIsRetry.value = !!data.next_run_is_retry;
 	form.merged_prompt = data.merged_prompt || "";
 	mergeStatus.value = data.merge_status || "";
 	nextRunRaw.value = data.next_run_at || "";
+	ownerBlockedReason.value = data.schedule_blocked_reason || "";
 	snapshot.value = {
 		macro_name: form.macro_name,
 		description: form.description,

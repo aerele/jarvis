@@ -549,6 +549,34 @@ def mark_streaming(run_id: str, version: int, epoch: int, gateway_run_id: str | 
 	)
 
 
+def requeue_for_redispatch(run_id: str, version: int, epoch: int, dispatch_payload: str) -> bool:
+	"""streaming -> ready, pump, EPOCH-fenced: send a turn again ONCE when the runtime
+	refused it before producing anything (admin-v2#656: a Claude CLI live session it
+	will not resume after the chat's model changed). Guarded IN the statement on
+	``last_event_seq=0`` (no delta or tool event was applied) and
+	``cancel_requested=0``, so a turn that streamed or was stopped is never re-sent.
+	``dispatch_payload`` is the caller's read-add-write of the stored payload with
+	``redispatch`` set: the once-only marker, and what gives the next dispatch a fresh
+	gateway key.
+
+	``gateway_run_id`` and ``first_event_at`` are cleared for the next ack to record.
+	``dispatching_at`` is KEPT on purpose: if a watchdog parks this turn before it is
+	re-sent, ``recover_adopt`` re-attaches it and the recovery budget ends it with an
+	error, instead of ``recover_to_queued`` re-preparing it and orphaning its
+	placeholder. Returns won/lost (0 => caller tells epoch loss from drift). No commit."""
+	return (
+		_run_cas(
+			f"""UPDATE `tab{TURN}`
+			SET state='ready', ready_at=%(now)s, gateway_run_id=NULL, first_event_at=NULL,
+			    dispatch_payload=%(p)s, version=version+1
+			WHERE name=%(r)s AND state='streaming' AND version=%(v)s AND pump_epoch=%(e)s
+			  AND COALESCE(last_event_seq, 0)=0 AND COALESCE(cancel_requested, 0)=0""",
+			{"r": run_id, "p": dispatch_payload, "now": _now(), "v": version, "e": epoch},
+		)
+		== 1
+	)
+
+
 def dispatch_errored(run_id: str, version: int, epoch: int, error: str | None = None) -> bool:
 	"""D2 row 7 (dispatching -> errored), pump, EPOCH-fenced (OAR-8). For a
 	DEFINITE pre-ack rejection ONLY (chat.send returned ok:false with a concrete

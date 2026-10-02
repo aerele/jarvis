@@ -252,37 +252,6 @@
 										>
 									</span>
 								</button>
-								<button
-									v-if="currentId"
-									role="menuitem"
-									class="jv-create-item"
-									@click="
-										createMenuOpen = false;
-										openCompactDialog('');
-									"
-								>
-									<svg
-										width="17"
-										height="17"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="var(--text-2)"
-										stroke-width="1.7"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									>
-										<path d="M8 3v4a1 1 0 0 1-1 1H3" />
-										<path d="M21 8h-4a1 1 0 0 1-1-1V3" />
-										<path d="M3 16h4a1 1 0 0 1 1 1v4" />
-										<path d="M16 21v-4a1 1 0 0 1 1-1h4" />
-									</svg>
-									<span class="jv-create-item-txt">
-										<span class="jv-create-item-t">Compact chat</span>
-										<span class="jv-create-item-s"
-											>Summarise older turns to free up space</span
-										>
-									</span>
-								</button>
 							</div>
 						</template>
 					</div>
@@ -3177,6 +3146,7 @@
 							>
 								<span
 									class="jv-connfocus-pill"
+									:class="{ 'jv-connfocus-pill--on': connectorFocus }"
 									:style="{
 										display: 'flex',
 										alignItems: 'center',
@@ -3201,7 +3171,7 @@
 										"
 										:aria-pressed="String(!!connectorFocus)"
 										:style="{
-											height: '26px',
+											height: connectorFocus ? '26px' : '30px',
 											display: 'flex',
 											alignItems: 'center',
 											gap: '4px',
@@ -3210,7 +3180,7 @@
 											justifyContent: 'center',
 											background: 'transparent',
 											border: 'none',
-											borderRadius: '6px',
+											borderRadius: connectorFocus ? '6px' : '7px',
 											cursor: 'pointer',
 											color: 'inherit',
 											fontSize: '12px',
@@ -3905,28 +3875,23 @@
 											"
 											autocomplete="off"
 										/>
-										<div
+										<DraftLinkMenu
 											v-if="
 												draftLink.open &&
 												draftLink.key === 'f:' + f.fieldname &&
 												draftLink.items.length
 											"
-											class="jv-action-linkmenu"
-											:class="{ up: draftLink.up }"
-										>
-											<button
-												v-for="it in draftLink.items"
-												:key="it.value"
-												@mousedown.prevent="
+											:anchor="draftLink.anchor"
+											:items="draftLink.items"
+											:palette="paletteVars"
+											@pick="
+												(it) =>
 													pickDraftLink((v) => {
 														f.value = v;
 													}, it)
-												"
-											>
-												<b>{{ it.value }}</b
-												><span v-if="it.label">: {{ it.label }}</span>
-											</button>
-										</div>
+											"
+											@close="draftLink.open = false"
+										/>
 									</template>
 									<select
 										v-else-if="f.control === 'select'"
@@ -4047,7 +4012,7 @@
 														@blur="closeDraftLink"
 														autocomplete="off"
 													/>
-													<div
+													<DraftLinkMenu
 														v-if="
 															draftLink.open &&
 															draftLink.key ===
@@ -4059,24 +4024,17 @@
 																	c.fieldname &&
 															draftLink.items.length
 														"
-														class="jv-action-linkmenu"
-														:class="{ up: draftLink.up }"
-													>
-														<button
-															v-for="it in draftLink.items"
-															:key="it.value"
-															@mousedown.prevent="
+														:anchor="draftLink.anchor"
+														:items="draftLink.items"
+														:palette="paletteVars"
+														@pick="
+															(it) =>
 																pickDraftLink((v) => {
 																	r[c.fieldname] = v;
 																}, it)
-															"
-														>
-															<b>{{ it.value }}</b
-															><span v-if="it.label">
-																: {{ it.label }}</span
-															>
-														</button>
-													</div>
+														"
+														@close="draftLink.open = false"
+													/>
 												</template>
 												<input
 													v-else-if="
@@ -4279,6 +4237,7 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
 import { Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
+import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
@@ -4289,6 +4248,7 @@ import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
+import { firstSendPicks } from "@/lib/firstSendPicks";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
@@ -7085,7 +7045,7 @@ function onOverlayBackdropClick(close) {
 }
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<ri>:<col>"
-const draftLink = ref({ key: "", items: [], open: false, up: false });
+const draftLink = ref({ key: "", items: [], open: false, anchor: null });
 // The shared popup belongs to one search, not merely one field key. A blur
 // timer or response from an older search must not mutate the current popup.
 let draftLinkGeneration = 0;
@@ -7289,17 +7249,14 @@ function removeDraftRow(ti, ri) {
 function closeDraftPanel() {
 	draftLinkGeneration++;
 	draftPanel.value = null;
-	draftLink.value = { key: "", items: [], open: false, up: false };
+	draftLink.value = { key: "", items: [], open: false, anchor: null };
 }
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
 	const generation = ++draftLinkGeneration;
-	let up = false;
-	const el = ev && ev.target;
-	if (el && el.getBoundingClientRect)
-		up = el.getBoundingClientRect().bottom > window.innerHeight - 260;
-	draftLink.value = { key, items: [], open: true, up };
+	const anchor = ev && ev.target;
+	draftLink.value = { key, items: [], open: true, anchor };
 	if (!doctype) return;
 	try {
 		const r = await api.searchLink(doctype, target());
@@ -7310,7 +7267,7 @@ async function onDraftLink(key, target, doctype, ev) {
 				.map((x) => ({ value: x.value, label: x.description || "" }))
 				.slice(0, 8),
 			open: true,
-			up,
+			anchor,
 		};
 	} catch (e) {
 		/* menu stays empty */
@@ -7319,7 +7276,7 @@ async function onDraftLink(key, target, doctype, ev) {
 function pickDraftLink(setter, item) {
 	draftLinkGeneration++;
 	setter(item.value);
-	draftLink.value = { key: "", items: [], open: false, up: false };
+	draftLink.value = { key: "", items: [], open: false, anchor: null };
 }
 function closeDraftLink(ev) {
 	const generation = draftLinkGeneration;
@@ -9458,6 +9415,11 @@ async function newChat() {
 	// an already-existing empty conversation, so this is a real reload (its
 	// own stored pick, if any), not just a reset to null.
 	connectorFocus.value = _loadConnectorFocusFor(currentId.value);
+	// The model and effort picks are per conversation too, and the server hands a
+	// new chat out with none (a reused empty one is cleared), so the pill must not
+	// keep showing the previous chat's pick.
+	modelOverride.value = "";
+	thinkingOverride.value = "";
 	// This conversation IS the unsaved new-chat composer getting its id. The recovered/typed
 	// new-chat draft (already restored into `input` by swapDraft above) and its still-retained
 	// voice records lived under the _NEW_CHAT_SCOPE sentinel — migrate draft + records + mirror +
@@ -9808,10 +9770,13 @@ async function send(textArg, resendAck) {
 		// is reachable ONLY through the card's own button (approveAndRunPending),
 		// by design (the typed shortcut pins to step-by-step, §3.5).
 		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
+		// A chat started from the home screen has no conversation to save a model or
+		// thinking pick on, so the first send carries it.
+		const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
 		const r = await api.sendMessage(
 			sentFrom,
 			text,
-			undefined,
+			_picks.model,
 			attachments,
 			sendCtx,
 			approvalTokens,
@@ -9820,7 +9785,8 @@ async function send(textArg, resendAck) {
 			// payload's text came from a dictation, so reuse it verbatim rather than
 			// adding new detection logic.
 			!!(_voiceAck && _voiceAck.length),
-			_sendAutoMode
+			_sendAutoMode,
+			_picks.thinking
 		);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
@@ -12438,16 +12404,18 @@ onUnmounted(() => {
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
 }
-/* The connector-focus pill is a labeled chip, not a bare icon. The default
-   .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which painted the
-   whole pill black on the light theme. Give its inner buttons a subtle,
-   theme-aware surface hover instead, keeping the accent border and label
-   readable. (Dark already had a subtle hover; a matching override is below.) */
-.jv-connfocus-pill .jv-iconbtn:hover {
+/* The FOCUSED connector pill (--on) is a labeled chip, not a bare icon. The
+   default .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which
+   painted the whole pill black on the light theme. Give its inner buttons a
+   subtle, theme-aware surface hover instead, keeping the accent border and
+   label readable. Unfocused, the pill is a bare icon and falls through to the
+   shared .jv-iconbtn hover like Wiki and Auto. (Dark has a matching override
+   below.) */
+.jv-connfocus-pill--on .jv-iconbtn:hover {
 	background: var(--surface-2) !important;
 	color: var(--cta) !important;
 }
-.jv-connfocus-pill .jv-iconbtn:hover svg {
+.jv-connfocus-pill--on .jv-iconbtn:hover svg {
 	stroke: var(--cta) !important;
 }
 .jv-ctxbtn:hover {
@@ -15293,10 +15261,6 @@ onUnmounted(() => {
 }
 
 /* rich action cards (doc confirm / email draft) */
-/* .jv-action must stay overflow:visible — the edit form's Link dropdown
-   (.jv-action-linkmenu, position:absolute) would be CLIPPED to the card
-   otherwise, leaving a sliver you have to scroll inside. The rounded corners
-   are preserved by rounding the footer's own bottom edge instead. */
 .jv-action,
 .jv-email {
 	margin-top: 12px;
@@ -15392,42 +15356,6 @@ onUnmounted(() => {
 }
 .jv-action-link {
 	position: relative;
-}
-.jv-action-linkmenu {
-	position: absolute;
-	left: 0;
-	right: 0;
-	top: calc(100% + 4px);
-	z-index: 20;
-	background: var(--surface);
-	border: 1px solid var(--border-2);
-	border-radius: 9px;
-	box-shadow: 0 8px 24px rgba(20, 20, 30, 0.14);
-	padding: 4px;
-	max-height: 220px;
-	overflow-y: auto;
-}
-.jv-action-linkmenu.up {
-	top: auto;
-	bottom: calc(100% + 4px);
-	box-shadow: 0 -8px 24px rgba(20, 20, 30, 0.14);
-}
-.jv-action-linkmenu button {
-	display: block;
-	width: 100%;
-	text-align: left;
-	padding: 7px 9px;
-	background: transparent;
-	border: none;
-	border-radius: 6px;
-	font-family: inherit;
-	font-size: 12.5px;
-	color: var(--text-2);
-	cursor: pointer;
-}
-.jv-action-linkmenu button:hover {
-	background: var(--surface-2);
-	color: var(--text);
 }
 .jv-action-editrow.changed .jv-action-input {
 	border-color: var(--cta);
@@ -15531,13 +15459,14 @@ onUnmounted(() => {
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
 }
-/* Connector-focus pill hover in dark: subtle surface, accent kept (matches the
-   light-theme override above rather than the bold neutral iconbtn hover). */
-.jv-dark .jv-connfocus-pill .jv-iconbtn:hover {
+/* Focused connector chip hover in dark: subtle surface, accent kept (matches
+   the light-theme override above rather than the bold neutral iconbtn hover).
+   The bare unfocused icon uses the shared .jv-dark .jv-iconbtn hover. */
+.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover {
 	background: var(--surface-3) !important;
 	color: var(--cta) !important;
 }
-.jv-dark .jv-connfocus-pill .jv-iconbtn:hover svg {
+.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover svg {
 	stroke: var(--cta) !important;
 }
 .jv-dark .jv-confirm-yes:hover,
