@@ -19,7 +19,11 @@
 				@click="run"
 			/>
 			<Dropdown v-if="!isNew" :options="overflowOptions">
-				<Button icon="more-horizontal" variant="ghost" />
+				<Button
+					icon="more-horizontal"
+					variant="ghost"
+					:aria-describedby="resummarizeBlocked ? RUN_REASON_ID : undefined"
+				/>
 			</Dropdown>
 			<Button
 				variant="solid"
@@ -35,6 +39,9 @@
 			     disabled button takes no keyboard focus, a screen reader gets "Run,
 			     dimmed" and no reason, and touch has no hover. The button points here
 			     with aria-describedby (the pattern of approvals/SheetDetail.vue).
+			     Why Re-summarize is off is said here too, and the menu's button points
+			     here as well: a disabled menu item may be skipped by the arrow keys,
+			     so the description on the item itself is not read out to everyone.
 			     A saved macro keeps one line's room for it whether or not it shows:
 			     it appears on the first keystroke, and without the room every field
 			     below moved down under the pointer. -->
@@ -420,14 +427,26 @@ const mergePending = computed(() => mergeStatus.value === "pending");
 // One sentence for the visible line, the tooltip and the button's description.
 const RUN_REASON_ID = "macro-run-reason";
 const runBlockedReason = computed(() => {
-	if (mergePending.value) return "Summarizing… Run unlocks when the summary is ready.";
+	if (mergePending.value) {
+		return (
+			"Summarizing… Run unlocks when the summary is ready." +
+			(resummarizeBlocked.value
+				? " Save your changes before Re-summarize: it summarizes the saved steps."
+				: "")
+		);
+	}
 	if (dirty.value) {
-		return "Save your changes first. Run starts the saved macro, not what is on screen.";
+		return resummarizeBlocked.value
+			? "Save your changes first. Run and Re-summarize use the saved macro, not what is on screen."
+			: "Save your changes first. Run starts the saved macro, not what is on screen.";
 	}
 	return "";
 });
 const RESUMMARIZE_NEEDS_SAVE = "Save your changes first. It summarizes the saved steps.";
 const stepsWithPrompt = computed(() => form.steps.filter((s) => (s.prompt || "").trim()).length);
+// Re-summarize is in the menu (two or more steps) and off: the form has unsaved
+// changes, and the server summarizes the SAVED steps.
+const resummarizeBlocked = computed(() => stepsWithPrompt.value >= 2 && dirty.value);
 
 // Arming a macro to skip confirmation is admin-only (the backend re-checks
 // require_jarvis_admin, so this is a UX gate, not the security boundary); a
@@ -504,8 +523,9 @@ const scheduleSummary = computed(() => {
 const overflowOptions = computed(() => {
 	const opts = [];
 	if (stepsWithPrompt.value >= 2) {
-		// Off while the form has unsaved changes, with the reason in the item itself
-		// (as Run says its own): the server summarizes the SAVED steps.
+		// Off while the form has unsaved changes: the server summarizes the SAVED
+		// steps. The reason is in the item, for whoever hovers it, and on the line
+		// under the buttons (runBlockedReason), for everyone.
 		opts.push({
 			label: "Re-summarize",
 			icon: "refresh-cw",
@@ -663,6 +683,22 @@ async function reloadMacro() {
 	}
 }
 
+// ── what the toasts say ──────────────────────────────────────────────────────
+// A toast can arrive after the user has opened another macro (/macros/A to
+// /macros/B is this same component), so each one names the macro it is about.
+// Toasts render HTML: the name is the owner's free text and goes in escaped.
+const quoted = (macroName) => `“${escapeHtml(macroName)}”`;
+// `html` as one sentence, whether or not it came with its full stop: the server's
+// reasons end in one, a bare network error does not.
+function asSentence(html) {
+	const text = String(html || "").trim();
+	return /[.!?…]$/.test(text) ? text : `${text}.`;
+}
+const summarizingToast = (macroName) =>
+	`Summarizing ${quoted(macroName)} in the background - Run unlocks when the summary is ready.`;
+const notStartedToast = (macroName, reasonHtml) =>
+	`The summary of ${quoted(macroName)} was not started: ${asSentence(reasonHtml)}`;
+
 // ── save (round-2 MacrosView semantics, ported) ──────────────────────────────
 async function save() {
 	if (saving.value || !dirty.value) return;
@@ -768,17 +804,13 @@ async function save() {
 				} else {
 					// Run waits for it, reload or no reload.
 					if (stillHere()) mergeStatus.value = "pending";
-					toast.create({
-						message:
-							"Summarizing in the background - Run unlocks when the summary is ready.",
-						type: "info",
-					});
+					toast.create({ message: summarizingToast(name), type: "info" });
 				}
 			} catch (e) {
 				notStarted = errHtml(e);
 			}
 		}
-		toast.success("Saved");
+		toast.success(`Saved ${quoted(name)}`);
 		if (notStarted) {
 			// The macro is saved either way, and without a summary its steps run. It
 			// has to be said: a later save does not try again (only a change to the
@@ -786,7 +818,7 @@ async function save() {
 			// no idea that Re-summarize is how to get one.
 			toast.create({
 				message:
-					`The summary was not started: ${notStarted} ` +
+					`${notStartedToast(name, notStarted)} ` +
 					"Until there is one the steps run in order. Re-summarize, in the menu next to Run, starts it again.",
 				type: "warning",
 			});
@@ -835,24 +867,23 @@ async function resummarize() {
 	// The server summarizes the SAVED steps, so with unsaved edits this would
 	// summarize something other than what is on screen.
 	if (dirty.value) return;
+	// Both read before the request: the user may open another macro meanwhile.
 	const id = props.id;
+	const name = form.macro_name || id;
 	try {
 		// `true`: the owner asks by name. A summary already pending is given up and a
 		// new one started, which is the way out of a "Summarizing" that never ends.
 		const started = (await api.summarizeMacro(id, true)) || {};
 		if (started.ok === false) {
 			// The site was busy and nothing was started: no "Summarizing" to wait on.
-			toast.error(escapeHtml(started.reason || "The summary could not be started."));
+			toast.error(notStartedToast(name, escapeHtml(started.reason || "The site is busy.")));
 			return;
 		}
 		// The user may have opened another macro while this was in flight.
 		if (id === props.id) mergeStatus.value = "pending";
-		toast.create({
-			message: "Summarizing in the background - Run unlocks when the summary is ready.",
-			type: "info",
-		});
+		toast.create({ message: summarizingToast(name), type: "info" });
 	} catch (e) {
-		toast.error(errHtml(e));
+		toast.error(notStartedToast(name, errHtml(e)));
 	}
 }
 

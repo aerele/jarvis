@@ -189,6 +189,12 @@ function saveBtn(w) {
 function runBtn(w) {
 	return w.findAllComponents({ name: "Button" }).find((b) => b.props("label") === "Run");
 }
+// The "..." button that opens the menu (Re-summarize, Delete).
+function menuBtn(w) {
+	return w
+		.findAllComponents({ name: "Button" })
+		.find((b) => b.props("icon") === "more-horizontal");
+}
 // The visible line that says why Run is off (the button's accessible description).
 function runReason(w) {
 	return w.find('[data-testid="run-reason"]');
@@ -579,7 +585,7 @@ describe("MacroDetail save: a save that worked leaves the form clean", () => {
 		await flushPromises();
 
 		expect(api.updateMacro).toHaveBeenCalledTimes(1);
-		expect(toast.success).toHaveBeenCalledWith("Saved");
+		expect(toast.success).toHaveBeenCalledWith("Saved “Renamed macro”");
 		expect(saveBtn(w).attributes("disabled")).toBeDefined();
 		expect(runBtn(w).props("disabled")).toBe(false);
 		expect(runReason(w).exists()).toBe(false);
@@ -813,7 +819,7 @@ describe("MacroDetail save: the server says whether to summarize", () => {
 		await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
 		api.getMacro.mockRejectedValue(new Error("The server is not reachable."));
 		await save(w);
-		expect(toast.success).toHaveBeenCalledWith("Saved");
+		expect(toast.success).toHaveBeenCalledWith("Saved “Month-end close”");
 		expect(runBtn(w).props("disabled")).toBe(false);
 		// Two warnings and no "Summarizing": the summary, and the failed reload.
 		expect(toast.create.mock.calls.map((c) => c[0].type)).toEqual(["warning", "warning"]);
@@ -848,8 +854,27 @@ describe("MacroDetail save: the server says whether to summarize", () => {
 			.find((o) => o.label === "Re-summarize");
 		await action.onClick();
 		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith("The site is busy.");
+		expect(toast.error).toHaveBeenCalledWith(
+			"The summary of “Month-end close” was not started: The site is busy."
+		);
 		expect(runBtn(w).props("disabled")).toBe(false);
+	});
+
+	it("Re-summarize that was refused names the macro too, and its name is text", async () => {
+		api.summarizeMacro.mockRejectedValue(new Error("Connect an AI model first"));
+		const w = await mountDetail(
+			baseMacro({ macro_name: "<b>Close</b>", steps: TWO, merge_status: "ready" })
+		);
+		const action = w
+			.findComponent({ name: "Dropdown" })
+			.props("options")
+			.find((o) => o.label === "Re-summarize");
+		await action.onClick();
+		await flushPromises();
+		// The toast renders HTML. A reason that came without a full stop gets one.
+		expect(toast.error).toHaveBeenCalledWith(
+			"The summary of “&lt;b&gt;Close&lt;/b&gt;” was not started: Connect an AI model first."
+		);
 	});
 });
 
@@ -990,7 +1015,11 @@ describe("MacroDetail save: the user opened another macro before it answered", (
 		expect(runBtn(w).props("disabled")).toBe(false);
 		expect(runReason(w).exists()).toBe(false);
 		expect(api.getMacro).not.toHaveBeenCalled();
-		expect(toast.success).toHaveBeenCalledWith("Saved");
+		// The toasts arrive over the OTHER macro's page: each names the one it is about.
+		expect(toast.success).toHaveBeenCalledWith("Saved “Month-end close”");
+		const started = toast.create.mock.calls.map((c) => c[0]).filter((t) => t.type === "info");
+		expect(started).toHaveLength(1);
+		expect(started[0].message).toContain("Summarizing “Month-end close”");
 	});
 
 	it("a new macro saved after the user left is not opened over where they went", async () => {
@@ -1071,7 +1100,7 @@ describe("MacroDetail: a summary that could not be started is said, with the way
 			)
 		);
 		const w = await saveChangedSteps();
-		expect(toast.success).toHaveBeenCalledWith("Saved");
+		expect(toast.success).toHaveBeenCalledWith("Saved “Month-end close”");
 		expect(toast.error).not.toHaveBeenCalled();
 		expect(warnings()).toHaveLength(1);
 		expect(warnings()[0].message).toContain("monthly usage limit");
@@ -1089,6 +1118,24 @@ describe("MacroDetail: a summary that could not be started is said, with the way
 		// The toast renders HTML: the reason goes in escaped.
 		expect(warnings()[0].message).toContain("The site is &lt;busy&gt;.");
 		expect(warnings()[0].message).toContain("Re-summarize");
+		expect(warnings()[0].message).toContain(
+			"The summary of “Month-end close” was not started"
+		);
+	});
+
+	it("the warning reads as sentences whether or not the reason ends in a full stop", async () => {
+		const sentence = /was not started: (.*) Until there is one/;
+		for (const [reason, shown] of [
+			["Network Error", "Network Error."],
+			["The site is busy.", "The site is busy."],
+			["Try again in a few minutes!  ", "Try again in a few minutes!"],
+		]) {
+			vi.clearAllMocks();
+			api.summarizeMacro.mockRejectedValue(new Error(reason));
+			await saveChangedSteps();
+			expect(warnings()).toHaveLength(1);
+			expect(warnings()[0].message.match(sentence)[1]).toBe(shown);
+		}
 	});
 
 	it("says nothing of the kind when the summary did start", async () => {
@@ -1125,10 +1172,49 @@ describe("MacroDetail: a summary that could not be started is said, with the way
 		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
 		expect(resummarizeOption(w).disabled).toBe(true);
 		expect(resummarizeOption(w).description).toContain("Save your changes first");
+		// A disabled menu item may never be reached with a keyboard or read out, so
+		// its description is not where the reason lives: the line under the buttons
+		// names Re-summarize too, and the menu's own button points at it.
+		expect(runReason(w).text()).toContain("Run and Re-summarize use the saved macro");
+		expect(menuBtn(w).attributes("aria-describedby")).toBe(runReason(w).attributes("id"));
 		// Refused inside too, not only by the disabled item.
 		await resummarizeOption(w).onClick();
 		await flushPromises();
 		expect(api.summarizeMacro).not.toHaveBeenCalled();
+	});
+});
+
+describe("MacroDetail: the line under the buttons speaks for Re-summarize too", () => {
+	const TWO = [
+		{ label: "", prompt: "do the thing", skills: [] },
+		{ label: "", prompt: "then this", skills: [] },
+	];
+
+	it("does not name Re-summarize on a macro that has no such menu item", async () => {
+		// One step: nothing to summarize, so the menu does not offer it.
+		const w = await mountDetail(baseMacro());
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		expect(runReason(w).text()).toContain("Save your changes first");
+		expect(runReason(w).text()).not.toContain("Re-summarize");
+		expect(menuBtn(w).attributes("aria-describedby")).toBeUndefined();
+	});
+
+	it("the menu button points nowhere while Re-summarize is on", async () => {
+		const w = await mountDetail(baseMacro({ steps: TWO, merge_status: "ready" }));
+		expect(menuBtn(w).attributes("aria-describedby")).toBeUndefined();
+		// Summarizing, form clean: Re-summarize is on (it replaces the pending one).
+		const pending = await mountDetail(baseMacro({ steps: TWO, merge_status: "pending" }));
+		expect(menuBtn(pending).attributes("aria-describedby")).toBeUndefined();
+		expect(runReason(pending).text()).not.toContain("Re-summarize");
+	});
+
+	it("says both reasons while a summary is being written and the form is edited", async () => {
+		// "Summarizing" used to be the whole line, and Re-summarize was off without a word.
+		const w = await mountDetail(baseMacro({ steps: TWO, merge_status: "pending" }));
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		expect(runReason(w).text()).toContain("Summarizing");
+		expect(runReason(w).text()).toContain("Save your changes before Re-summarize");
+		expect(menuBtn(w).attributes("aria-describedby")).toBe(runReason(w).attributes("id"));
 	});
 });
 
