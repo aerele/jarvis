@@ -827,7 +827,15 @@ def _step_went_out_anyway(run, index: int) -> bool:
 	connection). If so the cursor is put where the dispatch would have left it and the
 	answer is True: the step is running, its own end moves the run, and the caller
 	must not do what it does for a step that never went out (end the run, or park it
-	again for a resume that would then have nothing to send)."""
+	again for a resume that would then have nothing to send).
+
+	Asked, and the cursor written, on a fresh snapshot: whatever raised may have left
+	this transaction's view older than the run row's last write, and the write would
+	then fail with 1020 inside the very branch that is cleaning up. A commit, never a
+	rollback: the dispatch may have queued its send for after the commit."""
+	from jarvis.chat import txn
+
+	txn.fresh_snapshot(owned=True)
 	if not _step_is_out(run.name, index):
 		return False
 	_raise_cursor(run, index + 1, sent=True)
