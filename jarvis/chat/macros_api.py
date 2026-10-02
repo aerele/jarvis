@@ -20,7 +20,13 @@ RUN = "Jarvis Macro Run"
 
 def _parse_steps(steps) -> list[dict]:
 	"""Normalize the steps array (JSON string or list) into child-row dicts,
-	dropping blank prompts. Order is preserved (child ``idx``)."""
+	dropping wholly empty steps. Order is preserved (child ``idx``).
+
+	A step with a label and no prompt is refused, not dropped: it used to vanish
+	from the save without a word (the doctype's own "Step N has an empty prompt"
+	check never saw it, the row was gone before validate ran). A step with neither
+	is the blank card the form keeps to type into, and is still skipped. The Macros
+	form makes the same split (``cleanSteps`` / ``stepErrors`` in MacroDetail.vue)."""
 	if steps is None:
 		return []
 	if isinstance(steps, str):
@@ -28,11 +34,16 @@ def _parse_steps(steps) -> list[dict]:
 	if not isinstance(steps, list):
 		return []
 	rows = []
-	for s in steps:
+	for i, s in enumerate(steps, start=1):
 		if not isinstance(s, dict):
 			continue
 		prompt = (s.get("prompt") or "").strip()
 		if not prompt:
+			label = (s.get("label") or "").strip()
+			if label:
+				frappe.throw(
+					_("Step {0} ({1}) has no prompt. Add a prompt, or remove the step.").format(i, label)
+				)
 			continue
 		rows.append(
 			{
@@ -477,11 +488,19 @@ def update_macro(
 def delete_macro(name: str) -> dict:
 	"""Delete a macro row (owner-gated). Its Macro Run history rows link the
 	macro and would block the delete (LinkExistsError), so they go first — they
-	are just execution history; the run conversations themselves stay."""
+	are just execution history; the run conversations themselves stay.
+
+	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
+	and a queued job each, inside the request, for a table that grows without
+	bound. What the set-based delete leaves out, and why that is fine here: run
+	rows have no controller hooks, no child rows, no attachments and nothing links
+	to them (a chat message's ``ref_name`` is plain Data); no ``Deleted Document``
+	copy is kept of each run (they could not be restored without their macro); and
+	``on_trash`` doc events do not fire per run, so a Jarvis Trigger someone
+	pointed at Jarvis Macro Run deletions is not run for them."""
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
-	for r in frappe.get_all(RUN, filters={"macro": name}, pluck="name"):
-		frappe.delete_doc(RUN, r, ignore_permissions=True, force=True)
+	frappe.db.delete(RUN, {"macro": name})
 	frappe.delete_doc(MACRO, name)  # honors if_owner
 	frappe.db.commit()
 	return {"ok": True}
