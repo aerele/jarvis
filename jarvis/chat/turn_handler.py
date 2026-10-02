@@ -43,7 +43,7 @@ from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, Y
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
-from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
+from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -697,6 +697,47 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 	if model == "":
 		return False, None
 	return True, f"{provider}/{model}" if provider and model else model
+
+
+# Effort levels the chat pickers offer. Mirrors ``Jarvis Conversation.thinking_override``,
+# a Select limited to low/medium/high; the agent knows more levels, but offering one the
+# Select rejects would fail the save.
+#
+# The proxy route cannot think at all. Its models are a custom ``openai_compat`` provider
+# with no ``reasoning`` flag, so the agent allows only "off" there, and an explicit
+# per-turn level is not clamped: the agent answers it with an error reply instead of
+# running the turn (Aerele-RnD/jarvis-admin-v2#648). A Claude-plan leg runs on the native
+# claude-cli runtime and keeps the full range.
+CHAT_THINKING_LEVELS = ("low", "medium", "high")
+
+
+def offered_thinking_levels(settings) -> list[str]:
+	"""The effort levels to offer: none when every turn runs on the proxy."""
+	if getattr(settings, "proxy_active", 0) and not has_native_claude_subscription(settings):
+		return []
+	return list(CHAT_THINKING_LEVELS)
+
+
+def _turn_thinking(conv) -> str | None:
+	"""The thinking level to send with this turn, or None to send none.
+
+	The conversation keeps its stored level: a later pin to a Claude-plan model can use it.
+	"""
+	level = (conv.thinking_override or "").strip() or None
+	if level and _runs_on_proxy_route(conv):
+		return None
+	return level
+
+
+def _runs_on_proxy_route(conv) -> bool:
+	settings = frappe.get_cached_doc("Jarvis Settings")
+	if not settings.proxy_active:
+		return False
+	model, provider = _resolve_model_and_provider(conv)
+	if provider:  # a Claude-plan pick, served by claude-cli
+		return False
+	# A pinned bare id resolves through the proxy; an unpinned turn runs the pool primary.
+	return not _is_native_claude_pick(settings, model or pool_primary_model(settings))
 
 
 def _org_locale_clause() -> str:
@@ -1615,7 +1656,7 @@ def handle_chat_send(payload: dict) -> None:
 							conv.session_key,
 							user_message,
 							run_id,
-							thinking=(conv.thinking_override or "").strip() or None,
+							thinking=_turn_thinking(conv),
 							attachments=managed_attachments,
 							timeout_s=ack_timeout,
 						)
