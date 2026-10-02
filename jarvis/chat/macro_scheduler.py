@@ -29,7 +29,7 @@ import datetime
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
-from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_STEP_BUDGET
+from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_MACRO_DELETED, BLOCK_STEP_BUDGET
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -223,9 +223,9 @@ def _settle(m, now, out: dict, claimed) -> None:
 		_stamp_last_run(m, now)
 		return
 	reason = str(out.get("reason") or "").strip()
-	if reason == "macro disabled":
-		# Raced: disabled between the due query and the dispatch. Same handling as
-		# the pre-dispatch branch — no failure, nothing ran, nothing stamped.
+	if reason in ("macro disabled", BLOCK_MACRO_DELETED):
+		# Raced: disabled, or deleted, between the due query and the dispatch. Same
+		# handling as the pre-dispatch branch: no failure, nothing ran, nothing stamped.
 		return
 	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."
 	if reason == BLOCK_DISPATCH_FAILED:

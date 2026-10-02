@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import frappe
 
-from jarvis.chat import admission, error_taxonomy, macros, macros_api
+from jarvis.chat import admission, error_taxonomy, macro_scheduler, macros, macros_api
 from jarvis.chat import api as chat_api
 from jarvis.tests import test_macro_run_outcome as outcome
 from jarvis.tests._pending_action_helpers import ensure_user
@@ -25,6 +25,7 @@ from jarvis.tests.race_harness import (
 	assert_fix_closes_race,
 	open_read_view,
 	other_connection,
+	snapshot_isolation_off,
 	snapshot_isolation_on,
 )
 
@@ -35,7 +36,8 @@ MSG = outcome.MSG
 TURN = outcome.TURN
 OWNER = outcome.OWNER
 BYSTANDER = "macro-stop-bystander@example.com"
-DELETED = "The macro was deleted."
+DELETED = macros._MACRO_DELETED_ERROR
+CLOSING = "■ Stopped: its macro was being deleted."
 
 
 class StopBase(outcome.MacroRunOutcomeBase):
@@ -122,6 +124,16 @@ class StopBase(outcome.MacroRunOutcomeBase):
 		frappe.set_user("Administrator")
 		frappe.set_user(who if who == "Administrator" else ensure_user(who))
 
+	def _logged(self, log, title):
+		"""The ``frappe.log_error`` calls whose title starts with ``title``, as kwargs."""
+		return [c.kwargs for c in log.call_args_list if (c.kwargs.get("title") or "").startswith(title)]
+
+	def _write_elsewhere(self, sql, *params):
+		"""Commit one statement from a second connection: another request's write."""
+		with other_connection() as other:
+			other.sql(sql, params)
+			other.commit()
+
 
 # --------------------------------------------------------------------------- #
 # One Stop
@@ -193,12 +205,120 @@ class TestStoppingARun(StopBase):
 		real = macros._cas_run_status
 
 		def hook_wins(run_name, expect, new, **extra):
-			frappe.db.set_value(RUN, run_name, {"status": "failed", "error": "Step 1 failed."})
+			self._write_elsewhere(
+				f"UPDATE `tab{RUN}` SET status='failed', error='Step 1 failed.' WHERE name=%s", run_name
+			)
 			return real(run_name, expect, new, **extra)
 
 		with patch.object(macros, "_cas_run_status", side_effect=hook_wins):
 			self.assertFalse(macros._stop_run(run, reason=DELETED, by=OWNER))
 		self.assertEqual((self._run(run).status, self._run(run).error), ("failed", "Step 1 failed."))
+
+	def test_stop_is_not_dropped_when_the_run_moves_between_two_live_states(self):
+		# Stop read `running`; the step was deferred for capacity before Stop wrote. The
+		# write is fenced on `running` and matches nothing, but the run is still live:
+		# Stop reads again and stops it. It used to answer ok and leave the run going.
+		for first, then in (("running", "waiting_capacity"), ("waiting_capacity", "running")):
+			run, conv, _ = self._mk_run(steps=2, at_step=1, armed=True, tag=f"flip-{first[:4]}")
+			frappe.db.set_value(RUN, run, "status", first)
+			frappe.db.commit()
+			real = macros._cas_run_status
+			flipped = []
+
+			def flips_once(run_name, expect, new, _then=then, _flipped=flipped, **extra):
+				if not _flipped:
+					_flipped.append(1)
+					self._write_elsewhere(f"UPDATE `tab{RUN}` SET status=%s WHERE name=%s", _then, run_name)
+				return real(run_name, expect, new, **extra)
+
+			frappe.set_user(OWNER)
+			with (
+				snapshot_isolation_off(),
+				patch.object(macros, "_cas_run_status", side_effect=flips_once) as cas,
+				patch("jarvis.chat.macros.publish_to_user") as publish,
+			):
+				self.assertEqual(macros.stop_macro_run(run), {"ok": True})
+			self.assertEqual(cas.call_count, 2, first)
+			self.assertEqual(self._run(run).status, "stopped", first)
+			self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0, first)
+			self.assertEqual(
+				len([c for c in publish.call_args_list if c.args[1].get("kind") == "macro:done"]), 1
+			)
+
+	def test_a_run_that_will_not_hold_still_is_reported_not_dropped(self):
+		run, _, _ = self._mk_run()
+		with (
+			patch.object(macros, "_cas_run_status", return_value=False) as cas,
+			patch("frappe.log_error") as log,
+			self.assertRaises(frappe.ValidationError),
+		):
+			macros._stop_run(run, reason="", by=OWNER)
+		self.assertEqual(cas.call_count, macros._STOP_CAS_TRIES)
+		self.assertEqual(len(self._logged(log, f"jarvis.chat.macros.stop_lost: {run}")), 1)
+
+	def test_stop_is_replayed_when_the_run_row_is_written_under_it(self):
+		# The first step's cursor is written outside the run lock. With snapshot
+		# isolation, a write to the run row between Stop's read and its own write
+		# fails Stop's with 1020: a 500 for Stop and for a delete, and an archive that
+		# swallowed it and left the run `running` and armed.
+		def scenario():
+			self._purge()
+			run, conv, _ = self._mk_run(steps=2, at_step=0, armed=True)
+			real = macros._cas_run_status
+			moved = []
+
+			def cursor_moves_first(run_name, expect, new, **extra):
+				if not moved:
+					moved.append(1)
+					self._write_elsewhere(f"UPDATE `tab{RUN}` SET current_step=1 WHERE name=%s", run_name)
+				return real(run_name, expect, new, **extra)
+
+			try:
+				with (
+					snapshot_isolation_on(),
+					patch.object(macros, "_cas_run_status", side_effect=cursor_moves_first),
+				):
+					macros._stop_run(run, reason=DELETED, by=OWNER)
+			finally:
+				frappe.db.rollback()
+			return self._run(run).status, frappe.db.get_value(CONV, conv, "skip_confirmation")
+
+		assert_fix_closes_race(self, scenario, lambda got: self.assertEqual(got, ("stopped", 0)))
+
+	def test_the_chat_is_disarmed_in_the_same_commit_as_the_stop(self):
+		# On an armed chat the card sweep commits whatever is pending. The status used
+		# to be written first, so it was durable before the flag was cleared: a failure
+		# in between left a stopped run with an armed chat that nothing disarmed again.
+		from jarvis.chat import pending_confirm
+
+		run, conv, _ = self._mk_run(steps=2, at_step=1, armed=True)
+		with (
+			patch.object(pending_confirm, "has_live_card", side_effect=RuntimeError("store down")),
+			self.assertRaises(RuntimeError),
+		):
+			macros._stop_run(run, reason=DELETED, by=OWNER)
+		frappe.db.rollback()  # what a failed request does
+		armed = frappe.db.get_value(CONV, conv, "skip_confirmation")
+		self.assertEqual((self._run(run).status, armed), ("running", 1), "stopped, and still armed")
+		# Nothing was half done, so the next Stop does both.
+		self.assertTrue(macros._stop_run(run, reason=DELETED, by=OWNER))
+		self.assertEqual(self._run(run).status, "stopped")
+		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
+
+	def test_a_card_that_outlives_the_sweep_still_keeps_the_chat_armed(self):
+		# The existing rule (fail closed), unchanged by where the disarm now sits: the
+		# run is stopped, the flag stays, and it is said once.
+		from jarvis.chat import pending_confirm
+
+		run, conv, _ = self._mk_run(steps=2, at_step=1, armed=True)
+		with (
+			patch.object(pending_confirm, "has_live_card", return_value=True),
+			patch("frappe.log_error") as log,
+		):
+			self.assertTrue(macros._stop_run(run, reason=DELETED, by=OWNER))
+		self.assertEqual(self._run(run).status, "stopped")
+		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 1)
+		self.assertEqual(len(self._logged(log, "jarvis.macro.disarm_withheld")), 1)
 
 	def test_a_run_that_is_gone_is_not_an_error(self):
 		# Deleted while the stop waited for its lock.
@@ -300,6 +420,35 @@ class TestStopCancelsAStepThatHasNotStarted(StopBase):
 			self.assertTrue(macros._cancel_undispatched_turn(turn, macros._STOPPED_BEFORE_START))
 		self.assertEqual(lost.call_count, 1)
 		self.assertEqual(self._turn_state(turn), "cancelled")
+
+	def test_a_cancel_that_loses_both_attempts_is_logged(self):
+		# The pump moved the step on under both attempts: it runs although its run has
+		# ended, and nothing else would say so. The log names the run, the turn and
+		# its state, never the prompt.
+		from jarvis.chat import turn_state
+
+		run, conv, _ = self._mk_run(steps=2, at_step=1)
+		turn, _, _ = self._step(conv, "queued")
+		with (
+			patch.object(turn_state, "cancel_queued", return_value=False) as lost,
+			patch("frappe.log_error") as log,
+		):
+			self.assertTrue(macros._stop_run(run, reason="", by=OWNER))
+		self.assertEqual(lost.call_count, 2)
+		(entry,) = self._logged(log, "jarvis.chat.macros.cancel_lost")
+		self.assertEqual(entry["title"], f"jarvis.chat.macros.cancel_lost: {run}")
+		for said in (run, turn, "queued"):
+			self.assertIn(said, entry["message"])
+		self.assertNotIn("prompt", entry["message"])
+
+	def test_a_step_that_had_already_started_is_not_logged(self):
+		# The ordinary case: Stop while a step is with the agent. It finishes; quiet.
+		run, conv, _ = self._mk_run(steps=2, at_step=1)
+		self._step(conv, "streaming", placeholder=True)
+		with patch("frappe.log_error") as log:
+			self.assertTrue(macros._stop_run(run, reason="", by=OWNER))
+			self.assertFalse(macros._cancel_undispatched_turn("no-such-turn", "x", macro_run=run))
+		log.assert_not_called()
 
 	def test_the_cancel_never_raises(self):
 		self.assertFalse(macros._cancel_undispatched_turn("no-such-turn", "x"))
@@ -439,6 +588,98 @@ class TestNoStepStartsAfterStop(StopBase):
 			self.assertEqual(self._run(run).current_step, 0, status)
 			self.assertEqual(self._live_turns(conv), [], status)
 
+	def test_a_step_sent_while_its_macro_is_deleted_is_cancelled(self):
+		# A delete stops the run and then removes its ROW, and can do both while a
+		# step is being sent: the stop finds no turn to cancel yet. A run with no row
+		# has ended. The fence asked "is the status an ended one", and no row has no
+		# status, so the step stayed queued and ran after its macro was gone.
+		run, conv, macro = self._mk_run(steps=3, at_step=1, armed=True)
+		step_turn, _, _ = self._turn(conv)
+
+		def deleted():
+			self.assertEqual(macros_api.delete_macro(macro), {"ok": True, "stopped_runs": 1})
+
+		frappe.set_user(OWNER)
+		with self._stop_cannot_wait(), self._queueing(conv, before=deleted):
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		frappe.set_user("Administrator")
+		self.assertFalse(frappe.db.exists(RUN, run))
+		self.assertFalse(frappe.db.exists(MACRO, macro))
+		self.assertEqual(self._live_turns(conv), [])
+		self.assertEqual(len(self._markers(conv)), 1)
+
+	def test_the_first_step_of_a_run_whose_macro_is_deleted_at_once_is_cancelled(self):
+		# The realistic one: run_macro sends step 1 outside the run lock, and the send
+		# includes the session setup of a brand-new chat. A delete that was waiting
+		# for the macro row runs to completion inside it.
+		frappe.set_user(OWNER)
+		macro = frappe.get_doc(
+			{"doctype": MACRO, "macro_name": f"{outcome.PFX}-gone-first", "steps": [{"prompt": "a"}]}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		started = {}
+
+		def enqueue(conversation, prompt, **kw):
+			started["conv"] = conversation
+			started["deleted"] = macros_api.delete_macro(macro.name)
+			run_id, seed, _ = self._step(conversation, "queued")
+			frappe.set_user(OWNER)
+			return {"run_id": run_id, "message_id": seed, "queued": True}
+
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=enqueue):
+			macros.run_macro(macro.name)
+		frappe.set_user("Administrator")
+		self.assertEqual(started["deleted"], {"ok": True, "stopped_runs": 1})
+		self.assertFalse(frappe.db.exists(MACRO, macro.name))
+		self.assertEqual(self._live_turns(started["conv"]), [])
+		self.assertEqual(len(self._markers(started["conv"])), 1)
+		self.assertEqual(frappe.db.get_value(CONV, started["conv"], "skip_confirmation"), 0)
+
+	def test_a_step_that_had_started_before_the_fence_still_counts(self):
+		# The fence cannot cancel a step the agent already has (always so in Phase-0,
+		# where a step is dispatched as it is accepted). That step runs: the cursor
+		# must say so, or the month's scheduled budget counts one step too few.
+		for stepped in (True, False):
+			run, conv, macro = self._mk_run(steps=2, at_step=0, tag=f"started-{stepped}")
+			run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
+
+			def enqueue(conversation, prompt, run=run, **kw):
+				macros._stop_run(run, reason="", by=OWNER)
+				run_id, seed, _ = self._step(conversation, "dispatching", placeholder=True)
+				return {"run_id": run_id, "message_id": seed}
+
+			with (
+				patch("jarvis.chat.api._enqueue_turn", side_effect=enqueue),
+				patch("jarvis.chat.macros.publish_to_user") as publish,
+				patch("frappe.log_error") as log,
+			):
+				if stepped:
+					self.assertFalse(macros._run_step(run_doc, macro_doc, 0))
+				else:
+					self.assertFalse(macros._run_merged(run_doc, macro_doc, "all of it"))
+			row = self._run(run)
+			self.assertEqual((row.status, row.current_step), ("stopped", 1), stepped)
+			self.assertEqual(len(self._live_turns(conv)), 1, "the started step was cancelled")
+			self.assertEqual(self._progress(publish), [], "progress was announced for an ended run")
+			log.assert_not_called()  # the fence firing is an ordinary race
+
+	def test_a_step_stop_cancelled_first_does_not_count(self):
+		# Stop found the turn and cancelled it before the fence looked. The fence's
+		# own cancel then has nothing to do; the step did not run.
+		run, conv, macro = self._mk_run(steps=2, at_step=0)
+		run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
+
+		def enqueue(conversation, prompt, **kw):
+			run_id, seed, _ = self._step(conversation, "queued")
+			macros._stop_run(run, reason="", by=OWNER)
+			return {"run_id": run_id, "message_id": seed, "queued": True}
+
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=enqueue):
+			self.assertFalse(macros._run_step(run_doc, macro_doc, 0))
+		self.assertEqual(self._run(run).current_step, 0)
+		self.assertEqual(self._live_turns(conv), [])
+		self.assertEqual(len(self._markers(conv)), 1)
+
 	def test_a_run_parked_for_capacity_is_not_ended(self):
 		# `waiting_capacity` is live. Cancelling its turn would leave the step marked
 		# as sent with nothing to run it.
@@ -506,7 +747,7 @@ class TestDeletingAMacroStopsItsRuns(StopBase):
 		self.assertFalse(frappe.db.exists(RUN, run))
 		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
 		(closing,) = self._closing(conv, run)
-		self.assertEqual(closing.content, "■ The macro was deleted.")
+		self.assertEqual(closing.content, CLOSING)
 		self.assertEqual(self._turn_state(queued), "cancelled")
 		self.assertEqual(self._live_turns(conv), [])
 		# Nothing later either: a turn ending in that chat finds no run to move.
@@ -573,7 +814,7 @@ class TestDeletingAMacroStopsItsRuns(StopBase):
 		# The proof it was stopped, not just deleted: its chat is disarmed and closed.
 		self.assertEqual(frappe.db.get_value(CONV, second_chat, "skip_confirmation"), 0)
 		(closing,) = self._closing(second_chat, started[0])
-		self.assertEqual(closing.content, "■ The macro was deleted.")
+		self.assertEqual(closing.content, CLOSING)
 
 	def test_a_macro_that_keeps_starting_runs_is_not_deleted(self):
 		first, _, macro = self._mk_run(steps=2, at_step=1)
@@ -588,12 +829,27 @@ class TestDeletingAMacroStopsItsRuns(StopBase):
 		frappe.set_user(OWNER)
 		with (
 			patch.object(macros, "_lock_macro_row", side_effect=a_run_starts_every_time),
+			patch("frappe.log_error") as log,
 			self.assertRaises(macros_api.MacroBusyError) as refused,
 		):
 			macros_api.delete_macro(macro)
-		self.assertIn("This macro is running; try again", str(refused.exception))
+		# What happened and what to do, not "this macro is running": the delete itself
+		# stopped those runs, and they stay stopped.
+		self.assertEqual(
+			str(refused.exception),
+			"3 runs were stopped, but another run started before the macro could be deleted. Delete it again.",
+		)
+		self.assertEqual(refused.exception.stopped_runs, 3)
+		# The one trace an operator gets of a macro being started in a loop.
+		(entry,) = self._logged(log, "jarvis.chat.macros_api.delete_refused_busy")
+		self.assertIn(macro, entry["title"])
+		self.assertIn("3 run(s) were stopped", entry["message"])
+		self.assertNotIn("step 1", entry["message"])  # no prompt text
 		self.assertEqual(len(started), macros_api._DELETE_STOP_ROUNDS)
 		self.assertTrue(frappe.db.exists(MACRO, macro))
+		# The macro survives, so what its stopped runs say must still be true.
+		for stopped_run in (first, *started[:-1]):
+			self.assertEqual(self._run(stopped_run).error, "Stopped: its macro was being deleted.")
 		# No run row was deleted, and the one still live is untouched.
 		statuses = dict(
 			frappe.get_all(RUN, filters={"macro": macro}, fields=["name", "status"], as_list=True)
@@ -650,16 +906,206 @@ class TestDeletingAMacroStopsItsRuns(StopBase):
 		self.assertEqual(frappe.db.get_value(CONV, live_chat, "skip_confirmation"), 0)
 		self.assertEqual(len(self._closing(live_chat, live)), 1)
 
-	def test_a_bulk_delete_says_which_macro_was_still_running(self):
+	def test_a_bulk_delete_names_the_macro_it_skipped_and_counts_its_stopped_runs(self):
 		_, _, busy = self._mk_run(tag="bulk-busy")
+		done, _, idle = self._mk_run(tag="bulk-idle2")
+		frappe.db.set_value(RUN, done, "status", "completed")
+		frappe.db.commit()
+		real = macros._lock_macro_row
+
+		def a_run_starts_every_time(name):
+			if name == busy:
+				self._start_run_elsewhere(busy, self._armed_chat())
+				frappe.set_user(OWNER)
+			return real(name)
+
 		frappe.set_user(OWNER)
 		with (
-			patch.object(macros_api, "delete_macro", side_effect=macros_api.MacroBusyError("busy")),
+			patch.object(macros, "_lock_macro_row", side_effect=a_run_starts_every_time),
 			patch("frappe.log_error") as log,
 		):
-			out = macros_api.delete_macros_bulk([busy])
-		self.assertEqual(out["skipped"], [{"name": busy, "reason": "running"}])
-		log.assert_not_called()
+			out = macros_api.delete_macros_bulk([busy, idle])
+		self.assertEqual(
+			out["skipped"],
+			[
+				{
+					"name": busy,
+					"title": f"{outcome.PFX}-bulk-busy",
+					"reason": "running",
+					"message": (
+						"Its run was stopped, but another run started before it could be deleted. "
+						"Delete it again."
+					),
+				}
+			],
+		)
+		# The runs of the macro that was skipped were stopped all the same.
+		self.assertEqual((out["deleted"], out["stopped_runs"]), (1, 3))
+		self.assertFalse(frappe.db.exists(MACRO, idle))
+		self.assertEqual(len(self._logged(log, "jarvis.chat.macros_api.delete_refused_busy")), 1)
+		self.assertEqual(self._logged(log, "Jarvis: bulk macro delete failed"), [])
+		self.assertEqual(frappe.local.message_log, [])
+
+	def test_a_bulk_delete_that_fails_on_one_macro_leaves_it_whole_and_lets_go_of_it(self):
+		# The failed macro's row lock and its half-done delete (run history already
+		# gone) were carried into the next macro: that one waited for a run lock while
+		# holding the first one's row, and its first commit made the half-done delete
+		# permanent.
+		kept_run, _, broken = self._mk_run(tag="bulk-broken")
+		frappe.db.set_value(RUN, kept_run, "status", "completed")
+		_, _, fine = self._mk_run(tag="bulk-fine")
+		frappe.db.commit()
+		real_delete, real_stop = frappe.delete_doc, macros._stop_run
+
+		def delete_doc(doctype, name, *a, **kw):
+			if name == broken:
+				raise RuntimeError("delete_doc failed")
+			return real_delete(doctype, name, *a, **kw)
+
+		def the_first_row_is_free(run_name, **kw):
+			with other_connection() as other:
+				other.sql("SET SESSION innodb_lock_wait_timeout=1")
+				other.sql(f"SELECT name FROM `tab{MACRO}` WHERE name=%s FOR UPDATE", broken)
+			return real_stop(run_name, **kw)
+
+		frappe.set_user(OWNER)
+		with (
+			patch.object(macros_api.frappe, "delete_doc", side_effect=delete_doc),
+			patch.object(macros, "_stop_run", side_effect=the_first_row_is_free) as stop,
+			patch("frappe.log_error") as log,
+		):
+			out = macros_api.delete_macros_bulk([broken, fine])
+		self.assertEqual(stop.call_count, 1)
+		self.assertEqual((out["deleted"], out["stopped_runs"]), (1, 1))
+		(skipped,) = out["skipped"]
+		self.assertEqual((skipped["name"], skipped["reason"]), (broken, "error"))
+		self.assertEqual(skipped["message"], "It could not be deleted. Try again.")
+		self.assertTrue(frappe.db.exists(MACRO, broken))
+		self.assertTrue(frappe.db.exists(RUN, kept_run), "its run history went although it was not deleted")
+		self.assertEqual(len(self._logged(log, "Jarvis: bulk macro delete failed")), 1)
+
+	def test_a_bulk_delete_reports_the_other_reasons_in_words(self):
+		_, _, theirs = self._mk_run(tag="bulk-theirs")
+		frappe.db.set_value(MACRO, theirs, "owner", ensure_user(BYSTANDER), update_modified=False)
+		frappe.db.commit()
+		frappe.set_user(OWNER)
+		out = macros_api.delete_macros_bulk([theirs, "no-such-macro"])
+		self.assertEqual(
+			[(s["reason"], s["message"]) for s in out["skipped"]],
+			[("not owner", "It belongs to someone else."), ("not found", "It was already deleted.")],
+		)
+		self.assertEqual((out["deleted"], out["stopped_runs"]), (0, 0))
+		frappe.set_user("Administrator")
+		frappe.delete_doc(RUN, frappe.db.get_value(RUN, {"macro": theirs}), force=True)
+		frappe.delete_doc(MACRO, theirs, force=True)
+		frappe.db.commit()
+
+	def test_a_macro_row_that_stays_locked_is_busy_not_a_crash(self):
+		# A lock wait timeout on the macro row was the database's own error: a 500
+		# for a delete or a manual Run, and the bare word "error" in a bulk delete.
+		_, _, macro = self._mk_run(tag="row-held")
+		frappe.db.set_value(RUN, {"macro": macro}, "status", "completed")
+		frappe.db.commit()
+		frappe.set_user(OWNER)
+		previous = frappe.db.sql("SELECT @@session.innodb_lock_wait_timeout")[0][0]
+		with other_connection() as holder:
+			holder.sql(f"SELECT name FROM `tab{MACRO}` WHERE name=%s FOR UPDATE", macro)
+			try:
+				frappe.db.commit()
+				frappe.db.sql("SET SESSION innodb_lock_wait_timeout=1")
+				with self.assertRaises(macros.MacroRowBusyError) as busy:
+					macros_api.delete_macro(macro)
+				self.assertEqual(str(busy.exception), "This macro is busy right now. Try again in a moment.")
+				self.assertIsInstance(busy.exception, frappe.ValidationError)
+				frappe.db.rollback()
+				frappe.clear_messages()
+				with patch("frappe.log_error") as log:
+					out = macros_api.delete_macros_bulk([macro])
+				self.assertEqual(
+					[(s["reason"], s["message"]) for s in out["skipped"]],
+					[("busy", "It is busy right now. Try again in a moment.")],
+				)
+				log.assert_not_called()
+			finally:
+				frappe.db.rollback()
+				frappe.db.sql(f"SET SESSION innodb_lock_wait_timeout={int(previous)}")
+		self.assertTrue(frappe.db.exists(MACRO, macro))
+
+
+# --------------------------------------------------------------------------- #
+# Nothing writes a live or a failed status over a stop
+# --------------------------------------------------------------------------- #
+class TestAStoppedRunStaysStopped(StopBase):
+	def test_a_deferral_does_not_put_a_stopped_run_back_in_the_queue(self):
+		# The dispatcher read `running` and found the site busy; Stop landed; the
+		# deferral then wrote `waiting_capacity` by name, and the resume cron sent the
+		# step of a stopped run. Its own look at the status was no defence: it reads
+		# the dispatcher's snapshot, which is from before the Stop.
+		run, _, macro = self._mk_run(steps=2, at_step=0)
+		run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
+		with snapshot_isolation_off():
+			frappe.db.commit()
+			self.assertEqual(frappe.db.get_value(RUN, run, "status"), "running")  # the snapshot
+			self._write_elsewhere(f"UPDATE `tab{RUN}` SET status='stopped' WHERE name=%s", run)
+			with patch("jarvis.chat.macros.publish_to_user") as publish:
+				macros._defer_capacity(run_doc, macro_doc)
+		frappe.db.rollback()
+		self.assertEqual(self._run(run).status, "stopped")
+		self.assertEqual(run_doc.status, "running", "the caller was told the run is parked")
+		publish.assert_not_called()
+
+	def test_a_deferral_still_parks_a_running_run(self):
+		run, _, macro = self._mk_run(steps=2, at_step=0)
+		run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
+		macros._defer_capacity(run_doc, macro_doc)
+		self.assertEqual((self._run(run).status, run_doc.status), ("waiting_capacity", "waiting_capacity"))
+
+	def test_a_first_step_that_fails_to_send_does_not_turn_a_stop_into_a_failure(self):
+		# Stop (or an archive) landed while the first step's dispatch was failing. The
+		# failure path wrote `failed` by name over `stopped`, and announced it.
+		frappe.set_user(OWNER)
+		macro = frappe.get_doc(
+			{"doctype": MACRO, "macro_name": f"{outcome.PFX}-send-fails", "steps": [{"prompt": "a"}]}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		started = {}
+
+		def enqueue(conversation, prompt, **kw):
+			started["run"] = frappe.db.get_value(RUN, {"conversation": conversation}, "name")
+			macros.stop_macro_run(started["run"])
+			raise RuntimeError("gateway down")
+
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=enqueue),
+			patch("jarvis.chat.macros.publish_to_user") as publish,
+			patch("frappe.log_error"),
+			self.assertRaises(frappe.ValidationError),
+		):
+			macros.run_macro(macro.name)
+		row = self._run(started["run"])
+		self.assertEqual((row.status, row.error or ""), ("stopped", ""))
+		done = [c.args[1]["status"] for c in publish.call_args_list if c.args[1].get("kind") == "macro:done"]
+		self.assertEqual(done, ["stopped"])
+
+	def test_a_first_step_that_fails_to_send_still_fails_a_live_run(self):
+		frappe.set_user(OWNER)
+		macro = frappe.get_doc(
+			{"doctype": MACRO, "macro_name": f"{outcome.PFX}-send-fails2", "steps": [{"prompt": "a"}]}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value(MACRO, macro.name, "skip_confirmation", 1, update_modified=False)
+		frappe.db.commit()
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("gateway down")),
+			patch("frappe.log_error"),
+		):
+			out = macros.run_macro(macro.name, trigger="scheduled")
+		self.assertEqual(out, {"ok": False, "reason": macros.BLOCK_DISPATCH_FAILED})
+		row = frappe.db.get_value(
+			RUN, {"macro": macro.name}, ["status", "error", "conversation", "finished_at"], as_dict=True
+		)
+		self.assertEqual((row.status, row.error), ("failed", macros._DISPATCH_FAILED_ERROR))
+		self.assertTrue(row.finished_at)
+		self.assertEqual(frappe.db.get_value(CONV, row.conversation, "skip_confirmation"), 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -699,7 +1145,7 @@ class TestRunStartAndDeleteTakeTurns(StopBase):
 					frappe.db.sql("SET SESSION innodb_lock_wait_timeout=1")
 					with (
 						patch("jarvis.chat.api._enqueue_turn") as enqueue,
-						self.assertRaises(frappe.QueryTimeoutError),
+						self.assertRaises(macros.MacroRowBusyError),
 					):
 						blocked()
 					# Read inside the transaction that timed out: a lock wait timeout
@@ -732,6 +1178,34 @@ class TestRunStartAndDeleteTakeTurns(StopBase):
 		enqueue.assert_not_called()
 		self.assertEqual(frappe.db.count(RUN, {"macro": macro}), 0)
 		self.assertEqual(self._chats(), 0)
+
+	def test_a_scheduled_run_that_lost_to_a_delete_is_a_quiet_no_op(self):
+		# The scheduler claimed the slot, the owner deleted the macro, and the run
+		# start raised "not found": two Error Logs and a notification telling the owner
+		# the macro they had just deleted "did not run" and "will run again".
+		macro = self._macro("gone-scheduled")
+		row = frappe.db.get_value(MACRO, macro, ["name", "owner", "macro_name", "enabled"], as_dict=True)
+		frappe.set_user(OWNER)
+		self._delete_elsewhere(macro)
+		with patch("jarvis.chat.api._enqueue_turn") as enqueue:
+			out = macros.run_macro(macro, trigger="scheduled")
+		self.assertEqual(out, {"ok": False, "reason": macros.BLOCK_MACRO_DELETED})
+		enqueue.assert_not_called()
+		self.assertEqual(self._chats(), 0)
+		with (
+			patch.object(macro_scheduler, "_record_failed") as record,
+			patch.object(macro_scheduler, "_notify_owner") as notify,
+			patch.object(macro_scheduler, "_retry_later") as retry,
+			patch.object(macro_scheduler, "_stamp_last_run") as stamp,
+			patch("frappe.log_error") as log,
+		):
+			macro_scheduler._settle(row, frappe.utils.now_datetime(), out, None)
+		for untouched in (record, notify, retry, stamp, log):
+			untouched.assert_not_called()
+		# Someone pressing Run on a macro that is gone is still told so.
+		with self.assertRaises(frappe.DoesNotExistError):
+			macros.run_macro(macro)
+		frappe.db.rollback()
 
 	def test_a_run_starts_from_the_macro_as_it_is_now(self):
 		# An administrator disarmed the macro after this request's snapshot opened.
@@ -809,9 +1283,33 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 	def test_a_stop_that_fails_does_not_fail_the_archive(self):
 		run, conv, _ = self._mk_run()
 		frappe.set_user(OWNER)
-		with patch.object(macros, "_stop_run", side_effect=RuntimeError("redis")), patch("frappe.log_error"):
+		with (
+			patch.object(macros, "_stop_run", side_effect=RuntimeError("redis")),
+			patch("frappe.log_error") as log,
+		):
 			self.assertEqual(chat_api.archive_conversation(conv), {"ok": True})
 		self.assertEqual(frappe.db.get_value(CONV, conv, "status"), "Archived")
+		# Not blocking, and not silent either: the run that stayed live is named.
+		(entry,) = self._logged(log, "jarvis.chat.macros.stop_for_conversation_failed")
+		self.assertEqual(entry["title"], f"jarvis.chat.macros.stop_for_conversation_failed: {run}")
+
+	def test_one_run_that_cannot_be_stopped_does_not_spare_the_others(self):
+		# Clear history stops every live run of the user. One failure used to end the
+		# loop, leaving the runs after it live.
+		stuck, _, _ = self._mk_run(tag="stuck")
+		other, _, _ = self._mk_run(tag="other")
+		real = macros._stop_run
+
+		def stop(run_name, **kw):
+			if run_name == stuck:
+				raise frappe.QueryDeadlockError("1020")
+			return real(run_name, **kw)
+
+		frappe.set_user(OWNER)
+		with patch.object(macros, "_stop_run", side_effect=stop), patch("frappe.log_error") as log:
+			self.assertEqual(chat_api.clear_chat_history()["ok"], True)
+		self.assertEqual(self._run(other).status, "stopped")
+		self.assertEqual(len(self._logged(log, "jarvis.chat.macros.stop_for_conversation_failed")), 1)
 
 	def test_clearing_chat_history_stops_the_run_while_its_chat_still_exists(self):
 		run, conv, _ = self._mk_run(steps=3, at_step=1, armed=True)
@@ -821,10 +1319,10 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		seen = {}
 		real = macros._cancel_current_step
 
-		def cancel(conversation):
+		def cancel(conversation, **kw):
 			# The step to cancel is found through the chat's messages.
 			seen[conversation] = frappe.db.count(MSG, {"conversation": conversation})
-			result = real(conversation)
+			result = real(conversation, **kw)
 			seen["cancelled"] = seen.get("cancelled") or result
 			return result
 
