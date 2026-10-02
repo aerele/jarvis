@@ -56,6 +56,7 @@ vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		name: "ListPage",
 		props: ["rows", "loading", "error", "quickFilters", "emptyState"],
+		emits: ["refresh"],
 		template: `<div><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><span class="schedule"><slot name="cell-schedule" :row="row" /></span><span class="run"><slot name="cell-_run" :row="row" /></span></div></div>`,
 	},
 }));
@@ -98,6 +99,20 @@ describe("MacrosList: a load that failed", () => {
 		const { w } = await mountList(null);
 		expect(listPage(w).props("rows")).toEqual([]);
 		expect(listPage(w).props("error")).toBe("The server is not reachable.");
+	});
+
+	it("the list's Try again (its refresh) loads the list", async () => {
+		fetchPage.mockRejectedValue(new Error("The server is not reachable."));
+		const { w } = await mountList(null);
+		fetchPage.mockResolvedValue({ rows: [macro("close")], total: 1, has_more: false });
+		listPage(w).vm.$emit("refresh");
+		await flushPromises();
+		expect(listPage(w).props("error")).toBe("");
+		expect(
+			listPage(w)
+				.props("rows")
+				.map((r) => r.name)
+		).toEqual(["close"]);
 	});
 
 	it("a list that loaded carries no error, empty or not", async () => {
