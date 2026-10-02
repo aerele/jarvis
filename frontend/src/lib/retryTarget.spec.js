@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { isMacroClosingMessage, retryTargetIndex } from "./retryTarget";
+import { isMacroClosingMessage, retryLabel, retryTargetIndex } from "./retryTarget";
 
 const user = { name: "u1", role: "user", content: "step 2" };
 const failed = { name: "a1", role: "assistant", content: "", error: "The model is overloaded." };
@@ -37,6 +37,26 @@ describe("which message carries Retry", () => {
 	});
 });
 
+describe("what the Retry control says", () => {
+	it("is plain 'Retry' in an ordinary thread", () => {
+		expect(retryLabel([user, failed])).toBe("Retry");
+		expect(retryLabel([])).toBe("Retry");
+		expect(retryLabel(undefined)).toBe("Retry");
+	});
+
+	it("is 'Retry this step' under a macro's closing message", () => {
+		// It re-runs that one step as an ordinary chat turn; the run stays ended.
+		// A bare "Retry" beneath "Macro failed" reads as "retry the run".
+		expect(retryLabel([user, failed, closing])).toBe("Retry this step");
+	});
+
+	it("goes back to 'Retry' once the thread has moved on past the closing message", () => {
+		const next = { name: "u2", role: "user", content: "try again" };
+		const failedAgain = { ...failed, name: "a3" };
+		expect(retryLabel([user, failed, closing, next, failedAgain])).toBe("Retry");
+	});
+});
+
 describe("what counts as a macro's closing message", () => {
 	it("is an assistant row that refers to a macro run", () => {
 		expect(isMacroClosingMessage(closing)).toBe(true);
@@ -64,6 +84,16 @@ describe("ChatView uses the rule", () => {
 		expect(gate).not.toContain("visibleMessages.length - 1");
 		expect(src).toMatch(
 			/const retryIdx = computed\(\(\) => retryTargetIndex\(visibleMessages\.value\)\)/
+		);
+	});
+
+	it("labels the Retry button with the rule's label, not a fixed word", () => {
+		const from = src.indexOf('class="jv-retry"');
+		const button = src.slice(from, src.indexOf("</button>", from));
+		expect(button).toContain("retryText");
+		expect(button).not.toContain('"Retry"');
+		expect(src).toMatch(
+			/const retryText = computed\(\(\) => retryLabel\(visibleMessages\.value\)\)/
 		);
 	});
 });
