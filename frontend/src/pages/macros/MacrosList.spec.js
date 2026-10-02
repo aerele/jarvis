@@ -48,7 +48,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	Badge: { props: ["label"], template: `<span class="badge">{{ label }}</span>` },
 	Tooltip: { template: "<span><slot /></span>" },
-	Dropdown: { template: "<div />" },
+	Dropdown: { name: "Dropdown", props: ["options"], template: "<div />" },
 }));
 vi.mock("@/components/list/TabBar.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("./RunsTab.vue", () => ({ default: { name: "RunsTab", template: "<div />" } }));
@@ -57,11 +57,19 @@ vi.mock("@/components/list/ListPage.vue", () => ({
 		name: "ListPage",
 		props: ["rows", "loading", "error", "quickFilters", "emptyState"],
 		emits: ["refresh"],
-		template: `<div><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><span class="schedule"><slot name="cell-schedule" :row="row" /></span><span class="run"><slot name="cell-_run" :row="row" /></span></div></div>`,
+		// Every row counts as selected: the bulk actions get all their names.
+		computed: {
+			selections() {
+				return new Set((this.rows || []).map((r) => r.name));
+			},
+		},
+		methods: { unselectAll() {} },
+		template: `<div><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><span class="schedule"><slot name="cell-schedule" :row="row" /></span><span class="run"><slot name="cell-_run" :row="row" /></span></div><slot name="select-actions" :selections="selections" :unselectAll="unselectAll" /></div>`,
 	},
 }));
 
-import { toast } from "frappe-ui";
+import { toast, confirmDialog } from "frappe-ui";
+import { deleteMacrosBulk } from "@/api/macros";
 import MacrosList from "./MacrosList.vue";
 
 const macro = (name, extra = {}) => ({
@@ -228,5 +236,74 @@ describe("MacrosList: a macro's name in a toast is text, not markup", () => {
 		const { message } = toast.create.mock.calls[0][0];
 		expect(message).toContain(SAFE);
 		expect(message).not.toContain("<img");
+	});
+});
+
+describe("MacrosList: deleting macros that are running", () => {
+	// The server stops a live run before it deletes the macro. The dialog says so
+	// when the list knows of one, and the toast when the server stopped one.
+	const openBulkDelete = async (rows) => {
+		const { w } = await mountList(rows);
+		const del = w
+			.findComponent({ name: "Dropdown" })
+			.props("options")
+			.find((o) => o.label === "Delete");
+		del.onClick();
+		return confirmDialog.mock.calls.at(-1)[0];
+	};
+	const running = { last_run: { status: "running", error: "" } };
+	const finished = { last_run: { status: "completed", error: "" } };
+
+	it("one running macro: the confirmation says its run will be stopped", async () => {
+		const dialog = await openBulkDelete([macro("live", running)]);
+		expect(dialog.message).toContain("This macro is running. Deleting it stops the run.");
+		expect(dialog.message).toContain("run history");
+	});
+
+	it("several selected: it says how many are running", async () => {
+		const dialog = await openBulkDelete([
+			macro("live", running),
+			macro("parked", { last_run: { status: "waiting_capacity", error: "" } }),
+			macro("idle", finished),
+		]);
+		expect(dialog.message).toContain("2 of these macros are running.");
+	});
+
+	it("nothing running: the confirmation is the plain one", async () => {
+		const dialog = await openBulkDelete([macro("idle", finished), macro("never")]);
+		expect(dialog.message).toBe(
+			"Deletes the selected macros AND their run history. This can't be undone."
+		);
+	});
+
+	it("the toast says how many runs were stopped", async () => {
+		const dialog = await openBulkDelete([macro("live", running), macro("idle", finished)]);
+		deleteMacrosBulk.mockResolvedValue({ deleted: 2, skipped: [], stopped_runs: 1 });
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(deleteMacrosBulk).toHaveBeenCalledWith(["live", "idle"]);
+		expect(toast.success).toHaveBeenCalledWith("Deleted 2 macros. 1 run was stopped.");
+	});
+
+	it("the toast is unchanged when nothing was stopped, or an older server answers", async () => {
+		for (const answer of [{ deleted: 1, skipped: [], stopped_runs: 0 }, { deleted: 1 }]) {
+			const dialog = await openBulkDelete([macro("idle", finished)]);
+			deleteMacrosBulk.mockResolvedValue(answer);
+			await dialog.onConfirm({ hideDialog: vi.fn() });
+			expect(toast.success).toHaveBeenLastCalledWith("Deleted 1 macro");
+		}
+	});
+
+	it("a macro that could not be stopped is reported as skipped, with the stops that did happen", async () => {
+		const dialog = await openBulkDelete([macro("live", running), macro("busy", running)]);
+		deleteMacrosBulk.mockResolvedValue({
+			deleted: 1,
+			skipped: [{ name: "busy", reason: "running" }],
+			stopped_runs: 1,
+		});
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(toast.create).toHaveBeenCalledWith({
+			message: "Deleted 1 (skipped 1: running). 1 run was stopped.",
+			type: "info",
+		});
 	});
 });
