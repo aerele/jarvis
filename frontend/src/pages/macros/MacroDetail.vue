@@ -37,21 +37,21 @@
 			<!-- How the last run went, when the owner needs telling: it failed, it is
 			     waiting on them, or a step only drafted a record. Nothing else on this
 			     page said, and a scheduled run fails with nobody watching. -->
-			<div
+			<Banner
 				v-if="lastRunNote"
-				class="mb-4 flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
-				:class="LAST_RUN_TONE[lastRunNote.tone] || 'text-ink-gray-7'"
-				role="status"
+				class="mb-4"
+				data-testid="last-run-note"
+				:type="LAST_RUN_BANNER[lastRunNote.tone] || 'info'"
+				:message="lastRunNote.text"
 			>
-				<span class="min-w-0 flex-1 break-words">{{ lastRunNote.text }}</span>
-				<router-link
-					v-if="lastRun && lastRun.conversation"
-					class="shrink-0 underline"
-					:to="'/c/' + lastRun.conversation"
-				>
-					Open the run
-				</router-link>
-			</div>
+				<template v-if="lastRun && lastRun.conversation" #action>
+					<Button
+						variant="ghost"
+						label="Open the chat"
+						@click="router.push('/c/' + lastRun.conversation)"
+					/>
+				</template>
+			</Banner>
 			<DocSection label="Details">
 				<div class="space-y-4">
 					<FormControl
@@ -238,6 +238,7 @@ import {
 	confirmDialog,
 } from "frappe-ui";
 import DocPage from "@/components/doc/DocPage.vue";
+import Banner from "@/components/Banner.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
@@ -285,7 +286,7 @@ const nextRunRaw = ref("");
 // server that does not send it yet).
 const lastRun = ref(null);
 const lastRunNote = computed(() => lastRunLine(lastRun.value));
-const LAST_RUN_TONE = { bad: "text-ink-red-4", warn: "text-ink-amber-3" };
+const LAST_RUN_BANNER = { bad: "error", warn: "warning" };
 const nextRunIsRetry = ref(false);
 
 const form = reactive({
@@ -681,7 +682,10 @@ function confirmDelete() {
 
 // ── live merge updates for THIS macro (badge + Run gate + summary body) ──────
 function onEvent(p) {
-	if (!p || p.kind !== "macro:merged" || props.isNew || p.macro !== props.id) return;
+	if (!p || props.isNew || p.macro !== props.id) return;
+	// A run of this macro just ended: the line about the last run is out of date.
+	if (p.kind === "macro:done") return refreshLastRun();
+	if (p.kind !== "macro:merged") return;
 	refreshMergeFields();
 	if (p.status === "ready") {
 		toast.success("Summary ready - this macro now runs as one prompt.");
@@ -690,6 +694,16 @@ function onEvent(p) {
 			message: "Couldn't summarize - the steps run as a sequence.",
 			type: "info",
 		});
+	}
+}
+
+// Only the last-run summary: the form may hold unsaved edits, so nothing else is
+// re-seeded.
+async function refreshLastRun() {
+	try {
+		lastRun.value = (await api.getMacro(props.id)).last_run || null;
+	} catch (e) {
+		// keep what is shown; the next load corrects it
 	}
 }
 

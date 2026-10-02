@@ -57,6 +57,32 @@ describe("lastRunCell: the Macros list's Last run cell", () => {
 		expect(cell.hint).toContain(note);
 	});
 
+	it("a run with no recorded time still says how it went, with no stray punctuation", () => {
+		// A scheduler-recorded failure may carry neither a start nor a finish.
+		const failed = lastRunCell({
+			lastRun: { status: "failed", error: "It could not be started." },
+			when: "",
+			relative: "",
+		});
+		expect(failed.hint).toBe("It could not be started.");
+		const done = lastRunCell({ lastRun: { status: "completed" }, when: "", relative: "" });
+		expect(done.text).toBe("Completed");
+	});
+
+	it("an older server that sends no last run keeps the cell it had", () => {
+		const legacy = { when: "Wed, Sep 30, 2026 9:00 AM", relative: "a day ago" };
+		expect(lastRunCell({ lastRun: undefined, when: "", relative: "", legacy })).toEqual({
+			text: "a day ago",
+			hint: legacy.when,
+			tone: "",
+		});
+		expect(
+			lastRunCell({ lastRun: undefined, when: "", relative: "", legacy: null })
+		).toBeNull();
+		// `null` is the server saying "never ran": the legacy time must not resurface.
+		expect(lastRunCell({ lastRun: null, when: "", relative: "", legacy })).toBeNull();
+	});
+
 	it("a run still going says so", () => {
 		expect(lastRunCell({ lastRun: { status: "running" }, ...labels }).text).toBe("Running");
 		expect(lastRunCell({ lastRun: { status: "waiting_capacity" }, ...labels }).text).toBe(
