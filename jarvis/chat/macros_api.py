@@ -494,12 +494,38 @@ def update_macro(
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
+# How many times a delete stops the macro's live runs and looks again before it
+# gives up. A second round needs a run to START in the instant between the stop and
+# the lock; three in a row is a macro being started in a loop.
+_DELETE_STOP_ROUNDS = 3
+
+
+class MacroBusyError(frappe.ValidationError):
+	"""The macro kept starting runs while it was being deleted."""
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def delete_macro(name: str) -> dict:
-	"""Delete a macro row (owner-gated). Its Macro Run history rows link the
-	macro and would block the delete (LinkExistsError), so they go first — they
-	are just execution history; the run conversations themselves stay.
+	"""Delete a macro row (owner-gated). Returns ``{"ok", "stopped_runs"}``.
+
+	**A live run is stopped first.** Deleting the row of a run that is still going
+	did not stop it: its steps kept running, in a chat that stayed armed with no run
+	row left to disarm it. So, in this order:
+
+	1. Stop each run that is ``running`` or parked for capacity (``macros._stop_run``:
+	   the step that has not started is cancelled, the chat is disarmed and told "The
+	   macro was deleted."). Each stop commits, so no lock is held here.
+	2. Take the macro's row lock on a fresh snapshot and LOOK AGAIN. ``run_macro``
+	   takes the same lock before it inserts a run, so a run that started during 1 is
+	   either committed and seen now, or still waiting for the lock. One found: let go
+	   and go back to 1. After ``_DELETE_STOP_ROUNDS`` the delete is refused.
+	3. Still under the lock, with no commit in between, delete the run rows and the
+	   macro. A run waiting for the lock then finds no macro.
+
+	Its Macro Run history rows link the macro and would block the delete
+	(LinkExistsError), so they go first — they are just execution history; the run
+	conversations themselves stay.
 
 	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
 	and a queued job each, inside the request, for a table that grows without
@@ -526,12 +552,26 @@ def delete_macro(name: str) -> dict:
 	  that points at a name which no longer resolves: it is shown nowhere (the
 	  timeline it belonged to is gone) and nothing reads it. Sweeping eight tables
 	  on every macro delete for that is not worth the queries."""
+	from jarvis.chat import macros
+
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
-	frappe.db.delete(RUN, {"macro": doc.name})
-	frappe.delete_doc(MACRO, doc.name)  # honors if_owner
-	frappe.db.commit()
-	return {"ok": True}
+	stopped = 0
+	for _round in range(_DELETE_STOP_ROUNDS):
+		stopped += macros.stop_runs_of_macro(
+			doc.name, reason=macros._MACRO_DELETED_ERROR, by=frappe.session.user
+		)
+		if not macros._lock_macro_row(doc.name):
+			frappe.db.commit()
+			raise frappe.DoesNotExistError(_("This macro was already deleted."))
+		if macros.live_runs_of(doc.name):
+			frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
+			continue
+		frappe.db.delete(RUN, {"macro": doc.name})
+		frappe.delete_doc(MACRO, doc.name)  # honors if_owner
+		frappe.db.commit()
+		return {"ok": True, "stopped_runs": stopped}
+	raise MacroBusyError(_("This macro is running; try again"))
 
 
 @frappe.whitelist()
@@ -539,13 +579,15 @@ def delete_macro(name: str) -> dict:
 def delete_macros_bulk(names: str | list | None = None) -> dict:
 	"""Bulk delete macros the caller OWNS (DESIGN-V3 §8.3 / D20). ``names`` is a
 	JSON array of macro row-names. Reuses the ``delete_macro`` path per row so
-	each macro's Run history goes first (LinkExistsError otherwise). Per-row
-	try/except: foreign rows skip with ``not owner``, one bad row never aborts
-	the batch. Returns ``{deleted, skipped: [{name, reason}]}``."""
+	each macro's live runs are stopped and its Run history goes first
+	(LinkExistsError otherwise). Per-row try/except: foreign rows skip with
+	``not owner``, one bad row never aborts the batch. Returns
+	``{deleted, skipped: [{name, reason}], stopped_runs}``."""
 	raw = frappe.parse_json(names) if isinstance(names, str) else (names or [])
 	items = [str(n) for n in raw if n] if isinstance(raw, list) else []
 	me = frappe.session.user
 	deleted = 0
+	stopped_runs = 0
 	skipped: list[dict] = []
 	for n in items:
 		try:
@@ -553,18 +595,21 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 			if doc.owner != me:
 				skipped.append({"name": n, "reason": "not owner"})
 				continue
-			delete_macro(n)  # clears run history first, then the macro
+			# stops its live runs, clears run history, then the macro
+			stopped_runs += delete_macro(n).get("stopped_runs") or 0
 			deleted += 1
 		except frappe.DoesNotExistError:
 			skipped.append({"name": n, "reason": "not found"})
 		except frappe.PermissionError:
 			skipped.append({"name": n, "reason": "not permitted"})
+		except MacroBusyError:
+			skipped.append({"name": n, "reason": "running"})
 		except Exception:
 			# Never leak internal exception text to the client — log server-side.
 			frappe.log_error(title="Jarvis: bulk macro delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
 	frappe.db.commit()
-	return {"deleted": deleted, "skipped": skipped}
+	return {"deleted": deleted, "skipped": skipped, "stopped_runs": stopped_runs}
 
 
 # --------------------------------------------------------------------------- #
