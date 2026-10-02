@@ -612,9 +612,14 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 @require_jarvis_user
 def macro_run_stats() -> dict:
 	"""Summary tiles for the dashboard: counts per status, success rate, and the
-	last run time — all owner-scoped. Success rate = completed / (completed +
-	failed); stopped runs are user cancellations, not failures, so they're
-	excluded from the rate (but still counted in ``total``)."""
+	last run time — all owner-scoped.
+
+	Success rate = completed / every run that ended with an outcome. A run the USER
+	stopped is their cancellation, not an outcome, and stays out of the rate (it is
+	still counted in ``total``). A run the ENGINE stopped is one: it carries a reason
+	(a step is waiting on a confirmation, so its write was never applied) and counts
+	against the rate like a failure. Left out, a macro that stops at the same card
+	every day would read 100%."""
 	owner = {"owner": frappe.session.user}
 	rows = frappe.db.sql(
 		"SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run` WHERE owner = %(owner)s GROUP BY status",
@@ -624,7 +629,12 @@ def macro_run_stats() -> dict:
 	by = {r.status: r.n for r in rows}
 	completed = by.get("completed", 0)
 	failed = by.get("failed", 0)
-	finished = completed + failed
+	stopped_with_reason = frappe.db.sql(
+		"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND status = 'stopped' AND IFNULL(error, '') != ''""",
+		owner,
+	)[0][0]
+	finished = completed + failed + stopped_with_reason
 	last = frappe.db.sql("SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s", owner)[0][
 		0
 	]

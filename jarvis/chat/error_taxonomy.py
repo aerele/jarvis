@@ -34,8 +34,8 @@ class RulesFileError(RuntimeError):
 	"""The shared rules file could not be turned into a usable rule table."""
 
 
-def _load_rules(path: Path) -> list[tuple[str, re.Pattern]]:
-	"""Parse ``turn_error_rules.mjs`` into ``[(code, compiled_pattern), ...]``.
+def _load_rules(path: Path) -> list[tuple[str, re.Pattern, str]]:
+	"""Parse ``turn_error_rules.mjs`` into ``[(code, compiled_pattern, headline), ...]``.
 
 	Every malformed case names the offending rule, so a bad edit is caught at
 	deploy time with a message that says what to fix.
@@ -47,17 +47,19 @@ def _load_rules(path: Path) -> list[tuple[str, re.Pattern]]:
 		raw_rules = json.loads(match.group(1))
 	except json.JSONDecodeError as exc:
 		raise RulesFileError(f"{path.name}: rules literal is not valid JSON: {exc}") from exc
-	rules: list[tuple[str, re.Pattern]] = []
+	rules: list[tuple[str, re.Pattern, str]] = []
 	for index, rule in enumerate(raw_rules):
 		code = rule.get("code") if isinstance(rule, dict) else None
 		pattern = rule.get("pattern") if isinstance(rule, dict) else None
 		if not code or pattern is None:
 			raise RulesFileError(f"{path.name}: rule #{index} needs both 'code' and 'pattern'")
 		try:
-			rules.append((code, re.compile(pattern, re.IGNORECASE | re.ASCII)))
+			rules.append(
+				(code, re.compile(pattern, re.IGNORECASE | re.ASCII), str(rule.get("headline") or ""))
+			)
 		except re.error as exc:
 			raise RulesFileError(f"{path.name}: rule {code!r} has an invalid pattern: {exc}") from exc
-	codes = {code for code, _ in rules}
+	codes = {code for code, _, _ in rules}
 	if len(rules) < MIN_RULES or "gateway" not in codes or "internal" not in codes:
 		raise RulesFileError(
 			f"{path.name}: only {len(rules)} rules loaded; expected at least {MIN_RULES} incl. gateway/internal"
@@ -74,4 +76,14 @@ def classify_error_text(raw) -> str:
 	text = (json.dumps(raw, default=str) if isinstance(raw, (dict, list)) else str(raw or ""))[
 		:MAX_CLASSIFY_CHARS
 	]
-	return next((code for code, pattern in _RULES if pattern.search(text)), "gateway")
+	return next((code for code, pattern, _ in _RULES if pattern.search(text)), "gateway")
+
+
+def headline_for(raw) -> str | None:
+	"""The user-facing headline of the first rule that matches ``raw``, or None when
+	no rule does. The same text the chat shows above a failed turn, for callers that
+	must say why something failed away from the chat (a macro run row)."""
+	text = (json.dumps(raw, default=str) if isinstance(raw, (dict, list)) else str(raw or ""))[
+		:MAX_CLASSIFY_CHARS
+	]
+	return next((headline for _, pattern, headline in _RULES if headline and pattern.search(text)), None)
