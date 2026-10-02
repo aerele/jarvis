@@ -77,6 +77,7 @@
 							<button
 								type="button"
 								class="flex text-ink-gray-5 hover:text-ink-gray-7"
+								:aria-label="runDetail(row).title + ': details'"
 								@click.stop.prevent="openError(row)"
 							>
 								<FeatherIcon name="info" class="size-3.5" />
