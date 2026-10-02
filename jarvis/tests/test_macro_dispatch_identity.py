@@ -348,6 +348,59 @@ class TestTwoDispatchersAtOnce(IdentityBase):
 			macros.advance_after_turn(conv, errored=False, run_id=step_one)
 		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
 
+	def _second_runs_before_the_first_writes_its_message(self, second):
+		real, ran = chat_api._enqueue_turn, []
+
+		def enqueue(*args, **kw):
+			if not ran:
+				ran.append(1)
+				self._elsewhere(second)
+			return real(*args, **kw)
+
+		return patch.object(chat_api, "_enqueue_turn", side_effect=enqueue)
+
+	def test_a_dispatcher_that_lost_and_then_raised_leaves_no_copy_of_the_step(self):
+		# The loser wrote its message and then failed at the accept gate (a lock wait
+		# that timed out). Its message stayed: the newest step message, with no turn.
+		# The engine took it for the current step and refused the real step's end.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		real, calls = admission.accept_or_queue, []
+
+		def gate(**kw):
+			calls.append(1)
+			if len(calls) == 2:
+				raise RuntimeError("lock wait timeout")
+			return real(**kw)
+
+		with (
+			self._locks_always_granted(),
+			self._second_runs_before_the_first_writes_its_message(
+				lambda: macros.advance_after_turn(conv, errored=False, run_id=step_one)
+			),
+			patch.object(admission, "accept_or_queue", side_effect=gate),
+			patch("frappe.log_error"),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_one)
+		self.assertEqual(len(calls), 2, "premise: both dispatchers reached the gate")
+		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
+
+	def test_a_dispatcher_told_the_site_is_full_does_not_park_a_run_whose_step_is_out(self):
+		# One dispatcher is told "full"; a slot frees and the other gets the step's
+		# turn; the first then parks the run. A parked run ignores its step's end.
+		run, conv, macro = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		real = chat_api._enqueue_turn
+
+		def full(*args, **kw):
+			with patch.object(chat_api, "_enqueue_turn", real):
+				self._elsewhere(lambda: macros._dispatch_step(*self._docs(run, macro), 1))
+			return {"ok": False, "overloaded": True, "reason": "busy"}
+
+		with self._locks_always_granted(), patch.object(chat_api, "_enqueue_turn", side_effect=full):
+			self.assertEqual(macros._dispatch_step(*self._docs(run, macro), 1), macros._STEP_ALREADY_OUT)
+		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
+
 	def test_a_dispatcher_that_lost_removes_the_message_it_wrote(self):
 		# The second runs before the first has written its message, so each writes one.
 		# The first is then told `duplicate`: its message has no turn and never will.
@@ -611,10 +664,23 @@ class TestAFailureBeforeTheTurnExists(_Starting, IdentityBase):
 		row = self._run(run)
 		self.assertEqual((row.status, row.current_step), ("waiting_capacity", 1))
 		self.assertEqual(self._turns(conv, besides=(step_one,)), [])
-		left = self._seeds(conv)[-1]
+		# A parked run leaves no message: the sweep would run it under an id the resume
+		# does not know.
+		self.assertEqual(len(self._seeds(conv)), 1, "the parked run kept a message with no turn")
 		macros.resume_waiting_capacity_runs()
 		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
-		self.assertEqual(self._seeds(conv)[-1], left, "the step's own message was not the one sent")
+
+	def test_a_message_left_in_a_parked_runs_chat_is_reused_by_the_resume(self):
+		# The removal above is best-effort. If the message is still there the resume
+		# gives it its turn; it does not write a second one.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		left = self._msg(conv, "user", origin="macro", content="step 2")
+		frappe.db.set_value(RUN, run, "status", "waiting_capacity")
+		frappe.db.commit()
+		macros.resume_waiting_capacity_runs()
+		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
+		self.assertEqual(self._seeds(conv)[-1], left)
 
 	def test_a_hook_killed_before_the_turn_is_healed_when_the_step_end_comes_again(self):
 		run, conv, _, seed = self._dangling_step()
@@ -693,6 +759,49 @@ class TestTheSweepHandsAStepToTheEngine(IdentityBase):
 		self.assertEqual(self._run(run).current_step, 3)
 		self.assertEqual(self._prompts(conv), ["prompt", "step 2", "step 3"])
 
+	def test_a_run_whose_every_step_has_its_fixed_id_is_healed_the_same(self):
+		# The fixture above starts from a step sent before this change (a random id).
+		# Here step 1 went out under its fixed id, and step 2's message is the one
+		# with no turn: it must be given its turn, not taken for a copy of step 1.
+		run, conv, macro = self._mk_run(steps=3, at_step=0)
+		self.assertEqual(macros._dispatch_step(*self._docs(run, macro), 0), macros._STEP_SENT)
+		one = step_turn_id(run, 0)
+		with patch.object(admission, "accept_or_queue", side_effect=_Killed()), self.assertRaises(_Killed):
+			self._finish(conv, one)
+		frappe.db.rollback()
+		seed = self._seeds(conv)[-1]
+		_age(seed)
+		self._sweep()
+		self._assert_step_sent_once(run, conv, 1, besides=(one,), seeds=2)
+		self.assertEqual(self._seeds(conv)[-1], seed)
+
+	def test_a_copy_of_a_step_that_is_out_is_removed_not_run(self):
+		# A second dispatcher of step 2 was killed after writing its message; the first
+		# dispatcher's turn carries the step. Re-dispatched by the sweep, step 2 ran twice.
+		run, conv, macro = self._mk_run(steps=3, at_step=1)
+		self._turn(conv)
+		self.assertEqual(macros._dispatch_step(*self._docs(run, macro), 1), macros._STEP_SENT)
+		copy = self._msg(conv, "user", origin="macro", content="step 2")
+		frappe.db.commit()
+		_age(copy)
+		self._sweep()
+		self.assertFalse(frappe.db.exists(MSG, copy))
+		self.assertEqual(self._ordinary_turns(copy), [])
+		self.assertEqual(len(self._seeds(conv)), 2)
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 2))
+
+	def test_a_later_message_that_is_not_a_copy_is_healed_the_ordinary_way(self):
+		# Only a message carrying the sent step's own prompt is taken for its copy.
+		run, conv, macro = self._mk_run(steps=3, at_step=1)
+		self._turn(conv)
+		self.assertEqual(macros._dispatch_step(*self._docs(run, macro), 1), macros._STEP_SENT)
+		other = self._msg(conv, "user", origin="macro", content="something else entirely")
+		frappe.db.commit()
+		_age(other)
+		with patch.object(macros, "_dispatch_step") as engine:
+			self._sweep()
+		self._assert_healed_the_ordinary_way(other, engine, "not a copy")
+
 	def test_a_second_strike_ends_the_run(self):
 		# The one retry failed too. The run used to stay `running`, and armed, until
 		# the stale-run sweep hours later.
@@ -764,6 +873,7 @@ class TestTheSweepHandsAStepToTheEngine(IdentityBase):
 			patch("frappe.log_error"),
 		):
 			self.assertEqual(macros.heal_dangling_seed(conv, seed), {"ok": True})
+		self.assertEqual(self._strikes(seed), 1, "a heal that failed was free: it is tried at every sweep")
 		with (
 			patch.object(macros, "_cas_run_status", side_effect=RuntimeError("db")),
 			patch("frappe.log_error"),
@@ -1120,6 +1230,17 @@ class TestTheHookDecidesAsBefore(IdentityBase):
 		row = self._run(run)
 		self.assertEqual(row.status, "failed")
 		self.assertEqual(row.error, "Finished, but its only step failed. Step 1: The model is overloaded.")
+
+	def test_a_turn_with_no_row_is_not_judged_by_another_turns_row(self):
+		# The step failed once (an `errored` turn), was retried, and the retry ran as a
+		# legacy job with no Turn row (the kill switch). Its end names a turn that has
+		# no row: the old attempt's row must not be what decides.
+		run, conv, _ = self._mk_run(steps=2, at_step=1)
+		_, seed, _ = self._turn(conv, state="errored", error="The model is overloaded.")
+		self._msg(conv, "assistant", content="done on the second try")
+		frappe.db.commit()
+		macros.advance_after_turn(conv, errored=False, run_id="no-such-turn", seed_message=seed)
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 2))
 
 	def test_a_failed_step_with_no_turn_row_is_a_failure(self):
 		run, conv, _ = self._mk_run(steps=2, at_step=1)
