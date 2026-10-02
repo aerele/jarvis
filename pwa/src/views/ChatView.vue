@@ -854,6 +854,14 @@ function onEvent(p) {
 			// since this frame carries no message body to splice in by hand.
 			load();
 			break;
+
+		case "macro:closed":
+			// A macro run ended with something to say (it failed, it stopped at a
+			// card) and the bench posted that as the last message of this
+			// conversation (macros._post_closing_message). Same shape as
+			// import:finished above: the frame carries no message body, so re-read.
+			load();
+			break;
 	}
 }
 
