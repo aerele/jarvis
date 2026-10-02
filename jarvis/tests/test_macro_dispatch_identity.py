@@ -616,6 +616,19 @@ class TestAFailureBeforeTheTurnExists(_Starting, IdentityBase):
 		self.assertEqual(self._seeds(conv)[-1], seed)
 		self.assertEqual(frappe.db.get_value(TURN, step_turn_id(run, 1), "turn_class"), "interactive")
 
+	def test_a_prompt_with_markup_is_still_recognised_as_the_steps_message(self):
+		# A message's text is sanitized on insert, so the stored prompt is not always
+		# the prompt as written. Not recognised, the step would get a second message.
+		_, conv, _ = self._mk_run()
+		prompt = "List <b>overdue</b> invoices <script>alert(1)</script> where total > 100"
+		stored = frappe.db.get_value(MSG, self._msg(conv, "user", origin="macro", content=prompt), "content")
+		self.assertNotEqual(stored, prompt, "premise: the sanitizer rewrote it")
+		self.assertTrue(macros._same_prompt(stored, prompt))
+		self.assertFalse(macros._same_prompt(stored, "List overdue invoices"))
+		self.assertFalse(macros._same_prompt("step 1", "step 2"))
+		frappe.db.commit()
+		self.assertTrue(macros._unsent_seed(conv, prompt))
+
 	def test_a_hook_that_raises_before_the_turn_ends_the_run_as_before(self):
 		run, conv, _ = self._mk_run(steps=3, at_step=1)
 		step_one, _, _ = self._turn(conv)
