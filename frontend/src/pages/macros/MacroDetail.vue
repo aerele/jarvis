@@ -682,46 +682,45 @@ async function save() {
 			schedule_day_of_month:
 				form.schedule_frequency === "monthly" ? Number(form.schedule_day) || 0 : 0,
 		};
-		// Summary handling (update only): an edited summary is explicit intent →
-		// send it; a rename-only save keeps the stored one; changed steps with an
-		// untouched summary omit it → the backend clears the stale copy and the
-		// background re-summarize regenerates it.
-		const stepsTouched = JSON.stringify(steps) !== snapshot.value.stepsJson;
+		// The form says what the user did: the steps as they stand, and the summary
+		// only when its text was edited here. The SERVER decides whether the steps
+		// changed (it clears a stale summary) and whether a new summary is due
+		// (`summarize`). The form used to guess both, and its guess started a model
+		// call on every save of a macro whose summary was empty or had failed, and
+		// ended a summary still being written by posting its text back on a rename.
 		const mergedTouched = (form.merged_prompt || "") !== (snapshot.value.merged_prompt || "");
-		let sentMerged = "";
-		let savedName = props.isNew ? "" : props.id;
+		let saved;
 		if (props.isNew) {
-			const r = (await api.createMacro(payload)) || {};
-			savedName = (r.data && r.data.name) || "";
+			saved = ((await api.createMacro(payload)) || {}).data || {};
 		} else {
+			const stepsTouched = JSON.stringify(steps) !== snapshot.value.stepsJson;
 			const upd = { name: props.id, ...payload };
-			if (mergedTouched || !stepsTouched) {
-				upd.merged_prompt = (form.merged_prompt || "").trim();
-				sentMerged = upd.merged_prompt;
-			}
-			await api.updateMacro(upd);
+			if (mergedTouched) upd.merged_prompt = (form.merged_prompt || "").trim();
+			saved = ((await api.updateMacro(upd)) || {}).data || {};
 			// The server has these edits from here on, whatever the reload below
 			// does. The form is clean as of now: left to the reload alone, one
 			// failed request kept it "dirty", with Run off behind "Save your changes
 			// first" and a second Save judging the steps against a stale snapshot.
-			// A summary this save omitted was cleared by the server (see above), so
-			// it goes from the form too: kept, the next rename-only save would send
-			// the stale text back as if the owner had written it.
-			if (!("merged_prompt" in upd)) form.merged_prompt = "";
+			// Changed steps with an untouched summary: the server cleared it, so it
+			// goes from the form too, or the form would go on showing a summary of
+			// steps the macro no longer has. This is only what is on screen until
+			// the reload, which brings the server's own answer.
+			if (stepsTouched && !mergedTouched) form.merged_prompt = "";
 			snapshot.value = formSnapshot();
 		}
-		// Re-summarize only when the sequence actually changed (or has no summary
-		// yet) - a rename shouldn't burn an LLM turn.
-		const needsSummary = steps.length >= 2 && (stepsTouched || props.isNew || !sentMerged);
-		if (savedName && needsSummary) {
+		const savedName = props.isNew ? saved.name || "" : props.id;
+		if (savedName && saved.summarize) {
 			try {
-				await api.summarizeMacro(savedName);
-				mergeStatus.value = "pending"; // Run waits for it, reload or no reload
-				toast.create({
-					message:
-						"Summarizing in the background - Run unlocks when the summary is ready.",
-					type: "info",
-				});
+				const started = (await api.summarizeMacro(savedName)) || {};
+				// `ok: false`: the site was busy and nothing was started.
+				if (started.ok !== false) {
+					mergeStatus.value = "pending"; // Run waits for it, reload or no reload
+					toast.create({
+						message:
+							"Summarizing in the background - Run unlocks when the summary is ready.",
+						type: "info",
+					});
+				}
 			} catch (e) {
 				// macro is saved either way; without a summary the steps run
 			}
@@ -768,7 +767,12 @@ async function run() {
 
 async function resummarize() {
 	try {
-		await api.summarizeMacro(props.id);
+		const started = (await api.summarizeMacro(props.id)) || {};
+		if (started.ok === false) {
+			// The site was busy and nothing was started: no "Summarizing" to wait on.
+			toast.error(escapeHtml(started.reason || "The summary could not be started."));
+			return;
+		}
 		mergeStatus.value = "pending";
 		toast.create({
 			message: "Summarizing in the background - Run unlocks when the summary is ready.",
