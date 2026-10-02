@@ -157,7 +157,7 @@ def _conditional_clear(name: str, fields: dict) -> bool:
 	return won
 
 
-def _advance_macro(conversation_id: str, *, errored: bool) -> None:
+def _advance_macro(conversation_id: str, *, errored: bool, assistant_message: str | None = None) -> None:
 	"""Chaining hook for the macro engine (mirrors turn_handler._advance_macro;
 	not imported from there to avoid a cycle risk between chat.turn_handler
 	and chat.turn_recovery). A macro chain that ends its turn via park-and-
@@ -171,7 +171,9 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	try:
 		from jarvis.chat import macros
 
-		macros.advance_after_turn(conversation_id, errored=errored)
+		# Recovery works from the assistant row; the engine finds the turn by it, and
+		# advances a macro only when that turn was the macro's own step.
+		macros.advance_after_turn(conversation_id, errored=errored, assistant_message=assistant_message)
 	except Exception:
 		frappe.log_error(
 			title="turn_recovery: macro advance hook failed",
@@ -246,7 +248,7 @@ def _finalize(row: dict, text: str, *, media_rels: list[str] | None = None) -> N
 			"run_id": "recovered",
 		},
 	)
-	_advance_macro(conv, errored=False)
+	_advance_macro(conv, errored=False, assistant_message=name)
 
 	# Best-effort: a recovered long turn is exactly the kind that produced
 	# charts / generated images, so it deserves the same rich-output
@@ -345,7 +347,7 @@ def _error_side_effects(row: dict, message: str) -> None:
 			"error": message,
 		},
 	)
-	_advance_macro(row["conversation"], errored=True)
+	_advance_macro(row["conversation"], errored=True, assistant_message=row["name"])
 
 
 def _active_map(sess: AgentSession) -> dict:

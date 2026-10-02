@@ -217,8 +217,10 @@ def list_macros_page(
 	from jarvis.chat.macro_scheduler import is_retry_pending
 
 	now = frappe.utils.now_datetime()
+	last_runs = _last_runs(names, me)
 	for r in rows:
 		r["step_count"] = step_counts.get(r.name, 0)
+		r["last_run"] = last_runs.get(r.name)
 		# Pure arithmetic on the row, no query: see get_macro.
 		r["next_run_is_retry"] = int(is_retry_pending(r, now))
 		# Time renders as a timedelta over raw SQL; stringify for a stable payload.
@@ -232,6 +234,42 @@ def list_macros_page(
 		"start": start,
 		"page_length": pl,
 	}
+
+
+_LAST_RUN_FIELDS = ("status", "error", "started_at", "finished_at", "conversation", "trigger")
+
+
+def _last_runs(macro_names: list[str], owner: str) -> dict:
+	"""``{macro: its most recent run}`` for the macros named: how the last run went,
+	for the list and the form. Nothing else on either screen says whether a macro
+	worked the last time it ran; ``last_run_at`` is stamped by the scheduler only and
+	carries no outcome.
+
+	One query for a whole page. Scoped to ``owner``'s run rows, which is every run of
+	their macro by construction. The conversation is handed back only to that owner:
+	someone overseeing the macro may know that a run failed, not read the chat."""
+	if not macro_names:
+		return {}
+	rows = frappe.db.sql(
+		"""SELECT r.name, r.macro, r.status, r.error, r.started_at, r.finished_at,
+			r.conversation, r.`trigger`
+		FROM `tabJarvis Macro Run` r
+		JOIN (
+			SELECT macro, MAX(creation) AS latest FROM `tabJarvis Macro Run`
+			WHERE macro IN %(names)s AND owner = %(owner)s GROUP BY macro
+		) m ON m.macro = r.macro AND m.latest = r.creation
+		WHERE r.owner = %(owner)s""",
+		{"names": tuple(macro_names), "owner": owner},
+		as_dict=True,
+	)
+	is_owner = frappe.session.user == owner
+	out: dict = {}
+	for r in rows:
+		run = {f: r.get(f) for f in _LAST_RUN_FIELDS}
+		run["error"] = run["error"] or ""
+		run["conversation"] = (run["conversation"] or "") if is_owner else ""
+		out[r.macro] = run
+	return out
 
 
 @frappe.whitelist()
@@ -263,6 +301,7 @@ def get_macro(name: str) -> dict:
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
 		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
+		"last_run": _last_runs([doc.name], doc.owner).get(doc.name),
 		"steps": [
 			{
 				"label": s.label or "",
