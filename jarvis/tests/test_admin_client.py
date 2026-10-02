@@ -1075,24 +1075,135 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		)
 		self.assertEqual(out, "Max retries exceeded with url: /api/v1/audio?[REDACTED] (Caused by X)")
 
-	def test_scrubbing_a_long_adversarial_string_is_fast(self):
-		# The URL-userinfo pattern once rescanned a run of scheme characters from
-		# every word boundary in it: 68 s on 200 KB of "a.a.a.". Several callers pass
-		# an upstream's text uncapped, so every pattern has to be linear. Measured at
-		# about 25 ms each; the bound leaves room for a slow CI box.
+	# Shapes that made a pattern rescan one long run from many starting points.
+	_SLOW_SHAPES = (
+		("dotted run", "a." * 100000),
+		("hyphenated run", "de-ad-be-ef-" * 17000),
+		("scheme characters then a userinfo", "a+.-" * 50000 + "://x:y"),
+		("an unclosed quoted key", '"' + "token" * 40000),
+		# The JWT pattern once started again at every "-eyJ" of a run.
+		("JWT starts in one run", "-eyJ" * 50000),
+		("JWT starts, long segments", "-eyJaaaaaaaaaaaaaaaa" * 10000),
+		("JWT starts, then one dot", "eyJaaaaaaaaaa-" * 15000 + ".a"),
+		("JWT starts, a last segment of hyphens", "-eyJ" * 50000 + "aaaaaaaaaa.a.-"),
+		("closing brackets after a query", "x?a=1" + ")]" * 100000),
+		("an unclosed quoted value", 'password: "' + "a\\" * 100000),
+		("a token key with no secret", "token " + "a" * 200000),
+	)
+
+	def test_every_pattern_is_fast_on_a_long_adversarial_string(self):
+		# The URL-userinfo pattern once rescanned a run of scheme characters from every
+		# word boundary in it, and the JWT pattern from every "-eyJ". The patterns are
+		# timed here WITHOUT the input cap, so the cap is not what makes this pass.
+		# Measured locally at 35 ms or less each; the bound leaves room for a slow CI box.
 		import time
 
-		for label, text in (
-			("dotted run", "a." * 100000),
-			("hyphenated run", "de-ad-be-ef-" * 17000),
-			("scheme characters then a userinfo", "a+.-" * 50000 + "://x:y"),
-			("an unclosed quoted key", '"' + "token" * 40000),
-		):
+		for label, text in self._SLOW_SHAPES:
 			with self.subTest(shape=label):
 				self.assertGreaterEqual(len(text), 200000)
 				started = time.perf_counter()
+				for pattern, replacement in admin_client._SECRET_PATTERNS:
+					text = pattern.sub(replacement, text)
+				self.assertLess(time.perf_counter() - started, 0.5)
+
+	def test_scrubbing_a_long_adversarial_string_is_fast(self):
+		import time
+
+		for label, text in self._SLOW_SHAPES:
+			with self.subTest(shape=label):
+				started = time.perf_counter()
 				admin_client._scrub_secrets(text)
 				self.assertLess(time.perf_counter() - started, 0.5)
+
+	def test_text_past_the_input_cap_is_cut_before_any_pattern_sees_it(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		seen = []
+
+		class Recording:
+			def sub(self, _replacement, text):
+				seen.append(len(text))
+				return text
+
+		with patch.object(admin_client, "_SECRET_PATTERNS", ((Recording(), ""),)):
+			admin_client._scrub_secrets("word " * cap)
+		self.assertEqual(len(seen), 1)
+		self.assertLessEqual(seen[0], cap)
+
+	def test_the_input_cap_never_returns_an_unscrubbed_tail(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		for label, text, expected in (
+			# A credential the cap cuts in two would be left as a prefix no pattern
+			# knows: the cut goes back to the last whitespace, so it is dropped whole.
+			(
+				"a credential across the cap",
+				"api_key=" + "A" * (cap - 30) + " " + key + " and more",
+				"api_key=[REDACTED] ...[truncated]",
+			),
+			# Whatever lies past the cap is gone, not passed through.
+			(
+				"a credential past the cap",
+				"api_key=" + "A" * cap + " then " + key,
+				"api_key=[REDACTED] ...[truncated]",
+			),
+			("no whitespace to cut at", "A" * (cap + 10), "A" * 500 + " ...[truncated]"),
+		):
+			with self.subTest(case=label):
+				out = admin_client._scrub_secrets(text)
+				self.assertEqual(out, expected)
+				self.assertEqual(admin_client._scrub_secrets(out), out)
+
+	def test_text_at_the_input_cap_is_not_marked_as_cut(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		self.assertEqual(admin_client._scrub_secrets("api_key=" + "A" * (cap - 8)), "api_key=[REDACTED]")
+
+	def test_the_input_cap_loses_nothing_a_caller_shows(self):
+		# Every caller shows at most _MAX_MESSAGE_CHARS of the result (a macro run's
+		# reason is cut to 2,000 before it gets here and to 120 after).
+		from jarvis.chat import macros
+
+		self.assertGreaterEqual(admin_client._MAX_SCRUB_INPUT_CHARS, 10 * macros._SCRUB_INPUT_MAX)
+		self.assertGreaterEqual(admin_client._MAX_SCRUB_INPUT_CHARS, 40 * admin_client._MAX_MESSAGE_CHARS)
+
+	def test_a_raw_admin_body_is_scrubbed_before_it_is_cut(self):
+		# Cut first, a key that straddles the cut kept a prefix too short for its pattern.
+		key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		resp = MagicMock(status_code=400, text="x" * 478 + " " + key + " was refused")
+		with self.assertRaises(AdminValidationError) as cm:
+			admin_client._raise_for_admin_raw(resp)
+		self.assertNotIn("sk-ant", str(cm.exception))
+		self.assertLess(len(str(cm.exception)), 600)
+
+	def test_a_jwt_glued_after_a_hyphen_is_still_redacted(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"
+		for text, expected in (
+			(f"tok-{jwt} refused", "tok-[REDACTED] refused"),
+			(f"a_b-c-{jwt}", "a_b-c-[REDACTED]"),
+			(f"id_token rejected: {jwt}.", "id_token rejected: [REDACTED]."),
+			(f"x.{jwt}", "x.[REDACTED]"),
+			# Not a word boundary before "eyJ": never was a match.
+			(f"tok_{jwt}", f"tok_{jwt}"),
+			("eyJhbGciOiJIUzI1NiJ9.only-two", "eyJhbGciOiJIUzI1NiJ9.only-two"),
+		):
+			with self.subTest(text=text[:40]):
+				self.assertEqual(admin_client._scrub_secrets(text), expected)
+
+	def test_the_jwt_pattern_matches_what_the_word_boundary_form_matched(self):
+		# The linear pattern is longer than the one it replaced. This holds the two
+		# to the same output on JWT-shaped pieces put together at random (seeded).
+		import random
+		import re
+
+		was = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b")
+		now, replacement = next(
+			(pat, repl) for pat, repl in admin_client._SECRET_PATTERNS if "eyJ" in pat.pattern
+		)
+		pieces = ["eyJ", "-", "_", ".", "a", "aaaaaaaaaa", " ", "eyJaaaaaaaaaaaa", "-eyJ", ".b.c"]
+		pieces += ["9", "\n", "--", "..", "x-", "=", "/"]
+		rng = random.Random(20261002)
+		for _ in range(20000):
+			text = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 10)))
+			self.assertEqual(now.sub(replacement, text), was.sub("[REDACTED]", text), text)
 
 	# (text, what must not survive). The security review's probe corpus, less the
 	# shapes this scrub does not claim (an unlabelled token, a short all-letter
@@ -1165,6 +1276,37 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM", ["SflKxwRJSMeKKF2QT4fwpM"]),
 		(f"401 Client Error: Unauthorized for url: https://u:{_S}@h/x?token={_S2}", [_S, _S2]),
 		("x" * 470 + f" api_key={_S}{_S2}", [_S, _S2]),
+		# A query string with no path before it, and a form body with no "?".
+		(f"?token={_S}", [_S]),
+		(f"GET /x ?token={_S}", [_S]),
+		(f"https://h/x??token={_S}", [_S]),
+		(f"grant_type=client&token={_S}", [_S]),
+		(f"a=1&sig={_S}", [_S]),
+		(f"a=1&key={_S}", [_S]),
+		(f"https://h/x?a=1 &token={_S}", [_S]),
+		(f"https://h/x?a=1\n&token={_S}", [_S]),
+		(f"https://h/cb#id_token={_S}", [_S]),
+		(f"https://h/cb#token={_S}", [_S]),
+		(f"https://h/x;token={_S}", [_S]),
+		# A query string that holds what would end a URL elsewhere.
+		(f"https://h/x?name=O'Brien&session={_S}", [_S]),
+		(f"https://h/x?filter=(a,b)&session={_S}", [_S]),
+		(f"https://h/x?ids=[1,2]&session={_S}", [_S]),
+		(f"https://h/x?a=1\\u0026session={_S}", [_S]),
+		(f"see (https://h/x?session={_S}), then retry", [_S]),
+		# A sentence that ends in a keyword and a colon, then the next JSON pair.
+		(f'{{"error": "bad password:", "api_key": "{_S}"}}', [_S]),
+		(f"{{'error': 'invalid secret:', 'api_key': '{_S}'}}", [_S]),
+		(f'{{"hint": "set api_key=", "token": "{_S}"}}', [_S]),
+		# A quoted value that a cut left open, JSON inside a JSON string, bytes.
+		(f'{{"api_key": "{_S}', [_S]),
+		(f"{{'api_key': '{_S}", [_S]),
+		(f'{{"api_key": "an escaped \\" quote {_S}', [_S]),
+		(f'password: "correct horse {_S}', [_S, "correct horse"]),
+		(f'{{\\"api_key\\": \\"{_S}\\"}}', [_S]),
+		(f'{{\\"Authorization\\": \\"Bearer {_S}\\"}}', [_S]),
+		(f'{{\\"api_key\\": \\"{_S}', [_S]),
+		(f"{{'api_key': b'{_S}'}}", [_S]),
 	)
 
 	# Text that must come back exactly as it went in.
@@ -1195,7 +1337,61 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 		"Could not find Party Type: Customer, Party: ACME & Sons",
 		"Failed to get method for command jarvis_admin_v2.api.subscription_connect with No module named x",
 		"[REDACTED]",
+		# A URL, then an e-mail address with no space between: not a userinfo.
+		"https://erp.example.com,admin@example.com",
+		'{"url":"https://erp.example.com","email":"bob@example.com"}',
+		"<https://erp.example.com>bob@example.com",
+		# "token word:word" with no digit in it is a sentence, not a key and its secret.
+		"token refresh:failed",
+		"token missing:please sign in again",
+		"Token invalid:expired",
+		# OAuth's token_type names the scheme; its value is never a credential.
+		'{"token_type": "Bearer", "expires_in": 3600}',
+		"regex (?P<name>=x)",
+		"regex (?<=a)b and (?=x)",
+		"What?! really=yes",
+		"x = a ? b : c",
+		"WHERE name=? AND owner=?",
 	)
+
+	# (text, what it reads as). A URL's query string goes; what follows the URL stays.
+	_AFTER_THE_URL = (
+		(
+			'{"url":"https://h/x?a=1","status":"failed","detail":"Sales Invoice SINV-0001 not found"}',
+			'{"url":"https://h/x?[REDACTED]","status":"failed","detail":"Sales Invoice SINV-0001 not found"}',
+		),
+		(
+			'{"url": "https://h/x?a=1", "status": "failed"}',
+			'{"url": "https://h/x?[REDACTED]", "status": "failed"}',
+		),
+		("url='https://h/x?a=1', status=500", "url='https://h/x?[REDACTED]', status=500"),
+		(
+			'<a href="https://h/app/sales-invoice?status=Open">Open invoices</a> are overdue',
+			'<a href="https://h/app/sales-invoice?[REDACTED]">Open invoices</a> are overdue',
+		),
+		("<https://h/x?a=1> was refused", "<https://h/x?[REDACTED]> was refused"),
+		("open `https://h/x?a=1` again", "open `https://h/x?[REDACTED]` again"),
+		(
+			"[the docs](https://host.example/docs?page=2) explain it",
+			"[the docs](https://host.example/docs?[REDACTED]) explain it",
+		),
+		(
+			"[the docs](https://host.example/docs?page=2).",
+			"[the docs](https://host.example/docs?[REDACTED]).",
+		),
+		("[see https://h/x?a=1] and retry", "[see https://h/x?[REDACTED]] and retry"),
+		("see (https://h/x?a=1), then retry", "see (https://h/x?[REDACTED]), then retry"),
+		("https://h/x?a=1, status=500", "https://h/x?[REDACTED], status=500"),
+		# Inside the query string the same characters do not end it.
+		("https://h/x?a=(1)&b=2 failed", "https://h/x?[REDACTED] failed"),
+		("https://h/x?ids=1,2,3&b=2 failed", "https://h/x?[REDACTED] failed"),
+		("https://h/x?name=O'Brien&b=2 failed", "https://h/x?[REDACTED] failed"),
+	)
+
+	def test_what_follows_a_url_is_kept(self):
+		for text, expected in self._AFTER_THE_URL:
+			with self.subTest(text=text):
+				self.assertEqual(admin_client._scrub_secrets(text), expected)
 
 	def test_no_secret_in_the_probe_corpus_survives(self):
 		for text, secrets in self._LEAKS:
@@ -1215,6 +1411,21 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 			(f"Bearer abcdef123456:{s} was refused", "Bearer [REDACTED] was refused"),
 			# A port, then a query with an "@" in it, is not userinfo.
 			("https://host:8443?x=a@b failed", "https://host:8443?[REDACTED] failed"),
+			# A form body with no "?": the named parameter goes, the rest stays.
+			(f"grant_type=client&token={s}&scope=all", "grant_type=client&token=[REDACTED]&scope=all"),
+			(f"https://h/cb#id_token={s}", "https://h/cb#id_token=[REDACTED]"),
+			(f"?token={s}", "?[REDACTED]"),
+			# The next pair's key is not eaten as the value of a keyword in a sentence.
+			(
+				f'{{"error": "bad token", "api_key": "{s}", "status": 401}}',
+				'{"error": "bad token", "api_key": "[REDACTED]", "status": 401}',
+			),
+			(f'{{"api_key": "{s}', '{"api_key": "[REDACTED]"'),
+			(f'{{\\"api_key\\": \\"{s}\\"}}', '{\\"api_key\\": \\"[REDACTED]\\"}'),
+			(f"{{'api_key': b'{s}'}}", "{'api_key': '[REDACTED]'}"),
+			(f"token abcdef123456:{s}", "token [REDACTED]"),
+			# A keyword and its value on two lines stay on two lines.
+			(f"password:\n{s} next", "password=\n[REDACTED] next"),
 		):
 			with self.subTest(text=text):
 				self.assertEqual(admin_client._scrub_secrets(text), expected)
@@ -1230,10 +1441,43 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 			"x?Authorization: abc123def456",
 			f"password={self._S} secret: {self._S2}",
 		]
+		texts += [t for t, _ in self._AFTER_THE_URL]
+		texts += [
+			# A later pattern's output must not be what lets an earlier one match on
+			# the second pass: a keyword across a line break inside an open quoted
+			# value, a named parameter that held a "/" before an "@".
+			'"token": "a password:\nb c"',
+			'"token": "%password\n:<?a=1/x>',
+			"https://api_key&sig=/x=&Cookie@Authorization",
+			'"token": "}?a=1\\" \n',
+			"?&sig=,",
+			"x?a=1].b=2",
+		]
 		for raw in texts:
 			with self.subTest(raw=raw[:80]):
 				once = admin_client._scrub_secrets(raw)
 				self.assertEqual(admin_client._scrub_secrets(once), once)
+
+	def test_scrubbing_twice_changes_nothing_on_generated_text(self):
+		# Credential-shaped pieces put together at random (seeded, so the same strings
+		# every run): the hand-written cases above only cover the orders someone thought of.
+		import random
+
+		pieces = (
+			["Authorization", "Bearer", "token", "password", "api_key", "secret", "Cookie"]
+			+ ["https://", "://", "h.example", "/x", "?", "&", "=", ":", " ", "\n", "@", "#", ";"]
+			+ ['"', "'", "{", "}", ",", "[", "]", "(", ")", "\\", ".", "-", "`", "<", ">", "!", "b"]
+			+ [self._S, "abcdef123456", "a1", "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV", "eyJ"]
+			+ ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"]
+			+ ["[REDACTED]", "=[REDACTED]", "?[REDACTED]", "://[REDACTED]@"]
+			+ ['"token": "', "'secret': '", '\\"', "&token=", "#sig=", ";key=", "?a=1", "password:"]
+		)
+		rng = random.Random(20261002)
+		for _ in range(20000):
+			raw = "".join(rng.choice(pieces) for _ in range(rng.randint(2, 10)))
+			once = admin_client._scrub_secrets(raw)
+			if admin_client._scrub_secrets(once) != once:
+				self.fail(f"not idempotent: {raw!r} -> {once!r} -> {admin_client._scrub_secrets(once)!r}")
 
 	def test_ordinary_prose_is_left_alone(self):
 		for text in self._PROSE:
