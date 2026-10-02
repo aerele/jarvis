@@ -1086,40 +1086,37 @@ def _assert_owner(conversation: str) -> str:
 	return owner
 
 
-@frappe.whitelist(methods=["POST"])
-def cancel_queued_turn(run_id: str) -> dict:
-	"""Owner-checked cancel of a pre-dispatch turn, ROUTED BY STATE (CDX-8):
+def _cancel_pre_dispatch(run_id: str, *, owner_of, label: str, attempts: int = 1) -> dict:
+	"""Cancel a turn that has not been dispatched yet, ROUTED BY STATE (CDX-8). The
+	one implementation behind the owner's endpoint (``cancel_queued_turn``) and the
+	macro engine's own cancel (``macros._cancel_undispatched_turn``).
 
-	  * ``queued``            -> ``turn_state.cancel_queued`` (version-fenced): CAS to
-	                            ``cancelled`` CLEARING ``reserved`` + ``reservation_
-	                            expires_at`` atomically. A reserved-but-unclaimed queued
-	                            turn (the pump reserved a credit before prepare) would
-	                            otherwise leak that credit until the ~900s reservation
-	                            expiry — the reported leak.
-	  * ``preparing``/``ready`` -> ``turn_state.cancel_preparing_or_ready`` (version-
-	                            fenced): CAS to ``cancelled`` (also clearing the
-	                            reservation) + clean the assistant placeholder so no
-	                            stuck spinner. The pump owns dispatch but nothing is in
-	                            flight yet, so no gateway abort is needed; the losing
-	                            prepare's ``mark_ready`` then affects 0 rows.
+	Returns ``{"row", "owner", "path"}``: ``row`` is None when there is no such turn,
+	``path`` is ``"queued"`` / ``"preparing_ready"`` for a won cancel and None when
+	the turn was not in a pre-dispatch state or the cancel lost its race.
 
-	Returns ``{"ok": True, "run_id", "path": "queued"|"preparing_ready"}`` so the
-	caller/UI knows which path won; ``{"ok": False, ...}`` when the turn already
-	advanced (e.g. dispatched) — the UI then KEEPS its chip until the server confirms
-	(no optimistic clear on failure).
+	``owner_of(conversation)`` returns the conversation's owner. It is where a caller
+	refuses someone who may not cancel this turn (the endpoint passes
+	``_assert_owner``); it runs inside the unit, before any write.
 
 	W1: the read (prelude) + state-routed CAS (+ placeholder cleanup) is ONE unit,
 	replayed whole by ``txn.replay_on_conflict``: the pump commits promote/claim/
 	dispatch CASes on this same row roughly every 0.2s, so a plain read here can
 	easily be stale by the time the CAS runs, which used to surface as a raw 500.
 	The prelude (the read + the owner check) is read-only, so re-running it on
-	replay just re-reads the present row/version - correct, not merely safe. On
-	exhaustion the conflict is caught at this endpoint boundary ONLY (never inside
-	the unit, which must stay a plain re-raise) and turned into the same
-	``{"ok": False, ...}`` shape a lost CAS already returns, logged rather than
-	surfaced as a 500."""
-	refuse_in_tool_dispatch()
-	require_jarvis_access()
+	replay just re-reads the present row/version - correct, not merely safe. A
+	conflict that outlives the replay is raised to the caller (never swallowed
+	inside the unit, which must stay a plain re-raise).
+
+	``attempts``: on a server that does not refuse a stale write (no snapshot
+	isolation) a lost race is not an error, the CAS just matches no row: the pump
+	promoted ``queued`` to ``preparing`` between the read and the CAS, and the turn
+	has still not started. With ``attempts=2`` the unit runs once more on a fresh
+	read and takes the other route. The endpoint keeps 1 (it reports "already
+	started" and the chip stays); the engine passes 2, because a step it failed to
+	cancel runs after the run was stopped.
+
+	Each unit commits: call it with nothing pending."""
 	from jarvis.chat import turn_state as ts
 
 	def unit() -> dict:
@@ -1131,7 +1128,7 @@ def cancel_queued_turn(run_id: str) -> dict:
 		)
 		if not row:
 			return {"row": None, "owner": None, "path": None}
-		owner = _assert_owner(row["conversation"])
+		owner = owner_of(row["conversation"])
 		state = row["state"]
 		version = int(row["version"] or 0)
 		path = None
@@ -1166,23 +1163,25 @@ def cancel_queued_turn(run_id: str) -> dict:
 		frappe.db.commit()
 		return {"row": row, "owner": owner, "path": path}
 
-	try:
-		result = txn.replay_on_conflict(unit, label=f"admission.cancel_queued_turn {run_id}")
-	except Exception as e:
-		txn.report_lost_race(e, title="admission.cancel_queued_turn")
-		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
+	result = txn.replay_on_conflict(unit, label=label)
+	for _ in range(attempts - 1):
+		row = result["row"]
+		if result["path"] or not row or row["state"] not in ("queued", "preparing", "ready"):
+			break
+		result = txn.replay_on_conflict(unit, label=label)
+	return result
 
-	row, owner, path = result["row"], result["owner"], result["path"]
-	if row is None:
-		return {"ok": False, "reason": frappe._("This turn no longer exists.")}
+
+def _finish_pre_dispatch_cancel(run_id: str, row: dict, owner: str, path: str, *, reason: str, source: str):
+	"""Everything that follows a WON pre-dispatch cancel, for both callers of
+	``_cancel_pre_dispatch``: the model-switch hook, the live event, the durable
+	transcript marker carrying ``reason``, and handing the freed credit on."""
 	if path == "preparing_ready":
 		# jarvis#1425 review (scoped re-review, 2026-09-27): preparing/ready are
-		# in-flight states (_INFLIGHT_STATES) - a user cancel leaves one.
+		# in-flight states (_INFLIGHT_STATES) - a cancel leaves one.
 		from jarvis.chat import llm_switch
 
-		llm_switch.apply_if_active(source="admission.cancel_queued_turn")
-	if path is None:
-		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
+		llm_switch.apply_if_active(source=source)
 	try:
 		publish_to_user(
 			owner,
@@ -1191,14 +1190,14 @@ def cancel_queued_turn(run_id: str) -> dict:
 				"conversation_id": row["conversation"],
 				"run_id": run_id,
 				"message_id": row["seed_message"],
-				"reason": USER_CANCEL_REASON,
+				"reason": reason,
 			},
 		)
 	except Exception:
 		pass
 	# SUXI-4: durable transcript marker so a later reload shows the send was
 	# cancelled (not silently dropped).
-	_write_cancel_marker(row["conversation"], USER_CANCEL_REASON)
+	_write_cancel_marker(row["conversation"], reason)
 	target = row["relay_target_id"] or DEFAULT_RELAY_TARGET
 	# The freed credit lets the next queued turn run. In pump mode wake the pump to
 	# re-promote (promote_next is a no-op there); else best-effort legacy promote.
@@ -1216,6 +1215,53 @@ def cancel_queued_turn(run_id: str) -> dict:
 			pass
 	else:
 		promote_next(target)
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_queued_turn(run_id: str) -> dict:
+	"""Owner-checked cancel of a pre-dispatch turn, ROUTED BY STATE (CDX-8):
+
+	  * ``queued``            -> ``turn_state.cancel_queued`` (version-fenced): CAS to
+	                            ``cancelled`` CLEARING ``reserved`` + ``reservation_
+	                            expires_at`` atomically. A reserved-but-unclaimed queued
+	                            turn (the pump reserved a credit before prepare) would
+	                            otherwise leak that credit until the ~900s reservation
+	                            expiry — the reported leak.
+	  * ``preparing``/``ready`` -> ``turn_state.cancel_preparing_or_ready`` (version-
+	                            fenced): CAS to ``cancelled`` (also clearing the
+	                            reservation) + clean the assistant placeholder so no
+	                            stuck spinner. The pump owns dispatch but nothing is in
+	                            flight yet, so no gateway abort is needed; the losing
+	                            prepare's ``mark_ready`` then affects 0 rows.
+
+	Returns ``{"ok": True, "run_id", "path": "queued"|"preparing_ready"}`` so the
+	caller/UI knows which path won; ``{"ok": False, ...}`` when the turn already
+	advanced (e.g. dispatched) — the UI then KEEPS its chip until the server confirms
+	(no optimistic clear on failure).
+
+	The cancel itself is ``_cancel_pre_dispatch`` (W1: one replayed unit). On
+	exhaustion the conflict is caught at this endpoint boundary ONLY and turned into
+	the same ``{"ok": False, ...}`` shape a lost CAS already returns, logged rather
+	than surfaced as a 500."""
+	refuse_in_tool_dispatch()
+	require_jarvis_access()
+
+	try:
+		result = _cancel_pre_dispatch(
+			run_id, owner_of=_assert_owner, label=f"admission.cancel_queued_turn {run_id}"
+		)
+	except Exception as e:
+		txn.report_lost_race(e, title="admission.cancel_queued_turn")
+		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
+
+	row, owner, path = result["row"], result["owner"], result["path"]
+	if row is None:
+		return {"ok": False, "reason": frappe._("This turn no longer exists.")}
+	if path is None:
+		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
+	_finish_pre_dispatch_cancel(
+		run_id, row, owner, path, reason=USER_CANCEL_REASON, source="admission.cancel_queued_turn"
+	)
 	return {"ok": True, "run_id": run_id, "path": path}
 
 
