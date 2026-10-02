@@ -6,6 +6,8 @@ every trigger / activity / ToDo row created here is tracked and deleted in
 tearDown; no LLM/network calls anywhere on these paths.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -30,6 +32,14 @@ ACTIVITY = "Jarvis Trigger Activity"
 
 ADMIN_USER = "jarvis-trigger-admin@example.com"
 PLAIN_USER = "jarvis-trigger-user@example.com"
+# A Script-action trigger materializes a Server Script, so authoring one needs
+# the same rights as authoring a Server Script directly: Script Manager + the
+# Server Script create permission (System Manager). SCRIPT_USER holds both; the
+# plain System Manager (ADMIN_USER) deliberately does NOT hold Script Manager.
+SCRIPT_USER = "jarvis-trigger-scriptmgr@example.com"
+# The controller imports is_safe_exec_enabled at module scope, so patch it there
+# to let Script triggers validate on a bench without server_script_enabled.
+_CTRL = "jarvis.jarvis.doctype.jarvis_trigger.jarvis_trigger"
 
 
 def _ensure_user(email: str, roles: list[str]) -> None:
@@ -56,6 +66,7 @@ class _TriggersApiTestCase(FrappeTestCase):
 		ensure_jarvis_user_role()
 		_ensure_user(ADMIN_USER, ["System Manager"])
 		_ensure_user(PLAIN_USER, [JARVIS_USER_ROLE])
+		_ensure_user(SCRIPT_USER, ["System Manager", "Script Manager"])
 		self._orig_user = frappe.session.user
 		self._triggers: list[str] = []
 		self._activities: list[str] = []
@@ -371,3 +382,71 @@ class TestActivityFeed(_TriggersApiTestCase):
 		self.assertIn("total_rows", data)
 		self.assertGreaterEqual(data["last_24h"]["Success"], 1)
 		self.assertGreaterEqual(data["last_24h"]["Failed"], 1)
+
+
+class TestScriptActionAuthoring(_TriggersApiTestCase):
+	"""A Script-action trigger runs a Server Script with full privileges, so it
+	must require Script-Manager authoring rights (issue #13) - the managed sync's
+	ignore_permissions/ignore_validate must not become a way around core's
+	only_for("Script Manager")."""
+
+	def _script_draft(self, **overrides):
+		fields = {
+			"doctype": TRIGGER,
+			"trigger_name": f"script-{frappe.generate_hash(length=8)}",
+			"target_doctype": "ToDo",
+			"doc_event": "on_update",
+			"action_type": "Script",
+			"script_body": "x = 1",
+		}
+		fields.update(overrides)
+		return frappe.get_doc(fields)
+
+	def test_system_manager_without_script_manager_is_refused(self):
+		# A System Manager who lacks Script Manager cannot author a Script action,
+		# and no managed Server Script is created.
+		before = frappe.db.count("Server Script")
+		frappe.set_user(ADMIN_USER)
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			self.assertRaises(frappe.PermissionError, self._script_draft().insert)
+		frappe.set_user(self._orig_user)
+		self.assertEqual(frappe.db.count("Server Script"), before)
+
+	def test_script_manager_may_author(self):
+		# Script Manager + Server Script create permission: allowed, and the
+		# managed Server Script is materialized.
+		frappe.set_user(SCRIPT_USER)
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = self._script_draft()
+			doc.insert()
+		self._triggers.append(doc.name)
+		self.assertTrue(doc.server_script)
+		self.assertTrue(frappe.db.exists("Server Script", doc.server_script))
+
+	def test_llm_action_is_unaffected(self):
+		# The gate is Script-action-only: a manage user without Script Manager can
+		# still author LLM triggers.
+		frappe.set_user(ADMIN_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": TRIGGER,
+				"trigger_name": f"llm-{frappe.generate_hash(length=8)}",
+				"target_doctype": "ToDo",
+				"doc_event": "on_update",
+				"action_type": "LLM",
+				"llm_instruction": "check",
+			}
+		)
+		doc.insert()
+		self._triggers.append(doc.name)
+		self.assertEqual(doc.action_type, "LLM")
+
+	def test_system_save_is_not_blocked(self):
+		# System / programmatic saves (ignore_permissions) must still work, e.g. a
+		# patch or fixture materialising a Script trigger with no user in context.
+		frappe.set_user(ADMIN_USER)  # no Script Manager, but ignore_permissions set
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = self._script_draft()
+			doc.insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		self.assertTrue(frappe.db.exists(TRIGGER, doc.name))
