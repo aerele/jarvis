@@ -30,7 +30,7 @@ vi.mock("@vueuse/core", async (importOriginal) => {
 	return { ...actual, useStorage: (_key, initial) => ref(initial) };
 });
 vi.mock("frappe-ui", () => ({
-	toast: { success: vi.fn(), error: vi.fn(), create: vi.fn() },
+	toast: { success: vi.fn(), error: vi.fn(), create: vi.fn(), remove: vi.fn() },
 	confirmDialog: vi.fn(),
 	getConfig: () => "",
 	dayjs: () => ({ format: () => "" }),
@@ -293,17 +293,74 @@ describe("MacrosList: deleting macros that are running", () => {
 		}
 	});
 
-	it("a macro that could not be stopped is reported as skipped, with the stops that did happen", async () => {
+	it("a macro that was not deleted is named, with why and the stops that did happen", async () => {
+		// It used to read "Deleted 1 (skipped 1: running)": no name, nothing to do.
 		const dialog = await openBulkDelete([macro("live", running), macro("busy", running)]);
 		deleteMacrosBulk.mockResolvedValue({
 			deleted: 1,
-			skipped: [{ name: "busy", reason: "running" }],
-			stopped_runs: 1,
+			skipped: [
+				{
+					name: "busy",
+					title: "Busy <b>macro</b>",
+					reason: "running",
+					message:
+						"Its run was stopped, but another run started before it could be deleted. Delete it again.",
+				},
+			],
+			stopped_runs: 4,
 		});
 		await dialog.onConfirm({ hideDialog: vi.fn() });
 		expect(toast.create).toHaveBeenCalledWith({
-			message: "Deleted 1 (skipped 1: running). 1 run was stopped.",
+			message:
+				"Deleted 1 of 2. Not deleted: “Busy &lt;b&gt;macro&lt;/b&gt;”: Its run was stopped, " +
+				"but another run started before it could be deleted. Delete it again. 4 runs were stopped.",
 			type: "info",
 		});
+	});
+
+	it("a second press of Confirm does not start a second delete", async () => {
+		const dialog = await openBulkDelete([macro("live", running)]);
+		let land;
+		deleteMacrosBulk.mockReturnValue(new Promise((resolve) => (land = resolve)));
+		const hideDialog = vi.fn();
+		const first = dialog.onConfirm({ hideDialog });
+		expect(hideDialog).toHaveBeenCalledTimes(1); // closed at once
+		await dialog.onConfirm({ hideDialog });
+		expect(deleteMacrosBulk).toHaveBeenCalledTimes(1);
+		land({ deleted: 1, skipped: [], stopped_runs: 1 });
+		await first;
+		expect(toast.success).toHaveBeenCalledTimes(1);
+	});
+
+	it("a slow bulk delete says what it is doing", async () => {
+		vi.useFakeTimers();
+		try {
+			const dialog = await openBulkDelete([macro("live", running)]);
+			let land;
+			deleteMacrosBulk.mockReturnValue(new Promise((resolve) => (land = resolve)));
+			toast.create.mockReturnValue("note-1");
+			const going = dialog.onConfirm({ hideDialog: vi.fn() });
+			vi.advanceTimersByTime(1000);
+			expect(toast.create).toHaveBeenCalledWith(
+				expect.objectContaining({ message: "Stopping runs and deleting macros..." })
+			);
+			land({ deleted: 1, skipped: [], stopped_runs: 1 });
+			await going;
+			expect(toast.remove).toHaveBeenCalledWith("note-1");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a run that starts while the list is open is learned of, once", async () => {
+		const { emit } = await mountList([macro("idle", finished), macro("live", running)]);
+		fetchPage.mockClear();
+		emit({ kind: "macro:progress", macro: "not-on-this-page", step: 1 });
+		emit({ kind: "macro:progress", macro: "live", step: 2 });
+		await flushPromises();
+		expect(fetchPage).not.toHaveBeenCalled();
+		emit({ kind: "macro:progress", macro: "idle", step: 1 });
+		await flushPromises();
+		expect(fetchPage).toHaveBeenCalledTimes(1);
 	});
 });
