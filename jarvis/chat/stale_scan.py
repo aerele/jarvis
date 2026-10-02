@@ -109,11 +109,11 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 	return 0
 
 
-# Orphan sweep: recovery above keys on a streaming=1 ASSISTANT row, but that
-# placeholder is only created inside the worker. A turn whose RQ job never ran
-# (enqueued toward workers that died - possible for up to the probe TTL, or
-# ~420s after a hard kill while RQ's stale worker registration lingers) has no
-# assistant row at all, so without this sweep it would hang as an unanswered
+# Orphan sweep: recovery above keys on a streaming=1 ASSISTANT row, but on the
+# legacy transport that placeholder is only created inside the worker. A turn whose
+# RQ job never ran (enqueued toward workers that died - possible for up to the probe
+# TTL, or ~420s after a hard kill while RQ's stale worker registration lingers) has
+# no assistant row at all, so without this sweep it would hang as an unanswered
 # user message forever.
 #
 # A seed that has a `Jarvis Chat Turn` row is NOT an orphan, whatever that Turn's
@@ -126,13 +126,31 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 # Turn for the same message. The pump is single-flight per conversation, so the two
 # ran one after the other: the message was answered twice, and on an armed macro
 # conversation a step's writes happened twice.
-#   - Non-terminal Turn: the machine's own watchdog bounds every such state
-#     (pump.watchdog once the pump is configured, admission.sweep otherwise), so
-#     there is nothing here to heal.
-#   - Terminal Turn with no reply row (the pump's queue age-out writes no transcript
-#     marker; a cancel whose marker write failed): that is a verdict, not a lost
-#     dispatch. Re-running it would answer a message the user was told had been
-#     cancelled, and would overturn a user's own cancel.
+#   - Non-terminal Turn: the turn machine's to bound (pump.watchdog; admission.sweep
+#     where the pump is not configured), not this sweep's. The sweep cannot do it
+#     safely: a re-dispatch makes a second Turn, and an error row written over a Turn
+#     that is still live is followed by a real answer later. The machine does NOT
+#     bound every such state today. Known gaps, none of which this sweep covers:
+#       * a `queued` Turn that holds a reservation its prepare never claims: the
+#         watchdog reclaims it at 120s and deliberately skips the age-out, a live
+#         pump reserves it again, and so on with no cap;
+#       * a `preparing` Turn whose prepare dies before the placeholder is attached:
+#         re-queued at 300s, promoted again, no attempt cap;
+#       * a shard whose control row is `legacy` (the kill switch): pump.watchdog
+#         skips the shard, and admission.sweep only looks at `queued` (aged out with
+#         a marker) and `dispatching`, so a `preparing` Turn with no placeholder or
+#         a pre-dispatch `recovering` one has no owner there.
+#     Before the exclusion these ended, by accident, in the second strike's "never
+#     started" row (after a duplicate Turn). They now stay unanswered until the user
+#     cancels. The bound belongs in the watchdog.
+#   - Terminal Turn with no reply row: a verdict, not a lost dispatch. Re-running it
+#     would answer a message the user was told had been cancelled, and would overturn
+#     a user's own cancel. The pump's queue age-out used to be the common source; it
+#     now writes its own cancel marker (pump._write_age_out_marker), which is an
+#     assistant row after the seed. What remains is rare: a best-effort marker write
+#     that failed (age-out or user cancel), a recovery-budget error on a Turn that
+#     never got a placeholder, the Phase-0 stopped-then-crashed cancel. Those are
+#     skipped, neither re-run nor errored.
 # What still heals is what the sweep was written for: a message the machine never
 # saw (pure legacy, or the Turn insert that follows the committed seed never ran).
 ORPHAN_MIN_AGE_SECONDS = 180  # past any normal dequeue delay
@@ -158,11 +176,11 @@ def _sweep_orphan_turns(now) -> int:
 		WHERE m.role = 'user'
 		  AND m.creation BETWEEN %(lo)s AND %(hi)s
 		  AND NOT EXISTS (
+			SELECT 1 FROM `tabJarvis Chat Turn` t WHERE t.seed_message = m.name)
+		  AND NOT EXISTS (
 			SELECT 1 FROM `tabJarvis Chat Message` a
 			WHERE a.conversation = m.conversation
 			  AND a.role = 'assistant' AND a.seq > m.seq)
-		  AND NOT EXISTS (
-			SELECT 1 FROM `tabJarvis Chat Turn` t WHERE t.seed_message = m.name)
 		""",
 		{
 			"lo": now - timedelta(seconds=ORPHAN_MAX_AGE_SECONDS),
@@ -249,7 +267,11 @@ def _sweep_orphan_turns(now) -> int:
 
 def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 	"""One orphan row's write: heal (redispatch) on the first strike, error on the
-	second. Returns True iff the row was ERRORED (for the caller's count)."""
+	second. Returns True iff the row was ERRORED (for the caller's count).
+
+	Under the pump the second strike is reachable only when the first re-dispatch
+	left no Turn (legacy fallback, or admission raised after the strike was stamped):
+	a seed healed into a Turn is no longer a candidate."""
 	if not int(r["was_recovered"] or 0):
 		# Stamp the recovery-attempt marker BEFORE re-dispatch so the redispatch's
 		# job id carries the ::a1 suffix and the shard-lock commit inside admission
