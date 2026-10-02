@@ -131,7 +131,7 @@
 
 		<!-- error state (fetch failed, no rows to show) - before the empty state, so
 		     a load that failed is not reported as "No macro runs yet". Same markup
-		     as ListPage's own error state. -->
+		     as ListPage's own error state, "Try again" included. -->
 		<div v-else-if="error" class="relative flex-1">
 			<div
 				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
@@ -144,6 +144,7 @@
 					>
 					<span class="text-center text-p-base text-ink-red-4">{{ error }}</span>
 				</div>
+				<Button label="Try again" :loading="loading" @click="reload" />
 			</div>
 		</div>
 
@@ -207,7 +208,7 @@
 // macro_run_stats, status/macro filters, runs table rendered with the stock
 // ListView pieces (no selection), Stop / open-chat row actions, load-more
 // footer, and live socket updates (macro:progress / macro:done → silent
-// window refetch + stats reload).
+// refetch of every loaded page + stats reload).
 import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
@@ -274,8 +275,9 @@ const rows = ref([]);
 const hasMore = ref(false);
 const total = ref(null); // §8.3/D38: list_macro_runs gains `total`
 const loading = ref(false);
-// Why the last fetch failed, "" once one works. Shown in place of the empty state
-// only: with rows on screen the last-good rows stay and the toast says it.
+// Why the last fetch failed. Shown in place of the empty state only: with rows on
+// screen the last-good rows stay and the toast says it. Cleared when a load the
+// user asked for starts, and when any fetch works.
 const error = ref("");
 const status = ref("");
 const macro = ref("");
@@ -311,65 +313,129 @@ const statCards = computed(() => {
 	];
 });
 
-// ── data (monotonic request id - stale responses dropped, like useListPage) ──
+// ── data ─────────────────────────────────────────────────────────────────────
+// Three kinds of fetch:
+//   "reset"  page 1, replaces the list (first load, Refresh, a filter or page
+//            length change, Try again)
+//   "more"   the next page, appended (Load More)
+//   "keep"   a silent refresh after a realtime event: every page already on
+//            screen is fetched again and the list is replaced with the result
+//
+// One fetch is in flight at a time, and the rules are:
+//   - "reset" and "more" are things the user asked for. They start at once, and
+//     the newest wins (a monotonic request id drops the answer of an older one).
+//   - "keep" NEVER supersedes one of those. If anything is in flight it waits,
+//     and runs once when the tab goes idle, however many events arrived.
+//   - a "keep" in flight gives way to a "reset" (which brings fresh rows anyway)
+//     or a "more" (after which it runs again).
+// So the rows on screen were always fetched under the filters now selected, and
+// are only ever joined with rows fetched under those same filters. When a keep
+// could overtake a filter change, it spliced the new filter's first page over
+// the old filter's rows: wrong rows, a dead Load More, a dropped Load More.
 let reqId = 0;
+let inFlight = ""; // the kind of fetch under way, "" when idle
+let keepQueued = false;
+let disposed = false;
+// The filters the rows on screen were loaded under.
+let loadedFilters = "";
+// A failing silent refresh is said once, not once per realtime event for as long
+// as the server is down. Any fetch that works re-arms it.
+let failureSaid = false;
 
-// The rows already loaded BEYOND a refreshed first page. The server returns at
-// most 100 rows a page, so with more than that on screen a "keep" refetch can
-// only refresh the top of the list; replacing the list with it threw the rest
-// away (120 rows became 100 on the next realtime event). The fresh page is
-// spliced over the old one by row name: everything after the fresh page's last
-// row, minus anything the fresh page already carries, keeps its place. Order
-// stays the server's: fresh page first, older rows after it.
-// When the fresh page's last row is not among the old rows (a whole page of new
-// runs arrived at once) there is nothing to line the two up by, and the list
-// falls back to the fresh page alone.
-function rowsBeyond(fresh, old) {
-	if (!fresh.length) return [];
-	const at = old.findIndex((r) => r.name === fresh[fresh.length - 1].name);
-	if (at === -1) return [];
-	const seen = new Set(fresh.map((r) => r.name));
-	return old.slice(at + 1).filter((r) => !seen.has(r.name));
+// The server returns at most 100 rows a page.
+const PAGE_MAX = 100;
+// A silent refresh re-reads this many pages at most. Past that the list falls
+// back to its first 500 rows, and Load More continues from there.
+const KEEP_MAX_PAGES = 5;
+
+// Every row on screen again, in pages of PAGE_MAX, one request after the other,
+// all under `filters`. Returns null when a newer fetch took over part-way. A
+// short list asks for a full page, so a new run can appear in it.
+async function fetchLoadedPages(filters, id) {
+	const want = Math.min(
+		Math.max(rows.value.length, pageLength.value, 1),
+		PAGE_MAX * KEEP_MAX_PAGES
+	);
+	const out = [];
+	const seen = new Set();
+	let res = {};
+	let start = 0;
+	while (start < want) {
+		const limit = Math.min(PAGE_MAX, want - start);
+		res = (await api.listMacroRuns({ ...filters, limit, start })) || {};
+		if (id !== reqId) return null;
+		// A run that started between two requests pushes a row from the end of
+		// one page to the top of the next: show it once.
+		for (const r of res.runs || []) {
+			if (!seen.has(r.name)) {
+				seen.add(r.name);
+				out.push(r);
+			}
+		}
+		start += limit;
+		if (!res.has_more) break;
+	}
+	return { runs: out, has_more: !!res.has_more, total: res.total };
 }
 
-// mode: "reset" (page 1, replaces) | "more" (appends) | "keep" (silent refetch of
-//       the first page, merged over the loaded rows)
 async function fetchRuns(mode = "reset") {
+	if (disposed) return;
+	if (mode === "keep" && inFlight) {
+		keepQueued = true;
+		return;
+	}
+	// A keep this "more" is about to supersede runs again afterwards.
+	if (mode === "more" && inFlight === "keep") keepQueued = true;
 	const id = ++reqId;
-	const append = mode === "more";
-	const limit =
-		mode === "keep"
-			? Math.min(Math.max(rows.value.length || pageLength.value, 1), 100)
-			: pageLength.value;
-	if (mode !== "keep") loading.value = true;
+	inFlight = mode;
+	const filters = { status: status.value, macro: macro.value };
+	const filtersKey = JSON.stringify(filters);
+	if (mode !== "keep") {
+		loading.value = true;
+		// A silent refresh leaves the error up until it works: there is no loading
+		// state to show in its place, and "No macro runs yet" would flash instead.
+		error.value = "";
+	}
 	try {
 		const res =
-			(await api.listMacroRuns({
-				status: status.value,
-				macro: macro.value,
-				limit,
-				start: append ? rows.value.length : 0,
-			})) || {};
-		if (id !== reqId) return;
+			mode === "keep"
+				? await fetchLoadedPages(filters, id)
+				: (await api.listMacroRuns({
+						...filters,
+						limit: pageLength.value,
+						start: mode === "more" ? rows.value.length : 0,
+				  })) || {};
+		if (id !== reqId || !res) return;
 		const nr = res.runs || [];
-		// has_more false means the page IS the whole list: nothing lies beyond it.
-		const beyond = mode === "keep" && res.has_more ? rowsBeyond(nr, rows.value) : [];
-		rows.value = append ? [...rows.value, ...nr] : [...nr, ...beyond];
-		// With older rows kept, has_more was answered for the first page only;
-		// whether more lie past the kept rows is what it was before this refresh.
-		if (!beyond.length) hasMore.value = !!res.has_more;
+		rows.value = mode === "more" ? [...rows.value, ...nr] : nr;
+		hasMore.value = !!res.has_more;
 		total.value = res.total != null ? res.total : null;
+		loadedFilters = filtersKey;
 		error.value = "";
+		failureSaid = false;
 	} catch (e) {
 		if (id !== reqId) return;
 		error.value = errMsg(e);
-		toast.error(errHtml(e)); // keep last-good rows visible
+		// A refresh that fails keeps the last-good rows. A FILTER CHANGE that fails
+		// does not: the rows on screen belong to the filter that was left.
+		if (filtersKey !== loadedFilters) {
+			rows.value = [];
+			hasMore.value = false;
+			total.value = null;
+		}
+		if (mode !== "keep" || !failureSaid) toast.error(errHtml(e));
+		failureSaid = true;
 	} finally {
-		// The NEWEST request clears the spinner whatever its mode (as useListPage
-		// does). Tested on the mode too, a silent "keep" that overtook a "reset"
-		// left it on for good: the reset's response is dropped as stale, and the
-		// keep never thought the spinner was its to clear.
-		if (id === reqId) loading.value = false;
+		// The NEWEST fetch clears the spinner whatever its kind, and hands over to
+		// a refresh that was waiting.
+		if (id === reqId) {
+			inFlight = "";
+			loading.value = false;
+			if (keepQueued) {
+				keepQueued = false;
+				fetchRuns("keep");
+			}
+		}
 	}
 }
 
@@ -448,6 +514,7 @@ onMounted(() => {
 	socket && socket.on && socket.on("jarvis:event", onEvent);
 });
 onBeforeUnmount(() => {
+	disposed = true; // a refresh still waiting has nothing to refresh
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 });
 
