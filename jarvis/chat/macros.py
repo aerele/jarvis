@@ -190,6 +190,25 @@ def _disarm_run_conversation(run_name: str) -> None:
 	_disarm_conversation(frappe.db.get_value(RUN, run_name, "conversation"))
 
 
+def refuse_acting_for_barred_owner(owner: str) -> None:
+	"""Someone other than the owner is starting work that runs AS the owner (a run, a
+	summary). The owner is not at the keyboard, so this is an unattended turn and the
+	scheduler's two identity checks apply (#469, ``macro_scheduler._sweep_one``):
+	never for Administrator, Guest, a disabled account, or one without Jarvis access."""
+	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+	if owner == frappe.session.user:
+		return
+	if is_valid_unattended_owner(owner) and has_jarvis_access(owner):
+		return
+	frappe.throw(
+		_(
+			"This macro's owner ({0}) can no longer use Jarvis, so it cannot be run or summarized for them."
+		).format(owner),
+		frappe.PermissionError,
+	)
+
+
 # --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
@@ -198,7 +217,17 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	first step. Returns ``{ok, data:{macro_run, conversation}}``. ``trigger`` is
 	``manual`` (user clicked Run) or ``scheduled`` (the cron)."""
 	doc = frappe.get_doc(MACRO, macro_name)
-	doc.check_permission("read")  # owner-gate: get_doc alone doesn't enforce if_owner
+	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
+	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
+	# them), uncarded when the macro is armed. On read alone, anyone who could only
+	# SEE a macro (oversight, a read share) chose when its owner's steps ran. Checked
+	# on the owner directly, like stop_macro_run, not through "write": an owner's
+	# write comes from the Jarvis User role row, and an owner who holds another Jarvis
+	# role instead must still be able to run their own macro. The scheduler passes: it
+	# runs as the owner.
+	if frappe.session.user not in (doc.owner, "Administrator"):
+		frappe.throw(_("Only a macro's owner can run it."), frappe.PermissionError)
+	refuse_acting_for_barred_owner(doc.owner)
 	steps = doc.steps or []
 	if not steps:
 		frappe.throw(_("This macro has no steps."))
@@ -389,6 +418,8 @@ def advance_after_turn(conversation_id: str, *, errored: bool) -> None:
 			if run.status != "running":  # stopped mid-flight, or already advanced
 				return
 			macro_doc = frappe.get_doc(MACRO, run.macro)
+			if _fail_run_unless_one_owner(run, macro_doc):
+				return
 			steps = macro_doc.steps or []
 			total = min(run.total_steps or len(steps), len(steps))
 
@@ -527,6 +558,55 @@ def _finish_merge(macro_name: str, conversation_id: str, status: str, merged: st
 		pass
 
 
+def _drop_summary_link_unless_one_owner(macro_name: str, conversation_id: str) -> bool:
+	"""CLEARS the macro's summary link and returns True unless the macro and the
+	conversation it names belong to one user. Returns False, touching nothing, when
+	they do.
+
+	Landing a summary reads the conversation's last reply into the macro and then
+	deletes the conversation with permissions ignored. That is right for the throwaway
+	chat ``summarize_macro`` created for the macro's owner, and for nothing else: a
+	macro naming another user's conversation would take their reply and destroy their
+	chat. The controller refuses a user changing ``merge_conversation``; this is the
+	engine declining to act on a link it did not write, whatever did. The conversation
+	is left exactly as it was."""
+	row = frappe.db.get_value(MACRO, macro_name, ["owner", "macro_name"], as_dict=True)
+	if not row:
+		return True  # the macro was deleted while its summary ran: nothing to land on
+	conv_owner = frappe.db.get_value(CONV, conversation_id, "owner")
+	if row.owner == conv_owner:
+		return False
+	# State first, alarm second: if the log failed first the macro would stay
+	# "pending" with nothing left to revisit it.
+	frappe.db.set_value(
+		MACRO,
+		macro_name,
+		{"merge_status": "failed", "merge_conversation": ""},
+		update_modified=False,
+	)
+	frappe.db.commit()
+	# A conversation that no longer exists is an ordinary state ("delete all
+	# conversations" mid-summary), not a mismatch: no alarm for it.
+	if conv_owner is not None:
+		frappe.log_error(
+			title=f"jarvis.chat.macros.summary_owner_mismatch: {macro_name}",
+			message=(
+				f"macro {macro_name!r} owner {row.owner!r}; "
+				f"conversation {conversation_id!r} owner {conv_owner!r}"
+			),
+		)
+	# An open form learns the outcome ONLY from this event; without it the Run button
+	# sits on "summarizing" until a reload. Best-effort, like _finish_merge's own.
+	try:
+		publish_to_user(
+			row.owner,
+			{"kind": "macro:merged", "macro": macro_name, "macro_name": row.macro_name, "status": "failed"},
+		)
+	except Exception:
+		pass
+	return True
+
+
 def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 	"""When a macro's background summarize turn ends, land the result on the
 	macro — server-side, so the summary arrives even if the user's tab is gone.
@@ -538,6 +618,8 @@ def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 		MACRO, {"merge_conversation": conversation_id, "merge_status": "pending"}, "name"
 	)
 	if not macro_name:
+		return
+	if _drop_summary_link_unless_one_owner(macro_name, conversation_id):
 		return
 	try:
 		status, merged = _merge_outcome(conversation_id, errored=errored)
@@ -579,7 +661,10 @@ def stop_macro_run(run_name: str) -> dict:
 	concurrent resume nor let one start new work after it. Serializes the two; the state-fenced CAS
 	in the resume path is the hard backstop if the lock's TTL ever lapses."""
 	run = frappe.get_doc(RUN, run_name)
-	run.check_permission("write")  # owner-gate the stop action
+	# Owner-gate the stop action. Checked on the row's owner, not via a "write"
+	# permission: run rows are read-only through the document API (macro_permissions).
+	if frappe.session.user not in (run.owner, "Administrator"):
+		frappe.throw(_("You can only stop your own macro runs."), frappe.PermissionError)
 	from jarvis._redis_lock import redis_lock
 
 	# The block body runs whether or not the lock is acquired — a stop must never be silently
@@ -790,6 +875,8 @@ def resume_waiting_capacity_runs() -> None:
 				if run.status != "waiting_capacity":
 					continue
 				macro_doc = frappe.get_doc(MACRO, run.macro)
+				if _fail_run_unless_one_owner(run, macro_doc):
+					continue
 				attempts = int(run.capacity_attempts or 0) + 1
 				if attempts > _MAX_CAPACITY_ATTEMPTS:
 					_finish(
@@ -1175,6 +1262,55 @@ def notify_owner(owner: str, *, subject: str, body: str) -> None:
 		frappe.db.commit()
 	except Exception:
 		pass
+
+
+_OWNER_MISMATCH_ERROR = "This run was stopped: its macro and conversation do not belong to one user."
+_CONVERSATION_GONE_ERROR = "This run was stopped because its conversation was deleted."
+
+
+def _fail_run_unless_one_owner(run, macro_doc) -> bool:
+	"""FAILS THE RUN and returns True unless the run, its macro and its conversation all
+	belong to one user. Returns False, touching nothing, when they do.
+
+	They do by construction: ``run_macro`` creates all three for the macro's owner. A
+	step is dispatched as the CONVERSATION's owner, so a run row pointing at someone
+	else's conversation would execute this macro's prompts under their identity. Run
+	rows are read-only to users (``macro_permissions``); this is the engine declining
+	to act on a row it did not write that way, whatever did.
+
+	A conversation that no longer exists is a different, ordinary case ("delete all
+	conversations" blanks the link on the owner's own runs): the run fails plainly,
+	with no mismatch alarm."""
+	conv_owner = frappe.db.get_value(CONV, run.conversation, "owner") if run.conversation else None
+	if conv_owner is None:
+		_fail_run_in_place(run, _CONVERSATION_GONE_ERROR)
+		return True
+	if run.owner == macro_doc.owner == conv_owner:
+		return False
+	# Titled as a dotted ``jarvis.`` path on purpose: this log carries no traceback,
+	# and that title is what lets the tenant error rollup (api_errors.is_jarvis_error)
+	# forward it to the control plane. It should never fire, so someone must see it.
+	frappe.log_error(
+		title=f"jarvis.chat.macros.run_owner_mismatch: {run.name}",
+		message=(
+			f"run owner {run.owner!r}; macro {run.macro!r} owner {macro_doc.owner!r}; "
+			f"conversation {run.conversation!r} owner {conv_owner!r}"
+		),
+	)
+	_fail_run_in_place(run, _OWNER_MISMATCH_ERROR)
+	return True
+
+
+def _fail_run_in_place(run, error: str) -> None:
+	"""Terminalize a run with a raw write, NOT ``_finish``. ``_finish`` disarms
+	``run.conversation``, and on these paths that is either gone or a conversation this
+	run has no claim on."""
+	frappe.db.set_value(
+		RUN,
+		run.name,
+		{"status": "failed", "finished_at": frappe.utils.now(), "error": error},
+	)
+	frappe.db.commit()
 
 
 def _finish(run, status: str, error: str | None = None) -> None:
