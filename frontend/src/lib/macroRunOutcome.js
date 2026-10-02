@@ -46,19 +46,20 @@ export function lastRunCell({ lastRun, when, relative, legacy }) {
 	}
 }
 
-// The form's one line about the last run: { text, tone }, or null when there is
-// nothing the owner needs to be told (it worked, it is still going, they stopped it).
+// The form's notice about the last run: { title, text, tone }, or null when there
+// is nothing the owner needs to be told (it worked, it is still going, they stopped
+// it). `title` says what happened in a few words; `text` is the reason, which can
+// be several sentences and reads better as the lighter second line.
 export function lastRunLine(lastRun) {
 	if (!lastRun) return null;
 	const reason = lastRun.error || "";
 	if (lastRun.status === "failed")
-		return {
-			text: reason ? `The last run failed. ${reason}` : "The last run failed.",
-			tone: "bad",
-		};
+		return { title: "The last run failed", text: reason, tone: "bad" };
 	if (!reason) return null;
-	if (lastRun.status === "stopped") return { text: reason, tone: "warn" };
-	if (lastRun.status === "completed") return { text: reason, tone: "" };
+	if (lastRun.status === "stopped")
+		return { title: "The last run stopped before it finished", text: reason, tone: "warn" };
+	if (lastRun.status === "completed")
+		return { title: "The last run finished, with a note", text: reason, tone: "" };
 	return null;
 }
 

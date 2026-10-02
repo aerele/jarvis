@@ -42,6 +42,7 @@
 				class="mb-4"
 				data-testid="last-run-note"
 				:type="LAST_RUN_BANNER[lastRunNote.tone] || 'info'"
+				:title="lastRunNote.title"
 				:message="lastRunNote.text"
 			>
 				<template v-if="lastRun && lastRun.conversation" #action>
@@ -700,8 +701,11 @@ function onEvent(p) {
 // Only the last-run summary: the form may hold unsaved edits, so nothing else is
 // re-seeded.
 async function refreshLastRun() {
+	const id = props.id;
 	try {
-		lastRun.value = (await api.getMacro(props.id)).last_run || null;
+		const full = await api.getMacro(id);
+		// The user may have opened another macro while this was in flight.
+		if (id === props.id) lastRun.value = full.last_run || null;
 	} catch (e) {
 		// keep what is shown; the next load corrects it
 	}
