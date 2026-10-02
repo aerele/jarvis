@@ -28,6 +28,7 @@ import datetime
 
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
+from frappe.utils.user import get_users_with_role
 
 from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_STEP_BUDGET
 
@@ -37,10 +38,23 @@ RUN = "Jarvis Macro Run"
 _DEFAULT_SECONDS = 9 * 3600  # 09:00 when no schedule_time set
 _MAX_SECONDS = 24 * 3600 - 1  # 23:59:59, the last representable time of day
 
-# #471: the owner cannot act on any of these — Administrator and disabled users
+# #471: the owner cannot act on any of these. Administrator and disabled users
 # are refused by notify_owner anyway, and a role-less owner can no longer reach
-# the SPA — so the failed run row is the whole record. Notifying would relog the
-# same dead end every cadence forever.
+# the SPA. So the OWNER is never notified, and the failed run row is their record:
+# notifying them would only relog a dead end they cannot do anything about.
+#
+# That used to be the whole of it: the slot was consumed, the schedule stayed on, and
+# the same dead end was recorded again on every slot for as long as the macro existed,
+# with nobody told. A leaver's daily macro wrote a failed run a day, forever.
+#
+# Now the first sweep that meets such an owner records this ONE failed run and
+# switches the schedule off on every scheduled macro that owner has
+# (``_switch_off_leaver``), so there is no next slot to fail. The people who can act
+# on it are the site's own admins, and they are told once, by Notification Log. It is
+# deliberately NOT an Error Log row: those are forwarded to the vendor's error
+# rollup, which is the wrong audience and would carry a user's name off the site.
+# The schedules do not come back by themselves if the user returns; the owner
+# switches them on.
 _BARRED_OWNER = (
 	"Scheduled run skipped: this macro's owner may not run unattended work "
 	"(Administrator, a disabled account, or no Jarvis access)."
@@ -127,6 +141,9 @@ def run_due_macros() -> None:
 		return
 
 	original_user = frappe.session.user
+	# Owners this pass found barred. `due` was read before their schedules were
+	# switched off, so it can still hold more of their macros: those are skipped.
+	barred_owners: set = set()
 	for m in due:
 		# #472: fault-isolate each macro. The per-macro try below covers only the
 		# DISPATCH; the schedule arithmetic, the identity guard and the bookkeeping all
@@ -139,7 +156,7 @@ def run_due_macros() -> None:
 		# owner can see. If it blew up after the claim, the macro was already
 		# dispatched and the schedule has moved on, so there is nothing to retry.
 		try:
-			_sweep_one(m, now, original_user)
+			_sweep_one(m, now, original_user, barred_owners)
 		except Exception:
 			if frappe.session.user != original_user:
 				frappe.set_user(original_user)
@@ -151,11 +168,20 @@ def run_due_macros() -> None:
 			_report_failure_before_claim(m, now)
 
 
-def _sweep_one(m, now, original_user: str) -> None:
+def _sweep_one(m, now, original_user: str, barred_owners: set | None = None) -> None:
 	"""Handle ONE due macro. Extracted from the loop so ``run_due_macros`` can wrap it
-	whole (#472); every ``return`` here was a ``continue`` in the loop it came from."""
+	whole (#472); every ``return`` here was a ``continue`` in the loop it came from.
+
+	``barred_owners`` is the sweep's memory of the owners it has already found barred
+	in this pass (see the note above ``_BARRED_OWNER``)."""
 	from jarvis.chat import macros
 	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+	# Ahead of everything else, the switched-off-macro branch below included: this
+	# owner's schedules were switched off a moment ago, and moving a slot on now would
+	# write a "Next run" back onto a macro whose schedule is off.
+	if barred_owners is not None and m.owner in barred_owners:
+		return
 
 	# #471: a macro its owner switched OFF is not a failure, it is the state
 	# they asked for. run_macro's own `enabled` early return was never inspected
@@ -182,10 +208,11 @@ def _sweep_one(m, now, original_user: str) -> None:
 	# Administrator/Guest/disabled, has_jarvis_access refuses portal users and
 	# role-less System Users.
 	#
-	# Consume the slot so it does not busy re-fire, but skip the run.
+	# Skip the run, and switch the owner's schedules off so it does not re-fire.
 	if not is_valid_unattended_owner(m.owner) or not has_jarvis_access(m.owner):
-		_record_failed(m, _BARRED_OWNER)
-		_consume_slot(m, now)
+		if barred_owners is not None:
+			barred_owners.add(m.owner)
+		_switch_off_leaver(m, now)
 		return
 	claimed = _claim_slot(m, now)
 	if not claimed:
@@ -370,10 +397,10 @@ def _next_occurrence(m, now) -> datetime.datetime:
 
 
 def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
-	"""Consume a slot that is NOT being dispatched (a macro switched off, a barred
-	owner): move the schedule on with a raw set_value (no re-validate, which would
-	otherwise recompute ``next_run_at`` itself). A slot that IS dispatched goes
-	through ``_claim_slot`` instead.
+	"""Consume a slot that is NOT being dispatched (a macro switched off, or a barred
+	owner whose schedules could not be switched off): move the schedule on with a raw
+	set_value (no re-validate, which would otherwise recompute ``next_run_at``
+	itself). A slot that IS dispatched goes through ``_claim_slot`` instead.
 
 	``stamp_last_run=False`` moves the schedule on WITHOUT claiming a run happened:
 	``last_run_at`` is what the SPA renders as "last run", so stamping it for a slot
@@ -383,6 +410,119 @@ def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
 		values["last_run_at"] = now
 	frappe.db.set_value(MACRO, m.name, values, update_modified=False)
 	frappe.db.commit()
+
+
+def _switch_off_leaver(m, now) -> None:
+	"""The owner of this due macro may no longer run it. Switch the schedule off on
+	every scheduled macro they own, record the one failed run, tell the site's admins.
+
+	Three separate commits, because ``_record_failed`` and ``notify_owner`` each commit
+	their own work. The switch-off goes first and is the only one that matters: once it
+	has landed, a failure in either of the others cannot bring a schedule back.
+
+	If the switch-off itself fails, fall back to what the sweep did before it existed:
+	one failed run and the slot moved on. The next sweep that meets this owner tries
+	again."""
+	try:
+		switched = _switch_off_schedules(m, now)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(
+			title=f"jarvis macro scheduler: could not switch off a barred owner's schedules: {m.name}",
+			message=frappe.get_traceback(),
+		)
+		_record_failed(m, _BARRED_OWNER)
+		_consume_slot(m, now)
+		return
+	if not switched:
+		return
+	_record_failed(m, _BARRED_OWNER)
+	_notify_admins(m.owner, len(switched))
+
+
+def _switch_off_schedules(m, now) -> list[str]:
+	"""Switch the schedule off on every scheduled macro ``m.owner`` has, with a Comment
+	on each saying why. Returns their names: empty when there was nothing left to
+	switch off, which is how a second sweep running at the same moment learns the
+	first one already did this and must not record or notify again.
+
+	Raw writes, like every other write this module makes: the engine never saves a
+	macro document. Each row is left as the form leaves it when a user switches the
+	schedule off (``JarvisMacro._recompute_next_run``): ``schedule_enabled`` 0 and no
+	``next_run_at``. The frequency, time and day are kept, so switching it back on is
+	one click. ``enabled`` and ``modified`` are not touched. ``last_run_at`` is stamped
+	only on the macro whose slot this was, as consuming that slot always did.
+
+	The rows are read FOR UPDATE so an owner saving one of them at this moment waits
+	for the switch-off instead of being overwritten by it or overwriting it."""
+	frappe.db.commit()  # REPEATABLE-READ discipline: the FOR UPDATE read goes first
+	names = frappe.db.get_values(
+		MACRO, {"owner": m.owner, "schedule_enabled": 1}, "name", for_update=True, pluck=True
+	)
+	comment = f"Schedule switched off: {_barred_phrase(m.owner)}"
+	for name in names:
+		values = {"schedule_enabled": 0, "next_run_at": None}
+		if name == m.name:
+			values["last_run_at"] = now
+		frappe.db.set_value(MACRO, name, values, update_modified=False)
+		# What ``Document.add_comment`` inserts, without loading each macro to call it.
+		frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Info",
+				"comment_email": frappe.session.user,
+				"reference_doctype": MACRO,
+				"reference_name": name,
+				"content": comment,
+			}
+		).insert(ignore_permissions=True)
+	frappe.db.commit()  # releases the row locks
+	return names
+
+
+def _barred_phrase(owner: str) -> str:
+	"""Why this owner's schedules went off, for the Comment and the admins' notice.
+	Administrator and Guest never had Jarvis access to lose (the save gate refuses
+	their schedules; only a row from before it gets here), so they are not described
+	as someone who left."""
+	if owner in ("Administrator", "Guest"):
+		return f"{owner} may not run scheduled macros"
+	return f"{owner} can no longer use Jarvis"
+
+
+def _notify_admins(owner: str, count: int) -> None:
+	"""Tell the site's own admins, once, that ``count`` schedules of ``owner`` were
+	switched off: one Notification Log per enabled holder of the Jarvis Admin role, or
+	per enabled System Manager when nobody holds it.
+
+	Never raises. The schedules are already off and committed; failing to say so must
+	not abort the sweep for the macros behind this one."""
+	try:
+		from jarvis.chat import macros
+		from jarvis.permissions import JARVIS_ADMIN_ROLE
+
+		# get_users_with_role returns enabled users only, and never Administrator.
+		recipients = get_users_with_role(JARVIS_ADMIN_ROLE) or get_users_with_role("System Manager")
+		phrase = _barred_phrase(owner)
+		what = "1 macro schedule was" if count == 1 else f"{count} macro schedules were"
+		for user in recipients:
+			if user == owner:
+				continue
+			macros.notify_owner(
+				user,
+				subject=f"Macro schedules switched off: {phrase}",
+				body=(
+					f"{what} switched off because {phrase}. The macros themselves are kept. "
+					"The schedules do not come back by themselves: the owner switches them on "
+					"again from each macro."
+				),
+			)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(
+			title="jarvis macro scheduler: could not tell the admins a schedule was switched off",
+			message=frappe.get_traceback(),
+		)
 
 
 def _record_failed(m, reason: str) -> None:
