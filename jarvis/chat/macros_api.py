@@ -68,6 +68,21 @@ def _parse_steps(steps) -> list[dict]:
 	return rows
 
 
+_STEP_TEXT_FIELDS = ("label", "prompt", "model_override", "thinking_override")
+
+
+def _step_values(steps) -> list[tuple]:
+	"""What each step SAYS, in order, for telling whether a save changed the steps.
+
+	Takes ``_parse_steps`` output or the stored child rows and reads both the same
+	way, so the comparison is on values: never on row identity (a save resends the
+	rows) and never on how a value happens to be spelled (padding, ``None`` for an
+	unset override, the layout of the skills JSON)."""
+	return [
+		(*((s.get(f) or "").strip() for f in _STEP_TEXT_FIELDS), tuple(_step_skills(s))) for s in steps or []
+	]
+
+
 # --------------------------------------------------------------------------- #
 # CRUD (owner-scoped)
 # --------------------------------------------------------------------------- #
@@ -340,7 +355,8 @@ def get_macro(name: str) -> dict:
 def _step_skills(step) -> list[str]:
 	"""Parse a step row's ``skills`` JSON into a list (tolerant of legacy rows)."""
 	try:
-		v = frappe.parse_json(step.skills) if step.skills else []
+		skills = step.get("skills")
+		v = frappe.parse_json(skills) if skills else []
 		return v if isinstance(v, list) else []
 	except Exception:
 		return []
@@ -429,7 +445,10 @@ def create_macro(
 	)
 	doc.insert()
 	frappe.db.commit()
-	return {"ok": True, "data": {"name": doc.name, "macro_name": doc.macro_name}}
+	return {
+		"ok": True,
+		"data": {"name": doc.name, "macro_name": doc.macro_name, "summarize": len(doc.steps) >= 2},
+	}
 
 
 @frappe.whitelist()
@@ -450,9 +469,24 @@ def update_macro(
 	merged_prompt: str | None = None,
 ) -> dict:
 	"""Update provided fields of a macro (owner-gated). When ``steps`` is given it
-	replaces the whole ordered list (per-step skills ride inside each step dict) —
-	and, unless ``merged_prompt`` is sent in the same call, clears any stored
-	summary (it's stale once the steps change; the save flow regenerates it)."""
+	replaces the whole ordered list (per-step skills ride inside each step dict).
+
+	The summary follows what the save actually CHANGED, decided here and not by the
+	caller. The form posts ``steps`` on every save, so "steps were sent" used to be
+	read as "steps changed": a rename, a reschedule or the enabled switch wiped the
+	stored summary, and during a summary the "summarizing" mark with it, so the one in
+	flight never landed. Posting the summary back alongside did the same to the mark.
+
+	* Steps as stored, summary untouched (not sent, or sent as stored): the three
+	  summary fields stay exactly as they are, "summarizing" included.
+	* Summary edited by hand (sent, and different from the stored text): it is saved,
+	  whether or not the steps changed with it.
+	* Steps changed, summary untouched: the summary is stale and is cleared.
+
+	``summarize`` in the answer tells the form whether to start a new summary: only
+	after a real step change that left two or more steps, and not when the owner wrote
+	the summary in the same save. A summary that is empty or failed is not a reason:
+	that started a model call on every save of such a macro."""
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate (save enforces too; explicit for clarity)
 	if macro_name is not None:
@@ -478,20 +512,29 @@ def update_macro(
 		# cint (not the raw arg) so a stray "" or a non-numeric SPA payload lands
 		# on the doctype's own 1-31 validate() rather than a TypeError here.
 		doc.schedule_day_of_month = frappe.utils.cint(schedule_day_of_month) or None
+	steps_changed = False
 	if steps is not None:
-		doc.set("steps", _parse_steps(steps))
-		if merged_prompt is None:
-			# steps changed → the stored summary is stale; the save flow's
-			# background re-summarize repopulates it (merge_status → pending).
-			doc.merged_prompt = ""
-			doc.merge_status = ""
-	if merged_prompt is not None:
-		doc.merged_prompt = (merged_prompt or "").strip()
-		doc.merge_status = "ready" if doc.merged_prompt else ""
+		rows = _parse_steps(steps)
+		steps_changed = _step_values(rows) != _step_values(doc.steps)
+		if steps_changed:
+			doc.set("steps", rows)
+	written = (merged_prompt or "").strip()
+	edited_by_hand = merged_prompt is not None and written != (doc.merged_prompt or "").strip()
+	if edited_by_hand:
+		doc.merged_prompt = written
+		doc.merge_status = "ready" if written else ""
+	elif steps_changed:
+		# The stored summary is of steps the macro no longer has. A summary still being
+		# written is of those steps too: without "pending" its result does not land.
+		doc.merged_prompt = ""
+		doc.merge_status = ""
 	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
 	doc.save()
 	frappe.db.commit()
-	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
+	# An emptied summary is not one the owner wrote: with changed steps it is the same
+	# as the clear above, and a new summary follows.
+	summarize = steps_changed and len(doc.steps) >= 2 and not (edited_by_hand and written)
+	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified), "summarize": summarize}}
 
 
 @frappe.whitelist()
@@ -725,24 +768,86 @@ _MERGE_INSTRUCTION = (
 )
 
 
+# What a refused summary tells the owner, by ``macros.entitlement_block`` reason. The
+# run's own sentences (``macros._BLOCK_MESSAGE``) end in "this macro cannot run",
+# which is not what was asked for here.
+_SUMMARY_BLOCK_MESSAGE = {
+	"usage_limit": "You have reached your monthly usage limit, so this macro cannot be summarized.",
+	"subscription_suspended": (
+		"Your subscription does not currently include chat, so this macro cannot be summarized."
+	),
+	"release_update_required": "A Jarvis update is rolling out. Try the summary again in a few minutes.",
+	"workspace_resetting": "Your workspace is being rebuilt. Try the summary again in a few minutes.",
+	"maintenance": "Jarvis is being upgraded. Try the summary again in a few minutes.",
+	"llm_not_configured": "Connect an AI model before summarizing a macro.",
+}
+_SUMMARY_NOT_STARTED = "The summary could not be started. Please try again in a few minutes."
+
+
+def _abandon_summary(macro_name: str, conversation: str) -> None:
+	"""No summary turn is coming: take back the "summarizing" mark and the throwaway
+	chat made for it. Left in place, Run stays refused on a summary nothing will land.
+
+	The mark is cleared only while it still names THIS chat. Best-effort, and it
+	never raises: the caller is already on its way out with the real answer."""
+	try:
+		frappe.db.delete("Jarvis Chat Message", {"conversation": conversation})
+		frappe.delete_doc("Jarvis Conversation", conversation, ignore_permissions=True, force=True)
+		frappe.db.set_value(
+			MACRO,
+			{"name": macro_name, "merge_conversation": conversation},
+			{"merge_status": "", "merge_conversation": ""},
+			update_modified=False,
+		)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def summarize_macro(name: str) -> dict:
 	"""Kick off the merge: throwaway archived conversation + one agent turn
 	that invokes /macro-merge over the macro's steps. Returns the conversation
-	for the SPA to poll. The macro itself is untouched here."""
+	the summary is written in. The macro's steps are untouched here.
+
+	Asked again while a summary is already being written, it answers with that one
+	and starts nothing: the first chat would be orphaned and its result thrown away,
+	for a second model call. The macro's row is locked across "is one pending?" and
+	"mark it pending", so two requests at once cannot both answer no."""
+	from jarvis.chat import macros, txn
+
 	doc = frappe.get_doc(MACRO, name)
 	# Gated on WRITE, not read: a summary lands on the macro (merged_prompt,
 	# merge_status), and its turn runs in a chat created for whoever asks. On read
 	# alone, anyone who could SEE a macro could overwrite its owner's summary, and
 	# the throwaway chat belonged to the caller, not the macro's owner.
 	doc.check_permission("write")
-	from jarvis.chat import macros
-
 	macros.refuse_acting_for_barred_owner(doc.owner)
+	# The lock has to be the first read of its transaction: a locking read on the
+	# snapshot the reads above opened fails outright when another request has
+	# committed to the row since (see jarvis.chat.txn). Nothing is written yet, and
+	# this function commits its own work throughout. The macro is then read again,
+	# under the lock: by its loaded name, never the raw argument.
+	txn.fresh_snapshot(owned=True)
+	frappe.db.get_value(MACRO, doc.name, "name", for_update=True)
+	doc = frappe.get_doc(MACRO, doc.name)
 	steps = doc.steps or []
 	if len(steps) < 2:
 		frappe.throw(_("Nothing to merge — the macro has fewer than 2 steps."))
+	# A mark whose chat is gone has nothing coming for it: that one is replaced.
+	if (
+		(doc.merge_status or "") == "pending"
+		and doc.merge_conversation
+		and frappe.db.exists("Jarvis Conversation", doc.merge_conversation)
+	):
+		return {"ok": True, "conversation": doc.merge_conversation}
+	# The gate every other macro turn passes (#468), before anything is created. A
+	# summary is one turn a person asked for, so it is priced like a manual run of a
+	# single step: the token caps apply, the scheduled-run budget does not.
+	blocked = macros.entitlement_block(doc.owner, steps=1, trigger="manual")
+	if blocked:
+		frappe.throw(_(_SUMMARY_BLOCK_MESSAGE.get(blocked, "This macro cannot be summarized right now.")))
 	conv = frappe.get_doc(
 		{
 			"doctype": "Jarvis Conversation",
@@ -769,7 +874,7 @@ def summarize_macro(name: str) -> dict:
 	# Writing it first guarantees a completed turn always finds the macro already waiting.
 	frappe.db.set_value(
 		MACRO,
-		name,
+		doc.name,
 		{
 			"merge_status": "pending",
 			"merge_conversation": conv.name,
@@ -777,7 +882,27 @@ def summarize_macro(name: str) -> dict:
 		update_modified=False,
 	)
 	frappe.db.commit()
-	out = chat_api._enqueue_turn(conv.name, prompt, origin="macro")
+	try:
+		out = chat_api._enqueue_turn(conv.name, prompt, origin="macro")
+	except Exception:
+		traceback = frappe.get_traceback()
+		# The chat is new, so any step message with a Turn row is this dispatch's.
+		if macros._went_out_since(conv.name, None):
+			# The turn exists: the failure came after the dispatch. It is running, and
+			# its end lands the summary, so "pending" is true and stays. No rollback:
+			# the dispatch may have queued its send for after the commit, and a
+			# rollback would drop it (same rule as the engine's step path).
+			frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
+			frappe.db.commit()
+			frappe.log_error(title=f"jarvis macro summary bookkeeping failed: {doc.name}", message=traceback)
+			return {"ok": True, "conversation": conv.name}
+		# Nothing went out (``_ensure_session_key`` throws when the gateway is down;
+		# ``_enqueue_turn`` commits the message, then dispatches). "pending" was
+		# committed above and used to stay for good, with Run refused behind it.
+		frappe.db.rollback()
+		frappe.log_error(title=f"jarvis macro summary dispatch failed: {doc.name}", message=traceback)
+		_abandon_summary(doc.name, conv.name)
+		frappe.throw(_(_SUMMARY_NOT_STARTED))
 	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
 	# (its seed was cleaned up). Roll back the "pending" mark set above — there is no summary
 	# turn coming for it to wait on (get_macro_merge would poll pending forever otherwise).
@@ -785,20 +910,7 @@ def summarize_macro(name: str) -> dict:
 	# retryable rejection: tear down the throwaway conversation, clear the mark, and let the
 	# user re-click.
 	if isinstance(out, dict) and out.get("overloaded"):
-		try:
-			frappe.delete_doc("Jarvis Conversation", conv.name, ignore_permissions=True, force=True)
-			frappe.db.set_value(
-				MACRO,
-				name,
-				{
-					"merge_status": "",
-					"merge_conversation": "",
-				},
-				update_modified=False,
-			)
-			frappe.db.commit()
-		except Exception:
-			frappe.db.rollback()
+		_abandon_summary(doc.name, conv.name)
 		return {
 			"ok": False,
 			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
