@@ -200,6 +200,10 @@ class TestStoppingARun(StopBase):
 			self.assertFalse(macros._stop_run(run, reason=DELETED, by=OWNER))
 		self.assertEqual((self._run(run).status, self._run(run).error), ("failed", "Step 1 failed."))
 
+	def test_a_run_that_is_gone_is_not_an_error(self):
+		# Deleted while the stop waited for its lock.
+		self.assertFalse(macros._stop_run("no-such-run", reason=DELETED, by=OWNER))
+
 	def test_a_stop_that_cannot_reach_the_chat_still_stops_the_run(self):
 		run, _, _ = self._mk_run()
 		with (
@@ -509,6 +513,15 @@ class TestDeletingAMacroStopsItsRuns(StopBase):
 		with patch("jarvis.chat.api._enqueue_turn") as enqueue:
 			macros.advance_after_turn(conv, errored=False)
 		enqueue.assert_not_called()
+
+	def test_the_closing_line_does_not_close_a_draft_the_owner_can_still_apply(self):
+		# The chat keeps a card open on its LAST reply only. A line after it would
+		# take the draft away; the run is stopped all the same.
+		run, conv, macro = self._mk_run(steps=2, at_step=1)
+		self._turn(conv, reply=outcome._DRAFT)  # step 1 ended on a draft; the hook has not run yet
+		frappe.set_user(OWNER)
+		self.assertEqual(macros_api.delete_macro(macro)["stopped_runs"], 1)
+		self.assertEqual(self._closing(conv, run), [])
 
 	def test_a_parked_run_is_stopped_too(self):
 		run, _, macro = self._mk_run(steps=2, at_step=0)
