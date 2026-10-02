@@ -179,7 +179,9 @@
 			<DocSection
 				v-if="!isNew"
 				label="Summarized prompt"
-				:opened="!!form.merged_prompt || mergeStatus === 'pending'"
+				:opened="
+					!!form.merged_prompt || mergeStatus === 'pending' || mergeStatus === 'failed'
+				"
 			>
 				<template #header-suffix>
 					<Badge
@@ -201,11 +203,21 @@
 						label="Failed"
 					/>
 				</template>
+				<!-- "Failed" alone gave no way forward: a later save does not retry (only
+				     a change to the steps starts a summary), Re-summarize does. -->
+				<p
+					v-if="mergeStatus === 'failed'"
+					data-testid="summary-failed"
+					class="mb-2 text-sm text-ink-amber-3"
+				>
+					The summary could not be made, so the steps run in order. Re-summarize, in the
+					menu next to Run, tries again.
+				</p>
 				<FormControl
 					type="textarea"
 					:rows="9"
 					class="font-mono"
-					placeholder="No summary yet - saving 2+ steps generates one in the background."
+					placeholder="No summary yet. Saving a change to the steps (2 or more) generates one in the background, and Re-summarize in the menu starts one now."
 					description="When present, runs use this prompt instead of the steps."
 					:modelValue="form.merged_prompt"
 					:disabled="saving || mergePending"
@@ -414,6 +426,7 @@ const runBlockedReason = computed(() => {
 	}
 	return "";
 });
+const RESUMMARIZE_NEEDS_SAVE = "Save your changes first. It summarizes the saved steps.";
 const stepsWithPrompt = computed(() => form.steps.filter((s) => (s.prompt || "").trim()).length);
 
 // Arming a macro to skip confirmation is admin-only (the backend re-checks
@@ -491,7 +504,15 @@ const scheduleSummary = computed(() => {
 const overflowOptions = computed(() => {
 	const opts = [];
 	if (stepsWithPrompt.value >= 2) {
-		opts.push({ label: "Re-summarize", icon: "refresh-cw", onClick: resummarize });
+		// Off while the form has unsaved changes, with the reason in the item itself
+		// (as Run says its own): the server summarizes the SAVED steps.
+		opts.push({
+			label: "Re-summarize",
+			icon: "refresh-cw",
+			onClick: resummarize,
+			disabled: dirty.value,
+			...(dirty.value ? { description: RESUMMARIZE_NEEDS_SAVE } : {}),
+		});
 	}
 	opts.push({ label: "Delete", icon: "trash-2", theme: "red", onClick: confirmDelete });
 	return opts;
@@ -666,6 +687,13 @@ async function save() {
 		toast.error("Add at least one step with a prompt.");
 		return;
 	}
+	// Which macro this save is for, read before the first request. /macros/A to
+	// /macros/B is the same component with new props: read after the answer, the
+	// summary of A was started on B, and B's freshly loaded form was blanked and
+	// marked clean. A form that has moved on is left alone by everything below.
+	const id = props.id;
+	const isNew = props.isNew;
+	const stillHere = () => props.id === id && props.isNew === isNew;
 	saving.value = true;
 	try {
 		const payload = {
@@ -682,39 +710,64 @@ async function save() {
 			schedule_day_of_month:
 				form.schedule_frequency === "monthly" ? Number(form.schedule_day) || 0 : 0,
 		};
-		// The form says what the user did: the steps as they stand, and the summary
-		// only when its text was edited here. The SERVER decides whether the steps
-		// changed (it clears a stale summary) and whether a new summary is due
-		// (`summarize`). The form used to guess both, and its guess started a model
-		// call on every save of a macro whose summary was empty or had failed, and
-		// ended a summary still being written by posting its text back on a rename.
+		// The SERVER decides whether the steps changed (it clears a stale summary)
+		// and whether a new summary is due (`summarize`). The form used to guess
+		// both, and its guess started a model call on every save of a macro whose
+		// summary was empty or had failed.
+		//
+		// What is sent has to be right for a server from before that, too: assets
+		// and Python do not switch at the same instant, and an open tab keeps its
+		// bundle. That server clears the summary whenever a save does not carry it,
+		// so the summary on screen is sent unless the steps changed and it was left
+		// alone (then both servers clear it). `merged_prompt_edited` tells the new
+		// server whether the owner changed the text: what the form shows may be old
+		// (the summary landed after the form loaded), and old text must not be taken
+		// for the owner's. The old server ignores an argument it does not know.
+		const stepsTouched = !isNew && JSON.stringify(steps) !== snapshot.value.stepsJson;
 		const mergedTouched = (form.merged_prompt || "") !== (snapshot.value.merged_prompt || "");
+		let sentSummary = "";
 		let saved;
-		if (props.isNew) {
+		if (isNew) {
 			saved = ((await api.createMacro(payload)) || {}).data || {};
 		} else {
-			const stepsTouched = JSON.stringify(steps) !== snapshot.value.stepsJson;
-			const upd = { name: props.id, ...payload };
-			if (mergedTouched) upd.merged_prompt = (form.merged_prompt || "").trim();
+			const upd = { name: id, ...payload, merged_prompt_edited: mergedTouched ? 1 : 0 };
+			if (mergedTouched || !stepsTouched) {
+				upd.merged_prompt = (form.merged_prompt || "").trim();
+				sentSummary = upd.merged_prompt;
+			}
 			saved = ((await api.updateMacro(upd)) || {}).data || {};
 			// The server has these edits from here on, whatever the reload below
 			// does. The form is clean as of now: left to the reload alone, one
 			// failed request kept it "dirty", with Run off behind "Save your changes
 			// first" and a second Save judging the steps against a stale snapshot.
-			// Changed steps with an untouched summary: the server cleared it, so it
-			// goes from the form too, or the form would go on showing a summary of
-			// steps the macro no longer has. This is only what is on screen until
-			// the reload, which brings the server's own answer.
-			if (stepsTouched && !mergedTouched) form.merged_prompt = "";
-			snapshot.value = formSnapshot();
+			// A summary this save left out was cleared by the server, so it goes
+			// from the form too, or the form would go on showing a summary of steps
+			// the macro no longer has. This is only what is on screen until the
+			// reload, which brings the server's own answer.
+			if (stillHere()) {
+				if (!("merged_prompt" in upd)) form.merged_prompt = "";
+				snapshot.value = formSnapshot();
+			}
 		}
-		const savedName = props.isNew ? saved.name || "" : props.id;
-		if (savedName && saved.summarize) {
+		const savedName = isNew ? saved.name || "" : id;
+		// A server from before `summarize` does not answer the question, and starts
+		// nothing by itself: for that one the rule the form had before decides, or
+		// no macro saved in that window would get a summary.
+		const summarize =
+			"summarize" in saved
+				? !!saved.summarize
+				: steps.length >= 2 && (stepsTouched || isNew || !sentSummary);
+		// Why the summary was not started, as HTML for the toast ("" when it was).
+		let notStarted = "";
+		if (savedName && summarize) {
 			try {
 				const started = (await api.summarizeMacro(savedName)) || {};
-				// `ok: false`: the site was busy and nothing was started.
-				if (started.ok !== false) {
-					mergeStatus.value = "pending"; // Run waits for it, reload or no reload
+				if (started.ok === false) {
+					// The site was busy and nothing was started.
+					notStarted = escapeHtml(started.reason || "The site is busy.");
+				} else {
+					// Run waits for it, reload or no reload.
+					if (stillHere()) mergeStatus.value = "pending";
 					toast.create({
 						message:
 							"Summarizing in the background - Run unlocks when the summary is ready.",
@@ -722,11 +775,24 @@ async function save() {
 					});
 				}
 			} catch (e) {
-				// macro is saved either way; without a summary the steps run
+				notStarted = errHtml(e);
 			}
 		}
 		toast.success("Saved");
-		if (props.isNew) {
+		if (notStarted) {
+			// The macro is saved either way, and without a summary its steps run. It
+			// has to be said: a later save does not try again (only a change to the
+			// steps starts a summary), so silence left the owner with no summary and
+			// no idea that Re-summarize is how to get one.
+			toast.create({
+				message:
+					`The summary was not started: ${notStarted} ` +
+					"Until there is one the steps run in order. Re-summarize, in the menu next to Run, starts it again.",
+				type: "warning",
+			});
+		}
+		if (!stillHere()) return;
+		if (isNew) {
 			bypassGuard = true;
 			if (savedName) router.replace("/macros/" + savedName);
 		} else if (!(await reloadMacro())) {
@@ -766,14 +832,21 @@ async function run() {
 }
 
 async function resummarize() {
+	// The server summarizes the SAVED steps, so with unsaved edits this would
+	// summarize something other than what is on screen.
+	if (dirty.value) return;
+	const id = props.id;
 	try {
-		const started = (await api.summarizeMacro(props.id)) || {};
+		// `true`: the owner asks by name. A summary already pending is given up and a
+		// new one started, which is the way out of a "Summarizing" that never ends.
+		const started = (await api.summarizeMacro(id, true)) || {};
 		if (started.ok === false) {
 			// The site was busy and nothing was started: no "Summarizing" to wait on.
 			toast.error(escapeHtml(started.reason || "The summary could not be started."));
 			return;
 		}
-		mergeStatus.value = "pending";
+		// The user may have opened another macro while this was in flight.
+		if (id === props.id) mergeStatus.value = "pending";
 		toast.create({
 			message: "Summarizing in the background - Run unlocks when the summary is ready.",
 			type: "info",
