@@ -400,13 +400,79 @@ def delete_triggers_bulk(names: str) -> dict:
 # --------------------------------------------------------------------------- #
 # condition dry test
 # --------------------------------------------------------------------------- #
+def _wrap_condition_value(value):
+	"""Wrap child rows so ``doc.items[0].qty`` keeps resolving; scalars pass through."""
+	if isinstance(value, dict):
+		return _ConditionDoc(value)
+	if isinstance(value, list):
+		return [_wrap_condition_value(v) for v in value]
+	return value
+
+
+class _ConditionDoc:
+	"""Read-only, methodless view of a document for condition evaluation.
+
+	``frappe.safe_eval`` only blocks ``_``-prefixed attribute names, so a live
+	``Document`` handed to a condition would expose its public methods
+	(``db_insert``, ``db_set``, ``run_method``, ``get_password``). A plain
+	``frappe._dict`` is no good either: ``dict`` methods shadow same-named fields,
+	so ``doc.items`` resolves to ``dict.items`` and ``doc.items[0].qty`` breaks on
+	every transaction doctype. This wrapper resolves ONLY field values (child
+	tables wrapped the same way, so ``doc.items[0].qty`` works) and raises
+	``AttributeError`` for anything else, so a mistyped field is reported instead
+	of silently ``None`` and no document method is reachable. ``doc.get("field")``
+	is supported and is field-only. Built from an
+	``apply_fieldlevel_read_permissions`` snapshot, so permlevel fields the caller
+	cannot read are absent."""
+
+	__slots__ = ("_data",)
+
+	def __init__(self, data: dict):
+		object.__setattr__(self, "_data", data)
+
+	def __getattr__(self, name):
+		data = object.__getattribute__(self, "_data")
+		if name in data:
+			return _wrap_condition_value(data[name])
+		raise AttributeError(name)
+
+	def __getitem__(self, name):
+		data = object.__getattribute__(self, "_data")
+		if name in data:
+			return _wrap_condition_value(data[name])
+		raise KeyError(name)
+
+	def get(self, name, default=None):
+		data = object.__getattribute__(self, "_data")
+		return _wrap_condition_value(data[name]) if name in data else default
+
+
+def _readonly_eval_doc(doc) -> "_ConditionDoc":
+	"""A methodless, field-permission-filtered view of ``doc`` for condition
+	evaluation (see ``_ConditionDoc``). ``apply_fieldlevel_read_permissions``
+	drops the permlevel fields the caller cannot read; the passed ``doc`` is a
+	fresh ``get_doc`` / ``new_doc`` instance owned by the caller, so filtering it
+	here is safe."""
+	doc.apply_fieldlevel_read_permissions()
+	return _ConditionDoc(doc.as_dict())
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def test_trigger_condition(target_doctype: str, condition: str = "", docname: str = "") -> dict:
 	"""READ-ONLY condition tester. Without ``docname``: compile/eval against an
 	empty doc (webhook-style validation). With ``docname`` (caller needs read
 	on that doc): also report whether the trigger WOULD fire. A bad expression
-	is a payload (``{valid: False, error}``), never a 500."""
+	is a payload (``{valid: False, error}``), never a 500.
+
+	Manage-gated exactly like create/update/delete: it evaluates a caller-supplied
+	expression server-side, so it must never be reachable by a plain Jarvis User.
+	The expression runs against a methodless, field-permission-filtered view of the
+	document (``_readonly_eval_doc`` / ``_ConditionDoc``), never a live
+	``Document``: ``frappe.safe_eval`` blocks only ``_``-prefixed attribute names,
+	so a live doc would let a condition reach public ``Document`` methods and act
+	on any table."""
+	_require_manage()
 	target_doctype = (target_doctype or "").strip()
 	if not target_doctype or not frappe.db.exists("DocType", target_doctype):
 		frappe.throw(_("Unknown DocType: {0}").format(target_doctype))
@@ -429,8 +495,9 @@ def test_trigger_condition(target_doctype: str, condition: str = "", docname: st
 			data["would_fire"] = True  # no condition = always fires
 		return {"ok": True, "data": data}
 
+	safe_doc = _readonly_eval_doc(doc)
 	try:
-		result = frappe.safe_eval(condition, eval_locals=eval_context(doc))
+		result = frappe.safe_eval(condition, eval_locals=eval_context(safe_doc))
 	except TypeError as e:
 		# On a BLANK doc (no docname) a TypeError is almost always a numeric
 		# field that is None on an empty doc (doc.grand_total > 100000) — the
@@ -470,7 +537,13 @@ def _friendly_condition_error(e: Exception, target_doctype: str) -> str:
 		).format(str(e))
 	if isinstance(e, AttributeError):
 		return _("That field does not exist on {0}: {1}").format(target_doctype, str(e))
-	return _("The condition could not be evaluated: {0}").format(str(e))
+	# Deliberately NOT ``str(e)``: a raw exception message can carry a field
+	# value (e.g. ``{}[doc.grand_total]`` raises ``KeyError(<value>)``), which
+	# would turn this error string into a read oracle. Surface only the exception
+	# type, which names the failure class without echoing any value.
+	return _("The condition could not be evaluated ({0}). Check the fields and operators used.").format(
+		type(e).__name__
+	)
 
 
 # --------------------------------------------------------------------------- #
