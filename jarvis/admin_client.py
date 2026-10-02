@@ -103,25 +103,70 @@ _MAX_MESSAGE_CHARS = 500
 # the bench's status field. Punch-list "secret values can leak to
 # last_sync_status/Error Log via upstream passthrough" from the
 # 2026-06-16 cross-repo review.
+# Each entry is (pattern, replacement). The replacement keeps whatever names
+# the credential (the keyword, the URL scheme, the parameter name) so an
+# operator can still tell what kind of error it was; only the value goes.
+#
+# 2026-10-02: the first four were added when this scrub started serving text
+# that is not an admin envelope (a macro run's stored reason, the voice
+# errors): the text of an HTTP library's exception carries the request's URL
+# and headers. Before them ``Authorization: Bearer <tok>`` lost the word
+# "Bearer" and kept the token (the keyword pattern took "Bearer" as the
+# value), and a bare ``Bearer <tok>``, ``scheme://user:pass@host`` and
+# ``?token=`` / ``?key=`` / ``?sig=`` passed through untouched. An unlabelled
+# key with no known prefix still does: nothing tells it from an ordinary id.
 _SECRET_PATTERNS = (
-	# token=VALUE / api_key=VALUE / api_secret=VALUE / Bearer VALUE /
-	# Authorization: Bearer VALUE / etc. Captures the credential keyword
-	# + the (=|:) + the secret. We replace the whole tail with [REDACTED]
-	# so the keyword survives ("AuthenticationError: api_key=[REDACTED]
-	# is invalid").
-	re.compile(
-		r"(?i)\b("
-		r"api[_-]?key|api[_-]?secret|client[_-]?secret|"
-		r"access[_-]?token|refresh[_-]?token|"
-		r"authorization|bearer|password|secret"
-		r")\s*[=:]\s*\S+"
+	# scheme://user:pass@host -> scheme://[REDACTED]@host. Needs BOTH the colon
+	# and the "@" before the first "/", so "https://host:8443/x" and an e-mail
+	# address beside a URL are left alone.
+	(
+		re.compile(r"(?i)(\b[a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@"),
+		r"\1[REDACTED]@",
+	),
+	# Authorization: <scheme> VALUE. The scheme word is part of the match, so the
+	# token after it goes too.
+	(
+		re.compile(r"(?i)\b((?:proxy-)?authorization)\s*[=:]\s*(?:(?:bearer|basic|digest|token)\s+)?\S+"),
+		r"\1=[REDACTED]",
+	),
+	# Bearer VALUE with no "Authorization:" in front. The value must look like a
+	# token (8+ token characters with a digit among them, or 20+ of them), so
+	# prose such as "Bearer authentication failed" is not eaten.
+	(
+		re.compile(
+			r"(?i)\b(bearer)\s+"
+			r"(?=[A-Za-z0-9._~+/\-]*\d|[A-Za-z0-9._~+/\-]{20,})"
+			r"[A-Za-z0-9._~+/\-]{8,}=*"
+		),
+		r"\1 [REDACTED]",
+	),
+	# ?token=VALUE / &sig=VALUE / ... in a URL's query string. Anchored on the
+	# "?" or "&" so "the key = value pair" in a sentence is not a match, and
+	# stops at the next "&" so the other parameters survive.
+	(
+		re.compile(r"(?i)([?&](?:access[_-]?token|api[_-]?key|token|key|signature|sig|secret)=)[^&\s#]+"),
+		r"\1[REDACTED]",
+	),
+	# api_key=VALUE / api_secret=VALUE / password: VALUE / etc. Captures the
+	# credential keyword + the (=|:) + the secret. We replace the whole tail
+	# with [REDACTED] so the keyword survives ("AuthenticationError:
+	# api_key=[REDACTED] is invalid").
+	(
+		re.compile(
+			r"(?i)\b("
+			r"api[_-]?key|api[_-]?secret|client[_-]?secret|"
+			r"access[_-]?token|refresh[_-]?token|"
+			r"authorization|bearer|password|secret"
+			r")\s*[=:]\s*\S+"
+		),
+		r"\1=[REDACTED]",
 	),
 	# OpenAI / Anthropic-style key prefixes (sk-..., sk-ant-..., etc.)
 	# without an explicit keyword. Conservative threshold (20+ chars)
 	# so we don't false-positive on short literals like "sk-1".
-	re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),
+	(re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED]"),
 	# RFC 7519 JWTs (id_token / access_token shapes).
-	re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b"),
+	(re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b"), "[REDACTED]"),
 )
 
 
@@ -131,21 +176,13 @@ def _scrub_secrets(text: str) -> str:
 	can't pollute ``last_sync_status``.
 
 	Idempotent: scrubbing already-scrubbed text leaves [REDACTED] markers
-	intact (the patterns don't match the literal "[REDACTED]").
+	intact (a pattern that matches one again rewrites it to itself).
 	"""
 	if not text:
 		return text
 	out = text
-	for pat in _SECRET_PATTERNS:
-		out = pat.sub(
-			lambda m: (
-				# Keyword + "=[REDACTED]" for the labeled-credential pattern;
-				# bare "[REDACTED]" for the prefix / JWT patterns (whole match
-				# IS the secret).
-				f"{m.group(1)}=[REDACTED]" if m.lastindex else "[REDACTED]"
-			),
-			out,
-		)
+	for pat, repl in _SECRET_PATTERNS:
+		out = pat.sub(repl, out)
 	if len(out) > _MAX_MESSAGE_CHARS:
 		out = out[:_MAX_MESSAGE_CHARS] + "...[truncated]"
 	return out
