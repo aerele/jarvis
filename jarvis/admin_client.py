@@ -104,69 +104,117 @@ _MAX_MESSAGE_CHARS = 500
 # last_sync_status/Error Log via upstream passthrough" from the
 # 2026-06-16 cross-repo review.
 # Each entry is (pattern, replacement). The replacement keeps whatever names
-# the credential (the keyword, the URL scheme, the parameter name) so an
+# the credential (the keyword, the URL up to its "?", the JSON key) so an
 # operator can still tell what kind of error it was; only the value goes.
 #
-# 2026-10-02: the first four were added when this scrub started serving text
-# that is not an admin envelope (a macro run's stored reason, the voice
-# errors): the text of an HTTP library's exception carries the request's URL
-# and headers. Before them ``Authorization: Bearer <tok>`` lost the word
-# "Bearer" and kept the token (the keyword pattern took "Bearer" as the
-# value), and a bare ``Bearer <tok>``, ``scheme://user:pass@host`` and
-# ``?token=`` / ``?key=`` / ``?sig=`` passed through untouched. An unlabelled
-# key with no known prefix still does: nothing tells it from an ordinary id.
+# This scrub also serves text that is not an admin envelope (a macro run's
+# stored reason, the voice errors): the text of an HTTP library's exception,
+# which carries the request's URL and headers, and an upstream's raw body.
+#
+# Three rules the patterns are written to, each pinned by a test:
+#   - LINEAR. Callers pass upstream text uncapped. No pattern may rescan a run
+#     of characters from more than one starting point: every unbounded class is
+#     anchored on a literal that the class itself cannot contain ("://", "?", a
+#     quote, a keyword followed by whitespace), and a class that could overlap
+#     its anchor is bounded ({0,40}).
+#   - IDEMPOTENT. Scrubbing scrubbed text changes nothing. The ORDER carries
+#     this: a pattern never produces text that an EARLIER pattern would match on
+#     a second pass. That is why the quoted-key pattern comes after the keyword
+#     patterns and the query string goes last ("x?Authorization: v" becomes
+#     "x?Authorization=[REDACTED]", which is a query string).
+#   - An unlabelled value with no known shape still passes: nothing tells it
+#     from an ordinary id.
+#
+# Characters a quoted value may hold: anything but its own quote and a newline,
+# with a backslash escape taken whole.
+_DQ = r'"(?:[^"\\\n]|\\.)*"'
+_SQ = r"'(?:[^'\\\n]|\\.)*'"
+
 _SECRET_PATTERNS = (
-	# scheme://user:pass@host -> scheme://[REDACTED]@host. Needs BOTH the colon
-	# and the "@" before the first "/", so "https://host:8443/x" and an e-mail
-	# address beside a URL are left alone.
-	(
-		re.compile(r"(?i)(\b[a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]+@"),
-		r"\1[REDACTED]@",
-	),
+	# URL userinfo: everything between "://" and the last "@" before the path.
+	#   redis://:hunter2@host:6379/0      -> redis://[REDACTED]@host:6379/0
+	#   https://ghp_token@github.com/x    -> https://[REDACTED]@github.com/x
+	#   https://user:p@ss@host/x          -> https://[REDACTED]@host/x
+	# The userinfo cannot hold "/", "?", "#" or a space, so "https://host:8443/x",
+	# "https://host:8443?x=a@b" and an e-mail address beside a URL are left alone.
+	# A bare user name goes too ("ssh://git@host"): it cannot be told from a token.
+	(re.compile(r"://[^/\s?#]*@"), "://[REDACTED]@"),
 	# Authorization: <scheme> VALUE. The scheme word is part of the match, so the
 	# token after it goes too.
+	#   Authorization: Bearer abc123      -> Authorization=[REDACTED]
+	#   Authorization: token key:secret   -> Authorization=[REDACTED]
 	(
 		re.compile(r"(?i)\b((?:proxy-)?authorization)\s*[=:]\s*(?:(?:bearer|basic|digest|token)\s+)?\S+"),
 		r"\1=[REDACTED]",
 	),
 	# Bearer VALUE with no "Authorization:" in front. The value must look like a
 	# token (8+ token characters with a digit among them, or 20+ of them), so
-	# prose such as "Bearer authentication failed" is not eaten.
+	# prose such as "Bearer authentication failed" is not eaten. ":" is a token
+	# character: a "key:secret" value used to keep everything after the colon.
+	#   Bearer abc123tokenvalue was refused -> Bearer [REDACTED] was refused
+	#   Bearer abcdef123456:s3cr3t          -> Bearer [REDACTED]
 	(
 		re.compile(
 			r"(?i)\b(bearer)\s+"
-			r"(?=[A-Za-z0-9._~+/\-]*\d|[A-Za-z0-9._~+/\-]{20,})"
-			r"[A-Za-z0-9._~+/\-]{8,}=*"
+			r"(?=[A-Za-z0-9._~+/:\-]*\d|[A-Za-z0-9._~+/:\-]{20,})"
+			r"[A-Za-z0-9._~+/:\-]{8,}=*"
 		),
 		r"\1 [REDACTED]",
 	),
-	# ?token=VALUE / &sig=VALUE / ... in a URL's query string. Anchored on the
-	# "?" or "&" so "the key = value pair" in a sentence is not a match, and
-	# stops at the next "&" so the other parameters survive.
-	(
-		re.compile(r"(?i)([?&](?:access[_-]?token|api[_-]?key|token|key|signature|sig|secret)=)[^&\s#]+"),
-		r"\1[REDACTED]",
-	),
-	# api_key=VALUE / api_secret=VALUE / password: VALUE / etc. Captures the
-	# credential keyword + the (=|:) + the secret. We replace the whole tail
-	# with [REDACTED] so the keyword survives ("AuthenticationError:
-	# api_key=[REDACTED] is invalid").
+	# token KEY:SECRET, Frappe's own API-key scheme (the header this client sends
+	# when it has no OAuth token), with no "Authorization:" in front.
+	#   token 1a2b3c4d5e:f6g7h8i9j0 -> token [REDACTED]
+	(re.compile(r"(?i)\b(token)\s+[A-Za-z0-9]{6,}:[A-Za-z0-9]{6,}"), r"\1 [REDACTED]"),
+	# api_key=VALUE / api_secret=VALUE / password: VALUE / etc. The keyword
+	# survives, the value goes: a quoted value whole (spaces included, and
+	# whatever is glued to its closing quote), anything else up to whitespace.
+	#   api_key=sk-abc is invalid        -> api_key=[REDACTED] is invalid
+	#   password: "correct horse" failed -> password=[REDACTED] failed
 	(
 		re.compile(
 			r"(?i)\b("
 			r"api[_-]?key|api[_-]?secret|client[_-]?secret|"
 			r"access[_-]?token|refresh[_-]?token|"
 			r"authorization|bearer|password|secret"
-			r")\s*[=:]\s*\S+"
+			r")\s*[=:]\s*(?:" + _DQ + r"\S*|" + _SQ + r"\S*|\S+)"
 		),
 		r"\1=[REDACTED]",
+	),
+	# A QUOTED key with a quoted value: JSON, or the repr of a dict (a request
+	# body or a headers dict echoed in an error). The patterns above need "=" or
+	# ":" right after the keyword, so the closing quote of a key hid it from
+	# them. Any key that NAMES a credential counts, whatever else is in it.
+	#   {"api_key": "sk-abc"}                -> {"api_key": "[REDACTED]"}
+	#   {'Authorization': 'token key:secret'} -> {'Authorization': '[REDACTED]'}
+	#   {"X-Jarvis-Token": "abc"}            -> {"X-Jarvis-Token": "[REDACTED]"}
+	# A value that is not a string is left: {'password': ['This field is required']}.
+	# The key's quote must open a key (start of text, or after a space or one of
+	# "{,([" ), never close something else.
+	(
+		re.compile(
+			r"(?i)(?<![^\s{,(\[])([\"'])([\w.\-]{0,40}"
+			r"(?:token|secret|passw(?:or)?d|api[_-]?key|private[_-]?key|authorization|cookie)"
+			r"[\w.\-]{0,40})\1\s*:\s*(?:" + _DQ + r"|" + _SQ + r")"
+		),
+		# The value keeps its own kind of quote, so the text stays balanced.
+		lambda m: f"{m[1]}{m[2]}{m[1]}: {m[0][-1]}[REDACTED]{m[0][-1]}",
 	),
 	# OpenAI / Anthropic-style key prefixes (sk-..., sk-ant-..., etc.)
 	# without an explicit keyword. Conservative threshold (20+ chars)
 	# so we don't false-positive on short literals like "sk-1".
+	#   key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV rejected -> key [REDACTED] rejected
 	(re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), "[REDACTED]"),
 	# RFC 7519 JWTs (id_token / access_token shapes).
+	#   id_token rejected: eyJ0eXAiOiJKV1QifQ.abcde123.sig456 -> id_token rejected: [REDACTED]
 	(re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b"), "[REDACTED]"),
+	# The WHOLE query string of a URL or path, whatever its parameters are called.
+	# A list of credential names (token, key, sig, ...) missed the ones nobody
+	# listed: an S3 presigned URL carries X-Amz-Signature and X-Amz-Security-Token.
+	#   https://h/x?page=2&token=abc returned 403 -> https://h/x?[REDACTED] returned 403
+	#   with url: /b/k?X-Amz-Signature=9f8a (Caused -> with url: /b/k?[REDACTED] (Caused
+	# The "?" must follow something (a path) and be followed by name=, so
+	# "Did it work? key=value" and "Invalid field ?token= in filter" are left alone.
+	(re.compile(r"(?<=[^\s?])\?[^\s?=]+=\S*"), "?[REDACTED]"),
 )
 
 
