@@ -155,6 +155,16 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 #     skipped, neither re-run nor errored.
 # What still heals is what the sweep was written for: a message the machine never
 # saw (pure legacy, or the Turn insert that follows the committed seed never ran).
+#
+# One such message is not re-dispatched here: the step of a live macro run. The macro
+# engine sends each step under a fixed id and comes back to a step by several roads
+# (a repeated turn end, the capacity resume). A re-dispatch from here, under a random
+# id, was a turn the engine did not know: it sent the step again, and on an armed run
+# the step's writes happened twice. That message is handed to the engine
+# (``_a_live_runs_step``, ``macros.heal_dangling_seed``), which gives it the step's own
+# turn; the strike is the same marker, and a second strike also ends the run. Every
+# other orphan in a run's chat is healed here as before: a message someone typed, a
+# step message of a run parked for capacity, an older step message, the summarize turn.
 ORPHAN_MIN_AGE_SECONDS = 180  # past any normal dequeue delay
 ORPHAN_MAX_AGE_SECONDS = 3 * 3600  # don't touch history predating job ids
 _ORPHAN_ERR = "Run was never started (no worker picked it up)."
@@ -172,7 +182,7 @@ def _sweep_orphan_turns(now) -> int:
 
 	rows = frappe.db.sql(
 		"""
-		SELECT m.name, m.conversation, m.seq, m.was_recovered, c.owner
+		SELECT m.name, m.conversation, m.seq, m.was_recovered, m.origin, c.owner
 		FROM `tabJarvis Chat Message` m
 		LEFT JOIN `tabJarvis Conversation` c ON c.name = m.conversation
 		WHERE m.role = 'user'
@@ -267,6 +277,16 @@ def _sweep_orphan_turns(now) -> int:
 	return errored
 
 
+def _a_live_runs_step(r: dict) -> bool:
+	"""Whether this orphan is the current step message of a `running` macro run, which
+	the macro engine heals (see the note above ``ORPHAN_MIN_AGE_SECONDS``)."""
+	if (r.get("origin") or "") != "macro":
+		return False
+	from jarvis.chat import macros
+
+	return bool(macros.run_waiting_on_seed(r["conversation"], r["name"]))
+
+
 def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 	"""One orphan row's write: heal (redispatch) on the first strike, error on the
 	second. Returns True iff the row was ERRORED (for the caller's count).
@@ -274,6 +294,22 @@ def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 	Under the pump the second strike is reachable only when the first re-dispatch
 	left no Turn (legacy fallback, or admission raised after the strike was stamped):
 	a seed healed into a Turn is no longer a candidate."""
+	a_runs_step = _a_live_runs_step(r)
+	if a_runs_step and not int(r["was_recovered"] or 0):
+		from jarvis.chat import macros
+
+		# The engine stamps the strike itself, under the run's lock.
+		healed = macros.heal_dangling_seed(r["conversation"], r["name"])
+		if healed is not None:
+			if healed.get("overloaded"):
+				# As for the re-dispatch below: a full site must not cost the one strike.
+				frappe.db.set_value(MSG, r["name"], "was_recovered", 0, update_modified=False)
+				frappe.db.commit()
+				frappe.logger("jarvis.chat.stale_scan").warning(
+					f"macro step heal deferred (site overloaded); will retry: {r['name']}"
+				)
+			return False
+		# Not the engine's after all: healed as any other orphan.
 	if not int(r["was_recovered"] or 0):
 		# Stamp the recovery-attempt marker BEFORE re-dispatch so the redispatch's
 		# job id carries the ::a1 suffix and the shard-lock commit inside admission
@@ -328,4 +364,10 @@ def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 				"error": _ORPHAN_ERR,
 			},
 		)
+	if a_runs_step:
+		# The step got its one retry and still has no turn. Nothing will ever end for
+		# it, so the run would sit `running` (and armed) until the stale-run sweep.
+		from jarvis.chat import macros
+
+		macros.fail_run_for_seed(r["conversation"], r["name"])
 	return True
