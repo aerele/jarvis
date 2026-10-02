@@ -7046,6 +7046,12 @@ function onOverlayBackdropClick(close) {
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<ri>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
+// The shared popup belongs to one search, not merely one field key. A blur
+// timer or response from an older search must not mutate the current popup.
+let draftLinkGeneration = 0;
+onBeforeUnmount(() => {
+	draftLinkGeneration++;
+});
 const _formMetaCache = {};
 
 async function _formMeta(doctype) {
@@ -7241,18 +7247,20 @@ function removeDraftRow(ti, ri) {
 	draftPanel.value.tables[ti].rows.splice(ri, 1);
 }
 function closeDraftPanel() {
+	draftLinkGeneration++;
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
 }
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
+	const generation = ++draftLinkGeneration;
 	const anchor = ev && ev.target;
 	draftLink.value = { key, items: [], open: true, anchor };
 	if (!doctype) return;
 	try {
 		const r = await api.searchLink(doctype, target());
-		if (draftLink.value.key !== key) return; // user moved on
+		if (generation !== draftLinkGeneration || draftLink.value.key !== key) return;
 		draftLink.value = {
 			key,
 			items: (r || [])
@@ -7266,11 +7274,16 @@ async function onDraftLink(key, target, doctype, ev) {
 	}
 }
 function pickDraftLink(setter, item) {
+	draftLinkGeneration++;
 	setter(item.value);
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
 }
-function closeDraftLink() {
+function closeDraftLink(ev) {
+	const generation = draftLinkGeneration;
+	const anchor = ev.target;
 	setTimeout(() => {
+		if (generation !== draftLinkGeneration || document.activeElement === anchor) return;
+		draftLinkGeneration++; // a pending response may not reopen a blurred field
 		draftLink.value = { ...draftLink.value, open: false };
 	}, 160);
 }
