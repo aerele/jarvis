@@ -539,6 +539,18 @@ describe("MacroDetail Run: it runs what is SAVED, so it waits for a save", () =>
 		expect(runReason(w).exists()).toBe(false);
 	});
 
+	it("keeps a line's room for the reason, so the form does not jump when it appears", async () => {
+		// The line sits above the form. Without room kept for it, the first keystroke
+		// pushed every field down, the one being typed in included.
+		const w = await mountDetail(baseMacro());
+		const room = w.find('[data-testid="run-reason-room"]');
+		expect(room.exists()).toBe(true);
+		expect(room.classes()).toContain("min-h-4");
+		expect(room.text()).toBe("");
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		expect(room.element.contains(runReason(w).element)).toBe(true);
+	});
+
 	it("still waits for a summary that is being written, and says that first, on the same line", async () => {
 		const w = await mountDetail(baseMacro({ merge_status: "pending" }));
 		expect(runBtn(w).props("disabled")).toBe(true);

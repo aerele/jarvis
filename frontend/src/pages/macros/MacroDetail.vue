@@ -34,15 +34,20 @@
 			<!-- Why Run is off, as text. The tooltip alone does not reach everyone: a
 			     disabled button takes no keyboard focus, a screen reader gets "Run,
 			     dimmed" and no reason, and touch has no hover. The button points here
-			     with aria-describedby (the pattern of approvals/SheetDetail.vue). -->
-			<p
-				v-if="!isNew && runBlockedReason"
-				:id="RUN_REASON_ID"
-				data-testid="run-reason"
-				class="mb-4 text-sm text-ink-amber-3"
-			>
-				{{ runBlockedReason }}
-			</p>
+			     with aria-describedby (the pattern of approvals/SheetDetail.vue).
+			     A saved macro keeps one line's room for it whether or not it shows:
+			     it appears on the first keystroke, and without the room every field
+			     below moved down under the pointer. -->
+			<div v-if="!isNew" data-testid="run-reason-room" class="mb-4 min-h-4">
+				<p
+					v-if="runBlockedReason"
+					:id="RUN_REASON_ID"
+					data-testid="run-reason"
+					class="text-sm text-ink-amber-3"
+				>
+					{{ runBlockedReason }}
+				</p>
+			</div>
 			<!-- How the last run went, when the owner needs telling: it failed, it is
 			     waiting on them, or a step only drafted a record. Nothing else on this
 			     page said, and a scheduled run fails with nobody watching. -->
