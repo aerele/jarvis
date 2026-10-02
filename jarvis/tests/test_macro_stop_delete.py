@@ -986,6 +986,9 @@ class TestDeletingAMacroStopsItsRuns(StopBase):
 
 	def test_a_bulk_delete_reports_the_other_reasons_in_words(self):
 		_, _, theirs = self._mk_run(tag="bulk-theirs")
+		# _mk_run leaves the session as the owner, who may not create a user: on a site where
+		# the bystander does not exist yet (CI), ensure_user must run as Administrator.
+		frappe.set_user("Administrator")
 		frappe.db.set_value(MACRO, theirs, "owner", ensure_user(BYSTANDER), update_modified=False)
 		frappe.db.commit()
 		frappe.set_user(OWNER)
