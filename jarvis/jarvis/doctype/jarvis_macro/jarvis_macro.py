@@ -20,6 +20,7 @@ MAX_NAME_LEN = 80
 MAX_DESC_LEN = 500
 MAX_STEPS = 25
 MAX_PROMPT_LEN = 5000
+MAX_SUMMARY_LEN = MAX_STEPS * MAX_PROMPT_LEN
 MAX_MACROS_PER_OWNER = 25
 
 _STEP_TEXT_FIELDS = ("label", "prompt", "model_override", "thinking_override")
@@ -62,6 +63,7 @@ class JarvisMacro(NotRenamable, Document):
 		self._guard_skip_confirmation_enable()
 		self._guard_summary_state()
 		self._clear_summary_of_changed_steps()
+		self._settle_summary_written_in_this_save()
 		self._validate_summary_length()
 		self._recompute_next_run()
 
@@ -123,15 +125,46 @@ class JarvisMacro(NotRenamable, Document):
 		stored = (before.get("merged_prompt") if before else "") or ""
 		return (self.merged_prompt or "").strip() != stored.strip()
 
+	def _settle_summary_written_in_this_save(self):
+		"""A save that changes the summary text is someone writing it by hand, and that
+		text is the summary from then on: "ready" (no status once emptied), whatever
+		the status was. One being written by the model at that moment is given up: the
+		"summarizing" mark and its link go, so its late result finds no macro waiting
+		and is ignored (``macros._apply_merge_after_turn``).
+
+		The rule lived in ``macros_api.update_macro`` alone. A summary written through
+		the Desk form, REST or the assistant's ``update_doc`` kept "pending" and the
+		link, and the model's text landed over it a moment later; written on a macro
+		whose summary had failed, it ran under a Failed badge.
+
+		The link is cleared only here and only with the mark, which is the one thing a
+		save may do to engine state (see ``_guard_summary_state``): dropping one's own
+		summary in flight, as changing a step already does. Not on insert: a new macro
+		keeps what it is created with."""
+		before = self.get_doc_before_save()
+		if not before or not self._summary_written_in_this_save():
+			return
+		self.merge_status = "ready" if (self.merged_prompt or "").strip() else ""
+		if (before.get("merge_status") or "") == "pending":
+			self.merge_conversation = ""
+
 	def _validate_summary_length(self):
-		"""A summary runs as ONE prompt in place of the steps, so one written by hand
-		gets the limit a step's prompt has. Only a summary this save writes is
-		measured: the engine's own (a raw write that never comes through here) may be
-		longer, and must not make every later save of its macro fail."""
+		"""A summary runs in place of the steps, so one written by hand may be as long
+		as all the steps together (``MAX_SUMMARY_LEN``), not as long as one of them:
+		nothing limits a summary the model writes (a raw write that never comes through
+		here), and with the limit of one step a typo could not be fixed in a longer one.
+
+		Only a summary this save writes is measured, and one that is over the limit is
+		refused only when it is also longer than the stored text: a summary that is
+		already over (the model's) can still be corrected or shortened, and never made
+		longer."""
 		if not self._summary_written_in_this_save():
 			return
-		if len((self.merged_prompt or "").strip()) > MAX_PROMPT_LEN:
-			frappe.throw(_("The summarized prompt must be at most {0} characters.").format(MAX_PROMPT_LEN))
+		before = self.get_doc_before_save()
+		stored = len(((before.get("merged_prompt") if before else "") or "").strip())
+		written = len((self.merged_prompt or "").strip())
+		if written > MAX_SUMMARY_LEN and written > stored:
+			frappe.throw(_("The summarized prompt must be at most {0} characters.").format(MAX_SUMMARY_LEN))
 
 	def _guard_skip_confirmation_enable(self):
 		"""ARM the macro = run its writes uncarded (the broad covered set, incl.
