@@ -33,6 +33,22 @@ class TestAStepIsNeverDroppedSilently(outcome.MacroRunOutcomeBase):
 		self.assertIn("Step 2", str(cm.exception))
 		self.assertIn("Post the entries", str(cm.exception))
 
+	def test_the_way_out_offered_is_one_the_form_has(self):
+		# The form cannot remove a macro's only step (Remove is off with one card),
+		# so "remove the step" is only said when there is another step to keep.
+		with self.assertRaises(frappe.ValidationError) as cm:
+			macros_api._parse_steps([{"label": "Only a label", "prompt": ""}])
+		self.assertIn("clear the label", str(cm.exception))
+		self.assertNotIn("remove the step", str(cm.exception))
+		with self.assertRaises(frappe.ValidationError) as cm:
+			macros_api._parse_steps([{"prompt": "first"}, {"label": "Only a label", "prompt": ""}])
+		self.assertIn("remove the step", str(cm.exception))
+
+	def test_a_label_that_is_not_text_is_refused_not_a_crash(self):
+		with self.assertRaises(frappe.ValidationError) as cm:
+			macros_api._parse_steps([{"label": 5, "prompt": ""}])
+		self.assertIn("Step 1 (5)", str(cm.exception))
+
 	def test_a_wholly_empty_step_is_still_dropped(self):
 		# The form always carries one blank card to type into; it is not a step.
 		rows = macros_api._parse_steps(
@@ -84,6 +100,42 @@ class TestDeletingAMacroTakesItsRunHistory(outcome.MacroRunOutcomeBase):
 		self.assertTrue(frappe.db.exists(RUN, kept_run))
 		self.assertTrue(frappe.db.exists(MACRO, kept))
 		self.assertTrue(frappe.db.exists(CONV, conv))
+
+	def test_the_runs_deleted_are_those_of_the_macro_that_was_loaded(self):
+		# The filter is the LOADED document's name, not the caller's argument: what
+		# was permission-checked is what loses its history. The two can only differ
+		# for a caller outside a request (no argument type check there), which is
+		# simulated here by resolving another name to this macro.
+		_, _, macro = self._mk_run(tag="aliased")
+		self._more_runs(macro, 2)
+		frappe.set_user(OWNER)
+		real_get_doc = frappe.get_doc
+
+		def resolve(*args, **kwargs):
+			if args[:2] == (MACRO, "not-the-stored-name"):
+				return real_get_doc(MACRO, macro)
+			return real_get_doc(*args, **kwargs)
+
+		with patch.object(frappe, "get_doc", side_effect=resolve):
+			self.assertEqual(macros_api.delete_macro("not-the-stored-name"), {"ok": True})
+		self.assertEqual(frappe.db.count(RUN, {"macro": macro}), 0)
+		self.assertFalse(frappe.db.exists(MACRO, macro))
+
+	def test_the_owner_notification_points_at_no_run(self):
+		# delete_macro's docstring leans on this: the bulk delete skips the
+		# per-row cleanup of Notification Log rows that point at a run, and that is
+		# harmless because the only notifications the engine writes point at nothing.
+		before = set(frappe.get_all("Notification Log", filters={"for_user": OWNER}, pluck="name"))
+		with patch("jarvis.permissions.is_valid_unattended_owner", return_value=True):
+			macros.notify_owner(OWNER, subject="Macro failed", body="Step 2 failed.")
+		rows = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": OWNER, "name": ["not in", list(before) or [""]]},
+			fields=["document_type", "document_name"],
+		)
+		self.assertEqual(len(rows), 1)
+		self.assertFalse(rows[0].document_type)
+		self.assertFalse(rows[0].document_name)
 
 	def test_someone_elses_macro_keeps_its_runs(self):
 		# The owner gate comes before the run rows are touched.
