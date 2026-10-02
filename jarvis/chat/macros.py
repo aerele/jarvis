@@ -221,11 +221,40 @@ def refuse_acting_for_barred_owner(owner: str) -> None:
 # --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
+def _lock_macro_row(macro_name: str) -> bool:
+	"""Take the macro's row lock, held until this transaction ends. Returns whether
+	the macro exists.
+
+	What makes "start a run" and "delete the macro" one at a time. ``run_macro`` holds
+	it from before it inserts the run row until that row is committed;
+	``macros_api.delete_macro`` holds it across its last look for live runs and the
+	delete. So a run either committed before that look (and is seen, and stopped) or
+	locks after the delete (and finds no macro). Without it a run that started in
+	between lost its row and kept going, in a chat that stayed armed.
+
+	The lock is the FIRST read of a fresh transaction, both for the usual reason
+	(``jarvis.chat.txn``: a locking read on a row changed since the snapshot fails
+	with 1020) and so that everything read after it is the present: a macro loaded
+	before the wait would be the macro as it was.
+
+	Lock order: this row first, a run's redis lock second. Never wait for a run lock
+	(``_stop_run``) while holding it; a commit releases it."""
+	from jarvis.chat import txn
+
+	# ``owned``: both callers arrive with nothing pending, in a web request too.
+	txn.fresh_snapshot(owned=True)
+	return bool(frappe.db.get_value(MACRO, macro_name, "name", for_update=True))
+
+
 def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	"""Start a macro: create a fresh conversation, a Macro Run, and enqueue the
 	first step. Returns ``{ok, data:{macro_run, conversation}}``. ``trigger`` is
-	``manual`` (user clicked Run) or ``scheduled`` (the cron)."""
-	doc = frappe.get_doc(MACRO, macro_name)
+	``manual`` (user clicked Run) or ``scheduled`` (the cron).
+
+	Holds the macro's row lock (``_lock_macro_row``) until the run row is committed,
+	and reads the macro only after taking it. A refusal that RETURNS releases it."""
+	_lock_macro_row(macro_name)
+	doc = frappe.get_doc(MACRO, macro_name)  # DoesNotExistError: deleted meanwhile
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
 	# them), uncarded when the macro is armed. On read alone, anyone who could only
@@ -241,6 +270,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	if not steps:
 		frappe.throw(_("This macro has no steps."))
 	if trigger == "scheduled" and not doc.enabled:
+		frappe.db.commit()  # nothing written: this releases the macro row lock
 		return {"ok": False, "reason": "macro disabled"}
 	if (doc.merge_status or "") == "pending" and trigger != "scheduled":
 		frappe.throw(_("Still summarizing this macro — try again in a few seconds."))
@@ -259,6 +289,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		if trigger == "scheduled":
 			# The scheduler decides what a refusal costs: it records the failure
 			# against the owner and works out whether the slot is consumed.
+			frappe.db.commit()  # releases the macro row lock before it does
 			return {"ok": False, "reason": blocked}
 		frappe.throw(_(_BLOCK_MESSAGE.get(blocked, "This macro cannot run right now.")))
 
@@ -328,6 +359,8 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	# turns ever run on it. Cleared on every run-terminal transition (T5).
 	if doc.skip_confirmation:
 		frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
+	# The run row becomes visible and the macro row lock is released in one step: a
+	# delete waiting on the lock sees this run when it looks.
 	frappe.db.commit()
 
 	# Scheduled runs surface via the proactive "conversation:new" toast; manual
@@ -1224,6 +1257,36 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 	return True
 
 
+def live_runs_of(macro_name: str) -> list[str]:
+	"""The macro's runs that have not ended (``running`` or parked for capacity)."""
+	return frappe.get_all(
+		RUN, filters={"macro": macro_name, "status": ["in", _LIVE_RUN_STATUSES]}, pluck="name"
+	)
+
+
+def stop_runs_of_macro(macro_name: str, *, reason: str, by: str) -> int:
+	"""Stop every live run of a macro; returns how many this call stopped. Each stop
+	can wait ``_STOP_LOCK_BLOCK_S`` for its run lock, and commits."""
+	return sum(1 for run in live_runs_of(macro_name) if _stop_run(run, reason=reason, by=by))
+
+
+def stop_runs_in_conversations(conversations: list[str], *, by: str) -> int:
+	"""Stop the live runs whose chat is being archived or deleted; returns how many.
+
+	Such a run used to stay `running`: a step still in the queue ran into a chat
+	nobody could see, an armed chat stayed armed, and only the stale-run sweep, hours
+	later, closed the row. Call it while the messages still exist (the step to cancel
+	is found through them) and with nothing pending (each stop commits)."""
+	if not conversations:
+		return 0
+	runs = frappe.get_all(
+		RUN,
+		filters={"conversation": ["in", conversations], "status": ["in", _LIVE_RUN_STATUSES]},
+		pluck="name",
+	)
+	return sum(1 for run in runs if _stop_run(run, reason=_CONVERSATION_GONE_ERROR, by=by))
+
+
 def _cancel_current_step(conversation: str | None) -> bool:
 	"""Cancel the turn of the step the run last sent, if it has not started. Without
 	this a step waiting in the queue ran after its run was stopped: nothing looked at
@@ -1889,7 +1952,12 @@ def notify_owner(owner: str, *, subject: str, body: str) -> None:
 
 
 _OWNER_MISMATCH_ERROR = "This run was stopped: its macro and conversation do not belong to one user."
+# The one sentence for "the chat is gone", whoever notices: the hook and the resume
+# (found missing), an archive, a clear of chat history (``stop_runs_in_conversations``).
 _CONVERSATION_GONE_ERROR = "This run was stopped because its conversation was deleted."
+# The reason on a run stopped by ``macros_api.delete_macro``; also the closing line
+# left in the run's chat, which outlives the macro and the run row.
+_MACRO_DELETED_ERROR = "The macro was deleted."
 
 
 def _fail_run_unless_one_owner(run, macro_doc) -> bool:
