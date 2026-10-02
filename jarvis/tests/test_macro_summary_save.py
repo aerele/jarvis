@@ -113,6 +113,9 @@ class _SummarySaveBase(FrappeTestCase):
 
 	def _save(self, name: str, **changes) -> dict:
 		"""One save the way the form posts it: every field, and the steps, every time."""
+		return update_macro(name, **self._payload(name, **changes))["data"]
+
+	def _payload(self, name: str, **changes) -> dict:
 		shown = get_macro(name)
 		payload = {
 			"macro_name": shown["macro_name"],
@@ -130,7 +133,7 @@ class _SummarySaveBase(FrappeTestCase):
 		if "steps" in changes:
 			changes["steps"] = frappe.as_json(changes["steps"])
 		payload.update(changes)
-		return update_macro(name, **payload)["data"]
+		return payload
 
 
 # A rename, a reschedule and the enabled switch: three saves that leave the steps alone.
@@ -548,3 +551,360 @@ class TestSummarizeWhoseDispatchRaises(_SummarySaveBase):
 		macros._apply_merge_after_turn(conv, errored=True)
 		self.assertEqual(self._summary(name)[1:], ("failed", ""))
 		self.assertFalse(frappe.db.exists(CONV, conv))
+
+
+SUMMARY = "Analytics, then the top debtor."
+MERGE_REPLY = (
+	'```jarvis-macro-merge\n{"mergeable": true, "reason": "", "merged_prompt": "A late result."}\n```'
+)
+
+
+class TestTheFormSaysWhetherTheSummaryWasEdited(_SummarySaveBase):
+	"""The form posts the summary it shows on every save that leaves the steps alone
+	(a server from before this change clears the summary when it is not sent). What
+	it shows can be out of date: the summary landed, or was written in another tab,
+	after the form loaded. ``merged_prompt_edited`` says whether the owner changed the
+	text, so text that only differs because it is old is not read as their edit."""
+
+	def test_text_that_differs_but_was_not_edited_does_not_replace_the_summary(self):
+		name = self._macro()
+		for stale in ("", "The summary this form was opened with."):
+			with self.subTest(stale=stale):
+				self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+				saved = self._save(
+					name, macro_name=f"{PFX}-stale-form", merged_prompt=stale, merged_prompt_edited=0
+				)
+				self.assertEqual(self._summary(name)[:2], (SUMMARY, "ready"))
+				self.assertIs(saved["summarize"], False)
+
+	def test_text_that_was_not_edited_does_not_end_a_summary_being_written(self):
+		name = self._macro()
+		conv = self._pending(name)
+		self._save(name, macro_name=f"{PFX}-stale-pending", merged_prompt="Old text.", merged_prompt_edited=0)
+		self.assertEqual(self._summary(name), (None, "pending", conv))
+
+	def test_an_edit_is_saved(self):
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		saved = self._save(name, merged_prompt="  My own wording.  ", merged_prompt_edited=1)
+		self.assertEqual(self._summary(name)[:2], ("My own wording.", "ready"))
+		self.assertIs(saved["summarize"], False)
+
+	def test_an_edit_that_ends_on_the_stored_text_is_no_edit(self):
+		# Padding typed after the text: the form counts it, the trimmed text is the same.
+		name = self._macro()
+		conv = self._pending(name, text=SUMMARY)
+		self._save(name, merged_prompt=f"{SUMMARY}  ", merged_prompt_edited=1)
+		self.assertEqual(self._summary(name), (SUMMARY, "pending", conv))
+
+	def test_changed_steps_clear_a_summary_that_was_sent_but_not_edited(self):
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		saved = self._save(
+			name,
+			steps=TestASaveThatChangesTheSteps.CHANGES["text"],
+			merged_prompt="The summary this form was opened with.",
+			merged_prompt_edited=0,
+		)
+		self.assertEqual(self._summary(name)[:2], ("", ""))
+		self.assertIs(saved["summarize"], True)
+
+	def test_a_form_that_does_not_say_is_judged_by_the_text(self):
+		# A bundle from before the argument existed: sent and different is an edit.
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		self._save(name, merged_prompt="My own wording.")
+		self.assertEqual(self._summary(name)[:2], ("My own wording.", "ready"))
+
+
+class TestAStepChangeFromAnyWriter(_SummarySaveBase):
+	"""A stored summary runs INSTEAD of the steps. The comparison used to sit in
+	``update_macro`` alone, so steps changed by a plain document save (the assistant's
+	``update_doc``, the Desk form, ``frappe.client.save``, Data Import) kept the old
+	summary, and the next run did what the old steps said."""
+
+	def _doc_save(self, name: str, *, prompt: str | None = None, **fields):
+		doc = frappe.get_doc(MACRO, name)
+		if prompt is not None:
+			doc.steps[1].prompt = prompt
+		doc.update(fields)
+		doc.save()
+		frappe.db.commit()
+		return doc
+
+	def test_a_document_save_that_changes_a_step_clears_the_summary(self):
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		self._doc_save(name, prompt="Find the LOWEST outstanding customer")
+		self.assertEqual(self._summary(name)[:2], ("", ""))
+
+	def test_a_document_save_that_replaces_the_rows_clears_it_too(self):
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		doc = frappe.get_doc(MACRO, name)
+		doc.set("steps", [dict(TWO_STEPS[1]), dict(TWO_STEPS[0])])
+		doc.save()
+		frappe.db.commit()
+		self.assertEqual(self._summary(name)[:2], ("", ""))
+
+	def test_a_document_save_that_leaves_the_steps_alone_keeps_it(self):
+		name = self._macro()
+		conv = self._pending(name, text=SUMMARY)
+		self._doc_save(name, description="only the description")
+		self.assertEqual(self._summary(name), (SUMMARY, "pending", conv))
+
+	def test_a_summary_written_in_the_same_save_is_kept(self):
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		self._doc_save(name, prompt="Find the LOWEST outstanding customer", merged_prompt="My own wording.")
+		self.assertEqual(self._summary(name)[0], "My own wording.")
+
+	def test_a_summary_being_written_for_the_old_steps_does_not_land(self):
+		name = self._macro()
+		conv = self._pending(name)
+		frappe.get_doc(
+			{"doctype": MSG, "conversation": conv, "seq": 2, "role": "assistant", "content": MERGE_REPLY}
+		).insert(ignore_permissions=True)
+		self._doc_save(name, prompt="Find the LOWEST outstanding customer")
+		self.assertEqual(self._summary(name)[:2], ("", ""))
+		macros._apply_merge_after_turn(conv, errored=False)
+		self.assertEqual(self._summary(name)[:2], ("", ""))
+
+	def test_a_new_macro_keeps_the_summary_it_is_created_with(self):
+		doc = frappe.get_doc(
+			{
+				"doctype": MACRO,
+				"macro_name": f"{PFX}-{frappe.generate_hash(length=6)}",
+				"steps": [dict(s) for s in TWO_STEPS],
+				"merged_prompt": SUMMARY,
+			}
+		)
+		doc.insert()
+		frappe.db.commit()
+		self.assertEqual(self._summary(doc.name)[0], SUMMARY)
+
+
+class TestStepsThatOnlyLookDifferent(_SummarySaveBase):
+	"""Stored and posted steps are compared as the same values. A tagged skill that was
+	deleted or unshared since is dropped from what a save STORES, and a textarea posts
+	``\n`` for a stored ``\r\n``: neither is the owner changing a step."""
+
+	def test_a_tagged_skill_that_was_deleted_since_is_not_a_step_change(self):
+		skill = frappe.get_doc(
+			{
+				"doctype": "Jarvis Custom Skill",
+				"skill_name": f"{PFX}-{frappe.generate_hash(length=6)}",
+				"description": "a skill to tag",
+				"instructions": "Do the thing.",
+			}
+		)
+		skill.insert()
+		name = self._macro()
+		self._save(name, steps=[{**TWO_STEPS[0], "skills": [skill.name]}, TWO_STEPS[1]])
+		frappe.delete_doc("Jarvis Custom Skill", skill.name, force=True, ignore_permissions=True)
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		self.assertEqual(get_macro(name)["steps"][0]["skills"], [skill.name])
+		saved = self._save(name, macro_name=f"{PFX}-skill-gone")
+		self.assertEqual(self._summary(name)[:2], (SUMMARY, "ready"))
+		self.assertIs(saved["summarize"], False)
+
+	def test_a_stored_carriage_return_is_not_a_step_change(self):
+		name = self._macro()
+		row = frappe.get_all("Jarvis Macro Step", filters={"parent": name, "idx": 1}, pluck="name")[0]
+		frappe.db.set_value("Jarvis Macro Step", row, "prompt", "Sales analytics\r\nfor last quarter")
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		saved = self._save(
+			name, steps=[{"label": "a", "prompt": "Sales analytics\nfor last quarter"}, TWO_STEPS[1]]
+		)
+		self.assertEqual(self._summary(name)[:2], (SUMMARY, "ready"))
+		self.assertIs(saved["summarize"], False)
+
+
+class TestASaveWhileASummaryStarts(_SummarySaveBase):
+	def test_a_save_loaded_before_the_mark_was_written_keeps_it(self):
+		"""A save reads the macro, a summary is started by another request, the save
+		writes. It writes every column, so on what it read first it wrote the old
+		status back over "summarizing": the summary in flight then never landed."""
+		name = self._macro()
+		payload = self._payload(name, macro_name=f"{PFX}-renamed-mid-start")
+		other_conv = f"race-{frappe.generate_hash(length=10)}"
+
+		for isolation in (race_harness.snapshot_isolation_on, race_harness.snapshot_isolation_off):
+
+			def scenario(isolation=isolation):
+				frappe.db.rollback()
+				self._set_summary(name, text=None, status="", conversation="")
+				with isolation(), race_harness.other_connection() as other:
+					try:
+						race_harness.open_read_view()
+						self.assertFalse(frappe.db.get_value(MACRO, name, "merge_status"))
+						other.sql(
+							"""INSERT INTO `tabJarvis Conversation`
+							(name, creation, modified, owner, modified_by, title, status)
+							VALUES (%s, NOW(), NOW(), %s, %s, %s, 'Archived')""",
+							(other_conv, OWNER, OWNER, f"Merge: {PFX}-race"),
+						)
+						other.sql(
+							"""UPDATE `tabJarvis Macro` SET merge_status = 'pending',
+							merge_conversation = %s WHERE name = %s""",
+							(other_conv, name),
+						)
+						other.commit()
+						update_macro(name, **payload)
+						return self._summary(name)[1:]
+					finally:
+						frappe.db.rollback()
+						other.sql("DELETE FROM `tabJarvis Conversation` WHERE name = %s", (other_conv,))
+						other.commit()
+
+			with self.subTest(isolation=isolation.__name__):
+				race_harness.assert_fix_closes_race(
+					self, scenario, lambda summary: self.assertEqual(summary, ("pending", other_conv))
+				)
+
+
+class TestAHandWrittenSummaryHasALimit(_SummarySaveBase):
+	"""It runs as ONE prompt in place of the steps, so it gets the limit one step's
+	prompt has. Without one, a save stored two million characters as "ready"."""
+
+	def test_one_that_is_too_long_is_refused_in_plain_words(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
+
+		name = self._macro()
+		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
+		with self.assertRaises(frappe.ValidationError) as refused:
+			self._save(name, merged_prompt="z" * (MAX_PROMPT_LEN + 1), merged_prompt_edited=1)
+		self.assertIn(f"at most {MAX_PROMPT_LEN} characters", str(refused.exception))
+		frappe.db.rollback()
+		self.assertEqual(self._summary(name)[:2], (SUMMARY, "ready"))
+		self._save(name, merged_prompt="z" * MAX_PROMPT_LEN, merged_prompt_edited=1)
+		self.assertEqual(len(self._summary(name)[0]), MAX_PROMPT_LEN)
+
+	def test_a_document_save_is_held_to_it_too(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
+
+		name = self._macro()
+		doc = frappe.get_doc(MACRO, name)
+		doc.merged_prompt = "z" * (MAX_PROMPT_LEN + 1)
+		self.assertRaises(frappe.ValidationError, doc.save)
+
+	def test_a_long_summary_the_model_wrote_does_not_block_other_saves(self):
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN
+
+		name = self._macro()
+		long = "A generated summary. " * (MAX_PROMPT_LEN // 10)
+		self._set_summary(name, text=long, status="ready", conversation="")
+		self._save(name, macro_name=f"{PFX}-long-summary", merged_prompt=long.strip(), merged_prompt_edited=0)
+		self.assertEqual(self._summary(name)[:2], (long, "ready"))
+
+
+class TestResummarizeOnRequest(_SummarySaveBase):
+	""" "Summarizing" that never ends: the worker died, or the dispatch was cut off
+	after the mark was committed. The chat still exists, so a plain call answers "that
+	one is pending" for good and Run stays refused. Re-summarize in the menu passes
+	``force``: the pending summary is given up and a new one started."""
+
+	def _stuck(self, name: str) -> str:
+		conv = self._pending(name)
+		frappe.db.set_value(CONV, conv, "owner", OWNER, update_modified=False)
+		frappe.get_doc(
+			{"doctype": MSG, "conversation": conv, "seq": 2, "role": "assistant", "content": MERGE_REPLY}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		return conv
+
+	def test_it_replaces_the_pending_summary_and_deletes_its_chat(self):
+		name = self._macro()
+		stuck = self._stuck(name)
+		with patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED) as enqueue:
+			started = summarize_macro(name, force=1)
+		enqueue.assert_called_once()
+		self.assertNotEqual(started["conversation"], stuck)
+		self.assertEqual(self._summary(name)[1:], ("pending", started["conversation"]))
+		self.assertFalse(frappe.db.exists(CONV, stuck))
+		self.assertEqual(frappe.db.count(MSG, {"conversation": stuck}), 0)
+
+	def test_a_late_result_of_the_one_given_up_does_not_land(self):
+		# Even when its chat could not be deleted: the mark no longer names it.
+		name = self._macro()
+		stuck = self._stuck(name)
+		with (
+			patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED),
+			patch("jarvis.chat.macros_api.frappe.delete_doc", side_effect=RuntimeError("no")),
+		):
+			started = summarize_macro(name, force=1)
+		self.assertTrue(frappe.db.exists(CONV, stuck))
+		macros._apply_merge_after_turn(stuck, errored=False)
+		self.assertEqual(self._summary(name), (None, "pending", started["conversation"]))
+
+	def test_without_it_the_pending_summary_is_still_the_answer(self):
+		name = self._macro()
+		stuck = self._stuck(name)
+		with patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED) as enqueue:
+			self.assertEqual(summarize_macro(name), {"ok": True, "conversation": stuck})
+			self.assertEqual(summarize_macro(name, force=0), {"ok": True, "conversation": stuck})
+		enqueue.assert_not_called()
+
+	def test_a_new_summary_that_cannot_be_dispatched_leaves_nothing_pending(self):
+		name = self._macro()
+		stuck = self._stuck(name)
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("the gateway went away")),
+			self.assertRaises(frappe.ValidationError),
+		):
+			summarize_macro(name, force=1)
+		frappe.db.rollback()
+		self.assertEqual(self._summary(name)[1:], ("", ""))
+		self.assertFalse(frappe.db.exists(CONV, stuck))
+
+	def test_a_chat_that_is_not_the_owners_is_left_alone(self):
+		# The link is engine state, but the delete ignores permissions: it only ever
+		# removes a chat of the macro's owner, as the landing does.
+		name = self._macro()
+		frappe.set_user("Administrator")
+		theirs = self._conversation()
+		frappe.set_user(OWNER)
+		self._set_summary(name, text=None, status="pending", conversation=theirs)
+		with patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED):
+			started = summarize_macro(name, force=1)
+		self.assertTrue(frappe.db.exists(CONV, theirs))
+		self.assertEqual(self._summary(name)[1:], ("pending", started["conversation"]))
+
+
+class TestSummarizeHoldsTheRowBriefly(_SummarySaveBase):
+	def test_the_gate_is_asked_before_the_row_is_locked(self):
+		"""The gate can call the control plane (seconds, on a cold cache). Asked under
+		the row lock, a save of the macro and the landing of a summary waited on it."""
+		name = self._macro()
+		asked = []
+
+		def gate(owner, **kw):
+			with race_harness.other_connection() as other:
+				other.sql("SELECT name FROM `tabJarvis Macro` WHERE name = %s FOR UPDATE NOWAIT", (name,))
+				other.rollback()
+			asked.append(owner)
+			return None
+
+		with (
+			patch.object(macros, "entitlement_block", side_effect=gate),
+			patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED),
+		):
+			summarize_macro(name)
+		self.assertEqual(asked, [OWNER])
+
+	def test_a_refusal_does_not_hide_a_summary_that_is_pending(self):
+		name = self._macro()
+		conv = self._pending(name)
+		with patch.object(macros, "entitlement_block", return_value="usage_limit"):
+			self.assertEqual(summarize_macro(name), {"ok": True, "conversation": conv})
+
+	def test_the_mark_is_cleared_even_when_the_chat_cannot_be_deleted(self):
+		name = self._macro()
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("the gateway went away")),
+			patch("jarvis.chat.macros_api.frappe.delete_doc", side_effect=RuntimeError("no")),
+			self.assertRaises(frappe.ValidationError),
+		):
+			summarize_macro(name)
+		frappe.db.rollback()
+		self.assertEqual(self._summary(name)[1:], ("", ""))
