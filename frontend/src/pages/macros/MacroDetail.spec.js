@@ -233,6 +233,42 @@ describe("MacroDetail Schedule section: a pending retry is not shown as the sche
 	});
 });
 
+describe("MacroDetail: how the last run went", () => {
+	// Nothing on the form said whether the macro worked the last time it ran.
+	it("a failed last run is stated with its reason and a way to open it", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				last_run: {
+					status: "failed",
+					error: "Step 2 failed: no such customer",
+					conversation: "conv-run",
+				},
+			})
+		);
+		expect(w.text()).toContain("The last run failed. Step 2 failed: no such customer");
+		expect(w.html()).toContain("/c/conv-run");
+	});
+
+	it("a run waiting on a confirmation says what it is waiting for", async () => {
+		const reason = "Step 1 is waiting for your confirmation (Send email).";
+		const w = await mountDetail(baseMacro({ last_run: { status: "stopped", error: reason } }));
+		expect(w.text()).toContain(reason);
+		expect(w.text()).not.toContain("Open the run");
+	});
+
+	it("a last run that simply worked adds nothing to the form", async () => {
+		const w = await mountDetail(baseMacro({ last_run: { status: "completed", error: "" } }));
+		expect(w.find('[role="status"]').exists()).toBe(false);
+	});
+
+	it("a macro that never ran, or a server that sends no last run, adds nothing", async () => {
+		expect(
+			(await mountDetail(baseMacro({ last_run: null }))).find('[role="status"]').exists()
+		).toBe(false);
+		expect((await mountDetail(baseMacro())).find('[role="status"]').exists()).toBe(false);
+	});
+});
+
 describe("MacroDetail Schedule section: summary line reflects the SAVED snapshot only", () => {
 	it("shows the summary when clean and a next_run_at is present", async () => {
 		const w = await mountDetail(
