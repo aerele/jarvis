@@ -987,8 +987,10 @@ def _warn_provisioning_if_starved() -> None:
 #     only `last_heartbeat` (no `queues`), and a queue-Redis restart empties
 #     `rq:workers` for good while the workers keep running. So a zero reading is
 #     never a send block; `_registry_is_stale` names that shape and the readers
-#     treat it as "unknown". A turn nobody picks up is the orphan sweep's job
-#     (stale_scan), not this probe's.
+#     treat it as "unknown". A turn nobody picks up is not this probe's job: a
+#     Turn-owned turn is the watchdog's (queue age-out, below), and a message that
+#     never got a Turn (legacy transport included) is the orphan sweep's
+#     (stale_scan).
 
 _HEARTBEAT_FRESH_S = 480  # RQ's default worker_ttl (420s) plus its heartbeat slack
 
@@ -3951,8 +3953,12 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 			# reserved turn is reclaimed above, never cancelled by this path).
 			if not reserved and _older_than(r.get("enqueued_at"), ts.QUEUED_MAX_AGE_S):
 				if ts.cancel_queued_max_age(run_id, v, _AGE_OUT_REASON):
+					# The cancel is committed BEFORE its side effects, as on the other
+					# cancel edges: the marker below runs its own transaction and rolls
+					# back on failure, which would undo an uncommitted CAS.
 					frappe.db.commit()
 					_publish_cancelled(r, _AGE_OUT_REASON)
+					_write_age_out_marker(conv)
 					summary["aged_out"] += 1
 					continue
 			live_work = True
@@ -4290,6 +4296,36 @@ def _publish_cancelled(r: dict, reason: str) -> None:
 			)
 	except Exception:
 		pass
+
+
+def _write_age_out_marker(conversation: str) -> None:
+	"""Durable transcript row for a queue age-out (SUXI-4), the same marker the
+	Phase-0 age-out writes (``admission._sweep_age_out``).
+
+	``_publish_cancelled`` is a live event only: the client shows it as a toast, and
+	only in a tab still holding that turn's queued chip. Without this row a reload
+	(or another tab, or the phone) shows a message with no reply and no reason. The
+	gap was hidden for a while by the orphan sweep (``stale_scan``), which wrote its
+	"Run was never started" error over the still-queued turn; once the sweep stopped
+	touching a seed that has a Turn, nothing wrote a row at all.
+
+	The row is an assistant message with ``error`` set to the reason, appended at the
+	end of the conversation. It is written for a hidden seed (a confirm continuation)
+	too, where it is the only visible trace that the follow-up never ran.
+
+	Call it only AFTER the cancel is committed. Best-effort: the marker helper logs
+	and swallows its own failure, and the guard here covers the rest, so a failed
+	write can neither undo the cancel nor stop the watchdog's pass over the shard."""
+	try:
+		from jarvis.chat import admission
+
+		admission._write_cancel_marker(conversation, _AGE_OUT_REASON)
+	except Exception:
+		try:
+			frappe.db.rollback()
+			frappe.log_error(title="pump.watchdog age-out marker", message=frappe.get_traceback())
+		except Exception:
+			pass
 
 
 def _telemetry(event: str, **fields) -> None:

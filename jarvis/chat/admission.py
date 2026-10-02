@@ -1561,11 +1561,22 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 	"""SUXI-4: leave a durable assistant marker Message when a queued turn is
 	cancelled (user-initiated or system age-out) so a later reload shows WHY the
 	send has no reply - indistinguishable otherwise from a silently dropped send.
-	Reuses the error-card pattern (``error`` field) so the transcript renders it
-	as a card with a Retry affordance. seq is allocated under the conversation
-	FOR UPDATE lock (R-9 discipline) so it never collides with a concurrent
-	writer on the same conversation. Best-effort - never blocks the cancel."""
+	Reuses the ``error`` field of an assistant row. The desktop SPA and the PWA
+	classify both reason texts as ``cancelled`` (``public/js/turn_error_rules.mjs``)
+	and render a muted note with NO Retry button, not the red error card.
+
+	seq is allocated under the conversation FOR UPDATE lock (R-9 discipline), from a
+	read view opened AFTER the lock is held: the commit below closes whatever view
+	the caller's earlier reads opened (the live publish reads the conversation),
+	so the lock is the first statement and ``MAX(seq)`` sees every row committed
+	before the lock was granted. The guarantee is against writers that allocate seq
+	under the same lock; there is no unique index on ``(conversation, seq)`` behind
+	it. Call it only with nothing pending: every caller commits its cancel first,
+	and this commit (like the one after the insert) would commit a caller's
+	half-done work. Best-effort - never blocks the cancel, but it does wait for
+	the conversation lock (up to ``innodb_lock_wait_timeout``)."""
 	try:
+		frappe.db.commit()
 		_lock_conversation(conversation)
 		seq = (
 			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[
