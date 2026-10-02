@@ -238,7 +238,10 @@ export const macroRunStats = () => call(MC + "macro_run_stats");
 // to (the steps changed and two or more are left), and by Re-summarize. The WORKER
 // applies the summary when the turn ends (macro:merged event) - no client
 // round-trip needed. Run is gated on merge_status while pending.
-export const summarizeMacro = (name) => call(MC + "summarize_macro", { name });
+// `force` is Re-summarize only: a summary already pending is given up and a new one
+// started. Without it the server answers with the pending one.
+export const summarizeMacro = (name, force = false) =>
+	call(MC + "summarize_macro", force ? { name, force: 1 } : { name });
 export const setConversationModel = (conversation, model) =>
 	call("jarvis.chat.api.set_conversation_model", { conversation, model: model || "" });
 // Reasoning effort. "" clears the override, so the turn inherits Jarvis Settings.
