@@ -1608,8 +1608,10 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 	cancelled (user-initiated or system age-out) so a later reload shows WHY the
 	send has no reply - indistinguishable otherwise from a silently dropped send.
 	Reuses the ``error`` field of an assistant row. The desktop SPA and the PWA
-	classify both reason texts as ``cancelled`` (``public/js/turn_error_rules.mjs``)
-	and render a muted note with NO Retry button, not the red error card.
+	classify every reason text written here as ``cancelled``
+	(``public/js/turn_error_rules.mjs``: the user's cancel, the age-out, and the
+	macro engine's "Stopped before it started.") and render a muted note with NO
+	Retry button, not the red error card. A new reason needs its text in that rule.
 
 	seq is allocated under the conversation FOR UPDATE lock (R-9 discipline), from a
 	read view opened AFTER the lock is held: the commit below closes whatever view
