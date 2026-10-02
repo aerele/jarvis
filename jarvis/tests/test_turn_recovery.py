@@ -315,7 +315,13 @@ class TestTurnRecovery(FrappeTestCase):
 		)
 		with patch("jarvis.chat.macros.advance_after_turn") as advance:
 			self._run(sess)
-		advance.assert_called_once_with(self.conv.name, errored=False)
+		# The hook is told WHICH reply was recovered: the macro engine advances a run
+		# only when the turn that ended was that run's own step.
+		advance.assert_called_once()
+		self.assertEqual(advance.call_args.args, (self.conv.name,))
+		self.assertFalse(advance.call_args.kwargs["errored"])
+		recovered = advance.call_args.kwargs["assistant_message"]
+		self.assertEqual(frappe.db.get_value(MSG_DT, recovered, "conversation"), self.conv.name)
 
 	def test_error_advances_macro_with_errored_true(self):
 		old = self._add_msg(seq=2, started_min=-120)  # past the ceiling -> _error
@@ -333,7 +339,7 @@ class TestTurnRecovery(FrappeTestCase):
 			patch("jarvis.chat.macros.advance_after_turn") as advance,
 		):
 			turn_recovery.recover_pending_turns()
-		advance.assert_called_once_with(old.conversation, errored=True)
+		advance.assert_called_once_with(old.conversation, errored=True, assistant_message=old.name)
 
 	def test_losing_conditional_clear_does_not_advance_macro(self):
 		# Row already cleared by another cycle: _conditional_clear returns
