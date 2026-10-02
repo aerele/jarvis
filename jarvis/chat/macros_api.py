@@ -20,19 +20,41 @@ RUN = "Jarvis Macro Run"
 
 def _parse_steps(steps) -> list[dict]:
 	"""Normalize the steps array (JSON string or list) into child-row dicts,
-	dropping blank prompts. Order is preserved (child ``idx``)."""
+	dropping wholly empty steps. Order is preserved (child ``idx``).
+
+	A step with a label and no prompt is refused, not dropped: it used to vanish
+	from the save without a word (the doctype's own "Step N has an empty prompt"
+	check never saw it, the row was gone before validate ran). A step with neither
+	is the blank card the form keeps to type into, and is still skipped. The Macros
+	form makes the same split (``cleanSteps`` / ``stepErrors`` in MacroDetail.vue).
+
+	The refusal carries the owner's label, and reaches an HTML toast: the form shows
+	it through ``errHtml`` (frontend/src/lib/errors.js), which escapes it. It offers
+	"remove the step" only when another step would be left: the form cannot remove
+	a macro's only step, so there the way out is to clear the label."""
 	if steps is None:
 		return []
 	if isinstance(steps, str):
 		steps = frappe.parse_json(steps)
 	if not isinstance(steps, list):
 		return []
+	sole = sum(isinstance(s, dict) for s in steps) == 1
 	rows = []
-	for s in steps:
+	for i, s in enumerate(steps, start=1):
 		if not isinstance(s, dict):
 			continue
 		prompt = (s.get("prompt") or "").strip()
 		if not prompt:
+			# str(): a label that is not text is still not a reason for a 500.
+			label = str(s.get("label") or "").strip()
+			if label:
+				if sole:
+					frappe.throw(
+						_("Step {0} ({1}) has no prompt. Add a prompt, or clear the label.").format(i, label)
+					)
+				frappe.throw(
+					_("Step {0} ({1}) has no prompt. Add a prompt, or remove the step.").format(i, label)
+				)
 			continue
 		rows.append(
 			{
@@ -477,12 +499,37 @@ def update_macro(
 def delete_macro(name: str) -> dict:
 	"""Delete a macro row (owner-gated). Its Macro Run history rows link the
 	macro and would block the delete (LinkExistsError), so they go first — they
-	are just execution history; the run conversations themselves stay."""
+	are just execution history; the run conversations themselves stay.
+
+	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
+	and a queued job each, inside the request, for a table that grows without
+	bound. The filter is the LOADED document's name (the one whose permission was
+	just checked), never the raw argument.
+
+	What the set-based delete leaves out, and why that is fine here:
+
+	* run rows have no controller hooks, no child rows, no attachments and nothing
+	  links to them (a chat message's ``ref_name`` is plain Data);
+	* no ``Deleted Document`` copy is kept of each run (they could not be restored
+	  without their macro), and no "Deleted" feed Comment is written per run. What
+	  remains on record is the macro's own Deleted Document row;
+	* ``on_trash`` doc events do not fire per run, so a Jarvis Trigger someone
+	  pointed at Jarvis Macro Run deletions is not run for them;
+	* ``delete_doc``'s queued sweep of rows that point AT the deleted document
+	  (Comment, Notification Log, ToDo, DocShare, Document Follow, View Log,
+	  Communication and Activity Log references) does not run. Nothing in this app
+	  writes any of those against a run: the Notification Log the engine sends its
+	  owner (``macros.notify_owner``) names no document, the Macros pages offer
+	  comments, assignment and attachments on the MACRO only, and a run row is
+	  read-only to every role. One could exist only if somebody opened a run in
+	  Desk and commented on or followed it by hand. Such a row is then an orphan
+	  that points at a name which no longer resolves: it is shown nowhere (the
+	  timeline it belonged to is gone) and nothing reads it. Sweeping eight tables
+	  on every macro delete for that is not worth the queries."""
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
-	for r in frappe.get_all(RUN, filters={"macro": name}, pluck="name"):
-		frappe.delete_doc(RUN, r, ignore_permissions=True, force=True)
-	frappe.delete_doc(MACRO, name)  # honors if_owner
+	frappe.db.delete(RUN, {"macro": doc.name})
+	frappe.delete_doc(MACRO, doc.name)  # honors if_owner
 	frappe.db.commit()
 	return {"ok": True}
 

@@ -15,6 +15,7 @@
 			:columns="columns"
 			:rows="rows"
 			:loading="loading"
+			:error="error"
 			:total="total"
 			:has-more="hasMore"
 			:quick-filters="quickFilters"
@@ -158,13 +159,13 @@ import TabBar from "@/components/list/TabBar.vue";
 import { useListPage } from "@/composables/useListPage";
 import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
-import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
+import { timeAgo, exactDate, toLocalMs, formatTime12h } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
 import { lastRunCell as describeLastRun } from "@/lib/macroRunOutcome";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
-import { errHtml } from "@/lib/errors";
+import { errHtml, escapeHtml } from "@/lib/errors";
 
 const props = defineProps({
 	tab: { type: String, default: "macros" }, // 'runs' on /macros/runs (§9)
@@ -197,13 +198,16 @@ function onTab(v) {
 }
 
 // ── list config ──────────────────────────────────────────────────────────────
+// A select-type quick filter renders with no label of its own (ListPage), so
+// the "everything" option has to say WHAT it is all of: two controls side by
+// side both reading "All" could not be told apart.
 const ENABLED_OPTIONS = [
-	{ label: "All", value: "" },
+	{ label: "All statuses", value: "" },
 	{ label: "Enabled", value: "1" },
 	{ label: "Draft", value: "0" },
 ];
 const SCHEDULE_OPTIONS = [
-	{ label: "All", value: "" },
+	{ label: "All schedules", value: "" },
 	{ label: "Scheduled", value: "1" },
 	{ label: "Manual", value: "0" },
 ];
@@ -249,6 +253,9 @@ const {
 	total,
 	hasMore,
 	loading,
+	// Passed to ListPage so a load that FAILED shows its error state; without
+	// it a failure fell through to the empty state, "No Macros Found".
+	error,
 	filters,
 	setFilters,
 	sort,
@@ -288,7 +295,9 @@ async function runRow(row) {
 	try {
 		const res = await api.runMacro(row.name);
 		const data = (res && res.data) || res || {};
-		toast.success(`Running “${row.macro_name || row.name}”`);
+		// A toast renders its message as HTML (v-html): the name goes in escaped,
+		// here and in the two summary toasts below.
+		toast.success(`Running “${escapeHtml(row.macro_name || row.name)}”`);
 		// hand off to the chat - the live macro banner is ChatView's machinery
 		if (data.conversation) router.push("/c/" + data.conversation);
 	} catch (e) {
@@ -338,10 +347,14 @@ function onEvent(p) {
 	if (!p || p.kind !== "macro:merged") return;
 	refreshKeep();
 	if (p.status === "ready") {
-		toast.success(`Summary ready - “${p.macro_name || "macro"}” now runs as one prompt.`);
+		toast.success(
+			`Summary ready - “${escapeHtml(p.macro_name || "macro")}” now runs as one prompt.`
+		);
 	} else {
 		toast.create({
-			message: `“${p.macro_name || "Macro"}” keeps its step sequence (couldn't summarize).`,
+			message: `“${escapeHtml(
+				p.macro_name || "Macro"
+			)}” keeps its step sequence (couldn't summarize).`,
 			type: "info",
 		});
 	}
@@ -363,7 +376,9 @@ function scheduleLabel(row) {
 	const day = deriveScheduleDay(freq, row.schedule_weekday, row.schedule_day_of_month);
 	const anchor = scheduleAnchorPhrase(freq, day);
 	if (anchor) label = `${label} ${anchor}`;
-	const t = toHHMM(row.schedule_time);
+	// The same 12-hour text the macro's form and its time picker show ("9:00 am");
+	// this cell used to print the stored 24-hour value ("09:00").
+	const t = formatTime12h(row.schedule_time);
 	return t ? `${label} · ${t}` : label;
 }
 // What the "Next run" cell says, or null for the "-" placeholder. A slot that has
@@ -406,9 +421,5 @@ function nextRunCell(row) {
 		isRetry: !!row.next_run_is_retry,
 	});
 	return cell && { ...cell, class: NEXT_RUN_TONE[cell.tone] || "" };
-}
-function toHHMM(t) {
-	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
-	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
 }
 </script>
