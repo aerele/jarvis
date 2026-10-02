@@ -16,6 +16,9 @@ export const getAgent = (agent_slug) => call("jarvis.chat.agents_api.get_agent",
 // fetchFn that maps its ({search, filters, sort_field, ...}) call onto these.
 const AG = "jarvis.chat.agents_api.";
 
+export const getAPReviewDefaults = (company) => call(AG + "get_ap_review_defaults", { company });
+export const getARReviewDefaults = (company) => call(AG + "get_ar_review_defaults", { company });
+
 // PART 3 remediation — lightweight capability probe. `review` (skill-reviewer
 // set: Jarvis Skill Reviewer | Jarvis Admin | System Manager) is what
 // apply_agents() actually requires, so it drives the Apply-catalog button —
