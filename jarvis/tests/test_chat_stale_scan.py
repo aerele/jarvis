@@ -4,6 +4,7 @@ Runs as the fixture user ``TEST_USER`` so it never wipes Administrator's
 chat history on a dev site.
 """
 
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
@@ -22,7 +23,7 @@ from jarvis.tests.test_chat_api import (
 	_cleanup_user_conversations,
 	_ensure_test_user,
 )
-from jarvis.tests.test_pump import _PumpTestCase
+from jarvis.tests.test_pump import _PumpTestCase, _Recorder
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -32,6 +33,13 @@ TURN = "Jarvis Chat Turn"
 def setUpModule():
 	# The pump-mode class below drives a real pump slice, which reads the runtime profile.
 	install_synthetic_runtime_profile()
+
+
+def _age(message: str, seconds: int = 300) -> None:
+	"""Backdate a message's creation so it sits inside the orphan sweep's window."""
+	old = now_datetime() - timedelta(seconds=seconds)
+	frappe.db.sql(f"UPDATE `tab{MSG}` SET creation=%s WHERE name=%s", (old, message))
+	frappe.db.commit()
 
 
 class TestScanAndMarkErrored(FrappeTestCase):
@@ -137,8 +145,6 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		frappe.set_user(TEST_USER)
 		_cleanup_user_conversations()
 		self.conv = create_conversation()
-		from jarvis.chat import pump
-
 		self._pump_patches = [
 			patch.dict(frappe.local.conf, {"jarvis_phase0_admission_enabled": 1}),
 			patch.object(pump, "pump_mode_active", return_value=False),
@@ -172,9 +178,7 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 			}
 		)
 		doc.insert(ignore_permissions=True)
-		old = now_datetime() - timedelta(seconds=age_seconds)
-		frappe.db.sql("UPDATE `tabJarvis Chat Message` SET creation=%s WHERE name=%s", (old, doc.name))
-		frappe.db.commit()
+		_age(doc.name, age_seconds)
 		return doc.name
 
 	def _queued_job(self):
@@ -187,8 +191,6 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		# Workers alive but invisible in the RQ registry (bare or empty after a
 		# heartbeat gap or a queue-Redis restart): the queued job is draining toward
 		# them, so the sweep must not cancel and re-dispatch it.
-		from jarvis.chat import pump, stale_scan
-
 		uid = self._mk_orphan()
 		job = self._queued_job()
 		with (
@@ -204,8 +206,6 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 
 	def test_a_truly_empty_registry_still_heals_a_queued_orphan(self):
 		# Nobody heartbeats: the queue really is dead, the existing heal path stands.
-		from jarvis.chat import api, pump, stale_scan
-
 		uid = self._mk_orphan()
 		job = self._queued_job()
 		with (
@@ -225,8 +225,6 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		)
 
 	def test_overload_does_not_consume_healing_strike(self):
-		from jarvis.chat import admission, api, stale_scan
-
 		uid = self._mk_orphan()
 		with (
 			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
@@ -244,8 +242,6 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 		self.assertEqual(frappe.db.count(self.TURN, {"conversation": self.conv}), 0, "no replacement Turn")
 
 	def test_rescan_heals_once_capacity_frees(self):
-		from jarvis.chat import admission, api, stale_scan
-
 		uid = self._mk_orphan()
 		with (
 			patch("frappe.utils.background_jobs.get_job_status", return_value=None),
@@ -276,16 +272,21 @@ class TestOrphanRedispatchOverload(FrappeTestCase):
 
 class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 	"""The orphan sweep heals a user message the turn machine never saw. A seed that
-	already has a ``Jarvis Chat Turn`` is the machine's: its watchdog bounds every
-	non-terminal state, and a terminal Turn is a verdict the sweep must not overturn.
+	already has a ``Jarvis Chat Turn`` is the machine's: a non-terminal Turn is the
+	machine's to bound, and a terminal Turn is a verdict the sweep must not overturn.
 
 	Runs with the Relay Pump ACTIVE (the production transport), which the class above
 	pins OFF. Nothing about the RQ probe is patched: in pump mode no ``jarvis-turn::``
-	job is ever created, so the sweep's liveness probe really does read None."""
+	job is ever created, so the sweep's liveness probe really does read None.
+
+	The sweep is site-wide and this is a shared site, so every assertion here is on
+	THIS test's seed and conversation, never on the sweep's return value."""
 
 	def tearDown(self):
-		# The sweep is site-wide, so a foreign orphan left on the shared bench could
-		# have been re-dispatched onto this test's shard.
+		# A foreign orphan left on the shared site by another module is swept too, and
+		# while ``_pump_on`` is active its re-dispatch lands on this test's shard. Those
+		# Turns are removed here. What is NOT undone: the strike (``was_recovered``) or
+		# the error row the sweep wrote on that foreign message itself.
 		frappe.db.delete(TURN, {"relay_target_id": self._target})
 		frappe.db.commit()
 		super().tearDown()
@@ -304,17 +305,41 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 		):
 			yield
 
-	def _age(self, message: str, seconds: int = 300) -> None:
-		old = now_datetime() - timedelta(seconds=seconds)
-		frappe.db.sql(f"UPDATE `tab{MSG}` SET creation=%s WHERE name=%s", (old, message))
-		frappe.db.commit()
-
 	def _turns(self, seed: str) -> list[str]:
-		return frappe.get_all(TURN, filters={"seed_message": seed}, pluck="state")
+		return sorted(frappe.get_all(TURN, filters={"seed_message": seed}, pluck="state"))
 
-	def _sweep(self) -> int:
+	def _strikes(self, seed: str) -> int:
+		return int(frappe.db.get_value(MSG, seed, "was_recovered") or 0)
+
+	def _replies(self, conv: str) -> list:
+		"""The ``error`` of every assistant row in the conversation, in transcript order."""
+		return frappe.get_all(
+			MSG, filters={"conversation": conv, "role": "assistant"}, order_by="seq asc", pluck="error"
+		)
+
+	def _sweep(self) -> None:
 		with self._pump_on():
-			return stale_scan._sweep_orphan_turns(now_datetime())
+			stale_scan._sweep_orphan_turns(now_datetime())
+
+	def _watchdog_tick(self) -> dict:
+		"""One watchdog pass over THIS test's shard only (``pump.watchdog`` walks every
+		shard on the site)."""
+		deps = pump.PumpDeps()
+		deps.enqueue_finalize = _Recorder()
+		deps.enqueue_pump_job = _Recorder()
+		summary = defaultdict(int)
+		with self._pump_on():
+			pump._watchdog_shard(self._target, deps, summary)
+		return summary
+
+	def _mk_aged_out_candidate(self, run_id: str) -> tuple[str, str]:
+		"""A message whose Turn has waited, unreserved, past the queue's maximum age."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		stale = frappe.utils.add_to_date(None, seconds=-(ts.QUEUED_MAX_AGE_S + 60))
+		self._mk_turn(conv, run_id, seed, "queued", enqueued_at=stale)
+		_age(seed, seconds=ts.QUEUED_MAX_AGE_S + 60)
+		return conv, seed
 
 	def test_a_turn_waiting_in_the_queue_is_not_dispatched_a_second_time(self):
 		# The reported duplicate, through the real send path for an internal turn:
@@ -329,12 +354,12 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 			out = api._enqueue_turn(conv, "post the month-end journal", origin="macro")
 		seed = out["message_id"]
 		self.assertEqual(self._turns(seed), ["queued"], "the pump accepted the turn and left it queued")
-		self._age(seed)
+		_age(seed)
 
 		self._sweep()
 
 		self.assertEqual(self._turns(seed), ["queued"], "one Turn per seed: the queued turn is not an orphan")
-		self.assertEqual(int(frappe.db.get_value(MSG, seed, "was_recovered") or 0), 0, "no strike used")
+		self.assertEqual(self._strikes(seed), 0, "no strike used")
 
 	def test_the_message_is_answered_once(self):
 		# What the user saw: the pump is single-flight per conversation, so the two
@@ -346,7 +371,7 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 			admission.accept_or_queue(
 				conversation=conv, run_id="orph_first", seed_message=seed, dispatch=None
 			)
-		self._age(seed)
+		_age(seed)
 
 		self._sweep()
 
@@ -354,8 +379,7 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 		deps = self._deps(double=double, prepare=self._prepare_stub(conv, double, "success"))
 		ctx = self._make_ctx(deps)
 		self._pump_until(ctx, lambda: all(s in ("finalizing", "done") for s in self._turns(seed)))
-		replies = frappe.db.count(MSG, {"conversation": conv, "role": "assistant"})
-		self.assertEqual(replies, 1, "one seed, one reply")
+		self.assertEqual(len(self._replies(conv)), 1, "one seed, one reply")
 
 	def test_a_turn_being_prepared_is_left_alone(self):
 		# `preparing` is claimed BEFORE the assistant placeholder is attached, so a
@@ -364,12 +388,48 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)
 		self._mk_turn(conv, "orph_prep", seed, "preparing", reserved=1, preparing_at=frappe.utils.now())
-		self._age(seed)
+		_age(seed)
 
 		self._sweep()
 
 		self.assertEqual(self._turns(seed), ["preparing"])
-		self.assertEqual(int(frappe.db.get_value(MSG, seed, "was_recovered") or 0), 0, "no strike used")
+		self.assertEqual(self._strikes(seed), 0, "no strike used")
+		self.assertEqual(self._replies(conv), [], "no error over a live turn")
+
+	def test_a_turn_past_preparing_is_left_alone(self):
+		# `ready` and `dispatching` normally have their placeholder, which already
+		# keeps the seed out of the sweep. Pinned WITHOUT one, so it is the Turn itself
+		# that excludes the seed (a placeholder insert that was lost must not turn a
+		# turn that is about to run, or is running, into a second Turn).
+		for state in ("ready", "dispatching"):
+			with self.subTest(state=state):
+				conv = self._mk_conv()
+				seed = self._mk_msg(conv)
+				self._mk_turn(conv, f"orph_{state}", seed, state, reserved=1)
+				_age(seed)
+
+				self._sweep()
+
+				self.assertEqual(self._turns(seed), [state])
+				self.assertEqual(self._strikes(seed), 0, "no strike used")
+				self.assertEqual(self._replies(conv), [], "no error over a live turn")
+
+	def test_a_retried_message_with_several_turns_is_left_alone(self):
+		# Retry reuses the seed, so one message can carry several Turns: the one that
+		# ended and the retry that is now waiting. ANY Turn excludes the seed; there is
+		# no "latest Turn" logic to get wrong. (A real retry also has the error row it
+		# was pressed on; pinned without it so the Turn predicate is what decides.)
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		self._mk_turn(conv, "orph_retry_1", seed, "errored", done_at=frappe.utils.now())
+		self._mk_turn(conv, "orph_retry_2", seed, "queued")
+		_age(seed)
+
+		self._sweep()
+
+		self.assertEqual(self._turns(seed), ["errored", "queued"], "no third Turn")
+		self.assertEqual(self._strikes(seed), 0, "no strike used")
+		self.assertEqual(self._replies(conv), [], "no error over the waiting retry")
 
 	def test_a_message_the_machine_never_saw_still_heals_once(self):
 		# The case the sweep exists for: the seed was committed but the Turn insert
@@ -378,37 +438,66 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 		# nor writes the "never started" error over a turn that is merely waiting.
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)
-		self._age(seed)
+		_age(seed)
 
 		self._sweep()
 
 		self.assertEqual(self._turns(seed), ["queued"], "healed into a Turn the pump owns")
-		self.assertEqual(int(frappe.db.get_value(MSG, seed, "was_recovered") or 0), 1, "strike used")
+		self.assertEqual(self._strikes(seed), 1, "strike used")
 		self.assertEqual(
 			frappe.db.get_value(TURN, {"seed_message": seed}, "turn_class"), "background", "as before"
 		)
 
-		self.assertEqual(self._sweep(), 0, "second scan: nothing errored")
-		self.assertEqual(self._turns(seed), ["queued"])
-		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "assistant"}), 0)
+		self._sweep()
 
-	def test_a_turn_the_queue_aged_out_is_not_run_again(self):
-		# The pump's age-out cancels the Turn and tells the user to try again, but
-		# writes no transcript row, so the seed still has no reply after it. That is a
-		# verdict, not a lost dispatch: the message is neither re-run nor errored.
-		conv = self._mk_conv()
-		seed = self._mk_msg(conv)
-		stale = frappe.utils.add_to_date(None, seconds=-(ts.QUEUED_MAX_AGE_S + 60))
-		self._mk_turn(conv, "orph_aged", seed, "queued", enqueued_at=stale)
-		self.assertTrue(ts.cancel_queued_max_age("orph_aged", 1, pump._AGE_OUT_REASON))
-		frappe.db.commit()
-		self._age(seed, seconds=ts.QUEUED_MAX_AGE_S + 60)
+		self.assertEqual(self._turns(seed), ["queued"], "second scan: no second Turn")
+		self.assertEqual(self._replies(conv), [], "second scan: nothing errored")
 
-		self.assertEqual(self._sweep(), 0)
+	def test_a_message_the_queue_aged_out_has_a_reply_row_saying_why(self):
+		# The pump's age-out cancels the Turn and tells the user to try again. That
+		# notice is a live event only, so the age-out also writes the durable cancel
+		# marker: after a reload the message has a reply row carrying the reason. The
+		# sweep then has two reasons to leave the seed alone (a Turn, and a reply row),
+		# and neither runs it again nor writes its own error under the marker.
+		conv, seed = self._mk_aged_out_candidate("orph_aged")
+
+		summary = self._watchdog_tick()
+
+		self.assertEqual(summary["aged_out"], 1)
+		self.assertEqual(self._turns(seed), ["cancelled"])
+		marker = frappe.get_all(
+			MSG,
+			filters={"conversation": conv, "role": "assistant"},
+			fields=["seq", "error", "content", "streaming"],
+		)
+		self.assertEqual([m.error for m in marker], [pump._AGE_OUT_REASON], "one reply row, with the reason")
+		self.assertGreater(marker[0].seq, frappe.db.get_value(MSG, seed, "seq"), "after the message")
+		self.assertEqual((marker[0].content or "", int(marker[0].streaming or 0)), ("", 0))
+
+		self._sweep()
 
 		self.assertEqual(self._turns(seed), ["cancelled"], "no second Turn")
-		self.assertEqual(int(frappe.db.get_value(MSG, seed, "was_recovered") or 0), 0, "no strike used")
-		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "assistant"}), 0)
+		self.assertEqual(self._strikes(seed), 0, "no strike used")
+		self.assertEqual(self._replies(conv), [pump._AGE_OUT_REASON], "the marker is the only reply row")
+
+	def test_an_age_out_whose_marker_write_failed_is_still_cancelled_and_not_run_again(self):
+		# The marker is best-effort and is written AFTER the cancel is committed: a
+		# failed write must not undo the cancel or stop the watchdog. What is left is a
+		# terminal Turn with no reply row, which the sweep neither re-runs nor errors.
+		conv, seed = self._mk_aged_out_candidate("orph_aged_nomark")
+
+		with patch.object(admission, "_write_cancel_marker", side_effect=RuntimeError("marker write failed")):
+			summary = self._watchdog_tick()
+
+		self.assertEqual(summary["aged_out"], 1, "the cancel stands")
+		self.assertEqual(self._turns(seed), ["cancelled"])
+		self.assertEqual(self._replies(conv), [])
+
+		self._sweep()
+
+		self.assertEqual(self._turns(seed), ["cancelled"], "no second Turn")
+		self.assertEqual(self._strikes(seed), 0, "no strike used")
+		self.assertEqual(self._replies(conv), [])
 
 	def test_a_cancel_whose_marker_was_lost_is_not_run_again(self):
 		# A user cancel normally leaves an assistant marker row, which already keeps
@@ -417,18 +506,19 @@ class TestOrphanSweepLeavesTurnMachineSeedsAlone(_PumpTestCase):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)
 		self._mk_turn(conv, "orph_cxl", seed, "cancelled", cancel_requested=1, done_at=frappe.utils.now())
-		self._age(seed)
+		_age(seed)
 
-		self.assertEqual(self._sweep(), 0)
+		self._sweep()
 
 		self.assertEqual(self._turns(seed), ["cancelled"])
-		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "assistant"}), 0)
+		self.assertEqual(self._strikes(seed), 0, "no strike used")
+		self.assertEqual(self._replies(conv), [])
 
 
 class TestOrphanSweepLegacyTransport(_PumpTestCase):
-	"""Turn machine OFF (pump kill switch on, Phase-0 admission off): there are no
-	Turn rows, so the sweep behaves exactly as it did: first strike re-dispatches the
-	legacy job, second strike surfaces the error."""
+	"""Turn machine OFF (pump not active, not configured, not draining; Phase-0
+	admission off): there are no Turn rows, so the sweep behaves exactly as it did:
+	first strike re-dispatches the legacy job, second strike surfaces the error."""
 
 	def setUp(self):
 		super().setUp()
@@ -449,23 +539,24 @@ class TestOrphanSweepLegacyTransport(_PumpTestCase):
 	def test_first_strike_redispatches_and_second_strike_errors(self):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv)
-		old = now_datetime() - timedelta(seconds=300)
-		frappe.db.sql(f"UPDATE `tab{MSG}` SET creation=%s WHERE name=%s", (old, seed))
-		frappe.db.commit()
+		_age(seed)
 		self.assertFalse(admission.turn_machine_enabled())
 
 		with (
 			patch.object(api, "_dispatch_turn", return_value=None) as dispatch,
 			patch("jarvis.chat.stale_scan.publish_to_user") as pub,
 		):
-			self.assertEqual(stale_scan._sweep_orphan_turns(now_datetime()), 0)
+			stale_scan._sweep_orphan_turns(now_datetime())
 			ours = [c for c in dispatch.call_args_list if c.args[0]["message_id"] == seed]
 			self.assertEqual(len(ours), 1, "first strike: one legacy re-dispatch")
 			self.assertEqual(ours[0].kwargs, {"interactive": False, "cutover_gate": True})
 			self.assertEqual(int(frappe.db.get_value(MSG, seed, "was_recovered") or 0), 1)
 			self.assertEqual(frappe.db.count(TURN, {"seed_message": seed}), 0, "legacy makes no Turn")
+			self.assertEqual(
+				frappe.db.count(MSG, {"conversation": conv, "role": "assistant"}), 0, "no error yet"
+			)
 
-			self.assertGreaterEqual(stale_scan._sweep_orphan_turns(now_datetime()), 1)
+			stale_scan._sweep_orphan_turns(now_datetime())
 			ours = [c for c in dispatch.call_args_list if c.args[0]["message_id"] == seed]
 			self.assertEqual(len(ours), 1, "second strike does not re-dispatch")
 		err = frappe.get_all(MSG, filters={"conversation": conv, "role": "assistant"}, pluck="error")
