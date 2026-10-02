@@ -719,6 +719,12 @@ def get_conversation(conversation: str) -> dict:
 			# to a steady thread.
 			"model",
 			"provider",
+			# What the row is about. The SPA reads it for one thing: an assistant row
+			# whose ref_doctype is "Jarvis Macro Run" is the engine's closing message
+			# (macros._post_closing_message), not a reply, so it must not take the
+			# Retry control off the failed reply above it (lib/retryTarget.js).
+			"ref_doctype",
+			"ref_name",
 			"creation",
 			"modified",
 		],
