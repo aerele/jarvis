@@ -250,6 +250,23 @@ def record_agent_run(
 	coverage = _as_dict(coverage)
 	scope = _as_dict(scope)
 	truncated = bool(truncated)
+	from jarvis.chat import operator_review
+
+	review_backend = operator_review.backend(run_doc.agent)
+	review_ready = False
+	if review_backend:
+		inst.activation_state = run_doc.preparation_mode or "shadow"
+		state = frappe.db.get_value(
+			RUN, run_doc.name, ["status", "input_snapshot_json"], as_dict=True, for_update=True
+		)
+		if not state or state.status != "running":
+			return {"run": run_doc.name, "status": state.status if state else "stopped", "idempotent": True}
+		run_doc.input_snapshot_json = state.input_snapshot_json
+		raw_findings, coverage, review_ready = review_backend.validate_output(
+			run_doc, raw_findings, coverage, scope, integrity_digest
+		)
+		if not review_ready:
+			integrity_digest = None
 
 	# A model-supplied rows_consumed is only ever used to DETECT an under-fetch (it
 	# can force a run partial, never mask one — a bogus value cannot upgrade a run to
@@ -262,6 +279,26 @@ def record_agent_run(
 			rows_consumed_val = None
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
+	if review_backend:
+		frappe.db.set_value(
+			RUN,
+			run_doc.name,
+			"assessment_output_json",
+			frappe.as_json(
+				{
+					"findings": raw_findings,
+					"coverage": coverage,
+					"scope": scope,
+					"integrity_digest": integrity_digest,
+					"truncated": truncated,
+					"rows_consumed": rows_consumed_val,
+					"dropped": dropped,
+				}
+			),
+			update_modified=False,
+		)
+	if review_ready and not dropped and not truncated and run_doc.preparation_mode == "live":
+		review_backend.stage_reviews(run_doc, inst, valid)
 
 	run_doc = agent_runs.record_delegate_run(
 		run_doc,
