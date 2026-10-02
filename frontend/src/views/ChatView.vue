@@ -1113,7 +1113,7 @@
 												opacity: retrying || busy ? 0.6 : 1,
 											}"
 										>
-											{{ retrying || busy ? "Retrying…" : "Retry" }}
+											{{ retrying || busy ? "Retrying…" : retryText }}
 										</button>
 									</div>
 								</div>
@@ -4123,7 +4123,7 @@ import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
-import { retryTargetIndex } from "@/lib/retryTarget";
+import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 import { firstSendPicks } from "@/lib/firstSendPicks";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import * as api from "@/api";
@@ -6738,6 +6738,8 @@ function linkifyDocs(html) {
 // run's closing message (lib/retryTarget.js says why). For Retry only; the cards
 // below keep their own "last assistant" rule.
 const retryIdx = computed(() => retryTargetIndex(visibleMessages.value));
+// "Retry", or "Retry this step" under a macro's closing message (retryLabel).
+const retryText = computed(() => retryLabel(visibleMessages.value));
 // The last assistant message (finished, turn idle) decides which card is live —
 // once the user clicks, a new message lands and the card retires automatically.
 const _lastAssistant = computed(() => {

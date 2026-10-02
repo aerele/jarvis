@@ -25,3 +25,14 @@ export function retryTargetIndex(visibleMessages) {
 	}
 	return -1;
 }
+
+// What the Retry control says. Under a macro's closing message a bare "Retry"
+// reads as "retry the run", and it is not that: it re-runs the one failed step as
+// an ordinary chat turn, the run stays ended and its later steps do not follow.
+// So when the target was found by skipping a closing message, the control says
+// which thing it retries. Everywhere else it is the plain word, unchanged.
+export function retryLabel(visibleMessages) {
+	const rows = visibleMessages || [];
+	const at = retryTargetIndex(rows);
+	return at >= 0 && at < rows.length - 1 ? "Retry this step" : "Retry";
+}
