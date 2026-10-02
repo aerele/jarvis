@@ -67,11 +67,12 @@
 							:theme="RUN_THEMES[row.status] || 'gray'"
 							:label="statusLabel(row.status)"
 						/>
-						<!-- A run that errored explains itself: hover = short error,
-						     click = dialog with the full error + finish time + run mode.
-						     Keyed on `error` PRESENCE, not status, so a user-cancelled
-						     `stopped` run (empty error) shows no affordance. @click.stop so
-						     it never bubbles into openRow's conversation navigation. -->
+						<!-- A run with something to say explains itself: hover = the first
+						     line, click = dialog with the full text + finish time + run
+						     mode. Keyed on `error` PRESENCE, not status: a failed run's
+						     reason, why a run stopped, or a completed run's note; a
+						     user-cancelled `stopped` run (empty) shows no affordance.
+						     @click.stop so it never bubbles into openRow's navigation. -->
 						<Tooltip v-if="row.error" :text="shortError(row.error)">
 							<button
 								type="button"
@@ -168,7 +169,9 @@
 						</span>
 					</div>
 					<div>
-						<div class="mb-1 text-sm font-medium text-ink-gray-7">Error</div>
+						<div class="mb-1 text-sm font-medium text-ink-gray-7">
+							{{ errDialogDetail.label }}
+						</div>
 						<pre
 							class="max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-surface-gray-2 p-3 text-xs text-ink-gray-8"
 							>{{ errDialog.row.error }}</pre
@@ -209,6 +212,7 @@ import LayoutHeader from "@/components/LayoutHeader.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
+import { runDetail } from "@/lib/macroRunOutcome";
 
 const router = useRouter();
 const socket = inject("$socket");
@@ -258,9 +262,10 @@ const stats = ref(null);
 const macrosList = ref([]); // macro filter dropdown (list_macros)
 // failure-detail dialog (RunsTab-local; a run's error can be a full traceback)
 const errDialog = ref({ show: false, row: null });
-const errDialogTitle = computed(() =>
-	errDialog.value.row && errDialog.value.row.status === "stopped" ? "Run stopped" : "Run failed"
-);
+// Titled for what the run did: the stored text is the reason a run failed or
+// stopped, and a plain note on a completed one (lib/macroRunOutcome.js).
+const errDialogDetail = computed(() => runDetail(errDialog.value.row));
+const errDialogTitle = computed(() => errDialogDetail.value.title);
 
 const macroOptions = computed(() => [
 	{ label: "All macros", value: "" },
