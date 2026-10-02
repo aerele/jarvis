@@ -497,6 +497,10 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 	needs_input = []
 	try:
 		preview = api._run_preview(tool, args)
+	except api.PreviewSandboxLost:
+		# Not a validation error to look for missing fields behind: ``apply``
+		# rolls back, logs and refuses as unavailable.
+		raise
 	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		frappe.clear_messages()
 		needs_input = collect_missing(tool, items)

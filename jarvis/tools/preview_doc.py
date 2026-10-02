@@ -8,6 +8,7 @@ supplier with no linked Address) BEFORE creating.
 
 import frappe
 
+from jarvis.exceptions import PreviewSandboxLost
 from jarvis.tools._preview_sandbox import preview_sandbox
 from jarvis.tools.create_doc import _set_title_from_title_field, _validate_create_args
 
@@ -75,6 +76,10 @@ def preview_doc(doctype: str, values: dict) -> dict:
 	try:
 		with preview_sandbox():
 			doc.insert()
+	except PreviewSandboxLost:
+		# Not "this document is invalid": the dry run could not be undone
+		# cleanly. Propagates to the tool-layer refusal.
+		raise
 	except Exception as e:
 		frappe.clear_messages()
 		return {"valid": False, "error": _error_text(e)}
