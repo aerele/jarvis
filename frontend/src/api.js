@@ -234,9 +234,10 @@ export const stopMacroRun = (run) => call(MC + "stop_macro_run", { run });
 // Run-history dashboard (settings → Macro runs).
 export const listMacroRuns = (params) => call(MC + "list_macro_runs", params || {});
 export const macroRunStats = () => call(MC + "macro_run_stats");
-// Background summarize: fired after every 2+ step save; the WORKER applies the
-// summary when the turn ends (macro:merged event) - no client round-trip needed.
-// Run is gated on merge_status while pending.
+// Background summarize: fired after a save the server answered `summarize: true`
+// to (the steps changed and two or more are left), and by Re-summarize. The WORKER
+// applies the summary when the turn ends (macro:merged event) - no client
+// round-trip needed. Run is gated on merge_status while pending.
 export const summarizeMacro = (name) => call(MC + "summarize_macro", { name });
 export const setConversationModel = (conversation, model) =>
 	call("jarvis.chat.api.set_conversation_model", { conversation, model: model || "" });

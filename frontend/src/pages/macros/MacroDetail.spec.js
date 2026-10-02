@@ -624,7 +624,7 @@ describe("MacroDetail save: a save that worked leaves the form clean", () => {
 		// Changed steps with an untouched summary: the save omits the summary and the
 		// server clears its stale copy. Left on the form, the next rename-only save
 		// would have sent the stale text back as if the owner had written it.
-		api.updateMacro.mockResolvedValue({});
+		api.updateMacro.mockResolvedValue({ data: { summarize: true } });
 		api.summarizeMacro.mockResolvedValue({});
 		const w = await mountDetail(
 			baseMacro({ merged_prompt: "Old summary of one step.", merge_status: "ready" })
@@ -649,7 +649,7 @@ describe("MacroDetail save: a save that worked leaves the form clean", () => {
 	});
 
 	it("knows a summary was started even when the reload fails, so Run waits for it", async () => {
-		api.updateMacro.mockResolvedValue({});
+		api.updateMacro.mockResolvedValue({ data: { summarize: true } });
 		api.summarizeMacro.mockResolvedValue({});
 		const w = await mountDetail(baseMacro());
 		await stepsBuilder(w).vm.$emit("update:modelValue", [
@@ -662,6 +662,179 @@ describe("MacroDetail save: a save that worked leaves the form clean", () => {
 		expect(api.summarizeMacro).toHaveBeenCalledTimes(1);
 		expect(runBtn(w).props("disabled")).toBe(true);
 		expect(runReason(w).text()).toContain("Summarizing");
+	});
+});
+
+describe("MacroDetail save: the server says whether to summarize", () => {
+	// The form used to decide by itself: "the steps look changed, or there is no
+	// summary". The second half started a model call on every save of a macro whose
+	// summary was empty or had failed, and posting the summary back on a rename ended
+	// a summary that was still being written.
+	const TWO = [
+		{
+			label: "",
+			prompt: "do the thing",
+			model_override: "",
+			thinking_override: "",
+			skills: [],
+		},
+		{ label: "", prompt: "then this", model_override: "", thinking_override: "", skills: [] },
+	];
+	const summaryField = (w) =>
+		w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => String(c.attributes("placeholder") || "").startsWith("No summary yet"));
+	const save = async (w) => {
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+	};
+
+	it("a rename sends the steps and no summary, and starts nothing", async () => {
+		// Two steps and no summary: exactly the macro the old rule re-summarized on
+		// every save.
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		const w = await mountDetail(baseMacro({ steps: TWO, merge_status: "failed" }));
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		await save(w);
+		const sent = api.updateMacro.mock.calls[0][0];
+		expect(sent.macro_name).toBe("Renamed macro");
+		expect(sent.steps).toHaveLength(2);
+		expect("merged_prompt" in sent).toBe(false);
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+		expect(toast.create).not.toHaveBeenCalled();
+	});
+
+	it("a rename of a macro that has a summary does not send it back", async () => {
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		const w = await mountDetail(
+			baseMacro({ steps: TWO, merged_prompt: "Both, as one.", merge_status: "ready" })
+		);
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		await save(w);
+		expect("merged_prompt" in api.updateMacro.mock.calls[0][0]).toBe(false);
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+		expect(summaryField(w).props("modelValue")).toBe("Both, as one.");
+	});
+
+	it("starts a summary when the server says so", async () => {
+		api.updateMacro.mockResolvedValue({ data: { summarize: true } });
+		api.summarizeMacro.mockResolvedValue({ ok: true, conversation: "c1" });
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
+		await save(w);
+		expect(api.summarizeMacro).toHaveBeenCalledTimes(1);
+		expect(api.summarizeMacro).toHaveBeenCalledWith("MACRO-1");
+	});
+
+	it("starts none when the server says no, whatever the form thinks changed", async () => {
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
+		await save(w);
+		expect(api.updateMacro).toHaveBeenCalledTimes(1);
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+	});
+
+	it("starts none for a server that does not answer the question", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
+		await save(w);
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+		expect(toast.success).toHaveBeenCalledWith("Saved");
+	});
+
+	it("sends a summary the owner edited, trimmed", async () => {
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		const w = await mountDetail(
+			baseMacro({ steps: TWO, merged_prompt: "Both, as one.", merge_status: "ready" })
+		);
+		await summaryField(w).vm.$emit("update:modelValue", "  My own wording.  ");
+		await save(w);
+		expect(api.updateMacro.mock.calls[0][0].merged_prompt).toBe("My own wording.");
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+	});
+
+	it("sends an edited summary together with changed steps", async () => {
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		const w = await mountDetail(
+			baseMacro({ steps: TWO, merged_prompt: "Both, as one.", merge_status: "ready" })
+		);
+		await stepsBuilder(w).vm.$emit("update:modelValue", [TWO[1], TWO[0]]);
+		await summaryField(w).vm.$emit("update:modelValue", "The other way round.");
+		api.getMacro.mockRejectedValue(new Error("The server is not reachable."));
+		await save(w);
+		expect(api.updateMacro.mock.calls[0][0].merged_prompt).toBe("The other way round.");
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+		// It was saved, so it stays on the form.
+		expect(summaryField(w).props("modelValue")).toBe("The other way round.");
+	});
+
+	it("a new macro is summarized when the server says so", async () => {
+		const mountNew = async () => {
+			const w = mount(MacroDetail, {
+				props: { id: "", isNew: true },
+				global: { provide: { $socket: null } },
+			});
+			await flushPromises();
+			await nameField(w).vm.$emit("update:modelValue", "Brand new");
+			await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
+			return w;
+		};
+		api.createMacro.mockResolvedValue({ data: { name: "MACRO-9", summarize: true } });
+		api.summarizeMacro.mockResolvedValue({ ok: true });
+		await save(await mountNew());
+		expect(api.summarizeMacro).toHaveBeenCalledWith("MACRO-9");
+		expect(router.replace).toHaveBeenCalledWith("/macros/MACRO-9");
+
+		vi.clearAllMocks();
+		api.createMacro.mockResolvedValue({ data: { name: "MACRO-10", summarize: false } });
+		await save(await mountNew());
+		expect(api.createMacro).toHaveBeenCalledTimes(1);
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+	});
+
+	it("does not say Summarizing when the summary was not started", async () => {
+		// The site was busy: the server answers ok false and nothing is pending.
+		api.updateMacro.mockResolvedValue({ data: { summarize: true } });
+		api.summarizeMacro.mockResolvedValue({ ok: false, reason: "The site is busy." });
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
+		api.getMacro.mockRejectedValue(new Error("The server is not reachable."));
+		await save(w);
+		expect(toast.success).toHaveBeenCalledWith("Saved");
+		expect(runBtn(w).props("disabled")).toBe(false);
+		expect(toast.create.mock.calls.map((c) => c[0].type)).toEqual(["warning"]);
+	});
+
+	it("Re-summarize in the menu still starts one", async () => {
+		api.summarizeMacro.mockResolvedValue({ ok: true, conversation: "c1" });
+		const w = await mountDetail(
+			baseMacro({ steps: TWO, merged_prompt: "Both, as one.", merge_status: "ready" })
+		);
+		const action = w
+			.findComponent({ name: "Dropdown" })
+			.props("options")
+			.find((o) => o.label === "Re-summarize");
+		await action.onClick();
+		await flushPromises();
+		expect(api.summarizeMacro).toHaveBeenCalledWith("MACRO-1");
+		expect(runReason(w).text()).toContain("Summarizing");
+	});
+
+	it("Re-summarize says why when the summary was not started", async () => {
+		api.summarizeMacro.mockResolvedValue({ ok: false, reason: "The site is busy." });
+		const w = await mountDetail(
+			baseMacro({ steps: TWO, merged_prompt: "Both, as one.", merge_status: "ready" })
+		);
+		const action = w
+			.findComponent({ name: "Dropdown" })
+			.props("options")
+			.find((o) => o.label === "Re-summarize");
+		await action.onClick();
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("The site is busy.");
+		expect(runBtn(w).props("disabled")).toBe(false);
 	});
 });
 
