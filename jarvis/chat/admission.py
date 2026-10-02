@@ -1561,8 +1561,9 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 	"""SUXI-4: leave a durable assistant marker Message when a queued turn is
 	cancelled (user-initiated or system age-out) so a later reload shows WHY the
 	send has no reply - indistinguishable otherwise from a silently dropped send.
-	Reuses the error-card pattern (``error`` field) so the transcript renders it
-	as a card with a Retry affordance. seq is allocated under the conversation
+	Reuses the ``error`` field of an assistant row. The clients classify both
+	reason texts as ``cancelled`` (``public/js/turn_error_rules.mjs``) and render a
+	muted note with NO Retry button, not the red error card. seq is allocated under the conversation
 	FOR UPDATE lock (R-9 discipline) so it never collides with a concurrent
 	writer on the same conversation. Best-effort - never blocks the cancel."""
 	try:
