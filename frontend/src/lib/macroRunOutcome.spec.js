@@ -96,7 +96,7 @@ describe("lastRunCell: the Macros list's Last run cell", () => {
 	});
 });
 
-describe("lastRunLine: the form's line about the last run", () => {
+describe("lastRunLine: the form's notice about the last run", () => {
 	it("says nothing when the last run simply worked, or there was none", () => {
 		expect(lastRunLine(null)).toBeNull();
 		expect(lastRunLine({ status: "completed", error: "" })).toBeNull();
@@ -104,23 +104,32 @@ describe("lastRunLine: the form's line about the last run", () => {
 		expect(lastRunLine({ status: "stopped", error: "" })).toBeNull();
 	});
 
-	it("a failed run is stated with its reason", () => {
-		const line = lastRunLine({ status: "failed", error: "Step 2 failed: boom" });
-		expect(line).toEqual({ text: "The last run failed. Step 2 failed: boom", tone: "bad" });
+	it("a failed run is headed as one, with its reason beneath", () => {
+		expect(lastRunLine({ status: "failed", error: "Step 2 failed: boom" })).toEqual({
+			title: "The last run failed",
+			text: "Step 2 failed: boom",
+			tone: "bad",
+		});
 	});
 
 	it("a failed run with no stored reason still says it failed", () => {
-		expect(lastRunLine({ status: "failed", error: "" }).text).toBe("The last run failed.");
+		expect(lastRunLine({ status: "failed", error: "" })).toEqual({
+			title: "The last run failed",
+			text: "",
+			tone: "bad",
+		});
 	});
 
-	it("a run that stopped for a reason, and a completed run with a note, give the reason alone", () => {
-		const waiting = "Step 1 is waiting for your confirmation (Send email).";
+	it("a run the engine stopped, and a completed run with a note, are headed plainly", () => {
+		const waiting = "Stopped at step 1 of 2: a confirmation is waiting in the conversation.";
 		expect(lastRunLine({ status: "stopped", error: waiting })).toEqual({
+			title: "The last run stopped before it finished",
 			text: waiting,
 			tone: "warn",
 		});
-		const note = "Step 1 proposed a draft for you to apply; the macro did not wait for it.";
+		const note = "Step 2 left a draft for you to apply in the chat.";
 		expect(lastRunLine({ status: "completed", error: note })).toEqual({
+			title: "The last run finished, with a note",
 			text: note,
 			tone: "",
 		});

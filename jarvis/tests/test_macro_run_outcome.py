@@ -397,18 +397,20 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 
 	def test_a_step_the_user_stopped_stops_the_run_and_is_not_a_failure(self):
 		# A turn the user stopped carries no error text at all. It is their own act:
-		# the run stopped, it did not fail, and nothing should announce a failure.
-		run, conv, _ = self._mk_run(steps=2, at_step=1)
+		# the run stopped, it did not fail. It is recorded exactly like the Stop button
+		# on the run (no reason), so nothing announces it, nothing is posted, and it
+		# does not count against the success rate.
+		run, conv, _ = self._mk_run(steps=2, at_step=1, trigger="scheduled")
 		step_turn, _, _ = self._turn(conv, state="cancelled")
 		with patch("jarvis.chat.macros.publish_to_user") as publish:
 			macros.advance_after_turn(conv, errored=True, run_id=step_turn)
 		row = self._run(run)
-		self.assertEqual(row.status, "stopped")
-		self.assertEqual(
-			row.error, "Stopped at step 1 of 2: the step was stopped, so the steps after it did not run."
-		)
-		done = [c.args[1] for c in publish.call_args_list if c.args[1].get("kind") == "macro:done"]
-		self.assertEqual([e["status"] for e in done], ["stopped"])
+		self.assertEqual((row.status, row.error or ""), ("stopped", ""))
+		kinds = [c.args[1].get("kind") for c in publish.call_args_list]
+		self.assertEqual(kinds, ["macro:done"])
+		self.assertEqual(frappe.get_all("Notification Log", filters={"for_user": OWNER}), [])
+		frappe.set_user(OWNER)
+		self.assertIsNone(macros_api.macro_run_stats()["success_rate"], "their own Stop moved the rate")
 
 	def test_a_step_the_system_cancelled_says_why_and_does_not_blame_the_user(self):
 		# A turn that waited too long in the queue is cancelled with the reason in
@@ -488,17 +490,38 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 		row = self._run(run)
 		self.assertEqual((row.status, row.error or ""), ("completed", ""))
 
-	def test_a_step_that_only_drafted_a_record_is_noted_on_the_completed_run(self):
+	def test_an_earlier_step_that_only_drafted_a_record_is_reported_as_not_created(self):
 		# An unarmed step that creates or updates a record ends with a draft for the
-		# user to apply. Nothing is written until they do, and the run cannot see it.
+		# user to apply. The chat keeps a draft open on the LAST reply only, so the next
+		# step's reply closed this one: the record was never created, and the note must
+		# not send the owner looking for a draft that is gone.
 		run, conv, _ = self._mk_run(steps=2, at_step=2)
 		self._turn(conv, reply=f"Here is the draft.\n{_DRAFT}")
 		last, _, _ = self._turn(conv)
 		macros.advance_after_turn(conv, errored=False, run_id=last)
 		row = self._run(run)
 		self.assertEqual(row.status, "completed")
-		self.assertIn("Step 1 proposed a draft", row.error)
-		self.assertIn("did not wait", row.error)
+		self.assertEqual(
+			row.error,
+			"Step 1 drafted a record that was not created: the macro did not wait, "
+			"and the next step closed the draft.",
+		)
+
+	def test_a_draft_from_the_last_step_is_still_there_to_apply(self):
+		run, conv, _ = self._mk_run(steps=2, at_step=2)
+		self._turn(conv)
+		last, _, _ = self._turn(conv, reply=f"Here is the draft.\n{_DRAFT}")
+		macros.advance_after_turn(conv, errored=False, run_id=last)
+		row = self._run(run)
+		self.assertEqual(row.status, "completed")
+		self.assertEqual(row.error, "Step 2 left a draft for you to apply in the chat.")
+
+	def test_several_drafts_say_which_are_gone_and_which_is_open(self):
+		self.assertEqual(
+			macros._draft_note([1, 2, 3], 3),
+			"Steps 1 and 2 drafted records that were not created: the macro did not wait, "
+			"and the steps after them closed the drafts. Step 3 left a draft for you to apply in the chat.",
+		)
 
 
 # --------------------------------------------------------------------------- #
@@ -716,7 +739,10 @@ class TestAStepThatCouldNotStart(MacroRunOutcomeBase):
 		step_turn, _, _ = self._turn(conv)  # step 1
 		self._msg(conv, "user", origin="macro")  # step 2: message only
 		frappe.db.commit()
-		with self._dispatching(conv) as enqueue:
+		with (
+			patch("jarvis.chat.admission.turn_machine_enabled", return_value=True),
+			self._dispatching(conv) as enqueue,
+		):
 			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
 		self.assertEqual(enqueue.call_count, 1, "the run was stranded behind a message with no turn")
 		self.assertEqual(self._run(run).current_step, 2)
@@ -782,7 +808,9 @@ class TestTheRunsConversationSaysHowItEnded(MacroRunOutcomeBase):
 		self._park_card(conv)
 		macros.advance_after_turn(conv, errored=False, run_id=step_turn)
 		(closing,) = self._closing(conv, run)
-		self.assertTrue(closing.content.startswith("■ Macro stopped. Stopped at step 1 of 2"))
+		self.assertTrue(
+			closing.content.startswith("■ Stopped at step 1 of 2: a confirmation"), closing.content
+		)
 
 	def test_a_run_that_simply_worked_adds_nothing(self):
 		run, conv, _ = self._mk_run(steps=1, at_step=1)
@@ -831,7 +859,8 @@ class TestTheOtherWaysARunEnds(MacroRunOutcomeBase):
 		with patch("jarvis.chat.macros.publish_to_user") as publish:
 			macros.resume_waiting_capacity_runs()
 		self.assertEqual(self._run(run).status, "failed")
-		(event,) = self._done(publish)
+		# The sweep takes every parked run on the site; look at this one's event.
+		(event,) = [e for e in self._done(publish) if e["macro_run"] == run]
 		self.assertEqual(event["error"], macros._NO_CAPACITY_ERROR)
 		self.assertEqual(len(frappe.get_all("Notification Log", filters={"for_user": OWNER})), 1)
 
@@ -891,3 +920,251 @@ class TestRunNumbers(MacroRunOutcomeBase):
 		stats = macros_api.macro_run_stats()
 		self.assertEqual(stats["success_rate"], 50)
 		self.assertEqual(stats["stopped"], 2)
+
+
+# --------------------------------------------------------------------------- #
+# Second review pass
+# --------------------------------------------------------------------------- #
+class TestTheLockedDecisionSeesThePresent(MacroRunOutcomeBase):
+	"""The transaction's snapshot is taken by the run lookup, BEFORE the wait for the
+	run lock. Whoever waited must re-read, or it decides on what was true before the
+	previous holder acted: two deliveries of one step's end both dispatch the next
+	step; a Stop overwrites the outcome the hook just wrote. A single connection
+	cannot show the stale read, so these pin that the refresh is asked for, forced
+	(the helper is a no-op outside a background job otherwise), and after the lock."""
+
+	def _order(self):
+		from contextlib import contextmanager
+
+		calls = []
+
+		@contextmanager
+		def lock(*a, **kw):
+			calls.append("lock")
+			yield True
+
+		def snapshot(**kw):
+			calls.append(("snapshot", kw))
+			return True
+
+		return calls, lock, snapshot
+
+	def test_the_hook_refreshes_after_taking_the_lock(self):
+		run, conv, _ = self._mk_run(steps=1, at_step=1)
+		step_turn, _, _ = self._turn(conv)
+		calls, lock, snapshot = self._order()
+		with (
+			patch("jarvis._redis_lock.redis_lock", lock),
+			patch("jarvis.chat.txn.fresh_snapshot", snapshot),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		self.assertEqual(calls[:2], ["lock", ("snapshot", {"owned": True})])
+		self.assertEqual(self._run(run).status, "completed")
+
+	def test_stop_refreshes_after_taking_the_lock(self):
+		run, conv, _ = self._mk_run(steps=2, at_step=1)
+		calls, lock, snapshot = self._order()
+		frappe.set_user(OWNER)
+		with (
+			patch("jarvis._redis_lock.redis_lock", lock),
+			patch("jarvis.chat.txn.fresh_snapshot", snapshot),
+		):
+			macros.stop_macro_run(run)
+		self.assertEqual(calls[:2], ["lock", ("snapshot", {"owned": True})])
+		self.assertEqual(self._run(run).status, "stopped")
+
+	def test_a_turn_end_dropped_on_a_busy_lock_is_recorded(self):
+		# The site logger writes errors only: a logger line here was never written.
+		from contextlib import contextmanager
+
+		@contextmanager
+		def busy(*a, **kw):
+			yield False
+
+		run, conv, _ = self._mk_run(steps=2, at_step=1)
+		step_turn, _, _ = self._turn(conv)
+		with patch("jarvis._redis_lock.redis_lock", busy), patch("frappe.log_error") as log:
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		self.assertEqual(self._run(run).status, "running")
+		titles = [str(c.kwargs.get("title")) for c in log.call_args_list]
+		self.assertEqual(titles, [f"jarvis.chat.macros.turn_end_dropped: {run}"])
+
+
+class TestADispatchThatFailedLate(MacroRunOutcomeBase):
+	def test_a_step_that_went_out_is_not_reported_as_one_that_could_not_start(self):
+		# The raise came after the turn was created. Ending the run "could not be
+		# started" would be false, and the step would then reply after that verdict.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_turn, _, _ = self._turn(conv)
+
+		def went_out_then_raised(conversation, prompt, **kw):
+			self._turn(conv, state="streaming", reply="")
+			raise RuntimeError("the cursor write failed")
+
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=went_out_then_raised),
+			patch("frappe.log_error"),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		row = self._run(run)
+		self.assertEqual((row.status, row.current_step), ("running", 2))
+		self.assertFalse(row.error)
+
+	def test_a_progress_event_that_fails_does_not_fail_the_step(self):
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_turn, _, _ = self._turn(conv)
+		with (
+			self._dispatching(conv),
+			patch("jarvis.chat.macros._publish_progress", side_effect=RuntimeError("socket")),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 2))
+
+	def test_a_run_that_could_not_be_described_does_not_read_as_a_clean_success(self):
+		run, conv, _ = self._mk_run(steps=1, at_step=1)
+		step_turn, _, _ = self._turn(conv)
+		with (
+			patch("jarvis.chat.macros._run_outcome", side_effect=RuntimeError("db")),
+			patch("frappe.log_error"),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		row = self._run(run)
+		self.assertEqual(row.status, "completed")
+		self.assertIn("could not be read", row.error)
+
+	def test_a_last_step_that_failed_is_still_failed_when_the_run_cannot_be_described(self):
+		run, conv, _ = self._mk_run(steps=1, at_step=1, stop_on_error=0)
+		step_turn, _, _ = self._turn(conv, state="errored", error="The model is overloaded.")
+		with (
+			patch("jarvis.chat.macros._run_outcome", side_effect=RuntimeError("db")),
+			patch("frappe.log_error"),
+		):
+			macros.advance_after_turn(conv, errored=True, run_id=step_turn)
+		self.assertEqual(self._run(run).status, "failed")
+
+	def test_a_step_on_the_legacy_path_is_not_taken_for_one_that_never_started(self):
+		# With the turn machine off, a step just dispatched has no Turn row either.
+		run, conv, _ = self._mk_run(steps=3, at_step=2)
+		old_turn, _, _ = self._turn(conv)  # step 1, from before the cutover
+		self._msg(conv, "user", origin="macro")  # step 2, dispatched on the legacy path
+		frappe.db.commit()
+		with (
+			patch("jarvis.chat.admission.turn_machine_enabled", return_value=False),
+			self._dispatching(conv) as enqueue,
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=old_turn)
+		enqueue.assert_not_called()
+
+
+class TestWhatIsWrittenIsSafeToShow(MacroRunOutcomeBase):
+	def test_only_text_that_reads_as_a_sentence_is_kept(self):
+		keep = "The provider rejected the request."
+		self.assertTrue(macros._reads_as_a_sentence(keep))
+		for text, why in (
+			("the provider rejected the request.", "no capital"),
+			("The provider rejected the request", "no closing punctuation"),
+			("Rejected outright.", "too short to be a sentence"),
+			('The call failed with {"code": 429}.', "a payload"),
+			("The call failed. Traceback follows.", "a traceback"),
+			("The worker hit Error: boom.", "an error label"),
+			("The worker raised an Exception.", "an exception name"),
+			("", "nothing"),
+		):
+			with self.subTest(why=why):
+				self.assertFalse(macros._reads_as_a_sentence(text))
+
+	def test_a_reason_never_carries_a_credential(self):
+		raw = "The request to the provider failed with api_key=sk-live-1234567890abcdef."
+		reason = macros._plain_reason(raw)
+		self.assertNotIn("sk-live-1234567890abcdef", reason)
+		self.assertTrue(reason.startswith("The request to the provider failed"))
+
+	def test_a_cards_summary_cannot_become_a_link_or_formatting(self):
+		parked = {"summary": "Send [the report](https://evil.example) to **everyone** `now`"}
+		label = macros._card_label(parked)
+		for mark in "[]`*":
+			self.assertNotIn(mark, label)
+		self.assertIn("the report", label)
+		self.assertIn(label, macros._card_stop_message(1, 2, parked, scheduled=False))
+
+	def test_the_armed_stop_message_bounds_the_summary_too(self):
+		parked = {"summary": "Delete " + "record, " * 200 + "[x](y)"}
+		text = macros._armed_stop_message(1, parked)
+		self.assertLessEqual(len(text), 500)
+		self.assertNotIn("](", text)
+
+
+class TestTheClosingMessageKnowsItsPlace(MacroRunOutcomeBase):
+	def _closing(self, conv, run):
+		return frappe.get_all(
+			MSG,
+			filters={"conversation": conv, "role": "assistant", "ref_doctype": RUN, "ref_name": run},
+			fields=["name", "content", "owner"],
+		)
+
+	def test_it_is_not_posted_on_top_of_a_draft_that_is_still_open(self):
+		# The chat shows a card on the last assistant message only. A message after it
+		# would close the very draft the owner is being told to apply.
+		run, conv, _ = self._mk_run(steps=1, at_step=1)
+		step_turn, _, _ = self._turn(conv, reply=f"Here is the draft.\n{_DRAFT}")
+		macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		self.assertEqual(self._run(run).error, "Step 1 left a draft for you to apply in the chat.")
+		self.assertEqual(self._closing(conv, run), [], "the closing message would retire the draft card")
+
+	def test_it_is_not_posted_on_top_of_a_question_or_a_confirm_card(self):
+		for fence in ('```jarvis-ask\n{"question": "Which one?"}\n```', "```confirm\nPost it\n```"):
+			with self.subTest(fence=fence[:12]):
+				run, conv, macro = self._mk_run(steps=1, at_step=1, tag=f"card-{len(fence)}")
+				self._turn(conv, reply=f"One thing first.\n{fence}")
+				macros._announce(frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro), "failed", "Why.")
+				self.assertEqual(self._closing(conv, run), [])
+
+	def test_it_is_posted_as_the_owner_from_a_background_worker(self):
+		# The hook runs in a worker whose session is not the owner's.
+		run, conv, macro = self._mk_run(steps=2, at_step=1)
+		self._turn(conv)
+		frappe.set_user("Administrator")
+		macros._announce(frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro), "failed", "Step 1 failed.")
+		(closing,) = self._closing(conv, run)
+		self.assertEqual(closing.owner, OWNER)
+		self.assertEqual(frappe.session.user, "Administrator", "the worker's session was not restored")
+
+	def test_it_is_not_posted_into_an_archived_conversation(self):
+		run, conv, macro = self._mk_run(steps=2, at_step=1)
+		frappe.db.set_value(CONV, conv, "status", "Archived", update_modified=False)
+		frappe.db.commit()
+		macros._announce(frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro), "failed", "Step 1 failed.")
+		self.assertEqual(self._closing(conv, run), [])
+
+
+class TestTheCapacityPathsSayWhy(MacroRunOutcomeBase):
+	def _done_for(self, publish, run):
+		return [
+			c.args[1]
+			for c in publish.call_args_list
+			if c.args[1].get("kind") == "macro:done" and c.args[1].get("macro_run") == run
+		]
+
+	def test_a_parked_run_whose_macro_changed_under_it_says_so(self):
+		run, conv, _ = self._mk_run(steps=2, at_step=5, trigger="scheduled")  # cursor past the steps
+		frappe.db.set_value(RUN, run, {"status": "waiting_capacity"})
+		frappe.db.commit()
+		with patch("jarvis.chat.macros.publish_to_user") as publish:
+			macros.resume_waiting_capacity_runs()
+		self.assertEqual(self._run(run).status, "failed")
+		(event,) = self._done_for(publish, run)
+		self.assertEqual(event["error"], macros._MACRO_CHANGED_ERROR)
+		self.assertEqual(len(frappe.get_all("Notification Log", filters={"for_user": OWNER})), 1)
+
+	def test_a_parked_run_whose_owner_can_no_longer_run_says_so(self):
+		run, conv, _ = self._mk_run(steps=2, at_step=0)
+		frappe.db.set_value(RUN, run, {"status": "waiting_capacity"})
+		frappe.db.commit()
+		with (
+			patch("jarvis.permissions.is_valid_unattended_owner", return_value=False),
+			patch("jarvis.chat.macros.publish_to_user") as publish,
+		):
+			macros.resume_waiting_capacity_runs()
+		self.assertEqual(self._run(run).status, "failed")
+		(event,) = self._done_for(publish, run)
+		self.assertEqual(event["error"], macros._OWNER_INELIGIBLE_ERROR)
