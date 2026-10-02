@@ -783,7 +783,7 @@ def start_run(run_name: str) -> None:
 
 def _send_batch_turn(run, k: int) -> bool:
 	"""Rebuild batch ``k`` from the run's zip and enqueue it as one agent turn
-	(the macros ``_run_step`` seam: ``jarvis.chat.api._enqueue_turn``). Returns True
+	(the macros ``_dispatch_step`` seam: ``jarvis.chat.api._enqueue_turn``). Returns True
 	when dispatched, False when DEFERRED for capacity (CDX-19)."""
 	if _legacy_retired():
 		raise _LegacyRetired("app-learning turn dispatch is retired")

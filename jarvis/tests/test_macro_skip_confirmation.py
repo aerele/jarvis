@@ -345,8 +345,7 @@ class TestRunMacroStampAndInert(FrappeTestCase):
 
 		frappe.set_user(NON_ADMIN_USER)
 		with (
-			patch.object(macros, "_run_step"),
-			patch.object(macros, "_run_merged"),
+			patch.object(macros, "_dispatch_step"),
 			patch.object(macros, "entitlement_block", return_value=None),
 		):
 			res = macros.run_macro(macro_name)
