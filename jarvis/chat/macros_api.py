@@ -18,6 +18,7 @@ from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
+TURN = "Jarvis Chat Turn"
 
 
 def _parse_steps(steps, *, as_posted: bool = False) -> list[dict]:
@@ -536,8 +537,10 @@ def update_macro(
 		and (merged_prompt_edited is None or bool(frappe.utils.cint(merged_prompt_edited)))
 	)
 	if edited_by_hand:
+		# The text only. What follows from it (the status, and giving up a summary
+		# that is being written) is the controller's rule, the same for every writer:
+		# ``JarvisMacro._settle_summary_written_in_this_save``.
 		doc.merged_prompt = written
-		doc.merge_status = "ready" if written else ""
 	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
 	doc.save()
 	frappe.db.commit()
@@ -814,29 +817,66 @@ def _summary_block_message(reason: str) -> str:
 	}.get(reason) or _("This macro cannot be summarized right now.")
 
 
-def _abandon_summary(macro_name: str, conversation: str) -> None:
+def _abandon_summary(macro, conversation: str, *, replaced: str = "") -> None:
 	"""No summary turn is coming: take back the "summarizing" mark and the throwaway
 	chat made for it. Left in place, Run stays refused on a summary nothing will land.
 
+	``replaced``: the chat of the summary this one was started to replace (a forced
+	Re-summarize). The new one never started, so the old one is not given up after
+	all: the mark goes back to it and it lands as it would have. Unless it has ended
+	meanwhile (see ``_may_still_land``): then the mark is cleared like any other, and
+	its chat removed. The stored summary text is not touched on any path here; only a
+	summary that lands replaces it.
+
 	The mark first, committed on its own: when it shared a transaction with the chat's
 	delete, a delete that failed rolled the clearing back too and left "summarizing"
-	for good. It is cleared only while it still names THIS chat. Best-effort, and it
+	for good. It is changed only while it still names THIS chat. Best-effort, and it
 	never raises: the caller is already on its way out with the real answer."""
 	try:
+		put_back = bool(replaced) and _may_still_land(replaced)
 		frappe.db.set_value(
 			MACRO,
-			{"name": macro_name, "merge_conversation": conversation},
-			{"merge_status": "", "merge_conversation": ""},
+			{"name": macro.name, "merge_conversation": conversation},
+			{"merge_status": "pending", "merge_conversation": replaced}
+			if put_back
+			else {"merge_status": "", "merge_conversation": ""},
 			update_modified=False,
 		)
 		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
+		put_back = True  # unknown: leave the replaced chat alone
 	_delete_summary_chat(conversation)
+	if replaced and not put_back:
+		_delete_summary_chat(replaced, owned_by=macro.owner)
+
+
+def _has_live_turn(conversation: str) -> bool:
+	"""Whether a turn of this chat has not ended yet (queued, running or finishing)."""
+	from jarvis.chat.turn_state import TERMINAL_STATES
+
+	return bool(frappe.db.exists(TURN, {"conversation": conversation, "state": ["not in", TERMINAL_STATES]}))
+
+
+def _may_still_land(conversation: str) -> bool:
+	"""Whether a summary's chat can still produce a result: it exists, and its turn
+	has not ended. A chat with no Turn row at all counts as "can": the legacy
+	transport writes none, so there the answer is not knowable and the summary gets
+	the benefit of the doubt."""
+	if not frappe.db.exists("Jarvis Conversation", conversation):
+		return False
+	return _has_live_turn(conversation) or not frappe.db.exists(TURN, {"conversation": conversation})
 
 
 def _delete_summary_chat(conversation: str, *, owned_by: str | None = None) -> None:
 	"""Remove a summary's throwaway chat. Best-effort, and it never raises.
+
+	Never while a turn of it is live. Deleting a conversation deletes its Turn rows
+	(``admission.on_conversation_trash``), and the pump reads a Turn row that is gone
+	as a lost lease (``pump._epoch_lost``): its hop ends with no successor, and every
+	live reply on the site stops until the lease runs out and something starts a new
+	hop (30 seconds to 5 minutes). Such a chat is left to finish; it stays behind,
+	archived, like the chat of a summary a step change gave up.
 
 	``owned_by``: delete it only if it belongs to that user. The delete ignores
 	permissions, so a chat named by a macro's stored link is removed only when it is
@@ -844,6 +884,8 @@ def _delete_summary_chat(conversation: str, *, owned_by: str | None = None) -> N
 	(``macros._drop_summary_link_unless_one_owner``)."""
 	try:
 		if owned_by and frappe.db.get_value("Jarvis Conversation", conversation, "owner") != owned_by:
+			return
+		if _has_live_turn(conversation):
 			return
 		frappe.db.delete("Jarvis Chat Message", {"conversation": conversation})
 		frappe.delete_doc("Jarvis Conversation", conversation, ignore_permissions=True, force=True)
@@ -869,7 +911,13 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	given up and a new one started. Without that, a "summarizing" mark nothing will
 	ever land (the worker died mid-turn, or the request was cut off between the mark
 	and the dispatch) answered "that one is pending" for good, with Run refused
-	behind it and no way out but to change a step."""
+	behind it and no way out but to change a step.
+
+	Giving one up is moving the mark to the new chat: the old one's result then
+	matches no macro and is ignored. Its chat is removed only once the new summary
+	has started, and never while its own turn is live (``_delete_summary_chat``); a
+	live one is left to run to its end, it is not cancelled. A new summary that could
+	not start gives nothing up (``_abandon_summary``)."""
 	from jarvis.chat import macros
 
 	doc = frappe.get_doc(MACRO, name)
@@ -930,12 +978,10 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		update_modified=False,
 	)
 	frappe.db.commit()
-	if pending:
-		# The summary given up. The mark names the new chat as of the commit above, so
-		# a late result from the old one finds no macro waiting on it
-		# (``macros._apply_merge_after_turn`` looks the macro up by this link), whether
-		# or not its chat can be removed here.
-		_delete_summary_chat(pending, owned_by=doc.owner)
+	# A summary given up (``pending``, a forced call): the mark names the new chat as of
+	# the commit above, so a late result from the old one finds no macro waiting on it
+	# (``macros._apply_merge_after_turn`` looks the macro up by this link), whether or
+	# not its chat is ever removed. That is done below, once the new one has started.
 	try:
 		out = chat_api._enqueue_turn(conv.name, prompt, origin="macro")
 	except Exception:
@@ -949,13 +995,15 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 			frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
 			frappe.db.commit()
 			frappe.log_error(title=f"jarvis macro summary bookkeeping failed: {doc.name}", message=traceback)
+			if pending:
+				_delete_summary_chat(pending, owned_by=doc.owner)
 			return {"ok": True, "conversation": conv.name}
 		# Nothing went out (``_ensure_session_key`` throws when the gateway is down;
 		# ``_enqueue_turn`` commits the message, then dispatches). "pending" was
 		# committed above and used to stay for good, with Run refused behind it.
 		frappe.db.rollback()
 		frappe.log_error(title=f"jarvis macro summary dispatch failed: {doc.name}", message=traceback)
-		_abandon_summary(doc.name, conv.name)
+		_abandon_summary(doc, conv.name, replaced=pending)
 		frappe.throw(_("The summary could not be started. Please try again in a few minutes."))
 	# CDX-19: the site's turn queue was momentarily full, so the merge turn was NOT dispatched
 	# (its seed was cleaned up). Roll back the "pending" mark set above — there is no summary
@@ -964,7 +1012,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# retryable rejection: tear down the throwaway conversation, clear the mark, and let the
 	# user re-click.
 	if isinstance(out, dict) and out.get("overloaded"):
-		_abandon_summary(doc.name, conv.name)
+		_abandon_summary(doc, conv.name, replaced=pending)
 		return {
 			"ok": False,
 			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
@@ -972,4 +1020,6 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# Hide from the sidebar (list_conversations skips Archived).
 	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
 	frappe.db.commit()
+	if pending:
+		_delete_summary_chat(pending, owned_by=doc.owner)
 	return {"ok": True, "conversation": conv.name}
