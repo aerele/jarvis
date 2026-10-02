@@ -38,7 +38,7 @@
 			     A saved macro keeps one line's room for it whether or not it shows:
 			     it appears on the first keystroke, and without the room every field
 			     below moved down under the pointer. -->
-			<div v-if="!isNew" data-testid="run-reason-room" class="mb-4 min-h-4">
+			<div v-if="!isNew" data-testid="run-reason-room" class="mb-4 min-h-5">
 				<p
 					v-if="runBlockedReason"
 					:id="RUN_REASON_ID"
