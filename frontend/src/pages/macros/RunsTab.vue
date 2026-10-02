@@ -129,6 +129,24 @@
 			</template>
 		</ListView>
 
+		<!-- error state (fetch failed, no rows to show) - before the empty state, so
+		     a load that failed is not reported as "No macro runs yet". Same markup
+		     as ListPage's own error state. -->
+		<div v-else-if="error" class="relative flex-1">
+			<div
+				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				:style="{ top: '35%' }"
+			>
+				<FeatherIcon name="alert-circle" class="size-7.5 text-ink-red-4" />
+				<div class="flex flex-col items-center gap-1">
+					<span class="text-lg font-medium text-ink-gray-8"
+						>Couldn't load macro runs</span
+					>
+					<span class="text-center text-p-base text-ink-red-4">{{ error }}</span>
+				</div>
+			</div>
+		</div>
+
 		<!-- empty state (loaded, zero rows) -->
 		<div v-else-if="!loading" class="relative flex-1">
 			<div
@@ -212,7 +230,7 @@ import {
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
-import { errHtml } from "@/lib/errors";
+import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { runDetail } from "@/lib/macroRunOutcome";
 
 const router = useRouter();
@@ -256,6 +274,9 @@ const rows = ref([]);
 const hasMore = ref(false);
 const total = ref(null); // §8.3/D38: list_macro_runs gains `total`
 const loading = ref(false);
+// Why the last fetch failed, "" once one works. Shown in place of the empty state
+// only: with rows on screen the last-good rows stay and the toast says it.
+const error = ref("");
 const status = ref("");
 const macro = ref("");
 const pageLength = useStorage("jarvis-pl-macro-runs", 20);
@@ -293,7 +314,26 @@ const statCards = computed(() => {
 // ── data (monotonic request id - stale responses dropped, like useListPage) ──
 let reqId = 0;
 
-// mode: "reset" (page 1, replaces) | "more" (appends) | "keep" (silent window refetch)
+// The rows already loaded BEYOND a refreshed first page. The server returns at
+// most 100 rows a page, so with more than that on screen a "keep" refetch can
+// only refresh the top of the list; replacing the list with it threw the rest
+// away (120 rows became 100 on the next realtime event). The fresh page is
+// spliced over the old one by row name: everything after the fresh page's last
+// row, minus anything the fresh page already carries, keeps its place. Order
+// stays the server's: fresh page first, older rows after it.
+// When the fresh page's last row is not among the old rows (a whole page of new
+// runs arrived at once) there is nothing to line the two up by, and the list
+// falls back to the fresh page alone.
+function rowsBeyond(fresh, old) {
+	if (!fresh.length) return [];
+	const at = old.findIndex((r) => r.name === fresh[fresh.length - 1].name);
+	if (at === -1) return [];
+	const seen = new Set(fresh.map((r) => r.name));
+	return old.slice(at + 1).filter((r) => !seen.has(r.name));
+}
+
+// mode: "reset" (page 1, replaces) | "more" (appends) | "keep" (silent refetch of
+//       the first page, merged over the loaded rows)
 async function fetchRuns(mode = "reset") {
 	const id = ++reqId;
 	const append = mode === "more";
@@ -312,14 +352,24 @@ async function fetchRuns(mode = "reset") {
 			})) || {};
 		if (id !== reqId) return;
 		const nr = res.runs || [];
-		rows.value = append ? [...rows.value, ...nr] : nr;
-		hasMore.value = !!res.has_more;
+		// has_more false means the page IS the whole list: nothing lies beyond it.
+		const beyond = mode === "keep" && res.has_more ? rowsBeyond(nr, rows.value) : [];
+		rows.value = append ? [...rows.value, ...nr] : [...nr, ...beyond];
+		// With older rows kept, has_more was answered for the first page only;
+		// whether more lie past the kept rows is what it was before this refresh.
+		if (!beyond.length) hasMore.value = !!res.has_more;
 		total.value = res.total != null ? res.total : null;
+		error.value = "";
 	} catch (e) {
 		if (id !== reqId) return;
+		error.value = errMsg(e);
 		toast.error(errHtml(e)); // keep last-good rows visible
 	} finally {
-		if (id === reqId && mode !== "keep") loading.value = false;
+		// The NEWEST request clears the spinner whatever its mode (as useListPage
+		// does). Tested on the mode too, a silent "keep" that overtook a "reset"
+		// left it on for good: the reset's response is dropped as stale, and the
+		// keep never thought the spinner was its to clear.
+		if (id === reqId) loading.value = false;
 	}
 }
 
