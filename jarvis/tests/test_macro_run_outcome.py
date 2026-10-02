@@ -504,7 +504,7 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 		self.assertEqual(
 			row.error,
 			"Step 1 drafted a record that was not created: the macro did not wait, "
-			"and the next step closed the draft.",
+			"and the next step closed the draft. " + macros._DRAFTS_GONE_HINT,
 		)
 
 	def test_a_draft_from_the_last_step_is_still_there_to_apply(self):
@@ -520,7 +520,9 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 		self.assertEqual(
 			macros._draft_note([1, 2, 3], 3),
 			"Steps 1 and 2 drafted records that were not created: the macro did not wait, "
-			"and the steps after them closed the drafts. Step 3 left a draft for you to apply in the chat.",
+			"and the steps after them closed the drafts. "
+			+ macros._DRAFTS_GONE_HINT
+			+ " Step 3 left a draft for you to apply in the chat.",
 		)
 
 
@@ -1054,6 +1056,25 @@ class TestADispatchThatFailedLate(MacroRunOutcomeBase):
 		):
 			macros.advance_after_turn(conv, errored=False, run_id=old_turn)
 		enqueue.assert_not_called()
+		# The hook ran to the end and decided to leave the run where it is.
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 2))
+
+	def test_a_failed_dispatch_is_not_mistaken_for_one_that_went_out(self):
+		# The caller could not say which turn ended (turn recovery without a linked
+		# reply), and the dispatch failed before writing anything. The newest step
+		# message is then the step that just ENDED, and it does have a turn: compared
+		# with the turn that ended (unknown here) that read as "the step went out", and
+		# the run sat `running` with a step skipped.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		self._turn(conv)  # step 1, ended
+		with (
+			patch("jarvis.chat.api._enqueue_turn", side_effect=RuntimeError("gateway down")),
+			patch("frappe.log_error"),
+		):
+			macros.advance_after_turn(conv, errored=False)  # identity unknown
+		row = self._run(run)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("Step 2 could not be started", row.error)
 
 
 class TestWhatIsWrittenIsSafeToShow(MacroRunOutcomeBase):
@@ -1082,16 +1103,26 @@ class TestWhatIsWrittenIsSafeToShow(MacroRunOutcomeBase):
 	def test_a_cards_summary_cannot_become_a_link_or_formatting(self):
 		parked = {"summary": "Send [the report](https://evil.example) to **everyone** `now`"}
 		label = macros._card_label(parked)
-		for mark in "[]`*":
+		for mark in "[]`*<>":
 			self.assertNotIn(mark, label)
 		self.assertIn("the report", label)
 		self.assertIn(label, macros._card_stop_message(1, 2, parked, scheduled=False))
+
+	def test_a_real_card_summary_keeps_its_tool_and_record_names(self):
+		# The summary is `_describe_call` output, not prose: stripping underscores made
+		# "delete_doc ... name=ITEM_A_1" read "deletedoc ... ITEMA1".
+		parked = {"summary": "delete_doc doctype=Sales Order name=ITEM_A_1 targets=[SO-1, SO-2]"}
+		self.assertEqual(
+			macros._card_label(parked), "delete_doc doctype=Sales Order name=ITEM_A_1 targets=SO-1, SO-2"
+		)
 
 	def test_the_armed_stop_message_bounds_the_summary_too(self):
 		parked = {"summary": "Delete " + "record, " * 200 + "[x](y)"}
 		text = macros._armed_stop_message(1, parked)
 		self.assertLessEqual(len(text), 500)
 		self.assertNotIn("](", text)
+		# Bounded, not merely cut at the end: the sentence after the summary survives.
+		self.assertIn("Nothing after this step ran.", text)
 
 
 class TestTheClosingMessageKnowsItsPlace(MacroRunOutcomeBase):
@@ -1118,6 +1149,14 @@ class TestTheClosingMessageKnowsItsPlace(MacroRunOutcomeBase):
 				self._turn(conv, reply=f"One thing first.\n{fence}")
 				macros._announce(frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro), "failed", "Why.")
 				self.assertEqual(self._closing(conv, run), [])
+
+	def test_a_reply_cut_off_mid_card_does_not_hold_the_closing_message_back(self):
+		# The clients show a card only for a CLOSED fence. A reply that errored while
+		# writing one shows no card, so the reason belongs in the chat.
+		run, conv, macro = self._mk_run(steps=1, at_step=1)
+		self._turn(conv, reply='Drafting it now.\n```jarvis-action\n{"kind": "doc", "doctype": "To')
+		macros._announce(frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro), "failed", "Step 1 failed.")
+		self.assertEqual(len(self._closing(conv, run)), 1)
 
 	def test_it_is_posted_as_the_owner_from_a_background_worker(self):
 		# The hook runs in a worker whose session is not the owner's.
