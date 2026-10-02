@@ -572,7 +572,14 @@ def _raise_cursor(run, to: int, *, sent: bool = False) -> None:
 	``sent``: this call just sent the step, which is progress, so ``modified`` moves
 	(the stale-run sweep measures a run's idleness on it). A repair (the step turned
 	out to be sent already) is not progress and leaves ``modified`` alone: a repeated
-	event must not keep a stuck run looking alive."""
+	event must not keep a stuck run looking alive.
+
+	On a fresh snapshot: the run row is also written by a second dispatcher and by a
+	stop, and a write judged against an older view fails with 1020 (``jarvis.chat.txn``).
+	``owned``: every caller has committed its own work by here."""
+	from jarvis.chat import txn
+
+	txn.fresh_snapshot(owned=True)
 	if sent:
 		frappe.db.sql(
 			f"""UPDATE `tab{RUN}` SET current_step = GREATEST(current_step, %(to)s), modified = %(now)s
@@ -839,7 +846,42 @@ def _step_went_out_anyway(run, index: int) -> bool:
 	if not _step_is_out(run.name, index):
 		return False
 	_raise_cursor(run, index + 1, sent=True)
+	try:
+		_drop_copies_of_step(run, index)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis macro step copy cleanup failed: {run.name}", message=frappe.get_traceback()
+		)
 	return True
+
+
+def _drop_copies_of_step(run, index: int) -> int:
+	"""Remove the step messages written AFTER the message step ``index``'s turn is on
+	that have no turn of their own; returns how many. Each is a second dispatcher's
+	copy of the step: it wrote its message, and then failed (or was told
+	``duplicate``) because the other dispatcher's turn carries the step.
+
+	Left in the chat, a copy becomes the run's "current step" (it is the newest step
+	message), so the real step's end is refused and the run sits still; or the orphan
+	sweep later runs it, and the step runs twice.
+
+	Safe only while step ``index`` is the last one sent, which is when it is called:
+	the step after it has no message yet."""
+	from jarvis.chat import api
+
+	seed = frappe.db.get_value(TURN, _step_turn_id(run.name, index), "seed_message")
+	seq = frappe.db.get_value(MSG, seed, "seq") if seed else None
+	if seq is None:
+		return 0
+	later = frappe.get_all(
+		MSG,
+		filters={"conversation": run.conversation, "role": "user", "origin": "macro", "seq": [">", seq]},
+		pluck="name",
+	)
+	copies = [m for m in later if not frappe.db.exists(TURN, {"seed_message": m})]
+	for message in copies:
+		api._delete_enqueue_seed(message)
+	return len(copies)
 
 
 def _superseded_by_a_retry(run_id: str, seed: str | None) -> bool:
@@ -892,6 +934,24 @@ def _ended_turn(seed: str | None, run_id: str | None):
 		TURN, filters={"seed_message": seed}, fields=_TURN_FIELDS, order_by="creation desc", limit=1
 	)
 	return rows[0] if rows else None
+
+
+def _turn_to_judge(conversation: str, turn, run_id: str | None, assistant_message: str | None):
+	"""The Turn row ``_step_verdict`` may read for the turn that just ended: that turn's
+	own row, or None (then the caller's flag decides).
+
+	``_ended_turn`` falls back to the NEWEST turn of the step's message. That is right
+	for wording a reason, and wrong for a verdict when the step was retried: a caller
+	that names a turn with no row (a job the kill switch sent down the legacy path), or
+	names only the reply (turn recovery), would be judged by a sibling turn's row, and
+	an old `errored` attempt would fail the retry that just worked."""
+	if not turn:
+		return None
+	if run_id:
+		return turn if turn.get("name") == run_id else None
+	if assistant_message:
+		return turn if turn.get("assistant_message") == assistant_message else None
+	return turn
 
 
 def _step_turns(conversation: str) -> list:
@@ -1130,7 +1190,8 @@ def advance_after_turn(
 			step_number = max(int(run.current_step or 0), 1)  # never "Step 0" (first-step race)
 			turn = _ended_turn(seed, run_id)
 			# From here on `errored` is the step's verdict, not the caller's word alone.
-			errored = bool(_step_verdict(turn, _step_reply(turn), errored))
+			judged = _turn_to_judge(conversation_id, turn, run_id, assistant_message)
+			errored = bool(_step_verdict(judged, _step_reply(judged), errored))
 			if errored and macro_doc.stop_on_error:
 				if _stopped_by_the_user(turn):
 					# Their own Stop on the step: the run stopped, it did not fail. No
@@ -1714,6 +1775,8 @@ def heal_dangling_seed(conversation: str, seed: str) -> dict | None:
 
 	* ``None``: not the engine's after all (the run moved on, or the message is not
 	  the prompt of the step the run would send next). The sweep heals it as any other.
+	  One such message is not left to the sweep: a second dispatcher's copy of the
+	  step the run last sent, which is removed here.
 	* ``{"skipped": True}``: the run is busy (its lock is held). Nothing was done and
 	  no strike was used; the next sweep comes back.
 	* ``{"overloaded": True}``: the site was full and the run is parked. The sweep
@@ -1745,6 +1808,11 @@ def heal_dangling_seed(conversation: str, seed: str) -> dict | None:
 			index = _next_step_index(run)
 			total = min(run.total_steps or len(macro_doc.steps or []), len(macro_doc.steps or []))
 			if index >= total or _unsent_seed(conversation, _step_prompt(run, macro_doc, index)[0]) != seed:
+				if _is_a_copy_of_the_last_step(run, macro_doc, index, seed):
+					# Not a step that never started: a second dispatcher's copy of the step
+					# the run last sent. Re-dispatched, that step would run twice.
+					_drop_copies_of_step(run, index - 1)
+					return {"ok": True}
 				return None
 			# The strike, under the lock and durable before the attempt: an attempt that
 			# dies must not be free, or a step that cannot start is retried for ever.
@@ -1758,8 +1826,29 @@ def heal_dangling_seed(conversation: str, seed: str) -> dict | None:
 		except Exception:
 			pass
 		frappe.log_error(title="jarvis.chat.macros.heal_dangling_seed_failed", message=frappe.get_traceback())
+		try:
+			# Whatever failed, it was this message's one retry: without the strike a
+			# heal that cannot work is tried, and logged, at every sweep for hours.
+			frappe.db.set_value(MSG, seed, "was_recovered", 1, update_modified=False)
+		except Exception:
+			pass
 		frappe.db.commit()
 		return {"ok": True}
+
+
+def _is_a_copy_of_the_last_step(run, macro_doc, index: int, seed: str) -> bool:
+	"""Whether ``seed`` (a step message with no turn, and not the message of the step
+	the run would send next, ``index``) is a second copy of the step before it: that
+	step has its turn, on another message, and ``seed`` carries its prompt."""
+	if index < 1:
+		return False
+	on = frappe.db.get_value(TURN, _step_turn_id(run.name, index - 1), "seed_message")
+	if not on or on == seed:
+		return False
+	steps = macro_doc.steps or []
+	if _run_mode(run, macro_doc) != MODE_MERGED and index - 1 >= len(steps):
+		return False
+	return _same_prompt(frappe.db.get_value(MSG, seed, "content"), _step_prompt(run, macro_doc, index - 1)[0])
 
 
 def fail_run_for_seed(conversation: str, seed: str) -> bool:
@@ -1884,7 +1973,7 @@ def _dispatch_step(run, macro_doc, index: int) -> str:
 	skipped, and this is the old dispatch. A step sent in the instant a cutover
 	re-routes it into the machine has a random id too; ``_went_out_since`` covers the
 	hook's side of that."""
-	from jarvis.chat import admission, api
+	from jarvis.chat import admission, api, txn
 
 	turn_id = _step_turn_id(run.name, index) if admission.turn_machine_enabled() else None
 	if turn_id and frappe.db.exists(TURN, turn_id):
@@ -1896,14 +1985,20 @@ def _dispatch_step(run, macro_doc, index: int) -> str:
 		# wrote it staged on the conversation); only the turn is missing.
 		accepted = api._redispatch_orphan(run.conversation, seed, run_id=turn_id, interactive=True)
 		out = {"run_id": turn_id, "message_id": seed, **(accepted if isinstance(accepted, dict) else {})}
-		if out.get("overloaded"):
+		if out.get("overloaded") and not _step_is_out_now(turn_id):
 			api._delete_enqueue_seed(seed)  # as `_enqueue_turn` does: a parked run leaves no message
 	else:
 		out = api._enqueue_turn(
 			run.conversation, prompt, origin="macro", **overrides, **({"run_id": turn_id} if turn_id else {})
 		)
 	if isinstance(out, dict) and out.get("overloaded"):
+		# Parked, unless another dispatcher got the step's turn while this one was
+		# being told the site is full. Looked for again AFTER the park: the other
+		# dispatcher un-parks only what it finds parked, and it may have looked first.
+		txn.fresh_snapshot(owned=True)  # the park is a write to a row that dispatcher writes too
 		_defer_capacity(run, macro_doc)
+		if turn_id and _step_is_out_now(turn_id):
+			return _step_already_out(run, index)
 		return _STEP_DEFERRED
 	if isinstance(out, dict) and out.get("duplicate"):
 		if not seed:
@@ -1921,6 +2016,15 @@ def _dispatch_step(run, macro_doc, index: int) -> str:
 	except Exception:
 		pass  # a progress event is a courtesy; the step is already running
 	return _STEP_SENT
+
+
+def _step_is_out_now(turn_id: str) -> bool:
+	"""Whether the turn exists, read on a fresh snapshot (another dispatcher may have
+	created it since this transaction last looked)."""
+	from jarvis.chat import txn
+
+	txn.fresh_snapshot(owned=True)
+	return bool(frappe.db.exists(TURN, turn_id))
 
 
 def _step_prompt(run, macro_doc, index: int) -> tuple[str, dict]:
@@ -1981,6 +2085,23 @@ def _unsent_seed(conversation: str, prompt: str) -> str | None:
 	if frappe.db.exists(MSG, {"conversation": conversation, "seq": [">", newest[0].seq]}):
 		return None
 	return newest[0].name
+
+
+def _drop_unsent_message(run, macro_doc, index: int) -> None:
+	"""Remove the message of step ``index`` that was committed without a turn, if there
+	is one. Best-effort."""
+	from jarvis.chat import admission, api
+
+	try:
+		if not admission.turn_machine_enabled():
+			return  # no Turn rows: "no turn" says nothing about a message here
+		seed = _unsent_seed(run.conversation, _step_prompt(run, macro_doc, index)[0])
+		if seed:
+			api._delete_enqueue_seed(seed)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis macro unsent message cleanup failed: {run.name}", message=frappe.get_traceback()
+		)
 
 
 def _same_prompt(stored: str | None, prompt: str) -> bool:
@@ -2273,6 +2394,11 @@ def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int, *, index: 
 			index = 0 if _run_mode(run, macro_doc) == MODE_MERGED else int(run.current_step or 0)
 		if _step_went_out_anyway(run, index):
 			return
+		# The step did not go out, but its message may be committed (``_enqueue_turn``
+		# commits it before it asks for the turn). A parked run leaves no message: the
+		# orphan sweep heals a parked run's message the ordinary way, under an id the
+		# resume does not know, and the resume would then send the step again.
+		_drop_unsent_message(run, macro_doc, index)
 		if attempts >= _MAX_CAPACITY_ATTEMPTS:
 			if _cas_run_status(
 				run.name,
