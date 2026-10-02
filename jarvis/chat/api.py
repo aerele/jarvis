@@ -3490,6 +3490,9 @@ def _redispatch_orphan(
 	message_id: str,
 	attachments=None,
 	context=None,
+	*,
+	run_id: str | None = None,
+	interactive: bool = False,
 ) -> dict | None:
 	"""Re-dispatch a turn whose original RQ job never ran (orphan sweep in
 	stale_scan). Fresh run_id; the 10s probe re-routes to a live queue.
@@ -3497,12 +3500,17 @@ def _redispatch_orphan(
 	when it still exists - they ride only the enqueue payload, so dropping
 	them would resume the turn blind to its own file.
 
+	``run_id`` / ``interactive``: the macro engine dispatches a step message that was
+	committed without a turn through here too (``macros._dispatch_step``), under the
+	step's fixed id and at a step's usual priority. Server-side callers only; the
+	sweep passes neither.
+
 	CDX-19 (residual): RETURNS the admission result (accept_or_queue's dict, or
 	_dispatch_turn's reroute dict) so the stale-scan sweep can see an overload
 	rejection and NOT consume the one healing strike — it resets the recovery
 	marker so the next scan retries instead of surfacing a spurious second-strike
 	error. Returns None on the pure-legacy normal-dispatch path (nothing to merge)."""
-	run_id = uuid.uuid4().hex[:12]
+	run_id = run_id or uuid.uuid4().hex[:12]
 	payload = {
 		"conversation_id": conversation_id,
 		"message_id": message_id,
@@ -3526,13 +3534,13 @@ def _redispatch_orphan(
 			conversation=conversation_id,
 			run_id=run_id,
 			seed_message=message_id,
-			turn_class="background",
-			dispatch=lambda: _dispatch_turn(payload, interactive=False),
+			turn_class="interactive" if interactive else "background",
+			dispatch=lambda: _dispatch_turn(payload, interactive=interactive),
 			dispatch_payload=_dispatch_payload or None,
 		)
 	# Pure-legacy path: _dispatch_turn may itself reroute under the cutover gate and return an
 	# admission dict (queued/overloaded) — return it so the sweep sees an overload rejection.
-	return _dispatch_turn(payload, interactive=False, cutover_gate=True)
+	return _dispatch_turn(payload, interactive=interactive, cutover_gate=True)
 
 
 def _reroute_legacy_to_pump(enqueue_kwargs: dict, interactive: bool, exempt_overload: bool = False) -> dict:
@@ -3703,6 +3711,7 @@ def _enqueue_turn(
 	interactive: bool = True,
 	exempt_overload: bool = False,
 	claim=None,
+	run_id: str | None = None,
 ) -> dict:
 	"""Persist a user message + dispatch an agent turn for ``prompt`` (no
 	attachments / no auto-context). The macro engine (``jarvis.chat.macros``) uses
@@ -3718,7 +3727,16 @@ def _enqueue_turn(
 	``claim``: a pending action's ``settled`` compare-and-set, run inside the user
 	row's transaction (D5). When it returns False another settle already delivered
 	this outcome: nothing is written and ``{ok: False, already_settled: True}``
-	comes back."""
+	comes back.
+
+	``run_id``: the id the turn must have, for the one caller that has to be able to
+	name a turn before it exists: the macro engine, whose step N of run R is always
+	``macros._step_turn_id(R, N)``. Everyone else leaves it out and gets a random id.
+	It is never taken from a request: this function is not whitelisted and no caller
+	passes a client's value. When a turn with that id already exists the answer
+	carries ``duplicate: True``: nothing was dispatched, and the message this call
+	wrote (``message_id``) has no turn of its own. The caller decides what becomes of
+	it."""
 	conv_doc = frappe.get_doc(CONV, conversation)
 	# Every field this call changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
@@ -3770,7 +3788,7 @@ def _enqueue_turn(
 	# transaction yet at this point, but whether a lost race here can safely replay
 	# also depends on the CALLER: macros_api.merge_runs (a commit right before the
 	# call) and macros.run_macro / resume_waiting_capacity_runs (both commit right
-	# before their _run_step/_run_merged call, which reaches here) are verified
+	# before their _dispatch_step call, which reaches here) are verified
 	# clean. macros.advance_after_turn's own call is NOT fully verified: it first
 	# runs _apply_merge_after_turn, whose write path was not traced end to end, so
 	# on that path replay_is_safe() may read False and a genuine race there
@@ -3802,7 +3820,7 @@ def _enqueue_turn(
 		return {"ok": False, "already_settled": True}
 	frappe.db.commit()
 
-	run_id = uuid.uuid4().hex[:12]
+	run_id = run_id or uuid.uuid4().hex[:12]
 	_kwargs = {
 		"conversation_id": conversation,
 		"message_id": msg_doc.name,
@@ -3839,6 +3857,10 @@ def _enqueue_turn(
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
 			out["queued_position"] = _adm.get("queued_position")
+		if _adm.get("duplicate"):
+			# Passed up, not folded into `queued`: only a caller that fixed the id can
+			# get here, and it must know its message has no turn.
+			out["duplicate"] = True
 		return out
 	# CDX-19: the legacy path may REROUTE under the cutover gate; merge the queued result exactly
 	# like the machine branch above. R-7: exempt_overload is threaded through so a confirm
@@ -3855,6 +3877,8 @@ def _enqueue_turn(
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
 		out["queued"] = True
 		out["queued_position"] = _adm.get("queued_position")
+	if isinstance(_adm, dict) and _adm.get("duplicate"):
+		out["duplicate"] = True
 	return out
 
 
