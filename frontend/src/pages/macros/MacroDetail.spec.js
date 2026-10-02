@@ -382,6 +382,54 @@ describe("MacroDetail: how the last run went", () => {
 	});
 });
 
+describe("MacroDetail Delete: a macro that is running", () => {
+	// Deleting used to remove the run row from under a run that kept going. The
+	// server now stops the run first; the dialog and the toast say so.
+	const openDelete = async (macro) => {
+		const w = await mountDetail(macro);
+		const overflow = w
+			.findAllComponents({ name: "Dropdown" })
+			.map((d) => d.props("options") || [])
+			.flat()
+			.find((o) => o.label === "Delete");
+		overflow.onClick();
+		return confirmDialog.mock.calls.at(-1)[0];
+	};
+
+	it("the confirmation says the run will be stopped", async () => {
+		for (const status of ["running", "waiting_capacity"]) {
+			const dialog = await openDelete(baseMacro({ last_run: { status, error: "" } }));
+			expect(dialog.message).toContain("This macro is running. Deleting it stops the run.");
+			expect(dialog.message).toContain("Its run history is deleted too.");
+		}
+	});
+
+	it("a macro that is not running gets the plain confirmation", async () => {
+		for (const last_run of [null, undefined, { status: "completed", error: "" }]) {
+			const dialog = await openDelete(baseMacro({ last_run }));
+			expect(dialog.message).not.toContain("running");
+			expect(dialog.message).toContain("Its run history is deleted too.");
+		}
+	});
+
+	it("the toast says a run was stopped when the server stopped one", async () => {
+		const dialog = await openDelete(baseMacro({ last_run: { status: "running", error: "" } }));
+		api.deleteMacro.mockResolvedValue({ ok: true, stopped_runs: 1 });
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(api.deleteMacro).toHaveBeenCalledWith("MACRO-1");
+		expect(toast.success).toHaveBeenCalledWith("Macro deleted. 1 run was stopped.");
+	});
+
+	it("the toast stays as it was when nothing was running, or an older server answers", async () => {
+		for (const answer of [{ ok: true, stopped_runs: 0 }, { ok: true }, undefined]) {
+			const dialog = await openDelete(baseMacro());
+			api.deleteMacro.mockResolvedValue(answer);
+			await dialog.onConfirm({ hideDialog: vi.fn() });
+			expect(toast.success).toHaveBeenLastCalledWith("Macro deleted");
+		}
+	});
+});
+
 describe("MacroDetail Schedule section: summary line reflects the SAVED snapshot only", () => {
 	it("shows the summary when clean and a next_run_at is present", async () => {
 		const w = await mountDetail(

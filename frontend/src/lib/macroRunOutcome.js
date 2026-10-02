@@ -84,3 +84,29 @@ export function macroDoneSignal(p) {
 		body: p.error || "Open the run to see what happened.",
 	};
 }
+
+// A run that has not ended, as the server counts it (macros._LIVE_RUN_STATUSES):
+// in progress, or parked until the site has capacity for its next step.
+const LIVE_RUN = ["running", "waiting_capacity"];
+
+// What a delete confirmation adds when the page knows a macro about to be deleted
+// is running: the server stops the run first, and the user should hear that before
+// they confirm, not after. `lastRuns` is the `last_run` of each macro being deleted
+// (one for the form, the selection for the list). "" when none is live.
+export function deleteWarning(lastRuns) {
+	const live = (lastRuns || []).filter((r) => r && LIVE_RUN.includes(r.status)).length;
+	if (!live) return "";
+	if ((lastRuns || []).length === 1) return "This macro is running. Deleting it stops the run.";
+	if (live === 1) return "One of these macros is running. Deleting it stops the run.";
+	return `${live} of these macros are running. Deleting them stops their runs.`;
+}
+
+// What the success toast adds after a delete that stopped runs. `res` is the
+// server's answer (`stopped_runs`); "" when it stopped none, and for a server from
+// before it reported the count. It is appended to a toast that has no full stop
+// ("Macro deleted"), so it brings its own.
+export function stoppedRunsNote(res) {
+	const n = Number(res && res.stopped_runs);
+	if (!(n > 0)) return "";
+	return n === 1 ? ". 1 run was stopped." : `. ${n} runs were stopped.`;
+}

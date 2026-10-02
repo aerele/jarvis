@@ -279,7 +279,7 @@ import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";
-import { lastRunLine } from "@/lib/macroRunOutcome";
+import { lastRunLine, deleteWarning, stoppedRunsNote } from "@/lib/macroRunOutcome";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -780,19 +780,23 @@ async function resummarize() {
 }
 
 function confirmDelete() {
+	// A macro that is running is stopped by the delete (server side, before the
+	// row goes). Said here when this page knows of a live run: the last run it
+	// loaded, kept current by `macro:done`.
+	const running = deleteWarning([lastRun.value]);
 	confirmDialog({
 		title: "Delete macro?",
 		// ConfirmDialog renders `message` as HTML (v-html); the name is the owner's
 		// free text, so it goes in escaped.
-		message: `Delete “${escapeHtml(
-			form.macro_name || props.id
-		)}”? Its run history is deleted too. This can't be undone.`,
+		message: `Delete “${escapeHtml(form.macro_name || props.id)}”? ${
+			running ? `${running} ` : ""
+		}Its run history is deleted too. This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
-				await api.deleteMacro(props.id);
+				const res = await api.deleteMacro(props.id);
 				bypassGuard = true;
 				hideDialog();
-				toast.success("Macro deleted");
+				toast.success(`Macro deleted${stoppedRunsNote(res)}`);
 				router.push({ name: "MacrosList" });
 			} catch (e) {
 				toast.error(errHtml(e));
