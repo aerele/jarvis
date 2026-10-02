@@ -72,6 +72,22 @@ export function siteTimezone() {
 	}
 }
 
+// Whether a server datetime reads differently on the viewer's clock than as
+// stored (the site's clock). Judged by what is shown, not by zone names: one
+// clock under two names (Asia/Kolkata, Asia/Calcutta) is not a difference, and
+// two zones that happen to agree at that moment need no label either. False when
+// there is nothing to compare.
+export function onAnotherClock(d) {
+	if (!d) return false;
+	try {
+		const stored = String(d).replace("T", " ").slice(0, 19);
+		const shown = dayjsLocal(String(d)).format("YYYY-MM-DD HH:mm:ss");
+		return !!shown && shown !== stored;
+	} catch {
+		return false;
+	}
+}
+
 // "09:00" / "09:00:00" -> "9:00 am": the same text frappe-ui's TimePicker shows
 // for the value (use12Hour default), so a time reads the same on the form that
 // sets it and everywhere that reports it. "" for anything that is not a time.
