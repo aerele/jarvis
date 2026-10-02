@@ -121,7 +121,8 @@ _MAX_MESSAGE_CHARS = 500
 #     times every pattern on 200 KB of the shapes that were slow; that is a
 #     sample, not a proof, so _scrub_secrets also cuts its input to
 #     _MAX_SCRUB_INPUT_CHARS before any pattern runs.
-#   - IDEMPOTENT. Scrubbing scrubbed text changes nothing. The ORDER carries
+#   - IDEMPOTENT. Scrubbing scrubbed text changes nothing (one shape is known
+#     to redact more on a second pass, see the limits below). The ORDER carries
 #     this: a pattern never produces text that an EARLIER pattern would match on
 #     a second pass. The named parameter goes first because it can remove a "/"
 #     or "?" that kept the userinfo pattern off; the query string goes last
@@ -137,16 +138,44 @@ _MAX_MESSAGE_CHARS = 500
 #     not redacted ("https://u:pa?ss@host"); see the userinfo entry for why
 #   - a raw '"', "<", ">" or backtick inside a query string ends the redaction
 #     there, so a parameter after it is only caught if its name is on the named
-#     list (HTTP libraries percent-encode all four)
+#     list (HTTP libraries percent-encode all four):
+#     'https://h/x?a="1"&session=abc' keeps '"1"&session=abc'
 #   - a quoted key's value that is a number, a list or a nested object is left
 #     ({"password": 73519462}, {"api_key": ["..."]}), as is JSON escaped twice
+#   - a quoted value left open at the end of a LINE, not of the text, is left:
+#     '{"api_key": "abc\nmore'. So are an escaped value holding a backslash
+#     ('{\"password\": \"pa\\\\ss\"}'), a string prefix other than b
+#     ("{'api_key': rb'abc'}"), a bytes key ("{b'X-Jarvis-Token': b'abc'}") and
+#     an unquoted value ('{"api_key": abc}')
 #   - keys that do not name a credential are not matched ("key", "sig", "auth",
 #     "session_id"), nor a key holding a space or longer than 40 + 40 characters
-#   - an Authorization scheme other than Bearer, Basic, Digest or token loses
-#     only its scheme word; "token KEY:SECRET" needs 6+ characters each side
+#   - an unquoted label the keyword list lacks is not matched: "Cookie: sid=abc",
+#     "token: abc", "passwd=abc", and a FIRST form-body parameter ("token=abc&a=1").
+#     A header is matched when it is named X-...-Token, X-...-Key or X-...-Secret
+#     ("X-Jarvis-Token: abc"), with at most three words between
+#   - Authorization: Digest loses its first parameter only ('Authorization: Digest
+#     username="bob", response="abc"' keeps 'response="abc"'), and a scheme other
+#     than Bearer, Basic, Digest or token loses only its scheme word
+#   - a bare Bearer value stops at the first character outside its set ("Bearer
+#     abc1defg,abc" keeps ",abc") and a quoted one is not matched ('Bearer "abc"')
+#   - "token KEY:SECRET" needs 6+ characters each side, letters and digits only
+#     ("token abcdef_123456:abc" is left), and either a digit somewhere or 8+
+#     characters on one side ("token abcdefg:hijklmn" is left)
+#   - a keyword's unquoted value ends at the first space: "password: hunter2 abc"
+#     keeps " abc"
+#   - a userinfo with no "://" before it is left ("curl -u admin:abc https://h"),
+#     as are key shapes with no pattern ("ghp_...", "AKIA...", a bare Basic value)
+#   - a JWT glued to a non-ASCII letter IS redacted ("cl\u00e9" + JWT gives
+#     "cl\u00e9[REDACTED]"), which the word-boundary form of the pattern left alone
+#   - scrubbing twice can redact MORE than scrubbing once in one shape, an escaped
+#     key whose value the pattern cannot close: '\"api_key\": \"password:-\'
+#     gives '\"api_key\": \"password=[REDACTED]', then '\"api_key\":
+#     \"[REDACTED]\"'. Nothing is ever un-redacted by a second pass
 #   - the other way round, text that holds no secret is still redacted when it
 #     has the shape of one: "password: must be 8 characters", {"max_tokens":
-#     "4096"}, "Bearer https://host/api", "cond?a=1:b", "ssh://git@host"
+#     "4096"}, "Bearer https://host/api", "cond?a=1:b", "ssh://git@host",
+#     "a=1&key=name&order=asc", "url='https://h/x?a=1',status=500" (a URL with no
+#     space after its closing quote loses what is glued to it)
 #
 # Characters a quoted value may hold: anything but its own quote and a newline,
 # with a backslash escape taken whole.
@@ -162,27 +191,33 @@ _QUOTED_CUT = _DQ_CUT + "|" + _SQ_CUT
 _ESCAPED_DQ = r'\\"[^"\\\n]*(?:\\"|\Z)'
 _JWT_CHAR = r"[A-Za-z0-9_\-]"
 
-# Where a URL ends when it is not followed by a space: at a quote, an angle
-# bracket or a backtick always, and at a closing bracket, a comma or an
-# apostrophe when what follows is not more of the URL. So
-#   {"url":"https://h/x?a=1","status":"failed"}  keeps  ,"status":"failed"}
-#   [the docs](https://h/docs?page=2) explain    keeps  ) explain
-# while "?filter=(a,b)&sig=..." and "?name=O'Brien&sig=..." go whole.
-_AFTER_A_URL = r"""[\s"'<>`,)\]]|[.;:!?](?:\s|\Z)|\Z"""
+# Where a query string ends: at whitespace, a double quote, an angle bracket or
+# a backtick, and nowhere else. A ")", "]", "," or "'" does NOT end it: all four
+# are legal inside a query, and stopping at them left the parameters after
+# "?ids=[1],[2]" in the clear. When the scrubber cannot tell, it redacts.
+_URL_END = r"""\s"<>`"""
+# What is handed back from the END of a redacted value: the punctuation that
+# closes whatever the URL sat in, and a backslash (the escape of the quote that
+# stopped the match). It is only ever the run right before the end, so
+#   [the docs](https://h/docs?page=2). Then   keeps  ). Then
+#   url='https://h/x?a=1', status=500         keeps  ', status=500
+# while "?filter=(a),(b)&sig=..." and "?a=1),sig=..." go whole. No "?" here: it
+# starts a query string, and one handed back by the named-parameter pattern was
+# redacted by the query-string pattern and read as a value on a second pass.
+_URL_TRAILING = ")]',.;:!\\"
 
 
-def _url_value(also_ends: str = "") -> str:
-	"""The characters of a query string (or of one parameter's value, when
-	``also_ends`` is "&#"). A marker left by another pattern is taken whole, so
-	its "]" is never read as the end of the URL. A backslash is taken unless it
-	escapes a quote: Go prints "&" as \\u0026, and \\" closes a JSON string."""
-	return (
-		r"""(?:\[REDACTED\]|[^\s"'<>`,)\]\\"""
-		+ also_ends
-		+ r"""]|\\(?!["'])|(?:[)\]]+|[,'])(?!"""
-		+ _AFTER_A_URL
-		+ r"""))+"""
-	)
+def _url_value_gone(m: re.Match) -> str:
+	"""What stood before the value, then [REDACTED], then the closing punctuation
+	the value ended in. A value that is nothing but punctuation is left as it is,
+	and a marker another pattern left at the end keeps its own "]"."""
+	value = m["value"]
+	kept = len(value.rstrip(_URL_TRAILING))
+	if value.endswith("[REDACTED]", 0, kept + 1):
+		kept += 1
+	if not kept:
+		return m[0]
+	return f"{m['lead']}[REDACTED]{value[kept:]}"
 
 
 def _quoted_value_gone(m: re.Match) -> str:
@@ -210,10 +245,10 @@ _SECRET_PATTERNS = (
 	#   https://h/cb#id_token=abc             -> https://h/cb#id_token=[REDACTED]
 	(
 		re.compile(
-			r"(?i)([&#;](?:access[_-]?token|id[_-]?token|api[_-]?key|token|key|signature|sig|secret)=)"
-			+ _url_value("&#")
+			r"(?i)(?P<lead>[&#;](?:access[_-]?token|id[_-]?token|api[_-]?key|token|key|signature|sig|secret)=)"
+			r"(?P<value>[^&#" + _URL_END + r"]+)"
 		),
-		r"\1[REDACTED]",
+		_url_value_gone,
 	),
 	# URL userinfo: everything between "://" and the last "@" before the path.
 	#   redis://:hunter2@host:6379/0      -> redis://[REDACTED]@host:6379/0
@@ -250,13 +285,17 @@ _SECRET_PATTERNS = (
 		r"\1 [REDACTED]",
 	),
 	# token KEY:SECRET, Frappe's own API-key scheme (the header this client sends
-	# when it has no OAuth token), with no "Authorization:" in front. There must
-	# be a digit in the key or the secret: both are 15 hex characters, and without
-	# that rule "token refresh:failed" was a match.
-	#   token 1a2b3c4d5e:f6g7h8i9j0 -> token [REDACTED]
+	# when it has no OAuth token), with no "Authorization:" in front. Six or more
+	# characters each side, and either a digit somewhere or eight or more on one
+	# side. Short words with no digit are a sentence ("token refresh:failed");
+	# anything longer could be a credential, so it goes.
+	#   token 1a2b3c4d5e:f6g7h8i9j0           -> token [REDACTED]
+	#   token abcdefabcdefabc:fedcbafedcbafed -> token [REDACTED]
 	(
 		re.compile(
-			r"(?i)\b(token)\s+(?=[A-Za-z]*\d|[A-Za-z0-9]+:[A-Za-z]*\d)[A-Za-z0-9]{6,}:[A-Za-z0-9]{6,}"
+			r"(?i)\b(token)\s+"
+			r"(?=[A-Za-z]*\d|[A-Za-z0-9]{8}|[A-Za-z0-9]+:(?:[A-Za-z]*\d|[A-Za-z0-9]{8}))"
+			r"[A-Za-z0-9]{6,}:[A-Za-z0-9]{6,}"
 		),
 		r"\1 [REDACTED]",
 	),
@@ -291,12 +330,18 @@ _SECRET_PATTERNS = (
 	# left it open), anything else up to whitespace.
 	#   api_key=sk-abc is invalid        -> api_key=[REDACTED] is invalid
 	#   password: "correct horse" failed -> password=[REDACTED] failed
+	#   X-Jarvis-Token: abc was sent     -> X-Jarvis-Token=[REDACTED] was sent
+	# The last keyword is any header named X-...-Token, X-...-Key or X-...-Secret
+	# (the plugin's own X-Jarvis-Token, X-Auth-Token, X-Amz-Security-Token). At
+	# most three words between: each word is anchored on the "-" that ends it, so
+	# a long run of them is read once from each "x" that starts a word.
 	(
 		re.compile(
 			r"(?i)\b("
 			r"api[_-]?key|api[_-]?secret|client[_-]?secret|"
 			r"access[_-]?token|refresh[_-]?token|"
-			r"authorization|bearer|password|secret"
+			r"authorization|bearer|password|secret|"
+			r"x-(?:[a-z0-9]+-){0,3}(?:token|key|secret)"
 			r")(?P<before>\s*)[=:](?P<after>\s*)"
 			r"(?:" + _DQ + r"\S*|" + _SQ + r"\S*|" + _DQ_CUT + r"|" + _SQ_CUT + r"|\S+)"
 		),
@@ -332,10 +377,16 @@ _SECRET_PATTERNS = (
 	#   https://h/x?page=2&token=abc returned 403 -> https://h/x?[REDACTED] returned 403
 	#   with url: /b/k?X-Amz-Signature=9f8a (Caused -> with url: /b/k?[REDACTED] (Caused
 	#   {"url":"https://h/x?a=1","status":"failed"} -> {"url":"https://h/x?[REDACTED]","status":"failed"}
-	# It ends where the URL ends (_AFTER_A_URL), not at the next space. The "?"
-	# must be followed by name=value with no space, so "Did it work? key=value"
-	# and "Invalid field ?token= in filter" are left alone.
-	(re.compile(r"""\?[^\s?="'<>`,)]+=""" + _url_value()), "?[REDACTED]"),
+	#   https://h/x?ids=[1],[2]&session=abc failed -> https://h/x?[REDACTED] failed
+	# It ends where the URL has certainly ended (_URL_END), and the punctuation
+	# it ends in is handed back (_URL_TRAILING). The "?" must be followed by
+	# name=value with no space, so "Did it work? key=value" and "Invalid field
+	# ?token= in filter" are left alone. The name may hold anything a value may:
+	# "?a,b=..." and "?a(1)=2&..." were skipped when it could not.
+	(
+		re.compile(r"(?P<lead>\?)[^?=" + _URL_END + r"]+=(?P<value>[^" + _URL_END + r"]+)"),
+		_url_value_gone,
+	),
 )
 
 # The most text the patterns are ever run on. No caller shows more than
@@ -345,9 +396,18 @@ _SECRET_PATTERNS = (
 # that turns out slower than its test shows: the old JWT pattern took about
 # 100 ms on its worst 20,000 characters, against 10 s on 200,000 (measured locally).
 _MAX_SCRUB_INPUT_CHARS = 20_000
-# Starts with a space: glued on, "api_key=[REDACTED]...[truncated]" would be read
-# as one value on a second pass and the marker would go.
+# How far back from the cap the cut may go to land on whitespace.
+_MAX_CUT_BACKOFF_CHARS = 200
+# Starts with a space, so it is not glued to the last word. No pattern ever
+# sees it: _scrub_secrets takes it off before the patterns run and puts it back
+# after ("password= ...[truncated]" was read as a keyword and its value).
 _TRUNCATED = " ...[truncated]"
+
+
+def _apply_patterns(text: str) -> str:
+	for pat, repl in _SECRET_PATTERNS:
+		text = pat.sub(repl, text)
+	return text
 
 
 def _scrub_secrets(text: str) -> str:
@@ -356,27 +416,38 @@ def _scrub_secrets(text: str) -> str:
 	can't pollute ``last_sync_status``.
 
 	Text longer than ``_MAX_SCRUB_INPUT_CHARS`` is cut BEFORE the patterns run,
-	back to the last whitespace so a credential is not left as a prefix no
-	pattern knows, and the result always carries the truncation marker: the part
-	that was not scrubbed is never returned.
+	and the result always carries the truncation marker: the part that was not
+	scrubbed is never returned. The cut goes back to the last whitespace when
+	there is one within ``_MAX_CUT_BACKOFF_CHARS``, so a credential is not left
+	as a prefix no pattern knows. Further back than that it stays at the cap: a
+	minified body with one early space was cut down to its first word.
+
+	The patterns run a second time on the text as cut for the message, so a
+	value that cut left open is redacted here and not on some later pass. The
+	result is cut to the same length again: it is never longer than
+	``_MAX_MESSAGE_CHARS`` plus the marker.
 
 	Idempotent: scrubbing already-scrubbed text leaves [REDACTED] markers
-	intact (a pattern that matches one again rewrites it to itself).
+	intact (a pattern that matches one again rewrites it to itself), and the
+	truncation marker stays where it is.
 	"""
 	if not text:
 		return text
-	cut = len(text) > _MAX_SCRUB_INPUT_CHARS
+	cut = text.endswith(_TRUNCATED)
 	if cut:
+		text = text[: -len(_TRUNCATED)]
+	if len(text) > _MAX_SCRUB_INPUT_CHARS:
+		cut = True
 		text = text[:_MAX_SCRUB_INPUT_CHARS]
-		last_space = max(text.rfind(" "), text.rfind("\n"), text.rfind("\t"))
+		floor = _MAX_SCRUB_INPUT_CHARS - _MAX_CUT_BACKOFF_CHARS
+		last_space = max(text.rfind(space, floor) for space in " \n\t")
 		if last_space > 0:
 			text = text[:last_space]
-	out = text
-	for pat, repl in _SECRET_PATTERNS:
-		out = pat.sub(repl, out)
-	if cut or len(out) > _MAX_MESSAGE_CHARS:
-		out = out[:_MAX_MESSAGE_CHARS] + _TRUNCATED
-	return out
+	out = _apply_patterns(text)
+	if len(out) > _MAX_MESSAGE_CHARS:
+		cut = True
+		out = _apply_patterns(out[:_MAX_MESSAGE_CHARS])[:_MAX_MESSAGE_CHARS]
+	return out + _TRUNCATED if cut else out
 
 
 # DEFAULT_ADMIN_URL lives in hooks.py as a single source of truth for
