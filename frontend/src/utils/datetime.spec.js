@@ -3,15 +3,41 @@ import { describe, it, expect, vi } from "vitest";
 // frappe-ui's ESM entry does not resolve under vitest (see LlmPoolEditor.spec.js) -
 // fmtElapsed itself is pure, but datetime.js imports frappe-ui at module scope, so
 // any spec importing this module needs the mock even though fmtElapsed never calls it.
+const config = vi.hoisted(() => ({}));
 vi.mock("frappe-ui", async () => ({
 	call: vi.fn(),
 	// frappe-ui re-exports dayjs; the real one, so formatLocalMs is checked for real.
 	dayjs: (await vi.importActual("dayjs")).default,
 	dayjsLocal: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
-	getConfig: () => null,
+	getConfig: (key) => config[key] ?? null,
 }));
 
-import { fmtElapsed, formatLocalMs } from "./datetime";
+import { fmtElapsed, formatLocalMs, formatTime12h, siteTimezone } from "./datetime";
+
+describe("formatTime12h", () => {
+	it("prints a stored time-of-day the way the time picker shows it", () => {
+		expect(formatTime12h("09:00")).toBe("9:00 am");
+		expect(formatTime12h("09:00:00")).toBe("9:00 am");
+		expect(formatTime12h("00:05")).toBe("12:05 am");
+		expect(formatTime12h("12:00")).toBe("12:00 pm");
+		expect(formatTime12h("17:30:00")).toBe("5:30 pm");
+	});
+
+	it("is empty for anything that is not a time", () => {
+		expect(formatTime12h("")).toBe("");
+		expect(formatTime12h(null)).toBe("");
+		expect(formatTime12h("soon")).toBe("");
+	});
+});
+
+describe("siteTimezone", () => {
+	it("is the zone the shell was told, or empty when it was not", () => {
+		expect(siteTimezone()).toBe("");
+		config.systemTimezone = "Asia/Kolkata";
+		expect(siteTimezone()).toBe("Asia/Kolkata");
+		delete config.systemTimezone;
+	});
+});
 
 // A reply stamped in the browser at run:end shows its time in the same format
 // the server copy gets after the reload ("10:42 PM", never "22:42" first).
