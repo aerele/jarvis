@@ -98,9 +98,6 @@
     {
       "role": "Jarvis User",
       "read": 1,
-      "write": 1,
-      "create": 1,
-      "delete": 1,
       "if_owner": 1
     },
     {

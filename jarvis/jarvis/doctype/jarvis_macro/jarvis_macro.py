@@ -14,7 +14,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 
 MAX_NAME_LEN = 80
 MAX_DESC_LEN = 500
@@ -23,7 +23,7 @@ MAX_PROMPT_LEN = 5000
 MAX_MACROS_PER_OWNER = 25
 
 
-class JarvisMacro(Document):
+class JarvisMacro(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
 		self._validate_steps()
@@ -32,7 +32,39 @@ class JarvisMacro(Document):
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._guard_skip_confirmation_enable()
+		self._guard_summary_state()
 		self._recompute_next_run()
+
+	def _guard_summary_state(self):
+		"""``merge_conversation`` is engine state, not a user field: it names the
+		throwaway chat a summary is being generated in. When a turn in that chat ends,
+		the engine reads its reply into this macro and deletes the chat with permissions
+		ignored (``macros._apply_merge_after_turn``). A user who could set it could name
+		any conversation. Every legitimate writer is server-side and uses a raw
+		``db.set_value``, which never reaches ``validate``; so whatever a save carries
+		in this field is never the engine's, and the stored value always wins.
+
+		Restored silently rather than refused. A refusal would also hit an honest save
+		whose document was loaded a moment before the engine set or cleared the link
+		(a form left open while a summary starts or lands), and a Desk "Duplicate" of a
+		macro that is being summarized.
+
+		"Summarizing" is engine state for the same reason: only ``summarize_macro``
+		starts a summary, with the same raw write. A save that would move the macro
+		INTO ``pending`` was loaded while a summary was running and saved after it
+		ended (a form left open), so nothing is coming to clear it and a manual Run
+		would be refused for good. The stored status and summary text stay instead. A
+		save that clears the summary (steps changed) is untouched."""
+		before = self.get_doc_before_save()
+		stored_status = (before.get("merge_status") if before else "") or ""
+		if (self.merge_status or "") == "pending" and stored_status != "pending":
+			self.merge_status = stored_status
+			if before:
+				self.merged_prompt = before.get("merged_prompt")
+		# The stored value as it is (NULL stays NULL): this doctype tracks changes, and
+		# NULL -> "" on a Data field would add a Version line to an unrelated save.
+		stored = before.get("merge_conversation") if before else None
+		self.merge_conversation = stored
 
 	def _guard_skip_confirmation_enable(self):
 		"""ARM the macro = run its writes uncarded (the broad covered set, incl.
