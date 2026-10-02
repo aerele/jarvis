@@ -1012,6 +1012,76 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 				post_update_llm_creds("p", "m", "b", "k")
 		self.assertEqual(str(cm.exception), "no active subscription on this account")
 
+	# The shapes below reach _scrub_secrets from more than the admin envelope: a
+	# macro run's stored reason (macros._one_line) and the voice errors scrub the
+	# text of an HTTP library's exception, which carries the request's URL and
+	# headers. Called directly: the pattern is what is under test.
+
+	def test_bearer_token_after_authorization_is_redacted(self):
+		# The old keyword pattern took "Bearer" as the value and left the token.
+		out = admin_client._scrub_secrets("echoed Authorization: Bearer abc123tokenvalue here")
+		self.assertNotIn("abc123tokenvalue", out)
+		self.assertEqual(out, "echoed Authorization=[REDACTED] here")
+
+	def test_basic_credentials_after_authorization_are_redacted(self):
+		out = admin_client._scrub_secrets("Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA== rejected")
+		self.assertNotIn("dXNlcjpwYXNzd29yZA", out)
+		self.assertIn("rejected", out)
+
+	def test_bare_bearer_token_is_redacted(self):
+		out = admin_client._scrub_secrets("upstream said: Bearer abc123tokenvalue was rejected")
+		self.assertNotIn("abc123tokenvalue", out)
+		self.assertEqual(out, "upstream said: Bearer [REDACTED] was rejected")
+
+	def test_a_long_bearer_token_with_no_digit_is_redacted(self):
+		token = "AbCdEfGhIjKlMnOpQrStUvWx"
+		out = admin_client._scrub_secrets(f"Bearer {token}")
+		self.assertNotIn(token, out)
+
+	def test_url_userinfo_is_redacted_and_the_host_kept(self):
+		out = admin_client._scrub_secrets("GET https://svc_user:s3cr3t-pw@host.example/x failed")
+		self.assertNotIn("s3cr3t-pw", out)
+		self.assertNotIn("svc_user", out)
+		self.assertEqual(out, "GET https://[REDACTED]@host.example/x failed")
+
+	def test_credential_query_parameters_are_redacted(self):
+		for param in ("token", "key", "sig", "signature", "api_key", "secret", "access_token"):
+			for lead in ("?", "?page=2&"):
+				with self.subTest(param=param, lead=lead):
+					out = admin_client._scrub_secrets(
+						f"GET https://host.example/x{lead}{param}=Zq9vVALUE77 returned 403"
+					)
+					self.assertNotIn("Zq9vVALUE77", out)
+					self.assertIn("[REDACTED]", out)
+					self.assertIn("https://host.example/x", out)
+					self.assertIn("returned 403", out)
+
+	def test_a_query_parameter_beside_the_credential_survives(self):
+		out = admin_client._scrub_secrets("https://host.example/x?token=Zq9vVALUE77&page=2")
+		self.assertEqual(out, "https://host.example/x?token=[REDACTED]&page=2")
+
+	def test_scrubbing_twice_changes_nothing(self):
+		raw = (
+			"Authorization: Bearer abc123tokenvalue then Bearer zzz999tokenvalue at "
+			"https://u:p@host.example/x?sig=Zq9vVALUE77&page=2"
+		)
+		once = admin_client._scrub_secrets(raw)
+		self.assertEqual(admin_client._scrub_secrets(once), once)
+
+	def test_ordinary_prose_is_left_alone(self):
+		for text in (
+			"the key = value pair",
+			"pass the token to the next step",
+			"see https://host.example:8443/docs?page=2&sort=name for details",
+			"mail admin@host.example about https://host.example/x",
+			"Bearer",
+			"Bearer authentication failed",
+			"the Bearer token expired",
+			"a signature is required",
+		):
+			with self.subTest(text=text):
+				self.assertEqual(admin_client._scrub_secrets(text), text)
+
 
 class TestNonJsonResponse(FrappeTestCase):
 	def setUp(self):
