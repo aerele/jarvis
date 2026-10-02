@@ -14,13 +14,8 @@
 				iconLeft="play"
 				:loading="running"
 				:disabled="mergePending || running || dirty"
-				:tooltip="
-					mergePending
-						? 'Summarizing… - Run unlocks when the summary is ready'
-						: dirty
-						? 'Save your changes first'
-						: 'Run this macro now'
-				"
+				:tooltip="runBlockedReason || 'Run this macro now'"
+				:aria-describedby="runBlockedReason ? RUN_REASON_ID : undefined"
 				@click="run"
 			/>
 			<Dropdown v-if="!isNew" :options="overflowOptions">
@@ -36,6 +31,18 @@
 		</template>
 
 		<template #main>
+			<!-- Why Run is off, as text. The tooltip alone does not reach everyone: a
+			     disabled button takes no keyboard focus, a screen reader gets "Run,
+			     dimmed" and no reason, and touch has no hover. The button points here
+			     with aria-describedby (the pattern of approvals/SheetDetail.vue). -->
+			<p
+				v-if="!isNew && runBlockedReason"
+				:id="RUN_REASON_ID"
+				data-testid="run-reason"
+				class="mb-4 text-sm text-ink-amber-3"
+			>
+				{{ runBlockedReason }}
+			</p>
 			<!-- How the last run went, when the owner needs telling: it failed, it is
 			     waiting on them, or a step only drafted a record. Nothing else on this
 			     page said, and a scheduled run fails with nobody watching. -->
@@ -230,6 +237,7 @@ import {
 	watch,
 	nextTick,
 	shallowRef,
+	toRaw,
 	inject,
 	onMounted,
 	onBeforeUnmount,
@@ -254,7 +262,7 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
-import { exactDate, formatTime12h, siteTimezone } from "@/utils/datetime";
+import { exactDate, formatTime12h, onAnotherClock, siteTimezone } from "@/utils/datetime";
 import {
 	WEEKDAY_OPTIONS,
 	DAY_OF_MONTH_OPTIONS,
@@ -365,18 +373,24 @@ watch(
 );
 // The same for steps, keyed by the step's position in form.steps (StepsBuilder
 // shows each under its own step). Typing only ever CLEARS a mark (a step being
-// filled in is not nagged before the next save). A step that is moved, added or
-// removed gets a new array from StepsBuilder, and positions no longer mean what
-// they did: the marks are dropped and the next save sets them again.
+// filled in is not nagged before the next save). A mark belongs to its STEP, not
+// to a position: StepsBuilder answers a move, an add or a remove with a new array
+// of the same step objects, and the marks are carried over to wherever their
+// steps now sit. They used to be dropped, so reordering to "fix" things made the
+// red text vanish from a step that was still wrong.
+// The message offers "remove the step" only when that can be done: the builder
+// will not remove a macro's only step, and there the way out is the label.
 const STEP_NEEDS_PROMPT = "Add a prompt for this step, or remove the step.";
+const SOLE_STEP_NEEDS_PROMPT = "Add a prompt for this step, or clear its label.";
 const stepErrors = ref({});
 watch(
 	() => form.steps,
 	(steps, was) => {
-		if (!Object.keys(stepErrors.value).length) return;
-		const still = steps === was ? promptlessSteps(steps) : {};
+		const marked = Object.keys(stepErrors.value);
+		if (!marked.length) return;
+		const flagged = new Set(marked.map((i) => toRaw((was || [])[i])));
 		stepErrors.value = Object.fromEntries(
-			Object.entries(stepErrors.value).filter(([i]) => still[i])
+			Object.entries(promptlessSteps(steps)).filter(([i]) => flagged.has(toRaw(steps[i])))
 		);
 	},
 	{ deep: true }
@@ -385,6 +399,16 @@ watch(
 const docmeta = shallowRef(null); // useDocmeta instance (persisted macros only)
 
 const mergePending = computed(() => mergeStatus.value === "pending");
+// Why Run is off, "" when it is not (or only because a run is being started).
+// One sentence for the visible line, the tooltip and the button's description.
+const RUN_REASON_ID = "macro-run-reason";
+const runBlockedReason = computed(() => {
+	if (mergePending.value) return "Summarizing… Run unlocks when the summary is ready.";
+	if (dirty.value) {
+		return "Save your changes first. Run starts the saved macro, not what is on screen.";
+	}
+	return "";
+});
 const stepsWithPrompt = computed(() => form.steps.filter((s) => (s.prompt || "").trim()).length);
 
 // Arming a macro to skip confirmation is admin-only (the backend re-checks
@@ -442,13 +466,17 @@ const scheduleSummary = computed(() => {
 	const anchor = scheduleAnchorPhrase(snap.schedule_frequency, snap.schedule_day);
 	// A failed scheduled run is retried at a time the owner did not choose; say so,
 	// or "daily at 9:00 am. Next run: 11:17 am" reads as a contradiction.
-	const next = nextRunIsRetry.value
-		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${nextRunAt.value}`
-		: `Next run: ${nextRunAt.value}`;
 	// The time is the stored one, on the SITE's clock; the next-run stamp after it
-	// is shown on the viewer's. Naming the site zone keeps the two from reading as
-	// one clock. When the shell was not told the zone, the old text stands.
+	// is shown on the viewer's. Naming the site zone, and marking the stamp "your
+	// time" when the viewer's clock differs, keeps the two from reading as one
+	// clock. A viewer on the site's clock gets no extra label, and when the shell
+	// was not told the zone the old text stands.
 	const zone = siteTimezone();
+	const stamp =
+		nextRunAt.value + (zone && onAnotherClock(nextRunRaw.value) ? " (your time)" : "");
+	const next = nextRunIsRetry.value
+		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${stamp}`
+		: `Next run: ${stamp}`;
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
 		`at ${formatTime12h(snap.schedule_time)}${zone ? `, ${zone} time` : ""}. ${next}`
@@ -496,8 +524,9 @@ function cleanSteps(steps) {
 // { position in `steps`: message } for every step with a label and no prompt.
 function promptlessSteps(steps) {
 	const out = {};
+	const message = (steps || []).length > 1 ? STEP_NEEDS_PROMPT : SOLE_STEP_NEEDS_PROMPT;
 	(steps || []).forEach((s, i) => {
-		if ((s.label || "").trim() && !(s.prompt || "").trim()) out[i] = STEP_NEEDS_PROMPT;
+		if ((s.label || "").trim() && !(s.prompt || "").trim()) out[i] = message;
 	});
 	return out;
 }
@@ -506,8 +535,6 @@ function toHHMM(t) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
 	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
 }
-// formatTime12h ("09:00" -> "9:00 am") lives in utils/datetime now, shared with
-// the Macros list's Schedule cell so the two cannot print one time two ways.
 
 // ── load / init (re-runs when /macros/new saves and replaces to /macros/:id) ─
 function seed(data) {
@@ -541,7 +568,12 @@ function seed(data) {
 	nextRunRaw.value = data.next_run_at || "";
 	ownerBlockedReason.value = data.schedule_blocked_reason || "";
 	lastRun.value = data.last_run || null;
-	snapshot.value = {
+	snapshot.value = formSnapshot();
+}
+
+// The form as it stands, in the shape `dirty` compares against.
+function formSnapshot() {
+	return {
 		macro_name: form.macro_name,
 		description: form.description,
 		enabled: form.enabled ? 1 : 0,
@@ -593,13 +625,15 @@ async function init() {
 
 watch(() => [props.id, props.isNew], init, { immediate: true });
 
+// False when the reload failed: local state is kept, and the caller says so.
 async function reloadMacro() {
 	try {
 		const full = await api.getMacro(props.id);
 		macro.value = full;
 		seed(full);
+		return true;
 	} catch (e) {
-		// keep local state; next navigation reloads
+		return false;
 	}
 }
 
@@ -661,6 +695,15 @@ async function save() {
 				sentMerged = upd.merged_prompt;
 			}
 			await api.updateMacro(upd);
+			// The server has these edits from here on, whatever the reload below
+			// does. The form is clean as of now: left to the reload alone, one
+			// failed request kept it "dirty", with Run off behind "Save your changes
+			// first" and a second Save judging the steps against a stale snapshot.
+			// A summary this save omitted was cleared by the server (see above), so
+			// it goes from the form too: kept, the next rename-only save would send
+			// the stale text back as if the owner had written it.
+			if (!("merged_prompt" in upd)) form.merged_prompt = "";
+			snapshot.value = formSnapshot();
 		}
 		// Re-summarize only when the sequence actually changed (or has no summary
 		// yet) - a rename shouldn't burn an LLM turn.
@@ -668,6 +711,7 @@ async function save() {
 		if (savedName && needsSummary) {
 			try {
 				await api.summarizeMacro(savedName);
+				mergeStatus.value = "pending"; // Run waits for it, reload or no reload
 				toast.create({
 					message:
 						"Summarizing in the background - Run unlocks when the summary is ready.",
@@ -681,8 +725,14 @@ async function save() {
 		if (props.isNew) {
 			bypassGuard = true;
 			if (savedName) router.replace("/macros/" + savedName);
-		} else {
-			await reloadMacro(); // picks up merge_status / cleared summary / next_run_at
+		} else if (!(await reloadMacro())) {
+			// The reload picks up merge_status / the cleared summary / next_run_at.
+			// Without it the save still stands; only those may be out of date.
+			toast.create({
+				message:
+					"Saved, but this page could not be refreshed. Reload it to see the latest summary and next run.",
+				type: "warning",
+			});
 		}
 	} catch (e) {
 		toast.error(errHtml(e));

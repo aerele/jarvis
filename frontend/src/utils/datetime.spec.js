@@ -8,11 +8,22 @@ vi.mock("frappe-ui", async () => ({
 	call: vi.fn(),
 	// frappe-ui re-exports dayjs; the real one, so formatLocalMs is checked for real.
 	dayjs: (await vi.importActual("dayjs")).default,
-	dayjsLocal: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
+	// `config.viewerClock`: what a server datetime reads as on the viewer's clock.
+	dayjsLocal: () => ({
+		format: () => config.viewerClock ?? "",
+		fromNow: () => "",
+		isValid: () => false,
+	}),
 	getConfig: (key) => config[key] ?? null,
 }));
 
-import { fmtElapsed, formatLocalMs, formatTime12h, siteTimezone } from "./datetime";
+import {
+	fmtElapsed,
+	formatLocalMs,
+	formatTime12h,
+	onAnotherClock,
+	siteTimezone,
+} from "./datetime";
 
 describe("formatTime12h", () => {
 	it("prints a stored time-of-day the way the time picker shows it", () => {
@@ -36,6 +47,31 @@ describe("siteTimezone", () => {
 		config.systemTimezone = "Asia/Kolkata";
 		expect(siteTimezone()).toBe("Asia/Kolkata");
 		delete config.systemTimezone;
+	});
+});
+
+describe("onAnotherClock", () => {
+	// A server datetime is stored on the site's clock and shown on the viewer's.
+	it("is true when the viewer's clock reads it differently from the stored value", () => {
+		config.viewerClock = "2026-10-02 04:30:00";
+		expect(onAnotherClock("2026-10-02 09:00:00")).toBe(true);
+		delete config.viewerClock;
+	});
+
+	it("is false when the two read the same, whatever the zones are called", () => {
+		// Asia/Kolkata and Asia/Calcutta are one clock: compared by what is shown,
+		// not by name.
+		config.viewerClock = "2026-10-02 09:00:00";
+		expect(onAnotherClock("2026-10-02 09:00:00")).toBe(false);
+		expect(onAnotherClock("2026-10-02 09:00:00.000000")).toBe(false);
+		delete config.viewerClock;
+	});
+
+	it("is false with nothing to compare", () => {
+		expect(onAnotherClock("")).toBe(false);
+		expect(onAnotherClock(null)).toBe(false);
+		// The mock's default: nothing came back from the conversion.
+		expect(onAnotherClock("2026-10-02 09:00:00")).toBe(false);
 	});
 });
 

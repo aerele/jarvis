@@ -123,7 +123,9 @@ const props = defineProps({
 	modelValue: { type: Array, default: () => [] }, // [{label, prompt, skills[]}]
 	disabled: { type: Boolean, default: false },
 	// { step position: message } for steps the parent's save refused (a label
-	// with no prompt). Shown under that step's prompt.
+	// with no prompt). Shown under that step's prompt. frappe-ui's ErrorMessage
+	// renders its message as HTML: pass fixed sentences only, never text that
+	// carries what the owner typed (escape it first if that is ever needed).
 	errors: { type: Object, default: () => ({}) },
 });
 
