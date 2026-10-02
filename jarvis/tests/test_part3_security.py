@@ -368,9 +368,11 @@ class TestMacroScoping(Part3Base):
 			macro_scheduler.run_due_macros()
 		called = [c.args[0] for c in mock_run.call_args_list]
 		self.assertNotIn(m.name, called, "scheduler ran a barred owner's macro")
-		# processed-as-skipped: schedule advanced past now.
-		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		self.assertGreater(nxt, now_datetime())
+		# processed-as-skipped: the owner cannot run it, so the schedule is switched off
+		# (it used to be moved on, and then skipped again on every later slot).
+		row = frappe.db.get_value(MACRO, m.name, ["schedule_enabled", "next_run_at"], as_dict=True)
+		self.assertFalse(row.schedule_enabled)
+		self.assertIsNone(row.next_run_at)
 
 	# --- A Macro Run row is engine state: its owner may read it, never write it --- #
 	# MAC-2 guarded CREATE only. An owner could still UPDATE their own run row over
