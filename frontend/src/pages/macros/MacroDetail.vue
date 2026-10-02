@@ -34,6 +34,25 @@
 		</template>
 
 		<template #main>
+			<!-- How the last run went, when the owner needs telling: it failed, it is
+			     waiting on them, or a step only drafted a record. Nothing else on this
+			     page said, and a scheduled run fails with nobody watching. -->
+			<Banner
+				v-if="lastRunNote"
+				class="mb-4"
+				data-testid="last-run-note"
+				:type="LAST_RUN_BANNER[lastRunNote.tone] || 'info'"
+				:title="lastRunNote.title"
+				:message="lastRunNote.text"
+			>
+				<template v-if="lastRun && lastRun.conversation" #action>
+					<Button
+						variant="ghost"
+						label="Open the chat"
+						@click="router.push('/c/' + lastRun.conversation)"
+					/>
+				</template>
+			</Banner>
 			<DocSection label="Details">
 				<div class="space-y-4">
 					<FormControl
@@ -220,6 +239,7 @@ import {
 	confirmDialog,
 } from "frappe-ui";
 import DocPage from "@/components/doc/DocPage.vue";
+import Banner from "@/components/Banner.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
@@ -238,6 +258,7 @@ import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";
+import { lastRunLine } from "@/lib/macroRunOutcome";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -262,6 +283,11 @@ const saving = ref(false);
 const running = ref(false);
 const mergeStatus = ref(""); // '' | 'pending' | 'ready' | 'failed'
 const nextRunRaw = ref("");
+// The server's `last_run` for this macro (null when it never ran, undefined from a
+// server that does not send it yet).
+const lastRun = ref(null);
+const lastRunNote = computed(() => lastRunLine(lastRun.value));
+const LAST_RUN_BANNER = { bad: "error", warn: "warning" };
 const nextRunIsRetry = ref(false);
 
 const form = reactive({
@@ -467,6 +493,7 @@ function seed(data) {
 	mergeStatus.value = data.merge_status || "";
 	nextRunRaw.value = data.next_run_at || "";
 	ownerBlockedReason.value = data.schedule_blocked_reason || "";
+	lastRun.value = data.last_run || null;
 	snapshot.value = {
 		macro_name: form.macro_name,
 		description: form.description,
@@ -656,7 +683,10 @@ function confirmDelete() {
 
 // ── live merge updates for THIS macro (badge + Run gate + summary body) ──────
 function onEvent(p) {
-	if (!p || p.kind !== "macro:merged" || props.isNew || p.macro !== props.id) return;
+	if (!p || props.isNew || p.macro !== props.id) return;
+	// A run of this macro just ended: the line about the last run is out of date.
+	if (p.kind === "macro:done") return refreshLastRun();
+	if (p.kind !== "macro:merged") return;
 	refreshMergeFields();
 	if (p.status === "ready") {
 		toast.success("Summary ready - this macro now runs as one prompt.");
@@ -665,6 +695,19 @@ function onEvent(p) {
 			message: "Couldn't summarize - the steps run as a sequence.",
 			type: "info",
 		});
+	}
+}
+
+// Only the last-run summary: the form may hold unsaved edits, so nothing else is
+// re-seeded.
+async function refreshLastRun() {
+	const id = props.id;
+	try {
+		const full = await api.getMacro(id);
+		// The user may have opened another macro while this was in flight.
+		if (id === props.id) lastRun.value = full.last_run || null;
+	} catch (e) {
+		// keep what is shown; the next load corrects it
 	}
 }
 
