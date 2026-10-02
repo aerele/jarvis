@@ -8,6 +8,7 @@
 				/>
 				<div
 					class="space-y-2 rounded-md border p-3"
+					data-testid="macro-step"
 					:class="{ 'opacity-50': dragIdx === si }"
 					@dragover.prevent="onDragOver(si)"
 					@dragleave="onDragLeave(si)"
@@ -60,8 +61,10 @@
 						placeholder="The prompt to send for this step…"
 						:modelValue="st.prompt"
 						:disabled="disabled"
+						:aria-invalid="errors[si] ? 'true' : undefined"
 						@update:modelValue="(v) => (st.prompt = v)"
 					/>
+					<ErrorMessage :message="errors[si]" />
 					<div class="flex flex-wrap items-center gap-1.5">
 						<span class="text-sm text-ink-gray-5">Skills</span>
 						<div
@@ -113,12 +116,15 @@
 // the (parent-reactive) step objects in place, structural changes emit a new
 // array.
 import { ref, onMounted } from "vue";
-import { Button, FormControl, Autocomplete, confirmDialog } from "frappe-ui";
+import { Button, FormControl, Autocomplete, ErrorMessage, confirmDialog } from "frappe-ui";
 import * as api from "@/api";
 
 const props = defineProps({
 	modelValue: { type: Array, default: () => [] }, // [{label, prompt, skills[]}]
 	disabled: { type: Boolean, default: false },
+	// { step position: message } for steps the parent's save refused (a label
+	// with no prompt). Shown under that step's prompt.
+	errors: { type: Object, default: () => ({}) },
 });
 
 const emit = defineEmits(["update:modelValue"]);

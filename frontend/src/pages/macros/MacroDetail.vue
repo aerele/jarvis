@@ -13,10 +13,12 @@
 				label="Run"
 				iconLeft="play"
 				:loading="running"
-				:disabled="mergePending || running"
+				:disabled="mergePending || running || dirty"
 				:tooltip="
 					mergePending
 						? 'Summarizing… - Run unlocks when the summary is ready'
+						: dirty
+						? 'Save your changes first'
 						: 'Run this macro now'
 				"
 				@click="run"
@@ -55,14 +57,19 @@
 			</Banner>
 			<DocSection label="Details">
 				<div class="space-y-4">
-					<FormControl
-						type="text"
-						label="Name"
-						placeholder="e.g. Monthly close"
-						:modelValue="form.macro_name"
-						:disabled="saving"
-						@update:modelValue="(v) => (form.macro_name = v)"
-					/>
+					<div>
+						<FormControl
+							type="text"
+							label="Name"
+							required
+							placeholder="e.g. Monthly close"
+							:modelValue="form.macro_name"
+							:disabled="saving"
+							:aria-invalid="fieldErrors.macro_name ? 'true' : undefined"
+							@update:modelValue="(v) => (form.macro_name = v)"
+						/>
+						<ErrorMessage :message="fieldErrors.macro_name" class="mt-2" />
+					</div>
 					<FormControl
 						type="textarea"
 						label="Description"
@@ -75,7 +82,7 @@
 					<Switch
 						v-model="form.enabled"
 						label="Enabled"
-						description="Off = saved as a draft - it won't run and stays out of the chat run menu."
+						description="Off = saved as a draft - its scheduled runs are skipped. You can still run it by hand."
 						:disabled="saving"
 					/>
 					<Switch
@@ -154,7 +161,7 @@
 			</DocSection>
 
 			<DocSection label="Steps">
-				<StepsBuilder v-model="form.steps" :disabled="saving" />
+				<StepsBuilder v-model="form.steps" :disabled="saving" :errors="stepErrors" />
 			</DocSection>
 
 			<DocSection
@@ -232,6 +239,7 @@ import {
 	Button,
 	Badge,
 	Dropdown,
+	ErrorMessage,
 	FormControl,
 	Switch,
 	TimePicker,
@@ -246,7 +254,7 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import StepsBuilder from "./StepsBuilder.vue";
 import { takeMacroPrefill } from "@/composables/macroPrefill";
-import { exactDate } from "@/utils/datetime";
+import { exactDate, formatTime12h, siteTimezone } from "@/utils/datetime";
 import {
 	WEEKDAY_OPTIONS,
 	DAY_OF_MONTH_OPTIONS,
@@ -255,7 +263,7 @@ import {
 } from "@/lib/scheduleAnchor";
 import * as api from "@/api";
 import { agentName } from "@/branding";
-import { errMessage as errMsg, errHtml } from "@/lib/errors";
+import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";
 import { lastRunLine } from "@/lib/macroRunOutcome";
@@ -345,6 +353,35 @@ watch(
 // enables on existing macros.
 const snapshot = ref(null);
 
+// Inline save errors (TriggerDetail's pattern: an ErrorMessage under the field,
+// set all at once by save(), each clearing itself the moment its field is put
+// right). Toast-only, the owner was told once and then had to find the field.
+const fieldErrors = reactive({ macro_name: "" });
+watch(
+	() => form.macro_name,
+	() => {
+		if (String(form.macro_name || "").trim()) fieldErrors.macro_name = "";
+	}
+);
+// The same for steps, keyed by the step's position in form.steps (StepsBuilder
+// shows each under its own step). Typing only ever CLEARS a mark (a step being
+// filled in is not nagged before the next save). A step that is moved, added or
+// removed gets a new array from StepsBuilder, and positions no longer mean what
+// they did: the marks are dropped and the next save sets them again.
+const STEP_NEEDS_PROMPT = "Add a prompt for this step, or remove the step.";
+const stepErrors = ref({});
+watch(
+	() => form.steps,
+	(steps, was) => {
+		if (!Object.keys(stepErrors.value).length) return;
+		const still = steps === was ? promptlessSteps(steps) : {};
+		stepErrors.value = Object.fromEntries(
+			Object.entries(stepErrors.value).filter(([i]) => still[i])
+		);
+	},
+	{ deep: true }
+);
+
 const docmeta = shallowRef(null); // useDocmeta instance (persisted macros only)
 
 const mergePending = computed(() => mergeStatus.value === "pending");
@@ -408,9 +445,13 @@ const scheduleSummary = computed(() => {
 	const next = nextRunIsRetry.value
 		? `The last scheduled run failed (Runs, on the Macros page, says why). Retrying: ${nextRunAt.value}`
 		: `Next run: ${nextRunAt.value}`;
+	// The time is the stored one, on the SITE's clock; the next-run stamp after it
+	// is shown on the viewer's. Naming the site zone keeps the two from reading as
+	// one clock. When the shell was not told the zone, the old text stands.
+	const zone = siteTimezone();
 	return (
 		`Scheduled ${snap.schedule_frequency}${anchor ? ` ${anchor}` : ""} ` +
-		`at ${formatTime12h(snap.schedule_time)}. ${next}`
+		`at ${formatTime12h(snap.schedule_time)}${zone ? `, ${zone} time` : ""}. ${next}`
 	);
 });
 
@@ -435,6 +476,11 @@ function mapSteps(steps) {
 	}));
 }
 
+// What a save would send. A wholly empty step (no label, no prompt) is the blank
+// card the builder keeps to type into: left out, and not a change. A step with a
+// label and no prompt STAYS: it is unsaved work (so the form is dirty), and save()
+// refuses it by name. It used to be filtered out here, so it vanished on save
+// without a word. The server makes the same split (macros_api._parse_steps).
 function cleanSteps(steps) {
 	return (steps || [])
 		.map((s) => ({
@@ -444,23 +490,24 @@ function cleanSteps(steps) {
 			...(s.model_override ? { model_override: s.model_override } : {}),
 			...(s.thinking_override ? { thinking_override: s.thinking_override } : {}),
 		}))
-		.filter((s) => s.prompt);
+		.filter((s) => s.prompt || s.label);
+}
+
+// { position in `steps`: message } for every step with a label and no prompt.
+function promptlessSteps(steps) {
+	const out = {};
+	(steps || []).forEach((s, i) => {
+		if ((s.label || "").trim() && !(s.prompt || "").trim()) out[i] = STEP_NEEDS_PROMPT;
+	});
+	return out;
 }
 
 function toHHMM(t) {
 	const m = /^(\d{1,2}):(\d{2})/.exec(String(t || ""));
 	return m ? `${m[1].padStart(2, "0")}:${m[2]}` : "";
 }
-// "09:00" -> "9:00 am" - mirrors TimePicker's OWN formatDisplay (frappe-ui,
-// use12Hour default), matching AgentDetail.vue's own copy of this helper.
-function formatTime12h(hhmm) {
-	const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
-	if (!m) return "";
-	const h = parseInt(m[1], 10);
-	const am = h < 12;
-	const h12 = h % 12 === 0 ? 12 : h % 12;
-	return `${h12}:${m[2]} ${am ? "am" : "pm"}`;
-}
+// formatTime12h ("09:00" -> "9:00 am") lives in utils/datetime now, shared with
+// the Macros list's Schedule cell so the two cannot print one time two ways.
 
 // ── load / init (re-runs when /macros/new saves and replaces to /macros/:id) ─
 function seed(data) {
@@ -514,6 +561,8 @@ let bypassGuard = false;
 async function init() {
 	bypassGuard = false;
 	loadError.value = "";
+	fieldErrors.macro_name = "";
+	stepErrors.value = {};
 	docmeta.value = null;
 	if (props.isNew) {
 		macro.value = null;
@@ -557,9 +606,20 @@ async function reloadMacro() {
 // ── save (round-2 MacrosView semantics, ported) ──────────────────────────────
 async function save() {
 	if (saving.value || !dirty.value) return;
+	// Everything that is wrong is marked AT ONCE, each under its own field, with
+	// one toast naming them (never a toast per attempt).
 	const name = (form.macro_name || "").trim();
-	if (!name) {
-		toast.error("Give the macro a name.");
+	fieldErrors.macro_name = name ? "" : "Give the macro a name.";
+	stepErrors.value = promptlessSteps(form.steps);
+	const promptless = Object.keys(stepErrors.value).map((i) => Number(i) + 1);
+	const problems = [
+		fieldErrors.macro_name,
+		promptless.length &&
+			`Step${promptless.length === 1 ? "" : "s"} ${promptless.join(", ")} ` +
+				`need${promptless.length === 1 ? "s" : ""} a prompt.`,
+	].filter(Boolean);
+	if (problems.length) {
+		toast.error(problems.join(" "));
 		return;
 	}
 	const steps = cleanSteps(form.steps);
@@ -633,7 +693,10 @@ async function save() {
 
 // ── run / re-summarize / delete ──────────────────────────────────────────────
 async function run() {
-	if (running.value || mergePending.value) return;
+	// The server runs the SAVED macro, so with unsaved edits Run would start
+	// something other than what is on screen (and the hand-off to the chat would
+	// then ask to discard those edits, the run already under way).
+	if (running.value || mergePending.value || dirty.value) return;
 	running.value = true;
 	try {
 		const res = await api.runMacro(props.id);
@@ -664,9 +727,11 @@ async function resummarize() {
 function confirmDelete() {
 	confirmDialog({
 		title: "Delete macro?",
-		message: `Delete “${
+		// ConfirmDialog renders `message` as HTML (v-html); the name is the owner's
+		// free text, so it goes in escaped.
+		message: `Delete “${escapeHtml(
 			form.macro_name || props.id
-		}”? Its run history is deleted too. This can't be undone.`,
+		)}”? Its run history is deleted too. This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await api.deleteMacro(props.id);

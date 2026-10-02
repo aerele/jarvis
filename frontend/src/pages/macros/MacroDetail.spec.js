@@ -28,7 +28,17 @@ vi.mock("vue-router", () => ({
 	onBeforeRouteLeave: vi.fn(),
 }));
 
+// The site timezone the shell was told (AppShell's setConfig("systemTimezone")).
+// Unset by default: that is the fallback every older test in this file runs under.
+const siteConfig = vi.hoisted(() => ({ systemTimezone: "" }));
 vi.mock("frappe-ui", () => ({
+	getConfig: (key) => siteConfig[key],
+	dayjs: () => ({ format: () => "" }),
+	ErrorMessage: {
+		name: "ErrorMessage",
+		props: ["message"],
+		template: `<div v-if="message" class="error-message">{{ message }}</div>`,
+	},
 	dayjsLocal: (d) => ({
 		format: () => String(d || ""),
 		fromNow: () => "",
@@ -95,7 +105,12 @@ vi.mock("@/components/doc/CommentsSection.vue", () => ({
 	default: { name: "CommentsSection", template: "<div />" },
 }));
 vi.mock("@/pages/macros/StepsBuilder.vue", () => ({
-	default: { name: "StepsBuilder", template: "<div />" },
+	default: {
+		name: "StepsBuilder",
+		props: ["modelValue", "disabled", "errors"],
+		emits: ["update:modelValue"],
+		template: "<div />",
+	},
 }));
 vi.mock("@/composables/useDocmeta", () => ({ useDocmeta: () => ({}) }));
 vi.mock("@/composables/macroPrefill", () => ({ takeMacroPrefill: () => null }));
@@ -107,8 +122,16 @@ vi.mock("@/data/session", () => ({ session }));
 vi.mock("@/lib/errors", () => ({
 	errMessage: (e) => (e && e.message) || String(e),
 	errHtml: (e) => (e && e.message) || String(e),
+	// The real rule, not a pass-through: the delete confirmation is an HTML sink
+	// and the test below reads what reaches it.
+	escapeHtml: (v) =>
+		String(v ?? "").replace(
+			/[&<>"']/g,
+			(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+		),
 }));
 
+import { toast, confirmDialog } from "frappe-ui";
 import MacroDetail from "./MacroDetail.vue";
 
 function baseMacro(overrides = {}) {
@@ -154,10 +177,22 @@ async function mountDetail(macroFixture) {
 beforeEach(() => {
 	vi.clearAllMocks();
 	session.user = "priya@example.com";
+	siteConfig.systemTimezone = "";
 });
 
 function saveBtn(w) {
 	return w.findAll("button").find((b) => b.attributes("data-label") === "Save");
+}
+function runBtn(w) {
+	return w.findAllComponents({ name: "Button" }).find((b) => b.props("label") === "Run");
+}
+function nameField(w) {
+	return w
+		.findAllComponents({ name: "FormControl" })
+		.find((c) => c.attributes("label") === "Name");
+}
+function stepsBuilder(w) {
+	return w.findComponent({ name: "StepsBuilder" });
 }
 
 describe("MacroDetail Schedule section: seeding must not fabricate a day", () => {
@@ -452,5 +487,166 @@ describe("MacroDetail Schedule switch: an owner the scheduler will never run", (
 		const sw = scheduleSwitch(w);
 		expect(sw.props("description")).toBe("Jarvis runs this macro automatically.");
 		expect(sw.props("disabled")).toBe(false);
+	});
+});
+
+describe("MacroDetail Run: it runs what is SAVED, so it waits for a save", () => {
+	it("is offered on a clean form", async () => {
+		const w = await mountDetail(baseMacro());
+		expect(runBtn(w).props("disabled")).toBe(false);
+		expect(runBtn(w).props("tooltip")).toBe("Run this macro now");
+	});
+
+	it("is off with the reason while the form has unsaved changes", async () => {
+		// The server runs the stored macro: with edits on screen, Run would start
+		// something other than what the owner is looking at.
+		const w = await mountDetail(baseMacro());
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		expect(runBtn(w).props("disabled")).toBe(true);
+		expect(runBtn(w).props("tooltip")).toBe("Save your changes first");
+		await runBtn(w).trigger("click");
+		expect(api.runMacro).not.toHaveBeenCalled();
+	});
+
+	it("comes back once the edit is undone", async () => {
+		const w = await mountDetail(baseMacro());
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		await nameField(w).vm.$emit("update:modelValue", "Month-end close");
+		expect(runBtn(w).props("disabled")).toBe(false);
+	});
+
+	it("still waits for a summary that is being written, and says that first", async () => {
+		const w = await mountDetail(baseMacro({ merge_status: "pending" }));
+		expect(runBtn(w).props("disabled")).toBe(true);
+		expect(runBtn(w).props("tooltip")).toContain("Summarizing");
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		expect(runBtn(w).props("tooltip")).toContain("Summarizing");
+	});
+});
+
+describe("MacroDetail save: what is missing is said on the field", () => {
+	const nameError = (w) => w.find(".error-message");
+
+	it("marks Name as required", async () => {
+		const w = await mountDetail(baseMacro());
+		expect(nameField(w).attributes("required")).toBeDefined();
+	});
+
+	it("an empty name blocks the save with a message under the field", async () => {
+		const w = await mountDetail(baseMacro());
+		await nameField(w).vm.$emit("update:modelValue", "   ");
+		expect(nameError(w).exists()).toBe(false);
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro).not.toHaveBeenCalled();
+		expect(nameError(w).text()).toBe("Give the macro a name.");
+		expect(toast.error).toHaveBeenCalledTimes(1);
+		// It clears the moment the field has a value again.
+		await nameField(w).vm.$emit("update:modelValue", "Close the month");
+		expect(nameError(w).exists()).toBe(false);
+	});
+
+	it("a step with a label and no prompt blocks the save, marked on that step", async () => {
+		// It used to be dropped from the save without a word.
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", [
+			{ label: "", prompt: "do the thing", skills: [] },
+			{ label: "Post the entries", prompt: "  ", skills: [] },
+		]);
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro).not.toHaveBeenCalled();
+		expect(stepsBuilder(w).props("errors")).toEqual({
+			1: "Add a prompt for this step, or remove the step.",
+		});
+		expect(toast.error).toHaveBeenCalledWith("Step 2 needs a prompt.");
+	});
+
+	it("the mark goes once the step has a prompt, and the save goes through", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", [
+			{ label: "", prompt: "do the thing", skills: [] },
+			{ label: "Post the entries", prompt: "", skills: [] },
+		]);
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		// Typing mutates the step in place, exactly as StepsBuilder does.
+		stepsBuilder(w).props("modelValue")[1].prompt = "post them";
+		await flushPromises();
+		expect(stepsBuilder(w).props("errors")).toEqual({});
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro.mock.calls[0][0].steps.map((s) => s.prompt)).toEqual([
+			"do the thing",
+			"post them",
+		]);
+	});
+
+	it("a wholly empty step is not a change, and is left out of the save", async () => {
+		api.updateMacro.mockResolvedValue({});
+		const w = await mountDetail(baseMacro());
+		await stepsBuilder(w).vm.$emit("update:modelValue", [
+			{ label: "", prompt: "do the thing", skills: [] },
+			{ label: " ", prompt: "", skills: [] },
+		]);
+		// The blank card the builder keeps to type into: nothing to save yet.
+		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+		await nameField(w).vm.$emit("update:modelValue", "Renamed macro");
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro).toHaveBeenCalledTimes(1);
+		expect(api.updateMacro.mock.calls[0][0].steps).toHaveLength(1);
+		expect(stepsBuilder(w).props("errors")).toEqual({});
+	});
+});
+
+describe("MacroDetail Enabled switch: says what switching it off does", () => {
+	it("skips scheduled runs, and the macro can still be run by hand", async () => {
+		// macros.run_macro refuses a disabled macro only for trigger == "scheduled".
+		const w = await mountDetail(baseMacro());
+		const text = w
+			.findAllComponents({ name: "Switch" })
+			.find((c) => c.props("label") === "Enabled")
+			.props("description");
+		expect(text).toContain("scheduled runs are skipped");
+		expect(text).toContain("by hand");
+		expect(text).not.toContain("won't run");
+		expect(text).not.toContain("chat run menu");
+	});
+});
+
+describe("MacroDetail delete: the macro's name is text, not markup", () => {
+	it("is escaped on its way into the confirmation, which renders HTML", async () => {
+		// frappe-ui's ConfirmDialog binds `message` with v-html.
+		const w = await mountDetail(
+			baseMacro({ macro_name: 'Close <img src=x onerror="go()"> & go' })
+		);
+		const del = w
+			.findComponent({ name: "Dropdown" })
+			.props("options")
+			.find((o) => o.label === "Delete");
+		del.onClick();
+		const { message } = confirmDialog.mock.calls[0][0];
+		expect(message).toContain("Close &lt;img src=x onerror=&quot;go()&quot;&gt; &amp; go");
+		expect(message).not.toContain("<img");
+	});
+});
+
+describe("MacroDetail Schedule section: the summary says whose clock the time is on", () => {
+	const scheduled = { next_run_at: "2026-10-02 09:00:00" };
+
+	it("names the site timezone beside the time", async () => {
+		// 9:00 am is stored as a site-zone time and shown as stored; "Next run" beside
+		// it is converted to the viewer's zone. Unlabelled, the two read as one clock.
+		siteConfig.systemTimezone = "Asia/Kolkata";
+		const w = await mountDetail(baseMacro(scheduled));
+		expect(w.text()).toContain("Scheduled daily at 9:00 am, Asia/Kolkata time. Next run:");
+	});
+
+	it("keeps the old text when the site timezone is not known", async () => {
+		const w = await mountDetail(baseMacro(scheduled));
+		expect(w.text()).toContain("Scheduled daily at 9:00 am. Next run:");
 	});
 });
