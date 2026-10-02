@@ -406,9 +406,11 @@ def _armed_stop_message(current_step: int, parked: dict) -> str:
 	)[:500]
 
 
-# Characters that would turn a card's summary into formatting or a link once the
-# reason is posted into the chat, where assistant content renders as markdown.
-_MARKDOWN = str.maketrans("", "", "[]`*_#<>|")
+# Characters that would turn a card's summary into a link or formatting once the
+# reason is posted into the chat, where assistant content renders as markdown. Not
+# the underscore: a summary is "delete_doc doctype=Sales Order name=ITEM_A_1", and
+# without it the tool and the record's name read as something else.
+_MARKDOWN = str.maketrans("", "", "[]`*<>")
 
 
 def _card_label(parked: dict) -> str:
@@ -455,6 +457,7 @@ _TURN_FAILED = ("errored", "cancelled")
 _TURN_FIELDS = ["name", "seed_message", "assistant_message", "state", "error", "cancel_reason"]
 # One step's reason on a run row: several must fit the 500 characters of ``error``.
 _REASON_MAX = 120
+_SCRUB_INPUT_MAX = 2000
 _STEP_STOPPED = "the step was stopped."
 _STEP_ERRORED = "the step ended with an error."
 _OUTCOME_UNREAD = "Finished, but how its steps went could not be read. Open the chat to check."
@@ -559,7 +562,9 @@ def _one_line(text: str | None) -> str:
 	from jarvis.admin_client import _scrub_secrets
 	from jarvis.chat import egress_rules
 
-	line = " ".join(str(text or "").split())
+	# Bounded before the scrub: only the first line's worth is kept anyway, and the
+	# credential patterns are slow on a very long payload.
+	line = " ".join(str(text or "")[:_SCRUB_INPUT_MAX].split())
 	line = egress_rules.redact(_scrub_secrets(line) or "") or ""
 	return line if len(line) <= _REASON_MAX else line[: _REASON_MAX - 1].rstrip() + "…"
 
@@ -617,14 +622,21 @@ def _stopped_by_the_user(turn) -> bool:
 	)
 
 
-def _went_out_after(conversation: str, seed: str | None) -> bool:
-	"""Whether a step NEWER than the one that just ended (``seed``) has a turn: the
-	dispatch happened, whatever raised afterwards. Only knowable where Turn rows are
-	written; without them the answer is no, and the run ends."""
+def _newest_seed(conversation: str) -> str | None:
 	newest = _macro_seeds(conversation, newest_first=True, limit=1)
-	if not newest or newest[0].name == seed:
+	return newest[0].name if newest else None
+
+
+def _went_out_since(conversation: str, newest_before: str | None) -> bool:
+	"""Whether a dispatch that raised nevertheless created a turn: there is a step
+	message newer than the newest one from BEFORE the attempt, and it has a Turn row.
+	Compared with what was there before, not with the turn that ended: the caller
+	may not know which turn that was. Only knowable where Turn rows are written;
+	without them the answer is no, and the run ends."""
+	newest = _newest_seed(conversation)
+	if not newest or newest == newest_before:
 		return False
-	return bool(frappe.db.exists(TURN, {"seed_message": newest[0].name}))
+	return bool(frappe.db.exists(TURN, {"seed_message": newest}))
 
 
 def _ended_turn(seed: str | None, run_id: str | None):
@@ -662,6 +674,12 @@ def _step_turns(conversation: str) -> list:
 	return [latest.get(seed) for seed in seeds]
 
 
+_DRAFTS_GONE_HINT = (
+	"To create them, run those steps again in a chat, or ask an administrator to switch on "
+	"Skip confirmation so the macro writes directly."
+)
+
+
 def _draft_note(drafted: list[int], last_step: int) -> str:
 	"""What became of the steps that only drafted a record.
 
@@ -680,6 +698,7 @@ def _draft_note(drafted: list[int], last_step: int) -> str:
 			else f"Steps {numbers} drafted records that were not created: the macro did not wait, "
 			f"and the steps after them closed the drafts."
 		)
+		parts.append(_DRAFTS_GONE_HINT)
 	if last_step in drafted:
 		parts.append(f"Step {last_step} left a draft for you to apply in the chat.")
 	return " ".join(parts)
@@ -881,7 +900,9 @@ def advance_after_turn(
 					status, note = _run_outcome(run, total, last_step_errored=errored)
 				except Exception:
 					# Describing the run must never be what keeps it from ending.
-					frappe.log_error(title="jarvis macro outcome failed", message=frappe.get_traceback())
+					frappe.log_error(
+						title=f"jarvis macro outcome failed: {run.name}", message=frappe.get_traceback()
+					)
 					status, note = (
 						("failed", f"Step {step_number} failed: {_STEP_ERRORED}")
 						if errored
@@ -890,30 +911,30 @@ def advance_after_turn(
 				_end_run(run, macro_doc, status, note)
 				return
 
+			newest_before = _newest_seed(conversation_id)
 			try:
 				_run_step(run, macro_doc, next_index)
 			except Exception:
-				if _went_out_after(conversation_id, seed):
+				traceback = frappe.get_traceback()
+				if _went_out_since(conversation_id, newest_before):
 					# The turn exists: the failure came after the dispatch (the cursor
 					# write). The step is running and its own end will move the run, so
 					# ending the run here would be false, and would be followed by the
-					# step's reply. Put the cursor where the dispatch left it.
-					frappe.log_error(
-						title=f"jarvis macro step bookkeeping failed: {run.name}",
-						message=frappe.get_traceback(),
-					)
-					frappe.db.rollback()
+					# step's reply. Put the cursor where the dispatch left it. No
+					# rollback: the dispatch may have queued its send for after the
+					# commit, and a rollback would drop it.
 					frappe.db.set_value(RUN, run.name, "current_step", next_index + 1)
 					frappe.db.commit()
+					frappe.log_error(
+						title=f"jarvis macro step bookkeeping failed: {run.name}", message=traceback
+					)
 					return
 				# The step's message may already be committed with no turn behind it
 				# (``_enqueue_turn`` commits, then dispatches). Nothing would ever end
 				# for it, so the run would sit `running` until the stale sweep. End it
 				# now, saying what happened, as ``run_macro`` does for the first step
 				# (#471) and the capacity resume for a resumed one (CDX-23).
-				frappe.log_error(
-					title=f"jarvis macro step dispatch failed: {run.name}", message=frappe.get_traceback()
-				)
+				frappe.log_error(title=f"jarvis macro step dispatch failed: {run.name}", message=traceback)
 				_end_run(
 					run,
 					macro_doc,
@@ -1822,7 +1843,9 @@ _OUTCOME_SUBJECT = {
 _CLOSING_MARK = {"failed": "✗ Macro failed.", "stopped": "■", "completed": "✓ Macro finished."}
 # A reply that ends with one of these is a card the chat keeps open, on the LAST
 # assistant message only (ChatView's `_lastAssistant`; the PWA has the same rule).
-_LIVE_CARD_RE = re.compile(r"```(?:jarvis-action|jarvis-ask|confirm)[ \t]*\n")
+# The same shape the clients match (a CLOSED fence): a reply cut off mid-fence shows
+# no card there, and must not hold the closing message back.
+_LIVE_CARD_RE = re.compile(r"```(?:jarvis-action|jarvis-ask|confirm)[ \t]*\n[\s\S]*?```")
 
 
 def _last_reply_holds_a_card(conversation: str) -> bool:
