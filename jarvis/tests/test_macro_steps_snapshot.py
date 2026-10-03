@@ -29,6 +29,7 @@ from jarvis.tests import test_macro_dispatch_identity as identity
 from jarvis.tests.test_macro_dispatch_identity import step_turn_id
 
 MACRO = identity.MACRO
+TURN = identity.TURN
 RUN = identity.RUN
 OWNER = identity.OWNER
 FIELD = "steps_snapshot"
@@ -248,6 +249,35 @@ class TestAnEditMidRunChangesNothing(SnapshotBase):
 			c.args[1].get("label") for c in publish.call_args_list if c.args[1]["kind"] == "macro:progress"
 		]
 		self.assertEqual(labels, ["Old label"])
+
+	def test_the_five_minute_check_carries_a_run_on_with_its_snapshot(self):
+		# Step 2's end never reached the hook; the check finds it minutes later, after
+		# the macro was cut to one step and its prompts rewritten.
+		from jarvis.chat import macro_reconcile
+
+		run, conv, macro = self._start(steps=3)
+		self._end_step(conv, run, 0)
+		step_two = step_turn_id(run, 1)
+		self._finish(conv, step_two, deliver=False)
+		ago = frappe.utils.add_to_date(None, minutes=-5)
+		frappe.db.set_value(TURN, step_two, "done_at", ago, update_modified=False)
+		frappe.db.sql(f"UPDATE `tab{RUN}` SET modified = %s WHERE name = %s", (ago, run))
+		frappe.db.commit()
+
+		def change(d):
+			d.set("steps", d.steps[:1])
+			d.steps[0].prompt = "edited"
+
+		self._edit(macro, change)
+		frappe.db.sql(f"UPDATE `tab{RUN}` SET modified = %s WHERE name = %s", (ago, run))
+		frappe.db.commit()
+		summary = dict.fromkeys(("acted", "busy", "raised", "conflicts"), 0)
+		with patch.object(macro_reconcile, "_send_gate_refusal", return_value=None):
+			macro_reconcile._RunCheck(run, summary).run()
+		frappe.set_user("Administrator")
+		self.assertEqual(summary["acted"], 1)
+		self.assertEqual(self._prompts(conv), ["step 1", "step 2", "step 3"])
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 3))
 
 
 # --------------------------------------------------------------------------- #
