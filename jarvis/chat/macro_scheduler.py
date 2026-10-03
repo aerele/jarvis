@@ -25,11 +25,13 @@ FAILED is retried 55 minutes later, not on every sweep (``_retry_later``). Model
 
 import calendar
 import datetime
+from traceback import format_tb
 
 import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
+from frappe.utils.user import get_users_with_role
 
-from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_STEP_BUDGET
+from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_MACRO_DELETED, BLOCK_STEP_BUDGET
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -37,10 +39,26 @@ RUN = "Jarvis Macro Run"
 _DEFAULT_SECONDS = 9 * 3600  # 09:00 when no schedule_time set
 _MAX_SECONDS = 24 * 3600 - 1  # 23:59:59, the last representable time of day
 
-# #471: the owner cannot act on any of these — Administrator and disabled users
+# #471: the owner cannot act on any of these. Administrator and disabled users
 # are refused by notify_owner anyway, and a role-less owner can no longer reach
-# the SPA — so the failed run row is the whole record. Notifying would relog the
-# same dead end every cadence forever.
+# the SPA. So the OWNER is never notified, and the failed run row is their record:
+# notifying them would only relog a dead end they cannot do anything about.
+#
+# That used to be the whole of it: the slot was consumed, the schedule stayed on, and
+# the same dead end was recorded again on every slot for as long as the macro existed,
+# with nobody told. A leaver's daily macro wrote a failed run a day, forever.
+#
+# Now the first sweep that meets such an owner records this ONE failed run and
+# switches the schedule off on every scheduled macro that owner has
+# (``_switch_off_leaver``), so there is no next slot to fail. The site's own admins
+# get one Notification Log entry each. That reaches the Desk notification bell and
+# nothing else: an Alert is never emailed, and neither the Jarvis app nor the phone
+# app shows it. The signal is deliberately NOT an Error Log row: those are forwarded
+# to the vendor's error rollup, which is the wrong audience and would carry a user's
+# name off the site. What does go to the Error Log is a FAILURE of the switch-off or
+# of a notice, and those entries name no user (``_where_it_failed``).
+# The schedules do not come back by themselves if the user returns; the owner
+# switches them on.
 _BARRED_OWNER = (
 	"Scheduled run skipped: this macro's owner may not run unattended work "
 	"(Administrator, a disabled account, or no Jarvis access)."
@@ -127,6 +145,9 @@ def run_due_macros() -> None:
 		return
 
 	original_user = frappe.session.user
+	# Owners this pass found barred. `due` was read before their schedules were
+	# switched off, so it can still hold more of their macros: those are skipped.
+	barred_owners: set = set()
 	for m in due:
 		# #472: fault-isolate each macro. The per-macro try below covers only the
 		# DISPATCH; the schedule arithmetic, the identity guard and the bookkeeping all
@@ -139,7 +160,7 @@ def run_due_macros() -> None:
 		# owner can see. If it blew up after the claim, the macro was already
 		# dispatched and the schedule has moved on, so there is nothing to retry.
 		try:
-			_sweep_one(m, now, original_user)
+			_sweep_one(m, now, original_user, barred_owners)
 		except Exception:
 			if frappe.session.user != original_user:
 				frappe.set_user(original_user)
@@ -151,11 +172,20 @@ def run_due_macros() -> None:
 			_report_failure_before_claim(m, now)
 
 
-def _sweep_one(m, now, original_user: str) -> None:
+def _sweep_one(m, now, original_user: str, barred_owners: set) -> None:
 	"""Handle ONE due macro. Extracted from the loop so ``run_due_macros`` can wrap it
-	whole (#472); every ``return`` here was a ``continue`` in the loop it came from."""
+	whole (#472); every ``return`` here was a ``continue`` in the loop it came from.
+
+	``barred_owners`` is the sweep's memory of the owners it has already found barred
+	in this pass (see the note above ``_BARRED_OWNER``)."""
 	from jarvis.chat import macros
 	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+	# Ahead of everything else, the switched-off-macro branch below included: this
+	# owner's schedules were switched off a moment ago, and moving a slot on now would
+	# write a "Next run" back onto a macro whose schedule is off.
+	if m.owner in barred_owners:
+		return
 
 	# #471: a macro its owner switched OFF is not a failure, it is the state
 	# they asked for. run_macro's own `enabled` early return was never inspected
@@ -182,10 +212,10 @@ def _sweep_one(m, now, original_user: str) -> None:
 	# Administrator/Guest/disabled, has_jarvis_access refuses portal users and
 	# role-less System Users.
 	#
-	# Consume the slot so it does not busy re-fire, but skip the run.
+	# Skip the run, and switch the owner's schedules off so it does not re-fire.
 	if not is_valid_unattended_owner(m.owner) or not has_jarvis_access(m.owner):
-		_record_failed(m, _BARRED_OWNER)
-		_consume_slot(m, now)
+		barred_owners.add(m.owner)
+		_switch_off_leaver(m, now)
 		return
 	claimed = _claim_slot(m, now)
 	if not claimed:
@@ -223,9 +253,9 @@ def _settle(m, now, out: dict, claimed) -> None:
 		_stamp_last_run(m, now)
 		return
 	reason = str(out.get("reason") or "").strip()
-	if reason == "macro disabled":
-		# Raced: disabled between the due query and the dispatch. Same handling as
-		# the pre-dispatch branch — no failure, nothing ran, nothing stamped.
+	if reason in ("macro disabled", BLOCK_MACRO_DELETED):
+		# Raced: disabled, or deleted, between the due query and the dispatch. Same
+		# handling as the pre-dispatch branch: no failure, nothing ran, nothing stamped.
 		return
 	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."
 	if reason == BLOCK_DISPATCH_FAILED:
@@ -370,10 +400,15 @@ def _next_occurrence(m, now) -> datetime.datetime:
 
 
 def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
-	"""Consume a slot that is NOT being dispatched (a macro switched off, a barred
-	owner): move the schedule on with a raw set_value (no re-validate, which would
-	otherwise recompute ``next_run_at`` itself). A slot that IS dispatched goes
-	through ``_claim_slot`` instead.
+	"""Consume a slot that is NOT being dispatched (a macro switched off, or a barred
+	owner whose schedules could not be switched off): move the schedule on with a raw
+	set_value (no re-validate, which would otherwise recompute ``next_run_at``
+	itself). A slot that IS dispatched goes through ``_claim_slot`` instead.
+
+	The write lands only while the schedule is still ON. The row in hand can be stale:
+	an overlapping sweep may have switched this owner's schedules off since it was
+	read, and moving the slot on then would write a "Next run" back onto a macro whose
+	schedule is off.
 
 	``stamp_last_run=False`` moves the schedule on WITHOUT claiming a run happened:
 	``last_run_at`` is what the SPA renders as "last run", so stamping it for a slot
@@ -381,8 +416,207 @@ def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
 	values = {"next_run_at": _next_occurrence(m, now)}
 	if stamp_last_run:
 		values["last_run_at"] = now
-	frappe.db.set_value(MACRO, m.name, values, update_modified=False)
+	frappe.db.set_value(MACRO, {"name": m.name, "schedule_enabled": 1}, values, update_modified=False)
 	frappe.db.commit()
+
+
+# The marker on every macro the sweep switched off. A row switched off here is
+# otherwise identical to one its owner switched off, so this Comment text is the only
+# way to list them afterwards.
+_SWITCHED_OFF_COMMENT = "Schedule switched off: "
+
+_NOTICE_SAVEPOINT = "jarvis_macro_leaver_notice"
+
+
+def _switch_off_leaver(m, now) -> None:
+	"""The owner of this due macro may no longer run it. Switch the schedule off on
+	every scheduled macro they own, record the one failed run and tell the site's
+	admins, all as one unit (``_switch_off_and_record``).
+
+	If the unit fails, none of it has landed. Fall back to what the sweep did before
+	it existed: one failed run and the slot moved on. The next sweep that meets this
+	owner tries again."""
+	try:
+		switched, untold = _switch_off_and_record(m, now)
+	except Exception as e:
+		frappe.db.rollback()
+		frappe.log_error(
+			title=f"jarvis macro scheduler: could not switch off a barred owner's schedules: {m.name}",
+			message=_where_it_failed(e),
+		)
+		_consume_barred_slot(m, now)
+		return
+	if switched and untold:
+		# Written after the unit has committed, so a log entry that cannot be written
+		# takes nothing with it.
+		frappe.log_error(
+			title="jarvis macro scheduler: schedules were switched off and not every admin was told",
+			message=untold,
+		)
+		frappe.db.commit()
+
+
+def _consume_barred_slot(m, now) -> None:
+	"""The fallback when the switch-off failed: one failed run, and the slot moved on.
+
+	Only while the schedule is still on. What failed may have been this sweep waiting
+	on another one that was switching the same owner off (a lock wait that timed out):
+	that one has recorded the failed run and told the admins, and there is no slot
+	left to move on."""
+	if not cint(frappe.db.get_value(MACRO, m.name, "schedule_enabled")):
+		return
+	_record_failed(m, _BARRED_OWNER)
+	_consume_slot(m, now)
+
+
+def _switch_off_and_record(m, now) -> tuple[list[str], str]:
+	"""In ONE transaction: switch the schedule off on every scheduled macro ``m.owner``
+	has, with a Comment on each saying why; record the one failed run; write the
+	admins' notices. Then commit once.
+
+	Returns the macros' names, and what to log when the admins could not all be told
+	(empty when they were). No names means there was nothing left to switch off, which
+	is how a second sweep running at the same moment learns the first one already did
+	all of this: it writes nothing.
+
+	One transaction because once the schedules are off these macros are never due
+	again, so nothing would ever come back to write a failed run or a notice that was
+	lost. With separate commits a worker killed between them left the schedules off
+	and nobody told, for good. Now a kill at any point before the commit leaves the
+	macro due and untouched, and the next sweep does all of it.
+
+	A notice that cannot be written is the one part allowed to fail on its own
+	(``_insert_admin_notices``). Anything else that raises leaves the transaction to
+	the caller to roll back, and the schedules stay on.
+
+	Raw writes, like every other write this module makes: the engine never saves a
+	macro document. Each row is left as the form leaves it when a user switches the
+	schedule off (``JarvisMacro._recompute_next_run``): ``schedule_enabled`` 0 and no
+	``next_run_at``. The frequency, time and day are kept, so switching it back on is
+	one click. ``enabled`` and ``modified`` are not touched. ``last_run_at`` is stamped
+	only on the macro whose slot this was, as consuming that slot always did.
+
+	The rows are read FOR UPDATE so that two sweeps cannot both find them: the second
+	waits for the first to commit and then reads none. That is all the lock is for. It
+	does not stop a Desk form that was opened before the switch-off from saving the
+	schedule back on afterwards (``modified`` is not touched, so that save is not
+	refused as stale); the next due slot then switches it off again."""
+	frappe.db.commit()  # REPEATABLE-READ discipline: the FOR UPDATE read goes first
+	names = frappe.db.get_values(
+		MACRO, {"owner": m.owner, "schedule_enabled": 1}, "name", for_update=True, pluck=True
+	)
+	if not names:
+		frappe.db.commit()  # nothing was written; ends the locking read's transaction
+		return [], ""
+	comment = _SWITCHED_OFF_COMMENT + _barred_phrase(m.owner)
+	for name in names:
+		values = {"schedule_enabled": 0, "next_run_at": None}
+		if name == m.name:
+			values["last_run_at"] = now
+		frappe.db.set_value(MACRO, name, values, update_modified=False)
+		# What ``Document.add_comment`` inserts, without loading each macro to call it.
+		frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Info",
+				"comment_email": frappe.session.user,
+				"reference_doctype": MACRO,
+				"reference_name": name,
+				"content": comment,
+			}
+		).insert(ignore_permissions=True)
+	_insert_failed_run(m, _BARRED_OWNER)
+	untold = _insert_admin_notices(m.owner, len(names))
+	frappe.db.commit()  # the one commit; releases the row locks
+	return names, untold
+
+
+def _barred_phrase(owner: str) -> str:
+	"""Why this owner's schedules went off, for the Comment and the admins' notice.
+	Administrator and Guest never had Jarvis access to lose (the SPA's save gate
+	refuses their schedules; only a row from before it, or one saved in Desk, gets
+	here), so they are not described as someone who left."""
+	if owner in ("Administrator", "Guest"):
+		return f"{owner} may not run scheduled macros"
+	return f"{owner} can no longer use Jarvis"
+
+
+def _admins_to_tell(owner: str) -> list[str]:
+	"""Enabled holders of the Jarvis Admin role, or enabled System Managers when there
+	is nobody in that role to tell. The owner is taken out BEFORE that is decided, so
+	an owner who is the only Jarvis Admin does not stop the System Managers being told.
+
+	``get_users_with_role`` returns enabled users only, and never Administrator."""
+	from jarvis.permissions import JARVIS_ADMIN_ROLE
+
+	for role in (JARVIS_ADMIN_ROLE, "System Manager"):
+		users = [u for u in get_users_with_role(role) if u != owner]
+		if users:
+			return users
+	return []
+
+
+def _insert_admin_notices(owner: str, count: int) -> str:
+	"""Write one Notification Log per admin (``_admins_to_tell``) saying ``count``
+	schedules of ``owner`` were switched off, INSIDE the caller's transaction, so the
+	notices land with the switch-off or not at all. The row is the one
+	``macros.notify_owner`` writes (an Alert that names no document), without that
+	function's own commit.
+
+	Never raises for a notice that cannot be written. Each one sits behind a
+	savepoint: a failure undoes that notice alone, and the switch-off and the other
+	notices still commit. Returns what to put in the Error Log about it, or "" when
+	every admin was told; that text names no user, because Error Logs leave the site.
+
+	If the database has thrown the whole transaction away (a deadlock), the savepoint
+	is gone with it and rolling back to it raises. That is left to raise: the caller
+	then treats the whole unit as failed, which it has."""
+	frappe.db.savepoint(_NOTICE_SAVEPOINT)
+	try:
+		recipients = _admins_to_tell(owner)
+	except Exception as e:
+		frappe.db.rollback(save_point=_NOTICE_SAVEPOINT)
+		return f"The admins could not be looked up, so nobody was told.\n\n{_where_it_failed(e)}"
+	if not recipients:
+		return (
+			"Nobody was told: no enabled user other than the macros' owner holds the "
+			"Jarvis Admin or the System Manager role."
+		)
+	phrase = _barred_phrase(owner)
+	what = "1 macro schedule was" if count == 1 else f"{count} macro schedules were"
+	failures = []
+	for user in recipients:
+		frappe.db.savepoint(_NOTICE_SAVEPOINT)
+		try:
+			frappe.get_doc(
+				{
+					"doctype": "Notification Log",
+					"for_user": user,
+					"type": "Alert",
+					"subject": f"Macro schedules switched off: {phrase}"[:140],
+					"email_content": (
+						f"{what} switched off because {phrase}. The macros themselves are kept. "
+						"The schedules do not come back by themselves: the owner switches them on "
+						"again from each macro."
+					),
+				}
+			).insert(ignore_permissions=True)
+		except Exception as e:
+			frappe.db.rollback(save_point=_NOTICE_SAVEPOINT)
+			failures.append(e)
+	if not failures:
+		return ""
+	return (
+		f"{len(failures)} of {len(recipients)} notices could not be written. The first failure:\n\n"
+		f"{_where_it_failed(failures[0])}"
+	)
+
+
+def _where_it_failed(exc: BaseException) -> str:
+	"""The exception's type and the code path it took, WITHOUT its message. Error
+	Logs are forwarded to the vendor's error rollup, and the message of a failed
+	insert can quote the row it was writing, which here names a user."""
+	return f"{type(exc).__name__}\n\n" + "".join(format_tb(exc.__traceback__))
 
 
 def _record_failed(m, reason: str) -> None:
@@ -394,23 +628,7 @@ def _record_failed(m, reason: str) -> None:
 	Never raises: a bookkeeping failure must not abort the sweep for every other
 	due macro."""
 	try:
-		run = frappe.get_doc(
-			{
-				"doctype": RUN,
-				"macro": m.name,
-				"status": "failed",
-				"trigger": "scheduled",
-				"current_step": 0,
-				"total_steps": 0,
-				"started_at": frappe.utils.now(),
-				"finished_at": frappe.utils.now(),
-				"error": (reason or "")[:500],
-			}
-		)
-		run.flags.ignore_permissions = True
-		run.insert()
-		if m.owner and m.owner != frappe.session.user:
-			frappe.db.set_value(RUN, run.name, "owner", m.owner, update_modified=False)
+		_insert_failed_run(m, reason)
 		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
@@ -418,6 +636,28 @@ def _record_failed(m, reason: str) -> None:
 			title="jarvis macro scheduler: could not record a failed run",
 			message=frappe.get_traceback(),
 		)
+
+
+def _insert_failed_run(m, reason: str) -> None:
+	"""The row ``_record_failed`` writes, with no commit and no rollback of its own,
+	for a caller that owns the transaction (``_switch_off_and_record``). Raises."""
+	run = frappe.get_doc(
+		{
+			"doctype": RUN,
+			"macro": m.name,
+			"status": "failed",
+			"trigger": "scheduled",
+			"current_step": 0,
+			"total_steps": 0,
+			"started_at": frappe.utils.now(),
+			"finished_at": frappe.utils.now(),
+			"error": (reason or "")[:500],
+		}
+	)
+	run.flags.ignore_permissions = True
+	run.insert()
+	if m.owner and m.owner != frappe.session.user:
+		frappe.db.set_value(RUN, run.name, "owner", m.owner, update_modified=False)
 
 
 def _notify_owner(m, reason: str) -> None:

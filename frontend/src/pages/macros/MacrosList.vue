@@ -162,7 +162,13 @@ import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate, toLocalMs, formatTime12h } from "@/utils/datetime";
 import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
-import { lastRunCell as describeLastRun } from "@/lib/macroRunOutcome";
+import {
+	lastRunCell as describeLastRun,
+	deleteWarning,
+	bulkDeleteToast,
+	deleteGuard,
+	isLiveRun,
+} from "@/lib/macroRunOutcome";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml, escapeHtml } from "@/lib/errors";
@@ -308,34 +314,45 @@ async function runRow(row) {
 }
 
 // ── bulk delete (run history goes too - server side, per row) ────────────────
+// One delete at a time: the confirmation's own button cannot be told to wait.
+const deleting = deleteGuard(toast);
+
 function bulkDelete(selections, unselectAll) {
 	const names = Array.from(selections || []);
-	if (!names.length) return;
+	if (!names.length || deleting.isBusy()) return;
+	// A macro that is running is stopped by the delete (server side). Said here for
+	// the selected rows this list knows to have a live run (kept current by a run
+	// ending or starting, `onEvent`); the toast reports the rest afterwards.
+	const rowOf = new Map((rows.value || []).map((r) => [r.name, r]));
+	const running = deleteWarning(names.map((n) => (rowOf.get(n) || {}).last_run));
 	confirmDialog({
 		title: `Delete ${names.length} macro${names.length === 1 ? "" : "s"}?`,
-		message: "Deletes the selected macros AND their run history. This can't be undone.",
-		onConfirm: async ({ hideDialog }) => {
-			try {
-				const res = (await apiMacros.deleteMacrosBulk(names)) || {};
-				const skipped = res.skipped || [];
-				const deleted = res.deleted != null ? res.deleted : names.length - skipped.length;
-				if (skipped.length) {
-					const reasons = [...new Set(skipped.map((s) => s.reason || "skipped"))].join(
-						", "
-					);
-					toast.create({
-						message: `Deleted ${deleted} (skipped ${skipped.length}: ${reasons})`,
-						type: "info",
-					});
-				} else {
-					toast.success(`Deleted ${deleted} macro${deleted === 1 ? "" : "s"}`);
+		message: `${
+			running ? `${running} ` : ""
+		}Deletes the selected macros AND their run history. This can't be undone.`,
+		onConfirm: ({ hideDialog }) => {
+			// Closed at once: each live run is stopped first, which can take seconds,
+			// and the dialog would sit there with a Confirm button that still works.
+			hideDialog();
+			return deleting.run(
+				running ? "Stopping runs and deleting macros..." : "Deleting macros...",
+				async () => {
+					try {
+						const res = (await apiMacros.deleteMacrosBulk(names)) || {};
+						// The toast renders HTML: every macro name goes in escaped.
+						const said = bulkDeleteToast(res, names.length, {
+							escape: escapeHtml,
+							titleOf: (n) => (rowOf.get(n) || {}).macro_name,
+						});
+						if (said.type === "success") toast.success(said.message);
+						else toast.create(said);
+						unselectAll();
+						resetLoad();
+					} catch (e) {
+						toast.error(errHtml(e));
+					}
 				}
-				unselectAll();
-				hideDialog();
-				resetLoad();
-			} catch (e) {
-				toast.error(errHtml(e));
-			}
+			);
 		},
 	});
 }
@@ -344,6 +361,13 @@ function bulkDelete(selections, unselectAll) {
 function onEvent(p) {
 	// A run ended: the Last run cell of that macro is now out of date.
 	if (p && p.kind === "macro:done") return refreshKeep();
+	// A run STARTED that this list has not heard of (the scheduler, another tab):
+	// the cell, and the delete confirmation, should know. Once per run: the later
+	// steps of the same run find the row already live.
+	if (p && p.kind === "macro:progress") {
+		const row = (rows.value || []).find((r) => r.name === p.macro);
+		return row && !isLiveRun(row.last_run) ? refreshKeep() : undefined;
+	}
 	if (!p || p.kind !== "macro:merged") return;
 	refreshKeep();
 	if (p.status === "ready") {
