@@ -1475,34 +1475,82 @@ def _merge_outcome(conversation_id: str, *, errored: bool) -> tuple[str, str]:
 	return "failed", ""
 
 
-def _finish_merge(macro_name: str, conversation_id: str, status: str, merged: str) -> None:
+def _settle_summary_mark(macro_name: str, conversation_id: str, values: dict) -> bool:
+	"""Take the macro off "summarizing" with ``values``, only while the mark still names
+	``conversation_id``: ONE compare-and-set UPDATE on ``merge_status = 'pending'`` and
+	that link. Returns whether it won. Committed at once.
+
+	Whoever lands a summary (the turn's hook, the five minute check) read the mark
+	before it got here, and a forced Re-summarize may have moved it to a new chat in
+	between. A plain write by name then failed the NEW summary, or put the OLD one's
+	result in its place, and cleared the link the new one's turn lands by, so that
+	turn's result found no macro and "summarizing" never came back. Of two callers
+	for one chat, only one wins, so the chat is deleted and the SPA told once."""
+	from jarvis.chat import txn
+
+	sets = ", ".join(f"`{field}`=%(v_{field})s" for field in values)
+	params = {f"v_{field}": value for field, value in values.items()}
+
+	def cas() -> bool:
+		return (
+			_run_cas(
+				f"UPDATE `tab{MACRO}` SET {sets} WHERE name=%(n)s AND merge_status='pending'"
+				" AND IFNULL(merge_conversation, '')=%(c)s",
+				{**params, "n": macro_name, "c": conversation_id or ""},
+			)
+			== 1
+		)
+
+	# The row may have been written since this transaction's snapshot (a Re-summarize,
+	# a save): the UPDATE then fails with a write conflict instead of matching nothing.
+	# Replayed from the present it wins or loses on the row as it is.
+	won = txn.replay_on_conflict(cas, label="macros._settle_summary_mark")
+	frappe.db.commit()
+	if won:
+		frappe.clear_document_cache(MACRO, macro_name)
+	return won
+
+
+def _finish_merge(
+	macro_name: str, conversation_id: str, status: str, merged: str, *, chat_may_be_live: bool = False
+) -> bool:
 	"""Land the terminal merge outcome, bin the throwaway conversation, tell the SPA.
+	Returns False, landing nothing, when the macro is no longer waiting on THIS
+	conversation (``_settle_summary_mark``); a chat that is then no macro's is removed
+	if it may be (``_drop_an_orphan_summary_chat``).
 
 	The ONE place ``merge_status`` leaves ``pending``, and the one place the three
 	terminal steps live, so the success path and the fault path cannot do different
 	amounts of work (#632). Committed immediately: a caller may be about to re-raise,
 	and these writes must survive that.
 
+	``chat_may_be_live``: the five minute check giving up on a summary whose turn never
+	ended. Its chat is then removed only if no reply of it is in progress
+	(``macros_api._delete_summary_chat``): deleting a chat deletes its Turn rows, and
+	the pump reads a streaming turn's missing row as a lost lease. The hook's own call
+	deletes as it always did, from inside the turn's own finalize.
+
 	Reads the owner with ``get_value`` rather than ``get_doc`` deliberately. The doc
 	fetch used to sit ahead of the guard, so a row deleted in the window between
 	finding it and loading it threw before anything could be written and left
 	``merge_status`` on ``pending``, which is the exact bug this function exists to
 	prevent."""
-	frappe.db.set_value(
-		MACRO,
-		macro_name,
-		{"merged_prompt": merged, "merge_status": status, "merge_conversation": ""},
-		update_modified=False,
-	)
-	frappe.db.commit()
+	values = {"merged_prompt": merged, "merge_status": status, "merge_conversation": ""}
+	if not _settle_summary_mark(macro_name, conversation_id, values):
+		# Lost: the chat may be no macro's now (a Re-summarize moved the mark while its
+		# turn was finishing, and kept it for that). Its end is this call, or is over.
+		owner = frappe.db.get_value(MACRO, macro_name, "owner")
+		if owner:
+			_drop_an_orphan_summary_chat(conversation_id, owner=owner, chat_may_be_live=chat_may_be_live)
+		return False
 
 	# The throwaway conversation served its purpose - clean it up best-effort.
-	try:
-		frappe.db.delete(MSG, {"conversation": conversation_id})
-		frappe.delete_doc("Jarvis Conversation", conversation_id, force=True, ignore_permissions=True)
-		frappe.db.commit()
-	except Exception:
-		pass
+	if chat_may_be_live:
+		from jarvis.chat.macros_api import _delete_summary_chat
+
+		_delete_summary_chat(conversation_id, owned_by=frappe.db.get_value(MACRO, macro_name, "owner"))
+	else:
+		_bin_summary_chat(conversation_id)
 
 	# Best-effort too: an open tab learns the outcome ONLY from this event, but a
 	# publish failure must not undo a landed merge or mask the fault being re-raised.
@@ -1520,12 +1568,100 @@ def _finish_merge(macro_name: str, conversation_id: str, status: str, merged: st
 			)
 	except Exception:
 		pass
+	return True
+
+
+def _bin_summary_chat(conversation_id: str) -> None:
+	"""Delete a summary chat whose turn has ended, or whose end is the caller (the hook
+	runs inside its turn's own finalize). Best-effort. Rolled back on a failure, so a
+	failed delete (a lock wait undoes only its own statement) never leaves the
+	messages' delete in the transaction for the next commit: half a chat."""
+	try:
+		frappe.db.delete(MSG, {"conversation": conversation_id})
+		frappe.delete_doc("Jarvis Conversation", conversation_id, force=True, ignore_permissions=True)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+
+
+def _drop_an_orphan_summary_chat(
+	conversation_id: str, *, owner: str | None = None, chat_may_be_live: bool = False
+) -> None:
+	"""Delete a summary chat no macro names any more, at its turn's end. Two ways one
+	stays behind with nothing coming back for it: the five minute check gave its
+	summary up while the turn was live (``_finish_merge(chat_may_be_live=True)`` keeps
+	the chat), or a forced Re-summarize moved the mark while its turn was finishing
+	(``summarize_macro`` keeps it too). Either way the turn's end then finds no macro
+	waiting on the chat, or loses the compare-and-set, and this removes the chat.
+
+	Only a chat ``summarize_macro`` made, by its own marks: archived, opened by the
+	engine, its first message the summary instruction, named by no macro (a put-back
+	``_abandon_summary`` makes may name it again). ``owner``: and only that user's
+	(the macro's owner, where the caller has the macro). Not while a reply of it is in
+	progress, a ``finalizing`` turn excepted: that is the end calling this, the same
+	moment the winning landing deletes its chat at. ``chat_may_be_live``: no exception
+	at all (``macros_api._delete_summary_chat``), for the check's give-up.
+
+	Never commits or rolls back work of the caller's (a legacy caller may hold some):
+	skipped then, and the chat stays as it did before. Never raises."""
+	from jarvis.chat import txn
+
+	try:
+		if not txn.replay_is_safe() or not _an_orphan_summary_chat(conversation_id, owner):
+			return
+		if chat_may_be_live:
+			from jarvis.chat.macros_api import _delete_summary_chat
+
+			_delete_summary_chat(conversation_id, owned_by=owner)
+		elif not _a_reply_in_progress_but_its_end(conversation_id):
+			_bin_summary_chat(conversation_id)
+	except Exception:
+		frappe.db.rollback()
+
+
+def _an_orphan_summary_chat(conversation_id: str, owner: str | None) -> bool:
+	chat = frappe.db.get_value(CONV, conversation_id, ["owner", "status", "agent_initiated"], as_dict=True)
+	if not chat or chat.status != "Archived" or not frappe.utils.cint(chat.agent_initiated):
+		return False
+	if owner and chat.owner != owner:
+		return False
+	if frappe.db.exists(MACRO, {"merge_conversation": conversation_id}):
+		return False
+	from jarvis.chat.macros_api import _MERGE_INSTRUCTION
+
+	first = frappe.get_all(
+		MSG,
+		filters={"conversation": conversation_id, "role": "user"},
+		fields=["content"],
+		order_by="seq asc",
+		limit=1,
+	)
+	return bool(first) and (first[0].content or "").startswith(_MERGE_INSTRUCTION)
+
+
+def _a_reply_in_progress_but_its_end(conversation_id: str) -> bool:
+	"""``admission.reply_in_progress`` with a ``finalizing`` turn counted as ended."""
+	from jarvis.chat import admission, turn_state
+
+	live = [state for state in turn_state.NONTERMINAL_STATES if state != "finalizing"]
+	if frappe.db.exists(TURN, {"conversation": conversation_id, "state": ["in", live]}):
+		return True
+	return bool(admission._conv_legacy_busy(conversation_id))
 
 
 def _drop_summary_link_unless_one_owner(macro_name: str, conversation_id: str) -> bool:
 	"""CLEARS the macro's summary link and returns True unless the macro and the
 	conversation it names belong to one user. Returns False, touching nothing, when
-	they do.
+	they do. (``_refuse_a_foreign_summary_link`` says whether the clearing was this
+	call's.)"""
+	return _refuse_a_foreign_summary_link(macro_name, conversation_id) is not None
+
+
+def _refuse_a_foreign_summary_link(macro_name: str, conversation_id: str) -> bool | None:
+	"""None when the macro and the conversation it names belong to one user: the
+	summary may land. Otherwise the summary is not landed: True when this call cleared
+	the macro's link (failed), False when there was nothing for it to clear (the macro
+	is gone, or no longer waiting on this conversation).
 
 	Landing a summary reads the conversation's last reply into the macro and then
 	deletes the conversation with permissions ignored. That is right for the throwaway
@@ -1536,19 +1672,16 @@ def _drop_summary_link_unless_one_owner(macro_name: str, conversation_id: str) -
 	is left exactly as it was."""
 	row = frappe.db.get_value(MACRO, macro_name, ["owner", "macro_name"], as_dict=True)
 	if not row:
-		return True  # the macro was deleted while its summary ran: nothing to land on
+		return False  # the macro was deleted while its summary ran: nothing to land on
 	conv_owner = frappe.db.get_value(CONV, conversation_id, "owner")
 	if row.owner == conv_owner:
-		return False
+		return None
 	# State first, alarm second: if the log failed first the macro would stay
-	# "pending" with nothing left to revisit it.
-	frappe.db.set_value(
-		MACRO,
-		macro_name,
-		{"merge_status": "failed", "merge_conversation": ""},
-		update_modified=False,
-	)
-	frappe.db.commit()
+	# "pending" with nothing left to revisit it. Only while the mark still names this
+	# conversation: a summary started since is not failed by this one's end.
+	failed = {"merge_status": "failed", "merge_conversation": ""}
+	if not _settle_summary_mark(macro_name, conversation_id, failed):
+		return False
 	# A conversation that no longer exists is an ordinary state ("delete all
 	# conversations" mid-summary), not a mismatch: no alarm for it.
 	if conv_owner is not None:
@@ -1577,14 +1710,30 @@ def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 	ready → merged_prompt set (this is what run_macro executes); failed /
 	unmergeable → the step sequence runs (correct fallback: an unmergeable
 	sequence NEEDS its checkpoints). Publishes ``macro:merged`` so an open SPA
-	refreshes its Run buttons."""
+	refreshes its Run buttons.
+
+	No macro waiting: a summary chat left behind is removed at this, its turn's end
+	(``_drop_an_orphan_summary_chat``). For any other chat that costs one read by
+	name."""
 	macro_name = frappe.db.get_value(
 		MACRO, {"merge_conversation": conversation_id, "merge_status": "pending"}, "name"
 	)
 	if not macro_name:
+		_drop_an_orphan_summary_chat(conversation_id)
 		return
-	if _drop_summary_link_unless_one_owner(macro_name, conversation_id):
-		return
+	_land_summary(macro_name, conversation_id, errored=errored)
+
+
+def _land_summary(macro_name: str, conversation_id: str, *, errored: bool) -> bool:
+	"""The body of the summary hook, for a macro already found waiting on
+	``conversation_id``: read the turn's outcome and land it. Also the five minute
+	check's way of settling a summary whose hook never landed it
+	(``macro_reconcile``), so both settle a summary the same way. Every write in it is
+	fenced on the mark still naming this conversation (``_settle_summary_mark``).
+	Returns whether this call took the macro off "summarizing"."""
+	refused = _refuse_a_foreign_summary_link(macro_name, conversation_id)
+	if refused is not None:
+		return refused
 	try:
 		status, merged = _merge_outcome(conversation_id, errored=errored)
 	except Exception:
@@ -1607,12 +1756,13 @@ def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 		# its messages on every fault.
 		#
 		# Re-raised on purpose rather than swallowed here. The caller
-		# (``advance_after_turn``) logs the traceback, which is what makes an
-		# ImportError or NameError in this path visible instead of silent, and its
-		# own guard preserves the contract that a macro bug never strands a normal turn.
+		# (``advance_after_turn``, or the five minute check) logs the traceback, which
+		# is what makes an ImportError or NameError in this path visible instead of
+		# silent, and its own guard preserves the contract that a macro bug never
+		# strands a normal turn.
 		_finish_merge(macro_name, conversation_id, "failed", "")
 		raise
-	_finish_merge(macro_name, conversation_id, status, merged)
+	return _finish_merge(macro_name, conversation_id, status, merged)
 
 
 # What the chat shows in place of a step the engine cancelled before it started. The
