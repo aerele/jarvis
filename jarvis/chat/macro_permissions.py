@@ -100,10 +100,10 @@ def has_macro_run_permission(doc, ptype: str = "read", user: str | None = None) 
 	every write ptype here closes all three, and takes effect on deploy without
 	waiting for a migrate to re-sync the role rows.
 
-	NOT closed here: ``macros_api.delete_macro`` still removes a macro's run history
-	server-side, and the unattended budget is summed from surviving rows, so deleting
-	and recreating a macro resets it. That needs the budget to stop depending on rows
-	a user can make disappear."""
+	The other way a user could make budget rows disappear, deleting the macro, is
+	closed in ``macros_api.delete_macro``: it keeps the month's scheduled rows, with
+	no macro on them. Such a row is still its owner's to read here until the hourly
+	macro job removes it; the Macros screens do not show it."""
 	user = user or frappe.session.user
 	if ptype not in _RUN_READ_PTYPES:
 		return False
