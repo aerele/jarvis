@@ -2480,8 +2480,11 @@ def _run_content(run, macro_doc) -> frappe._dict:
 
 
 _UNREADABLE_SNAPSHOT_LOG = "jarvis.chat.macros.snapshot_unreadable"
-# Long enough to outlive any run: the marker only keeps a run from asking twice.
+# Long enough to outlive any run: the marker only keeps a run from asking twice. Its key
+# starts with a ``persistent_cache_keys`` prefix (hooks.py), or the pump watchdog's
+# five-minute full cache clear would take it and the run would ask again every window.
 _UNREADABLE_SNAPSHOT_MARKER_S = 24 * 3600
+_UNREADABLE_SNAPSHOT_MARKER = "jarvis:macro_snapshot_unreadable:"
 
 
 def _report_unreadable_snapshot(run_name: str) -> None:
@@ -2496,7 +2499,7 @@ def _report_unreadable_snapshot(run_name: str) -> None:
 	replaying it (``_send_step``). A marker in the cache and a queued job are neither.
 	Never raises: a report must not change what the run does."""
 	try:
-		key = f"jarvis_macro_snapshot_unreadable:{run_name}"
+		key = f"{_UNREADABLE_SNAPSHOT_MARKER}{run_name}"
 		if frappe.cache().get_value(key):
 			return
 		frappe.cache().set_value(key, 1, expires_in_sec=_UNREADABLE_SNAPSHOT_MARKER_S)
@@ -2541,17 +2544,29 @@ def _clear_snapshots_of_ended_runs() -> None:
 	clearing it: ended by a worker still on code from before the snapshot (a rolling
 	restart), or on a site whose meta said the field was not there yet. The copy has
 	no reader left on an ended run. A step of the hourly macro job, as the kept-row
-	purge is; one bounded statement, and the same rows match again if it is cut short.
+	purge is; bounded, and the same rows match again if it is cut short.
 	``modified`` is left alone: nothing about the run changed. Committed here; a
-	failure is logged and goes no further."""
-	if not _snapshot_cleared():
-		return
+	failure is logged and goes no further.
+
+	The names are read first with a plain (non-locking) read, then cleared by primary
+	key: nearly every run row is ended, so an UPDATE filtered on ``status`` would scan
+	the table and, under REPEATABLE READ, lock every row it read, live runs included,
+	for the length of the statement."""
 	try:
-		frappe.db.sql(
-			f"""UPDATE `tab{RUN}` SET `{SNAPSHOT_FIELD}` = NULL
+		if not _snapshot_cleared():
+			return
+		names = frappe.db.sql_list(
+			f"""SELECT name FROM `tab{RUN}`
 			    WHERE status IN %(ended)s AND `{SNAPSHOT_FIELD}` IS NOT NULL
 			    LIMIT %(batch)s""",
 			{"ended": _TERMINAL_RUN_STATUSES, "batch": _SNAPSHOT_SWEEP_BATCH},
+		)
+		if not names:
+			return
+		frappe.db.sql(
+			f"""UPDATE `tab{RUN}` SET `{SNAPSHOT_FIELD}` = NULL
+			    WHERE name IN %(names)s AND status IN %(ended)s""",
+			{"names": tuple(names), "ended": _TERMINAL_RUN_STATUSES},
 		)
 		frappe.db.commit()
 	except Exception:
