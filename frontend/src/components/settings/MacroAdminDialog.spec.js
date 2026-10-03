@@ -125,10 +125,14 @@ describe("MacroAdminDialog", () => {
 	it("shows the owner, the state, the summary and every step's prompt", async () => {
 		const w = await open();
 		expect(w.find("h4").text()).toBe("Month end");
-		expect(w.text()).toContain(
-			"Read-only. Only Asha Rao (asha@example.test) can edit or run this macro."
+		// One line saying whose text this is and why the reader can see it.
+		expect(w.find(".jv-macro-admin-note").text().replace(/\s+/g, " ")).toBe(
+			"You are reading this as an administrator. These are Asha Rao (asha@example.test)'s own " +
+				"prompts, shown read-only: only they can edit or run this macro."
 		);
-		expect(w.findAll("dd .badge").map((b) => b.text())).toEqual(["On", "Armed"]);
+		// The Macros list's own words for the switch.
+		expect(w.findAll("dd .badge").map((b) => b.text())).toEqual(["Enabled", "Armed"]);
+		expect(w.text()).toContain("Its runs write without asking for confirmation.");
 		expect(w.text()).toContain("Daily · 9:00 am");
 		const texts = w.findAll("pre.jv-macro-admin-text").map((p) => p.text());
 		expect(texts).toEqual([
@@ -169,6 +173,56 @@ describe("MacroAdminDialog", () => {
 		expect(w.text()).toContain("Being summarized.");
 	});
 
+	it("says a macro with no steps has none, and calls a switched-off one a draft", async () => {
+		const w = await open(macro({ steps: [], enabled: 0, skip_confirmation: 0 }));
+		expect(w.text()).toContain("Steps (0)");
+		expect(w.text()).toContain("No steps.");
+		expect(w.findAll("dd .badge").map((b) => b.text())).toEqual(["Draft"]);
+	});
+
+	it("scrolls in its own boxes, each reachable by keyboard", async () => {
+		const w = await open();
+		const body = w.find(".jv-macro-admin-body");
+		expect(body.attributes("tabindex")).toBe("0");
+		expect(body.attributes("aria-label")).toBe("Macro details");
+		// Up and down only: a wide run reason scrolls in the runs box, not here.
+		expect(body.classes()).toContain("overflow-x-hidden");
+		const runs = w.find(".jv-macro-admin-runs");
+		expect(runs.classes()).toContain("overflow-x-auto");
+		expect(runs.attributes("tabindex")).toBe("0");
+		expect(runs.find("table").exists()).toBe(true);
+		const pres = w.findAll("pre.jv-macro-admin-text");
+		expect(pres.map((p) => p.attributes("tabindex"))).toEqual(["0", "0", "0"]);
+		expect(pres.map((p) => p.attributes("aria-label"))).toEqual([
+			"Summarized prompt",
+			"Prompt of step 1",
+			"Prompt of step 2",
+		]);
+	});
+
+	it("says a macro deleted meanwhile was deleted, with nothing to retry, and tells the pane", async () => {
+		// "Jarvis Macro <hash> not found" with a Try again that could never work.
+		const notFound = Object.assign(new Error("This macro was deleted."), {
+			exc_type: "DoesNotExistError",
+			status: 404,
+		});
+		api.adminGetMacro.mockRejectedValue(notFound);
+		const w = mount(MacroAdminDialog, { props: { modelValue: true, name: "m1" } });
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-gone").text()).toBe("This macro was deleted.");
+		expect(w.findAll("button").map((b) => b.text())).toEqual(["Close"]);
+		expect(w.emitted("gone")).toEqual([["m1"]]);
+		await w.find("button").trigger("click");
+		expect(w.emitted("update:modelValue")).toEqual([[false]]);
+
+		// Pointed at a macro that is there, it shows it.
+		api.adminGetMacro.mockResolvedValue(macro({ name: "m2", macro_name: "Other" }));
+		await w.setProps({ name: "m2" });
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-gone").exists()).toBe(false);
+		expect(w.find("h4").text()).toBe("Other");
+	});
+
 	it("renders another user's text as text, never as markup", async () => {
 		const w = await open(
 			macro({
@@ -186,10 +240,11 @@ describe("MacroAdminDialog", () => {
 	});
 
 	it("shows the error with Try again, and recovers", async () => {
-		api.adminGetMacro.mockRejectedValue(new Error("Jarvis Macro m1 not found"));
+		api.adminGetMacro.mockRejectedValue(new Error("Server is busy"));
 		const w = mount(MacroAdminDialog, { props: { modelValue: true, name: "m1" } });
 		await flushPromises();
-		expect(w.find("[role='alert']").text()).toContain("Jarvis Macro m1 not found");
+		expect(w.find("[role='alert']").text()).toContain("Server is busy");
+		expect(w.emitted("gone")).toBeUndefined();
 		api.adminGetMacro.mockResolvedValue(macro());
 		await w
 			.findAll("button")

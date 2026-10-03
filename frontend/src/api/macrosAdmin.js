@@ -11,10 +11,13 @@ const MA = "jarvis.chat.macros_admin_api.";
 
 // One page of every user's macros, with no step or summary text.
 // `filters`: { owner, armed, scheduled, live_run }; an empty value is "not filtering".
-// -> { rows, total, has_more, start, page_length, owners: [{ user, full_name, macros }] }
+// `search` matches the macro's name, its owner's address and its owner's full name.
+// -> { rows, total, has_more, start, page_length }
 // Each row: name, macro_name, owner, owner_full_name, enabled, skip_confirmation,
 // the schedule fields, next_run_at, next_run_is_retry, last_run ({ status, trigger,
-// started_at, finished_at }) and live_run (the run Stop acts on, or "").
+// started_at, finished_at, stopped_by_admin }) and live_run (the run Stop acts on,
+// or ""). `stopped_by_admin` is all the list says about why a run ended: the reason
+// itself is shown with the opened macro.
 export const adminListMacros = ({ search = "", filters = {}, start = 0, pageLength = 20 } = {}) =>
 	call(MA + "admin_list_macros", {
 		search,
@@ -22,6 +25,11 @@ export const adminListMacros = ({ search = "", filters = {}, start = 0, pageLeng
 		start,
 		page_length: pageLength,
 	});
+
+// The owner filter's choices, asked for once (not with every page of the list).
+// -> { owners: [{ user, full_name, macros }], more }; `more`: the site has more
+// owners than are listed, and the search box reaches the rest.
+export const adminMacroOwners = () => call(MA + "admin_macro_owners");
 
 // One macro to look at: its settings, steps, summarized prompt and recent runs
 // (status, trigger, times, step counts, the reason each ended). Never a run's chat.
