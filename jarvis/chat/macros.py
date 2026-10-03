@@ -2409,8 +2409,9 @@ def _resume_incompatible(run, macro_doc) -> bool:
 	return int(run.current_step or 0) >= len(macro_doc.steps or [])
 
 
-# The run row's copy of what the run runs (``_run_content``). Its own constant: the
-# column arrives with a migrate, and the code must work on a site that has not run it.
+# The run row's copy of what the run runs (``_run_content``). The column arrives with
+# a migrate. Until that has run, the insert leaves the field out (it is not in the
+# doctype yet) and no write names it (``_snapshot_cleared``): runs work as before.
 SNAPSHOT_FIELD = "steps_snapshot"
 # Everything the dispatch reads off a step (``_step_prompt``, ``_skill_invocations``,
 # ``_merged_skill_invocations``) and the progress event its label.
@@ -2422,7 +2423,8 @@ def _steps_snapshot(macro_doc, run_mode: str, merged_prompt: str) -> str:
 	step's fields the dispatch reads, "Stop on error", the shape and the summary as the
 	run sends it (empty for a stepped run). ``json.dumps``, so Frappe 15 and 16 store
 	the same text. The skills stay names: which of them are enabled is decided when
-	the step is sent, as for a step typed in the composer."""
+	the step is sent, as for a step typed in the composer. The shape is read from the
+	row's own ``run_mode`` (#470); it is here so the copy says how it was taken."""
 	return json.dumps(
 		{
 			"run_mode": run_mode,
