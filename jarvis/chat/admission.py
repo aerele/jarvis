@@ -199,10 +199,17 @@ def _lock_shard(target: str) -> None:
 def on_conversation_trash(doc, method=None) -> None:
 	"""doc_events hook: cascade-delete a deleted conversation's Turn rows so a
 	removed conversation never leaves ghost queued/dispatching rows in the
-	admission shard. Best-effort - never blocks the trash."""
+	admission shard. Best-effort - never blocks the trash, with one exception: a
+	write conflict (1020 / 1213) is raised to the caller. The server has by then
+	aborted the whole transaction, the caller's earlier deletes included, so carrying
+	on would delete the conversation alone in a new transaction and leave its
+	messages and Turn rows behind. Raised, it reaches whoever owns the transaction:
+	``clear_chat_history`` replays the delete (``txn.replay_on_conflict``)."""
 	try:
 		frappe.db.delete(TURN, {"conversation": doc.name})
-	except Exception:
+	except Exception as e:
+		if txn.is_write_conflict(e):
+			raise
 		frappe.log_error(title="admission.on_conversation_trash", message=frappe.get_traceback())
 
 
