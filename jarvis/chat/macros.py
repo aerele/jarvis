@@ -2503,20 +2503,26 @@ def drop_runs_of_deleted_macro(macro_name: str) -> None:
 	The delete used to remove them all, so deleting a macro and creating it again
 	handed its owner the month's unattended budget back. The rows that count toward
 	the current month (exactly the terms of ``_scheduled_steps_this_month``, and at
-	least one step sent) are KEPT, with only their ``macro`` link cleared: the macro
-	can then be deleted, and the row is no longer anybody's run history. Every reader
+	least one step sent) are KEPT, with their ``macro`` link cleared: the macro can
+	then be deleted, and the row is no longer anybody's run history. Every reader
 	that shows runs leaves a row with no macro out (``macros_api``). The chat link is
 	left as it is. ``purge_kept_budget_rows`` removes a kept row once its month is over.
 
+	A kept row is there for its step count only, so its ``error`` is blanked: that is
+	free text from the run (a step's failure reason), and the user deleted the macro.
+
 	The caller (``macros_api.delete_macro``) has stopped the macro's live runs and
-	holds the macro's row lock, so every row here has ended; it commits, or rolls
-	both statements back with its own delete. Raw writes: a run row is read-only
-	through the document API (``macro_permissions``)."""
+	holds the macro's row lock, so every row here has ended. The keep does not rest
+	on that: only a row that has ended is kept, and one still live is deleted with
+	the rest, as every row was before. A live row with no macro would be one the
+	engine cannot load a macro for. The caller commits, or rolls both statements
+	back with its own delete. Raw writes: a run row is read-only through the
+	document API (``macro_permissions``)."""
 	frappe.db.sql(
-		f"""UPDATE `tab{RUN}` SET macro = NULL
+		f"""UPDATE `tab{RUN}` SET macro = NULL, error = NULL
 		    WHERE macro = %(macro)s AND `trigger` = 'scheduled' AND creation >= %(since)s
-		      AND current_step > 0""",
-		{"macro": macro_name, "since": _budget_month_start()},
+		      AND current_step > 0 AND status IN %(ended)s""",
+		{"macro": macro_name, "since": _budget_month_start(), "ended": _TERMINAL_RUN_STATUSES},
 	)
 	frappe.db.delete(RUN, {"macro": macro_name})
 
@@ -2526,17 +2532,29 @@ def drop_runs_of_deleted_macro(macro_name: str) -> None:
 _KEPT_ROW_PURGE_BATCH = 5000
 
 
-def purge_kept_budget_rows() -> int:
+def purge_kept_budget_rows(owner: str | None = None) -> int:
 	"""Delete the run rows a macro delete kept for the budget
 	(``drop_runs_of_deleted_macro``) once their month is over; returns how many.
 	They count toward nothing from then on and are shown nowhere.
 
-	One bounded statement, and the same rows match again if it is repeated or cut
-	short. Run history of a macro that still exists always has its macro, so it is
-	never touched. Does not commit."""
+	One bounded statement, oldest rows first, and the same rows match again if it
+	is repeated or cut short. Run history of a macro that still exists always has
+	its macro, so it is never touched; neither is a row that has not ended (a kept
+	row always has). Does not commit.
+
+	``owner`` narrows it to one user's rows. The hourly job passes none; the tests
+	do, because they share a site and must not delete rows they did not make."""
 	frappe.db.sql(
-		f"DELETE FROM `tab{RUN}` WHERE macro IS NULL AND creation < %(since)s LIMIT %(batch)s",
-		{"since": _budget_month_start(), "batch": _KEPT_ROW_PURGE_BATCH},
+		f"""DELETE FROM `tab{RUN}`
+		    WHERE macro IS NULL AND status IN %(ended)s AND creation < %(since)s
+		      AND (%(owner)s IS NULL OR owner = %(owner)s)
+		    ORDER BY creation LIMIT %(batch)s""",
+		{
+			"since": _budget_month_start(),
+			"ended": _TERMINAL_RUN_STATUSES,
+			"owner": owner,
+			"batch": _KEPT_ROW_PURGE_BATCH,
+		},
 	)
 	cursor = getattr(frappe.db, "_cursor", None)
 	return int(cursor.rowcount) if cursor else 0
@@ -2624,13 +2642,17 @@ def _purge_kept_budget_rows_quietly() -> None:
 	"""The purge as a step of the hourly macro job. It rides on
 	``reap_stale_macro_runs``' scheduler entry instead of having its own: a new entry
 	only exists after a migrate. Committed here, and a failure is logged and goes no
-	further, so the stuck-run sweep after it runs either way."""
+	further, so the stuck-run sweep after it runs either way. The log is followed by
+	a commit, as in the other log-and-go-on handlers here, so the sweep starts with
+	nothing pending. (The log row does not depend on it: ``Error Log`` is a table
+	that a rollback does not undo.)"""
 	try:
 		purge_kept_budget_rows()
 		frappe.db.commit()
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis macro kept-row purge failed", message=frappe.get_traceback())
+		frappe.db.commit()
 
 
 def _stale_run_candidates(cutoff) -> list[str]:
