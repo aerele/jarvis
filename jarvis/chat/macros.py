@@ -616,12 +616,22 @@ def _step_end_delivered(run, index: int) -> bool:
 
 	Phase-0's worker calls the hook before its Turn settles, so there a step whose end
 	was delivered still reads as running here."""
-	from jarvis.chat import turn_state
-
 	if _step_turn_state(run, index) not in (*_TURN_ENDED, "finalizing"):
 		return False
-	hook = f"{_step_turn_id(run.name, index)}::macro_advance"
-	return frappe.db.get_value(turn_state.EFFECT, hook, "status") != "pending"
+	return _hook_effect_status(_step_turn_id(run.name, index)) != "pending"
+
+
+def _hook_effect_status(turn_id: str) -> str | None:
+	"""Where the finalize ledger has a turn's ``macro_advance`` effect, the one that
+	calls the hook: ``pending`` (to come), ``running`` (being delivered, or its job
+	died inside it and it is re-run once the claim goes stale), ``done`` (delivered,
+	or given up after the attempt budget). None: the turn has no such row, so no
+	finalize job will call the hook for it. The one read of that row, for
+	``_step_end_delivered`` and for the reconcile check's stricter question
+	(``macro_reconcile.step_is_over``)."""
+	from jarvis.chat import turn_state
+
+	return frappe.db.get_value(turn_state.EFFECT, f"{turn_id}::macro_advance", "status")
 
 
 def _step_is_out(run, index: int) -> bool:
@@ -1226,11 +1236,20 @@ def _apply_step_end(
 	run_id: str | None = None,
 	seed_message: str | None = None,
 	assistant_message: str | None = None,
+	refuse_next_step=None,
 ) -> None:
 	"""The hook's work, under the run's lock (the caller holds it): decide whether the
 	turn that ended is the run's current step, and if so send the next step or end the
 	run. Also the capacity resume's, for a step whose end came while the run was
-	parked (``resume_waiting_capacity_runs``)."""
+	parked (``resume_waiting_capacity_runs``), and the reconcile check's, for a step
+	whose end never reached the hook (``macro_reconcile``).
+
+	``refuse_next_step``: the reconcile check's say on sending ANOTHER step, and on
+	nothing else (a run that ends here ends exactly as the hook would end it). Called
+	with how many steps the run has sent, at the one point where the next would go
+	out; a sentence back ends the run ``failed`` with it instead. The check finds a
+	step long after it ended, with nobody watching: it sends no step for a run that
+	has stood still too long, or whose owner may no longer run unattended work."""
 	run = frappe.get_doc(RUN, run_name)
 	if run.status != "running":  # stopped mid-flight, or already advanced
 		return
@@ -1339,6 +1358,11 @@ def _apply_step_end(
 				else ("completed", _OUTCOME_UNREAD)
 			)
 		_end_run(run, macro_doc, status, note)
+		return
+
+	refusal = refuse_next_step(next_index) if refuse_next_step else None
+	if refusal:
+		_end_run(run, macro_doc, "failed", refusal)
 		return
 
 	newest_before = _newest_seed(conversation_id)
@@ -1608,9 +1632,9 @@ def _stop_run(run_name: str, *, reason: str, by: str) -> bool:
 
 
 def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
-	"""``_stop_run`` without taking the run lock (which is not re-entrant). Kept
-	apart from it for the reconcile check that follows this change, which stops a
-	run under the lock it already holds; today ``_stop_run`` is its only caller."""
+	"""``_stop_run`` without taking the run lock (which is not re-entrant). For
+	``_stop_run``, and for the reconcile check (``macro_reconcile``), which stops a
+	run under the lock it already holds."""
 	from jarvis.chat import txn
 
 	extra = {"error": reason[:500]} if reason else {}
