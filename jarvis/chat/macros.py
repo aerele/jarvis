@@ -104,6 +104,10 @@ BLOCK_STEP_BUDGET = "scheduled_step_budget"
 # run start. Nothing ran and there is nothing left to run: not a failure to record or
 # to tell the owner about (they deleted it).
 BLOCK_MACRO_DELETED = "macro deleted"
+# Reported to the scheduler when a Jarvis Admin has put the macro on hold
+# (``macros_admin_api.admin_hold``): the slot is consumed as for a disabled macro,
+# with no failed run.
+BLOCK_MACRO_HELD = "macro on hold"
 
 # #471: reported when the first turn's dispatch RAISED after the conversation and run
 # row were already committed. Distinct from the codes above because the run row exists
@@ -300,6 +304,35 @@ def _lock_macro_row(macro_name: str) -> bool:
 		frappe.throw(_("This macro is busy right now. Try again in a moment."), MacroRowBusyError)
 
 
+def _hold_under_lock(macro_name: str) -> tuple[bool, str]:
+	"""``(held, reason)`` for a macro whose row lock this transaction holds, read with
+	a locking read: the row as committed now, never a snapshot from before the wait.
+	An admin's hold takes the same lock (``macros_admin_api.admin_hold``), so a hold
+	either committed before this read and is seen, or waits for this transaction.
+	Not held when the site has not migrated the hold fields yet."""
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
+		HOLD_FIELD,
+		HOLD_REASON_FIELD,
+		hold_fields_exist,
+	)
+
+	if not hold_fields_exist():
+		return False, ""
+	row = frappe.db.get_value(
+		MACRO, macro_name, [HOLD_FIELD, HOLD_REASON_FIELD], as_dict=True, for_update=True
+	)
+	if not row or not frappe.utils.cint(row.get(HOLD_FIELD)):
+		return False, ""
+	return True, row.get(HOLD_REASON_FIELD) or ""
+
+
+def is_held(macro_doc) -> bool:
+	"""Whether a loaded macro is on hold (False on a site without the hold fields)."""
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import HOLD_FIELD
+
+	return bool(frappe.utils.cint(macro_doc.get(HOLD_FIELD)))
+
+
 def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	"""Start a macro: create a fresh conversation, a Macro Run, and enqueue the
 	first step. Returns ``{ok, data:{macro_run, conversation}}``. ``trigger`` is
@@ -328,6 +361,16 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	steps = doc.steps or []
 	if not steps:
 		frappe.throw(_("This macro has no steps."))
+	# An admin's hold: the macro does not run at all, for any trigger (owner decision
+	# default, 2026-10-03: not by hand either). Read under the row lock taken above.
+	held, reason = _hold_under_lock(doc.name)
+	if held:
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MacroOnHoldError, held_message
+
+		if trigger == "scheduled":
+			frappe.db.commit()  # nothing written: this releases the macro row lock
+			return {"ok": False, "reason": BLOCK_MACRO_HELD}
+		frappe.throw(held_message(reason), MacroOnHoldError)
 	if trigger == "scheduled" and not doc.enabled:
 		frappe.db.commit()  # nothing written: this releases the macro row lock
 		return {"ok": False, "reason": "macro disabled"}
@@ -2416,6 +2459,11 @@ def resume_waiting_capacity_runs() -> None:
 				macro_doc = frappe.get_doc(MACRO, run.macro)
 				if _fail_run_unless_one_owner(run, macro_doc):
 					continue
+				if is_held(macro_doc):
+					# An admin's hold landed while the run was parked (its own stop of
+					# the run lost, or came before the park): end it, never send its step.
+					_stop_run_locked(run.name, reason=_MACRO_HELD_ERROR, by="capacity resume")
+					continue
 				attempts = int(run.capacity_attempts or 0) + 1
 				if attempts > _MAX_CAPACITY_ATTEMPTS:
 					_end_run(run, macro_doc, "failed", _NO_CAPACITY_ERROR)
@@ -3150,6 +3198,10 @@ _HISTORY_CLEARED_ERROR = "This run was stopped because its owner deleted all cha
 # true whether or not the delete then goes through: the stop commits first, and a
 # delete that is refused, or dies, leaves the macro and this run row in place.
 _MACRO_DELETED_ERROR = "Stopped: its macro was being deleted."
+# The reason on a run of a macro an admin put on hold: stopped by the hold itself
+# (``macros_admin_api.admin_hold``), or found later by the capacity resume or the
+# five minute check, which end such a run instead of continuing it.
+_MACRO_HELD_ERROR = "Stopped: an admin put this macro on hold."
 
 
 def _fail_run_unless_one_owner(run, macro_doc) -> bool:
