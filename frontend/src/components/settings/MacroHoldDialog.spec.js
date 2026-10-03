@@ -135,6 +135,14 @@ describe("MacroHoldDialog", () => {
 		);
 	});
 
+	it("caps the reason at the limit, and the count is read out as it changes", () => {
+		const w = open();
+		expect(w.find("textarea.stub-reason").attributes("maxlength")).toBe("500");
+		const count = w.find(".jv-macro-hold-count");
+		expect(count.attributes("aria-live")).toBe("polite");
+		expect(count.text()).toBe("0 / 500");
+	});
+
 	it("starts empty each time it opens", async () => {
 		const w = open();
 		await w.find(".stub-reason").setValue("first");

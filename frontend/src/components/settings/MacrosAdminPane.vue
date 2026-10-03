@@ -201,6 +201,8 @@
 										:title="holdTitle(row)"
 									>
 										<Badge variant="subtle" theme="red" label="On hold" />
+										<!-- The title shows on hover only: the reason is in the text too. -->
+										<span class="sr-only">{{ holdTitle(row) }}</span>
 									</span>
 								</div>
 							</div>
@@ -279,7 +281,14 @@
 									@click="stop(row)"
 								/>
 								<!-- An admin's own macro has no Hold: they switch it off on
-								     its form. The server refuses it too. -->
+								     its form. The server refuses it too. Said, so the missing
+								     buttons do not read as a fault. -->
+								<p
+									v-if="isMine(row)"
+									class="jv-macro-admin-own text-right text-xs text-ink-gray-5"
+								>
+									You cannot hold or release your own macro.
+								</p>
 								<Button
 									v-if="!row.admin_hold && !isMine(row)"
 									class="jv-macro-admin-hold"

@@ -781,6 +781,10 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 		expect(a.find(".jv-macro-admin-held").attributes("title")).toBe(
 			"On hold: Sends too many emails"
 		);
+		// The title shows on hover only: the reason is in the text too.
+		const said = a.find(".jv-macro-admin-held .sr-only");
+		expect(said.text()).toBe("On hold: Sends too many emails");
+		expect(b.find(".jv-macro-admin-own").exists()).toBe(false);
 		expect(holdButton(w).exists()).toBe(false);
 		expect(releaseButton(w).exists()).toBe(true);
 		expect(b.find(".jv-macro-admin-held").exists()).toBe(false);
@@ -797,6 +801,10 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 			expect(holdButton(w, i).exists()).toBe(false);
 			expect(releaseButton(w, i).exists()).toBe(false);
 			expect(deleteButton(w, i).exists()).toBe(true);
+			// Said, not just left out.
+			expect(rowsOf(w)[i].find(".jv-macro-admin-own").text()).toBe(
+				"You cannot hold or release your own macro."
+			);
 		}
 	});
 

@@ -408,6 +408,29 @@ describe("MacrosList: an admin's hold and delete", () => {
 		expect(lines[0].find("b").exists()).toBe(false);
 	});
 
+	it("an answer without the notices key leaves the notices shown alone", async () => {
+		fetchPage.mockResolvedValue({
+			rows: [],
+			total: 0,
+			has_more: false,
+			notices: [notice("N1", "An admin deleted your macro Close.")],
+		});
+		const { w } = await mountList(null);
+		expect(w.findAll(".jv-macro-notice")).toHaveLength(1);
+		fetchPage.mockResolvedValue({ rows: [], total: 0, has_more: false });
+		listPage(w).vm.$emit("refresh");
+		await flushPromises();
+		expect(fetchPage).toHaveBeenCalledTimes(2);
+		expect(w.findAll(".jv-macro-notice")).toHaveLength(1);
+	});
+
+	it("the badge's reason is in the text, for a keyboard or a screen reader", async () => {
+		const { w } = await mountList([held("close")]);
+		const said = rowEl(w, "close").find(".name .jv-macro-held-reason");
+		expect(said.classes()).toContain("sr-only");
+		expect(said.text()).toBe(HELD_SAYS);
+	});
+
 	it("shows no notice line when there is none, or from an older server", async () => {
 		const { w } = await mountList([macro("a")]);
 		expect(w.find('[data-testid="admin-notices"]').exists()).toBe(false);
