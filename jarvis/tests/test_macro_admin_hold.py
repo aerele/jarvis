@@ -316,10 +316,13 @@ class TestAHeldMacroDoesNotRun(WithColumns):
 		frappe.set_user("Administrator")
 		with (
 			patch("jarvis.chat.api._enqueue_turn") as enqueue,
+			patch.object(macros, "run_macro", wraps=macros.run_macro) as run,
 			patch.object(macro_scheduler, "_record_failed") as record,
 			patch.object(macro_scheduler, "_notify_owner") as notify,
 		):
 			macro_scheduler.run_due_macros()
+		# Consumed before any dispatch, through the switched-off path.
+		run.assert_not_called()
 		enqueue.assert_not_called()
 		record.assert_not_called()
 		notify.assert_not_called()
@@ -449,6 +452,21 @@ class TestTheOwnerCannotUndoIt(WithColumns):
 		frappe.db.commit()
 		state = self._state(free)
 		self.assertEqual((state.admin_hold, state.admin_hold_reason or ""), (0, ""))
+
+	def test_nor_by_a_save_that_skips_the_permission_check(self):
+		# The fields' permlevel resets a plain user's write, but not Administrator's
+		# nor server code saving with permissions ignored. The controller does.
+		held = self._macro(OWNER, "held")
+		self._hold(held)
+		frappe.set_user("Administrator")
+		frappe.client.set_value(MACRO, held, {"admin_hold": 0, "admin_hold_reason": ""})
+		doc = frappe.get_doc(MACRO, held)
+		doc.admin_hold = 0
+		doc.flags.ignore_permissions = True
+		doc.save()
+		frappe.db.commit()
+		state = self._state(held)
+		self.assertEqual((state.admin_hold, state.admin_hold_reason), (1, REASON))
 
 	def test_nor_by_rest_set_value(self):
 		held = self._macro(OWNER, "held")
