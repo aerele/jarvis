@@ -40,6 +40,19 @@ DELETED = macros._MACRO_DELETED_ERROR
 CLOSING = "■ Stopped: its macro was being deleted."
 
 
+def _cleared(*kept, deleted) -> dict:
+	"""What ``clear_chat_history`` answers when nothing failed: ``kept`` are the chats
+	left because a reply is in progress."""
+	return {
+		"ok": True,
+		"deleted": deleted,
+		"skipped": len(kept),
+		"kept": list(kept),
+		"failed": 0,
+		"failed_names": [],
+	}
+
+
 class StopBase(outcome.MacroRunOutcomeBase):
 	"""Runs with real Turn rows in the states the turn machine leaves them in.
 
@@ -1329,7 +1342,7 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		frappe.set_user(OWNER)
 		with patch.object(macros, "_cancel_current_step", side_effect=cancel):
 			out = chat_api.clear_chat_history()
-		self.assertEqual(out, {"ok": True, "deleted": 2, "skipped": 0, "kept": []})
+		self.assertEqual(out, _cleared(deleted=2))
 		self.assertTrue(seen[conv] > 0, "the run was stopped after its messages were deleted")
 		for name in (run, parked):
 			row = frappe.db.get_value(RUN, name, ["status", "error", "conversation"], as_dict=True)
@@ -1345,9 +1358,7 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		before = frappe.db.count(MSG, {"conversation": conv})
 		gone, other, _ = self._mk_run(steps=2, at_step=1, tag="gone")
 		frappe.set_user(OWNER)
-		self.assertEqual(
-			chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 1, "kept": [conv]}
-		)
+		self.assertEqual(chat_api.clear_chat_history(), _cleared(conv, deleted=1))
 		# A kept chat keeps its run: not stopped, not disarmed, still linked.
 		row = frappe.db.get_value(RUN, run, ["status", "conversation"], as_dict=True)
 		self.assertEqual((row.status, row.conversation), ("running", conv))
@@ -1374,7 +1385,7 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		frappe.set_user(OWNER)
 		with patch.object(chat_api, "_stop_macro_runs_in", side_effect=stop_then_a_send_lands):
 			out = chat_api.clear_chat_history()
-		self.assertEqual(out, {"ok": True, "deleted": 0, "skipped": 1, "kept": [conv]})
+		self.assertEqual(out, _cleared(conv, deleted=0))
 		row = frappe.db.get_value(RUN, run, ["status", "error", "conversation"], as_dict=True)
 		self.assertEqual((row.status, row.conversation), ("stopped", conv))
 		(closing,) = self._closing(conv, run)
