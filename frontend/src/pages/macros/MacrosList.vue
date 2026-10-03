@@ -159,8 +159,8 @@ import TabBar from "@/components/list/TabBar.vue";
 import { useListPage } from "@/composables/useListPage";
 import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
-import { timeAgo, exactDate, toLocalMs, formatTime12h } from "@/utils/datetime";
-import { deriveScheduleDay, scheduleAnchorPhrase } from "@/lib/scheduleAnchor";
+import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
+import { scheduleLabel } from "./scheduleLabel";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
 import {
 	lastRunCell as describeLastRun,
@@ -392,19 +392,6 @@ onBeforeUnmount(() => {
 });
 
 // ── cell helpers ─────────────────────────────────────────────────────────────
-function scheduleLabel(row) {
-	const freq = row.schedule_frequency || "scheduled";
-	let label = freq.charAt(0).toUpperCase() + freq.slice(1);
-	// jarvis#653: "Weekly on Monday" / "Monthly on the 15th" when the row has an
-	// anchor saved; unchanged ("Weekly") for a legacy row with none.
-	const day = deriveScheduleDay(freq, row.schedule_weekday, row.schedule_day_of_month);
-	const anchor = scheduleAnchorPhrase(freq, day);
-	if (anchor) label = `${label} ${anchor}`;
-	// The same 12-hour text the macro's form and its time picker show ("9:00 am");
-	// this cell used to print the stored 24-hour value ("09:00").
-	const t = formatTime12h(row.schedule_time);
-	return t ? `${label} · ${t}` : label;
-}
 // What the "Next run" cell says, or null for the "-" placeholder. A slot that has
 // passed is "Due now" / "Overdue", never the bare relative time ("5 minutes ago").
 // The wording and the states live in lib/macroSchedule's nextRunCell (unit-tested,
