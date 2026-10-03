@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import frappe
 
+from jarvis.exceptions import PreviewSandboxLost
 from jarvis.tools._doc_actions import get_doc_actions
 from jarvis.tools._preview_sandbox import preview_sandbox
 
@@ -154,6 +155,10 @@ def mapped_values(
 			# but the doc must be read before we leave the block.
 			doc.apply_fieldlevel_read_permissions()
 			values = doc.as_dict(no_default_fields=True)
+	except PreviewSandboxLost:
+		# Not "the ERP declined to map": the dry run could not be undone
+		# cleanly. Propagates to the tool-layer refusal.
+		raise
 	except frappe.PermissionError as e:
 		return None, str(e) or f"no permission to map {target_doctype}"
 	except Exception as e:
