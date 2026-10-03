@@ -1105,30 +1105,75 @@ def _stop_macro_runs_in(conversations: list[str]) -> None:
 
 @frappe.whitelist(methods=["POST"])
 def clear_chat_history() -> dict:
-	"""Permanently delete ALL of the current user's conversations and messages
-	(the settings "Danger zone" action). Macros, skills and settings are
-	untouched; macro-run history rows survive but drop their (now deleted)
-	conversation reference."""
+	"""Permanently delete the current user's conversations and messages (the
+	settings "Danger zone" action), except a conversation that is waiting for a
+	reply: that one is left whole and counted in ``skipped``, to be deleted once
+	the reply has finished. Macros, skills and settings are untouched; macro-run
+	history rows survive but drop their (now deleted) conversation reference."""
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
-	user = frappe.session.user
-	names = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
-	if not names:
-		return {"ok": True, "deleted": 0}
-	# BEFORE the messages go: the step to cancel is found through them.
-	_stop_macro_runs_in(names)
-	frappe.db.delete(MSG, {"conversation": ["in", names]})
-	# Macro runs LINK conversations — blank the reference instead of leaving a
-	# dangling link (the run-history dashboard tolerates an empty conversation).
-	frappe.db.sql(
-		"""UPDATE `tabJarvis Macro Run` SET conversation = NULL
-		   WHERE conversation IN %(names)s""",
-		{"names": names},
-	)
+	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
+	deleted = 0
 	for name in names:
-		frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
+		deleted += _delete_conversation_unless_replying(name)
+	return {"ok": True, "deleted": deleted, "skipped": len(names) - deleted}
+
+
+def _reply_in_progress(conversation: str) -> bool:
+	"""Whether the conversation is waiting for a reply: it has a turn that has not
+	ended or, where the turn machine never saw it (no Turn rows: the legacy
+	transport), a reply row still marked streaming."""
+	from jarvis.chat import turn_state
+
+	states = frappe.get_all(turn_state.TURN, filters={"conversation": conversation}, pluck="state")
+	if states:
+		return any(state not in turn_state.TERMINAL_STATES for state in states)
+	return bool(frappe.db.exists(MSG, {"conversation": conversation, "role": "assistant", "streaming": 1}))
+
+
+def _delete_conversation_unless_replying(conversation: str) -> bool:
+	"""Delete one conversation with its messages; returns False, having touched
+	nothing, when it is waiting for a reply.
+
+	Deleting a conversation deletes its Turn rows (``admission.on_conversation_trash``),
+	and the pump reads the missing row of a turn it is streaming as a lost lease: the
+	hop ends ``lease_lost``, which schedules no successor, and nothing drains the shard
+	(every user's reply on it) until the lease runs out or the watchdog revives it. So
+	a conversation with a reply in progress is not deleted.
+
+	Looked at twice. The first look decides whether its macro runs are stopped: a run
+	in a kept chat goes on. The stop cannot run under a row lock (``macros._stop_run``),
+	so the second look comes after it, under the conversation's row lock, which every
+	send takes before it creates a Turn (``admission.accept_or_queue``): a send that
+	lands from here on waits for the delete instead of starting a turn inside it.
+	Both looks follow a commit, so neither reads a view older than itself.
+
+	Commits per conversation: a failure part-way leaves the earlier ones deleted."""
+	from jarvis.chat import turn_state
+
 	frappe.db.commit()
-	return {"ok": True, "deleted": len(names)}
+	if _reply_in_progress(conversation):
+		return False
+	# BEFORE the messages go: the step to cancel is found through them.
+	_stop_macro_runs_in([conversation])
+	frappe.db.commit()
+	try:
+		turn_state._lock_conversation(conversation)
+		if _reply_in_progress(conversation):
+			frappe.db.rollback()
+			return False
+		frappe.db.delete(MSG, {"conversation": conversation})
+		# Macro runs LINK conversations: blank the reference instead of leaving a
+		# dangling link (the run-history dashboard tolerates an empty conversation).
+		frappe.db.sql(
+			"UPDATE `tabJarvis Macro Run` SET conversation = NULL WHERE conversation = %(name)s",
+			{"name": conversation},
+		)
+		frappe.delete_doc(CONV, conversation, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		return True
+	finally:
+		turn_state.reset_lock_tracking()
 
 
 @frappe.whitelist()
