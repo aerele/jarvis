@@ -30,6 +30,9 @@ from jarvis.tests.test_relay_mux import _DoubleGateway
 from jarvis.tests.test_tool_reentry_guards import _InDispatch
 
 BYSTANDER = "clear-history-bystander@example.com"
+RUN = "Jarvis Macro Run"
+KEPT_LOG = "jarvis.chat.clear_history.kept"
+FAILED_LOG = "jarvis.chat.clear_history.conversation_failed"
 
 
 def setUpModule():
@@ -40,6 +43,11 @@ def setUpModule():
 
 def _result(*kept, deleted):
 	return {"ok": True, "deleted": deleted, "skipped": len(kept), "kept": list(kept)}
+
+
+def _logged(log, title) -> list[dict]:
+	"""The ``frappe.log_error`` calls under ``title``, as kwargs."""
+	return [c.kwargs for c in log.call_args_list if c.kwargs.get("title") == title]
 
 
 class _HeldGateway(_DoubleGateway):
@@ -125,6 +133,29 @@ class TestWhichChatsAreKept(_PumpTestCase):
 			self._mk_turn(conv, f"clr_{self._n}_{frappe.generate_hash(length=6)}", seed, state)
 		return conv
 
+	def _age_messages(self, conv, *, seconds) -> None:
+		"""Nothing was written to this chat for ``seconds``: a reply row still marked
+		streaming is then a flag a dead worker left behind, not a reply."""
+		then = frappe.utils.add_to_date(None, seconds=-seconds)
+		frappe.db.sql(f"UPDATE `tab{MSG}` SET modified=%s WHERE conversation=%s", (then, conv))
+		frappe.db.commit()
+
+	def _macro_run_in(self, conv) -> str:
+		"""A finished macro run that still links ``conv`` (run history outlives a chat)."""
+		run = frappe.get_doc(
+			{"doctype": RUN, "macro": "clr-no-such-macro", "conversation": conv, "status": "completed"}
+		)
+		run.flags.ignore_links = run.flags.ignore_mandatory = True
+		run.insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.addCleanup(self._drop_run, run.name)
+		return run.name
+
+	@staticmethod
+	def _drop_run(run) -> None:
+		frappe.db.delete(RUN, {"name": run})
+		frappe.db.commit()
+
 	def _rows(self, conv) -> tuple:
 		return (
 			bool(frappe.db.exists(CONV, conv)),
@@ -167,40 +198,171 @@ class TestWhichChatsAreKept(_PumpTestCase):
 		self.assertEqual(chat_api.clear_chat_history(), _result(legacy, deleted=0))
 		self.assertEqual(self._rows(legacy), (True, 2, 0))
 
-	def test_turn_rows_decide_when_there_are_any(self):
-		# Every Turn has ended: a `streaming` flag left on a reply row does not keep
-		# the chat (the turn machine is the authority once it has seen the chat).
-		conv = self._chat("done", streaming_reply=True)
-		self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
-		self.assertEqual(self._rows(conv), (False, 0, 0))
+	def test_a_reply_still_streaming_keeps_a_chat_whose_turns_have_all_ended(self):
+		# A site that is draining, or was switched back to the legacy transport, sends
+		# without a Turn row. Such a chat has old ended Turns and a live reply row:
+		# either sign of a reply keeps it, the Turn rows do not overrule the reply.
+		conv = self._chat(*ts.TERMINAL_STATES, streaming_reply=True)
+		self.assertEqual(chat_api.clear_chat_history(), _result(conv, deleted=0))
+		self.assertEqual(self._rows(conv), (True, 2, 3))
+
+	def test_a_streaming_flag_nothing_has_written_under_for_a_while_keeps_no_chat(self):
+		# The age-out every send already goes by (``api._conversation_busy``): a
+		# streaming flag on a chat that has been silent past the freshness window is
+		# what a dead worker left, and must not make the chat undeletable.
+		for states in ((), ("done",)):
+			with self.subTest(turns=states):
+				conv = self._chat(*states, streaming_reply=True)
+				self._age_messages(conv, seconds=chat_api._INFLIGHT_FRESH_SECONDS + 60)
+				self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
+				self.assertEqual(self._rows(conv), (False, 0, 0))
 
 	def test_a_turn_that_starts_while_the_delete_is_under_way_keeps_its_chat(self):
 		# Between the first look at a chat and its delete, a send lands in it. The
 		# second look, under the conversation's row lock, sees the new Turn.
 		conv = self._chat("done")
 		seed = frappe.db.get_value(MSG, {"conversation": conv, "role": "user"}, "name")
-		row = frappe.db.get_value(TURN, {"conversation": conv}, "*", as_dict=True)
 		real_stop = chat_api._stop_macro_runs_in
 		seen = []
 
-		def stop_then_a_send_lands(conversations):
-			real_stop(conversations)
+		def stop_then_a_send_lands(conversations, **kw):
+			real_stop(conversations, **kw)
 			seen.extend(conversations)
+			# Another request's send: the pump suite's own Turn fixture, committed on
+			# a second connection.
+			mine = frappe.local.db
 			with other_connection() as other:
-				other.sql(
-					f"""INSERT INTO `tab{TURN}`
-						(name, run_id, conversation, relay_target_id, turn_class, state, version,
-						 seed_message, owner, creation, modified)
-					VALUES (%(n)s, %(n)s, %(c)s, %(t)s, 'interactive', 'queued', 0, %(s)s, %(o)s, NOW(), NOW())""",
-					{"n": "clr_late_send", "c": conv, "t": row.relay_target_id, "s": seed, "o": TEST_USER},
-				)
-				other.commit()
+				frappe.local.db = other
+				try:
+					self._mk_turn(conv, "clr_late_send", seed, "queued", version=0)
+				finally:
+					frappe.local.db = mine
 
 		with patch.object(chat_api, "_stop_macro_runs_in", side_effect=stop_then_a_send_lands):
 			out = chat_api.clear_chat_history()
 		self.assertEqual(seen, [conv])
 		self.assertEqual(out, _result(conv, deleted=0))
 		self.assertEqual(self._rows(conv), (True, 1, 2))
+
+	def test_a_deleted_chat_lets_go_of_its_macro_runs_and_a_kept_chat_keeps_them(self):
+		gone, kept = self._chat("done"), self._chat("streaming")
+		run_of_gone, run_of_kept = self._macro_run_in(gone), self._macro_run_in(kept)
+		self.assertEqual(chat_api.clear_chat_history(), _result(kept, deleted=1))
+		# Run history survives its chat, with the link blanked rather than dangling.
+		self.assertFalse(frappe.db.get_value(RUN, run_of_gone, "conversation"))
+		self.assertEqual(frappe.db.get_value(RUN, run_of_kept, "conversation"), kept)
+
+	def test_the_macro_run_link_is_blanked_by_name_and_only_when_there_is_one(self):
+		# No statement here may scan (and so lock) the site's macro runs: the link is
+		# read without a lock and written by primary key.
+		self._macro_run_in(self._chat("done"))
+		self._chat("done")
+		writes = []
+		real_sql = frappe.db.sql
+
+		def sql(query, *args, **kw):
+			if str(query).lstrip().upper().startswith("UPDATE") and RUN in str(query):
+				writes.append(" ".join(str(query).split()))
+			return real_sql(query, *args, **kw)
+
+		with patch.object(frappe.db, "sql", side_effect=sql):
+			self.assertEqual(chat_api.clear_chat_history(), _result(deleted=2))
+		self.assertEqual(len(writes), 1, "one chat had a run, so one write")
+		self.assertIn("WHERE name IN", writes[0])
+		self.assertNotIn("WHERE conversation", writes[0])
+
+	def test_one_chat_that_cannot_be_deleted_does_not_stop_the_others(self):
+		bad, good, other = self._chat("done"), self._chat("done"), self._chat("done")
+		real = chat_api._unlink_macro_runs
+
+		def unlink(conversation):
+			if conversation == bad:
+				raise RuntimeError("boom")
+			return real(conversation)
+
+		with (
+			patch.object(chat_api, "_unlink_macro_runs", side_effect=unlink),
+			patch("frappe.log_error") as log,
+		):
+			out = chat_api.clear_chat_history()
+		self.assertEqual(out, _result(bad, deleted=2))
+		for conv in (good, other):
+			self.assertEqual(self._rows(conv), (False, 0, 0))
+		# The failed one is whole: its messages were deleted before the failure, and
+		# that was rolled back, not committed by the next chat's work.
+		self.assertEqual(self._rows(bad), (True, 1, 1))
+		(failure,) = _logged(log, FAILED_LOG)
+		self.assertIn(f"conversation {bad}", failure["message"])
+		self.assertIn("RuntimeError: boom", failure["message"])
+		(summary,) = _logged(log, KEPT_LOG)
+		self.assertIn("kept 1 of 3", summary["message"])
+		self.assertIn("error: 1", summary["message"])
+		# Its row lock is let go at once (a send to it would be waiting on it).
+		with other_connection() as elsewhere:
+			elsewhere.sql("SET SESSION innodb_lock_wait_timeout=1")
+			elsewhere.sql(f"SELECT name FROM `tab{CONV}` WHERE name=%s FOR UPDATE", bad)
+
+	def test_a_delete_that_loses_a_write_race_is_run_again(self):
+		conv = self._chat("done")
+		real = chat_api._unlink_macro_runs
+		calls = []
+
+		def unlink(conversation):
+			calls.append(conversation)
+			if len(calls) == 1:
+				raise frappe.QueryDeadlockError(1020, "Record has changed since last read")
+			return real(conversation)
+
+		with (
+			patch.object(chat_api, "_unlink_macro_runs", side_effect=unlink),
+			patch("frappe.log_error") as log,
+		):
+			self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
+		self.assertEqual(calls, [conv, conv])
+		self.assertEqual(self._rows(conv), (False, 0, 0))
+		log.assert_not_called()
+
+	def test_what_was_kept_and_why_is_left_for_an_operator_once_per_request(self):
+		streaming, queued = self._chat("done", "streaming"), self._chat("queued")
+		legacy = self._chat(streaming_reply=True)
+		self._chat("done")
+		with patch("frappe.log_error") as log:
+			out = chat_api.clear_chat_history()
+		self.assertEqual((out["deleted"], sorted(out["kept"])), (1, sorted([streaming, queued, legacy])))
+		(summary,) = _logged(log, KEPT_LOG)
+		self.assertEqual(len(log.call_args_list), 1)
+		message = summary["message"]
+		self.assertIn(f"user {TEST_USER}", message)
+		self.assertIn("kept 3 of 4", message)
+		for reason in ("turn streaming: 1", "turn queued: 1", "reply streaming, no live turn: 1"):
+			self.assertIn(reason, message)
+		for conv in (streaming, queued, legacy):
+			self.assertIn(conv, message)
+
+	def test_nothing_is_logged_when_nothing_was_kept(self):
+		self._chat("done")
+		with patch("frappe.log_error") as log:
+			self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
+		log.assert_not_called()
+
+	def test_a_chat_someone_else_deleted_meanwhile_is_not_counted(self):
+		# A second tab pressing "Delete all" at the same moment: each chat is counted
+		# by the request that deleted it.
+		conv, mine = self._chat("done"), self._chat("done")
+		real_stop = chat_api._stop_macro_runs_in
+
+		def stop_then_the_other_tab_deletes_it(conversations, **kw):
+			real_stop(conversations, **kw)
+			if conversations == [conv]:
+				with other_connection() as other:
+					for doctype in (TURN, MSG):
+						other.sql(f"DELETE FROM `tab{doctype}` WHERE conversation=%s", conv)
+					other.sql(f"DELETE FROM `tab{CONV}` WHERE name=%s", conv)
+					other.commit()
+
+		with patch.object(chat_api, "_stop_macro_runs_in", side_effect=stop_then_the_other_tab_deletes_it):
+			self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
+		self.assertEqual(self._rows(mine), (False, 0, 0))
 
 	def test_another_users_chats_are_never_touched(self):
 		frappe.set_user("Administrator")
@@ -223,7 +385,7 @@ class TestWhichChatsAreKept(_PumpTestCase):
 
 class TestStillRefusedInsideATool(_InDispatch):
 	def test_delete_all_is_refused_inside_a_tool_dispatch(self):
-		with patch.object(chat_api, "_delete_conversation_unless_replying") as delete:
+		with patch.object(chat_api, "_delete_idle_conversation") as delete:
 			err = self._raised_inside(chat_api.clear_chat_history)
 		self.assertIsInstance(err, frappe.PermissionError)
 		self.assertIn("inside a tool", str(err))

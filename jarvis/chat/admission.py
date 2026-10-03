@@ -350,6 +350,34 @@ def _conv_legacy_busy(conversation: str) -> bool:
 	return _conversation_busy(conversation) or _conv_legacy_recovering_busy(conversation)
 
 
+# What ``reply_in_progress`` answers for a reply the turn machine holds no live Turn for.
+REPLY_WITHOUT_A_LIVE_TURN = "reply streaming, no live turn"
+
+
+def reply_in_progress(conversation: str) -> str:
+	"""Why this conversation counts as waiting for a reply, or "" when it does not.
+	The one answer to "may this conversation be deleted now?".
+
+	Either sign is enough, the same two ``accept_or_queue`` goes by for single-flight:
+
+	* a Turn that has not ended: the answer is ``turn <state>``. Deleting the
+	  conversation deletes its Turn rows (``on_conversation_trash``), and the pump
+	  reads the missing row of a turn it is streaming as a lost lease;
+	* no such Turn, but a reply row still streaming (``_conv_legacy_busy``): a site
+	  that is draining, or back on the legacy transport, sends without a Turn row,
+	  so a chat can have old ended Turns and a live reply. The answer is
+	  ``REPLY_WITHOUT_A_LIVE_TURN``. This sign ages out as it does for a send (a
+	  flag left by a dead worker stops counting once the chat has been silent for
+	  ``_INFLIGHT_FRESH_SECONDS``), and it is also true while the chat is being
+	  compacted, which a delete should not cut across either."""
+	from jarvis.chat import turn_state
+
+	state = turn_state.unfinished_turn_state(conversation)
+	if state:
+		return f"turn {state}"
+	return REPLY_WITHOUT_A_LIVE_TURN if _conv_legacy_busy(conversation) else ""
+
+
 def _conv_legacy_recovering_busy(conversation: str) -> bool:
 	"""CDX-24 legacy dual-signal: True when this conversation's newest assistant
 	Message is ``streaming=1 AND recovering=1`` with NO owning blocking Turn row.
