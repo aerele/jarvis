@@ -173,14 +173,88 @@ calls `frappe.db.commit()` internally cannot persist:
 // data
 { "preview": true,
   "would": { "name": "<resolved name>", "grand_total": 1180.0, ... },
-  "note": "Validated with all DB writes rolled back; nothing was committed. External side effects (emails/webhooks in on_submit / on_cancel) are not sandboxed by preview." }
+  "note": "Trial run: the change was checked and every database write was rolled back. Nothing is saved until you confirm. A trial run cannot undo email or calls to other systems sent by the document's own code, live notifications, or error log entries." }
 ```
 
 Use it to show the user exactly what a write would produce (resolved name,
 fetched/computed fields) - or the validation error it would hit - before they
-confirm. Preview runs are never audited (nothing is committed). **Caveat:** DB
-effects are sandboxed, but external side effects in `on_submit` / `on_cancel`
-(emails, webhooks) are not rolled back.
+confirm. Preview runs are never audited (nothing is committed). The same sandbox
+(`jarvis/tools/_preview_sandbox.py`) builds the preview on a confirmation card.
+
+`note` is written for a person: plain language, no key names. Where it is shown
+depends on the card. Neither client shows it when a structured card exists, and
+one is built for create / update and for submit / cancel / amend / delete (chat
+card, phone decision sheet and Approval Board alike); there it reaches the user
+only when the model relays it. Both clients render it on the plain fallback, for
+a call that has no structured card. It is stored with the pending record and in
+the transcript either way.
+Three more keys appear only when they apply:
+
+- `will_queue`: background jobs a hook enqueued during the dry run. They are
+  **not sent**; these are their names (distinct, at most 20 plus a `+N more`
+  marker, each one line and at most 140 characters). `note` then also says how
+  many jobs Confirm will start. Frappe's own clean-up job after a delete
+  (`delete_dynamic_links`, enqueued on every delete) is dropped but not
+  listed or counted.
+- `will_queue_note`: a sentence for the model, saying what to tell the user.
+  When one of the jobs is Frappe's `queue_action`
+  (`frappe.model.document.execute_action`, e.g. a Stock Reconciliation over 100
+  rows) it adds that the action itself runs in the background on confirm and was
+  not validated by the preview; `note` then says the same and does not call the
+  change "checked". What counts is the method a job really runs, never the
+  `job_name` its caller gave it.
+- `hook_rolled_back: true`: the document's own code called a bare
+  `frappe.db.rollback()` during the dry run. It took a failure path, so `would`
+  may not be what Confirm produces, and `note` says so.
+
+**The one job that is still sent.** `SURVIVES_DRY_RUN` (in the sandbox module)
+lists `jarvis.triggers.engine.write_activity`: a Jarvis Trigger that blocks a
+save enqueues its Blocked audit row immediately so that it outlives the
+rollback, and it does so from a dry run too. Only when Frappe's own `enqueue`
+built the job, and only when it is enqueued immediately; the same method
+enqueued after commit (Success / Failed activity) is dropped and is not listed
+in `will_queue` (a job that is merely NAMED like it is listed). The card's
+`note` does not mention this job: it is sent when an automation blocks the save,
+which raises, so no note is built for that dry run. Add a method to that set
+only together with a test.
+
+**When the dry run cannot be undone.** If the sandbox's savepoint is gone when it
+comes to roll back (a deadlock aborted the transaction, or the write ran DDL,
+which commits implicitly: a Custom Field, a DocType), the sandbox rolls the
+transaction back in full (with a bare `ROLLBACK` if Frappe's own did not send
+one), writes one Error Log row, and raises `PreviewSandboxLost`
+(`jarvis/exceptions.py`). If the dry run itself raised, its own error is what
+the caller sees; the row is still written.
+No card is parked. The model gets a `ConfirmationUnavailableError` refusal saying
+that part of the change may already be saved when it alters database structure,
+and to retry at most once. `preview_doc` and `get_creation_context` answer with
+the error code `PreviewSandboxLost` and the same message.
+
+**Not sandboxed** (the dry run really does these): HTTP or email sent directly
+inside a hook; a realtime event published immediately; a write to a
+non-transactional table (Error Log is MyISAM); what a write did before its own
+DDL; `enqueue(deduplicate=True)` deleting a finished job of the same id; and
+jobs that only come into being when a commit callback runs (a webhook's delivery
+job) are neither sent nor listed in `will_queue`.
+
+**Telling from the logs that it works.** The sandbox writes to
+`logs/jarvis.preview.log` (bench and site):
+
+| Line | Level | Written on a production bench |
+|---|---|---|
+| `dry run: job sent for real (it must outlive a rollback) ... job='...'` | WARNING | yes |
+| `dry run: a bare frappe.db.rollback() was redirected to the savepoint ...` | WARNING | yes |
+| `dry run: job not sent ... job='...'` (one per dropped job) | INFO | only with the log level lowered to INFO |
+| a lost savepoint, a displaced `get_queue` wrap, a failed cleanup step | ERROR | yes |
+
+Frappe hands out loggers at ERROR outside a dev server; the sandbox pins this
+one to WARNING so the two rare events above are kept. A lost savepoint and a
+displaced wrap also write an Error Log row, titled
+`jarvis preview sandbox: savepoint lost` and
+`jarvis preview sandbox: get_queue guard was displaced` (the latter once per
+process). A quiet log on a production bench therefore means no job left a dry
+run and no hook rolled one back, not that the sandbox is idle; to see every
+dropped job, lower the level and look for `job not sent`.
 
 `run_method` is **not** in this set: it is always gated, so `preview: true` is
 rejected (`InvalidArgumentError`). Call it directly and the bench parks a

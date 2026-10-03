@@ -1752,6 +1752,17 @@ def _edit_dry_run(tool: str, args: dict, items: list[dict]) -> dict | None:
 
 	try:
 		api._run_preview(tool, args)
+	except api.PreviewSandboxLost:
+		# Not a validation error: the dry run could not be undone cleanly (the
+		# sandbox logged it). The caller rolls back and shows this to the
+		# approver; nothing is claimed or created.
+		frappe.clear_messages()
+		return _held_refusal(
+			"invalid",
+			"These values could not be checked safely, so nothing was created. If this record changes "
+			"database structure (for example a Custom Field), part of it may already be saved: check "
+			"before trying again.",
+		)
 	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		frappe.clear_messages()
 		missing = held_writes.collect_missing(tool, items)
