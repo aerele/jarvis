@@ -476,6 +476,39 @@ def _telemetry(event: str, **fields) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _insert_seed(conversation: str, content: str | None, origin: str, hidden: bool) -> str:
+	"""The user row of a turn whose caller asked admission to write it. Not committed.
+
+	Called with the conversation row locked, so ``MAX(seq) + 1`` is the next seq (the
+	same reasoning as OAR-6). The row belongs to the conversation's owner, as every
+	user row of a chat does: the worker runs the turn as that row's owner, and a cron
+	(Administrator) inserting it would otherwise own it (``api._enqueue_turn`` does the
+	same)."""
+	seq = (
+		frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[0][0]
+		or 0
+	) + 1
+	msg = frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conversation,
+			"seq": seq,
+			"role": "user",
+			"content": content or "",
+			"streaming": 0,
+			"hidden": 1 if hidden else 0,
+			"origin": origin,
+		}
+	)
+	msg.flags.ignore_permissions = True
+	msg.flags.jarvis_server_write = True
+	msg.insert()
+	owner = frappe.db.get_value(CONV, conversation, "owner")
+	if owner and msg.owner != owner:
+		frappe.db.set_value(MSG, msg.name, "owner", owner, update_modified=False)
+	return msg.name
+
+
 def accept_or_queue(
 	*,
 	conversation: str,
@@ -487,6 +520,8 @@ def accept_or_queue(
 	seed_content: str | None = None,
 	seed_origin: str | None = None,
 	exempt_overload: bool = False,
+	seed_hidden: bool = False,
+	on_seed=None,
 ) -> dict:
 	"""Admit or durably queue one turn. Returns one of:
 
@@ -499,10 +534,16 @@ def accept_or_queue(
 	or dispatched. Answered before anything else, a full queue included.
 
 	``seed_message`` is the already-committed user Message (send/retry/orphan/
-	macro all insert it before dispatch today - OAR-3's retry/orphan reuse is
-	automatic here since no caller asks admission to insert). ``seed_content``
-	+ ``seed_message=None`` is the WP-1 insert branch, wired but unused in
-	Phase-0's legacy integration; ``seed_origin`` is the caller's origin for it.
+	continuation insert it before dispatch - OAR-3's retry/orphan reuse is
+	automatic here). ``seed_content`` + ``seed_message=None`` is the insert branch
+	(WP-1): admission writes the user row itself, after the duplicate check and the
+	overload guard and in the SAME transaction as the Turn, so a duplicate or a full
+	site writes nothing and a process that dies leaves both rows or neither. The
+	macro engine sends its steps this way (``api._enqueue_turn`` with a fixed
+	``run_id``). ``seed_origin`` / ``seed_hidden`` stamp that row, which is owned by
+	the conversation's owner (the worker's chat user, never a cron's Administrator);
+	``on_seed(name)`` is called with its name before anything is dispatched, for a
+	``dispatch`` callable that needs it.
 
 	``exempt_overload`` (SUXI-2 ruling): a confirm continuation is the follow-up
 	of an ALREADY-committed write - it must never be rejected by the accept-time
@@ -571,6 +612,24 @@ def accept_or_queue(
 			# concurrent cutover scan sees it — same guarantee as _dispatch_turn's gate) and commit;
 			# no Turn row is created. The seed user Message already exists (every caller inserts it
 			# before dispatch), so nothing is orphaned.
+			if not seed_message:
+				# The insert branch: the user row first, committed, and only then the job, so a
+				# worker never starts on a row it cannot read yet. That legacy job is the turn,
+				# as on any legacy path (no Turn row); this is the commit-then-enqueue order
+				# every legacy sender has.
+				seed_message = _insert_seed(conversation, seed_content, seed_origin, seed_hidden)
+				if on_seed:
+					on_seed(seed_message)
+				frappe.db.commit()  # releases both locks
+				dispatch()
+				_telemetry("accept_legacy_fallback", run_id=run_id, target=target)
+				return {
+					"ok": True,
+					"dispatched": True,
+					"run_id": run_id,
+					"queued_position": None,
+					"legacy_fallback": True,
+				}
 			dispatch()
 			frappe.db.commit()  # releases both locks; the legacy job is durably enqueued
 			_telemetry("accept_legacy_fallback", run_id=run_id, target=target)
@@ -595,30 +654,12 @@ def accept_or_queue(
 				"reason": frappe._("The site is busy — please try again in a moment."),
 			}
 
-		# Seed the user Message if the caller delegated it (WP-1 branch; unused in
-		# Phase-0 wiring because every legacy caller inserts before dispatch).
+		# Seed the user Message if the caller delegated it (the insert branch, see the
+		# docstring): uncommitted until the Turn below is, and rolled back with it.
 		if not seed_message:
-			seq = (
-				frappe.db.sql(
-					f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation}
-				)[0][0]
-				or 0
-			) + 1
-			msg = frappe.get_doc(
-				{
-					"doctype": MSG,
-					"conversation": conversation,
-					"seq": seq,
-					"role": "user",
-					"content": seed_content or "",
-					"streaming": 0,
-					"origin": seed_origin,
-				}
-			)
-			msg.flags.ignore_permissions = True
-			msg.flags.jarvis_server_write = True
-			msg.insert()
-			seed_message = msg.name
+			seed_message = _insert_seed(conversation, seed_content, seed_origin, seed_hidden)
+			if on_seed:
+				on_seed(seed_message)
 
 		# Insert the durable Turn row (idempotent on the run_id PK).
 		try:
