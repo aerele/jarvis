@@ -275,7 +275,8 @@ def _last_runs(macro_names: list[str]) -> dict:
 	Status, trigger and times only. The run's conversation is not for an admin, and
 	its reason can quote what a step tried to do: that is shown with the opened
 	macro, not in a list. The one thing the list says about the reason is a yes or
-	no, ``stopped_by_admin``: whether it is exactly this module's own fixed sentence.
+	no, ``stopped_by_admin``: whether it is exactly one of the two fixed sentences an
+	admin's action leaves (``_ADMIN_STOP_REASONS``: a Stop, or a hold).
 	That lets the pane tell an admin's stop from the owner's own without any of the
 	run's text leaving the server. The run Stop acts on is the row's ``live_run``.
 
@@ -574,7 +575,9 @@ def admin_hold(macro: str, reason: str = "") -> dict:
 	   the Comment, commit. ``run_macro`` reads the hold under the same lock, so a run
 	   that had not committed by then waits and is refused;
 	2. each run that is still live is stopped (``macros._stop_run``, its own run lock,
-	   compare-and-set): it committed before the hold.
+	   compare-and-set): it committed before the hold. Each is tried on its own; the
+	   ones that could not be stopped are named in an error raised after all were
+	   tried. The hold stands, and such a run ends at its next step's end.
 
 	Works on a macro that is already off, and again on one already held (the reason is
 	the new one). Every step can be repeated: a request that failed part-way is sent
@@ -603,10 +606,28 @@ def admin_hold(macro: str, reason: str = "") -> dict:
 	)
 	_leave_comment(row.name, f"{admin} put this macro on hold: {reason}")
 	frappe.db.commit()  # the hold is visible, and the row lock released, from here on
-	stopped = 0
+	stopped, failed = 0, []
 	for run in macros.live_runs_of(row.name):
+		# Each run on its own: one that raised used to leave every run after it going.
 		# Nothing is pending and no lock is held: what `_stop_run` asks of its caller.
-		stopped += bool(macros._stop_run(run, reason=_MACRO_HELD_ERROR, by=admin))
+		try:
+			stopped += bool(macros._stop_run(run, reason=_MACRO_HELD_ERROR, by=admin))
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				title=f"jarvis.chat.macros_admin_api.hold_stop_failed: {run}", message=frappe.get_traceback()
+			)
+			frappe.db.commit()  # the log only; the error below rolls the request back
+			failed.append(run)
+	if failed:
+		# The hold stands (committed above), and a run it missed still ends at its next
+		# step's end (``macros._apply_step_end``). Holding again retries the stop.
+		frappe.throw(
+			_(
+				"The macro is on hold, but {0} of its runs could not be stopped ({1}). Put it on hold again to retry."
+			).format(len(failed), ", ".join(failed)),
+			frappe.ValidationError,
+		)
 	return {"ok": True, "held": True, "stopped_runs": stopped}
 
 

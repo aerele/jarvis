@@ -48,12 +48,16 @@ def hold_fields_exist() -> bool:
 
 
 def held_message(reason: str | None) -> str:
-	"""The one sentence for "on hold": the form's banner says the same."""
+	"""The one sentence for "on hold": the form's banner says the same.
+
+	A message, so HTML: Frappe 15's Desk dialog inserts a thrown message as it is, and
+	the reason is an admin's free text. It is escaped here; the SPA decodes a message
+	once before showing it as text, and reads the reason itself raw (``get_macro``)."""
 	reason = (reason or "").strip()
 	if reason:
 		return _(
 			"An admin has put this macro on hold: {0}. It will not run until an admin releases it."
-		).format(reason.rstrip("."))
+		).format(frappe.utils.escape_html(reason.rstrip(".")))
 	return _("An admin has put this macro on hold. It will not run until an admin releases it.")
 
 
