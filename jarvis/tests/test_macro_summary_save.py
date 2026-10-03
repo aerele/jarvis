@@ -954,6 +954,20 @@ class TestResummarizeOnRequest(_SummarySaveBase):
 				self.assertEqual(frappe.db.count("Error Log", alarms), 0)
 				self.assertTrue(frappe.db.exists(CONV, stuck))
 
+	def test_a_chat_whose_reply_is_still_streaming_is_left_to_finish_too(self):
+		# A reply sent without a Turn row (a draining site, the legacy transport) shows
+		# only on its reply row. The one rule for "is a reply in progress"
+		# (``admission.reply_in_progress``) counts it, whatever the chat's ended Turns say.
+		name = self._macro()
+		stuck = self._stuck(name)
+		self._turn(stuck, "done")
+		frappe.db.set_value(MSG, {"conversation": stuck, "role": "assistant"}, "streaming", 1)
+		frappe.db.commit()
+		with patch("jarvis.chat.api._enqueue_turn", return_value=ENQUEUED):
+			started = summarize_macro(name, force=1)
+		self.assertNotEqual(started["conversation"], stuck)
+		self.assertTrue(frappe.db.exists(CONV, stuck))
+
 	def test_a_new_summary_that_cannot_be_dispatched_leaves_the_one_it_replaced(self):
 		# Nothing was started, so nothing is given up: the stored text, the mark and
 		# the chat of the summary being written are as they were, and it still lands.
