@@ -1329,7 +1329,7 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		frappe.set_user(OWNER)
 		with patch.object(macros, "_cancel_current_step", side_effect=cancel):
 			out = chat_api.clear_chat_history()
-		self.assertEqual(out, {"ok": True, "deleted": 2, "skipped": 0})
+		self.assertEqual(out, {"ok": True, "deleted": 2, "skipped": 0, "kept": []})
 		self.assertTrue(seen[conv] > 0, "the run was stopped after its messages were deleted")
 		for name in (run, parked):
 			row = frappe.db.get_value(RUN, name, ["status", "error", "conversation"], as_dict=True)
@@ -1345,7 +1345,9 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		before = frappe.db.count(MSG, {"conversation": conv})
 		gone, other, _ = self._mk_run(steps=2, at_step=1, tag="gone")
 		frappe.set_user(OWNER)
-		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 1})
+		self.assertEqual(
+			chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 1, "kept": [conv]}
+		)
 		# A kept chat keeps its run: not stopped, not disarmed, still linked.
 		row = frappe.db.get_value(RUN, run, ["status", "conversation"], as_dict=True)
 		self.assertEqual((row.status, row.conversation), ("running", conv))

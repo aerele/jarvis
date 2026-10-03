@@ -1109,14 +1109,15 @@ def clear_chat_history() -> dict:
 	settings "Danger zone" action), except a conversation that is waiting for a
 	reply: that one is left whole and counted in ``skipped``, to be deleted once
 	the reply has finished. Macros, skills and settings are untouched; macro-run
-	history rows survive but drop their (now deleted) conversation reference."""
+	history rows survive but drop their (now deleted) conversation reference.
+
+	``kept`` names the skipped conversations, so the client can tell whether the
+	chat it has open is one of them without reading the list again."""
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
-	deleted = 0
-	for name in names:
-		deleted += _delete_conversation_unless_replying(name)
-	return {"ok": True, "deleted": deleted, "skipped": len(names) - deleted}
+	kept = [name for name in names if not _delete_conversation_unless_replying(name)]
+	return {"ok": True, "deleted": len(names) - len(kept), "skipped": len(kept), "kept": kept}
 
 
 def _reply_in_progress(conversation: str) -> bool:

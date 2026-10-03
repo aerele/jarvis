@@ -38,6 +38,10 @@ def setUpModule():
 	install_synthetic_runtime_profile()
 
 
+def _result(*kept, deleted):
+	return {"ok": True, "deleted": deleted, "skipped": len(kept), "kept": list(kept)}
+
+
 class _HeldGateway(_DoubleGateway):
 	"""The transport double, with a reply that stops part-way: the first frames are
 	delivered, the rest wait for ``resume``. That leaves a turn ``streaming`` across
@@ -96,7 +100,7 @@ class TestDeleteAllDuringALiveReply(_PumpTestCase):
 			("handoff", 1),
 			"the hop must go on draining the shard and hand off to a successor",
 		)
-		self.assertEqual(seen["out"], {"ok": True, "deleted": 1, "skipped": 1})
+		self.assertEqual(seen["out"], _result(live, deleted=1))
 		self.assertFalse(frappe.db.exists(CONV, idle))
 		self.assertTrue(frappe.db.exists(CONV, live))
 		self.assertEqual(self._state(rid), "finalizing", "the reply was settled")
@@ -131,19 +135,19 @@ class TestWhichChatsAreKept(_PumpTestCase):
 	def test_with_no_reply_in_progress_everything_is_deleted(self):
 		plain = self._chat()
 		finished = self._chat(*ts.TERMINAL_STATES)
-		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 2, "skipped": 0})
+		self.assertEqual(chat_api.clear_chat_history(), _result(deleted=2))
 		for conv in (plain, finished):
 			self.assertEqual(self._rows(conv), (False, 0, 0))
 
 	def test_with_no_chats_there_is_nothing_to_do(self):
-		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 0, "skipped": 0})
+		self.assertEqual(chat_api.clear_chat_history(), _result(deleted=0))
 
 	def test_a_chat_with_a_turn_that_has_not_ended_is_kept_whole(self):
 		for state in ts.NONTERMINAL_STATES:
 			with self.subTest(state=state):
 				waiting = self._chat("done", state)
 				other = self._chat("done")
-				self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 1})
+				self.assertEqual(chat_api.clear_chat_history(), _result(waiting, deleted=1))
 				self.assertEqual(self._rows(waiting), (True, 1, 2))
 				self.assertEqual(self._rows(other), (False, 0, 0))
 				_cleanup_conversations()
@@ -153,21 +157,21 @@ class TestWhichChatsAreKept(_PumpTestCase):
 		self.assertEqual(chat_api.clear_chat_history()["skipped"], 1)
 		frappe.db.set_value(TURN, {"conversation": conv}, "state", "done", update_modified=False)
 		frappe.db.commit()
-		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 0})
+		self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
 		self.assertEqual(self._rows(conv), (False, 0, 0))
 
 	def test_a_chat_without_turn_rows_is_kept_while_its_reply_row_is_streaming(self):
 		# The pre-turn-machine shape: the only sign of a reply in progress is the
 		# reply row itself.
 		legacy = self._chat(streaming_reply=True)
-		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 0, "skipped": 1})
+		self.assertEqual(chat_api.clear_chat_history(), _result(legacy, deleted=0))
 		self.assertEqual(self._rows(legacy), (True, 2, 0))
 
 	def test_turn_rows_decide_when_there_are_any(self):
 		# Every Turn has ended: a `streaming` flag left on a reply row does not keep
 		# the chat (the turn machine is the authority once it has seen the chat).
 		conv = self._chat("done", streaming_reply=True)
-		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 0})
+		self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
 		self.assertEqual(self._rows(conv), (False, 0, 0))
 
 	def test_a_turn_that_starts_while_the_delete_is_under_way_keeps_its_chat(self):
@@ -195,7 +199,7 @@ class TestWhichChatsAreKept(_PumpTestCase):
 		with patch.object(chat_api, "_stop_macro_runs_in", side_effect=stop_then_a_send_lands):
 			out = chat_api.clear_chat_history()
 		self.assertEqual(seen, [conv])
-		self.assertEqual(out, {"ok": True, "deleted": 0, "skipped": 1})
+		self.assertEqual(out, _result(conv, deleted=0))
 		self.assertEqual(self._rows(conv), (True, 1, 2))
 
 	def test_another_users_chats_are_never_touched(self):
@@ -207,7 +211,7 @@ class TestWhichChatsAreKept(_PumpTestCase):
 			theirs_live = self._chat("streaming")
 			frappe.set_user(TEST_USER)
 			mine = self._chat("done")
-			self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 0})
+			self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
 			self.assertEqual(self._rows(mine), (False, 0, 0))
 			self.assertEqual(self._rows(theirs_idle), (True, 1, 1))
 			self.assertEqual(self._rows(theirs_live), (True, 1, 1))
