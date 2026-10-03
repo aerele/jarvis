@@ -4247,7 +4247,11 @@ import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 import { firstSendPicks } from "@/lib/firstSendPicks";
-import { CLEAR_HISTORY_CONFIRM, clearHistoryOutcome } from "@/lib/clearHistory";
+import {
+	CLEAR_HISTORY_CONFIRM,
+	clearHistoryFailedNotice,
+	clearHistoryOutcome,
+} from "@/lib/clearHistory";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
@@ -6277,7 +6281,10 @@ async function clearAllHistory() {
 		settingsOpen.value = false;
 		newChat(); // also reloads store.conversations
 	} catch (e) {
-		notify(errMessage(e) || "Could not delete history", { type: "error" });
+		// The server deletes chat by chat: some may be gone although the request
+		// failed, so say so and show the list as it now is.
+		notify(clearHistoryFailedNotice(errMessage(e)), { type: "error" });
+		store.loadConversations();
 	} finally {
 		clearingHistory.value = false;
 	}
