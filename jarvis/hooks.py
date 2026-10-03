@@ -286,6 +286,19 @@ scheduler_events = {
 			# path. Bounded per run (capacity_attempts), then the run fails honestly.
 			# Cheap no-op (one indexed status query) when nothing is parked.
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
+			# A macro run moves when its step's turn end reaches the chaining hook, and
+			# several ends never do (a turn that fails before it is sent, ages out of the
+			# queue or is cancelled queued has no finalize job; a finalize job that died
+			# three times in the hook is given up on; a hook that waited 10s for the run
+			# lock returns). Such a run sat `running`, its chat armed, until the hourly
+			# stale-run sweep three hours later. This reads the step's Turn row and the
+			# finalize ledger and does what the hook would have. Self-gating: only where
+			# the turn machine is on and the shard is in `pump` mode; off switch
+			# `jarvis_macro_reconcile_disabled` in site config. Cheap no-op (one indexed
+			# status query) when no run is idle, and it writes nothing unless it acts.
+			# If the module is ever removed, keep this path importable as a no-op for a
+			# release: the cron row outlives the code until the next migrate.
+			"jarvis.chat.macro_reconcile.reconcile_running_runs",
 			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
 			# admin control plane for the per-tenant Errors feed. Off the hot path,
 			# self-gating (skips un-onboarded), never raises. Cheap
