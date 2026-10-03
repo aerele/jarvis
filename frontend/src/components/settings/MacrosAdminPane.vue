@@ -1,7 +1,7 @@
 <template>
 	<SettingsPane
 		title="Macros"
-		description="Every user's macros on this site. Open one to read it, or stop a run. Only its owner can edit, run or delete a macro."
+		description="Every user's macros on this site. Open one to read it, stop a run, put a macro on hold or delete it. Only its owner can edit or run a macro."
 	>
 		<template #actions>
 			<Button
@@ -60,6 +60,14 @@
 						:options="LIVE_OPTIONS"
 						:modelValue="filters.live_run"
 						@update:modelValue="(v) => setFilter('live_run', v)"
+					/>
+					<FormControl
+						class="min-w-28 flex-1"
+						type="select"
+						label="Hold"
+						:options="HOLD_OPTIONS"
+						:modelValue="filters.on_hold"
+						@update:modelValue="(v) => setFilter('on_hold', v)"
 					/>
 					<!-- The combination an admin looks for, in one step: it sets the two
 					     selects beside it, so what is filtered stays in plain sight. -->
@@ -187,6 +195,13 @@
 									>
 										<Badge variant="subtle" theme="orange" label="Armed" />
 									</span>
+									<span
+										v-if="row.admin_hold"
+										class="jv-macro-admin-held inline-flex"
+										:title="holdTitle(row)"
+									>
+										<Badge variant="subtle" theme="red" label="On hold" />
+									</span>
 								</div>
 							</div>
 
@@ -257,11 +272,51 @@
 									theme="red"
 									label="Stop run"
 									:loading="stopping === row.name"
-									:disabled="!!stopping"
+									:disabled="busy"
 									:aria-label="`Stop the run of ${
 										row.macro_name || row.name
 									}, owned by ${ownerText(row)}`"
 									@click="stop(row)"
+								/>
+								<!-- An admin's own macro has no Hold: they switch it off on
+								     its form. The server refuses it too. -->
+								<Button
+									v-if="!row.admin_hold && !isMine(row)"
+									class="jv-macro-admin-hold"
+									size="sm"
+									variant="subtle"
+									label="Hold"
+									:disabled="busy"
+									:aria-label="`Put ${
+										row.macro_name || row.name
+									}, owned by ${ownerText(row)}, on hold`"
+									@click="askHold(row)"
+								/>
+								<Button
+									v-if="row.admin_hold && !isMine(row)"
+									class="jv-macro-admin-release"
+									size="sm"
+									variant="subtle"
+									label="Release"
+									:loading="acting === `release:${row.name}`"
+									:disabled="busy"
+									:aria-label="`Release the hold on ${
+										row.macro_name || row.name
+									}, owned by ${ownerText(row)}`"
+									@click="release(row)"
+								/>
+								<Button
+									class="jv-macro-admin-delete"
+									size="sm"
+									variant="ghost"
+									theme="red"
+									label="Delete"
+									:loading="acting === `delete:${row.name}`"
+									:disabled="busy"
+									:aria-label="`Delete ${
+										row.macro_name || row.name
+									}, owned by ${ownerText(row)}`"
+									@click="remove(row)"
 								/>
 							</div>
 						</div>
@@ -286,13 +341,22 @@
 		<!-- The macro, to look at: a second dialog over Settings, not a route. Escape
 		     closes it alone and focus goes back to the row's button. -->
 		<MacroAdminDialog v-if="opened" v-model="detailOpen" :name="opened" @gone="onGone" />
+		<MacroHoldDialog
+			v-if="holding"
+			v-model="holdOpen"
+			:name="holding.name"
+			:macroName="holding.macro_name || ''"
+			:ownerLabel="ownerText(holding)"
+			@held="onHeld"
+		/>
 	</SettingsPane>
 </template>
 
 <script setup>
 // A Jarvis Admin's view of every user's macros: who owns each, whether it is on,
-// scheduled or armed, how its last run went. One action, Stop run. Opening a row
-// shows the macro read-only (MacroAdminDialog).
+// scheduled, armed or on hold, how its last run went. Actions: Stop run, Hold
+// (MacroHoldDialog asks why), Release, Delete. Opening a row shows the macro
+// read-only (MacroAdminDialog). Nothing here edits or runs a macro.
 //
 // Gated at the SettingsDialog level by window.is_jarvis_admin. The server checks
 // the Jarvis Admin role itself on every call (jarvis.chat.macros_admin_api), so a
@@ -301,8 +365,16 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "v
 import { Badge, Button, FeatherIcon, FormControl, toast } from "frappe-ui";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import MacroAdminDialog from "@/components/settings/MacroAdminDialog.vue";
+import MacroHoldDialog from "@/components/settings/MacroHoldDialog.vue";
+import { session } from "@/data/session";
 import { useConfirm } from "@/composables/useConfirm";
-import { adminListMacros, adminMacroOwners, adminStopRun } from "@/api/macrosAdmin";
+import {
+	adminDelete,
+	adminListMacros,
+	adminMacroOwners,
+	adminRelease,
+	adminStopRun,
+} from "@/api/macrosAdmin";
 import { errMessage, errHtml, escapeHtml } from "@/lib/errors";
 import { isLiveRun, lastRunCell } from "@/lib/macroRunOutcome";
 import { nextRunCell } from "@/lib/macroSchedule";
@@ -317,7 +389,7 @@ const PAGE_MAX = 100;
 // list falls back to its first 500 rows, and Load more continues from there.
 const KEEP_MAX_PAGES = 5;
 const SEARCH_WAIT_MS = 300;
-const GRID = "grid-template-columns: 2fr 1.4fr 1.6fr 1fr 5.5rem";
+const GRID = "grid-template-columns: 2fr 1.4fr 1.6fr 1fr 6rem";
 // Below this the columns would be a few characters of ellipsis each: the list
 // scrolls sideways inside its own box instead.
 const GRID_MIN = "min-width: 40rem";
@@ -337,6 +409,11 @@ const LIVE_OPTIONS = [
 	{ label: "Running now", value: "1" },
 	{ label: "Not running", value: "0" },
 ];
+const HOLD_OPTIONS = [
+	{ label: "All", value: "" },
+	{ label: "On hold", value: "1" },
+	{ label: "Not on hold", value: "0" },
+];
 
 const { confirm } = useConfirm();
 
@@ -351,7 +428,7 @@ const error = ref("");
 const listEl = ref(null);
 
 const search = ref("");
-const filters = reactive({ owner: "", armed: "", scheduled: "", live_run: "" });
+const filters = reactive({ owner: "", armed: "", scheduled: "", live_run: "", on_hold: "" });
 const filtering = computed(
 	() => !!search.value.trim() || Object.values(filters).some((v) => v !== "")
 );
@@ -588,7 +665,7 @@ async function focusRow(name) {
 }
 
 async function stop(row) {
-	if (stopping.value || !row.live_run) return;
+	if (busy.value || !row.live_run) return;
 	const name = row.macro_name || row.name;
 	// The confirmation renders its message as text, so the names go in as they are.
 	const ok = await confirm({
@@ -623,6 +700,96 @@ async function stop(row) {
 		await focusRow(row.name);
 	} finally {
 		stopping.value = "";
+	}
+}
+
+// ── hold, release, delete ────────────────────────────────────────────────────
+// One action at a time across the list, as for Stop: `acting` is "<verb>:<row>"
+// while a release or a delete is in flight, and the hold dialog is open for
+// `holding`. Nothing is shown changed until the server says so: each ends with a
+// re-read of the list.
+const acting = ref("");
+const holding = ref(null);
+const holdOpen = ref(false);
+const busy = computed(() => !!stopping.value || !!acting.value || holdOpen.value);
+
+const isMine = (row) => !!session.user && row.owner === session.user;
+
+function holdTitle(row) {
+	const reason = (row.admin_hold_reason || "").trim();
+	return reason ? `On hold: ${reason}` : "On hold";
+}
+
+function askHold(row) {
+	if (busy.value) return;
+	holding.value = row;
+	holdOpen.value = true;
+}
+
+async function onHeld({ name }) {
+	await load("keep");
+	await focusRow(name);
+}
+
+async function release(row) {
+	if (busy.value) return;
+	const name = row.macro_name || row.name;
+	const ok = await confirm({
+		title: "Release the hold?",
+		message:
+			`Release the hold on “${name}”, owned by ${ownerText(row)}? ` +
+			"Nothing turns itself back on: the macro stays off, unscheduled and disarmed until its owner switches it on.",
+		confirmLabel: "Release",
+	});
+	if (!ok) return;
+	await act(`release:${row.name}`, row.name, async () => {
+		const res = (await adminRelease(row.name)) || {};
+		if (res.released === false) {
+			toast.create({ message: "This macro was not on hold.", type: "info" });
+		} else {
+			toast.success(`Released the hold on “${escapeHtml(name)}”`);
+		}
+	});
+}
+
+async function remove(row) {
+	if (busy.value) return;
+	const name = row.macro_name || row.name;
+	const ok = await confirm({
+		title: "Delete this macro?",
+		message:
+			`Delete “${name}”, owned by ${ownerText(row)}? ` +
+			(row.live_run ? "Its run is stopped first. " : "") +
+			"The macro and its run history go; the chats its runs left stay. " +
+			"The owner is told an admin deleted it. This can't be undone.",
+		confirmLabel: "Delete",
+		danger: true,
+	});
+	if (!ok) return;
+	await act(`delete:${row.name}`, row.name, async () => {
+		const res = (await adminDelete(row.name)) || {};
+		const stopped = Number(res.stopped_runs) || 0;
+		toast.success(
+			`Deleted “${escapeHtml(name)}”` +
+				(stopped ? `; ${stopped} run${stopped === 1 ? "" : "s"} stopped first` : "")
+		);
+	});
+}
+
+// Runs one action, says what went wrong, and re-reads the list whatever happened:
+// a refusal ("This macro was deleted.") means the row is stale.
+async function act(key, name, fn) {
+	acting.value = key;
+	try {
+		await fn();
+	} catch (e) {
+		toast.error(errHtml(e));
+	}
+	try {
+		await load("keep");
+		await focusRow(name);
+	} finally {
+		acting.value = "";
 	}
 }
 
