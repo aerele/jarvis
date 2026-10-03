@@ -5,8 +5,19 @@
 	     the row that opened it. -->
 	<Dialog v-model="show" :options="{ title, size: '3xl' }">
 		<template #body-content>
+			<!-- Deleted since the list was loaded: nothing to retry, only to close. The
+			     pane is told (`gone`) and re-reads its list. -->
 			<div
-				v-if="error"
+				v-if="gone"
+				class="jv-macro-admin-gone flex flex-col items-center gap-3 py-8 text-center"
+				role="alert"
+			>
+				<FeatherIcon name="trash-2" class="size-8 text-ink-gray-4" />
+				<span class="text-base text-ink-gray-6">This macro was deleted.</span>
+			</div>
+
+			<div
+				v-else-if="error"
 				class="flex flex-col items-center gap-3 py-8 text-center"
 				role="alert"
 			>
@@ -23,20 +34,29 @@
 
 			<p v-else-if="!macro" class="text-p-base text-ink-gray-6" role="status">Loading…</p>
 
-			<div v-else class="flex max-h-[65vh] flex-col gap-5 overflow-y-auto pr-1">
-				<p class="text-p-sm text-ink-gray-6">
-					Read-only. Only {{ ownerText }} can edit or run this macro.
+			<!-- The one scroller of the dialog (up and down only). Focusable, so the
+			     keyboard can scroll a long macro. -->
+			<div
+				v-else
+				class="jv-macro-admin-body flex max-h-[65vh] flex-col gap-5 overflow-y-auto overflow-x-hidden pr-1"
+				tabindex="0"
+				role="region"
+				aria-label="Macro details"
+			>
+				<p class="jv-macro-admin-note text-p-sm text-ink-gray-6">
+					You are reading this as an administrator. These are {{ ownerText }}'s own
+					prompts, shown read-only: only they can edit or run this macro.
 				</p>
 
-				<dl class="grid grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+				<dl class="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
 					<dt class="text-ink-gray-5">Owner</dt>
-					<dd class="text-ink-gray-8">{{ ownerText }}</dd>
+					<dd class="break-words text-ink-gray-8">{{ ownerText }}</dd>
 					<dt class="text-ink-gray-5">State</dt>
 					<dd class="flex flex-wrap items-center gap-1">
 						<Badge
 							variant="subtle"
 							:theme="macro.enabled ? 'green' : 'gray'"
-							:label="macro.enabled ? 'On' : 'Off'"
+							:label="enabledLabel(macro.enabled)"
 						/>
 						<Badge
 							v-if="macro.skip_confirmation"
@@ -45,7 +65,7 @@
 							label="Armed"
 						/>
 						<span v-if="macro.skip_confirmation" class="text-xs text-ink-gray-5">
-							Its runs write without a confirmation card.
+							Its runs write without asking for confirmation.
 						</span>
 					</dd>
 					<dt class="text-ink-gray-5">Schedule</dt>
@@ -57,7 +77,7 @@
 					</dd>
 					<template v-if="macro.description">
 						<dt class="text-ink-gray-5">Description</dt>
-						<dd class="whitespace-pre-wrap text-ink-gray-8">
+						<dd class="whitespace-pre-wrap break-words text-ink-gray-8">
 							{{ macro.description }}
 						</dd>
 					</template>
@@ -70,9 +90,14 @@
 					>
 						Summarized prompt
 					</h3>
-					<pre v-if="macro.merged_prompt" class="jv-macro-admin-text" :class="PRE">{{
-						macro.merged_prompt
-					}}</pre>
+					<pre
+						v-if="macro.merged_prompt"
+						class="jv-macro-admin-text"
+						:class="PRE"
+						tabindex="0"
+						aria-label="Summarized prompt"
+						>{{ macro.merged_prompt }}</pre
+					>
 					<p v-else class="text-sm text-ink-gray-5">
 						{{
 							macro.merge_status === "pending"
@@ -86,12 +111,19 @@
 					<h3 id="jv-macro-admin-steps" class="mb-1 text-sm font-medium text-ink-gray-7">
 						Steps ({{ macro.steps.length }})
 					</h3>
-					<ol class="flex flex-col gap-3">
+					<p v-if="!macro.steps.length" class="text-sm text-ink-gray-5">No steps.</p>
+					<ol v-else class="flex flex-col gap-3">
 						<li v-for="(step, i) in macro.steps" :key="i">
 							<div class="mb-1 text-xs text-ink-gray-5">
 								{{ stepTitle(step, i) }}
 							</div>
-							<pre class="jv-macro-admin-text" :class="PRE">{{ step.prompt }}</pre>
+							<pre
+								class="jv-macro-admin-text"
+								:class="PRE"
+								tabindex="0"
+								:aria-label="`Prompt of step ${i + 1}`"
+								>{{ step.prompt }}</pre
+							>
 						</li>
 					</ol>
 				</section>
@@ -103,49 +135,63 @@
 					<p v-if="!macro.runs.length" class="text-sm text-ink-gray-5">
 						It has not run yet.
 					</p>
-					<table v-else class="w-full text-left text-sm">
-						<thead class="text-xs text-ink-gray-5">
-							<tr>
-								<th scope="col" class="py-1 pr-3 font-medium">Started</th>
-								<th scope="col" class="py-1 pr-3 font-medium">Status</th>
-								<th scope="col" class="py-1 pr-3 font-medium">Trigger</th>
-								<th scope="col" class="py-1 pr-3 font-medium">Steps</th>
-								<th scope="col" class="py-1 font-medium">Reason</th>
-							</tr>
-						</thead>
-						<tbody>
-							<tr
-								v-for="run in macro.runs"
-								:key="run.name"
-								class="border-t align-top"
-							>
-								<td
-									class="whitespace-nowrap py-1.5 pr-3 text-ink-gray-8"
-									:title="exactDate(run.started_at || run.creation)"
+					<!-- A long reason (a URL, a document name) makes the table wider than
+					     the dialog: it scrolls sideways here, in its own box. -->
+					<div
+						v-else
+						class="jv-macro-admin-runs overflow-x-auto"
+						tabindex="0"
+						role="region"
+						aria-label="Recent runs"
+					>
+						<table class="w-full text-left text-sm">
+							<thead class="text-xs text-ink-gray-5">
+								<tr>
+									<th scope="col" class="py-1 pr-3 font-medium">Started</th>
+									<th scope="col" class="py-1 pr-3 font-medium">Status</th>
+									<th scope="col" class="py-1 pr-3 font-medium">Trigger</th>
+									<th scope="col" class="py-1 pr-3 font-medium">Steps</th>
+									<th scope="col" class="py-1 font-medium">Reason</th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr
+									v-for="run in macro.runs"
+									:key="run.name"
+									class="border-t align-top"
 								>
-									{{ timeAgo(run.started_at || run.creation) }}
-								</td>
-								<td class="whitespace-nowrap py-1.5 pr-3">
-									<Badge
-										variant="subtle"
-										:theme="RUN_THEMES[run.status] || 'gray'"
-										:label="statusLabel(run.status)"
-									/>
-								</td>
-								<td
-									class="whitespace-nowrap py-1.5 pr-3 capitalize text-ink-gray-8"
-								>
-									{{ run.trigger || "manual" }}
-								</td>
-								<td class="whitespace-nowrap py-1.5 pr-3 text-ink-gray-8">
-									{{ (run.current_step || 0) + "/" + (run.total_steps || 0) }}
-								</td>
-								<td class="whitespace-pre-wrap break-words py-1.5 text-ink-gray-7">
-									{{ run.error || "-" }}
-								</td>
-							</tr>
-						</tbody>
-					</table>
+									<td
+										class="whitespace-nowrap py-1.5 pr-3 text-ink-gray-8"
+										:title="exactDate(run.started_at || run.creation)"
+									>
+										{{ timeAgo(run.started_at || run.creation) }}
+									</td>
+									<td class="whitespace-nowrap py-1.5 pr-3">
+										<Badge
+											variant="subtle"
+											:theme="RUN_THEMES[run.status] || 'gray'"
+											:label="statusLabel(run.status)"
+										/>
+									</td>
+									<td
+										class="whitespace-nowrap py-1.5 pr-3 capitalize text-ink-gray-8"
+									>
+										{{ run.trigger || "manual" }}
+									</td>
+									<td class="whitespace-nowrap py-1.5 pr-3 text-ink-gray-8">
+										{{
+											(run.current_step || 0) + "/" + (run.total_steps || 0)
+										}}
+									</td>
+									<td
+										class="min-w-40 whitespace-pre-wrap py-1.5 text-ink-gray-7 [overflow-wrap:anywhere]"
+									>
+										{{ run.error || "-" }}
+									</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
 				</section>
 			</div>
 		</template>
@@ -169,13 +215,15 @@ import { adminGetMacro } from "@/api/macrosAdmin";
 import { errMessage } from "@/lib/errors";
 import { nextRunCell } from "@/lib/macroSchedule";
 import { scheduleLabel } from "@/pages/macros/scheduleLabel";
+import { RUN_THEMES, enabledLabel, statusLabel } from "@/pages/macros/runDisplay";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	name: { type: String, required: true },
 });
-const emit = defineEmits(["update:modelValue"]);
+// `gone`: the macro no longer exists (deleted since the list was loaded).
+const emit = defineEmits(["update:modelValue", "gone"]);
 
 const show = computed({
 	get: () => props.modelValue,
@@ -184,24 +232,11 @@ const show = computed({
 
 const PRE =
 	"max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md bg-surface-gray-2 p-3 text-xs text-ink-gray-8";
-// The Runs tab's own colours and words for a run's status.
-const RUN_THEMES = {
-	queued: "gray",
-	running: "blue",
-	waiting_capacity: "orange",
-	completed: "green",
-	failed: "red",
-	stopped: "gray",
-};
-const STATUS_LABELS = { waiting_capacity: "Waiting for capacity" };
-function statusLabel(s) {
-	if (!s) return "";
-	return STATUS_LABELS[s] || s.charAt(0).toUpperCase() + s.slice(1);
-}
 
 const macro = ref(null);
 const loading = ref(false);
 const error = ref("");
+const gone = ref(false);
 
 // Only the newest request may fill the dialog: it is re-pointed at another row
 // without being unmounted.
@@ -210,6 +245,7 @@ async function load() {
 	const mine = ++latest;
 	loading.value = true;
 	error.value = "";
+	gone.value = false;
 	try {
 		const res = (await adminGetMacro(props.name)) || {};
 		if (mine !== latest) return;
@@ -217,6 +253,12 @@ async function load() {
 	} catch (e) {
 		if (mine !== latest) return;
 		macro.value = null;
+		// Not an error to try again: its owner deleted it after the list was loaded.
+		if (e && (e.status === 404 || e.exc_type === "DoesNotExistError")) {
+			gone.value = true;
+			emit("gone", props.name);
+			return;
+		}
 		error.value = errMessage(e, "Could not load this macro.");
 	} finally {
 		if (mine === latest) loading.value = false;
@@ -228,6 +270,7 @@ watch(
 	([open]) => {
 		if (!open) return;
 		macro.value = null;
+		gone.value = false;
 		load();
 	},
 	{ immediate: true }
