@@ -21,7 +21,8 @@ from unittest.mock import patch
 
 import frappe
 
-from jarvis.chat import admission, finalize, macro_reconcile, macros, macros_api
+from jarvis.chat import admission, finalize, macro_reconcile, macros, macros_api, settlement
+from jarvis.chat import turn_state as ts
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.race_harness import snapshot_isolation_on
 from jarvis.tests.test_macro_reconcile import CheckBase, _Killed
@@ -42,6 +43,9 @@ MERGE_REPLY = (
 	f'{{"mergeable": true, "reason": "", "merged_prompt": "{REPLY_MARK}"}}\n```'
 )
 MIN = 60
+# The real candidate query, before ``SummaryBase`` narrows it to a test's own macros.
+REAL_CANDIDATES = macro_reconcile._stuck_summary_candidates
+REAL_COUNT = getattr(macro_reconcile, "_stuck_summary_count", None)
 
 
 def setUpModule():
@@ -55,11 +59,13 @@ class SummaryBase(CheckBase):
 		self._macros: list[str] = []
 		self._conversations: list[str] = []
 		self.published: list[dict] = []
-		real_candidates = macro_reconcile._stuck_summary_candidates
 
-		def candidates():
+		def candidates(**kw):
 			# The site is shared: only this test's macros, through the real query.
-			return [row for row in real_candidates() if row.name in self._macros]
+			return [row for row in REAL_CANDIDATES(**kw) if row.name in self._macros]
+
+		def count():
+			return len(candidates(limit=10**6))
 
 		def publish(user, payload):
 			if payload.get("kind") == "macro:merged":
@@ -67,6 +73,7 @@ class SummaryBase(CheckBase):
 
 		for p in (
 			patch.object(macro_reconcile, "_stuck_summary_candidates", candidates),
+			patch.object(macro_reconcile, "_stuck_summary_count", count),
 			patch.object(macros, "publish_to_user", publish),
 			# The control plane and the gateway handshake, at their boundary.
 			patch.object(macros, "entitlement_block", return_value=None),
@@ -180,6 +187,14 @@ class SummaryBase(CheckBase):
 		self._settle_success(conv, rid, MERGE_REPLY)
 		self._force_done(rid)
 		self.assertEqual(self._state(rid), "done")
+		self._ended(rid)
+
+	def _ended_with_reply(self, conv: str, rid: str, state: str, **reply):
+		"""The turn ended ``state`` five minutes ago with this reply, and no finalize ledger:
+		an end no hook comes for (the run check's own fixtures do the same)."""
+		amsg = self._placeholder(conv, content=reply.pop("content", MERGE_REPLY), streaming=0, **reply)
+		self._force(rid, state=state, version=5, assistant_message=amsg, done_at=frappe.utils.now())
+		self.assertIsNone(macros._hook_effect_status(rid), "premise: no hook is owed")
 		self._ended(rid)
 
 	def _all_logs(self) -> list:
@@ -310,6 +325,7 @@ class TestATurnThatNeverEnds(SummaryBase):
 		self._real_advance(conv, errored=False, run_id=rid)
 		self.assertEqual(self._mark(name)[:2], ("failed", ""))
 		self.assertEqual(len(self.published), 1)
+		self.assertTrue(frappe.db.exists(CONV, conv), "its turn is still live")
 
 
 class TestOneSettlement(SummaryBase):
@@ -398,8 +414,8 @@ class TestOneSettlement(SummaryBase):
 			macros._apply_merge_after_turn(conv_a, errored=True)
 		self.assertEqual(self._mark(name)[:2], ("pending", started["conv"]))
 		self.assertTrue(frappe.db.exists(CONV, started["conv"]))
-		# Only the winner deletes: A's turn is still queued, and the losing hook leaves
-		# its chat alone (Re-summarize leaves a chat with a live turn too).
+		# A's turn is still queued: neither the losing hook nor Re-summarize removes a
+		# chat with a live turn.
 		self.assertTrue(frappe.db.exists(CONV, conv_a))
 		self.assertEqual(self.published, [])
 
@@ -468,6 +484,7 @@ class TestTheGateAndTheTick(SummaryBase):
 			out = self._tick()
 			self.assertEqual((out["raised"], out["summaries_settled"]), (1, 1))
 			self.assertEqual(self._mark(second)[0], "failed")
+			self._watchdog_clears_the_cache()
 			self.assertEqual(self._tick()["raised"], 0, "skipped for an hour after a raise")
 		failures = frappe.get_all(
 			LOG, filters={"method": f"jarvis.chat.macros.summary_reconcile_failed: {first}"}, pluck="name"
@@ -512,3 +529,208 @@ class TestTheGateAndTheTick(SummaryBase):
 			[{k: v for k, v in p.items() if k not in ("macro", "macro_name")} for p in self.published],
 			[{"kind": "macro:merged", "status": "ready"}] * 2,
 		)
+
+
+class TestWhatTheTurnAndTheReplyDecide(SummaryBase):
+	def test_a_chat_with_no_turn_and_a_finished_reply_lands_it(self):
+		"""Sent where no Turn row is written, the reply finished and its hook was lost: it
+		lands as the hook would have landed it."""
+		name, conv = self._mk_summary_with_no_turn()
+		self._placeholder(conv, content=MERGE_REPLY, streaming=0)
+		self.assertFalse(admission.reply_in_progress(conv), "premise")
+		self.assertEqual(self._tick()["summaries_settled"], 1)
+		self.assertEqual(self._mark(name), ("ready", "", REPLY_MARK))
+		self.assertEqual([p["status"] for p in self.published], ["ready"])
+
+	def test_a_reply_turn_recovery_finished_lands(self):
+		"""The turn was recorded ``errored``; turn recovery then finished its reply
+		(``was_recovered``, no error, text): the answer arrived."""
+		name, conv, rid = self._mk_summary()
+		self._ended_with_reply(conv, rid, "errored", was_recovered=1)
+		self.assertEqual(self._tick()["summaries_settled"], 1)
+		self.assertEqual(self._mark(name), ("ready", "", REPLY_MARK))
+
+	def test_a_turn_that_failed_or_was_stopped_fails_whatever_its_reply_says(self):
+		for state in ("errored", "cancelled"):
+			with self.subTest(state=state):
+				name, conv, rid = self._mk_summary()
+				self._ended_with_reply(conv, rid, state)
+				self.assertEqual(self._tick()["summaries_settled"], 1)
+				self.assertEqual(self._mark(name), ("failed", "", ""))
+
+	def test_the_newest_turn_of_the_chat_decides(self):
+		"""An older turn of the chat ended; a newer one (a re-dispatch) has not: the summary
+		waits for the newer one."""
+		name, conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+		frappe.db.sql(f"UPDATE `tab{TURN}` SET creation=%s WHERE name=%s", (self._ago(30 * MIN), rid))
+		frappe.db.commit()
+		seed = frappe.db.get_value(TURN, rid, "seed_message")
+		self._mk_turn(conv, f"summary-again-{frappe.generate_hash(length=6)}", seed, "queued")
+		self.assertEqual(self._tick()["summaries_settled"], 0)
+		self.assertEqual(self._mark(name)[:2], ("pending", conv))
+
+
+class TestTheCandidatesAndTheBudget(SummaryBase):
+	def _cut_short_logs(self):
+		return self._logs(macro_reconcile.TICK_CUT_SHORT)
+
+	def test_a_gone_chat_comes_first_then_the_oldest(self):
+		newest, _c1, _r1 = self._mk_summary(age_s=30 * MIN)
+		middle, _c2, _r2 = self._mk_summary(age_s=40 * MIN)
+		oldest, _c3, _r3 = self._mk_summary(age_s=50 * MIN)
+		gone, conv_gone, _r4 = self._mk_summary(age_s=0)
+		frappe.db.delete(TURN, {"conversation": conv_gone})
+		frappe.db.delete(MSG, {"conversation": conv_gone})
+		frappe.db.delete(CONV, {"name": conv_gone})
+		frappe.db.commit()
+		self.assertEqual(
+			[row.name for row in macro_reconcile._stuck_summary_candidates()], [gone, oldest, middle, newest]
+		)
+
+	def test_at_most_the_cap_is_looked_at_and_the_rest_is_counted(self):
+		names = []
+		for age in (23, 22, 21):
+			name, _conv, rid = self._mk_summary(age_s=age * MIN)
+			self._dead_turn(rid)
+			names.append(name)
+		self.assertGreaterEqual(REAL_COUNT(), 3, "the real count")
+		with patch.object(macro_reconcile, "MAX_SUMMARIES_PER_TICK", 2):
+			self.assertLessEqual(len(REAL_CANDIDATES()), 2, "the query itself is capped")
+			out = self._tick()
+			self.assertEqual((out["summaries_settled"], out["summaries_left"]), (2, 1))
+			self.assertEqual([self._mark(n)[0] for n in names], ["failed", "failed", "pending"])
+			cut = self._cut_short_logs()
+			self.assertEqual(len(cut), 1)
+			self.assertIn("1 stuck summaries were not looked at", cut[0].error)
+			self.assertNotIn("candidate runs", cut[0].error)
+			self.assertEqual(self._tick()["summaries_settled"], 1)
+
+	def test_the_time_budget_stops_the_summaries_too(self):
+		first, _c1, rid1 = self._mk_summary(age_s=25 * MIN)
+		second, _c2, rid2 = self._mk_summary()
+		self._dead_turn(rid1)
+		self._dead_turn(rid2)
+		real = macro_reconcile._SummaryCheck.run
+		looked = []
+
+		def run_check(check):
+			looked.append(check.name)
+			return real(check)
+
+		def clock():
+			# The budget is used up by the first summary, however often the clock is read.
+			return macro_reconcile.TICK_BUDGET_S + 1.0 if looked else 0.0
+
+		with (
+			patch.object(macro_reconcile._SummaryCheck, "run", run_check),
+			patch.object(macro_reconcile, "_clock", clock),
+		):
+			out = self._tick()
+		self.assertEqual(looked, [first])
+		self.assertEqual(
+			(out["summaries_settled"], out["out_of_time"], out["summaries_left"], out["left"]), (1, 1, 1, 0)
+		)
+		self.assertEqual(self._mark(second)[0], "pending")
+		cut = self._cut_short_logs()
+		self.assertEqual(len(cut), 1)
+		self.assertIn("time budget", cut[0].error)
+		self.assertIn("1 stuck summaries were not looked at", cut[0].error)
+
+	def test_summaries_a_run_half_out_of_time_left_are_counted(self):
+		name, _conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+		run, _run_conv, _run_turn = self._mk_run()
+		self._idle(run)
+		reads = iter([0.0])
+		with patch.object(macro_reconcile, "_clock", lambda: next(reads, 1000.0)):
+			out = self._tick()
+		self.assertEqual(
+			(out["out_of_time"], out["left"], out["summaries"], out["summaries_left"]), (1, 1, 0, 1)
+		)
+		self.assertEqual(self._mark(name)[0], "pending")
+		cut = self._cut_short_logs()
+		self.assertEqual(len(cut), 1)
+		self.assertIn("1 candidate runs were not looked at", cut[0].error)
+		self.assertIn("1 stuck summaries were not looked at", cut[0].error)
+
+
+class TestGivingUp(SummaryBase):
+	def _hook_owed_on_an_ended_turn(self, rid):
+		"""The turn ended ``errored`` and its finalize job died once in the hook: the
+		ledger still owes the hook, so the turn is not over, and nothing of the chat is
+		live."""
+		self._force(rid, state="errored", version=5, error="The model refused.", done_at=frappe.utils.now())
+		ts.insert_required_effects(rid, settlement.TERMINAL_EFFECTS)
+		frappe.db.commit()
+		self._die_in_the_hook(rid)
+		self.assertEqual(macros._hook_effect_status(rid), "running", "premise: a hook is owed")
+
+	def test_the_give_up_removes_an_idle_chat_of_the_owner_only(self):
+		mine, conv_mine, rid_mine = self._mk_summary(age_s=61 * MIN)
+		theirs, conv_theirs, rid_theirs = self._mk_summary(age_s=61 * MIN)
+		for rid in (rid_mine, rid_theirs):
+			self._hook_owed_on_an_ended_turn(rid)
+		frappe.db.set_value(CONV, conv_theirs, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		self.assertEqual(self._tick()["summaries_settled"], 2)
+		self.assertEqual([self._mark(n)[:2] for n in (mine, theirs)], [("failed", "")] * 2)
+		self.assertFalse(frappe.db.exists(CONV, conv_mine))
+		self.assertTrue(frappe.db.exists(CONV, conv_theirs), "never another user's chat")
+
+	def test_a_look_that_raises_on_every_tick_is_failed_at_sixty_minutes(self):
+		name, conv, rid = self._mk_summary()
+
+		def raises(conversation):
+			raise RuntimeError("a fault in the turn read")
+
+		with patch.object(macro_reconcile, "_summary_turn", raises):
+			out = self._tick()
+			self.assertEqual((out["raised"], out["summaries_settled"]), (1, 0))
+			self.assertEqual(self._mark(name)[:2], ("pending", conv))
+			# An hour later: the skip has run out, and the chat is an hour old.
+			frappe.cache().delete_value(macro_reconcile._summary_key("skip", name))
+			self._age_chat(conv, 61 * MIN)
+			out = self._tick()
+		self.assertEqual((out["raised"], out["summaries_settled"]), (1, 1))
+		self.assertEqual(self._mark(name)[:2], ("failed", ""))
+		self.assertEqual([p["status"] for p in self.published], ["failed"])
+		self.assertTrue(frappe.db.exists(CONV, conv), "its turn is live: the chat is kept")
+
+
+class TestTheTickLeavesATrace(SummaryBase):
+	def test_a_lock_wait_is_tried_again_on_the_next_tick_and_logged_at_most_hourly(self):
+		name, conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+
+		def waits(*a, **k):
+			raise frappe.QueryTimeoutError("Lock wait timeout exceeded")
+
+		with patch.object(macros, "_land_summary", waits):
+			for _ in range(2):
+				out = self._tick()
+				self.assertEqual((out["conflicts"], out["raised"], out["summaries_settled"]), (1, 0, 0))
+		rows = self._logs(macro_reconcile.LOCK_WAIT)
+		self.assertEqual(len(rows), 1)
+		self.assertIn(name, rows[0].error)
+		for mark in (PROMPT_MARK, REPLY_MARK, "Traceback"):
+			self.assertNotIn(mark, rows[0].error)
+		self.assertEqual(self._tick()["summaries_settled"], 1, "not skipped for an hour")
+
+	def test_a_cached_macro_reads_the_landed_summary(self):
+		name, conv, rid = self._mk_summary()
+		self._landing_lost(conv, rid)
+		self.assertEqual(frappe.get_cached_doc(MACRO, name).merge_status, "pending")
+		self._tick()
+		self.assertEqual(frappe.get_cached_doc(MACRO, name).merge_status, "ready")
+
+	def test_each_summary_of_a_macro_has_its_own_signal(self):
+		name, conv, rid = self._mk_summary()
+		self._landing_lost(conv, rid)
+		self._tick()
+		conv2 = self._summarize(name)
+		rid2 = frappe.db.get_value(TURN, {"conversation": conv2}, "name")
+		self._age_chat(conv2, 21 * MIN)
+		self._landing_lost(conv2, rid2)
+		self.assertEqual(self._tick()["summaries_settled"], 1)
+		self.assertEqual(len(self._summary_signals()), 2)
