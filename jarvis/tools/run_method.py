@@ -60,6 +60,9 @@ _DENIED_PREFIXES = (
 	"jarvis.chat.approvals_api.",
 	"jarvis.chat.pending_actions.",
 	"jarvis.chat.macros_api.",
+	# The Jarvis Admin's view of every user's macros. An admin's own assistant must
+	# not reach it: one call would read every user's prompts into the model's context.
+	"jarvis.chat.macros_admin_api.",
 )
 _DENIED = frozenset(
 	{

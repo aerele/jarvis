@@ -192,6 +192,7 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 	"billing", // legacy alias, not a PANES key - SettingsDialog maps it to "usage"
 	"branding",
 	"usageadmin",
+	"macroadmin",
 ]);
 // Only ever OPENS a pane - an absent or unrecognised key is silently ignored
 // so a plain "/jarvis/" load is untouched. Strips the param either way it

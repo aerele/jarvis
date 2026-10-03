@@ -233,6 +233,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { runDetail } from "@/lib/macroRunOutcome";
+import { RUN_THEMES, statusLabel } from "./runDisplay";
 
 const router = useRouter();
 const socket = inject("$socket");
@@ -247,18 +248,6 @@ const STATUS_OPTIONS = [
 	{ label: "Failed", value: "failed" },
 	{ label: "Stopped", value: "stopped" },
 ];
-const RUN_THEMES = {
-	queued: "gray",
-	running: "blue",
-	waiting_capacity: "orange", // parked, not failed - matches the merge_status "pending" badge elsewhere in Macros
-	completed: "green",
-	failed: "red",
-	stopped: "gray",
-};
-// Statuses whose display label isn't just a capitalized value (e.g. waiting_capacity).
-const STATUS_LABELS = {
-	waiting_capacity: "Waiting for capacity",
-};
 
 const columns = [
 	{ label: "Macro", key: "macro_name", width: 2 },
@@ -540,10 +529,6 @@ onBeforeUnmount(() => {
 });
 
 // ── formatters ───────────────────────────────────────────────────────────────
-function statusLabel(s) {
-	if (!s) return "";
-	return STATUS_LABELS[s] || s.charAt(0).toUpperCase() + s.slice(1);
-}
 function fmtDuration(sec) {
 	if (sec == null) return "";
 	sec = Math.max(0, Math.round(sec));
