@@ -1109,7 +1109,13 @@ _DELETED = "deleted"
 # Deleted by someone else since this request listed it (a second tab pressing the
 # same button): neither deleted by this request nor kept.
 _ALREADY_GONE = "already gone"
-_KEPT_ON_ERROR = "error"
+# The delete raised: not deleted, and not "kept" (no reply is in progress).
+_FAILED = "failed"
+# This many chats failing one after another reads as a fault common to all of them
+# (a broken trash hook, a held lock), not as one bad chat: the request stops there.
+# It bounds the Error Log rows of one request (each is forwarded off the bench with
+# its traceback) and the lock waits it can sit through in series.
+_FAILURES_IN_A_ROW_THAT_END_THE_REQUEST = 3
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1121,18 +1127,30 @@ def clear_chat_history() -> dict:
 	history rows survive but drop their (now deleted) conversation reference.
 
 	``deleted`` counts the conversations this request deleted. ``kept`` names the
-	skipped ones, so the client can tell whether the chat it has open is one of them
-	without reading the list again.
+	skipped ones (kept because a reply is in progress, nothing else), ``failed``
+	counts and ``failed_names`` names the ones an error left undeleted. The names are
+	there so the client can tell whether the chat it has open still exists without
+	reading the list again. Every listed conversation is in exactly one of deleted,
+	skipped, failed, or already gone (deleted by someone else meanwhile, not reported).
 
 	One conversation at a time, each in its own transaction. A conversation whose
-	delete fails is rolled back, logged by name, counted as kept, and the rest still
-	go: the request answers the same shape either way."""
+	delete fails is rolled back, logged by name and counted as failed, and the rest
+	still go, until ``_FAILURES_IN_A_ROW_THAT_END_THE_REQUEST`` fail one after
+	another: then the rest are not tried, and are failed too, without a log row each.
+	Keeping a chat for its reply is the designed outcome and writes no Error Log row
+	(a ``jarvis.`` row is forwarded to the control plane as an error). The request
+	answers the same shape either way."""
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
 	deleted = 0
-	kept: dict[str, str] = {}
-	for name in names:
+	kept: list[str] = []
+	failed: list[str] = []
+	failures_in_a_row = 0
+	for at, name in enumerate(names):
+		if failures_in_a_row >= _FAILURES_IN_A_ROW_THAT_END_THE_REQUEST:
+			failed.extend(names[at:])
+			break
 		try:
 			outcome = _delete_idle_conversation(name)
 		except Exception:
@@ -1144,37 +1162,22 @@ def clear_chat_history() -> dict:
 				message=f"conversation {name}\n{frappe.get_traceback()}",
 			)
 			frappe.db.commit()
-			outcome = _KEPT_ON_ERROR
+			outcome = _FAILED
+		failures_in_a_row = failures_in_a_row + 1 if outcome == _FAILED else 0
 		if outcome == _DELETED:
 			deleted += 1
+		elif outcome == _FAILED:
+			failed.append(name)
 		elif outcome != _ALREADY_GONE:
-			kept[name] = outcome
-	_note_kept_conversations(kept, of=len(names))
-	return {"ok": True, "deleted": deleted, "skipped": len(kept), "kept": list(kept)}
-
-
-def _note_kept_conversations(kept: dict[str, str], *, of: int) -> None:
-	"""One Error Log row per request that kept anything: how many, and why each. It is
-	what tells "kept, as designed" from "the delete failed" when a user reports that
-	Delete all did not delete everything. An Error Log row because an operator reads
-	those (a logger line below ERROR is not written in production); the title is the
-	part forwarded off the bench (``api_errors``), so the names stay in the body.
-	Never raises: the deletes it reports are already committed."""
-	if not kept:
-		return
-	try:
-		reasons: dict[str, list[str]] = {}
-		for name, reason in kept.items():
-			reasons.setdefault(reason, []).append(name)
-		lines = [f"{reason}: {len(names)} ({', '.join(names)})" for reason, names in sorted(reasons.items())]
-		frappe.log_error(
-			title="jarvis.chat.clear_history.kept",
-			message=f"user {frappe.session.user}: kept {len(kept)} of {of} conversations\n"
-			+ "\n".join(lines),
-		)
-		frappe.db.commit()
-	except Exception:
-		frappe.db.rollback()
+			kept.append(name)
+	return {
+		"ok": True,
+		"deleted": deleted,
+		"skipped": len(kept),
+		"kept": kept,
+		"failed": len(failed),
+		"failed_names": failed,
+	}
 
 
 def _delete_idle_conversation(conversation: str) -> str:
