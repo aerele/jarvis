@@ -263,6 +263,21 @@ def record_agent_run(
 
 	valid, dropped = _validate_findings(raw_findings, token_set, allowed_refs)
 
+	# OBSERVABILITY: a dropped finding is otherwise silent to the operator (it surfaces only in
+	# the run's coverage_note). Log it — a spike of "unknown rule token" drops is the fingerprint
+	# of a bundle/listing token-set drift (e.g. an advisory_tokens re-vendor that has not reached
+	# the listing yet), which would otherwise present as inexplicably vanished worklist findings.
+	if dropped:
+		frappe.logger("jarvis.agent_runs").warning(
+			{
+				"event": "findings_dropped",
+				"agent": run_row.agent,
+				"run": run_doc.name,
+				"count": len(dropped),
+				"reasons": sorted({d.get("reason", "invalid") for d in dropped}),
+			}
+		)
+
 	run_doc = agent_runs.record_delegate_run(
 		run_doc,
 		inst,
