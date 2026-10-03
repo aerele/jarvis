@@ -522,6 +522,8 @@ class TestAStepThatEndedWithNoHook(CheckBase):
 				self.assertEqual((out["ok"], out["path"]), (True, "queued"))
 				self._assert_ended(run, conv, rid, status="stopped")
 				self.assertEqual(self._run(run).error or "", "")
+				# Their own stop is told to nobody, as on the hook's own path.
+				self.assertEqual(self._notifications(), [])
 
 	def test_the_owner_cancelled_the_last_step_with_stop_on_error_off(self):
 		# Not "Finished, but 1 of 1 steps failed": they stopped it.
@@ -615,10 +617,10 @@ class TestAHookThatWasLost(CheckBase):
 		self._settled_long_enough(run, rid, seconds=3 * 3600 - 300)  # however late: an end is an end
 		self._tick()
 		self.assertEqual((self._run(run).status, self._run(run).error or ""), ("completed", ""))
-		# A manual run the check ends is told to its owner, however it ended.
+		# A clean completion is told to nobody, as on the hook's own path: the check is
+		# not louder than the hook. Only an ending with a reason notifies.
 		subjects = frappe.get_all("Notification Log", filters={"for_user": TEST_USER}, pluck="subject")
-		self.assertEqual(len(subjects), 1)
-		self.assertTrue(subjects[0].startswith("Macro run finished: reconcile-"), subjects)
+		self.assertEqual(subjects, [])
 
 	def test_a_hook_that_was_delivered_is_not_logged_as_lost(self):
 		# The ledger row is `done` with attempts to spare and the hook left no trace of

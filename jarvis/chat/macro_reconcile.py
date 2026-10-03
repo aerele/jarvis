@@ -406,7 +406,9 @@ class _RunCheck:
 		"""What the look did to the run: nothing (the engine declined the end, as it
 		declines a repeated one) or something. Something is logged when a hook should
 		have done it (by ``run``, once the session is restored), and the owner of a
-		manual run that ENDED is told, however it ended."""
+		manual run that ended WITH A REASON is told. A run the owner stopped, or one
+		that simply completed, is told to nobody, as on the hook's own path
+		(``macros._announce`` notifies only when there is an error to give)."""
 		run = self.run_doc
 		now = frappe.db.get_value(RUN, run.name, ["status", "current_step", "error"], as_dict=True)
 		if now and (now.status, int(now.current_step or 0)) == was:
@@ -414,7 +416,7 @@ class _RunCheck:
 		if shape:
 			self.signal = (shape, turn_state)
 		manual = (run.get("trigger") or "manual") != "scheduled"
-		if now and manual and now.status in macros._TERMINAL_RUN_STATUSES:
+		if now and manual and now.status in macros._TERMINAL_RUN_STATUSES and now.error:
 			# ``macros._announce`` left the closing line and, for a scheduled run, the
 			# notification. A manual run gets none there: whoever started it is told by
 			# the realtime event. Nobody is watching a run found minutes later, and a
@@ -424,7 +426,7 @@ class _RunCheck:
 			macros.notify_owner(
 				self.macro_doc.owner,
 				subject=f"{macros._OUTCOME_SUBJECT[now.status]}: {self.macro_doc.macro_name}",
-				body=now.error or "",
+				body=now.error,
 			)
 		return True
 
