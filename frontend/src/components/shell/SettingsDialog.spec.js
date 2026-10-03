@@ -113,7 +113,7 @@ describe("SettingsDialog rail", () => {
 });
 
 describe("SettingsDialog Administration group", () => {
-	const railLabels = (w) => w.findAll("button[aria-current], button").map((b) => b.text());
+	const railLabels = (w) => w.findAll("button").map((b) => b.text());
 
 	it("shows Macros beside User usage to a Jarvis Admin", async () => {
 		const w = await mountDialog({ isAdmin: true });
