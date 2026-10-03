@@ -75,9 +75,10 @@
    "fieldtype": "Small Text",
    "label": "Hold reason",
    "read_only": 1,
+   "hidden": 1,
    "no_copy": 1,
    "permlevel": 1,
-   "description": "Why the admin put the macro on hold, shown to its owner on the macro form."
+   "description": "Why the admin put the macro on hold, shown to its owner on the macro form. Hidden in Desk: the text is stored as the admin typed it, and the Desk form would show it as HTML. The SPA shows it as plain text."
   },
   {
    "fieldname": "description",

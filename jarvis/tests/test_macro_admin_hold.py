@@ -636,6 +636,11 @@ class TestTheOwnerCannotUndoIt(WithColumns):
 			state = self._state(name)
 			self.assertEqual((state.admin_hold, state.admin_hold_reason or ""), (0, ""), name)
 
+	def test_the_reason_is_never_drawn_by_the_desk_form(self):
+		# The reason is stored as the admin typed it, and Desk draws a read-only text
+		# field as HTML. Only the SPA shows it, as plain text.
+		self.assertTrue(frappe.get_meta(MACRO).get_field("admin_hold_reason").hidden)
+
 	def test_the_fields_permlevel_alone_resets_an_owners_write(self):
 		# Spec assumption 7 on this framework (Frappe 16): a permlevel 1 field that no
 		# role may write is put back on an owner's save, with the controller's own
