@@ -356,6 +356,30 @@ class TestOneSettlement(SummaryBase):
 		self.assertTrue(frappe.db.exists(TURN, {"conversation": conv_b}))
 		self.assertEqual(self.published, [])
 
+	def test_a_save_of_the_macro_meanwhile_does_not_stop_the_check(self):
+		"""Another writer changed the macro row (not its summary) after the check's
+		snapshot: the compare-and-set is replayed on the present row and wins, rather
+		than losing to a write conflict for an hour of ticks."""
+		name, conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+		real_over = macro_reconcile.step_is_over
+		saved = []
+
+		def over(turn_id, **kw):
+			def save():
+				frappe.db.set_value(MACRO, name, "description", "edited meanwhile", update_modified=True)
+
+			if turn_id == rid and not saved:
+				saved.append(1)
+				self._elsewhere(save)
+			return real_over(turn_id, **kw)
+
+		with patch.object(macro_reconcile, "step_is_over", over):
+			out = self._tick()
+		self.assertEqual((out["summaries_settled"], out["conflicts"]), (1, 0))
+		self.assertEqual(self._mark(name)[:2], ("failed", ""))
+		self.assertEqual(frappe.db.get_value(MACRO, name, "description"), "edited meanwhile")
+
 	def test_a_stale_hook_does_not_fail_a_re_summarize(self):
 		"""The hook found the macro waiting on chat A; a forced Re-summarize moves the
 		mark to chat B while the hook reads A's reply. A's landing loses."""
