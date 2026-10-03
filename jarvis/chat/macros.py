@@ -2485,9 +2485,61 @@ def _scheduled_steps_this_month(owner: str) -> int:
 	row = frappe.db.sql(
 		f"""SELECT COALESCE(SUM(current_step), 0) FROM `tab{RUN}`
 		    WHERE owner = %(owner)s AND `trigger` = 'scheduled' AND creation >= %(since)s""",
-		{"owner": owner, "since": frappe.utils.get_first_day(frappe.utils.today())},
+		{"owner": owner, "since": _budget_month_start()},
 	)
 	return int(row[0][0] or 0) if row else 0
+
+
+def _budget_month_start():
+	"""The first day of the budget month. One definition: the sum above, what a
+	macro delete keeps and what the purge removes must agree on where a month starts."""
+	return frappe.utils.get_first_day(frappe.utils.today())
+
+
+def drop_runs_of_deleted_macro(macro_name: str) -> None:
+	"""Remove a macro's run rows for its delete, except the ones the month's budget
+	is added up from.
+
+	The delete used to remove them all, so deleting a macro and creating it again
+	handed its owner the month's unattended budget back. The rows that count toward
+	the current month (exactly the terms of ``_scheduled_steps_this_month``, and at
+	least one step sent) are KEPT, with only their ``macro`` link cleared: the macro
+	can then be deleted, and the row is no longer anybody's run history. Every reader
+	that shows runs leaves a row with no macro out (``macros_api``). The chat link is
+	left as it is. ``purge_kept_budget_rows`` removes a kept row once its month is over.
+
+	The caller (``macros_api.delete_macro``) has stopped the macro's live runs and
+	holds the macro's row lock, so every row here has ended; it commits, or rolls
+	both statements back with its own delete. Raw writes: a run row is read-only
+	through the document API (``macro_permissions``)."""
+	frappe.db.sql(
+		f"""UPDATE `tab{RUN}` SET macro = NULL
+		    WHERE macro = %(macro)s AND `trigger` = 'scheduled' AND creation >= %(since)s
+		      AND current_step > 0""",
+		{"macro": macro_name, "since": _budget_month_start()},
+	)
+	frappe.db.delete(RUN, {"macro": macro_name})
+
+
+# How many kept rows one pass of the purge removes. The hourly job comes back for
+# the rest; a site would need this many deleted-macro runs in one month to notice.
+_KEPT_ROW_PURGE_BATCH = 5000
+
+
+def purge_kept_budget_rows() -> int:
+	"""Delete the run rows a macro delete kept for the budget
+	(``drop_runs_of_deleted_macro``) once their month is over; returns how many.
+	They count toward nothing from then on and are shown nowhere.
+
+	One bounded statement, and the same rows match again if it is repeated or cut
+	short. Run history of a macro that still exists always has its macro, so it is
+	never touched. Does not commit."""
+	frappe.db.sql(
+		f"DELETE FROM `tab{RUN}` WHERE macro IS NULL AND creation < %(since)s LIMIT %(batch)s",
+		{"since": _budget_month_start(), "batch": _KEPT_ROW_PURGE_BATCH},
+	)
+	cursor = getattr(frappe.db, "_cursor", None)
+	return int(cursor.rowcount) if cursor else 0
 
 
 def _over_step_budget(owner: str, steps: int) -> bool:
@@ -2526,6 +2578,7 @@ def reap_stale_macro_runs() -> int:
 	the chaining hook and the capacity resume take, plus a row lock, and transitioned
 	with a compare-and-set on ``status='running'`` — so a run that advanced between
 	the scan and here is left alone rather than having a live step killed under it."""
+	_purge_kept_budget_rows_quietly()
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
 	candidates = _stale_run_candidates(cutoff)
 	if not candidates:
@@ -2565,6 +2618,19 @@ def reap_stale_macro_runs() -> int:
 			frappe.db.rollback()
 			frappe.log_error(title="jarvis macro stale-run sweep failed", message=frappe.get_traceback())
 	return reaped
+
+
+def _purge_kept_budget_rows_quietly() -> None:
+	"""The purge as a step of the hourly macro job. It rides on
+	``reap_stale_macro_runs``' scheduler entry instead of having its own: a new entry
+	only exists after a migrate. Committed here, and a failure is logged and goes no
+	further, so the stuck-run sweep after it runs either way."""
+	try:
+		purge_kept_budget_rows()
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis macro kept-row purge failed", message=frappe.get_traceback())
 
 
 def _stale_run_candidates(cutoff) -> list[str]:
