@@ -50,7 +50,9 @@
 
 <script setup>
 // One question, the reason, then admin_hold. The pane re-reads its list when told
-// (`held`). A refusal stays in the dialog, next to the reason it may be about.
+// (`held`, and `failed`: a hold can be committed and still answer an error, when one
+// of the macro's runs could not be stopped). A refusal stays in the dialog, next to
+// the reason it may be about.
 import { computed, ref, watch } from "vue";
 import { Button, Dialog, ErrorMessage, FormControl, toast } from "frappe-ui";
 import { adminHold } from "@/api/macrosAdmin";
@@ -66,7 +68,7 @@ const props = defineProps({
 	macroName: { type: String, default: "" },
 	ownerLabel: { type: String, default: "" },
 });
-const emit = defineEmits(["update:modelValue", "held"]);
+const emit = defineEmits(["update:modelValue", "held", "failed"]);
 
 const show = computed({
 	get: () => props.modelValue,
@@ -108,6 +110,7 @@ async function save() {
 		show.value = false;
 	} catch (e) {
 		error.value = errMessage(e, "Could not put the macro on hold.");
+		emit("failed", { name: props.name });
 	} finally {
 		saving.value = false;
 	}

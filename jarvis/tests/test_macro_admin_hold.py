@@ -281,11 +281,17 @@ class TestTheHold(WithColumns):
 				frappe.throw("This run could not be stopped. Try again.")
 			return real_stop(run, **kwargs)
 
+		frappe.clear_messages()
 		with patch.object(macros, "_stop_run", side_effect=stop):
 			with self.assertRaises(frappe.ValidationError) as raised:
 				self._hold(macro)
 		self.assertEqual(sorted(calls), sorted([first, second]))
 		self.assertIn(first, str(raised.exception))
+		# The admin is shown the hold's own message, not the failed stop's: a client
+		# shows the first message of the request.
+		shown = [frappe.parse_json(m).get("message", "") for m in frappe.local.message_log]
+		self.assertEqual(len(shown), 1, shown)
+		self.assertIn("could not be stopped (", shown[0])
 		self.assertEqual(self._run(second).status, "stopped")
 		self.assertEqual(self._run(first).status, "running")
 		self.assertEqual(self._state(macro).admin_hold, 1)  # the hold itself stands
