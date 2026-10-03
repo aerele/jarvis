@@ -23,6 +23,7 @@ import frappe
 
 from jarvis.chat import admission, finalize, macro_reconcile, macros, macros_api
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+from jarvis.tests.race_harness import snapshot_isolation_on
 from jarvis.tests.test_macro_reconcile import CheckBase, _Killed
 from jarvis.tests.test_pump import TEST_USER
 
@@ -347,8 +348,9 @@ class TestOneSettlement(SummaryBase):
 				self._elsewhere(re_summarize)
 			return real_over(turn_id, **kw)
 
-		with patch.object(macro_reconcile, "step_is_over", over):
-			self.assertEqual(self._tick()["summaries_settled"], 0)
+		with patch.object(macro_reconcile, "step_is_over", over), snapshot_isolation_on():
+			out = self._tick()
+		self.assertEqual((out["summaries_settled"], out["conflicts"]), (0, 0))
 		conv_b = started["conv"]
 		self._track(conv_b)
 		self.assertEqual(self._mark(name)[:2], ("pending", conv_b))
@@ -374,7 +376,7 @@ class TestOneSettlement(SummaryBase):
 				self._elsewhere(save)
 			return real_over(turn_id, **kw)
 
-		with patch.object(macro_reconcile, "step_is_over", over):
+		with patch.object(macro_reconcile, "step_is_over", over), snapshot_isolation_on():
 			out = self._tick()
 		self.assertEqual((out["summaries_settled"], out["conflicts"]), (1, 0))
 		self.assertEqual(self._mark(name)[:2], ("failed", ""))
