@@ -25,8 +25,9 @@ import datetime
 from unittest.mock import patch
 
 import frappe
+from frappe.desk.doctype.notification_log.notification_log import NotificationLog
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_to_date, get_datetime, now_datetime
+from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
 from jarvis.chat import macro_scheduler, macros, macros_api
 
@@ -98,12 +99,35 @@ def _purge() -> None:
 	frappe.db.commit()
 
 
+_SWITCH_OFF_NOTICE = "Macro schedules switched off:%"
+
+
+def _switch_off_notices() -> set:
+	return set(
+		frappe.get_all("Notification Log", filters={"subject": ["like", _SWITCH_OFF_NOTICE]}, pluck="name")
+	)
+
+
 def _runs_for(macro_name: str) -> list:
 	return frappe.get_all(
 		RUN,
 		filters={"macro": macro_name},
 		fields=["name", "status", "error", "owner", "trigger"],
 		order_by="creation asc",
+	)
+
+
+def _due_names(macros_: list, *, days_ahead: int = 0) -> list:
+	"""Which of these macros a sweep would pick up, by the sweep's own filter. With
+	``days_ahead`` it answers "would ANY sweep in that time", i.e. is it scheduled at all."""
+	return frappe.get_all(
+		MACRO,
+		filters={
+			"name": ["in", [m.name for m in macros_]],
+			"schedule_enabled": 1,
+			"next_run_at": ["<=", add_to_date(now_datetime(), days=days_ahead)],
+		},
+		pluck="name",
 	)
 
 
@@ -118,10 +142,18 @@ class MacroSchedulerBase(FrappeTestCase):
 	def setUp(self):
 		super().setUp()
 		_purge()
+		# A sweep that meets a barred owner tells EVERY Jarvis Admin on the site, other
+		# suites' users included, and the notice about Administrator carries nothing
+		# `_purge` can find it by. Remember what was there, so tearDown removes exactly
+		# what this test caused and nothing a real admin was sent.
+		self._notices_before = _switch_off_notices()
 
 	def tearDown(self):
 		frappe.db.rollback()
 		_purge()
+		for n in _switch_off_notices() - self._notices_before:
+			frappe.delete_doc("Notification Log", n, force=True, ignore_permissions=True)
+		frappe.db.commit()
 		super().tearDown()
 
 	def _run_due(self):
@@ -177,10 +209,11 @@ class TestScheduledMacroIdentity(MacroSchedulerBase):
 		self.assertIn(m.name, self._run_due(), "the guard over-reached and refused a legitimate owner")
 
 	def test_refused_macro_does_not_busy_refire(self):
+		# Was "the slot is moved on". The schedule is now switched OFF instead (see
+		# TestLeaverSchedulesAreSwitchedOff), and that is what stops the re-fire.
 		m = _mk_macro("Administrator", "admin-advance")
 		self._run_due()
-		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		self.assertGreater(nxt, now_datetime(), "a refused macro stayed due and would re-fire hourly")
+		self.assertEqual(_due_names([m]), [], "a refused macro stayed due and would re-fire every sweep")
 
 	def test_refusal_is_recorded_as_a_failed_run(self):
 		m = _mk_macro(OWNER_OFF, "disabled-recorded")
@@ -189,6 +222,593 @@ class TestScheduledMacroIdentity(MacroSchedulerBase):
 		self.assertEqual([r.status for r in runs], ["failed"])
 		self.assertEqual(runs[0].owner, OWNER_OFF, "the failed row is not visible to the owner")
 		self.assertIn("unattended", runs[0].error)
+
+
+# --------------------------------------------------------------------------- #
+# Leavers: the first sweep that meets a barred owner switches ALL of that owner's
+# schedules off and tells the site's admins once, instead of failing every slot
+# forever and telling nobody
+# --------------------------------------------------------------------------- #
+ADMIN_A = "msched-admin-a@example.com"
+ADMIN_B = "msched-admin-b@example.com"
+ADMIN_OFF = "msched-admin-off@example.com"
+LEAVER = "msched-leaver@example.com"
+NO_ROLE = "msched-norole@example.com"
+
+
+class _Killed(BaseException):
+	"""A worker dying mid-sweep (a deploy restart, the OOM killer, a job timeout). Not
+	an ``Exception``, so no handler in the sweep gets to tidy up after it."""
+
+
+def _comments_on(macro_name: str) -> list:
+	return frappe.get_all(
+		"Comment",
+		filters={"reference_doctype": MACRO, "reference_name": macro_name, "comment_type": "Info"},
+		pluck="content",
+	)
+
+
+def _admin_notes(user: str, about: str) -> list:
+	return frappe.get_all(
+		"Notification Log",
+		filters={"for_user": user, "subject": ["like", f"%{about}%"]},
+		fields=["subject", "email_content", "document_type", "document_name"],
+	)
+
+
+def _schedule_state(macro_name: str):
+	return frappe.db.get_value(
+		MACRO,
+		macro_name,
+		["schedule_enabled", "next_run_at", "last_run_at", "enabled", "modified"],
+		as_dict=True,
+	)
+
+
+class TestLeaverSchedulesAreSwitchedOff(MacroSchedulerBase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, ensure_jarvis_admin_role
+
+		ensure_jarvis_admin_role()
+		for admin in (ADMIN_A, ADMIN_B, ADMIN_OFF):
+			_ensure_user(admin, enabled=1)
+			frappe.get_doc("User", admin).add_roles(JARVIS_ADMIN_ROLE)
+		# A Jarvis Admin whose own account is disabled is nobody to tell.
+		frappe.db.set_value("User", ADMIN_OFF, "enabled", 0)
+		_ensure_user(LEAVER, enabled=1)
+		# Enabled, a System User, and holding no Jarvis role: the "lost the role" leaver.
+		_ensure_user(NO_ROLE, enabled=1)
+		frappe.get_doc("User", NO_ROLE).remove_roles(JARVIS_USER_ROLE)
+		frappe.db.set_value("User", NO_ROLE, {"enabled": 1, "user_type": "System User"})
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		# These users are this class's own. Left behind, the three admins stay holders
+		# of the Jarvis Admin role on a shared site, and every other suite that sweeps a
+		# barred owner then notifies them.
+		frappe.db.rollback()
+		for user in (ADMIN_A, ADMIN_B, ADMIN_OFF, LEAVER, NO_ROLE):
+			frappe.db.delete("Notification Log", {"for_user": user})
+			frappe.delete_doc("User", user, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		super().tearDownClass()
+
+	def setUp(self):
+		super().setUp()
+		self._enable_leaver()
+
+	def tearDown(self):
+		frappe.db.rollback()
+		self._enable_leaver()
+		super().tearDown()
+
+	def _enable_leaver(self):
+		frappe.db.set_value("User", LEAVER, "enabled", 1)
+		frappe.db.commit()
+
+	def _assert_sweep_order(self, *groups):
+		"""The sweep handles the due macros in the order its query returns them, newest
+		first. A test about what happens AFTER a barred owner was met proves nothing if
+		the macro it watches is handled before that owner, so pin the order: every macro
+		of one group comes before every macro of the next."""
+		names = [m.name for group in groups for m in group]
+		order = frappe.get_all(
+			MACRO,
+			filters={"name": ["in", names], "schedule_enabled": 1, "next_run_at": ["<=", now_datetime()]},
+			pluck="name",
+		)
+		self.assertEqual(order, names, "the fixture no longer puts these macros in the order the test needs")
+
+	def _assert_untouched(self, m):
+		row = _schedule_state(m.name)
+		self.assertEqual(cint(row.schedule_enabled), 1, f"{m.macro_name}: the schedule went off")
+		self.assertIsNotNone(row.next_run_at)
+		self.assertIsNone(row.last_run_at)
+		self.assertEqual(_comments_on(m.name), [])
+		self.assertEqual(_runs_for(m.name), [])
+
+	def _assert_switched_off(self, m, *, by: str = OWNER_OFF):
+		row = _schedule_state(m.name)
+		self.assertEqual(cint(row.schedule_enabled), 0, f"{m.macro_name}: the schedule is still on")
+		self.assertIsNone(
+			row.next_run_at,
+			f"{m.macro_name}: not the state the form leaves when the schedule is switched off",
+		)
+		self.assertEqual(
+			_comments_on(m.name),
+			[f"Schedule switched off: {by} can no longer use Jarvis"],
+			f"{m.macro_name}: expected exactly one Comment saying why",
+		)
+
+	def test_first_encounter_switches_off_every_schedule_of_that_owner(self):
+		due = _mk_macro(OWNER_OFF, "leave-due")
+		later = _mk_macro(OWNER_OFF, "leave-later", due=False)
+		paused = _mk_macro(OWNER_OFF, "leave-paused", due=False, enabled=0)
+		before = _schedule_state(later.name)
+
+		self.assertEqual(self._run_due(), [], "a barred owner's macro was dispatched")
+
+		self.assertEqual([r.status for r in _runs_for(due.name)], ["failed"])
+		self.assertIn("unattended", _runs_for(due.name)[0].error)
+		for m in (due, later, paused):
+			self._assert_switched_off(m)
+		# Only the macro the sweep actually met has anything recorded against it.
+		self.assertEqual(_runs_for(later.name), [])
+		self.assertEqual(_runs_for(paused.name), [])
+		after = _schedule_state(later.name)
+		self.assertEqual(after.modified, before.modified, "the engine never saves a macro document")
+		self.assertIsNone(after.last_run_at, "a macro that was not even due reads as having run")
+		self.assertEqual(cint(_schedule_state(paused.name).enabled), 0)
+		self.assertEqual(cint(_schedule_state(due.name).enabled), 1, "only the schedule goes off")
+
+		for admin in (ADMIN_A, ADMIN_B):
+			notes = _admin_notes(admin, OWNER_OFF)
+			self.assertEqual(len(notes), 1, f"{admin} should be told exactly once")
+			self.assertIn("3 macro schedules", notes[0].email_content)
+			self.assertIn(OWNER_OFF, notes[0].email_content)
+			self.assertFalse(notes[0].document_type or notes[0].document_name)
+		self.assertEqual(_admin_notes(ADMIN_OFF, OWNER_OFF), [], "a disabled admin was notified")
+		self.assertEqual(_admin_notes(OWNER_OFF, OWNER_OFF), [], "the leaver was notified")
+
+	def test_an_unscheduled_macro_of_that_owner_is_not_touched(self):
+		_mk_macro(OWNER_OFF, "leave-sched")
+		manual = _mk_macro(OWNER_OFF, "leave-manual", due=False)
+		frappe.db.set_value(
+			MACRO, manual.name, {"schedule_enabled": 0, "next_run_at": None}, update_modified=False
+		)
+		frappe.db.commit()
+		before = _schedule_state(manual.name)
+
+		self._run_due()
+
+		self.assertEqual(_schedule_state(manual.name), before)
+		self.assertEqual(_comments_on(manual.name), [], "a macro with no schedule got a switch-off Comment")
+		self.assertEqual(_runs_for(manual.name), [])
+		self.assertIn("1 macro schedule ", _admin_notes(ADMIN_A, OWNER_OFF)[0].email_content)
+
+	def test_three_due_macros_of_one_owner_run_the_branch_once(self):
+		three = [_mk_macro(OWNER_OFF, f"leave-three-{i}") for i in range(3)]
+
+		self._run_due()
+
+		runs = [r for m in three for r in _runs_for(m.name)]
+		self.assertEqual(len(runs), 1, "one failed run for the owner, not one per due macro")
+		for m in three:
+			self._assert_switched_off(m)
+		for admin in (ADMIN_A, ADMIN_B):
+			notes = _admin_notes(admin, OWNER_OFF)
+			self.assertEqual(len(notes), 1, "one notification per admin, not one per due macro")
+			self.assertIn("3 macro schedules", notes[0].email_content)
+
+	def test_the_next_sweep_does_nothing_for_that_owner(self):
+		three = [_mk_macro(OWNER_OFF, f"leave-next-{i}") for i in range(3)]
+		self._run_due()
+		self.assertEqual(_due_names(three, days_ahead=400), [], "a switched-off macro can still come due")
+
+		self._run_due()
+
+		self.assertEqual(len([r for m in three for r in _runs_for(m.name)]), 1)
+		self.assertEqual(len(_admin_notes(ADMIN_A, OWNER_OFF)), 1)
+		for m in three:
+			self._assert_switched_off(m)
+
+	def test_a_second_sweep_holding_the_same_stale_row_does_not_repeat_it(self):
+		# Two sweeps overlapping: each read `due` before either switched anything off,
+		# and neither has the other's memory of barred owners.
+		m = _mk_macro(OWNER_OFF, "leave-overlap")
+		stale = frappe.get_all(MACRO, filters={"name": m.name}, fields=["*"])[0]
+
+		macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+		macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+
+		self.assertEqual(len(_runs_for(m.name)), 1, "the second sweep recorded the failure again")
+		self._assert_switched_off(m)
+		self.assertEqual(len(_admin_notes(ADMIN_A, OWNER_OFF)), 1, "the admins were told twice")
+
+	def test_a_paused_macro_due_in_the_same_pass_is_not_given_a_next_run(self):
+		# The sweep lists newest first, so `paused` is handled AFTER `live` switched the
+		# owner's schedules off. Moving its slot on then would write a "Next run" back
+		# onto a macro whose schedule is off.
+		paused = _mk_macro(OWNER_OFF, "leave-paused-due", enabled=0)
+		live = _mk_macro(OWNER_OFF, "leave-live-due")
+
+		self._run_due()
+
+		for m in (paused, live):
+			self._assert_switched_off(m)
+		self.assertEqual(_runs_for(paused.name), [], "a paused macro is not a failure")
+		self.assertIsNone(_schedule_state(paused.name).last_run_at)
+
+	def test_another_owners_macros_in_the_same_pass_still_run(self):
+		# Created FIRST, so handled LAST: after the sweep has met the barred owner.
+		mine = [_mk_macro(OWNER_OK, f"stay-mixed-{i}") for i in range(2)]
+		gone = [_mk_macro(OWNER_OFF, f"leave-mixed-{i}") for i in range(2)]
+		self._assert_sweep_order(gone[::-1], mine[::-1])
+
+		ran = self._run_due()
+
+		self.assertEqual(sorted(ran), sorted(m.name for m in mine))
+		for m in mine:
+			row = _schedule_state(m.name)
+			self.assertEqual(cint(row.schedule_enabled), 1, "another owner's schedule was switched off")
+			self.assertGreater(get_datetime(row.next_run_at), now_datetime())
+			self.assertEqual(_comments_on(m.name), [])
+			self.assertEqual(_runs_for(m.name), [], "run_macro is stubbed: nothing should be recorded")
+		for m in gone:
+			self._assert_switched_off(m)
+
+	def test_two_barred_owners_and_a_healthy_one_in_the_same_pass(self):
+		# The first sweeps after a deploy: several owners are already barred. What the
+		# sweep remembers is WHICH owners it met, not that it met one.
+		mine_0 = _mk_macro(OWNER_OK, "stay-two-0")
+		gone = [_mk_macro(OWNER_OFF, f"leave-two-gone-{i}") for i in range(2)]
+		mine_1 = _mk_macro(OWNER_OK, "stay-two-1")
+		norole = [_mk_macro(NO_ROLE, f"leave-two-norole-{i}") for i in range(2)]
+		self._assert_sweep_order(norole[::-1], [mine_1], gone[::-1], [mine_0])
+
+		ran = self._run_due()
+
+		self.assertEqual(
+			sorted(ran), sorted([mine_0.name, mine_1.name]), "a healthy owner's macro was skipped"
+		)
+		for group, owner in ((gone, OWNER_OFF), (norole, NO_ROLE)):
+			for m in group:
+				self._assert_switched_off(m, by=owner)
+			self.assertEqual(
+				len([r for m in group for r in _runs_for(m.name)]), 1, f"{owner}: one failed run"
+			)
+			for admin in (ADMIN_A, ADMIN_B):
+				notes = _admin_notes(admin, owner)
+				self.assertEqual(len(notes), 1, f"{admin} should be told once about {owner}")
+				self.assertIn("2 macro schedules", notes[0].email_content)
+		for m in (mine_0, mine_1):
+			self.assertEqual(cint(_schedule_state(m.name).schedule_enabled), 1)
+			self.assertEqual(_comments_on(m.name), [])
+
+	def test_an_owner_whose_only_due_macros_are_paused_is_not_switched_off_yet(self):
+		# Stated, not fixed: a paused macro is handled before the owner is looked at
+		# (its slot is moved on, nothing is recorded), so the branch is not reached
+		# until a LIVE macro of that owner comes due.
+		paused = _mk_macro(OWNER_OFF, "leave-only-paused", enabled=0)
+		live = _mk_macro(OWNER_OFF, "leave-only-paused-live", due=False)
+
+		self._run_due()
+
+		row = _schedule_state(paused.name)
+		self.assertEqual(cint(row.schedule_enabled), 1)
+		self.assertGreater(get_datetime(row.next_run_at), now_datetime(), "the paused slot was not moved on")
+		self.assertEqual(cint(_schedule_state(live.name).schedule_enabled), 1)
+		for m in (paused, live):
+			self.assertEqual(_comments_on(m.name), [])
+			self.assertEqual(_runs_for(m.name), [])
+		self.assertEqual(_admin_notes(ADMIN_A, OWNER_OFF), [])
+
+		frappe.db.set_value(
+			MACRO, live.name, "next_run_at", add_to_date(now_datetime(), hours=-1), update_modified=False
+		)
+		frappe.db.commit()
+		self._run_due()
+
+		for m in (paused, live):
+			self._assert_switched_off(m)
+		self.assertIn("2 macro schedules", _admin_notes(ADMIN_A, OWNER_OFF)[0].email_content)
+
+	def test_a_stale_paused_row_does_not_put_a_next_run_back_on_a_switched_off_schedule(self):
+		# An overlapping sweep that read this paused macro as due before the owner's
+		# schedules were switched off, and has no memory of that owner.
+		paused = _mk_macro(OWNER_OFF, "leave-stale-paused", enabled=0)
+		_mk_macro(OWNER_OFF, "leave-stale-live")
+		stale = frappe.get_all(MACRO, filters={"name": paused.name}, fields=["*"])[0]
+		self._run_due()
+
+		macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+
+		self._assert_switched_off(paused)
+		self.assertIsNone(_schedule_state(paused.name).last_run_at)
+
+	def test_a_worker_killed_before_the_failed_run_is_written_leaves_nothing_half_done(self):
+		self._assert_a_kill_is_atomic(
+			patch.object(macro_scheduler, "_insert_failed_run", side_effect=_Killed())
+		)
+
+	def test_a_worker_killed_while_writing_the_notices_leaves_nothing_half_done(self):
+		# The first admin's notice is written, and the worker dies inside the second.
+		self._assert_a_kill_is_atomic(
+			patch.object(NotificationLog, "after_insert", side_effect=[None, _Killed()]), notices_written=2
+		)
+
+	def _assert_a_kill_is_atomic(self, kill, *, notices_written: int = 0):
+		"""Once the schedules are off these macros are never due again, so nothing
+		comes back for a failed run or a notice that was lost. Either all of it lands
+		or none of it does, and "none" leaves the macro due for the next sweep."""
+		due = _mk_macro(OWNER_OFF, "leave-killed-due")
+		later = _mk_macro(OWNER_OFF, "leave-killed-later", due=False)
+		before = len(_switch_off_notices())
+
+		with kill, self.assertRaises(_Killed):
+			self._run_due()
+		# The kill landed where the test means it to: inside the open transaction.
+		self.assertEqual(len(_switch_off_notices()) - before, notices_written)
+		# A dead worker's connection goes away, and the database rolls back whatever
+		# that connection had not committed.
+		frappe.db.rollback()
+
+		for m in (due, later):
+			self._assert_untouched(m)
+		self.assertEqual(
+			len(_switch_off_notices()), before, "an admin was told about a switch-off that did not land"
+		)
+		self.assertEqual(_due_names([due]), [due.name], "nothing will come back to finish this")
+
+		self._run_due()
+
+		for m in (due, later):
+			self._assert_switched_off(m)
+		self.assertEqual([r.status for r in _runs_for(due.name)], ["failed"])
+		for admin in (ADMIN_A, ADMIN_B):
+			self.assertEqual(len(_admin_notes(admin, OWNER_OFF)), 1)
+
+	def test_the_leaver_is_taken_out_before_system_managers_are_considered(self):
+		# The leaver is the only holder of the Jarvis Admin role: there is nobody in
+		# that role to tell, so the System Managers are.
+		_mk_macro(OWNER_OFF, "leave-only-admin")
+		holders = {"Jarvis Admin": [OWNER_OFF], "System Manager": [ADMIN_B]}
+		with patch.object(macro_scheduler, "get_users_with_role", side_effect=lambda role: holders[role]):
+			self._run_due()
+		self.assertEqual(len(_admin_notes(ADMIN_B, OWNER_OFF)), 1, "nobody was told")
+		self.assertEqual(_admin_notes(OWNER_OFF, OWNER_OFF), [], "the leaver was notified about themselves")
+
+	def test_a_barred_owner_who_is_a_jarvis_admin_is_not_told_about_themselves(self):
+		_mk_macro(OWNER_OFF, "leave-is-admin")
+		holders = {"Jarvis Admin": [OWNER_OFF, ADMIN_A], "System Manager": [ADMIN_B]}
+		with patch.object(macro_scheduler, "get_users_with_role", side_effect=lambda role: holders[role]):
+			self._run_due()
+		self.assertEqual(len(_admin_notes(ADMIN_A, OWNER_OFF)), 1)
+		self.assertEqual(_admin_notes(OWNER_OFF, OWNER_OFF), [], "the leaver was notified about themselves")
+		self.assertEqual(_admin_notes(ADMIN_B, OWNER_OFF), [], "another Jarvis Admin exists: no fallback")
+
+	def test_with_nobody_to_tell_the_switch_off_still_leaves_a_trace(self):
+		gone = _mk_macro(OWNER_OFF, "leave-nobody")
+		with (
+			patch.object(macro_scheduler, "get_users_with_role", return_value=[]),
+			patch.object(frappe, "log_error") as logged,
+		):
+			self._run_due()
+		self._assert_switched_off(gone)
+		self.assertEqual([r.status for r in _runs_for(gone.name)], ["failed"])
+		self.assertEqual(logged.call_count, 1)
+		self.assertIn("not every admin was told", logged.call_args.kwargs["title"])
+		self.assertIn("Nobody was told", logged.call_args.kwargs["message"])
+		self._assert_names_no_user(logged)
+
+	def _assert_names_no_user(self, logged):
+		"""An Error Log leaves the site (the vendor's error rollup): no user in it."""
+		for call in logged.call_args_list:
+			text = f"{call.kwargs.get('title')}\n{call.kwargs.get('message')}"
+			for user in (OWNER_OFF, ADMIN_A, ADMIN_B):
+				self.assertNotIn(user, text)
+
+	def test_system_managers_are_told_when_nobody_holds_the_admin_role(self):
+		_mk_macro(OWNER_OFF, "leave-no-admins")
+		holders = {"Jarvis Admin": [], "System Manager": [ADMIN_B]}
+		with patch.object(macro_scheduler, "get_users_with_role", side_effect=lambda role: holders[role]):
+			self._run_due()
+		self.assertEqual(len(_admin_notes(ADMIN_B, OWNER_OFF)), 1)
+		self.assertEqual(_admin_notes(ADMIN_A, OWNER_OFF), [])
+
+	def test_system_managers_are_not_told_when_an_admin_exists(self):
+		_mk_macro(OWNER_OFF, "leave-admins")
+		holders = {"Jarvis Admin": [ADMIN_A], "System Manager": [ADMIN_B]}
+		with patch.object(macro_scheduler, "get_users_with_role", side_effect=lambda role: holders[role]):
+			self._run_due()
+		self.assertEqual(len(_admin_notes(ADMIN_A, OWNER_OFF)), 1)
+		self.assertEqual(_admin_notes(ADMIN_B, OWNER_OFF), [])
+
+	def test_a_notification_that_cannot_be_written_does_not_undo_the_switch_off(self):
+		# The real insert, failing for one admin AFTER its row was written (the hook
+		# that marks the bell unseen raises). That notice alone is undone.
+		gone = _mk_macro(OWNER_OFF, "leave-notify-fails")
+		mine = _mk_macro(OWNER_OK, "stay-notify-fails")
+		real = NotificationLog.after_insert
+
+		def after_insert(doc):
+			if doc.for_user == ADMIN_A:
+				raise frappe.ValidationError(f"could not notify {doc.for_user} about {OWNER_OFF}")
+			real(doc)
+
+		with (
+			patch.object(NotificationLog, "after_insert", after_insert),
+			patch.object(frappe, "log_error") as logged,
+		):
+			ran = self._run_due()
+
+		self.assertEqual(ran, [mine.name], "a failed notification aborted the sweep")
+		self._assert_switched_off(gone)
+		self.assertEqual([r.status for r in _runs_for(gone.name)], ["failed"])
+		self.assertEqual(_admin_notes(ADMIN_A, OWNER_OFF), [], "a half-written notice was kept")
+		self.assertEqual(len(_admin_notes(ADMIN_B, OWNER_OFF)), 1, "one failed notice cost the others")
+		# Logged as what it is, and not left to the sweep's catch-all, which would
+		# report the whole macro as a failed sweep.
+		self.assertEqual(logged.call_count, 1, logged.call_args_list)
+		self.assertIn("not every admin was told", logged.call_args.kwargs["title"])
+		self.assertIn("1 of ", logged.call_args.kwargs["message"])
+		self.assertIn("ValidationError", logged.call_args.kwargs["message"])
+		self._assert_names_no_user(logged)
+
+	def test_failing_to_find_the_admins_does_not_undo_the_switch_off(self):
+		gone = _mk_macro(OWNER_OFF, "leave-lookup-fails")
+		mine = _mk_macro(OWNER_OK, "stay-lookup-fails")
+		with (
+			patch.object(
+				macro_scheduler, "get_users_with_role", side_effect=RuntimeError(f"no roles for {OWNER_OFF}")
+			),
+			patch.object(frappe, "log_error") as logged,
+		):
+			ran = self._run_due()
+
+		self.assertEqual(ran, [mine.name], "a failed lookup aborted the sweep")
+		self._assert_switched_off(gone)
+		self.assertEqual([r.status for r in _runs_for(gone.name)], ["failed"])
+		self.assertEqual(logged.call_count, 1, logged.call_args_list)
+		self.assertIn("not every admin was told", logged.call_args.kwargs["title"])
+		self.assertIn("could not be looked up", logged.call_args.kwargs["message"])
+		self._assert_names_no_user(logged)
+
+	def test_a_user_who_returns_does_not_get_their_schedules_back(self):
+		m = _mk_macro(LEAVER, "leave-returns")
+		frappe.db.set_value("User", LEAVER, "enabled", 0)
+		frappe.db.commit()
+		self._run_due()
+		self._assert_switched_off(m, by=LEAVER)
+
+		frappe.db.set_value("User", LEAVER, "enabled", 1)
+		frappe.db.commit()
+		from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+		self.assertTrue(is_valid_unattended_owner(LEAVER) and has_jarvis_access(LEAVER))
+
+		self.assertNotIn(m.name, self._run_due(), "a returning user's macro ran without being switched on")
+		self._assert_switched_off(m, by=LEAVER)
+		self.assertEqual(_due_names([m], days_ahead=400), [])
+		self.assertEqual(len(_runs_for(m.name)), 1)
+
+		# The way back is the owner switching it on, which is an ordinary save.
+		frappe.set_user(LEAVER)
+		try:
+			macros_api.update_macro(m.name, schedule_enabled=1)
+		finally:
+			frappe.set_user("Administrator")
+		row = _schedule_state(m.name)
+		self.assertEqual(cint(row.schedule_enabled), 1)
+		self.assertGreater(get_datetime(row.next_run_at), now_datetime())
+
+	def test_an_owner_who_lost_the_jarvis_role_is_a_leaver_too(self):
+		from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+
+		self.assertTrue(is_valid_unattended_owner(NO_ROLE), "premise: the account itself is fine")
+		self.assertFalse(has_jarvis_access(NO_ROLE), "premise: it holds no Jarvis role")
+		m = _mk_macro(NO_ROLE, "leave-norole")
+
+		self.assertEqual(self._run_due(), [])
+
+		self._assert_switched_off(m, by=NO_ROLE)
+		self.assertEqual(len(_admin_notes(ADMIN_A, NO_ROLE)), 1)
+
+	def test_an_administrator_owned_macro_is_switched_off_with_wording_that_fits(self):
+		# The save gate (admin-v2#675) refuses such a schedule, so only a row from before
+		# it can get here. Administrator has not "left"; the text must not say so.
+		m = _mk_macro("Administrator", "leave-root")
+
+		self.assertEqual(self._run_due(), [])
+
+		row = _schedule_state(m.name)
+		self.assertEqual(cint(row.schedule_enabled), 0)
+		self.assertIsNone(row.next_run_at)
+		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
+		self.assertEqual(
+			_comments_on(m.name), ["Schedule switched off: Administrator may not run scheduled macros"]
+		)
+		notes = _admin_notes(ADMIN_A, "Administrator may not run scheduled macros")
+		self.assertEqual(len(notes), 1)
+		self.assertNotIn("no longer", notes[0].subject + notes[0].email_content)
+
+	def test_when_the_switch_off_itself_fails_the_slot_is_still_consumed_once_per_owner(self):
+		# The fallback is what the sweep did before: one failed run, the slot moved on.
+		# The owner is still remembered for the pass, so three due macros do not become
+		# three failed runs; the other two stay due and the next sweep tries again.
+		three = [_mk_macro(OWNER_OFF, f"leave-broken-{i}") for i in range(3)]
+		mine = _mk_macro(OWNER_OK, "stay-broken")
+
+		with (
+			patch.object(
+				macro_scheduler, "_switch_off_and_record", side_effect=RuntimeError(f"no db for {OWNER_OFF}")
+			),
+			patch.object(frappe, "log_error") as logged,
+		):
+			ran = self._run_due()
+
+		self.assertEqual(logged.call_count, 1, logged.call_args_list)
+		self.assertIn("could not switch off", logged.call_args.kwargs["title"])
+		self._assert_names_no_user(logged)
+		self.assertEqual(ran, [mine.name], "a failed switch-off aborted the sweep")
+		self.assertEqual(len([r for m in three for r in _runs_for(m.name)]), 1)
+		self.assertEqual(len(_due_names(three)), 2, "the macros the sweep skipped should still be due")
+		self.assertEqual(
+			_admin_notes(ADMIN_A, OWNER_OFF), [], "admins were told about a switch-off that failed"
+		)
+
+		self._run_due()
+		for m in three:
+			row = _schedule_state(m.name)
+			self.assertEqual(cint(row.schedule_enabled), 0)
+			self.assertIsNone(row.next_run_at)
+		self.assertEqual(len(_admin_notes(ADMIN_A, OWNER_OFF)), 1)
+
+	def test_a_failed_run_that_cannot_be_written_leaves_the_schedule_on(self):
+		# The failed run is part of the unit. If it cannot be written the schedules stay
+		# on, and the sweep falls back to consuming the slot and tries again next time.
+		m = _mk_macro(OWNER_OFF, "leave-run-fails")
+		with (
+			patch.object(macro_scheduler, "_insert_failed_run", side_effect=RuntimeError("no run table")),
+			patch.object(frappe, "log_error"),
+		):
+			self._run_due()
+
+		row = _schedule_state(m.name)
+		self.assertEqual(
+			cint(row.schedule_enabled), 1, "the schedule went off with no failed run to show for it"
+		)
+		self.assertGreater(get_datetime(row.next_run_at), now_datetime(), "the slot was left due")
+		self.assertEqual(_comments_on(m.name), [])
+		self.assertEqual(_admin_notes(ADMIN_A, OWNER_OFF), [])
+
+	def test_the_fallback_writes_nothing_onto_a_schedule_another_sweep_switched_off(self):
+		# The switch-off failed because this sweep lost a wait on another one that was
+		# switching the same owner off. That one recorded the run and told the admins.
+		m = _mk_macro(OWNER_OFF, "leave-lost-the-wait")
+
+		def switched_off_elsewhere(row, now):
+			frappe.db.set_value(
+				MACRO, row.name, {"schedule_enabled": 0, "next_run_at": None}, update_modified=False
+			)
+			frappe.db.commit()
+			raise RuntimeError("lock wait timeout exceeded")
+
+		with (
+			patch.object(macro_scheduler, "_switch_off_and_record", side_effect=switched_off_elsewhere),
+			patch.object(frappe, "log_error"),
+		):
+			self._run_due()
+
+		row = _schedule_state(m.name)
+		self.assertEqual(cint(row.schedule_enabled), 0)
+		self.assertIsNone(row.next_run_at, "a next run was written onto a schedule that is off")
+		self.assertIsNone(row.last_run_at)
+		self.assertEqual(_runs_for(m.name), [], "a second failed run for the same switch-off")
 
 
 # --------------------------------------------------------------------------- #
@@ -636,8 +1256,8 @@ class TestScheduledMacroCadence(MacroSchedulerBase):
 		m = _mk_macro(OWNER_OK, "claimed-elsewhere")
 		stale = frappe.get_all(MACRO, filters={"name": m.name}, fields=["*"])[0]
 		with patch("jarvis.chat.macros.run_macro", return_value={"ok": True}) as mock_run:
-			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user)
-			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user)
+			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
 		self.assertEqual(self._dispatches(mock_run, m), 1, "a stale read of a taken slot ran it twice")
 
 	def test_a_run_whose_bookkeeping_blew_up_is_neither_rerun_nor_reported_failed(self):
