@@ -1333,7 +1333,7 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		self.assertTrue(seen[conv] > 0, "the run was stopped after its messages were deleted")
 		for name in (run, parked):
 			row = frappe.db.get_value(RUN, name, ["status", "error", "conversation"], as_dict=True)
-			self.assertEqual((row.status, row.error), ("stopped", macros._CONVERSATION_GONE_ERROR))
+			self.assertEqual((row.status, row.error), ("stopped", macros._HISTORY_CLEARED_ERROR))
 			self.assertFalse(row.conversation)
 		self.assertFalse(frappe.db.exists(CONV, conv))
 
@@ -1356,9 +1356,30 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		self.assertEqual(frappe.db.count(MSG, {"conversation": conv}), before)
 		# The run in the chat that did go is stopped, and its link is blanked.
 		row = frappe.db.get_value(RUN, gone, ["status", "error", "conversation"], as_dict=True)
-		self.assertEqual((row.status, row.error), ("stopped", macros._CONVERSATION_GONE_ERROR))
+		self.assertEqual((row.status, row.error), ("stopped", macros._HISTORY_CLEARED_ERROR))
 		self.assertFalse(row.conversation)
 		self.assertFalse(frappe.db.exists(CONV, other))
+
+	def test_a_run_stopped_for_a_chat_that_is_then_kept_is_told_something_true(self):
+		# The stop commits before the delete. A reply that starts in between keeps the
+		# chat, and the stopped run's closing line is then read in a chat that exists.
+		run, conv, _ = self._mk_run(steps=3, at_step=1, armed=True)
+		self._step(conv, "done")
+		real_stop = chat_api._stop_macro_runs_in
+
+		def stop_then_a_send_lands(conversations, **kw):
+			real_stop(conversations, **kw)
+			self._step(conv, "queued")
+
+		frappe.set_user(OWNER)
+		with patch.object(chat_api, "_stop_macro_runs_in", side_effect=stop_then_a_send_lands):
+			out = chat_api.clear_chat_history()
+		self.assertEqual(out, {"ok": True, "deleted": 0, "skipped": 1, "kept": [conv]})
+		row = frappe.db.get_value(RUN, run, ["status", "error", "conversation"], as_dict=True)
+		self.assertEqual((row.status, row.conversation), ("stopped", conv))
+		(closing,) = self._closing(conv, run)
+		self.assertEqual(row.error, "This run was stopped because its owner deleted all chat history.")
+		self.assertEqual(closing.content, f"■ {row.error}")
 
 	def test_clearing_chat_history_leaves_a_run_whose_step_is_being_answered(self):
 		# "Delete all" keeps a chat with a reply in progress: deleting it would take

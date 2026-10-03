@@ -1088,19 +1088,28 @@ def archive_conversation(conversation: str) -> dict:
 	return {"ok": True}
 
 
-def _stop_macro_runs_in(conversations: list[str]) -> None:
+def _stop_macro_runs_in(conversations: list[str], *, reason: str = "") -> None:
 	"""A macro run whose chat is archived or deleted is stopped, not left `running`
 	(``macros.stop_runs_in_conversations``). Call it with nothing pending: each stop
 	commits. Best-effort: it must not undo, or fail, what the user asked for."""
 	try:
 		from jarvis.chat import macros
 
-		macros.stop_runs_in_conversations(conversations, by=frappe.session.user)
+		macros.stop_runs_in_conversations(conversations, by=frappe.session.user, reason=reason)
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(
 			title="jarvis.chat.macros.stop_for_conversation_failed", message=frappe.get_traceback()
 		)
+
+
+# What ``_delete_idle_conversation`` answers when the conversation went. Anything
+# else it answers is why the conversation was kept.
+_DELETED = "deleted"
+# Deleted by someone else since this request listed it (a second tab pressing the
+# same button): neither deleted by this request nor kept.
+_ALREADY_GONE = "already gone"
+_KEPT_ON_ERROR = "error"
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1111,30 +1120,67 @@ def clear_chat_history() -> dict:
 	the reply has finished. Macros, skills and settings are untouched; macro-run
 	history rows survive but drop their (now deleted) conversation reference.
 
-	``kept`` names the skipped conversations, so the client can tell whether the
-	chat it has open is one of them without reading the list again."""
+	``deleted`` counts the conversations this request deleted. ``kept`` names the
+	skipped ones, so the client can tell whether the chat it has open is one of them
+	without reading the list again.
+
+	One conversation at a time, each in its own transaction. A conversation whose
+	delete fails is rolled back, logged by name, counted as kept, and the rest still
+	go: the request answers the same shape either way."""
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
-	kept = [name for name in names if not _delete_conversation_unless_replying(name)]
-	return {"ok": True, "deleted": len(names) - len(kept), "skipped": len(kept), "kept": kept}
+	deleted = 0
+	kept: dict[str, str] = {}
+	for name in names:
+		try:
+			outcome = _delete_idle_conversation(name)
+		except Exception:
+			# Also lets go of the conversation's row lock, which a send to this chat
+			# would be waiting on (as ``admission.accept_or_queue`` does on a failure).
+			frappe.db.rollback()
+			frappe.log_error(
+				title="jarvis.chat.clear_history.conversation_failed",
+				message=f"conversation {name}\n{frappe.get_traceback()}",
+			)
+			frappe.db.commit()
+			outcome = _KEPT_ON_ERROR
+		if outcome == _DELETED:
+			deleted += 1
+		elif outcome != _ALREADY_GONE:
+			kept[name] = outcome
+	_note_kept_conversations(kept, of=len(names))
+	return {"ok": True, "deleted": deleted, "skipped": len(kept), "kept": list(kept)}
 
 
-def _reply_in_progress(conversation: str) -> bool:
-	"""Whether the conversation is waiting for a reply: it has a turn that has not
-	ended or, where the turn machine never saw it (no Turn rows: the legacy
-	transport), a reply row still marked streaming."""
-	from jarvis.chat import turn_state
+def _note_kept_conversations(kept: dict[str, str], *, of: int) -> None:
+	"""One Error Log row per request that kept anything: how many, and why each. It is
+	what tells "kept, as designed" from "the delete failed" when a user reports that
+	Delete all did not delete everything. An Error Log row because an operator reads
+	those (a logger line below ERROR is not written in production); the title is the
+	part forwarded off the bench (``api_errors``), so the names stay in the body.
+	Never raises: the deletes it reports are already committed."""
+	if not kept:
+		return
+	try:
+		reasons: dict[str, list[str]] = {}
+		for name, reason in kept.items():
+			reasons.setdefault(reason, []).append(name)
+		lines = [f"{reason}: {len(names)} ({', '.join(names)})" for reason, names in sorted(reasons.items())]
+		frappe.log_error(
+			title="jarvis.chat.clear_history.kept",
+			message=f"user {frappe.session.user}: kept {len(kept)} of {of} conversations\n"
+			+ "\n".join(lines),
+		)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
 
-	states = frappe.get_all(turn_state.TURN, filters={"conversation": conversation}, pluck="state")
-	if states:
-		return any(state not in turn_state.TERMINAL_STATES for state in states)
-	return bool(frappe.db.exists(MSG, {"conversation": conversation, "role": "assistant", "streaming": 1}))
 
-
-def _delete_conversation_unless_replying(conversation: str) -> bool:
-	"""Delete one conversation with its messages; returns False, having touched
-	nothing, when it is waiting for a reply.
+def _delete_idle_conversation(conversation: str) -> str:
+	"""Delete one conversation with its messages, unless it is waiting for a reply.
+	Answers ``_DELETED``, ``_ALREADY_GONE``, or, having touched nothing, why it was
+	kept (``admission.reply_in_progress``).
 
 	Deleting a conversation deletes its Turn rows (``admission.on_conversation_trash``),
 	and the pump reads the missing row of a turn it is streaming as a lost lease: the
@@ -1149,32 +1195,61 @@ def _delete_conversation_unless_replying(conversation: str) -> bool:
 	lands from here on waits for the delete instead of starting a turn inside it.
 	Both looks follow a commit, so neither reads a view older than itself.
 
-	Commits per conversation: a failure part-way leaves the earlier ones deleted."""
-	from jarvis.chat import turn_state
+	The locked part is one unit of DB work that starts on a fresh transaction, so a
+	write conflict in it (another request moved one of the chat's rows after the
+	second look) is replayed from the lock (``txn.replay_on_conflict``). Any other
+	failure is the caller's: the lock is still held when it raises."""
+	from jarvis.chat import macros, turn_state
 
 	frappe.db.commit()
-	if _reply_in_progress(conversation):
-		return False
+	reason = admission.reply_in_progress(conversation)
+	if reason:
+		return reason
 	# BEFORE the messages go: the step to cancel is found through them.
-	_stop_macro_runs_in([conversation])
+	_stop_macro_runs_in([conversation], reason=macros._HISTORY_CLEARED_ERROR)
 	frappe.db.commit()
-	try:
+
+	def under_the_lock() -> str:
 		turn_state._lock_conversation(conversation)
-		if _reply_in_progress(conversation):
-			frappe.db.rollback()
-			return False
+		if not frappe.db.exists(CONV, conversation):
+			return _ALREADY_GONE
+		reason = admission.reply_in_progress(conversation)
+		if reason:
+			return reason
 		frappe.db.delete(MSG, {"conversation": conversation})
-		# Macro runs LINK conversations: blank the reference instead of leaving a
-		# dangling link (the run-history dashboard tolerates an empty conversation).
-		frappe.db.sql(
-			"UPDATE `tabJarvis Macro Run` SET conversation = NULL WHERE conversation = %(name)s",
-			{"name": conversation},
-		)
+		_unlink_macro_runs(conversation)
 		frappe.delete_doc(CONV, conversation, force=True, ignore_permissions=True)
-		frappe.db.commit()
-		return True
+		return _DELETED
+
+	try:
+		outcome = txn.replay_on_conflict(
+			under_the_lock,
+			label=f"clear_chat_history {conversation}",
+			before_replay=turn_state.reset_lock_tracking,
+		)
+		if outcome == _DELETED:
+			frappe.db.commit()
+		else:
+			frappe.db.rollback()  # nothing was written: this lets go of the row lock
+		return outcome
 	finally:
 		turn_state.reset_lock_tracking()
+
+
+def _unlink_macro_runs(conversation: str) -> None:
+	"""Macro runs LINK conversations: blank the reference instead of leaving a dangling
+	link (the run-history dashboard tolerates an empty conversation).
+
+	Read first, without a lock, and written by primary key. ``conversation`` has no
+	index on the run table, so an UPDATE filtered on it reads, and locks until the
+	commit, every macro run on the site: one scan per deleted chat, and a commit to
+	anyone's run in that window fails the delete (1020 under snapshot isolation).
+	Nearly every chat has no run, and then nothing is written at all."""
+	runs = frappe.get_all("Jarvis Macro Run", filters={"conversation": conversation}, pluck="name")
+	if runs:
+		frappe.db.sql(
+			"UPDATE `tabJarvis Macro Run` SET conversation = NULL WHERE name IN %(runs)s", {"runs": runs}
+		)
 
 
 @frappe.whitelist()
