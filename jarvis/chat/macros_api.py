@@ -989,13 +989,6 @@ def _abandon_summary(macro, conversation: str, *, replaced: str = "") -> None:
 		_delete_summary_chat(replaced, owned_by=macro.owner)
 
 
-def _has_live_turn(conversation: str) -> bool:
-	"""Whether a turn of this chat has not ended yet (queued, running or finishing)."""
-	from jarvis.chat.turn_state import TERMINAL_STATES
-
-	return bool(frappe.db.exists(TURN, {"conversation": conversation, "state": ["not in", TERMINAL_STATES]}))
-
-
 def _may_still_land(conversation: str) -> bool:
 	"""Whether a summary's chat can still produce a result: it exists, and its turn
 	has not ended. A chat with no Turn row at all counts as "can": the legacy
@@ -1003,17 +996,22 @@ def _may_still_land(conversation: str) -> bool:
 	the benefit of the doubt."""
 	if not frappe.db.exists("Jarvis Conversation", conversation):
 		return False
-	return _has_live_turn(conversation) or not frappe.db.exists(TURN, {"conversation": conversation})
+	from jarvis.chat import turn_state
+
+	return bool(turn_state.unfinished_turn_state(conversation)) or not frappe.db.exists(
+		TURN, {"conversation": conversation}
+	)
 
 
 def _delete_summary_chat(conversation: str, *, owned_by: str | None = None) -> None:
 	"""Remove a summary's throwaway chat. Best-effort, and it never raises.
 
-	Never while a turn of it is live. Deleting a conversation deletes its Turn rows
-	(``admission.on_conversation_trash``), and the pump reads a Turn row that is gone
-	as a lost lease (``pump._epoch_lost``): its hop ends with no successor, and every
-	live reply on the site stops until the lease runs out and something starts a new
-	hop (30 seconds to 5 minutes). Such a chat is left to finish; it stays behind,
+	Never while a reply of it is in progress (``admission.reply_in_progress``, the rule
+	"Delete all chat history" goes by too). Deleting a conversation deletes its Turn
+	rows (``admission.on_conversation_trash``), and the pump reads a Turn row that is
+	gone as a lost lease (``pump._epoch_lost``): its hop ends with no successor, and
+	every live reply on the site stops until the lease runs out and something starts a
+	new hop (30 seconds to 5 minutes). Such a chat is left to finish; it stays behind,
 	archived, like the chat of a summary a step change gave up.
 
 	``owned_by``: delete it only if it belongs to that user. The delete ignores
@@ -1021,9 +1019,11 @@ def _delete_summary_chat(conversation: str, *, owned_by: str | None = None) -> N
 	the macro owner's, the rule the landing follows
 	(``macros._drop_summary_link_unless_one_owner``)."""
 	try:
+		from jarvis.chat import admission
+
 		if owned_by and frappe.db.get_value("Jarvis Conversation", conversation, "owner") != owned_by:
 			return
-		if _has_live_turn(conversation):
+		if admission.reply_in_progress(conversation):
 			return
 		frappe.db.delete("Jarvis Chat Message", {"conversation": conversation})
 		frappe.delete_doc("Jarvis Conversation", conversation, ignore_permissions=True, force=True)
