@@ -718,7 +718,12 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 
 	# ---- direction (b): a merged run whose summary is cleared mid-park ----------- #
 	def _forget_the_steps_snapshot(self, run_name):
-		"""The run as one started before the steps snapshot existed left it."""
+		"""The run as one started before the steps snapshot existed left it. Needs the
+		column (CI's fresh site has it; a local site needs `bench migrate`)."""
+		self.assertTrue(
+			frappe.db.has_column(self.RUN, "steps_snapshot"),
+			"this test needs the steps_snapshot column of Jarvis Macro Run: run `bench migrate`",
+		)
 		frappe.db.set_value(self.RUN, run_name, "steps_snapshot", None, update_modified=False)
 		frappe.db.commit()
 
