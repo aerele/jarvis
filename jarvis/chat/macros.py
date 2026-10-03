@@ -1582,9 +1582,10 @@ def _stop_run(run_name: str, *, reason: str, by: str) -> bool:
 
 	``reason`` is why, for the owner: stored on the run row and left as the closing
 	line of the run's chat. Empty for the owner's own Stop, which says nothing. ``by``
-	is who asked. It is not stored yet (the run row has no column for it) and nothing
-	reads it: it stays in the signature because the admin stop that follows this
-	change records it, and every caller already states it.
+	is who asked. It is not stored (the run row has no column for it) and nothing here
+	reads it: every caller states it, and the one caller that records it, the admin
+	stop (``macros_admin_api.admin_stop_run``), does so itself, as a Comment on the
+	macro.
 
 	CDX-22: acquire the SAME ``jarvis_macro_run:<run>`` lock the chaining hook and the
 	capacity-resume critical section hold, and re-read status UNDER it before writing
