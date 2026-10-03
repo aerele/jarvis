@@ -824,3 +824,36 @@ class TestAnOrphanedSummaryChat(SummaryBase):
 		self.assertNotEqual(frappe.db.get_value(CONV, conv, "title"), "a write of the caller's")
 		macros._apply_merge_after_turn(conv, errored=False)
 		self.assertFalse(frappe.db.exists(CONV, conv), "with nothing of the caller's, it goes")
+
+	def _an_unnamed_summary_chat(self) -> str:
+		"""A real summary chat no macro names: the macro's mark was cleared."""
+		name, conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+		frappe.db.set_value(MACRO, name, {"merge_status": "failed", "merge_conversation": ""})
+		frappe.db.commit()
+		return conv
+
+	def test_a_chat_with_the_instruction_that_is_active_or_user_started_is_kept(self):
+		"""The instruction text alone is not the mark: the chat must also be archived and
+		opened by the engine, or it is a user's chat that quotes it."""
+		active = self._an_unnamed_summary_chat()
+		frappe.db.set_value(CONV, active, "status", "Active", update_modified=False)
+		user_started = self._an_unnamed_summary_chat()
+		frappe.db.set_value(CONV, user_started, "agent_initiated", 0, update_modified=False)
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+		for chat in (active, user_started):
+			macros._apply_merge_after_turn(chat, errored=False)
+			self.assertTrue(frappe.db.exists(CONV, chat))
+
+	def test_a_hook_that_loses_leaves_a_chat_of_another_user_alone(self):
+		"""``_finish_merge`` loses and the macro's owner is not the chat's: a summary-shaped
+		chat of someone else is not the macro owner's to remove."""
+		conv = self._an_unnamed_summary_chat()
+		name = self._mk_macro()
+		frappe.db.set_value(CONV, conv, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		self.assertNotEqual(frappe.db.get_value(MACRO, name, "owner"), "Administrator")
+		frappe.set_user("Administrator")
+		self.assertFalse(macros._finish_merge(name, conv, "failed", ""))
+		self.assertTrue(frappe.db.exists(CONV, conv))
