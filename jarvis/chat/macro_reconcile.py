@@ -142,26 +142,24 @@ def reconcile_running_runs() -> dict:
 		"left": 0,
 		"summaries": 0,
 		"summaries_settled": 0,
+		"summaries_left": 0,
 	}
 	try:
 		if _switched_off() or not _turn_rows_are_written():
 			return summary
 		started = _clock()
 		rows = _candidates()
-		beyond = _candidates_beyond_the_cap() if len(rows) >= MAX_RUNS_PER_TICK else 0
-		for position, row in enumerate(rows):
+		summary["left"] += _beyond_the_cap(rows, MAX_RUNS_PER_TICK, _candidate_count)
+		for row in _within_the_budget(rows, started, summary, "left"):
 			summary["candidates"] += 1
-			if _clock() - started >= TICK_BUDGET_S:
-				summary["out_of_time"] = 1
-				summary["left"] = len(rows) - position
-				break
 			if not _shard_is_on_the_pump(row.conversation):
 				continue
 			_RunCheck(row.name, summary).run()
-		if not summary["out_of_time"]:
+		if summary["out_of_time"]:
+			summary["summaries_left"] += _stuck_summary_count()
+		else:
 			_reconcile_stuck_summaries(summary, started)
-		summary["left"] += beyond
-		if summary["left"]:
+		if summary["left"] or summary["summaries_left"]:
 			_cut_short(summary)
 	except JobTimeoutException:
 		raise
@@ -320,14 +318,7 @@ class _RunCheck:
 		into "the run stood still too long". Tried again on the next tick. A conflict
 		cannot last (each look starts on a fresh snapshot). A lock wait can, fifty
 		seconds of the tick each time, so that one leaves a trace: one row an hour."""
-		from jarvis.chat import txn
-
-		if txn.is_write_conflict(e) or isinstance(e, frappe.QueryTimeoutError):
-			self.summary["conflicts"] += 1
-			if isinstance(e, frappe.QueryTimeoutError):
-				_log_at_most_hourly(
-					LOCK_WAIT, f"run {self.name}: tried again on the next tick\n\n{traceback}"
-				)
+		if _a_lost_race(e, self.summary, f"run {self.name}: tried again on the next tick\n\n{traceback}"):
 			return
 		self.summary["raised"] += 1
 		frappe.cache().set_value(_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
@@ -456,31 +447,40 @@ def _reconcile_stuck_summaries(summary: dict, started: float) -> None:
 	"""The tick's second half: every macro whose summary looks stuck, in what is left of
 	the tick's time budget."""
 	rows = _stuck_summary_candidates()
-	for position, row in enumerate(rows):
-		if _clock() - started >= TICK_BUDGET_S:
-			summary["out_of_time"] = 1
-			summary["left"] += len(rows) - position
-			return
+	summary["summaries_left"] += _beyond_the_cap(rows, MAX_SUMMARIES_PER_TICK, _stuck_summary_count)
+	for row in _within_the_budget(rows, started, summary, "summaries_left"):
 		summary["summaries"] += 1
 		if not _shard_is_on_the_pump(row.conversation):
 			continue
 		_SummaryCheck(row.name, row.conversation or "", summary).run()
 
 
-def _stuck_summary_candidates() -> list:
+def _stuck_summary_candidates(*, limit: int | None = None) -> list:
 	"""Macros ``pending`` on a chat created ``SUMMARY_SETTLE_AFTER_S`` ago or more, or on
 	one that is gone; those first, then the oldest chat first, ``MAX_SUMMARIES_PER_TICK``
 	at most. The cutoff is the site's clock, like the chat's ``creation``."""
-	cutoff = frappe.utils.add_to_date(now_datetime(), seconds=-SUMMARY_SETTLE_AFTER_S)
 	return frappe.db.sql(
-		f"""SELECT m.name, m.merge_conversation AS conversation
-		FROM `tab{MACRO}` m LEFT JOIN `tab{CONV}` c ON c.name = m.merge_conversation
-		WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)
+		f"""SELECT m.name, m.merge_conversation AS conversation {_STUCK_SUMMARIES}
 		ORDER BY c.creation IS NOT NULL, c.creation
 		LIMIT %(limit)s""",
-		{"cutoff": cutoff, "limit": MAX_SUMMARIES_PER_TICK},
+		{"cutoff": _stuck_summary_cutoff(), "limit": limit or MAX_SUMMARIES_PER_TICK},
 		as_dict=True,
 	)
+
+
+def _stuck_summary_count() -> int:
+	"""How many macros ``_stuck_summary_candidates`` would list with no cap. Asked only
+	for a tick that was cut short."""
+	rows = frappe.db.sql(f"SELECT COUNT(*) {_STUCK_SUMMARIES}", {"cutoff": _stuck_summary_cutoff()})
+	return int(rows[0][0] or 0)
+
+
+_STUCK_SUMMARIES = f"""FROM `tab{MACRO}` m LEFT JOIN `tab{CONV}` c ON c.name = m.merge_conversation
+	WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)"""
+
+
+def _stuck_summary_cutoff():
+	return frappe.utils.add_to_date(now_datetime(), seconds=-SUMMARY_SETTLE_AFTER_S)
 
 
 class _SummaryCheck:
@@ -499,7 +499,9 @@ class _SummaryCheck:
 
 	A turn that has not ended ``SUMMARY_GIVE_UP_AFTER_S`` after its chat was created
 	(``ready`` for good, a prepare that keeps being reclaimed) fails the summary, and
-	its chat is kept while the turn is live.
+	its chat is kept while the turn is live. So does a look that raises, once the chat
+	is that old (``_give_up_after_a_fault``). A late end of that turn lands nothing:
+	the owner was told "failed", and Run may already have run the steps as written.
 
 	No lock. Every write is a compare-and-set on the mark still naming the chat this
 	look read (``macros._settle_summary_mark``): of the check, the hook and a
@@ -525,8 +527,10 @@ class _SummaryCheck:
 		except Exception as e:
 			traceback = frappe.get_traceback()
 			_rollback()
-			self._raised(e, traceback)
-			return
+			if not self._raised(e, traceback):
+				return
+			self.signal = None
+			settled = self._give_up_after_a_fault()
 		if not settled:
 			return
 		self.summary["summaries_settled"] += 1
@@ -535,18 +539,37 @@ class _SummaryCheck:
 				self.name, *self.signal, subject="macro", key=_summary_key("signalled", self.conversation)
 			)
 
-	def _raised(self, e: Exception, traceback: str) -> None:
+	def _raised(self, e: Exception, traceback: str) -> bool:
 		"""As a run's (``_RunCheck._raised``): a lost race is tried again on the next
-		tick; anything else is logged once and the macro left alone for an hour."""
-		from jarvis.chat import txn
-
-		if txn.is_write_conflict(e) or isinstance(e, frappe.QueryTimeoutError):
-			self.summary["conflicts"] += 1
-			return
+		tick; anything else is logged once and the macro left alone for an hour.
+		Returns whether it was such a fault."""
+		lock_wait = f"summary of macro {self.name}: a lock wait, tried again on the next tick"
+		if _a_lost_race(e, self.summary, lock_wait):
+			return False
 		self.summary["raised"] += 1
 		frappe.cache().set_value(_summary_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
 		frappe.log_error(title=f"jarvis.chat.macros.summary_reconcile_failed: {self.name}", message=traceback)
 		frappe.db.commit()
+		return True
+
+	def _give_up_after_a_fault(self) -> bool:
+		"""A look that raises raises again on every look, and a summary must not stay
+		"summarizing" for good: once its chat is ``SUMMARY_GIVE_UP_AFTER_S`` old, or gone,
+		it is failed as a turn that never ends is, with none of the reads that raised.
+		Never raises (but the job's timeout)."""
+		from jarvis.chat import txn
+
+		try:
+			txn.fresh_snapshot(owned=True)
+			created = frappe.db.get_value(CONV, self.conversation, "creation") if self.conversation else None
+			if created is not None and _seconds_since(created) < SUMMARY_GIVE_UP_AFTER_S:
+				return False
+			return macros._finish_merge(self.name, self.conversation, "failed", "", chat_may_be_live=True)
+		except JobTimeoutException:
+			raise
+		except Exception:
+			_rollback()
+			return False
 
 	def _look(self) -> bool:
 		"""Returns whether this look took the macro off "summarizing"."""
@@ -651,20 +674,40 @@ def _candidates() -> list:
 	)
 
 
-def _candidates_beyond_the_cap() -> int:
-	"""How many candidates a full list left unread. Asked only when the list is full."""
-	return max(int(frappe.db.count(RUN, _candidate_filters()) or 0) - MAX_RUNS_PER_TICK, 0)
+def _candidate_count() -> int:
+	return int(frappe.db.count(RUN, _candidate_filters()) or 0)
+
+
+def _beyond_the_cap(rows: list, cap: int, count) -> int:
+	"""How many candidates a full list left unread (``count``: all of them, uncapped).
+	Asked only when the list is full."""
+	return max(count() - cap, 0) if len(rows) >= cap else 0
+
+
+def _within_the_budget(rows: list, started: float, summary: dict, left: str):
+	"""``rows`` in order, while the tick's time budget lasts. Out of time, the tick is
+	marked so and every row not reached is counted in ``summary[left]``."""
+	for position, row in enumerate(rows):
+		if _clock() - started >= TICK_BUDGET_S:
+			summary["out_of_time"] = 1
+			summary[left] += len(rows) - position
+			return
+		yield row
 
 
 def _cut_short(summary: dict) -> None:
 	"""A tick that left candidates unlooked at (the cap, or its time budget) says so,
 	once an hour: a run the check cannot act on keeps its place at the head of the
-	list until the stale-run sweep closes it, and enough of them starve the rest."""
+	list until the stale-run sweep closes it, and enough of them starve the rest. A
+	summary the same, and when the runs used up the budget the summaries were not
+	looked at at all."""
 	why = "its time budget ran out" if summary["out_of_time"] else f"more than {MAX_RUNS_PER_TICK} candidates"
-	_log_at_most_hourly(
-		TICK_CUT_SHORT,
-		f"The tick was cut short ({why}); {summary['left']} candidate runs were not looked at.",
-	)
+	left = []
+	if summary["left"]:
+		left.append(f"{summary['left']} candidate runs were not looked at")
+	if summary["summaries_left"]:
+		left.append(f"{summary['summaries_left']} stuck summaries were not looked at")
+	_log_at_most_hourly(TICK_CUT_SHORT, f"The tick was cut short ({why}); {'; '.join(left)}.")
 
 
 _NOTHING_SENT = object()
@@ -800,6 +843,21 @@ def _ledger_gave_up_on_the_hook(turn_id: str, attempts: int | None = None) -> bo
 	if attempts is None:
 		attempts = _hook_attempts(turn_id)
 	return attempts is not None and attempts >= turn_state.FINALIZE_MAX_ATTEMPTS
+
+
+def _a_lost_race(e: Exception, summary: dict, lock_wait_message: str) -> bool:
+	"""Whether ``e`` is a write conflict or a lock wait (``frappe.QueryTimeoutError``):
+	both routine on a row other workers write (``jarvis.chat.txn``), counted and tried
+	again on the next tick. A lock wait can last, fifty seconds of the tick each time,
+	so it leaves ``lock_wait_message`` in an Error Log at most once an hour."""
+	from jarvis.chat import txn
+
+	if not (txn.is_write_conflict(e) or isinstance(e, frappe.QueryTimeoutError)):
+		return False
+	summary["conflicts"] += 1
+	if isinstance(e, frappe.QueryTimeoutError):
+		_log_at_most_hourly(LOCK_WAIT, lock_wait_message)
+	return True
 
 
 def _signal(
