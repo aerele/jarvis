@@ -76,7 +76,7 @@ vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
 	default: {
 		name: "MacroHoldDialog",
 		props: ["modelValue", "name", "macroName", "ownerLabel"],
-		emits: ["update:modelValue", "held"],
+		emits: ["update:modelValue", "held", "failed"],
 		template: `<div class="stub-hold" :data-name="name" :data-open="modelValue ? '1' : ''" :data-owner="ownerLabel" />`,
 	},
 }));
@@ -832,6 +832,17 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 		hold.vm.$emit("held", { name: "a", stopped_runs: 1 });
 		await flushPromises();
 		expect(lastCall()).toMatchObject({ start: 0, pageLength: 20 });
+		expect(releaseButton(w).exists()).toBe(true);
+	});
+
+	it("re-reads the rows when the hold answers an error: the hold may still stand", async () => {
+		const w = await mountWith([row("a")]);
+		await holdButton(w).trigger("click");
+		const calls = api.adminListMacros.mock.calls.length;
+		api.adminListMacros.mockResolvedValue(page([held()]));
+		w.findComponent({ name: "MacroHoldDialog" }).vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		expect(api.adminListMacros.mock.calls.length).toBeGreaterThan(calls);
 		expect(releaseButton(w).exists()).toBe(true);
 	});
 
