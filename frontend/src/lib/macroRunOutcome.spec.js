@@ -1,5 +1,16 @@
-import { describe, it, expect } from "vitest";
-import { lastRunCell, lastRunLine, runDetail, macroDoneSignal } from "./macroRunOutcome.js";
+import { describe, it, expect, vi } from "vitest";
+import {
+	lastRunCell,
+	lastRunLine,
+	runDetail,
+	macroDoneSignal,
+	deleteWarning,
+	stoppedRunsNote,
+	bulkDeleteToast,
+	deleteGuard,
+	isLiveRun,
+	SLOW_DELETE_MS,
+} from "./macroRunOutcome.js";
 
 /**
  * How a macro run went, as the screens say it. Until now nothing outside the Runs
@@ -188,5 +199,183 @@ describe("macroDoneSignal: what a macro:done event is worth telling the user", (
 		expect(
 			macroDoneSignal(done({ status: "stopped", error: "Step 1 is waiting…" }))
 		).toBeNull();
+	});
+});
+
+describe("deleteWarning: what a delete confirmation adds for a macro that is running", () => {
+	const live = { status: "running" };
+	const parked = { status: "waiting_capacity" };
+	const done = { status: "completed" };
+
+	it("says the run will be stopped, for a run in progress or one waiting for capacity", () => {
+		expect(deleteWarning([live])).toBe("This macro is running. Deleting it stops the run.");
+		expect(deleteWarning([parked])).toBe("This macro is running. Deleting it stops the run.");
+	});
+
+	it("says nothing when the page knows of no live run", () => {
+		for (const lastRun of [done, { status: "failed" }, { status: "stopped" }, null, undefined])
+			expect(deleteWarning([lastRun])).toBe("");
+		expect(deleteWarning([])).toBe("");
+		expect(deleteWarning([done, null])).toBe("");
+	});
+
+	it("counts the running ones among several selected", () => {
+		expect(deleteWarning([live, done, null])).toBe(
+			"One of these macros is running. Deleting it stops the run."
+		);
+		expect(deleteWarning([live, done, parked])).toBe(
+			"2 of these macros are running. Deleting them stops their runs."
+		);
+	});
+});
+
+describe("stoppedRunsNote: what a delete's success toast adds when it stopped a run", () => {
+	it("says so, in the singular and the plural", () => {
+		expect(stoppedRunsNote({ stopped_runs: 1 })).toBe(". 1 run was stopped.");
+		expect(stoppedRunsNote({ stopped_runs: 3 })).toBe(". 3 runs were stopped.");
+	});
+
+	it("adds nothing when nothing was stopped, or for a server that does not say", () => {
+		for (const res of [{ stopped_runs: 0 }, {}, null, undefined, { stopped_runs: "x" }])
+			expect(stoppedRunsNote(res)).toBe("");
+	});
+});
+
+describe("bulkDeleteToast: what a bulk delete reports", () => {
+	const busy = {
+		name: "m-busy",
+		title: "Daily report",
+		reason: "running",
+		message:
+			"Its run was stopped, but another run started before it could be deleted. Delete it again.",
+	};
+
+	it("everything deleted: a plain success, with the stops", () => {
+		expect(bulkDeleteToast({ deleted: 2, skipped: [], stopped_runs: 1 }, 2)).toEqual({
+			message: "Deleted 2 macros. 1 run was stopped.",
+			type: "success",
+		});
+		expect(bulkDeleteToast({ deleted: 1 }, 1)).toEqual({
+			message: "Deleted 1 macro",
+			type: "success",
+		});
+	});
+
+	it("names the macro that was not deleted and says why, in a sentence", () => {
+		// It used to read "Deleted 1 (skipped 1: running)": no name, nothing to do.
+		expect(bulkDeleteToast({ deleted: 1, skipped: [busy], stopped_runs: 3 }, 2)).toEqual({
+			message:
+				"Deleted 1 of 2. Not deleted: “Daily report”: Its run was stopped, but another run " +
+				"started before it could be deleted. Delete it again. 3 runs were stopped.",
+			type: "info",
+		});
+	});
+
+	it("macros skipped for the same reason share one sentence", () => {
+		const theirs = (name) => ({
+			name,
+			title: name.toUpperCase(),
+			reason: "not owner",
+			message: "It belongs to someone else.",
+		});
+		const said = bulkDeleteToast({ deleted: 0, skipped: [theirs("a"), busy, theirs("b")] }, 3);
+		expect(said.message).toBe(
+			"Deleted 0 of 3. Not deleted: “A”, “B”: It belongs to someone else. " +
+				"“Daily report”: Its run was stopped, but another run started before it could be " +
+				"deleted. Delete it again."
+		);
+	});
+
+	it("a name goes into the toast escaped", () => {
+		const said = bulkDeleteToast(
+			{ deleted: 0, skipped: [{ ...busy, title: "<img src=x>" }] },
+			1,
+			{ escape: (v) => v.replace(/</g, "&lt;") }
+		);
+		expect(said.message).toContain("“&lt;img src=x>”");
+	});
+
+	it("an older server (a code only, no name): the list's own name and the code", () => {
+		const said = bulkDeleteToast(
+			{ deleted: 0, skipped: [{ name: "m1", reason: "not owner" }, { name: "m2" }] },
+			2,
+			{ titleOf: (n) => (n === "m1" ? "Month end" : "") }
+		);
+		expect(said.message).toBe(
+			"Deleted 0 of 2. Not deleted: “Month end”: Skipped (not owner). “m2”: Skipped (no reason given)."
+		);
+	});
+});
+
+describe("isLiveRun", () => {
+	it("is true for a run in progress or parked, and for nothing else", () => {
+		expect(isLiveRun({ status: "running" })).toBe(true);
+		expect(isLiveRun({ status: "waiting_capacity" })).toBe(true);
+		for (const r of [null, undefined, {}, { status: "stopped" }, { status: "completed" }])
+			expect(isLiveRun(r)).toBe(false);
+	});
+});
+
+describe("deleteGuard: one delete at a time, with a note while a slow one is going", () => {
+	const toastStub = () => ({ create: vi.fn(() => "note-1"), remove: vi.fn() });
+	const deferred = () => {
+		let resolve;
+		const promise = new Promise((r) => (resolve = r));
+		return { promise, resolve };
+	};
+
+	it("a second confirm while the first is going does nothing", async () => {
+		const guard = deleteGuard(toastStub());
+		const first = deferred();
+		const work = vi.fn(() => first.promise);
+		const running = guard.run("Deleting...", work);
+		expect(guard.isBusy()).toBe(true);
+		await guard.run("Deleting...", work);
+		expect(work).toHaveBeenCalledTimes(1);
+		first.resolve();
+		await running;
+		expect(guard.isBusy()).toBe(false);
+		await guard.run("Deleting...", work);
+		expect(work).toHaveBeenCalledTimes(2);
+	});
+
+	it("a quick delete shows no note; a slow one shows it and takes it away", async () => {
+		vi.useFakeTimers();
+		try {
+			const toast = toastStub();
+			const guard = deleteGuard(toast);
+			await guard.run("Deleting...", async () => {});
+			vi.advanceTimersByTime(SLOW_DELETE_MS * 2);
+			expect(toast.create).not.toHaveBeenCalled();
+
+			const slow = deferred();
+			const running = guard.run(
+				"Stopping the run and deleting the macro...",
+				() => slow.promise
+			);
+			vi.advanceTimersByTime(SLOW_DELETE_MS);
+			expect(toast.create).toHaveBeenCalledWith(
+				expect.objectContaining({
+					message: "Stopping the run and deleting the macro...",
+					closable: false,
+				})
+			);
+			expect(toast.remove).not.toHaveBeenCalled();
+			slow.resolve();
+			await running;
+			expect(toast.remove).toHaveBeenCalledWith("note-1");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("is free again after a delete that threw", async () => {
+		const guard = deleteGuard(toastStub());
+		await expect(
+			guard.run("Deleting...", async () => {
+				throw new Error("boom");
+			})
+		).rejects.toThrow("boom");
+		expect(guard.isBusy()).toBe(false);
 	});
 });

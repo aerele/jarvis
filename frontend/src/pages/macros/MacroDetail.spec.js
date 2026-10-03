@@ -51,6 +51,7 @@ vi.mock("frappe-ui", () => ({
 		success: vi.fn(),
 		error: vi.fn(),
 		create: vi.fn(),
+		remove: vi.fn(),
 	},
 	confirmDialog: vi.fn(),
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<i />" },
@@ -363,6 +364,24 @@ describe("MacroDetail: how the last run went", () => {
 		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
 	});
 
+	it("a run that starts while the form is open is learned of, once", async () => {
+		// The delete confirmation warns about a live run only if the page knows of
+		// one. A run started by the scheduler, or from another tab, sends progress
+		// events: the first is enough, the later steps of the same run are not asked.
+		const { emit } = await withSocket(baseMacro({ last_run: null }));
+		api.getMacro.mockClear();
+		api.getMacro.mockResolvedValue(baseMacro({ last_run: { status: "running", error: "" } }));
+		emit({ kind: "macro:progress", macro: "SOMEONE-ELSE", step: 1 });
+		await flushPromises();
+		expect(api.getMacro).not.toHaveBeenCalled();
+		emit({ kind: "macro:progress", macro: "MACRO-1", step: 1 });
+		await flushPromises();
+		expect(api.getMacro).toHaveBeenCalledTimes(1);
+		emit({ kind: "macro:progress", macro: "MACRO-1", step: 2 });
+		await flushPromises();
+		expect(api.getMacro).toHaveBeenCalledTimes(1);
+	});
+
 	it("a refresh that lands after the user opened another macro is dropped", async () => {
 		const { w, emit } = await withSocket(baseMacro({ last_run: null }));
 		let landLate;
@@ -385,6 +404,108 @@ describe("MacroDetail: how the last run went", () => {
 		landLate();
 		await flushPromises();
 		expect(note(w).exists()).toBe(false);
+	});
+});
+
+describe("MacroDetail Delete: a macro that is running", () => {
+	// Deleting used to remove the run row from under a run that kept going. The
+	// server now stops the run first; the dialog and the toast say so.
+	const openDelete = async (macro) => {
+		const w = await mountDetail(macro);
+		const overflow = w
+			.findAllComponents({ name: "Dropdown" })
+			.map((d) => d.props("options") || [])
+			.flat()
+			.find((o) => o.label === "Delete");
+		overflow.onClick();
+		return confirmDialog.mock.calls.at(-1)[0];
+	};
+
+	it("the confirmation says the run will be stopped", async () => {
+		for (const status of ["running", "waiting_capacity"]) {
+			const dialog = await openDelete(baseMacro({ last_run: { status, error: "" } }));
+			expect(dialog.message).toContain("This macro is running. Deleting it stops the run.");
+			expect(dialog.message).toContain("Its run history is deleted too.");
+		}
+	});
+
+	it("a macro that is not running gets the plain confirmation", async () => {
+		for (const last_run of [null, undefined, { status: "completed", error: "" }]) {
+			const dialog = await openDelete(baseMacro({ last_run }));
+			expect(dialog.message).not.toContain("running");
+			expect(dialog.message).toContain("Its run history is deleted too.");
+		}
+	});
+
+	it("the toast says a run was stopped when the server stopped one", async () => {
+		const dialog = await openDelete(baseMacro({ last_run: { status: "running", error: "" } }));
+		api.deleteMacro.mockResolvedValue({ ok: true, stopped_runs: 1 });
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(api.deleteMacro).toHaveBeenCalledWith("MACRO-1");
+		expect(toast.success).toHaveBeenCalledWith("Macro deleted. 1 run was stopped.");
+	});
+
+	it("the toast stays as it was when nothing was running, or an older server answers", async () => {
+		for (const answer of [{ ok: true, stopped_runs: 0 }, { ok: true }, undefined]) {
+			const dialog = await openDelete(baseMacro());
+			api.deleteMacro.mockResolvedValue(answer);
+			await dialog.onConfirm({ hideDialog: vi.fn() });
+			expect(toast.success).toHaveBeenLastCalledWith("Macro deleted");
+		}
+	});
+
+	it("a second press of Confirm does not start a second delete", async () => {
+		// frappe-ui's ConfirmDialog does not wait for onConfirm, so its button stays
+		// live. A delete that stops a run takes seconds; the second request found the
+		// macro gone and showed an error for a delete that had worked.
+		const dialog = await openDelete(baseMacro({ last_run: { status: "running", error: "" } }));
+		let land;
+		api.deleteMacro.mockReturnValue(new Promise((resolve) => (land = resolve)));
+		const hideDialog = vi.fn();
+		const first = dialog.onConfirm({ hideDialog });
+		// The dialog closes at once, not when the server answers.
+		expect(hideDialog).toHaveBeenCalledTimes(1);
+		await dialog.onConfirm({ hideDialog });
+		expect(api.deleteMacro).toHaveBeenCalledTimes(1);
+		land({ ok: true, stopped_runs: 1 });
+		await first;
+		expect(toast.success).toHaveBeenCalledTimes(1);
+		expect(toast.error).not.toHaveBeenCalled();
+	});
+
+	it("a slow delete says what it is doing, and takes the note away when it is done", async () => {
+		vi.useFakeTimers();
+		try {
+			const dialog = await openDelete(
+				baseMacro({ last_run: { status: "running", error: "" } })
+			);
+			let land;
+			api.deleteMacro.mockReturnValue(new Promise((resolve) => (land = resolve)));
+			toast.create.mockReturnValue("note-1");
+			const going = dialog.onConfirm({ hideDialog: vi.fn() });
+			expect(toast.create).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1000);
+			expect(toast.create).toHaveBeenCalledWith(
+				expect.objectContaining({ message: "Stopping the run and deleting the macro..." })
+			);
+			land({ ok: true, stopped_runs: 1 });
+			await going;
+			expect(toast.remove).toHaveBeenCalledWith("note-1");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a refused delete shows the server's sentence, and Delete can be pressed again", async () => {
+		const dialog = await openDelete(baseMacro());
+		api.deleteMacro.mockRejectedValue(new Error("refused"));
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(toast.error).toHaveBeenCalledTimes(1);
+		expect(toast.success).not.toHaveBeenCalled();
+		api.deleteMacro.mockResolvedValue({ ok: true });
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(api.deleteMacro).toHaveBeenCalledTimes(2);
+		expect(toast.success).toHaveBeenLastCalledWith("Macro deleted");
 	});
 });
 

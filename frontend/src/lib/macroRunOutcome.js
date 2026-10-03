@@ -84,3 +84,97 @@ export function macroDoneSignal(p) {
 		body: p.error || "Open the run to see what happened.",
 	};
 }
+
+// A run that has not ended, as the server counts it (macros._LIVE_RUN_STATUSES):
+// in progress, or parked until the site has capacity for its next step.
+const LIVE_RUN = ["running", "waiting_capacity"];
+
+export function isLiveRun(lastRun) {
+	return !!lastRun && LIVE_RUN.includes(lastRun.status);
+}
+
+// What a delete confirmation adds when the page knows a macro about to be deleted
+// is running: the server stops the run first, and the user should hear that before
+// they confirm, not after. `lastRuns` is the `last_run` of each macro being deleted
+// (one for the form, the selection for the list). "" when none is live.
+export function deleteWarning(lastRuns) {
+	const live = (lastRuns || []).filter(isLiveRun).length;
+	if (!live) return "";
+	if ((lastRuns || []).length === 1) return "This macro is running. Deleting it stops the run.";
+	if (live === 1) return "One of these macros is running. Deleting it stops the run.";
+	return `${live} of these macros are running. Deleting them stops their runs.`;
+}
+
+// What the success toast adds after a delete that stopped runs. `res` is the
+// server's answer (`stopped_runs`); "" when it stopped none, and for a server from
+// before it reported the count. It is appended to a toast that has no full stop
+// ("Macro deleted"), so it brings its own.
+export function stoppedRunsNote(res) {
+	const n = Number(res && res.stopped_runs);
+	if (!(n > 0)) return "";
+	return n === 1 ? ". 1 run was stopped." : `. ${n} runs were stopped.`;
+}
+
+// The toast after a bulk delete: { message, type }. `res` is the server's answer
+// ({ deleted, skipped: [{ name, title, reason, message }], stopped_runs }), `total`
+// how many were selected. A macro that was not deleted is NAMED, with the server's
+// sentence for why ("skipped 1: running" named nothing and gave the user nothing to
+// do). Macros skipped for the same reason share one sentence. `escape` is applied
+// to each name: the toast renders its message as HTML. `titleOf(name)` is the
+// list's own name for a row, for a server that sends no `title`.
+export function bulkDeleteToast(res, total, { escape = (v) => v, titleOf = () => "" } = {}) {
+	const skipped = (res && res.skipped) || [];
+	const deleted = res && res.deleted != null ? res.deleted : total - skipped.length;
+	const stopped = stoppedRunsNote(res);
+	if (!skipped.length)
+		return {
+			message: `Deleted ${deleted} macro${deleted === 1 ? "" : "s"}${stopped}`,
+			type: "success",
+		};
+	const byWhy = new Map();
+	for (const s of skipped) {
+		const why = s.message || `Skipped (${s.reason || "no reason given"}).`;
+		const name = `“${escape(s.title || titleOf(s.name) || s.name)}”`;
+		byWhy.set(why, [...(byWhy.get(why) || []), name]);
+	}
+	const notDeleted = [...byWhy].map(([why, names]) => `${names.join(", ")}: ${why}`).join(" ");
+	return {
+		message: `Deleted ${deleted} of ${total}. Not deleted: ${notDeleted}${stopped.slice(1)}`,
+		type: "info",
+	};
+}
+
+// One delete at a time, and a note while a slow one is going. frappe-ui's
+// ConfirmDialog does not wait for `onConfirm`: its Confirm button never shows a
+// loading state and can be pressed again. A delete used to take milliseconds; one
+// that stops live runs first can take seconds, and a second press started a second
+// delete (an error toast for a delete that had worked). The caller closes the
+// dialog and runs the request through here: `run` ignores a call while one is going
+// and shows `note` if the work outlasts `SLOW_DELETE_MS`.
+export const SLOW_DELETE_MS = 600;
+export function deleteGuard(toast) {
+	let busy = false;
+	return {
+		isBusy: () => busy,
+		async run(note, work) {
+			if (busy) return;
+			busy = true;
+			let shown = null;
+			const timer = setTimeout(() => {
+				shown = toast.create({
+					message: note,
+					type: "info",
+					duration: 60,
+					closable: false,
+				});
+			}, SLOW_DELETE_MS);
+			try {
+				await work();
+			} finally {
+				clearTimeout(timer);
+				if (shown != null && toast.remove) toast.remove(shown);
+				busy = false;
+			}
+		},
+	};
+}

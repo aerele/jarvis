@@ -1084,7 +1084,23 @@ def archive_conversation(conversation: str) -> dict:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis.pending_action.archive_cancel_failed", message=frappe.get_traceback())
 		frappe.db.commit()
+	_stop_macro_runs_in([doc.name])
 	return {"ok": True}
+
+
+def _stop_macro_runs_in(conversations: list[str]) -> None:
+	"""A macro run whose chat is archived or deleted is stopped, not left `running`
+	(``macros.stop_runs_in_conversations``). Call it with nothing pending: each stop
+	commits. Best-effort: it must not undo, or fail, what the user asked for."""
+	try:
+		from jarvis.chat import macros
+
+		macros.stop_runs_in_conversations(conversations, by=frappe.session.user)
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(
+			title="jarvis.chat.macros.stop_for_conversation_failed", message=frappe.get_traceback()
+		)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1099,6 +1115,8 @@ def clear_chat_history() -> dict:
 	names = frappe.get_all(CONV, filters={"owner": user}, pluck="name")
 	if not names:
 		return {"ok": True, "deleted": 0}
+	# BEFORE the messages go: the step to cancel is found through them.
+	_stop_macro_runs_in(names)
 	frappe.db.delete(MSG, {"conversation": ["in", names]})
 	# Macro runs LINK conversations — blank the reference instead of leaving a
 	# dangling link (the run-history dashboard tolerates an empty conversation).

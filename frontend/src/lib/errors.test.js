@@ -211,6 +211,16 @@ test("cancelled has no hint - it renders as a muted note, never the error card",
 	assert.equal(info.hint, "");
 });
 
+// The macro engine's marker for a step it cancelled when the run was stopped
+// (macros._STOPPED_BEFORE_START). As an error card it would offer Retry, and Retry
+// would run the stopped step as a plain turn.
+test("a macro step stopped before it started is a cancelled note with no Retry", () => {
+	const info = turnErrorInfo("Stopped before it started.");
+	assert.equal(info.code, "cancelled");
+	assert.equal(info.hint, "");
+	assert.equal(info.retryable, false);
+});
+
 // MUST be total (same contract as errMessage above): any shape of input
 // returns a usable envelope and never throws, including a truthy non-string
 // that would otherwise crash a naive `.toLowerCase()` call.

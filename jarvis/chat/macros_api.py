@@ -567,12 +567,68 @@ def _locked_for_writing(doc):
 	return frappe.get_doc(MACRO, doc.name)
 
 
+# How many times a delete stops the macro's live runs and looks again before it
+# gives up. A second round needs a run to START in the instant between the stop and
+# the lock; three in a row is a macro being started in a loop.
+_DELETE_STOP_ROUNDS = 3
+
+
+class MacroBusyError(frappe.ValidationError):
+	"""The macro kept starting runs while it was being deleted."""
+
+
+def _refuse_busy_delete(macro_name: str, stopped: int):
+	"""A delete that gave up. The runs it stopped stay stopped (each stop committed),
+	so the refusal says so, and says what to do. It is also the one trace an operator
+	gets of a macro being started in a loop: a ValidationError is not logged."""
+	frappe.log_error(
+		title=f"jarvis.chat.macros_api.delete_refused_busy: {macro_name}",
+		message=(
+			f"macro {macro_name}: a run was live again after each of {_DELETE_STOP_ROUNDS} rounds of "
+			f"stops; {stopped} run(s) were stopped; the macro was not deleted."
+		),
+	)
+	frappe.db.commit()  # the throw below rolls the request back
+	if stopped == 1:
+		said = _("The run was stopped, but another run started before the macro could be deleted.")
+	elif stopped:
+		said = _("{0} runs were stopped, but another run started before the macro could be deleted.").format(
+			stopped
+		)
+	else:
+		said = _("Another run started before the macro could be deleted.")
+	# ``frappe.throw``, not a bare raise: only a thrown message reaches the client.
+	frappe.throw(f"{said} {_('Delete it again.')}", MacroBusyError)
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def delete_macro(name: str) -> dict:
-	"""Delete a macro row (owner-gated). Its Macro Run history rows link the
-	macro and would block the delete (LinkExistsError), so they go first — they
-	are just execution history; the run conversations themselves stay.
+	"""Delete a macro row (owner-gated). Returns ``{"ok", "stopped_runs"}``.
+
+	**A live run is stopped first.** Deleting the row of a run that is still going
+	did not stop it: its steps kept running, in a chat that stayed armed with no run
+	row left to disarm it. So, in this order:
+
+	1. Stop each run that is ``running`` or parked for capacity (``macros._stop_run``:
+	   the step that has not started is cancelled, the chat is disarmed and told
+	   "Stopped: its macro was being deleted."). Each stop commits, so no lock is
+	   held here.
+	2. Take the macro's row lock on a fresh snapshot and LOOK AGAIN. ``run_macro``
+	   takes the same lock before it inserts a run, so a run that started during 1 is
+	   either committed and seen now, or still waiting for the lock. One found: let go
+	   and go back to 1. After ``_DELETE_STOP_ROUNDS`` the delete is refused
+	   (``MacroBusyError``): the refusal says the runs were stopped, and is logged.
+	3. Still under the lock, with no commit in between, delete the run rows and the
+	   macro. A run waiting for the lock then finds no macro.
+
+	The stops are committed whatever happens after them. Any exception that leaves
+	this function carries ``stopped_runs`` (how many it had stopped), which is how a
+	bulk delete counts the runs of a macro it then had to skip.
+
+	Its Macro Run history rows link the macro and would block the delete
+	(LinkExistsError), so they go first — they are just execution history; the run
+	conversations themselves stay.
 
 	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
 	and a queued job each, inside the request, for a table that grows without
@@ -599,12 +655,56 @@ def delete_macro(name: str) -> dict:
 	  that points at a name which no longer resolves: it is shown nowhere (the
 	  timeline it belonged to is gone) and nothing reads it. Sweeping eight tables
 	  on every macro delete for that is not worth the queries."""
+	from jarvis.chat import macros
+
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
-	frappe.db.delete(RUN, {"macro": doc.name})
-	frappe.delete_doc(MACRO, doc.name)  # honors if_owner
-	frappe.db.commit()
-	return {"ok": True}
+	stopped = 0
+	try:
+		for _round in range(_DELETE_STOP_ROUNDS):
+			stopped += macros.stop_runs_of_macro(
+				doc.name, reason=macros._MACRO_DELETED_ERROR, by=frappe.session.user
+			)
+			if not macros._lock_macro_row(doc.name):
+				frappe.db.commit()
+				frappe.throw(_("This macro was already deleted."), frappe.DoesNotExistError)
+			if macros.live_runs_of(doc.name):
+				frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
+				continue
+			frappe.db.delete(RUN, {"macro": doc.name})
+			frappe.delete_doc(MACRO, doc.name)  # honors if_owner
+			frappe.db.commit()
+			return {"ok": True, "stopped_runs": stopped}
+		_refuse_busy_delete(doc.name, stopped)
+	except Exception as e:
+		e.stopped_runs = stopped
+		raise
+
+
+# Why a bulk delete left a macro in place: the code the client keys on, and the
+# sentence it shows after the macro's name.
+_SKIP_MESSAGE = {
+	"not owner": "It belongs to someone else.",
+	"not found": "It was already deleted.",
+	"not permitted": "You are not allowed to delete it.",
+	"running": "Its run was stopped, but another run started before it could be deleted. Delete it again.",
+	"busy": "It is busy right now. Try again in a moment.",
+	"error": "It could not be deleted. Try again.",
+}
+
+
+def _skip_reason(e: Exception) -> str:
+	from jarvis.chat import macros
+
+	for exc, reason in (
+		(frappe.DoesNotExistError, "not found"),
+		(frappe.PermissionError, "not permitted"),
+		(MacroBusyError, "running"),
+		(macros.MacroRowBusyError, "busy"),
+	):
+		if isinstance(e, exc):
+			return reason
+	return "error"
 
 
 @frappe.whitelist()
@@ -612,32 +712,51 @@ def delete_macro(name: str) -> dict:
 def delete_macros_bulk(names: str | list | None = None) -> dict:
 	"""Bulk delete macros the caller OWNS (DESIGN-V3 §8.3 / D20). ``names`` is a
 	JSON array of macro row-names. Reuses the ``delete_macro`` path per row so
-	each macro's Run history goes first (LinkExistsError otherwise). Per-row
-	try/except: foreign rows skip with ``not owner``, one bad row never aborts
-	the batch. Returns ``{deleted, skipped: [{name, reason}]}``."""
+	each macro's live runs are stopped and its Run history goes first
+	(LinkExistsError otherwise). Per-row try/except: foreign rows skip with
+	``not owner``, one bad row never aborts the batch. Returns
+	``{deleted, skipped: [{name, title, reason, message}], stopped_runs}``:
+	``title`` is the macro's own name and ``message`` a sentence for the user;
+	``stopped_runs`` includes the runs of a macro that was then skipped.
+
+	A row that fails is ROLLED BACK before the next one. Without that its macro row
+	lock, and whatever its delete had half done, were carried into the next macro's
+	stops: that macro waited for run locks while holding the first one's row (the
+	lock order ``macros._lock_macro_row`` forbids), and its first commit then made
+	the half-done delete permanent (run history gone, macro still there)."""
 	raw = frappe.parse_json(names) if isinstance(names, str) else (names or [])
 	items = [str(n) for n in raw if n] if isinstance(raw, list) else []
 	me = frappe.session.user
 	deleted = 0
+	stopped_runs = 0
 	skipped: list[dict] = []
+
+	def skip(name: str, title: str, reason: str) -> None:
+		skipped.append({"name": name, "title": title, "reason": reason, "message": _(_SKIP_MESSAGE[reason])})
+
 	for n in items:
+		title = n
 		try:
 			doc = frappe.get_doc(MACRO, n)
+			title = doc.macro_name or n
 			if doc.owner != me:
-				skipped.append({"name": n, "reason": "not owner"})
+				skip(n, title, "not owner")
 				continue
-			delete_macro(n)  # clears run history first, then the macro
+			# stops its live runs, clears run history, then the macro
+			stopped_runs += delete_macro(n).get("stopped_runs") or 0
 			deleted += 1
-		except frappe.DoesNotExistError:
-			skipped.append({"name": n, "reason": "not found"})
-		except frappe.PermissionError:
-			skipped.append({"name": n, "reason": "not permitted"})
-		except Exception:
-			# Never leak internal exception text to the client — log server-side.
-			frappe.log_error(title="Jarvis: bulk macro delete failed", message=frappe.get_traceback())
-			skipped.append({"name": n, "reason": "error"})
+		except Exception as e:
+			frappe.db.rollback()
+			frappe.clear_messages()  # the thrown sentence is reported per row, below
+			stopped_runs += getattr(e, "stopped_runs", 0)
+			reason = _skip_reason(e)
+			if reason == "error":
+				# Never leak internal exception text to the client: log server-side.
+				frappe.log_error(title="Jarvis: bulk macro delete failed", message=frappe.get_traceback())
+				frappe.db.commit()  # a later row's rollback must not take the log with it
+			skip(n, title, reason)
 	frappe.db.commit()
-	return {"deleted": deleted, "skipped": skipped}
+	return {"deleted": deleted, "skipped": skipped, "stopped_runs": stopped_runs}
 
 
 # --------------------------------------------------------------------------- #
