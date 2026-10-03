@@ -357,6 +357,7 @@
 			:macroName="holding.macro_name || ''"
 			:ownerLabel="ownerText(holding)"
 			@held="onHeld"
+			@failed="onHeld"
 		/>
 	</SettingsPane>
 </template>

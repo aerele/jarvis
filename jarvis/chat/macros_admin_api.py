@@ -614,6 +614,10 @@ def admin_hold(macro: str, reason: str = "") -> dict:
 			stopped += bool(macros._stop_run(run, reason=_MACRO_HELD_ERROR, by=admin))
 		except Exception:
 			frappe.db.rollback()
+			# A stop refused with frappe.throw left its own message in the request; the
+			# client shows the first one, so the admin would read "this run could not be
+			# stopped" and never learn the hold itself went through.
+			frappe.clear_last_message()
 			frappe.log_error(
 				title=f"jarvis.chat.macros_admin_api.hold_stop_failed: {run}", message=frappe.get_traceback()
 			)

@@ -123,6 +123,8 @@ describe("MacroHoldDialog", () => {
 		expect(w.emitted("held")).toBeUndefined();
 		expect(w.emitted("update:modelValue")).toBeUndefined();
 		expect(toast.success).not.toHaveBeenCalled();
+		// The hold may be committed even so: the pane re-reads its list.
+		expect(w.emitted("failed")).toEqual([[{ name: "m1" }]]);
 	});
 
 	it("puts the macro's name in the toast escaped", async () => {
