@@ -70,7 +70,7 @@ class MacroRunOutcomeBase(FrappeTestCase):
 
 	def _mk_run(self, *, steps=2, at_step=1, armed=False, stop_on_error=1, trigger="manual", tag="m"):
 		"""A macro with ``steps`` steps and a run of it that has dispatched step
-		``at_step`` (1-based), the way ``_run_step`` leaves the row."""
+		``at_step`` (1-based), the way ``macros._dispatch_step`` leaves the row."""
 		frappe.set_user(OWNER)
 		macro = frappe.get_doc(
 			{
