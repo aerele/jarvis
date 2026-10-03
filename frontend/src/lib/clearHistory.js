@@ -8,11 +8,27 @@
 export const CLEAR_HISTORY_CONFIRM =
 	"Every conversation and message will be permanently deleted. A chat with a reply still in progress is kept. Macros, skills and settings stay. This can't be undone.";
 
-export function keptChatsNotice(kept) {
+function deletedChatsLine(deleted) {
+	if (!Number.isFinite(deleted) || deleted < 0) return "";
+	if (deleted === 0) return "No chats were deleted. ";
+	return deleted === 1 ? "Deleted 1 chat. " : `Deleted ${deleted} chats. `;
+}
+
+// What went, what stayed, and what to do about what stayed. `deleted` is left out
+// of the line when the server did not say.
+export function keptChatsNotice(kept, deleted) {
 	if (!(kept > 0)) return "";
-	return kept === 1
-		? "1 chat was kept because a reply is still in progress. Delete again once it finishes."
-		: `${kept} chats were kept because a reply is still in progress. Delete again once they finish.`;
+	const stayed =
+		kept === 1
+			? "1 chat was kept because a reply is still in progress. Delete all again once the reply finishes."
+			: `${kept} chats were kept because their replies are still in progress. Delete all again once the replies finish.`;
+	return deletedChatsLine(deleted) + stayed;
+}
+
+// The server deletes chat by chat, so a request that failed may have deleted some.
+export function clearHistoryFailedNotice(detail) {
+	const what = String(detail || "").trim() || "Could not delete history";
+	return `${what.replace(/[.\s]+$/, "")}. Some chats may already have been deleted.`;
 }
 
 // -> { notice, openChatKept }: the line to show ("" for none), and whether the
@@ -21,8 +37,9 @@ export function clearHistoryOutcome(res, openId) {
 	const names = Array.isArray(res?.kept) ? res.kept : [];
 	const count = Number(res?.skipped);
 	const kept = Number.isFinite(count) && count > 0 ? count : names.length;
+	const deleted = res?.deleted == null ? NaN : Number(res.deleted);
 	return {
-		notice: keptChatsNotice(kept),
+		notice: keptChatsNotice(kept, deleted),
 		openChatKept: Boolean(openId) && names.includes(openId),
 	};
 }

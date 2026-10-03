@@ -158,7 +158,8 @@
 			<div class="flex flex-col gap-0.5">
 				<span class="text-base font-medium text-ink-gray-8">Delete all chat history</span>
 				<span class="max-w-lg text-p-sm text-ink-gray-6">
-					Every conversation and message, permanently. Macros and skills stay.
+					Every conversation and message, permanently. Chats still waiting for a reply
+					are kept. Macros and skills stay.
 				</span>
 				<!-- clearAllHistory is registered by ChatView at runtime, so it is
 				     absent on non-chat routes. Say why rather than showing a dead
