@@ -305,11 +305,18 @@ def _lock_macro_row(macro_name: str) -> bool:
 
 
 def _hold_under_lock(macro_name: str) -> tuple[bool, str]:
-	"""``(held, reason)`` for a macro whose row lock this transaction holds, read with
-	a locking read: the row as committed now, never a snapshot from before the wait.
-	An admin's hold takes the same lock (``macros_admin_api.admin_hold``), so a hold
-	either committed before this read and is seen, or waits for this transaction.
-	Not held when the site has not migrated the hold fields yet."""
+	"""``(held, reason)`` for a macro whose row lock this transaction holds. An admin's
+	hold takes the same lock (``macros_admin_api.admin_hold``), so a hold either
+	committed before the lock was granted and is seen, or waits for this transaction.
+	Not held when the site has not migrated the hold fields yet.
+
+	In ``run_macro`` the macro loaded after ``_lock_macro_row`` is already the row as
+	committed now, so this second locking read adds nothing there today (a mutant
+	reading it without the lock survives the race tests). It is kept as a guard that
+	does not depend on that: a locking read always reads the latest committed row,
+	whatever read view an earlier statement in the transaction opened (a meta lookup
+	that missed its cache, a future read moved above the lock). One extra indexed read
+	per run start."""
 	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
 		HOLD_FIELD,
 		HOLD_REASON_FIELD,
@@ -1344,6 +1351,12 @@ def _apply_step_end(
 		return  # the step was retried; that turn's end is the one that counts
 	macro_doc = frappe.get_doc(MACRO, run.macro)
 	if _fail_run_unless_one_owner(run, macro_doc):
+		return
+	if is_held(macro_doc):
+		# An admin's hold whose own stop of this run did not go through (it raised;
+		# the hold had already committed): no further step goes out. The same end as
+		# the capacity resume's and the five-minute check's. The caller holds the lock.
+		_stop_run_locked(run.name, reason=_MACRO_HELD_ERROR, by="turn end")
 		return
 	content = _run_content(run, macro_doc)
 	steps = content.steps

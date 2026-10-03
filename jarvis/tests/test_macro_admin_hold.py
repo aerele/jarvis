@@ -263,6 +263,38 @@ class TestTheHold(WithColumns):
 		self.assertEqual(row["last_run"]["stopped_by_admin"], 1)
 		self.assertEqual(self._run(run).error, HELD)
 
+	def test_one_run_that_will_not_stop_leaves_the_others_stopped(self):
+		# Every live run is tried; the one that failed is named in the error, which
+		# comes after the rest were stopped.
+		first, _c1, macro = self._mk_run(steps=3, at_step=1, armed=True, tag=f"{TAG}-two")
+		frappe.set_user(OWNER)
+		conv = frappe.get_doc({"doctype": CONV, "title": "second run"})
+		conv.flags.ignore_permissions = True
+		conv.insert()
+		second = self._run_row(macro, OWNER, "running", conversation=conv.name)
+		real_stop = macros._stop_run
+		calls = []
+
+		def stop(run, **kwargs):
+			calls.append(run)
+			if run == first:
+				frappe.throw("This run could not be stopped. Try again.")
+			return real_stop(run, **kwargs)
+
+		with patch.object(macros, "_stop_run", side_effect=stop):
+			with self.assertRaises(frappe.ValidationError) as raised:
+				self._hold(macro)
+		self.assertEqual(sorted(calls), sorted([first, second]))
+		self.assertIn(first, str(raised.exception))
+		self.assertEqual(self._run(second).status, "stopped")
+		self.assertEqual(self._run(first).status, "running")
+		self.assertEqual(self._state(macro).admin_hold, 1)  # the hold itself stands
+
+	def test_the_admin_list_shows_a_reason_only_on_a_held_row(self):
+		macro = self._macro(OWNER, "a", admin_hold=0, admin_hold_reason="left behind")
+		(row,) = [r for r in self._list()["rows"] if r["name"] == macro]
+		self.assertEqual((row["admin_hold"], row["admin_hold_reason"]), (0, ""))
+
 	def test_the_admin_list_filters_on_hold(self):
 		held = self._macro(OWNER, "held")
 		free = self._macro(OTHER, "free")
@@ -376,6 +408,48 @@ class TestAHeldMacroDoesNotRun(WithColumns):
 		self.assertEqual((row.status, row.error), ("stopped", HELD))
 		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
 
+	def test_a_step_end_ends_a_held_macros_run_and_sends_nothing(self):
+		# The hold committed and its own stop of this run failed: the run's next turn
+		# end stops it, with the reason the resume and the check use.
+		run, conv, macro = self._mk_run(steps=3, at_step=1, armed=True, tag=f"{TAG}-hook")
+		step_turn, _, _ = self._turn(conv)
+		with patch.object(macros, "_stop_run", side_effect=frappe.ValidationError("lost")):
+			with self.assertRaises(frappe.ValidationError):
+				self._hold(macro)
+		self.assertEqual(self._run(run).status, "running")
+		frappe.set_user("Administrator")
+		with patch("jarvis.chat.api._enqueue_turn") as enqueue:
+			macros.advance_after_turn(conv, errored=False, run_id=step_turn)
+		enqueue.assert_not_called()
+		row = self._run(run)
+		self.assertEqual((row.status, row.error, row.current_step), ("stopped", HELD, 1))
+		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
+
+	def test_a_held_macro_is_not_summarized(self):
+		macro = self._macro(OWNER, "a", steps=("one", "two"))
+		self._hold(macro)
+		frappe.set_user(OWNER)
+		with patch("jarvis.chat.api._enqueue_turn") as enqueue:
+			for force in (0, 1):
+				with self.subTest(force=force):
+					with self.assertRaises(MacroOnHoldError) as raised:
+						macros_api.summarize_macro(macro, force=force)
+					self.assertIn(REASON, str(raised.exception))
+					frappe.db.rollback()
+		enqueue.assert_not_called()
+		self.assertEqual(frappe.db.get_value(MACRO, macro, "merge_status") or "", "")
+		self.assertEqual(frappe.db.count(CONV, {"owner": OWNER}), 0)
+
+	def test_a_step_edit_while_held_does_not_ask_for_a_summary(self):
+		macro = self._macro(OWNER, "a", steps=("one", "two"))
+		self._hold(macro)
+		frappe.set_user(OWNER)
+		res = macros_api.update_macro(macro, steps=[{"prompt": "one"}, {"prompt": "two, edited"}])
+		self.assertFalse(res["data"]["summarize"])
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Macro Step", {"parent": macro, "idx": 2}, "prompt"), "two, edited"
+		)
+
 	def test_the_five_minute_check_ends_a_held_macros_run(self):
 		run, conv, macro = self._mk_run(steps=2, at_step=1, armed=True, tag=f"{TAG}-check")
 		self._turn(conv)  # step 1 ended; its hook is lost
@@ -418,6 +492,38 @@ class TestTheOwnerCannotUndoIt(WithColumns):
 		macros_api.update_macro(macro, description="still mine", enabled=0, schedule_enabled=0)
 		self.assertEqual(frappe.db.get_value(MACRO, macro, "description"), "still mine")
 		self.assertEqual(self._state(macro).admin_hold, 1)
+
+	def test_switching_off_a_held_macro_that_is_still_on_is_never_blocked(self):
+		# A row held while still on (a raw write; the verb switches all three off):
+		# each switch goes off on its own save, and the hold stays.
+		macro = self._macro(OWNER, "a")
+		self._held_raw(macro, enabled=1, schedule_enabled=1, skip_confirmation=1)
+		frappe.set_user(OWNER)
+		for field in ("enabled", "schedule_enabled", "skip_confirmation"):
+			with self.subTest(field=field):
+				macros_api.update_macro(macro, **{field: 0})
+				self.assertEqual(frappe.db.get_value(MACRO, macro, field), 0)
+		self.assertEqual(self._state(macro).admin_hold, 1)
+
+	def test_the_reason_is_escaped_in_the_message(self):
+		# The refusal is a message, and messages are HTML (Frappe 15's Desk dialog
+		# inserts one as it is). What the SPA reads stays the admin's own text.
+		reason = "<b>x</b> <img src=x onerror=alert(1)>"
+		macro = self._macro(OWNER, "a")
+		self._hold(macro, reason=reason)
+		frappe.set_user(OWNER)
+		with self.assertRaises(MacroOnHoldError) as switched_on:
+			macros_api.update_macro(macro, enabled=1)
+		frappe.db.rollback()
+		with self.assertRaises(MacroOnHoldError) as by_hand:
+			macros.run_macro(macro)
+		frappe.db.rollback()
+		for message in (str(switched_on.exception), str(by_hand.exception)):
+			self.assertIn("&lt;b&gt;x&lt;/b&gt; &lt;img src=x onerror=alert(1)&gt;", message)
+			self.assertNotIn("<", message)
+		self.assertEqual(macros_api.get_macro(macro)["admin_hold_reason"], reason)
+		(row,) = [r for r in self._list()["rows"] if r["name"] == macro]
+		self.assertEqual(row["admin_hold_reason"], reason)
 
 	def test_a_form_loaded_before_the_hold_cannot_switch_it_back_on(self):
 		macro = self._macro(OWNER, "a")
@@ -760,8 +866,11 @@ class TestAdminDelete(HoldBase):
 		fn = macros_api.dismiss_macro_notices
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[fn], ["POST"])
 		frappe.set_user(OWNER)
-		with self.assertRaises(frappe.ValidationError):
-			fn({"owner": OWNER})
+		# Not JSON, not a list, or a list of anything but names: a ValidationError, not a 500.
+		for names in ({"owner": OWNER}, "NL-0001", '{"a": 1}', "[1, 2]", [None], ["NL-1", 3]):
+			with self.subTest(names=names):
+				with self.assertRaises(frappe.ValidationError):
+					fn(names)
 		self.assertEqual(fn("[]")["dismissed"], 0)
 
 	def test_an_admin_deleting_their_own_macro_is_not_notified(self):
