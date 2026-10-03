@@ -4125,6 +4125,7 @@ import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 import { firstSendPicks } from "@/lib/firstSendPicks";
+import { CLEAR_HISTORY_CONFIRM, clearHistoryOutcome } from "@/lib/clearHistory";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
@@ -6113,14 +6114,14 @@ const toolOpen = ref({});
 const showActivityDetail = computed(() => store.activityDetail);
 const notifyEnabled = computed(() => store.notifyEnabled);
 
-// Danger zone: wipe every conversation + message (macros/skills untouched).
+// Danger zone: wipe every conversation + message (macros/skills untouched). A chat
+// waiting for a reply is kept by the server; lib/clearHistory.js decides the rest.
 const clearingHistory = ref(false);
 async function clearAllHistory() {
 	if (
 		!(await confirm({
 			title: "Delete ALL chat history?",
-			message:
-				"Every conversation and message will be permanently deleted. Macros, skills and settings stay. This can't be undone.",
+			message: CLEAR_HISTORY_CONFIRM,
 			confirmLabel: "Delete everything",
 			danger: true,
 		}))
@@ -6128,7 +6129,15 @@ async function clearAllHistory() {
 		return;
 	clearingHistory.value = true;
 	try {
-		await api.clearChatHistory();
+		const outcome = clearHistoryOutcome(await api.clearChatHistory(), currentId.value);
+		if (outcome.notice) notify(outcome.notice, { type: "info", duration: 9000 });
+		if (outcome.openChatKept) {
+			// The open chat is waiting for its reply and was kept: leave it exactly
+			// as it is (it goes on streaming) and only refresh the sidebar.
+			settingsOpen.value = false;
+			store.loadConversations();
+			return;
+		}
 		messages.value = [];
 		originPage.value = "";
 		originOf.value = "";
