@@ -536,6 +536,31 @@ def _step_turn_state(run, index: int) -> str | None:
 	)
 
 
+def _step_end_delivered(run, index: int) -> bool:
+	"""Whether step ``index``'s end may already have reached the hook (and so will not
+	reach it again to move the run): the un-park and the capacity resume ask this.
+
+	Not "the turn has ended". On the pump the hook is the ``macro_advance`` effect of
+	the finalize job, and it runs while the Turn is still ``finalizing``; the Turn is
+	``done`` only after the effects behind it (usage re-queues itself while the gateway
+	has no fresh numbers, so that can be a finalize cycle or more). So a Turn that is
+	``finalizing`` or has ended counts as delivered unless the effect ledger says the
+	hook is still to come: its ``macro_advance`` row is ``pending``. A ``running`` row
+	counts as delivered: that is the hook running now, or a finalize that died inside
+	it (re-run after the claim goes stale, and then refused by the step check). No row
+	(a turn that ended without settlement: never dispatched, aged out, cancelled
+	queued) means no hook is coming.
+
+	Phase-0's worker calls the hook before its Turn settles, so there a step whose end
+	was delivered still reads as running here."""
+	from jarvis.chat import turn_state
+
+	if _step_turn_state(run, index) not in (*_TURN_ENDED, "finalizing"):
+		return False
+	hook = f"{_step_turn_id(run.name, index)}::macro_advance"
+	return frappe.db.get_value(turn_state.EFFECT, hook, "status") != "pending"
+
+
 def _step_is_out(run, index: int) -> bool:
 	"""Whether step ``index`` of the run has its turn. Always False where no Turn rows
 	are written (the pump off and draining, without Phase-0): a step sent there gets a
@@ -576,7 +601,7 @@ def _raise_cursor(run, to: int, *, sent: bool = False) -> None:
 	run.current_step = max(int(run.current_step or 0), to)
 
 
-def _next_step_index(run) -> int:
+def _next_step_index(run, total: int) -> int:
 	"""The 0-based index of the first step the run has NOT sent, and the cursor
 	repaired to match.
 
@@ -589,10 +614,20 @@ def _next_step_index(run) -> int:
 	Only for a caller that knows the current step is over (an accepted step end) or
 	that nothing is running (a message with no turn). The capacity resume sends
 	exactly the index it parked at and lets ``_dispatch_step`` answer "already out":
-	walking forward there would send the step after one that is still running."""
+	walking forward there would send the step after one that is still running.
+
+	Bounded by the run's steps (``total``, or ``total_steps`` if larger): a turn for a
+	step past the last one cannot exist unless the id stopped depending on the step,
+	and then the walk would read on forever holding the run lock. It raises instead."""
 	cursor = int(run.current_step or 0)
+	bound = max(int(total or 0), int(run.total_steps or 0))
 	index = cursor
 	while _step_is_out(run, index):
+		if index >= bound:
+			raise RuntimeError(
+				f"{run.name}: step {index + 1} of {bound} has a turn ({_step_turn_id(run.name, index)}); "
+				"the step's turn id is not per step"
+			)
 		index += 1
 	if index != cursor:
 		_raise_cursor(run, index)
@@ -1155,7 +1190,7 @@ def _apply_step_end(
 	# the cursor). Repaired BEFORE anything below reads the cursor: "Step N" in a
 	# failure names the step that ended, and a run that ends here counts every step it
 	# sent in the month's budget.
-	next_index = _next_step_index(run)
+	next_index = _next_step_index(run, total)
 	if merged and next_index < total:
 		# A summarized run is one turn: its accepted end is the run's end, whatever the
 		# turn's id. A turn with a random id (sent in the instant a cutover re-routed
@@ -1646,15 +1681,25 @@ def _send_step(run, index: int, prompt: str, overrides: dict):
 	``FOR UPDATE``, so under load either is a realistic way to lose a whole run (the
 	caller ends it, "could not be started"). A retry is safe exactly where Turn rows are
 	written: there the failed attempt wrote nothing (the message and the turn are one
-	transaction, rolled back together), and an attempt whose turn did land answers the
-	retry ``duplicate``. On the legacy path the message is committed before the job is
-	asked for, so a retry would write a second one: not retried there."""
+	transaction, rolled back together). On the legacy path the message is committed
+	before the job is asked for, so a retry would write a second one: not retried there.
+
+	Not retried either when the step's turn exists by then: the raise came after the
+	gate's commit (waking the pump). The retry would be told ``duplicate`` and the
+	caller would take the step for one somebody else sent, skipping its look at the run
+	(``_fenced_by_an_ended_run``): a Stop that landed before the turn would not withdraw
+	it. The attempt's own answer is handed back instead, so the look and the cursor
+	follow as for any step this call sent.
+
+	The trace is written after the retry: written before it, it is a write in the
+	retry's transaction, and ``txn.replay_is_safe()`` then refuses to replay the
+	retry's own conversation write if that loses a race."""
 	from jarvis.chat import admission, api, txn
 
+	turn_id = _step_turn_id(run.name, index)
+
 	def send():
-		return api._enqueue_turn(
-			run.conversation, prompt, origin="macro", run_id=_step_turn_id(run.name, index), **overrides
-		)
+		return api._enqueue_turn(run.conversation, prompt, origin="macro", run_id=turn_id, **overrides)
 
 	try:
 		return send()
@@ -1664,12 +1709,21 @@ def _send_step(run, index: int, prompt: str, overrides: dict):
 		if not admission.turn_machine_enabled():
 			raise
 		frappe.db.rollback()
+		first = frappe.get_traceback()
+	retried = not _step_is_out(run, index)
+	try:
+		return send() if retried else {"ok": True, "run_id": turn_id}
+	finally:
 		frappe.log_error(
 			title=f"jarvis.chat.macros.step_send_retried: {run.name}",
-			message=f"Step {index + 1}: the first attempt lost a lock race and was retried.\n\n"
-			+ frappe.get_traceback(),
+			message=(
+				f"Step {index + 1}: the first attempt lost a lock race and was retried.\n\n"
+				if retried
+				else f"Step {index + 1}: its turn {turn_id} existed after the attempt raised (committed "
+				"before the raise, or by a second dispatcher); not retried.\n\n"
+			)
+			+ first,
 		)
-		return send()
 
 
 def _step_prompt(run, macro_doc, index: int) -> tuple[str, dict]:
@@ -1738,17 +1792,19 @@ def _unpark(run, index: int) -> None:
 	"""Undo a park another dispatcher of step ``index`` left while this step's turn was
 	being created: the run is ``running`` again, so the step's end moves it.
 
-	Only while that turn has NOT ended. A turn that has ended says the park is not
-	about it: a stale dispatcher of step k (its run lock lapsed) must not take a run
-	parked at step k+1 out of ``waiting_capacity``; nothing would ever send k+1 (the
-	resume lists parked runs only, and step k's end has been used). And when the park
-	did come while step k was running, its end was ignored (a parked run takes no
-	step end): the resume, which flips the run back itself, then finds the step out and
-	ended and carries the run on (``resume_waiting_capacity_runs``). Nothing else is
-	touched: an ended run stays ended."""
+	Only while that turn's end is still to come (``_step_end_delivered``). An end
+	already delivered says the park is not about it: a stale dispatcher of step k (its
+	run lock lapsed) must not take a run parked at step k+1 out of ``waiting_capacity``;
+	nothing would ever send k+1 (the resume lists parked runs only, and step k's end has
+	been used). On the pump that end is delivered while the Turn is still
+	``finalizing``, which is why "the turn has ended" was not enough. And when the park
+	did come while step k was running, its end was ignored (a parked run takes no step
+	end): the resume, which flips the run back itself, then finds the step out and its
+	end delivered and carries the run on (``resume_waiting_capacity_runs``). Nothing
+	else is touched: an ended run stays ended."""
 	if _run_status_now(run.name) != "waiting_capacity":
 		return
-	if _step_turn_state(run, index) in _TURN_ENDED:
+	if _step_end_delivered(run, index):
 		return
 	if _cas_run_status(run.name, "waiting_capacity", "running"):
 		run.status = "running"
@@ -1950,6 +2006,17 @@ def resume_waiting_capacity_runs() -> None:
 				index = 0 if _run_mode(run, macro_doc) == MODE_MERGED else int(run.current_step or 0)
 				try:
 					sent = _dispatch_step(run, macro_doc, index)
+				except _StepIdTaken:
+					# Not the site being busy, and no later cycle will be different: end
+					# the run now, as the hook and ``run_macro`` do. Re-parked, it was
+					# retried every cycle and failed ~100 minutes later as "the site
+					# stayed busy".
+					frappe.log_error(
+						title=f"jarvis macro step dispatch failed: {run.name}", message=frappe.get_traceback()
+					)
+					merged = _run_mode(run, macro_doc) == MODE_MERGED
+					_end_run(run, macro_doc, "failed", _step_not_started(index, merged))
+					continue
 				except Exception:
 					# CDX-23: the waiting_capacity -> running flip already committed; an enqueue that
 					# RAISED (session setup / Message persistence / dispatch) leaves NO Turn and NO owner
@@ -1962,12 +2029,14 @@ def resume_waiting_capacity_runs() -> None:
 					)
 					_compensate_resume_enqueue_failure(run, macro_doc, attempts, index=index)
 					continue
-				if sent == _STEP_ALREADY_OUT and _step_turn_state(run, index) in _TURN_ENDED:
-					# The step is out AND over, and the run was parked when it ended, so its
-					# end was ignored (a parked run takes no step end) and nothing else will
+				if sent == _STEP_ALREADY_OUT and _step_end_delivered(run, index):
+					# The step is out and its end was delivered while the run was parked, so
+					# it was ignored (a parked run takes no step end) and nothing else will
 					# move the run: a second dispatcher parked it while the first sent the
 					# step, and the first died before it could undo that. Apply the end now,
-					# as the hook would have (the turn's own row decides how it went).
+					# as the hook would have (the turn's own row decides how it went; a
+					# `finalizing` Turn is a success). A hook still to come finds the run
+					# `running` and moves it itself.
 					_apply_step_end(
 						run.name, run.conversation, errored=False, run_id=_step_turn_id(run.name, index)
 					)
