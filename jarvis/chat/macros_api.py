@@ -293,7 +293,10 @@ def _last_runs(macro_names: list[str], owner: str) -> dict:
 
 	One query for a whole page. Scoped to ``owner``'s run rows, which is every run of
 	their macro by construction. The conversation is handed back only to that owner:
-	someone overseeing the macro may know that a run failed, not read the chat."""
+	someone overseeing the macro may know that a run failed, not read the chat.
+
+	A row kept for the budget after its macro was deleted (``delete_macro``) has no
+	macro, so ``macro IN`` never matches it."""
 	if not macro_names:
 		return {}
 	rows = frappe.db.sql(
@@ -630,6 +633,13 @@ def delete_macro(name: str) -> dict:
 	(LinkExistsError), so they go first — they are just execution history; the run
 	conversations themselves stay.
 
+	**The month's scheduled steps are kept.** The unattended budget is added up from
+	run rows, so removing them all gave the owner the month back: delete, create
+	again, start from zero. The finished scheduled rows of the current month stay,
+	with no macro on them (``macros.drop_runs_of_deleted_macro``); for the user the
+	run history is gone all the same, since nothing that lists runs shows a row with
+	no macro (``_HAS_MACRO``). The hourly macro job removes them after the month ends.
+
 	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
 	and a queued job each, inside the request, for a table that grows without
 	bound. The filter is the LOADED document's name (the one whose permission was
@@ -671,7 +681,7 @@ def delete_macro(name: str) -> dict:
 			if macros.live_runs_of(doc.name):
 				frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
 				continue
-			frappe.db.delete(RUN, {"macro": doc.name})
+			macros.drop_runs_of_deleted_macro(doc.name)
 			frappe.delete_doc(MACRO, doc.name)  # honors if_owner
 			frappe.db.commit()
 			return {"ok": True, "stopped_runs": stopped}
@@ -787,6 +797,10 @@ def get_macro_run(run: str) -> dict:
 	"""Current state of a run (for polling as a socketio fallback)."""
 	doc = frappe.get_doc(RUN, run)
 	doc.check_permission("read")  # owner-gate
+	if not doc.macro:
+		# A row kept for the budget after its macro was deleted (``delete_macro``).
+		# As a run it is gone, which is what this said when the row was deleted.
+		frappe.throw(_("Jarvis Macro Run {0} not found").format(run), frappe.DoesNotExistError)
 	return {
 		"name": doc.name,
 		"macro": doc.macro,
@@ -802,6 +816,10 @@ def get_macro_run(run: str) -> dict:
 # Run history dashboard (settings → Macro runs)
 # --------------------------------------------------------------------------- #
 _RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
+# A run row with no macro is not run history: ``delete_macro`` keeps the month's
+# scheduled rows of a deleted macro so the unattended budget still counts them, and
+# clears their macro. Every query that shows or counts runs for a person carries this.
+_HAS_MACRO = "macro IS NOT NULL"
 
 
 @frappe.whitelist()
@@ -817,7 +835,7 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 	footer (DESIGN-V3 D38 — additive)."""
 	limit = max(1, min(int(limit or 30), 100))
 	start = max(0, int(start or 0))
-	conditions = ["r.owner = %(owner)s"]
+	conditions = ["r.owner = %(owner)s", f"r.{_HAS_MACRO}"]
 	params = {"owner": frappe.session.user, "limit": limit + 1, "start": start}
 	if status and status in _RUN_STATUSES:
 		conditions.append("r.status = %(status)s")
@@ -861,7 +879,8 @@ def macro_run_stats() -> dict:
 	every day would read 100%."""
 	owner = {"owner": frappe.session.user}
 	rows = frappe.db.sql(
-		"SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run` WHERE owner = %(owner)s GROUP BY status",
+		f"""SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND {_HAS_MACRO} GROUP BY status""",
 		owner,
 		as_dict=True,
 	)
@@ -869,14 +888,14 @@ def macro_run_stats() -> dict:
 	completed = by.get("completed", 0)
 	failed = by.get("failed", 0)
 	stopped_with_reason = frappe.db.sql(
-		"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
-		WHERE owner = %(owner)s AND status = 'stopped' AND IFNULL(error, '') != ''""",
+		f"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND {_HAS_MACRO} AND status = 'stopped' AND IFNULL(error, '') != ''""",
 		owner,
 	)[0][0]
 	finished = completed + failed + stopped_with_reason
-	last = frappe.db.sql("SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s", owner)[0][
-		0
-	]
+	last = frappe.db.sql(
+		f"SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s AND {_HAS_MACRO}", owner
+	)[0][0]
 	return {
 		"total": sum(by.values()),
 		"completed": completed,
