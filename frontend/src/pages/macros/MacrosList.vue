@@ -161,6 +161,7 @@ import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 import { scheduleLabel } from "./scheduleLabel";
+import { LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "./runDisplay";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
 import {
 	lastRunCell as describeLastRun,
@@ -209,8 +210,8 @@ function onTab(v) {
 // side both reading "All" could not be told apart.
 const ENABLED_OPTIONS = [
 	{ label: "All statuses", value: "" },
-	{ label: "Enabled", value: "1" },
-	{ label: "Draft", value: "0" },
+	{ label: enabledLabel(true), value: "1" },
+	{ label: enabledLabel(false), value: "0" },
 ];
 const SCHEDULE_OPTIONS = [
 	{ label: "All schedules", value: "" },
@@ -396,19 +397,12 @@ onBeforeUnmount(() => {
 // passed is "Due now" / "Overdue", never the bare relative time ("5 minutes ago").
 // The wording and the states live in lib/macroSchedule's nextRunCell (unit-tested,
 // imported here as describeNextRun); this wrapper only feeds it the row and maps its
-// tone to a colour.
-const NEXT_RUN_TONE = { warn: "text-ink-amber-3", muted: "text-ink-gray-5" };
+// tone to a colour (./runDisplay, shared with the admin's pane).
 
 // What the "Last run" cell says, or null for the "-" placeholder. It used to print
 // a bare time, and only for scheduled runs, so a macro whose last run failed looked
 // the same as one that worked. The decision lives in lib/macroRunOutcome.js; this
 // wrapper feeds it the row. A server that sends no `last_run` yet keeps the old cell.
-const LAST_RUN_TONE = {
-	bad: "text-ink-red-4",
-	warn: "text-ink-amber-3",
-	muted: "text-ink-gray-5",
-	info: "text-ink-blue-3",
-};
 function lastRunCell(row) {
 	const at = row.last_run && (row.last_run.finished_at || row.last_run.started_at);
 	const cell = describeLastRun({
