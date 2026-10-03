@@ -570,7 +570,7 @@ class TestNoStepStartsAfterStop(StopBase):
 		frappe.db.commit()
 		run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
 		with self._queueing(conv, before=lambda: macros._stop_run(run, reason=DELETED, by=OWNER)):
-			self.assertFalse(macros._run_merged(run_doc, macro_doc, "all of it"))
+			self.assertEqual(macros._dispatch_step(run_doc, macro_doc, 0), macros._STEP_WITHDRAWN)
 		self.assertEqual(self._run(run).current_step, 0)
 		self.assertEqual(self._live_turns(conv), [])
 
@@ -584,7 +584,7 @@ class TestNoStepStartsAfterStop(StopBase):
 				frappe.db.commit()
 
 			with self._queueing(conv, before=ended):
-				self.assertFalse(macros._run_step(run_doc, macro_doc, 0))
+				self.assertEqual(macros._dispatch_step(run_doc, macro_doc, 0), macros._STEP_WITHDRAWN)
 			self.assertEqual(self._run(run).current_step, 0, status)
 			self.assertEqual(self._live_turns(conv), [], status)
 
@@ -653,10 +653,9 @@ class TestNoStepStartsAfterStop(StopBase):
 				patch("jarvis.chat.macros.publish_to_user") as publish,
 				patch("frappe.log_error") as log,
 			):
-				if stepped:
-					self.assertFalse(macros._run_step(run_doc, macro_doc, 0))
-				else:
-					self.assertFalse(macros._run_merged(run_doc, macro_doc, "all of it"))
+				if not stepped:
+					run_doc.run_mode = "merged"  # a summarized run: one turn, the summary
+				self.assertEqual(macros._dispatch_step(run_doc, macro_doc, 0), macros._STEP_RUNS_ANYWAY)
 			row = self._run(run)
 			self.assertEqual((row.status, row.current_step), ("stopped", 1), stepped)
 			self.assertEqual(len(self._live_turns(conv)), 1, "the started step was cancelled")
@@ -675,7 +674,7 @@ class TestNoStepStartsAfterStop(StopBase):
 			return {"run_id": run_id, "message_id": seed, "queued": True}
 
 		with patch("jarvis.chat.api._enqueue_turn", side_effect=enqueue):
-			self.assertFalse(macros._run_step(run_doc, macro_doc, 0))
+			self.assertEqual(macros._dispatch_step(run_doc, macro_doc, 0), macros._STEP_WITHDRAWN)
 		self.assertEqual(self._run(run).current_step, 0)
 		self.assertEqual(self._live_turns(conv), [])
 		self.assertEqual(len(self._markers(conv)), 1)
@@ -691,7 +690,7 @@ class TestNoStepStartsAfterStop(StopBase):
 			frappe.db.commit()
 
 		with self._queueing(conv, before=parked):
-			self.assertTrue(macros._run_step(run_doc, macro_doc, 0))
+			self.assertEqual(macros._dispatch_step(run_doc, macro_doc, 0), macros._STEP_SENT)
 		self.assertEqual(self._run(run).current_step, 1)
 		self.assertEqual(len(self._live_turns(conv)), 1)
 
@@ -699,7 +698,7 @@ class TestNoStepStartsAfterStop(StopBase):
 		run, conv, macro = self._mk_run(steps=2, at_step=0)
 		run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
 		with self._queueing(conv):
-			self.assertTrue(macros._run_step(run_doc, macro_doc, 0))
+			self.assertEqual(macros._dispatch_step(run_doc, macro_doc, 0), macros._STEP_SENT)
 		self.assertEqual(self._run(run).current_step, 1)
 		self.assertEqual(len(self._live_turns(conv)), 1)
 		self.assertEqual(self._markers(conv), [])
