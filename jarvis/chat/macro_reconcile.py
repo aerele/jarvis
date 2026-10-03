@@ -30,6 +30,12 @@ in site config. The stale-run sweep stays for what this cannot see: a turn that 
 ends (``ready``, a prepare that keeps being reclaimed, ``finalizing`` with no job)
 and a run whose newest step message has no Turn row.
 
+The same tick settles a macro's summary that sits "summarizing" because its turn's
+end never landed it (``_SummaryCheck``): the summarize turn is a turn like a step's,
+its hook can be lost the same ways, and Run stays refused while the mark is there.
+Failing a summary is harmless (the steps run as written), so a summarize turn that
+never ends is failed too, after ``SUMMARY_GIVE_UP_AFTER_S``.
+
 Is it working? ``stuck_runs`` lists the runs it should have dealt with and has not
 (``bench --site <site> execute jarvis.chat.macro_reconcile.stuck_runs``: an empty
 list is the healthy answer), and the stale-run sweep writes an Error Log,
@@ -75,6 +81,13 @@ NOT_STARTED_AFTER_S = 10 * 60
 # own latency is one tick after the grace (or after ``NOT_STARTED_AFTER_S``).
 STUCK_AFTER_S = 20 * 60
 MAX_RUNS_PER_TICK = 200
+# A summary is looked at once its chat is this old (the chat's ``creation`` is the
+# only clock: the macro row's ``modified`` is not written by a summary). A chat that
+# is gone is looked at at once: nothing is coming from it.
+SUMMARY_SETTLE_AFTER_S = 20 * 60
+# A summarize turn that has not ended by then is given up on and the summary failed.
+SUMMARY_GIVE_UP_AFTER_S = 60 * 60
+MAX_SUMMARIES_PER_TICK = 200
 TICK_BUDGET_S = 120
 SKIP_AFTER_A_RAISE_S = 3600
 LOG_AT_MOST_EVERY_S = 3600
@@ -93,6 +106,10 @@ _GATE_CLOSED = "This macro cannot run right now."
 SHAPE_FORCE_DONE = "force_done"  # the finalize job died in the hook until it was given up on
 SHAPE_HOOK_DROPPED = "hook_dropped"  # the hook gave up waiting for the run lock
 SHAPE_NO_STEP_SENT = "no_step_sent"  # the run's first step was never written
+# The same for a summary: its turn's finalize job died in the hook until it was given
+# up on, or its chat has no turn (the request that started it died before the dispatch).
+SHAPE_SUMMARY_FORCE_DONE = "summary_force_done"
+SHAPE_SUMMARY_NO_TURN = "summary_no_turn"
 
 TICK_FAILED = "jarvis.chat.macros.reconcile_tick_failed"
 TICK_CUT_SHORT = "jarvis.chat.macros.reconcile_cut_short"
@@ -123,6 +140,8 @@ def reconcile_running_runs() -> dict:
 		"conflicts": 0,
 		"out_of_time": 0,
 		"left": 0,
+		"summaries": 0,
+		"summaries_settled": 0,
 	}
 	try:
 		if _switched_off() or not _turn_rows_are_written():
@@ -139,6 +158,8 @@ def reconcile_running_runs() -> dict:
 			if not _shard_is_on_the_pump(row.conversation):
 				continue
 			_RunCheck(row.name, summary).run()
+		if not summary["out_of_time"]:
+			_reconcile_stuck_summaries(summary, started)
 		summary["left"] += beyond
 		if summary["left"]:
 			_cut_short(summary)
@@ -431,6 +452,164 @@ class _RunCheck:
 		return True
 
 
+def _reconcile_stuck_summaries(summary: dict, started: float) -> None:
+	"""The tick's second half: every macro whose summary looks stuck, in what is left of
+	the tick's time budget."""
+	rows = _stuck_summary_candidates()
+	for position, row in enumerate(rows):
+		if _clock() - started >= TICK_BUDGET_S:
+			summary["out_of_time"] = 1
+			summary["left"] += len(rows) - position
+			return
+		summary["summaries"] += 1
+		if not _shard_is_on_the_pump(row.conversation):
+			continue
+		_SummaryCheck(row.name, row.conversation or "", summary).run()
+
+
+def _stuck_summary_candidates() -> list:
+	"""Macros ``pending`` on a chat created ``SUMMARY_SETTLE_AFTER_S`` ago or more, or on
+	one that is gone; those first, then the oldest chat first, ``MAX_SUMMARIES_PER_TICK``
+	at most. The cutoff is the site's clock, like the chat's ``creation``."""
+	cutoff = frappe.utils.add_to_date(now_datetime(), seconds=-SUMMARY_SETTLE_AFTER_S)
+	return frappe.db.sql(
+		f"""SELECT m.name, m.merge_conversation AS conversation
+		FROM `tab{MACRO}` m LEFT JOIN `tab{CONV}` c ON c.name = m.merge_conversation
+		WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)
+		ORDER BY c.creation IS NOT NULL, c.creation
+		LIMIT %(limit)s""",
+		{"cutoff": cutoff, "limit": MAX_SUMMARIES_PER_TICK},
+		as_dict=True,
+	)
+
+
+class _SummaryCheck:
+	"""One macro's "summarizing" mark, in one tick, isolated from the macros after it.
+
+	Settled, the way the summarize turn's own hook settles it
+	(``macros._land_summary``), when nothing more will come for it:
+
+	* its chat is gone: failed at once, as the hook fails it;
+	* its turn is over by the run check's own rule (``step_is_over``: ended, no hook
+	  owed, its reply not turn recovery's, two minutes since): the reply decides,
+	  ready or failed, as it decides for the hook. A summary that worked and whose
+	  hook was lost lands;
+	* its chat has no turn and no reply in progress: the request that started it died
+	  before the dispatch. With Turn rows written that is all it can be.
+
+	A turn that has not ended ``SUMMARY_GIVE_UP_AFTER_S`` after its chat was created
+	(``ready`` for good, a prepare that keeps being reclaimed) fails the summary, and
+	its chat is kept while the turn is live.
+
+	No lock. Every write is a compare-and-set on the mark still naming the chat this
+	look read (``macros._settle_summary_mark``): of the check, the hook and a
+	Re-summarize started meanwhile, one wins, and only the winner deletes the chat."""
+
+	def __init__(self, macro_name: str, conversation: str, summary: dict):
+		self.name = macro_name
+		self.conversation = conversation
+		self.summary = summary
+		self.signal = None  # (shape, turn state): the Error Log this look owes
+
+	def run(self) -> None:
+		from jarvis.chat import txn
+
+		if frappe.cache().get_value(_summary_key("skip", self.name), expires=True):
+			return
+		try:
+			# The candidate list is from before: read the present.
+			txn.fresh_snapshot(owned=True)
+			settled = self._look()
+		except JobTimeoutException:
+			raise
+		except Exception as e:
+			traceback = frappe.get_traceback()
+			_rollback()
+			self._raised(e, traceback)
+			return
+		if not settled:
+			return
+		self.summary["summaries_settled"] += 1
+		if self.signal:
+			_signal(
+				self.name, *self.signal, subject="macro", key=_summary_key("signalled", self.conversation)
+			)
+
+	def _raised(self, e: Exception, traceback: str) -> None:
+		"""As a run's (``_RunCheck._raised``): a lost race is tried again on the next
+		tick; anything else is logged once and the macro left alone for an hour."""
+		from jarvis.chat import txn
+
+		if txn.is_write_conflict(e) or isinstance(e, frappe.QueryTimeoutError):
+			self.summary["conflicts"] += 1
+			return
+		self.summary["raised"] += 1
+		frappe.cache().set_value(_summary_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
+		frappe.log_error(title=f"jarvis.chat.macros.summary_reconcile_failed: {self.name}", message=traceback)
+		frappe.db.commit()
+
+	def _look(self) -> bool:
+		"""Returns whether this look took the macro off "summarizing"."""
+		mark = frappe.db.get_value(MACRO, self.name, ["merge_status", "merge_conversation"], as_dict=True)
+		if not mark or mark.merge_status != "pending" or (mark.merge_conversation or "") != self.conversation:
+			return False
+		created = frappe.db.get_value(CONV, self.conversation, "creation") if self.conversation else None
+		if created is None:
+			# "Delete all chat history" mid-summary: by design, no Error Log.
+			return macros._land_summary(self.name, self.conversation, errored=True)
+		age = _seconds_since(created)
+		if age < SUMMARY_SETTLE_AFTER_S:
+			return False
+		turn = _summary_turn(self.conversation)
+		if turn and step_is_over(turn.name):
+			if _ledger_gave_up_on_the_hook(turn.name):
+				self.signal = (SHAPE_SUMMARY_FORCE_DONE, turn.state)
+			return self._land(turn)
+		if not turn and not _reply_in_progress(self.conversation):
+			self.signal = (SHAPE_SUMMARY_NO_TURN, None)
+			# ``errored=False``: the reply decides, and with no turn there is none
+			# that finished, so it is failed (a chat sent where no Turn row is written
+			# can hold a finished one, and that one lands as its hook would land it).
+			return macros._land_summary(self.name, self.conversation, errored=False)
+		if age < SUMMARY_GIVE_UP_AFTER_S:
+			return False
+		return macros._finish_merge(self.name, self.conversation, "failed", "", chat_may_be_live=True)
+
+	def _land(self, turn) -> bool:
+		"""The turn is over: what the hook would have landed. How the turn ended is read
+		as the run check reads a step's end (``macros._step_verdict``), so a reply that
+		turn recovery finished counts as finished."""
+		reply = None
+		if turn.assistant_message:
+			reply = frappe.db.get_value(
+				MSG, turn.assistant_message, ["was_recovered", "streaming", "content", "error"], as_dict=True
+			)
+		errored = bool(macros._step_verdict(turn, reply, errored=False))
+		return macros._land_summary(self.name, self.conversation, errored=errored)
+
+
+def _summary_turn(conversation: str):
+	"""The summary chat's newest turn (it has one), or None."""
+	rows = frappe.get_all(
+		TURN,
+		filters={"conversation": conversation},
+		fields=_STEP_TURN_FIELDS,
+		order_by="creation desc",
+		limit=1,
+	)
+	return rows[0] if rows else None
+
+
+def _reply_in_progress(conversation: str) -> bool:
+	from jarvis.chat import admission
+
+	return bool(admission.reply_in_progress(conversation))
+
+
+def _summary_key(kind: str, name: str) -> str:
+	return f"{CACHE_PREFIX}:summary-{kind}:{name}"
+
+
 def _switched_off() -> bool:
 	"""The off switch, read on every tick (site config is loaded per job). Any value
 	but an absent, empty or zero one switches the check off: ``bench set-config``
@@ -596,28 +775,47 @@ def _lost_hook_shape(run_name: str, turn_id: str) -> str | None:
 	  standing is something else (a hook that raised and logged it, a capacity
 	  resume that died after its flip), and calling it a lost hook would send
 	  whoever reads the log after the wrong thing. No Error Log."""
-	from jarvis.chat import turn_state
-
-	attempts = frappe.db.get_value(turn_state.EFFECT, f"{turn_id}::macro_advance", "attempts")
+	attempts = _hook_attempts(turn_id)
 	if attempts is None:
 		return None
-	if int(attempts or 0) >= turn_state.FINALIZE_MAX_ATTEMPTS:
+	if _ledger_gave_up_on_the_hook(turn_id, attempts):
 		return SHAPE_FORCE_DONE
 	if frappe.db.exists(LOG, {"method": f"jarvis.chat.macros.turn_end_dropped: {run_name}"}):
 		return SHAPE_HOOK_DROPPED
 	return None
 
 
-def _signal(run_name: str, shape: str, turn_state: str | None) -> None:
-	"""One Error Log row per run the check moved in a hook's place. The title is
-	forwarded off the bench (``api_errors``): the shape only. The body: the run, the
-	turn's state, the shape. Never a prompt or a reply."""
-	if frappe.cache().get_value(_key("signalled", run_name), expires=True):
+def _hook_attempts(turn_id: str) -> int | None:
+	"""How many times the finalize ledger tried the turn's hook; None: it has no row."""
+	from jarvis.chat import turn_state
+
+	attempts = frappe.db.get_value(turn_state.EFFECT, f"{turn_id}::macro_advance", "attempts")
+	return None if attempts is None else int(attempts or 0)
+
+
+def _ledger_gave_up_on_the_hook(turn_id: str, attempts: int | None = None) -> bool:
+	"""Whether the turn's hook used every attempt the ledger gives it (``force_done``)."""
+	from jarvis.chat import turn_state
+
+	if attempts is None:
+		attempts = _hook_attempts(turn_id)
+	return attempts is not None and attempts >= turn_state.FINALIZE_MAX_ATTEMPTS
+
+
+def _signal(
+	name: str, shape: str, turn_state: str | None, *, subject: str = "run", key: str | None = None
+) -> None:
+	"""One Error Log row per run (or per stuck summary: ``subject`` "macro", ``key``
+	its chat) the check moved in a hook's place. The title is forwarded off the bench
+	(``api_errors``), and its body with it: the shape in the title; the run or macro,
+	the turn's state and the shape in the body. Never a prompt or a reply."""
+	key = key or _key("signalled", name)
+	if frappe.cache().get_value(key, expires=True):
 		return
-	frappe.cache().set_value(_key("signalled", run_name), 1, expires_in_sec=_MARKER_TTL_S)
+	frappe.cache().set_value(key, 1, expires_in_sec=_MARKER_TTL_S)
 	frappe.log_error(
 		title=f"jarvis.chat.macros.reconciled: {shape}",
-		message=f"run {run_name}; turn state {turn_state or 'no turn'}; shape {shape}",
+		message=f"{subject} {name}; turn state {turn_state or 'no turn'}; shape {shape}",
 	)
 	frappe.db.commit()
 
