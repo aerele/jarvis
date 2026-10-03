@@ -1746,8 +1746,10 @@ def stop_runs_of_macro(macro_name: str, *, reason: str, by: str) -> int:
 	return sum(1 for run in live_runs_of(macro_name) if _stop_run(run, reason=reason, by=by))
 
 
-def stop_runs_in_conversations(conversations: list[str], *, by: str) -> int:
+def stop_runs_in_conversations(conversations: list[str], *, by: str, reason: str = "") -> int:
 	"""Stop the live runs whose chat is being archived or deleted; returns how many.
+	``reason`` is what the run row and its chat are told; an archive gives none and
+	gets ``_CONVERSATION_GONE_ERROR``.
 
 	Such a run used to stay `running`: a step still in the queue ran into a chat
 	nobody could see, an armed chat stayed armed, and only the stale-run sweep, hours
@@ -1767,7 +1769,7 @@ def stop_runs_in_conversations(conversations: list[str], *, by: str) -> int:
 	stopped = 0
 	for run in runs:
 		try:
-			stopped += bool(_stop_run(run, reason=_CONVERSATION_GONE_ERROR, by=by))
+			stopped += bool(_stop_run(run, reason=reason or _CONVERSATION_GONE_ERROR, by=by))
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(
@@ -2791,8 +2793,12 @@ def notify_owner(owner: str, *, subject: str, body: str) -> None:
 
 _OWNER_MISMATCH_ERROR = "This run was stopped: its macro and conversation do not belong to one user."
 # The one sentence for "the chat is gone", whoever notices: the hook and the resume
-# (found missing), an archive, a clear of chat history (``stop_runs_in_conversations``).
+# (found missing), an archive (``stop_runs_in_conversations``).
 _CONVERSATION_GONE_ERROR = "This run was stopped because its conversation was deleted."
+# The reason on a run stopped by "Delete all chat history" (``api.clear_chat_history``).
+# Worded so it is true whether or not the chat then goes: the stop commits first, and a
+# chat that a reply starts in before its delete is kept, with this as its closing line.
+_HISTORY_CLEARED_ERROR = "This run was stopped because its owner deleted all chat history."
 # The reason on a run stopped by ``macros_api.delete_macro``; also the closing line
 # left in the run's chat, which outlives the macro and the run row. Worded so it is
 # true whether or not the delete then goes through: the stop commits first, and a
