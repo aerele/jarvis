@@ -39,3 +39,20 @@ export const adminGetMacro = (name) => call(MA + "admin_get_macro", { name });
 // -> { ok, stopped, status, message }; `stopped` is false when the run had already
 // ended, and `message` says so.
 export const adminStopRun = (run) => call(MA + "admin_stop_run", { run });
+
+// Put another user's macro on hold: it does not run at all (by hand, on its
+// schedule, or a parked run resuming) until an admin releases it. The hold also
+// switches the macro off, unschedules and disarms it, and stops its live runs.
+// `reason` is required and is shown to the owner on their macro form.
+// Refused on the admin's own macro.
+// -> { ok, held, stopped_runs }
+export const adminHold = (macro, reason) => call(MA + "admin_hold", { macro, reason });
+
+// Lift the hold. Nothing turns itself back on: the owner does that.
+// -> { ok, released }; `released` is false when the macro was not on hold.
+export const adminRelease = (macro) => call(MA + "admin_release", { macro });
+
+// Delete any user's macro, through the owner's own delete: its live runs are
+// stopped first. The owner's Macros list shows them a notice that it happened.
+// -> { ok, deleted, stopped_runs }
+export const adminDelete = (macro) => call(MA + "admin_delete", { macro });

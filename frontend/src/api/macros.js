@@ -11,3 +11,13 @@ export const deleteMacrosBulk = (names) =>
 	call("jarvis.chat.macros_api.delete_macros_bulk", {
 		names: JSON.stringify(Array.from(names || [])),
 	});
+
+// The owner's notices that an admin deleted one of their macros arrive with the
+// list page (`notices: [{ name, message, creation }]` on list_macros_page). This
+// marks them read, so the list stops showing them: the ones named, or all of
+// them when `names` is empty.
+// -> { ok, dismissed }
+export const dismissMacroNotices = (names) =>
+	call("jarvis.chat.macros_api.dismiss_macro_notices", {
+		names: JSON.stringify(Array.from(names || [])),
+	});
