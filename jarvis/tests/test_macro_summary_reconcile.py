@@ -809,3 +809,18 @@ class TestAnOrphanedSummaryChat(SummaryBase):
 			macros._apply_merge_after_turn(chat, errored=False)
 		self.assertTrue(frappe.db.exists(CONV, run_log))
 		self.assertTrue(frappe.db.exists(CONV, conv))
+
+	def test_a_caller_holding_work_is_left_its_transaction(self):
+		"""A legacy caller may reach the hook with writes of its own not yet committed:
+		the chat stays rather than commit them (or roll them back)."""
+		name, conv, rid = self._mk_summary(age_s=61 * MIN)
+		self._force(rid, state="ready")
+		self._tick()
+		self._force(rid, state="cancelled", done_at=frappe.utils.now())
+		frappe.db.set_value(CONV, conv, "title", "a write of the caller's", update_modified=False)
+		macros._apply_merge_after_turn(conv, errored=False)
+		frappe.db.rollback()
+		self.assertTrue(frappe.db.exists(CONV, conv))
+		self.assertNotEqual(frappe.db.get_value(CONV, conv, "title"), "a write of the caller's")
+		macros._apply_merge_after_turn(conv, errored=False)
+		self.assertFalse(frappe.db.exists(CONV, conv), "with nothing of the caller's, it goes")
