@@ -25,7 +25,7 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import now_datetime
 
-from jarvis.chat import admission, macros, pump, stale_scan
+from jarvis.chat import admission, finalize, macros, pump, stale_scan, txn
 from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.tests import test_macro_run_outcome as outcome
@@ -121,6 +121,10 @@ class IdentityBase(outcome.MacroRunOutcomeBase):
 				frappe.local.conf.pop(key, None)
 			else:
 				frappe.local.conf[key] = value
+		frappe.db.sql(
+			f"DELETE FROM `tab{ts.EFFECT}` WHERE turn IN (SELECT name FROM `tab{TURN}` WHERE relay_target_id=%s)",
+			self._target,
+		)
 		frappe.db.delete(TURN, {"relay_target_id": self._target})
 		frappe.db.delete(PUMP, {"relay_target_id": ["like", f"{TARGET_PREFIX}%"]})
 		frappe.db.delete("Error Log", {"method": ["like", "jarvis.chat.macros.step_%"]})
@@ -191,6 +195,32 @@ class IdentityBase(outcome.MacroRunOutcomeBase):
 		if deliver:
 			macros.advance_after_turn(conv, errored=state != "done", run_id=turn)
 		return message
+
+	def _finish_as_the_pump(self, conv, turn, *, hook_pending=False):
+		"""End a step's turn the way the pump really does (the macros spike's S1 shape).
+		Settlement leaves the Turn ``finalizing`` with its effect rows ``pending``. The
+		finalize job then runs ``macro_advance``, which calls the hook with that effect
+		claimed (``running``) and the Turn still ``finalizing``; ``done`` comes only after
+		the effects behind it. Here another finalizer holds ``usage`` (a slow gateway
+		poll), so the Turn is still ``finalizing`` when the test goes on.
+
+		``hook_pending``: settlement only; the finalize job has not run yet."""
+		message = self._msg(conv, "assistant", content="done")
+		frappe.db.set_value(
+			TURN, turn, {"state": "finalizing", "assistant_message": message}, update_modified=False
+		)
+		ts.insert_required_effects(turn, ("macro_advance", "usage"))
+		ts.claim_effect(turn, "usage")
+		frappe.db.commit()
+		if not hook_pending:
+			self._run_finalize(turn)
+		return message
+
+	def _run_finalize(self, turn):
+		"""The finalize job for ``turn``: the hook runs with the Turn ``finalizing``."""
+		finalize.run_finalize(turn)
+		self.assertEqual(frappe.db.get_value(TURN, turn, "state"), "finalizing", "premise: usage is held")
+		self.assertEqual(frappe.db.get_value(ts.EFFECT, f"{turn}::macro_advance", "status"), "done")
 
 	@contextmanager
 	def _killed_at_the_turn_insert(self):
@@ -457,10 +487,13 @@ class TestTheReviewsRaceProbes(IdentityBase):
 		def meanwhile():
 			macros.advance_after_turn(conv, errored=False, run_id=step_one)
 			with patch.object(admission, "MAX_QUEUE_DEPTH", 0):
-				self._finish(conv, two)
+				# Step 2's end, as the pump delivers it: its Turn is still `finalizing`
+				# while the hook parks the run, and stays so until usage is recorded.
+				self._finish_as_the_pump(conv, two)
 
 		with self._locks_always_granted(), self._paused_after_its_look(meanwhile):
 			self.assertEqual(macros._dispatch_step(*self._docs(run, macro), 1), macros._STEP_ALREADY_OUT)
+		self.assertEqual(frappe.db.get_value(TURN, two, "state"), "finalizing")
 		row = self._run(run)
 		self.assertEqual((row.status, row.current_step), ("waiting_capacity", 2), "un-parked by a stale step")
 		macros.resume_waiting_capacity_runs()
@@ -590,7 +623,9 @@ class TestTheReviewsRaceProbes(IdentityBase):
 		frappe.db.rollback()
 		frappe.db.set_value(RUN, run, "status", "waiting_capacity")  # the loser's park
 		frappe.db.commit()
-		self._finish(conv, two)
+		# As the pump delivers it: the hook runs, and is ignored, while the Turn is
+		# `finalizing`, and the resume comes before the Turn is `done`.
+		self._finish_as_the_pump(conv, two)
 		self.assertEqual(self._names(conv, (step_one,)), [two], "premise: a parked run takes no step end")
 		macros.resume_waiting_capacity_runs()
 		self.assertEqual(self._names(conv, (step_one,)), [two, step_turn_id(run, 2)])
@@ -631,6 +666,183 @@ class TestTheReviewsRaceProbes(IdentityBase):
 		self.assertEqual((row.status, row.current_step), ("running", 1))
 		macros.advance_after_turn(conv, errored=False, run_id=step_one)
 		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
+
+
+class _Looping(BaseException):
+	"""The position walk went on far past the run's steps: escapes every handler."""
+
+
+class TestTheSecondReviewsFindings(IdentityBase):
+	"""What the second review round drove through the real code."""
+
+	def test_a_park_is_undone_while_the_steps_end_is_still_to_come(self):
+		# B, told the site was full, parked the run while A created step 2's turn, and
+		# step 2 then ran and settled before A got to its un-park. Its end has not been
+		# delivered yet (the finalize job has not run), so the end must find the run
+		# `running`: left parked, the end is ignored and the run waits for the resume.
+		run, conv, macro = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		two, three = step_turn_id(run, 1), step_turn_id(run, 2)
+		real = macros._fenced_by_an_ended_run
+
+		def meanwhile(run_doc, out):
+			def other():
+				frappe.db.set_value(RUN, run, "status", "waiting_capacity")
+				self._finish_as_the_pump(conv, two, hook_pending=True)
+
+			self._elsewhere(other)
+			return real(run_doc, out)
+
+		with patch.object(macros, "_fenced_by_an_ended_run", side_effect=meanwhile):
+			self.assertEqual(macros._dispatch_step(*self._docs(run, macro), 1), macros._STEP_SENT)
+		self.assertEqual(self._run(run).status, "running")
+		self._run_finalize(two)
+		self.assertEqual(self._names(conv, (step_one,)), [two, three])
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 3))
+
+	def test_a_step_id_that_ignored_the_step_fails_the_walk_instead_of_looping(self):
+		# A regression that made the id the same for every step had the walk read on
+		# forever, holding the run lock, and hung CI instead of failing it.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		real, looks = macros._step_is_out, []
+
+		def is_out(run_doc, index):
+			looks.append(index)
+			if len(looks) > 50:
+				raise _Looping(looks[-5:])
+			return real(run_doc, index)
+
+		with (
+			patch.object(macros, "_step_turn_id", lambda run_name, index: step_one),
+			patch.object(macros, "_step_is_out", side_effect=is_out),
+			patch("frappe.log_error") as log,
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_one)
+		self.assertLessEqual(len(looks), 4, looks)
+		(call,) = [c for c in log.call_args_list if "advance failed" in c.kwargs.get("title", "")]
+		self.assertIn("is not per step", call.kwargs["message"])
+		self.assertEqual(self._run(run).status, "running")
+
+	def test_the_cursor_repair_is_not_judged_against_a_view_from_before_another_dispatcher(self):
+		# Step 2's dispatcher died after its turn, so the cursor stayed on step 1. Step
+		# 2's end is delivered twice at once (a lapsed run lock): the second delivery
+		# sends step 3 and moves the cursor while the first walks. The first then
+		# repairs the cursor from a view older than that write: 1020.
+		run, conv, macro = self._mk_run(steps=4, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		two, three = step_turn_id(run, 1), step_turn_id(run, 2)
+		with (
+			patch.object(macros, "_fenced_by_an_ended_run", side_effect=_Killed()),
+			self.assertRaises(_Killed),
+		):
+			macros._dispatch_step(*self._docs(run, macro), 1)
+		frappe.db.rollback()
+		self._finish(conv, two, deliver=False)
+		real, ran = macros._step_is_out, []
+
+		def is_out(run_doc, index):
+			if not ran:
+				ran.append(1)
+				self._elsewhere(lambda: macros.advance_after_turn(conv, errored=False, run_id=two))
+			return real(run_doc, index)
+
+		with (
+			self._locks_always_granted(),
+			patch.object(macros, "_step_is_out", side_effect=is_out),
+			patch("frappe.log_error") as log,
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=two)
+		self.assertEqual(ran, [1])
+		failed = [c.kwargs["message"] for c in log.call_args_list if "advance failed" in c.kwargs["title"]]
+		self.assertEqual(failed, [])
+		self.assertEqual(self._names(conv, (step_one,)), [two, three])
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 3))
+
+	def test_a_dispatch_that_raised_after_another_sent_the_step_does_not_take_it_for_unsent(self):
+		# This dispatcher looked (step 2 not out), stalled while a second one sent step 2,
+		# then raised before its own gate. Asked from its old view, "did the step go out
+		# anyway?" said no, and it ended a run whose step 2 was running.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		real, ran = macros._step_prompt, []
+
+		def prompt(*args, **kw):
+			if not ran:
+				ran.append(1)
+				self._elsewhere(lambda: macros.advance_after_turn(conv, errored=False, run_id=step_one))
+				raise RuntimeError("the prompt could not be read")
+			return real(*args, **kw)
+
+		with (
+			self._locks_always_granted(),
+			patch.object(macros, "_step_prompt", side_effect=prompt),
+			patch("frappe.log_error") as log,
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_one)
+		titles = [c.kwargs.get("title", "") for c in log.call_args_list]
+		self.assertIn(f"jarvis macro step bookkeeping failed: {run}", titles)
+		self.assertNotIn(f"jarvis macro step dispatch failed: {run}", titles)
+		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
+
+	def test_a_deadlock_after_the_gate_committed_still_meets_the_stop_fence(self):
+		# The step's turn was committed, and waking the pump then lost a lock race. The
+		# retry was told `duplicate` and skipped the look at the run: a Stop that landed
+		# before the turn left the step to run on a stopped run.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		woke = []
+
+		def wake(*a, **kw):
+			woke.append(1)
+			if len(woke) == 1:
+				raise frappe.QueryDeadlockError("1213")
+			return {"enqueued": False}
+
+		with (
+			patch.object(macros, "_STOP_LOCK_BLOCK_S", 0.05),
+			patch.object(pump, "ensure_pump", side_effect=wake),
+			patch("frappe.log_error"),
+			self._while_the_first_is_at_the_accept_gate(lambda: macros._stop_run(run, reason="", by=OWNER)),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_one)
+		self.assertGreaterEqual(len(woke), 1)
+		row = self._run(run)
+		self.assertEqual((row.status, row.current_step), ("stopped", 1))
+		self.assertEqual(frappe.db.get_value(TURN, step_turn_id(run, 1), "state"), "cancelled")
+
+	def test_the_retry_after_a_lost_lock_race_can_itself_be_replayed(self):
+		# The retry's trace was written BEFORE the retry, so the retried send began with
+		# a write in its transaction and its conversation write could no longer replay a
+		# lost race (``txn.replay_is_safe``).
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		step_one, _, _ = self._turn(conv)
+		real_gate, calls = admission.accept_or_queue, []
+
+		def gate(**kw):
+			calls.append(1)
+			if len(calls) == 1:
+				raise frappe.QueryDeadlockError("1213")
+			return real_gate(**kw)
+
+		real_replay, safe = txn.replay_on_conflict, []
+
+		def replay(fn, **kw):
+			safe.append(txn.replay_is_safe())
+			return real_replay(fn, **kw)
+
+		with (
+			patch.object(admission, "accept_or_queue", side_effect=gate),
+			patch.object(txn, "replay_on_conflict", side_effect=replay),
+		):
+			macros.advance_after_turn(conv, errored=False, run_id=step_one)
+		self.assertEqual(len(calls), 2)
+		self.assertEqual(safe, [True, True])
+		self._assert_step_sent_once(run, conv, 1, besides=(step_one,), seeds=2)
+		self.assertTrue(
+			frappe.db.exists("Error Log", {"method": f"jarvis.chat.macros.step_send_retried: {run}"}),
+			"the retry left no trace",
+		)
 
 
 # --------------------------------------------------------------------------- #
@@ -766,6 +978,24 @@ class TestTheAcceptGateKnowsATurnItAlreadyAccepted(IdentityBase):
 		self.assertEqual(row.status, "failed")
 		self.assertIn("Step 2 could not be started", row.error)
 		self.assertEqual(self._turns(conv, besides=(step_one,)), [])
+
+	def test_a_fixed_id_taken_by_another_chat_fails_a_resumed_run_at_once(self):
+		# Through the capacity resume it re-parked every cycle and failed about 100
+		# minutes later, saying the site had stayed busy.
+		run, conv, _ = self._mk_run(steps=3, at_step=1)
+		self._turn(conv)
+		_, elsewhere, _ = self._mk_run(tag="elsewhere-resume")
+		other_seed = self._msg(elsewhere, "user", origin="human", content="hi")
+		frappe.db.commit()
+		self._accept(elsewhere, step_turn_id(run, 1), other_seed)
+		frappe.db.set_value(RUN, run, "status", "waiting_capacity")
+		frappe.db.commit()
+		with patch("frappe.log_error"):
+			macros.resume_waiting_capacity_runs()
+		row = self._run(run)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("Step 2 could not be started", row.error)
+		self.assertEqual(self._seeds(conv)[1:], [])
 
 	def test_a_step_asked_for_again_leaves_a_trace_without_the_prompt(self):
 		run, conv, macro = self._mk_run(steps=3, at_step=1)
@@ -1114,7 +1344,7 @@ class TestWhereARunIs(IdentityBase):
 		frappe.db.set_value(RUN, run, "current_step", 0, update_modified=False)  # two failures in a row
 		frappe.db.commit()
 		run_doc, _ = self._docs(run, macro)
-		self.assertEqual(macros._next_step_index(run_doc), 2)
+		self.assertEqual(macros._next_step_index(run_doc, 5), 2)
 		self.assertEqual((self._run(run).current_step, run_doc.current_step), (2, 2))
 
 	def test_a_summarized_run_is_never_sent_step_ones_prompt(self):
