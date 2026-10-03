@@ -21,9 +21,15 @@ Every endpoint:
   database layer as a filter and would match some other row), loads the row, and
   keys everything after that on the loaded row's own name.
 
-Privacy: step prompts and summaries, which their owners wrote as private rows, are
-readable here by a Jarvis Admin (a System Manager could already read them). A
-run's conversation is never returned.
+Arguments are checked HERE, by hand. This module has ``from __future__ import
+annotations``, which turns every type hint into a string, and Frappe's request-time
+type check skips string hints (``frappe/utils/typing_validations.py``, Frappe 15 and
+16 alike). So the hints below document the arguments and guard nothing: a list or a
+dict posted as JSON reaches the function body as it is.
+
+Privacy: descriptions, step prompts and summaries, which their owners wrote as
+private rows, are readable here by a Jarvis Admin (a System Manager could already
+read them). A run's conversation is never returned.
 """
 
 from __future__ import annotations
@@ -42,6 +48,11 @@ STOPPED_BY_ADMIN = "Stopped by an administrator."
 
 # How many of a macro's runs the read-only view shows.
 RECENT_RUNS = 20
+# The owner filter's choices are a select: past this many it is no longer one, and
+# the search box (which matches an owner's name and address) is the way in.
+OWNERS_MAX = 200
+# A search box, not a document: anything longer is cut, not refused.
+SEARCH_MAX = 140
 
 _SORTABLE = {
 	"macro_name": "macro_name",
@@ -59,11 +70,38 @@ _HAS_LIVE_RUN = """EXISTS (SELECT 1 FROM `tabJarvis Macro Run` r
 
 
 def _name_arg(value, what: str) -> str:
-	"""``value`` as a document name, or a refusal. Checked here and not left to the
-	type hint: Frappe validates hints on an HTTP request only."""
+	"""``value`` as a document name, or a refusal. This check is the only guard:
+	Frappe does not type-check this module's arguments (see the module docstring)."""
 	if not isinstance(value, str) or not value.strip():
 		frappe.throw(_("{0} must be a name.").format(what), frappe.ValidationError)
 	return value.strip()
+
+
+def _text_arg(value, what: str) -> str:
+	"""``value`` as optional text ("" when absent), or a refusal. A list or a dict is
+	refused, not ignored: ignoring a search would answer with the unfiltered list."""
+	if value is None:
+		return ""
+	if not isinstance(value, str):
+		frappe.throw(_("{0} must be text.").format(what), frappe.ValidationError)
+	return value.strip()
+
+
+def _filters_arg(filters) -> dict:
+	"""``filters`` as a dict, from a dict or a JSON object; nothing sent is ``{}``.
+	Anything else (a list, text that is not JSON) is refused: the shared reader
+	(``list_filters.load_legacy_filters``) drops it, and a filter that silently does
+	nothing answers with every user's macros."""
+	if filters is None or (isinstance(filters, str) and not filters.strip()):
+		return {}
+	if isinstance(filters, str):
+		try:
+			filters = frappe.parse_json(filters)
+		except Exception:
+			frappe.throw(_("Filters could not be read."), frappe.ValidationError)
+	if not isinstance(filters, dict):
+		frappe.throw(_("Filters must be an object of filter names and values."), frappe.ValidationError)
+	return filters
 
 
 def _full_names(users) -> dict:
@@ -93,9 +131,12 @@ def admin_list_macros(
 	scheduled or armed, and how its last run went. No step and no summary text:
 	those are read one macro at a time (``admin_get_macro``).
 
+	``search`` matches the macro's name, its owner's address and its owner's full
+	name (the list shows the full name, so that is what an admin types).
 	``filters``: ``owner`` (a user), ``armed``, ``scheduled``, ``live_run`` (0 or 1).
-	Envelope ``{rows, total, has_more, start, page_length, owners}``; ``owners`` is
-	everyone who has a macro, for the owner filter.
+	Envelope ``{rows, total, has_more, start, page_length}``. The owner filter's
+	choices are their own call (``admin_macro_owners``): they do not change with the
+	page or the search, so they are not recomputed with every keystroke.
 
 	Every predicate is written here and every value is bound: nothing the caller
 	sends becomes SQL text."""
@@ -103,14 +144,22 @@ def admin_list_macros(
 	require_jarvis_admin()
 	from jarvis.chat.macros import _LIVE_RUN_STATUSES
 
+	search = _text_arg(search, _("Search"))[:SEARCH_MAX]
+	sort_field = _text_arg(sort_field, _("Sort field"))
+	sort_dir = _text_arg(sort_dir, _("Sort direction"))
 	start, page_length = list_filters.clamp_page(start, page_length)
-	f = list_filters.load_legacy_filters(filters, _FILTERS)
+	f = list_filters.load_legacy_filters(_filters_arg(filters), _FILTERS)
 	conditions = ["1=1"]
 	params: dict = {"start": start, "page_length": page_length, "live": _LIVE_RUN_STATUSES}
 
-	if search and isinstance(search, str):
-		conditions.append("(m.macro_name LIKE %(q)s OR m.owner LIKE %(q)s)")
-		params["q"] = f"%{list_filters.escape_like(search.strip())}%"
+	if search:
+		# One statement: the full name is matched by a subquery on the user table,
+		# not looked up per row.
+		conditions.append(
+			"""(m.macro_name LIKE %(q)s OR m.owner LIKE %(q)s
+			OR m.owner IN (SELECT u.name FROM `tabUser` u WHERE u.full_name LIKE %(q)s))"""
+		)
+		params["q"] = f"%{list_filters.escape_like(search)}%"
 	if "owner" in f:
 		if not isinstance(f["owner"], str):
 			frappe.throw(_("Invalid owner filter."))
@@ -143,8 +192,7 @@ def admin_list_macros(
 	names = [r.name for r in rows]
 	last_runs = _last_runs(names)
 	live_runs = _live_runs(names)
-	owners = _owners()
-	full_names = {o["user"]: o["full_name"] for o in owners}
+	full_names = _full_names(r.owner for r in rows)
 	now = frappe.utils.now_datetime()
 	for r in rows:
 		r["owner_full_name"] = full_names.get(r.owner) or r.owner
@@ -162,17 +210,35 @@ def admin_list_macros(
 		"has_more": start + len(rows) < total,
 		"start": start,
 		"page_length": page_length,
-		"owners": owners,
 	}
 
 
-def _owners() -> list[dict]:
-	"""Everyone who owns a macro, with how many: the owner filter's choices."""
-	counts = frappe.db.sql(
-		"SELECT owner, COUNT(*) AS n FROM `tabJarvis Macro` GROUP BY owner ORDER BY owner", as_dict=True
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def admin_macro_owners() -> dict:
+	"""The owner filter's choices: who owns a macro, with how many. Asked for once
+	when the pane opens (and on Refresh), not with every page of the list.
+
+	``{owners: [{user, full_name, macros}], more}``. At most ``OWNERS_MAX``, the ones
+	with the most macros, in name order; ``more`` says the site has others, who are
+	reached through the search box. Only people who own a macro: this is not a
+	directory of the site's users."""
+	refuse_in_tool_dispatch()
+	require_jarvis_admin()
+	counts = list_filters.bounded_sql(
+		"""SELECT owner, COUNT(*) AS n FROM `tabJarvis Macro`
+		GROUP BY owner ORDER BY n DESC, owner ASC LIMIT %(limit)s""",
+		{"limit": OWNERS_MAX + 1},
+		as_dict=True,
 	)
+	more = len(counts) > OWNERS_MAX
+	counts = counts[:OWNERS_MAX]
 	full_names = _full_names(c.owner for c in counts)
-	return [{"user": c.owner, "full_name": full_names.get(c.owner) or c.owner, "macros": c.n} for c in counts]
+	owners = [
+		{"user": c.owner, "full_name": full_names.get(c.owner) or c.owner, "macros": c.n} for c in counts
+	]
+	owners.sort(key=lambda o: (o["full_name"].lower(), o["user"]))
+	return {"owners": owners, "more": more}
 
 
 def _last_runs(macro_names: list[str]) -> dict:
@@ -185,13 +251,24 @@ def _last_runs(macro_names: list[str]) -> dict:
 
 	Status, trigger and times only. The run's conversation is not for an admin, and
 	its reason can quote what a step tried to do: that is shown with the opened
-	macro, not in a list. ``name`` is set only while the run is live."""
+	macro, not in a list. The one thing the list says about the reason is a yes or
+	no, ``stopped_by_admin``: whether it is exactly this module's own fixed sentence.
+	That lets the pane tell an admin's stop from the owner's own without any of the
+	run's text leaving the server. The run Stop acts on is the row's ``live_run``.
+
+	Cost: the grouped subquery finds each macro's rows through the ``macro`` index
+	but reads every one of them for ``creation``, and run rows are never purged. A
+	composite ``(macro, creation)`` index would answer it from the index alone. It
+	is NOT added here: on an existing site ``on_doctype_update`` only runs when the
+	doctype is reloaded, so the index needs a patch (as ``owner_creation_index``
+	did, ``patches/v2_12_reload_macro_doctypes_for_indexes.py``), and this change
+	ships none. Until then the statement is bounded in time (``bounded_sql``) like
+	the list's own two, and by the page: at most 100 macros."""
 	if not macro_names:
 		return {}
-	from jarvis.chat.macros import _LIVE_RUN_STATUSES
 
-	rows = frappe.db.sql(
-		"""SELECT r.name, r.macro, r.status, r.`trigger`, r.started_at, r.finished_at
+	rows = list_filters.bounded_sql(
+		"""SELECT r.macro, r.status, r.`trigger`, r.started_at, r.finished_at, r.error
 		FROM `tabJarvis Macro Run` r
 		JOIN (
 			SELECT macro, MAX(creation) AS latest FROM `tabJarvis Macro Run`
@@ -202,11 +279,11 @@ def _last_runs(macro_names: list[str]) -> dict:
 	)
 	return {
 		r.macro: {
-			"name": r.name if r.status in _LIVE_RUN_STATUSES else "",
 			"status": r.status,
 			"trigger": r.trigger,
 			"started_at": r.started_at,
 			"finished_at": r.finished_at,
+			"stopped_by_admin": int(r.status == "stopped" and r.error == STOPPED_BY_ADMIN),
 		}
 		for r in rows
 	}
@@ -220,7 +297,7 @@ def _live_runs(macro_names: list[str]) -> dict:
 		return {}
 	from jarvis.chat.macros import _LIVE_RUN_STATUSES
 
-	rows = frappe.db.sql(
+	rows = list_filters.bounded_sql(
 		"""SELECT name, macro FROM `tabJarvis Macro Run`
 		WHERE macro IN %(names)s AND status IN %(live)s
 		ORDER BY creation ASC""",
@@ -247,6 +324,9 @@ def admin_get_macro(name: str) -> dict:
 	name = _name_arg(name, _("Macro"))
 	# No check_permission: reading other users' macros is what the role gate above
 	# grants, and the document permission (owner only) is deliberately unchanged.
+	if not frappe.db.exists(MACRO, name):
+		# In words an admin can act on: the list they clicked in was loaded earlier.
+		frappe.throw(_("This macro was deleted."), frappe.DoesNotExistError)
 	doc = frappe.get_doc(MACRO, name)
 	from jarvis.chat.macro_scheduler import is_retry_pending
 	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_skills
@@ -310,8 +390,11 @@ def admin_stop_run(run: str) -> dict:
 	step that has not started, and leaves the reason as the last line of the chat.
 	A step already with the agent still finishes; no further step starts.
 
-	The owner is told an administrator stopped it (the run's reason). Who that was
-	is recorded as a Comment on the macro.
+	The owner is told an administrator stopped it: the run's reason, the closing line
+	of its chat, and a notification (they are probably not watching). Who that was
+	is recorded as a Comment on the macro, and only there: the run row has no column
+	for it. The Comment is best-effort; when it cannot be written the Error Log
+	names the admin and the run instead.
 
 	A run that has already ended is left as it ended: ``stopped`` is False and
 	``message`` says so."""
@@ -338,13 +421,42 @@ def admin_stop_run(run: str) -> dict:
 		frappe.db.commit()
 	except Exception:
 		# The run is stopped and that is committed. Failing the request now would
-		# tell the admin it was not.
+		# tell the admin it was not. The Comment was the only record of WHO: say it
+		# here instead (ids only, never the macro's text).
 		frappe.db.rollback()
 		frappe.log_error(
 			title=f"jarvis.chat.macros_admin_api.comment_failed: {row.name}",
-			message=frappe.get_traceback(),
+			message=(
+				f"{admin} stopped run {row.name} of macro {row.macro}; the Comment that records it "
+				f"could not be written.\n\n{frappe.get_traceback()}"
+			),
 		)
+	_tell_the_owner(row.macro, admin)
 	return {"ok": True, "stopped": True, "status": "stopped", "message": ""}
+
+
+def _tell_the_owner(macro: str | None, admin: str) -> None:
+	"""A notification for the macro's owner that an administrator stopped its run.
+	``_stop_run`` posts the chat's closing line and the realtime event, which reach
+	someone looking at the app; the engine's own notification (``macros._announce``)
+	is for runs that end from inside. Same shape as that one: no document attached,
+	the fixed reason as its body. Not sent to an admin stopping their own macro's
+	run. Best-effort: the stop is committed and must not fail on this."""
+	try:
+		from jarvis.chat import macros
+
+		owner, macro_name = frappe.db.get_value(MACRO, macro, ["owner", "macro_name"]) or (None, None)
+		if not owner or owner == admin:
+			return
+		macros.notify_owner(
+			owner,
+			subject=f"{macros._OUTCOME_SUBJECT['stopped']}: {macro_name}",
+			body=STOPPED_BY_ADMIN,
+		)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis.chat.macros_admin_api.notify_failed: {macro}", message=frappe.get_traceback()
+		)
 
 
 def _leave_comment(macro: str | None, text: str) -> None:
