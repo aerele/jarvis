@@ -13,7 +13,7 @@ const api = vi.hoisted(() => ({
 	getListFilterCapabilities: vi.fn(async () => ({})),
 }));
 vi.mock("@/api", () => api);
-vi.mock("@/api/macros", () => ({ deleteMacrosBulk: vi.fn() }));
+vi.mock("@/api/macros", () => ({ deleteMacrosBulk: vi.fn(), dismissMacroNotices: vi.fn() }));
 const fetchPage = vi.hoisted(() => vi.fn());
 vi.mock("@/pages/list/listFetchers", () => ({ macrosListFetch: fetchPage }));
 
@@ -47,7 +47,10 @@ vi.mock("frappe-ui", () => ({
 		template: `<button :disabled="disabled" @click="$emit('click')">{{ label }}</button>`,
 	},
 	Badge: { props: ["label"], template: `<span class="badge">{{ label }}</span>` },
-	Tooltip: { template: "<span><slot /></span>" },
+	Tooltip: {
+		props: ["text"],
+		template: `<span class="tooltip" :data-text="text"><slot /></span>`,
+	},
 	Dropdown: { name: "Dropdown", props: ["options"], template: "<div />" },
 }));
 vi.mock("@/components/list/TabBar.vue", () => ({ default: { template: "<div />" } }));
@@ -64,12 +67,12 @@ vi.mock("@/components/list/ListPage.vue", () => ({
 			},
 		},
 		methods: { unselectAll() {} },
-		template: `<div><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><span class="schedule"><slot name="cell-schedule" :row="row" /></span><span class="run"><slot name="cell-_run" :row="row" /></span></div><slot name="select-actions" :selections="selections" :unselectAll="unselectAll" /></div>`,
+		template: `<div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><span class="name"><slot name="cell-macro_name" :row="row" /></span><span class="schedule"><slot name="cell-schedule" :row="row" /></span><span class="run"><slot name="cell-_run" :row="row" /></span></div><slot name="select-actions" :selections="selections" :unselectAll="unselectAll" /></div>`,
 	},
 }));
 
 import { toast, confirmDialog } from "frappe-ui";
-import { deleteMacrosBulk } from "@/api/macros";
+import { deleteMacrosBulk, dismissMacroNotices } from "@/api/macros";
 import MacrosList from "./MacrosList.vue";
 
 const macro = (name, extra = {}) => ({
@@ -362,5 +365,94 @@ describe("MacrosList: deleting macros that are running", () => {
 		emit({ kind: "macro:progress", macro: "idle", step: 1 });
 		await flushPromises();
 		expect(fetchPage).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("MacrosList: an admin's hold and delete", () => {
+	const HELD_SAYS =
+		"An admin has put this macro on hold: Paused for review. It will not run until an admin releases it.";
+	const held = (name) =>
+		macro(name, { enabled: 0, admin_hold: 1, admin_hold_reason: "Paused for review" });
+	const notice = (name, message) => ({ name, message, creation: "2026-10-03 10:00:00" });
+
+	it("badges a held macro On hold, with the reason, and keeps its Run off", async () => {
+		const { w } = await mountList([held("close"), macro("open")]);
+		const badge = rowEl(w, "close").find(".name .jv-macro-held");
+		expect(badge.exists()).toBe(true);
+		expect(badge.text()).toBe("On hold");
+		expect(rowEl(w, "close").find(".name .tooltip:last-of-type").attributes("data-text")).toBe(
+			HELD_SAYS
+		);
+		expect(runBtn(w, "close").props("disabled")).toBe(true);
+		expect(runBtn(w, "close").props("tooltip")).toBe(HELD_SAYS);
+		await runBtn(w, "close").trigger("click");
+		expect(api.runMacro).not.toHaveBeenCalled();
+		expect(rowEl(w, "open").find(".jv-macro-held").exists()).toBe(false);
+		expect(runBtn(w, "open").props("disabled")).toBe(false);
+	});
+
+	it("shows the admin-delete notices that came with the list, as text", async () => {
+		fetchPage.mockResolvedValue({
+			rows: [],
+			total: 0,
+			has_more: false,
+			notices: [
+				notice("N1", "An admin deleted your macro <b>Close</b>."),
+				notice("N2", "An admin deleted your macro Open."),
+			],
+		});
+		const { w } = await mountList(null);
+		const lines = w.findAll(".jv-macro-notice");
+		expect(lines.map((l) => l.attributes("data-notice"))).toEqual(["N1", "N2"]);
+		expect(lines[0].text()).toContain("An admin deleted your macro <b>Close</b>.");
+		expect(lines[0].find("b").exists()).toBe(false);
+	});
+
+	it("shows no notice line when there is none, or from an older server", async () => {
+		const { w } = await mountList([macro("a")]);
+		expect(w.find('[data-testid="admin-notices"]').exists()).toBe(false);
+	});
+
+	it("dismisses a notice: marks it read on the server, then drops the line", async () => {
+		fetchPage.mockResolvedValue({
+			rows: [],
+			total: 0,
+			has_more: false,
+			notices: [
+				notice("N1", "An admin deleted your macro Close."),
+				notice("N2", "Another."),
+			],
+		});
+		let answer;
+		dismissMacroNotices.mockReturnValue(new Promise((r) => (answer = r)));
+		const { w } = await mountList(null);
+		const dismissOf = (i) =>
+			w.findAll(".jv-macro-notice")[i].findComponent({ name: "Button" });
+		await dismissOf(0).trigger("click");
+		expect(dismissMacroNotices).toHaveBeenCalledWith(["N1"]);
+		// In flight: the line stays, and the other Dismiss waits.
+		expect(w.findAll(".jv-macro-notice")).toHaveLength(2);
+		expect(dismissOf(0).props("loading")).toBe(true);
+		expect(dismissOf(1).props("disabled")).toBe(true);
+		answer({ ok: true, dismissed: 1 });
+		await flushPromises();
+		expect(w.findAll(".jv-macro-notice").map((l) => l.attributes("data-notice"))).toEqual([
+			"N2",
+		]);
+	});
+
+	it("keeps the notice and says why when the dismiss fails", async () => {
+		fetchPage.mockResolvedValue({
+			rows: [],
+			total: 0,
+			has_more: false,
+			notices: [notice("N1", "An admin deleted your macro Close.")],
+		});
+		dismissMacroNotices.mockRejectedValue(new Error("Server is busy"));
+		const { w } = await mountList(null);
+		await w.find(".jv-macro-notice").findComponent({ name: "Button" }).trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalled();
+		expect(w.findAll(".jv-macro-notice")).toHaveLength(1);
 	});
 });

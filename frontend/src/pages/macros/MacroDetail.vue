@@ -13,7 +13,7 @@
 				label="Run"
 				iconLeft="play"
 				:loading="running"
-				:disabled="mergePending || running || dirty"
+				:disabled="!!hold || mergePending || running || dirty"
 				:tooltip="runBlockedReason || 'Run this macro now'"
 				:aria-describedby="runBlockedReason ? RUN_REASON_ID : undefined"
 				@click="run"
@@ -55,6 +55,16 @@
 					{{ runBlockedReason }}
 				</p>
 			</div>
+			<!-- An admin's hold: the one thing on this page the owner cannot change.
+			     Said first, in the words the server refuses a Run or a switch-on with. -->
+			<Banner
+				v-if="hold"
+				class="mb-4"
+				data-testid="hold-banner"
+				type="warning"
+				title="On hold"
+				:message="holdText"
+			/>
 			<!-- How the last run went, when the owner needs telling: it failed, it is
 			     waiting on them, or a step only drafted a record. Nothing else on this
 			     page said, and a scheduled run fails with nobody watching. -->
@@ -98,11 +108,16 @@
 						:disabled="saving"
 						@update:modelValue="(v) => (form.description = v)"
 					/>
+					<!-- While on hold, switching ON is the admin's to allow; switching
+					     off stays free (the server rules the same). -->
 					<Switch
 						v-model="form.enabled"
 						label="Enabled"
-						description="Off = saved as a draft - its scheduled runs are skipped. You can still run it by hand."
-						:disabled="saving"
+						:description="
+							heldOff(form.enabled) ||
+							'Off = saved as a draft - its scheduled runs are skipped. You can still run it by hand.'
+						"
+						:disabled="saving || !!heldOff(form.enabled)"
 					/>
 					<Switch
 						v-model="form.stop_on_error"
@@ -114,11 +129,12 @@
 						v-model="form.skip_confirmation"
 						label="Skip confirmation (run writes uncarded)"
 						:description="
-							canArm
+							heldOff(form.skip_confirmation) ||
+							(canArm
 								? 'Admin only. This macro\'s runs execute writes WITHOUT a confirmation card - including run_method, send_email and run_import. delete/cancel/amend still park and stop the run. Arming trusts the owner for current and future steps.'
-								: 'Admin only - a Jarvis Admin or System Manager can arm this macro to run its writes without a confirmation card.'
+								: 'Admin only - a Jarvis Admin or System Manager can arm this macro to run its writes without a confirmation card.')
 						"
-						:disabled="saving || !canArm"
+						:disabled="saving || !canArm || !!heldOff(form.skip_confirmation)"
 					/>
 				</div>
 			</DocSection>
@@ -132,9 +148,15 @@
 						v-model="form.schedule_enabled"
 						label="Run on a schedule"
 						:description="
-							scheduleBlocked || `${agentName} runs this macro automatically.`
+							heldOff(form.schedule_enabled) ||
+							scheduleBlocked ||
+							`${agentName} runs this macro automatically.`
 						"
-						:disabled="saving || (!!scheduleBlocked && !form.schedule_enabled)"
+						:disabled="
+							saving ||
+							!!heldOff(form.schedule_enabled) ||
+							(!!scheduleBlocked && !form.schedule_enabled)
+						"
 					/>
 					<div v-if="form.schedule_enabled" class="flex items-start gap-4">
 						<FormControl
@@ -298,6 +320,7 @@ import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";
+import { macroHold, holdMessage } from "@/lib/macroHold";
 import {
 	lastRunLine,
 	deleteWarning,
@@ -335,6 +358,12 @@ const lastRun = ref(null);
 const lastRunNote = computed(() => lastRunLine(lastRun.value));
 const LAST_RUN_BANNER = { bad: "error", warn: "warning" };
 const nextRunIsRetry = ref(false);
+// An admin's hold (null when not held): Run is off, and nothing can be switched on.
+const hold = ref(null);
+const holdText = computed(() => holdMessage(hold.value));
+// The hold's sentence for a switch that is OFF (it cannot go on while held), or ""
+// when the switch is free: not held, or on (switching off is always allowed).
+const heldOff = (on) => (hold.value && !on ? holdText.value : "");
 
 const form = reactive({
 	macro_name: "",
@@ -433,6 +462,7 @@ const mergePending = computed(() => mergeStatus.value === "pending");
 // One sentence for the visible line, the tooltip and the button's description.
 const RUN_REASON_ID = "macro-run-reason";
 const runBlockedReason = computed(() => {
+	if (hold.value) return holdText.value;
 	if (mergePending.value) {
 		return (
 			"Summarizing… Run unlocks when the summary is ready." +
@@ -620,6 +650,7 @@ function seed(data) {
 	nextRunRaw.value = data.next_run_at || "";
 	ownerBlockedReason.value = data.schedule_blocked_reason || "";
 	lastRun.value = data.last_run || null;
+	hold.value = macroHold(data);
 	snapshot.value = formSnapshot();
 }
 
@@ -854,7 +885,7 @@ async function run() {
 	// The server runs the SAVED macro, so with unsaved edits Run would start
 	// something other than what is on screen (and the hand-off to the chat would
 	// then ask to discard those edits, the run already under way).
-	if (running.value || mergePending.value || dirty.value) return;
+	if (hold.value || running.value || mergePending.value || dirty.value) return;
 	running.value = true;
 	try {
 		const res = await api.runMacro(props.id);
