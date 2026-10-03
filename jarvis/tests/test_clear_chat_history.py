@@ -18,12 +18,12 @@ from unittest.mock import patch
 
 import frappe
 
+from jarvis.chat import admission, pump
 from jarvis.chat import api as chat_api
-from jarvis.chat import pump
 from jarvis.chat import turn_state as ts
 from jarvis.tests._pending_action_helpers import ensure_user
 from jarvis.tests.harness import transcripts
-from jarvis.tests.race_harness import other_connection
+from jarvis.tests.race_harness import other_connection, snapshot_isolation_on
 from jarvis.tests.test_pump import CONV, MSG, TEST_USER, TURN, _PumpTestCase
 from jarvis.tests.test_pump import _cleanup as _cleanup_conversations
 from jarvis.tests.test_relay_mux import _DoubleGateway
@@ -31,7 +31,6 @@ from jarvis.tests.test_tool_reentry_guards import _InDispatch
 
 BYSTANDER = "clear-history-bystander@example.com"
 RUN = "Jarvis Macro Run"
-KEPT_LOG = "jarvis.chat.clear_history.kept"
 FAILED_LOG = "jarvis.chat.clear_history.conversation_failed"
 
 
@@ -41,8 +40,17 @@ def setUpModule():
 	install_synthetic_runtime_profile()
 
 
-def _result(*kept, deleted):
-	return {"ok": True, "deleted": deleted, "skipped": len(kept), "kept": list(kept)}
+def _result(*kept, deleted, failed=()):
+	"""``kept``: left because a reply is in progress. ``failed``: not deleted because
+	of an error."""
+	return {
+		"ok": True,
+		"deleted": deleted,
+		"skipped": len(kept),
+		"kept": list(kept),
+		"failed": len(failed),
+		"failed_names": list(failed),
+	}
 
 
 def _logged(log, title) -> list[dict]:
@@ -116,7 +124,7 @@ class TestDeleteAllDuringALiveReply(_PumpTestCase):
 		self.assertEqual(reply, transcripts.get("success")["terminal"]["text"])
 
 
-class TestWhichChatsAreKept(_PumpTestCase):
+class _ChatsTestCase(_PumpTestCase):
 	def setUp(self):
 		super().setUp()
 		self._n = 0
@@ -133,6 +141,15 @@ class TestWhichChatsAreKept(_PumpTestCase):
 			self._mk_turn(conv, f"clr_{self._n}_{frappe.generate_hash(length=6)}", seed, state)
 		return conv
 
+	def _rows(self, conv) -> tuple:
+		return (
+			bool(frappe.db.exists(CONV, conv)),
+			frappe.db.count(MSG, {"conversation": conv}),
+			frappe.db.count(TURN, {"conversation": conv}),
+		)
+
+
+class TestWhichChatsAreKept(_ChatsTestCase):
 	def _age_messages(self, conv, *, seconds) -> None:
 		"""Nothing was written to this chat for ``seconds``: a reply row still marked
 		streaming is then a flag a dead worker left behind, not a reply."""
@@ -155,13 +172,6 @@ class TestWhichChatsAreKept(_PumpTestCase):
 	def _drop_run(run) -> None:
 		frappe.db.delete(RUN, {"name": run})
 		frappe.db.commit()
-
-	def _rows(self, conv) -> tuple:
-		return (
-			bool(frappe.db.exists(CONV, conv)),
-			frappe.db.count(MSG, {"conversation": conv}),
-			frappe.db.count(TURN, {"conversation": conv}),
-		)
 
 	def test_with_no_reply_in_progress_everything_is_deleted(self):
 		plain = self._chat()
@@ -285,7 +295,9 @@ class TestWhichChatsAreKept(_PumpTestCase):
 			patch("frappe.log_error") as log,
 		):
 			out = chat_api.clear_chat_history()
-		self.assertEqual(out, _result(bad, deleted=2))
+		# Not deleted because of an error, which is not "kept because a reply is in
+		# progress": it is counted, and named, apart.
+		self.assertEqual(out, _result(deleted=2, failed=[bad]))
 		for conv in (good, other):
 			self.assertEqual(self._rows(conv), (False, 0, 0))
 		# The failed one is whole: its messages were deleted before the failure, and
@@ -294,9 +306,7 @@ class TestWhichChatsAreKept(_PumpTestCase):
 		(failure,) = _logged(log, FAILED_LOG)
 		self.assertIn(f"conversation {bad}", failure["message"])
 		self.assertIn("RuntimeError: boom", failure["message"])
-		(summary,) = _logged(log, KEPT_LOG)
-		self.assertIn("kept 1 of 3", summary["message"])
-		self.assertIn("error: 1", summary["message"])
+		self.assertEqual(len(log.call_args_list), 1, "the failure's own row and no other")
 		# Its row lock is let go at once (a send to it would be waiting on it).
 		with other_connection() as elsewhere:
 			elsewhere.sql("SET SESSION innodb_lock_wait_timeout=1")
@@ -322,22 +332,86 @@ class TestWhichChatsAreKept(_PumpTestCase):
 		self.assertEqual(self._rows(conv), (False, 0, 0))
 		log.assert_not_called()
 
-	def test_what_was_kept_and_why_is_left_for_an_operator_once_per_request(self):
+	def test_keeping_a_chat_that_is_waiting_for_a_reply_writes_no_error_log_row(self):
+		# Keeping a busy chat is what the endpoint is for. An Error Log row titled
+		# ``jarvis.`` is forwarded to the control plane as an error, so the by-design
+		# outcome writes none: the answer already says what was kept.
 		streaming, queued = self._chat("done", "streaming"), self._chat("queued")
 		legacy = self._chat(streaming_reply=True)
 		self._chat("done")
+		before = frappe.db.count("Error Log")
 		with patch("frappe.log_error") as log:
 			out = chat_api.clear_chat_history()
 		self.assertEqual((out["deleted"], sorted(out["kept"])), (1, sorted([streaming, queued, legacy])))
-		(summary,) = _logged(log, KEPT_LOG)
-		self.assertEqual(len(log.call_args_list), 1)
-		message = summary["message"]
-		self.assertIn(f"user {TEST_USER}", message)
-		self.assertIn("kept 3 of 4", message)
-		for reason in ("turn streaming: 1", "turn queued: 1", "reply streaming, no live turn: 1"):
-			self.assertIn(reason, message)
-		for conv in (streaming, queued, legacy):
-			self.assertIn(conv, message)
+		self.assertEqual((out["skipped"], out["failed"], out["failed_names"]), (3, 0, []))
+		log.assert_not_called()
+		self.assertEqual(frappe.db.count("Error Log"), before)
+
+	def _clear_with_failing(self, failing) -> tuple[dict, list[dict], list[str]]:
+		"""Delete all, with the delete of every chat in ``failing`` raising. Answers
+		the response, the per-chat failure rows, and the chats a delete was tried on."""
+		real = chat_api._delete_idle_conversation
+		tried = []
+
+		def delete(conversation):
+			tried.append(conversation)
+			if conversation in failing:
+				raise RuntimeError("boom")
+			return real(conversation)
+
+		with (
+			patch.object(chat_api, "_delete_idle_conversation", side_effect=delete),
+			patch("frappe.log_error") as log,
+		):
+			out = chat_api.clear_chat_history()
+		self.assertEqual(len(log.call_args_list), len(_logged(log, FAILED_LOG)))
+		return out, _logged(log, FAILED_LOG), tried
+
+	def _chats_in_delete_order(self, count) -> list[str]:
+		for _ in range(count):
+			self._chat("done")
+		return frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name")
+
+	def _start_a_reply_in(self, conv) -> None:
+		seed = frappe.db.get_value(MSG, {"conversation": conv, "role": "user"}, "name")
+		self._mk_turn(conv, f"clr_busy_{frappe.generate_hash(length=6)}", seed, "streaming")
+
+	def test_three_failures_in_a_row_end_the_request_and_the_rest_are_reported_failed(self):
+		# A fault common to every chat (a broken trash hook, a held lock) would
+		# otherwise cost one Error Log row with a traceback, and up to a lock wait,
+		# per chat. The busy chat past the stop is not looked at either: it is
+		# reported as not deleted, never as "a reply is in progress".
+		order = self._chats_in_delete_order(6)
+		busy = order[4]
+		self._start_a_reply_in(busy)
+		out, failures, tried = self._clear_with_failing(set(order))
+		self.assertEqual(tried, order[:3])
+		self.assertEqual(len(failures), 3)
+		self.assertEqual(out, _result(deleted=0, failed=order))
+		for conv in order:
+			self.assertTrue(frappe.db.exists(CONV, conv))
+
+	def test_failures_that_are_not_in_a_row_do_not_end_the_request(self):
+		# Only an unbroken run of failures reads as "everything is failing". Any
+		# chat that is deleted, kept for its reply, or already gone starts the count
+		# again.
+		order = self._chats_in_delete_order(7)
+		failing = {order[0], order[1], order[3], order[4], order[6]}
+		out, failures, tried = self._clear_with_failing(failing)
+		self.assertEqual(tried, order)
+		self.assertEqual(len(failures), 5)
+		self.assertEqual(out, _result(deleted=2, failed=[c for c in order if c in failing]))
+		self.assertEqual(out["deleted"] + out["skipped"] + out["failed"], len(order))
+
+	def test_a_kept_chat_between_failures_starts_the_count_again(self):
+		order = self._chats_in_delete_order(5)
+		busy = order[2]
+		self._start_a_reply_in(busy)
+		failing = set(order) - {busy}
+		out, failures, tried = self._clear_with_failing(failing)
+		self.assertEqual(tried, order)
+		self.assertEqual(len(failures), 4)
+		self.assertEqual(out, _result(busy, deleted=0, failed=[c for c in order if c != busy]))
 
 	def test_nothing_is_logged_when_nothing_was_kept(self):
 		self._chat("done")
@@ -381,6 +455,63 @@ class TestWhichChatsAreKept(_PumpTestCase):
 			frappe.set_user("Administrator")
 			_cleanup_conversations(BYSTANDER)
 			frappe.set_user(TEST_USER)
+
+
+class TestAWriteConflictInTheTrashHook(_ChatsTestCase):
+	"""``admission.on_conversation_trash`` deletes the conversation's Turn rows inside
+	the delete's transaction. When that statement loses a write race the server has
+	already aborted the whole transaction, so the hook must not swallow it."""
+
+	def test_a_turn_row_moved_after_the_second_look_is_replayed_not_half_deleted(self):
+		# A real conflict: the snapshot check armed, and another connection commits
+		# a write to the chat's (ended) Turn row once this request has looked at it
+		# under the lock. With the conflict swallowed the conversation went, its
+		# message and Turn row stayed for good, and the answer said "deleted".
+		conv = self._chat("done")
+		real = admission.reply_in_progress
+		looks = []
+
+		def look_then_the_turn_row_moves(conversation):
+			out = real(conversation)
+			looks.append(conversation)
+			if len(looks) == 2:
+				with other_connection() as other:
+					other.sql(f"UPDATE `tab{TURN}` SET modified=NOW(6) WHERE conversation=%s", conv)
+					other.commit()
+			return out
+
+		with (
+			snapshot_isolation_on(),
+			patch.object(admission, "reply_in_progress", side_effect=look_then_the_turn_row_moves),
+			patch("frappe.log_error") as log,
+		):
+			out = chat_api.clear_chat_history()
+		frappe.db.commit()
+		self.assertEqual(looks, [conv] * 3, "first look, second look, and the replay's look")
+		self.assertEqual(out, _result(deleted=1))
+		self.assertEqual(self._rows(conv), (False, 0, 0))
+		log.assert_not_called()
+
+	def test_the_hook_lets_a_write_conflict_through(self):
+		conv = frappe.get_doc(CONV, self._chat("done"))
+		conflict = frappe.QueryDeadlockError(1020, "Record has changed since last read")
+		with (
+			patch.object(frappe.db, "delete", side_effect=conflict),
+			patch("frappe.log_error") as log,
+		):
+			with self.assertRaises(frappe.QueryDeadlockError):
+				admission.on_conversation_trash(conv)
+		log.assert_not_called()
+
+	def test_the_hook_still_logs_any_other_failure_and_lets_the_delete_go_on(self):
+		conv = frappe.get_doc(CONV, self._chat("done"))
+		with (
+			patch.object(frappe.db, "delete", side_effect=RuntimeError("boom")),
+			patch("frappe.log_error") as log,
+		):
+			admission.on_conversation_trash(conv)
+		(row,) = log.call_args_list
+		self.assertEqual(row.kwargs["title"], "admission.on_conversation_trash")
 
 
 class TestStillRefusedInsideATool(_InDispatch):
