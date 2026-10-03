@@ -1317,25 +1317,52 @@ class TestTheChatGoingAwayStopsTheRun(StopBase):
 		run, conv, _ = self._mk_run(steps=3, at_step=1, armed=True)
 		parked, _, _ = self._mk_run(steps=2, at_step=0, tag="parked")
 		frappe.db.set_value(RUN, parked, "status", "waiting_capacity")
-		self._step(conv, "queued")
+		self._step(conv, "done")  # between two steps: no reply is in progress
 		seen = {}
 		real = macros._cancel_current_step
 
 		def cancel(conversation, **kw):
 			# The step to cancel is found through the chat's messages.
 			seen[conversation] = frappe.db.count(MSG, {"conversation": conversation})
-			result = real(conversation, **kw)
-			seen["cancelled"] = seen.get("cancelled") or result
-			return result
+			return real(conversation, **kw)
 
 		frappe.set_user(OWNER)
 		with patch.object(macros, "_cancel_current_step", side_effect=cancel):
 			out = chat_api.clear_chat_history()
-		self.assertEqual(out["ok"], True)
+		self.assertEqual(out, {"ok": True, "deleted": 2, "skipped": 0})
 		self.assertTrue(seen[conv] > 0, "the run was stopped after its messages were deleted")
-		self.assertTrue(seen["cancelled"], "the queued step was not cancelled")
 		for name in (run, parked):
 			row = frappe.db.get_value(RUN, name, ["status", "error", "conversation"], as_dict=True)
 			self.assertEqual((row.status, row.error), ("stopped", macros._CONVERSATION_GONE_ERROR))
 			self.assertFalse(row.conversation)
 		self.assertFalse(frappe.db.exists(CONV, conv))
+
+	def _clear_with_a_step_in(self, state):
+		"""Clear history with one run whose current step is in ``state`` and one run
+		between steps. Returns what the kept run's chat must still hold."""
+		run, conv, _ = self._mk_run(steps=3, at_step=1, armed=True, tag="kept")
+		step, _, _ = self._step(conv, state, placeholder=state == "streaming")
+		before = frappe.db.count(MSG, {"conversation": conv})
+		gone, other, _ = self._mk_run(steps=2, at_step=1, tag="gone")
+		frappe.set_user(OWNER)
+		self.assertEqual(chat_api.clear_chat_history(), {"ok": True, "deleted": 1, "skipped": 1})
+		# A kept chat keeps its run: not stopped, not disarmed, still linked.
+		row = frappe.db.get_value(RUN, run, ["status", "conversation"], as_dict=True)
+		self.assertEqual((row.status, row.conversation), ("running", conv))
+		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 1)
+		self.assertEqual(self._turn_state(step), state)
+		self.assertEqual(frappe.db.count(MSG, {"conversation": conv}), before)
+		# The run in the chat that did go is stopped, and its link is blanked.
+		row = frappe.db.get_value(RUN, gone, ["status", "error", "conversation"], as_dict=True)
+		self.assertEqual((row.status, row.error), ("stopped", macros._CONVERSATION_GONE_ERROR))
+		self.assertFalse(row.conversation)
+		self.assertFalse(frappe.db.exists(CONV, other))
+
+	def test_clearing_chat_history_leaves_a_run_whose_step_is_being_answered(self):
+		# "Delete all" keeps a chat with a reply in progress: deleting it would take
+		# the Turn row from under the pump.
+		self._clear_with_a_step_in("streaming")
+
+	def test_clearing_chat_history_leaves_a_run_whose_step_is_still_in_the_queue(self):
+		# A step waiting in the queue is a reply in progress too: it is not cancelled.
+		self._clear_with_a_step_in("queued")
