@@ -58,6 +58,7 @@ vi.mock("@/components/settings/PlanBillingPane.vue", () => paneStub("PlanBilling
 vi.mock("@/components/settings/AiModelsPane.vue", () => paneStub("AiModelsPane"));
 vi.mock("@/components/settings/UsageAdminPane.vue", () => paneStub("UsageAdminPane"));
 vi.mock("@/components/settings/BrandingPane.vue", () => paneStub("BrandingPane"));
+vi.mock("@/components/settings/MacrosAdminPane.vue", () => paneStub("MacrosAdminPane"));
 
 import SettingsDialog from "./SettingsDialog.vue";
 
@@ -108,6 +109,30 @@ describe("SettingsDialog rail", () => {
 		expect(w.text()).toContain("Billing");
 		expect(w.text()).toContain("AI models");
 		expect(w.text()).toContain("Branding");
+	});
+});
+
+describe("SettingsDialog Administration group", () => {
+	const railLabels = (w) => w.findAll("button[aria-current], button").map((b) => b.text());
+
+	it("shows Macros beside User usage to a Jarvis Admin", async () => {
+		const w = await mountDialog({ isAdmin: true });
+		const labels = railLabels(w);
+		expect(labels).toContain("User usage");
+		expect(labels).toContain("Macros");
+		expect(labels.indexOf("Macros")).toBe(labels.indexOf("User usage") + 1);
+	});
+
+	it("opens the Macros pane for a Jarvis Admin", async () => {
+		const w = await mountDialog({ isAdmin: true, section: "macroadmin" });
+		expect(w.find(".pane-marker").text()).toBe("MacrosAdminPane");
+	});
+
+	it("hides Macros from an ordinary member, on the rail and by its key", async () => {
+		const w = await mountDialog({ isSM: false, isAdmin: false, section: "macroadmin" });
+		expect(railLabels(w)).not.toContain("Macros");
+		expect(railLabels(w)).not.toContain("User usage");
+		expect(w.find(".pane-marker").text()).toBe("GeneralPane");
 	});
 });
 
