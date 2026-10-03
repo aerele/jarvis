@@ -411,6 +411,23 @@ def _lifecycle_row_mode(target: str) -> str:
 	return mode
 
 
+def transport_mode(target: str | None = None) -> str:
+	"""The shard's transport mode by its AUTHORITATIVE row: ``pump``, ``draining`` or
+	``legacy``. The public reader for code that must know which of the three it is and
+	decides no dispatch: ``pump_mode_active()`` reads the config mirror (written after
+	the row, best-effort), its ``from_db`` form needs the shard row lock, and
+	``pump_lifecycle_configured`` is also true while draining.
+
+	An UNLOCKED read, through the 5s lifecycle cache. Its one caller, the macro
+	reconcile check, acts on a run only in ``pump`` mode: a stale answer costs it one
+	tick, and a wrong "go" sends at most the step that was due anyway, once (the
+	accept gate re-decides under the lock, and a step's turn has a fixed id). A value
+	that is none of the three reads as ``draining``, which is what the fenced
+	predicates make of it (not active, not the kill switch)."""
+	mode = _lifecycle_row_mode(target or DEFAULT_TARGET)
+	return mode if mode in (_MODE_PUMP, _MODE_DRAINING, _MODE_LEGACY) else _MODE_DRAINING
+
+
 def pump_lifecycle_configured(target: str) -> bool:
 	"""CDX-21 gate for ensure_pump/watchdog: configured == the ROW is not the ``legacy`` kill
 	switch. Row-authoritative (5s TTL read-through), REPLACING the old config-based
