@@ -95,6 +95,22 @@ class SnapshotBase(identity._Starting, identity.IdentityBase):
 	def _snapshot(self, run):
 		return frappe.db.get_value(RUN, run, FIELD)
 
+	def _skill(self):
+		skill = frappe.get_doc(
+			{
+				"doctype": "Jarvis Custom Skill",
+				"skill_name": f"snap-{frappe.generate_hash(length=6)}",
+				"description": "a skill to tag",
+				"instructions": "Do the thing.",
+			}
+		)
+		skill.insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Custom Skill", skill.name, force=True, ignore_permissions=True)
+		)
+		return skill
+
 	def _forget_the_snapshot(self, run):
 		"""The run as one started before this change left it: no snapshot."""
 		frappe.db.set_value(RUN, run, FIELD, None, update_modified=False)
@@ -132,7 +148,6 @@ class TestTheSnapshot(SnapshotBase):
 		self.assertEqual(
 			snapshot,
 			{
-				"run_mode": "stepped",
 				"stop_on_error": 0,
 				"merged_prompt": "",
 				"steps": [
@@ -157,8 +172,9 @@ class TestTheSnapshot(SnapshotBase):
 	def test_a_summarized_run_keeps_the_summary_it_sends(self):
 		run, _, _ = self._start(steps=3, merged="  do all three  ")
 		snapshot = json.loads(self._snapshot(run))
-		self.assertEqual((snapshot["run_mode"], snapshot["merged_prompt"]), ("merged", "do all three"))
+		self.assertEqual(snapshot["merged_prompt"], "do all three")
 		self.assertEqual(len(snapshot["steps"]), 3)
+		self.assertEqual(frappe.db.get_value(RUN, run, "run_mode"), "merged")
 
 
 # --------------------------------------------------------------------------- #
@@ -240,6 +256,17 @@ class TestAnEditMidRunChangesNothing(SnapshotBase):
 		self._end_step(conv, run, 0)
 		self._assert_ran(run, conv, ["do all three"])
 
+	def test_a_summarized_run_keeps_its_steps_skills(self):
+		# The summary carries every step's skills. A skill taken off a step while the
+		# run was parked is still the run's.
+		skill = self._skill()
+		run, conv, macro = self._start_parked(
+			steps=2, merged="do both", step_fields={1: {"skills": json.dumps([skill.name])}}
+		)
+		self._edit(macro, lambda d: setattr(d.steps[1], "skills", None))
+		self._resume()
+		self.assertEqual(self._prompts(conv), [f"do both\n\nApply these skills: /{skill.skill_name}"])
+
 	def test_a_progress_event_names_the_step_the_run_sends(self):
 		run, conv, macro = self._start(steps=2, step_fields={1: {"label": "Old label"}})
 		self._edit(macro, lambda d: setattr(d.steps[1], "label", "New label"))
@@ -313,6 +340,69 @@ class TestAResumeAfterAnEdit(SnapshotBase):
 
 
 # --------------------------------------------------------------------------- #
+# A parked run whose every step is already out
+# --------------------------------------------------------------------------- #
+class TestAParkedRunWithEveryStepOut(SnapshotBase):
+	"""A second dispatcher parked the run while the first sent its last step (a run
+	lock that lapsed), so the cursor is at the end. The resume has no step to send."""
+
+	def _park_with_every_step_out(self, *, snapshot=True, last_step_ended=True):
+		run, conv, macro = self._start(steps=2)
+		self._end_step(conv, run, 0)  # step 2 sent: the cursor is at the end
+		self.assertEqual(int(self._run(run).current_step), 2, "premise: every step is out")
+		frappe.db.set_value(RUN, run, "status", "waiting_capacity", update_modified=False)
+		frappe.db.commit()
+		if last_step_ended:
+			self._end_step(conv, run, 1)  # a parked run takes no step end
+			self.assertEqual(self._run(run).status, "waiting_capacity", "premise: the end was not taken")
+		if not snapshot:
+			self._forget_the_snapshot(run)
+		self.addCleanup(
+			frappe.db.delete, "Error Log", {"method": f"jarvis macro capacity-resume enqueue raised: {run}"}
+		)
+		with self._sent() as sent:
+			self._resume()
+		self.assertEqual(sent.call_count, 0, "a step was sent past the end")
+		return run, conv
+
+	def _capacity_resume_errors(self, run):
+		return frappe.get_all(
+			"Error Log", filters={"method": f"jarvis macro capacity-resume enqueue raised: {run}"}
+		)
+
+	def test_the_last_steps_end_ends_it(self):
+		# It was re-parked every cycle (an IndexError) and failed ~100 minutes later as
+		# "the site stayed busy", every step having run.
+		run, conv = self._park_with_every_step_out()
+		self._assert_ran(run, conv, ["step 1", "step 2"])
+		self.assertEqual(self._capacity_resume_errors(run), [])
+
+	def test_a_failed_last_step_fails_it(self):
+		run, conv, _ = self._start(steps=2, stop_on_error=1)
+		self._end_step(conv, run, 0)
+		frappe.db.set_value(RUN, run, "status", "waiting_capacity", update_modified=False)
+		frappe.db.commit()
+		self._end_step(conv, run, 1, state="errored")
+		self._resume()
+		self.assertEqual(self._run(run).status, "failed")
+		self.assertEqual(self._capacity_resume_errors(run), [])
+
+	def test_a_last_step_still_running_ends_it_when_it_ends(self):
+		run, conv = self._park_with_every_step_out(last_step_ended=False)
+		self.assertEqual(self._run(run).status, "running", "the resume took the run back")
+		self._end_step(conv, run, 1)
+		self._assert_ran(run, conv, ["step 1", "step 2"])
+
+	def test_without_a_snapshot_it_ends_as_before(self):
+		# Read off the macro, a cursor at the end is what a macro shrunk past the
+		# cursor looks like: ended at once, as it always was.
+		run, _ = self._park_with_every_step_out(snapshot=False)
+		row = self._run(run)
+		self.assertEqual((row.status, row.error), ("failed", macros._MACRO_CHANGED_ERROR))
+		self.assertEqual(self._capacity_resume_errors(run), [])
+
+
+# --------------------------------------------------------------------------- #
 # A run started before the snapshot existed runs as it always did
 # --------------------------------------------------------------------------- #
 class TestARunWithoutASnapshot(SnapshotBase):
@@ -343,22 +433,71 @@ class TestARunWithoutASnapshot(SnapshotBase):
 		row = self._run(run)
 		self.assertEqual((row.status, row.error), ("failed", macros._MACRO_CHANGED_ERROR))
 
-	def test_an_unreadable_snapshot_is_the_macro_and_leaves_a_trace(self):
-		run, conv, macro = self._start(steps=2)
+	def _unreadable(self, run):
 		frappe.db.set_value(RUN, run, FIELD, "{not json", update_modified=False)
 		frappe.db.commit()
+		self.addCleanup(frappe.cache().delete_value, f"jarvis_macro_snapshot_unreadable:{run}")
+		self.addCleanup(frappe.db.commit)
+		self.addCleanup(
+			frappe.db.delete, "Error Log", {"method": f"jarvis.chat.macros.snapshot_unreadable: {run}"}
+		)
+
+	@contextmanager
+	def _reports(self):
+		"""The jobs ``_run_content`` asks for, recorded instead of queued."""
+		asked, real = [], frappe.enqueue
+
+		def enqueue(*args, **kw):
+			method = args[0] if args else kw.get("method")
+			if method == "jarvis.chat.macros._log_unreadable_snapshot":
+				asked.append(kw)
+				return None
+			return real(*args, **kw)
+
+		with patch.object(frappe, "enqueue", enqueue):
+			yield asked
+
+	def test_an_unreadable_snapshot_is_the_macro_and_is_reported_once(self):
+		run, conv, macro = self._start(steps=3)
+		self._unreadable(run)
 		self._edit(macro, lambda d: setattr(d.steps[1], "prompt", "edited"))
-		self._end_step(conv, run, 0)
-		self.assertEqual(self._prompts(conv), ["step 1", "edited"])
+		with self._reports() as asked:
+			self._end_step(conv, run, 0)
+			self._end_step(conv, run, 1)
+		self.assertEqual(self._prompts(conv), ["step 1", "edited", "step 3"])
+		self.assertEqual(asked, [{"queue": "short", "run_name": run}], "one report for the run")
+
+		# The job, as a worker runs it: as the owner who queued it. Twice: the cache can
+		# lose its marker.
+		for _ in range(2):
+			frappe.set_user(OWNER)
+			macros._log_unreadable_snapshot(run_name=run)
+		frappe.set_user("Administrator")
 		logs = frappe.get_all(
 			"Error Log",
 			filters={"method": f"jarvis.chat.macros.snapshot_unreadable: {run}"},
-			fields=["error"],
+			fields=["error", "owner"],
 		)
-		self.assertTrue(logs)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].owner, "Administrator")
 		self.assertNotIn("step 1", logs[0].error)  # the run, never its text
-		frappe.db.delete("Error Log", {"method": ["like", "jarvis.chat.macros.snapshot_unreadable%"]})
+
+	def test_reporting_it_writes_nothing_in_the_sends_transaction(self):
+		# ``_step_prompt`` is read right before ``_send_step``, as the owner: a write
+		# there would keep a lost race from being replayed (``txn.replay_is_safe``).
+		from jarvis.chat import txn
+
+		run, _, macro = self._start(steps=2)
+		self._unreadable(run)
+		run_doc, macro_doc = frappe.get_doc(RUN, run), frappe.get_doc(MACRO, macro)
 		frappe.db.commit()
+		frappe.set_user(OWNER)
+		with self._reports() as asked:
+			prompt, _ = macros._step_prompt(run_doc, macro_doc, 1)
+		safe = txn.replay_is_safe()
+		frappe.set_user("Administrator")
+		self.assertEqual((prompt, len(asked)), ("step 2", 1))
+		self.assertTrue(safe, "the report wrote in the send's transaction")
 
 
 # --------------------------------------------------------------------------- #
@@ -420,6 +559,99 @@ class TestEveryEndClearsTheSnapshot(SnapshotBase):
 		self.assertTrue(macros._cas_run_status(run, "waiting_capacity", "running"))
 		frappe.db.commit()
 		self.assertEqual(self._snapshot(run), before)
+
+
+class _MetaWithoutTheField:
+	"""The run doctype's meta as a site whose migrate has not added the field reads it."""
+
+	def __init__(self, meta):
+		self._meta = meta
+
+	def __getattr__(self, name):
+		return getattr(self._meta, name)
+
+	def has_field(self, fieldname):
+		return fieldname != FIELD and self._meta.has_field(fieldname)
+
+
+@contextmanager
+def _before_the_migrate():
+	real = frappe.get_meta
+
+	def get_meta(doctype, *args, **kw):
+		meta = real(doctype, *args, **kw)
+		return _MetaWithoutTheField(meta) if doctype == RUN else meta
+
+	with patch.object(frappe, "get_meta", get_meta):
+		yield
+
+
+# --------------------------------------------------------------------------- #
+# Whether the field is there is the meta's say, not the table's
+# --------------------------------------------------------------------------- #
+class TestTheFieldGuard(SnapshotBase):
+	def test_the_meta_decides_not_the_table(self):
+		# On Frappe 16 the table lookup can see another site's database; on Frappe 15
+		# it can be cached stale. Either way it may say yes before this site migrated.
+		with patch.object(frappe.db, "has_column", return_value=True), _before_the_migrate():
+			self.assertEqual(macros._snapshot_cleared(), {})
+		with patch.object(frappe.db, "has_column", return_value=False):
+			self.assertEqual(macros._snapshot_cleared(), {FIELD: None})
+
+	def test_before_the_migrate_a_run_ends_without_naming_the_field(self):
+		run, conv, _ = self._start(steps=1)
+		before = self._snapshot(run)
+		with _before_the_migrate():
+			self._end_step(conv, run, 0)
+		self.assertEqual(self._run(run).status, "completed")
+		self.assertEqual(self._snapshot(run), before, "the end wrote the field")
+
+
+# --------------------------------------------------------------------------- #
+# An ended run that kept its snapshot loses it later
+# --------------------------------------------------------------------------- #
+class TestAnEndedRunThatKeptItsSnapshot(SnapshotBase):
+	def _ended_by_older_code(self, run):
+		"""Ended by a worker still on code from before the snapshot: its write names
+		status alone. ``modified`` is set back so a change to it shows."""
+		frappe.db.sql(
+			f"""UPDATE `tab{RUN}` SET status = 'completed', modified = modified - INTERVAL 1 HOUR
+			    WHERE name = %s""",
+			run,
+		)
+		frappe.db.commit()
+		self.assertTrue(self._snapshot(run), "premise: the ended run kept its snapshot")
+		return frappe.db.get_value(RUN, run, "modified")
+
+	def test_the_hourly_job_clears_it(self):
+		ended, _, _ = self._start(steps=2, tag="ended")
+		modified = self._ended_by_older_code(ended)
+		live, _, _ = self._start(steps=2, tag="live")
+		with patch.object(macros, "_stale_run_candidates", return_value=[]):
+			macros.reap_stale_macro_runs()
+		self.assertIsNone(self._snapshot(ended))
+		self.assertEqual(
+			frappe.db.get_value(RUN, ended, "modified"), modified, "nothing about the run changed"
+		)
+		self.assertTrue(self._snapshot(live), "a live run lost its snapshot")
+
+	def test_the_hourly_job_leaves_it_before_the_migrate(self):
+		ended, _, _ = self._start(steps=2)
+		self._ended_by_older_code(ended)
+		with patch.object(macros, "_stale_run_candidates", return_value=[]), _before_the_migrate():
+			macros.reap_stale_macro_runs()
+		self.assertTrue(self._snapshot(ended))
+
+	def test_a_macro_delete_clears_it_on_a_row_kept_for_the_budget(self):
+		run, conv, macro = self._start(steps=2)
+		self._end_step(conv, run, 0)
+		frappe.db.set_value(RUN, run, "trigger", "scheduled", update_modified=False)
+		self._ended_by_older_code(run)
+		macros.drop_runs_of_deleted_macro(macro)
+		frappe.db.commit()
+		row = frappe.db.get_value(RUN, run, ["macro", FIELD], as_dict=True)
+		self.assertIsNotNone(row, "premise: the row is kept for the budget")
+		self.assertEqual((row.macro, row[FIELD]), (None, None))
 
 
 # --------------------------------------------------------------------------- #
