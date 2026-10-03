@@ -302,8 +302,10 @@ scheduler_events = {
 			# the turn machine is on and the shard is in `pump` mode; off switch
 			# `jarvis_macro_reconcile_disabled` in site config. Cheap no-op (one indexed
 			# status query) when no run is idle, and it writes nothing unless it acts.
-			# If the module is ever removed, keep this path importable as a no-op for a
-			# release: the cron row outlives the code until the next migrate.
+			# Is it working: `macro_reconcile.stuck_runs` (empty when healthy), and the
+			# stale-run sweep logs `jarvis.chat.macros.reaped_despite_check`.
+			# The cron row outlives the code until the next migrate: if the module is
+			# ever removed, keep this path importable as a no-op for a release.
 			"jarvis.chat.macro_reconcile.reconcile_running_runs",
 			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
 			# admin control plane for the per-tenant Errors feed. Off the hot path,
@@ -896,4 +898,10 @@ has_permission.update(
 # once before its job was ever released and once while the job was still
 # running). Redis locks (jarvis._redis_lock) are unaffected: they use
 # cache.lock() with a raw, unprefixed key, never this site-prefixed cache.
-persistent_cache_keys = ["jarvis:llm_switch"]
+#
+# jarvis:macro_reconcile (2026-10-03): the same wipe, every five minutes, took the
+# macro reconcile check's "skip this run for an hour" and "this run was logged"
+# markers with it, so a run that raised in the check was looked at and logged again
+# on every tick until the stale-run sweep (about 36 Error Log rows a run). Every key
+# of that module starts with ``macro_reconcile.CACHE_PREFIX``; their TTLs still apply.
+persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile"]
