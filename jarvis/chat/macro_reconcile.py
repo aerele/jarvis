@@ -557,9 +557,9 @@ class _SummaryCheck:
 		if created is None:
 			# "Delete all chat history" mid-summary: by design, no Error Log.
 			return macros._land_summary(self.name, self.conversation, errored=True)
+		# At least ``SUMMARY_SETTLE_AFTER_S`` old: the candidate query's own cutoff
+		# (a chat's ``creation`` does not change).
 		age = _seconds_since(created)
-		if age < SUMMARY_SETTLE_AFTER_S:
-			return False
 		turn = _summary_turn(self.conversation)
 		if turn and step_is_over(turn.name):
 			if _ledger_gave_up_on_the_hook(turn.name):
