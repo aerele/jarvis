@@ -436,7 +436,7 @@ class TestARunWithoutASnapshot(SnapshotBase):
 	def _unreadable(self, run):
 		frappe.db.set_value(RUN, run, FIELD, "{not json", update_modified=False)
 		frappe.db.commit()
-		self.addCleanup(frappe.cache().delete_value, f"jarvis_macro_snapshot_unreadable:{run}")
+		self.addCleanup(frappe.cache().delete_value, f"{macros._UNREADABLE_SNAPSHOT_MARKER}{run}")
 		self.addCleanup(frappe.db.commit)
 		self.addCleanup(
 			frappe.db.delete, "Error Log", {"method": f"jarvis.chat.macros.snapshot_unreadable: {run}"}
@@ -456,6 +456,16 @@ class TestARunWithoutASnapshot(SnapshotBase):
 
 		with patch.object(frappe, "enqueue", enqueue):
 			yield asked
+
+	def test_the_reported_marker_outlives_the_watchdogs_cache_clear(self):
+		# The pump watchdog clears the whole site cache every five minutes; only keys
+		# under a ``persistent_cache_keys`` prefix survive it.
+		self.assertTrue(
+			any(
+				macros._UNREADABLE_SNAPSHOT_MARKER.startswith(prefix)
+				for prefix in frappe.get_hooks("persistent_cache_keys")
+			)
+		)
 
 	def test_an_unreadable_snapshot_is_the_macro_and_is_reported_once(self):
 		run, conv, macro = self._start(steps=3)
