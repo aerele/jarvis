@@ -20,7 +20,36 @@ MAX_NAME_LEN = 80
 MAX_DESC_LEN = 500
 MAX_STEPS = 25
 MAX_PROMPT_LEN = 5000
+MAX_SUMMARY_LEN = MAX_STEPS * MAX_PROMPT_LEN
 MAX_MACROS_PER_OWNER = 25
+
+_STEP_TEXT_FIELDS = ("label", "prompt", "model_override", "thinking_override")
+
+
+def step_skills(step) -> list[str]:
+	"""Parse a step row's ``skills`` JSON into a list (tolerant of legacy rows)."""
+	try:
+		skills = step.get("skills")
+		v = frappe.parse_json(skills) if skills else []
+		return v if isinstance(v, list) else []
+	except Exception:
+		return []
+
+
+def step_values(steps) -> list[tuple]:
+	"""What each step SAYS, in order, for telling whether a save changed the steps.
+
+	Takes step dicts or the stored child rows and reads both the same way, so the
+	comparison is on values: never on row identity (a save resends the rows) and
+	never on how a value happens to be spelled (padding, ``None`` for an unset
+	override, the layout of the skills JSON, ``\r\n`` where a textarea posts ``\n``)."""
+	return [
+		(
+			*((s.get(f) or "").replace("\r\n", "\n").strip() for f in _STEP_TEXT_FIELDS),
+			tuple(step_skills(s)),
+		)
+		for s in steps or []
+	]
 
 
 class JarvisMacro(NotRenamable, Document):
@@ -33,6 +62,9 @@ class JarvisMacro(NotRenamable, Document):
 		self._validate_schedule_day_of_month()
 		self._guard_skip_confirmation_enable()
 		self._guard_summary_state()
+		self._clear_summary_of_changed_steps()
+		self._settle_summary_written_in_this_save()
+		self._validate_summary_length()
 		self._recompute_next_run()
 
 	def _guard_summary_state(self):
@@ -65,6 +97,74 @@ class JarvisMacro(NotRenamable, Document):
 		# NULL -> "" on a Data field would add a Version line to an unrelated save.
 		stored = before.get("merge_conversation") if before else None
 		self.merge_conversation = stored
+
+	def _clear_summary_of_changed_steps(self):
+		"""A stored summary runs INSTEAD of the steps (``macros.run_macro``), so one
+		made from steps the macro no longer has must go, and with it the "summarizing"
+		mark of one still being written from them: without the mark its result does not
+		land. Unless this same save wrote the summary: then it is the writer's text for
+		the new steps, and it stays.
+
+		Here, and not in ``macros_api.update_macro`` where it used to be: that covered
+		the Macros form only. Steps changed by the assistant's ``update_doc``, the Desk
+		form, ``frappe.client.save`` or a Data Import kept the old summary, and the
+		next run did what the old steps said.
+
+		``flags.steps_changed`` tells ``update_macro`` whether a new summary is due.
+		Run after ``_guard_summary_state``, so a summary this save only carries because
+		its document was loaded a while ago is not mistaken for one it wrote."""
+		before = self.get_doc_before_save()
+		self.flags.steps_changed = bool(before) and step_values(self.steps) != step_values(before.steps)
+		if not self.flags.steps_changed or self._summary_written_in_this_save():
+			return
+		self.merged_prompt = ""
+		self.merge_status = ""
+
+	def _summary_written_in_this_save(self) -> bool:
+		before = self.get_doc_before_save()
+		stored = (before.get("merged_prompt") if before else "") or ""
+		return (self.merged_prompt or "").strip() != stored.strip()
+
+	def _settle_summary_written_in_this_save(self):
+		"""A save that changes the summary text is someone writing it by hand, and that
+		text is the summary from then on: "ready" (no status once emptied), whatever
+		the status was. One being written by the model at that moment is given up: the
+		"summarizing" mark and its link go, so its late result finds no macro waiting
+		and is ignored (``macros._apply_merge_after_turn``).
+
+		The rule lived in ``macros_api.update_macro`` alone. A summary written through
+		the Desk form, REST or the assistant's ``update_doc`` kept "pending" and the
+		link, and the model's text landed over it a moment later; written on a macro
+		whose summary had failed, it ran under a Failed badge.
+
+		The link is cleared only here and only with the mark, which is the one thing a
+		save may do to engine state (see ``_guard_summary_state``): dropping one's own
+		summary in flight, as changing a step already does. Not on insert: a new macro
+		keeps what it is created with."""
+		before = self.get_doc_before_save()
+		if not before or not self._summary_written_in_this_save():
+			return
+		self.merge_status = "ready" if (self.merged_prompt or "").strip() else ""
+		if (before.get("merge_status") or "") == "pending":
+			self.merge_conversation = ""
+
+	def _validate_summary_length(self):
+		"""A summary runs in place of the steps, so one written by hand may be as long
+		as all the steps together (``MAX_SUMMARY_LEN``), not as long as one of them:
+		nothing limits a summary the model writes (a raw write that never comes through
+		here), and with the limit of one step a typo could not be fixed in a longer one.
+
+		Only a summary this save writes is measured, and one that is over the limit is
+		refused only when it is also longer than the stored text: a summary that is
+		already over (the model's) can still be corrected or shortened, and never made
+		longer."""
+		if not self._summary_written_in_this_save():
+			return
+		before = self.get_doc_before_save()
+		stored = len(((before.get("merged_prompt") if before else "") or "").strip())
+		written = len((self.merged_prompt or "").strip())
+		if written > MAX_SUMMARY_LEN and written > stored:
+			frappe.throw(_("The summarized prompt must be at most {0} characters.").format(MAX_SUMMARY_LEN))
 
 	def _guard_skip_confirmation_enable(self):
 		"""ARM the macro = run its writes uncarded (the broad covered set, incl.
