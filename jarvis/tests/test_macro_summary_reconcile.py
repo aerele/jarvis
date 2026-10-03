@@ -734,3 +734,78 @@ class TestTheTickLeavesATrace(SummaryBase):
 		self._landing_lost(conv2, rid2)
 		self.assertEqual(self._tick()["summaries_settled"], 1)
 		self.assertEqual(len(self._summary_signals()), 2)
+
+	def test_a_chat_delete_that_fails_commits_none_of_it(self):
+		name, conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+		messages = frappe.db.count(MSG, {"conversation": conv})
+		self.assertTrue(messages, "premise")
+		real_delete_doc = frappe.delete_doc
+
+		def delete_doc(doctype, *a, **kw):
+			if doctype == CONV:
+				raise frappe.QueryTimeoutError("Lock wait timeout exceeded")
+			return real_delete_doc(doctype, *a, **kw)
+
+		with patch.object(frappe, "delete_doc", delete_doc):
+			self.assertEqual(self._tick()["summaries_settled"], 1)
+		self.assertEqual(self._mark(name)[:2], ("failed", ""))
+		self.assertTrue(frappe.db.exists(CONV, conv))
+		self.assertEqual(frappe.db.count(MSG, {"conversation": conv}), messages, "half a delete committed")
+
+
+class TestAnOrphanedSummaryChat(SummaryBase):
+	"""A summary chat no macro names any more (given up at an hour while its turn was
+	live, or replaced by a Re-summarize while its turn was finishing) is removed at
+	its turn's end, by that end's own hook."""
+
+	def test_a_chat_kept_at_the_give_up_is_removed_when_its_turn_ends(self):
+		name, conv, rid = self._mk_summary(age_s=61 * MIN)
+		self._force(rid, state="ready")
+		self.assertEqual(self._tick()["summaries_settled"], 1)
+		self.assertTrue(frappe.db.exists(CONV, conv), "premise: kept while its turn is live")
+		self._settle_success(conv, rid, MERGE_REPLY)
+		finalize.run_finalize(rid, self._target)
+		self.assertEqual(self._mark(name)[:2], ("failed", ""), "a late reply does not land")
+		self.assertFalse(frappe.db.exists(CONV, conv))
+		self.assertEqual(len(self.published), 1)
+
+	def test_a_hook_that_loses_to_a_re_summarize_removes_its_chat_at_its_end(self):
+		name, conv_a, rid = self._mk_summary()
+		self._settle_success(conv_a, rid, MERGE_REPLY)
+		started = {}
+		real_outcome = macros._merge_outcome
+
+		def outcome(conversation_id, *, errored):
+			if not started:
+				session_user = frappe.session.user
+				started["conv"] = self._summarize(name, force=1)
+				self.assertTrue(frappe.db.exists(CONV, conv_a), "premise: its turn is finishing, so kept")
+				frappe.set_user(session_user)
+			return real_outcome(conversation_id, errored=errored)
+
+		with patch.object(macros, "_merge_outcome", outcome):
+			finalize.run_finalize(rid, self._target)
+		self.assertEqual(self._mark(name)[:2], ("pending", started["conv"]))
+		self.assertTrue(frappe.db.exists(CONV, started["conv"]))
+		self.assertFalse(frappe.db.exists(CONV, conv_a))
+		self.assertEqual(self.published, [])
+
+	def test_no_other_chat_is_removed(self):
+		"""An archived chat the engine opened that is not a summary's (a run's log), and a
+		summary chat a macro still names."""
+		run_log = self._mk_conv()
+		self._track(run_log)
+		frappe.db.set_value(
+			CONV, run_log, {"status": "Archived", "agent_initiated": 1}, update_modified=False
+		)
+		self._mk_msg(run_log, content=f"{PROMPT_MARK} 1")
+		name, conv, rid = self._mk_summary()
+		self._dead_turn(rid)
+		frappe.db.set_value(MACRO, name, "merge_status", "failed", update_modified=False)
+		frappe.db.commit()
+		frappe.set_user("Administrator")
+		for chat in (run_log, conv):
+			macros._apply_merge_after_turn(chat, errored=False)
+		self.assertTrue(frappe.db.exists(CONV, run_log))
+		self.assertTrue(frappe.db.exists(CONV, conv))
