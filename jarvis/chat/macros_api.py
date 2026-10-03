@@ -357,15 +357,18 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 	none are. Another user's notification, or one of another kind, is never touched:
 	the filter is the caller's own and the kind's own."""
 	refuse_in_tool_dispatch()
-	raw = frappe.parse_json(names) if isinstance(names, str) and names.strip() else names
+	refused = _("Notices must be a list of names.")
+	try:
+		raw = frappe.parse_json(names) if isinstance(names, str) and names.strip() else names
+	except ValueError:  # not JSON (both json's and orjson's decode errors are ValueErrors)
+		frappe.throw(refused, frappe.ValidationError)
 	if raw is not None and not isinstance(raw, list):
-		frappe.throw(_("Notices must be a list of names."), frappe.ValidationError)
+		frappe.throw(refused, frappe.ValidationError)
+	if raw and not all(isinstance(n, str) and n for n in raw):
+		frappe.throw(refused, frappe.ValidationError)
 	filters = _notice_filters(frappe.session.user)
 	if raw:
-		named = [n for n in raw if isinstance(n, str) and n]
-		if not named:
-			return {"ok": True, "dismissed": 0}
-		filters["name"] = ["in", named]
+		filters["name"] = ["in", raw]
 	marked = frappe.get_all("Notification Log", filters=filters, pluck="name")
 	for name in marked:
 		frappe.db.set_value("Notification Log", name, "read", 1, update_modified=False)
@@ -643,7 +646,15 @@ def update_macro(
 	frappe.db.commit()
 	# An emptied summary is not one the owner wrote: with changed steps it is the same
 	# as the controller's clear, and a new summary follows.
-	summarize = bool(doc.flags.steps_changed) and len(doc.steps) >= 2 and not (edited_by_hand and written)
+	# Not while held: ``summarize_macro`` refuses a held macro.
+	from jarvis.chat.macros import is_held
+
+	summarize = (
+		bool(doc.flags.steps_changed)
+		and len(doc.steps) >= 2
+		and not (edited_by_hand and written)
+		and not is_held(doc)
+	)
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified), "summarize": summarize}}
 
 
@@ -1177,6 +1188,15 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# it. Acted on below, before anything is created.
 	blocked = macros.entitlement_block(doc.owner, steps=1, trigger="manual")
 	doc = _locked_for_writing(doc)
+	if macros.is_held(doc):
+		# An admin's hold: the macro does nothing, and a summary is one agent turn.
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
+			HOLD_REASON_FIELD,
+			MacroOnHoldError,
+			held_message,
+		)
+
+		frappe.throw(held_message(doc.get(HOLD_REASON_FIELD)), MacroOnHoldError)
 	steps = doc.steps or []
 	if len(steps) < 2:
 		frappe.throw(_("Nothing to merge — the macro has fewer than 2 steps."))
