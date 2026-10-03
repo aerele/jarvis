@@ -157,6 +157,16 @@ describe("MacroAdminDialog", () => {
 		);
 	});
 
+	it("says a macro is on hold, and why, as text", async () => {
+		const w = await open(macro({ admin_hold: 1, admin_hold_reason: HOSTILE }));
+		expect(w.find(".jv-macro-admin-dialog-held").text()).toBe("On hold");
+		expect(w.find(".jv-macro-admin-dialog-reason").text()).toBe(HOSTILE);
+		expect(w.find("img").exists()).toBe(false);
+		const free = await open(macro({ admin_hold: 0, admin_hold_reason: "" }));
+		expect(free.find(".jv-macro-admin-dialog-held").exists()).toBe(false);
+		expect(free.find(".jv-macro-admin-dialog-reason").exists()).toBe(false);
+	});
+
 	it("has nothing to edit, save or run it with, and no way into a run's chat", async () => {
 		const w = await open();
 		expect(w.findAll("input, textarea, select, [contenteditable]")).toHaveLength(0);
