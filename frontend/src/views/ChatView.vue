@@ -6266,10 +6266,15 @@ async function clearAllHistory() {
 	clearingHistory.value = true;
 	try {
 		const outcome = clearHistoryOutcome(await api.clearChatHistory(), currentId.value);
-		if (outcome.notice) notify(outcome.notice, { type: "info", duration: 9000 });
+		if (outcome.notice)
+			notify(outcome.notice, {
+				type: outcome.failed ? "error" : "info",
+				duration: 9000,
+			});
 		if (outcome.openChatKept) {
-			// The open chat is waiting for its reply and was kept: leave it exactly
-			// as it is (it goes on streaming) and only refresh the sidebar.
+			// The open chat was not deleted (it is waiting for its reply, or its
+			// delete failed): leave it exactly as it is (a reply goes on streaming)
+			// and only refresh the sidebar.
 			settingsOpen.value = false;
 			store.loadConversations();
 			return;
