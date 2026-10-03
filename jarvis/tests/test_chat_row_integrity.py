@@ -268,14 +268,15 @@ class TestOrigin(_Base):
 		from jarvis.learning import app_analysis
 
 		step = frappe._dict(prompt="p1", model_override=None, thinking_override=None, skills=None)
-		macro_doc = frappe._dict(steps=[step], name="m", owner=USER)
-		run = frappe._dict(conversation=self.conv, name="r")
+		macro_doc = frappe._dict(steps=[step], name="m", owner=USER, merged_prompt="merged")
+		stepped = frappe._dict(conversation=self.conv, name="r", run_mode="stepped")
+		summarized = frappe._dict(conversation=self.conv, name="r", run_mode="merged")
 		with (
 			patch("jarvis.chat.api._enqueue_turn", return_value={"overloaded": True}) as enq,
 			patch.object(macros, "_defer_capacity"),
 		):
-			macros._run_step(run, macro_doc, 0)
-			macros._run_merged(run, macro_doc, "merged")
+			macros._dispatch_step(stepped, macro_doc, 0)
+			macros._dispatch_step(summarized, macro_doc, 0)
 		self.assertEqual([c.kwargs["origin"] for c in enq.call_args_list], ["macro", "macro"])
 
 		lrun = frappe._dict(conversation=self.conv, app="x", zip_path="z", batches_total=1)

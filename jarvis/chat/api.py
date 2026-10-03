@@ -3763,6 +3763,7 @@ def _enqueue_turn(
 	interactive: bool = True,
 	exempt_overload: bool = False,
 	claim=None,
+	run_id: str | None = None,
 ) -> dict:
 	"""Persist a user message + dispatch an agent turn for ``prompt`` (no
 	attachments / no auto-context). The macro engine (``jarvis.chat.macros``) uses
@@ -3778,7 +3779,17 @@ def _enqueue_turn(
 	``claim``: a pending action's ``settled`` compare-and-set, run inside the user
 	row's transaction (D5). When it returns False another settle already delivered
 	this outcome: nothing is written and ``{ok: False, already_settled: True}``
-	comes back."""
+	comes back.
+
+	``run_id``: the id the turn must have, for the one caller that has to be able to
+	name a turn before it exists: the macro engine, whose step N of run R is always
+	``macros._step_turn_id(R, N)``. Everyone else leaves it out and gets a random id.
+	It is never taken from a request: this function is not whitelisted and no caller
+	passes a client's value. Honoured where Turn rows are written: there the message
+	and the turn are written in one transaction (``_enqueue_turn_with_its_message``),
+	and a turn that already exists comes back as ``duplicate: True`` with nothing
+	written. Elsewhere (the pump off, or draining) there is no row to meet on and the
+	turn gets a random id, as before."""
 	conv_doc = frappe.get_doc(CONV, conversation)
 	# Every field this call changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
@@ -3830,7 +3841,7 @@ def _enqueue_turn(
 	# transaction yet at this point, but whether a lost race here can safely replay
 	# also depends on the CALLER: macros_api.merge_runs (a commit right before the
 	# call) and macros.run_macro / resume_waiting_capacity_runs (both commit right
-	# before their _run_step/_run_merged call, which reaches here) are verified
+	# before their _dispatch_step call, which reaches here) are verified
 	# clean. macros.advance_after_turn's own call is NOT fully verified: it first
 	# runs _apply_merge_after_turn, whose write path was not traced end to end, so
 	# on that path replay_is_safe() may read False and a genuine race there
@@ -3838,25 +3849,27 @@ def _enqueue_turn(
 	# just not newly protected).
 	txn.replay_on_conflict(_write_conv, label="chat._enqueue_turn conversation")
 
-	seq = _next_seq(conversation)
-	msg_doc = frappe.get_doc(
-		{
-			"doctype": MSG,
-			"conversation": conversation,
-			"seq": seq,
-			"role": "user",
-			"content": prompt,
-			"streaming": 0,
-			"hidden": 1 if hidden else 0,
-			"origin": origin,
-		}
-	)
-	msg_doc.flags.ignore_permissions = True
-	msg_doc.flags.jarvis_server_write = True
-	msg_doc.insert()
-	if msg_doc.owner != conv_doc.owner:
-		# The worker's chat user is the seed row's owner: never a cron's Administrator.
-		frappe.db.set_value(MSG, msg_doc.name, "owner", conv_doc.owner, update_modified=False)
+	if run_id and admission.turn_machine_enabled():
+		if claim is not None:
+			raise ValueError("_enqueue_turn: a fixed run_id cannot carry a claim")
+		# The conversation's bookkeeping (overrides, session key, last active) is its own
+		# commit: the gate's first act is a commit anyway (``_lock_shard``), and the row
+		# lock this write holds must not be held into it.
+		frappe.db.commit()
+		return _enqueue_turn_with_its_message(
+			conversation,
+			prompt,
+			origin=origin,
+			hidden=hidden,
+			interactive=interactive,
+			exempt_overload=exempt_overload,
+			run_id=run_id,
+		)
+
+	# The same user row the accept gate writes for a fixed id (``admission._insert_seed``:
+	# the next seq, owned by the chat's owner, never a cron's Administrator), committed
+	# here before the dispatch. ``_write_conv`` above holds the conversation row lock.
+	seed = admission._insert_seed(conversation, prompt, origin, hidden)
 	if claim is not None and not claim():
 		frappe.db.rollback()
 		return {"ok": False, "already_settled": True}
@@ -3865,7 +3878,7 @@ def _enqueue_turn(
 	run_id = uuid.uuid4().hex[:12]
 	_kwargs = {
 		"conversation_id": conversation,
-		"message_id": msg_doc.name,
+		"message_id": seed,
 		"run_id": run_id,
 	}
 	# Phase-0 admission (flag ON): macro steps AND confirm continuations run
@@ -3876,12 +3889,12 @@ def _enqueue_turn(
 	# branch. The admission result (queued/queued_position) is RETURNED (SUXI-2)
 	# so the caller (apply_action / confirm_tool) can render the standard queued
 	# chip instead of leaving the card to vanish into silence.
-	out = {"run_id": run_id, "message_id": msg_doc.name}
+	out = {"run_id": run_id, "message_id": seed}
 	if admission.turn_machine_enabled():
 		_adm = admission.accept_or_queue(
 			conversation=conversation,
 			run_id=run_id,
-			seed_message=msg_doc.name,
+			seed_message=seed,
 			turn_class="interactive" if interactive else "background",
 			dispatch=lambda: _dispatch_turn(_kwargs, interactive=interactive),
 			exempt_overload=exempt_overload,
@@ -3894,7 +3907,7 @@ def _enqueue_turn(
 		# that can never arrive. A confirm continuation passes exempt_overload=True, so it never
 		# reaches this branch (accept_or_queue always queues it).
 		if _adm.get("overloaded"):
-			_delete_enqueue_seed(msg_doc.name)
+			_delete_enqueue_seed(seed)
 			return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
@@ -3910,9 +3923,64 @@ def _enqueue_turn(
 	if isinstance(_adm, dict) and _adm.get("overloaded"):
 		# CDX-19 (residual): a full-queue reroute is an HONEST rejection — clean the orphan seed
 		# and return the typed rejection, exactly like the machine branch.
-		_delete_enqueue_seed(msg_doc.name)
+		_delete_enqueue_seed(seed)
 		return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
+		out["queued"] = True
+		out["queued_position"] = _adm.get("queued_position")
+	return out
+
+
+def _enqueue_turn_with_its_message(
+	conversation: str,
+	prompt: str,
+	*,
+	origin: str,
+	hidden: bool,
+	interactive: bool,
+	exempt_overload: bool,
+	run_id: str,
+) -> dict:
+	"""``_enqueue_turn`` for a turn whose id the caller fixed, where Turn rows are
+	written: the accept gate inserts the user row itself, in the turn's own
+	transaction (``admission.accept_or_queue``'s insert branch).
+
+	The macro engine's step N of run R is always the turn ``macros._step_turn_id(R, N)``,
+	and several dispatchers can come for one step (a repeated turn end, the capacity
+	resume, a lapsed run lock). With the message committed first and the turn after,
+	every way of failing in between left a step message with no turn: a loser's copy,
+	a message a killed worker left, one a full site left. Each needed its own clean-up,
+	and the orphan sweep could run any of them a second time. In one transaction a
+	duplicate or a full site writes nothing, and a process that dies leaves both rows
+	or neither.
+
+	Returns ``{run_id, message_id}`` (plus ``queued`` / ``queued_position``),
+	``{run_id, message_id: None, duplicate: True}`` when the turn already exists, or
+	the overload rejection."""
+	out = {"run_id": run_id, "message_id": None}
+	_kwargs = {"conversation_id": conversation, "message_id": None, "run_id": run_id}
+
+	def seeded(message: str) -> None:
+		out["message_id"] = _kwargs["message_id"] = message
+
+	_adm = admission.accept_or_queue(
+		conversation=conversation,
+		run_id=run_id,
+		seed_message=None,
+		seed_content=prompt,
+		seed_origin=origin,
+		seed_hidden=hidden,
+		on_seed=seeded,
+		turn_class="interactive" if interactive else "background",
+		dispatch=lambda: _dispatch_turn(_kwargs, interactive=interactive),
+		exempt_overload=exempt_overload,
+	)
+	if _adm.get("overloaded"):
+		# Nothing was written: the gate refused before the user row.
+		return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
+	if _adm.get("duplicate"):
+		return {"run_id": run_id, "message_id": None, "duplicate": True}
+	if not _adm.get("dispatched", True):
 		out["queued"] = True
 		out["queued_position"] = _adm.get("queued_position")
 	return out
