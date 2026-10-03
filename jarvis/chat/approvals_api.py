@@ -465,9 +465,18 @@ def get_approval(name: str) -> dict:
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
 	can_act = _may_act_on(doc.conversation)
-	if not can_act and not frappe.db.exists(
-		"DocShare",
-		{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+	can_read = can_act
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import may_review
+
+		can_act = may_review(doc)
+	if (
+		not can_read
+		and not can_act
+		and not frappe.db.exists(
+			"DocShare",
+			{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	return {
@@ -614,7 +623,11 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, bool(int(approve)))
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.status != "Pending":
@@ -641,6 +654,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	doc.reload()
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
+	if doc.get("assessment_key"):
+		return {"ok": True, "status": doc.status, "resumed": False}
 
 	if doc.get("routing"):
 		return {"ok": True, "status": doc.status, "resumed": _apply_routing_answer(doc)}
@@ -711,7 +726,11 @@ def dismiss_approval(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, False)
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.status != "Pending":
@@ -746,7 +765,11 @@ def restore_approval(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, False)
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.get("routing"):
