@@ -250,6 +250,7 @@ def list_macros_page(
 		as_dict=True,
 	)
 
+	holds = _holds_of([r.name for r in rows])
 	names = [r.name for r in rows]
 	step_counts: dict = {}
 	if names:
@@ -266,6 +267,7 @@ def list_macros_page(
 	last_runs = _last_runs(names, me)
 	for r in rows:
 		r["step_count"] = step_counts.get(r.name, 0)
+		r.update(holds.get(r.name) or _NOT_HELD)
 		r["last_run"] = last_runs.get(r.name)
 		# Pure arithmetic on the row, no query: see get_macro.
 		r["next_run_is_retry"] = int(is_retry_pending(r, now))
@@ -279,7 +281,96 @@ def list_macros_page(
 		"has_more": start + len(rows) < total,
 		"start": start,
 		"page_length": pl,
+		# Additive: what an admin did that left nothing on the list to show it.
+		"notices": admin_notices(me),
 	}
+
+
+_NOT_HELD = {"admin_hold": 0, "admin_hold_reason": ""}
+
+
+def _hold_of(doc) -> dict:
+	"""A loaded macro's hold, for a payload. Not held on a site without the fields."""
+	from jarvis.chat.macros import is_held
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import HOLD_REASON_FIELD
+
+	if not is_held(doc):
+		return dict(_NOT_HELD)
+	return {"admin_hold": 1, "admin_hold_reason": doc.get(HOLD_REASON_FIELD) or ""}
+
+
+def _holds_of(macro_names: list[str]) -> dict:
+	"""``{macro: its hold}`` for the held macros among ``macro_names``, one query.
+	Empty on a site without the fields (nothing is held there)."""
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
+		HOLD_FIELD,
+		HOLD_REASON_FIELD,
+		hold_fields_exist,
+	)
+
+	if not macro_names or not hold_fields_exist():
+		return {}
+	rows = frappe.get_all(
+		MACRO,
+		filters={"name": ["in", macro_names], HOLD_FIELD: 1},
+		fields=["name", HOLD_REASON_FIELD],
+	)
+	return {r.name: {"admin_hold": 1, "admin_hold_reason": r.get(HOLD_REASON_FIELD) or ""} for r in rows}
+
+
+# --------------------------------------------------------------------------- #
+# Notices: an admin deleted one of the caller's macros
+# --------------------------------------------------------------------------- #
+# The subject every such Notification Log starts with: the one way to tell them from
+# the engine's other notices, since they name no document (``macros.notify_owner``:
+# Frappe deletes a notification that points at a record when the record goes).
+ADMIN_DELETE_NOTICE = "Macro deleted by an admin"
+_NOTICES_MAX = 20
+
+
+def _notice_filters(user: str) -> dict:
+	return {
+		"for_user": user,
+		"read": 0,
+		"subject": ["like", f"{list_filters.escape_like(ADMIN_DELETE_NOTICE)}:%"],
+	}
+
+
+def admin_notices(user: str) -> list[dict]:
+	"""The user's unread notices that an admin deleted one of their macros, newest
+	first: ``[{name, message, creation}]``. Neither client shows the notification
+	log, so the Macros list shows these, until dismissed (``dismiss_macro_notices``)."""
+	rows = frappe.get_all(
+		"Notification Log",
+		filters=_notice_filters(user),
+		fields=["name", "email_content", "creation"],
+		order_by="creation desc",
+		limit=_NOTICES_MAX,
+	)
+	return [{"name": r.name, "message": r.email_content or "", "creation": str(r.creation)} for r in rows]
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def dismiss_macro_notices(names: str | list | None = None) -> dict:
+	"""Mark the caller's admin-delete notices read: those named, or all of them when
+	none are. Another user's notification, or one of another kind, is never touched:
+	the filter is the caller's own and the kind's own."""
+	refuse_in_tool_dispatch()
+	raw = frappe.parse_json(names) if isinstance(names, str) and names.strip() else names
+	if raw is not None and not isinstance(raw, list):
+		frappe.throw(_("Notices must be a list of names."), frappe.ValidationError)
+	filters = _notice_filters(frappe.session.user)
+	if raw:
+		named = [n for n in raw if isinstance(n, str) and n]
+		if not named:
+			return {"ok": True, "dismissed": 0}
+		filters["name"] = ["in", named]
+	marked = frappe.get_all("Notification Log", filters=filters, pluck="name")
+	for name in marked:
+		frappe.db.set_value("Notification Log", name, "read", 1, update_modified=False)
+	frappe.db.commit()
+	return {"ok": True, "dismissed": len(marked)}
 
 
 _LAST_RUN_FIELDS = ("status", "error", "started_at", "finished_at", "conversation", "trigger")
@@ -349,6 +440,9 @@ def get_macro(name: str) -> dict:
 		"next_run_at": str(doc.next_run_at or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
+		# An admin's hold (0 and "" on a site without the fields): the form shows the
+		# banner and keeps Run, Enabled, the schedule and the arm switch off.
+		**_hold_of(doc),
 		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"last_run": _last_runs([doc.name], doc.owner).get(doc.name),
 		"steps": [
@@ -665,10 +759,19 @@ def delete_macro(name: str) -> dict:
 	  that points at a name which no longer resolves: it is shown nowhere (the
 	  timeline it belonged to is gone) and nothing reads it. Sweeping eight tables
 	  on every macro delete for that is not worth the queries."""
-	from jarvis.chat import macros
-
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
+	return delete_loaded_macro(doc)
+
+
+def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
+	"""``delete_macro`` after its gate, for a caller that has made its own decision
+	that the session user may delete ``doc``: the owner's endpoint (the document
+	permission) and an admin's (``macros_admin_api.admin_delete``, the Jarvis Admin
+	role, with ``ignore_permissions`` because the document permission is the owner's
+	alone). One body, so both stop the live runs first and keep the month's rows."""
+	from jarvis.chat import macros
+
 	stopped = 0
 	try:
 		for _round in range(_DELETE_STOP_ROUNDS):
@@ -682,7 +785,8 @@ def delete_macro(name: str) -> dict:
 				frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
 				continue
 			macros.drop_runs_of_deleted_macro(doc.name)
-			frappe.delete_doc(MACRO, doc.name)  # honors if_owner
+			# honors if_owner, unless the caller's own gate stands in for it
+			frappe.delete_doc(MACRO, doc.name, ignore_permissions=ignore_permissions)
 			frappe.db.commit()
 			return {"ok": True, "stopped_runs": stopped}
 		_refuse_busy_delete(doc.name, stopped)

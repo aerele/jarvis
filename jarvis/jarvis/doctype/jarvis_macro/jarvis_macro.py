@@ -25,6 +25,37 @@ MAX_MACROS_PER_OWNER = 25
 
 _STEP_TEXT_FIELDS = ("label", "prompt", "model_override", "thinking_override")
 
+# An admin's hold (``macros_admin_api.admin_hold``). The two columns arrive with a
+# migrate; until it has run the doctype does not have them and nothing is held.
+HOLD_FIELD = "admin_hold"
+HOLD_REASON_FIELD = "admin_hold_reason"
+# What a held macro may not be switched to. Switching any of them OFF stays free.
+_HELD_OFF_FIELDS = ("enabled", "schedule_enabled", "skip_confirmation")
+
+
+class MacroOnHoldError(frappe.ValidationError):
+	"""A Jarvis Admin has put the macro on hold."""
+
+
+def hold_fields_exist() -> bool:
+	"""Whether this site's ``Jarvis Macro`` has the hold fields (the migrate ran).
+
+	The doctype's meta, not ``frappe.db.has_column``: on Frappe 16 that reads
+	``information_schema`` without a schema filter, so it can see the migrated table of
+	another site on the same database server; on Frappe 15 its answer can be cached
+	from before the migrate. The meta is this site's own doctype."""
+	return bool(frappe.get_meta("Jarvis Macro").has_field(HOLD_FIELD))
+
+
+def held_message(reason: str | None) -> str:
+	"""The one sentence for "on hold": the form's banner says the same."""
+	reason = (reason or "").strip()
+	if reason:
+		return _(
+			"An admin has put this macro on hold: {0}. It will not run until an admin releases it."
+		).format(reason.rstrip("."))
+	return _("An admin has put this macro on hold. It will not run until an admin releases it.")
+
 
 def step_skills(step) -> list[str]:
 	"""Parse a step row's ``skills`` JSON into a list (tolerant of legacy rows)."""
@@ -60,6 +91,7 @@ class JarvisMacro(NotRenamable, Document):
 		self._validate_owner_cap()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
+		self._guard_admin_hold()
 		self._guard_skip_confirmation_enable()
 		self._guard_summary_state()
 		self._clear_summary_of_changed_steps()
@@ -97,6 +129,30 @@ class JarvisMacro(NotRenamable, Document):
 		# NULL -> "" on a Data field would add a Version line to an unrelated save.
 		stored = before.get("merge_conversation") if before else None
 		self.merge_conversation = stored
+
+	def _guard_admin_hold(self):
+		"""The hold is an admin's, never the owner's. Only the admin verbs write it, with
+		a raw write that never reaches ``validate``; so, as for ``merge_conversation``,
+		whatever a save carries in the two fields is not theirs and the stored value
+		always wins: on a form save, REST ``set_value``, a Data Import, a Desk Duplicate
+		(an insert, where "stored" is "not held"). The fields' permlevel 1 with no writer
+		does the same for a plain user's save, but not for one that ignores permissions
+		or comes from Administrator; this does.
+
+		While held, the save may not switch the macro on, schedule it or arm it. Each of
+		those is judged against the STORED value, so a form loaded before the hold and
+		saved after it is refused too. Switching any of them off stays free."""
+		if not hold_fields_exist():
+			return
+		before = self.get_doc_before_save()
+		# As stored, NULL included: this doctype tracks changes (see _guard_summary_state).
+		self.set(HOLD_FIELD, before.get(HOLD_FIELD) if before else 0)
+		self.set(HOLD_REASON_FIELD, before.get(HOLD_REASON_FIELD) if before else None)
+		if not frappe.utils.cint(self.get(HOLD_FIELD)):
+			return
+		for field in _HELD_OFF_FIELDS:
+			if frappe.utils.cint(self.get(field)) and not frappe.utils.cint(before.get(field)):
+				frappe.throw(held_message(self.get(HOLD_REASON_FIELD)), MacroOnHoldError)
 
 	def _clear_summary_of_changed_steps(self):
 		"""A stored summary runs INSTEAD of the steps (``macros.run_macro``), so one
