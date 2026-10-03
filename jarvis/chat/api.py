@@ -3550,9 +3550,6 @@ def _redispatch_orphan(
 	message_id: str,
 	attachments=None,
 	context=None,
-	*,
-	run_id: str | None = None,
-	interactive: bool = False,
 ) -> dict | None:
 	"""Re-dispatch a turn whose original RQ job never ran (orphan sweep in
 	stale_scan). Fresh run_id; the 10s probe re-routes to a live queue.
@@ -3560,17 +3557,12 @@ def _redispatch_orphan(
 	when it still exists - they ride only the enqueue payload, so dropping
 	them would resume the turn blind to its own file.
 
-	``run_id`` / ``interactive``: the macro engine dispatches a step message that was
-	committed without a turn through here too (``macros._dispatch_step``), under the
-	step's fixed id and at a step's usual priority. Server-side callers only; the
-	sweep passes neither.
-
 	CDX-19 (residual): RETURNS the admission result (accept_or_queue's dict, or
 	_dispatch_turn's reroute dict) so the stale-scan sweep can see an overload
 	rejection and NOT consume the one healing strike — it resets the recovery
 	marker so the next scan retries instead of surfacing a spurious second-strike
 	error. Returns None on the pure-legacy normal-dispatch path (nothing to merge)."""
-	run_id = run_id or uuid.uuid4().hex[:12]
+	run_id = uuid.uuid4().hex[:12]
 	payload = {
 		"conversation_id": conversation_id,
 		"message_id": message_id,
@@ -3594,13 +3586,13 @@ def _redispatch_orphan(
 			conversation=conversation_id,
 			run_id=run_id,
 			seed_message=message_id,
-			turn_class="interactive" if interactive else "background",
-			dispatch=lambda: _dispatch_turn(payload, interactive=interactive),
+			turn_class="background",
+			dispatch=lambda: _dispatch_turn(payload, interactive=False),
 			dispatch_payload=_dispatch_payload or None,
 		)
 	# Pure-legacy path: _dispatch_turn may itself reroute under the cutover gate and return an
 	# admission dict (queued/overloaded) — return it so the sweep sees an overload rejection.
-	return _dispatch_turn(payload, interactive=interactive, cutover_gate=True)
+	return _dispatch_turn(payload, interactive=False, cutover_gate=True)
 
 
 def _reroute_legacy_to_pump(enqueue_kwargs: dict, interactive: bool, exempt_overload: bool = False) -> dict:
@@ -3793,10 +3785,11 @@ def _enqueue_turn(
 	name a turn before it exists: the macro engine, whose step N of run R is always
 	``macros._step_turn_id(R, N)``. Everyone else leaves it out and gets a random id.
 	It is never taken from a request: this function is not whitelisted and no caller
-	passes a client's value. When a turn with that id already exists the answer
-	carries ``duplicate: True``: nothing was dispatched, and the message this call
-	wrote (``message_id``) has no turn of its own. The caller decides what becomes of
-	it."""
+	passes a client's value. Honoured where Turn rows are written: there the message
+	and the turn are written in one transaction (``_enqueue_turn_with_its_message``),
+	and a turn that already exists comes back as ``duplicate: True`` with nothing
+	written. Elsewhere (the pump off, or draining) there is no row to meet on and the
+	turn gets a random id, as before."""
 	conv_doc = frappe.get_doc(CONV, conversation)
 	# Every field this call changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
@@ -3856,6 +3849,23 @@ def _enqueue_turn(
 	# just not newly protected).
 	txn.replay_on_conflict(_write_conv, label="chat._enqueue_turn conversation")
 
+	if run_id and admission.turn_machine_enabled():
+		if claim is not None:
+			raise ValueError("_enqueue_turn: a fixed run_id cannot carry a claim")
+		# The conversation's bookkeeping (overrides, session key, last active) is its own
+		# commit: the gate's first act is a commit anyway (``_lock_shard``), and the row
+		# lock this write holds must not be held into it.
+		frappe.db.commit()
+		return _enqueue_turn_with_its_message(
+			conversation,
+			prompt,
+			origin=origin,
+			hidden=hidden,
+			interactive=interactive,
+			exempt_overload=exempt_overload,
+			run_id=run_id,
+		)
+
 	seq = _next_seq(conversation)
 	msg_doc = frappe.get_doc(
 		{
@@ -3880,7 +3890,7 @@ def _enqueue_turn(
 		return {"ok": False, "already_settled": True}
 	frappe.db.commit()
 
-	run_id = run_id or uuid.uuid4().hex[:12]
+	run_id = uuid.uuid4().hex[:12]
 	_kwargs = {
 		"conversation_id": conversation,
 		"message_id": msg_doc.name,
@@ -3917,10 +3927,6 @@ def _enqueue_turn(
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
 			out["queued_position"] = _adm.get("queued_position")
-		if _adm.get("duplicate"):
-			# Passed up, not folded into `queued`: only a caller that fixed the id can
-			# get here, and it must know its message has no turn.
-			out["duplicate"] = True
 		return out
 	# CDX-19: the legacy path may REROUTE under the cutover gate; merge the queued result exactly
 	# like the machine branch above. R-7: exempt_overload is threaded through so a confirm
@@ -3937,8 +3943,61 @@ def _enqueue_turn(
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
 		out["queued"] = True
 		out["queued_position"] = _adm.get("queued_position")
-	if isinstance(_adm, dict) and _adm.get("duplicate"):
-		out["duplicate"] = True
+	return out
+
+
+def _enqueue_turn_with_its_message(
+	conversation: str,
+	prompt: str,
+	*,
+	origin: str,
+	hidden: bool,
+	interactive: bool,
+	exempt_overload: bool,
+	run_id: str,
+) -> dict:
+	"""``_enqueue_turn`` for a turn whose id the caller fixed, where Turn rows are
+	written: the accept gate inserts the user row itself, in the turn's own
+	transaction (``admission.accept_or_queue``'s insert branch).
+
+	The macro engine's step N of run R is always the turn ``macros._step_turn_id(R, N)``,
+	and several dispatchers can come for one step (a repeated turn end, the capacity
+	resume, a lapsed run lock). With the message committed first and the turn after,
+	every way of failing in between left a step message with no turn: a loser's copy,
+	a message a killed worker left, one a full site left. Each needed its own clean-up,
+	and the orphan sweep could run any of them a second time. In one transaction a
+	duplicate or a full site writes nothing, and a process that dies leaves both rows
+	or neither.
+
+	Returns ``{run_id, message_id}`` (plus ``queued`` / ``queued_position``),
+	``{run_id, message_id: None, duplicate: True}`` when the turn already exists, or
+	the overload rejection."""
+	out = {"run_id": run_id, "message_id": None}
+	_kwargs = {"conversation_id": conversation, "message_id": None, "run_id": run_id}
+
+	def seeded(message: str) -> None:
+		out["message_id"] = _kwargs["message_id"] = message
+
+	_adm = admission.accept_or_queue(
+		conversation=conversation,
+		run_id=run_id,
+		seed_message=None,
+		seed_content=prompt,
+		seed_origin=origin,
+		seed_hidden=hidden,
+		on_seed=seeded,
+		turn_class="interactive" if interactive else "background",
+		dispatch=lambda: _dispatch_turn(_kwargs, interactive=interactive),
+		exempt_overload=exempt_overload,
+	)
+	if _adm.get("overloaded"):
+		# Nothing was written: the gate refused before the user row.
+		return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
+	if _adm.get("duplicate"):
+		return {"run_id": run_id, "message_id": None, "duplicate": True}
+	if not _adm.get("dispatched", True):
+		out["queued"] = True
+		out["queued_position"] = _adm.get("queued_position")
 	return out
 
 
