@@ -568,6 +568,21 @@ describe("MacrosAdminPane, filters", () => {
 		expect(api.adminListMacros.mock.calls.length).toBe(calls + 1);
 		expect(lastCall().search).toBe("invoices");
 	});
+
+	it("does not ask for the owner choices again when a search runs", async () => {
+		const w = await mountWith([row("a")]);
+		expect(api.adminMacroOwners).toHaveBeenCalledTimes(1);
+		vi.useFakeTimers();
+		const calls = api.adminListMacros.mock.calls.length;
+		const input = control(w, "Search").find("input");
+		await input.setValue("in");
+		await input.setValue("invoices");
+		vi.advanceTimersByTime(300);
+		vi.useRealTimers();
+		await flushPromises();
+		expect(api.adminListMacros.mock.calls.length).toBe(calls + 1);
+		expect(api.adminMacroOwners).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("MacrosAdminPane, Stop run", () => {
