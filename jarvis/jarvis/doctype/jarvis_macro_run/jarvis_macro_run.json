@@ -17,7 +17,8 @@
     "trigger",
     "started_at",
     "finished_at",
-    "error"
+    "error",
+    "steps_snapshot"
   ],
   "fields": [
     {
@@ -93,6 +94,14 @@
       "fieldname": "error",
       "fieldtype": "Small Text",
       "label": "Reason / Note"
+    },
+    {
+      "fieldname": "steps_snapshot",
+      "fieldtype": "Long Text",
+      "label": "Steps Snapshot",
+      "read_only": 1,
+      "hidden": 1,
+      "description": "What the run started with, as JSON: each step's prompt, skills and overrides, Stop on error and the summarized prompt. The engine reads it instead of the macro while the run is live, so an edit applies from the next run. Written with the run row, cleared when the run ends. Empty on a run started before it existed: such a run reads the macro, as it always did."
     }
   ],
   "permissions": [

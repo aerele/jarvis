@@ -16,9 +16,11 @@ a run failed or stopped, or a plain note on a completed one). Progress is pushed
 the owner's realtime channel as ``macro:progress`` / ``macro:done``, and a run that
 ends with something to say leaves it as the last message of its conversation.
 
-A run also records the SHAPE it was dispatched in (``run_mode``, #470). Everything
-that re-enters a live run reads that snapshot rather than re-deriving the shape from
-the macro, because the macro is editable while the run is in flight.
+A run also records the SHAPE it was dispatched in (``run_mode``, #470) and the steps
+it started with (``steps_snapshot``: each step's prompt, skills and overrides, "Stop on
+error" and the summary). Everything that re-enters a live run reads those rather than
+the macro, because the macro is editable while the run is in flight: an edit applies
+from the next run (``_run_content``).
 
 Two ways to say WHICH step a turn is, each used for one job. Sending and position go by
 the step's fixed turn id (``_step_turn_id``: step N of run R is the Turn named
@@ -31,6 +33,7 @@ transaction where Turn rows exist; without Turn rows only the second applies.
 """
 
 import hashlib
+import json
 import re
 from datetime import timedelta
 
@@ -155,7 +158,11 @@ def _cas_run_status(run_name: str, expect: str, new: str, *, disarm: bool = True
 	statement. Caller commits.
 
 	``disarm=False`` is for the one caller that has already disarmed the conversation in this
-	same transaction (``_stop_run_locked``)."""
+	same transaction (``_stop_run_locked``).
+
+	A terminal transition also clears the run's steps snapshot (``_snapshot_cleared``)."""
+	if new in _TERMINAL_RUN_STATUSES:
+		extra = {**extra, **_snapshot_cleared()}
 	sets = ["status=%(new)s", "modified=%(now)s"]
 	params = {"n": run_name, "expect": expect, "new": new, "now": frappe.utils.now()}
 	for i, (col, val) in enumerate(extra.items()):
@@ -359,6 +366,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	intro.flags.ignore_permissions = True
 	intro.insert()
 
+	run_mode = MODE_MERGED if merged else MODE_STEPPED
 	run = frappe.get_doc(
 		{
 			"doctype": RUN,
@@ -371,7 +379,11 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 			# run reads it back off the row. It used to be re-derived from the live macro
 			# on each dispatch, so a macro edited while the run sat parked for capacity
 			# flipped the run's shape mid-flight.
-			"run_mode": MODE_MERGED if merged else MODE_STEPPED,
+			"run_mode": run_mode,
+			# The steps themselves, for the same reason: an edit while the run is in
+			# flight applies from the next run. Read from the macro after its row lock,
+			# and written with the run row, in the commit below.
+			SNAPSHOT_FIELD: _steps_snapshot(doc, run_mode, merged),
 			"trigger": trigger,
 			"started_at": frappe.utils.now(),
 		}
@@ -1280,7 +1292,8 @@ def _apply_step_end(
 	macro_doc = frappe.get_doc(MACRO, run.macro)
 	if _fail_run_unless_one_owner(run, macro_doc):
 		return
-	steps = macro_doc.steps or []
+	content = _run_content(run, macro_doc)
+	steps = content.steps
 	total = min(run.total_steps or len(steps), len(steps))
 	merged = _run_mode(run, macro_doc) == MODE_MERGED
 
@@ -1351,7 +1364,7 @@ def _apply_step_end(
 	# From here on `errored` is the step's verdict, not the caller's word alone.
 	judged = _turn_to_judge(conversation_id, turn, run_id, assistant_message)
 	errored = bool(_step_verdict(judged, _step_reply(judged), errored))
-	if errored and (macro_doc.stop_on_error or (a_stop_ends_the_run and _stopped_by_the_user(turn))):
+	if errored and (content.stop_on_error or (a_stop_ends_the_run and _stopped_by_the_user(turn))):
 		if _stopped_by_the_user(turn):
 			# Their own Stop on the step: the run stopped, it did not fail. No
 			# reason is stored, exactly as for the Stop button on the run: a
@@ -2074,11 +2087,14 @@ def _step_prompt(run, macro_doc, index: int) -> tuple[str, dict]:
 	the steps' skills and the first override any step sets (the rule the summary was
 	made under), whatever ``index`` a caller computed from its cursor. Asked for by
 	index alone it would send step 1's prompt, to a run that had already run all of
-	them as one."""
-	steps = macro_doc.steps or []
+	them as one.
+
+	The steps and the summary are the ones the run started with (``_run_content``)."""
+	content = _run_content(run, macro_doc)
+	steps = content.steps
 	if _run_mode(run, macro_doc) == MODE_MERGED:
 		return (
-			(macro_doc.merged_prompt or "").strip() + _merged_skill_invocations(macro_doc),
+			(content.merged_prompt or "").strip() + _merged_skill_invocations(steps),
 			{
 				"model_override": next(
 					(s.model_override for s in steps if (s.model_override or "").strip()), None
@@ -2147,12 +2163,12 @@ def _unpark(run, index: int) -> None:
 	frappe.db.commit()
 
 
-def _merged_skill_invocations(macro_doc) -> str:
+def _merged_skill_invocations(steps) -> str:
 	"""Union of ALL steps' tagged skills (order kept) for the merged
 	single-turn run — the summary covers every step, so it inherits every
 	step's skills. Same /slug mechanism + visibility rules as per-step."""
 	names, seen = [], set()
-	for s in macro_doc.steps or []:
+	for s in steps or []:
 		try:
 			lst = frappe.parse_json(s.skills) if s.skills else []
 		except Exception:
@@ -2380,10 +2396,86 @@ def _resume_incompatible(run, macro_doc) -> bool:
 	* **stepped, step list shrank past the cursor.** ``macro_doc.steps[index]`` would
 	  IndexError, and the CDX-23 compensation would then restore ``waiting_capacity`` and
 	  retry that certain IndexError once per cron cycle until the attempt cap ~100 min
-	  later."""
+	  later.
+
+	A run with a steps snapshot never gets here: it runs the steps and the summary it
+	started with (``_run_content``), so no edit of the macro can make it unrunnable.
+	Only a run started before the snapshot existed reads the live macro, and still
+	needs this."""
+	if _run_content(run, macro_doc).from_snapshot:
+		return False
 	if _run_mode(run, macro_doc) == MODE_MERGED:
 		return not (macro_doc.merged_prompt or "").strip()
 	return int(run.current_step or 0) >= len(macro_doc.steps or [])
+
+
+# The run row's copy of what the run runs (``_run_content``). Its own constant: the
+# column arrives with a migrate, and the code must work on a site that has not run it.
+SNAPSHOT_FIELD = "steps_snapshot"
+# Everything the dispatch reads off a step (``_step_prompt``, ``_skill_invocations``,
+# ``_merged_skill_invocations``) and the progress event its label.
+_SNAPSHOT_STEP_FIELDS = ("label", "prompt", "skills", "model_override", "thinking_override")
+
+
+def _steps_snapshot(macro_doc, run_mode: str, merged_prompt: str) -> str:
+	"""The run's copy of its macro, for ``run_macro`` to write with the run row: each
+	step's fields the dispatch reads, "Stop on error", the shape and the summary as the
+	run sends it (empty for a stepped run). ``json.dumps``, so Frappe 15 and 16 store
+	the same text. The skills stay names: which of them are enabled is decided when
+	the step is sent, as for a step typed in the composer."""
+	return json.dumps(
+		{
+			"run_mode": run_mode,
+			"stop_on_error": int(macro_doc.stop_on_error or 0),
+			"merged_prompt": merged_prompt,
+			"steps": [{f: s.get(f) for f in _SNAPSHOT_STEP_FIELDS} for s in macro_doc.steps or []],
+		}
+	)
+
+
+def _run_content(run, macro_doc) -> frappe._dict:
+	"""What the run runs: ``steps`` (each with the ``_SNAPSHOT_STEP_FIELDS``),
+	``merged_prompt`` and ``stop_on_error``, from the run's steps snapshot. The one
+	place a live run reads its macro's content: the macro can be edited while the run
+	is in flight, and an edit applies from the next run.
+
+	``from_snapshot`` False: the macro as it is now. A run started before the snapshot
+	existed has none (an empty field: no data patch), and neither has a run on a site
+	whose migrate has not added the column; both run as they always did. A snapshot
+	that cannot be read is treated the same, with an Error Log naming the run (never
+	its text)."""
+	raw = run.get(SNAPSHOT_FIELD)
+	if raw:
+		try:
+			snapshot = json.loads(raw)
+			return frappe._dict(
+				steps=[frappe._dict(step) for step in snapshot["steps"]],
+				merged_prompt=snapshot.get("merged_prompt") or "",
+				stop_on_error=int(snapshot.get("stop_on_error") or 0),
+				from_snapshot=True,
+			)
+		except Exception:
+			frappe.log_error(
+				title=f"jarvis.chat.macros.snapshot_unreadable: {run.name}",
+				message=f"run {run.name}: its steps snapshot could not be read; the live macro was used.",
+			)
+	return frappe._dict(
+		steps=list(macro_doc.steps or []),
+		merged_prompt=macro_doc.merged_prompt or "",
+		stop_on_error=int(macro_doc.stop_on_error or 0),
+		from_snapshot=False,
+	)
+
+
+def _snapshot_cleared() -> dict:
+	"""The column write that clears a run's steps snapshot, for every write that ends a
+	run (``_finish``, ``_cas_run_status``, ``_fail_run_in_place``; a Stop goes through
+	the second). An ended run is never dispatched again, and a run row is kept for
+	months: the copy of every prompt has no reader left.
+
+	Nothing on a site whose migrate has not added the column yet: the write would fail
+	there, and a run that cannot be ended stays ``running``, and armed."""
+	return {SNAPSHOT_FIELD: None} if frappe.db.has_column(RUN, SNAPSHOT_FIELD) else {}
 
 
 def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int, *, index: int | None = None) -> None:
@@ -2848,7 +2940,7 @@ def _fail_run_in_place(run, error: str) -> None:
 	frappe.db.set_value(
 		RUN,
 		run.name,
-		{"status": "failed", "finished_at": frappe.utils.now(), "error": error},
+		{"status": "failed", "finished_at": frappe.utils.now(), "error": error, **_snapshot_cleared()},
 	)
 	frappe.db.commit()
 
@@ -2857,7 +2949,12 @@ def _finish(run, status: str, error: str | None = None) -> None:
 	frappe.db.set_value(
 		RUN,
 		run.name,
-		{"status": status, "finished_at": frappe.utils.now(), "error": (error or "")[:500]},
+		{
+			"status": status,
+			"finished_at": frappe.utils.now(),
+			"error": (error or "")[:500],
+			**_snapshot_cleared(),
+		},
 	)
 	_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
 	frappe.db.commit()
@@ -2868,7 +2965,7 @@ def _publish_progress(run, macro_doc, index: int) -> None:
 		step, total, label = 1, 1, "Summarized prompt"
 	else:
 		step, total = index + 1, run.total_steps
-		label = (macro_doc.steps[index].label or "").strip() or f"Step {index + 1}"
+		label = (_run_content(run, macro_doc).steps[index].label or "").strip() or f"Step {index + 1}"
 	publish_to_user(
 		macro_doc.owner,
 		{
