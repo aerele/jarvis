@@ -869,4 +869,8 @@ has_permission.update(
 # markers with it, so a run that raised in the check was looked at and logged again
 # on every tick until the stale-run sweep (about 36 Error Log rows a run). Every key
 # of that module starts with ``macro_reconcile.CACHE_PREFIX``; their TTLs still apply.
-persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile"]
+#
+# jarvis:macro_snapshot_unreadable: the "this run's unreadable steps snapshot was
+# reported" marker (``macros._report_unreadable_snapshot``); without it a run with a
+# broken snapshot queued a report job every five minutes.
+persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile", "jarvis:macro_snapshot_unreadable"]

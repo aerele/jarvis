@@ -16,9 +16,11 @@ a run failed or stopped, or a plain note on a completed one). Progress is pushed
 the owner's realtime channel as ``macro:progress`` / ``macro:done``, and a run that
 ends with something to say leaves it as the last message of its conversation.
 
-A run also records the SHAPE it was dispatched in (``run_mode``, #470). Everything
-that re-enters a live run reads that snapshot rather than re-deriving the shape from
-the macro, because the macro is editable while the run is in flight.
+A run also records the SHAPE it was dispatched in (``run_mode``, #470) and the steps
+it started with (``steps_snapshot``: each step's prompt, skills and overrides, "Stop on
+error" and the summary). Everything that re-enters a live run reads those rather than
+the macro, because the macro is editable while the run is in flight: an edit applies
+from the next run (``_run_content``).
 
 Two ways to say WHICH step a turn is, each used for one job. Sending and position go by
 the step's fixed turn id (``_step_turn_id``: step N of run R is the Turn named
@@ -31,6 +33,7 @@ transaction where Turn rows exist; without Turn rows only the second applies.
 """
 
 import hashlib
+import json
 import re
 from datetime import timedelta
 
@@ -112,6 +115,17 @@ _DISPATCH_FAILED_ERROR = "The agent turn could not be dispatched, so this run ne
 MODE_STEPPED = "stepped"
 MODE_MERGED = "merged"
 
+# The run row's copy of what the run runs (``_run_content``). The column arrives with
+# a migrate. Until that has run, the insert leaves the field out (it is not in the
+# doctype yet) and no write names it (``_snapshot_cleared``): runs work as before.
+SNAPSHOT_FIELD = "steps_snapshot"
+# Everything the dispatch reads off a step (``_step_prompt``, ``_skill_invocations``,
+# ``_merged_skill_invocations``) and the progress event its label.
+_SNAPSHOT_STEP_FIELDS = ("label", "prompt", "skills", "model_override", "thinking_override")
+# How many ended runs one pass of the hourly snapshot sweep clears
+# (``_clear_snapshots_of_ended_runs``). The job comes back for the rest.
+_SNAPSHOT_SWEEP_BATCH = 5000
+
 # #470: what the owner is told when a mid-park macro edit made the run's dispatch-time
 # shape unrunnable. Ending the run is the honest outcome: the alternatives are executing
 # the OLD summary the user just replaced, or silently switching shape mid-flight.
@@ -155,7 +169,11 @@ def _cas_run_status(run_name: str, expect: str, new: str, *, disarm: bool = True
 	statement. Caller commits.
 
 	``disarm=False`` is for the one caller that has already disarmed the conversation in this
-	same transaction (``_stop_run_locked``)."""
+	same transaction (``_stop_run_locked``).
+
+	A terminal transition also clears the run's steps snapshot (``_snapshot_cleared``)."""
+	if new in _TERMINAL_RUN_STATUSES:
+		extra = {**extra, **_snapshot_cleared()}
 	sets = ["status=%(new)s", "modified=%(now)s"]
 	params = {"n": run_name, "expect": expect, "new": new, "now": frappe.utils.now()}
 	for i, (col, val) in enumerate(extra.items()):
@@ -372,6 +390,10 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 			# on each dispatch, so a macro edited while the run sat parked for capacity
 			# flipped the run's shape mid-flight.
 			"run_mode": MODE_MERGED if merged else MODE_STEPPED,
+			# The steps themselves, for the same reason: an edit while the run is in
+			# flight applies from the next run. Read from the macro after its row lock,
+			# and written with the run row, in the commit below.
+			SNAPSHOT_FIELD: _steps_snapshot(doc, merged),
 			"trigger": trigger,
 			"started_at": frappe.utils.now(),
 		}
@@ -1280,7 +1302,8 @@ def _apply_step_end(
 	macro_doc = frappe.get_doc(MACRO, run.macro)
 	if _fail_run_unless_one_owner(run, macro_doc):
 		return
-	steps = macro_doc.steps or []
+	content = _run_content(run, macro_doc)
+	steps = content.steps
 	total = min(run.total_steps or len(steps), len(steps))
 	merged = _run_mode(run, macro_doc) == MODE_MERGED
 
@@ -1351,7 +1374,7 @@ def _apply_step_end(
 	# From here on `errored` is the step's verdict, not the caller's word alone.
 	judged = _turn_to_judge(conversation_id, turn, run_id, assistant_message)
 	errored = bool(_step_verdict(judged, _step_reply(judged), errored))
-	if errored and (macro_doc.stop_on_error or (a_stop_ends_the_run and _stopped_by_the_user(turn))):
+	if errored and (content.stop_on_error or (a_stop_ends_the_run and _stopped_by_the_user(turn))):
 		if _stopped_by_the_user(turn):
 			# Their own Stop on the step: the run stopped, it did not fail. No
 			# reason is stored, exactly as for the Stop button on the run: a
@@ -2224,11 +2247,14 @@ def _step_prompt(run, macro_doc, index: int) -> tuple[str, dict]:
 	the steps' skills and the first override any step sets (the rule the summary was
 	made under), whatever ``index`` a caller computed from its cursor. Asked for by
 	index alone it would send step 1's prompt, to a run that had already run all of
-	them as one."""
-	steps = macro_doc.steps or []
+	them as one.
+
+	The steps and the summary are the ones the run started with (``_run_content``)."""
+	content = _run_content(run, macro_doc)
+	steps = content.steps
 	if _run_mode(run, macro_doc) == MODE_MERGED:
 		return (
-			(macro_doc.merged_prompt or "").strip() + _merged_skill_invocations(macro_doc),
+			(content.merged_prompt or "").strip() + _merged_skill_invocations(steps),
 			{
 				"model_override": next(
 					(s.model_override for s in steps if (s.model_override or "").strip()), None
@@ -2297,12 +2323,12 @@ def _unpark(run, index: int) -> None:
 	frappe.db.commit()
 
 
-def _merged_skill_invocations(macro_doc) -> str:
+def _merged_skill_invocations(steps) -> str:
 	"""Union of ALL steps' tagged skills (order kept) for the merged
 	single-turn run — the summary covers every step, so it inherits every
 	step's skills. Same /slug mechanism + visibility rules as per-step."""
 	names, seen = [], set()
-	for s in macro_doc.steps or []:
+	for s in steps or []:
 		try:
 			lst = frappe.parse_json(s.skills) if s.skills else []
 		except Exception:
@@ -2451,6 +2477,19 @@ def resume_waiting_capacity_runs() -> None:
 				# or a second dispatcher parked the run while the first sent it),
 				# ``_dispatch_step`` says so and sends nothing.
 				index = 0 if _run_mode(run, macro_doc) == MODE_MERGED else int(run.current_step or 0)
+				last = int(run.total_steps or 0) - 1
+				if 0 <= last < index:
+					# Every step is out: a second dispatcher parked the run while the first
+					# sent the last one, and that step's end came while it was parked. There
+					# is no step left to send (sent, it was an IndexError, re-parked every
+					# cycle until the run failed ~100 minutes later as "the site stayed
+					# busy"). The last step's own end decides how the run ends, as below; a
+					# hook still to come finds the run `running` and ends it itself.
+					if _step_end_delivered(run, last):
+						_apply_step_end(
+							run.name, run.conversation, errored=False, run_id=_step_turn_id(run.name, last)
+						)
+					continue
 				try:
 					sent = _dispatch_step(run, macro_doc, index)
 				except _StepIdTaken:
@@ -2530,10 +2569,163 @@ def _resume_incompatible(run, macro_doc) -> bool:
 	* **stepped, step list shrank past the cursor.** ``macro_doc.steps[index]`` would
 	  IndexError, and the CDX-23 compensation would then restore ``waiting_capacity`` and
 	  retry that certain IndexError once per cron cycle until the attempt cap ~100 min
-	  later."""
+	  later.
+
+	A run with a steps snapshot never gets here: it runs the steps and the summary it
+	started with (``_run_content``), so no edit of the macro can make it unrunnable.
+	Only a run started before the snapshot existed reads the live macro, and still
+	needs this."""
+	if _run_content(run, macro_doc).from_snapshot:
+		return False
 	if _run_mode(run, macro_doc) == MODE_MERGED:
 		return not (macro_doc.merged_prompt or "").strip()
 	return int(run.current_step or 0) >= len(macro_doc.steps or [])
+
+
+def _steps_snapshot(macro_doc, merged_prompt: str) -> str:
+	"""The run's copy of its macro, for ``run_macro`` to write with the run row: each
+	step's fields the dispatch reads, "Stop on error" and the summary as the run sends
+	it (empty for a stepped run). ``json.dumps``, so Frappe 15 and 16 store the same
+	text. The skills stay names: which of them are enabled is decided when the step is
+	sent, as for a step typed in the composer. The shape is not in it: that is the
+	row's own ``run_mode`` (#470)."""
+	return json.dumps(
+		{
+			"stop_on_error": int(macro_doc.stop_on_error or 0),
+			"merged_prompt": merged_prompt,
+			"steps": [{f: s.get(f) for f in _SNAPSHOT_STEP_FIELDS} for s in macro_doc.steps or []],
+		}
+	)
+
+
+def _run_content(run, macro_doc) -> frappe._dict:
+	"""What the run runs: ``steps`` (each with the ``_SNAPSHOT_STEP_FIELDS``),
+	``merged_prompt`` and ``stop_on_error``, from the run's steps snapshot. The one
+	place a live run reads its macro's content: the macro can be edited while the run
+	is in flight, and an edit applies from the next run.
+
+	``from_snapshot`` False: the macro as it is now. A run started before the snapshot
+	existed has none (an empty field: no data patch), and neither has a run on a site
+	whose migrate has not added the column; both run as they always did. A snapshot
+	that cannot be read is treated the same, and reported once
+	(``_report_unreadable_snapshot``)."""
+	raw = run.get(SNAPSHOT_FIELD)
+	if raw:
+		try:
+			snapshot = json.loads(raw)
+			return frappe._dict(
+				steps=[frappe._dict(step) for step in snapshot["steps"]],
+				merged_prompt=snapshot.get("merged_prompt") or "",
+				stop_on_error=int(snapshot.get("stop_on_error") or 0),
+				from_snapshot=True,
+			)
+		except Exception:
+			_report_unreadable_snapshot(run.name)
+	return frappe._dict(
+		steps=list(macro_doc.steps or []),
+		merged_prompt=macro_doc.merged_prompt or "",
+		stop_on_error=int(macro_doc.stop_on_error or 0),
+		from_snapshot=False,
+	)
+
+
+_UNREADABLE_SNAPSHOT_LOG = "jarvis.chat.macros.snapshot_unreadable"
+# Long enough to outlive any run: the marker only keeps a run from asking twice. Its key
+# starts with a ``persistent_cache_keys`` prefix (hooks.py), or the pump watchdog's
+# five-minute full cache clear would take it and the run would ask again every window.
+_UNREADABLE_SNAPSHOT_MARKER_S = 24 * 3600
+_UNREADABLE_SNAPSHOT_MARKER = "jarvis:macro_snapshot_unreadable:"
+
+
+def _report_unreadable_snapshot(run_name: str) -> None:
+	"""Ask, once per run, for the Error Log that says a run's snapshot could not be
+	read (``_log_unreadable_snapshot``). Only a hand edit makes one, and a step end
+	alone reads the snapshot three or four times.
+
+	Asked for, not written here. ``_run_content`` is read as the run's owner (the hook,
+	the check) and right before a step is sent (``_step_prompt``): a row written here
+	would be the owner's, forwarded off the bench with a reference to them, and a write
+	in the send's transaction, which ``txn.replay_is_safe()`` then counts against
+	replaying it (``_send_step``). A marker in the cache and a queued job are neither.
+	Never raises: a report must not change what the run does."""
+	try:
+		key = f"{_UNREADABLE_SNAPSHOT_MARKER}{run_name}"
+		# ``expires=True``: on Frappe 15 a plain read remembers "not set" for the rest of
+		# the request, and a write with an expiry does not update that memory, so every
+		# later read in the request missed the marker (the run asked once per read).
+		if frappe.cache().get_value(key, expires=True):
+			return
+		frappe.cache().set_value(key, 1, expires_in_sec=_UNREADABLE_SNAPSHOT_MARKER_S)
+		frappe.enqueue(f"{__name__}._log_unreadable_snapshot", queue="short", run_name=run_name)
+	except Exception:
+		pass
+
+
+def _log_unreadable_snapshot(run_name: str) -> None:
+	"""The background job of ``_report_unreadable_snapshot``. A job runs as the user
+	who queued it, here the run's owner: the row is written as Administrator. At most
+	one row per run even if the cache lost its marker. The row names the run, never
+	its text."""
+	frappe.set_user("Administrator")
+	title = f"{_UNREADABLE_SNAPSHOT_LOG}: {run_name}"
+	if frappe.db.exists("Error Log", {"method": title}):
+		return
+	frappe.log_error(
+		title=title,
+		message=f"run {run_name}: its steps snapshot could not be read; the live macro was used.",
+	)
+	frappe.db.commit()
+
+
+def _snapshot_cleared() -> dict:
+	"""The column write that clears a run's steps snapshot, for every write that ends a
+	run (``_finish``, ``_cas_run_status``, ``_fail_run_in_place``; a Stop goes through
+	the second). An ended run is never dispatched again, and a run row is kept for
+	months: the copy of every prompt has no reader left.
+
+	Nothing on a site whose migrate has not added the field yet: the write would fail
+	there, and a run that cannot be ended stays ``running``, and armed. Decided by the
+	doctype's meta, as the insert is (it writes only the fields the meta has), not by
+	the table: the meta is read from this site's own rows, which the migrate commits
+	with the column, while the table lookup can see another site's database on
+	Frappe 16 (no schema filter) and can be cached stale on Frappe 15."""
+	return {SNAPSHOT_FIELD: None} if frappe.get_meta(RUN).has_field(SNAPSHOT_FIELD) else {}
+
+
+def _clear_snapshots_of_ended_runs() -> None:
+	"""Clear the steps snapshot of runs that ended without the write that ends a run
+	clearing it: ended by a worker still on code from before the snapshot (a rolling
+	restart), or on a site whose meta said the field was not there yet. The copy has
+	no reader left on an ended run. A step of the hourly macro job, as the kept-row
+	purge is; bounded, and the same rows match again if it is cut short.
+	``modified`` is left alone: nothing about the run changed. Committed here; a
+	failure is logged and goes no further.
+
+	The names are read first with a plain (non-locking) read, then cleared by primary
+	key: nearly every run row is ended, so an UPDATE filtered on ``status`` would scan
+	the table and, under REPEATABLE READ, lock every row it read, live runs included,
+	for the length of the statement."""
+	try:
+		if not _snapshot_cleared():
+			return
+		names = frappe.db.sql_list(
+			f"""SELECT name FROM `tab{RUN}`
+			    WHERE status IN %(ended)s AND `{SNAPSHOT_FIELD}` IS NOT NULL
+			    LIMIT %(batch)s""",
+			{"ended": _TERMINAL_RUN_STATUSES, "batch": _SNAPSHOT_SWEEP_BATCH},
+		)
+		if not names:
+			return
+		frappe.db.sql(
+			f"""UPDATE `tab{RUN}` SET `{SNAPSHOT_FIELD}` = NULL
+			    WHERE name IN %(names)s AND status IN %(ended)s""",
+			{"names": tuple(names), "ended": _TERMINAL_RUN_STATUSES},
+		)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis macro snapshot sweep failed", message=frappe.get_traceback())
+		frappe.db.commit()
 
 
 def _compensate_resume_enqueue_failure(run, macro_doc, attempts: int, *, index: int | None = None) -> None:
@@ -2704,6 +2896,8 @@ def drop_runs_of_deleted_macro(macro_name: str) -> None:
 
 	A kept row is there for its step count only, so its ``error`` is blanked: that is
 	free text from the run (a step's failure reason), and the user deleted the macro.
+	So is its steps snapshot, which a run ended by older code can still hold
+	(``_clear_snapshots_of_ended_runs``): the deleted macro's prompts.
 
 	The caller (``macros_api.delete_macro``) has stopped the macro's live runs and
 	holds the macro's row lock, so every row here has ended. The keep does not rest
@@ -2712,8 +2906,9 @@ def drop_runs_of_deleted_macro(macro_name: str) -> None:
 	engine cannot load a macro for. The caller commits, or rolls both statements
 	back with its own delete. Raw writes: a run row is read-only through the
 	document API (``macro_permissions``)."""
+	snapshot = f", `{SNAPSHOT_FIELD}` = NULL" if _snapshot_cleared() else ""
 	frappe.db.sql(
-		f"""UPDATE `tab{RUN}` SET macro = NULL, error = NULL
+		f"""UPDATE `tab{RUN}` SET macro = NULL, error = NULL{snapshot}
 		    WHERE macro = %(macro)s AND `trigger` = 'scheduled' AND creation >= %(since)s
 		      AND current_step > 0 AND status IN %(ended)s""",
 		{"macro": macro_name, "since": _budget_month_start(), "ended": _TERMINAL_RUN_STATUSES},
@@ -2791,6 +2986,7 @@ def reap_stale_macro_runs() -> int:
 	with a compare-and-set on ``status='running'`` — so a run that advanced between
 	the scan and here is left alone rather than having a live step killed under it."""
 	_purge_kept_budget_rows_quietly()
+	_clear_snapshots_of_ended_runs()
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
 	candidates = _stale_run_candidates(cutoff)
 	if not candidates:
@@ -2998,7 +3194,7 @@ def _fail_run_in_place(run, error: str) -> None:
 	frappe.db.set_value(
 		RUN,
 		run.name,
-		{"status": "failed", "finished_at": frappe.utils.now(), "error": error},
+		{"status": "failed", "finished_at": frappe.utils.now(), "error": error, **_snapshot_cleared()},
 	)
 	frappe.db.commit()
 
@@ -3007,7 +3203,12 @@ def _finish(run, status: str, error: str | None = None) -> None:
 	frappe.db.set_value(
 		RUN,
 		run.name,
-		{"status": status, "finished_at": frappe.utils.now(), "error": (error or "")[:500]},
+		{
+			"status": status,
+			"finished_at": frappe.utils.now(),
+			"error": (error or "")[:500],
+			**_snapshot_cleared(),
+		},
 	)
 	_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
 	frappe.db.commit()
@@ -3018,7 +3219,7 @@ def _publish_progress(run, macro_doc, index: int) -> None:
 		step, total, label = 1, 1, "Summarized prompt"
 	else:
 		step, total = index + 1, run.total_steps
-		label = (macro_doc.steps[index].label or "").strip() or f"Step {index + 1}"
+		label = (_run_content(run, macro_doc).steps[index].label or "").strip() or f"Step {index + 1}"
 	publish_to_user(
 		macro_doc.owner,
 		{
