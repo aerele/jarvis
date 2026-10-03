@@ -2650,7 +2650,10 @@ def _report_unreadable_snapshot(run_name: str) -> None:
 	Never raises: a report must not change what the run does."""
 	try:
 		key = f"{_UNREADABLE_SNAPSHOT_MARKER}{run_name}"
-		if frappe.cache().get_value(key):
+		# ``expires=True``: on Frappe 15 a plain read remembers "not set" for the rest of
+		# the request, and a write with an expiry does not update that memory, so every
+		# later read in the request missed the marker (the run asked once per read).
+		if frappe.cache().get_value(key, expires=True):
 			return
 		frappe.cache().set_value(key, 1, expires_in_sec=_UNREADABLE_SNAPSHOT_MARKER_S)
 		frappe.enqueue(f"{__name__}._log_unreadable_snapshot", queue="short", run_name=run_name)
