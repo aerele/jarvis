@@ -27,6 +27,8 @@ MACRO = stop.MACRO
 RUN = stop.RUN
 OWNER = stop.OWNER
 BYSTANDER = stop.BYSTANDER
+SETTINGS = "Jarvis Settings"
+BUDGET_FIELD = "macro_step_budget_monthly"
 
 
 class BudgetBase(stop.StopBase):
@@ -72,6 +74,39 @@ class BudgetBase(stop.StopBase):
 		return frappe.db.get_value(
 			RUN, run, ["macro", "conversation", "status", "current_step", "owner", "error"], as_dict=True
 		)
+
+	def _set_budget(self, steps):
+		"""Set the monthly budget for this test. The stored value (or its absence) is
+		put back and committed after the test, also when it fails: the fixtures here
+		commit, so the changed setting is on the shared site until then."""
+		frappe.set_user("Administrator")
+		key = {"doctype": SETTINGS, "field": BUDGET_FIELD}
+		stored = frappe.db.sql(
+			"SELECT value FROM tabSingles WHERE doctype = %(doctype)s AND field = %(field)s", key
+		)
+
+		def restore():
+			frappe.db.rollback()
+			if stored:
+				frappe.db.set_single_value(SETTINGS, BUDGET_FIELD, stored[0][0], update_modified=False)
+			else:
+				frappe.db.delete("Singles", key)
+				frappe.clear_document_cache(SETTINGS, SETTINGS)
+			frappe.db.commit()
+
+		self.addCleanup(restore)
+		frappe.db.set_single_value(SETTINGS, BUDGET_FIELD, steps, update_modified=False)
+
+	def _purge_mine(self):
+		"""The purge, over the test owner's rows only. Unscoped it deletes every
+		user's kept rows of past months, and this site is shared with other suites."""
+		return macros.purge_kept_budget_rows(owner=OWNER)
+
+	def _the_job_purging_mine_only(self):
+		"""The hourly job commits its purge. Under this it is handed the test owner's
+		rows only; the mock still records how the job called it."""
+		purge = macros.purge_kept_budget_rows
+		return patch.object(macros, "purge_kept_budget_rows", side_effect=lambda: purge(owner=OWNER))
 
 	def _next_month(self):
 		"""The clock the budget month is read from, moved to the 3rd of next month."""
@@ -148,13 +183,14 @@ class TestADeleteKeepsTheMonthsScheduledSteps(BudgetBase):
 		spent = self._spent()
 		self.assertEqual(self._delete(macro), {"ok": True, "stopped_runs": 1})
 		kept = self._row(run)
-		self.assertEqual((kept.macro, kept.status, kept.error), (None, "stopped", stop.DELETED))
+		self.assertEqual((kept.macro, kept.status, kept.error), (None, "stopped", None))
 		self.assertEqual(kept.conversation, conv)
 		self.assertEqual(frappe.db.get_value(CONV, conv, "skip_confirmation"), 0)
 		self.assertEqual(self._spent(), spent)
 		# No engine job picks a kept row up: it is not live.
 		self.assertEqual(macros.live_runs_of(macro), [])
 		with (
+			self._the_job_purging_mine_only(),
 			patch("jarvis.chat.api._enqueue_turn") as enqueue,
 			patch.object(frappe, "log_error") as log,
 			# Handed to the stuck-run sweep by name, as a scan from before the delete would.
@@ -166,6 +202,34 @@ class TestADeleteKeepsTheMonthsScheduledSteps(BudgetBase):
 		enqueue.assert_not_called()
 		log.assert_not_called()
 		self.assertEqual(self._row(run).status, "stopped")
+
+	def test_a_run_that_is_still_live_is_deleted_with_the_rest_not_kept(self):
+		# ``delete_macro`` stops the live runs before it gets here. Should one ever
+		# reach this still live, it goes with the rest, as it did before rows were
+		# kept: a live row with no macro is one the engine cannot load a macro for.
+		done, _, macro = self._finished(at_step=2)
+		live = [
+			self._another_run(macro, trigger="scheduled", current_step=2, status=status)
+			for status in ("running", "waiting_capacity", "queued")
+		]
+		macros.drop_runs_of_deleted_macro(macro)
+		self.assertEqual([bool(frappe.db.exists(RUN, r)) for r in live], [False, False, False])
+		self.assertIsNone(self._row(done).macro)
+
+	def test_a_kept_row_does_not_keep_the_runs_error_text(self):
+		# Only the step count matters once the macro is gone. The error is free text
+		# from the run (a step's failure reason), and the user deleted the macro.
+		failed, conv, macro = self._finished(at_step=2, status="failed")
+		noted = self._another_run(macro, trigger="scheduled", current_step=1, error="finished with a note")
+		frappe.db.set_value(RUN, failed, "error", "Step 2 failed: customer ACME-7", update_modified=False)
+		frappe.db.commit()
+		spent = self._spent()
+		self._delete(macro)
+		self.assertEqual([self._row(r).error for r in (failed, noted)], [None, None])
+		# Nothing else on the row changed.
+		kept = self._row(failed)
+		self.assertEqual((kept.conversation, kept.status, kept.current_step), (conv, "failed", 2))
+		self.assertEqual(self._spent(), spent)
 
 	def test_a_kept_row_stays_with_its_own_owner(self):
 		# The sum is by the run row's owner, so it is right whoever deletes the macro.
@@ -203,9 +267,7 @@ class TestADeleteKeepsTheMonthsScheduledSteps(BudgetBase):
 		self.assertFalse(frappe.db.exists(RUN, gone))
 
 	def test_the_budget_still_refuses_a_run_when_the_kept_rows_are_over_it(self):
-		frappe.set_user("Administrator")
-		frappe.db.set_single_value("Jarvis Settings", "macro_step_budget_monthly", 40)
-		self.addCleanup(frappe.db.set_single_value, "Jarvis Settings", "macro_step_budget_monthly", None)
+		self._set_budget(40)
 		_, _, macro = self._finished(steps=25, at_step=max(40 - self._spent(), 1))
 		with patch("jarvis.chat.policy.validate_can_send", return_value=(True, "")):
 			self.assertEqual(
@@ -309,12 +371,51 @@ class TestAKeptRowIsShownNowhere(BudgetBase):
 # The month ends
 # --------------------------------------------------------------------------- #
 class TestKeptRowsGoWhenTheirMonthIsOver(BudgetBase):
-	def _kept_last_month(self):
+	"""Every test here runs on a site that already holds a kept row of a past month
+	that is not the test's (``self.foreign``), and must leave it there: the purge is
+	asked for the test owner's rows only, and what is asserted is the test's own rows."""
+
+	def setUp(self):
+		super().setUp()
+		self.foreign = self._someone_elses_kept_row()
+
+	def tearDown(self):
+		frappe.db.rollback()
+		still_there = frappe.db.exists(RUN, self.foreign)
+		super().tearDown()  # removes the bystander's rows
+		self.assertTrue(still_there, "a purge in this test deleted a row the test does not own")
+
+	def _someone_elses_kept_row(self):
+		"""Another user's kept row from last month: what a shared site has lying about."""
+		frappe.set_user("Administrator")
+		ensure_user(BYSTANDER)
+		run = frappe.get_doc({"doctype": RUN, "status": "completed", "total_steps": 3})
+		run.flags.ignore_permissions = True
+		run.insert()
+		frappe.db.set_value(
+			RUN,
+			run.name,
+			{
+				"owner": BYSTANDER,
+				"trigger": "scheduled",
+				"current_step": 2,
+				"creation": frappe.utils.add_days(self._month_start(), -3),
+			},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		return run.name
+
+	def _kept_last_month(self, days_before=1):
 		"""A row a delete kept, aged to last month, as it is once the month turns."""
 		run, _, macro = self._finished(at_step=2, tag="aged")
 		self._delete(macro)
 		frappe.db.set_value(
-			RUN, run, "creation", frappe.utils.add_days(self._month_start(), -1), update_modified=False
+			RUN,
+			run,
+			"creation",
+			frappe.utils.add_days(self._month_start(), -days_before),
+			update_modified=False,
 		)
 		frappe.db.commit()
 		return run
@@ -325,29 +426,58 @@ class TestKeptRowsGoWhenTheirMonthIsOver(BudgetBase):
 		self._delete(macro)
 		# Last month's run of a macro that still exists is run history: not touched.
 		history, _, _ = self._finished(at_step=2, tag="alive", age_days=1)
-		self.assertEqual(macros.purge_kept_budget_rows(), 1)
+		self.assertEqual(self._purge_mine(), 1)
 		self.assertFalse(frappe.db.exists(RUN, old))
 		self.assertTrue(frappe.db.exists(RUN, current))
 		self.assertTrue(frappe.db.exists(RUN, history))
-		self.assertEqual(macros.purge_kept_budget_rows(), 0)
+		self.assertEqual(self._purge_mine(), 0)
 
-	def test_the_purge_is_bounded(self):
-		first, second = self._kept_last_month(), self._kept_last_month()
+	def test_the_purge_is_bounded_and_takes_the_oldest_first(self):
+		newer, older = self._kept_last_month(days_before=1), self._kept_last_month(days_before=9)
 		with patch.object(macros, "_KEPT_ROW_PURGE_BATCH", 1):
-			self.assertEqual(macros.purge_kept_budget_rows(), 1)
-			self.assertEqual(sum(bool(frappe.db.exists(RUN, r)) for r in (first, second)), 1)
-			self.assertEqual(macros.purge_kept_budget_rows(), 1)
-		self.assertEqual(frappe.db.count(RUN, {"name": ["in", [first, second]]}), 0)
+			self.assertEqual(self._purge_mine(), 1)
+			self.assertEqual([bool(frappe.db.exists(RUN, r)) for r in (older, newer)], [False, True])
+			self.assertEqual(self._purge_mine(), 1)
+			self.assertEqual(self._purge_mine(), 0)
+		self.assertEqual(frappe.db.count(RUN, {"name": ["in", [newer, older]]}), 0)
+
+	def test_the_purge_leaves_a_row_that_has_not_ended(self):
+		# No row with no macro is live today. The purge does not rest on that.
+		live = [self._kept_last_month() for _ in range(3)]
+		for run, status in zip(live, ("running", "waiting_capacity", "queued"), strict=True):
+			frappe.db.set_value(RUN, run, "status", status, update_modified=False)
+		ended = self._kept_last_month()
+		frappe.db.commit()
+		self.assertEqual(self._purge_mine(), 1)
+		self.assertFalse(frappe.db.exists(RUN, ended))
+		self.assertEqual(frappe.db.count(RUN, {"name": ["in", live]}), 3)
+
+	def test_a_purge_for_one_owner_leaves_everyone_elses_rows(self):
+		mine = self._kept_last_month()
+		self.assertEqual(self._purge_mine(), 1)
+		self.assertFalse(frappe.db.exists(RUN, mine))
+		self.assertTrue(frappe.db.exists(RUN, self.foreign))
+
+	def test_the_purge_the_job_runs_is_for_every_owner(self):
+		# Unscoped, as the hourly job calls it. Looked at and taken back: it reaches
+		# rows this test did not make.
+		mine = self._kept_last_month()
+		try:
+			self.assertGreaterEqual(macros.purge_kept_budget_rows(), 2)
+			self.assertEqual(frappe.db.count(RUN, {"name": ["in", [mine, self.foreign]]}), 0)
+		finally:
+			frappe.db.rollback()
+		self.assertEqual(frappe.db.count(RUN, {"name": ["in", [mine, self.foreign]]}), 2)
 
 	def test_the_month_turning_over_starts_the_sum_again_and_the_rows_go(self):
 		run, _, macro = self._finished(at_step=2)
 		self._delete(macro)
 		self.assertGreaterEqual(self._spent(), 2)
-		self.assertEqual(macros.purge_kept_budget_rows(), 0)
+		self.assertEqual(self._purge_mine(), 0)
 		self.assertTrue(frappe.db.exists(RUN, run))
 		with self._next_month():
 			self.assertEqual(self._spent(), 0)
-			self.assertGreaterEqual(macros.purge_kept_budget_rows(), 1)
+			self.assertEqual(self._purge_mine(), 1)
 		self.assertFalse(frappe.db.exists(RUN, run))
 
 	def test_a_macro_deleted_next_month_keeps_nothing_of_this_month(self):
@@ -358,13 +488,18 @@ class TestKeptRowsGoWhenTheirMonthIsOver(BudgetBase):
 
 	def test_the_hourly_macro_job_runs_the_purge(self):
 		# No new scheduler entry (that would need a migrate): the job that is there
-		# does it, also on a pass with no stuck run to look at.
+		# does it, also on a pass with no stuck run to look at. The job commits its
+		# purge, so here it is handed the test owner's rows only.
 		old = self._kept_last_month()
 		self.assertIn(
 			"jarvis.chat.macros.reap_stale_macro_runs", frappe.get_hooks("scheduler_events")["hourly"]
 		)
-		with patch.object(macros, "_stale_run_candidates", return_value=[]):
+		with (
+			self._the_job_purging_mine_only() as purge,
+			patch.object(macros, "_stale_run_candidates", return_value=[]),
+		):
 			self.assertEqual(macros.reap_stale_macro_runs(), 0)
+		purge.assert_called_once_with()  # the job itself asks for every owner's rows
 		frappe.db.rollback()  # the purge committed
 		self.assertFalse(frappe.db.exists(RUN, old))
 
@@ -383,6 +518,22 @@ class TestKeptRowsGoWhenTheirMonthIsOver(BudgetBase):
 			self.assertEqual(macros.reap_stale_macro_runs(), 1)
 		self.assertEqual(len(self._logged(log, "jarvis macro kept-row purge failed")), 1)
 		self.assertEqual(self._row(stuck).status, "failed")
+
+	def test_the_log_of_a_failed_purge_is_still_there_if_the_job_is_rolled_back(self):
+		title = "jarvis macro kept-row purge failed"
+		before = frappe.db.count("Error Log", {"method": title})
+		self.addCleanup(self._drop_error_logs, title, before)
+		with patch.object(macros, "purge_kept_budget_rows", side_effect=RuntimeError("no")):
+			macros._purge_kept_budget_rows_quietly()
+		frappe.db.rollback()
+		self.assertEqual(frappe.db.count("Error Log", {"method": title}), before + 1)
+
+	def _drop_error_logs(self, title, before):
+		frappe.db.rollback()
+		logs = frappe.get_all("Error Log", filters={"method": title}, order_by="creation desc", pluck="name")
+		for name in logs[: max(len(logs) - before, 0)]:
+			frappe.db.delete("Error Log", {"name": name})
+		frappe.db.commit()
 
 
 # --------------------------------------------------------------------------- #
