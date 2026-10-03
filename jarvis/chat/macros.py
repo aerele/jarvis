@@ -41,11 +41,16 @@ TURN = "Jarvis Chat Turn"
 # site overload before giving up — far longer than any real transient backpressure.
 _MAX_CAPACITY_ATTEMPTS = 20
 
-# CDX-22: how long stop_macro_run waits for the SAME per-run lock the capacity-resume critical
+# CDX-22: how long a stop (``_stop_run``: the owner's Stop, a delete of the macro, an archive
+# or a clear of the run's chat) waits for the SAME per-run lock the capacity-resume critical
 # section holds. The resume section is a few DB writes + an enqueue (milliseconds), so this is
 # ample headroom; on the pathological miss the state-fenced CAS in the resume path is the hard
 # backstop. Module-level so tests can shorten it.
 _STOP_LOCK_BLOCK_S = 10.0
+# How many times a stop re-reads a run whose status moved between two LIVE values under it
+# (``running`` <-> ``waiting_capacity``) before it gives up, loudly. One flip needs a deferral
+# or a resume to land between two adjacent statements; five in a row is not a race.
+_STOP_CAS_TRIES = 5
 
 # #471: how long a run may sit ``running`` WITHOUT FORWARD PROGRESS before the sweep
 # terminalizes it. Sized against the longest a SINGLE step can legitimately take without
@@ -81,6 +86,11 @@ MIN_SCHEDULED_STEP_BUDGET_MONTHLY = 31
 # straight from ``policy.validate_can_send`` so a macro and a typed message speak
 # the same vocabulary.
 BLOCK_STEP_BUDGET = "scheduled_step_budget"
+
+# Reported to the SCHEDULER when the macro was deleted between its slot claim and the
+# run start. Nothing ran and there is nothing left to run: not a failure to record or
+# to tell the owner about (they deleted it).
+BLOCK_MACRO_DELETED = "macro deleted"
 
 # #471: reported when the first turn's dispatch RAISED after the conversation and run
 # row were already committed. Distinct from the codes above because the run row exists
@@ -126,13 +136,16 @@ def _run_cas(sql: str, params: dict) -> int:
 	return int(cursor.rowcount) if cursor else 0
 
 
-def _cas_run_status(run_name: str, expect: str, new: str, **extra) -> bool:
+def _cas_run_status(run_name: str, expect: str, new: str, *, disarm: bool = True, **extra) -> bool:
 	"""State-fenced status transition on ``Jarvis Macro Run``: flip ``expect`` -> ``new`` in ONE
 	UPDATE, returning True iff it matched exactly one row. The fence closes the CDX-22/CDX-23 races
 	where a stop (or a compensating restore) must not clobber a concurrent transition — a run that
 	already moved off ``expect`` (e.g. a stop set ``stopped``) matches 0 rows and the caller aborts.
 	Extra columns (``capacity_attempts``/``finished_at``/``error``) are set atomically in the same
-	statement. Caller commits."""
+	statement. Caller commits.
+
+	``disarm=False`` is for the one caller that has already disarmed the conversation in this
+	same transaction (``_stop_run_locked``)."""
 	sets = ["status=%(new)s", "modified=%(now)s"]
 	params = {"n": run_name, "expect": expect, "new": new, "now": frappe.utils.now()}
 	for i, (col, val) in enumerate(extra.items()):
@@ -147,7 +160,7 @@ def _cas_run_status(run_name: str, expect: str, new: str, **extra) -> bool:
 	)
 	# Clear the armed flag on every terminal transition driven through the CAS
 	# (reap, resume-incompatible compensation, ...) - not only via _finish (T5).
-	if ok and new in _TERMINAL_RUN_STATUSES:
+	if ok and disarm and new in _TERMINAL_RUN_STATUSES:
 		_disarm_run_conversation(run_name)
 	return ok
 
@@ -159,6 +172,8 @@ def _run_status_now(run_name: str) -> str | None:
 
 
 _TERMINAL_RUN_STATUSES = ("completed", "failed", "stopped")
+# A parked run is live: the capacity resume will send its step (CDX-19).
+_LIVE_RUN_STATUSES = ("running", "waiting_capacity")
 
 
 def _disarm_conversation(conversation: str | None) -> None:
@@ -219,11 +234,58 @@ def refuse_acting_for_barred_owner(owner: str) -> None:
 # --------------------------------------------------------------------------- #
 # Public entry points
 # --------------------------------------------------------------------------- #
+class MacroRowBusyError(frappe.ValidationError):
+	"""The macro's row stayed locked by another transaction for the whole lock wait."""
+
+
+def _lock_macro_row(macro_name: str) -> bool:
+	"""Take the macro's row lock, held until this transaction ends. Returns whether
+	the macro exists.
+
+	What makes "start a run" and "delete the macro" one at a time. ``run_macro`` holds
+	it from before it inserts the run row until that row is committed;
+	``macros_api.delete_macro`` holds it across its last look for live runs and the
+	delete. So a run either committed before that look (and is seen, and stopped) or
+	locks after the delete (and finds no macro). Without it a run that started in
+	between lost its row and kept going, in a chat that stayed armed.
+
+	The lock is the FIRST read of a fresh transaction, both for the usual reason
+	(``jarvis.chat.txn``: a locking read on a row changed since the snapshot fails
+	with 1020) and so that everything read after it is the present: a macro loaded
+	before the wait would be the macro as it was.
+
+	Lock order: this row first, a run's redis lock second. Never wait for a run lock
+	(``_stop_run``) while holding it; a commit releases it.
+
+	A wait that times out (``innodb_lock_wait_timeout``: something else sat on the row
+	that long) is raised as ``MacroRowBusyError``, a sentence the user can act on,
+	instead of the database's own error and a 500. Nothing was written before the
+	lock, so there is nothing to undo."""
+	from jarvis.chat import txn
+
+	# ``owned``: both callers arrive with nothing pending, in a web request too.
+	txn.fresh_snapshot(owned=True)
+	try:
+		return bool(frappe.db.get_value(MACRO, macro_name, "name", for_update=True))
+	except frappe.QueryTimeoutError:
+		# ``frappe.throw``, not a bare raise: only a thrown message reaches the client.
+		frappe.throw(_("This macro is busy right now. Try again in a moment."), MacroRowBusyError)
+
+
 def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	"""Start a macro: create a fresh conversation, a Macro Run, and enqueue the
 	first step. Returns ``{ok, data:{macro_run, conversation}}``. ``trigger`` is
-	``manual`` (user clicked Run) or ``scheduled`` (the cron)."""
-	doc = frappe.get_doc(MACRO, macro_name)
+	``manual`` (user clicked Run) or ``scheduled`` (the cron).
+
+	Holds the macro's row lock (``_lock_macro_row``) until the run row is committed,
+	and reads the macro only after taking it. A refusal that RETURNS releases it."""
+	if not _lock_macro_row(macro_name) and trigger == "scheduled":
+		# Deleted after the scheduler claimed the slot. Raising here sent the owner
+		# "Scheduled macro did not run ... it will run again" about a macro they had
+		# just deleted, and wrote two Error Logs.
+		frappe.db.commit()
+		return {"ok": False, "reason": BLOCK_MACRO_DELETED}
+	doc = frappe.get_doc(MACRO, macro_name)  # DoesNotExistError: deleted meanwhile
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
 	# them), uncarded when the macro is armed. On read alone, anyone who could only
@@ -239,6 +301,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	if not steps:
 		frappe.throw(_("This macro has no steps."))
 	if trigger == "scheduled" and not doc.enabled:
+		frappe.db.commit()  # nothing written: this releases the macro row lock
 		return {"ok": False, "reason": "macro disabled"}
 	if (doc.merge_status or "") == "pending" and trigger != "scheduled":
 		frappe.throw(_("Still summarizing this macro — try again in a few seconds."))
@@ -257,6 +320,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		if trigger == "scheduled":
 			# The scheduler decides what a refusal costs: it records the failure
 			# against the owner and works out whether the slot is consumed.
+			frappe.db.commit()  # releases the macro row lock before it does
 			return {"ok": False, "reason": blocked}
 		frappe.throw(_(_BLOCK_MESSAGE.get(blocked, "This macro cannot run right now.")))
 
@@ -326,6 +390,8 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 	# turns ever run on it. Cleared on every run-terminal transition (T5).
 	if doc.skip_confirmation:
 		frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
+	# The run row becomes visible and the macro row lock is released in one step: a
+	# delete waiting on the lock sees this run when it looks.
 	frappe.db.commit()
 
 	# Scheduled runs surface via the proactive "conversation:new" toast; manual
@@ -356,12 +422,19 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		# Terminalize the row that actually carries the conversation, and report the
 		# refusal in the normal return shape instead of raising.
 		frappe.log_error(title=f"jarvis macro dispatch failed: {doc.name}", message=frappe.get_traceback())
-		_finish(run, "failed", error=_DISPATCH_FAILED_ERROR)
-		try:
-			# The scheduler records and notifies this refusal itself.
-			_publish_done(run, doc, "failed", _DISPATCH_FAILED_ERROR)
-		except Exception:
-			pass
+		# From the status this call left the run in, not by name: a Stop (or a delete,
+		# or an archive) that landed while the dispatch was failing keeps its outcome.
+		# The blind write turned that `stopped` into `failed`.
+		failed = _cas_run_status(
+			run.name, run.status, "failed", finished_at=frappe.utils.now(), error=_DISPATCH_FAILED_ERROR
+		)
+		frappe.db.commit()
+		if failed:
+			try:
+				# The scheduler records and notifies this refusal itself.
+				_publish_done(run, doc, "failed", _DISPATCH_FAILED_ERROR)
+			except Exception:
+				pass
 		if trigger == "scheduled":
 			return {"ok": False, "reason": BLOCK_DISPATCH_FAILED}
 		frappe.throw(_(_BLOCK_MESSAGE[BLOCK_DISPATCH_FAILED]))
@@ -1128,44 +1201,304 @@ def _apply_merge_after_turn(conversation_id: str, *, errored: bool) -> None:
 	_finish_merge(macro_name, conversation_id, status, merged)
 
 
+# What the chat shows in place of a step the engine cancelled before it started. The
+# clients classify this text as `cancelled` (``public/js/turn_error_rules.mjs``): a
+# muted note with no Retry, because Retry would run the step as a plain turn.
+_STOPPED_BEFORE_START = "Stopped before it started."
+
+
 def stop_macro_run(run_name: str) -> dict:
-	"""Mark a run stopped so the chaining hook halts. The in-flight turn, if any,
-	still finishes; no further steps are enqueued. Exposed via
+	"""The owner's Stop button: mark the run stopped so the chaining hook halts, and
+	cancel the step that is waiting to start. A step already with the agent still
+	finishes; no further steps are enqueued. Exposed via
 	``macros_api.stop_macro_run`` (owner-gated there).
 
-	CDX-22: acquire the SAME ``jarvis_macro_run:<run>`` lock the capacity-resume critical section
-	holds, and re-read status UNDER it before writing ``stopped``, so a stop can neither erase a
-	concurrent resume nor let one start new work after it. Serializes the two; the state-fenced CAS
-	in the resume path is the hard backstop if the lock's TTL ever lapses."""
+	No reason is stored and nothing is posted in the chat: it is the user's own act.
+	The stop itself is ``_stop_run``."""
 	run = frappe.get_doc(RUN, run_name)
 	# Owner-gate the stop action. Checked on the row's owner, not via a "write"
 	# permission: run rows are read-only through the document API (macro_permissions).
 	if frappe.session.user not in (run.owner, "Administrator"):
 		frappe.throw(_("You can only stop your own macro runs."), frappe.PermissionError)
+	_stop_run(run.name, reason="", by=frappe.session.user)
+	return {"ok": True}
+
+
+def _stop_run(run_name: str, *, reason: str, by: str) -> bool:
+	"""Stop a live run. The ONE way a run is stopped from outside its own steps: the
+	owner's Stop, a delete of its macro, an archive or a clear of its chat. Not
+	gated: each caller has already decided that ``by`` may do this. Returns whether
+	this call stopped the run (False: it had already ended, or its row is gone).
+
+	``reason`` is why, for the owner: stored on the run row and left as the closing
+	line of the run's chat. Empty for the owner's own Stop, which says nothing. ``by``
+	is who asked. It is not stored yet (the run row has no column for it) and nothing
+	reads it: it stays in the signature because the admin stop that follows this
+	change records it, and every caller already states it.
+
+	CDX-22: acquire the SAME ``jarvis_macro_run:<run>`` lock the chaining hook and the
+	capacity-resume critical section hold, and re-read status UNDER it before writing
+	``stopped``, so a stop can neither erase a concurrent resume nor let one start new
+	work after it.
+
+	The block body runs whether or not the lock is acquired: a stop must never be
+	silently dropped. After the wait (``_STOP_LOCK_BLOCK_S``) it goes ahead without
+	the lock. Two fences cover that case: the resume path's status-fenced CAS, and the
+	dispatcher's own look at the run once its turn exists (``_fenced_by_an_ended_run``).
+
+	Raises when the run could not be stopped (a write conflict that outlived its
+	replays, a run whose status would not hold still): the caller decides whether
+	that fails the request (Stop, delete) or is logged (archive, clear history).
+
+	Never call it holding a database lock: it waits for the run lock, and it commits."""
 	from jarvis._redis_lock import redis_lock
 
-	# The block body runs whether or not the lock is acquired — a stop must never be silently
-	# dropped. In the (rare) not-acquired case the resume path's status-fenced CAS still prevents a
-	# resume from clobbering this stop.
 	with redis_lock(f"jarvis_macro_run:{run_name}", timeout_s=60, blocking_timeout_s=_STOP_LOCK_BLOCK_S):
-		from jarvis.chat import txn
+		return _stop_run_locked(run_name, reason=reason, by=by)
 
-		# The status re-read below must not be from before the wait: the hook may have
-		# just ended this run, and a stale `running` here would overwrite its outcome.
-		# ``owned``: this is a web request, where the helper is otherwise a no-op;
-		# nothing has been written yet and the commit below was coming regardless.
-		txn.fresh_snapshot(owned=True)
-		# CDX-19: waiting_capacity is a live (non-terminal) run parked for capacity, so it must be
-		# stoppable too — otherwise the resume cron would keep re-attempting a run the user stopped.
-		if frappe.db.get_value(RUN, run_name, "status") in ("running", "waiting_capacity"):
-			frappe.db.set_value(RUN, run.name, {"status": "stopped", "finished_at": frappe.utils.now()})
-			_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
+
+def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
+	"""``_stop_run`` without taking the run lock (which is not re-entrant). Kept
+	apart from it for the reconcile check that follows this change, which stops a
+	run under the lock it already holds; today ``_stop_run`` is its only caller."""
+	from jarvis.chat import txn
+
+	extra = {"error": reason[:500]} if reason else {}
+
+	def unit():
+		"""One attempt: ``(run, stopped)``. ``stopped`` is None when the run has
+		already ended or its row is gone, False when the status moved between two
+		live values after it was read."""
+		run = frappe.db.get_value(
+			RUN, run_name, ["name", "status", "conversation", "macro", "trigger"], as_dict=True
+		)
+		# CDX-19: waiting_capacity is a live (non-terminal) run parked for capacity, so it must
+		# be stoppable too, otherwise the resume cron would keep re-attempting a run the user
+		# stopped. No row: the run was deleted while this call waited for its lock.
+		if not run or run.status not in _LIVE_RUN_STATUSES:
+			return run, None
+		# Disarm WITH the stop, in its one commit (the flag never outlives the run,
+		# T5). It used to follow the status write, and on an armed chat the card sweep
+		# inside it commits whatever is pending: `stopped` was durable before the flag
+		# was cleared. A failure in between left an armed chat that nothing cleared
+		# again (every later look saw an ended run), and a delete then removed the run
+		# row, the only pointer to it. Here the sweep runs with nothing pending, and
+		# the flag write and the status land together or not at all. A card the sweep
+		# left live still keeps the flag (``_disarm_conversation``: fail closed).
+		_disarm_conversation(run.conversation)
+		# Fenced on the status just read: whatever ended the run in between keeps its
+		# outcome.
+		stopped = _cas_run_status(
+			run.name, run.status, "stopped", disarm=False, finished_at=frappe.utils.now(), **extra
+		)
+		if stopped:
 			frappe.db.commit()
-			try:
-				_publish_done(run, frappe.get_doc(MACRO, run.macro), "stopped")
-			except Exception:
-				pass
-	return {"ok": True}
+		else:
+			frappe.db.rollback()  # the flag write goes back with the lost stop
+		return run, stopped
+
+	for _attempt in range(_STOP_CAS_TRIES):
+		# The status read must not be from before the wait: the hook may have just
+		# ended this run, and a stale `running` here would overwrite its outcome.
+		# ``owned``: in a web request the helper is otherwise a no-op; every caller
+		# comes here with nothing pending, and the unit's commit was coming regardless.
+		txn.fresh_snapshot(owned=True)
+		# Replayed on a write conflict (1020): the run row is also written outside the
+		# run lock (the first step's cursor, a deferral), and this body runs without
+		# the lock after the wait. A conflict used to be a 500 for Stop and a delete,
+		# and a run left `running` and armed by an archive.
+		run, stopped = txn.replay_on_conflict(unit, label=f"macros._stop_run {run_name}", attempts=3)
+		if stopped is None:
+			return False
+		if stopped:
+			break
+		# The status moved `running` <-> `waiting_capacity` between the read and the
+		# write (a deferral or a resume outside the lock). The run is still live: read
+		# again. The old code wrote `stopped` by name and could not miss this way.
+	else:
+		frappe.log_error(
+			title=f"jarvis.chat.macros.stop_lost: {run_name}",
+			message=f"run {run_name}: its status changed under {_STOP_CAS_TRIES} attempts to stop it",
+		)
+		frappe.db.commit()  # the caller's failure path rolls back
+		frappe.throw(_("This run could not be stopped. Try again."))
+	try:
+		_cancel_current_step(run.conversation, macro_run=run.name)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis.chat.macros.stop_cancel_failed: {run.name}", message=frappe.get_traceback()
+		)
+	if reason:
+		try:
+			_post_closing_message(run, "stopped", reason)
+		except Exception:
+			frappe.log_error(title="jarvis macro closing message failed", message=frappe.get_traceback())
+	try:
+		_publish_done(run, frappe.get_doc(MACRO, run.macro), "stopped", reason)
+	except Exception:
+		pass
+	return True
+
+
+def live_runs_of(macro_name: str) -> list[str]:
+	"""The macro's runs that have not ended (``running`` or parked for capacity)."""
+	return frappe.get_all(
+		RUN, filters={"macro": macro_name, "status": ["in", _LIVE_RUN_STATUSES]}, pluck="name"
+	)
+
+
+def stop_runs_of_macro(macro_name: str, *, reason: str, by: str) -> int:
+	"""Stop every live run of a macro; returns how many this call stopped. Each stop
+	can wait ``_STOP_LOCK_BLOCK_S`` for its run lock, and commits. A stop that fails
+	raises: the delete this serves must not go ahead over a live run."""
+	return sum(1 for run in live_runs_of(macro_name) if _stop_run(run, reason=reason, by=by))
+
+
+def stop_runs_in_conversations(conversations: list[str], *, by: str) -> int:
+	"""Stop the live runs whose chat is being archived or deleted; returns how many.
+
+	Such a run used to stay `running`: a step still in the queue ran into a chat
+	nobody could see, an armed chat stayed armed, and only the stale-run sweep, hours
+	later, closed the row. Call it while the messages still exist (the step to cancel
+	is found through them) and with nothing pending (each stop commits).
+
+	Never raises: the archive or the clear goes ahead whatever happens here. A run
+	that could not be stopped is logged, by name, and the others are still stopped
+	(one failure used to skip every run after it, with one log for all of them)."""
+	if not conversations:
+		return 0
+	runs = frappe.get_all(
+		RUN,
+		filters={"conversation": ["in", conversations], "status": ["in", _LIVE_RUN_STATUSES]},
+		pluck="name",
+	)
+	stopped = 0
+	for run in runs:
+		try:
+			stopped += bool(_stop_run(run, reason=_CONVERSATION_GONE_ERROR, by=by))
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				title=f"jarvis.chat.macros.stop_for_conversation_failed: {run}",
+				message=frappe.get_traceback(),
+			)
+			frappe.db.commit()
+	return stopped
+
+
+def _cancel_current_step(conversation: str | None, *, macro_run: str = "") -> bool:
+	"""Cancel the turn of the step the run last sent, if it has not started. Without
+	this a step waiting in the queue ran after its run was stopped: nothing looked at
+	the run between the dispatch and the turn's end. A step already handed to the
+	agent is left to finish. ``macro_run`` names the run in the log of a lost cancel."""
+	seed = _current_step_message(conversation) if conversation else None
+	turn = _ended_turn(seed, None) if seed else None  # the step's newest turn; None on the legacy path
+	if not turn or turn.state in _TURN_ENDED:
+		return False
+	return _cancel_undispatched_turn(turn.name, _STOPPED_BEFORE_START, macro_run=macro_run)
+
+
+_TURN_NOT_STARTED = ("queued", "preparing", "ready")
+
+
+def _cancel_undispatched_turn(run_id: str, reason: str, *, macro_run: str = "") -> bool:
+	"""Cancel turn ``run_id`` if it has not been handed to the agent yet (``queued``,
+	``preparing``, ``ready``), leaving ``reason`` in the chat in its place. Returns
+	whether it was cancelled. Never raises.
+
+	The engine's own cancel. ``admission.cancel_queued_turn`` is the same cancel for
+	the chat's queued chip, and refuses anyone but the conversation's owner; a run is
+	also stopped by a cron and by whoever may delete its macro. Same internals, no
+	gate, and one more try when the pump promotes the turn mid-cancel.
+
+	A turn that had already started is left alone, quietly: that is a step finishing
+	after its run ended, which Stop has always allowed. A turn that had NOT started
+	when the last attempt was made, and still was not cancelled, is the pump winning
+	twice in a row: the step runs after its run ended and nothing else says so, so
+	that one is logged (``macro_run``, the turn and its state; never the prompt).
+
+	Call it with nothing pending: it commits."""
+	from jarvis.chat import admission
+
+	try:
+		result = admission._cancel_pre_dispatch(
+			run_id,
+			owner_of=lambda conversation: frappe.db.get_value(CONV, conversation, "owner"),
+			label=f"macros._cancel_undispatched_turn {run_id}",
+			attempts=2,
+		)
+		if not result["path"]:
+			row = result["row"]
+			if row and row["state"] in _TURN_NOT_STARTED:
+				frappe.log_error(
+					title=f"jarvis.chat.macros.cancel_lost: {macro_run or run_id}",
+					message=(
+						f"macro run {macro_run or 'unknown'!r}; turn {run_id!r} was {row['state']!r} at the "
+						f"last attempt and is {frappe.db.get_value(TURN, run_id, 'state')!r} now. "
+						"Both attempts to cancel it lost: the step runs although its run has ended."
+					),
+				)
+				frappe.db.commit()
+			return False
+		admission._finish_pre_dispatch_cancel(
+			run_id,
+			result["row"],
+			result["owner"],
+			result["path"],
+			reason=reason,
+			source="macros._cancel_undispatched_turn",
+		)
+		return True
+	except Exception:
+		# A write conflict has already aborted the transaction on the server; reset
+		# this side too so the caller's next statement starts clean.
+		try:
+			frappe.db.rollback()
+		except Exception:
+			pass
+		frappe.log_error(
+			title=f"jarvis.chat.macros.cancel_undispatched_failed: {run_id}", message=frappe.get_traceback()
+		)
+		return False
+
+
+# What ``_fenced_by_an_ended_run`` found (its falsy answer, "", is "the run is live").
+_STEP_WITHDRAWN = "withdrawn"
+_STEP_RUNS_ANYWAY = "runs anyway"
+
+
+def _fenced_by_an_ended_run(run, enqueued) -> str:
+	"""Whether the run ENDED while its step was being sent (#421). Asked right after
+	the turn exists, on a fresh snapshot. Answers "" when the run is live and the
+	caller carries on. Otherwise the turn just created is cancelled if it has not
+	started, and the answer says what became of the step:
+
+	* ``_STEP_WITHDRAWN``: it will not run. The caller must not move the cursor.
+	* ``_STEP_RUNS_ANYWAY``: it had already started and finishes. The caller moves
+	  the cursor, because the step counts (the month's scheduled budget adds up
+	  ``current_step``), and says nothing more about a run that has ended.
+
+	Stop and the dispatcher serialize on the run lock, but not always: Stop goes
+	ahead without it after ``_STOP_LOCK_BLOCK_S``, the lock lapses under a slow
+	holder, and ``run_macro`` sends the first step outside it. A dispatcher that read
+	`running` then sent a step into a run that had been stopped, deleted or failed.
+
+	The run is live only while its row says ``running`` or ``waiting_capacity`` (a
+	parked run is live: a cancelled turn would leave its step sent with nothing to
+	run it). Everything else has ended, and that includes NO ROW: a delete of the
+	macro stops the run and then removes its row, and can do both while the first
+	step is being sent. Asking "is the status an ended one" let that step through."""
+	from jarvis.chat import txn
+
+	txn.fresh_snapshot(owned=True)
+	if _run_status_now(run.name) in _LIVE_RUN_STATUSES:
+		return ""
+	turn = enqueued.get("run_id") if isinstance(enqueued, dict) else None
+	if not turn or _cancel_undispatched_turn(turn, _STOPPED_BEFORE_START, macro_run=run.name):
+		return _STEP_WITHDRAWN
+	# Not cancelled by this call. Stop's own cancel may have got to it first.
+	state = frappe.db.get_value(TURN, turn, "state")
+	return _STEP_WITHDRAWN if state in (None, "cancelled") else _STEP_RUNS_ANYWAY
 
 
 # --------------------------------------------------------------------------- #
@@ -1204,7 +1537,8 @@ def _skill_invocations(step) -> str:
 
 def _run_step(run, macro_doc, index: int) -> bool:
 	"""Enqueue the turn for step ``index`` (0-based) and stamp current_step. Returns
-	True when the step dispatched, False when it was DEFERRED for capacity.
+	True when the step dispatched, False when it was DEFERRED for capacity or the run
+	had ended by the time the turn existed (``_fenced_by_an_ended_run``).
 
 	CDX-19: at the entry to this call ``run.current_step == index`` (run_macro seeds 0
 	for step 0; advance_after_turn passes ``next_index == current_step``). If the accept
@@ -1225,9 +1559,14 @@ def _run_step(run, macro_doc, index: int) -> bool:
 	if isinstance(out, dict) and out.get("overloaded"):
 		_defer_capacity(run, macro_doc)
 		return False
+	fenced = _fenced_by_an_ended_run(run, out)
+	if fenced == _STEP_WITHDRAWN:
+		return False
 	frappe.db.set_value(RUN, run.name, "current_step", index + 1)
 	frappe.db.commit()
 	run.current_step = index + 1
+	if fenced:
+		return False  # the step runs and counts; its run has ended, so no progress event
 	try:
 		_publish_progress(run, macro_doc, index)
 	except Exception:
@@ -1266,7 +1605,8 @@ def _run_merged(run, macro_doc, merged_prompt: str) -> bool:
 	"""Enqueue the macro's summarized prompt as its single turn. Overrides =
 	first non-empty among the steps (same rule the merge apply used). Returns True
 	when dispatched, False when DEFERRED for capacity (CDX-19: park in
-	``waiting_capacity``; the resume cron re-attempts the merged turn next cycle)."""
+	``waiting_capacity``; the resume cron re-attempts the merged turn next cycle) or
+	the run had ended by the time the turn existed (``_fenced_by_an_ended_run``)."""
 	steps = macro_doc.steps or []
 	model_o = next((s.model_override for s in steps if (s.model_override or "").strip()), None)
 	think_o = next((s.thinking_override for s in steps if (s.thinking_override or "").strip()), None)
@@ -1282,9 +1622,14 @@ def _run_merged(run, macro_doc, merged_prompt: str) -> bool:
 	if isinstance(out, dict) and out.get("overloaded"):
 		_defer_capacity(run, macro_doc)
 		return False
+	fenced = _fenced_by_an_ended_run(run, out)
+	if fenced == _STEP_WITHDRAWN:
+		return False
 	frappe.db.set_value(RUN, run.name, "current_step", 1)
 	frappe.db.commit()
 	run.current_step = 1
+	if fenced:
+		return False  # the step runs and counts; its run has ended, so no progress event
 	publish_to_user(
 		macro_doc.owner,
 		{
@@ -1306,11 +1651,14 @@ def _defer_capacity(run, macro_doc) -> None:
 	step could not be admitted (its seed was cleaned up, no turn dispatched). Park the run in
 	``waiting_capacity`` WITHOUT advancing ``current_step`` — ``resume_waiting_capacity_runs``
 	re-attempts the SAME step on its next cron cycle. Idempotent: only flips a ``running`` run
-	(a stop/finish that already moved on wins)."""
-	if frappe.db.get_value(RUN, run.name, "status") != "running":
-		return
-	frappe.db.set_value(RUN, run.name, {"status": "waiting_capacity"}, update_modified=True)
+	(a stop/finish that already moved on wins).
+
+	One compare-and-set, not a read and then a write: a stop that landed between the two was
+	put back to ``waiting_capacity``, and the resume cron then sent the step of a stopped run."""
+	parked = _cas_run_status(run.name, "running", "waiting_capacity")
 	frappe.db.commit()
+	if not parked:
+		return
 	run.status = "waiting_capacity"
 	try:
 		publish_to_user(
@@ -1747,7 +2095,14 @@ def notify_owner(owner: str, *, subject: str, body: str) -> None:
 
 
 _OWNER_MISMATCH_ERROR = "This run was stopped: its macro and conversation do not belong to one user."
+# The one sentence for "the chat is gone", whoever notices: the hook and the resume
+# (found missing), an archive, a clear of chat history (``stop_runs_in_conversations``).
 _CONVERSATION_GONE_ERROR = "This run was stopped because its conversation was deleted."
+# The reason on a run stopped by ``macros_api.delete_macro``; also the closing line
+# left in the run's chat, which outlives the macro and the run row. Worded so it is
+# true whether or not the delete then goes through: the stop commits first, and a
+# delete that is refused, or dies, leaves the macro and this run row in place.
+_MACRO_DELETED_ERROR = "Stopped: its macro was being deleted."
 
 
 def _fail_run_unless_one_owner(run, macro_doc) -> bool:
@@ -1951,8 +2306,8 @@ def _announce(run, macro_doc, status: str, error: str = "") -> None:
 
 def _end_run(run, macro_doc, status: str, error: str = "") -> None:
 	"""Terminalize a run and say so: how a run ends from the chaining hook and the
-	capacity resume. (``stop_macro_run`` and the owner-mismatch failure do not come
-	through here: the first is the user's own act, the second must not write to a
+	capacity resume. (A stop from outside the run and the owner-mismatch failure do
+	not come through here: the first is ``_stop_run``, the second must not write to a
 	conversation the run has no claim on.)"""
 	_finish(run, status, error=error)
 	_announce(run, macro_doc, status, error)

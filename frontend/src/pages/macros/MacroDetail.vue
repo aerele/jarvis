@@ -298,7 +298,13 @@ import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";
-import { lastRunLine } from "@/lib/macroRunOutcome";
+import {
+	lastRunLine,
+	deleteWarning,
+	stoppedRunsNote,
+	deleteGuard,
+	isLiveRun,
+} from "@/lib/macroRunOutcome";
 
 const props = defineProps({
 	id: { type: String, default: "" },
@@ -887,24 +893,40 @@ async function resummarize() {
 	}
 }
 
+// One delete at a time: the confirmation's own button cannot be told to wait.
+const deleting = deleteGuard(toast);
+
 function confirmDelete() {
+	if (deleting.isBusy()) return;
+	// A macro that is running is stopped by the delete (server side, before the
+	// row goes). Said here when this page knows of a live run: the last run it
+	// loaded, kept current by `macro:done` and by a run starting (`onEvent`). A run
+	// the page has not heard of is still stopped, and the toast says so afterwards.
+	const running = deleteWarning([lastRun.value]);
 	confirmDialog({
 		title: "Delete macro?",
 		// ConfirmDialog renders `message` as HTML (v-html); the name is the owner's
 		// free text, so it goes in escaped.
-		message: `Delete “${escapeHtml(
-			form.macro_name || props.id
-		)}”? Its run history is deleted too. This can't be undone.`,
-		onConfirm: async ({ hideDialog }) => {
-			try {
-				await api.deleteMacro(props.id);
-				bypassGuard = true;
-				hideDialog();
-				toast.success("Macro deleted");
-				router.push({ name: "MacrosList" });
-			} catch (e) {
-				toast.error(errHtml(e));
-			}
+		message: `Delete “${escapeHtml(form.macro_name || props.id)}”? ${
+			running ? `${running} ` : ""
+		}Its run history is deleted too. This can't be undone.`,
+		onConfirm: ({ hideDialog }) => {
+			// Closed at once: stopping a live run can take seconds, and the dialog
+			// would sit there with a Confirm button that still works.
+			hideDialog();
+			return deleting.run(
+				running ? "Stopping the run and deleting the macro..." : "Deleting the macro...",
+				async () => {
+					try {
+						const res = await api.deleteMacro(props.id);
+						bypassGuard = true;
+						toast.success(`Macro deleted${stoppedRunsNote(res)}`);
+						router.push({ name: "MacrosList" });
+					} catch (e) {
+						toast.error(errHtml(e));
+					}
+				}
+			);
 		},
 	});
 }
@@ -914,6 +936,10 @@ function onEvent(p) {
 	if (!p || props.isNew || p.macro !== props.id) return;
 	// A run of this macro just ended: the line about the last run is out of date.
 	if (p.kind === "macro:done") return refreshLastRun();
+	// A run of it STARTED (the scheduler, another tab) since the page loaded: the
+	// delete confirmation should know. Once per run: later steps find it live.
+	if (p.kind === "macro:progress")
+		return isLiveRun(lastRun.value) ? undefined : refreshLastRun();
 	if (p.kind !== "macro:merged") return;
 	refreshMergeFields();
 	if (p.status === "ready") {

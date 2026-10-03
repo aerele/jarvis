@@ -91,7 +91,8 @@ class TestDeletingAMacroTakesItsRunHistory(outcome.MacroRunOutcomeBase):
 		self._more_runs(doomed, 4)
 		frappe.set_user(OWNER)
 		with patch("frappe.delete_doc", wraps=frappe.delete_doc) as delete_doc:
-			self.assertEqual(macros_api.delete_macro(doomed), {"ok": True})
+			# The fixture's run is `running`: the delete stops it first.
+			self.assertEqual(macros_api.delete_macro(doomed), {"ok": True, "stopped_runs": 1})
 		self.assertEqual([c.args[0] for c in delete_doc.call_args_list], [MACRO])
 		self.assertFalse(frappe.db.exists(MACRO, doomed))
 		self.assertEqual(frappe.db.count(RUN, {"macro": doomed}), 0)
@@ -117,7 +118,7 @@ class TestDeletingAMacroTakesItsRunHistory(outcome.MacroRunOutcomeBase):
 			return real_get_doc(*args, **kwargs)
 
 		with patch.object(frappe, "get_doc", side_effect=resolve):
-			self.assertEqual(macros_api.delete_macro("not-the-stored-name"), {"ok": True})
+			self.assertEqual(macros_api.delete_macro("not-the-stored-name"), {"ok": True, "stopped_runs": 1})
 		self.assertEqual(frappe.db.count(RUN, {"macro": macro}), 0)
 		self.assertFalse(frappe.db.exists(MACRO, macro))
 
