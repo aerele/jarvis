@@ -3806,25 +3806,10 @@ def _enqueue_turn(
 			run_id=run_id,
 		)
 
-	seq = _next_seq(conversation)
-	msg_doc = frappe.get_doc(
-		{
-			"doctype": MSG,
-			"conversation": conversation,
-			"seq": seq,
-			"role": "user",
-			"content": prompt,
-			"streaming": 0,
-			"hidden": 1 if hidden else 0,
-			"origin": origin,
-		}
-	)
-	msg_doc.flags.ignore_permissions = True
-	msg_doc.flags.jarvis_server_write = True
-	msg_doc.insert()
-	if msg_doc.owner != conv_doc.owner:
-		# The worker's chat user is the seed row's owner: never a cron's Administrator.
-		frappe.db.set_value(MSG, msg_doc.name, "owner", conv_doc.owner, update_modified=False)
+	# The same user row the accept gate writes for a fixed id (``admission._insert_seed``:
+	# the next seq, owned by the chat's owner, never a cron's Administrator), committed
+	# here before the dispatch. ``_write_conv`` above holds the conversation row lock.
+	seed = admission._insert_seed(conversation, prompt, origin, hidden)
 	if claim is not None and not claim():
 		frappe.db.rollback()
 		return {"ok": False, "already_settled": True}
@@ -3833,7 +3818,7 @@ def _enqueue_turn(
 	run_id = uuid.uuid4().hex[:12]
 	_kwargs = {
 		"conversation_id": conversation,
-		"message_id": msg_doc.name,
+		"message_id": seed,
 		"run_id": run_id,
 	}
 	# Phase-0 admission (flag ON): macro steps AND confirm continuations run
@@ -3844,12 +3829,12 @@ def _enqueue_turn(
 	# branch. The admission result (queued/queued_position) is RETURNED (SUXI-2)
 	# so the caller (apply_action / confirm_tool) can render the standard queued
 	# chip instead of leaving the card to vanish into silence.
-	out = {"run_id": run_id, "message_id": msg_doc.name}
+	out = {"run_id": run_id, "message_id": seed}
 	if admission.turn_machine_enabled():
 		_adm = admission.accept_or_queue(
 			conversation=conversation,
 			run_id=run_id,
-			seed_message=msg_doc.name,
+			seed_message=seed,
 			turn_class="interactive" if interactive else "background",
 			dispatch=lambda: _dispatch_turn(_kwargs, interactive=interactive),
 			exempt_overload=exempt_overload,
@@ -3862,7 +3847,7 @@ def _enqueue_turn(
 		# that can never arrive. A confirm continuation passes exempt_overload=True, so it never
 		# reaches this branch (accept_or_queue always queues it).
 		if _adm.get("overloaded"):
-			_delete_enqueue_seed(msg_doc.name)
+			_delete_enqueue_seed(seed)
 			return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
@@ -3878,7 +3863,7 @@ def _enqueue_turn(
 	if isinstance(_adm, dict) and _adm.get("overloaded"):
 		# CDX-19 (residual): a full-queue reroute is an HONEST rejection — clean the orphan seed
 		# and return the typed rejection, exactly like the machine branch.
-		_delete_enqueue_seed(msg_doc.name)
+		_delete_enqueue_seed(seed)
 		return {"ok": False, "overloaded": True, "reason": _adm.get("reason")}
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
 		out["queued"] = True

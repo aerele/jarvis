@@ -19,6 +19,15 @@ ends with something to say leaves it as the last message of its conversation.
 A run also records the SHAPE it was dispatched in (``run_mode``, #470). Everything
 that re-enters a live run reads that snapshot rather than re-deriving the shape from
 the macro, because the macro is editable while the run is in flight.
+
+Two ways to say WHICH step a turn is, each used for one job. Sending and position go by
+the step's fixed turn id (``_step_turn_id``: step N of run R is the Turn named
+``h(R, N)``): whether a step was sent, where the run is, and every dispatcher meeting
+on one row. Accepting a turn's end goes by message order: the turn that ended counts
+only if it started from the run's newest step message (``_is_the_steps_own_turn``),
+which also numbers the steps for the outcome (``_step_turns``) and finds the step a
+Stop cancels. The two agree because a step's message and its turn are written in one
+transaction where Turn rows exist; without Turn rows only the second applies.
 """
 
 import hashlib
@@ -1564,6 +1573,7 @@ def _skill_invocations(step) -> str:
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 def _run_step(run, macro_doc, index: int) -> bool:
 	"""Enqueue the turn for step ``index`` (0-based) and stamp current_step. Returns
 	True when the step dispatched, False when it was DEFERRED for capacity.
@@ -1577,6 +1587,13 @@ _STEP_SENT = "sent"  # this call created the step's turn
 _STEP_ALREADY_OUT = "already out"  # the turn was there: nothing was sent
 _STEP_DEFERRED = "deferred"  # the site was full: the run is parked for the resume
 >>>>>>> ab24563 (fix(macros): a step is sent once: a fixed turn id per step and one dispatch function)
+=======
+# What ``_dispatch_step`` did, besides the fence's two answers (above) and None for a
+# run parked because the site was full. The capacity resume acts on
+# ``_STEP_ALREADY_OUT``; ``_STEP_SENT`` is what the tests read for "this call sent it".
+_STEP_SENT = "sent"  # this call created the step's turn
+_STEP_ALREADY_OUT = "already out"  # the turn was there: nothing was sent
+>>>>>>> 22d1f3e (refactor(macros): review round 2 tidy: one seed insert, no dead parameter or return)
 
 
 class _StepIdTaken(Exception):
@@ -1585,15 +1602,15 @@ class _StepIdTaken(Exception):
 	it had run. Raised instead: the caller ends the run, "Step N could not be started"."""
 
 
-def _dispatch_step(run, macro_doc, index: int) -> str:
+def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	"""Send step ``index`` (0-based) of the run, at most once however often and by
 	whomever it is asked. THE way a step is sent: the chaining hook, the capacity
 	resume and ``run_macro``'s first step all call this and nothing dispatches around
 	it. A summarized run has one step, index 0, and its prompt is the summary.
 
-	Returns what happened: ``_STEP_SENT``, ``_STEP_ALREADY_OUT``, ``_STEP_DEFERRED``,
-	or the fence's ``_STEP_WITHDRAWN`` / ``_STEP_RUNS_ANYWAY`` when the run had ended
-	by the time the turn existed.
+	Returns what happened: ``_STEP_SENT``, ``_STEP_ALREADY_OUT``, None (parked: the site
+	was full), or the fence's ``_STEP_WITHDRAWN`` / ``_STEP_RUNS_ANYWAY`` when the run
+	had ended by the time the turn existed.
 
 	There used to be one dispatch per caller, each writing the cursor after its turn
 	existed and each deciding from the cursor alone. A failure between the two, or a
@@ -1616,17 +1633,20 @@ def _dispatch_step(run, macro_doc, index: int) -> str:
 
 	Where no Turn rows are written (the pump off or draining, without Phase-0) there is
 	no row to meet on: ``_enqueue_turn`` gives the turn a random id, writes the message
-	first as it always did, and this is the old dispatch. Under the legacy kill switch
-	the gate falls back to a legacy job that carries the fixed id and writes no Turn
-	row; harmless, the job's own id is per message. A step sent in the instant a
-	cutover re-routes it into the machine has a random id; ``_went_out_since`` covers
-	the hook's side of that."""
+	first as it always did, and this is the old dispatch. One window of that kind is
+	left under the machine: a sender whose config still says "machine on" while the
+	shard row says legacy (a cutover being reverted) is answered by the gate with a
+	legacy job that carries the fixed id and writes no Turn row. With no row, the id
+	dedupes nothing there: two dispatchers of one step in that instant (a lapsed run
+	lock) each write a message and a job, the step twice, as on the base. A step sent
+	in the instant a cutover re-routes it into the machine has a random id;
+	``_went_out_since`` covers the hook's side of that."""
 	from jarvis.chat import txn
 
 	turn_id = _step_turn_id(run.name, index)
 	# Whatever the mode: rows written under the pump outlive a switch to draining.
 	if _step_is_out(run, index):
-		return _step_already_out(run, index, again=True)
+		return _step_already_out(run, index)
 	prompt, overrides = _step_prompt(run, macro_doc, index)
 	out = _send_step(run, index, prompt, overrides)
 	if isinstance(out, dict) and out.get("overloaded"):
@@ -1649,13 +1669,18 @@ def _dispatch_step(run, macro_doc, index: int) -> str:
 >>>>>>> f9c8200 (fix(macros): review round 1 for the step identity)
 =======
 		if _step_is_out(run, index):
+<<<<<<< HEAD
 			return _step_already_out(run, index, again=True)
 >>>>>>> 5320063 (fix(macros): a step's message and turn are one transaction; the clean-up after a lone message goes)
 		return _STEP_DEFERRED
+=======
+			return _step_already_out(run, index)
+		return None
+>>>>>>> 22d1f3e (refactor(macros): review round 2 tidy: one seed insert, no dead parameter or return)
 	if isinstance(out, dict) and out.get("duplicate"):
 		if not _step_is_out(run, index):
 			raise _StepIdTaken(f"turn {turn_id} (step {index + 1} of {run.name}) belongs to another chat")
-		return _step_already_out(run, index, again=True)
+		return _step_already_out(run, index)
 	fenced = _fenced_by_an_ended_run(run, out)
 	if fenced == _STEP_WITHDRAWN:
 		return fenced
@@ -1757,7 +1782,7 @@ def _step_prompt(run, macro_doc, index: int) -> tuple[str, dict]:
 	)
 
 
-def _step_already_out(run, index: int, *, again: bool = False) -> str:
+def _step_already_out(run, index: int) -> str:
 	"""Step ``index`` has its turn and this call did not create it: a resume after a
 	failure that came later than the turn, a second dispatcher (a lapsed run lock).
 	Send nothing. Two things may still be wrong, and are put right:
@@ -1768,21 +1793,16 @@ def _step_already_out(run, index: int, *, again: bool = False) -> str:
 	  turn parked the run; a parked run ignores its step's end (``_unpark`` says when
 	  that is undone).
 
-	``again``: the step was asked for a second time. Rare (the hook walks past every
-	step that is out), so it leaves a trace an operator can count: the run, the step
-	and the turn, never the prompt."""
-	from jarvis.chat import txn
+	Rare (the hook walks past every step that is out), so it leaves a trace an operator
+	can count: the run, the step and the turn, never the prompt.
 
-	if again:
-		frappe.log_error(
-			title=f"jarvis.chat.macros.step_already_sent: {run.name}",
-			message=f"Step {index + 1} was asked for again; its turn {_step_turn_id(run.name, index)} "
-			"exists, so nothing was sent.",
-		)
-	# The writes below must not be judged against a snapshot from before the other
-	# dispatcher's (``jarvis.chat.txn``). ``owned``: every dispatcher has committed its
-	# own work by here, in a web request too.
-	txn.fresh_snapshot(owned=True)
+	No fresh snapshot of its own: both writes read the present already. ``_raise_cursor``
+	takes one before its write, and ``_unpark`` reads after that commit."""
+	frappe.log_error(
+		title=f"jarvis.chat.macros.step_already_sent: {run.name}",
+		message=f"Step {index + 1} was asked for again; its turn {_step_turn_id(run.name, index)} "
+		"exists, so nothing was sent.",
+	)
 	_raise_cursor(run, index + 1)
 	_unpark(run, index)
 	return _STEP_ALREADY_OUT
