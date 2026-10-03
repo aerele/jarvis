@@ -27,10 +27,11 @@ from unittest.mock import patch
 import frappe
 
 from jarvis import _redis_lock
-from jarvis.chat import admission, finalize, macro_reconcile, macros, prepare, pump, settlement
+from jarvis.chat import admission, finalize, macro_reconcile, macros, prepare, pump, settlement, txn
 from jarvis.chat import turn_state as ts
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+from jarvis.tests.race_harness import other_connection, snapshot_isolation_on
 from jarvis.tests.test_pump import TEST_USER, _Recorder, _RejectGateway
 from jarvis.tests.test_pump_pipeline import _PipelineCase
 
@@ -84,6 +85,9 @@ class CheckBase(_PipelineCase):
 		frappe.local.conf.pop(macro_reconcile.OFF_SWITCH, None)
 		self._set_mode("pump")
 		self._drop_logs()
+		# A cleanup, not a line at the end of a test: a failed assertion must not leave
+		# this test's Error Logs for the next one to count. Runs after tearDown.
+		self.addCleanup(self._drop_logs)
 		real_candidates = macro_reconcile._candidates
 
 		def candidates():
@@ -115,7 +119,7 @@ class CheckBase(_PipelineCase):
 			else:
 				frappe.local.conf[key] = value
 		for run in self._runs:
-			for kind in ("skip", "resent", "signalled"):
+			for kind in ("skip", "signalled"):
 				frappe.cache().delete_value(macro_reconcile._key(kind, run))
 		frappe.db.delete(
 			EFFECT,
@@ -131,14 +135,22 @@ class CheckBase(_PipelineCase):
 			if frappe.db.exists(dt, name):
 				frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
 		frappe.db.delete("Notification Log", {"for_user": TEST_USER})
-		self._drop_logs()
 		frappe.db.commit()
 		pump._LIFECYCLE_MODE_CACHE.pop(self._target, None)
 		super().tearDown()
 
 	def _drop_logs(self):
-		frappe.db.delete(LOG, {"method": ["like", "jarvis.chat.macros.reconcil%"]})
+		"""The check's own Error Logs, and every log that names one of this test's runs
+		(the hook's ``turn_end_dropped``, a dispatch that failed or was repeated)."""
+		for title in ("jarvis.chat.macros.reconcil%", macro_reconcile.REAPED_DESPITE_CHECK):
+			frappe.db.delete(LOG, {"method": ["like", title]})
+		for run in self._runs:
+			frappe.db.delete(LOG, {"method": ["like", f"%: {run}"]})
 		frappe.db.commit()
+
+	def _logs(self, title):
+		frappe.db.commit()
+		return frappe.get_all(LOG, filters={"method": ["like", title]}, fields=["method", "error", "owner"])
 
 	@staticmethod
 	def _usage_noop(ctx):
@@ -286,6 +298,11 @@ class CheckBase(_PipelineCase):
 		frappe.db.commit()
 		return out
 
+	def _stuck(self):
+		"""``stuck_runs``, for this test's runs (the site is shared)."""
+		frappe.db.commit()
+		return [row for row in macro_reconcile.stuck_runs() if row["run"] in self._runs]
+
 	def _signals(self):
 		frappe.db.commit()
 		return frappe.get_all(LOG, filters={"method": ["like", f"{SIGNAL}%"]}, fields=["method", "error"])
@@ -333,7 +350,39 @@ class CheckBase(_PipelineCase):
 				finalize.run_finalize(rid, self._target)
 		self.assertEqual(len(self.calls), before + 1, "premise: the hook WAS called")
 		self.assertEqual((self._state(rid), self._effects(rid)["macro_advance"]), ("done", "done"))
-		frappe.db.delete(LOG, {"method": ["like", "jarvis.chat.macros.turn_end_dropped%"]})
+		# The hook's own trace of the drop stays: it is what tells the check that this
+		# `done` ledger row is a hook that was lost (removed with the run's other logs).
+		self.assertTrue(self._logs(f"jarvis.chat.macros.turn_end_dropped: {run}"))
+
+	def _hook_delivered_and_the_run_did_not_move(self, run, conv, rid, reply="answer"):
+		"""A step that WORKED and whose hook was delivered, and yet the run is where it
+		was (a hook that raised inside and was swallowed, a resume that died after its
+		flip): the ledger row is ``done`` and nothing says a hook was lost."""
+		self._settle_success(conv, rid, reply)
+		with patch.object(macros, "advance_after_turn", lambda *a, **k: None):
+			finalize.run_finalize(rid, self._target)
+		self.assertEqual((self._state(rid), self._effects(rid)["macro_advance"]), ("done", "done"))
+		self.assertEqual(self._run(run).status, "running")
+
+	def _elsewhere(self, fn, *, user=TEST_USER):
+		"""Run ``fn`` to completion on a second real connection: another worker."""
+		mine, session_user = frappe.local.db, frappe.session.user
+		with other_connection() as other:
+			frappe.local.db = other
+			other.sql("SET SESSION innodb_snapshot_isolation=ON")  # as the first connection
+			try:
+				frappe.set_user(user)
+				fn()
+				other.commit()
+			finally:
+				frappe.local.db = mine
+				frappe.set_user(session_user)
+
+	def _watchdog_clears_the_cache(self):
+		"""The last statement of ``pump.watchdog``, on the same five minute cron as the
+		check: ``set_default`` clears every site cache key not listed in
+		``persistent_cache_keys``."""
+		frappe.db.set_default(pump.WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
 		frappe.db.commit()
 
 	def _die_in_the_hook(self, rid):
@@ -462,10 +511,22 @@ class TestAStepThatEndedWithNoHook(CheckBase):
 		self._assert_ended(run, conv, rid, status="failed", reason="Waited too long")
 
 	def test_the_owner_cancelled_the_queued_step(self):
-		run, conv, rid = self._mk_run()
-		out = admission.cancel_queued_turn(rid)
-		self.assertEqual((out["ok"], out["path"]), (True, "queued"))
-		# Their own stop of the step: the run stopped, it did not fail. No reason.
+		# Their own stop of the step: the run stopped, it did not fail. No reason. And
+		# whatever "Stop on error" says: with it off the hook (seconds after a Stop)
+		# sends the next step; minutes later, with nobody there, the check must not.
+		for stop_on_error in (1, 0):
+			with self.subTest(stop_on_error=stop_on_error):
+				self.calls.clear()
+				run, conv, rid = self._mk_run(steps=3, stop_on_error=stop_on_error)
+				out = admission.cancel_queued_turn(rid)
+				self.assertEqual((out["ok"], out["path"]), (True, "queued"))
+				self._assert_ended(run, conv, rid, status="stopped")
+				self.assertEqual(self._run(run).error or "", "")
+
+	def test_the_owner_cancelled_the_last_step_with_stop_on_error_off(self):
+		# Not "Finished, but 1 of 1 steps failed": they stopped it.
+		run, conv, rid = self._mk_run(steps=1, stop_on_error=0)
+		admission.cancel_queued_turn(rid)
 		self._assert_ended(run, conv, rid, status="stopped")
 		self.assertEqual(self._run(run).error or "", "")
 
@@ -485,6 +546,7 @@ class TestAStepThatEndedWithNoHook(CheckBase):
 		self._assert_ended(run, conv, rid, status="stopped")
 
 	def test_with_stop_on_error_off_the_next_step_goes_out(self):
+		# A turn the SYSTEM cancelled is a failed step, not the owner's stop.
 		run, conv, rid = self._mk_run(steps=3, stop_on_error=0)
 		self._age_out(rid)
 		self._settled_long_enough(run, rid)
@@ -553,7 +615,42 @@ class TestAHookThatWasLost(CheckBase):
 		self._settled_long_enough(run, rid, seconds=3 * 3600 - 300)  # however late: an end is an end
 		self._tick()
 		self.assertEqual((self._run(run).status, self._run(run).error or ""), ("completed", ""))
-		self.assertEqual(self._notifications(), [])
+		# A manual run the check ends is told to its owner, however it ended.
+		subjects = frappe.get_all("Notification Log", filters={"for_user": TEST_USER}, pluck="subject")
+		self.assertEqual(len(subjects), 1)
+		self.assertTrue(subjects[0].startswith("Macro run finished: reconcile-"), subjects)
+
+	def test_a_hook_that_was_delivered_is_not_logged_as_lost(self):
+		# The ledger row is `done` with attempts to spare and the hook left no trace of
+		# giving up: it ran. The check still moves the run; it does not call that a
+		# lost hook.
+		run, conv, rid = self._mk_run()
+		self._hook_delivered_and_the_run_did_not_move(run, conv, rid)
+		self._settled_long_enough(run, rid)
+		self.assertEqual(self._tick()["acted"], 1)
+		self.assertEqual(self._run(run).current_step, 2)
+		self.assertEqual(self._signals(), [])
+
+	def test_the_checks_error_logs_are_the_schedulers_rows_not_the_owners(self):
+		# The check acts as the run's owner to send a step. An Error Log written then
+		# is that user's row, and is forwarded off the bench with a reference to them.
+		run, conv, rid = self._mk_run(steps=3)
+		self._drop_the_hook(run, conv, rid)
+		self._settled_long_enough(run, rid)
+		self._tick()
+		self.assertEqual(self._run(run).current_step, 2, "premise: a step was sent, as the owner")
+		self.assertEqual(
+			[(s.method, s.owner) for s in self._logs(f"{SIGNAL}%")],
+			[(SIGNAL + "hook_dropped", "Administrator")],
+		)
+
+		second = macros._step_turn_id(run, 1)
+		self._drop_the_hook(run, conv, second)
+		self._settled_long_enough(run, second)
+		with patch.object(macros, "_apply_step_end", side_effect=RuntimeError("after the switch")):
+			self.assertEqual(self._tick()["raised"], 1)
+		failed = self._logs(f"jarvis.chat.macros.reconcile_failed: {run}")
+		self.assertEqual([row.owner for row in failed], ["Administrator"])
 
 	def test_the_signal_carries_no_prompt_and_no_reply_and_is_written_once_per_run(self):
 		run, conv, rid = self._mk_run(steps=3, prompt="PROMPT-TEXT-zq7")
@@ -727,6 +824,42 @@ class TestThePredicateWhileAHookIsComing(CheckBase):
 		self._ended(rid, seconds=macro_reconcile.STEP_END_GRACE_S + 5)
 		self.assertEqual(self._tick()["acted"], 1)
 
+	def test_an_older_turn_of_the_step_that_still_owes_its_hook_is_waited_for(self):
+		# The step failed, its finalize job died once in the hook (re-run after the
+		# claim goes stale), the owner pressed Retry and cancelled the queued retry.
+		# The newest turn has no ledger at all; the hook that counts is the first
+		# turn's (a cancelled retry does not supersede it), and it is still owed.
+		run, conv, rid = self._mk_run()
+		self._force(rid, state="errored", version=5, error="The model refused.", done_at=frappe.utils.now())
+		ts.insert_required_effects(rid, settlement.TERMINAL_EFFECTS)
+		frappe.db.commit()
+		self._die_in_the_hook(rid)
+		self.assertEqual(self._effects(rid)["macro_advance"], "running")
+		self._mk_turn(
+			conv,
+			"reconcile_retry",
+			self._seeds(conv)[0],
+			"cancelled",
+			cancel_requested=1,
+			done_at=self._ago(300),
+		)
+		self._settled_long_enough(run, rid)
+		self.assertFalse(macro_reconcile.step_is_over("reconcile_retry"))
+		self.assertEqual(self._tick()["acted"], 0)
+		self.assertEqual(self._run(run).status, "running")
+		# The ledger then delivers the hook, and it says what the step did.
+		frappe.db.set_value(
+			EFFECT,
+			f"{rid}::macro_advance",
+			"claimed_at",
+			self._ago(ts.EFFECT_CLAIM_STALE_S + 5),
+			update_modified=False,
+		)
+		frappe.db.commit()
+		finalize.run_finalize(rid, self._target)
+		row = self._run(run)
+		self.assertEqual((row.status, row.error), ("failed", "Step 1 failed: The model refused."))
+
 	def test_a_retried_step_is_judged_by_its_newest_turn(self):
 		run, conv, rid = self._mk_run(stop_on_error=0)
 		self._force(rid, state="errored", version=5, error="The model refused.", done_at=self._ago(900))
@@ -792,6 +925,58 @@ class TestOneAdvance(CheckBase):
 		self._idle(run)
 		self.assertEqual(self._tick()["acted"], 0)
 		self._one_step_two(run, conv)
+
+	def _a_hook_lands_between_the_list_and_the_look(self, *, with_the_fresh_snapshot):
+		"""The check has read its candidate list. Before it takes this run's lock, the
+		real hook moves the run on a second connection and commits. Then the check
+		looks. Returns what the tick said and the run's name and chat."""
+		run, conv, rid = self._mk_run(steps=3)
+		self._drop_the_hook(run, conv, rid)
+		self._settled_long_enough(run, rid)
+		real_gate, real_snapshot = macro_reconcile._shard_is_on_the_pump, txn.fresh_snapshot
+		landed, skipped = [], []
+
+		def gate(conversation):  # called after the list is read, before the run's lock
+			if not landed:
+				self._elsewhere(lambda: self._real_advance(conv, errored=False, run_id=rid))
+				landed.append(1)
+			return real_gate(conversation)
+
+		def all_but_the_checks_own(**kw):
+			# The first one asked for after the hook landed is the check's, under its lock.
+			if landed and not skipped:
+				skipped.append(1)
+				return False
+			return real_snapshot(**kw)
+
+		snapshot = real_snapshot if with_the_fresh_snapshot else all_but_the_checks_own
+		with (
+			snapshot_isolation_on(),
+			patch.object(macro_reconcile, "_shard_is_on_the_pump", gate),
+			patch.object(txn, "fresh_snapshot", snapshot),
+		):
+			out = self._tick()
+		self.assertEqual(landed, [1], "premise: the hook ran between the list and the look")
+		self.assertEqual(skipped, [] if with_the_fresh_snapshot else [1])
+		return out, run, conv
+
+	def test_the_hook_lands_between_the_checks_list_and_its_look(self):
+		out, run, conv = self._a_hook_lands_between_the_list_and_the_look(with_the_fresh_snapshot=True)
+		# The hook's advance is the only one: the check saw it and did nothing.
+		self.assertEqual((out["acted"], out["conflicts"], out["raised"]), (0, 0, 0))
+		self._one_step_two(run, conv)
+		self.assertEqual(frappe.db.count(TURN, {"name": macros._step_turn_id(run, 1)}), 1)
+		self.assertEqual(self._signals(), [], "the check reported a hook as lost that had just run")
+		self.assertEqual(self._logs(f"jarvis.chat.macros.step_%: {run}"), [], "step 2 was asked for twice")
+
+	def test_without_its_fresh_snapshot_the_check_acts_on_a_run_the_hook_just_moved(self):
+		# The same interleaving with the one commit removed: the check reads the run as
+		# its candidate list saw it and asks for step 2 again. The step's fixed turn id
+		# keeps it from being sent twice; the tick is no longer silent. This is what
+		# the test above would look like if the fresh snapshot stopped being taken.
+		out, run, conv = self._a_hook_lands_between_the_list_and_the_look(with_the_fresh_snapshot=False)
+		self.assertNotEqual((out["acted"], out["conflicts"], out["raised"]), (0, 0, 0))
+		self.assertEqual(frappe.db.count(TURN, {"name": macros._step_turn_id(run, 1)}), 1)
 
 	def test_a_run_whose_lock_is_held_is_skipped(self):
 		run, conv, rid = self._mk_run()
@@ -859,6 +1044,81 @@ class TestSendingAnotherStepUnattended(CheckBase):
 			"The run was interrupted and did not finish. Steps 1 to 2 ran; the rest did not.",
 		)
 
+	def test_the_twenty_minutes_are_the_steps_not_the_run_rows(self):
+		# The run row is written when a step is SENT; the step ends minutes later.
+		# Old row, step ended lately: the next step goes out.
+		run, conv, rid = self._lost()
+		self._ended(rid, seconds=300)
+		self._idle(run, seconds=3600)
+		self._tick()
+		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 2))
+		# Fresh row (a cursor repair, a park that was undone), step ended long ago: no.
+		run, conv, rid = self._lost()
+		self._ended(rid, seconds=macro_reconcile.CONTINUE_WITHIN_S + 300)
+		self._idle(run, seconds=300)
+		self._tick()
+		self._assert_interrupted(run, conv)
+
+	def test_the_message_names_the_steps_that_reached_the_agent(self):
+		# "Stop on error" off: a step that aged out of the queue is passed over. It
+		# was sent (the cursor counts it) and it did not run.
+		run, conv, rid = self._mk_run(steps=3, stop_on_error=0)
+		self._age_out(rid)
+		self._settled_long_enough(run, rid, seconds=macro_reconcile.CONTINUE_WITHIN_S + 60)
+		self._tick()
+		self.assertEqual(self._run(run).error, "The run was interrupted and did not finish. No step ran.")
+
+		run, conv, rid = self._mk_run(steps=3, stop_on_error=0)
+		self._age_out(rid)
+		self._settled_long_enough(run, rid)
+		self._tick()
+		second = macros._step_turn_id(run, 1)
+		self.assertEqual(self._state(second), "queued", "premise: step 2 went out after the failed step 1")
+		self._force(second, dispatching_at=frappe.utils.now())
+		self._drop_the_hook(run, conv, second)
+		self._settled_long_enough(run, second, seconds=macro_reconcile.CONTINUE_WITHIN_S + 60)
+		self._tick()
+		self.assertEqual(
+			self._run(run).error, "The run was interrupted and did not finish. Step 2 ran; the rest did not."
+		)
+
+	def test_a_closed_send_gate_ends_the_run_with_the_gates_reason(self):
+		# What a typed message and `run_macro` are refused for. Lost hooks cluster
+		# around the rolls and rebuilds that close the gate.
+		for closed_by, sentence in (
+			("_maintenance_hold", "Jarvis is being upgraded. Try this macro again in a few minutes."),
+			(
+				"_subscription_suspended",
+				"Your subscription does not currently include chat, so this macro cannot run.",
+			),
+			("_over_total_limit", "You have reached your monthly usage limit, so this macro cannot run."),
+		):
+			with self.subTest(closed_by=closed_by):
+				run, conv, rid = self._lost()
+				self._settled_long_enough(run, rid)
+				with (
+					patch(f"jarvis.chat.policy.{closed_by}", lambda *a, **k: True),
+					patch.object(macros, "_dispatch_step") as dispatch,
+				):
+					self._tick()
+				dispatch.assert_not_called()
+				row = self._run(run)
+				self.assertEqual((row.status, row.error), ("failed", sentence))
+				self.assertEqual(len(self._seeds(conv)), 1)
+
+	def test_a_run_stopped_at_a_confirmation_card_is_told_to_its_owner(self):
+		# The closing line is withheld while the reply holds the card, and a manual run
+		# gets no notification from the engine: the run row was the only trace.
+		run, conv, rid = self._lost()
+		self._settled_long_enough(run, rid)
+		parked = {"tool": "delete_doc", "summary": "delete_doc doctype=ToDo name=X", "conversation": conv}
+		with patch.object(macros, "_parked_card", lambda conversation, owner: parked):
+			self._tick()
+		row = self._run(run)
+		self.assertEqual(row.status, "stopped")
+		self.assertTrue(row.error)
+		self.assertEqual(self._notifications(), [row.error])
+
 	def test_an_owner_who_was_disabled(self):
 		run, conv, rid = self._lost()
 		self._settled_long_enough(run, rid)
@@ -922,6 +1182,8 @@ class TestANoOpTick(CheckBase):
 		with patch.object(macros, "_stale_run_candidates", lambda cutoff: [run]):
 			self.assertEqual(macros.reap_stale_macro_runs(), 1)
 		self.assertEqual((self._run(run).status, self._run(run).error), ("failed", macros._STALE_RUN_ERROR))
+		# Left to the sweep on purpose: not a check that failed to act.
+		self.assertEqual(self._logs(macro_reconcile.REAPED_DESPITE_CHECK), [])
 
 	def test_a_parked_run_is_not_the_checks(self):
 		run, conv, rid = self._mk_run()
@@ -1031,21 +1293,60 @@ class TestTheLimitsOfOneTick(CheckBase):
 				kw["filters"] = {**kw["filters"], "name": ["in", runs]}
 			return real(doctype, *a, **kw)
 
-		with patch.object(macro_reconcile, "MAX_RUNS_PER_TICK", 2), patch.object(frappe, "get_all", get_all):
-			self.assertEqual(self._tick()["acted"], 2)
+		real_count = frappe.db.count
+
+		def count(doctype, filters=None, *a, **kw):
+			if doctype == RUN:
+				filters = {**filters, "name": ["in", runs]}
+			return real_count(doctype, filters, *a, **kw)
+
+		with (
+			patch.object(macro_reconcile, "MAX_RUNS_PER_TICK", 2),
+			patch.object(frappe, "get_all", get_all),
+			patch.object(frappe.db, "count", count),
+		):
+			out = self._tick()
+			self.assertEqual((out["acted"], out["left"]), (2, 1))
 			self.assertEqual(asked, [(2, "modified asc")])
 			self.assertEqual(self._statuses(runs), ["failed", "failed", "running"])
-			self.assertEqual(self._tick()["acted"], 1)
+			cut = self._logs(macro_reconcile.TICK_CUT_SHORT)
+			self.assertEqual(len(cut), 1)
+			self.assertIn("1 candidate runs were not looked at", cut[0].error)
+			out = self._tick()
+			self.assertEqual((out["acted"], out["left"]), (1, 0))
 		self.assertEqual(self._statuses(runs), ["failed"] * 3)
+		self.assertEqual(len(self._logs(macro_reconcile.TICK_CUT_SHORT)), 1)
 
 	def test_a_tick_out_of_time_stops_and_the_next_one_goes_on(self):
 		runs = self._three_stuck()
-		clock = iter([0.0, 1.0, macro_reconcile.TICK_BUDGET_S + 1.0])
-		with patch.object(macro_reconcile, "_clock", lambda: next(clock)):
+		real = macro_reconcile._RunCheck.run
+		looked = []
+
+		def run_check(check):
+			looked.append(check.name)
+			return real(check)
+
+		def clock():
+			# The budget is used up by the first run, however often the clock is read.
+			return macro_reconcile.TICK_BUDGET_S + 1.0 if looked else 0.0
+
+		with (
+			patch.object(macro_reconcile._RunCheck, "run", run_check),
+			patch.object(macro_reconcile, "_clock", clock),
+		):
 			out = self._tick()
-		self.assertEqual((out["acted"], out["out_of_time"]), (1, 1))
-		self.assertEqual(self._statuses(runs), ["failed", "running", "running"])
-		self.assertEqual(self._tick()["acted"], 2)
+			self.assertEqual((out["acted"], out["out_of_time"], out["left"]), (1, 1, 2))
+			self.assertEqual(self._statuses(runs), ["failed", "running", "running"])
+			# Said once an hour, with how many were not looked at; never a run's name.
+			looked.clear()
+			self._idle(runs[1], seconds=600)
+			self._tick()
+		cut = self._logs(macro_reconcile.TICK_CUT_SHORT)
+		self.assertEqual(len(cut), 1, "logged on every tick")
+		self.assertIn("time budget", cut[0].error)
+		self.assertIn("2 candidate runs were not looked at", cut[0].error)
+		self.assertEqual(self._tick()["acted"], 1)
+		self.assertEqual(self._statuses(runs), ["failed"] * 3)
 
 	def test_a_run_that_raises_does_not_stop_the_batch_and_is_skipped_for_an_hour(self):
 		runs = self._three_stuck()
@@ -1071,6 +1372,130 @@ class TestTheLimitsOfOneTick(CheckBase):
 		frappe.cache().delete_value(macro_reconcile._key("skip", runs[0]))
 		self.assertEqual(self._tick()["acted"], 1)
 
+	def test_the_markers_outlive_the_pump_watchdogs_cache_clear(self):
+		# The watchdog is on the same cron and ends by clearing the site cache. With
+		# the check's keys not listed in `persistent_cache_keys` a run that raised was
+		# looked at, and logged, on every tick until the stale-run sweep.
+		poison, moved = self._three_stuck()[:2]
+		real = macro_reconcile._RunCheck._look
+		looked = []
+
+		def look(check):
+			looked.append(check.name)
+			if check.name == poison:
+				raise RuntimeError("this run cannot be read")
+			return real(check)
+
+		self._watchdog_clears_the_cache()  # and reloads the hooks from this tree
+		frappe.cache().set_value("jarvis:reconcile_test_probe", 1, expires_in_sec=600)
+		with patch.object(macro_reconcile._RunCheck, "_look", look):
+			self.assertEqual(self._tick()["raised"], 1)
+			for _ in range(3):
+				self._watchdog_clears_the_cache()
+				self.assertEqual(self._tick()["raised"], 0, "the hour's skip was wiped with the cache")
+		self.assertEqual(looked.count(poison), 1)
+		self.assertEqual(len(self._logs(f"jarvis.chat.macros.reconcile_failed: {poison}")), 1)
+		self.assertIsNone(
+			frappe.cache().get_value("jarvis:reconcile_test_probe", expires=True),
+			"premise: the clear did wipe an ordinary key",
+		)
+		for kind in ("skip", "signalled"):
+			self.assertTrue(macro_reconcile._key(kind, poison).startswith(macro_reconcile.CACHE_PREFIX + ":"))
+		self.assertIn(macro_reconcile.CACHE_PREFIX, frappe.get_hooks("persistent_cache_keys"))
+
+	def test_logged_once_per_run_outlives_the_cache_clear(self):
+		run, conv, rid = self._mk_run(steps=3)
+		self._drop_the_hook(run, conv, rid)
+		self._settled_long_enough(run, rid)
+		self._watchdog_clears_the_cache()
+		self._tick()
+		self._watchdog_clears_the_cache()
+		second = macros._step_turn_id(run, 1)
+		self._drop_the_hook(run, conv, second)
+		self._settled_long_enough(run, second)
+		self._tick()
+		self.assertEqual(self._run(run).current_step, 3, "premise: the check moved the run twice")
+		self.assertEqual(len(self._signals()), 1, "one Error Log row per run")
+
+	def test_a_tick_that_fails_is_logged_once_an_hour(self):
+		self._three_stuck()
+		with patch.object(macro_reconcile, "_candidates", side_effect=RuntimeError("no such column")):
+			for _ in range(3):
+				out = self._tick()  # never raises
+				self.assertEqual(out["acted"], 0)
+			rows = self._logs(macro_reconcile.TICK_FAILED)
+			self.assertEqual(len(rows), 1, "one row a tick is 288 a day")
+			self.assertIn("no such column", rows[0].error)
+			# The hour over: said again.
+			frappe.db.sql(
+				f"UPDATE `tab{LOG}` SET creation=%s WHERE method=%s",
+				(self._ago(macro_reconcile.LOG_AT_MOST_EVERY_S + 60), macro_reconcile.TICK_FAILED),
+			)
+			self._tick()
+		self.assertEqual(len(self._logs(macro_reconcile.TICK_FAILED)), 2)
+
+	def test_a_lock_that_cannot_be_asked_for_ends_the_tick_with_one_log(self):
+		# Redis down is not three runs failing: it was one Error Log per candidate per
+		# tick, and an hour's skip that could not even be written.
+		runs = self._three_stuck()
+
+		@contextmanager
+		def unreachable(name, **kw):
+			raise ConnectionError("redis is not there")
+			yield
+
+		with patch.object(_redis_lock, "redis_lock", unreachable):
+			out = self._tick()
+			self._tick()
+		self.assertEqual((out["candidates"], out["acted"], out["raised"]), (1, 0, 0))
+		self.assertEqual(self._logs("jarvis.chat.macros.reconcile_failed%"), [])
+		rows = self._logs(macro_reconcile.TICK_FAILED)
+		self.assertEqual(len(rows), 1)
+		self.assertIn("could not be asked for", rows[0].error)
+		for run in runs:
+			self.assertIsNone(frappe.cache().get_value(macro_reconcile._key("skip", run), expires=True))
+		self.assertEqual(self._tick()["acted"], 3)
+
+	def test_the_jobs_own_timeout_is_not_a_run_that_raised(self):
+		from rq.timeouts import JobTimeoutException
+
+		runs = self._three_stuck()
+		seen = []
+
+		def look(check):
+			seen.append(frappe.session.user)
+			frappe.set_user(TEST_USER)  # as when it strikes mid-dispatch
+			raise JobTimeoutException("Task exceeded maximum timeout value (300 seconds)")
+
+		with patch.object(macro_reconcile._RunCheck, "_look", look), self.assertRaises(JobTimeoutException):
+			frappe.set_user("Administrator")
+			try:
+				macro_reconcile.reconcile_running_runs()
+			finally:
+				self.assertEqual(frappe.session.user, "Administrator", "the session was left switched")
+				frappe.db.rollback()
+				frappe.set_user(TEST_USER)
+		self.assertEqual(len(seen), 1, "the tick went on after the job timed out")
+		self.assertEqual(self._logs("jarvis.chat.macros.reconcil%"), [])
+		self.assertIsNone(frappe.cache().get_value(macro_reconcile._key("skip", runs[0]), expires=True))
+		self.assertEqual(self._tick()["acted"], 3)
+
+	def test_a_lock_wait_that_keeps_timing_out_is_logged_once_an_hour(self):
+		runs = self._three_stuck()
+		with patch.object(
+			macro_reconcile._RunCheck,
+			"_look",
+			side_effect=frappe.QueryTimeoutError("Lock wait timeout exceeded"),
+		):
+			for _ in range(3):
+				out = self._tick()
+				self.assertEqual((out["conflicts"], out["raised"]), (3, 0))
+		rows = self._logs(macro_reconcile.LOCK_WAIT)
+		self.assertEqual(len(rows), 1, "one row an hour, not one a run a tick")
+		self.assertIn(runs[0], rows[0].error)
+		self.assertEqual(self._logs("jarvis.chat.macros.reconcile_failed%"), [])
+		self.assertEqual(self._tick()["acted"], 3, "they were retried: no hour's skip")
+
 	def test_a_lost_write_race_is_tried_again_on_the_next_tick(self):
 		runs = self._three_stuck()[:1]
 		real = macro_reconcile._RunCheck._look
@@ -1087,9 +1512,244 @@ class TestTheLimitsOfOneTick(CheckBase):
 			self.assertEqual((out["conflicts"], out["raised"]), (1, 0))
 			self._tick()
 		self.assertEqual(self._statuses(runs), ["failed"])
+		# A conflict cannot last (every look starts on a fresh snapshot): no trace.
+		self.assertEqual(self._logs("jarvis.chat.macros.reconcil%"), [])
+
+
+# --------------------------------------------------------------------------- #
+# A later step sent where no Turn row is written
+# --------------------------------------------------------------------------- #
+class TestAStepMessageWithNoTurn(CheckBase):
+	"""The chat's newest step message has no Turn row: it was sent while the shard was,
+	for a moment, draining or on the legacy transport, and its worker may be running
+	it. ``macros._current_step_message`` reads such a message as never dispatched and
+	names the step before it; judged on that step's long-finished turn the check sent
+	step 3 before step 2 had started, and ended a two-step run ``completed`` with its
+	last step not run and its chat disarmed (2026-10-03 review, reproduced)."""
+
+	def _step_two_sent_with_no_turn(self, steps, **kw):
+		"""Step 1 worked and its hook sent step 2. Step 2 is then made what a step sent
+		on the legacy path is: its message, the cursor on 2, and NO Turn row."""
+		run, conv, rid = self._mk_run(steps=steps, **kw)
+		self._settle_success(conv, rid)
+		finalize.run_finalize(rid, self._target)
+		self.assertEqual((self._state(rid), self._run(run).current_step), ("done", 2))
+		frappe.db.delete(TURN, {"name": macros._step_turn_id(run, 1)})
+		frappe.db.commit()
+		self.assertEqual(len(self._seeds(conv)), 2)
+		self.assertFalse(frappe.db.exists(TURN, {"seed_message": self._seeds(conv)[1]}))
 		self.assertEqual(
-			frappe.db.count(LOG, {"method": ["like", "jarvis.chat.macros.reconcile_failed%"]}), 0
+			macros._current_step_message(conv), self._seeds(conv)[0], "premise: the engine names step 1"
 		)
+		return run, conv, rid
+
+	def _assert_left_alone(self, run, conv, rid):
+		before = self._row(run)
+		for age in (300, macro_reconcile.CONTINUE_WITHIN_S + 60):
+			self._settled_long_enough(run, rid, seconds=age)
+			before["modified"] = self._row(run)["modified"]
+			self.assertEqual(self._tick()["acted"], 0)
+			self.assertEqual(self._row(run), before)
+		self.assertEqual(len(self._seeds(conv)), 2, "a step was sent past one that has not run")
+		self.assertEqual(self._signals(), [])
+		self.assertEqual(self._stuck(), [])
+
+	def test_a_three_step_run_does_not_get_step_three_before_step_two_ran(self):
+		run, conv, rid = self._step_two_sent_with_no_turn(3)
+		self._assert_left_alone(run, conv, rid)
+		self.assertIsNone(frappe.db.get_value(TURN, macros._step_turn_id(run, 2)))
+
+	def test_a_two_step_run_is_not_completed_with_its_last_step_not_run(self):
+		run, conv, rid = self._step_two_sent_with_no_turn(2, armed=True)
+		self._assert_left_alone(run, conv, rid)
+		self.assertEqual(self._run(run).status, "running")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skip_confirmation")), 1)
+
+	def test_the_same_with_the_cursor_not_yet_on_the_new_step(self):
+		# Its dispatcher wrote the message and got no further (the cursor is written
+		# last). Step 1's turn is then the one the fixed id finds, and it is long over.
+		run, conv, rid = self._step_two_sent_with_no_turn(3)
+		frappe.db.set_value(RUN, run, "current_step", 1, update_modified=False)
+		self._assert_left_alone(run, conv, rid)
+		self.assertEqual(self._run(run).current_step, 1)
+
+	def test_the_stale_run_sweep_closes_it_and_does_not_blame_the_check(self):
+		run, conv, rid = self._step_two_sent_with_no_turn(3)
+		self._settled_long_enough(run, rid, seconds=macros.STALE_RUN_AFTER_SECONDS + 600)
+		self.assertEqual(self._tick()["acted"], 0)
+		with patch.object(macros, "_stale_run_candidates", lambda cutoff: [run]):
+			self.assertEqual(macros.reap_stale_macro_runs(), 1)
+		self.assertEqual(self._run(run).status, "failed")
+		self.assertEqual(self._logs(macro_reconcile.REAPED_DESPITE_CHECK), [])
+
+
+# --------------------------------------------------------------------------- #
+# Is the check working: the stuck-run list, and the sweep's signal
+# --------------------------------------------------------------------------- #
+class TestIsTheCheckWorking(CheckBase):
+	"""A check that stopped (the cron row missing because nobody ran migrate, every
+	tick failing) looks like a healthy idle site. Two ways to tell: ``stuck_runs``
+	lists what it should have dealt with, and the stale-run sweep says so when it
+	closes such a run."""
+
+	LATE = macro_reconcile.STUCK_AFTER_S + 300
+
+	def _aged_out(self, seconds, **kw):
+		run, conv, rid = self._mk_run(**kw)
+		self._age_out(rid)
+		self._settled_long_enough(run, rid, seconds=seconds)
+		return run, conv, rid
+
+	def test_a_run_whose_step_has_been_over_for_twenty_minutes_is_listed(self):
+		self.assertEqual(macro_reconcile.STUCK_AFTER_S, 20 * 60)
+		run, conv, rid = self._aged_out(self.LATE, prompt="PROMPT-TEXT-zq7")
+		young, _, _ = self._aged_out(macro_reconcile.STUCK_AFTER_S - 300)
+		before = self._row(run)
+		rows = self._stuck()
+		self.assertEqual([row["run"] for row in rows], [run], "only the one over for twenty minutes")
+		row = rows[0]
+		self.assertEqual(
+			(row["why"], row["turn"], row["turn_state"], row["steps_sent"], row["conversation"]),
+			("step_over", rid, "cancelled", 1, conv),
+		)
+		self.assertEqual(row["macro"], frappe.db.get_value(RUN, run, "macro"))
+		self.assertEqual(row["since"], str(frappe.db.get_value(TURN, rid, "done_at")))
+		self.assertNotIn("zq7", json.dumps(rows))  # and it is what `bench execute` prints
+		self.assertEqual(self._row(run), before, "the list wrote the run row")
+		# The check deals with both; the list is empty again.
+		self._tick()
+		self.assertEqual(self._stuck(), [])
+
+	def test_the_twenty_minutes_are_since_the_step_ended_not_since_the_run_was_written(self):
+		# The run row is written when a step is sent; a long step ends much later.
+		run, conv, rid = self._aged_out(300)
+		self._idle(run, seconds=self.LATE)
+		self.assertEqual(self._stuck(), [])
+		self._ended(rid, seconds=self.LATE)
+		self.assertEqual([row["run"] for row in self._stuck()], [run])
+
+	def test_the_twenty_minutes_are_measured_on_the_sites_clock_not_the_databases(self):
+		# `done_at` is the site's local time; SQL's NOW() is the database server's.
+		# The cutoff must come from Python, as the check's does.
+		run, conv, rid = self._aged_out(self.LATE)
+		real = frappe.db.sql
+
+		def sql(query, *a, **kw):
+			self.assertNotIn("NOW()", str(query).upper())
+			self.assertNotIn("CURRENT_TIMESTAMP", str(query).upper())
+			return real(query, *a, **kw)
+
+		with patch.object(frappe.db, "sql", sql):
+			self.assertEqual([row["run"] for row in self._stuck()], [run])
+
+	def test_a_step_with_a_hook_still_owed_or_a_reply_in_recovery_is_not_listed(self):
+		# The check's own predicate, clause for clause: these are not stuck, they wait.
+		owed, conv, rid = self._mk_run()
+		self._force(rid, state="errored", version=5, error="boom", done_at=self._ago(self.LATE))
+		ts.insert_required_effects(rid, settlement.TERMINAL_EFFECTS)
+		self._idle(owed, seconds=self.LATE)
+
+		recovering, conv, rid = self._mk_run()
+		amsg = self._placeholder(conv, content="partial", streaming=1, recovering=1)
+		self._force(
+			rid,
+			state="errored",
+			version=5,
+			assistant_message=amsg,
+			error="stalled",
+			done_at=self._ago(self.LATE),
+		)
+		self._idle(recovering, seconds=self.LATE)
+
+		going, conv, rid = self._mk_run()
+		self._idle(going, seconds=self.LATE)
+
+		finalizing, conv, rid = self._mk_run()
+		self._settle_success(conv, rid)
+		self._idle(finalizing, seconds=self.LATE)
+		self.assertEqual(self._stuck(), [])
+
+		frappe.db.set_value(MSG, amsg, {"streaming": 0, "recovering": 0}, update_modified=False)
+		self.assertEqual([row["run"] for row in self._stuck()], [recovering])
+
+	def test_a_run_that_sent_nothing_is_listed(self):
+		run, conv, _ = self._mk_run(send=False)
+		self._idle(run, seconds=macro_reconcile.STUCK_AFTER_S - 300)
+		self.assertEqual(self._stuck(), [])
+		self._idle(run, seconds=self.LATE)
+		row = self._stuck()[0]
+		self.assertEqual(
+			(row["run"], row["why"], row["turn"], row["steps_sent"]), (run, "no_step_sent", None, 0)
+		)
+
+	def test_a_run_whose_chat_or_macro_is_gone_is_listed(self):
+		archived, conv, _ = self._mk_run()
+		frappe.db.set_value(CONV, conv, "status", "Archived", update_modified=False)
+		orphan, _, _ = self._mk_run()
+		frappe.db.delete(MACRO, {"name": frappe.db.get_value(RUN, orphan, "macro")})
+		for run in (archived, orphan):
+			self._idle(run, seconds=self.LATE)
+		self.assertEqual(
+			sorted((row["run"], row["why"]) for row in self._stuck()),
+			sorted([(archived, "chat_gone"), (orphan, "macro_gone")]),
+		)
+
+	def test_it_lists_them_with_the_check_switched_off(self):
+		run, conv, rid = self._aged_out(self.LATE)
+		frappe.local.conf[macro_reconcile.OFF_SWITCH] = 1
+		self._tick()
+		self.assertEqual([row["run"] for row in self._stuck()], [run])
+
+	# --- the sweep's signal ------------------------------------------------------ #
+
+	def _reap(self, run):
+		with patch.object(macros, "_stale_run_candidates", lambda cutoff: [run]):
+			self.assertEqual(macros.reap_stale_macro_runs(), 1)
+		self.assertEqual(self._run(run).status, "failed")
+		return self._logs(macro_reconcile.REAPED_DESPITE_CHECK)
+
+	def _three_hours(self, **kw):
+		return self._aged_out(macros.STALE_RUN_AFTER_SECONDS + 600, **kw)
+
+	def test_the_sweep_says_when_it_closes_a_run_the_check_should_have_ended(self):
+		# The check never ran: nobody ran migrate, so its cron row does not exist.
+		self.assertEqual(macro_reconcile.REAPED_DESPITE_CHECK, "jarvis.chat.macros.reaped_despite_check")
+		run, conv, rid = self._three_hours(prompt="PROMPT-TEXT-zq7")
+		rows = self._reap(run)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].method, macro_reconcile.REAPED_DESPITE_CHECK)
+		self.assertIn(f"run {run}; turn state cancelled; step_over", rows[0].error)
+		self.assertNotIn("zq7", json.dumps(rows, default=str))
+
+	def test_a_run_that_sent_nothing_and_was_left_for_three_hours(self):
+		run, conv, _ = self._mk_run(send=False)
+		self._idle(run, seconds=macros.STALE_RUN_AFTER_SECONDS + 600)
+		rows = self._reap(run)
+		self.assertEqual(len(rows), 1)
+		self.assertIn(f"run {run}; turn state no turn; no_step_sent", rows[0].error)
+
+	def test_a_run_the_check_raised_on_every_hour_is_reported_by_the_sweep(self):
+		run, conv, rid = self._three_hours()
+		with patch.object(macro_reconcile._RunCheck, "_look", side_effect=RuntimeError("poison")):
+			self.assertEqual(self._tick()["raised"], 1)
+		self.assertEqual(len(self._reap(run)), 1)
+
+	def test_the_sweep_is_silent_where_the_check_is_not_in_use(self):
+		for mode in ("legacy", "draining", "phase0", "kill switch"):
+			with self.subTest(mode=mode):
+				run, conv, rid = self._three_hours()
+				self._set_mode(mode)
+				self.assertEqual(self._reap(run), [])
+				self._set_mode("pump")
+		with self.subTest("the off switch"):
+			run, conv, rid = self._three_hours()
+			frappe.local.conf[macro_reconcile.OFF_SWITCH] = 1
+			self.assertEqual(self._reap(run), [])
+
+	def test_a_signal_that_cannot_be_read_does_not_keep_the_sweep_from_closing_the_run(self):
+		run, conv, rid = self._three_hours()
+		with patch.object(macro_reconcile, "left_by_the_check", side_effect=RuntimeError("unreadable")):
+			self.assertEqual(self._reap(run), [])
 
 
 # --------------------------------------------------------------------------- #
@@ -1125,9 +1785,12 @@ class TestNothingToRunIn(CheckBase):
 		self.assertEqual(self._state(rid), "cancelled")
 
 
-class TestAStepThatWasNeverSent(CheckBase):
+class TestARunThatSentNothing(CheckBase):
 	"""The dispatcher of the first step died before its transaction committed: no
-	message, no turn, and nothing delivers its trigger again."""
+	message, no turn, and nothing delivers its trigger again. The run ends ``failed``
+	after ten minutes. It is never SENT: the owner of a manual run saw the click fail
+	and pressed Run again, and a first step sent ten minutes later would run the
+	whole macro a second time (2026-10-03 review)."""
 
 	TEN = macro_reconcile.NOT_STARTED_AFTER_S
 
@@ -1144,94 +1807,59 @@ class TestAStepThatWasNeverSent(CheckBase):
 		self.assertEqual(self._tick()["acted"], 0)
 		self.assertEqual(self._row(run), before)
 
-	def test_it_is_sent_once_as_the_owner(self):
-		run, conv = self._unsent()
-		self._idle(run, seconds=self.TEN + 60)
-		seen = []
-		real = macros._dispatch_step
+	def test_after_ten_minutes_the_run_fails_and_no_step_is_sent(self):
+		for trigger, owner in (("manual", TEST_USER), ("scheduled", TEST_USER), ("manual", "Administrator")):
+			with self.subTest(trigger=trigger, owner=owner):
+				frappe.db.delete("Notification Log", {"for_user": TEST_USER})
+				run, conv = self._unsent(trigger=trigger, owner=owner)
+				self._idle(run, seconds=self.TEN + 60)
+				with (
+					patch.object(macros, "_dispatch_step") as dispatch,
+					patch.object(macros, "_send_step") as send,
+				):
+					self.assertEqual(self._tick()["acted"], 1)
+				dispatch.assert_not_called()
+				send.assert_not_called()
+				row = self._run(run)
+				self.assertEqual(
+					(row.status, row.error), ("failed", "The run could not start. Run it again.")
+				)
+				self.assertEqual((self._seeds(conv), frappe.db.count(TURN, {"conversation": conv})), ([], 0))
+				self.assertIn("could not start", self._closing_lines(conv)[0])
+				if owner == TEST_USER:
+					self.assertEqual(len(self._notifications()), 1, "told once")
+					self.assertIn("could not start", self._notifications()[0])
+				self.assertEqual(
+					[s.method for s in self._signals() if run in s.error], [SIGNAL + "no_step_sent"]
+				)
+				# Nothing is left behind that a later tick could act on.
+				self._idle(run, seconds=macro_reconcile.CONTINUE_WITHIN_S + 60)
+				self.assertEqual(self._tick()["acted"], 0)
 
-		def dispatch(*a, **kw):
-			seen.append(frappe.session.user)
-			return real(*a, **kw)
+	def test_the_owner_ran_it_again_and_the_first_run_is_never_sent(self):
+		# The request that started run 1 died; the owner pressed Run again; run 2 went
+		# through. Run 1's first step must not go out ten minutes later.
+		first, conv = self._unsent(armed=True)
+		second, conv2, rid2 = self._mk_run(armed=True)
+		self._idle(first, seconds=self.TEN + 60)
+		real = macros._dispatch_step
+		sent = []
+
+		def dispatch(run, *a, **kw):
+			sent.append(run.name)
+			return real(run, *a, **kw)
 
 		with patch.object(macros, "_dispatch_step", dispatch):
-			self.assertEqual(self._tick()["acted"], 1)
-		self.assertEqual(seen, [TEST_USER])
-		self.assertEqual((self._run(run).status, self._run(run).current_step), ("running", 1))
-		self.assertEqual(self._state(macros._step_turn_id(run, 0)), "queued")
-		self.assertEqual(len(self._seeds(conv)), 1)
-		self.assertEqual([s.method for s in self._signals()], [SIGNAL + "dispatch_never_committed"])
-
-	def _killed_tick(self, run):
-		def dies(*a, **kw):
-			raise _Killed()
-
-		with patch.object(macros, "_dispatch_step", dies), self.assertRaises(_Killed):
 			self._tick()
-		frappe.db.rollback()
-		frappe.set_user(TEST_USER)
-		frappe.cache().delete_value(f"{_redis_lock.LOCK_PREFIX}jarvis_macro_run:{run}")  # the dead holder's
-
-	def test_a_second_failure_ends_the_run(self):
-		run, conv = self._unsent()
-		self._idle(run, seconds=self.TEN + 60)
-		self._killed_tick(run)
-		self.assertEqual(self._run(run).status, "running")
-		with patch.object(macros, "_dispatch_step") as dispatch:
-			self.assertEqual(self._tick()["acted"], 1)
-		dispatch.assert_not_called()
-		row = self._run(run)
-		self.assertEqual((row.status, row.error), ("failed", "Step 1 could not be started, so nothing ran."))
+		self.assertEqual(sent, [])
+		self.assertEqual(self._run(first).status, "failed")
 		self.assertEqual(self._seeds(conv), [])
-		self.assertIn("could not be started", self._notifications()[0])
-		self.assertEqual([s.method for s in self._signals()], [SIGNAL + "dispatch_never_committed"])
-
-	def test_a_lost_marker_costs_one_more_attempt_and_the_window_ends_it(self):
-		run, conv = self._unsent()
-		self._idle(run, seconds=self.TEN + 60)
-		self._killed_tick(run)
-		frappe.cache().delete_value(macro_reconcile._key("resent", run))
-		self._killed_tick(run)  # sent again: the marker was all that said "once"
-		frappe.cache().delete_value(macro_reconcile._key("resent", run))
-		# A dead attempt wrote nothing, so the run's last write kept ageing.
-		self._idle(run, seconds=macro_reconcile.CONTINUE_WITHIN_S + 60)
-		with patch.object(macros, "_dispatch_step") as dispatch:
-			self._tick()
-		dispatch.assert_not_called()
-		self.assertEqual(self._run(run).status, "failed")
-
-	def test_a_dispatch_that_raises_ends_the_run_at_once(self):
-		run, conv = self._unsent()
-		self._idle(run, seconds=self.TEN + 60)
-		with patch.object(macros, "_send_step", side_effect=RuntimeError("no gateway")):
-			self._tick()
-		row = self._run(run)
-		self.assertEqual((row.status, row.error), ("failed", "Step 1 could not be started, so nothing ran."))
-		frappe.db.delete(LOG, {"method": ["like", "jarvis macro step dispatch failed%"]})
-
-	def test_found_after_twenty_minutes_nothing_is_sent(self):
-		run, conv = self._unsent()
-		self._idle(run, seconds=macro_reconcile.CONTINUE_WITHIN_S + 60)
-		with patch.object(macros, "_dispatch_step") as dispatch:
-			self._tick()
-		dispatch.assert_not_called()
-		row = self._run(run)
-		self.assertEqual((row.status, row.error), ("failed", "The run could not start. Run it again."))
-		self.assertIn("could not start", self._closing_lines(conv)[0])
-		self.assertIn("could not start", self._notifications()[0])
-		self.assertEqual([s.method for s in self._signals()], [SIGNAL + "no_step_sent"])
-
-	def test_nothing_is_sent_for_an_administrator_owned_run(self):
-		run, conv = self._unsent(owner="Administrator")
-		self._idle(run, seconds=self.TEN + 60)
-		with patch.object(macros, "_dispatch_step") as dispatch:
-			self._tick()
-		dispatch.assert_not_called()
-		self.assertEqual(self._run(run).error, "The run could not start. Run it again.")
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skip_confirmation")), 0, "the dead run's chat")
+		self.assertEqual(self._run(second).status, "running")
 
 	def test_a_step_message_with_no_turn_is_not_taken_for_unsent(self):
 		# A step sent where no Turn rows are written (before a cutover to the pump):
-		# its worker may be running it. Not known to be dead, so not sent again.
+		# its worker may be running it. Not known to be dead, so the run is not ended.
 		run, conv = self._unsent()
 		doc = frappe.get_doc(
 			{
@@ -1248,7 +1876,6 @@ class TestAStepThatWasNeverSent(CheckBase):
 		frappe.db.commit()
 		self._idle(run, seconds=self.TEN + 60)
 		before = self._row(run)
-		with patch.object(macros, "_dispatch_step") as dispatch:
-			self.assertEqual(self._tick()["acted"], 0)
-		dispatch.assert_not_called()
+		self.assertEqual(self._tick()["acted"], 0)
 		self.assertEqual(self._row(run), before)
+		self.assertEqual(self._stuck(), [])
