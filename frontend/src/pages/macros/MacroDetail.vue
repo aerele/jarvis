@@ -22,7 +22,7 @@
 				<Button
 					icon="more-horizontal"
 					variant="ghost"
-					:aria-describedby="resummarizeBlocked ? RUN_REASON_ID : undefined"
+					:aria-describedby="resummarizeBlocked || hold ? RUN_REASON_ID : undefined"
 				/>
 			</Dropdown>
 			<Button
@@ -361,9 +361,12 @@ const nextRunIsRetry = ref(false);
 // An admin's hold (null when not held): Run is off, and nothing can be switched on.
 const hold = ref(null);
 const holdText = computed(() => holdMessage(hold.value));
-// The hold's sentence for a switch that is OFF (it cannot go on while held), or ""
+// The full sentence is the banner's, said once. The controls the hold turns off
+// (Run, Re-summarize, a switch that cannot go on) say this short one.
+const HELD_SHORT = "On hold: only an admin can release it.";
+// The short reason for a switch that is OFF (it cannot go on while held), or ""
 // when the switch is free: not held, or on (switching off is always allowed).
-const heldOff = (on) => (hold.value && !on ? holdText.value : "");
+const heldOff = (on) => (hold.value && !on ? HELD_SHORT : "");
 
 const form = reactive({
 	macro_name: "",
@@ -462,7 +465,7 @@ const mergePending = computed(() => mergeStatus.value === "pending");
 // One sentence for the visible line, the tooltip and the button's description.
 const RUN_REASON_ID = "macro-run-reason";
 const runBlockedReason = computed(() => {
-	if (hold.value) return holdText.value;
+	if (hold.value) return HELD_SHORT;
 	if (mergePending.value) {
 		return (
 			"Summarizing… Run unlocks when the summary is ready." +
@@ -561,13 +564,15 @@ const overflowOptions = computed(() => {
 	if (stepsWithPrompt.value >= 2) {
 		// Off while the form has unsaved changes: the server summarizes the SAVED
 		// steps. The reason is in the item, for whoever hovers it, and on the line
-		// under the buttons (runBlockedReason), for everyone.
+		// under the buttons (runBlockedReason), for everyone. Off while held too: the
+		// server refuses a summary of a held macro.
+		const off = hold.value ? HELD_SHORT : dirty.value ? RESUMMARIZE_NEEDS_SAVE : "";
 		opts.push({
 			label: "Re-summarize",
 			icon: "refresh-cw",
 			onClick: resummarize,
-			disabled: dirty.value,
-			...(dirty.value ? { description: RESUMMARIZE_NEEDS_SAVE } : {}),
+			disabled: !!off,
+			...(off ? { description: off } : {}),
 		});
 	}
 	opts.push({ label: "Delete", icon: "trash-2", theme: "red", onClick: confirmDelete });
@@ -832,7 +837,8 @@ async function save() {
 				: steps.length >= 2 && (stepsTouched || isNew || !sentSummary);
 		// Why the summary was not started, as HTML for the toast ("" when it was).
 		let notStarted = "";
-		if (savedName && summarize) {
+		// Not while held: the server refuses a summary of a held macro.
+		if (savedName && summarize && !hold.value) {
 			try {
 				const started = (await api.summarizeMacro(savedName)) || {};
 				if (started.ok === false) {
@@ -903,7 +909,7 @@ async function run() {
 async function resummarize() {
 	// The server summarizes the SAVED steps, so with unsaved edits this would
 	// summarize something other than what is on screen.
-	if (dirty.value) return;
+	if (dirty.value || hold.value) return;
 	// Both read before the request: the user may open another macro meanwhile.
 	const id = props.id;
 	const name = form.macro_name || id;

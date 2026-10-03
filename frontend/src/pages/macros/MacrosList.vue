@@ -55,7 +55,7 @@
 			<!-- What an admin did that left no row to show it: a macro of this user
 			     an admin deleted. One line per notice, until dismissed. -->
 			<template v-if="notices.length" #banner>
-				<div class="flex flex-col gap-2 px-5 pt-3" data-testid="admin-notices">
+				<div class="flex flex-col gap-2 pt-3" data-testid="admin-notices">
 					<div
 						v-for="n in notices"
 						:key="n.name"
@@ -95,6 +95,10 @@
 							theme="red"
 							label="On hold"
 						/>
+						<!-- The tooltip shows on hover only: the reason is in the text too. -->
+						<span class="jv-macro-held-reason sr-only">{{
+							holdMessage(macroHold(row))
+						}}</span>
 					</Tooltip>
 				</div>
 			</template>

@@ -16,11 +16,16 @@
 					:rows="3"
 					placeholder="e.g. It sends emails to customers; paused while we check them."
 					:modelValue="reason"
+					:maxlength="REASON_MAX"
 					:disabled="saving"
 					:aria-invalid="tooLong ? 'true' : undefined"
 					@update:modelValue="(v) => (reason = v == null ? '' : String(v))"
 				/>
-				<p class="text-xs" :class="tooLong ? 'text-ink-red-4' : 'text-ink-gray-5'">
+				<p
+					class="jv-macro-hold-count text-xs"
+					:class="tooLong ? 'text-ink-red-4' : 'text-ink-gray-5'"
+					aria-live="polite"
+				>
 					{{ reason.trim().length }} / {{ REASON_MAX }}
 				</p>
 				<ErrorMessage v-if="error" :message="error" />
