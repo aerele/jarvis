@@ -8,8 +8,9 @@ What is pinned here:
 * the list shows other users' macros with no step or summary text, and the last run
   of each macro whoever owns the run row;
 * opening a macro shows its steps and summary and never a run's conversation;
-* stopping a run stops it, disarms its chat, tells the owner who did it and leaves a
-  Comment on the macro;
+* stopping a run stops it, disarms its chat, tells the owner an administrator did it
+  (the reason, the chat's closing line, a notification) and leaves a Comment on the
+  macro naming who;
 * none of this gives an admin the document API: saving or running another user's
   macro is still refused.
 """
@@ -38,11 +39,14 @@ OWNER = stop_tests.OWNER
 OTHER = "macro-admin-other@example.com"
 ADMIN = "macro-admin-admin@example.com"
 PLAIN = "macro-admin-plain@example.com"
+# A System Manager with no Jarvis role at all: "Jarvis Admin" in code is the role OR
+# System Manager OR Administrator (``jarvis/permissions.py``).
+SYSMGR = "macro-admin-sysmgr@example.com"
 # Every macro these tests make carries this, so a list call can be narrowed to them:
 # the test site is shared and may hold other users' macros.
 TAG = "e1adm"
 PATH = "jarvis.chat.macros_admin_api."
-ENDPOINTS = ("admin_list_macros", "admin_get_macro", "admin_stop_run")
+ENDPOINTS = ("admin_list_macros", "admin_macro_owners", "admin_get_macro", "admin_stop_run")
 STOPPED = macros_admin_api.STOPPED_BY_ADMIN
 _MISSING = object()
 
@@ -57,6 +61,11 @@ class AdminBase(stop_tests.StopBase):
 		ensure_user(OTHER)
 		ensure_user(PLAIN)
 		ensure_user(ADMIN, roles=("Jarvis User", "Jarvis Admin"))
+		ensure_user(SYSMGR, roles=("System Manager",))
+		for role in ("Jarvis User", "Jarvis Admin"):
+			if role in frappe.get_roles(SYSMGR):
+				frappe.get_doc("User", SYSMGR).remove_roles(role)
+				frappe.db.commit()
 		if "System Manager" in frappe.get_roles(ADMIN):
 			frappe.get_doc("User", ADMIN).remove_roles("System Manager")
 			frappe.db.commit()
@@ -64,11 +73,15 @@ class AdminBase(stop_tests.StopBase):
 	def _purge(self):
 		super()._purge()
 		frappe.set_user("Administrator")
-		for owner in (OTHER, ADMIN, PLAIN):
+		for owner in (OTHER, ADMIN, PLAIN, SYSMGR):
 			for dt in (RUN, MACRO, CONV):
 				for name in frappe.get_all(dt, filters={"owner": owner}, pluck="name"):
 					frappe.delete_doc(dt, name, force=True, ignore_permissions=True)
-		frappe.db.delete("Comment", {"reference_doctype": MACRO, "comment_email": ADMIN})
+			frappe.db.delete("Notification Log", {"for_user": owner})
+		frappe.db.delete(
+			"Comment",
+			{"reference_doctype": MACRO, "comment_email": ["in", (ADMIN, SYSMGR, "Administrator")]},
+		)
 		frappe.db.commit()
 
 	def _macro(self, owner, tag, *, steps=("first prompt",), **fields):
@@ -119,6 +132,13 @@ class AdminBase(stop_tests.StopBase):
 	def _names(self, res):
 		return [r["name"] for r in res["rows"]]
 
+	def _notes(self, user=OWNER):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"for_user": user},
+			fields=["subject", "email_content", "document_type", "document_name"],
+		)
+
 	def _comments(self, macro):
 		return frappe.get_all(
 			"Comment",
@@ -139,6 +159,7 @@ class TestTheGates(AdminBase):
 			macro,
 			{
 				"admin_list_macros": {},
+				"admin_macro_owners": {},
 				"admin_get_macro": {"name": macro},
 				"admin_stop_run": {"run": run},
 			},
@@ -151,6 +172,24 @@ class TestTheGates(AdminBase):
 		self.assertEqual(macros_admin_api.admin_get_macro(**calls["admin_get_macro"])["owner"], OWNER)
 		self.assertTrue(macros_admin_api.admin_stop_run(**calls["admin_stop_run"])["stopped"])
 		self.assertEqual(self._run(run).status, "stopped")
+
+	def test_a_system_manager_and_administrator_are_admins_too(self):
+		# Neither holds the Jarvis Admin role. The description's privacy note is about
+		# exactly these two, so a gate narrowed to the role alone must fail here.
+		self.assertNotIn("Jarvis Admin", frappe.get_roles(SYSMGR))
+		for who in (SYSMGR, "Administrator"):
+			with self.subTest(who=who):
+				run, macro, calls = self._calls()
+				frappe.set_user(who)
+				self.assertIn(macro, self._names(macros_admin_api.admin_list_macros(search=TAG)))
+				owners = macros_admin_api.admin_macro_owners(**calls["admin_macro_owners"])["owners"]
+				self.assertIn(OWNER, [o["user"] for o in owners])
+				self.assertEqual(macros_admin_api.admin_get_macro(**calls["admin_get_macro"])["owner"], OWNER)
+				self.assertTrue(macros_admin_api.admin_stop_run(**calls["admin_stop_run"])["stopped"])
+				self.assertEqual(self._run(run).status, "stopped")
+				(comment,) = self._comments(macro)
+				self.assertEqual(comment.comment_email, who)
+				self._purge()
 
 	def test_anyone_but_an_admin_is_refused(self):
 		# The macro's own owner is "a plain user" here too: these are not their
@@ -245,15 +284,16 @@ class TestTheGates(AdminBase):
 
 	def test_a_name_that_is_not_text_is_refused_before_anything_is_read(self):
 		# A dict reaches the database layer as a FILTER: `{"owner": ...}` would load
-		# (and stop) whichever row matched it. Called below the request-time type
-		# check (`__wrapped__`), which is absent when the call is not an HTTP request.
+		# (and stop) whichever row matched it. The endpoint's own check is the only
+		# thing in the way: the module's hints are strings (`from __future__ import
+		# annotations`) and Frappe's type check skips string hints.
 		run, _macro, _calls = self._calls()
 		frappe.set_user(ADMIN)
 		matches_the_run = {"owner": OWNER}
 		for endpoint, arg in (("admin_get_macro", "name"), ("admin_stop_run", "run")):
 			for bad in (None, "", "  ", ["x"], matches_the_run, 7):
 				with self.subTest(endpoint=endpoint, value=bad):
-					fn = getattr(macros_admin_api, endpoint).__wrapped__
+					fn = getattr(macros_admin_api, endpoint)
 					with (
 						patch.object(frappe, "get_doc", wraps=frappe.get_doc) as get_doc,
 						patch.object(frappe.db, "get_value", wraps=frappe.db.get_value) as get_value,
@@ -268,14 +308,39 @@ class TestTheGates(AdminBase):
 		self.assertEqual(self._run(run).status, "running")
 
 	def test_a_name_that_is_not_text_is_refused_on_a_request_too(self):
+		# With a real request in place, which is when Frappe would type-check a
+		# whitelisted function's arguments. It does not check these (string hints),
+		# so the refusal must still be the endpoint's own sentence.
 		run, _macro, _calls = self._calls()
+		prev = getattr(frappe.local, "request", _MISSING)
+		self.addCleanup(self._restore_request, prev)
 		frappe.set_user(ADMIN)
 		for endpoint, arg in (("admin_get_macro", "name"), ("admin_stop_run", "run")):
-			for bad in (None, ["x"], {"owner": OWNER}):
+			set_request(method="POST", path=f"/api/method/{PATH}{endpoint}")
+			for bad in (None, ["x"], {"owner": OWNER}, 7):
 				with self.subTest(endpoint=endpoint, value=bad):
-					with self.assertRaises(Exception):
-						getattr(macros_admin_api, endpoint)(**{arg: bad})
+					with self.assertRaises(frappe.ValidationError) as raised:
+						frappe.call(getattr(macros_admin_api, endpoint), **{arg: bad})
+					self.assertIn("must be a name", str(raised.exception))
 		self.assertEqual(self._run(run).status, "running")
+
+	def test_a_search_or_a_sort_that_is_not_text_is_refused(self):
+		# Ignoring one would answer with the unfiltered list; passing one on raised a
+		# TypeError from the sort helper.
+		self._macro(OWNER, "a")
+		prev = getattr(frappe.local, "request", _MISSING)
+		self.addCleanup(self._restore_request, prev)
+		set_request(method="POST", path=f"/api/method/{PATH}admin_list_macros")
+		frappe.set_user(ADMIN)
+		for arg in ("search", "sort_field", "sort_dir"):
+			for bad in (["x"], {"owner": OWNER}, 7):
+				with self.subTest(arg=arg, value=bad):
+					with self.assertRaises(frappe.ValidationError) as raised:
+						frappe.call(macros_admin_api.admin_list_macros, **{arg: bad})
+					self.assertIn("must be text", str(raised.exception))
+		# Nothing sent is "not searching", as before.
+		res = macros_admin_api.admin_list_macros(search=None, sort_field=None, sort_dir=None)
+		self.assertTrue(res["rows"])
 
 
 # --------------------------------------------------------------------------- #
@@ -314,9 +379,28 @@ class TestTheList(AdminBase):
 	def test_the_owners_it_offers_as_a_filter_are_everyone_with_a_macro(self):
 		self._macro(OWNER, "a")
 		self._macro(OTHER, "b")
-		owners = {o["user"]: o for o in self._list()["owners"]}
+		self._macro(OTHER, "c")
+		frappe.set_user(ADMIN)
+		res = macros_admin_api.admin_macro_owners()
+		owners = {o["user"]: o for o in res["owners"]}
 		self.assertTrue({OWNER, OTHER} <= set(owners))
 		self.assertTrue(owners[OTHER]["full_name"])
+		self.assertEqual(owners[OTHER]["macros"], 2)
+		# Someone with no macro is not offered: this is not a user directory.
+		self.assertNotIn(PLAIN, owners)
+		# They are not recomputed with every page of the list.
+		self.assertNotIn("owners", self._list())
+
+	def test_the_owner_choices_are_capped(self):
+		self._macro(OWNER, "a")
+		self._macro(OTHER, "b")
+		self._macro(OTHER, "c")
+		frappe.set_user(ADMIN)
+		with patch.object(macros_admin_api, "OWNERS_MAX", 1):
+			res = macros_admin_api.admin_macro_owners()
+		self.assertEqual((len(res["owners"]), res["more"]), (1, True))
+		with patch.object(macros_admin_api, "OWNERS_MAX", 10**6):
+			self.assertFalse(macros_admin_api.admin_macro_owners()["more"])
 
 	def test_the_last_run_is_the_macros_whoever_owns_the_run_row(self):
 		# After a hand-over the macro belongs to someone who owns none of its past
@@ -353,7 +437,10 @@ class TestTheList(AdminBase):
 	def test_a_live_run_is_named_so_it_can_be_stopped(self):
 		run, _conv, macro = self._mk_run(tag=f"{TAG}-live")
 		(row,) = self._list()["rows"]
-		self.assertEqual((row["name"], row["live_run"], row["last_run"]["name"]), (macro, run, run))
+		self.assertEqual((row["name"], row["live_run"]), (macro, run))
+		# One field names the run to stop. `last_run` naming one too invited stopping
+		# the wrong run when an older one is the live one.
+		self.assertNotIn("name", row["last_run"])
 		self.assertEqual(row["last_run"]["status"], "running")
 
 		frappe.db.set_value(RUN, run, "status", "waiting_capacity")
@@ -363,7 +450,7 @@ class TestTheList(AdminBase):
 		frappe.db.set_value(RUN, run, "status", "completed")
 		frappe.db.commit()
 		(row,) = self._list()["rows"]
-		self.assertEqual((row["live_run"], row["last_run"]["name"]), ("", ""))
+		self.assertEqual(row["live_run"], "")
 
 	def test_an_older_run_that_is_still_live_is_the_one_named(self):
 		# Two runs of one macro: the newer one ended, the older one is still going.
@@ -373,6 +460,25 @@ class TestTheList(AdminBase):
 		(row,) = self._list()["rows"]
 		self.assertEqual((row["last_run"]["status"], row["live_run"]), ("failed", older))
 		self.assertEqual(self._names(self._list(filters={"live_run": 1})), [macro])
+
+	def test_the_last_run_says_an_admin_stopped_it_and_nothing_else_about_why(self):
+		theirs = self._macro(OWNER, "theirs")
+		engine = self._macro(OWNER, "engine")
+		own = self._macro(OWNER, "own")
+		failed = self._macro(OWNER, "failed")
+		self._run_row(theirs, OWNER, "stopped", error=STOPPED)
+		self._run_row(engine, OWNER, "stopped", error="Stopped at step 2: SECRET-STEP-TEXT")
+		self._run_row(own, OWNER, "stopped")
+		# The same sentence on a run that did not stop is not an admin's stop.
+		self._run_row(failed, OWNER, "failed", error=STOPPED)
+		res = self._list()
+		flags = {r["name"]: r["last_run"]["stopped_by_admin"] for r in res["rows"]}
+		self.assertEqual(flags, {theirs: 1, engine: 0, own: 0, failed: 0})
+		for row in res["rows"]:
+			self.assertNotIn("error", row["last_run"])
+		dumped = json.dumps(res, default=str)
+		self.assertNotIn("SECRET", dumped)
+		self.assertNotIn(STOPPED, dumped)
 
 	def test_it_is_paged(self):
 		names = [self._macro(OWNER, tag) for tag in ("a", "b", "c")]
@@ -390,6 +496,40 @@ class TestTheList(AdminBase):
 		self.assertEqual(self._names(self._list(search=OTHER, filters={"owner": OTHER})), [theirs])
 		# A wildcard typed into the box is a character, not a pattern.
 		self.assertEqual(self._names(self._list(search=f"{TAG}-%")), [])
+
+	def test_the_search_matches_the_owners_full_name(self):
+		# The list shows the full name first, so that is what an admin types. It
+		# matched the address only, and "Asha" found nothing for arao@example.com.
+		self._macro(OWNER, "mine")
+		theirs = self._macro(OTHER, "theirs")
+		prev = frappe.db.get_value("User", OTHER, ["first_name", "last_name", "full_name"], as_dict=True)
+		self.addCleanup(self._restore_name, OTHER, prev)
+		frappe.set_user("Administrator")
+		frappe.db.set_value(
+			"User", OTHER, {"first_name": "Zqasha", "last_name": "Rao", "full_name": "Zqasha Rao"}
+		)
+		frappe.db.commit()
+		self.assertNotIn("zqasha", OTHER)
+		res = self._list(search="zqasha ra")
+		self.assertEqual(self._names(res), [theirs])
+		self.assertEqual(res["rows"][0]["owner_full_name"], "Zqasha Rao")
+		self.assertEqual(res["total"], 1)
+
+	@staticmethod
+	def _restore_name(user, prev):
+		frappe.set_user("Administrator")
+		frappe.db.set_value("User", user, dict(prev))
+		frappe.db.commit()
+
+	def test_the_full_names_of_a_page_take_one_query(self):
+		self._macro(OWNER, "a")
+		self._macro(OTHER, "b")
+		self._macro(ADMIN, "c")
+		frappe.set_user(ADMIN)
+		with patch.object(frappe, "get_all", wraps=frappe.get_all) as get_all:
+			res = macros_admin_api.admin_list_macros(search=TAG)
+		self.assertEqual(len(res["rows"]), 3)
+		self.assertEqual(len([c for c in get_all.call_args_list if c.args and c.args[0] == "User"]), 1)
 
 	def test_each_filter_narrows_the_list(self):
 		plain = self._macro(OWNER, "plain")
@@ -421,6 +561,20 @@ class TestTheList(AdminBase):
 			with self.subTest(filters=bad):
 				with self.assertRaises(frappe.ValidationError):
 					self._list(filters=bad)
+
+	def test_filters_that_are_not_an_object_are_refused_not_dropped(self):
+		# The shared reader turns a list or unreadable JSON into "no filters", and the
+		# answer was every user's macros: a filter that silently did nothing.
+		self._macro(OWNER, "a")
+		for bad in ([["owner", "=", OTHER]], '[["owner", "=", "x"]]', "{not json", "owner=x", 7, '"text"'):
+			with self.subTest(filters=bad):
+				with self.assertRaises(frappe.ValidationError) as raised:
+					self._list(filters=bad)
+				self.assertIn("Filters", str(raised.exception))
+		# Nothing sent is still "not filtering".
+		for nothing in (None, "", "  ", {}, "{}"):
+			with self.subTest(filters=nothing):
+				self.assertEqual(len(self._list(filters=nothing)["rows"]), 1)
 
 	def test_only_a_listed_column_sorts_it(self):
 		a = self._macro(OTHER, "a")
@@ -484,9 +638,12 @@ class TestOpeningAMacro(AdminBase):
 		self.assertEqual(len(macros_admin_api.admin_get_macro(macro)["runs"]), macros_admin_api.RECENT_RUNS)
 
 	def test_a_macro_that_is_not_there_is_not_found(self):
+		# In the pane's own words: the usual cause is a list loaded before the owner
+		# deleted the macro, and "Jarvis Macro <hash> not found" tells an admin nothing.
 		frappe.set_user(ADMIN)
-		with self.assertRaises(frappe.DoesNotExistError):
+		with self.assertRaises(frappe.DoesNotExistError) as raised:
 			macros_admin_api.admin_get_macro("zz-no-such-macro")
+		self.assertEqual(str(raised.exception), "This macro was deleted.")
 
 
 # --------------------------------------------------------------------------- #
@@ -517,6 +674,51 @@ class TestStoppingAnotherUsersRun(AdminBase):
 		self.assertIn(run, comment.content)
 		# The Comment did not go through a save of the macro.
 		self.assertEqual(frappe.db.get_value(MACRO, macro, "modified_by"), OWNER)
+
+	def test_the_owner_is_notified_that_an_administrator_stopped_it(self):
+		# The closing line and the realtime event reach someone looking at the app.
+		# Nobody is watching a scheduled run, and the engine's own notification is
+		# for runs that end from inside: an admin stop sent none.
+		for trigger in ("scheduled", "manual"):
+			with self.subTest(trigger=trigger):
+				run, _conv, macro = self._mk_run(trigger=trigger, tag=f"{TAG}-note")
+				macro_name = frappe.db.get_value(MACRO, macro, "macro_name")
+				frappe.set_user(ADMIN)
+				self.assertTrue(macros_admin_api.admin_stop_run(run)["stopped"])
+				(note,) = self._notes()
+				self.assertEqual(note.subject, f"Macro run stopped: {macro_name}")
+				self.assertIn(STOPPED, note.email_content)
+				# The engine's shape: a note, with no document to open.
+				self.assertFalse(note.document_type or note.document_name)
+				self._purge()
+
+	def test_a_run_that_had_already_ended_notifies_nobody(self):
+		run, _conv, _macro = self._mk_run(tag=f"{TAG}-ended")
+		frappe.db.set_value(RUN, run, "status", "completed")
+		frappe.db.commit()
+		frappe.set_user(ADMIN)
+		self.assertFalse(macros_admin_api.admin_stop_run(run)["stopped"])
+		self.assertEqual(self._notes(), [])
+
+	def test_an_admin_stopping_their_own_run_is_not_notified_of_it(self):
+		macro = self._macro(ADMIN, "own")
+		run = self._run_row(macro, ADMIN, "running")
+		frappe.set_user(ADMIN)
+		self.assertTrue(macros_admin_api.admin_stop_run(run)["stopped"])
+		self.assertEqual(self._notes(ADMIN), [])
+
+	def test_a_notification_that_cannot_be_sent_does_not_fail_the_stop(self):
+		run, _conv, macro = self._mk_run(tag=f"{TAG}-nonote")
+		frappe.set_user(ADMIN)
+		with (
+			patch.object(macros, "notify_owner", side_effect=RuntimeError("no note")),
+			patch.object(frappe, "log_error") as log,
+		):
+			res = macros_admin_api.admin_stop_run(run)
+		self.assertTrue(res["stopped"])
+		self.assertEqual(self._run(run).status, "stopped")
+		self.assertEqual(len(self._comments(macro)), 1)
+		self.assertTrue(self._logged(log, "jarvis.chat.macros_admin_api.notify_failed"))
 
 	def test_the_stop_is_asked_as_the_admin(self):
 		run, _conv, _macro = self._mk_run(tag=f"{TAG}-by")
@@ -572,16 +774,33 @@ class TestStoppingAnotherUsersRun(AdminBase):
 			macros_admin_api.admin_stop_run("zz-no-such-run")
 
 	def test_a_comment_that_cannot_be_written_does_not_undo_the_stop(self):
-		run, _conv, _macro = self._mk_run(tag=f"{TAG}-nocomment")
+		# The real path: the Comment's own insert fails after its row is written, so
+		# the rollback in the handler has something to take back.
+		from frappe.core.doctype.comment.comment import Comment
+
+		run, _conv, macro = self._mk_run(tag=f"{TAG}-nocomment")
+		frappe.db.set_value(MACRO, macro, "description", "SECRET-DESCRIPTION")
+		frappe.db.commit()
 		frappe.set_user(ADMIN)
 		with (
-			patch.object(macros_admin_api, "_leave_comment", side_effect=RuntimeError("no comment")),
+			patch.object(Comment, "after_insert", side_effect=RuntimeError("no comment"), create=True),
 			patch.object(frappe, "log_error") as log,
 		):
 			res = macros_admin_api.admin_stop_run(run)
 		self.assertTrue(res["stopped"])
 		self.assertEqual(self._run(run).status, "stopped")
-		self.assertTrue(self._logged(log, "jarvis.chat.macros_admin_api.comment_failed"))
+		frappe.db.commit()
+		self.assertEqual(self._comments(macro), [])
+		# The Comment was the only record of who stopped it: the log says it instead,
+		# by id, with none of the macro's text.
+		(logged,) = self._logged(log, "jarvis.chat.macros_admin_api.comment_failed")
+		self.assertIn(run, logged["title"])
+		for said in (ADMIN, run, macro, "no comment"):
+			self.assertIn(said, logged["message"])
+		self.assertNotIn("SECRET", logged["message"])
+		self.assertNotIn(f"{TAG}-nocomment", logged["message"])
+		# And the owner is still told.
+		self.assertEqual(len(self._notes()), 1)
 
 
 # --------------------------------------------------------------------------- #
