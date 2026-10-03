@@ -300,8 +300,11 @@ scheduler_events = {
 			# stale-run sweep three hours later. This reads the step's Turn row and the
 			# finalize ledger and does what the hook would have. Self-gating: only where
 			# the turn machine is on and the shard is in `pump` mode; off switch
-			# `jarvis_macro_reconcile_disabled` in site config. Cheap no-op (one indexed
-			# status query) when no run is idle, and it writes nothing unless it acts.
+			# `jarvis_macro_reconcile_disabled` in site config. The same tick settles a
+			# macro summary stuck "summarizing" the same ways (Run is refused behind it).
+			# Cheap no-op when nothing is stuck: one indexed status query for runs and one
+			# small unindexed read of the macro table for summaries; it writes nothing
+			# unless it acts.
 			# Is it working: `macro_reconcile.stuck_runs` (empty when healthy), and the
 			# stale-run sweep logs `jarvis.chat.macros.reaped_despite_check`.
 			# The cron row outlives the code until the next migrate: if the module is
