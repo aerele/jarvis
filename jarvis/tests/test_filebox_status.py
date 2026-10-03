@@ -571,19 +571,22 @@ class TestStaleConversationSave(_Base):
 	"""m-2: a send that loaded the conversation before a live run stamped a filebox_*
 	field neither trips the guard nor reverts the stamp."""
 
-	def _stamp_behind(self, conv: str):
-		real = chat_api._next_seq
+	def _stamp_behind(self, conv: str, seam: str = "jarvis.chat.api._next_seq"):
+		"""The run stamps between the send's conversation write and its message insert
+		(``seam``: the call that starts the insert)."""
+		module, _, name = seam.rpartition(".")
+		real = getattr(frappe.get_module(module), name)
 
-		def stamp(conversation):
+		def stamp(conversation, *args, **kw):
 			frappe.db.set_value(
 				CONV,
 				conv,
 				{"filebox_result_doctype": "Purchase Invoice", "filebox_result_name": "PI-LIVE"},
 				update_modified=False,
 			)
-			return real(conversation)
+			return real(conversation, *args, **kw)
 
-		return patch("jarvis.chat.api._next_seq", side_effect=stamp)
+		return patch(seam, side_effect=stamp)
 
 	@contextlib.contextmanager
 	def _no_dispatch(self):
@@ -602,7 +605,7 @@ class TestStaleConversationSave(_Base):
 
 	def test_enqueue_turn(self):
 		conv = self._conv()
-		with _as(USER), self._no_dispatch(), self._stamp_behind(conv):
+		with _as(USER), self._no_dispatch(), self._stamp_behind(conv, "jarvis.chat.admission._insert_seed"):
 			chat_api.enqueue_continuation(conv, "created Purchase Invoice PI-LIVE")
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_result_name"), "PI-LIVE")
 
