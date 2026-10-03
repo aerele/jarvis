@@ -372,6 +372,9 @@ class TestOneSettlement(SummaryBase):
 			macros._apply_merge_after_turn(conv_a, errored=True)
 		self.assertEqual(self._mark(name)[:2], ("pending", started["conv"]))
 		self.assertTrue(frappe.db.exists(CONV, started["conv"]))
+		# Only the winner deletes: A's turn is still queued, and the losing hook leaves
+		# its chat alone (Re-summarize leaves a chat with a live turn too).
+		self.assertTrue(frappe.db.exists(CONV, conv_a))
 		self.assertEqual(self.published, [])
 
 	def test_a_stale_owner_refusal_does_not_fail_a_re_summarize(self):
