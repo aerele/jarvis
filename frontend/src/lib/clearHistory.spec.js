@@ -5,12 +5,14 @@ import {
 	CLEAR_HISTORY_CONFIRM,
 	clearHistoryFailedNotice,
 	clearHistoryOutcome,
+	failedChatsNotice,
 	keptChatsNotice,
 } from "./clearHistory";
 
-// "Delete all chat history" keeps a chat that is waiting for a reply (the server
-// answers { ok, deleted, skipped, kept: [names] }). What the user is told, and
-// whether the chat they have open stays open, is decided here.
+// "Delete all chat history" keeps a chat that is waiting for a reply, and may fail
+// on a chat (the server answers { ok, deleted, skipped, kept: [names], failed,
+// failed_names: [names] }). What the user is told, and whether the chat they have
+// open stays open, is decided here.
 
 describe("keptChatsNotice", () => {
 	const ONE =
@@ -42,8 +44,30 @@ describe("keptChatsNotice", () => {
 	});
 
 	it("has no em-dash", () => {
-		for (const text of [ONE, TWO, keptChatsNotice(2, 3), clearHistoryFailedNotice("")])
+		for (const text of [
+			ONE,
+			TWO,
+			keptChatsNotice(2, 3),
+			clearHistoryFailedNotice(""),
+			failedChatsNotice(1),
+			failedChatsNotice(2),
+		])
 			expect(text).not.toContain("\u2014");
+	});
+});
+
+describe("failedChatsNotice", () => {
+	it("says nothing when no chat failed", () => {
+		for (const failed of [0, undefined, NaN, -1]) expect(failedChatsNotice(failed)).toBe("");
+	});
+
+	it("says plainly that the chats could not be deleted, and to try again", () => {
+		expect(failedChatsNotice(1)).toBe("1 chat could not be deleted. Try Delete all again.");
+		expect(failedChatsNotice(4)).toBe("4 chats could not be deleted. Try Delete all again.");
+	});
+
+	it("does not claim a reply is in progress", () => {
+		for (const failed of [1, 4]) expect(failedChatsNotice(failed)).not.toMatch(/repl/i);
 	});
 });
 
@@ -68,13 +92,14 @@ describe("clearHistoryFailedNotice", () => {
 describe("clearHistoryOutcome", () => {
 	it("is the old outcome when nothing was skipped", () => {
 		const out = clearHistoryOutcome({ ok: true, deleted: 4, skipped: 0, kept: [] }, "c-open");
-		expect(out).toEqual({ notice: "", openChatKept: false });
+		expect(out).toEqual({ notice: "", failed: false, openChatKept: false });
 	});
 
 	it("is the old outcome for a server that does not report skipped chats yet", () => {
 		for (const res of [{ ok: true, deleted: 4 }, {}, null, undefined])
 			expect(clearHistoryOutcome(res, "c-open")).toEqual({
 				notice: "",
+				failed: false,
 				openChatKept: false,
 			});
 	});
@@ -93,7 +118,11 @@ describe("clearHistoryOutcome", () => {
 			{ ok: true, deleted: 3, skipped: 1, kept: ["c-other"] },
 			"c-open"
 		);
-		expect(out).toEqual({ notice: keptChatsNotice(1, 3), openChatKept: false });
+		expect(out).toEqual({
+			notice: keptChatsNotice(1, 3),
+			failed: false,
+			openChatKept: false,
+		});
 	});
 
 	it("does not treat an unsaved new chat as kept", () => {
@@ -121,6 +150,75 @@ describe("clearHistoryOutcome", () => {
 		expect(clearHistoryOutcome({ ok: true, deleted: "5", skipped: 2 }, "").notice).toBe(
 			keptChatsNotice(2, 5)
 		);
+	});
+});
+
+describe("clearHistoryOutcome when chats could not be deleted", () => {
+	const res = (over) => ({
+		ok: true,
+		deleted: 3,
+		skipped: 0,
+		kept: [],
+		failed: 0,
+		failed_names: [],
+		...over,
+	});
+
+	it("says how many went and how many could not be deleted", () => {
+		const out = clearHistoryOutcome(res({ failed: 2, failed_names: ["a", "b"] }), "c-open");
+		expect(out).toEqual({
+			notice: "Deleted 3 chats. 2 chats could not be deleted. Try Delete all again.",
+			failed: true,
+			openChatKept: false,
+		});
+	});
+
+	it("does not tell the user a reply is in progress for them", () => {
+		const out = clearHistoryOutcome(res({ deleted: 0, failed: 1, failed_names: ["a"] }), "");
+		expect(out.notice).toBe(
+			"No chats were deleted. 1 chat could not be deleted. Try Delete all again."
+		);
+		expect(out.notice).not.toMatch(/repl/i);
+	});
+
+	it("keeps the open chat open when it is one that could not be deleted", () => {
+		const out = clearHistoryOutcome(
+			res({ failed: 2, failed_names: ["c-other", "c-open"] }),
+			"c-open"
+		);
+		expect(out.openChatKept).toBe(true);
+		expect(out.failed).toBe(true);
+	});
+
+	it("says both when some were kept for a reply and some failed", () => {
+		const out = clearHistoryOutcome(
+			res({ skipped: 1, kept: ["c-busy"], failed: 2, failed_names: ["a", "b"] }),
+			"c-busy"
+		);
+		expect(out).toEqual({
+			notice: `${keptChatsNotice(1, 3)} ${failedChatsNotice(2)}`,
+			failed: true,
+			openChatKept: true,
+		});
+	});
+
+	it("counts the names when the count itself is missing or wrong", () => {
+		expect(clearHistoryOutcome({ ok: true, failed_names: ["a", "b"] }, "").notice).toBe(
+			failedChatsNotice(2)
+		);
+		expect(clearHistoryOutcome({ ok: true, failed: "3" }, "").notice).toBe(
+			failedChatsNotice(3)
+		);
+		expect(clearHistoryOutcome({ ok: true, failed: -1 }, "")).toEqual({
+			notice: "",
+			failed: false,
+			openChatKept: false,
+		});
+	});
+
+	it("reads a server that reports no failures as none", () => {
+		const out = clearHistoryOutcome({ ok: true, deleted: 3, skipped: 1, kept: ["a"] }, "a");
+		expect(out).toEqual({ notice: keptChatsNotice(1, 3), failed: false, openChatKept: true });
 	});
 });
 
@@ -158,8 +256,9 @@ describe("ChatView clearAllHistory", () => {
 		expect(body).toContain("message: CLEAR_HISTORY_CONFIRM,");
 	});
 
-	it("tells the user about the kept chats", () => {
-		expect(body).toMatch(/if \(outcome\.notice\) notify\(outcome\.notice, \{/);
+	it("tells the user about the chats that stayed, as an error when any failed", () => {
+		expect(body).toMatch(/if \(outcome\.notice\)\s+notify\(outcome\.notice, \{/);
+		expect(body).toContain('type: outcome.failed ? "error" : "info",');
 	});
 
 	it("returns before it blanks the view when the open chat was kept", () => {
