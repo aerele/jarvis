@@ -3,7 +3,8 @@ import { mount, flushPromises } from "@vue/test-utils";
 
 /**
  * The Jarvis Admin's Macros pane (Settings, Administration): every user's macros,
- * the filters, the loading / empty / error states, and the one action, Stop run.
+ * the filters, the loading / empty / error states, and the row actions: Stop run,
+ * Hold (the reason is asked by MacroHoldDialog, stubbed here), Release and Delete.
  * The decisions behind the cells (lib/macroRunOutcome, lib/macroSchedule) are the
  * real ones; frappe-ui and the read-only dialog are stubs.
  */
@@ -54,6 +55,8 @@ const api = vi.hoisted(() => ({
 	adminListMacros: vi.fn(),
 	adminMacroOwners: vi.fn(),
 	adminStopRun: vi.fn(),
+	adminRelease: vi.fn(),
+	adminDelete: vi.fn(),
 }));
 vi.mock("@/api/macrosAdmin", () => api);
 
@@ -68,6 +71,18 @@ vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
 		template: `<div class="stub-detail" :data-name="name" :data-open="modelValue ? '1' : ''" />`,
 	},
 }));
+
+vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
+	default: {
+		name: "MacroHoldDialog",
+		props: ["modelValue", "name", "macroName", "ownerLabel"],
+		emits: ["update:modelValue", "held", "failed"],
+		template: `<div class="stub-hold" :data-name="name" :data-open="modelValue ? '1' : ''" :data-owner="ownerLabel" />`,
+	},
+}));
+
+// Who is looking: an admin whose own macros have no Hold.
+vi.mock("@/data/session", () => ({ session: { user: "admin@example.test" } }));
 
 import { toast } from "frappe-ui";
 import MacrosAdminPane from "./MacrosAdminPane.vue";
@@ -132,6 +147,8 @@ beforeEach(() => {
 	api.adminListMacros.mockReset();
 	api.adminMacroOwners.mockReset();
 	api.adminMacroOwners.mockResolvedValue({ owners: OWNERS, more: false });
+	api.adminRelease.mockResolvedValue({ ok: true, released: true });
+	api.adminDelete.mockResolvedValue({ ok: true, deleted: true, stopped_runs: 0 });
 	api.adminStopRun.mockResolvedValue({
 		ok: true,
 		stopped: true,
@@ -425,6 +442,7 @@ describe("MacrosAdminPane, filters", () => {
 			"Armed",
 			"Schedule",
 			"Runs",
+			"Hold",
 		]);
 	});
 
@@ -740,5 +758,184 @@ describe("MacrosAdminPane, Stop run", () => {
 		expect(confirm).toHaveBeenCalledTimes(1);
 		answer({ ok: true, stopped: true });
 		await flushPromises();
+	});
+});
+
+describe("MacrosAdminPane, hold, release and delete", () => {
+	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
+	const holdButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-hold");
+	const releaseButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-release");
+	const deleteButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-delete");
+	const held = (name = "a", extra = {}) =>
+		row(name, {
+			enabled: 0,
+			admin_hold: 1,
+			admin_hold_reason: "Sends too many emails",
+			...extra,
+		});
+
+	it("shows On hold, with its reason, and offers Release instead of Hold", async () => {
+		const w = await mountWith([held(), row("b")]);
+		const [a, b] = rowsOf(w);
+		expect(a.find(".jv-macro-admin-held .badge").text()).toBe("On hold");
+		expect(a.find(".jv-macro-admin-held").attributes("title")).toBe(
+			"On hold: Sends too many emails"
+		);
+		// The title shows on hover only: the reason is in the text too.
+		const said = a.find(".jv-macro-admin-held .sr-only");
+		expect(said.text()).toBe("On hold: Sends too many emails");
+		expect(b.find(".jv-macro-admin-own").exists()).toBe(false);
+		expect(holdButton(w).exists()).toBe(false);
+		expect(releaseButton(w).exists()).toBe(true);
+		expect(b.find(".jv-macro-admin-held").exists()).toBe(false);
+		expect(holdButton(w, 1).exists()).toBe(true);
+		expect(releaseButton(w, 1).exists()).toBe(false);
+	});
+
+	it("offers no Hold or Release on the admin's own macro, only Delete", async () => {
+		const w = await mountWith([
+			row("mine", { owner: "admin@example.test" }),
+			held("mine-held", { owner: "admin@example.test" }),
+		]);
+		for (const i of [0, 1]) {
+			expect(holdButton(w, i).exists()).toBe(false);
+			expect(releaseButton(w, i).exists()).toBe(false);
+			expect(deleteButton(w, i).exists()).toBe(true);
+			// Said, not just left out.
+			expect(rowsOf(w)[i].find(".jv-macro-admin-own").text()).toBe(
+				"You cannot hold or release your own macro."
+			);
+		}
+	});
+
+	it("filters on hold", async () => {
+		const w = await mountWith([row("a")]);
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		expect(lastCall().filters).toEqual({ on_hold: "1" });
+	});
+
+	it("asks for a reason in the hold dialog, and re-reads the rows once it is held", async () => {
+		const w = await mountWith([row("a")]);
+		expect(w.find(".stub-hold").exists()).toBe(false);
+		await holdButton(w).trigger("click");
+		const dialog = w.find(".stub-hold");
+		expect(dialog.attributes("data-name")).toBe("a");
+		expect(dialog.attributes("data-open")).toBe("1");
+		expect(dialog.attributes("data-owner")).toBe("Asha Rao (asha@example.test)");
+		// Nothing is sent from the pane itself: the dialog holds, with the reason.
+		expect(confirm).not.toHaveBeenCalled();
+
+		api.adminListMacros.mockResolvedValue(page([held()]));
+		const hold = w.findComponent({ name: "MacroHoldDialog" });
+		hold.vm.$emit("update:modelValue", false);
+		hold.vm.$emit("held", { name: "a", stopped_runs: 1 });
+		await flushPromises();
+		expect(lastCall()).toMatchObject({ start: 0, pageLength: 20 });
+		expect(releaseButton(w).exists()).toBe(true);
+	});
+
+	it("re-reads the rows when the hold answers an error: the hold may still stand", async () => {
+		const w = await mountWith([row("a")]);
+		await holdButton(w).trigger("click");
+		const calls = api.adminListMacros.mock.calls.length;
+		api.adminListMacros.mockResolvedValue(page([held()]));
+		w.findComponent({ name: "MacroHoldDialog" }).vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		expect(api.adminListMacros.mock.calls.length).toBeGreaterThan(calls);
+		expect(releaseButton(w).exists()).toBe(true);
+	});
+
+	it("releases after asking, says nothing turns back on, and re-reads the rows", async () => {
+		const w = await mountWith([held()]);
+		api.adminListMacros.mockResolvedValue(page([row("a", { enabled: 0 })]));
+		await releaseButton(w).trigger("click");
+		await flushPromises();
+		const asked = confirm.mock.calls[0][0];
+		expect(asked.title).toBe("Release the hold?");
+		expect(asked.message).toContain("“Macro a”, owned by Asha Rao (asha@example.test)");
+		expect(asked.message).toContain("Nothing turns itself back on");
+		expect(api.adminRelease).toHaveBeenCalledWith("a");
+		expect(toast.success).toHaveBeenCalledWith("Released the hold on “Macro a”");
+		expect(holdButton(w).exists()).toBe(true);
+	});
+
+	it("does not release or delete when the admin cancels", async () => {
+		confirm.mockResolvedValue(false);
+		const w = await mountWith([held()]);
+		const calls = api.adminListMacros.mock.calls.length;
+		await releaseButton(w).trigger("click");
+		await deleteButton(w).trigger("click");
+		await flushPromises();
+		expect(api.adminRelease).not.toHaveBeenCalled();
+		expect(api.adminDelete).not.toHaveBeenCalled();
+		expect(api.adminListMacros.mock.calls.length).toBe(calls);
+	});
+
+	it("says a macro that was not on hold was not, as information", async () => {
+		api.adminRelease.mockResolvedValue({ ok: true, released: false });
+		const w = await mountWith([held()]);
+		await releaseButton(w).trigger("click");
+		await flushPromises();
+		expect(toast.success).not.toHaveBeenCalled();
+		expect(toast.create).toHaveBeenCalledWith({
+			message: "This macro was not on hold.",
+			type: "info",
+		});
+	});
+
+	it("deletes after a danger confirmation that says the run is stopped first", async () => {
+		const w = await mountWith([row("a", { live_run: "RUN-1" }), row("b")]);
+		api.adminDelete.mockResolvedValue({ ok: true, deleted: true, stopped_runs: 1 });
+		api.adminListMacros.mockResolvedValue(page([row("b")]));
+		await deleteButton(w).trigger("click");
+		await flushPromises();
+		const asked = confirm.mock.calls[0][0];
+		expect(asked.danger).toBe(true);
+		expect(asked.confirmLabel).toBe("Delete");
+		expect(asked.message).toContain("Its run is stopped first.");
+		expect(asked.message).toContain("The owner is told an admin deleted it.");
+		expect(api.adminDelete).toHaveBeenCalledWith("a");
+		expect(toast.success).toHaveBeenCalledWith("Deleted “Macro a”; 1 run stopped first");
+		expect(rowsOf(w).map((r) => r.attributes("data-macro"))).toEqual(["b"]);
+	});
+
+	it("shows why an action failed, escaped, and re-reads the rows", async () => {
+		api.adminDelete.mockRejectedValue(new Error("This macro was deleted. &lt;b&gt;"));
+		const w = await mountWith([row("a")]);
+		api.adminListMacros.mockResolvedValue(page([]));
+		await deleteButton(w).trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("This macro was deleted. &lt;b&gt;");
+		expect(toast.success).not.toHaveBeenCalled();
+		expect(rowsOf(w)).toHaveLength(0);
+	});
+
+	it("shows the action in flight and disables every other one meanwhile", async () => {
+		let answer;
+		api.adminRelease.mockReturnValue(new Promise((r) => (answer = r)));
+		const w = await mountWith([held(), row("b", { live_run: "RUN-2" })]);
+		await releaseButton(w).trigger("click");
+		await flushPromises();
+		expect(releaseButton(w).attributes("data-loading")).toBe("1");
+		for (const b of [deleteButton(w), holdButton(w, 1), deleteButton(w, 1)]) {
+			expect(b.attributes("disabled")).toBe("");
+		}
+		expect(rowsOf(w)[1].find(".jv-macro-admin-stop").attributes("disabled")).toBe("");
+		await deleteButton(w, 1).trigger("click");
+		expect(confirm).toHaveBeenCalledTimes(1);
+		answer({ ok: true, released: true });
+		await flushPromises();
+		expect(deleteButton(w).attributes("disabled")).toBeUndefined();
+	});
+
+	it("puts a name in the confirmation as text and in the toast escaped", async () => {
+		const w = await mountWith([held("a", { macro_name: HOSTILE })]);
+		await releaseButton(w).trigger("click");
+		await flushPromises();
+		expect(confirm.mock.calls[0][0].message).toContain(`“${HOSTILE}”`);
+		const said = toast.success.mock.calls[0][0];
+		expect(said).not.toContain("<img");
+		expect(w.find("img").exists()).toBe(false);
 	});
 });

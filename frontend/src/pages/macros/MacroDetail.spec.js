@@ -1546,3 +1546,133 @@ describe("MacroDetail Schedule section: the summary says whose clock the time is
 		expect(w.text()).toContain("Scheduled daily at 9:00 am. Next run:");
 	});
 });
+
+describe("MacroDetail: an admin's hold", () => {
+	const HELD_SAYS =
+		"An admin has put this macro on hold: Sends too many emails. It will not run until an admin releases it.";
+	// The full sentence is the banner's, said once; the controls it turns off say this.
+	const HELD_SHORT = "On hold: only an admin can release it.";
+	const held = (extra = {}) =>
+		baseMacro({
+			enabled: 0,
+			schedule_enabled: 0,
+			skip_confirmation: 0,
+			admin_hold: 1,
+			admin_hold_reason: "Sends too many emails",
+			...extra,
+		});
+	const switchOf = (w, label) =>
+		w.findAllComponents({ name: "Switch" }).find((s) => s.props("label").startsWith(label));
+
+	it("shows the banner with the admin's reason", async () => {
+		const w = await mountDetail(held());
+		const banner = w.find('[data-testid="hold-banner"]');
+		expect(banner.exists()).toBe(true);
+		expect(banner.text()).toContain("On hold");
+		expect(banner.text()).toContain(HELD_SAYS);
+	});
+
+	it("keeps Run off and says why, on the line the button points to", async () => {
+		const w = await mountDetail(held());
+		expect(runBtn(w).props("disabled")).toBe(true);
+		expect(runBtn(w).props("tooltip")).toBe(HELD_SHORT);
+		expect(runReason(w).text()).toBe(HELD_SHORT);
+		// The full sentence is on the page once.
+		expect(w.text().split(HELD_SAYS)).toHaveLength(2);
+		await runBtn(w).trigger("click");
+		expect(api.runMacro).not.toHaveBeenCalled();
+	});
+
+	it("keeps Enabled, the schedule and the arm switch off, each with the reason", async () => {
+		window.is_jarvis_admin = true; // the arm switch would otherwise be off for its own reason
+		try {
+			const w = await mountDetail(held());
+			for (const label of ["Enabled", "Run on a schedule", "Skip confirmation"]) {
+				const sw = switchOf(w, label);
+				expect(sw.props("disabled"), label).toBe(true);
+				expect(sw.props("description"), label).toBe(HELD_SHORT);
+			}
+			// Everything else stays the owner's to edit.
+			expect(switchOf(w, "Stop on error").props("disabled")).toBe(false);
+		} finally {
+			delete window.is_jarvis_admin;
+		}
+	});
+
+	it("still lets a switch that is on be switched off", async () => {
+		const w = await mountDetail(held({ enabled: 1 }));
+		const enabled = switchOf(w, "Enabled");
+		expect(enabled.props("disabled")).toBe(false);
+		expect(enabled.props("description")).not.toBe(HELD_SHORT);
+	});
+
+	const TWO = [
+		{ label: "", prompt: "do the thing", skills: [] },
+		{ label: "", prompt: "then this", skills: [] },
+	];
+	const menuItem = (w, label) =>
+		w
+			.findAllComponents({ name: "Dropdown" })
+			.map((d) => d.props("options") || [])
+			.flat()
+			.find((o) => o.label === label);
+
+	it("the owner can still edit the steps and save", async () => {
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		const w = await mountDetail(held());
+		stepsBuilder(w).vm.$emit("update:modelValue", [
+			{ label: "", prompt: "do the other thing", skills: [] },
+		]);
+		await flushPromises();
+		expect(saveBtn(w).attributes("disabled")).toBeUndefined();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro).toHaveBeenCalledTimes(1);
+		expect(api.updateMacro.mock.calls[0][0].steps[0].prompt).toBe("do the other thing");
+		expect(toast.success).toHaveBeenCalled();
+	});
+
+	it("starts no summary after a save while held, whatever the answer says", async () => {
+		// The server refuses a summary of a held macro and answers summarize: false;
+		// the form does not ask either.
+		api.updateMacro.mockResolvedValue({ data: { summarize: true } });
+		const w = await mountDetail(held({ steps: TWO }));
+		stepsBuilder(w).vm.$emit("update:modelValue", [
+			{ label: "", prompt: "do the thing", skills: [] },
+			{ label: "", prompt: "then that", skills: [] },
+		]);
+		await flushPromises();
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro).toHaveBeenCalledTimes(1);
+		expect(api.summarizeMacro).not.toHaveBeenCalled();
+		expect(toast.create).not.toHaveBeenCalled();
+	});
+
+	it("keeps Re-summarize off, with why", async () => {
+		const w = await mountDetail(held({ steps: TWO }));
+		const item = menuItem(w, "Re-summarize");
+		expect(item.disabled).toBe(true);
+		expect(item.description).toBe(HELD_SHORT);
+	});
+
+	it("the owner can still delete it", async () => {
+		const w = await mountDetail(held());
+		const item = menuItem(w, "Delete");
+		expect(item.disabled).toBeFalsy();
+		item.onClick();
+		const dialog = confirmDialog.mock.calls.at(-1)[0];
+		api.deleteMacro.mockResolvedValue({ ok: true, stopped_runs: 0 });
+		await dialog.onConfirm({ hideDialog: vi.fn() });
+		expect(api.deleteMacro).toHaveBeenCalledWith("MACRO-1");
+	});
+
+	it("shows nothing of the kind for a macro that is not held, or from an older server", async () => {
+		for (const fixture of [baseMacro({ admin_hold: 0, admin_hold_reason: "" }), baseMacro()]) {
+			const w = await mountDetail(fixture);
+			expect(w.find('[data-testid="hold-banner"]').exists()).toBe(false);
+			expect(runBtn(w).props("disabled")).toBe(false);
+			expect(switchOf(w, "Enabled").props("disabled")).toBe(false);
+		}
+	});
+});

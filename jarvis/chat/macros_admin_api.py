@@ -1,12 +1,13 @@
 """A Jarvis Admin's view of every user's macros: list them, open one read-only,
-stop a run.
+stop a run, put a macro on hold or release it, delete it.
 
-The owner's endpoints (``jarvis.chat.macros_api``) are untouched and stay
-owner-scoped. Nothing here changes who may save, run or delete a macro:
-``has_macro_permission``, the doctype's role rows and the generic document API are
-as they were, so an admin still cannot edit or run someone else's macro. These
-endpoints read with the role gate below instead of the document permission, and
-the one write is a stop.
+The owner's endpoints (``jarvis.chat.macros_api``) stay owner-scoped. Nothing here
+changes who may save or run a macro: ``has_macro_permission``, the doctype's role
+rows and the generic document API are as they were, so an admin still cannot edit
+or run someone else's macro (control without impersonation). These endpoints act
+with the role gate below instead of the document permission. Their writes are a
+stop, the two hold fields (and switching the macro off with them), and the owner's
+own delete.
 
 Every endpoint:
 
@@ -38,6 +39,12 @@ import frappe
 from frappe import _
 
 from jarvis.chat import list_filters
+from jarvis.chat.macros import _MACRO_HELD_ERROR, is_held
+from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
+	HOLD_FIELD,
+	HOLD_REASON_FIELD,
+	hold_fields_exist,
+)
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_admin, require_jarvis_user
 
 MACRO = "Jarvis Macro"
@@ -45,6 +52,10 @@ RUN = "Jarvis Macro Run"
 
 # What the run's owner reads, on the run row and as the closing line of its chat.
 STOPPED_BY_ADMIN = "Stopped by an administrator."
+
+# The reasons an admin's act leaves on a run it stopped: the list's
+# ``stopped_by_admin`` is whether a run ended with one of them.
+_ADMIN_STOP_REASONS = (STOPPED_BY_ADMIN, _MACRO_HELD_ERROR)
 
 # How many of a macro's runs the read-only view shows.
 RECENT_RUNS = 20
@@ -60,7 +71,9 @@ _SORTABLE = {
 	"modified": "modified",
 	"next_run_at": "next_run_at",
 }
-_FILTERS = {"owner", "armed", "scheduled", "live_run"}
+_FILTERS = {"owner", "armed", "scheduled", "live_run", "on_hold"}
+# What the hold's reason may be: it is shown to the owner on their form.
+HOLD_REASON_MAX = 500
 
 _LIST_COLUMNS = """m.name, m.macro_name, m.owner, m.enabled, m.skip_confirmation,
 	m.schedule_enabled, m.schedule_frequency, m.schedule_weekday, m.schedule_day_of_month,
@@ -173,12 +186,20 @@ def admin_list_macros(
 		params["scheduled"] = list_filters.bool01(f["scheduled"])
 	if "live_run" in f:
 		conditions.append(_HAS_LIVE_RUN if list_filters.bool01(f["live_run"]) else f"NOT {_HAS_LIVE_RUN}")
+	held_column = hold_fields_exist()
+	if "on_hold" in f:
+		on_hold = list_filters.bool01(f["on_hold"])
+		if held_column:
+			conditions.append("COALESCE(m.admin_hold, 0) = %(on_hold)s")
+			params["on_hold"] = on_hold
+		elif on_hold:
+			conditions.append("1=0")  # before the migrate nothing is held
 
 	where = " AND ".join(conditions)
 	order = list_filters.order_by(sort_field, sort_dir, _SORTABLE, "macro_name", "asc", prefix="m.")
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Macro` m WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
-		f"""SELECT {_LIST_COLUMNS}
+		f"""SELECT {_LIST_COLUMNS}{", m.admin_hold, m.admin_hold_reason" if held_column else ""}
 		FROM `tabJarvis Macro` m
 		WHERE {where}
 		ORDER BY {order}
@@ -196,6 +217,8 @@ def admin_list_macros(
 	now = frappe.utils.now_datetime()
 	for r in rows:
 		r["owner_full_name"] = full_names.get(r.owner) or r.owner
+		r["admin_hold"] = int(r.get("admin_hold") or 0)
+		r["admin_hold_reason"] = (r.get("admin_hold_reason") or "") if r["admin_hold"] else ""
 		r["last_run"] = last_runs.get(r.name)
 		r["live_run"] = live_runs.get(r.name, "")
 		# Pure arithmetic on the row, no query (as in the owner's list).
@@ -252,7 +275,8 @@ def _last_runs(macro_names: list[str]) -> dict:
 	Status, trigger and times only. The run's conversation is not for an admin, and
 	its reason can quote what a step tried to do: that is shown with the opened
 	macro, not in a list. The one thing the list says about the reason is a yes or
-	no, ``stopped_by_admin``: whether it is exactly this module's own fixed sentence.
+	no, ``stopped_by_admin``: whether it is exactly one of the two fixed sentences an
+	admin's action leaves (``_ADMIN_STOP_REASONS``: a Stop, or a hold).
 	That lets the pane tell an admin's stop from the owner's own without any of the
 	run's text leaving the server. The run Stop acts on is the row's ``live_run``.
 
@@ -283,7 +307,7 @@ def _last_runs(macro_names: list[str]) -> dict:
 			"trigger": r.trigger,
 			"started_at": r.started_at,
 			"finished_at": r.finished_at,
-			"stopped_by_admin": int(r.status == "stopped" and r.error == STOPPED_BY_ADMIN),
+			"stopped_by_admin": int(r.status == "stopped" and r.error in _ADMIN_STOP_REASONS),
 		}
 		for r in rows
 	}
@@ -363,6 +387,8 @@ def admin_get_macro(name: str) -> dict:
 		"modified": str(doc.modified or ""),
 		"merged_prompt": doc.merged_prompt or "",
 		"merge_status": doc.merge_status or "",
+		"admin_hold": int(is_held(doc)),
+		"admin_hold_reason": (doc.get(HOLD_REASON_FIELD) or "") if is_held(doc) else "",
 		"steps": [
 			{
 				"label": s.label or "",
@@ -475,3 +501,185 @@ def _leave_comment(macro: str | None, text: str) -> None:
 			"content": frappe.utils.escape_html(text),
 		}
 	).insert(ignore_permissions=True)
+
+
+# --------------------------------------------------------------------------- #
+# Hold, release, delete
+# --------------------------------------------------------------------------- #
+def _reason_arg(value) -> str:
+	"""The hold's reason: text, not empty, at most ``HOLD_REASON_MAX`` characters. The
+	owner reads it on their form, so it is asked for, and refused rather than cut."""
+	reason = _text_arg(value, _("Reason"))
+	if not reason:
+		frappe.throw(_("Say why the macro is put on hold: its owner reads it."), frappe.ValidationError)
+	if len(reason) > HOLD_REASON_MAX:
+		frappe.throw(
+			_("The reason must be at most {0} characters.").format(HOLD_REASON_MAX), frappe.ValidationError
+		)
+	return reason
+
+
+def _load_macro(name) -> frappe._dict:
+	"""The macro's name and owner, by a name that was checked to be text. Every write
+	after this is keyed on the loaded row's own name."""
+	name = _name_arg(name, _("Macro"))
+	row = frappe.db.get_value(MACRO, {"name": name}, ["name", "owner", "macro_name"], as_dict=True)
+	if not row:
+		frappe.throw(_("This macro was deleted."), frappe.DoesNotExistError)
+	return row
+
+
+def _refuse_without_the_hold_fields() -> None:
+	if not hold_fields_exist():
+		frappe.throw(
+			_("Holding a macro needs a site update that has not run yet (bench migrate)."),
+			frappe.ValidationError,
+		)
+
+
+def _refuse_own_macro(row, action: str) -> None:
+	"""The hold verbs are for other users' macros. On their own, an admin switches the
+	macro off on its form; a hold they could not lift themselves would lock them out,
+	and one they could lift would not hold anything another admin set."""
+	if row.owner == frappe.session.user:
+		frappe.throw(
+			_("This is your own macro. {0}").format(action),
+			frappe.ValidationError,
+		)
+
+
+def _lock(row) -> frappe._dict:
+	"""Take the macro's row lock (``macros._lock_macro_row``: a fresh snapshot, then the
+	locking read first), the one ``run_macro`` takes before it starts a run, and read
+	the row again under it: everything decided after this is decided on the present,
+	not on the row as it was before the wait."""
+	from jarvis.chat import macros
+
+	if not macros._lock_macro_row(row.name):
+		frappe.db.rollback()
+		frappe.throw(_("This macro was deleted."), frappe.DoesNotExistError)
+	return frappe.db.get_value(MACRO, row.name, ["name", "owner", "macro_name", HOLD_FIELD], as_dict=True)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def admin_hold(macro: str, reason: str = "") -> dict:
+	"""Put another user's macro on hold: it does not run, by hand, on its schedule or
+	by a parked run resuming, until an admin releases it. The hold also switches the
+	macro off, takes it off its schedule and disarms it, and the owner cannot switch
+	any of those back on while it lasts (the controller refuses; the form shows why).
+
+	In this order, as the design pins it (not one transaction: a stop commits):
+
+	1. the macro's row lock, then the hold fields and the switches in one raw write,
+	   the Comment, commit. ``run_macro`` reads the hold under the same lock, so a run
+	   that had not committed by then waits and is refused;
+	2. each run that is still live is stopped (``macros._stop_run``, its own run lock,
+	   compare-and-set): it committed before the hold. Each is tried on its own; the
+	   ones that could not be stopped are named in an error raised after all were
+	   tried. The hold stands, and such a run ends at its next step's end.
+
+	Works on a macro that is already off, and again on one already held (the reason is
+	the new one). Every step can be repeated: a request that failed part-way is sent
+	again. Refused on the admin's own macro."""
+	refuse_in_tool_dispatch()
+	require_jarvis_admin()
+	from jarvis.chat import macros
+
+	row = _load_macro(macro)
+	reason = _reason_arg(reason)
+	_refuse_without_the_hold_fields()
+	admin = frappe.session.user
+	row = _lock(row)
+	_refuse_own_macro(row, _("Switch it off on the macro form instead."))
+	frappe.db.set_value(
+		MACRO,
+		row.name,
+		{
+			HOLD_FIELD: 1,
+			HOLD_REASON_FIELD: reason,
+			"enabled": 0,
+			"schedule_enabled": 0,
+			"next_run_at": None,
+			"skip_confirmation": 0,
+		},
+	)
+	_leave_comment(row.name, f"{admin} put this macro on hold: {reason}")
+	frappe.db.commit()  # the hold is visible, and the row lock released, from here on
+	stopped, failed = 0, []
+	for run in macros.live_runs_of(row.name):
+		# Each run on its own: one that raised used to leave every run after it going.
+		# Nothing is pending and no lock is held: what `_stop_run` asks of its caller.
+		try:
+			stopped += bool(macros._stop_run(run, reason=_MACRO_HELD_ERROR, by=admin))
+		except Exception:
+			frappe.db.rollback()
+			# A stop refused with frappe.throw left its own message in the request; the
+			# client shows the first one, so the admin would read "this run could not be
+			# stopped" and never learn the hold itself went through.
+			frappe.clear_last_message()
+			frappe.log_error(
+				title=f"jarvis.chat.macros_admin_api.hold_stop_failed: {run}", message=frappe.get_traceback()
+			)
+			frappe.db.commit()  # the log only; the error below rolls the request back
+			failed.append(run)
+	if failed:
+		# The hold stands (committed above), and a run it missed still ends at its next
+		# step's end (``macros._apply_step_end``). Holding again retries the stop.
+		frappe.throw(
+			_(
+				"The macro is on hold, but {0} of its runs could not be stopped ({1}). Put it on hold again to retry."
+			).format(len(failed), ", ".join(failed)),
+			frappe.ValidationError,
+		)
+	return {"ok": True, "held": True, "stopped_runs": stopped}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def admin_release(macro: str) -> dict:
+	"""Lift an admin's hold. That is all: the macro stays off, unscheduled and
+	disarmed, and its owner turns back on what they want. A macro that is not held is
+	left as it is (``released`` False). Refused on the admin's own macro: a hold
+	another admin set is not theirs to lift."""
+	refuse_in_tool_dispatch()
+	require_jarvis_admin()
+	row = _load_macro(macro)
+	_refuse_without_the_hold_fields()
+	admin = frappe.session.user
+	row = _lock(row)
+	_refuse_own_macro(row, _("Another admin has to release it."))
+	if not frappe.utils.cint(row.get(HOLD_FIELD)):
+		frappe.db.commit()  # releases the row lock
+		return {"ok": True, "released": False}
+	frappe.db.set_value(MACRO, row.name, {HOLD_FIELD: 0, HOLD_REASON_FIELD: None})
+	_leave_comment(row.name, f"{admin} released the hold on this macro.")
+	frappe.db.commit()
+	return {"ok": True, "released": True}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def admin_delete(macro: str) -> dict:
+	"""Delete any user's macro: the owner's own delete (``macros_api.delete_loaded_macro``),
+	so its live runs are stopped first and the month's scheduled run rows are kept for
+	the owner's budget. The Comments go with the macro; what stays on record is Frappe's
+	Deleted Document row (written as the admin) and a notice to the owner that names no
+	document, which their Macros list shows until they dismiss it.
+
+	Repeating it after it went through answers "This macro was deleted."."""
+	refuse_in_tool_dispatch()
+	require_jarvis_admin()
+	from jarvis.chat import macros, macros_api
+
+	row = _load_macro(macro)
+	admin = frappe.session.user
+	doc = frappe.get_doc(MACRO, row.name)
+	out = macros_api.delete_loaded_macro(doc, ignore_permissions=True)
+	if row.owner != admin:
+		macros.notify_owner(
+			row.owner,
+			subject=f"{macros_api.ADMIN_DELETE_NOTICE}: {row.macro_name}",
+			body=_("An admin deleted your macro {0}.").format(row.macro_name),
+		)
+	return {"ok": True, "deleted": True, "stopped_runs": out.get("stopped_runs") or 0}
