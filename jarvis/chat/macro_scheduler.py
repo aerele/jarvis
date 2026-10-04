@@ -31,7 +31,12 @@ import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 from frappe.utils.user import get_users_with_role
 
-from jarvis.chat.macros import BLOCK_DISPATCH_FAILED, BLOCK_MACRO_DELETED, BLOCK_STEP_BUDGET
+from jarvis.chat.macros import (
+	BLOCK_DISPATCH_FAILED,
+	BLOCK_MACRO_DELETED,
+	BLOCK_MACRO_HELD,
+	BLOCK_STEP_BUDGET,
+)
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -125,6 +130,8 @@ _TRANSIENT_BLOCKS = {
 def run_due_macros() -> None:
 	"""Run every enabled macro whose next_run_at is due. Runs as Administrator
 	(the scheduler user); each macro executes as its own owner."""
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import HOLD_FIELD, hold_fields_exist
+
 	now = now_datetime()
 	due = frappe.get_all(
 		MACRO,
@@ -139,6 +146,8 @@ def run_due_macros() -> None:
 			"schedule_weekday",
 			"schedule_day_of_month",
 			"next_run_at",
+			# Before the migrate the column is not there: nothing is held.
+			*([HOLD_FIELD] if hold_fields_exist() else []),
 		],
 	)
 	if not due:
@@ -193,7 +202,14 @@ def _sweep_one(m, now, original_user: str, barred_owners: set) -> None:
 	# reading "last run: today" for a macro that has not run in months. Move the
 	# schedule on so it does not busy re-fire, write no failed row, and leave
 	# last_run_at alone: nothing ran.
-	if not cint(m.enabled):
+	#
+	# A macro an admin put on hold the same way. The due list asks for
+	# `schedule_enabled=1` and the hold clears it in the same write, so a row read as
+	# held here is one held while still scheduled, which only a raw write makes. A hold
+	# that lands after the list was read is not seen here (the row says 0): the slot
+	# claim finds `next_run_at` cleared and skips, and a hold after the claim is
+	# `run_macro`'s quiet BLOCK_MACRO_HELD, settled like a disabled macro.
+	if not cint(m.enabled) or cint(m.get("admin_hold")):
 		_consume_slot(m, now, stamp_last_run=False)
 		return
 
@@ -253,9 +269,10 @@ def _settle(m, now, out: dict, claimed) -> None:
 		_stamp_last_run(m, now)
 		return
 	reason = str(out.get("reason") or "").strip()
-	if reason in ("macro disabled", BLOCK_MACRO_DELETED):
-		# Raced: disabled, or deleted, between the due query and the dispatch. Same
-		# handling as the pre-dispatch branch: no failure, nothing ran, nothing stamped.
+	if reason in ("macro disabled", BLOCK_MACRO_DELETED, BLOCK_MACRO_HELD):
+		# Raced: disabled, deleted or put on hold, between the due query and the
+		# dispatch. Same handling as the pre-dispatch branch: no failure, nothing ran,
+		# nothing stamped.
 		return
 	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."
 	if reason == BLOCK_DISPATCH_FAILED:
