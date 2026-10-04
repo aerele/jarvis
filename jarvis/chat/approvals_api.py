@@ -1772,7 +1772,14 @@ def _edit_dry_run(tool: str, args: dict, items: list[dict]) -> dict | None:
 	come back inline, anything else as a banner; nothing is claimed."""
 	from jarvis import api
 	from jarvis.chat import held_writes
+	from jarvis.tools import _write_risk
 
+	try:
+		# A structure change is refused before the dry run (round 2): set up in Desk.
+		_write_risk.check(tool, args)
+	except api.WriteRefusedError as e:
+		frappe.clear_messages()
+		return _held_refusal("invalid", frappe.utils.strip_html(str(e)))
 	try:
 		api._run_preview(tool, args)
 	except api.PreviewSandboxLost:
@@ -1985,7 +1992,7 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 	if ok and not hidden:
 		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""))
 
-	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver)  # full rollback
+	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver, result=result)  # full rollback
 	if ok and not interfered:
 		frappe.db.commit()  # the failure audit; the row is Pending again
 		return _held_refusal(
