@@ -8,7 +8,7 @@ from __future__ import annotations
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from jarvis.chat.pending_actions._settle import MAX_SETTLE_ATTEMPTS, settle, settle_batch
+from jarvis.chat.pending_actions._settle import LATE_SETTLE_FLAG, MAX_SETTLE_ATTEMPTS, settle, settle_batch
 from jarvis.chat.pending_actions._store import (
 	CANCELLED,
 	EXECUTING,
@@ -260,22 +260,29 @@ def reconcile() -> dict:
 	if not table_ready():
 		return {}
 	out = {}
-	for step in (
-		_reap_interrupted,
-		_reap_sheets,
-		_settle_unsettled,
-		_retry_waiters,
-		_cancel_disabled_owners,
-		_cancel_orphaned_chat,
-		_sheet_backstop,
-		_warn_old_pending,
-		_cards_health,
-	):
-		try:
-			out[step.__name__.lstrip("_")] = step()
-		except Exception:
-			frappe.db.rollback()
-			_log("reconcile_failed", frappe.get_traceback())
+	# Every settle made here is a late one: no failure it reports is offered a
+	# correction (R2-3), because nobody is in that turn any more.
+	prev = frappe.flags.get(LATE_SETTLE_FLAG)
+	frappe.flags[LATE_SETTLE_FLAG] = True
+	try:
+		for step in (
+			_reap_interrupted,
+			_reap_sheets,
+			_settle_unsettled,
+			_retry_waiters,
+			_cancel_disabled_owners,
+			_cancel_orphaned_chat,
+			_sheet_backstop,
+			_warn_old_pending,
+			_cards_health,
+		):
+			try:
+				out[step.__name__.lstrip("_")] = step()
+			except Exception:
+				frappe.db.rollback()
+				_log("reconcile_failed", frappe.get_traceback())
+	finally:
+		frappe.flags[LATE_SETTLE_FLAG] = prev
 	return out
 
 

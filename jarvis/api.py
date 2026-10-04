@@ -1608,7 +1608,7 @@ def _preview_error(e: Exception) -> dict:
 		# that could not be staged: no card, and the message says what to check.
 		return _error("ConfirmationUnavailableError", str(e))
 	if isinstance(e, JarvisError):
-		return _error(type(e).__name__, str(e))
+		return _error(_error_code(e), str(e))
 	if isinstance(e, frappe.PermissionError):
 		return _error("PermissionDeniedError", str(e) or "permission denied")
 	# frappe.ValidationError (incl. MandatoryError) / frappe.DuplicateEntryError
@@ -1820,6 +1820,8 @@ _ERROR_HINTS = {
 	"OutgoingEmailError": (
 		"Ask your administrator to configure an enabled default outgoing Email Account before retrying."
 	),
+	# R2-3: a deadlock, a lock wait that timed out, or a lock another write holds.
+	"RetryLaterError": "Nothing was changed. Try again in a moment.",
 	# JF-017. The agent's tool surface is fixed when it is published, so unlike a
 	# permission denial there is nothing the USER can change - the remedy is the
 	# bundle. (The delegate's own "retrying will not help" instruction rides in the
@@ -1898,14 +1900,46 @@ def _duplicate_message(e: Exception) -> str:
 	return "A record with these values already exists."
 
 
+def _error_code(e: JarvisError) -> str:
+	"""The wire code of a Jarvis error: its class name, unless the class keeps an
+	established code (``InvalidFieldValueError`` -> ``InvalidArgumentError``)."""
+	return getattr(e, "envelope_code", None) or type(e).__name__
+
+
+_BUSY_MESSAGE = "The system was busy (a lock or timeout) and nothing was saved."
+
+
+def _bad_date_message(found: dict) -> str:
+	"""A database refusal of a date / datetime / time value (error 1292), named by field."""
+	fieldname, doctype = found["fieldname"], found["doctype"]
+	label = fieldname
+	try:
+		if doctype and frappe.db.exists("DocType", doctype):
+			label = frappe.get_meta(doctype).get_label(fieldname) or fieldname
+	except Exception:
+		pass
+	shape = {"date": "YYYY-MM-DD", "datetime": "YYYY-MM-DD HH:MM:SS", "time": "HH:MM:SS"}[found["type"]]
+	where = f"{label} ({fieldname})" if label != fieldname else fieldname
+	return f"{where} has an invalid {found['type']} value '{found['value'][:80]}'; use {shape}."
+
+
 def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	"""Enriched ``{ok:false, error}`` envelope for a KNOWN write-path exception,
 	promoting Frappe's discarded reason into ``message``/``detail``/``hint``.
 	Returns ``None`` for an unexpected exception - the caller MUST re-raise it so
 	a real bug still surfaces as a 500 (never enveloped, never leaks a traceback).
-	``mark`` is a ``_msglog_mark()`` taken before the write ran."""
+	``mark`` is a ``_msglog_mark()`` taken before the write ran.
+
+	``error.kind`` (R2-3, ``jarvis._failure_kind``) says whether the request can be
+	corrected (``fixable``), the site was busy (``retry_later``: a deadlock or a lock
+	wait timeout, now enveloped instead of a 500) or neither (``not_fixable``). A
+	database refusal of a date value is enveloped as a fixable
+	``InvalidArgumentError`` naming the field (Frappe does not validate dates)."""
+	from jarvis import _failure_kind
+
+	kind = _failure_kind.kind_of(e)
 	if isinstance(e, JarvisError):
-		code, message = type(e).__name__, strip_html(str(e)).strip()
+		code, message = _error_code(e), strip_html(str(e)).strip()
 	elif isinstance(e, frappe.PermissionError):
 		code = "PermissionDeniedError"
 		message = strip_html(str(e)).strip() or _flags_message() or "permission denied"
@@ -1918,13 +1952,19 @@ def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	elif isinstance(e, frappe.ValidationError):
 		code = "InvalidArgumentError"
 		message = strip_html(str(e)).strip() or _flags_message() or type(e).__name__
+	elif kind == _failure_kind.RETRY_LATER:
+		code, message = "RetryLaterError", _BUSY_MESSAGE
+	elif _failure_kind.bad_date(e):
+		code, message = "InvalidArgumentError", _bad_date_message(_failure_kind.bad_date(e))
 	else:
 		return None
 	detail = _harvest_reason(mark)
 	# Don't repeat the message under "Show details".
 	if detail and detail == strip_html(message).strip():
 		detail = ""
-	return _error(code, message, detail=detail, hint=_hint_for(code, detail))
+	envelope = _error(code, message, detail=detail, hint=_hint_for(code, detail))
+	envelope["error"]["kind"] = kind
+	return envelope
 
 
 # Tools that never raise and return their OWN {ok: false} envelope as the tool's
@@ -2026,7 +2066,17 @@ def _dispatch_and_wrap(
 			try:
 				frappe.db.rollback(save_point=sp)
 			except Exception:
-				pass
+				if envelope["error"].get("kind") == "retry_later":
+					# A deadlock already rolled the whole transaction back in the
+					# database (the savepoint went with it); a full rollback here also
+					# drops what the tool queued for after commit, as the 500 it
+					# replaced did. It also resets ``before_commit``, so a caller that
+					# watches for a mid-dispatch commit with a sentinel there
+					# (pending_actions._execute) is told what was still armed just
+					# before this rollback: a sentinel still there saw no commit.
+					armed = tuple(frappe.db.before_commit._functions)
+					frappe.db.rollback()
+					frappe.local.jarvis_rolled_back_after_failure = armed
 			else:
 				# SQL savepoint rollback leaves callbacks and realtime events queued.
 				for name, functions in saved_queues.items():
