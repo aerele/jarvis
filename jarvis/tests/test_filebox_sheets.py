@@ -697,6 +697,23 @@ class TestFixField(_Base):
 		self.assertEqual((fix["field"], fix["label"]), ("item_group", "Item Group"))
 		self.assertIn("zz-fbs Nope", fix["message"])
 
+	def test_a_value_the_type_check_rejects_joins_flagged_not_refused(self):
+		# R2-3: like the ValidationError Frappe raised for it before, a bad Select or a
+		# number that would be stored as 0 tries once, then joins the sheet flagged,
+		# while the call's other records are added.
+		for code, values, field in (
+			("zz-fbs S", {"valuation_method": "Bogus"}, "valuation_method"),
+			("zz-fbs Q", {"shelf_life_in_days": "abc"}, "shelf_life_in_days"),
+		):
+			with self.subTest(field=field):
+				conv = self.conv()
+				batch = _batch(_item(code, **values), _item(code + " ok"))
+				self.assert_refused(self.call("create_doc", batch, conv), "InvalidArgumentError")
+				self.assert_added(self.call("create_doc", batch, conv), 2)
+				fix = json.loads(self.sheet(conv).needs_fix)
+				self.assertEqual(list(fix), ["0"], "only the bad record is flagged")
+				self.assertEqual(fix["0"]["field"], field)
+
 	def test_an_error_naming_no_field_has_none(self):
 		self.assertEqual(
 			held_sheets._fix("Item", frappe.ValidationError("zz-fbs something broke")),

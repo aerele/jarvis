@@ -834,7 +834,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		# scaffold (on failure - explain + stop, do not auto-retry).
 		_cont = None
 		try:
-			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
+			_cont = enqueue_continuation(
+				conv, _confirm_receipt_text(record, result), outcome=_legacy_outcome(result)
+			)
 		except Exception:
 			frappe.log_error(
 				title="approve_and_run continuation failed",
@@ -975,7 +977,9 @@ def _confirm_core(
 			return result
 		_cont = None
 		try:
-			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
+			_cont = enqueue_continuation(
+				conv, _confirm_receipt_text(record, result), outcome=_legacy_outcome(result)
+			)
 		except Exception:
 			frappe.log_error(
 				title="confirm continuation failed",
@@ -1002,6 +1006,68 @@ def _confirm_pending_action(token: str, passed_conv: str, *, batch: bool, batch_
 			res["receipt_text"] = _pa_receipt_text(_item(row))
 			res["pa_deferred"] = True
 	return res
+
+
+# R2-3: a failure's own words reach the assistant in full up to these caps (they are
+# tenant text, quoted as DATA by enqueue_continuation): per failed row, and in total
+# for the failures of one continuation.
+RECEIPT_ROW_CAP = 600
+RECEIPT_TOTAL_CAP = 4000
+
+
+def _failure_text(err) -> str:
+	"""The failure's message and, when it adds something, Frappe's detail (the reason
+	``_harvest_reason`` kept), capped at ``RECEIPT_ROW_CAP`` characters."""
+	if not isinstance(err, dict):
+		return ""
+	message = str(err.get("message") or "").strip()
+	detail = str(err.get("detail") or "").strip()
+	text = f"{message} {detail}".strip() if detail and detail not in message else message
+	if len(text) > RECEIPT_ROW_CAP:
+		text = text[: RECEIPT_ROW_CAP - 3].rstrip() + "..."
+	return text
+
+
+def _join_capped(receipts: list[str]) -> str:
+	"""Failure receipts joined up to ``RECEIPT_TOTAL_CAP`` characters (``_cap_groups``)."""
+	return _cap_groups([("all", receipts)])["all"]
+
+
+def _cap_groups(groups: list[tuple[str, list[str]]]) -> dict[str, str]:
+	"""Each group's failure receipts joined, under ONE ``RECEIPT_TOTAL_CAP`` budget for
+	all of them together. No non-empty group is dropped: each first gets its first
+	receipt (each already capped at ``RECEIPT_ROW_CAP``), then the rest fill what is
+	left in order. What does not fit is counted in its own group ("and N more."),
+	never cut mid-way."""
+	shown = {key: texts[:1] for key, texts in groups}
+	used = sum(len(t[0]) + 1 for _key, t in groups if t)
+	for key, texts in groups:
+		for text in texts[1:]:
+			if used + 1 + len(text) > RECEIPT_TOTAL_CAP - 20 * len(groups):
+				break
+			shown[key].append(text)
+			used += len(text) + 1
+	out = {}
+	for key, texts in groups:
+		parts = [t[:RECEIPT_TOTAL_CAP] for t in shown[key]]
+		if len(texts) > len(parts):
+			parts.append(f"and {len(texts) - len(parts)} more.")
+		out[key] = " ".join(parts)
+	return out
+
+
+def _legacy_outcome(result) -> str:
+	"""The continuation outcome of a LEGACY (Redis token) confirm. It has no Pending
+	Action row for the correction stamp, so the bench could not limit a fixable
+	failure to one correction: it is sent as not fixable (explain and stop)."""
+	from jarvis import _failure_kind
+	from jarvis.chat import api as chat_api
+
+	if isinstance(result, dict) and result.get("ok"):
+		return chat_api.OUTCOME_OK
+	if _failure_kind.envelope_kind(result) == _failure_kind.RETRY_LATER:
+		return chat_api.OUTCOME_RETRY_LATER
+	return chat_api.OUTCOME_NOT_FIXABLE
 
 
 def _confirm_receipt_text(record: dict, result) -> str:
@@ -1037,9 +1103,7 @@ def _confirm_receipt_text(record: dict, result) -> str:
 	if not is_run_method and isinstance(data, dict) and data.get("name"):
 		desc += f" -> {data['name']}"
 	if isinstance(result, dict) and not result.get("ok"):
-		err = result.get("error") or {}
-		msg = str(err.get("message") or "")[:200] if isinstance(err, dict) else ""
-		return f"{desc} FAILED. {msg}".strip()
+		return f"{desc} FAILED. {_failure_text(result.get('error'))}".strip()
 	if is_run_method:
 		try:
 			payload = frappe.as_json(data)
@@ -1241,6 +1305,90 @@ def _take_continuation(name: str):
 	return (frappe.flags.jarvis_pa_continuations or {}).pop(name, None)
 
 
+def _settled_kind(item: dict) -> str:
+	"""The failure kind a settled, failed card is reported with. Never fixable for a
+	card that was itself the correction (``corrects``: the one correction is spent),
+	nor for a late settle (the reconciler, long after the click: nobody is in the
+	turn to correct it). Only FIXABLE is downgraded: a busy failure stays busy."""
+	from jarvis import _failure_kind
+
+	kind = _failure_kind.envelope_kind(item.get("result"))
+	if kind == _failure_kind.FIXABLE and (item.get("corrects") or item.get("late")):
+		return _failure_kind.NOT_FIXABLE
+	return kind
+
+
+def _settled_plan(decided: list[dict]) -> dict:
+	"""The continuation for settled Executed / Failed cards (R2-3): its outcome, the
+	DATA spans, and the cards to stamp as "may be corrected in the next turn".
+
+	``unknown`` / ``partial`` win over every failure kind (an unverified write is
+	never offered a retry). Otherwise one kind for all the failures is that kind's
+	outcome, and anything else (some ran, or kinds differ) is ``mixed``. Stamped:
+	each fixable failure, and each card that ran as a correction (``corrects``), so
+	"update the missing value, then submit again" is still the one correction."""
+	from jarvis import _failure_kind
+	from jarvis.chat import api as chat_api
+	from jarvis.chat.pending_actions._store import EXECUTED
+
+	ran = [i for i in decided if i["status"] == EXECUTED]
+	failed = [i for i in decided if i["status"] != EXECUTED]
+	applied = " ".join(_pa_receipt_text(i) for i in ran)
+	plan = {"receipt": "", "spans": None, "stamp": []}
+	if any(i["outcome"] in ("unknown", "partial") for i in decided):
+		partial_only = all(
+			i["outcome"] != "unknown" for i in decided if i["outcome"] in ("unknown", "partial")
+		)
+		plan["outcome"] = chat_api.OUTCOME_PARTIAL if partial_only else chat_api.OUTCOME_UNKNOWN
+		plan["receipt"] = " ".join(
+			filter(None, (applied, _join_capped([_pa_receipt_text(i) for i in failed])))
+		)
+		return plan
+	plan["stamp"] = [i["name"] for i in ran if i.get("corrects")]
+	if not failed:
+		plan["outcome"] = chat_api.OUTCOME_OK
+		plan["receipt"] = applied
+		return plan
+	kinds = {i["name"]: _settled_kind(i) for i in failed}
+	plan["stamp"] += [n for n, k in kinds.items() if k == _failure_kind.FIXABLE]
+	if not ran and len(set(kinds.values())) == 1:
+		kind = next(iter(kinds.values()))
+		plan["outcome"] = {
+			_failure_kind.FIXABLE: chat_api.OUTCOME_FIXABLE,
+			_failure_kind.RETRY_LATER: chat_api.OUTCOME_RETRY_LATER,
+		}.get(kind, chat_api.OUTCOME_NOT_FIXABLE)
+		plan["receipt"] = _join_capped([_pa_receipt_text(i) for i in failed])
+		return plan
+	# One cap across every failure span of the continuation, not one per span.
+	groups = _cap_groups(
+		[
+			(span, [_pa_receipt_text(i) for i in failed if kinds[i["name"]] == kind])
+			for span, kind in (
+				("fixable", _failure_kind.FIXABLE),
+				("busy", _failure_kind.RETRY_LATER),
+				("not_fixable", _failure_kind.NOT_FIXABLE),
+			)
+		]
+	)
+	plan["outcome"] = chat_api.OUTCOME_MIXED
+	plan["spans"] = {"applied": applied, **groups}
+	plan["receipt"] = groups["not_fixable"]
+	return plan
+
+
+def _stamp_correction(names: list[str], message: str) -> None:
+	"""R2-3 correction stamp, written in the continuation's own user-row transaction:
+	these cards may be corrected by a card parked in the turn ``message`` starts
+	(``pending_actions.park`` seals ``corrects`` on it)."""
+	from jarvis.chat.pending_actions._park import stamp_ready
+
+	if names and message and stamp_ready():
+		frappe.db.sql(
+			"UPDATE `tabJarvis Pending Action` SET correction_message=%(m)s WHERE name IN %(n)s",
+			{"m": message, "n": tuple(names)},
+		)
+
+
 def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 	"""``_settle.CONTINUATIONS["chat"]``: tell the agent how its settled card(s) ended,
 	at most once (D5). Executed/Failed: ONE hidden continuation turn carrying every
@@ -1278,19 +1426,17 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 			won.extend(claim_settled(names))
 			return bool(won)
 
-		ran = [i for i in decided if i["status"] == EXECUTED]
-		unknown = any(i["outcome"] in ("unknown", "partial") for i in decided)
-		# A mixed batch quotes what ran apart from what failed; an unverified outcome
-		# keeps its check-before-retrying scaffold over everything.
-		mixed = bool(ran) and len(ran) < len(decided) and not unknown
+		plan = _settled_plan(decided)
 		with impersonate(switch_to):
 			cont = enqueue_continuation(
 				conversation,
-				" ".join(_pa_receipt_text(i) for i in decided if not (mixed and i["status"] == EXECUTED)),
-				failed=len(ran) < len(decided),
-				outcome="unknown" if unknown else None,
+				plan["receipt"],
+				outcome=plan["outcome"],
 				claim=_claim,
-				applied=" ".join(_pa_receipt_text(i) for i in ran) if mixed else None,
+				spans=plan["spans"],
+				on_seed=(lambda message: _stamp_correction(plan["stamp"], message))
+				if plan["stamp"]
+				else None,
 			)
 		_stash_continuation(won or names, cont)
 		return
