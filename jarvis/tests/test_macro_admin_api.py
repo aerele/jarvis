@@ -46,7 +46,15 @@ SYSMGR = "macro-admin-sysmgr@example.com"
 # the test site is shared and may hold other users' macros.
 TAG = "e1adm"
 PATH = "jarvis.chat.macros_admin_api."
-ENDPOINTS = ("admin_list_macros", "admin_macro_owners", "admin_get_macro", "admin_stop_run")
+ENDPOINTS = (
+	"admin_list_macros",
+	"admin_macro_owners",
+	"admin_get_macro",
+	"admin_stop_run",
+	"admin_hold",
+	"admin_release",
+	"admin_delete",
+)
 STOPPED = macros_admin_api.STOPPED_BY_ADMIN
 _MISSING = object()
 
@@ -162,6 +170,9 @@ class TestTheGates(AdminBase):
 				"admin_macro_owners": {},
 				"admin_get_macro": {"name": macro},
 				"admin_stop_run": {"run": run},
+				"admin_hold": {"macro": macro, "reason": "Paused for review"},
+				"admin_release": {"macro": macro},
+				"admin_delete": {"macro": macro},
 			},
 		)
 

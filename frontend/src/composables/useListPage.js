@@ -65,6 +65,10 @@ export function useListPage({
 	// the whole clause model, so it covers every control family regardless of what
 	// props the individual input happens to support.
 	clauseDebounceMs = 300,
+	// Called with each answer this composable keeps (the current request's, not a
+	// rejection), for a page that reads an additive key of its list's envelope
+	// (the Macros list's `notices`). The fetcher itself stays bare (the D1 guard).
+	onEnvelope = null,
 }) {
 	const rows = ref([]);
 	const total = ref(0);
@@ -217,6 +221,7 @@ export function useListPage({
 			hasMore.value =
 				res.has_more != null ? !!res.has_more : rows.value.length < total.value;
 			if (!append && res.facets) facets.value = res.facets;
+			if (onEnvelope) onEnvelope(res);
 			error.value = "";
 			filterError.value = null;
 		} catch (e) {
