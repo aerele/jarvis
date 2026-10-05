@@ -18,6 +18,8 @@ the run.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentRunStep(Document):
+
+class JarvisAgentRunStep(NotRenamable, Document):
 	pass

@@ -17,11 +17,13 @@ revoked device by writing the row. Revoked rows are deleted after
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 MAX_LABEL_CHARS = 140
 MAX_PLATFORM_CHARS = 40
 
 
-class JarvisMobileDevice(Document):
+class JarvisMobileDevice(NotRenamable, Document):
 	def validate(self) -> None:
 		if not self.token_id or not self.secret_hash:
 			frappe.throw("A Jarvis Mobile Device needs both a token id and a hashed secret.")

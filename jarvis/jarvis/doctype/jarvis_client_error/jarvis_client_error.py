@@ -12,13 +12,15 @@ not business records.
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 MAX_MESSAGE = 500
 MAX_STACK = 2000
 MAX_SURFACE = 40
 MAX_ROUTE = 200
 
 
-class JarvisClientError(Document):
+class JarvisClientError(NotRenamable, Document):
 	def validate(self) -> None:
 		self.message = (self.message or "").strip()[:MAX_MESSAGE]
 		self.stack = (self.stack or "").strip()[:MAX_STACK]

@@ -16,8 +16,10 @@ controller stays minimal.
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisUserSettings(Document):
+
+class JarvisUserSettings(NotRenamable, Document):
 	# Minimal controller: identity is enforced by field constraints (``user``
 	# is a mandatory, unique Link and the autoname source) and the counters
 	# are mutated only by jarvis.chat.usage via SQL. No validation hook needed.

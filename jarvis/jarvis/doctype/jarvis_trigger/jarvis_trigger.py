@@ -22,6 +22,7 @@ from frappe.model.document import Document
 from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
+from jarvis.permissions import NotRenamable
 from jarvis.triggers.engine import (
 	LLM_EVENTS,
 	SCRIPT_EVENT_MAP,
@@ -90,7 +91,7 @@ def _denylisted_doctypes() -> frozenset:
 DENYLISTED_DOCTYPES = _denylisted_doctypes()
 
 
-class JarvisTrigger(Document):
+class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
 		self._validate_target_doctype()

@@ -9,6 +9,8 @@ and every write is a ``doc.save`` so track_changes records it.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentModelChoice(Document):
+
+class JarvisAgentModelChoice(NotRenamable, Document):
 	pass

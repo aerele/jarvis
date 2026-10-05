@@ -12,6 +12,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 # Server-owned fields (P0a chat-row integrity): only a writer that sets
 # ``flags.jarvis_server_write`` may set them on insert or change them on save.
 # Deliberately NOT keyed on ignore_permissions, and REST cannot set flags.
@@ -30,7 +32,7 @@ def _norm(fieldname: str, value):
 	return value
 
 
-class JarvisChatMessage(Document):
+class JarvisChatMessage(NotRenamable, Document):
 	def validate(self):
 		self._validate_conversation_owner()
 		self._guard_server_fields()

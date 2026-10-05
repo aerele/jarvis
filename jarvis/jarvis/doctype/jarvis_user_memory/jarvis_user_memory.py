@@ -4,8 +4,10 @@
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisUserMemory(Document):
+
+class JarvisUserMemory(NotRenamable, Document):
 	pass
 
 
