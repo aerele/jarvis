@@ -125,16 +125,14 @@
 						description="Stop the chain if a step fails - otherwise it keeps going after an error."
 						:disabled="saving"
 					/>
+					<!-- The owner's own switch (the server decides who may: can_arm). Off
+					     is always free; on asks once, in the server's words. -->
 					<Switch
-						v-model="form.skip_confirmation"
+						:modelValue="form.skip_confirmation"
 						label="Skip confirmation (run writes uncarded)"
-						:description="
-							heldOff(form.skip_confirmation) ||
-							(canArm
-								? 'Admin only. This macro\'s runs execute writes WITHOUT a confirmation card - including run_method, send_email and run_import. delete/cancel/amend still park and stop the run. Arming trusts the owner for current and future steps.'
-								: 'Admin only - a Jarvis Admin or System Manager can arm this macro to run its writes without a confirmation card.')
-						"
-						:disabled="saving || !canArm || !!heldOff(form.skip_confirmation)"
+						:description="heldOff(form.skip_confirmation) || armDescription"
+						:disabled="saving || !!heldOff(form.skip_confirmation) || !armSwitchFree"
+						@update:modelValue="setArm"
 					/>
 				</div>
 			</DocSection>
@@ -316,6 +314,7 @@ import {
 	scheduleAnchorPhrase,
 } from "@/lib/scheduleAnchor";
 import * as api from "@/api";
+import * as apiMacros from "@/api/macros";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
@@ -487,10 +486,56 @@ const stepsWithPrompt = computed(() => form.steps.filter((s) => (s.prompt || "")
 // changes, and the server summarizes the SAVED steps.
 const resummarizeBlocked = computed(() => stepsWithPrompt.value >= 2 && dirty.value);
 
-// Arming a macro to skip confirmation is admin-only (the backend re-checks
-// require_jarvis_admin, so this is a UX gate, not the security boundary); a
-// non-admin sees the toggle disabled with the reason instead of a throw-on-save.
-const canArm = !!(window.is_jarvis_admin || window.is_system_manager);
+// Whether this user may switch Skip confirmation on, why not, and what they are
+// asked to confirm first: all the server's (`can_arm`, `arm_blocked_reason`,
+// `arm_notice` on get_macro, or get_new_macro_arming for a new macro). The macro's
+// owner may; the server refuses everyone else, so this is a UX gate, not the
+// security boundary. A server from before these keys sends none of them: there
+// only an admin could arm, which is what the fallback says.
+const legacyCanArm = () => !!(window.is_jarvis_admin || window.is_system_manager);
+const LEGACY_ARM_REASON = "Only a Jarvis Admin or System Manager can switch this on.";
+const ARM_ON = "This macro's runs make their changes without asking for confirmation first.";
+const canArm = ref(legacyCanArm());
+const armBlockedReason = ref("");
+const armNotice = ref("");
+function seedArming(data) {
+	if (!data || data.can_arm === undefined) {
+		canArm.value = legacyCanArm();
+		armBlockedReason.value = canArm.value ? "" : LEGACY_ARM_REASON;
+		armNotice.value = "";
+		return;
+	}
+	canArm.value = !!data.can_arm;
+	armBlockedReason.value = data.arm_blocked_reason || "";
+	armNotice.value = data.arm_notice || "";
+}
+// Off is always free, and so is putting back an arm the macro already had.
+const armSwitchFree = computed(
+	() =>
+		canArm.value ||
+		form.skip_confirmation ||
+		!!(snapshot.value && snapshot.value.skip_confirmation)
+);
+const armDescription = computed(() =>
+	canArm.value || form.skip_confirmation ? ARM_ON : armBlockedReason.value || LEGACY_ARM_REASON
+);
+// Switching it on asks once, with the server's notice. An arm the macro already had
+// when it loaded is not asked about again.
+function setArm(on) {
+	if (!on || !armNotice.value || (snapshot.value && snapshot.value.skip_confirmation)) {
+		form.skip_confirmation = !!on;
+		return;
+	}
+	confirmDialog({
+		title: "Skip confirmation?",
+		// ConfirmDialog renders `message` as HTML (v-html): the server's text goes in escaped.
+		message: escapeHtml(armNotice.value),
+		onConfirm: ({ hideDialog }) => {
+			form.skip_confirmation = true;
+			hideDialog();
+		},
+	});
+}
 
 const dirty = computed(() => {
 	const snap = snapshot.value;
@@ -656,6 +701,7 @@ function seed(data) {
 	ownerBlockedReason.value = data.schedule_blocked_reason || "";
 	lastRun.value = data.last_run || null;
 	hold.value = macroHold(data);
+	seedArming(data);
 	snapshot.value = formSnapshot();
 }
 
@@ -687,6 +733,7 @@ async function init() {
 	if (props.isNew) {
 		macro.value = null;
 		seed({ enabled: 1, stop_on_error: 1 });
+		loadNewArming();
 		// "Save as macro" hand-off from chat (§6.3): applied AFTER the snapshot
 		// so the prefilled draft counts as unsaved work (dirty guard protects it)
 		const pre = takeMacroPrefill();
@@ -712,6 +759,17 @@ async function init() {
 }
 
 watch(() => [props.id, props.isNew], init, { immediate: true });
+
+// The arming keys for a new macro. A failure (or a server without the endpoint)
+// keeps the fallback seed() set; the server refuses anything it does not allow.
+async function loadNewArming() {
+	try {
+		const arming = await apiMacros.getNewMacroArming();
+		if (props.isNew) seedArming(arming);
+	} catch (e) {
+		// keep the fallback
+	}
+}
 
 // False when the reload failed: local state is kept, and the caller says so.
 async function reloadMacro() {
