@@ -211,8 +211,30 @@ describe("MacroHandoverDialog", () => {
 		expect(w.find(".stub-error").text()).toContain("already has a macro named Month end");
 		expect(w.emitted("handed")).toBeUndefined();
 		expect(w.emitted("update:modelValue")).toBeUndefined();
-		expect(w.emitted("failed")).toEqual([[{ name: "m1" }]]);
+		expect(w.emitted("failed")).toEqual([
+			[{ name: "m1", message: "ben@example.test already has a macro named Month end." }],
+		]);
 		expect(toast.success).not.toHaveBeenCalled();
+	});
+
+	it("sends the owner it is given now: the pane refreshes it after a refusal", async () => {
+		api.adminHandover.mockRejectedValue(
+			new Error("This macro changed hands since the list was loaded. Reload and try again.")
+		);
+		const w = await open();
+		await pick(w, "ben@example.test");
+		await handButton(w).trigger("click");
+		await flushPromises();
+		await w.setProps({ owner: "cara@example.test", ownerLabel: "Cara" });
+		api.adminHandover.mockResolvedValue({ ok: true, new_owner: "ben@example.test" });
+		await handButton(w).trigger("click");
+		await flushPromises();
+		expect(api.adminHandover).toHaveBeenLastCalledWith(
+			"m1",
+			"ben@example.test",
+			"cara@example.test"
+		);
+		expect(w.find(".jv-macro-handover-summary").text()).toContain("from Cara");
 	});
 
 	it("puts names in the toast escaped", async () => {

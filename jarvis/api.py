@@ -5,6 +5,7 @@ from contextlib import nullcontext
 
 import frappe
 from frappe.utils import strip_html
+from frappe.utils.caching import request_cache
 
 from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
@@ -1375,6 +1376,8 @@ def _armed_skip_disabled() -> bool:
 _SKILL_DOCTYPES = frozenset(
 	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
 )
+# Compared as Frappe finds a doctype: in any case, and spaces around it trimmed.
+_SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
 _DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
 
 
@@ -1407,12 +1410,16 @@ def _names_a_skill_doctype(value, *, depth: int) -> bool:
 			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
 			raise InvalidArgumentError("doctype must be the name of a document type")
 		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
-		if any(_SKILL_DOCTYPES.intersection(_texts(dt)) for dt in named):
+		if any(_is_a_skill_doctype(text) for dt in named for text in _texts(dt)):
 			return True
 		value = list(value.values())
 	if isinstance(value, list):
 		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
 	return False
+
+
+def _is_a_skill_doctype(text: str) -> bool:
+	return text.strip().casefold() in _SKILL_DOCTYPES_FOLDED
 
 
 def _texts(value) -> list:
@@ -3640,11 +3647,54 @@ def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> t
 			return _dispatch_and_wrap(tool, args, is_write), ""
 		finally:
 			frappe.flags[ARMED_SKILL_OWNER_FLAG] = before
-	result = _dispatch_and_wrap(tool, args, is_write)
+	# A skill list is asked, in an armed chat only, for the field that says which skill
+	# each row is of under a name of its own (``_JUDGE_ALIAS``), judged on that, and the
+	# field taken out again before the rows go back: the read is judged on exactly its
+	# rows, and the columns the agent asked for come back as it asked for them.
+	key = _judging_key(tool, args)
+	if key and not macros.armed_skill_owner(conversation):
+		key = None
+	alias = f"{_JUDGE_ALIAS}{key}" if key else None
+	judged = {**args, "fields": [*(args.get("fields") or ["name"]), f"{key} as {alias}"]} if key else args
+	result = _dispatch_and_wrap(tool, judged, is_write)
 	if not result.get("ok") or not _reads_skill_rows(tool, args):
-		return result, ""
+		return _without_column(result, alias), ""
 	data = result.get("data")
-	return result, macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data))
+	note = macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data, alias))
+	return _without_column(result, alias), note
+
+
+# The name a skill list's own key is asked for under: not one a caller's column has.
+_JUDGE_ALIAS = "__jv_judge_"
+
+
+def _judging_key(tool: str, args) -> str | None:
+	"""The field that tells a ``get_list`` row of a skill doctype apart (``name``, or
+	``parent`` for a child table); else None. Not for fields that are not plain
+	records' (an aggregate, ``distinct``), whose rows are not one per record: those are
+	judged on every skill the reader can read, as before."""
+	if tool != "get_list" or not isinstance(args, dict):
+		return None
+	doctype = args.get("doctype")
+	if not isinstance(doctype, str) or not _is_a_skill_doctype(doctype):
+		return None
+	key = "name" if doctype.strip().casefold() == "jarvis custom skill" else "parent"
+	fields = args.get("fields") or ["name"]  # get_list's own default
+	if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+		return None
+	if any("(" in f or "distinct" in f.casefold() for f in fields):
+		return None
+	return key
+
+
+def _without_column(result: dict, column: str | None) -> dict:
+	"""``result`` with ``column`` (added by ``_dispatch_judging_skills``) taken out of
+	each row."""
+	if column and result.get("ok") and isinstance(result.get("data"), list):
+		for row in result["data"]:
+			if isinstance(row, dict):
+				row.pop(column, None)
+	return result
 
 
 # Reads that return no stored row of the doctype they name (its schema, a would-be
@@ -3662,71 +3712,167 @@ _NO_STORED_ROWS = frozenset(
 		"preview_import",
 	}
 )
-_SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
 
 
 def _reads_skill_rows(tool: str, args) -> bool:
-	"""Whether a read may return rows of a skill doctype: one is named anywhere in its
-	arguments (a ``doctype``, a query's ``from`` or join, a parent, a JSON filter), or
-	it runs a report on one. A Script or Query Report's own SQL is not seen here."""
+	"""Whether a read may return rows of a skill doctype: its arguments use one as a
+	doctype (a ``doctype``, a query's ``from`` or join, a parent, or a filter on a field
+	that holds a doctype, JSON included), or it runs a report on one. A Script or Query
+	Report's own SQL is not seen here."""
 	if tool in _NO_STORED_ROWS:
 		return False
 	if tool in ("run_report", "report_pdf") and isinstance(args, dict):
 		report = args.get("report_name")
 		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
-		if ref and ref.casefold() in _SKILL_DOCTYPES_FOLDED:
+		if ref and _is_a_skill_doctype(ref):
 			return True
-	return _mentions_a_skill_doctype(args, depth=0)
+	if not _mentions_a_skill_doctype(args, depth=0, keys=None):
+		return False  # no skill doctype's name anywhere in it: no meta read
+	keys = _DOCTYPE_ARG_KEYS.union(*(_doctype_fields(dt) for dt in _doctypes_named(args, depth=0)))
+	return _mentions_a_skill_doctype(args, depth=0, keys=keys)
 
 
-def _mentions_a_skill_doctype(value, *, depth: int) -> bool:
+# Where a read's arguments use a value as a doctype: the tool's own arguments (its
+# ``doctype``, a query's ``from`` and a join's ``doctype``, a child table's parent),
+# ``parenttype``, and fields Frappe keeps a doctype in as plain text, which their
+# doctype's meta cannot tell (``Deleted Document.deleted_doctype``). Every other field
+# is told by the meta of the doctypes the read names (``_doctype_fields``). A skill
+# doctype's name anywhere else (a ToDo's description, a document's name) is a value
+# like any other, not a read of skill rows.
+_DOCTYPE_ARG_KEYS = frozenset(
+	{"doctype", "from", "parent_doctype", "parenttype", "reference_doctype", "ref_doctype", "deleted_doctype"}
+)
+# The argument keys that name the doctypes a read reads.
+_READ_DOCTYPE_KEYS = ("doctype", "from", "parent_doctype")
+
+
+@request_cache
+def _doctype_fields(doctype: str) -> frozenset:
+	"""The fields of ``doctype`` that hold a doctype, casefolded: a Link to DocType, and
+	the field a Dynamic Link takes its doctype from. Empty for a doctype that is not."""
+	try:
+		meta = frappe.get_meta(doctype)
+	except Exception:
+		return frozenset()
+	held = set()
+	for df in meta.fields:
+		if df.fieldtype == "Link" and df.options == "DocType":
+			held.add(df.fieldname)
+		elif df.fieldtype == "Dynamic Link" and df.options:
+			held.add(df.options)
+	return frozenset(field.casefold() for field in held)
+
+
+def _doctypes_named(value, *, depth: int) -> set:
+	"""The doctypes a read's arguments name as the ones it reads: under
+	``_READ_DOCTYPE_KEYS`` and as a four- or five-part filter's first part, JSON
+	included."""
+	if depth > 6:
+		return set()
+	value = _parsed(value)
+	named = set()
+	if isinstance(value, dict):
+		named.update(
+			dt.strip() for key in _READ_DOCTYPE_KEYS if isinstance(dt := value.get(key), str) and dt.strip()
+		)
+		value = list(value.values())
+	if isinstance(value, list | tuple):
+		if len(value) in (4, 5) and isinstance(value[0], str) and value[0].strip():
+			named.add(value[0].strip())
+		for item in value:
+			named |= _doctypes_named(item, depth=depth + 1)
+	return named
+
+
+def _parsed(value):
+	"""``value``, or the JSON a string that starts as an object or a list holds."""
+	if isinstance(value, str) and value.strip().startswith(("{", "[")):
+		try:
+			return json.loads(value)
+		except ValueError:
+			return value
+	return value
+
+
+def _is_doctype_key(key, keys) -> bool:
+	"""Whether ``key`` (an argument, or a filter's field, ``alias.field`` included) is
+	one of ``keys``, the fields that hold a doctype."""
+	return isinstance(key, str) and key.split(".")[-1].strip(" `").casefold() in keys
+
+
+def _mentions_a_skill_doctype(value, *, depth: int, keys, as_doctype: bool = False) -> bool:
+	"""Whether ``value`` holds a skill doctype's name where ``keys`` say a doctype is
+	held; with ``keys`` None, anywhere."""
 	if depth > 6:
 		return False
 	if isinstance(value, str):
-		text = value.strip()
-		if text.casefold() in _SKILL_DOCTYPES_FOLDED:
+		if (keys is None or as_doctype) and _is_a_skill_doctype(value):
 			return True
-		if not text.startswith(("{", "[")):
+		value = _parsed(value)
+		if isinstance(value, str):
 			return False
-		try:
-			value = json.loads(text)
-		except ValueError:
-			return False
+	if keys is None:
+		if isinstance(value, dict):
+			value = list(value.values())
+		if isinstance(value, list | tuple):
+			return any(_mentions_a_skill_doctype(item, depth=depth + 1, keys=None) for item in value)
+		return False
 	if isinstance(value, dict):
-		value = list(value.values())
+		# A query's where clause: ``{"field": "c.reference_doctype", "value": ...}``.
+		keyed = as_doctype or _is_doctype_key(value.get("field"), keys)
+		return any(
+			_mentions_a_skill_doctype(
+				item, depth=depth + 1, keys=keys, as_doctype=keyed or _is_doctype_key(key, keys)
+			)
+			for key, item in value.items()
+		)
 	if isinstance(value, list | tuple):
-		return any(_mentions_a_skill_doctype(item, depth=depth + 1) for item in value)
+		# A filter as a list: ``[field, op, value]``, or ``[doctype, field, op, value]``
+		# whose first part is a doctype too.
+		keyed = as_doctype or any(_is_doctype_key(part, keys) for part in value[:2])
+		if len(value) == 4 and all(isinstance(part, str) for part in value[:2]):
+			if _is_a_skill_doctype(value[0]):
+				return True
+		return any(
+			_mentions_a_skill_doctype(item, depth=depth + 1, keys=keys, as_doctype=keyed) for item in value
+		)
 	return False
 
 
-def _skill_rows_read(args, data):
+def _skill_rows_read(args, data, column: str | None = None):
 	"""The ``Jarvis Custom Skill`` docnames a skill read asked for or returned, or
 	None when they cannot be told apart (every skill the reader can read is judged).
 	Known: the record(s) named by ``name`` / ``names`` on a skill doctype (a child
-	row's skill is its parent), and ``get_list`` rows carrying ``name`` (or ``parent``
-	for a child table)."""
+	row's skill is its parent), and the rows of a ``get_list`` asked for its key under
+	``column`` (``_judging_key``). No column of the caller's stands in for it: a
+	``name`` can be another table's, or another field's alias."""
 	doctype = args.get("doctype") if isinstance(args, dict) else None
-	if not isinstance(doctype, str) or doctype.casefold() not in _SKILL_DOCTYPES_FOLDED:
+	if not isinstance(doctype, str) or not _is_a_skill_doctype(doctype):
 		return None
-	doctype = next(dt for dt in _SKILL_DOCTYPES if dt.casefold() == doctype.casefold())
-	key = "name" if doctype == "Jarvis Custom Skill" else "parent"
+	doctype = next(dt for dt in _SKILL_DOCTYPES if dt.casefold() == doctype.strip().casefold())
 	names = args.get("names") if isinstance(args.get("names"), list) else []
 	names = [n for n in [args.get("name"), *names] if n]
 	if names:
 		if not all(isinstance(n, str) for n in names):
 			return None
-		if key == "name":
+		if doctype == "Jarvis Custom Skill":
 			return names
 		return frappe.get_all(doctype, filters={"name": ["in", names]}, pluck="parent")
-	if isinstance(data, list) and all(isinstance(row, dict) and row.get(key) for row in data):
-		return [row[key] for row in data]
+	if column and isinstance(data, list) and all(isinstance(row, dict) and row.get(column) for row in data):
+		return [row[column] for row in data]
 	return None
 
 
 def _with_note(result: dict, note: str) -> dict:
-	"""``result`` with ``note`` added to its data, for the agent to read."""
-	if note and isinstance(result, dict) and result.get("ok") and isinstance(result.get("data"), dict):
+	"""``result`` with ``note`` added to its data, for the agent to read: a key of a
+	dict, and a list (``get_list``'s rows) wrapped as ``{"rows": ..., "note": ...}``,
+	the shape a truncated list already has. Without a note nothing changes."""
+	if not (note and isinstance(result, dict) and result.get("ok")):
+		return result
+	if isinstance(result.get("data"), dict):
 		result["data"]["note"] = note
+	elif isinstance(result.get("data"), list):
+		result["data"] = {"rows": result["data"], "note": note}
 	return result
 
 

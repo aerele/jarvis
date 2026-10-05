@@ -104,8 +104,10 @@
 // Search, pick, then admin_handover, with the owner this dialog showed (the server
 // refuses a macro that changed hands since). The pane re-reads its list when told
 // (`handed`, and `failed`: a hand-over can stop at a run that would not stop and
-// leave the macro on hold, which the list should show). A refusal stays in the
-// dialog, next to the choice it is about. While the hand-over is in flight the
+// leave the macro on hold, which the list should show; the pane then passes the
+// owner it re-read, so a retry is not refused as "changed hands" again, or closes
+// this with the message when the macro is no longer listed). A refusal stays in
+// the dialog, next to the choice it is about. While the hand-over is in flight the
 // dialog stays open: its answer belongs here.
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Button, Dialog, ErrorMessage, FormControl, toast } from "frappe-ui";
@@ -256,7 +258,7 @@ async function save() {
 		show.value = false;
 	} catch (e) {
 		error.value = errorText(e, "Could not hand the macro over.");
-		emit("failed", { name: props.name });
+		emit("failed", { name: props.name, message: error.value });
 	} finally {
 		saving.value = false;
 	}
