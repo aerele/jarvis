@@ -56,3 +56,18 @@ export const adminRelease = (macro) => call(MA + "admin_release", { macro });
 // stopped first. The owner's Macros list shows them a notice that it happened.
 // -> { ok, deleted, stopped_runs }
 export const adminDelete = (macro) => call(MA + "admin_delete", { macro });
+
+// Hand another user's macro to `newOwner` (a user's name). It arrives switched off,
+// unscheduled and disarmed, with its summary, its steps' skills, its shares and
+// its assignments cleared; its live runs are stopped first. Both owners are told.
+// Refused on the admin's own macro.
+// -> { ok, handed_over, new_owner, stopped_runs }
+export const adminHandover = (macro, newOwner) =>
+	call(MA + "admin_handover", { macro, new_owner: newOwner });
+
+// Who a macro can be handed to: enabled users with Jarvis access matching `search`
+// (address or full name), at most 20.
+// -> { users: [{ user, full_name, macros }], max }; `max` is how many macros one
+// user can have.
+export const adminHandoverTargets = (search = "") =>
+	call(MA + "admin_handover_targets", { search });
