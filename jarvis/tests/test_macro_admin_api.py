@@ -54,6 +54,8 @@ ENDPOINTS = (
 	"admin_hold",
 	"admin_release",
 	"admin_delete",
+	"admin_handover",
+	"admin_handover_targets",
 )
 STOPPED = macros_admin_api.STOPPED_BY_ADMIN
 _MISSING = object()
@@ -173,6 +175,8 @@ class TestTheGates(AdminBase):
 				"admin_hold": {"macro": macro, "reason": "Paused for review"},
 				"admin_release": {"macro": macro},
 				"admin_delete": {"macro": macro},
+				"admin_handover": {"macro": macro, "new_owner": OTHER, "expected_owner": OWNER},
+				"admin_handover_targets": {"search": "macro-admin"},
 			},
 		)
 

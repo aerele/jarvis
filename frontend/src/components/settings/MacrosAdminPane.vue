@@ -1,7 +1,7 @@
 <template>
 	<SettingsPane
 		title="Macros"
-		description="Every user's macros on this site. Open one to read it, stop a run, put a macro on hold or delete it. Only its owner can edit or run a macro."
+		description="Every user's macros on this site. Open one to read it, stop a run, put a macro on hold, hand it to another user or delete it. Only its owner can edit or run a macro."
 	>
 		<template #actions>
 			<Button
@@ -280,14 +280,15 @@
 									}, owned by ${ownerText(row)}`"
 									@click="stop(row)"
 								/>
-								<!-- An admin's own macro has no Hold: they switch it off on
-								     its form. The server refuses it too. Said, so the missing
-								     buttons do not read as a fault. -->
+								<!-- An admin's own macro has no Hold and no Hand over: they
+								     switch it off on its form, and another admin hands it over.
+								     The server refuses both too. Said, so the missing buttons
+								     do not read as a fault. -->
 								<p
 									v-if="isMine(row)"
 									class="jv-macro-admin-own text-right text-xs text-ink-gray-5"
 								>
-									You cannot hold or release your own macro.
+									You cannot hold, release or hand over your own macro.
 								</p>
 								<Button
 									v-if="!row.admin_hold && !isMine(row)"
@@ -313,6 +314,18 @@
 										row.macro_name || row.name
 									}, owned by ${ownerText(row)}`"
 									@click="release(row)"
+								/>
+								<Button
+									v-if="!isMine(row)"
+									class="jv-macro-admin-handover"
+									size="sm"
+									variant="subtle"
+									label="Hand over"
+									:disabled="busy"
+									:aria-label="`Hand ${
+										row.macro_name || row.name
+									}, owned by ${ownerText(row)}, to another user`"
+									@click="askHandover(row)"
 								/>
 								<Button
 									class="jv-macro-admin-delete"
@@ -359,13 +372,24 @@
 			@held="onHeld"
 			@failed="onHeld"
 		/>
+		<MacroHandoverDialog
+			v-if="handingOver"
+			v-model="handoverOpen"
+			:name="handingOver.name"
+			:macroName="handingOver.macro_name || ''"
+			:owner="handingOver.owner"
+			:ownerLabel="ownerText(handingOver)"
+			@handed="onHeld"
+			@failed="onHeld"
+		/>
 	</SettingsPane>
 </template>
 
 <script setup>
 // A Jarvis Admin's view of every user's macros: who owns each, whether it is on,
 // scheduled, armed or on hold, how its last run went. Actions: Stop run, Hold
-// (MacroHoldDialog asks why), Release, Delete. Opening a row shows the macro
+// (MacroHoldDialog asks why), Release, Hand over (MacroHandoverDialog picks who
+// to), Delete. Opening a row shows the macro
 // read-only (MacroAdminDialog). Nothing here edits or runs a macro.
 //
 // Gated at the SettingsDialog level by window.is_jarvis_admin. The server checks
@@ -376,6 +400,7 @@ import { Badge, Button, FeatherIcon, FormControl, toast } from "frappe-ui";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import MacroAdminDialog from "@/components/settings/MacroAdminDialog.vue";
 import MacroHoldDialog from "@/components/settings/MacroHoldDialog.vue";
+import MacroHandoverDialog from "@/components/settings/MacroHandoverDialog.vue";
 import { session } from "@/data/session";
 import { useConfirm } from "@/composables/useConfirm";
 import {
@@ -713,15 +738,19 @@ async function stop(row) {
 	}
 }
 
-// ── hold, release, delete ────────────────────────────────────────────────────
+// ── hold, release, hand over, delete ─────────────────────────────────────────
 // One action at a time across the list, as for Stop: `acting` is "<verb>:<row>"
-// while a release or a delete is in flight, and the hold dialog is open for
-// `holding`. Nothing is shown changed until the server says so: each ends with a
+// while a release or a delete is in flight, the hold dialog is open for
+// `holding` and the hand-over dialog for `handingOver`. Nothing is shown changed until the server says so: each ends with a
 // re-read of the list.
 const acting = ref("");
 const holding = ref(null);
 const holdOpen = ref(false);
-const busy = computed(() => !!stopping.value || !!acting.value || holdOpen.value);
+const handingOver = ref(null);
+const handoverOpen = ref(false);
+const busy = computed(
+	() => !!stopping.value || !!acting.value || holdOpen.value || handoverOpen.value
+);
 
 const isMine = (row) => !!session.user && row.owner === session.user;
 
@@ -736,6 +765,14 @@ function askHold(row) {
 	holdOpen.value = true;
 }
 
+function askHandover(row) {
+	if (busy.value) return;
+	handingOver.value = row;
+	handoverOpen.value = true;
+}
+
+// After a hold or a hand-over, answered or refused: the row's state on the server
+// may have changed either way.
 async function onHeld({ name }) {
 	await load("keep");
 	await focusRow(name);
