@@ -321,6 +321,20 @@ class DispatchIdempotencyTestCase(FrappeTestCase):
 	def _next_run_at(self, inst: str):
 		return frappe.db.get_value(INSTALLATION, inst, "next_run_at")
 
+	def _assert_retry_scheduled(self, inst: str, now) -> None:
+		"""A slot whose launch created nothing is retried, never counted as run. It used
+		to go straight back (still due, so the next hourly tick retried it); with the
+		sweep every five minutes the retry is written about an hour out instead
+		(``agent_scheduler._retry_later``), so a failing slot is not relogged and
+		re-notified on every sweep."""
+		nxt = self._next_run_at(inst)
+		self.assertGreater(nxt, now, "the retry is scheduled, not left due for every sweep")
+		self.assertLessEqual(
+			nxt,
+			add_to_date(now_datetime(), seconds=agent_scheduler._RETRY_AFTER_S + 5),
+			"the slot is retried within the hour, not skipped to the next occurrence",
+		)
+
 
 class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 	"""The reported defect and its immediate neighbours."""
@@ -395,7 +409,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		self.assertEqual(self._launched(inst), launched)
 		self.assertEqual(frappe.db.get_value(RUN, launched[0], "status"), "running")
 
-	def test_a_dispatch_that_fails_for_real_leaves_the_slot_due_and_nothing_running(self):
+	def test_a_dispatch_that_fails_for_real_schedules_a_retry_and_leaves_nothing_running(self):
 		"""The launch reaches the fleet call and THAT fails, which is a different shape
 		from the whole launch failing: the run row is already committed, so
 		``_launch_audit`` stamps it ``failed`` itself and re-raises. Nothing is running,
@@ -429,11 +443,11 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 			frappe.get_all(NOTIFICATION, filters={"for_user": self.owner}, pluck="name"),
 			"the owner is told",
 		)
-		self.assertLessEqual(self._next_run_at(inst), now, "the slot goes back for a retry")
+		self._assert_retry_scheduled(inst, now)
 
-	def test_a_genuine_launch_failure_records_notifies_and_leaves_the_slot_due(self):
+	def test_a_genuine_launch_failure_records_notifies_and_schedules_a_retry(self):
 		"""Control: nothing durable was created, so the customer must still be told and
-		the slot must stay due for the next hour."""
+		the slot must be retried within the hour."""
 		inst = self._due_install()
 		now = now_datetime()
 
@@ -454,7 +468,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 			frappe.get_all(NOTIFICATION, filters={"for_user": self.owner}, pluck="name"),
 			"the owner is told the run could not be started",
 		)
-		self.assertLessEqual(self._next_run_at(inst), now, "the slot stays due for a retry")
+		self._assert_retry_scheduled(inst, now)
 		self.assertEqual(self._dispatched_for(inst), [], "nothing reached the container")
 
 
@@ -493,9 +507,14 @@ class TestLaunchAtomicity(DispatchIdempotencyTestCase):
 
 		with self._mid_launch_failure():
 			self._sweep()
+			# The retry time arrives (it is written about an hour out).
+			frappe.db.set_value(
+				INSTALLATION, inst, "next_run_at", add_days(now_datetime(), -1), update_modified=False
+			)
+			frappe.db.commit()
 			self._sweep()
 
-		self.assertEqual(len(self._runs(inst, "failed")), 2, "the second tick reports it too")
+		self.assertEqual(len(self._runs(inst, "failed")), 2, "the retry reports it too")
 		self.assertEqual(self._runs(inst, "running"), [])
 
 	def test_a_wedged_run_does_not_suppress_a_later_due_slot(self):
@@ -675,9 +694,9 @@ class TestAmbiguousDispatchIsNotRetriedAsANewRun(DispatchIdempotencyTestCase):
 		self.assertEqual(self._runs(inst, "running"), running, "the same single run; no new id minted")
 		self.assertEqual(len(self._dispatched_for(inst)), 1, "no second audit reaches the container")
 
-	def test_a_confirmed_refusal_still_records_notifies_and_returns_the_slot(self):
+	def test_a_confirmed_refusal_still_records_notifies_and_retries_the_slot(self):
 		"""Control (unchanged behavior): a CONFIRMED refusal - a base AdminUnreachableError,
-		not the ambiguous subclass - is terminalized, notified and retried exactly as before."""
+		not the ambiguous subclass - is terminalized, notified and retried (within the hour)."""
 		inst = self._due_install()
 		now = now_datetime()
 
@@ -696,7 +715,7 @@ class TestAmbiguousDispatchIsNotRetriedAsANewRun(DispatchIdempotencyTestCase):
 			frappe.get_all(NOTIFICATION, filters={"for_user": self.owner}, pluck="name"),
 			"the owner is told the run could not start",
 		)
-		self.assertLessEqual(self._next_run_at(inst), now, "the slot goes back for a retry")
+		self._assert_retry_scheduled(inst, now)
 
 
 class TestAmbiguousDispatchManualPath(DispatchIdempotencyTestCase):
