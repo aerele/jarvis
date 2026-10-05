@@ -12,8 +12,10 @@ in ORM validation — the finalize path never uses ``save()``.
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisTurnEffect(Document):
+
+class JarvisTurnEffect(NotRenamable, Document):
 	# Minimal controller. The composite name (turn::effect_name) enforces the
 	# UNIQUE (turn, effect_name) idempotency key at the PK level.
 	pass

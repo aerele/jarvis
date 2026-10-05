@@ -30,6 +30,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 STATUSES = ("Unanswered", "Answered", "Ignored", "Deleted")
 ORIGINS = (
 	"Behavioural Learning",
@@ -40,7 +42,7 @@ ORIGINS = (
 MAX_QUESTION_LEN = 500
 
 
-class JarvisPersonaliseQuestion(Document):
+class JarvisPersonaliseQuestion(NotRenamable, Document):
 	def before_insert(self):
 		# See module docstring: owner-visibility rides doc.owner, so it must
 		# track the target user regardless of which identity performs the

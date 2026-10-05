@@ -23,6 +23,8 @@ from __future__ import annotations
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 DT = "Jarvis Connector Log"
 
 MAX_CONNECTOR = 140
@@ -35,7 +37,7 @@ MAX_ARGS_SUMMARY = 500
 _VALID_STATUSES = ("Success", "Failed", "Denied", "Blocked")
 
 
-class JarvisConnectorLog(Document):
+class JarvisConnectorLog(NotRenamable, Document):
 	def validate(self) -> None:
 		self.connector = (self.connector or "").strip()[:MAX_CONNECTOR]
 		self.action = (self.action or "").strip()[:MAX_ACTION]

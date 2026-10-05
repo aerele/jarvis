@@ -14,8 +14,10 @@ doc is the axis). Reaped after 90 days via hooks'
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisTriggerActivity(Document):
+
+class JarvisTriggerActivity(NotRenamable, Document):
 	@staticmethod
 	def clear_old_logs(days=90):
 		from frappe.query_builder import Interval

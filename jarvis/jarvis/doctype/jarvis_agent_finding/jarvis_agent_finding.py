@@ -13,6 +13,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 RUN = "Jarvis Agent Run"
 
 # Engine-owned audit fields — everything except the user-actionable ``state``.
@@ -47,7 +49,7 @@ _FROZEN_FIELDS = (
 )
 
 
-class JarvisAgentFinding(Document):
+class JarvisAgentFinding(NotRenamable, Document):
 	def validate(self):
 		self._guard_result_class_set_once()
 		self._freeze_audit_fields()

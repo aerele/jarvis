@@ -18,7 +18,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, has_jarvis_admin_access
+from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, NotRenamable, has_jarvis_admin_access
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
@@ -241,7 +241,7 @@ def _refuse_an_armed_macro_write():
 		)
 
 
-class JarvisCustomSkill(Document):
+class JarvisCustomSkill(NotRenamable, Document):
 	def validate(self):
 		_refuse_an_armed_macro_write()
 		self._validate_slug()
