@@ -21,6 +21,8 @@ const api = vi.hoisted(() => ({
 	summarizeMacro: vi.fn(),
 }));
 vi.mock("@/api", () => api);
+const apiMacros = vi.hoisted(() => ({ getNewMacroArming: vi.fn() }));
+vi.mock("@/api/macros", () => apiMacros);
 
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 vi.mock("vue-router", () => ({
@@ -1674,5 +1676,180 @@ describe("MacroDetail: an admin's hold", () => {
 			expect(runBtn(w).props("disabled")).toBe(false);
 			expect(switchOf(w, "Enabled").props("disabled")).toBe(false);
 		}
+	});
+});
+
+describe("MacroDetail: the owner arms their own macro", () => {
+	const NOTICE =
+		"This macro will create, change and submit records & more without asking you first.";
+	const armSwitch = (w) =>
+		w
+			.findAllComponents({ name: "Switch" })
+			.find((s) => s.props("label").startsWith("Skip confirmation"));
+	const mine = (extra = {}) =>
+		baseMacro({ can_arm: 1, arm_blocked_reason: "", arm_notice: NOTICE, ...extra });
+
+	it("is on offer when the server says so, and ticking it asks once, in the server's words", async () => {
+		const w = await mountDetail(mine());
+		expect(armSwitch(w).props("disabled")).toBe(false);
+		await armSwitch(w).trigger("click");
+		expect(confirmDialog).toHaveBeenCalledTimes(1);
+		const dialog = confirmDialog.mock.calls[0][0];
+		expect(dialog.message).toBe(NOTICE.replace("&", "&amp;"));
+		// Nothing changes until the owner confirms.
+		expect(armSwitch(w).props("modelValue")).toBe(false);
+		const hideDialog = vi.fn();
+		dialog.onConfirm({ hideDialog });
+		await flushPromises();
+		expect(hideDialog).toHaveBeenCalled();
+		expect(armSwitch(w).props("modelValue")).toBe(true);
+		expect(confirmDialog).toHaveBeenCalledTimes(1);
+		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
+		api.getMacro.mockResolvedValue(mine({ skip_confirmation: 1 }));
+		await saveBtn(w).trigger("click");
+		await flushPromises();
+		expect(api.updateMacro.mock.calls[0][0].skip_confirmation).toBe(1);
+		expect(confirmDialog).toHaveBeenCalledTimes(1);
+	});
+
+	it("stays off when the notice is closed without confirming", async () => {
+		const w = await mountDetail(mine());
+		await armSwitch(w).trigger("click");
+		confirmDialog.mock.calls[0][0].onCancel?.();
+		await flushPromises();
+		expect(armSwitch(w).props("modelValue")).toBe(false);
+		expect(saveBtn(w).attributes("disabled")).toBeDefined();
+	});
+
+	it("is off with the server's reason when this user may not arm it", async () => {
+		const w = await mountDetail(
+			mine({ can_arm: 0, arm_blocked_reason: "Only the macro's owner can switch this on." })
+		);
+		expect(armSwitch(w).props("disabled")).toBe(true);
+		expect(armSwitch(w).props("description")).toBe(
+			"Only the macro's owner can switch this on."
+		);
+	});
+
+	it("switching an armed macro off is always free, and asks nothing", async () => {
+		const w = await mountDetail(
+			mine({ skip_confirmation: 1, can_arm: 0, arm_blocked_reason: "Not yours." })
+		);
+		expect(armSwitch(w).props("disabled")).toBe(false);
+		await armSwitch(w).trigger("click");
+		expect(armSwitch(w).props("modelValue")).toBe(false);
+		// Putting it back before saving is not a new arm either.
+		await armSwitch(w).trigger("click");
+		expect(armSwitch(w).props("modelValue")).toBe(true);
+		expect(confirmDialog).not.toHaveBeenCalled();
+	});
+
+	it("an older server, which sends none of this, keeps the admin-only rule", async () => {
+		const plain = await mountDetail(baseMacro());
+		expect(armSwitch(plain).props("disabled")).toBe(true);
+		expect(armSwitch(plain).props("description")).toBe(
+			"Only a Jarvis Admin or System Manager can switch this on."
+		);
+		window.is_jarvis_admin = true;
+		try {
+			const admin = await mountDetail(baseMacro());
+			expect(armSwitch(admin).props("disabled")).toBe(false);
+			await armSwitch(admin).trigger("click");
+			expect(armSwitch(admin).props("modelValue")).toBe(true);
+			expect(confirmDialog).not.toHaveBeenCalled();
+		} finally {
+			delete window.is_jarvis_admin;
+		}
+	});
+
+	it("a new macro asks the server, which has no macro to load", async () => {
+		apiMacros.getNewMacroArming.mockResolvedValue({
+			can_arm: 1,
+			arm_blocked_reason: "",
+			arm_notice: NOTICE,
+		});
+		const w = mount(MacroDetail, {
+			props: { id: "", isNew: true },
+			global: { provide: { $socket: null } },
+		});
+		await flushPromises();
+		expect(apiMacros.getNewMacroArming).toHaveBeenCalledTimes(1);
+		expect(armSwitch(w).props("disabled")).toBe(false);
+		await armSwitch(w).trigger("click");
+		expect(confirmDialog.mock.calls[0][0].message).toBe(NOTICE.replace("&", "&amp;"));
+	});
+
+	it("says no admin anywhere on the switch for the owner", async () => {
+		const w = await mountDetail(mine());
+		expect(armSwitch(w).props("description")).not.toMatch(/admin/i);
+	});
+
+	it("says what switching it on would do while it is off, and what it does once on", async () => {
+		const off = await mountDetail(mine());
+		expect(armSwitch(off).props("description")).toBe(
+			"If on, this macro's runs make their changes without asking for confirmation first."
+		);
+		const on = await mountDetail(mine({ skip_confirmation: 1 }));
+		expect(armSwitch(on).props("description")).toBe(
+			"This macro's runs make their changes without asking for confirmation first."
+		);
+	});
+});
+
+describe("MacroDetail: an armed macro seen by someone other than its owner", () => {
+	const REASON = "Only the owner can change an armed macro.";
+	const switchNamed = (w, label) =>
+		w.findAllComponents({ name: "Switch" }).find((s) => s.props("label") === label);
+	const select = (w) =>
+		w.findAllComponents({ name: "FormControl" }).filter((c) => c.props("type") === "select");
+	const summary = (w) =>
+		w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => c.props("type") === "textarea" && c.attributes("rows") === "9");
+
+	it("keeps its steps, summary, schedule time and Stop on error going off read-only, and says why", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				skip_confirmation: 1,
+				schedule_frequency: "weekly",
+				schedule_weekday: "Monday",
+				armed_locked_reason: REASON,
+			})
+		);
+		expect(w.find('[data-testid="armed-locked"]').text()).toBe(REASON);
+		expect(stepsBuilder(w).props("disabled")).toBe(true);
+		expect(summary(w).props("disabled")).toBe(true);
+		// Scheduled and stopping on error: unscheduling and switching off stay open.
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(false);
+		expect(switchNamed(w, "Enabled").props("disabled")).toBe(false);
+		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Stop on error").props("description")).toBe(REASON);
+		expect(select(w).map((c) => c.props("disabled"))).toEqual([true, true]);
+	});
+
+	it("lets it be switched off, unscheduled and made to stop on error, and not back", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				skip_confirmation: 1,
+				enabled: 0,
+				schedule_enabled: 0,
+				stop_on_error: 0,
+				armed_locked_reason: REASON,
+			})
+		);
+		expect(switchNamed(w, "Enabled").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Enabled").props("description")).toBe(REASON);
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Run on a schedule").props("description")).toBe(REASON);
+		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(false);
+	});
+
+	it("leaves them alone for the owner, and on a macro that is not armed", async () => {
+		const w = await mountDetail(baseMacro({ skip_confirmation: 1, armed_locked_reason: "" }));
+		expect(w.find('[data-testid="armed-locked"]').exists()).toBe(false);
+		expect(stepsBuilder(w).props("disabled")).toBe(false);
+		expect(summary(w).props("disabled")).toBe(false);
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(false);
+		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(false);
 	});
 });
