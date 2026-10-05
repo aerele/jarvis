@@ -381,6 +381,34 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		self.assertEqual(self.voucher(snap, self.linked)["linked_bank_lines"], [self.lines[1]])
 		self.assertEqual(self.voucher(snap, self.receipt)["linked_bank_lines"], [])
 
+	def test_disabled_bank_account_fails_closed(self):
+		frappe.db.set_value("Bank Account", self.bank_account, "disabled", 1)
+		try:
+			snap = self.snapshot()
+		finally:
+			frappe.db.set_value("Bank Account", self.bank_account, "disabled", 0)
+		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "record_coverage_insufficient"))
+
+	def test_disabled_charge_account_is_not_offered(self):
+		name = "_Test BRR Old Charges - TBRR"
+		if not frappe.db.exists("Account", name):
+			frappe.get_doc(
+				{
+					"doctype": "Account",
+					"account_name": "_Test BRR Old Charges",
+					"parent_account": "Indirect Expenses - TBRR",
+					"company": E2E_CO,
+					"root_type": "Expense",
+					"is_group": 0,
+					"disabled": 1,
+				}
+			).insert()
+		snap = self.snapshot()
+		self.assertTrue(snap["complete"], snap.get("detail"))
+		names = {a["name"] for a in snap["datasets"]["accounts"]}
+		self.assertIn("Bank Charges - TBRR", names)
+		self.assertNotIn(name, names)
+
 	def test_hidden_rows_fail_closed(self):
 		with patch.object(review, "_count", return_value=10**6):
 			snap = self.snapshot()
@@ -708,6 +736,82 @@ class TestBankReconOutput(FrappeTestCase):
 			"does not reconcile",
 		):
 			self.assertIn(needle, text)
+
+	def test_coverage_must_be_evaluated_with_the_draft_count(self):
+		for cov in (
+			{"state": "partial", "drafts_awaiting_submission": 1},
+			{"state": "evaluated", "drafts_awaiting_submission": 0},
+			{"state": "evaluated"},
+		):
+			self.assertRejected(good_findings(), coverage={review.TOKEN: cov})
+
+	def test_type_confused_fields_are_rejected_cleanly(self):
+		for bad in ({"review_state": ["match_proposed"]}, {"candidates": 5}):
+			rows = good_findings()
+			rows[0].update(bad)
+			with self.assertRaisesRegex(frappe.ValidationError, "malformed"):
+				self.check(rows)
+
+	def test_non_dict_row_rejected(self):
+		rows = good_findings()
+		rows[0] = "BT-1"
+		with self.assertRaisesRegex(frappe.ValidationError, "exactly one result"):
+			self.check(rows)
+
+	def test_shape_must_match_state(self):
+		snap = stored_snapshot()
+		snap["datasets"]["vouchers"].append(
+			{
+				"doctype": "Payment Entry",
+				"name": "PE-4",
+				"direction": "in",
+				"amount": "100",
+				"linked_bank_lines": [],
+			}
+		)
+		snap["source_digest"] = review.digest({k: v for k, v in snap.items() if k != "source_digest"})
+		pe1, pe4 = {"doctype": "Payment Entry", "name": "PE-1"}, {"doctype": "Payment Entry", "name": "PE-4"}
+		rows = good_findings()
+		rows[0].update(review_state="ambiguous", match_confidence=None, candidates=[pe1, pe4])
+		self.assertTrue(self.check(rows, snap=snap)[2])
+		for bad in (
+			{"review_state": "ambiguous", "match_confidence": None, "candidates": [pe1]},
+			{"review_state": "needs_decision", "match_confidence": None, "candidates": [pe1]},
+			{"candidates": [pe1, pe4]},
+		):
+			rows = good_findings()
+			rows[0].update(bad)
+			with self.assertRaisesRegex(frappe.ValidationError, "shape does not match"):
+				self.check(rows, snap=snap)
+
+	def test_review_context_renders_validated_candidate_before_note(self):
+		snap = stored_snapshot()
+		snap["datasets"]["vouchers"][0].update(posting_date="2026-09-02", party="Cust A", reference="R-1")
+		row = good_findings()[0]
+		row["note"] = "Matched Payment Entry PE-999 for 5000."
+		text = review.review_context(snap, row)
+		self.assertIn("Proposal: match proposed (high confidence)", text)
+		self.assertIn("Bank line: BT-1, 2026-09-03, Deposit 100, reference none", text)
+		self.assertIn("Candidate: Payment Entry PE-1, 2026-09-02, 100, party Cust A, reference R-1", text)
+		self.assertLess(text.index("Candidate: Payment Entry PE-1"), text.index("PE-999"))
+		self.assertLess(text.index("Assessment note (quoted from the run):"), text.index("PE-999"))
+		self.assertNotIn("Candidate: Payment Entry PE-999", text)
+
+	def test_review_context_renders_reversal_pair(self):
+		text = review.review_context(stored_snapshot(), good_findings()[1])
+		self.assertIn("Proposal: reversal pair", text)
+		self.assertIn("Bank line: BT-2, 2026-09-04, Withdrawal 50", text)
+		self.assertIn("Paired with bank line BT-3, 2026-09-05, Deposit 50", text)
+
+	def test_review_context_renders_draft_entry(self):
+		entry = {"payment_type": "Pay", "amount": "50", "account": None, "party_type": None, "party": None}
+		text = review.review_context(
+			stored_snapshot(), finding("BT-2", "draft_proposal", proposed_entry=entry)
+		)
+		self.assertIn(
+			"Proposed entry for a person to create: Pay 50 to an account the reviewer chooses; no party.",
+			text,
+		)
 
 	def test_stage_reviews_forwards_to_shared_custody(self):
 		with patch.object(operator_review, "stage_reviews", return_value=["AR-1"]) as staged:

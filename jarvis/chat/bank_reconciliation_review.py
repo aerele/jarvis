@@ -318,7 +318,12 @@ def _journal_vouchers(scope):
 
 
 def _accounts(company):
-	filters = {"company": company, "is_group": 0, "root_type": ["in", ["Expense", "Income"]]}
+	filters = {
+		"company": company,
+		"is_group": 0,
+		"disabled": 0,
+		"root_type": ["in", ["Expense", "Income"]],
+	}
 	or_filters = [
 		["account_name", "like", f"%{word}%"] for word in ("charge", "fee", "interest", "commission")
 	]
@@ -353,6 +358,7 @@ def collect(scope, config):
 			bank.company != scope["company"]
 			or bank.account != scope["bank_gl"]
 			or not bank.is_company_account
+			or bank.disabled
 		):
 			raise ValueError("Bank account changed")
 		filters = {
@@ -489,6 +495,29 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 	if not findings and coverage[TOKEN].get("state") == "not_evaluable":
 		return [], coverage, False
 	data = stored["datasets"]
+	drafts = coverage[TOKEN].get("drafts_awaiting_submission")
+	if coverage[TOKEN].get("state") != "evaluated" or type(drafts) is not int:
+		_reject("Bank reconciliation proposals must come from an evaluated run.")
+	if drafts != sum(1 for row in data["bank_lines"] if row["docstatus"] == 0):
+		_reject("Bank reconciliation output must count the draft bank lines awaiting submission.")
+	try:
+		_check_findings(findings, data, scope)
+	except (TypeError, AttributeError):
+		_reject("Bank reconciliation output is malformed.")
+	current = collect(stored["scope"], stored["config"])
+	if current["source_digest"] != stored["source_digest"]:
+		return (
+			[],
+			_unavailable(
+				"run_truncated_watermark",
+				"Bank evidence or permissions changed after capture. Re-run before reviewing any proposals.",
+			),
+			False,
+		)
+	return findings, coverage, True
+
+
+def _check_findings(findings, data, scope):
 	lines = {
 		row["name"]: row
 		for row in data["bank_lines"]
@@ -521,17 +550,41 @@ def validate_output(run, findings, coverage, scope, integrity_digest):
 				_reject(
 					"A reversal must pair two equal, opposite in-scope bank lines that point at each other."
 				)
-	current = collect(stored["scope"], stored["config"])
-	if current["source_digest"] != stored["source_digest"]:
-		return (
-			[],
-			_unavailable(
-				"run_truncated_watermark",
-				"Bank evidence or permissions changed after capture. Re-run before reviewing any proposals.",
-			),
-			False,
+
+
+def _line_text(line):
+	kind = "Deposit" if _direction(line) == "in" else "Withdrawal"
+	return f"{line['name']}, {line['date']}, {kind} {line['unallocated_amount']}"
+
+
+def _evidence(stored, finding):
+	"""Rendered from validated fields and stored rows only, so a relayed note cannot rename a voucher."""
+	data = stored["datasets"]
+	lines = {row["name"]: row for row in data["bank_lines"]}
+	vouchers = {(v["doctype"], v["name"]): v for v in data["vouchers"]}
+	line = lines[finding["ref_name"]]
+	proposal = f"Proposal: {finding['review_state'].replace('_', ' ')}"
+	if finding.get("match_confidence"):
+		proposal += f" ({finding['match_confidence']} confidence)"
+	out = [
+		proposal,
+		f"Bank line: {_line_text(line)}, reference {line.get('reference_number') or 'none'}",
+	]
+	for c in finding.get("candidates") or []:
+		v = vouchers[(c["doctype"], c["name"])]
+		out.append(
+			f"Candidate: {v['doctype']} {v['name']}, {v.get('posting_date')}, {v['amount']}, "
+			f"party {v.get('party') or 'none'}, reference {v.get('reference') or 'none'}"
 		)
-	return findings, coverage, True
+	if finding["review_state"] == "reversal_pair":
+		out.append(f"Paired with bank line {_line_text(lines[finding['pair']])}")
+	entry = finding.get("proposed_entry")
+	if finding["review_state"] == "draft_proposal" and entry:
+		out.append(
+			f"Proposed entry for a person to create: {entry['payment_type']} {entry['amount']} "
+			f"to {entry.get('account') or 'an account the reviewer chooses'}; no party."
+		)
+	return "\n".join(out)
 
 
 def review_context(stored, finding):
@@ -542,6 +595,8 @@ def review_context(stored, finding):
 		f"Vouchers read from {scope['voucher_from']} ({policy['voucher_lookback_days']} calendar days before the window). "
 		f"Policy: {policy['policy_version']}. Current records only. "
 		"Approving this does not reconcile, allocate, create or post anything; reconcile in the Bank Reconciliation Tool.\n\n"
+		+ _evidence(stored, finding)
+		+ "\n\nAssessment note (quoted from the run):\n"
 		+ finding["note"]
 	)
 
