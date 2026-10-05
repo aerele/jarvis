@@ -49,10 +49,25 @@ def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) ->
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
 	child marks none."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield) for df in _grid_fields(child_doctype)[0]
+	]
+
+
+def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
+	"""Every other editable field of the child, so a row key the model proposes
+	outside the grid keeps its real type and label (#655)."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield) for df in _grid_fields(child_doctype)[1]
+	]
+
+
+def _grid_fields(child_doctype: str) -> tuple[list, list]:
+	"""(the grid's columns, every other editable field) of a child doctype."""
 	meta = frappe.get_meta(child_doctype)
 	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
-	listed = [df for df in editable if df.in_list_view]
-	return [_field_dict(df, child_doctype, parent_doctype, parentfield) for df in (listed or editable[:4])]
+	listed = [df for df in editable if df.in_list_view] or editable[:4]
+	return listed, [df for df in editable if df not in listed]
 
 
 @frappe.whitelist()
@@ -77,6 +92,7 @@ def get_doctype_form_meta(doctype: str) -> dict:
 				"child_doctype": df.options,
 				"label": df.label or df.fieldname,
 				"columns": _child_columns(df.options, doctype, df.fieldname),
+				"extra_columns": _extra_child_columns(df.options, doctype, df.fieldname),
 			}
 			continue
 		if df.fieldtype in _NON_EDIT_FIELDTYPES:
@@ -128,6 +144,61 @@ def load_doc(doctype: str, name: str) -> dict:
 		"values": values,
 		"tables": tables,
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def draft_computed(action: dict | str | None = None) -> dict:
+	"""What ERPNext computes for a create card's rows (amounts, tax totals) that the
+	model leaves blank (#647). The values are inserted in the preview sandbox, with
+	the same checks as the write and mandatory fields not enforced, then rolled back;
+	only the requested ``columns`` (``{table field: [fieldnames]}``) come back, after
+	permlevel masking. Display only: never written. Any failure is ``{"ok": False}``,
+	so the card just keeps its blanks."""
+	refuse_in_tool_dispatch()
+	a = frappe.parse_json(action) if isinstance(action, str) else (action or {})
+	doctype = (a.get("doctype") or "").strip()
+	conversation = (a.get("conversation") or "").strip()
+	values, columns = a.get("values"), a.get("columns")
+	if not doctype or not conversation or not isinstance(values, dict) or not isinstance(columns, dict):
+		raise InvalidArgumentError("doctype, conversation, values and columns are required")
+	_require_own_conversation(conversation)
+
+	from jarvis.exceptions import PreviewSandboxLost
+	from jarvis.tools import _write_risk
+	from jarvis.tools._preview_sandbox import preview_sandbox
+	from jarvis.tools.create_doc import _insert_one, _validate_create_args
+
+	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
+	try:
+		# Structure and sensitive configuration never dry-run from a card.
+		if _write_risk.check("create_doc", {"doctype": doctype, "values": values}) == "sensitive":
+			return {"ok": False}
+		_validate_create_args(doctype, values)
+		with preview_sandbox():
+			doc = _insert_one(doctype, values, ignore_mandatory=True)
+	except PreviewSandboxLost:
+		raise  # not undone cleanly: fail the request so nothing is committed
+	except Exception:  # a refusal or a failed validate: the card keeps its blanks
+		return {"ok": False}
+	finally:
+		frappe.local.jarvis_dispatch_depth -= 1
+		frappe.clear_messages()
+	doc.apply_fieldlevel_read_permissions()
+	tables = {}
+	for tf, wanted in columns.items():
+		df = doc.meta.get_field(tf) if isinstance(tf, str) else None
+		if not df or df.fieldtype != "Table" or not isinstance(wanted, list):
+			continue
+		child = frappe.get_meta(df.options)
+		known = [f for f in wanted if isinstance(f, str) and _is_shown(child.get_field(f))]
+		tables[tf] = [{f: row.get(f) for f in known} for row in doc.get(tf) or []]
+	return {"ok": True, "tables": tables}
+
+
+def _is_shown(df) -> bool:
+	"""A child field the card could show: data-bearing, and never a secret."""
+	return bool(df) and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and df.fieldtype != "Password"
 
 
 # apply_action is the human-authored EDIT path only: the human deliberately

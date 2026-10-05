@@ -92,6 +92,23 @@ class TestFormMeta(FrappeTestCase):
 		self.assertIn("item_code", colnames)
 		self.assertIn("qty", colnames)
 
+	def test_form_meta_types_every_other_child_field(self):
+		# The model may propose row keys the grid does not list (#655): conversion_factor
+		# came back as a plain text column, and Confirm sent "1" for a Float.
+		items = get_doctype_form_meta("Sales Order")["tables"]["items"]
+		listed = {c["fieldname"] for c in items["columns"]}
+		extra = {c["fieldname"]: c for c in items["extra_columns"]}
+		self.assertFalse(listed & set(extra))
+		meta = frappe.get_meta("Sales Order Item")
+		self.assertEqual(
+			(extra["conversion_factor"]["fieldtype"], extra["conversion_factor"]["label"]),
+			("Float", meta.get_field("conversion_factor").label),
+		)
+		self.assertEqual((extra["uom"]["fieldtype"], extra["uom"]["options"]), ("Link", "UOM"))
+		self.assertFalse(
+			{c["fieldtype"] for c in extra.values()} & {"Section Break", "Column Break", "Table"}
+		)
+
 	def test_form_meta_unknown_doctype(self):
 		self.assertFalse(get_doctype_form_meta("No Such DocType")["ok"])
 
@@ -1198,3 +1215,82 @@ class TestListPendingConfirmations(FrappeTestCase):
 		self.assertTrue(conv_args)
 		for ca in conv_args:
 			self.assertLessEqual(len(ca), 64)
+
+
+class TestDraftComputed(FrappeTestCase):
+	"""A create card's blank read-only cells, filled from ERPNext's own validate run
+	in the preview sandbox (#647). Display only: nothing is written."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		if "erpnext" not in frappe.get_installed_apps():
+			raise cls.skipException("ERPNext is not installed")
+		from jarvis.tests import _erpnext_masters as masters
+
+		frappe.set_user("Administrator")
+		masters.clear_cache_after_rollback(cls)
+		cls.delivery = frappe.utils.add_days(frappe.utils.today(), 3)
+		masters.ensure_fiscal_years(frappe.utils.today(), cls.delivery)
+		cls.values = {
+			"company": masters.ensure_ledger_company(),
+			"customer": masters.ensure_customer("_J2A Draft Computed Customer"),
+			"selling_price_list": masters.ensure_selling_price_list(),
+			"delivery_date": cls.delivery,
+			"items": [
+				{
+					"item_code": masters.ensure_item("_J2A Service Item", is_stock_item=0),
+					"qty": 20,
+					"rate": 100,
+				}
+			],
+		}
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "j2a computed"}).insert(
+			ignore_permissions=True
+		)
+
+	def _computed(self, **overrides):
+		from jarvis.chat.actions_api import draft_computed
+
+		action = {
+			"doctype": "Sales Order",
+			"conversation": self.conv.name,
+			"values": self.values,
+			"columns": {"items": ["amount"]},
+			**overrides,
+		}
+		return draft_computed(frappe.as_json(action))
+
+	def test_fills_the_amount_and_writes_nothing(self):
+		before = frappe.db.count("Sales Order")
+		r = self._computed()
+		self.assertEqual(r, {"ok": True, "tables": {"items": [{"amount": 2000}]}})
+		self.assertEqual(frappe.db.count("Sales Order"), before)
+
+	def test_returns_only_the_requested_known_fields(self):
+		r = self._computed(
+			columns={"items": ["amount", "not_a_field"], "taxes": ["tax_amount"], "nope": ["x"]}
+		)
+		self.assertEqual(r["tables"], {"items": [{"amount": 2000}], "taxes": []})
+
+	def test_a_value_the_check_refuses_is_no_dry_run(self):
+		values = {**self.values, "items": [{**self.values["items"][0], "qty": "abc"}]}
+		self.assertEqual(self._computed(values=values), {"ok": False})
+
+	def test_a_structure_doctype_never_runs(self):
+		before = frappe.db.count("Custom Field")
+		r = self._computed(
+			doctype="Custom Field",
+			values={"dt": "ToDo", "fieldname": "j2a_x", "label": "X", "fieldtype": "Data"},
+			columns={},
+		)
+		self.assertEqual(r, {"ok": False})
+		self.assertEqual(frappe.db.count("Custom Field"), before)
+
+	def test_someone_elses_conversation_is_refused(self):
+		frappe.db.set_value("Jarvis Conversation", self.conv.name, "owner", "Guest")
+		with self.assertRaises(frappe.PermissionError):
+			self._computed()
