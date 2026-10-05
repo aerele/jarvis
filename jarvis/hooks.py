@@ -286,6 +286,24 @@ scheduler_events = {
 			# path. Bounded per run (capacity_attempts), then the run fails honestly.
 			# Cheap no-op (one indexed status query) when nothing is parked.
 			"jarvis.chat.macros.resume_waiting_capacity_runs",
+			# A macro run moves when its step's turn end reaches the chaining hook, and
+			# several ends never do (a turn that fails before it is sent, ages out of the
+			# queue or is cancelled queued has no finalize job; a finalize job that died
+			# three times in the hook is given up on; a hook that waited 10s for the run
+			# lock returns). Such a run sat `running`, its chat armed, until the hourly
+			# stale-run sweep three hours later. This reads the step's Turn row and the
+			# finalize ledger and does what the hook would have. Self-gating: only where
+			# the turn machine is on and the shard is in `pump` mode; off switch
+			# `jarvis_macro_reconcile_disabled` in site config. The same tick settles a
+			# macro summary stuck "summarizing" the same ways (Run is refused behind it).
+			# Cheap no-op when nothing is stuck: one indexed status query for runs and one
+			# small unindexed read of the macro table for summaries; it writes nothing
+			# unless it acts.
+			# Is it working: `macro_reconcile.stuck_runs` (empty when healthy), and the
+			# stale-run sweep logs `jarvis.chat.macros.reaped_despite_check`.
+			# The cron row outlives the code until the next migrate: if the module is
+			# ever removed, keep this path importable as a no-op for a release.
+			"jarvis.chat.macro_reconcile.reconcile_running_runs",
 			# Forward tenant errors (UI + jarvis-only code-level exceptions) to the
 			# admin control plane for the per-tenant Errors feed. Off the hot path,
 			# self-gating (skips un-onboarded), never raises. Cheap
@@ -845,4 +863,14 @@ has_permission.update(
 # once before its job was ever released and once while the job was still
 # running). Redis locks (jarvis._redis_lock) are unaffected: they use
 # cache.lock() with a raw, unprefixed key, never this site-prefixed cache.
-persistent_cache_keys = ["jarvis:llm_switch"]
+#
+# jarvis:macro_reconcile (2026-10-03): the same wipe, every five minutes, took the
+# macro reconcile check's "skip this run for an hour" and "this run was logged"
+# markers with it, so a run that raised in the check was looked at and logged again
+# on every tick until the stale-run sweep (about 36 Error Log rows a run). Every key
+# of that module starts with ``macro_reconcile.CACHE_PREFIX``; their TTLs still apply.
+#
+# jarvis:macro_snapshot_unreadable: the "this run's unreadable steps snapshot was
+# reported" marker (``macros._report_unreadable_snapshot``); without it a run with a
+# broken snapshot queued a report job every five minutes.
+persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile", "jarvis:macro_snapshot_unreadable"]

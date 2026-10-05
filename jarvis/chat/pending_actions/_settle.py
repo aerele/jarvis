@@ -24,6 +24,10 @@ from jarvis.chat.pending_actions._store import (
 )
 
 MAX_SETTLE_ATTEMPTS = 5
+# frappe.flags key set by the reconciler around its settles: a settle that is not the
+# confirming request's own (or a retry of a failed one, ``settle_attempts``) is LATE,
+# and a late failure is never offered a correction (R2-3).
+LATE_SETTLE_FLAG = "jarvis_pa_late_settle"
 # Failures of these may still have reached the outside world: the chip says
 # "unknown" instead of "nothing changed" (presentation only; the code stays).
 MAY_HAVE_EXTERNAL_EFFECT = frozenset({"call_connector", "run_method"})
@@ -90,6 +94,8 @@ def _item(row) -> dict:
 		"result_doctype": row.result_doctype,
 		"result_name": row.result_name,
 		"batch_id": row.batch_id,
+		"corrects": row.get("corrects") or "",
+		"late": bool(frappe.flags.get(LATE_SETTLE_FLAG) or row.settle_attempts),
 	}
 
 

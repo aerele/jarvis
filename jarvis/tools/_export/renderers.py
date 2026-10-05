@@ -2,6 +2,7 @@ import csv as _csv
 import io
 
 from jarvis import compat
+from jarvis._xlsx_highlights import validate_highlights
 from jarvis.tools._export.model import ExportModel
 from jarvis.tools._export.safety import escape_formula
 
@@ -43,7 +44,7 @@ def csv(model: ExportModel) -> bytes:
 	return buf.getvalue().encode("utf-8")
 
 
-def xlsx(model: ExportModel) -> bytes:
+def xlsx(model: ExportModel, *, highlights=None) -> bytes:
 	"""Styled workbook via the shared xlsx_bytes builder (bold header + date/currency
 	number formats from Frappe's make_xlsx). Header AND cells are formula-escaped;
 	over-long cells are clipped-with-marker and flagged in ``model.meta``; HTML is
@@ -51,9 +52,16 @@ def xlsx(model: ExportModel) -> bytes:
 	Empty rowset -> valid header-only workbook."""
 	# Imported lazily (once per render, not per cell): xlsxutils pulls xlsxwriter,
 	# which compat.py deliberately keeps out of module import for Frappe 15.
-	from frappe.utils.xlsxutils import handle_html
+	from frappe.utils.xlsxutils import ILLEGAL_CHARACTERS_RE, handle_html
 
 	header = [_xlsx_cell(c, model, handle_html) for c in model.columns]
+	# Writer sanitation also strips XML control characters. Match those headers
+	# before resolving highlight columns, so a rule cannot target an alias that
+	# becomes ambiguous only when the workbook is written.
+	header = [ILLEGAL_CHARACTERS_RE.sub("", c) if isinstance(c, str) else c for c in header]
 	body = [[_xlsx_cell(c, model, handle_html) for c in row] for row in model.rows]
 	title = (model.meta.get("title") or "Export")[:31]
-	return compat.xlsx_bytes([(title, [header] + body)])
+	data = [header] + body
+	rules = validate_highlights(highlights, data)
+	model.meta["highlight_count"] = len(rules)
+	return compat.xlsx_bytes([(title, data)], highlights=[rules])

@@ -36,6 +36,7 @@ const UNFENCED_IN_CHATVIEW = new Set([
 	"canvas",
 	"conversation:renamed",
 	"import:finished", // Slice B: a background-poll completion signal, not a pump-sequenced turn frame
+	"macro:closed", // the macro engine's closing message landed: a reload signal with no run_id/seq, not a turn frame
 ]);
 
 function onEventBody() {
