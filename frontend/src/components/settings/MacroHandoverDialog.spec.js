@@ -197,6 +197,13 @@ describe("MacroHandoverDialog", () => {
 		expect(w.findAll(".jv-macro-handover-user")).toHaveLength(1);
 		expect(handButton(w).attributes("disabled")).toBe("");
 		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
+		// Searched back, the user is offered again but not picked behind the admin's back.
+		api.adminHandoverTargets.mockResolvedValue({ users: USERS, max: 25 });
+		await w.find(".stub-search").setValue("");
+		vi.advanceTimersByTime(300);
+		await flushPromises();
+		expect(w.findAll(".jv-macro-handover-user")).toHaveLength(3);
+		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
 	});
 
 	it("says when nobody matches, and when the users cannot be loaded", async () => {
