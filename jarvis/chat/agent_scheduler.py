@@ -1953,14 +1953,36 @@ def _over_run_budget(installation: str) -> tuple[bool, str]:
 	    by a burst.
 	Keyed on the installation + tenant, NEVER the owner (run_as_user decouples the
 	executing identity from the owner, so a per-owner count both mis- and
-	under-counts)."""
+	under-counts).
+
+	The ceiling also holds one budget per agent uninstalled this month whose kept runs
+	still count (``_uninstalled_this_month``): the tenant figure keeps those runs, so
+	without it uninstalling a heavily used agent would refuse the tenant's other agents
+	until the month ends."""
 	budget = _agent_run_budget_monthly()
 	if _runs_this_month(installation=installation) >= budget:
 		return True, "monthly run budget exceeded for this agent"
-	enabled = frappe.db.count(INSTALLATION, {"enabled": 1}) or 1
+	enabled = (frappe.db.count(INSTALLATION, {"enabled": 1}) + _uninstalled_this_month()) or 1
 	if _runs_this_month() >= budget * enabled:
 		return True, "tenant-wide monthly agent run budget exceeded"
 	return False, ""
+
+
+def _uninstalled_this_month() -> int:
+	"""How many (agent, owner) pairs hold kept runs this month and have no installation.
+	A pair installed again is left out: its installation is already in the enabled count
+	(or, disabled, is out of it like any disabled install), so it is never counted twice."""
+	row = frappe.db.sql(
+		f"""SELECT COUNT(*) FROM (
+		      SELECT DISTINCT r.agent, r.owner FROM `tab{RUN}` r
+		      WHERE IFNULL(r.installation, '') = '' AND r.creation >= %(since)s
+		        AND IFNULL(r.status, '') != 'failed'
+		        AND NOT EXISTS (
+		          SELECT 1 FROM `tab{INSTALLATION}` i WHERE i.agent = r.agent AND i.owner = r.owner)
+		    ) pairs""",
+		{"since": _budget_month_start()},
+	)
+	return int(row[0][0] or 0) if row else 0
 
 
 def _dispatch_lock_name(installation: str) -> str:
