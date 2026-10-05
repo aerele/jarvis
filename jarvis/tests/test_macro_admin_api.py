@@ -175,7 +175,7 @@ class TestTheGates(AdminBase):
 				"admin_hold": {"macro": macro, "reason": "Paused for review"},
 				"admin_release": {"macro": macro},
 				"admin_delete": {"macro": macro},
-				"admin_handover": {"macro": macro, "new_owner": OTHER},
+				"admin_handover": {"macro": macro, "new_owner": OTHER, "expected_owner": OWNER},
 				"admin_handover_targets": {"search": "macro-admin"},
 			},
 		)

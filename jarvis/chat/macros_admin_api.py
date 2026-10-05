@@ -552,8 +552,8 @@ def _lock(row) -> frappe._dict:
 	"""Take the macro's row lock (``macros._lock_macro_row``: a fresh snapshot, then the
 	locking read first), the one ``run_macro`` takes before it starts a run, and read
 	the row again under it: everything decided after this is decided on the present,
-	not on the row as it was before the wait. The hold is read only where the site has
-	its column (a hand-over works before the migrate too)."""
+	not on the row as it was before the wait. The hold and its reason are read only
+	where the site has their columns (a hand-over works before the migrate too)."""
 	from jarvis.chat import macros
 
 	if not macros._lock_macro_row(row.name):
@@ -561,7 +561,7 @@ def _lock(row) -> frappe._dict:
 		frappe.throw(_("This macro was deleted."), frappe.DoesNotExistError)
 	fields = ["name", "owner", "macro_name", "merge_conversation"]
 	if hold_fields_exist():
-		fields.append(HOLD_FIELD)
+		fields += [HOLD_FIELD, HOLD_REASON_FIELD]
 	return frappe.db.get_value(MACRO, row.name, fields, as_dict=True)
 
 
@@ -570,11 +570,25 @@ def _lock(row) -> frappe._dict:
 _SWITCHED_OFF = {"enabled": 0, "schedule_enabled": 0, "next_run_at": None, "skip_confirmation": 0}
 
 
-def _stand_down(row, admin: str, own_macro: str, *, reason: str) -> frappe._dict:
+def _stand_down(
+	row,
+	admin: str,
+	own_macro_hint: str,
+	*,
+	reason: str,
+	if_held_comment: str | None = None,
+	expected_owner: str | None = None,
+) -> frappe._dict:
 	"""Step 1 of a hold and of a hand-over: under the macro's row lock, put it on hold
 	with ``reason`` and switch it off, unschedule and disarm it, leave the Comment, and
 	commit. ``run_macro`` reads the hold under the same lock, so from the commit on no
-	run starts. Refused on the admin's own macro (``own_macro`` says what to do).
+	run starts. Refused on the admin's own macro (``own_macro_hint`` says what to do
+	instead).
+
+	With ``if_held_comment`` (a hand-over), a macro already on hold keeps the reason
+	another admin held it for, and that Comment is left instead. With
+	``expected_owner``, a macro owned by someone else by now is refused before
+	anything is written: the admin chose to act on that person's macro.
 
 	Before the migrate there is no hold to write: the macro is only switched off,
 	unscheduled and disarmed. That stops the scheduler from starting it (a scheduled
@@ -582,10 +596,19 @@ def _stand_down(row, admin: str, own_macro: str, *, reason: str) -> frappe._dict
 	it by hand, which is why a hand-over looks again under the lock before it writes.
 	Returns the row as read under the lock."""
 	row = _lock(row)
-	_refuse_own_macro(row, own_macro)
+	if expected_owner is not None and row.owner != expected_owner:
+		frappe.db.commit()  # nothing written: releases the row lock
+		_refuse_changed_hands()
+	_refuse_own_macro(row, own_macro_hint)
 	if hold_fields_exist():
-		frappe.db.set_value(MACRO, row.name, {HOLD_FIELD: 1, HOLD_REASON_FIELD: reason, **_SWITCHED_OFF})
-		_leave_comment(row.name, f"{admin} put this macro on hold: {reason}")
+		values = {HOLD_FIELD: 1, **_SWITCHED_OFF}
+		comment = f"{admin} put this macro on hold: {reason}"
+		if if_held_comment and frappe.utils.cint(row.get(HOLD_FIELD)):
+			comment = if_held_comment
+		else:
+			values[HOLD_REASON_FIELD] = reason
+		frappe.db.set_value(MACRO, row.name, values)
+		_leave_comment(row.name, comment)
 	else:
 		frappe.db.set_value(MACRO, row.name, _SWITCHED_OFF)
 	frappe.db.commit()  # visible, and the row lock released, from here on
@@ -700,9 +723,12 @@ def admin_delete(macro: str) -> dict:
 	admin = frappe.session.user
 	doc = frappe.get_doc(MACRO, row.name)
 	out = macros_api.delete_loaded_macro(doc, ignore_permissions=True)
-	if row.owner != admin:
+	# The owner as read under the delete's row lock: a hand-over that committed after
+	# the read above made someone else the owner of what was deleted.
+	owner = out.get("owner") or row.owner
+	if owner != admin:
 		macros.notify_owner(
-			row.owner,
+			owner,
 			subject=f"{macros_api.ADMIN_DELETE_NOTICE}: {row.macro_name}",
 			body=_("An admin deleted your macro {0}.").format(row.macro_name),
 		)
@@ -732,18 +758,24 @@ def _new_owner_arg(value) -> str:
 	name = _name_arg(value, _("New owner"))
 	stored = frappe.db.get_value("User", {"name": name}, "name")
 	if not stored:
-		frappe.throw(_("There is no user {0}.").format(name), MacroHandoverError)
+		frappe.throw(_("There is no user {0}.").format(frappe.utils.escape_html(name)), MacroHandoverError)
 	return stored
 
 
 def _handover_refusal(row, new_owner: str) -> str:
 	"""Why ``row`` cannot go to ``new_owner``, or "" when it can. The same people who may
 	own a macro that runs on its own (``_schedule_block_reason``'s checks: never
-	Administrator or Guest, an enabled account, with Jarvis access), under the
-	per-owner cap, with no macro of the same name. Read from the database as it is
-	now: called again under the lock before the write."""
+	Administrator or Guest, an enabled account, with Jarvis access), who also hold the
+	Jarvis User role, under the per-owner cap, with no macro of the same name. Read
+	from the database as it is now: called again under the lock before the write.
+
+	The role, because Jarvis access is not enough to USE a macro: System Manager or
+	Jarvis Admin alone pass the gate, but the macro's create, write and delete are the
+	Jarvis User role's (``jarvis.permissions.grant_onboarding_admin`` tells the same
+	story for chats). Handed to such a user, a macro arrives switched off and could
+	never be switched on, edited or deleted by them."""
 	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_MACROS_PER_OWNER
-	from jarvis.permissions import has_jarvis_access, is_valid_unattended_owner
+	from jarvis.permissions import JARVIS_USER_ROLE, has_jarvis_access, is_valid_unattended_owner
 
 	if new_owner == row.owner:
 		return _("{0} already owns this macro.").format(new_owner)
@@ -753,6 +785,10 @@ def _handover_refusal(row, new_owner: str) -> str:
 		return _("{0} is disabled.").format(new_owner)
 	if not has_jarvis_access(new_owner):
 		return _("{0} does not have access to Jarvis.").format(new_owner)
+	if JARVIS_USER_ROLE not in frappe.get_roles(new_owner):
+		return _("{0} does not have the Jarvis User role, so they could not edit or run the macro.").format(
+			new_owner
+		)
 	if frappe.db.count(MACRO, {"owner": new_owner}) >= MAX_MACROS_PER_OWNER:
 		return _("{0} already has {1} macros, the most one user can have.").format(
 			new_owner, MAX_MACROS_PER_OWNER
@@ -760,6 +796,12 @@ def _handover_refusal(row, new_owner: str) -> str:
 	if frappe.db.exists(MACRO, {"owner": new_owner, "macro_name": row.macro_name}):
 		return _("{0} already has a macro named {1}.").format(new_owner, row.macro_name)
 	return ""
+
+
+def _refuse_changed_hands() -> None:
+	frappe.throw(
+		_("This macro changed hands since the list was loaded. Reload and try again."), MacroHandoverError
+	)
 
 
 def _refuse_handover(row, new_owner: str) -> None:
@@ -772,11 +814,13 @@ def _write_handover(row, new_owner: str) -> None:
 	"""The owner change and everything that must not follow the macro to its new
 	owner, in the one transaction the caller holds the row lock in:
 
-	* off, unscheduled, disarmed, and the hold (that step 1 set) cleared;
+	* off, unscheduled, disarmed, and the hold (that step 1 set or kept) cleared; no
+	  last scheduled run time either: that was the old owner's schedule;
 	* no summary and no summary in progress: a summary runs INSTEAD of the steps and
 	  the old owner could have written anything in it;
 	* no skills on any step: a step's skill can be a private skill of the old owner;
 	* no shares, no open assignments (each also shared the macro), nobody following it.
+	  A closed assignment is history and stays closed.
 
 	Raw writes, as every admin verb's: the document permission is the owner's, and
 	``validate`` would judge the change as the admin. The child rows' ``owner`` goes
@@ -784,6 +828,7 @@ def _write_handover(row, new_owner: str) -> None:
 	values = {
 		"owner": new_owner,
 		**_SWITCHED_OFF,
+		"last_run_at": None,
 		"merged_prompt": "",
 		"merge_status": "",
 		"merge_conversation": "",
@@ -800,7 +845,7 @@ def _write_handover(row, new_owner: str) -> None:
 	frappe.db.delete("DocShare", {"share_doctype": MACRO, "share_name": row.name})
 	frappe.db.sql(
 		"""UPDATE `tabToDo` SET status = 'Cancelled'
-		WHERE reference_type = %(doctype)s AND reference_name = %(macro)s AND status != 'Cancelled'""",
+		WHERE reference_type = %(doctype)s AND reference_name = %(macro)s AND status = 'Open'""",
 		{"doctype": MACRO, "macro": row.name},
 	)
 	frappe.db.delete("Document Follow", {"ref_doctype": MACRO, "ref_docname": row.name})
@@ -808,25 +853,29 @@ def _write_handover(row, new_owner: str) -> None:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def admin_handover(macro: str, new_owner: str) -> dict:
+def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None) -> dict:
 	"""Hand another user's macro to ``new_owner``. It arrives switched off,
 	unscheduled and disarmed, with no summary, no skills on its steps, no shares, no
-	assignments and nobody following it; only its new owner can turn any of that back
-	on. Both owners are told (a notice their Macros list shows) and a Comment on the
-	macro names the admin and both owners.
+	open assignments and nobody following it; only its new owner can turn any of that
+	back on. Both owners are told (a notice their Macros list shows) and a Comment on
+	the macro names the admin and both owners.
+
+	``expected_owner`` is the owner the dialog showed. A macro that changed hands since
+	(a stale list, or another admin's hand-over a moment earlier) is refused with
+	nothing written: the admin chose to act on that person's macro. Required: the
+	endpoint is new, so no older client calls it without.
 
 	In this order (not one transaction: a stop commits):
 
 	1. the macro is put on hold, under its row lock, and committed, so nothing starts
 	   it from here on (before the migrate it is only switched off: see
-	   ``_stand_down``);
+	   ``_stand_down``). One already on hold keeps the reason another admin gave;
 	2. its live runs are stopped, each on its own. One that cannot be stopped ends the
 	   request with the hold standing: the macro does not change hands over a live run
 	   of its old owner. Sending the hand-over again retries;
-	3. under the row lock again, read fresh: if a run is live again (only possible
-	   before the migrate), let go and repeat from 2, at most ``_HANDOVER_ROUNDS``
-	   times; otherwise check the new owner again and write the owner change and the
-	   clears (``_write_handover``), with the Comment, in one commit.
+	3. under the row lock again, read fresh, the owner change (``_handover_under_lock``).
+	   It also lifts the hold, and the Comment names a hold it lifts that was not the
+	   hand-over's own (one another admin set before or during it).
 
 	Past run rows keep the old owner: they are that person's history and month usage,
 	including after the new owner deletes the macro. Every step can be repeated.
@@ -836,48 +885,28 @@ def admin_handover(macro: str, new_owner: str) -> dict:
 	over. Handing a macro TO oneself is allowed."""
 	refuse_in_tool_dispatch()
 	require_jarvis_admin()
-	from jarvis.chat import macros
-
 	row = _load_macro(macro)
 	new_owner = _new_owner_arg(new_owner)
+	expected_owner = _name_arg(expected_owner, _("Current owner"))
 	admin = frappe.session.user
-	own_macro = _("Another admin has to hand it over.")
-	_refuse_own_macro(row, own_macro)
+	own_macro_hint = _("Another admin has to hand it over.")
+	if row.owner != expected_owner:
+		_refuse_changed_hands()
+	_refuse_own_macro(row, own_macro_hint)
 	_refuse_handover(row, new_owner)  # before anything is written
 
 	old_owner = row.owner
-	row = _stand_down(row, admin, own_macro, reason=f"Being handed over to {new_owner}.")
-	stopped = 0
-	for _round in range(_HANDOVER_ROUNDS):
-		n, failed = _stop_live_runs(row.name, reason=STOPPED_BY_ADMIN, admin=admin, verb="handover")
-		stopped += n
-		if failed:
-			frappe.throw(
-				_(
-					"The macro was not handed over: {0} of its runs could not be stopped ({1}). It stays {2}. Hand it over again to retry."
-				).format(
-					len(failed), ", ".join(failed), _("on hold") if hold_fields_exist() else _("switched off")
-				),
-				MacroHandoverError,
-			)
-		row = _lock(row)
-		if row.owner != old_owner:
-			frappe.db.commit()  # releases the row lock
-			frappe.throw(_("This macro changed hands meanwhile. Refresh and try again."), MacroHandoverError)
-		if macros.live_runs_of(row.name):
-			frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
-			continue
-		_refuse_handover(row, new_owner)
-		_write_handover(row, new_owner)
-		_leave_comment(row.name, f"{admin} handed this macro over from {old_owner} to {new_owner}.")
-		frappe.db.commit()
-		break
-	else:
-		frappe.throw(
-			_("The macro kept starting runs and was not handed over. Hand it over again."),
-			MacroHandoverError,
-		)
-
+	hold_reason = f"Being handed over to {new_owner}."
+	row = _stand_down(
+		row,
+		admin,
+		own_macro_hint,
+		reason=hold_reason,
+		if_held_comment=f"{admin} is handing this macro over to {new_owner}. It was already on hold, "
+		"and keeps the reason it was held for until then.",
+		expected_owner=old_owner,
+	)
+	row, stopped = _handover_under_lock(row, old_owner, new_owner, admin, hold_reason=hold_reason)
 	if row.merge_conversation:
 		# A summary that was being written for the old owner: its result now finds no
 		# macro waiting and is ignored. Its throwaway chat goes, if it is still theirs.
@@ -886,6 +915,65 @@ def admin_handover(macro: str, new_owner: str) -> dict:
 		macros_api._delete_summary_chat(row.merge_conversation, owned_by=old_owner)
 	_tell_both_owners(row.macro_name, old_owner, new_owner, admin)
 	return {"ok": True, "handed_over": True, "new_owner": new_owner, "stopped_runs": stopped}
+
+
+def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hold_reason: str):
+	"""Steps 2 and 3 of ``admin_handover``: stop the live runs, then under the row lock,
+	read fresh: if a run is live again (only possible before the migrate), let go and
+	repeat, at most ``_HANDOVER_ROUNDS`` times; otherwise check the new owner again and
+	write the owner change and the clears (``_write_handover``), with the Comment, in
+	one commit. ``(the row as read under the lock, how many runs were stopped)``.
+
+	The write lifts any hold. One whose reason is not ``hold_reason`` (step 1 kept an
+	earlier admin's, or another admin held the macro between the steps) is named in
+	the Comment, so lifting it is on record."""
+	from jarvis.chat import macros
+
+	stopped = 0
+	for _round in range(_HANDOVER_ROUNDS):
+		n, failed = _stop_live_runs(row.name, reason=STOPPED_BY_ADMIN, admin=admin, verb="handover")
+		stopped += n
+		if failed:
+			frappe.throw(
+				_(
+					"The macro was not handed over: {0} of its runs could not be stopped ({1}), and {2}. "
+					"It stays {3}. Hand it over again to retry."
+				).format(
+					len(failed),
+					", ".join(failed),
+					_stopped_others(stopped),
+					_("on hold") if hold_fields_exist() else _("switched off"),
+				),
+				MacroHandoverError,
+			)
+		row = _lock(row)
+		if row.owner != old_owner:
+			frappe.db.commit()  # releases the row lock
+			_refuse_changed_hands()
+		if macros.live_runs_of(row.name):
+			frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
+			continue
+		_refuse_handover(row, new_owner)
+		_write_handover(row, new_owner)
+		comment = f"{admin} handed this macro over from {old_owner} to {new_owner}."
+		held_for = row.get(HOLD_REASON_FIELD) if frappe.utils.cint(row.get(HOLD_FIELD)) else None
+		if held_for and held_for != hold_reason:
+			comment += f" This also released the hold set for: {held_for}"
+		_leave_comment(row.name, comment)
+		frappe.db.commit()
+		return row, stopped
+	frappe.throw(
+		_("The macro kept starting runs and was not handed over. Hand it over again."),
+		MacroHandoverError,
+	)
+
+
+def _stopped_others(count: int) -> str:
+	if count == 1:
+		return _("1 other was stopped")
+	if count:
+		return _("{0} others were stopped").format(count)
+	return _("no other was stopped")
 
 
 def _tell_both_owners(macro_name: str, old_owner: str, new_owner: str, admin: str) -> None:
@@ -915,14 +1003,16 @@ def _tell_both_owners(macro_name: str, old_owner: str, new_owner: str, admin: st
 @require_jarvis_user
 def admin_handover_targets(search: str = "") -> dict:
 	"""Who a macro can be handed to, for the hand-over dialog's search: enabled
-	desk users with a Jarvis role, matching ``search`` on their address or full name,
-	at most ``TARGETS_MAX``. ``{users: [{user, full_name, macros}], max}``: ``macros``
-	is how many they own, ``max`` the per-owner cap, so the dialog can say who is
-	full. The hand-over itself checks everything again."""
+	desk users with the Jarvis User role (see ``_handover_refusal``), matching
+	``search`` on their address or full name, by full name, at most ``TARGETS_MAX``.
+	``{users: [{user, full_name, macros}], max, more}``: ``macros`` is how many they
+	own, ``max`` the per-owner cap, so the dialog can say who is full; ``more`` that
+	others match too, so it can say to narrow the search. The hand-over itself checks
+	everything again."""
 	refuse_in_tool_dispatch()
 	require_jarvis_admin()
 	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_MACROS_PER_OWNER
-	from jarvis.permissions import JARVIS_ACCESS_ROLES
+	from jarvis.permissions import JARVIS_USER_ROLE
 
 	search = _text_arg(search, _("Search"))[:SEARCH_MAX]
 	users = list_filters.bounded_sql(
@@ -930,17 +1020,19 @@ def admin_handover_targets(search: str = "") -> dict:
 		WHERE u.enabled = 1 AND u.user_type = 'System User'
 			AND u.name NOT IN ('Administrator', 'Guest')
 			AND EXISTS (SELECT 1 FROM `tabHas Role` r
-				WHERE r.parent = u.name AND r.parenttype = 'User' AND r.role IN %(roles)s)
+				WHERE r.parent = u.name AND r.parenttype = 'User' AND r.role = %(role)s)
 			AND (u.name LIKE %(q)s OR u.full_name LIKE %(q)s)
 		ORDER BY u.full_name ASC, u.name ASC
 		LIMIT %(limit)s""",
 		{
-			"roles": tuple(JARVIS_ACCESS_ROLES),
+			"role": JARVIS_USER_ROLE,
 			"q": f"%{list_filters.escape_like(search)}%",
-			"limit": TARGETS_MAX,
+			"limit": TARGETS_MAX + 1,  # one more than shown says whether there are more
 		},
 		as_dict=True,
 	)
+	more = len(users) > TARGETS_MAX
+	users = users[:TARGETS_MAX]
 	counts = {}
 	if users:
 		counts = dict(
@@ -956,4 +1048,5 @@ def admin_handover_targets(search: str = "") -> dict:
 			for u in users
 		],
 		"max": MAX_MACROS_PER_OWNER,
+		"more": more,
 	}
