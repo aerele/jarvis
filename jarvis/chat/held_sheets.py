@@ -41,7 +41,7 @@ from jarvis.chat.pending_actions._store import (
 	reseal_sheet,
 	rowcount,
 )
-from jarvis.exceptions import JarvisError
+from jarvis.exceptions import InvalidFieldValueError, JarvisError
 
 SHEET_TOOL = "file_box_sheet"
 SHEET_MAX_RECORDS = 250
@@ -619,7 +619,11 @@ def _try(record: dict, index: int, remap: dict) -> tuple | None:
 		raise
 	except _KNOWN as e:
 		frappe.db.rollback(save_point=sp)
-		if isinstance(e, _HARD) or not isinstance(e, frappe.ValidationError):
+		# A value the field type check rejects (R2-3) is the record's own, like the
+		# ValidationError Frappe raised for it before: it tries once, then joins flagged.
+		if not isinstance(e, InvalidFieldValueError) and (
+			isinstance(e, _HARD) or not isinstance(e, frappe.ValidationError)
+		):
 			return "refused", e
 		missing = _missing(record, values, index, remap) if record["op"] == "create" else None
 		if missing:
