@@ -205,7 +205,38 @@ class JarvisTrigger(Document):
 		except Exception as e:
 			frappe.throw(_("Invalid Condition: {0}").format(str(e)))
 
+	def _require_script_authoring_rights(self):
+		"""A Script action materializes a managed Server Script that runs with full
+		server-script globals on other users' saves, so authoring one must need the
+		same rights as authoring a Server Script directly.
+
+		Core gates Server Script authoring behind ``only_for("Script Manager")``
+		plus the Server Script DocType create permission (System Manager). The
+		managed sync writes with ``ignore_permissions`` / ``ignore_validate``, which
+		would skip that gate and let a Jarvis Admin (who holds neither) run
+		arbitrary server-side code, i.e. become System Manager where
+		``server_script_enabled`` is on. Re-impose the gate here.
+
+		Skipped for system / programmatic saves (``ignore_permissions``): patches,
+		the scheduler and fixtures manage these rows without a user in context,
+		exactly as core's own permission checks are skipped there."""
+		if self.flags.ignore_permissions or frappe.session.user == "Administrator":
+			return
+		if "Script Manager" not in frappe.get_roles() or not frappe.has_permission(
+			"Server Script", ptype="create"
+		):
+			frappe.throw(
+				_(
+					"A Script action runs a Server Script with full privileges, so it "
+					"needs the Script Manager role and permission to create Server "
+					"Scripts. Use an LLM action, or ask an administrator to set up the "
+					"Script trigger."
+				),
+				frappe.PermissionError,
+			)
+
 	def _validate_script(self):
+		self._require_script_authoring_rights()
 		if not (self.script_body or "").strip():
 			frappe.throw(_("Script body is required for a Script action."))
 		if not is_safe_exec_enabled():
@@ -263,10 +294,11 @@ class JarvisTrigger(Document):
 				"disabled": 1,
 			}
 		)
-		# Server Script.validate() is only_for("Script Manager") — a Jarvis
-		# Admin saving a trigger legitimately is not one. Skipping validate is
-		# safe: _validate_script() above already compile-checked the body (and
-		# throws where core only warns).
+		# Server Script.validate() is only_for("Script Manager"). Skipping validate
+		# here is safe because _validate_script() has already enforced that same
+		# authoring right (_require_script_authoring_rights) and compile-checked the
+		# body (throwing where core only warns), so this managed write never grants
+		# a capability the author does not already hold.
 		ss.flags.ignore_validate = True
 		if ss.is_new():
 			ss.name = f"{MANAGED_SCRIPT_PREFIX}{self.name}"
