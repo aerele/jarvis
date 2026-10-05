@@ -1293,18 +1293,28 @@ _REQUEST_AUTORUN_TTL_S = 900
 # of surfacing after the human confirms a doomed card. Preview and confirm build
 # the same doc as the same exec_user, so a preview failure faithfully predicts the
 # confirm failure. Scoped to the build-from-args create/update pair - the reported
-# mandatory-field case. submit_doc/cancel_doc/delete_doc/amend_doc are _PREVIEWABLE
-# too and are STILL dry-run at park via _pending_preview, but keep the legacy
-# park-with-note: their failures are state-based (already exists, docstatus, link
-# integrity) and dry-running them fires on_submit/on_cancel hooks - extending the
-# block to them is a separate, larger change. run_method is never sandbox-run at
-# park at all (its target's inline non-DB side effects would fire unconfirmed).
+# mandatory-field case. submit_doc/cancel_doc/delete_doc/amend_doc are NOT dry-run
+# at park (they are in _NO_SANDBOX_PREVIEW below): dry-running them fires
+# on_submit / on_cancel / on_trash, whose INLINE, non-rollback-able side effects
+# (an e-invoice / e-waybill HTTP call to a tax portal, attachment deletion from
+# disk) would happen the moment the card is built, before the user confirms. They
+# take a described-intent card instead; the real call runs only on confirm.
 #
 # create_docs joins the build-from-args creates: its whole batch is dry-run in
 # the sandbox at park, so a bad link / missing mandatory in ANY item bounces to
 # the model instead of a doomed card. Deliberately NOT in _AUTO_APPLYABLE - the
 # batch card is the human checkpoint against duplicate masters.
 _DRY_RUN_ON_PARK = frozenset({"create_doc", "create_docs", "update_doc"})
+
+# Gated writes whose park preview must NEVER sandbox-execute the tool, in single
+# OR bulk form, because their consequential hooks fire inline, non-rollback-able
+# side effects (on_submit / on_cancel / on_trash: tax-portal HTTP, files removed
+# from disk), or because the target runs arbitrary code (run_method). The DB
+# rollback in preview_sandbox does not undo those, so a dry run at park would
+# perform the side effect before the human confirms (and Discard could not take it
+# back). These take a described-intent card; only _DRY_RUN_ON_PARK (pure-DB
+# create / update) keeps a sandboxed dry-run preview.
+_NO_SANDBOX_PREVIEW = frozenset({"run_method", "submit_doc", "cancel_doc", "amend_doc", "delete_doc"})
 
 # Batch payload keys: a call carrying a non-empty list under any of these is a
 # BULK call (many targets in one gated card), not a single-doc write.
@@ -1748,23 +1758,20 @@ def _pending_preview(tool: str, args: dict) -> dict:
 		"summary": _describe_call(tool, args),
 		"note": ("not a dry run - this will send/execute on confirm"),
 	}
-	# run_method is _PREVIEWABLE for the dry-run path, but it must NEVER be
-	# sandbox-executed to build a park preview: even inside the rollback
-	# sandbox the target method's inline non-DB side effects (HTTP/email fired
-	# directly, not via DB writes) would fire unconfirmed and its result would
-	# be returned to the model. Route it to the described-intent path (like
-	# send_email) so parking a run_method never executes it - the real call
-	# runs only on confirm.
-	# A BULK submit/cancel/delete/amend routes to described-intent: sandbox-
-	# running the batch would fire on_submit / on_cancel hooks - incl. non-
-	# rollback-able inline side effects (e-invoice / webhook HTTP) - once per doc,
-	# N times, at PARK. Bulk create/update/create_docs stay SANDBOXED even here
-	# (the resync path reaches _pending_preview directly, bypassing the
-	# _DRY_RUN_ON_PARK branch): they are _DRY_RUN_ON_PARK - rolled back, no
-	# consequential hooks - so exclude them from the bulk described routing.
+	# _NO_SANDBOX_PREVIEW (run_method + submit/cancel/delete/amend) must NEVER be
+	# sandbox-executed to build a park preview, in single OR bulk form: even inside
+	# the rollback sandbox their hooks fire inline, non-rollback-able side effects
+	# (on_submit / on_cancel / on_trash: tax-portal HTTP, files removed from disk;
+	# a run_method target running arbitrary code) the moment the card is built,
+	# before the user confirms. Route them to the described-intent path (like
+	# send_email) so parking never executes them - the real call runs only on
+	# confirm. The trailing bulk clause keeps any OTHER non-_DRY_RUN_ON_PARK
+	# previewable out of the batch sandbox too (create/update/create_docs are
+	# _DRY_RUN_ON_PARK - pure DB, rolled back, no consequential hooks - and stay
+	# sandboxed here, e.g. the resync path that reaches _pending_preview directly).
 	if (
 		tool not in _PREVIEWABLE
-		or tool == "run_method"
+		or tool in _NO_SANDBOX_PREVIEW
 		or (_is_bulk_call(args) and tool not in _DRY_RUN_ON_PARK)
 	):
 		return described
@@ -3337,9 +3344,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# same doc as the same exec_user - so return the error to the model NOW
 		# instead of showing a confirmation card that dies on click. clear_messages
 		# so the validation msgprint does not leak into the turn (mirrors
-		# preview_doc). Every other gated write (submit/cancel/delete/amend get a
-		# sandboxed preview; send_email/run_method/create_custom_skill/update_wiki
-		# a described-intent one) parks via _pending_preview exactly as before.
+		# preview_doc). Every other gated write parks via _pending_preview, which
+		# returns a described-intent card for _NO_SANDBOX_PREVIEW (submit/cancel/
+		# delete/amend/run_method) and send_email/create_custom_skill/update_wiki,
+		# and a sandboxed dry-run only for the remaining previewables.
 		if tool == "run_import":
 			# run_import cannot be sandbox-run (staging + a background job), so it has its
 			# own pre-park validation: refuse a blocked / non-importable / non-admin import

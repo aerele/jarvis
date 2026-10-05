@@ -1442,25 +1442,53 @@ class TestALostSandboxIsARefusal(_LostSavepoint):
 		self.assert_refused(result)
 		mint.assert_not_called()
 
-	def test_a_parked_submit_is_refused_and_not_parked(self):
-		# Through _pending_preview, which turns every other JarvisError into a
-		# card that says "preview unavailable".
+	def test_a_parked_submit_does_not_dispatch_at_preview(self):
+		# #3: submit_doc is _NO_SANDBOX_PREVIEW - parking it builds a described-
+		# intent card WITHOUT dispatching the tool, so the dry run (and any inline
+		# on_submit side effect it would fire) never happens before the user
+		# confirms. The savepoint-losing dispatch is therefore never reached; the
+		# card parks normally.
 		from jarvis import api
 
 		with (
-			patch.object(api, "dispatch", self._tool_that_loses_the_savepoint),
+			patch.object(api, "dispatch", self._tool_that_loses_the_savepoint) as dispatch,
 			patch("jarvis.chat.pending_confirm.mint") as mint,
 		):
 			result = api._run_tool("submit_doc", {"doctype": "ToDo", "name": "x"})
-		self.assert_refused(result)
-		mint.assert_not_called()
+		dispatch.assert_not_called()
+		mint.assert_called_once()
+		self.assertTrue(result["ok"])
 
-	def test_pending_preview_raises_rather_than_describing(self):
+	def test_pending_preview_describes_submit_without_dispatching(self):
+		# submit_doc now takes a described-intent preview: _pending_preview returns
+		# the described dict and never calls dispatch, so a savepoint-losing dry run
+		# cannot occur.
 		from jarvis import api
 
-		with patch.object(api, "dispatch", self._tool_that_loses_the_savepoint):
-			with self.assertRaises(PreviewSandboxLost):
-				api._pending_preview("submit_doc", {"doctype": "ToDo", "name": "x"})
+		with patch.object(api, "dispatch", self._tool_that_loses_the_savepoint) as dispatch:
+			out = api._pending_preview("submit_doc", {"doctype": "ToDo", "name": "x"})
+		dispatch.assert_not_called()
+		self.assertTrue(out["described"])
+		self.assertFalse(out["preview"])
+
+	def test_destructive_single_doc_preview_never_dispatches(self):
+		# #3 regression: a single-doc submit/cancel/delete/amend preview must be
+		# described-intent (no sandbox dispatch), because their hooks fire inline,
+		# non-rollback-able side effects (tax-portal HTTP, files removed from disk).
+		# create_doc stays a sandboxed dry-run (pure DB, rolled back) as the control.
+		from jarvis import api
+
+		for tool in ("submit_doc", "cancel_doc", "delete_doc", "amend_doc"):
+			with patch.object(api, "dispatch") as dispatch:
+				out = api._pending_preview(tool, {"doctype": "ToDo", "name": "x"})
+			dispatch.assert_not_called()
+			self.assertTrue(out["described"], tool)
+			self.assertFalse(out["preview"], tool)
+
+		with patch.object(api, "dispatch", return_value={"name": "x"}) as dispatch:
+			out = api._pending_preview("create_doc", {"doctype": "ToDo", "values": {"description": "x"}})
+		dispatch.assert_called_once()
+		self.assertTrue(out["preview"])
 
 	def test_preview_doc_does_not_call_the_document_invalid(self):
 		from jarvis.tools.preview_doc import preview_doc
