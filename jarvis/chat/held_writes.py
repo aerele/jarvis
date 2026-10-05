@@ -368,9 +368,11 @@ def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 	(``get_value``, ``exists``, ...) read an outage as a miss."""
 	keys = {frappe.cache.make_key(k) for k in keys}
 	try:
+		# Keys are site-scoped by make_key above.
+		# nosemgrep: frappe-cache-breaks-multitenancy
 		seen = any(frappe.cache.get(k) is not None for k in keys)
 		for k in keys:
-			frappe.cache.set(k, 1, ex=MISS_TTL_S)
+			frappe.cache.set(k, 1, ex=MISS_TTL_S)  # nosemgrep: frappe-cache-breaks-multitenancy
 	except Exception:
 		frappe.log_error(title=f"jarvis.file_box.{event}", message=frappe.get_traceback())
 		return True

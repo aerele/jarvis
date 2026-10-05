@@ -43,7 +43,8 @@ def reset_cache() -> None:
 
 def _git_value(*args: str) -> str | None:
 	try:
-		result = subprocess.run(
+		# Literal git argv (args come only from _QUERIES), no shell, bounded by a timeout.
+		result = subprocess.run(  # nosemgrep: frappe-subprocess-exec
 			["git", "-C", str(_REPOSITORY_ROOT), *args],
 			capture_output=True,
 			text=True,

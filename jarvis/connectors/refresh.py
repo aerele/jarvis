@@ -110,7 +110,9 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""Set-if-absent on the debounce flag: the first caller wins the window."""
+	"""Set-if-absent on the debounce flag: the first caller wins the window.
+	Raw SET for nx; _debounce_key is site-scoped by make_key."""
+	# nosemgrep: frappe-cache-breaks-multitenancy
 	return bool(frappe.cache().set(_debounce_key(row_name), 1, ex=DEBOUNCE_S, nx=True))
 
 

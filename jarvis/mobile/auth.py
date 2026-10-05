@@ -72,8 +72,8 @@ def _pairing_cache_key(user: str):
 def _throttle_pairing(user: str) -> None:
 	"""Reject a pairing storm. Mirrors frappe.rate_limiter's counter shape but
 	keyed by user instead of IP."""
-	key = _pairing_cache_key(user)
-	if not frappe.cache.get(key):
+	key = _pairing_cache_key(user)  # site-scoped by make_key
+	if not frappe.cache.get(key):  # nosemgrep: frappe-cache-breaks-multitenancy
 		frappe.cache.setex(key, PAIRING_WINDOW_SECONDS, 0)
 	if cint(frappe.cache.incrby(key, 1)) > PAIRING_LIMIT:
 		frappe.throw(

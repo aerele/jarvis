@@ -72,13 +72,14 @@ def load_policy(raw, expected_digest=None):
 
 def scan(root, policy):
 	root = Path(root).resolve()
-	checkout = subprocess.check_output(
+	# CI-only. Literal git argv, no shell; the only variable is the resolved scan root.
+	checkout = subprocess.check_output(  # nosemgrep: frappe-subprocess-exec
 		["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True
 	).strip()
 	if Path(checkout).resolve() != root:
 		raise PolicyError("Scan root must be the checkout root.")
 	paths = (
-		subprocess.check_output(
+		subprocess.check_output(  # nosemgrep: frappe-subprocess-exec
 			["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
 		)
 		.decode()
