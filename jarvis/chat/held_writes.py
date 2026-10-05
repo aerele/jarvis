@@ -364,16 +364,16 @@ def _missed_before(conversation: str, items: list[dict], needs_input: list[dict]
 def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 	"""Tries once: True when one of ``keys`` was already seen. Records them for an
 	hour; a lost key just gives one more try, and a cache failure reads as seen
-	(never an endless retry loop). ``set_value`` swallows an outage, so the write is
-	read back past the request-local copy: a key that did not land counts as seen."""
+	(never an endless retry loop)."""
 	keys = {_seen_key(k) for k in keys}
 	try:
 		seen = any(frappe.cache.get_value(k, expires=True) is not None for k in keys)
 		for k in keys:
 			frappe.cache.set_value(k, 1, expires_in_sec=MISS_TTL_S)
+		# set_value hides an outage: confirm in Redis.
 		if all(frappe.cache.get_value(k, expires=True, use_local_cache=False) is not None for k in keys):
 			return seen
-		message = "the cache did not keep the write (Redis unavailable?)"
+		message = "cache write lost"
 	except Exception:
 		message = frappe.get_traceback()
 	frappe.log_error(title=f"jarvis.file_box.{event}", message=message)
@@ -381,7 +381,6 @@ def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 
 
 def forget_seen(key: str) -> None:
-	"""Give ``key`` a fresh try."""
 	frappe.cache.delete_value(_seen_key(key))
 
 

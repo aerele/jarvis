@@ -1179,9 +1179,7 @@ class JarvisSettings(Document):
 			self._mirror_saved(modified=row[0][0])
 
 	def _mirror_saved(self, **values):
-		"""Set fields on this in-memory doc to what is already saved (a saved
-		password reads back masked); nothing set here is left to persist. Plain setattr:
-		doc.update() skips reserved keys such as ``modified``."""
+		"""Sync in-memory fields to saved values (setattr: update() skips ``modified``)."""
 		for fieldname, value in values.items():
 			setattr(self, fieldname, value)
 

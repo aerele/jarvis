@@ -59,7 +59,7 @@ def _cap_key(trigger: str) -> str:
 
 
 def over_cap_count(trigger: str) -> int:
-	"""Today's count for ``trigger`` once it went past its cap; 0 until then."""
+	"""Today's count once past the cap, else 0."""
 	return cint(frappe.cache.get_value(_over_cap_key(trigger), expires=True))
 
 
@@ -193,7 +193,7 @@ def run_llm_action(
 				detail=f"daily LLM cap reached ({cap}); further evaluations today are dropped silently",
 			)
 			frappe.db.commit()
-		# After the Skipped marker: from here the engine stops enqueueing this trigger.
+		# Lets the engine skip enqueueing.
 		frappe.cache.set_value(_over_cap_key(trigger), count, expires_in_sec=_CAP_TTL_SECONDS)
 		return
 

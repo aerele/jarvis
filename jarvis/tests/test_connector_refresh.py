@@ -123,7 +123,7 @@ class TestAfterCallTriggers(unittest.TestCase):
 class TestRequestDebounce(unittest.TestCase):
 	def test_first_caller_enqueues_immediately_with_dedupe(self):
 		fake = _fake_frappe()
-		fake.cache.get_value.return_value = None  # no claim in the window yet
+		fake.cache.get_value.return_value = None
 		with mock.patch.object(refresh, "frappe", fake):
 			self.assertTrue(refresh.request("conn-1"))
 		fake.enqueue.assert_called_once()
@@ -139,7 +139,7 @@ class TestRequestDebounce(unittest.TestCase):
 
 	def test_second_caller_in_window_does_not_enqueue(self):
 		fake = _fake_frappe()
-		fake.cache.get_value.return_value = 1  # claimed earlier in the window
+		fake.cache.get_value.return_value = 1
 		with mock.patch.object(refresh, "frappe", fake):
 			self.assertFalse(refresh.request("conn-1"))
 		fake.enqueue.assert_not_called()
@@ -150,7 +150,6 @@ class TestRequestDebounce(unittest.TestCase):
 		fake.cache.get_value.return_value = None
 		with mock.patch.object(refresh, "frappe", fake):
 			refresh.request("conn-1")
-		# The wrapper API scopes the key to the site; the window is its expiry.
 		fake.cache.set_value.assert_called_once_with(
 			refresh._debounce_key("conn-1"), 1, expires_in_sec=refresh.DEBOUNCE_S
 		)
