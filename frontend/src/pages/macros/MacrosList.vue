@@ -82,10 +82,7 @@
 					<span class="truncate text-base font-medium text-ink-gray-9">{{
 						row.macro_name
 					}}</span>
-					<Tooltip
-						v-if="row.skip_confirmation"
-						text="Armed: this macro's runs execute writes without a confirmation card (admin-set)."
-					>
+					<Tooltip v-if="row.skip_confirmation" :text="ARMED_HELP">
 						<Badge variant="subtle" theme="orange" label="Armed" />
 					</Tooltip>
 					<Tooltip v-if="macroHold(row)" :text="holdMessage(macroHold(row))">
@@ -202,7 +199,7 @@ import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 import { scheduleLabel } from "./scheduleLabel";
-import { LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "./runDisplay";
+import { ARMED_HELP, LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "./runDisplay";
 import { nextRunCell as describeNextRun } from "@/lib/macroSchedule";
 import {
 	lastRunCell as describeLastRun,
