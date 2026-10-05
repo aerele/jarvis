@@ -59,6 +59,47 @@ export function toSiteDatetime(d) {
 	return dayjs.tz(s, local).tz(site).format("YYYY-MM-DD HH:mm:ss");
 }
 
+// The site's timezone name ("Asia/Kolkata"), or "" when the shell has not been
+// told (AppShell feeds it from window.time_zone / get_chat_ui_settings). A stored
+// time-of-day such as a schedule's "09:00" is a SITE-zone clock time and is shown
+// as stored, never converted, so the text beside it has to say whose clock it is:
+// a viewer in another zone otherwise reads it as their own.
+export function siteTimezone() {
+	try {
+		return String(getConfig("systemTimezone") || "");
+	} catch {
+		return "";
+	}
+}
+
+// Whether a server datetime reads differently on the viewer's clock than as
+// stored (the site's clock). Judged by what is shown, not by zone names: one
+// clock under two names (Asia/Kolkata, Asia/Calcutta) is not a difference, and
+// two zones that happen to agree at that moment need no label either. False when
+// there is nothing to compare.
+export function onAnotherClock(d) {
+	if (!d) return false;
+	try {
+		const stored = String(d).replace("T", " ").slice(0, 19);
+		const shown = dayjsLocal(String(d)).format("YYYY-MM-DD HH:mm:ss");
+		return !!shown && shown !== stored;
+	} catch {
+		return false;
+	}
+}
+
+// "09:00" / "09:00:00" -> "9:00 am": the same text frappe-ui's TimePicker shows
+// for the value (use12Hour default), so a time reads the same on the form that
+// sets it and everywhere that reports it. "" for anything that is not a time.
+export function formatTime12h(hhmm) {
+	const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm || ""));
+	if (!m) return "";
+	const h = parseInt(m[1], 10);
+	const am = h < 12;
+	const h12 = h % 12 === 0 ? 12 : h % 12;
+	return `${h12}:${m[2]} ${am ? "am" : "pm"}`;
+}
+
 // Day-bucket label for chat day separators, timezone-safe like the rest of this
 // module. Accepts a naive site-tz string (creation/modified) or a browser Date /
 // ms number (optimistic rows). "Today" / "Yesterday" / weekday within a week /

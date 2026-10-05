@@ -178,7 +178,7 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return _refuse("ConfirmationUnavailableError", _UNAVAILABLE)
 	frappe.db.commit()  # release the conversation lock before any dispatch
 	if verdict == "apply":
-		result = api.dispatch_confirmed(tool, args, provenance="auto_apply")
+		result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 		if tool == "create_doc" and result.get("ok"):
 			api._stamp_file_box_draft(conversation, result.get("data"))
 		return result
@@ -495,6 +495,10 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 	needs_input = []
 	try:
 		preview = api._run_preview(tool, args)
+	except api.PreviewSandboxLost:
+		# Not a validation error to look for missing fields behind: ``apply``
+		# rolls back, logs and refuses as unavailable.
+		raise
 	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		frappe.clear_messages()
 		needs_input = collect_missing(tool, items)

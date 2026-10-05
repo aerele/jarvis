@@ -465,9 +465,18 @@ def get_approval(name: str) -> dict:
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
 	can_act = _may_act_on(doc.conversation)
-	if not can_act and not frappe.db.exists(
-		"DocShare",
-		{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+	can_read = can_act
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import may_review
+
+		can_act = may_review(doc)
+	if (
+		not can_read
+		and not can_act
+		and not frappe.db.exists(
+			"DocShare",
+			{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	return {
@@ -614,7 +623,11 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, bool(int(approve)))
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.status != "Pending":
@@ -641,6 +654,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	doc.reload()
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
+	if doc.get("assessment_key"):
+		return {"ok": True, "status": doc.status, "resumed": False}
 
 	if doc.get("routing"):
 		return {"ok": True, "status": doc.status, "resumed": _apply_routing_answer(doc)}
@@ -711,7 +726,11 @@ def dismiss_approval(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, False)
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.status != "Pending":
@@ -746,7 +765,11 @@ def restore_approval(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, False)
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.get("routing"):
@@ -1749,9 +1772,27 @@ def _edit_dry_run(tool: str, args: dict, items: list[dict]) -> dict | None:
 	come back inline, anything else as a banner; nothing is claimed."""
 	from jarvis import api
 	from jarvis.chat import held_writes
+	from jarvis.tools import _write_risk
 
 	try:
+		# A structure change is refused before the dry run (round 2): set up in Desk.
+		_write_risk.check(tool, args)
+	except api.WriteRefusedError as e:
+		frappe.clear_messages()
+		return _held_refusal("invalid", frappe.utils.strip_html(str(e)))
+	try:
 		api._run_preview(tool, args)
+	except api.PreviewSandboxLost:
+		# Not a validation error: the dry run could not be undone cleanly (the
+		# sandbox logged it). The caller rolls back and shows this to the
+		# approver; nothing is claimed or created.
+		frappe.clear_messages()
+		return _held_refusal(
+			"invalid",
+			"These values could not be checked safely, so nothing was created. If this record changes "
+			"database structure (for example a Custom Field), part of it may already be saved: check "
+			"before trying again.",
+		)
 	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		frappe.clear_messages()
 		missing = held_writes.collect_missing(tool, items)
@@ -1950,7 +1991,7 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 	if ok and not hidden:
 		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""))
 
-	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver)  # full rollback
+	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver, result=result)  # full rollback
 	if ok and not interfered:
 		frappe.db.commit()  # the failure audit; the row is Pending again
 		return _held_refusal(

@@ -147,6 +147,10 @@ const AiModelsPane = defineAsyncComponent(() => import("@/components/settings/Ai
 const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
+// Every user's macros, for a Jarvis Admin: see, open read-only, stop a run.
+const MacrosAdminPane = defineAsyncComponent(() =>
+	import("@/components/settings/MacrosAdminPane.vue")
+);
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
 const PdfTemplatesPane = defineAsyncComponent(() =>
 	import("@/components/settings/PdfTemplatesPane.vue")
@@ -168,6 +172,7 @@ const PANES = {
 	branding: BrandingPane,
 	pdftemplates: PdfTemplatesPane,
 	usageadmin: UsageAdminPane,
+	macroadmin: MacrosAdminPane,
 };
 
 // Rail labels live here; the header title and description each pane shows are
@@ -197,7 +202,10 @@ const NAV = [
 	{
 		name: "Administration",
 		gate: () => isAdmin,
-		items: [{ key: "usageadmin", label: "User usage", icon: "users" }],
+		items: [
+			{ key: "usageadmin", label: "User usage", icon: "users" },
+			{ key: "macroadmin", label: "Macros", icon: "layers" },
+		],
 	},
 ];
 

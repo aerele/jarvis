@@ -65,8 +65,91 @@ class RunDisarmedError(JarvisError):
 	so retrying the same call can never turn it into a yes."""
 
 
+class PreviewSandboxLost(JarvisError):
+	"""A dry run could not be undone cleanly: the savepoint of its sandbox
+	(``jarvis.tools._preview_sandbox``) was gone when it came to roll back. A
+	deadlock aborted the transaction, or the write altered database structure
+	as its FIRST statement (DDL commits implicitly; after any write Frappe raises
+	``ImplicitCommitError`` instead, which ``api._preview_error`` refuses as a
+	structure change, and the structure doctypes are refused before any dry run:
+	``jarvis.tools._write_risk``). The sandbox has
+	already rolled back in full and written one Error Log row; the message is
+	the plain-language text the model relays.
+
+	A ``JarvisError`` so that it can never be a raw 500: a tool that lets it
+	propagate (``preview_doc``, the source mapper under ``get_creation_context``)
+	gets the ordinary error envelope from ``api._translate_write_error``. The
+	same base class is why every caller that treats a ``JarvisError`` from a dry
+	run as "the document is invalid" names this one FIRST:
+
+	- ``api._pending_preview`` re-raises it (anything else parks a card that says
+	  "preview unavailable"); its caller in ``api._run_tool``, and
+	  ``api._preview_error`` for the other dry runs there, answer with the
+	  ``ConfirmationUnavailableError`` refusal and park nothing.
+	- ``held_writes._hold`` re-raises it to ``held_writes.apply``, which rolls
+	  back, logs and refuses (instead of looking for missing fields).
+	- ``approvals_api._edit_dry_run`` returns a refusal the Approval Board shows.
+	- ``preview_doc`` and ``_source_mapper.mapped_values`` re-raise it (instead of
+	  ``valid: false`` / "could not map").
+
+	One caller still swallows it: ``held_writes.collect_missing`` answers "no
+	missing fields found", and its callers then report the validation error they
+	already had. Nothing is parked on that path, and the sandbox has rolled back
+	and logged the loss by then.
+
+	A new caller of ``preview_sandbox`` that catches ``JarvisError`` or
+	``Exception`` around it must name this one first, as the callers above do."""
+
+
+class WriteRefusedError(JarvisError):
+	"""A write the risk guard (``jarvis.tools._write_risk``) will not run from chat.
+
+	Carries its own wire ``code`` (``api._translate_write_error`` reads ``code``
+	before the class name) plus the doctype and, for a structure change, the Desk
+	page where a person sets it up. The answer is FIXED for this route: retrying the
+	same call, or the same change through another tool, gets the same refusal. That
+	instruction rides in the message, because the plugin relays only code + message."""
+
+	code = "write_refused"
+
+	def __init__(self, message: str, *, doctype: str = "", desk_path: str = ""):
+		super().__init__(message)
+		self.doctype = doctype
+		self.desk_path = desk_path
+
+
+class StructureRefusedError(WriteRefusedError):
+	"""A change to the database structure (a Custom Field, a DocType, a Workflow ...):
+	set up in Desk, never from chat (R2-4 REVISED AGAIN, R2-10)."""
+
+	code = "structure_refused"
+
+
+class SensitiveWriteRefusedError(WriteRefusedError):
+	"""Sensitive configuration (code, outbound mail, access, sign-in; R2-8 / R2-12)
+	written without the confirmation card that names exactly that record."""
+
+	code = "sensitive_refused"
+
+
 class InvalidArgumentError(JarvisError):
 	"""Raised when tool arguments fail validation."""
+
+
+class InvalidFieldValueError(InvalidArgumentError):
+	"""A field value Frappe would reject or silently corrupt (``qty="abc"`` saved as 0,
+	a date the database refuses, an option the Select does not list), caught before
+	the write. Its message names the field and the value, so the request can be
+	corrected (``jarvis._failure_kind``: FIXABLE). The envelope keeps the
+	``InvalidArgumentError`` code every consumer already branches on."""
+
+	envelope_code = "InvalidArgumentError"
+
+
+class RetryLaterError(JarvisError):
+	"""The site was busy (a lock held or a lock wait that timed out); nothing was
+	saved and the same request can succeed in a moment (``jarvis._failure_kind``:
+	RETRY_LATER). Raised by a write that takes its own lock."""
 
 
 class NoDataError(InvalidArgumentError):

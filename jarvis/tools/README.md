@@ -173,20 +173,155 @@ calls `frappe.db.commit()` internally cannot persist:
 // data
 { "preview": true,
   "would": { "name": "<resolved name>", "grand_total": 1180.0, ... },
-  "note": "Validated with all DB writes rolled back; nothing was committed. External side effects (emails/webhooks in on_submit / on_cancel) are not sandboxed by preview." }
+  "note": "Trial run: the change was checked and every database write was rolled back. Nothing is saved until you confirm. A trial run cannot undo email or calls to other systems sent by the document's own code, live notifications, or error log entries." }
 ```
 
 Use it to show the user exactly what a write would produce (resolved name,
 fetched/computed fields) - or the validation error it would hit - before they
-confirm. Preview runs are never audited (nothing is committed). **Caveat:** DB
-effects are sandboxed, but external side effects in `on_submit` / `on_cancel`
-(emails, webhooks) are not rolled back.
+confirm. Preview runs are never audited (nothing is committed). The same sandbox
+(`jarvis/tools/_preview_sandbox.py`) builds the preview on a confirmation card.
+
+`note` is written for a person: plain language, no key names. Where it is shown
+depends on the card. Neither client shows it when a structured card exists, and
+one is built for create / update and for submit / cancel / amend / delete (chat
+card, phone decision sheet and Approval Board alike); there it reaches the user
+only when the model relays it. Both clients render it on the plain fallback, for
+a call that has no structured card. It is stored with the pending record and in
+the transcript either way.
+Three more keys appear only when they apply:
+
+- `will_queue`: background jobs a hook enqueued during the dry run. They are
+  **not sent**; these are their names (distinct, at most 20 plus a `+N more`
+  marker, each one line and at most 140 characters). `note` then also says how
+  many jobs Confirm will start. Frappe's own clean-up job after a delete
+  (`delete_dynamic_links`, enqueued on every delete) is dropped but not
+  listed or counted.
+- `will_queue_note`: a sentence for the model, saying what to tell the user.
+  When one of the jobs is Frappe's `queue_action`
+  (`frappe.model.document.execute_action`, e.g. a Stock Reconciliation over 100
+  rows) it adds that the action itself runs in the background on confirm and was
+  not validated by the preview; `note` then says the same and does not call the
+  change "checked". What counts is the method a job really runs, never the
+  `job_name` its caller gave it.
+- `hook_rolled_back: true`: the document's own code called a bare
+  `frappe.db.rollback()` during the dry run. It took a failure path, so `would`
+  may not be what Confirm produces, and `note` says so.
+
+**The one job that is still sent.** `SURVIVES_DRY_RUN` (in the sandbox module)
+lists `jarvis.triggers.engine.write_activity`: a Jarvis Trigger that blocks a
+save enqueues its Blocked audit row immediately so that it outlives the
+rollback, and it does so from a dry run too. Only when Frappe's own `enqueue`
+built the job, and only when it is enqueued immediately; the same method
+enqueued after commit (Success / Failed activity) is dropped and is not listed
+in `will_queue` (a job that is merely NAMED like it is listed). The card's
+`note` does not mention this job: it is sent when an automation blocks the save,
+which raises, so no note is built for that dry run. Add a method to that set
+only together with a test.
+
+**When the dry run cannot be undone.** If the sandbox's savepoint is gone when it
+comes to roll back (a deadlock aborted the transaction, or the write ran DDL,
+which commits implicitly: a Custom Field, a DocType), the sandbox rolls the
+transaction back in full (with a bare `ROLLBACK` if Frappe's own did not send
+one), writes one Error Log row, and raises `PreviewSandboxLost`
+(`jarvis/exceptions.py`). If the dry run itself raised, its own error is what
+the caller sees; the row is still written.
+No card is parked. The model gets a `ConfirmationUnavailableError` refusal saying
+that part of the change may already be saved when it alters database structure,
+and to retry at most once. `preview_doc` and `get_creation_context` answer with
+the error code `PreviewSandboxLost` and the same message.
+
+**Not sandboxed** (the dry run really does these): HTTP or email sent directly
+inside a hook; a realtime event published immediately; a write to a
+non-transactional table (Error Log is MyISAM); what a write did before its own
+DDL; `enqueue(deduplicate=True)` deleting a finished job of the same id; and
+jobs that only come into being when a commit callback runs (a webhook's delivery
+job) are neither sent nor listed in `will_queue`.
+
+**Telling from the logs that it works.** The sandbox writes to
+`logs/jarvis.preview.log` (bench and site):
+
+| Line | Level | Written on a production bench |
+|---|---|---|
+| `dry run: job sent for real (it must outlive a rollback) ... job='...'` | WARNING | yes |
+| `dry run: a bare frappe.db.rollback() was redirected to the savepoint ...` | WARNING | yes |
+| `dry run: job not sent ... job='...'` (one per dropped job) | INFO | only with the log level lowered to INFO |
+| a lost savepoint, a displaced `get_queue` wrap, a failed cleanup step | ERROR | yes |
+
+Frappe hands out loggers at ERROR outside a dev server; the sandbox pins this
+one to WARNING so the two rare events above are kept. A lost savepoint and a
+displaced wrap also write an Error Log row, titled
+`jarvis preview sandbox: savepoint lost` and
+`jarvis preview sandbox: get_queue guard was displaced` (the latter once per
+process). A quiet log on a production bench therefore means no job left a dry
+run and no hook rolled one back, not that the sandbox is idle; to see every
+dropped job, lower the level and look for `job not sent`.
 
 `run_method` is **not** in this set: it is always gated, so `preview: true` is
 rejected (`InvalidArgumentError`). Call it directly and the bench parks a
 confirmation card built from a described-intent summary of the blast radius -
 there is no sandboxed dry-run for it, since its target's inline non-DB side
 effects could fire unconfirmed. See the `run_method` section above.
+
+## Write-risk guard - structure refused, sensitive always carded
+
+`jarvis/tools/_write_risk.py` holds the lists and both layers (round-2 decisions
+R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
+
+- **Structure** (Custom Field, DocType, Workflow, Inventory Dimension, Service
+  Level Agreement, CRM Settings, Domain Settings, Permission Type, Accounting
+  Dimension): refused from chat on every route - the gated card, the draft panel
+  (`apply_action`), auto mode, "confirm all", an armed macro, an approved skill
+  run, File Box, the Approval Board edit, `preview_doc`, and at Confirm for a card
+  parked before the guard. Code `structure_refused`, `error.desk_path` names the
+  Desk page. Any structure doctype in a batch refuses the whole batch.
+- **Sensitive** (Server Script, Client Script, Webhook, Notification, Auto Email
+  Report, Custom DocPerm, Property Setter, Scheduled Job Type, Website Script,
+  Custom HTML Block, Email Account / Domain, User, Role, Role Profile, Module
+  Profile, User Permission, Social Login Key, OAuth Client, Connected App, LDAP
+  Settings, Automation Flow, Custom Role; Report of type Script / Query and Jarvis Trigger with a Script action;
+  Web Page / Web Form / Website Theme / Website Settings / custom Web Template when
+  a write puts content in their script / HTML fields; Auto Repeat when it emails
+  people): parks behind its own card in EVERY mode; the draft panel turns it into
+  that card.
+- **`run_method`** stays open (R2-13): a card in ordinary chat, none in the
+  uncarded modes, no method allow- or deny-list beyond run_method's own (Jarvis's
+  gate / turn / decision endpoints). What it SAVES is judged by the ORM guard below:
+  a structure root write is refused even after Confirm; a sensitive root write is
+  refused uncarded and admitted once the user confirmed the run_method card.
+  Accepted gap (aerele/jarvis#1635): a whitelisted method that changes state
+  without saving a document (Google Drive `authorize_access`, the permission
+  manager, the two-factor reset, Jarvis's workspace reset ...) is not seen and runs
+  uncarded in the uncarded modes.
+- **ORM guard** (`doc_events["*"]` on before_validate / before_change /
+  before_rename / on_trash): while a tool call runs, a ROOT write of a structure
+  document is refused, and of a sensitive one unless the confirmed card admitted
+  it (`structure_refused` / `sensitive_refused`). Saves a document's own
+  controller makes during another document's save (Employee -> User, Stock
+  Settings -> Property Setter) pass, as from Desk. Inert for Desk, REST and
+  scheduler saves. A refusal a method swallows (`reset_password` catches every
+  exception) still turns the call into the refusal.
+- **Deletes that call no hook** (a DocType delete, `ignore_on_trash`) are judged
+  at `frappe.model.delete_doc.delete_from_table` the same way.
+- **Background jobs** a tool call enqueues run under the same guard in the
+  worker, with the confirmed card's allow entries (never structure): the preview
+  sandbox's `get_queue` wrap runs them through `_write_risk.execute_guarded_job`;
+  the queued job keeps its real method, so `get_jobs` dedupe and monitoring see it.
+  Jobs enqueued outside a tool call are untouched.
+- **No-commit fence**: an uncarded create / update runs with `frappe.db.commit`
+  neutralised and a write counted, so a doctype outside the list whose save runs
+  DDL (even as its first statement) hits Frappe's `ImplicitCommitError` before
+  the ALTER; that is refused as a structure change (also when an app re-raises it
+  as another error). Frappe 16's `_disable_transaction_control` is put back on
+  exit by the fence and the preview sandbox. An uncarded run_method is not fenced.
+- **Access-granting fields** (Employee `user_id` / `create_user_permission`, an
+  Employee `status` change that turns its user's login on or off, Customer /
+  Supplier `portal_users`), judged when a call changes them, in the argument
+  layer and at the save (so `frappe.client` through run_method too). Jarvis's own
+  configuration (Jarvis Settings, Connector, Agent Installation / Listing, User
+  Settings, Macro, MCP OAuth Client / Token: argument layer only) and a Data
+  Import of any conditional doctype park a card too.
+- Every refusal is a `refused` row in Jarvis Agent Write plus a log line
+  `jarvis.risky_write risk=... doctype="..." name="..." user="..." outcome=...`.
 
 ## Audit logging
 

@@ -61,7 +61,14 @@ def run_atomic_batch(items, fn, *, label=None, max_batch=_MAX_BATCH):
 		for index, item in enumerate(items):
 			results.append(fn(item))
 	except Exception as exc:
-		frappe.db.rollback(save_point=sp)
+		try:
+			frappe.db.rollback(save_point=sp)
+		except Exception:
+			if not isinstance(exc, frappe.QueryDeadlockError | frappe.QueryTimeoutError):
+				raise
+			# A real deadlock rolled the whole transaction back in the database and the
+			# savepoint went with it (1305 on the rollback). Report the deadlock itself
+			# (RetryLaterError, R2-3); the write path does the full rollback.
 		for name, functions in saved_queues.items():
 			getattr(frappe.db, name)._functions = deque(functions)
 		# Name the failing item without swallowing the exception's type/message

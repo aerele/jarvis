@@ -895,11 +895,17 @@ def _persona_clause(chat_user: str) -> str:
 	return ""
 
 
-def _advance_macro(conversation_id: str, *, errored: bool, run_id: str | None = None) -> None:
+def _advance_macro(
+	conversation_id: str, *, errored: bool, run_id: str | None = None, seed_message: str | None = None
+) -> None:
 	"""Chaining hook for the macro engine: if this conversation is a running
 	macro, advance it (enqueue the next step, or finish). Best-effort — a macro
 	bug must never affect the normal turn. Every legacy (pump-off) turn end passes
-	through here, so it also seals the File Box sheet ``run_id`` collected."""
+	through here, so it also seals the File Box sheet ``run_id`` collected.
+
+	``seed_message`` is the user message this turn was started for: the engine
+	advances only on its own step's turn, and this path may have no Turn row to
+	look that up from."""
 	if run_id:
 		from jarvis.chat import held_sheet_seal
 
@@ -907,7 +913,7 @@ def _advance_macro(conversation_id: str, *, errored: bool, run_id: str | None = 
 	try:
 		from jarvis.chat import macros
 
-		macros.advance_after_turn(conversation_id, errored=errored)
+		macros.advance_after_turn(conversation_id, errored=errored, run_id=run_id, seed_message=seed_message)
 	except Exception:
 		frappe.log_error(title="jarvis macro advance hook failed", message=frappe.get_traceback())
 	try:
@@ -1673,7 +1679,7 @@ def handle_chat_send(payload: dict) -> None:
 			# in_flight for the identical resend, so true double-runs are
 			# confined to the ghost-run-already-finished case.
 			_publish_run_error(str(e), changed_data=False, exc=e)
-			_advance_macro(conversation_id, errored=True, run_id=run_id)
+			_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 			_admission_settle(run_id, "errored", str(e))
 			return
 
@@ -1743,11 +1749,11 @@ def handle_chat_send(payload: dict) -> None:
 						"stopped": True,
 					},
 				)
-				_advance_macro(conversation_id, errored=True, run_id=run_id)
+				_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 				_admission_settle(run_id, "cancelled")
 				return
 			_publish_run_error(err_text)
-			_advance_macro(conversation_id, errored=True, run_id=run_id)
+			_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 			_admission_settle(run_id, "errored", err_text)
 			return
 		if terminal["kind"] == "relay:interrupted":
@@ -1852,7 +1858,7 @@ def handle_chat_send(payload: dict) -> None:
 			# already in an error path and re-raising would mask the
 			# original exception that RQ should see.
 			pass
-		_advance_macro(conversation_id, errored=True, run_id=run_id)
+		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 		# Backstop terminal: settle the Turn row errored + promote before the
 		# re-raise so a queued turn never waits on a crashed worker. Best-effort
 		# inside _admission_settle - it never masks the re-raised exception.
@@ -1867,6 +1873,7 @@ def handle_chat_send(payload: dict) -> None:
 		conversation_id,
 		errored=_turn_errored,
 		run_id=run_id,
+		seed_message=message_id,
 	)
 	_publish_to_user(
 		user,

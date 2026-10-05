@@ -63,6 +63,7 @@ EXPECTED_VIEW_KEYS = {
 	"skill_promotions",
 	# Settings area
 	"settings_user_usage_admin",
+	"settings_macros_admin",
 	"settings_tool_activity",
 	# explicit non-lists / dormant
 	"chat_conversation_sidebar",
@@ -326,10 +327,10 @@ class TestListRegistryIntegrity(FrappeTestCase):
 			"the migrated view set drifted from what this wave built — update "
 			"EXPECTED_MIGRATED in the SAME commit that migrates a view",
 		)
-		# And the counts follow from it: 5 migrated / 16 pending / 21 active.
+		# And the counts follow from it: 5 migrated / 17 pending / 22 active.
 		self.assertEqual(len(migrated), 5)
-		self.assertEqual(len(pending), 16)
-		self.assertEqual(len(active), 21)
+		self.assertEqual(len(pending), 17)
+		self.assertEqual(len(active), 22)
 
 	def test_migrated_views_actually_accept_filters_v2(self):
 		"""'migrated' is a claim; this checks the wiring behind it."""

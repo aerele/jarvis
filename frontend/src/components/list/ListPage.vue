@@ -196,7 +196,8 @@
 		</ListView>
 
 		<!-- error state (fetch failed, no rows to show) - precedes the empty state
-		     so a broken fetch isn't misreported as "no records" -->
+		     so a broken fetch isn't misreported as "no records". "Try again" is the
+		     toolbar's Refresh, put where the reader is looking. -->
 		<div v-else-if="error" class="relative flex-1">
 			<div
 				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
@@ -209,6 +210,7 @@
 					>
 					<span class="text-center text-p-base text-ink-red-4">{{ error }}</span>
 				</div>
+				<Button label="Try again" :loading="loading" @click="$emit('refresh')" />
 			</div>
 		</div>
 

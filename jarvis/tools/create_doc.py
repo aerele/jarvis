@@ -33,6 +33,7 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._bulk import _MAX_BATCH, run_atomic_batch
 from jarvis.tools._delegate_write_caps import enforce_create
+from jarvis.tools._field_values import check_values
 
 # `name` is intentionally NOT in this list: DocTypes that use autoname=prompt
 # (or autoname=field:<x>) need it set in `values`. Frappe's autoname handling
@@ -80,7 +81,10 @@ def _insert_one(
 ) -> "frappe.model.document.Document":
 	"""Build + insert ONE doc from ``values`` (guards already run). Returns the
 	inserted Document. Shared by the single and batch paths so they never drift.
-	``ignore_mandatory``: the held-write classifier's sandbox (collect mode)."""
+	``ignore_mandatory``: the held-write classifier's sandbox (collect mode).
+	The field type check runs first (``_field_values``): a value Frappe would store
+	as 0 or the database would refuse is rejected naming the field (R2-3)."""
+	values = check_values(doctype, values)
 	doc = frappe.new_doc(doctype)
 	for field, value in values.items():
 		doc.set(field, value)
