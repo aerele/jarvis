@@ -27,6 +27,7 @@ from jarvis.tests._agent_access import allow_listing_for
 from jarvis.tests.test_agent_dispatch_idempotency import (
 	INSTALLATION,
 	NOTIFICATION,
+	RUN,
 	SESSION,
 	SLUG,
 	DispatchIdempotencyTestCase,
@@ -372,7 +373,11 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 
 		self.assertEqual(len(self._runs(inst, "running")), 1)
 		self.assertEqual(self._runs(inst, "failed"), [], "the timeout was taken for a confirmed failure")
-		self.assertTrue(frappe.db.exists(SESSION, {"user": self.owner}), "the run's session was torn down")
+		(run,) = self._runs(inst, "running")
+		key = frappe.db.get_value(RUN, run, "session_key")
+		self.assertTrue(
+			key and frappe.db.exists(SESSION, {"session_key": key}), "the run's session was torn down"
+		)
 		self.assertEqual(self._notifications(), [])
 		self.assertGreater(
 			get_datetime(self._next_run_at(inst)),
