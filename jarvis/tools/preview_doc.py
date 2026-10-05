@@ -11,7 +11,7 @@ import frappe
 from jarvis.exceptions import PreviewSandboxLost
 from jarvis.tools._preview_sandbox import preview_sandbox
 from jarvis.tools._write_risk import check
-from jarvis.tools.create_doc import _set_title_from_title_field, _validate_create_args
+from jarvis.tools.create_doc import _validate_create_args, build_doc
 
 # Header fieldtypes worth echoing back (child tables + layout/HTML excluded).
 _HEADER_TYPES = {
@@ -72,10 +72,7 @@ def preview_doc(doctype: str, values: dict) -> dict:
 	check("create_doc", {"doctype": doctype, "values": values})
 	_validate_create_args(doctype, values)
 
-	doc = frappe.new_doc(doctype)
-	for field, value in values.items():
-		doc.set(field, value)
-	_set_title_from_title_field(doc)
+	doc = build_doc(doctype, values)  # same type check + numeric cast as create_doc
 
 	try:
 		with preview_sandbox():

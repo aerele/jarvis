@@ -1091,8 +1091,9 @@ class TestListPendingConfirmations(FrappeTestCase):
 
 
 class TestDraftComputed(FrappeTestCase):
-	"""A create card's blank read-only cells, filled from ERPNext's own validate run
-	in the preview sandbox (#647). Display only: nothing is written."""
+	"""A create card's blank read-only cells, filled by ERPNext's own calculation
+	(set_missing_values + calculate_taxes_and_totals) on an in-memory document
+	(#647). Nothing is inserted, so no document hook, trigger or Server Script runs."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -1100,8 +1101,12 @@ class TestDraftComputed(FrappeTestCase):
 		if "erpnext" not in frappe.get_installed_apps():
 			raise cls.skipException("ERPNext is not installed")
 		from jarvis.tests import _erpnext_masters as masters
+		from jarvis.tests._pending_action_helpers import ensure_user
 
 		frappe.set_user("Administrator")
+		# ensure_user commits: make the users before any fixture, so none is committed.
+		cls.no_perm_user = ensure_user("j2a-computed-noperm@example.com")
+		cls.sales_user = ensure_user("j2a-computed-sales@example.com", roles=("Jarvis User", "Sales User"))
 		masters.clear_cache_after_rollback(cls)
 		cls.delivery = frappe.utils.add_days(frappe.utils.today(), 3)
 		masters.ensure_fiscal_years(frappe.utils.today(), cls.delivery)
@@ -1137,15 +1142,20 @@ class TestDraftComputed(FrappeTestCase):
 		}
 		return draft_computed(frappe.as_json(action))
 
-	def test_fills_the_amount_and_writes_nothing(self):
+	def test_fills_the_amount_without_inserting_anything(self):
+		from unittest.mock import patch
+
+		from frappe.model.document import Document
+
 		before = frappe.db.count("Sales Order")
-		r = self._computed()
+		with patch.object(Document, "insert", side_effect=AssertionError("a card render must never insert")):
+			r = self._computed()
 		self.assertEqual(r, {"ok": True, "tables": {"items": [{"amount": 2000}]}})
 		self.assertEqual(frappe.db.count("Sales Order"), before)
 
-	def test_returns_only_the_requested_known_fields(self):
+	def test_returns_only_requested_read_only_fields(self):
 		r = self._computed(
-			columns={"items": ["amount", "not_a_field"], "taxes": ["tax_amount"], "nope": ["x"]}
+			columns={"items": ["amount", "qty", "not_a_field"], "taxes": ["total"], "nope": ["x"]}
 		)
 		self.assertEqual(r["tables"], {"items": [{"amount": 2000}], "taxes": []})
 
@@ -1153,15 +1163,45 @@ class TestDraftComputed(FrappeTestCase):
 		values = {**self.values, "items": [{**self.values["items"][0], "qty": "abc"}]}
 		self.assertEqual(self._computed(values=values), {"ok": False})
 
-	def test_a_structure_doctype_never_runs(self):
-		before = frappe.db.count("Custom Field")
-		r = self._computed(
-			doctype="Custom Field",
-			values={"dt": "ToDo", "fieldname": "j2a_x", "label": "X", "fieldtype": "Data"},
-			columns={},
-		)
+	def test_a_doctype_erpnext_does_not_total_is_not_run(self):
+		r = self._computed(doctype="ToDo", values={"description": "j2a"}, columns={})
 		self.assertEqual(r, {"ok": False})
-		self.assertEqual(frappe.db.count("Custom Field"), before)
+
+	def test_sensitive_configuration_never_reaches_the_calculation(self):
+		from unittest.mock import patch
+
+		with patch("jarvis.chat.actions_api._calculate_draft") as calc:
+			r = self._computed(
+				doctype="Notification",
+				values={"subject": "j2a", "document_type": "ToDo", "event": "New"},
+				columns={},
+			)
+		self.assertEqual(r, {"ok": False})
+		calc.assert_not_called()
+
+	def test_no_create_permission_is_no_dry_run(self):
+		from unittest.mock import patch
+
+		from jarvis.tests._pending_action_helpers import as_user
+
+		frappe.db.set_value("Jarvis Conversation", self.conv.name, "owner", self.no_perm_user)
+		with as_user(self.no_perm_user), patch("jarvis.chat.actions_api._calculate_draft") as calc:
+			self.assertEqual(self._computed(), {"ok": False})
+		calc.assert_not_called()  # refused at the create-permission check, before anything is built
+
+	def test_a_field_the_user_cannot_read_is_masked(self):
+		from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+		from jarvis.tests._pending_action_helpers import as_user
+
+		ps = make_property_setter("Sales Order Item", "amount", "permlevel", 1, "Int")
+		self.addCleanup(frappe.clear_cache, doctype="Sales Order")
+		self.addCleanup(frappe.delete_doc, "Property Setter", ps.name, force=True)
+		frappe.db.set_value("Jarvis Conversation", self.conv.name, "owner", self.sales_user)
+		with as_user(self.sales_user):
+			r = self._computed()
+		self.assertTrue(r["ok"], r)
+		self.assertIsNone(r["tables"]["items"][0]["amount"])
 
 	def test_someone_elses_conversation_is_refused(self):
 		frappe.db.set_value("Jarvis Conversation", self.conv.name, "owner", "Guest")
