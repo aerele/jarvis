@@ -16,6 +16,7 @@ Run:
     --module jarvis.tests.test_agent_budget_survives_delete
 """
 
+from contextlib import ExitStack
 from unittest.mock import patch
 
 import frappe
@@ -270,6 +271,70 @@ class TestBudgetSurvivesUninstall(AgentBudgetTestCase):
 		live = self._run(inst, "running")
 		self._uninstall_as(self.owner, inst)
 		self.assertFalse(frappe.db.exists(RUN, live))
+
+
+class TestTheTenantCeilingAfterAnUninstall(AgentBudgetTestCase):
+	"""The tenant ceiling is the budget times the installs. The kept runs of an
+	uninstalled agent still count toward the tenant, so the uninstalled agent keeps its
+	share of the ceiling for the rest of the month."""
+
+	def _ours_only(self):
+		"""Scope the tenant-wide figures to this module's agent: the site is shared, and
+		other modules leave enabled installations and runs behind."""
+		real_runs = agent_scheduler._runs_this_month
+		real_count = frappe.db.count
+
+		def _runs(*, installation=None):
+			if installation:
+				return real_runs(installation=installation)
+			return real_count(
+				RUN,
+				{"agent": SLUG, "creation": [">=", get_first_day(today())], "status": ["!=", "failed"]},
+			)
+
+		def _count(doctype, filters=None, *a, **kw):
+			if doctype == INSTALLATION and filters == {"enabled": 1}:
+				filters = {"enabled": 1, "agent": SLUG}
+			return real_count(doctype, filters, *a, **kw)
+
+		stack = ExitStack()
+		stack.enter_context(patch.object(agent_scheduler, "_runs_this_month", side_effect=_runs))
+		stack.enter_context(patch.object(frappe.db, "count", side_effect=_count))
+		stack.enter_context(patch.object(agent_scheduler, "_agent_run_budget_monthly", return_value=3))
+		return stack
+
+	def test_uninstalling_a_used_agent_does_not_refuse_another(self):
+		a = self._install_as(self.owner)
+		b = self._install_as(self.other)
+		for inst in (a, b):
+			frappe.db.set_value(INSTALLATION, inst, "enabled", 1, update_modified=False)
+		for _ in range(3):
+			self._run(a)
+		self._run(b)
+
+		self._uninstall_as(self.owner, a)
+
+		with self._ours_only():
+			self.assertEqual(agent_scheduler._over_run_budget(b), (False, ""))
+
+	def test_an_uninstalled_agent_holds_one_share_until_it_is_installed_again(self):
+		base = agent_scheduler._uninstalled_this_month()
+		inst = self._install_as(self.owner)
+		self._run(inst)
+		self._run(inst)
+		self._uninstall_as(self.owner, inst)
+		self.assertEqual(agent_scheduler._uninstalled_this_month(), base + 1)
+
+		self._install_as(self.owner)
+
+		self.assertEqual(agent_scheduler._uninstalled_this_month(), base, "the pair is counted twice")
+
+	def test_an_uninstall_with_nothing_kept_holds_no_share(self):
+		base = agent_scheduler._uninstalled_this_month()
+		inst = self._install_as(self.owner)
+		self._run(inst, "failed")
+		self._uninstall_as(self.owner, inst)
+		self.assertEqual(agent_scheduler._uninstalled_this_month(), base)
 
 
 class TestKeptRowsAreHidden(AgentBudgetTestCase):
