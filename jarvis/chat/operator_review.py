@@ -6,19 +6,17 @@ import frappe
 
 from jarvis.chat.purchase_match import digest
 
-AGENTS = frozenset({"ap-3way-match-operator", "ar-collections-operator"})
+_BACKENDS = {
+	"ap-3way-match-operator": "jarvis.chat.purchase_match",
+	"ar-collections-operator": "jarvis.chat.receivables_review",
+	"bank-recon-operator": "jarvis.chat.bank_reconciliation_review",
+}
+AGENTS = frozenset(_BACKENDS)
 
 
 def backend(agent):
-	if agent == "ap-3way-match-operator":
-		from jarvis.chat import purchase_match
-
-		return purchase_match
-	if agent == "ar-collections-operator":
-		from jarvis.chat import receivables_review
-
-		return receivables_review
-	return None
+	path = _BACKENDS.get(agent)
+	return frappe.get_module(path) if path else None
 
 
 def get_inputs(run, adapter):
