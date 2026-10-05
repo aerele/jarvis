@@ -1605,9 +1605,55 @@ def uninstall_agent(installation: str) -> dict:
 	the history survives the cascade. The bundle leaves the container on the next
 	Apply (the fleet endpoint does a full reconcile); the dirty flag records that
 	an Apply is now pending — but only when the install was ENABLED (a disabled
-	install was never in the pushed set, so removing it changes nothing)."""
+	install was never in the pushed set, so removing it changes nothing).
+
+	**A live run is stopped first**, as ``macros_api.delete_macro`` does. Deleting the
+	row of a run still going left its session bearer live and gave its budget back.
+	The uninstall holds the installation's dispatch lock throughout, the one the sweep
+	and Run Now take before a launch, so no run can start while it cascades; if a
+	launch holds it, the uninstall is refused with "try again". Each running run is
+	stopped (``_stop_running_run``, committed whatever happens next), then kept and
+	counted like any other stopped run. Returns ``{"ok", "stopped_runs"}``."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	via_admin = _check_installation_write(doc, "delete")  # S3 owner-gate (or admin)
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat.agent_scheduler import DISPATCH_LOCK_TTL_S, _dispatch_lock_name
+
+	with redis_lock(
+		_dispatch_lock_name(doc.name),
+		timeout_s=DISPATCH_LOCK_TTL_S,
+		blocking_timeout_s=DISPATCH_LOCK_WAIT_S,
+	) as acquired:
+		if not acquired:
+			frappe.throw(_("A run for this agent is starting right now. Try again in a moment."))
+		stopped = _stop_live_runs_for_uninstall(doc.name)
+		_uninstall_cascade(doc, via_admin)
+	from jarvis.chat import agent_models
+
+	agent_models.on_uninstalled(doc.agent)
+	return {"ok": True, "stopped_runs": stopped}
+
+
+def _stop_live_runs_for_uninstall(installation: str) -> int:
+	"""Stop every run of the installation that is still ``running``, however old.
+	Returns how many this call stopped."""
+	running = frappe.get_all(
+		RUN,
+		filters={"installation": installation, "status": "running"},
+		pluck="name",
+		ignore_permissions=True,
+	)
+	stopped = 0
+	for run in running:
+		status = _stop_running_run(
+			run, error=_("Stopped: its agent was uninstalled."), detail="stopped by the uninstall"
+		)
+		stopped += status == "stopped"
+	return stopped
+
+
+def _uninstall_cascade(doc, via_admin: bool) -> None:
+	"""The delete itself, under the caller's dispatch lock; commits."""
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1647,10 +1693,6 @@ def uninstall_agent(installation: str) -> dict:
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
-	from jarvis.chat import agent_models
-
-	agent_models.on_uninstalled(doc.agent)
-	return {"ok": True}
 
 
 @frappe.whitelist()
@@ -1841,6 +1883,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	) as acquired:
 		if not acquired:
 			frappe.throw(_("A run for this agent is already starting. Try again in a moment."))
+		# An uninstall holds this lock while it cascades, so one that finished while we
+		# waited has deleted the installation read above. A locking read, because this
+		# transaction's snapshot may predate the delete; ``_launch_audit`` commits it.
+		if not frappe.db.get_value(INSTALLATION, installation, "name", for_update=True):
+			frappe.throw(_("This agent was uninstalled."), frappe.DoesNotExistError)
 		# Freshness-bounded (see agent_scheduler._live_run), so a wedged run cannot
 		# lock the button out until the 3h reaper clears it.
 		if _live_run(installation):
@@ -1954,7 +2001,23 @@ def stop_agent_run(run: str) -> dict:
 	start-then-stop would be an unlimited free-run loop around the budget."""
 	doc = frappe.get_doc(RUN, run)
 	_guard_run_control(doc)
+	status = _stop_running_run(
+		run, error=_("Stopped by operator."), detail=f"stopped by {frappe.session.user}"
+	)
+	if status is None:
+		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+	if status != "stopped":
+		return {"ok": True, "status": status, "idempotent": True}
+	return {"ok": True, "status": "stopped"}
 
+
+def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
+	"""Move one run from ``running`` to ``stopped``, revoke its session bearer and
+	best-effort abort its gateway session. Returns the status the run ends in (that is
+	``stopped`` only when this call stopped it), or None when the row is gone. No
+	permission check: the caller has made it (``stop_agent_run``, ``uninstall_agent``).
+
+	The transition and its ordering are ``stop_agent_run``'s (see there)."""
 	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
 	row = frappe.db.get_value(
 		RUN,
@@ -1965,18 +2028,17 @@ def stop_agent_run(run: str) -> dict:
 	)
 	if not row:
 		frappe.db.commit()
-		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+		return None
 	if row.status != "running":
 		# Already terminal — a concurrent finish, reap or a second click. Release the
 		# row lock and report the state it actually reached; never overwrite it.
 		frappe.db.commit()
-		return {"ok": True, "status": row.status, "idempotent": True}
+		return row.status
 
-	stop_error = _("Stopped by operator.")
 	frappe.db.set_value(
 		RUN,
 		run,
-		{"status": "stopped", "finished_at": frappe.utils.now(), "error": stop_error[:140]},
+		{"status": "stopped", "finished_at": frappe.utils.now(), "error": error[:140]},
 		update_modified=False,
 	)
 	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
@@ -1994,11 +2056,11 @@ def stop_agent_run(run: str) -> dict:
 		installation=row.installation,
 		action="run_stopped",
 		run=run,
-		detail=f"stopped by {frappe.session.user}",
+		detail=detail,
 		owner=row.owner,
 	)
 	frappe.db.commit()
-	return {"ok": True, "status": "stopped"}
+	return "stopped"
 
 
 # --------------------------------------------------------------------------- #

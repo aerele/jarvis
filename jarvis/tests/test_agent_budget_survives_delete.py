@@ -16,7 +16,7 @@ Run:
     --module jarvis.tests.test_agent_budget_survives_delete
 """
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 import frappe
@@ -31,6 +31,7 @@ from jarvis.tests.test_agent_dispatch_idempotency import (
 	ACTIVITY,
 	INSTALLATION,
 	RUN,
+	SESSION,
 	SLUG,
 	DispatchIdempotencyTestCase,
 	_mk_user,
@@ -264,13 +265,127 @@ class TestBudgetSurvivesUninstall(AgentBudgetTestCase):
 		frappe.delete_doc(DASHBOARD, dash.name, ignore_permissions=True)
 		self.assertFalse(frappe.db.exists(DASHBOARD, dash.name))
 
-	def test_a_live_run_at_uninstall_is_deleted_as_before(self):
-		"""Unchanged behaviour: a run still ``running`` at uninstall is removed with the
-		installation, as every row was before. Only ended rows are kept."""
+
+class TestUninstallStopsALiveRun(AgentBudgetTestCase):
+	"""A run still going at uninstall is stopped first, then kept and counted like any
+	other stopped run (the agent twin of a macro delete stopping its run)."""
+
+	def _live_run(self, inst: str) -> tuple[str, str]:
+		run = self._run(inst, "running")
+		key = f"agent:agent-{SLUG}:{run}"
+		agent_scheduler._mint_run_session(key, self.owner)
+		frappe.db.set_value(RUN, run, "session_key", key, update_modified=False)
+		frappe.db.commit()
+		return run, key
+
+	def test_a_running_run_is_stopped_kept_and_counted(self):
 		inst = self._install_as(self.owner)
-		live = self._run(inst, "running")
-		self._uninstall_as(self.owner, inst)
-		self.assertFalse(frappe.db.exists(RUN, live))
+		run, key = self._live_run(inst)
+
+		frappe.set_user(self.owner)
+		try:
+			out = agents_api.uninstall_agent(inst)
+		finally:
+			frappe.set_user("Administrator")
+
+		self.assertEqual(out, {"ok": True, "stopped_runs": 1})
+		row = frappe.db.get_value(RUN, run, ["status", "installation", "finished_at"], as_dict=True)
+		self.assertIsNotNone(row, "the live run was deleted instead of stopped")
+		self.assertEqual((row.status, row.installation), ("stopped", None))
+		self.assertIsNotNone(row.finished_at)
+		self.assertFalse(frappe.db.exists(SESSION, key), "the run's session bearer outlived it")
+		again = self._install_as(self.owner)
+		self.assertEqual(agent_scheduler._runs_this_month(installation=again), 1)
+
+	def test_an_uninstall_while_a_launch_holds_the_lock_is_refused(self):
+		from jarvis._redis_lock import redis_lock
+
+		inst = self._install_as(self.owner)
+		with (
+			patch.object(agents_api, "DISPATCH_LOCK_WAIT_S", 0.1),
+			redis_lock(agent_scheduler._dispatch_lock_name(inst), timeout_s=30) as held,
+		):
+			self.assertTrue(held)
+			with self.assertRaises(frappe.ValidationError):
+				self._uninstall_as(self.owner, inst)
+		self.assertTrue(frappe.db.exists(INSTALLATION, inst), "the refused uninstall deleted it anyway")
+
+	def test_a_launch_during_the_uninstall_leaves_no_run_behind(self):
+		"""A sweep fires while the uninstall is cascading (re-entered from inside the
+		cascade, where a real one would overlap). It must not start a run that the
+		cascade has already passed over, on an installation about to be deleted."""
+		inst = self._due_install()
+		real = agents_api._detach_last_seen_run
+		fired = []
+
+		def _sweep_then_detach(run_names):
+			fired.append(1)
+			self._sweep_as_administrator()
+			return real(run_names)
+
+		with self._delegate_stubbed(), patch.object(agents_api, "_detach_last_seen_run", _sweep_then_detach):
+			self._uninstall_as(self.owner, inst)
+
+		self.assertEqual(fired, [1])
+		self.assertEqual(self.dispatched, [], "a run was launched during the uninstall")
+		self.assertFalse(frappe.db.exists(INSTALLATION, inst))
+		self.assertEqual(frappe.get_all(RUN, filters={"installation": inst}, pluck="name"), [])
+
+	def test_a_run_now_that_waited_out_an_uninstall_starts_nothing(self):
+		"""Run Now reads the installation, then waits for the dispatch lock while an
+		uninstall holds it. When it gets the lock the installation is gone."""
+		from jarvis import _redis_lock
+
+		inst = self._due_install()
+		real_lock = _redis_lock.redis_lock
+
+		waited = []
+
+		@contextmanager
+		def _uninstalled_while_waiting(name, **kw):
+			if not waited:  # Run Now's wait; the uninstall takes the real lock
+				waited.append(name)
+				prev = frappe.session.user
+				frappe.set_user(self.owner)
+				try:
+					agents_api.uninstall_agent(inst)
+				finally:
+					frappe.set_user(prev)
+			with real_lock(name, **kw) as acquired:
+				yield acquired
+
+		with (
+			patch.object(_redis_lock, "redis_lock", _uninstalled_while_waiting),
+			self.assertRaises(frappe.DoesNotExistError),
+		):
+			self._run_now(inst)
+		self.assertEqual(waited, [agent_scheduler._dispatch_lock_name(inst)])
+		self.assertEqual(self.dispatched, [])
+		self.assertEqual(frappe.get_all(RUN, filters={"installation": inst}, pluck="name"), [])
+
+	def test_run_now_rechecks_the_installation_past_its_snapshot(self):
+		"""The uninstall ran on another worker: this request's snapshot, taken when it
+		read the installation, still holds the row."""
+		from jarvis import _redis_lock
+		from jarvis.tests.race_harness import other_connection
+
+		inst = self._due_install()
+		real_lock = _redis_lock.redis_lock
+
+		@contextmanager
+		def _deleted_elsewhere_while_waiting(name, **kw):
+			with other_connection() as db:
+				db.sql(f"DELETE FROM `tab{INSTALLATION}` WHERE name = %s", (inst,))
+				db.commit()
+			with real_lock(name, **kw) as acquired:
+				yield acquired
+
+		with (
+			patch.object(_redis_lock, "redis_lock", _deleted_elsewhere_while_waiting),
+			self.assertRaises(frappe.DoesNotExistError),
+		):
+			self._run_now(inst)
+		self.assertEqual(self.dispatched, [])
 
 
 class TestTheTenantCeilingAfterAnUninstall(AgentBudgetTestCase):
