@@ -331,6 +331,29 @@ class ArrivesClean:
 		row = self._row(macro)
 		self.assertEqual((row.owner, row.merge_status or ""), (TARGET, ""))
 
+	def test_an_old_owner_who_may_still_write_it_is_not_told_it_changed_hands(self):
+		# Only someone who may not write the macro is ever refused. Administrator may
+		# write every macro: handed over from them, the marker names them, and still
+		# their Re-summarize goes ahead.
+		macro = self._macro(OWNER, "resum-admin", steps=("one", "two"))
+		frappe.db.set_value(MACRO, macro, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		self.assertTrue(self._handover(macro)["handed_over"])
+		self.assertTrue(
+			frappe.db.exists(
+				"Comment", {"reference_name": macro, "subject": macros_api.handed_over_from("Administrator")}
+			)
+		)
+		frappe.set_user("Administrator")
+		macros_api.refuse_if_handed_away(frappe.get_doc(MACRO, macro))  # does not raise
+		with (
+			patch.object(macros, "entitlement_block", return_value=None),
+			patch("jarvis.chat.api._enqueue_turn", return_value={"ok": True}) as enqueue,
+		):
+			macros_api.summarize_macro(macro, force=1)
+		enqueue.assert_called_once()
+		frappe.db.rollback()
+
 	def test_the_new_owner_can_open_edit_and_run_it_and_the_old_owner_cannot(self):
 		# Nothing but the macro row (and its steps) carries the macro's owner: the run
 		# rows, chats and messages carry their own.

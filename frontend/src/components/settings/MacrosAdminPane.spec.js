@@ -1035,4 +1035,18 @@ describe("MacrosAdminPane, hand over", () => {
 		expect(w.find(".stub-handover").attributes("data-open")).toBe("");
 		expect(toast.error).toHaveBeenCalledWith("&lt;b&gt;Changed&lt;/b&gt; hands.");
 	});
+
+	it("leaves the open dialog alone when another macro's action fails", async () => {
+		const w = await mountWith([row("a"), row("b")]);
+		await handoverButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([row("a")]));
+		const dialog = w.findComponent({ name: "MacroHandoverDialog" });
+		dialog.vm.$emit("failed", { name: "b", message: "Gone." });
+		await flushPromises();
+		const stub = w.find(".stub-handover");
+		expect(stub.attributes("data-open")).toBe("1");
+		expect(stub.attributes("data-name")).toBe("a");
+		expect(stub.attributes("data-owner")).toBe("asha@example.test");
+		expect(toast.error).not.toHaveBeenCalled();
+	});
 });
