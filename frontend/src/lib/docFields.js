@@ -61,6 +61,8 @@ export function panelField(metaField, value) {
 		fieldtype: metaField.fieldtype,
 		reqd: metaField.reqd,
 		read_only: metaField.read_only,
+		link_filters: metaField.link_filters,
+		link_query_filters: metaField.link_query_filters,
 		value: v,
 		orig,
 	};
