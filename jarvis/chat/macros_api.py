@@ -876,7 +876,9 @@ def delete_macro(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
-	return delete_loaded_macro(doc)
+	out = delete_loaded_macro(doc)
+	out.pop("owner", None)  # theirs: the admin delete's notice is what reads it
+	return out
 
 
 def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
@@ -884,7 +886,11 @@ def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
 	that the session user may delete ``doc``: the owner's endpoint (the document
 	permission) and an admin's (``macros_admin_api.admin_delete``, the Jarvis Admin
 	role, with ``ignore_permissions`` because the document permission is the owner's
-	alone). One body, so both stop the live runs first and keep the month's rows."""
+	alone). One body, so both stop the live runs first and keep the month's rows.
+
+	``{ok, stopped_runs, owner}``: ``owner`` as read under the row lock the delete was
+	made under, the person the macro belonged to when it went (an admin's hand-over
+	can change it between the caller's read and this lock)."""
 	from jarvis.chat import macros
 
 	stopped = 0
@@ -899,11 +905,12 @@ def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
 			if macros.live_runs_of(doc.name):
 				frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
 				continue
+			owner = frappe.db.get_value(MACRO, doc.name, "owner")
 			macros.drop_runs_of_deleted_macro(doc.name)
 			# honors if_owner, unless the caller's own gate stands in for it
 			frappe.delete_doc(MACRO, doc.name, ignore_permissions=ignore_permissions)
 			frappe.db.commit()
-			return {"ok": True, "stopped_runs": stopped}
+			return {"ok": True, "stopped_runs": stopped, "owner": owner}
 		_refuse_busy_delete(doc.name, stopped)
 	except Exception as e:
 		e.stopped_runs = stopped
@@ -1298,7 +1305,15 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# and under the lock a save of this macro and the landing of a summary waited on
 	# it. Acted on below, before anything is created.
 	blocked = macros.entitlement_block(doc.owner, steps=1, trigger="manual")
+	asked_for = doc.owner
 	doc = _locked_for_writing(doc)
+	# Again on the row as it is now: an admin can hand the macro over while the
+	# entitlement was asked, and a summary of the old owner's would then start an agent
+	# turn as the new owner, on a macro the new owner was told arrives with none.
+	doc.check_permission("write")
+	macros.refuse_acting_for_barred_owner(doc.owner)
+	if doc.owner != asked_for:
+		frappe.throw(_("This macro changed hands. Reload it."), frappe.PermissionError)
 	if macros.is_held(doc):
 		# An admin's hold: the macro does nothing, and a summary is one agent turn.
 		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
