@@ -43,14 +43,61 @@ def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict
 	}
 
 
+def _readable_permlevels(doctype: str, parenttype: str | None = None) -> set | None:
+	"""Permlevels the session user may READ on ``doctype`` (a child through
+	``parenttype``): the set ``apply_fieldlevel_read_permissions`` uses. ``None``
+	means unrestricted (Administrator, which that method also skips)."""
+	if frappe.session.user == "Administrator":
+		return None
+	return set(frappe.get_meta(doctype).get_permlevel_access(permission_type="read", parenttype=parenttype))
+
+
+def _can_read_field(df, levels: set | None) -> bool:
+	"""A permlevel-0 field is readable to anyone who can read the document; a
+	higher permlevel only with a role granting it (Desk hides the rest)."""
+	return levels is None or not df.permlevel or df.permlevel in levels
+
+
 def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
+<<<<<<< HEAD
 	child marks none."""
 	meta = frappe.get_meta(child_doctype)
 	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
 	listed = [df for df in editable if df.in_list_view]
 	return [_field_dict(df, child_doctype, parent_doctype, parentfield) for df in (listed or editable[:4])]
+=======
+	child marks none. Columns at a permlevel the user cannot read are dropped."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[0]
+	]
+
+
+def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
+	"""Every other editable field of the child, so a row key the model proposes
+	outside the grid keeps its real type and label (#655). Fields at a permlevel
+	the user cannot read are dropped here too."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[1]
+	]
+
+
+def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
+	"""(the grid's columns, every other editable field) of a child doctype,
+	limited to the fields the user can read through ``parent_doctype``."""
+	meta = frappe.get_meta(child_doctype)
+	levels = _readable_permlevels(child_doctype, parent_doctype)
+	editable = [
+		df
+		for df in meta.fields
+		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
+	]
+	listed = [df for df in editable if df.in_list_view] or editable[:4]
+	return listed, [df for df in editable if df not in listed]
+>>>>>>> 52056a5 (fix(chat): keep permlevel-hidden fields out of load_doc and the draft form)
 
 
 @frappe.whitelist()
@@ -58,16 +105,19 @@ def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) ->
 def get_doctype_form_meta(doctype: str) -> dict:
 	"""Form metadata for the draft panel: main fields INCLUDING Table fields,
 	plus per-table child columns - one call, so the panel never fans out.
-	Gated on read permission of the parent (child meta rides on that gate)."""
+	Gated on read permission of the parent (child meta rides on that gate).
+	Fields at a permlevel the user cannot read are left out, so the panel never
+	shows (or pre-fills, via ``load_doc``) a value Desk would hide from them."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return {"ok": False, "reason": _("unknown doctype")}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
+	levels = _readable_permlevels(doctype)
 	fields, tables = [], {}
 	for df in meta.fields:
-		if not df.fieldname:
+		if not df.fieldname or not _can_read_field(df, levels):
 			continue
 		if df.fieldtype == "Table" and df.options:
 			fields.append(_field_dict(df, doctype))
@@ -106,6 +156,11 @@ def load_doc(doctype: str, name: str) -> dict:
 		frappe.throw(_("You can't edit {0} {1}.").format(doctype, name), frappe.PermissionError)
 	fm = get_doctype_form_meta(doctype)
 	doc = frappe.get_doc(doctype, name)
+	# Write access does not imply read access at every permlevel: strip the
+	# fields (parent and child rows) the user cannot read, exactly as Desk's
+	# getdoc does. The form meta above already omits them, so they are neither
+	# returned nor shown for editing.
+	doc.apply_fieldlevel_read_permissions()
 	values = {}
 	for f in fm["fields"]:
 		if f["fieldtype"] == "Table":
