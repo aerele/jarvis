@@ -36,6 +36,11 @@ JARVIS_USER_ROLE = "Jarvis User"
 # finds the disambiguation.
 JARVIS_ADMIN_ROLE = "Jarvis Admin"
 
+# Set around an armed macro's uncarded write (``api._run_tool``); the skill controller
+# refuses a save or delete while it is set. Here, not in ``jarvis.api``, so a skill
+# save does not import the gate module.
+ARMED_MACRO_WRITE_FLAG = "jarvis_armed_macro_write"
+
 # App-access: a Jarvis Admin can also use chat (appended so an admin isn't
 # locked out of the surface they administer).
 JARVIS_ACCESS_ROLES = ("System Manager", JARVIS_USER_ROLE, JARVIS_ADMIN_ROLE)

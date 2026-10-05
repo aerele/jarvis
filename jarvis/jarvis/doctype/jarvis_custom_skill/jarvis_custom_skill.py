@@ -18,7 +18,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, has_jarvis_admin_access
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
@@ -234,8 +234,6 @@ def _refuse_an_armed_macro_write():
 	and a run that rewrote one would change what its own later runs follow. The gate
 	parks such a call for a card (``api._writes_a_skill``); this refuses one it could
 	not read (a Server Script, a whitelisted method that saves a skill)."""
-	from jarvis.api import ARMED_MACRO_WRITE_FLAG
-
 	if frappe.flags.get(ARMED_MACRO_WRITE_FLAG):
 		frappe.throw(
 			_("A macro that runs without asking for confirmation cannot change a skill."),

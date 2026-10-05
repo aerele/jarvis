@@ -1426,7 +1426,7 @@ def _apply_step_end(
 				total,
 				parked,
 				scheduled=(run.get("trigger") or "") == "scheduled",
-				asked_for_a_skill=_asked_for_a_skill(run.conversation),
+				asked_for_a_skill=_asked_for_a_skill(run.name),
 			),
 		)
 		return
@@ -2223,7 +2223,7 @@ def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	if _step_is_out(run, index):
 		return _step_already_out(run, index)
 	prompt, overrides = _step_prompt(run, macro_doc, index)
-	prompt = _ask_for_skills_outside_control(run, macro_doc, prompt)
+	prompt = _ask_for_skills_outside_control(run, macro_doc, index, prompt)
 	out = _send_step(run, index, prompt, overrides)
 	if isinstance(out, dict) and out.get("overloaded"):
 		# Parked, unless another dispatcher got the step's turn while this one was
@@ -2252,52 +2252,130 @@ def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	return _STEP_SENT
 
 
-def _ask_for_skills_outside_control(run, macro_doc, prompt: str) -> str:
-	"""An armed run's step that applies a skill its owner does not control (another
-	user's private skill shared with them, ``skill_permissions.controlled_by``) runs
-	asking: the run's conversation is disarmed before the step goes out, so its writes
-	park their cards and the run stops at the first one, as an unarmed run does. The
-	step's message says why. Every slug the prompt invokes counts: the skills the
-	step tags and any typed into it.
+def _ask_for_skills_outside_control(run, macro_doc, index: int, prompt: str) -> str:
+	"""An early notice: an armed run's step whose prompt names a skill its owner does
+	not control (``skill_permissions.controlled_by``) runs asking. The run's
+	conversation is disarmed before the step goes out, so its writes park their cards
+	and the run stops at the first one, as an unarmed run does, and the step's message
+	says why. Every ``/slug`` in the prompt counts, the tagged ones and any typed,
+	judged by the row ``get_skill`` would serve the owner (``skills_outside_control``).
 
-	Judged now, before each step, and not only when the macro was armed: the author
-	can rewrite the skill, and a Role or Org skill narrowed back to private by its
-	author is theirs to rewrite from then on.
+	Not the guarantee: the agent may fetch a skill the prompt does not name (by its
+	name in prose, from inside another skill), and sharing can change between here
+	and the fetch. ``check_a_fetched_skill`` judges the row at the fetch.
 
-	From that step to the end of the run, not for that step alone: arming a
-	conversation again mid-run is not done anywhere (it is stamped once, by
-	``run_macro``), and while it is disarmed its owner may type into it, so a message
-	of theirs could run armed. The disarm is committed before the send, which may roll
-	back and retry (``_send_step``)."""
+	A step parked for capacity after its disarm is sent again by the resume, on a
+	conversation already disarmed: the disarm is recorded on the run, so that send
+	carries the same note."""
+	recorded = _recorded_skill_disarm(run.name, index + 1)
+	if recorded:
+		return prompt + "\n\n" + recorded
 	if not frappe.db.get_value(CONV, run.conversation, "skip_confirmation"):
 		return prompt
-	from jarvis.chat.custom_skills import _INVOKE_RE
-	from jarvis.chat.skill_permissions import skills_outside_control
+	from jarvis.chat.skill_permissions import prompt_slugs, skills_outside_control
 
-	slugs = {slug.lower() for slug in _INVOKE_RE.findall(prompt)}
-	foreign = skills_outside_control(macro_doc.owner, slugs=slugs)
+	foreign = skills_outside_control(macro_doc.owner, slugs=prompt_slugs(prompt))
 	if not foreign:
 		return prompt
-	frappe.db.set_value(CONV, run.conversation, "skip_confirmation", 0, update_modified=False)
+	return prompt + "\n\n" + _disarm_for_skills(run.conversation, run.name, index + 1, foreign)
+
+
+def check_a_fetched_skill(conversation: str, skill_name) -> str:
+	"""The guarantee that an armed run follows only skills its owner controls, made
+	where a skill's text is served (``api._run_tool``, tool ``get_skill``): when the
+	conversation is armed, read fresh, and the row ``get_skill`` serves for
+	``skill_name`` is one the macro's owner does not control, the conversation is
+	disarmed and committed before the body goes back. The gate reads the flag on every
+	tool call, so each write after this one in the same turn parks its card.
+
+	Returns the note for the agent ("" when nothing changed)."""
+	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		return ""
+	from jarvis.chat.skill_permissions import controlled_by, served_row
+
+	run = frappe.db.get_value(
+		RUN,
+		{"conversation": conversation},
+		["name", "macro", "current_step"],
+		as_dict=True,
+		order_by="creation desc",
+	)
+	owner = (run and frappe.db.get_value(MACRO, run.macro, "owner")) or frappe.db.get_value(
+		CONV, conversation, "owner"
+	)
+	# The row served is the session user's; in a run that is the owner.
+	foreign = set()
+	for user in {owner, frappe.session.user}:
+		row = served_row(str(skill_name or ""), user)
+		if row is not None and not controlled_by(row, owner):
+			foreign.add(row.skill_name)
+	if not foreign:
+		return ""
+	step = max(frappe.utils.cint(run.current_step), 1) if run else 0
+	return _disarm_for_skills(conversation, run.name if run else None, step, sorted(foreign))
+
+
+def _disarm_for_skills(conversation: str, run_name: str | None, step: int, skills: list) -> str:
+	"""Disarm ``conversation`` from ``step`` on, record why on its run, commit, and
+	return the note. Committed here: a step's send rolls back and retries after a lost
+	lock race (``_send_step``), and that must not bring the arm back.
+
+	To the end of the run, not for one step: nothing arms a conversation again
+	mid-run (``run_macro`` stamps it once), and while it is disarmed its owner may
+	type into it, so a message of theirs could run armed."""
+	note = _FOREIGN_SKILLS_NOTE.format(skills=_listed([f"/{slug}" for slug in skills]))
+	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+	if run_name:
+		frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Info",
+				"reference_doctype": RUN,
+				"reference_name": run_name,
+				"subject": f"{_SKILL_DISARM_SUBJECT}{step}",
+				"content": note,
+			}
+		).insert(ignore_permissions=True)
 	frappe.db.commit()
-	return prompt + _FOREIGN_SKILLS_NOTE.format(skills=_listed([f"/{slug}" for slug in foreign]))
+	return note
 
 
-# Appended to the step's message: the owner reads it in the run's chat, and the
-# assistant learns its writes ask from here on.
-_FOREIGN_SKILLS_MARK = "(Skip confirmation is off from this step on:"
+def _recorded_skill_disarm(run_name: str, step: int) -> str:
+	"""The note of a disarm recorded at ``step`` of the run, or ""."""
+	return (
+		frappe.db.get_value(
+			"Comment",
+			{
+				"reference_doctype": RUN,
+				"reference_name": run_name,
+				"subject": f"{_SKILL_DISARM_SUBJECT}{step}",
+			},
+			"content",
+		)
+		or ""
+	)
+
+
+# Read by the owner in the run's chat and by the agent (the step's message, or the
+# fetched skill's result): its writes ask from here on.
 _FOREIGN_SKILLS_NOTE = (
-	"\n\n" + _FOREIGN_SKILLS_MARK + " it applies {skills}, which another user can still "
-	"change, so its changes ask for confirmation first.)"
+	"(Skip confirmation is off from this step on: it applies {skills}, which another user can "
+	"still change, so its changes ask for confirmation first.)"
 )
+# The run's record of a disarm (a Comment on the run, so no new column): one per step.
+_SKILL_DISARM_SUBJECT = "skill-disarm:step-"
 
 
-def _asked_for_a_skill(conversation: str) -> bool:
-	"""Whether a step of this run was sent disarmed by ``_ask_for_skills_outside_control``."""
+def _asked_for_a_skill(run_name: str) -> bool:
+	"""Whether this run was disarmed because of a skill (``_disarm_for_skills``)."""
 	return bool(
 		frappe.db.exists(
-			MSG,
-			{"conversation": conversation, "role": "user", "content": ["like", f"%{_FOREIGN_SKILLS_MARK}%"]},
+			"Comment",
+			{
+				"reference_doctype": RUN,
+				"reference_name": run_name,
+				"subject": ["like", f"{_SKILL_DISARM_SUBJECT}%"],
+			},
 		)
 	)
 

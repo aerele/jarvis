@@ -276,36 +276,34 @@ class JarvisMacro(NotRenamable, Document):
 		On a macro that is armed and stays armed, the same holds for what changes what
 		it does: the steps, the summary, switching it on, switching Stop on error off,
 		and a schedule change that leaves it scheduled. Each is judged against the
-		stored row; a summary carried by a save from elsewhere is put back as stored
-		instead of refused. Switching it off, taking it off its schedule and disarming
+		stored row; a summary carried by a save from elsewhere is refused, unless that
+		save is a safe one (``_keep_the_stored_summary``). Switching it off, taking it off its schedule and disarming
 		it stay free from any route: the safe direction is never blocked, and an armed
 		macro is never edited from where arming is refused. A held macro is refused
 		before this (``_guard_admin_hold``).
 
 		Its steps apply only skills its owner controls, on arming and on every change
-		to the steps (``_refuse_skills_outside_owners_control``).
+		to the steps or the summary (``_refuse_skills_outside_owners_control``).
 
 		Enabling the macro flag is what later drives ``run_macro``'s stamp of the run
 		conversation's own ``skip_confirmation`` (a raw write)."""
-		if not frappe.utils.cint(self.skip_confirmation):
-			return
 		before = self.get_doc_before_save()
 		from_form = bool(self.flags.get(FORM_FLAG))
+		was_armed = bool(before) and frappe.utils.cint(before.get("skip_confirmation"))
+		if not frappe.utils.cint(self.skip_confirmation):
+			if was_armed and not from_form:
+				self._keep_the_stored_summary(before)
+			return
 		owner = self.owner or frappe.session.user
-		if not (before and frappe.utils.cint(before.get("skip_confirmation"))):
+		if not was_armed:
 			if not from_form:
 				frappe.throw(arm_on_form_only(), frappe.PermissionError)
 			if not owner_may_arm(owner):
 				frappe.throw(_arm_refusal(owner), frappe.PermissionError)
 			self._refuse_skills_outside_owners_control(owner)
 			return
-		if not from_form:
-			# Its summary changes on its own page only, and the stored one wins here, as
-			# for ``merge_status`` (``_guard_summary_state``): the summary landing is a
-			# raw write that leaves ``modified`` alone, so a Desk or REST copy loaded
-			# before it carries the old text. Kept, not refused: switching it off from
-			# there must work.
-			self.merged_prompt = before.get("merged_prompt")
+		if not from_form and self._switched_off_or_unscheduled(before):
+			self._keep_the_stored_summary(before)
 		changes = self._armed_changes(before)
 		if changes and not (from_form and frappe.session.user == owner):
 			frappe.throw(
@@ -316,21 +314,39 @@ class JarvisMacro(NotRenamable, Document):
 				).format(join_words(changes)),
 				frappe.PermissionError,
 			)
-		if step_values(self.steps) != step_values(before.steps):
+		if step_values(self.steps) != step_values(before.steps) or self._summary_written_in_this_save():
 			self._refuse_skills_outside_owners_control(owner)
+
+	def _switched_off_or_unscheduled(self, before) -> bool:
+		return any(
+			frappe.utils.cint(before.get(field)) and not frappe.utils.cint(self.get(field))
+			for field in ("enabled", "schedule_enabled")
+		)
+
+	def _keep_the_stored_summary(self, before):
+		"""An armed macro's summary changes on its own page only. A save from elsewhere
+		that carries another one is refused (``_armed_changes``), unless it also switches
+		the macro off, unschedules it or disarms it: then the stored summary is kept and
+		the safe change goes through. The summary landing is a raw write that leaves
+		``modified`` alone, so a Desk or REST copy loaded before it carries the old text,
+		and switching the macro off from there must work."""
+		self.merged_prompt = before.get("merged_prompt")
 
 	def _refuse_skills_outside_owners_control(self, owner: str):
 		"""An armed macro's steps apply only skills whose words its owner controls: their
 		own, or a Role or Org skill, whose content only a reviewer can change
 		(``skill_permissions.controlled_by``). Another user's private skill shared with
 		the owner can be rewritten by its author at any time, and the next run would
-		follow the new words without asking. Checked when the macro is armed and when
-		an armed macro's steps change; a run checks again before each step, because
-		sharing and authorship change later (``macros._ask_for_skills_outside_control``)."""
-		from jarvis.chat.skill_permissions import skills_outside_control
+		follow the new words without asking. The tagged skills and every ``/slug`` typed
+		into a step or the summary count. Checked when the macro is armed and when an
+		armed macro's steps or summary change; the run checks again, because sharing and
+		authorship change later (``macros.check_a_fetched_skill``)."""
+		from jarvis.chat.skill_permissions import prompt_slugs, skills_outside_control
 
 		names = [name for step in self.steps or [] for name in step_skills(step)]
-		foreign = skills_outside_control(owner, names=names)
+		texts = [step.get("prompt") or "" for step in self.steps or []] + [self.merged_prompt or ""]
+		slugs = set().union(*(prompt_slugs(text) for text in texts))
+		foreign = skills_outside_control(owner, names=names, slugs=slugs)
 		if foreign:
 			frappe.throw(
 				_(

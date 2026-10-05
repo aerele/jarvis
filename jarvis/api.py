@@ -19,7 +19,7 @@ from jarvis.exceptions import (
 	RunDisarmedError,
 	RunHaltedError,
 )
-from jarvis.permissions import has_jarvis_access, refuse_in_tool_dispatch
+from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, has_jarvis_access, refuse_in_tool_dispatch
 from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
@@ -1366,9 +1366,6 @@ def _armed_skip_disabled() -> bool:
 _SKILL_DOCTYPES = frozenset(
 	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
 )
-# The flag an armed macro's uncarded write runs under; ``JarvisCustomSkill`` refuses a
-# save or delete while it is set, for a route ``_writes_a_skill`` cannot read.
-ARMED_MACRO_WRITE_FLAG = "jarvis_armed_macro_write"
 _DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
 
 
@@ -1376,7 +1373,8 @@ def _writes_a_skill(tool: str, args) -> bool:
 	"""Whether a covered write names a skill doctype anywhere in its arguments (a
 	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
 	``frappe.client``, a JSON ``doc`` string included), or calls the skills' own API.
-	Such a call parks a card on an armed macro's run, as the brake does."""
+	Such a call parks a card on an armed macro's run, as the brake does. Raises
+	InvalidArgumentError for a doctype that is not text."""
 	if tool == "run_method" and isinstance(args, dict):
 		if str(args.get("method") or "").startswith("jarvis.chat.custom_skills_api."):
 			return True
@@ -1395,12 +1393,28 @@ def _names_a_skill_doctype(value, *, depth: int) -> bool:
 		except ValueError:
 			return False
 	if isinstance(value, dict):
-		if any(value.get(key) in _SKILL_DOCTYPES for key in _DOCTYPE_KEYS):
+		named = [value.get(key) for key in _DOCTYPE_KEYS if value.get(key) is not None]
+		if depth == 0 and any(not isinstance(dt, str) for dt in named):
+			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
+			raise InvalidArgumentError("doctype must be the name of a document type")
+		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
+		if any(_SKILL_DOCTYPES.intersection(_texts(dt)) for dt in named):
 			return True
 		value = list(value.values())
 	if isinstance(value, list):
 		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
 	return False
+
+
+def _texts(value) -> list:
+	"""The strings in ``value``, a string or a nested list or dict of them."""
+	if isinstance(value, str):
+		return [value]
+	if isinstance(value, dict):
+		value = list(value.values())
+	if isinstance(value, list | tuple):
+		return [text for item in value for text in _texts(item)]
+	return []
 
 
 def _skill_autorun_slide(conv: str) -> None:
@@ -2705,13 +2719,22 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		verdict = held_writes.apply(tool, args, conversation)
 		if verdict is not None:
 			return verdict
+	# An armed macro's run follows only skills its owner controls: judged here, on the
+	# row this fetch serves, before its body goes back (``macros.check_a_fetched_skill``).
+	skill_note = ""
+	if conversation and tool == "get_skill":
+		from jarvis.chat import macros
+
+		skill_note = macros.check_a_fetched_skill(
+			conversation, args.get("skill_name") if isinstance(args, dict) else None
+		)
 	# File Box skill routing: only an eligible skill loads (and is recorded).
 	if conversation and tool == "get_skill":
 		from jarvis.chat import filebox_skills
 
 		verdict = filebox_skills.gate_get_skill(args, conversation)
 		if verdict is not None:
-			return verdict
+			return _with_note(verdict, skill_note)
 
 	# ``preview`` is read, not popped: dispatch() filters args to the tool's
 	# signature so the flag never reaches the tool anyway, and leaving ``args``
@@ -2920,12 +2943,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# the F16 over-size cap above still bounces an oversized batch. A write to a
 		# skill parks too (``_writes_a_skill``): a macro step applies skills, so an
 		# armed run must not rewrite what its own later runs follow.
-		if (
-			tool in _ARMED_SKIP_COVERED
-			and _conv_flags.get("skip_confirmation")
-			and not _writes_a_skill(tool, args)
-			and not _armed_skip_disabled()
-		):
+		armed = bool(tool in _ARMED_SKIP_COVERED and _conv_flags.get("skip_confirmation"))
+		if armed:
+			try:
+				armed = not _writes_a_skill(tool, args)
+			except InvalidArgumentError as e:
+				return _error(type(e).__name__, str(e))
+		if armed and not _armed_skip_disabled():
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
 			# write. Always label an armed write (we are in the armed branch, so it IS
 			# armed): resolve the human macro_name (Jarvis Macro autoname is a hash, so the
@@ -2942,6 +2966,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				if _armed_run_macro
 				else None
 			) or "an armed macro"
+			armed_write_before = frappe.flags.get(ARMED_MACRO_WRITE_FLAG)
 			frappe.flags[ARMED_MACRO_WRITE_FLAG] = True
 			try:
 				return _run_covered_write(
@@ -2953,7 +2978,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					provenance_name=_macro_name,
 				)
 			finally:
-				frappe.flags[ARMED_MACRO_WRITE_FLAG] = False
+				frappe.flags[ARMED_MACRO_WRITE_FLAG] = armed_write_before
 		# Skill "Approve & run" auto-run bypass (design §3.4): a conversation in an
 		# APPROVED skill run (skill_autorun=1, stamped by approve_and_run on step-1
 		# success) runs the explicit _SKILL_AUTORUN_COVERED allowlist uncarded, sliding
@@ -3312,6 +3337,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		duration_ms=int((time.perf_counter() - t0) * 1000),
 		result=result,
 	)
+	return _with_note(result, skill_note)
+
+
+def _with_note(result: dict, note: str) -> dict:
+	"""``result`` with ``note`` added to its data, for the agent to read."""
+	if note and isinstance(result, dict) and result.get("ok") and isinstance(result.get("data"), dict):
+		result["data"]["note"] = note
 	return result
 
 

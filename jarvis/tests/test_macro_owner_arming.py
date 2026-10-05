@@ -49,7 +49,8 @@ CONV = "Jarvis Conversation"
 OWNER = "macro-arm-owner@example.com"
 OTHER = "macro-arm-other@example.com"
 ADMIN = "macro-arm-admin@example.com"
-USERS = (OWNER, OTHER, ADMIN)
+SM = "macro-arm-sm@example.com"
+USERS = (OWNER, OTHER, ADMIN, SM)
 PATH = "jarvis.chat.macros_api."
 SKILL = "Jarvis Custom Skill"
 # The module's other state-changing endpoints: POST only and never from a tool, too.
@@ -81,6 +82,7 @@ class ArmingBase(FrappeTestCase):
 		ensure_user(OWNER)
 		ensure_user(OTHER)
 		ensure_user(ADMIN, roles=("Jarvis User", "Jarvis Admin"))
+		ensure_user(SM, roles=("Jarvis User", "System Manager"))
 		if "System Manager" in frappe.get_roles(ADMIN):
 			frappe.get_doc("User", ADMIN).remove_roles("System Manager")
 			frappe.db.commit()
@@ -566,23 +568,40 @@ class TestAnArmedMacroOffTheForm(ArmingBase):
 					self.assertEqual((str(row.schedule_time), row.stop_on_error), ("9:00:00", 1))
 					self._purge()
 
-	def test_its_summary_is_kept_as_stored_there(self):
-		# Kept, not refused: a summary is not a reason to refuse a save from there, which
-		# must always be able to switch the macro off.
+	def test_its_summary_alone_is_refused_there(self):
+		# Refused with a reason, not dropped: the assistant would tell the user it saved.
 		for route in ("frappe.client.set_value", "update_doc"):
 			with self.subTest(route=route):
 				macro = self._armed_on(route)
 				frappe.db.set_value(
 					MACRO, macro, "merged_prompt", "the stored summary", update_modified=False
 				)
-				frappe.set_user(OWNER)
-				self._routes(macro)[route]({"merged_prompt": "a summary written elsewhere", "enabled": 0})
 				frappe.db.commit()
-				row = self._row(macro)
-				self.assertEqual(
-					(row.merged_prompt, row.enabled, row.skip_confirmation), ("the stored summary", 0, 1)
-				)
+				frappe.set_user(OWNER)
+				with self.assertRaises((frappe.PermissionError, PermissionDeniedError)) as raised:
+					self._routes(macro)[route]({"merged_prompt": "a summary written elsewhere"})
+				self.assertIn("summary", str(raised.exception))
+				frappe.db.rollback()
+				self.assertEqual(self._row(macro).merged_prompt, "the stored summary")
 				self._purge()
+
+	def test_with_a_safe_change_its_summary_is_kept_as_stored(self):
+		# Switching off, unscheduling or disarming must work from a copy that carries an
+		# older summary; the stored one stays.
+		for route in ("frappe.client.set_value", "update_doc"):
+			for field in ("enabled", "schedule_enabled", "skip_confirmation"):
+				with self.subTest(route=route, field=field):
+					macro = self._armed_on(f"{route}-{field}")
+					frappe.db.set_value(
+						MACRO, macro, "merged_prompt", "the stored summary", update_modified=False
+					)
+					frappe.db.commit()
+					frappe.set_user(OWNER)
+					self._routes(macro)[route]({"merged_prompt": "a summary written elsewhere", field: 0})
+					frappe.db.commit()
+					row = self._row(macro)
+					self.assertEqual((row.merged_prompt, row[field]), ("the stored summary", 0))
+					self._purge()
 
 	def test_a_stale_desk_copy_still_switches_it_off(self):
 		# The summary landed after the Desk form was loaded: a raw write that leaves
@@ -803,6 +822,16 @@ class TestArmingWithSkills(WithColumns, SkillsBase):
 				self.assertEqual(self._armed(macro), 1)
 				self._purge()
 
+	def test_a_skill_typed_into_a_step_counts_too(self):
+		# The run would disarm at that step; the form says so before arming.
+		self._skill(OTHER, "typed", share_with=OWNER)
+		macro = self._tagged(OWNER, None, prompt="then apply (/Custom-Armskill-Typed)")
+		with self.assertRaises(frappe.PermissionError) as raised:
+			self._arm(macro)
+		self.assertIn("/armskill-typed", str(raised.exception))
+		frappe.db.rollback()
+		self.assertEqual(self._armed(macro), 0)
+
 	def test_switching_it_off_on_the_form_is_free_with_one_still_tagged(self):
 		# Shared after the macro was armed: the run asks for that step, and the form can
 		# still switch the macro off and change what does not touch the steps.
@@ -817,7 +846,7 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 	"""Judged before each step, as the run sends it: an armed macro is armed raw here,
 	as one armed before a skill was shared or narrowed."""
 
-	def _run(self, macro):
+	def _run(self, macro, user=OWNER):
 		"""``run_macro`` up to the send of its first step: what was sent, and whether
 		the run's chat was armed at that moment."""
 		from jarvis.chat import macros
@@ -830,7 +859,7 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 			)
 			return {"ok": True, "run_id": macros._step_turn_id(run.name, index)}
 
-		frappe.set_user(OWNER)
+		frappe.set_user(user)
 		with (
 			patch.object(macros, "_send_step", side_effect=send),
 			patch.object(macros, "entitlement_block", return_value=None),
@@ -841,8 +870,11 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 
 	def _purge(self):
 		frappe.set_user("Administrator")
-		for name in frappe.get_all("Jarvis Macro Run", filters={"owner": OWNER}, pluck="name"):
+		for name in frappe.get_all("Jarvis Macro Run", filters={"owner": ["in", USERS]}, pluck="name"):
 			frappe.delete_doc("Jarvis Macro Run", name, force=True, ignore_permissions=True)
+		frappe.db.delete(
+			"Comment", {"reference_doctype": "Jarvis Macro Run", "subject": ["like", "skill-disarm:%"]}
+		)
 		super()._purge()
 
 	def test_a_shared_skill_its_author_rewrote_runs_asking(self):
@@ -915,6 +947,257 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 		self.assertEqual(armed, 0)
 		self.assertNotIn("Skip confirmation is off", prompt)
 
+	def test_every_way_a_prompt_names_it_counts(self):
+		# As ``get_skill`` resolves a name: the ``custom-`` wire name, any case, and a
+		# slash after a bracket or a comma.
+		self._skill(OTHER, "typed", share_with=OWNER)
+		for i, prompt in enumerate(
+			(
+				"do it with /custom-armskill-typed",
+				"do it (/armskill-typed)",
+				"do it with,/armskill-typed",
+				"do it with /Armskill-Typed",
+			)
+		):
+			with self.subTest(prompt=prompt):
+				macro = self._tagged(OWNER, None, tag=f"form{i}", armed=True, prompt=prompt)
+				_data, [(sent, armed)] = self._run(macro)
+				self.assertEqual(armed, 0)
+				self.assertIn("/armskill-typed, which another user", sent)
+
+	def test_the_owners_own_skill_of_that_name_is_the_one_it_runs(self):
+		# ``get_skill`` serves the owner's own row first, so another user's skill of the
+		# same name, shared with them, never runs and does not disarm the run.
+		own = self._skill(OWNER, "g")
+		macro = self._tagged(OWNER, own, armed=True)
+		frappe.set_user(OTHER)
+		frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": "armskill-g",
+				"scope": "User",
+				"description": "d",
+				"instructions": "i",
+				"shared_with": [{"user": OWNER}],
+			}
+		).insert()
+		frappe.db.commit()
+		_data, [(prompt, armed)] = self._run(macro)
+		self.assertEqual(armed, 1)
+		self.assertNotIn("Skip confirmation is off", prompt)
+
+	def test_a_system_manager_is_judged_on_the_skill_they_would_be_served(self):
+		# A System Manager reads every skill: another user's private one, shared with
+		# nobody, is what ``get_skill`` serves them for that name.
+		self._skill(OTHER, "priv")
+		macro = self._tagged(SM, None, tag="sm", armed=True, prompt="do it with /armskill-priv")
+		_data, [(_prompt, armed)] = self._run(macro, user=SM)
+		self.assertEqual(armed, 0)
+		from jarvis.chat.skill_permissions import skills_outside_control
+
+		self.assertEqual(skills_outside_control("Administrator", slugs={"armskill-priv"}), ["armskill-priv"])
+
+	def test_a_step_parked_for_capacity_says_why_when_it_is_sent_again(self):
+		from jarvis.chat import macros
+
+		skill = self._skill(OTHER, "shared", share_with=OWNER)
+		macro = self._tagged(OWNER, skill, armed=True)
+		sent = []
+
+		def send(run, index, prompt, overrides):
+			sent.append(prompt)
+			if len(sent) == 1:
+				return {"ok": False, "overloaded": True}
+			return {"ok": True, "run_id": macros._step_turn_id(run.name, index)}
+
+		frappe.set_user(OWNER)
+		with (
+			patch.object(macros, "_send_step", side_effect=send),
+			patch.object(macros, "entitlement_block", return_value=None),
+			patch.object(macros, "_publish_progress"),
+			patch.object(macros, "_defer_capacity"),
+		):
+			data = macros.run_macro(macro)["data"]
+			run = frappe.get_doc("Jarvis Macro Run", data["macro_run"])
+			macros._dispatch_step(run, frappe.get_doc(MACRO, macro), 0)
+		self.assertEqual(len(sent), 2)
+		self.assertIn("Skip confirmation is off from this step on", sent[1])
+		self.assertEqual(sent[1].count("Skip confirmation is off"), 1)
+		self.assertTrue(macros._asked_for_a_skill(run.name))
+
+	def test_the_disarm_is_committed_before_the_step_is_sent(self):
+		# The send rolls back and retries after a lost lock race; the retried step must
+		# still go out disarmed.
+		from jarvis.chat import admission, macros
+		from jarvis.chat import api as chat_api
+
+		skill = self._skill(OTHER, "shared", share_with=OWNER)
+		macro = self._tagged(OWNER, skill, armed=True, steps=2)
+		data, [(_first, armed)] = self._run(macro)
+		self.assertEqual(armed, 1)
+		run = frappe.get_doc("Jarvis Macro Run", data["macro_run"])
+		attempts = []
+
+		def enqueue(conversation, prompt, **kwargs):
+			attempts.append(frappe.utils.cint(frappe.db.get_value(CONV, conversation, "skip_confirmation")))
+			if len(attempts) == 1:
+				raise frappe.QueryDeadlockError("lost a lock race")
+			return {"ok": True, "run_id": kwargs["run_id"]}
+
+		with (
+			patch.object(chat_api, "_enqueue_turn", side_effect=enqueue),
+			patch.object(admission, "turn_machine_enabled", return_value=True),
+			patch.object(macros, "_publish_progress"),
+		):
+			macros._dispatch_step(run, frappe.get_doc(MACRO, macro), 1)
+		self.assertEqual(attempts, [0, 0])
+
+
+class TestASkillFetchedByAnArmedRun(SkillsBase):
+	"""The guarantee: where a skill's text is served (``get_skill``), an armed run's
+	chat is disarmed, committed, before the body of a skill its owner does not control
+	goes back, however the agent came to fetch it."""
+
+	def _purge(self):
+		frappe.set_user("Administrator")
+		for name in frappe.get_all("Jarvis Macro Run", filters={"owner": ["in", USERS]}, pluck="name"):
+			frappe.delete_doc("Jarvis Macro Run", name, force=True, ignore_permissions=True)
+		for name in frappe.get_all(
+			CONV, filters={"owner": "Administrator", "title": "conv test"}, pluck="name"
+		):
+			frappe.delete_doc(CONV, name, force=True, ignore_permissions=True)
+		frappe.db.delete(
+			"Comment", {"reference_doctype": "Jarvis Macro Run", "subject": ["like", "skill-disarm:%"]}
+		)
+		super()._purge()
+
+	def _armed_conv(self, owner=OWNER):
+		conv = _make_conv(owner)
+		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
+		frappe.db.commit()
+		return conv
+
+	def _armed_run(self):
+		"""An armed run of OWNER's macro, its first step sent: the run and its chat."""
+		from jarvis.chat import macros
+
+		macro = self._tagged(OWNER, None, armed=True, prompt="follow the usual routine")
+		frappe.set_user(OWNER)
+		with (
+			patch.object(
+				macros,
+				"_send_step",
+				side_effect=lambda r, i, p, o: {"ok": True, "run_id": macros._step_turn_id(r.name, i)},
+			),
+			patch.object(macros, "entitlement_block", return_value=None),
+			patch.object(macros, "_publish_progress"),
+		):
+			data = macros.run_macro(macro)["data"]
+		return data["macro_run"], data["conversation"]
+
+	def _fetch(self, conv, name, user=OWNER):
+		frappe.set_user(user)
+		return api._run_tool("get_skill", {"skill_name": name}, conversation=conv)
+
+	def _armed(self, conv) -> int:
+		return frappe.utils.cint(frappe.db.get_value(CONV, conv, "skip_confirmation"))
+
+	def test_another_users_skill_disarms_the_run_before_its_body_goes_back(self):
+		from jarvis.chat import macros
+
+		self._skill(OTHER, "shared", share_with=OWNER)
+		run, conv = self._armed_run()
+		at_serve = []
+		serve = api._dispatch_and_wrap
+
+		def served(*args, **kwargs):
+			frappe.db.rollback()  # only what was committed is left
+			at_serve.append(self._armed(conv))
+			return serve(*args, **kwargs)
+
+		with patch.object(api, "_dispatch_and_wrap", side_effect=served):
+			res = self._fetch(conv, "armskill-shared")
+		self.assertEqual(at_serve, [0])
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"]["instructions"], "Summarise the open orders.")
+		self.assertIn("Skip confirmation is off from this step on", res["data"]["note"])
+		self.assertIn("/armskill-shared", res["data"]["note"])
+		# The stop message reads the run's record.
+		self.assertTrue(macros._asked_for_a_skill(run))
+
+	def test_whatever_name_it_is_fetched_by(self):
+		self._skill(OTHER, "shared", share_with=OWNER)
+		for name in ("custom-armskill-shared", "ARMSKILL-SHARED", "Custom-Armskill-Shared"):
+			with self.subTest(name=name):
+				conv = self._armed_conv()
+				res = self._fetch(conv, name)
+				self.assertTrue(res["ok"], res)
+				self.assertEqual(self._armed(conv), 0)
+
+	def test_every_write_after_it_in_the_turn_asks(self):
+		# The gate reads the chat's flag on every tool call, not once per turn.
+		self._skill(OTHER, "shared", share_with=OWNER)
+		conv = self._armed_conv()
+		macro = self._macro(OWNER, "written")
+		write = {"doctype": MACRO, "name": macro, "changes": {"description": "changed"}}
+		frappe.set_user(OWNER)
+		with patch("jarvis.api.dispatch", return_value={"ok": True}) as dispatch:
+			api._run_tool("update_doc", write, conversation=conv)
+		self.assertTrue(dispatch.called)  # armed: ran without a card
+		self._fetch(conv, "armskill-shared")
+		frappe.set_user(OWNER)
+		res = api._run_tool("update_doc", write, conversation=conv)
+		self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
+		pending_confirm.clear_for_conversation(OWNER, conv)
+		frappe.db.commit()
+
+	def test_skills_the_owner_controls_keep_it_armed(self):
+		for scope, author in (("User", OWNER), ("Org", OTHER), ("Role", OTHER)):
+			with self.subTest(scope=scope):
+				self._skill(author, scope.lower(), scope=scope)
+				conv = self._armed_conv()
+				res = self._fetch(conv, f"custom-armskill-{scope.lower()}")
+				self.assertTrue(res["ok"], res)
+				self.assertNotIn("note", res["data"])
+				self.assertEqual(self._armed(conv), 1)
+				self._purge()
+
+	def test_the_owners_own_skill_of_that_name_is_the_one_served(self):
+		self._skill(OWNER, "g")
+		frappe.set_user(OTHER)
+		frappe.get_doc(
+			{
+				"doctype": SKILL,
+				"skill_name": "armskill-g",
+				"scope": "User",
+				"description": "d",
+				"instructions": "theirs",
+				"shared_with": [{"user": OWNER}],
+			}
+		).insert()
+		frappe.db.commit()
+		conv = self._armed_conv()
+		res = self._fetch(conv, "armskill-g")
+		self.assertEqual(res["data"]["instructions"], "Summarise the open orders.")
+		self.assertEqual(self._armed(conv), 1)
+
+	def test_a_system_manager_and_administrator_are_judged_on_the_row_served(self):
+		# They may read every skill, so a private one nobody shared is served to them.
+		self._skill(OTHER, "priv")
+		for owner in (SM, "Administrator"):
+			with self.subTest(owner=owner):
+				conv = self._armed_conv(owner)
+				res = self._fetch(conv, "armskill-priv", user=owner)
+				self.assertTrue(res["ok"], res)
+				self.assertEqual(self._armed(conv), 0)
+
+	def test_an_unarmed_chat_is_left_alone(self):
+		self._skill(OTHER, "shared", share_with=OWNER)
+		conv = _make_conv(OWNER)
+		res = self._fetch(conv, "armskill-shared")
+		self.assertTrue(res["ok"], res)
+		self.assertNotIn("note", res["data"])
+
 
 class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 	"""An armed run's write to a skill asks (a card), as the brake does: it would
@@ -976,6 +1259,35 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 		frappe.db.rollback()
 		self.assertEqual(self._instructions(skill), "Summarise the open orders.")
 		self.assertFalse(frappe.flags.get(api.ARMED_MACRO_WRITE_FLAG))
+
+	def test_a_doctype_that_is_not_text_is_a_tool_error(self):
+		for doctype in (["Jarvis Custom Skill"], {"name": "Jarvis Custom Skill"}):
+			with self.subTest(doctype=doctype):
+				conv = self._armed_conv()
+				frappe.set_user(OWNER)
+				res = api._run_tool(
+					"update_doc",
+					{"doctype": doctype, "name": "x", "changes": {"instructions": "y"}},
+					conversation=conv,
+				)
+				self.assertFalse(res.get("ok"), res)
+				frappe.db.rollback()
+		# Deeper, a list is a filter, read as one.
+		filtered = {"method": "m", "args": {"filters": {"reference_doctype": ["=", SKILL]}}}
+		self.assertTrue(api._writes_a_skill("run_method", filtered))
+
+	def test_the_write_flag_is_put_back_as_it_was(self):
+		conv = self._armed_conv()
+		frappe.set_user(OWNER)
+		frappe.flags[api.ARMED_MACRO_WRITE_FLAG] = "outer"
+		self.addCleanup(frappe.flags.pop, api.ARMED_MACRO_WRITE_FLAG, None)
+		with patch("jarvis.api.dispatch", return_value={"ok": True}):
+			api._run_tool(
+				"update_doc",
+				{"doctype": "ToDo", "name": "x", "changes": {"status": "Closed"}},
+				conversation=conv,
+			)
+		self.assertEqual(frappe.flags.get(api.ARMED_MACRO_WRITE_FLAG), "outer")
 
 	def test_other_writes_still_run(self):
 		conv = self._armed_conv()
