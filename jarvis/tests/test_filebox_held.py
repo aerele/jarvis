@@ -213,6 +213,54 @@ class TestPolicy(_Base):
 		self.assertFalse(frappe.db.exists("Supplier", {"supplier_name": PARTY}))
 		self.assertTrue(frappe.db.exists("Notification Log", {"for_user": OWNER}))
 
+	def test_a_held_card_carries_the_trial_warning(self):
+		"""J1-cards: the held card is built from the same trial, so the Approval Board
+		shows the same warning line as a chat card (the real job count)."""
+		real = api._run_preview
+
+		def with_jobs(tool, args):
+			out = real(tool, args)
+			out["will_queue_jobs"] = 500
+			return out
+
+		conv = self.conv()
+		with patch("jarvis.api._run_preview", side_effect=with_jobs):
+			self.assert_held(self.call("create_doc", _supplier(), conv))
+		[row] = self.rows()
+		self.assertEqual(json.loads(row.card)["warning"], {"jobs": 500, "rolled_back": False})
+
+	def test_a_held_sensitive_create_gets_the_full_card(self):
+		"""J1-cards review: a held write that grants access (portal users) reaches the
+		Approval Board with the risk banner and the record in full, like a chat card."""
+		conv = self.conv()
+		details = "note " * 100
+		res = self.call(
+			"create_doc", _supplier(supplier_details=details, portal_users=[{"user": OWNER}]), conv
+		)
+		self.assert_held(res)
+		[row] = self.rows()
+		card = json.loads(row.card)
+		self.assertEqual(
+			(card["risk"], card["risk_line"]), ("sensitive", "This changes who can see or edit.")
+		)
+		shown = next(r for r in card["rows"] if r["label"] == "Supplier Details")
+		self.assertEqual(shown["value"], details, "not clipped")
+		self.assertIs(shown["multiline"], True)
+
+	def test_a_held_sensitive_card_too_large_to_show_is_refused(self):
+		# Supplier's Text columns hold 64 KB, so the limit is lowered rather than the
+		# value raised past what the trial can save.
+		conv = self.conv()
+		big = "x" * 20_000
+		with patch("jarvis.chat.confirm_card.MAX_FULL_CARD_BYTES", 10_000):
+			res = self.call(
+				"create_doc", _supplier(supplier_details=big, portal_users=[{"user": OWNER}]), conv
+			)
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(res["error"]["code"], "sensitive_refused", res)
+		self.assertEqual(self.rows(), [])
+		self.assertFalse(frappe.db.exists("Supplier", {"supplier_name": PARTY}))
+
 	def test_master_batches_and_updates_are_held(self):
 		conv = self.conv()
 		self.assert_held(self.call("create_doc", _batch(_supplier(), _supplier("zz-fbh Two", "")), conv))

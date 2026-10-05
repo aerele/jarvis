@@ -6,7 +6,8 @@ import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
 import * as api from "../api";
 import { store } from "../store";
-import { EFFORT, prefs, setPrefs, thinkingOf } from "../lib/prefs";
+import { EFFORT, effortOffered, sendThinking } from "../lib/effort";
+import { prefs, setPrefs } from "../lib/prefs";
 import { feed } from "../lib/notifications";
 import { DEFAULT_STARTERS, normalizeStarters, starterTint } from "../lib/starters";
 import { pickStarterPrompt } from "../lib/fillComposer";
@@ -77,6 +78,7 @@ const models = computed(() => {
 
 const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "");
 const micEnabled = computed(() => !!settings.value?.stt_enabled);
+const effortOn = computed(() => effortOffered(settings.value));
 const hasDraft = computed(
 	() => input.value.trim().length > 0 || attachments.value.some((a) => a.file_url)
 );
@@ -124,7 +126,7 @@ async function send(text = input.value) {
 		const r = await api.sendMessage("", t, {
 			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
 			model: prefs.defaultModel || "",
-			thinking: thinkingOf(prefs.effort),
+			thinking: sendThinking(settings.value, prefs.effort),
 			autoMode: autoView.value.on,
 		});
 		if (r?.ok === false || !r?.conversation_id) {
@@ -504,22 +506,26 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 					No models available on your plan yet.
 				</div>
 
-				<div class="jv-sep" />
+				<template v-if="effortOn">
+					<div class="jv-sep" />
 
-				<div class="jv-msheet-sub">Effort</div>
-				<div class="jv-msheet-hint">How much {{ agentName }} thinks before it acts.</div>
-				<div class="jv-seg">
-					<button
-						v-for="e in EFFORT"
-						:key="e.value"
-						class="jv-seg-btn"
-						:class="{ 'is-on': prefs.effort === e.value }"
-						@click="setPrefs({ effort: e.value })"
-					>
-						<span>{{ e.value }}</span>
-						<small>{{ e.hint }}</small>
-					</button>
-				</div>
+					<div class="jv-msheet-sub">Effort</div>
+					<div class="jv-msheet-hint">
+						How much {{ agentName }} thinks before it acts.
+					</div>
+					<div class="jv-seg">
+						<button
+							v-for="e in EFFORT"
+							:key="e.value"
+							class="jv-seg-btn"
+							:class="{ 'is-on': prefs.effort === e.value }"
+							@click="setPrefs({ effort: e.value })"
+						>
+							<span>{{ e.value }}</span>
+							<small>{{ e.hint }}</small>
+						</button>
+					</div>
+				</template>
 
 				<button class="jv-done" @click="modelSheet = false">Done</button>
 			</div>

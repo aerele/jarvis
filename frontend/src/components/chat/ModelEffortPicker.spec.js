@@ -139,3 +139,32 @@ describe("ModelEffortPicker narrow-host geometry", () => {
 		expect(validator("left")).toBe(false);
 	});
 });
+
+// A proxy-only workspace's model cannot think, so the server lists no effort levels
+// (jarvis-admin-v2#648). The picker must not offer a choice the turn would drop.
+describe("ModelEffortPicker effort row", () => {
+	const effortRow = (w) => w.findAll(".mep-item").filter((b) => b.text().startsWith("Effort"));
+
+	it("is offered when the server lists thinking levels", async () => {
+		const w = openPicker({ thinkingLevels: ["low", "medium", "high"] });
+		await w.vm.$nextTick();
+		expect(effortRow(w)).toHaveLength(1);
+		expect(w.find(".mep-div").exists()).toBe(true);
+	});
+
+	it("is hidden, with its divider, when the server lists none", async () => {
+		const w = openPicker({ thinkingLevels: [] });
+		await w.vm.$nextTick();
+		expect(w.findAll(".mep-item").length).toBeGreaterThan(0);
+		expect(effortRow(w)).toHaveLength(0);
+		expect(w.find(".mep-div").exists()).toBe(false);
+	});
+
+	it("drops a stored level from the pill when no level is offered", () => {
+		const w = mount(ModelEffortPicker, {
+			props: { modelsByProvider: POOL, thinkingOverride: "high", thinkingLevels: [] },
+		});
+		expect(w.find(".mep-effort").classes()).toContain("mep-hide");
+		expect(w.find(".mep-dot").classes()).toContain("mep-hide");
+	});
+});

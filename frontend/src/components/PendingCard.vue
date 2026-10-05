@@ -10,9 +10,20 @@
 // A kind rendered here ALSO needs an entry in CARD_KINDS (@/lib/actionSummary):
 // pendingCardOf returns null for a kind not in that set and the SPA falls back to
 // the raw preview, so a branch added here alone is dead code.
+//
+// Round 2 (J1-cards), on every kind, all optional: the risk banner (sensitive or
+// structural change) first, then ONE warning line from the trial; a verb's
+// consequence line; and on a sensitive card the record in full (a ``multiline``
+// value in its own block, an update's ``lines`` diff beside the full texts).
 import { computed } from "vue";
 
-import { verbSentence } from "@/lib/actionSummary";
+import {
+	cardBannerOf,
+	cardWarningOf,
+	diffLineView,
+	diffTablesOf,
+	verbSentence,
+} from "@/lib/actionSummary";
 import PlanOutline from "./PlanOutline.vue";
 
 const props = defineProps({
@@ -22,6 +33,10 @@ const props = defineProps({
 });
 
 const sentence = computed(() => (props.card.kind === "verb" ? verbSentence(props.card) : ""));
+const banner = computed(() => cardBannerOf(props.card));
+// A sensitive card opens every record: nothing it changes hides behind a click.
+const sensitive = computed(() => props.card.risk === "sensitive");
+const warning = computed(() => cardWarningOf(props.card));
 
 // The remainder line for a proposed child table. A helper rather than chained
 // <template>s: with only extra_columns set, an inline chain renders a dangling
@@ -42,16 +57,41 @@ function tableNote(t) {
 
 <template>
 	<div class="jv-pcard">
+		<!-- The risk leads (role="note": read with the card, never announced over it),
+		     then the trial's one warning line. -->
+		<div
+			v-if="banner"
+			class="jv-pcard-banner"
+			:class="'jv-pcard-banner-' + banner.risk"
+			role="note"
+		>
+			<svg class="jv-pcard-banner-icon" viewBox="0 0 16 16" aria-hidden="true">
+				<path d="M8 1.6 15 14.2H1L8 1.6Z" />
+				<path d="M8 6.2v3.6M8 11.6v.2" />
+			</svg>
+			<span>{{ banner.text }}</span>
+		</div>
+		<div v-if="warning" class="jv-pcard-warnline" role="note">{{ warning }}</div>
+
 		<!-- create: the fields the write will set -->
 		<template v-if="card.kind === 'create'">
 			<div class="jv-pcard-head">
 				Create {{ card.doctype }}<template v-if="card.name"> · {{ card.name }}</template>
 			</div>
 			<dl v-if="card.rows.length" class="jv-pcard-fields">
-				<template v-for="(r, i) in card.rows" :key="i"
-					><dt>{{ r.label }}</dt>
-					<dd>{{ r.value }}</dd></template
-				>
+				<template v-for="(r, i) in card.rows" :key="i">
+					<template v-if="r.multiline"
+						><dt class="jv-pcard-longlbl">{{ r.label }}</dt>
+						<dd class="jv-pcard-longval">
+							<div v-if="r.note" class="jv-pcard-diffnote">{{ r.note }}</div>
+							<pre class="jv-pcard-body">{{ r.value }}</pre>
+						</dd></template
+					>
+					<template v-else
+						><dt>{{ r.label }}</dt>
+						<dd>{{ r.value }}</dd></template
+					>
+				</template>
 			</dl>
 			<div v-else-if="!(card.tables || []).length" class="jv-pcard-empty">
 				No fields set.
@@ -61,6 +101,7 @@ function tableNote(t) {
 				<div class="jv-pcard-table-head">
 					{{ t.label }} · {{ t.count }} row<template v-if="t.count !== 1">s</template>
 				</div>
+				<div v-if="t.note" class="jv-pcard-diffnote">{{ t.note }}</div>
 				<div class="jv-pcard-table-scroll">
 					<table>
 						<thead>
@@ -85,12 +126,65 @@ function tableNote(t) {
 				Update {{ card.doctype }}<template v-if="card.name"> · {{ card.name }}</template
 				><template v-if="card.title"> · {{ card.title }}</template>
 			</div>
-			<div v-for="(d, i) in card.diff" :key="i" class="jv-pcard-diffrow">
-				<span class="jv-pcard-lbl">{{ d.label }}</span>
-				<span class="jv-pcard-from">{{ d.from || "(empty)" }}</span>
-				<span class="jv-pcard-arrow">→</span>
-				<span class="jv-pcard-to">{{ d.to || "(empty)" }}</span>
-			</div>
+			<template v-for="(d, i) in card.diff" :key="i">
+				<div v-if="d.from_table || d.to_table" class="jv-pcard-diffblock">
+					<span class="jv-pcard-lbl">{{ d.label }}</span>
+					<div
+						v-for="side in diffTablesOf(d)"
+						:key="side.name"
+						class="jv-pcard-table jv-pcard-difftable"
+					>
+						<div class="jv-pcard-table-head">
+							{{ side.heading }}
+						</div>
+						<div v-if="side.table && side.table.note" class="jv-pcard-diffnote">
+							{{ side.table.note }}
+						</div>
+						<div v-if="side.table" class="jv-pcard-table-scroll">
+							<table>
+								<thead>
+									<tr>
+										<th v-for="(c, ci) in side.table.columns" :key="'c' + ci">
+											{{ c }}
+										</th>
+									</tr>
+								</thead>
+								<tbody>
+									<tr v-for="(r, ri) in side.table.rows" :key="'r' + ri">
+										<td v-for="(cell, di) in r.cells" :key="'d' + di">
+											{{ cell }}
+										</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+				<div v-else-if="d.lines?.length || d.multiline" class="jv-pcard-diffblock">
+					<span class="jv-pcard-lbl">{{ d.label }}</span>
+					<div v-if="d.note" class="jv-pcard-diffnote">{{ d.note }}</div>
+					<pre v-if="d.lines?.length" class="jv-pcard-ldiff"><span
+						v-for="(l, li) in d.lines"
+						:key="li"
+						:class="'jv-ld-' + diffLineView(l).kind"
+						>{{ diffLineView(l).text }}</span></pre>
+					<pre v-else class="jv-pcard-body">{{ d.to }}</pre>
+					<details v-if="d.lines?.length" class="jv-pcard-fulltext">
+						<summary>Full new text</summary>
+						<pre class="jv-pcard-body">{{ d.to }}</pre>
+					</details>
+					<details class="jv-pcard-fulltext">
+						<summary>Current text</summary>
+						<pre class="jv-pcard-body">{{ d.from }}</pre>
+					</details>
+				</div>
+				<div v-else class="jv-pcard-diffrow">
+					<span class="jv-pcard-lbl">{{ d.label }}</span>
+					<span class="jv-pcard-from">{{ d.from || "(empty)" }}</span>
+					<span class="jv-pcard-arrow">→</span>
+					<span class="jv-pcard-to">{{ d.to || "(empty)" }}</span>
+				</div>
+			</template>
 			<div v-if="!card.diff.length" class="jv-pcard-empty">No field changes.</div>
 		</template>
 
@@ -102,20 +196,62 @@ function tableNote(t) {
 		     its targets twice, once as records and once as the old list. -->
 		<template v-else-if="card.kind === 'verb'">
 			<div class="jv-pcard-verb">{{ sentence }}</div>
+			<div v-if="card.consequence" class="jv-pcard-consequence">{{ card.consequence }}</div>
 			<div v-if="(card.records || []).length" class="jv-pcard-recs">
 				<template v-for="(r, i) in card.records" :key="'vr' + i">
-					<details v-if="r.rows.length" class="jv-rec" :open="i === 0">
+					<details v-if="r.rows.length" class="jv-rec" :open="i === 0 || sensitive">
 						<summary>
 							<span class="jv-chev" aria-hidden="true"></span>
 							<span class="jv-rec-id">{{ r.name }}</span>
 							<span v-if="r.title" class="jv-rec-title">{{ r.title }}</span>
 						</summary>
 						<dl class="jv-pcard-fields">
-							<template v-for="(f, j) in r.rows" :key="'vf' + j"
-								><dt>{{ f.label }}</dt>
-								<dd>{{ f.value }}</dd></template
-							>
+							<template v-for="(f, j) in r.rows" :key="'vf' + j">
+								<template v-if="f.multiline"
+									><dt class="jv-pcard-longlbl">{{ f.label }}</dt>
+									<dd class="jv-pcard-longval">
+										<div v-if="f.note" class="jv-pcard-diffnote">
+											{{ f.note }}
+										</div>
+										<pre class="jv-pcard-body">{{ f.value }}</pre>
+									</dd></template
+								>
+								<template v-else
+									><dt>{{ f.label }}</dt>
+									<dd>{{ f.value }}</dd></template
+								>
+							</template>
 						</dl>
+						<div
+							v-for="(t, ti) in r.tables || []"
+							:key="'vt' + ti"
+							class="jv-pcard-table"
+						>
+							<div class="jv-pcard-table-head">
+								{{ t.label }} · {{ t.count }} row<template v-if="t.count !== 1"
+									>s</template
+								>
+							</div>
+							<div v-if="t.note" class="jv-pcard-diffnote">{{ t.note }}</div>
+							<div class="jv-pcard-table-scroll">
+								<table>
+									<thead>
+										<tr>
+											<th v-for="(c, ci) in t.columns" :key="'vc' + ci">
+												{{ c }}
+											</th>
+										</tr>
+									</thead>
+									<tbody>
+										<tr v-for="(row, ri) in t.rows" :key="'vrw' + ri">
+											<td v-for="(cell, di) in row.cells" :key="'vd' + di">
+												{{ cell }}
+											</td>
+										</tr>
+									</tbody>
+								</table>
+							</div>
+						</div>
 					</details>
 					<div v-else class="jv-rec jv-rec-bare">
 						<span class="jv-rec-id">{{ r.name }}</span>
@@ -376,7 +512,7 @@ function tableNote(t) {
 					v-for="(r, i) in card.records"
 					:key="'br' + i"
 					class="jv-rec"
-					:open="i === 0"
+					:open="i === 0 || sensitive"
 				>
 					<summary>
 						<span class="jv-chev" aria-hidden="true"></span>
@@ -386,10 +522,21 @@ function tableNote(t) {
 					</summary>
 					<div class="jv-rec-body">
 						<dl v-if="r.rows.length" class="jv-pcard-fields">
-							<template v-for="(f, j) in r.rows" :key="'bf' + j"
-								><dt>{{ f.label }}</dt>
-								<dd>{{ f.value }}</dd></template
-							>
+							<template v-for="(f, j) in r.rows" :key="'bf' + j">
+								<template v-if="f.multiline"
+									><dt class="jv-pcard-longlbl">{{ f.label }}</dt>
+									<dd class="jv-pcard-longval">
+										<div v-if="f.note" class="jv-pcard-diffnote">
+											{{ f.note }}
+										</div>
+										<pre class="jv-pcard-body">{{ f.value }}</pre>
+									</dd></template
+								>
+								<template v-else
+									><dt>{{ f.label }}</dt>
+									<dd>{{ f.value }}</dd></template
+								>
+							</template>
 						</dl>
 						<div v-if="r.extra > 0" class="jv-pcard-more">
 							+{{ r.extra }} more fields
@@ -404,6 +551,7 @@ function tableNote(t) {
 									>s</template
 								>
 							</div>
+							<div v-if="t.note" class="jv-pcard-diffnote">{{ t.note }}</div>
 							<div class="jv-pcard-table-scroll">
 								<table>
 									<thead>
@@ -445,9 +593,14 @@ function tableNote(t) {
 					>s</template
 				><span v-if="card.varying" class="jv-pcard-sub"> · varying changes</span>
 			</div>
-			<p class="jv-pcard-caption">Click a record to review its changes.</p>
+			<p v-if="!sensitive" class="jv-pcard-caption">Click a record to review its changes.</p>
 			<div class="jv-pcard-recs">
-				<details v-for="(r, i) in card.records" :key="i" class="jv-rec" :open="i === 0">
+				<details
+					v-for="(r, i) in card.records"
+					:key="i"
+					class="jv-rec"
+					:open="i === 0 || sensitive"
+				>
 					<summary>
 						<span class="jv-chev" aria-hidden="true"></span>
 						<span class="jv-rec-id">{{ r.name }}</span>
@@ -457,12 +610,80 @@ function tableNote(t) {
 						}}</span>
 					</summary>
 					<div class="jv-rec-body">
-						<div v-for="(d, j) in r.diff" :key="j" class="jv-pcard-diffrow">
-							<span class="jv-pcard-lbl">{{ d.label }}</span>
-							<span class="jv-pcard-from">{{ d.from || "(empty)" }}</span>
-							<span class="jv-pcard-arrow">→</span>
-							<span class="jv-pcard-to">{{ d.to || "(empty)" }}</span>
-						</div>
+						<template v-for="(d, j) in r.diff" :key="j">
+							<div v-if="d.from_table || d.to_table" class="jv-pcard-diffblock">
+								<span class="jv-pcard-lbl">{{ d.label }}</span>
+								<div
+									v-for="side in diffTablesOf(d)"
+									:key="side.name"
+									class="jv-pcard-table jv-pcard-difftable"
+								>
+									<div class="jv-pcard-table-head">
+										{{ side.heading }}
+									</div>
+									<div
+										v-if="side.table && side.table.note"
+										class="jv-pcard-diffnote"
+									>
+										{{ side.table.note }}
+									</div>
+									<div v-if="side.table" class="jv-pcard-table-scroll">
+										<table>
+											<thead>
+												<tr>
+													<th
+														v-for="(c, ci) in side.table.columns"
+														:key="'c' + ci"
+													>
+														{{ c }}
+													</th>
+												</tr>
+											</thead>
+											<tbody>
+												<tr
+													v-for="(r, ri) in side.table.rows"
+													:key="'r' + ri"
+												>
+													<td
+														v-for="(cell, di) in r.cells"
+														:key="'d' + di"
+													>
+														{{ cell }}
+													</td>
+												</tr>
+											</tbody>
+										</table>
+									</div>
+								</div>
+							</div>
+							<div
+								v-else-if="d.lines?.length || d.multiline"
+								class="jv-pcard-diffblock"
+							>
+								<span class="jv-pcard-lbl">{{ d.label }}</span>
+								<div v-if="d.note" class="jv-pcard-diffnote">{{ d.note }}</div>
+								<pre v-if="d.lines?.length" class="jv-pcard-ldiff"><span
+									v-for="(l, li) in d.lines"
+									:key="li"
+									:class="'jv-ld-' + diffLineView(l).kind"
+									>{{ diffLineView(l).text }}</span></pre>
+								<pre v-else class="jv-pcard-body">{{ d.to }}</pre>
+								<details v-if="d.lines?.length" class="jv-pcard-fulltext">
+									<summary>Full new text</summary>
+									<pre class="jv-pcard-body">{{ d.to }}</pre>
+								</details>
+								<details class="jv-pcard-fulltext">
+									<summary>Current text</summary>
+									<pre class="jv-pcard-body">{{ d.from }}</pre>
+								</details>
+							</div>
+							<div v-else class="jv-pcard-diffrow">
+								<span class="jv-pcard-lbl">{{ d.label }}</span>
+								<span class="jv-pcard-from">{{ d.from || "(empty)" }}</span>
+								<span class="jv-pcard-arrow">→</span>
+								<span class="jv-pcard-to">{{ d.to || "(empty)" }}</span>
+							</div>
+						</template>
 						<div v-if="!r.diff.length" class="jv-pcard-empty">No field changes.</div>
 					</div>
 				</details>
@@ -535,9 +756,32 @@ function tableNote(t) {
 </template>
 
 <style scoped>
+/* The card's own palette: the chat's variables when it sits inside the chat (its
+   container binds them inline), else the same light / dark values, so the card is
+   styled wherever it is mounted (the Approval Board detail panes have none). */
 .jv-pcard {
+	--pc-amber: var(--amber, #d97706);
+	--pc-border: var(--border, #e8e8ec);
+	--pc-green: var(--green, #16a34a);
+	--pc-red: var(--red, #dc2626);
+	--pc-surface-1: var(--surface-1, #f7f7f8);
+	--pc-surface-2: var(--surface-2, #f1f1f3);
+	--pc-text: var(--text, #171717);
+	--pc-text-2: var(--text-2, #4a4a4f);
+	--pc-text-3: var(--text-3, #6d6d76);
 	font-size: 12.5px;
-	color: var(--text);
+	color: var(--pc-text);
+}
+html[data-theme="dark"] .jv-pcard {
+	--pc-amber: var(--amber, #fbbf24);
+	--pc-border: var(--border, #2c2c34);
+	--pc-green: var(--green, #34d399);
+	--pc-red: var(--red, #f87171);
+	--pc-surface-1: var(--surface-1, #1d1d22);
+	--pc-surface-2: var(--surface-2, #26262d);
+	--pc-text: var(--text, #ededf2);
+	--pc-text-2: var(--text-2, #b6b6c0);
+	--pc-text-3: var(--text-3, #7e7e8a);
 }
 .jv-pcard-head {
 	font-weight: 600;
@@ -548,6 +792,109 @@ function tableNote(t) {
 	font-weight: 500;
 	overflow-wrap: anywhere;
 }
+/* what the verb does (described card: nothing ran at park) */
+.jv-pcard-consequence {
+	margin-top: 2px;
+	color: var(--pc-text-2);
+	overflow-wrap: anywhere;
+}
+/* risk banner: a sensitive or structural change leads the card */
+.jv-pcard-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 7px;
+	margin-bottom: 8px;
+	padding: 6px 9px;
+	border-radius: 6px;
+	background: var(--pc-surface-2);
+	border-left: 2px solid var(--pc-red, var(--pc-text-3));
+	color: var(--pc-text);
+	font-weight: 500;
+	overflow-wrap: anywhere;
+}
+.jv-pcard-banner-icon {
+	flex: none;
+	width: 14px;
+	height: 14px;
+	margin-top: 1px;
+	fill: none;
+	stroke: var(--pc-red, var(--pc-text-3));
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+/* the trial's one warning line (jobs to start, a rolled-back hook) */
+.jv-pcard-warnline {
+	margin-bottom: 8px;
+	padding: 5px 9px;
+	border-radius: 6px;
+	background: var(--pc-surface-2);
+	border-left: 2px solid var(--pc-amber, var(--pc-text-3));
+	color: var(--pc-text);
+	overflow-wrap: anywhere;
+}
+/* sensitive card: a long value takes the full width in its own block */
+.jv-pcard-fields .jv-pcard-longlbl,
+.jv-pcard-fields .jv-pcard-longval {
+	grid-column: 1 / -1;
+}
+.jv-pcard-fields .jv-pcard-longval {
+	text-align: left;
+}
+.jv-pcard-longval .jv-pcard-body {
+	margin-top: 0;
+	max-height: 320px;
+}
+/* sensitive update: a line diff of a multi-line value, the full texts behind it */
+.jv-pcard-diffblock {
+	padding: 4px 0;
+}
+.jv-pcard-ldiff {
+	margin: 4px 0 0;
+	padding: 6px 0;
+	background: var(--pc-surface-2);
+	border-radius: 7px;
+	font-family: ui-monospace, "SF Mono", Menlo, monospace;
+	font-size: 11.5px;
+	line-height: 1.5;
+	max-height: 320px;
+	overflow: auto;
+}
+.jv-pcard-ldiff > span {
+	display: block;
+	padding: 0 10px;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+.jv-ld-add {
+	background: color-mix(in srgb, var(--pc-green, #2f9e44) 14%, transparent);
+}
+.jv-ld-del {
+	background: color-mix(in srgb, var(--pc-red, #e03131) 14%, transparent);
+}
+.jv-ld-gap {
+	color: var(--pc-text-3);
+}
+.jv-pcard-diffnote {
+	margin-top: 2px;
+	color: var(--pc-text-2);
+	font-size: 11.5px;
+}
+.jv-pcard-difftable {
+	margin-top: 6px;
+}
+.jv-pcard-diffblock > .jv-pcard-body {
+	max-height: 320px;
+}
+.jv-pcard-fulltext {
+	margin-top: 4px;
+}
+.jv-pcard-fulltext summary {
+	cursor: pointer;
+	color: var(--pc-text-3);
+	font-size: 11.5px;
+	user-select: none;
+}
 .jv-pcard-fields {
 	display: grid;
 	grid-template-columns: auto 1fr;
@@ -555,7 +902,7 @@ function tableNote(t) {
 	margin: 0;
 }
 .jv-pcard-fields dt {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 }
 .jv-pcard-fields dd {
 	margin: 0;
@@ -570,23 +917,23 @@ function tableNote(t) {
 	padding: 2px 0;
 }
 .jv-pcard-lbl {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 }
 .jv-pcard-from {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	text-decoration: line-through;
 	overflow-wrap: anywhere;
 }
 .jv-pcard-arrow {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 }
 .jv-pcard-to {
-	color: var(--green, var(--text));
+	color: var(--pc-green, var(--pc-text));
 	font-weight: 500;
 	overflow-wrap: anywhere;
 }
 .jv-pcard-empty {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	font-style: italic;
 }
 .jv-pcard-kv {
@@ -596,7 +943,7 @@ function tableNote(t) {
 	padding: 2px 0;
 }
 .jv-pcard-kv span {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 }
 .jv-pcard-kv b {
 	font-weight: 500;
@@ -613,7 +960,7 @@ function tableNote(t) {
 }
 .jv-pcard-more {
 	list-style: none;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 }
 /* create: a proposed child table, scrolling inside its own box so the card never
    scrolls the page sideways */
@@ -622,7 +969,7 @@ function tableNote(t) {
 }
 .jv-pcard-table-head {
 	font-size: 11.5px;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	margin-bottom: 4px;
 }
 .jv-pcard-table-scroll {
@@ -639,11 +986,11 @@ function tableNote(t) {
 .jv-pcard-table td {
 	text-align: left;
 	padding: 4px 8px;
-	border-bottom: 1px solid var(--surface-2);
+	border-bottom: 1px solid var(--pc-surface-2);
 	white-space: nowrap;
 }
 .jv-pcard-table th {
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	font-weight: 500;
 }
 .jv-pcard-table td {
@@ -657,11 +1004,11 @@ function tableNote(t) {
 /* bulk update: collapsible per-record from→to list */
 .jv-pcard-sub {
 	font-weight: 400;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 }
 .jv-pcard-caption {
 	font-size: 11.5px;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	margin: 0 0 8px;
 }
 .jv-pcard-recs {
@@ -673,7 +1020,7 @@ function tableNote(t) {
 	-webkit-overflow-scrolling: touch;
 }
 .jv-rec {
-	border-top: 1px solid var(--surface-2);
+	border-top: 1px solid var(--pc-surface-2);
 }
 .jv-rec:first-child {
 	border-top: none;
@@ -697,18 +1044,18 @@ function tableNote(t) {
 	content: "";
 }
 .jv-rec > summary:hover {
-	background: var(--surface-1);
+	background: var(--pc-surface-1);
 }
 .jv-rec > summary:focus-visible {
-	outline: 2px solid var(--blue, var(--text));
+	outline: 2px solid var(--blue, var(--pc-text));
 	outline-offset: -2px;
 }
 .jv-chev {
 	flex: none;
 	width: 7px;
 	height: 7px;
-	border-right: 1.6px solid var(--text-3);
-	border-bottom: 1.6px solid var(--text-3);
+	border-right: 1.6px solid var(--pc-text-3);
+	border-bottom: 1.6px solid var(--pc-text-3);
 	transform: rotate(-45deg);
 	transition: transform 0.15s ease;
 	margin-left: 2px;
@@ -728,18 +1075,18 @@ function tableNote(t) {
 .jv-rec-id {
 	font-family: ui-monospace, "SF Mono", Menlo, monospace;
 	font-size: 11.5px;
-	color: var(--text);
+	color: var(--pc-text);
 	font-weight: 500;
 	flex: none;
 }
 .jv-rec-title {
 	font-size: 11.5px;
-	color: var(--text);
+	color: var(--pc-text);
 	overflow-wrap: anywhere;
 }
 .jv-rec-fields {
 	font-size: 11.5px;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	margin-left: auto;
 	text-align: right;
 	overflow-wrap: anywhere;
@@ -763,7 +1110,7 @@ function tableNote(t) {
 .jv-pcard-body {
 	margin: 6px 0 0;
 	padding: 8px 10px;
-	background: var(--surface-2);
+	background: var(--pc-surface-2);
 	border-radius: 7px;
 	white-space: pre-wrap;
 	word-break: break-word;
@@ -778,20 +1125,20 @@ function tableNote(t) {
 	margin-left: 4px;
 	padding: 1px 7px;
 	border-radius: 999px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
+	background: var(--pc-surface-2);
+	border: 1px solid var(--pc-border);
 	font-size: 11px;
 	font-weight: 500;
-	color: var(--text);
+	color: var(--pc-text);
 }
 /* wiki: a full-body replace is a rewrite, not an edit - it must not read as routine */
 .jv-pcard-warn {
 	margin-top: 6px;
 	padding: 5px 9px;
 	border-radius: 6px;
-	background: var(--surface-2);
-	border-left: 2px solid var(--red, var(--text-3));
-	color: var(--text);
+	background: var(--pc-surface-2);
+	border-left: 2px solid var(--pc-red, var(--pc-text-3));
+	color: var(--pc-text);
 	font-weight: 500;
 }
 /* long-form bodies (skill instructions, wiki body, one email) - an 8k body must not
@@ -801,7 +1148,7 @@ function tableNote(t) {
 }
 .jv-pcard-expand summary {
 	cursor: pointer;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	font-size: 11.5px;
 	user-select: none;
 }
@@ -813,15 +1160,15 @@ function tableNote(t) {
 }
 .jv-pcard-details summary {
 	cursor: pointer;
-	color: var(--text-3);
+	color: var(--pc-text-3);
 	font-size: 11.5px;
 	user-select: none;
 }
 .jv-pcard-details pre {
 	margin: 6px 0 0;
 	padding: 9px 11px;
-	background: var(--surface-2);
-	border: 1px solid var(--border);
+	background: var(--pc-surface-2);
+	border: 1px solid var(--pc-border);
 	border-radius: 7px;
 	font-family: ui-monospace, "SF Mono", Menlo, monospace;
 	font-size: 11.5px;

@@ -11,9 +11,21 @@
 // (@shared/lib/actionSummary.js): pendingCardOf returns null for a kind not in that
 // set and the sheet falls back to the raw preview, so a branch added here alone is
 // dead code.
+//
+// Round 2 (J1-cards), the same as the desktop card and from the same @shared
+// helpers, all optional: the risk banner first, then ONE warning line from the
+// trial; a verb's consequence line; and on a sensitive card the record in full (a
+// ``multiline`` value in its own block, an update's ``lines`` diff beside the full
+// texts).
 import { computed } from "vue";
 
-import { verbSentence } from "@shared/lib/actionSummary.js";
+import {
+	cardBannerOf,
+	cardWarningOf,
+	diffLineView,
+	diffTablesOf,
+	verbSentence,
+} from "@shared/lib/actionSummary.js";
 import PlanOutline from "./PlanOutline.vue";
 
 const props = defineProps({
@@ -22,6 +34,10 @@ const props = defineProps({
 });
 
 const sentence = computed(() => (props.card.kind === "verb" ? verbSentence(props.card) : ""));
+const banner = computed(() => cardBannerOf(props.card));
+// A sensitive card opens every record: nothing it changes hides behind a click.
+const sensitive = computed(() => props.card.risk === "sensitive");
+const warning = computed(() => cardWarningOf(props.card));
 
 // The remainder line for a proposed child table. Duplicated from the desktop card
 // rather than shared: the two TEMPLATES are deliberately separate (different class
@@ -42,13 +58,34 @@ function tableNote(t) {
 
 <template>
 	<div class="jv-pc">
+		<!-- The risk leads (role="note"), then the trial's one warning line. -->
+		<div v-if="banner" class="jv-pc-banner" :class="'jv-pc-banner-' + banner.risk" role="note">
+			<svg class="jv-pc-banner-icon" viewBox="0 0 16 16" aria-hidden="true">
+				<path d="M8 1.6 15 14.2H1L8 1.6Z" />
+				<path d="M8 6.2v3.6M8 11.6v.2" />
+			</svg>
+			<span>{{ banner.text }}</span>
+		</div>
+		<div v-if="warning" class="jv-pc-warnline" role="note">{{ warning }}</div>
+
 		<template v-if="card.kind === 'create'">
 			<div class="jv-pc-head">
 				Create {{ card.doctype }}<template v-if="card.name"> · {{ card.name }}</template>
 			</div>
-			<div v-for="(r, i) in card.rows" :key="i" class="jv-pc-kv">
-				<span>{{ r.label }}</span
-				><b>{{ r.value }}</b>
+			<div
+				v-for="(r, i) in card.rows"
+				:key="i"
+				:class="r.multiline ? 'jv-pc-long' : 'jv-pc-kv'"
+			>
+				<template v-if="r.multiline"
+					><span class="jv-pc-lbl">{{ r.label }}</span>
+					<div v-if="r.note" class="jv-pc-diffnote">{{ r.note }}</div>
+					<pre class="jv-pc-body">{{ r.value }}</pre>
+				</template>
+				<template v-else
+					><span>{{ r.label }}</span
+					><b>{{ r.value }}</b></template
+				>
 			</div>
 			<div v-if="!card.rows.length && !(card.tables || []).length" class="jv-pc-empty">
 				No fields set.
@@ -57,6 +94,7 @@ function tableNote(t) {
 				<div class="jv-pc-table-head">
 					{{ t.label }} · {{ t.count }} row<template v-if="t.count !== 1">s</template>
 				</div>
+				<div v-if="t.note" class="jv-pc-diffnote">{{ t.note }}</div>
 				<div class="jv-pc-table-scroll">
 					<table>
 						<thead>
@@ -80,12 +118,65 @@ function tableNote(t) {
 				Update {{ card.doctype }}<template v-if="card.name"> · {{ card.name }}</template
 				><template v-if="card.title"> · {{ card.title }}</template>
 			</div>
-			<div v-for="(d, i) in card.diff" :key="i" class="jv-pc-diff">
-				<span class="jv-pc-lbl">{{ d.label }}</span>
-				<span class="jv-pc-from">{{ d.from || "(empty)" }}</span>
-				<span class="jv-pc-arrow">→</span>
-				<span class="jv-pc-to">{{ d.to || "(empty)" }}</span>
-			</div>
+			<template v-for="(d, i) in card.diff" :key="i">
+				<div v-if="d.from_table || d.to_table" class="jv-pc-diffblock">
+					<span class="jv-pc-lbl">{{ d.label }}</span>
+					<div
+						v-for="side in diffTablesOf(d)"
+						:key="side.name"
+						class="jv-pc-table jv-pc-difftable"
+					>
+						<div class="jv-pc-table-head">
+							{{ side.heading }}
+						</div>
+						<div v-if="side.table && side.table.note" class="jv-pc-diffnote">
+							{{ side.table.note }}
+						</div>
+						<div v-if="side.table" class="jv-pc-table-scroll">
+							<table>
+								<thead>
+									<tr>
+										<th v-for="(c, ci) in side.table.columns" :key="'c' + ci">
+											{{ c }}
+										</th>
+									</tr>
+								</thead>
+								<tbody>
+									<tr v-for="(r, ri) in side.table.rows" :key="'r' + ri">
+										<td v-for="(cell, di) in r.cells" :key="'d' + di">
+											{{ cell }}
+										</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+				<div v-else-if="d.lines?.length || d.multiline" class="jv-pc-diffblock">
+					<span class="jv-pc-lbl">{{ d.label }}</span>
+					<div v-if="d.note" class="jv-pc-diffnote">{{ d.note }}</div>
+					<pre v-if="d.lines?.length" class="jv-pc-ldiff"><span
+						v-for="(l, li) in d.lines"
+						:key="li"
+						:class="'jv-pc-ld-' + diffLineView(l).kind"
+						>{{ diffLineView(l).text }}</span></pre>
+					<pre v-else class="jv-pc-body">{{ d.to }}</pre>
+					<details v-if="d.lines?.length" class="jv-pc-expand">
+						<summary>Full new text</summary>
+						<pre class="jv-pc-body">{{ d.to }}</pre>
+					</details>
+					<details class="jv-pc-expand">
+						<summary>Current text</summary>
+						<pre class="jv-pc-body">{{ d.from }}</pre>
+					</details>
+				</div>
+				<div v-else class="jv-pc-diff">
+					<span class="jv-pc-lbl">{{ d.label }}</span>
+					<span class="jv-pc-from">{{ d.from || "(empty)" }}</span>
+					<span class="jv-pc-arrow">→</span>
+					<span class="jv-pc-to">{{ d.to || "(empty)" }}</span>
+				</div>
+			</template>
 			<div v-if="!card.diff.length" class="jv-pc-empty">No field changes.</div>
 		</template>
 
@@ -96,18 +187,63 @@ function tableNote(t) {
 		     its targets twice, once as records and once as the old list. -->
 		<template v-else-if="card.kind === 'verb'">
 			<div class="jv-pc-verb">{{ sentence }}</div>
+			<div v-if="card.consequence" class="jv-pc-consequence">{{ card.consequence }}</div>
 			<div v-if="(card.records || []).length" class="jv-pc-recs">
 				<template v-for="(r, i) in card.records" :key="'vr' + i">
-					<details v-if="r.rows.length" class="jv-pc-rec" :open="i === 0">
+					<details v-if="r.rows.length" class="jv-pc-rec" :open="i === 0 || sensitive">
 						<summary>
 							<span class="jv-pc-chev" aria-hidden="true"></span>
 							<span class="jv-pc-rid">{{ r.name }}</span>
 							<span v-if="r.title" class="jv-pc-rtitle">{{ r.title }}</span>
 						</summary>
 						<div class="jv-pc-rbody">
-							<div v-for="(f, j) in r.rows" :key="'vf' + j" class="jv-pc-kv">
-								<span>{{ f.label }}</span
-								><b>{{ f.value }}</b>
+							<div
+								v-for="(f, j) in r.rows"
+								:key="'vf' + j"
+								:class="f.multiline ? 'jv-pc-long' : 'jv-pc-kv'"
+							>
+								<template v-if="f.multiline"
+									><span class="jv-pc-lbl">{{ f.label }}</span>
+									<div v-if="f.note" class="jv-pc-diffnote">{{ f.note }}</div>
+									<pre class="jv-pc-body">{{ f.value }}</pre>
+								</template>
+								<template v-else
+									><span>{{ f.label }}</span
+									><b>{{ f.value }}</b></template
+								>
+							</div>
+							<div
+								v-for="(t, ti) in r.tables || []"
+								:key="'vt' + ti"
+								class="jv-pc-table"
+							>
+								<div class="jv-pc-table-head">
+									{{ t.label }} · {{ t.count }} row<template v-if="t.count !== 1"
+										>s</template
+									>
+								</div>
+								<div v-if="t.note" class="jv-pc-diffnote">{{ t.note }}</div>
+								<div class="jv-pc-table-scroll">
+									<table>
+										<thead>
+											<tr>
+												<th v-for="(c, ci) in t.columns" :key="'vc' + ci">
+													{{ c }}
+												</th>
+											</tr>
+										</thead>
+										<tbody>
+											<tr v-for="(row, ri) in t.rows" :key="'vrw' + ri">
+												<td
+													v-for="(cell, di) in row.cells"
+													:key="'vd' + di"
+												>
+													{{ cell }}
+												</td>
+											</tr>
+										</tbody>
+									</table>
+								</div>
 							</div>
 						</div>
 					</details>
@@ -360,7 +496,7 @@ function tableNote(t) {
 					v-for="(r, i) in card.records"
 					:key="'br' + i"
 					class="jv-pc-rec"
-					:open="i === 0"
+					:open="i === 0 || sensitive"
 				>
 					<summary>
 						<span class="jv-pc-chev" aria-hidden="true"></span>
@@ -369,9 +505,20 @@ function tableNote(t) {
 						>
 					</summary>
 					<div class="jv-pc-rbody">
-						<div v-for="(f, j) in r.rows" :key="'bf' + j" class="jv-pc-kv">
-							<span>{{ f.label }}</span
-							><b>{{ f.value }}</b>
+						<div
+							v-for="(f, j) in r.rows"
+							:key="'bf' + j"
+							:class="f.multiline ? 'jv-pc-long' : 'jv-pc-kv'"
+						>
+							<template v-if="f.multiline"
+								><span class="jv-pc-lbl">{{ f.label }}</span>
+								<div v-if="f.note" class="jv-pc-diffnote">{{ f.note }}</div>
+								<pre class="jv-pc-body">{{ f.value }}</pre>
+							</template>
+							<template v-else
+								><span>{{ f.label }}</span
+								><b>{{ f.value }}</b></template
+							>
 						</div>
 						<div v-if="r.extra > 0" class="jv-pc-more">+{{ r.extra }} more fields</div>
 						<div
@@ -384,6 +531,7 @@ function tableNote(t) {
 									>s</template
 								>
 							</div>
+							<div v-if="t.note" class="jv-pc-diffnote">{{ t.note }}</div>
 							<div class="jv-pc-table-scroll">
 								<table>
 									<thead>
@@ -426,7 +574,12 @@ function tableNote(t) {
 			</div>
 			<p class="jv-pc-cap">Tap a record to review its changes.</p>
 			<div class="jv-pc-recs">
-				<details v-for="(r, i) in card.records" :key="i" class="jv-pc-rec" :open="i === 0">
+				<details
+					v-for="(r, i) in card.records"
+					:key="i"
+					class="jv-pc-rec"
+					:open="i === 0 || sensitive"
+				>
 					<summary>
 						<span class="jv-pc-chev" aria-hidden="true"></span>
 						<span class="jv-pc-rid">{{ r.name }}</span>
@@ -436,12 +589,80 @@ function tableNote(t) {
 						}}</span>
 					</summary>
 					<div class="jv-pc-rbody">
-						<div v-for="(d, j) in r.diff" :key="j" class="jv-pc-diff">
-							<span class="jv-pc-lbl">{{ d.label }}</span>
-							<span class="jv-pc-from">{{ d.from || "(empty)" }}</span>
-							<span class="jv-pc-arrow">→</span>
-							<span class="jv-pc-to">{{ d.to || "(empty)" }}</span>
-						</div>
+						<template v-for="(d, j) in r.diff" :key="j">
+							<div v-if="d.from_table || d.to_table" class="jv-pc-diffblock">
+								<span class="jv-pc-lbl">{{ d.label }}</span>
+								<div
+									v-for="side in diffTablesOf(d)"
+									:key="side.name"
+									class="jv-pc-table jv-pc-difftable"
+								>
+									<div class="jv-pc-table-head">
+										{{ side.heading }}
+									</div>
+									<div
+										v-if="side.table && side.table.note"
+										class="jv-pc-diffnote"
+									>
+										{{ side.table.note }}
+									</div>
+									<div v-if="side.table" class="jv-pc-table-scroll">
+										<table>
+											<thead>
+												<tr>
+													<th
+														v-for="(c, ci) in side.table.columns"
+														:key="'c' + ci"
+													>
+														{{ c }}
+													</th>
+												</tr>
+											</thead>
+											<tbody>
+												<tr
+													v-for="(r, ri) in side.table.rows"
+													:key="'r' + ri"
+												>
+													<td
+														v-for="(cell, di) in r.cells"
+														:key="'d' + di"
+													>
+														{{ cell }}
+													</td>
+												</tr>
+											</tbody>
+										</table>
+									</div>
+								</div>
+							</div>
+							<div
+								v-else-if="d.lines?.length || d.multiline"
+								class="jv-pc-diffblock"
+							>
+								<span class="jv-pc-lbl">{{ d.label }}</span>
+								<div v-if="d.note" class="jv-pc-diffnote">{{ d.note }}</div>
+								<pre v-if="d.lines?.length" class="jv-pc-ldiff"><span
+									v-for="(l, li) in d.lines"
+									:key="li"
+									:class="'jv-pc-ld-' + diffLineView(l).kind"
+									>{{ diffLineView(l).text }}</span></pre>
+								<pre v-else class="jv-pc-body">{{ d.to }}</pre>
+								<details v-if="d.lines?.length" class="jv-pc-expand">
+									<summary>Full new text</summary>
+									<pre class="jv-pc-body">{{ d.to }}</pre>
+								</details>
+								<details class="jv-pc-expand">
+									<summary>Current text</summary>
+									<pre class="jv-pc-body">{{ d.from }}</pre>
+								</details>
+							</div>
+							<div v-else class="jv-pc-diff">
+								<span class="jv-pc-lbl">{{ d.label }}</span>
+								<span class="jv-pc-from">{{ d.from || "(empty)" }}</span>
+								<span class="jv-pc-arrow">→</span>
+								<span class="jv-pc-to">{{ d.to || "(empty)" }}</span>
+							</div>
+						</template>
 						<div v-if="!r.diff.length" class="jv-pc-empty">No field changes.</div>
 					</div>
 				</details>
@@ -528,6 +749,97 @@ function tableNote(t) {
 	font-weight: 500;
 	color: var(--ink9);
 	overflow-wrap: anywhere;
+}
+/* what the verb does (described card: nothing ran at park) */
+.jv-pc-consequence {
+	margin-top: 2px;
+	color: var(--ink6);
+	overflow-wrap: anywhere;
+}
+/* risk banner: a sensitive or structural change leads the sheet */
+.jv-pc-banner {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	margin-bottom: 10px;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: var(--red-bg, var(--card2));
+	border-left: 2px solid var(--red, var(--ink5));
+	color: var(--ink9);
+	font-weight: 500;
+	overflow-wrap: anywhere;
+}
+.jv-pc-banner-icon {
+	flex: none;
+	width: 16px;
+	height: 16px;
+	margin-top: 1px;
+	fill: none;
+	stroke: var(--red, var(--ink5));
+	stroke-width: 1.5;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+/* the trial's one warning line (jobs to start, a rolled-back hook) */
+.jv-pc-warnline {
+	margin-bottom: 10px;
+	padding: 7px 10px;
+	border-radius: 8px;
+	background: var(--amber-bg, var(--card2));
+	border-left: 2px solid var(--amber, var(--ink5));
+	color: var(--ink9);
+	overflow-wrap: anywhere;
+}
+/* sensitive card: a long value in its own full-width block */
+.jv-pc-long {
+	padding: 4px 0;
+	border-bottom: 1px solid var(--border);
+}
+.jv-pc-long .jv-pc-body {
+	margin-top: 4px;
+	max-height: 320px;
+}
+/* sensitive update: a line diff of a multi-line value, the full texts behind it */
+.jv-pc-diffblock {
+	padding: 4px 0;
+}
+.jv-pc-diffnote {
+	margin-top: 2px;
+	color: var(--ink6);
+	font-size: 12px;
+}
+.jv-pc-difftable {
+	margin-top: 6px;
+}
+.jv-pc-diffblock > .jv-pc-body {
+	max-height: 320px;
+}
+.jv-pc-ldiff {
+	margin: 4px 0 0;
+	padding: 6px 0;
+	border-radius: 8px;
+	background: var(--card2);
+	font-family: ui-monospace, "SF Mono", Menlo, monospace;
+	font-size: 12px;
+	line-height: 1.5;
+	max-height: 320px;
+	overflow: auto;
+}
+.jv-pc-ldiff > span {
+	display: block;
+	padding: 0 10px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+.jv-pc-ld-add {
+	background: var(--green-bg, transparent);
+}
+.jv-pc-ld-del {
+	background: var(--red-bg, transparent);
+}
+.jv-pc-ld-gap {
+	color: var(--ink5);
 }
 .jv-pc-kv {
 	display: flex;

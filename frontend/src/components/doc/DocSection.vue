@@ -11,6 +11,7 @@
 		<button
 			v-if="collapsible"
 			type="button"
+			:aria-expanded="isOpened"
 			class="flex h-8 max-w-fit items-center gap-1.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-outline-gray-3"
 			@click="toggle"
 		>

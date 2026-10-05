@@ -9,9 +9,10 @@ commit). Execution itself lives in ``jarvis.chat.macros``.
 import re
 
 import frappe
-from frappe import _
+from frappe import _, _lt
 
 from jarvis.chat import list_filters
+from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import FORM_FLAG, join_words
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_skills as _step_skills
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_values as _step_values
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
@@ -319,30 +320,37 @@ def _holds_of(macro_names: list[str]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Notices: an admin deleted one of the caller's macros
+# Notices: an admin deleted one of the caller's macros, or handed one over
 # --------------------------------------------------------------------------- #
-# The subject every such Notification Log starts with: the one way to tell them from
+# The subjects such a Notification Log starts with: the one way to tell them from
 # the engine's other notices, since they name no document (``macros.notify_owner``:
 # Frappe deletes a notification that points at a record when the record goes).
 ADMIN_DELETE_NOTICE = "Macro deleted by an admin"
+# Both owners of a handed-over macro get one: the old owner's list no longer shows
+# the macro, and the new owner's shows it switched off with no word of why.
+ADMIN_HANDOVER_NOTICE = "Macro handed over by an admin"
+_NOTICE_KINDS = (ADMIN_DELETE_NOTICE, ADMIN_HANDOVER_NOTICE)
 _NOTICES_MAX = 20
 
 
 def _notice_filters(user: str) -> dict:
-	return {
-		"for_user": user,
-		"read": 0,
-		"subject": ["like", f"{list_filters.escape_like(ADMIN_DELETE_NOTICE)}:%"],
-	}
+	return {"for_user": user, "read": 0}
+
+
+def _notice_kinds() -> list:
+	"""``or_filters``: a subject that starts with one of the kinds above."""
+	return [["subject", "like", f"{list_filters.escape_like(kind)}:%"] for kind in _NOTICE_KINDS]
 
 
 def admin_notices(user: str) -> list[dict]:
-	"""The user's unread notices that an admin deleted one of their macros, newest
-	first: ``[{name, message, creation}]``. Neither client shows the notification
-	log, so the Macros list shows these, until dismissed (``dismiss_macro_notices``)."""
+	"""The user's unread notices of what an admin did to their macros (deleted one,
+	handed one over to or from them), newest first: ``[{name, message, creation}]``.
+	Neither client shows the notification log, so the Macros list shows these, until
+	dismissed (``dismiss_macro_notices``)."""
 	rows = frappe.get_all(
 		"Notification Log",
 		filters=_notice_filters(user),
+		or_filters=_notice_kinds(),
 		fields=["name", "email_content", "creation"],
 		order_by="creation desc",
 		limit=_NOTICES_MAX,
@@ -353,7 +361,7 @@ def admin_notices(user: str) -> list[dict]:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dismiss_macro_notices(names: str | list | None = None) -> dict:
-	"""Mark the caller's admin-delete notices read: those named, or all of them when
+	"""Mark the caller's admin notices read: those named, or all of them when
 	none are. Another user's notification, or one of another kind, is never touched:
 	the filter is the caller's own and the kind's own."""
 	refuse_in_tool_dispatch()
@@ -369,7 +377,7 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 	filters = _notice_filters(frappe.session.user)
 	if raw:
 		filters["name"] = ["in", raw]
-	marked = frappe.get_all("Notification Log", filters=filters, pluck="name")
+	marked = frappe.get_all("Notification Log", filters=filters, or_filters=_notice_kinds(), pluck="name")
 	for name in marked:
 		frappe.db.set_value("Notification Log", name, "read", 1, update_modified=False)
 	frappe.db.commit()
@@ -423,6 +431,7 @@ def get_macro(name: str) -> dict:
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	from jarvis.chat.macro_scheduler import is_retry_pending
 
+	hold = _hold_of(doc)
 	return {
 		"name": doc.name,
 		"macro_name": doc.macro_name,
@@ -445,7 +454,17 @@ def get_macro(name: str) -> dict:
 		"merge_status": doc.merge_status or "",
 		# An admin's hold (0 and "" on a site without the fields): the form shows the
 		# banner and keeps Run, Enabled, the schedule and the arm switch off.
-		**_hold_of(doc),
+		**hold,
+		# Whether this viewer may switch Skip confirmation on, why not, and what the
+		# form asks before it does: the server's to say (``_arming``).
+		**_arming(doc.owner, held=hold["admin_hold"]),
+		# An armed macro changes on its own page by its owner only: for anyone else the
+		# form keeps its steps, summary, schedule and Stop on error read-only, and says so.
+		"armed_locked_reason": (
+			_("Only the owner can change an armed macro.")
+			if frappe.utils.cint(doc.skip_confirmation) and frappe.session.user != doc.owner
+			else ""
+		),
 		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"last_run": _last_runs([doc.name], doc.owner).get(doc.name),
 		"steps": [
@@ -458,6 +477,81 @@ def get_macro(name: str) -> dict:
 			}
 			for s in (doc.steps or [])
 		],
+	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_new_macro_arming() -> dict:
+	"""``get_macro``'s arming keys for a macro the caller is about to create: the new
+	form has no macro to load, and the caller will be its owner."""
+	return _arming(frappe.session.user, held=0)
+
+
+# What an armed macro does without asking, and what still asks: one row per plain
+# phrase, naming the tools it stands for. Every tool of ``jarvis.api._COVERED`` and of
+# ``_BRAKE`` is in exactly one row of its table, and no other tool is: a test fails
+# when a gated tool is added, or moves, and the notice would no longer say what
+# arming lets through (``test_macro_owner_arming``).
+# Changing a skill asks too, whatever tool does it (``api._writes_a_skill``): the asks
+# row says so, under the one tool that only ever writes a skill.
+_ARM_NOTICE_SKIPS = (
+	(_lt("create, change and submit records"), ("create_doc", "create_docs", "update_doc", "submit_doc")),
+	(
+		_lt("add and change comments, tags and attachments"),
+		("add_comment", "update_comment", "add_tag", "remove_tag", "attach_to_doc"),
+	),
+	(_lt("update wiki pages"), ("update_wiki",)),
+	(
+		_lt("share and assign documents (and remove shares and assignments)"),
+		("share_doc", "assign_to", "unshare_doc", "unassign_from"),
+	),
+	(_lt("run workflow actions"), ("apply_workflow_action",)),
+	(_lt("send email"), ("send_email",)),
+	(_lt("run imports"), ("run_import",)),
+	(_lt("call server methods"), ("run_method",)),
+)
+_ARM_NOTICE_ASKS = (
+	(_lt("deleting, cancelling and amending records"), ("delete_doc", "cancel_doc", "amend_doc")),
+	(_lt("creating or changing skills"), ("create_custom_skill",)),
+	(_lt("calling connectors"), ("call_connector",)),
+)
+
+
+def arm_notice() -> str:
+	"""What the form asks the owner to confirm before it switches Skip confirmation on."""
+	skips = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_SKIPS])
+	asks = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_ASKS])
+	return _(
+		"This macro will {0} without asking you first, including when it runs on a schedule "
+		"with nobody watching. {1} still ask, and stop the run. Its steps can apply only "
+		"skills you own, or skills only a reviewer can change."
+	).format(skips, asks[:1].upper() + asks[1:])
+
+
+def _arming(owner: str, *, held) -> dict:
+	"""``can_arm``: whether the session user may switch Skip confirmation on for a
+	macro ``owner`` owns; ``arm_blocked_reason``: why not, "" when they may (a held
+	macro says nothing here: the form gives the hold's own reason); ``arm_notice``.
+
+	The controller's rule (``owner_may_arm``) and the hold decide it. The site's kill
+	switch (``Jarvis Settings.disable_armed_skip``) does not refuse a save, as before:
+	it stops every armed macro skipping its cards. The form is told, so nobody arms a
+	macro that would not skip anything."""
+	from jarvis.api import _armed_skip_disabled
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import owner_may_arm
+
+	reason = ""
+	if frappe.session.user != owner:
+		reason = _("Only the macro's owner can switch this on.")
+	elif not owner_may_arm(owner):
+		reason = _("Only a Jarvis Admin or System Manager can switch this on.")
+	elif _armed_skip_disabled():
+		reason = _("Skip confirmation is switched off for this whole site, so it would change nothing.")
+	return {
+		"can_arm": int(not reason and not frappe.utils.cint(held)),
+		"arm_blocked_reason": reason,
+		"arm_notice": arm_notice(),
 	}
 
 
@@ -506,7 +600,10 @@ def _schedule_block_reason(owner: str) -> str:
 	return ""
 
 
-@frappe.whitelist()
+# The macro form's two writers. POST only: a GET is not checked for the CSRF token,
+# and through them a cross-site link could create an armed, scheduled macro. Never
+# from inside a tool call: they are the one place arming happens (``FORM_FLAG``).
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def create_macro(
 	macro_name: str,
@@ -523,8 +620,9 @@ def create_macro(
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps, and the two schedule anchors'
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
-	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 0 -> 1) is
-	admin-gated in the doctype validate()."""
+	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 1) is the
+	owner's, here and in ``update_macro`` only (``JarvisMacro._guard_arming``)."""
+	refuse_in_tool_dispatch()
 	_refuse_schedule_for_barred_owner(frappe.session.user, schedule_enabled)
 	doc = frappe.get_doc(
 		{
@@ -542,6 +640,7 @@ def create_macro(
 			"steps": _parse_steps(steps),
 		}
 	)
+	doc.flags[FORM_FLAG] = True
 	doc.insert()
 	frappe.db.commit()
 	return {
@@ -550,7 +649,7 @@ def create_macro(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def update_macro(
 	name: str,
@@ -596,6 +695,7 @@ def update_macro(
 	after a real step change that left two or more steps, and not when the owner wrote
 	the summary in the same save. A summary that is empty or failed is not a reason:
 	that started a model call on every save of such a macro."""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate (save enforces too; explicit for clarity)
 	# The save below writes every column. On a document read before a summary was
@@ -610,7 +710,7 @@ def update_macro(
 	if stop_on_error is not None:
 		doc.stop_on_error = int(stop_on_error)
 	if skip_confirmation is not None:
-		# The doctype validate() admin-gates a 0 -> 1 transition; a non-admin flip raises.
+		# The doctype validate() allows a 0 -> 1 transition to the owner only.
 		doc.skip_confirmation = int(skip_confirmation)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled)
@@ -642,6 +742,7 @@ def update_macro(
 		# ``JarvisMacro._settle_summary_written_in_this_save``.
 		doc.merged_prompt = written
 	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
+	doc.flags[FORM_FLAG] = True
 	doc.save()
 	frappe.db.commit()
 	# An emptied summary is not one the owner wrote: with changed steps it is the same
@@ -709,7 +810,9 @@ def _refuse_busy_delete(macro_name: str, stopped: int):
 	frappe.throw(f"{said} {_('Delete it again.')}", MacroBusyError)
 
 
-@frappe.whitelist()
+# POST only (a GET is not checked for the CSRF token) and never from a tool call, like
+# the form's writers: each one changes a macro or one of its runs.
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_macro(name: str) -> dict:
 	"""Delete a macro row (owner-gated). Returns ``{"ok", "stopped_runs"}``.
@@ -770,9 +873,12 @@ def delete_macro(name: str) -> dict:
 	  that points at a name which no longer resolves: it is shown nowhere (the
 	  timeline it belonged to is gone) and nothing reads it. Sweeping eight tables
 	  on every macro delete for that is not worth the queries."""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
-	return delete_loaded_macro(doc)
+	out = delete_loaded_macro(doc)
+	out.pop("owner", None)  # theirs: the admin delete's notice is what reads it
+	return out
 
 
 def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
@@ -780,7 +886,11 @@ def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
 	that the session user may delete ``doc``: the owner's endpoint (the document
 	permission) and an admin's (``macros_admin_api.admin_delete``, the Jarvis Admin
 	role, with ``ignore_permissions`` because the document permission is the owner's
-	alone). One body, so both stop the live runs first and keep the month's rows."""
+	alone). One body, so both stop the live runs first and keep the month's rows.
+
+	``{ok, stopped_runs, owner}``: ``owner`` as read under the row lock the delete was
+	made under, the person the macro belonged to when it went (an admin's hand-over
+	can change it between the caller's read and this lock)."""
 	from jarvis.chat import macros
 
 	stopped = 0
@@ -795,11 +905,12 @@ def delete_loaded_macro(doc, *, ignore_permissions: bool = False) -> dict:
 			if macros.live_runs_of(doc.name):
 				frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
 				continue
+			owner = frappe.db.get_value(MACRO, doc.name, "owner")
 			macros.drop_runs_of_deleted_macro(doc.name)
 			# honors if_owner, unless the caller's own gate stands in for it
 			frappe.delete_doc(MACRO, doc.name, ignore_permissions=ignore_permissions)
 			frappe.db.commit()
-			return {"ok": True, "stopped_runs": stopped}
+			return {"ok": True, "stopped_runs": stopped, "owner": owner}
 		_refuse_busy_delete(doc.name, stopped)
 	except Exception as e:
 		e.stopped_runs = stopped
@@ -832,7 +943,7 @@ def _skip_reason(e: Exception) -> str:
 	return "error"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_macros_bulk(names: str | list | None = None) -> dict:
 	"""Bulk delete macros the caller OWNS (DESIGN-V3 §8.3 / D20). ``names`` is a
@@ -849,6 +960,7 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 	stops: that macro waited for run locks while holding the first one's row (the
 	lock order ``macros._lock_macro_row`` forbids), and its first commit then made
 	the half-done delete permanent (run history gone, macro still there)."""
+	refuse_in_tool_dispatch()
 	raw = frappe.parse_json(names) if isinstance(names, str) else (names or [])
 	items = [str(n) for n in raw if n] if isinstance(raw, list) else []
 	me = frappe.session.user
@@ -897,10 +1009,13 @@ def run_macro(name: str) -> dict:
 	return macros.run_macro(name, trigger="manual")
 
 
-@frappe.whitelist()
+# POST only (a GET is not checked for the CSRF token) and never from a tool call, like
+# the form's writers: each one changes a macro or one of its runs.
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def stop_macro_run(run: str) -> dict:
 	"""Stop an in-progress run (owner-gated)."""
+	refuse_in_tool_dispatch()
 	from jarvis.chat import macros
 
 	return macros.stop_macro_run(run)
@@ -1147,7 +1262,9 @@ def _delete_summary_chat(conversation: str, *, owned_by: str | None = None) -> N
 		frappe.db.rollback()
 
 
-@frappe.whitelist()
+# POST only (a GET is not checked for the CSRF token) and never from a tool call, like
+# the form's writers: each one changes a macro or one of its runs.
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def summarize_macro(name: str, force: int = 0) -> dict:
 	"""Kick off the merge: throwaway archived conversation + one agent turn
@@ -1171,6 +1288,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	has started, and never while its own turn is live (``_delete_summary_chat``); a
 	live one is left to run to its end, it is not cancelled. A new summary that could
 	not start gives nothing up (``_abandon_summary``)."""
+	refuse_in_tool_dispatch()
 	from jarvis.chat import macros
 
 	doc = frappe.get_doc(MACRO, name)
@@ -1187,7 +1305,15 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# and under the lock a save of this macro and the landing of a summary waited on
 	# it. Acted on below, before anything is created.
 	blocked = macros.entitlement_block(doc.owner, steps=1, trigger="manual")
+	asked_for = doc.owner
 	doc = _locked_for_writing(doc)
+	# Again on the row as it is now: an admin can hand the macro over while the
+	# entitlement was asked, and a summary of the old owner's would then start an agent
+	# turn as the new owner, on a macro the new owner was told arrives with none.
+	doc.check_permission("write")
+	macros.refuse_acting_for_barred_owner(doc.owner)
+	if doc.owner != asked_for:
+		frappe.throw(_("This macro changed hands. Reload it."), frappe.PermissionError)
 	if macros.is_held(doc):
 		# An admin's hold: the macro does nothing, and a summary is one agent turn.
 		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (

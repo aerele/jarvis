@@ -6,6 +6,8 @@ every trigger / activity / ToDo row created here is tracked and deleted in
 tearDown; no LLM/network calls anywhere on these paths.
 """
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -22,7 +24,7 @@ from jarvis.chat.triggers_api import (
 	test_trigger_condition,
 	update_trigger,
 )
-from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
+from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, ensure_jarvis_user_role
 from jarvis.triggers import engine
 
 TRIGGER = "Jarvis Trigger"
@@ -30,6 +32,18 @@ ACTIVITY = "Jarvis Trigger Activity"
 
 ADMIN_USER = "jarvis-trigger-admin@example.com"
 PLAIN_USER = "jarvis-trigger-user@example.com"
+# A Jarvis Admin who is NOT a System Manager: holds manage rights (so the
+# condition tester lets them in) but no blanket document read, so the named-doc
+# read check is still exercisable.
+JADMIN_USER = "jarvis-trigger-jadmin@example.com"
+# A Script-action trigger materializes a Server Script, so authoring one needs
+# the same rights as authoring a Server Script directly: Script Manager + the
+# Server Script create permission (System Manager). SCRIPT_USER holds both; the
+# plain System Manager (ADMIN_USER) deliberately does NOT hold Script Manager.
+SCRIPT_USER = "jarvis-trigger-scriptmgr@example.com"
+# The controller imports is_safe_exec_enabled at module scope, so patch it there
+# to let Script triggers validate on a bench without server_script_enabled.
+_CTRL = "jarvis.jarvis.doctype.jarvis_trigger.jarvis_trigger"
 
 
 def _ensure_user(email: str, roles: list[str]) -> None:
@@ -56,6 +70,8 @@ class _TriggersApiTestCase(FrappeTestCase):
 		ensure_jarvis_user_role()
 		_ensure_user(ADMIN_USER, ["System Manager"])
 		_ensure_user(PLAIN_USER, [JARVIS_USER_ROLE])
+		_ensure_user(JADMIN_USER, [JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE])
+		_ensure_user(SCRIPT_USER, ["System Manager", "Script Manager"])
 		self._orig_user = frappe.session.user
 		self._triggers: list[str] = []
 		self._activities: list[str] = []
@@ -248,19 +264,22 @@ class TestTriggerList(_TriggersApiTestCase):
 
 
 class TestConditionTester(_TriggersApiTestCase):
+	# The tester evaluates a caller-supplied expression server-side, so it is
+	# manage-gated like create/update/delete (Jarvis Admin / System Manager).
+	# Legitimate use therefore runs as a manage-capable user, not a plain one.
 	def test_happy_path(self):
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("ToDo", 'doc.status == "Open"')
 		self.assertEqual(r["data"], {"valid": True})
 
 	def test_invalid_expression_is_a_payload_not_a_500(self):
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("ToDo", "doc.status ==")
 		self.assertFalse(r["data"]["valid"])
 		self.assertTrue(r["data"]["error"])
 
 	def test_unknown_doctype_throws(self):
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		self.assertRaises(frappe.ValidationError, test_trigger_condition, "No Such Doctype Zzz", "True")
 
 	def test_would_fire_against_named_doc(self):
@@ -273,7 +292,7 @@ class TestConditionTester(_TriggersApiTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self._todos.append(todo.name)
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("ToDo", 'doc.status == "Open"', docname=todo.name)
 		self.assertTrue(r["data"]["valid"])
 		self.assertTrue(r["data"]["would_fire"])
@@ -281,8 +300,10 @@ class TestConditionTester(_TriggersApiTestCase):
 		self.assertFalse(r["data"]["would_fire"])
 
 	def test_named_doc_requires_read_permission(self):
-		# A ToDo belonging to someone else: plain users only read ToDos they
-		# own or are assigned (frappe.desk.doctype.todo has_permission).
+		# A ToDo belonging to someone else. A Jarvis Admin has manage rights (so
+		# they clear the manage gate) but no blanket read: ToDo read is scoped to
+		# owned/assigned rows (frappe.desk.doctype.todo has_permission), so the
+		# named-doc read check must still refuse them.
 		foreign = frappe.get_doc(
 			{
 				"doctype": "ToDo",
@@ -291,7 +312,7 @@ class TestConditionTester(_TriggersApiTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self._todos.append(foreign.name)
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(JADMIN_USER)
 		self.assertRaises(
 			frappe.PermissionError,
 			test_trigger_condition,
@@ -299,6 +320,95 @@ class TestConditionTester(_TriggersApiTestCase):
 			"True",
 			foreign.name,
 		)
+
+	def test_plain_jarvis_user_is_refused(self):
+		# The reported escalation (#1): a plain Jarvis User must not reach the
+		# tester at all — it is manage-gated before any evaluation happens.
+		frappe.set_user(PLAIN_USER)
+		self.assertRaises(
+			frappe.PermissionError,
+			test_trigger_condition,
+			"ToDo",
+			'doc.status == "Open"',
+		)
+
+	def test_plain_user_condition_cannot_write_to_any_table(self):
+		# Replay of the reported exploit as a plain Jarvis User: the condition
+		# inserts a `Has Role` row granting System Manager. Two layers must hold —
+		# the manage gate refuses the caller, and even if it were reached the
+		# methodless `_dict` view has no `db_insert`. Assert both: PermissionError,
+		# and no role row was written for the sentinel principal.
+		sentinel = "trigger-exploit-sentinel@example.invalid"
+		exploit = (
+			'[doc.update({"parent": "%s", "parenttype": "User", '
+			'"parentfield": "roles", "role": "System Manager"}), doc.db_insert()]' % sentinel
+		)
+		before = frappe.db.count("Has Role", {"parent": sentinel})
+		frappe.set_user(PLAIN_USER)
+		self.assertRaises(
+			frappe.PermissionError,
+			test_trigger_condition,
+			"Has Role",
+			exploit,
+		)
+		frappe.set_user(self._orig_user)
+		self.assertEqual(frappe.db.count("Has Role", {"parent": sentinel}), before)
+
+	def test_manage_user_condition_cannot_call_document_methods(self):
+		# Defense in depth: even a manage-capable caller who reaches the tester
+		# cannot use the condition to write, because it evaluates against a
+		# methodless view (_ConditionDoc), not a live Document. `doc.update` and
+		# `doc.db_insert` are not fields, so they raise AttributeError; the call is
+		# a plain invalid-condition payload and nothing is persisted.
+		sentinel = "trigger-exploit-sentinel-admin@example.invalid"
+		exploit = (
+			'[doc.update({"parent": "%s", "parenttype": "User", '
+			'"parentfield": "roles", "role": "System Manager"}), doc.db_insert()]' % sentinel
+		)
+		before = frappe.db.count("Has Role", {"parent": sentinel})
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("Has Role", exploit)
+		self.assertTrue(r["ok"])  # a payload, never a 500
+		self.assertFalse(r["data"]["valid"])
+		frappe.set_user(self._orig_user)
+		self.assertEqual(frappe.db.count("Has Role", {"parent": sentinel}), before)
+
+	def test_unknown_field_is_reported_not_silently_valid(self):
+		# A mistyped field must be flagged, not silently resolve to None (which
+		# would let a broken condition read as valid and then never fire).
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("ToDo", 'doc.statuss == "Open"')
+		self.assertFalse(r["data"]["valid"])
+		self.assertIn("does not exist", r["data"]["error"])
+
+	def test_child_table_field_is_reachable(self):
+		# The methodless view must still resolve child-table rows so a real
+		# condition like doc.<child>[0].<field> behaves as it does at fire time.
+		# A plain frappe._dict would shadow a child table named like a dict method
+		# (e.g. `items`), breaking doc.items[0].qty on transaction doctypes; the
+		# wrapper resolves the field instead.
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("User", 'doc.roles[0].role != ""', docname=ADMIN_USER)
+		self.assertTrue(r["data"]["valid"])
+		self.assertTrue(r["data"]["would_fire"])
+
+	def test_error_text_does_not_echo_field_values(self):
+		# `{}[doc.<field>]` raises KeyError(<value>); the friendly error must not
+		# echo that value back (it would be a read oracle). Use a named doc so the
+		# field has a real value, and assert the value is absent from the message.
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "leak-canary-value-12345",
+				"allocated_to": ADMIN_USER,
+				"status": "Open",
+			}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("ToDo", "{}[doc.description]", docname=todo.name)
+		self.assertFalse(r["data"]["valid"])
+		self.assertNotIn("leak-canary-value-12345", r["data"]["error"])
 
 
 class TestActivityFeed(_TriggersApiTestCase):
@@ -371,3 +481,71 @@ class TestActivityFeed(_TriggersApiTestCase):
 		self.assertIn("total_rows", data)
 		self.assertGreaterEqual(data["last_24h"]["Success"], 1)
 		self.assertGreaterEqual(data["last_24h"]["Failed"], 1)
+
+
+class TestScriptActionAuthoring(_TriggersApiTestCase):
+	"""A Script-action trigger runs a Server Script with full privileges, so it
+	must require Script-Manager authoring rights (issue #13) - the managed sync's
+	ignore_permissions/ignore_validate must not become a way around core's
+	only_for("Script Manager")."""
+
+	def _script_draft(self, **overrides):
+		fields = {
+			"doctype": TRIGGER,
+			"trigger_name": f"script-{frappe.generate_hash(length=8)}",
+			"target_doctype": "ToDo",
+			"doc_event": "on_update",
+			"action_type": "Script",
+			"script_body": "x = 1",
+		}
+		fields.update(overrides)
+		return frappe.get_doc(fields)
+
+	def test_system_manager_without_script_manager_is_refused(self):
+		# A System Manager who lacks Script Manager cannot author a Script action,
+		# and no managed Server Script is created.
+		before = frappe.db.count("Server Script")
+		frappe.set_user(ADMIN_USER)
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			self.assertRaises(frappe.PermissionError, self._script_draft().insert)
+		frappe.set_user(self._orig_user)
+		self.assertEqual(frappe.db.count("Server Script"), before)
+
+	def test_script_manager_may_author(self):
+		# Script Manager + Server Script create permission: allowed, and the
+		# managed Server Script is materialized.
+		frappe.set_user(SCRIPT_USER)
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = self._script_draft()
+			doc.insert()
+		self._triggers.append(doc.name)
+		self.assertTrue(doc.server_script)
+		self.assertTrue(frappe.db.exists("Server Script", doc.server_script))
+
+	def test_llm_action_is_unaffected(self):
+		# The gate is Script-action-only: a manage user without Script Manager can
+		# still author LLM triggers.
+		frappe.set_user(ADMIN_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": TRIGGER,
+				"trigger_name": f"llm-{frappe.generate_hash(length=8)}",
+				"target_doctype": "ToDo",
+				"doc_event": "on_update",
+				"action_type": "LLM",
+				"llm_instruction": "check",
+			}
+		)
+		doc.insert()
+		self._triggers.append(doc.name)
+		self.assertEqual(doc.action_type, "LLM")
+
+	def test_system_save_is_not_blocked(self):
+		# System / programmatic saves (ignore_permissions) must still work, e.g. a
+		# patch or fixture materialising a Script trigger with no user in context.
+		frappe.set_user(ADMIN_USER)  # no Script Manager, but ignore_permissions set
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = self._script_draft()
+			doc.insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		self.assertTrue(frappe.db.exists(TRIGGER, doc.name))

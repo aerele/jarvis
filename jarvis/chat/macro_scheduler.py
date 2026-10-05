@@ -33,6 +33,7 @@ from frappe.utils.user import get_users_with_role
 
 from jarvis.chat.macros import (
 	BLOCK_DISPATCH_FAILED,
+	BLOCK_MACRO_CHANGED_OWNER,
 	BLOCK_MACRO_DELETED,
 	BLOCK_MACRO_HELD,
 	BLOCK_STEP_BUDGET,
@@ -269,9 +270,9 @@ def _settle(m, now, out: dict, claimed) -> None:
 		_stamp_last_run(m, now)
 		return
 	reason = str(out.get("reason") or "").strip()
-	if reason in ("macro disabled", BLOCK_MACRO_DELETED, BLOCK_MACRO_HELD):
-		# Raced: disabled, deleted or put on hold, between the due query and the
-		# dispatch. Same handling as the pre-dispatch branch: no failure, nothing ran,
+	if reason in ("macro disabled", BLOCK_MACRO_DELETED, BLOCK_MACRO_HELD, BLOCK_MACRO_CHANGED_OWNER):
+		# Raced: disabled, deleted, put on hold or handed to someone else, between the
+		# due query and the dispatch. Same handling as the pre-dispatch branch: no failure, nothing ran,
 		# nothing stamped.
 		return
 	sentence = _BLOCK_SENTENCE.get(reason) or f"Scheduled run was refused: {reason or 'unknown'}."

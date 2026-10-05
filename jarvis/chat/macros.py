@@ -108,6 +108,10 @@ BLOCK_MACRO_DELETED = "macro deleted"
 # (``macros_admin_api.admin_hold``): the slot is consumed as for a disabled macro,
 # with no failed run.
 BLOCK_MACRO_HELD = "macro on hold"
+# Reported to the scheduler when the macro's owner is not the one the sweep is
+# running it as: an admin handed it over after the slot was claimed. Nothing ran, and
+# it is not the old owner's failure to be told about.
+BLOCK_MACRO_CHANGED_OWNER = "macro changed owner"
 
 # #471: reported when the first turn's dispatch RAISED after the conversation and run
 # row were already committed. Distinct from the codes above because the run row exists
@@ -354,6 +358,15 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		frappe.db.commit()
 		return {"ok": False, "reason": BLOCK_MACRO_DELETED}
 	doc = frappe.get_doc(MACRO, macro_name)  # DoesNotExistError: deleted meanwhile
+	if trigger == "scheduled" and frappe.session.user not in (doc.owner, "Administrator"):
+		# Before the permission check, as the deleted case above: the sweep claimed the
+		# slot as the owner it read, and an admin's hand-over can commit before this
+		# lock. The permission check would then fail as the old owner, and the sweep
+		# record a failed run and tell them about a macro that is not theirs. Settled
+		# quietly; a run by hand keeps its refusal below. (A macro that is merely off
+		# is still the owner's: its quiet return below comes after the checks.)
+		frappe.db.commit()  # nothing written: this releases the macro row lock
+		return {"ok": False, "reason": BLOCK_MACRO_CHANGED_OWNER}
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
 	# them), uncarded when the macro is armed. On read alone, anyone who could only
@@ -463,11 +476,11 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		for dt, name in ((CONV, conv.name), (MSG, intro.name), (RUN, run.name)):
 			frappe.db.set_value(dt, name, "owner", owner, update_modified=False)
 	# Arm the run conversation when the macro is armed (doc.skip_confirmation, set
-	# only by a Jarvis Admin - guarded on the macro controller). Stamped via a raw
-	# db.set_value, the File-Box pattern that bypasses the conversation controller's
-	# admin guard: the value derives from the already-admin-gated macro flag, so a
-	# re-check would just refuse a legitimate non-admin owner running their own armed
-	# macro. The gate reads THIS conversation flag; the conversation is human-inert
+	# only by its owner on the macro form - guarded on the macro controller). Stamped
+	# via a raw db.set_value, the File-Box pattern that bypasses the conversation
+	# controller's admin guard: the value derives from the already-guarded macro flag,
+	# so a re-check would just refuse a legitimate non-admin owner running their own
+	# armed macro. The gate reads THIS conversation flag; the conversation is human-inert
 	# while set (send_message / retry_message are blocked, T4), so only macro-step
 	# turns ever run on it. Cleared on every run-terminal transition (T5).
 	if doc.skip_confirmation:
@@ -600,7 +613,9 @@ def _card_label(parked: dict) -> str:
 	return label.translate(_MARKDOWN).strip()
 
 
-def _card_stop_message(current_step: int, total: int, parked: dict, *, scheduled: bool) -> str:
+def _card_stop_message(
+	current_step: int, total: int, parked: dict, *, scheduled: bool, asked_for_a_skill: bool = False
+) -> str:
 	"""Why an UNARMED run ended at a step when a confirmation card was waiting.
 
 	The card is the user's to answer, so it is left alone (an armed run sweeps its
@@ -620,10 +635,13 @@ def _card_stop_message(current_step: int, total: int, parked: dict, *, scheduled
 	text += " You can still confirm or discard it there."
 	if step < total:
 		text += " The steps after it did not run, and confirming it will not resume them."
-	if scheduled:
+	if asked_for_a_skill:
+		# Its macro skips confirmation, and the run asked anyway: a step applied a skill
+		# another user can change (``_ask_for_skills_outside_control``).
+		text += " It asked because a step applies a skill another user can still change."
+	elif scheduled:
 		text += (
-			" To let this macro run without stopping here, ask an administrator to"
-			" switch on Skip confirmation for it."
+			" To let this macro run without stopping here, switch on Skip confirmation on the macro's page."
 		)
 	return text[:500]
 
@@ -1144,12 +1162,12 @@ def _step_turns(conversation: str) -> list:
 
 
 _DRAFT_GONE_HINT = (
-	"To create it, run that step again in a chat, or ask an administrator to switch on "
-	"Skip confirmation so the macro writes directly."
+	"To create it, run that step again in a chat, or switch on Skip confirmation on the "
+	"macro's page so the macro writes directly."
 )
 _DRAFTS_GONE_HINT = (
-	"To create them, run those steps again in a chat, or ask an administrator to switch on "
-	"Skip confirmation so the macro writes directly."
+	"To create them, run those steps again in a chat, or switch on Skip confirmation on the "
+	"macro's page so the macro writes directly."
 )
 
 
@@ -1177,7 +1195,7 @@ def _draft_note(drafted: list[int], last_step: int) -> str:
 	return " ".join(parts)
 
 
-def _listed(numbers: list[int]) -> str:
+def _listed(numbers: list) -> str:
 	if len(numbers) == 1:
 		return str(numbers[0])
 	return ", ".join(str(n) for n in numbers[:-1]) + f" and {numbers[-1]}"
@@ -1421,6 +1439,7 @@ def _apply_step_end(
 				total,
 				parked,
 				scheduled=(run.get("trigger") or "") == "scheduled",
+				asked_for_a_skill=_asked_for_a_skill(run.name),
 			),
 		)
 		return
@@ -2217,6 +2236,7 @@ def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	if _step_is_out(run, index):
 		return _step_already_out(run, index)
 	prompt, overrides = _step_prompt(run, macro_doc, index)
+	prompt = _ask_for_skills_outside_control(run, macro_doc, index, prompt)
 	out = _send_step(run, index, prompt, overrides)
 	if isinstance(out, dict) and out.get("overloaded"):
 		# Parked, unless another dispatcher got the step's turn while this one was
@@ -2243,6 +2263,180 @@ def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	except Exception:
 		pass  # a progress event is a courtesy; the step is already running
 	return _STEP_SENT
+
+
+def _ask_for_skills_outside_control(run, macro_doc, index: int, prompt: str) -> str:
+	"""An early notice: an armed run's step whose prompt names a skill its owner does
+	not control (``skill_permissions.controlled_by``) runs asking. The run's
+	conversation is disarmed before the step goes out, so its writes park their cards
+	and the run stops at the first one, as an unarmed run does, and the step's message
+	says why. Every ``/slug`` in the prompt counts, the tagged ones and any typed,
+	judged by the row ``get_skill`` would serve the owner (``skills_outside_control``).
+
+	Not the guarantee: the agent may fetch a skill the prompt does not name (by its
+	name in prose, from inside another skill), and sharing can change between here
+	and the fetch. ``check_a_fetched_skill`` judges the row at the fetch.
+
+	A step parked for capacity after its disarm is sent again by the resume, on a
+	conversation already disarmed: the disarm is recorded on the run, so that send
+	carries the same note."""
+	recorded = _recorded_skill_disarm(run.name, index + 1)
+	if recorded:
+		return prompt + "\n\n" + recorded
+	if not frappe.db.get_value(CONV, run.conversation, "skip_confirmation"):
+		return prompt
+	from jarvis.chat.skill_permissions import prompt_slugs, skills_outside_control
+
+	foreign = skills_outside_control(macro_doc.owner, slugs=prompt_slugs(prompt))
+	if not foreign:
+		return prompt
+	return prompt + "\n\n" + _disarm_for_skills(run.conversation, run.name, index + 1, foreign)
+
+
+def check_a_fetched_skill(conversation: str, skill_name) -> str:
+	"""The guarantee that an armed run follows only skills its owner controls, made
+	where a skill's text is served (``api._run_tool``, tool ``get_skill``): when the
+	conversation is armed, read fresh, and the row ``get_skill`` serves for
+	``skill_name`` is one the macro's owner does not control, the conversation is
+	disarmed and committed before the body goes back. The gate reads the flag on every
+	tool call, so each write after this one in the same turn parks its card.
+
+	Returns the note for the agent ("" when nothing changed)."""
+	armed = armed_skill_owner(conversation)
+	if not armed:
+		return ""
+	from jarvis.chat.skill_permissions import controlled_by, served_row
+
+	run, owner = armed
+	# The row served is the session user's; in a run that is the owner.
+	foreign = set()
+	for user in {owner, frappe.session.user}:
+		row = served_row(str(skill_name or ""), user)
+		if row is not None and not controlled_by(row, owner):
+			foreign.add(row.skill_name)
+	return _disarm_for_read_skills(conversation, run, foreign)
+
+
+def check_skill_rows_read(conversation: str, skills_read) -> str:
+	"""``check_a_fetched_skill`` for a skill read as a record (``get_doc``,
+	``get_list`` and every other read tool naming a skill doctype, ``api._run_tool``):
+	when the conversation is armed and any of the skills read is one the macro's owner
+	does not control, it is disarmed and committed before the rows go back.
+	``skills_read()``, called only when it is armed, gives their docnames, or None for
+	a read whose rows cannot be told apart: that is judged on every skill the session
+	user can read.
+
+	Returns the note for the agent ("" when nothing changed)."""
+	armed = armed_skill_owner(conversation)
+	if not armed:
+		return ""
+	names = skills_read()
+	if names is not None and not names:
+		return ""
+	from jarvis.chat.skill_permissions import SKILL, controlled_by
+
+	run, owner = armed
+	fields = ["skill_name", "owner", "scope"]
+	if names is None:
+		rows = frappe.get_list(SKILL, fields=fields, limit_page_length=0)
+	else:
+		rows = frappe.get_all(SKILL, filters={"name": ["in", sorted(set(names))]}, fields=fields)
+	return _disarm_for_read_skills(
+		conversation, run, {row.skill_name for row in rows if not controlled_by(row, owner)}
+	)
+
+
+def armed_skill_owner(conversation: str | None):
+	"""``(run, owner)`` when ``conversation`` is armed, read fresh, else None: the
+	latest run in it (None in a chat armed by hand) and the user whose control a skill
+	is judged by, the macro's owner (the chat's owner without a run). One query when
+	it is not armed."""
+	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		return None
+	run = frappe.db.get_value(
+		RUN,
+		{"conversation": conversation},
+		["name", "macro", "current_step"],
+		as_dict=True,
+		order_by="creation desc",
+	)
+	owner = (run and frappe.db.get_value(MACRO, run.macro, "owner")) or frappe.db.get_value(
+		CONV, conversation, "owner"
+	)
+	return run, owner
+
+
+def _disarm_for_read_skills(conversation: str, run, foreign: set) -> str:
+	"""``_disarm_for_skills`` at the step in flight, for skills read mid-turn."""
+	if not foreign:
+		return ""
+	step = max(frappe.utils.cint(run.current_step), 1) if run else 0
+	return _disarm_for_skills(conversation, run.name if run else None, step, sorted(foreign))
+
+
+def _disarm_for_skills(conversation: str, run_name: str | None, step: int, skills: list) -> str:
+	"""Disarm ``conversation`` from ``step`` on, record why on its run, commit, and
+	return the note. Committed here: a step's send rolls back and retries after a lost
+	lock race (``_send_step``), and that must not bring the arm back.
+
+	To the end of the run, not for one step: nothing arms a conversation again
+	mid-run (``run_macro`` stamps it once), and while it is disarmed its owner may
+	type into it, so a message of theirs could run armed."""
+	note = _FOREIGN_SKILLS_NOTE.format(skills=_listed([f"/{slug}" for slug in skills]))
+	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
+	if run_name:
+		frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Info",
+				"reference_doctype": RUN,
+				"reference_name": run_name,
+				"subject": f"{_SKILL_DISARM_SUBJECT}{step}",
+				"content": note,
+			}
+		).insert(ignore_permissions=True)
+	frappe.db.commit()
+	return note
+
+
+def _recorded_skill_disarm(run_name: str, step: int) -> str:
+	"""The note of a disarm recorded at ``step`` of the run, or ""."""
+	return (
+		frappe.db.get_value(
+			"Comment",
+			{
+				"reference_doctype": RUN,
+				"reference_name": run_name,
+				"subject": f"{_SKILL_DISARM_SUBJECT}{step}",
+			},
+			"content",
+		)
+		or ""
+	)
+
+
+# Read by the owner in the run's chat and by the agent (the step's message, or the
+# fetched skill's result): its writes ask from here on.
+_FOREIGN_SKILLS_NOTE = (
+	"(Skip confirmation is off from this step on: it applies {skills}, which another user can "
+	"still change, so its changes ask for confirmation first.)"
+)
+# The run's record of a disarm (a Comment on the run, so no new column): one per step.
+_SKILL_DISARM_SUBJECT = "skill-disarm:step-"
+
+
+def _asked_for_a_skill(run_name: str) -> bool:
+	"""Whether this run was disarmed because of a skill (``_disarm_for_skills``)."""
+	return bool(
+		frappe.db.exists(
+			"Comment",
+			{
+				"reference_doctype": RUN,
+				"reference_name": run_name,
+				"subject": ["like", f"{_SKILL_DISARM_SUBJECT}%"],
+			},
+		)
+	)
 
 
 def _send_step(run, index: int, prompt: str, overrides: dict):
