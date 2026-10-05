@@ -364,19 +364,29 @@ def _missed_before(conversation: str, items: list[dict], needs_input: list[dict]
 def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 	"""Tries once: True when one of ``keys`` was already seen. Records them for an
 	hour; a lost key just gives one more try, and a cache failure reads as seen
-	(never an endless retry loop). Raw ``get`` / ``set``: the wrappers
-	(``get_value``, ``exists``, ...) read an outage as a miss."""
-	keys = {frappe.cache.make_key(k) for k in keys}
+	(never an endless retry loop). ``set_value`` swallows an outage, so the write is
+	read back past the request-local copy: a key that did not land counts as seen."""
+	keys = {_seen_key(k) for k in keys}
 	try:
-		# Keys are site-scoped by make_key above.
-		# nosemgrep: frappe-cache-breaks-multitenancy
-		seen = any(frappe.cache.get(k) is not None for k in keys)
+		seen = any(frappe.cache.get_value(k, expires=True) is not None for k in keys)
 		for k in keys:
-			frappe.cache.set(k, 1, ex=MISS_TTL_S)  # nosemgrep: frappe-cache-breaks-multitenancy
+			frappe.cache.set_value(k, 1, expires_in_sec=MISS_TTL_S)
+		if all(frappe.cache.get_value(k, expires=True, use_local_cache=False) is not None for k in keys):
+			return seen
+		message = "the cache did not keep the write (Redis unavailable?)"
 	except Exception:
-		frappe.log_error(title=f"jarvis.file_box.{event}", message=frappe.get_traceback())
-		return True
-	return seen
+		message = frappe.get_traceback()
+	frappe.log_error(title=f"jarvis.file_box.{event}", message=message)
+	return True
+
+
+def forget_seen(key: str) -> None:
+	"""Give ``key`` a fresh try."""
+	frappe.cache.delete_value(_seen_key(key))
+
+
+def _seen_key(key: str) -> str:
+	return f"{key}:seen"
 
 
 def parse_needs_input(value) -> list[dict]:

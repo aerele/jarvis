@@ -118,13 +118,12 @@ class TestAfterCallTriggers(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# request: debounce (NX) + dedupe (job_id)
+# request: debounce (cache window) + dedupe (job_id)
 # --------------------------------------------------------------------------- #
 class TestRequestDebounce(unittest.TestCase):
 	def test_first_caller_enqueues_immediately_with_dedupe(self):
 		fake = _fake_frappe()
-		fake.cache.return_value.set.return_value = True  # NX claim won
-		fake.cache.return_value.make_key.side_effect = lambda k: f"site|{k}"
+		fake.cache.get_value.return_value = None  # no claim in the window yet
 		with mock.patch.object(refresh, "frappe", fake):
 			self.assertTrue(refresh.request("conn-1"))
 		fake.enqueue.assert_called_once()
@@ -140,21 +139,21 @@ class TestRequestDebounce(unittest.TestCase):
 
 	def test_second_caller_in_window_does_not_enqueue(self):
 		fake = _fake_frappe()
-		fake.cache.return_value.set.return_value = None  # NX claim lost (key present)
-		fake.cache.return_value.make_key.side_effect = lambda k: f"site|{k}"
+		fake.cache.get_value.return_value = 1  # claimed earlier in the window
 		with mock.patch.object(refresh, "frappe", fake):
 			self.assertFalse(refresh.request("conn-1"))
 		fake.enqueue.assert_not_called()
+		fake.cache.set_value.assert_not_called()
 
-	def test_debounce_key_uses_set_nx_with_the_window(self):
+	def test_claim_is_a_site_scoped_cache_value_for_the_window(self):
 		fake = _fake_frappe()
-		fake.cache.return_value.set.return_value = True
-		fake.cache.return_value.make_key.side_effect = lambda k: k
+		fake.cache.get_value.return_value = None
 		with mock.patch.object(refresh, "frappe", fake):
 			refresh.request("conn-1")
-		_, set_kwargs = fake.cache.return_value.set.call_args
-		self.assertTrue(set_kwargs["nx"])
-		self.assertEqual(set_kwargs["ex"], refresh.DEBOUNCE_S)
+		# The wrapper API scopes the key to the site; the window is its expiry.
+		fake.cache.set_value.assert_called_once_with(
+			refresh._debounce_key("conn-1"), 1, expires_in_sec=refresh.DEBOUNCE_S
+		)
 
 	def test_job_id_is_colon_free(self):
 		self.assertNotIn(":", refresh._job_id("conn-1"))

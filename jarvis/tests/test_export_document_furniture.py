@@ -41,6 +41,29 @@ from jarvis.tools._export.document.furniture import render_pdf, resolve_letterhe
 _HAS_SITE = bool(getattr(frappe.local, "site", None))
 
 
+class TestCompanyPlaceholders(unittest.TestCase):
+	def test_plain_placeholders_are_filled_and_escaped(self):
+		company = {"company_name": "A & B <Ltd>", "phone_no": 42}
+		out = furniture._fill_company_placeholders(
+			"<p>{{ doc.company_name }} | {{company.phone_no}}</p>", company
+		)
+		self.assertEqual(out, "<p>A &amp; B &lt;Ltd&gt; | 42</p>")
+
+	def test_other_jinja_is_dropped_never_evaluated(self):
+		raw = (
+			"<p>{% if doc.phone_no %}Call{% endif %}{{ doc.company_name | upper }}"
+			"{{ frappe.get_all('User') }}{# note #}{{ ''.__class__ }} Address</p>"
+		)
+		out = furniture._fill_company_placeholders(raw, {"company_name": "Demo"})
+		self.assertEqual(out, "<p>Call Address</p>")
+
+	def test_missing_or_non_scalar_fields_fill_blank(self):
+		out = furniture._fill_company_placeholders(
+			"{{ doc.nope }}|{{ doc.accounts }}", {"accounts": [{"account": "x"}]}
+		)
+		self.assertEqual(out, "|")
+
+
 class TestCompanyFooterPermissions(unittest.TestCase):
 	def test_denied_company_or_letterhead_never_reads_footer(self):
 		for denied in ("Company", "Letter Head"):
@@ -65,11 +88,14 @@ class TestCompanyFooterPermissions(unittest.TestCase):
 			patch.object(frappe, "has_permission", return_value=True) as perm,
 			patch.object(frappe, "db", new=Mock()) as db,
 			patch.object(frappe, "get_doc", return_value={"company_name": "Demo Co"}),
-			patch.object(frappe, "render_template", return_value="<p>Approved footer</p>"),
+			patch.object(frappe, "render_template", side_effect=AssertionError("no template is run")),
 		):
-			db.get_value.return_value = {"footer": "<p>Approved footer</p>", "disabled": 0}
+			db.get_value.return_value = {
+				"footer": "<p>{{ doc.company_name }} - Approved footer</p>",
+				"disabled": 0,
+			}
 			body, note = furniture.resolve_company_letterhead_footer({"Demo Co": "Demo LH"}, "Demo Co")
-			self.assertIn("Approved footer", body)
+			self.assertIn("Demo Co - Approved footer", body)
 			self.assertIsNone(note)
 			self.assertEqual(perm.call_count, 2)
 			perm.assert_any_call("Company", "read", doc="Demo Co")

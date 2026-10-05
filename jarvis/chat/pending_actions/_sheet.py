@@ -8,7 +8,6 @@ transaction holds its naming-series rows until it commits."""
 
 from __future__ import annotations
 
-import pickle
 from collections import deque
 from contextlib import contextmanager
 
@@ -1071,13 +1070,13 @@ def _progress(
 	from jarvis.chat import events
 
 	if state == "applying":
-		value = pickle.dumps({"done": done, "total": total})
+		key = _progress_key(row.name)
 		try:
-			key = frappe.cache.make_key(_progress_key(row.name))
-			# Raw SET for nx; the key is site-scoped by make_key.
-			# nosemgrep: frappe-cache-breaks-multitenancy
-			if not frappe.cache.set(key, value, ex=PROGRESS_TTL_S, nx=first):
+			# A job step landing between this check and the write only shows 0/N
+			# until its next step.
+			if first and frappe.cache.get_value(key, expires=True) is not None:
 				return
+			frappe.cache.set_value(key, {"done": done, "total": total}, expires_in_sec=PROGRESS_TTL_S)
 		except Exception:
 			pass
 	payload = {

@@ -12,9 +12,11 @@ import statistics
 import threading
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
+from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import (
 	approvals_api,
@@ -1523,3 +1525,16 @@ class TestTiming(_ApplyBase):
 				f"n={n} preflight={preflight:.1f}s job={total:.1f}s per-record p50={statistics.median(took) * 1000:.0f}ms"
 			)
 		print("\nSHEET APPLY TIMING: " + " | ".join(report))
+
+
+class TestProgressValue(FrappeTestCase):
+	def test_opening_progress_never_overwrites_the_jobs(self):
+		row = SimpleNamespace(
+			name=f"zz-progress-{frappe.generate_hash(length=8)}", owner_user=None, conversation=None
+		)
+		self.addCleanup(_sheet._clear_progress, row.name)
+		_sheet._progress(row, None, 1, 2)
+		_sheet._progress(row, None, 0, 2, first=True)
+		self.assertEqual(_sheet.progress(row.name), {"done": 1, "total": 2})
+		_sheet._progress(row, None, 2, 2)
+		self.assertEqual(_sheet.progress(row.name), {"done": 2, "total": 2})
