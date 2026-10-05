@@ -150,11 +150,11 @@ def load_doc(doctype: str, name: str) -> dict:
 @require_jarvis_user
 def draft_computed(action: dict | str | None = None) -> dict:
 	"""What ERPNext computes for a create card's rows (item amounts, tax totals) that
-	the model leaves blank (#647). The values are set on an UNSAVED document with the
-	same checks as the write, and ERPNext's own calculation runs on it, as Desk's form
-	does while you type: nothing is inserted, so no document hook, trigger or Server
-	Script runs for a card that is only being shown. Only a doctype ERPNext totals
-	(``calculate_taxes_and_totals``) is computed; only the requested read-only
+	the model leaves blank (#647). The card's values are set on an UNSAVED document
+	(same checks as the write) and only ERPNext's totals arithmetic runs on them, as
+	Desk's form recomputes while you type: nothing is inserted or saved, so no
+	document hook, trigger or Server Script runs for a card that is only being shown.
+	Only a doctype ERPNext totals is computed; only the requested read-only
 	``columns`` (``{table field: [fieldnames]}``) come back, after permlevel masking.
 	Any refusal or failure is ``{"ok": False}`` and the card keeps its blanks."""
 	refuse_in_tool_dispatch()
@@ -191,17 +191,18 @@ def draft_computed(action: dict | str | None = None) -> dict:
 
 
 def _calculate_draft(doctype: str, values: dict):
-	"""The unsaved document with ERPNext's missing values and totals filled, or None
-	for a doctype ERPNext does not total. In the preview sandbox all the same, so a
-	read that writes is rolled back."""
+	"""The unsaved document with ERPNext's totals computed from the card's own values,
+	or None for a doctype ERPNext does not total (it totals only one with a currency,
+	as its validate does). Deliberately not ``set_missing_values``: fetching item
+	details can insert or update an Item Price (Stock Settings' auto-insert), and that
+	write would run hooks. In the preview sandbox all the same."""
 	from jarvis.tools._preview_sandbox import preview_sandbox
 	from jarvis.tools.create_doc import build_doc
 
 	doc = build_doc(doctype, values)
-	if not (hasattr(doc, "calculate_taxes_and_totals") and hasattr(doc, "set_missing_values")):
+	if not (doc.meta.get_field("currency") and hasattr(doc, "calculate_taxes_and_totals")):
 		return None
 	with preview_sandbox():
-		doc.set_missing_values(for_validate=True)
 		doc.calculate_taxes_and_totals()
 	return doc
 
