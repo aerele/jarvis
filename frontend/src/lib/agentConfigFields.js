@@ -58,7 +58,7 @@ export const CONFIG_FIELD_SET = [
 		label: "Voucher lookback",
 		type: "number",
 		suffix: "calendar days",
-		help: "Suggested: 30 (0–90). Booked vouchers this many days before the statement window are read, so cheques that clear late can be matched.",
+		help: "Suggested: 30 (0 to 90). Booked vouchers dated up to this many days before the statement window are read as possible matches.",
 	},
 	{
 		key: "report_date",
