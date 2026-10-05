@@ -43,6 +43,7 @@ from datetime import timedelta
 import frappe
 from frappe import _
 from frappe.utils import now_datetime
+from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user
 from jarvis.chat.agent_activity import log_activity
@@ -133,14 +134,18 @@ DISPATCH_LOCK_TTL_S = 300
 # hour out misses the next tick by seconds and waits two.
 _RETRY_AFTER_S = 55 * 60
 
-# The most installations one sweep dispatches; the rest stay due and the next sweep,
-# five minutes later, takes them, oldest slot first. The sweep is sequential, each
-# launch makes an admin call (normally about a second, up to
-# admin_client.DEFAULT_TIMEOUT_S when admin is slow) and the cron job is killed at
-# the default queue's timeout. A sweep killed mid-launch costs the slot it had
-# claimed (a missed run, the safe side), so a smaller batch that finishes is better
-# than a whole tenant's 09:00 slots in one job that may not.
+# The most installations one sweep dispatches, and how long it keeps starting new
+# launches; the rest stay due and the next sweep, five minutes later, takes them, oldest
+# slot first. The sweep is sequential and each launch makes an admin call: normally
+# about a second, up to admin_client.DEFAULT_TIMEOUT_S (150 s) when admin is slow.
+# The cron job runs on the default queue (300 s timeout on Frappe 15 and 16), and RQ
+# enforces that by raising JobTimeoutException inside whatever is running. Raised
+# during an admin call, it leaves it unknown whether admin got the request, so
+# ``_launch_audit`` keeps that run in flight like any ambiguous dispatch. The time
+# budget keeps a sweep from getting there: no launch starts after 120 s, so even one
+# that waits the full admin timeout ends inside the queue's.
 SWEEP_MAX_PER_TICK = 25
+SWEEP_TIME_BUDGET_S = 120
 
 
 # --------------------------------------------------------------------------- #
@@ -148,8 +153,9 @@ SWEEP_MAX_PER_TICK = 25
 # --------------------------------------------------------------------------- #
 def run_due_agent_audits() -> None:
 	"""Run every enabled auditor installation whose next_run_at is due, at most
-	``SWEEP_MAX_PER_TICK`` of them, oldest slot first. Runs as Administrator (the
-	scheduler user); each audit executes as its own owner.
+	``SWEEP_MAX_PER_TICK`` of them and none started after ``SWEEP_TIME_BUDGET_S``,
+	oldest slot first. Runs as Administrator (the scheduler user); each audit executes
+	as its own owner.
 
 	Two sweeps never run at once in practice (Frappe does not enqueue a scheduled job
 	that is still queued or running), and nothing here depends on that: a slot is
@@ -175,14 +181,23 @@ def run_due_agent_audits() -> None:
 			"next_run_at",
 		],
 		order_by="next_run_at asc, name asc",
-		limit=SWEEP_MAX_PER_TICK,
+		limit=SWEEP_MAX_PER_TICK + 1,  # one more, only to tell whether the cap was hit
 	)
 	if not due:
 		return
+	if len(due) > SWEEP_MAX_PER_TICK:
+		due = due[:SWEEP_MAX_PER_TICK]
+		_sweep_log(f"agent sweep: more than {SWEEP_MAX_PER_TICK} installations due; the rest wait a tick")
 
 	original_user = frappe.session.user
 	seen: set = set()  # O7: dedupe identical (owner, agent, cadence, time)
-	for row in due:
+	started = _sweep_clock()
+	for i, row in enumerate(due):
+		if _sweep_clock() - started > SWEEP_TIME_BUDGET_S:
+			# The log, not an Error Log: those are forwarded to the control plane, and a
+			# slow admin would add one every five minutes. The slots stay due.
+			_sweep_log(f"agent sweep: time budget spent; {len(due) - i} due installations wait a tick")
+			break
 		# #648: fault-isolate each installation, the agent twin of #472's macro sweep.
 		# The per-row try below covers only the DISPATCH; the dedupe, the schedule
 		# arithmetic, the identity guards and every _record_failed / _notify_owner sat
@@ -206,6 +221,15 @@ def run_due_agent_audits() -> None:
 				message=frappe.get_traceback(),
 			)
 			_retry_later(row, now, expected=row.next_run_at)
+
+
+def _sweep_clock() -> float:
+	"""Seconds on a monotonic clock; its own function so a test can move it."""
+	return time.monotonic()
+
+
+def _sweep_log(message: str) -> None:
+	frappe.logger("jarvis.agent_scheduler").info(message)
 
 
 def _sweep_one(row, now, original_user: str, seen: set) -> None:
@@ -402,8 +426,9 @@ def _dispatch(
 	hour out (``_retry_later``). Reading the run rather than the exception is what tells
 	the two apart.
 
-	The fourth case, a dispatch that fails AMBIGUOUSLY (a timeout, or a reset mid-flight,
-	where admin may already have started the turn), is #743. ``_launch_audit`` no longer
+	The fourth case, a dispatch that fails AMBIGUOUSLY (a timeout, a reset mid-flight, or
+	the cron job's own RQ timeout firing during the call, where admin may already have
+	started the turn), is #743. ``_launch_audit`` no longer
 	records it ``failed``: it leaves the run ``running`` and re-raises AdminAmbiguousError,
 	and the explicit branch below keeps the slot CLAIMED rather than retrying it. So no
 	fresh run id is minted an hour later, the fleet's run-id idempotency is never bypassed,
@@ -1406,6 +1431,20 @@ def _launch_audit(
 		)
 		frappe.db.commit()
 		raise
+	except JobTimeoutException as e:
+		# The cron job reached its queue's timeout during the dispatch. RQ raises this
+		# inside the call, and it is an Exception, so the branch below would take it
+		# for a confirmed failure and the slot would be retried under a new run id.
+		# Admin may have the request, so it is ambiguous like a read timeout: the run
+		# stays ``running`` with its session, and the caller keeps the claim.
+		frappe.log_error(
+			title=f"jarvis agent-run dispatch ambiguous (left running): {run.name}",
+			message=frappe.get_traceback(),
+		)
+		frappe.db.commit()
+		raise admin_client.AdminAmbiguousError(
+			"the job timed out during the dispatch; the run may already be going"
+		) from e
 	except Exception as e:
 		# The dispatch call itself failed, and CONFIRMEDLY: nothing was sent (a clean
 		# refusal / connect timeout), a 4xx rejection, or an auth denial. Mark THIS
