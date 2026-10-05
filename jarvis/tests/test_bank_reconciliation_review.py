@@ -1,6 +1,6 @@
 """Bank reconciliation review: config, custody, completeness and proposals-only staging."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -91,6 +91,31 @@ class TestBankReconConfiguration(FrappeTestCase):
 		):
 			self.assertRaises(frappe.ValidationError, review.configuration, inst)
 
+	def test_configuration_checks_the_linked_gl_account(self):
+		inst = frappe._dict(config=frappe.as_json(config()))
+		checked = []
+
+		def get_doc(doctype, name=None):
+			doc = MagicMock()
+			doc.account = BANK.account
+			doc.check_permission.side_effect = lambda *a: checked.append((doctype, name))
+			if doctype == "Account":
+				doc.check_permission.side_effect = frappe.PermissionError
+			return doc
+
+		with (
+			patch.object(review, "_bank_account", return_value=BANK),
+			patch.object(frappe.utils, "today", return_value="2026-10-05"),
+			patch.object(frappe, "get_doc", side_effect=get_doc),
+		):
+			self.assertRaises(frappe.PermissionError, review.configuration, inst)
+		self.assertIn(("Bank Account", "Example Current - Example Bank"), checked)
+
+	def test_scope_with_missing_bank_account_throws_cleanly(self):
+		with patch.object(review, "_bank_account", return_value=None):
+			with self.assertRaisesRegex(frappe.ValidationError, "no longer available"):
+				review.scope_from_config(config())
+
 	def test_defaults_suggest_previous_month_and_never_save(self):
 		with (
 			patch.object(
@@ -128,3 +153,247 @@ class TestBankReconConfiguration(FrappeTestCase):
 				"bank_account": "Example Current - Example Bank",
 			},
 		)
+
+
+E2E_CO = "_Test BRR Company"
+
+
+def _ensure_masters():
+	if not frappe.db.exists("Company", E2E_CO):
+		frappe.get_doc(
+			{
+				"doctype": "Company",
+				"company_name": E2E_CO,
+				"abbr": "TBRR",
+				"default_currency": "INR",
+				"country": "India",
+			}
+		).insert()
+	if not frappe.db.exists("Fiscal Year", "_Test BRR FY 2026-2027"):
+		frappe.get_doc(
+			{
+				"doctype": "Fiscal Year",
+				"year": "_Test BRR FY 2026-2027",
+				"year_start_date": "2026-04-01",
+				"year_end_date": "2027-03-31",
+				"companies": [{"company": E2E_CO}],
+			}
+		).insert()
+	abbr = "TBRR"
+	gl = f"_Test BRR Current - {abbr}"
+	if not frappe.db.exists("Account", gl):
+		frappe.get_doc(
+			{
+				"doctype": "Account",
+				"account_name": "_Test BRR Current",
+				"parent_account": f"Bank Accounts - {abbr}",
+				"company": E2E_CO,
+				"account_type": "Bank",
+				"root_type": "Asset",
+				"is_group": 0,
+			}
+		).insert()
+	other = f"_Test BRR Other Current - {abbr}"
+	if not frappe.db.exists("Account", other):
+		frappe.get_doc(
+			{
+				"doctype": "Account",
+				"account_name": "_Test BRR Other Current",
+				"parent_account": f"Bank Accounts - {abbr}",
+				"company": E2E_CO,
+				"account_type": "Bank",
+				"root_type": "Asset",
+				"is_group": 0,
+			}
+		).insert()
+	if not frappe.db.exists("Bank", "_Test BRR Bank"):
+		frappe.get_doc({"doctype": "Bank", "bank_name": "_Test BRR Bank"}).insert()
+	name = frappe.db.get_value("Bank Account", {"account": gl})
+	if not name:
+		name = (
+			frappe.get_doc(
+				{
+					"doctype": "Bank Account",
+					"account_name": "_Test BRR Current",
+					"bank": "_Test BRR Bank",
+					"account": gl,
+					"company": E2E_CO,
+					"is_company_account": 1,
+				}
+			)
+			.insert()
+			.name
+		)
+	if not frappe.db.exists("Customer", "_Test BRR Customer"):
+		frappe.get_doc(
+			{"doctype": "Customer", "customer_name": "_Test BRR Customer", "customer_type": "Company"}
+		).insert()
+	return gl, other, name
+
+
+def _pe(kind, amount, posting, ref, paid_from, paid_to, party=True):
+	doc = frappe.get_doc(
+		{
+			"doctype": "Payment Entry",
+			"payment_type": kind,
+			"company": E2E_CO,
+			"posting_date": posting,
+			"paid_from": paid_from,
+			"paid_to": paid_to,
+			"paid_amount": amount,
+			"received_amount": amount,
+			"reference_no": ref,
+			"reference_date": posting,
+			**({"party_type": "Customer", "party": "_Test BRR Customer"} if party else {}),
+		}
+	)
+	doc.setup_party_account_field()
+	doc.set_missing_values()
+	doc.set_exchange_rate()
+	doc.set_amounts()
+	doc.insert()
+	doc.submit()
+	return doc.name
+
+
+def _je(posting, lines, ref):
+	doc = frappe.get_doc(
+		{
+			"doctype": "Journal Entry",
+			"voucher_type": "Bank Entry",
+			"company": E2E_CO,
+			"posting_date": posting,
+			"cheque_no": ref,
+			"cheque_date": posting,
+			"accounts": [
+				{
+					"account": a,
+					"debit_in_account_currency": d,
+					"credit_in_account_currency": c,
+					"cost_center": frappe.db.get_value("Company", E2E_CO, "cost_center"),
+				}
+				for a, d, c in lines
+			],
+		}
+	)
+	doc.insert()
+	doc.submit()
+	return doc.name
+
+
+def _bt(bank_account, day, deposit=0, withdrawal=0, ref=None, submit=True, allocate=None):
+	doc = frappe.get_doc(
+		{
+			"doctype": "Bank Transaction",
+			"date": day,
+			"company": E2E_CO,
+			"bank_account": bank_account,
+			"currency": "INR",
+			"deposit": deposit,
+			"withdrawal": withdrawal,
+			"description": f"line {ref}",
+			"reference_number": ref,
+			"transaction_id": ref,
+		}
+	)
+	if allocate:
+		doc.append(
+			"payment_entries",
+			{
+				"payment_document": "Payment Entry",
+				"payment_entry": allocate,
+				"allocated_amount": deposit or withdrawal,
+			},
+		)
+	doc.insert()
+	if submit:
+		doc.submit()
+	return doc
+
+
+class TestNativeBankReconEvidence(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.gl, cls.other, cls.bank_account = _ensure_masters()
+		receivable = frappe.db.get_value("Company", E2E_CO, "default_receivable_account")
+		cls.receipt = _pe("Receive", 1000, "2026-09-02", "BRR-REF-1", receivable, cls.gl)
+		cls.linked = _pe("Receive", 2000, "2026-09-03", "BRR-REF-2", receivable, cls.gl)
+		cls.transfer = _pe("Internal Transfer", 3000, "2026-09-04", "BRR-TRF", cls.gl, cls.other, party=False)
+		cls.zero_je = _je("2026-09-05", [(cls.gl, 500, 0), (cls.gl, 0, 500)], "BRR-ZERO")
+		cls.je = _je("2026-09-06", [(cls.other, 700, 0), (cls.gl, 0, 700)], "BRR-JE")
+		cls.lines = [
+			_bt(cls.bank_account, "2026-09-03", deposit=1000, ref="BRR-REF-1").name,
+			_bt(cls.bank_account, "2026-09-03", deposit=2000, ref="BRR-REF-2", allocate=cls.linked).name,
+			_bt(cls.bank_account, "2026-09-07", deposit=50, ref="BRR-DRAFT", submit=False).name,
+		]
+		cancelled = _bt(cls.bank_account, "2026-09-08", deposit=1000, ref="BRR-CXL", allocate=cls.receipt)
+		cancelled.cancel()
+
+	def snapshot(self):
+		cfg = config(company=E2E_CO, bank_account=self.bank_account)
+		return review.collect(review.scope_from_config(cfg), cfg)
+
+	def voucher(self, snap, name):
+		return next(v for v in snap["datasets"]["vouchers"] if v["name"] == name)
+
+	def test_snapshot_is_complete_and_sealed(self):
+		snap = self.snapshot()
+		self.assertTrue(snap["complete"], snap.get("detail"))
+		body = {k: v for k, v in snap.items() if k != "source_digest"}
+		self.assertEqual(snap["source_digest"], review.digest(body))
+		self.assertEqual(
+			{row["name"] for row in snap["datasets"]["bank_lines"]} & set(self.lines), set(self.lines)
+		)
+
+	def test_internal_transfer_direction_follows_selected_bank_side(self):
+		self.assertEqual(self.voucher(self.snapshot(), self.transfer)["direction"], "out")
+
+	def test_payment_amount_is_taken_on_the_selected_bank_side(self):
+		scope = {"company": E2E_CO, "bank_gl": "GL", "voucher_from": "2026-08-01", "to_date": "2026-09-30"}
+		incoming = frappe._dict(
+			name="PE-IN", paid_from="X", paid_to="GL", paid_amount=100, received_amount=120
+		)
+		outgoing = frappe._dict(
+			name="PE-OUT", paid_from="GL", paid_to="X", paid_amount=90, received_amount=75
+		)
+		docs = {"PE-IN": incoming, "PE-OUT": outgoing}
+		with (
+			patch.object(review, "_names", side_effect=[["PE-OUT"], ["PE-IN"]]),
+			patch.object(review, "_read", side_effect=lambda dt, name: docs[name]),
+		):
+			rows = {row["name"]: row for row in review._payment_vouchers(scope)}
+		self.assertEqual((rows["PE-IN"]["direction"], rows["PE-IN"]["amount"]), ("in", "120"))
+		self.assertEqual((rows["PE-OUT"]["direction"], rows["PE-OUT"]["amount"]), ("out", "90"))
+
+	def test_zero_net_journal_is_not_a_candidate(self):
+		names = {v["name"] for v in self.snapshot()["datasets"]["vouchers"]}
+		self.assertNotIn(self.zero_je, names)
+		self.assertEqual(self.voucher(self.snapshot(), self.je)["direction"], "out")
+		self.assertEqual(self.voucher(self.snapshot(), self.je)["amount"], "700.0")
+
+	def test_only_submitted_bank_links_lock_a_voucher(self):
+		snap = self.snapshot()
+		self.assertEqual(self.voucher(snap, self.linked)["linked_bank_lines"], [self.lines[1]])
+		self.assertEqual(self.voucher(snap, self.receipt)["linked_bank_lines"], [])
+
+	def test_hidden_rows_fail_closed(self):
+		with patch.object(review, "_count", return_value=10**6):
+			snap = self.snapshot()
+		self.assertFalse(snap["complete"])
+		self.assertEqual(snap["reason_code"], "permission_slice")
+
+	def test_capacity_limit_is_typed(self):
+		with patch.object(review, "MAX_VOUCHERS", 1):
+			snap = self.snapshot()
+		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "run_truncated_watermark"))
+
+	def test_unreadable_doctype_is_permission_slice(self):
+		real = frappe.has_permission
+		with patch.object(
+			frappe,
+			"has_permission",
+			side_effect=lambda dt, *a, **k: dt != "Journal Entry" and real(dt, *a, **k),
+		):
+			snap = self.snapshot()
+		self.assertEqual(snap["reason_code"], "permission_slice")
