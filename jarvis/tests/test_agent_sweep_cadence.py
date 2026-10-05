@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.utils import add_days, add_to_date, get_datetime, now_datetime
+from rq.timeouts import JobTimeoutException
 
 from jarvis import admin_client
 from jarvis.chat import agent_models, agent_scheduler
@@ -26,6 +27,7 @@ from jarvis.tests._agent_access import allow_listing_for
 from jarvis.tests.test_agent_dispatch_idempotency import (
 	INSTALLATION,
 	NOTIFICATION,
+	SESSION,
 	SLUG,
 	DispatchIdempotencyTestCase,
 	_mk_user,
@@ -57,6 +59,15 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 	def _the_wait_passes(self, inst: str) -> None:
 		frappe.db.set_value(
 			INSTALLATION, inst, "next_run_at", add_to_date(now_datetime(), minutes=-1), update_modified=False
+		)
+		frappe.db.commit()
+
+	def _schedule_far_from_now(self, inst: str) -> None:
+		"""A daily slot about twelve hours away, so a retry (under an hour away) and the
+		next natural slot can never be mistaken for each other, whatever the time of day."""
+		far = add_to_date(now_datetime(), hours=12)
+		frappe.db.set_value(
+			INSTALLATION, inst, "schedule_time", far.strftime("%H:%M:00"), update_modified=False
 		)
 		frappe.db.commit()
 
@@ -265,6 +276,80 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 			self.assertEqual(self._dispatched_for(newer), [], "the sweep went past its cap")
 			self._sweep()
 		self.assertEqual(len(self._dispatched_for(newer)), 1, "the next sweep takes the rest")
+
+	def test_a_sweep_starts_no_launch_once_its_time_budget_is_spent(self):
+		frappe.set_user("Administrator")
+		second_owner = _mk_user(SECOND_OWNER)
+		allow_listing_for(SLUG, user=second_owner)
+		first = self._due_install()
+		second = self._due_install_for(second_owner)
+		frappe.db.set_value(
+			INSTALLATION, first, "next_run_at", add_days(now_datetime(), -2), update_modified=False
+		)
+		frappe.db.commit()
+		left_due = get_datetime(self._next_run_at(second))
+		# The sweep reads the clock once to start, then before each launch: the first
+		# launch starts at 0 s, the second would start past the budget.
+		clock = iter([0, 0, agent_scheduler.SWEEP_TIME_BUDGET_S + 1])
+
+		with (
+			patch.object(agent_scheduler, "_sweep_clock", side_effect=lambda: next(clock)),
+			patch.object(agent_scheduler, "_sweep_log") as log,
+		):
+			self._sweep()
+
+		self.assertEqual(len(self._dispatched_for(first)), 1)
+		self.assertEqual(self._dispatched_for(second), [], "a launch started after the time budget")
+		self.assertEqual(get_datetime(self._next_run_at(second)), left_due, "the slot left for later moved")
+		self.assertIn("time budget", log.call_args.args[0])
+
+	def test_the_time_budget_ends_inside_the_queue_timeout(self):
+		from jarvis import admin_client as client
+
+		self.assertLessEqual(agent_scheduler.SWEEP_TIME_BUDGET_S + client.DEFAULT_TIMEOUT_S, 300 - 20)
+
+	def test_a_sweep_that_hits_the_cap_says_so_in_the_log(self):
+		frappe.set_user("Administrator")
+		second_owner = _mk_user(SECOND_OWNER)
+		allow_listing_for(SLUG, user=second_owner)
+		self._due_install()
+		self._due_install_for(second_owner)
+		with (
+			patch.object(agent_scheduler, "SWEEP_MAX_PER_TICK", 1),
+			patch.object(agent_scheduler, "_sweep_log") as log,
+		):
+			self._sweep()
+		self.assertIn("more than 1", log.call_args.args[0])
+
+	def test_a_sweep_under_the_cap_logs_nothing(self):
+		self._due_install()
+		with patch.object(agent_scheduler, "_sweep_log") as log:
+			self._sweep()
+		log.assert_not_called()
+
+	# --- a job timeout during the dispatch ------------------------------------- #
+
+	def test_a_job_timeout_during_the_dispatch_keeps_the_run_and_the_claim(self):
+		"""RQ raises its job timeout inside the admin call. Admin may have the request,
+		so the run must stay in flight under its own id, never be retried under a new one."""
+		inst = self._due_install()
+		self._schedule_far_from_now(inst)
+
+		def _timed_out(**kw):
+			self.dispatched.append(kw)  # admin received it
+			raise JobTimeoutException("Task exceeded maximum timeout value (300 seconds)")
+
+		self._sweep(dispatch=_timed_out)
+
+		self.assertEqual(len(self._runs(inst, "running")), 1)
+		self.assertEqual(self._runs(inst, "failed"), [], "the timeout was taken for a confirmed failure")
+		self.assertTrue(frappe.db.exists(SESSION, {"user": self.owner}), "the run's session was torn down")
+		self.assertEqual(self._notifications(), [])
+		self.assertGreater(
+			get_datetime(self._next_run_at(inst)),
+			add_to_date(now_datetime(), hours=2),
+			"the slot was handed to a retry, which would launch it again under a new run id",
+		)
 
 	def _due_install_for(self, owner: str) -> str:
 		doc = frappe.get_doc(
