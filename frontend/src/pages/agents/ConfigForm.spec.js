@@ -270,6 +270,39 @@ describe("bank reconciliation review configuration", () => {
 		});
 		expect(saved.voucher_lookback_days).toBe(30);
 	});
+	it("hides saved-config issues for fields a default has filled, until saved", async () => {
+		const wrapper = mountForm(
+			{},
+			{
+				configKeys,
+				validationErrors: {
+					company: "Select a company.",
+					bank_account: "Select an enabled company bank account.",
+					config: "Configuration must be a JSON object.",
+				},
+			}
+		);
+		expect(wrapper.text()).toContain("Select a company.");
+		await flushPromises();
+		expect(field(wrapper, "Voucher lookback").element.value).toBe("30");
+		expect(wrapper.text()).not.toContain("Select a company.");
+		expect(wrapper.text()).not.toContain("Select an enabled company bank account.");
+		expect(wrapper.text()).toContain("Configuration must be a JSON object.");
+	});
+	it("keeps an issue while the field still holds the saved value", async () => {
+		apiAgents.getBankReconReviewDefaults.mockRejectedValue(new Error("Forbidden"));
+		const wrapper = mountForm(
+			{ company: "Example", voucher_lookback_days: 120 },
+			{
+				configKeys,
+				validationErrors: {
+					voucher_lookback_days: "Choose a voucher lookback from 0 to 90 calendar days.",
+				},
+			}
+		);
+		await flushPromises();
+		expect(wrapper.text()).toContain("Choose a voucher lookback from 0 to 90 calendar days.");
+	});
 });
 
 describe("AP explicit review configuration", () => {
