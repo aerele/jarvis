@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	alignComputedRows,
 	blankComputedColumns,
 	checkToYesNo,
 	coerceOut,
@@ -392,5 +393,55 @@ describe("blankComputedColumns (#647)", () => {
 			],
 		};
 		expect(blankComputedColumns(model)).toEqual({ items: ["amount"] });
+	});
+});
+
+describe("review follow-ups", () => {
+	it("update: a read-only extra column is never sent, like a listed one (card must not overwrite a server field)", () => {
+		const t = {
+			fieldname: "items",
+			columns: [
+				{ fieldname: "qty", fieldtype: "Float", read_only: 0 },
+				{ fieldname: "so_detail", fieldtype: "Data", read_only: 1 },
+			],
+			rows: [
+				{ __name: "r1", qty: "3", so_detail: "x" },
+				{ qty: "1", so_detail: "y" },
+			],
+			origJson: JSON.stringify([{ name: "r1", qty: 2, so_detail: "x" }]),
+		};
+		expect(draftValues({ verb: "update", fields: [], tables: [t] })).toEqual({
+			items: [{ name: "r1", qty: 3 }, { qty: 1 }],
+		});
+	});
+	it("a grouped or non-plain number is sent as written, for the server to read or refuse", () => {
+		const table = { columns: [{ fieldname: "rate", fieldtype: "Currency" }] };
+		expect(coerceRow(table, { rate: "1,250.5" }, "create")).toEqual({ rate: "1,250.5" });
+		expect(coerceRow(table, { rate: "12.5" }, "create")).toEqual({ rate: 12.5 });
+	});
+});
+
+describe("alignComputedRows (#647)", () => {
+	const table = {
+		columns: [
+			{ fieldname: "item_code", fieldtype: "Link" },
+			{ fieldname: "amount", fieldtype: "Currency", read_only: 1 },
+		],
+		rows: [
+			{ item_code: "A", amount: "" },
+			{ item_code: "", amount: "" },
+			{ item_code: "B", amount: "" },
+		],
+	};
+	it("puts each dry-run row back on the card row it came from (blank rows are never sent)", () => {
+		expect(alignComputedRows(table, [{ amount: 10 }, { amount: 20 }])).toEqual([
+			{ amount: 10 },
+			undefined,
+			{ amount: 20 },
+		]);
+	});
+	it("gives up when ERPNext returns a different number of rows", () => {
+		expect(alignComputedRows(table, [{ amount: 10 }])).toBeNull();
+		expect(alignComputedRows(table, undefined)).toBeNull();
 	});
 });

@@ -545,3 +545,18 @@ test("summarize: hands each table its computed rows", () => {
 	};
 	assert.deepEqual(summarize(model, {}).tables[0].rows[0].cells, ["12.50"]);
 });
+
+test("lineItemSummary: names the calculated columns, so the cue is text, not only colour", () => {
+	const table = {
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "qty", label: "Quantity", fieldtype: "Float", read_only: 0 },
+			{ fieldname: "amount", label: "Amount", fieldtype: "Currency", read_only: 1 },
+		],
+		rows: [{ qty: "2", amount: "" }],
+		origJson: "null",
+	};
+	assert.deepEqual(lineItemSummary(table, [{ amount: 4 }]).computedLabels, ["Amount"]);
+	assert.deepEqual(lineItemSummary(table).computedLabels, []);
+});
