@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import { renderMarkdown } from "@shared/markdown.js";
-import { pendingCardOf, pendingExpiry } from "@shared/lib/actionSummary.js";
+import { pendingCardOf, pendingExpiry, personError } from "@shared/lib/actionSummary.js";
 import { denyOutcome } from "../lib/denyOutcome.js";
 import { keptCardMessage, settledReasonMessage } from "../lib/keptCard.js";
 import Sheet from "./Sheet.vue";
@@ -149,7 +149,8 @@ async function approve(mode = "step") {
 				emit("resolved", props.action.token, "expired");
 				return;
 			}
-			error.value = r.error?.message || r.reason || "Couldn't run this action.";
+			// The person's words for a refusal written for the model (error.person_message).
+			error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
 			state.value = "review";
 			return;
 		}

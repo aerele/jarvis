@@ -1442,25 +1442,30 @@ class TestALostSandboxIsARefusal(_LostSavepoint):
 		self.assert_refused(result)
 		mint.assert_not_called()
 
-	def test_a_parked_submit_is_refused_and_not_parked(self):
-		# Through _pending_preview, which turns every other JarvisError into a
-		# card that says "preview unavailable".
+	def test_a_parked_submit_never_enters_the_sandbox(self):
+		# Round 2 (R2-2): a submit parks a described card; nothing runs at park, so
+		# there is no sandbox to lose.
 		from jarvis import api
 
 		with (
 			patch.object(api, "dispatch", self._tool_that_loses_the_savepoint),
-			patch("jarvis.chat.pending_confirm.mint") as mint,
+			patch("jarvis.chat.pending_confirm.mint", return_value="tok") as mint,
+			patch("jarvis.chat.events.publish_to_user"),
 		):
 			result = api._run_tool("submit_doc", {"doctype": "ToDo", "name": "x"})
-		self.assert_refused(result)
-		mint.assert_not_called()
+		self.assertTrue(result["ok"], result)
+		self.assertTrue(result["data"]["preview"]["described"])
+		mint.assert_called_once()
+		self.assertEqual(self.lost_reports(), [])
 
 	def test_pending_preview_raises_rather_than_describing(self):
+		# Through _pending_preview (the resync path), which turns every other
+		# JarvisError into a card that says "preview unavailable".
 		from jarvis import api
 
 		with patch.object(api, "dispatch", self._tool_that_loses_the_savepoint):
 			with self.assertRaises(PreviewSandboxLost):
-				api._pending_preview("submit_doc", {"doctype": "ToDo", "name": "x"})
+				api._pending_preview("update_doc", {"doctype": "ToDo", "name": "x", "changes": {}})
 
 	def test_preview_doc_does_not_call_the_document_invalid(self):
 		from jarvis.tools.preview_doc import preview_doc
