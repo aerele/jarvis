@@ -111,6 +111,23 @@ describe("PendingChatDetail", () => {
 		expect(window.__pwned).toBeUndefined();
 	});
 
+	it("shows the card's risk banner, then its warning line, as the chat does", async () => {
+		const w = await mountWith(
+			rec({
+				card: {
+					...rec().card,
+					risk: "sensitive",
+					risk_line: "This sends data outside the site.",
+					warning: { jobs: 3, rolled_back: false },
+				},
+			})
+		);
+		expect(w.findAll('[role="note"]').map((n) => n.text())).toEqual([
+			"This sends data outside the site.",
+			"This will also start 3 background jobs.",
+		]);
+	});
+
 	it("falls back to the summary when the card can't render", async () => {
 		const w = await mountWith(rec({ card: "not a card" }));
 		expect(w.text()).toContain("Create a ToDo");

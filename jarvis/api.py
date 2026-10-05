@@ -19,6 +19,7 @@ from jarvis.exceptions import (
 	PreviewSandboxLost,
 	RunDisarmedError,
 	RunHaltedError,
+	SensitiveWriteRefusedError,
 	WriteRefusedError,
 )
 from jarvis.permissions import (
@@ -1102,17 +1103,20 @@ _WRITE_TOOLS = frozenset(
 		"save_agent_dashboard",
 	}
 )
-_PREVIEWABLE = frozenset(
-	{
-		"create_doc",
-		"create_docs",
-		"update_doc",
-		"submit_doc",
-		"cancel_doc",
-		"amend_doc",
-		"delete_doc",
-		"run_method",
-	}
+# Writes whose park preview is a sandboxed trial run (``_run_preview``). Only the
+# build-from-args create / update tools: the person edits those values on the card,
+# so the trial is the point. submit / cancel / amend / delete are NOT trial-run at
+# park (round-2 R2-2): a trial fires their on_submit / on_cancel hooks, and what a
+# hook sends (email, calls to other systems, live notifications, error log rows)
+# cannot be rolled back. They park a described card with a consequence line, and a
+# failure shows at Confirm. run_method is never trial-run (its target's inline side
+# effects would fire unconfirmed).
+_PREVIEWABLE = frozenset({"create_doc", "create_docs", "update_doc"})
+# The verbs that park a described card (see above), and the note it carries.
+_DESCRIBED_VERBS = frozenset({"submit_doc", "cancel_doc", "amend_doc", "delete_doc"})
+_DESCRIBED_VERB_NOTE = (
+	"Nothing has run yet: this card describes the action, which runs only when you confirm. "
+	"Any problem with it shows at that point."
 )
 # Writes that MUST get a human confirmation before executing (issue #186).
 # As of the action-card overhaul (design A1) the light collaboration mutators
@@ -1281,12 +1285,11 @@ _REQUEST_AUTORUN_TTL_S = 900
 # of surfacing after the human confirms a doomed card. Preview and confirm build
 # the same doc as the same exec_user, so a preview failure faithfully predicts the
 # confirm failure. Scoped to the build-from-args create/update pair - the reported
-# mandatory-field case. submit_doc/cancel_doc/delete_doc/amend_doc are _PREVIEWABLE
-# too and are STILL dry-run at park via _pending_preview, but keep the legacy
-# park-with-note: their failures are state-based (already exists, docstatus, link
-# integrity) and dry-running them fires on_submit/on_cancel hooks - extending the
-# block to them is a separate, larger change. run_method is never sandbox-run at
-# park at all (its target's inline non-DB side effects would fire unconfirmed).
+# mandatory-field case. submit_doc/cancel_doc/delete_doc/amend_doc are not dry-run
+# at park at all (R2-2, see _PREVIEWABLE): their card is described, so a failure
+# (state-based: docstatus, link integrity, stock) shows at Confirm. run_method is
+# never sandbox-run at park (its target's inline non-DB side effects would fire
+# unconfirmed).
 #
 # create_docs joins the build-from-args creates: its whole batch is dry-run in
 # the sandbox at park, so a bad link / missing mandatory in ANY item bounces to
@@ -1300,11 +1303,10 @@ _BULK_ARG_KEYS = ("names", "updates", "docs", "messages")
 
 
 def _is_bulk_call(args) -> bool:
-	"""True when a tool call carries a batch payload. Used to (1) keep a bulk
+	"""True when a tool call carries a batch payload. Used to keep a bulk
 	create_doc/update_doc from auto-applying - a batch always parks behind the
-	card - and (2) route consequential bulk writes to the described-intent
-	preview instead of a sandbox dry-run that would fire on_submit / on_cancel
-	hooks N times at park."""
+	card - and to gate a bulk light write. (A bulk submit / cancel / amend /
+	delete no longer needs routing here: no verb is trial-run at park, R2-2.)"""
 	if not isinstance(args, dict):
 		return False
 	return any(isinstance(args.get(k), list) and args.get(k) for k in _BULK_ARG_KEYS)
@@ -1554,12 +1556,13 @@ def _job_count(n: int) -> str:
 
 
 def _preview_note(hook_rolled_back: bool, queue) -> str:
-	"""The note on a dry-run result. Written for a person, and stored with the
+	"""The note on a dry-run result (create / update; R2-2 stopped the trial for
+	submit / cancel / amend / delete). Written for a person, and stored with the
 	pending record and in the transcript, so it stands alone in plain language,
 	names no key, and states only what the sandbox really guarantees. Neither
-	client shows it when a structured card exists (create / update and submit /
-	cancel / amend / delete all have one), and neither renders ``will_queue``;
-	there the model relays it. Both render it on the plain fallback card.
+	client shows it when a structured card exists; there the card's warning line
+	(``card.warning``) carries the job count and a rolled-back hook, and the model
+	relays the rest. Both render it on the plain fallback card.
 	``queue`` is the ``WillQueue`` of the dry run.
 
 	Nothing here about the audit job a dry run does send (SURVIVES_DRY_RUN): it
@@ -1619,7 +1622,8 @@ def _run_preview(tool: str, args: dict) -> dict:
 	hands back their names, returned here as ``will_queue`` (only when there
 	are any to announce; see ``will_queue_summary`` for what is counted, named
 	and left out) with ``will_queue_note``, a sentence that tells the model
-	what to do with them. Before, a parked Payroll Entry submit put the real
+	what to do with them, and ``will_queue_jobs``, their real count, which the
+	card's warning line shows. Before, a parked Payroll Entry submit put the real
 	salary-slip job on the queue while the card was being built.
 
 	``hook_rolled_back`` (only when true) says a hook called a bare
@@ -1629,8 +1633,9 @@ def _run_preview(tool: str, args: dict) -> dict:
 
 	The whole dict is kept on the pending record and in the transcript, not
 	only shown to the model. The card itself is built from the call's
-	arguments; the frontends show ``would`` under Details, and ``note`` only
-	on the plain fallback card (see ``_preview_note``).
+	arguments and carries the trial's findings as ``card.warning``; the
+	frontends show ``would`` under Details, and ``note`` only on the plain
+	fallback card (see ``_preview_note``).
 
 	Raises ``PreviewSandboxLost`` when the dry run could not be undone cleanly;
 	every caller turns that into a refusal (see the class)."""
@@ -1649,6 +1654,9 @@ def _run_preview(tool: str, args: dict) -> dict:
 	if queue.jobs:
 		out["will_queue"] = queue.names
 		out["will_queue_note"] = _will_queue_note(queue)
+		# The real number of jobs (``will_queue`` names each kind once): the card's
+		# warning line shows this count (confirm_card._add_warning).
+		out["will_queue_jobs"] = queue.jobs
 	if dropped.hook_rolled_back:
 		out["hook_rolled_back"] = True
 	return out
@@ -1724,36 +1732,24 @@ def _describe_call(tool: str, args: dict) -> str:
 
 
 def _pending_preview(tool: str, args: dict) -> dict:
-	"""Build the preview shown alongside a parked gated write. Previewable
-	tools reuse the sandboxed ``_run_preview`` (all DB writes rolled back);
-	everything else (send_email, or a previewable whose validation could not
-	be dry-run) gets a described-intent dict that makes clear it is NOT a dry
-	run - the real thing runs on confirm."""
+	"""Build the preview shown alongside a parked gated write. The create /
+	update tools (``_PREVIEWABLE``, single or bulk) reuse the sandboxed
+	``_run_preview`` (all DB writes rolled back); everything else gets a
+	described-intent dict that makes clear it is NOT a dry run - the real thing
+	runs on confirm. That covers submit / cancel / amend / delete (R2-2: their
+	hooks' email and outside calls would fire at park, single or bulk),
+	run_method (its target's inline side effects would fire and its result reach
+	the model), send_email and every other gated write, and a create / update
+	whose validation could not be dry-run."""
 	described = {
 		"preview": False,
 		"described": True,
 		"summary": _describe_call(tool, args),
-		"note": ("not a dry run - this will send/execute on confirm"),
+		"note": _DESCRIBED_VERB_NOTE
+		if tool in _DESCRIBED_VERBS
+		else "not a dry run - this will send/execute on confirm",
 	}
-	# run_method is _PREVIEWABLE for the dry-run path, but it must NEVER be
-	# sandbox-executed to build a park preview: even inside the rollback
-	# sandbox the target method's inline non-DB side effects (HTTP/email fired
-	# directly, not via DB writes) would fire unconfirmed and its result would
-	# be returned to the model. Route it to the described-intent path (like
-	# send_email) so parking a run_method never executes it - the real call
-	# runs only on confirm.
-	# A BULK submit/cancel/delete/amend routes to described-intent: sandbox-
-	# running the batch would fire on_submit / on_cancel hooks - incl. non-
-	# rollback-able inline side effects (e-invoice / webhook HTTP) - once per doc,
-	# N times, at PARK. Bulk create/update/create_docs stay SANDBOXED even here
-	# (the resync path reaches _pending_preview directly, bypassing the
-	# _DRY_RUN_ON_PARK branch): they are _DRY_RUN_ON_PARK - rolled back, no
-	# consequential hooks - so exclude them from the bulk described routing.
-	if (
-		tool not in _PREVIEWABLE
-		or tool == "run_method"
-		or (_is_bulk_call(args) and tool not in _DRY_RUN_ON_PARK)
-	):
+	if tool not in _PREVIEWABLE:
 		return described
 	try:
 		return _run_preview(tool, args)
@@ -2218,9 +2214,13 @@ def dispatch_confirmed(
 	from jarvis.tools import _write_risk
 
 	try:
-		_write_risk.check(tool, args)
+		risk = _write_risk.check(tool, args)
 	except WriteRefusedError as e:
 		return _refuse_risky_write(tool, args, e, provenance=provenance, provenance_name=provenance_name)
+	if tool == "run_import" and risk == "sensitive":
+		# Also at Confirm: an import parked before this rule (its card sampled a few
+		# rows, clipped) that writes something sensitive is refused, nothing staged.
+		return _refuse_sensitive_import(tool, args, provenance=provenance, provenance_name=provenance_name)
 	allow = _write_risk.allow_entries(tool, args) if allow_risky else []
 	fence = _write_risk.no_commit_fence() if uncarded and tool in _FENCED_TOOLS else nullcontext()
 	with _write_risk.guard_scope(allow) as state, fence:
@@ -2262,6 +2262,89 @@ def _refuse_risky_write(
 		provenance_name=provenance_name,
 		ref_doctype=e.doctype or None,
 	)
+	return env
+
+
+def _build_park_card(
+	tool: str, args: dict, preview: dict, *, sensitive: bool
+) -> tuple[dict | None, dict | None]:
+	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
+
+	A sensitive call (R2-8 / R2-12) gets ``preview["risk"]`` / ``risk_line`` (every
+	risk it carries, in target order), which makes ``build_card`` show it in full,
+	and the same keys on the card. It is refused instead of parked when the call is
+	over the size limit (checked first, so a huge script never reaches the line
+	diff), when no card could be built (the raw fallback has no banner and no full
+	view), or when the card itself is over the limit (a sensitive card is never
+	clipped)."""
+	from jarvis.chat import confirm_card
+	from jarvis.tools import _write_risk
+
+	if not sensitive:
+		return confirm_card.build_card(tool, args, preview), None
+	if confirm_card.too_large(None, args):
+		return None, _refuse_unshowable_card(tool, args, too_large=True)
+	line = " ".join(_write_risk.risk_lines(tool, args))
+	preview["risk"] = "sensitive"
+	if line:
+		preview["risk_line"] = line
+	card = confirm_card.build_card(tool, args, preview)
+	if not isinstance(card, dict):
+		return None, _refuse_unshowable_card(tool, args, too_large=False)
+	card["risk"] = "sensitive"
+	if line:
+		card["risk_line"] = line
+	if confirm_card.too_large(card, args):
+		return None, _refuse_unshowable_card(tool, args, too_large=True)
+	return card, None
+
+
+def _refuse_sensitive_import(tool: str, args: dict, **provenance) -> dict:
+	"""Refuse a ``run_import`` that would write something sensitive (``_write_risk``:
+	a sensitive doctype, or an access-granting column such as portal users or an
+	Employee's user, or a file that cannot be read to tell): its card samples a few
+	rows and cannot show every record in full, so it is set up through Data Import in
+	Desk. Audited like every refusal. An ordinary import parks its card as before."""
+	from jarvis.tools import _write_risk
+
+	doctype = _write_risk.first_risky_target(tool, args)[0] or "these"
+	e = SensitiveWriteRefusedError(
+		f"Importing {doctype} records changes sensitive settings, and an import cannot be shown in "
+		"full on a confirmation card, so it is not run from chat. Do not retry it with another tool; "
+		"tell the user to use Data Import in Desk.",
+		doctype=doctype,
+	)
+	env = _refuse_risky_write(tool, args, e, **provenance)
+	env["error"]["hint"] = "Use Data Import in Desk: open /app/data-import/new."
+	env["error"]["person_message"] = (
+		f"An import of {doctype} records changes sensitive settings and cannot be shown in full on a "
+		"confirmation card, so it cannot be run from chat. Use Data Import in Desk."
+	)
+	return env
+
+
+def _refuse_unshowable_card(tool: str, args: dict, *, too_large: bool) -> dict:
+	"""Refuse a sensitive write whose card cannot be shown in full (R2-8): over
+	``confirm_card.MAX_FULL_CARD_BYTES``, or no card could be built. Audited like
+	every refusal, with a hint that sends the person to Desk. ``error.person_message``
+	is the same refusal for a person (the draft panel shows it)."""
+	from jarvis.tools import _write_risk
+
+	doctype = _write_risk.first_risky_target(tool, args)[0]
+	if too_large:
+		why = "is too large to show in full on a confirmation card (over 256 KB)"
+		person = "This change is too large to show in full on a confirmation card"
+	else:
+		why = "cannot be shown in full on a confirmation card"
+		person = "This change cannot be shown in full on a confirmation card"
+	e = SensitiveWriteRefusedError(
+		f"This {doctype or 'record'} change {why}, so it is not made from chat. Do not retry it "
+		"with another tool; tell the user to make it in Desk.",
+		doctype=doctype,
+	)
+	env = _refuse_risky_write(tool, args, e)
+	env["error"]["hint"] = "Make this change in Desk, where the whole record can be reviewed."
+	env["error"]["person_message"] = f"{person}, so it cannot be made from chat. Make it in Desk."
 	return env
 
 
@@ -2763,6 +2846,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		verdict = held_writes.apply(tool, args, conversation)
 		if verdict is not None:
 			return verdict
+	if _must_card and tool == "run_import":
+		# Every mode (after the File Box policy, which refuses imports its own way): a
+		# sensitive import cannot be carded in full (owner default, J1-cards review).
+		return _refuse_sensitive_import(tool, args)
 	# An armed macro's run follows only skills its owner controls: judged here, on the
 	# row this fetch serves, before its body goes back (``macros.check_a_fetched_skill``).
 	skill_note = ""
@@ -3187,9 +3274,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# same doc as the same exec_user - so return the error to the model NOW
 		# instead of showing a confirmation card that dies on click. clear_messages
 		# so the validation msgprint does not leak into the turn (mirrors
-		# preview_doc). Every other gated write (submit/cancel/delete/amend get a
-		# sandboxed preview; send_email/run_method/create_custom_skill/update_wiki
-		# a described-intent one) parks via _pending_preview exactly as before.
+		# preview_doc). Every other gated write (submit/cancel/delete/amend since
+		# R2-2, send_email/run_method/create_custom_skill/update_wiki) parks a
+		# described-intent card via _pending_preview: nothing runs until Confirm.
 		if tool == "run_import":
 			# run_import cannot be sandbox-run (staging + a background job), so it has its
 			# own pre-park validation: refuse a blocked / non-importable / non-admin import
@@ -3242,23 +3329,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			_resolve_approve_run_offer(conv) if tool in _SKILL_AUTORUN_COVERED else (None, None)
 		)
 		if isinstance(preview, dict):
-			if _must_card:
-				# What the card must say (J1-cards renders it): the risk of the
-				# sensitive record.
-				line = _write_risk.risk_line(tool, args)
-				preview["risk"] = "sensitive"
-				if line:
-					preview["risk_line"] = line
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
 			# the clients read it to keep that draft "waiting" across a reload.
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
-			preview["card"] = confirm_card.build_card(tool, args, preview)
-			if _must_card and isinstance(preview.get("card"), dict):
-				preview["card"]["risk"] = "sensitive"
-				if preview.get("risk_line"):
-					preview["card"]["risk_line"] = preview["risk_line"]
+			card, refusal = _build_park_card(tool, args, preview, sensitive=_must_card)
+			if refusal is not None:
+				frappe.clear_messages()
+				return refusal
+			preview["card"] = card
 			if from_draft and isinstance(preview.get("card"), dict):
 				# On the card too: a reloaded desktop seeds the card from its message
 				# row (pending_card), which carries only the card.
