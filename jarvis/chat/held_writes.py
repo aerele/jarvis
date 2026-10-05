@@ -178,7 +178,7 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return _refuse("ConfirmationUnavailableError", _UNAVAILABLE)
 	frappe.db.commit()  # release the conversation lock before any dispatch
 	if verdict == "apply":
-		result = api.dispatch_confirmed(tool, args, provenance="auto_apply")
+		result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 		if tool == "create_doc" and result.get("ok"):
 			api._stamp_file_box_draft(conversation, result.get("data"))
 		return result

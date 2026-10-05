@@ -257,10 +257,14 @@ class TestPolicy(_Base):
 			{"doctype": "Buying Settings", "values": {}},  # a single
 			{"doctype": "Purchase Invoice Item", "values": {}},  # a child table
 		]
+		# Structure changes are refused by the write-risk guard ahead of the File Box
+		# policy, on every route (round 2), with their own code.
+		structure = {"Custom Field", "Workflow"}
 		with patch("jarvis.api._run_preview") as preview:
 			for doc in cases:
 				with self.subTest(doctype=doc["doctype"]):
-					self.assert_refused(self.call("create_doc", doc, conv))
+					code = "structure_refused" if doc["doctype"] in structure else "FileBoxRefusedError"
+					self.assert_refused(self.call("create_doc", doc, conv), code)
 			self.assert_refused(self.call("create_doc", _batch(_supplier(), cases[0]), conv))
 			self.assert_refused(
 				self.call("create_doc", {"doctype": "No Such DocType", "values": {}}, conv),

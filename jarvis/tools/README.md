@@ -262,6 +262,67 @@ confirmation card built from a described-intent summary of the blast radius -
 there is no sandboxed dry-run for it, since its target's inline non-DB side
 effects could fire unconfirmed. See the `run_method` section above.
 
+## Write-risk guard - structure refused, sensitive always carded
+
+`jarvis/tools/_write_risk.py` holds the lists and both layers (round-2 decisions
+R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
+
+- **Structure** (Custom Field, DocType, Workflow, Inventory Dimension, Service
+  Level Agreement, CRM Settings, Domain Settings, Permission Type, Accounting
+  Dimension): refused from chat on every route - the gated card, the draft panel
+  (`apply_action`), auto mode, "confirm all", an armed macro, an approved skill
+  run, File Box, the Approval Board edit, `preview_doc`, and at Confirm for a card
+  parked before the guard. Code `structure_refused`, `error.desk_path` names the
+  Desk page. Any structure doctype in a batch refuses the whole batch.
+- **Sensitive** (Server Script, Client Script, Webhook, Notification, Auto Email
+  Report, Custom DocPerm, Property Setter, Scheduled Job Type, Website Script,
+  Custom HTML Block, Email Account / Domain, User, Role, Role Profile, Module
+  Profile, User Permission, Social Login Key, OAuth Client, Connected App, LDAP
+  Settings, Automation Flow, Custom Role; Report of type Script / Query and Jarvis Trigger with a Script action;
+  Web Page / Web Form / Website Theme / Website Settings / custom Web Template when
+  a write puts content in their script / HTML fields; Auto Repeat when it emails
+  people): parks behind its own card in EVERY mode; the draft panel turns it into
+  that card.
+- **`run_method`** stays open (R2-13): a card in ordinary chat, none in the
+  uncarded modes, no method allow- or deny-list beyond run_method's own (Jarvis's
+  gate / turn / decision endpoints). What it SAVES is judged by the ORM guard below:
+  a structure root write is refused even after Confirm; a sensitive root write is
+  refused uncarded and admitted once the user confirmed the run_method card.
+  Accepted gap (aerele/jarvis#1635): a whitelisted method that changes state
+  without saving a document (Google Drive `authorize_access`, the permission
+  manager, the two-factor reset, Jarvis's workspace reset ...) is not seen and runs
+  uncarded in the uncarded modes.
+- **ORM guard** (`doc_events["*"]` on before_validate / before_change /
+  before_rename / on_trash): while a tool call runs, a ROOT write of a structure
+  document is refused, and of a sensitive one unless the confirmed card admitted
+  it (`structure_refused` / `sensitive_refused`). Saves a document's own
+  controller makes during another document's save (Employee -> User, Stock
+  Settings -> Property Setter) pass, as from Desk. Inert for Desk, REST and
+  scheduler saves. A refusal a method swallows (`reset_password` catches every
+  exception) still turns the call into the refusal.
+- **Deletes that call no hook** (a DocType delete, `ignore_on_trash`) are judged
+  at `frappe.model.delete_doc.delete_from_table` the same way.
+- **Background jobs** a tool call enqueues run under the same guard in the
+  worker, with the confirmed card's allow entries (never structure): the preview
+  sandbox's `get_queue` wrap runs them through `_write_risk.execute_guarded_job`;
+  the queued job keeps its real method, so `get_jobs` dedupe and monitoring see it.
+  Jobs enqueued outside a tool call are untouched.
+- **No-commit fence**: an uncarded create / update runs with `frappe.db.commit`
+  neutralised and a write counted, so a doctype outside the list whose save runs
+  DDL (even as its first statement) hits Frappe's `ImplicitCommitError` before
+  the ALTER; that is refused as a structure change (also when an app re-raises it
+  as another error). Frappe 16's `_disable_transaction_control` is put back on
+  exit by the fence and the preview sandbox. An uncarded run_method is not fenced.
+- **Access-granting fields** (Employee `user_id` / `create_user_permission`, an
+  Employee `status` change that turns its user's login on or off, Customer /
+  Supplier `portal_users`), judged when a call changes them, in the argument
+  layer and at the save (so `frappe.client` through run_method too). Jarvis's own
+  configuration (Jarvis Settings, Connector, Agent Installation / Listing, User
+  Settings, Macro, MCP OAuth Client / Token: argument layer only) and a Data
+  Import of any conditional doctype park a card too.
+- Every refusal is a `refused` row in Jarvis Agent Write plus a log line
+  `jarvis.risky_write risk=... doctype="..." name="..." user="..." outcome=...`.
+
 ## Audit logging
 
 Every **mutating** tool call is logged from the `_run_tool` choke-point

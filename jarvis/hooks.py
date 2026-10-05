@@ -623,6 +623,22 @@ for _trigger_event in (
 	else:
 		_existing_handlers.append(_TRIGGER_DISPATCH)
 
+# Write-risk guard (round 2, jarvis.tools._write_risk): while a Jarvis tool call
+# runs, a ROOT write of a structure / sensitive document is refused unless the card
+# the user confirmed named it; saves a document's own controller makes pass, as from
+# Desk. A no-op outside a tool call. before_validate, not before_save: before_save
+# is skipped under flags.ignore_validate (create_custom_fields, CRM Settings set it);
+# before_change is what db_set fires. Merged like the trigger dispatcher above.
+_WRITE_GUARD = "jarvis.tools._write_risk.guard_doc_event"
+for _guard_event in ("before_validate", "before_change", "before_rename", "on_trash"):
+	_existing_handlers = _star_doc_events.get(_guard_event)
+	if _existing_handlers is None:
+		_star_doc_events[_guard_event] = [_WRITE_GUARD]
+	elif isinstance(_existing_handlers, str):
+		_star_doc_events[_guard_event] = [_WRITE_GUARD, _existing_handlers]
+	else:
+		_existing_handlers.insert(0, _WRITE_GUARD)
+
 # Jarvis Trigger Activity is an append-only log; frappe's standard Log
 # Settings clearing reaps rows older than 90 days (the controller's
 # clear_old_logs mirrors core's WebhookRequestLog).
