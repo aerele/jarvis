@@ -2508,11 +2508,8 @@ def list_findings(
 		# get_value bypasses perms, so without the owner check a foreign run id is
 		# an existence/metadata oracle. A run the caller does not own returns empty
 		# (identical to an unknown run), never leaking that it exists.
-		run_row = frappe.db.get_value(
-			RUN, run, ["agent", "creation", "status", "owner", "installation"], as_dict=True
-		)
-		if not run_row or run_row.owner != me or not run_row.installation:
-			# A run kept for the budget after an uninstall reads like a deleted one.
+		run_row = frappe.db.get_value(RUN, run, ["agent", "creation", "status", "owner"], as_dict=True)
+		if not run_row or run_row.owner != me:
 			return _empty()
 		if run_row.status not in ("completed", "partial"):
 			# unknown / failed / still-running runs recorded no findings snapshot
