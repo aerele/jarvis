@@ -136,6 +136,22 @@ class InvalidArgumentError(JarvisError):
 	"""Raised when tool arguments fail validation."""
 
 
+class InvalidFieldValueError(InvalidArgumentError):
+	"""A field value Frappe would reject or silently corrupt (``qty="abc"`` saved as 0,
+	a date the database refuses, an option the Select does not list), caught before
+	the write. Its message names the field and the value, so the request can be
+	corrected (``jarvis._failure_kind``: FIXABLE). The envelope keeps the
+	``InvalidArgumentError`` code every consumer already branches on."""
+
+	envelope_code = "InvalidArgumentError"
+
+
+class RetryLaterError(JarvisError):
+	"""The site was busy (a lock held or a lock wait that timed out); nothing was
+	saved and the same request can succeed in a moment (``jarvis._failure_kind``:
+	RETRY_LATER). Raised by a write that takes its own lock."""
+
+
 class NoDataError(InvalidArgumentError):
 	"""Raised when an export/report tool has nothing to produce (e.g. no rows
 	to write to a workbook). Carries a clean, user-facing message the agent

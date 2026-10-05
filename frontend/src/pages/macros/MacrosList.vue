@@ -52,6 +52,31 @@
 				/>
 			</template>
 
+			<!-- What an admin did that left no row to show it: a macro of this user
+			     an admin deleted. One line per notice, until dismissed. -->
+			<template v-if="notices.length" #banner>
+				<div class="flex flex-col gap-2 pt-3" data-testid="admin-notices">
+					<div
+						v-for="n in notices"
+						:key="n.name"
+						class="jv-macro-notice flex items-center justify-between gap-3 rounded-md bg-surface-amber-2 px-3 py-2"
+						role="status"
+						:data-notice="n.name"
+					>
+						<span class="text-sm text-ink-gray-8">{{ n.message }}</span>
+						<Button
+							variant="ghost"
+							size="sm"
+							label="Dismiss"
+							:loading="dismissing === n.name"
+							:disabled="!!dismissing"
+							:aria-label="`Dismiss: ${n.message}`"
+							@click="dismiss(n)"
+						/>
+					</div>
+				</div>
+			</template>
+
 			<template #cell-macro_name="{ row }">
 				<div class="flex items-center gap-2">
 					<span class="truncate text-base font-medium text-ink-gray-9">{{
@@ -62,6 +87,18 @@
 						text="Armed: this macro's runs execute writes without a confirmation card (admin-set)."
 					>
 						<Badge variant="subtle" theme="orange" label="Armed" />
+					</Tooltip>
+					<Tooltip v-if="macroHold(row)" :text="holdMessage(macroHold(row))">
+						<Badge
+							class="jv-macro-held"
+							variant="subtle"
+							theme="red"
+							label="On hold"
+						/>
+						<!-- The tooltip shows on hover only: the reason is in the text too. -->
+						<span class="jv-macro-held-reason sr-only">{{
+							holdMessage(macroHold(row))
+						}}</span>
 					</Tooltip>
 				</div>
 			</template>
@@ -119,9 +156,13 @@
 						variant="ghost"
 						icon="play"
 						:loading="runningRow === row.name"
-						:disabled="row.merge_status === 'pending' || !!runningRow"
+						:disabled="
+							!!macroHold(row) || row.merge_status === 'pending' || !!runningRow
+						"
 						:tooltip="
-							row.merge_status === 'pending'
+							macroHold(row)
+								? holdMessage(macroHold(row))
+								: row.merge_status === 'pending'
 								? 'Summarizing… - Run unlocks when the summary is ready'
 								: 'Run'
 						"
@@ -173,6 +214,7 @@ import {
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
 import { errHtml, escapeHtml } from "@/lib/errors";
+import { macroHold, holdMessage } from "@/lib/macroHold";
 
 const props = defineProps({
 	tab: { type: String, default: "macros" }, // 'runs' on /macros/runs (§9)
@@ -255,6 +297,9 @@ const sortOptions = [
 ];
 const DEFAULT_SORT = { field: "modified", dir: "desc" };
 
+const notices = ref([]);
+const dismissing = ref("");
+
 const {
 	rows,
 	total,
@@ -277,6 +322,7 @@ const {
 	dismissFilterNotice,
 } = useListPage({
 	fetchFn: macrosListFetch,
+	onEnvelope: keepNotices,
 	defaultSort: DEFAULT_SORT,
 	storageKey: "macros",
 	viewKey: "macros",
@@ -289,6 +335,29 @@ const {
 	router,
 });
 
+// ── an admin's notices (a macro of this user was deleted by an admin) ────────
+// They ride the list's own answer (`notices`, additive to the envelope), so they
+// arrive with every load and need no request of their own. Dismissing marks them
+// read on the server; the line goes once the server says so. (`notices` is
+// declared above useListPage, which may load at once.)
+
+function keepNotices(res) {
+	if (res && Array.isArray(res.notices)) notices.value = res.notices;
+}
+
+async function dismiss(notice) {
+	if (dismissing.value) return;
+	dismissing.value = notice.name;
+	try {
+		await apiMacros.dismissMacroNotices([notice.name]);
+		notices.value = notices.value.filter((n) => n.name !== notice.name);
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		dismissing.value = "";
+	}
+}
+
 function getRowRoute(row) {
 	return { name: "MacroDetail", params: { id: row.name } };
 }
@@ -297,7 +366,7 @@ function getRowRoute(row) {
 const runningRow = ref("");
 
 async function runRow(row) {
-	if (runningRow.value || row.merge_status === "pending") return;
+	if (runningRow.value || macroHold(row) || row.merge_status === "pending") return;
 	runningRow.value = row.name;
 	try {
 		const res = await api.runMacro(row.name);

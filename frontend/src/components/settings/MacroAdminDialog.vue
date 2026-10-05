@@ -67,7 +67,22 @@
 						<span v-if="macro.skip_confirmation" class="text-xs text-ink-gray-5">
 							Its runs write without asking for confirmation.
 						</span>
+						<Badge
+							v-if="macro.admin_hold"
+							class="jv-macro-admin-dialog-held"
+							variant="subtle"
+							theme="red"
+							label="On hold"
+						/>
 					</dd>
+					<template v-if="macro.admin_hold">
+						<dt class="text-ink-gray-5">Hold reason</dt>
+						<dd
+							class="jv-macro-admin-dialog-reason whitespace-pre-wrap break-words text-ink-gray-8"
+						>
+							{{ macro.admin_hold_reason || "None given" }}
+						</dd>
+					</template>
 					<dt class="text-ink-gray-5">Schedule</dt>
 					<dd class="text-ink-gray-8">
 						{{ macro.schedule_enabled ? scheduleLabel(macro) : "Not scheduled" }}

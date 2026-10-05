@@ -338,6 +338,10 @@ class _RunCheck:
 		if not frappe.db.exists(MACRO, run.macro):
 			return macros._stop_run_locked(run.name, reason=macros._MACRO_DELETED_ERROR, by=BY)
 		self.macro_doc = frappe.get_doc(MACRO, run.macro)
+		if macros.is_held(self.macro_doc):
+			# An admin put the macro on hold and the run is still going (the hold's
+			# own stop of it lost): end it here rather than move it on.
+			return macros._stop_run_locked(run.name, reason=macros._MACRO_HELD_ERROR, by=BY)
 		steps = macros._run_content(run, self.macro_doc).steps
 		sent = macros._next_step_index(run, min(run.total_steps or len(steps), len(steps)))
 		step = _current_step(run, sent)
