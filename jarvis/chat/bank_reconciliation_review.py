@@ -154,6 +154,7 @@ LINE_FIELDS = (
 	"reference_number",
 	"transaction_id",
 	"bank_party_name",
+	"bank_party_account_number",
 	"party_type",
 	"party",
 	"modified",
@@ -229,6 +230,8 @@ def _payment_vouchers(scope):
 		set(_names("Payment Entry", {**base, "paid_from": gl}, MAX_VOUCHERS))
 		| set(_names("Payment Entry", {**base, "paid_to": gl}, MAX_VOUCHERS))
 	)
+	if len(names) > MAX_VOUCHERS:
+		raise OverflowError
 	rows = []
 	for name in names:
 		doc = _read("Payment Entry", name)
@@ -265,7 +268,12 @@ def _journal_vouchers(scope):
 	names = sorted(
 		set(
 			frappe.get_list(
-				"Journal Entry", filters=filters, pluck="name", limit_page_length=MAX_VOUCHERS + 1
+				"Journal Entry",
+				filters=filters,
+				pluck="name",
+				distinct=True,
+				order_by="name",
+				limit_page_length=MAX_VOUCHERS + 1,
 			)
 		)
 	)
@@ -310,18 +318,22 @@ def _journal_vouchers(scope):
 
 
 def _accounts(company):
+	filters = {"company": company, "is_group": 0, "root_type": ["in", ["Expense", "Income"]]}
+	or_filters = [
+		["account_name", "like", f"%{word}%"] for word in ("charge", "fee", "interest", "commission")
+	]
 	rows = frappe.get_list(
 		"Account",
-		filters={"company": company, "is_group": 0, "root_type": ["in", ["Expense", "Income"]]},
-		or_filters=[
-			["account_name", "like", f"%{word}%"] for word in ("charge", "fee", "interest", "commission")
-		],
+		filters=filters,
+		or_filters=or_filters,
 		fields=["name", "account_name", "root_type"],
 		order_by="name",
 		limit_page_length=MAX_ACCOUNTS + 1,
 	)
 	if len(rows) > MAX_ACCOUNTS:
 		raise OverflowError
+	if len(rows) != len(frappe.get_all("Account", filters=filters, or_filters=or_filters, pluck="name")):
+		raise frappe.PermissionError
 	return rows
 
 
