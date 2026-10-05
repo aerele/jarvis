@@ -22,7 +22,7 @@ from jarvis.chat.triggers_api import (
 	test_trigger_condition,
 	update_trigger,
 )
-from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
+from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, ensure_jarvis_user_role
 from jarvis.triggers import engine
 
 TRIGGER = "Jarvis Trigger"
@@ -30,6 +30,10 @@ ACTIVITY = "Jarvis Trigger Activity"
 
 ADMIN_USER = "jarvis-trigger-admin@example.com"
 PLAIN_USER = "jarvis-trigger-user@example.com"
+# A Jarvis Admin who is NOT a System Manager: holds manage rights (so the
+# condition tester lets them in) but no blanket document read, so the named-doc
+# read check is still exercisable.
+JADMIN_USER = "jarvis-trigger-jadmin@example.com"
 
 
 def _ensure_user(email: str, roles: list[str]) -> None:
@@ -56,6 +60,7 @@ class _TriggersApiTestCase(FrappeTestCase):
 		ensure_jarvis_user_role()
 		_ensure_user(ADMIN_USER, ["System Manager"])
 		_ensure_user(PLAIN_USER, [JARVIS_USER_ROLE])
+		_ensure_user(JADMIN_USER, [JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE])
 		self._orig_user = frappe.session.user
 		self._triggers: list[str] = []
 		self._activities: list[str] = []
@@ -248,19 +253,22 @@ class TestTriggerList(_TriggersApiTestCase):
 
 
 class TestConditionTester(_TriggersApiTestCase):
+	# The tester evaluates a caller-supplied expression server-side, so it is
+	# manage-gated like create/update/delete (Jarvis Admin / System Manager).
+	# Legitimate use therefore runs as a manage-capable user, not a plain one.
 	def test_happy_path(self):
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("ToDo", 'doc.status == "Open"')
 		self.assertEqual(r["data"], {"valid": True})
 
 	def test_invalid_expression_is_a_payload_not_a_500(self):
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("ToDo", "doc.status ==")
 		self.assertFalse(r["data"]["valid"])
 		self.assertTrue(r["data"]["error"])
 
 	def test_unknown_doctype_throws(self):
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		self.assertRaises(frappe.ValidationError, test_trigger_condition, "No Such Doctype Zzz", "True")
 
 	def test_would_fire_against_named_doc(self):
@@ -273,7 +281,7 @@ class TestConditionTester(_TriggersApiTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self._todos.append(todo.name)
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(ADMIN_USER)
 		r = test_trigger_condition("ToDo", 'doc.status == "Open"', docname=todo.name)
 		self.assertTrue(r["data"]["valid"])
 		self.assertTrue(r["data"]["would_fire"])
@@ -281,8 +289,10 @@ class TestConditionTester(_TriggersApiTestCase):
 		self.assertFalse(r["data"]["would_fire"])
 
 	def test_named_doc_requires_read_permission(self):
-		# A ToDo belonging to someone else: plain users only read ToDos they
-		# own or are assigned (frappe.desk.doctype.todo has_permission).
+		# A ToDo belonging to someone else. A Jarvis Admin has manage rights (so
+		# they clear the manage gate) but no blanket read: ToDo read is scoped to
+		# owned/assigned rows (frappe.desk.doctype.todo has_permission), so the
+		# named-doc read check must still refuse them.
 		foreign = frappe.get_doc(
 			{
 				"doctype": "ToDo",
@@ -291,7 +301,7 @@ class TestConditionTester(_TriggersApiTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self._todos.append(foreign.name)
-		frappe.set_user(PLAIN_USER)
+		frappe.set_user(JADMIN_USER)
 		self.assertRaises(
 			frappe.PermissionError,
 			test_trigger_condition,
@@ -299,6 +309,95 @@ class TestConditionTester(_TriggersApiTestCase):
 			"True",
 			foreign.name,
 		)
+
+	def test_plain_jarvis_user_is_refused(self):
+		# The reported escalation (#1): a plain Jarvis User must not reach the
+		# tester at all — it is manage-gated before any evaluation happens.
+		frappe.set_user(PLAIN_USER)
+		self.assertRaises(
+			frappe.PermissionError,
+			test_trigger_condition,
+			"ToDo",
+			'doc.status == "Open"',
+		)
+
+	def test_plain_user_condition_cannot_write_to_any_table(self):
+		# Replay of the reported exploit as a plain Jarvis User: the condition
+		# inserts a `Has Role` row granting System Manager. Two layers must hold —
+		# the manage gate refuses the caller, and even if it were reached the
+		# methodless `_dict` view has no `db_insert`. Assert both: PermissionError,
+		# and no role row was written for the sentinel principal.
+		sentinel = "trigger-exploit-sentinel@example.invalid"
+		exploit = (
+			'[doc.update({"parent": "%s", "parenttype": "User", '
+			'"parentfield": "roles", "role": "System Manager"}), doc.db_insert()]' % sentinel
+		)
+		before = frappe.db.count("Has Role", {"parent": sentinel})
+		frappe.set_user(PLAIN_USER)
+		self.assertRaises(
+			frappe.PermissionError,
+			test_trigger_condition,
+			"Has Role",
+			exploit,
+		)
+		frappe.set_user(self._orig_user)
+		self.assertEqual(frappe.db.count("Has Role", {"parent": sentinel}), before)
+
+	def test_manage_user_condition_cannot_call_document_methods(self):
+		# Defense in depth: even a manage-capable caller who reaches the tester
+		# cannot use the condition to write, because it evaluates against a
+		# methodless view (_ConditionDoc), not a live Document. `doc.update` and
+		# `doc.db_insert` are not fields, so they raise AttributeError; the call is
+		# a plain invalid-condition payload and nothing is persisted.
+		sentinel = "trigger-exploit-sentinel-admin@example.invalid"
+		exploit = (
+			'[doc.update({"parent": "%s", "parenttype": "User", '
+			'"parentfield": "roles", "role": "System Manager"}), doc.db_insert()]' % sentinel
+		)
+		before = frappe.db.count("Has Role", {"parent": sentinel})
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("Has Role", exploit)
+		self.assertTrue(r["ok"])  # a payload, never a 500
+		self.assertFalse(r["data"]["valid"])
+		frappe.set_user(self._orig_user)
+		self.assertEqual(frappe.db.count("Has Role", {"parent": sentinel}), before)
+
+	def test_unknown_field_is_reported_not_silently_valid(self):
+		# A mistyped field must be flagged, not silently resolve to None (which
+		# would let a broken condition read as valid and then never fire).
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("ToDo", 'doc.statuss == "Open"')
+		self.assertFalse(r["data"]["valid"])
+		self.assertIn("does not exist", r["data"]["error"])
+
+	def test_child_table_field_is_reachable(self):
+		# The methodless view must still resolve child-table rows so a real
+		# condition like doc.<child>[0].<field> behaves as it does at fire time.
+		# A plain frappe._dict would shadow a child table named like a dict method
+		# (e.g. `items`), breaking doc.items[0].qty on transaction doctypes; the
+		# wrapper resolves the field instead.
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("User", 'doc.roles[0].role != ""', docname=ADMIN_USER)
+		self.assertTrue(r["data"]["valid"])
+		self.assertTrue(r["data"]["would_fire"])
+
+	def test_error_text_does_not_echo_field_values(self):
+		# `{}[doc.<field>]` raises KeyError(<value>); the friendly error must not
+		# echo that value back (it would be a read oracle). Use a named doc so the
+		# field has a real value, and assert the value is absent from the message.
+		todo = frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "leak-canary-value-12345",
+				"allocated_to": ADMIN_USER,
+				"status": "Open",
+			}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		frappe.set_user(ADMIN_USER)
+		r = test_trigger_condition("ToDo", "{}[doc.description]", docname=todo.name)
+		self.assertFalse(r["data"]["valid"])
+		self.assertNotIn("leak-canary-value-12345", r["data"]["error"])
 
 
 class TestActivityFeed(_TriggersApiTestCase):

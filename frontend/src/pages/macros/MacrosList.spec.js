@@ -479,3 +479,15 @@ describe("MacrosList: an admin's hold and delete", () => {
 		expect(w.findAll(".jv-macro-notice")).toHaveLength(1);
 	});
 });
+
+describe("MacrosList: the Armed badge", () => {
+	it("says what armed means, and not that an admin set it: its owner does", async () => {
+		const { w } = await mountList([macro("armed", { skip_confirmation: 1 }), macro("plain")]);
+		const tip = rowEl(w, "armed").find(".tooltip");
+		expect(tip.attributes("data-text")).toBe(
+			"Armed: this macro's runs write without asking for confirmation."
+		);
+		expect(tip.text()).toBe("Armed");
+		expect(rowEl(w, "plain").find(".tooltip").exists()).toBe(false);
+	});
+});
