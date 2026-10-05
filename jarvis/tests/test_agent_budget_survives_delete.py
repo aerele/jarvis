@@ -88,6 +88,12 @@ class AgentBudgetTestCase(DispatchIdempotencyTestCase):
 			frappe.db.delete(DASHBOARD, {"name": name})
 		for name in frappe.get_all(ACTIVITY, filters={"owner": OTHER_OWNER}, pluck="name"):
 			frappe.delete_doc(ACTIVITY, name, force=True, ignore_permissions=True)
+		frappe.db.delete("ToDo", {"description": "budget-keep todo"})
+		runs = frappe.get_all(RUN, filters={"agent": SLUG}, pluck="name")
+		if runs:
+			frappe.db.delete("Version", {"ref_doctype": RUN, "docname": ["in", runs]})
+			frappe.db.delete("Comment", {"reference_doctype": RUN, "reference_name": ["in", runs]})
+		frappe.db.commit()
 		super().tearDown()
 
 	# ------------------------------------------------------------------ #
@@ -573,6 +579,46 @@ class TestKeptRowsArePurged(AgentBudgetTestCase):
 		frappe.db.commit()
 		self.assertFalse(frappe.db.exists(RUN, old))
 
+	def test_the_purge_removes_what_points_at_a_purged_row(self):
+		old = self._kept(months_ago=1)
+		inst = self._install_as(self.owner)
+		history = self._run(inst, months_ago=2)
+		for run in (old, history):
+			self._traces_on(run)
+
+		agent_scheduler.purge_kept_budget_rows(owner=self.owner)
+		frappe.db.commit()
+
+		self.assertEqual(self._traces(old), {}, "a purged run left rows pointing at it")
+		self.assertEqual(set(self._traces(history)), {"Version", "Comment", "ToDo"})
+
+	def _traces_on(self, run: str) -> None:
+		frappe.db.delete("Version", {"ref_doctype": RUN, "docname": run})
+		frappe.get_doc({"doctype": "Version", "ref_doctype": RUN, "docname": run, "data": "{}"}).insert(
+			ignore_permissions=True
+		)
+		frappe.get_doc(
+			{"doctype": "Comment", "comment_type": "Comment", "reference_doctype": RUN, "reference_name": run}
+		).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"description": "budget-keep todo",
+				"allocated_to": self.owner,
+				"reference_type": RUN,
+				"reference_name": run,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+	def _traces(self, run: str) -> dict:
+		found = {
+			"Version": frappe.db.count("Version", {"ref_doctype": RUN, "docname": run}),
+			"Comment": frappe.db.count("Comment", {"reference_doctype": RUN, "reference_name": run}),
+			"ToDo": frappe.db.count("ToDo", {"reference_type": RUN, "reference_name": run}),
+		}
+		return {k: v for k, v in found.items() if v}
+
 	def test_this_months_kept_rows_are_not_purged(self):
 		cur = self._kept(months_ago=0)
 		agent_scheduler.purge_kept_budget_rows(owner=self.owner)
@@ -585,6 +631,37 @@ class TestKeptRowsArePurged(AgentBudgetTestCase):
 		agent_scheduler.purge_kept_budget_rows(owner=self.owner)
 		frappe.db.commit()
 		self.assertTrue(frappe.db.exists(RUN, history), "run history of an installed agent was purged")
+
+	def test_the_purge_leaves_a_row_that_never_counted(self):
+		"""Only ended, counted rows are kept by an uninstall, so a row with no
+		installation in any other status is not one, and the purge leaves it."""
+		names = []
+		for status in ("running", "failed"):
+			doc = frappe.get_doc(
+				{
+					"doctype": RUN,
+					"agent": SLUG,
+					"trigger": "manual",
+					"status": status,
+					"started_at": now_datetime(),
+				}
+			)
+			doc.insert(ignore_permissions=True)
+			frappe.db.set_value(
+				RUN,
+				doc.name,
+				{"owner": self.owner, "creation": add_months(now_datetime(), -2)},
+				update_modified=False,
+			)
+			names.append(doc.name)
+		frappe.db.commit()
+
+		agent_scheduler.purge_kept_budget_rows(owner=self.owner)
+		frappe.db.commit()
+
+		self.assertEqual(
+			sorted(frappe.get_all(RUN, filters={"name": ["in", names]}, pluck="name")), sorted(names)
+		)
 
 	def test_the_purge_spares_another_users_kept_row(self):
 		theirs = self._install_as(self.other)
