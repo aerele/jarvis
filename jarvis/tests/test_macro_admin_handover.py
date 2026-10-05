@@ -72,7 +72,9 @@ class HandoverBase(e1.AdminBase):
 		ensure_user(TARGET)
 		ensure_user(DISABLED)
 		frappe.db.set_value("User", DISABLED, "enabled", 0)
-		ensure_user(NO_ACCESS, roles=())
+		# A desk user with no Jarvis role: a desk role keeps them a System User, so
+		# the role is the only thing that tells them apart.
+		ensure_user(NO_ACCESS, roles=("Report Manager",))
 		for role in frappe.get_roles(NO_ACCESS):
 			if role in ("Jarvis User", "Jarvis Admin", "System Manager"):
 				frappe.get_doc("User", NO_ACCESS).remove_roles(role)
@@ -653,6 +655,8 @@ class TestTargets(HandoverBase):
 		res = macros_admin_api.admin_handover_targets(search="macro-handover")
 		self.assertEqual(res["max"], controller.MAX_MACROS_PER_OWNER)
 		self.assertEqual(res["users"], [{"user": TARGET, "full_name": "macro-handover-target", "macros": 1}])
-		names = [u["user"] for u in macros_admin_api.admin_handover_targets(search="")["users"]]
-		for absent in (DISABLED, NO_ACCESS, "Administrator", "Guest"):
+		self.assertEqual(frappe.db.get_value("User", NO_ACCESS, "user_type"), "System User")
+		# The first search above already left out DISABLED and NO_ACCESS, who match it.
+		for absent in ("Administrator", "Guest"):
+			names = [u["user"] for u in macros_admin_api.admin_handover_targets(search=absent)["users"]]
 			self.assertNotIn(absent, names)
