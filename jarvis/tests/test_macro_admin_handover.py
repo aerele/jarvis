@@ -26,14 +26,16 @@ What is pinned here:
 
 from __future__ import annotations
 
+import contextvars
 import threading
+import time
 from unittest.mock import patch
 
 import frappe
 from frappe.handler import is_valid_http_method
 from frappe.utils import set_request
 
-from jarvis.chat import macros, macros_admin_api, macros_api
+from jarvis.chat import macro_scheduler, macros, macros_admin_api, macros_api
 from jarvis.exceptions import PermissionDeniedError
 from jarvis.jarvis.doctype.jarvis_macro import jarvis_macro as controller
 from jarvis.tests import test_macro_admin_api as e1
@@ -54,7 +56,27 @@ STEP = "Jarvis Macro Step"
 TARGET = "macro-handover-target@example.com"
 DISABLED = "macro-handover-disabled@example.com"
 NO_ACCESS = "macro-handover-noaccess@example.com"
-HELPERS = (TARGET, DISABLED, NO_ACCESS)
+# Pass the Jarvis gate, but the macro's doctype permission (create, write, delete)
+# is the Jarvis User role's alone: such a user could not switch the macro on.
+SM_ONLY = "macro-handover-smonly@example.com"
+JA_ONLY = "macro-handover-jaonly@example.com"
+# A portal user who holds the Jarvis User role.
+WEBSITE = "macro-handover-website@example.com"
+# Created in this order, and sorted the other way by full name and by address.
+ORDER_FIRST = "macro-handover-order-b@example.com"
+ORDER_SECOND = "macro-handover-order-a@example.com"
+SECOND_TARGET = "macro-handover-second@example.com"
+HELPERS = (
+	TARGET,
+	DISABLED,
+	NO_ACCESS,
+	SM_ONLY,
+	JA_ONLY,
+	WEBSITE,
+	ORDER_FIRST,
+	ORDER_SECOND,
+	SECOND_TARGET,
+)
 NOTICE = macros_api.ADMIN_HANDOVER_NOTICE
 STOPPED = macros_admin_api.STOPPED_BY_ADMIN
 _MISSING = object()
@@ -72,12 +94,24 @@ class HandoverBase(e1.AdminBase):
 		ensure_user(TARGET)
 		ensure_user(DISABLED)
 		frappe.db.set_value("User", DISABLED, "enabled", 0)
-		# A desk user with no Jarvis role: a desk role keeps them a System User, so
-		# the role is the only thing that tells them apart.
-		ensure_user(NO_ACCESS, roles=("Report Manager",))
-		for role in frappe.get_roles(NO_ACCESS):
-			if role in ("Jarvis User", "Jarvis Admin", "System Manager"):
-				frappe.get_doc("User", NO_ACCESS).remove_roles(role)
+		# Desk users without the Jarvis User role (NO_ACCESS with no Jarvis role at
+		# all): a desk role keeps each a System User, so the roles are the only thing
+		# that tells them apart.
+		for user, roles in (
+			(NO_ACCESS, ("Report Manager",)),
+			(SM_ONLY, ("System Manager",)),
+			(JA_ONLY, ("Jarvis Admin",)),
+		):
+			ensure_user(user, roles=roles)
+			for role in ("Jarvis User", "Jarvis Admin", "System Manager"):
+				if role not in roles and role in frappe.get_roles(user):
+					frappe.get_doc("User", user).remove_roles(role)
+		ensure_user(WEBSITE)
+		frappe.db.set_value("User", WEBSITE, "user_type", "Website User")
+		for user, full_name in ((ORDER_FIRST, "Abe Order"), (ORDER_SECOND, "Zed Order")):
+			ensure_user(user)
+			frappe.db.set_value("User", user, "full_name", full_name)
+		ensure_user(SECOND_TARGET)
 		frappe.db.commit()
 
 	def _purge(self):
@@ -94,9 +128,13 @@ class HandoverBase(e1.AdminBase):
 		frappe.db.delete("Document Follow", {"ref_doctype": MACRO, "user": ["in", users]})
 		frappe.db.commit()
 
-	def _handover(self, macro, new_owner=TARGET, *, who=ADMIN):
+	def _handover(self, macro, new_owner=TARGET, *, who=ADMIN, expected_owner=_MISSING):
+		"""As the dialog sends it: with the owner it showed (the stored one, unless
+		given)."""
+		if expected_owner is _MISSING:
+			expected_owner = frappe.db.get_value(MACRO, macro, "owner")
 		frappe.set_user(who)
-		return macros_admin_api.admin_handover(macro, new_owner)
+		return macros_admin_api.admin_handover(macro, new_owner, expected_owner)
 
 	def _row(self, macro):
 		fields = [
@@ -104,6 +142,7 @@ class HandoverBase(e1.AdminBase):
 			"enabled",
 			"schedule_enabled",
 			"next_run_at",
+			"last_run_at",
 			"skip_confirmation",
 			"merged_prompt",
 			"merge_status",
@@ -115,8 +154,9 @@ class HandoverBase(e1.AdminBase):
 		return frappe.db.get_value(MACRO, macro, fields, as_dict=True)
 
 	def _full_macro(self, tag="a"):
-		"""OWNER's macro with everything a hand-over must not carry over: on, scheduled,
-		armed, a summary, a skill on each step, a share, an assignment and a follower."""
+		"""OWNER's macro with everything a hand-over must not carry over: on, scheduled
+		(and run on that schedule), armed, a summary, a skill on each step, a share, an
+		open assignment and a follower. Also a closed assignment, which stays closed."""
 		macro = self._macro(
 			OWNER,
 			tag,
@@ -124,6 +164,7 @@ class HandoverBase(e1.AdminBase):
 			enabled=1,
 			schedule_enabled=1,
 			next_run_at=frappe.utils.add_days(frappe.utils.now_datetime(), 1),
+			last_run_at=frappe.utils.add_days(frappe.utils.now_datetime(), -1),
 			skip_confirmation=1,
 			merged_prompt="Do whatever the old owner wrote here.",
 			merge_status="ready",
@@ -151,6 +192,16 @@ class HandoverBase(e1.AdminBase):
 				"reference_name": macro,
 				"description": "look at this",
 				"status": "Open",
+			}
+		).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "ToDo",
+				"allocated_to": OTHER,
+				"reference_type": MACRO,
+				"reference_name": macro,
+				"description": "done already",
+				"status": "Closed",
 			}
 		).insert(ignore_permissions=True)
 		frappe.get_doc(
@@ -210,6 +261,8 @@ class ArrivesClean:
 		self.assertEqual(
 			(row.enabled, row.schedule_enabled, row.next_run_at, row.skip_confirmation), (0, 0, None, 0)
 		)
+		# The old owner's schedule ran it, not the new owner's.
+		self.assertIsNone(row.last_run_at)
 		self.assertEqual(
 			(row.merged_prompt or "", row.merge_status or "", row.merge_conversation or ""), ("", "", "")
 		)
@@ -223,11 +276,17 @@ class ArrivesClean:
 		self.assertEqual({s.skills for s in steps}, {"[]"})
 		self.assertEqual({s.owner for s in steps}, {TARGET})
 		self.assertFalse(frappe.db.exists("DocShare", {"share_doctype": MACRO, "share_name": macro}))
+		# The open assignment is cancelled; the closed one is history and stays closed.
 		self.assertEqual(
-			frappe.get_all(
-				"ToDo", filters={"reference_type": MACRO, "reference_name": macro}, pluck="status"
-			),
-			["Cancelled"],
+			{
+				t.description: t.status
+				for t in frappe.get_all(
+					"ToDo",
+					filters={"reference_type": MACRO, "reference_name": macro},
+					fields=["description", "status"],
+				)
+			},
+			{"look at this": "Cancelled", "done already": "Closed"},
 		)
 		self.assertFalse(frappe.db.exists("Document Follow", {"ref_doctype": MACRO, "ref_docname": macro}))
 
@@ -268,6 +327,44 @@ class ArrivesClean:
 				attempt()
 			frappe.db.rollback()
 		self.assertEqual(frappe.db.get_value(MACRO, macro, "description"), "mine now")
+
+	def test_both_owners_are_told_with_no_document_named(self):
+		macro = self._macro(OWNER, "told")
+		self._handover(macro)
+		(old,) = self._notices(OWNER)
+		(new,) = self._notices(TARGET)
+		for note in (old, new):
+			self.assertEqual(note.subject, f"{NOTICE}: {TAG}-told")
+			self.assertFalse(note.document_type or note.document_name)
+		self.assertIn(TARGET, old.email_content)
+		self.assertIn(OWNER, new.email_content)
+		self.assertIn("switched off, unscheduled and not armed", new.email_content)
+		self.assertEqual(self._notices(ADMIN), [])
+
+	def test_the_old_owners_scheduled_start_that_reaches_the_lock_late_is_dropped_quietly(self):
+		# The sweep claimed the slot as the old owner; the hand-over committed before
+		# its run_macro took the row lock. Not a failure of the old owner's: no run
+		# row, no Error Log, no notice, and nothing started.
+		macro = self._macro(OWNER, "late-sched", steps=("one", "two"), enabled=1)
+		self._handover(macro)
+		frappe.set_user(TARGET)
+		macros_api.update_macro(macro, enabled=1)  # the new owner switched it on again
+		for row_enabled in (1, 0):
+			with self.subTest(enabled=row_enabled):
+				frappe.db.set_value(MACRO, macro, "enabled", row_enabled, update_modified=False)
+				frappe.db.commit()
+				frappe.set_user(OWNER)
+				with patch("jarvis.chat.api._enqueue_turn") as enqueue:
+					out = macros.run_macro(macro, trigger="scheduled")
+				enqueue.assert_not_called()
+				self.assertFalse(out["ok"])
+				self.assertEqual(out["reason"], macros.BLOCK_MACRO_CHANGED_OWNER)
+				self.assertEqual(frappe.db.count(RUN, {"macro": macro}), 0)
+		# A run by hand keeps its refusal: the person asked, and is told why not.
+		frappe.set_user(OWNER)
+		with self.assertRaises(frappe.PermissionError):
+			macros.run_macro(macro)
+		frappe.db.rollback()
 
 
 class TestWhatArrives(ArrivesClean, WithColumns):
@@ -349,6 +446,9 @@ class TestRefusals(WithColumns):
 			("nobody-here@example.com", "There is no user"),
 			(DISABLED, "is disabled"),
 			(NO_ACCESS, "does not have access to Jarvis"),
+			(WEBSITE, "does not have access to Jarvis"),
+			(SM_ONLY, "does not have the Jarvis User role"),
+			(JA_ONLY, "does not have the Jarvis User role"),
 			("Administrator", "Choose a named user"),
 			("Guest", "Choose a named user"),
 			(OWNER, "already owns this macro"),
@@ -376,6 +476,39 @@ class TestRefusals(WithColumns):
 			self._handover(macro)
 		self.assertEqual(self._row(macro).owner, TARGET)
 
+	def test_a_user_who_could_not_use_the_macro_is_refused_and_a_jarvis_user_is_not(self):
+		# A System Manager passes the Jarvis gate and may read a macro; a Jarvis Admin
+		# passes the gate alone. Neither could switch the macro on, edit or delete it:
+		# the doctype's create, write and delete are the Jarvis User role's.
+		for target in (SM_ONLY, JA_ONLY):
+			with self.subTest(target=target):
+				macro = self._macro(OWNER, f"use-{target[:20]}")
+				before = self._row(macro)
+				with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
+					self._handover(macro, target)
+				self.assertIn("does not have the Jarvis User role", str(raised.exception))
+				self._untouched(macro, before)
+		macro = self._macro(OWNER, "use-ju")
+		self._handover(macro, SECOND_TARGET)
+		self.assertEqual(self._row(macro).owner, SECOND_TARGET)
+
+	def test_a_name_that_is_no_user_comes_back_escaped(self):
+		macro = self._macro(OWNER, "esc")
+		with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
+			self._handover(macro, "<b>x</b>@example.com")
+		self.assertIn("&lt;b&gt;x&lt;/b&gt;", str(raised.exception))
+		self.assertNotIn("<b>", str(raised.exception))
+
+	def test_a_macro_that_changed_hands_since_the_dialog_showed_it_is_refused(self):
+		# The pane showed OTHER as the owner (a stale list): the admin meant OTHER's
+		# macro, not whoever owns it now.
+		macro = self._macro(OWNER, "stale")
+		before = self._row(macro)
+		with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
+			self._handover(macro, expected_owner=OTHER)
+		self.assertIn("changed hands", str(raised.exception))
+		self._untouched(macro, before)
+
 	def test_the_admins_own_macro_is_refused_and_handing_one_to_oneself_is_not(self):
 		own = self._macro(ADMIN, "own")
 		before = self._row(own)
@@ -397,7 +530,10 @@ class TestRefusals(WithColumns):
 		for who in (PLAIN, OWNER, TARGET):
 			with self.subTest(who=who):
 				for fn, kwargs in (
-					(macros_admin_api.admin_handover, {"macro": macro, "new_owner": TARGET}),
+					(
+						macros_admin_api.admin_handover,
+						{"macro": macro, "new_owner": TARGET, "expected_owner": OWNER},
+					),
 					(macros_admin_api.admin_handover_targets, {"search": ""}),
 				):
 					frappe.set_user(who)
@@ -422,7 +558,11 @@ class TestRefusals(WithColumns):
 		before = self._row(macro)
 		frappe.set_user(ADMIN)
 		for bad in (None, "", "  ", ["x"], {"owner": OWNER}, 7):
-			for kwargs in ({"macro": bad, "new_owner": TARGET}, {"macro": macro, "new_owner": bad}):
+			for kwargs in (
+				{"macro": bad, "new_owner": TARGET, "expected_owner": OWNER},
+				{"macro": macro, "new_owner": bad, "expected_owner": OWNER},
+				{"macro": macro, "new_owner": TARGET, "expected_owner": bad},
+			):
 				with self.subTest(kwargs=kwargs):
 					with (
 						patch.object(frappe.db, "set_value") as set_value,
@@ -442,7 +582,7 @@ class TestRefusals(WithColumns):
 		frappe.set_user(ADMIN)
 		gates = e1.TestTheGates()
 		for verb, kwargs in (
-			("admin_handover", {"macro": macro, "new_owner": TARGET}),
+			("admin_handover", {"macro": macro, "new_owner": TARGET, "expected_owner": OWNER}),
 			("admin_handover_targets", {"search": ""}),
 		):
 			with self.subTest(verb=verb):
@@ -496,6 +636,79 @@ class TestLiveRuns(WithColumns):
 		# Sent again once the run can be stopped, it goes through.
 		self.assertEqual(self._handover(macro)["stopped_runs"], 1)
 		self.assertEqual(self._row(macro).owner, TARGET)
+
+	def test_the_refusal_says_how_many_runs_were_stopped(self):
+		macro = self._macro(OWNER, "some")
+		stopped = self._run_row(macro, OWNER, "running")
+		stuck = self._run_row(macro, OWNER, "running")
+		real_stop = macros._stop_run
+
+		def stop(name, **kwargs):
+			if name == stuck:
+				raise frappe.ValidationError("could not be stopped")
+			return real_stop(name, **kwargs)
+
+		with patch.object(macros, "_stop_run", side_effect=stop):
+			with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
+				self._handover(macro)
+		self.assertIn("1 of its runs could not be stopped", str(raised.exception))
+		self.assertIn("1 other was stopped", str(raised.exception))
+		self.assertEqual(self._run(stopped).status, "stopped")
+		frappe.db.set_value(RUN, stuck, "status", "stopped")
+		frappe.db.commit()
+
+	def test_a_held_macro_keeps_its_hold_and_reason_when_the_handover_fails(self):
+		macro = self._macro(OWNER, "held-fail")
+		frappe.set_user(ADMIN)
+		macros_admin_api.admin_hold(macro, "Emails customers wrongly, do not release")
+		run = self._run_row(macro, OWNER, "running")
+		with patch.object(macros, "_stop_run", side_effect=frappe.ValidationError("stuck")):
+			with self.assertRaises(macros_admin_api.MacroHandoverError):
+				self._handover(macro)
+		row = self._row(macro)
+		self.assertEqual(
+			(row.owner, row.admin_hold, row.admin_hold_reason),
+			(OWNER, 1, "Emails customers wrongly, do not release"),
+		)
+		# The Comment says what is under way, and that the hold was already there.
+		(note,) = [c.content for c in self._comments(macro) if "handing this macro over" in c.content]
+		self.assertIn(TARGET, note)
+		self.assertIn("already on hold", note)
+		frappe.db.set_value(RUN, run, "status", "stopped")
+		frappe.db.commit()
+
+	def test_a_handover_that_lifts_an_earlier_hold_says_so(self):
+		macro = self._macro(OWNER, "held-ok")
+		frappe.set_user(ADMIN)
+		macros_admin_api.admin_hold(macro, "Emails customers wrongly")
+		self._handover(macro)
+		row = self._row(macro)
+		self.assertEqual((row.owner, row.admin_hold, row.admin_hold_reason), (TARGET, 0, None))
+		(note,) = [c.content for c in self._comments(macro) if "handed this macro over" in c.content]
+		self.assertIn("This also released the hold set for: Emails customers wrongly", note)
+
+	def test_a_hold_another_admin_set_during_the_handover_is_named_when_lifted(self):
+		macro = self._macro(OWNER, "held-mid")
+		real_stop = macros_admin_api._stop_live_runs
+		done = []
+
+		def stop(name, **kwargs):
+			if not done:  # admin_hold stops runs too
+				done.append(1)
+				macros_admin_api.admin_hold(name, "Paused for review")
+			return real_stop(name, **kwargs)
+
+		with patch.object(macros_admin_api, "_stop_live_runs", side_effect=stop):
+			self._handover(macro)
+		self.assertEqual(self._row(macro).owner, TARGET)
+		(note,) = [c.content for c in self._comments(macro) if "handed this macro over" in c.content]
+		self.assertIn("This also released the hold set for: Paused for review", note)
+
+	def test_a_handover_of_a_macro_that_was_not_held_names_no_other_hold(self):
+		macro = self._macro(OWNER, "not-held")
+		self._handover(macro)
+		(note,) = [c.content for c in self._comments(macro) if "handed this macro over" in c.content]
+		self.assertNotIn("also released", note)
 
 	def test_a_run_start_in_progress_when_the_handover_begins_is_stopped(self):
 		# The run start is mid-insert on another connection (row locked, run row
@@ -597,19 +810,6 @@ class TestHistoryAndNotices(WithColumns):
 		self.assertEqual(frappe.db.get_value(RUN, kept, ["owner", "macro"]), (OWNER, None))
 		self.assertEqual(macros._scheduled_steps_this_month(OWNER), before)
 
-	def test_both_owners_are_told_with_no_document_named(self):
-		macro = self._macro(OWNER, "told")
-		self._handover(macro)
-		(old,) = self._notices(OWNER)
-		(new,) = self._notices(TARGET)
-		for note in (old, new):
-			self.assertEqual(note.subject, f"{NOTICE}: {TAG}-told")
-			self.assertFalse(note.document_type or note.document_name)
-		self.assertIn(TARGET, old.email_content)
-		self.assertIn(OWNER, new.email_content)
-		self.assertIn("switched off, unscheduled and not armed", new.email_content)
-		self.assertEqual(self._notices(ADMIN), [])
-
 	def test_a_comment_names_the_admin_and_both_owners(self):
 		macro = self._macro(OWNER, "comment")
 		self._handover(macro)
@@ -654,9 +854,273 @@ class TestTargets(HandoverBase):
 		frappe.set_user(ADMIN)
 		res = macros_admin_api.admin_handover_targets(search="macro-handover")
 		self.assertEqual(res["max"], controller.MAX_MACROS_PER_OWNER)
-		self.assertEqual(res["users"], [{"user": TARGET, "full_name": "macro-handover-target", "macros": 1}])
+		self.assertEqual(
+			sorted(u["user"] for u in res["users"]),
+			sorted((TARGET, ORDER_FIRST, ORDER_SECOND, SECOND_TARGET)),
+		)
+		self.assertIn({"user": TARGET, "full_name": "macro-handover-target", "macros": 1}, res["users"])
 		self.assertEqual(frappe.db.get_value("User", NO_ACCESS, "user_type"), "System User")
-		# The first search above already left out DISABLED and NO_ACCESS, who match it.
+		# The first search above already left out DISABLED and NO_ACCESS (and the users
+		# without the Jarvis User role), who match it.
 		for absent in ("Administrator", "Guest"):
 			names = [u["user"] for u in macros_admin_api.admin_handover_targets(search=absent)["users"]]
 			self.assertNotIn(absent, names)
+
+	def test_users_without_the_jarvis_user_role_are_not_offered(self):
+		# They pass the Jarvis gate, but could not switch a macro on (see the refusal).
+		frappe.set_user(ADMIN)
+		for absent in (SM_ONLY, JA_ONLY):
+			with self.subTest(user=absent):
+				names = [u["user"] for u in macros_admin_api.admin_handover_targets(search=absent)["users"]]
+				self.assertEqual(names, [])
+
+	def test_a_portal_user_with_the_jarvis_user_role_is_not_offered(self):
+		self.assertIn("Jarvis User", frappe.get_roles(WEBSITE))
+		frappe.set_user(ADMIN)
+		self.assertEqual(macros_admin_api.admin_handover_targets(search=WEBSITE)["users"], [])
+
+	def test_percent_and_underscore_in_the_search_are_matched_as_typed(self):
+		frappe.set_user(ADMIN)
+		for search in ("macro-handover%target", "macro_handover-target"):
+			with self.subTest(search=search):
+				self.assertEqual(macros_admin_api.admin_handover_targets(search=search)["users"], [])
+
+	def test_ordered_by_full_name_and_cut_at_the_cap_saying_so(self):
+		# ORDER_FIRST was created first, and its address sorts after ORDER_SECOND's:
+		# only the full name puts it first.
+		frappe.set_user(ADMIN)
+		res = macros_admin_api.admin_handover_targets(search="macro-handover-order")
+		self.assertEqual([u["user"] for u in res["users"]], [ORDER_FIRST, ORDER_SECOND])
+		self.assertFalse(res["more"])
+		with patch.object(macros_admin_api, "TARGETS_MAX", 1):
+			res = macros_admin_api.admin_handover_targets(search="macro-handover-order")
+		self.assertEqual([u["user"] for u in res["users"]], [ORDER_FIRST])
+		self.assertTrue(res["more"])
+		with patch.object(macros_admin_api, "TARGETS_MAX", 2):
+			res = macros_admin_api.admin_handover_targets(search="macro-handover-order")
+		self.assertEqual(len(res["users"]), 2)
+		self.assertFalse(res["more"])
+
+
+# --------------------------------------------------------------------------- #
+# Races with a second connection
+# --------------------------------------------------------------------------- #
+def _in_other_context(fn, out: dict) -> threading.Thread:
+	"""Run ``fn`` in a thread with its own Frappe context and database connection
+	(another request or worker), its result or error put in ``out``."""
+	site = frappe.local.site
+	sites_path = frappe.local.sites_path
+
+	def body():
+		frappe.init(site=site, sites_path=sites_path)
+		frappe.connect()
+		try:
+			out["result"] = fn()
+		except BaseException as e:
+			out["error"] = e
+			out["tb"] = frappe.get_traceback()
+			frappe.db.rollback()
+		finally:
+			frappe.db.commit()
+			frappe.destroy()
+
+	t = threading.Thread(target=lambda: contextvars.Context().run(body))
+	t.start()
+	return t
+
+
+class TestRaces(WithColumns):
+	def _scheduled_macro(self, tag):
+		return self._macro(
+			OWNER,
+			tag,
+			steps=("one", "two"),
+			enabled=1,
+			schedule_enabled=1,
+			schedule_frequency="Daily",
+			schedule_time="03:00:00",
+			next_run_at=frappe.utils.add_days(frappe.utils.now_datetime(), -1),
+		)
+
+	def _scheduler_noise(self, macro):
+		"""What a failed scheduled start leaves: run rows, the old owner's notices
+		about it, Error Logs."""
+		frappe.db.rollback()
+		frappe.set_user("Administrator")
+		return (
+			frappe.get_all(RUN, filters={"macro": macro}, fields=["status", "owner"]),
+			frappe.get_all(
+				"Notification Log",
+				filters={"for_user": OWNER, "subject": ["like", "Scheduled macro%"]},
+				pluck="subject",
+			),
+			frappe.get_all("Error Log", filters={"method": ["like", f"%{macro}%"]}, pluck="name"),
+		)
+
+	def _clean_scheduler_noise(self, macro):
+		frappe.set_user("Administrator")
+		frappe.db.delete("Error Log", {"method": ["like", f"%{macro}%"]})
+		frappe.db.delete("Notification Log", {"for_user": OWNER, "subject": ["like", "Scheduled macro%"]})
+		frappe.db.commit()
+
+	def test_a_scheduled_start_that_holds_the_row_first_is_stopped(self):
+		macro = self._scheduled_macro("sched-a")
+		locked = threading.Event()
+		real_snapshot = macros._steps_snapshot
+
+		def slow_snapshot(doc, merged):
+			locked.set()
+			time.sleep(1.5)
+			return real_snapshot(doc, merged)
+
+		def start():
+			frappe.set_user(OWNER)
+			return macros.run_macro(macro, trigger="scheduled")
+
+		out = {}
+		with (
+			patch.object(macros, "_steps_snapshot", side_effect=slow_snapshot),
+			patch.object(macros, "_dispatch_step", return_value=None),
+			patch.object(macros, "entitlement_block", return_value=None),
+			patch.object(macros, "publish_to_user", return_value=None),
+		):
+			t = _in_other_context(start, out)
+			self.assertTrue(locked.wait(10))
+			res = self._handover(macro, expected_owner=OWNER)
+			t.join(20)
+		self.assertNotIn("error", out, out.get("tb"))
+		run = out["result"]["data"]["macro_run"]
+		self.assertEqual(res["stopped_runs"], 1)
+		self.assertEqual(frappe.db.get_value(RUN, run, ["status", "owner"]), ("stopped", OWNER))
+		row = self._row(macro)
+		self.assertEqual((row.owner, row.admin_hold, row.enabled), (TARGET, 0, 0))
+
+	def test_a_scheduled_start_that_waits_on_the_owner_write_is_dropped_quietly(self):
+		# The sweep claimed the slot before the hold, and its run_macro (as the old
+		# owner) reaches the row lock only after the owner change committed. Not a
+		# failure: no run row, no notice to the old owner, no Error Log.
+		macro = self._scheduled_macro("sched-b")
+		self._clean_scheduler_noise(macro)
+		frappe.set_user("Administrator")
+		(m,) = frappe.get_all(
+			MACRO,
+			filters={"name": macro},
+			fields=[
+				"name",
+				"macro_name",
+				"owner",
+				"enabled",
+				"schedule_frequency",
+				"schedule_time",
+				"schedule_weekday",
+				"schedule_day_of_month",
+				"next_run_at",
+				"admin_hold",
+			],
+		)
+		now = frappe.utils.now_datetime()
+		claimed = frappe.utils.add_days(now, 1)
+		real_write = macros_admin_api._write_handover
+		out, threads = {}, []
+
+		def sweep():
+			frappe.set_user("Administrator")
+			with patch.object(macro_scheduler, "_claim_slot", return_value=claimed):
+				macro_scheduler._sweep_one(m, now, "Administrator", set())
+			return "swept"
+
+		def write(row, new_owner):
+			threads.append(_in_other_context(sweep, out))
+			time.sleep(1.5)  # the scheduled run_macro now waits for this row lock
+			return real_write(row, new_owner)
+
+		with (
+			patch.object(macros_admin_api, "_write_handover", side_effect=write),
+			patch.object(macros, "_dispatch_step", return_value=None),
+			patch.object(macros, "entitlement_block", return_value=None),
+			patch.object(macros, "publish_to_user", return_value=None),
+		):
+			self._handover(macro)
+			threads[0].join(20)
+		self.assertNotIn("error", out, out.get("tb"))
+		self.assertEqual(self._scheduler_noise(macro), ([], [], []))
+		self.assertEqual(self._row(macro).owner, TARGET)
+		self._clean_scheduler_noise(macro)
+
+	def test_a_second_handover_from_a_stale_dialog_writes_nothing(self):
+		# H2's dialog showed OWNER; H1 completed between H2's read and its hold. H2
+		# must not hold the macro TARGET just received.
+		macro = self._macro(OWNER, "twice")
+		real_load = macros_admin_api._load_macro
+		state = {}
+
+		def load(name):
+			row = real_load(name)
+			if not state:
+				state["done"] = True
+				frappe.set_user(ADMIN)
+				with patch.object(macros_admin_api, "_load_macro", side_effect=real_load):
+					macros_admin_api.admin_handover(macro, TARGET, OWNER)
+			return row
+
+		with patch.object(macros_admin_api, "_load_macro", side_effect=load):
+			with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
+				self._handover(macro, SECOND_TARGET, expected_owner=OWNER)
+		self.assertIn("changed hands", str(raised.exception))
+		frappe.db.rollback()
+		row = self._row(macro)
+		self.assertEqual((row.owner, row.admin_hold, row.admin_hold_reason), (TARGET, 0, None))
+		self.assertFalse([c for c in self._comments(macro) if SECOND_TARGET in c.content])
+		self.assertEqual(self._notices(SECOND_TARGET), [])
+
+	def test_the_old_owners_summarize_spanning_the_handover_starts_nothing(self):
+		# The old owner's Re-summarize passed its checks before the hand-over, and
+		# takes the row lock after it.
+		macro = self._macro(OWNER, "sumrace", steps=("one", "two"))
+		done = []
+
+		def block(owner, **kw):
+			if not done:
+				done.append(1)
+				me = frappe.session.user
+				self._handover(macro, expected_owner=OWNER)
+				frappe.set_user(me)
+			return None
+
+		frappe.set_user(OWNER)
+		with (
+			patch.object(macros, "entitlement_block", side_effect=block),
+			patch("jarvis.chat.api._enqueue_turn", return_value={"ok": True}) as enqueue,
+		):
+			with self.assertRaises(frappe.PermissionError):
+				macros_api.summarize_macro(macro)
+		frappe.db.rollback()
+		enqueue.assert_not_called()
+		row = self._row(macro)
+		self.assertEqual((row.owner, row.merge_status or "", row.merge_conversation or ""), (TARGET, "", ""))
+		self.assertFalse(frappe.db.exists(CONV, {"owner": TARGET, "title": f"Merge: {TAG}-sumrace"}))
+
+	def test_an_admin_delete_racing_a_handover_tells_the_owner_it_deleted(self):
+		# The hand-over commits between the delete's read and its lock: the macro the
+		# delete removes is TARGET's by then.
+		macro = self._macro(OWNER, "del-race")
+		real_stop = macros.stop_runs_of_macro
+		done = []
+
+		def stop(name, **kwargs):
+			if not done:
+				done.append(1)
+				self._handover(macro, expected_owner=OWNER)
+			return real_stop(name, **kwargs)
+
+		frappe.set_user(ADMIN)
+		with patch.object(macros, "stop_runs_of_macro", side_effect=stop):
+			macros_admin_api.admin_delete(macro)
+		self.assertFalse(frappe.db.exists(MACRO, macro))
+		deleted = f"{macros_api.ADMIN_DELETE_NOTICE}:%"
+		self.assertFalse(
+			frappe.db.exists("Notification Log", {"for_user": OWNER, "subject": ["like", deleted]})
+		)
+		self.assertTrue(
+			frappe.db.exists("Notification Log", {"for_user": TARGET, "subject": ["like", deleted]})
+		)
