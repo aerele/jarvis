@@ -2791,8 +2791,9 @@ def get_chat_ui_settings() -> dict:
 	"""
 	require_jarvis_access()
 	settings = frappe.get_single("Jarvis Settings")
-	# Lazy import: keeps this hot endpoint's module import light and avoids
-	# a jarvis.chat.api <-> jarvis.chat.voice cycle.
+	# Lazy imports: keep this hot endpoint's module import light and avoid
+	# jarvis.chat.api <-> jarvis.chat.voice / turn_handler cycles.
+	from jarvis.chat.turn_handler import offered_thinking_levels
 	from jarvis.chat.voice import stt_config, stt_state
 
 	# default_models lets callers (jarvis_onboarding.js,
@@ -2881,13 +2882,10 @@ def get_chat_ui_settings() -> dict:
 		# Settings, keyed by the same provider id the ``pool_models`` rows carry.
 		# See _catalog_models_for_pool.
 		"catalog_models": _catalog_models_for_pool(settings),
-		# Effort levels. Deliberately mirrors ``_ALLOWED_THINKING`` minus the
-		# empty "auto" entry, which the UI renders separately. agent itself
-		# accepts more levels (off/minimal/xhigh/adaptive/max), but
-		# ``Jarvis Conversation.thinking_override`` is a Select limited to
-		# low/medium/high - offering a level the Select rejects would fail the
-		# save, so this list stays pinned to the DocType.
-		"thinking_levels": ["low", "medium", "high"],
+		# Effort levels, minus the empty "auto" entry the UI renders separately.
+		# Empty when no route this tenant has can think: the clients then hide the
+		# effort control (see turn_handler.offered_thinking_levels).
+		"thinking_levels": offered_thinking_levels(settings),
 		# Site timezone: server datetimes are naive strings in THIS zone; the
 		# SPA feeds it to frappe-ui's setConfig("systemTimezone") so dayjsLocal
 		# renders them correctly for viewers in any browser timezone.
