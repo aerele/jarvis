@@ -228,7 +228,7 @@ def render_pdf(
 		# subprocess environment changes).
 		run_env = {**os.environ, "FONTCONFIG_FILE": font_config_file} if font_config_file else None
 		try:
-			# argv list from _build_args (resolved binary + fixed flags), no shell; HTML goes over stdin.
+			# Fixed argv from _build_args, no shell.
 			result = subprocess.run(  # nosemgrep: frappe-subprocess-exec
 				args,
 				input=document.encode("utf-8"),
@@ -695,9 +695,8 @@ def resolve_company_letterhead_footer(
 
 	Unlike ``resolve_letterhead`` (which keeps only logos on a doc-less report), a
 	custom template's footer is PINNED per company, so we keep that company's Letter
-	Head ``footer`` text (address/contact). Company-branded letterheads are usually
-	static; plain company placeholders are filled without running the template (see
-	``_fill_company_placeholders``). Same safety gate as the header path: same-site logos
+	Head ``footer`` text (address/contact); company placeholders are filled, never
+	rendered. Same safety gate as the header path: same-site logos
 	inlined to permission-checked ``data:`` URIs, remote ``<img>`` dropped, then the
 	nh3 letterhead sanitizer (data-images only, no scripts).
 
@@ -738,16 +737,13 @@ def resolve_company_letterhead_footer(
 		return "", "letter head footer could not be applied"
 
 
-# A plain company placeholder in Letter Head HTML, e.g. ``{{ doc.company_name }}``.
+# e.g. {{ doc.company_name }}
 _COMPANY_PLACEHOLDER = re.compile(r"\{\{\s*(?:doc|company)\.([A-Za-z_]\w*)\s*\}\}")
 _JINJA_MARKUP = re.compile(r"\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\}", re.S)
 
 
 def _fill_company_placeholders(raw: str, company) -> str:
-	"""Letter Head HTML with plain ``{{ doc.<field> }}`` / ``{{ company.<field> }}``
-	placeholders filled from ``company`` (escaped). Nothing is executed: any other
-	Jinja (tags, filters, expressions) is dropped, as a doc-less export has no
-	document to evaluate it against."""
+	"""Fill company placeholders (escaped); drop any other Jinja unexecuted."""
 
 	def value(match: re.Match) -> str:
 		field_value = company.get(match.group(1))
