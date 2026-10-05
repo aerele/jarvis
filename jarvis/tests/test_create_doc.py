@@ -64,11 +64,19 @@ class TestCreateDocValidation(FrappeTestCase):
 
 		def fake_new_doc(dt):
 			class _Stub:
+				meta = frappe._dict(fields=[])  # what cast_numbers reads; no numeric fields
+
 				def __init__(self):
 					self._values = {}
 
 				def set(self, f, v):
 					self._values[f] = v
+
+				def get(self, f):
+					return self._values.get(f)
+
+				def get_all_children(self):
+					return []
 
 				def insert(self):
 					pass

@@ -83,7 +83,12 @@ export function coerceRow(table, row, verb) {
 }
 
 function coerceCell(column, v) {
-	if (["Int", "Float", "Currency", "Percent"].includes(column.fieldtype)) return Number(v);
+	if (["Int", "Float", "Currency", "Percent"].includes(column.fieldtype)) {
+		// "1,250.5" is NaN to Number() and would go out as null, clearing the cell:
+		// send it as written for the server's field check to read or refuse.
+		const n = Number(v);
+		return Number.isNaN(n) ? v : n;
+	}
 	if (column.fieldtype === "Check") return coerceCheck(v);
 	return v;
 }
@@ -131,6 +136,71 @@ const ROW_SYSTEM_KEYS = new Set([
 ]);
 export function isRowKeyColumn(key) {
 	return !ROW_SYSTEM_KEYS.has(key) && !String(key).startsWith("__");
+}
+
+// The grid column for a row key the agent proposed that the grid does not list:
+// the child field's real meta when the form meta carries it (extra_columns), so
+// the cell keeps its type, label and link filters and Apply sends a number as a
+// number (#655); a key the child does not have stays a text column.
+export function rowKeyColumn(key, extraColumns) {
+	const known = (extraColumns || []).find((c) => c.fieldname === key);
+	if (known) return { ...known };
+	return { fieldname: key, label: key, fieldtype: "Data", options: "", reqd: 0, read_only: 0 };
+}
+
+// The create_doc / update_doc values a draft model applies: on a create every
+// writable non-blank field and every filled row; on an update only the changed
+// fields and changed tables (CR-3). Shared by Apply and the computed-cell dry run,
+// so the two always send the same thing.
+export function draftValues(p) {
+	const values = {};
+	for (const f of p.fields) {
+		if (!isFieldWritable(f, p.verb)) continue;
+		const changed = String(f.value) !== String(f.orig);
+		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
+			values[f.fieldname] = coerceOut(f);
+	}
+	for (const t of p.tables) {
+		const rows = t.rows
+			.map((r) => coerceRow(t, r, p.verb))
+			.filter((r) => Object.keys(r).length);
+		if (p.verb === "create") {
+			if (rows.length) values[t.fieldname] = rows;
+		} else if (tableChanged(t, JSON.parse(t.origJson))) {
+			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
+		}
+	}
+	return values;
+}
+
+// The read-only columns a card leaves blank somewhere ({table: [fieldnames]}):
+// what ERPNext computes on save (amounts, tax totals) and the dry run can fill (#647).
+export function blankComputedColumns(model) {
+	const out = {};
+	for (const t of model.tables || []) {
+		const blank = t.columns
+			.filter((c) => c.read_only && t.rows.some((r) => String(r[c.fieldname] ?? "") === ""))
+			.map((c) => c.fieldname);
+		if (blank.length) out[t.fieldname] = blank;
+	}
+	return out;
+}
+
+// The dry run's rows for one table, put back on the card rows they came from: a
+// blank row is never sent (draftValues), so the server's rows skip it. null when
+// ERPNext returned a different number of rows (a template added some), since then
+// no row can be matched with confidence (#647).
+export function alignComputedRows(table, serverRows) {
+	const sent = [];
+	table.rows.forEach((r, i) => {
+		if (Object.keys(coerceRow(table, r, "create")).length) sent.push(i);
+	});
+	if (!Array.isArray(serverRows) || serverRows.length !== sent.length) return null;
+	const out = new Array(table.rows.length).fill(undefined);
+	sent.forEach((i, j) => {
+		out[i] = serverRows[j];
+	});
+	return out;
 }
 
 // Saved rows an update would delete: every loaded row (origJson) whose name no

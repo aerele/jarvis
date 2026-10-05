@@ -42,6 +42,14 @@ export function controlFor(fieldtype, options) {
 	}
 }
 
+// A grid Select cell's options: the field's own, plus the current value when they
+// lack it (as panelField does for a main field), so a cell never silently blanks.
+export function cellOptions(column, value) {
+	const options = controlFor("Select", column.options)[1];
+	const v = value == null ? "" : String(value);
+	return v && !options.includes(v) ? [v, ...options] : options;
+}
+
 export function panelField(metaField, value) {
 	let [control, options] = controlFor(metaField.fieldtype, metaField.options);
 	let v = value == null ? "" : String(value);
