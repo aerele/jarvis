@@ -251,6 +251,25 @@ def apply_action(action: dict | str | None = None) -> dict:
 		if (frappe.get_meta(doctype).autoname or "").lower().startswith("prompt"):
 			values = {**values, "name": name}
 
+	from jarvis import api
+	from jarvis.tools import _write_risk
+
+	# The call as the gated route would see it: create {doctype, values}, update
+	# {doctype, name, changes}. Also the audit/receipt args below.
+	tool = f"{verb}_doc"
+	args = (
+		{"doctype": doctype, "values": values}
+		if verb == "create"
+		else {"doctype": doctype, "name": name, "changes": values}
+	)
+	# Write-risk guard (round 2): a structure change is refused from the panel too
+	# (set up in Desk); sensitive configuration is turned into a gated card below,
+	# since the panel holds the values and its one click is not that card.
+	try:
+		_risk = _write_risk.check(tool, args)
+	except api.WriteRefusedError as e:
+		return api._refuse_risky_write(tool, args, e)
+
 	# A File Box chat's card goes through the File Box policy (filebox_cards), whether
 	# the turn end or this Confirm gets to it first - never straight to the write. The
 	# policy only drafts, so a "Create & Submit" leaves the submit to a human.
@@ -276,40 +295,43 @@ def apply_action(action: dict | str | None = None) -> dict:
 				frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 		return res
 
-	from jarvis import api
-
-	# The audit/receipt args, built up front (independent of the write outcome);
-	# a create fills in its real `name` after insert. For create the args are
-	# {doctype, values}; for update {doctype, name, changes}.
-	args = (
-		{"doctype": doctype, "values": values}
-		if verb == "create"
-		else {"doctype": doctype, "name": name, "changes": values}
-	)
+	if _risk == "sensitive":
+		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
 
 	# Surface a failed apply through the SAME {ok:false, error} envelope the
 	# model/confirm paths use (rich detail + hint), instead of leaking Frappe's
 	# raw 403/417 to the SPA. ``mark`` lets _translate_write_error harvest only
 	# the reason THIS write logged.
 	mark = api._msglog_mark()
+	_write_risk.take_refusal()
 	try:
-		if verb == "create":
-			from jarvis.tools.create_doc import create_doc
+		# The panel's write is a tool call with no card: the ORM guard is on (no
+		# record allowed) and the no-commit fence makes a doctype whose save runs
+		# DDL raise ImplicitCommitError before the ALTER (refused as structure).
+		with _write_risk.guard_scope([]), _write_risk.no_commit_fence():
+			if verb == "create":
+				from jarvis.tools.create_doc import create_doc
 
-			res = create_doc(doctype, values)
-			name = res.get("name")
-			if do_submit:
-				# Submit of the JUST-created draft the human authored (the same
-				# payload they saw) - low risk, kept as part of the draft-editor UX.
-				from jarvis.tools.submit_doc import submit_doc
+				res = create_doc(doctype, values)
+				name = res.get("name")
+				if do_submit:
+					# Submit of the JUST-created draft the human authored (the same
+					# payload they saw) - low risk, kept as part of the draft-editor UX.
+					from jarvis.tools.submit_doc import submit_doc
 
-				submit_doc(doctype, name)
-		else:  # update
-			from jarvis.tools.update_doc import update_doc
+					submit_doc(doctype, name)
+			else:  # update
+				from jarvis.tools.update_doc import update_doc
 
-			update_doc(doctype, name, values)
+				update_doc(doctype, name, values)
+		hidden = _write_risk.take_refusal()
+		if hidden is not None:
+			raise hidden  # a hook swallowed the guard's refusal: never report success
 	except Exception as e:
-		envelope = api._translate_write_error(e, mark)
+		hidden = _write_risk.take_refusal()
+		if hidden is not None and not isinstance(e, api.WriteRefusedError):
+			e = hidden
+		envelope = api._translate_write_error(e, mark, doctype=doctype)
 		if envelope is None:
 			# Unexpected - audit + re-raise so a real bug still surfaces as a 500
 			# (never enveloped, never leaks a traceback to the client).
@@ -335,6 +357,20 @@ def apply_action(action: dict | str | None = None) -> dict:
 			error_code=err_obj["code"],
 			error_message=err_obj["message"],
 		)
+		if err_obj["code"] in _write_risk.REFUSAL_CODES:
+			# The guard refused it (the ORM, or the fence before DDL): a refused row in
+			# Jarvis Agent Write, like every other route (E4).
+			from jarvis import agent_audit
+
+			agent_audit.record_write(
+				actor=frappe.session.user,
+				tool=tool,
+				args=args,
+				result=None,
+				outcome="refused",
+				provenance="chat",
+				ref_doctype=err_obj.get("doctype"),
+			)
 		return envelope
 
 	# Audit as a human-authored write, distinct from a model tool call. The
@@ -378,6 +414,46 @@ def apply_action(action: dict | str | None = None) -> dict:
 		resp["run_id"] = _cont.get("run_id")
 		resp["message_id"] = _cont.get("message_id")
 	return resp
+
+
+def _park_sensitive(
+	tool: str, args: dict, conversation: str, verb: str, name: str, message: str = ""
+) -> dict:
+	"""Turn a draft-panel write of sensitive configuration into the gated card
+	(R2-8): the same park the assistant's own call gets, run as the person, so it
+	is shown in full and needs its own Confirm. ``parked`` tells the panel the
+	change is waiting on that card, not saved; a refusal (another card already
+	waiting, a failed dry run) comes back as the gate's own envelope."""
+	from jarvis import api
+
+	# ``message``: the draft's message; stamped on the card (preview.from_draft) so
+	# both clients show that draft as waiting, also after a reload.
+	prev = frappe.flags.get("jarvis_park_from_draft")
+	frappe.flags["jarvis_park_from_draft"] = message or None
+	try:
+		res = api._run_tool(tool, args, conversation=conversation)
+	finally:
+		frappe.flags["jarvis_park_from_draft"] = prev
+	if not (res.get("ok") and (res.get("data") or {}).get("status") == "pending_confirmation"):
+		err = res.get("error") if isinstance(res.get("error"), dict) else {}
+		if err.get("code") == "ConfirmationPendingError":
+			# The gate's text is written for the model ("end your turn"); a person
+			# clicked the panel, so say it plainly.
+			err["message"] = _(
+				"A confirmation for an earlier change is already waiting in this chat. "
+				"Confirm or discard it first."
+			)
+		return res
+	return {
+		"ok": True,
+		"verb": verb,
+		"name": name,
+		"parked": True,
+		"doc_url": "",
+		"note": _(
+			"This needs its own confirmation card, now waiting in the chat. Nothing is saved until it is confirmed."
+		),
+	}
 
 
 def _name_missing_fields(err_obj: dict, doctype: str, values: dict) -> None:
@@ -643,7 +719,9 @@ def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> di
 		with impersonate(exec_user):
 			# Same envelope + audit as an inline write - dispatch_confirmed bypasses
 			# the gate so the stored call actually executes instead of parking again.
-			result = api.dispatch_confirmed(record["tool"], record["args"])
+			# allow_risky: the human confirmed this card, so the write-risk guard
+			# admits the sensitive records its arguments name (and nothing else).
+			result = api.dispatch_confirmed(record["tool"], record["args"], allow_risky=True)
 			# run_method returns its target verbatim; strip permlevel>0 fields the agent
 			# can't read before they reach the receipt / continuation (still as exec_user).
 			api._apply_run_method_read_filter(record["tool"], result)

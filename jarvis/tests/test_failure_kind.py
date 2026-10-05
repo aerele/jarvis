@@ -173,7 +173,7 @@ class TestRealSavesClassified(FrappeTestCase):
 		self.assertEqual((r["ok"], r["error"]["kind"]), (False, "fixable"), r)
 
 	def test_duplicate_name_is_fixable(self):
-		args = {"doctype": "Role", "values": {"role_name": "_J2A Duplicate Role", "desk_access": 1}}
+		args = {"doctype": "UOM", "values": {"uom_name": "_J2A Duplicate UOM"}}
 		self.assertTrue(_envelope("create_doc", args)["ok"])
 		r = _envelope("create_doc", args)
 		self.assertEqual((r["ok"], r["error"]["kind"]), (False, "fixable"), r)

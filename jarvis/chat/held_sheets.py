@@ -978,7 +978,7 @@ def file_questions(tool: str, args: dict, conversation: str) -> dict:
 	created to the sheet."""
 	from jarvis import api
 
-	result = api.dispatch_confirmed(tool, args, provenance="auto_apply")
+	result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 	if tool in held_parties.CREATE_TOOLS and result.get("ok"):
 		names = [n for dt, n in held_edit.created_refs(tool, args, result) if dt == AR and n]
 		if names and link_to_sheet(conversation, names) and isinstance(result.get("data"), dict):

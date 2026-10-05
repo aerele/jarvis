@@ -1,8 +1,9 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import * as api from "../api";
 import { agentName } from "@/branding";
 import { cardTableRemovals, cardTableSummary, cardTableValues } from "../lib/cardTables";
+import { parkedNoteOf } from "@shared/lib/draftParked.js";
 
 // The agent proposes a document; a human applies it.
 //
@@ -17,14 +18,30 @@ import { cardTableRemovals, cardTableSummary, cardTableValues } from "../lib/car
 const props = defineProps({
 	action: { type: Object, required: true },
 	conversation: { type: String, required: true },
+	// Set when this draft already became a gated confirmation card (sensitive
+	// configuration): it shows as waiting and can't be applied again.
+	parkedNote: { type: String, default: "" },
+	// The message this draft came from: the server stamps it on the gated card so
+	// the waiting state can be found again after a reload.
+	messageKey: { type: String, default: "" },
 });
-const emit = defineEmits(["applied", "dismissed"]);
+const emit = defineEmits(["applied", "dismissed", "parked"]);
 
-const state = ref("review"); // review | busy | done
+const state = ref(props.parkedNote ? "parked" : "review"); // review | busy | done | parked
 const error = ref("");
 const applied = ref(null);
 // A File Box chat's Confirm goes to the Approval Board: the server says what happened.
-const note = ref("");
+const note = ref(props.parkedNote || "");
+// The waiting card can also be found after the card mounted (a reload's resync).
+watch(
+	() => props.parkedNote,
+	(n) => {
+		if (n && state.value !== "done") {
+			note.value = n;
+			state.value = "parked";
+		}
+	}
+);
 
 const isEmail = computed(() => props.action.kind === "email");
 const verb = computed(() => String(props.action.verb || "").toLowerCase());
@@ -120,10 +137,20 @@ async function apply() {
 			conversation: props.conversation,
 			continue: props.action.continue ? 1 : 0,
 			card: props.action,
+			message: props.messageKey,
 		});
 		if (r?.ok === false) {
 			error.value = r.error?.message || r.reason || "Couldn't save that.";
 			state.value = "review";
+			return;
+		}
+		// Sensitive configuration: not saved here, a confirmation card now waits in
+		// the chat. Waiting, not done, and never applied twice.
+		const parked = parkedNoteOf(r);
+		if (parked) {
+			note.value = parked;
+			state.value = "parked";
+			emit("parked", parked);
 			return;
 		}
 		applied.value = r?.data?.name || r?.name || "";
@@ -210,6 +237,15 @@ async function copyBody() {
 		</div>
 
 		<div v-if="invalid || error" class="jv-action-err">{{ invalid || error }}</div>
+		<!-- Always present, so the parked note is announced when it fills. -->
+		<div
+			class="jv-action-parked"
+			:class="{ 'is-empty': state !== 'parked' }"
+			role="status"
+			aria-live="polite"
+		>
+			{{ state === "parked" ? note : "" }}
+		</div>
 
 		<div v-if="state === 'done'" class="jv-action-done">
 			<svg
@@ -230,7 +266,7 @@ async function copyBody() {
 			</template>
 		</div>
 
-		<div v-else class="jv-action-foot">
+		<div v-else-if="state !== 'parked'" class="jv-action-foot">
 			<button
 				class="jv-btn is-ghost"
 				:disabled="state === 'busy'"
@@ -339,6 +375,16 @@ async function copyBody() {
 	color: var(--green);
 	font-size: 13px;
 	font-weight: 600;
+}
+.jv-action-parked {
+	padding: 11px 12px;
+	border-top: 1px solid var(--border);
+	color: var(--ink7);
+	font-size: 13px;
+}
+.jv-action-parked.is-empty {
+	padding: 0;
+	border-top: 0;
 }
 .jv-action-foot {
 	display: flex;
