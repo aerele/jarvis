@@ -303,6 +303,25 @@ describe("bank reconciliation review configuration", () => {
 		await flushPromises();
 		expect(wrapper.text()).toContain("Choose a voucher lookback from 0 to 90 calendar days.");
 	});
+	it("a saved configuration reloads clean, with no fiscal year field", async () => {
+		apiAgents.getBankReconReviewDefaults.mockResolvedValue({
+			...bankDefaults(),
+			fiscal_years: [{ name: "2026-2027", from_date: "2026-04-01", to_date: "2027-03-31" }],
+		});
+		const saved = {
+			company: "Example",
+			bank_account: "Example Bank - EX",
+			from_date: "2026-09-01",
+			to_date: "2026-09-30",
+			voucher_lookback_days: 30,
+			policy_version: "BANK-RECON-v1",
+			review_scope: "proposals_only",
+		};
+		const wrapper = mountForm(saved, { configKeys });
+		await flushPromises();
+		expect(wrapper.text()).not.toContain("Fiscal year");
+		expect(wrapper.emitted("dirty").at(-1)).toEqual([false]);
+	});
 });
 
 describe("AP explicit review configuration", () => {

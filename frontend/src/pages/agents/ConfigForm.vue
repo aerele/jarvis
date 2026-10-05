@@ -225,7 +225,10 @@ const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
 let defaultsRequest = 0;
 const visibleFields = computed(() => [
-	...SCOPE_CONFIG_FIELDS.map((field) => {
+	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
+	...SCOPE_CONFIG_FIELDS.filter(
+		(field) => !(bankRecon.value && field.key === "fiscal_year")
+	).map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
 		if (bankRecon.value && field.type === "date-range")
 			return { ...field, help: "Statement window. Lines dated inside it are reviewed." };
@@ -322,8 +325,11 @@ const advanced = ref("{}");
 const advancedError = ref("");
 const initialState = ref("");
 
+// Only rendered fields count: a default filled into a field this agent never
+// shows or saves (e.g. report_date) must not leave the form looking unsaved.
 function formState() {
-	return JSON.stringify({ form, advanced: advanced.value });
+	const shown = Object.fromEntries([...visibleKeys.value].sort().map((key) => [key, form[key]]));
+	return JSON.stringify({ form: shown, advanced: advanced.value });
 }
 
 function seed(cfg) {
@@ -474,12 +480,13 @@ function fillEmptySettings() {
 	const fiscal = candidates.length === 1 ? candidates[0] : null;
 	const dates = fiscalDates(fiscal);
 	if (dates) {
-		if (!form.fiscal_year) form.fiscal_year = fiscal.name;
+		if (!form.fiscal_year && visibleKeys.value.has("fiscal_year"))
+			form.fiscal_year = fiscal.name;
 		if (!form.from_date) form.from_date = dates.from_date;
 		if (!form.to_date)
 			form.to_date = [dates.to_date, form.report_date || data.site_date].sort()[0];
 	}
-	if (!form.report_date)
+	if (!form.report_date && visibleKeys.value.has("report_date"))
 		form.report_date = [form.to_date || data.site_date, data.site_date].sort()[0];
 }
 
