@@ -855,3 +855,60 @@ class TestSkillChildTableBatch(SkillToolsTestCase):
 			res = get_skill("sttool-dup")
 		pf.assert_called_once()  # R>1 -> batched
 		self.assertEqual(res["description"], "peer-private-desc")  # caller's own row wins
+
+
+class TestAToolReadsADoctypeByItsCanonicalName(SkillToolsTestCase):
+	"""Skill rows are scoped by hooks registered under the doctype's exact name, so a
+	tool reads a doctype by its canonical name, whatever case the call spells it in."""
+
+	def setUp(self):
+		super().setUp()
+		_make_skill(OWNER, f"{PFX}-case-own", "own", scope="User")
+		_make_skill(PEER, f"{PFX}-case-shared", "shared", scope="User", shared_with=[OWNER])
+		self.private = _make_skill(THIRD, f"{PFX}-case-private", "private", scope="User").name
+
+	def _dispatch(self, tool, args):
+		from jarvis.tools.registry import dispatch
+
+		with _as(OWNER):
+			return dispatch(tool, args)
+
+	def test_get_list_in_any_case_reads_only_the_callers_skills(self):
+		for doctype in (SKILL, SKILL.lower(), SKILL.upper()):
+			with self.subTest(doctype=doctype):
+				rows = self._dispatch(
+					"get_list",
+					{
+						"doctype": doctype,
+						"fields": ["skill_name"],
+						"filters": {"skill_name": ["like", f"{PFX}-case-%"]},
+					},
+				)
+				self.assertEqual(
+					sorted(r["skill_name"] for r in rows), [f"{PFX}-case-own", f"{PFX}-case-shared"]
+				)
+
+	def test_get_doc_in_any_case_is_refused_another_users_private_skill(self):
+		for doctype in (SKILL, SKILL.lower()):
+			with self.subTest(doctype=doctype):
+				with self.assertRaises((PermissionDeniedError, frappe.PermissionError)):
+					self._dispatch("get_doc", {"doctype": doctype, "name": self.private})
+
+	def test_query_in_any_case_reads_only_the_callers_skills(self):
+		for doctype in (SKILL, SKILL.lower()):
+			with self.subTest(doctype=doctype):
+				res = self._dispatch(
+					"query",
+					{
+						"spec": {
+							"from": doctype,
+							"alias": "s",
+							"select": ["s.skill_name"],
+							"where": [{"field": "s.skill_name", "op": "like", "value": f"{PFX}-case-%"}],
+						}
+					},
+				)
+				rows = res["rows"] if isinstance(res, dict) else res
+				self.assertEqual(
+					sorted(r["skill_name"] for r in rows), [f"{PFX}-case-own", f"{PFX}-case-shared"]
+				)

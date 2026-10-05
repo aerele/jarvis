@@ -81,6 +81,7 @@ from jarvis.exceptions import (
 	ResultTooLargeError,
 )
 from jarvis.tools import _expr
+from jarvis.tools._doctype_name import canonical_doctype
 
 # Row guard: refuse a result over this size unless the caller passes
 # ``confirm_large=True``. Mirrors the run_query guard so the agent's
@@ -250,10 +251,11 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	# Joins.
 	for j in spec.get("joins") or []:
 		# SEC-003: validate the join's table-name + alias sinks.
-		_validate_doctype(j["doctype"])
+		join_dt = canonical_doctype(j["doctype"])
+		_validate_doctype(join_dt)
 		_validate_identifier(j["alias"], "alias")
-		joined_table = frappe.qb.DocType(j["doctype"]).as_(j["alias"])
-		alias_map[j["alias"]] = (j["doctype"], joined_table)
+		joined_table = frappe.qb.DocType(join_dt).as_(j["alias"])
+		alias_map[j["alias"]] = (join_dt, joined_table)
 		on_criterion = _build_on_criterion(j["on"], alias_map)
 		join_method_name = _JOIN_METHODS[j.get("type", "inner")]
 		q = getattr(q, join_method_name)(joined_table).on(on_criterion)
@@ -320,7 +322,9 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	# ``for dt in doctypes: for alias ...`` double loop (every alias's
 	# doctype is in ``doctypes``), and lets the child branch resolve the
 	# scoping parent from THIS alias's join/where signals.
-	engine = _make_permission_engine(q, [table for (_, table) in alias_map.values()], spec["from"])
+	engine = _make_permission_engine(
+		q, [table for (_, table) in alias_map.values()], canonical_doctype(spec["from"])
+	)
 	for alias, (resolved_dt, table) in alias_map.items():
 		q = _weave_record_gate(q, engine, alias, resolved_dt, table, spec, alias_map)
 
@@ -487,11 +491,11 @@ def _collect_doctypes(spec: dict) -> list[str]:
 	def _walk(node: dict) -> None:
 		if not isinstance(node, dict):
 			return
-		from_dt = node.get("from")
+		from_dt = canonical_doctype(node.get("from"))
 		if isinstance(from_dt, str) and from_dt not in out:
 			out.append(from_dt)
 		for j in node.get("joins") or []:
-			dt = j.get("doctype")
+			dt = canonical_doctype(j.get("doctype"))
 			if isinstance(dt, str) and dt not in out:
 				out.append(dt)
 		for predicate_list_key in ("where", "having"):
@@ -988,13 +992,13 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 	"""Build the FROM table and seed the alias_map with the FROM entry.
 	The alias_map maps spec-alias → (doctype, pypika.Table) so later
 	stages can resolve ``"alias.field"`` references."""
-	from_dt = spec["from"]
+	from_dt = canonical_doctype(spec["from"])
 	# SEC-003: validate the table-name sink and any explicit alias before
 	# they reach pypika. The doctype-name fallback (below) is guarded by
 	# the existence check; an explicitly-supplied alias flows into
 	# ``.as_()`` and must be a bare identifier.
 	_validate_doctype(from_dt)
-	alias = spec.get("alias") or from_dt
+	alias = spec.get("alias") or spec["from"]  # as the spec's own references spell it
 	if spec.get("alias"):
 		_validate_identifier(spec["alias"], "alias")
 	# ``frappe.qb.DocType("Name")`` returns a pypika Table; ``.as_(alias)``
@@ -1365,10 +1369,11 @@ def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *
 		if j["alias"] in sub_alias_map:
 			raise InvalidArgumentError(f"EXISTS sub-spec alias {j['alias']!r} collides")
 		# SEC-003: validate the sub-spec join's table-name + alias sinks.
-		_validate_doctype(j["doctype"])
+		join_dt = canonical_doctype(j["doctype"])
+		_validate_doctype(join_dt)
 		_validate_identifier(j["alias"], "alias")
-		joined_table = frappe.qb.DocType(j["doctype"]).as_(j["alias"])
-		sub_alias_map[j["alias"]] = (j["doctype"], joined_table)
+		joined_table = frappe.qb.DocType(join_dt).as_(j["alias"])
+		sub_alias_map[j["alias"]] = (join_dt, joined_table)
 		on_criterion = _build_on_criterion(j["on"], sub_alias_map)
 		join_method_name = _JOIN_METHODS[j.get("type", "inner")]
 		sub_q = getattr(sub_q, join_method_name)(joined_table).on(on_criterion)
@@ -1404,7 +1409,7 @@ def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *
 		a: (dt, table) for a, (dt, table) in sub_alias_map.items() if a not in outer_alias_map
 	}
 	sub_engine = _make_permission_engine(
-		sub_q, [table for (_, table) in sub_local_aliases.values()], sub_spec["from"]
+		sub_q, [table for (_, table) in sub_local_aliases.values()], canonical_doctype(sub_spec["from"])
 	)
 	# Apply the record gate to every alias's table object. Earlier code
 	# de-duplicated by doctype on the assumption that the returned criterion
