@@ -1,5 +1,6 @@
 """Bank reconciliation review: config, custody, completeness and proposals-only staging."""
 
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -370,7 +371,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		names = {v["name"] for v in self.snapshot()["datasets"]["vouchers"]}
 		self.assertNotIn(self.zero_je, names)
 		self.assertEqual(self.voucher(self.snapshot(), self.je)["direction"], "out")
-		self.assertEqual(self.voucher(self.snapshot(), self.je)["amount"], "700.0")
+		self.assertEqual(Decimal(self.voucher(self.snapshot(), self.je)["amount"]), Decimal("700"))
 
 	def test_only_submitted_bank_links_lock_a_voucher(self):
 		snap = self.snapshot()
@@ -382,6 +383,43 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 			snap = self.snapshot()
 		self.assertFalse(snap["complete"])
 		self.assertEqual(snap["reason_code"], "permission_slice")
+
+	def hide_from_list(self, doctype, name):
+		real = frappe.get_list
+
+		def get_list(dt, *args, **kwargs):
+			rows = real(dt, *args, **kwargs)
+			if dt != doctype or kwargs.get("ignore_permissions"):
+				return rows
+			return [r for r in rows if (r if isinstance(r, str) else r["name"]) != name]
+
+		return patch.object(frappe, "get_list", side_effect=get_list)
+
+	def test_hidden_journal_entry_fails_closed(self):
+		with self.hide_from_list("Journal Entry", self.je):
+			snap = self.snapshot()
+		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "permission_slice"))
+
+	def test_hidden_charge_account_fails_closed(self):
+		with self.hide_from_list("Account", "Bank Charges - TBRR"):
+			snap = self.snapshot()
+		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "permission_slice"))
+
+	def test_payment_union_is_capped_before_any_read(self):
+		read = review._read
+		seen = []
+		with (
+			patch.object(review, "MAX_VOUCHERS", 2),
+			patch.object(review, "_read", side_effect=lambda dt, n: seen.append(dt) or read(dt, n)),
+		):
+			snap = self.snapshot()
+		self.assertEqual(snap["reason_code"], "run_truncated_watermark")
+		self.assertNotIn("Payment Entry", seen)
+
+	def test_journal_cap_counts_entries_not_bank_rows(self):
+		scope = review.scope_from_config(config(company=E2E_CO, bank_account=self.bank_account))
+		with patch.object(review, "MAX_VOUCHERS", 1):
+			self.assertRaises(OverflowError, review._journal_vouchers, scope)
 
 	def test_capacity_limit_is_typed(self):
 		with patch.object(review, "MAX_VOUCHERS", 1):
