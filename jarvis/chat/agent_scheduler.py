@@ -1904,7 +1904,7 @@ def _kept_row_clear_sql() -> str:
 	for df in frappe.get_meta(RUN).fields:
 		if df.fieldname in _KEPT_ROW_FIELDS or df.fieldname == "installation":
 			continue
-		if df.fieldtype in no_value_fields or df.fieldtype in table_fields:
+		if df.fieldtype in no_value_fields or df.fieldtype in table_fields or df.get("is_virtual"):
 			continue
 		parts.append(f", `{df.fieldname}` = {0 if df.fieldtype in _ZERO_FIELDTYPES else 'NULL'}")
 	return "".join(parts)
