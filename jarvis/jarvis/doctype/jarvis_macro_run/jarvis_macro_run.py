@@ -9,8 +9,10 @@ to decide whether to enqueue the next step, and the SPA renders progress from th
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisMacroRun(Document):
+
+class JarvisMacroRun(NotRenamable, Document):
 	pass
 
 

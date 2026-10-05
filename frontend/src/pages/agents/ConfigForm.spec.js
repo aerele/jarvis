@@ -31,6 +31,11 @@ const ALL_AGENT_SPECIFIC_PATHS = [
 
 const api = vi.hoisted(() => ({ searchLink: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/api", () => api);
+const apiAgents = vi.hoisted(() => ({
+	getAPReviewDefaults: vi.fn(),
+	getARReviewDefaults: vi.fn(),
+}));
+vi.mock("@/api/agents", () => apiAgents);
 
 vi.mock("frappe-ui", () => ({
 	Autocomplete: {
@@ -105,9 +110,391 @@ function field(w, label) {
 	return w.find(`[data-label="${label}"]`);
 }
 
+function fiscalYearPicker(wrapper) {
+	return wrapper
+		.findAllComponents({ name: "Autocomplete" })
+		.find((component) => component.props("placeholder") === "Search Fiscal Year…");
+}
+
+function apDefaults(company = "Example") {
+	return {
+		defaults: {
+			company,
+			policy_version: "AP-MATCH-v1",
+			price_tolerance_percent: 0,
+			basis: "current_records",
+			review_scope: "document_matching_only",
+		},
+		site_date: "2026-09-30",
+		fiscal_years: [
+			{ name: "2026-2027", from_date: "2026-04-01", to_date: "2027-03-31" },
+			{ name: "2025-2026", from_date: "2025-04-01", to_date: "2026-03-31" },
+		],
+		message: "",
+	};
+}
+
+describe("AR review configuration", () => {
+	const configKeys = [
+		"report_date",
+		"policy_version",
+		"settlement_hold_days",
+		"basis",
+		"review_scope",
+	];
+	function arDefaults(company = "Example") {
+		const result = apDefaults(company);
+		delete result.defaults.price_tolerance_percent;
+		Object.assign(result.defaults, {
+			policy_version: "AR-REVIEW-v1",
+			settlement_hold_days: 3,
+			review_scope: "review_and_drafts_only",
+		});
+		return result;
+	}
+	beforeEach(() => {
+		apiAgents.getARReviewDefaults.mockReset().mockResolvedValue(arDefaults());
+		apiAgents.getAPReviewDefaults.mockClear();
+	});
+	it("uses the shared fiscal-year picker and saves explicitly unsent settings", async () => {
+		const wrapper = mountForm({}, { configKeys });
+		await flushPromises();
+		expect(apiAgents.getARReviewDefaults).toHaveBeenCalled();
+		expect(apiAgents.getAPReviewDefaults).not.toHaveBeenCalled();
+		expect(fiscalYearPicker(wrapper).props("modelValue").value).toBe("2026-2027");
+		expect(wrapper.text()).toContain("older open receivables");
+		expect(wrapper.text()).toContain("India Compliance");
+		expect(field(wrapper, "Net-price tolerance").exists()).toBe(false);
+		expect(field(wrapper, "Recent-settlement hold").element.value).toBe("3");
+		await field(wrapper, "Save configuration").trigger("click");
+		expect(wrapper.emitted("save")[0][0]).toMatchObject({
+			...arDefaults().defaults,
+			fiscal_year: "2026-2027",
+			from_date: "2026-04-01",
+			report_date: "2026-09-30",
+		});
+	});
+	it("preserves saved review policy and zero-day holds", async () => {
+		const policy = {
+			...arDefaults().defaults,
+			policy_version: "Finance-policy-9",
+			settlement_hold_days: 0,
+			from_date: "2026-04-01",
+			to_date: "2026-08-31",
+			report_date: "2026-08-31",
+		};
+		const wrapper = mountForm(policy, { configKeys });
+		await flushPromises();
+		await field(wrapper, "Fill empty settings").trigger("click");
+		await flushPromises();
+		await field(wrapper, "Save configuration").trigger("click");
+		expect(wrapper.emitted("save")[0][0]).toEqual({ ...policy, fiscal_year: "2026-2027" });
+	});
+	it("does not overwrite edits with delayed defaults", async () => {
+		let resolve;
+		apiAgents.getARReviewDefaults.mockReturnValue(
+			new Promise((done) => {
+				resolve = done;
+			})
+		);
+		const wrapper = mountForm({}, { configKeys });
+		await field(wrapper, "AR review policy reference").setValue("Reviewed-v2");
+		resolve(arDefaults());
+		await flushPromises();
+		expect(field(wrapper, "AR review policy reference").element.value).toBe("Reviewed-v2");
+		expect(field(wrapper, "Recent-settlement hold").element.value).toBe("");
+	});
+});
+
+describe("AP explicit review configuration", () => {
+	const configKeys = [
+		"report_date",
+		"policy_version",
+		"price_tolerance_percent",
+		"basis",
+		"review_scope",
+	];
+
+	it("uses the same fiscal-year picker, year label and help as other agents", async () => {
+		const config = { company: "Example", fiscal_year: "2026-2027" };
+		const wrapper = mountForm(config, { configKeys });
+		const other = mountForm(config);
+		await flushPromises();
+		expect(fiscalYearPicker(wrapper).props("modelValue")).toEqual(
+			fiscalYearPicker(other).props("modelValue")
+		);
+		expect(fiscalYearPicker(wrapper).props("options")).toEqual([
+			{ label: "2026-2027", value: "2026-2027" },
+			{ label: "2025-2026", value: "2025-2026" },
+		]);
+		expect(wrapper.text()).toContain("Defaults to the current fiscal year");
+		expect(wrapper.find('select[data-label="Fiscal year"]').exists()).toBe(false);
+		wrapper.unmount();
+		other.unmount();
+	});
+
+	it("searches only the company's readable fiscal years using the shared picker", async () => {
+		vi.useFakeTimers();
+		const wrapper = mountForm({ company: "Example" }, { configKeys });
+		try {
+			await flushPromises();
+			await fiscalYearPicker(wrapper).find("input").setValue(" 2025 ");
+			await vi.advanceTimersByTimeAsync(300);
+			await flushPromises();
+			expect(fiscalYearPicker(wrapper).props("options")).toEqual([
+				{ label: "2025-2026", value: "2025-2026" },
+			]);
+			expect(api.searchLink).not.toHaveBeenCalled();
+		} finally {
+			wrapper.unmount();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps manual entry available when defaults cannot be read", async () => {
+		apiAgents.getAPReviewDefaults.mockRejectedValue(new Error("Forbidden"));
+		const wrapper = mountForm(
+			{ company: "Example" },
+			{
+				configKeys,
+				validationErrors: {
+					policy_version: "Enter an AP matching policy reference (1–128 characters).",
+					price_tolerance_percent: "Enter a net-price tolerance from 0 to 100%.",
+				},
+			}
+		);
+		expect(wrapper.find('[role="status"]').text()).toContain(
+			"Complete these settings before running"
+		);
+		await flushPromises();
+		expect(wrapper.text()).toContain("Could not load suggested settings");
+		expect(wrapper.find('[role="status"]').text()).toContain("net-price tolerance");
+		expect(field(wrapper, "Net-price tolerance").element.value).toBe("");
+		await field(wrapper, "Save configuration").trigger("click");
+		expect(wrapper.emitted("save")[0][0]).toEqual({ company: "Example" });
+	});
+
+	it("reports unsaved edits and preserves them when field keys are merely reloaded", async () => {
+		const policy = {
+			...apDefaults().defaults,
+			fiscal_year: "2026-2027",
+			from_date: "2026-04-01",
+			to_date: "2026-09-30",
+			report_date: "2026-09-30",
+			policy_version: "AP-v1",
+		};
+		const wrapper = mountForm(policy, { configKeys });
+		await flushPromises();
+		expect(wrapper.emitted("dirty").at(-1)).toEqual([false]);
+		await field(wrapper, "AP matching policy reference").setValue("AP-v2");
+		expect(wrapper.emitted("dirty").at(-1)).toEqual([true]);
+		await wrapper.setProps({ configKeys: [...configKeys] });
+		expect(field(wrapper, "AP matching policy reference").element.value).toBe("AP-v2");
+		await wrapper.setProps({ config: { ...policy, policy_version: "AP-v2" } });
+		await flushPromises();
+		expect(wrapper.emitted("dirty").at(-1)).toEqual([false]);
+	});
+
+	it("prevents editing AP settings while their save is in flight", async () => {
+		const wrapper = mountForm({}, { configKeys, saving: true });
+		expect(wrapper.find("fieldset").attributes("disabled")).toBeDefined();
+		await wrapper.setProps({ saving: false });
+		expect(wrapper.find("fieldset").attributes("disabled")).toBeUndefined();
+	});
+
+	it("reloads fiscal-year choices after configuration is saved", async () => {
+		const wrapper = mountForm({ company: "Example" }, { configKeys });
+		await flushPromises();
+		await wrapper.setProps({ saving: true });
+		await wrapper.setProps({ config: { company: "Example", fiscal_year: "2026-2027" } });
+		await wrapper.setProps({ saving: false });
+		await flushPromises();
+		expect(fiscalYearPicker(wrapper).props("options")).toContainEqual({
+			label: "2025-2026",
+			value: "2025-2026",
+		});
+	});
+
+	it("preserves a custom cross-year window and saves zero tolerance", async () => {
+		const configKeys = [
+			"report_date",
+			"policy_version",
+			"price_tolerance_percent",
+			"basis",
+			"review_scope",
+		];
+		const wrapper = mountForm(
+			{
+				company: "Example",
+				from_date: "2026-03-01",
+				to_date: "2026-04-30",
+				report_date: "2026-04-15",
+				policy_version: "AP-v1",
+				price_tolerance_percent: 0,
+				basis: "current_records",
+				review_scope: "document_matching_only",
+			},
+			{ configKeys }
+		);
+		await flushPromises();
+		expect(wrapper.text()).toContain("company, fiscal period");
+		expect(fiscalYearPicker(wrapper).props("modelValue")).toBeNull();
+		expect(field(wrapper, "Evidence cutoff").element.value).toBe("2026-04-15");
+		expect(field(wrapper, "AP matching policy reference").element.value).toBe("AP-v1");
+		expect(field(wrapper, "Net-price tolerance").element.value).toBe("0");
+		await wrapper.find('[data-label="Save configuration"]').trigger("click");
+		expect(wrapper.emitted("save")[0][0]).toMatchObject({
+			report_date: "2026-04-15",
+			policy_version: "AP-v1",
+			price_tolerance_percent: 0,
+			basis: "current_records",
+			review_scope: "document_matching_only",
+		});
+	});
+
+	it("shows unsaved starter settings and company fiscal-year-to-date dates", async () => {
+		const wrapper = mountForm({}, { configKeys });
+		await flushPromises();
+		expect(fiscalYearPicker(wrapper).props("modelValue")).toEqual({
+			label: "2026-2027",
+			value: "2026-2027",
+		});
+		expect(field(wrapper, "Period from").element.value).toBe("2026-04-01");
+		expect(field(wrapper, "Period to").element.value).toBe("2026-09-30");
+		expect(field(wrapper, "Evidence cutoff").element.value).toBe("2026-09-30");
+		expect(field(wrapper, "Net-price tolerance").element.value).toBe("0");
+		expect(wrapper.text()).toContain(
+			"not accounting-standard certification or policy approval"
+		);
+		expect(wrapper.emitted("dirty").at(-1)).toEqual([true]);
+		expect(wrapper.emitted("save")).toBeUndefined();
+		await field(wrapper, "Save configuration").trigger("click");
+		expect(wrapper.emitted("save")[0][0]).toEqual({
+			...apDefaults().defaults,
+			fiscal_year: "2026-2027",
+			from_date: "2026-04-01",
+			to_date: "2026-09-30",
+			report_date: "2026-09-30",
+		});
+	});
+
+	it("adds the matching fiscal year without replacing saved policy, tolerance or dates", async () => {
+		const policy = {
+			...apDefaults().defaults,
+			policy_version: "helooo",
+			price_tolerance_percent: 10,
+			from_date: "2026-04-01",
+			to_date: "2026-08-31",
+			report_date: "2026-09-01",
+		};
+		const wrapper = mountForm(policy, { configKeys });
+		await flushPromises();
+		await field(wrapper, "Fill empty settings").trigger("click");
+		await flushPromises();
+		await fiscalYearPicker(wrapper).find('[data-option="2026-2027"]').trigger("click");
+		await field(wrapper, "Save configuration").trigger("click");
+		expect(wrapper.emitted("save")[0][0]).toEqual({ ...policy, fiscal_year: "2026-2027" });
+	});
+
+	it("uses historical year end rather than today when a fiscal year is explicitly chosen", async () => {
+		const wrapper = mountForm({}, { configKeys });
+		await flushPromises();
+		await fiscalYearPicker(wrapper).find('[data-option="2025-2026"]').trigger("click");
+		expect(field(wrapper, "Period from").element.value).toBe("2025-04-01");
+		expect(field(wrapper, "Period to").element.value).toBe("2026-03-31");
+		expect(field(wrapper, "Evidence cutoff").element.value).toBe("2026-03-31");
+		wrapper.findComponent({ name: "Autocomplete" }).vm.$emit("update:modelValue", {
+			value: "Example",
+		});
+		await flushPromises();
+		expect(fiscalYearPicker(wrapper).props("modelValue")).toEqual({
+			label: "2025-2026",
+			value: "2025-2026",
+		});
+		fiscalYearPicker(wrapper).vm.$emit("update:modelValue", null);
+		await flushPromises();
+		expect(fiscalYearPicker(wrapper).props("modelValue")).toBeNull();
+		expect(field(wrapper, "Period from").element.value).toBe("2025-04-01");
+		await field(wrapper, "Save configuration").trigger("click");
+		expect(wrapper.emitted("save")[0][0]).not.toHaveProperty("fiscal_year");
+	});
+
+	it("does not choose arbitrarily between overlapping or future fiscal years", async () => {
+		for (const fiscal_years of [
+			[
+				...apDefaults().fiscal_years,
+				{ name: "Calendar 2026", from_date: "2026-01-01", to_date: "2026-12-31" },
+			],
+			[{ name: "Future", from_date: "2027-04-01", to_date: "2028-03-31" }],
+		]) {
+			apiAgents.getAPReviewDefaults.mockResolvedValue({ ...apDefaults(), fiscal_years });
+			const wrapper = mountForm({ company: "Example" }, { configKeys });
+			await flushPromises();
+			expect(fiscalYearPicker(wrapper).props("modelValue")).toBeNull();
+			expect(field(wrapper, "Period from").element.value).toBe("");
+			expect(field(wrapper, "Period to").element.value).toBe("");
+			wrapper.unmount();
+		}
+	});
+
+	it("does not apply late suggestions over an edited or submitted form", async () => {
+		for (const action of ["edit", "save"]) {
+			let resolveDefaults;
+			apiAgents.getAPReviewDefaults.mockReturnValue(
+				new Promise((resolve) => {
+					resolveDefaults = resolve;
+				})
+			);
+			const wrapper = mountForm({ company: "Example" }, { configKeys });
+			if (action === "edit") await field(wrapper, "Net-price tolerance").setValue("7");
+			else await field(wrapper, "Save configuration").trigger("click");
+			resolveDefaults(apDefaults());
+			await flushPromises();
+			expect(field(wrapper, "Net-price tolerance").element.value).toBe(
+				action === "edit" ? "7" : ""
+			);
+			expect(field(wrapper, "Period from").element.value).toBe("");
+			wrapper.unmount();
+		}
+	});
+
+	it("fences company lookups and never applies the previous company's fiscal calendar", async () => {
+		let resolveOld;
+		apiAgents.getAPReviewDefaults.mockImplementation((company) =>
+			company === "Example"
+				? new Promise((resolve) => {
+						resolveOld = resolve;
+				  })
+				: Promise.resolve({
+						...apDefaults("Second"),
+						fiscal_years: [
+							{ name: "Second FY", from_date: "2026-07-01", to_date: "2027-06-30" },
+						],
+				  })
+		);
+		const wrapper = mountForm({ company: "Example" }, { configKeys });
+		wrapper
+			.findComponent({ name: "Autocomplete" })
+			.vm.$emit("update:modelValue", { value: "Second" });
+		await flushPromises();
+		resolveOld(apDefaults());
+		await flushPromises();
+		expect(fiscalYearPicker(wrapper).props("modelValue")).toEqual({
+			label: "Second FY",
+			value: "Second FY",
+		});
+		expect(field(wrapper, "Period from").element.value).toBe("2026-07-01");
+		expect(fiscalYearPicker(wrapper).props("options")).toEqual([
+			{ label: "Second FY", value: "Second FY" },
+		]);
+	});
+});
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	api.searchLink.mockResolvedValue([]);
+	apiAgents.getAPReviewDefaults.mockReset();
+	apiAgents.getAPReviewDefaults.mockResolvedValue(apDefaults());
 });
 
 describe("the known-settings form always renders, config empty or not", () => {
@@ -126,6 +513,7 @@ describe("the known-settings form always renders, config empty or not", () => {
 		expect(w.text()).toContain("Rounding step");
 		// the old code-key reference list (a <code> chip per key) is gone
 		expect(w.find("code").exists()).toBe(false);
+		expect(apiAgents.getAPReviewDefaults).not.toHaveBeenCalled();
 	});
 
 	it("shows each field's help text", () => {

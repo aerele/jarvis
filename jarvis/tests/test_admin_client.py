@@ -1012,6 +1012,602 @@ class TestSecretScrubbingAtBoundary(FrappeTestCase):
 				post_update_llm_creds("p", "m", "b", "k")
 		self.assertEqual(str(cm.exception), "no active subscription on this account")
 
+	# The shapes below reach _scrub_secrets from more than the admin envelope: a
+	# macro run's stored reason (macros._one_line) and the voice errors scrub the
+	# text of an HTTP library's exception, which carries the request's URL and
+	# headers. Called directly: the pattern is what is under test.
+
+	def test_bearer_token_after_authorization_is_redacted(self):
+		# The old keyword pattern took "Bearer" as the value and left the token.
+		out = admin_client._scrub_secrets("echoed Authorization: Bearer abc123tokenvalue here")
+		self.assertNotIn("abc123tokenvalue", out)
+		self.assertEqual(out, "echoed Authorization=[REDACTED] here")
+
+	def test_basic_credentials_after_authorization_are_redacted(self):
+		out = admin_client._scrub_secrets("Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA== rejected")
+		self.assertNotIn("dXNlcjpwYXNzd29yZA", out)
+		self.assertIn("rejected", out)
+
+	def test_bare_bearer_token_is_redacted(self):
+		out = admin_client._scrub_secrets("upstream said: Bearer abc123tokenvalue was rejected")
+		self.assertNotIn("abc123tokenvalue", out)
+		self.assertEqual(out, "upstream said: Bearer [REDACTED] was rejected")
+
+	def test_a_long_bearer_token_with_no_digit_is_redacted(self):
+		token = "AbCdEfGhIjKlMnOpQrStUvWx"
+		out = admin_client._scrub_secrets(f"Bearer {token}")
+		self.assertNotIn(token, out)
+
+	def test_url_userinfo_is_redacted_and_the_host_kept(self):
+		out = admin_client._scrub_secrets("GET https://svc_user:s3cr3t-pw@host.example/x failed")
+		self.assertNotIn("s3cr3t-pw", out)
+		self.assertNotIn("svc_user", out)
+		self.assertEqual(out, "GET https://[REDACTED]@host.example/x failed")
+
+	def test_the_whole_query_string_of_a_url_is_redacted(self):
+		# Every name gives the same output, so no subcase passes on the back of the
+		# keyword pattern (which knows api_key / secret / access_token and would leave
+		# "?api_key=[REDACTED]"): the query string goes whole, whatever is in it.
+		for param in ("token", "key", "sig", "signature", "api_key", "secret", "access_token", "page"):
+			for lead in ("?", "?page=2&"):
+				with self.subTest(param=param, lead=lead):
+					out = admin_client._scrub_secrets(
+						f"GET https://host.example/x{lead}{param}=Zq9vVALUE77 returned 403"
+					)
+					self.assertEqual(out, "GET https://host.example/x?[REDACTED] returned 403")
+
+	def test_a_presigned_url_loses_its_signature(self):
+		# A list of credential parameter names missed these: nothing in
+		# "X-Amz-Signature" or "X-Amz-Security-Token" is on such a list.
+		out = admin_client._scrub_secrets(
+			"403 Client Error: Forbidden for url: https://bucket.s3.amazonaws.com/b/k"
+			"?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE"
+			"&X-Amz-Signature=9f8a7b6c5d&X-Amz-Security-Token=FQoGZXIvYXdzE"
+		)
+		self.assertEqual(
+			out, "403 Client Error: Forbidden for url: https://bucket.s3.amazonaws.com/b/k?[REDACTED]"
+		)
+
+	def test_a_path_with_no_host_loses_its_query_string_too(self):
+		# The shape `requests` prints: "... with url: /path?query".
+		out = admin_client._scrub_secrets(
+			"Max retries exceeded with url: /api/v1/audio?key=Zq9vVALUE77 (Caused by X)"
+		)
+		self.assertEqual(out, "Max retries exceeded with url: /api/v1/audio?[REDACTED] (Caused by X)")
+
+	# Shapes that made a pattern rescan one long run from many starting points.
+	_SLOW_SHAPES = (
+		("dotted run", "a." * 100000),
+		("hyphenated run", "de-ad-be-ef-" * 17000),
+		("scheme characters then a userinfo", "a+.-" * 50000 + "://x:y"),
+		("an unclosed quoted key", '"' + "token" * 40000),
+		# The JWT pattern once started again at every "-eyJ" of a run.
+		("JWT starts in one run", "-eyJ" * 50000),
+		("JWT starts, long segments", "-eyJaaaaaaaaaaaaaaaa" * 10000),
+		("JWT starts, then one dot", "eyJaaaaaaaaaa-" * 15000 + ".a"),
+		("JWT starts, a last segment of hyphens", "-eyJ" * 50000 + "aaaaaaaaaa.a.-"),
+		("closing brackets after a query", "x?a=1" + ")]" * 100000),
+		("an unclosed quoted value", 'password: "' + "a\\" * 100000),
+		("a token key with no secret", "token " + "a" * 200000),
+		("closing punctuation after a query", "x?a=1" + "),'" * 70000),
+		("header words in one run", "x-" * 100000),
+		("one long header name", "x-" + "a-" * 100000),
+	)
+
+	def test_every_pattern_is_fast_on_a_long_adversarial_string(self):
+		# The URL-userinfo pattern once rescanned a run of scheme characters from every
+		# word boundary in it, and the JWT pattern from every "-eyJ". The patterns are
+		# timed here WITHOUT the input cap, so the cap is not what makes this pass.
+		# Measured locally at 50 ms or less each; the bound leaves room for a slow CI box.
+		import time
+
+		for label, text in self._SLOW_SHAPES:
+			with self.subTest(shape=label):
+				self.assertGreaterEqual(len(text), 200000)
+				started = time.perf_counter()
+				for pattern, replacement in admin_client._SECRET_PATTERNS:
+					text = pattern.sub(replacement, text)
+				self.assertLess(time.perf_counter() - started, 0.5)
+
+	def test_scrubbing_a_long_adversarial_string_is_fast(self):
+		import time
+
+		for label, text in self._SLOW_SHAPES:
+			with self.subTest(shape=label):
+				started = time.perf_counter()
+				admin_client._scrub_secrets(text)
+				self.assertLess(time.perf_counter() - started, 0.5)
+
+	def test_text_past_the_input_cap_is_cut_before_any_pattern_sees_it(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		seen = []
+
+		class Recording:
+			def sub(self, _replacement, text):
+				seen.append(len(text))
+				return text
+
+		with patch.object(admin_client, "_SECRET_PATTERNS", ((Recording(), ""),)):
+			admin_client._scrub_secrets("word " * cap)
+		# Once on the capped input, once more on the text as cut for the message.
+		self.assertEqual(len(seen), 2)
+		self.assertLessEqual(seen[0], cap)
+		self.assertLessEqual(seen[1], admin_client._MAX_MESSAGE_CHARS)
+
+	def test_the_input_cap_never_returns_an_unscrubbed_tail(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		for label, text, expected in (
+			# A credential the cap cuts in two would be left as a prefix no pattern
+			# knows: the cut goes back to the last whitespace, so it is dropped whole.
+			(
+				"a credential across the cap",
+				"api_key=" + "A" * (cap - 30) + " " + key + " and more",
+				"api_key=[REDACTED] ...[truncated]",
+			),
+			# Whatever lies past the cap is gone, not passed through.
+			(
+				"a credential past the cap",
+				"api_key=" + "A" * cap + " then " + key,
+				"api_key=[REDACTED] ...[truncated]",
+			),
+			("no whitespace to cut at", "A" * (cap + 10), "A" * 500 + " ...[truncated]"),
+		):
+			with self.subTest(case=label):
+				out = admin_client._scrub_secrets(text)
+				self.assertEqual(out, expected)
+				self.assertEqual(admin_client._scrub_secrets(out), out)
+
+	def test_a_long_body_with_one_early_space_keeps_its_first_characters(self):
+		# The cut went back to the LAST whitespace wherever it was, which here is the
+		# one after "Error:", and the operator was left with "Error: ...[truncated]".
+		# It now goes back at most _MAX_CUT_BACKOFF_CHARS, else stays at the cap.
+		body = 'Error: {"exc_type":"ValidationError","exception":"' + "x" * 30000 + '"}'
+		out = admin_client._scrub_secrets(body)
+		self.assertEqual(out, body[: admin_client._MAX_MESSAGE_CHARS] + " ...[truncated]")
+		self.assertEqual(admin_client._scrub_secrets(out), out)
+
+	def test_the_cut_still_goes_back_to_whitespace_that_is_near_the_cap(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		near = admin_client._MAX_CUT_BACKOFF_CHARS - 10
+		seen = []
+
+		class Recording:
+			def sub(self, _replacement, text):
+				seen.append(text)
+				return text
+
+		with patch.object(admin_client, "_SECRET_PATTERNS", ((Recording(), ""),)):
+			admin_client._scrub_secrets("x" * (cap - near) + " " + key * 10)
+		self.assertEqual(seen[0], "x" * (cap - near))
+
+	def test_the_truncation_marker_survives_a_second_scrub(self):
+		# The keyword and Authorization patterns allow whitespace after "=" or ":",
+		# so " ...[truncated]" was read as the value and replaced.
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		for label, text, expected in (
+			(
+				"keyword, then a long run",
+				"password= " + "A" * (cap + 50),
+				"password=[REDACTED] ...[truncated]",
+			),
+			(
+				"header, then a long run",
+				"Authorization: " + "A" * (cap + 50),
+				"Authorization=[REDACTED] ...[truncated]",
+			),
+			("a marked text that ends in a keyword", "password= ...[truncated]", "password= ...[truncated]"),
+			("the same, a header", "Authorization: ...[truncated]", "Authorization: ...[truncated]"),
+			("the same, a quoted key", '{"api_key": ...[truncated]', '{"api_key": ...[truncated]'),
+			("the message cut lands after a keyword", "x" * 489 + " password: hunter2", None),
+			("the message cut lands after a header", "x" * 484 + " Authorization: Bearer abc123", None),
+			("the input cut lands after a keyword", "api_key= " + "A" * (cap - 9) + " tail", None),
+		):
+			with self.subTest(case=label):
+				out = admin_client._scrub_secrets(text)
+				self.assertTrue(out.endswith(" ...[truncated]"), out[-40:])
+				if expected is not None:
+					self.assertEqual(out, expected)
+				self.assertEqual(admin_client._scrub_secrets(out), out)
+				self.assertEqual(out.count("...[truncated]"), 1)
+
+	def test_a_value_the_message_cut_leaves_open_is_redacted_on_the_first_pass(self):
+		# The value runs over two lines, so the quoted-key pattern leaves it in the
+		# full text. Cut for the message it is an open value at the end of the text.
+		s = self._S
+		text = "x" * 470 + ' {"api_key": "' + s + s + "\n" + s + '"}'
+		out = admin_client._scrub_secrets(text)
+		self.assertNotIn(s[:6], out)
+		self.assertLessEqual(len(out), admin_client._MAX_MESSAGE_CHARS + len(" ...[truncated]"))
+		self.assertEqual(admin_client._scrub_secrets(out), out)
+
+	def test_text_at_the_input_cap_is_not_marked_as_cut(self):
+		cap = admin_client._MAX_SCRUB_INPUT_CHARS
+		self.assertEqual(admin_client._scrub_secrets("api_key=" + "A" * (cap - 8)), "api_key=[REDACTED]")
+
+	def test_the_input_cap_loses_nothing_a_caller_shows(self):
+		# Every caller shows at most _MAX_MESSAGE_CHARS of the result (a macro run's
+		# reason is cut to 2,000 before it gets here and to 120 after).
+		from jarvis.chat import macros
+
+		self.assertGreaterEqual(admin_client._MAX_SCRUB_INPUT_CHARS, 10 * macros._SCRUB_INPUT_MAX)
+		self.assertGreaterEqual(admin_client._MAX_SCRUB_INPUT_CHARS, 40 * admin_client._MAX_MESSAGE_CHARS)
+
+	def test_a_raw_admin_body_is_scrubbed_before_it_is_cut(self):
+		# Cut first, a key that straddles the cut kept a prefix too short for its pattern.
+		key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+		resp = MagicMock(status_code=400, text="x" * 478 + " " + key + " was refused")
+		with self.assertRaises(AdminValidationError) as cm:
+			admin_client._raise_for_admin_raw(resp)
+		self.assertNotIn("sk-ant", str(cm.exception))
+		self.assertLess(len(str(cm.exception)), 600)
+
+	def test_a_jwt_glued_after_a_hyphen_is_still_redacted(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"
+		for text, expected in (
+			(f"tok-{jwt} refused", "tok-[REDACTED] refused"),
+			(f"a_b-c-{jwt}", "a_b-c-[REDACTED]"),
+			(f"id_token rejected: {jwt}.", "id_token rejected: [REDACTED]."),
+			(f"x.{jwt}", "x.[REDACTED]"),
+			# Not a word boundary before "eyJ": never was a match.
+			(f"tok_{jwt}", f"tok_{jwt}"),
+			("eyJhbGciOiJIUzI1NiJ9.only-two", "eyJhbGciOiJIUzI1NiJ9.only-two"),
+		):
+			with self.subTest(text=text[:40]):
+				self.assertEqual(admin_client._scrub_secrets(text), expected)
+
+	def test_the_jwt_pattern_matches_what_the_word_boundary_form_matched(self):
+		# The linear pattern is longer than the one it replaced. This holds the two
+		# to the same output on JWT-shaped pieces put together at random (seeded).
+		import random
+		import re
+
+		was = re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b")
+		now, replacement = next(
+			(pat, repl) for pat, repl in admin_client._SECRET_PATTERNS if "eyJ" in pat.pattern
+		)
+		pieces = ["eyJ", "-", "_", ".", "a", "aaaaaaaaaa", " ", "eyJaaaaaaaaaaaa", "-eyJ", ".b.c"]
+		pieces += ["9", "\n", "--", "..", "x-", "=", "/"]
+		rng = random.Random(20261002)
+		for _ in range(20000):
+			text = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 10)))
+			self.assertEqual(now.sub(replacement, text), was.sub("[REDACTED]", text), text)
+
+	# (text, what must not survive). The security review's probe corpus, less the
+	# shapes this scrub does not claim (an unlabelled token, a short all-letter
+	# Bearer value, a header it has no name for).
+	_S = "S3CR3Tvalue9Zq"
+	_S2 = "OTHERs3cret77"
+	_LEAKS = (
+		(f"Authorization: Bearer {_S}", [_S]),
+		(f"authorization: bearer {_S}", [_S]),
+		(f"Authorization=Bearer {_S}", [_S]),
+		(f"Authorization:\tBearer\t{_S}", [_S]),
+		(f"Authorization: Bearer\n {_S}", [_S]),
+		(f"{{'Authorization': 'Bearer {_S}'}}", [_S]),
+		(f'{{"Authorization": "Bearer {_S}"}}', [_S]),
+		(f'{{"Authorization":"Bearer {_S}"}}', [_S]),
+		("Authorization: Basic dXNlcjpTM0NSM1R2YWx1ZTlacQ==", ["dXNlcjpTM0NSM1R2YWx1ZTlacQ"]),
+		(f"Authorization: token abcdef123456:{_S}", [_S, "abcdef123456"]),
+		(f"{{'Authorization': 'token abcdef123456:{_S}'}}", [_S, "abcdef123456"]),
+		('{"Authorization": "Basic dXNlcjpwYXNzd29yZA=="}', ["dXNlcjpwYXNzd29yZA"]),
+		(f"token abcdef123456:{_S}", [_S]),
+		(f"Proxy-Authorization: Basic {_S}==", [_S]),
+		(f"X-Api-Key: {_S}", [_S]),
+		(f"{{'X-Jarvis-Token': '{_S}'}}", [_S]),
+		(f"Bearer {_S}", [_S]),
+		(f"BEARER {_S}", [_S]),
+		("Bearer abcdefghijklmnopqrst", ["abcdefghijklmnopqrst"]),
+		("Bearer a1.b_c~d+e/f-g=", ["a1.b_c~d+e/f-g"]),
+		(f"Bearer tok_{_S}_tail", [_S, "_tail"]),
+		(f"Bearer abcdef123456:{_S}", [_S]),
+		(f"Bearer abc123:{_S}", [_S]),
+		(f"Bearer\n{_S}", [_S]),
+		(f"https://user:{_S}@host.example/path", [_S]),
+		("https://user:p%40ss9Zq@host.example/path", ["p%40ss9Zq"]),
+		(f"https://{_S}@github.com/org/repo.git", [_S]),
+		(f"https://:{_S}@host/x", [_S]),
+		(f"redis://:{_S}@redis.internal:6379/0", [_S]),
+		(f"https://user:pa@{_S}@host/x", [_S]),
+		(f"https://user:pa:{_S}@host/x", [_S]),
+		(f"redis://default:{_S}@10.0.0.4:6379/0", [_S]),
+		(f"mysql+pymysql://root:{_S}@db:3306/site", [_S]),
+		(f"HTTPS://u:{_S}@host/x", [_S]),
+		(f"https://h/x?token={_S}#frag", [_S]),
+		(f"https://h/x?a=1;token={_S}", [_S]),
+		(f"https://h/x?a=1&amp;token={_S}", [_S]),
+		(f"https://h/x?passwd={_S}", [_S]),
+		(f"https://h/cb?code={_S}&state=xyz", [_S]),
+		(f"https://s3/x?X-Amz-Credential=AKIA&X-Amz-Signature={_S}", [_S]),
+		(f"https://s3/x?X-Amz-Security-Token={_S}", [_S]),
+		(f"https://h/x?redirect=%2Fy%3Ftoken%3D{_S}", [_S]),
+		(f"grant_type=refresh_token&refresh_token={_S}&client_id=abc", [_S]),
+		(f"client_secret={_S}&x=1", [_S]),
+		(f'{{"api_key": "{_S}"}}', [_S]),
+		(f'{{"api_key":"{_S}"}}', [_S]),
+		(f'{{"token": "{_S}"}}', [_S]),
+		(f'{{"access_token": "{_S}", "expires": 3600}}', [_S]),
+		(f'{{"password": "correct horse {_S}"}}', [_S, "correct horse"]),
+		(f'{{"password": "an escaped \\" quote {_S}"}}', [_S]),
+		(f'{{"apiKey": "{_S}"}}', [_S]),
+		(f'{{"clientSecret": "{_S}"}}', [_S]),
+		(f"{{'api_secret': '{_S}'}}", [_S]),
+		(
+			f"body was {{'provider': 'p', 'model': 'm', 'api_key': '{_S}', 'auth_mode': 'api_key'}}",
+			[_S],
+		),
+		(f"body was {{'refresh_token': '{_S}'}}", [_S]),
+		(f"api_key={_S} is invalid", [_S]),
+		(f'password: "correct horse {_S}" was refused', [_S, "correct horse"]),
+		(f"line1\nAuthorization: Bearer {_S}\nline3 api_key={_S2}\nhttps://u:{_S}@h/x", [_S, _S2]),
+		("key sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV rejected", ["ABCDEFGHIJKLMNOPQRSTUV"]),
+		("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM", ["SflKxwRJSMeKKF2QT4fwpM"]),
+		(f"401 Client Error: Unauthorized for url: https://u:{_S}@h/x?token={_S2}", [_S, _S2]),
+		("x" * 470 + f" api_key={_S}{_S2}", [_S, _S2]),
+		# A query string with no path before it, and a form body with no "?".
+		(f"?token={_S}", [_S]),
+		(f"GET /x ?token={_S}", [_S]),
+		(f"https://h/x??token={_S}", [_S]),
+		(f"grant_type=client&token={_S}", [_S]),
+		(f"a=1&sig={_S}", [_S]),
+		(f"a=1&key={_S}", [_S]),
+		(f"https://h/x?a=1 &token={_S}", [_S]),
+		(f"https://h/x?a=1\n&token={_S}", [_S]),
+		(f"https://h/cb#id_token={_S}", [_S]),
+		(f"https://h/cb#token={_S}", [_S]),
+		(f"https://h/x;token={_S}", [_S]),
+		# A query string that holds what would end a URL elsewhere.
+		(f"https://h/x?name=O'Brien&session={_S}", [_S]),
+		(f"https://h/x?filter=(a,b)&session={_S}", [_S]),
+		(f"https://h/x?ids=[1,2]&session={_S}", [_S]),
+		(f"https://h/x?a=1\\u0026session={_S}", [_S]),
+		(f"see (https://h/x?session={_S}), then retry", [_S]),
+		# Closing brackets, commas and apostrophes INSIDE a query string, with more
+		# of it after them: the redaction stopped there and left the rest.
+		(f"https://h/x?ids=[1],[2]&session={_S}", [_S]),
+		(f"https://h/x?filter=(a),(b)&session={_S}", [_S]),
+		(f"https://h/x?a=[[1,2],[3,4]]&session={_S}", [_S]),
+		(f"https://h/x?name='a','b'&session={_S}", [_S]),
+		(f"https://h/x?a=1),session={_S}", [_S]),
+		(f"https://h/x?a='1',b=2&session={_S}", [_S]),
+		(f"https://h/x?a=1\\'&session={_S}", [_S]),
+		# The same characters in a parameter NAME.
+		(f"https://h/x?a,b={_S}", [_S]),
+		(f"https://h/x?a)b={_S}", [_S]),
+		(f"https://h/x?a(1)=2&session={_S}", [_S]),
+		(f"https://h/x?it's=2&session={_S}", [_S]),
+		(f"a=1&token=x),{_S}", [_S]),
+		# token KEY:SECRET with no digit on either side.
+		("token abcdefabcdefabc:fedcbafedcbafed", ["abcdefabcdefabc", "fedcbafedcbafed"]),
+		("token ABCDEFGHIJKLMNO:abcdefghijklmno", ["ABCDEFGHIJKLMNO", "abcdefghijklmno"]),
+		("token abcdefgh:ABCDEFGHIJ", ["ABCDEFGHIJ"]),
+		("token abcdef:ghijklmn", ["ghijklmn"]),
+		# A header named X-...-Token / -Key / -Secret, not in a dict.
+		(f"X-Jarvis-Token: {_S}", [_S]),
+		(f"x-jarvis-token:{_S}", [_S]),
+		(f"X-Auth-Token: {_S}", [_S]),
+		(f"X-Amz-Security-Token={_S}", [_S]),
+		(f"X-Hub-Shared-Secret: {_S}", [_S]),
+		(f"sent X-Api-Key: {_S} and X-Jarvis-Token: {_S2}", [_S, _S2]),
+		# A sentence that ends in a keyword and a colon, then the next JSON pair.
+		(f'{{"error": "bad password:", "api_key": "{_S}"}}', [_S]),
+		(f"{{'error': 'invalid secret:', 'api_key': '{_S}'}}", [_S]),
+		(f'{{"hint": "set api_key=", "token": "{_S}"}}', [_S]),
+		# A quoted value that a cut left open, JSON inside a JSON string, bytes.
+		(f'{{"api_key": "{_S}', [_S]),
+		(f"{{'api_key': '{_S}", [_S]),
+		(f'{{"api_key": "an escaped \\" quote {_S}', [_S]),
+		(f'password: "correct horse {_S}', [_S, "correct horse"]),
+		(f'{{\\"api_key\\": \\"{_S}\\"}}', [_S]),
+		(f'{{\\"Authorization\\": \\"Bearer {_S}\\"}}', [_S]),
+		(f'{{\\"api_key\\": \\"{_S}', [_S]),
+		(f"{{'api_key': b'{_S}'}}", [_S]),
+	)
+
+	# Text that must come back exactly as it went in.
+	_PROSE = (
+		"the key = value pair",
+		"pass the token to the next step",
+		"see https://host.example:8443/docs for details",
+		"mail admin@host.example about https://host.example/x",
+		"write to user@host.com",
+		"https://host.example/x then mail user@host.com",
+		"Bearer",
+		"Bearer authentication failed",
+		"the Bearer token expired",
+		"Bearer authentication is misconfigured",
+		'Bearer realm="example"',
+		'WWW-Authenticate: Bearer error="invalid_token"',
+		"bearer cheque no 12345678 bounced",
+		"a signature is required",
+		"Did it work? key=value",
+		"Invalid field ?token= in filter",
+		"Sort by: key=posting_date",
+		"Step 3 failed: Sales Invoice SINV-2026-00012 not found",
+		"Time 10:30 - mail a:b@c.d",
+		"ratio 3:1@noon see http://a/b",
+		"docs at s3://bucket/a:b@c",
+		'macro "token=reset" step',
+		"'password': ['This field may not be blank.']",
+		"Could not find Party Type: Customer, Party: ACME & Sons",
+		"Failed to get method for command jarvis_admin_v2.api.subscription_connect with No module named x",
+		"[REDACTED]",
+		# A URL, then an e-mail address with no space between: not a userinfo.
+		"https://erp.example.com,admin@example.com",
+		'{"url":"https://erp.example.com","email":"bob@example.com"}',
+		"<https://erp.example.com>bob@example.com",
+		# "token word:word", short words with no digit, is a sentence, not a key and
+		# its secret.
+		"the token ABCDEF:GHIJKL pair",
+		"token refresh:failed",
+		"token missing:please sign in again",
+		"Token invalid:expired",
+		# OAuth's token_type names the scheme; its value is never a credential.
+		'{"token_type": "Bearer", "expires_in": 3600}',
+		"regex (?P<name>=x)",
+		"regex (?<=a)b and (?=x)",
+		"What?! really=yes",
+		"x = a ? b : c",
+		"WHERE name=? AND owner=?",
+		"Invalid field (?token=) in filter",
+		"x-ray key: value",
+	)
+
+	# (text, what it reads as). A URL's query string goes; what follows the URL stays.
+	_AFTER_THE_URL = (
+		(
+			'{"url":"https://h/x?a=1","status":"failed","detail":"Sales Invoice SINV-0001 not found"}',
+			'{"url":"https://h/x?[REDACTED]","status":"failed","detail":"Sales Invoice SINV-0001 not found"}',
+		),
+		(
+			'{"url": "https://h/x?a=1", "status": "failed"}',
+			'{"url": "https://h/x?[REDACTED]", "status": "failed"}',
+		),
+		("url='https://h/x?a=1', status=500", "url='https://h/x?[REDACTED]', status=500"),
+		(
+			'<a href="https://h/app/sales-invoice?status=Open">Open invoices</a> are overdue',
+			'<a href="https://h/app/sales-invoice?[REDACTED]">Open invoices</a> are overdue',
+		),
+		("<https://h/x?a=1> was refused", "<https://h/x?[REDACTED]> was refused"),
+		("open `https://h/x?a=1` again", "open `https://h/x?[REDACTED]` again"),
+		(
+			"[the docs](https://host.example/docs?page=2) explain it",
+			"[the docs](https://host.example/docs?[REDACTED]) explain it",
+		),
+		(
+			"[the docs](https://host.example/docs?page=2).",
+			"[the docs](https://host.example/docs?[REDACTED]).",
+		),
+		("[see https://h/x?a=1] and retry", "[see https://h/x?[REDACTED]] and retry"),
+		("see (https://h/x?a=1), then retry", "see (https://h/x?[REDACTED]), then retry"),
+		("https://h/x?a=1, status=500", "https://h/x?[REDACTED], status=500"),
+		# Inside the query string the same characters do not end it.
+		("https://h/x?a=(1)&b=2 failed", "https://h/x?[REDACTED] failed"),
+		("https://h/x?ids=1,2,3&b=2 failed", "https://h/x?[REDACTED] failed"),
+		("https://h/x?name=O'Brien&b=2 failed", "https://h/x?[REDACTED] failed"),
+		("https://h/x?ids=[1],[2]&b=2 failed", "https://h/x?[REDACTED] failed"),
+		# The punctuation a URL ends in is handed back, a sentence's full stop too.
+		("see https://h/x?a=1. Then retry", "see https://h/x?[REDACTED]. Then retry"),
+		("{'url': 'https://h/x?a=1', 'status': 500}", "{'url': 'https://h/x?[REDACTED]', 'status': 500}"),
+		(
+			'{\\"url\\": \\"https://h/x?a=1\\", \\"n\\": 1}',
+			'{\\"url\\": \\"https://h/x?[REDACTED]\\", \\"n\\": 1}',
+		),
+		("a=1&token=abc123), then retry", "a=1&token=[REDACTED]), then retry"),
+		# With no space after the closing quote the scrub cannot tell where the URL
+		# ends, so everything up to the next space goes.
+		("url='https://h/x?a=1',status=500 failed", "url='https://h/x?[REDACTED] failed"),
+	)
+
+	def test_what_follows_a_url_is_kept(self):
+		for text, expected in self._AFTER_THE_URL:
+			with self.subTest(text=text):
+				self.assertEqual(admin_client._scrub_secrets(text), expected)
+
+	def test_no_secret_in_the_probe_corpus_survives(self):
+		for text, secrets in self._LEAKS:
+			with self.subTest(text=text[:80]):
+				out = admin_client._scrub_secrets(text)
+				for secret in secrets:
+					self.assertNotIn(secret, out)
+
+	def test_the_shapes_the_review_named_read_as_expected(self):
+		s = self._S
+		for text, expected in (
+			(f"redis://:{s}@host", "redis://[REDACTED]@host"),
+			(f"https://{s}@host", "https://[REDACTED]@host"),
+			(f'{{"api_key": "{s}"}}', '{"api_key": "[REDACTED]"}'),
+			(f"{{'Authorization': 'token abcdef123456:{s}'}}", "{'Authorization': '[REDACTED]'}"),
+			(f"Authorization: token abcdef123456:{s}", "Authorization=[REDACTED]"),
+			(f"Bearer abcdef123456:{s} was refused", "Bearer [REDACTED] was refused"),
+			# A port, then a query with an "@" in it, is not userinfo.
+			("https://host:8443?x=a@b failed", "https://host:8443?[REDACTED] failed"),
+			# A form body with no "?": the named parameter goes, the rest stays.
+			(f"grant_type=client&token={s}&scope=all", "grant_type=client&token=[REDACTED]&scope=all"),
+			(f"https://h/cb#id_token={s}", "https://h/cb#id_token=[REDACTED]"),
+			(f"?token={s}", "?[REDACTED]"),
+			# The next pair's key is not eaten as the value of a keyword in a sentence.
+			(
+				f'{{"error": "bad token", "api_key": "{s}", "status": 401}}',
+				'{"error": "bad token", "api_key": "[REDACTED]", "status": 401}',
+			),
+			(f'{{"api_key": "{s}', '{"api_key": "[REDACTED]"'),
+			(f'{{\\"api_key\\": \\"{s}\\"}}', '{\\"api_key\\": \\"[REDACTED]\\"}'),
+			(f"{{'api_key': b'{s}'}}", "{'api_key': '[REDACTED]'}"),
+			(f"token abcdef123456:{s}", "token [REDACTED]"),
+			("token abcdefabcdefabc:fedcbafedcbafed was refused", "token [REDACTED] was refused"),
+			(f"https://h/x?ids=[1],[2]&session={s} returned 403", "https://h/x?[REDACTED] returned 403"),
+			(f"X-Jarvis-Token: {s} was sent", "X-Jarvis-Token=[REDACTED] was sent"),
+			(f'X-Jarvis-Token: "{s}"', "X-Jarvis-Token=[REDACTED]"),
+			# A keyword and its value on two lines stay on two lines.
+			(f"password:\n{s} next", "password=\n[REDACTED] next"),
+		):
+			with self.subTest(text=text):
+				self.assertEqual(admin_client._scrub_secrets(text), expected)
+
+	def test_scrubbing_twice_changes_nothing(self):
+		texts = [t for t, _ in self._LEAKS] + list(self._PROSE)
+		texts += [
+			"Authorization: Bearer abc123tokenvalue then Bearer zzz999tokenvalue at "
+			"https://u:p@host.example/x?sig=Zq9vVALUE77&page=2",
+			"Authorization=[REDACTED]",
+			"Bearer [REDACTED]",
+			"https://[REDACTED]@host/x?[REDACTED]",
+			"x?Authorization: abc123def456",
+			f"password={self._S} secret: {self._S2}",
+		]
+		texts += [t for t, _ in self._AFTER_THE_URL]
+		texts += [
+			# A later pattern's output must not be what lets an earlier one match on
+			# the second pass: a keyword across a line break inside an open quoted
+			# value, a named parameter that held a "/" before an "@".
+			'"token": "a password:\nb c"',
+			'"token": "%password\n:<?a=1/x>',
+			"https://api_key&sig=/x=&Cookie@Authorization",
+			'"token": "}?a=1\\" \n',
+			"?&sig=,",
+			"x?a=1].b=2",
+			# A "?" the named parameter handed back was redacted as a query string,
+			# and that marker was the parameter's value on the second pass.
+			"#sig=?##sig=%b",
+			"&token=.;?#sig=access_token;key=",
+			"{@eyJ;key=token://[REDACTED]@?#sig=@b'",
+			"a=1&token=[REDACTED]), then",
+			"x?a=[REDACTED]]",
+		]
+		for raw in texts:
+			with self.subTest(raw=raw[:80]):
+				once = admin_client._scrub_secrets(raw)
+				self.assertEqual(admin_client._scrub_secrets(once), once)
+
+	def test_scrubbing_twice_changes_nothing_on_generated_text(self):
+		# Credential-shaped pieces put together at random (seeded, so the same strings
+		# every run): the hand-written cases above only cover the orders someone thought of.
+		import random
+
+		pieces = (
+			["Authorization", "Bearer", "token", "password", "api_key", "secret", "Cookie"]
+			+ ["https://", "://", "h.example", "/x", "?", "&", "=", ":", " ", "\n", "@", "#", ";"]
+			+ ['"', "'", "{", "}", ",", "[", "]", "(", ")", "\\", ".", "-", "`", "<", ">", "!", "b"]
+			+ [self._S, "abcdef123456", "a1", "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV", "eyJ"]
+			+ ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"]
+			+ ["[REDACTED]", "=[REDACTED]", "?[REDACTED]", "://[REDACTED]@"]
+			+ ['"token": "', "'secret': '", '\\"', "&token=", "#sig=", ";key=", "?a=1", "password:"]
+			+ ["X-Jarvis-Token", "x-", "-key", "token abcdefgh:", "),", "',", " ...[truncated]"]
+		)
+		rng = random.Random(20261002)
+		for _ in range(20000):
+			raw = "".join(rng.choice(pieces) for _ in range(rng.randint(2, 10)))
+			once = admin_client._scrub_secrets(raw)
+			if admin_client._scrub_secrets(once) != once:
+				self.fail(f"not idempotent: {raw!r} -> {once!r} -> {admin_client._scrub_secrets(once)!r}")
+
+	def test_ordinary_prose_is_left_alone(self):
+		for text in self._PROSE:
+			with self.subTest(text=text):
+				self.assertEqual(admin_client._scrub_secrets(text), text)
+
 
 class TestNonJsonResponse(FrappeTestCase):
 	def setUp(self):

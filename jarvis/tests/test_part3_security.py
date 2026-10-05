@@ -134,6 +134,24 @@ def _mk_macro(owner: str, name: str, **extra):
 	return doc
 
 
+def _mk_macro_run(owner: str, macro: str, conversation: str, status: str = "running") -> str:
+	"""A run row the way the engine writes one: inserted server-side, then owned by
+	the macro's owner."""
+	doc = frappe.get_doc(
+		{
+			"doctype": MACRO_RUN,
+			"macro": macro,
+			"conversation": conversation,
+			"status": status,
+			"current_step": 0,
+			"total_steps": 1,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	_reassign(MACRO_RUN, doc.name, owner)
+	return doc.name
+
+
 def _mk_approval(owner: str, *, conversation=None, status="Pending", **extra):
 	doc = frappe.get_doc(
 		{
@@ -337,6 +355,17 @@ class TestMacroScoping(Part3Base):
 	def test_scheduler_skips_barred_owner(self):
 		# MAC-1: a due macro owned by a user who lost Jarvis access is skipped.
 		m = _mk_macro(OUTSIDER, f"{PFX}-sched", schedule_enabled=1)
+		# The sweep tells every Jarvis Admin on the site that this owner's schedules
+		# went off, and commits it: drop exactly the notices this test causes.
+		notices = {"subject": ["like", "Macro schedules switched off:%"]}
+		before = set(frappe.get_all("Notification Log", filters=notices, pluck="name"))
+
+		def drop_notices():
+			for n in set(frappe.get_all("Notification Log", filters=notices, pluck="name")) - before:
+				frappe.delete_doc("Notification Log", n, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+		self.addCleanup(drop_notices)
 		frappe.db.set_value(
 			MACRO,
 			m.name,
@@ -350,9 +379,419 @@ class TestMacroScoping(Part3Base):
 			macro_scheduler.run_due_macros()
 		called = [c.args[0] for c in mock_run.call_args_list]
 		self.assertNotIn(m.name, called, "scheduler ran a barred owner's macro")
-		# processed-as-skipped: schedule advanced past now.
-		nxt = get_datetime(frappe.db.get_value(MACRO, m.name, "next_run_at"))
-		self.assertGreater(nxt, now_datetime())
+		# processed-as-skipped: the owner cannot run it, so the schedule is switched off
+		# (it used to be moved on, and then skipped again on every later slot).
+		row = frappe.db.get_value(MACRO, m.name, ["schedule_enabled", "next_run_at"], as_dict=True)
+		self.assertFalse(row.schedule_enabled)
+		self.assertIsNone(row.next_run_at)
+
+	# --- A Macro Run row is engine state: its owner may read it, never write it --- #
+	# MAC-2 guarded CREATE only. An owner could still UPDATE their own run row over
+	# generic REST and repoint its `conversation` at another user's chat; the engine
+	# trusted the row and dispatched the next step there AS that user.
+
+	def test_owner_cannot_repoint_their_run_at_another_users_conversation(self):
+		ma = _mk_macro(USER_A, f"{PFX}-repoint")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		victim_conv = _mk_conv(USER_B)
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO_RUN, run)
+			doc.conversation = victim_conv
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+
+	def test_owner_cannot_edit_their_run_row(self):
+		# Setting a terminal status by hand skipped the code that disarms an armed
+		# run's conversation; `trigger` and `current_step` feed the unattended budget.
+		ma = _mk_macro(USER_A, f"{PFX}-edit")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO_RUN, run)
+			doc.status = "completed"
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+
+	def test_owner_cannot_delete_their_run_row(self):
+		ma = _mk_macro(USER_A, f"{PFX}-delete")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				frappe.delete_doc(MACRO_RUN, run)
+
+	def test_owner_can_still_read_their_run_row(self):
+		ma = _mk_macro(USER_A, f"{PFX}-read")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_A):
+			self.assertTrue(frappe.get_doc(MACRO_RUN, run).has_permission("read"))
+		with _as(USER_B):
+			self.assertFalse(frappe.get_doc(MACRO_RUN, run).has_permission("read"))
+
+	def test_stop_is_still_the_owners_and_only_the_owners(self):
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-stop")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A))
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				macros.stop_macro_run(run)
+		with _as(USER_A):
+			macros.stop_macro_run(run)
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "status"), "stopped")
+
+	def test_engine_never_advances_a_run_into_another_users_conversation(self):
+		# Defence in depth: even if a row is ever tampered with, the engine must not
+		# act on a run whose owner is not the owner of the conversation it points at.
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-engine")
+		victim_conv = _mk_conv(USER_B)
+		# The victim's chat is itself an armed run conversation. Failing the tampered
+		# run must not reach into it: `_finish` would disarm it.
+		frappe.db.set_value(CONVERSATION, victim_conv, "skip_confirmation", 1, update_modified=False)
+		run = _mk_macro_run(USER_A, ma.name, victim_conv)
+		with patch("jarvis.chat.api._enqueue_turn") as dispatch:
+			macros.advance_after_turn(victim_conv, errored=False)
+		dispatch.assert_not_called()
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "status"), "failed")
+		self.assertEqual(frappe.db.get_value(CONVERSATION, victim_conv, "skip_confirmation"), 1)
+
+	def test_engine_never_advances_a_run_of_another_users_macro(self):
+		# The other leg of the same check: the run and its conversation are the
+		# owner's, the MACRO it points at is not.
+		from jarvis.chat import macros
+
+		mb = _mk_macro(USER_B, f"{PFX}-engine-macro")
+		conv = _mk_conv(USER_A)
+		run = _mk_macro_run(USER_A, mb.name, conv)
+		with patch("jarvis.chat.api._enqueue_turn") as dispatch:
+			macros.advance_after_turn(conv, errored=False)
+		dispatch.assert_not_called()
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "status"), "failed")
+
+	def test_engine_never_resumes_a_parked_run_into_another_users_conversation(self):
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-engine-resume")
+		run = _mk_macro_run(USER_A, ma.name, _mk_conv(USER_B), status="waiting_capacity")
+		with patch("jarvis.chat.api._enqueue_turn") as dispatch:
+			macros.resume_waiting_capacity_runs()
+		dispatch.assert_not_called()
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "status"), "failed")
+
+	def test_a_parked_run_whose_conversation_was_deleted_is_not_called_tampering(self):
+		# "Delete all conversations" blanks the link on the owner's own runs. That is
+		# an ordinary state, so it must fail plainly and not raise the mismatch alarm.
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-engine-gone")
+		run = _mk_macro_run(USER_A, ma.name, None, status="waiting_capacity")
+		with patch("jarvis.chat.api._enqueue_turn") as dispatch:
+			macros.resume_waiting_capacity_runs()
+		dispatch.assert_not_called()
+		row = frappe.db.get_value(MACRO_RUN, run, ["status", "error"], as_dict=True)
+		self.assertEqual((row.status, row.error), ("failed", macros._CONVERSATION_GONE_ERROR))
+
+	# Each layer is proven on its own. The role row and the hook mask each other: on a
+	# migrated site the row alone refuses a write, so a test that only saves a doc
+	# cannot tell whether the hook still works, and the other way round.
+
+	def test_the_run_hook_alone_refuses_every_write(self):
+		from jarvis.chat.macro_permissions import has_macro_run_permission
+
+		ma = _mk_macro(USER_A, f"{PFX}-hook")
+		doc = frappe.get_doc(MACRO_RUN, _mk_macro_run(USER_A, ma.name, _mk_conv(USER_A)))
+		for ptype in ("write", "create", "delete", "submit", "cancel", "amend", "share", "import"):
+			for user in (USER_A, USER_B, "Administrator"):
+				self.assertFalse(has_macro_run_permission(doc, ptype, user), f"{ptype} allowed for {user}")
+		self.assertTrue(has_macro_run_permission(doc, "read", USER_A))
+		self.assertFalse(has_macro_run_permission(doc, "read", USER_B))
+		self.assertTrue(has_macro_run_permission(doc, "read", "Administrator"))
+
+	def test_the_run_doctype_alone_grants_read_only(self):
+		import json
+
+		path = frappe.get_app_path("jarvis", "jarvis", "doctype", "jarvis_macro_run", "jarvis_macro_run.json")
+		with open(path) as f:
+			rows = json.load(f)["permissions"]
+		self.assertTrue(rows)
+		for row in rows:
+			granted = [k for k in ("write", "create", "delete", "submit", "cancel", "amend") if row.get(k)]
+			self.assertEqual(granted, [], f"{row.get('role')} may {granted} a run row")
+
+	# --- The same trust mistake on the macro itself: the summary link ---------- #
+	# `merge_conversation` names the throwaway chat a summary is being generated in.
+	# When ANY turn ends, the engine looks a macro up by that field, reads that
+	# conversation's reply, then deletes the conversation with permissions ignored.
+
+	def test_owner_cannot_point_their_macros_summary_at_another_users_conversation(self):
+		# Whatever a save carries in the field is dropped: the stored value wins.
+		ma = _mk_macro(USER_A, f"{PFX}-merge-point")
+		victim_conv = _mk_conv(USER_B)
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO, ma.name)
+			doc.merge_conversation = victim_conv
+			doc.merge_status = "pending"
+			doc.save()
+		self.assertFalse(frappe.db.get_value(MACRO, ma.name, "merge_conversation"))
+
+	def test_a_new_macro_cannot_arrive_with_a_summary_link(self):
+		victim_conv = _mk_conv(USER_B)
+		with _as(USER_A):
+			m = frappe.get_doc(
+				{
+					"doctype": MACRO,
+					"macro_name": f"{PFX}-merge-new",
+					"steps": [{"prompt": "hi"}],
+					"merge_conversation": victim_conv,
+					"merge_status": "pending",
+				}
+			).insert()
+		row = frappe.db.get_value(MACRO, m.name, ["merge_conversation", "merge_status"], as_dict=True)
+		self.assertFalse(row.merge_conversation)
+		self.assertFalse(row.merge_status, "a new macro arrived already 'summarizing', with no turn coming")
+
+	def test_a_stale_save_does_not_wipe_a_summary_that_just_started(self):
+		# The form was loaded, then the engine started a summary, then the form saved.
+		# The save carries the old empty link; it must neither be refused nor win.
+		ma = _mk_macro(USER_A, f"{PFX}-merge-stale")
+		own_conv = _mk_conv(USER_A)
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO, ma.name)
+			frappe.db.set_value(MACRO, ma.name, "merge_conversation", own_conv, update_modified=False)
+			doc.description = "saved from a stale form"
+			doc.save()
+		self.assertEqual(frappe.db.get_value(MACRO, ma.name, "merge_conversation"), own_conv)
+
+	def test_only_the_owner_can_start_a_summary(self):
+		# Summarize was gated on READ, so anyone who could see a macro could overwrite
+		# its owner's summary. It writes to the macro, so it needs write.
+		from jarvis.chat import macros_api
+
+		overseer = _ensure_user("p3-overseer@example.com", ["System Manager", "Jarvis User"])
+		ma = _mk_macro(USER_A, f"{PFX}-merge-reader", steps=[{"prompt": "a"}, {"prompt": "b"}])
+		with _as(overseer):
+			self.assertTrue(frappe.get_doc(MACRO, ma.name).has_permission("read"), "premise: can read it")
+			with self.assertRaises(frappe.PermissionError):
+				macros_api.summarize_macro(ma.name)
+		self.assertFalse(frappe.db.get_value(MACRO, ma.name, "merge_conversation"))
+
+	def test_a_summary_started_for_another_owner_runs_in_that_owners_chat(self):
+		# Administrator passes every permission check. The throwaway chat must still be
+		# the macro owner's, or the engine (rightly) refuses to land the summary.
+		from jarvis.chat import macros_api
+
+		ma = _mk_macro(USER_A, f"{PFX}-merge-admin", steps=[{"prompt": "a"}, {"prompt": "b"}])
+		with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r", "message_id": "m"}):
+			macros_api.summarize_macro(ma.name)
+		conv = frappe.db.get_value(MACRO, ma.name, "merge_conversation")
+		self.assertEqual(frappe.db.get_value(CONVERSATION, conv, "owner"), USER_A)
+
+	def test_a_summary_whose_conversation_was_deleted_fails_without_an_alarm(self):
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-merge-gone")
+		gone = _mk_conv(USER_A)
+		frappe.db.set_value(
+			MACRO, ma.name, {"merge_status": "pending", "merge_conversation": gone}, update_modified=False
+		)
+		frappe.delete_doc(CONVERSATION, gone, force=True, ignore_permissions=True)
+		with patch("frappe.log_error") as log:
+			macros.advance_after_turn(gone, errored=False)
+		self.assertEqual(frappe.db.get_value(MACRO, ma.name, "merge_status"), "failed")
+		# Nothing at all: neither the tamper alarm nor a swallowed failure in the path.
+		self.assertEqual(log.call_args_list, [], "a deleted chat was logged as an error")
+
+	def test_engine_never_lands_a_summary_from_another_users_conversation(self):
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-merge-engine")
+		victim_conv = _mk_conv(USER_B)
+		frappe.db.set_value(
+			MACRO,
+			ma.name,
+			{"merge_status": "pending", "merge_conversation": victim_conv},
+			update_modified=False,
+		)
+		with patch("jarvis.chat.macros.publish_to_user") as publish:
+			macros.advance_after_turn(victim_conv, errored=False)
+		self.assertTrue(
+			frappe.db.exists(CONVERSATION, victim_conv), "another user's conversation was deleted"
+		)
+		# An open form learns the outcome only from this event; it goes to the macro's
+		# owner and says nothing about the other conversation.
+		sent = [c.args for c in publish.call_args_list if c.args[1].get("kind") == "macro:merged"]
+		self.assertEqual(len(sent), 1, publish.call_args_list)
+		self.assertEqual((sent[0][0], sent[0][1]["status"]), (USER_A, "failed"))
+		self.assertNotIn(victim_conv, frappe.as_json(sent[0][1]))
+		row = frappe.db.get_value(MACRO, ma.name, ["merge_status", "merge_conversation"], as_dict=True)
+		self.assertEqual((row.merge_status, row.merge_conversation or ""), ("failed", ""))
+
+	def test_only_the_owner_can_start_a_run(self):
+		# A run executes as the macro's OWNER, with the owner's permissions, and
+		# uncarded when the macro is armed. It was gated on READ, so anyone who could
+		# only see a macro (oversight, a read share) chose when the owner's steps ran.
+		from jarvis.chat import macros_api
+
+		overseer = _ensure_user("p3-overseer@example.com", ["System Manager", "Jarvis User"])
+		ma = _mk_macro(USER_A, f"{PFX}-run-reader")
+		with _as(overseer):
+			self.assertTrue(frappe.get_doc(MACRO, ma.name).has_permission("read"), "premise: can read it")
+			with self.assertRaises(frappe.PermissionError):
+				macros_api.run_macro(ma.name)
+		self.assertFalse(frappe.get_all(MACRO_RUN, filters={"macro": ma.name}))
+
+	def test_an_owner_without_the_jarvis_user_role_can_still_run_their_own_macro(self):
+		# The gate is "you are the owner", not "you have write": write comes from the
+		# Jarvis User role row, and an owner who holds System Manager instead of it
+		# would have had every scheduled run of their own macro refused.
+		from jarvis.chat import macros
+
+		owner = _ensure_user("p3-smowner@example.com", ["System Manager"])
+		ma = _mk_macro(owner, f"{PFX}-run-smowner")
+		with _as(owner):
+			self.assertFalse(frappe.get_doc(MACRO, ma.name).has_permission("write"), "premise: no write")
+			with patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r", "message_id": "m"}):
+				out = macros.run_macro(ma.name)
+		self.assertTrue(out.get("ok"), out)
+
+	def test_a_run_is_not_started_for_an_owner_who_can_no_longer_use_jarvis(self):
+		# Administrator passes the owner gate for anyone's macro, but the run would
+		# execute AS that owner with nobody at the keyboard (#469).
+		from jarvis.chat import macros
+
+		ma = _mk_macro(USER_A, f"{PFX}-run-barred")
+		with (
+			patch("jarvis.permissions.has_jarvis_access", return_value=False),
+			patch("jarvis.chat.api._enqueue_turn") as enqueue,
+			self.assertRaises(frappe.PermissionError),
+		):
+			macros.run_macro(ma.name)
+		enqueue.assert_not_called()
+		self.assertFalse(frappe.get_all(MACRO_RUN, filters={"macro": ma.name}))
+
+	def test_a_summary_is_not_started_for_an_owner_who_cannot_run_unattended(self):
+		# Started by someone else, the summary turn runs AS the macro's owner with
+		# nobody at the keyboard: the same rule as a scheduled run (#469).
+		from jarvis.chat import macros_api
+
+		ma = _mk_macro(USER_A, f"{PFX}-merge-barred", steps=[{"prompt": "a"}, {"prompt": "b"}])
+		with (
+			patch("jarvis.permissions.is_valid_unattended_owner", return_value=False),
+			patch("jarvis.chat.api._enqueue_turn") as enqueue,
+			self.assertRaises(frappe.PermissionError),
+		):
+			macros_api.summarize_macro(ma.name)
+		enqueue.assert_not_called()
+		self.assertFalse(frappe.db.get_value(MACRO, ma.name, "merge_conversation"))
+
+	def test_a_stale_save_does_not_put_a_landed_summary_back_to_summarizing(self):
+		# A form opened while a summary was running still holds "pending". The summary
+		# lands (the engine does not bump `modified`), then the form is saved. Written
+		# back, "pending" has no turn coming and a manual Run is refused for good.
+		ma = _mk_macro(USER_A, f"{PFX}-merge-stale-status")
+		own_conv = _mk_conv(USER_A)
+		frappe.db.set_value(
+			MACRO, ma.name, {"merge_status": "pending", "merge_conversation": own_conv}, update_modified=False
+		)
+		with _as(USER_A):
+			stale = frappe.get_doc(MACRO, ma.name)
+			frappe.db.set_value(
+				MACRO,
+				ma.name,
+				{"merge_status": "ready", "merged_prompt": "the summary", "merge_conversation": ""},
+				update_modified=False,
+			)
+			stale.description = "edited in a form that was open all along"
+			stale.save()
+		row = frappe.db.get_value(
+			MACRO,
+			ma.name,
+			["merge_status", "merged_prompt", "merge_conversation", "description"],
+			as_dict=True,
+		)
+		self.assertEqual((row.merge_status, row.merged_prompt), ("ready", "the summary"))
+		self.assertFalse(row.merge_conversation)
+		self.assertEqual(row.description, "edited in a form that was open all along")
+
+	def test_editing_the_steps_as_a_summary_lands_still_discards_that_summary(self):
+		# The other direction must keep working: a save that CLEARS the summary because
+		# the steps changed is current even if a summary landed a moment earlier. Kept,
+		# the macro would run a summary of steps it no longer has.
+		from jarvis.chat import macros_api
+
+		ma = _mk_macro(USER_A, f"{PFX}-merge-steps", steps=[{"prompt": "a"}, {"prompt": "b"}])
+		frappe.db.set_value(
+			MACRO, ma.name, {"merge_status": "ready", "merged_prompt": "of a and b"}, update_modified=False
+		)
+		with _as(USER_A):
+			macros_api.update_macro(ma.name, steps=frappe.as_json([{"prompt": "a"}, {"prompt": "c"}]))
+		row = frappe.db.get_value(MACRO, ma.name, ["merge_status", "merged_prompt"], as_dict=True)
+		self.assertFalse(row.merge_status)
+		self.assertFalse(row.merged_prompt)
+
+	def test_a_macro_deleted_while_its_summary_ran_ends_quietly(self):
+		from jarvis.chat import macros
+
+		conv = _mk_conv(USER_A)
+		with patch("frappe.log_error") as log:
+			self.assertTrue(macros._drop_summary_link_unless_one_owner("p3-no-such-macro", conv))
+		self.assertEqual(log.call_args_list, [])
+		self.assertTrue(frappe.db.exists(CONVERSATION, conv))
+
+	def test_an_ordinary_save_of_a_macro_being_summarized_still_works(self):
+		# The form saves while a summary is pending and sends the link back unchanged.
+		ma = _mk_macro(USER_A, f"{PFX}-merge-save")
+		own_conv = _mk_conv(USER_A)
+		frappe.db.set_value(
+			MACRO, ma.name, {"merge_status": "pending", "merge_conversation": own_conv}, update_modified=False
+		)
+		with _as(USER_A):
+			doc = frappe.get_doc(MACRO, ma.name)
+			doc.description = "edited while summarizing"
+			doc.save()
+		self.assertEqual(frappe.db.get_value(MACRO, ma.name, "merge_conversation"), own_conv)
+
+	# --- engine records are not renamable ---------------------------------------- #
+	# A rename rewrites every link to a record in place, with no permission check on
+	# the rows that hold those links: a run row would follow its conversation onto
+	# whatever the conversation became.
+
+	def _engine_records(self):
+		ma = _mk_macro(USER_A, f"{PFX}-rename")
+		conv = _mk_conv(USER_A)
+		return ((MACRO, ma.name), (CONVERSATION, conv), (MACRO_RUN, _mk_macro_run(USER_A, ma.name, conv)))
+
+	def test_an_engine_record_refuses_to_be_renamed(self):
+		for dt, name in self._engine_records():
+			with self.subTest(dt=dt), _as(USER_A):
+				with self.assertRaises(frappe.PermissionError):
+					frappe.get_doc(dt, name).rename(f"{PFX}-renamed-{frappe.generate_hash(length=6)}")
+			self.assertTrue(frappe.db.exists(dt, name), f"{dt} was renamed")
+
+	def test_an_engine_record_refuses_to_be_merged_into_another_users(self):
+		ma = _mk_macro(USER_A, f"{PFX}-rename-conv")
+		own_conv = _mk_conv(USER_A)
+		run = _mk_macro_run(USER_A, ma.name, own_conv)
+		victim_conv = _mk_conv(USER_B)
+		with _as(USER_A), self.assertRaises(frappe.PermissionError):
+			frappe.get_doc(CONVERSATION, own_conv).rename(victim_conv, merge=True)
+		self.assertEqual(frappe.db.get_value(MACRO_RUN, run, "conversation"), own_conv)
+		self.assertTrue(frappe.db.exists(CONVERSATION, own_conv))
+
+	def test_renaming_an_engine_record_is_not_an_api_method(self):
+		from frappe.model.document import Document
+
+		frappe.is_whitelisted(Document.rename)  # control: this check can pass
+		for dt, name in self._engine_records():
+			method = frappe.get_doc(dt, name).rename
+			with self.subTest(dt=dt), self.assertRaises(frappe.PermissionError):
+				frappe.is_whitelisted(method.__func__)
+
+	def test_a_server_side_rename_of_an_engine_record_is_refused_too(self):
+		# Code that calls the rename machinery directly, not through the document.
+		for dt, name in self._engine_records():
+			with self.subTest(dt=dt), self.assertRaises(frappe.PermissionError):
+				frappe.rename_doc(dt, name, f"{PFX}-moved-{frappe.generate_hash(length=6)}", force=True)
 
 
 # --------------------------------------------------------------------------- #

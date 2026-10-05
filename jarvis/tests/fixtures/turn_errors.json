@@ -232,6 +232,10 @@
     "code": "cancelled"
   },
   {
+    "error": "Stopped before it started.",
+    "code": "cancelled"
+  },
+  {
     "error": "İnvalid api key",
     "code": "gateway"
   },

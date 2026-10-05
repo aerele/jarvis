@@ -24,6 +24,8 @@
   "skill_docname",
   "run_id",
   "batch_id",
+  "corrects",
+  "correction_message",
   "open_key",
   "dedup_keys",
   "executing_at",
@@ -165,6 +167,21 @@
    "fieldname": "batch_id",
    "fieldtype": "Data",
    "label": "Batch ID",
+   "search_index": 1
+  },
+  {
+   "description": "The failed confirmation card this card corrects (R2-3: one correction per change). Sealed with the call.",
+   "fieldname": "corrects",
+   "fieldtype": "Data",
+   "label": "Corrects",
+   "read_only": 1
+  },
+  {
+   "description": "The hidden continuation message whose turn may propose the one correction for this card (R2-3).",
+   "fieldname": "correction_message",
+   "fieldtype": "Data",
+   "label": "Correction Message",
+   "read_only": 1,
    "search_index": 1
   },
   {
@@ -335,7 +352,7 @@
  "in_create": 1,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-25 03:00:00.000000",
+ "modified": "2026-10-04 12:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Pending Action",
  "naming_rule": "Random",

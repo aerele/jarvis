@@ -346,7 +346,7 @@ def _effect_macro_advance(ctx: _Ctx) -> None:
 	# _advance_macro). Each has its own per-run redis lock (idempotent).
 	from jarvis.chat import macros
 
-	macros.advance_after_turn(ctx.conversation, errored=ctx.errored)
+	macros.advance_after_turn(ctx.conversation, errored=ctx.errored, run_id=ctx.run_id)
 	from jarvis.learning import app_analysis
 
 	app_analysis.on_turn_end(ctx.conversation, errored=ctx.errored)

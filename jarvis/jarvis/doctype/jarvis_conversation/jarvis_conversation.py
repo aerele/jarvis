@@ -9,7 +9,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 
 # File Box status/result stamps: written by server code via ``frappe.db.set_value``
 # (or a doc carrying ``flags.jarvis_server_write``). No Admin/SM exemption (M12).
@@ -36,7 +36,7 @@ _FILEBOX_SERVER_FIELDS = (
 _AUTO_MODE_SERVER_FIELDS = ("auto_mode", "auto_mode_at")
 
 
-class JarvisConversation(Document):
+class JarvisConversation(NotRenamable, Document):
 	def before_insert(self):
 		if not self.last_active_at:
 			self.last_active_at = frappe.utils.now()

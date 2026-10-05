@@ -15,6 +15,7 @@ from jarvis.exceptions import (
 	FeatureDisabledError,
 	InvalidArgumentError,
 	JarvisError,
+	PreviewSandboxLost,
 	RunDisarmedError,
 	RunHaltedError,
 )
@@ -1490,24 +1491,110 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 		return None, None
 
 
+_PREVIEW_NOT_UNDONE = (
+	"A trial run cannot undo email or calls to other systems sent by the document's own code, live "
+	"notifications, or error log entries."
+)
+
+
+def _job_count(n: int) -> str:
+	return "1 background job" if n == 1 else f"{n} background jobs"
+
+
+def _preview_note(hook_rolled_back: bool, queue) -> str:
+	"""The note on a dry-run result. Written for a person, and stored with the
+	pending record and in the transcript, so it stands alone in plain language,
+	names no key, and states only what the sandbox really guarantees. Neither
+	client shows it when a structured card exists (create / update and submit /
+	cancel / amend / delete all have one), and neither renders ``will_queue``;
+	there the model relays it. Both render it on the plain fallback card.
+	``queue`` is the ``WillQueue`` of the dry run.
+
+	Nothing here about the audit job a dry run does send (SURVIVES_DRY_RUN): it
+	is sent when an automation BLOCKS the save, which raises, so no note is
+	built for that dry run. That fact lives in the tools README."""
+	if hook_rolled_back:
+		parts = [
+			"The document's own code rolled back part-way through this trial run (it took a failure "
+			"path), so this preview may not reflect what Confirm will do. Every database write was "
+			"rolled back; nothing is saved until you confirm."
+		]
+	elif queue.queued_action:
+		# Not "checked": the dry run only QUEUED the action.
+		parts = ["Trial run: every database write was rolled back. Nothing is saved until you confirm."]
+	else:
+		parts = [
+			"Trial run: the change was checked and every database write was rolled back. Nothing is "
+			"saved until you confirm."
+		]
+	if queue.jobs:
+		parts.append(f"Confirming will also start {_job_count(queue.jobs)}, which did not run here.")
+	if queue.queued_action:
+		parts.append(
+			"The action itself will run in the background after you confirm, so it has not been "
+			"validated here and may still fail."
+		)
+	return " ".join([*parts, _PREVIEW_NOT_UNDONE])
+
+
+def _will_queue_note(queue) -> str:
+	"""The sentence that goes with ``will_queue``. Read by the model only, and
+	no persona text explains these keys, so it says what to do with them."""
+	count = _job_count(queue.jobs)
+	if queue.kinds != queue.jobs:
+		count += f" of {queue.kinds} kind" + ("" if queue.kinds == 1 else "s")
+	note = (
+		f"Confirming will also start {count}, named in will_queue. None of this ran in the preview, "
+		"so its outcome is unknown. Before the user confirms, tell them in plain words that "
+		"confirming starts this background work."
+	)
+	if queue.queued_action:
+		note += (
+			" One of these jobs is the action itself (frappe.model.document.execute_action): on "
+			"confirm it runs in the background, so it was NOT validated by this preview and can still "
+			"fail afterwards. Say so, and after the user confirms do not call the action done until "
+			"you have read the document back."
+		)
+	return note
+
+
 def _run_preview(tool: str, args: dict) -> dict:
 	"""Dispatch a write tool with all DB effects sandboxed (mechanics in
 	``jarvis.tools._preview_sandbox``, shared with preview_doc). Side effects
-	fired directly inside hooks (inline HTTP calls) are NOT sandboxed."""
-	from jarvis.tools._preview_sandbox import preview_sandbox
+	fired directly inside hooks (inline HTTP calls) are NOT sandboxed.
 
-	with preview_sandbox():
+	Background jobs a hook enqueues ARE sandboxed: the sandbox drops them and
+	hands back their names, returned here as ``will_queue`` (only when there
+	are any to announce; see ``will_queue_summary`` for what is counted, named
+	and left out) with ``will_queue_note``, a sentence that tells the model
+	what to do with them. Before, a parked Payroll Entry submit put the real
+	salary-slip job on the queue while the card was being built.
+
+	``hook_rolled_back`` (only when true) says a hook called a bare
+	``frappe.db.rollback()`` during the dry run: its code took a failure path
+	(HRMS then writes ``status: Failed``), so ``would`` may not be what Confirm
+	produces, and the note says so instead of "checked".
+
+	The whole dict is kept on the pending record and in the transcript, not
+	only shown to the model. The card itself is built from the call's
+	arguments; the frontends show ``would`` under Details, and ``note`` only
+	on the plain fallback card (see ``_preview_note``).
+
+	Raises ``PreviewSandboxLost`` when the dry run could not be undone cleanly;
+	every caller turns that into a refusal (see the class)."""
+	from jarvis.tools._preview_sandbox import preview_sandbox, will_queue_summary
+
+	with preview_sandbox() as dropped:
 		would = dispatch(tool, args)
-	return {
-		"preview": True,
-		"would": would,
-		"note": (
-			"Validated with all DB writes rolled back; nothing was "
-			"committed or queued. Side effects fired directly inside "
-			"hooks (inline HTTP calls in on_submit / on_cancel) are "
-			"not sandboxed by preview."
-		),
-	}
+	# Read after the ``with``: after-commit jobs are named as the sandbox exits.
+	queue = will_queue_summary(dropped)
+	out = {"preview": True, "would": would, "note": _preview_note(dropped.hook_rolled_back, queue)}
+	if queue.jobs:
+		out["will_queue"] = queue.names
+		out["will_queue_note"] = _will_queue_note(queue)
+	if dropped.hook_rolled_back:
+		out["hook_rolled_back"] = True
+	return out
 
 
 def _preview_error(e: Exception) -> dict:
@@ -1515,8 +1602,13 @@ def _preview_error(e: Exception) -> dict:
 	envelope. NEVER audited: a dry-run commits nothing, so there is no write to
 	record. Shared by the model-facing ``preview=True`` path and the park gate's
 	pre-park validation so both classify the same exceptions identically."""
+	if isinstance(e, PreviewSandboxLost):
+		# The dry run could not be undone cleanly (the sandbox already rolled
+		# back in full and logged it). The same retryable refusal as a park
+		# that could not be staged: no card, and the message says what to check.
+		return _error("ConfirmationUnavailableError", str(e))
 	if isinstance(e, JarvisError):
-		return _error(type(e).__name__, str(e))
+		return _error(_error_code(e), str(e))
 	if isinstance(e, frappe.PermissionError):
 		return _error("PermissionDeniedError", str(e) or "permission denied")
 	# frappe.ValidationError (incl. MandatoryError) / frappe.DuplicateEntryError
@@ -1602,6 +1694,10 @@ def _pending_preview(tool: str, args: dict) -> dict:
 		return described
 	try:
 		return _run_preview(tool, args)
+	except PreviewSandboxLost:
+		# The park must FAIL: a card saying "preview unavailable" would invite
+		# a Confirm on a write whose dry run has already misbehaved.
+		raise
 	except (JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		# The call would fail validation - surface that in the card rather
 		# than blocking the park, so the human sees why before confirming.
@@ -1724,6 +1820,8 @@ _ERROR_HINTS = {
 	"OutgoingEmailError": (
 		"Ask your administrator to configure an enabled default outgoing Email Account before retrying."
 	),
+	# R2-3: a deadlock, a lock wait that timed out, or a lock another write holds.
+	"RetryLaterError": "Nothing was changed. Try again in a moment.",
 	# JF-017. The agent's tool surface is fixed when it is published, so unlike a
 	# permission denial there is nothing the USER can change - the remedy is the
 	# bundle. (The delegate's own "retrying will not help" instruction rides in the
@@ -1802,14 +1900,46 @@ def _duplicate_message(e: Exception) -> str:
 	return "A record with these values already exists."
 
 
+def _error_code(e: JarvisError) -> str:
+	"""The wire code of a Jarvis error: its class name, unless the class keeps an
+	established code (``InvalidFieldValueError`` -> ``InvalidArgumentError``)."""
+	return getattr(e, "envelope_code", None) or type(e).__name__
+
+
+_BUSY_MESSAGE = "The system was busy (a lock or timeout) and nothing was saved."
+
+
+def _bad_date_message(found: dict) -> str:
+	"""A database refusal of a date / datetime / time value (error 1292), named by field."""
+	fieldname, doctype = found["fieldname"], found["doctype"]
+	label = fieldname
+	try:
+		if doctype and frappe.db.exists("DocType", doctype):
+			label = frappe.get_meta(doctype).get_label(fieldname) or fieldname
+	except Exception:
+		pass
+	shape = {"date": "YYYY-MM-DD", "datetime": "YYYY-MM-DD HH:MM:SS", "time": "HH:MM:SS"}[found["type"]]
+	where = f"{label} ({fieldname})" if label != fieldname else fieldname
+	return f"{where} has an invalid {found['type']} value '{found['value'][:80]}'; use {shape}."
+
+
 def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	"""Enriched ``{ok:false, error}`` envelope for a KNOWN write-path exception,
 	promoting Frappe's discarded reason into ``message``/``detail``/``hint``.
 	Returns ``None`` for an unexpected exception - the caller MUST re-raise it so
 	a real bug still surfaces as a 500 (never enveloped, never leaks a traceback).
-	``mark`` is a ``_msglog_mark()`` taken before the write ran."""
+	``mark`` is a ``_msglog_mark()`` taken before the write ran.
+
+	``error.kind`` (R2-3, ``jarvis._failure_kind``) says whether the request can be
+	corrected (``fixable``), the site was busy (``retry_later``: a deadlock or a lock
+	wait timeout, now enveloped instead of a 500) or neither (``not_fixable``). A
+	database refusal of a date value is enveloped as a fixable
+	``InvalidArgumentError`` naming the field (Frappe does not validate dates)."""
+	from jarvis import _failure_kind
+
+	kind = _failure_kind.kind_of(e)
 	if isinstance(e, JarvisError):
-		code, message = type(e).__name__, strip_html(str(e)).strip()
+		code, message = _error_code(e), strip_html(str(e)).strip()
 	elif isinstance(e, frappe.PermissionError):
 		code = "PermissionDeniedError"
 		message = strip_html(str(e)).strip() or _flags_message() or "permission denied"
@@ -1822,13 +1952,19 @@ def _translate_write_error(e: Exception, mark: int) -> dict | None:
 	elif isinstance(e, frappe.ValidationError):
 		code = "InvalidArgumentError"
 		message = strip_html(str(e)).strip() or _flags_message() or type(e).__name__
+	elif kind == _failure_kind.RETRY_LATER:
+		code, message = "RetryLaterError", _BUSY_MESSAGE
+	elif _failure_kind.bad_date(e):
+		code, message = "InvalidArgumentError", _bad_date_message(_failure_kind.bad_date(e))
 	else:
 		return None
 	detail = _harvest_reason(mark)
 	# Don't repeat the message under "Show details".
 	if detail and detail == strip_html(message).strip():
 		detail = ""
-	return _error(code, message, detail=detail, hint=_hint_for(code, detail))
+	envelope = _error(code, message, detail=detail, hint=_hint_for(code, detail))
+	envelope["error"]["kind"] = kind
+	return envelope
 
 
 # Tools that never raise and return their OWN {ok: false} envelope as the tool's
@@ -1930,7 +2066,17 @@ def _dispatch_and_wrap(
 			try:
 				frappe.db.rollback(save_point=sp)
 			except Exception:
-				pass
+				if envelope["error"].get("kind") == "retry_later":
+					# A deadlock already rolled the whole transaction back in the
+					# database (the savepoint went with it); a full rollback here also
+					# drops what the tool queued for after commit, as the 500 it
+					# replaced did. It also resets ``before_commit``, so a caller that
+					# watches for a mid-dispatch commit with a sentinel there
+					# (pending_actions._execute) is told what was still armed just
+					# before this rollback: a sentinel still there saw no commit.
+					armed = tuple(frappe.db.before_commit._functions)
+					frappe.db.rollback()
+					frappe.local.jarvis_rolled_back_after_failure = armed
 			else:
 				# SQL savepoint rollback leaves callbacks and realtime events queued.
 				for name, functions in saved_queues.items():
@@ -3011,7 +3157,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.clear_messages()
 				return _preview_error(e)
 		else:
-			preview = _pending_preview(tool, args)
+			try:
+				preview = _pending_preview(tool, args)
+			except PreviewSandboxLost as e:
+				frappe.clear_messages()
+				return _preview_error(e)
 		# Render-ready confirmation summary (F9) + wall-clock expiry (F15), attached
 		# ONCE here at park: F2 stores the preview in the token record and resync
 		# returns it verbatim, so the card + expiry ride the event, the record, and

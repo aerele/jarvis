@@ -3,7 +3,7 @@
 export default [
   {
     "code": "cancelled",
-    "pattern": "^(you cancelled this message|waited too long in the queue)",
+    "pattern": "^(you cancelled this message|waited too long in the queue|stopped before it started)",
     "headline": "This message was cancelled",
     "hint": "",
     "retryable": false,

@@ -520,7 +520,11 @@
 											<Button
 												variant="solid"
 												theme="green"
-												label="Approve"
+												:label="
+													sourceOf(selected) === 'Agent Review'
+														? 'Acknowledge review'
+														: 'Approve'
+												"
 												:loading="deciding === 1"
 												:disabled="deciding !== null"
 												@click="submitDecide(1)"
@@ -877,6 +881,7 @@ function docType(row) {
 
 // NULL/absent source predates the field — reads as File Box (backend contract)
 function sourceOf(row) {
+	if (row && row.source === "Agent Review") return "Agent Review";
 	return row && row.source === "Chat" ? "Chat" : "File Box";
 }
 
@@ -1146,7 +1151,12 @@ async function submitDecide(approve) {
 	// decide() requires non-empty decision text - Approve sends the selected
 	// option chip, else the note, else the verdict word; Reject sends the note
 	// or the verdict word (the picked option was what got refused)
-	const text = approve ? selectedOption.value || noteText || "Approved" : noteText || "Rejected";
+	const reviewOnly = sourceOf(selected.value) === "Agent Review";
+	const text = approve
+		? selectedOption.value ||
+		  noteText ||
+		  (reviewOnly ? "Review acknowledged — no posting authorised" : "Approved")
+		: noteText || "Rejected";
 	const id = selected.value.name;
 	try {
 		const res = (await api.decideApproval(id, text, approve)) || {};
@@ -1170,7 +1180,11 @@ async function submitDecide(approve) {
 		selectedOption.value = "";
 		note.value = "";
 		toast.success(
-			(approve ? "Approved" : "Rejected") + (res.resumed ? " - conversation resumed" : "")
+			(approve
+				? reviewOnly
+					? "Review acknowledged — no accounting or sending action"
+					: "Approved"
+				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
 		);
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") {

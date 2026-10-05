@@ -439,6 +439,27 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(refreshApprovalsCount).toHaveBeenCalled();
 	});
 
+	it("labels AP review as acknowledgement, never posting approval", async () => {
+		state.ar = [ar("AR-1", { source: "Agent Review" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "Agent Review" }),
+			can_act: 1,
+			options: [],
+			question: "Document review only; no posting is authorised.",
+		}));
+		api.decideApproval.mockResolvedValue({ resumed: false });
+		const wrapper = await board();
+		expect(rail(wrapper).text()).toContain("Agent Review");
+		expect(button(pane(wrapper), "Approve")).toBeFalsy();
+		await button(pane(wrapper), "Acknowledge review").trigger("click");
+		await flushPromises();
+		expect(api.decideApproval).toHaveBeenCalledWith(
+			"AR-1",
+			"Review acknowledged — no posting authorised",
+			1
+		);
+	});
+
 	it("a question decided after the board is gone never navigates back to it", async () => {
 		approvals.getApproval.mockImplementation(async (name) => ({
 			...ar(name, { source: "File Box" }),
