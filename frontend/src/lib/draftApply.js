@@ -133,6 +133,54 @@ export function isRowKeyColumn(key) {
 	return !ROW_SYSTEM_KEYS.has(key) && !String(key).startsWith("__");
 }
 
+// The grid column for a row key the agent proposed that the grid does not list:
+// the child field's real meta when the form meta carries it (extra_columns), so
+// the cell keeps its type, label and link filters and Apply sends a number as a
+// number (#655); a key the child does not have stays a text column.
+export function rowKeyColumn(key, extraColumns) {
+	const known = (extraColumns || []).find((c) => c.fieldname === key);
+	if (known) return { ...known };
+	return { fieldname: key, label: key, fieldtype: "Data", options: "", reqd: 0, read_only: 0 };
+}
+
+// The create_doc / update_doc values a draft model applies: on a create every
+// writable non-blank field and every filled row; on an update only the changed
+// fields and changed tables (CR-3). Shared by Apply and the computed-cell dry run,
+// so the two always send the same thing.
+export function draftValues(p) {
+	const values = {};
+	for (const f of p.fields) {
+		if (!isFieldWritable(f, p.verb)) continue;
+		const changed = String(f.value) !== String(f.orig);
+		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
+			values[f.fieldname] = coerceOut(f);
+	}
+	for (const t of p.tables) {
+		const rows = t.rows
+			.map((r) => coerceRow(t, r, p.verb))
+			.filter((r) => Object.keys(r).length);
+		if (p.verb === "create") {
+			if (rows.length) values[t.fieldname] = rows;
+		} else if (tableChanged(t, JSON.parse(t.origJson))) {
+			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
+		}
+	}
+	return values;
+}
+
+// The read-only columns a card leaves blank somewhere ({table: [fieldnames]}):
+// what ERPNext computes on save (amounts, tax totals) and the dry run can fill (#647).
+export function blankComputedColumns(model) {
+	const out = {};
+	for (const t of model.tables || []) {
+		const blank = t.columns
+			.filter((c) => c.read_only && t.rows.some((r) => String(r[c.fieldname] ?? "") === ""))
+			.map((c) => c.fieldname);
+		if (blank.length) out[t.fieldname] = blank;
+	}
+	return out;
+}
+
 // Saved rows an update would delete: every loaded row (origJson) whose name no
 // panel row carries any more. Returned as short labels (first shown column's value,
 // else the row id) so the card can say WHICH rows go, not only how many (CR-3).
