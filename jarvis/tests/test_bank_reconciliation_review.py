@@ -773,3 +773,39 @@ class TestBankReconStoreContract(FrappeTestCase):
 
 	def run_doc(self, snap):
 		return frappe._dict(input_snapshot_json=frappe.as_json(snap), agent=review.AGENT)
+
+
+class TestBankReconTool(FrappeTestCase):
+	def test_tool_refuses_outside_a_delegate_session(self):
+		from jarvis.exceptions import InvalidArgumentError
+		from jarvis.tools import get_bank_recon_inputs as tool
+
+		with patch.object(tool, "get_session_key", return_value=None):
+			self.assertRaises(InvalidArgumentError, tool.get_bank_recon_inputs)
+
+	def test_tool_refuses_another_agents_run(self):
+		run = frappe._dict(name="RUN-1", assessment_config_json=frappe.as_json(config()), scope_json="{}")
+		with patch.object(
+			frappe.db,
+			"get_value",
+			return_value=frappe._dict(
+				agent="ar-collections-operator", status="running", input_snapshot_json=None
+			),
+		):
+			self.assertRaises(frappe.PermissionError, review.get_inputs, run)
+
+	def test_tool_is_registered_and_listed(self):
+		from jarvis.tools import registry
+
+		self.assertIn("get_bank_recon_inputs", registry._TOOL_NAMES)
+		names = frappe.parse_json(
+			open(os.path.join(os.path.dirname(registry.__file__), "tool-names.json")).read()
+		)
+		self.assertIn("get_bank_recon_inputs", frappe.as_json(names))
+
+	def test_registry_lists_published_bank_recon_0_3_0(self):
+		reg = frappe.parse_json(open(frappe.get_app_path("jarvis", "agents", "registry.json")).read())
+		entry = next(a for a in reg["agents"] if a["agent_slug"] == review.AGENT)
+		self.assertEqual((entry["version"], entry["status"]), ("0.3.0", "Published"))
+		self.assertIn("jarvis__get_bank_recon_inputs", entry["tools_allow"])
+		self.assertNotIn("jarvis__create_doc", entry["tools_allow"])
