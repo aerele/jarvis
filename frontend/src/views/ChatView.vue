@@ -1341,6 +1341,15 @@
 														</tbody>
 													</table>
 												</div>
+												<div
+													v-if="
+														t.computedLabels && t.computedLabels.length
+													"
+													class="jv-summary-computed-note"
+												>
+													{{ t.computedLabels.join(", ") }}: calculated
+													by ERPNext, saved when you confirm.
+												</div>
 											</div>
 										</div>
 										<!-- A draft we could not build is a FAILURE, not a pending state: style
@@ -4251,6 +4260,7 @@ import { normaliseAction } from "@/lib/chatAction";
 import { cellOptions, markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
+	alignComputedRows,
 	blankComputedColumns,
 	checkToYesNo,
 	draftValues,
@@ -7293,7 +7303,13 @@ async function fillComputedCells(key, model, a) {
 		return;
 	}
 	if (!r || !r.ok || summaryState.value.key !== key) return;
-	model.computed = r.tables;
+	const computed = {};
+	for (const t of model.tables) {
+		const rows = alignComputedRows(t, (r.tables || {})[t.fieldname]);
+		if (rows) computed[t.fieldname] = rows;
+	}
+	// Through the reactive state, so an open Preview shows them too.
+	summaryState.value.model.computed = computed;
 	summaryState.value = { ...summaryState.value, view: summarize(model, a) };
 }
 function isEditVerb(a) {
@@ -15556,6 +15572,11 @@ onUnmounted(() => {
 .jv-summary-grid td.jv-summary-computed {
 	color: var(--text-2);
 	font-variant-numeric: tabular-nums;
+}
+.jv-summary-computed-note {
+	padding: 6px 10px 0;
+	font-size: 11.5px;
+	color: var(--text-3);
 }
 .jv-summary-hint {
 	padding: 0 14px 11px;

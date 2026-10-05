@@ -83,7 +83,12 @@ export function coerceRow(table, row, verb) {
 }
 
 function coerceCell(column, v) {
-	if (["Int", "Float", "Currency", "Percent"].includes(column.fieldtype)) return Number(v);
+	if (["Int", "Float", "Currency", "Percent"].includes(column.fieldtype)) {
+		// "1,250.5" is NaN to Number() and would go out as null, clearing the cell:
+		// send it as written for the server's field check to read or refuse.
+		const n = Number(v);
+		return Number.isNaN(n) ? v : n;
+	}
 	if (column.fieldtype === "Check") return coerceCheck(v);
 	return v;
 }
@@ -178,6 +183,23 @@ export function blankComputedColumns(model) {
 			.map((c) => c.fieldname);
 		if (blank.length) out[t.fieldname] = blank;
 	}
+	return out;
+}
+
+// The dry run's rows for one table, put back on the card rows they came from: a
+// blank row is never sent (draftValues), so the server's rows skip it. null when
+// ERPNext returned a different number of rows (a template added some), since then
+// no row can be matched with confidence (#647).
+export function alignComputedRows(table, serverRows) {
+	const sent = [];
+	table.rows.forEach((r, i) => {
+		if (Object.keys(coerceRow(table, r, "create")).length) sent.push(i);
+	});
+	if (!Array.isArray(serverRows) || serverRows.length !== sent.length) return null;
+	const out = new Array(table.rows.length).fill(undefined);
+	sent.forEach((i, j) => {
+		out[i] = serverRows[j];
+	});
 	return out;
 }
 
