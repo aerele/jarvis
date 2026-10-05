@@ -16,8 +16,10 @@ What is pinned here:
   changed there; an unarmed macro is edited from a tool as before;
 * before the migrate (no hold field) the rule from before applies: only a Jarvis
   Admin arms, still only their own macro and only on the form;
-* the notice names every tool an armed macro runs without asking, and every one that
-  still asks.
+* the notice names every tool an armed macro runs without asking, every one that
+  still asks, and each kind of sensitive configuration the write-risk guard cards;
+* an armed chat's read is judged on exactly the skill rows it reads, where a skill
+  doctype is used as a doctype, and a list read that disarms carries the note too.
 
 The tests where a plain owner arms need the hold field and skip on a site that has
 not migrated it. A refusal is tested on a Jarvis Admin's own macro, which the owner
@@ -709,6 +711,16 @@ class TestTheNotice(FrappeTestCase):
 	def test_every_tool_that_still_asks_is_named(self):
 		self.assertEqual(self._tools(macros_api._ARM_NOTICE_ASKS), set(api._BRAKE))
 
+	def test_every_kind_of_sensitive_configuration_the_guard_cards_is_named(self):
+		# The write-risk guard cards these in every mode, an armed macro's run included.
+		from jarvis.tools import _write_risk
+
+		kinds = [kind for kind, _phrase in macros_api._ARM_NOTICE_SENSITIVE]
+		self.assertEqual(len(kinds), len(set(kinds)), "a kind is in two rows")
+		self.assertEqual(set(kinds), set(_write_risk.RISK_LINES))
+		classified = {_write_risk.risk_class(dt) for dt in _write_risk._all_named().values()}
+		self.assertEqual(classified - {""}, set(kinds))
+
 	def test_the_text(self):
 		self.assertEqual(
 			macros_api.arm_notice(),
@@ -717,8 +729,9 @@ class TestTheNotice(FrappeTestCase):
 			"assignments), run workflow actions, send email, run imports and call server methods "
 			"without asking you first, including when it runs on a schedule with nobody watching. "
 			"Deleting, cancelling and amending records, creating or changing skills and calling "
-			"connectors still ask, and stop the run. Its steps can apply only skills you own, or "
-			"skills only a reviewer can change.",
+			"connectors still ask, and stop the run. So do changes to scripts, webhooks, email set-up, "
+			"user access, sign-in settings and other sensitive configuration. Its steps can apply only "
+			"skills you own, or skills only a reviewer can change.",
 		)
 		self.assertNotIn(EM_DASH, macros_api.arm_notice())
 
@@ -1319,23 +1332,11 @@ class TestASkillReadAsARecordByAnArmedRun(ArmedChatBase):
 		for scope, author in (("User", OWNER), ("Org", OTHER), ("Role", OTHER)):
 			skill = self._skill(author, scope.lower(), scope=scope, share_with=ADMIN)  # a share row to list
 			for label, (tool, args) in self._reads(skill).items():
-				if label == "get_list (no name asked for)":
-					continue  # which rows came back is not known: judged on all it could read
 				with self.subTest(scope=scope, read=label):
 					conv = self._armed_conv()
 					res = self._read(conv, tool, args)
 					self.assertTrue(res["ok"], res)
 					self.assertEqual(self._armed(conv), 1)
-
-	def test_rows_it_cannot_tell_apart_are_judged_on_all_it_could_read(self):
-		own = self._skill(OWNER, "mine")
-		read = {"doctype": SKILL, "fields": ["instructions"], "filters": {"name": own}}
-		conv = self._armed_conv()
-		self._read(conv, "get_list", read)
-		self.assertEqual(self._armed(conv), 1)  # all it can read is its own
-		self._skill(OTHER, "side", share_with=OWNER)
-		self._read(conv, "get_list", read)
-		self.assertEqual(self._armed(conv), 0)
 
 	def test_a_read_that_fails_reads_nothing(self):
 		skill = self._skill(OTHER, "priv")  # not shared: OWNER cannot read it
@@ -1357,6 +1358,202 @@ class TestASkillReadAsARecordByAnArmedRun(ArmedChatBase):
 			self.assertTrue(res["ok"], res)
 			self.assertNotIn("note", res["data"])
 		self.assertEqual(self._armed(conv), 0)
+
+
+class TestWhatAReadNamesAsADoctype(FrappeTestCase):
+	"""A read is judged as a skill read only where a skill doctype's name is used as a
+	doctype (the tool's own, a query's ``from`` or join, a child table's parent, a
+	filter on a field that holds a doctype), not wherever the text appears as a value."""
+
+	def test_used_as_a_doctype(self):
+		for label, (tool, args) in {
+			"get_doc": ("get_doc", {"doctype": SKILL, "name": "x"}),
+			"any case": ("get_doc", {"doctype": "jarvis custom skill", "name": "x"}),
+			"a child table": (
+				"get_list",
+				{"doctype": "Jarvis Custom Skill Share", "parent_doctype": SKILL},
+			),
+			"parent_doctype alone": ("get_list", {"doctype": "X", "parent_doctype": SKILL}),
+			"a comment filter": ("get_list", {"doctype": "Comment", "filters": {"reference_doctype": SKILL}}),
+			"a version filter": ("get_list", {"doctype": "Version", "filters": {"ref_doctype": SKILL}}),
+			"a JSON filter": (
+				"get_list",
+				{"doctype": "Comment", "filters": json.dumps({"reference_doctype": SKILL})},
+			),
+			"an operator filter": (
+				"get_list",
+				{"doctype": "Comment", "filters": {"reference_doctype": ["in", [SKILL, "ToDo"]]}},
+			),
+			"a list filter": (
+				"get_list",
+				{"doctype": "Comment", "filters": [["reference_doctype", "=", SKILL]]},
+			),
+			"a four-part filter": (
+				"get_list",
+				{"doctype": "Comment", "filters": [["Comment", "reference_doctype", "=", SKILL]]},
+			),
+			"a filter's own doctype": ("get_list", {"doctype": "X", "filters": [[SKILL, "owner", "=", "u"]]}),
+			"parenttype": ("get_list", {"doctype": "Has Role", "filters": {"parenttype": SKILL}}),
+			"a query": ("query", {"spec": {"from": SKILL, "select": ["name"]}}),
+			"a query's join": (
+				"query",
+				{"spec": {"from": "ToDo", "joins": [{"doctype": SKILL, "alias": "s", "on": {}}]}},
+			),
+			"a query's where": (
+				"query",
+				{
+					"spec": {
+						"from": "Comment",
+						"alias": "c",
+						"where": [{"field": "c.reference_doctype", "op": "=", "value": SKILL}],
+					}
+				},
+			),
+		}.items():
+			with self.subTest(read=label):
+				self.assertTrue(api._reads_skill_rows(tool, args))
+
+	def test_a_value_that_only_reads_like_one(self):
+		for label, (tool, args) in {
+			"a filter value": ("get_list", {"doctype": "ToDo", "filters": {"description": SKILL}}),
+			"a JSON filter value": (
+				"get_list",
+				{"doctype": "ToDo", "filters": json.dumps({"description": SKILL})},
+			),
+			"a list filter value": (
+				"get_list",
+				{"doctype": "ToDo", "filters": [["description", "=", SKILL]]},
+			),
+			"a four-part filter value": (
+				"get_list",
+				{"doctype": "ToDo", "filters": [["ToDo", "description", "=", SKILL]]},
+			),
+			"a query's where value": (
+				"query",
+				{
+					"spec": {
+						"from": "ToDo",
+						"alias": "t",
+						"where": [{"field": "t.description", "op": "=", "value": SKILL}],
+					}
+				},
+			),
+			"a document name": ("get_doc", {"doctype": "Note", "name": SKILL}),
+		}.items():
+			with self.subTest(read=label):
+				self.assertFalse(api._reads_skill_rows(tool, args))
+
+
+class TestAnArmedRunReadingAroundSkills(ArmedChatBase):
+	"""What an armed chat's read is judged on: exactly the skill rows it reads."""
+
+	def _read(self, conv, tool, args, user=OWNER):
+		frappe.set_user(user)
+		return api._run_tool(tool, args, conversation=conv)
+
+	def test_a_skill_doctype_name_as_a_plain_value_keeps_it_armed(self):
+		self._skill(OTHER, "side", share_with=OWNER)  # a foreign skill OWNER can read
+		for filters in ({"description": SKILL}, json.dumps({"description": SKILL})):
+			with self.subTest(filters=filters):
+				conv = self._armed_conv()
+				res = self._read(conv, "get_list", {"doctype": "ToDo", "filters": filters})
+				self.assertTrue(res["ok"], res)
+				self.assertEqual(self._armed(conv), 1)
+
+	def test_a_skill_list_without_its_name_is_judged_on_its_own_rows(self):
+		own = self._skill(OWNER, "mine")
+		self._skill(OTHER, "side", share_with=OWNER)  # readable, but not read
+		conv = self._armed_conv()
+		res = self._read(
+			conv, "get_list", {"doctype": SKILL, "fields": ["skill_name"], "filters": {"owner": OWNER}}
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"], [{"skill_name": "armskill-mine"}])  # only what it asked for
+		self.assertEqual(self._armed(conv), 1)
+		res = self._read(
+			conv,
+			"get_list",
+			{
+				"doctype": "Jarvis Custom Skill Share",
+				"parent_doctype": SKILL,
+				"fields": ["user"],
+				"filters": {"parent": own},
+			},
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"], [])
+		self.assertEqual(self._armed(conv), 1)
+
+	def test_a_child_list_with_the_default_fields_is_judged_on_its_own_rows(self):
+		own = self._skill(OWNER, "mine", share_with=ADMIN)
+		self._skill(OTHER, "side", share_with=OWNER)
+		conv = self._armed_conv()
+		res = self._read(
+			conv,
+			"get_list",
+			{"doctype": "Jarvis Custom Skill Share", "parent_doctype": SKILL, "filters": {"parent": own}},
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual([sorted(row) for row in res["data"]], [["name"]])
+		self.assertEqual(self._armed(conv), 1)
+
+	def test_a_foreign_skill_listed_without_its_name_still_disarms_with_a_note(self):
+		self._skill(OTHER, "side", share_with=OWNER)
+		conv = self._armed_conv()
+		res = self._read(
+			conv, "get_list", {"doctype": SKILL, "fields": ["skill_name"], "filters": {"owner": OTHER}}
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._armed(conv), 0)
+		self.assertEqual(res["data"]["rows"], [{"skill_name": "armskill-side"}])
+		self.assertIn("/armskill-side", res["data"]["note"])
+
+	def test_an_unarmed_list_read_is_unchanged(self):
+		self._skill(OTHER, "side", share_with=OWNER)
+		args = {"doctype": SKILL, "fields": ["skill_name"], "filters": {"owner": OTHER}}
+		conv = _make_conv(OWNER)
+		frappe.set_user(OWNER)
+		plain = api._dispatch_and_wrap("get_list", dict(args), False)
+		with patch.object(api, "dispatch", wraps=api.dispatch) as dispatch:
+			res = self._read(conv, "get_list", dict(args))
+		self.assertEqual(json.dumps(res, sort_keys=False, default=str), json.dumps(plain, default=str))
+		self.assertEqual(dispatch.call_args.args[1]["fields"], ["skill_name"])  # nothing added
+
+	def test_rows_it_cannot_tell_apart_are_still_judged_on_all_it_could_read(self):
+		own = self._skill(OWNER, "mine")
+		spec = {
+			"spec": {
+				"from": SKILL,
+				"select": ["instructions"],
+				"where": [{"field": "name", "op": "=", "value": own}],
+			}
+		}
+		conv = self._armed_conv()
+		self.assertTrue(self._read(conv, "query", spec)["ok"])
+		self.assertEqual(self._armed(conv), 1)  # all it can read is its own
+		self._skill(OTHER, "side", share_with=OWNER)
+		res = self._read(conv, "query", spec)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._armed(conv), 0)
+		self.assertIn("/armskill-side", res["data"]["note"])
+
+
+class TestTheDisarmNote(ArmedChatBase):
+	def test_it_names_at_most_five_skills(self):
+		from jarvis.chat import macros
+
+		for count, named, more in ((5, 5, ""), (8, 5, " and 3 more")):
+			with self.subTest(count=count):
+				conv = self._armed_conv()
+				slugs = [f"armskill-many{i}" for i in range(count)]
+				note = macros._disarm_for_skills(conv, None, 0, slugs)
+				for i in range(count):
+					(self.assertIn if i < named else self.assertNotIn)(f"/armskill-many{i}", note)
+				if more:
+					self.assertIn(f"/armskill-many4{more}, which another user", note)
+				else:
+					self.assertIn("/armskill-many3 and /armskill-many4, which", note)
+				self.assertEqual(self._armed(conv), 0)
 
 
 class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
