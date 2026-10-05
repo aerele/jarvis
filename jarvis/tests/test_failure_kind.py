@@ -19,6 +19,7 @@ from jarvis import api
 from jarvis.chat import actions_api
 from jarvis.chat import api as chat_api
 from jarvis.exceptions import InvalidArgumentError, InvalidFieldValueError, RetryLaterError
+from jarvis.tests import _erpnext_masters as masters
 
 # Every class the plan allows as FIXABLE, imported here so a silent addition or
 # removal in jarvis._failure_kind fails this test.
@@ -248,8 +249,8 @@ class TestRealSavesClassified(FrappeTestCase):
 			_envelope("create_doc", {"doctype": "ToDo", "values": {"description": "j2a"}})
 
 	def test_extra_keys_leave_the_plugin_rendering_alone(self):
-		# The plugin renders a failed tool as `${code}: ${message}` (jarvis-openclaw-plugin
-		# src/index.ts, toolError), reading only those two keys; `kind` is additive. Its
+		# The plugin renders a failed tool as `${code}: ${message}` (the Jarvis plugin's
+		# toolError), reading only those two keys; `kind` is additive. Its
 		# contract test is the plugin's; this pins the bench side of that shape.
 		r = _envelope("create_doc", {"doctype": "ToDo", "values": {"priority": "High"}})
 		err = r["error"]
@@ -338,8 +339,7 @@ class TestBadDateOnBothDrivers(FrappeTestCase):
 		self._assert_fixable(exc, envelope)
 
 
-_CO = "_J2A Failure Kind Co"
-_ABBR = "J2AFK"
+_CO = masters.COMPANY
 
 
 class TestRealBusinessRulesAreNotFixable(FrappeTestCase):
@@ -353,48 +353,18 @@ class TestRealBusinessRulesAreNotFixable(FrappeTestCase):
 		if "erpnext" not in frappe.get_installed_apps():
 			raise cls.skipException("ERPNext is not installed")
 		frappe.set_user("Administrator")
-		if not frappe.db.exists("Company", _CO):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": _CO,
-					"abbr": _ABBR,
-					"default_currency": "INR",
-					"country": "India",
-					"create_chart_of_accounts_based_on": "Standard Template",
-					"chart_of_accounts": "Standard",
-				}
-			).insert(ignore_permissions=True)
-		for code, group, stock in (
-			("_J2A Stock Item", "Raw Material", 1),
-			("_J2A Service Item", "Services", 0),
-		):
-			if not frappe.db.exists("Item", code):
-				frappe.get_doc(
-					{
-						"doctype": "Item",
-						"item_code": code,
-						"item_group": group,
-						"stock_uom": "Nos",
-						"is_stock_item": stock,
-						"valuation_rate": 10,
-					}
-				).insert(ignore_permissions=True)
-		cls.customer = frappe.db.get_value("Customer", {"customer_name": "_J2A Credit Customer"})
-		if not cls.customer:
-			cls.customer = (
-				frappe.get_doc(
-					{
-						"doctype": "Customer",
-						"customer_name": "_J2A Credit Customer",
-						"customer_group": "Commercial",
-						"territory": "India",
-						"credit_limits": [{"company": _CO, "credit_limit": 100}],
-					}
-				)
-				.insert(ignore_permissions=True)
-				.name
-			)
+		masters.clear_cache_after_rollback(cls)
+		masters.ensure_ledger_company()
+		masters.ensure_item("_J2A Stock Item", is_stock_item=1, valuation_rate=10)
+		masters.ensure_item("_J2A Service Item", is_stock_item=0, valuation_rate=10)
+		masters.ensure_stock_entry_type("Material Issue")
+		# The journals post in Feb and Mar 2026; the order is dated today, delivered in 5 days.
+		masters.ensure_fiscal_years("2026-02-15", "2026-03-15", today(), add_days(today(), 5))
+		cls.customer = masters.ensure_customer("_J2A Credit Customer", credit_limit=100)
+		cls.price_list = masters.ensure_selling_price_list()
+		# With no one to extend a limit, ERPNext throws only "Please contact your administrator"
+		# and drops the "Credit limit has been crossed" text; a fresh site has no such user.
+		masters.ensure_credit_controller("j2a-credit-controller@example.com")
 		cls.warehouse = frappe.db.get_value("Warehouse", {"company": _CO, "warehouse_name": "Stores"})
 		cls.allow_negative = frappe.db.get_single_value("Stock Settings", "allow_negative_stock")
 		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 0)
@@ -432,6 +402,7 @@ class TestRealBusinessRulesAreNotFixable(FrappeTestCase):
 				"doctype": "Sales Order",
 				"company": _CO,
 				"customer": self.customer,
+				"selling_price_list": self.price_list,
 				"transaction_date": today(),
 				"delivery_date": add_days(today(), 5),
 				"items": [{"item_code": "_J2A Service Item", "qty": 1, "rate": 1000}],
