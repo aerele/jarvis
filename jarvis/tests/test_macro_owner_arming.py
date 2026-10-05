@@ -1409,9 +1409,55 @@ class TestWhatAReadNamesAsADoctype(FrappeTestCase):
 					}
 				},
 			),
+			# A field the read's own doctype holds a doctype in: a Link to DocType, or
+			# the doctype side of a Dynamic Link, and the few Frappe keeps as plain text.
+			"a deleted document": (
+				"get_list",
+				{"doctype": "Deleted Document", "filters": {"deleted_doctype": SKILL}},
+			),
+			"a share": ("get_list", {"doctype": "DocShare", "filters": {"share_doctype": SKILL}}),
+			"a file": ("get_list", {"doctype": "File", "filters": [["attached_to_doctype", "=", SKILL]]}),
+			"a to-do's reference": ("get_list", {"doctype": "ToDo", "filters": {"reference_type": SKILL}}),
+			"a communication": (
+				"get_list",
+				{"doctype": "Communication", "filters": json.dumps({"reference_doctype": SKILL})},
+			),
+			"another table's four-part filter": (
+				"get_list",
+				{"doctype": "User", "filters": [["DocShare", "share_doctype", "=", SKILL]]},
+			),
+			"a query on shares": (
+				"query",
+				{
+					"spec": {
+						"from": "DocShare",
+						"alias": "d",
+						"where": [{"field": "d.share_doctype", "op": "=", "value": SKILL}],
+					}
+				},
+			),
+			"a joined table's field": (
+				"query",
+				{
+					"spec": {
+						"from": "User",
+						"alias": "u",
+						"joins": [{"doctype": "DocShare", "alias": "d", "on": {"d.user": "u.name"}}],
+						"where": [{"field": "d.share_doctype", "op": "=", "value": SKILL}],
+					}
+				},
+			),
 		}.items():
 			with self.subTest(read=label):
 				self.assertTrue(api._reads_skill_rows(tool, args))
+
+	def test_the_fields_that_hold_a_doctype_come_from_the_doctype_itself(self):
+		self.assertIn("share_doctype", api._doctype_fields("DocShare"))  # a Link to DocType
+		self.assertIn("reference_type", api._doctype_fields("ToDo"))
+		self.assertIn("link_type", api._doctype_fields("Workspace Link"))  # a Dynamic Link's side
+		self.assertIn("share_doctype", api._doctype_fields("docshare"))  # any case
+		self.assertNotIn("description", api._doctype_fields("ToDo"))
+		self.assertEqual(api._doctype_fields("No Such Doctype"), frozenset())
 
 	def test_a_value_that_only_reads_like_one(self):
 		for label, (tool, args) in {
@@ -1459,6 +1505,97 @@ class TestAnArmedRunReadingAroundSkills(ArmedChatBase):
 				res = self._read(conv, "get_list", {"doctype": "ToDo", "filters": filters})
 				self.assertTrue(res["ok"], res)
 				self.assertEqual(self._armed(conv), 1)
+
+	def test_a_field_that_holds_a_doctype_is_read_as_one(self):
+		self._skill(OTHER, "side", share_with=OWNER)
+		conv = self._armed_conv()
+		res = self._read(conv, "get_list", {"doctype": "ToDo", "filters": {"reference_type": SKILL}})
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._armed(conv), 0)  # judged on every skill it could read
+
+	def test_a_deleted_skill_read_back_disarms(self):
+		self._skill(OTHER, "side", share_with=SM)
+		gone = self._skill(OTHER, "gone")
+		frappe.set_user(OTHER)
+		frappe.delete_doc(SKILL, gone)
+		frappe.db.commit()
+		self.addCleanup(self._drop_deleted_skills)
+		conv = self._armed_conv(SM)
+		res = self._read(
+			conv,
+			"get_list",
+			{"doctype": "Deleted Document", "fields": ["data"], "filters": {"deleted_doctype": SKILL}},
+			user=SM,
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertTrue(res["data"]["rows"], res)
+		self.assertEqual(self._armed(conv), 0)
+
+	def _drop_deleted_skills(self):
+		frappe.set_user("Administrator")
+		frappe.db.delete("Deleted Document", {"deleted_doctype": SKILL, "data": ["like", "%armskill-%"]})
+		frappe.db.commit()
+
+	def test_the_callers_own_columns_come_back_as_asked(self):
+		own = self._skill(OWNER, "mine", share_with=ADMIN)
+		self._skill(OTHER, "side", share_with=OWNER)  # readable, but not read
+		for fields, row in (
+			(["skill_name as name"], {"name": "armskill-mine"}),
+			(["skill_name as parent", "scope"], {"parent": "armskill-mine", "scope": "User"}),
+			(["skill_name"], {"skill_name": "armskill-mine"}),
+		):
+			with self.subTest(fields=fields):
+				conv = self._armed_conv()
+				res = self._read(
+					conv, "get_list", {"doctype": SKILL, "fields": fields, "filters": {"owner": OWNER}}
+				)
+				self.assertTrue(res["ok"], res)
+				self.assertEqual(res["data"], [row])
+				self.assertEqual(list(res["data"][0]), list(row))  # its keys, in its order
+				self.assertEqual(self._armed(conv), 1)
+		conv = self._armed_conv()
+		res = self._read(
+			conv,
+			"get_list",
+			{
+				"doctype": "Jarvis Custom Skill Share",
+				"parent_doctype": SKILL,
+				"fields": ["user as parent"],
+				"filters": {"parent": own},
+			},
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"], [{"parent": ADMIN}])
+		self.assertEqual(self._armed(conv), 1)
+
+	def test_another_tables_name_does_not_stand_in_for_the_skills(self):
+		skill = self._skill(OTHER, "side", share_with=OWNER)
+		self._skill(OWNER, "mine")
+		for label, args in {
+			"a share's name": {
+				"doctype": SKILL,
+				"fields": ["`tabJarvis Custom Skill Share`.name", "instructions"],
+				"filters": {"name": skill},
+			},
+			"a role row's name": {
+				"doctype": SKILL,
+				"fields": ["`tabJarvis Custom Skill Allowed Role`.name", "instructions"],
+				"filters": {"name": skill},
+			},
+			"filtered on the share": {
+				"doctype": SKILL,
+				"fields": ["`tabJarvis Custom Skill Share`.name", "instructions"],
+				"filters": [["Jarvis Custom Skill Share", "user", "=", OWNER]],
+			},
+			"a slug as name": {"doctype": SKILL, "fields": ["skill_name as name", "instructions"]},
+		}.items():
+			with self.subTest(read=label):
+				conv = self._armed_conv()
+				res = self._read(conv, "get_list", args)
+				self.assertTrue(res["ok"], res)
+				self.assertEqual(self._armed(conv), 0)
+				for row in res["data"]["rows"]:
+					self.assertEqual(sorted(row), ["instructions", "name"])
 
 	def test_a_skill_list_without_its_name_is_judged_on_its_own_rows(self):
 		own = self._skill(OWNER, "mine")
@@ -1600,6 +1737,32 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				frappe.db.commit()
 				self.assertEqual(self._instructions(skill), "Summarise the open orders.")
 				self.assertFalse(frappe.db.exists(SKILL, {"skill_name": "armskill-made"}))
+
+	def test_a_skill_doctype_in_any_case_parks_a_card(self):
+		skill = self._skill(OTHER, "side", share_with=OWNER)
+		for method, doctype in (
+			("frappe.client.get_value", SKILL),
+			("frappe.client.get_value", "jarvis custom skill"),
+			("frappe.client.get_value", " JARVIS Custom Skill "),
+			("frappe.client.get_list", "jarvis custom skill"),
+		):
+			args = {"doctype": doctype, "filters": {"name": skill}, "fieldname": "instructions"}
+			if method == "frappe.client.get_list":
+				args = {"doctype": doctype, "fields": ["instructions"]}
+			with self.subTest(method=method, doctype=doctype):
+				self.assertTrue(api._writes_a_skill("run_method", {"method": "m", "args": args}))
+				conv = self._armed_conv()
+				frappe.set_user(OWNER)
+				res = api._run_tool("run_method", {"method": method, "args": args}, conversation=conv)
+				self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
+				self.assertNotIn("Summarise the open orders", json.dumps(res, default=str))
+				pending_confirm.clear_for_conversation(OWNER, conv)
+				frappe.db.commit()
+		filtered = {
+			"method": "m",
+			"args": {"filters": {"reference_doctype": ["=", "jarvis custom skill share"]}},
+		}
+		self.assertTrue(api._writes_a_skill("run_method", filtered))
 
 	def test_a_route_the_gate_cannot_read_is_refused(self):
 		skill = self._skill(OWNER, "own")
