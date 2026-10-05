@@ -3,7 +3,9 @@
 		<p class="text-sm text-ink-gray-6">
 			{{
 				operatorReview
-					? arReview
+					? bankRecon
+						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
+						: arReview
 						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
 						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
 					: "Settings this agent reads when it runs. Leave a field empty to use the default."
@@ -13,7 +15,11 @@
 			v-if="operatorReview"
 			class="mt-3 rounded-lg bg-surface-gray-1 p-3 text-sm text-ink-gray-6"
 		>
-			<p v-if="arReview">
+			<p v-if="bankRecon">
+				Starter settings: the previous calendar month, a 30-calendar-day voucher lookback
+				and proposals only. Choose the bank account with your named reviewer and save.
+			</p>
+			<p v-else-if="arReview">
 				Starter settings: a 3-calendar-day settlement hold and current records only. The
 				fiscal year provides review context; older open invoices remain included.
 				India-specific context is detected from India Compliance and the company country.
@@ -174,7 +180,11 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
 import { searchLink } from "@/api";
-import { getAPReviewDefaults, getARReviewDefaults } from "@/api/agents";
+import {
+	getAPReviewDefaults,
+	getARReviewDefaults,
+	getBankReconReviewDefaults,
+} from "@/api/agents";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import {
 	SCOPE_CONFIG_FIELDS,
@@ -209,6 +219,7 @@ const agentSpecificFields = computed(() =>
 // the single list the template's v-for renders.
 const operatorReview = computed(() => props.configKeys.includes("review_scope"));
 const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
+const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
 const defaultsData = ref(null);
 const defaultsLoading = ref(false);
 const defaultsMessage = ref("");
@@ -216,6 +227,8 @@ let defaultsRequest = 0;
 const visibleFields = computed(() => [
 	...SCOPE_CONFIG_FIELDS.map((field) => {
 		if (!operatorReview.value || field.key === "fiscal_year") return field;
+		if (bankRecon.value && field.type === "date-range")
+			return { ...field, help: "Statement window. Lines dated inside it are reviewed." };
 		return {
 			...field,
 			help:
@@ -227,6 +240,22 @@ const visibleFields = computed(() => [
 		};
 	}),
 	...agentSpecificFields.value.map((field) => {
+		if (bankRecon.value) {
+			if (field.key === "policy_version")
+				return {
+					...field,
+					label: "Bank reconciliation policy reference",
+					help: "BANK-RECON-v1 identifies the saved starter settings, not evidence of policy approval.",
+				};
+			if (field.key === "review_scope")
+				return {
+					...field,
+					options: [
+						{ label: "Proposals only, no reconciling", value: "proposals_only" },
+					],
+				};
+			return field;
+		}
 		if (!arReview.value) return field;
 		if (field.key === "policy_version")
 			return {
@@ -261,6 +290,8 @@ const emit = defineEmits(["save", "dirty"]);
 const form = reactive({
 	report_date: "",
 	policy_version: "",
+	bank_account: "",
+	voucher_lookback_days: "",
 	price_tolerance_percent: "",
 	settlement_hold_days: "",
 	basis: "",
@@ -348,6 +379,17 @@ function makeLinkField(doctype) {
 					)
 					.map((fiscal) => ({ value: fiscal.name }));
 			}
+			if (bankRecon.value && doctype === "Bank Account") {
+				const data = defaultsData.value;
+				if (data?.defaults.company !== form.company) return [];
+				return (data.bank_accounts || [])
+					.filter((row) =>
+						`${row.name} ${row.account || ""}`
+							.toLowerCase()
+							.includes(query.trim().toLowerCase())
+					)
+					.map((row) => ({ value: row.name }));
+			}
 			return searchLink(doctype, query);
 		},
 		{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) }
@@ -357,9 +399,11 @@ function makeLinkField(doctype) {
 const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
+	bank_account: makeLinkField("Bank Account"),
 };
 watch([operatorReview, defaultsData], () => {
 	linkFields.fiscal_year.reprime();
+	linkFields.bank_account.reprime();
 	if (operatorReview.value && defaultsData.value) linkFields.fiscal_year.prime();
 });
 function linkValue(key) {
@@ -368,7 +412,10 @@ function linkValue(key) {
 function onLinkPick(key, opt) {
 	const value = opt && opt.value ? String(opt.value) : "";
 	if (form[key] === value) return;
-	if (operatorReview.value && key === "company") form.fiscal_year = "";
+	if (operatorReview.value && key === "company") {
+		form.fiscal_year = "";
+		form.bank_account = "";
+	}
 	onSelect(key, value);
 }
 
@@ -432,9 +479,11 @@ async function loadDefaults() {
 	const state = formState();
 	defaultsLoading.value = true;
 	try {
-		const data = await (arReview.value ? getARReviewDefaults : getAPReviewDefaults)(
-			form.company || undefined
-		);
+		const data = await (bankRecon.value
+			? getBankReconReviewDefaults
+			: arReview.value
+			? getARReviewDefaults
+			: getAPReviewDefaults)(form.company || undefined);
 		if (request !== defaultsRequest) return;
 		defaultsData.value = data;
 		defaultsMessage.value = data.message || "";

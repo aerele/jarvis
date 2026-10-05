@@ -34,6 +34,7 @@ vi.mock("@/api", () => api);
 const apiAgents = vi.hoisted(() => ({
 	getAPReviewDefaults: vi.fn(),
 	getARReviewDefaults: vi.fn(),
+	getBankReconReviewDefaults: vi.fn(),
 }));
 vi.mock("@/api/agents", () => apiAgents);
 
@@ -203,6 +204,71 @@ describe("AR review configuration", () => {
 		await flushPromises();
 		expect(field(wrapper, "AR review policy reference").element.value).toBe("Reviewed-v2");
 		expect(field(wrapper, "Recent-settlement hold").element.value).toBe("");
+	});
+});
+
+describe("bank reconciliation review configuration", () => {
+	const configKeys = [
+		"company",
+		"bank_account",
+		"from_date",
+		"to_date",
+		"voucher_lookback_days",
+		"policy_version",
+		"review_scope",
+	];
+	function bankDefaults(company = "Example") {
+		return {
+			defaults: {
+				company,
+				policy_version: "BANK-RECON-v1",
+				review_scope: "proposals_only",
+				voucher_lookback_days: 30,
+				from_date: "2026-08-01",
+				to_date: "2026-08-31",
+				bank_account: "Example Bank - EX",
+			},
+			site_date: "2026-09-30",
+			fiscal_years: [],
+			message: "",
+			bank_accounts: [{ name: "Example Bank - EX", account: "Bank - EX" }],
+		};
+	}
+	beforeEach(() => {
+		apiAgents.getBankReconReviewDefaults.mockReset().mockResolvedValue(bankDefaults());
+		apiAgents.getARReviewDefaults.mockClear();
+		apiAgents.getAPReviewDefaults.mockClear();
+	});
+	it("renders bank fields and proposals-only wording", async () => {
+		const wrapper = mountForm({ company: "Example" }, { configKeys });
+		await flushPromises();
+		expect(wrapper.text()).toContain("Bank account");
+		expect(wrapper.text()).toContain("Voucher lookback");
+		expect(wrapper.text()).toContain("Bank reconciliation policy reference");
+		expect(wrapper.text()).toContain("Statement window. Lines dated inside it are reviewed.");
+		const options = wrapper.find("select").exists()
+			? wrapper.findAll("option").map((o) => o.text())
+			: [];
+		expect(options).toEqual(["Proposals only, no reconciling"]);
+	});
+	it("fills defaults via the bank endpoint and saves the lookback as a number", async () => {
+		const wrapper = mountForm({ company: "Example" }, { configKeys });
+		await flushPromises();
+		expect(apiAgents.getBankReconReviewDefaults).toHaveBeenCalledWith("Example");
+		expect(apiAgents.getARReviewDefaults).not.toHaveBeenCalled();
+		expect(apiAgents.getAPReviewDefaults).not.toHaveBeenCalled();
+		expect(field(wrapper, "Voucher lookback").element.value).toBe("30");
+		await field(wrapper, "Save configuration").trigger("click");
+		const saved = wrapper.emitted("save")[0][0];
+		expect(saved).toMatchObject({
+			company: "Example",
+			bank_account: "Example Bank - EX",
+			from_date: "2026-08-01",
+			to_date: "2026-08-31",
+			policy_version: "BANK-RECON-v1",
+			review_scope: "proposals_only",
+		});
+		expect(saved.voucher_lookback_days).toBe(30);
 	});
 });
 

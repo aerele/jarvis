@@ -288,6 +288,8 @@
 									? "read-only"
 									: agent.nature === "Scribe"
 									? "writes wiki pages"
+									: agent.agent_slug === "bank-recon-operator"
+									? "proposes bank matches; never reconciles"
 									: agent.agent_slug === "ar-collections-operator"
 									? "reviews receivables; drafts only, never sends"
 									: agent.supports_manual_run
@@ -1100,8 +1102,8 @@ async function doInstall(pick) {
 
 const running = ref(false);
 const configurationDirty = ref(false);
-const isOperatorReview = computed(() =>
-	["ap-3way-match-operator", "ar-collections-operator"].includes(agent.value?.agent_slug)
+const isOperatorReview = computed(
+	() => agent.value?.nature === "Operator" && !!agent.value?.supports_manual_run
 );
 const configurationIssues = computed(
 	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
@@ -1117,13 +1119,12 @@ const apConfigurationBlocked = computed(
 const apConfigurationHint = computed(() =>
 	configurationDirty.value
 		? "Save your configuration changes before running."
-		: `Complete and save the required ${
-				agent.value?.agent_slug === "ar-collections-operator" ? "AR" : "AP"
-		  } settings in Configure before running.`
+		: "Complete and save the required review settings in Configure before running."
 );
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
-// backend run_agent_now gate: nature in Auditor/Scribe); operators draft through
-// the Approval Board and never run on demand.
+// backend run_agent_now gate: nature in Auditor/Scribe, or an operator that
+// declares supports_manual_run); other operators draft through the Approval
+// Board and never run on demand.
 // A scribe writes the live Org wiki directly (no shadow holding pen - see
 // agents_api.run_agent_now), so the backend refuses it outright while shadow
 // (jarvis#456). Block it here too rather than let the click round-trip into
@@ -1170,7 +1171,9 @@ const runTooltip = computed(() => {
 		return canReview.value
 			? "Still in shadow preview - promote it to live under Configure first"
 			: "Not yet enabled for live runs - ask your administrator";
-	return agent.value.agent_slug === "ar-collections-operator"
+	return agent.value.agent_slug === "bank-recon-operator"
+		? "Review bank lines, proposals only"
+		: agent.value.agent_slug === "ar-collections-operator"
 		? "Review receivables — unsent drafts only"
 		: nature === "Operator"
 		? "Review existing drafts — no posting or payment"
