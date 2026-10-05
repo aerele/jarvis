@@ -183,9 +183,9 @@ class TestNotRenamable(FrappeTestCase):
 				name, other = _seed(doctype), _seed(doctype)
 				before = _row(doctype, name)
 				with self.assertRaises(frappe.PermissionError):
-					frappe.rename_doc(doctype, name, f"nr-moved-{frappe.generate_hash(length=8)}", force=True)
+					frappe.rename_doc(doctype, name, f"nr-moved-{frappe.generate_hash(length=8)}")
 				with self.assertRaises(frappe.PermissionError):
-					frappe.rename_doc(doctype, name, other, merge=True, force=True)
+					frappe.rename_doc(doctype, name, other, merge=True)
 				self.assertEqual(_row(doctype, name), before)
 				self.assertTrue(frappe.db.exists(doctype, other))
 
@@ -200,7 +200,7 @@ class TestNotRenamable(FrappeTestCase):
 				new = _new_name(doctype)
 				frappe.db.savepoint("nr_rename")
 				with self.assertRaises(frappe.PermissionError):
-					rename_doc(doctype, name, new, force=True, validate=False, show_alert=False)
+					rename_doc(doctype, name, new, validate=False, show_alert=False)
 				frappe.db.rollback(save_point="nr_rename")
 				self.assertEqual(_row(doctype, name), before)
 				self.assertFalse(frappe.db.exists(doctype, new))
@@ -217,5 +217,5 @@ class TestNotRenamable(FrappeTestCase):
 		new = f"nr-{frappe.generate_hash(length=8)}@example.com"
 		settings = _seed("Jarvis User Settings")
 		frappe.db.set_value("Jarvis User Settings", settings, "user", old, update_modified=False)
-		frappe.rename_doc("User", old, new, force=True)
+		frappe.rename_doc("User", old, new)
 		self.assertEqual(frappe.db.get_value("Jarvis User Settings", settings, "user"), new)
