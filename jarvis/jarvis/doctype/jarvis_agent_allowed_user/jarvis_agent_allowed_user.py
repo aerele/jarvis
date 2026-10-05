@@ -10,6 +10,8 @@ grandfather patch; the catalog sync never writes it.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentAllowedUser(Document):
+
+class JarvisAgentAllowedUser(NotRenamable, Document):
 	pass

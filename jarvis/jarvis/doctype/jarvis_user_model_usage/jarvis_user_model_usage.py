@@ -9,8 +9,10 @@ a desk save), so this controller stays minimal.
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisUserModelUsage(Document):
+
+class JarvisUserModelUsage(NotRenamable, Document):
 	# Identity is (parent, model, month_key). Counters + cap are mutated only by
 	# jarvis.chat.usage; no validation hook needed.
 	pass
