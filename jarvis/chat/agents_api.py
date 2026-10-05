@@ -1596,7 +1596,9 @@ def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
 	``run`` / ``first_seen_run`` / ``last_seen_run``) and runs link the
-	installation. The cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
+	installation, except the month's counted runs, which are kept for the A14 budget
+	with no installation (``agent_scheduler.keep_budget_rows_of_uninstalled``). The
+	cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
 	way ``_rehome_installation_outputs`` scopes it, never by a broad
 	``(agent, owner)`` match (#455 — see ``_installation_finding_names``). The
 	``uninstalled`` activity row is written FIRST — it is Link-free by design, so
@@ -1630,8 +1632,15 @@ def uninstall_agent(installation: str) -> dict:
 			flags={"jarvis_uninstall_installation": doc.name},
 		)
 	_detach_last_seen_run(run_names)
+	# The month's counted runs are KEPT, detached from the installation, so uninstalling
+	# and installing again does not hand the month's run budget back (A14). For the user
+	# the run history is gone all the same: no screen lists a run with no installation.
+	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+
+	kept = set(keep_budget_rows_of_uninstalled(doc.name, doc.owner))
 	for name in run_names:
-		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+		if name not in kept:
+			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
 	_delete_installation_preserving_provenance(doc, via_admin)
@@ -2339,6 +2348,12 @@ def _count(doctype: str, filters: dict, or_filters: list | None = None) -> int:
 	return frappe.db.count(doctype, filters=filters)
 
 
+# A run row with no installation is not run history: an uninstall keeps the month's
+# counted runs for the A14 budget and clears their installation
+# (``agent_scheduler.keep_budget_rows_of_uninstalled``). Every reader that shows runs to
+# a person leaves them out, as it did when they were deleted.
+_HAS_INSTALLATION = {"installation": ["is", "set"]}
+
 _RUN_LIST_FIELDS = [
 	"name",
 	"agent",
@@ -2385,7 +2400,7 @@ def _stamp_run_nature(rows: list[dict]) -> list[dict]:
 def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	"""This owner's run history (optionally filtered to one agent)."""
 	me = frappe.session.user
-	filters = {"owner": me}
+	filters = {"owner": me, **_HAS_INSTALLATION}
 	if agent:
 		filters["agent"] = agent
 	rows = frappe.get_all(
@@ -2416,7 +2431,7 @@ def list_runs_page(
 	matches name/status (LIKE-escaped)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
-	filters: dict = {"owner": me}
+	filters: dict = {"owner": me, **_HAS_INSTALLATION}
 	if agent:
 		filters["agent"] = agent
 	if status:
@@ -2493,8 +2508,11 @@ def list_findings(
 		# get_value bypasses perms, so without the owner check a foreign run id is
 		# an existence/metadata oracle. A run the caller does not own returns empty
 		# (identical to an unknown run), never leaking that it exists.
-		run_row = frappe.db.get_value(RUN, run, ["agent", "creation", "status", "owner"], as_dict=True)
-		if not run_row or run_row.owner != me:
+		run_row = frappe.db.get_value(
+			RUN, run, ["agent", "creation", "status", "owner", "installation"], as_dict=True
+		)
+		if not run_row or run_row.owner != me or not run_row.installation:
+			# A run kept for the budget after an uninstall reads like a deleted one.
 			return _empty()
 		if run_row.status not in ("completed", "partial"):
 			# unknown / failed / still-running runs recorded no findings snapshot
@@ -2636,8 +2654,9 @@ def list_run_steps(run: str) -> dict:
 	if not run:
 		return empty
 	me = frappe.session.user
-	run_row = frappe.db.get_value(RUN, run, ["name", "owner"], as_dict=True)
-	if not run_row:
+	run_row = frappe.db.get_value(RUN, run, ["name", "owner", "installation"], as_dict=True)
+	if not run_row or not run_row.installation:
+		# A run kept for the budget after an uninstall reads like a deleted one.
 		return empty
 	if run_row.owner != me and not has_jarvis_admin_access(me):
 		return empty
@@ -2694,7 +2713,7 @@ def list_agent_activity_page(
 	Search matches agent_title/detail (LIKE-escaped). Each row also carries a
 	live-joined ``run_status`` (the named run's CURRENT status, not the
 	action verb's point-in-time label; ``None`` when the row names no run or
-	that run no longer exists)."""
+	that run no longer exists, or is one an uninstall kept for the budget)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	filters: dict = {"owner": me}
@@ -2738,7 +2757,11 @@ def list_agent_activity_page(
 	if run_names:
 		status_by_run = {
 			d.name: d.status
-			for d in frappe.get_all(RUN, filters={"name": ["in", list(run_names)]}, fields=["name", "status"])
+			for d in frappe.get_all(
+				RUN,
+				filters={"name": ["in", list(run_names)], **_HAS_INSTALLATION},
+				fields=["name", "status"],
+			)
 		}
 	for r in rows:
 		r["run_status"] = status_by_run.get(r["run"]) if r.get("run") else None
