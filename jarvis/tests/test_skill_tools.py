@@ -912,3 +912,21 @@ class TestAToolReadsADoctypeByItsCanonicalName(SkillToolsTestCase):
 				self.assertEqual(
 					sorted(r["skill_name"] for r in rows), [f"{PFX}-case-own", f"{PFX}-case-shared"]
 				)
+
+	def test_an_unknown_doctype_leaves_nothing_in_the_message_log(self):
+		# The failing tool's error detail is read from the message log; a lookup of the
+		# name must not add "not found" lines to it.
+		from jarvis.tools._doctype_name import canonical_doctype
+
+		frappe.clear_messages()
+		self.assertEqual(canonical_doctype("No Such Doctype Here"), "No Such Doctype Here")
+		self.assertEqual(frappe.local.message_log, [])
+
+	def test_another_spelling_is_looked_up_once_per_request(self):
+		from jarvis.tools import _doctype_name
+
+		frappe.local.request_cache.clear()
+		with patch.object(frappe.db, "get_value", wraps=frappe.db.get_value) as lookup:
+			for _ in range(3):
+				self.assertEqual(_doctype_name.canonical_doctype(" todo "), "ToDo")
+		self.assertEqual(lookup.call_count, 1)
