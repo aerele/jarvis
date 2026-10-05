@@ -13,6 +13,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 # PP-5: launch-time facts stamped once when the run starts. Unlike the listing /
 # installation versions (mutable), these are the run's immutable provenance — the
 # bundle it actually executed, whether it ran in shadow, and the human who
@@ -39,7 +41,7 @@ _IMMUTABLE_LAUNCH_FIELDS = (
 )
 
 
-class JarvisAgentRun(Document):
+class JarvisAgentRun(NotRenamable, Document):
 	def validate(self):
 		self._guard_immutable_launch_fields()
 

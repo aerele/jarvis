@@ -19,8 +19,10 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentProvenanceEvent(Document):
+
+class JarvisAgentProvenanceEvent(NotRenamable, Document):
 	def before_insert(self):
 		if not self.occurred_at:
 			self.occurred_at = frappe.utils.now()

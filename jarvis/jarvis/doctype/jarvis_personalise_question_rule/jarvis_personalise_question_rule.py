@@ -20,11 +20,13 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 SCOPES = ("Org", "Role", "User")
 MAX_QUESTION_LEN = 500
 
 
-class JarvisPersonaliseQuestionRule(Document):
+class JarvisPersonaliseQuestionRule(NotRenamable, Document):
 	def validate(self):
 		self._validate_question()
 		self._validate_scope()

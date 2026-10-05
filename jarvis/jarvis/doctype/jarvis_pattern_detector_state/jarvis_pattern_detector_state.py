@@ -8,6 +8,8 @@ and written only by engine code (SM read-only from Desk).
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisPatternDetectorState(Document):
+
+class JarvisPatternDetectorState(NotRenamable, Document):
 	pass
