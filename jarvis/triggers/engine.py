@@ -381,7 +381,8 @@ def _llm_cap_reached(row: dict) -> bool:
 		# The counter is a raw redis INCR value (llm_action uses cache.incr),
 		# NOT a pickled set_value — read it with the raw GET, not get_value
 		# (which pickle.loads and would raise on the plain integer).
-		cache = frappe.cache()
+		# Site-scoped by make_key.
+		cache = frappe.cache()  # nosemgrep: frappe-cache-breaks-multitenancy
 		raw = cache.get(cache.make_key(_cap_key(row.get("name"))))
 		used = int(raw) if raw is not None else 0
 		return used > cap

@@ -228,7 +228,8 @@ def render_pdf(
 		# subprocess environment changes).
 		run_env = {**os.environ, "FONTCONFIG_FILE": font_config_file} if font_config_file else None
 		try:
-			result = subprocess.run(
+			# argv list from _build_args (resolved binary + fixed flags), no shell; HTML goes over stdin.
+			result = subprocess.run(  # nosemgrep: frappe-subprocess-exec
 				args,
 				input=document.encode("utf-8"),
 				capture_output=True,
@@ -730,6 +731,9 @@ def resolve_company_letterhead_footer(
 			return "", "letter head footer is too large — rendered without it"
 		try:
 			comp_doc = frappe.get_doc("Company", comp)
+			# Admin-authored Letter Head footer, rendered in Frappe's sandboxed Jinja env
+			# (safe_render) exactly as Frappe's print view renders it.
+			# nosemgrep: frappe-ssti
 			rendered = frappe.render_template(raw, {"doc": comp_doc, "company": comp_doc})
 		except Exception:
 			# A doc-bound Jinja letter head that needs an invoice context; fall back to
