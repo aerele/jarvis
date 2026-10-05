@@ -1142,16 +1142,44 @@ class TestDraftComputed(FrappeTestCase):
 		}
 		return draft_computed(frappe.as_json(action))
 
-	def test_fills_the_amount_without_inserting_anything(self):
+	def test_fills_the_amount_without_writing_anything(self):
 		from unittest.mock import patch
 
 		from frappe.model.document import Document
 
-		before = frappe.db.count("Sales Order")
-		with patch.object(Document, "insert", side_effect=AssertionError("a card render must never insert")):
+		# With auto-insert on, fetching item details would insert an Item Price for a
+		# rate with no price: the calculation must never reach that.
+		before_auto = frappe.db.get_single_value("Stock Settings", "auto_insert_price_list_rate_if_missing")
+		frappe.db.set_single_value("Stock Settings", "auto_insert_price_list_rate_if_missing", 1)
+		self.addCleanup(
+			frappe.db.set_single_value,
+			"Stock Settings",
+			"auto_insert_price_list_rate_if_missing",
+			before_auto,
+		)
+		before = (frappe.db.count("Sales Order"), frappe.db.count("Item Price"))
+		never = AssertionError("a card render must never write")
+		with (
+			patch.object(Document, "insert", side_effect=never),
+			patch.object(Document, "save", side_effect=never),
+		):
 			r = self._computed()
 		self.assertEqual(r, {"ok": True, "tables": {"items": [{"amount": 2000}]}})
-		self.assertEqual(frappe.db.count("Sales Order"), before)
+		self.assertEqual((frappe.db.count("Sales Order"), frappe.db.count("Item Price")), before)
+
+	def test_a_doctype_without_a_currency_is_not_totalled(self):
+		from unittest.mock import patch
+
+		with patch(
+			"erpnext.controllers.accounts_controller.AccountsController.calculate_taxes_and_totals"
+		) as calc:
+			r = self._computed(
+				doctype="Material Request",
+				values={"material_request_type": "Purchase", "schedule_date": self.delivery, "items": []},
+				columns={},
+			)
+		self.assertEqual(r, {"ok": False})
+		calc.assert_not_called()
 
 	def test_returns_only_requested_read_only_fields(self):
 		r = self._computed(
