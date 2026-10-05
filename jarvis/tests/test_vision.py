@@ -1,5 +1,6 @@
 """Unit tests for jarvis.chat.vision (pure media helpers; no DB/frappe)."""
 
+import base64
 import io
 import unittest
 
@@ -11,6 +12,20 @@ def _png(w=12, h=12) -> bytes:
 
 	buf = io.BytesIO()
 	Image.new("RGB", (w, h), (200, 50, 50)).save(buf, format="PNG")
+	return buf.getvalue()
+
+
+def _sideways_photo(w=200, h=100, orientation=6) -> bytes:
+	"""A camera JPEG: pixels stored sideways, EXIF says how to turn them upright.
+	A dark block marks the STORED top-left corner."""
+	from PIL import Image
+
+	im = Image.new("RGB", (w, h), (255, 255, 255))
+	im.paste((0, 0, 0), (0, 0, w // 4, h // 4))
+	exif = Image.Exif()
+	exif[274] = orientation  # Orientation
+	buf = io.BytesIO()
+	im.save(buf, format="JPEG", exif=exif)
 	return buf.getvalue()
 
 
@@ -40,6 +55,19 @@ class TestVision(unittest.TestCase):
 		self.assertEqual(part["mime"], "image/jpeg")
 		self.assertTrue(part["data_b64"])
 		self.assertEqual(part["file_name"], "x.png")
+
+	def test_image_part_turns_a_camera_photo_upright(self):
+		# #654: a phone photo of an invoice reached the model sideways (Orientation 6).
+		from PIL import Image
+
+		part = vision.image_part(_sideways_photo(), "invoice.jpg")
+		im = Image.open(io.BytesIO(base64.b64decode(part["data_b64"])))
+		self.assertEqual(im.size, (100, 200))
+		# Orientation 6 is viewed turned 90 degrees clockwise: the stored top-left
+		# corner is shown at the top-right.
+		self.assertLess(sum(im.getpixel((95, 5))), 120)
+		self.assertGreater(sum(im.getpixel((5, 5))), 600)
+		self.assertIsNone(im.getexif().get(274))  # never turned twice by a viewer
 
 	def test_image_part_undecodable_returns_none(self):
 		self.assertIsNone(vision.image_part(b"not really an image", "x.png"))

@@ -56,17 +56,31 @@ def image_part(content: bytes, file_name: str) -> dict | None:
 	try:
 		from PIL import Image
 
-		im = Image.open(io.BytesIO(content))
-		im.load()
+		src = Image.open(io.BytesIO(content))
+		src.load()
 	except Exception:
 		return None
+	im = _upright(src)
 	try:
 		return _encode_under_caps(im, file_name)
 	finally:
-		try:
-			im.close()
-		except Exception:
-			pass
+		for each in {id(src): src, id(im): im}.values():
+			try:
+				each.close()
+			except Exception:
+				pass
+
+
+def _upright(im):
+	"""A camera photo stores its pixels sideways and says so in EXIF Orientation;
+	the re-encode drops that tag, so turn the pixels first or the model reads the
+	page on its side (#654). A malformed tag keeps the stored pixels."""
+	try:
+		from PIL import ImageOps
+
+		return ImageOps.exif_transpose(im) or im
+	except Exception:
+		return im
 
 
 def pdf_parts(
