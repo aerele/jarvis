@@ -320,30 +320,37 @@ def _holds_of(macro_names: list[str]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Notices: an admin deleted one of the caller's macros
+# Notices: an admin deleted one of the caller's macros, or handed one over
 # --------------------------------------------------------------------------- #
-# The subject every such Notification Log starts with: the one way to tell them from
+# The subjects such a Notification Log starts with: the one way to tell them from
 # the engine's other notices, since they name no document (``macros.notify_owner``:
 # Frappe deletes a notification that points at a record when the record goes).
 ADMIN_DELETE_NOTICE = "Macro deleted by an admin"
+# Both owners of a handed-over macro get one: the old owner's list no longer shows
+# the macro, and the new owner's shows it switched off with no word of why.
+ADMIN_HANDOVER_NOTICE = "Macro handed over by an admin"
+_NOTICE_KINDS = (ADMIN_DELETE_NOTICE, ADMIN_HANDOVER_NOTICE)
 _NOTICES_MAX = 20
 
 
 def _notice_filters(user: str) -> dict:
-	return {
-		"for_user": user,
-		"read": 0,
-		"subject": ["like", f"{list_filters.escape_like(ADMIN_DELETE_NOTICE)}:%"],
-	}
+	return {"for_user": user, "read": 0}
+
+
+def _notice_kinds() -> list:
+	"""``or_filters``: a subject that starts with one of the kinds above."""
+	return [["subject", "like", f"{list_filters.escape_like(kind)}:%"] for kind in _NOTICE_KINDS]
 
 
 def admin_notices(user: str) -> list[dict]:
-	"""The user's unread notices that an admin deleted one of their macros, newest
-	first: ``[{name, message, creation}]``. Neither client shows the notification
-	log, so the Macros list shows these, until dismissed (``dismiss_macro_notices``)."""
+	"""The user's unread notices of what an admin did to their macros (deleted one,
+	handed one over to or from them), newest first: ``[{name, message, creation}]``.
+	Neither client shows the notification log, so the Macros list shows these, until
+	dismissed (``dismiss_macro_notices``)."""
 	rows = frappe.get_all(
 		"Notification Log",
 		filters=_notice_filters(user),
+		or_filters=_notice_kinds(),
 		fields=["name", "email_content", "creation"],
 		order_by="creation desc",
 		limit=_NOTICES_MAX,
@@ -354,7 +361,7 @@ def admin_notices(user: str) -> list[dict]:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dismiss_macro_notices(names: str | list | None = None) -> dict:
-	"""Mark the caller's admin-delete notices read: those named, or all of them when
+	"""Mark the caller's admin notices read: those named, or all of them when
 	none are. Another user's notification, or one of another kind, is never touched:
 	the filter is the caller's own and the kind's own."""
 	refuse_in_tool_dispatch()
@@ -370,7 +377,7 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 	filters = _notice_filters(frappe.session.user)
 	if raw:
 		filters["name"] = ["in", raw]
-	marked = frappe.get_all("Notification Log", filters=filters, pluck="name")
+	marked = frappe.get_all("Notification Log", filters=filters, or_filters=_notice_kinds(), pluck="name")
 	for name in marked:
 		frappe.db.set_value("Notification Log", name, "read", 1, update_modified=False)
 	frappe.db.commit()
