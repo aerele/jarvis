@@ -2,6 +2,8 @@
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisMacroStep(Document):
+
+class JarvisMacroStep(NotRenamable, Document):
 	pass
