@@ -65,6 +65,11 @@
 				title="On hold"
 				:message="holdText"
 			/>
+			<!-- An armed macro changes on its own page by its owner only: anyone else sees
+			     its steps, summary, schedule and Stop on error read-only, and why. -->
+			<p v-if="armedLocked" data-testid="armed-locked" class="mb-4 text-sm text-ink-gray-5">
+				{{ armedLockedReason }}
+			</p>
 			<!-- How the last run went, when the owner needs telling: it failed, it is
 			     waiting on them, or a step only drafted a record. Nothing else on this
 			     page said, and a scheduled run fails with nobody watching. -->
@@ -110,31 +115,35 @@
 					/>
 					<!-- While on hold, switching ON is the admin's to allow; switching
 					     off stays free (the server rules the same). -->
+					<!-- On someone else's armed macro, only the safe direction is open here
+					     too: switching off, unscheduling, Stop on error going on. -->
 					<Switch
 						v-model="form.enabled"
 						label="Enabled"
 						:description="
 							heldOff(form.enabled) ||
+							armedOff(form.enabled) ||
 							'Off = saved as a draft - its scheduled runs are skipped. You can still run it by hand.'
 						"
-						:disabled="saving || !!heldOff(form.enabled)"
+						:disabled="saving || !!heldOff(form.enabled) || !!armedOff(form.enabled)"
 					/>
 					<Switch
 						v-model="form.stop_on_error"
 						label="Stop on error"
-						description="Stop the chain if a step fails - otherwise it keeps going after an error."
-						:disabled="saving"
-					/>
-					<Switch
-						v-model="form.skip_confirmation"
-						label="Skip confirmation (run writes uncarded)"
 						:description="
-							heldOff(form.skip_confirmation) ||
-							(canArm
-								? 'Admin only. This macro\'s runs execute writes WITHOUT a confirmation card - including run_method, send_email and run_import. delete/cancel/amend still park and stop the run. Arming trusts the owner for current and future steps.'
-								: 'Admin only - a Jarvis Admin or System Manager can arm this macro to run its writes without a confirmation card.')
+							armedOff(!form.stop_on_error) ||
+							'Stop the chain if a step fails - otherwise it keeps going after an error.'
 						"
-						:disabled="saving || !canArm || !!heldOff(form.skip_confirmation)"
+						:disabled="saving || !!armedOff(!form.stop_on_error)"
+					/>
+					<!-- The owner's own switch (the server decides who may: can_arm). Off
+					     is always free; on asks once, in the server's words. -->
+					<Switch
+						:modelValue="form.skip_confirmation"
+						label="Skip confirmation (run writes uncarded)"
+						:description="heldOff(form.skip_confirmation) || armDescription"
+						:disabled="saving || !!heldOff(form.skip_confirmation) || !armSwitchFree"
+						@update:modelValue="setArm"
 					/>
 				</div>
 			</DocSection>
@@ -149,11 +158,13 @@
 						label="Run on a schedule"
 						:description="
 							heldOff(form.schedule_enabled) ||
+							armedOff(form.schedule_enabled) ||
 							scheduleBlocked ||
 							`${agentName} runs this macro automatically.`
 						"
 						:disabled="
 							saving ||
+							!!armedOff(form.schedule_enabled) ||
 							!!heldOff(form.schedule_enabled) ||
 							(!!scheduleBlocked && !form.schedule_enabled)
 						"
@@ -165,7 +176,7 @@
 							label="Frequency"
 							:options="FREQUENCY_OPTIONS"
 							:modelValue="form.schedule_frequency"
-							:disabled="saving"
+							:disabled="saving || armedLocked"
 							@update:modelValue="(v) => (form.schedule_frequency = v)"
 						/>
 						<div class="flex-1">
@@ -173,7 +184,7 @@
 							<TimePicker
 								v-model="form.schedule_time"
 								placeholder="09:00"
-								:disabled="saving"
+								:disabled="saving || armedLocked"
 							/>
 						</div>
 						<!-- weekly -> weekday name, monthly -> day of month; hidden for
@@ -191,7 +202,7 @@
 							label="Day"
 							:options="dayOptions"
 							:modelValue="form.schedule_day"
-							:disabled="saving"
+							:disabled="saving || armedLocked"
 							@update:modelValue="(v) => (form.schedule_day = v)"
 						/>
 					</div>
@@ -202,7 +213,11 @@
 			</DocSection>
 
 			<DocSection label="Steps">
-				<StepsBuilder v-model="form.steps" :disabled="saving" :errors="stepErrors" />
+				<StepsBuilder
+					v-model="form.steps"
+					:disabled="saving || armedLocked"
+					:errors="stepErrors"
+				/>
 			</DocSection>
 
 			<DocSection
@@ -249,7 +264,7 @@
 					placeholder="No summary yet. Saving a change to the steps (2 or more) generates one in the background, and Re-summarize in the menu starts one now."
 					description="When present, runs use this prompt instead of the steps."
 					:modelValue="form.merged_prompt"
-					:disabled="saving || mergePending"
+					:disabled="saving || mergePending || armedLocked"
 					@update:modelValue="(v) => (form.merged_prompt = v)"
 				/>
 			</DocSection>
@@ -316,6 +331,7 @@ import {
 	scheduleAnchorPhrase,
 } from "@/lib/scheduleAnchor";
 import * as api from "@/api";
+import * as apiMacros from "@/api/macros";
 import { agentName } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
@@ -487,10 +503,66 @@ const stepsWithPrompt = computed(() => form.steps.filter((s) => (s.prompt || "")
 // changes, and the server summarizes the SAVED steps.
 const resummarizeBlocked = computed(() => stepsWithPrompt.value >= 2 && dirty.value);
 
-// Arming a macro to skip confirmation is admin-only (the backend re-checks
-// require_jarvis_admin, so this is a UX gate, not the security boundary); a
-// non-admin sees the toggle disabled with the reason instead of a throw-on-save.
-const canArm = !!(window.is_jarvis_admin || window.is_system_manager);
+// Whether this user may switch Skip confirmation on, why not, and what they are
+// asked to confirm first: all the server's (`can_arm`, `arm_blocked_reason`,
+// `arm_notice` on get_macro, or get_new_macro_arming for a new macro). The macro's
+// owner may; the server refuses everyone else, so this is a UX gate, not the
+// security boundary. A server from before these keys sends none of them: there
+// only an admin could arm, which is what the fallback says.
+const legacyCanArm = () => !!(window.is_jarvis_admin || window.is_system_manager);
+const LEGACY_ARM_REASON = "Only a Jarvis Admin or System Manager can switch this on.";
+const ARM_ON = "This macro's runs make their changes without asking for confirmation first.";
+const ARM_IF_ON =
+	"If on, this macro's runs make their changes without asking for confirmation first.";
+const canArm = ref(legacyCanArm());
+const armBlockedReason = ref("");
+const armNotice = ref("");
+function seedArming(data) {
+	if (!data || data.can_arm === undefined) {
+		canArm.value = legacyCanArm();
+		armBlockedReason.value = canArm.value ? "" : LEGACY_ARM_REASON;
+		armNotice.value = "";
+		return;
+	}
+	canArm.value = !!data.can_arm;
+	armBlockedReason.value = data.arm_blocked_reason || "";
+	armNotice.value = data.arm_notice || "";
+}
+// Off is always free, and so is putting back an arm the macro already had.
+const armSwitchFree = computed(
+	() =>
+		canArm.value ||
+		form.skip_confirmation ||
+		!!(snapshot.value && snapshot.value.skip_confirmation)
+);
+const armDescription = computed(() => {
+	if (form.skip_confirmation) return ARM_ON;
+	return canArm.value ? ARM_IF_ON : armBlockedReason.value || LEGACY_ARM_REASON;
+});
+// "" unless this macro is armed and the viewer is not its owner (the server's say):
+// then its steps, summary and schedule settings are read-only here, and Enabled,
+// Schedule and Stop on error move only the safe way (armedOff).
+const armedLockedReason = ref("");
+const armedLocked = computed(() => !!armedLockedReason.value);
+// As heldOff: the reason for a switch that is off and may not go on ("" when free).
+const armedOff = (on) => (armedLocked.value && !on ? armedLockedReason.value : "");
+// Switching it on asks once, with the server's notice. An arm the macro already had
+// when it loaded is not asked about again.
+function setArm(on) {
+	if (!on || !armNotice.value || (snapshot.value && snapshot.value.skip_confirmation)) {
+		form.skip_confirmation = !!on;
+		return;
+	}
+	confirmDialog({
+		title: "Skip confirmation?",
+		// ConfirmDialog renders `message` as HTML (v-html): the server's text goes in escaped.
+		message: escapeHtml(armNotice.value),
+		onConfirm: ({ hideDialog }) => {
+			form.skip_confirmation = true;
+			hideDialog();
+		},
+	});
+}
 
 const dirty = computed(() => {
 	const snap = snapshot.value;
@@ -656,6 +728,8 @@ function seed(data) {
 	ownerBlockedReason.value = data.schedule_blocked_reason || "";
 	lastRun.value = data.last_run || null;
 	hold.value = macroHold(data);
+	seedArming(data);
+	armedLockedReason.value = data.armed_locked_reason || "";
 	snapshot.value = formSnapshot();
 }
 
@@ -687,6 +761,7 @@ async function init() {
 	if (props.isNew) {
 		macro.value = null;
 		seed({ enabled: 1, stop_on_error: 1 });
+		loadNewArming();
 		// "Save as macro" hand-off from chat (§6.3): applied AFTER the snapshot
 		// so the prefilled draft counts as unsaved work (dirty guard protects it)
 		const pre = takeMacroPrefill();
@@ -712,6 +787,17 @@ async function init() {
 }
 
 watch(() => [props.id, props.isNew], init, { immediate: true });
+
+// The arming keys for a new macro. A failure (or a server without the endpoint)
+// keeps the fallback seed() set; the server refuses anything it does not allow.
+async function loadNewArming() {
+	try {
+		const arming = await apiMacros.getNewMacroArming();
+		if (props.isNew) seedArming(arming);
+	} catch (e) {
+		// keep the fallback
+	}
+}
 
 // False when the reload failed: local state is kept, and the caller says so.
 async function reloadMacro() {

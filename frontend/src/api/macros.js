@@ -21,3 +21,9 @@ export const dismissMacroNotices = (names) =>
 	call("jarvis.chat.macros_api.dismiss_macro_notices", {
 		names: JSON.stringify(Array.from(names || [])),
 	});
+
+// For the new-macro form, which has no macro to load: whether the caller may switch
+// Skip confirmation on for a macro they are about to create, why not, and the notice
+// the form asks them to confirm first (get_macro returns the same three keys).
+// -> { can_arm: 0|1, arm_blocked_reason: string, arm_notice: string }
+export const getNewMacroArming = () => call("jarvis.chat.macros_api.get_new_macro_arming");

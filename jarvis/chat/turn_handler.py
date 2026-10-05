@@ -1069,7 +1069,7 @@ def assemble_prompt(
 	# unchanged; only the value sent over to agent is augmented.
 	now = frappe.utils.now_datetime()
 	today = now.strftime("%Y-%m-%d (%A)")
-	# Armed macro run: this run's conversation carries skip_confirmation=1 (an admin
+	# Armed macro run: this run's conversation carries skip_confirmation=1 (its owner
 	# armed the macro). Signal the persona to call EVERY write tool directly - incl.
 	# create/update, which it would otherwise route through a jarvis-action card,
 	# leaving armed-skip inert on those two. The bench still enforces the gate; this
