@@ -41,13 +41,13 @@
 			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
 		</div>
 		<div
-			v-if="operatorReview && Object.keys(validationErrors).length"
+			v-if="operatorReview && Object.keys(shownErrors).length"
 			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
 			role="status"
 		>
 			<p class="font-medium">Complete these settings before running</p>
 			<ul class="mt-2 list-disc space-y-1 pl-5">
-				<li v-for="(message, key) in validationErrors" :key="key">{{ message }}</li>
+				<li v-for="(message, key) in shownErrors" :key="key">{{ message }}</li>
 			</ul>
 			<p class="mt-2">Fill the fields below, then save to check the configuration.</p>
 		</div>
@@ -125,9 +125,9 @@
 					</template>
 				</FormControl>
 				<ErrorMessage
-					v-for="key in (f.keys || [f.key]).filter((field) => validationErrors[field])"
+					v-for="key in (f.keys || [f.key]).filter((field) => shownErrors[field])"
 					:key="key"
-					:message="validationErrors[key]"
+					:message="shownErrors[key]"
 				/>
 			</template>
 
@@ -282,6 +282,19 @@ const visibleFields = computed(() => [
 // every field always rendered) has no control here and must fall through to
 // Advanced (JSON) - seed()/save() key off this.
 const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.keys || [f.key])));
+
+// Server issues describe the SAVED config. Hide a field's issue once its value
+// differs from what is saved (a filled default or an edit) until the next save
+// re-checks it; issues without a form field always show.
+const shownErrors = computed(() =>
+	Object.fromEntries(
+		Object.entries(props.validationErrors || {}).filter(([key]) => {
+			if (!(key in form)) return true;
+			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
+			return String(form[key]) === String(saved == null ? "" : saved);
+		})
+	)
+);
 
 const emit = defineEmits(["save", "dirty"]);
 
