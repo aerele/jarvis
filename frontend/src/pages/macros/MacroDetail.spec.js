@@ -1807,7 +1807,7 @@ describe("MacroDetail: an armed macro seen by someone other than its owner", () 
 			.findAllComponents({ name: "FormControl" })
 			.find((c) => c.props("type") === "textarea" && c.attributes("rows") === "9");
 
-	it("keeps its steps, summary, schedule and Stop on error read-only, and says why", async () => {
+	it("keeps its steps, summary, schedule time and Stop on error going off read-only, and says why", async () => {
 		const w = await mountDetail(
 			baseMacro({
 				skip_confirmation: 1,
@@ -1819,10 +1819,29 @@ describe("MacroDetail: an armed macro seen by someone other than its owner", () 
 		expect(w.find('[data-testid="armed-locked"]').text()).toBe(REASON);
 		expect(stepsBuilder(w).props("disabled")).toBe(true);
 		expect(summary(w).props("disabled")).toBe(true);
-		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(true);
+		// Scheduled and stopping on error: unscheduling and switching off stay open.
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(false);
+		expect(switchNamed(w, "Enabled").props("disabled")).toBe(false);
 		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(true);
 		expect(switchNamed(w, "Stop on error").props("description")).toBe(REASON);
 		expect(select(w).map((c) => c.props("disabled"))).toEqual([true, true]);
+	});
+
+	it("lets it be switched off, unscheduled and made to stop on error, and not back", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				skip_confirmation: 1,
+				enabled: 0,
+				schedule_enabled: 0,
+				stop_on_error: 0,
+				armed_locked_reason: REASON,
+			})
+		);
+		expect(switchNamed(w, "Enabled").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Enabled").props("description")).toBe(REASON);
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Run on a schedule").props("description")).toBe(REASON);
+		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(false);
 	});
 
 	it("leaves them alone for the owner, and on a macro that is not armed", async () => {

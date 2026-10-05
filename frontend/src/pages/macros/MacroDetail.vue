@@ -115,23 +115,26 @@
 					/>
 					<!-- While on hold, switching ON is the admin's to allow; switching
 					     off stays free (the server rules the same). -->
+					<!-- On someone else's armed macro, only the safe direction is open here
+					     too: switching off, unscheduling, Stop on error going on. -->
 					<Switch
 						v-model="form.enabled"
 						label="Enabled"
 						:description="
 							heldOff(form.enabled) ||
+							armedOff(form.enabled) ||
 							'Off = saved as a draft - its scheduled runs are skipped. You can still run it by hand.'
 						"
-						:disabled="saving || !!heldOff(form.enabled)"
+						:disabled="saving || !!heldOff(form.enabled) || !!armedOff(form.enabled)"
 					/>
 					<Switch
 						v-model="form.stop_on_error"
 						label="Stop on error"
 						:description="
-							armedLockedReason ||
+							armedOff(!form.stop_on_error) ||
 							'Stop the chain if a step fails - otherwise it keeps going after an error.'
 						"
-						:disabled="saving || armedLocked"
+						:disabled="saving || !!armedOff(!form.stop_on_error)"
 					/>
 					<!-- The owner's own switch (the server decides who may: can_arm). Off
 					     is always free; on asks once, in the server's words. -->
@@ -155,12 +158,13 @@
 						label="Run on a schedule"
 						:description="
 							heldOff(form.schedule_enabled) ||
+							armedOff(form.schedule_enabled) ||
 							scheduleBlocked ||
 							`${agentName} runs this macro automatically.`
 						"
 						:disabled="
 							saving ||
-							armedLocked ||
+							!!armedOff(form.schedule_enabled) ||
 							!!heldOff(form.schedule_enabled) ||
 							(!!scheduleBlocked && !form.schedule_enabled)
 						"
@@ -539,6 +543,8 @@ const armDescription = computed(() => {
 // then its steps, summary, schedule and Stop on error are read-only here.
 const armedLockedReason = ref("");
 const armedLocked = computed(() => !!armedLockedReason.value);
+// As heldOff: the reason for a switch that is off and may not go on ("" when free).
+const armedOff = (on) => (armedLocked.value && !on ? armedLockedReason.value : "");
 // Switching it on asks once, with the server's notice. An arm the macro already had
 // when it loaded is not asked about again.
 function setArm(on) {
