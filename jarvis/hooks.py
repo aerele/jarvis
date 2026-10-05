@@ -889,4 +889,13 @@ has_permission.update(
 # jarvis:macro_snapshot_unreadable: the "this run's unreadable steps snapshot was
 # reported" marker (``macros._report_unreadable_snapshot``); without it a run with a
 # broken snapshot queued a report job every five minutes.
-persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile", "jarvis:macro_snapshot_unreadable"]
+#
+# jarvis:heartbeat_macro_health_log_hour: the once-an-hour log marker for a fault in the
+# heartbeat's scheduled-macro counts (``heartbeat._scheduled_macro_health_safe``); without
+# it a persistent fault would log every five minutes.
+persistent_cache_keys = [
+	"jarvis:llm_switch",
+	"jarvis:macro_reconcile",
+	"jarvis:macro_snapshot_unreadable",
+	"jarvis:heartbeat_macro_health_log_hour",
+]
