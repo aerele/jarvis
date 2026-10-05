@@ -11,6 +11,7 @@
   "rule_id",
   "severity",
   "result_class",
+  "advisory",
   "title",
   "detail_md",
   "section",
@@ -158,6 +159,15 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "description": "PP-1 four-class value grammar. Set once at writeback, never editable afterwards (controller set-once guard). observed_fact = direct record read; derived_candidate = a candidate until confirmed; legal_scenario = a rule scenario, never realised exposure; confirmed_outcome is RESERVED — an evaluator may not emit it (written only by the PP-5 provenance ledger)."
+  },
+  {
+   "default": "0",
+   "fieldname": "advisory",
+   "fieldtype": "Check",
+   "label": "Advisory",
+   "description": "Set when this finding's token is a listing advisory_token: a NON-attesting worklist signal (RET-3/RET-6-class) exempt from the clean-attestation gate, never contributing to the coverage verdict or blocker_count. Derived server-side from the token set at record time; never model-supplied.",
+   "in_list_view": 1,
+   "in_standard_filter": 1
   },
   {
    "fieldname": "confidence",
