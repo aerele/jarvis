@@ -2654,6 +2654,11 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 				blocks.append(f"[Attached image `{name}` sent for viewing.]")
 			else:
 				blocks.append(f"[Attached image `{name}` could not be read.]")
+				# The model only sees this note and tells the user the file is unreadable.
+				frappe.log_error(
+					title="chat worker: attached image could not be decoded",
+					message=f"{name} ({len(raw)} bytes)",
+				)
 		else:
 			try:
 				text = raw.decode("utf-8")
