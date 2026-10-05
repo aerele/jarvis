@@ -33,6 +33,13 @@ HOLD_REASON_FIELD = "admin_hold_reason"
 _HELD_OFF_FIELDS = ("enabled", "schedule_enabled", "skip_confirmation")
 
 
+# Set on the document by the macro form's own two endpoints and by nothing else
+# (``macros_api.create_macro`` / ``update_macro``). A payload cannot carry it:
+# ``flags`` is a reserved key that ``Document.update`` and ``frappe.get_doc(dict)``
+# skip, so REST, a tool's values, Data Import and bulk update never set it.
+FORM_FLAG = "jarvis_macro_form"
+
+
 class MacroOnHoldError(frappe.ValidationError):
 	"""A Jarvis Admin has put the macro on hold."""
 
@@ -47,6 +54,21 @@ def hold_fields_exist() -> bool:
 	return bool(frappe.get_meta("Jarvis Macro").has_field(HOLD_FIELD))
 
 
+def arm_on_form_only() -> str:
+	return _("Skip confirmation can be switched on only on the macro's own page in Jarvis, by its owner.")
+
+
+def _arm_refusal(owner: str) -> str:
+	if frappe.session.user != owner:
+		return _("Only the macro's owner can switch on Skip confirmation.")
+	return _("Arming a macro to skip confirmation requires a Jarvis Admin or System Manager role.")
+
+
+def _join(items: list[str]) -> str:
+	"""``a``, ``a and b``, ``a, b and c``."""
+	return items[0] if len(items) == 1 else _("{0} and {1}").format(", ".join(items[:-1]), items[-1])
+
+
 def held_message(reason: str | None) -> str:
 	"""The one sentence for "on hold": the form's banner says the same.
 
@@ -59,6 +81,17 @@ def held_message(reason: str | None) -> str:
 			"An admin has put this macro on hold: {0}. It will not run until an admin releases it."
 		).format(frappe.utils.escape_html(reason.rstrip(".")))
 	return _("An admin has put this macro on hold. It will not run until an admin releases it.")
+
+
+def owner_may_arm(owner: str, user: str | None = None) -> bool:
+	"""Whether ``user`` (the session user by default) may arm a macro ``owner`` owns,
+	the hold aside: only its owner, and only once the admin's hold exists on this
+	site. Before the migrate there is no hold to stop an armed macro with, and the
+	rule from before applies: the owner must also be a Jarvis Admin."""
+	user = user or frappe.session.user
+	if user != owner:
+		return False
+	return hold_fields_exist() or has_jarvis_admin_access(user)
 
 
 def step_skills(step) -> list[str]:
@@ -96,8 +129,8 @@ class JarvisMacro(NotRenamable, Document):
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
 		self._guard_admin_hold()
-		self._guard_skip_confirmation_enable()
 		self._guard_summary_state()
+		self._guard_arming()
 		self._clear_summary_of_changed_steps()
 		self._settle_summary_written_in_this_save()
 		self._validate_summary_length()
@@ -226,27 +259,69 @@ class JarvisMacro(NotRenamable, Document):
 		if written > MAX_SUMMARY_LEN and written > stored:
 			frappe.throw(_("The summarized prompt must be at most {0} characters.").format(MAX_SUMMARY_LEN))
 
-	def _guard_skip_confirmation_enable(self):
-		"""ARM the macro = run its writes uncarded (the broad covered set, incl.
-		run_method/send_email/run_import; the irreversible trio still parks + stops
-		the run). Only a Jarvis Admin / System Manager may enable it - a plain owner
-		may RUN a macro (``if_owner`` write) but must not self-grant the bypass.
+	def _guard_arming(self):
+		"""ARM the macro = its runs make the covered writes without a card (the broad
+		set, incl. run_method, send_email and run_import; delete, cancel, amend,
+		creating a skill and a connector call still park and stop the run). It runs as
+		the owner, so the owner may arm it (owner decision 2026-10-03), and nobody else,
+		an admin included (``owner_may_arm``).
 
-		Only the 0/unset -> 1 transition is gated; disabling and every other edit
-		(including editing steps while it stays on - the arm persists across step
-		edits by design, D6) are free for the owner. Enabling the macro flag is what
-		later drives ``run_macro``'s stamp of the run conversation's own
-		``skip_confirmation`` (guarded there too)."""
-		if not self.skip_confirmation:
+		Only on the macro's own form, by a person: ``FORM_FLAG`` is set by its two
+		endpoints alone, and they refuse to run inside a tool call. Everything else
+		that saves a macro (REST, the Desk form and its Duplicate, Data Import, bulk
+		update and its background job, ``run_method`` reaching ``frappe.client``, the
+		assistant's ``update_doc`` / ``create_doc``, a card the user approved) is
+		refused taking ``skip_confirmation`` from 0 to 1, insert included.
+
+		On a macro that is armed and stays armed, the same holds for what changes what
+		it does: the steps, the summary, switching it on, and a schedule change that
+		leaves it scheduled. Each is judged against the stored row. Switching it off,
+		taking it off its schedule and disarming it stay free from any route: the safe
+		direction is never blocked, and an armed macro is never edited from where
+		arming is refused. A held macro is refused before this (``_guard_admin_hold``).
+
+		Enabling the macro flag is what later drives ``run_macro``'s stamp of the run
+		conversation's own ``skip_confirmation`` (a raw write)."""
+		if not frappe.utils.cint(self.skip_confirmation):
 			return
-		previous = self.get_doc_before_save()
-		if previous and bool(previous.skip_confirmation):
+		before = self.get_doc_before_save()
+		from_form = bool(self.flags.get(FORM_FLAG))
+		owner = self.owner or frappe.session.user
+		if not (before and frappe.utils.cint(before.get("skip_confirmation"))):
+			if not from_form:
+				frappe.throw(arm_on_form_only(), frappe.PermissionError)
+			if not owner_may_arm(owner):
+				frappe.throw(_arm_refusal(owner), frappe.PermissionError)
 			return
-		if not has_jarvis_admin_access(frappe.session.user):
+		changes = self._armed_changes(before)
+		if changes and not (from_form and frappe.session.user == owner):
 			frappe.throw(
-				_("Arming a macro to skip confirmation requires a Jarvis Admin or System Manager role."),
+				_(
+					"This macro runs without asking for confirmation, so a change to its {0} can be "
+					"made only on its own page in Jarvis, by its owner. Switching it off, taking it "
+					"off its schedule or switching off Skip confirmation works from anywhere."
+				).format(_join(changes)),
 				frappe.PermissionError,
 			)
+
+	def _armed_changes(self, before) -> list[str]:
+		"""What this save changes, of what an armed macro does or when it runs."""
+		changes = []
+		if step_values(self.steps) != step_values(before.steps):
+			changes.append(_("steps"))
+		if self._summary_written_in_this_save():
+			changes.append(_("summary"))
+		if frappe.utils.cint(self.enabled) and not frappe.utils.cint(before.get("enabled")):
+			changes.append(_("Enabled switch"))
+		if frappe.utils.cint(self.schedule_enabled) and (
+			not frappe.utils.cint(before.get("schedule_enabled"))
+			or (before.get("schedule_frequency") or "") != (self.schedule_frequency or "")
+			or self._time_changed()
+			or self._anchor_changed("schedule_weekday")
+			or self._anchor_changed("schedule_day_of_month")
+		):
+			changes.append(_("schedule"))
+		return changes
 
 	def _validate_name(self):
 		self.macro_name = (self.macro_name or "").strip()

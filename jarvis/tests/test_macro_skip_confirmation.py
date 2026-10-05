@@ -1,9 +1,9 @@
-"""Tests for admin-armed macro "skip confirmation".
+"""Tests for an armed macro's "skip confirmation".
 
-An admin arms a Jarvis Macro (``skip_confirmation``); its runs then execute the
+Its owner arms a Jarvis Macro (``skip_confirmation``) on the macro form; its runs then execute the
 covered gated writes without a confirmation card. The single source of truth the
 write-confirmation gate reads is ``Jarvis Conversation.skip_confirmation``, stamped
-onto an armed macro's run conversation. This module covers the admin guards on both
+onto an armed macro's run conversation. This module covers the guards on both
 flags (this file), the gate branch, the run stamp + human-inert block, the
 clear-on-terminal, and D5 stop-and-report.
 """
@@ -140,8 +140,8 @@ class TestConversationSkipConfirmationGuard(FrappeTestCase):
 
 
 class TestMacroSkipConfirmationGuard(FrappeTestCase):
-	"""Arming a macro (Jarvis Macro.skip_confirmation 0 -> 1) requires admin;
-	editing steps while armed keeps it armed (D6 trust model)."""
+	"""Arming a macro (Jarvis Macro.skip_confirmation 0 -> 1) is its owner's, on the
+	macro form; editing steps there while armed keeps it armed (D6 trust model)."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -159,7 +159,15 @@ class TestMacroSkipConfirmationGuard(FrappeTestCase):
 				frappe.delete_doc(MACRO, name, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def test_non_admin_owner_cannot_arm(self):
+	def test_owner_arms_through_the_form_only(self):
+		"""Replaces ``test_non_admin_owner_cannot_arm`` (owner decision 2026-10-03: any
+		user may arm their OWN macro, it runs as them). A plain owner's own save of the
+		document is still refused: arming happens on the macro form only
+		(``macros_api.update_macro``), which needs the hold field (the migrate) for a
+		plain owner. The routes one by one: ``test_macro_owner_arming``."""
+		from jarvis.chat.macros_api import update_macro
+		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import hold_fields_exist
+
 		macro = _make_macro(NON_ADMIN_USER)
 		frappe.set_user(NON_ADMIN_USER)
 		doc = frappe.get_doc(MACRO, macro)
@@ -167,25 +175,42 @@ class TestMacroSkipConfirmationGuard(FrappeTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			doc.save()
 		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation") or 0), 0)
+		frappe.db.rollback()
+		if not hold_fields_exist():
+			with self.assertRaises(frappe.PermissionError):
+				update_macro(name=macro, skip_confirmation=1)
+			return
+		update_macro(name=macro, skip_confirmation=1)
+		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation")), 1)
+
+	def test_a_non_owner_cannot_arm(self):
+		from jarvis.chat.macros_api import update_macro
+
+		macro = _make_macro(NON_ADMIN_USER)
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.PermissionError):
+			update_macro(name=macro, skip_confirmation=1)
+		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation") or 0), 0)
 
 	def test_jarvis_admin_can_arm_own_macro(self):
+		from jarvis.chat.macros_api import update_macro
+
 		macro = _make_macro(ADMIN_USER)
 		frappe.set_user(ADMIN_USER)
-		doc = frappe.get_doc(MACRO, macro)
-		doc.skip_confirmation = 1
-		doc.save()
+		update_macro(name=macro, skip_confirmation=1)
 		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation")), 1)
 
 	def test_editing_steps_keeps_arm_for_non_admin_owner(self):
-		"""D6 trust model: an admin armed the macro; its NON-admin owner can later
-		edit the steps (a no-op 1 -> 1 transition on skip_confirmation) without admin
-		rights and without disarming - arming trusts the owner for future steps too."""
+		"""The arm trusts the owner for future steps too: their edit of an armed macro's
+		steps on the form (a 1 -> 1 transition) keeps it armed. Moved from a bare
+		``doc.save()``, which an armed macro now refuses for its steps."""
+		from jarvis.chat.macros_api import update_macro
+
 		macro = _make_macro(NON_ADMIN_USER, armed=True)
 		frappe.set_user(NON_ADMIN_USER)
-		doc = frappe.get_doc(MACRO, macro)
-		doc.steps[0].prompt = "do a different thing"
-		doc.save()  # must not raise; arm persists
+		update_macro(name=macro, steps=[{"prompt": "do a different thing"}])
 		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation")), 1)
+		self.assertEqual(frappe.get_doc(MACRO, macro).steps[0].prompt, "do a different thing")
 
 	def test_owner_can_disarm(self):
 		macro = _make_macro(ADMIN_USER, armed=True)
@@ -928,7 +953,7 @@ class TestReviewHardening(FrappeTestCase):
 
 class TestMacrosApiSkipConfirmation(FrappeTestCase):
 	"""The macros_api create/update/get thread skip_confirmation (so the SPA editor
-	can set + read it), and arming via the API still hits the admin guard."""
+	can set + read it), and arming via the API still hits the controller's guard."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -955,20 +980,26 @@ class TestMacrosApiSkipConfirmation(FrappeTestCase):
 		self.assertEqual(int(frappe.db.get_value(MACRO, name, "skip_confirmation")), 1)
 		self.assertEqual(get_macro(name)["skip_confirmation"], 1)
 
-	def test_create_macro_armed_by_non_admin_rejected(self):
+	def test_create_macro_armed_by_non_admin_rejected_before_the_migrate(self):
+		# Without the hold field the rule from before applies: only a Jarvis Admin
+		# arms. With it, the owner does (test_macro_owner_arming).
 		from jarvis.chat.macros_api import create_macro
+		from jarvis.jarvis.doctype.jarvis_macro import jarvis_macro
 
 		frappe.set_user(NON_ADMIN_USER)
-		with self.assertRaises(frappe.PermissionError):
-			create_macro("api-armed-bad", steps=[{"prompt": "do it"}], skip_confirmation=1)
+		with patch.object(jarvis_macro, "hold_fields_exist", return_value=False):
+			with self.assertRaises(frappe.PermissionError):
+				create_macro("api-armed-bad", steps=[{"prompt": "do it"}], skip_confirmation=1)
 
-	def test_update_macro_arm_rejected_for_non_admin(self):
+	def test_update_macro_arm_rejected_for_non_admin_before_the_migrate(self):
 		from jarvis.chat.macros_api import create_macro, update_macro
+		from jarvis.jarvis.doctype.jarvis_macro import jarvis_macro
 
 		frappe.set_user(NON_ADMIN_USER)
 		name = create_macro("api-upd", steps=[{"prompt": "do it"}])["data"]["name"]
-		with self.assertRaises(frappe.PermissionError):
-			update_macro(name=name, skip_confirmation=1)
+		with patch.object(jarvis_macro, "hold_fields_exist", return_value=False):
+			with self.assertRaises(frappe.PermissionError):
+				update_macro(name=name, skip_confirmation=1)
 		self.assertEqual(int(frappe.db.get_value(MACRO, name, "skip_confirmation") or 0), 0)
 
 	def test_update_macro_arm_ok_for_admin(self):

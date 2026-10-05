@@ -1242,7 +1242,7 @@ _BRAKE = frozenset(
 	}
 )
 # The unified COVERED set (design §3 A4): every gated write that is NOT a brake
-# runs uncarded in BOTH armed modes - an admin-armed macro (skip_confirmation) and
+# runs uncarded in BOTH armed modes - an owner-armed macro (skip_confirmation) and
 # an approved "Approve & run" skill (skill_autorun). Deriving it as
 # ``_GATED_WRITES - _BRAKE`` makes the two modes ONE rule that can never drift again
 # (they previously diverged on create_custom_skill, a real bug the action-card
@@ -1353,7 +1353,7 @@ def _as_bool(value) -> bool:
 
 
 def _armed_skip_disabled() -> bool:
-	"""Site-wide kill switch for admin-armed macro skip-confirmation. When the
+	"""Site-wide kill switch for armed macro skip-confirmation. When the
 	operator flips ``Jarvis Settings.disable_armed_skip`` on, every armed covered
 	write re-gates behind its card immediately, no deploy - the escape hatch if an
 	armed macro misbehaves. Read only when an armed covered write is about to skip."""
@@ -2865,7 +2865,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# the standard envelope so the agent-session path's result["data"] read
 			# stays valid and the model reads it like a dispatched update_wiki result.
 			return {"ok": True, "data": _propose_file_box_wiki_write(args, conv)}
-		# Armed-skip bypass (macro skip-confirmation): an admin-armed macro's run
+		# Armed-skip bypass (macro skip-confirmation): an armed macro's run
 		# conversation carries skip_confirmation=1 (stamped by run_macro), so the
 		# BROAD covered set - incl. run_method / submit / send_email / run_import -
 		# runs uncarded. This is distinct from and wider than the create/update-only

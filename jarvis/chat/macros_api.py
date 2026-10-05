@@ -12,6 +12,7 @@ import frappe
 from frappe import _
 
 from jarvis.chat import list_filters
+from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import FORM_FLAG
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_skills as _step_skills
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_values as _step_values
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
@@ -423,6 +424,7 @@ def get_macro(name: str) -> dict:
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	from jarvis.chat.macro_scheduler import is_retry_pending
 
+	hold = _hold_of(doc)
 	return {
 		"name": doc.name,
 		"macro_name": doc.macro_name,
@@ -445,7 +447,10 @@ def get_macro(name: str) -> dict:
 		"merge_status": doc.merge_status or "",
 		# An admin's hold (0 and "" on a site without the fields): the form shows the
 		# banner and keeps Run, Enabled, the schedule and the arm switch off.
-		**_hold_of(doc),
+		**hold,
+		# Whether this viewer may switch Skip confirmation on, why not, and what the
+		# form asks before it does: the server's to say (``_arming``).
+		**_arming(doc.owner, held=hold["admin_hold"]),
 		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"last_run": _last_runs([doc.name], doc.owner).get(doc.name),
 		"steps": [
@@ -458,6 +463,82 @@ def get_macro(name: str) -> dict:
 			}
 			for s in (doc.steps or [])
 		],
+	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_new_macro_arming() -> dict:
+	"""``get_macro``'s arming keys for a macro the caller is about to create: the new
+	form has no macro to load, and the caller will be its owner."""
+	return _arming(frappe.session.user, held=0)
+
+
+# What an armed macro does without asking, and what still asks: one row per plain
+# phrase, naming the tools it stands for. Every tool of ``jarvis.api._COVERED`` and of
+# ``_BRAKE`` is in exactly one row of its table, and no other tool is: a test fails
+# when a gated tool is added, or moves, and the notice would no longer say what
+# arming lets through (``test_macro_owner_arming``).
+_ARM_NOTICE_SKIPS = (
+	("create, change and submit records", ("create_doc", "create_docs", "update_doc", "submit_doc")),
+	(
+		"add and change comments, tags and attachments",
+		("add_comment", "update_comment", "add_tag", "remove_tag", "attach_to_doc"),
+	),
+	("update wiki pages", ("update_wiki",)),
+	(
+		"share and assign documents (and remove shares and assignments)",
+		("share_doc", "assign_to", "unshare_doc", "unassign_from"),
+	),
+	("run workflow actions", ("apply_workflow_action",)),
+	("send email", ("send_email",)),
+	("run imports", ("run_import",)),
+	("call server methods", ("run_method",)),
+)
+_ARM_NOTICE_ASKS = (
+	("deleting, cancelling and amending records", ("delete_doc", "cancel_doc", "amend_doc")),
+	("creating skills", ("create_custom_skill",)),
+	("calling connectors", ("call_connector",)),
+)
+
+
+def _phrases(rows) -> str:
+	words = [phrase for phrase, _tools in rows]
+	return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def arm_notice() -> str:
+	"""What the form asks the owner to confirm before it switches Skip confirmation on."""
+	asks = _phrases(_ARM_NOTICE_ASKS)
+	return _(
+		"This macro will {0} without asking you first, including when it runs on a schedule "
+		"with nobody watching. {1} still ask, and stop the run."
+	).format(_phrases(_ARM_NOTICE_SKIPS), asks[:1].upper() + asks[1:])
+
+
+def _arming(owner: str, *, held) -> dict:
+	"""``can_arm``: whether the session user may switch Skip confirmation on for a
+	macro ``owner`` owns; ``arm_blocked_reason``: why not, "" when they may (a held
+	macro says nothing here: the form gives the hold's own reason); ``arm_notice``.
+
+	The controller's rule (``owner_may_arm``) and the hold decide it. The site's kill
+	switch (``Jarvis Settings.disable_armed_skip``) does not refuse a save, as before:
+	it stops every armed macro skipping its cards. The form is told, so nobody arms a
+	macro that would not skip anything."""
+	from jarvis.api import _armed_skip_disabled
+	from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import owner_may_arm
+
+	reason = ""
+	if frappe.session.user != owner:
+		reason = _("Only the macro's owner can switch this on.")
+	elif not owner_may_arm(owner):
+		reason = _("Only a Jarvis Admin or System Manager can switch this on.")
+	elif _armed_skip_disabled():
+		reason = _("Skip confirmation is switched off for this whole site, so it would change nothing.")
+	return {
+		"can_arm": int(not reason and not frappe.utils.cint(held)),
+		"arm_blocked_reason": reason,
+		"arm_notice": arm_notice(),
 	}
 
 
@@ -506,7 +587,10 @@ def _schedule_block_reason(owner: str) -> str:
 	return ""
 
 
-@frappe.whitelist()
+# The macro form's two writers. POST only: a GET is not checked for the CSRF token,
+# and through them a cross-site link could create an armed, scheduled macro. Never
+# from inside a tool call: they are the one place arming happens (``FORM_FLAG``).
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def create_macro(
 	macro_name: str,
@@ -523,8 +607,9 @@ def create_macro(
 ) -> dict:
 	"""Create a macro. Validation (name/steps/caps, and the two schedule anchors'
 	ranges) runs in the doctype validate(). Per-step tagged skills arrive INSIDE
-	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 0 -> 1) is
-	admin-gated in the doctype validate()."""
+	each step dict (``steps[].skills``). Arming (``skip_confirmation`` 1) is the
+	owner's, here and in ``update_macro`` only (``JarvisMacro._guard_arming``)."""
+	refuse_in_tool_dispatch()
 	_refuse_schedule_for_barred_owner(frappe.session.user, schedule_enabled)
 	doc = frappe.get_doc(
 		{
@@ -542,6 +627,7 @@ def create_macro(
 			"steps": _parse_steps(steps),
 		}
 	)
+	doc.flags[FORM_FLAG] = True
 	doc.insert()
 	frappe.db.commit()
 	return {
@@ -550,7 +636,7 @@ def create_macro(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def update_macro(
 	name: str,
@@ -596,6 +682,7 @@ def update_macro(
 	after a real step change that left two or more steps, and not when the owner wrote
 	the summary in the same save. A summary that is empty or failed is not a reason:
 	that started a model call on every save of such a macro."""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate (save enforces too; explicit for clarity)
 	# The save below writes every column. On a document read before a summary was
@@ -610,7 +697,7 @@ def update_macro(
 	if stop_on_error is not None:
 		doc.stop_on_error = int(stop_on_error)
 	if skip_confirmation is not None:
-		# The doctype validate() admin-gates a 0 -> 1 transition; a non-admin flip raises.
+		# The doctype validate() allows a 0 -> 1 transition to the owner only.
 		doc.skip_confirmation = int(skip_confirmation)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled)
@@ -642,6 +729,7 @@ def update_macro(
 		# ``JarvisMacro._settle_summary_written_in_this_save``.
 		doc.merged_prompt = written
 	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
+	doc.flags[FORM_FLAG] = True
 	doc.save()
 	frappe.db.commit()
 	# An emptied summary is not one the owner wrote: with changed steps it is the same

@@ -463,11 +463,11 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		for dt, name in ((CONV, conv.name), (MSG, intro.name), (RUN, run.name)):
 			frappe.db.set_value(dt, name, "owner", owner, update_modified=False)
 	# Arm the run conversation when the macro is armed (doc.skip_confirmation, set
-	# only by a Jarvis Admin - guarded on the macro controller). Stamped via a raw
-	# db.set_value, the File-Box pattern that bypasses the conversation controller's
-	# admin guard: the value derives from the already-admin-gated macro flag, so a
-	# re-check would just refuse a legitimate non-admin owner running their own armed
-	# macro. The gate reads THIS conversation flag; the conversation is human-inert
+	# only by its owner on the macro form - guarded on the macro controller). Stamped
+	# via a raw db.set_value, the File-Box pattern that bypasses the conversation
+	# controller's admin guard: the value derives from the already-guarded macro flag,
+	# so a re-check would just refuse a legitimate non-admin owner running their own
+	# armed macro. The gate reads THIS conversation flag; the conversation is human-inert
 	# while set (send_message / retry_message are blocked, T4), so only macro-step
 	# turns ever run on it. Cleared on every run-terminal transition (T5).
 	if doc.skip_confirmation:
@@ -622,8 +622,7 @@ def _card_stop_message(current_step: int, total: int, parked: dict, *, scheduled
 		text += " The steps after it did not run, and confirming it will not resume them."
 	if scheduled:
 		text += (
-			" To let this macro run without stopping here, ask an administrator to"
-			" switch on Skip confirmation for it."
+			" To let this macro run without stopping here, switch on Skip confirmation on the macro's page."
 		)
 	return text[:500]
 
@@ -1144,12 +1143,12 @@ def _step_turns(conversation: str) -> list:
 
 
 _DRAFT_GONE_HINT = (
-	"To create it, run that step again in a chat, or ask an administrator to switch on "
-	"Skip confirmation so the macro writes directly."
+	"To create it, run that step again in a chat, or switch on Skip confirmation on the "
+	"macro's page so the macro writes directly."
 )
 _DRAFTS_GONE_HINT = (
-	"To create them, run those steps again in a chat, or ask an administrator to switch on "
-	"Skip confirmation so the macro writes directly."
+	"To create them, run those steps again in a chat, or switch on Skip confirmation on the "
+	"macro's page so the macro writes directly."
 )
 
 
