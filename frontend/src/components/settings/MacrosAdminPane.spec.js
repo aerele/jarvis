@@ -81,6 +81,15 @@ vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
 	},
 }));
 
+vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
+	default: {
+		name: "MacroHandoverDialog",
+		props: ["modelValue", "name", "macroName", "owner", "ownerLabel"],
+		emits: ["update:modelValue", "handed", "failed"],
+		template: `<div class="stub-handover" :data-name="name" :data-open="modelValue ? '1' : ''" :data-macro="macroName" :data-owner="owner" :data-owner-label="ownerLabel" />`,
+	},
+}));
+
 // Who is looking: an admin whose own macros have no Hold.
 vi.mock("@/data/session", () => ({ session: { user: "admin@example.test" } }));
 
@@ -792,7 +801,7 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 		expect(releaseButton(w, 1).exists()).toBe(false);
 	});
 
-	it("offers no Hold or Release on the admin's own macro, only Delete", async () => {
+	it("offers no Hold, Release or Hand over on the admin's own macro, only Delete", async () => {
 		const w = await mountWith([
 			row("mine", { owner: "admin@example.test" }),
 			held("mine-held", { owner: "admin@example.test" }),
@@ -800,10 +809,11 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 		for (const i of [0, 1]) {
 			expect(holdButton(w, i).exists()).toBe(false);
 			expect(releaseButton(w, i).exists()).toBe(false);
+			expect(rowsOf(w)[i].find(".jv-macro-admin-handover").exists()).toBe(false);
 			expect(deleteButton(w, i).exists()).toBe(true);
 			// Said, not just left out.
 			expect(rowsOf(w)[i].find(".jv-macro-admin-own").text()).toBe(
-				"You cannot hold or release your own macro."
+				"You cannot hold, release or hand over your own macro."
 			);
 		}
 	});
@@ -937,5 +947,65 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 		const said = toast.success.mock.calls[0][0];
 		expect(said).not.toContain("<img");
 		expect(w.find("img").exists()).toBe(false);
+	});
+});
+
+describe("MacrosAdminPane, hand over", () => {
+	const handoverButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-handover");
+
+	it("offers Hand over on another user's macro, held or not", async () => {
+		const w = await mountWith([row("a"), row("b", { admin_hold: 1, enabled: 0 })]);
+		for (const i of [0, 1]) {
+			const b = handoverButton(w, i);
+			expect(b.exists()).toBe(true);
+			expect(b.text()).toBe("Hand over");
+		}
+		expect(handoverButton(w).attributes("aria-label")).toBe(
+			"Hand Macro a, owned by Asha Rao (asha@example.test), to another user"
+		);
+	});
+
+	it("opens the hand-over dialog for the row, and sends nothing itself", async () => {
+		const w = await mountWith([row("a")]);
+		expect(w.find(".stub-handover").exists()).toBe(false);
+		await handoverButton(w).trigger("click");
+		const dialog = w.find(".stub-handover");
+		expect(dialog.attributes("data-name")).toBe("a");
+		expect(dialog.attributes("data-open")).toBe("1");
+		expect(dialog.attributes("data-macro")).toBe("Macro a");
+		expect(dialog.attributes("data-owner")).toBe("asha@example.test");
+		expect(dialog.attributes("data-owner-label")).toBe("Asha Rao (asha@example.test)");
+		expect(confirm).not.toHaveBeenCalled();
+	});
+
+	it("disables the other actions while the dialog is open", async () => {
+		const w = await mountWith([row("a"), row("b", { live_run: "RUN-2" })]);
+		await handoverButton(w).trigger("click");
+		for (const b of [
+			handoverButton(w, 1),
+			rowsOf(w)[1].find(".jv-macro-admin-delete"),
+			rowsOf(w)[1].find(".jv-macro-admin-hold"),
+			rowsOf(w)[1].find(".jv-macro-admin-stop"),
+		]) {
+			expect(b.attributes("disabled")).toBe("");
+		}
+	});
+
+	it("re-reads the rows once it is handed over, and when it answers an error", async () => {
+		for (const event of ["handed", "failed"]) {
+			const w = await mountWith([row("a")]);
+			await handoverButton(w).trigger("click");
+			const calls = api.adminListMacros.mock.calls.length;
+			api.adminListMacros.mockResolvedValue(
+				page([row("a", { owner: "ben@example.test", owner_full_name: "Ben", enabled: 0 })])
+			);
+			const dialog = w.findComponent({ name: "MacroHandoverDialog" });
+			dialog.vm.$emit("update:modelValue", false);
+			dialog.vm.$emit(event, { name: "a" });
+			await flushPromises();
+			expect(api.adminListMacros.mock.calls.length).toBeGreaterThan(calls);
+			expect(rowsOf(w)[0].text()).toContain("Ben");
+			w.unmount();
+		}
 	});
 });
