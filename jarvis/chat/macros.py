@@ -108,6 +108,10 @@ BLOCK_MACRO_DELETED = "macro deleted"
 # (``macros_admin_api.admin_hold``): the slot is consumed as for a disabled macro,
 # with no failed run.
 BLOCK_MACRO_HELD = "macro on hold"
+# Reported to the scheduler when the macro's owner is not the one the sweep is
+# running it as: an admin handed it over after the slot was claimed. Nothing ran, and
+# it is not the old owner's failure to be told about.
+BLOCK_MACRO_CHANGED_OWNER = "macro changed owner"
 
 # #471: reported when the first turn's dispatch RAISED after the conversation and run
 # row were already committed. Distinct from the codes above because the run row exists
@@ -354,6 +358,15 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		frappe.db.commit()
 		return {"ok": False, "reason": BLOCK_MACRO_DELETED}
 	doc = frappe.get_doc(MACRO, macro_name)  # DoesNotExistError: deleted meanwhile
+	if trigger == "scheduled" and frappe.session.user not in (doc.owner, "Administrator"):
+		# Before the permission check, as the deleted case above: the sweep claimed the
+		# slot as the owner it read, and an admin's hand-over can commit before this
+		# lock. The permission check would then fail as the old owner, and the sweep
+		# record a failed run and tell them about a macro that is not theirs. Settled
+		# quietly; a run by hand keeps its refusal below. (A macro that is merely off
+		# is still the owner's: its quiet return below comes after the checks.)
+		frappe.db.commit()  # nothing written: this releases the macro row lock
+		return {"ok": False, "reason": BLOCK_MACRO_CHANGED_OWNER}
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
 	# them), uncarded when the macro is armed. On read alone, anyone who could only
