@@ -437,6 +437,26 @@ class TestWhatArrivesBeforeTheMigrate(ArrivesClean, BeforeTheMigrate):
 # --------------------------------------------------------------------------- #
 # Refusals
 # --------------------------------------------------------------------------- #
+class TestOnlyAJarvisUserReceivesIt(HandoverBase):
+	"""Runs before the migrate too: the check does not depend on the hold fields."""
+
+	def test_a_user_who_could_not_use_the_macro_is_refused_and_a_jarvis_user_is_not(self):
+		# A System Manager passes the Jarvis gate and may read a macro; a Jarvis Admin
+		# passes the gate alone. Neither could switch the macro on, edit or delete it:
+		# the doctype's create, write and delete are the Jarvis User role's.
+		for target in (SM_ONLY, JA_ONLY):
+			with self.subTest(target=target):
+				macro = self._macro(OWNER, f"use-{target[:20]}")
+				before = self._row(macro)
+				with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
+					self._handover(macro, target)
+				self.assertIn("does not have the Jarvis User role", str(raised.exception))
+				self._untouched(macro, before)
+		macro = self._macro(OWNER, "use-ju")
+		self._handover(macro, SECOND_TARGET)
+		self.assertEqual(self._row(macro).owner, SECOND_TARGET)
+
+
 class TestRefusals(WithColumns):
 	def test_a_target_that_cannot_own_it_is_refused_with_nothing_written(self):
 		macro = self._macro(OWNER, "a")
@@ -475,22 +495,6 @@ class TestRefusals(WithColumns):
 		with patch.object(controller, "MAX_MACROS_PER_OWNER", 2):
 			self._handover(macro)
 		self.assertEqual(self._row(macro).owner, TARGET)
-
-	def test_a_user_who_could_not_use_the_macro_is_refused_and_a_jarvis_user_is_not(self):
-		# A System Manager passes the Jarvis gate and may read a macro; a Jarvis Admin
-		# passes the gate alone. Neither could switch the macro on, edit or delete it:
-		# the doctype's create, write and delete are the Jarvis User role's.
-		for target in (SM_ONLY, JA_ONLY):
-			with self.subTest(target=target):
-				macro = self._macro(OWNER, f"use-{target[:20]}")
-				before = self._row(macro)
-				with self.assertRaises(macros_admin_api.MacroHandoverError) as raised:
-					self._handover(macro, target)
-				self.assertIn("does not have the Jarvis User role", str(raised.exception))
-				self._untouched(macro, before)
-		macro = self._macro(OWNER, "use-ju")
-		self._handover(macro, SECOND_TARGET)
-		self.assertEqual(self._row(macro).owner, SECOND_TARGET)
 
 	def test_a_name_that_is_no_user_comes_back_escaped(self):
 		macro = self._macro(OWNER, "esc")
