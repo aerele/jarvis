@@ -11,6 +11,10 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			// The phone's components import the shared helpers as @shared (see
+			// pwa/vite.config.js); mapped the same way so a spec can mount them
+			// (src/components/PwaPendingCard.spec.js).
+			"@shared": path.resolve(__dirname, "src"),
 		},
 	},
 	test: {

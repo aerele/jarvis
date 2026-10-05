@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis.exceptions import (
+	InvalidArgumentError,
 	SensitiveWriteRefusedError,
 	StructureRefusedError,
 	WriteRefusedError,
@@ -290,7 +291,7 @@ def _targets(tool: str, args) -> list[_Target]:
 			out.append(_Target(doctype, "update", a.get("name") or None, changes))
 		return out
 	if tool == "run_import":
-		return [_Target(doctype, "import")]
+		return [_Target(doctype, "import", values=a)]  # the call's arguments: the file
 	op = "delete" if tool == "delete_doc" else "other"
 	names = a.get("names") if isinstance(a.get("names"), list) else [a.get("name")]
 	for n in names or [None]:
@@ -438,12 +439,55 @@ def _target_risk(target: _Target) -> str | None:
 		return "sensitive"
 	if dt in _FIELD_SENSITIVE and target.op in ("create", "update", "import"):
 		if target.op == "import":
-			return "sensitive"
+			return "sensitive" if _import_grants(dt, target.values) else None
 		_risk, fields = _FIELD_SENSITIVE[dt]
 		if any(_grants(target, f) for f in fields):
 			return "sensitive"
 		return "sensitive" if dt == "Employee" and _toggles_login(_ArgView(target)) else None
 	return None
+
+
+def _import_grants(doctype: str, args: dict) -> bool:
+	"""Whether a Data Import of a field-sensitive doctype writes an access-granting
+	field (``_FIELD_SENSITIVE``): a column for one of its fields, or for a child row of
+	one of its tables (portal users), with a value in any row. An Employee ``status``
+	column counts when the import updates existing records (``_toggles_login``: the
+	linked login follows "Active"); on new records the user comes from ``user_id``,
+	already a counted field.
+
+	A file that cannot be read or parsed at all (a missing or mistyped file, a
+	header-only file, a bad mapping key, no permission) is not judged here: nothing
+	can be imported from it, and the import's own validation (``api._import_park``,
+	then ``run_import``) answers with its real, fixable error. A file that WAS read
+	but whose columns cannot be classified fails closed (True)."""
+	from jarvis.tools._import_preview import import_columns
+
+	import_type = args.get("import_type") or "Insert New Records"
+	try:
+		columns = import_columns(
+			doctype=doctype,
+			file_url=args.get("file_url"),
+			filename=args.get("filename"),
+			import_type=import_type,
+			mapping=args.get("mapping") if isinstance(args.get("mapping"), dict) else None,
+		)
+	except (InvalidArgumentError, frappe.ValidationError, frappe.PermissionError, frappe.DoesNotExistError):
+		frappe.clear_messages()
+		return False  # unreadable / unparseable: the import's own validation refuses it
+	except Exception:
+		frappe.clear_messages()
+		return True  # read, but its columns could not be classified: fail closed
+	_risk, fields = _FIELD_SENSITIVE[doctype]
+	updates = import_type != "Insert New Records"
+	for col in columns:
+		if not col["filled"]:
+			continue
+		if col["tables"]:
+			if any(t in fields for t in col["tables"]):
+				return True
+		elif col["field"] in fields or (doctype == "Employee" and col["field"] == "status" and updates):
+			return True
+	return False
 
 
 def _toggles_login(view) -> bool:
@@ -505,6 +549,18 @@ def risk_line(tool: str, args) -> str:
 		if _target_risk(t) == "sensitive":
 			return RISK_LINES[risk_class(t.doctype)]
 	return ""
+
+
+def risk_lines(tool: str, args) -> list[str]:
+	"""Every distinct risk line a card must show for a sensitive call, in target
+	order (a batch with a Client Script and a Role names both). Display only."""
+	out = []
+	for t in _targets(tool, args):
+		if _target_risk(t) == "sensitive":
+			line = RISK_LINES[risk_class(t.doctype)]
+			if line not in out:
+				out.append(line)
+	return out
 
 
 def check(tool: str, args) -> str | None:
@@ -1111,6 +1167,7 @@ __all__ = [
 	"refused_envelope",
 	"risk_class",
 	"risk_line",
+	"risk_lines",
 	"risk_of",
 	"structure_refusal",
 	"take_refusal",
