@@ -73,8 +73,16 @@ def _maybe_prefetch_children(rows: list, user: str, user_roles: list[str]) -> No
 def find_skills(query: str, limit: int = 10) -> dict:
 	"""Search enabled skills by name/description; returns only skills the
 	calling user may use. ``{"skills": [{skill_name, scope, description,
-	managed}], "count"}``, capped at ``limit``."""
+	managed}], "count"}``, capped at ``limit``.
+
+	In an armed macro's chat (``ARMED_SKILL_OWNER_FLAG``, set by ``api._run_tool``)
+	only skills the macro's owner controls are listed: another user's description is
+	their text, and fetching that skill would disarm the run anyway."""
+	from jarvis.chat.skill_permissions import controlled_by
+	from jarvis.permissions import ARMED_SKILL_OWNER_FLAG
+
 	user = _require_system_user()
+	armed_owner = frappe.flags.get(ARMED_SKILL_OWNER_FLAG)
 	q = (query or "").strip()
 	if len(q) < _MIN_QUERY_LEN:
 		raise InvalidArgumentError(f"query must be at least {_MIN_QUERY_LEN} characters")
@@ -102,6 +110,8 @@ def find_skills(query: str, limit: int = 10) -> dict:
 	skills = []
 	for row in rows:
 		if not _visible(row, user, user_roles):
+			continue
+		if armed_owner and not controlled_by(row, armed_owner):
 			continue
 		skills.append(
 			{

@@ -22,7 +22,12 @@ from jarvis.exceptions import (
 	SensitiveWriteRefusedError,
 	WriteRefusedError,
 )
-from jarvis.permissions import has_jarvis_access, refuse_in_tool_dispatch
+from jarvis.permissions import (
+	ARMED_MACRO_WRITE_FLAG,
+	ARMED_SKILL_OWNER_FLAG,
+	has_jarvis_access,
+	refuse_in_tool_dispatch,
+)
 from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
@@ -1248,7 +1253,7 @@ _BRAKE = frozenset(
 	}
 )
 # The unified COVERED set (design §3 A4): every gated write that is NOT a brake
-# runs uncarded in BOTH armed modes - an admin-armed macro (skip_confirmation) and
+# runs uncarded in BOTH armed modes - an owner-armed macro (skip_confirmation) and
 # an approved "Approve & run" skill (skill_autorun). Deriving it as
 # ``_GATED_WRITES - _BRAKE`` makes the two modes ONE rule that can never drift again
 # (they previously diverged on create_custom_skill, a real bug the action-card
@@ -1357,11 +1362,68 @@ def _as_bool(value) -> bool:
 
 
 def _armed_skip_disabled() -> bool:
-	"""Site-wide kill switch for admin-armed macro skip-confirmation. When the
+	"""Site-wide kill switch for armed macro skip-confirmation. When the
 	operator flips ``Jarvis Settings.disable_armed_skip`` on, every armed covered
 	write re-gates behind its card immediately, no deploy - the escape hatch if an
 	armed macro misbehaves. Read only when an armed covered write is about to skip."""
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
+
+
+# What a skill says is what a macro step that applies it does (``Apply these skills:
+# /slug``). An armed macro's run never changes one uncarded: it would rewrite what its
+# own later runs, scheduled and unwatched, follow. The skill and its child tables.
+_SKILL_DOCTYPES = frozenset(
+	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
+)
+_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
+
+
+def _writes_a_skill(tool: str, args) -> bool:
+	"""Whether a covered write names a skill doctype anywhere in its arguments (a
+	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
+	``frappe.client``, a JSON ``doc`` string included), or calls the skills' own API.
+	Such a call parks a card on an armed macro's run, as the brake does. Raises
+	InvalidArgumentError for a doctype that is not text."""
+	if tool == "run_method" and isinstance(args, dict):
+		if str(args.get("method") or "").startswith("jarvis.chat.custom_skills_api."):
+			return True
+	return _names_a_skill_doctype(args, depth=0)
+
+
+def _names_a_skill_doctype(value, *, depth: int) -> bool:
+	if depth > 6:
+		return False
+	if isinstance(value, str):
+		text = value.strip()
+		if not text.startswith(("{", "[")):
+			return False
+		try:
+			value = json.loads(text)
+		except ValueError:
+			return False
+	if isinstance(value, dict):
+		named = [value.get(key) for key in _DOCTYPE_KEYS if value.get(key) is not None]
+		if depth == 0 and any(not isinstance(dt, str) for dt in named):
+			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
+			raise InvalidArgumentError("doctype must be the name of a document type")
+		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
+		if any(_SKILL_DOCTYPES.intersection(_texts(dt)) for dt in named):
+			return True
+		value = list(value.values())
+	if isinstance(value, list):
+		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
+	return False
+
+
+def _texts(value) -> list:
+	"""The strings in ``value``, a string or a nested list or dict of them."""
+	if isinstance(value, str):
+		return [value]
+	if isinstance(value, dict):
+		value = list(value.values())
+	if isinstance(value, list | tuple):
+		return [text for item in value for text in _texts(item)]
+	return []
 
 
 def _skill_autorun_slide(conv: str) -> None:
@@ -2921,13 +2983,22 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# Every mode (after the File Box policy, which refuses imports its own way): a
 		# sensitive import cannot be carded in full (owner default, J1-cards review).
 		return _refuse_sensitive_import(tool, args)
+	# An armed macro's run follows only skills its owner controls: judged here, on the
+	# row this fetch serves, before its body goes back (``macros.check_a_fetched_skill``).
+	skill_note = ""
+	if conversation and tool == "get_skill":
+		from jarvis.chat import macros
+
+		skill_note = macros.check_a_fetched_skill(
+			conversation, args.get("skill_name") if isinstance(args, dict) else None
+		)
 	# File Box skill routing: only an eligible skill loads (and is recorded).
 	if conversation and tool == "get_skill":
 		from jarvis.chat import filebox_skills
 
 		verdict = filebox_skills.gate_get_skill(args, conversation)
 		if verdict is not None:
-			return verdict
+			return _with_note(verdict, skill_note)
 
 	# ``preview`` is read, not popped: dispatch() filters args to the tool's
 	# signature so the flag never reaches the tool anyway, and leaving ``args``
@@ -3124,7 +3195,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# the standard envelope so the agent-session path's result["data"] read
 			# stays valid and the model reads it like a dispatched update_wiki result.
 			return {"ok": True, "data": _propose_file_box_wiki_write(args, conv)}
-		# Armed-skip bypass (macro skip-confirmation): an admin-armed macro's run
+		# Armed-skip bypass (macro skip-confirmation): an armed macro's run
 		# conversation carries skip_confirmation=1 (stamped by run_macro), so the
 		# BROAD covered set - incl. run_method / submit / send_email / run_import -
 		# runs uncarded. This is distinct from and wider than the create/update-only
@@ -3133,13 +3204,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# one stops the run - D5). Cheap frozenset membership test first; the
 		# kill-switch Settings read runs only when a covered write is actually armed.
 		# Bulk covered writes skip too (an automation must not stall on a batch card);
-		# the F16 over-size cap above still bounces an oversized batch.
-		if (
-			tool in _ARMED_SKIP_COVERED
-			and not _must_card
-			and _conv_flags.get("skip_confirmation")
-			and not _armed_skip_disabled()
-		):
+		# the F16 over-size cap above still bounces an oversized batch. A write the
+		# write-risk guard must card (``_must_card``) parks. A write to a skill parks
+		# too (``_writes_a_skill``): a macro step applies skills, so an armed run must
+		# not rewrite what its own later runs follow.
+		armed = bool(tool in _ARMED_SKIP_COVERED and not _must_card and _conv_flags.get("skip_confirmation"))
+		if armed:
+			try:
+				armed = not _writes_a_skill(tool, args)
+			except InvalidArgumentError as e:
+				return _error(type(e).__name__, str(e))
+		if armed and not _armed_skip_disabled():
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
 			# write. Always label an armed write (we are in the armed branch, so it IS
 			# armed): resolve the human macro_name (Jarvis Macro autoname is a hash, so the
@@ -3156,14 +3231,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				if _armed_run_macro
 				else None
 			) or "an armed macro"
-			return _run_covered_write(
-				tool,
-				args,
-				conv=conv,
-				owner_user=owner_user,
-				provenance_kind="macro",
-				provenance_name=_macro_name,
-			)
+			armed_write_before = frappe.flags.get(ARMED_MACRO_WRITE_FLAG)
+			frappe.flags[ARMED_MACRO_WRITE_FLAG] = True
+			try:
+				return _run_covered_write(
+					tool,
+					args,
+					conv=conv,
+					owner_user=owner_user,
+					provenance_kind="macro",
+					provenance_name=_macro_name,
+				)
+			finally:
+				frappe.flags[ARMED_MACRO_WRITE_FLAG] = armed_write_before
 		# Skill "Approve & run" auto-run bypass (design §3.4): a conversation in an
 		# APPROVED skill run (skill_autorun=1, stamped by approve_and_run on step-1
 		# success) runs the explicit _SKILL_AUTORUN_COVERED allowlist uncarded, sliding
@@ -3527,7 +3607,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 	# Read-path telemetry; fast no-op for untracked tools, never raises.
 	t0 = time.perf_counter()
-	result = _dispatch_and_wrap(tool, args, is_write)
+	result, read_note = _dispatch_judging_skills(tool, args, is_write, conversation)
 	telemetry.record_tool(
 		tool=tool,
 		args=args,
@@ -3535,6 +3615,118 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		duration_ms=int((time.perf_counter() - t0) * 1000),
 		result=result,
 	)
+	return _with_note(result, skill_note or read_note)
+
+
+def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> tuple[dict, str]:
+	"""``_dispatch_and_wrap``, and the note for the agent ("" when nothing changed).
+
+	An armed macro's run follows only skills its owner controls, and a skill's text
+	reaches the turn by more routes than ``get_skill`` (judged in ``_run_tool``):
+	``find_skills`` lists only skills the owner controls (``ARMED_SKILL_OWNER_FLAG``),
+	and a read that returns rows of a skill doctype (``_reads_skill_rows``) is judged
+	on them (``macros.check_skill_rows_read``), the chat disarmed and committed before
+	they go back. Nothing is read for a chat that is not armed but its flag, and only
+	for those two."""
+	if not conversation or is_write or tool == "get_skill":
+		return _dispatch_and_wrap(tool, args, is_write), ""
+	from jarvis.chat import macros
+
+	if tool == "find_skills":
+		armed = macros.armed_skill_owner(conversation)
+		before = frappe.flags.get(ARMED_SKILL_OWNER_FLAG)
+		frappe.flags[ARMED_SKILL_OWNER_FLAG] = armed[1] if armed else None
+		try:
+			return _dispatch_and_wrap(tool, args, is_write), ""
+		finally:
+			frappe.flags[ARMED_SKILL_OWNER_FLAG] = before
+	result = _dispatch_and_wrap(tool, args, is_write)
+	if not result.get("ok") or not _reads_skill_rows(tool, args):
+		return result, ""
+	data = result.get("data")
+	return result, macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data))
+
+
+# Reads that return no stored row of the doctype they name (its schema, a would-be
+# record built from the call's own values, a file's rows): never judged as a skill read.
+_NO_STORED_ROWS = frozenset(
+	{
+		"get_schema",
+		"describe_customizations",
+		"get_my_access",
+		"get_report_filters",
+		"get_naming_series_preview",
+		"get_workflow_transitions",
+		"resolve_links",
+		"preview_doc",
+		"preview_import",
+	}
+)
+_SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
+
+
+def _reads_skill_rows(tool: str, args) -> bool:
+	"""Whether a read may return rows of a skill doctype: one is named anywhere in its
+	arguments (a ``doctype``, a query's ``from`` or join, a parent, a JSON filter), or
+	it runs a report on one. A Script or Query Report's own SQL is not seen here."""
+	if tool in _NO_STORED_ROWS:
+		return False
+	if tool in ("run_report", "report_pdf") and isinstance(args, dict):
+		report = args.get("report_name")
+		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
+		if ref and ref.casefold() in _SKILL_DOCTYPES_FOLDED:
+			return True
+	return _mentions_a_skill_doctype(args, depth=0)
+
+
+def _mentions_a_skill_doctype(value, *, depth: int) -> bool:
+	if depth > 6:
+		return False
+	if isinstance(value, str):
+		text = value.strip()
+		if text.casefold() in _SKILL_DOCTYPES_FOLDED:
+			return True
+		if not text.startswith(("{", "[")):
+			return False
+		try:
+			value = json.loads(text)
+		except ValueError:
+			return False
+	if isinstance(value, dict):
+		value = list(value.values())
+	if isinstance(value, list | tuple):
+		return any(_mentions_a_skill_doctype(item, depth=depth + 1) for item in value)
+	return False
+
+
+def _skill_rows_read(args, data):
+	"""The ``Jarvis Custom Skill`` docnames a skill read asked for or returned, or
+	None when they cannot be told apart (every skill the reader can read is judged).
+	Known: the record(s) named by ``name`` / ``names`` on a skill doctype (a child
+	row's skill is its parent), and ``get_list`` rows carrying ``name`` (or ``parent``
+	for a child table)."""
+	doctype = args.get("doctype") if isinstance(args, dict) else None
+	if not isinstance(doctype, str) or doctype.casefold() not in _SKILL_DOCTYPES_FOLDED:
+		return None
+	doctype = next(dt for dt in _SKILL_DOCTYPES if dt.casefold() == doctype.casefold())
+	key = "name" if doctype == "Jarvis Custom Skill" else "parent"
+	names = args.get("names") if isinstance(args.get("names"), list) else []
+	names = [n for n in [args.get("name"), *names] if n]
+	if names:
+		if not all(isinstance(n, str) for n in names):
+			return None
+		if key == "name":
+			return names
+		return frappe.get_all(doctype, filters={"name": ["in", names]}, pluck="parent")
+	if isinstance(data, list) and all(isinstance(row, dict) and row.get(key) for row in data):
+		return [row[key] for row in data]
+	return None
+
+
+def _with_note(result: dict, note: str) -> dict:
+	"""``result`` with ``note`` added to its data, for the agent to read."""
+	if note and isinstance(result, dict) and result.get("ok") and isinstance(result.get("data"), dict):
+		result["data"]["note"] = note
 	return result
 
 
