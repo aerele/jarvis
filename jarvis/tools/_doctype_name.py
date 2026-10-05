@@ -1,0 +1,21 @@
+import frappe
+
+
+def canonical_doctype(doctype):
+	"""``doctype`` as its DocType is named, when it names one in another case or with
+	spaces around it; anything else unchanged.
+
+	Frappe finds a DocType by a name in any case (the name column compares
+	case-insensitively), but runs the hooks registered for it (row scoping by
+	``permission_query_conditions`` and ``has_permission``, doc events) only under its
+	exact name, so a read by another spelling would skip its row scoping. A tool reads
+	and writes a doctype by this name."""
+	if not isinstance(doctype, str) or not doctype.strip():
+		return doctype
+	try:
+		name = frappe.get_meta(doctype.strip()).name
+	except Exception:
+		return doctype  # not a DocType: the tool says so as before
+	if isinstance(name, str) and name.casefold() == doctype.strip().casefold():
+		return name
+	return doctype
