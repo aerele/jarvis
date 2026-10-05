@@ -155,7 +155,8 @@ class TestWriteAudit(FrappeTestCase):
 			patch("jarvis.api.dispatch", side_effect=fake_dispatch),
 			patch.object(api, "_GATED_WRITES", frozenset()),
 		):
-			r = api._run_tool("run_method", {"method": "x", "preview": True})
+			# update_doc: run_method is no longer trial-run at all (round 2, R2-2).
+			r = api._run_tool("update_doc", {"doctype": "ToDo", "name": "x", "preview": True})
 		self.assertTrue(r["ok"])
 		self.assertTrue(r["data"]["preview"])
 		self.assertFalse(frappe.db.exists("ToDo", {"description": sentinel}))

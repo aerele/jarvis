@@ -18,6 +18,8 @@ Safety contract (see docs/confirmation-card-redesign-spec.md):
 
 from __future__ import annotations
 
+import difflib
+import json
 import re
 
 import frappe
@@ -30,6 +32,32 @@ _MAX_TABLES = 3  # child tables rendered per record; the rest degrade to "N rows
 _MAX_BODY = 8_000  # a single long-form body (skill instructions, wiki body, one email)
 _MAX_BULK_BODY = 2_000  # per-message body in a bulk-email card
 _MAX_FLOOR = 8  # fields the meta floor selects for a stored record
+# A sensitive update's line diff: SequenceMatcher (quadratic on repeated lines
+# such as ``}``) only up to _MAX_DIFF_LINES lines in all, a linear changed-middle
+# above that, and none above _MAX_DIFF_CHARS (both full texts still show).
+_MAX_DIFF_LINES = 500
+_MAX_DIFF_CHARS = 256 * 1024
+
+# Characters a sensitive card shows as a visible marker (R2-8), by Unicode
+# CATEGORY, never a hand-picked list: everything ``str.isprintable`` rejects
+# (Cc controls, Cf format, Zl / Zp separators, Zs spaces other than U+0020, Cn
+# unassigned, Co private use, Cs) except newline and tab, plus printable code
+# points that draw as nothing: variation selectors, the combining grapheme
+# joiner, Mongolian free variation selectors, Hangul fillers, the braille
+# blank, the Khmer inherent vowels and the musical null notehead. A right-to-left override makes a script read differently from what
+# runs; a lone carriage return or U+2028 hides a second statement on what looks
+# like one line.
+_DRAWS_NOTHING_RE = re.compile(
+	"[\ufe00-\ufe0f\U000e0100-\U000e01ef\u034f\u180b-\u180f\u3164\u115f\u1160\uffa0\u2800"
+	"\u17b4\u17b5\U0001d159]"
+)
+# The marker is ``⟦U+XXXX⟧``. Its opening bracket is itself always marked, so text
+# typed to look like a marker can never pass for a real one.
+_MARK_OPEN, _MARK_CLOSE = "\u27e6", "\u27e7"
+# Line breaks other than ``\n`` (what ``str.splitlines`` also breaks on): code may
+# run what follows them as a new line while the card draws one line.
+HIDDEN_BREAK_NOTE = "Contains a line break the card shows as a marker: the code may run it as a new line."
+_HIDDEN_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 # A Password field or an obviously-secret key name - masked, never rendered. This
 # lives HERE, not in confirm_card, so the dependency runs one way only
@@ -73,8 +101,9 @@ def is_secret(meta, key) -> bool:
 	return False
 
 
-def fmt(value, df=None, doc=None, limit: int = _MAX_VAL) -> str:
+def fmt(value, df=None, doc=None, limit: int | None = _MAX_VAL) -> str:
 	"""A value as a short display string, formatted the way Frappe would show it.
+	``limit=None`` keeps the whole value (a sensitive card, see ``fmt_full``).
 
 	``translated=False`` is deliberate: format_value runs ``frappe._(value)`` on
 	every string VALUE, not just labels (frappe/utils/formatters.py:59-60), so a
@@ -101,7 +130,145 @@ def fmt(value, df=None, doc=None, limit: int = _MAX_VAL) -> str:
 			# (meta.py:886), a bad link in get_cached_value (meta.py:897), an assert
 			# in get_field_precision (meta.py:936).
 			out = "" if value is None else cstr(value)
-	return out if len(out) <= limit else out[: limit - 1] + "…"
+	return out if limit is None or len(out) <= limit else out[: limit - 1] + "…"
+
+
+def _hides(ch: str) -> bool:
+	if ch.isprintable():
+		return ch == _MARK_OPEN or bool(_DRAWS_NOTHING_RE.match(ch))
+	return ch not in "\n\t"
+
+
+def visible(text: str) -> str:
+	"""``text`` with every character that hides (see ``_DRAWS_NOTHING_RE``) shown as
+	a ``⟦U+XXXX⟧`` marker. A carriage return directly before a newline is an
+	ordinary (CRLF) line ending and stays; a LONE one is marked. Apply ONCE: the
+	card's final pass does it (``confirm_card._visible_all``); a second pass would
+	mark the markers."""
+	out = []
+	last = len(text) - 1
+	for i, ch in enumerate(text):
+		if _hides(ch) and not (ch == "\r" and i < last and text[i + 1] == "\n"):
+			out.append(f"{_MARK_OPEN}U+{ord(ch):04X}{_MARK_CLOSE}")
+		else:
+			out.append(ch)
+	return "".join(out)
+
+
+def visible_char(ch: str) -> str:
+	"""One character as a marker, whatever it is (a whitespace-only value on a
+	sensitive card, ``confirm_card._visible_all``)."""
+	return f"{_MARK_OPEN}U+{ord(ch):04X}{_MARK_CLOSE}"
+
+
+def has_hidden_break(text: str) -> bool:
+	"""Whether ``text`` holds a line break other than ``\n`` (see ``_HIDDEN_BREAKS``);
+	a CRLF line ending does not count, a lone carriage return does."""
+	return any(ch in _HIDDEN_BREAKS for ch in text.replace("\r\n", "\n"))
+
+
+def _lines(text: str) -> list[str]:
+	"""``text`` split on ``\n`` only, a CRLF ending's carriage return dropped (the last
+	part has no newline after it, so a carriage return there is lone and stays)."""
+	parts = text.split("\n")
+	return [p[:-1] if p.endswith("\r") else p for p in parts[:-1]] + parts[-1:]
+
+
+def fmt_full(value, df=None, doc=None) -> str:
+	"""A value for a sensitive card (R2-8): never clipped, a JSON / list value
+	written out rather than "..." / "N rows" (a child table is the caller's
+	``table_rows``). The raw text: the card's final pass marks hidden characters.
+	Secrets are the caller's job (``secret_state``)."""
+	if isinstance(value, dict | list):
+		return json.dumps(value, indent=1, ensure_ascii=False, default=str)
+	return fmt(value, df, doc, limit=None)
+
+
+def is_long(text: str) -> bool:
+	"""Whether a full value needs its own block: several lines (``\n`` or a hidden
+	break), or longer than an ordinary card would show."""
+	return "\n" in text or len(text) > _MAX_VAL or has_hidden_break(text)
+
+
+def secret_state(value, before=None, *, update: bool = False, stored: bool = False) -> str:
+	"""What a sensitive card shows for a password or secret: "set" on a create,
+	"changed" when an update replaces a stored one, nothing when it is empty, and
+	for an all-``*`` value being WRITTEN (Frappe's dummy password, which a save
+	leaves alone) "unchanged" on an update / "not set" on a create. A ``stored``
+	value is the masked column (all ``*`` when set), so filled means "set". Never
+	the value. A secret an update empties is "cleared"."""
+	if not _filled(value):
+		return "cleared" if update and _filled(before) else ""
+	if stored:
+		return "set"
+	if set(cstr(value)) == {"*"}:
+		return "unchanged" if update else "not set"
+	return "changed" if update and _filled(before) else "set"
+
+
+def _filled(value) -> bool:
+	return value is not None and cstr(value).strip() != ""
+
+
+def line_diff(old: str, new: str, context: int = 2, force: bool = False) -> list[dict] | None:
+	"""A line diff for a long value on a sensitive update card:
+	``[{"op": " " | "-" | "+", "text"} | {"op": "gap", "text": "", "count": n}]``,
+	with ``context`` unchanged lines around each change and a ``gap`` naming how
+	many unchanged lines are left out. Lines split on ``\n`` ONLY (a CRLF ending's
+	carriage return dropped): a hidden break (lone ``\r``, U+2028 ...) stays inside
+	its line, where the card marks it.
+	None when neither side has several lines (unless ``force``: a hidden break),
+	nothing changed, or the texts are over ``_MAX_DIFF_CHARS``. Above
+	``_MAX_DIFF_LINES`` the diff is the linear changed-middle (common first and
+	last lines kept), because SequenceMatcher is quadratic on repeated lines. The
+	card carries both full texts beside it."""
+	if old == new or (not force and "\n" not in old and "\n" not in new):
+		return None
+	if len(old) + len(new) > _MAX_DIFF_CHARS:
+		return None
+	a, b = _lines(old), _lines(new)
+	if a == b:
+		return None  # only CRLF / LF line endings differ: the caller names that
+	if len(a) + len(b) > _MAX_DIFF_LINES:
+		groups = [_changed_middle(a, b, context)]
+	else:
+		groups = list(difflib.SequenceMatcher(None, a, b, autojunk=False).get_grouped_opcodes(context))
+	out = []
+	seen = 0  # lines of ``a`` already shown or counted
+	for group in groups:
+		if group[0][1] > seen:
+			out.append({"op": "gap", "text": "", "count": group[0][1] - seen})
+		for tag, i1, i2, j1, j2 in group:
+			if tag == "equal":
+				out.extend({"op": " ", "text": t} for t in a[i1:i2])
+				continue
+			if tag in ("replace", "delete"):
+				out.extend({"op": "-", "text": t} for t in a[i1:i2])
+			if tag in ("replace", "insert"):
+				out.extend({"op": "+", "text": t} for t in b[j1:j2])
+		seen = group[-1][2]
+	if seen < len(a):
+		out.append({"op": "gap", "text": "", "count": len(a) - seen})
+	return out
+
+
+def _changed_middle(a: list, b: list, context: int) -> list:
+	"""One group of opcodes for a large diff, in linear time: the common first and
+	last lines are equal, everything between is replaced."""
+	head = 0
+	while head < min(len(a), len(b)) and a[head] == b[head]:
+		head += 1
+	tail = 0
+	while tail < min(len(a), len(b)) - head and a[-1 - tail] == b[-1 - tail]:
+		tail += 1
+	start = max(0, head - context)
+	end_a, end_b = len(a) - tail, len(b) - tail
+	group = [("equal", start, head, start, head)] if head > start else []
+	group.append(("replace", head, end_a, head, end_b))
+	keep = min(context, tail)
+	if keep:
+		group.append(("equal", end_a, end_a + keep, end_b, end_b + keep))
+	return group
 
 
 def _cast_date(value):
@@ -218,9 +385,10 @@ def pick_fields(meta) -> list[str]:
 _DOCSTATUS_LABEL = {0: "Draft", 1: "Submitted", 2: "Cancelled"}
 
 
-def summary_rows(doctype: str, name: str) -> dict | None:
+def summary_rows(doctype: str, name: str, full: bool = False) -> dict | None:
 	"""``{"title", "rows"}`` for a STORED record, or None when it is missing or the
-	caller cannot read it.
+	caller cannot read it. ``full`` (a sensitive card) keeps each value it shows
+	whole; the selection is still the meta floor below.
 
 	The caller renders a NAME-ONLY row on None. ``title`` is returned only from this
 	function's successful, permission-checked path - never source a card header from
@@ -255,6 +423,9 @@ def summary_rows(doctype: str, name: str) -> dict | None:
 
 	meta = doc.meta
 	rows = []
+	if full:
+		rows, tables = _whole_record(meta, doc)
+		return {"title": _title(meta, doc), "rows": rows, "tables": tables}
 	for fieldname in pick_fields(meta):
 		# A permlevel-restricted field is delattr'd by the filter above
 		# (document.py:1264) and is dropped by the confirmed save too - never show a
@@ -266,8 +437,7 @@ def summary_rows(doctype: str, name: str) -> dict | None:
 			continue
 		df = meta.get_field(fieldname)
 		label = df.label if df and df.label else fieldname
-		shown = "[hidden]" if is_secret(meta, fieldname) else fmt(value, df, doc)
-		rows.append({"label": label, "value": shown})
+		rows.append(value_row(meta, fieldname, label, value, df, doc, full, stored=True))
 		if len(rows) >= _MAX_ROWS:
 			break
 
@@ -284,20 +454,81 @@ def summary_rows(doctype: str, name: str) -> dict | None:
 			}
 		)
 
-	title = ""
+	return {"title": _title(meta, doc), "rows": rows}
+
+
+def _title(meta, doc) -> str:
 	try:
 		title_field = meta.get_title_field()
 		if title_field and title_field != "name" and hasattr(doc, title_field):
-			title = fmt(doc.get(title_field), meta.get_field(title_field), doc)
+			return fmt(doc.get(title_field), meta.get_field(title_field), doc)
 	except Exception:
-		title = ""
-	return {"title": title, "rows": rows}
+		pass
+	return ""
 
 
-def values_rows(meta, values: dict, limit: int = _MAX_VAL) -> dict:
+def _whole_record(meta, doc) -> tuple[list[dict], list[dict]]:
+	"""``(rows, tables)``: every non-empty field of a stored record, whole (a
+	sensitive delete card: deleting a Server Script shows its script). A value that
+	is only whitespace is kept (the card marks it). Child tables are full tables
+	(``table_rows``: every row and column, secrets "set", a hidden-break ``note``),
+	so their cells get the same marker pass as any value. A permlevel-restricted
+	field (dropped by the read filter) is skipped. Bounded by the gate's size
+	refusal."""
+	from frappe.model import no_value_fields
+
+	rows, tables = [], []
+	for df in meta.fields or []:
+		if df.fieldtype in no_value_fields and df.fieldtype not in _TABLE_FIELDTYPES:
+			continue
+		if not hasattr(doc, df.fieldname):
+			continue
+		value = doc.get(df.fieldname)
+		if df.fieldtype in _TABLE_FIELDTYPES:
+			table = table_rows(
+				meta,
+				df.fieldname,
+				[r.as_dict() if hasattr(r, "as_dict") else r for r in value or []],
+				True,
+				stored=True,
+			)
+			if table:
+				tables.append(table)
+			continue
+		if value is None or cstr(value) == "":
+			continue
+		rows.append(
+			value_row(meta, df.fieldname, df.label or df.fieldname, value, df, doc, True, stored=True)
+		)
+	if getattr(meta, "is_submittable", 0):
+		rows.append({"label": "Docstatus", "value": _DOCSTATUS_LABEL.get(cint(doc.get("docstatus")), "?")})
+	return rows, tables
+
+
+def value_row(
+	meta, fieldname, label, value, df=None, doc=None, full: bool = False, limit=_MAX_VAL, stored: bool = False
+) -> dict:
+	"""One ``{"label", "value"}`` row. A secret is masked ("[hidden]", or "set" on a
+	sensitive card); a ``full`` row keeps the whole value and marks a long one
+	``multiline`` so the clients give it its own block."""
+	if is_secret(meta, fieldname):
+		return {"label": label, "value": secret_state(value, stored=stored) if full else "[hidden]"}
+	if not full:
+		return {"label": label, "value": fmt(value, df, doc, limit)}
+	text = fmt_full(value, df, doc)
+	row = {"label": label, "value": text}
+	if is_long(text):
+		row["multiline"] = True
+	if has_hidden_break(text):
+		row["note"] = HIDDEN_BREAK_NOTE
+	return row
+
+
+def values_rows(meta, values: dict, limit: int = _MAX_VAL, full: bool = False) -> dict:
 	"""``{"rows", "extra"}`` for PROPOSED content (a create's values, an email body).
 
-	Renders EVERY key, in caller order, capped with an explicit remainder. Never
+	Renders EVERY key, in caller order, capped with an explicit remainder (no cap
+	and no clip when ``full``, a sensitive card). Never
 	filtered to the floor: a proposed field outside the floor is one the save will
 	write, so hiding it would let a human approve a value they never saw. Caller
 	order is preserved so the card stays comparable against the request.
@@ -308,16 +539,24 @@ def values_rows(meta, values: dict, limit: int = _MAX_VAL) -> dict:
 		return {"rows": [], "extra": 0}
 	rows = []
 	keys = list(values)
-	for fieldname in keys[:_MAX_ROWS]:
+	for fieldname in keys if full else keys[:_MAX_ROWS]:
 		df = meta.get_field(fieldname) if meta else None
 		label = df.label if df and df.label else fieldname
-		value = values.get(fieldname)
-		shown = "[hidden]" if is_secret(meta, fieldname) else fmt(value, df, None, limit)
-		rows.append({"label": label, "value": shown})
+		rows.append(value_row(meta, fieldname, label, values.get(fieldname), df, None, full, limit))
 	return {"rows": rows, "extra": max(0, len(keys) - len(rows))}
 
 
-def table_rows(meta, fieldname: str, rows: list) -> dict | None:
+def stored_rows(rows) -> list:
+	"""Child rows as the caller would write them: a stored or resolved row's own
+	bookkeeping (name, parent, idx, owner ...) removed, so a sensitive card's
+	table shows the values, not the metadata."""
+	from frappe.model import child_table_fields, default_fields
+
+	drop = {*default_fields, *child_table_fields}
+	return [{k: v for k, v in r.items() if k not in drop} for r in rows if isinstance(r, dict)]
+
+
+def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: bool = False) -> dict | None:
 	"""A PROPOSED child table as a real table, or None when there is nothing to show.
 
 	Columns are the child doctype's ``in_list_view`` order UNION every key the caller
@@ -331,9 +570,15 @@ def table_rows(meta, fieldname: str, rows: list) -> dict | None:
 
 	STORED child tables keep "N rows" (fmt's list branch) - a delete card does not
 	need line items to identify the order.
+
+	``full`` (a sensitive card): every row and column, values whole, the rows'
+	own bookkeeping dropped, secrets as "set" (``stored``: rows read from the
+	database, whose secret columns are masked).
 	"""
 	if not meta or not isinstance(rows, list) or not rows:
 		return None
+	if full:
+		rows = stored_rows(rows)
 	df = meta.get_field(fieldname)
 	if df is None or df.fieldtype not in _TABLE_FIELDTYPES or not df.options:
 		return None
@@ -358,20 +603,21 @@ def table_rows(meta, fieldname: str, rows: list) -> dict | None:
 
 	listed = [d.fieldname for d in child.fields if d.in_list_view and d.fieldname in proposed]
 	columns = listed + [f for f in proposed if f not in listed]
-	shown_cols = columns[:_MAX_COLS]  # NOT _MAX_ROWS - 20 columns is an unusable table
+	shown_cols = columns if full else columns[:_MAX_COLS]  # NOT _MAX_ROWS - 20 columns is unusable
 
 	out_rows = []
-	for row in rows[:_MAX_ROWS]:
+	hidden_break = False  # a cell holds a lone carriage return / U+2028 ... (full only)
+	for row in rows if full else rows[:_MAX_ROWS]:
 		if not isinstance(row, dict):
 			continue
 		cells = []
 		for key in shown_cols:
-			cdf = child.get_field(key)
-			value = row.get(key)
-			cells.append("[hidden]" if is_secret(child, key) else fmt(value, cdf))
+			cell = value_row(child, key, "", row.get(key), child.get_field(key), None, full, stored=stored)
+			cells.append(cell["value"])
+			hidden_break = hidden_break or "note" in cell
 		out_rows.append({"cells": cells})
 
-	return {
+	out = {
 		"label": df.label or fieldname,
 		"count": len(rows),
 		# ``columns`` is labels (what the card renders); ``fieldnames`` is the
@@ -383,3 +629,6 @@ def table_rows(meta, fieldname: str, rows: list) -> dict | None:
 		"extra_columns": max(0, len(columns) - len(shown_cols)),
 		"unknown_columns": len(unknown),
 	}
+	if hidden_break:
+		out["note"] = HIDDEN_BREAK_NOTE
+	return out
