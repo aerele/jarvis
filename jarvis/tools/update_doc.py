@@ -33,7 +33,7 @@ from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import run_atomic_batch
 from jarvis.tools._child_rows import merge_child_rows, row_values
 from jarvis.tools._delegate_write_caps import enforce_update
-from jarvis.tools._field_values import check_values
+from jarvis.tools._field_values import cast_numbers, check_values
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
 # rewriting these would corrupt the row.
@@ -97,6 +97,7 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 			doc.set(field, [row_values(r) if isinstance(r, dict) else r for r in value])
 		else:
 			doc.set(field, value)
+	cast_numbers(doc)
 	doc.save()  # runs DocType validate() and on_update hooks
 	return doc
 

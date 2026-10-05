@@ -400,3 +400,79 @@ class TestRejectsWhatFrappeWouldCorrupt(_Defaults, FrappeTestCase):
 		)
 		self.assertEqual((r["ok"], r["error"]["kind"]), (False, "fixable"), r)
 		self.assertIn("Due Date (date)", r["error"]["message"])
+
+
+class TestNumbersReachValidateAsNumbers(_Defaults, FrappeTestCase):
+	"""A numeric string the check accepts is a number by the time the controller's
+	validate runs (#655). Frappe casts only when it writes the row, after validate,
+	and a controller that does arithmetic first (ERPNext's ``rate / conversion_factor``
+	on the tester's site) raised TypeError, so the Confirm became a 500."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		if "erpnext" not in frappe.get_installed_apps():
+			raise cls.skipException("ERPNext is not installed")
+		masters.clear_cache_after_rollback(cls)
+		cls.company = masters.ensure_ledger_company()
+		cls.delivery = frappe.utils.add_days(frappe.utils.today(), 3)
+		masters.ensure_fiscal_years(frappe.utils.today(), cls.delivery)
+		cls.customer = masters.ensure_customer("_J2A Type Check Customer")
+		cls.price_list = masters.ensure_selling_price_list()
+		cls.item = masters.ensure_item("_J2A Service Item", is_stock_item=0)
+
+	def _order_values(self, **row) -> dict:
+		self.set_default("number_format", "#,###.##")
+		return {
+			"company": self.company,
+			"customer": self.customer,
+			"selling_price_list": self.price_list,
+			"delivery_date": self.delivery,
+			"items": [{"item_code": self.item, **row}],
+		}
+
+	def _row_types_at_validate(self, write) -> list:
+		from unittest.mock import patch
+
+		from erpnext.selling.doctype.sales_order.sales_order import SalesOrder
+
+		seen, original = [], SalesOrder.validate
+
+		def spy(doc):
+			seen.extend((d.qty, d.rate, d.conversion_factor) for d in doc.items)
+			return original(doc)
+
+		with patch.object(SalesOrder, "validate", spy):
+			write()
+		return [tuple(type(v) for v in row) for row in seen]
+
+	def test_a_create_casts_numeric_strings_in_a_row(self):
+		values = self._order_values(qty="2", rate="1,250.5", conversion_factor="1")
+		out = {}
+		types = self._row_types_at_validate(lambda: out.update(create_doc("Sales Order", values)))
+		self.assertEqual(types, [(float, float, float)])
+		item = frappe.get_doc("Sales Order", out["name"]).items[0]
+		self.assertEqual((item.qty, item.rate, item.conversion_factor, item.amount), (2, 1250.5, 1, 2501))
+		self.assertEqual(values["items"][0]["conversion_factor"], "1")  # the caller's dict is not rewritten
+
+	def test_an_update_casts_a_numeric_string(self):
+		doc = create_doc("Sales Order", self._order_values(qty=1, rate=10))
+		row = doc["items"][0]["name"]
+		types = self._row_types_at_validate(
+			lambda: update_doc("Sales Order", doc["name"], {"items": [{"name": row, "qty": "3"}]})
+		)
+		self.assertEqual(types[0][0], float)
+		self.assertEqual(frappe.db.get_value("Sales Order Item", row, ["qty", "amount"]), (3, 30))
+
+	def test_the_draft_panel_confirm_casts_too(self):
+		from jarvis.chat.actions_api import apply_action
+
+		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "j2a numbers"}).insert(
+			ignore_permissions=True
+		)
+		values = self._order_values(qty=2, rate=5, conversion_factor="1")
+		out = {}
+		action = {"verb": "create", "doctype": "Sales Order", "conversation": conv.name, "values": values}
+		types = self._row_types_at_validate(lambda: out.update(apply_action(frappe.as_json(action))))
+		self.assertTrue(out.get("ok"), out)
+		self.assertEqual(types, [(int, int, float)])
