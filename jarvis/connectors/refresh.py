@@ -84,8 +84,8 @@ def ttl_seconds(ttl_ms) -> float:
 
 def request(row_name: str) -> bool:
 	"""Enqueue one refresh for ``row_name`` unless one was queued in the last
-	``DEBOUNCE_S`` seconds (Redis SET NX window) or one is already queued/running (a
-	stable ``job_id`` with ``deduplicate``). Returns True when a job was queued."""
+	``DEBOUNCE_S`` seconds or one is already queued/running (a stable ``job_id`` with
+	``deduplicate``). Returns True when a job was queued."""
 	if not _claim(row_name):
 		return False
 	# Queued NOW, not after commit: the debounce claim above is already taken, so a
@@ -110,14 +110,17 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""Set-if-absent on the debounce flag: the first caller wins the window.
-	Raw SET for nx; _debounce_key is site-scoped by make_key."""
-	# nosemgrep: frappe-cache-breaks-multitenancy
-	return bool(frappe.cache().set(_debounce_key(row_name), 1, ex=DEBOUNCE_S, nx=True))
+	"""The first caller in a ``DEBOUNCE_S`` window wins. Two callers racing here can
+	both win; the job's stable ``job_id`` with ``deduplicate`` still runs one refresh."""
+	key = _debounce_key(row_name)
+	if frappe.cache.get_value(key, expires=True) is not None:
+		return False
+	frappe.cache.set_value(key, 1, expires_in_sec=DEBOUNCE_S)
+	return True
 
 
 def _debounce_key(row_name: str) -> str:
-	return frappe.cache().make_key(f"jarvis:connectors:refresh:{row_name}")
+	return f"jarvis:connectors:refresh:{row_name}"
 
 
 def refresh_tools_cache(name: str) -> None:

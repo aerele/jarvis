@@ -1309,7 +1309,9 @@ def _rerun_one(conversation: str) -> dict:
 		{"filebox_last_error": None, "filebox_last_error_at": None, **(fresh if routed else {})},
 		update_modified=False,
 	)
-	frappe.cache.delete_value(filebox_skills.backstop_key(conversation))
+	from jarvis.chat import held_writes
+
+	held_writes.forget_seen(filebox_skills.backstop_key(conversation))
 	msg = (
 		frappe.db.get_value(MSG, r["lm_name"], ["content", "error"], as_dict=True)
 		if r.get("lm_name")

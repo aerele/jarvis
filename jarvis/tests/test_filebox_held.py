@@ -1092,6 +1092,28 @@ class TestLadderAndLifecycle(_Base):
 		self.assertEqual(self.waiters(row.name), [])
 
 
+class TestSeenOnce(FrappeTestCase):
+	def key(self):
+		return f"jarvis:test_seen_once:{frappe.generate_hash(length=10)}"
+
+	def test_tries_once_and_forget_gives_a_fresh_try(self):
+		key = self.key()
+		self.assertFalse(held_writes.seen_once([key]))
+		self.assertTrue(held_writes.seen_once([key]))
+		held_writes.forget_seen(key)
+		self.assertFalse(held_writes.seen_once([key]))
+
+	def test_a_write_the_cache_did_not_keep_counts_as_seen(self):
+		import redis
+
+		with (
+			patch.object(frappe.cache, "set", side_effect=redis.exceptions.ConnectionError("down")),
+			patch.object(frappe, "log_error") as log,
+		):
+			self.assertTrue(held_writes.seen_once([self.key()], "test_event"))
+		self.assertEqual(log.call_args.kwargs["title"], "jarvis.file_box.test_event")
+
+
 class TestPartyKeys(FrappeTestCase):
 	def test_primary_key_prefers_tax_then_name(self):
 		keys = ["args:1", "name:Supplier:acme", "gstin:Supplier:X"]

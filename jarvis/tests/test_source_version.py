@@ -1,15 +1,22 @@
 """Source revision reporting is exact, remembers only real answers, and fails soft."""
 
-import subprocess
-from types import SimpleNamespace
+import contextlib
+import os
+import tempfile
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
+import git
+
 from jarvis import source_version
 
-
-def _git(returncode: int, stdout: str) -> SimpleNamespace:
-	return SimpleNamespace(returncode=returncode, stdout=stdout)
+_IDENTITY = {
+	"GIT_AUTHOR_NAME": "Test",
+	"GIT_AUTHOR_EMAIL": "test@example.com",
+	"GIT_COMMITTER_NAME": "Test",
+	"GIT_COMMITTER_EMAIL": "test@example.com",
+}
 
 
 class TestSourceDetails(TestCase):
@@ -20,7 +27,7 @@ class TestSourceDetails(TestCase):
 		source_version.reset_cache()
 
 	def test_reports_branch_and_exact_release_tag(self):
-		with patch.object(source_version, "_git_value", side_effect=["version-16", "v16.1.0"]):
+		with patch.object(source_version, "_read_value", side_effect=["version-16", "v16.1.0"]):
 			self.assertEqual(
 				source_version.source_details(),
 				{"branch": "version-16", "tag": "v16.1.0"},
@@ -28,40 +35,63 @@ class TestSourceDetails(TestCase):
 
 	def test_answers_are_cached_for_repeated_connection_polls(self):
 		# An empty answer is still an answer (detached / untagged) and is cached like any other.
-		with patch.object(source_version, "_git_value", side_effect=["develop", ""]) as git_value:
+		with patch.object(source_version, "_read_value", side_effect=["develop", ""]) as read_value:
 			source_version.source_details()
 			self.assertEqual(source_version.source_details(), {"branch": "develop", "tag": ""})
-		self.assertEqual(git_value.call_count, 2)
+		self.assertEqual(read_value.call_count, 2)
 
 	def test_unknown_value_is_reported_as_none_and_asked_again(self):
-		# A timed-out git call must not be memoised as "no branch": the next poll retries it, and
+		# An unreadable checkout must not be memoised as "no branch": the next poll retries it, and
 		# in the meantime the caller sees None rather than a blank it would clear upstream with.
 		with patch.object(
-			source_version, "_git_value", side_effect=[None, "v16.1.0", "version-16"]
-		) as git_value:
+			source_version, "_read_value", side_effect=[None, "v16.1.0", "version-16"]
+		) as read_value:
 			self.assertEqual(source_version.source_details(), {"branch": None, "tag": "v16.1.0"})
 			self.assertEqual(source_version.source_details(), {"branch": "version-16", "tag": "v16.1.0"})
-		self.assertEqual(git_value.call_count, 3)
+		self.assertEqual(read_value.call_count, 3)
 
 
-class TestGitValue(TestCase):
-	def test_detached_head_and_missing_tag_are_confirmed_blanks(self):
-		with patch.object(source_version.subprocess, "run", side_effect=[_git(0, "\n"), _git(128, "")]):
-			self.assertEqual(source_version._git_value("branch", "--show-current"), "")
-			self.assertEqual(source_version._git_value("describe", "--tags", "--exact-match"), "")
+class TestReadValue(TestCase):
+	"""Reads a real repository; GitDB reads refs and objects without a git process."""
 
-	def test_timeout_and_os_error_are_unknown(self):
-		with patch.object(
-			source_version.subprocess,
-			"run",
-			side_effect=[subprocess.TimeoutExpired("git", 2), OSError("fork failed")],
+	def setUp(self):
+		stack = contextlib.ExitStack()
+		self.addCleanup(stack.close)
+		stack.enter_context(patch.dict(os.environ, _IDENTITY))
+		self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+		self.repo = git.Repo.init(self.root, initial_branch="version-16")
+		stack.enter_context(patch.object(source_version, "_REPOSITORY_ROOT", self.root))
+
+	def commit(self):
+		return self.repo.index.commit("change")
+
+	def test_branch_and_highest_release_tag_on_head(self):
+		self.repo.create_tag("v16.0.9", ref=self.commit())
+		head = self.commit()
+		self.repo.create_tag("v16.1.0", ref=head)
+		self.repo.create_tag("v16.10.0", ref=head, message="annotated")
+		self.repo.create_tag("v16.2.0-beta", ref=head)
+		self.assertEqual(source_version._read_value("branch"), "version-16")
+		self.assertEqual(source_version._read_value("tag"), "v16.10.0")
+
+	def test_detached_head_and_untagged_commit_are_confirmed_blanks(self):
+		self.repo.create_tag("v16.1.0", ref=self.commit())
+		self.repo.head.reference = self.commit()
+		self.assertEqual(source_version._read_value("branch"), "")
+		self.assertEqual(source_version._read_value("tag"), "")
+
+	def test_repository_without_commits_has_no_tag(self):
+		self.assertEqual(source_version._read_value("branch"), "version-16")
+		self.assertEqual(source_version._read_value("tag"), "")
+
+	def test_not_a_checkout_is_a_confirmed_blank(self):
+		with (
+			tempfile.TemporaryDirectory() as plain,
+			patch.object(source_version, "_REPOSITORY_ROOT", Path(plain)),
 		):
-			self.assertIsNone(source_version._git_value("branch", "--show-current"))
-			self.assertIsNone(source_version._git_value("describe", "--tags", "--exact-match"))
+			self.assertEqual(source_version._read_value("branch"), "")
 
-	def test_only_a_release_shaped_tag_counts(self):
-		with patch.object(
-			source_version.subprocess, "run", side_effect=[_git(0, "v1-beta\n"), _git(0, "v16.2.0\n")]
-		):
-			self.assertEqual(source_version._git_value("describe", "--tags", "--exact-match"), "")
-			self.assertEqual(source_version._git_value("describe", "--tags", "--exact-match"), "v16.2.0")
+	def test_unreadable_checkout_is_unknown(self):
+		with patch.object(git, "Repo", side_effect=OSError("disk error")):
+			self.assertIsNone(source_version._read_value("branch"))
+			self.assertIsNone(source_version._read_value("tag"))
