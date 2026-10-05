@@ -21,6 +21,7 @@
 
 <script setup>
 import { computed } from "vue";
+import { personError } from "@/lib/actionSummary";
 import Banner from "./Banner.vue";
 
 const props = defineProps({
@@ -41,11 +42,8 @@ const HEADLINES = {
 	ToolNotFoundError: "That action isn't available",
 };
 
-const err = computed(() => {
-	const e = props.error;
-	if (typeof e === "string") return { message: e };
-	return e || {};
-});
+// The person's words when a refusal carries them (error.person_message).
+const err = computed(() => personError(props.error));
 
 const headline = computed(() => HEADLINES[err.value.code] || "Something went wrong");
 </script>

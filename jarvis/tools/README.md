@@ -161,11 +161,21 @@ Returns the live schema, not a stored copy:
 
 ## `preview` - dry-run on writes
 
-The write tools (`create_doc`, `update_doc`, `submit_doc`, `cancel_doc`,
-`amend_doc`, `delete_doc`) accept `preview: true`. The operation runs through all
-DocType validations with **every DB write rolled back** - commits are neutralized
-for the duration and the work is undone via a savepoint, so even a tool that
-calls `frappe.db.commit()` internally cannot persist:
+The create / update tools (`create_doc`, `create_docs`, `update_doc`; `api._PREVIEWABLE`)
+are trial-run when they park: the operation runs through all DocType validations
+with **every DB write rolled back** - commits are neutralized for the duration and
+the work is undone via a savepoint, so even a tool that calls `frappe.db.commit()`
+internally cannot persist. (A model-passed `preview: true` on a gated write is
+ignored: the gate parks it and builds this preview itself.)
+
+`submit_doc`, `cancel_doc`, `amend_doc` and `delete_doc` are **not** trial-run
+(round-2 decision R2-2): a trial fires their on_submit / on_cancel hooks, and what
+those send (email, calls to other systems, live notifications) cannot be rolled
+back. They park a described card (`{"preview": false, "described": true, ...}`)
+whose verb card carries a `consequence` line ("Submitting posts its accounting and
+stock entries, if any, and locks the document.", "Cancelling reverses its
+entries.", "Deleting removes it permanently.", "Amending creates a new draft from
+the cancelled document."); a failure shows at Confirm. The trial-run preview:
 
 ```jsonc
 // args
@@ -182,13 +192,20 @@ confirm. Preview runs are never audited (nothing is committed). The same sandbox
 (`jarvis/tools/_preview_sandbox.py`) builds the preview on a confirmation card.
 
 `note` is written for a person: plain language, no key names. Where it is shown
-depends on the card. Neither client shows it when a structured card exists, and
-one is built for create / update and for submit / cancel / amend / delete (chat
-card, phone decision sheet and Approval Board alike); there it reaches the user
-only when the model relays it. Both clients render it on the plain fallback, for
-a call that has no structured card. It is stored with the pending record and in
-the transcript either way.
-Three more keys appear only when they apply:
+depends on the card. Neither client shows it when a structured card exists (chat
+card, phone decision sheet and Approval Board alike); there the card's own
+`warning` (below) carries what the trial found, and the rest reaches the user only
+when the model relays it. Both clients render it on the plain fallback, for a call
+that has no structured card. It is stored with the pending record and in the
+transcript either way.
+
+The card (`confirm_card.build_card`) gets `warning: {"jobs": N, "rolled_back":
+bool}` only when the trial found something: `jobs` is the real number of
+background jobs Confirm will start (`will_queue_jobs`), `rolled_back` is
+`hook_rolled_back`. All three surfaces render it as ONE line under the risk
+banner, from the shared `cardWarningOf` / `cardBannerOf`
+(`frontend/src/lib/actionSummary.js`).
+Four more keys appear only when they apply:
 
 - `will_queue`: background jobs a hook enqueued during the dry run. They are
   **not sent**; these are their names (distinct, at most 20 plus a `+N more`
@@ -196,6 +213,8 @@ Three more keys appear only when they apply:
   many jobs Confirm will start. Frappe's own clean-up job after a delete
   (`delete_dynamic_links`, enqueued on every delete) is dropped but not
   listed or counted.
+- `will_queue_jobs`: how many jobs that is (`will_queue` names each kind once);
+  the card's warning line shows it.
 - `will_queue_note`: a sentence for the model, saying what to tell the user.
   When one of the jobs is Frappe's `queue_action`
   (`frappe.model.document.execute_action`, e.g. a Stock Reconciliation over 100
@@ -282,7 +301,48 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
   Web Page / Web Form / Website Theme / Website Settings / custom Web Template when
   a write puts content in their script / HTML fields; Auto Repeat when it emails
   people): parks behind its own card in EVERY mode; the draft panel turns it into
-  that card.
+  that card. A File Box write held for the Approval Board gets the same card; with
+  approval sheets on, a sensitive record is refused from the sheet instead (the
+  sheet's editor has no full view), plain words, audited. The
+  card (`card.risk = "sensitive"`, `card.risk_line` naming every risk the call
+  carries, such as "This runs code for every user.", rendered as a banner on the
+  chat card, the phone sheet and the Approval Board) shows the record in FULL:
+  - no 200-character clip, no 20-row cap, every record open;
+  - a password as "set" / "changed" / "cleared" ("unchanged" for Frappe's all-`*`
+    dummy); a whitespace-only value is kept and every character of it marked
+    (spaces included, so it never draws as an empty cell);
+  - every character that draws as nothing or hides a line (by Unicode category:
+    format, control other than newline and tab, line / paragraph separators,
+    spaces other than U+0020, unassigned, private use, plus variation selectors,
+    the combining grapheme joiner, Hangul fillers and the braille blank) as a
+    `⟦U+XXXX⟧` marker; a typed `⟦` is itself marked, so a marker cannot be forged;
+    a line break other than `\n` (a LONE `\r`, U+2028 ...) also forces a block, the
+    line diff and a note; a CRLF line ending is ordinary and is not marked (a
+    CRLF / LF-only update says "Only the line endings change.");
+  - a long value marked `multiline`; an update's long value with a line diff
+    (`lines`, split on `\n` only, gaps counting the unchanged lines left out,
+    linear above 500 lines) beside both full texts;
+  - a child-table change as the current and the new table (`from_table` /
+    `to_table`, an empty side shown as "none"); a JSON value written out;
+  - a delete shows every non-empty field of the record (a Server Script's script)
+    and its child tables as full tables (cells marked, a hidden-break note).
+  A call or card over 256 KB is refused (`sensitive_refused`, sent to Desk), never
+  clipped; so is a sensitive write whose card could not be built. A `run_import`
+  is refused in every mode, and again at Confirm, only when it would write
+  something sensitive: a doctype on the sensitive list (or a conditional / Jarvis
+  configuration doctype), or a file with a non-empty access-granting column
+  (`_write_risk._import_grants`, reusing the field rules: Customer / Supplier
+  portal users, Employee `user_id` / `create_user_permission` /
+  `create_user_automatically`, and Employee `status` on an update import), or a
+  file that was read but whose columns cannot be classified. A file that cannot be
+  read or parsed at all (missing, mistyped, header-only, a bad mapping key) gets
+  the import's own fixable error instead. Its card samples rows and cannot show
+  every record: Data Import in Desk. An ordinary Customer / Supplier / Employee
+  import parks its card as before.
+- A refusal written for the model ("Do not retry it with another tool; tell the
+  user ...") also carries `error.person_message`, which the chat's failed tool
+  row, the action error banner, the Approval Board and the phone show instead
+  (`personError` in `frontend/src/lib/actionSummary.js`).
 - **`run_method`** stays open (R2-13): a card in ordinary chat, none in the
   uncarded modes, no method allow- or deny-list beyond run_method's own (Jarvis's
   gate / turn / decision endpoints). What it SAVES is judged by the ORM guard below:

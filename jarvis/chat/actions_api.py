@@ -465,6 +465,9 @@ def _park_sensitive(
 				"A confirmation for an earlier change is already waiting in this chat. "
 				"Confirm or discard it first."
 			)
+		elif err.get("person_message"):
+			# A sensitive card that cannot be shown in full (api._refuse_unshowable_card).
+			err["message"] = err.pop("person_message")
 		return res
 	return {
 		"ok": True,

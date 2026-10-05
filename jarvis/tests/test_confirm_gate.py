@@ -591,8 +591,8 @@ class TestGatedToolRefusesModelPreview(FrappeTestCase):
 
 
 class TestRunMethodParkDoesNotSandboxExecute(FrappeTestCase):
-	"""Fix 2: run_method is _PREVIEWABLE, but parking one must NOT sandbox-
-	execute the target method to build its preview - the sandbox only rolls
+	"""Fix 2: parking a run_method must NOT sandbox-execute the target method
+	to build its preview (it is not _PREVIEWABLE) - the sandbox only rolls
 	back DB writes, so a method's inline non-DB side effects (HTTP/email) would
 	fire unconfirmed and its result would leak to the model. run_method parks
 	with a described-intent preview (never executed at park time); the real
