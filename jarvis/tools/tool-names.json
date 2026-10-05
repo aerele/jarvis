@@ -18,7 +18,11 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
+<<<<<<< HEAD
   "digest": "sha256:1ef5a48cf76de064ec7da985a05aa3b380898f88a39bd508cf7f6ec19033328d",
+=======
+  "digest": "sha256:6746279e69a495bd087e00a24f5d4829c2c9695e01b64f3f73cb6af92cd81324",
+>>>>>>> d9d85ff (feat(agents): bank reconciliation evidence tool, defaults endpoint and 0.3.0 listing)
   "tools": [
     "add_comment",
     "add_tag",
@@ -42,6 +46,7 @@
     "finish_app_learning_run",
     "follow_document",
     "get_balance_on",
+    "get_bank_recon_inputs",
     "get_creation_context",
     "get_customer_outstanding",
     "get_doc",
