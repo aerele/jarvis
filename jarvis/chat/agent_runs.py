@@ -655,11 +655,10 @@ def _scoped_visibility(run_doc, inst) -> bool:
 	whose profile computation failed)."""
 	import json as _json
 
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.jarvis.doctype.jarvis_agent_installation.jarvis_agent_installation import (
 		_GL_SCOPED_DIMENSIONS,
 	)
-
-	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 
 	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
