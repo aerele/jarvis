@@ -365,8 +365,15 @@ USER_ITEM_READER = "jpl-perm-item-reader@example.com"
 # Sales User grants role-level Customer + Company read, but this user is
 # additionally scoped by a Company User Permission to PERM_COMPANY_A only -
 # exactly the "restricted via a Company User Permission" case the audit
-# findings call out.
+# findings call out. Accounts User adds the ledger read the balance tools
+# require, so these cases exercise the company scope, not the ledger gate.
 USER_COMPANY_SCOPED = "jpl-perm-company-scoped@example.com"
+# Plain Sales User: reads Customers and Accounts but no ledger, the persona
+# the balance tools' ledger gate exists for.
+USER_SALES_ONLY = "jpl-perm-sales-only@example.com"
+# Plain Purchase User: no GL Entry read, but ERPNext lets it run Accounts
+# Payable, so it may see a Supplier balance and nothing else.
+USER_PURCHASE_ONLY = "jpl-perm-purchase-only@example.com"
 # ERPNext's stock "Auditor" role (GL Entry read, Company "select" only -
 # not "read") combined with "Sales Manager" (Customer read, no Company
 # permission of any kind) for party read - together, real stock roles
@@ -538,7 +545,9 @@ class CrossCompanyPermTestCase(FrappeTestCase):
 		_ensure_role(ROLE_NO_GRANTS)
 		_ensure_user(USER_NO_GRANTS, roles=(ROLE_NO_GRANTS,))
 		_ensure_user(USER_ITEM_READER, roles=("Stock User",))
-		_ensure_user(USER_COMPANY_SCOPED, roles=("Sales User",))
+		_ensure_user(USER_COMPANY_SCOPED, roles=("Sales User", "Accounts User"))
+		_ensure_user(USER_SALES_ONLY, roles=("Sales User",))
+		_ensure_user(USER_PURCHASE_ONLY, roles=("Purchase User",))
 		_ensure_user(USER_AUDITOR_LIKE, roles=("Auditor", "Sales Manager"))
 		frappe.db.commit()
 		# Company/Item/Customer/User Permission are NOT committed - unlike
@@ -715,6 +724,55 @@ class TestGetBalanceOnCompanyPermission(CrossCompanyPermTestCase):
 		):
 			out = get_balance_on(party_type="Customer", party=self.customer)
 		self.assertEqual(out["balance"], 750.0)
+
+
+class TestBalanceToolsNeedLedgerRead(CrossCompanyPermTestCase):
+	"""A balance is a ledger sum: Customer or Account read is not enough.
+	A Sales User reads both, but has no GL Entry read and can't run
+	Accounts Receivable, so every balance mode must refuse it, without
+	reaching the ERPNext helper."""
+
+	def test_preconditions_sales_user_reads_customer_and_account(self):
+		# Without these the refusals below would pass for the wrong reason.
+		self.assertTrue(frappe.has_permission("Customer", "read", doc=self.customer, user=USER_SALES_ONLY))
+		self.assertTrue(frappe.has_permission("Account", "read", user=USER_SALES_ONLY))
+		self.assertFalse(frappe.has_permission("GL Entry", "read", user=USER_SALES_ONLY))
+
+	def test_customer_outstanding_refused(self):
+		with (
+			_as(USER_SALES_ONLY),
+			patch("erpnext.selling.doctype.customer.customer.get_customer_outstanding") as helper,
+			self.assertRaises(PermissionDeniedError),
+		):
+			get_customer_outstanding(self.customer, PERM_COMPANY_A)
+		helper.assert_not_called()
+
+	def test_party_balance_refused(self):
+		with (
+			_as(USER_SALES_ONLY),
+			patch("erpnext.accounts.utils.get_balance_on") as helper,
+			self.assertRaises(PermissionDeniedError),
+		):
+			get_balance_on(party_type="Customer", party=self.customer, company=PERM_COMPANY_A)
+		helper.assert_not_called()
+
+	def test_account_balance_refused(self):
+		with (
+			_as(USER_SALES_ONLY),
+			_all_exist(),
+			patch("erpnext.accounts.utils.get_balance_on") as helper,
+			self.assertRaises(PermissionDeniedError),
+		):
+			get_balance_on(account="_T-Acct")
+		helper.assert_not_called()
+
+	def test_payable_report_allows_supplier_balance_only(self):
+		from jarvis.tools._ledger_access import can_read_ledger
+
+		with _as(USER_PURCHASE_ONLY):
+			self.assertTrue(can_read_ledger("Supplier"))
+			self.assertFalse(can_read_ledger("Customer"))
+			self.assertFalse(can_read_ledger(None))
 
 
 class TestAuditorLikeCompanyScope(CrossCompanyPermTestCase):
