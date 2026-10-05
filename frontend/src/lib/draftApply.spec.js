@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	blankComputedColumns,
 	checkToYesNo,
 	coerceOut,
 	coerceRow,
+	draftValues,
 	isFieldMissing,
 	isFieldWritable,
 	isRowKeyColumn,
 	overlaySavedRows,
 	readonlyDisplay,
 	removedSavedRows,
+	rowKeyColumn,
 	tableChanged,
 	tableRowsPayload,
 	toPanelRow,
@@ -275,5 +278,119 @@ describe("removedSavedRows", () => {
 
 	it("system keys are not grid columns either", () => {
 		expect(["idx", "parent", "creation", "doctype"].some(isRowKeyColumn)).toBe(false);
+	});
+});
+
+describe("rowKeyColumn (#655)", () => {
+	const extra = [
+		{
+			fieldname: "conversion_factor",
+			label: "UOM Conversion Factor",
+			fieldtype: "Float",
+			options: "",
+			reqd: 0,
+			read_only: 0,
+		},
+		{
+			fieldname: "uom",
+			label: "UOM",
+			fieldtype: "Link",
+			options: "UOM",
+			reqd: 1,
+			read_only: 0,
+		},
+	];
+	it("a proposed key the grid does not list keeps its real type and label", () => {
+		const c = rowKeyColumn("conversion_factor", extra);
+		expect([c.label, c.fieldtype]).toEqual(["UOM Conversion Factor", "Float"]);
+		expect(c).not.toBe(extra[0]); // a copy: the cached meta is never mutated
+	});
+	it("so a numeric cell is sent as a number", () => {
+		const table = { columns: [rowKeyColumn("conversion_factor", extra)] };
+		expect(coerceRow(table, { conversion_factor: "1" }, "create")).toEqual({
+			conversion_factor: 1,
+		});
+	});
+	it("an unknown key is still a text column", () => {
+		expect(rowKeyColumn("custom_note", extra)).toEqual({
+			fieldname: "custom_note",
+			label: "custom_note",
+			fieldtype: "Data",
+			options: "",
+			reqd: 0,
+			read_only: 0,
+		});
+		expect(rowKeyColumn("x", undefined).fieldtype).toBe("Data");
+	});
+});
+
+describe("draftValues", () => {
+	const field = (fieldname, value, extra = {}) => ({
+		fieldname,
+		value,
+		control: "data",
+		...extra,
+	});
+	const items = {
+		fieldname: "items",
+		columns: [
+			{ fieldname: "item_code", fieldtype: "Link" },
+			{ fieldname: "qty", fieldtype: "Float" },
+		],
+		rows: [
+			{ item_code: "A", qty: "2" },
+			{ item_code: "", qty: "" },
+		],
+		origJson: "null",
+	};
+	it("create: non-blank writable fields and filled rows, coerced", () => {
+		const model = {
+			verb: "create",
+			fields: [
+				field("customer", "C"),
+				field("po_no", " "),
+				field("total_qty", "9", { control: "number", read_only: 1 }),
+			],
+			tables: [items],
+		};
+		expect(draftValues(model)).toEqual({ customer: "C", items: [{ item_code: "A", qty: 2 }] });
+	});
+	it("update: only changed fields; an unchanged table is not resent", () => {
+		const model = {
+			verb: "update",
+			fields: [field("customer", "C", { orig: "C" }), field("po_no", "P2", { orig: "P1" })],
+			tables: [
+				{
+					...items,
+					rows: [{ __name: "r1", item_code: "A", qty: "2" }],
+					origJson: JSON.stringify([{ name: "r1", item_code: "A", qty: 2 }]),
+				},
+			],
+		};
+		expect(draftValues(model)).toEqual({ po_no: "P2" });
+	});
+});
+
+describe("blankComputedColumns (#647)", () => {
+	it("asks only for read-only columns that are blank somewhere", () => {
+		const model = {
+			tables: [
+				{
+					fieldname: "items",
+					columns: [
+						{ fieldname: "qty", read_only: 0 },
+						{ fieldname: "amount", read_only: 1 },
+						{ fieldname: "item_name", read_only: 1 },
+					],
+					rows: [{ qty: "", amount: "", item_name: "X" }],
+				},
+				{
+					fieldname: "taxes",
+					columns: [{ fieldname: "total", read_only: 1 }],
+					rows: [{ total: "5" }],
+				},
+			],
+		};
+		expect(blankComputedColumns(model)).toEqual({ items: ["amount"] });
 	});
 });
