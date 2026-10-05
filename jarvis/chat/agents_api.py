@@ -496,6 +496,8 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS, backend
+
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
 	except frappe.DoesNotExistError:
@@ -546,7 +548,7 @@ def get_agent(agent_slug: str) -> dict:
 		"category": listing.category,
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
-		or listing.agent_slug in ("ap-3way-match-operator", "ar-collections-operator"),
+		or listing.agent_slug in REVIEW_OPERATORS,
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -611,9 +613,7 @@ def get_agent(agent_slug: str) -> dict:
 		i["schedule_time"] = str(i.schedule_time) if i.schedule_time else None
 		i["next_run_at"] = str(i.next_run_at) if i.next_run_at else None
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
-		if listing.agent_slug in ("ap-3way-match-operator", "ar-collections-operator"):
-			from jarvis.chat.operator_review import backend
-
+		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
 		out["installation"] = i
 
@@ -1332,6 +1332,8 @@ def set_schedule(
 	anchors - optional, and only meaningful for their own frequency; the doctype's
 	own ``validate()`` re-checks both ranges (a Desk edit or data import bypasses
 	this endpoint entirely, so the range check cannot live here alone)."""
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
@@ -1339,7 +1341,7 @@ def set_schedule(
 	if int(schedule_enabled or 0):
 		from jarvis.chat.agent_installability import assert_installable
 
-		if doc.agent in ("ap-3way-match-operator", "ar-collections-operator"):
+		if doc.agent in REVIEW_OPERATORS:
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
 	if schedule_enabled is not None:
@@ -1711,12 +1713,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(doc.agent)
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe") and doc.agent not in (
-		"ap-3way-match-operator",
-		"ar-collections-operator",
-	):
+	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)

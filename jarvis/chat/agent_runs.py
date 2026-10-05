@@ -609,7 +609,9 @@ def _watermark_drift(run_doc, scope: dict) -> bool:
 	compare to the watermark stamped at launch. True when the GL changed mid-scan
 	(a backdated JV between two chunk fetches) so the run must NOT read as
 	``completed``. No stamped watermark / no scope -> no drift signal (False)."""
-	if run_doc.get("agent") in ("ap-3way-match-operator", "ar-collections-operator"):
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
+	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
 	stamped_count = run_doc.get("wm_row_count")
 	company = (scope or {}).get("company")
@@ -657,7 +659,9 @@ def _scoped_visibility(run_doc, inst) -> bool:
 		_GL_SCOPED_DIMENSIONS,
 	)
 
-	if run_doc.get("agent") in ("ap-3way-match-operator", "ar-collections-operator"):
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
+	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
 	profile = run_doc.get("permission_profile")
 	if profile:
@@ -684,7 +688,9 @@ def _rowcount_shortfall(run_doc, rows_consumed) -> bool:
 	differ), so a non-zero count is deliberately not asserted equal — that would be a
 	false-positive machine. ``rows_consumed=None`` (a delegate/evaluator that does not
 	yet report it) means "cannot reconcile", never a false shortfall."""
-	if run_doc.get("agent") in ("ap-3way-match-operator", "ar-collections-operator"):
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
+	if run_doc.get("agent") in REVIEW_OPERATORS:
 		return False
 	stamped = run_doc.get("wm_row_count")
 	if stamped is None:
@@ -878,6 +884,8 @@ def record_delegate_run(
 	# regression. Only findings whose token was FULLY EVALUATED this run AND that
 	# belong to THIS run's company scope are eligible; empty-company legacy rows are
 	# exempt.
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
 	evaluated_tokens, coverage_notes = _coverage_summary(coverage)
 
 	# PP-2 (false-clean gate): the required-check set is the agent's DECLARED
@@ -897,7 +905,7 @@ def record_delegate_run(
 		and not scoped
 		and not row_shortfall
 		and evaluated_tokens
-		and agent not in ("ap-3way-match-operator", "ar-collections-operator")
+		and agent not in REVIEW_OPERATORS
 	):
 		candidates = frappe.get_all(
 			FINDING,
