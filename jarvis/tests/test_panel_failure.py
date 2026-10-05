@@ -446,10 +446,13 @@ class TestRealInsufficientStockOnThePanel(FrappeTestCase):
 		from jarvis.tests import _erpnext_masters as masters
 
 		frappe.set_user("Administrator")
+		TestPanelOnErpnext.guard_masters(cls)
 		masters.clear_cache_after_rollback(cls)
 		cls.company = masters.ensure_ledger_company()
 		masters.ensure_item("_J2A Stock Item", is_stock_item=1, valuation_rate=10)
 		masters.ensure_stock_entry_type("Material Issue")
+		# Its own fiscal year: never one another class left behind (a fresh CI site has none).
+		masters.ensure_fiscal_years(frappe.utils.today())
 		cls.warehouse = frappe.db.get_value("Warehouse", {"company": cls.company, "warehouse_name": "Stores"})
 		allow = frappe.db.get_single_value("Stock Settings", "allow_negative_stock")
 		frappe.db.set_single_value("Stock Settings", "allow_negative_stock", 0)
@@ -724,6 +727,12 @@ class TestNestedCommitWatch(FrappeTestCase):
 		again.disarm()
 
 
+def masters_company() -> str:
+	from jarvis.tests import _erpnext_masters as masters
+
+	return masters.COMPANY
+
+
 class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 	"""Real ERPNext drafts on the panel (its own company, customer and items; nothing
 	commits: the full rollback is held to savepoints and the continuation recorded)."""
@@ -738,6 +747,7 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 		from jarvis.tests import _erpnext_masters as masters
 
 		frappe.set_user("Administrator")
+		TestPanelOnErpnext.guard_masters(cls)
 		masters.clear_cache_after_rollback(cls)
 		cls.company = masters.ensure_ledger_company()
 		cls.item = masters.ensure_item("_J2A Service Item", is_stock_item=0, valuation_rate=10)
@@ -745,6 +755,22 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 		cls.customer = masters.ensure_customer("_J2B Panel Customer")
 		cls.price_list = masters.ensure_selling_price_list()
 		cls.today, cls.later = today(), add_days(today(), 5)
+
+	@staticmethod
+	def guard_masters(test_class) -> None:
+		"""Fail the class when its company outlives the class rollback (a later suite
+		would read it as the site's first company). A site that already had it (a dev
+		bench) is not checked. Registered before the masters are made, so it runs after
+		the rollback (class cleanups run last-in first-out)."""
+		if frappe.db.exists("Company", masters_company()):
+			return
+
+		def _check():
+			frappe.db.rollback()
+			if frappe.db.exists("Company", masters_company()):
+				raise AssertionError(f"{masters_company()} was committed past the class rollback")
+
+		test_class.addClassCleanup(_check)
 
 	def apply(self, doctype: str, values: dict) -> tuple[dict, list]:
 		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "j2b erpnext"}).insert()
@@ -771,6 +797,27 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 			)
 		return r, [c.kwargs.get("outcome") for c in cont.call_args_list]
 
+	@staticmethod
+	def user_without_commit(email: str) -> str:
+		"""A Jarvis User, inserted in the class's own transaction. Never through
+		``ensure_user``: its commit would also commit this class's company and masters,
+		which later tests (test_report_scope) then read as the site's first company."""
+		from jarvis.permissions import ensure_jarvis_user_role
+
+		ensure_jarvis_user_role()
+		if not frappe.db.exists("User", email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": email,
+					"first_name": email.split("@")[0],
+					"send_welcome_email": 0,
+					"user_type": "System User",
+					"roles": [{"role": "Jarvis User"}],
+				}
+			).insert(ignore_permissions=True)
+		return email
+
 	def bad_customer_order(self) -> dict:
 		return {
 			"company": self.company,
@@ -795,9 +842,8 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 		# Order is told so, the panel closes, and whether the customer exists stays
 		# hidden (no field marks, no link lookup).
 		from jarvis.chat import panel_fields
-		from jarvis.tests._pending_action_helpers import ensure_user
 
-		user = ensure_user("j2b-noperm@example.com")
+		user = self.user_without_commit("j2b-noperm@example.com")
 		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "j2b perm"})
 		with as_user(user):
 			conv.insert(ignore_permissions=True)
