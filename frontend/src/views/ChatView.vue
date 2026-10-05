@@ -3827,6 +3827,9 @@
 						</button>
 					</div>
 					<div class="jv-draft-body">
+						<p v-if="draftLinkError" class="jv-draft-toast" role="alert">
+							{{ draftLinkError }}
+						</p>
 						<div v-if="draftPanel.updatedToast" class="jv-draft-toast">
 							Draft updated from chat
 						</div>
@@ -4354,6 +4357,7 @@ import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTool
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
+import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
 	checkToYesNo,
 	coerceOut,
@@ -7107,6 +7111,17 @@ let draftLinkGeneration = 0;
 onBeforeUnmount(() => {
 	draftLinkGeneration++;
 });
+const draftLinkError = ref("");
+// Company / row dependency changes invalidate suggestions even if a request is
+// still pending or its field remains focused. Existing field values stay intact.
+watch(
+	() => draftLinkContext(draftPanel.value, draftLink.value.key),
+	(context) => {
+		if (draftLink.value.filterContext && context !== draftLink.value.filterContext)
+			draftLink.value = { ...draftLink.value, open: false, items: [] };
+	},
+	{ flush: "sync" }
+);
 const _formMetaCache = {};
 
 async function _formMeta(doctype) {
@@ -7265,6 +7280,7 @@ async function buildDraftModel(a) {
 		// bench then dispatches a follow-up agent turn after Apply so the agent
 		// stages the next step without the user typing "continue".
 		cont: a.continue ? 1 : 0,
+		linkContext: { ...base.values, ...proposed },
 		fields,
 		tables,
 		tableMeta: meta.tables || {},
@@ -7303,6 +7319,7 @@ function removeDraftRow(ti, ri) {
 }
 function closeDraftPanel() {
 	draftLinkGeneration++;
+	draftLinkError.value = "";
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
 }
@@ -7312,10 +7329,27 @@ async function onDraftLink(key, target, doctype, ev) {
 	const generation = ++draftLinkGeneration;
 	const anchor = ev && ev.target;
 	draftLink.value = { key, items: [], open: true, anchor };
+	const search = draftLink.value;
+	draftLinkError.value = "";
 	if (!doctype) return;
 	try {
-		const r = await api.searchLink(doctype, target());
-		if (generation !== draftLinkGeneration || draftLink.value.key !== key) return;
+		const args = draftLinkSearch(draftPanel.value, key);
+		const filterContext = JSON.stringify(args);
+		draftLink.value.filterContext = filterContext;
+		const r = await api.searchLink(
+			doctype,
+			target(),
+			8,
+			args.referenceDoctype,
+			args.linkFieldname,
+			args.filters
+		);
+		if (
+			generation !== draftLinkGeneration ||
+			draftLink.value !== search ||
+			draftLinkContext(draftPanel.value, key) !== filterContext
+		)
+			return;
 		draftLink.value = {
 			key,
 			items: (r || [])
@@ -7323,13 +7357,26 @@ async function onDraftLink(key, target, doctype, ev) {
 				.slice(0, 8),
 			open: true,
 			anchor,
+			filterContext,
 		};
 	} catch (e) {
-		/* menu stays empty */
+		if (generation === draftLinkGeneration && draftLink.value === search) {
+			draftLink.value = { ...draftLink.value, open: false, items: [] };
+			draftLinkError.value =
+				e instanceof DraftLinkFilterError
+					? e.message
+					: "Could not load this field's choices. Try again or open the document in ERPNext.";
+		}
 	}
 }
 function pickDraftLink(setter, item) {
 	draftLinkGeneration++;
+	if (
+		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
+	) {
+		draftLink.value = { ...draftLink.value, open: false, items: [] };
+		return;
+	}
 	setter(item.value);
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
 }

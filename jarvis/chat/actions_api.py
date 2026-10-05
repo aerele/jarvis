@@ -19,6 +19,7 @@ from frappe.utils import cint
 from jarvis import audit
 from jarvis._session import impersonate
 from jarvis.chat.api import _NON_EDIT_FIELDTYPES, _next_seq, enqueue_continuation
+from jarvis.chat.link_filters import draft_link_query_filters
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
 
@@ -31,7 +32,7 @@ _TRIGGER_DOCTYPE = "Jarvis Trigger"
 _SKIP_CHILD_FIELDTYPES = _NON_EDIT_FIELDTYPES | {"Table", "Table MultiSelect"}
 
 
-def _field_dict(df) -> dict:
+def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict:
 	return {
 		"fieldname": df.fieldname,
 		"label": df.label or df.fieldname,
@@ -39,17 +40,19 @@ def _field_dict(df) -> dict:
 		"options": df.options or "",
 		"reqd": int(df.reqd or 0),
 		"read_only": int(df.read_only or 0),
+		"link_filters": df.get("link_filters") or "",
+		"link_query_filters": draft_link_query_filters(doctype or df.parent, df, parent_doctype, parentfield),
 	}
 
 
-def _child_columns(child_doctype: str) -> list[dict]:
+def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
 	child marks none."""
 	meta = frappe.get_meta(child_doctype)
 	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
 	listed = [df for df in editable if df.in_list_view]
-	return [_field_dict(df) for df in (listed or editable[:4])]
+	return [_field_dict(df, child_doctype, parent_doctype, parentfield) for df in (listed or editable[:4])]
 
 
 @frappe.whitelist()
@@ -69,16 +72,16 @@ def get_doctype_form_meta(doctype: str) -> dict:
 		if not df.fieldname:
 			continue
 		if df.fieldtype == "Table" and df.options:
-			fields.append(_field_dict(df))
+			fields.append(_field_dict(df, doctype))
 			tables[df.fieldname] = {
 				"child_doctype": df.options,
 				"label": df.label or df.fieldname,
-				"columns": _child_columns(df.options),
+				"columns": _child_columns(df.options, doctype, df.fieldname),
 			}
 			continue
 		if df.fieldtype in _NON_EDIT_FIELDTYPES:
 			continue
-		fields.append(_field_dict(df))
+		fields.append(_field_dict(df, doctype))
 	return {
 		"ok": True,
 		"doctype": doctype,
