@@ -1126,10 +1126,36 @@ describe("AR configuration readiness", () => {
 		});
 		const wrapper = await mountDetail(fixture);
 		expect(wrapper.find('[data-label="Run Now"]').attributes("disabled")).toBeDefined();
-		expect(wrapper.text()).toContain("Complete and save the required AR settings");
+		expect(wrapper.text()).toContain("Complete and save the required review settings");
 		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
 		expect(wrapper.text()).toContain("Manual review only");
 		expect(wrapper.text()).not.toContain("Run automatically");
+	});
+});
+
+describe("bank reconciliation on-demand review", () => {
+	function bankAgent(issues = {}) {
+		return baseAgent({
+			agent_slug: "bank-recon-operator",
+			nature: "Operator",
+			supports_manual_run: true,
+			installation: installedInstallation({ configuration_issues: issues }),
+		});
+	}
+	const runButton = (wrapper) => wrapper.find('[data-label="Run Now"]');
+
+	it("enables Run when configuration is complete", async () => {
+		const wrapper = await mountDetail(bankAgent({}));
+		expect(wrapper.text()).toContain("proposes bank matches; never reconciles");
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("blocks Run with the review-settings hint while issues exist", async () => {
+		const wrapper = await mountDetail(bankAgent({ bank_account: "Select a bank account." }));
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain(
+			"Complete and save the required review settings in Configure before running."
+		);
 	});
 });
 
@@ -1153,7 +1179,7 @@ describe("AP configuration readiness", () => {
 		};
 		const wrapper = await mountDetail(apAgent(issues));
 		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
-		expect(wrapper.text()).toContain("Complete and save the required AP settings");
+		expect(wrapper.text()).toContain("Complete and save the required review settings");
 		await runButton(wrapper).trigger("click");
 		expect(api.runAgentNow).not.toHaveBeenCalled();
 		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
@@ -1217,7 +1243,7 @@ describe("operator-withdrawn (install_disabled) detail", () => {
 				baseAgent({
 					nature: "Operator",
 					supports_manual_run: supported,
-					installation: installedInstallation({ enabled: 1 }),
+					installation: installedInstallation({ enabled: 1, configuration_issues: {} }),
 				})
 			);
 			const button = wrapper

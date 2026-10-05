@@ -45,6 +45,22 @@ export const CONFIG_FIELD_SET = [
 		help: "Suggested: 3 calendar days (0–30). Hold recent allocations for reconciliation, not business-day or statutory grace-period calculation.",
 	},
 	{
+		key: "bank_account",
+		path: "bank_account",
+		label: "Bank account",
+		type: "link",
+		linkDoctype: "Bank Account",
+		help: "A company bank account of the selected company. Each run reviews one account.",
+	},
+	{
+		key: "voucher_lookback_days",
+		path: "voucher_lookback_days",
+		label: "Voucher lookback",
+		type: "number",
+		suffix: "calendar days",
+		help: "Suggested: 30 (0–90). Booked vouchers this many days before the statement window are read, so cheques that clear late can be matched.",
+	},
+	{
 		key: "report_date",
 		path: "report_date",
 		label: "Evidence cutoff",
