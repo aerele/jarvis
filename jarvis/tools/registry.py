@@ -22,6 +22,7 @@ from collections.abc import Callable
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, ToolNotFoundError
+from jarvis.tools._write_risk import guard_scope
 
 _TOOL_NAMES: tuple[str, ...] = (
 	"get_schema",
@@ -101,6 +102,8 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_exchange_rate",
 	"get_fiscal_year",
 	"get_engagement_config",
+	"get_purchase_match_inputs",
+	"get_receivables_review_inputs",
 	"get_itemised_tax_breakup",
 	# Tier 2b HRMS + Frappe computed reads: leave/shift/holiday lookups
 	# the LLM gets wrong because they need policy-aware math, plus
@@ -249,9 +252,12 @@ def dispatch(tool_name: str, args: dict):
 	except TypeError as e:
 		raise InvalidArgumentError(str(e))
 	# The ONLY dispatch site (normal, confirmed and preview), so the depth covers
-	# every tool body; gate/chat endpoints refuse while it is > 0.
+	# every tool body; gate/chat endpoints refuse while it is > 0. The write-risk
+	# guard scope rides the same site (joining a confirm path's scope when one is
+	# open), so every tool body runs with the ORM guard on.
 	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
 	try:
-		return fn(**args)
+		with guard_scope():
+			return fn(**args)
 	finally:
 		frappe.local.jarvis_dispatch_depth -= 1

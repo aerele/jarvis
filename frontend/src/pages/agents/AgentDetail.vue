@@ -190,6 +190,18 @@
 				<div v-else-if="shadowScribeBlocked" class="mt-3 text-sm text-ink-gray-5">
 					Still in shadow preview - promote it to live under Configure first
 				</div>
+				<div
+					v-if="installation && apConfigurationBlocked"
+					class="mt-3 flex items-center gap-3 text-sm text-ink-gray-6"
+					role="status"
+				>
+					<span>{{ apConfigurationHint }}</span>
+					<Button
+						v-if="tab !== 'configure'"
+						label="Complete configuration"
+						@click="setTab('configure')"
+					/>
+				</div>
 				<!-- Operator withdrew this agent: a visible hint (not only badge/tooltip) that Run
 				     Now is off, it resumes if made available, and it can still be uninstalled. -->
 				<div
@@ -276,6 +288,10 @@
 									? "read-only"
 									: agent.nature === "Scribe"
 									? "writes wiki pages"
+									: agent.agent_slug === "ar-collections-operator"
+									? "reviews receivables; drafts only, never sends"
+									: agent.supports_manual_run
+									? "reviews existing drafts; never posts"
 									: "writes drafts"
 							}}
 						</div>
@@ -405,7 +421,9 @@
 								class="mt-2"
 								:config="parsedConfig"
 								:config-keys="configKeys"
+								:validation-errors="configurationIssues"
 								:saving="savingConfig"
+								@dirty="configurationDirty = $event"
 								@save="saveConfig"
 							/>
 						</section>
@@ -418,7 +436,11 @@
 							     space-y-5 (not -4) to match ConfigForm's own
 							     field-to-field rhythm - one consistent gap across
 							     both columns, not two different densities. -->
-							<div class="mt-2 space-y-5">
+							<p v-if="isOperatorReview" class="mt-2 text-sm text-ink-gray-6">
+								Manual review only. Confirm the date cutoff and policy before each
+								run.
+							</p>
+							<div v-else class="mt-2 space-y-5">
 								<Switch
 									label="Run automatically"
 									:modelValue="sched.enabled"
@@ -1077,6 +1099,28 @@ async function doInstall(pick) {
 }
 
 const running = ref(false);
+const configurationDirty = ref(false);
+const isOperatorReview = computed(() =>
+	["ap-3way-match-operator", "ar-collections-operator"].includes(agent.value?.agent_slug)
+);
+const configurationIssues = computed(
+	() => (isOperatorReview.value && installation.value?.configuration_issues) || {}
+);
+const apConfigurationBlocked = computed(
+	() =>
+		isOperatorReview.value &&
+		(configurationDirty.value ||
+			savingConfig.value ||
+			!installation.value?.configuration_issues ||
+			Object.keys(configurationIssues.value).length > 0)
+);
+const apConfigurationHint = computed(() =>
+	configurationDirty.value
+		? "Save your configuration changes before running."
+		: `Complete and save the required ${
+				agent.value?.agent_slug === "ar-collections-operator" ? "AR" : "AP"
+		  } settings in Configure before running.`
+);
 // On-demand run is offered for read-only auditors AND scribes (mirrors the
 // backend run_agent_now gate: nature in Auditor/Scribe); operators draft through
 // the Approval Board and never run on demand.
@@ -1099,9 +1143,12 @@ const runDisabled = computed(
 		!installation.value ||
 		!installation.value.enabled ||
 		(agent.value && agent.value.install_disabled) ||
-		(agent.value && !["Auditor", "Scribe"].includes(agent.value.nature)) ||
+		(agent.value &&
+			!agent.value.supports_manual_run &&
+			!["Auditor", "Scribe"].includes(agent.value.nature)) ||
 		!(agent.value && agent.value.allowed) ||
-		shadowScribeBlocked.value
+		shadowScribeBlocked.value ||
+		apConfigurationBlocked.value
 );
 const runTooltip = computed(() => {
 	if (!agent.value || !installation.value) return "";
@@ -1111,10 +1158,11 @@ const runTooltip = computed(() => {
 	if (agent.value.install_disabled)
 		return "The operator has made this agent unavailable — it can't run until it's available again";
 	const nature = agent.value.nature;
-	if (nature !== "Auditor" && nature !== "Scribe")
+	if (nature !== "Auditor" && nature !== "Scribe" && !agent.value.supports_manual_run)
 		return "Operators draft through the Approval Board - no on-demand runs";
 	if (!installation.value.enabled) return "Enable the agent first";
 	if (!agent.value.allowed) return "You do not have access to this agent";
+	if (apConfigurationBlocked.value) return apConfigurationHint.value;
 	// The shadow vocabulary is reviewer language (jarvis#1062): a plain user has
 	// no promote control and no say in the sign-off, so telling them to go and
 	// promote it names an action they cannot take.
@@ -1122,7 +1170,13 @@ const runTooltip = computed(() => {
 		return canReview.value
 			? "Still in shadow preview - promote it to live under Configure first"
 			: "Not yet enabled for live runs - ask your administrator";
-	return nature === "Scribe" ? "Run this agent now" : "Run this audit now";
+	return agent.value.agent_slug === "ar-collections-operator"
+		? "Review receivables — unsent drafts only"
+		: nature === "Operator"
+		? "Review existing drafts — no posting or payment"
+		: nature === "Scribe"
+		? "Run this agent now"
+		: "Run this audit now";
 });
 
 // CX5-2: the Custom App Learning agent reads customer SOURCE, so a run must name
@@ -1403,8 +1457,13 @@ async function saveConfig(merged) {
 	savingConfig.value = true;
 	try {
 		await api.setAgentConfig(installation.value.name, merged);
-		toast.success("Configuration saved");
 		await load();
+		configurationDirty.value = false;
+		toast.success(
+			Object.keys(configurationIssues.value).length
+				? "Draft configuration saved — complete the highlighted settings before running."
+				: "Configuration saved"
+		);
 	} catch (e) {
 		toast.error(errHtml(e));
 	} finally {
