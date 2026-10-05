@@ -3,9 +3,10 @@
 A five-minute cron (``jarvis.hooks.scheduler_events``) calls
 :func:`run_due_agent_audits`, which fires every enabled AUDITOR installation
 whose ``next_run_at`` has passed. The sweep was hourly, so an audit set for 10:15
-started at 11:00, the same defect the macro sweep had (admin-v2#675). A slot whose
-launch FAILED is retried about an hour later, not on every sweep (``_retry_later``),
-and one sweep dispatches at most ``SWEEP_MAX_PER_TICK`` installations. Modeled on
+started at 11:00, the same defect the macro sweep had (jarvis#1568, admin-v2#675). A
+slot whose launch FAILED is retried 55 minutes later, not on every sweep
+(``_retry_later``); a retry that fails is retried again the same way, until the slot's
+next natural time. One sweep dispatches at most ``SWEEP_MAX_PER_TICK`` installations. Modeled on
 ``jarvis.chat.macro_scheduler.run_due_macros`` but hardened per the adversarial
 review:
 
@@ -27,8 +28,9 @@ review:
 * **O4 (#672):** the slot is CLAIMED (``next_run_at`` advanced) under a
   per-installation lock BEFORE the enqueue, so a crash anywhere in the launch
   leaves the slot spent rather than due; a launch that provably created nothing
-  schedules ONE retry of the slot about an hour out, records a ``failed`` run and
-  notifies the owner. The missed slot is NOT backfilled (``compute_next_run`` from
+  schedules a retry of the slot 55 minutes out (again after each failed retry,
+  never past the slot's next natural time), records a ``failed`` run and notifies
+  the owner. The missed slot is NOT backfilled (``compute_next_run`` from
   *now* yields a single next future slot).
 * **O7:** identical ``(owner, agent, cadence, time)`` due rows are deduped.
 
@@ -281,8 +283,8 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 	# such delegate and a dispatched run can only fail three hours later as a
 	# mislabelled timeout. ``_launch_audit`` is the authoritative gate, but refuse
 	# HERE too and consume the slot: a throw out of _launch_audit lands in the
-	# generic except below, which does NOT advance, so the cadence would retry
-	# hourly and write an Error Log every time for a state only a human can fix.
+	# generic except below, which does NOT advance, so the slot would be retried
+	# every 55 minutes with an Error Log each time, for a state only a human can fix.
 	if (listing.get("status") or "") != "Published":
 		_record_failed(
 			row,
@@ -368,7 +370,7 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		return
 
 	# Enforced min-model: no eligible model left is a state only a human can fix, so
-	# record why and consume the slot instead of retrying hourly.
+	# record why and consume the slot instead of retrying it.
 	from jarvis.chat import agent_models
 
 	model_gate = agent_models.gate_run(row.agent)
@@ -422,8 +424,9 @@ def _dispatch(
 	a failure of the bookkeeping, not of the audit, and handing the slot back there is
 	exactly how the duplicate was reached. A throw from the dispatch call itself is the
 	other case: ``_launch_audit`` has already stamped its own run ``failed``, nothing is
-	running, and the slot is genuinely unspent, so ONE retry of it is scheduled about an
-	hour out (``_retry_later``). Reading the run rather than the exception is what tells
+	running, and the slot is genuinely unspent, so a retry of it is scheduled 55 minutes
+	out (``_retry_later``), and again after each failed retry until its next natural
+	time. Reading the run rather than the exception is what tells
 	the two apart.
 
 	The fourth case, a dispatch that fails AMBIGUOUSLY (a timeout, a reset mid-flight, or
@@ -1450,8 +1453,8 @@ def _launch_audit(
 		# refusal / connect timeout), a 4xx rejection, or an auth denial. Mark THIS
 		# Run failed (mirror _record_failed's writeback onto the already-created
 		# "running" row so it is never orphaned), then re-raise so the caller's
-		# retry/notify path runs (scheduler: no next_run_at advance -> retry next
-		# hour; run_agent_now: surfaces the error to the UI).
+		# retry/notify path runs (scheduler: the slot is retried 55 minutes later;
+		# run_agent_now: surfaces the error to the UI).
 		#
 		# One confirmed failure has a self-service fix, so translate it rather than
 		# leaving a raw fleet 502: the fleet-agent's "agent_id '<x>' is not an
@@ -1950,14 +1953,19 @@ def purge_kept_budget_rows(owner: str | None = None) -> int:
 	"""Delete the run rows an uninstall kept for the budget once their month is over;
 	returns how many. They count toward nothing from then on and are shown nowhere.
 
-	One bounded statement, oldest rows first, and the same rows match again if it is
+	One bounded batch, oldest rows first, and the same rows match again if it is
 	repeated or cut short. A run of an installed agent always has its installation, so
 	it is never touched, and neither is a row that has not ended. Does not commit.
 
+	Set-based, not ``delete_doc`` per row, so the rows ``delete_doc`` would also remove
+	are removed here for the same names: the Version rows (the doctype tracks changes)
+	and any comment, assignment, share or attachment someone added in Desk. Attachments
+	go through ``delete_doc`` so their files go too; a run has none in practice.
+
 	``owner`` narrows it to one user's rows. The hourly job passes none; the tests do,
 	because they share a site and must not delete rows they did not make."""
-	frappe.db.sql(
-		f"""DELETE FROM `tab{RUN}`
+	names = frappe.db.sql(
+		f"""SELECT name FROM `tab{RUN}`
 		    WHERE IFNULL(installation, '') = '' AND status IN %(statuses)s AND creation < %(since)s
 		      AND (%(owner)s IS NULL OR owner = %(owner)s)
 		    ORDER BY creation LIMIT %(batch)s""",
@@ -1967,9 +1975,28 @@ def purge_kept_budget_rows(owner: str | None = None) -> int:
 			"owner": owner,
 			"batch": _KEPT_ROW_PURGE_BATCH,
 		},
+		pluck=True,
 	)
-	cursor = getattr(frappe.db, "_cursor", None)
-	return int(cursor.rowcount) if cursor else 0
+	if not names:
+		return 0
+	for file in frappe.get_all(
+		"File", filters={"attached_to_doctype": RUN, "attached_to_name": ["in", names]}, pluck="name"
+	):
+		frappe.delete_doc("File", file, ignore_permissions=True, force=True)
+	for doctype, dt_field, name_field in _KEPT_ROW_TRACES:
+		frappe.db.delete(doctype, {dt_field: RUN, name_field: ["in", names]})
+	frappe.db.delete(RUN, {"name": ["in", names]})
+	return len(names)
+
+
+# Rows elsewhere that point at a run by (doctype, name) and that ``delete_doc`` removes
+# with it.
+_KEPT_ROW_TRACES = (
+	("Version", "ref_doctype", "docname"),
+	("Comment", "reference_doctype", "reference_name"),
+	("ToDo", "reference_type", "reference_name"),
+	("DocShare", "share_doctype", "share_name"),
+)
 
 
 def _purge_kept_budget_rows_quietly() -> None:
@@ -2083,14 +2110,38 @@ def _claim_slot(row, now) -> dict | None:
 
 
 def _retry_claimed_slot(row, now, claim: dict) -> bool:
-	"""Schedule one retry of a slot this sweep claimed and whose launch created
+	"""Schedule a retry of a slot this sweep claimed and whose launch created
 	nothing, and put back the ``last_run_at`` the claim stamped: nothing ran. Only ever
 	called with the dispatch lock held and with a launch that left no live run.
 
 	This used to hand the slot straight back (``next_run_at`` restored, still due), so
 	the next sweep retried it. With the sweep every five minutes that is a failed run
-	and an owner notice every five minutes; the retry now waits ``_RETRY_AFTER_S``."""
-	return _retry_later(row, now, expected=claim["claimed"], last_run_at=claim["last_run_at"])
+	and an owner notice every five minutes; the retry now waits ``_RETRY_AFTER_S``.
+
+	When the retry is not written (the owner saved a new schedule during the launch),
+	``last_run_at`` is still put back, by its own compare-and-set on the claim's stamp."""
+	landed = _retry_later(row, now, expected=claim["claimed"], last_run_at=claim["last_run_at"])
+	if not landed:
+		_unstamp_last_run(row, now, claim["last_run_at"])
+	return landed
+
+
+def _unstamp_last_run(row, stamped, previous) -> None:
+	"""Put back the ``last_run_at`` a claim stamped, if the row still holds that stamp.
+	Never raises, like ``_retry_later``."""
+	try:
+		frappe.db.sql(
+			f"""UPDATE `tab{INSTALLATION}` SET last_run_at=%(previous)s
+			    WHERE name=%(name)s AND last_run_at=%(stamped)s""",
+			{"previous": previous, "name": row.name, "stamped": stamped},
+		)
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(
+			title=f"jarvis agent scheduler: could not restore last run: {row.name}",
+			message=frappe.get_traceback(),
+		)
 
 
 _KEEP = object()
@@ -2205,7 +2256,7 @@ def _record_failed(row, reason: str) -> None:
 def _notify_owner(owner: str, row, reason: str | None = None, *, retry_scheduled: bool = True) -> None:
 	"""Best-effort owner notification on enqueue failure OR budget exhaustion (A14),
 	never raises. A budget message says the cap is hit + resets next month (it will
-	NOT simply retry next hour), so the owner is not left waiting on a run that can't
+	NOT simply retry later), so the owner is not left waiting on a run that can't
 	start until the budget rolls over or an admin raises it. ``retry_scheduled`` says
 	whether an enqueue failure's retry was actually written (``_retry_later``), so the
 	notice never promises a retry that is not there."""

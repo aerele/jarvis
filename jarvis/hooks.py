@@ -354,9 +354,11 @@ scheduler_events = {
 			# Every five minutes, NOT hourly, for the same reason as the macro sweep
 			# above: the schedule takes a time to the minute, and an hourly sweep started
 			# a 10:15 audit at 11:00. The faster sweep does not run audits more often:
-			# each slot still runs once. A slot whose launch FAILED is retried only about
-			# hourly (agent_scheduler._retry_later writes the retry time to the row), and
-			# one sweep dispatches at most SWEEP_MAX_PER_TICK installations.
+			# each slot still runs once. A slot whose launch FAILED is retried 55 minutes
+			# later, and again after each failed retry until its next natural time
+			# (agent_scheduler._retry_later writes the retry time to the row). One sweep
+			# dispatches at most SWEEP_MAX_PER_TICK installations and starts none after
+			# SWEEP_TIME_BUDGET_S.
 			# Cheap no-op (one query on a small table) when nothing is due.
 			"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		],

@@ -1,14 +1,14 @@
 """The scheduled-agent sweep runs every five minutes (the agent twin of the macro
-sweep's admin-v2#675 fix).
+sweep's fix, jarvis#1568, admin-v2#675).
 
 An hourly sweep started a 10:15 audit at 11:00. Moving it to five minutes is only safe
 because of what these tests pin down:
 
   * the slot is CLAIMED before the launch, so a later sweep never re-dispatches it;
   * two sweeps that overlap launch the slot once;
-  * a slot whose launch failed is retried about an hour later, once, and not on every
-    five-minute sweep (which would record a failed run and notify the owner twelve
-    times an hour);
+  * a slot whose launch failed is retried 55 minutes later, again after each failed
+    retry until its next natural time, and not on every five-minute sweep (which
+    would record a failed run and notify the owner twelve times an hour);
   * one sweep dispatches a bounded number of installations, oldest slot first.
 
 Run:
@@ -133,7 +133,7 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 		self._sweep()
 		self.assertEqual(len(self._dispatched_for(inst)), 1)
 
-	# --- a failed slot is retried once, about an hour later ------------------- #
+	# --- a failed slot is retried 55 minutes later ---------------------------- #
 
 	def test_a_failed_launch_is_not_retried_by_the_next_sweep(self):
 		inst = self._due_install()
@@ -225,10 +225,38 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 		"""The audit WAS launched; only the bookkeeping after it raised. The slot holds
 		its next natural occurrence and must not be pulled back to an hour from now."""
 		inst = self._due_install()
+		self._schedule_far_from_now(inst)
 		self._sweep(launch=self._launch_then_crash())
 		self.assertEqual(len(self._launched(inst)), 1)
 		nxt = get_datetime(self._next_run_at(inst))
 		self.assertGreater(nxt, add_to_date(now_datetime(), seconds=agent_scheduler._RETRY_AFTER_S + 60))
+
+	def test_the_retry_waits_55_minutes(self):
+		inst = self._due_install()
+		self._schedule_far_from_now(inst)
+		before = now_datetime()
+		self._sweep(dispatch=_unreachable)
+		wait = get_datetime(self._next_run_at(inst)) - before
+		self.assertGreaterEqual(wait.total_seconds(), 55 * 60)
+		self.assertLessEqual(wait.total_seconds(), 55 * 60 + 10)
+
+	def test_a_retry_that_fails_again_is_retried_again(self):
+		"""A failed retry is claimed and fails like any slot, so it gets another retry
+		55 minutes later; the chain ends at the slot's next natural time. The same as
+		the macro sweep, and as the hourly sweep that handed a failed slot straight back."""
+		inst = self._due_install()
+		self._schedule_far_from_now(inst)
+		self._sweep(dispatch=_unreachable)
+		self._the_wait_passes(inst)
+		before = now_datetime()
+
+		self._sweep(dispatch=_unreachable)
+
+		# Each failed launch fails its own run and records why the slot did not run.
+		self.assertEqual(len(self._runs(inst, "failed")), 4)
+		self.assertEqual(len(self._notifications()), 2)
+		self._assert_retry_scheduled(inst, before)
+		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "last_run_at"), "nothing ran")
 
 	def test_a_retry_does_not_overwrite_a_schedule_saved_during_the_launch(self):
 		inst = self._due_install()
@@ -242,6 +270,7 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 		self._sweep(dispatch=_owner_saves_then_refused)
 
 		self.assertEqual(get_datetime(self._next_run_at(inst)), saved)
+		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "last_run_at"), "nothing ran")
 		body = frappe.db.get_value(NOTIFICATION, self._notifications()[0], "email_content") or ""
 		self.assertIn("next scheduled time", body, "the notice promised a retry that was not written")
 
