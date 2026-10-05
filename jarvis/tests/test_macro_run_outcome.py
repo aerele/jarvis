@@ -310,12 +310,12 @@ class TestARunStopsAtAWaitingConfirmation(MacroRunOutcomeBase):
 
 	def test_a_scheduled_run_is_told_how_to_stop_this_happening(self):
 		# A scheduled macro that parks a card stops at it every single run. Only arming
-		# changes that, and arming is an administrator's switch.
+		# changes that, and arming is the owner's switch on the macro's page.
 		run, conv, _ = self._mk_run(steps=2, at_step=1, trigger="scheduled")
 		step_turn, _, _ = self._turn(conv)
 		self._park_card(conv)
 		macros.advance_after_turn(conv, errored=False, run_id=step_turn)
-		self.assertIn("ask an administrator to switch on Skip confirmation", self._run(run).error)
+		self.assertIn("switch on Skip confirmation on the macro's page", self._run(run).error)
 
 	def test_the_cards_summary_is_one_bounded_line(self):
 		# The summary is built from the tool call's own arguments. Unbounded, a long
@@ -505,7 +505,7 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 			row.error,
 			"Step 1 drafted a record that was not created: the macro did not wait, "
 			"and the next step closed the draft. To create it, run that step again in a chat, "
-			"or ask an administrator to switch on Skip confirmation so the macro writes directly.",
+			"or switch on Skip confirmation on the macro's page so the macro writes directly.",
 		)
 
 	def test_a_draft_from_the_last_step_is_still_there_to_apply(self):

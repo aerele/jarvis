@@ -18,7 +18,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, has_jarvis_admin_access
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
@@ -229,8 +229,21 @@ def _batch_child_values(names: list, child_doctype: str, value_field: str) -> di
 	return grouped
 
 
+def _refuse_an_armed_macro_write():
+	"""An armed macro's uncarded write never changes a skill: its steps apply skills,
+	and a run that rewrote one would change what its own later runs follow. The gate
+	parks such a call for a card (``api._writes_a_skill``); this refuses one it could
+	not read (a Server Script, a whitelisted method that saves a skill)."""
+	if frappe.flags.get(ARMED_MACRO_WRITE_FLAG):
+		frappe.throw(
+			_("A macro that runs without asking for confirmation cannot change a skill."),
+			frappe.PermissionError,
+		)
+
+
 class JarvisCustomSkill(Document):
 	def validate(self):
+		_refuse_an_armed_macro_write()
 		self._validate_slug()
 		self._validate_scope()
 		self._guard_new_scope()
@@ -250,6 +263,7 @@ class JarvisCustomSkill(Document):
 		self._sync_slug_reservation()
 
 	def on_trash(self):
+		_refuse_an_armed_macro_write()
 		_clear_personal_clause_cache(self.owner)
 		_clear_pushable_org_rows_memo()
 		self._release_slug_reservation()
