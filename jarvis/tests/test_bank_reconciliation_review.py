@@ -11,6 +11,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import bank_reconciliation_review as review
 from jarvis.chat import operator_review
+from jarvis.tests._erpnext_masters import clear_cache_after_rollback, ensure_customer
 
 
 def config(**over):
@@ -159,18 +160,23 @@ class TestBankReconConfiguration(FrappeTestCase):
 		)
 
 
-E2E_CO = "_Test BRR Company"
+E2E_CO = "_Test BRR Co"
 
 
 def _ensure_masters():
+	# A fresh CI site never ran the setup wizard (see _erpnext_masters): a Standard chart
+	# Company needs Warehouse Type "Transit", and a non-India country avoids HRMS's
+	# regional ALTER TABLE committing past the class rollback.
+	if not frappe.db.exists("Warehouse Type", "Transit"):
+		frappe.get_doc({"doctype": "Warehouse Type", "name": "Transit"}).insert(ignore_permissions=True)
 	if not frappe.db.exists("Company", E2E_CO):
 		frappe.get_doc(
 			{
 				"doctype": "Company",
 				"company_name": E2E_CO,
-				"abbr": "TBRR",
+				"abbr": "TBRC",
 				"default_currency": "INR",
-				"country": "India",
+				"country": "Maldives",
 			}
 		).insert()
 	if not frappe.db.exists("Fiscal Year", "_Test BRR FY 2026-2027"):
@@ -183,7 +189,7 @@ def _ensure_masters():
 				"companies": [{"company": E2E_CO}],
 			}
 		).insert()
-	abbr = "TBRR"
+	abbr = "TBRC"
 	gl = f"_Test BRR Current - {abbr}"
 	if not frappe.db.exists("Account", gl):
 		frappe.get_doc(
@@ -228,10 +234,7 @@ def _ensure_masters():
 			.insert()
 			.name
 		)
-	if not frappe.db.exists("Customer", "_Test BRR Customer"):
-		frappe.get_doc(
-			{"doctype": "Customer", "customer_name": "_Test BRR Customer", "customer_type": "Company"}
-		).insert()
+	ensure_customer("_Test BRR Customer")
 	return gl, other, name
 
 
@@ -248,7 +251,7 @@ def _pe(kind, amount, posting, ref, paid_from, paid_to, party=True):
 			"received_amount": amount,
 			"reference_no": ref,
 			"reference_date": posting,
-			**({"party_type": "Customer", "party": "_Test BRR Customer"} if party else {}),
+			**({"party_type": "Customer", "party": ensure_customer("_Test BRR Customer")} if party else {}),
 		}
 	)
 	doc.setup_party_account_field()
@@ -319,6 +322,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
+		clear_cache_after_rollback(cls)
 		cls.gl, cls.other, cls.bank_account = _ensure_masters()
 		receivable = frappe.db.get_value("Company", E2E_CO, "default_receivable_account")
 		cls.receipt = _pe("Receive", 1000, "2026-09-02", "BRR-REF-1", receivable, cls.gl)
@@ -390,13 +394,13 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "record_coverage_insufficient"))
 
 	def test_disabled_charge_account_is_not_offered(self):
-		name = "_Test BRR Old Charges - TBRR"
+		name = "_Test BRR Old Charges - TBRC"
 		if not frappe.db.exists("Account", name):
 			frappe.get_doc(
 				{
 					"doctype": "Account",
 					"account_name": "_Test BRR Old Charges",
-					"parent_account": "Indirect Expenses - TBRR",
+					"parent_account": "Indirect Expenses - TBRC",
 					"company": E2E_CO,
 					"root_type": "Expense",
 					"is_group": 0,
@@ -406,7 +410,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		snap = self.snapshot()
 		self.assertTrue(snap["complete"], snap.get("detail"))
 		names = {a["name"] for a in snap["datasets"]["accounts"]}
-		self.assertIn("Bank Charges - TBRR", names)
+		self.assertIn("Bank Charges - TBRC", names)
 		self.assertNotIn(name, names)
 
 	def test_hidden_rows_fail_closed(self):
@@ -432,7 +436,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "permission_slice"))
 
 	def test_hidden_charge_account_fails_closed(self):
-		with self.hide_from_list("Account", "Bank Charges - TBRR"):
+		with self.hide_from_list("Account", "Bank Charges - TBRC"):
 			snap = self.snapshot()
 		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "permission_slice"))
 

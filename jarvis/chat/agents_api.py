@@ -496,7 +496,8 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
-	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS, backend
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+	from jarvis.chat.operator_review import backend
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
