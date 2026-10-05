@@ -9,10 +9,10 @@ commit). Execution itself lives in ``jarvis.chat.macros``.
 import re
 
 import frappe
-from frappe import _
+from frappe import _, _lt
 
 from jarvis.chat import list_filters
-from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import FORM_FLAG
+from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import FORM_FLAG, join_words
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_skills as _step_skills
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import step_values as _step_values
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
@@ -451,6 +451,13 @@ def get_macro(name: str) -> dict:
 		# Whether this viewer may switch Skip confirmation on, why not, and what the
 		# form asks before it does: the server's to say (``_arming``).
 		**_arming(doc.owner, held=hold["admin_hold"]),
+		# An armed macro changes on its own page by its owner only: for anyone else the
+		# form keeps its steps, summary, schedule and Stop on error read-only, and says so.
+		"armed_locked_reason": (
+			_("Only the owner can change an armed macro.")
+			if frappe.utils.cint(doc.skip_confirmation) and frappe.session.user != doc.owner
+			else ""
+		),
 		"schedule_blocked_reason": _schedule_block_reason(doc.owner),
 		"last_run": _last_runs([doc.name], doc.owner).get(doc.name),
 		"steps": [
@@ -479,41 +486,40 @@ def get_new_macro_arming() -> dict:
 # ``_BRAKE`` is in exactly one row of its table, and no other tool is: a test fails
 # when a gated tool is added, or moves, and the notice would no longer say what
 # arming lets through (``test_macro_owner_arming``).
+# Changing a skill asks too, whatever tool does it (``api._writes_a_skill``): the asks
+# row says so, under the one tool that only ever writes a skill.
 _ARM_NOTICE_SKIPS = (
-	("create, change and submit records", ("create_doc", "create_docs", "update_doc", "submit_doc")),
+	(_lt("create, change and submit records"), ("create_doc", "create_docs", "update_doc", "submit_doc")),
 	(
-		"add and change comments, tags and attachments",
+		_lt("add and change comments, tags and attachments"),
 		("add_comment", "update_comment", "add_tag", "remove_tag", "attach_to_doc"),
 	),
-	("update wiki pages", ("update_wiki",)),
+	(_lt("update wiki pages"), ("update_wiki",)),
 	(
-		"share and assign documents (and remove shares and assignments)",
+		_lt("share and assign documents (and remove shares and assignments)"),
 		("share_doc", "assign_to", "unshare_doc", "unassign_from"),
 	),
-	("run workflow actions", ("apply_workflow_action",)),
-	("send email", ("send_email",)),
-	("run imports", ("run_import",)),
-	("call server methods", ("run_method",)),
+	(_lt("run workflow actions"), ("apply_workflow_action",)),
+	(_lt("send email"), ("send_email",)),
+	(_lt("run imports"), ("run_import",)),
+	(_lt("call server methods"), ("run_method",)),
 )
 _ARM_NOTICE_ASKS = (
-	("deleting, cancelling and amending records", ("delete_doc", "cancel_doc", "amend_doc")),
-	("creating skills", ("create_custom_skill",)),
-	("calling connectors", ("call_connector",)),
+	(_lt("deleting, cancelling and amending records"), ("delete_doc", "cancel_doc", "amend_doc")),
+	(_lt("creating or changing skills"), ("create_custom_skill",)),
+	(_lt("calling connectors"), ("call_connector",)),
 )
-
-
-def _phrases(rows) -> str:
-	words = [phrase for phrase, _tools in rows]
-	return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
 def arm_notice() -> str:
 	"""What the form asks the owner to confirm before it switches Skip confirmation on."""
-	asks = _phrases(_ARM_NOTICE_ASKS)
+	skips = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_SKIPS])
+	asks = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_ASKS])
 	return _(
 		"This macro will {0} without asking you first, including when it runs on a schedule "
-		"with nobody watching. {1} still ask, and stop the run."
-	).format(_phrases(_ARM_NOTICE_SKIPS), asks[:1].upper() + asks[1:])
+		"with nobody watching. {1} still ask, and stop the run. Its steps can apply only "
+		"skills you own, or skills only a reviewer can change."
+	).format(skips, asks[:1].upper() + asks[1:])
 
 
 def _arming(owner: str, *, held) -> dict:
@@ -797,7 +803,9 @@ def _refuse_busy_delete(macro_name: str, stopped: int):
 	frappe.throw(f"{said} {_('Delete it again.')}", MacroBusyError)
 
 
-@frappe.whitelist()
+# POST only (a GET is not checked for the CSRF token) and never from a tool call, like
+# the form's writers: each one changes a macro or one of its runs.
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_macro(name: str) -> dict:
 	"""Delete a macro row (owner-gated). Returns ``{"ok", "stopped_runs"}``.
@@ -858,6 +866,7 @@ def delete_macro(name: str) -> dict:
 	  that points at a name which no longer resolves: it is shown nowhere (the
 	  timeline it belonged to is gone) and nothing reads it. Sweeping eight tables
 	  on every macro delete for that is not worth the queries."""
+	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(MACRO, name)
 	doc.check_permission("write")  # owner-gate before touching linked runs
 	return delete_loaded_macro(doc)
@@ -920,7 +929,7 @@ def _skip_reason(e: Exception) -> str:
 	return "error"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_macros_bulk(names: str | list | None = None) -> dict:
 	"""Bulk delete macros the caller OWNS (DESIGN-V3 §8.3 / D20). ``names`` is a
@@ -937,6 +946,7 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 	stops: that macro waited for run locks while holding the first one's row (the
 	lock order ``macros._lock_macro_row`` forbids), and its first commit then made
 	the half-done delete permanent (run history gone, macro still there)."""
+	refuse_in_tool_dispatch()
 	raw = frappe.parse_json(names) if isinstance(names, str) else (names or [])
 	items = [str(n) for n in raw if n] if isinstance(raw, list) else []
 	me = frappe.session.user
@@ -985,10 +995,13 @@ def run_macro(name: str) -> dict:
 	return macros.run_macro(name, trigger="manual")
 
 
-@frappe.whitelist()
+# POST only (a GET is not checked for the CSRF token) and never from a tool call, like
+# the form's writers: each one changes a macro or one of its runs.
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def stop_macro_run(run: str) -> dict:
 	"""Stop an in-progress run (owner-gated)."""
+	refuse_in_tool_dispatch()
 	from jarvis.chat import macros
 
 	return macros.stop_macro_run(run)
@@ -1235,7 +1248,9 @@ def _delete_summary_chat(conversation: str, *, owned_by: str | None = None) -> N
 		frappe.db.rollback()
 
 
-@frappe.whitelist()
+# POST only (a GET is not checked for the CSRF token) and never from a tool call, like
+# the form's writers: each one changes a macro or one of its runs.
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def summarize_macro(name: str, force: int = 0) -> dict:
 	"""Kick off the merge: throwaway archived conversation + one agent turn
@@ -1259,6 +1274,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	has started, and never while its own turn is live (``_delete_summary_chat``); a
 	live one is left to run to its end, it is not cancelled. A new summary that could
 	not start gives nothing up (``_abandon_summary``)."""
+	refuse_in_tool_dispatch()
 	from jarvis.chat import macros
 
 	doc = frappe.get_doc(MACRO, name)

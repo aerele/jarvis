@@ -64,8 +64,8 @@ def _arm_refusal(owner: str) -> str:
 	return _("Arming a macro to skip confirmation requires a Jarvis Admin or System Manager role.")
 
 
-def _join(items: list[str]) -> str:
-	"""``a``, ``a and b``, ``a, b and c``."""
+def join_words(items: list[str]) -> str:
+	"""``a``, ``a and b``, ``a, b and c``: one list in a sentence, translatable."""
 	return items[0] if len(items) == 1 else _("{0} and {1}").format(", ".join(items[:-1]), items[-1])
 
 
@@ -262,7 +262,7 @@ class JarvisMacro(NotRenamable, Document):
 	def _guard_arming(self):
 		"""ARM the macro = its runs make the covered writes without a card (the broad
 		set, incl. run_method, send_email and run_import; delete, cancel, amend,
-		creating a skill and a connector call still park and stop the run). It runs as
+		creating or changing a skill and a connector call still park and stop the run). It runs as
 		the owner, so the owner may arm it (owner decision 2026-10-03), and nobody else,
 		an admin included (``owner_may_arm``).
 
@@ -274,11 +274,16 @@ class JarvisMacro(NotRenamable, Document):
 		refused taking ``skip_confirmation`` from 0 to 1, insert included.
 
 		On a macro that is armed and stays armed, the same holds for what changes what
-		it does: the steps, the summary, switching it on, and a schedule change that
-		leaves it scheduled. Each is judged against the stored row. Switching it off,
-		taking it off its schedule and disarming it stay free from any route: the safe
-		direction is never blocked, and an armed macro is never edited from where
-		arming is refused. A held macro is refused before this (``_guard_admin_hold``).
+		it does: the steps, the summary, switching it on, switching Stop on error off,
+		and a schedule change that leaves it scheduled. Each is judged against the
+		stored row; a summary carried by a save from elsewhere is put back as stored
+		instead of refused. Switching it off, taking it off its schedule and disarming
+		it stay free from any route: the safe direction is never blocked, and an armed
+		macro is never edited from where arming is refused. A held macro is refused
+		before this (``_guard_admin_hold``).
+
+		Its steps apply only skills its owner controls, on arming and on every change
+		to the steps (``_refuse_skills_outside_owners_control``).
 
 		Enabling the macro flag is what later drives ``run_macro``'s stamp of the run
 		conversation's own ``skip_confirmation`` (a raw write)."""
@@ -292,7 +297,15 @@ class JarvisMacro(NotRenamable, Document):
 				frappe.throw(arm_on_form_only(), frappe.PermissionError)
 			if not owner_may_arm(owner):
 				frappe.throw(_arm_refusal(owner), frappe.PermissionError)
+			self._refuse_skills_outside_owners_control(owner)
 			return
+		if not from_form:
+			# Its summary changes on its own page only, and the stored one wins here, as
+			# for ``merge_status`` (``_guard_summary_state``): the summary landing is a
+			# raw write that leaves ``modified`` alone, so a Desk or REST copy loaded
+			# before it carries the old text. Kept, not refused: switching it off from
+			# there must work.
+			self.merged_prompt = before.get("merged_prompt")
 		changes = self._armed_changes(before)
 		if changes and not (from_form and frappe.session.user == owner):
 			frappe.throw(
@@ -300,7 +313,30 @@ class JarvisMacro(NotRenamable, Document):
 					"This macro runs without asking for confirmation, so a change to its {0} can be "
 					"made only on its own page in Jarvis, by its owner. Switching it off, taking it "
 					"off its schedule or switching off Skip confirmation works from anywhere."
-				).format(_join(changes)),
+				).format(join_words(changes)),
+				frappe.PermissionError,
+			)
+		if step_values(self.steps) != step_values(before.steps):
+			self._refuse_skills_outside_owners_control(owner)
+
+	def _refuse_skills_outside_owners_control(self, owner: str):
+		"""An armed macro's steps apply only skills whose words its owner controls: their
+		own, or a Role or Org skill, whose content only a reviewer can change
+		(``skill_permissions.controlled_by``). Another user's private skill shared with
+		the owner can be rewritten by its author at any time, and the next run would
+		follow the new words without asking. Checked when the macro is armed and when
+		an armed macro's steps change; a run checks again before each step, because
+		sharing and authorship change later (``macros._ask_for_skills_outside_control``)."""
+		from jarvis.chat.skill_permissions import skills_outside_control
+
+		names = [name for step in self.steps or [] for name in step_skills(step)]
+		foreign = skills_outside_control(owner, names=names)
+		if foreign:
+			frappe.throw(
+				_(
+					"Skip confirmation works only with skills you own, or skills only a reviewer "
+					"can change. Take {0} off the steps, or leave Skip confirmation off."
+				).format(join_words([f"/{slug}" for slug in foreign])),
 				frappe.PermissionError,
 			)
 
@@ -313,6 +349,9 @@ class JarvisMacro(NotRenamable, Document):
 			changes.append(_("summary"))
 		if frappe.utils.cint(self.enabled) and not frappe.utils.cint(before.get("enabled")):
 			changes.append(_("Enabled switch"))
+		# Off, a run carries on past a failed step and keeps writing on top of it.
+		if frappe.utils.cint(before.get("stop_on_error")) and not frappe.utils.cint(self.stop_on_error):
+			changes.append(_("Stop on error switch"))
 		if frappe.utils.cint(self.schedule_enabled) and (
 			not frappe.utils.cint(before.get("schedule_enabled"))
 			or (before.get("schedule_frequency") or "") != (self.schedule_frequency or "")

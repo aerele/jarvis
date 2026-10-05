@@ -1360,6 +1360,49 @@ def _armed_skip_disabled() -> bool:
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
 
 
+# What a skill says is what a macro step that applies it does (``Apply these skills:
+# /slug``). An armed macro's run never changes one uncarded: it would rewrite what its
+# own later runs, scheduled and unwatched, follow. The skill and its child tables.
+_SKILL_DOCTYPES = frozenset(
+	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
+)
+# The flag an armed macro's uncarded write runs under; ``JarvisCustomSkill`` refuses a
+# save or delete while it is set, for a route ``_writes_a_skill`` cannot read.
+ARMED_MACRO_WRITE_FLAG = "jarvis_armed_macro_write"
+_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
+
+
+def _writes_a_skill(tool: str, args) -> bool:
+	"""Whether a covered write names a skill doctype anywhere in its arguments (a
+	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
+	``frappe.client``, a JSON ``doc`` string included), or calls the skills' own API.
+	Such a call parks a card on an armed macro's run, as the brake does."""
+	if tool == "run_method" and isinstance(args, dict):
+		if str(args.get("method") or "").startswith("jarvis.chat.custom_skills_api."):
+			return True
+	return _names_a_skill_doctype(args, depth=0)
+
+
+def _names_a_skill_doctype(value, *, depth: int) -> bool:
+	if depth > 6:
+		return False
+	if isinstance(value, str):
+		text = value.strip()
+		if not text.startswith(("{", "[")):
+			return False
+		try:
+			value = json.loads(text)
+		except ValueError:
+			return False
+	if isinstance(value, dict):
+		if any(value.get(key) in _SKILL_DOCTYPES for key in _DOCTYPE_KEYS):
+			return True
+		value = list(value.values())
+	if isinstance(value, list):
+		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
+	return False
+
+
 def _skill_autorun_slide(conv: str) -> None:
 	"""Advance the sliding last-write timestamp after a covered auto-run write, and
 	commit immediately (mirroring the macro's per-step row write). Committing now
@@ -2874,10 +2917,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# one stops the run - D5). Cheap frozenset membership test first; the
 		# kill-switch Settings read runs only when a covered write is actually armed.
 		# Bulk covered writes skip too (an automation must not stall on a batch card);
-		# the F16 over-size cap above still bounces an oversized batch.
+		# the F16 over-size cap above still bounces an oversized batch. A write to a
+		# skill parks too (``_writes_a_skill``): a macro step applies skills, so an
+		# armed run must not rewrite what its own later runs follow.
 		if (
 			tool in _ARMED_SKIP_COVERED
 			and _conv_flags.get("skip_confirmation")
+			and not _writes_a_skill(tool, args)
 			and not _armed_skip_disabled()
 		):
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
@@ -2896,14 +2942,18 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				if _armed_run_macro
 				else None
 			) or "an armed macro"
-			return _run_covered_write(
-				tool,
-				args,
-				conv=conv,
-				owner_user=owner_user,
-				provenance_kind="macro",
-				provenance_name=_macro_name,
-			)
+			frappe.flags[ARMED_MACRO_WRITE_FLAG] = True
+			try:
+				return _run_covered_write(
+					tool,
+					args,
+					conv=conv,
+					owner_user=owner_user,
+					provenance_kind="macro",
+					provenance_name=_macro_name,
+				)
+			finally:
+				frappe.flags[ARMED_MACRO_WRITE_FLAG] = False
 		# Skill "Approve & run" auto-run bypass (design §3.4): a conversation in an
 		# APPROVED skill run (skill_autorun=1, stamped by approve_and_run on step-1
 		# success) runs the explicit _SKILL_AUTORUN_COVERED allowlist uncarded, sliding

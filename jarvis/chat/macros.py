@@ -600,7 +600,9 @@ def _card_label(parked: dict) -> str:
 	return label.translate(_MARKDOWN).strip()
 
 
-def _card_stop_message(current_step: int, total: int, parked: dict, *, scheduled: bool) -> str:
+def _card_stop_message(
+	current_step: int, total: int, parked: dict, *, scheduled: bool, asked_for_a_skill: bool = False
+) -> str:
 	"""Why an UNARMED run ended at a step when a confirmation card was waiting.
 
 	The card is the user's to answer, so it is left alone (an armed run sweeps its
@@ -620,7 +622,11 @@ def _card_stop_message(current_step: int, total: int, parked: dict, *, scheduled
 	text += " You can still confirm or discard it there."
 	if step < total:
 		text += " The steps after it did not run, and confirming it will not resume them."
-	if scheduled:
+	if asked_for_a_skill:
+		# Its macro skips confirmation, and the run asked anyway: a step applied a skill
+		# another user can change (``_ask_for_skills_outside_control``).
+		text += " It asked because a step applies a skill another user can still change."
+	elif scheduled:
 		text += (
 			" To let this macro run without stopping here, switch on Skip confirmation on the macro's page."
 		)
@@ -1176,7 +1182,7 @@ def _draft_note(drafted: list[int], last_step: int) -> str:
 	return " ".join(parts)
 
 
-def _listed(numbers: list[int]) -> str:
+def _listed(numbers: list) -> str:
 	if len(numbers) == 1:
 		return str(numbers[0])
 	return ", ".join(str(n) for n in numbers[:-1]) + f" and {numbers[-1]}"
@@ -1420,6 +1426,7 @@ def _apply_step_end(
 				total,
 				parked,
 				scheduled=(run.get("trigger") or "") == "scheduled",
+				asked_for_a_skill=_asked_for_a_skill(run.conversation),
 			),
 		)
 		return
@@ -2216,6 +2223,7 @@ def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	if _step_is_out(run, index):
 		return _step_already_out(run, index)
 	prompt, overrides = _step_prompt(run, macro_doc, index)
+	prompt = _ask_for_skills_outside_control(run, macro_doc, prompt)
 	out = _send_step(run, index, prompt, overrides)
 	if isinstance(out, dict) and out.get("overloaded"):
 		# Parked, unless another dispatcher got the step's turn while this one was
@@ -2242,6 +2250,56 @@ def _dispatch_step(run, macro_doc, index: int) -> str | None:
 	except Exception:
 		pass  # a progress event is a courtesy; the step is already running
 	return _STEP_SENT
+
+
+def _ask_for_skills_outside_control(run, macro_doc, prompt: str) -> str:
+	"""An armed run's step that applies a skill its owner does not control (another
+	user's private skill shared with them, ``skill_permissions.controlled_by``) runs
+	asking: the run's conversation is disarmed before the step goes out, so its writes
+	park their cards and the run stops at the first one, as an unarmed run does. The
+	step's message says why. Every slug the prompt invokes counts: the skills the
+	step tags and any typed into it.
+
+	Judged now, before each step, and not only when the macro was armed: the author
+	can rewrite the skill, and a Role or Org skill narrowed back to private by its
+	author is theirs to rewrite from then on.
+
+	From that step to the end of the run, not for that step alone: arming a
+	conversation again mid-run is not done anywhere (it is stamped once, by
+	``run_macro``), and while it is disarmed its owner may type into it, so a message
+	of theirs could run armed. The disarm is committed before the send, which may roll
+	back and retry (``_send_step``)."""
+	if not frappe.db.get_value(CONV, run.conversation, "skip_confirmation"):
+		return prompt
+	from jarvis.chat.custom_skills import _INVOKE_RE
+	from jarvis.chat.skill_permissions import skills_outside_control
+
+	slugs = {slug.lower() for slug in _INVOKE_RE.findall(prompt)}
+	foreign = skills_outside_control(macro_doc.owner, slugs=slugs)
+	if not foreign:
+		return prompt
+	frappe.db.set_value(CONV, run.conversation, "skip_confirmation", 0, update_modified=False)
+	frappe.db.commit()
+	return prompt + _FOREIGN_SKILLS_NOTE.format(skills=_listed([f"/{slug}" for slug in foreign]))
+
+
+# Appended to the step's message: the owner reads it in the run's chat, and the
+# assistant learns its writes ask from here on.
+_FOREIGN_SKILLS_MARK = "(Skip confirmation is off from this step on:"
+_FOREIGN_SKILLS_NOTE = (
+	"\n\n" + _FOREIGN_SKILLS_MARK + " it applies {skills}, which another user can still "
+	"change, so its changes ask for confirmation first.)"
+)
+
+
+def _asked_for_a_skill(conversation: str) -> bool:
+	"""Whether a step of this run was sent disarmed by ``_ask_for_skills_outside_control``."""
+	return bool(
+		frappe.db.exists(
+			MSG,
+			{"conversation": conversation, "role": "user", "content": ["like", f"%{_FOREIGN_SKILLS_MARK}%"]},
+		)
+	)
 
 
 def _send_step(run, index: int, prompt: str, overrides: dict):

@@ -105,3 +105,57 @@ def has_skill_permission(doc, ptype: str = "read", user: str | None = None) -> b
 	# raised by the SPA write endpoints (custom_skills_api._require_skill_owner);
 	# generic REST writes fall back to Frappe's "does not have access" message.
 	return (doc.get("owner") or "") == user
+
+
+# --------------------------------------------------------------------------- #
+# Who controls what a skill says (an armed macro's steps, ``jarvis_macro``)
+# --------------------------------------------------------------------------- #
+def reviewer_locked(skill) -> bool:
+	"""Whether only a reviewer (or the learning compiler) can change what ``skill``
+	says: a Role or Org skill (``JarvisCustomSkill._guard_content_change``). A blank
+	scope on a stored row reads as Org and "Personal" as User, as in
+	``user_can_use_skill``."""
+	scope = (skill.get("scope") or "Org").strip() or "Org"
+	return scope in ("Role", "Org")
+
+
+def controlled_by(skill, user: str) -> bool:
+	"""Whether what ``skill`` says can change only by ``user`` or by a reviewer: it is
+	``user``'s own, or it is reviewer-locked. Anything else (another user's private
+	skill shared with ``user``) its author can rewrite at any time."""
+	return (skill.get("owner") or "") == user or reviewer_locked(skill)
+
+
+def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
+	"""The ``skill_name`` of each skill, among the rows ``names`` and the slugs
+	``slugs``, that ``user`` does not control (``controlled_by``), sorted.
+
+	``names`` are rows a macro step tags: each is judged, enabled or not (its author
+	can enable it again). ``slugs`` are ``/slug`` tokens in a prompt: a slug resolves
+	for ``user`` to every enabled skill of that name they may invoke, so it counts
+	when one of those is another user's private skill shared with them (the only
+	kind ``user`` may invoke and not control)."""
+	found = set()
+	names = [n for n in names or () if n]
+	if names:
+		for row in frappe.get_all(
+			SKILL, filters={"name": ["in", names]}, fields=["skill_name", "owner", "scope"]
+		):
+			if not controlled_by(row, user):
+				found.add(row.skill_name)
+	slugs = sorted({s for s in slugs or () if s})
+	if slugs:
+		rows = frappe.get_all(
+			SKILL,
+			filters={"skill_name": ["in", slugs], "enabled": 1, "owner": ["!=", user]},
+			fields=["name", "skill_name", "owner", "scope"],
+		)
+		foreign = {r.name: r.skill_name for r in rows if not controlled_by(r, user)}
+		if foreign:
+			for share in frappe.get_all(
+				SHARE,
+				filters={"parent": ["in", list(foreign)], "parenttype": SKILL, "user": user},
+				fields=["parent"],
+			):
+				found.add(foreign[share.parent])
+	return sorted(found)

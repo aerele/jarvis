@@ -163,25 +163,16 @@ class TestMacroSkipConfirmationGuard(FrappeTestCase):
 		"""Replaces ``test_non_admin_owner_cannot_arm`` (owner decision 2026-10-03: any
 		user may arm their OWN macro, it runs as them). A plain owner's own save of the
 		document is still refused: arming happens on the macro form only
-		(``macros_api.update_macro``), which needs the hold field (the migrate) for a
-		plain owner. The routes one by one: ``test_macro_owner_arming``."""
-		from jarvis.chat.macros_api import update_macro
-		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import hold_fields_exist
-
+		(``macros_api.update_macro``). The form arming, with and without the hold field,
+		and the other routes one by one: ``test_macro_owner_arming``."""
 		macro = _make_macro(NON_ADMIN_USER)
 		frappe.set_user(NON_ADMIN_USER)
 		doc = frappe.get_doc(MACRO, macro)
 		doc.skip_confirmation = 1
 		with self.assertRaises(frappe.PermissionError):
 			doc.save()
-		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation") or 0), 0)
 		frappe.db.rollback()
-		if not hold_fields_exist():
-			with self.assertRaises(frappe.PermissionError):
-				update_macro(name=macro, skip_confirmation=1)
-			return
-		update_macro(name=macro, skip_confirmation=1)
-		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation")), 1)
+		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation") or 0), 0)
 
 	def test_a_non_owner_cannot_arm(self):
 		from jarvis.chat.macros_api import update_macro
