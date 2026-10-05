@@ -73,7 +73,7 @@ _DISCOVERABLE_STATUSES = ("Published", "Coming Soon")
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
 
 # #672: how long a manual "Run now" waits for the per-installation dispatch lock
-# before refusing. Long enough to swallow an ordinary overlap with the hourly sweep,
+# before refusing. Long enough to swallow an ordinary overlap with the scheduled sweep,
 # short enough that a human never sits on a spinner.
 DISPATCH_LOCK_WAIT_S = 5.0
 
@@ -1817,7 +1817,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# #672: the manual path takes the SAME per-installation dispatch lock as the cron
 	# sweep, and refuses to start a second CONCURRENT audit of one installation.
 	# Without the lock the two paths were an unguarded check-then-act on shared state:
-	# a Run Now landing in the same tick as the hourly sweep had both pass every gate
+	# a Run Now landing in the same tick as the scheduled sweep had both pass every gate
 	# above and both launch, so one customer paid twice out of one A14 budget for two
 	# audits of the same books. A short wait rather than an immediate refusal, because
 	# the common overlap is a launch already in progress that finishes in well under a
@@ -1937,7 +1937,7 @@ def stop_agent_run(run: str) -> dict:
 	consumed the installation's ``next_run_at``/``last_run_at`` BEFORE the dispatch,
 	and neither the reaper nor ``_terminalize_failed`` ever unclaims it — a run that
 	really started spent its slot, and resurrecting it here would re-dispatch the same
-	slot on the next hourly tick. The A14 monthly BUDGET is a separate ledger and
+	slot on the next sweep. The A14 monthly BUDGET is a separate ledger and
 	deliberately differs from ``failed``: ``_runs_this_month`` excludes only ``failed``
 	rows (because every skip path writes one, which would make the cap
 	self-perpetuating), and that reasoning does not extend to an operator act. A
