@@ -1328,12 +1328,32 @@
 																<td
 																	v-for="(c, ci) in row.cells"
 																	:key="ci"
+																	:class="{
+																		'jv-summary-computed':
+																			row.computed &&
+																			row.computed[ci],
+																	}"
+																	:title="
+																		row.computed &&
+																		row.computed[ci]
+																			? 'Calculated by ERPNext. Saved when you confirm.'
+																			: undefined
+																	"
 																>
 																	{{ c }}
 																</td>
 															</tr>
 														</tbody>
 													</table>
+												</div>
+												<div
+													v-if="
+														t.computedLabels && t.computedLabels.length
+													"
+													class="jv-summary-computed-note"
+												>
+													{{ t.computedLabels.join(", ") }}: calculated
+													by ERPNext, saved when you confirm.
 												</div>
 											</div>
 										</div>
@@ -4064,6 +4084,19 @@
 													v-model="r[c.fieldname]"
 												/>
 												<select
+													v-else-if="c.fieldtype === 'Select'"
+													class="jv-action-input jv-action-sel"
+													v-model="r[c.fieldname]"
+												>
+													<option
+														v-for="o in cellOptions(c, r[c.fieldname])"
+														:key="o"
+														:value="o"
+													>
+														{{ o }}
+													</option>
+												</select>
+												<select
 													v-else-if="c.fieldtype === 'Check'"
 													class="jv-action-input jv-action-sel"
 													v-model="r[c.fieldname]"
@@ -4358,20 +4391,19 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
-import { markMissing, panelField as _panelField } from "@/lib/docFields";
+import { cellOptions, markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
+	alignComputedRows,
+	blankComputedColumns,
 	checkToYesNo,
-	coerceOut,
-	coerceRow,
+	draftValues,
 	isFieldMissing,
-	isFieldWritable,
 	readonlyDisplay,
 	isRowKeyColumn,
 	overlaySavedRows,
 	removedSavedRows,
-	tableChanged,
-	tableRowsPayload,
+	rowKeyColumn,
 	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
@@ -7214,21 +7246,15 @@ async function buildDraftModel(a) {
 		const baseRows = (base.tables || {})[tf] || [];
 		const proposedRows = aTables[tf] && overlaySavedRows(aTables[tf], baseRows);
 		if (!proposedRows && !metaField.reqd && !baseRows.length) continue;
-		// columns = child meta columns ∪ keys the agent used (unknown keys → data input)
+		// columns = child meta columns ∪ keys the agent used, each typed from the
+		// child's meta (unknown keys → data input)
 		const columns = spec.columns.slice();
 		const known = new Set(columns.map((c) => c.fieldname));
 		for (const r of proposedRows || []) {
 			for (const k of Object.keys(r)) {
 				if (!known.has(k) && isRowKeyColumn(k)) {
 					known.add(k);
-					columns.push({
-						fieldname: k,
-						label: k,
-						fieldtype: "Data",
-						options: "",
-						reqd: 0,
-						read_only: 0,
-					});
+					columns.push(rowKeyColumn(k, spec.extra_columns));
 				}
 			}
 		}
@@ -7463,6 +7489,35 @@ async function ensureActionSummary(a) {
 	if (summaryState.value.key !== key) return; // a newer action superseded this build
 	stampDraftModel(model, { messageKey, card, editable: false });
 	summaryState.value = { key, model, view: summarize(model, a), error: "" };
+	if (model.verb === "create") fillComputedCells(key, model, a);
+}
+// A create card's blank read-only cells (amounts, tax totals) are what ERPNext
+// computes on save: ask a dry run for them and show them on the card, marked as
+// calculated (#647). Display only - Confirm still sends what the card proposes.
+// Latest wins: a newer action's card is never touched; any failure keeps the blanks.
+async function fillComputedCells(key, model, a) {
+	const columns = blankComputedColumns(model);
+	if (!Object.keys(columns).length || !currentId.value) return;
+	let r;
+	try {
+		r = await api.draftComputed({
+			doctype: model.doctype,
+			conversation: currentId.value,
+			values: draftValues(model),
+			columns,
+		});
+	} catch (e) {
+		return;
+	}
+	if (!r || !r.ok || summaryState.value.key !== key) return;
+	const computed = {};
+	for (const t of model.tables) {
+		const rows = alignComputedRows(t, (r.tables || {})[t.fieldname]);
+		if (rows) computed[t.fieldname] = rows;
+	}
+	// Through the reactive state, so an open Preview shows them too.
+	summaryState.value.model.computed = computed;
+	summaryState.value = { ...summaryState.value, view: summarize(model, a) };
 }
 function isEditVerb(a) {
 	return !!a && (!a.verb || a.verb === "create" || a.verb === "update");
@@ -7533,32 +7588,13 @@ watch(actionFor, () => {
 async function applyDraft(submitFlag, model = draftPanel.value) {
 	const p = model;
 	if (!p || p.applying) return;
-	const values = {};
-	for (const f of p.fields) {
-		// read_only gating + coercion live in lib/draftApply (unit-tested there): a
-		// read_only field is submitted only when the agent proposed it on a create;
-		// permlevel>0 fields stay guarded by Frappe's insert-time reset (see
-		// test_permlevel_leak: TestCreateDocPermlevelWriteReset).
-		if (!isFieldWritable(f, p.verb)) continue;
-		const changed = String(f.value) !== String(f.orig);
-		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
-			values[f.fieldname] = coerceOut(f);
-	}
-	for (const t of p.tables) {
-		const rows = t.rows
-			.map((r) => coerceRow(t, r, p.verb))
-			.filter((r) => Object.keys(r).length);
-		if (p.verb === "create") {
-			if (rows.length) values[t.fieldname] = rows;
-		} else if (tableChanged(t, JSON.parse(t.origJson))) {
-			// Only a changed table is sent: each saved row by name with just its
-			// changed cells, new rows in full; an unchanged one (incl. a Datetime/Time
-			// column) is never resent (CR-3).
-			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
-		}
-	}
+	// read_only gating, coercion and the changed-only update payload live in
+	// lib/draftApply (unit-tested there): a read_only field is submitted only when
+	// the agent proposed it on a create; permlevel>0 fields stay guarded by Frappe's
+	// insert-time reset (see test_permlevel_leak: TestCreateDocPermlevelWriteReset).
+	const values = draftValues(p);
 	// Which draft this is: stamped when the model was built (actionFor drifts once a
-	// reply lands), else the current one.
+	// reply lands), else the current one, captured before the round-trip.
 	const draftKey = p.messageKey || actionFor.value;
 	const waiting =
 		parkedNoteFor(parkedDrafts.value, draftKey) ||
@@ -15939,6 +15975,17 @@ onUnmounted(() => {
 }
 .jv-summary-grid tbody tr:last-child td {
 	border-bottom: none;
+}
+/* ERPNext's value for a blank read-only cell (#647): muted, so it reads as
+   calculated rather than proposed (the title says so). */
+.jv-summary-grid td.jv-summary-computed {
+	color: var(--text-2);
+	font-variant-numeric: tabular-nums;
+}
+.jv-summary-computed-note {
+	padding: 6px 10px 0;
+	font-size: 11.5px;
+	color: var(--text-3);
 }
 .jv-summary-hint {
 	padding: 0 14px 11px;

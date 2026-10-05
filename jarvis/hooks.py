@@ -346,6 +346,21 @@ scheduler_events = {
 			# failed runs or notifications.
 			# Cheap no-op (one query) when nothing is due.
 			"jarvis.chat.macro_scheduler.run_due_macros",
+			# Fire any due scheduled auditor agents. Identity-safe (runs each audit
+			# as its owner, never Administrator) and budget-capped; the slot is claimed
+			# under a per-installation lock before the launch, so an overlapping sweep
+			# cannot dispatch it twice. See jarvis/chat/agent_scheduler.py.
+			#
+			# Every five minutes, NOT hourly, for the same reason as the macro sweep
+			# above: the schedule takes a time to the minute, and an hourly sweep started
+			# a 10:15 audit at 11:00. The faster sweep does not run audits more often:
+			# each slot still runs once. A slot whose launch FAILED is retried 55 minutes
+			# later, and again after each failed retry until its next natural time
+			# (agent_scheduler._retry_later writes the retry time to the row). One sweep
+			# dispatches at most SWEEP_MAX_PER_TICK installations and starts none after
+			# SWEEP_TIME_BUDGET_S.
+			# Cheap no-op (one query on a small table) when nothing is due.
+			"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -429,10 +444,6 @@ scheduler_events = {
 		# window, logs both to the greppable latency channel, and alerts past a
 		# threshold. Read-only (never flips a row); cheap (one bounded scan + peeks).
 		"jarvis.chat.session_lifecycle.reconcile_action_cards",
-		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
-		# as its owner, never Administrator); budget-capped; advances only on a
-		# successful enqueue. See jarvis/chat/agent_scheduler.py.
-		"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		# A8 backstop: fail agent runs stuck `running` past the max duration and
 		# tear down their orphaned per-run session bearers (a crashed delegate
 		# would otherwise leave a live session credential forever).
@@ -927,4 +938,13 @@ has_permission.update(
 # jarvis:macro_snapshot_unreadable: the "this run's unreadable steps snapshot was
 # reported" marker (``macros._report_unreadable_snapshot``); without it a run with a
 # broken snapshot queued a report job every five minutes.
-persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile", "jarvis:macro_snapshot_unreadable"]
+#
+# jarvis:heartbeat_macro_health_log_hour: the once-an-hour log marker for a fault in the
+# heartbeat's scheduled-macro counts (``heartbeat._scheduled_macro_health_safe``); without
+# it a persistent fault would log every five minutes.
+persistent_cache_keys = [
+	"jarvis:llm_switch",
+	"jarvis:macro_reconcile",
+	"jarvis:macro_snapshot_unreadable",
+	"jarvis:heartbeat_macro_health_log_hour",
+]

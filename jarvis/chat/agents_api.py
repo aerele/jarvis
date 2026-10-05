@@ -73,7 +73,7 @@ _DISCOVERABLE_STATUSES = ("Published", "Coming Soon")
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
 
 # #672: how long a manual "Run now" waits for the per-installation dispatch lock
-# before refusing. Long enough to swallow an ordinary overlap with the hourly sweep,
+# before refusing. Long enough to swallow an ordinary overlap with the scheduled sweep,
 # short enough that a human never sits on a spinner.
 DISPATCH_LOCK_WAIT_S = 5.0
 
@@ -1596,16 +1596,68 @@ def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
 	``run`` / ``first_seen_run`` / ``last_seen_run``) and runs link the
-	installation. The cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
+	installation, except the month's counted runs, which are kept for the A14 budget
+	with no installation (``agent_scheduler.keep_budget_rows_of_uninstalled``). The
+	cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
 	way ``_rehome_installation_outputs`` scopes it, never by a broad
 	``(agent, owner)`` match (#455 — see ``_installation_finding_names``). The
 	``uninstalled`` activity row is written FIRST — it is Link-free by design, so
 	the history survives the cascade. The bundle leaves the container on the next
 	Apply (the fleet endpoint does a full reconcile); the dirty flag records that
 	an Apply is now pending — but only when the install was ENABLED (a disabled
-	install was never in the pushed set, so removing it changes nothing)."""
+	install was never in the pushed set, so removing it changes nothing).
+
+	**A live run is stopped first**, as ``macros_api.delete_macro`` does. Deleting the
+	row of a run still going left its session bearer live and gave its budget back.
+	The uninstall holds the installation's dispatch lock throughout, the one the sweep
+	and Run Now take before a launch, so no run can start while it cascades; if a
+	launch holds it, the uninstall is refused with "try again". Each running run is
+	stopped (``_stop_running_run``, committed whatever happens next), then kept and
+	counted like any other stopped run. Returns ``{"ok", "stopped_runs"}``."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	via_admin = _check_installation_write(doc, "delete")  # S3 owner-gate (or admin)
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat.agent_scheduler import DISPATCH_LOCK_TTL_S, _dispatch_lock_name
+
+	with redis_lock(
+		_dispatch_lock_name(doc.name),
+		timeout_s=DISPATCH_LOCK_TTL_S,
+		blocking_timeout_s=DISPATCH_LOCK_WAIT_S,
+	) as acquired:
+		if not acquired:
+			frappe.throw(_("A run for this agent is starting right now. Try again in a moment."))
+		# A fresh read view: this request's snapshot opened at the get_doc above, and a
+		# launch that held the lock while we waited may have committed a running run.
+		# Nothing is pending here, so the commit only ends the stale snapshot.
+		frappe.db.commit()
+		stopped = _stop_live_runs_for_uninstall(doc.name)
+		_uninstall_cascade(doc, via_admin)
+	from jarvis.chat import agent_models
+
+	agent_models.on_uninstalled(doc.agent)
+	return {"ok": True, "stopped_runs": stopped}
+
+
+def _stop_live_runs_for_uninstall(installation: str) -> int:
+	"""Stop every run of the installation that is still ``running``, however old.
+	Returns how many this call stopped."""
+	running = frappe.get_all(
+		RUN,
+		filters={"installation": installation, "status": "running"},
+		pluck="name",
+		ignore_permissions=True,
+	)
+	stopped = 0
+	for run in running:
+		status = _stop_running_run(
+			run, error=_("Stopped: its agent was uninstalled."), detail="stopped by the uninstall"
+		)
+		stopped += status == "stopped"
+	return stopped
+
+
+def _uninstall_cascade(doc, via_admin: bool) -> None:
+	"""The delete itself, under the caller's dispatch lock; commits."""
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1630,18 +1682,21 @@ def uninstall_agent(installation: str) -> dict:
 			flags={"jarvis_uninstall_installation": doc.name},
 		)
 	_detach_last_seen_run(run_names)
+	# The month's counted runs are KEPT, detached from the installation, so uninstalling
+	# and installing again does not hand the month's run budget back (A14). For the user
+	# the run history is gone all the same: no screen lists a run with no installation.
+	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+
+	kept = set(keep_budget_rows_of_uninstalled(doc.name, doc.owner))
 	for name in run_names:
-		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+		if name not in kept:
+			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
 	_delete_installation_preserving_provenance(doc, via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
 	frappe.db.commit()
-	from jarvis.chat import agent_models
-
-	agent_models.on_uninstalled(doc.agent)
-	return {"ok": True}
 
 
 @frappe.whitelist()
@@ -1817,7 +1872,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# #672: the manual path takes the SAME per-installation dispatch lock as the cron
 	# sweep, and refuses to start a second CONCURRENT audit of one installation.
 	# Without the lock the two paths were an unguarded check-then-act on shared state:
-	# a Run Now landing in the same tick as the hourly sweep had both pass every gate
+	# a Run Now landing in the same tick as the scheduled sweep had both pass every gate
 	# above and both launch, so one customer paid twice out of one A14 budget for two
 	# audits of the same books. A short wait rather than an immediate refusal, because
 	# the common overlap is a launch already in progress that finishes in well under a
@@ -1832,6 +1887,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	) as acquired:
 		if not acquired:
 			frappe.throw(_("A run for this agent is already starting. Try again in a moment."))
+		# An uninstall holds this lock while it cascades, so one that finished while we
+		# waited has deleted the installation read above. A locking read, because this
+		# transaction's snapshot may predate the delete; ``_launch_audit`` commits it.
+		if not frappe.db.get_value(INSTALLATION, installation, "name", for_update=True):
+			frappe.throw(_("This agent was uninstalled."), frappe.DoesNotExistError)
 		# Freshness-bounded (see agent_scheduler._live_run), so a wedged run cannot
 		# lock the button out until the 3h reaper clears it.
 		if _live_run(installation):
@@ -1937,7 +1997,7 @@ def stop_agent_run(run: str) -> dict:
 	consumed the installation's ``next_run_at``/``last_run_at`` BEFORE the dispatch,
 	and neither the reaper nor ``_terminalize_failed`` ever unclaims it — a run that
 	really started spent its slot, and resurrecting it here would re-dispatch the same
-	slot on the next hourly tick. The A14 monthly BUDGET is a separate ledger and
+	slot on the next sweep. The A14 monthly BUDGET is a separate ledger and
 	deliberately differs from ``failed``: ``_runs_this_month`` excludes only ``failed``
 	rows (because every skip path writes one, which would make the cap
 	self-perpetuating), and that reasoning does not extend to an operator act. A
@@ -1945,7 +2005,23 @@ def stop_agent_run(run: str) -> dict:
 	start-then-stop would be an unlimited free-run loop around the budget."""
 	doc = frappe.get_doc(RUN, run)
 	_guard_run_control(doc)
+	status = _stop_running_run(
+		run, error=_("Stopped by operator."), detail=f"stopped by {frappe.session.user}"
+	)
+	if status is None:
+		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+	if status != "stopped":
+		return {"ok": True, "status": status, "idempotent": True}
+	return {"ok": True, "status": "stopped"}
 
+
+def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
+	"""Move one run from ``running`` to ``stopped``, revoke its session bearer and
+	best-effort abort its gateway session. Returns the status the run ends in (that is
+	``stopped`` only when this call stopped it), or None when the row is gone. No
+	permission check: the caller has made it (``stop_agent_run``, ``uninstall_agent``).
+
+	The transition and its ordering are ``stop_agent_run``'s (see there)."""
 	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
 	row = frappe.db.get_value(
 		RUN,
@@ -1956,18 +2032,17 @@ def stop_agent_run(run: str) -> dict:
 	)
 	if not row:
 		frappe.db.commit()
-		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+		return None
 	if row.status != "running":
 		# Already terminal — a concurrent finish, reap or a second click. Release the
 		# row lock and report the state it actually reached; never overwrite it.
 		frappe.db.commit()
-		return {"ok": True, "status": row.status, "idempotent": True}
+		return row.status
 
-	stop_error = _("Stopped by operator.")
 	frappe.db.set_value(
 		RUN,
 		run,
-		{"status": "stopped", "finished_at": frappe.utils.now(), "error": stop_error[:140]},
+		{"status": "stopped", "finished_at": frappe.utils.now(), "error": error[:140]},
 		update_modified=False,
 	)
 	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
@@ -1985,11 +2060,11 @@ def stop_agent_run(run: str) -> dict:
 		installation=row.installation,
 		action="run_stopped",
 		run=run,
-		detail=f"stopped by {frappe.session.user}",
+		detail=detail,
 		owner=row.owner,
 	)
 	frappe.db.commit()
-	return {"ok": True, "status": "stopped"}
+	return "stopped"
 
 
 # --------------------------------------------------------------------------- #
@@ -2339,6 +2414,12 @@ def _count(doctype: str, filters: dict, or_filters: list | None = None) -> int:
 	return frappe.db.count(doctype, filters=filters)
 
 
+# A run row with no installation is not run history: an uninstall keeps the month's
+# counted runs for the A14 budget and clears their installation
+# (``agent_scheduler.keep_budget_rows_of_uninstalled``). Every reader that shows runs to
+# a person leaves them out, as it did when they were deleted.
+_HAS_INSTALLATION = {"installation": ["is", "set"]}
+
 _RUN_LIST_FIELDS = [
 	"name",
 	"agent",
@@ -2385,7 +2466,7 @@ def _stamp_run_nature(rows: list[dict]) -> list[dict]:
 def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	"""This owner's run history (optionally filtered to one agent)."""
 	me = frappe.session.user
-	filters = {"owner": me}
+	filters = {"owner": me, **_HAS_INSTALLATION}
 	if agent:
 		filters["agent"] = agent
 	rows = frappe.get_all(
@@ -2416,7 +2497,7 @@ def list_runs_page(
 	matches name/status (LIKE-escaped)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
-	filters: dict = {"owner": me}
+	filters: dict = {"owner": me, **_HAS_INSTALLATION}
 	if agent:
 		filters["agent"] = agent
 	if status:
@@ -2636,8 +2717,9 @@ def list_run_steps(run: str) -> dict:
 	if not run:
 		return empty
 	me = frappe.session.user
-	run_row = frappe.db.get_value(RUN, run, ["name", "owner"], as_dict=True)
-	if not run_row:
+	run_row = frappe.db.get_value(RUN, run, ["name", "owner", "installation"], as_dict=True)
+	if not run_row or not run_row.installation:
+		# A run kept for the budget after an uninstall reads like a deleted one.
 		return empty
 	if run_row.owner != me and not has_jarvis_admin_access(me):
 		return empty
@@ -2694,7 +2776,7 @@ def list_agent_activity_page(
 	Search matches agent_title/detail (LIKE-escaped). Each row also carries a
 	live-joined ``run_status`` (the named run's CURRENT status, not the
 	action verb's point-in-time label; ``None`` when the row names no run or
-	that run no longer exists)."""
+	that run no longer exists, or is one an uninstall kept for the budget)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	filters: dict = {"owner": me}
@@ -2738,7 +2820,11 @@ def list_agent_activity_page(
 	if run_names:
 		status_by_run = {
 			d.name: d.status
-			for d in frappe.get_all(RUN, filters={"name": ["in", list(run_names)]}, fields=["name", "status"])
+			for d in frappe.get_all(
+				RUN,
+				filters={"name": ["in", list(run_names)], **_HAS_INSTALLATION},
+				fields=["name", "status"],
+			)
 		}
 	for r in rows:
 		r["run_status"] = status_by_run.get(r["run"]) if r.get("run") else None

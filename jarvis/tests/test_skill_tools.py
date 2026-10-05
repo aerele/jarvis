@@ -855,3 +855,78 @@ class TestSkillChildTableBatch(SkillToolsTestCase):
 			res = get_skill("sttool-dup")
 		pf.assert_called_once()  # R>1 -> batched
 		self.assertEqual(res["description"], "peer-private-desc")  # caller's own row wins
+
+
+class TestAToolReadsADoctypeByItsCanonicalName(SkillToolsTestCase):
+	"""Skill rows are scoped by hooks registered under the doctype's exact name, so a
+	tool reads a doctype by its canonical name, whatever case the call spells it in."""
+
+	def setUp(self):
+		super().setUp()
+		_make_skill(OWNER, f"{PFX}-case-own", "own", scope="User")
+		_make_skill(PEER, f"{PFX}-case-shared", "shared", scope="User", shared_with=[OWNER])
+		self.private = _make_skill(THIRD, f"{PFX}-case-private", "private", scope="User").name
+
+	def _dispatch(self, tool, args):
+		from jarvis.tools.registry import dispatch
+
+		with _as(OWNER):
+			return dispatch(tool, args)
+
+	def test_get_list_in_any_case_reads_only_the_callers_skills(self):
+		for doctype in (SKILL, SKILL.lower(), SKILL.upper()):
+			with self.subTest(doctype=doctype):
+				rows = self._dispatch(
+					"get_list",
+					{
+						"doctype": doctype,
+						"fields": ["skill_name"],
+						"filters": {"skill_name": ["like", f"{PFX}-case-%"]},
+					},
+				)
+				self.assertEqual(
+					sorted(r["skill_name"] for r in rows), [f"{PFX}-case-own", f"{PFX}-case-shared"]
+				)
+
+	def test_get_doc_in_any_case_is_refused_another_users_private_skill(self):
+		for doctype in (SKILL, SKILL.lower()):
+			with self.subTest(doctype=doctype):
+				with self.assertRaises((PermissionDeniedError, frappe.PermissionError)):
+					self._dispatch("get_doc", {"doctype": doctype, "name": self.private})
+
+	def test_query_in_any_case_reads_only_the_callers_skills(self):
+		for doctype in (SKILL, SKILL.lower()):
+			with self.subTest(doctype=doctype):
+				res = self._dispatch(
+					"query",
+					{
+						"spec": {
+							"from": doctype,
+							"alias": "s",
+							"select": ["s.skill_name"],
+							"where": [{"field": "s.skill_name", "op": "like", "value": f"{PFX}-case-%"}],
+						}
+					},
+				)
+				rows = res["rows"] if isinstance(res, dict) else res
+				self.assertEqual(
+					sorted(r["skill_name"] for r in rows), [f"{PFX}-case-own", f"{PFX}-case-shared"]
+				)
+
+	def test_an_unknown_doctype_leaves_nothing_in_the_message_log(self):
+		# The failing tool's error detail is read from the message log; a lookup of the
+		# name must not add "not found" lines to it.
+		from jarvis.tools._doctype_name import canonical_doctype
+
+		frappe.clear_messages()
+		self.assertEqual(canonical_doctype("No Such Doctype Here"), "No Such Doctype Here")
+		self.assertEqual(frappe.local.message_log, [])
+
+	def test_another_spelling_is_looked_up_once_per_request(self):
+		from jarvis.tools import _doctype_name
+
+		frappe.local.request_cache.clear()
+		with patch.object(frappe.db, "get_value", wraps=frappe.db.get_value) as lookup:
+			for _ in range(3):
+				self.assertEqual(_doctype_name.canonical_doctype(" todo "), "ToDo")
+		self.assertEqual(lookup.call_count, 1)
