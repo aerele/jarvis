@@ -867,7 +867,14 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		run = self._bind_scribe_run()
 		record_app_wiki(app="fakeapp", pages=[{"title": "Overview", "key": "overview", "body_md": "a"}])
 		finish_app_learning_run()
-		frappe.db.set_value(RUN, run, "owner", "Administrator", update_modified=False)
+		# Every launched run carries its installation; the run list leaves out a run with
+		# none (one an uninstall kept for the monthly budget). The fixture has none.
+		frappe.db.set_value(
+			RUN,
+			run,
+			{"owner": "Administrator", "installation": "fixture-installation"},
+			update_modified=False,
+		)
 		page = agents_api.list_runs_page(agent=SCRIBE_SLUG)
 		rows = [r for r in page["rows"] if r["name"] == run]
 		self.assertTrue(rows)
