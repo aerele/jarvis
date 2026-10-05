@@ -18,6 +18,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install GitPython
+        run: python -m pip install "GitPython~=3.1.45"
       - name: Test generic scanner
         run: python -m unittest jarvis.tests.test_branding_scanner
       - name: Enforce Admin-owned policy on this commit

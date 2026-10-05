@@ -371,21 +371,14 @@ def _llm_cap_reached(row: dict) -> bool:
 	"""Cheap peek at today's per-trigger LLM counter so an over-cap trigger on
 	a high-churn doctype stops paying the snapshot + enqueue cost on every save
 	(the authoritative incr + the single Skipped marker still live in the job).
-	Returns True only once the counter is STRICTLY over cap — i.e. after the
-	job has already logged the cap+1 Skipped marker — so we never suppress that
-	one marker. Never raises."""
+	Returns True only once the count is STRICTLY over cap — the job publishes it
+	only after logging the cap+1 Skipped marker — so we never suppress that one
+	marker. Compared with the current cap, so raising it reopens the day. Never raises."""
 	try:
-		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, _cap_key
+		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, over_cap_count
 
 		cap = cint(row.get("llm_daily_cap")) or _DEFAULT_DAILY_CAP
-		# The counter is a raw redis INCR value (llm_action uses cache.incr),
-		# NOT a pickled set_value — read it with the raw GET, not get_value
-		# (which pickle.loads and would raise on the plain integer).
-		# Site-scoped by make_key.
-		cache = frappe.cache()  # nosemgrep: frappe-cache-breaks-multitenancy
-		raw = cache.get(cache.make_key(_cap_key(row.get("name"))))
-		used = int(raw) if raw is not None else 0
-		return used > cap
+		return over_cap_count(row.get("name")) > cap
 	except Exception:
 		return False
 

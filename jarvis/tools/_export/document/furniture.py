@@ -694,10 +694,10 @@ def resolve_company_letterhead_footer(
 	template's pinned Company->Letter Head map. Returns ``(footer_html, note)``.
 
 	Unlike ``resolve_letterhead`` (which keeps only logos on a doc-less report), a
-	custom template's footer is PINNED per company, so we render that company's
-	Letter Head ``footer`` WITH the Company as Jinja context and keep the text
-	(address/contact). Company-branded letterheads are usually static; a Jinja one
-	gets company-level fields. Same safety gate as the header path: same-site logos
+	custom template's footer is PINNED per company, so we keep that company's Letter
+	Head ``footer`` text (address/contact). Company-branded letterheads are usually
+	static; plain company placeholders are filled without running the template (see
+	``_fill_company_placeholders``). Same safety gate as the header path: same-site logos
 	inlined to permission-checked ``data:`` URIs, remote ``<img>`` dropped, then the
 	nh3 letterhead sanitizer (data-images only, no scripts).
 
@@ -729,21 +729,33 @@ def resolve_company_letterhead_footer(
 		if len(raw) > _MAX_FURNITURE_CHARS:
 			_log_infra_failure("rich-pdf company letterhead footer too large", f"{len(raw)} chars")
 			return "", "letter head footer is too large — rendered without it"
-		try:
-			comp_doc = frappe.get_doc("Company", comp)
-			# Admin-authored Letter Head footer, rendered in Frappe's sandboxed Jinja env
-			# (safe_render) exactly as Frappe's print view renders it.
-			# nosemgrep: frappe-ssti
-			rendered = frappe.render_template(raw, {"doc": comp_doc, "company": comp_doc})
-		except Exception:
-			# A doc-bound Jinja letter head that needs an invoice context; fall back to
-			# the raw HTML (sanitizer strips any leaked {%%}/{{}} as inert text).
-			rendered = raw
-		footer_html = sanitize_letterhead(_inline_letterhead_images(rendered))
+		company_doc = frappe.get_doc("Company", comp) if _COMPANY_PLACEHOLDER.search(raw) else {}
+		filled = _fill_company_placeholders(raw, company_doc)
+		footer_html = sanitize_letterhead(_inline_letterhead_images(filled))
 		return footer_html, None
 	except Exception:
 		_log_infra_failure("rich-pdf company letterhead footer failed", f"company={comp!r} lh={lh_name!r}")
 		return "", "letter head footer could not be applied"
+
+
+# A plain company placeholder in Letter Head HTML, e.g. ``{{ doc.company_name }}``.
+_COMPANY_PLACEHOLDER = re.compile(r"\{\{\s*(?:doc|company)\.([A-Za-z_]\w*)\s*\}\}")
+_JINJA_MARKUP = re.compile(r"\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\}", re.S)
+
+
+def _fill_company_placeholders(raw: str, company) -> str:
+	"""Letter Head HTML with plain ``{{ doc.<field> }}`` / ``{{ company.<field> }}``
+	placeholders filled from ``company`` (escaped). Nothing is executed: any other
+	Jinja (tags, filters, expressions) is dropped, as a doc-less export has no
+	document to evaluate it against."""
+
+	def value(match: re.Match) -> str:
+		field_value = company.get(match.group(1))
+		if field_value is None or isinstance(field_value, list | dict):
+			return ""
+		return html.escape(str(field_value))
+
+	return _JINJA_MARKUP.sub("", _COMPANY_PLACEHOLDER.sub(value, raw))
 
 
 def _letterhead_logos(raw: str) -> str:

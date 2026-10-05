@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -71,20 +70,19 @@ def load_policy(raw, expected_digest=None):
 
 
 def scan(root, policy):
+	import git  # GitPython: lazy, so policy loading (jarvis.ci.inputs) does not need it
+
 	root = Path(root).resolve()
-	# CI-only. Literal git argv, no shell; the only variable is the resolved scan root.
-	checkout = subprocess.check_output(  # nosemgrep: frappe-subprocess-exec
-		["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True
-	).strip()
-	if Path(checkout).resolve() != root:
+	try:
+		repo = git.Repo(root)
+	except (git.InvalidGitRepositoryError, git.NoSuchPathError):
+		raise PolicyError("Scan root must be the checkout root.") from None
+	if Path(repo.working_tree_dir).resolve() != root:
 		raise PolicyError("Scan root must be the checkout root.")
-	paths = (
-		subprocess.check_output(  # nosemgrep: frappe-subprocess-exec
-			["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
-		)
-		.decode()
-		.split("\0")
-	)
+	try:
+		paths = repo.git.ls_files("-z", "--cached", "--others", "--exclude-standard").split("\0")
+	except git.GitCommandError as exc:
+		raise PolicyError(f"Could not list the checkout's files: {exc}") from None
 	pattern = re.compile("|".join(re.escape(term) for term in policy["terms"]), re.IGNORECASE)
 	allowances = {path: Counter(lines) for path, lines in policy["allowed_lines"].items()}
 	allowed_paths = set(policy["allowed_paths"])
@@ -144,7 +142,7 @@ def main(argv=None):
 		raw = args.policy.read_text() if args.policy else os.environ.get(args.policy_env)
 		policy = load_policy(raw, args.expected_policy_sha256)
 		errors = scan(args.root, policy)
-	except (PolicyError, OSError, subprocess.CalledProcessError, UnicodeError) as exc:
+	except (PolicyError, OSError, UnicodeError) as exc:
 		print(f"Branding check failed: {exc}", file=sys.stderr)
 		return 1
 	if errors:

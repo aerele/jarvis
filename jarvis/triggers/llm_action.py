@@ -58,6 +58,15 @@ def _cap_key(trigger: str) -> str:
 	return f"jarvis:trigcap:{trigger}:{nowdate().replace('-', '')}"
 
 
+def over_cap_count(trigger: str) -> int:
+	"""Today's count for ``trigger`` once it went past its cap; 0 until then."""
+	return cint(frappe.cache.get_value(_over_cap_key(trigger), expires=True))
+
+
+def _over_cap_key(trigger: str) -> str:
+	return f"{_cap_key(trigger)}:over"
+
+
 def _llm_task_prompt(instruction: str, doctype: str, docname: str, doc_event: str) -> str:
 	"""System prompt + instruction folded into one ``prompt`` string for
 	llm-task (no separate system-message slot on that tool). Carries the same
@@ -184,6 +193,8 @@ def run_llm_action(
 				detail=f"daily LLM cap reached ({cap}); further evaluations today are dropped silently",
 			)
 			frappe.db.commit()
+		# After the Skipped marker: from here the engine stops enqueueing this trigger.
+		frappe.cache.set_value(_over_cap_key(trigger), count, expires_in_sec=_CAP_TTL_SECONDS)
 		return
 
 	# Imported lazily (background job only): turn_handler for the

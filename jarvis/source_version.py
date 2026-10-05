@@ -1,16 +1,11 @@
 """Best-effort source revision details for this Jarvis checkout."""
 
 import re
-import subprocess
 from pathlib import Path
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-_GIT_TIMEOUT_SECONDS = 2
-_RELEASE_TAG = re.compile(r"^v\d+\.\d+\.\d+$")
-_QUERIES = {
-	"branch": ("branch", "--show-current"),
-	"tag": ("describe", "--tags", "--exact-match", "--match", "v[0-9]*", "HEAD"),
-}
+_RELEASE_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+_KEYS = ("branch", "tag")
 
 # Only answers Git actually gave are kept; an unknown value is asked again on the next call.
 _known: dict[str, str] = {}
@@ -20,15 +15,15 @@ def source_details() -> dict[str, str | None]:
 	"""Return the checked-out branch and exact ``vN.N.N`` release tag.
 
 	Three outcomes per value, and the difference matters to the control plane: a non-empty
-	string is the revision, an empty string means Git answered and there is none (detached,
-	untagged, not a Git checkout), and ``None`` means Git did not answer in time, so the value
-	is unknown and must not be reported as blank. Nothing is ever inferred from ``__version__``,
+	string is the revision, an empty string means the checkout has none (detached,
+	untagged, not a Git checkout), and ``None`` means the checkout could not be read, so the
+	value is unknown and must not be reported as blank. Nothing is ever inferred from ``__version__``,
 	so support never sees a made-up revision.
 	"""
 	details: dict[str, str | None] = {}
-	for key, args in _QUERIES.items():
+	for key in _KEYS:
 		if key not in _known:
-			value = _git_value(*args)
+			value = _read_value(key)
 			if value is None:
 				details[key] = None
 				continue
@@ -41,21 +36,32 @@ def reset_cache() -> None:
 	_known.clear()
 
 
-def _git_value(*args: str) -> str | None:
+def _read_value(key: str) -> str | None:
+	"""``key`` read from the checkout with GitPython (a Frappe dependency). GitDB reads
+	refs and objects in Python, so no git process is started."""
 	try:
-		# Literal git argv (args come only from _QUERIES), no shell, bounded by a timeout.
-		result = subprocess.run(  # nosemgrep: frappe-subprocess-exec
-			["git", "-C", str(_REPOSITORY_ROOT), *args],
-			capture_output=True,
-			text=True,
-			timeout=_GIT_TIMEOUT_SECONDS,
-			check=False,
-		)
-	except (OSError, subprocess.TimeoutExpired):
+		import git
+	except ImportError:  # GitPython refuses to import without a usable git executable
 		return None
-	if result.returncode:
+	try:
+		repo = git.Repo(_REPOSITORY_ROOT, odbt=git.GitDB)
+		if key == "branch":
+			return "" if repo.head.is_detached else repo.head.reference.name
+		return _release_tag(repo)
+	except (git.InvalidGitRepositoryError, git.NoSuchPathError):
 		return ""
-	value = result.stdout.strip()
-	if args[0] == "describe" and not _RELEASE_TAG.match(value):
+	except Exception:
+		return None
+
+
+def _release_tag(repo) -> str:
+	"""The highest ``vN.N.N`` tag on HEAD, or "" (also for a repository with no commits)."""
+	if not repo.head.is_valid():
 		return ""
-	return value
+	head = repo.head.commit.hexsha
+	tags = []
+	for tag in repo.tags:
+		match = _RELEASE_TAG.match(tag.name)
+		if match and tag.commit.hexsha == head:
+			tags.append((tuple(map(int, match.groups())), tag.name))
+	return max(tags)[1] if tags else ""
