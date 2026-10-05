@@ -9,7 +9,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from jarvis.chat import heartbeat
-from jarvis.tests.test_macro_scheduler import _ensure_user
+from jarvis.tests._pending_action_helpers import ensure_user
 
 MACRO = "Jarvis Macro"
 RUN = "Jarvis Macro Run"
@@ -48,7 +48,10 @@ def _mk_run(macro, *, trigger="scheduled", status="completed", finished_at=None)
 class TestHeartbeatMacroHealth(FrappeTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
-		_ensure_user(OWNER)
+		ensure_user(OWNER)
+		# The hourly fault-log marker is a persistent key: clear it so the fault test sees
+		# a fresh hour whatever ran before it.
+		frappe.cache().delete_value(heartbeat._MACRO_HEALTH_LOG_KEY)
 		# Isolate from rows other suites left behind: this transaction is rolled back.
 		frappe.db.delete(RUN, {"trigger": "scheduled", "status": "completed"})
 		self.base = heartbeat._scheduled_macro_health()
@@ -123,6 +126,21 @@ class TestHeartbeatMacroHealth(FrappeTestCase):
 		self.assertGreaterEqual(age, 290)
 		self.assertLess(age, 400)
 
+	def test_last_ok_ignores_runs_older_than_the_window(self):
+		m = _mk("r", next_run=None)
+		old = _mk_run(m, finished_at=add_to_date(now_datetime(), days=-35))
+		frappe.db.set_value(
+			RUN, old, "creation", add_to_date(now_datetime(), days=-35), update_modified=False
+		)
+		self.assertNotIn("sched_last_ok_age_s", self._health(), "a 35-day-old success is outside the window")
+
+	def test_last_ok_age_never_negative_on_a_future_stamp(self):
+		# Clock skew: a finished_at ahead of the site clock reads as 0, never a negative age
+		# (the control plane drops a negative value as "not reported").
+		m = _mk("r", next_run=None)
+		_mk_run(m, finished_at=add_to_date(now_datetime(), minutes=10))
+		self.assertEqual(self._health()["sched_last_ok_age_s"], 0)
+
 	def test_vector_keeps_liveness_keys_and_adds_only_counts(self):
 		v = heartbeat.bench_liveness_vector()
 		self.assertTrue({"watchdog_last_completed_age_s", "oldest_nonterminal_turn_age_s"} <= set(v))
@@ -138,7 +156,7 @@ class TestHeartbeatMacroHealth(FrappeTestCase):
 			v = heartbeat.bench_liveness_vector()
 			heartbeat.bench_liveness_vector()
 		self.assertEqual(set(v), {"watchdog_last_completed_age_s", "oldest_nonterminal_turn_age_s"})
-		self.assertLessEqual(logged.call_count, 1, "logged at most once an hour")
+		self.assertEqual(logged.call_count, 1, "logged once, and only once an hour")
 
 	def test_fault_marker_is_covered_by_persistent_cache_keys(self):
 		from jarvis import hooks
