@@ -540,7 +540,8 @@ const armDescription = computed(() => {
 	return canArm.value ? ARM_IF_ON : armBlockedReason.value || LEGACY_ARM_REASON;
 });
 // "" unless this macro is armed and the viewer is not its owner (the server's say):
-// then its steps, summary, schedule and Stop on error are read-only here.
+// then its steps, summary and schedule settings are read-only here, and Enabled,
+// Schedule and Stop on error move only the safe way (armedOff).
 const armedLockedReason = ref("");
 const armedLocked = computed(() => !!armedLockedReason.value);
 // As heldOff: the reason for a switch that is off and may not go on ("" when free).
