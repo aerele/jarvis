@@ -1375,7 +1375,14 @@
 											<ActionError :error="summaryState.model.error" />
 										</div>
 
-										<template v-if="!summaryState.error">
+										<div
+											v-if="activeParkedNote"
+											class="jv-summary-body jv-draft-parked"
+											role="status"
+										>
+											{{ activeParkedNote }}
+										</div>
+										<template v-else-if="!summaryState.error">
 											<div class="jv-action-foot">
 												<button
 													class="jv-action-primary"
@@ -4146,19 +4153,31 @@
 						<div v-if="draftPanel.error" style="margin-top: 10px">
 							<ActionError :error="draftPanel.error" />
 						</div>
+						<!-- Always present, so a screen reader announces the note when it fills. -->
+						<div
+							ref="draftParkedRegion"
+							class="jv-draft-parked"
+							:class="{ 'is-empty': !draftPanel.parked }"
+							role="status"
+							aria-live="polite"
+							tabindex="-1"
+							style="margin-top: 10px"
+						>
+							{{ draftPanel.parked || "" }}
+						</div>
 					</div>
 					<div class="jv-draft-foot">
 						<button
 							v-if="draftPanel.submittable && draftPanel.verb === 'create'"
 							class="jv-action-2nd"
-							:disabled="draftPanel.applying"
+							:disabled="draftPanel.applying || !!draftPanel.parked"
 							@click="applyDraft(1)"
 						>
 							Create &amp; Submit
 						</button>
 						<button
 							class="jv-action-primary"
-							:disabled="draftPanel.applying"
+							:disabled="draftPanel.applying || !!draftPanel.parked"
 							@click="applyDraft(0)"
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
@@ -4239,6 +4258,7 @@ import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
 import { collectDocRefs } from "@/lib/docRefs";
+import { markParked, parkedByCard, parkedNoteFor, parkedNoteOf } from "@/lib/draftParked";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
@@ -7010,6 +7030,16 @@ function _actField(meta, label) {
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
+// Drafts the server turned into a gated confirmation card (sensitive
+// configuration): message name -> the note. Waiting, not saved, never re-applied.
+const parkedDrafts = ref(new Map());
+// Also after a reload: the waiting card carries the draft's message (from_draft).
+const activeParkedNote = computed(
+	() =>
+		parkedNoteFor(parkedDrafts.value, actionFor.value) ||
+		parkedByCard(pendingActions.value, actionFor.value)
+);
+const draftParkedRegion = ref(null);
 
 // Resizable edit panel — drag the inner (left) edge. Clamped to [min, max],
 // snaps to the default within +/-10px, width persisted to localStorage. Scoped
@@ -7481,6 +7511,16 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
 		}
 	}
+	// Which draft this is, captured before the round-trip (a new turn may replace it).
+	const draftKey = actionFor.value;
+	const waiting =
+		parkedNoteFor(parkedDrafts.value, draftKey) ||
+		parkedByCard(pendingActions.value, draftKey);
+	if (waiting) {
+		// Already a waiting card: say so instead of doing nothing.
+		p.parked = waiting;
+		return;
+	}
 	p.applying = true;
 	p.error = null;
 	try {
@@ -7503,6 +7543,19 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			p.applying = false;
 			p.error = r.error || { message: "Could not save. Check the values." };
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
+			return;
+		}
+		// Sensitive configuration: nothing was saved, a confirmation card now waits in
+		// the chat. Say so where the person clicked (no silent close) and mark the
+		// draft so it can't park a second card.
+		const parked = parkedNoteOf(r);
+		if (parked) {
+			p.applying = false;
+			p.parked = parked;
+			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
+			await nextTick();
+			if (draftParkedRegion.value) draftParkedRegion.value.focus();
+			await loadConversation(currentId.value);
 			return;
 		}
 		closeDraftPanel();
@@ -16063,6 +16116,18 @@ onUnmounted(() => {
 	transform: translateY(-50%);
 	color: var(--text-3);
 	pointer-events: none;
+}
+.jv-draft-parked {
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	color: var(--text-2);
+	font-size: 13px;
+}
+.jv-draft-parked.is-empty {
+	padding: 0;
+	border: 0;
+	margin-top: 0 !important;
 }
 .jv-draft-est {
 	flex-basis: 100%;

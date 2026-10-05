@@ -789,8 +789,18 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 			).insert(ignore_permissions=True)
 			raise frappe.ValidationError("after ddl")
 
+		# The write-risk guard refuses a root Custom Field insert inside a tool call;
+		# take Custom Field off the structure list so it stands in for an app's
+		# DDL doctype the list does not know, which is what this test is about.
+		from jarvis.tools import _write_risk
+
 		try:
-			name, out, _ = self._run(body, tool="run_import", args={"doctype": "ToDo", "file_url": "/y.csv"})
+			with patch.object(
+				_write_risk, "STRUCTURE_DOCTYPES", _write_risk.STRUCTURE_DOCTYPES - {"Custom Field"}
+			):
+				name, out, _ = self._run(
+					body, tool="run_import", args={"doctype": "ToDo", "file_url": "/y.csv"}
+				)
 			self.assertEqual(self.row(name).reason_code, "partial")
 		finally:
 			cf = frappe.db.get_value("Custom Field", {"dt": "ToDo", "fieldname": fieldname})

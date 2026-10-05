@@ -183,11 +183,14 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 	result = None
 	try:
 		with impersonate(user or row.exec_user):
+			# allow_risky: a human approved this row, so the write-risk guard admits
+			# the sensitive records its arguments name (and nothing else).
 			result = api.dispatch_confirmed(
 				row.tool,
 				args,
 				provenance=_PROVENANCE[row.kind],
 				provenance_name=row.name if row.kind != "chat" else "",
+				allow_risky=True,
 			)
 			api._apply_run_method_read_filter(row.tool, result)
 	except Exception:
@@ -204,9 +207,18 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 	return result, interfered, crash_tb
 
 
-def _discard_failed_dispatch(row, args: dict, crash_tb: str, *, actor: str | None = None) -> None:
-	"""Full rollback of a failed dispatch, then re-record what must survive it."""
+def _discard_failed_dispatch(
+	row, args: dict, crash_tb: str, *, actor: str | None = None, result: dict | None = None
+) -> None:
+	"""Full rollback of a failed dispatch, then re-record what must survive it. A
+	write the risk guard refused stays ``refused`` (the rollback dropped the row
+	``_dispatch_and_wrap`` wrote), against the doctype it refused."""
 	from jarvis import agent_audit
+	from jarvis.tools._write_risk import REFUSAL_CODES
+
+	err = (result or {}).get("error") if isinstance(result, dict) else None
+	err = err if isinstance(err, dict) else {}
+	refused = not crash_tb and err.get("code") in REFUSAL_CODES
 
 	frappe.db.rollback()  # resets both callback deques; after_rollback clears realtime
 	# An empty list is falsy, so the next webhook re-registers its flush; a stale
@@ -219,9 +231,10 @@ def _discard_failed_dispatch(row, args: dict, crash_tb: str, *, actor: str | Non
 		tool=row.tool,
 		args=args,
 		result=None,
-		outcome="failed",
+		outcome="refused" if refused else "failed",
 		provenance=_PROVENANCE[row.kind],
 		provenance_name=row.name if row.kind != "chat" else "",
+		ref_doctype=err.get("doctype") if refused else None,
 	)
 	if crash_tb:
 		frappe.log_error(title="jarvis.pending_action.dispatch_crashed", message=crash_tb)
@@ -344,7 +357,7 @@ def _execute_locked(
 	args = call.get("args") or {}
 	result, interfered, crash_tb = _dispatch(row, args)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
-		_discard_failed_dispatch(row, args, crash_tb)
+		_discard_failed_dispatch(row, args, crash_tb, result=result)
 	ok = not crash_tb and api.envelope_ok(row.tool, result)
 	status = EXECUTED if ok else FAILED
 	code = None if ok else ("partial" if interfered else "failed")
