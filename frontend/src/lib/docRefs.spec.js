@@ -55,6 +55,25 @@ describe("collectDocRefs", () => {
 		expect(refs).toEqual({ "Grant Plastics Ltd.": "Customer" });
 	});
 
+	it("reads the rows of a list wrapped with a note", () => {
+		const refs = collectDocRefs([
+			tool(
+				{ doctype: "Customer" },
+				{
+					ok: true,
+					data: {
+						rows: [{ name: "Grant Plastics Ltd." }, { name: "West View Software" }],
+						note: "n",
+					},
+				}
+			),
+		]);
+		expect(refs).toEqual({
+			"Grant Plastics Ltd.": "Customer",
+			"West View Software": "Customer",
+		});
+	});
+
 	it("ignores names shorter than 4 characters and non-tool rows", () => {
 		const refs = collectDocRefs([
 			tool({ doctype: "UOM", name: "Nos" }, { ok: true }),

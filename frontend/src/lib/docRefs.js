@@ -23,7 +23,9 @@ export function collectDocRefs(messages) {
 		const res = parseJson(m.tool_result);
 		const dt = args.doctype;
 		if (args.name) add(dt, args.name);
-		const data = res && res.data;
+		let data = res && res.data;
+		// A list read can come back wrapped with a note: {rows, note}.
+		if (data && Array.isArray(data.rows)) data = data.rows;
 		if (Array.isArray(data)) {
 			for (const row of data) if (row && row.name) add(row.doctype || dt, row.name);
 		} else if (data && typeof data === "object") {

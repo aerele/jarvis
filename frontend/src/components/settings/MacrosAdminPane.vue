@@ -772,9 +772,21 @@ function askHandover(row) {
 }
 
 // After a hold or a hand-over, answered or refused: the row's state on the server
-// may have changed either way.
-async function onHeld({ name }) {
+// may have changed either way. A hand-over dialog still open (refused) is given the
+// row as re-read, so its owner is the one the server now has: a macro that changed
+// hands would otherwise be refused at every retry. One no longer listed closes it,
+// its message in a toast.
+async function onHeld({ name, message }) {
 	await load("keep");
+	if (handoverOpen.value && handingOver.value && handingOver.value.name === name) {
+		const fresh = rows.value.find((r) => r.name === name);
+		if (fresh) {
+			handingOver.value = fresh;
+		} else {
+			handoverOpen.value = false;
+			if (message) toast.error(escapeHtml(message));
+		}
+	}
 	await focusRow(name);
 }
 

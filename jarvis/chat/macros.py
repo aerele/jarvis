@@ -2382,7 +2382,7 @@ def _disarm_for_skills(conversation: str, run_name: str | None, step: int, skill
 	To the end of the run, not for one step: nothing arms a conversation again
 	mid-run (``run_macro`` stamps it once), and while it is disarmed its owner may
 	type into it, so a message of theirs could run armed."""
-	note = _FOREIGN_SKILLS_NOTE.format(skills=_listed([f"/{slug}" for slug in skills]))
+	note = _FOREIGN_SKILLS_NOTE.format(skills=_first_few([f"/{slug}" for slug in skills]))
 	frappe.db.set_value(CONV, conversation, "skip_confirmation", 0, update_modified=False)
 	if run_name:
 		frappe.get_doc(
@@ -2397,6 +2397,14 @@ def _disarm_for_skills(conversation: str, run_name: str | None, step: int, skill
 		).insert(ignore_permissions=True)
 	frappe.db.commit()
 	return note
+
+
+def _first_few(slugs: list, shown: int = 5) -> str:
+	"""``slugs`` in a sentence, the first ``shown`` by name and the rest counted: a read
+	judged on every skill its reader can see can name a great many."""
+	if len(slugs) <= shown:
+		return _listed(slugs)
+	return f"{', '.join(slugs[:shown])} and {len(slugs) - shown} more"
 
 
 def _recorded_skill_disarm(run_name: str, step: int) -> str:
