@@ -1450,8 +1450,10 @@ class TestALostSandboxIsARefusal(_LostSavepoint):
 		# card parks normally.
 		from jarvis import api
 
+		# side_effect (not a bare replacement) keeps dispatch a MagicMock, so the
+		# call can be asserted on; if it WERE reached it would still lose the savepoint.
 		with (
-			patch.object(api, "dispatch", self._tool_that_loses_the_savepoint) as dispatch,
+			patch.object(api, "dispatch", side_effect=self._tool_that_loses_the_savepoint) as dispatch,
 			patch("jarvis.chat.pending_confirm.mint") as mint,
 		):
 			result = api._run_tool("submit_doc", {"doctype": "ToDo", "name": "x"})
@@ -1465,7 +1467,7 @@ class TestALostSandboxIsARefusal(_LostSavepoint):
 		# cannot occur.
 		from jarvis import api
 
-		with patch.object(api, "dispatch", self._tool_that_loses_the_savepoint) as dispatch:
+		with patch.object(api, "dispatch", side_effect=self._tool_that_loses_the_savepoint) as dispatch:
 			out = api._pending_preview("submit_doc", {"doctype": "ToDo", "name": "x"})
 		dispatch.assert_not_called()
 		self.assertTrue(out["described"])
