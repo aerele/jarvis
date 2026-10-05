@@ -1,8 +1,11 @@
 """Scheduled auditor runs — the identity-safe agent scheduler.
 
-An hourly cron (``jarvis.hooks.scheduler_events``) calls
+A five-minute cron (``jarvis.hooks.scheduler_events``) calls
 :func:`run_due_agent_audits`, which fires every enabled AUDITOR installation
-whose ``next_run_at`` has passed. Modeled on
+whose ``next_run_at`` has passed. The sweep was hourly, so an audit set for 10:15
+started at 11:00, the same defect the macro sweep had (admin-v2#675). A slot whose
+launch FAILED is retried about an hour later, not on every sweep (``_retry_later``),
+and one sweep dispatches at most ``SWEEP_MAX_PER_TICK`` installations. Modeled on
 ``jarvis.chat.macro_scheduler.run_due_macros`` but hardened per the adversarial
 review:
 
@@ -24,9 +27,9 @@ review:
 * **O4 (#672):** the slot is CLAIMED (``next_run_at`` advanced) under a
   per-installation lock BEFORE the enqueue, so a crash anywhere in the launch
   leaves the slot spent rather than due; a launch that provably created nothing
-  hands the claim back, records a ``failed`` run and notifies the owner. The
-  missed slot is NOT backfilled (``compute_next_run`` from *now* yields a single
-  next future slot).
+  schedules ONE retry of the slot about an hour out, records a ``failed`` run and
+  notifies the owner. The missed slot is NOT backfilled (``compute_next_run`` from
+  *now* yields a single next future slot).
 * **O7:** identical ``(owner, agent, cadence, time)`` due rows are deduped.
 
 ``_launch_audit`` is shared with ``agents_api.run_agent_now`` so a manual
@@ -120,13 +123,39 @@ MAX_CONSECUTIVE_POLL_FAILURES = 2
 # prevent.
 DISPATCH_LOCK_TTL_S = 300
 
+# How long a slot whose launch failed waits before the sweep tries it again. The
+# sweep runs every five minutes; handing the slot straight back (as the hourly sweep
+# did) would record a failed run and notify the owner twelve times an hour instead of
+# once. Written to ``next_run_at`` on the row, never held in the cache: pump.watchdog,
+# on the same five-minute cron, ends each cycle with a full frappe.clear_cache() (see
+# ``macro_scheduler._RETRY_AFTER_S``, which this mirrors). 55 minutes, not 60: until a
+# site migrates, this code still runs on the old HOURLY job, and a retry exactly an
+# hour out misses the next tick by seconds and waits two.
+_RETRY_AFTER_S = 55 * 60
+
+# The most installations one sweep dispatches; the rest stay due and the next sweep,
+# five minutes later, takes them, oldest slot first. The sweep is sequential, each
+# launch makes an admin call (normally about a second, up to
+# admin_client.DEFAULT_TIMEOUT_S when admin is slow) and the cron job is killed at
+# the default queue's timeout. A sweep killed mid-launch costs the slot it had
+# claimed (a missed run, the safe side), so a smaller batch that finishes is better
+# than a whole tenant's 09:00 slots in one job that may not.
+SWEEP_MAX_PER_TICK = 25
+
 
 # --------------------------------------------------------------------------- #
-# hourly cron
+# five-minute cron
 # --------------------------------------------------------------------------- #
 def run_due_agent_audits() -> None:
-	"""Run every enabled auditor installation whose next_run_at is due. Runs as
-	Administrator (the scheduler user); each audit executes as its own owner."""
+	"""Run every enabled auditor installation whose next_run_at is due, at most
+	``SWEEP_MAX_PER_TICK`` of them, oldest slot first. Runs as Administrator (the
+	scheduler user); each audit executes as its own owner.
+
+	Two sweeps never run at once in practice (Frappe does not enqueue a scheduled job
+	that is still queued or running), and nothing here depends on that: a slot is
+	claimed by a compare-and-set under the per-installation dispatch lock before it is
+	launched (``_dispatch``), so an overlapping sweep reading the same due row finds it
+	taken and leaves it alone."""
 	now = now_datetime()
 	due = frappe.get_all(
 		INSTALLATION,
@@ -143,7 +172,10 @@ def run_due_agent_audits() -> None:
 			"installable",
 			"source_apps_json",
 			"activation_state",
+			"next_run_at",
 		],
+		order_by="next_run_at asc, name asc",
+		limit=SWEEP_MAX_PER_TICK,
 	)
 	if not due:
 		return
@@ -159,8 +191,10 @@ def run_due_agent_audits() -> None:
 		# hourly tick re-reads the same due set and dies on the same row again. The
 		# concrete case was a schedule_time the arithmetic could not use, but the
 		# guarantee wanted here is structural: no single poisoned row can starve a
-		# tenant's agents. The slot is left DUE on this path (a failure never advances
-		# the schedule), so the next tick retries it.
+		# tenant's agents. A failure never consumes the slot: if it raised before the
+		# slot was claimed, the slot is retried about an hour later (not on every
+		# five-minute sweep, which would write an Error Log twelve times an hour). If
+		# it raised after the claim, the slot was taken and is not touched here.
 		try:
 			_sweep_one(row, now, original_user, seen)
 		except Exception:
@@ -171,6 +205,7 @@ def run_due_agent_audits() -> None:
 				title=f"jarvis scheduled agent sweep failed: {row.name}",
 				message=frappe.get_traceback(),
 			)
+			_retry_later(row, now, expected=row.next_run_at)
 
 
 def _sweep_one(row, now, original_user: str, seen: set) -> None:
@@ -351,9 +386,8 @@ def _dispatch(
 	   BEFORE the launch, so a failed set_value, a killed RQ worker or an OOM leaves
 	   the slot consumed rather than due. That is the safe direction: a lost slot
 	   resumes at the next cadence, a duplicate audit cannot be taken back. Keying
-	   idempotency on the RUN instead does not work: audits finish in minutes and
-	   ticks are hourly, so by the next tick the run is ``completed`` and a liveness
-	   check sees nothing at all.
+	   idempotency on the RUN instead does not work: audits finish in minutes, so by a
+	   later tick the run is ``completed`` and a liveness check sees nothing at all.
 	3. **The live-run check**, which stops a SECOND CONCURRENT audit of one
 	   installation rather than a second dispatch of one slot. It is bounded by run
 	   freshness, never status alone (see ``_live_run``).
@@ -364,13 +398,14 @@ def _dispatch(
 	a failure of the bookkeeping, not of the audit, and handing the slot back there is
 	exactly how the duplicate was reached. A throw from the dispatch call itself is the
 	other case: ``_launch_audit`` has already stamped its own run ``failed``, nothing is
-	running, and the slot is genuinely unspent. Reading the run rather than the
-	exception is what tells the two apart.
+	running, and the slot is genuinely unspent, so ONE retry of it is scheduled about an
+	hour out (``_retry_later``). Reading the run rather than the exception is what tells
+	the two apart.
 
 	The fourth case, a dispatch that fails AMBIGUOUSLY (a timeout, or a reset mid-flight,
 	where admin may already have started the turn), is #743. ``_launch_audit`` no longer
 	records it ``failed``: it leaves the run ``running`` and re-raises AdminAmbiguousError,
-	and the explicit branch below keeps the slot CLAIMED rather than handing it back. So no
+	and the explicit branch below keeps the slot CLAIMED rather than retrying it. So no
 	fresh run id is minted an hour later, the fleet's run-id idempotency is never bypassed,
 	and the 3h stale-run reaper is the single arbiter of the still-running run. Leaving the
 	customer with a ``running`` run after a timeout is the accepted cost of never billing a
@@ -396,8 +431,8 @@ def _dispatch(
 			_record_failed(row, "scheduled run skipped: an audit for this agent was already running")
 			_advance(row, now)
 			return
-		prev = _claim_slot(row, now)
-		if prev is None:
+		claim = _claim_slot(row, now)
+		if claim is None:
 			return
 
 		# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
@@ -430,7 +465,10 @@ def _dispatch(
 			# The launch already failed its own run with the reason and logged the error.
 			frappe.set_user(original_user)
 			if e.token == "apply_in_progress":
-				_unclaim_slot(row, prev)  # the container was mid-apply: retry next sweep
+				# The container was mid-apply, which clears by itself: retry the slot
+				# later. Not on the next five-minute sweep: the launch already recorded
+				# a failed run, and every sweep would add another.
+				_retry_claimed_slot(row, now, claim)
 			else:
 				# Only a human or a platform upgrade fixes these: one notice, slot spent.
 				_notify_owner(row.owner, row, reason=str(e))
@@ -453,12 +491,14 @@ def _dispatch(
 				# the claim; the Error Log above is the operator's signal.
 				frappe.db.commit()
 				return
-			# Nothing durable was created, so this slot really is unspent: hand it back
-			# and retry next hour. compute_next_run(from=now) means even a long outage
-			# yields ONE next slot, never a backfill storm.
-			_unclaim_slot(row, prev)
+			# Nothing durable was created, so this slot really is unspent: retry it about
+			# an hour from now. The retry is scheduled FIRST: the record and the notice
+			# after it can fail, and the claim would then stand with nothing to retry.
+			# compute_next_run(from=now) means even a long outage yields ONE next slot,
+			# never a backfill storm.
+			retried = _retry_claimed_slot(row, now, claim)
 			_record_failed(row, "scheduled audit enqueue failed; see Error Log")
-			_notify_owner(row.owner, row)
+			_notify_owner(row.owner, row, retry_scheduled=retried)
 		finally:
 			if frappe.session.user != original_user:
 				frappe.set_user(original_user)
@@ -1825,9 +1865,10 @@ def _live_run(installation: str) -> str | None:
 
 
 def _claim_slot(row, now) -> dict | None:
-	"""Consume this slot durably BEFORE dispatching it, and return what it held so a
-	launch that provably created nothing can hand it back. None means another
-	dispatcher already claimed it.
+	"""Consume this slot durably BEFORE dispatching it. Returns what the row held
+	(``next_run_at``, ``last_run_at``) and the slot it now holds (``claimed``), so a
+	launch that provably created nothing can schedule a retry (``_retry_claimed_slot``).
+	None means another dispatcher already claimed it.
 
 	Compare-and-set under a ROW LOCK: the sweep's ``frappe.get_all`` does not lock, so
 	two dispatchers can read the same due row; re-reading ``next_run_at`` for update
@@ -1841,25 +1882,75 @@ def _claim_slot(row, now) -> dict | None:
 	if not cur or not cur.next_run_at or frappe.utils.get_datetime(cur.next_run_at) > now:
 		frappe.db.commit()  # release the row lock; this slot is not ours to run
 		return None
-	_advance(row, now)  # commits, releasing the row lock
-	return {"next_run_at": cur.next_run_at, "last_run_at": cur.last_run_at}
+	claimed = _advance(row, now)  # commits, releasing the row lock
+	return {"next_run_at": cur.next_run_at, "last_run_at": cur.last_run_at, "claimed": claimed}
 
 
-def _unclaim_slot(row, prev: dict) -> None:
-	"""Give a claimed slot back, unchanged, after a launch that created nothing. Only
-	ever called with the dispatch lock held and with a launch that left no live run,
-	so this cannot resurrect a slot some other dispatcher is running."""
-	frappe.db.set_value(
-		INSTALLATION,
-		row.name,
-		{"next_run_at": prev["next_run_at"], "last_run_at": prev["last_run_at"]},
-		update_modified=False,
-	)
-	frappe.db.commit()
+def _retry_claimed_slot(row, now, claim: dict) -> bool:
+	"""Schedule one retry of a slot this sweep claimed and whose launch created
+	nothing, and put back the ``last_run_at`` the claim stamped: nothing ran. Only ever
+	called with the dispatch lock held and with a launch that left no live run.
+
+	This used to hand the slot straight back (``next_run_at`` restored, still due), so
+	the next sweep retried it. With the sweep every five minutes that is a failed run
+	and an owner notice every five minutes; the retry now waits ``_RETRY_AFTER_S``."""
+	return _retry_later(row, now, expected=claim["claimed"], last_run_at=claim["last_run_at"])
 
 
-def _advance(row, now, stamp_last_run: bool = True) -> None:
-	"""Advance the schedule with a raw set_value (no re-validate). ``last_run_at`` is stamped
+_KEEP = object()
+
+
+def _retry_later(row, now, *, expected, last_run_at=_KEEP) -> bool:
+	"""Move this installation's ``next_run_at`` to ``_RETRY_AFTER_S`` from now, never
+	later than the schedule's own next occurrence. True only if this call moved it.
+
+	Compare-and-set in ONE UPDATE: the write lands only while the row still holds
+	``expected`` (the value this sweep last knew it to hold), so a schedule the owner
+	saved in the meantime is never overwritten, and a slot another dispatcher claimed
+	is never re-armed. The answer is the UPDATE's own row count (see
+	``macro_scheduler._retry_later``, which this mirrors).
+
+	``last_run_at`` is written in the same statement when given.
+
+	Never raises: it runs on failure paths, and failing to schedule a retry must not
+	abort the sweep for the installations behind this one. False then, and logged."""
+	try:
+		retry_at = min(
+			now + timedelta(seconds=_RETRY_AFTER_S),
+			compute_next_run(
+				row.schedule_frequency,
+				row.schedule_time,
+				from_dt=now,
+				weekday=row.get("schedule_weekday"),
+				day_of_month=row.get("schedule_day_of_month"),
+			),
+		)
+		values = {"retry_at": retry_at, "name": row.name, "expected": expected}
+		stamp = ""
+		if last_run_at is not _KEEP:
+			stamp = ", last_run_at=%(last_run_at)s"
+			values["last_run_at"] = last_run_at
+		frappe.db.sql(
+			f"""UPDATE `tab{INSTALLATION}` SET next_run_at=%(retry_at)s{stamp}
+			    WHERE name=%(name)s AND next_run_at=%(expected)s""",
+			values,
+		)
+		cursor = getattr(frappe.db, "_cursor", None)
+		landed = bool(cursor and cursor.rowcount == 1)  # read BEFORE commit resets it
+		frappe.db.commit()
+		return landed
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(
+			title=f"jarvis agent scheduler: could not schedule a retry: {row.name}",
+			message=frappe.get_traceback(),
+		)
+		return False
+
+
+def _advance(row, now, stamp_last_run: bool = True):
+	"""Advance the schedule with a raw set_value (no re-validate), and return the new
+	``next_run_at``. ``last_run_at`` is stamped
 	whether the slot produced a real, failed, or skipped run — the slot was consumed either way.
 
 	``stamp_last_run=False`` advances ONLY the next slot without stamping ``last_run_at``: used
@@ -1878,6 +1969,7 @@ def _advance(row, now, stamp_last_run: bool = True) -> None:
 		vals["last_run_at"] = now
 	frappe.db.set_value(INSTALLATION, row.name, vals, update_modified=False)
 	frappe.db.commit()
+	return vals["next_run_at"]
 
 
 def _record_failed(row, reason: str) -> None:
@@ -1914,11 +2006,13 @@ def _record_failed(row, reason: str) -> None:
 	frappe.db.commit()
 
 
-def _notify_owner(owner: str, row, reason: str | None = None) -> None:
+def _notify_owner(owner: str, row, reason: str | None = None, *, retry_scheduled: bool = True) -> None:
 	"""Best-effort owner notification on enqueue failure OR budget exhaustion (A14),
 	never raises. A budget message says the cap is hit + resets next month (it will
 	NOT simply retry next hour), so the owner is not left waiting on a run that can't
-	start until the budget rolls over or an admin raises it."""
+	start until the budget rolls over or an admin raises it. ``retry_scheduled`` says
+	whether an enqueue failure's retry was actually written (``_retry_later``), so the
+	notice never promises a retry that is not there."""
 	if not _valid_owner(owner):
 		return
 	is_budget = bool(reason) and "budget" in reason.lower()
@@ -1943,7 +2037,10 @@ def _notify_owner(owner: str, row, reason: str | None = None) -> None:
 					else f"A scheduled agent audit could not be started: {reason}"
 					if reason
 					else (
-						"A scheduled agent audit could not be started. It will retry on the next hourly run."
+						"A scheduled agent audit could not be started. It will retry within the hour."
+						if retry_scheduled
+						else "A scheduled agent audit could not be started. It will run again at "
+						"its next scheduled time."
 					)
 				),
 			}

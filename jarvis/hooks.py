@@ -340,6 +340,19 @@ scheduler_events = {
 			# failed runs or notifications.
 			# Cheap no-op (one query) when nothing is due.
 			"jarvis.chat.macro_scheduler.run_due_macros",
+			# Fire any due scheduled auditor agents. Identity-safe (runs each audit
+			# as its owner, never Administrator) and budget-capped; the slot is claimed
+			# under a per-installation lock before the launch, so an overlapping sweep
+			# cannot dispatch it twice. See jarvis/chat/agent_scheduler.py.
+			#
+			# Every five minutes, NOT hourly, for the same reason as the macro sweep
+			# above: the schedule takes a time to the minute, and an hourly sweep started
+			# a 10:15 audit at 11:00. The faster sweep does not run audits more often:
+			# each slot still runs once. A slot whose launch FAILED is retried only about
+			# hourly (agent_scheduler._retry_later writes the retry time to the row), and
+			# one sweep dispatches at most SWEEP_MAX_PER_TICK installations.
+			# Cheap no-op (one query on a small table) when nothing is due.
+			"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -420,10 +433,6 @@ scheduler_events = {
 		# window, logs both to the greppable latency channel, and alerts past a
 		# threshold. Read-only (never flips a row); cheap (one bounded scan + peeks).
 		"jarvis.chat.session_lifecycle.reconcile_action_cards",
-		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
-		# as its owner, never Administrator); budget-capped; advances only on a
-		# successful enqueue. See jarvis/chat/agent_scheduler.py.
-		"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		# A8 backstop: fail agent runs stuck `running` past the max duration and
 		# tear down their orphaned per-run session bearers (a crashed delegate
 		# would otherwise leave a live session credential forever).
