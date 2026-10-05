@@ -529,7 +529,12 @@ def reap_stale_agent_runs() -> int:
 	finish already moved off running is LEFT ALONE, and the per-run session is torn down
 	only AFTER the transition is won + committed. That whole locked transition lives in
 	``_terminalize_stuck_run``, shared with the #1061 poll so the two sweeps cannot
-	drift apart on it."""
+	drift apart on it.
+
+	It also purges the run rows an uninstall kept for last month's budget
+	(``purge_kept_budget_rows``), riding on this hourly entry because a new scheduler
+	entry only exists after a migrate."""
+	_purge_kept_budget_rows_quietly()
 	cutoff = now_datetime() - timedelta(seconds=STALE_RUN_AFTER_SECONDS)
 	reaped = 0
 	for r in _stale_candidates(cutoff):
@@ -1801,12 +1806,137 @@ def _runs_this_month(*, installation: str | None = None) -> int:
 	"""This month's NON-FAILED agent runs — for ONE installation (the per-install
 	budget) or the whole tenant (the aggregate ceiling). Failed rows are EXCLUDED
 	(A14): every skip path writes a ``failed`` row, so counting them would make the
-	cap self-perpetuating once hit. Manual + scheduled are counted together."""
-	month_start = frappe.utils.get_first_day(frappe.utils.today())
-	filters = {"creation": [">=", month_start], "status": ["!=", "failed"]}
-	if installation:
-		filters["installation"] = installation
-	return frappe.db.count(RUN, filters)
+	cap self-perpetuating once hit. Manual + scheduled are counted together.
+
+	The run rows an uninstall kept (``keep_budget_rows_of_uninstalled``) count too:
+	the tenant figure needs nothing for that (it never filters on the installation),
+	and an installation is also charged with the kept rows of the same agent and the
+	same owner. That pair is unique among installations, so it is exactly "this agent,
+	installed again by the person who uninstalled it"; another owner's install of the
+	agent has its own budget and is not charged."""
+	since = _budget_month_start()
+	if not installation:
+		return frappe.db.count(RUN, {"creation": [">=", since], "status": ["!=", "failed"]})
+	inst = frappe.db.get_value(INSTALLATION, installation, ["agent", "owner"], as_dict=True) or frappe._dict()
+	row = frappe.db.sql(
+		f"""SELECT COUNT(*) FROM `tab{RUN}`
+		    WHERE creation >= %(since)s AND IFNULL(status, '') != 'failed'
+		      AND (installation = %(installation)s
+		           OR (IFNULL(installation, '') = '' AND agent = %(agent)s AND owner = %(owner)s))""",
+		{"since": since, "installation": installation, "agent": inst.agent, "owner": inst.owner},
+	)
+	return int(row[0][0] or 0) if row else 0
+
+
+def _budget_month_start():
+	"""The first day of the budget month. One definition: the count above, what an
+	uninstall keeps and what the purge removes must agree on where a month starts."""
+	return frappe.utils.get_first_day(frappe.utils.today())
+
+
+# The run rows an uninstall keeps: ended, and counted by the budget (A14 excludes
+# ``failed``). A row still ``running`` is deleted with the installation, as every row was
+# before: kept, it would be a live run the poll and the reaper act on with no installation.
+_KEPT_ROW_STATUSES = ("completed", "partial", "stopped")
+
+# What a kept row loses. It is there to be counted, nothing else: what the run produced
+# (its output, notes, scope and coverage) goes, as it did when the row was deleted, and
+# so do links that would refuse a later delete of their target (a saved dashboard) or
+# resolve the row from a session key. ``conversation`` stays: it is what marks the audit
+# chat as machine-made for pattern learning, as the run row did before.
+_KEPT_ROW_CLEARED = (
+	"dashboard",
+	"session_key",
+	"error",
+	"coverage_note",
+	"assessment_output_json",
+	"assessment_config_json",
+	"input_snapshot_json",
+	"pages_json",
+	"coverage_json",
+	"scope_json",
+	"canvas_ref",
+	"permission_profile",
+)
+
+
+def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
+	"""Keep the run rows of an installation being uninstalled that this month's budget
+	counts, and return their names; the caller deletes the rest.
+
+	Uninstall used to delete every run row, so uninstalling and installing the agent
+	again handed the month's budget back, and the tenant-wide ceiling dropped with it.
+	A kept row has its installation cleared (the installation can then be deleted, and
+	the row is nobody's run history: every screen that lists runs leaves it out) and its
+	owner set to the installation's owner. Under PP-4 a shadow installation's runs are
+	owned by its reviewer, and the owner is what ``_runs_this_month`` matches a
+	reinstall on. ``purge_kept_budget_rows`` removes a kept row once its month is over.
+
+	Raw writes: the run controller refuses an ORM save that changes a launch field. Does
+	not commit; the caller commits with the rest of the uninstall."""
+	since = _budget_month_start()
+	kept = frappe.db.sql(
+		f"""SELECT name FROM `tab{RUN}`
+		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s""",
+		{"installation": installation, "since": since, "statuses": _KEPT_ROW_STATUSES},
+		pluck=True,
+	)
+	if not kept:
+		return []
+	# Notes left on the run (docmeta_api): the delete removed them with the row.
+	frappe.db.delete("Comment", {"reference_doctype": RUN, "reference_name": ["in", kept]})
+	# Only the fields this site has: a site not yet migrated to a release that added one
+	# has no column for it (the same check as macro_scheduler's hold fields).
+	meta = frappe.get_meta(RUN)
+	cleared = "".join(f", `{field}` = NULL" for field in _KEPT_ROW_CLEARED if meta.has_field(field))
+	frappe.db.sql(
+		f"""UPDATE `tab{RUN}` SET installation = NULL, owner = %(owner)s{cleared}
+		    WHERE name IN %(kept)s""",
+		{"owner": owner, "kept": tuple(kept)},
+	)
+	return kept
+
+
+# How many kept rows one pass of the purge removes. The hourly job comes back for the
+# rest; a site would need this many uninstalled-agent runs in one month to notice.
+_KEPT_ROW_PURGE_BATCH = 5000
+
+
+def purge_kept_budget_rows(owner: str | None = None) -> int:
+	"""Delete the run rows an uninstall kept for the budget once their month is over;
+	returns how many. They count toward nothing from then on and are shown nowhere.
+
+	One bounded statement, oldest rows first, and the same rows match again if it is
+	repeated or cut short. A run of an installed agent always has its installation, so
+	it is never touched, and neither is a row that has not ended. Does not commit.
+
+	``owner`` narrows it to one user's rows. The hourly job passes none; the tests do,
+	because they share a site and must not delete rows they did not make."""
+	frappe.db.sql(
+		f"""DELETE FROM `tab{RUN}`
+		    WHERE IFNULL(installation, '') = '' AND status IN %(statuses)s AND creation < %(since)s
+		      AND (%(owner)s IS NULL OR owner = %(owner)s)
+		    ORDER BY creation LIMIT %(batch)s""",
+		{
+			"statuses": _KEPT_ROW_STATUSES,
+			"since": _budget_month_start(),
+			"owner": owner,
+			"batch": _KEPT_ROW_PURGE_BATCH,
+		},
+	)
+	cursor = getattr(frappe.db, "_cursor", None)
+	return int(cursor.rowcount) if cursor else 0
+
+
+def _purge_kept_budget_rows_quietly() -> None:
+	"""The purge as a step of the hourly reaper. Committed here, and a failure is logged
+	and goes no further, so the stale-run sweep after it runs either way."""
+	try:
+		purge_kept_budget_rows()
+		frappe.db.commit()
+	except Exception:
+		frappe.db.rollback()
+		frappe.log_error(title="jarvis agent kept-row purge failed", message=frappe.get_traceback())
 
 
 def _over_run_budget(installation: str) -> tuple[bool, str]:
