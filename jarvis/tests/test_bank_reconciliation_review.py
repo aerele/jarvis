@@ -1,5 +1,8 @@
 """Bank reconciliation review: config, custody, completeness and proposals-only staging."""
 
+import importlib.util
+import os
+import unittest
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -435,3 +438,338 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		):
 			snap = self.snapshot()
 		self.assertEqual(snap["reason_code"], "permission_slice")
+
+
+def stored_snapshot():
+	snap = {
+		"scope": {
+			"company": "Example",
+			"bank_account": "BA",
+			"bank_gl": "GL",
+			"from_date": "2026-09-01",
+			"to_date": "2026-09-30",
+			"voucher_from": "2026-08-02",
+		},
+		"config": config(bank_account="BA"),
+		"site_date": "2026-10-05",
+		"complete": True,
+		"datasets": {
+			"bank_lines": [
+				{
+					"name": "BT-1",
+					"date": "2026-09-03",
+					"docstatus": 1,
+					"status": "Unreconciled",
+					"deposit": "100",
+					"withdrawal": "0",
+					"unallocated_amount": "100",
+				},
+				{
+					"name": "BT-2",
+					"date": "2026-09-04",
+					"docstatus": 1,
+					"status": "Unreconciled",
+					"deposit": "0",
+					"withdrawal": "50",
+					"unallocated_amount": "50",
+				},
+				{
+					"name": "BT-3",
+					"date": "2026-09-05",
+					"docstatus": 1,
+					"status": "Unreconciled",
+					"deposit": "50",
+					"withdrawal": "0",
+					"unallocated_amount": "50",
+				},
+				{
+					"name": "BT-4",
+					"date": "2026-09-06",
+					"docstatus": 0,
+					"status": "Pending",
+					"deposit": "9",
+					"withdrawal": "0",
+					"unallocated_amount": "9",
+				},
+			],
+			"vouchers": [
+				{
+					"doctype": "Payment Entry",
+					"name": "PE-1",
+					"direction": "in",
+					"amount": "100",
+					"linked_bank_lines": [],
+				},
+				{
+					"doctype": "Payment Entry",
+					"name": "PE-2",
+					"direction": "out",
+					"amount": "100",
+					"linked_bank_lines": [],
+				},
+				{
+					"doctype": "Payment Entry",
+					"name": "PE-3",
+					"direction": "in",
+					"amount": "100",
+					"linked_bank_lines": ["BT-9"],
+				},
+			],
+			"accounts": [
+				{"name": "Bank Charges - EX", "account_name": "Bank Charges", "root_type": "Expense"}
+			],
+		},
+	}
+	snap["source_digest"] = review.digest(snap)
+	return snap
+
+
+def finding(ref, state, **extra):
+	row = {
+		"token": review.TOKEN,
+		"ref_doctype": "Bank Transaction",
+		"ref_name": ref,
+		"amount": 0,
+		"result_class": "derived_candidate",
+		"note": "n",
+		"review_state": state,
+		"candidates": [],
+		"pair": None,
+		"proposed_entry": None,
+		"match_confidence": None,
+	}
+	row.update(extra)
+	return row
+
+
+def good_findings():
+	return [
+		finding(
+			"BT-1",
+			"match_proposed",
+			match_confidence="high",
+			candidates=[{"doctype": "Payment Entry", "name": "PE-1"}],
+		),
+		finding("BT-2", "reversal_pair", pair="BT-3"),
+		finding("BT-3", "reversal_pair", pair="BT-2"),
+	]
+
+
+class TestBankReconOutput(FrappeTestCase):
+	def run_doc(self, snap=None):
+		return frappe._dict(input_snapshot_json=frappe.as_json(snap or stored_snapshot()), agent=review.AGENT)
+
+	def check(self, findings, snap=None, coverage=None, scope=None):
+		snap = snap or stored_snapshot()
+		coverage = coverage or {review.TOKEN: {"state": "evaluated", "drafts_awaiting_submission": 1}}
+		scope = scope or snap["scope"]
+		sealed = review.digest(
+			{
+				"input_digest": snap["source_digest"],
+				"scope": scope,
+				"findings": findings,
+				"coverage": coverage,
+			}
+		)
+		with patch.object(review, "collect", return_value=snap):
+			return review.validate_output(self.run_doc(snap), findings, coverage, scope, sealed)
+
+	def assertRejected(self, findings, **kw):
+		self.assertRaises(frappe.ValidationError, self.check, findings, **kw)
+
+	def test_valid_output_is_ready(self):
+		self.assertTrue(self.check(good_findings())[2])
+
+	def test_missing_extra_and_duplicate_lines_rejected(self):
+		self.assertRejected(good_findings()[:2])
+		self.assertRejected(good_findings() + [finding("BT-4", "needs_decision")])
+		self.assertRejected(good_findings() + [good_findings()[0]])
+
+	def test_unknown_linked_and_wrong_direction_vouchers_rejected(self):
+		for name in ("PE-404", "PE-3", "PE-2"):
+			rows = good_findings()
+			rows[0]["candidates"] = [{"doctype": "Payment Entry", "name": name}]
+			self.assertRejected(rows)
+
+	def test_voucher_proposed_for_two_lines_rejected(self):
+		snap = stored_snapshot()
+		snap["datasets"]["bank_lines"][2].update(deposit="100", unallocated_amount="100")
+		snap["source_digest"] = review.digest({k: v for k, v in snap.items() if k != "source_digest"})
+		rows = good_findings()
+		rows[1:] = [
+			finding("BT-2", "needs_decision"),
+			finding(
+				"BT-3",
+				"match_proposed",
+				match_confidence="low",
+				candidates=[{"doctype": "Payment Entry", "name": "PE-1"}],
+			),
+		]
+		self.assertRejected(rows, snap=snap)
+
+	def test_unpaired_reversal_rejected(self):
+		rows = good_findings()
+		rows[2] = finding("BT-3", "needs_decision")
+		self.assertRejected(rows)
+		snap = stored_snapshot()
+		snap["datasets"]["bank_lines"].append({**snap["datasets"]["bank_lines"][1], "name": "BT-5"})
+		snap["source_digest"] = review.digest({k: v for k, v in snap.items() if k != "source_digest"})
+		rows = good_findings()
+		rows[2]["pair"] = "BT-5"
+		self.assertRejected(rows + [finding("BT-5", "reversal_pair", pair="BT-3")], snap=snap)
+
+	def test_draft_must_match_line_direction_amount_and_known_account(self):
+		base = {
+			"payment_type": "Pay",
+			"amount": "50",
+			"account": "Bank Charges - EX",
+			"party_type": None,
+			"party": None,
+			"basis": "bank_charges",
+		}
+		rows = good_findings()
+		rows[1] = finding("BT-2", "draft_proposal", proposed_entry=base)
+		rows[2] = finding("BT-3", "needs_decision")
+		self.assertTrue(self.check(rows)[2])
+		for bad in (
+			{"payment_type": "Receive"},
+			{"amount": "49"},
+			{"account": "Other - EX"},
+			{"party": "Somebody"},
+		):
+			rows = good_findings()
+			rows[1] = finding("BT-2", "draft_proposal", proposed_entry={**base, **bad})
+			rows[2] = finding("BT-3", "needs_decision")
+			self.assertRejected(rows)
+
+	def test_states_and_confidence_are_closed_sets(self):
+		for bad in (
+			{"review_state": "reconciled"},
+			{"match_confidence": "certain"},
+			{"amount": 1},
+			{"result_class": "confirmed_outcome"},
+		):
+			rows = good_findings()
+			rows[0].update(bad)
+			self.assertRejected(rows)
+
+	def test_tampered_digest_and_scope_rejected(self):
+		snap = stored_snapshot()
+		self.assertRaises(
+			frappe.ValidationError,
+			review.validate_output,
+			self.run_doc(snap),
+			good_findings(),
+			{review.TOKEN: {"state": "evaluated"}},
+			snap["scope"],
+			"0" * 64,
+		)
+		self.assertRejected(good_findings(), scope={**snap["scope"], "to_date": "2026-09-29"})
+
+	def test_incomplete_snapshot_returns_not_evaluable(self):
+		snap = stored_snapshot()
+		snap.update(complete=False, reason_code="permission_slice", detail="x")
+		snap["source_digest"] = review.digest({k: v for k, v in snap.items() if k != "source_digest"})
+		findings, coverage, ready = self.check(
+			[],
+			snap=snap,
+			coverage={review.TOKEN: {"state": "not_evaluable", "reason_code": "permission_slice"}},
+		)
+		self.assertEqual((findings, ready), ([], False))
+		self.assertEqual(coverage[review.TOKEN]["reason_code"], "permission_slice")
+
+	def test_drift_after_capture_is_not_ready(self):
+		snap = stored_snapshot()
+		drifted = {**snap, "source_digest": "f" * 64}
+		coverage = {review.TOKEN: {"state": "evaluated", "drafts_awaiting_submission": 1}}
+		sealed = review.digest(
+			{
+				"input_digest": snap["source_digest"],
+				"scope": snap["scope"],
+				"findings": good_findings(),
+				"coverage": coverage,
+			}
+		)
+		with patch.object(review, "collect", return_value=drifted):
+			_f, cov, ready = review.validate_output(
+				self.run_doc(snap), good_findings(), coverage, snap["scope"], sealed
+			)
+		self.assertFalse(ready)
+		self.assertEqual(cov[review.TOKEN]["reason_code"], "run_truncated_watermark")
+
+	def test_review_context_states_scope_and_no_authority(self):
+		text = review.review_context(stored_snapshot(), finding("BT-1", "needs_decision"))
+		for needle in (
+			"BA",
+			"2026-09-01",
+			"2026-09-30",
+			"30 calendar days",
+			"BANK-RECON-v1",
+			"does not reconcile",
+		):
+			self.assertIn(needle, text)
+
+	def test_stage_reviews_forwards_to_shared_custody(self):
+		with patch.object(operator_review, "stage_reviews", return_value=["AR-1"]) as staged:
+			self.assertEqual(review.stage_reviews("run", "inst", ["f"]), ["AR-1"])
+		self.assertIs(staged.call_args.args[3], review)
+
+
+_STORE = os.path.join(
+	os.path.dirname(frappe.utils.get_bench_path()), "jarvis", "jarvis-agents", "agents", "bank-recon-operator"
+)
+_STORE = os.environ.get("JARVIS_BANK_RECON_STORE", os.path.normpath(_STORE))
+
+
+@unittest.skipUnless(os.path.isfile(os.path.join(_STORE, "assessment.py")), "bank-recon store bundle absent")
+class TestBankReconStoreContract(FrappeTestCase):
+	"""The private matcher's output passes the bench gate unchanged."""
+
+	def test_store_output_is_accepted(self):
+		spec = importlib.util.spec_from_file_location(
+			"bank_recon_store", os.path.join(_STORE, "assessment.py")
+		)
+		assessment = importlib.util.module_from_spec(spec)
+		spec.loader.exec_module(assessment)
+		snap = stored_snapshot()
+		data = snap["datasets"]
+		data["bank_lines"][0]["reference_number"] = "BRR-REF-100"
+		data["bank_lines"][1]["description"] = "RVSL BRR-REF-777"
+		data["bank_lines"][2]["reference_number"] = "BRR-REF-777"
+		data["bank_lines"].append(
+			{
+				"name": "BT-5",
+				"date": "2026-09-07",
+				"docstatus": 1,
+				"status": "Unreconciled",
+				"deposit": "0",
+				"withdrawal": "5",
+				"unallocated_amount": "5",
+				"description": "SMS ALERT CHG",
+			}
+		)
+		for voucher in data["vouchers"]:
+			voucher["posting_date"] = "2026-09-02"
+		data["vouchers"][0]["reference"] = "BRR-REF-100"
+		snap.pop("source_digest")
+		snap["source_digest"] = review.digest(snap)
+		out = assessment.evaluate(snap)
+		states = {row["ref_name"]: row["review_state"] for row in out["findings"]}
+		self.assertEqual(
+			states,
+			{
+				"BT-1": "match_proposed",
+				"BT-2": "reversal_pair",
+				"BT-3": "reversal_pair",
+				"BT-5": "draft_proposal",
+			},
+		)
+		with patch.object(review, "collect", return_value=snap):
+			findings, _coverage, ready = review.validate_output(
+				self.run_doc(snap), out["findings"], out["coverage"], out["scope"], out["integrity_digest"]
+			)
+		self.assertTrue(ready)
+		self.assertEqual(len(findings), 4)
+
+	def run_doc(self, snap):
+		return frappe._dict(input_snapshot_json=frappe.as_json(snap), agent=review.AGENT)

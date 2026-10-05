@@ -402,3 +402,163 @@ def get_inputs(run):
 	from jarvis.chat import operator_review
 
 	return operator_review.get_inputs(run, operator_review.backend(AGENT))
+
+
+def _unavailable(reason, detail):
+	return {
+		TOKEN: {
+			"state": "not_evaluable",
+			"reason_code": reason or "record_coverage_insufficient",
+			"detail": detail or "Complete evidence is required.",
+		}
+	}
+
+
+def _direction(line):
+	return "in" if Decimal(str(line["deposit"])) > 0 else "out"
+
+
+def _reject(message):
+	frappe.throw(message)
+
+
+def _check_finding(row, lines, vouchers, accounts):
+	if (
+		row.get("token") != TOKEN
+		or row.get("ref_doctype") != "Bank Transaction"
+		or row.get("result_class") != "derived_candidate"
+		or row.get("amount") != 0
+		or not isinstance(row.get("note"), str)
+		or row.get("review_state") not in STATES
+	):
+		_reject("Bank reconciliation results must be proposals, never reconciliation outcomes.")
+	line = lines[row["ref_name"]]
+	state, candidates = row["review_state"], row.get("candidates") or []
+	keys = [(c.get("doctype"), c.get("name")) for c in candidates if isinstance(c, dict)]
+	if len(keys) != len(candidates) or len(set(keys)) != len(keys):
+		_reject("Each candidate must be a distinct voucher.")
+	for key in keys:
+		voucher = vouchers.get(key)
+		if not voucher or voucher["direction"] != _direction(line) or voucher["linked_bank_lines"]:
+			_reject("A candidate must be an unlinked captured voucher in the bank line's direction.")
+	entry, pair = row.get("proposed_entry"), row.get("pair")
+	expected = {
+		"match_proposed": len(keys) == 1 and row.get("match_confidence") in ("high", "medium", "low"),
+		"ambiguous": len(keys) >= 2,
+		"reversal_pair": not keys and isinstance(pair, str),
+		"draft_proposal": not keys and isinstance(entry, dict),
+		"needs_decision": not keys and not entry and not pair,
+	}[state]
+	if not expected or (state != "match_proposed" and row.get("match_confidence") is not None):
+		_reject("Bank reconciliation result shape does not match its review state.")
+	if (state != "draft_proposal" and entry is not None) or (state != "reversal_pair" and pair is not None):
+		_reject("Only drafts carry a proposed entry and only reversals carry a pair.")
+	if state == "draft_proposal":
+		want = "Receive" if _direction(line) == "in" else "Pay"
+		try:
+			same_amount = Decimal(str(entry.get("amount"))) == Decimal(str(line["unallocated_amount"]))
+		except (InvalidOperation, TypeError):
+			same_amount = False
+		if (
+			entry.get("payment_type") != want
+			or not same_amount
+			or (entry.get("account") is not None and entry["account"] not in accounts)
+			or entry.get("party") is not None
+			or entry.get("party_type") is not None
+		):
+			_reject(
+				"A proposed entry must follow the bank line's direction and amount, with a known account and no guessed party."
+			)
+	return keys if state == "match_proposed" else []
+
+
+def validate_output(run, findings, coverage, scope, integrity_digest):
+	"""Fail closed on omitted lines, foreign vouchers, stale inputs, altered scope or unbound results."""
+	stored = frappe.parse_json(run.input_snapshot_json or "null")
+	if not stored or scope != stored["scope"]:
+		_reject("Bank reconciliation output must reference the captured launch scope and evidence.")
+	expected = digest(
+		{"input_digest": stored["source_digest"], "scope": scope, "findings": findings, "coverage": coverage}
+	)
+	if integrity_digest != expected:
+		_reject("Bank reconciliation result digest does not match its captured inputs and output.")
+	if set(coverage or {}) != {TOKEN} or not isinstance(coverage[TOKEN], dict):
+		_reject("Bank reconciliation output must include its declared coverage.")
+	if not stored["complete"]:
+		return [], _unavailable(stored.get("reason_code"), stored.get("detail")), False
+	if not findings and coverage[TOKEN].get("state") == "not_evaluable":
+		return [], coverage, False
+	data = stored["datasets"]
+	lines = {
+		row["name"]: row
+		for row in data["bank_lines"]
+		if row["docstatus"] == 1
+		and row["status"] == "Unreconciled"
+		and scope["from_date"] <= row["date"] <= scope["to_date"]
+	}
+	refs = [row.get("ref_name") for row in findings if isinstance(row, dict)]
+	if len(refs) != len(findings) or len(set(refs)) != len(refs) or set(refs) != set(lines):
+		_reject("Bank reconciliation output must contain exactly one result per unreconciled bank line.")
+	vouchers = {(v["doctype"], v["name"]): v for v in data["vouchers"]}
+	accounts = {a["name"] for a in data["accounts"]}
+	claimed = []
+	for row in findings:
+		claimed += _check_finding(row, lines, vouchers, accounts)
+	if len(set(claimed)) != len(claimed):
+		_reject("One voucher cannot be proposed as the match for two bank lines.")
+	by_ref = {row["ref_name"]: row for row in findings}
+	for row in findings:
+		if row["review_state"] == "reversal_pair":
+			other = by_ref.get(row["pair"])
+			if (
+				not other
+				or other["review_state"] != "reversal_pair"
+				or other["pair"] != row["ref_name"]
+				or _direction(lines[other["ref_name"]]) == _direction(lines[row["ref_name"]])
+				or Decimal(str(lines[other["ref_name"]]["unallocated_amount"]))
+				!= Decimal(str(lines[row["ref_name"]]["unallocated_amount"]))
+			):
+				_reject(
+					"A reversal must pair two equal, opposite in-scope bank lines that point at each other."
+				)
+	current = collect(stored["scope"], stored["config"])
+	if current["source_digest"] != stored["source_digest"]:
+		return (
+			[],
+			_unavailable(
+				"run_truncated_watermark",
+				"Bank evidence or permissions changed after capture. Re-run before reviewing any proposals.",
+			),
+			False,
+		)
+	return findings, coverage, True
+
+
+def review_context(stored, finding):
+	scope, policy = stored["scope"], stored["config"]
+	return (
+		f"Company: {scope['company']}. Bank account: {scope['bank_account']}. "
+		f"Statement window: {scope['from_date']} to {scope['to_date']}. "
+		f"Vouchers read from {scope['voucher_from']} ({policy['voucher_lookback_days']} calendar days before the window). "
+		f"Policy: {policy['policy_version']}. Current records only. "
+		"Approving this does not reconcile, allocate, create or post anything; reconcile in the Bank Reconciliation Tool.\n\n"
+		+ finding["note"]
+	)
+
+
+def stage_reviews(run, inst, findings):
+	from jarvis.chat import operator_review
+
+	return operator_review.stage_reviews(run, inst, findings, operator_review.backend(AGENT))
+
+
+def may_review(doc):
+	from jarvis.chat.operator_review import may_review as allowed
+
+	return allowed(doc)
+
+
+def check_review(doc, approve):
+	from jarvis.chat import operator_review
+
+	return operator_review.check_review(doc, approve, operator_review.backend(AGENT))
