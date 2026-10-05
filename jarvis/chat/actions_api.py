@@ -179,12 +179,14 @@ def load_doc(doctype: str, name: str) -> dict:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def draft_computed(action: dict | str | None = None) -> dict:
-	"""What ERPNext computes for a create card's rows (amounts, tax totals) that the
-	model leaves blank (#647). The values are inserted in the preview sandbox, with
-	the same checks as the write and mandatory fields not enforced, then rolled back;
-	only the requested ``columns`` (``{table field: [fieldnames]}``) come back, after
-	permlevel masking. Display only: never written. Any failure is ``{"ok": False}``,
-	so the card just keeps its blanks."""
+	"""What ERPNext computes for a create card's rows (item amounts, tax totals) that
+	the model leaves blank (#647). The values are set on an UNSAVED document with the
+	same checks as the write, and ERPNext's own calculation runs on it, as Desk's form
+	does while you type: nothing is inserted, so no document hook, trigger or Server
+	Script runs for a card that is only being shown. Only a doctype ERPNext totals
+	(``calculate_taxes_and_totals``) is computed; only the requested read-only
+	``columns`` (``{table field: [fieldnames]}``) come back, after permlevel masking.
+	Any refusal or failure is ``{"ok": False}`` and the card keeps its blanks."""
 	refuse_in_tool_dispatch()
 	a = frappe.parse_json(action) if isinstance(action, str) else (action or {})
 	doctype = (a.get("doctype") or "").strip()
@@ -196,25 +198,45 @@ def draft_computed(action: dict | str | None = None) -> dict:
 
 	from jarvis.exceptions import PreviewSandboxLost
 	from jarvis.tools import _write_risk
-	from jarvis.tools._preview_sandbox import preview_sandbox
-	from jarvis.tools.create_doc import _insert_one, _validate_create_args
+	from jarvis.tools.create_doc import _validate_create_args
 
 	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
 	try:
-		# Structure and sensitive configuration never dry-run from a card.
+		# Structure and sensitive configuration are never computed from a card.
 		if _write_risk.check("create_doc", {"doctype": doctype, "values": values}) == "sensitive":
 			return {"ok": False}
 		_validate_create_args(doctype, values)
-		with preview_sandbox():
-			doc = _insert_one(doctype, values, ignore_mandatory=True)
+		doc = _calculate_draft(doctype, values)
+		if doc is None:
+			return {"ok": False}
+		doc.apply_fieldlevel_read_permissions()
+		return {"ok": True, "tables": _requested_rows(doc, columns)}
 	except PreviewSandboxLost:
 		raise  # not undone cleanly: fail the request so nothing is committed
-	except Exception:  # a refusal or a failed validate: the card keeps its blanks
+	except Exception:  # a refusal or a failed calculation: the card keeps its blanks
 		return {"ok": False}
 	finally:
 		frappe.local.jarvis_dispatch_depth -= 1
 		frappe.clear_messages()
-	doc.apply_fieldlevel_read_permissions()
+
+
+def _calculate_draft(doctype: str, values: dict):
+	"""The unsaved document with ERPNext's missing values and totals filled, or None
+	for a doctype ERPNext does not total. In the preview sandbox all the same, so a
+	read that writes is rolled back."""
+	from jarvis.tools._preview_sandbox import preview_sandbox
+	from jarvis.tools.create_doc import build_doc
+
+	doc = build_doc(doctype, values)
+	if not (hasattr(doc, "calculate_taxes_and_totals") and hasattr(doc, "set_missing_values")):
+		return None
+	with preview_sandbox():
+		doc.set_missing_values(for_validate=True)
+		doc.calculate_taxes_and_totals()
+	return doc
+
+
+def _requested_rows(doc, columns: dict) -> dict:
 	tables = {}
 	for tf, wanted in columns.items():
 		df = doc.meta.get_field(tf) if isinstance(tf, str) else None
@@ -223,12 +245,17 @@ def draft_computed(action: dict | str | None = None) -> dict:
 		child = frappe.get_meta(df.options)
 		known = [f for f in wanted if isinstance(f, str) and _is_shown(child.get_field(f))]
 		tables[tf] = [{f: row.get(f) for f in known} for row in doc.get(tf) or []]
-	return {"ok": True, "tables": tables}
+	return tables
 
 
 def _is_shown(df) -> bool:
-	"""A child field the card could show: data-bearing, and never a secret."""
-	return bool(df) and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and df.fieldtype != "Password"
+	"""A child field ERPNext computes for the card: read-only, data-bearing, never a secret."""
+	return (
+		bool(df)
+		and bool(df.read_only)
+		and df.fieldtype not in _SKIP_CHILD_FIELDTYPES
+		and df.fieldtype != "Password"
+	)
 
 
 # apply_action is the human-authored EDIT path only: the human deliberately

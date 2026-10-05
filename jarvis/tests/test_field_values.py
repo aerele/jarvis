@@ -465,6 +465,8 @@ class TestNumbersReachValidateAsNumbers(_Defaults, FrappeTestCase):
 		self.assertEqual(frappe.db.get_value("Sales Order Item", row, ["qty", "amount"]), (3, 30))
 
 	def test_the_draft_panel_confirm_casts_too(self):
+		from unittest.mock import patch
+
 		from jarvis.chat.actions_api import apply_action
 
 		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "j2a numbers"}).insert(
@@ -473,6 +475,17 @@ class TestNumbersReachValidateAsNumbers(_Defaults, FrappeTestCase):
 		values = self._order_values(qty=2, rate=5, conversion_factor="1")
 		out = {}
 		action = {"verb": "create", "doctype": "Sales Order", "conversation": conv.name, "values": values}
-		types = self._row_types_at_validate(lambda: out.update(apply_action(frappe.as_json(action))))
+		# apply_action commits a real write; keep this class's fixtures inside its rollback.
+		with patch.object(frappe.db, "commit"):
+			types = self._row_types_at_validate(lambda: out.update(apply_action(frappe.as_json(action))))
 		self.assertTrue(out.get("ok"), out)
 		self.assertEqual(types, [(int, int, float)])
+
+	def test_the_preview_tool_casts_too(self):
+		from jarvis.tools.preview_doc import preview_doc
+
+		values = self._order_values(qty="2", rate="5", conversion_factor="1")
+		out = {}
+		types = self._row_types_at_validate(lambda: out.update(preview_doc("Sales Order", values)))
+		self.assertTrue(out.get("valid"), out)
+		self.assertEqual(types, [(float, float, float)])

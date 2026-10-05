@@ -84,15 +84,23 @@ def _insert_one(
 	``ignore_mandatory``: the held-write classifier's sandbox (collect mode).
 	The field type check runs first (``_field_values``): a value Frappe would store
 	as 0 or the database would refuse is rejected naming the field (R2-3)."""
+	doc = build_doc(doctype, values)
+	if ignore_mandatory:
+		doc.flags.ignore_mandatory = True
+	doc.insert()  # runs DocType validate() + on_insert hooks; sets autoname
+	return doc
+
+
+def build_doc(doctype: str, values: dict) -> "frappe.model.document.Document":
+	"""An unsaved ``doctype`` holding ``values`` as a write would set them: the field
+	type check first (a bad value raises naming the field), then numeric strings cast
+	the way Frappe stores them, then the title. Shared by every insert and dry run."""
 	values = check_values(doctype, values)
 	doc = frappe.new_doc(doctype)
 	for field, value in values.items():
 		doc.set(field, value)
 	cast_numbers(doc)
 	_set_title_from_title_field(doc)
-	if ignore_mandatory:
-		doc.flags.ignore_mandatory = True
-	doc.insert()  # runs DocType validate() + on_insert hooks; sets autoname
 	return doc
 
 
