@@ -1626,6 +1626,10 @@ def uninstall_agent(installation: str) -> dict:
 	) as acquired:
 		if not acquired:
 			frappe.throw(_("A run for this agent is starting right now. Try again in a moment."))
+		# A fresh read view: this request's snapshot opened at the get_doc above, and a
+		# launch that held the lock while we waited may have committed a running run.
+		# Nothing is pending here, so the commit only ends the stale snapshot.
+		frappe.db.commit()
 		stopped = _stop_live_runs_for_uninstall(doc.name)
 		_uninstall_cascade(doc, via_admin)
 	from jarvis.chat import agent_models

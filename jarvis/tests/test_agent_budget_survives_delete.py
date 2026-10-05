@@ -299,9 +299,48 @@ class TestUninstallStopsALiveRun(AgentBudgetTestCase):
 		self.assertIsNotNone(row, "the live run was deleted instead of stopped")
 		self.assertEqual((row.status, row.installation), ("stopped", None))
 		self.assertIsNotNone(row.finished_at)
-		self.assertFalse(frappe.db.exists(SESSION, key), "the run's session bearer outlived it")
+		self.assertFalse(
+			frappe.db.exists(SESSION, {"session_key": key}), "the run's session bearer outlived it"
+		)
 		again = self._install_as(self.owner)
 		self.assertEqual(agent_scheduler._runs_this_month(installation=again), 1)
+
+	def test_a_run_committed_while_the_uninstall_waits_is_stopped(self):
+		"""A launch on another worker held the lock and committed a running run after this
+		request read the installation: the uninstall must see it past its old snapshot."""
+		from jarvis import _redis_lock
+		from jarvis.tests.race_harness import other_connection
+
+		inst = self._install_as(self.owner)
+		name = "budget-race-" + frappe.generate_hash(length=8)
+		real_lock = _redis_lock.redis_lock
+
+		@contextmanager
+		def _launched_elsewhere_while_waiting(lock_name, **kw):
+			with other_connection() as db:
+				db.sql(
+					f"""INSERT INTO `tab{RUN}` (name, creation, modified, owner, modified_by, agent,
+					installation, `trigger`, status, started_at)
+					VALUES (%s, NOW(), NOW(), %s, %s, %s, %s, 'scheduled', 'running', NOW())""",
+					(name, self.owner, self.owner, SLUG, inst),
+				)
+				db.commit()
+			with real_lock(lock_name, **kw) as acquired:
+				yield acquired
+
+		self.addCleanup(frappe.db.commit)
+		self.addCleanup(frappe.db.delete, RUN, {"name": name})
+		frappe.set_user(self.owner)
+		try:
+			frappe.get_doc(INSTALLATION, inst)  # the request's first read opens its snapshot
+			with patch.object(_redis_lock, "redis_lock", _launched_elsewhere_while_waiting):
+				out = agents_api.uninstall_agent(inst)
+		finally:
+			frappe.set_user("Administrator")
+
+		self.assertEqual(out, {"ok": True, "stopped_runs": 1})
+		row = frappe.db.get_value(RUN, name, ["status", "installation"], as_dict=True)
+		self.assertEqual((row.status, row.installation), ("stopped", None))
 
 	def test_an_uninstall_while_a_launch_holds_the_lock_is_refused(self):
 		from jarvis._redis_lock import redis_lock
