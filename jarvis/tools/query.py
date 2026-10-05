@@ -274,12 +274,21 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	for w in spec.get("where") or []:
 		q = q.where(_build_predicate(w, alias_map))
 
+	# The SELECT output aliases a bare ORDER BY / GROUP BY name may refer to.
+	# Any other bare name is a real column and goes through the permlevel ACL.
+	select_aliases = frozenset(
+		item["as"] for item in (spec.get("select") or []) if isinstance(item, dict) and item.get("as")
+	)
+
 	# GROUP BY. ``allow_alias`` mirrors ORDER BY: a bare name may reference
-	# a SELECT output alias (e.g. a computed ``month`` bucket) rather than
-	# a physical column — MariaDB resolves aliases in GROUP BY. The alias
-	# still passes the SEC-003 identifier check inside ``_resolve_field``.
+	# a declared SELECT output alias (e.g. a computed ``month`` bucket) rather
+	# than a physical column. ``group_by=True`` refuses an alias that shadows a
+	# real column, since MariaDB resolves GROUP BY names against the FROM tables
+	# first (see ``_resolve_field``).
 	for gb in spec.get("group_by") or []:
-		q = q.groupby(_resolve_field(gb, alias_map, allow_alias=True))
+		q = q.groupby(
+			_resolve_field(gb, alias_map, allow_alias=True, select_aliases=select_aliases, group_by=True)
+		)
 
 	# HAVING.
 	for h in spec.get("having") or []:
@@ -287,7 +296,7 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 
 	# ORDER BY.
 	for ob in spec.get("order_by") or []:
-		field = _resolve_field(ob["field"], alias_map, allow_alias=True)
+		field = _resolve_field(ob["field"], alias_map, allow_alias=True, select_aliases=select_aliases)
 		direction = Order.desc if ob.get("dir", "asc").lower() == "desc" else Order.asc
 		q = q.orderby(field, order=direction)
 
@@ -633,9 +642,11 @@ def _compute_permitted_read_fields(dt: str, base_doctype: str | None) -> frozens
 	yields ``parenttype=None``). Resolve the child's owning parent(s) instead —
 	the same ``_child_table_parents`` derivation step 3 uses for the
 	record-level gate — and permit a field if it is readable under ANY owning
-	parent the caller can read the child through. A child JOINed under a
-	concrete parent already carries that parent as ``base_doctype``, so use it
-	directly (unchanged pre-fix behaviour). Non-child DocTypes keep the plain
+	parent the caller can read the child through. A child JOINed under a parent
+	that OWNS it carries that parent as ``base_doctype``, so use it directly. A
+	``base_doctype`` that does not own the child (no Table field pointing at it)
+	is NOT trusted: its DocPerms say nothing about the child, so the child's
+	real readable parents are used instead. Non-child DocTypes keep the plain
 	``parenttype`` resolution.
 	"""
 	if not frappe.get_meta(dt).istable:
@@ -649,17 +660,29 @@ def _compute_permitted_read_fields(dt: str, base_doctype: str | None) -> frozens
 			)
 		)
 	# Child table: evaluate its field ACL against the owning parent(s).
-	if base_doctype and base_doctype != dt and not frappe.get_meta(base_doctype).istable:
+	from jarvis.tools.get_list import _child_table_parents, _readable_child_parents
+
+	if (
+		base_doctype
+		and base_doctype != dt
+		and not frappe.get_meta(base_doctype).istable
+		and base_doctype in _child_table_parents(dt)
+	):
+		# The FROM/base genuinely OWNS this child (a Table field points at it), so
+		# its DocPerms govern the child's fields: the usual parent -> child join,
+		# and an EXISTS sub-FROM scoped to one owning parent.
 		parents = [base_doctype]
 	else:
-		from jarvis.tools.get_list import _readable_child_parents
-
-		# Only parents the caller can actually read the child THROUGH — mirrors
-		# step 3's record-level gate. Without this filter, an owning parent with
-		# zero DocPerm rows would make get_permitted_fieldnames fall through to
-		# its "no permissions defined -> all fields" branch (frappe/model/meta.py)
-		# and leak a permlevel-restricted child field to a caller whose only real
-		# access path is a different, more restrictive parent.
+		# Child as FROM, or JOINed under a DocType that does NOT own it. The FROM's
+		# DocPerms say nothing about this child: trusting them let a caller read,
+		# say, Delivery Note Item rates through their Sales Order permlevel by
+		# joining the two on any ON condition. Use only the child's real parents
+		# the caller can read it THROUGH - mirrors step 3's record-level gate.
+		# Without that filter, an owning parent with zero DocPerm rows would make
+		# get_permitted_fieldnames fall through to its "no permissions defined ->
+		# all fields" branch (frappe/model/meta.py) and leak a permlevel-restricted
+		# child field to a caller whose only real access path is a different, more
+		# restrictive parent.
 		parents = _readable_child_parents(dt)
 	permitted: set[str] = set()
 	for parent in parents:
@@ -1009,13 +1032,33 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 	return table, alias_map
 
 
-def _resolve_field(field_ref: str, alias_map: dict, allow_alias: bool = False):
+def _bare_name_is_column(name: str, alias_map: dict) -> bool:
+	"""True when ``name`` is a real column of any table in scope, i.e. one MariaDB
+	could resolve an unqualified reference to."""
+	return any(name in frappe.get_meta(dt).get_valid_columns() for dt, _table in alias_map.values())
+
+
+def _resolve_field(
+	field_ref: str,
+	alias_map: dict,
+	allow_alias: bool = False,
+	select_aliases: frozenset = frozenset(),
+	group_by: bool = False,
+):
 	"""Resolve a ``"alias.field"`` reference to a pypika Field.
 
-	When ``allow_alias=True``, a bare name (no dot) is permitted and
-	returned as a pypika ``Field`` without table qualification — this
-	is the ORDER BY case where the operator may reference a SELECT
-	alias like ``total_qty``."""
+	When ``allow_alias=True`` (ORDER BY / GROUP BY), a bare name (no dot) that
+	is a declared SELECT output alias (``select_aliases``, e.g. ``total_qty``) is
+	returned as an unqualified pypika ``Field``. Any OTHER bare name is a real
+	column and is resolved - and permlevel-checked - like any column: emitting it
+	unqualified would let MariaDB resolve it to the physical column and order or
+	group by a field the caller cannot read, leaking its ranking / distribution.
+
+	GROUP BY additionally refuses the alias shortcut when the alias shares its
+	name with a real column in scope: MariaDB resolves an unqualified GROUP BY
+	name against the FROM tables BEFORE the SELECT aliases (ORDER BY is the
+	reverse, so a colliding ORDER BY alias is safe), so ``group_by: ["rate"]``
+	with an innocuous ``... as rate`` would still group by the hidden column."""
 	# Reject empty / non-string / dot-only refs. Without this, callers
 	# producing accidental empty strings (e.g. GROUP BY with an empty
 	# entry, ORDER BY with an unset field) would silently produce
@@ -1024,11 +1067,14 @@ def _resolve_field(field_ref: str, alias_map: dict, allow_alias: bool = False):
 	if not isinstance(field_ref, str) or not field_ref.strip():
 		raise InvalidArgumentError(f"field reference must be a non-empty string, got {field_ref!r}")
 	if "." not in field_ref:
-		if allow_alias:
-			# ORDER BY / GROUP BY may reference a SELECT output alias
-			# (e.g. total_qty) rather than a physical column, so we can
-			# only enforce SEC-003 identifier syntax here — column
-			# existence isn't knowable for an output alias.
+		if (
+			allow_alias
+			and field_ref in select_aliases
+			and not (group_by and _bare_name_is_column(field_ref, alias_map))
+		):
+			# A declared SELECT output alias rather than a physical column: column
+			# existence isn't knowable for it, so only SEC-003 identifier syntax
+			# applies. The aliased expression was itself ACL-checked in SELECT.
 			_validate_identifier(field_ref, "field")
 			from pypika import Field
 
