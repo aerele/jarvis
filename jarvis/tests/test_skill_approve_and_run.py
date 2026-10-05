@@ -2129,8 +2129,8 @@ class TestApproveAndRun(FrappeTestCase):
 			"the armed skill docname is stamped for the gate's live disarm re-check",
 		)
 		cont.assert_called_once()
-		self.assertFalse(
-			cont.call_args.kwargs.get("failed"), "the success continuation is not the failed scaffold"
+		self.assertEqual(
+			cont.call_args.kwargs.get("outcome"), "ok", "the success continuation is not a failed scaffold"
 		)
 		self.assertIsNone(pending_confirm.peek(token), "the token is single-use consumed")
 
@@ -2206,7 +2206,10 @@ class TestApproveAndRun(FrappeTestCase):
 			"a failed first step opens NO run (the flag is never set)",
 		)
 		cont.assert_called_once()
-		self.assertTrue(cont.call_args.kwargs.get("failed"), "the failed continuation scaffold fires")
+		# R2-3: the outcome vocabulary replaced the ``failed`` boolean (any non-ok outcome).
+		self.assertNotIn(
+			cont.call_args.kwargs.get("outcome"), (None, "ok"), "the failed continuation scaffold fires"
+		)
 		self.assertIsNone(pending_confirm.peek(token), "the token is burned on failure (user re-invokes)")
 
 	def test_no_skill_docname_refused_not_consumed_no_flag(self):

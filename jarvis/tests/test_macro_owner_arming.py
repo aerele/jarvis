@@ -1154,6 +1154,11 @@ class TestASkillFetchedByAnArmedRun(ArmedChatBase):
 		conv = self._armed_conv()
 		macro = self._macro(OWNER, "written")
 		write = {"doctype": MACRO, "name": macro, "changes": {"description": "changed"}}
+		# A write to a macro is sensitive configuration, which the write-risk guard
+		# cards in every mode; switched off here, so what is tested is the armed flag.
+		no_risk = patch("jarvis.tools._write_risk.check", return_value=None)
+		no_risk.start()
+		self.addCleanup(no_risk.stop)
 		frappe.set_user(OWNER)
 		with patch("jarvis.api.dispatch", return_value={"ok": True}) as dispatch:
 			api._run_tool("update_doc", write, conversation=conv)

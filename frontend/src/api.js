@@ -391,12 +391,13 @@ export const getActiveTurn = (conversation) =>
 // the target's read permission regardless — and are sent only when known
 // (mentions omit them). The list FilterGroup passes the schema entry's own
 // (doctype, fieldname), which the shared schema already knows.
-export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname) => {
+export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname, filters) => {
 	const args = { doctype, txt: txt || "", page_length: pageLength || 8 };
 	// Frappe's search_link params (frappe/desk/search.py): reference_doctype +
 	// keyword-only link_fieldname. Sent only when known.
 	if (referenceDoctype) args.reference_doctype = referenceDoctype;
 	if (linkFieldname) args.link_fieldname = linkFieldname;
+	if (filters?.length) args.filters = filters;
 	return call("frappe.desk.search.search_link", args);
 };
 

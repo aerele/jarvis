@@ -30,10 +30,8 @@
 			<span class="mep-model">{{ pillModel }}</span>
 			<!-- kept in layout (visibility, not v-if) so toggling thinkingOverride
 			     does not shift the Enter hint / Send button beside this pill -->
-			<span class="mep-dot" :class="{ 'mep-hide': !thinkingOverride }">·</span>
-			<span class="mep-effort" :class="{ 'mep-hide': !thinkingOverride }">{{
-				effortLabel
-			}}</span>
+			<span class="mep-dot" :class="{ 'mep-hide': !showEffort }">·</span>
+			<span class="mep-effort" :class="{ 'mep-hide': !showEffort }">{{ effortLabel }}</span>
 			<svg
 				class="mep-caret"
 				width="12"
@@ -118,11 +116,17 @@
 				<span class="mep-plus" aria-hidden="true">+</span>
 			</button>
 
-			<div class="mep-div" />
+			<div v-if="thinkingLevels.length || personaEnabled" class="mep-div" />
 
 			<!-- effort → side flyout (wrapper keeps the flyout a SIBLING of the row
-			     button, never nested inside it — interactive-in-button is invalid) -->
-			<div class="mep-sub" @mouseenter="cancelEffortClose" @mouseleave="scheduleEffortClose">
+			     button, never nested inside it — interactive-in-button is invalid).
+			     No levels = the workspace's model cannot think, so no choice. -->
+			<div
+				v-if="thinkingLevels.length"
+				class="mep-sub"
+				@mouseenter="cancelEffortClose"
+				@mouseleave="scheduleEffortClose"
+			>
 				<!-- click OPENS, it does not toggle. For a mouse user the pointer order
 				     is mouseenter (opens) then click, so a toggling click would close
 				     what the hover just opened and the flyout could never open by
@@ -274,6 +278,8 @@ const rootRef = ref(null);
 const triggerRef = ref(null);
 
 const pillModel = computed(() => props.modelOverride || props.defaultModel || "Auto");
+// A stored level the workspace cannot use (no levels offered) is not shown.
+const showEffort = computed(() => !!props.thinkingOverride && props.thinkingLevels.length > 0);
 const effortLabel = computed(() => {
 	const t = props.thinkingOverride;
 	return t ? t.charAt(0).toUpperCase() + t.slice(1) : "Auto";
