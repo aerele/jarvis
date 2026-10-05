@@ -243,12 +243,20 @@
 									class="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-ink-gray-5"
 								>
 									<span v-if="RESULT_CLASS_LABEL[f.result_class]">
-										{{ RESULT_CLASS_LABEL[f.result_class] }}
+										{{
+											displayFor(f.name).arReview
+												? "Derived review"
+												: RESULT_CLASS_LABEL[f.result_class]
+										}}
 									</span>
 									<span v-if="f.result_class === 'derived_candidate'">
 										{{
-											CONFIRMATION_LABEL[f.confirmation_status] ||
-											"Awaiting confirmation"
+											displayFor(f.name).arReview &&
+											(!f.confirmation_status ||
+												f.confirmation_status === "unconfirmed")
+												? "Not independently confirmed"
+												: CONFIRMATION_LABEL[f.confirmation_status] ||
+												  "Awaiting confirmation"
 										}}
 									</span>
 								</div>
@@ -291,8 +299,13 @@
 							     below - never in this primary sentence. displayFor(f.name)
 							     reads the precomputed findingDisplayMap entry - one
 							     extraction pass per finding, not one per template read. -->
+							<ArFindingDetails
+								v-if="displayFor(f.name).arReview"
+								:presentation="displayFor(f.name).arReview"
+								:finding="f"
+							/>
 							<div
-								v-if="displayFor(f.name).text"
+								v-else-if="displayFor(f.name).text"
 								class="prose prose-sm max-w-none"
 								v-html="renderMarkdown(displayFor(f.name).text)"
 							/>
@@ -303,7 +316,10 @@
 							</div>
 
 							<div
-								v-if="f.match_basis || f.false_positive_path"
+								v-if="
+									!displayFor(f.name).arReview &&
+									(f.match_basis || f.false_positive_path)
+								"
 								class="mt-4 space-y-3"
 							>
 								<div v-if="f.match_basis">
@@ -440,6 +456,8 @@ import { Badge, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-
 import JvSpinner from "@/components/JvSpinner.vue";
 import Banner from "@/components/Banner.vue";
 import RunStepTimeline from "./RunStepTimeline.vue";
+import ArFindingDetails from "./ArFindingDetails.vue";
+import { arFindingPresentation } from "@/lib/arFindingPresentation";
 // Shared, not a local copy: this panel's header pill is one of the surfaces
 // @/lib/agentRunStatus exists to keep in step with the rail and the Activity
 // feed (jarvis#1062). A second table here is exactly the drift it prevents.
@@ -862,7 +880,7 @@ function findingDisplay(f) {
 	if (f && f.rule_id && !all.some((d) => d.value === f.rule_id)) {
 		all.unshift({ label: "Rule", value: f.rule_id });
 	}
-	return { text, details: all };
+	return { text, details: all, arReview: arFindingPresentation(f, props.run.agent) };
 }
 // Review fix: an expanded row's template read findingDisplay(f) 2-3 times
 // (the v-if, the v-html source, and TechnicalDetails' :details prop), each
