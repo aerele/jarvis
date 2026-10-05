@@ -2,6 +2,7 @@
 // kind chat). Confirm / Discard go through the chat's own confirm_tool /
 // dismiss_tool, and every answer carries a reason_code; the words live here. All
 // plain text: callers escape it for an HTML sink (frappe-ui toasts).
+import { personError } from "./actionSummary.js";
 import { isSettled } from "./heldActions";
 
 const REFUSALS = {
@@ -30,7 +31,8 @@ const REFUSALS = {
 
 export function chatRefusalMessage(res) {
 	const code = (res && res.reason_code) || "";
-	const server = res && res.error && res.error.message;
+	// The person's words for a refusal written for the model (actionSummary.personError).
+	const server = res && res.error && personError(res.error).message;
 	if (code === "failed" && server) return `Couldn't complete it: ${server}`;
 	if (code === "partial" && server)
 		return `It may have partly run: ${server} Check before retrying.`;

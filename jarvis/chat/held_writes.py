@@ -52,6 +52,7 @@ from jarvis.chat.pending_actions._store import (
 	rowcount,
 	waiters,
 )
+from jarvis.tools import _write_risk
 
 HELD = "file_box_held"
 AR = "Jarvis Approval Request"
@@ -243,7 +244,32 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 		if not refusal and sheets:
 			refusal = held_sheets.draft_refusal(conversation, sheet)
 		return ("refuse", refusal) if refusal else ("apply", None)
+	if sheets and _write_risk.risk_of(tool, args) == "sensitive":
+		return "refuse", _sensitive_sheet_refusal(tool, args)
 	return held_sheets.classify_masters(items, conversation, sheet) if sheets else ("hold", items)
+
+
+def _sensitive_sheet_refusal(tool: str, args: dict) -> dict:
+	"""A record that changes sensitive configuration (R2-8 / R2-12: portal users, an
+	Employee's user, a sensitive doctype) never collects on the approval sheet: the
+	sheet shows records through its own editor, with no risk line and no full view,
+	so it is refused (audited) and left to a person in chat, where it gets its own
+	card. Without sheets the legacy hold gives it that card (``_dedup_or_park``)."""
+	from jarvis import api
+	from jarvis.exceptions import SensitiveWriteRefusedError
+
+	doctype = _write_risk.first_risky_target(tool, args)[0] or "This"
+	e = SensitiveWriteRefusedError(
+		f"{doctype} changes sensitive settings here, so an unattended File Box run cannot add it to "
+		"the review sheet. Do not retry it with another tool; leave it out and tell the user it "
+		"needs a person.",
+		doctype=doctype,
+	)
+	env = api._refuse_risky_write(tool, args, e)
+	env["error"]["hint"] = (
+		"Leave this record out; a person can ask for it in chat, where it gets its own card."
+	)
+	return env
 
 
 def _denied(doctype: str) -> dict | None:
@@ -549,7 +575,7 @@ def _recent_refusal(name: str) -> dict:
 
 
 def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_input=()) -> dict:
-	from jarvis.chat import confirm_card
+	from jarvis import api
 	from jarvis.chat.pending_actions import park
 
 	labels = missing_labels(needs_input)
@@ -561,7 +587,16 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_
 			raise _Rescan(row)
 		frappe.db.commit()
 		return _held(_WAIT_NOTE if subset else _OVERLAP_NOTE, labels)
-	card = confirm_card.build_card(tool, args, preview)
+	# A held write that changes sensitive configuration (an Employee user, portal
+	# users) gets the chat gate's card: the risk line, the record in full, and the
+	# same refusal when it cannot be shown whole (R2-8, J1-cards review).
+	sensitive = _write_risk.risk_of(tool, args) == "sensitive"
+	card, refusal = api._build_park_card(
+		tool, args, preview if isinstance(preview, dict) else {}, sensitive=sensitive
+	)
+	if refusal is not None:
+		frappe.db.commit()
+		return refusal
 	title = held_title(items)
 	name = park(
 		kind=HELD,

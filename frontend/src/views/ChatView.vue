@@ -4305,6 +4305,7 @@ import {
 	pendingCardOf,
 	verbSentence,
 	pendingExpiry,
+	toolFailureCopy,
 } from "@/lib/actionSummary";
 
 const session = inject("$session");
@@ -6017,7 +6018,8 @@ function explainSttUnavailable() {
 // delegate produces when its very first call is refused. Those rows are surfaced
 // inline instead; everything else keeps the accordion behaviour untouched. The
 // server writes plain, customer-facing text into error.message / error.hint for
-// this surface, so both are shown as-is.
+// this surface, so both are shown as-is; a refusal written for the model carries
+// error.person_message, which is shown instead (toolFailureCopy).
 const orphanToolFailures = computed(() => {
 	const out = {};
 	let cur = null;
@@ -6025,21 +6027,7 @@ const orphanToolFailures = computed(() => {
 		if (m.role === "user") cur = null;
 		else if (m.role === "assistant") cur = m.name;
 		else if (m.role === "tool" && !cur && !m.action_outcome && m.tool_status === "error") {
-			let v = m.tool_result;
-			if (typeof v === "string") {
-				try {
-					v = JSON.parse(v);
-				} catch (e) {
-					v = null;
-				}
-			}
-			const err = (v && v.error) || {};
-			out[m.name] = {
-				message:
-					(typeof err.message === "string" && err.message.trim()) ||
-					"This step couldn't be completed.",
-				hint: (typeof err.hint === "string" && err.hint.trim()) || "",
-			};
+			out[m.name] = toolFailureCopy(m.tool_result);
 		}
 	}
 	return out;

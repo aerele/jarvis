@@ -196,3 +196,21 @@ describe("ChatView shows the specific reason on a settled card", () => {
 		});
 	}
 });
+
+describe("chatRefusalMessage prefers the person's words", () => {
+	it("shows error.person_message over the model-facing message", () => {
+		const res = {
+			ok: false,
+			error: {
+				code: "sensitive_refused",
+				message:
+					"... Do not retry it with another tool; tell the user to use Data Import in Desk.",
+				person_message: "This import cannot be run from chat. Use Data Import in Desk.",
+			},
+		};
+		expect(chatRefusalMessage(res)).toBe(
+			"This import cannot be run from chat. Use Data Import in Desk."
+		);
+		expect(chatRefusalMessage({ ok: false, error: { message: "Plain" } })).toBe("Plain");
+	});
+});
