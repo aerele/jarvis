@@ -266,6 +266,10 @@ export const getDoctypeFormMeta = (doctype) => call(AC + "get_doctype_form_meta"
 export const loadDocForEdit = (doctype, name) => call(AC + "load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// What ERPNext computes for a create card's blank read-only cells (a rolled-back
+// dry run): {ok, tables: {table: [{fieldname: value}]}}. Display only (#647).
+export const draftComputed = (action) =>
+	call(AC + "draft_computed", { action: JSON.stringify(action) });
 // Write-safety gate (issue #186): confirm a parked ERP write by its one-time
 // token. Pass the conversation the click came from so the server enforces the
 // real conversation guard (#11). Returns the tool result envelope {ok, ...} on
