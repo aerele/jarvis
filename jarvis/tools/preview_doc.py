@@ -8,7 +8,9 @@ supplier with no linked Address) BEFORE creating.
 
 import frappe
 
+from jarvis.exceptions import PreviewSandboxLost
 from jarvis.tools._preview_sandbox import preview_sandbox
+from jarvis.tools._write_risk import check
 from jarvis.tools.create_doc import _set_title_from_title_field, _validate_create_args
 
 # Header fieldtypes worth echoing back (child tables + layout/HTML excluded).
@@ -65,6 +67,9 @@ def preview_doc(doctype: str, values: dict) -> dict:
 	document returns ``{valid: false, error}`` instead of raising. Use before
 	``create_doc`` on consequential documents (invoices, orders).
 	"""
+	# A structure change is refused before any dry run (round 2): it is set up in
+	# Desk, and its trial would only reach Frappe's implicit-commit refusal.
+	check("create_doc", {"doctype": doctype, "values": values})
 	_validate_create_args(doctype, values)
 
 	doc = frappe.new_doc(doctype)
@@ -75,6 +80,10 @@ def preview_doc(doctype: str, values: dict) -> dict:
 	try:
 		with preview_sandbox():
 			doc.insert()
+	except PreviewSandboxLost:
+		# Not "this document is invalid": the dry run could not be undone
+		# cleanly. Propagates to the tool-layer refusal.
+		raise
 	except Exception as e:
 		frappe.clear_messages()
 		return {"valid": False, "error": _error_text(e)}

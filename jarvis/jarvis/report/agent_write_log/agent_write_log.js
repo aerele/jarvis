@@ -26,7 +26,7 @@ frappe.query_reports["Agent Write Log"] = {
 			fieldname: "outcome",
 			label: __("Outcome"),
 			fieldtype: "Select",
-			options: ["", "applied", "failed", "discarded"].join("\n"),
+			options: ["", "applied", "failed", "discarded", "refused", "partial"].join("\n"),
 		},
 	],
 };

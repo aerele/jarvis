@@ -31,6 +31,9 @@ BOUND_FIELDS = (
 	"origin_conversation",
 	"skill_docname",
 	"run_id",
+	# R2-3: the failed card this one corrects. Bound so clearing it in the table
+	# (to win a second correction) reads as tampered; "" on rows sealed before it.
+	"corrects",
 )
 
 

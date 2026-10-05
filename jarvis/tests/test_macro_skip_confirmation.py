@@ -345,8 +345,7 @@ class TestRunMacroStampAndInert(FrappeTestCase):
 
 		frappe.set_user(NON_ADMIN_USER)
 		with (
-			patch.object(macros, "_run_step"),
-			patch.object(macros, "_run_merged"),
+			patch.object(macros, "_dispatch_step"),
 			patch.object(macros, "entitlement_block", return_value=None),
 		):
 			res = macros.run_macro(macro_name)
@@ -654,15 +653,17 @@ class TestD5StopAndReport(FrappeTestCase):
 			frappe.db.get_value(self.RUN, run_name, "status"), "completed", "no card -> normal advance"
 		)
 
-	def test_non_armed_run_not_stopped_by_d5(self):
-		"""D5 is armed-only: a non-armed run with a parked card is NOT stopped here
-		(the pre-existing behaviour is out of scope) and the card is not swept."""
+	def test_non_armed_run_is_not_swept_or_failed_by_d5(self):
+		"""D5's sweep-and-fail is armed-only: a non-armed run's card is the user's to
+		answer, so it is NOT swept and the run is not ``failed``. It is not
+		``completed`` either (it used to be: the write had never been applied); it ends
+		``stopped``, saying what it is waiting for (test_macro_run_outcome)."""
 		from jarvis.chat import macros
 
 		run_name, conv = self._run_and_conv(armed=False, current_step=1, total=1, name="d5-plain")
 		self._park_delete_card(conv)
 		macros.advance_after_turn(conv, errored=False)
-		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "completed")
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "status"), "stopped")
 		self.assertEqual(self._pending_count(conv), 1, "non-armed run must not sweep the card")
 
 
