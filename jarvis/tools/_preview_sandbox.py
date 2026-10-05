@@ -45,10 +45,12 @@ released. The order of all that is in ``_Sandbox.exit``.
 
 Still NOT sandboxed: HTTP or email sent directly inside a hook; a realtime
 event published immediately (``after_commit=False``); a write to a
-non-transactional table (Error Log is MyISAM on a stock site); DDL, which
-commits implicitly and takes the savepoint with it (the sandbox then fails
-closed, see ``PreviewSandboxLost``, but what was written before the DDL is
-committed); and ``enqueue(deduplicate=True)`` deleting a FINISHED job of the
+non-transactional table (Error Log is MyISAM on a stock site); DDL as the
+dry run's FIRST statement, which commits implicitly and takes the savepoint
+with it (the sandbox then fails closed, see ``PreviewSandboxLost``, but what the
+request wrote before is committed; DDL after any write makes Frappe raise
+``ImplicitCommitError`` before the ALTER, refused as a structure change, and the
+structure doctypes never reach a dry run: ``jarvis.tools._write_risk``); and ``enqueue(deduplicate=True)`` deleting a FINISHED job of the
 same id, which Frappe does before it ever asks for the queue.
 
 Frappe internals this leans on. None is public API; each was read in the
@@ -373,7 +375,11 @@ def _install_guard() -> None:
 		def get_queue(*args, **kwargs):
 			q = real(*args, **kwargs)
 			if _dropped_jobs() is None:
-				return q
+				# Outside a dry run: a job a Jarvis tool call enqueues runs under the
+				# write-risk guard in the worker too (a pass-through otherwise).
+				from jarvis.tools._write_risk import guard_queue
+
+				return guard_queue(q)
 			return _DroppingQueue(q.name, connection=q.connection, is_async=q.is_async)
 
 		background_jobs.get_queue = _guard = get_queue
@@ -532,6 +538,11 @@ class _Sandbox:
 		db = self.db = frappe.db
 		self.real_commit = db.commit
 		self.real_rollback = db.rollback
+		# Frappe 16 only. sql_ddl zeroes it and restores it without a finally, so a
+		# DDL the dry run refuses inside a doc_events handler leaves it at -1 (the
+		# handler's finally decrements): every later commit and full rollback of the
+		# request would then be silently skipped. Put back first thing at exit.
+		self.transaction_control = getattr(db, "_disable_transaction_control", None)
 		self.commit_queues = {
 			name: tuple(getattr(db, name)._functions)
 			for name in ("before_commit", "after_commit")
@@ -645,6 +656,9 @@ class _Sandbox:
 		   nothing may skip it: left set, every later real enqueue of this
 		   request would be silently dropped.
 
+		0. (Before 1) put Frappe 16's ``_disable_transaction_control`` back to its
+		   value at entry, so the rollbacks below are not skipped.
+
 		Then, with the request clean: re-raise the first error a step raised.
 		Otherwise, if the savepoint was lost, report it (one Error Log row)
 		and raise PreviewSandboxLost, unless the body raised: then its own
@@ -652,6 +666,7 @@ class _Sandbox:
 		self.returned_normally = returned_normally
 		first_error = None
 		for step in (
+			self._restore_transaction_control,
 			self._name_after_commit_jobs,
 			self._run_before_rollback,
 			self._roll_back_to_savepoint,
@@ -675,6 +690,10 @@ class _Sandbox:
 		_report_lost(self.dropped)
 		if returned_normally:
 			raise PreviewSandboxLost(_LOST_MESSAGE)
+
+	def _restore_transaction_control(self) -> None:
+		if self.transaction_control is not None:
+			self.db._disable_transaction_control = self.transaction_control
 
 	def _name_after_commit_jobs(self) -> None:
 		if self.returned_normally and self.dropped is not None:
