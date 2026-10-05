@@ -12,6 +12,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
 from jarvis.exceptions import InvalidFieldValueError
+from jarvis.tests import _erpnext_masters as masters
 from jarvis.tools._field_values import _check, check_values
 from jarvis.tools.create_doc import create_doc
 from jarvis.tools.update_doc import update_doc
@@ -38,12 +39,20 @@ class TestAcceptsWhatFrappeAccepts(_Defaults, FrappeTestCase):
 		super().setUpClass()
 		if "erpnext" not in frappe.get_installed_apps():
 			raise cls.skipException("ERPNext is not installed")
+		masters.clear_cache_after_rollback(cls)
 
 	def _item(self, **values) -> dict:
+		masters.ensure_item_group_and_uom()
 		frappe.db.delete("Item", {"item_code": ITEM})
 		return create_doc(
 			"Item",
-			{"item_code": ITEM, "item_group": "Services", "stock_uom": "Nos", "is_stock_item": 0, **values},
+			{
+				"item_code": ITEM,
+				"item_group": masters.ITEM_GROUP,
+				"stock_uom": masters.UOM,
+				"is_stock_item": 0,
+				**values,
+			},
 		)
 
 	def test_numbers_and_check(self):
@@ -243,25 +252,27 @@ class TestRejectsWhatFrappeWouldCorrupt(_Defaults, FrappeTestCase):
 		super().setUpClass()
 		if "erpnext" not in frappe.get_installed_apps():
 			raise cls.skipException("ERPNext is not installed")
+		masters.clear_cache_after_rollback(cls)
 
 	def test_baseline_frappe_saves_garbage_as_zero(self):
 		# What the check prevents: Frappe's own insert stores cint("abc") = 0.
+		masters.ensure_item_group_and_uom()
 		frappe.db.delete("Item", {"item_code": ITEM})
 		doc = frappe.get_doc(
 			{
 				"doctype": "Item",
 				"item_code": ITEM,
-				"item_group": "Services",
-				"stock_uom": "Nos",
+				"item_group": masters.ITEM_GROUP,
+				"stock_uom": masters.UOM,
 				"shelf_life_in_days": "abc",
 			}
 		).insert()
 		self.assertEqual(frappe.db.get_value("Item", doc.name, "shelf_life_in_days"), 0)
 
 	def test_qty_abc_in_an_item_row_names_the_field_and_saves_nothing(self):
-		company = frappe.db.get_value("Company", {}, "name")
-		customer = frappe.db.get_value("Customer", {}, "name")
-		item = frappe.db.get_value("Item", {"is_stock_item": 0, "disabled": 0, "has_variants": 0}, "name")
+		company = masters.ensure_ledger_company()
+		customer = masters.ensure_customer("_J2A Type Check Customer")
+		item = masters.ensure_item("_J2A Service Item", is_stock_item=0)
 		before = frappe.db.count("Sales Order")
 		r = _envelope(
 			"create_doc",
@@ -286,9 +297,16 @@ class TestRejectsWhatFrappeWouldCorrupt(_Defaults, FrappeTestCase):
 		self.assertEqual(frappe.db.count("Sales Order"), before)
 
 	def test_update_rejects_instead_of_storing_zero(self):
+		masters.ensure_item_group_and_uom()
 		frappe.db.delete("Item", {"item_code": ITEM})
 		create_doc(
-			"Item", {"item_code": ITEM, "item_group": "Services", "stock_uom": "Nos", "shelf_life_in_days": 7}
+			"Item",
+			{
+				"item_code": ITEM,
+				"item_group": masters.ITEM_GROUP,
+				"stock_uom": masters.UOM,
+				"shelf_life_in_days": 7,
+			},
 		)
 		with self.assertRaises(InvalidFieldValueError) as cm:
 			update_doc("Item", ITEM, {"shelf_life_in_days": "abc"})
