@@ -48,10 +48,12 @@ def payload(row) -> dict:
 	}
 
 
-def resolve_skill(skill_name: str, user: str, prefer=None):
+def resolve_skill(skill_name: str, user: str, prefer=None, *, audit: bool = True):
 	"""The row ``get_skill`` serves ``user`` (enabled + visible, own row wins; else the
 	lowest ``prefer(row)`` key, ties in query order). Raises InvalidArgumentError
-	(unknown) / PermissionDeniedError (not visible)."""
+	(unknown) / PermissionDeniedError (not visible). ``audit=False`` for a caller that
+	only checks which row a fetch would serve: a missed ``learned-`` slug is audited
+	(``_audit_learned_miss``) only when it was fetched."""
 	raw = (skill_name or "").strip().lower()
 	if not raw:
 		raise InvalidArgumentError("skill_name is required")
@@ -86,7 +88,8 @@ def resolve_skill(skill_name: str, user: str, prefer=None):
 		],
 	)
 	if not rows:
-		_audit_learned_miss(raw, user, "unknown")
+		if audit:
+			_audit_learned_miss(raw, user, "unknown")
 		raise InvalidArgumentError(f"unknown skill: {skill_name}")
 
 	user_roles = frappe.get_roles(user)
@@ -96,7 +99,8 @@ def resolve_skill(skill_name: str, user: str, prefer=None):
 	_maybe_prefetch_children(rows, user, user_roles)
 	usable = [r for r in rows if _visible(r, user, user_roles)]
 	if not usable:
-		_audit_learned_miss(raw, user, "denied")
+		if audit:
+			_audit_learned_miss(raw, user, "denied")
 		raise PermissionDeniedError(f"no access to skill: {skill_name}")
 
 	own = next((r for r in usable if r.owner == user), None)
