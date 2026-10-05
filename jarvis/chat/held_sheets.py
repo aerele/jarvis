@@ -41,7 +41,7 @@ from jarvis.chat.pending_actions._store import (
 	reseal_sheet,
 	rowcount,
 )
-from jarvis.exceptions import JarvisError
+from jarvis.exceptions import InvalidFieldValueError, JarvisError
 
 SHEET_TOOL = "file_box_sheet"
 SHEET_MAX_RECORDS = 250
@@ -619,7 +619,11 @@ def _try(record: dict, index: int, remap: dict) -> tuple | None:
 		raise
 	except _KNOWN as e:
 		frappe.db.rollback(save_point=sp)
-		if isinstance(e, _HARD) or not isinstance(e, frappe.ValidationError):
+		# A value the field type check rejects (R2-3) is the record's own, like the
+		# ValidationError Frappe raised for it before: it tries once, then joins flagged.
+		if not isinstance(e, InvalidFieldValueError) and (
+			isinstance(e, _HARD) or not isinstance(e, frappe.ValidationError)
+		):
 			return "refused", e
 		missing = _missing(record, values, index, remap) if record["op"] == "create" else None
 		if missing:
@@ -974,7 +978,7 @@ def file_questions(tool: str, args: dict, conversation: str) -> dict:
 	created to the sheet."""
 	from jarvis import api
 
-	result = api.dispatch_confirmed(tool, args, provenance="auto_apply")
+	result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 	if tool in held_parties.CREATE_TOOLS and result.get("ok"):
 		names = [n for dt, n in held_edit.created_refs(tool, args, result) if dt == AR and n]
 		if names and link_to_sheet(conversation, names) and isinstance(result.get("data"), dict):

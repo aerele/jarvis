@@ -545,6 +545,50 @@ class TestAgentsMarketplace(unittest.TestCase):
 			],
 		)
 
+	def test_ap_detail_exposes_saved_configuration_readiness(self):
+		slug = "ap-3way-match-operator"
+		original_status = frappe.db.get_value(LISTING, slug, "status")
+		original_roles = [row.role for row in frappe.get_doc("User", self.admin).roles]
+		try:
+			for role in ("Purchase User", "Stock User"):
+				_give_role(self.admin, role)
+			frappe.db.set_value(LISTING, slug, "status", "Published")
+			installation = _install_as(self.admin, slug)
+			frappe.set_user(self.admin)
+			agents_api.set_config(installation, json.dumps({"company": "Example"}))
+			detail = agents_api.get_agent(slug)
+			self.assertEqual(
+				set(detail["installation"]["configuration_issues"]),
+				{
+					"from_date",
+					"to_date",
+					"report_date",
+					"policy_version",
+					"price_tolerance_percent",
+					"basis",
+					"review_scope",
+				},
+			)
+			policy = {
+				"company": "Example",
+				"from_date": "2020-01-01",
+				"to_date": "2020-12-31",
+				"report_date": "2020-12-31",
+				"policy_version": "AP-review-v1",
+				"price_tolerance_percent": 0,
+				"basis": "current_records",
+				"review_scope": "document_matching_only",
+			}
+			agents_api.set_config(installation, json.dumps(policy))
+			self.assertEqual(agents_api.get_agent(slug)["installation"]["configuration_issues"], {})
+		finally:
+			frappe.set_user("Administrator")
+			frappe.db.set_value(LISTING, slug, "status", original_status)
+			user = frappe.get_doc("User", self.admin)
+			user.set("roles", [{"role": role} for role in original_roles])
+			user.save()
+			frappe.db.commit()
+
 	# ------------------------------------------------------------------ #
 	# jarvis#1062 E2E defect: turning a schedule off left the last computed
 	# next_run_at in place, so the Configure tab kept showing a stale
@@ -600,8 +644,6 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_dispatchless_operators_downgrade_to_coming_soon_on_resync(self):
 		operator_slugs = [
-			"ap-3way-match-operator",
-			"ar-collections-operator",
 			"bank-recon-operator",
 			"cycle-count-planner-operator",
 			"reorder-replenishment-operator",
@@ -620,6 +662,16 @@ class TestAgentsMarketplace(unittest.TestCase):
 				"Coming Soon",
 				f"{slug} must follow the registry's Coming Soon status on re-sync",
 			)
+
+	def test_ap_ar_review_operators_publish_on_resync(self):
+		operator_slugs = ("ap-3way-match-operator", "ar-collections-operator")
+		for slug in operator_slugs:
+			frappe.db.set_value(LISTING, slug, "status", "Coming Soon", update_modified=False)
+
+		agent_catalog.sync_agent_listings()
+
+		for slug in operator_slugs:
+			self.assertEqual(frappe.db.get_value(LISTING, slug, "status"), "Published")
 
 	# ------------------------------------------------------------------ #
 	# (d2) Phase 0A — delegate agent stub + body-free enablement signal

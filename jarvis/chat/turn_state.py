@@ -306,6 +306,18 @@ def _lock_conversation(conversation: str) -> None:
 	frappe.db.sql(f"SELECT name FROM `tab{CONV}` WHERE name=%(c)s FOR UPDATE", {"c": conversation})
 
 
+def unfinished_turn_state(conversation: str) -> str | None:
+	"""The state of a turn of this conversation that has not ended (queued, running,
+	finishing or recovering), or None when every turn has. One row off the
+	(conversation, state) index, however many turns the chat has had."""
+	rows = frappe.db.sql(
+		f"""SELECT state FROM `tab{TURN}`
+		WHERE conversation=%(c)s AND state IN %(live)s LIMIT 1""",
+		{"c": conversation, "live": NONTERMINAL_STATES},
+	)
+	return rows[0][0] if rows else None
+
+
 def read_turn(run_id: str) -> dict | None:
 	"""Read the fields a caller/test needs to compute the next CAS (state,
 	version, epoch, watermark, reservation, recovery discriminators)."""

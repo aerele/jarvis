@@ -37,6 +37,59 @@
  */
 export const CONFIG_FIELD_SET = [
 	{
+		key: "settlement_hold_days",
+		path: "settlement_hold_days",
+		label: "Recent-settlement hold",
+		type: "number",
+		suffix: "calendar days",
+		help: "Suggested: 3 calendar days (0–30). Hold recent allocations for reconciliation, not business-day or statutory grace-period calculation.",
+	},
+	{
+		key: "report_date",
+		path: "report_date",
+		label: "Evidence cutoff",
+		type: "date",
+		help: "Cannot be later than today. Current records, not historical reconstruction.",
+	},
+	{
+		key: "policy_version",
+		path: "policy_version",
+		label: "AP matching policy reference",
+		type: "text",
+		help: "AP-MATCH-v1 is a starter reference for these saved settings. Replace it with your organization's policy reference when applicable. Jarvis does not verify policy approval.",
+	},
+	{
+		key: "price_tolerance_percent",
+		path: "price_tolerance_percent",
+		label: "Net-price tolerance",
+		type: "number",
+		suffix: "%",
+		help: "Suggested: 0% (exact net-price match at source currency precision). A business control, not a tolerance prescribed by accounting standards. Confirm any allowance with your reviewer; quantities cannot exceed the linked order or receipt.",
+	},
+	{
+		key: "basis",
+		path: "basis",
+		label: "Evidence basis",
+		type: "select",
+		options: [
+			{ label: "Select a basis", value: "" },
+			{ label: "Current records only", value: "current_records" },
+		],
+	},
+	{
+		key: "review_scope",
+		path: "review_scope",
+		label: "Review scope",
+		type: "select",
+		options: [
+			{ label: "Confirm review scope", value: "" },
+			{
+				label: "Document matching only — no tax or posting approval",
+				value: "document_matching_only",
+			},
+		],
+	},
+	{
 		key: "company",
 		path: "company",
 		label: "Company",

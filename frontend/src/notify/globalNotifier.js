@@ -23,6 +23,7 @@ import { report as reportError } from "@/lib/errorReporter";
 // listeners on this socket cannot disagree about what counts as a duplicate.
 import { fenceAccept, fenceReject } from "@/utils/eventFence";
 import { agentName } from "@/branding";
+import { macroDoneSignal } from "@/lib/macroRunOutcome";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
 const MAX_TOASTS = 3;
@@ -152,6 +153,12 @@ export function attachGlobalNotifier({ socket, router }) {
 	const trigSignalAt = new Map();
 	const TRIG_SIGNAL_WINDOW_MS = 5000;
 
+	// When each conversation last had a failed turn announced. A macro step that
+	// fails raises run:error for its turn and, a moment later, macro:done for the
+	// run: one failure, and it gets one signal.
+	const runErrorSignalAt = new Map();
+	const MACRO_AFTER_RUN_ERROR_MS = 5000;
+
 	// Terminal fence, per listener. The server publishes a turn's terminal MORE THAN
 	// ONCE (settlement, then the finalize backstop re-publish), and ChatView has always
 	// deduped it one-shot so its announce + reload fire once. This listener did not, so
@@ -215,6 +222,7 @@ export function attachGlobalNotifier({ socket, router }) {
 				// A stop is the user's own click, seconds ago - the dot is useful, a
 				// notification saying "Reply ready" for the reply they just killed is not.
 				if (p.stopped) return;
+				if (p.kind === "run:error") runErrorSignalAt.set(conv, Date.now());
 				const body =
 					p.kind === "run:error"
 						? `${agentName} hit an error in ${convTitle(conv) || "your chat"}`
@@ -321,6 +329,32 @@ export function attachGlobalNotifier({ socket, router }) {
 				} else if (!onActivityTab) {
 					pushToast({ title, body, onClick: open });
 				}
+				return;
+			}
+			case "macro:done": {
+				// A macro run that FAILED. Before this, nothing outside the run's own
+				// conversation said so: the Runs tab had to be opened to find out.
+				const sig = macroDoneSignal(p);
+				if (!sig) return;
+				const conv = p.conversation || null;
+				if (
+					conv &&
+					Date.now() - (runErrorSignalAt.get(conv) || 0) < MACRO_AFTER_RUN_ERROR_MS
+				)
+					return; // the step's own failure was just announced
+				if (conv && conv !== onScreenConv()) {
+					store.markUnread(conv);
+					store.applyRemoteNew();
+				}
+				signal({
+					conv,
+					// A run with no conversation left has no screen that shows it.
+					toastAnywhere: !conv,
+					title: sig.title,
+					body: _excerpt(sig.body, 160),
+					tag: "jarvis-" + (conv || "macro"),
+					open: () => go(conv ? "/c/" + conv : "/macros/runs"),
+				});
 				return;
 			}
 			case "conversation:new": {
