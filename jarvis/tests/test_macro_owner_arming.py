@@ -1312,7 +1312,7 @@ class TestASkillReadAsARecordByAnArmedRun(ArmedChatBase):
 	def test_skills_the_owner_controls_keep_it_armed(self):
 		self._skill(OTHER, "side", share_with=OWNER)  # readable, but not read
 		for scope, author in (("User", OWNER), ("Org", OTHER), ("Role", OTHER)):
-			skill = self._skill(author, scope.lower(), scope=scope)
+			skill = self._skill(author, scope.lower(), scope=scope, share_with=ADMIN)  # a share row to list
 			for label, (tool, args) in self._reads(skill).items():
 				if label == "get_list (no name asked for)":
 					continue  # which rows came back is not known: judged on all it could read
