@@ -19,6 +19,8 @@ Run:
 from unittest.mock import patch
 
 import frappe
+from frappe.desk.reportview import execute
+from frappe.model import no_value_fields
 from frappe.utils import add_months, get_first_day, now_datetime, today
 
 from jarvis.chat import agent_models, agent_scheduler, agents_api
@@ -37,6 +39,22 @@ OTHER_OWNER = "budget-keep-other@example.com"
 REVIEWER = "budget-keep-reviewer@example.com"
 STEP = "Jarvis Agent Run Step"
 DASHBOARD = "Jarvis Dashboard"
+
+# What a finished run produced, set on a run that an uninstall then keeps.
+_RESULT = {
+	"findings_count": 7,
+	"advisory_findings_count": 4,
+	"blocker_count": 2,
+	"result_state": "partial",
+	"wm_row_count": 12345,
+	"integrity_digest": "budget-keep-digest",
+	"model_used": "budget-keep/model",
+	"preparation_mode": "shadow",
+	"error": "produced by the run",
+	"coverage_note": "produced by the run",
+	"scope_json": "{}",
+	"assessment_output_json": "{}",
+}
 
 
 class AgentBudgetTestCase(DispatchIdempotencyTestCase):
@@ -216,13 +234,7 @@ class TestBudgetSurvivesUninstall(AgentBudgetTestCase):
 		dash.flags.ignore_permissions = True
 		dash.flags.ignore_mandatory = True
 		dash.insert(ignore_permissions=True)
-		produced = {
-			field: "produced by the run"
-			for field in agent_scheduler._KEPT_ROW_CLEARED
-			if field not in ("dashboard", "session_key") and frappe.get_meta(RUN).has_field(field)
-		}
-		self.assertIn("error", produced)
-		run = self._run(inst, dashboard=dash.name, session_key=f"budget-keep-{inst}", **produced)
+		run = self._run(inst, dashboard=dash.name, session_key=f"budget-keep-{inst}", **_RESULT)
 		frappe.get_doc(
 			{"doctype": "Comment", "comment_type": "Comment", "reference_doctype": RUN, "reference_name": run}
 		).insert(ignore_permissions=True)
@@ -230,9 +242,18 @@ class TestBudgetSurvivesUninstall(AgentBudgetTestCase):
 
 		self._uninstall_as(self.owner, inst)
 
-		fields = [*produced, "dashboard", "session_key"]
-		row = frappe.db.get_value(RUN, run, [*fields, "owner", "status", "agent"], as_dict=True)
-		self.assertEqual({f: row[f] for f in fields}, dict.fromkeys(fields))
+		row = frappe.db.get_value(RUN, run, "*", as_dict=True)
+		# Every field of the doctype but the few a kept row needs, so a field added later
+		# is checked too.
+		left = {
+			df.fieldname: row[df.fieldname]
+			for df in frappe.get_meta(RUN).fields
+			if df.fieldtype not in no_value_fields
+			and df.fieldname
+			not in ("agent", "status", "trigger", "started_at", "finished_at", "conversation")
+			and row[df.fieldname]
+		}
+		self.assertEqual(left, {}, "a kept row still carries what the run produced")
 		self.assertEqual((row.owner, row.status, row.agent), (self.owner, "completed", SLUG))
 		self.assertFalse(
 			frappe.db.exists("Comment", {"reference_doctype": RUN, "reference_name": run}),
@@ -300,6 +321,58 @@ class TestKeptRowsAreHidden(AgentBudgetTestCase):
 		mine = [r for r in rows if r.get("run") == run]
 		self.assertTrue(mine)
 		self.assertEqual({r["run_status"] for r in mine}, {None}, "the feed reads a deleted run's status")
+
+
+class TestKeptRowsAreNotReadable(AgentBudgetTestCase):
+	"""The generic document API (Desk, REST) reads runs through the permission hooks,
+	not through the agent screens, so a kept row is hidden there by the hooks."""
+
+	def _readable_by(self, user: str, run: str) -> dict:
+		frappe.set_user(user)
+		try:
+			listed = frappe.get_list(RUN, filters={"name": run}, pluck="name")
+			report = execute(RUN, fields=["name"], filters={"name": run}, as_list=True)
+			try:
+				got = bool(frappe.client.get(RUN, run))
+			except frappe.PermissionError:
+				got = False
+			return {"list": bool(listed), "report": bool(report), "get": got}
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_the_installer_never_reads_a_reviewers_shadow_run(self):
+		frappe.set_user("Administrator")
+		reviewer = _mk_user(REVIEWER)
+		inst = self._install_as(self.owner)
+		run = self._run(inst, owner=reviewer, **_RESULT)
+		nothing = {"list": False, "report": False, "get": False}
+		self.assertEqual(self._readable_by(self.owner, run), nothing)
+
+		self._uninstall_as(self.owner, inst)
+
+		self.assertTrue(frappe.db.exists(RUN, run))
+		self.assertEqual(frappe.db.get_value(RUN, run, "owner"), self.owner)
+		self.assertEqual(
+			self._readable_by(self.owner, run), nothing, "the uninstall opened the run to the installer"
+		)
+		self.assertEqual(self._readable_by(reviewer, run), nothing)
+
+	def test_a_kept_row_of_ones_own_is_not_readable_either(self):
+		inst = self._install_as(self.owner)
+		run = self._run(inst)
+		everything = {"list": True, "report": True, "get": True}
+		self.assertEqual(self._readable_by(self.owner, run), everything)
+
+		self._uninstall_as(self.owner, inst)
+
+		self.assertEqual(self._readable_by(self.owner, run), {"list": False, "report": False, "get": False})
+
+	def test_an_admin_still_reads_a_kept_row(self):
+		inst = self._install_as(self.owner)
+		run = self._run(inst)
+		self._uninstall_as(self.owner, inst)
+		self.assertTrue(frappe.get_list(RUN, filters={"name": run}, pluck="name"))
+		self.assertEqual(frappe.client.get(RUN, run)["name"], run)
 
 
 class TestKeptRowsArePurged(AgentBudgetTestCase):

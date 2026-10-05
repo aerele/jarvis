@@ -1839,25 +1839,33 @@ def _budget_month_start():
 # before: kept, it would be a live run the poll and the reaper act on with no installation.
 _KEPT_ROW_STATUSES = ("completed", "partial", "stopped")
 
-# What a kept row loses. It is there to be counted, nothing else: what the run produced
-# (its output, notes, scope and coverage) goes, as it did when the row was deleted, and
-# so do links that would refuse a later delete of their target (a saved dashboard) or
-# resolve the row from a session key. ``conversation`` stays: it is what marks the audit
-# chat as machine-made for pattern learning, as the run row did before.
-_KEPT_ROW_CLEARED = (
-	"dashboard",
-	"session_key",
-	"error",
-	"coverage_note",
-	"assessment_output_json",
-	"assessment_config_json",
-	"input_snapshot_json",
-	"pages_json",
-	"coverage_json",
-	"scope_json",
-	"canvas_ref",
-	"permission_profile",
-)
+# What a kept row still holds: what the budget counts it by (agent, status, creation,
+# and the owner, a standard column) and when it ran. Every other field is cleared,
+# read from the doctype so a field added later is cleared too: what the run produced
+# (output, counts, coverage, digests, the model it used) went with the row when it was
+# deleted, and under PP-4 a shadow run belongs to its reviewer while the kept row is
+# handed to the installer. Links that would refuse a later delete of their target (a
+# saved dashboard) or resolve the row from a session key go too. ``conversation``
+# stays: pattern learning reads it to leave the audit chat out as machine-made
+# (``learning.chat_mining``), as it did while the row existed. Readers hide a kept row
+# from everyone but an admin (``agent_permissions.run_query_conditions``).
+_KEPT_ROW_FIELDS = frozenset({"agent", "status", "trigger", "started_at", "finished_at", "conversation"})
+_ZERO_FIELDTYPES = frozenset({"Int", "Check", "Float", "Currency", "Percent"})
+
+
+def _kept_row_clear_sql() -> str:
+	"""The SET clause that clears a kept row: NULL, or 0 for a number column (those are
+	NOT NULL). ``installation`` is cleared by the caller."""
+	from frappe.model import no_value_fields, table_fields
+
+	parts = []
+	for df in frappe.get_meta(RUN).fields:
+		if df.fieldname in _KEPT_ROW_FIELDS or df.fieldname == "installation":
+			continue
+		if df.fieldtype in no_value_fields or df.fieldtype in table_fields:
+			continue
+		parts.append(f", `{df.fieldname}` = {0 if df.fieldtype in _ZERO_FIELDTYPES else 'NULL'}")
+	return "".join(parts)
 
 
 def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
@@ -1867,8 +1875,9 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 	Uninstall used to delete every run row, so uninstalling and installing the agent
 	again handed the month's budget back, and the tenant-wide ceiling dropped with it.
 	A kept row has its installation cleared (the installation can then be deleted, and
-	the row is nobody's run history: every screen that lists runs leaves it out) and its
-	owner set to the installation's owner. Under PP-4 a shadow installation's runs are
+	the row is nobody's run history: every screen that lists runs leaves it out, and the
+	document API shows it to an admin only), everything but ``_KEPT_ROW_FIELDS``
+	cleared, and its owner set to the installation's owner. Under PP-4 a shadow installation's runs are
 	owned by its reviewer, and the owner is what ``_runs_this_month`` matches a
 	reinstall on. ``purge_kept_budget_rows`` removes a kept row once its month is over.
 
@@ -1885,12 +1894,8 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 		return []
 	# Notes left on the run (docmeta_api): the delete removed them with the row.
 	frappe.db.delete("Comment", {"reference_doctype": RUN, "reference_name": ["in", kept]})
-	# Only the fields this site has: a site not yet migrated to a release that added one
-	# has no column for it (the same check as macro_scheduler's hold fields).
-	meta = frappe.get_meta(RUN)
-	cleared = "".join(f", `{field}` = NULL" for field in _KEPT_ROW_CLEARED if meta.has_field(field))
 	frappe.db.sql(
-		f"""UPDATE `tab{RUN}` SET installation = NULL, owner = %(owner)s{cleared}
+		f"""UPDATE `tab{RUN}` SET installation = NULL, owner = %(owner)s{_kept_row_clear_sql()}
 		    WHERE name IN %(kept)s""",
 		{"owner": owner, "kept": tuple(kept)},
 	)
