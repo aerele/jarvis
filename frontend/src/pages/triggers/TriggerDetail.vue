@@ -141,6 +141,7 @@
 						variant="ghost"
 						label="Test condition"
 						iconLeft="check-circle"
+						:disabled="readOnly || saving"
 						@click="openTest"
 					/>
 				</div>
