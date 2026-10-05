@@ -443,10 +443,8 @@ class TestAgentsMarketplace(unittest.TestCase):
 		self.assertEqual(r2["created"], 0)  # nothing created the second time
 		published = set(frappe.get_all(LISTING, filters={"status": "Published"}, pluck="name"))
 		self.assertIn("close-auditor", published)
-		# jarvis#1062 polish: bank-recon-operator has no dispatch path yet and was
-		# flipped to Coming Soon in the registry - it must follow on sync, not
-		# stay Published.
-		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "status"), "Coming Soon")
+		# bank-recon-operator ships Published at 0.3.0 (proposals-only review).
+		self.assertEqual(frappe.db.get_value(LISTING, "bank-recon-operator", "status"), "Published")
 		# Every shipped agent is delegate and BODY-FREE: the proprietary SKILL must
 		# NEVER be stored in the customer DB (A2) — it lives only in the admin
 		# bundle store.
@@ -526,7 +524,9 @@ class TestAgentsMarketplace(unittest.TestCase):
 		close-auditor today) gets [], not null/absent - ConfigForm.vue can
 		always safely parse it."""
 		agent_catalog.sync_agent_listings()
-		self.assertEqual(json.loads(frappe.db.get_value(LISTING, "bank-recon-operator", "config_keys")), [])
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "cycle-count-planner-operator", "config_keys")), []
+		)
 
 	def test_get_agent_returns_config_keys(self):
 		agent_catalog.sync_agent_listings()
@@ -644,7 +644,6 @@ class TestAgentsMarketplace(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	def test_dispatchless_operators_downgrade_to_coming_soon_on_resync(self):
 		operator_slugs = [
-			"bank-recon-operator",
 			"cycle-count-planner-operator",
 			"reorder-replenishment-operator",
 		]

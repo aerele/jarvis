@@ -1410,6 +1410,15 @@ def get_ar_review_defaults(company: str | None = None) -> dict:
 
 
 @frappe.whitelist()
+@require_jarvis_user
+def get_bank_recon_review_defaults(company: str | None = None) -> dict:
+	"""Read-only bank reconciliation starter settings; never saves configuration."""
+	from jarvis.chat.bank_reconciliation_review import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist()
 def set_config(installation: str, config: str) -> dict:
 	"""Persist an installed agent's engagement config JSON — a pure DB write
 	(O6: no restart; the delegate reads it on its installation on the next run).

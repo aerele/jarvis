@@ -261,51 +261,34 @@
       "domain": "bank-recon",
       "nature": "operator",
       "delivery": "delegate",
-      "version": "2.0.0",
-      "status": "Coming Soon",
-      "description": "The reconciliation workbench as drafts and approvals: lists unreconciled Bank Transactions, proposes matches against submitted Payment Entries / invoices by reference, amount, date and party, and queues each proposal as a Jarvis Approval Request carrying both sides of the evidence. Unmatched lines become draft Payment Entry proposals. It proposes; a human confirms and reconciles every one — it never reconciles, allocates, or submits.",
+      "version": "0.3.0",
+      "status": "Published",
+      "description": "Reviews unreconciled bank lines for one company bank account and statement window against booked Payment Entries and Journal Entries. Proposes matches, flags ambiguous lines and reversals, and describes entries a person may create for bank charges or interest. A named reviewer confirms each proposal and reconciles in ERPNext. No reconciliation, allocation, document creation or posting. Manual runs only.",
       "tools_required": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc"
+        "jarvis__get_bank_recon_inputs"
       ],
       "tools_allow": [
-        "jarvis__get_list",
-        "jarvis__get_doc",
-        "jarvis__query",
-        "jarvis__run_report",
-        "jarvis__create_doc",
-        "jarvis__update_doc",
+        "jarvis__get_bank_recon_inputs",
         "jarvis__record_agent_run",
         "jarvis__save_agent_dashboard",
-        "canvas",
-        "message"
+        "exec"
       ],
       "doctypes_required": [
+        "Jarvis Approval Request",
         "Bank Transaction",
+        "Bank Account",
         "Payment Entry",
         "Journal Entry",
-        "Sales Invoice",
-        "Purchase Invoice",
         "Account",
-        "Jarvis Approval Request"
+        "Company"
       ],
-      "rule_tokens": [],
-      "writes": [
-        {
-          "doctype": "Jarvis Approval Request",
-          "mode": "approval-request"
-        },
-        {
-          "doctype": "Payment Entry",
-          "mode": "draft"
-        }
+      "rule_tokens": [
+        "bank-recon-review-v1"
       ],
+      "advisory_tokens": [],
+      "writes": null,
       "rule_pack": "finance-close-control",
-      "timeout_s": 1200,
+      "timeout_s": 600,
       "min_apps": [
         "erpnext"
       ],
@@ -317,7 +300,16 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Standard"
-      }
+      },
+      "config_keys": [
+        "company",
+        "bank_account",
+        "from_date",
+        "to_date",
+        "voucher_lookback_days",
+        "policy_version",
+        "review_scope"
+      ]
     },
     {
       "agent_slug": "baseline-meter-auditor",
