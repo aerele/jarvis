@@ -65,6 +65,11 @@
 				title="On hold"
 				:message="holdText"
 			/>
+			<!-- An armed macro changes on its own page by its owner only: anyone else sees
+			     its steps, summary, schedule and Stop on error read-only, and why. -->
+			<p v-if="armedLocked" data-testid="armed-locked" class="mb-4 text-sm text-ink-gray-5">
+				{{ armedLockedReason }}
+			</p>
 			<!-- How the last run went, when the owner needs telling: it failed, it is
 			     waiting on them, or a step only drafted a record. Nothing else on this
 			     page said, and a scheduled run fails with nobody watching. -->
@@ -122,8 +127,11 @@
 					<Switch
 						v-model="form.stop_on_error"
 						label="Stop on error"
-						description="Stop the chain if a step fails - otherwise it keeps going after an error."
-						:disabled="saving"
+						:description="
+							armedLockedReason ||
+							'Stop the chain if a step fails - otherwise it keeps going after an error.'
+						"
+						:disabled="saving || armedLocked"
 					/>
 					<!-- The owner's own switch (the server decides who may: can_arm). Off
 					     is always free; on asks once, in the server's words. -->
@@ -152,6 +160,7 @@
 						"
 						:disabled="
 							saving ||
+							armedLocked ||
 							!!heldOff(form.schedule_enabled) ||
 							(!!scheduleBlocked && !form.schedule_enabled)
 						"
@@ -163,7 +172,7 @@
 							label="Frequency"
 							:options="FREQUENCY_OPTIONS"
 							:modelValue="form.schedule_frequency"
-							:disabled="saving"
+							:disabled="saving || armedLocked"
 							@update:modelValue="(v) => (form.schedule_frequency = v)"
 						/>
 						<div class="flex-1">
@@ -171,7 +180,7 @@
 							<TimePicker
 								v-model="form.schedule_time"
 								placeholder="09:00"
-								:disabled="saving"
+								:disabled="saving || armedLocked"
 							/>
 						</div>
 						<!-- weekly -> weekday name, monthly -> day of month; hidden for
@@ -189,7 +198,7 @@
 							label="Day"
 							:options="dayOptions"
 							:modelValue="form.schedule_day"
-							:disabled="saving"
+							:disabled="saving || armedLocked"
 							@update:modelValue="(v) => (form.schedule_day = v)"
 						/>
 					</div>
@@ -200,7 +209,11 @@
 			</DocSection>
 
 			<DocSection label="Steps">
-				<StepsBuilder v-model="form.steps" :disabled="saving" :errors="stepErrors" />
+				<StepsBuilder
+					v-model="form.steps"
+					:disabled="saving || armedLocked"
+					:errors="stepErrors"
+				/>
 			</DocSection>
 
 			<DocSection
@@ -247,7 +260,7 @@
 					placeholder="No summary yet. Saving a change to the steps (2 or more) generates one in the background, and Re-summarize in the menu starts one now."
 					description="When present, runs use this prompt instead of the steps."
 					:modelValue="form.merged_prompt"
-					:disabled="saving || mergePending"
+					:disabled="saving || mergePending || armedLocked"
 					@update:modelValue="(v) => (form.merged_prompt = v)"
 				/>
 			</DocSection>
@@ -495,6 +508,8 @@ const resummarizeBlocked = computed(() => stepsWithPrompt.value >= 2 && dirty.va
 const legacyCanArm = () => !!(window.is_jarvis_admin || window.is_system_manager);
 const LEGACY_ARM_REASON = "Only a Jarvis Admin or System Manager can switch this on.";
 const ARM_ON = "This macro's runs make their changes without asking for confirmation first.";
+const ARM_IF_ON =
+	"If on, this macro's runs make their changes without asking for confirmation first.";
 const canArm = ref(legacyCanArm());
 const armBlockedReason = ref("");
 const armNotice = ref("");
@@ -516,9 +531,14 @@ const armSwitchFree = computed(
 		form.skip_confirmation ||
 		!!(snapshot.value && snapshot.value.skip_confirmation)
 );
-const armDescription = computed(() =>
-	canArm.value || form.skip_confirmation ? ARM_ON : armBlockedReason.value || LEGACY_ARM_REASON
-);
+const armDescription = computed(() => {
+	if (form.skip_confirmation) return ARM_ON;
+	return canArm.value ? ARM_IF_ON : armBlockedReason.value || LEGACY_ARM_REASON;
+});
+// "" unless this macro is armed and the viewer is not its owner (the server's say):
+// then its steps, summary, schedule and Stop on error are read-only here.
+const armedLockedReason = ref("");
+const armedLocked = computed(() => !!armedLockedReason.value);
 // Switching it on asks once, with the server's notice. An arm the macro already had
 // when it loaded is not asked about again.
 function setArm(on) {
@@ -702,6 +722,7 @@ function seed(data) {
 	lastRun.value = data.last_run || null;
 	hold.value = macroHold(data);
 	seedArming(data);
+	armedLockedReason.value = data.armed_locked_reason || "";
 	snapshot.value = formSnapshot();
 }
 

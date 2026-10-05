@@ -1783,4 +1783,54 @@ describe("MacroDetail: the owner arms their own macro", () => {
 		const w = await mountDetail(mine());
 		expect(armSwitch(w).props("description")).not.toMatch(/admin/i);
 	});
+
+	it("says what switching it on would do while it is off, and what it does once on", async () => {
+		const off = await mountDetail(mine());
+		expect(armSwitch(off).props("description")).toBe(
+			"If on, this macro's runs make their changes without asking for confirmation first."
+		);
+		const on = await mountDetail(mine({ skip_confirmation: 1 }));
+		expect(armSwitch(on).props("description")).toBe(
+			"This macro's runs make their changes without asking for confirmation first."
+		);
+	});
+});
+
+describe("MacroDetail: an armed macro seen by someone other than its owner", () => {
+	const REASON = "Only the owner can change an armed macro.";
+	const switchNamed = (w, label) =>
+		w.findAllComponents({ name: "Switch" }).find((s) => s.props("label") === label);
+	const select = (w) =>
+		w.findAllComponents({ name: "FormControl" }).filter((c) => c.props("type") === "select");
+	const summary = (w) =>
+		w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => c.props("type") === "textarea" && c.attributes("rows") === "9");
+
+	it("keeps its steps, summary, schedule and Stop on error read-only, and says why", async () => {
+		const w = await mountDetail(
+			baseMacro({
+				skip_confirmation: 1,
+				schedule_frequency: "weekly",
+				schedule_weekday: "Monday",
+				armed_locked_reason: REASON,
+			})
+		);
+		expect(w.find('[data-testid="armed-locked"]').text()).toBe(REASON);
+		expect(stepsBuilder(w).props("disabled")).toBe(true);
+		expect(summary(w).props("disabled")).toBe(true);
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(true);
+		expect(switchNamed(w, "Stop on error").props("description")).toBe(REASON);
+		expect(select(w).map((c) => c.props("disabled"))).toEqual([true, true]);
+	});
+
+	it("leaves them alone for the owner, and on a macro that is not armed", async () => {
+		const w = await mountDetail(baseMacro({ skip_confirmation: 1, armed_locked_reason: "" }));
+		expect(w.find('[data-testid="armed-locked"]').exists()).toBe(false);
+		expect(stepsBuilder(w).props("disabled")).toBe(false);
+		expect(summary(w).props("disabled")).toBe(false);
+		expect(switchNamed(w, "Run on a schedule").props("disabled")).toBe(false);
+		expect(switchNamed(w, "Stop on error").props("disabled")).toBe(false);
+	});
 });
