@@ -7,7 +7,10 @@ import { mount, flushPromises } from "@vue/test-utils";
  * nothing is sent until someone is picked, and then the dialog says what arrives
  * (off, unscheduled, not armed, summary, step skills, shares and assignments
  * cleared) naming the macro and both owners; a refusal stays in the dialog;
- * names go into the toast escaped.
+ * names go into the toast escaped. The owner the dialog showed is sent with the
+ * hand-over (the server refuses one that changed hands); a cut list says so; the
+ * dialog cannot be closed while the hand-over is in flight; an unavailable person
+ * stays focusable with the reason readable, and cannot be chosen.
  */
 
 vi.mock("frappe-ui", () => ({
@@ -88,11 +91,38 @@ describe("MacroHandoverDialog", () => {
 		expect(api.adminHandoverTargets).toHaveBeenCalledWith("");
 		const rows = w.findAll(".jv-macro-handover-user");
 		expect(rows.map((r) => r.attributes("data-user"))).toEqual(USERS.map((u) => u.user));
-		expect(radio(w, "asha@example.test").attributes("disabled")).toBe("");
-		expect(rows[0].text()).toContain("owns it");
-		expect(radio(w, "full@example.test").attributes("disabled")).toBe("");
-		expect(rows[2].text()).toContain("has 25 macros, the most");
-		expect(radio(w, "ben@example.test").attributes("disabled")).toBeUndefined();
+		// Not `disabled`: a keyboard or screen reader user reaches them and hears why.
+		for (const [user, row, why] of [
+			["asha@example.test", rows[0], "is already its owner"],
+			["full@example.test", rows[2], "has 25 macros, the most"],
+		]) {
+			const r = radio(w, user);
+			expect(r.attributes("disabled")).toBeUndefined();
+			expect(r.attributes("aria-disabled")).toBe("true");
+			expect(row.text()).toContain(why);
+			const reason = w.find(`#${r.attributes("aria-describedby")}`);
+			expect(reason.text()).toBe(why);
+		}
+		expect(radio(w, "ben@example.test").attributes("aria-disabled")).toBeUndefined();
+		expect(radio(w, "ben@example.test").attributes("aria-describedby")).toBeUndefined();
+	});
+
+	it("does not let an unavailable person be chosen", async () => {
+		const w = await open();
+		for (const user of ["asha@example.test", "full@example.test"]) {
+			const r = radio(w, user);
+			await r.trigger("click");
+			await r.setValue(true);
+			expect(r.element.checked).toBe(false);
+			expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
+			expect(handButton(w).attributes("disabled")).toBe("");
+		}
+		// With someone picked, landing on an unavailable person keeps the pick checked.
+		await pick(w, "ben@example.test");
+		await radio(w, "full@example.test").setValue(true);
+		expect(radio(w, "ben@example.test").element.checked).toBe(true);
+		expect(radio(w, "full@example.test").element.checked).toBe(false);
+		expect(w.find(".jv-macro-handover-summary").text()).toContain("Ben Ode");
 	});
 
 	it("sends nothing until someone is picked", async () => {
@@ -129,7 +159,12 @@ describe("MacroHandoverDialog", () => {
 		await pick(w, "ben@example.test");
 		await handButton(w).trigger("click");
 		await flushPromises();
-		expect(api.adminHandover).toHaveBeenCalledWith("m1", "ben@example.test");
+		// With the owner it showed: the server refuses a macro that changed hands since.
+		expect(api.adminHandover).toHaveBeenCalledWith(
+			"m1",
+			"ben@example.test",
+			"asha@example.test"
+		);
 		expect(toast.success).toHaveBeenCalledWith(
 			"Handed “Month end” to Ben Ode (ben@example.test); 1 run stopped"
 		);
@@ -148,6 +183,21 @@ describe("MacroHandoverDialog", () => {
 		expect(api.adminHandover).toHaveBeenCalledTimes(1);
 		answer({ ok: true, new_owner: "ben@example.test", stopped_runs: 0 });
 		await flushPromises();
+	});
+
+	it("cannot be closed while the hand-over is in flight", async () => {
+		let answer;
+		api.adminHandover.mockReturnValue(new Promise((r) => (answer = r)));
+		const w = await open();
+		await pick(w, "ben@example.test");
+		await handButton(w).trigger("click");
+		// Escape or a click outside: the Dialog asks to close.
+		w.findComponent({ name: "Dialog" }).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(w.emitted("update:modelValue")).toBeUndefined();
+		answer({ ok: true, new_owner: "ben@example.test", stopped_runs: 0 });
+		await flushPromises();
+		expect(w.emitted("update:modelValue")).toEqual([[false]]);
 	});
 
 	it("keeps a refusal in the dialog, stays open, and tells the pane to re-read", async () => {
@@ -206,15 +256,65 @@ describe("MacroHandoverDialog", () => {
 		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
 	});
 
+	it("shows that a new search is under way until its answer comes", async () => {
+		vi.useFakeTimers();
+		const w = await open();
+		expect(w.find(".jv-macro-handover-searching").exists()).toBe(false);
+		let answer;
+		api.adminHandoverTargets.mockReturnValue(new Promise((r) => (answer = r)));
+		await w.find(".stub-search").setValue("be");
+		vi.advanceTimersByTime(300);
+		await flushPromises();
+		expect(w.find(".jv-macro-handover-searching").text()).toBe("Searching…");
+		expect(w.find("fieldset").attributes("aria-busy")).toBe("true");
+		answer({ users: [USERS[1]], max: 25 });
+		await flushPromises();
+		expect(w.find(".jv-macro-handover-searching").exists()).toBe(false);
+		expect(w.find("fieldset").attributes("aria-busy")).toBe("false");
+	});
+
+	it("says when the list is cut, and not otherwise", async () => {
+		api.adminHandoverTargets.mockResolvedValue({ users: USERS, max: 25, more: true });
+		let w = await open();
+		expect(w.find(".jv-macro-handover-more").text()).toBe(
+			"Showing the first 3. Type a name to narrow the search."
+		);
+		w.unmount();
+		api.adminHandoverTargets.mockResolvedValue({ users: USERS, max: 25, more: false });
+		w = await open();
+		expect(w.find(".jv-macro-handover-more").exists()).toBe(false);
+	});
+
 	it("says when nobody matches, and when the users cannot be loaded", async () => {
 		api.adminHandoverTargets.mockResolvedValue({ users: [], max: 25 });
 		let w = await open();
-		expect(w.text()).toContain("Nobody with access to Jarvis matches.");
+		expect(w.text()).toContain("Nobody who can use Jarvis macros matches.");
 		w.unmount();
 		api.adminHandoverTargets.mockRejectedValue(new Error("Not permitted"));
 		w = await open();
 		expect(w.find(".jv-macro-handover-load-error").text()).toBe("Not permitted");
 		expect(handButton(w).attributes("disabled")).toBe("");
+	});
+
+	it("says in plain words when the site is not updated for hand-overs yet", async () => {
+		const missing = (m) =>
+			new Error(
+				`Failed to get method for command jarvis.chat.macros_admin_api.${m} with module ` +
+					`'jarvis.chat.macros_admin_api' has no attribute '${m}'`
+			);
+		const plain =
+			"This site has not been updated for handing macros over yet. Ask whoever looks after it to update Jarvis.";
+		api.adminHandoverTargets.mockRejectedValue(missing("admin_handover_targets"));
+		let w = await open();
+		expect(w.find(".jv-macro-handover-load-error").text()).toBe(plain);
+		w.unmount();
+		api.adminHandoverTargets.mockResolvedValue({ users: USERS, max: 25 });
+		api.adminHandover.mockRejectedValue(missing("admin_handover"));
+		w = await open();
+		await pick(w, "ben@example.test");
+		await handButton(w).trigger("click");
+		await flushPromises();
+		expect(w.find(".stub-error").text()).toBe(plain);
 	});
 
 	it("starts over each time it opens", async () => {
