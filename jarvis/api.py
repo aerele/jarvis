@@ -1069,8 +1069,8 @@ _WRITE_TOOLS = frozenset(
 		"create_custom_skill",
 		"update_wiki",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
-		# download_pdf/export_excel both insert a File doc (download_pdf also
-		# attaches it) - real DB writes that need an audit trail, not a
+		# download_pdf/export_excel both insert a private, unattached File doc
+		# - real DB writes that need an audit trail, not a
 		# confirmation card (audit-findings.md F24/F25). record_agent_run is the
 		# delegate's Phase-3 findings writeback: it inserts Jarvis Agent Run/Finding
 		# rows deterministically (validated, coverage-scoped) from a detached agent
