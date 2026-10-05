@@ -1074,6 +1074,8 @@ def _progress(
 		value = pickle.dumps({"done": done, "total": total})
 		try:
 			key = frappe.cache.make_key(_progress_key(row.name))
+			# Raw SET for nx; the key is site-scoped by make_key.
+			# nosemgrep: frappe-cache-breaks-multitenancy
 			if not frappe.cache.set(key, value, ex=PROGRESS_TTL_S, nx=first):
 				return
 		except Exception:
