@@ -579,12 +579,12 @@ class TestRunLLMAction(_TriggerTestCase):
 		trig = self._make_llm_trigger(cap=1)
 		row = {"name": trig.name, "llm_daily_cap": 1}
 		with patch(LLM_TASK_COMPLETE, return_value="ok"):
-			self._run(trig)  # 1 == cap: nothing published, the next save still enqueues
+			self._run(trig)  # == cap
 			self.assertFalse(engine._llm_cap_reached(row))
-			self._run(trig)  # 2 == cap+1: Skipped marker, then the count is published
+			self._run(trig)  # cap+1
 		self.assertEqual(llm_action.over_cap_count(trig.name), 2)
 		self.assertTrue(engine._llm_cap_reached(row))
-		self.assertFalse(engine._llm_cap_reached({**row, "llm_daily_cap": 5}))  # a raised cap reopens
+		self.assertFalse(engine._llm_cap_reached({**row, "llm_daily_cap": 5}))
 
 	def test_missing_or_disabled_trigger_is_silent(self):
 		with patch(LLM_TASK_COMPLETE, return_value="ok") as task:

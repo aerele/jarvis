@@ -70,9 +70,7 @@ def _pairing_cache_key(user: str):
 
 
 def _throttle_pairing(user: str) -> None:
-	"""Reject a pairing storm: at most PAIRING_LIMIT attempts per user per window.
-	The attempt is counted atomically; the window starts with the first attempt and
-	is re-armed should a counter ever be left without one."""
+	"""Reject a pairing storm, per user. Re-arms a counter left without a TTL."""
 	key = _pairing_cache_key(user)
 	pipe = frappe.cache.pipeline()
 	pipe.incr(key)

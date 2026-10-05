@@ -110,8 +110,7 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""The first caller in a ``DEBOUNCE_S`` window wins. Two callers racing here can
-	both win; the job's stable ``job_id`` with ``deduplicate`` still runs one refresh."""
+	"""First caller in the window wins; a racing second is deduped by job_id."""
 	key = _debounce_key(row_name)
 	if frappe.cache.get_value(key, expires=True) is not None:
 		return False

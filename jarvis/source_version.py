@@ -37,11 +37,10 @@ def reset_cache() -> None:
 
 
 def _read_value(key: str) -> str | None:
-	"""``key`` read from the checkout with GitPython (a Frappe dependency). GitDB reads
-	refs and objects in Python, so no git process is started."""
+	"""Read via GitPython's GitDB: no git process."""
 	try:
 		import git
-	except ImportError:  # GitPython refuses to import without a usable git executable
+	except ImportError:  # no git executable
 		return None
 	try:
 		repo = git.Repo(_REPOSITORY_ROOT, odbt=git.GitDB)
@@ -55,7 +54,7 @@ def _read_value(key: str) -> str | None:
 
 
 def _release_tag(repo) -> str:
-	"""The highest ``vN.N.N`` tag on HEAD, or "" (also for a repository with no commits)."""
+	"""Highest ``vN.N.N`` tag on HEAD, else ""."""
 	if not repo.head.is_valid():
 		return ""
 	head = repo.head.commit.hexsha

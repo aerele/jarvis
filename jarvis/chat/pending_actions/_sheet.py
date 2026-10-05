@@ -1072,8 +1072,6 @@ def _progress(
 	if state == "applying":
 		key = _progress_key(row.name)
 		try:
-			# A job step landing between this check and the write only shows 0/N
-			# until its next step.
 			if first and frappe.cache.get_value(key, expires=True) is not None:
 				return
 			frappe.cache.set_value(key, {"done": done, "total": total}, expires_in_sec=PROGRESS_TTL_S)

@@ -70,7 +70,7 @@ def load_policy(raw, expected_digest=None):
 
 
 def scan(root, policy):
-	import git  # GitPython: lazy, so policy loading (jarvis.ci.inputs) does not need it
+	import git  # lazy: ci.inputs runs without it
 
 	root = Path(root).resolve()
 	try:

@@ -154,11 +154,11 @@ class TestPairingThrottle(MobileDeviceBase):
 			mobile_auth._throttle_pairing(USER_A)
 		ttl = frappe.cache.ttl(mobile_auth._pairing_cache_key(USER_A))
 		self.assertTrue(0 < ttl <= mobile_auth.PAIRING_WINDOW_SECONDS)
-		mobile_auth._throttle_pairing(USER_B)  # counted per user
+		mobile_auth._throttle_pairing(USER_B)
 
 	def test_a_counter_left_without_a_window_is_rearmed(self):
 		key = mobile_auth._pairing_cache_key(USER_A)
-		frappe.cache.incr(key)  # e.g. a crash between the count and the expiry
+		frappe.cache.incr(key)  # no TTL
 		mobile_auth._throttle_pairing(USER_A)
 		self.assertGreater(frappe.cache.ttl(key), 0)
 

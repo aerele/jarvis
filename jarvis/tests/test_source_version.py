@@ -52,8 +52,6 @@ class TestSourceDetails(TestCase):
 
 
 class TestReadValue(TestCase):
-	"""Reads a real repository; GitDB reads refs and objects without a git process."""
-
 	def setUp(self):
 		stack = contextlib.ExitStack()
 		self.addCleanup(stack.close)
