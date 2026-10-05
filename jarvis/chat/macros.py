@@ -2289,10 +2289,57 @@ def check_a_fetched_skill(conversation: str, skill_name) -> str:
 	tool call, so each write after this one in the same turn parks its card.
 
 	Returns the note for the agent ("" when nothing changed)."""
-	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+	armed = armed_skill_owner(conversation)
+	if not armed:
 		return ""
 	from jarvis.chat.skill_permissions import controlled_by, served_row
 
+	run, owner = armed
+	# The row served is the session user's; in a run that is the owner.
+	foreign = set()
+	for user in {owner, frappe.session.user}:
+		row = served_row(str(skill_name or ""), user)
+		if row is not None and not controlled_by(row, owner):
+			foreign.add(row.skill_name)
+	return _disarm_for_read_skills(conversation, run, foreign)
+
+
+def check_skill_rows_read(conversation: str, skills_read) -> str:
+	"""``check_a_fetched_skill`` for a skill read as a record (``get_doc``,
+	``get_list`` and every other read tool naming a skill doctype, ``api._run_tool``):
+	when the conversation is armed and any of the skills read is one the macro's owner
+	does not control, it is disarmed and committed before the rows go back.
+	``skills_read()``, called only when it is armed, gives their docnames, or None for
+	a read whose rows cannot be told apart: that is judged on every skill the session
+	user can read.
+
+	Returns the note for the agent ("" when nothing changed)."""
+	armed = armed_skill_owner(conversation)
+	if not armed:
+		return ""
+	names = skills_read()
+	if names is not None and not names:
+		return ""
+	from jarvis.chat.skill_permissions import SKILL, controlled_by
+
+	run, owner = armed
+	fields = ["skill_name", "owner", "scope"]
+	if names is None:
+		rows = frappe.get_list(SKILL, fields=fields, limit_page_length=0)
+	else:
+		rows = frappe.get_all(SKILL, filters={"name": ["in", sorted(set(names))]}, fields=fields)
+	return _disarm_for_read_skills(
+		conversation, run, {row.skill_name for row in rows if not controlled_by(row, owner)}
+	)
+
+
+def armed_skill_owner(conversation: str | None):
+	"""``(run, owner)`` when ``conversation`` is armed, read fresh, else None: the
+	latest run in it (None in a chat armed by hand) and the user whose control a skill
+	is judged by, the macro's owner (the chat's owner without a run). One query when
+	it is not armed."""
+	if not conversation or not frappe.db.get_value(CONV, conversation, "skip_confirmation"):
+		return None
 	run = frappe.db.get_value(
 		RUN,
 		{"conversation": conversation},
@@ -2303,12 +2350,11 @@ def check_a_fetched_skill(conversation: str, skill_name) -> str:
 	owner = (run and frappe.db.get_value(MACRO, run.macro, "owner")) or frappe.db.get_value(
 		CONV, conversation, "owner"
 	)
-	# The row served is the session user's; in a run that is the owner.
-	foreign = set()
-	for user in {owner, frappe.session.user}:
-		row = served_row(str(skill_name or ""), user)
-		if row is not None and not controlled_by(row, owner):
-			foreign.add(row.skill_name)
+	return run, owner
+
+
+def _disarm_for_read_skills(conversation: str, run, foreign: set) -> str:
+	"""``_disarm_for_skills`` at the step in flight, for skills read mid-turn."""
 	if not foreign:
 		return ""
 	step = max(frappe.utils.cint(run.current_step), 1) if run else 0

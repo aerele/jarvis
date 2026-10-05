@@ -877,6 +877,16 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 		)
 		super()._purge()
 
+	def test_a_learned_slug_that_matches_nothing_writes_no_error_log(self):
+		# Judging a step is not a fetch: the learned-fetch audit is the fetch's alone.
+		title = "Jarvis: learned skill fetch missed"
+		frappe.cache().delete(f"jarvis:learned_get_skill_miss:{frappe.local.site}:learned-nosuchdomain")
+		before = frappe.db.count("Error Log", {"method": title})
+		macro = self._tagged(OWNER, None, tag="learned", armed=True, prompt="apply /learned-nosuchdomain")
+		_data, [(_prompt, armed)] = self._run(macro)
+		self.assertEqual(armed, 1)
+		self.assertEqual(frappe.db.count("Error Log", {"method": title}), before)
+
 	def test_a_shared_skill_its_author_rewrote_runs_asking(self):
 		skill = self._skill(OTHER, "shared", share_with=OWNER)
 		macro = self._tagged(OWNER, skill, armed=True)
@@ -1053,10 +1063,8 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 		self.assertEqual(attempts, [0, 0])
 
 
-class TestASkillFetchedByAnArmedRun(SkillsBase):
-	"""The guarantee: where a skill's text is served (``get_skill``), an armed run's
-	chat is disarmed, committed, before the body of a skill its owner does not control
-	goes back, however the agent came to fetch it."""
+class ArmedChatBase(SkillsBase):
+	"""An armed chat, or an armed run of OWNER's macro, to read skills in."""
 
 	def _purge(self):
 		frappe.set_user("Administrator")
@@ -1077,11 +1085,11 @@ class TestASkillFetchedByAnArmedRun(SkillsBase):
 		frappe.db.commit()
 		return conv
 
-	def _armed_run(self):
+	def _armed_run(self, tag="sk"):
 		"""An armed run of OWNER's macro, its first step sent: the run and its chat."""
 		from jarvis.chat import macros
 
-		macro = self._tagged(OWNER, None, armed=True, prompt="follow the usual routine")
+		macro = self._tagged(OWNER, None, tag=tag, armed=True, prompt="follow the usual routine")
 		frappe.set_user(OWNER)
 		with (
 			patch.object(
@@ -1095,12 +1103,18 @@ class TestASkillFetchedByAnArmedRun(SkillsBase):
 			data = macros.run_macro(macro)["data"]
 		return data["macro_run"], data["conversation"]
 
+	def _armed(self, conv) -> int:
+		return frappe.utils.cint(frappe.db.get_value(CONV, conv, "skip_confirmation"))
+
+
+class TestASkillFetchedByAnArmedRun(ArmedChatBase):
+	"""The guarantee: where a skill's text is served (``get_skill``), an armed run's
+	chat is disarmed, committed, before the body of a skill its owner does not control
+	goes back, however the agent came to fetch it."""
+
 	def _fetch(self, conv, name, user=OWNER):
 		frappe.set_user(user)
 		return api._run_tool("get_skill", {"skill_name": name}, conversation=conv)
-
-	def _armed(self, conv) -> int:
-		return frappe.utils.cint(frappe.db.get_value(CONV, conv, "skip_confirmation"))
 
 	def test_another_users_skill_disarms_the_run_before_its_body_goes_back(self):
 		from jarvis.chat import macros
@@ -1197,6 +1211,147 @@ class TestASkillFetchedByAnArmedRun(SkillsBase):
 		res = self._fetch(conv, "armskill-shared")
 		self.assertTrue(res["ok"], res)
 		self.assertNotIn("note", res["data"])
+
+
+class TestASkillFoundByAnArmedRun(ArmedChatBase):
+	"""``find_skills`` in an armed chat leaves out what its owner does not control: a
+	shared skill's description is its author's text too."""
+
+	def _found(self, conv, user=OWNER):
+		frappe.set_user(user)
+		res = api._run_tool("find_skills", {"query": "armskill"}, conversation=conv)
+		self.assertTrue(res["ok"], res)
+		return {row["skill_name"]: row["description"] for row in res["data"]["skills"]}
+
+	def test_another_users_skill_is_left_out(self):
+		self._skill(OTHER, "side", share_with=OWNER)
+		self._skill(OWNER, "mine")
+		self._skill(OTHER, "org", scope="Org")
+		conv = self._armed_conv()
+		found = self._found(conv)
+		self.assertEqual(sorted(found), ["armskill-mine", "armskill-org"])
+		self.assertEqual(self._armed(conv), 1)  # nothing of it was read
+
+	def test_in_an_owners_run_whoever_asks(self):
+		self._skill(OTHER, "priv")
+		_run, conv = self._armed_run()
+		self.assertNotIn("armskill-priv", self._found(conv, user=SM))
+
+	def test_the_flag_is_put_back_as_it_was(self):
+		from jarvis.permissions import ARMED_SKILL_OWNER_FLAG
+
+		frappe.flags[ARMED_SKILL_OWNER_FLAG] = "outer"
+		self.addCleanup(frappe.flags.pop, ARMED_SKILL_OWNER_FLAG, None)
+		self._found(self._armed_conv())
+		self.assertEqual(frappe.flags.get(ARMED_SKILL_OWNER_FLAG), "outer")
+
+	def test_an_unarmed_chat_finds_it_as_before(self):
+		self._skill(OTHER, "side", share_with=OWNER)
+		self.assertIn("armskill-side", self._found(_make_conv(OWNER)))
+		self.assertIn("armskill-side", self._found(None))
+
+
+class TestASkillReadAsARecordByAnArmedRun(ArmedChatBase):
+	"""A skill read through the record tools (``get_doc``, ``get_list`` and every other
+	read naming a skill doctype) is judged as ``get_skill`` judges it: one its owner
+	does not control disarms the run's chat, recorded and committed, before the rows
+	go back."""
+
+	def _read(self, conv, tool, args, user=OWNER):
+		frappe.set_user(user)
+		return api._run_tool(tool, args, conversation=conv)
+
+	def _reads(self, skill):
+		return {
+			"get_doc": ("get_doc", {"doctype": SKILL, "name": skill}),
+			"get_doc (a batch)": ("get_doc", {"doctype": SKILL, "names": [skill]}),
+			"get_list": (
+				"get_list",
+				{"doctype": SKILL, "fields": ["name", "instructions"], "filters": {"name": skill}},
+			),
+			"get_list (no name asked for)": (
+				"get_list",
+				{"doctype": SKILL, "fields": ["instructions"], "filters": {"name": skill}},
+			),
+			"get_list (its shares)": (
+				"get_list",
+				{
+					"doctype": "Jarvis Custom Skill Share",
+					"parent_doctype": SKILL,
+					"fields": ["parent", "user"],
+					"filters": {"parent": skill},
+				},
+			),
+		}
+
+	def test_another_users_skill_disarms_the_run_before_it_goes_back(self):
+		from jarvis.chat import macros
+
+		skill = self._skill(OTHER, "side", share_with=OWNER)
+		write = {"doctype": MACRO, "name": self._macro(OWNER, "w"), "changes": {"description": "x"}}
+		for i, (label, (tool, args)) in enumerate(self._reads(skill).items()):
+			with self.subTest(read=label):
+				run, conv = self._armed_run(tag=f"read{i}")
+				res = self._read(conv, tool, args)
+				self.assertTrue(res["ok"], res)
+				frappe.db.rollback()  # only what was committed is left
+				self.assertEqual(self._armed(conv), 0)
+				self.assertTrue(macros._asked_for_a_skill(run))
+				# and the next write in the turn asks
+				frappe.set_user(OWNER)
+				res = api._run_tool("update_doc", write, conversation=conv)
+				self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
+				pending_confirm.clear_for_conversation(OWNER, conv)
+				frappe.db.commit()
+
+	def test_the_agent_is_told_why(self):
+		skill = self._skill(OTHER, "side", share_with=OWNER)
+		res = self._read(self._armed_conv(), "get_doc", {"doctype": SKILL, "name": skill})
+		self.assertIn("/armskill-side", res["data"]["note"])
+
+	def test_skills_the_owner_controls_keep_it_armed(self):
+		self._skill(OTHER, "side", share_with=OWNER)  # readable, but not read
+		for scope, author in (("User", OWNER), ("Org", OTHER), ("Role", OTHER)):
+			skill = self._skill(author, scope.lower(), scope=scope)
+			for label, (tool, args) in self._reads(skill).items():
+				if label == "get_list (no name asked for)":
+					continue  # which rows came back is not known: judged on all it could read
+				with self.subTest(scope=scope, read=label):
+					conv = self._armed_conv()
+					res = self._read(conv, tool, args)
+					self.assertTrue(res["ok"], res)
+					self.assertEqual(self._armed(conv), 1)
+
+	def test_rows_it_cannot_tell_apart_are_judged_on_all_it_could_read(self):
+		own = self._skill(OWNER, "mine")
+		read = {"doctype": SKILL, "fields": ["instructions"], "filters": {"name": own}}
+		conv = self._armed_conv()
+		self._read(conv, "get_list", read)
+		self.assertEqual(self._armed(conv), 1)  # all it can read is its own
+		self._skill(OTHER, "side", share_with=OWNER)
+		self._read(conv, "get_list", read)
+		self.assertEqual(self._armed(conv), 0)
+
+	def test_a_read_that_fails_reads_nothing(self):
+		skill = self._skill(OTHER, "priv")  # not shared: OWNER cannot read it
+		conv = self._armed_conv()
+		res = self._read(conv, "get_doc", {"doctype": SKILL, "name": skill})
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(self._armed(conv), 1)
+
+	def test_an_unarmed_chat_and_other_doctypes_are_left_alone(self):
+		from jarvis.chat import macros
+
+		skill = self._skill(OTHER, "side", share_with=OWNER)
+		with patch.object(macros, "check_skill_rows_read", wraps=macros.check_skill_rows_read) as check:
+			res = self._read(self._armed_conv(), "get_list", {"doctype": "ToDo"})
+			self.assertTrue(res["ok"], res)
+			self.assertFalse(check.called)
+			conv = _make_conv(OWNER)
+			res = self._read(conv, "get_doc", {"doctype": SKILL, "name": skill})
+			self.assertTrue(res["ok"], res)
+			self.assertNotIn("note", res["data"])
+		self.assertEqual(self._armed(conv), 0)
 
 
 class TestAnArmedRunDoesNotChangeASkill(SkillsBase):

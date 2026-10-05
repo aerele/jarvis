@@ -155,12 +155,12 @@ def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
 
 def served_row(skill_name: str, user: str):
 	"""The row ``get_skill`` serves ``user`` for ``skill_name`` (``resolve_skill``),
-	or None when it would serve none."""
+	or None when it would serve none. A check, not a fetch: nothing is audited."""
 	from jarvis.exceptions import JarvisError
 	from jarvis.tools.get_skill import resolve_skill
 
 	try:
-		return resolve_skill(skill_name, user)
+		return resolve_skill(skill_name, user, audit=False)
 	except JarvisError:
 		return None
 

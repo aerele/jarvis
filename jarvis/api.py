@@ -19,7 +19,12 @@ from jarvis.exceptions import (
 	RunDisarmedError,
 	RunHaltedError,
 )
-from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, has_jarvis_access, refuse_in_tool_dispatch
+from jarvis.permissions import (
+	ARMED_MACRO_WRITE_FLAG,
+	ARMED_SKILL_OWNER_FLAG,
+	has_jarvis_access,
+	refuse_in_tool_dispatch,
+)
 from jarvis.tools._result_guard import enforce_result_budget
 from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
 
@@ -3329,7 +3334,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 	# Read-path telemetry; fast no-op for untracked tools, never raises.
 	t0 = time.perf_counter()
-	result = _dispatch_and_wrap(tool, args, is_write)
+	result, read_note = _dispatch_judging_skills(tool, args, is_write, conversation)
 	telemetry.record_tool(
 		tool=tool,
 		args=args,
@@ -3337,7 +3342,112 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		duration_ms=int((time.perf_counter() - t0) * 1000),
 		result=result,
 	)
-	return _with_note(result, skill_note)
+	return _with_note(result, skill_note or read_note)
+
+
+def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> tuple[dict, str]:
+	"""``_dispatch_and_wrap``, and the note for the agent ("" when nothing changed).
+
+	An armed macro's run follows only skills its owner controls, and a skill's text
+	reaches the turn by more routes than ``get_skill`` (judged in ``_run_tool``):
+	``find_skills`` lists only skills the owner controls (``ARMED_SKILL_OWNER_FLAG``),
+	and a read that returns rows of a skill doctype (``_reads_skill_rows``) is judged
+	on them (``macros.check_skill_rows_read``), the chat disarmed and committed before
+	they go back. Nothing is read for a chat that is not armed but its flag, and only
+	for those two."""
+	if not conversation or is_write or tool == "get_skill":
+		return _dispatch_and_wrap(tool, args, is_write), ""
+	from jarvis.chat import macros
+
+	if tool == "find_skills":
+		armed = macros.armed_skill_owner(conversation)
+		before = frappe.flags.get(ARMED_SKILL_OWNER_FLAG)
+		frappe.flags[ARMED_SKILL_OWNER_FLAG] = armed[1] if armed else None
+		try:
+			return _dispatch_and_wrap(tool, args, is_write), ""
+		finally:
+			frappe.flags[ARMED_SKILL_OWNER_FLAG] = before
+	result = _dispatch_and_wrap(tool, args, is_write)
+	if not result.get("ok") or not _reads_skill_rows(tool, args):
+		return result, ""
+	data = result.get("data")
+	return result, macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data))
+
+
+# Reads that return no stored row of the doctype they name (its schema, a would-be
+# record built from the call's own values, a file's rows): never judged as a skill read.
+_NO_STORED_ROWS = frozenset(
+	{
+		"get_schema",
+		"describe_customizations",
+		"get_my_access",
+		"get_report_filters",
+		"get_naming_series_preview",
+		"get_workflow_transitions",
+		"resolve_links",
+		"preview_doc",
+		"preview_import",
+	}
+)
+_SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
+
+
+def _reads_skill_rows(tool: str, args) -> bool:
+	"""Whether a read may return rows of a skill doctype: one is named anywhere in its
+	arguments (a ``doctype``, a query's ``from`` or join, a parent, a JSON filter), or
+	it runs a report on one. A Script or Query Report's own SQL is not seen here."""
+	if tool in _NO_STORED_ROWS:
+		return False
+	if tool in ("run_report", "report_pdf") and isinstance(args, dict):
+		report = args.get("report_name")
+		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
+		if ref and ref.casefold() in _SKILL_DOCTYPES_FOLDED:
+			return True
+	return _mentions_a_skill_doctype(args, depth=0)
+
+
+def _mentions_a_skill_doctype(value, *, depth: int) -> bool:
+	if depth > 6:
+		return False
+	if isinstance(value, str):
+		text = value.strip()
+		if text.casefold() in _SKILL_DOCTYPES_FOLDED:
+			return True
+		if not text.startswith(("{", "[")):
+			return False
+		try:
+			value = json.loads(text)
+		except ValueError:
+			return False
+	if isinstance(value, dict):
+		value = list(value.values())
+	if isinstance(value, list | tuple):
+		return any(_mentions_a_skill_doctype(item, depth=depth + 1) for item in value)
+	return False
+
+
+def _skill_rows_read(args, data):
+	"""The ``Jarvis Custom Skill`` docnames a skill read asked for or returned, or
+	None when they cannot be told apart (every skill the reader can read is judged).
+	Known: the record(s) named by ``name`` / ``names`` on a skill doctype (a child
+	row's skill is its parent), and ``get_list`` rows carrying ``name`` (or ``parent``
+	for a child table)."""
+	doctype = args.get("doctype") if isinstance(args, dict) else None
+	if not isinstance(doctype, str) or doctype.casefold() not in _SKILL_DOCTYPES_FOLDED:
+		return None
+	doctype = next(dt for dt in _SKILL_DOCTYPES if dt.casefold() == doctype.casefold())
+	key = "name" if doctype == "Jarvis Custom Skill" else "parent"
+	names = args.get("names") if isinstance(args.get("names"), list) else []
+	names = [n for n in [args.get("name"), *names] if n]
+	if names:
+		if not all(isinstance(n, str) for n in names):
+			return None
+		if key == "name":
+			return names
+		return frappe.get_all(doctype, filters={"name": ["in", names]}, pluck="parent")
+	if isinstance(data, list) and all(isinstance(row, dict) and row.get(key) for row in data):
+		return [row[key] for row in data]
+	return None
 
 
 def _with_note(result: dict, note: str) -> dict:
