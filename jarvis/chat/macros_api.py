@@ -330,6 +330,29 @@ ADMIN_DELETE_NOTICE = "Macro deleted by an admin"
 # the macro, and the new owner's shows it switched off with no word of why.
 ADMIN_HANDOVER_NOTICE = "Macro handed over by an admin"
 _NOTICE_KINDS = (ADMIN_DELETE_NOTICE, ADMIN_HANDOVER_NOTICE)
+# The subject of the Comment a hand-over leaves on the macro, naming its old owner.
+_HANDED_OVER_FROM = "macro-handover:from:"
+
+
+def handed_over_from(old_owner: str) -> str:
+	return f"{_HANDED_OVER_FROM}{old_owner}"
+
+
+def refuse_if_handed_away(doc) -> None:
+	"""Tell a macro's old owner that an admin handed it over (their form or list was
+	still open), instead of a bare permission error. Only ever refuses, and only
+	someone who may not write the macro: whoever passes it still passes
+	``check_permission``."""
+	user = frappe.session.user
+	if user == doc.owner or doc.has_permission("write"):
+		return
+	if frappe.db.exists(
+		"Comment",
+		{"reference_doctype": MACRO, "reference_name": doc.name, "subject": handed_over_from(user)},
+	):
+		frappe.throw(_("This macro changed hands. Reload it."), frappe.PermissionError)
+
+
 _NOTICES_MAX = 20
 
 
@@ -516,17 +539,30 @@ _ARM_NOTICE_ASKS = (
 	(_lt("creating or changing skills"), ("create_custom_skill",)),
 	(_lt("calling connectors"), ("call_connector",)),
 )
+# Writes the write-risk guard treats as sensitive configuration park a card in every
+# mode, an armed macro's run included (``api._run_tool``, ``_must_card``): one phrase per
+# kind of risk it knows (``_write_risk.RISK_LINES``), pinned by the same test.
+_ARM_NOTICE_SENSITIVE = (
+	("code", _lt("scripts")),
+	("outbound", _lt("webhooks")),
+	("mail", _lt("email set-up")),
+	("access", _lt("user access")),
+	("login", _lt("sign-in settings")),
+)
 
 
 def arm_notice() -> str:
 	"""What the form asks the owner to confirm before it switches Skip confirmation on."""
 	skips = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_SKIPS])
 	asks = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_ASKS])
+	sensitive = join_words(
+		[str(phrase) for _kind, phrase in _ARM_NOTICE_SENSITIVE] + [_("other sensitive configuration")]
+	)
 	return _(
 		"This macro will {0} without asking you first, including when it runs on a schedule "
-		"with nobody watching. {1} still ask, and stop the run. Its steps can apply only "
-		"skills you own, or skills only a reviewer can change."
-	).format(skips, asks[:1].upper() + asks[1:])
+		"with nobody watching. {1} still ask, and stop the run. So do changes to {2}. Its steps "
+		"can apply only skills you own, or skills only a reviewer can change."
+	).format(skips, asks[:1].upper() + asks[1:], sensitive)
 
 
 def _arming(owner: str, *, held) -> dict:
@@ -1292,6 +1328,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	from jarvis.chat import macros
 
 	doc = frappe.get_doc(MACRO, name)
+	refuse_if_handed_away(doc)
 	# Gated on WRITE, not read: a summary lands on the macro (merged_prompt,
 	# merge_status), and its turn runs in a chat created for whoever asks. On read
 	# alone, anyone who could SEE a macro could overwrite its owner's summary, and
@@ -1310,10 +1347,11 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# Again on the row as it is now: an admin can hand the macro over while the
 	# entitlement was asked, and a summary of the old owner's would then start an agent
 	# turn as the new owner, on a macro the new owner was told arrives with none.
-	doc.check_permission("write")
-	macros.refuse_acting_for_barred_owner(doc.owner)
+	# The owner first: the old owner fails the write check too, and is told why.
 	if doc.owner != asked_for:
 		frappe.throw(_("This macro changed hands. Reload it."), frappe.PermissionError)
+	doc.check_permission("write")
+	macros.refuse_acting_for_barred_owner(doc.owner)
 	if macros.is_held(doc):
 		# An admin's hold: the macro does nothing, and a summary is one agent turn.
 		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
