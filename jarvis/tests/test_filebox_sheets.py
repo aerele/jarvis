@@ -230,6 +230,26 @@ class TestCollect(_Base):
 		self.assertFalse(frappe.db.exists("Item", "zz-fbs A"))
 		self.assertIsNone(held_writes.waiting_on(conv), "no legacy held row")
 
+	def test_a_sensitive_record_is_kept_off_the_sheet(self):
+		"""J1-cards: the sheet shows records through its own editor, with no risk line and
+		no full view, so a record that changes sensitive settings (portal users: who can
+		see or edit) is refused with plain words, alone or in a batch; nothing collects."""
+		conv = self.conv()
+		risky = _supplier(portal_users=[{"user": OWNER}])
+		for args in (risky, _batch(_item("zz-fbs Safe"), risky)):
+			res = self.call("create_doc", args, conv)
+			self.assert_refused(res, "sensitive_refused")
+			self.assertIn("review sheet", res["error"]["message"])
+			self.assertNotIn("tool", res["error"]["hint"])
+		self.assertEqual(self.sheets(), [])
+		self.assertFalse(frappe.db.exists("Supplier", {"supplier_name": PARTY}))
+		self.assertTrue(
+			frappe.db.exists(
+				"Jarvis Agent Write", {"tool": "create_doc", "outcome": "refused", "actor": OWNER}
+			)
+		)
+		self.assert_added(self.call("create_doc", _supplier(), conv), 1)  # an ordinary one still collects
+
 	def test_the_switch_off_keeps_the_legacy_hold(self):
 		frappe.db.set_single_value("Jarvis Settings", "file_box_sheets", 0)
 		conv = self.conv()

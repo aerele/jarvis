@@ -9,6 +9,12 @@ import {
 	batchFromPreview,
 	pendingCardOf,
 	verbSentence,
+	cardBannerOf,
+	cardWarningOf,
+	diffLineView,
+	diffTablesOf,
+	personError,
+	toolFailureCopy,
 	pendingExpiry,
 	receiptView,
 	isDestructivePlanStep,
@@ -559,4 +565,151 @@ test("lineItemSummary: names the calculated columns, so the cue is text, not onl
 	};
 	assert.deepEqual(lineItemSummary(table, [{ amount: 4 }]).computedLabels, ["Amount"]);
 	assert.deepEqual(lineItemSummary(table).computedLabels, []);
+});
+
+// ── Risk banner + trial warning (round 2, J1-cards) ─────────────────────────
+
+test("cardBannerOf: the server's risk line, for a sensitive card", () => {
+	assert.deepEqual(
+		cardBannerOf({
+			kind: "create",
+			risk: "sensitive",
+			risk_line: "This runs code for every user.",
+		}),
+		{ risk: "sensitive", text: "This runs code for every user." }
+	);
+});
+
+test("cardBannerOf: no banner for a structure card (structure writes are refused, never carded)", () => {
+	assert.equal(cardBannerOf({ kind: "create", risk: "structure", risk_line: "x" }), null);
+});
+
+test("cardBannerOf: a sensitive card with no line falls back to plain words", () => {
+	assert.equal(
+		cardBannerOf({ risk: "sensitive", risk_line: "  " }).text,
+		"This changes sensitive settings."
+	);
+});
+
+test("cardBannerOf: no banner on an ordinary card, an old card, or junk", () => {
+	for (const card of [
+		{ kind: "create" },
+		{},
+		null,
+		undefined,
+		{ risk: "other" },
+		{ risk_line: "x" },
+	]) {
+		assert.equal(cardBannerOf(card), null, JSON.stringify(card));
+	}
+});
+
+test("cardWarningOf: the real job count", () => {
+	assert.equal(
+		cardWarningOf({ warning: { jobs: 500, rolled_back: false } }),
+		"This will also start 500 background jobs."
+	);
+	assert.equal(
+		cardWarningOf({ warning: { jobs: 1, rolled_back: false } }),
+		"This will also start 1 background job."
+	);
+});
+
+test("cardWarningOf: a hook that rolled back, alone or with jobs, in one line", () => {
+	const rolled =
+		"During the check, the record's own code stopped part-way, so the result may differ.";
+	assert.equal(cardWarningOf({ warning: { jobs: 0, rolled_back: true } }), rolled);
+	assert.equal(
+		cardWarningOf({ warning: { jobs: 2, rolled_back: true } }),
+		`${rolled} This will also start 2 background jobs.`
+	);
+});
+
+test("cardWarningOf: nothing for no warning, an old card or bad values", () => {
+	for (const card of [
+		{},
+		null,
+		{ warning: null },
+		{ warning: { jobs: 0, rolled_back: false } },
+		{ warning: { jobs: "500" } },
+		{ warning: { jobs: -1 } },
+		{ warning: { jobs: 1.5 } },
+		{ warning: { rolled_back: "yes" } },
+	]) {
+		assert.equal(cardWarningOf(card), "", JSON.stringify(card));
+	}
+});
+
+test("diffLineView: one line of a sensitive update's line diff", () => {
+	assert.deepEqual(diffLineView({ op: "+", text: "B" }), { kind: "add", text: "+ B" });
+	assert.deepEqual(diffLineView({ op: "-", text: "b" }), { kind: "del", text: "- b" });
+	assert.deepEqual(diffLineView({ op: " ", text: "a" }), { kind: "same", text: "  a" });
+	assert.deepEqual(diffLineView({ op: "gap", text: "" }), { kind: "gap", text: "…" });
+	assert.deepEqual(diffLineView({ op: "gap", text: "", count: 12 }), {
+		kind: "gap",
+		text: "… 12 unchanged lines",
+	});
+	assert.deepEqual(diffLineView({ op: "gap", text: "", count: 1 }), {
+		kind: "gap",
+		text: "… 1 unchanged line",
+	});
+	assert.deepEqual(diffLineView({ op: "?", text: 5 }), { kind: "same", text: "  5" });
+	assert.deepEqual(diffLineView(null), { kind: "same", text: "  " });
+	assert.deepEqual(diffLineView({ op: "toString", text: "x" }), { kind: "same", text: "  x" });
+});
+
+test("diffTablesOf: both sides, current first, an empty side named none", () => {
+	const t = { rows: [{ cells: ["a"] }], count: 1 };
+	const t3 = { rows: [{}, {}, {}], count: 3 };
+	assert.deepEqual(diffTablesOf({ from_table: t3, to_table: t }), [
+		{ name: "Current", table: t3, heading: "Current · 3 rows" },
+		{ name: "New", table: t, heading: "New · 1 row" },
+	]);
+	assert.deepEqual(diffTablesOf({ to_table: t }), [
+		{ name: "Current", table: null, heading: "Current · none" },
+		{ name: "New", table: t, heading: "New · 1 row" },
+	]);
+	assert.deepEqual(diffTablesOf({ from_table: t3 }), [
+		{ name: "Current", table: t3, heading: "Current · 3 rows" },
+		{ name: "New", table: null, heading: "New · none" },
+	]);
+	assert.deepEqual(diffTablesOf({ from_table: "x", to_table: { rows: "no" } }), []);
+	assert.deepEqual(diffTablesOf(null), []);
+});
+
+// A refusal the bench writes for the model ("Do not retry it with another tool;
+// tell the user ...") can carry a plain twin for the person: error.person_message.
+const REFUSAL = {
+	code: "sensitive_refused",
+	message:
+		"Importing Customer records changes sensitive settings ... Do not retry it with another tool; tell the user to use Data Import in Desk.",
+	hint: "Use Data Import in Desk: open /app/data-import/new.",
+	person_message:
+		"An import of Customer records changes sensitive settings and cannot be shown in full on a confirmation card, so it cannot be run from chat. Use Data Import in Desk.",
+};
+
+test("personError: the person's words when the bench wrote them, else the message", () => {
+	assert.deepEqual(personError(REFUSAL), { ...REFUSAL, message: REFUSAL.person_message });
+	assert.deepEqual(personError({ message: "Value missing" }), { message: "Value missing" });
+	assert.deepEqual(personError({ message: "m", person_message: "  " }), {
+		message: "m",
+		person_message: "  ",
+	});
+	assert.deepEqual(personError(null), {});
+	assert.deepEqual(personError("plain"), { message: "plain" });
+});
+
+test("toolFailureCopy: a refused tool row shows the person's words and the hint", () => {
+	const row = toolFailureCopy(JSON.stringify({ ok: false, error: REFUSAL }));
+	assert.equal(row.message, REFUSAL.person_message);
+	assert.equal(row.hint, REFUSAL.hint);
+	assert.ok(!row.message.includes("another tool"));
+	assert.deepEqual(toolFailureCopy({ ok: false, error: { message: "Plain failure" } }), {
+		message: "Plain failure",
+		hint: "",
+	});
+	assert.deepEqual(toolFailureCopy("not json"), {
+		message: "This step couldn't be completed.",
+		hint: "",
+	});
 });

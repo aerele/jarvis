@@ -152,6 +152,111 @@ export function verbSentence(card) {
 	return `Will ${verb}${act} this ${dt}${name ? " " + name : ""}`;
 }
 
+// ── Risk banner + trial warning (round 2, J1-cards) ─────────────────────────
+// Two optional card keys the server adds (jarvis/chat/confirm_card.py and the
+// gate in jarvis/api.py), read the same way by the desktop card, the phone card
+// and the Approval Board. Both tolerate a card parked before they existed. The
+// card renders the banner first, then the warning, so the risk always leads.
+// Wording fits every surface's button (Confirm in chat, Approve on the board).
+const SENSITIVE_LINE = "This changes sensitive settings.";
+
+// {risk, text} for a card that changes sensitive configuration, else null. The
+// text is the server's ``risk_line`` ("This runs code for every user."), with a
+// plain fallback when an older card carries none. Structure changes are refused
+// from chat, never carded, so there is no structure banner (a later unit that
+// cards a guarded structure write adds its own).
+export function cardBannerOf(card) {
+	if (!card || card.risk !== "sensitive") return null;
+	const line = typeof card.risk_line === "string" ? card.risk_line.trim() : "";
+	return { risk: "sensitive", text: line || SENSITIVE_LINE };
+}
+
+const ROLLED_BACK_LINE =
+	"During the check, the record's own code stopped part-way, so the result may differ.";
+
+// The ONE warning line for a create / update card whose trial found something
+// (``card.warning = {jobs, rolled_back}``), else "". ``jobs`` is the real count
+// of background jobs Confirm will start, not the number of kinds.
+export function cardWarningOf(card) {
+	const w = card && card.warning;
+	if (!w || typeof w !== "object") return "";
+	const jobs = Number.isInteger(w.jobs) && w.jobs > 0 ? w.jobs : 0;
+	const parts = [];
+	if (w.rolled_back === true) parts.push(ROLLED_BACK_LINE);
+	if (jobs) {
+		parts.push(`This will also start ${jobs} background job${jobs === 1 ? "" : "s"}.`);
+	}
+	return parts.join(" ");
+}
+
+// One line of a sensitive update's line diff (``diff[i].lines``: {op, text} with op
+// " " / "-" / "+" / "gap", a gap carrying ``count``), as {kind, text}: kind picks the line's style (same /
+// del / add / gap) in each app's own class vocabulary, text is what the line shows.
+const DIFF_LINE = new Map([
+	["+", ["add", "+ "]],
+	["-", ["del", "- "]],
+	["gap", ["gap", ""]],
+]);
+export function diffLineView(line) {
+	const [kind, mark] = DIFF_LINE.get(line && line.op) || ["same", "  "];
+	if (kind === "gap") {
+		const n = Number.isInteger(line.count) && line.count > 0 ? line.count : 0;
+		return { kind, text: n ? `… ${n} unchanged line${n === 1 ? "" : "s"}` : "…" };
+	}
+	return { kind, text: mark + String((line && line.text) ?? "") };
+}
+
+// A sensitive update's child-table change (``diff[i].from_table`` / ``to_table``,
+// each a full table) as both sides, current first: [{name, table, heading}]. An
+// empty side (the server sends no table for zero rows) is still named, "none", so
+// emptying a table never reads as only its old rows. [] when neither side is a table.
+export function diffTablesOf(row) {
+	const sides = [
+		["Current", row && row.from_table],
+		["New", row && row.to_table],
+	].map(([name, t]) => [name, t && typeof t === "object" && Array.isArray(t.rows) ? t : null]);
+	if (!sides.some(([, t]) => t)) return [];
+	return sides.map(([name, table]) => {
+		const n = table ? (Number.isInteger(table.count) ? table.count : table.rows.length) : 0;
+		const heading = n ? `${name} · ${n} row${n === 1 ? "" : "s"}` : `${name} · none`;
+		return { name, table: n ? table : null, heading };
+	});
+}
+
+// An error envelope's ``error`` as a PERSON should read it. Some refusals are
+// written for the model ("Do not retry it with another tool; tell the user ...")
+// and carry a plain twin, ``person_message`` (jarvis/api.py
+// _refuse_unshowable_card / _refuse_sensitive_import); every surface a person
+// reads shows that instead, and the model still gets ``message``. Tolerates a
+// bare string and a missing error.
+export function personError(err) {
+	if (typeof err === "string") return { message: err };
+	if (!err || typeof err !== "object") return {};
+	const person = typeof err.person_message === "string" ? err.person_message.trim() : "";
+	return person ? { ...err, message: person } : err;
+}
+
+// The copy for a failed tool row in the chat transcript ("<tool> didn't run"):
+// {message, hint} from the row's stored result (a JSON string or an object),
+// in the person's words when the bench wrote them.
+export function toolFailureCopy(toolResult) {
+	let v = toolResult;
+	if (typeof v === "string") {
+		try {
+			v = JSON.parse(v);
+		} catch (e) {
+			v = null;
+		}
+	}
+	const err = personError((v && v.error) || {});
+	return {
+		message:
+			(typeof err.message === "string" && err.message.trim()) ||
+			"This step couldn't be completed.",
+		hint: (typeof err.hint === "string" && err.hint.trim()) || "",
+	};
+}
+
 // Wall-clock expiry for a parked confirmation. ``expiresAt`` is epoch SECONDS (as
 // the server stamps it); ``nowMs`` is Date.now(). Returns {expired, secondsLeft}
 // (secondsLeft null when there is no expiry stamp — an older token).

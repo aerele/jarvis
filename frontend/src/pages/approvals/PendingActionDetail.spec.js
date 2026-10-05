@@ -100,6 +100,15 @@ describe("PendingActionDetail", () => {
 		expect(button(w, "Create & continue")).toBeTruthy();
 	});
 
+	it("shows the trial's warning line on a held card", async () => {
+		const w = await mountWith(
+			rec({ card: { ...rec().card, warning: { jobs: 0, rolled_back: true } } })
+		);
+		expect(w.findAll('[role="note"]').map((n) => n.text())).toEqual([
+			"During the check, the record's own code stopped part-way, so the result may differ.",
+		]);
+	});
+
 	it("renders hostile model text as text, never HTML", async () => {
 		const w = await mountWith(
 			rec({
