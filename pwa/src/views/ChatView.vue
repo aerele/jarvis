@@ -1,4 +1,5 @@
 <script setup>
+import { parkedByCard } from "@shared/lib/draftParked.js";
 import {
 	computed,
 	defineAsyncComponent,
@@ -157,6 +158,8 @@ const composer = ref(null);
 // may still be applied. Scrolling back to last week's proposal and tapping
 // Create would write a record the user has long since moved on from.
 const dismissedActions = ref(new Set());
+// Drafts the server turned into a gated confirmation card: key -> the note.
+const parkedActions = ref(new Map());
 
 const sending = computed(() => !!live.value || sendBusy.value);
 const title = computed(
@@ -1012,7 +1015,10 @@ onUnmounted(() => {
 						"
 						:action="it.view.action"
 						:conversation="convId"
+						:parked-note="parkedActions.get(it.key) || parkedByCard(pending, it.key)"
+						:message-key="it.key"
 						@applied="onActionApplied"
+						@parked="(n) => parkedActions.set(it.key, n)"
 						@dismissed="dismissedActions.add(it.key)"
 					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />

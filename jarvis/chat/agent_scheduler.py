@@ -1101,6 +1101,12 @@ def _launch_audit(
 	refuse everything."""
 	listing = frappe.get_doc(LISTING, inst.agent)
 	owner = inst.owner
+	from jarvis.chat import operator_review
+
+	review_backend = operator_review.backend(inst.agent)
+	review_config = review_backend.configuration(inst) if review_backend else None
+	if review_config and trigger != "manual":
+		frappe.throw("Operator evidence review supports manual runs only.")
 	# Phase 1 identity: the run's ERP-read identity. The caller (scheduler /
 	# run_agent_now) has already switched the session to this user, so
 	# frappe.session.user == run_as_user here — scope + watermark below are
@@ -1264,6 +1270,7 @@ def _launch_audit(
 				"preparation_mode": preparation_mode,
 				"initiating_human": initiating_human,
 				"model_source": model_gate.get("model_source"),
+				"assessment_config_json": frappe.as_json(review_config) if review_config else None,
 				**capability,
 			}
 		)
@@ -1505,7 +1512,19 @@ def _stamp_scope_and_watermark(
 	the best-effort try, so an ERP scope-resolution failure can never drop the
 	authorization the source-read tools read back — a scribe run either carries its
 	admin-authorized app list or reads nothing."""
-	from jarvis.chat import agent_scope
+	from jarvis.chat import agent_scope, operator_review
+
+	review_backend = operator_review.backend(inst.agent)
+	if review_backend:
+		config = frappe.parse_json(frappe.db.get_value(RUN, run_name, "assessment_config_json"))
+		scope = review_backend.scope_from_config(config)
+		frappe.db.set_value(
+			RUN,
+			run_name,
+			{"scope_json": frappe.as_json(scope), "permission_profile": _permission_profile(run_as_user)},
+			update_modified=False,
+		)
+		return scope
 
 	values: dict = {}
 	scope = None

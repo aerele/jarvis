@@ -69,7 +69,10 @@ class PreviewSandboxLost(JarvisError):
 	"""A dry run could not be undone cleanly: the savepoint of its sandbox
 	(``jarvis.tools._preview_sandbox``) was gone when it came to roll back. A
 	deadlock aborted the transaction, or the write altered database structure
-	(DDL: a Custom Field, a DocType), which commits implicitly. The sandbox has
+	as its FIRST statement (DDL commits implicitly; after any write Frappe raises
+	``ImplicitCommitError`` instead, which ``api._preview_error`` refuses as a
+	structure change, and the structure doctypes are refused before any dry run:
+	``jarvis.tools._write_risk``). The sandbox has
 	already rolled back in full and written one Error Log row; the message is
 	the plain-language text the model relays.
 
@@ -96,6 +99,37 @@ class PreviewSandboxLost(JarvisError):
 
 	A new caller of ``preview_sandbox`` that catches ``JarvisError`` or
 	``Exception`` around it must name this one first, as the callers above do."""
+
+
+class WriteRefusedError(JarvisError):
+	"""A write the risk guard (``jarvis.tools._write_risk``) will not run from chat.
+
+	Carries its own wire ``code`` (``api._translate_write_error`` reads ``code``
+	before the class name) plus the doctype and, for a structure change, the Desk
+	page where a person sets it up. The answer is FIXED for this route: retrying the
+	same call, or the same change through another tool, gets the same refusal. That
+	instruction rides in the message, because the plugin relays only code + message."""
+
+	code = "write_refused"
+
+	def __init__(self, message: str, *, doctype: str = "", desk_path: str = ""):
+		super().__init__(message)
+		self.doctype = doctype
+		self.desk_path = desk_path
+
+
+class StructureRefusedError(WriteRefusedError):
+	"""A change to the database structure (a Custom Field, a DocType, a Workflow ...):
+	set up in Desk, never from chat (R2-4 REVISED AGAIN, R2-10)."""
+
+	code = "structure_refused"
+
+
+class SensitiveWriteRefusedError(WriteRefusedError):
+	"""Sensitive configuration (code, outbound mail, access, sign-in; R2-8 / R2-12)
+	written without the confirmation card that names exactly that record."""
+
+	code = "sensitive_refused"
 
 
 class InvalidArgumentError(JarvisError):
