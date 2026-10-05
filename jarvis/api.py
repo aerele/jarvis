@@ -3490,11 +3490,49 @@ def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> t
 			return _dispatch_and_wrap(tool, args, is_write), ""
 		finally:
 			frappe.flags[ARMED_SKILL_OWNER_FLAG] = before
-	result = _dispatch_and_wrap(tool, args, is_write)
+	# A skill list whose fields would not say which skill each row is of: asked with
+	# that field too, in an armed chat only, and the field taken out again before the
+	# rows go back, so the read is judged on exactly its rows.
+	added = _judging_key(tool, args)
+	if added and not macros.armed_skill_owner(conversation):
+		added = None
+	judged = {**args, "fields": [*(args.get("fields") or ["name"]), added]} if added else args
+	result = _dispatch_and_wrap(tool, judged, is_write)
 	if not result.get("ok") or not _reads_skill_rows(tool, args):
-		return result, ""
+		return _without_key(result, added), ""
 	data = result.get("data")
-	return result, macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data))
+	note = macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data))
+	return _without_key(result, added), note
+
+
+def _judging_key(tool: str, args) -> str | None:
+	"""The field that tells a ``get_list`` row of a skill doctype apart (``name``, or
+	``parent`` for a child table), when its fields leave it out; else None. Not for
+	fields that are not plain records' (an aggregate, ``distinct``), whose rows are not
+	one per record: those are judged on every skill the reader can read, as before."""
+	if tool != "get_list" or not isinstance(args, dict):
+		return None
+	doctype = args.get("doctype")
+	if not isinstance(doctype, str) or doctype.casefold() not in _SKILL_DOCTYPES_FOLDED:
+		return None
+	key = "name" if doctype.casefold() == "jarvis custom skill" else "parent"
+	fields = args.get("fields") or ["name"]  # get_list's own default
+	if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+		return None
+	if any("(" in f or "distinct" in f.casefold() for f in fields):
+		return None
+	if any(f.strip() == "*" or f.split(".")[-1].strip(" `") == key for f in fields):
+		return None
+	return key
+
+
+def _without_key(result: dict, key: str | None) -> dict:
+	"""``result`` with ``key`` (added by ``_judging_key``) taken out of each row."""
+	if key and result.get("ok") and isinstance(result.get("data"), list):
+		for row in result["data"]:
+			if isinstance(row, dict):
+				row.pop(key, None)
+	return result
 
 
 # Reads that return no stored row of the doctype they name (its schema, a would-be
@@ -3516,9 +3554,10 @@ _SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
 
 
 def _reads_skill_rows(tool: str, args) -> bool:
-	"""Whether a read may return rows of a skill doctype: one is named anywhere in its
-	arguments (a ``doctype``, a query's ``from`` or join, a parent, a JSON filter), or
-	it runs a report on one. A Script or Query Report's own SQL is not seen here."""
+	"""Whether a read may return rows of a skill doctype: its arguments use one as a
+	doctype (``_DOCTYPE_ARG_KEYS``: a ``doctype``, a query's ``from`` or join, a parent,
+	a filter on a doctype field, JSON included), or it runs a report on one. A Script
+	or Query Report's own SQL is not seen here."""
 	if tool in _NO_STORED_ROWS:
 		return False
 	if tool in ("run_report", "report_pdf") and isinstance(args, dict):
@@ -3529,12 +3568,27 @@ def _reads_skill_rows(tool: str, args) -> bool:
 	return _mentions_a_skill_doctype(args, depth=0)
 
 
-def _mentions_a_skill_doctype(value, *, depth: int) -> bool:
+# Where a read's arguments use a value as a doctype: the tool's own, a query's
+# ``from`` and a join's ``doctype``, a child table's parent, and the fields that hold
+# a doctype in a filter. A skill doctype's name anywhere else (a ToDo's description,
+# a document's name) is a value like any other, not a read of skill rows.
+_DOCTYPE_ARG_KEYS = frozenset(
+	{"doctype", "from", "parent_doctype", "parenttype", "reference_doctype", "ref_doctype"}
+)
+
+
+def _is_doctype_key(key) -> bool:
+	"""Whether ``key`` (an argument, or a filter's field, ``alias.field`` included)
+	holds a doctype."""
+	return isinstance(key, str) and key.split(".")[-1].strip(" `").casefold() in _DOCTYPE_ARG_KEYS
+
+
+def _mentions_a_skill_doctype(value, *, depth: int, as_doctype: bool = False) -> bool:
 	if depth > 6:
 		return False
 	if isinstance(value, str):
 		text = value.strip()
-		if text.casefold() in _SKILL_DOCTYPES_FOLDED:
+		if as_doctype and text.casefold() in _SKILL_DOCTYPES_FOLDED:
 			return True
 		if not text.startswith(("{", "[")):
 			return False
@@ -3543,9 +3597,20 @@ def _mentions_a_skill_doctype(value, *, depth: int) -> bool:
 		except ValueError:
 			return False
 	if isinstance(value, dict):
-		value = list(value.values())
+		# A query's where clause: ``{"field": "c.reference_doctype", "value": ...}``.
+		keyed = as_doctype or _is_doctype_key(value.get("field"))
+		return any(
+			_mentions_a_skill_doctype(item, depth=depth + 1, as_doctype=keyed or _is_doctype_key(key))
+			for key, item in value.items()
+		)
 	if isinstance(value, list | tuple):
-		return any(_mentions_a_skill_doctype(item, depth=depth + 1) for item in value)
+		# A filter as a list: ``[field, op, value]``, or ``[doctype, field, op, value]``
+		# whose first part is a doctype too.
+		keyed = as_doctype or any(_is_doctype_key(part) for part in value[:2])
+		if len(value) == 4 and all(isinstance(part, str) for part in value[:2]):
+			if value[0].strip().casefold() in _SKILL_DOCTYPES_FOLDED:
+				return True
+		return any(_mentions_a_skill_doctype(item, depth=depth + 1, as_doctype=keyed) for item in value)
 	return False
 
 
@@ -3574,9 +3639,15 @@ def _skill_rows_read(args, data):
 
 
 def _with_note(result: dict, note: str) -> dict:
-	"""``result`` with ``note`` added to its data, for the agent to read."""
-	if note and isinstance(result, dict) and result.get("ok") and isinstance(result.get("data"), dict):
+	"""``result`` with ``note`` added to its data, for the agent to read: a key of a
+	dict, and a list (``get_list``'s rows) wrapped as ``{"rows": ..., "note": ...}``,
+	the shape a truncated list already has. Without a note nothing changes."""
+	if not (note and isinstance(result, dict) and result.get("ok")):
+		return result
+	if isinstance(result.get("data"), dict):
 		result["data"]["note"] = note
+	elif isinstance(result.get("data"), list):
+		result["data"] = {"rows": result["data"], "note": note}
 	return result
 
 

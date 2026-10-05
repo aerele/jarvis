@@ -516,17 +516,30 @@ _ARM_NOTICE_ASKS = (
 	(_lt("creating or changing skills"), ("create_custom_skill",)),
 	(_lt("calling connectors"), ("call_connector",)),
 )
+# Writes the write-risk guard treats as sensitive configuration park a card in every
+# mode, an armed macro's run included (``api._run_tool``, ``_must_card``): one phrase per
+# kind of risk it knows (``_write_risk.RISK_LINES``), pinned by the same test.
+_ARM_NOTICE_SENSITIVE = (
+	("code", _lt("scripts")),
+	("outbound", _lt("webhooks")),
+	("mail", _lt("email set-up")),
+	("access", _lt("user access")),
+	("login", _lt("sign-in settings")),
+)
 
 
 def arm_notice() -> str:
 	"""What the form asks the owner to confirm before it switches Skip confirmation on."""
 	skips = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_SKIPS])
 	asks = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_ASKS])
+	sensitive = join_words(
+		[str(phrase) for _kind, phrase in _ARM_NOTICE_SENSITIVE] + [_("other sensitive configuration")]
+	)
 	return _(
 		"This macro will {0} without asking you first, including when it runs on a schedule "
-		"with nobody watching. {1} still ask, and stop the run. Its steps can apply only "
-		"skills you own, or skills only a reviewer can change."
-	).format(skips, asks[:1].upper() + asks[1:])
+		"with nobody watching. {1} still ask, and stop the run. So do changes to {2}. Its steps "
+		"can apply only skills you own, or skills only a reviewer can change."
+	).format(skips, asks[:1].upper() + asks[1:], sensitive)
 
 
 def _arming(owner: str, *, held) -> dict:
