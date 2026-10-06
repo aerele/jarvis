@@ -41,6 +41,45 @@ from jarvis.tools._export.document.furniture import render_pdf, resolve_letterhe
 _HAS_SITE = bool(getattr(frappe.local, "site", None))
 
 
+class TestCompanyFooterRender(unittest.TestCase):
+	def render(self, raw, **company):
+		data = frappe._dict({"company_name": "Demo Co", **company})
+		with (
+			patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: data)),
+			patch.object(frappe, "render_template") as frappe_render,
+		):
+			out = furniture._render_company_footer(raw, "Demo Co")
+		frappe_render.assert_not_called()
+		return out
+
+	def test_conditionals_and_html_values_render_as_before(self):
+		raw = "{% if doc.tax_id %}GSTIN: {{ doc.tax_id }}{% else %}GST pending{% endif %} {{ company.description }}"
+		self.assertEqual(
+			self.render(raw, tax_id="29AB", description="<b>Est. 1990</b>"), "GSTIN: 29AB <b>Est. 1990</b>"
+		)
+		self.assertEqual(self.render(raw, tax_id=None, description=""), "GST pending ")
+
+	def test_missing_fields_are_undefined_and_frappe_filters_work(self):
+		raw = (
+			"{{ doc.customer_name | default('N/A') }}{% for r in doc.taxes %}x{% endfor %} {{ '1.50' | flt }}"
+		)
+		self.assertEqual(self.render(raw), "N/A 1.5")
+
+	def test_values_are_data_never_template(self):
+		self.assertEqual(self.render("{{ doc.company_name }}|x", company_name="Foo {# Bar"), "Foo {# Bar|x")
+
+	def test_no_frappe_api_internals_or_mutation(self):
+		for raw in (
+			"{{ frappe.get_all('User') }}",
+			"{{ ''.__class__.__mro__ }}",
+			"{{ doc.update({'company_name': 'X'}) }}",
+			"{{ 9 ** 9 }}",
+			"{{ lipsum(n=5) }}",
+		):
+			with self.subTest(raw=raw):
+				self.assertEqual(self.render(raw), raw)  # refused: the raw text, sanitized later
+
+
 class TestCompanyFooterPermissions(unittest.TestCase):
 	def test_denied_company_or_letterhead_never_reads_footer(self):
 		for denied in ("Company", "Letter Head"):
@@ -64,12 +103,14 @@ class TestCompanyFooterPermissions(unittest.TestCase):
 		with (
 			patch.object(frappe, "has_permission", return_value=True) as perm,
 			patch.object(frappe, "db", new=Mock()) as db,
-			patch.object(frappe, "get_doc", return_value={"company_name": "Demo Co"}),
-			patch.object(frappe, "render_template", return_value="<p>Approved footer</p>"),
+			patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: {"company_name": "Demo Co"})),
 		):
-			db.get_value.return_value = {"footer": "<p>Approved footer</p>", "disabled": 0}
+			db.get_value.return_value = {
+				"footer": "<p>{{ doc.company_name }} - Approved footer</p>",
+				"disabled": 0,
+			}
 			body, note = furniture.resolve_company_letterhead_footer({"Demo Co": "Demo LH"}, "Demo Co")
-			self.assertIn("Approved footer", body)
+			self.assertIn("Demo Co - Approved footer", body)
 			self.assertIsNone(note)
 			self.assertEqual(perm.call_count, 2)
 			perm.assert_any_call("Company", "read", doc="Demo Co")

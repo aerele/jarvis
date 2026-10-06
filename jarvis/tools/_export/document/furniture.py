@@ -58,6 +58,7 @@ import tempfile
 
 import frappe
 import pdfkit
+from jinja2.sandbox import ImmutableSandboxedEnvironment, SecurityError
 
 from jarvis.exceptions import InvalidArgumentError
 
@@ -228,7 +229,8 @@ def render_pdf(
 		# subprocess environment changes).
 		run_env = {**os.environ, "FONTCONFIG_FILE": font_config_file} if font_config_file else None
 		try:
-			result = subprocess.run(
+			# Fixed argv from _build_args, no shell.
+			result = subprocess.run(  # nosemgrep: frappe-subprocess-exec
 				args,
 				input=document.encode("utf-8"),
 				capture_output=True,
@@ -694,9 +696,9 @@ def resolve_company_letterhead_footer(
 
 	Unlike ``resolve_letterhead`` (which keeps only logos on a doc-less report), a
 	custom template's footer is PINNED per company, so we render that company's
-	Letter Head ``footer`` WITH the Company as Jinja context and keep the text
-	(address/contact). Company-branded letterheads are usually static; a Jinja one
-	gets company-level fields. Same safety gate as the header path: same-site logos
+	Letter Head ``footer`` against its Company data in an immutable sandbox (no
+	``frappe`` API) and keep the text (address/contact). Same safety gate as the
+	header path: same-site logos
 	inlined to permission-checked ``data:`` URIs, remote ``<img>`` dropped, then the
 	nh3 letterhead sanitizer (data-images only, no scripts).
 
@@ -728,18 +730,40 @@ def resolve_company_letterhead_footer(
 		if len(raw) > _MAX_FURNITURE_CHARS:
 			_log_infra_failure("rich-pdf company letterhead footer too large", f"{len(raw)} chars")
 			return "", "letter head footer is too large — rendered without it"
-		try:
-			comp_doc = frappe.get_doc("Company", comp)
-			rendered = frappe.render_template(raw, {"doc": comp_doc, "company": comp_doc})
-		except Exception:
-			# A doc-bound Jinja letter head that needs an invoice context; fall back to
-			# the raw HTML (sanitizer strips any leaked {%%}/{{}} as inert text).
-			rendered = raw
-		footer_html = sanitize_letterhead(_inline_letterhead_images(rendered))
+		footer_html = sanitize_letterhead(_inline_letterhead_images(_render_company_footer(raw, comp)))
 		return footer_html, None
 	except Exception:
 		_log_infra_failure("rich-pdf company letterhead footer failed", f"company={comp!r} lh={lh_name!r}")
 		return "", "letter head footer could not be applied"
+
+
+class _FooterJinja(ImmutableSandboxedEnvironment):
+	"""Immutable sandbox for Letter Head footers; ``**`` refused (no CPU blow-up)."""
+
+	intercepted_binops = frozenset(["**"])
+
+	def call_binop(self, context, operator, left, right):
+		raise SecurityError(f"{operator} is not allowed")
+
+
+def _footer_env() -> _FooterJinja:
+	from frappe.utils.jinja import get_jinja_hooks, set_filters
+
+	env = _FooterJinja()
+	env.globals.pop("lipsum", None)
+	set_filters(env)
+	env.filters.update(get_jinja_hooks()[1] or {})
+	return env
+
+
+def _render_company_footer(raw: str, company: str) -> str:
+	"""Letter Head footer Jinja rendered against Company data only (Frappe's filters,
+	no ``frappe`` API). A template that can't render falls back to the raw HTML."""
+	try:
+		data = dict(frappe.get_doc("Company", company).as_dict())  # missing field -> Undefined
+		return _footer_env().from_string(raw).render(doc=data, company=data, _=frappe._)
+	except Exception:
+		return raw
 
 
 def _letterhead_logos(raw: str) -> str:
