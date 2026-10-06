@@ -185,6 +185,39 @@ class TestLoadDocFieldLevel(FrappeTestCase):
 		self.assertNotIn("description", {f["fieldname"] for f in fm["fields"]})
 		self.assertIn("status", {f["fieldname"] for f in fm["fields"]})
 
+	def test_child_grid_and_extra_columns_respect_parent_permlevels(self):
+		fields = [
+			frappe._dict(fieldname=name, fieldtype="Data", permlevel=level, in_list_view=listed)
+			for name, level, listed in (
+				("visible_grid", 0, 1),
+				("hidden_grid", 2, 1),
+				("visible_extra", 0, 0),
+				("hidden_extra", 2, 0),
+			)
+		]
+		meta = MagicMock(fields=fields)
+		with (
+			patch.object(actions_api.frappe, "get_meta", return_value=meta),
+			patch.object(actions_api.frappe, "session", frappe._dict(user="restricted@example.com")),
+			patch.object(actions_api, "_field_dict", side_effect=lambda df, *args: df),
+		):
+			for levels in ([0], [0, 2]):
+				with self.subTest(levels=levels):
+					meta.get_permlevel_access.return_value = levels
+					columns = actions_api._child_columns("Sales Order Item", "Sales Order", "items")
+					extra = actions_api._extra_child_columns("Sales Order Item", "Sales Order", "items")
+					self.assertEqual(
+						[c.fieldname for c in columns],
+						["visible_grid", "hidden_grid"] if 2 in levels else ["visible_grid"],
+					)
+					self.assertEqual(
+						[c.fieldname for c in extra],
+						["visible_extra", "hidden_extra"] if 2 in levels else ["visible_extra"],
+					)
+					meta.get_permlevel_access.assert_called_with(
+						permission_type="read", parenttype="Sales Order"
+					)
+
 	def test_load_doc_strips_permlevel_fields_from_the_document(self):
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "permlevel probe"}).insert(
 			ignore_permissions=True

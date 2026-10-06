@@ -64,6 +64,23 @@ def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) ->
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
 	child marks none. Columns at a permlevel the user cannot read are dropped."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[0]
+	]
+
+
+def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
+	"""Every other readable editable field of the child, so a row key the model
+	proposes outside the grid keeps its real type and label (#655)."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[1]
+	]
+
+
+def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
+	"""(the grid's columns, every other readable editable field) of a child doctype."""
 	meta = frappe.get_meta(child_doctype)
 	levels = _readable_permlevels(child_doctype, parent_doctype)
 	editable = [
@@ -71,8 +88,8 @@ def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) ->
 		for df in meta.fields
 		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
 	]
-	listed = [df for df in editable if df.in_list_view]
-	return [_field_dict(df, child_doctype, parent_doctype, parentfield) for df in (listed or editable[:4])]
+	listed = [df for df in editable if df.in_list_view] or editable[:4]
+	return listed, [df for df in editable if df not in listed]
 
 
 @frappe.whitelist()
@@ -100,6 +117,7 @@ def get_doctype_form_meta(doctype: str) -> dict:
 				"child_doctype": df.options,
 				"label": df.label or df.fieldname,
 				"columns": _child_columns(df.options, doctype, df.fieldname),
+				"extra_columns": _extra_child_columns(df.options, doctype, df.fieldname),
 			}
 			continue
 		if df.fieldtype in _NON_EDIT_FIELDTYPES:
@@ -156,6 +174,89 @@ def load_doc(doctype: str, name: str) -> dict:
 		"values": values,
 		"tables": tables,
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def draft_computed(action: dict | str | None = None) -> dict:
+	"""What ERPNext computes for a create card's rows (item amounts, tax totals) that
+	the model leaves blank (#647). The card's values are set on an UNSAVED document
+	(same checks as the write) and only ERPNext's totals arithmetic runs on them, as
+	Desk's form recomputes while you type: nothing is inserted or saved, so no
+	document hook, trigger or Server Script runs for a card that is only being shown.
+	Only a doctype ERPNext totals is computed; only the requested read-only
+	``columns`` (``{table field: [fieldnames]}``) come back, after permlevel masking.
+	Any refusal or failure is ``{"ok": False}`` and the card keeps its blanks."""
+	refuse_in_tool_dispatch()
+	a = frappe.parse_json(action) if isinstance(action, str) else (action or {})
+	doctype = (a.get("doctype") or "").strip()
+	conversation = (a.get("conversation") or "").strip()
+	values, columns = a.get("values"), a.get("columns")
+	if not doctype or not conversation or not isinstance(values, dict) or not isinstance(columns, dict):
+		raise InvalidArgumentError("doctype, conversation, values and columns are required")
+	_require_own_conversation(conversation)
+
+	from jarvis.exceptions import PreviewSandboxLost
+	from jarvis.tools import _write_risk
+	from jarvis.tools.create_doc import _validate_create_args
+
+	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
+	try:
+		# Structure and sensitive configuration are never computed from a card.
+		if _write_risk.check("create_doc", {"doctype": doctype, "values": values}) == "sensitive":
+			return {"ok": False}
+		_validate_create_args(doctype, values)
+		doc = _calculate_draft(doctype, values)
+		if doc is None:
+			return {"ok": False}
+		doc.apply_fieldlevel_read_permissions()
+		return {"ok": True, "tables": _requested_rows(doc, columns)}
+	except PreviewSandboxLost:
+		raise  # not undone cleanly: fail the request so nothing is committed
+	except Exception:  # a refusal or a failed calculation: the card keeps its blanks
+		return {"ok": False}
+	finally:
+		frappe.local.jarvis_dispatch_depth -= 1
+		frappe.clear_messages()
+
+
+def _calculate_draft(doctype: str, values: dict):
+	"""The unsaved document with ERPNext's totals computed from the card's own values,
+	or None for a doctype ERPNext does not total (it totals only one with a currency,
+	as its validate does). Deliberately not ``set_missing_values``: fetching item
+	details can insert or update an Item Price (Stock Settings' auto-insert), and that
+	write would run hooks. In the preview sandbox all the same."""
+	from jarvis.tools._preview_sandbox import preview_sandbox
+	from jarvis.tools.create_doc import build_doc
+
+	doc = build_doc(doctype, values)
+	if not (doc.meta.get_field("currency") and hasattr(doc, "calculate_taxes_and_totals")):
+		return None
+	with preview_sandbox():
+		doc.calculate_taxes_and_totals()
+	return doc
+
+
+def _requested_rows(doc, columns: dict) -> dict:
+	tables = {}
+	for tf, wanted in columns.items():
+		df = doc.meta.get_field(tf) if isinstance(tf, str) else None
+		if not df or df.fieldtype != "Table" or not isinstance(wanted, list):
+			continue
+		child = frappe.get_meta(df.options)
+		known = [f for f in wanted if isinstance(f, str) and _is_shown(child.get_field(f))]
+		tables[tf] = [{f: row.get(f) for f in known} for row in doc.get(tf) or []]
+	return tables
+
+
+def _is_shown(df) -> bool:
+	"""A child field ERPNext computes for the card: read-only, data-bearing, never a secret."""
+	return (
+		bool(df)
+		and bool(df.read_only)
+		and df.fieldtype not in _SKIP_CHILD_FIELDTYPES
+		and df.fieldtype != "Password"
+	)
 
 
 # apply_action is the human-authored EDIT path only: the human deliberately
