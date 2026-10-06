@@ -296,14 +296,16 @@ def _lock_shard(target: str) -> None:
 	_ensure_control_row(target)
 	frappe.db.commit()
 	assert_lock_order("shard")
-	frappe.db.sql(f"SELECT name FROM `tab{PUMP}` WHERE name=%(t)s FOR UPDATE", {"t": target})
+	frappe.db.sql("SELECT name FROM `tabJarvis Relay Pump` WHERE name=%(t)s FOR UPDATE", {"t": target})
 
 
 def _lock_conversation(conversation: str) -> None:
 	"""Second lock in the canonical order (rank 2); defends per-conversation
 	single-flight / seq allocation (OAR-6)."""
 	assert_lock_order("conversation")
-	frappe.db.sql(f"SELECT name FROM `tab{CONV}` WHERE name=%(c)s FOR UPDATE", {"c": conversation})
+	frappe.db.sql(
+		"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE", {"c": conversation}
+	)
 
 
 def unfinished_turn_state(conversation: str) -> str | None:
@@ -311,7 +313,7 @@ def unfinished_turn_state(conversation: str) -> str | None:
 	finishing or recovering), or None when every turn has. One row off the
 	(conversation, state) index, however many turns the chat has had."""
 	rows = frappe.db.sql(
-		f"""SELECT state FROM `tab{TURN}`
+		"""SELECT state FROM `tabJarvis Chat Turn`
 		WHERE conversation=%(c)s AND state IN %(live)s LIMIT 1""",
 		{"c": conversation, "live": NONTERMINAL_STATES},
 	)
@@ -1281,7 +1283,7 @@ def all_required_effects_done(run_id: str) -> bool:
 	"""True iff no required effect row for the turn is still pending/running (the D2
 	row 12 finalize guard, mirrored in Python for the caller's pre-check)."""
 	return not frappe.db.sql(
-		f"""SELECT 1 FROM `tab{EFFECT}` WHERE turn=%(r)s AND status!='done' LIMIT 1""",
+		"""SELECT 1 FROM `tabJarvis Turn Effect` WHERE turn=%(r)s AND status!='done' LIMIT 1""",
 		{"r": run_id},
 	)
 
@@ -1295,7 +1297,7 @@ def visible_effects_done(run_id: str) -> bool:
 	a future required set with none) reads True vacuously, matching intent:
 	nothing visible is held, so there is nothing for the affordance to wait on."""
 	return not frappe.db.sql(
-		f"""SELECT 1 FROM `tab{EFFECT}` WHERE turn=%(r)s AND status!='done'
+		"""SELECT 1 FROM `tabJarvis Turn Effect` WHERE turn=%(r)s AND status!='done'
 		AND effect_name IN %(names)s LIMIT 1""",
 		{"r": run_id, "names": VISIBLE_EFFECT_NAMES},
 	)
@@ -1328,8 +1330,8 @@ def shards_with_open_effects() -> list[str]:
 	errored/cancelled (terminal) turn whose owed effects would otherwise be invisible
 	to a nonterminal-only scan."""
 	rows = frappe.db.sql(
-		f"""SELECT DISTINCT t.relay_target_id
-		FROM `tab{EFFECT}` e INNER JOIN `tab{TURN}` t ON t.run_id = e.turn
+		"""SELECT DISTINCT t.relay_target_id
+		FROM `tabJarvis Turn Effect` e INNER JOIN `tabJarvis Chat Turn` t ON t.run_id = e.turn
 		WHERE e.status != 'done'"""
 	)
 	return [r[0] for r in rows if r[0]]
@@ -1344,8 +1346,8 @@ def turns_with_open_effects(target: str) -> list[str]:
 	watchdog never fights a healthy in-flight finalize."""
 	stale_cut = frappe.utils.add_to_date(None, seconds=-EFFECT_CLAIM_STALE_S)
 	rows = frappe.db.sql(
-		f"""SELECT DISTINCT e.turn
-		FROM `tab{EFFECT}` e INNER JOIN `tab{TURN}` t ON t.run_id = e.turn
+		"""SELECT DISTINCT e.turn
+		FROM `tabJarvis Turn Effect` e INNER JOIN `tabJarvis Chat Turn` t ON t.run_id = e.turn
 		WHERE t.relay_target_id=%(t)s
 		  AND ( e.status='pending'
 		        OR (e.status='running' AND (e.claimed_at IS NULL OR e.claimed_at < %(stale)s)) )""",

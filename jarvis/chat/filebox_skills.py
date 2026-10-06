@@ -33,19 +33,6 @@ DESC_CAP = 200
 _CANDIDATES = 200
 _RECORD_CAP = 20
 _BACKSTOP_LIST = 10
-_FIELDS = (
-	"name",
-	"owner",
-	"skill_name",
-	"description",
-	"scope",
-	"target_role",
-	"enabled",
-	"use_in_file_box",
-	"file_box_creates",
-	"managed_by_learning",
-	"modified",
-)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 _LIST_HEAD = (
@@ -130,7 +117,9 @@ def eligible_skills(dropper: str, pin: str | None = None) -> list:
 	if not filebox_migrated():
 		return []
 	rows = frappe.db.sql(
-		f"""SELECT {", ".join(_FIELDS)} FROM `tabJarvis Custom Skill`
+		"""SELECT name, owner, skill_name, description, scope, target_role, enabled, use_in_file_box,
+		  file_box_creates, managed_by_learning, modified
+		FROM `tabJarvis Custom Skill`
 		WHERE enabled = 1 AND (owner = %(u)s OR (use_in_file_box = 1
 		  AND (name = %(pin)s OR (scope IN ('Role', 'Org') AND managed_by_learning = 0))))
 		ORDER BY modified DESC LIMIT %(n)s""",

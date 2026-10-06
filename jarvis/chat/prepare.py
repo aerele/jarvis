@@ -335,9 +335,9 @@ def _create_placeholder_locked(conversation: str) -> str:
 	ts._lock_conversation(conversation)
 	try:
 		seq = (
-			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[
-				0
-			][0]
+			frappe.db.sql(
+				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+			)[0][0]
 			or 0
 		) + 1
 		doc = frappe.get_doc(
