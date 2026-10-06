@@ -54,9 +54,9 @@ jobs:
     uses: ./.github/workflows/runtime-branding.yml
 
   # The Frappe Marketplace audit's Semgrep ruleset: fails on what fails the audit.
-  # Release PRs only (into version-15 / version-16), where audited code ships.
+  # PRs into develop and the release branches (version-15 / version-16).
   marketplace-semgrep:
-    if: github.event_name == 'pull_request' && (github.base_ref == 'version-15' || github.base_ref == 'version-16')
+    if: github.event_name == 'pull_request' && (github.base_ref == 'develop' || github.base_ref == 'version-15' || github.base_ref == 'version-16')
     uses: ./.github/workflows/marketplace-semgrep.yml
 
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
