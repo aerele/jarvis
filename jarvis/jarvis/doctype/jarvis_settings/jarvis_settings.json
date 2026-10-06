@@ -113,6 +113,7 @@
   "chat_ready_authority",
   "installed_apps_synced",
   "last_subscription_status",
+  "subscription_health",
   "last_sync_warnings",
   "last_model_statuses",
   "llm_last_apply_fingerprint",
@@ -854,6 +855,14 @@
    "read_only": 1
   },
   {
+   "description": "JSON map {account_ref: {upstream, label, email, state, source, since}} of chat-subscription sign-ins that stopped working. Written only by jarvis.subscription_health (admin's heartbeat reply and failed chat turns); 'direct:openai' keys a lone direct-mode OpenAI subscription. Backend-only - the SPA reads it through get_subscription_notice and get_llm_connection_status, not the form.",
+   "fieldname": "subscription_health",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Subscription Health",
+   "read_only": 1
+  },
+  {
    "description": "JSON array of {code, message} warnings from the last pool apply (e.g. a subscription that loaded but failed a probe). '[]' when none. Backend-only - the SPA reads this via get_llm_sync_status, not the form.",
    "fieldname": "last_sync_warnings",
    "fieldtype": "Long Text",
@@ -1261,5 +1270,5 @@
    "write": 1
   }
  ],
- "modified": "2026-09-28 18:05:00.000000"
+ "modified": "2026-10-06 12:00:00.000000"
 }
