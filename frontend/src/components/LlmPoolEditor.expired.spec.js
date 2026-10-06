@@ -109,7 +109,7 @@ describe("an expired single-account row", () => {
 		expect(badges(w)).toHaveLength(1);
 		expect(badges(w)[0].attributes("data-theme")).toBe("red");
 		expect(w.find(".jv-flist-expline").text()).toContain(
-			"Auto uses claude-x until you reconnect.",
+			"Auto uses claude-x until you reconnect."
 		);
 		const reconnect = w
 			.findAll("button")
@@ -161,7 +161,7 @@ describe("two accounts on one row, one expired (Review Focus 5)", () => {
 		const w = await mountEditor({ expiredEntries: [entry("A1", { fallback: "Anthropic" })] });
 		expect(badges(w)).toHaveLength(1);
 		expect(w.find(".jv-flist-subrow-note").text()).toBe(
-			"Auto uses another account until you reconnect.",
+			"Auto uses another account until you reconnect."
 		);
 		expect(w.find(".jv-flist-expline").exists()).toBe(false);
 		expect(w.text()).not.toContain("Chats fail until you reconnect.");
@@ -176,6 +176,15 @@ describe("the reconnect deep link (I8)", () => {
 		const w = await mountEditor({ expiredEntries: [entry("A2")], reconnectRef: "A2" });
 		expect(w.emitted("reconnect-handled")).toBeTruthy();
 		expect(w.text()).toContain("Use the same account: b@x.com");
+	});
+
+	it("hides the account's own Reconnect while the sign-in steps are open", async () => {
+		pool.models = [subModel("gpt-5.6", 0, [account("A1", "a@x.com")])];
+		const w = await mountEditor({ expiredEntries: [entry("A1")], reconnectRef: "A1" });
+		expect(w.text()).toContain("Use the same account: a@x.com");
+		const acctButtons = w.findAll(".jv-pool-acctacts button").map((b) => b.text());
+		expect(acctButtons).toContain("Disconnect");
+		expect(acctButtons).not.toContain("Reconnect");
 	});
 
 	it("does nothing for a ref this pool does not hold", async () => {

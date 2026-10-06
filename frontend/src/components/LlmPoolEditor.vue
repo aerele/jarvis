@@ -388,10 +388,7 @@
 								{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
 							</button>
 						</span>
-						<p
-							v-if="rowExpiry(row, expiredEntries)"
-							class="jv-flist-expline"
-						>
+						<p v-if="rowExpiry(row, expiredEntries)" class="jv-flist-expline">
 							{{ rowExpiry(row, expiredEntries).line }}
 						</p>
 					</div>
@@ -530,10 +527,7 @@
 										{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
 									</button>
 								</span>
-								<p
-									v-if="rowExpiry(row, expiredEntries)"
-									class="jv-flist-expline"
-								>
+								<p v-if="rowExpiry(row, expiredEntries)" class="jv-flist-expline">
 									{{ rowExpiry(row, expiredEntries).line }}
 								</p>
 							</div>
@@ -1132,8 +1126,12 @@
 									>{{ accountHealth(panelRow).label }}</span
 								>
 								<span class="jv-pool-acctacts">
+									<!-- Hidden while the sign-in steps are open below: they ARE the reconnect. -->
 									<button
-										v-if="canEdit"
+										v-if="
+											canEdit &&
+											!(panelRow._connect && panelRow._connect.open)
+										"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 										:disabled="!editable"
 										@click="openConnectPanel(panelRow, ai)"
@@ -2024,7 +2022,11 @@
 										</svg>
 									</button>
 									<button
-										v-if="canEdit && !singleMode"
+										v-if="
+											canEdit &&
+											!singleMode &&
+											!(m._connect && m._connect.open)
+										"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 										:disabled="needsCatalog(m) || !editable"
 										@click="startConnect(m, ai)"
