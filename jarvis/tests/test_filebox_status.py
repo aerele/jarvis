@@ -1041,10 +1041,29 @@ class TestDuplicateDrop(_Base):
 		sm.assert_called_once()
 		self.assertNotIn("duplicate_of", res)
 
-	def test_a_rerun_processes_the_duplicate_from_scratch(self):
+	def test_a_rerun_of_a_duplicate_stays_a_duplicate_while_the_first_stands(self):
+		# Re-try on the same file used to process it anyway; it stays a Duplicate while
+		# the first copy's draft stands (or the first is still being worked).
+		first = self._first()
+		res, _ = self._drop(file=self._file().name)
+		conv = res["conversation_id"]
+		with (
+			_as(USER),
+			patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send,
+			self.assertRaises(frappe.ValidationError) as cm,
+		):
+			filebox._rerun_one(conv)
+		send.assert_not_called()
+		self.assertIn("stays a Duplicate", str(cm.exception))
+		self.assertEqual(self._row(conv)["status"], "duplicate")
+		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_duplicate_of"), first)
+		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))  # nothing claimed
+
+	def test_a_rerun_processes_the_duplicate_once_the_first_draft_is_gone(self):
 		self._first()
 		res, _ = self._drop(file=self._file().name)
 		conv = res["conversation_id"]
+		frappe.db.delete("ToDo", {"name": self.todo.name})
 		with _as(USER), patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send:
 			filebox._rerun_one(conv)
 		send.assert_called_once()

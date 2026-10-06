@@ -1267,6 +1267,29 @@ def _rerun_claimed(conversation: str, fresh) -> bool:
 	return not frappe.db.exists(MSG, {"conversation": conversation, "role": "user", "creation": [">", at]})
 
 
+def _refuse_rerun_of_duplicate(conversation: str) -> None:
+	"""Re-try on the same file bytes, while an earlier copy is still being worked or its
+	draft stands, keeps the row a Duplicate instead of processing it again (#663). Runs
+	before any write; a pinned skill always runs, as on drop (K-D2)."""
+	fname = frappe.db.get_value(CONV, conversation, "filebox_source_file")
+	fdoc = frappe.db.get_value("File", fname, ["name", "content_hash"], as_dict=True) if fname else None
+	prior = _prior_duplicate(fdoc) if fdoc else None
+	if not prior:
+		return
+	p = frappe.db.get_value(
+		CONV, prior, ["title", "filebox_result_doctype", "filebox_result_name"], as_dict=True
+	)
+	what = (
+		f"its draft {p.filebox_result_doctype} {p.filebox_result_name} stands"
+		if p.filebox_result_name
+		else "it is still being worked"
+	)
+	frappe.throw(
+		f"Same file as {p.title or 'an earlier file'} and {what}, so this one stays a Duplicate. "
+		"To process it again, delete or cancel that draft first."
+	)
+
+
 def _rerun_one(conversation: str) -> dict:
 	"""Re-run ONE File Box file in place. Raises on a hard refusal (not found /
 	not owned / not eligible) - every check runs before any write, so a refusal
@@ -1302,6 +1325,8 @@ def _rerun_one(conversation: str) -> dict:
 	f = _source_file(conversation)
 	if not f:
 		frappe.throw("The original file is no longer available — drop it again")
+	if not requested:
+		_refuse_rerun_of_duplicate(conversation)
 
 	# Claim-first: stamped now, cleared by ``_send_inbound`` once the send's
 	# outcome is known (either branch) - so a double click, racing in before that
