@@ -434,7 +434,7 @@ def answer_question(
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "note": note.name, "question_status": "Answered"}
 
 
@@ -460,7 +460,7 @@ def ignore_question(name: str) -> dict:
 		{"status": "Ignored", "ignored_at": now_datetime()},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -477,7 +477,7 @@ def delete_question(name: str) -> dict:
 	if owner_user != me:
 		frappe.throw(_("Not your question."), frappe.PermissionError)
 	frappe.db.set_value(QUESTION, name, "status", "Deleted", update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -652,7 +652,7 @@ def _create_note(
 		except Exception:
 			pass
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before enqueue
 	_enqueue_immediate_ingest(doc.name)
 	return doc
 
@@ -862,7 +862,7 @@ def set_personalisation_settings(payload: str | dict | None = None) -> dict:
 		values["chat_question_mining_enabled"] = 1 if cint(payload["chat_question_mining_enabled"]) else 0
 
 	frappe.db.set_single_value(SETTINGS, values, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return get_personalisation_settings()
 
 
@@ -961,7 +961,7 @@ def save_question_rule(payload: str | dict | None = None) -> dict:
 		if f in payload:
 			doc.set(f, payload[f])
 	doc.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "name": doc.name}
 
 
@@ -977,5 +977,5 @@ def delete_question_rule(name: str) -> dict:
 	if not frappe.db.exists(RULE, name):
 		frappe.throw(_("Question rule not found."))
 	frappe.delete_doc(RULE, name, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}

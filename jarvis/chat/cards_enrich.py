@@ -178,7 +178,7 @@ def enrich_message(message_name: str, owner: str | None = None) -> None:
 			# otherwise a later effect's own failure could roll this one back with it,
 			# and a retried replay would have no commit boundary to distinguish "landed"
 			# from "still pending".
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- durable per replay unit
 
 	try:
 		txn.replay_on_conflict(_read_enrich_write, label=f"chat: enrich cards {message_name}", fresh=True)

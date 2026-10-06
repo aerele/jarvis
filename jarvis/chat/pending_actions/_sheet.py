@@ -409,7 +409,7 @@ def _actionable(name, approver: str) -> tuple:
 
 def _lock_sheet(row) -> tuple:
 	"""Commit, then the conversation lock and the row lock (no wait): ``(row, refusal)``."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
 	lock_conversation(row.conversation)
 	try:
 		locked = get_row(row.name, lock="nowait")
@@ -467,7 +467,7 @@ def _apply_locked(row, approver: str, decisions: dict) -> dict:
 	if not claim(locked.name, approver, apply_token=token, apply_request={**plan, "approver": approver}):
 		frappe.db.rollback()
 		return _refusal(*_BUSY)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before enqueue
 	_progress(locked, approver, 0, len(records))  # before the job: it can't overwrite the job's
 	try:
 		frappe.enqueue(JOB, queue="long", timeout=JOB_TIMEOUT_S, job_id=token, name=locked.name, token=token)
@@ -512,7 +512,7 @@ def _discard_locked(row, approver: str) -> dict:
 	_terminal_update(
 		locked.name, [PENDING], DISCARDED, reason_code="discarded", decided_by=approver, sheet_outcome=outcome
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	_settle(locked.name)
 	return {"ok": True, "reason_code": "discarded", "pa_status": DISCARDED}
 
@@ -524,7 +524,7 @@ def _fail_sealed(row, e: _seal.SealError, *, decided_by: str | None = None, toke
 	frappe.log_error(
 		title=f"jarvis.file_box.sheet_{e.reason_code}", message=f"{row.name}: failed binding {e.binding}"
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if moved:
 		_settle(row.name)
 	return _refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED, outcome="failed")
@@ -545,9 +545,9 @@ def run_apply(name: str, token: str) -> None:
 		frappe.log_error(
 			title="jarvis.file_box.sheet_apply_stale", message=f"{name}: this job's claim is gone"
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before apply
 	try:
 		_run(row, token)
 	except Exception:
@@ -952,7 +952,7 @@ def _finish(row, token: str, plan: dict, merged: list[dict], outcome: list[dict]
 		_lost(row.name)
 		return
 	_audit(row, written, "applied")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before progress
 	_progress(row, plan.get("approver"), len(outcome), len(outcome), state="applied")
 	_settle(row.name)
 
@@ -1001,7 +1001,7 @@ def _hand_back(name: str, token: str, errors: dict, *, failed=()) -> str | None:
 		[{"doctype": r["doctype"], "op": r["op"], "name": r.get("name") or ""} for r in failed],
 		"failed",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if status == DISCARDED:
 		_settle(name)
 	return status
@@ -1013,20 +1013,20 @@ def _lost(name: str) -> None:
 		title="jarvis.file_box.sheet_apply_lost",
 		message=f"{name}: its claim moved on (an operator or the reaper); nothing from this apply was kept",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist log before return
 
 
 def _log_crashes(name: str, crashes) -> None:
 	for tb in crashes:
 		frappe.log_error(title="jarvis.file_box.sheet_apply_record_crashed", message=f"{name}\n{tb}")
 	if crashes:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 
 
 def _crashed(row, token: str, tb: str) -> None:
 	_rollback()
 	frappe.log_error(title="jarvis.file_box.sheet_apply_crashed", message=f"{row.name}\n{tb}")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before hand back
 	try:
 		if not _hand_back(row.name, token, {"sheet": _CRASHED_TEXT}):
 			_lost(row.name)
@@ -1128,7 +1128,7 @@ def reap() -> list[str]:
 	for r in rows:
 		if _job_alive(r.apply_token) is not False:
 			continue
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before hand back
 		if _hand_back(r.name, r.apply_token or "", {"sheet": INTERRUPTED_TEXT}):
 			released.append(r.name)
 	if released:
@@ -1137,6 +1137,6 @@ def reap() -> list[str]:
 			message="Handed back to Pending (their apply job was gone; nothing was created): "
 			+ ", ".join(released),
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before alert
 		_alert(f"{len(released)} File Box sheet apply job(s) went missing: " + ", ".join(released))
 	return released

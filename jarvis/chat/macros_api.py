@@ -403,7 +403,6 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 	marked = frappe.get_all("Notification Log", filters=filters, or_filters=_notice_kinds(), pluck="name")
 	for name in marked:
 		frappe.db.set_value("Notification Log", name, "read", 1, update_modified=False)
-	frappe.db.commit()
 	return {"ok": True, "dismissed": len(marked)}
 
 
@@ -678,7 +677,6 @@ def create_macro(
 	)
 	doc.flags[FORM_FLAG] = True
 	doc.insert()
-	frappe.db.commit()
 	return {
 		"ok": True,
 		"data": {"name": doc.name, "macro_name": doc.macro_name, "summarize": len(doc.steps) >= 2},
@@ -780,7 +778,7 @@ def update_macro(
 	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
 	doc.flags[FORM_FLAG] = True
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- save lands before summary starts
 	# An emptied summary is not one the owner wrote: with changed steps it is the same
 	# as the controller's clear, and a new summary follows.
 	# Not while held: ``summarize_macro`` refuses a held macro.
@@ -833,7 +831,7 @@ def _refuse_busy_delete(macro_name: str, stopped: int):
 			f"stops; {stopped} run(s) were stopped; the macro was not deleted."
 		),
 	)
-	frappe.db.commit()  # the throw below rolls the request back
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before raise
 	if stopped == 1:
 		said = _("The run was stopped, but another run started before the macro could be deleted.")
 	elif stopped:
@@ -1028,7 +1026,7 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 				frappe.log_error(title="Jarvis: bulk macro delete failed", message=frappe.get_traceback())
 				frappe.db.commit()  # a later row's rollback must not take the log with it
 			skip(n, title, reason)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- log survives later rollback
 	return {"deleted": deleted, "skipped": skipped, "stopped_runs": stopped_runs}
 
 
@@ -1403,7 +1401,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pending mark visible to turn worker
 	# A summary given up (``pending``, a forced call): the mark names the new chat as of
 	# the commit above, so a late result from the old one finds no macro waiting on it
 	# (``macros._apply_merge_after_turn`` looks the macro up by this link), whether or
@@ -1445,7 +1443,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		}
 	# Hide from the sidebar (list_conversations skips Archived).
 	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- archive survives summary chat cleanup
 	if pending:
 		_delete_summary_chat(pending, owned_by=doc.owner)
 	return {"ok": True, "conversation": conv.name}

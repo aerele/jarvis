@@ -198,7 +198,7 @@ def run_llm_action(
 				summary=f"daily LLM cap reached ({cap})",
 				detail=f"daily LLM cap reached ({cap}); further evaluations today are dropped silently",
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist activity log
 		return
 
 	# Imported lazily (background job only): turn_handler for the
@@ -234,4 +234,4 @@ def run_llm_action(
 			duration_ms=duration_ms,
 		)
 	# Background job: nothing else commits for us.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist job result

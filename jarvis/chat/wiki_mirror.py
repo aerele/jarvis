@@ -485,7 +485,7 @@ def _sync(full: bool) -> dict:
 		if last:
 			for r in deletes:
 				frappe.db.set_value(WIKI, r.name, "mirror_hash", "", update_modified=False)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync progress
 
 	return {
 		"ok": True,
@@ -615,7 +615,7 @@ def _scrub() -> dict:
 	# stay consistent and a later re-enable full sync re-pushes cleanly.
 	for r in rows:
 		frappe.db.set_value(WIKI, r.name, "mirror_hash", "", update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync progress
 
 	return {
 		"ok": True,

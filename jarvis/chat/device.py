@@ -94,7 +94,7 @@ def _save_credentials(
 	settings_doc.db_set("chat_device_public_key", public_key_b64u)
 	set_settings_password(settings_doc, "chat_device_private_key", private_key_b64u)
 	set_settings_password(settings_doc, "chat_device_token", device_token)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist credentials immediately
 
 
 def _priv_b64u(priv: Ed25519PrivateKey) -> str:
@@ -123,7 +123,7 @@ def _save_keypair(*, device_id: str, public_key_b64u: str, private_key_b64u: str
 	settings_doc.db_set("chat_device_id", device_id)
 	settings_doc.db_set("chat_device_public_key", public_key_b64u)
 	set_settings_password(settings_doc, "chat_device_private_key", private_key_b64u)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist credentials immediately
 
 
 def _read_keypair() -> tuple[str, str, Ed25519PrivateKey] | None:
@@ -432,7 +432,7 @@ def clear_credentials() -> None:
 	settings.db_set("chat_device_public_key", "")
 	clear_settings_password(settings, "chat_device_private_key")
 	clear_settings_password(settings, "chat_device_token")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist credentials immediately
 
 
 def session_device_is_stale(row_device_id: str, current_device_id: str) -> bool:
@@ -510,7 +510,7 @@ def update_device_token(new_token: str, *, device_id: str) -> bool:
 		# rotated bearer straight into tabSingles as plaintext; encrypt it
 		# into __Auth first (see _password_utils module docstring).
 		set_settings_password(settings, "chat_device_token", new_token)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist credentials immediately
 		return True
 
 

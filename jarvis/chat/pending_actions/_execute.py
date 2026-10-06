@@ -250,7 +250,7 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 		frappe.log_error(
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if not defer:
 		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
@@ -296,7 +296,7 @@ def _execute_locked(
 	"""Steps 3-13: lock, preflight, unseal, claim, dispatch, final write, settle."""
 	from jarvis import api
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	try:
 		row = get_row(name, lock="nowait")
 	except (frappe.QueryTimeoutError, frappe.QueryDeadlockError):
@@ -305,7 +305,7 @@ def _execute_locked(
 	if not row:
 		return _refusal(*_NOT_FOUND)
 	if row.status != PENDING:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		if row.status in TERMINAL and not row.settled:
 			settle(name)
 		return handled(row)
@@ -326,7 +326,7 @@ def _execute_locked(
 	if not claim(name, approver, batch_id=batch_id, adopted_conversation=adopt):
 		frappe.db.rollback()
 		return _refusal(*_BUSY)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before dispatch
 	if arm and arm.claimed:
 		try:
 			arm.claimed(row)
@@ -377,7 +377,7 @@ def _execute_locked(
 	)
 	if not done:
 		late_outcome(name, status, code, outcome)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 
 	if ok and done and arm:
 		try:

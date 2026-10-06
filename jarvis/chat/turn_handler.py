@@ -424,7 +424,7 @@ class _AssistantContentBatcher:
 
 		def _write() -> None:
 			frappe.db.set_value(MSG, self.msg_name, "content", text)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 		# The buffered text can span up to _ASSISTANT_BATCH_INTERVAL_MS since the
 		# transaction's last commit. A competing write to the SAME reply row in that
@@ -2683,7 +2683,7 @@ def _create_assistant_placeholder(conv) -> "frappe.model.document.Document":
 		}
 	)
 	msg.insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	return msg
 
 
@@ -2710,7 +2710,7 @@ def _mark_errored(assistant_msg_name: str, error: str) -> None:
 			"error": error,
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	_maybe_apply_llm_switch()
 
 
@@ -2726,7 +2726,7 @@ def _mark_recovering(assistant_msg_name: str) -> None:
 			"recovery_started_at": frappe.utils.now_datetime(),
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def _try_recover_now(conversation_id: str) -> None:
@@ -2897,7 +2897,7 @@ def _handle_event_inner(
 
 			def _record_owner() -> None:
 				record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 			# batcher.flush() just above can be a no-op (nothing pending), leaving this on
 			# the transaction's existing snapshot; drop it so record_tool_owner's FOR UPDATE
@@ -2934,7 +2934,7 @@ def _handle_event_inner(
 				)
 				doc.flags.jarvis_server_write = True
 				doc.insert(ignore_permissions=True)
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 				tool_msg_by_call_id[tool_call_id] = doc.name
 			_publish_to_user(
 				user,
@@ -2995,7 +2995,7 @@ def _handle_event_inner(
 					"streaming": 0,
 				},
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 			_publish_to_user(
 				user,
 				{

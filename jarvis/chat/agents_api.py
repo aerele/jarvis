@@ -812,7 +812,7 @@ def set_agent_access(
 	# allowed listing, not only the enabled-install set), so an access change moves
 	# the container roster exactly as install/enable does and must show as pending.
 	_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 
 	applied = False
 	if frappe.utils.cint(apply):
@@ -901,7 +901,7 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 		or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
 	):
 		_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status}
 
 
@@ -936,7 +936,7 @@ def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
 			or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
 		):
 			_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "visibility": doc.operator_visibility}
 
 
@@ -1248,7 +1248,7 @@ def install_agent(
 		action="installed",
 		detail=f"v{listing.version}" if listing.version else None,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before response
 	return {"ok": True, "data": {"name": doc.name, "agent": listing.name}}
 
 
@@ -1310,7 +1310,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 		installation=doc.name,
 		action="enabled" if doc.enabled else "disabled",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
@@ -1382,7 +1382,7 @@ def set_schedule(
 			else "schedule off"
 		),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {
@@ -1453,7 +1453,7 @@ def set_config(installation: str, config: str) -> dict:
 		# Key names only — engagement config VALUES stay out of the feed.
 		detail=", ".join(sorted(parsed)) or None,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name}}
 
 
@@ -1475,7 +1475,7 @@ def set_run_as_user(installation: str, user: str) -> dict:
 	# it fires on EVERY write surface, Desk / import / bulk / direct save, not just
 	# this SPA endpoint; a self-map is correctly not audited).
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {
@@ -1641,7 +1641,7 @@ def uninstall_agent(installation: str) -> dict:
 		# A fresh read view: this request's snapshot opened at the get_doc above, and a
 		# launch that held the lock while we waited may have committed a running run.
 		# Nothing is pending here, so the commit only ends the stale snapshot.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot after lock wait
 		stopped = _stop_live_runs_for_uninstall(doc.name)
 		_uninstall_cascade(doc, via_admin)
 	from jarvis.chat import agent_models
@@ -1708,7 +1708,7 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 	_delete_installation_preserving_provenance(doc, via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before stopping runs
 
 
 @frappe.whitelist()
@@ -2033,7 +2033,7 @@ def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
 	permission check: the caller has made it (``stop_agent_run``, ``uninstall_agent``).
 
 	The transition and its ordering are ``stop_agent_run``'s (see there)."""
-	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before row lock
 	row = frappe.db.get_value(
 		RUN,
 		run,
@@ -2042,12 +2042,12 @@ def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
 		for_update=True,
 	)
 	if not row:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return None
 	if row.status != "running":
 		# Already terminal — a concurrent finish, reap or a second click. Release the
 		# row lock and report the state it actually reached; never overwrite it.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return row.status
 
 	frappe.db.set_value(
@@ -2056,14 +2056,14 @@ def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
 		{"status": "stopped", "finished_at": frappe.utils.now(), "error": error[:140]},
 		update_modified=False,
 	)
-	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before session teardown
 	# The session bearer must not outlive the run: with the row gone the delegate's
 	# late jarvis__* calls (record_agent_run included) resolve no identity and 401,
 	# so nothing it does after this can write back onto the stopped run.
 	from jarvis.chat import agent_runs
 
 	agent_runs.teardown_run_session(row.session_key)
-	frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before gateway abort
 	_try_abort_gateway_session(row.session_key, run)
 	log_activity(
 		agent=row.agent,
@@ -2074,7 +2074,7 @@ def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
 		detail=detail,
 		owner=row.owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist stopped run
 	return "stopped"
 
 
@@ -2276,7 +2276,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 			frappe.throw(
 				_("Another activation change for this customer is in progress. Please retry in a moment.")
 			)
-		frappe.db.commit()  # fresh snapshot under the lock (defeats stale REPEATABLE-READ count)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot under lock
 		doc = frappe.get_doc(INSTALLATION, installation)  # re-read the row under the lock
 		if doc.activation_state == "live":
 			frappe.throw(_("This installation is already live."))
@@ -2316,7 +2316,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 			detail=f"signed off by {me}",
 			owner=owner,
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before response
 	return {
 		"ok": True,
 		"data": {
@@ -2355,7 +2355,7 @@ def demote_installation(installation: str, reason: str | None = None) -> dict:
 		detail=((reason or "").strip()[:140] or f"by {me}"),
 		owner=doc.owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "activation_state": "shadow"}}
 
 
@@ -2399,7 +2399,7 @@ def raise_activation_ceiling(customer: str, justification: str, new_ceiling: int
 		result_link_name=customer,
 		detail=f"activation_module_ceiling -> {nc} for {customer}; reviewer {reviewer}; {just}"[:500],
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {
@@ -2767,7 +2767,7 @@ def set_finding_state(finding: str, state: str) -> dict:
 	doc.check_permission("write")  # S3 owner-gate
 	doc.state = state
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "state": state}}
 
 
@@ -2877,7 +2877,7 @@ def take_finding_to_chat(finding: str) -> dict:
 		}
 	)
 	conv.insert()  # owned by the current user; respects perms
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before reply build
 
 	parts = [
 		f"I want to act on audit finding {doc.name} (rule {doc.rule_id}, severity: {doc.severity}).",
@@ -2909,7 +2909,7 @@ def take_finding_to_chat(finding: str) -> dict:
 		# no trace, mirroring filebox._cascade's cleanup shape.
 		frappe.db.delete(MSG, {"conversation": conv.name})
 		frappe.delete_doc(CONV, conv.name, ignore_permissions=True, force=True)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist cleanup before return
 		return {
 			"ok": False,
 			"conversation": None,
@@ -3002,7 +3002,7 @@ def _enqueue_apply() -> dict:
 	_rate_limit_apply()
 	payload = build_agent_push_payload()
 	frappe.db.set_single_value(_SETTINGS, "agent_skills_sync_status", "pending: applying agents")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before enqueue
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	frappe.enqueue(
 		"jarvis.chat.agents_api._enqueued_push_agent_skills",
@@ -3046,7 +3046,7 @@ def _enqueued_push_agent_skills() -> None:
 			frappe.db.set_single_value(
 				_SETTINGS, "agent_skills_sync_status", "failed: skipped (concurrent sync)"
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 			return
 
 		terminal_written = False
@@ -3079,7 +3079,7 @@ def _enqueued_push_agent_skills() -> None:
 			# happen. The terminal write below is a single ``set_value`` in the fresh
 			# transaction, still covered by the try/except/finally and the trailing
 			# commit, so the "status is never left pending" invariant is unchanged.
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before status write
 			stamped = _stamp_pushed_models(payload, pushed, scope)
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
@@ -3129,7 +3129,7 @@ def _enqueued_push_agent_skills() -> None:
 					_fail("failed: unexpected error; see Error Log")
 				except Exception:
 					pass
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist job result
 
 
 def _model_push_scope(payload: list[dict]) -> dict | None:

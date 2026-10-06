@@ -328,7 +328,6 @@ def touch(user: str) -> None:
 		)
 
 	txn.replay_on_conflict(write, label="suggestions.touch")
-	frappe.db.commit()
 
 
 def store(user: str, items: list[dict]) -> None:
@@ -358,7 +357,6 @@ def store(user: str, items: list[dict]) -> None:
 		)
 
 	txn.replay_on_conflict(write, label="suggestions.store")
-	frappe.db.commit()
 
 
 def read(user: str) -> list[dict]:

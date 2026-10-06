@@ -153,7 +153,7 @@ def _conditional_clear(name: str, fields: dict) -> bool:
 	# Read rowcount BEFORE commit (commit can reset the cursor).
 	cursor = getattr(frappe.db, "_cursor", None)
 	won = bool(cursor and cursor.rowcount)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist conditional clear
 	return won
 
 
