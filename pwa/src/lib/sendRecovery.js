@@ -1,3 +1,4 @@
+// Relative shared import also supports the unbundled node --test suite (no Vite aliases).
 import { sendRejectionCopy } from "../../../frontend/src/lib/sendRejectionCopy.js";
 
 // Request state is independent of the view and transcript. The caller makes

@@ -39,7 +39,10 @@ def _public(receipt):
 	if conversation := result.get("conversation_id") or receipt.get("conversation"):
 		from jarvis.chat.api import _get_owned_conversation
 
-		_get_owned_conversation(conversation)
+		try:
+			_get_owned_conversation(conversation)
+		except frappe.DoesNotExistError:
+			return {"delivery": "unknown"}
 	return {"delivery": "settled", "result": result}
 
 
@@ -66,12 +69,6 @@ def send_message(
 
 	require_jarvis_access()
 	cache, key = _key(request_id)
-	if conversation:
-		try:
-			api._get_owned_conversation(conversation)
-		except frappe.DoesNotExistError:
-			# Preserve send_message's stale, reaped-conversation fallback.
-			pass
 	payload = json.dumps([conversation, message, attachments, approval_tokens], separators=(",", ":"))
 	fingerprint = hashlib.sha256(payload.encode()).hexdigest()
 	receipt = {"state": "pending", "fingerprint": fingerprint, "conversation": conversation}
@@ -98,9 +95,6 @@ def send_message(
 		attachments=attachments,
 		approval_tokens=approval_tokens,
 	)
-	# Explicit commit BEFORE publishing the receipt: a later request-level commit
-	# failure must not turn a cached success into evidence of uncommitted work.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- publish receipt only after DB commit
 	# No request content, file references, tool results or business records in Redis.
 	fields = (
 		"ok",
@@ -118,10 +112,16 @@ def send_message(
 	)
 	receipt["state"] = "settled"
 	receipt["result"] = {k: result[k] for k in fields if k in result}
-	try:
-		cache.set(key, json.dumps(receipt), ex=RETENTION_SECONDS)
-	except Exception:
-		# The current caller still receives the real outcome. A lost HTTP response
-		# with no cached outcome remains unknown on check_delivery.
-		pass
+
+	def publish_receipt():
+		try:
+			cache.set(key, json.dumps(receipt), ex=RETENTION_SECONDS)
+		except Exception:
+			# Committed work must not fail because its optional receipt was lost.
+			# A later lookup stays unknown; it never authorizes replay.
+			pass
+
+	# Let Frappe own the request transaction. A rollback/failed commit never
+	# publishes success, and the response is sent only after request commit.
+	frappe.db.after_commit.add(publish_receipt)
 	return {"delivery": "settled", "result": result}

@@ -13,6 +13,7 @@ vi.mock("../../../pwa/src/api", () => ({
 	activeQueuedTurn: vi.fn(),
 	queuePosition: vi.fn(),
 	cancelQueuedTurn: vi.fn(),
+	stopRun: vi.fn(),
 	getChatUiSettings: vi.fn(),
 	listPendingConfirmations: vi.fn(),
 	sendRecoverableMessage: vi.fn(),
@@ -40,7 +41,6 @@ vi.mock("../../../pwa/src/components/MessageMedia.vue", () => ({
 vi.mock("../../../pwa/src/components/RecordCards.vue", () => ({
 	default: { template: "<div />" },
 }));
-vi.mock("../../../pwa/src/components/Sheet.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("../../../pwa/src/components/SkillChips.vue", () => ({
 	default: { template: "<div />" },
 }));
@@ -102,6 +102,7 @@ beforeEach(() => {
 	recoveryState.drafts = {};
 	recoveryState.parkedDrafts = [];
 	recoveryState.queued = {};
+	recoveryState.starting = {};
 	recoveryState.observedRuns = {};
 	api.activeQueuedTurn.mockResolvedValue({ ok: true, active: null });
 	api.queuePosition.mockResolvedValue({ ok: true, state: "queued", position: 2 });
@@ -508,4 +509,99 @@ it("stalled queue reads release the status control and keep waiting feedback", a
 	await flushPromises();
 	expect(wrapper.text()).toContain("Starting…");
 	expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+});
+
+it("normal acceptance stays busy after seed reconciliation until the matching run starts and ends", async () => {
+	const pending = defer();
+	api.sendRecoverableMessage.mockReturnValue(pending.promise);
+	await open();
+	await send();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+	savedSeed();
+	pending.resolve({
+		delivery: "settled",
+		result: { ok: true, conversation_id: "A", message_id: "M", run_id: "normal" },
+	});
+	await flushPromises();
+	expect(recoveryState.requests).toHaveLength(0);
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+	await send("Second message");
+	expect(api.sendRecoverableMessage).toHaveBeenCalledTimes(1);
+	api.queuePosition.mockResolvedValue({ ok: true, state: "dispatching" });
+	wrapper.unmount();
+	await open();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+	event({ kind: "run:start", conversation_id: "A", run_id: "normal" });
+	await flushPromises();
+	expect(recoveryState.starting.A).toBeUndefined();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+	event({ kind: "run:end", conversation_id: "A", run_id: "normal" });
+	await flushPromises();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
+});
+it.each(["run:end", "run:error"])(
+	"normal acceptance after %s does not restore busy state",
+	async (kind) => {
+		const pending = defer();
+		api.sendRecoverableMessage.mockReturnValue(pending.promise);
+		await open();
+		await send();
+		event({ kind, conversation_id: "A", run_id: "normal-late", error: "failed" });
+		savedSeed();
+		pending.resolve({
+			delivery: "settled",
+			result: { ok: true, conversation_id: "A", message_id: "M", run_id: "normal-late" },
+		});
+		await flushPromises();
+		expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
+	}
+);
+it("edit as new preserves a newer draft and files without sending or importing approval selections", async () => {
+	recoveryState.drafts.A = { text: "", attachments: [{ ...file }] };
+	api.sendRecoverableMessage.mockRejectedValue(new Error("offline"));
+	await open();
+	await send();
+	recoveryState.requests[0].approvalTokens = ["old-approval"];
+	wrapper.findComponent(Composer).vm.$emit("update:modelValue", "Newer draft");
+	await button("Edit as new message").trigger("click");
+	await flushPromises();
+	await button("Move to composer").trigger("click");
+	await flushPromises();
+	expect(recoveryState.requests).toHaveLength(0);
+	expect(wrapper.findComponent(Composer).props("modelValue")).toBe("Review invoice");
+	expect(wrapper.findComponent(Composer).props("attachments")[0].file_url).toBe(file.file_url);
+	expect(recoveryState.parkedDrafts[0].text).toBe("Newer draft");
+	expect(wrapper.text()).toContain("could duplicate work");
+	expect(api.sendRecoverableMessage).toHaveBeenCalledTimes(1);
+	api.sendRecoverableMessage.mockResolvedValue(rejected);
+	await send();
+	expect(api.sendRecoverableMessage.mock.calls[1][0].approvalTokens).toEqual([]);
+});
+it("discarding unknown delivery leaves newer composer text unchanged", async () => {
+	api.sendRecoverableMessage.mockRejectedValue(new Error("offline"));
+	await open();
+	await send();
+	wrapper.findComponent(Composer).vm.$emit("update:modelValue", "Keep me");
+	await button("Discard").trigger("click");
+	await flushPromises();
+	await button("Discard request").trigger("click");
+	await flushPromises();
+	expect(recoveryState.requests).toHaveLength(0);
+	expect(wrapper.findComponent(Composer).props("modelValue")).toBe("Keep me");
+	expect(api.sendRecoverableMessage).toHaveBeenCalledTimes(1);
+});
+
+it("normal waiting state heals a missed terminal through server resync", async () => {
+	api.sendRecoverableMessage.mockResolvedValue({
+		delivery: "settled",
+		result: { ok: true, conversation_id: "A", message_id: "M", run_id: "normal-ended" },
+	});
+	await open();
+	savedSeed();
+	await send();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+	api.queuePosition.mockResolvedValue({ ok: true, state: "done" });
+	window.dispatchEvent(new Event("jv:resync"));
+	await flushPromises();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
 });

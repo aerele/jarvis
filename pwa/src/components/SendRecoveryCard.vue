@@ -1,30 +1,40 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { agentName } from "@/branding";
 import { recoveryCopy } from "../lib/sendRecovery";
+import Sheet from "./Sheet.vue";
 
-const props = defineProps({ request: { type: Object, required: true }, disabled: Boolean });
-const emit = defineEmits(["retry", "check", "discard", "edit"]);
+const props = defineProps({
+	request: { type: Object, required: true },
+	disabled: Boolean,
+	backup: Function,
+});
+const emit = defineEmits(["retry", "check", "discard", "edit", "edit-new", "reload"]);
 const copy = computed(() => recoveryCopy(props.request, agentName));
-const dialog = ref(null);
-const editor = ref(null);
 const mode = ref("");
 const text = ref("");
-let opener;
-async function open(kind) {
-	if (props.request.state !== "rejected" || props.request.checking) return;
-	opener = document.activeElement;
+const backupNote = ref("");
+const updateRequired = computed(() => props.request.result?.reason === "release_update_required");
+const uncertain = computed(() => props.request.state === "uncertain");
+const title = computed(
+	() =>
+		({
+			edit: "Edit unsent message",
+			discard: "Discard preserved request?",
+			new: "Edit as new message?",
+			reload: "Reload to update Jarvis?",
+		}[mode.value] || "")
+);
+function open(kind) {
+	if (!["rejected", "uncertain"].includes(props.request.state) || props.request.checking) return;
 	mode.value = kind;
 	text.value = props.request.text;
-	await nextTick();
-	dialog.value?.showModal();
-	if (kind === "edit") editor.value?.focus();
+	backupNote.value = "";
 }
 function close() {
-	dialog.value?.close();
 	mode.value = "";
-	if (opener?.isConnected) opener.focus();
 }
+watch(() => props.request.state, close);
 function save() {
 	if (props.request.state !== "rejected") return close();
 	if (!text.value.trim() && !props.request.attachments.length) return;
@@ -32,31 +42,28 @@ function save() {
 	close();
 }
 function discard() {
+	if (["rejected", "uncertain"].includes(props.request.state)) emit("discard");
 	close();
-	if (props.request.state === "rejected") emit("discard");
 }
-function keepFocus(event) {
-	if (event.key !== "Tab") return;
-	const controls = [
-		...dialog.value.querySelectorAll("button:not(:disabled), textarea:not(:disabled)"),
-	];
-	const first = controls[0];
-	const last = controls[controls.length - 1];
-	if (event.shiftKey && document.activeElement === first) {
-		event.preventDefault();
-		last?.focus();
-	} else if (!event.shiftKey && document.activeElement === last) {
-		event.preventDefault();
-		first?.focus();
+function editNew() {
+	if (uncertain.value) emit("edit-new");
+	close();
+}
+function backup() {
+	try {
+		props.backup?.();
+		backupNote.value =
+			"Backup download requested. Check that the file was saved before reloading. It contains message text and file links, not the uploaded files themselves.";
+	} catch {
+		backupNote.value =
+			"Could not download a backup. Copy your messages and file links before reloading.";
 	}
 }
-
 function fileHref(file) {
 	return file.file_url?.startsWith("/") && !file.file_url.startsWith("//")
 		? file.file_url
 		: undefined;
 }
-onBeforeUnmount(close);
 </script>
 
 <template>
@@ -95,10 +102,10 @@ onBeforeUnmount(close);
 			<div v-if="request.state === 'rejected'" class="jv-recovery-actions">
 				<button
 					class="is-primary"
-					:disabled="disabled || request.checking"
-					@click="emit('retry')"
+					:disabled="(!updateRequired && disabled) || request.checking"
+					@click="updateRequired ? open('reload') : emit('retry')"
 				>
-					Retry
+					{{ updateRequired ? "Reload" : "Retry" }}
 				</button>
 				<button :disabled="request.checking" @click="open('edit')">Edit</button>
 				<button :disabled="request.checking" @click="open('discard')">Discard</button>
@@ -107,49 +114,80 @@ onBeforeUnmount(close);
 				<button class="is-primary" :disabled="request.checking" @click="emit('check')">
 					Check delivery
 				</button>
+				<button :disabled="request.checking" @click="open('new')">
+					Edit as new message
+				</button>
+				<button :disabled="request.checking" @click="open('discard')">Discard</button>
 			</div>
 		</div>
-		<dialog
-			ref="dialog"
-			class="jv-recovery-dialog"
-			:aria-label="mode === 'edit' ? 'Edit unsent message' : 'Discard unsent request'"
-			@cancel.prevent="close"
-			@keydown="keepFocus"
-		>
-			<form v-if="mode === 'edit'" @submit.prevent="save">
-				<h2>Edit unsent message</h2>
-				<p>
-					Your newer draft stays in the composer. The files below remain attached to this
-					request.
-				</p>
-				<label>Message<textarea ref="editor" v-model="text" rows="5" /></label>
-				<ul>
-					<li v-for="(file, i) in request.attachments" :key="i">
-						{{ file.name || "Attachment" }}
-					</li>
-				</ul>
-				<div class="jv-recovery-actions">
-					<button type="button" @click="close">Cancel</button
-					><button
-						class="is-primary"
-						:disabled="!text.trim() && !request.attachments.length"
-					>
-						Save changes
-					</button>
-				</div>
-			</form>
-			<div v-else-if="mode === 'discard'">
-				<h2>Discard this unsent request?</h2>
-				<p>
-					This removes the preserved message from this tab. Your newer draft is kept.
-					Uploaded files are not deleted.
-				</p>
-				<div class="jv-recovery-actions">
-					<button autofocus @click="close">Keep message</button
-					><button @click="discard">Discard request</button>
-				</div>
+		<Sheet :open="!!mode" :label="title" @close="close">
+			<div class="jv-recovery-editor">
+				<h2>{{ title }}</h2>
+				<form v-if="mode === 'edit'" @submit.prevent="save">
+					<p>
+						Your newer draft stays in the composer. The files below remain attached to
+						this request.
+					</p>
+					<label>Message<textarea v-model="text" autofocus rows="5" /></label>
+					<ul>
+						<li v-for="(file, i) in request.attachments" :key="i">
+							{{ file.name || "Attachment" }}
+						</li>
+					</ul>
+					<div class="jv-recovery-actions">
+						<button type="button" @click="close">Cancel</button>
+						<button
+							class="is-primary"
+							:disabled="!text.trim() && !request.attachments.length"
+						>
+							Save changes
+						</button>
+					</div>
+				</form>
+				<template v-else-if="mode === 'discard'">
+					<p>
+						This removes the preserved message from this tab. Your newer draft is kept.
+						Uploaded files are not deleted.
+					</p>
+					<p v-if="uncertain">
+						Delivery is unknown. Discarding does not cancel work that may already be
+						running.
+					</p>
+					<div class="jv-recovery-actions">
+						<button autofocus @click="close">Keep message</button
+						><button @click="discard">Discard request</button>
+					</div>
+				</template>
+				<template v-else-if="mode === 'new'">
+					<p>
+						The original request may already have been received or executed. Sending it
+						again could duplicate work. Check the conversation before sending again.
+					</p>
+					<p>
+						This moves the text and files into the composer without sending. Your
+						current draft stays saved separately. Previous approval selections are not
+						reused.
+					</p>
+					<div class="jv-recovery-actions">
+						<button autofocus @click="close">Cancel</button
+						><button @click="editNew">Move to composer</button>
+					</div>
+				</template>
+				<template v-else-if="mode === 'reload'">
+					<p>
+						Reload is required before you can send again. Reloading clears all
+						preserved requests and drafts in this tab, including other conversations.
+						Save a backup first.
+					</p>
+					<p role="status">{{ backupNote }}</p>
+					<div class="jv-recovery-actions">
+						<button autofocus @click="close">Cancel</button
+						><button @click="backup">Download backup</button
+						><button @click="emit('reload')">Reload now</button>
+					</div>
+				</template>
 			</div>
-		</dialog>
+		</Sheet>
 	</div>
 </template>
 
@@ -243,37 +281,27 @@ onBeforeUnmount(close);
 	opacity: 0.45;
 	cursor: default;
 }
-.jv-recovery-dialog {
-	inset: auto 0 0;
-	width: min(100%, 520px);
-	max-height: 85dvh;
-	margin: auto auto 0;
+.jv-recovery-editor {
 	padding: 24px 20px max(24px, env(safe-area-inset-bottom));
-	border: 1px solid var(--border);
-	border-radius: 22px 22px 0 0;
 	color: var(--ink9);
-	background: var(--card);
 	overflow: auto;
 }
-.jv-recovery-dialog::backdrop {
-	background: var(--scrim);
-}
-.jv-recovery-dialog h2 {
+.jv-recovery-editor h2 {
 	font-size: 18px;
 	margin: 0 0 12px;
 }
-.jv-recovery-dialog p,
-.jv-recovery-dialog li {
+.jv-recovery-editor p,
+.jv-recovery-editor li {
 	font-size: 13px;
 	line-height: 1.6;
 	color: var(--ink6);
 }
-.jv-recovery-dialog label {
+.jv-recovery-editor label {
 	display: block;
 	margin-top: 16px;
 	font-size: 12px;
 }
-.jv-recovery-dialog textarea {
+.jv-recovery-editor textarea {
 	display: block;
 	width: 100%;
 	padding: 12px;
