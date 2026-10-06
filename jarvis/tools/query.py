@@ -382,7 +382,7 @@ def _validate_spec_shape(spec: dict) -> None:
 	unknown = set(spec) - allowed_keys
 	if unknown:
 		raise InvalidArgumentError(
-			f"unknown query spec keys: {', '.join(sorted(map(str, unknown)))}. "
+			f"unknown query spec keys: {', '.join(sorted(str(key) for key in unknown))}. "
 			"Use select for columns and aggregates, and where for filters. "
 			f"Allowed keys: {', '.join(sorted(allowed_keys))}"
 		)

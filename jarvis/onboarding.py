@@ -12,6 +12,7 @@ from jarvis import (
 	admin_client,
 	announcement,
 	catalogue_visibility,
+	compat,
 	maintenance_notice,
 	onboarding_contract,
 	release_notice,
@@ -846,12 +847,7 @@ def save_llm_pool(
 			# restart's confirmed apply (see readiness_budget_s comment above).
 			readiness_budget_s = 300
 
-	row = (
-		frappe.db.get_value(
-			"Jarvis Settings", "Jarvis Settings", ["last_sync_at", "last_sync_status"], as_dict=True
-		)
-		or {}
-	)
+	row = compat.single_values("Jarvis Settings", ["last_sync_at", "last_sync_status"])
 	return {
 		# Plan-05 D2 (review §8.4): the durable operation descriptor the SPA follows,
 		# or null on the legacy single-model path / an unallocated failure.
@@ -2475,15 +2471,7 @@ def save_llm_creds(
 	# need rather than reloading the entire Singles doc (the previous
 	# shape was ``frappe.get_single(...)`` then ``.get(...)`` on
 	# every field - pointless re-fetch from the 2026-06-16 review).
-	row = (
-		frappe.db.get_value(
-			"Jarvis Settings",
-			"Jarvis Settings",
-			["last_sync_at", "last_sync_status"],
-			as_dict=True,
-		)
-		or {}
-	)
+	row = compat.single_values("Jarvis Settings", ["last_sync_at", "last_sync_status"])
 	return {
 		"last_sync_at": str(row.get("last_sync_at") or ""),
 		"last_sync_status": row.get("last_sync_status") or "",

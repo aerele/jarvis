@@ -645,7 +645,7 @@ def _finish_switch_run(run_id: str | None, *, crashed: bool) -> None:
 	if not run_id:
 		return
 	try:
-		status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		status = frappe.db.get_single_value("Jarvis Settings", "last_sync_status", cache=False) or ""
 		if not crashed and status == _PENDING_APPLYING_STATUS:
 			from jarvis.chat import llm_switch
 
