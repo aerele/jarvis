@@ -549,8 +549,9 @@ def get_subscription_notice() -> dict:
 	Any workspace member may call it, so a member only learns what they need: the first expired
 	sign-in that has no fallback (their chats are failing) as ``{upstream, label}``, and nothing about
 	the rest of the pool. Each entry carries ``models``: the model ids only that expired sign-in
-	serves, so the error card can recognise a failed turn from its model. An admin gets every entry (with ``account_ref`` and ``fallback`` for the
-	Reconnect link) and the workspace's subscription upstreams."""
+	serves, so the error card can recognise a failed turn from its model. An admin gets every
+	entry (with ``account_ref`` and ``fallback`` for the Reconnect link) and the workspace's
+	subscription upstreams."""
 	from jarvis.permissions import has_jarvis_admin_access, require_jarvis_access
 
 	require_jarvis_access()
