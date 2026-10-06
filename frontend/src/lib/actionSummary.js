@@ -31,21 +31,49 @@ export function changedFields(model) {
 		.map((f) => ({ label: f.label, from: f.orig ?? "", to: f.value ?? "" }));
 }
 
-export function lineItemSummary(table) {
+// `computed`: the dry run's rows for this table (index-aligned). A read-only cell
+// the model left blank shows ERPNext's value, flagged so the card can mark it as
+// calculated; the model's own values and editable blanks are never replaced (#647).
+export function lineItemSummary(table, computed) {
+	const filled = new Set();
+	const rows = table.rows.map((r, i) => {
+		const cells = [];
+		const flags = [];
+		for (const c of table.columns) {
+			const own = r[c.fieldname] ?? "";
+			const v = computed && computed[i] ? computed[i][c.fieldname] : null;
+			const fill = !!c.read_only && String(own) === "" && v != null && v !== "";
+			cells.push(fill ? computedText(c, v) : own);
+			flags.push(fill);
+			if (fill) filled.add(c.label);
+		}
+		return { cells, computed: flags };
+	});
 	return {
 		fieldname: table.fieldname,
 		label: table.label,
 		count: table.rows.length,
 		columns: table.columns.map((c) => c.label),
-		rows: table.rows.map((r) => ({ cells: table.columns.map((c) => r[c.fieldname] ?? "") })),
+		rows,
+		// Which columns show a calculated value, named in a line under the table so
+		// the cue is text, not only the muted colour.
+		computedLabels: table.columns.map((c) => c.label).filter((l) => filled.has(l)),
 		removed: removedSavedRows(table),
 	};
 }
 
+function computedText(column, v) {
+	if (typeof v !== "number") return String(v);
+	if (column.fieldtype === "Currency")
+		return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+	return v.toLocaleString("en-IN");
+}
+
 export function summarize(model, action = {}) {
 	const headline = String(action.summary ?? "").trim();
+	const computed = model.computed || {};
 	const tables = (model.tables || [])
-		.map(lineItemSummary)
+		.map((t) => lineItemSummary(t, computed[t.fieldname]))
 		.filter((t) => t.count || t.removed.length);
 	if (model.verb === "update") {
 		return { kind: "update", headline, diff: changedFields(model), tables };

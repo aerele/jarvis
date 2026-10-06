@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { controlFor, markMissing, panelField } from "./docFields";
+import { cellOptions, controlFor, markMissing, panelField } from "./docFields";
 import { normDateVal } from "./draftApply";
 
 describe("docFields", () => {
@@ -91,5 +91,13 @@ describe("markMissing", () => {
 		const model = { fields: [] };
 		markMissing(model, undefined, meta);
 		expect(model.fields).toEqual([]);
+	});
+});
+
+describe("cellOptions (#669)", () => {
+	it("a Select cell offers the field's options, keeping a current value they lack", () => {
+		const col = { fieldtype: "Select", options: "\nPercentage\nAmount" };
+		expect(cellOptions(col, "Amount")).toEqual(["", "Percentage", "Amount"]);
+		expect(cellOptions(col, "Legacy")).toEqual(["Legacy", "", "Percentage", "Amount"]);
 	});
 });

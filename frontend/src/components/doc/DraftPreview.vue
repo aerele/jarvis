@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from "vue";
-import { isRequiredBlank } from "@/lib/actionSummary";
+import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
 
 const props = defineProps({
 	model: { type: Object, required: true },
@@ -26,7 +26,16 @@ const fields = computed(() =>
 		return isUpdate.value ? set || f.changed : set || isRequiredBlank(f);
 	})
 );
-const tables = computed(() => (props.model.tables || []).filter((t) => (t.rows || []).length));
+// Each table through the card's own summary, so a cell ERPNext calculated (#647)
+// reads the same here as on the card.
+const tables = computed(() =>
+	(props.model.tables || [])
+		.filter((t) => (t.rows || []).length)
+		.map((t) => ({
+			...t,
+			view: lineItemSummary(t, (props.model.computed || {})[t.fieldname]),
+		}))
+);
 
 // Resizable width - drag the left (inner) edge. Mirrors Resizer.vue's behaviour:
 // clamp to [min, max], snap to the default within +/-10px, persist to localStorage.
@@ -169,13 +178,21 @@ onBeforeUnmount(() => {
 									</tr>
 								</thead>
 								<tbody>
-									<tr v-for="(r, ri) in t.rows" :key="ri">
-										<td v-for="c in t.columns" :key="c.fieldname">
-											{{ r[c.fieldname] ?? "" }}
+									<tr v-for="(r, ri) in t.view.rows" :key="ri">
+										<td
+											v-for="(cell, ci) in r.cells"
+											:key="t.columns[ci].fieldname"
+											:class="{ 'dp-computed': r.computed[ci] }"
+										>
+											{{ cell }}
 										</td>
 									</tr>
 								</tbody>
 							</table>
+						</div>
+						<div v-if="t.view.computedLabels.length" class="dp-computed-note">
+							{{ t.view.computedLabels.join(", ") }}: calculated by ERPNext, saved
+							when you confirm.
 						</div>
 					</div>
 					<div v-if="!fields.length && !tables.length" class="dp-empty">
@@ -389,6 +406,15 @@ onBeforeUnmount(() => {
 }
 .dp-grid tbody tr:last-child td {
 	border-bottom: none;
+}
+.dp-grid td.dp-computed {
+	color: var(--text-2);
+	font-variant-numeric: tabular-nums;
+}
+.dp-computed-note {
+	padding: 6px 0 0;
+	font-size: 11.5px;
+	color: var(--text-3);
 }
 .dp-empty {
 	font-size: 12.5px;

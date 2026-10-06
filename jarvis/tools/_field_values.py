@@ -44,7 +44,7 @@ import math
 import re
 
 import frappe
-from frappe.utils import cstr
+from frappe.utils import cint, cstr, flt
 
 from jarvis.exceptions import InvalidFieldValueError
 
@@ -88,6 +88,25 @@ def check_values(doctype: str, values: dict, *, where: str = "") -> dict:
 			if checked is not value:
 				changed[fieldname] = checked
 	return {**values, **changed} if changed else values
+
+
+def cast_numbers(doc) -> None:
+	"""Cast the numeric fields of ``doc`` and its rows that still hold a string, as
+	Frappe casts them for storage (``cint`` / ``flt``).
+
+	Frappe casts only when it writes the row, after ``validate``, so a controller
+	doing arithmetic there got the string (#655: ``rate / conversion_factor``). Desk
+	sends numbers; this puts a tool write on the same footing. Runs after
+	``check_values``, so each string here reads as the number it says."""
+	for d in (doc, *doc.get_all_children()):
+		for df in d.meta.fields:
+			value = d.get(df.fieldname)
+			if not isinstance(value, str) or not value.strip():
+				continue
+			if df.fieldtype in _INT_TYPES:
+				d.set(df.fieldname, cint(value))
+			elif df.fieldtype in _FLOAT_TYPES:
+				d.set(df.fieldname, flt(value))
 
 
 def _check(df, value, where: str):

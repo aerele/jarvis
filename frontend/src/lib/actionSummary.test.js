@@ -505,6 +505,70 @@ test("lineItemSummary: a create (no saved rows) removes nothing", () => {
 	assert.deepEqual(s.removed, []);
 });
 
+test("lineItemSummary: a blank read-only cell shows ERPNext's computed value, flagged (#647)", () => {
+	const table = {
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "qty", label: "Quantity", fieldtype: "Float", read_only: 0 },
+			{ fieldname: "amount", label: "Amount", fieldtype: "Currency", read_only: 1 },
+			{ fieldname: "warehouse", label: "Warehouse", fieldtype: "Link", read_only: 0 },
+		],
+		rows: [
+			{ qty: "20", amount: "", warehouse: "" },
+			{ qty: "1", amount: "7", warehouse: "" },
+		],
+		origJson: "null",
+	};
+	const computed = [
+		{ amount: 2000, warehouse: "Stores" },
+		{ amount: 99, warehouse: "Stores" },
+	];
+	const s = lineItemSummary(table, computed);
+	assert.deepEqual(s.rows[0].cells, ["20", "2,000.00", ""]);
+	assert.deepEqual(s.rows[0].computed, [false, true, false]);
+	// the model's own value and an editable blank are never replaced
+	assert.deepEqual(s.rows[1].cells, ["1", "7", ""]);
+	assert.deepEqual(s.rows[1].computed, [false, false, false]);
+	// without a dry run nothing changes
+	assert.deepEqual(lineItemSummary(table).rows[0].cells, ["20", "", ""]);
+});
+
+test("summarize: hands each table its computed rows", () => {
+	const model = {
+		verb: "create",
+		fields: [],
+		tables: [
+			{
+				fieldname: "items",
+				label: "Items",
+				columns: [
+					{ fieldname: "amount", label: "Amount", fieldtype: "Currency", read_only: 1 },
+				],
+				rows: [{ amount: "" }],
+				origJson: "null",
+			},
+		],
+		computed: { items: [{ amount: 12.5 }] },
+	};
+	assert.deepEqual(summarize(model, {}).tables[0].rows[0].cells, ["12.50"]);
+});
+
+test("lineItemSummary: names the calculated columns, so the cue is text, not only colour", () => {
+	const table = {
+		fieldname: "items",
+		label: "Items",
+		columns: [
+			{ fieldname: "qty", label: "Quantity", fieldtype: "Float", read_only: 0 },
+			{ fieldname: "amount", label: "Amount", fieldtype: "Currency", read_only: 1 },
+		],
+		rows: [{ qty: "2", amount: "" }],
+		origJson: "null",
+	};
+	assert.deepEqual(lineItemSummary(table, [{ amount: 4 }]).computedLabels, ["Amount"]);
+	assert.deepEqual(lineItemSummary(table).computedLabels, []);
+});
+
 // ── Risk banner + trial warning (round 2, J1-cards) ─────────────────────────
 
 test("cardBannerOf: the server's risk line, for a sensitive card", () => {
