@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -962,12 +963,26 @@ def _is_child_row(doc) -> bool:
 		return False
 
 
+# The leading number MariaDB keeps when it puts a string into an int column.
+_LEADING_NUMBER = re.compile(r"\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)")
+
+
 def _is_docstatus_2(value) -> bool:
-	"""As the database reads it: 2, "2", "2 ", 2.0 and DocStatus.CANCELLED alike."""
-	try:
-		return int(float(str(value).strip())) == 2
-	except (TypeError, ValueError):
+	"""Whether the database would store ``value`` in docstatus as 2: 2, "2", " 2 ",
+	"2.0", "2abc", b"2", Decimal(2) and DocStatus.CANCELLED alike (MariaDB keeps a
+	string's leading number and rounds it; anything from 1.5 up to 3 counts)."""
+	if value is None or isinstance(value, bool):
 		return False
+	if isinstance(value, bytes | bytearray):
+		value = value.decode(errors="ignore")
+	match = _LEADING_NUMBER.match(str(value))
+	if not match:
+		return False
+	try:
+		number = float(match.group(1))
+	except ValueError:
+		return False
+	return 1.5 <= number < 3
 
 
 def _brake_raw_set_value(doctype, name, field, value) -> None:
