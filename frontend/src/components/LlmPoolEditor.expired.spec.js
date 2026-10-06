@@ -187,6 +187,20 @@ describe("the reconnect deep link (I8)", () => {
 		expect(acctButtons).not.toContain("Reconnect");
 	});
 
+	it("keeps the account's Reconnect while Add account is open", async () => {
+		pool.models = [subModel("gpt-5.6", 0, [account("A1", "a@x.com")])];
+		const w = await mountEditor({ expiredEntries: [entry("A1")] });
+		const byText = (t) => w.findAll("button").find((b) => b.text() === t);
+		await byText("Edit").trigger("click");
+		await flushPromises();
+		const add = byText("+ Add account");
+		expect(add).toBeTruthy();
+		await add.trigger("click");
+		await flushPromises();
+		const acctButtons = w.findAll(".jv-pool-acctacts button").map((b) => b.text());
+		expect(acctButtons).toContain("Reconnect");
+	});
+
 	it("does nothing for a ref this pool does not hold", async () => {
 		pool.models = [subModel("gpt-5.6", 0, [account("A1", "a@x.com")])];
 		const w = await mountEditor({ reconnectRef: "ZZ" });

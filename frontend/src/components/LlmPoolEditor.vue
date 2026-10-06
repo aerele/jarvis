@@ -1130,7 +1130,11 @@
 									<button
 										v-if="
 											canEdit &&
-											!(panelRow._connect && panelRow._connect.open)
+											!(
+												panelRow._connect &&
+												panelRow._connect.open &&
+												panelRow._connect.reconnectIdx === ai
+											)
 										"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 										:disabled="!editable"
@@ -2025,7 +2029,7 @@
 										v-if="
 											canEdit &&
 											!singleMode &&
-											!(m._connect && m._connect.open)
+											!(m._connect && m._connect.open && m._connect.reconnectIdx === ai)
 										"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 										:disabled="needsCatalog(m) || !editable"

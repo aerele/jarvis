@@ -850,6 +850,10 @@ describe("ChatView subscription-expired wiring", () => {
 		expect(key).toContain("expiredModels");
 	});
 
+	it("passes :expired-models to the model picker", () => {
+		expect(chatSrc).toContain(':expired-models="expiredModels"');
+	});
+
 	it("loads the notice on mount and listens for the realtime refresh", () => {
 		expect(chatSrc).toContain("loadSubscriptionNotice();");
 		expect(chatSrc).toContain("watchSubscriptionNotice(socket)");

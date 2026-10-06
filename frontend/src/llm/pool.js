@@ -662,6 +662,8 @@ export function autoLine(entry) {
 // specific truth and wins over the pool-wide fallback.
 export function expiredLine(entry, { sameRowOk = false, formatDate = defaultFormatDate } = {}) {
 	if (!entry) return "";
+	// Skipped wins: Auto is already past this row, so a healthy sibling on it changes nothing.
+	if (sameRowOk && entry.skipped) return "Auto skips it until you reconnect.";
 	if (sameRowOk) return "Auto uses another account until you reconnect.";
 	if (entry.fallback) {
 		const when = entry.since ? `Expired ${formatDate(entry.since)}. ` : "";

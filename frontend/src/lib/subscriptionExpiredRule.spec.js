@@ -247,9 +247,8 @@ describe("expired model upgrade of a generic failure", () => {
 			["insufficient quota", "billing"],
 		]) {
 			const info = turnErrorInfo(text, "", { model: "gpt-5.6-terra", expiredModels });
-			expect(info.code).not.toBe("subscription-expired");
-			expect(turnErrorInfo(text).code).toBe(info.code);
-			expect(code).toBeTruthy();
+			expect(info.code).toBe(code);
+			expect(turnErrorInfo(text).code).toBe(code);
 		}
 		expect(
 			turnErrorInfo("x", "authentication", { model: "gpt-5.6-terra", expiredModels }).code

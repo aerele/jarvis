@@ -98,10 +98,13 @@ describe("expiredLine", () => {
 		).toContain("Auto uses OpenAI until you reconnect.");
 	});
 
-	it("keeps the same-row and no-fallback lines when skipped", () => {
+	it("says Auto skips it for a skipped entry even when a sibling on the same row is healthy", () => {
 		expect(expiredLine(entry("A1", { skipped: true }), { sameRowOk: true })).toBe(
-			"Auto uses another account until you reconnect."
+			"Auto skips it until you reconnect."
 		);
+	});
+
+	it("keeps the no-fallback line when skipped", () => {
 		expect(expiredLine(entry("A1", { fallback: "", skipped: true }))).toBe(
 			"Chats fail until you reconnect."
 		);
