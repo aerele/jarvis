@@ -922,9 +922,12 @@ def _brake_doc_event(doc, method: str) -> None:
 		return
 	if method in ("before_cancel", "before_discard", "on_trash"):
 		_check_brake(state, doc, method)
-	elif method == "before_change" and doc.get("docstatus") == 2:
+	elif method == "before_change" and _is_docstatus_2(doc.get("docstatus")):
 		before = doc.get_doc_before_save()
-		if before is not None and before.get("docstatus") != 2:
+		was = before.get("docstatus") if before is not None else None
+		if was is None and doc.name:
+			was = frappe.db.get_value(doc.doctype, doc.name, "docstatus")
+		if not _is_docstatus_2(was):
 			_check_brake(state, doc, "before_cancel")
 
 
@@ -951,11 +954,19 @@ def _check_brake(state: _GuardState, doc, event: str) -> None:
 
 
 def _is_child_row(doc) -> bool:
-	if doc.get("parenttype") and doc.get("parentfield"):
-		return True
+	"""From the doctype, never from the document's own fields: a caller can put
+	``parenttype`` / ``parentfield`` on a root document's payload."""
 	try:
 		return bool(frappe.get_meta(doc.doctype).istable)
 	except Exception:
+		return False
+
+
+def _is_docstatus_2(value) -> bool:
+	"""As the database reads it: 2, "2", "2 ", 2.0 and DocStatus.CANCELLED alike."""
+	try:
+		return int(float(str(value).strip())) == 2
+	except (TypeError, ValueError):
 		return False
 
 
@@ -965,7 +976,11 @@ def _brake_raw_set_value(doctype, name, field, value) -> None:
 	if state is None or not state.brake:
 		return
 	values = field if isinstance(field, dict) else {field: value}
-	if str(values.get("docstatus")) != "2":
+	# Column names as the database matches them: any case, optional backticks.
+	if not any(
+		str(k).strip().strip("`").strip().lower() == "docstatus" and _is_docstatus_2(v)
+		for k, v in values.items()
+	):
 		return
 	_check_brake(
 		state, frappe._dict(doctype=doctype, name=name if isinstance(name, str | int) else ""), "cancel"
