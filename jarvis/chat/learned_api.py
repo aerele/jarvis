@@ -816,7 +816,8 @@ def batch_approve(names: str | list) -> dict:
 		fields=["name", "effective_sensitivity", "status"],
 	)
 	found = {r.name for r in rows}
-	missing = [n for n in names if n not in found]
+	# A chat-mined pattern awaiting its owner does not exist for reviewers.
+	missing = [n for n in names if n not in found or chat_pattern_privacy.awaiting_owner(n)]
 	if missing:
 		frappe.throw(_("Unknown pattern(s): {0}.").format(", ".join(missing)))
 	blocked = [r.name for r in rows if (r.effective_sensitivity or "") in ("B", "C")]

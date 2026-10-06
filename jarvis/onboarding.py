@@ -257,7 +257,6 @@ def write_connection(data: dict) -> None:
 	# chat gate.
 
 
-@frappe.whitelist()
 def _store_agent_token(settings, token: str) -> None:
 	"""Store the agent token and stamp when this site got it. A new token (an
 	admin-side rotation or reconnect arrives here) restarts the clock, and a token
@@ -271,6 +270,7 @@ def _store_agent_token(settings, token: str) -> None:
 		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
 
 
+@frappe.whitelist()
 def sync_connection(timeout_s: int | None = None) -> dict:
 	"""Pull the container connection from admin and store it. Daily scheduled +
 	the page's 'Sync connection' button + the reconnect landing. No-op until

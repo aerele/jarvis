@@ -40,6 +40,13 @@ class TestTokenStamping(FrappeTestCase):
 		self._store(settings, "same")
 		settings.db_set.assert_called_once()
 
+	def test_only_sync_connection_is_an_endpoint(self):
+		import frappe
+
+		frappe.is_whitelisted(onboarding.sync_connection)  # raises if not
+		with self.assertRaises(frappe.PermissionError):
+			frappe.is_whitelisted(onboarding._store_agent_token)
+
 	def test_the_same_stamped_token_keeps_its_date(self):
 		settings = _settings(token="same", issued_at=datetime.datetime(2026, 1, 1))
 		self._store(settings, "same")
