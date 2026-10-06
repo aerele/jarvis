@@ -1228,8 +1228,12 @@ class TestSavedRoutesCycle3(_RouteBase):
 
 		self.addCleanup(_drop)
 		call = {"method": "frappe.client.delete", "args": {"doctype": "DocType", "name": name}}
+		# Auto mode: a delete through run_method parks its own card (the delete
+		# brake), and run uncarded anyway it is refused before the delete.
 		r = self._run("run_method", call, self._conv(auto_mode=1))
-		self.assertEqual(r["error"]["code"], "structure_refused", r)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", r)
+		r = api.dispatch_confirmed("run_method", call, uncarded=True)
+		self.assertEqual(r["error"]["code"], "brake_refused", r)
 		r = api.dispatch_confirmed("run_method", call, allow_risky=True)
 		self.assertEqual(r["error"]["code"], "structure_refused", r)
 		frappe.db.rollback()
