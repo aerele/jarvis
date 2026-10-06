@@ -650,7 +650,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		(name, new_status, frappe.session.user),
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before reload and hooks
 	doc.reload()
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
@@ -749,7 +749,7 @@ def dismiss_approval(name: str) -> dict:
 		(name,),
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resuming agent
 	resumed = False
 	if doc.get("routing"):
 		doc.decision = decision
@@ -787,7 +787,6 @@ def restore_approval(name: str) -> dict:
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Pending'", (name,)
 	):
 		frappe.throw(f"Approval {name} was changed concurrently")
-	frappe.db.commit()
 	return {"ok": True, "status": "Pending"}
 
 
@@ -1011,7 +1010,7 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 			token,
 		),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	return {
 		"ok": True,
 		"name": name,
@@ -1065,7 +1064,7 @@ def approve_wiki_write(name: str, expected_digest: str | None = None) -> dict:
 		if frappe.db.get_value(APPROVAL, name, "status") == "Pending":
 			frappe.throw(_WIKI_CHANGED, frappe.PermissionError)
 		frappe.throw(f"Proposal {name} was decided concurrently")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before landing file
 	return _land_and_record(name, doc, dropper)
 
 
@@ -1120,7 +1119,6 @@ def reject_wiki_write(name: str) -> dict:
 		(name, me),
 	):
 		frappe.throw(f"Proposal {name} was decided concurrently")
-	frappe.db.commit()
 	return {"ok": True, "name": name, "status": "Rejected"}
 
 
@@ -1538,7 +1536,7 @@ def _lock_pending(name: str):
 	"""Commit, then take the row lock without waiting: ``(row, refusal)``."""
 	from jarvis.chat.pending_actions._store import get_row
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking read
 	try:
 		return get_row(name, lock="nowait"), None
 	except (frappe.QueryTimeoutError, frappe.QueryDeadlockError):
@@ -1648,7 +1646,7 @@ def _seal_failed(locked, approver: str, e) -> dict:
 		title=f"jarvis.pending_action.{e.reason_code}",
 		message=f"{locked.name}: failed binding {e.binding}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	return _held_refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED, outcome="failed")
 
@@ -1704,7 +1702,7 @@ def _use_existing_locked(row, approver: str, link) -> dict:
 		result_name=link,
 		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	return {**result, "reason_code": "use_existing", "pa_status": EXECUTED, "outcome": "confirmed"}
 
@@ -1875,7 +1873,7 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
 		**cols,
 	):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		settle(locked.name)
 		return {
 			**result,
@@ -1890,12 +1888,12 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols)
 	):
 		_claim_lost(locked.name, ref)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		settle(locked.name)
 		message = f"{REASON_TEXT['partial']} Check {ref[0]} {ref[1]} before retrying."
 		return _held_refusal("partial", message, pa_status=FAILED, outcome="partial")
 	late_outcome(locked.name, EXECUTED, None, "confirmed")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	final = get_row(locked.name) or frappe._dict()
 	return {
@@ -1927,7 +1925,7 @@ def _edit_failed(locked, approver: str, stamp, result, interfered: bool) -> dict
 			_claim_lost(locked.name)
 	elif fresh and interfered:
 		late_outcome(locked.name, FAILED, code, outcome_for(FAILED, code, locked.tool))
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	final = get_row(locked.name) or frappe._dict()
 	error = (result or {}).get("error") if isinstance(result, dict) else None
@@ -1993,7 +1991,7 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 
 	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver, result=result)  # full rollback
 	if ok and not interfered:
-		frappe.db.commit()  # the failure audit; the row is Pending again
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist failure audit
 		return _held_refusal(
 			"unreadable",
 			f"The person who dropped the file couldn't open the new {hidden[0]}, so nothing was "

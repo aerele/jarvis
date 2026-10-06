@@ -794,7 +794,7 @@ def _tampered(sheet, e: _seal.SealError) -> dict:
 	frappe.log_error(
 		title=f"jarvis.file_box.sheet_{e.reason_code}", message=f"{sheet.name}: failed binding {e.binding}"
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(sheet.name)
 	return _refuse("FileBoxRefusedError", _BROKEN)
 
@@ -824,7 +824,7 @@ def collect(conversation: str, items: list[dict], sheet=None) -> dict:
 	deadlock re-locks, re-runs the gates and re-reads once."""
 	refusal = _precheck(items)
 	if refusal:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return refusal
 	for attempt in range(2):
 		try:
@@ -841,7 +841,7 @@ def collect(conversation: str, items: list[dict], sheet=None) -> dict:
 			sheet = live_sheet(conversation)
 			refusal = _regate(conversation, sheet)
 			if refusal:
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 				return refusal
 	frappe.log_error(
 		title="jarvis.file_box.sheet_collect_failed", message=f"{conversation}: not added after a retry"
@@ -861,7 +861,7 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if not _identity_ok(conversation, owner, sheet):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return _refuse("FileBoxRefusedError", _IDENTITY)
 	records, row = [], None
 	if sheet:
@@ -874,15 +874,15 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 			return _tampered(row, e)
 	records, targets = _merge(records, [_record(i) for i in items])
 	if not targets:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return _added(records, targets, {})
 	if len(records) > SHEET_MAX_RECORDS:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return _refuse("InvalidArgumentError", _FULL.format(cap=SHEET_MAX_RECORDS))
 	problems = _dry_run(records, targets)
 	refusal = _problem_refusal(conversation, records, problems)
 	if refusal:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return refusal
 	needs_input = [
 		e for e in held_writes.parse_needs_input(row and row.needs_input) if e["doc_index"] not in targets
@@ -906,7 +906,7 @@ def _collect_locked(conversation: str, items: list[dict], sheet) -> dict:
 			dedup_keys=_seal.canonical(keys),
 		):
 			raise _Retry
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist batch outcome
 	else:
 		_open(conversation, owner, records, needs_input, needs_fix)
 	return _added(records, targets, problems)
@@ -1031,7 +1031,7 @@ def _close_if_stopped(conversation: str, names: list[str]) -> None:
 			" modified=%(now)s" + _LINKABLE,
 			{"d": _STOPPED_NOTE, "now": now, "n": tuple(names), "c": conversation, "wiki": _WIKI_SOURCE},
 		)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist batch outcome
 
 
 # The questions a sheet may take (``%(n)s`` names, ``%(c)s`` the conversation).
@@ -1044,14 +1044,14 @@ _LINKABLE = (
 def _link_locked(conversation: str, names: list[str]) -> str | None:
 	from jarvis.chat.held_sheet_seal import seal_if_stale
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 	lock_conversation(conversation)
 	names = names and frappe.db.sql_list(
 		"SELECT name FROM `tabJarvis Approval Request`" + _LINKABLE,
 		{"n": tuple(names), "c": conversation, "wiki": _WIKI_SOURCE},
 	)
 	if not names:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return None
 	if user_stopped(conversation, live_turn(conversation)) or _archived(conversation):
 		raise _NotOpened
@@ -1059,12 +1059,12 @@ def _link_locked(conversation: str, names: list[str]) -> str | None:
 	sheet = seal_if_stale(conversation, live_sheet(conversation))
 	closed = not enabled() or _sheet_count(conversation) >= MAX_SHEETS
 	if (sheet and paused(sheet)) or (not sheet and closed) or not _identity_ok(conversation, owner, sheet):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return None
 	if not sheet:
 		return _open(conversation, owner, [], questions=names)
 	_stamp(sheet.name, conversation, names)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist batch outcome
 	return sheet.name
 
 

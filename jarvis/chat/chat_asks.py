@@ -158,7 +158,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# trace Comment's owner.
 	if doc.owner != owner:
 		frappe.db.set_value(APPROVAL, doc.name, "owner", owner, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	publish_to_user(
 		owner,
 		{
@@ -200,7 +200,7 @@ def resolve_on_user_message(conversation: str) -> None:
 			"conversation": conversation,
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	# The board badge counted it: tell the owner's shell to re-count.
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if owner:

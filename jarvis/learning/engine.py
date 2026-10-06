@@ -229,7 +229,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 	if not run.started_at:
 		start_update["started_at"] = now
 	_write_run(run_name, start_update)
-	frappe.db.commit()  # clean transaction before the first fence
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clean transaction before fence
 
 	# Registry is provided by the parallel builder; import lazily so this
 	# module still imports standalone. Missing registry -> Failed, not a crash.
@@ -254,7 +254,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 
 	units = _load_work_units(run, active_companies, registry)
 	_write_run(run_name, {"detectors_total": len(units)})
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit count
 
 	if not units:
 		note = _no_units_note(companies, active_companies)
@@ -365,7 +365,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 				"duplicates_suppressed": counts["duplicates"],
 			},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 
 	# Flush the last open FDR family. Partial on a pause: BH over the tests
 	# actually run is still valid; deferred units re-test next night. Guarded
@@ -503,7 +503,7 @@ def _read_and_persist(spec, company, run, fdr_buffer, mined=None, watch=None) ->
 	from jarvis.learning.executor import PER_DETECTOR_CANDIDATE_CAP, run_detector
 	from jarvis.learning.fdr import NO_FDR
 
-	frappe.db.commit()  # no pending writes before opening the READ ONLY fence
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clean transaction before fence
 	with read_only_transaction() as pdb:
 		raw = run_detector(spec, company, pdb)
 	# Fence closed (auto ROLLBACK); the connection is writable again.
@@ -796,7 +796,7 @@ def _promote_surfaced(run_name: str) -> None:
 	_fenced_write(JLP)
 	for name in chosen_names[:slots]:
 		frappe.db.set_value(JLP, name, {"surfaced": 1, "surfaced_at": now}, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist surfaced patterns
 
 
 # --------------------------------------------------------------------------- #
@@ -946,7 +946,7 @@ def _finalize_run(run_name, *, status, counts, skipped, errors, doctypes, remain
 		"coverage_note": ((note or "")[:1000] or None),
 	}
 	_write_run(run_name, update)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist run result
 
 
 def _write_run(run_name, update: dict) -> None:

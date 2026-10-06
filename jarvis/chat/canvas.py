@@ -281,7 +281,7 @@ def persist_canvases(
 		cleaned = strip_canvas_refs(content, names)
 		if cleaned != content:
 			frappe.db.set_value(MSG, assistant_msg_name, "content", cleaned)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- cleaned reply survives later failure
 		return []
 
 	items: list[dict] = []
@@ -324,5 +324,5 @@ def persist_canvases(
 			"canvas": frappe.as_json(items),
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- canvases survive a later failure
 	return items

@@ -277,7 +277,7 @@ def _refresh_db_snapshot() -> None:
 	FrappeTestCase isolation intact, and a single-connection context has no
 	competing writer to lose to, so skipping the refresh there costs nothing."""
 	if _owns_transaction():
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot for the next read
 
 
 def _write_settings_fields(settings, fields: dict) -> bool:
@@ -473,7 +473,7 @@ def _commit_terminal_sync_status() -> None:
 	Committing mid-migrate is normal (the patch runner itself commits
 	between patches)."""
 	if getattr(frappe.local, "job", None) or frappe.flags.in_migrate:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- terminal status survives later rollback
 
 
 def _sync_lock_wait_s(retry_left: int) -> float:

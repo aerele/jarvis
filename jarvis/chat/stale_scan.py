@@ -78,13 +78,13 @@ def _scan_one_row(r: dict, now, managed_cutoff, error_cutoff) -> int:
 		if recoverable:
 			if creation and creation < managed_cutoff:
 				frappe.db.set_value(MSG, r["name"], {"recovering": 1, "recovery_started_at": now})
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retry unit commits on its own
 				return "recovering"
 			return "skip"
 		# Orphaned / no session: genuinely unrecoverable.
 		if creation and creation < error_cutoff:
 			frappe.db.set_value(MSG, r["name"], {"streaming": 0, "error": _ABANDONED})
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retry unit commits on its own
 			return "errored"
 		return "skip"
 
@@ -293,7 +293,7 @@ def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 		)
 		if isinstance(_res, dict) and _res.get("overloaded"):
 			frappe.db.set_value(MSG, r["name"], "was_recovered", 0, update_modified=False)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- deferral survives later rows
 			frappe.logger("jarvis.chat.stale_scan").warning(
 				f"orphan redispatch deferred (site overloaded); will retry: {r['name']}"
 			)
@@ -317,7 +317,7 @@ def _heal_or_error_orphan(r: dict, orig_attachments, orig_context) -> bool:
 	# row durable before the publish below points the user's client at it. A failed
 	# insert never reaches here: the caller's report_lost_race rolls it back and the
 	# next scan retries the row.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	if r.get("owner"):
 		publish_to_user(
 			r["owner"],

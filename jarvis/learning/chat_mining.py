@@ -722,7 +722,7 @@ def _persist_candidates(mined: list[dict]) -> dict:
 				},
 				update_modified=False,
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 	finally:
 		frappe.flags.jarvis_pattern_engine = prev_flag
 		frappe.set_user(original_user)

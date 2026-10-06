@@ -434,7 +434,6 @@ def _record_history_snapshot() -> dict:
 	else:
 		doc = frappe.get_doc({"doctype": HISTORY_DT, "snapshot_date": today, **stats})
 		doc.insert(ignore_permissions=True)
-	frappe.db.commit()
 	return {"ok": True, "date": today, **stats}
 
 

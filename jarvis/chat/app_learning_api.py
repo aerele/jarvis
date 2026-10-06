@@ -207,7 +207,7 @@ def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 		)
 		doc.insert(ignore_permissions=True)
 		created.append(doc.name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before enqueue
 
 	if scheduled_at <= now:
 		app_analysis._enqueue_tick()

@@ -863,7 +863,6 @@ def _ingest_note(note_name: str) -> None:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
 
 
 def _note_entities(note) -> list[dict]:
@@ -1787,7 +1786,7 @@ def apply_promotion(request_name: str, approve, note: str = "", reviewer: str | 
 	req.decision_note = (note or "").strip()[:140] or None
 	req.flags.ignore_permissions = True
 	req.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return out
 
 

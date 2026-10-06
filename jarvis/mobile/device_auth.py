@@ -384,7 +384,7 @@ def prune_revoked_devices() -> int:
 		except Exception:
 			frappe.logger("jarvis.mobile").warning(f"could not prune device row {name}", exc_info=True)
 	if deleted:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before audit
 		_audit("prune_revoked", deleted=deleted, retention_days=REVOKED_RETENTION_DAYS)
 	return deleted
 

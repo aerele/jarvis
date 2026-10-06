@@ -69,7 +69,7 @@ def _append_canvas_items(assistant_msg_name: str, new_items: list[dict]) -> None
 	items = (frappe.parse_json(existing) if existing else []) or []
 	items.extend(new_items)
 	frappe.db.set_value(MSG, assistant_msg_name, "canvas", frappe.as_json(items))
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def persist_generated_images(assistant_msg_name: str, conversation_id: str, turn_start_ms: int) -> list[dict]:

@@ -775,8 +775,6 @@ def prune_turn_usage() -> int:
 			deleted += 1
 		except Exception:
 			frappe.logger("jarvis.usage").warning(f"could not prune turn usage row {name}", exc_info=True)
-	if deleted:
-		frappe.db.commit()
 	return deleted
 
 
@@ -999,7 +997,7 @@ def set_model_limit(user: str, model: str, limit: int, now=None) -> None:
 		)
 	else:
 		_insert_model_row(user, model, month, in_tokens=0, out_tokens=0, limit=limit, now=now)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- limit durable before reply
 
 
 def refresh_session_snapshots(rows: list[dict]) -> dict:
@@ -1105,5 +1103,5 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 				title="jarvis usage: last_synced_at stamp failed",
 				message=frappe.get_traceback(),
 			)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return summary

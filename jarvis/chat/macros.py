@@ -355,7 +355,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		# Deleted after the scheduler claimed the slot. Raising here sent the owner
 		# "Scheduled macro did not run ... it will run again" about a macro they had
 		# just deleted, and wrote two Error Logs.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return {"ok": False, "reason": BLOCK_MACRO_DELETED}
 	doc = frappe.get_doc(MACRO, macro_name)  # DoesNotExistError: deleted meanwhile
 	if trigger == "scheduled" and frappe.session.user not in (doc.owner, "Administrator"):
@@ -365,7 +365,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		# record a failed run and tell them about a macro that is not theirs. Settled
 		# quietly; a run by hand keeps its refusal below. (A macro that is merely off
 		# is still the owner's: its quiet return below comes after the checks.)
-		frappe.db.commit()  # nothing written: this releases the macro row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return {"ok": False, "reason": BLOCK_MACRO_CHANGED_OWNER}
 	doc.check_permission("read")  # get_doc alone doesn't enforce if_owner
 	# Owner-gate. A run executes as the macro's owner (the rows below are handed to
@@ -388,11 +388,11 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MacroOnHoldError, held_message
 
 		if trigger == "scheduled":
-			frappe.db.commit()  # nothing written: this releases the macro row lock
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 			return {"ok": False, "reason": BLOCK_MACRO_HELD}
 		frappe.throw(held_message(reason), MacroOnHoldError)
 	if trigger == "scheduled" and not doc.enabled:
-		frappe.db.commit()  # nothing written: this releases the macro row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return {"ok": False, "reason": "macro disabled"}
 	if (doc.merge_status or "") == "pending" and trigger != "scheduled":
 		frappe.throw(_("Still summarizing this macro — try again in a few seconds."))
@@ -411,7 +411,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		if trigger == "scheduled":
 			# The scheduler decides what a refusal costs: it records the failure
 			# against the owner and works out whether the slot is consumed.
-			frappe.db.commit()  # releases the macro row lock before it does
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 			return {"ok": False, "reason": blocked}
 		frappe.throw(_(_BLOCK_MESSAGE.get(blocked, "This macro cannot run right now.")))
 
@@ -487,7 +487,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		frappe.db.set_value(CONV, conv.name, "skip_confirmation", 1, update_modified=False)
 	# The run row becomes visible and the macro row lock is released in one step: a
 	# delete waiting on the lock sees this run when it looks.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 
 	# Scheduled runs surface via the proactive "conversation:new" toast; manual
 	# runs are navigated to directly by the SPA, so no toast there.
@@ -768,7 +768,7 @@ def _raise_cursor(run, to: int, *, sent: bool = False) -> None:
 			f"UPDATE `tab{RUN}` SET current_step = %(to)s WHERE name = %(n)s AND current_step < %(to)s",
 			{"n": run.name, "to": to},
 		)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	run.current_step = max(int(run.current_step or 0), to)
 
 
@@ -1580,7 +1580,7 @@ def _settle_summary_mark(macro_name: str, conversation_id: str, values: dict) ->
 	# a save): the UPDATE then fails with a write conflict instead of matching nothing.
 	# Replayed from the present it wins or loses on the row as it is.
 	won = txn.replay_on_conflict(cas, label="macros._settle_summary_mark")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	if won:
 		frappe.clear_document_cache(MACRO, macro_name)
 	return won
@@ -1932,7 +1932,7 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 			run.name, run.status, "stopped", disarm=False, finished_at=frappe.utils.now(), **extra
 		)
 		if stopped:
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 		else:
 			frappe.db.rollback()  # the flag write goes back with the lost stop
 		return run, stopped
@@ -1960,7 +1960,7 @@ def _stop_run_locked(run_name: str, *, reason: str, by: str) -> bool:
 			title=f"jarvis.chat.macros.stop_lost: {run_name}",
 			message=f"run {run_name}: its status changed under {_STOP_CAS_TRIES} attempts to stop it",
 		)
-		frappe.db.commit()  # the caller's failure path rolls back
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		frappe.throw(_("This run could not be stopped. Try again."))
 	try:
 		_cancel_current_step(run.conversation, macro_run=run.name)
@@ -2395,7 +2395,7 @@ def _disarm_for_skills(conversation: str, run_name: str | None, step: int, skill
 				"content": note,
 			}
 		).insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- disarm survives a later failure
 	return note
 
 
@@ -2578,7 +2578,7 @@ def _unpark(run, index: int) -> None:
 		return
 	if _cas_run_status(run.name, "waiting_capacity", "running"):
 		run.status = "running"
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def _merged_skill_invocations(steps) -> str:
@@ -2618,7 +2618,7 @@ def _defer_capacity(run, macro_doc) -> None:
 	One compare-and-set, not a read and then a write: a stop that landed between the two was
 	put back to ``waiting_capacity``, and the resume cron then sent the step of a stopped run."""
 	parked = _cas_run_status(run.name, "running", "waiting_capacity")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	if not parked:
 		return
 	run.status = "waiting_capacity"
@@ -2937,7 +2937,6 @@ def _log_unreadable_snapshot(run_name: str) -> None:
 		title=title,
 		message=f"run {run_name}: its steps snapshot could not be read; the live macro was used.",
 	)
-	frappe.db.commit()
 
 
 def _snapshot_cleared() -> dict:
@@ -3463,7 +3462,7 @@ def _fail_run_in_place(run, error: str) -> None:
 		run.name,
 		{"status": "failed", "finished_at": frappe.utils.now(), "error": error, **_snapshot_cleared()},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def _finish(run, status: str, error: str | None = None) -> None:
@@ -3478,7 +3477,7 @@ def _finish(run, status: str, error: str | None = None) -> None:
 		},
 	)
 	_disarm_conversation(run.conversation)  # the flag never outlives the run (T5)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def _publish_progress(run, macro_doc, index: int) -> None:
@@ -3575,7 +3574,7 @@ def _post_closing_message(run, status: str, note: str) -> None:
 
 	message = None
 	with impersonate(conv.owner):
-		frappe.db.commit()  # commit-first: the FOR UPDATE is the first statement
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 		message = _locked_insert_chat_message(
 			run.conversation,
 			{
@@ -3592,7 +3591,7 @@ def _post_closing_message(run, status: str, note: str) -> None:
 				"ref_name": run.name,
 			},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before publish
 	if message:
 		publish_to_user(
 			conv.owner,
