@@ -209,13 +209,35 @@ describe("expired model upgrade of a generic failure", () => {
 		expect(info.action).toBeUndefined();
 	});
 
-	it("does nothing when the message has no model", () => {
-		expect(turnErrorInfo(POOL_503, "", { expiredModels }).code).toBe(
-			turnErrorInfo(POOL_503).code
-		);
-		expect(turnErrorInfo(POOL_503, "", { model: "", expiredModels }).code).toBe(
-			turnErrorInfo(POOL_503).code
-		);
+	it("reads the model from the error text when the failed row has none", () => {
+		for (const ctx of [
+			{ expiredModels },
+			{ model: "", expiredModels },
+			{ model: null, expiredModels },
+		]) {
+			const info = turnErrorInfo(POOL_503, "", ctx);
+			expect(info.code).toBe("subscription-expired");
+			expect(info.upstream).toBe("openai");
+		}
+	});
+
+	it("stays generic when neither the row nor the text names a model", () => {
+		const text = "provider internal error. This is usually temporary - try again shortly.";
+		expect(turnErrorInfo(text, "", { expiredModels }).code).not.toBe("subscription-expired");
+		expect(
+			turnErrorInfo(
+				"openai_compat/other-model request failed (provider internal error)",
+				"",
+				{
+					expiredModels,
+				}
+			).code
+		).not.toBe("subscription-expired");
+	});
+
+	it("prefers the row's model over the one in the text", () => {
+		const info = turnErrorInfo(POOL_503, "", { model: "claude-x", expiredModels });
+		expect(info.code).not.toBe("subscription-expired");
 	});
 
 	it("never overrides a specific cause", () => {

@@ -865,7 +865,7 @@ class TestAttentionAndNotice(_Base):
 			out = self._notice(admin=True)
 		self.assertEqual(out["expired"][0]["models"], ["gpt-5.6"])
 
-	def test_account_models_reads_pool_rows_and_the_direct_model(self):
+	def _pool(self, rows, llm_model="gpt-direct"):
 		def row(model, refs, credential_type="subscription", enabled=1):
 			return frappe._dict(
 				model=model,
@@ -874,23 +874,34 @@ class TestAttentionAndNotice(_Base):
 				accounts=[frappe._dict(account_ref=r) for r in refs],
 			)
 
-		pool = frappe._dict(
-			models=[
-				row("gpt-a", ["ACC_OA1", "ACC_OA2"]),
-				row("gpt-b", ["ACC_OA1"]),
-				row("claude-x", ["ACC_CL1"], enabled=0),
-				row("key-model", ["ACC_OA1"], credential_type="api_key"),
-			],
-			llm_model="gpt-direct",
-		)
+		return frappe._dict(models=[row(*r[:2], **r[2]) for r in rows], llm_model=llm_model)
+
+	def _served(self, pool, expired):
 		with (
 			patch.object(sh, "_settings", return_value=pool),
 			patch("jarvis.jarvis.pool_serialize._get_password", return_value=""),
 		):
-			self.assertEqual(sh._account_models(), {"ACC_OA1": ["gpt-a", "gpt-b"], "ACC_OA2": ["gpt-a"]})
-			pool.models = []
-			self.live = DIRECT
-			self.assertEqual(sh._account_models(), {sh.DIRECT_REF: ["gpt-direct"]})
+			return sh._account_models(expired)
+
+	def test_account_models_lists_a_model_only_the_expired_account_serves(self):
+		pool = self._pool([("gpt-a", ["ACC_OA1"], {}), ("gpt-b", ["ACC_OA1"], {})])
+		self.assertEqual(self._served(pool, {"ACC_OA1"}), {"ACC_OA1": ["gpt-a", "gpt-b"]})
+
+	def test_account_models_excludes_a_model_shared_with_a_healthy_account(self):
+		pool = self._pool([("gpt-a", ["ACC_OA1", "ACC_OA2"], {}), ("gpt-b", ["ACC_OA1"], {})])
+		self.assertEqual(self._served(pool, {"ACC_OA1"}), {"ACC_OA1": ["gpt-b"]})
+
+	def test_account_models_excludes_a_model_shared_with_an_api_key_row(self):
+		pool = self._pool([("gpt-a", ["ACC_OA1"], {}), ("openai/gpt-a", [], {"credential_type": "api_key"})])
+		self.assertEqual(self._served(pool, {"ACC_OA1"}), {})
+
+	def test_account_models_ignores_disabled_rows(self):
+		pool = self._pool([("gpt-a", ["ACC_OA1"], {}), ("gpt-a", ["ACC_OA2"], {"enabled": 0})])
+		self.assertEqual(self._served(pool, {"ACC_OA1"}), {"ACC_OA1": ["gpt-a"]})
+
+	def test_account_models_direct_mode_reads_the_flat_model(self):
+		self.live = DIRECT
+		self.assertEqual(self._served(self._pool([]), {sh.DIRECT_REF}), {sh.DIRECT_REF: ["gpt-direct"]})
 
 	def test_member_sees_nothing_while_another_model_still_answers(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1")})

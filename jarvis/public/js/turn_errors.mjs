@@ -162,9 +162,14 @@ const bareModel = (id) =>
     .split("/")
     .pop();
 
-function expiredUpstreamFor(code, context) {
+// A failed turn's row has no `model` (only answered turns are stamped), but openclaw writes
+// "<provider>/<model> request failed (...)" into the error, so read the model from there.
+const FAILED_MODEL =
+  /^[\s\p{Extended_Pictographic}\uFE0F]*[\w.-]+\/([\w.:+-]+) request failed/u;
+
+function expiredUpstreamFor(code, context, text) {
   const map = context?.expiredModels;
-  const model = bareModel(context?.model);
+  const model = bareModel(context?.model) || FAILED_MODEL.exec(text)?.[1] || "";
   if (!model || !map || !GENERIC_CODES.has(code)) return "";
   for (const [id, entry] of Object.entries(map)) {
     if (
@@ -204,7 +209,7 @@ export function turnErrorInfo(raw, explicitCode, context = {}) {
     }
     // The site already holds this model's sign-in as expired (admin poll): a generic failure on
     // that model is that sign-in, whatever the flattened error text says.
-    const expiredUpstream = expiredUpstreamFor(code, context);
+    const expiredUpstream = expiredUpstreamFor(code, context, text);
     if (expiredUpstream) {
       code = "subscription-expired";
       upstream = expiredUpstream;

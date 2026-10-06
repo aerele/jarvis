@@ -132,18 +132,31 @@ def _live_accounts() -> dict[str, dict]:
 	return {}
 
 
-def _account_models() -> dict[str, list[str]]:
-	"""``{account_ref: [model id, ...]}``: the models each live subscription account serves.
+def _account_models(expired_refs: set[str]) -> dict[str, list[str]]:
+	"""``{account_ref: [model id, ...]}`` for the expired accounts in ``expired_refs``.
 
-	A pool account serves every enabled subscription row that lists it; the direct ``direct:openai``
-	account serves the flat ``llm_model``. Model ids are not sensitive, so members get them too."""
+	A model id is listed only when EVERY enabled row serving that bare id (any provider, credential
+	type or account) belongs to an expired account: the error card recognises a failed turn by its
+	model alone, so an id also served by a healthy account or an API-key row must not be blamed on
+	the dead sign-in. The direct ``direct:openai`` account serves the flat ``llm_model``.
+	Model ids are not sensitive, so members get them too."""
 	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _field, _model_accounts
 
 	settings = _settings()
+	servers: dict[str, set[str]] = {}
+	for model in _enabled_models(settings):
+		model_id = (_field(model, "model") or "").strip()
+		if not model_id:
+			continue
+		refs = set()
+		if _credential_type(model) == "subscription":
+			refs = {(_field(a, "account_ref") or "").strip() for a in _model_accounts(model)} - {""}
+		# A row with no subscription account (api key, or no live sign-in) is a healthy server.
+		servers.setdefault(model_id.split("/")[-1], set()).update(refs or {""})
 	served: dict[str, list[str]] = {}
 	for model in _enabled_models(settings):
 		model_id = (_field(model, "model") or "").strip()
-		if not model_id or _credential_type(model) != "subscription":
+		if not model_id or not servers[model_id.split("/")[-1]] <= expired_refs:
 			continue
 		for account in _model_accounts(model):
 			ref = (_field(account, "account_ref") or "").strip()
@@ -151,6 +164,7 @@ def _account_models() -> dict[str, list[str]]:
 				served[ref].append(model_id)
 	if served:
 		return served
+	# Pool rows win: the flat llm_* fields only describe the served model when there is no pool.
 	direct_model = (settings.get("llm_model") or "").strip()
 	if direct_model and DIRECT_REF in _live_accounts():
 		return {DIRECT_REF: [direct_model]}
@@ -534,14 +548,15 @@ def get_subscription_notice() -> dict:
 
 	Any workspace member may call it, so a member only learns what they need: the first expired
 	sign-in that has no fallback (their chats are failing) as ``{upstream, label}``, and nothing about
-	the rest of the pool. Each entry carries ``models``: the model ids that sign-in serves, so the
-	error card can recognise a failed turn from its model. An admin gets every entry (with ``account_ref`` and ``fallback`` for the
+	the rest of the pool. Each entry carries ``models``: the model ids only that expired sign-in
+	serves, so the error card can recognise a failed turn from its model. An admin gets every entry (with ``account_ref`` and ``fallback`` for the
 	Reconnect link) and the workspace's subscription upstreams."""
 	from jarvis.permissions import has_jarvis_admin_access, require_jarvis_access
 
 	require_jarvis_access()
-	served = _account_models()
-	entries = [{**e, "models": served.get(e["account_ref"], [])} for e in ui_entries()]
+	entries = ui_entries()
+	served = _account_models({e["account_ref"] for e in entries})
+	entries = [{**e, "models": served.get(e["account_ref"], [])} for e in entries]
 	if has_jarvis_admin_access():
 		upstreams = sorted({account["upstream"] for account in _live_accounts().values()})
 		return {"expired": entries, "upstreams": upstreams}
