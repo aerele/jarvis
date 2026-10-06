@@ -575,14 +575,14 @@ class TestRunLLMAction(_TriggerTestCase):
 		skipped = next(r for r in rows if r.status == "Skipped")
 		self.assertIn("daily LLM cap reached (1)", skipped.summary)
 
-	def test_engine_peek_starts_after_the_skipped_marker_and_follows_the_cap(self):
+	def test_engine_peek_reads_the_published_count_against_the_current_cap(self):
 		trig = self._make_llm_trigger(cap=1)
 		row = {"name": trig.name, "llm_daily_cap": 1}
 		with patch(LLM_TASK_COMPLETE, return_value="ok"):
 			self._run(trig)  # == cap
 			self.assertFalse(engine._llm_cap_reached(row))
 			self._run(trig)  # cap+1
-		self.assertEqual(llm_action.over_cap_count(trig.name), 2)
+		self.assertEqual(llm_action.daily_count(trig.name), 2)
 		self.assertTrue(engine._llm_cap_reached(row))
 		self.assertFalse(engine._llm_cap_reached({**row, "llm_daily_cap": 5}))
 

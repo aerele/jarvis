@@ -26,6 +26,7 @@ import time
 import frappe
 from frappe.utils import cint, nowdate
 
+from jarvis.compat import cache_get_fresh
 from jarvis.triggers.engine import TRIGGER, _insert_activity
 
 _SYSTEM_PROMPT = (
@@ -58,13 +59,13 @@ def _cap_key(trigger: str) -> str:
 	return f"jarvis:trigcap:{trigger}:{nowdate().replace('-', '')}"
 
 
-def over_cap_count(trigger: str) -> int:
-	"""Today's count once past the cap, else 0."""
-	return cint(frappe.cache.get_value(_over_cap_key(trigger), expires=True))
+def daily_count(trigger: str) -> int:
+	"""Today's LLM evaluations for ``trigger``, as the job last published them."""
+	return cint(cache_get_fresh(_count_key(_cap_key(trigger))))
 
 
-def _over_cap_key(trigger: str) -> str:
-	return f"{_cap_key(trigger)}:over"
+def _count_key(cap_key: str) -> str:
+	return f"{cap_key}:count"
 
 
 def _llm_task_prompt(instruction: str, doctype: str, docname: str, doc_event: str) -> str:
@@ -177,11 +178,13 @@ def run_llm_action(
 	}
 
 	cap = cint(row.llm_daily_cap) or _DEFAULT_DAILY_CAP
+	cap_key = _cap_key(trigger)
 	cache = frappe.cache()
-	counter_key = cache.make_key(_cap_key(trigger))
+	counter_key = cache.make_key(cap_key)
 	count = cint(cache.incr(counter_key))
 	if count == 1:
 		cache.expire(counter_key, _CAP_TTL_SECONDS)
+	frappe.cache.set_value(_count_key(cap_key), count, expires_in_sec=_CAP_TTL_SECONDS)  # engine peek
 	if count > cap:
 		if count == cap + 1:
 			# Exactly one Skipped row marks the day's cutoff; the rest of the
@@ -193,8 +196,6 @@ def run_llm_action(
 				detail=f"daily LLM cap reached ({cap}); further evaluations today are dropped silently",
 			)
 			frappe.db.commit()
-		# Lets the engine skip enqueueing.
-		frappe.cache.set_value(_over_cap_key(trigger), count, expires_in_sec=_CAP_TTL_SECONDS)
 		return
 
 	# Imported lazily (background job only): turn_handler for the

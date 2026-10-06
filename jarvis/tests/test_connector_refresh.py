@@ -118,12 +118,12 @@ class TestAfterCallTriggers(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# request: debounce (cache window) + dedupe (job_id)
+# request: debounce (atomic lease) + dedupe (job_id)
 # --------------------------------------------------------------------------- #
 class TestRequestDebounce(unittest.TestCase):
 	def test_first_caller_enqueues_immediately_with_dedupe(self):
 		fake = _fake_frappe()
-		fake.cache.get_value.return_value = None
+		fake.cache.lock.return_value.acquire.return_value = True
 		with mock.patch.object(refresh, "frappe", fake):
 			self.assertTrue(refresh.request("conn-1"))
 		fake.enqueue.assert_called_once()
@@ -139,20 +139,28 @@ class TestRequestDebounce(unittest.TestCase):
 
 	def test_second_caller_in_window_does_not_enqueue(self):
 		fake = _fake_frappe()
-		fake.cache.get_value.return_value = 1
+		fake.cache.lock.return_value.acquire.return_value = False
 		with mock.patch.object(refresh, "frappe", fake):
 			self.assertFalse(refresh.request("conn-1"))
 		fake.enqueue.assert_not_called()
-		fake.cache.set_value.assert_not_called()
 
-	def test_claim_is_a_site_scoped_cache_value_for_the_window(self):
+	def test_claim_is_one_atomic_site_scoped_lease_for_the_window(self):
 		fake = _fake_frappe()
-		fake.cache.get_value.return_value = None
+		fake.cache.make_key.side_effect = lambda k: f"site|{k}"
+		fake.cache.lock.return_value.acquire.return_value = True
 		with mock.patch.object(refresh, "frappe", fake):
 			refresh.request("conn-1")
-		fake.cache.set_value.assert_called_once_with(
-			refresh._debounce_key("conn-1"), 1, expires_in_sec=refresh.DEBOUNCE_S
+		fake.cache.lock.assert_called_once_with(
+			"site|jarvis:connectors:refresh:conn-1", timeout=refresh.DEBOUNCE_S
 		)
+		fake.cache.lock.return_value.acquire.assert_called_once_with(blocking=False)
+
+	def test_cache_outage_queues_nothing(self):
+		fake = _fake_frappe()
+		fake.cache.lock.return_value.acquire.side_effect = ConnectionError("down")
+		with mock.patch.object(refresh, "frappe", fake), self.assertRaises(ConnectionError):
+			refresh.request("conn-1")
+		fake.enqueue.assert_not_called()
 
 	def test_job_id_is_colon_free(self):
 		self.assertNotIn(":", refresh._job_id("conn-1"))

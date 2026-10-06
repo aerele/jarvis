@@ -52,6 +52,7 @@ from jarvis.chat.pending_actions._store import (
 	rowcount,
 	waiters,
 )
+from jarvis.compat import cache_get_fresh
 from jarvis.tools import _write_risk
 
 HELD = "file_box_held"
@@ -371,7 +372,7 @@ def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 		for k in keys:
 			frappe.cache.set_value(k, 1, expires_in_sec=MISS_TTL_S)
 		# set_value hides an outage: confirm in Redis.
-		if all(frappe.cache.get_value(k, expires=True, use_local_cache=False) is not None for k in keys):
+		if all(cache_get_fresh(k) is not None for k in keys):
 			return seen
 		message = "cache write lost"
 	except Exception:

@@ -1104,12 +1104,7 @@ class TestSeenOnce(FrappeTestCase):
 		self.assertFalse(held_writes.seen_once([key]))
 
 	def test_a_write_the_cache_did_not_keep_counts_as_seen(self):
-		import redis
-
-		with (
-			patch.object(frappe.cache, "set", side_effect=redis.exceptions.ConnectionError("down")),
-			patch.object(frappe, "log_error") as log,
-		):
+		with patch.object(frappe.cache, "set_value"), patch.object(frappe, "log_error") as log:
 			self.assertTrue(held_writes.seen_once([self.key()], "test_event"))
 		self.assertEqual(log.call_args.kwargs["title"], "jarvis.file_box.test_event")
 
