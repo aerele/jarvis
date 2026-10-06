@@ -1396,6 +1396,14 @@ def _run_method_brakes(args) -> bool:
 	return needs_brake(args)
 
 
+def _workflow_brakes(args) -> bool:
+	"""An apply_workflow_action whose action can cancel (``workflow_action_cancels``)."""
+	from jarvis.tools._write_risk import workflow_action_cancels
+
+	args = args if isinstance(args, dict) else {}
+	return workflow_action_cancels(args.get("doctype"), args.get("action"))
+
+
 def _writes_a_skill(tool: str, args) -> bool:
 	"""Whether a covered write names a skill doctype anywhere in its arguments (a
 	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
@@ -2312,7 +2320,7 @@ def dispatch_confirmed(
 	allow = _write_risk.allow_entries(tool, args) if allow_risky else []
 	fence = _write_risk.no_commit_fence() if uncarded and tool in _FENCED_TOOLS else nullcontext()
 	# An uncarded write may not delete or cancel a document, however it gets there
-	# (_write_risk._brake_doc_event): those verbs always park a card. A run_method
+	# (_write_risk.brake_doc_event): those verbs always park a card. A run_method
 	# picks its own code, so it may not even nest one in another save.
 	with (
 		_write_risk.guard_scope(
@@ -3009,9 +3017,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			return _refuse_risky_write(tool, args, e)
 	# Sensitive configuration never runs uncarded (R2-8): auto mode, "confirm all",
 	# an armed macro and an approved skill run all fall through to the park. Nor
-	# does a run_method that deletes or cancels: those verbs are braked as tools
-	# (_BRAKE), and run_method must not be the way around that.
-	_must_card = _risk == "sensitive" or (tool == "run_method" and _run_method_brakes(args))
+	# does a run_method or a workflow action that deletes or cancels: those verbs are
+	# braked as tools (_BRAKE), and nothing else may be the way around that.
+	_must_card = (
+		_risk == "sensitive"
+		or (tool == "run_method" and _run_method_brakes(args))
+		or (tool == "apply_workflow_action" and _workflow_brakes(args))
+	)
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths

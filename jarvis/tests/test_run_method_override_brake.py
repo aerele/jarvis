@@ -7,6 +7,8 @@ test_skill_approve_and_run.TestSkillAutorunGate). The ORM backstop is exercised
 inside a guard scope directly, and everything it touches rolls back.
 """
 
+import json
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -31,6 +33,36 @@ def _overrides(mapping: dict):
 		return real(hook, *args, **kwargs)
 
 	return patch("frappe.get_hooks", side_effect=fake)
+
+
+@contextmanager
+def _todo_workflow():
+	"""Serve an active ToDo workflow whose "Cancel" ends in a cancelled state."""
+	workflow = frappe._dict(
+		states=[
+			frappe._dict(state="Approved", doc_status="1"),
+			frappe._dict(state="Cancelled", doc_status="2"),
+		],
+		transitions=[
+			frappe._dict(action="Approve", next_state="Approved"),
+			frappe._dict(action="Cancel", next_state="Cancelled"),
+		],
+	)
+	real = frappe.get_cached_doc
+
+	def cached_doc(doctype, *args, **kwargs):
+		if doctype == "Workflow" and args[:1] == ("ToDo Flow",):
+			return workflow
+		return real(doctype, *args, **kwargs)
+
+	with (
+		patch(
+			"frappe.model.workflow.get_workflow_name",
+			side_effect=lambda dt: "ToDo Flow" if dt == "ToDo" else None,
+		),
+		patch("frappe.get_cached_doc", side_effect=cached_doc),
+	):
+		yield
 
 
 class TestRunMethodFollowsOverrides(FrappeTestCase):
@@ -66,6 +98,39 @@ class TestRunMethodBrake(FrappeTestCase):
 			},
 			{"method": "cancel", "doctype": "ToDo", "name": "x"},
 			{"method": "discard", "doctype": "ToDo", "name": "x"},
+			{
+				"method": "frappe.client.save",
+				"args": {"doc": {"doctype": "ToDo", "name": "x", "docstatus": 2}},
+			},
+			{
+				"method": "frappe.client.save",
+				"args": {"doc": json.dumps({"doctype": "ToDo", "docstatus": "2"})},
+			},
+			{"method": "frappe.client.set_value", "args": {"fieldname": {"docstatus": 2}}},
+			{"method": "frappe.client.set_value", "args": {"fieldname": '{"DocStatus": "2 "}'}},
+			{"method": "frappe.client.bulk_update", "args": {"docs": json.dumps([{}, {"docstatus": 2}])}},
+			{
+				"method": "frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs",
+				"args": {
+					"doctype": "ToDo",
+					"docnames": ["x"],
+					"action": "update",
+					"data": '{"docstatus": 2}',
+				},
+			},
+			{"method": "frappe.desk.form.save.discard", "args": {"doctype": "ToDo", "name": "x"}},
+			{"method": "frappe.desk.form.utils.remove_attach", "args": {"fid": "x"}},
+			{"method": "frappe.core.api.file.unzip_file", "args": {"name": "x"}},
+			{"method": "frappe.client.rename_doc", "args": {"doctype": "ToDo", "old_name": "x", "merge": 1}},
+			{
+				"method": "frappe.rename_doc",
+				"args": {"doctype": "ToDo", "old": "x", "new": "y", "merge": "true"},
+			},
+			{
+				"method": "frappe.model.rename_doc.update_document_title",
+				"args": {"doctype": "ToDo", "docname": "x", "name": "y", "merge": True},
+			},
+			{"method": "rename", "doctype": "ToDo", "name": "x", "args": {"name": "y", "merge": 1}},
 		):
 			with self.subTest(tool_args=tool_args):
 				self.assertTrue(needs_brake(tool_args))
@@ -76,6 +141,26 @@ class TestRunMethodBrake(FrappeTestCase):
 			{"method": "frappe.client.get_value", "args": {"doctype": "ToDo"}},
 			{"method": "frappe.desk.form.save.savedocs", "args": {"doc": "{}", "action": "Submit"}},
 			{"method": "submit", "doctype": "ToDo", "name": "x"},
+			{"method": "rename", "doctype": "ToDo", "name": "x", "args": {"name": "y"}},
+			{
+				"method": "frappe.client.rename_doc",
+				"args": {"doctype": "ToDo", "old_name": "x", "merge": "false"},
+			},
+			{"method": "frappe.rename_doc", "args": {"doctype": "ToDo", "old": "x", "new": "y", "merge": 0}},
+			{"method": "frappe.client.save", "args": {"doc": {"doctype": "ToDo", "docstatus": 1}}},
+			{"method": "frappe.client.save", "args": {"doc": "{not json"}},
+			{"method": "frappe.client.set_value", "args": {"fieldname": "description", "value": "2"}},
+			{"method": "frappe.client.bulk_update", "args": {"docs": json.dumps([{"docstatus": 0}])}},
+			{"method": "frappe.client.bulk_update", "args": {"docs": "{not json"}},
+			{
+				"method": "frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs",
+				"args": {
+					"doctype": "ToDo",
+					"docnames": ["x"],
+					"action": "update",
+					"data": {"status": "Closed"},
+				},
+			},
 			{"method": "no.such.module.fn"},
 			{},
 			None,
@@ -86,6 +171,66 @@ class TestRunMethodBrake(FrappeTestCase):
 	def test_an_override_into_delete_is_braked(self):
 		with _overrides({"frappe.ping": "frappe.client.delete"}):
 			self.assertTrue(needs_brake({"method": "frappe.ping"}))
+
+	def test_a_docstatus_2_payload_is_read_as_loosely_as_the_database(self):
+		for values in (
+			{"docstatus": 2},
+			{"DOCSTATUS": "2 "},
+			{"`docstatus`": 2.0},
+			{"DocStatus": "2"},
+			{"docstatus": "2abc"},
+			{"docstatus": b"2"},
+			'{"docstatus": 2}',
+		):
+			with self.subTest(values=values):
+				self.assertTrue(_write_risk.sets_docstatus_2(values))
+		for values in ({"docstatus": 1}, {"docstatus": True}, {"status": 2}, "docstatus", [2], None):
+			with self.subTest(values=values):
+				self.assertFalse(_write_risk.sets_docstatus_2(values))
+
+
+class TestWorkflowCancelBrake(FrappeTestCase):
+	def test_an_action_into_a_cancelled_state_cancels(self):
+		with _todo_workflow():
+			self.assertTrue(_write_risk.workflow_action_cancels("ToDo", "Cancel"))
+			self.assertTrue(_write_risk.workflow_action_cancels("ToDo", " Cancel "))  # the tool strips it
+			for doctype, action in (
+				("ToDo", "Approve"),
+				("ToDo", "cancel"),
+				("Note", "Cancel"),
+				(None, "Cancel"),
+				("ToDo", None),
+			):
+				with self.subTest(doctype=doctype, action=action):
+					self.assertFalse(_write_risk.workflow_action_cancels(doctype, action))
+
+	def test_a_cancelling_workflow_action_is_braked_on_every_route(self):
+		with _todo_workflow():
+			self.assertTrue(api._workflow_brakes({"doctype": "ToDo", "name": "x", "action": "Cancel"}))
+			self.assertFalse(api._workflow_brakes({"doctype": "ToDo", "name": "x", "action": "Approve"}))
+			for action, braked in (("Cancel", True), ("Approve", False)):
+				with self.subTest(action=action):
+					self.assertIs(
+						needs_brake(
+							{
+								"method": "frappe.model.workflow.apply_workflow",
+								"args": {
+									"doc": json.dumps({"doctype": "ToDo", "name": "x"}),
+									"action": action,
+								},
+							}
+						),
+						braked,
+					)
+					self.assertIs(
+						needs_brake(
+							{
+								"method": "frappe.model.workflow.bulk_workflow_approval",
+								"args": {"docnames": '["x"]', "doctype": "ToDo", "action": action},
+							}
+						),
+						braked,
+					)
 
 
 class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
@@ -114,19 +259,28 @@ class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
 			frappe.call("frappe.client.save", doc=payload)
 		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
 
-	def test_the_brake_runs_before_the_documents_own_cancel_handler(self):
-		# Nothing a cancel handler does outside the database (an e-invoice cancel,
-		# a mail) may happen before the refusal.
+	def test_the_refusal_comes_before_on_cancel(self):
+		# Frappe runs "*" handlers after the document's own before_cancel; the cancel's
+		# work (on_cancel) never starts.
 		todo = self._submitted_todo()
 		handler = MagicMock()
 		with (
-			patch.object(type(todo), "before_cancel", handler, create=True),
+			patch.object(type(todo), "on_cancel", handler, create=True),
 			patch.object(self.todo_meta, "is_submittable", 1),
 			_write_risk.guard_scope([], brake=True),
 			self.assertRaises(BrakeRefusedError),
 		):
 			todo.cancel()
 		handler.assert_not_called()
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
+
+	def test_the_brake_is_a_doc_event_ahead_of_the_guard(self):
+		star = frappe.get_hooks("doc_events")["*"]
+		brake, guard = "jarvis.tools._write_risk.brake_doc_event", "jarvis.tools._write_risk.guard_doc_event"
+		for event in ("before_cancel", "before_discard", "before_change", "on_trash"):
+			self.assertIn(brake, star[event])
+		for event in ("before_change", "on_trash"):
+			self.assertLess(star[event].index(brake), star[event].index(guard))
 
 	def test_cancel_by_db_set_is_refused(self):
 		todo = self._submitted_todo()
@@ -202,25 +356,6 @@ class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
 		todo = self._submitted_todo()
 		with _write_risk.guard_scope([], brake=True), self.assertRaises(BrakeRefusedError):
 			todo.db_set("docstatus", "2")
-		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
-
-	def test_a_raw_set_value_to_docstatus_2_is_refused(self):
-		todo = self._submitted_todo()
-		for field, value in (
-			("docstatus", 2),
-			({"docstatus": 2}, None),
-			("DOCSTATUS", "2 "),
-			("`docstatus`", 2.0),
-			({"DocStatus": "2"}, None),
-			("docstatus", "2abc"),
-			("docstatus", b"2"),
-		):
-			with (
-				self.subTest(field=field),
-				_write_risk.guard_scope([], brake=True),
-				self.assertRaises(BrakeRefusedError),
-			):
-				frappe.db.set_value("ToDo", todo.name, field, value)
 		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
 
 	def test_a_queued_job_carries_the_brake(self):
