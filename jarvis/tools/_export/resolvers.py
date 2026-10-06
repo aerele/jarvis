@@ -2,7 +2,7 @@ import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._export.model import ExportModel
-from jarvis.tools.get_list import _child_table_parents
+from jarvis.tools.get_list import _child_table_parents, assert_child_query_fields_readable
 
 # Server-side hard ceiling. ABOVE this we FAIL CLOSED (raise) rather than return
 # a silently-partial file - an export must never look complete when it isn't.
@@ -74,6 +74,9 @@ def from_query(doctype, filters=None, fields=None, order_by=None, parent_doctype
 		raise PermissionDeniedError(f"no export permission on {export_dt}")
 
 	cols = list(fields) if fields else _default_fields(doctype)
+	# Same core gap as get_list: a child's filter / sort / aggregate field is not
+	# permlevel-checked against parent_doctype by the query engine.
+	assert_child_query_fields_readable(doctype, parent_doctype, cols, filters, order_by)
 	# Fetch one past the ceiling so we can FAIL CLOSED on an over-large export
 	# instead of shipping a silently-truncated file. Under the ceiling, len(rows)
 	# is the true permission-filtered total.

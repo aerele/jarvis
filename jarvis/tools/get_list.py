@@ -1,3 +1,5 @@
+import re
+
 import frappe
 
 from jarvis.exceptions import (
@@ -17,6 +19,85 @@ MAX_LIMIT = 1000
 ROW_GUARD = 200
 
 _CHILD_TABLE_FIELDTYPES = ("Table", "Table MultiSelect")
+
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _idents(text) -> set:
+	"""Every identifier in a SQL-ish fragment (``rate desc``, ``max(rate)``,
+	```tabX`.`rate```), backticks dropped."""
+	return set(_IDENT.findall(str(text).replace("`", "")))
+
+
+def _filter_fieldnames(filters) -> set:
+	"""The field each filter condition tests, from Frappe's filter shapes:
+	``{field: value}``, ``[[field, op, value]]``, ``[[doctype, field, op, value]]``,
+	a single ``[field, op, value]``, or the same as a JSON string. Only the field
+	position is read, so a filter VALUE that happens to spell a field name is not
+	mistaken for a reference."""
+	if isinstance(filters, str):
+		try:
+			filters = frappe.parse_json(filters)
+		except Exception:
+			return set()
+	refs = []
+	if isinstance(filters, dict):
+		refs = list(filters)
+	elif isinstance(filters, list | tuple) and filters:
+		conditions = filters if isinstance(filters[0], list | tuple | dict) else [filters]
+		for cond in conditions:
+			if isinstance(cond, dict):
+				refs += list(cond)
+			elif isinstance(cond, list | tuple) and cond:
+				refs.append(cond[1] if len(cond) >= 4 else cond[0])
+	names = set()
+	for ref in refs:
+		if isinstance(ref, str) and ref.strip():
+			names.add(ref.replace("`", "").rsplit(".", 1)[-1].strip())
+	return names
+
+
+def _aggregate_fieldnames(fields) -> set:
+	"""Identifiers inside aggregate / function select entries (``{"MAX": "rate"}``,
+	``"max(rate)"``, ``"sum(rate) as total"``). A plain field name is left to
+	Frappe, which drops a permlevel-denied SELECT field on its own."""
+	names = set()
+	for entry in fields or []:
+		if isinstance(entry, dict):
+			for value in entry.values():
+				names |= _idents(value)
+		elif isinstance(entry, str) and "(" in entry:
+			names |= _idents(entry)
+	return names
+
+
+def assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, order_by) -> None:
+	"""Refuse a child-table filter / sort / aggregate on a field the caller cannot
+	read through ``parent_doctype``.
+
+	Frappe's query engine checks a child's SELECT fields against
+	``parent_doctype``, but passes NO parent to the field check for filters,
+	``order_by`` and aggregate arguments - and a child DocType has no permissions
+	of its own, so that check is skipped. ``get_list("Delivery Note Item",
+	fields=[{"MAX": "rate"}], parent_doctype="Delivery Note")`` therefore returned
+	a rate the caller cannot see, and filtering or sorting on it leaked it too.
+	Until core passes the parent there, enforce it here."""
+	if not parent_doctype or frappe.session.user == "Administrator":
+		return
+	meta = frappe.get_meta(doctype)
+	if not meta.istable:
+		return
+	levels = set(meta.get_permlevel_access(permission_type="read", parenttype=parent_doctype))
+	denied = {df.fieldname for df in meta.fields if df.permlevel and df.permlevel not in levels}
+	if not denied:
+		return
+	referenced = _filter_fieldnames(filters) | _idents(order_by or "") | _aggregate_fieldnames(fields)
+	hit = sorted(referenced & denied)
+	if hit:
+		raise PermissionDeniedError(
+			f"no read permission on {doctype} field(s) {', '.join(hit)} through {parent_doctype}, "
+			"so they cannot be filtered, sorted or aggregated on"
+		)
 
 
 def _child_table_parents(doctype: str) -> list[str]:
@@ -111,6 +192,7 @@ def get_list(
 
 	if not frappe.has_permission(doctype, ptype="read", parent_doctype=parent_doctype):
 		raise PermissionDeniedError(f"no read permission on {doctype}")
+	assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, order_by)
 
 	rows = frappe.get_list(
 		doctype,
