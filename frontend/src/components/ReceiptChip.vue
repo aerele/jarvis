@@ -14,7 +14,7 @@
   also NEUTRALIZES any outcome it doesn't recognise to the "unknown" chip -
   never the confirmed/✓ path. Bulk shows a name teaser collapsed and the full
   linked list expanded; failures show the rolled-back reason behind a "why"
-  toggle.
+  toggle, and a failed / partial / unknown chip its confirmation's reference.
 -->
 <template>
 	<div class="jv-receipt" :class="'jv-receipt--' + view.tone">
@@ -158,6 +158,7 @@
 				</button>
 				<span v-if="ts" class="jv-receipt-time">{{ ts }}</span>
 			</div>
+			<FailureReference :id="view.reference" />
 			<div v-if="hasList && !open" class="jv-receipt-teaser">{{ teaser }}</div>
 			<div v-if="open && (hasWhy || hasList)" class="jv-receipt-detail">
 				<div v-if="hasWhy" class="jv-receipt-error">{{ view.error }}</div>
@@ -182,6 +183,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import { receiptView } from "@/lib/actionSummary";
+import FailureReference from "./FailureReference.vue";
 
 const props = defineProps({
 	// A role="tool" Jarvis Chat Message with a non-empty action_outcome.

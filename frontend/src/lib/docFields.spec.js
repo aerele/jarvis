@@ -65,6 +65,18 @@ describe("markMissing", () => {
 		expect(model.fields.map((f) => [f.fieldname, f.serverMissing])).toEqual([["gstin", true]]);
 	});
 
+	it("marks a field whose value was refused, and clears it on the next failure", () => {
+		const model = { fields: [panelField(meta[0], "x"), panelField(meta[1], "bad")] };
+		markMissing(model, [{ fieldname: "gstin", invalid: 1 }], meta);
+		expect(model.fields.map((f) => [f.fieldname, !!f.serverInvalid])).toEqual([
+			["account_manager", false],
+			["gstin", true],
+		]);
+		expect(model.fields[1].serverMissing).toBeFalsy();
+		markMissing(model, [{ fieldname: "account_manager" }], meta);
+		expect(model.fields[1].serverInvalid).toBe(false);
+	});
+
 	it("leaves child-row and unknown fields to the message", () => {
 		const model = { fields: [] };
 		markMissing(

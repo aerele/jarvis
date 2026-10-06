@@ -712,6 +712,7 @@ class TestEveryContinuationCallerIsPinned(FrappeTestCase):
 		("jarvis/chat/actions_api.py", "_confirm_core", True),
 		("jarvis/chat/actions_api.py", "on_chat_settled", True),
 		("jarvis/chat/api.py", "_confirm_typed_items", True),
+		("jarvis/chat/panel_failure.py", "_continue", True),  # a failed draft-panel save (R2-9)
 	]
 	NAMES = {"enqueue_continuation", "_enqueue_cont"}
 
@@ -746,7 +747,7 @@ class TestEveryContinuationCallerIsPinned(FrappeTestCase):
 						)
 						found.append((rel, func.name, "outcome" in kwargs))
 		self.assertEqual(sorted(found), sorted(self.EXPECTED))
-		self.assertEqual(len(found), 6)
+		self.assertEqual(len(found), 7)
 
 
 class TestTypedBulkEnvelope(FrappeTestCase):

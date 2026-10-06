@@ -29,6 +29,7 @@
 			<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
 				{{ closedText }}
 			</div>
+			<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
 
 			<div class="mt-4 flex flex-wrap items-center gap-2">
 				<template v-if="rec.can_act">
@@ -72,6 +73,7 @@ import { useRouter } from "vue-router";
 import { Button, toast } from "frappe-ui";
 import PendingCard from "@/components/PendingCard.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
+import FailureReference from "@/components/FailureReference.vue";
 import { getPendingAction } from "@/api/approvals";
 import { confirmTool, dismissTool } from "@/api";
 import { errMessage, escapeHtml } from "@/lib/errors";

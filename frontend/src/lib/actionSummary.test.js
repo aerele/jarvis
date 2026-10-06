@@ -15,6 +15,8 @@ import {
 	diffTablesOf,
 	personError,
 	toolFailureCopy,
+	failureReferenceOf,
+	copyText,
 	pendingExpiry,
 	receiptView,
 	isDestructivePlanStep,
@@ -712,4 +714,61 @@ test("toolFailureCopy: a refused tool row shows the person's words and the hint"
 		message: "This step couldn't be completed.",
 		hint: "",
 	});
+});
+
+// J2b: a failed confirmation carries its own id (error.reference) for support.
+test("failureReferenceOf: from an envelope, an error, or a stored JSON result", () => {
+	const env = { ok: false, error: { message: "x", reference: "  pa-123  " } };
+	assert.equal(failureReferenceOf(env), "pa-123");
+	assert.equal(failureReferenceOf(env.error), "pa-123");
+	assert.equal(failureReferenceOf(JSON.stringify(env)), "pa-123");
+	assert.equal(failureReferenceOf({ ok: false, error: { message: "x" } }), "");
+	assert.equal(failureReferenceOf({ ok: true, data: {} }), "");
+	assert.equal(failureReferenceOf({ ok: false, error: { reference: 42 } }), "");
+	assert.equal(failureReferenceOf("not json"), "");
+	assert.equal(failureReferenceOf(null), "");
+});
+
+test("failureReferenceOf: a connector's own failure carries it beside its data", () => {
+	const chip = { ok: true, data: { ok: false, error: { message: "down" } }, reference: "pa-c1" };
+	assert.equal(failureReferenceOf(chip), "pa-c1");
+	assert.equal(
+		receiptView("call_connector", { connector: "c1" }, chip, "unknown").reference,
+		"pa-c1"
+	);
+});
+
+test("receiptView: a failed, partial or unknown chip carries the reference; a confirmed one never", () => {
+	const res = { ok: false, error: { message: "Value missing", reference: "pa-9" } };
+	for (const outcome of ["failed", "partial", "unknown"]) {
+		assert.equal(
+			receiptView("submit_doc", { doctype: "Task", name: "T-1" }, res, outcome).reference,
+			"pa-9"
+		);
+	}
+	const ok = { ok: true, data: { name: "T-1" }, error: { reference: "pa-9" } };
+	assert.equal(
+		receiptView("submit_doc", { doctype: "Task", name: "T-1" }, ok, "confirmed").reference,
+		""
+	);
+	assert.equal(
+		receiptView("submit_doc", { doctype: "Task", name: "T-1" }, null, "failed").reference,
+		""
+	);
+});
+
+test("copyText: true when the clipboard took it, false when it refused or is missing", async () => {
+	const seen = [];
+	assert.equal(await copyText("pa-1", { writeText: async (t) => seen.push(t) }), true);
+	assert.deepEqual(seen, ["pa-1"]);
+	assert.equal(
+		await copyText("pa-1", {
+			writeText: async () => {
+				throw new Error("denied");
+			},
+		}),
+		false
+	);
+	assert.equal(await copyText("pa-1", null), false);
+	assert.equal(await copyText("", { writeText: async () => {} }), false);
 });

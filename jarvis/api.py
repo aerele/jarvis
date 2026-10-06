@@ -1887,15 +1887,18 @@ def _import_park(args: dict) -> tuple[dict | None, dict | None]:
 # in a fresh log, so the record-level specifics (which linked value blocked it)
 # are discarded - ``detail`` at most names the doctype the caller asked for.
 
+# A fixable value (R2-3): the message names the field. Nothing is highlighted here;
+# the draft panel's own field marks (``actions_api._mark_fields``) bring their
+# own hint.
+_FIXABLE_HINT = "Correct the value named above, then try again."
+
 # "what you can do" lines, keyed by the wire ``code``. Deliberately tiny.
 _ERROR_HINTS = {
 	"PermissionDeniedError": (
 		"You don't have access to do this. If you believe you should, ask your "
 		"administrator to review your permissions."
 	),
-	"InvalidArgumentError": (
-		"Some of the values need attention - check the highlighted fields and try again."
-	),
+	"InvalidArgumentError": _FIXABLE_HINT,
 	"OutgoingEmailError": (
 		"Ask your administrator to configure an enabled default outgoing Email Account before retrying."
 	),
@@ -1957,11 +1960,19 @@ def _flags_message() -> str:
 	return strip_html(str(frappe.flags.get("error_message") or "")).strip()
 
 
-def _hint_for(code: str, detail: str) -> str:
+def _hint_for(code: str, detail: str, *, kind: str | None = None) -> str:
+	"""The "what you can do" line. ``kind`` (``jarvis._failure_kind``): a business rule
+	raised as a plain ValidationError is enveloped as ``InvalidArgumentError`` too, and
+	"correct the value" does not fit something no value fixes (insufficient stock), so
+	only a fixable one gets that hint."""
+	from jarvis import _failure_kind
+
 	if code == "PermissionDeniedError" and (
 		"linked to" in detail.lower() or "not allowed to access" in detail.lower()
 	):
 		return _USER_PERM_HINT
+	if code == "InvalidArgumentError" and kind not in (None, _failure_kind.FIXABLE):
+		return ""
 	return _ERROR_HINTS.get(code, "")
 
 
@@ -2056,7 +2067,7 @@ def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dic
 	# Don't repeat the message under "Show details".
 	if detail and detail == strip_html(message).strip():
 		detail = ""
-	envelope = _error(code, message, detail=detail, hint=_hint_for(code, detail))
+	envelope = _error(code, message, detail=detail, hint=_hint_for(code, detail, kind=kind))
 	envelope["error"]["kind"] = kind
 	return envelope
 
