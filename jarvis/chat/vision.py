@@ -29,7 +29,11 @@ _MAX_PDF_PAGES = 20
 _RASTER_SCALE = 200 / 72  # ~200 DPI
 _JPEG_QUALITIES = (85, 70, 55, 40)
 
-_VISION_PROVIDERS = {"Anthropic", "OpenAI", "Google Gemini"}
+# Lowercase, matched case-insensitively: a site connected through the admin's provider
+# presets stores the catalog slug ("anthropic", "openai", "gemini"), a hand-set one the
+# display name ("Anthropic"). Matching only the display names left vision silently off
+# for preset sites, so every photo reached the model as "couldn't be viewed" (#654).
+_VISION_PROVIDERS = {"anthropic", "openai", "google gemini", "gemini", "google"}
 
 # Raise PIL's decompression-bomb error past a generous ceiling once at import
 # (process-global) so a crafted tiny-file-that-decodes-huge is rejected before a
@@ -47,7 +51,7 @@ def supports_vision(provider: str | None) -> bool:
 	"""True for providers whose models are reliably multimodal. Conservative:
 	unknown/local providers return False so the worker falls back to a note
 	instead of sending pixels a text-only model would reject."""
-	return (provider or "").strip() in _VISION_PROVIDERS
+	return (provider or "").strip().lower() in _VISION_PROVIDERS
 
 
 def image_part(content: bytes, file_name: str) -> dict | None:
