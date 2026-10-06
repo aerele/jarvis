@@ -49,6 +49,8 @@ import {
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
 import Composer from "../components/Composer.vue";
+import SendRecoveryCard from "../components/SendRecoveryCard.vue";
+import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
@@ -161,7 +163,27 @@ const dismissedActions = ref(new Set());
 // Drafts the server turned into a gated confirmation card: key -> the note.
 const parkedActions = ref(new Map());
 
-const sending = computed(() => !!live.value || sendBusy.value);
+const localRequests = computed(() =>
+	recoveryState.requests.filter((r) => r.conversation === convId.value)
+);
+const sending = computed(
+	() => !!live.value || sendBusy.value || localRequests.value.some((r) => r.state === "sending")
+);
+let viewActive = true;
+let viewGeneration = 0;
+let loadGeneration = 0;
+const isCurrent = (cid, generation) =>
+	viewActive && cid === convId.value && generation === viewGeneration;
+
+function saveDraft() {
+	recoveryState.drafts[convId.value] = { text: input.value, attachments: attachments.value };
+}
+function restoreDraft() {
+	const draft = recoveryState.drafts[convId.value];
+	input.value = draft?.text || "";
+	attachments.value = draft?.attachments || [];
+}
+restoreDraft();
 const title = computed(
 	() =>
 		conversation.value?.title ||
@@ -307,15 +329,21 @@ async function scrollToBottom(force = false) {
 
 // ── loading ─────────────────────────────────────────────────────────────────
 async function load(force = false) {
-	if (!convId.value) return;
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const ticket = ++loadGeneration;
+	if (!cid) return;
+	const current = () => isCurrent(cid, generation) && ticket === loadGeneration;
 	// A fresh open / refresh follows the newest content again (streaming replies
 	// arrive via socket events, never load(), so this never re-pins mid-reply).
 	follow.value = true;
 	loading.value = true;
 	try {
-		const d = await api.getConversation(convId.value);
+		const d = await api.getConversation(cid);
+		if (!current()) return;
 		conversation.value = d?.conversation || null;
 		messages.value = d?.messages || [];
+		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
 		// A reply still streaming when we (re)opened the chat: restore the busy
@@ -328,7 +356,7 @@ async function load(force = false) {
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load conversation", e);
 	} finally {
-		loading.value = false;
+		if (current()) loading.value = false;
 	}
 }
 
@@ -461,134 +489,149 @@ function onVisible() {
 
 // ── sending ─────────────────────────────────────────────────────────────────
 async function send() {
+	const cid = convId.value;
+	const generation = viewGeneration;
 	const text = input.value.trim();
 	const ready = attachments.value.filter((a) => a.file_url);
-	// Hard block (Stream E maintenance hold): the server refuses every send during a hold and
-	// the composer is disabled; guard here too (also blocks the re-check below, parity w/ SPA).
-	if (holdActive.value) return;
+	if (holdActive.value || attachments.value.some((a) => a.uploading || !a.file_url)) return;
 
-	// Layered re-check phase 2: a typed "show it" / "I can't see the card" re-surfaces a
-	// parked card instantly (source="typed"), no model round-trip. Runs BEFORE the sending
-	// guard so it works mid-turn too - the moment a card push is most likely dropped (parity
-	// with the SPA). Only when a card ACTUALLY surfaces do we swallow; otherwise it falls
-	// through to a normal send, so a false positive never eats a message and the persona
-	// backstop stays reachable. (Text-only - not while an attachment is staged.)
-	if (convId.value && !ready.length && isShowCardRequest(text)) {
-		const forConv = convId.value;
+	// Preserve the existing typed-card rescue; do not clear a newer draft after
+	// its asynchronous lookup or continue sending into a different conversation.
+	if (cid && !ready.length && isShowCardRequest(text)) {
 		const before = pending.value.length;
 		await loadPending("typed");
-		if (convId.value === forConv && pending.value.length > before) {
-			input.value = "";
-			composer.value?.reset();
+		if (!isCurrent(cid, generation)) return;
+		if (pending.value.length > before) {
+			if (input.value.trim() === text) {
+				input.value = "";
+				composer.value?.reset();
+			}
 			return;
 		}
+		if (input.value.trim() !== text || attachments.value.length) return;
 	}
-
 	if ((!text && !ready.length) || sending.value) return;
-
 	errorBanner.value = "";
+	const request = sendRecovery.stage(
+		cid,
+		input.value,
+		ready,
+		orderedPending.value.map((p) => p.token)
+	);
 	input.value = "";
 	composer.value?.reset();
+	// The preserved request uses durable file URLs; release only local thumbnails.
+	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
 	attachments.value = [];
-	sendBusy.value = true;
-	// Optimistic user bubble; the server echoes it back on the next load.
-	messages.value.push({
-		name: `local-${Date.now()}`,
-		role: "user",
-		content: text,
-		optimistic: true,
-	});
+	saveDraft();
+	// Capture/send before awaiting scroll; routing never changes the payload.
+	const completion = dispatchRequest(request);
 	await scrollToBottom(true);
-	// Land on the new turn, then stop following so the reply grows downward
-	// instead of dragging the view up as it streams (see `follow`).
-	follow.value = false;
+	if (isCurrent(cid, generation)) follow.value = false;
+	await completion;
+}
 
+async function dispatchRequest(request) {
+	const attempt = request.id;
+	// The browser can keep a stalled POST pending indefinitely. A UI deadline
+	// makes its preserved request checkable; it does not cancel server work.
+	const deadline = setTimeout(() => {
+		if (request.id === attempt && request.state === "sending")
+			sendRecovery.settle(request, null);
+	}, 30000);
 	try {
-		// No model/effort override here: an existing chat keeps whatever it was
-		// started with (the backend falls back to the workspace default). The
-		// device's preference applies when a chat is CREATED, on the new-chat
-		// screen — same rule as the native app.
-		const res = await api.sendMessage(convId.value, text, {
-			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
-			// Numbers a typed approval selects by must resolve against the cards on
-			// screen, in this order, not a list the server re-fetches at send time.
-			// Deliberately confirm-only (step-by-step): this forwards to confirm_tool
-			// server-side, never approve_and_run - that stays reachable only through
-			// a runnable card's own Approve & run button in DecisionSheet (P1, skill
-			// approve-and-run, §3.5).
-			approvalTokens: orderedPending.value.map((p) => p.token),
-		});
-		// The server read this as a go-ahead on the parked card and ran the
-		// confirmation instead of starting a turn, so no run events are coming and
-		// nothing was persisted for the typed words. Take the spinner down here or
-		// it waits forever, and drop the optimistic echo of a message that does not
-		// exist. The receipt chip in the reloaded thread is what the user sees.
-		if (res?.confirmed) {
-			sendBusy.value = false;
-			// A parked-card confirmation also got past the send gate, so any maintenance
-			// hold has lifted - clear the strip now instead of waiting for the poll.
-			clearHold();
-			messages.value = messages.value.filter((m) => !m.optimistic);
-			if (res.ok === false)
-				errorBanner.value =
-					res.error?.message ||
-					"That confirmation is no longer valid. Ask again to retry it.";
-			await load(true);
-			await loadPending();
-			return;
-		}
-		// A typed "no" discarded these before its turn (even one that then lost the
-		// admission race): they must not linger as live approvals.
-		const discarded = discardedTokens(res);
-		if (discarded.size) {
-			pending.value = pending.value.filter((p) => !discarded.has(p.token));
-			// The transcript row (messages.value) stays "pending" until the next
-			// load() - keep these excluded from every merge until then (D1).
-			settledTokens.value = withExcluded(settledTokens.value, discarded);
-		}
-		if (res?.ok === false) {
-			sendBusy.value = false;
-			messages.value = messages.value.filter((m) => !m.optimistic);
-			// A rollout started under this tab; the gate only latches at boot, so
-			// reload onto it instead of leaving them retrying.
-			if (res.reason === "release_update_required") {
-				errorBanner.value = "Jarvis is being updated. Reloading…";
-				setTimeout(() => window.location.reload(), 1500);
-				return;
-			}
-			// Maintenance hold (Stream E): the operator/roll raised an upgrade hold
-			// while this tab was open. Raise the persistent top-of-app strip + self-
-			// heal by re-checking the CP; no reload (a hold is transient). This HARD-
-			// blocks the composer (disabled until the hold lifts, then re-enabled).
-			if (res.reason === "maintenance") {
-				raiseHold(res.message);
+		const outcome = await api.sendRecoverableMessage(request);
+		if (request.id === attempt) {
+			sendRecovery.settle(request, outcome);
+			// Only a fresh send response can update global maintenance readiness.
+			// A receipt read later describes the past, not current availability.
+			if (["accepted", "confirmed"].includes(request.state)) clearHold();
+			else if (request.state === "rejected" && request.result?.reason === "maintenance") {
+				raiseHold(request.result.message);
 				recheckMaintenance();
-				input.value = text; // keep their draft so it's ready when the hold lifts
-				return;
 			}
-			errorBanner.value = res.reason || "Couldn't send that message.";
-			return;
 		}
-		// An accepted send proves the maintenance hold lifted - clear the strip + wake
-		// the avatar now instead of stranding them until a reload (self-heal).
-		clearHold();
-		// The user just spoke: every card still here is now Earlier.
-		markCardsEarlier(pending.value, res?.conversation_id || convId.value);
-		olderCardsNote.value = !!res?.older_cards_waiting;
-		// First send of a brand-new chat: adopt the id the backend just created,
-		// and put the row in the list without a refetch.
-		const id = res?.conversation_id;
-		if (id && id !== convId.value) {
-			convId.value = id;
-			router.replace(`/c/${id}`);
-			store.loadConversations();
-		}
-	} catch (e) {
-		sendBusy.value = false;
-		errorBanner.value = `That didn't reach ${agentName}. Check your connection and try again.`;
-		messages.value = messages.value.filter((m) => !m.optimistic);
+	} catch {
+		// A delivery check may have settled this attempt while its POST was
+		// stalled. A late transport error must not undo that evidence.
+		if (request.id === attempt) sendRecovery.settle(request, null);
+	} finally {
+		clearTimeout(deadline);
 	}
 }
+
+async function retryRequest(request) {
+	if (request.conversation !== convId.value || sending.value || holdActive.value) return;
+	if (!sendRecovery.retry(request)) return;
+	await dispatchRequest(request);
+}
+
+async function checkRequest(request) {
+	if (request.state !== "uncertain" || request.checking) return;
+	request.checking = true;
+	request.note = "";
+	try {
+		sendRecovery.settle(request, await api.checkDelivery(request.id));
+		if (request.state === "uncertain")
+			request.note =
+				"Delivery is still unknown. No second message was sent. Check again later or ask support to inspect this conversation.";
+	} catch {
+		request.note =
+			"Could not check delivery. Reconnect or sign in again, then check. No second message was sent.";
+	} finally {
+		request.checking = false;
+	}
+}
+
+function editRequest(request, text) {
+	if (request.state === "rejected" && request.conversation === convId.value) request.text = text;
+}
+
+// Outcome handling belongs to the currently mounted originating view. A request
+// can finish while another chat (or no chat) is mounted; its state still survives.
+watch(
+	() => localRequests.value.map((r) => `${r.id}:${r.state}`).join("|"),
+	async () => {
+		const cid = convId.value;
+		const generation = viewGeneration;
+		for (const request of [...localRequests.value]) {
+			if (!isCurrent(cid, generation)) return;
+			const res = request.result;
+			const discarded = discardedTokens(res);
+			if (discarded.size) {
+				pending.value = pending.value.filter((p) => !discarded.has(p.token));
+				settledTokens.value = withExcluded(settledTokens.value, discarded);
+			}
+			if (request.state === "rejected") {
+				// In-memory recovery cannot survive an automatic release reload.
+				continue;
+			}
+			if (!["accepted", "confirmed"].includes(request.state)) continue;
+			if (res.conversation_id && res.conversation_id !== cid) {
+				saveDraft();
+				request.conversation = res.conversation_id;
+				// Keep a newer draft alongside its newly created conversation.
+				recoveryState.drafts[res.conversation_id] = recoveryState.drafts[cid];
+				delete recoveryState.drafts[cid];
+				router.replace(`/c/${res.conversation_id}`);
+				store.loadConversations();
+				return;
+			}
+			if (request.state === "confirmed") {
+				sendRecovery.remove(request);
+				if (res.ok === false)
+					errorBanner.value =
+						"The confirmation was processed, but one or more actions failed. Check the action receipts before continuing.";
+			} else {
+				markCardsEarlier(pending.value, cid);
+				olderCardsNote.value = !!res.older_cards_waiting;
+			}
+			await load(true);
+			if (isCurrent(cid, generation)) await loadPending();
+		}
+	},
+	{ immediate: true }
+);
 
 async function stop() {
 	const runId = live.value?.runId || "";
@@ -616,20 +659,28 @@ async function attach(files) {
 		preview: f.type.startsWith("image/") ? URL.createObjectURL(f) : "",
 		uploading: true,
 	}));
-	attachments.value.push(...staged);
+	const target = attachments.value;
+	target.push(...staged);
+	const cid = convId.value;
+	const generation = viewGeneration;
 
 	await Promise.all(
 		staged.map(async (a) => {
 			try {
 				const up = await api.uploadFile(a.file);
-				const row = attachments.value.find((x) => x.key === a.key);
+				const row = target.find((x) => x.key === a.key);
 				if (row) {
 					row.file_url = up.file_url;
 					row.uploading = false;
 				}
 			} catch (e) {
-				removeAttachment(a.key);
-				errorBanner.value = e?.message || `Couldn't upload ${a.name}.`;
+				const index = target.findIndex((x) => x.key === a.key);
+				if (index !== -1) {
+					if (target[index].preview) URL.revokeObjectURL(target[index].preview);
+					target.splice(index, 1);
+				}
+				if (isCurrent(cid, generation))
+					errorBanner.value = e?.message || `Couldn't upload ${a.name}.`;
 			}
 		})
 	);
@@ -888,7 +939,11 @@ const onResync = () => {
 watch(
 	() => props.id,
 	(id) => {
+		saveDraft();
+		viewGeneration++;
+		loadGeneration++;
 		convId.value = id === "new" ? "" : id;
+		restoreDraft();
 		store.clearUnread(convId.value);
 		messages.value = [];
 		conversation.value = null;
@@ -924,13 +979,16 @@ onMounted(async () => {
 	}
 });
 onUnmounted(() => {
+	saveDraft();
+	viewActive = false;
+	viewGeneration++;
 	socket?.off("jarvis:event", onEvent);
 	window.removeEventListener("jv:resync", onResync);
 	window.removeEventListener("focus", wakePending);
 	document.removeEventListener("visibilitychange", onVisible);
 	stopPendingPoll();
 	clearInterval(_cardClockTick);
-	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
+	// Draft attachments remain in tab memory for a later return to this chat.
 });
 </script>
 
@@ -973,7 +1031,7 @@ onUnmounted(() => {
 	</div>
 
 	<div ref="scroller" class="jv-scroll jv-thread" @scroll.passive="onScroll">
-		<div v-if="!items.length && !live && !loading" class="jv-empty">
+		<div v-if="!items.length && !localRequests.length && !live && !loading" class="jv-empty">
 			<BrandMark :size="52" :mood="holdActive ? 'upgrading' : 'star'" />
 			<div style="font-size: 16px; font-weight: 600; color: var(--ink9)">
 				What can I do for you?
@@ -1130,6 +1188,17 @@ onUnmounted(() => {
 				</template>
 			</div>
 		</template>
+
+		<SendRecoveryCard
+			v-for="request in localRequests"
+			:key="request.id"
+			:request="request"
+			:disabled="sending || holdActive"
+			@retry="retryRequest(request)"
+			@check="checkRequest(request)"
+			@edit="editRequest(request, $event)"
+			@discard="sendRecovery.remove(request)"
+		/>
 
 		<!-- the turn in flight -->
 		<template v-if="live">

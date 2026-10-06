@@ -190,3 +190,17 @@ export async function uploadFile(file) {
 // 150-second client budget, same error unwrapping. The mic is a place where two subtly
 // different clients would be two subtly different bugs.
 export { transcribeAudio } from "@shared/api/voice.js";
+
+// F01 recovery: a check only reads the scoped receipt, never resends a message.
+export const sendRecoverableMessage = (request) =>
+	call("jarvis.chat.pwa_send.send_message", {
+		request_id: request.id,
+		conversation: request.conversation,
+		message: request.text,
+		attachments: JSON.stringify(
+			request.attachments.map((a) => ({ file_url: a.file_url, file_name: a.name }))
+		),
+		approval_tokens: JSON.stringify(request.approvalTokens),
+	});
+export const checkDelivery = (requestId) =>
+	call("jarvis.chat.pwa_send.check_delivery", { request_id: requestId });
