@@ -172,7 +172,9 @@ describe("ModelEffortPicker effort row", () => {
 const ADMIN_TIP = "Sign-in expired. Reconnect it in AI models.";
 const MEMBER_TIP = "Sign-in expired. Ask your workspace admin to reconnect it.";
 const MAP = { "gpt-5.6": { upstream: "codex", label: "ChatGPT" } };
-const EXPIRED_GROUPS = [{ provider: "openai", models: [{ model: "gpt-5.6" }, { model: "claude-x" }] }];
+const EXPIRED_GROUPS = [
+	{ provider: "openai", models: [{ model: "gpt-5.6" }, { model: "claude-x" }] },
+];
 
 function buildExpired(props = {}) {
 	return mount(ModelEffortPicker, {
@@ -203,7 +205,11 @@ describe("ModelEffortPicker expired sign-in", () => {
 	});
 
 	it("shows the dot when the pill names an expired default model", () => {
-		const w = buildExpired({ modelOverride: "", defaultModel: "gpt-5.6", canAddProvider: true });
+		const w = buildExpired({
+			modelOverride: "",
+			defaultModel: "gpt-5.6",
+			canAddProvider: true,
+		});
 		expect(w.find(".mep-model").text()).toBe("gpt-5.6");
 		expect(dot(w).exists()).toBe(true);
 		expect(pill(w).attributes("title")).toBe(ADMIN_TIP);
