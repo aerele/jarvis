@@ -699,3 +699,199 @@ class TestSuccessHook(_Base):
 			sh.note_turn_success("gpt-5.6", "openai_compat")
 		log.assert_called_once_with()
 		self.assertIn("ACC_OA1", json.loads(self.stored))
+
+
+class TestFallbackLabel(unittest.TestCase):
+	def _with(self, *rows):
+		return patch.object(sh, "_settings", return_value=frappe._dict(models=list(rows)))
+
+	def test_first_non_expired_row_in_pool_order_answers(self):
+		rows = (_row("gpt-5.6", order=1), _row("claude-sonnet-4-5", upstream="anthropic", order=2))
+		with self._with(*rows):
+			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "Anthropic")
+
+	def test_an_api_key_row_is_labelled_by_its_model_id(self):
+		rows = (_row("gpt-5.6", order=1), _row("gemini-2.5-pro", sub=False, order=2))
+		with self._with(*rows):
+			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "gemini-2.5-pro")
+
+	def test_a_row_with_one_live_account_still_answers(self):
+		row = _row("gpt-5.6")
+		row.subscription_accounts = json.dumps(
+			[{"account_ref": "A1", "upstream": "openai"}, {"account_ref": "A2", "upstream": "openai"}]
+		)
+		with self._with(row):
+			self.assertEqual(sh.fallback_label({"A1"}), "OpenAI")
+			self.assertEqual(sh.fallback_label({"A1", "A2"}), "")
+
+	def test_nothing_left_means_chats_fail(self):
+		with self._with(_row("gpt-5.6")):
+			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "")
+
+	def test_disabled_rows_and_accountless_subscription_rows_never_answer(self):
+		off = _row("claude-sonnet-4-5", upstream="anthropic", order=2)
+		off.enabled = 0
+		empty = _row("kimi-k2", upstream="kimi", order=3)
+		empty.subscription_accounts = ""
+		with self._with(_row("gpt-5.6"), off, empty):
+			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "")
+
+
+class TestAttentionAndNotice(_Base):
+	def test_ui_entries_carry_the_fallback(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100)})
+		with patch.object(sh, "fallback_label", return_value="Anthropic") as fb:
+			entries = sh.ui_entries()
+		fb.assert_called_once_with({"ACC_OA1"})
+		self.assertEqual(entries[0]["fallback"], "Anthropic")
+		self.assertEqual(entries[0]["account_ref"], "ACC_OA1")
+
+	def test_ui_entries_empty_when_nothing_expired(self):
+		self.assertEqual(sh.ui_entries(), [])
+
+	def _notice(self, admin):
+		frappe.set_user("Administrator")
+		with (
+			patch("jarvis.permissions.require_jarvis_access"),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=admin),
+		):
+			return sh.get_subscription_notice()
+
+	def test_admin_gets_every_entry_and_the_workspace_upstreams(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1"), "ACC_CL1": _entry("ACC_CL1", since=200)})
+		with patch.object(sh, "fallback_label", return_value=""):
+			out = self._notice(admin=True)
+		self.assertEqual([e["account_ref"] for e in out["expired"]], ["ACC_OA1", "ACC_CL1"])
+		self.assertEqual(out["upstreams"], ["anthropic", "openai"])
+
+	def test_member_sees_only_a_failing_entry_with_no_fallback_and_nothing_else(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1")})
+		with patch.object(sh, "fallback_label", return_value=""):
+			out = self._notice(admin=False)
+		self.assertEqual(out, {"expired": [{"upstream": "openai", "label": "OpenAI"}], "upstreams": None})
+
+	def test_member_sees_nothing_while_another_model_still_answers(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1")})
+		with patch.object(sh, "fallback_label", return_value="Anthropic"):
+			out = self._notice(admin=False)
+		self.assertEqual(out, {"expired": [], "upstreams": None})
+
+
+class TestLlmHealthPrecedence(unittest.TestCase):
+	def _health(self, **settings):
+		from jarvis import account
+
+		base = {"last_sync_status": "ok (restart via admin)", "last_subscription_status": ""}
+		with (
+			patch.object(account, "_llm_apply_confirmed", return_value=True),
+			patch.object(account, "_last_turn_errored", return_value=settings.pop("turn_error", False)),
+			patch.object(account, "_last_turn_succeeded", return_value=False),
+		):
+			return account._llm_health(frappe._dict({**base, **settings}), True)
+
+	def _expired(self, value=True):
+		return patch.object(sh, "expired_entries", return_value=[{"account_ref": "A"}] if value else [])
+
+	def test_expired_outranks_turn_error_and_subscription_unverified(self):
+		with self._expired():
+			self.assertEqual(
+				self._health(turn_error=True, last_subscription_status="unverified"),
+				("attention", "subscription_expired"),
+			)
+
+	def test_sync_failed_and_applying_still_win(self):
+		with self._expired():
+			self.assertEqual(self._health(last_sync_status="failed: boom"), ("attention", "sync_failed"))
+			self.assertEqual(self._health(last_sync_status="pending: applying"), ("applying", ""))
+
+	def test_without_an_expired_entry_the_old_causes_are_unchanged(self):
+		with self._expired(False):
+			self.assertEqual(self._health(turn_error=True), ("attention", "turn_error"))
+			self.assertEqual(
+				self._health(last_subscription_status="unverified"), ("attention", "subscription_unverified")
+			)
+			self.assertEqual(self._health(), ("ok", ""))
+
+	def test_a_member_gets_the_same_payload_as_for_every_other_cause(self):
+		from jarvis import account
+
+		frappe.set_user("Administrator")
+		with (
+			patch.object(account, "_has_llm_config", return_value=True),
+			patch.object(account, "compute_pool_mode", return_value=True),
+			patch.object(account, "_llm_health", return_value=("attention", "subscription_expired")),
+		):
+			self.assertEqual(account.get_llm_connection_health(), {"state": "attention"})
+
+	def test_connection_status_carries_detail_and_the_entries(self):
+		from jarvis import account, admin_client
+
+		entry = {
+			"account_ref": "ACC_OA1",
+			"upstream": "openai",
+			"label": "OpenAI",
+			"email": "a@x.com",
+			"state": "expired",
+			"source": "poll",
+			"since": 123,
+			"fallback": "Anthropic",
+		}
+		frappe.set_user("Administrator")
+		with (
+			patch.object(account, "_has_llm_config", return_value=True),
+			patch.object(account, "compute_pool_mode", return_value=True),
+			patch.object(account, "_llm_health", return_value=("attention", "subscription_expired")),
+			patch.object(sh, "ui_entries", return_value=[entry]),
+			patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}),
+		):
+			out = account.get_llm_connection_status()
+		self.assertEqual(out["attention_reason"], "subscription_expired")
+		self.assertEqual(
+			out["attention_detail"],
+			{"upstream": "openai", "label": "OpenAI", "since": 123, "account_ref": "ACC_OA1"},
+		)
+		self.assertEqual(out["subscription_health"], [entry])
+
+	def test_other_causes_have_an_empty_detail(self):
+		from jarvis import account, admin_client
+
+		frappe.set_user("Administrator")
+		with (
+			patch.object(account, "_has_llm_config", return_value=True),
+			patch.object(account, "compute_pool_mode", return_value=True),
+			patch.object(account, "_llm_health", return_value=("attention", "turn_error")),
+			patch.object(sh, "ui_entries", return_value=[]),
+			patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}),
+		):
+			out = account.get_llm_connection_status()
+		self.assertEqual((out["attention_detail"], out["subscription_health"]), ({}, []))
+
+
+class TestNoteRecordedTurn(_Base):
+	"""Carried from S3 review: the legacy relay:final hook acts only on a recorded / valid-zero outcome."""
+
+	ROW = {"model": "gpt-5.6", "modelProvider": "openai_compat"}
+
+	def test_a_retry_outcome_never_clears_anything(self):
+		from jarvis.chat import usage
+
+		with patch.object(sh, "note_session_row") as note:
+			sh.note_recorded_turn(usage.USAGE_RETRY, self.ROW)
+		note.assert_not_called()
+
+	def test_recorded_and_valid_zero_outcomes_clear_by_the_row(self):
+		from jarvis.chat import usage
+
+		for outcome in (usage.USAGE_RECORDED, usage.USAGE_VALID_ZERO):
+			with patch.object(sh, "note_session_row") as note:
+				sh.note_recorded_turn(outcome, self.ROW)
+			note.assert_called_once_with(self.ROW)
+
+	def test_the_legacy_final_hook_goes_through_the_outcome_gate(self):
+		import inspect
+
+		from jarvis.chat import turn_handler
+
+		src = inspect.getsource(turn_handler)
+		self.assertIn("note_recorded_turn(", src)
+		self.assertNotIn("note_session_row(", src)

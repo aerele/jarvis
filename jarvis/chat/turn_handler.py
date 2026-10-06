@@ -1781,11 +1781,13 @@ def handle_chat_send(payload: dict) -> None:
 
 						_row = _usage.fetch_fresh_session_row(sess, conv.session_key)
 						if _row:
-							_usage.record_turn_usage(conv.session_key, _row)
-							# A completed turn proves its sign-in works (never raises).
+							_outcome = _usage.record_turn_usage(conv.session_key, _row)
+							# A completed turn proves its sign-in works, but only when its
+							# row was fresh (a retry row may name a previous turn's model).
+							# Never raises.
 							from jarvis import subscription_health as _sub_health
 
-							_sub_health.note_session_row(_row)
+							_sub_health.note_recorded_turn(_outcome, _row)
 					except Exception:
 						frappe.log_error(
 							title="chat: usage record hook failed",

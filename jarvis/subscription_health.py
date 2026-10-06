@@ -410,3 +410,69 @@ def note_session_row(row) -> None:
 			note_turn_success(model, provider)
 	except Exception:
 		_log_throttled()
+
+
+def note_recorded_turn(outcome: str, row) -> None:
+	"""``note_session_row`` gated on ``record_turn_usage``'s outcome: only a recorded or valid-zero turn
+	read a fresh row. A ``retry`` row may still describe a previous turn on another model, and clearing
+	an upstream on that guess is forbidden. Never raises."""
+	from jarvis.chat.usage import USAGE_RECORDED, USAGE_VALID_ZERO
+
+	if outcome in (USAGE_RECORDED, USAGE_VALID_ZERO):
+		note_session_row(row)
+
+
+# ---- what the SPA reads ---------------------------------------------------------------------------
+
+
+def fallback_label(expired_refs: set) -> str:
+	"""Label of the first enabled row, in pool order, that can still answer while ``expired_refs`` are
+	dead, or ``""`` when none can (chats fail). A subscription row answers while it has at least one
+	account that is not expired; its label is its upstream's. An api-key row answers; its label is its
+	model id, the row's own label in the UI. Computed once here so the banner, the AI models row and the
+	member notice never disagree."""
+	from jarvis.jarvis.pool_serialize import (
+		_credential_type,
+		_enabled_models,
+		_field,
+		_fleet_sort_key,
+		_model_accounts,
+		_subscription_upstream,
+	)
+
+	for model in sorted(_enabled_models(_settings()), key=_fleet_sort_key):
+		if _credential_type(model) == "subscription":
+			refs = {(_field(a, "account_ref") or "").strip() for a in _model_accounts(model)} - {""}
+			if refs - set(expired_refs):
+				return LABELS.get(_subscription_upstream(model), "")
+		elif (_field(model, "model") or "").strip():
+			return (_field(model, "model") or "").strip()
+	return ""
+
+
+def ui_entries() -> list[dict]:
+	"""``expired_entries()`` with the ``fallback`` label the SPA shows, oldest first."""
+	entries = expired_entries()
+	if not entries:
+		return []
+	fallback = fallback_label({e["account_ref"] for e in entries})
+	return [{**entry, "fallback": fallback} for entry in entries]
+
+
+@frappe.whitelist()
+def get_subscription_notice() -> dict:
+	"""The expired chat sign-ins, for the chat banner, the error card and the Settings rail.
+
+	Any workspace member may call it, so a member only learns what they need: the first expired
+	sign-in that has no fallback (their chats are failing) as ``{upstream, label}``, and nothing about
+	the rest of the pool. An admin gets every entry (with ``account_ref`` and ``fallback`` for the
+	Reconnect link) and the workspace's subscription upstreams."""
+	from jarvis.permissions import has_jarvis_admin_access, require_jarvis_access
+
+	require_jarvis_access()
+	entries = ui_entries()
+	if has_jarvis_admin_access():
+		upstreams = sorted({account["upstream"] for account in _live_accounts().values()})
+		return {"expired": entries, "upstreams": upstreams}
+	failing = [{"upstream": e["upstream"], "label": e["label"]} for e in entries if not e["fallback"]]
+	return {"expired": failing[:1], "upstreams": None}
