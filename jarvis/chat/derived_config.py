@@ -30,6 +30,12 @@ PROVIDERS = {
 }
 
 
+def customer_may_set(key):
+	"""False for bench-only keys (the salt): a customer-typed value is never passed on."""
+	provider = PROVIDERS.get(key)
+	return provider is None or provider[1]
+
+
 def derive(namespaces, inst, explicit):
 	"""Values for the declared namespaces the bench supplies; never overrides a customer value
 	where the provider allows one, always overrides where it does not (the salt)."""
