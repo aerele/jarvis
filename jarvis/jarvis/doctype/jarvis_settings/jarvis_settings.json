@@ -114,6 +114,7 @@
   "installed_apps_synced",
   "last_subscription_status",
   "subscription_health",
+  "max_concurrent_chats",
   "last_sync_warnings",
   "last_model_statuses",
   "llm_last_apply_fingerprint",
@@ -860,6 +861,13 @@
    "fieldtype": "Long Text",
    "hidden": 1,
    "label": "Subscription Health",
+   "read_only": 1
+  },
+  {
+   "description": "Set by Jarvis admin from your plan. Changes made here are reset by the next sync. Empty means the default of 4.",
+   "fieldname": "max_concurrent_chats",
+   "fieldtype": "Int",
+   "label": "Max Concurrent Chats",
    "read_only": 1
   },
   {

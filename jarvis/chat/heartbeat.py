@@ -190,6 +190,40 @@ def _apply_subscription_health(reply) -> None:
 		_log_failure_throttled()
 
 
+def _positive_int(value) -> int | None:
+	"""``value`` if it is a real positive int (a bool is not), else None."""
+	if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+		return value
+	return None
+
+
+def _apply_max_concurrent_chats(reply) -> None:
+	"""Store the plan's chat cap from admin's heartbeat reply (``{"tenant", "max_concurrent_chats"}``).
+	Key absent (older admin) or any bad value -> keep what is stored; explicit null -> clear it;
+	a positive int -> set it. Writes only on change, so an unchanged value causes no cache churn.
+	No commit: the scheduler job commits."""
+	if not isinstance(reply, dict) or "max_concurrent_chats" not in reply:
+		return
+	raw = reply["max_concurrent_chats"]
+	new = _positive_int(raw)
+	if new is None and raw is not None:
+		return
+	# DB truth, not the document cache: a stale cache must not suppress a needed write.
+	stored = _positive_int(frappe.db.get_single_value("Jarvis Settings", "max_concurrent_chats"))
+	if new == stored:
+		return
+	frappe.db.set_single_value("Jarvis Settings", "max_concurrent_chats", new, update_modified=False)
+
+
+def _apply_max_concurrent_chats_safely(reply) -> None:
+	"""The heartbeat already landed, so a fault storing the cap is not a failed push and must not
+	skip the subscription-health step after it."""
+	try:
+		_apply_max_concurrent_chats(reply)
+	except Exception:
+		_log_failure_throttled()
+
+
 def push_bench_heartbeat() -> None:
 	"""``*/5`` scheduler entry. Self-gating + best-effort; NEVER raises. UNCONDITIONAL:
 	posts every tick whenever admin is configured (that is the point — silence means the
@@ -209,6 +243,7 @@ def push_bench_heartbeat() -> None:
 		except Exception:
 			_requeue_subscription_signals(signals)
 			raise
+		_apply_max_concurrent_chats_safely(reply)
 		_apply_subscription_health(reply)
 	except (AdminAuthError, AdminUnreachableError, AdminRateLimitedError, AdminValidationError):
 		# Best-effort telemetry: ANY push the backend does not accept — not onboarded, admin

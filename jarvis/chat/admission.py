@@ -55,7 +55,8 @@ FLAG = "jarvis_phase0_admission_enabled"
 # One gateway per bench in Phase 0 -> one site-wide admission shard.
 DEFAULT_RELAY_TARGET = "default"
 
-# Container main-lane ceiling (fleet agents.defaults.maxConcurrent, default 4).
+# Chat concurrency cap used when Jarvis admin has not supplied one for this site (Jarvis
+# Settings.max_concurrent_chats, pushed from the plan via the bench heartbeat reply).
 DEFAULT_MAX_INFLIGHT = 4
 
 # Accept-time overload guard (SUX-5): reject (no row) past this queued depth.
@@ -136,11 +137,13 @@ def relay_target_id(conversation: str | None = None) -> str:
 
 
 def _max_inflight() -> int:
-	try:
-		v = int(frappe.conf.get("jarvis_site_max_inflight_turns") or 0)
-	except (TypeError, ValueError):
-		v = 0
-	return v if v > 0 else DEFAULT_MAX_INFLIGHT
+	"""The plan's chat concurrency cap, else DEFAULT_MAX_INFLIGHT. Runs on every send and
+	every pump pass under the shard lock, so it reads the Redis document cache (no network;
+	``db.get_single_value`` would miss after every commit) and never raises on garbage."""
+	v = frappe.get_cached_value("Jarvis Settings", "Jarvis Settings", "max_concurrent_chats")
+	if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+		return v
+	return DEFAULT_MAX_INFLIGHT
 
 
 def _now() -> str:
