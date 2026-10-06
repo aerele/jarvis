@@ -46,6 +46,7 @@ the refusal in ``check`` into its own card.
 
 from __future__ import annotations
 
+import functools
 import json
 import sys
 from collections.abc import Iterator
@@ -55,6 +56,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis.exceptions import (
+	BrakeRefusedError,
 	InvalidArgumentError,
 	SensitiveWriteRefusedError,
 	StructureRefusedError,
@@ -618,6 +620,8 @@ def refused_envelope(e: WriteRefusedError, detail: str = "") -> dict:
 		)
 	elif isinstance(e, SensitiveWriteRefusedError):
 		hint = "Ask for this change on its own in chat so it gets a confirmation card."
+	elif isinstance(e, BrakeRefusedError):
+		hint = "Run it from the chat outside the automatic run, so the user gets a confirmation card."
 	env = err(e.code, strip_html(str(e)).strip(), detail=detail, hint=hint)
 	if getattr(e, "desk_path", ""):
 		env["error"]["desk_path"] = e.desk_path
@@ -660,6 +664,7 @@ class _Allow:
 class _GuardState:
 	allow: list = field(default_factory=list)
 	admitted: list = field(default_factory=list)  # (doctype, name) an allow let through
+	brake: bool = False  # an uncarded run_method: no root delete or cancel at all
 
 
 def allow_entries(tool: str, args) -> list[_Allow]:
@@ -691,7 +696,7 @@ def allow_entries(tool: str, args) -> list[_Allow]:
 
 
 @contextmanager
-def guard_scope(allow: list | None = None) -> Iterator[_GuardState]:
+def guard_scope(allow: list | None = None, *, brake: bool = False) -> Iterator[_GuardState]:
 	"""Mark a Jarvis tool call: ROOT writes of structure / sensitive documents are
 	refused unless ``allow`` names them. ``allow=None`` joins an enclosing scope
 	(so the confirm path's allow survives ``registry.dispatch``); a list always
@@ -701,7 +706,7 @@ def guard_scope(allow: list | None = None) -> Iterator[_GuardState]:
 	if allow is None and prev is not None:
 		yield prev
 		return
-	state = _GuardState(list(allow or []))
+	state = _GuardState(list(allow or []), brake=brake)
 	setattr(frappe.local, _LOCAL, state)
 	try:
 		yield state
@@ -897,6 +902,42 @@ def guard_doc_event(doc, method=None, *args, **kwargs):
 	)
 
 
+def _brake_doc_event(doc, method: str) -> None:
+	"""Called first thing in every ``Document.run_method`` (see ``_install_hooks``).
+	In a run_method that runs without a card, refuse deleting, cancelling or
+	discarding a root document, however the method reaches it (frappe.client.save
+	with docstatus 2, a custom app method, db_set) and BEFORE the document's own
+	handlers or any app's hooks run, so nothing outside the database (an e-invoice
+	cancel, a mail) happens first. The delete / cancel tools always park a card; a
+	method must not be the way around that. A no-op everywhere else."""
+	state = getattr(frappe.local, _LOCAL, None)
+	if state is None or not state.brake:
+		return
+	if method in ("before_cancel", "before_discard", "on_trash"):
+		_check_brake(state, doc, method)
+	elif method == "before_change" and doc.get("docstatus") == 2:
+		before = doc.get_doc_before_save()
+		if before is not None and before.get("docstatus") != 2:
+			_check_brake(state, doc, "before_cancel")
+
+
+def _check_brake(state: _GuardState, doc, event: str) -> None:
+	if not state.brake or _in_sandbox() or nested_under(doc) is not None:
+		return
+	dt = canonical(doc.doctype)
+	verb = "delete" if event in ("delete", "on_trash") else "cancel"
+	log_line("brake", dt, doc.name, "refused", event=event)
+	_refuse(
+		BrakeRefusedError(
+			f"This action tried to {verb} {dt} {doc.name or ''}".rstrip()
+			+ ". Deleting and cancelling always need the user's confirmation, so it cannot run"
+			" as part of an automatic run. Nothing was saved. Ask the user to run it from the"
+			" chat, where it gets a confirmation card.",
+			doctype=dt,
+		)
+	)
+
+
 # --------------------------------------------------------------------------- #
 # Deletes that run no hook, and background jobs (review cycle 3)
 # --------------------------------------------------------------------------- #
@@ -930,6 +971,18 @@ def _install_hooks() -> None:
 
 		delete_from_table._jarvis_guarded = True
 		delete_module.delete_from_table = delete_from_table
+	from frappe.model.document import Document
+
+	real_run_method = Document.run_method
+	if not getattr(real_run_method, "_jarvis_braked", False):
+
+		@functools.wraps(real_run_method)
+		def run_method(self, method, *args, **kwargs):
+			_brake_doc_event(self, method)
+			return real_run_method(self, method, *args, **kwargs)
+
+		run_method._jarvis_braked = True
+		Document.run_method = run_method
 	_preview_sandbox._install_guard()
 	_hooks_installed = True
 
@@ -942,6 +995,7 @@ def _guard_delete(doctype, name, doc) -> None:
 		return
 	dt = canonical(doctype)
 	target = doc if doc is not None else frappe._dict(doctype=dt, name=name)
+	_check_brake(state, target, "delete")
 	if dt in STRUCTURE_DOCTYPES:
 		risk = "structure"
 	elif dt in SENSITIVE_DOCTYPES or (doc is not None and doc_risk(doc, "on_trash")):
@@ -983,9 +1037,10 @@ class _GuardedQueue:
 	introspection see the real job; the allow entries ride beside them. A bare
 	function queued straight onto rq is wrapped as a Frappe job for this site."""
 
-	def __init__(self, queue, payload: list[dict]):
+	def __init__(self, queue, payload: list[dict], brake: bool = False):
 		self._queue = queue
 		self._payload = payload
+		self._brake = brake
 
 	def __getattr__(self, attr):
 		return getattr(self._queue, attr)
@@ -1009,6 +1064,7 @@ class _GuardedQueue:
 			}
 			args = None
 		queue_args["_jarvis_allow"] = self._payload  # always this scope's entries
+		queue_args["_jarvis_brake"] = self._brake
 		return _GUARDED_EXECUTE_JOB, args, queue_args
 
 	def enqueue_call(self, func, args=None, kwargs=None, **options):
@@ -1040,10 +1096,10 @@ def guard_queue(queue):
 	state = _active_state()
 	if state is None or _in_sandbox():
 		return queue
-	return _GuardedQueue(queue, _allow_payload(state))
+	return _GuardedQueue(queue, _allow_payload(state), state.brake)
 
 
-def execute_guarded_job(_jarvis_allow=None, _jarvis_args=None, **queue_args):
+def execute_guarded_job(_jarvis_allow=None, _jarvis_args=None, _jarvis_brake=False, **queue_args):
 	"""The worker side: Frappe's ``execute_job`` with the job's method wrapped in a
 	guard scope carrying the confirmed card's allow entries (none for an uncarded
 	call). The wrapper presents the real method's module and name, so
@@ -1066,7 +1122,7 @@ def execute_guarded_job(_jarvis_allow=None, _jarvis_args=None, **queue_args):
 
 	def guarded(**kwargs):
 		method = frappe.get_attr(real) if isinstance(real, str) else real
-		with guard_scope(allow):
+		with guard_scope(allow, brake=bool(_jarvis_brake)):
 			take_refusal()
 			result = method(*(_jarvis_args or ()), **kwargs)
 			hidden = take_refusal()
