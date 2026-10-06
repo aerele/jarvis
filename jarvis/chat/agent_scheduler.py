@@ -11,8 +11,8 @@ next natural time. One sweep dispatches at most ``SWEEP_MAX_PER_TICK`` installat
 review:
 
 * **S1 (THE HINGE):** the audit conversation + triggering message row are
-  created INSIDE ``frappe.set_user(installation.owner)`` (try/finally that
-  restores the user). Frappe scheduler jobs run as Administrator with no
+  created INSIDE ``impersonate(installation.owner)``, which restores the
+  user afterwards. Frappe scheduler jobs run as Administrator with no
   session; a ``jarvis__*`` call runs as the DB owner of the triggering message
   row, so binding it to Administrator would bypass every DocType permission,
   silently, unattended. A fail-closed guard REFUSES to bind a scheduled audit
@@ -47,7 +47,7 @@ from frappe import _
 from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
-from jarvis._session import authenticated_user
+from jarvis._session import authenticated_user, impersonate
 from jarvis.chat import derived_config
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
@@ -192,7 +192,6 @@ def run_due_agent_audits() -> None:
 		due = due[:SWEEP_MAX_PER_TICK]
 		_sweep_log(f"agent sweep: more than {SWEEP_MAX_PER_TICK} installations due; the rest wait a tick")
 
-	original_user = frappe.session.user
 	seen: set = set()  # O7: dedupe identical (owner, agent, cadence, time)
 	started = _sweep_clock()
 	for i, row in enumerate(due):
@@ -214,10 +213,8 @@ def run_due_agent_audits() -> None:
 		# five-minute sweep, which would write an Error Log twelve times an hour). If
 		# it raised after the claim, the slot was taken and is not touched here.
 		try:
-			_sweep_one(row, now, original_user, seen)
+			_sweep_one(row, now, seen)
 		except Exception:
-			if frappe.session.user != original_user:
-				frappe.set_user(original_user)
 			frappe.db.rollback()
 			frappe.log_error(
 				title=f"jarvis scheduled agent sweep failed: {row.name}",
@@ -235,7 +232,7 @@ def _sweep_log(message: str) -> None:
 	frappe.logger("jarvis.agent_scheduler").info(message)
 
 
-def _sweep_one(row, now, original_user: str, seen: set) -> None:
+def _sweep_one(row, now, seen: set) -> None:
 	"""Handle ONE due installation. Extracted from the loop so ``run_due_agent_audits``
 	can wrap it whole (#648); every ``return`` here was a ``continue`` in the loop it
 	came from. ``seen`` is the caller's dedupe set and is mutated in place."""
@@ -380,9 +377,7 @@ def _sweep_one(row, now, original_user: str, seen: set) -> None:
 		_advance(row, now)
 		return
 
-	_dispatch(
-		row, now, run_as=run_as, original_user=original_user, source_apps=source_apps, model_gate=model_gate
-	)
+	_dispatch(row, now, run_as=run_as, source_apps=source_apps, model_gate=model_gate)
 
 
 def _dispatch(
@@ -390,7 +385,6 @@ def _dispatch(
 	now,
 	*,
 	run_as: str,
-	original_user: str,
 	source_apps: list[str] | None,
 	model_gate: dict | None = None,
 ) -> None:
@@ -464,21 +458,21 @@ def _dispatch(
 		if claim is None:
 			return
 
-		# S1 hinge: mint the run session + create conv/run INSIDE set_user(run_as).
+		# S1 hinge: mint the run session + create conv/run INSIDE impersonate(run_as).
 		# Row ownership is reassigned to the human owner inside _launch_audit; only
 		# the ERP-read identity is the run-as user.
 		try:
-			frappe.set_user(run_as)
-			inst = frappe.get_doc(INSTALLATION, row.name)
-			# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
-			# it has no initiating human: the scheduler user (Administrator) is not one.
-			_launch_audit(
-				inst,
-				trigger="scheduled",
-				source_apps=source_apps,
-				initiating_human=None,
-				model_gate=model_gate,
-			)
+			with impersonate(run_as):
+				inst = frappe.get_doc(INSTALLATION, row.name)
+				# initiating_human=None is EXPLICIT (JF-021): a cron run is unattended, so
+				# it has no initiating human: the scheduler user (Administrator) is not one.
+				_launch_audit(
+					inst,
+					trigger="scheduled",
+					source_apps=source_apps,
+					initiating_human=None,
+					model_gate=model_gate,
+				)
 		except admin_client.AdminAmbiguousError:
 			# #743: the dispatch timed out and admin MAY be running this turn.
 			# ``_launch_audit`` deliberately left the run ``running``, so the slot must
@@ -487,12 +481,10 @@ def _dispatch(
 			# reaper arbitrate the running run. This is the same net effect as the
 			# generic ``_live_run`` branch below would reach for this row, made explicit
 			# so the money decision is not read out of a liveness query.
-			frappe.set_user(original_user)
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- claimed slot survives the sweep
 			return
 		except agent_models.ModelRunRefused as e:
 			# The launch already failed its own run with the reason and logged the error.
-			frappe.set_user(original_user)
 			if e.token == "apply_in_progress":
 				# The container was mid-apply, which clears by itself: retry the slot
 				# later. Not on the next five-minute sweep: the launch already recorded
@@ -504,7 +496,6 @@ def _dispatch(
 				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- spent slot survives the sweep
 			return
 		except Exception:
-			frappe.set_user(original_user)
 			frappe.log_error(
 				title=f"jarvis scheduled audit failed: {row.name}",
 				message=frappe.get_traceback(),
@@ -528,9 +519,6 @@ def _dispatch(
 			retried = _retry_claimed_slot(row, now, claim)
 			_record_failed(row, "scheduled audit enqueue failed; see Error Log")
 			_notify_owner(row.owner, row, retry_scheduled=retried)
-		finally:
-			if frappe.session.user != original_user:
-				frappe.set_user(original_user)
 
 
 # --------------------------------------------------------------------------- #
