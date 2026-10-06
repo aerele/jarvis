@@ -53,6 +53,10 @@ jobs:
   runtime-branding:
     uses: ./.github/workflows/runtime-branding.yml
 
+  # The Frappe Marketplace audit's Semgrep ruleset: fails on what fails the audit.
+  marketplace-semgrep:
+    uses: ./.github/workflows/marketplace-semgrep.yml
+
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
   # even for a clone where nobody ran `pre-commit install`. Deliberately NOT in
   # the tests container: this needs only python + node, and it should report in
