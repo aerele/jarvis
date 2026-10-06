@@ -22,3 +22,11 @@ Deploy backend before the new PWA bundle. No schema migration is required. Roll 
 - From `pwa`: `npm run build`
 
 The receipt unit suite mocks Redis and the send boundary. Real ERP actions and Redis outage/restart behavior still require integration validation on a dedicated test site. Component tests use the real recovery card and ChatView with mocked APIs; browser checks should include keyboard focus, Escape, newer-draft preservation, slow HTTP responses and route changes.
+
+## Browser validation captures
+
+Synthetic data in the actual recovery component and composer. Captured while verifying native dialog focus and draft preservation; the final rejection copy also explicitly says the request is preserved in this tab.
+
+| Light | Separate editor | Dark |
+|---|---|---|
+| ![Failed request in light theme](docs/send-recovery/light.png) | ![Separate editor keeps the newer draft](docs/send-recovery/editor.png) | ![Recovery card in dark theme](docs/send-recovery/dark.png) |
