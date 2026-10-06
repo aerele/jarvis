@@ -142,23 +142,12 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			message="invalid X-Jarvis-Token",
 		)
 
-	# 3a. C2 (2026-06-16 review) - time-bounded token. Operators
-	# configure ``Jarvis Settings.agent_token_max_age_days`` (default 90)
-	# and the rotate_agent_token endpoint stamps issued_at = now. Past
-	# the configured age the token is rejected with a distinct code so
-	# the bench's UI can render a "rotate now" CTA instead of a generic
-	# 401. max_age=0 disables expiry (legacy escape hatch).
-	if _agent_token_expired():
-		_audit_log(
-			"plugin_auth: agent_token past max-age",
-			"agent_token is older than agent_token_max_age_days; "
-			"operator must call rotate_agent_token to refresh",
-		)
-		raise PluginAuthError(
-			http_status=401,
-			code="AgentTokenExpired",
-			message="agent_token past configured max age; operator must rotate",
-		)
+	# 3a. C2 (2026-06-16 review) token age is ADVISORY for now: nothing rotates
+	# the agent_token on its own yet (rotation restarts the tenant's agent), so
+	# refusing an old token would take the agent down on day N. The site stamps
+	# agent_token_issued_at whenever it receives a token, and the daily
+	# oauth.cron.check_agent_token_age tells System Managers to rotate before and
+	# after agent_token_max_age_days. Hard expiry returns with automatic rotation.
 
 	# 3. Session header required.
 	session_key = (headers.get("X-Jarvis-Session") or "").strip()
@@ -368,44 +357,6 @@ def _record_unsigned_allowed() -> int | None:
 def _agent_token() -> str:
 	settings = frappe.get_single("Jarvis Settings")
 	return settings.get_password("agent_token", raise_exception=False) or ""
-
-
-def _agent_token_expired() -> bool:
-	"""Return True iff the bench's agent_token is past its operator-
-	configured max age.
-
-	Fields driving this:
-	  - agent_token_issued_at: Datetime (set by rotate_agent_token)
-	  - agent_token_max_age_days: Int (default 90, 0 disables)
-
-	A token with no issued_at is treated as not-expired (legacy
-	deployments that pre-date this field; operator must run a one-time
-	rotate to set the timestamp going forward). Backwards compat with
-	pre-migration benches that don't have the column yet: any read
-	failure is treated as "not expired" so call_tool doesn't 500 on a
-	deploy where the JSON shipped but bench migrate hasn't run.
-	"""
-	try:
-		settings = frappe.get_single("Jarvis Settings")
-		max_age_days = int(getattr(settings, "agent_token_max_age_days", 0) or 0)
-		if max_age_days <= 0:
-			return False
-		issued_at = getattr(settings, "agent_token_issued_at", None)
-	except Exception:
-		return False
-	if not issued_at:
-		# Legacy token (issued before this field existed) - don't break
-		# the bench by expiring it; surface via the cron-side warning
-		# instead so operators can do a one-time rotate at their leisure.
-		return False
-	try:
-		import datetime as _dt
-
-		issued = frappe.utils.get_datetime(issued_at)
-		age = (_dt.datetime.now(issued.tzinfo) if issued.tzinfo else _dt.datetime.now()) - issued
-		return age.days >= max_age_days
-	except Exception:
-		return False
 
 
 def _canonical_request(*, session_key: str, body_bytes: bytes, nonce: str, timestamp_s: int) -> bytes:

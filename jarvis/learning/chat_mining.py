@@ -682,8 +682,9 @@ def _persist_candidates(mined: list[dict]) -> dict:
 				else:
 					stats["duplicates"] += 1
 				if outcome in ("created", "updated"):
-					# Surface immediately (the question is the confirmation path,
-					# not the nightly mining's capped surfacing pass) and stamp the
+					# NOT surfaced here: a pattern mined from someone's chats stays
+					# hidden from reviewers until its owner answers the question
+					# (chat_pattern_privacy; answering surfaces it). Stamp the
 					# private-provenance flag: a chat transcript is personal, so a
 					# reviewer promoting the pattern org-wide is warned to scrub
 					# personal nuances (voice_facts PART 2 TASK 16 idiom). Guarded:
@@ -692,7 +693,6 @@ def _persist_candidates(mined: list[dict]) -> dict:
 					# scan_mode — as a run-in-progress and would block the nightly
 					# behavioural engine).
 					try:
-						voice_facts._surface(cand["pattern_key"])
 						voice_facts._flag_personalise_origin(cand["pattern_key"])
 					except Exception:
 						frappe.log_error(
