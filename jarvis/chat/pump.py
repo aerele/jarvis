@@ -320,7 +320,7 @@ def set_transport_mode(target: str, mode: str) -> int:
 	is observable/orderable (CDX-10). No commit here — the caller commits the flip atomically
 	(or rolls it back on a straggler/fault). Returns the new mode_epoch (best-effort read)."""
 	frappe.db.sql(
-		f"""UPDATE `tab{PUMP}` SET transport_mode=%(m)s, mode_epoch=mode_epoch+1
+		"""UPDATE `tabJarvis Relay Pump` SET transport_mode=%(m)s, mode_epoch=mode_epoch+1
 		WHERE relay_target_id=%(t)s""",
 		{"m": mode, "t": target},
 	)
@@ -1379,7 +1379,9 @@ def _insert_tool_start_row(conversation: str, tool_call_id: str, tool_name: str 
 	if existing:
 		return existing
 	seq = (
-		frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[0][0]
+		frappe.db.sql(
+			"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+		)[0][0]
 		or 0
 	) + 1
 	doc = frappe.get_doc(
@@ -2155,7 +2157,7 @@ def _pump_local_reservations(target: str) -> int:
 	its credit auto-reclaims on the next recompute (OAR-5)."""
 	return int(
 		frappe.db.sql(
-			f"""SELECT COUNT(*) FROM `tab{TURN}`
+			"""SELECT COUNT(*) FROM `tabJarvis Chat Turn`
 			WHERE relay_target_id=%(t)s
 			  AND ( reserved=1 OR state IN ('dispatching','streaming','terminal_observed') )
 			  AND ( reservation_expires_at IS NULL OR reservation_expires_at > %(now)s )""",
@@ -2173,7 +2175,7 @@ def _pump_active_convs(target: str) -> set[str]:
 	credit accounting (``_pump_local_reservations``/``_shard_inflight``) is unchanged,
 	so other conversations keep dispatching against the freed capacity."""
 	rows = frappe.db.sql(
-		f"""SELECT DISTINCT conversation FROM `tab{TURN}`
+		"""SELECT DISTINCT conversation FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s
 		  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed','recovering')""",
 		{"t": target},
@@ -2183,7 +2185,7 @@ def _pump_active_convs(target: str) -> set[str]:
 
 def _pump_queued_reserved(target: str) -> list[dict]:
 	return frappe.db.sql(
-		f"""SELECT run_id, conversation FROM `tab{TURN}`
+		"""SELECT run_id, conversation FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=1
 		  AND ( reservation_expires_at IS NULL OR reservation_expires_at > %(now)s )
 		ORDER BY CASE turn_class WHEN 'interactive' THEN 0 ELSE 1 END, enqueued_at ASC, run_id ASC""",
@@ -2197,7 +2199,7 @@ def _pick_next_cold(target: str, active_convs: set[str], promoted_convs: set[str
 	with a background floor of 1 (SUX-4a: when background work is queued,
 	interactive holds at most cap-1 credits), per-conversation single-flight."""
 	rows = frappe.db.sql(
-		f"""SELECT run_id, conversation, turn_class FROM `tab{TURN}`
+		"""SELECT run_id, conversation, turn_class FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state='queued' AND reserved=0
 		ORDER BY enqueued_at ASC, run_id ASC LIMIT 200""",
 		{"t": target},
@@ -2225,7 +2227,7 @@ def _pick_next_cold(target: str, active_convs: set[str], promoted_convs: set[str
 def _turn_state_count(target: str, turn_class: str) -> int:
 	return int(
 		frappe.db.sql(
-			f"""SELECT COUNT(*) FROM `tab{TURN}`
+			"""SELECT COUNT(*) FROM `tabJarvis Chat Turn`
 			WHERE relay_target_id=%(t)s AND turn_class=%(k)s
 			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed')""",
 			{"t": target, "k": turn_class},
@@ -2241,7 +2243,7 @@ def _turn_state_count(target: str, turn_class: str) -> int:
 def _dispatch_ready(ctx: PumpContext) -> int:
 	target = ctx.relay_target_id
 	rows = frappe.db.sql(
-		f"""SELECT run_id FROM `tab{TURN}`
+		"""SELECT run_id FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND state='ready'
 		ORDER BY ready_at ASC, run_id ASC LIMIT 50""",
 		{"t": target},
@@ -2917,8 +2919,8 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 	``cancelled`` (D2 row 19 via the settlement seam)."""
 	target = ctx.relay_target_id
 	rows = frappe.db.sql(
-		f"""SELECT run_id, state, version, gateway_run_id, conversation, assistant_message
-		FROM `tab{TURN}`
+		"""SELECT run_id, state, version, gateway_run_id, conversation, assistant_message
+		FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s AND cancel_requested=1
 		  AND state IN ('dispatching','streaming') AND pump_epoch=%(e)s""",
 		{"t": target, "e": ctx.epoch},
@@ -3053,9 +3055,9 @@ def _reconcile_on_start(ctx: PumpContext) -> None:
 	active_keys = snap.get("active_session_keys")
 
 	rows = frappe.db.sql(
-		f"""SELECT run_id, state, version, conversation, assistant_message,
+		"""SELECT run_id, state, version, conversation, assistant_message,
 		       last_event_seq, gateway_run_id, dispatching_at, recovery_started_at
-		FROM `tab{TURN}`
+		FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s
 		  AND state IN ('dispatching','streaming','terminal_observed','recovering')""",
 		{"t": target},
@@ -3207,13 +3209,14 @@ def _recovery_window(r: dict) -> tuple[int, int | None]:
 	am = r.get("assistant_message")
 	if not am:
 		return 0, None
-	from jarvis.chat.seq_watermark import wm_expr
+	from jarvis.chat.seq_watermark import wm_term
 
-	rows = frappe.db.sql(
-		f"""SELECT {wm_expr()} AS agent_seq_watermark, seq
-		FROM `tab{MSG}` WHERE name=%(n)s""",
-		{"n": am},
-		as_dict=True,
+	msg = frappe.qb.DocType(MSG)
+	rows = (
+		frappe.qb.from_(msg)
+		.select(wm_term(msg).as_("agent_seq_watermark"), msg.seq)
+		.where(msg.name == am)
+		.run(as_dict=True)
 	)
 	row = rows[0] if rows else {}
 	min_seq = int(row.get("agent_seq_watermark") or 0)
@@ -3545,7 +3548,7 @@ def _park_affected_recovering(ctx: PumpContext, *, reason: str = "db-disconnect"
 	target = ctx.relay_target_id
 	try:
 		rows = frappe.db.sql(
-			f"""SELECT run_id, version, conversation, assistant_message FROM `tab{TURN}`
+			"""SELECT run_id, version, conversation, assistant_message FROM `tabJarvis Chat Turn`
 			WHERE relay_target_id=%(t)s
 			  AND state IN ('preparing','ready','dispatching','streaming','terminal_observed')""",
 			{"t": target},
@@ -3725,9 +3728,9 @@ def _shard_has_live_work(target: str) -> bool:
 	transport-exit successor is owed, CDX-1)."""
 	return bool(
 		frappe.db.sql(
-			f"""SELECT 1 FROM `tab{TURN}`
-			WHERE relay_target_id=%(t)s AND state IN ({_in_list(ts.NONTERMINAL_STATES)}) LIMIT 1""",
-			{"t": target},
+			"""SELECT 1 FROM `tabJarvis Chat Turn`
+			WHERE relay_target_id=%(t)s AND state IN %(states)s LIMIT 1""",
+			{"t": target, "states": ts.NONTERMINAL_STATES},
 		)
 	)
 
@@ -3845,8 +3848,9 @@ def watchdog(deps: PumpDeps | None = None) -> dict:
 		targets = {
 			r[0]
 			for r in frappe.db.sql(
-				f"""SELECT DISTINCT relay_target_id FROM `tab{TURN}`
-				WHERE state IN ({_in_list(ts.NONTERMINAL_STATES)})"""
+				"""SELECT DISTINCT relay_target_id FROM `tabJarvis Chat Turn`
+				WHERE state IN %(states)s""",
+				{"states": ts.NONTERMINAL_STATES},
 			)
 		}
 		# CDX-4: also scan shards that have a turn with an open (pending/stale-running)
@@ -3930,12 +3934,12 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 	# which re-stamps + reconciles in-flight turns on start (D6 §5). The watchdog
 	# parks only on a per-turn deadline / recovery budget.
 	rows = frappe.db.sql(
-		f"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
+		"""SELECT run_id, state, version, reserved, reservation_expires_at, enqueued_at,
 		       preparing_at, deadline_at, dispatching_at, recovery_started_at, conversation,
 		       assistant_message, seed_message
-		FROM `tab{TURN}`
-		WHERE relay_target_id=%(t)s AND state IN ({_in_list(ts.NONTERMINAL_STATES)})""",
-		{"t": target},
+		FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state IN %(states)s""",
+		{"t": target, "states": ts.NONTERMINAL_STATES},
 		as_dict=True,
 	)
 
@@ -4187,7 +4191,7 @@ def _local_active_session_keys(target: str) -> set[str]:
 	"""Session keys the bench has an in-flight local turn for (used to subtract
 	local runs from the gateway snapshot so only FOREIGN runs count as inflight)."""
 	rows = frappe.db.sql(
-		f"""SELECT dispatch_payload FROM `tab{TURN}`
+		"""SELECT dispatch_payload FROM `tabJarvis Chat Turn`
 		WHERE relay_target_id=%(t)s
 		  AND state IN ('dispatching','streaming','terminal_observed')""",
 		{"t": target},
@@ -4247,10 +4251,6 @@ def _json_or_none(raw):
 		return json.loads(raw)
 	except Exception:
 		return raw
-
-
-def _in_list(values) -> str:
-	return ",".join(f"'{v}'" for v in values)
 
 
 def _older_than(dt, seconds: int) -> bool:

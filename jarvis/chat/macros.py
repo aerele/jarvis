@@ -759,13 +759,13 @@ def _raise_cursor(run, to: int, *, sent: bool = False) -> None:
 	txn.fresh_snapshot(owned=True)
 	if sent:
 		frappe.db.sql(
-			f"""UPDATE `tab{RUN}` SET current_step = GREATEST(current_step, %(to)s), modified = %(now)s
+			"""UPDATE `tabJarvis Macro Run` SET current_step = GREATEST(current_step, %(to)s), modified = %(now)s
 			    WHERE name = %(n)s""",
 			{"n": run.name, "to": to, "now": frappe.utils.now()},
 		)
 	else:
 		frappe.db.sql(
-			f"UPDATE `tab{RUN}` SET current_step = %(to)s WHERE name = %(n)s AND current_step < %(to)s",
+			"UPDATE `tabJarvis Macro Run` SET current_step = %(to)s WHERE name = %(n)s AND current_step < %(to)s",
 			{"n": run.name, "to": to},
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
@@ -2971,15 +2971,15 @@ def _clear_snapshots_of_ended_runs() -> None:
 		if not _snapshot_cleared():
 			return
 		names = frappe.db.sql_list(
-			f"""SELECT name FROM `tab{RUN}`
-			    WHERE status IN %(ended)s AND `{SNAPSHOT_FIELD}` IS NOT NULL
+			"""SELECT name FROM `tabJarvis Macro Run`
+			    WHERE status IN %(ended)s AND `steps_snapshot` IS NOT NULL
 			    LIMIT %(batch)s""",
 			{"ended": _TERMINAL_RUN_STATUSES, "batch": _SNAPSHOT_SWEEP_BATCH},
 		)
 		if not names:
 			return
 		frappe.db.sql(
-			f"""UPDATE `tab{RUN}` SET `{SNAPSHOT_FIELD}` = NULL
+			"""UPDATE `tabJarvis Macro Run` SET `steps_snapshot` = NULL
 			    WHERE name IN %(names)s AND status IN %(ended)s""",
 			{"names": tuple(names), "ended": _TERMINAL_RUN_STATUSES},
 		)
@@ -3131,7 +3131,7 @@ def _scheduled_steps_this_month(owner: str) -> int:
 
 	So an in-flight or part-failed run contributes honestly, not all-or-nothing."""
 	row = frappe.db.sql(
-		f"""SELECT COALESCE(SUM(current_step), 0) FROM `tab{RUN}`
+		"""SELECT COALESCE(SUM(current_step), 0) FROM `tabJarvis Macro Run`
 		    WHERE owner = %(owner)s AND `trigger` = 'scheduled' AND creation >= %(since)s""",
 		{"owner": owner, "since": _budget_month_start()},
 	)
@@ -3168,13 +3168,17 @@ def drop_runs_of_deleted_macro(macro_name: str) -> None:
 	engine cannot load a macro for. The caller commits, or rolls both statements
 	back with its own delete. Raw writes: a run row is read-only through the
 	document API (``macro_permissions``)."""
-	snapshot = f", `{SNAPSHOT_FIELD}` = NULL" if _snapshot_cleared() else ""
-	frappe.db.sql(
-		f"""UPDATE `tab{RUN}` SET macro = NULL, error = NULL{snapshot}
-		    WHERE macro = %(macro)s AND `trigger` = 'scheduled' AND creation >= %(since)s
-		      AND current_step > 0 AND status IN %(ended)s""",
-		{"macro": macro_name, "since": _budget_month_start(), "ended": _TERMINAL_RUN_STATUSES},
-	)
+	run = frappe.qb.DocType(RUN)
+	query = frappe.qb.update(run).set(run.macro, None).set(run.error, None)
+	if _snapshot_cleared():
+		query = query.set(run[SNAPSHOT_FIELD], None)
+	query.where(
+		(run.macro == macro_name)
+		& (run.trigger == "scheduled")
+		& (run.creation >= _budget_month_start())
+		& (run.current_step > 0)
+		& run.status.isin(_TERMINAL_RUN_STATUSES)
+	).run()
 	frappe.db.delete(RUN, {"macro": macro_name})
 
 
@@ -3196,7 +3200,7 @@ def purge_kept_budget_rows(owner: str | None = None) -> int:
 	``owner`` narrows it to one user's rows. The hourly job passes none; the tests
 	do, because they share a site and must not delete rows they did not make."""
 	frappe.db.sql(
-		f"""DELETE FROM `tab{RUN}`
+		"""DELETE FROM `tabJarvis Macro Run`
 		    WHERE macro IS NULL AND status IN %(ended)s AND creation < %(since)s
 		      AND (%(owner)s IS NULL OR owner = %(owner)s)
 		    ORDER BY creation LIMIT %(batch)s""",

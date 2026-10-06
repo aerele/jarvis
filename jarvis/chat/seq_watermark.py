@@ -41,7 +41,9 @@ def has_legacy_column() -> bool:
 	cached = getattr(frappe.local, "_jarvis_wm_legacy_col", None)
 	if cached is None:
 		cached = bool(
-			frappe.db.sql(f"SHOW COLUMNS FROM `tab{MSG}` WHERE Field = %(c)s", {"c": _legacy_column()})
+			frappe.db.sql(
+				"SHOW COLUMNS FROM `tabJarvis Chat Message` WHERE Field = %(c)s", {"c": _legacy_column()}
+			)
 		)
 		frappe.local._jarvis_wm_legacy_col = cached
 	return cached
@@ -51,12 +53,19 @@ def stamp_watermark(message_name: str, watermark: int) -> None:
 	"""Write the watermark to the new column AND, while it exists, the legacy one
 	(dual-write: keeps a rollback's old-code readers correct). Does not touch
 	``modified`` — matches the previous ``update_modified=False`` write."""
-	cols = "agent_seq_watermark=%(w)s"
-	if has_legacy_column():
-		cols += f", {_legacy_column()}=%(w)s"
-	frappe.db.sql(
-		f"UPDATE `tab{MSG}` SET {cols} WHERE name=%(n)s",
-		{"w": int(watermark), "n": message_name},
+	if not has_legacy_column():
+		frappe.db.sql(
+			"UPDATE `tabJarvis Chat Message` SET agent_seq_watermark=%(w)s WHERE name=%(n)s",
+			{"w": int(watermark), "n": message_name},
+		)
+		return
+	msg = frappe.qb.DocType(MSG)
+	(
+		frappe.qb.update(msg)
+		.set(msg.agent_seq_watermark, int(watermark))
+		.set(msg[_legacy_column()], int(watermark))
+		.where(msg.name == message_name)
+		.run()
 	)
 
 
@@ -69,3 +78,10 @@ def wm_expr(alias: str = "") -> str:
 	if has_legacy_column():
 		return f"GREATEST({col}, {alias}{_legacy_column()})"
 	return col
+
+
+def wm_term(table):
+	"""``wm_expr`` as a ``frappe.qb`` term over ``table``."""
+	if has_legacy_column():
+		return frappe.qb.functions("GREATEST", table.agent_seq_watermark, table[_legacy_column()])
+	return table.agent_seq_watermark

@@ -7,17 +7,17 @@ populated.
 
 import frappe
 
-_FIELDS = [
-	"agent_llm_key_path",
-	"agent_config_path",
-	"agent_compose_dir",
-]
+_DROP_COLUMNS = (
+	"ALTER TABLE `tabJarvis Settings` DROP COLUMN `agent_llm_key_path`",
+	"ALTER TABLE `tabJarvis Settings` DROP COLUMN `agent_config_path`",
+	"ALTER TABLE `tabJarvis Settings` DROP COLUMN `agent_compose_dir`",
+)
 
 
 def execute():
-	for field in _FIELDS:
+	for statement in _DROP_COLUMNS:
 		try:
-			frappe.db.sql(f"ALTER TABLE `tabJarvis Settings` DROP COLUMN `{field}`")
+			frappe.db.sql(statement)
 		except Exception:
 			pass  # column may already be gone
 	frappe.db.commit()
