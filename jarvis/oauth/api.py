@@ -632,7 +632,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	settings.db_set("llm_oauth_connected_at", frappe.utils.now_datetime(), update_modified=False)
 
 	frappe.cache.hdel(_CACHE_KEY, nonce)
-	subscription_health.record_signin_complete(p["agent_provider"])
+	subscription_health.record_signin_complete(p["agent_provider"], all_sources=True)
 	return _ok(
 		{
 			"account_email": email,
@@ -999,7 +999,7 @@ def complete_claude_cli_login(login_id: str, code: str) -> dict:
 		safe_label=email or "Claude subscription",
 		provider_subject="",
 	)
-	subscription_health.record_signin_complete("anthropic")
+	subscription_health.record_signin_complete("anthropic", all_sources=True)
 	return _ok(view)
 
 

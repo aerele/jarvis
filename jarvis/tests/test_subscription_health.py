@@ -408,15 +408,34 @@ class TestHeartbeatWiring(_Base):
 class TestSigninCompletionClears(_Base):
 	"""R1(c): a completed sign-in clears that upstream's entries (any source) and queues ok."""
 
-	def test_record_signin_complete_clears_every_source_of_that_upstream_only(self):
+	def test_all_sources_clears_every_entry_of_that_upstream_only(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll"), "ACC_CL1": _entry("ACC_CL1", source="chat")})
-		sh.record_signin_complete("openai")
+		sh.record_signin_complete("openai", all_sources=True)
 		self.assertEqual(list(sh.current_health()), ["ACC_CL1"])
 		self.assertEqual([(s["upstream"], s["code"]) for s in sh.drain_signals()], [("openai", "ok")])
 		self.assertEqual(self.events, [1])
 
+	def test_two_accounts_one_upstream_reconnecting_b_keeps_a_expired_and_queues_nothing(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll")})
+		sh.record_signin_complete("openai", account_ref=None)
+		self.assertEqual(list(sh.current_health()), ["ACC_OA1"])
+		self.assertEqual(self.writes, [])
+		self.assertEqual(sh.drain_signals(), [])
+
+	def test_reconnecting_the_expired_account_clears_it_and_queues_ok(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll")})
+		sh.record_signin_complete("openai", account_ref="ACC_OA1")
+		self.assertEqual(sh.current_health(), {})
+		self.assertEqual([s["code"] for s in sh.drain_signals()], ["ok"])
+
+	def test_replacing_b_clears_b_but_not_a_and_queues_no_ok(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll"), "ACC_OA2": _entry("ACC_OA2", source="poll")})
+		sh.record_signin_complete("openai", account_ref="ACC_OA2")
+		self.assertEqual(list(sh.current_health()), ["ACC_OA1"])
+		self.assertEqual(sh.drain_signals(), [])
+
 	def test_without_an_entry_it_still_queues_ok_and_writes_nothing(self):
-		sh.record_signin_complete("openai")
+		sh.record_signin_complete("openai", all_sources=True)
 		self.assertEqual(self.writes, [])
 		self.assertEqual([(s["upstream"], s["code"]) for s in sh.drain_signals()], [("openai", "ok")])
 
@@ -451,7 +470,7 @@ class TestSigninCompletionClears(_Base):
 		self.assertEqual(sh.current_health(), {})
 		self.assertEqual([(s["upstream"], s["code"]) for s in sh.drain_signals()], [("openai", "ok")])
 
-	def test_complete_pool_account_signin_clears_that_upstream(self):
+	def test_complete_pool_account_signin_keeps_another_accounts_poll_entry(self):
 		api = self._api()
 		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll"), "ACC_CL1": _entry("ACC_CL1", source="chat")})
 		result = {"provider": "OpenAI", "model": "gpt", "email": "n@x.com", "blob": {"accountId": "a"}}
@@ -464,8 +483,8 @@ class TestSigninCompletionClears(_Base):
 		):
 			out = api.complete_pool_account_signin("n", "http://x")
 		self.assertTrue(out.get("ok"), out)
-		self.assertEqual(list(sh.current_health()), ["ACC_CL1"])
-		self.assertEqual([(s["upstream"], s["code"]) for s in sh.drain_signals()], [("openai", "ok")])
+		self.assertEqual(sorted(sh.current_health()), ["ACC_CL1", "ACC_OA1"])
+		self.assertEqual(sh.drain_signals(), [])
 
 	def test_complete_claude_cli_login_clears_the_anthropic_entry(self):
 		api = self._api()

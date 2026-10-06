@@ -216,22 +216,27 @@ def record_chat_failure(upstream: str) -> None:
 		_log_throttled()
 
 
-def _clear_upstream(upstream: str, only_chat: bool) -> bool:
-	"""Drop the stored entries of ``upstream`` (``chat`` ones only when ``only_chat``) and queue an ``ok``
-	signal. True when an entry was dropped."""
+def _clear_upstream(
+	upstream: str, *, only_chat: bool = True, account_ref: str | None = None, all_sources=False
+) -> bool:
+	"""Drop the stored entries to clear and queue an ``ok`` signal. Cleared: the upstream's ``chat``
+	entries, plus ``account_ref``'s entry, plus (``all_sources``) every entry of the upstream. The
+	signal is queued only when no other account of the upstream is still expired. True when an entry
+	was dropped."""
 	live = _live_accounts()
 	health = {ref: e for ref, e in current_health().items() if ref in live}
 	cleared = [
 		ref
 		for ref, e in health.items()
-		if e.get("upstream") == upstream and (e.get("source") == "chat" or not only_chat)
+		if e.get("upstream") == upstream and (all_sources or e.get("source") == "chat" or ref == account_ref)
 	]
 	if not cleared:
 		return False
 	for ref in cleared:
 		del health[ref]
 	_store(health)
-	_queue_signal(upstream, CODE_OK)
+	if not any(e.get("upstream") == upstream and e.get("state") == "expired" for e in health.values()):
+		_queue_signal(upstream, CODE_OK)
 	return True
 
 
@@ -239,20 +244,30 @@ def record_chat_success(upstream: str) -> None:
 	"""A turn on ``upstream`` succeeded: clear its ``chat`` entries (a ``poll`` entry is admin's to
 	clear) and queue an ``ok`` signal. Only acts when such an entry exists. Never raises."""
 	try:
-		_clear_upstream((upstream or "").strip().lower(), only_chat=True)
+		_clear_upstream((upstream or "").strip().lower())
 	except Exception:
 		_log_throttled()
 
 
-def record_signin_complete(upstream: str) -> None:
-	"""A sign-in for ``upstream`` completed: clear its entries (any source) and queue an ``ok`` signal
-	(always: it is what clears ``direct:openai`` on admin, whose key never changes across reconnects).
-	Never raises."""
+def record_signin_complete(upstream: str, account_ref: str | None = None, all_sources: bool = False) -> None:
+	"""A sign-in for ``upstream`` completed. Clears its ``chat`` entries and the replaced account's entry
+	(``account_ref``; None for a brand-new account) and queues an ``ok`` signal unless another account
+	of the upstream is still expired. ``all_sources`` (single-account paths: direct, Claude CLI) clears
+	every entry of the upstream. A pool sign-in must NOT clear another account's ``poll`` entry. With
+	nothing to clear it still queues ``ok`` when none is expired (it is what clears ``direct:openai``
+	on admin, whose key never changes across reconnects). Never raises."""
 	try:
 		upstream = (upstream or "").strip().lower()
 		if upstream not in LABELS:
 			return
-		if not _clear_upstream(upstream, only_chat=False):
+		if _clear_upstream(upstream, account_ref=account_ref, all_sources=all_sources):
+			return
+		still = [
+			e
+			for ref, e in current_health().items()
+			if ref in _live_accounts() and e.get("upstream") == upstream
+		]
+		if not any(e.get("state") == "expired" for e in still):
 			_queue_signal(upstream, CODE_OK)
 	except Exception:
 		_log_throttled()
