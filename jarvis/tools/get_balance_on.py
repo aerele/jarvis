@@ -9,7 +9,11 @@ rows by hand will miss.
 
 Permission gating: the underlying helper checks Account read perm
 internally unless ``ignore_account_permission`` is set, which we do
-NOT expose to the agent (callers can't override perm checks). It applies
+NOT expose to the agent (callers can't override perm checks), and party
+read in party mode. Neither is ledger access (Sales / Purchase Users read
+accounts, Stock / Sales Users read customers), so this wrapper also
+requires GL Entry read, or for a Customer / Supplier balance the Accounts
+Receivable / Payable report (``jarvis.tools._ledger_access``). It applies
 NO company-level filter of its own, so this wrapper additionally gates
 ``company`` by Company User Permission scope (not Company-doctype read
 - see ``jarvis.tools._company_scope``) whenever ``company`` is supplied,
@@ -24,6 +28,7 @@ import frappe
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._company_scope import assert_company_permitted
+from jarvis.tools._ledger_access import assert_ledger_readable
 
 
 def get_balance_on(
@@ -51,6 +56,9 @@ def get_balance_on(
 		raise InvalidArgumentError(f"unknown Company: {company}")
 	if party and party_type and not frappe.db.exists(party_type, party):
 		raise InvalidArgumentError(f"unknown {party_type}: {party}")
+
+	# Party mode may use the party's AR/AP report; an account balance needs GL Entry read.
+	assert_ledger_readable(party_type if (party_type and party) else None)
 
 	if company:
 		assert_company_permitted(company)
