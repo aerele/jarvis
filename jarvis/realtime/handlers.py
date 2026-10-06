@@ -81,8 +81,7 @@ def _read_common_config() -> dict:
 	config-file problems must not take down the realtime process."""
 	for path in ("common_site_config.json", os.path.join("sites", "common_site_config.json")):
 		try:
-			with open(path) as fh:
-				data = json.load(fh)
+			data = frappe.get_file_json(path)
 			if isinstance(data, dict):
 				return data
 		except Exception:

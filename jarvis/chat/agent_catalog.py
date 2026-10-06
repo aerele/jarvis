@@ -79,8 +79,7 @@ def _load_registry() -> dict:
 			message=f"expected bundled registry at {_REGISTRY_PATH}",
 		)
 		return {"agents": []}
-	with open(_REGISTRY_PATH) as fh:
-		return json.load(fh)
+	return frappe.get_file_json(_REGISTRY_PATH)
 
 
 # --------------------------------------------------------------------------- #

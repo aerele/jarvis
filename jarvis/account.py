@@ -1301,9 +1301,7 @@ def _persist_operation_probe_verdicts(status: dict) -> None:
 		"last_sync_warnings": frappe.as_json(status.get("warnings") or []),
 		"last_model_statuses": frappe.as_json(status.get("model_statuses") or []),
 	}
-	current = (
-		frappe.db.get_value("Jarvis Settings", "Jarvis Settings", list(fields.keys()), as_dict=True) or {}
-	)
+	current = compat.single_values("Jarvis Settings", fields)
 	if all((current.get(k) or "") == v for k, v in fields.items()):
 		return  # unchanged from what is stored - do not churn the Singles row per poll
 	frappe.db.set_single_value("Jarvis Settings", fields, update_modified=False)

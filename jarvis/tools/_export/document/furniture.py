@@ -883,6 +883,7 @@ def _write_temp(tmp_dir: str, content: str) -> str:
 	its random name was never returned, so nothing else could ever clean it up."""
 	path = os.path.join(tmp_dir, f"jv-pdf-{frappe.generate_hash()}.html")
 	try:
+		# nosemgrep: frappe-security-file-traversal -- random name in our temp dir
 		with open(path, "wb") as fh:
 			fh.write(content.encode("utf-8"))
 	except Exception:
