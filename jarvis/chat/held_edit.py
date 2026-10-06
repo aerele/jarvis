@@ -166,7 +166,9 @@ def _unshown_errors(meta, sealed: dict, patch: dict, exec_user: str, fail) -> No
 		if df and df.fieldtype == "Table":
 			# a patched row cell is the approver's; its other hidden cells are not
 			rows_patch = patch.get(field) if isinstance(patch.get(field), list) else []
-			shown = {c["fieldname"] for c in _child_columns(df.options)}
+			# Same columns the board renders (parent-scoped, so permlevel follows the
+			# parent exactly as get_doctype_form_meta builds them).
+			shown = {c["fieldname"] for c in _child_columns(df.options, meta.name, field)}
 			for idx, row in enumerate(value if isinstance(value, list) else [], start=1):
 				cells = rows_patch[idx - 1] if idx <= len(rows_patch) else None
 				mine = cells if isinstance(cells, dict) else {}
