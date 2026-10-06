@@ -190,6 +190,19 @@ def _ensure_masters():
 			}
 		).insert()
 	abbr = "TBRC"
+	# Charts differ by version/country (the v15 Standard chart has no "Bank Charges"), so the
+	# charge account the evidence tests rely on is our own.
+	if not frappe.db.exists("Account", f"_Test BRR Bank Charges - {abbr}"):
+		frappe.get_doc(
+			{
+				"doctype": "Account",
+				"account_name": "_Test BRR Bank Charges",
+				"parent_account": f"Indirect Expenses - {abbr}",
+				"company": E2E_CO,
+				"root_type": "Expense",
+				"is_group": 0,
+			}
+		).insert()
 	gl = f"_Test BRR Current - {abbr}"
 	if not frappe.db.exists("Account", gl):
 		frappe.get_doc(
@@ -410,7 +423,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		snap = self.snapshot()
 		self.assertTrue(snap["complete"], snap.get("detail"))
 		names = {a["name"] for a in snap["datasets"]["accounts"]}
-		self.assertIn("Bank Charges - TBRC", names)
+		self.assertIn("_Test BRR Bank Charges - TBRC", names)
 		self.assertNotIn(name, names)
 
 	def test_hidden_rows_fail_closed(self):
@@ -436,7 +449,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "permission_slice"))
 
 	def test_hidden_charge_account_fails_closed(self):
-		with self.hide_from_list("Account", "Bank Charges - TBRC"):
+		with self.hide_from_list("Account", "_Test BRR Bank Charges - TBRC"):
 			snap = self.snapshot()
 		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "permission_slice"))
 
