@@ -223,7 +223,7 @@ def write_connection(data: dict) -> None:
 			elif data.get("runtime_profile_status") == "unsupported_runtime":
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
-				set_settings_password(s, "agent_token", data["agent_token"])
+				_store_agent_token(s, data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -258,6 +258,19 @@ def write_connection(data: dict) -> None:
 
 
 @frappe.whitelist()
+def _store_agent_token(settings, token: str) -> None:
+	"""Store the agent token and stamp when this site got it. A new token (an
+	admin-side rotation or reconnect arrives here) restarts the clock, and a token
+	with no stamp yet gets one, so the age check (oauth.cron.check_agent_token_age)
+	always has a date to warn from."""
+	from jarvis._password_utils import set_settings_password
+
+	changed = (settings.get_password("agent_token", raise_exception=False) or "") != token
+	set_settings_password(settings, "agent_token", token)
+	if changed or not settings.get("agent_token_issued_at"):
+		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
+
+
 def sync_connection(timeout_s: int | None = None) -> dict:
 	"""Pull the container connection from admin and store it. Daily scheduled +
 	the page's 'Sync connection' button + the reconnect landing. No-op until
