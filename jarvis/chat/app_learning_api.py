@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
+from frappe.query_builder import Order
+from frappe.query_builder.functions import Count
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
 from jarvis.chat.macros_api import _clamp_page, _lk, _load_filters
@@ -235,14 +237,14 @@ def cancel_app_learning_run(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # runs list (frozen envelope)
 # --------------------------------------------------------------------------- #
-def _order_by(sort_field: str, sort_dir: str) -> str:
-	"""Whitelisted ORDER BY (unknown sort field throws — the triggers_api
-	idiom)."""
+def _order_by(sort_field: str, sort_dir: str) -> tuple[str, Order]:
+	"""Whitelisted sort column and direction (unknown sort field throws — the
+	triggers_api idiom)."""
 	field = (sort_field or "").strip() or "creation"
 	if field not in _RUN_SORTABLE:
 		frappe.throw(_("Unknown sort field: {0}").format(field))
-	d = "desc" if (sort_dir or "desc").lower() == "desc" else "asc"
-	return f"`{_RUN_SORTABLE[field]}` {d}, `name` asc"
+	d = Order.desc if (sort_dir or "desc").lower() == "desc" else Order.asc
+	return _RUN_SORTABLE[field], d
 
 
 @frappe.whitelist()
@@ -262,32 +264,28 @@ def list_app_learning_runs_page(
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _RUN_FILTERS)
 
-	conds = ["1=1"]
-	params: dict = {"start": start, "page_length": pl}
+	t = frappe.qb.DocType(RUN)
+	query = frappe.qb.from_(t)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(app LIKE %(q)s OR error LIKE %(q)s)")
+		q = f"%{_lk(search)}%"
+		query = query.where(t.app.like(q) | t.error.like(q))
 	if "app" in f:
-		params["app"] = str(f["app"])
-		conds.append("app = %(app)s")
+		query = query.where(t.app == str(f["app"]))
 	if "status" in f:
 		if f["status"] not in _STATUSES:
 			frappe.throw(_("Invalid status filter."))
-		params["status"] = f["status"]
-		conds.append("status = %(status)s")
+		query = query.where(t.status == f["status"])
 
-	where = " AND ".join(conds)
-	order = _order_by(sort_field, sort_dir)
+	order_col, order_dir = _order_by(sort_field, sort_dir)
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis App Learning Run` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""SELECT {", ".join(_ROW_FIELDS)}
-		FROM `tabJarvis App Learning Run`
-		WHERE {where}
-		ORDER BY {order}
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	total = query.select(Count("*")).run()[0][0]
+	rows = (
+		query.select(*_ROW_FIELDS)
+		.orderby(t[order_col], order=order_dir)
+		.orderby(t.name, order=Order.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	for r in rows:
 		_row_out(r)

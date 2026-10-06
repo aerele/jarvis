@@ -863,6 +863,7 @@ def _attach_results(rows: list[dict], me: str) -> None:
 	waits: dict = {}
 	need = [r["name"] for r in rows if r["status"] == "needs_approval"]
 	if need:
+		# nosemgrep: frappe-sql-format-injection -- server-built UNION; values bound
 		for w in frappe.db.sql(
 			f"""SELECT w.conversation, w.item, w.title, w.src, w.needs_input, w.counts, w.questions, w.routing
 			FROM ({_pending_waits_sql()}) w
@@ -970,7 +971,9 @@ def list_inbound_page(
 
 	order = _order_by(sort_field, sort_dir, _INBOUND_SORTABLE, "creation", "desc", prefix="t.")
 
+	# nosemgrep: frappe-sql-format-injection -- server-built status ladder; values bound
 	total = frappe.db.sql(f"SELECT COUNT(*) FROM ({inner}) t {outer}", params)[0][0]
+	# nosemgrep: frappe-sql-format-injection -- server-built status ladder; values bound
 	rows = frappe.db.sql(
 		f"""SELECT t.name, t.title, t.creation, t.status, t.pending_approvals, t.behind_chat,
 		t.lm_name, t.fail_code, t.skipped, t.filebox_result_doctype, t.filebox_result_name,
@@ -1074,6 +1077,7 @@ def _delete_one(conversation: str, live: int | None = None) -> None:
 	if not doc.file_box:
 		frappe.throw("Not a File Box conversation")
 	if live is None:
+		# nosemgrep: frappe-sql-format-injection -- server-built status ladder; values bound
 		row = frappe.db.sql(
 			f"SELECT t.live FROM ({_inbound_inner_sql('AND c.name = %(one)s')}) t",
 			{**_ladder_params(me), "one": conversation},
@@ -1081,12 +1085,14 @@ def _delete_one(conversation: str, live: int | None = None) -> None:
 		live = row[0][0] if row else 0
 	if live:
 		frappe.throw("Still processing — stop or wait for it to finish before deleting")
+	# nosemgrep: frappe-sql-format-injection -- constant predicate; value bound
 	if frappe.db.sql(
 		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_wiki_open('c')}", (conversation,)
 	):
 		frappe.throw(
 			"A wiki note from this file is still awaiting review — try again once a reviewer has handled it"
 		)
+	# nosemgrep: frappe-sql-format-injection -- constant predicate; value bound
 	if frappe.db.sql(
 		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_held_open('c')}", (conversation,)
 	):
@@ -1146,6 +1152,7 @@ def clear_processed_inbound() -> dict:
 	refuse_in_tool_dispatch()
 	me = frappe.session.user
 	extra = f"AND c.owner = %(me)s AND NOT {_wiki_open('c')}"
+	# nosemgrep: frappe-sql-format-injection -- server-built status ladder; values bound
 	rows = frappe.db.sql(
 		f"SELECT t.name, t.live FROM ({_inbound_inner_sql(extra)}) t WHERE t.status IN %(clearable)s",
 		{**_ladder_params(me), "clearable": _CLEARABLE},
@@ -1183,6 +1190,7 @@ _RERUN_SCAFFOLD = (
 def _rerun_row(conversation: str, me: str) -> dict | None:
 	"""One conversation's full ladder row (the ``_delete_one`` precedent), for the
 	re-run eligibility check and the preamble."""
+	# nosemgrep: frappe-sql-format-injection -- server-built status ladder; values bound
 	rows = frappe.db.sql(
 		f"SELECT t.* FROM ({_inbound_inner_sql('AND c.name = %(one)s')}) t",
 		{**_ladder_params(me), "one": conversation},

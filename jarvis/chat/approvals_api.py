@@ -15,6 +15,8 @@ import json
 import math
 
 import frappe
+from frappe.query_builder.functions import Coalesce, Count, IfNull, NullIf, Trim
+from pypika.terms import Criterion, ExistsCriterion, Not, ValueWrapper
 
 from jarvis._session import impersonate
 from jarvis.chat import filebox_skills
@@ -231,12 +233,20 @@ def _load_filters(filters, allowed: set) -> dict:
 	return out
 
 
-def _order_by(sort_field, sort_dir, sortable: dict, default_field, default_dir, prefix="") -> str:
-	col = sortable.get(sort_field or "")
-	if not col:
-		return f"{prefix}`{sortable[default_field]}` {default_dir}, {prefix}`name` asc"
-	d = "desc" if (sort_dir or "").lower() == "desc" else "asc"
-	return f"{prefix}`{col}` {d}, {prefix}`name` asc"
+def _owns_conversation(a, me: str):
+	c = frappe.qb.DocType("Jarvis Conversation").as_("c")
+	return ExistsCriterion(frappe.qb.from_(c).select(1).where((c.name == a.conversation) & (c.owner == me)))
+
+
+def _tagged(a, me: str):
+	ds = frappe.qb.DocType("DocShare").as_("ds")
+	return ExistsCriterion(
+		frappe.qb.from_(ds)
+		.select(1)
+		.where(
+			(ds.share_doctype == APPROVAL) & (ds.share_name == a.name) & (ds.user == me) & (ds["read"] == 1)
+		)
+	)
 
 
 @frappe.whitelist()
@@ -266,84 +276,79 @@ def list_approvals_page(
 	f = _load_filters(filters, _APPROVALS_FILTERS)
 	is_sm = "System Manager" in frappe.get_roles()
 
-	from_sql = "`tabJarvis Approval Request` a"
-
-	params: dict = {"me": me, "start": start, "page_length": pl}
+	a = frappe.qb.DocType(APPROVAL).as_("a")
 
 	# `base` applies to BOTH the main query and the facet query; the
 	# document_type filter applies ONLY to the main query (facets drop it).
-	base: list[str] = []
 	# Wiki-write proposals live on the reviewer lane only (SoD) - keep them OFF
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
-	params["wiki_src"] = FILE_BOX_WIKI_SOURCE
-	base.append("(a.source IS NULL OR a.source <> %(wiki_src)s)")
+	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
 	if _ar.sheet_ready():
-		base.append("IFNULL(a.sheet, '') = ''")  # answered in its File Box sheet
+		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	if not is_sm:
 		# Owner OR tagged: the caller owns the linked conversation, or holds a
 		# DocShare read grant on the approval (docmeta_api.toggle_share /
 		# assignment). EXISTS, not JOIN: a row matching BOTH arms must still
 		# appear exactly once in rows/total/facets.
-		base.append(
-			"(EXISTS (SELECT 1 FROM `tabJarvis Conversation` c "
-			"WHERE c.name = a.conversation AND c.owner = %(me)s) "
-			"OR EXISTS (SELECT 1 FROM `tabDocShare` ds "
-			"WHERE ds.share_doctype = 'Jarvis Approval Request' "
-			"AND ds.share_name = a.name "
-			"AND ds.user = %(me)s AND ds.`read` = 1))"
-		)
+		base.append(_owns_conversation(a, me) | _tagged(a, me))
 	status = f.get("status") or "Pending"
 	if status not in _APPROVAL_STATUSES:
 		frappe.throw("Invalid status filter")
 	if status == "Decided":
-		base.append("a.status IN ('Approved', 'Rejected')")
+		base.append(a.status.isin(("Approved", "Rejected")))
 	elif status != "All":
-		params["status"] = status
-		base.append("a.status = %(status)s")
+		base.append(a.status == status)
 	if "conversation" in f:
-		params["conv"] = f["conversation"]
-		base.append("a.conversation = %(conv)s")
+		base.append(a.conversation == str(f["conversation"]))
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		base.append("(a.title LIKE %(q)s OR a.question LIKE %(q)s OR a.ref_name LIKE %(q)s)")
+		q = f"%{_lk(search)}%"
+		base.append(a.title.like(q) | a.question.like(q) | a.ref_name.like(q))
 
-	doc_cond = None
+	main = list(base)
 	if "document_type" in f:
-		dt = f["document_type"]
-		if dt == "Unclassified":
-			doc_cond = "TRIM(COALESCE(a.document_type, '')) = ''"
-		else:
-			params["dt"] = dt
-			doc_cond = "a.document_type = %(dt)s"
+		dt = str(f["document_type"])
+		main.append(
+			Trim(Coalesce(a.document_type, "")) == "" if dt == "Unclassified" else a.document_type == dt
+		)
 
-	main_where = " AND ".join(base + ([doc_cond] if doc_cond else [])) or "1=1"
-	base_where = " AND ".join(base) or "1=1"
-	order = _order_by(sort_field, sort_dir, _APPROVALS_SORTABLE, "creation", "desc", prefix="a.")
+	sort_col = _APPROVALS_SORTABLE.get(sort_field or "")
+	sort_order = frappe.qb.desc if not sort_col or (sort_dir or "").lower() == "desc" else frappe.qb.asc
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM {from_sql} WHERE {main_where}", params)[0][0]
+	total = frappe.qb.from_(a).select(Count("*")).where(Criterion.all(main)).run()[0][0]
 	# `shared` (contract): non-SM rows the caller sees WITHOUT owning the linked
 	# conversation (i.e. only via a DocShare tag) carry 1; SM sees all rows by
 	# role, so shared is hardcoded 0 there.
-	shared_expr = (
-		"0 AS shared"
-		if is_sm
-		else "(NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` c "
-		"WHERE c.name = a.conversation AND c.owner = %(me)s)) AS shared"
-	)
-	rows = frappe.db.sql(
-		f"""SELECT a.name, a.title, a.status, a.source, a.document_type, a.question,
-		a.context_md, a.options, a.conversation, a.ref_doctype, a.ref_name,
-		a.decision, a.decided_by, a.decided_at, a.creation,
-		COALESCE((SELECT oc.origin_page FROM `tabJarvis Conversation` oc
-		          WHERE oc.name = a.conversation), '') AS origin_page,
-		{shared_expr}
-		FROM {from_sql}
-		WHERE {main_where}
-		ORDER BY {order}
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	shared = ValueWrapper(0) if is_sm else Not(_owns_conversation(a, me))
+	oc = frappe.qb.DocType("Jarvis Conversation").as_("oc")
+	origin_page = frappe.qb.from_(oc).select(oc.origin_page).where(oc.name == a.conversation)
+	rows = (
+		frappe.qb.from_(a)
+		.select(
+			a.name,
+			a.title,
+			a.status,
+			a.source,
+			a.document_type,
+			a.question,
+			a.context_md,
+			a.options,
+			a.conversation,
+			a.ref_doctype,
+			a.ref_name,
+			a.decision,
+			a.decided_by,
+			a.decided_at,
+			a.creation,
+			Coalesce(origin_page, "").as_("origin_page"),
+			shared.as_("shared"),
+		)
+		.where(Criterion.all(main))
+		.orderby(a[sort_col or "creation"], order=sort_order)
+		.orderby(a.name, order=frappe.qb.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
@@ -351,15 +356,15 @@ def list_approvals_page(
 		# NULL = a row from before the source field existed = File Box.
 		r["source"] = r.get("source") or "File Box"
 
-	facet_rows = frappe.db.sql(
-		f"""SELECT COALESCE(NULLIF(TRIM(a.document_type), ''), 'Unclassified') AS dtv,
-		COUNT(*) AS n
-		FROM {from_sql}
-		WHERE {base_where}
-		GROUP BY dtv
-		ORDER BY n DESC""",
-		params,
-		as_dict=True,
+	dtv = Coalesce(NullIf(Trim(a.document_type), ""), "Unclassified").as_("dtv")
+	n = Count("*").as_("n")
+	facet_rows = (
+		frappe.qb.from_(a)
+		.select(dtv, n)
+		.where(Criterion.all(base))
+		.groupby(dtv)
+		.orderby(n, order=frappe.qb.desc)
+		.run(as_dict=True)
 	)
 	facets = {"document_type": [{"value": x.dtv, "count": x.n} for x in facet_rows]}
 
@@ -541,27 +546,21 @@ def _ar_pending_count() -> int:
 	# materializing the pending list. EXISTS also keeps the COUNT exact when a
 	# row matches both arms.
 	# Exclude wiki-write proposals (reviewer lane, not the customer badge).
-	# Raw SQL, NULL-safe: a `!=` filter would drop legacy rows (source NULL).
+	# NULL-safe: a `!=` filter would drop legacy rows (source NULL).
 	# A sheet's questions count through their sheet (the held count), never here.
-	unlinked = _unlinked()
-	if "System Manager" in frappe.get_roles():
-		return frappe.db.sql(
-			f"""SELECT COUNT(*) FROM `tabJarvis Approval Request`
-			WHERE status = 'Pending' AND (source IS NULL OR source <> %(wiki_src)s){unlinked}""",
-			{"wiki_src": FILE_BOX_WIKI_SOURCE},
-		)[0][0]
-	return frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tabJarvis Approval Request` a
-		WHERE a.status = 'Pending'
-		AND (a.source IS NULL OR a.source <> %(wiki_src)s){unlinked}
-		AND (EXISTS (SELECT 1 FROM `tabJarvis Conversation` c
-		             WHERE c.name = a.conversation AND c.owner = %(me)s)
-		     OR EXISTS (SELECT 1 FROM `tabDocShare` ds
-		                WHERE ds.share_doctype = 'Jarvis Approval Request'
-		                AND ds.share_name = a.name
-		                AND ds.user = %(me)s AND ds.`read` = 1))""",
-		{"me": frappe.session.user, "wiki_src": FILE_BOX_WIKI_SOURCE},
-	)[0][0]
+	a = frappe.qb.DocType(APPROVAL).as_("a")
+	query = (
+		frappe.qb.from_(a)
+		.select(Count("*"))
+		.where(a.status == "Pending")
+		.where(a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE))
+	)
+	if _ar.sheet_ready():
+		query = query.where(IfNull(a.sheet, "") == "")
+	if "System Manager" not in frappe.get_roles():
+		me = frappe.session.user
+		query = query.where(_owns_conversation(a, me) | _tagged(a, me))
+	return query.run()[0][0]
 
 
 def _resume_conversation(
@@ -879,32 +878,40 @@ def list_wiki_write_proposals(
 	if order not in ("newest", "oldest"):
 		frappe.throw("Invalid order")
 	start, pl = _clamp_page(start, page_length)
-	params: dict = {"src": FILE_BOX_WIKI_SOURCE, "start": start, "pl": pl}
-	where = ["a.source = %(src)s"]
+	a = frappe.qb.DocType(APPROVAL).as_("a")
+	where = a.source == FILE_BOX_WIKI_SOURCE
 	if status == "Actionable":
 		# Needs a reviewer's hand: awaiting decision, OR approved but the fenced
 		# write has not landed (Failed, or an interrupted Pending) — re-drivable.
-		where.append(
-			"(a.status = 'Pending' OR (a.status = 'Approved' "
-			"AND COALESCE(a.apply_status, 'Pending') <> 'Applied'))"
+		where &= (a.status == "Pending") | (
+			(a.status == "Approved") & (Coalesce(a.apply_status, "Pending") != "Applied")
 		)
 	elif status != "All":
-		params["status"] = status
-		where.append("a.status = %(status)s")
-	where_sql = " AND ".join(where)
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Approval Request` a WHERE {where_sql}", params)[
-		0
-	][0]
-	rows = frappe.db.sql(
-		f"""SELECT a.name, a.title, a.status, a.apply_status, a.apply_reason,
-		a.wiki_payload, a.wiki_digest, a.ref_name, a.conversation, a.owner, a.decision,
-		a.decided_by, a.decided_at, a.creation
-		FROM `tabJarvis Approval Request` a
-		WHERE {where_sql}
-		ORDER BY a.creation {"ASC" if order == "oldest" else "DESC"}
-		LIMIT %(pl)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+		where &= a.status == status
+	total = frappe.qb.from_(a).select(Count("*")).where(where).run()[0][0]
+	rows = (
+		frappe.qb.from_(a)
+		.select(
+			a.name,
+			a.title,
+			a.status,
+			a.apply_status,
+			a.apply_reason,
+			a.wiki_payload,
+			a.wiki_digest,
+			a.ref_name,
+			a.conversation,
+			a.owner,
+			a.decision,
+			a.decided_by,
+			a.decided_at,
+			a.creation,
+		)
+		.where(where)
+		.orderby(a.creation, order=frappe.qb.asc if order == "oldest" else frappe.qb.desc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	for r in rows:
 		r["preview"] = _decode_wiki_preview(r.pop("wiki_payload", None))
@@ -1103,16 +1110,20 @@ def reject_wiki_write(name: str) -> dict:
 	if doc.status != "Pending" and not needs_retry:
 		frappe.throw(f"Proposal {name} is already {doc.status}")
 	me = frappe.session.user
+	ar = frappe.qb.DocType(APPROVAL)
 	cond = (
-		"status='Pending'"
+		ar.status == "Pending"
 		if doc.status == "Pending"
-		else "status='Approved' AND COALESCE(apply_status, 'Pending') <> 'Applied'"
+		else (ar.status == "Approved") & (Coalesce(ar.apply_status, "Pending") != "Applied")
 	)
-	frappe.db.sql(
-		f"""update `tabJarvis Approval Request`
-		set status='Rejected', decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and {cond}""",
-		("(rejected - not written to the wiki)", me, frappe.utils.now_datetime(), name),
+	(
+		frappe.qb.update(ar)
+		.set(ar.status, "Rejected")
+		.set(ar.decision, "(rejected - not written to the wiki)")
+		.set(ar.decided_by, me)
+		.set(ar.decided_at, frappe.utils.now_datetime())
+		.where((ar.name == name) & cond)
+		.run()
 	)
 	if not frappe.db.sql(
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Rejected' and decided_by=%s",
@@ -1235,30 +1246,23 @@ def list_pending_actions_lane() -> dict:
 	if not table_ready():
 		return {"rows": [], "total": 0}
 	me = frappe.session.user
-	params = {
-		"held": HELD,
-		"chat": CHAT,
-		"sm": int("System Manager" in frappe.get_roles()),
-		"me": me,
-		"lim": _HELD_LANE_LIMIT,
-	}
+	sm = int("System Manager" in frappe.get_roles())
+	params = {"sm": sm, "me": me, "lim": _HELD_LANE_LIMIT}
 	rows = []
 	# One capped query per kind: an SM's backlog of held rows never crowds out their own cards.
-	for scope in (
-		"pa.kind = %(held)s AND (%(sm)s OR pa.owner_user = %(me)s)",
-		"pa.kind = %(chat)s AND pa.owner_user = %(me)s",
-	):
+	for kind, any_owner in ((HELD, sm), (CHAT, 0)):
 		rows += frappe.db.sql(
-			f"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
+			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
 			pa.conversation, c.title AS conversation_title, c.origin_page,
 			(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
 			 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
 			FROM `tabJarvis Pending Action` pa
 			LEFT JOIN `tabJarvis Conversation` c ON c.name = pa.conversation
-			WHERE pa.status IN ('Pending', 'Executing') AND {scope}
+			WHERE pa.status IN ('Pending', 'Executing') AND pa.kind = %(kind)s
+			AND (%(any_owner)s OR pa.owner_user = %(me)s)
 			ORDER BY pa.creation ASC, pa.name ASC
 			LIMIT %(lim)s""",
-			params,
+			{**params, "kind": kind, "any_owner": any_owner},
 			as_dict=True,
 		)
 	# ``collecting``/``record_count``/``sheet_counts`` name the S1a migrate's columns:

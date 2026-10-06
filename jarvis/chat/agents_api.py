@@ -1555,7 +1555,7 @@ def _detach_last_seen_run(run_names: list) -> None:
 	if not run_names:
 		return
 	for name, first_seen_run in frappe.db.sql(
-		f"""SELECT name, first_seen_run FROM `tab{FINDING}`
+		"""SELECT name, first_seen_run FROM `tabJarvis Agent Finding`
 		WHERE last_seen_run IN %(runs)s""",
 		{"runs": tuple(run_names)},
 	):

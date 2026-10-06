@@ -299,7 +299,7 @@ def _bump_turn_count(conversation: str, run_id: str) -> None:
 		if _is_hidden_turn(run_id):
 			return
 		frappe.db.sql(
-			f"""UPDATE `tab{CONV}` SET turn_count = turn_count + 1
+			"""UPDATE `tabJarvis Conversation` SET turn_count = turn_count + 1
 			WHERE name=%(c)s AND file_box=0 AND agent_initiated=0""",
 			{"c": conversation},
 		)
