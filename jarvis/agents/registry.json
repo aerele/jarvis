@@ -764,7 +764,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Weekly read-only pipeline-hygiene scrub of your open CRM deals: surfaces deals that have gone quiet, aged in their current stage, run past their expected close date, or have no next step scheduled, then ranks them into a per-owner worklist so the forecast reflects deals that are actually moving. Never edits a deal, moves a stage, changes a date, or creates a task.",
       "tools_required": [
@@ -1181,7 +1181,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
