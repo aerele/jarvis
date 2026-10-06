@@ -10,7 +10,7 @@
 			class="mep-pill"
 			type="button"
 			:aria-expanded="open"
-			title="Model and effort"
+			:title="pillTitle"
 			@click="open = !open"
 		>
 			<svg
@@ -28,6 +28,13 @@
 				<path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3" />
 			</svg>
 			<span class="mep-model">{{ pillModel }}</span>
+			<span
+				v-if="pillExpired"
+				data-testid="mep-expired-dot"
+				class="size-1.5 shrink-0 rounded-full bg-surface-red-5"
+				role="img"
+				aria-label="Sign-in expired"
+			/>
 			<!-- kept in layout (visibility, not v-if) so toggling thinkingOverride
 			     does not shift the Enter hint / Send button beside this pill -->
 			<span class="mep-dot" :class="{ 'mep-hide': !showEffort }">·</span>
@@ -81,11 +88,12 @@
 					>
 						<span class="mep-item-body">
 							<span class="mep-name">{{ r.model }}</span>
+							<span v-if="isExpired(r.model)" class="mep-desc">Sign-in expired</span>
 							<!-- `tier` belongs to a configured pool row. An `extra` row is another
 						     model on a provider the customer ALREADY configured, offered so they
 						     can switch without re-saving Settings; its catalog label is the more
 						     useful subtitle, skipped when it merely repeats the id. -->
-							<span v-if="r.tier" class="mep-desc">{{ r.tier }}</span>
+							<span v-else-if="r.tier" class="mep-desc">{{ r.tier }}</span>
 							<span
 								v-else-if="r.extra && r.label && r.label !== r.model"
 								class="mep-desc"
@@ -253,6 +261,8 @@ const props = defineProps({
 	showProviders: { type: Boolean, default: false },
 	personaEnabled: { type: Boolean, default: false },
 	canAddProvider: { type: Boolean, default: false },
+	// { "<model id>": { upstream, label } } for models whose sign-in has expired.
+	expiredModels: { type: Object, default: () => ({}) },
 	// Where the menu hangs off the pill. "end" (main chat: the pill sits at the
 	// composer's left, the menu grows leftward over the wide input) or "start"
 	// (a narrow host such as the dashboard builder pane, whose overflow-hidden
@@ -278,6 +288,23 @@ const rootRef = ref(null);
 const triggerRef = ref(null);
 
 const pillModel = computed(() => props.modelOverride || props.defaultModel || "Auto");
+// Same match the error card uses: "provider/model" and "model" are one model.
+const bareModel = (id) =>
+	String(id ?? "")
+		.trim()
+		.split("/")
+		.pop();
+const expiredBare = computed(() => new Set(Object.keys(props.expiredModels || {}).map(bareModel)));
+const isExpired = (id) => !!id && expiredBare.value.has(bareModel(id));
+// Auto (nothing picked) fails over to another model, so it never shows the dot,
+// even when the default model it would start with has an expired sign-in.
+const pillExpired = computed(() => isExpired(props.modelOverride));
+const pillTitle = computed(() => {
+	if (!pillExpired.value) return "Model and effort";
+	return props.canAddProvider
+		? "Sign-in expired. Reconnect it in AI models."
+		: "Sign-in expired. Ask your workspace admin to reconnect it.";
+});
 // A stored level the workspace cannot use (no levels offered) is not shown.
 const showEffort = computed(() => !!props.thinkingOverride && props.thinkingLevels.length > 0);
 const effortLabel = computed(() => {

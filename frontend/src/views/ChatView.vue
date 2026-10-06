@@ -3470,6 +3470,7 @@
 								:show-providers="showProviders"
 								:persona-enabled="ui.persona_enabled"
 								:can-add-provider="canConnectModel"
+								:expired-models="expiredModels"
 								@select-model="selectModel"
 								@select-thinking="selectThinking"
 								@add-provider="goConnectModel"
@@ -5960,6 +5961,7 @@ function queuedChipLabel(pos, state) {
 // several times per failed message per render, and classification is a regex
 // walk over the (capped) error text.
 const errorInfoCache = new Map();
+const expiredModels = computed(() => expiredModelMap(subscriptionNotice.expiredModels));
 function errorInfo(m) {
 	const meta = errorMeta.value[m.name] || {};
 	// An admin also learns which subscription upstreams the workspace has, so a stray sign-in-looking
@@ -5968,12 +5970,11 @@ function errorInfo(m) {
 	const known = subscriptionNotice.upstreams;
 	// Models whose sign-in the site already holds as expired: a generic failure on one of them is
 	// that sign-in (CLIProxy's dead-sign-in 503 reaches us as a bare "provider internal error").
-	const expiredModels = expiredModelMap(subscriptionNotice.expiredModels);
 	const key = `${m.name}\u0000${m.error}\u0000${meta.code || ""}\u0000${
 		meta.changed_data
 	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
 		known ? known.join(",") : "-"
-	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels)
+	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels.value)
 		.map(([id, e]) => `${id}:${e.upstream}`)
 		.join(",")}`;
 	let info = errorInfoCache.get(key);
@@ -5984,7 +5985,7 @@ function errorInfo(m) {
 				admin: canConnectModel,
 				subscriptionUpstreams: known || undefined,
 				model: m.model,
-				expiredModels,
+				expiredModels: expiredModels.value,
 			}),
 			noChange: meta.changed_data === false,
 		};
