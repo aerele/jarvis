@@ -83,18 +83,26 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"InvalidArgumentError",
 				f"unknown session: {session_key}",
 			)
-		if not frappe.db.exists("User", plugin_user):
+		enabled = frappe.db.get_value("User", plugin_user, "enabled")
+		if enabled is None:
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
 				f"session references unknown user: {plugin_user}",
 			)
+		# Disabling a user is how access is revoked, but Frappe only ends their
+		# browser sessions, not this chat session row: refuse it here.
+		if not enabled:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", f"session user is disabled: {plugin_user}")
 
 		# NOTE: no Jarvis-access role gate on the plugin path. It is
 		# machine-authenticated (token/HMAC proves the call came from agent),
-		# and `plugin_user` is the real chat user — already gated when they
-		# started the conversation. Per-DocType perms still apply under
-		# _dispatch_from_session.
+		# and `plugin_user` is the real chat user — role-gated when they sent
+		# the message (chat/api.py send_message). Delegated runs (agent
+		# run-as, approvals resume, File Box) legitimately act as an owner
+		# without the role, so a role check here would break them. Per-DocType
+		# perms still apply under _dispatch_from_session.
 
 		# C2 stretch (2026-06-16 review): bind session_key -> bench's
 		# device_id at session-create time, verify on every call. If the
