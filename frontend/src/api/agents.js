@@ -17,6 +17,8 @@ export const getAgent = (agent_slug) => call("jarvis.chat.agents_api.get_agent",
 const AG = "jarvis.chat.agents_api.";
 
 export const getAPReviewDefaults = (company) => call(AG + "get_ap_review_defaults", { company });
+export const getBankReconReviewDefaults = (company) =>
+	call(AG + "get_bank_recon_review_defaults", { company });
 export const getARReviewDefaults = (company) => call(AG + "get_ar_review_defaults", { company });
 
 // PART 3 remediation — lightweight capability probe. `review` (skill-reviewer
