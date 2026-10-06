@@ -153,6 +153,18 @@ def _make_conversation() -> str:
 	return conv.name
 
 
+def _purge_conversation(conv: str) -> None:
+	"""Drop a test conversation with its messages and Turns, and commit. A
+	continuation commits its hidden seed (``enqueue_continuation``), so a plain
+	conversation delete, rolled back with the test, left the seed behind as an
+	orphan user message for a later suite's stale scan to heal
+	(test_chat_stale_scan)."""
+	frappe.db.delete("Jarvis Chat Turn", {"conversation": conv})
+	frappe.db.delete("Jarvis Chat Message", {"conversation": conv})
+	frappe.db.delete("Jarvis Conversation", {"name": conv})
+	frappe.db.commit()
+
+
 class TestApplyAction(FrappeTestCase):
 	def _cleanup_doc(self, doctype, name):
 		self.addCleanup(lambda: frappe.delete_doc(doctype, name, force=True, ignore_permissions=True))
@@ -500,9 +512,7 @@ class TestContinuation(FrappeTestCase):
 
 	def _conv(self) -> str:
 		conv = _make_conversation()
-		self.addCleanup(
-			lambda: frappe.delete_doc("Jarvis Conversation", conv, force=True, ignore_permissions=True)
-		)
+		self.addCleanup(_purge_conversation, conv)
 		return conv
 
 	def _messages(self, conv):
@@ -825,9 +835,7 @@ class TestConfirmEmptyConversationToken(FrappeTestCase):
 
 	def _conv(self) -> str:
 		conv = _make_conversation()
-		self.addCleanup(
-			lambda: frappe.delete_doc("Jarvis Conversation", conv, force=True, ignore_permissions=True)
-		)
+		self.addCleanup(_purge_conversation, conv)
 		return conv
 
 	def _roles(self, conv):
@@ -891,9 +899,7 @@ class TestConfirmEmptyConversationToken(FrappeTestCase):
 
 		other = _make_conversation()
 		frappe.db.set_value("Jarvis Conversation", other, "owner", "someone@else.invalid")
-		self.addCleanup(
-			lambda: frappe.delete_doc("Jarvis Conversation", other, force=True, ignore_permissions=True)
-		)
+		self.addCleanup(_purge_conversation, other)
 		desc = "jarvis-test-empty-conv-unowned-001"
 		token = pending_confirm.mint(
 			conversation="",
@@ -921,9 +927,7 @@ class TestConfirmEmptyConversationToken(FrappeTestCase):
 
 		other = _make_conversation()
 		frappe.db.set_value("Jarvis Conversation", other, "owner", "someone@else.invalid")
-		self.addCleanup(
-			lambda: frappe.delete_doc("Jarvis Conversation", other, force=True, ignore_permissions=True)
-		)
+		self.addCleanup(_purge_conversation, other)
 		token = pending_confirm.mint(
 			conversation="",
 			owner="Administrator",

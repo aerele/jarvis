@@ -306,6 +306,13 @@ class TestApplyActionContract(FrappeTestCase):
 		# (built-in conf guard) so a real ToDo insert runs cleanly.
 		frappe.local.conf["disable_global_search"] = 1
 		self.addCleanup(lambda: frappe.local.conf.pop("disable_global_search", None))
+		# A failed save tells the assistant through a continuation (R2-9, PanelFailure),
+		# which commits a hidden seed message and its Turn. Nothing here asserts on it
+		# (test_panel_failure does), and a committed seed outlived the test as an orphan
+		# user message for a later suite's stale scan to heal (test_chat_stale_scan).
+		send = patch("jarvis.chat.panel_failure.PanelFailure._continue", return_value=(True, None))
+		send.start()
+		self.addCleanup(send.stop)
 
 	def _conv(self) -> str:
 		conv = frappe.get_doc(
