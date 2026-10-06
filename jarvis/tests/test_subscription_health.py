@@ -791,6 +791,57 @@ class TestFallbackLabel(unittest.TestCase):
 			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "")
 
 
+class TestSkippedEntries(_Base):
+	"""``skipped``: the entry's own row is AFTER the answering row, so Auto never used it."""
+
+	ACCOUNTS = {
+		"ACC_gpt": {"upstream": "openai", "label": "OpenAI", "email": ""},
+		"ACC_claude": {"upstream": "anthropic", "label": "Anthropic", "email": ""},
+	}
+	live = ACCOUNTS
+
+	def _skipped(self, rows, *expired):
+		self.seed({ref: _entry(ref, accounts=self.ACCOUNTS) for ref in expired})
+		with patch.object(sh, "_settings", return_value=frappe._dict(models=list(rows))):
+			return {e["account_ref"]: (e["skipped"], e["fallback"]) for e in sh.ui_entries()}
+
+	def _owner_pool(self):
+		return (
+			_row("gpt", order=1),
+			_row("deepseek-flash", sub=False, order=2),
+			_row("claude", upstream="anthropic", order=3),
+		)
+
+	def test_owners_pool_skips_the_expired_row_after_the_answering_one(self):
+		out = self._skipped(self._owner_pool(), "ACC_claude")
+		self.assertEqual(out, {"ACC_claude": (True, "OpenAI")})
+
+	def test_the_first_row_expired_is_not_skipped(self):
+		out = self._skipped(self._owner_pool(), "ACC_gpt")
+		self.assertEqual(out, {"ACC_gpt": (False, "deepseek-flash")})
+
+	def test_two_expired_entries_compare_against_the_one_shared_fallback(self):
+		out = self._skipped(self._owner_pool(), "ACC_gpt", "ACC_claude")
+		self.assertEqual(out, {"ACC_gpt": (False, "deepseek-flash"), "ACC_claude": (True, "deepseek-flash")})
+
+	def test_no_fallback_is_never_skipped(self):
+		rows = (_row("gpt", order=1), _row("claude", upstream="anthropic", order=2))
+		out = self._skipped(rows, "ACC_gpt", "ACC_claude")
+		self.assertEqual(out, {"ACC_gpt": (False, ""), "ACC_claude": (False, "")})
+
+	def test_direct_mode_is_never_skipped(self):
+		self.live = DIRECT
+		self.seed({sh.DIRECT_REF: _entry(sh.DIRECT_REF, accounts=DIRECT)})
+		with patch.object(sh, "_settings", return_value=frappe._dict(models=[])):
+			self.assertFalse(sh.ui_entries()[0]["skipped"])
+
+	def test_a_member_entry_does_not_carry_skipped(self):
+		self.assertNotIn(
+			"skipped",
+			sh._member_entry({"upstream": "openai", "label": "OpenAI", "models": [], "skipped": True}),
+		)
+
+
 class TestAttentionAndNotice(_Base):
 	def test_ui_entries_carry_the_fallback(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100)})

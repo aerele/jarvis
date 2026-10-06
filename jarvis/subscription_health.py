@@ -500,29 +500,59 @@ def note_recorded_turn(outcome: str, row) -> None:
 # ---- what the SPA reads ---------------------------------------------------------------------------
 
 
+def _pool_rows() -> list:
+	"""The enabled rows in pool order, the order Auto tries them."""
+	from jarvis.jarvis.pool_serialize import _enabled_models, _fleet_sort_key
+
+	return sorted(_enabled_models(_settings()), key=_fleet_sort_key)
+
+
+def _row_refs(model) -> set[str]:
+	from jarvis.jarvis.pool_serialize import _field, _model_accounts
+
+	return {(_field(a, "account_ref") or "").strip() for a in _model_accounts(model)} - {""}
+
+
+def _answering(model, expired_refs: set) -> str:
+	"""The label ``model`` answers under while ``expired_refs`` are dead, or ``""`` if it cannot. A
+	subscription row answers while it has an account that is not expired (its upstream's label); an
+	api-key row answers under its model id."""
+	from jarvis.jarvis.pool_serialize import _credential_type, _field, _subscription_upstream
+
+	if _credential_type(model) == "subscription":
+		if _row_refs(model) - set(expired_refs):
+			return LABELS.get(_subscription_upstream(model), "")
+		return ""
+	return (_field(model, "model") or "").strip()
+
+
 def fallback_label(expired_refs: set) -> str:
 	"""Label of the first enabled row, in pool order, that can still answer while ``expired_refs`` are
 	dead, or ``""`` when none can (chats fail). A subscription row answers while it has at least one
 	account that is not expired; its label is its upstream's. An api-key row answers; its label is its
 	model id, the row's own label in the UI. Computed once here so the banner, the AI models row and the
 	member notice never disagree."""
-	from jarvis.jarvis.pool_serialize import (
-		_credential_type,
-		_enabled_models,
-		_field,
-		_fleet_sort_key,
-		_model_accounts,
-		_subscription_upstream,
-	)
-
-	for model in sorted(_enabled_models(_settings()), key=_fleet_sort_key):
-		if _credential_type(model) == "subscription":
-			refs = {(_field(a, "account_ref") or "").strip() for a in _model_accounts(model)} - {""}
-			if refs - set(expired_refs):
-				return LABELS.get(_subscription_upstream(model), "")
-		elif (_field(model, "model") or "").strip():
-			return (_field(model, "model") or "").strip()
+	for model in _pool_rows():
+		label = _answering(model, expired_refs)
+		if label:
+			return label
 	return ""
+
+
+def _skipped_refs(expired_refs: set) -> set[str]:
+	"""The expired accounts whose own row sits AFTER the row that answers. Auto tries rows in pool
+	order, so it was already past those rows: nothing switched when they expired, and the card must
+	not say "Auto uses X". An account's own row is the first enabled subscription row listing it."""
+	rows = _pool_rows()
+	answering_at = next((i for i, m in enumerate(rows) if _answering(m, expired_refs)), None)
+	if answering_at is None:
+		return set()
+	skipped = set()
+	for ref in expired_refs:
+		own_at = next((i for i, m in enumerate(rows) if ref in _row_refs(m)), None)
+		if own_at is not None and own_at > answering_at:
+			skipped.add(ref)
+	return skipped
 
 
 def _fallback_for(entry: dict, fallback: str) -> str:
@@ -534,12 +564,22 @@ def _fallback_for(entry: dict, fallback: str) -> str:
 
 
 def ui_entries() -> list[dict]:
-	"""``expired_entries()`` with the ``fallback`` label the SPA shows, oldest first."""
+	"""``expired_entries()`` with the ``fallback`` label the SPA shows and whether the entry was
+	``skipped`` (its row is after the answering one), oldest first."""
 	entries = expired_entries()
 	if not entries:
 		return []
-	fallback = fallback_label({e["account_ref"] for e in entries})
-	return [{**entry, "fallback": _fallback_for(entry, fallback)} for entry in entries]
+	refs = {e["account_ref"] for e in entries}
+	fallback = fallback_label(refs)
+	skipped = _skipped_refs(refs) if fallback else set()
+	return [
+		{
+			**entry,
+			"fallback": _fallback_for(entry, fallback),
+			"skipped": entry["account_ref"] in skipped and entry["account_ref"] != DIRECT_REF,
+		}
+		for entry in entries
+	]
 
 
 def _member_entry(entry: dict) -> dict:

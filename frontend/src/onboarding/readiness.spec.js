@@ -708,6 +708,27 @@ describe("bootstrap send gate", () => {
 	});
 });
 
+describe("subscriptionExpiredBanner skipped copy", () => {
+	const entry = {
+		upstream: "anthropic",
+		label: "Anthropic",
+		account_ref: "A",
+		fallback: "OpenAI",
+	};
+
+	it("says Auto skips it when the entry is skipped", () => {
+		expect(subscriptionExpiredBanner([{ ...entry, skipped: true }], true).message).toBe(
+			"Auto skips it until you reconnect."
+		);
+	});
+
+	it("keeps the Auto uses line when it is not skipped", () => {
+		expect(subscriptionExpiredBanner([{ ...entry, skipped: false }], true).message).toBe(
+			"Auto uses OpenAI until you reconnect."
+		);
+	});
+});
+
 describe("subscriptionExpiredBanner copy (spec section 3)", () => {
 	const openai = { upstream: "openai", label: "OpenAI", account_ref: "A1", fallback: "" };
 

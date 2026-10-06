@@ -52,13 +52,13 @@ describe("subscriptionAccountHealth expired level", () => {
 describe("expiredLine", () => {
 	it("names the fallback", () => {
 		expect(expiredLine(entry("A1", { fallback: "Anthropic" }), { formatDate: fmt })).toBe(
-			"Expired Oct 6, 2026. Auto uses Anthropic until you reconnect.",
+			"Expired Oct 6, 2026. Auto uses Anthropic until you reconnect."
 		);
 	});
 
 	it("reads naturally when the fallback is another account of the same upstream", () => {
 		expect(
-			expiredLine(entry("A1", { fallback: "Another OpenAI account" }), { formatDate: fmt }),
+			expiredLine(entry("A1", { fallback: "Another OpenAI account" }), { formatDate: fmt })
 		).toBe("Expired Oct 6, 2026. Auto uses another OpenAI account until you reconnect.");
 	});
 
@@ -70,13 +70,13 @@ describe("expiredLine", () => {
 			day: "numeric",
 		});
 		expect(expiredLine(entry("A1", { fallback: "Anthropic", since }))).toBe(
-			`Expired ${expected}. Auto uses Anthropic until you reconnect.`,
+			`Expired ${expected}. Auto uses Anthropic until you reconnect.`
 		);
 	});
 
 	it("says chats fail when nothing else can answer", () => {
 		expect(expiredLine(entry("A1"), { formatDate: fmt })).toBe(
-			"Chats fail until you reconnect.",
+			"Chats fail until you reconnect."
 		);
 	});
 
@@ -85,13 +85,31 @@ describe("expiredLine", () => {
 			expiredLine(entry("A1", { fallback: "Anthropic" }), {
 				sameRowOk: true,
 				formatDate: fmt,
-			}),
+			})
 		).toBe("Auto uses another account until you reconnect.");
+	});
+
+	it("says Auto skips it when the entry's row is after the answering one, keeping the date", () => {
+		expect(
+			expiredLine(entry("A1", { fallback: "OpenAI", skipped: true }), { formatDate: fmt })
+		).toBe(`Expired ${fmt(entry("A1").since)}. Auto skips it until you reconnect.`);
+		expect(
+			expiredLine(entry("A1", { fallback: "OpenAI", skipped: false }), { formatDate: fmt })
+		).toContain("Auto uses OpenAI until you reconnect.");
+	});
+
+	it("keeps the same-row and no-fallback lines when skipped", () => {
+		expect(expiredLine(entry("A1", { skipped: true }), { sameRowOk: true })).toBe(
+			"Auto uses another account until you reconnect."
+		);
+		expect(expiredLine(entry("A1", { fallback: "", skipped: true }))).toBe(
+			"Chats fail until you reconnect."
+		);
 	});
 
 	it("drops the date prefix when there is no since", () => {
 		expect(
-			expiredLine(entry("A1", { since: 0, fallback: "Anthropic" }), { formatDate: fmt }),
+			expiredLine(entry("A1", { since: 0, fallback: "Anthropic" }), { formatDate: fmt })
 		).toBe("Auto uses Anthropic until you reconnect.");
 	});
 

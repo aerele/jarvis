@@ -148,7 +148,7 @@ export function validatePool(models, preset) {
 			// back on save). The raw oauth_blob is NEVER a wire field anymore (P0-04), so
 			// it is not consulted here - a stale bundle sending one cannot pass this gate.
 			const connected = accounts.some(
-				(a) => a && ((a.capture_id || "").trim() || (a.account_ref || "").trim()),
+				(a) => a && ((a.capture_id || "").trim() || (a.account_ref || "").trim())
 			);
 			if (!connected)
 				return {
@@ -182,7 +182,7 @@ export function validatePool(models, preset) {
 	if (claudeIndexes.length > 1)
 		return { ok: false, error: "Only one Claude subscription model is supported per pool." };
 	const otherSubscriptions = models.filter(
-		(m) => m && m.subscription && subscriptionUpstream(m) !== "anthropic",
+		(m) => m && m.subscription && subscriptionUpstream(m) !== "anthropic"
 	);
 	if (claudeIndexes.length && otherSubscriptions.length) {
 		if (otherSubscriptions.some((m) => subscriptionUpstream(m) !== "openai"))
@@ -235,7 +235,7 @@ export function poolBackstopWarning(models) {
 	};
 	const subUpstreams = new Set(list.filter(isSubscription).map(upstreamOf));
 	const hasNativeBackstop = list.some(
-		(m) => m && (!isSubscription(m) || upstreamOf(m) === "anthropic"),
+		(m) => m && (!isSubscription(m) || upstreamOf(m) === "anthropic")
 	);
 	if (subUpstreams.size >= 2 && !hasNativeBackstop) {
 		return "A pool with 2+ subscription providers and no API-key-backed model has no backstop - if a subscription is rate-limited or drops, chat can stall. Add an API-key model as a fallback.";
@@ -530,7 +530,7 @@ export function apiKeyModelHealth(row, modelStatuses) {
 			title: detail
 				? `This model failed a test request: ${truncate(detail, 220)}`
 				: "This model failed a test request - check its API key, model id, and base URL. " +
-					"It's skipped during failover until it passes.",
+				  "It's skipped during failover until it passes.",
 		};
 	}
 	if (status === "unchecked") {
@@ -561,7 +561,7 @@ export function apiKeyModelHealth(row, modelStatuses) {
 //     "verified".
 export function subscriptionAccountHealth(
 	status,
-	{ knownGood = true, warningDetail = "", expired = null } = {},
+	{ knownGood = true, warningDetail = "", expired = null } = {}
 ) {
 	// A dead sign-in (jarvis.subscription_health) is decided per ACCOUNT by the caller and beats the
 	// pool-wide probe verdict below: a "verified" snapshot from the last apply cannot vouch for it.
@@ -650,6 +650,14 @@ export function fallbackInSentence(fallback) {
 	return fallback.replace(/^Another /, "another ");
 }
 
+// Auto tries rows in pool order, so an expired row that sits after the answering one was already
+// being skipped: nothing switched, and "Auto uses X" would claim a change that did not happen.
+export function autoLine(entry) {
+	return entry.skipped
+		? "Auto skips it until you reconnect."
+		: `Auto uses ${fallbackInSentence(entry.fallback)} until you reconnect.`;
+}
+
 // The line under an expired row (spec 3). Another account in the SAME row that still works is the most
 // specific truth and wins over the pool-wide fallback.
 export function expiredLine(entry, { sameRowOk = false, formatDate = defaultFormatDate } = {}) {
@@ -657,7 +665,7 @@ export function expiredLine(entry, { sameRowOk = false, formatDate = defaultForm
 	if (sameRowOk) return "Auto uses another account until you reconnect.";
 	if (entry.fallback) {
 		const when = entry.since ? `Expired ${formatDate(entry.since)}. ` : "";
-		return `${when}Auto uses ${fallbackInSentence(entry.fallback)} until you reconnect.`;
+		return `${when}${autoLine(entry)}`;
 	}
 	return "Chats fail until you reconnect.";
 }
@@ -666,7 +674,7 @@ export function expiredEntryMap(entries) {
 	return new Map(
 		(Array.isArray(entries) ? entries : [])
 			.filter((e) => e && e.account_ref)
-			.map((e) => [e.account_ref, e]),
+			.map((e) => [e.account_ref, e])
 	);
 }
 
