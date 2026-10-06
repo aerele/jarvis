@@ -235,6 +235,47 @@ class TestRunReportPrepared(FrappeTestCase):
 		self.assertEqual(env["result"], [{"name": "X"}])
 
 	# ---- in-flight + stall self-heal ----------------------------------------
+	# ---- #635: finding the copy the background run left ------------------------
+	def test_a_desk_copy_with_empty_and_typed_filters_is_reused(self):
+		# Desk stores the empty filters it showed and its own value types; Jarvis drops
+		# the empties and may send true for 1. Same request, so the same report.
+		desk = {"company": "Acme", "cost_center": "", "show_zero": 1, "periods": ["Q2", "Q1"]}
+		with _completed([{"name": "D"}], filters=desk):
+			env = run_report(
+				report_name=PREP_REPORT,
+				filters={"company": "Acme", "show_zero": True, "periods": ["Q1", "Q2"]},
+			)
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["result"], [{"name": "D"}])
+
+	def test_a_different_filter_value_is_not_reused(self):
+		with _completed([{"name": "D"}], filters={"company": "Acme"}), patch(_ENQUEUE):
+			env = run_report(report_name=PREP_REPORT, filters={"company": "Other"})
+		self.assertEqual(env["status"], "started")
+
+	def test_the_newest_completed_copy_is_read(self):
+		older = _make_pr("Completed", filters={"company": "Acme"}, age_seconds=3600)
+		newer = _make_pr("Completed", filters={"company": "Acme"})
+		with patch.object(_prepared_reports, "_read_completed", return_value={"status": "ready"}) as read:
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		read.assert_called_once_with(newer)
+		self.assertNotEqual(older, newer)
+
+	def test_a_desk_started_run_is_generating_not_started_again(self):
+		_make_pr("Started", filters={"company": "Acme", "cost_center": ""})
+		before = frappe.db.count("Prepared Report", {"report_name": PREP_REPORT})
+		with patch(_ENQUEUE):
+			env = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		self.assertEqual(env["status"], "generating")
+		self.assertEqual(frappe.db.count("Prepared Report", {"report_name": PREP_REPORT}), before)
+
+	def test_a_cancelled_newest_run_starts_again_rather_than_an_older_failure(self):
+		_make_pr("Error", age_seconds=600)
+		_make_pr("Cancelled")
+		with patch(_ENQUEUE):
+			env = run_report(report_name=PREP_REPORT)
+		self.assertEqual(env["status"], "started")
+
 	def test_generating_when_recent_started(self):
 		_make_pr("Started", age_seconds=30)
 		env = run_report(report_name=PREP_REPORT)
