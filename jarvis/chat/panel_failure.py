@@ -22,6 +22,7 @@ from __future__ import annotations
 import frappe
 
 from jarvis import _failure_kind
+from jarvis._redis_lock import claim
 from jarvis.chat import api as chat_api
 
 # One "fixing it in the panel" continuation per draft. The key outlives any panel left
@@ -127,8 +128,7 @@ class PanelFailure:
 		if not key:
 			return False
 		try:
-			cache = frappe.cache()
-			return bool(cache.set(cache.make_key(key), 1, ex=FIXING_TTL_S, nx=True))
+			return claim(key, FIXING_TTL_S)
 		except Exception:
 			frappe.logger("jarvis.panel_failure").warning("fixing-in-panel claim failed for %s", key)
 			return False
