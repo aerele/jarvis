@@ -830,10 +830,17 @@ class TestSkippedEntries(_Base):
 		self.assertEqual(out, {"ACC_gpt": (False, ""), "ACC_claude": (False, "")})
 
 	def test_direct_mode_is_never_skipped(self):
+		# A fallback exists (the api-key row answers) and a row after it lists the direct ref, so only the
+		# DIRECT_REF guard keeps the entry from reading as skipped.
 		self.live = DIRECT
 		self.seed({sh.DIRECT_REF: _entry(sh.DIRECT_REF, accounts=DIRECT)})
-		with patch.object(sh, "_settings", return_value=frappe._dict(models=[])):
-			self.assertFalse(sh.ui_entries()[0]["skipped"])
+		after = _row("gpt-direct", order=2)
+		after.subscription_accounts = json.dumps([{"account_ref": sh.DIRECT_REF, "upstream": "openai"}])
+		rows = [_row("deepseek-flash", sub=False, order=1), after]
+		with patch.object(sh, "_settings", return_value=frappe._dict(models=rows)):
+			entry = sh.ui_entries()[0]
+		self.assertEqual(entry["fallback"], "deepseek-flash")
+		self.assertFalse(entry["skipped"])
 
 	def test_a_member_entry_does_not_carry_skipped(self):
 		self.assertNotIn(
@@ -847,7 +854,8 @@ class TestAttentionAndNotice(_Base):
 		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100)})
 		with patch.object(sh, "fallback_label", return_value="Anthropic") as fb:
 			entries = sh.ui_entries()
-		fb.assert_called_once_with({"ACC_OA1"})
+		self.assertEqual(fb.call_count, 1)
+		self.assertEqual(fb.call_args.args[0], {"ACC_OA1"})
 		self.assertEqual(entries[0]["fallback"], "Anthropic")
 		self.assertEqual(entries[0]["account_ref"], "ACC_OA1")
 
@@ -881,6 +889,42 @@ class TestAttentionAndNotice(_Base):
 			out = self._notice(admin=True)
 		self.assertEqual([e["account_ref"] for e in out["expired"]], ["ACC_OA1", "ACC_CL1"])
 		self.assertEqual(out["upstreams"], ["anthropic", "openai"])
+
+	def test_nothing_expired_reads_no_row_accounts(self):
+		rows = [_row("gpt-5.6", order=1), _row("claude-x", upstream="anthropic", order=2)]
+		with (
+			patch.object(sh, "_settings", return_value=frappe._dict(models=rows)),
+			patch("jarvis.jarvis.pool_serialize._model_accounts") as read,
+		):
+			admin = self._notice(admin=True)
+			member = self._notice(admin=False)
+		read.assert_not_called()
+		self.assertEqual(admin, {"expired": [], "upstreams": ["anthropic", "openai"]})
+		self.assertEqual(member, {"expired": [], "expired_models": [], "upstreams": None})
+
+	def test_an_expired_entry_reads_each_enabled_subscription_row_once(self):
+		from jarvis.jarvis import pool_serialize
+
+		real = pool_serialize._model_accounts
+		rows = [
+			_row("gpt-5.6", order=1),
+			_row("deepseek-flash", sub=False, order=2),
+			_row("claude-x", upstream="anthropic", order=3),
+			_row("kimi-k2", upstream="kimi", order=4),
+		]
+		off = _row("gpt-off", order=5)
+		off.enabled = 0
+		self.live = {**POOL, "ACC_gpt-5.6": POOL["ACC_OA1"]}
+		self.seed({"ACC_gpt-5.6": _entry("ACC_gpt-5.6", accounts=self.live)})
+		with (
+			patch.object(sh, "_settings", return_value=frappe._dict(models=[*rows, off])),
+			patch("jarvis.jarvis.pool_serialize._model_accounts", side_effect=real) as read,
+		):
+			out = self._notice(admin=True)
+		self.assertEqual(out["expired"][0]["fallback"], "deepseek-flash")
+		self.assertEqual(
+			read.call_count, 3
+		)  # the 3 enabled subscription rows; not the api-key or disabled one
 
 	def test_member_sees_only_a_failing_entry_with_no_fallback_and_nothing_else(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1")})

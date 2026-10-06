@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import NamedTuple
 
 import frappe
 
@@ -132,40 +133,64 @@ def _live_accounts() -> dict[str, dict]:
 	return {}
 
 
-def _account_models(expired_refs: set[str]) -> dict[str, list[str]]:
+class _PoolRow(NamedTuple):
+	"""One enabled pool row with its account refs read ONCE (each read decrypts a Password field)."""
+
+	model: object
+	model_id: str
+	is_subscription: bool
+	upstream: str  # a subscription row's upstream, else ""
+	refs: tuple  # account refs in account order, blank and repeated ones dropped
+
+
+def _enabled_rows() -> list[_PoolRow]:
+	"""Every enabled row in ``_enabled_models`` order, one account read per subscription row."""
+	from jarvis.jarvis.pool_serialize import (
+		_credential_type,
+		_enabled_models,
+		_field,
+		_model_accounts,
+		_upstream_of,
+	)
+
+	rows = []
+	for model in _enabled_models(_settings()):
+		model_id = (_field(model, "model") or "").strip()
+		if _credential_type(model) != "subscription":
+			rows.append(_PoolRow(model, model_id, False, "", ()))
+			continue
+		accounts = _model_accounts(model)
+		refs = dict.fromkeys(r for r in ((_field(a, "account_ref") or "").strip() for a in accounts) if r)
+		rows.append(_PoolRow(model, model_id, True, _upstream_of(model, accounts), tuple(refs)))
+	return rows
+
+
+def _account_models(expired_refs: set[str], rows: list[_PoolRow] | None = None) -> dict[str, list[str]]:
 	"""``{account_ref: [model id, ...]}`` for the expired accounts in ``expired_refs``.
 
 	A model id is listed only when EVERY enabled row serving that bare id (any provider, credential
 	type or account) belongs to an expired account: the error card recognises a failed turn by its
 	model alone, so an id also served by a healthy account or an API-key row must not be blamed on
 	the dead sign-in. The direct ``direct:openai`` account serves the flat ``llm_model``.
-	Model ids are not sensitive, so members get them too."""
-	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _field, _model_accounts
-
-	settings = _settings()
+	Model ids are not sensitive, so members get them too. ``rows`` is ``_enabled_rows()``."""
+	rows = _enabled_rows() if rows is None else rows
 	servers: dict[str, set[str]] = {}
-	for model in _enabled_models(settings):
-		model_id = (_field(model, "model") or "").strip()
-		if not model_id:
+	for row in rows:
+		if not row.model_id:
 			continue
-		refs = set()
-		if _credential_type(model) == "subscription":
-			refs = {(_field(a, "account_ref") or "").strip() for a in _model_accounts(model)} - {""}
 		# A row with no subscription account (api key, or no live sign-in) is a healthy server.
-		servers.setdefault(model_id.split("/")[-1], set()).update(refs or {""})
+		servers.setdefault(row.model_id.split("/")[-1], set()).update(set(row.refs) or {""})
 	served: dict[str, list[str]] = {}
-	for model in _enabled_models(settings):
-		model_id = (_field(model, "model") or "").strip()
-		if not model_id or not servers[model_id.split("/")[-1]] <= expired_refs:
+	for row in rows:
+		if not row.model_id or not servers[row.model_id.split("/")[-1]] <= expired_refs:
 			continue
-		for account in _model_accounts(model):
-			ref = (_field(account, "account_ref") or "").strip()
-			if ref and model_id not in served.setdefault(ref, []):
-				served[ref].append(model_id)
+		for ref in row.refs:
+			if row.model_id not in served.setdefault(ref, []):
+				served[ref].append(row.model_id)
 	if served:
 		return served
 	# Pool rows win: the flat llm_* fields only describe the served model when there is no pool.
-	direct_model = (settings.get("llm_model") or "").strip()
+	direct_model = (_settings().get("llm_model") or "").strip()
 	if direct_model and DIRECT_REF in _live_accounts():
 		return {DIRECT_REF: [direct_model]}
 	return {}
@@ -207,12 +232,11 @@ def _int(value) -> int:
 
 def expired_entries() -> list[dict]:
 	"""Stored expired entries for accounts that still exist, oldest first, each with its ``account_ref``."""
+	stored = {ref: e for ref, e in current_health().items() if e.get("state") == "expired"}
+	if not stored:
+		return []  # nothing flagged: skip the live-account read (it decrypts every row)
 	live = _live_accounts()
-	entries = [
-		{"account_ref": ref, **entry}
-		for ref, entry in current_health().items()
-		if ref in live and entry.get("state") == "expired"
-	]
+	entries = [{"account_ref": ref, **entry} for ref, entry in stored.items() if ref in live]
 	return sorted(entries, key=lambda e: (_int(e.get("since")), e["account_ref"]))
 
 
@@ -500,56 +524,47 @@ def note_recorded_turn(outcome: str, row) -> None:
 # ---- what the SPA reads ---------------------------------------------------------------------------
 
 
-def _pool_rows() -> list:
+def _pool_rows(rows: list[_PoolRow] | None = None) -> list[_PoolRow]:
 	"""The enabled rows in pool order, the order Auto tries them."""
-	from jarvis.jarvis.pool_serialize import _enabled_models, _fleet_sort_key
+	from jarvis.jarvis.pool_serialize import _fleet_sort_key
 
-	return sorted(_enabled_models(_settings()), key=_fleet_sort_key)
-
-
-def _row_refs(model) -> set[str]:
-	from jarvis.jarvis.pool_serialize import _field, _model_accounts
-
-	return {(_field(a, "account_ref") or "").strip() for a in _model_accounts(model)} - {""}
+	rows = _enabled_rows() if rows is None else rows
+	return sorted(rows, key=lambda r: _fleet_sort_key(r.model))
 
 
-def _answering(model, expired_refs: set) -> str:
-	"""The label ``model`` answers under while ``expired_refs`` are dead, or ``""`` if it cannot. A
+def _answering(row: _PoolRow, expired_refs: set) -> str:
+	"""The label ``row`` answers under while ``expired_refs`` are dead, or ``""`` if it cannot. A
 	subscription row answers while it has an account that is not expired (its upstream's label); an
 	api-key row answers under its model id."""
-	from jarvis.jarvis.pool_serialize import _credential_type, _field, _subscription_upstream
-
-	if _credential_type(model) == "subscription":
-		if _row_refs(model) - set(expired_refs):
-			return LABELS.get(_subscription_upstream(model), "")
-		return ""
-	return (_field(model, "model") or "").strip()
+	if row.is_subscription:
+		return LABELS.get(row.upstream, "") if set(row.refs) - set(expired_refs) else ""
+	return row.model_id
 
 
-def fallback_label(expired_refs: set) -> str:
+def fallback_label(expired_refs: set, rows: list[_PoolRow] | None = None) -> str:
 	"""Label of the first enabled row, in pool order, that can still answer while ``expired_refs`` are
 	dead, or ``""`` when none can (chats fail). A subscription row answers while it has at least one
 	account that is not expired; its label is its upstream's. An api-key row answers; its label is its
 	model id, the row's own label in the UI. Computed once here so the banner, the AI models row and the
-	member notice never disagree."""
-	for model in _pool_rows():
-		label = _answering(model, expired_refs)
+	member notice never disagree. ``rows`` is ``_enabled_rows()``."""
+	for row in _pool_rows(rows):
+		label = _answering(row, expired_refs)
 		if label:
 			return label
 	return ""
 
 
-def _skipped_refs(expired_refs: set) -> set[str]:
+def _skipped_refs(expired_refs: set, rows: list[_PoolRow] | None = None) -> set[str]:
 	"""The expired accounts whose own row sits AFTER the row that answers. Auto tries rows in pool
 	order, so it was already past those rows: nothing switched when they expired, and the card must
 	not say "Auto uses X". An account's own row is the first enabled subscription row listing it."""
-	rows = _pool_rows()
-	answering_at = next((i for i, m in enumerate(rows) if _answering(m, expired_refs)), None)
+	ordered = _pool_rows(rows)
+	answering_at = next((i for i, r in enumerate(ordered) if _answering(r, expired_refs)), None)
 	if answering_at is None:
 		return set()
 	skipped = set()
 	for ref in expired_refs:
-		own_at = next((i for i, m in enumerate(rows) if ref in _row_refs(m)), None)
+		own_at = next((i for i, r in enumerate(ordered) if ref in r.refs), None)
 		if own_at is not None and own_at > answering_at:
 			skipped.add(ref)
 	return skipped
@@ -563,15 +578,10 @@ def _fallback_for(entry: dict, fallback: str) -> str:
 	return fallback
 
 
-def ui_entries() -> list[dict]:
-	"""``expired_entries()`` with the ``fallback`` label the SPA shows and whether the entry was
-	``skipped`` (its row is after the answering one), oldest first."""
-	entries = expired_entries()
-	if not entries:
-		return []
+def _with_fallbacks(entries: list[dict], rows: list[_PoolRow]) -> list[dict]:
 	refs = {e["account_ref"] for e in entries}
-	fallback = fallback_label(refs)
-	skipped = _skipped_refs(refs) if fallback else set()
+	fallback = fallback_label(refs, rows)
+	skipped = _skipped_refs(refs, rows) if fallback else set()
 	return [
 		{
 			**entry,
@@ -582,8 +592,19 @@ def ui_entries() -> list[dict]:
 	]
 
 
+def ui_entries() -> list[dict]:
+	"""``expired_entries()`` with the ``fallback`` label the SPA shows and whether the entry was
+	``skipped`` (its row is after the answering one), oldest first. Nothing expired reads no row."""
+	entries = expired_entries()
+	return _with_fallbacks(entries, _enabled_rows()) if entries else []
+
+
 def _member_entry(entry: dict) -> dict:
 	return {"upstream": entry["upstream"], "label": entry["label"], "models": entry["models"]}
+
+
+def _upstreams() -> list[str]:
+	return sorted({account["upstream"] for account in _live_accounts().values()})
 
 
 @frappe.whitelist()
@@ -599,12 +620,20 @@ def get_subscription_notice() -> dict:
 	from jarvis.permissions import has_jarvis_admin_access, require_jarvis_access
 
 	require_jarvis_access()
-	entries = ui_entries()
-	served = _account_models({e["account_ref"] for e in entries})
+	is_admin = has_jarvis_admin_access()
+	# Nothing expired is the common case (every chat load, every realtime event): answer before any
+	# pool row is read. Only the admin's upstreams list reads the accounts, once, in _live_accounts.
+	entries = expired_entries()
+	if not entries:
+		if is_admin:
+			return {"expired": [], "upstreams": _upstreams()}
+		return {"expired": [], "expired_models": [], "upstreams": None}
+	rows = _enabled_rows()
+	entries = _with_fallbacks(entries, rows)
+	served = _account_models({e["account_ref"] for e in entries}, rows)
 	entries = [{**e, "models": served.get(e["account_ref"], [])} for e in entries]
-	if has_jarvis_admin_access():
-		upstreams = sorted({account["upstream"] for account in _live_accounts().values()})
-		return {"expired": entries, "upstreams": upstreams}
+	if is_admin:
+		return {"expired": entries, "upstreams": _upstreams()}
 	failing = [_member_entry(e) for e in entries if not e["fallback"]]
 	# The banner shows only a failing entry with no fallback, but an explicit pick of ANY expired
 	# model does not fail over, so the error card needs every expired entry's models.
