@@ -3707,6 +3707,7 @@
 								class="jv-draft-fld"
 								:class="{
 									missing: isFieldMissing(f),
+									invalid: f.serverInvalid,
 									changed: f.changed,
 								}"
 							>
@@ -4128,7 +4129,8 @@ import ReportScope from "@/components/chat/ReportScope.vue";
 import { reportToolsByAssistant } from "@/lib/reportScope";
 import { toolRowFromResult, upsertToolRow, withLiveToolRows } from "@/lib/liveToolRows";
 import { collectDocRefs } from "@/lib/docRefs";
-import { markParked, parkedByCard, parkedNoteFor, parkedNoteOf } from "@/lib/draftParked";
+import { markParked, parkedByCard, parkedNoteFor } from "@/lib/draftParked";
+import { applyActionPayload, draftSaveOutcome, stampDraftModel } from "@/lib/draftSave";
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
@@ -7081,6 +7083,11 @@ async function buildDraftModel(a) {
 
 // Open the editable panel for an action, via the shared buildDraftModel.
 async function openDraftPanel(a) {
+	// The draft this panel edits, captured before the build: actionFor goes null
+	// while a turn runs and moves on with the next reply, so read later it would
+	// name another draft (the server sends "fixing it in the panel" once per draft).
+	const messageKey = actionFor.value || "";
+	const card = activeAction.value || null;
 	let model;
 	// Deliberate: swallow to the SAME dead-end the old `if (!model) return` gave, so
 	// a guard throw cannot escape a @click handler. The summary card already shows
@@ -7091,7 +7098,8 @@ async function openDraftPanel(a) {
 		return;
 	}
 	if (!model) return;
-	draftPanel.value = model;
+	// Only the open panel can be edited after a failure (R2-9, lib/draftSave).
+	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true });
 }
 
 function _blankRow(columns) {
@@ -7223,6 +7231,8 @@ async function ensureActionSummary(a) {
 		a.tables || [],
 	]);
 	if (summaryState.value.key === key) return;
+	const messageKey = actionFor.value || ""; // this draft's message, before the build
+	const card = activeAction.value || null;
 	summaryState.value = { key, model: null, view: null, error: "" };
 	let model;
 	try {
@@ -7244,6 +7254,7 @@ async function ensureActionSummary(a) {
 		return;
 	}
 	if (summaryState.value.key !== key) return; // a newer action superseded this build
+	stampDraftModel(model, { messageKey, card, editable: false });
 	summaryState.value = { key, model, view: summarize(model, a), error: "" };
 }
 function isEditVerb(a) {
@@ -7339,8 +7350,9 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			values[t.fieldname] = tableRowsPayload(t, JSON.parse(t.origJson));
 		}
 	}
-	// Which draft this is, captured before the round-trip (a new turn may replace it).
-	const draftKey = actionFor.value;
+	// Which draft this is: stamped when the model was built (actionFor drifts once a
+	// reply lands), else the current one, captured before the round-trip.
+	const draftKey = p.messageKey || actionFor.value;
 	const waiting =
 		parkedNoteFor(parkedDrafts.value, draftKey) ||
 		parkedByCard(pendingActions.value, draftKey);
@@ -7352,32 +7364,41 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 	p.applying = true;
 	p.error = null;
 	try {
-		const r = await api.applyAction({
-			verb: p.verb,
-			doctype: p.doctype,
-			name: p.docName || "",
-			values,
-			submit: submitFlag ? 1 : 0,
-			conversation: currentId.value || "",
-			continue: p.cont ? 1 : 0,
-			// which card this confirms: a File Box chat parks exactly this one
-			message: actionFor.value || "",
-			card: activeAction.value || null,
-		});
-		if (r && r.ok === false) {
-			// apply_action now returns the enriched {ok:false, error} envelope
-			// (rich detail + hint, and nothing was saved) instead of throwing a
-			// raw Frappe 403/417. Keep the panel open so the values are editable.
+		const r = await api.applyAction(
+			applyActionPayload(p, {
+				values,
+				submit: submitFlag,
+				conversation: currentId.value,
+				fallback: { messageKey: draftKey, card: activeAction.value },
+			})
+		);
+		const outcome = draftSaveOutcome(r, agentName);
+		if (outcome.kind === "closed") {
+			// R2-9: no value in the panel fixes this one (a business rule, a
+			// permission) or part of it was saved: the panel closes and the reply in
+			// the chat explains (or the note says to ask, when it could not be sent).
+			closeDraftPanel();
+			notify(outcome.note, { type: "error" });
+			await loadConversation(currentId.value);
+			store.loadConversations();
+			showQueuedContinuation(r);
+			return;
+		}
+		if (outcome.kind === "keep") {
+			// apply_action returns the enriched {ok:false, error} envelope (rich
+			// detail + hint, and nothing was saved) instead of throwing a raw Frappe
+			// 403/417. Keep the panel open so the values are editable (R2-9: the
+			// assistant is only told the user is fixing it here).
 			p.applying = false;
-			p.error = r.error || { message: "Could not save. Check the values." };
+			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
 			return;
 		}
 		// Sensitive configuration: nothing was saved, a confirmation card now waits in
 		// the chat. Say so where the person clicked (no silent close) and mark the
 		// draft so it can't park a second card.
-		const parked = parkedNoteOf(r);
-		if (parked) {
+		if (outcome.kind === "parked") {
+			const parked = outcome.note;
 			p.applying = false;
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
@@ -7389,20 +7410,23 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 		closeDraftPanel();
 		await loadConversation(currentId.value);
 		store.loadConversations();
-		// SUX-3/SUXI-2: the continuation turn queued — show the chip + lock the
-		// composer instead of the card vanishing into silence.
-		if (r && r.queued) {
-			queuedTurn.value = {
-				run_id: r.run_id,
-				message_id: r.message_id,
-				position: r.queued_position || null,
-			};
-			sending.value = true;
-		}
+		showQueuedContinuation(r);
 	} catch (e) {
 		p.applying = false;
 		p.error = { message: errMessage(e, "Could not save. Check the values.") };
 	}
+}
+
+// SUX-3/SUXI-2: the panel's continuation turn queued: show the chip + lock the
+// composer instead of the panel vanishing into silence.
+function showQueuedContinuation(r) {
+	if (!r || !r.queued) return;
+	queuedTurn.value = {
+		run_id: r.run_id,
+		message_id: r.message_id,
+		position: r.queued_position || null,
+	};
+	sending.value = true;
 }
 
 function discardDraft() {
@@ -15600,6 +15624,10 @@ onUnmounted(() => {
 }
 .jv-draft-fld.missing .jv-action-input {
 	border-color: var(--amber-bd);
+}
+/* a value the save refused (a bad option or link): marked until the next save */
+.jv-draft-fld.invalid .jv-action-input {
+	border-color: var(--red);
 }
 .jv-draft-fld.changed .jv-action-input {
 	border-color: var(--cta-bd);

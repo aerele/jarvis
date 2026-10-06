@@ -42,3 +42,47 @@ describe("ReceiptChip auto-applied provenance", () => {
 		expect(w.find(".jv-receipt-automode").exists()).toBe(false);
 	});
 });
+
+describe("ReceiptChip failure reference", () => {
+	const failed = {
+		role: "tool",
+		tool_name: "submit_doc",
+		tool_args: JSON.stringify({ doctype: "Sales Order", name: "SO-1" }),
+		tool_result: JSON.stringify({
+			ok: false,
+			error: {
+				code: "InvalidArgumentError",
+				message: "Credit limit crossed",
+				reference: "pa-77",
+			},
+		}),
+		action_outcome: "failed",
+	};
+
+	it("a failed chip shows the reference with a copy button", () => {
+		const w = mount(ReceiptChip, { props: { message: failed } });
+		expect(w.text()).toContain("Reference:");
+		expect(w.find("code").text()).toBe("pa-77");
+		expect(w.find('button[aria-label="Copy reference pa-77"]').exists()).toBe(true);
+	});
+
+	it("a partial chip shows it too", () => {
+		const w = mount(ReceiptChip, {
+			props: { message: { ...failed, action_outcome: "partial" } },
+		});
+		expect(w.find("code").text()).toBe("pa-77");
+	});
+
+	it("no reference on a confirmed chip, or when the bench sent none", () => {
+		expect(mount(ReceiptChip, { props: { message: autoApplied } }).text()).not.toContain(
+			"Reference:"
+		);
+		const bare = {
+			...failed,
+			tool_result: JSON.stringify({ ok: false, error: { message: "x" } }),
+		};
+		expect(mount(ReceiptChip, { props: { message: bare } }).text()).not.toContain(
+			"Reference:"
+		);
+	});
+});

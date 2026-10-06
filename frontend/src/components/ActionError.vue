@@ -5,7 +5,8 @@
   reason tucked behind a "Show details" expander - mirroring the turn-level error
   card. Fed by the enriched `{ok:false, error:{code, message, detail, hint}}`
   envelope (see jarvis/api.py _translate_write_error); tolerates a bare string or
-  a partial object so the thrown-error (network/500) fallback still renders.
+  a partial object so the thrown-error (network/500) fallback still renders. A
+  failed confirmation also shows its reference (error.reference) for support.
 -->
 <template>
 	<div role="alert">
@@ -15,14 +16,16 @@
 				<summary>Show details</summary>
 				<div class="jv-ae-detail">{{ err.detail }}</div>
 			</details>
+			<FailureReference :id="reference" />
 		</Banner>
 	</div>
 </template>
 
 <script setup>
 import { computed } from "vue";
-import { personError } from "@/lib/actionSummary";
+import { failureReferenceOf, personError } from "@/lib/actionSummary";
 import Banner from "./Banner.vue";
+import FailureReference from "./FailureReference.vue";
 
 const props = defineProps({
 	// The envelope's `error` object, or a plain message string (fallback path).
@@ -46,6 +49,8 @@ const HEADLINES = {
 const err = computed(() => personError(props.error));
 
 const headline = computed(() => HEADLINES[err.value.code] || "Something went wrong");
+// A failed confirmation's own id, for support (absent on a draft-panel failure).
+const reference = computed(() => failureReferenceOf(err.value));
 </script>
 
 <style scoped>
