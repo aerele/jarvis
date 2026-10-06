@@ -151,6 +151,31 @@ def _log_failure_throttled() -> None:
 		pass
 
 
+def _positive_int(value) -> int | None:
+	"""``value`` if it is a real positive int (a bool is not), else None."""
+	if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+		return value
+	return None
+
+
+def _apply_max_concurrent_chats(reply) -> None:
+	"""Store the plan's chat cap from admin's heartbeat reply (``{"tenant", "max_concurrent_chats"}``).
+	Key absent (older admin) or any bad value -> keep what is stored; explicit null -> clear it;
+	a positive int -> set it. Writes only on change, so an unchanged value causes no cache churn.
+	No commit: the scheduler job commits."""
+	if not isinstance(reply, dict) or "max_concurrent_chats" not in reply:
+		return
+	raw = reply["max_concurrent_chats"]
+	new = _positive_int(raw)
+	if new is None and raw is not None:
+		return
+	# DB truth, not the document cache: a stale cache must not suppress a needed write.
+	stored = _positive_int(frappe.db.get_single_value("Jarvis Settings", "max_concurrent_chats"))
+	if new == stored:
+		return
+	frappe.db.set_single_value("Jarvis Settings", "max_concurrent_chats", new, update_modified=False)
+
+
 def push_bench_heartbeat() -> None:
 	"""``*/5`` scheduler entry. Self-gating + best-effort; NEVER raises. UNCONDITIONAL:
 	posts every tick whenever admin is configured (that is the point — silence means the
@@ -160,7 +185,8 @@ def push_bench_heartbeat() -> None:
 			return
 		from jarvis import admin_client
 
-		admin_client.push_bench_heartbeat(bench_liveness_vector())
+		reply = admin_client.push_bench_heartbeat(bench_liveness_vector())
+		_apply_max_concurrent_chats(reply)
 	except (AdminAuthError, AdminUnreachableError, AdminRateLimitedError, AdminValidationError):
 		# Best-effort telemetry: ANY push the backend does not accept — not onboarded, admin
 		# down, throttled, or a 4xx (INCLUDING the ingest endpoint not existing yet, before
