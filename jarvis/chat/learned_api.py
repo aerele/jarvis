@@ -45,6 +45,7 @@ from frappe.query_builder import Case, Order
 from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_days, now_datetime, today
 
+from jarvis.learning import chat_pattern_privacy
 from jarvis.learning.lifecycle import REDRAFT_STALE_PREFIX
 from jarvis.permissions import JARVIS_REVIEWER_ROLES, require_jarvis_admin
 
@@ -343,8 +344,9 @@ def list_learned_patterns_page(
 
 	p = frappe.qb.DocType(JLP)
 	# `base` = status + surfaced + strength + search (shared with the facet
-	# query). The domain condition applies to the row/total query only.
-	base = frappe.qb.from_(p)
+	# query). The domain condition applies to the row/total query only. A pattern
+	# mined from someone's chats is left out until its owner answers.
+	base = frappe.qb.from_(p).where(chat_pattern_privacy.reviewable(p))
 	if decided:
 		base = base.where(p.status.isin(_DECIDED_STATUSES))
 		if disposition == "approved":
@@ -437,8 +439,15 @@ def list_learned_patterns_page(
 
 
 def _queued_count() -> int:
-	"""Proposed but not yet surfaced (the "N more queued" escape hatch)."""
-	return frappe.db.count(JLP, {"status": "Proposed", "surfaced": 0})
+	"""Proposed but not yet surfaced (the "N more queued" escape hatch), leaving
+	out chat-mined patterns still awaiting their owner."""
+	p = frappe.qb.DocType(JLP)
+	return (
+		frappe.qb.from_(p)
+		.select(Count("*"))
+		.where((p.status == "Proposed") & (p.surfaced == 0) & chat_pattern_privacy.reviewable(p))
+		.run()[0][0]
+	)
 
 
 def _pending_apply_count() -> int:
@@ -535,6 +544,7 @@ def get_learned_pattern(name: str) -> dict:
 	temporal-spread JSON, detected roles, the exact compiled-bullet preview, run
 	links, and the exceptions list (SM may see named parties)."""
 	_guard()
+	chat_pattern_privacy.require_reviewable(name)
 	doc = frappe.get_doc(JLP, name)
 	evidence = _parse_json(doc.evidence, {})
 	exceptions = evidence.get("exceptions") if isinstance(evidence, dict) else None
@@ -629,6 +639,7 @@ def _compiled_preview(doc) -> str:
 def _load_for_transition(name: str, allowed_sources: tuple, action: str):
 	"""Re-read the row and guard its source status (the TOCTOU re-read). The
 	subsequent ``doc.save`` adds the modified-timestamp concurrency check."""
+	chat_pattern_privacy.require_reviewable(name)
 	doc = frappe.get_doc(JLP, name)
 	if doc.status not in allowed_sources:
 		frappe.throw(_("Pattern {0} is {1}; cannot {2}.").format(name, doc.status, action))
@@ -901,6 +912,7 @@ def polish_learned_draft(name: str) -> dict:
 	# the status still allows polish, then write ONLY the changed columns.
 	# update_modified stays at its default so a genuine concurrent SM edit is
 	# still caught by the modified-timestamp concurrency check.
+	chat_pattern_privacy.require_reviewable(name)
 	status = frappe.db.get_value(JLP, name, "status")
 	if status not in ("Proposed", "Stale"):
 		return {
@@ -970,6 +982,7 @@ def draft_insight_skill_update(pattern_name: str) -> dict:
 	the OFFERED candidates (managed/Personal rows are never offered) and stay
 	inside the doctype instruction cap."""
 	_guard()
+	chat_pattern_privacy.require_reviewable(pattern_name)
 	doc = frappe.get_doc(JLP, pattern_name)
 	if (doc.effective_sensitivity or "") not in ("B", "C"):
 		return _draft_envelope(
@@ -1969,7 +1982,7 @@ def _evidence_owner(doc):
 
 
 def _pattern_chat_bundle(name: str) -> str:
-	if not frappe.db.exists(JLP, name):
+	if not frappe.db.exists(JLP, name) or chat_pattern_privacy.awaiting_owner(name):
 		frappe.throw(_("Unknown learned pattern: {0}.").format(name))
 	doc = frappe.get_doc(JLP, name)
 	domain = doc.domain or "org"
@@ -2142,6 +2155,7 @@ def _resolve_followup_target(name: str):
 	question's user, else the evidence owner (source_pattern carried through for
 	provenance). Promotion -> the request owner (no source_pattern)."""
 	if frappe.db.exists(JLP, name):
+		chat_pattern_privacy.require_reviewable(name)
 		q = _linked_question(name)
 		if q and q.get("user"):
 			return q["user"], name
