@@ -527,7 +527,7 @@ def fallback_label(expired_refs: set) -> str:
 
 def _fallback_for(entry: dict, fallback: str) -> str:
 	"""When the account that answers is another one of the dead sign-in's own upstream, say so; the
-	SPA reads ``{fallback} answers until you reconnect``."""
+	SPA reads ``Auto uses {fallback} until you reconnect``."""
 	if fallback and fallback == LABELS.get(entry.get("upstream")):
 		return f"Another {fallback} account"
 	return fallback

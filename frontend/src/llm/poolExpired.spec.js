@@ -52,14 +52,14 @@ describe("subscriptionAccountHealth expired level", () => {
 describe("expiredLine", () => {
 	it("names the fallback", () => {
 		expect(expiredLine(entry("A1", { fallback: "Anthropic" }), { formatDate: fmt })).toBe(
-			"Expired Oct 6, 2026. Anthropic answers until you reconnect.",
+			"Expired Oct 6, 2026. Auto uses Anthropic until you reconnect.",
 		);
 	});
 
 	it("reads naturally when the fallback is another account of the same upstream", () => {
 		expect(
 			expiredLine(entry("A1", { fallback: "Another OpenAI account" }), { formatDate: fmt }),
-		).toBe("Expired Oct 6, 2026. Another OpenAI account answers until you reconnect.");
+		).toBe("Expired Oct 6, 2026. Auto uses another OpenAI account until you reconnect.");
 	});
 
 	it("formats the since epoch as a local date by default", () => {
@@ -70,7 +70,7 @@ describe("expiredLine", () => {
 			day: "numeric",
 		});
 		expect(expiredLine(entry("A1", { fallback: "Anthropic", since }))).toBe(
-			`Expired ${expected}. Anthropic answers until you reconnect.`,
+			`Expired ${expected}. Auto uses Anthropic until you reconnect.`,
 		);
 	});
 
@@ -86,13 +86,13 @@ describe("expiredLine", () => {
 				sameRowOk: true,
 				formatDate: fmt,
 			}),
-		).toBe("Another account answers until you reconnect.");
+		).toBe("Auto uses another account until you reconnect.");
 	});
 
 	it("drops the date prefix when there is no since", () => {
 		expect(
 			expiredLine(entry("A1", { since: 0, fallback: "Anthropic" }), { formatDate: fmt }),
-		).toBe("Anthropic answers until you reconnect.");
+		).toBe("Auto uses Anthropic until you reconnect.");
 	});
 
 	it("is empty for no entry and has no em dash", () => {
@@ -107,7 +107,7 @@ describe("per-account state (Review Focus 5)", () => {
 			entry("A1", { fallback: "Anthropic" }),
 		]);
 		expect(states[0].entry.account_ref).toBe("A1");
-		expect(states[0].line).toBe("Another account answers until you reconnect.");
+		expect(states[0].line).toBe("Auto uses another account until you reconnect.");
 		expect(states[0].line).not.toContain("Chats fail");
 		expect(states[1]).toMatchObject({ entry: null, line: "" });
 	});
@@ -122,7 +122,7 @@ describe("per-account state (Review Focus 5)", () => {
 			entry("A2", { fallback: "Anthropic" }),
 		]);
 		expect(out.entry.account_ref).toBe("A1");
-		expect(out.line).toContain("Anthropic answers until you reconnect.");
+		expect(out.line).toContain("Auto uses Anthropic until you reconnect.");
 	});
 
 	it("a single-account row expires on its own account", () => {

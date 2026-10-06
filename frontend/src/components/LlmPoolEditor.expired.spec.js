@@ -109,7 +109,7 @@ describe("an expired single-account row", () => {
 		expect(badges(w)).toHaveLength(1);
 		expect(badges(w)[0].attributes("data-theme")).toBe("red");
 		expect(w.find(".jv-flist-expline").text()).toContain(
-			"claude-x answers until you reconnect.",
+			"Auto uses claude-x until you reconnect.",
 		);
 		const reconnect = w
 			.findAll("button")
@@ -161,7 +161,7 @@ describe("two accounts on one row, one expired (Review Focus 5)", () => {
 		const w = await mountEditor({ expiredEntries: [entry("A1", { fallback: "Anthropic" })] });
 		expect(badges(w)).toHaveLength(1);
 		expect(w.find(".jv-flist-subrow-note").text()).toBe(
-			"Another account answers until you reconnect.",
+			"Auto uses another account until you reconnect.",
 		);
 		expect(w.find(".jv-flist-expline").exists()).toBe(false);
 		expect(w.text()).not.toContain("Chats fail until you reconnect.");

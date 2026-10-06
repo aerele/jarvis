@@ -645,14 +645,19 @@ function defaultFormatDate(epochSeconds) {
 	});
 }
 
+// "Another OpenAI account" is a sentence-initial label; mid-sentence it reads "another OpenAI account".
+export function fallbackInSentence(fallback) {
+	return fallback.replace(/^Another /, "another ");
+}
+
 // The line under an expired row (spec 3). Another account in the SAME row that still works is the most
 // specific truth and wins over the pool-wide fallback.
 export function expiredLine(entry, { sameRowOk = false, formatDate = defaultFormatDate } = {}) {
 	if (!entry) return "";
-	if (sameRowOk) return "Another account answers until you reconnect.";
+	if (sameRowOk) return "Auto uses another account until you reconnect.";
 	if (entry.fallback) {
 		const when = entry.since ? `Expired ${formatDate(entry.since)}. ` : "";
-		return `${when}${entry.fallback} answers until you reconnect.`;
+		return `${when}Auto uses ${fallbackInSentence(entry.fallback)} until you reconnect.`;
 	}
 	return "Chats fail until you reconnect.";
 }

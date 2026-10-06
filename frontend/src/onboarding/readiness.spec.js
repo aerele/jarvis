@@ -728,7 +728,7 @@ describe("subscriptionExpiredBanner copy (spec section 3)", () => {
 
 	it("an admin whose other model still answers is told which one", () => {
 		const b = subscriptionExpiredBanner([{ ...openai, fallback: "Anthropic" }], true);
-		expect(b.message).toBe("Anthropic answers until you reconnect.");
+		expect(b.message).toBe("Auto uses Anthropic until you reconnect.");
 		expect(b.showReconnect).toBe(true);
 	});
 

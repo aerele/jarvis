@@ -356,7 +356,7 @@ export function subscriptionExpiredBanner(expired, isAdmin) {
 	return {
 		title,
 		message: entry.fallback
-			? `${entry.fallback} answers until you reconnect.`
+			? `Auto uses ${entry.fallback.replace(/^Another /, "another ")} until you reconnect.`
 			: "Chats that need it will fail until it is reconnected.",
 		upstream: entry.upstream,
 		accountRef: entry.account_ref || "",
