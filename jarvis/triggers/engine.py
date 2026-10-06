@@ -351,12 +351,31 @@ def _run_script_action(row: dict, doc, method: str, depth: int) -> None:
 # --------------------------------------------------------------------------- #
 def _snapshot_json(doc) -> str:
 	"""The doc AT EVENT TIME as JSON: top-level keys starting with "_" are
-	dropped, output clipped to the snapshot cap (LLM context, not archival)."""
+	dropped, output clipped to the snapshot cap (LLM context, not archival).
+
+	Fields above permlevel 0 are dropped too, child rows included: the LLM's
+	summary is shown to everyone who can read the record, and some of them
+	can't see those fields (e.g. a permlevel-2 rate)."""
 	try:
-		data = {k: v for k, v in doc.as_dict(convert_dates_to_str=True).items() if not str(k).startswith("_")}
+		data = _permlevel_0(doc.as_dict(convert_dates_to_str=True), doc.doctype)
+		data = {k: v for k, v in data.items() if not str(k).startswith("_")}
 		return frappe.as_json(data)[:_SNAPSHOT_CHAR_CAP]
 	except Exception:
 		return "{}"
+
+
+def _permlevel_0(values: dict, doctype: str) -> dict:
+	"""``values`` without its fields above permlevel 0, recursing into tables."""
+	meta = frappe.get_meta(doctype)
+	out = {}
+	for key, value in values.items():
+		df = meta.get_field(key)
+		if df and df.permlevel:
+			continue
+		if df and df.fieldtype in frappe.model.table_fields and isinstance(value, list):
+			value = [_permlevel_0(row, df.options) if isinstance(row, dict) else row for row in value]
+		out[key] = value
+	return out
 
 
 def _drop_llm_queue() -> None:
