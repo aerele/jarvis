@@ -188,6 +188,21 @@ def visible_scope_condition(user: str | None = None) -> str:
 	return "(" + " or ".join(clauses) + ")"
 
 
+def visible_scope_criterion(page, user: str | None = None):
+	"""``visible_scope_condition`` as a ``frappe.qb`` criterion over ``page``;
+	None when nothing is hidden (System Managers)."""
+	from frappe.query_builder.functions import Coalesce
+
+	user = user or frappe.session.user
+	if _is_sm(user):
+		return None
+	visible = Coalesce(page.scope, "").isin(["", "Org"])
+	roles = [r for r in frappe.get_roles(user) if r]
+	if roles:
+		visible |= (page.scope == "Role") & page.target_role.isin(roles)
+	return visible | ((page.scope == "User") & (page.target_user == user))
+
+
 def wiki_page_query_conditions(user: str | None = None) -> str:
 	"""hooks.permission_query_conditions entry — scopes every Desk/ORM list
 	query. Empty string (no restriction) for System Managers."""

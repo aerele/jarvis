@@ -41,6 +41,8 @@ import json
 
 import frappe
 from frappe import _
+from frappe.query_builder import Case, Order
+from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_days, now_datetime, today
 
 from jarvis.learning.lifecycle import REDRAFT_STALE_PREFIX
@@ -339,74 +341,58 @@ def list_learned_patterns_page(
 	if domain and domain not in _DOMAINS:
 		frappe.throw(_("Invalid domain filter."))
 
-	params: dict = {"start": start, "page_length": pl}
+	p = frappe.qb.DocType(JLP)
 	# `base` = status + surfaced + strength + search (shared with the facet
 	# query). The domain condition applies to the row/total query only.
-	base: list[str] = []
+	base = frappe.qb.from_(p)
 	if decided:
-		params["decided_statuses"] = list(_DECIDED_STATUSES)
-		base.append("status IN %(decided_statuses)s")
+		base = base.where(p.status.isin(_DECIDED_STATUSES))
 		if disposition == "approved":
-			base.append("status IN ('Approved', 'Active')")
+			base = base.where(p.status.isin(("Approved", "Active")))
 		elif disposition == "snoozed":
-			base.append("status = 'Snoozed'")
+			base = base.where(p.status == "Snoozed")
 		elif disposition == "applied":
-			params["applied_like"] = f"{_lk(APPLIED_NOTE_PREFIX)}%"
-			base.append("review_note LIKE %(applied_like)s")
+			base = base.where(p.review_note.like(f"{_lk(APPLIED_NOTE_PREFIX)}%"))
 		elif disposition == "acknowledged":
-			params["ack_note"] = ACK_NOTE
-			base.append("review_note = %(ack_note)s")
+			base = base.where(p.review_note == ACK_NOTE)
 		elif disposition == "rejected":
-			params["ack_prefix"] = f"{_lk('Acknowledged')}%"
-			base.append("status = 'Rejected' AND ifnull(review_note, '') NOT LIKE %(ack_prefix)s")
+			base = base.where(
+				(p.status == "Rejected") & IfNull(p.review_note, "").not_like(f"{_lk('Acknowledged')}%")
+			)
 	elif status and status != "All":
-		params["status"] = status
-		base.append("status = %(status)s")
+		base = base.where(p.status == status)
 	sc = _surfaced_cond(surfaced) if not decided else None
 	if sc is not None:
-		params["surfaced"] = sc
-		base.append("surfaced = %(surfaced)s")
+		base = base.where(p.surfaced == sc)
 	if strength:
-		params["strength"] = strength
-		base.append("strength_band = %(strength)s")
+		base = base.where(p.strength_band == strength)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		base.append("(pattern_statement LIKE %(q)s OR skill_draft LIKE %(q)s)")
+		q = f"%{_lk(search)}%"
+		base = base.where(p.pattern_statement.like(q) | p.skill_draft.like(q))
 
-	domain_cond = None
-	if domain:
-		params["domain"] = domain
-		domain_cond = "domain = %(domain)s"
+	main = base.where(p.domain == domain) if domain else base
 
-	main_where = " AND ".join(base + ([domain_cond] if domain_cond else [])) or "1=1"
-	base_where = " AND ".join(base) or "1=1"
-
-	col_list = ", ".join(f"`{c}`" for c in _CARD_FIELDS)
 	# MariaDB has no NULLS LAST: `IS NULL` sorts the undated rows behind the
 	# dated ones for the Decided log; the default board keeps strength-first.
-	order_by = (
-		(
-			"(`reviewed_at` IS NULL) ASC, `reviewed_at` ASC, `creation` ASC, `name` ASC"
-			if sort == "oldest"
-			else "(`reviewed_at` IS NULL) ASC, `reviewed_at` DESC, `creation` DESC, `name` ASC"
+	if decided:
+		d = Order.asc if sort == "oldest" else Order.desc
+		order_by = [(p.reviewed_at.isnull(), Order.asc), (p.reviewed_at, d), (p.creation, d)]
+	else:
+		strength_rank = (
+			Case()
+			.when(p.strength_band == "High", 0)
+			.when(p.strength_band == "Medium", 1)
+			.when(p.strength_band == "Low", 2)
+			.else_(3)
 		)
-		if decided
-		else (
-			"CASE `strength_band` "
-			"WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 WHEN 'Low' THEN 2 ELSE 3 END, "
-			"`creation` DESC, `name` ASC"
-		)
-	)
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{JLP}` WHERE {main_where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""SELECT {col_list}
-		FROM `tab{JLP}`
-		WHERE {main_where}
-		ORDER BY {order_by}
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
-	)
+		order_by = [(strength_rank, Order.asc), (p.creation, Order.desc)]
+	order_by.append((p.name, Order.asc))
+
+	total = main.select(Count("*")).run()[0][0]
+	rows = main.select(*_CARD_FIELDS)
+	for term, direction in order_by:
+		rows = rows.orderby(term, order=direction)
+	rows = rows.limit(pl).offset(start).run(as_dict=True)
 	for r in rows:
 		# normalize the check fields to ints for the client
 		for k in ("not_applicable", "draft_edited", "surfaced"):
@@ -430,14 +416,9 @@ def list_learned_patterns_page(
 	# say). Batched - never a per-row lookup.
 	_attach_question_enrichment(rows)
 
-	facet_rows = frappe.db.sql(
-		f"""SELECT domain AS dv, COUNT(*) AS n
-		FROM `tab{JLP}`
-		WHERE {base_where}
-		GROUP BY domain
-		ORDER BY n DESC""",
-		params,
-		as_dict=True,
+	n = Count("*").as_("n")
+	facet_rows = (
+		base.select(p.domain.as_("dv"), n).groupby(p.domain).orderby(n, order=Order.desc).run(as_dict=True)
 	)
 	facets = {"domain": [{"value": x.dv, "count": x.n} for x in facet_rows]}
 
@@ -1801,26 +1782,33 @@ def list_promotion_requests_page(
 	if status and status != "All" and status not in _PROMO_STATUSES:
 		frappe.throw(_("Invalid status filter."))
 
-	params: dict = {"start": start, "page_length": pl}
-	conds: list[str] = []
+	pr = frappe.qb.DocType(PROMO)
+	query = frappe.qb.from_(pr)
 	if status and status != "All":
-		params["status"] = status
-		conds.append("status = %(status)s")
+		query = query.where(pr.status == status)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(page LIKE %(q)s OR note LIKE %(q)s OR body_snapshot LIKE %(q)s)")
-	where = " AND ".join(conds) or "1=1"
+		q = f"%{_lk(search)}%"
+		query = query.where(pr.page.like(q) | pr.note.like(q) | pr.body_snapshot.like(q))
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""SELECT name, page, from_scope, to_scope, target_role, note,
-			body_snapshot, status, owner, creation
-		FROM `tab{PROMO}`
-		WHERE {where}
-		ORDER BY creation DESC, name ASC
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	total = query.select(Count("*")).run()[0][0]
+	rows = (
+		query.select(
+			pr.name,
+			pr.page,
+			pr.from_scope,
+			pr.to_scope,
+			pr.target_role,
+			pr.note,
+			pr.body_snapshot,
+			pr.status,
+			pr.owner,
+			pr.creation,
+		)
+		.orderby(pr.creation, order=Order.desc)
+		.orderby(pr.name, order=Order.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 
 	# Batched enrichment: page titles + requester names in one query each.

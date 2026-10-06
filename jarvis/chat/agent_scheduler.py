@@ -1861,7 +1861,7 @@ def _runs_this_month(*, installation: str | None = None) -> int:
 		return frappe.db.count(RUN, {"creation": [">=", since], "status": ["!=", "failed"]})
 	inst = frappe.db.get_value(INSTALLATION, installation, ["agent", "owner"], as_dict=True) or frappe._dict()
 	row = frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tab{RUN}`
+		"""SELECT COUNT(*) FROM `tabJarvis Agent Run`
 		    WHERE creation >= %(since)s AND IFNULL(status, '') != 'failed'
 		      AND (installation = %(installation)s
 		           OR (IFNULL(installation, '') = '' AND agent = %(agent)s AND owner = %(owner)s))""",
@@ -1895,19 +1895,19 @@ _KEPT_ROW_FIELDS = frozenset({"agent", "status", "trigger", "started_at", "finis
 _ZERO_FIELDTYPES = frozenset({"Int", "Check", "Float", "Currency", "Percent"})
 
 
-def _kept_row_clear_sql() -> str:
-	"""The SET clause that clears a kept row: NULL, or 0 for a number column (those are
-	NOT NULL). ``installation`` is cleared by the caller."""
+def _kept_row_clear_values() -> dict:
+	"""What clears a kept row: NULL, or 0 for a number column (those are NOT NULL).
+	``installation`` is cleared by the caller."""
 	from frappe.model import no_value_fields, table_fields
 
-	parts = []
+	values = {}
 	for df in frappe.get_meta(RUN).fields:
 		if df.fieldname in _KEPT_ROW_FIELDS or df.fieldname == "installation":
 			continue
 		if df.fieldtype in no_value_fields or df.fieldtype in table_fields or df.get("is_virtual"):
 			continue
-		parts.append(f", `{df.fieldname}` = {0 if df.fieldtype in _ZERO_FIELDTYPES else 'NULL'}")
-	return "".join(parts)
+		values[df.fieldname] = 0 if df.fieldtype in _ZERO_FIELDTYPES else None
+	return values
 
 
 def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
@@ -1927,7 +1927,7 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 	not commit; the caller commits with the rest of the uninstall."""
 	since = _budget_month_start()
 	kept = frappe.db.sql(
-		f"""SELECT name FROM `tab{RUN}`
+		"""SELECT name FROM `tabJarvis Agent Run`
 		    WHERE installation = %(installation)s AND creation >= %(since)s AND status IN %(statuses)s""",
 		{"installation": installation, "since": since, "statuses": _KEPT_ROW_STATUSES},
 		pluck=True,
@@ -1936,11 +1936,11 @@ def keep_budget_rows_of_uninstalled(installation: str, owner: str) -> list[str]:
 		return []
 	# Notes left on the run (docmeta_api): the delete removed them with the row.
 	frappe.db.delete("Comment", {"reference_doctype": RUN, "reference_name": ["in", kept]})
-	frappe.db.sql(
-		f"""UPDATE `tab{RUN}` SET installation = NULL, owner = %(owner)s{_kept_row_clear_sql()}
-		    WHERE name IN %(kept)s""",
-		{"owner": owner, "kept": tuple(kept)},
-	)
+	run = frappe.qb.DocType(RUN)
+	query = frappe.qb.update(run).set(run.installation, None).set(run.owner, owner)
+	for fieldname, value in _kept_row_clear_values().items():
+		query = query.set(run[fieldname], value)
+	query.where(run.name.isin(kept)).run()
 	return kept
 
 
@@ -1965,7 +1965,7 @@ def purge_kept_budget_rows(owner: str | None = None) -> int:
 	``owner`` narrows it to one user's rows. The hourly job passes none; the tests do,
 	because they share a site and must not delete rows they did not make."""
 	names = frappe.db.sql(
-		f"""SELECT name FROM `tab{RUN}`
+		"""SELECT name FROM `tabJarvis Agent Run`
 		    WHERE IFNULL(installation, '') = '' AND status IN %(statuses)s AND creation < %(since)s
 		      AND (%(owner)s IS NULL OR owner = %(owner)s)
 		    ORDER BY creation LIMIT %(batch)s""",
@@ -2039,12 +2039,12 @@ def _uninstalled_this_month() -> int:
 	A pair installed again is left out: its installation is already in the enabled count
 	(or, disabled, is out of it like any disabled install), so it is never counted twice."""
 	row = frappe.db.sql(
-		f"""SELECT COUNT(*) FROM (
-		      SELECT DISTINCT r.agent, r.owner FROM `tab{RUN}` r
+		"""SELECT COUNT(*) FROM (
+		      SELECT DISTINCT r.agent, r.owner FROM `tabJarvis Agent Run` r
 		      WHERE IFNULL(r.installation, '') = '' AND r.creation >= %(since)s
 		        AND IFNULL(r.status, '') != 'failed'
 		        AND NOT EXISTS (
-		          SELECT 1 FROM `tab{INSTALLATION}` i WHERE i.agent = r.agent AND i.owner = r.owner)
+		          SELECT 1 FROM `tabJarvis Agent Installation` i WHERE i.agent = r.agent AND i.owner = r.owner)
 		    ) pairs""",
 		{"since": _budget_month_start()},
 	)
@@ -2131,7 +2131,7 @@ def _unstamp_last_run(row, stamped, previous) -> None:
 	Never raises, like ``_retry_later``."""
 	try:
 		frappe.db.sql(
-			f"""UPDATE `tab{INSTALLATION}` SET last_run_at=%(previous)s
+			"""UPDATE `tabJarvis Agent Installation` SET last_run_at=%(previous)s
 			    WHERE name=%(name)s AND last_run_at=%(stamped)s""",
 			{"previous": previous, "name": row.name, "stamped": stamped},
 		)
@@ -2172,16 +2172,11 @@ def _retry_later(row, now, *, expected, last_run_at=_KEEP) -> bool:
 				day_of_month=row.get("schedule_day_of_month"),
 			),
 		)
-		values = {"retry_at": retry_at, "name": row.name, "expected": expected}
-		stamp = ""
+		inst = frappe.qb.DocType(INSTALLATION)
+		query = frappe.qb.update(inst).set(inst.next_run_at, retry_at)
 		if last_run_at is not _KEEP:
-			stamp = ", last_run_at=%(last_run_at)s"
-			values["last_run_at"] = last_run_at
-		frappe.db.sql(
-			f"""UPDATE `tab{INSTALLATION}` SET next_run_at=%(retry_at)s{stamp}
-			    WHERE name=%(name)s AND next_run_at=%(expected)s""",
-			values,
-		)
+			query = query.set(inst.last_run_at, last_run_at)
+		query.where((inst.name == row.name) & (inst.next_run_at == expected)).run()
 		cursor = getattr(frappe.db, "_cursor", None)
 		landed = bool(cursor and cursor.rowcount == 1)  # read BEFORE commit resets it
 		frappe.db.commit()

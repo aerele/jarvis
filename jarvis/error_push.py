@@ -123,10 +123,9 @@ def _collect_ui_errors() -> tuple[list[str], list[dict]]:
 		return [], []
 
 	now = frappe.utils.now_datetime()
-	placeholders = ", ".join(["%s"] * len(names))
 	frappe.db.sql(
-		f"UPDATE `tab{DT}` SET pushed = 1, pushed_at = %s WHERE name IN ({placeholders}) AND pushed = 0",
-		[now, *names],
+		"UPDATE `tabJarvis Client Error` SET pushed = 1, pushed_at = %(now)s WHERE name IN %(names)s AND pushed = 0",
+		{"now": now, "names": tuple(names)},
 	)
 
 	rows = frappe.get_all(
@@ -177,10 +176,9 @@ def _revert_claim(names: list[str]) -> None:
 	"""Un-claim rows a failed push had marked sent, so the next cycle retries."""
 	if not names:
 		return
-	placeholders = ", ".join(["%s"] * len(names))
 	frappe.db.sql(
-		f"UPDATE `tab{DT}` SET pushed = 0, pushed_at = NULL WHERE name IN ({placeholders}) AND pushed = 1",
-		names,
+		"UPDATE `tabJarvis Client Error` SET pushed = 0, pushed_at = NULL WHERE name IN %(names)s AND pushed = 1",
+		{"names": tuple(names)},
 	)
 
 

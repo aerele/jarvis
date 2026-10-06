@@ -338,7 +338,7 @@ def _retry_later(m, now, *, expected) -> bool:
 	try:
 		retry_at = min(add_to_date(now, seconds=_RETRY_AFTER_S), _next_occurrence(m, now))
 		frappe.db.sql(
-			f"UPDATE `tab{MACRO}` SET next_run_at=%(retry_at)s WHERE name=%(name)s AND next_run_at=%(expected)s",
+			"UPDATE `tabJarvis Macro` SET next_run_at=%(retry_at)s WHERE name=%(name)s AND next_run_at=%(expected)s",
 			{"retry_at": retry_at, "name": m.name, "expected": expected},
 		)
 		cursor = getattr(frappe.db, "_cursor", None)

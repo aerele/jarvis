@@ -97,10 +97,6 @@ _CONV_ACTIVE_STATES = ("queued",) + _INFLIGHT_STATES
 _CONV_BLOCKING_STATES = _CONV_ACTIVE_STATES + ("recovering",)
 
 
-def _in_sql(values) -> str:
-	return ", ".join(f"'{v}'" for v in values)
-
-
 # --------------------------------------------------------------------------- #
 # Flag / shard helpers
 # --------------------------------------------------------------------------- #
@@ -191,7 +187,7 @@ def _lock_shard(target: str) -> None:
 	_ensure_control_row(target)
 	frappe.db.commit()
 	frappe.db.sql(
-		f"SELECT name FROM `tab{PUMP}` WHERE name=%(t)s FOR UPDATE",
+		"SELECT name FROM `tabJarvis Relay Pump` WHERE name=%(t)s FOR UPDATE",
 		{"t": target},
 	)
 
@@ -217,7 +213,7 @@ def _lock_conversation(conversation: str) -> None:
 	"""Second lock in the canonical order; defends per-conversation
 	single-flight / seq (OAR-6)."""
 	frappe.db.sql(
-		f"SELECT name FROM `tab{CONV}` WHERE name=%(c)s FOR UPDATE",
+		"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
 		{"c": conversation},
 	)
 
@@ -239,16 +235,16 @@ def _turn_dispatching_count(target: str) -> int:
 	# Byte-identical to `state='dispatching'` when the pump is off; counts pump
 	# in-flight turns during coexistence (OAR-11).
 	return frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tab{TURN}` WHERE relay_target_id=%(t)s AND state IN ({_in_sql(_INFLIGHT_STATES)})",
-		{"t": target},
+		"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE relay_target_id=%(t)s AND state IN %(states)s",
+		{"t": target, "states": _INFLIGHT_STATES},
 	)[0][0]
 
 
 def _turn_dispatching_count_by_class(target: str, turn_class: str) -> int:
 	return frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tab{TURN}`
-		WHERE relay_target_id=%(t)s AND state IN ({_in_sql(_INFLIGHT_STATES)}) AND turn_class=%(k)s""",
-		{"t": target, "k": turn_class},
+		"""SELECT COUNT(*) FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state IN %(states)s AND turn_class=%(k)s""",
+		{"t": target, "k": turn_class, "states": _INFLIGHT_STATES},
 	)[0][0]
 
 
@@ -275,24 +271,27 @@ def _legacy_streaming_count(target: str, *, fresh_cutoff=None) -> int:
 	live reply as idle and cut it. Every other caller keeps the default and
 	stays byte-identical."""
 	return frappe.db.sql(
-		f"""
+		"""
 		SELECT COUNT(*) FROM (
 			SELECT m.conversation
-			FROM `tab{MSG}` m
+			FROM `tabJarvis Chat Message` m
 			INNER JOIN (
 				SELECT conversation, MAX(seq) AS mseq
-				FROM `tab{MSG}` WHERE role='assistant' GROUP BY conversation
+				FROM `tabJarvis Chat Message` WHERE role='assistant' GROUP BY conversation
 			) latest ON latest.conversation = m.conversation AND latest.mseq = m.seq
 			WHERE m.role='assistant' AND m.streaming=1 AND m.recovering=0
 			  AND m.modified > %(fresh)s
 			  AND NOT EXISTS (
-					SELECT 1 FROM `tab{TURN}` t
+					SELECT 1 FROM `tabJarvis Chat Turn` t
 					WHERE t.conversation = m.conversation
-					  AND t.state IN ({_in_sql(_INFLIGHT_STATES)})
+					  AND t.state IN %(states)s
 			  )
 		) x
 		""",
-		{"fresh": fresh_cutoff if fresh_cutoff is not None else _fresh_cutoff()},
+		{
+			"fresh": fresh_cutoff if fresh_cutoff is not None else _fresh_cutoff(),
+			"states": _INFLIGHT_STATES,
+		},
 	)[0][0]
 
 
@@ -303,7 +302,7 @@ def _shard_inflight(target: str) -> int:
 
 def _shard_queued_depth(target: str) -> int:
 	return frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tab{TURN}` WHERE relay_target_id=%(t)s AND state='queued'",
+		"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE relay_target_id=%(t)s AND state='queued'",
 		{"t": target},
 	)[0][0]
 
@@ -323,10 +322,10 @@ def _conv_has_other_active_turn(conversation: str, run_id: str) -> bool:
 	still be live, so the conversation stays single-flight until it settles."""
 	return bool(
 		frappe.db.sql(
-			f"""SELECT 1 FROM `tab{TURN}`
-			WHERE conversation=%(c)s AND name!=%(r)s AND state IN ({_in_sql(_CONV_BLOCKING_STATES)})
+			"""SELECT 1 FROM `tabJarvis Chat Turn`
+			WHERE conversation=%(c)s AND name!=%(r)s AND state IN %(states)s
 			LIMIT 1""",
-			{"c": conversation, "r": run_id},
+			{"c": conversation, "r": run_id, "states": _CONV_BLOCKING_STATES},
 		)
 	)
 
@@ -397,7 +396,7 @@ def _conv_legacy_recovering_busy(conversation: str) -> bool:
 	The ``NOT EXISTS`` de-dups against an owning Turn already caught by
 	``_conv_has_other_active_turn`` (this signal is for the Turn-less legacy park)."""
 	rows = frappe.db.sql(
-		f"""SELECT streaming, recovering FROM `tab{MSG}`
+		"""SELECT streaming, recovering FROM `tabJarvis Chat Message`
 		WHERE conversation=%(c)s AND role='assistant'
 		ORDER BY seq DESC LIMIT 1""",
 		{"c": conversation},
@@ -412,9 +411,9 @@ def _conv_legacy_recovering_busy(conversation: str) -> bool:
 	# NOT EXISTS, which de-dups only against _INFLIGHT_STATES).
 	return not bool(
 		frappe.db.sql(
-			f"""SELECT 1 FROM `tab{TURN}`
-			WHERE conversation=%(c)s AND state IN ({_in_sql(_INFLIGHT_STATES + ("recovering",))}) LIMIT 1""",
-			{"c": conversation},
+			"""SELECT 1 FROM `tabJarvis Chat Turn`
+			WHERE conversation=%(c)s AND state IN %(states)s LIMIT 1""",
+			{"c": conversation, "states": _INFLIGHT_STATES + ("recovering",)},
 		)
 	)
 
@@ -426,10 +425,10 @@ def _conv_legacy_recovering_busy(conversation: str) -> bool:
 
 def _queued_ordered(target: str) -> list[dict]:
 	return frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, c.owner
-		FROM `tab{TURN}` t
-		INNER JOIN `tab{CONV}` c ON c.name = t.conversation
+		FROM `tabJarvis Chat Turn` t
+		INNER JOIN `tabJarvis Conversation` c ON c.name = t.conversation
 		WHERE t.relay_target_id=%(t)s AND t.state='queued'
 		ORDER BY CASE t.turn_class WHEN 'interactive' THEN 0 ELSE 1 END,
 		         t.enqueued_at ASC, t.run_id ASC
@@ -520,7 +519,9 @@ def _insert_seed(conversation: str, content: str | None, origin: str, hidden: bo
 	(Administrator) inserting it would otherwise own it (``api._enqueue_turn`` does the
 	same)."""
 	seq = (
-		frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[0][0]
+		frappe.db.sql(
+			"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+		)[0][0]
 		or 0
 	) + 1
 	msg = frappe.get_doc(
@@ -1007,9 +1008,9 @@ def _pick_next(target: str, cap: int, promoted_convs: set[str]) -> dict | None:
 	and per-conversation single-flight. Reads a small ordered batch and filters
 	in Python (bounded work: at most a handful of credits per round)."""
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, t.dispatch_payload
-		FROM `tab{TURN}` t
+		FROM `tabJarvis Chat Turn` t
 		WHERE t.relay_target_id=%(t)s AND t.state='queued'
 		ORDER BY t.enqueued_at ASC, t.run_id ASC
 		LIMIT 200
@@ -1727,9 +1728,9 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 		frappe.db.commit()
 		_lock_conversation(conversation)
 		seq = (
-			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[
-				0
-			][0]
+			frappe.db.sql(
+				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+			)[0][0]
 			or 0
 		) + 1
 		marker = frappe.get_doc(
@@ -1801,7 +1802,7 @@ def sweep() -> dict:
 		return summary
 	try:
 		open_count = frappe.db.sql(
-			f"SELECT COUNT(*) FROM `tab{TURN}` WHERE state IN ('queued','dispatching')"
+			"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE state IN ('queued','dispatching')"
 		)[0][0]
 	except Exception:
 		return summary
@@ -1844,10 +1845,10 @@ def _sweep_reconcile(targets: set[str]) -> int:
 	well beyond the 720s worker cap) is closed errored so a post-deploy batch of
 	orphans frees its shard credits instead of pinning them for extra cycles."""
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.reservation_expires_at
-		FROM `tab{TURN}` t
+		FROM `tabJarvis Chat Turn` t
 		WHERE t.state='dispatching'
 		""",
 		as_dict=True,
@@ -1858,9 +1859,9 @@ def _sweep_reconcile(targets: set[str]) -> int:
 	for r in rows:
 		# THIS turn's own latest assistant (strictly after its seed user row).
 		latest = frappe.db.sql(
-			f"""SELECT streaming, recovering, error, modified FROM `tab{MSG}`
+			"""SELECT streaming, recovering, error, modified FROM `tabJarvis Chat Message`
 			WHERE conversation=%(c)s AND role='assistant'
-			  AND seq > (SELECT seq FROM `tab{MSG}` WHERE name=%(seed)s)
+			  AND seq > (SELECT seq FROM `tabJarvis Chat Message` WHERE name=%(seed)s)
 			ORDER BY seq DESC LIMIT 1""",
 			{"c": r["conversation"], "seed": r["seed_message"]},
 			as_dict=True,
@@ -1917,10 +1918,10 @@ def _sweep_reservations(targets: set[str]) -> int:
 	a placeholder is CANCELLED (terminal), never re-dispatched - a turn the user
 	explicitly stopped must not run again."""
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.cancel_requested
-		FROM `tab{TURN}` t
+		FROM `tabJarvis Chat Turn` t
 		WHERE t.state='dispatching' AND t.reservation_expires_at IS NOT NULL
 		  AND t.reservation_expires_at < %(now)s
 		""",
@@ -1930,9 +1931,9 @@ def _sweep_reservations(targets: set[str]) -> int:
 	reclaimed = 0
 	for r in rows:
 		has_own_assistant = frappe.db.sql(
-			f"""SELECT 1 FROM `tab{MSG}`
+			"""SELECT 1 FROM `tabJarvis Chat Message`
 			WHERE conversation=%(c)s AND role='assistant'
-			  AND seq > (SELECT seq FROM `tab{MSG}` WHERE name=%(seed)s) LIMIT 1""",
+			  AND seq > (SELECT seq FROM `tabJarvis Chat Message` WHERE name=%(seed)s) LIMIT 1""",
 			{"c": r["conversation"], "seed": r["seed_message"]},
 		)
 		if has_own_assistant:
@@ -1971,9 +1972,9 @@ def _sweep_age_out(targets: set[str]) -> int:
 	reason + publish (SUX-5)."""
 	cutoff = frappe.utils.add_to_date(None, seconds=-QUEUED_MAX_AGE_S)
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message, c.owner
-		FROM `tab{TURN}` t INNER JOIN `tab{CONV}` c ON c.name = t.conversation
+		FROM `tabJarvis Chat Turn` t INNER JOIN `tabJarvis Conversation` c ON c.name = t.conversation
 		WHERE t.state='queued' AND t.enqueued_at IS NOT NULL AND t.enqueued_at < %(cut)s
 		""",
 		{"cut": cutoff},
