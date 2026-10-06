@@ -462,10 +462,10 @@ def _create_custom_skill_impl(
 	if (scope or "").strip() in ("Role", "Org"):
 		with _catalog_lock():
 			doc.insert(ignore_permissions=bool(ignore_permissions))
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- durable before catalog lock release
 	else:
 		doc.insert(ignore_permissions=bool(ignore_permissions))
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each skill durable in batch ingest
 	return {"ok": True, "data": {"name": doc.name, "skill_name": doc.skill_name}}
 
 
@@ -518,10 +518,8 @@ def update_custom_skill(
 	if scope in ("Role", "Org"):
 		with _catalog_lock():
 			doc.save()
-			frappe.db.commit()
 	else:
 		doc.save()
-		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
@@ -545,7 +543,7 @@ def delete_custom_skill(name: str) -> dict:
 	container on the next Apply (the fleet endpoint does a full reconcile)."""
 	_require_skill_owner(frappe.get_doc(SKILL, name), "delete")
 	frappe.delete_doc(SKILL, name)  # ORM hook also enforces owner-only delete
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -579,7 +577,7 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 			# Never leak internal exception text to the client — log server-side.
 			frappe.log_error(title="Jarvis: bulk skill delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	# Only a reviewer's delete reconciles the shared catalog (TASK 12): a plain
 	# Jarvis User's rows are User/Role-scope and never in the shared push, so
 	# their delete changes nothing there and must not trigger a bench-wide
@@ -641,7 +639,7 @@ def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 		clean.append(u)
 	doc.set("shared_with", [{"user": u} for u in clean])
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"count": len(clean)}}
 
 
@@ -815,7 +813,7 @@ def request_skill_promotion(
 		}
 	)
 	req.insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notifying
 	_notify_skill_reviewers(req.name)
 	return {"ok": True, "request": req.name, "skill": doc.skill_name}
 
@@ -830,7 +828,7 @@ def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
 	req.decided_at = frappe.utils.now_datetime()
 	req.decision_note = (note or "").strip()[:140] or None
 	req.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision survives later failure
 
 
 @frappe.whitelist()
@@ -1496,7 +1494,7 @@ def _apply_custom_skills_impl() -> dict:
 	reviewer)."""
 	skills = build_push_payload(strict=True)
 	frappe.db.set_single_value(_SETTINGS, "custom_skills_sync_status", "pending: applying skills")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	frappe.enqueue(
 		"jarvis.chat.custom_skills_api._enqueued_push_custom_skills",
@@ -1528,7 +1526,7 @@ def _enqueued_push_custom_skills() -> None:
 			frappe.db.set_single_value(
 				_SETTINGS, "custom_skills_sync_status", "failed: skipped (concurrent sync)"
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- status survives caller rollback
 			return
 
 		terminal_written = False
@@ -1574,7 +1572,7 @@ def _enqueued_push_custom_skills() -> None:
 					_fail("failed: unexpected error; see Error Log")
 				except Exception:
 					pass
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- terminal status survives later failure
 
 
 def _fail(status: str) -> None:

@@ -570,4 +570,4 @@ def write_activity(
 		event_user=event_user,
 		trigger_owner=trigger_owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist activity log

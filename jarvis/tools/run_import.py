@@ -88,7 +88,7 @@ def run_import(
 	# Commit BEFORE starting the import: start_import enqueues a background job that reloads
 	# the Data Import by name; an uncommitted row would race the worker to a "does not
 	# exist". _dispatch_and_wrap guards the (now-gone) savepoint, so committing here is safe.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 
 	started = di.start_import()  # enqueues (prod) or runs inline (test / developer_mode)
 

@@ -192,7 +192,7 @@ def _lock_shard(target: str) -> None:
 	READ COMMITTED and REPEATABLE READ). Callers commit their own durable work
 	BEFORE entering admission, so this commit never drops pending state."""
 	_ensure_control_row(target)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before row lock
 	frappe.db.sql(
 		f"SELECT name FROM `tab{PUMP}` WHERE name=%(t)s FOR UPDATE",
 		{"t": target},
@@ -1161,7 +1161,7 @@ def mark_cancel_requested(conversation: str) -> None:
 				WHERE name=%(r)s AND state='dispatching'""",
 				{"r": run_id},
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist cancel marker
 
 	try:
 		txn.replay_on_conflict(unit, label=f"admission.mark_cancel_requested {conversation}")
@@ -1263,7 +1263,7 @@ def _cancel_pre_dispatch(run_id: str, *, owner_of, label: str, attempts: int = 1
 							title="admission.cancel_queued_turn placeholder cleanup",
 							message=frappe.get_traceback(),
 						)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retry unit commits on its own
 		return {"row": row, "owner": owner, "path": path}
 
 	result = txn.replay_on_conflict(unit, label=label)
@@ -1615,7 +1615,7 @@ def pump_cutover_execute(relay_target: str | None = None) -> dict:
 			_telemetry("cutover_execute", target=target, done=0, verdict="retry")
 			return {"ok": True, "done": False, "action": "reverted", "verdict": "retry", "preflight": post}
 
-		frappe.db.commit()  # (4) commit the gate: the ROW flip is durable, the lock is released
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist gate flip, release lock
 	except Exception:
 		# Any fault mid-pass: roll back (undoing the uncommitted transport_mode flip), releasing
 		# the lock. Nothing was mirrored, so there is nothing to restore.
@@ -1682,7 +1682,7 @@ def pump_set_transport_mode(mode: str, relay_target: str | None = None) -> dict:
 	try:
 		_ts._lock_shard(target)  # commit-first; the FOR UPDATE is the first statement
 		mode_epoch = pump.set_transport_mode(target, mode)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist transport mode, release lock
 	except Exception:
 		frappe.db.rollback()
 		raise
@@ -1901,7 +1901,7 @@ def _sweep_reconcile(targets: set[str]) -> int:
 			closed += 1
 			targets.add(r["relay_target_id"] or DEFAULT_RELAY_TARGET)
 	if closed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sweep result
 	return closed
 
 
@@ -1965,7 +1965,7 @@ def _sweep_reservations(targets: set[str]) -> int:
 			reclaimed += 1
 			targets.add(r["relay_target_id"] or DEFAULT_RELAY_TARGET)
 	if reclaimed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sweep result
 	return reclaimed
 
 
@@ -1995,7 +1995,7 @@ def _sweep_age_out(targets: set[str]) -> int:
 		# Make the cancel durable BEFORE the side-effects: _write_cancel_marker
 		# runs its own txn (and rolls back on failure), which would otherwise
 		# undo an uncommitted CAS.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before side effects
 		cancelled += 1
 		targets.add(r["relay_target_id"] or DEFAULT_RELAY_TARGET)
 		try:

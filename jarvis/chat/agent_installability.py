@@ -144,5 +144,5 @@ def reconcile_installations() -> dict:
 		)
 		changed += 1
 	if changed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile result
 	return {"reconciled": len(rows), "changed": changed}

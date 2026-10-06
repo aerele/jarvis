@@ -254,6 +254,7 @@ class TestSkillEditorEndpoints(_Base):
 					custom_skills_api.update_custom_skill(name=row.name, **change)
 			on = skill(PEER, "ed-org-on", scope="Org", creates=PI)
 			custom_skills_api.update_custom_skill(name=on.name, use_in_file_box=0)  # opting out is free
+			frappe.db.commit()  # the POST request's own commit
 		frappe.db.rollback()
 		self.assertEqual(self.fields(row.name), {"use_in_file_box": 0, "file_box_creates": PI})
 		self.assertEqual(self.fields(on.name).use_in_file_box, 0)

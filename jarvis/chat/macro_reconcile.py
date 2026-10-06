@@ -323,7 +323,7 @@ class _RunCheck:
 		self.summary["raised"] += 1
 		frappe.cache().set_value(_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
 		frappe.log_error(title=f"jarvis.chat.macros.reconcile_failed: {self.name}", message=traceback)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 
 	def _look(self) -> bool:
 		"""Under the lock. Returns whether the run was changed."""
@@ -412,7 +412,7 @@ class _RunCheck:
 		failed = macros._cas_run_status(
 			run.name, "running", "failed", finished_at=frappe.utils.now(), error=error[:500]
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before follow-up work
 		if not failed:
 			return False
 		macros._announce(run, self.macro_doc, "failed", error)
@@ -553,7 +553,7 @@ class _SummaryCheck:
 		self.summary["raised"] += 1
 		frappe.cache().set_value(_summary_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
 		frappe.log_error(title=f"jarvis.chat.macros.summary_reconcile_failed: {self.name}", message=traceback)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 		return True
 
 	def _give_up_after_a_fault(self) -> bool:
@@ -879,7 +879,7 @@ def _signal(
 		title=f"jarvis.chat.macros.reconciled: {shape}",
 		message=f"{subject} {name}; turn state {turn_state or 'no turn'}; shape {shape}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 
 
 def _log_at_most_hourly(title: str, message: str) -> None:

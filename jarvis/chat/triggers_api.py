@@ -322,7 +322,7 @@ def create_trigger(payload: str) -> dict:
 	fields = _parse_payload(payload)
 	doc = frappe.get_doc({"doctype": TRIGGER, **fields})
 	doc.insert()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": _trigger_detail(doc)}
 
 
@@ -335,7 +335,7 @@ def update_trigger(name: str, payload: str) -> dict:
 	doc = frappe.get_doc(TRIGGER, name)
 	doc.update(fields)
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": _trigger_detail(doc)}
 
 
@@ -351,7 +351,7 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 	doc.db_set("enabled", value)
 	clear_cache()
 	_publish_changed()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": value}}
 
 
@@ -363,7 +363,7 @@ def delete_trigger(name: str) -> dict:
 	Link)."""
 	_require_manage()
 	frappe.delete_doc(TRIGGER, name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": 1}}
 
 
@@ -393,7 +393,7 @@ def delete_triggers_bulk(names: str) -> dict:
 		except Exception:
 			frappe.log_error(title="Jarvis: bulk trigger delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": deleted, "skipped": skipped}}
 
 

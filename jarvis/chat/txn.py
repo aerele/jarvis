@@ -86,7 +86,7 @@ def fresh_snapshot(*, owned: bool = False) -> bool:
 	# A job owns its transaction and the runtime only commits it at the job's end;
 	# ending it here is what drops a snapshot that would otherwise fail the write
 	# below with 1020. Callers only reach this with their earlier work complete.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before write
 	return True
 
 

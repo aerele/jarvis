@@ -2274,7 +2274,7 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 		if _shard_epoch_lost(ctx):
 			ts.lease_lost_exit(run_id)
 		return False
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 
 	owner = frappe.db.get_value(CONV, turn["conversation"], "owner")
 	dispatch = _load_dispatch(turn)
@@ -2394,7 +2394,7 @@ def _on_ack_success(ctx: PumpContext, pa: _PendingAck, ack: dict) -> None:
 	rs.gateway_run_id = gw
 	if ts.mark_streaming(rs.run_id, rs.version, ctx.epoch, gateway_run_id=gw):
 		rs.version += 1
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		# R-2: the ack PROVES delivery, so clear EXACTLY the agent-correction notes
 		# prepare folded into this prompt (id-keyed, idempotent) — never on an
 		# ack-timeout. Best-effort.
@@ -2445,7 +2445,7 @@ def _handle_ack_failure(ctx: PumpContext, rs: _RunState, exc: AgentUnreachableEr
 				frappe.log_error(
 					title="pump: ack-failure placeholder stamp failed", message=frappe.get_traceback()
 				)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		return True
 
 	txn.fresh_snapshot()
@@ -2539,7 +2539,7 @@ def _flush_deltas(ctx: PumpContext, rs: _RunState) -> None:
 	)
 	if won:
 		rs.version += 1
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		if rs.owner:
 			# SUX-1/SUX-6: the event name + payload MUST match what today's ChatView
 			# already consumes — it renders on `assistant:delta` with {message_id,
@@ -2659,7 +2659,7 @@ def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payl
 	# Pump-owned transaction, as for every transition here: the requeue must be durable
 	# before the lane retires and the next slice re-sends it. A raise before this point
 	# leaves the turn streaming for the hop's own rollback and recovery.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	# The next dispatch builds a fresh run state and lane; this one is done.
 	ctx.runs.pop(rs.run_id, None)
 	_telemetry("redispatch_refused_session", run_id=rs.run_id)
@@ -2696,7 +2696,7 @@ def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) 
 			ts.lease_lost_exit(rs.run_id)
 		return
 	rs.version += 1
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	ctx.deps.invoke_settlement(
 		rs.run_id,
 		relay_target_id=ctx.relay_target_id,
@@ -2953,7 +2953,7 @@ def _cancel_sweep(ctx: PumpContext) -> int:
 			if _epoch_lost(ctx, run_id):
 				ts.lease_lost_exit(run_id)
 			continue
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		if awaiting_continuation:
 			# The Stop won the race against the deferred tool's continuation -
 			# release the mux's parked (or already-adopted-but-not-yet-terminaled)
@@ -3095,11 +3095,11 @@ def _reconcile_one(ctx: PumpContext, r: dict, active_keys) -> None:
 		if r.get("dispatching_at") is None:
 			# Parked PRE-dispatch (OAR-4): back to queued for a FRESH prepare.
 			ts.recover_to_queued(run_id, int(r["version"]))
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 			return
 		# Parked IN-flight: adopt (re-stamp epoch), then re-attach or snapshot-recover.
 		if ts.recover_adopt(run_id, int(r["version"]), ctx.epoch, target_state="streaming"):
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 			r = {**r, "version": int(r["version"]) + 1, "state": "streaming"}
 			_reattach_or_recover(ctx, r, active_keys)
 		return
@@ -3289,7 +3289,7 @@ def _settle_recovered_final(
 				raise
 			# Any other failure costs only the stamps, as before; say so.
 			frappe.log_error(title="pump: recovered-final stamps failed", message=frappe.get_traceback())
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		return True
 
 	txn.fresh_snapshot()
@@ -3324,7 +3324,7 @@ def _settle_recovered_errored(ctx: PumpContext, r: dict) -> None:
 		if _epoch_lost(ctx, run_id):
 			ts.lease_lost_exit(run_id)
 		return
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	owner = frappe.db.get_value(CONV, r["conversation"], "owner")
 	ctx.deps.invoke_settlement(
 		run_id,
@@ -3430,7 +3430,7 @@ def _mark_recovering_mirror(
 		epoch=pump_epoch,
 	):
 		return False
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	_write_message_recovering(assistant_message)
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if owner:
@@ -3473,7 +3473,7 @@ def _settle_recover_errored(
 	err = error or _STALLED_ERROR
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:
 		try:
@@ -3659,7 +3659,7 @@ def request_cancel_conversation(relay_or_conversation: str) -> bool:
 			return False, None
 		won = ts.request_cancel(row["run_id"], int(row["version"]))
 		if won:
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		return won, row
 
 	won, row = txn.replay_on_conflict(unit, label=f"pump.request_cancel_conversation {conversation}")
@@ -3960,9 +3960,9 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 			# drops the stale prepare refs so it re-prepares from scratch.
 			if reserved and _reservation_stale(r.get("reservation_expires_at"), PREPARE_DISPATCH_DEADLINE_S):
 				if ts.mark_recovering(run_id, v):
-					frappe.db.commit()
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 					if ts.recover_to_queued(run_id, v + 1):
-						frappe.db.commit()
+						frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 						summary["reclaimed"] += 1
 				live_work = True
 				continue
@@ -3973,7 +3973,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 					# The cancel is committed BEFORE its side effects, as on the other
 					# cancel edges: the marker below runs its own transaction and rolls
 					# back on failure, which would undo an uncommitted CAS.
-					frappe.db.commit()
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 					_publish_cancelled(r, _AGE_OUT_REASON)
 					_write_age_out_marker(conv)
 					summary["aged_out"] += 1
@@ -3985,9 +3985,9 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 			# Pre-dispatch reclaim: recover_to_queued NULLs the assistant_message, so
 			# no Message banner is owed (the turn simply re-queues).
 			if ts.mark_recovering(run_id, v, require_prepare_deadline=True):
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 				if ts.recover_to_queued(run_id, v + 1):
-					frappe.db.commit()
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 					summary["reclaimed"] += 1
 			live_work = True
 
@@ -4009,7 +4009,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 				# intermediate run:recovering publish: the very next step is the terminal
 				# run:error, and a banner that flashes for one statement helps nobody.
 				if ts.mark_recovering(run_id, v):
-					frappe.db.commit()
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 					v += 1
 				if _settle_recover_errored(run_id, v, conv, am, error=_STALLED_ERROR):
 					summary["errored"] += 1
@@ -4029,7 +4029,7 @@ def _watchdog_shard(target: str, deps: PumpDeps, summary: dict) -> None:
 					summary["errored"] += 1
 			elif r.get("dispatching_at") is None:
 				if ts.recover_to_queued(run_id, v):
-					frappe.db.commit()
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 					summary["reclaimed"] += 1
 					live_work = True
 			else:

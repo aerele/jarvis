@@ -208,8 +208,6 @@ def report_client_errors(errors: str | list) -> dict:
 		except Exception:
 			# One malformed row must not sink the batch.
 			frappe.logger("jarvis.client_errors").debug("client error row dropped", exc_info=True)
-	if accepted:
-		frappe.db.commit()
 	return {"ok": True, "accepted": accepted}
 
 

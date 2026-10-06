@@ -222,7 +222,7 @@ def _supersede_for_legacy(conversation: str, owner: str, token: str) -> str | No
 	from jarvis.chat.pending_actions._settle import settle
 	from jarvis.chat.pending_actions._store import lock_conversation
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
 	try:
 		lock_conversation(conversation)
 		superseded = _check_single_flight(conversation, owner, None)
