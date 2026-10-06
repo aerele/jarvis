@@ -66,6 +66,9 @@
 					ref="poolEditor"
 					:editable="isSM"
 					:directStatus="directSub"
+					:expiredEntries="subscriptionNotice.expired"
+					:reconnectRef="reconnectRef"
+					@reconnect-handled="reconnectRef = ''"
 					:hostScrim="true"
 					@saved="onSaved"
 					@direct-changed="onDirectChanged"
@@ -91,7 +94,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, inject, onMounted, onUnmounted } from "vue";
 import { Button } from "frappe-ui";
 import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
@@ -100,12 +103,24 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { isSyncDisconnected } from "@/lib/syncStatus";
 import { agentName } from "@/branding";
 import { useShellStore } from "@/stores/shell";
+import {
+	subscriptionNotice,
+	loadSubscriptionNotice,
+	watchSubscriptionNotice,
+} from "@/lib/subscriptionNotice";
 
 const store = useShellStore();
 
 // Template ref onto LlmPoolEditor's exposed { save, busy } - read busy.active/
 // busy.label above for the pane-wide scrim in the #scrim slot.
 const poolEditor = ref(null);
+// Expired chat sign-ins (shared reading, refreshed on jarvis:subscription_health) and the one-shot
+// reconnect request a Reconnect link left (`store.openSettings("aimodels", { reconnect })`, or the
+// `?settings=aimodels&reconnect=` deep link). The editor runs it once its rows have loaded and
+// answers with `reconnect-handled`.
+const socket = inject("$socket", null);
+const reconnectRef = ref(((store.takeSettingsIntent() || {}).reconnect || "").toString());
+let unwatchNotice = () => {};
 
 // The rail already gates this section to the tenant-admin tier; this flag
 // additionally gates the editor's edit affordances + which probes fire. PART 4
@@ -206,7 +221,11 @@ async function onSaved(sync) {
 	store.bumpLlmConfig();
 }
 
-onMounted(loadDirectSub);
+onMounted(() => {
+	loadDirectSub();
+	loadSubscriptionNotice();
+	unwatchNotice = watchSubscriptionNotice(socket);
+});
 
 // True while a model change is applying, mirroring LlmPoolEditor's own
 // busy.active through the poolEditor template ref above. Still exposed (some
@@ -230,6 +249,7 @@ onMounted(loadDirectSub);
 const applying = computed(() => !!poolEditor.value?.busy?.active);
 watch(applying, (v) => (store.settingsApplying = v), { immediate: true });
 onUnmounted(() => {
+	unwatchNotice();
 	store.settingsApplying = false;
 });
 

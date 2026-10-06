@@ -111,6 +111,7 @@ import SupportCopyPromptDialog from "@/components/support/SupportCopyPromptDialo
 import OnboardingGate from "./OnboardingGate.vue";
 import UpdateNoticeGate from "./UpdateNoticeGate.vue";
 import { showNotice } from "@/noticeGate";
+import { parseSettingsDeepLink } from "@/lib/settingsDeepLink";
 // Unscoped global stylesheet. ChatView and OnboardingView render .jv-btn /
 // .jv-iconbtn from it, so it is imported here at the shell rather than left as
 // a side effect of whichever component happens to mount first (it used to ride
@@ -200,13 +201,11 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 // matched or not is irrelevant once read; leaving it in the URL would reopen
 // the dialog on every refresh, which is the one thing a deep link must not do.
 function openSettingsFromQuery() {
-	const params = new URLSearchParams(window.location.search);
-	const key = params.get("settings");
-	if (key && SETTINGS_DEEP_LINK_KEYS.has(key)) store.openSettings(key);
-	if (!params.has("settings")) return;
-	params.delete("settings");
-	const query = params.toString();
-	const url = window.location.pathname + (query ? `?${query}` : "") + window.location.hash;
+	const link = parseSettingsDeepLink(window.location.search, SETTINGS_DEEP_LINK_KEYS);
+	if (link.rest === null) return;
+	if (link.section) store.openSettings(link.section, link.intent);
+	const url =
+		window.location.pathname + (link.rest ? `?${link.rest}` : "") + window.location.hash;
 	history.replaceState(history.state, "", url);
 }
 
