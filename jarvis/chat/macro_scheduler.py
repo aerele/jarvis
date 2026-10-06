@@ -31,6 +31,7 @@ import frappe
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 from frappe.utils.user import get_users_with_role
 
+from jarvis._session import impersonate
 from jarvis.chat.macros import (
 	BLOCK_DISPATCH_FAILED,
 	BLOCK_MACRO_CHANGED_OWNER,
@@ -154,7 +155,6 @@ def run_due_macros() -> None:
 	if not due:
 		return
 
-	original_user = frappe.session.user
 	# Owners this pass found barred. `due` was read before their schedules were
 	# switched off, so it can still hold more of their macros: those are skipped.
 	barred_owners: set = set()
@@ -170,10 +170,8 @@ def run_due_macros() -> None:
 		# owner can see. If it blew up after the claim, the macro was already
 		# dispatched and the schedule has moved on, so there is nothing to retry.
 		try:
-			_sweep_one(m, now, original_user, barred_owners)
+			_sweep_one(m, now, barred_owners)
 		except Exception:
-			if frappe.session.user != original_user:
-				frappe.set_user(original_user)
 			frappe.db.rollback()
 			frappe.log_error(
 				title=f"jarvis scheduled macro sweep failed: {m.name}",
@@ -182,7 +180,7 @@ def run_due_macros() -> None:
 			_report_failure_before_claim(m, now)
 
 
-def _sweep_one(m, now, original_user: str, barred_owners: set) -> None:
+def _sweep_one(m, now, barred_owners: set) -> None:
 	"""Handle ONE due macro. Extracted from the loop so ``run_due_macros`` can wrap it
 	whole (#472); every ``return`` here was a ``continue`` in the loop it came from.
 
@@ -238,10 +236,9 @@ def _sweep_one(m, now, original_user: str, barred_owners: set) -> None:
 	if not claimed:
 		return
 	try:
-		frappe.set_user(m.owner)
-		out = macros.run_macro(m.name, trigger="scheduled") or {}
+		with impersonate(m.owner):
+			out = macros.run_macro(m.name, trigger="scheduled") or {}
 	except Exception:
-		frappe.set_user(original_user)
 		traceback = frappe.get_traceback()
 		# #471: do NOT consume the slot, and record the failure where the OWNER can
 		# see it. Previously the schedule advanced regardless, so a run that never
@@ -253,9 +250,6 @@ def _sweep_one(m, now, original_user: str, barred_owners: set) -> None:
 		_record_failed(m, sentence)
 		_notify_owner(m, sentence)
 		return
-	finally:
-		if frappe.session.user != original_user:
-			frappe.set_user(original_user)
 	_settle(m, now, out, claimed)
 
 
