@@ -93,7 +93,7 @@
 						     model on a provider the customer ALREADY configured, offered so they
 						     can switch without re-saving Settings; its catalog label is the more
 						     useful subtitle, skipped when it merely repeats the id. -->
-							<span v-else-if="r.tier" class="mep-desc">{{ r.tier }}</span>
+							<span v-if="r.tier" class="mep-desc">{{ r.tier }}</span>
 							<span
 								v-else-if="r.extra && r.label && r.label !== r.model"
 								class="mep-desc"

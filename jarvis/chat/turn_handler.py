@@ -1459,10 +1459,9 @@ def handle_chat_send(payload: dict) -> None:
 		# pre-ack failure - the run never started). The SPA turns that into a
 		# "No changes were made to your data" reassurance; omit it when unknown.
 		code = code or _classify_error(err, exc)
-		if changed_data is None:
-			# A mid-run error (a pre-ack one passes changed_data=False): remember a dead sign-in.
-			# Before _mark_errored so its commit carries the write.
-			_note_subscription_error(err, code)
+		# Every publish here is the turn's final error (mid-run or pre-ack): remember a dead sign-in.
+		# Before _mark_errored so its commit carries the write.
+		_note_subscription_error(err, code)
 		_mark_errored(assistant_msg.name, err)
 		payload = {
 			"kind": "run:error",

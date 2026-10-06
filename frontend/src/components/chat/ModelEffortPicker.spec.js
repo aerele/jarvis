@@ -243,4 +243,31 @@ describe("ModelEffortPicker expired sign-in", () => {
 			other.findAll(".mep-desc").filter((d) => d.text() === "Sign-in expired")
 		).toHaveLength(1);
 	});
+
+	it("keeps the tier under the expired line, and a healthy row shows only its tier", async () => {
+		const w = buildExpired({
+			modelsByProvider: [
+				{
+					provider: "openai",
+					models: [
+						{ model: "gpt-5.6", tier: "Plus" },
+						{ model: "claude-x", tier: "Pro" },
+					],
+				},
+			],
+			modelOverride: "claude-x",
+		});
+		await pill(w).trigger("click");
+		const row = (name) => w.findAll(".mep-item").find((r) => r.text().includes(name));
+		expect(
+			row("gpt-5.6")
+				.findAll(".mep-desc")
+				.map((d) => d.text())
+		).toEqual(["Sign-in expired", "Plus"]);
+		expect(
+			row("claude-x")
+				.findAll(".mep-desc")
+				.map((d) => d.text())
+		).toEqual(["Pro"]);
+	});
 });

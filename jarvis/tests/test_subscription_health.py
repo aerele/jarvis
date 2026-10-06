@@ -497,6 +497,12 @@ class TestSigninCompletionClears(_Base):
 		sh.record_signin_complete("nope")
 		self.assertEqual(sh.drain_signals(), [])
 
+	def test_one_live_accounts_read_per_signin_completion(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll"), "ACC_CL1": _entry("ACC_CL1", source="chat")})
+		with patch.object(sh, "_live_accounts", side_effect=lambda: dict(self.live)) as live:
+			sh.record_signin_complete("openai", account_ref=None)
+		self.assertEqual(live.call_count, 1)
+
 	def _api(self):
 		from jarvis.oauth import api
 
@@ -705,6 +711,26 @@ class TestServingUpstream(_Base):
 
 
 class TestSuccessHook(_Base):
+	def test_a_turn_reads_each_enabled_rows_accounts_at_most_once(self):
+		from jarvis.jarvis import pool_serialize
+
+		real = pool_serialize._model_accounts
+		rows = [
+			_row("gpt-5.6", order=1),
+			_row("deepseek-flash", sub=False, order=2),
+			_row("claude-x", upstream="anthropic", order=3),
+		]
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat")})
+		with (
+			patch.object(sh, "_settings", return_value=frappe._dict(models=rows)),
+			patch("jarvis.jarvis.pool_serialize._model_accounts", side_effect=real) as read,
+			patch.object(sh, "_enabled_rows", side_effect=sh._enabled_rows) as walk,
+		):
+			sh.note_turn_success("gpt-5.6", "openai_compat")
+		walk.assert_called_once_with()  # the serving lookup shares the one row pass
+		self.assertLessEqual(read.call_count, 2)  # the 2 subscription rows, once each
+		self.assertEqual(sh.current_health(), {})
+
 	def test_success_clears_the_chat_entry_of_the_serving_upstream(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat")})
 		with patch.object(sh, "upstream_for_serving", return_value="openai"):

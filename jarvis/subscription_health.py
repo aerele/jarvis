@@ -313,12 +313,14 @@ def record_chat_failure(upstream: str) -> None:
 		_log_throttled()
 
 
-def _clear_upstream(upstream: str, *, account_ref: str | None = None, all_sources: bool = False) -> bool:
+def _clear_upstream(
+	upstream: str, *, account_ref: str | None = None, all_sources: bool = False, live: dict | None = None
+) -> bool:
 	"""Drop the stored entries to clear and queue an ``ok`` signal. Cleared: the upstream's ``chat``
 	entries, plus ``account_ref``'s entry, plus (``all_sources``) every entry of the upstream. The
 	signal is queued only when no other account of the upstream is still expired. True when an entry
-	was dropped."""
-	live = _live_accounts()
+	was dropped. ``live`` is the caller's ``_live_accounts()`` read, to spare a second decrypting pass."""
+	live = _live_accounts() if live is None else live
 	health = {ref: e for ref, e in current_health().items() if ref in live}
 	cleared = [
 		ref
@@ -357,13 +359,10 @@ def record_signin_complete(upstream: str, account_ref: str | None = None, all_so
 		upstream = (upstream or "").strip().lower()
 		if upstream not in LABELS:
 			return
-		if _clear_upstream(upstream, account_ref=account_ref, all_sources=all_sources):
+		live = _live_accounts()
+		if _clear_upstream(upstream, account_ref=account_ref, all_sources=all_sources, live=live):
 			return
-		still = [
-			e
-			for ref, e in current_health().items()
-			if ref in _live_accounts() and e.get("upstream") == upstream
-		]
+		still = [e for ref, e in current_health().items() if ref in live and e.get("upstream") == upstream]
 		if not any(e.get("state") == "expired" for e in still):
 			_queue_signal(upstream, CODE_OK)
 	except Exception:
@@ -452,28 +451,18 @@ def note_turn_error(err_text, code) -> None:
 		_log_throttled()
 
 
-def _subscription_models(settings) -> list[tuple[str, str]]:
-	"""``(model_id, upstream)`` of every enabled subscription row."""
-	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _field, _subscription_upstream
-
-	return [
-		((_field(m, "model") or "").strip(), _subscription_upstream(m))
-		for m in _enabled_models(settings)
-		if _credential_type(m) == "subscription"
-	]
-
-
 def upstream_for_serving(model: str, provider: str) -> str:
 	"""The subscription upstream that served a reply, or ``""`` when it cannot be told or the reply was
 	served by an api key (which proves nothing about a sign-in). Never guesses."""
 	settings = _settings()
+	rows = _enabled_rows()
 	full = (model or "").strip()
 	served = full.rsplit("/", 1)[-1]
 	provider_upstream = _PROVIDER_UPSTREAM.get((provider or "").strip().lower(), "")
 	candidates = {
-		upstream
-		for row_model, upstream in _subscription_models(settings)
-		if row_model and row_model in (full, served)
+		row.upstream
+		for row in rows
+		if row.is_subscription and row.model_id and row.model_id in (full, served)
 	}
 	if len(candidates) == 1:
 		return candidates.pop()
