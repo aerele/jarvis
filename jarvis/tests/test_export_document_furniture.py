@@ -43,9 +43,14 @@ _HAS_SITE = bool(getattr(frappe.local, "site", None))
 
 class TestCompanyFooterRender(unittest.TestCase):
 	def render(self, raw, **company):
-		data = {"company_name": "Demo Co", **company}
-		with patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: data)):
-			return furniture._render_company_footer(raw, "Demo Co")
+		data = frappe._dict({"company_name": "Demo Co", **company})
+		with (
+			patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: data)),
+			patch.object(frappe, "render_template") as frappe_render,
+		):
+			out = furniture._render_company_footer(raw, "Demo Co")
+		frappe_render.assert_not_called()
+		return out
 
 	def test_conditionals_and_html_values_render_as_before(self):
 		raw = "{% if doc.tax_id %}GSTIN: {{ doc.tax_id }}{% else %}GST pending{% endif %} {{ company.description }}"
@@ -53,6 +58,12 @@ class TestCompanyFooterRender(unittest.TestCase):
 			self.render(raw, tax_id="29AB", description="<b>Est. 1990</b>"), "GSTIN: 29AB <b>Est. 1990</b>"
 		)
 		self.assertEqual(self.render(raw, tax_id=None, description=""), "GST pending ")
+
+	def test_missing_fields_are_undefined_and_frappe_filters_work(self):
+		raw = (
+			"{{ doc.customer_name | default('N/A') }}{% for r in doc.taxes %}x{% endfor %} {{ '1.50' | flt }}"
+		)
+		self.assertEqual(self.render(raw), "N/A 1.5")
 
 	def test_values_are_data_never_template(self):
 		self.assertEqual(self.render("{{ doc.company_name }}|x", company_name="Foo {# Bar"), "Foo {# Bar|x")
@@ -62,6 +73,8 @@ class TestCompanyFooterRender(unittest.TestCase):
 			"{{ frappe.get_all('User') }}",
 			"{{ ''.__class__.__mro__ }}",
 			"{{ doc.update({'company_name': 'X'}) }}",
+			"{{ 9 ** 9 }}",
+			"{{ lipsum(n=5) }}",
 		):
 			with self.subTest(raw=raw):
 				self.assertEqual(self.render(raw), raw)  # refused: the raw text, sanitized later
@@ -91,7 +104,6 @@ class TestCompanyFooterPermissions(unittest.TestCase):
 			patch.object(frappe, "has_permission", return_value=True) as perm,
 			patch.object(frappe, "db", new=Mock()) as db,
 			patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: {"company_name": "Demo Co"})),
-			patch.object(frappe, "render_template", side_effect=AssertionError("Frappe's env is not used")),
 		):
 			db.get_value.return_value = {
 				"footer": "<p>{{ doc.company_name }} - Approved footer</p>",

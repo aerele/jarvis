@@ -474,6 +474,7 @@ def _apply_locked(row, approver: str, decisions: dict) -> dict:
 	except Exception:
 		frappe.log_error(title="jarvis.file_box.sheet_apply_enqueue_failed", message=frappe.get_traceback())
 		_clear_progress(locked.name)
+		_progress(locked, approver, 0, len(records), state="returned")
 		_hand_back(locked.name, token, {"sheet": INTERRUPTED_TEXT})
 		return _refusal("unavailable", "The apply couldn't start: nothing was created. Try again.")
 	return {"ok": True, "applying": True, "reason_code": "applying", "pa_status": EXECUTING}
