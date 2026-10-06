@@ -212,6 +212,8 @@ class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
 			("DOCSTATUS", "2 "),
 			("`docstatus`", 2.0),
 			({"DocStatus": "2"}, None),
+			("docstatus", "2abc"),
+			("docstatus", b"2"),
 		):
 			with (
 				self.subTest(field=field),
