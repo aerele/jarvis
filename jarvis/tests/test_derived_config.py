@@ -88,3 +88,10 @@ class TestDerivedConfig(FrappeTestCase):
 		le.assert_called_once()
 		self.assertIn("open_workable_status_set", le.call_args.kwargs["message"])
 		self.assertNotIn(salt, str(le.call_args))
+
+	def test_typed_salt_dropped_even_when_provider_fails(self):
+		inst = _inst(config='{"fingerprint_salt": "mine", "open_workable_status_set": ["X"]}')
+		boom = patch.dict(derived_config.PROVIDERS, {"fingerprint_salt": (lambda i: 1 / 0, False)})
+		with boom, patch.object(derived_config.frappe, "log_error"):
+			out = agent_scheduler._explicit_config({"config_keys": _KEYS}, inst)
+		self.assertEqual(out, {"open_workable_status_set": ["X"]})
