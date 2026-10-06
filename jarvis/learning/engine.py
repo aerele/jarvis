@@ -197,8 +197,7 @@ def _run_locked(run_name: str) -> None:
 		# update_modified=False so the Settings on_update LLM classifier never
 		# fires (never doc.save() here).
 		try:
-			frappe.db.set_value(
-				SETTINGS,
+			frappe.db.set_single_value(
 				SETTINGS,
 				{
 					"pattern_last_run_at": now_datetime(),

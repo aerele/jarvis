@@ -34,8 +34,7 @@ def execute():
 	if not frappe.db.exists("DocType", "Jarvis Settings"):
 		return
 	# 1. Clear the stale chat-device pairing -> clean re-pair on the next connection.
-	frappe.db.set_value(
-		"Jarvis Settings",
+	frappe.db.set_single_value(
 		"Jarvis Settings",
 		{
 			"chat_device_id": "",

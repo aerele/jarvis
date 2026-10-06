@@ -46,7 +46,7 @@ def persist(notice: dict | None) -> None:
 			and (current.get("maintenance_message") or "") == fresh["maintenance_message"]
 		):
 			return
-		frappe.db.set_value(SETTINGS, SETTINGS, fresh, update_modified=False)
+		frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)
 	except Exception:
 		frappe.log_error(title="maintenance_notice.persist failed", message=frappe.get_traceback())
 

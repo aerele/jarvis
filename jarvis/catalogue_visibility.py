@@ -118,7 +118,7 @@ def _apply(policy) -> None:
 	fresh = {"catalogue_visibility_synced_at": frappe.utils.now()}
 	if normalized != old:
 		fresh["catalogue_visibility_governed"] = frappe.as_json(normalized)
-	frappe.db.set_value(SETTINGS, SETTINGS, fresh, update_modified=False)
+	frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)
 
 
 def _validate(policy) -> tuple[bool, dict]:
