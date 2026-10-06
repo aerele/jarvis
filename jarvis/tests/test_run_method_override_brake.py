@@ -109,6 +109,18 @@ class TestRunMethodBrake(FrappeTestCase):
 			{"method": "frappe.client.set_value", "args": {"fieldname": {"docstatus": 2}}},
 			{"method": "frappe.client.set_value", "args": {"fieldname": '{"DocStatus": "2 "}'}},
 			{"method": "frappe.client.bulk_update", "args": {"docs": json.dumps([{}, {"docstatus": 2}])}},
+			{
+				"method": "frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs",
+				"args": {
+					"doctype": "ToDo",
+					"docnames": ["x"],
+					"action": "update",
+					"data": '{"docstatus": 2}',
+				},
+			},
+			{"method": "frappe.desk.form.save.discard", "args": {"doctype": "ToDo", "name": "x"}},
+			{"method": "frappe.desk.form.utils.remove_attach", "args": {"fid": "x"}},
+			{"method": "frappe.core.api.file.unzip_file", "args": {"name": "x"}},
 		):
 			with self.subTest(tool_args=tool_args):
 				self.assertTrue(needs_brake(tool_args))
@@ -124,6 +136,15 @@ class TestRunMethodBrake(FrappeTestCase):
 			{"method": "frappe.client.set_value", "args": {"fieldname": "description", "value": "2"}},
 			{"method": "frappe.client.bulk_update", "args": {"docs": json.dumps([{"docstatus": 0}])}},
 			{"method": "frappe.client.bulk_update", "args": {"docs": "{not json"}},
+			{
+				"method": "frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs",
+				"args": {
+					"doctype": "ToDo",
+					"docnames": ["x"],
+					"action": "update",
+					"data": {"status": "Closed"},
+				},
+			},
 			{"method": "no.such.module.fn"},
 			{},
 			None,
@@ -156,6 +177,7 @@ class TestWorkflowCancelBrake(FrappeTestCase):
 	def test_an_action_into_a_cancelled_state_cancels(self):
 		with _todo_workflow():
 			self.assertTrue(_write_risk.workflow_action_cancels("ToDo", "Cancel"))
+			self.assertTrue(_write_risk.workflow_action_cancels("ToDo", " Cancel "))  # the tool strips it
 			for doctype, action in (
 				("ToDo", "Approve"),
 				("ToDo", "cancel"),
