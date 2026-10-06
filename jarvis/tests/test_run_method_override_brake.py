@@ -187,9 +187,32 @@ class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
 					frappe.get_doc("ToDo", carrier.name).save()  # the save's own cascade, as from Desk
 		self.assertEqual(frappe.db.get_value("ToDo", victim.name, "docstatus"), 2)
 
+	def test_a_root_document_posing_as_a_child_row_is_still_braked(self):
+		todo = self._submitted_todo()
+		payload = {**todo.as_dict(), "docstatus": 2, "parenttype": "ToDo", "parentfield": "x"}
+		with (
+			patch.object(self.todo_meta, "is_submittable", 1),
+			_write_risk.guard_scope([], brake=True),
+			self.assertRaises(BrakeRefusedError),
+		):
+			frappe.call("frappe.client.save", doc=payload)
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
+
+	def test_db_set_with_a_string_docstatus_is_refused(self):
+		todo = self._submitted_todo()
+		with _write_risk.guard_scope([], brake=True), self.assertRaises(BrakeRefusedError):
+			todo.db_set("docstatus", "2")
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
+
 	def test_a_raw_set_value_to_docstatus_2_is_refused(self):
 		todo = self._submitted_todo()
-		for field, value in (("docstatus", 2), ({"docstatus": 2}, None)):
+		for field, value in (
+			("docstatus", 2),
+			({"docstatus": 2}, None),
+			("DOCSTATUS", "2 "),
+			("`docstatus`", 2.0),
+			({"DocStatus": "2"}, None),
+		):
 			with (
 				self.subTest(field=field),
 				_write_risk.guard_scope([], brake=True),
