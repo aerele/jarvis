@@ -43,9 +43,16 @@ describe("ModelEffortPicker expired sign-in", () => {
 		expect(dot(w).exists()).toBe(true);
 	});
 
-	it("shows no dot on Auto even if the default model is expired", () => {
+	it("shows the dot when the pill names an expired default model", () => {
 		const w = build({ modelOverride: "", defaultModel: "gpt-5.6", canAddProvider: true });
 		expect(w.find(".mep-model").text()).toBe("gpt-5.6");
+		expect(dot(w).exists()).toBe(true);
+		expect(pill(w).attributes("title")).toBe(ADMIN_TIP);
+	});
+
+	it("shows no dot on Auto", () => {
+		const w = build({ modelOverride: "", defaultModel: "", canAddProvider: true });
+		expect(w.find(".mep-model").text()).toBe("Auto");
 		expect(dot(w).exists()).toBe(false);
 		expect(pill(w).attributes("title")).toBe("Model and effort");
 	});

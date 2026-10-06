@@ -296,9 +296,9 @@ const bareModel = (id) =>
 		.pop();
 const expiredBare = computed(() => new Set(Object.keys(props.expiredModels || {}).map(bareModel)));
 const isExpired = (id) => !!id && expiredBare.value.has(bareModel(id));
-// Auto (nothing picked) fails over to another model, so it never shows the dot,
-// even when the default model it would start with has an expired sign-in.
-const pillExpired = computed(() => isExpired(props.modelOverride));
+// The dot follows the model the pill names (the pick, else the default model). "Auto" is never
+// a model id, so it never shows one.
+const pillExpired = computed(() => isExpired(pillModel.value));
 const pillTitle = computed(() => {
 	if (!pillExpired.value) return "Model and effort";
 	return props.canAddProvider
