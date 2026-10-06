@@ -404,9 +404,7 @@ def _mark_chat_ready(raw: dict) -> None:
 			# Keep the anchor in step without rewriting the timestamp.
 			_rebind_anchor(raw)
 			return
-		frappe.db.set_value(
-			SETTINGS, SETTINGS, _READY_MARKER_FIELD, frappe.utils.now(), update_modified=False
-		)
+		frappe.db.set_single_value(SETTINGS, _READY_MARKER_FIELD, frappe.utils.now(), update_modified=False)
 		_rebind_anchor(raw)
 	except Exception:
 		pass
@@ -420,7 +418,7 @@ def _rebind_anchor(raw: dict) -> None:
 			return
 		anchor = _authority_anchor(raw)
 		if (raw.get(_READY_ANCHOR_FIELD) or "").strip() != anchor:
-			frappe.db.set_value(SETTINGS, SETTINGS, _READY_ANCHOR_FIELD, anchor, update_modified=False)
+			frappe.db.set_single_value(SETTINGS, _READY_ANCHOR_FIELD, anchor, update_modified=False)
 	except Exception:
 		pass
 
@@ -1308,7 +1306,7 @@ def _persist_operation_probe_verdicts(status: dict) -> None:
 	)
 	if all((current.get(k) or "") == v for k, v in fields.items()):
 		return  # unchanged from what is stored - do not churn the Singles row per poll
-	frappe.db.set_value("Jarvis Settings", "Jarvis Settings", fields, update_modified=False)
+	frappe.db.set_single_value("Jarvis Settings", fields, update_modified=False)
 
 
 @frappe.whitelist()

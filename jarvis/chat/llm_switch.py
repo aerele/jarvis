@@ -187,11 +187,13 @@ def _inflight() -> int:
 
 
 def _broadcast(state: str, **extra) -> None:
-	"""Tell every open chat at once. No user= -> frappe sends it to the site room
-	"all" (every connected socket), matching the spec's "tell everyone" flow. Never
-	raises into a caller that is trying to start or end a switch."""
+	"""Tell every open chat at once: the site room (every connected socket), matching
+	the spec's "tell everyone" flow. Never raises into a caller that is trying to
+	start or end a switch."""
+	from frappe.realtime import get_site_room
+
 	try:
-		frappe.publish_realtime(EVENT, {"state": state, **extra})
+		frappe.publish_realtime(EVENT, {"state": state, **extra}, room=get_site_room())
 	except Exception:
 		frappe.log_error(title="llm_switch broadcast failed", message=frappe.get_traceback())
 

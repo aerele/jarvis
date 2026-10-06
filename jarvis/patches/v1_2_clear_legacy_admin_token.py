@@ -10,5 +10,5 @@ import frappe
 
 
 def execute():
-	frappe.db.set_value("Jarvis Settings", "Jarvis Settings", "jarvis_admin_api_key", "")
+	frappe.db.set_single_value("Jarvis Settings", "jarvis_admin_api_key", "")
 	frappe.db.commit()
