@@ -12,11 +12,29 @@ import {
 	deletePath,
 } from "./agentConfigFields";
 
+describe("bank reconciliation fields", () => {
+	it("declares the bank account link and the lookback number", () => {
+		expect(CONFIG_FIELD_SET).toContainEqual(
+			expect.objectContaining({
+				key: "bank_account",
+				type: "link",
+				linkDoctype: "Bank Account",
+			})
+		);
+		expect(CONFIG_FIELD_SET).toContainEqual(
+			expect.objectContaining({ key: "voucher_lookback_days", type: "number" })
+		);
+		expect(NUMBER_CONFIG_KEYS).toContain("voucher_lookback_days");
+	});
+});
+
 describe("CONFIG_FIELD_SET", () => {
 	it("covers exactly the keys the run path reads (scope + agent config_keys)", () => {
 		expect([...KNOWN_CONFIG_KEYS].sort()).toEqual(
 			[
 				"settlement_hold_days",
+				"bank_account",
+				"voucher_lookback_days",
 				"report_date",
 				"policy_version",
 				"price_tolerance_percent",
@@ -41,6 +59,8 @@ describe("CONFIG_FIELD_SET", () => {
 		const order = CONFIG_FIELD_SET.map((f) => f.key || f.keys.join("/"));
 		expect(order).toEqual([
 			"settlement_hold_days",
+			"bank_account",
+			"voucher_lookback_days",
 			"report_date",
 			"policy_version",
 			"price_tolerance_percent",
@@ -76,6 +96,7 @@ describe("CONFIG_FIELD_SET", () => {
 		expect(NUMBER_CONFIG_KEYS.sort()).toEqual(
 			[
 				"settlement_hold_days",
+				"voucher_lookback_days",
 				"price_tolerance_percent",
 				"benchmark_value",
 				"percentage",
@@ -109,6 +130,8 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 	it("agent-specific is the close-auditor materiality set plus the vendor-ledger ageing floors", () => {
 		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
 			"settlement_hold_days",
+			"bank_account",
+			"voucher_lookback_days",
 			"report_date",
 			"policy_version",
 			"price_tolerance_percent",
