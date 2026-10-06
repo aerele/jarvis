@@ -434,6 +434,11 @@ def answer_question(
 		},
 		update_modified=False,
 	)
+	# Answering is the owner's go-ahead: a pattern mined from their chats becomes
+	# visible to reviewers only now.
+	from jarvis.learning import chat_pattern_privacy
+
+	chat_pattern_privacy.release_for_question(name)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "note": note.name, "question_status": "Answered"}
 
