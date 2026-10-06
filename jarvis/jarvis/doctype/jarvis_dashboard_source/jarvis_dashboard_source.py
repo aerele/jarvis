@@ -5,6 +5,8 @@ shape)."""
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisDashboardSource(Document):
+
+class JarvisDashboardSource(NotRenamable, Document):
 	pass

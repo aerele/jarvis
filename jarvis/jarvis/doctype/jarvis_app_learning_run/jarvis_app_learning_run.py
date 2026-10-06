@@ -11,6 +11,8 @@ perms); the SPA reads them through the manage-gated API.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAppLearningRun(Document):
+
+class JarvisAppLearningRun(NotRenamable, Document):
 	pass

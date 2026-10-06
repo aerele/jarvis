@@ -10,6 +10,8 @@ arrive additively in WP-1.
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisRelayPump(Document):
+
+class JarvisRelayPump(NotRenamable, Document):
 	pass

@@ -8,6 +8,8 @@ may install / run the agent. This is bench-admin state set via
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentAllowedRole(Document):
+
+class JarvisAgentAllowedRole(NotRenamable, Document):
 	pass

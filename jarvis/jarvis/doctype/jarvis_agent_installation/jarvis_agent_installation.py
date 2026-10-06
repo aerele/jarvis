@@ -15,6 +15,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 LISTING = "Jarvis Agent Listing"
 
 # Per-owner install cap, mirroring jarvis_custom_skill._validate_owner_cap.
@@ -39,7 +41,7 @@ _GL_SCOPED_DIMENSIONS = (
 )
 
 
-class JarvisAgentInstallation(Document):
+class JarvisAgentInstallation(NotRenamable, Document):
 	def validate(self):
 		self._default_reviewer()
 		self._guard_installability()

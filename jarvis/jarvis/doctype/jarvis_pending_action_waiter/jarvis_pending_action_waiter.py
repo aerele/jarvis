@@ -8,9 +8,10 @@ import frappe
 from frappe.model.document import Document
 
 from jarvis.jarvis.doctype.jarvis_pending_action.jarvis_pending_action import refuse_orm_write
+from jarvis.permissions import NotRenamable
 
 
-class JarvisPendingActionWaiter(Document):
+class JarvisPendingActionWaiter(NotRenamable, Document):
 	def validate(self):
 		refuse_orm_write(self)
 

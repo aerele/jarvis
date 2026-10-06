@@ -29,6 +29,7 @@ from jarvis.learning.sanitizer import (
 	SANITIZED_PLACEHOLDER,
 	scan_instruction_injection,
 )
+from jarvis.permissions import NotRenamable
 
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-{1,2}[a-z0-9]+)*$")
 MAX_SLUG_LEN = 140
@@ -70,7 +71,7 @@ def _invalidate_has_pages_flag():
 	frappe.cache().delete_value(WIKI_HAS_PAGES_CACHE_KEY)
 
 
-class JarvisWikiPage(Document):
+class JarvisWikiPage(NotRenamable, Document):
 	def before_insert(self):
 		# Must run BEFORE set_new_name (autoname field:slug freezes the
 		# docname right after before_insert), so the audience suffix lands

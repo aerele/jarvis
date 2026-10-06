@@ -13,11 +13,12 @@ from frappe.model.document import Document
 from frappe.utils import strip_html
 
 from jarvis.chat.pending_actions import _seal
+from jarvis.permissions import NotRenamable
 
 SUMMARY_MAX = 280
 
 
-class JarvisPendingAction(Document):
+class JarvisPendingAction(NotRenamable, Document):
 	def validate(self):
 		refuse_orm_write(self)
 		# Plain text before the seal (Desk renders it as HTML); the card hash is over this.
