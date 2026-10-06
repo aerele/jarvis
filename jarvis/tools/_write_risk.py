@@ -46,7 +46,6 @@ the refusal in ``check`` into its own card.
 
 from __future__ import annotations
 
-import functools
 import json
 import re
 import sys
@@ -906,18 +905,23 @@ def guard_doc_event(doc, method=None, *args, **kwargs):
 	)
 
 
-def _brake_doc_event(doc, method: str) -> None:
-	"""Called first thing in every ``Document.run_method`` (see ``_install_hooks``).
-	In a write that runs without a card (auto mode, an armed macro, an approved
-	skill run, File Box), refuse deleting, cancelling or discarding a root document,
-	however it is reached (a workflow Cancel step, frappe.client.save with docstatus
-	2, a custom app method, db_set), BEFORE the document's own handlers or any app's
-	hooks run, so nothing outside the database (an e-invoice cancel, a mail) happens
-	first. The delete / cancel tools always park a card; nothing else may be the way
-	around that. A no-op everywhere else.
+def brake_doc_event(doc, method=None, *args, **kwargs) -> None:
+	"""``doc_events["*"]`` handler on before_cancel / before_discard / before_change /
+	on_trash. In a write that runs without a card (auto mode, an armed macro, an
+	approved skill run, File Box), refuse deleting, cancelling or discarding a root
+	document, however it is reached (a workflow Cancel step, frappe.client.save with
+	docstatus 2, a custom app method, db_set). The delete / cancel tools always park a
+	card; nothing else may be the way around that. A no-op everywhere else.
 
-	Not covered: raw SQL and ``frappe.db.delete``, which run no Frappe hook at all
-	(``frappe.db.set_value`` to docstatus 2 is caught, see ``_install_hooks``)."""
+	Frappe runs the document's own method, its doctype's hooks and the "*" hooks of
+	apps installed before Jarvis first (an e-invoice cancel, File removing its file
+	from disk, a search-index delete), so the calls whose arguments show a cancel or a
+	delete park a card before anything runs (``run_method.needs_brake``,
+	``workflow_action_cancels``); this refuses the rest before on_cancel, the delete
+	and every notification, webhook and server script of the event.
+
+	Not covered: raw SQL, ``frappe.db.set_value`` and ``frappe.db.delete``, which run
+	no Frappe hook at all."""
 	state = getattr(frappe.local, _LOCAL, None)
 	if state is None or not state.brake:
 		return
@@ -985,21 +989,36 @@ def _is_docstatus_2(value) -> bool:
 	return 1.5 <= number < 3
 
 
-def _brake_raw_set_value(doctype, name, field, value) -> None:
-	"""``frappe.db.set_value`` that sets docstatus 2 is a cancel with no hook."""
-	state = getattr(frappe.local, _LOCAL, None)
-	if state is None or not state.brake:
-		return
-	values = field if isinstance(field, dict) else {field: value}
-	# Column names as the database matches them: any case, optional backticks.
-	if not any(
+def sets_docstatus_2(values) -> bool:
+	"""Whether field ``values`` (a dict, or its JSON) set docstatus to 2: a cancel."""
+	if isinstance(values, str):
+		try:
+			values = json.loads(values)
+		except ValueError:
+			return False
+	if not isinstance(values, dict):
+		return False
+	# Any case, optional backticks.
+	return any(
 		str(k).strip().strip("`").strip().lower() == "docstatus" and _is_docstatus_2(v)
 		for k, v in values.items()
-	):
-		return
-	_check_brake(
-		state, frappe._dict(doctype=doctype, name=name if isinstance(name, str | int) else ""), "cancel"
 	)
+
+
+def workflow_action_cancels(doctype, action) -> bool:
+	"""Whether ``action`` can move a ``doctype`` document into a cancelled state of its
+	active workflow (any transition by that name, from any state)."""
+	from frappe.model.workflow import get_workflow_name
+
+	if not isinstance(doctype, str) or not isinstance(action, str) or not doctype.strip():
+		return False
+	name = get_workflow_name(doctype.strip())
+	if not name:
+		return False
+	workflow = frappe.get_cached_doc("Workflow", name)
+	cancelled = {s.state for s in workflow.states if frappe.utils.cint(s.doc_status) == 2}
+	# Stripped: apply_workflow_action strips the action before it runs.
+	return any(t.action == action.strip() and t.next_state in cancelled for t in workflow.transitions)
 
 
 # --------------------------------------------------------------------------- #
@@ -1035,30 +1054,6 @@ def _install_hooks() -> None:
 
 		delete_from_table._jarvis_guarded = True
 		delete_module.delete_from_table = delete_from_table
-	from frappe.model.document import Document
-
-	real_run_method = Document.run_method
-	if not getattr(real_run_method, "_jarvis_braked", False):
-
-		@functools.wraps(real_run_method)
-		def run_method(self, method, *args, **kwargs):
-			_brake_doc_event(self, method)
-			return real_run_method(self, method, *args, **kwargs)
-
-		run_method._jarvis_braked = True
-		Document.run_method = run_method
-	from frappe.database.database import Database
-
-	real_set_value = Database.set_value
-	if not getattr(real_set_value, "_jarvis_braked", False):
-
-		@functools.wraps(real_set_value)
-		def set_value(self, dt, dn, field, val=None, *args, **kwargs):
-			_brake_raw_set_value(dt, dn, field, val)
-			return real_set_value(self, dt, dn, field, val, *args, **kwargs)
-
-		set_value._jarvis_braked = True
-		Database.set_value = set_value
 	_preview_sandbox._install_guard()
 	_hooks_installed = True
 

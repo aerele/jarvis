@@ -1265,6 +1265,25 @@ class TestSkillAutorunGate(FrappeTestCase):
 			# one card at a time per conversation: clear it before the next case
 			pending_confirm.clear_for_conversation(TEST_USER, conv)
 
+	def test_workflow_action_that_cancels_still_parks_when_autorun(self):
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		args = {"doctype": "ToDo", "name": "x", "action": "Cancel"}
+		with (
+			patch("jarvis.tools._write_risk.workflow_action_cancels", return_value=True),
+			patch("jarvis.api.dispatch_confirmed") as disp,
+		):
+			r = api._run_tool("apply_workflow_action", args, conversation=conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertFalse(disp.called)
+		pending_confirm.clear_for_conversation(TEST_USER, conv)
+		with (
+			patch("jarvis.tools._write_risk.workflow_action_cancels", return_value=False),
+			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp,
+		):
+			api._run_tool("apply_workflow_action", {**args, "action": "Approve"}, conversation=conv)
+		disp.assert_called_once()
+
 	def test_create_custom_skill_still_parks_when_autorun(self):
 		conv = _make_conv(TEST_USER)
 		_stamp_autorun(conv)
