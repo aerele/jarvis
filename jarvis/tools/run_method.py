@@ -173,8 +173,12 @@ _BRAKED_METHODS = frozenset(
 		"frappe.client.delete",
 		"frappe.client.cancel",
 		"frappe.desk.form.save.cancel",
+		"frappe.desk.form.save.discard",
 		"frappe.desk.reportview.delete_items",
 		"frappe.desk.reportview.delete_report",
+		# Delete a File, whose own on_trash removes it from disk.
+		"frappe.desk.form.utils.remove_attach",
+		"frappe.core.api.file.unzip_file",
 	}
 )
 # Methods that delete or cancel only for some actions: path -> (arg name, actions).
@@ -204,6 +208,12 @@ def _bulk_update_cancels(args: dict) -> bool:
 	return isinstance(docs, list) and any(_write_risk.sets_docstatus_2(d) for d in docs)
 
 
+def _bulk_action_cancels(args: dict) -> bool:
+	return str(args.get("action") or "").strip().lower() == "update" and _write_risk.sets_docstatus_2(
+		args.get("data")
+	)
+
+
 def _workflow_cancels(args: dict) -> bool:
 	doctype = args.get("doctype")
 	if not doctype:
@@ -222,6 +232,7 @@ _BRAKED_PAYLOADS = {
 	"frappe.client.save": lambda args: _write_risk.sets_docstatus_2(args.get("doc")),
 	"frappe.client.set_value": _set_value_cancels,
 	"frappe.client.bulk_update": _bulk_update_cancels,
+	"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs": _bulk_action_cancels,
 	"frappe.model.workflow.apply_workflow": _workflow_cancels,
 	"frappe.model.workflow.bulk_workflow_approval": _workflow_cancels,
 }

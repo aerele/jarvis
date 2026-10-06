@@ -913,8 +913,9 @@ def brake_doc_event(doc, method=None, *args, **kwargs) -> None:
 	docstatus 2, a custom app method, db_set). The delete / cancel tools always park a
 	card; nothing else may be the way around that. A no-op everywhere else.
 
-	Frappe runs the document's own method and its doctype's hooks (an e-invoice
-	cancel) before any "*" handler, so the calls whose arguments show a cancel or a
+	Frappe runs the document's own method, its doctype's hooks and the "*" hooks of
+	apps installed before Jarvis first (an e-invoice cancel, File removing its file
+	from disk, a search-index delete), so the calls whose arguments show a cancel or a
 	delete park a card before anything runs (``run_method.needs_brake``,
 	``workflow_action_cancels``); this refuses the rest before on_cancel, the delete
 	and every notification, webhook and server script of the event.
@@ -1016,7 +1017,8 @@ def workflow_action_cancels(doctype, action) -> bool:
 		return False
 	workflow = frappe.get_cached_doc("Workflow", name)
 	cancelled = {s.state for s in workflow.states if frappe.utils.cint(s.doc_status) == 2}
-	return any(t.action == action and t.next_state in cancelled for t in workflow.transitions)
+	# Stripped: apply_workflow_action strips the action before it runs.
+	return any(t.action == action.strip() and t.next_state in cancelled for t in workflow.transitions)
 
 
 # --------------------------------------------------------------------------- #
