@@ -1704,7 +1704,7 @@ def _explicit_config(listing, inst) -> dict:
 			full = {}
 		if not isinstance(full, dict):
 			full = {}
-	explicit = {k: full[k] for k in namespaces if k in full}
+	explicit = {k: full[k] for k in namespaces if k in full and derived_config.customer_may_set(k)}
 	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
