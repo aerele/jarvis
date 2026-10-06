@@ -121,6 +121,16 @@ class TestRunMethodBrake(FrappeTestCase):
 			{"method": "frappe.desk.form.save.discard", "args": {"doctype": "ToDo", "name": "x"}},
 			{"method": "frappe.desk.form.utils.remove_attach", "args": {"fid": "x"}},
 			{"method": "frappe.core.api.file.unzip_file", "args": {"name": "x"}},
+			{"method": "frappe.client.rename_doc", "args": {"doctype": "ToDo", "old_name": "x", "merge": 1}},
+			{
+				"method": "frappe.rename_doc",
+				"args": {"doctype": "ToDo", "old": "x", "new": "y", "merge": "true"},
+			},
+			{
+				"method": "frappe.model.rename_doc.update_document_title",
+				"args": {"doctype": "ToDo", "docname": "x", "name": "y", "merge": True},
+			},
+			{"method": "rename", "doctype": "ToDo", "name": "x", "args": {"name": "y", "merge": 1}},
 		):
 			with self.subTest(tool_args=tool_args):
 				self.assertTrue(needs_brake(tool_args))
@@ -131,6 +141,12 @@ class TestRunMethodBrake(FrappeTestCase):
 			{"method": "frappe.client.get_value", "args": {"doctype": "ToDo"}},
 			{"method": "frappe.desk.form.save.savedocs", "args": {"doc": "{}", "action": "Submit"}},
 			{"method": "submit", "doctype": "ToDo", "name": "x"},
+			{"method": "rename", "doctype": "ToDo", "name": "x", "args": {"name": "y"}},
+			{
+				"method": "frappe.client.rename_doc",
+				"args": {"doctype": "ToDo", "old_name": "x", "merge": "false"},
+			},
+			{"method": "frappe.rename_doc", "args": {"doctype": "ToDo", "old": "x", "new": "y", "merge": 0}},
 			{"method": "frappe.client.save", "args": {"doc": {"doctype": "ToDo", "docstatus": 1}}},
 			{"method": "frappe.client.save", "args": {"doc": "{not json"}},
 			{"method": "frappe.client.set_value", "args": {"fieldname": "description", "value": "2"}},
