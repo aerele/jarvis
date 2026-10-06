@@ -32,6 +32,10 @@ EVENT = "jarvis:subscription_health"
 # Under the ``jarvis:subscription_`` prefix in hooks.py persistent_cache_keys: frappe.clear_cache()
 # (pump's watchdog triggers one) would otherwise wipe pending signals before a heartbeat sends them.
 SIGNAL_KEY = "jarvis:subscription_signals"
+# Per-upstream "cleared at" epoch (same persistent prefix). Admin builds its reply before it sees our
+# ok signal, so the next reply can still list a chat entry we just cleared; entries no later than this
+# epoch are stale.
+CLEARED_KEY_PREFIX = "jarvis:subscription_cleared:"
 _LOG_KEY = "jarvis:subscription_log_hour"
 CODE_EXPIRED = "subscription-expired"
 CODE_OK = "ok"
@@ -173,11 +177,22 @@ def expired_entries() -> list[dict]:
 	return sorted(entries, key=lambda e: (_int(e.get("since")), e["account_ref"]))
 
 
+def _stamp_cleared(upstream: str) -> None:
+	frappe.cache().set_value(CLEARED_KEY_PREFIX + upstream, int(time.time()))
+
+
+def _cleared_at(upstream: str) -> int:
+	return _int(frappe.cache().get_value(CLEARED_KEY_PREFIX + upstream))
+
+
 def apply_admin_health(health) -> bool:
 	"""Merge admin's heartbeat reply (I3) into the stored map. True when the stored map changed.
 
 	An admin entry keeps the ``source`` admin gave it. A local ``chat`` entry is never cleared by
-	admin (neither by ``ok`` nor by omission); only a successful turn or a completed sign-in does."""
+	admin (neither by ``ok`` nor by omission); only a successful turn or a completed sign-in does.
+	Two guards against admin's reply lagging our ok signal: a ``chat`` entry whose ``since`` is not later
+	than the upstream's clear epoch is stale and ignored, and a local ``chat`` entry that predates that
+	epoch is dropped once admin no longer lists it."""
 	if not isinstance(health, dict):
 		return False  # key absent (older admin) or junk: never wipe chat-detected state
 	live = _live_accounts()
@@ -187,7 +202,14 @@ def apply_admin_health(health) -> bool:
 		local = stored.get(ref) or {}
 		remote = health.get(ref)
 		local_chat = local.get("state") == "expired" and local.get("source") == "chat"
-		if isinstance(remote, dict) and remote.get("state") == "expired":
+		cleared_at = _cleared_at(account["upstream"])
+		if local_chat and _int(local.get("since")) <= cleared_at:
+			local_chat = False  # a leftover from before the clear: nothing keeps it alive
+		if (
+			isinstance(remote, dict)
+			and remote.get("state") == "expired"
+			and not (remote.get("source") == "chat" and _int(remote.get("since")) <= cleared_at)
+		):
 			since = _int(remote.get("since")) or _int(local.get("since")) or int(time.time())
 			if local_chat and _int(local.get("since")):
 				since = min(since, _int(local.get("since")))
@@ -240,6 +262,7 @@ def _clear_upstream(upstream: str, *, account_ref: str | None = None, all_source
 		for ref, e in health.items()
 		if e.get("upstream") == upstream and (all_sources or e.get("source") == "chat" or ref == account_ref)
 	]
+	_stamp_cleared(upstream)
 	if not cleared:
 		return False
 	for ref in cleared:
@@ -462,13 +485,21 @@ def fallback_label(expired_refs: set) -> str:
 	return ""
 
 
+def _fallback_for(entry: dict, fallback: str) -> str:
+	"""When the account that answers is another one of the dead sign-in's own upstream, say so; the
+	SPA reads ``{fallback} answers until you reconnect``."""
+	if fallback and fallback == LABELS.get(entry.get("upstream")):
+		return f"Another {fallback} account"
+	return fallback
+
+
 def ui_entries() -> list[dict]:
 	"""``expired_entries()`` with the ``fallback`` label the SPA shows, oldest first."""
 	entries = expired_entries()
 	if not entries:
 		return []
 	fallback = fallback_label({e["account_ref"] for e in entries})
-	return [{**entry, "fallback": fallback} for entry in entries]
+	return [{**entry, "fallback": _fallback_for(entry, fallback)} for entry in entries]
 
 
 @frappe.whitelist()

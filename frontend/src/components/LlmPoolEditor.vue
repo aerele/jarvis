@@ -122,7 +122,7 @@
 						Remove
 					</button>
 				</span>
-				<p v-if="directExpiry" class="jv-flist-expline" role="status">
+				<p v-if="directExpiry" class="jv-flist-expline">
 					{{ expiredLine(directExpiry) }}
 				</p>
 			</div>
@@ -391,7 +391,6 @@
 						<p
 							v-if="rowExpiry(row, expiredEntries)"
 							class="jv-flist-expline"
-							role="status"
 						>
 							{{ rowExpiry(row, expiredEntries).line }}
 						</p>
@@ -534,7 +533,6 @@
 								<p
 									v-if="rowExpiry(row, expiredEntries)"
 									class="jv-flist-expline"
-									role="status"
 								>
 									{{ rowExpiry(row, expiredEntries).line }}
 								</p>
@@ -2433,6 +2431,7 @@ import {
 	accountExpiryStates,
 	rowExpiry,
 } from "@/llm/pool";
+import "@/llm/poolDates";
 import { errMessage as _err } from "@/lib/errors";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { classifyOperation } from "@/lib/llmOperation.js";

@@ -6,6 +6,7 @@ import {
 	expiredEntryMap,
 	accountExpiryStates,
 	rowExpiry,
+	setExpiryDateFormatter,
 } from "./pool.js";
 
 const fmt = () => "Oct 6, 2026";
@@ -52,13 +53,30 @@ describe("subscriptionAccountHealth expired level", () => {
 describe("expiredLine", () => {
 	it("names the fallback", () => {
 		expect(expiredLine(entry("A1", { fallback: "Anthropic" }), { formatDate: fmt })).toBe(
-			"Expired Oct 6, 2026. Anthropic answers until you reconnect."
+			"Expired Oct 6, 2026. Anthropic answers until you reconnect.",
 		);
+	});
+
+	it("reads naturally when the fallback is another account of the same upstream", () => {
+		expect(
+			expiredLine(entry("A1", { fallback: "Another OpenAI account" }), { formatDate: fmt }),
+		).toBe("Expired Oct 6, 2026. Another OpenAI account answers until you reconnect.");
+	});
+
+	it("formats the date with the formatter the SPA registers", () => {
+		setExpiryDateFormatter((s) => `at ${s}`);
+		try {
+			expect(expiredLine(entry("A1", { fallback: "Anthropic" }))).toBe(
+				"Expired at 1791230000. Anthropic answers until you reconnect.",
+			);
+		} finally {
+			setExpiryDateFormatter(null);
+		}
 	});
 
 	it("says chats fail when nothing else can answer", () => {
 		expect(expiredLine(entry("A1"), { formatDate: fmt })).toBe(
-			"Chats fail until you reconnect."
+			"Chats fail until you reconnect.",
 		);
 	});
 
@@ -67,13 +85,13 @@ describe("expiredLine", () => {
 			expiredLine(entry("A1", { fallback: "Anthropic" }), {
 				sameRowOk: true,
 				formatDate: fmt,
-			})
+			}),
 		).toBe("Another account answers until you reconnect.");
 	});
 
 	it("drops the date prefix when there is no since", () => {
 		expect(
-			expiredLine(entry("A1", { since: 0, fallback: "Anthropic" }), { formatDate: fmt })
+			expiredLine(entry("A1", { since: 0, fallback: "Anthropic" }), { formatDate: fmt }),
 		).toBe("Anthropic answers until you reconnect.");
 	});
 

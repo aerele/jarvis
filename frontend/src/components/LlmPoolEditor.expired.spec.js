@@ -23,7 +23,11 @@ vi.mock("@/api", () => api);
 vi.mock("frappe-ui", () => ({
 	call: vi.fn(),
 	dayjs: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
-	dayjsLocal: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
+	dayjsLocal: () => ({
+		format: () => "Tue, Oct 6, 2026 5:30 PM",
+		fromNow: () => "",
+		isValid: () => false,
+	}),
 	getConfig: () => null,
 	toast: { error: vi.fn(), success: vi.fn() },
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<span/>" },
@@ -105,12 +109,29 @@ describe("an expired single-account row", () => {
 		expect(badges(w)).toHaveLength(1);
 		expect(badges(w)[0].attributes("data-theme")).toBe("red");
 		expect(w.find(".jv-flist-expline").text()).toContain(
-			"claude-x answers until you reconnect."
+			"claude-x answers until you reconnect.",
 		);
 		const reconnect = w
 			.findAll("button")
 			.find((b) => b.text() === "Reconnect" && b.classes().includes("jv-btn--primary"));
 		expect(reconnect).toBeTruthy();
+	});
+
+	it("renders the expiry line as plain text, not a live region announced on mount", async () => {
+		pool.models = [subModel("gpt-5.6", 0, [account("A1", "a@x.com")])];
+		const w = await mountEditor({ expiredEntries: [entry("A1")] });
+		expect(w.find(".jv-flist-expline").attributes("role")).toBeUndefined();
+	});
+
+	it("dates the expiry like the rest of the app (exactDate)", async () => {
+		pool.models = [
+			subModel("gpt-5.6", 0, [account("A1", "a@x.com")]),
+			keyModel("Anthropic", "claude-x", 1),
+		];
+		const w = await mountEditor({
+			expiredEntries: [entry("A1", { fallback: "claude-x", since: 1791230000 })],
+		});
+		expect(w.find(".jv-flist-expline").text()).toMatch(/^Expired Tue, Oct 6, 2026 5:30 PM\. /);
 	});
 
 	it("says chats fail when nothing else can answer", async () => {
@@ -135,7 +156,7 @@ describe("two accounts on one row, one expired (Review Focus 5)", () => {
 		const w = await mountEditor({ expiredEntries: [entry("A1", { fallback: "Anthropic" })] });
 		expect(badges(w)).toHaveLength(1);
 		expect(w.find(".jv-flist-subrow-note").text()).toBe(
-			"Another account answers until you reconnect."
+			"Another account answers until you reconnect.",
 		);
 		expect(w.find(".jv-flist-expline").exists()).toBe(false);
 		expect(w.text()).not.toContain("Chats fail until you reconnect.");

@@ -199,6 +199,7 @@ import * as api from "@/api";
 import { Badge } from "frappe-ui";
 import { errMessage as _err } from "@/lib/errors";
 import { isCodeOnlyPaste, expiredLine } from "@/llm/pool";
+import "@/llm/poolDates";
 import { exactDate } from "@/utils/datetime";
 import { useConfirm } from "@/composables/useConfirm";
 import { agentName } from "@/branding";

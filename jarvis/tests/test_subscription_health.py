@@ -46,12 +46,17 @@ class _Base(unittest.TestCase):
 		]
 		for p in self.patches:
 			p.start()
+		self._clear_epochs()
+
+	def _clear_epochs(self):
 		frappe.cache().delete_value(sh.SIGNAL_KEY)
+		for upstream in ("openai", "anthropic"):
+			frappe.cache().delete_value(sh.CLEARED_KEY_PREFIX + upstream)
 
 	def tearDown(self):
 		for p in self.patches:
 			p.stop()
-		frappe.cache().delete_value(sh.SIGNAL_KEY)
+		self._clear_epochs()
 
 	def seed(self, health):
 		self.stored = json.dumps(health, sort_keys=True, separators=(",", ":"))
@@ -134,6 +139,55 @@ class TestApplyAdminHealth(_Base):
 	def test_junk_entries_and_unknown_states_are_ignored(self):
 		sh.apply_admin_health({"ACC_OA1": "x", "ACC_OA2": {"state": "unknown"}, "ACC_CL1": {"state": "ok"}})
 		self.assertEqual(sh.current_health(), {})
+
+
+class TestClearEpoch(_Base):
+	"""Admin builds its reply from its stored map before it sees our ok signal, so the next reply
+	can still list an entry we just cleared. That stale chat entry must not come back."""
+
+	def _stale_reply(self, since=100):
+		return {"ACC_OA1": {**_entry("ACC_OA1", source="chat", since=since)}}
+
+	def test_stale_admin_chat_entry_after_a_local_clear_stays_cleared(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat", since=100)})
+		sh.record_chat_success("openai")
+		self.assertEqual(sh.current_health(), {})
+		sh.apply_admin_health(self._stale_reply())
+		self.assertEqual(sh.current_health(), {})
+		sh.apply_admin_health({})
+		self.assertEqual(sh.current_health(), {})
+
+	def test_stale_admin_chat_entry_after_a_signin_complete_stays_cleared(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat", since=100)})
+		sh.record_signin_complete("openai", "ACC_OA1", all_sources=True)
+		sh.apply_admin_health(self._stale_reply())
+		self.assertEqual(sh.current_health(), {})
+
+	def test_a_new_failure_after_the_clear_is_accepted(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat", since=100)})
+		sh.record_chat_success("openai")
+		later = int(frappe.cache().get_value(sh.CLEARED_KEY_PREFIX + "openai")) + 50
+		sh.apply_admin_health(self._stale_reply(since=later))
+		self.assertEqual(sh.current_health()["ACC_OA1"]["since"], later)
+
+	def test_a_poll_entry_is_not_filtered_by_the_clear_epoch(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat", since=100)})
+		sh.record_chat_success("openai")
+		reply = {"ACC_OA1": _entry("ACC_OA1", source="poll", since=100)}
+		sh.apply_admin_health(reply)
+		self.assertEqual(sh.current_health()["ACC_OA1"]["source"], "poll")
+
+	def test_a_leftover_chat_entry_older_than_the_clear_is_dropped_when_admin_omits_it(self):
+		frappe.cache().set_value(sh.CLEARED_KEY_PREFIX + "openai", 1000)
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat", since=100)})
+		sh.apply_admin_health({})
+		self.assertEqual(sh.current_health(), {})
+
+	def test_a_chat_entry_newer_than_the_clear_survives_admin_omitting_it(self):
+		frappe.cache().set_value(sh.CLEARED_KEY_PREFIX + "openai", 1000)
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat", since=2000)})
+		sh.apply_admin_health({})
+		self.assertIn("ACC_OA1", sh.current_health())
 
 
 class TestDirectMode(_Base):
@@ -745,6 +799,19 @@ class TestAttentionAndNotice(_Base):
 		fb.assert_called_once_with({"ACC_OA1"})
 		self.assertEqual(entries[0]["fallback"], "Anthropic")
 		self.assertEqual(entries[0]["account_ref"], "ACC_OA1")
+
+	def test_same_upstream_fallback_reads_another_account(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100)})
+		with patch.object(sh, "fallback_label", return_value="OpenAI"):
+			entries = sh.ui_entries()
+		self.assertEqual(entries[0]["fallback"], "Another OpenAI account")
+
+	def test_other_upstream_fallback_is_untouched(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100), "ACC_CL1": _entry("ACC_CL1", since=200)})
+		with patch.object(sh, "fallback_label", return_value="Anthropic"):
+			by_ref = {e["account_ref"]: e["fallback"] for e in sh.ui_entries()}
+		self.assertEqual(by_ref["ACC_OA1"], "Anthropic")
+		self.assertEqual(by_ref["ACC_CL1"], "Another Anthropic account")
 
 	def test_ui_entries_empty_when_nothing_expired(self):
 		self.assertEqual(sh.ui_entries(), [])
