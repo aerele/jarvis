@@ -4,7 +4,11 @@
 
 Confirmed rejections offer Retry, Edit and Discard. Editing uses a separate modal editor and never replaces a newer composer draft. Retrying allocates a new request ID and reuses all files and the original displayed token order; it does not reselect numbered approval targets. The server's existing unnumbered approval-sweep semantics remain unchanged. Discard removes the local request, not uploaded files or accepted work.
 
-An exception, malformed response, or a POST still pending after 30 seconds becomes Delivery not confirmed. Check delivery only reads `jarvis.chat.pwa_send.check_delivery`; it cannot execute a second send. Late responses cannot overwrite a newer retry or downgrade an already settled result. Normal acceptance is reconciled by the exact returned message ID, never by matching text. Typed confirmations are handled before ordinary ok:false rejection because they can execute without a user-message row or new turn.
+An exception, malformed response, or a POST still pending after 30 seconds becomes Delivery not confirmed. Check delivery only reads `jarvis.chat.pwa_send.check_delivery`; it cannot execute a second send. Late responses cannot overwrite a newer retry or downgrade an already settled result. Delivery reads have a 15-second deadline; timeout unlocks Check delivery without permitting replay, and late read results cannot affect a subsequent check. Normal acceptance is reconciled by the exact returned message ID, never by matching text. Typed confirmations are handled before ordinary ok:false rejection because they can execute without a user-message row or new turn.
+
+If a stale conversation is retargeted to another chat, its destination composer is preserved. A colliding source draft appears in a saved-draft card; Use this draft swaps it with the composer, preserving text and files on both sides. It never sends a request or transfers approval tokens.
+
+Queue feedback is separate from transcript reconciliation. Once a saved user message replaces its local recovery card, an accepted queued turn keeps its status and composer lock. Existing owner-checked admission endpoints discover queued/preparing/ready turns on open, focus and resync, and poll a pending run every 10 seconds. Reads are bounded and fenced against navigation and lifecycle events. Cancellation uses `cancel_queued_turn`; lost responses keep the status and offer a read-only status check. Matching start/terminal events retire queue feedback. Unknown states and failed reads retain the last known status.
 
 ## Backend contract and limits
 
@@ -30,3 +34,11 @@ Synthetic data in the actual recovery component and composer. Captured while ver
 | Light | Separate editor | Dark |
 |---|---|---|
 | ![Failed request in light theme](docs/send-recovery/light.png) | ![Separate editor keeps the newer draft](docs/send-recovery/editor.png) | ![Recovery card in dark theme](docs/send-recovery/dark.png) |
+
+### Review-fix browser captures
+
+Actual ChatView at 390px with synthetic API responses: reversible draft selection, queue status refresh, confirmed cancellation, no horizontal overflow, and no runtime errors. These are not live ERP integration checks.
+
+| Light | Dark |
+|---|---|
+| ![Saved draft and queued request](docs/send-recovery/queue-drafts-light.png) | ![Saved draft and queued request in dark theme](docs/send-recovery/queue-drafts-dark.png) |
