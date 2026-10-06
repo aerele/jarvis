@@ -76,12 +76,15 @@ class TestDerivedConfig(FrappeTestCase):
 		out = agent_scheduler._explicit_config({"config_keys": ["ageing.stale_floor_days"]}, inst)
 		self.assertEqual(out, {"ageing": {"stale_floor_days": 9}})
 
-	def test_salt_never_logged(self):
-		with (
-			patch.object(frappe, "log_error") as le,
-			patch.object(frappe.logger(), "info") as li,
-		):
-			out = agent_scheduler._explicit_config({"config_keys": ["fingerprint_salt"]}, _inst())
-		salt = out["fingerprint_salt"]
-		for m in (le, li):
-			self.assertNotIn(salt, str(m.call_args_list))
+	def test_failing_provider_is_omitted_and_logged_without_value(self):
+		salt = derived_config._fingerprint_salt(_inst())
+		boom = patch.dict(
+			derived_config.PROVIDERS,
+			{"open_workable_status_set": (lambda inst: 1 / 0, True)},
+		)
+		with boom, patch.object(derived_config.frappe, "log_error") as le:
+			out = derived_config.derive(set(_KEYS), _inst(), {})
+		self.assertEqual(out, {"fingerprint_salt": salt})
+		le.assert_called_once()
+		self.assertIn("open_workable_status_set", le.call_args.kwargs["message"])
+		self.assertNotIn(salt, str(le.call_args))

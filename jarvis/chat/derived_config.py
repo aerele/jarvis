@@ -41,7 +41,13 @@ def derive(namespaces, inst, explicit):
 		fn, customer_wins = provider
 		if customer_wins and key in explicit:
 			continue
-		value = fn(inst)
+		try:
+			value = fn(inst)
+		except Exception:
+			frappe.log_error(
+				title="derived_config provider failed", message=f"{key}\n{frappe.get_traceback()}"
+			)
+			continue
 		if value is not None:
 			out[key] = value
 	return out
