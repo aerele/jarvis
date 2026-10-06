@@ -271,7 +271,8 @@ const lastAssistantKey = computed(() => {
 	return assistants.length ? assistants[assistants.length - 1].key : "";
 });
 
-// The write leaves a receipt in the conversation, so reload rather than guess.
+// The write leaves a receipt in the conversation (a closed failure, the assistant's
+// explanation), so reload rather than guess.
 function onActionApplied() {
 	load();
 	store.loadConversations();
@@ -1018,6 +1019,7 @@ onUnmounted(() => {
 						:parked-note="parkedActions.get(it.key) || parkedByCard(pending, it.key)"
 						:message-key="it.key"
 						@applied="onActionApplied"
+						@failed="onActionApplied"
 						@parked="(n) => parkedActions.set(it.key, n)"
 						@dismissed="dismissedActions.add(it.key)"
 					/>

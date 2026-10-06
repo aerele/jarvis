@@ -4,6 +4,7 @@ import * as api from "../api";
 import { agentName } from "@/branding";
 import { cardTableRemovals, cardTableSummary, cardTableValues } from "../lib/cardTables";
 import { parkedNoteOf } from "@shared/lib/draftParked.js";
+import { draftFailureOf } from "@shared/lib/draftFailure.js";
 
 // The agent proposes a document; a human applies it.
 //
@@ -25,9 +26,15 @@ const props = defineProps({
 	// the waiting state can be found again after a reload.
 	messageKey: { type: String, default: "" },
 });
-const emit = defineEmits(["applied", "dismissed", "parked"]);
+const emit = defineEmits(["applied", "dismissed", "parked", "failed"]);
 
-const state = ref(props.parkedNote ? "parked" : "review"); // review | busy | done | parked
+// closed: a failure no value fixes (or one that saved part of it); the reply in the
+// chat explains, so the card can't be applied again (R2-9). Kept in this component
+// only, on purpose: the card shows only under the latest assistant message, and the
+// reply that explains the failure becomes the latest, so after a reload the card is
+// gone. Only when that reply could not be sent (the note then says to ask in the
+// chat) does a reload show the card again, and applying it then simply retries.
+const state = ref(props.parkedNote ? "parked" : "review"); // review | busy | done | parked | closed
 const error = ref("");
 const applied = ref(null);
 // A File Box chat's Confirm goes to the Approval Board: the server says what happened.
@@ -138,9 +145,23 @@ async function apply() {
 			continue: props.action.continue ? 1 : 0,
 			card: props.action,
 			message: props.messageKey,
+			// This card is read-only: a value it got wrong is not fixed here, so the
+			// server never tells the assistant "the user is fixing it in the panel".
+			editable: 0,
 		});
-		if (r?.ok === false) {
-			error.value = r.error?.message || r.reason || "Couldn't save that.";
+		const failed = draftFailureOf(r, agentName);
+		if (failed && failed.closed) {
+			error.value = failed.note;
+			state.value = "closed";
+			emit("failed");
+			return;
+		}
+		if (failed) {
+			// Nothing here can be edited: a value it got wrong is for the assistant.
+			error.value =
+				failed.error.kind === "fixable"
+					? `${failed.error.message} Ask ${agentName} to correct it.`
+					: failed.error.message;
 			state.value = "review";
 			return;
 		}
@@ -266,7 +287,7 @@ async function copyBody() {
 			</template>
 		</div>
 
-		<div v-else-if="state !== 'parked'" class="jv-action-foot">
+		<div v-else-if="state !== 'parked' && state !== 'closed'" class="jv-action-foot">
 			<button
 				class="jv-btn is-ghost"
 				:disabled="state === 'busy'"

@@ -67,6 +67,21 @@ def outcome_for(status: str, reason_code: str | None, tool: str | None) -> str:
 	return _CHIP_BY_STATUS.get(status, "failed")
 
 
+def with_reference(result, name: str) -> dict:
+	"""A failed result carrying ``error.reference``: the confirmation's own id, which the
+	failed card, its chip and the Approval Board show for support (R2-3 default, never
+	a new Error Log row). The continuation reads only ``message`` / ``detail``, so it
+	never reaches the assistant. An envelope that dispatched but failed inside (a
+	connector's own failure: outer ok, inner ok false) carries it as ``reference``
+	instead, beside its data, so its outer ``ok`` is not given an ``error``."""
+	if isinstance(result, dict) and result.get("ok"):
+		return {**result, "reference": name}
+	out = dict(result) if isinstance(result, dict) else {"ok": False}
+	err = out.get("error") if isinstance(out.get("error"), dict) else {}
+	out["error"] = {**err, "reference": name}
+	return out
+
+
 def _item(row) -> dict:
 	"""What a continuation needs; args/result come from the seals (``{}`` / ``None``
 	when a seal can't be opened: a tampered or unverifiable row)."""
@@ -120,11 +135,14 @@ def _deliver(item: dict) -> None:
 		overwrite = ("superseded",)
 	else:
 		overwrite = ()
+	# A failed chip shows its reference, also for a failure that never dispatched
+	# (seal, stale, interrupted) and so has no stored result.
+	result = with_reference(item["result"], item["name"]) if item["status"] == FAILED else item["result"]
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",
 		item["args"],
-		item["result"],
+		result,
 		action_outcome=item["outcome"],
 		flip_token=item["name"],
 		overwrite_outcomes=overwrite,

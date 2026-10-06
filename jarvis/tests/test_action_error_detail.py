@@ -437,8 +437,10 @@ class TestApplyActionContract(FrappeTestCase):
 		self.assertEqual(r["error"]["message"], "ToDo needs a value for Description.")
 		self.assertEqual(frappe.db.count("ToDo"), todos, "the dry-run insert was rolled back")
 
-	def test_missing_field_with_another_error_keeps_generic_envelope(self):
-		# Naming only the empty field would hide the bad link, so nothing is named.
+	def test_missing_field_with_another_error_names_the_bad_link(self):
+		# The bad link is what failed (Frappe checks links first), so the bad link is
+		# named; never only the empty field, which would hide it (round 2, R2-9).
 		r = self._apply_todo({"priority": "Medium", "allocated_to": "nobody-603@example.invalid"})
 		self.assertFalse(r["ok"])
-		self.assertNotIn("fields", r["error"])
+		marks = {f["fieldname"]: f.get("invalid") for f in r["error"]["fields"]}
+		self.assertEqual(marks, {"allocated_to": 1})

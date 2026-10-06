@@ -30,3 +30,22 @@ describe("ActionError shows the person's words for a refusal", () => {
 		expect(w.text()).toContain("where the whole record can be reviewed");
 	});
 });
+
+describe("ActionError failure reference", () => {
+	it("shows the reference when the failed envelope carries one", () => {
+		const w = mount(ActionError, {
+			props: { error: { message: "Failed", reference: "pa-5" } },
+		});
+		expect(w.text()).toContain("Reference:");
+		expect(w.find("code").text()).toBe("pa-5");
+	});
+
+	it("none for a draft-panel failure (no confirmation row) or a plain string", () => {
+		expect(
+			mount(ActionError, { props: { error: { message: "Failed" } } }).text()
+		).not.toContain("Reference:");
+		expect(mount(ActionError, { props: { error: "boom" } }).text()).not.toContain(
+			"Reference:"
+		);
+	});
+});
