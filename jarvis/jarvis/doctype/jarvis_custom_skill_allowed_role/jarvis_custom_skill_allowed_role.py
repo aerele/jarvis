@@ -10,6 +10,8 @@ soft boundary, not a confidentiality boundary (plan section 6.6).
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisCustomSkillAllowedRole(Document):
+
+class JarvisCustomSkillAllowedRole(NotRenamable, Document):
 	pass

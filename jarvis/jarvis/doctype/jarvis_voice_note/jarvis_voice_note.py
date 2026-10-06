@@ -21,6 +21,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 MAX_TRANSCRIPT_LEN = 20000
 
 ALLOWED_KINDS = ("Text", "Voice", "Attachment", "Link")
@@ -30,7 +32,7 @@ TRANSCRIPT_REQUIRED_KINDS = ("Text", "Voice")
 _URL_SCHEMES = ("http://", "https://")
 
 
-class JarvisVoiceNote(Document):
+class JarvisVoiceNote(NotRenamable, Document):
 	def validate(self):
 		self._validate_kind()
 		self._validate_transcript()

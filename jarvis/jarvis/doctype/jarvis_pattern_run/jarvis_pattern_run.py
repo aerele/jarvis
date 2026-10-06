@@ -11,6 +11,8 @@ or the row budget (never masquerades as ``Completed``).
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisPatternRun(Document):
+
+class JarvisPatternRun(NotRenamable, Document):
 	pass

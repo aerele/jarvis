@@ -1,8 +1,10 @@
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentWrite(Document):
+
+class JarvisAgentWrite(NotRenamable, Document):
 	@staticmethod
 	def clear_old_logs(days=90):
 		"""Satisfies frappe's ``LogType`` protocol so Log Settings picks this

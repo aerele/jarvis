@@ -10,8 +10,10 @@ table and dispatches under ``frappe.set_user(user)``.
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisChatSession(Document):
+
+class JarvisChatSession(NotRenamable, Document):
 	# Minimal controller - all validation is handled by field constraints.
 	# session_key is unique+mandatory; user is a mandatory Link to User.
 

@@ -14,6 +14,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 LEGAL_TRANSITIONS = {
 	"Proposed": {"Approved", "Rejected", "Snoozed"},
 	"Approved": {"Active", "Proposed", "Stale"},
@@ -25,7 +27,7 @@ LEGAL_TRANSITIONS = {
 }
 
 
-class JarvisLearnedPattern(Document):
+class JarvisLearnedPattern(NotRenamable, Document):
 	def validate(self):
 		self.validate_transition()
 
