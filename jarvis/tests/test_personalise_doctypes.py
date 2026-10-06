@@ -51,6 +51,7 @@ from jarvis.jarvis.doctype.jarvis_wiki_promotion_request.jarvis_wiki_promotion_r
 	TO_SCOPES,
 )
 from jarvis.learning import roles as learning_roles
+from jarvis.permissions import JARVIS_USER_ROLE
 
 QUESTION = "Jarvis Personalise Question"
 RULE = "Jarvis Personalise Question Rule"
@@ -75,9 +76,8 @@ def _ensure_user(email: str) -> str:
 				"first_name": email.split("@")[0],
 				"send_welcome_email": 0,
 				"enabled": 1,
-				# Explicit: a role-less insert becomes a Website User, which
-				# never reaches Desk data / the if_owner "All" role checks
-				# below the way a System User does.
+				# Explicit: a role-less insert becomes a Website User. A Jarvis
+				# user is a System User with a Jarvis role (the if_owner perms).
 				"user_type": "System User",
 			}
 		)
@@ -86,6 +86,8 @@ def _ensure_user(email: str) -> str:
 	if frappe.db.get_value("User", email, "user_type") != "System User":
 		frappe.db.set_value("User", email, "user_type", "System User", update_modified=False)
 		frappe.clear_cache(user=email)
+	if JARVIS_USER_ROLE not in frappe.get_roles(email):
+		frappe.get_doc("User", email).add_roles(JARVIS_USER_ROLE)
 	return email
 
 
@@ -247,6 +249,14 @@ class TestPersonaliseQuestion(PersonaliseDoctypeTestCase):
 		# the wrong person visibility.
 		doc = self._question(USER_A)
 		self.assertEqual(doc.owner, USER_A)
+
+	def test_a_user_without_jarvis_access_gets_no_owner_access(self):
+		doc = self._question(USER_A)
+		user = frappe.get_doc("User", USER_A)
+		user.remove_roles(JARVIS_USER_ROLE)
+		self.addCleanup(_ensure_user, USER_A)
+		with _as(USER_A):
+			self.assertFalse(frappe.has_permission(QUESTION, doc=doc.name, ptype="read"))
 
 	def test_target_user_can_read_write_delete_own_question(self):
 		doc = self._question(USER_A)
