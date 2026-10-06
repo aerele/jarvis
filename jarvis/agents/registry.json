@@ -764,7 +764,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Weekly read-only pipeline-hygiene scrub of your open CRM deals: surfaces deals that have gone quiet, aged in their current stage, run past their expected close date, or have no next step scheduled, then ranks them into a per-owner worklist so the forecast reflects deals that are actually moving. Never edits a deal, moves a stage, changes a date, or creates a task.",
       "tools_required": [
@@ -793,10 +793,12 @@
       ],
       "rule_tokens": [
         "dp-bench-6c1a",
+        "dp-due-5b19",
         "dp-open-7d45",
         "dp-quiet-3f88",
         "dp-rank-a20e"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 1800,
@@ -1179,7 +1181,7 @@
       "domain": "crm",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "status": "Published",
       "description": "Read-only hygiene sweep of your Frappe CRM: finds duplicate and near-duplicate leads (the same person entered twice across leads and deals), flags leads marked converted with no matching deal, and surfaces uncontactable, unassigned, or SLA-breached leads into a ranked worklist. Never merges, edits, assigns, or deletes a record — it hands sales-ops the exceptions and a human decides.",
       "tools_required": [
@@ -1213,8 +1215,11 @@
         "lh-phon-9d22",
         "lh-plen-c614",
         "lh-shm-8a73",
-        "lh-sla-5c40"
+        "lh-sla-5c40",
+        "lh-unas-1e93",
+        "lh-xfun-6d07"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "revops-hygiene",
       "timeout_s": 900,
@@ -1229,7 +1234,11 @@
       "validated_for_fy": null,
       "min_model": {
         "tier": "Advanced"
-      }
+      },
+      "config_keys": [
+        "open_workable_status_set",
+        "fingerprint_salt"
+      ]
     },
     {
       "agent_slug": "ledger-scrutiny-auditor",
