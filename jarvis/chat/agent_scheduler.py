@@ -48,6 +48,7 @@ from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user
+from jarvis.chat import derived_config
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import is_valid_unattended_owner
@@ -1685,22 +1686,26 @@ def _explicit_config(listing, inst) -> dict:
 	listing declares (e.g. config_keys ``['ageing.stale_floor_days', ...]`` -> the ``ageing``
 	object), so ONLY declared tunables are handed to the delegate - never the whole config, and
 	never a non-declared key a user typed into the advanced-JSON box. Empty when the agent
-	declares no config_keys or the installation has no config."""
+	declares no config_keys or the installation has no config. Bench-derived keys (see
+	``derived_config``) are merged in when declared."""
 	keys = listing.get("config_keys")
 	try:
 		keys = frappe.parse_json(keys) if isinstance(keys, str) else (keys or [])
 	except Exception:
 		keys = []
 	namespaces = {str(k).split(".", 1)[0] for k in keys if k}
-	if not namespaces or not inst.get("config"):
+	if not namespaces:
 		return {}
-	try:
-		full = frappe.parse_json(inst.config) or {}
-	except Exception:
-		return {}
-	if not isinstance(full, dict):
-		return {}
-	return {k: full[k] for k in namespaces if k in full}
+	full = {}
+	if inst.get("config"):
+		try:
+			full = frappe.parse_json(inst.config) or {}
+		except Exception:
+			full = {}
+		if not isinstance(full, dict):
+			full = {}
+	explicit = {k: full[k] for k in namespaces if k in full}
+	return {**explicit, **derived_config.derive(namespaces, inst, explicit)}
 
 
 def _audit_prompt(listing, inst, trigger: str, scope: dict | None = None) -> str:
