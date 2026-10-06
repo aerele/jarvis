@@ -895,3 +895,51 @@ class TestNoteRecordedTurn(_Base):
 		src = inspect.getsource(turn_handler)
 		self.assertIn("note_recorded_turn(", src)
 		self.assertNotIn("note_session_row(", src)
+
+
+class TestUnmigratedSite(unittest.TestCase):
+	"""Code deployed before ``bench migrate``: the field is missing and nothing may raise."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.patch = patch.object(sh, "_has_field", return_value=False)
+		self.patch.start()
+
+	def tearDown(self):
+		self.patch.stop()
+
+	def test_read_is_empty_and_write_is_a_no_op(self):
+		with patch("frappe.db.set_single_value") as setter, patch("frappe.db.get_single_value") as getter:
+			self.assertEqual(sh._read_stored(), "")
+			sh._write_stored("{}")
+		setter.assert_not_called()
+		getter.assert_not_called()
+		self.assertEqual(sh.current_health(), {})
+
+	def test_status_health_and_notice_return_the_no_health_shape(self):
+		from jarvis import account, admin_client
+
+		with (
+			patch.object(account, "_has_llm_config", return_value=True),
+			patch.object(account, "compute_pool_mode", return_value=True),
+			patch.object(account, "_llm_apply_confirmed", return_value=True),
+			patch.object(account, "_last_turn_errored", return_value=False),
+			patch.object(account, "_last_turn_succeeded", return_value=False),
+			patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}),
+			patch.object(sh, "_live_accounts", return_value={}),
+			patch("jarvis.permissions.require_jarvis_access"),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=True),
+		):
+			status = account.get_llm_connection_status()
+			health = account.get_llm_connection_health()
+			admin_notice = sh.get_subscription_notice()
+		with (
+			patch("jarvis.permissions.require_jarvis_access"),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=False),
+		):
+			notice = sh.get_subscription_notice()
+		self.assertNotEqual(status["attention_reason"], "subscription_expired")
+		self.assertEqual((status["attention_detail"], status["subscription_health"]), ({}, []))
+		self.assertEqual(health, {"state": "ok"})
+		self.assertEqual(admin_notice, {"expired": [], "upstreams": []})
+		self.assertEqual(notice, {"expired": [], "upstreams": None})

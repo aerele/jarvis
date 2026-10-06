@@ -45,11 +45,23 @@ _SOURCES = ("poll", "chat")
 # ---- storage seams (tests patch these) -------------------------------------------------
 
 
+def _has_field() -> bool:
+	"""False on a site where this code is deployed but ``bench migrate`` has not added the field yet."""
+	try:
+		return bool(frappe.get_meta(SETTINGS).has_field(FIELD))
+	except Exception:
+		return False
+
+
 def _read_stored() -> str:
+	if not _has_field():
+		return ""
 	return frappe.db.get_single_value(SETTINGS, FIELD, cache=False) or ""
 
 
 def _write_stored(text: str) -> None:
+	if not _has_field():
+		return
 	frappe.db.set_single_value(SETTINGS, FIELD, text, update_modified=False)
 
 
