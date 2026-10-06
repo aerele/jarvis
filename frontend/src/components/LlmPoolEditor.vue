@@ -3872,7 +3872,12 @@ function missingApiKeyField(row) {
 const showDirectRow = computed(
 	() => !singleMode.value && !!(props.directStatus && props.directStatus.is_direct_subscription)
 );
+const directAutoStart = ref(false);
 const directPanelOpen = ref(false);
+// Auto-start belongs to the one explicit reconnect intent: once the panel closes it is spent.
+watch(directPanelOpen, (open) => {
+	if (!open) directAutoStart.value = false;
+});
 watch(
 	() => props.directStatus,
 	(v) => {
@@ -3884,7 +3889,6 @@ const directExpiry = computed(
 	() => (props.expiredEntries || []).find((e) => e && e.account_ref === "direct:openai") || null
 );
 // Tells DirectSubscriptionCard to start its sign-in as soon as the reconnect link opens it.
-const directAutoStart = ref(false);
 function accountState(row, ai) {
 	return accountExpiryStates(row, props.expiredEntries)[ai] || { entry: null, line: "" };
 }

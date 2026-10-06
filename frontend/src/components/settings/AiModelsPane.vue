@@ -121,6 +121,15 @@ const poolEditor = ref(null);
 const socket = inject("$socket", null);
 const reconnectRef = ref(((store.takeSettingsIntent() || {}).reconnect || "").toString());
 let unwatchNotice = () => {};
+// openSettings("aimodels", { reconnect }) while this pane is already open: consume and clear it.
+watch(
+	() => store.settingsIntent,
+	(intent) => {
+		if (!intent || !intent.reconnect) return;
+		reconnectRef.value = String(intent.reconnect);
+		store.takeSettingsIntent();
+	}
+);
 
 // The rail already gates this section to the tenant-admin tier; this flag
 // additionally gates the editor's edit affordances + which probes fire. PART 4

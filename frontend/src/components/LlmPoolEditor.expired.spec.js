@@ -192,4 +192,24 @@ describe("direct mode (lone OpenAI subscription, key direct:openai)", () => {
 		expect(w.emitted("reconnect-handled")).toBeTruthy();
 		expect(api.beginPasteSignin).toHaveBeenCalledTimes(1);
 	});
+
+	it("auto-starts only from the intent: closing and reopening by hand does not re-run it", async () => {
+		api.beginPasteSignin.mockResolvedValue({
+			ok: true,
+			data: { nonce: "n1", authorize_url: "https://auth.example/x", expires_in: 600 },
+		});
+		const w = await mountEditor({
+			directStatus,
+			expiredEntries: [entry("direct:openai")],
+			reconnectRef: "direct:openai",
+		});
+		expect(api.beginPasteSignin).toHaveBeenCalledTimes(1);
+		const toggle = () =>
+			w.findAll("button").find((b) => ["Close", "Reconnect"].includes(b.text()));
+		await toggle().trigger("click");
+		await flushPromises();
+		await toggle().trigger("click");
+		await flushPromises();
+		expect(api.beginPasteSignin).toHaveBeenCalledTimes(1);
+	});
 });
