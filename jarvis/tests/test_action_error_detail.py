@@ -306,6 +306,13 @@ class TestApplyActionContract(FrappeTestCase):
 		# (built-in conf guard) so a real ToDo insert runs cleanly.
 		frappe.local.conf["disable_global_search"] = 1
 		self.addCleanup(lambda: frappe.local.conf.pop("disable_global_search", None))
+		# A failed save tells the assistant through a continuation (R2-9, PanelFailure),
+		# which commits a hidden seed message and its Turn. Nothing here asserts on it
+		# (test_panel_failure does), and a committed seed outlived the test as an orphan
+		# user message for a later suite's stale scan to heal (test_chat_stale_scan).
+		send = patch("jarvis.chat.panel_failure.PanelFailure._continue", return_value=(True, None))
+		send.start()
+		self.addCleanup(send.stop)
 
 	def _conv(self) -> str:
 		conv = frappe.get_doc(
@@ -437,8 +444,10 @@ class TestApplyActionContract(FrappeTestCase):
 		self.assertEqual(r["error"]["message"], "ToDo needs a value for Description.")
 		self.assertEqual(frappe.db.count("ToDo"), todos, "the dry-run insert was rolled back")
 
-	def test_missing_field_with_another_error_keeps_generic_envelope(self):
-		# Naming only the empty field would hide the bad link, so nothing is named.
+	def test_missing_field_with_another_error_names_the_bad_link(self):
+		# The bad link is what failed (Frappe checks links first), so the bad link is
+		# named; never only the empty field, which would hide it (round 2, R2-9).
 		r = self._apply_todo({"priority": "Medium", "allocated_to": "nobody-603@example.invalid"})
 		self.assertFalse(r["ok"])
-		self.assertNotIn("fields", r["error"])
+		marks = {f["fieldname"]: f.get("invalid") for f in r["error"]["fields"]}
+		self.assertEqual(marks, {"allocated_to": 1})

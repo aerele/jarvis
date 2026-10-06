@@ -71,7 +71,10 @@ export function panelField(metaField, value) {
 // Mark the fields a failed create named (apply_action `error.fields`) on a draft
 // model. A field meta does not mark required (mandatory_depends_on) is added from
 // the form meta so the person can fill it. Child-row misses stay in the message.
+// An entry with `invalid` is a value the field refused (a bad option or link): it is
+// marked `serverInvalid`, cleared by the next failure's marks.
 export function markMissing(model, missing, metaFields = []) {
+	for (const f of model.fields) f.serverInvalid = false;
 	for (const m of missing || []) {
 		if (m.parentfield) continue;
 		let field = model.fields.find((f) => f.fieldname === m.fieldname);
@@ -81,6 +84,7 @@ export function markMissing(model, missing, metaFields = []) {
 			field = panelField(metaField, "");
 			model.fields.push(field);
 		}
-		field.serverMissing = true;
+		if (m.invalid) field.serverInvalid = true;
+		else field.serverMissing = true;
 	}
 }

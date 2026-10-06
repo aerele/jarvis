@@ -1,11 +1,17 @@
 <script setup>
 import { computed, ref, watch } from "vue";
 import { renderMarkdown } from "@shared/markdown.js";
-import { pendingCardOf, pendingExpiry, personError } from "@shared/lib/actionSummary.js";
+import {
+	failureReferenceOf,
+	pendingCardOf,
+	pendingExpiry,
+	personError,
+} from "@shared/lib/actionSummary.js";
 import { denyOutcome } from "../lib/denyOutcome.js";
 import { keptCardMessage, settledReasonMessage } from "../lib/keptCard.js";
 import Sheet from "./Sheet.vue";
 import PendingCard from "./PendingCard.vue";
+import FailureReference from "./FailureReference.vue";
 import * as api from "../api";
 import { agentName } from "@/branding";
 
@@ -35,6 +41,8 @@ const emit = defineEmits(["close", "resolved", "busy"]);
 
 const state = ref("review"); // review | busy | approved | denied
 const error = ref("");
+// A failed confirmation's own id, for support (the bench's error.reference).
+const reference = ref("");
 // Which of the two approve buttons is in flight, so a runnable card's pair
 // (Step-by-step / Approve & run) can each show their OWN busy state instead of
 // `state === "busy"` alone leaving both looking identical (P1, skill
@@ -47,6 +55,7 @@ watch(
 	() => {
 		state.value = "review";
 		error.value = "";
+		reference.value = "";
 	}
 );
 
@@ -117,6 +126,7 @@ async function deny() {
 async function approve(mode = "step") {
 	if (state.value === "busy" || props.streaming) return;
 	error.value = "";
+	reference.value = "";
 	state.value = "busy";
 	approveMode.value = mode;
 	emit("busy", true);
@@ -151,6 +161,7 @@ async function approve(mode = "step") {
 			}
 			// The person's words for a refusal written for the model (error.person_message).
 			error.value = personError(r.error).message || r.reason || "Couldn't run this action.";
+			reference.value = failureReferenceOf(r);
 			state.value = "review";
 			return;
 		}
@@ -222,7 +233,10 @@ async function approve(mode = "step") {
 						This confirmation expired. Tell {{ agentName }} the action again to retry
 						it.
 					</div>
-					<div v-if="error" class="jv-derror">{{ error }}</div>
+					<div v-if="error" class="jv-derror">
+						{{ error }}
+						<FailureReference :id="reference" />
+					</div>
 					<div v-if="props.streaming" class="jv-dnote">
 						Waiting for the reply to finish before this can run…
 					</div>
