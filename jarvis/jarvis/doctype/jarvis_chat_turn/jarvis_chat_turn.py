@@ -11,8 +11,10 @@ by ORM validation (the hot path never uses ``save()``).
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisChatTurn(Document):
+
+class JarvisChatTurn(NotRenamable, Document):
 	# Minimal controller. run_id is the autoname field (name == run_id), so a
 	# duplicate send collides on primary-key insert - the idempotency guard.
 	pass

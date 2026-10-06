@@ -4,6 +4,8 @@
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 WIKI_SOURCE = "File Box Wiki"
 # Written only by server code that sets ``flags.jarvis_server_write`` (raw-SQL
 # transitions never reach validate). No Administrator / ignore_permissions exemption.
@@ -32,7 +34,7 @@ def sheet_ready() -> bool:
 	return filebox_migrated()
 
 
-class JarvisApprovalRequest(Document):
+class JarvisApprovalRequest(NotRenamable, Document):
 	"""A decision the agent needs a human for.
 
 	Created by the agent itself (via the generic ``jarvis__create_doc``

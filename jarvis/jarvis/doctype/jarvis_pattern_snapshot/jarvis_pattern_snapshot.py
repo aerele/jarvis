@@ -13,10 +13,12 @@ import re
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 _PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
-class JarvisPatternSnapshot(Document):
+class JarvisPatternSnapshot(NotRenamable, Document):
 	def validate(self):
 		if not _PERIOD_RE.match(self.period or ""):
 			frappe.throw(f"Jarvis Pattern Snapshot period must be YYYY-MM, got {self.period!r}")
