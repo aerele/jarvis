@@ -512,3 +512,190 @@ class TestSigninCompletionClears(_Base):
 			api.complete_pool_account_signin("n", "http://x")
 		self.assertIn("ACC_OA1", sh.current_health())
 		self.assertEqual(sh.drain_signals(), [])
+
+
+PROD = (
+	"Still verifying your openai subscription: internal_server_error: auth_unavailable: no auth available "
+	'(providers=codex, model=gpt-5.6-terra; last upstream error: unauthorized: token: [REDACTED] "error": '
+	'{ "message": "Your refresh token: [REDACTED] "type": "invalid_request_error", "param": null, '
+	'"code": "refresh_token_reused" } })'
+)
+
+
+class TestFailureHook(unittest.TestCase):
+	def test_the_classifier_itself_records_nothing(self):
+		"""The pump's pre-ack paths classify too: a classifier must never write health."""
+		from jarvis.chat import turn_handler
+
+		with patch.object(sh, "record_chat_failure") as rec, patch.object(sh, "note_turn_error") as note:
+			self.assertEqual(turn_handler._classify_error(PROD), "subscription-expired")
+		rec.assert_not_called()
+		note.assert_not_called()
+
+	def test_the_turn_handler_publish_helper_records_a_dead_sign_in(self):
+		from jarvis.chat import turn_handler
+
+		with patch.object(sh, "record_chat_failure") as rec:
+			turn_handler._note_subscription_error(PROD, "subscription-expired")
+		rec.assert_called_once_with("openai")
+
+	def test_the_all_models_failed_form_names_the_failing_upstream(self):
+		text = "All models failed (2): xai/grok: 500 auth_unavailable: unauthorized | openai/gpt-5.6: timeout"
+		with patch.object(sh, "record_chat_failure") as rec:
+			sh.note_turn_error(text, "subscription-expired")
+		rec.assert_called_once_with("xai")
+
+	def test_other_codes_record_nothing(self):
+		from jarvis.chat import turn_handler
+
+		with patch.object(sh, "record_chat_failure") as rec:
+			turn_handler._note_subscription_error(PROD, "gateway")
+			sh.note_turn_error("OpenAI API error: 401 Unauthorized. Incorrect API key", "auth")
+		rec.assert_not_called()
+
+	def test_an_upstream_less_strong_signal_records_nothing(self):
+		with patch.object(sh, "record_chat_failure") as rec:
+			sh.note_turn_error("auth_unavailable: unauthorized", "subscription-expired")
+		rec.assert_not_called()
+
+	def test_a_fault_in_the_hook_is_logged_once_and_never_raised(self):
+		with (
+			patch.object(sh, "record_chat_failure", side_effect=RuntimeError("boom")),
+			patch.object(sh, "_log_throttled") as log,
+		):
+			sh.note_turn_error(PROD, "subscription-expired")
+		log.assert_called_once_with()
+
+	def test_settlement_of_a_dead_sign_in_records_it_before_the_settling_commit(self):
+		from jarvis.chat import settlement
+
+		order = []
+		row = {"state": "terminal_observed", "version": 1, "assistant_message": "m", "last_event_seq": 3}
+		with (
+			patch.object(settlement.ts, "read_turn", return_value=row),
+			patch.object(settlement.ts, "_run_cas"),
+			patch.object(settlement.ts, "settle_errored", return_value=True),
+			patch.object(settlement.ts, "insert_required_effects"),
+			patch.object(settlement, "_stamp_reply_duration"),
+			patch.object(settlement, "_stamp_steps"),
+			patch.object(settlement.frappe.db, "commit", side_effect=lambda: order.append("commit")),
+			patch.object(settlement.ts, "publish_fenced"),
+			patch.object(settlement, "_bump_turn_count"),
+			patch.object(settlement, "_extra_with_pending", side_effect=lambda extra, *a: extra),
+			patch.object(sh, "record_chat_failure", side_effect=lambda up: order.append(f"fail:{up}")),
+			patch("jarvis.chat.llm_switch.apply_if_active"),
+		):
+			deps = type("D", (), {"enqueue_finalize": staticmethod(lambda *a: None)})()
+			settlement.invoke_settlement(
+				"r1",
+				relay_target_id="t",
+				epoch=1,
+				version=1,
+				terminal_kind="relay:error",
+				terminal_payload={"error": PROD},
+				assistant_message="m",
+				owner="u@x.com",
+				conversation="c",
+				deps=deps,
+			)
+		self.assertEqual(order, ["fail:openai", "commit"])
+
+
+def _row(model, sub=True, order=1, upstream="openai", provider=""):
+	account = {"account_ref": f"ACC_{model}", "upstream": upstream}
+	return frappe._dict(
+		enabled=1,
+		order=order,
+		model=model,
+		provider=provider,
+		credential_type="subscription" if sub else "api_key",
+		subscription_accounts=json.dumps([account]) if sub else "",
+	)
+
+
+class TestServingUpstream(_Base):
+	def _settings_with(self, *rows, **flat):
+		return patch.object(sh, "_settings", return_value=frappe._dict(models=list(rows), **flat))
+
+	def test_pooled_subscription_is_matched_by_model_id_not_by_the_proxy_provider(self):
+		with self._settings_with(_row("gpt-5.6"), _row("claude-sonnet-4-5", upstream="anthropic", order=2)):
+			self.assertEqual(sh.upstream_for_serving("gpt-5.6", "openai_compat"), "openai")
+			self.assertEqual(sh.upstream_for_serving("claude-sonnet-4-5", "anthropic_cli"), "anthropic")
+
+	def test_a_prefixed_model_id_is_stripped(self):
+		with self._settings_with(_row("gpt-5.6")):
+			self.assertEqual(sh.upstream_for_serving("jarvis-pool/gpt-5.6", "openai_compat"), "openai")
+
+	def test_an_api_key_model_never_maps(self):
+		with self._settings_with(_row("gpt-4.1", sub=False)):
+			self.assertEqual(sh.upstream_for_serving("gpt-4.1", "openai"), "")
+
+	def test_an_unknown_model_never_maps(self):
+		with self._settings_with(_row("gpt-5.6")):
+			self.assertEqual(sh.upstream_for_serving("mystery", "openai_compat"), "")
+			self.assertEqual(sh.upstream_for_serving("", "openai"), "")
+
+	def test_a_model_id_shared_by_two_upstreams_needs_the_provider_to_disambiguate(self):
+		rows = (_row("shared-1", upstream="openai"), _row("shared-1", upstream="xai", order=2))
+		with self._settings_with(*rows):
+			self.assertEqual(sh.upstream_for_serving("shared-1", "openai_compat"), "")
+			self.assertEqual(sh.upstream_for_serving("shared-1", "xai"), "xai")
+
+	def test_direct_mode_maps_the_codex_provider(self):
+		self.live = DIRECT
+		flat = dict(llm_auth_mode="oauth", llm_provider="OpenAI", proxy_active=0)
+		with self._settings_with(**flat):
+			self.assertEqual(sh.upstream_for_serving("gpt-5.6", "openai-codex"), "openai")
+			self.assertEqual(sh.upstream_for_serving("gpt-5.6", "openai"), "openai")
+			self.assertEqual(sh.upstream_for_serving("gpt-5.6", "openai_compat"), "")
+
+
+class TestSuccessHook(_Base):
+	def test_success_clears_the_chat_entry_of_the_serving_upstream(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat")})
+		with patch.object(sh, "upstream_for_serving", return_value="openai"):
+			sh.note_turn_success("gpt-5.6", "openai_compat")
+		self.assertEqual(sh.current_health(), {})
+		self.assertEqual([s["code"] for s in sh.drain_signals()], ["ok"])
+
+	def test_success_on_another_upstream_changes_nothing(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat")})
+		with patch.object(sh, "upstream_for_serving", return_value="anthropic"):
+			sh.note_turn_success("claude", "anthropic_cli")
+		self.assertIn("ACC_OA1", sh.current_health())
+		self.assertEqual(sh.drain_signals(), [])
+
+	def test_no_chat_entry_means_no_mapping_work_at_all(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="poll")})
+		with patch.object(sh, "upstream_for_serving") as up:
+			sh.note_turn_success("gpt-5.6", "openai_compat")
+		up.assert_not_called()
+
+	def test_an_unmappable_turn_changes_nothing(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat")})
+		with patch.object(sh, "upstream_for_serving", return_value=""):
+			sh.note_turn_success("mystery", "openai_compat")
+		self.assertIn("ACC_OA1", sh.current_health())
+
+	def test_direct_mode_success_clears_direct_openai(self):
+		self.live = DIRECT
+		self.seed({sh.DIRECT_REF: _entry(sh.DIRECT_REF, source="chat", accounts=DIRECT)})
+		with patch.object(sh, "upstream_for_serving", return_value="openai"):
+			sh.note_turn_success("gpt-5.6", "openai-codex")
+		self.assertEqual(sh.current_health(), {})
+
+	def test_session_row_helper_reads_the_gateway_identity(self):
+		with patch.object(sh, "note_turn_success") as note:
+			sh.note_session_row({"model": "gpt-5.6", "modelProvider": "openai_compat"})
+			sh.note_session_row(None)
+		note.assert_called_once_with("gpt-5.6", "openai_compat")
+
+	def test_the_hooks_never_raise_and_log_once(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1", source="chat")})
+		with (
+			patch.object(sh, "current_health", side_effect=RuntimeError("boom")),
+			patch.object(sh, "_log_throttled") as log,
+		):
+			sh.note_turn_success("gpt-5.6", "openai_compat")
+		log.assert_called_once_with()
+		self.assertIn("ACC_OA1", json.loads(self.stored))

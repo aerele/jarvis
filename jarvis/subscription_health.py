@@ -216,9 +216,7 @@ def record_chat_failure(upstream: str) -> None:
 		_log_throttled()
 
 
-def _clear_upstream(
-	upstream: str, *, only_chat: bool = True, account_ref: str | None = None, all_sources=False
-) -> bool:
+def _clear_upstream(upstream: str, *, account_ref: str | None = None, all_sources: bool = False) -> bool:
 	"""Drop the stored entries to clear and queue an ``ok`` signal. Cleared: the upstream's ``chat``
 	entries, plus ``account_ref``'s entry, plus (``all_sources``) every entry of the upstream. The
 	signal is queued only when no other account of the upstream is still expired. True when an entry
@@ -322,3 +320,93 @@ def requeue_signals(signals: list[dict]) -> None:
 	for item in reversed(signals or []):
 		cache.lpush(SIGNAL_KEY, json.dumps(item, sort_keys=True))
 	cache.ltrim(SIGNAL_KEY, 0, _QUEUE_CAP - 1)
+
+
+# ---- turn hooks ---------------------------------------------------------------------------------
+
+# The served provider id the gateway reports, when it names the upstream itself. The pool proxy reports
+# the synthetic ``openai_compat`` endpoint, which names nothing: the served MODEL id decides then.
+_PROVIDER_UPSTREAM = {
+	"openai": "openai",
+	"openai-codex": "openai",
+	"anthropic": "anthropic",
+	"anthropic_cli": "anthropic",
+	"claude-cli": "anthropic",
+	"xai": "xai",
+	"kimi": "kimi",
+	"moonshot": "kimi",
+}
+
+
+def note_turn_error(err_text, code) -> None:
+	"""Called at the run-error publish sites (never from the classifier). Records only a dead
+	sign-in whose text names an upstream. Never raises."""
+	if code != CODE_EXPIRED:
+		return
+	try:
+		from jarvis.chat.error_taxonomy import subscription_upstream_from_error
+
+		upstream = subscription_upstream_from_error(err_text)
+		if upstream:
+			record_chat_failure(upstream)
+	except Exception:
+		_log_throttled()
+
+
+def _subscription_models(settings) -> list[tuple[str, str]]:
+	"""``(model_id, upstream)`` of every enabled subscription row."""
+	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _field, _subscription_upstream
+
+	return [
+		((_field(m, "model") or "").strip(), _subscription_upstream(m))
+		for m in _enabled_models(settings)
+		if _credential_type(m) == "subscription"
+	]
+
+
+def upstream_for_serving(model: str, provider: str) -> str:
+	"""The subscription upstream that served a reply, or ``""`` when it cannot be told or the reply was
+	served by an api key (which proves nothing about a sign-in). Never guesses."""
+	settings = _settings()
+	full = (model or "").strip()
+	served = full.rsplit("/", 1)[-1]
+	provider_upstream = _PROVIDER_UPSTREAM.get((provider or "").strip().lower(), "")
+	candidates = {
+		upstream
+		for row_model, upstream in _subscription_models(settings)
+		if row_model and row_model in (full, served)
+	}
+	if len(candidates) == 1:
+		return candidates.pop()
+	if len(candidates) > 1:
+		return provider_upstream if provider_upstream in candidates else ""
+	# No pool subscription row: direct mode names its upstream through the provider id.
+	if not settings.get("models") and provider_upstream == "openai":
+		return "openai" if DIRECT_REF in _live_accounts() else ""
+	return ""
+
+
+def note_turn_success(model: str, provider: str) -> None:
+	"""A completed turn is first-hand proof the sign-in it ran on works: clear a chat-detected expiry
+	for the serving upstream. One read when nothing is flagged. Never raises."""
+	try:
+		chat_upstreams = {e.get("upstream") for e in current_health().values() if e.get("source") == "chat"}
+		if not chat_upstreams:
+			return
+		upstream = upstream_for_serving(model, provider)
+		if upstream in chat_upstreams:
+			record_chat_success(upstream)
+	except Exception:
+		_log_throttled()
+
+
+def note_session_row(row) -> None:
+	"""``note_turn_success`` for the ``sessions.list`` row both turn paths already hold."""
+	try:
+		from jarvis.chat.usage import resolved_model_identity
+
+		model, provider = resolved_model_identity(row)
+		if model:
+			note_turn_success(model, provider)
+	except Exception:
+		_log_throttled()
