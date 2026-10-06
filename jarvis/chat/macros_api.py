@@ -10,6 +10,8 @@ import re
 
 import frappe
 from frappe import _, _lt
+from frappe.query_builder.functions import Coalesce, Count
+from pypika.terms import Case, PseudoColumn
 
 from jarvis.chat import list_filters
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import FORM_FLAG, join_words
@@ -882,7 +884,7 @@ def delete_macro(name: str) -> dict:
 	again, start from zero. The finished scheduled rows of the current month stay,
 	with no macro on them (``macros.drop_runs_of_deleted_macro``); for the user the
 	run history is gone all the same, since nothing that lists runs shows a row with
-	no macro (``_HAS_MACRO``). The hourly macro job removes them after the month ends.
+	no macro (``macro IS NOT NULL``). The hourly macro job removes them after the month ends.
 
 	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
 	and a queued job each, inside the request, for a table that grows without
@@ -1084,8 +1086,8 @@ def get_macro_run(run: str) -> dict:
 _RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
 # A run row with no macro is not run history: ``delete_macro`` keeps the month's
 # scheduled rows of a deleted macro so the unattended budget still counts them, and
-# clears their macro. Every query that shows or counts runs for a person carries this.
-_HAS_MACRO = "macro IS NOT NULL"
+# clears their macro. Every query that shows or counts runs for a person carries
+# ``macro IS NOT NULL``.
 
 
 @frappe.whitelist()
@@ -1101,32 +1103,43 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 	footer (DESIGN-V3 D38 — additive)."""
 	limit = max(1, min(int(limit or 30), 100))
 	start = max(0, int(start or 0))
-	conditions = ["r.owner = %(owner)s", f"r.{_HAS_MACRO}"]
-	params = {"owner": frappe.session.user, "limit": limit + 1, "start": start}
+	r = frappe.qb.DocType(RUN).as_("r")
+	m = frappe.qb.DocType(MACRO).as_("m")
+	where = (r.owner == frappe.session.user) & r.macro.isnotnull()
 	if status and status in _RUN_STATUSES:
-		conditions.append("r.status = %(status)s")
-		params["status"] = status
+		where &= r.status == status
 	if macro:
-		conditions.append("r.macro = %(macro)s")
-		params["macro"] = macro
-	where = " AND ".join(conditions)
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Macro Run` r WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""
-		SELECT r.name, r.macro, COALESCE(m.macro_name, r.macro) AS macro_name,
-		       r.conversation, r.status, r.current_step, r.total_steps,
-		       r.`trigger` AS `trigger`, r.creation, r.started_at, r.finished_at, r.error, r.run_mode,
-		       CASE WHEN r.started_at IS NOT NULL AND r.finished_at IS NOT NULL
-		            THEN TIMESTAMPDIFF(SECOND, r.started_at, r.finished_at)
-		       END AS duration_s
-		FROM `tabJarvis Macro Run` r
-		LEFT JOIN `tabJarvis Macro` m ON m.name = r.macro
-		WHERE {where}
-		ORDER BY r.creation DESC
-		LIMIT %(limit)s OFFSET %(start)s
-		""",
-		params,
-		as_dict=True,
+		where &= r.macro == macro
+	total = frappe.qb.from_(r).select(Count("*")).where(where).run()[0][0]
+	duration_s = Case().when(
+		r.started_at.isnotnull() & r.finished_at.isnotnull(),
+		frappe.qb.functions("TIMESTAMPDIFF", PseudoColumn("SECOND"), r.started_at, r.finished_at),
+	)
+	rows = (
+		frappe.qb.from_(r)
+		.left_join(m)
+		.on(m.name == r.macro)
+		.select(
+			r.name,
+			r.macro,
+			Coalesce(m.macro_name, r.macro).as_("macro_name"),
+			r.conversation,
+			r.status,
+			r.current_step,
+			r.total_steps,
+			r.trigger.as_("trigger"),
+			r.creation,
+			r.started_at,
+			r.finished_at,
+			r.error,
+			r.run_mode,
+			duration_s.as_("duration_s"),
+		)
+		.where(where)
+		.orderby(r.creation, order=frappe.qb.desc)
+		.limit(limit + 1)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	return {"runs": rows[:limit], "has_more": len(rows) > limit, "total": total}
 
@@ -1145,8 +1158,8 @@ def macro_run_stats() -> dict:
 	every day would read 100%."""
 	owner = {"owner": frappe.session.user}
 	rows = frappe.db.sql(
-		f"""SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run`
-		WHERE owner = %(owner)s AND {_HAS_MACRO} GROUP BY status""",
+		"""SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND macro IS NOT NULL GROUP BY status""",
 		owner,
 		as_dict=True,
 	)
@@ -1154,13 +1167,13 @@ def macro_run_stats() -> dict:
 	completed = by.get("completed", 0)
 	failed = by.get("failed", 0)
 	stopped_with_reason = frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
-		WHERE owner = %(owner)s AND {_HAS_MACRO} AND status = 'stopped' AND IFNULL(error, '') != ''""",
+		"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND macro IS NOT NULL AND status = 'stopped' AND IFNULL(error, '') != ''""",
 		owner,
 	)[0][0]
 	finished = completed + failed + stopped_with_reason
 	last = frappe.db.sql(
-		f"SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s AND {_HAS_MACRO}", owner
+		"SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s AND macro IS NOT NULL", owner
 	)[0][0]
 	return {
 		"total": sum(by.values()),

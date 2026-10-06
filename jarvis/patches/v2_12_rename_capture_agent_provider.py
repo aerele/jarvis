@@ -18,6 +18,7 @@ rollback net; a later contract patch drops it once the rename is proven.
 """
 
 import frappe
+from frappe.query_builder.functions import Coalesce
 
 from jarvis.legacy_compatibility import get_contract
 
@@ -33,10 +34,11 @@ def execute():
 	# never existed and there is nothing to copy.
 	if legacy_column not in frappe.db.get_table_columns(DT):
 		return
-	frappe.db.sql(
-		f"""
-		UPDATE `tabJarvis Pending OAuth Capture`
-		SET agent_provider = `{legacy_column}`
-		WHERE COALESCE(agent_provider, '') = '' AND COALESCE(`{legacy_column}`, '') != ''
-		"""
-	)
+	capture = frappe.qb.DocType(DT)
+	legacy = capture[legacy_column]
+	(
+		frappe.qb.update(capture)
+		.set(capture.agent_provider, legacy)
+		.where(Coalesce(capture.agent_provider, "") == "")
+		.where(Coalesce(legacy, "") != "")
+	).run()

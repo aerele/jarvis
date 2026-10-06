@@ -2273,16 +2273,18 @@ def get_wiki_graph() -> dict:
 	_require_system_user()
 	from jarvis.chat import wiki_graph
 
-	where = "status = 'Active'"
-	vis = (wiki_permissions.visible_scope_condition(frappe.session.user) or "").strip()
-	if vis:
-		where += f" and ({vis})"
-	fields = ", ".join(f"`{f}`" for f in [*wiki_graph._PAGE_FIELDS, "summary"])
-	pages = frappe.db.sql(
-		f"select {fields} from `tabJarvis Wiki Page` where {where} order by modified desc limit %(lim)s",
-		{"lim": wiki_graph.MAX_PAGES},
-		as_dict=True,
+	page = frappe.qb.DocType("Jarvis Wiki Page")
+	query = (
+		frappe.qb.from_(page)
+		.select(*(page[f] for f in [*wiki_graph._PAGE_FIELDS, "summary"]))
+		.where(page.status == "Active")
+		.orderby(page.modified, order=frappe.qb.desc)
+		.limit(wiki_graph.MAX_PAGES)
 	)
+	vis = wiki_permissions.visible_scope_criterion(page, frappe.session.user)
+	if vis is not None:
+		query = query.where(vis)
+	pages = query.run(as_dict=True)
 	return wiki_graph._build_graph_from_pages(pages, include_content=True)
 
 

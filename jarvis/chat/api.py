@@ -9,6 +9,9 @@ import json
 from urllib.parse import quote
 
 import frappe
+from frappe.query_builder import Order
+from frappe.query_builder.functions import Coalesce, Count
+from pypika.terms import ExistsCriterion
 
 from jarvis.chat import admission, txn, user_settings_api
 from jarvis.chat.usage import current_month_key as _usage_month_key
@@ -265,32 +268,32 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 		pl = 20
 	pl = max(1, min(pl, 50))
 
-	conds = [
-		"c.owner = %(me)s",
-		"c.status = 'Active'",
+	c = frappe.qb.DocType("Jarvis Conversation")
+	m = frappe.qb.DocType("Jarvis Chat Message")
+	query = (
+		frappe.qb.from_(c)
+		.where(c.owner == me)
+		.where(c.status == "Active")
 		# Dashboard Builder threads have their own in-context history and must not
 		# leak into the general chat palette. Other origin markers retain their
 		# established behavior.
-		"COALESCE(c.origin_page, '') != 'dashboards'",
+		.where(Coalesce(c.origin_page, "") != "dashboards")
 		# Hide empty (message-less) drafts, mirroring list_conversations.
-		"EXISTS (SELECT 1 FROM `tabJarvis Chat Message` m WHERE m.conversation = c.name)",
-	]
-	params: dict = {"me": me, "start": start, "page_length": pl}
+		.where(ExistsCriterion(frappe.qb.from_(m).select(1).where(m.conversation == c.name)))
+	)
 	if search:
 		escaped = (search or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-		params["q"] = f"%{escaped}%"
-		conds.append("c.title LIKE %(q)s")
-	where = " AND ".join(conds)
+		query = query.where(c.title.like(f"%{escaped}%"))
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Conversation` c WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""SELECT c.name, c.title, c.starred, c.last_active_at
-		FROM `tabJarvis Conversation` c
-		WHERE {where}
-		ORDER BY c.starred DESC, c.last_active_at DESC, c.name ASC
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	total = query.select(Count("*")).run()[0][0]
+	rows = (
+		query.select(c.name, c.title, c.starred, c.last_active_at)
+		.orderby(c.starred, order=Order.desc)
+		.orderby(c.last_active_at, order=Order.desc)
+		.orderby(c.name, order=Order.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	return {
 		"rows": rows,
