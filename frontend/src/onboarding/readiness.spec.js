@@ -823,7 +823,7 @@ describe("ChatView subscription-expired wiring", () => {
 		const block = chatSrc.slice(i, i + 400);
 		expect(block).toContain("model: m.model");
 		expect(block).toContain("expiredModels");
-		expect(chatSrc).toContain("expiredModelMap(subscriptionNotice.expired)");
+		expect(chatSrc).toContain("expiredModelMap(subscriptionNotice.expiredModels)");
 		const key = chatSrc.slice(chatSrc.indexOf("const key = `${m.name}"), i);
 		expect(key).toContain("m.model");
 		expect(key).toContain("expiredModels");

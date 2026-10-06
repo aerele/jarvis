@@ -14,6 +14,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	subscriptionNotice.loaded = false;
 	subscriptionNotice.expired = [];
+	subscriptionNotice.expiredModels = [];
 	subscriptionNotice.upstreams = null;
 });
 
@@ -34,6 +35,33 @@ describe("loadSubscriptionNotice", () => {
 		await loadSubscriptionNotice();
 		expect(subscriptionNotice.expired).toEqual([]);
 		expect(subscriptionNotice.upstreams).toBeNull();
+	});
+
+	it("stores a member's expired_models for the card, apart from the banner's expired", async () => {
+		const cards = [{ upstream: "openai", label: "OpenAI", models: ["gpt-a"] }];
+		api.getSubscriptionNotice.mockResolvedValue({
+			expired: [],
+			expired_models: cards,
+			upstreams: null,
+		});
+		await loadSubscriptionNotice();
+		expect(subscriptionNotice.expired).toEqual([]);
+		expect(subscriptionNotice.expiredModels).toEqual(cards);
+	});
+
+	it("falls back to expired for an admin, who gets no expired_models", async () => {
+		const expired = [
+			{ upstream: "openai", label: "OpenAI", account_ref: "A1", models: ["m"] },
+		];
+		api.getSubscriptionNotice.mockResolvedValue({ expired, upstreams: ["openai"] });
+		await loadSubscriptionNotice();
+		expect(subscriptionNotice.expiredModels).toEqual(expired);
+	});
+
+	it("stores nothing for a malformed expired_models", async () => {
+		api.getSubscriptionNotice.mockResolvedValue({ expired: [], expired_models: "x" });
+		await loadSubscriptionNotice();
+		expect(subscriptionNotice.expiredModels).toEqual([]);
 	});
 
 	it("never rejects and keeps the last reading when the call fails", async () => {

@@ -837,7 +837,11 @@ class TestAttentionAndNotice(_Base):
 			out = self._notice(admin=False)
 		self.assertEqual(
 			out,
-			{"expired": [{"upstream": "openai", "label": "OpenAI", "models": []}], "upstreams": None},
+			{
+				"expired": [{"upstream": "openai", "label": "OpenAI", "models": []}],
+				"expired_models": [{"upstream": "openai", "label": "OpenAI", "models": []}],
+				"upstreams": None,
+			},
 		)
 
 	def test_entries_carry_the_models_their_sign_in_serves(self):
@@ -903,11 +907,32 @@ class TestAttentionAndNotice(_Base):
 		self.live = DIRECT
 		self.assertEqual(self._served(self._pool([]), {sh.DIRECT_REF}), {sh.DIRECT_REF: ["gpt-direct"]})
 
+	def test_member_gets_every_expired_entrys_models_for_the_card_and_nothing_else(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1"), "ACC_CL1": _entry("ACC_CL1", since=200)})
+		served = {"ACC_OA1": ["gpt-a"], "ACC_CL1": ["claude-x"]}
+		with (
+			patch.object(sh, "fallback_label", return_value="Anthropic"),
+			patch.object(sh, "_account_models", return_value=served),
+		):
+			member = self._notice(admin=False)
+			admin = self._notice(admin=True)
+		# The banner rule is unchanged: only the first entry with no fallback.
+		self.assertEqual(member["expired"], [])
+		self.assertEqual(
+			member["expired_models"],
+			[
+				{"upstream": "openai", "label": "OpenAI", "models": ["gpt-a"]},
+				{"upstream": "anthropic", "label": "Anthropic", "models": ["claude-x"]},
+			],
+		)
+		self.assertNotIn("expired_models", admin)
+
 	def test_member_sees_nothing_while_another_model_still_answers(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1")})
 		with patch.object(sh, "fallback_label", return_value="Anthropic"):
 			out = self._notice(admin=False)
-		self.assertEqual(out, {"expired": [], "upstreams": None})
+		self.assertEqual(out["expired"], [])
+		self.assertEqual(out["upstreams"], None)
 
 
 class TestLlmHealthPrecedence(unittest.TestCase):
@@ -1075,4 +1100,4 @@ class TestUnmigratedSite(unittest.TestCase):
 		self.assertEqual((status["attention_detail"], status["subscription_health"]), ({}, []))
 		self.assertEqual(health, {"state": "ok"})
 		self.assertEqual(admin_notice, {"expired": [], "upstreams": []})
-		self.assertEqual(notice, {"expired": [], "upstreams": None})
+		self.assertEqual(notice, {"expired": [], "expired_models": [], "upstreams": None})

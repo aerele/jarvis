@@ -542,6 +542,10 @@ def ui_entries() -> list[dict]:
 	return [{**entry, "fallback": _fallback_for(entry, fallback)} for entry in entries]
 
 
+def _member_entry(entry: dict) -> dict:
+	return {"upstream": entry["upstream"], "label": entry["label"], "models": entry["models"]}
+
+
 @frappe.whitelist()
 def get_subscription_notice() -> dict:
 	"""The expired chat sign-ins, for the chat banner, the error card and the Settings rail.
@@ -561,9 +565,11 @@ def get_subscription_notice() -> dict:
 	if has_jarvis_admin_access():
 		upstreams = sorted({account["upstream"] for account in _live_accounts().values()})
 		return {"expired": entries, "upstreams": upstreams}
-	failing = [
-		{"upstream": e["upstream"], "label": e["label"], "models": e["models"]}
-		for e in entries
-		if not e["fallback"]
-	]
-	return {"expired": failing[:1], "upstreams": None}
+	failing = [_member_entry(e) for e in entries if not e["fallback"]]
+	# The banner shows only a failing entry with no fallback, but an explicit pick of ANY expired
+	# model does not fail over, so the error card needs every expired entry's models.
+	return {
+		"expired": failing[:1],
+		"expired_models": [_member_entry(e) for e in entries],
+		"upstreams": None,
+	}

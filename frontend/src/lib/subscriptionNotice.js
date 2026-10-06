@@ -6,7 +6,12 @@ import { getSubscriptionNotice } from "@/api";
 // card, the AI models pane and the Settings rail all read this, so they cannot disagree and the
 // server is asked once per change. `upstreams` is null for a member (never disclosed) and the
 // workspace's subscription upstreams for an admin.
-export const subscriptionNotice = reactive({ loaded: false, expired: [], upstreams: null });
+export const subscriptionNotice = reactive({
+	loaded: false,
+	expired: [],
+	expiredModels: [],
+	upstreams: null,
+});
 
 let inflight = null;
 
@@ -18,6 +23,10 @@ export function loadSubscriptionNotice() {
 		.then(() => getSubscriptionNotice())
 		.then((res) => {
 			subscriptionNotice.expired = Array.isArray(res && res.expired) ? res.expired : [];
+			// A member's `expired_models` lists every expired entry for the error card (their `expired`
+			// is only the banner's); an admin's `expired` already carries every entry's models.
+			const cards = res && (res.expired_models ?? res.expired);
+			subscriptionNotice.expiredModels = Array.isArray(cards) ? cards : [];
 			subscriptionNotice.upstreams =
 				res && Array.isArray(res.upstreams) ? res.upstreams : null;
 			subscriptionNotice.loaded = true;

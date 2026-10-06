@@ -5968,7 +5968,7 @@ function errorInfo(m) {
 	const known = subscriptionNotice.upstreams;
 	// Models whose sign-in the site already holds as expired: a generic failure on one of them is
 	// that sign-in (CLIProxy's dead-sign-in 503 reaches us as a bare "provider internal error").
-	const expiredModels = expiredModelMap(subscriptionNotice.expired);
+	const expiredModels = expiredModelMap(subscriptionNotice.expiredModels);
 	const key = `${m.name}\u0000${m.error}\u0000${meta.code || ""}\u0000${
 		meta.changed_data
 	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
