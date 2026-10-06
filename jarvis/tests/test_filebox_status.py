@@ -1055,9 +1055,26 @@ class TestDuplicateDrop(_Base):
 			filebox._rerun_one(conv)
 		send.assert_not_called()
 		self.assertIn("stays a Duplicate", str(cm.exception))
+		self.assertIn("delete or cancel that draft", str(cm.exception))
 		self.assertEqual(self._row(conv)["status"], "duplicate")
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_duplicate_of"), first)
 		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))  # nothing claimed
+
+	def test_a_rerun_while_the_first_still_processes_says_to_let_it_finish(self):
+		first = self._first(stamp=False)
+		self._msg(first, 1, "user", "process this file")
+		self._msg(first, 2, "assistant", "...", streaming=1)
+		res, _ = self._drop(file=self._file().name)
+		with (
+			_as(USER),
+			patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send,
+			self.assertRaises(frappe.ValidationError) as cm,
+		):
+			filebox._rerun_one(res["conversation_id"])
+		send.assert_not_called()
+		self.assertIn("still being worked", str(cm.exception))
+		self.assertIn("Let that one finish first.", str(cm.exception))
+		self.assertNotIn("draft", str(cm.exception))  # there is none yet
 
 	def test_a_rerun_processes_the_duplicate_once_the_first_draft_is_gone(self):
 		self._first()

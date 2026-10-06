@@ -1279,14 +1279,13 @@ def _refuse_rerun_of_duplicate(conversation: str) -> None:
 	p = frappe.db.get_value(
 		CONV, prior, ["title", "filebox_result_doctype", "filebox_result_name"], as_dict=True
 	)
-	what = (
-		f"its draft {p.filebox_result_doctype} {p.filebox_result_name} stands"
-		if p.filebox_result_name
-		else "it is still being worked"
-	)
+	if p.filebox_result_name:
+		what = f"its draft {p.filebox_result_doctype} {p.filebox_result_name} stands"
+		hint = "To process it again, delete or cancel that draft first."
+	else:
+		what, hint = "it is still being worked", "Let that one finish first."
 	frappe.throw(
-		f"Same file as {p.title or 'an earlier file'} and {what}, so this one stays a Duplicate. "
-		"To process it again, delete or cancel that draft first."
+		f"Same file as {p.title or 'an earlier file'} and {what}, so this one stays a Duplicate. {hint}"
 	)
 
 
