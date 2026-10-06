@@ -204,3 +204,10 @@ export const sendRecoverableMessage = (request) =>
 	});
 export const checkDelivery = (requestId) =>
 	call("jarvis.chat.pwa_send.check_delivery", { request_id: requestId });
+
+// Reuse the desktop admission contract; these endpoints enforce ownership.
+export const activeQueuedTurn = (conversation) =>
+	call("jarvis.chat.admission.active_turn_for_conversation", { conversation });
+export const queuePosition = (run_id) => call("jarvis.chat.admission.queue_position", { run_id });
+export const cancelQueuedTurn = (run_id) =>
+	call("jarvis.chat.admission.cancel_queued_turn", { run_id });

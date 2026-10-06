@@ -167,8 +167,110 @@ const localRequests = computed(() =>
 	recoveryState.requests.filter((r) => r.conversation === convId.value)
 );
 const sending = computed(
-	() => !!live.value || sendBusy.value || localRequests.value.some((r) => r.state === "sending")
+	() =>
+		!!live.value ||
+		!!queuedTurn.value ||
+		sendBusy.value ||
+		localRequests.value.some((r) => r.state === "sending")
 );
+const queuedTurn = computed(() => recoveryState.queued[convId.value]);
+const savedDrafts = computed(() =>
+	recoveryState.parkedDrafts.filter((d) => d.conversation === convId.value)
+);
+const hasDraft = (draft) => !!(draft?.text || draft?.attachments?.length);
+function useSavedDraft(draft) {
+	const current = { text: input.value, attachments: attachments.value };
+	input.value = draft.text;
+	attachments.value = draft.attachments;
+	if (hasDraft(current)) Object.assign(draft, current);
+	else recoveryState.parkedDrafts.splice(recoveryState.parkedDrafts.indexOf(draft), 1);
+	saveDraft();
+}
+// Bounded reads settle exactly once: late network results cannot mutate a new check.
+async function boundedRead(promise) {
+	let timer;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise((_, reject) => {
+				timer = setTimeout(() => reject(new Error("Read timed out")), 15000);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+let queueGeneration = 0;
+let queueRead = null;
+let queuePoll;
+async function refreshQueue() {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const epoch = queueGeneration;
+	if (!cid || queueRead?.cid === cid) return;
+	const ticket = { cid };
+	queueRead = ticket;
+	const q = recoveryState.queued[cid];
+	const current = () => isCurrent(cid, generation) && epoch === queueGeneration;
+	try {
+		const result = await boundedRead(
+			q ? api.queuePosition(q.run_id) : api.activeQueuedTurn(cid)
+		);
+		if (!current()) return;
+		if (q) {
+			if (!result?.ok) throw new Error("Status unavailable");
+			if (["queued", "preparing", "ready"].includes(result.state)) {
+				Object.assign(q, { state: result.state, position: result.position, note: "" });
+			} else if (
+				[
+					"dispatching",
+					"streaming",
+					"terminal_observed",
+					"finalizing",
+					"recovering",
+					"done",
+					"errored",
+					"cancelled",
+				].includes(result.state)
+			) {
+				recoveryState.observedRuns[q.run_id] = true;
+				delete recoveryState.queued[cid];
+				load();
+			} else throw new Error("Unknown turn state");
+		} else if (
+			result?.ok &&
+			result.active &&
+			!recoveryState.observedRuns[result.active.run_id]
+		) {
+			recoveryState.queued[cid] = result.active;
+		}
+	} catch {
+		if (current() && q)
+			q.note = "Could not refresh status. Your request is still accepted. Check again.";
+	} finally {
+		if (queueRead === ticket) queueRead = null;
+	}
+}
+async function cancelWaiting() {
+	const cid = convId.value;
+	const q = queuedTurn.value;
+	if (!q || q.cancelling) return;
+	q.cancelling = true;
+	try {
+		const result = await boundedRead(api.cancelQueuedTurn(q.run_id));
+		if (recoveryState.queued[cid] !== q) return;
+		if (result?.ok) {
+			queueGeneration++;
+			recoveryState.observedRuns[q.run_id] = true;
+			delete recoveryState.queued[cid];
+			if (cid === convId.value) load();
+		} else q.note = "This request may have started. Check its status before trying again.";
+	} catch {
+		q.note = "Cancellation is not confirmed. Check status before trying again.";
+	} finally {
+		q.cancelling = false;
+	}
+}
 let viewActive = true;
 let viewGeneration = 0;
 let loadGeneration = 0;
@@ -481,6 +583,7 @@ function wakePending() {
 	const now = Date.now();
 	if (now - _lastWake < 2000) return; // focus + visibility often co-fire
 	_lastWake = now;
+	refreshQueue();
 	loadPending("auto");
 }
 function onVisible() {
@@ -568,18 +671,22 @@ async function retryRequest(request) {
 
 async function checkRequest(request) {
 	if (request.state !== "uncertain" || request.checking) return;
+	const attempt = request.id;
 	request.checking = true;
 	request.note = "";
 	try {
-		sendRecovery.settle(request, await api.checkDelivery(request.id));
+		const outcome = await boundedRead(api.checkDelivery(attempt));
+		if (request.id !== attempt) return;
+		sendRecovery.settle(request, outcome);
 		if (request.state === "uncertain")
 			request.note =
 				"Delivery is still unknown. No second message was sent. Check again later or ask support to inspect this conversation.";
 	} catch {
+		if (request.id !== attempt || request.state !== "uncertain") return;
 		request.note =
-			"Could not check delivery. Reconnect or sign in again, then check. No second message was sent.";
+			"Delivery check did not finish. Check again when connected. No second message was sent.";
 	} finally {
-		request.checking = false;
+		if (request.id === attempt) request.checking = false;
 	}
 }
 
@@ -610,8 +717,21 @@ watch(
 			if (res.conversation_id && res.conversation_id !== cid) {
 				saveDraft();
 				request.conversation = res.conversation_id;
-				// Keep a newer draft alongside its newly created conversation.
-				recoveryState.drafts[res.conversation_id] = recoveryState.drafts[cid];
+				for (const draft of recoveryState.parkedDrafts) {
+					if (draft.conversation === cid) draft.conversation = res.conversation_id;
+				}
+				const source = recoveryState.drafts[cid];
+				if (hasDraft(source)) {
+					if (hasDraft(recoveryState.drafts[res.conversation_id])) {
+						recoveryState.parkedDrafts.push({
+							...source,
+							id: request.id,
+							conversation: res.conversation_id,
+						});
+					} else recoveryState.drafts[res.conversation_id] = source;
+				}
+				input.value = "";
+				attachments.value = [];
 				delete recoveryState.drafts[cid];
 				router.replace(`/c/${res.conversation_id}`);
 				store.loadConversations();
@@ -623,6 +743,18 @@ watch(
 					errorBanner.value =
 						"The confirmation was processed, but one or more actions failed. Check the action receipts before continuing.";
 			} else {
+				if (
+					res.queued &&
+					!recoveryState.observedRuns[res.run_id] &&
+					!recoveryState.queued[cid]
+				) {
+					queueGeneration++;
+					recoveryState.queued[cid] = {
+						run_id: res.run_id,
+						state: "queued",
+						position: res.queued_position,
+					};
+				}
 				markCardsEarlier(pending.value, cid);
 				olderCardsNote.value = !!res.older_cards_waiting;
 			}
@@ -634,6 +766,7 @@ watch(
 );
 
 async function stop() {
+	if (queuedTurn.value && !live.value) return cancelWaiting();
 	const runId = live.value?.runId || "";
 	// Ignore anything still arriving for this run: the backend may well finish
 	// the turn anyway, and a reply the user stopped must not reappear.
@@ -752,6 +885,24 @@ function onEvent(p) {
 	// Same placement and the same kind set as the desktop SPA — see
 	// jarvis/public/js/shared/pump_fence.mjs for the mirrored comparison ladder.
 	if (!admitEvent(eventFence, p)) return;
+	if (
+		["run:start", "assistant:delta", "run:end", "run:error", "turn:cancelled"].includes(
+			p.kind
+		) &&
+		p.run_id
+	) {
+		recoveryState.observedRuns[p.run_id] = true;
+		queueGeneration++;
+		if (queuedTurn.value?.run_id === p.run_id) delete recoveryState.queued[convId.value];
+	}
+	if (p.kind === "queue:position" && queuedTurn.value?.run_id === p.run_id) {
+		queueGeneration++;
+		queuedTurn.value.position = p.position;
+	}
+	if (p.kind === "turn:cancelled") {
+		errorBanner.value = p.reason || "The waiting request was cancelled.";
+		load();
+	}
 
 	switch (p.kind) {
 		case "run:start":
@@ -932,6 +1083,7 @@ function onResolved(token, kind) {
 }
 
 const onResync = () => {
+	refreshQueue();
 	load();
 	loadPending();
 };
@@ -941,6 +1093,7 @@ watch(
 	(id) => {
 		saveDraft();
 		viewGeneration++;
+		queueGeneration++;
 		loadGeneration++;
 		convId.value = id === "new" ? "" : id;
 		restoreDraft();
@@ -953,6 +1106,7 @@ watch(
 		live.value = null;
 		sendBusy.value = false;
 		errorBanner.value = "";
+		refreshQueue();
 		stopPendingPoll(); // a poll from the previous conversation must not carry over
 		load(true);
 		loadPending();
@@ -960,6 +1114,10 @@ watch(
 );
 
 onMounted(async () => {
+	refreshQueue();
+	queuePoll = setInterval(() => {
+		if (queuedTurn.value) refreshQueue();
+	}, 10000);
 	socket?.on("jarvis:event", onEvent);
 	window.addEventListener("jv:resync", onResync);
 	// Auto-heal: recover a card minted while the app was backgrounded, on return.
@@ -988,6 +1146,7 @@ onUnmounted(() => {
 	document.removeEventListener("visibilitychange", onVisible);
 	stopPendingPoll();
 	clearInterval(_cardClockTick);
+	clearInterval(queuePoll);
 	// Draft attachments remain in tab memory for a later return to this chat.
 });
 </script>
@@ -1200,6 +1359,50 @@ onUnmounted(() => {
 			@discard="sendRecovery.remove(request)"
 		/>
 
+		<section
+			v-for="draft in savedDrafts"
+			:key="draft.id"
+			class="jv-waiting-card"
+			aria-label="Saved draft"
+		>
+			<strong>Another draft is saved</strong>
+			<p>{{ draft.text }}</p>
+			<ul v-if="draft.attachments.length">
+				<li v-for="(file, i) in draft.attachments" :key="i">{{ file.name }}</li>
+			</ul>
+			<p>Use this draft to edit it. Your current draft will stay saved here.</p>
+			<button type="button" class="jv-btn is-ghost" @click="useSavedDraft(draft)">
+				Use this draft
+			</button>
+		</section>
+		<section v-if="queuedTurn" class="jv-waiting-card" aria-label="Waiting request">
+			<div role="status" aria-live="polite">
+				<strong>{{
+					queuedTurn.state === "queued" ? "Message queued" : "Starting…"
+				}}</strong>
+				<p>
+					{{
+						queuedTurn.state === "queued"
+							? "Your message is saved and waiting for a reply."
+							: "Your reply is being prepared."
+					}}
+				</p>
+				<p v-if="queuedTurn.position">Queue position: {{ queuedTurn.position }}</p>
+				<p v-if="queuedTurn.note">{{ queuedTurn.note }}</p>
+			</div>
+			<button type="button" class="jv-btn is-ghost" @click="refreshQueue">
+				Check status
+			</button>
+			<button
+				type="button"
+				class="jv-btn is-ghost"
+				:disabled="queuedTurn.cancelling"
+				@click="cancelWaiting"
+			>
+				{{ queuedTurn.cancelling ? "Cancelling…" : "Cancel request" }}
+			</button>
+		</section>
+
 		<!-- the turn in flight -->
 		<template v-if="live">
 			<div v-if="live.text" class="jv-msg-agent">
@@ -1207,7 +1410,7 @@ onUnmounted(() => {
 			</div>
 		</template>
 
-		<ThinkingIndicator v-if="sending && !(live && live.text)" />
+		<ThinkingIndicator v-if="sending && !queuedTurn && !(live && live.text)" />
 
 		<!-- aria-live so a card surfaced by auto-heal / the menu re-check is announced to a
 		     screen reader, not silently inserted. display:contents = zero layout change. -->
@@ -1718,5 +1921,29 @@ onUnmounted(() => {
 }
 .jv-btn:disabled {
 	opacity: 0.55;
+}
+.jv-waiting-card {
+	border: 1px solid var(--border2);
+	border-radius: 12px;
+	background: var(--card);
+	padding: 14px;
+	margin: 10px 0;
+	font-size: 13px;
+	overflow-wrap: anywhere;
+}
+.jv-waiting-card strong {
+	color: var(--ink9);
+}
+.jv-waiting-card p,
+.jv-waiting-card ul {
+	color: var(--ink6);
+	line-height: 1.5;
+	margin: 8px 0;
+	white-space: pre-wrap;
+}
+.jv-waiting-card .jv-btn {
+	padding: 0 12px;
+	margin: 6px 6px 0 0;
+	font-size: 13px;
 }
 </style>

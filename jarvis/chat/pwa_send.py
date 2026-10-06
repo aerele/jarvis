@@ -19,7 +19,6 @@ RETENTION_SECONDS = 7 * 24 * 60 * 60
 
 def _key(request_id):
 	refuse_in_tool_dispatch()
-	require_jarvis_access()
 	if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
 		frappe.throw("Invalid send request identifier")
 	owner_key = hashlib.sha256(f"{frappe.session.user}:{request_id}".encode()).hexdigest()
@@ -46,6 +45,7 @@ def _public(receipt):
 
 @frappe.whitelist(methods=["POST"])
 def check_delivery(request_id: str):
+	require_jarvis_access()
 	cache, key = _key(request_id)
 	try:
 		receipt = _read(cache, key)
@@ -64,6 +64,7 @@ def send_message(
 ):
 	from jarvis.chat import api
 
+	require_jarvis_access()
 	cache, key = _key(request_id)
 	if conversation:
 		try:
