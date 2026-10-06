@@ -1,5 +1,6 @@
 import { isReadyForChat } from "@/api.js";
 import { isOnboardComplete } from "@/onboarding/steps.js";
+import { fallbackInSentence } from "@/llm/pool.js";
 
 // Shared, memoized readiness verdict. Two callers need it per page load: the
 // router's first-navigation guard (bounce an already-onboarded user off a stale
@@ -356,7 +357,7 @@ export function subscriptionExpiredBanner(expired, isAdmin) {
 	return {
 		title,
 		message: entry.fallback
-			? `Auto uses ${entry.fallback.replace(/^Another /, "another ")} until you reconnect.`
+			? `Auto uses ${fallbackInSentence(entry.fallback)} until you reconnect.`
 			: "Chats that need it will fail until it is reconnected.",
 		upstream: entry.upstream,
 		accountRef: entry.account_ref || "",
