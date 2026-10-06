@@ -1161,16 +1161,10 @@ class JarvisSettings(Document):
 		else:
 			agent_models.on_enforcement_disabled()
 		# This in-memory doc must not write the catalog flag/version back on a later save.
-		self.update(
-			{
-				"agent_catalog_dirty": frappe.utils.cint(
-					frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty", cache=False)
-				),
-				"agent_catalog_version": frappe.utils.cint(
-					frappe.db.get_single_value("Jarvis Settings", "agent_catalog_version", cache=False)
-				),
-			}
-		)
+		for field in ("agent_catalog_dirty", "agent_catalog_version"):
+			self.set(
+				field, frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", field, cache=False))
+			)
 		# The dirty mark moved `modified`; keep this doc current so saving it again
 		# (a Desk form, a second save in one request) is not a TimestampMismatch.
 		# Raw text, exactly as load_from_db reads it back for check_if_latest.

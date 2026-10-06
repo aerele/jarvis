@@ -26,7 +26,7 @@ import time
 import frappe
 from frappe.utils import cint, nowdate
 
-from jarvis.compat import cache_get_fresh
+from jarvis import compat
 from jarvis.triggers.engine import TRIGGER, _insert_activity
 
 _SYSTEM_PROMPT = (
@@ -61,7 +61,7 @@ def _cap_key(trigger: str) -> str:
 
 def daily_count(trigger: str) -> int:
 	"""Today's LLM evaluations for ``trigger``, as the job last published them."""
-	return cint(cache_get_fresh(_count_key(_cap_key(trigger))))
+	return cint(compat.cache_get_fresh(_count_key(_cap_key(trigger))))
 
 
 def _count_key(cap_key: str) -> str:
@@ -184,7 +184,10 @@ def run_llm_action(
 	count = cint(cache.incr(counter_key))
 	if count == 1:
 		cache.expire(counter_key, _CAP_TTL_SECONDS)
-	frappe.cache.set_value(_count_key(cap_key), count, expires_in_sec=_CAP_TTL_SECONDS)  # engine peek
+	try:  # the engine's peek; the cap itself is enforced below
+		frappe.cache.set_value(_count_key(cap_key), count, expires_in_sec=_CAP_TTL_SECONDS)
+	except Exception:
+		pass
 	if count > cap:
 		if count == cap + 1:
 			# Exactly one Skipped row marks the day's cutoff; the rest of the

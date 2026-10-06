@@ -1076,14 +1076,19 @@ class TestEnforcement(_Base):
 		skill(OWNER, "undeclared")
 		self.assertTrue(self.call("create_doc", _draft(SI), self.conv())["ok"])
 		skill(OWNER, "declared2", creates=PI)
-		conv, real = self.conv(), frappe.cache.get
+		import redis
 
-		def get(key, *a, **k):
-			if "filebox_backstop" in str(key):
-				raise ConnectionError("down")
-			return real(key, *a, **k)
+		conv, real = self.conv(), frappe.cache.execute_command
 
-		with patch.object(frappe.cache, "get", side_effect=get), patch.object(frappe, "log_error") as log:
+		def execute(*args, **kwargs):
+			if any("filebox_backstop" in str(a) for a in args):
+				raise redis.exceptions.ConnectionError("down")
+			return real(*args, **kwargs)
+
+		with (
+			patch.object(frappe.cache, "execute_command", side_effect=execute),
+			patch.object(frappe, "log_error") as log,
+		):
 			self.assertTrue(self.call("create_doc", _draft(SI), conv)["ok"])
 		titles = [c.kwargs.get("title") for c in log.call_args_list]
 		self.assertIn("jarvis.file_box.skill_backstop_cache_failed", titles)
