@@ -144,6 +144,12 @@ describe("subscriptionUpstreamFromError", () => {
 		});
 	}
 
+	it("does not resolve a providers= token to a prototype member", () => {
+		for (const t of ["constructor", "__proto__", "toString", "hasOwnProperty"]) {
+			expect(subscriptionUpstreamFromError(`providers=${t}`)).toBe("");
+		}
+	});
+
 	it("uses the app's own labels", () => {
 		expect(SUBSCRIPTION_LABELS).toEqual({
 			openai: "OpenAI",

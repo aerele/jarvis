@@ -48,8 +48,11 @@ function toText(raw) {
 // (fixtures/subscription_upstreams.json pins both).
 export function subscriptionUpstreamFromError(raw, contextProvider = "") {
   const text = toText(raw);
-  const named =
-    SUBSCRIPTION.providerTokens[PROVIDERS_TOKEN.exec(text)?.[1].toLowerCase()];
+  const token = PROVIDERS_TOKEN.exec(text)?.[1].toLowerCase();
+  // Own keys only: "providers=constructor" must not resolve to a prototype member.
+  const named = Object.hasOwn(SUBSCRIPTION.providerTokens, token)
+    ? SUBSCRIPTION.providerTokens[token]
+    : "";
   if (named) return named;
   const signalAt = SIGNAL.exec(text)?.index ?? text.length;
   let before = null;
