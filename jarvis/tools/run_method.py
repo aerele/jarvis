@@ -43,12 +43,14 @@ method's dotted path or a Server Script API method's name - before dispatch.
 
 import fnmatch
 import inspect
+import json
 import re
 
 import frappe
 from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools import _write_risk
 
 # S6: Jarvis's own gate, turn-entry and decision endpoints are never a tool target
 # (``call_tool`` is allow_guest and ``frappe.call`` skips the HTTP-method check).
@@ -171,8 +173,12 @@ _BRAKED_METHODS = frozenset(
 		"frappe.client.delete",
 		"frappe.client.cancel",
 		"frappe.desk.form.save.cancel",
+		"frappe.desk.form.save.discard",
 		"frappe.desk.reportview.delete_items",
 		"frappe.desk.reportview.delete_report",
+		# Delete a File, whose own on_trash removes it from disk.
+		"frappe.desk.form.utils.remove_attach",
+		"frappe.core.api.file.unzip_file",
 	}
 )
 # Methods that delete or cancel only for some actions: path -> (arg name, actions).
@@ -187,6 +193,59 @@ _BRAKED_ACTIONS = {
 _BRAKED_DOC_METHODS = frozenset({"cancel", "discard"})
 
 
+def _set_value_cancels(args: dict) -> bool:
+	# frappe.client.set_value refuses "docstatus" by name; a dict of values is not checked.
+	return not args.get("value") and _write_risk.sets_docstatus_2(args.get("fieldname"))
+
+
+def _bulk_update_cancels(args: dict) -> bool:
+	docs = args.get("docs")
+	if isinstance(docs, str):
+		try:
+			docs = json.loads(docs)
+		except ValueError:
+			return False
+	return isinstance(docs, list) and any(_write_risk.sets_docstatus_2(d) for d in docs)
+
+
+def _bulk_action_cancels(args: dict) -> bool:
+	return str(args.get("action") or "").strip().lower() == "update" and _write_risk.sets_docstatus_2(
+		args.get("data")
+	)
+
+
+def _merges(args: dict) -> bool:
+	# A merge rename deletes the old record. Read as Frappe reads it (sbool).
+	return bool(frappe.utils.sbool(args.get("merge")))
+
+
+def _workflow_cancels(args: dict) -> bool:
+	doctype = args.get("doctype")
+	if not doctype:
+		doc = args.get("doc")
+		if isinstance(doc, str):
+			try:
+				doc = json.loads(doc)
+			except ValueError:
+				doc = None
+		doctype = doc.get("doctype") if isinstance(doc, dict) else None
+	return _write_risk.workflow_action_cancels(doctype, args.get("action"))
+
+
+# Methods that cancel when their payload says so: path -> check on the call's args.
+_BRAKED_PAYLOADS = {
+	"frappe.client.save": lambda args: _write_risk.sets_docstatus_2(args.get("doc")),
+	"frappe.client.set_value": _set_value_cancels,
+	"frappe.client.bulk_update": _bulk_update_cancels,
+	"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs": _bulk_action_cancels,
+	"frappe.model.workflow.apply_workflow": _workflow_cancels,
+	"frappe.model.workflow.bulk_workflow_approval": _workflow_cancels,
+	"frappe.rename_doc": _merges,
+	"frappe.client.rename_doc": _merges,
+	"frappe.model.rename_doc.update_document_title": _merges,
+}
+
+
 def needs_brake(tool_args: dict | None) -> bool:
 	"""True when a ``run_method`` call (its tool args) would delete or cancel, so
 	it must park a confirmation card in every mode."""
@@ -194,14 +253,16 @@ def needs_brake(tool_args: dict | None) -> bool:
 	method = tool_args.get("method")
 	if not isinstance(method, str) or not method:
 		return False
-	if tool_args.get("doctype"):
-		return method in _BRAKED_DOC_METHODS
 	call_args = tool_args.get("args") if isinstance(tool_args.get("args"), dict) else {}
+	if tool_args.get("doctype"):
+		return method in _BRAKED_DOC_METHODS or (method == "rename" and _merges(call_args))
 	for path in _call_paths(method):
 		if path in _BRAKED_METHODS:
 			return True
 		arg, actions = _BRAKED_ACTIONS.get(path, (None, ()))
 		if arg and str(call_args.get(arg) or "").strip().lower() in actions:
+			return True
+		if path in _BRAKED_PAYLOADS and _BRAKED_PAYLOADS[path](call_args):
 			return True
 	return False
 
