@@ -759,9 +759,11 @@ def _promote_surfaced(run_name: str) -> None:
 	if slots <= 0:
 		return
 
+	# Chat-mined rows are skipped: they surface only when their owner answers
+	# (jarvis.learning.chat_pattern_privacy).
 	rows = frappe.get_all(
 		JLP,
-		filters={"status": "Proposed", "surfaced": 0},
+		filters={"status": "Proposed", "surfaced": 0, "detector_id": ["!=", "chat-context"]},
 		fields=["name", "domain", "strength_band", "support_n", "effective_sensitivity"],
 	)
 	if not rows:

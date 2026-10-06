@@ -13,6 +13,7 @@ real ``doc_events "*"`` hook wiring, so it needs the app's hooks loaded (bench
 migrate + restart after deploying this branch).
 """
 
+import json
 from unittest.mock import patch
 
 import frappe
@@ -430,6 +431,26 @@ class TestDispatch(_TriggerTestCase):
 		snapshot = self._llm_queue()[-1].snapshot_json
 		self.assertNotIn('"__islocal"', snapshot)
 		self.assertNotIn('"_user_tags"', snapshot)
+
+	def test_llm_snapshot_drops_fields_above_permlevel_0(self):
+		# The LLM's summary is shown to every reader of the record, so it must not
+		# be built from a field some of them can't see, in the parent or a row.
+		contact = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "Snapshot",
+				"company_name": "Hidden Co",
+				"email_ids": [{"email_id": "hidden@example.com", "is_primary": 1}],
+			}
+		)
+		parent_df = frappe.get_meta("Contact").get_field("company_name")
+		child_df = frappe.get_meta("Contact Email").get_field("email_id")
+		with patch.object(parent_df, "permlevel", 1), patch.object(child_df, "permlevel", 2):
+			snapshot = json.loads(engine._snapshot_json(contact))
+		self.assertEqual(snapshot["first_name"], "Snapshot")
+		self.assertNotIn("company_name", snapshot)
+		self.assertEqual(snapshot["email_ids"][0]["is_primary"], 1)
+		self.assertNotIn("email_id", snapshot["email_ids"][0])
 
 	def test_depth_guard_stops_recursion(self):
 		trig = self._make_llm_trigger()
