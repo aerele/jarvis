@@ -8,7 +8,6 @@ transaction holds its naming-series rows until it commits."""
 
 from __future__ import annotations
 
-import pickle
 from collections import deque
 from contextlib import contextmanager
 
@@ -469,13 +468,15 @@ def _apply_locked(row, approver: str, decisions: dict) -> dict:
 		frappe.db.rollback()
 		return _refusal(*_BUSY)
 	frappe.db.commit()
+	_progress(locked, approver, 0, len(records))  # before the job: it can't overwrite the job's
 	try:
 		frappe.enqueue(JOB, queue="long", timeout=JOB_TIMEOUT_S, job_id=token, name=locked.name, token=token)
 	except Exception:
 		frappe.log_error(title="jarvis.file_box.sheet_apply_enqueue_failed", message=frappe.get_traceback())
+		_clear_progress(locked.name)
+		_progress(locked, approver, 0, len(records), state="returned")
 		_hand_back(locked.name, token, {"sheet": INTERRUPTED_TEXT})
 		return _refusal("unavailable", "The apply couldn't start: nothing was created. Try again.")
-	_progress(locked, approver, 0, len(records), first=True)
 	return {"ok": True, "applying": True, "reason_code": "applying", "pa_status": EXECUTING}
 
 
@@ -1063,19 +1064,16 @@ def _clear_progress(name: str) -> None:
 		pass
 
 
-def _progress(
-	row, approver: str | None, done: int, total: int, *, state: str = "applying", first: bool = False
-) -> None:
+def _progress(row, approver: str | None, done: int, total: int, *, state: str = "applying") -> None:
 	"""Best-effort: the File Box line reads it; the owner (and a different approver)
-	get ``sheet:progress``. ``first`` (the request's 0/N) never overwrites the job's."""
+	get ``sheet:progress``."""
 	from jarvis.chat import events
 
 	if state == "applying":
-		value = pickle.dumps({"done": done, "total": total})
 		try:
-			key = frappe.cache.make_key(_progress_key(row.name))
-			if not frappe.cache.set(key, value, ex=PROGRESS_TTL_S, nx=first):
-				return
+			frappe.cache.set_value(
+				_progress_key(row.name), {"done": done, "total": total}, expires_in_sec=PROGRESS_TTL_S
+			)
 		except Exception:
 			pass
 	payload = {

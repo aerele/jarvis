@@ -375,16 +375,10 @@ def _llm_cap_reached(row: dict) -> bool:
 	job has already logged the cap+1 Skipped marker — so we never suppress that
 	one marker. Never raises."""
 	try:
-		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, _cap_key
+		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, daily_count
 
 		cap = cint(row.get("llm_daily_cap")) or _DEFAULT_DAILY_CAP
-		# The counter is a raw redis INCR value (llm_action uses cache.incr),
-		# NOT a pickled set_value — read it with the raw GET, not get_value
-		# (which pickle.loads and would raise on the plain integer).
-		cache = frappe.cache()
-		raw = cache.get(cache.make_key(_cap_key(row.get("name"))))
-		used = int(raw) if raw is not None else 0
-		return used > cap
+		return daily_count(row.get("name")) > cap
 	except Exception:
 		return False
 

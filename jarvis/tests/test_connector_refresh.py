@@ -118,14 +118,15 @@ class TestAfterCallTriggers(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# request: debounce (NX) + dedupe (job_id)
+# request: debounce (atomic lease) + dedupe (job_id)
 # --------------------------------------------------------------------------- #
 class TestRequestDebounce(unittest.TestCase):
 	def test_first_caller_enqueues_immediately_with_dedupe(self):
 		fake = _fake_frappe()
-		fake.cache.return_value.set.return_value = True  # NX claim won
-		fake.cache.return_value.make_key.side_effect = lambda k: f"site|{k}"
-		with mock.patch.object(refresh, "frappe", fake):
+		with (
+			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "claim", return_value=True),
+		):
 			self.assertTrue(refresh.request("conn-1"))
 		fake.enqueue.assert_called_once()
 		_, kwargs = fake.enqueue.call_args
@@ -140,21 +141,27 @@ class TestRequestDebounce(unittest.TestCase):
 
 	def test_second_caller_in_window_does_not_enqueue(self):
 		fake = _fake_frappe()
-		fake.cache.return_value.set.return_value = None  # NX claim lost (key present)
-		fake.cache.return_value.make_key.side_effect = lambda k: f"site|{k}"
-		with mock.patch.object(refresh, "frappe", fake):
+		with (
+			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "claim", return_value=False),
+		):
 			self.assertFalse(refresh.request("conn-1"))
 		fake.enqueue.assert_not_called()
 
-	def test_debounce_key_uses_set_nx_with_the_window(self):
+	def test_claim_is_the_atomic_window(self):
+		with mock.patch.object(refresh, "claim", return_value=True) as claim:
+			refresh._claim("conn-1")
+		claim.assert_called_once_with("jarvis:connectors:refresh:conn-1", refresh.DEBOUNCE_S)
+
+	def test_cache_outage_queues_nothing(self):
 		fake = _fake_frappe()
-		fake.cache.return_value.set.return_value = True
-		fake.cache.return_value.make_key.side_effect = lambda k: k
-		with mock.patch.object(refresh, "frappe", fake):
+		with (
+			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "claim", side_effect=ConnectionError("down")),
+			self.assertRaises(ConnectionError),
+		):
 			refresh.request("conn-1")
-		_, set_kwargs = fake.cache.return_value.set.call_args
-		self.assertTrue(set_kwargs["nx"])
-		self.assertEqual(set_kwargs["ex"], refresh.DEBOUNCE_S)
+		fake.enqueue.assert_not_called()
 
 	def test_job_id_is_colon_free(self):
 		self.assertNotIn(":", refresh._job_id("conn-1"))

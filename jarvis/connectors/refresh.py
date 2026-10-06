@@ -27,6 +27,7 @@ from datetime import timedelta
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
+from jarvis._redis_lock import claim
 from jarvis.connectors import oauth
 
 CONNECTOR_DOCTYPE = "Jarvis Connector"
@@ -84,8 +85,8 @@ def ttl_seconds(ttl_ms) -> float:
 
 def request(row_name: str) -> bool:
 	"""Enqueue one refresh for ``row_name`` unless one was queued in the last
-	``DEBOUNCE_S`` seconds (Redis SET NX window) or one is already queued/running (a
-	stable ``job_id`` with ``deduplicate``). Returns True when a job was queued."""
+	``DEBOUNCE_S`` seconds or one is already queued/running (a stable ``job_id`` with
+	``deduplicate``). Returns True when a job was queued."""
 	if not _claim(row_name):
 		return False
 	# Queued NOW, not after commit: the debounce claim above is already taken, so a
@@ -110,12 +111,7 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""Set-if-absent on the debounce flag: the first caller wins the window."""
-	return bool(frappe.cache().set(_debounce_key(row_name), 1, ex=DEBOUNCE_S, nx=True))
-
-
-def _debounce_key(row_name: str) -> str:
-	return frappe.cache().make_key(f"jarvis:connectors:refresh:{row_name}")
+	return claim(f"jarvis:connectors:refresh:{row_name}", DEBOUNCE_S)
 
 
 def refresh_tools_cache(name: str) -> None:
