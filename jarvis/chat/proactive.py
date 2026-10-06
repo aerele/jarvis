@@ -55,7 +55,7 @@ def start_conversation(message: str, *, title: str | None = None, user: str | No
 		frappe.db.set_value(CONV, conv.name, "owner", user, update_modified=False)
 		frappe.db.set_value(MSG, msg.name, "owner", user, update_modified=False)
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 
 	publish_to_user(
 		user,

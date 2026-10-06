@@ -56,5 +56,5 @@ def finish_app_learning_run() -> dict:
 
 	teardown_run_session(run["session_key"])
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist run teardown
 	return {"run": run["name"], "status": "completed", "pages_written": pages_written}

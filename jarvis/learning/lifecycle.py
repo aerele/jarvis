@@ -348,7 +348,7 @@ def snooze_expiry() -> dict:
 				message=frappe.get_traceback(),
 			)
 	if moved:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each housekeeping step durable
 	return {"unsnoozed": moved}
 
 
@@ -376,7 +376,7 @@ def retention() -> dict:
 					message=frappe.get_traceback(),
 				)
 	if archived:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each housekeeping step durable
 	return {"archived": archived}
 
 
@@ -570,7 +570,7 @@ def revalidate_active(run=None, patterndb=None, mined=None) -> dict:
 	if staled_lines:
 		_notify_stale(staled_lines)
 	if out["revalidated"] or out["version_skipped"]:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each housekeeping step durable
 	return out
 
 

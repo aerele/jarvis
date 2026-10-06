@@ -56,5 +56,5 @@ def get_context(context):
 	# Customer announcement (operator-authored) — same soft banner on the PWA path.
 	context.boot["announcement"] = announcement.boot_payload()
 	context.boot["maintenance"] = maintenance_notice.boot_payload()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return context

@@ -322,5 +322,5 @@ def _swap(message: str, old: str, new: str) -> bool:
 	from jarvis.chat.pending_actions._store import rowcount
 
 	changed = bool(rowcount())
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist swap result
 	return changed

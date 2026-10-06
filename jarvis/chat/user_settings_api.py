@@ -299,7 +299,7 @@ def admin_set_user_limit(user: str, monthly_token_limit: int = 0, limit_period: 
 			}
 		)
 	frappe.db.set_value(USER_SETTINGS, doc.name, values, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {

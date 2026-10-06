@@ -182,7 +182,7 @@ def save_agent_dashboard(
 	# teardown (no leaked Dashboard/Run rows); same-connection asserts still see the
 	# uncommitted writes.
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the run worker
 
 	return {
 		"run": run_doc.name,
