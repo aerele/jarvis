@@ -110,6 +110,7 @@
   "chat_ready_authority",
   "installed_apps_synced",
   "last_subscription_status",
+  "max_concurrent_chats",
   "last_sync_warnings",
   "last_model_statuses",
   "llm_last_apply_fingerprint",
@@ -835,6 +836,13 @@
    "read_only": 1
   },
   {
+   "description": "Set by Jarvis admin from your plan. Changes made here are reset by the next sync. Empty means the default of 4.",
+   "fieldname": "max_concurrent_chats",
+   "fieldtype": "Int",
+   "label": "Max Concurrent Chats",
+   "read_only": 1
+  },
+  {
    "description": "JSON array of {code, message} warnings from the last pool apply (e.g. a subscription that loaded but failed a probe). '[]' when none. Backend-only - the SPA reads this via get_llm_sync_status, not the form.",
    "fieldname": "last_sync_warnings",
    "fieldtype": "Long Text",
@@ -1242,5 +1250,5 @@
    "write": 1
   }
  ],
- "modified": "2026-09-28 18:05:00.000000"
+ "modified": "2026-10-05 18:00:00.000000"
 }
