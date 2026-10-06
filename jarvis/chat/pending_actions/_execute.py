@@ -13,10 +13,11 @@ from dataclasses import dataclass
 
 import frappe
 
+from jarvis._commit_watch import CommitWatch
 from jarvis._session import authenticated_user, impersonate
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._park import target_state
-from jarvis.chat.pending_actions._settle import outcome_for, settle
+from jarvis.chat.pending_actions._settle import outcome_for, settle, with_reference
 from jarvis.chat.pending_actions._store import (
 	CONV,
 	EXECUTED,
@@ -161,24 +162,12 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 	"""Run the sealed call as ``exec_user`` (or ``user``: an Edit & create runs as the
 	approver). Returns ``(result, interfered, crash_tb)``.
 
-	``interfered``: the transaction was not ours start to finish. A mid-dispatch
-	commit (``run_import``, DDL) pops and runs the ``before_commit`` sentinel; a
-	mid-dispatch full rollback clears it (a later commit would then go unseen).
-	Either way it is gone from the deque. One exception (R2-3): the write path's own
-	full rollback after a deadlock resets the deque; ``api._dispatch_and_wrap`` records
-	what was armed just before it, and a sentinel still armed then saw no commit, so
-	that failure is a clean RETRY_LATER, not partial. A commit before the deadlock
-	ran the sentinel, so it stays partial."""
+	``interfered``: the transaction was not ours start to finish (a mid-dispatch commit
+	such as ``run_import`` or DDL, or a mid-dispatch full rollback), so a failure may
+	have left part of the write behind (``jarvis._commit_watch``)."""
 	from jarvis import api
 
-	ran = []
-
-	def _pa_commit_sentinel():
-		ran.append(True)
-
-	frappe.local.jarvis_rolled_back_after_failure = ()
-	callbacks = frappe.db.before_commit
-	callbacks.add(_pa_commit_sentinel)
+	watch = CommitWatch().arm()
 	crash_tb = ""
 	result = None
 	try:
@@ -195,16 +184,7 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 			api._apply_run_method_read_filter(row.tool, result)
 	except Exception:
 		crash_tb = frappe.get_traceback() or "dispatch raised"
-	gone = _pa_commit_sentinel not in callbacks._functions
-	# Armed until the write path's own post-deadlock rollback: no commit, no other reset.
-	reset_by_rollback = _pa_commit_sentinel in (
-		getattr(frappe.local, "jarvis_rolled_back_after_failure", ()) or ()
-	)
-	frappe.local.jarvis_rolled_back_after_failure = ()
-	interfered = bool(ran) or (gone and not reset_by_rollback)
-	if not gone:
-		callbacks._functions.remove(_pa_commit_sentinel)  # disarm before any later commit
-	return result, interfered, crash_tb
+	return result, watch.disarm(), crash_tb
 
 
 def _discard_failed_dispatch(
@@ -369,6 +349,8 @@ def _execute_locked(
 			if outcome == "failed"
 			else "the confirmed action may have partly run; check before retrying",
 		)
+	if not ok:
+		result = with_reference(result, name)
 
 	result_doctype = result_name = ""
 	if ok:

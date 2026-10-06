@@ -846,7 +846,7 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 			self.assertTrue(pa.execute(name)["ok"])
 		after_claim = seen[2:]  # [0] = the pre-lock commit, [1] = the claim commit
 		self.assertTrue(after_claim)
-		self.assertFalse(any("_pa_commit_sentinel" in names for names in after_claim), seen)
+		self.assertFalse(any("_jarvis_commit_sentinel" in names for names in after_claim), seen)
 
 	def test_failed_dispatch_error_log_has_no_arg_values(self):
 		def body(tool, args):
