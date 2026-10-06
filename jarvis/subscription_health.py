@@ -275,7 +275,8 @@ def _clear_upstream(upstream: str, *, account_ref: str | None = None, all_source
 
 def record_chat_success(upstream: str) -> None:
 	"""A turn on ``upstream`` succeeded: clear its ``chat`` entries (a ``poll`` entry is admin's to
-	clear) and queue an ``ok`` signal. Only acts when such an entry exists. Never raises."""
+	clear) and queue an ``ok`` signal when one existed. Also stamps the per-upstream clear epoch on
+	every successful turn, entry or not. Never raises."""
 	try:
 		_clear_upstream((upstream or "").strip().lower())
 	except Exception:

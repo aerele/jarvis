@@ -637,22 +637,12 @@ export function dirtyAccountHealth(settled, isDirtyOrPending) {
 // Entries come from the site: { account_ref, upstream, label, email, state: "expired", source, since,
 // fallback }. `fallback` is the label of the next row that can still answer, computed once on the site.
 
-// pool.js is also bundled for the desk onboarding page and may not import the SPA's date helpers, so
-// the SPA registers its own formatter (llm/poolDates.js: exactDate, like the rest of the app). This
-// plain one is only the fallback.
-let expiryDateFormatter = (epochSeconds) =>
-	new Date(Number(epochSeconds) * 1000).toLocaleDateString(undefined, {
+function defaultFormatDate(epochSeconds) {
+	return new Date(Number(epochSeconds) * 1000).toLocaleDateString(undefined, {
 		year: "numeric",
 		month: "short",
 		day: "numeric",
 	});
-
-export function setExpiryDateFormatter(fn) {
-	expiryDateFormatter = typeof fn === "function" ? fn : expiryDateFormatter;
-}
-
-function defaultFormatDate(epochSeconds) {
-	return expiryDateFormatter(epochSeconds);
 }
 
 // The line under an expired row (spec 3). Another account in the SAME row that still works is the most

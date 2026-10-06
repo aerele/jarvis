@@ -6,7 +6,6 @@ import {
 	expiredEntryMap,
 	accountExpiryStates,
 	rowExpiry,
-	setExpiryDateFormatter,
 } from "./pool.js";
 
 const fmt = () => "Oct 6, 2026";
@@ -63,15 +62,16 @@ describe("expiredLine", () => {
 		).toBe("Expired Oct 6, 2026. Another OpenAI account answers until you reconnect.");
 	});
 
-	it("formats the date with the formatter the SPA registers", () => {
-		setExpiryDateFormatter((s) => `at ${s}`);
-		try {
-			expect(expiredLine(entry("A1", { fallback: "Anthropic" }))).toBe(
-				"Expired at 1791230000. Anthropic answers until you reconnect.",
-			);
-		} finally {
-			setExpiryDateFormatter(null);
-		}
+	it("formats the since epoch as a local date by default", () => {
+		const since = 1791230000;
+		const expected = new Date(since * 1000).toLocaleDateString(undefined, {
+			year: "numeric",
+			month: "short",
+			day: "numeric",
+		});
+		expect(expiredLine(entry("A1", { fallback: "Anthropic", since }))).toBe(
+			`Expired ${expected}. Anthropic answers until you reconnect.`,
+		);
 	});
 
 	it("says chats fail when nothing else can answer", () => {

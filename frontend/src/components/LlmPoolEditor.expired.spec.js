@@ -123,7 +123,7 @@ describe("an expired single-account row", () => {
 		expect(w.find(".jv-flist-expline").attributes("role")).toBeUndefined();
 	});
 
-	it("dates the expiry like the rest of the app (exactDate)", async () => {
+	it("dates the expiry in the browser's local time", async () => {
 		pool.models = [
 			subModel("gpt-5.6", 0, [account("A1", "a@x.com")]),
 			keyModel("Anthropic", "claude-x", 1),
@@ -131,7 +131,12 @@ describe("an expired single-account row", () => {
 		const w = await mountEditor({
 			expiredEntries: [entry("A1", { fallback: "claude-x", since: 1791230000 })],
 		});
-		expect(w.find(".jv-flist-expline").text()).toMatch(/^Expired Tue, Oct 6, 2026 5:30 PM\. /);
+		const day = new Date(1791230000 * 1000).toLocaleDateString(undefined, {
+			year: "numeric",
+			month: "short",
+			day: "numeric",
+		});
+		expect(w.find(".jv-flist-expline").text()).toMatch(new RegExp(`^Expired ${day}\\. `));
 	});
 
 	it("says chats fail when nothing else can answer", async () => {
