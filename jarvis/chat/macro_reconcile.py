@@ -49,6 +49,7 @@ import frappe
 from frappe.utils import get_datetime, now_datetime
 from rq.timeouts import JobTimeoutException
 
+from jarvis._session import impersonate
 from jarvis.chat import macros
 
 RUN = macros.RUN
@@ -267,7 +268,6 @@ class _RunCheck:
 	def run(self) -> None:
 		if frappe.cache().get_value(_key("skip", self.name), expires=True):
 			return
-		session_user = frappe.session.user
 		failure = None
 		try:
 			self._under_the_lock()
@@ -276,9 +276,6 @@ class _RunCheck:
 		except Exception as e:
 			failure = (e, frappe.get_traceback())
 			_rollback()
-		finally:
-			if frappe.session.user != session_user:
-				frappe.set_user(session_user)
 		# The Error Logs are written here, after the session is the scheduler's again.
 		# Written while the check acted as the run's owner they were that user's rows,
 		# and were forwarded off the bench with a reference to them.
@@ -371,17 +368,16 @@ class _RunCheck:
 			return _send_gate_refusal(owner)
 
 		shape = _lost_hook_shape(run.name, turn.name)
-		if owner_ok:
-			frappe.set_user(owner)
-		macros._apply_step_end(
-			run.name,
-			run.conversation,
-			errored=turn.state in macros._TURN_FAILED,
-			run_id=turn.name,
-			refuse_next_step=refuse_next_step,
-			a_stop_ends_the_run=True,
-		)
-		return self._after(shape, turn.state, was=("running", sent))
+		with impersonate(owner if owner_ok else None):
+			macros._apply_step_end(
+				run.name,
+				run.conversation,
+				errored=turn.state in macros._TURN_FAILED,
+				run_id=turn.name,
+				refuse_next_step=refuse_next_step,
+				a_stop_ends_the_run=True,
+			)
+			return self._after(shape, turn.state, was=("running", sent))
 
 	def _nothing_sent(self) -> bool:
 		"""The run has sent no step: no turn under step 1's id, no step message. With

@@ -993,7 +993,7 @@ class TestOperatorVisibility(AccessGovernanceCase):
 			patch.object(agent_scheduler, "_advance") as adv,
 			patch.object(agent_scheduler, "_record_failed") as rec,
 		):
-			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), "Administrator", set())
+			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), set())
 		launch.assert_not_called()
 		# Deliberately NOT recorded as a failed run (withdrawal is a normal reversible operator
 		# state the owner can't fix); the slot is advanced without a phantom last_run_at.
