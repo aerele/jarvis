@@ -95,6 +95,13 @@ class TestChatPatternPrivacy(FrappeTestCase):
 		frappe.set_user(REVIEWER)
 		self.assertEqual(learned_api.get_learned_pattern(self.chat_row)["name"], self.chat_row)
 
+	def test_a_batch_naming_it_approves_nothing(self):
+		frappe.set_user(REVIEWER)
+		with self.assertRaises(frappe.ValidationError):
+			learned_api.batch_approve([self.other_row, self.chat_row])
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(JLP, self.other_row, "status"), "Proposed")
+
 	def test_desk_and_rest_reads_hide_it(self):
 		frappe.set_user(REVIEWER)
 		self.assertNotIn(self.chat_row, frappe.get_list(JLP, pluck="name", limit_page_length=0))
