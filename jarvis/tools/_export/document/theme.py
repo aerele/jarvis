@@ -69,7 +69,7 @@ a fill", and fill-less elements ignore the hint.
 
 from __future__ import annotations
 
-from string import Template
+import string
 
 # --- brand tokens (v1 default) --------------------------------------------
 
@@ -224,7 +224,7 @@ def cover_height_pt(page_size: str, orientation: str, margins_mm: float, header:
 	return round(max(usable, 100.0), 1)
 
 
-_CSS_TEMPLATE = Template(
+_CSS_TEMPLATE = string.Template(
 	"""
 /* === Branded component stylesheet - see theme.py docstring for the full
    class-name contract and the wkhtmltopdf layout constraints. === */

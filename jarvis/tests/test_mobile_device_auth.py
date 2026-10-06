@@ -146,6 +146,14 @@ class MobileDeviceBase(FrappeTestCase):
 		frappe.local.flags.jarvis_mobile_device = None
 
 
+class TestPairingThrottle(MobileDeviceBase):
+	def test_a_counter_left_without_a_window_is_rearmed(self):
+		key = mobile_auth._pairing_cache_key(USER_A)
+		frappe.cache.incr(key)  # no TTL
+		mobile_auth._throttle_pairing(USER_A)
+		self.assertGreater(frappe.cache.ttl(key), 0)
+
+
 # --------------------------------------------------------------------------- #
 # 1. Pairing mints a per-device credential
 # --------------------------------------------------------------------------- #
@@ -228,6 +236,9 @@ class TestPairingMintsPerDeviceTokens(MobileDeviceBase):
 				mobile_auth._throttle_pairing(who)
 			with self.assertRaises(frappe.RateLimitExceededError):
 				mobile_auth._throttle_pairing(who)
+			ttl = frappe.cache.ttl(mobile_auth._pairing_cache_key(who))
+			self.assertTrue(0 < ttl <= mobile_auth.PAIRING_WINDOW_SECONDS)
+			mobile_auth._throttle_pairing(USER_B)  # counted per user
 		finally:
 			frappe.cache.delete(mobile_auth._pairing_cache_key(who))
 

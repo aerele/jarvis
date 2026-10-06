@@ -37,6 +37,7 @@ import re
 
 import frappe
 
+from jarvis._redis_lock import claim
 from jarvis.chat import filebox_skills, held_parties
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import (
@@ -362,17 +363,13 @@ def _missed_before(conversation: str, items: list[dict], needs_input: list[dict]
 def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 	"""Tries once: True when one of ``keys`` was already seen. Records them for an
 	hour; a lost key just gives one more try, and a cache failure reads as seen
-	(never an endless retry loop). Raw ``get`` / ``set``: the wrappers
-	(``get_value``, ``exists``, ...) read an outage as a miss."""
-	keys = {frappe.cache.make_key(k) for k in keys}
+	(never an endless retry loop)."""
 	try:
-		seen = any(frappe.cache.get(k) is not None for k in keys)
-		for k in keys:
-			frappe.cache.set(k, 1, ex=MISS_TTL_S)
+		claimed = [claim(k, MISS_TTL_S) for k in set(keys)]
 	except Exception:
 		frappe.log_error(title=f"jarvis.file_box.{event}", message=frappe.get_traceback())
 		return True
-	return seen
+	return not all(claimed)
 
 
 def parse_needs_input(value) -> list[dict]:
