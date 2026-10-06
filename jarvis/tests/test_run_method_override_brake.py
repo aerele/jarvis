@@ -161,21 +161,64 @@ class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
 			frappe.delete_doc("ToDo", todo.name, ignore_permissions=True)
 		self.assertFalse(frappe.db.exists("ToDo", todo.name))
 
+	def test_a_cancel_nested_in_another_save_is_refused_inside_a_run_method(self):
+		# A method can't hide the cancel inside a harmless save: the nesting only
+		# exempts another document's own cascade, and only outside a run_method.
+		victim = self._submitted_todo()
+		with patch.object(self.todo_meta, "is_submittable", 1):
+			carrier = frappe.get_doc({"doctype": "ToDo", "description": "carrier"}).insert(
+				ignore_permissions=True
+			)
+
+			real_validate = type(carrier).validate
+
+			def cancel_victim(doc, *args, **kwargs):
+				real_validate(doc, *args, **kwargs)
+				frappe.get_doc("ToDo", victim.name).cancel()
+
+			with patch.object(type(carrier), "validate", cancel_victim):
+				with (
+					_write_risk.guard_scope([], brake=True, brake_nested=True),
+					self.assertRaises(BrakeRefusedError),
+				):
+					carrier.save()
+				self.assertEqual(frappe.db.get_value("ToDo", victim.name, "docstatus"), 1)
+				with _write_risk.guard_scope([], brake=True):
+					frappe.get_doc("ToDo", carrier.name).save()  # the save's own cascade, as from Desk
+		self.assertEqual(frappe.db.get_value("ToDo", victim.name, "docstatus"), 2)
+
+	def test_a_raw_set_value_to_docstatus_2_is_refused(self):
+		todo = self._submitted_todo()
+		for field, value in (("docstatus", 2), ({"docstatus": 2}, None)):
+			with (
+				self.subTest(field=field),
+				_write_risk.guard_scope([], brake=True),
+				self.assertRaises(BrakeRefusedError),
+			):
+				frappe.db.set_value("ToDo", todo.name, field, value)
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
+
 	def test_a_queued_job_carries_the_brake(self):
-		with _write_risk.guard_scope([], brake=True):
+		with _write_risk.guard_scope([], brake=True, brake_nested=True):
 			queue = _write_risk.guard_queue(MagicMock())
 		_, _, queue_args = queue._guard("frappe.ping", (), {})
 		self.assertIs(queue_args["_jarvis_brake"], True)
+		self.assertIs(queue_args["_jarvis_brake_nested"], True)
 
-	def test_only_an_uncarded_run_method_gets_the_brake(self):
+	def test_every_uncarded_write_gets_the_brake_and_run_method_the_nested_one(self):
 		seen = {}
 
 		def capture(tool, *args, **kwargs):
-			seen[tool] = _write_risk._active_state().brake
+			state = _write_risk._active_state()
+			seen[tool] = (state.brake, state.brake_nested)
 			return {"ok": True, "data": {}}
 
 		with patch.object(api, "_dispatch_and_wrap", side_effect=capture):
 			api.dispatch_confirmed("run_method", {"method": "frappe.ping"}, uncarded=True)
-			self.assertIs(seen.pop("run_method"), True)
+			self.assertEqual(seen.pop("run_method"), (True, True))
+			api.dispatch_confirmed(
+				"apply_workflow_action", {"doctype": "ToDo", "name": "x", "action": "Cancel"}, uncarded=True
+			)
+			self.assertEqual(seen.pop("apply_workflow_action"), (True, False))
 			api.dispatch_confirmed("run_method", {"method": "frappe.ping"})
-			self.assertIs(seen.pop("run_method"), False)
+			self.assertEqual(seen.pop("run_method"), (False, False))
