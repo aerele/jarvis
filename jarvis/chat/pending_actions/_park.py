@@ -169,7 +169,7 @@ def park(
 	if waiters and waiters[0] != conversation:
 		raise ValueError("park: the primary waiter must be the conversation")
 	if not locked:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	try:
 		if not locked:
 			lock_conversation(conversation)

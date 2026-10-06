@@ -241,7 +241,7 @@ def _send_inbound(conv: str, file_doc, pinned: str | None, preamble: str | None 
 			"filebox_rerun_at": None,
 		}
 	frappe.db.set_value(CONV, conv, error, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- send outcome survives later failure
 	return res
 
 
@@ -334,7 +334,7 @@ def drop_file(
 		{"attached_to_doctype": CONV, "attached_to_name": conv_id},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 
 	# The same bytes already made a draft: hold the row as a Duplicate, no run (#619).
 	# Re-run processes it anyway.
@@ -342,7 +342,7 @@ def drop_file(
 	prior = None if requested else _prior_duplicate(fdoc)
 	if prior:
 		frappe.db.set_value(CONV, conv_id, "filebox_duplicate_of", prior, update_modified=False)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 		return {"ok": True, "conversation_id": conv_id, "run_id": None, "reason": None, "duplicate_of": prior}
 	if requested and not pin and routed:
 		filebox_skills.file_skill_missing(conv_id, requested)
@@ -1102,7 +1102,6 @@ def delete_inbound(conversation: str) -> dict:
 	"""Owner-gated cascade delete of a File-Box conversation (FB-1)."""
 	refuse_in_tool_dispatch()
 	_delete_one(conversation)
-	frappe.db.commit()
 	return {"ok": True}
 
 
@@ -1130,7 +1129,7 @@ def delete_inbound_bulk(conversations: str | list | None = None) -> dict:
 				reason = str(e) or "error"
 			skipped.append({"conversation": conv, "reason": reason})
 			continue
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 		deleted += 1
 	return {"deleted": deleted, "skipped": skipped}
 
@@ -1160,7 +1159,7 @@ def clear_processed_inbound() -> dict:
 			# finished rows are never live; only a concurrent race fails.
 			frappe.db.rollback()
 			continue
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 		deleted += 1
 	return {"ok": True, "deleted": deleted}
 
@@ -1266,7 +1265,7 @@ def _rerun_one(conversation: str) -> dict:
 	requested = (doc.filebox_pinned_skill or "").strip()
 	pin = _validated_pinned_skill(requested)
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	lock_conversation(conversation)
 	r = _rerun_row(conversation, me)
 	if not r:
@@ -1317,7 +1316,7 @@ def _rerun_one(conversation: str) -> dict:
 	)
 	# A duplicate had no earlier pass: Re-run means "process it anyway", from scratch.
 	preamble = None if r["status"] == "duplicate" else _rerun_preamble(r, msg, held)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 
 	from jarvis.chat.pending_actions._settle import settle
 

@@ -323,7 +323,7 @@ def add_comment(doctype: str, name: str, content: str) -> dict:
 			"comment_by": _full_name(frappe.session.user),
 		}
 	).insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _comment_row(comment)
 
 
@@ -348,7 +348,7 @@ def update_comment(comment: str, content: str) -> dict:
 		frappe.throw(_("Comment is empty."))
 	doc.content = content
 	doc.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _comment_row(doc)
 
 
@@ -358,7 +358,7 @@ def delete_comment(comment: str) -> None:
 	"""Delete a comment (author or System Manager only)."""
 	_comment_gated(comment)
 	frappe.delete_doc("Comment", comment, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 
 
 # --------------------------------------------------------------------------- #
@@ -411,7 +411,7 @@ def toggle_assignment(doctype: str, name: str, user: str, action: str = "add") -
 					"notify_by_email": 0,
 				},
 			)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _assignees(doctype, name)
 
 
@@ -487,7 +487,7 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 				title="Jarvis: conversation share mirror failed",
 				message=frappe.get_traceback(),
 			)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _shares(doctype, name, doc.owner)
 
 
@@ -523,7 +523,7 @@ def toggle_like(doctype: str, name: str, like: int = 1) -> list[str]:
 			):
 				frappe.delete_doc("Comment", c, ignore_permissions=True, force=True)
 	_set_liked_by(doctype, name, liked_by)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return liked_by
 
 
@@ -554,4 +554,4 @@ def delete_attachment(doctype: str, name: str, file: str) -> None:
 	if not f or f.attached_to_doctype != doctype or f.attached_to_name != name:
 		frappe.throw(_("File is not attached to this document."))
 	frappe.delete_doc("File", file, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes

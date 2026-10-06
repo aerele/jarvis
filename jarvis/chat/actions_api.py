@@ -411,7 +411,7 @@ def apply_action(action: dict | str | None = None) -> dict:
 		tool=f"apply_action.{verb}_doc", args=args, ok=True, result={"doctype": doctype, "name": name}
 	)
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
 	try:
 		_append_receipt(conversation, verb, doctype, name, args, receipt)
@@ -711,7 +711,7 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		"SELECT status FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE", {"c": run_conv}
 	)
 	if not status or status[0] == "Archived" or turn_message_binding.is_run_cancel_requested(run_conv):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return
 	# Stamp skill_autorun_skill (C2) so the gate can re-read allow_approve_run LIVE
 	# off THIS exact armed row before each uncarded covered write - un-arming the
@@ -726,7 +726,7 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist armed run state
 
 
 def _clear_stale_halt(run_conv: str | None) -> None:

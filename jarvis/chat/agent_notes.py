@@ -64,7 +64,7 @@ def _write(conversation: str, entries: list) -> None:
 		frappe.as_json(entries) if entries else None,
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before turn continues
 
 
 def read(conv) -> list:

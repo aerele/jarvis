@@ -174,7 +174,7 @@ def invoke_settlement(
 				frappe.db.rollback()
 			return
 
-		frappe.db.commit()  # slot released; the NEXT turn can be promoted
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release turn slot
 		return row, am, pub_kind, pub_extra
 
 	settled = txn.replay_on_conflict(project, label=f"settlement {run_id}")

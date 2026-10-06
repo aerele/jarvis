@@ -320,7 +320,7 @@ def _apply_learned_skills_locked() -> dict:
 				deleted_domains.append(domain)
 
 		activated = _finalize_patterns(compiled, skill_by_domain)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before restoring flags
 	finally:
 		frappe.flags.jarvis_pattern_engine = prev_engine
 

@@ -167,7 +167,7 @@ def _try_take_lock(conversation: str) -> bool:
 		},
 	)
 	won = frappe.db.sql("SELECT ROW_COUNT()")[0][0] > 0
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	return won
 
 
@@ -221,7 +221,7 @@ def _clear_lock(conversation: str) -> None:
 
 	def _clear() -> None:
 		frappe.db.set_value(CONV, conversation, "compacting_since", None, update_modified=False)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 	txn.fresh_snapshot()
 	try:
@@ -281,7 +281,7 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 
 				def _write() -> None:
 					write_compaction_result(session_key, after_row)
-					frappe.db.commit()
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 				# write_compaction_result's two UPDATEs are both absolute/GREATEST (budget
 				# fields set from `after_row`, compaction_count only moves forward) - safe to

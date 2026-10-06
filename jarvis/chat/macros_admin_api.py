@@ -600,7 +600,7 @@ def _stand_down(
 	Returns the row as read under the lock."""
 	row = _lock(row)
 	if expected_owner is not None and row.owner != expected_owner:
-		frappe.db.commit()  # nothing written: releases the row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		_refuse_changed_hands()
 	_refuse_own_macro(row, own_macro_hint)
 	if hold_fields_exist():
@@ -618,7 +618,7 @@ def _stand_down(
 		_leave_comment(row.name, comment)
 	else:
 		frappe.db.set_value(MACRO, row.name, _SWITCHED_OFF)
-	frappe.db.commit()  # visible, and the row lock released, from here on
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist and release row lock
 	return row
 
 
@@ -714,11 +714,10 @@ def admin_release(macro: str) -> dict:
 	row = _lock(row)
 	_refuse_own_macro(row, _("Another admin has to release it."))
 	if not frappe.utils.cint(row.get(HOLD_FIELD)):
-		frappe.db.commit()  # releases the row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return {"ok": True, "released": False}
 	frappe.db.set_value(MACRO, row.name, {HOLD_FIELD: 0, HOLD_REASON_FIELD: None})
 	_leave_comment(row.name, f"{admin} released the hold on this macro.")
-	frappe.db.commit()
 	return {"ok": True, "released": True}
 
 
@@ -968,10 +967,10 @@ def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hol
 			)
 		row = _lock(row)
 		if row.owner != old_owner:
-			frappe.db.commit()  # releases the row lock
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 			_refuse_changed_hands()
 		if macros.live_runs_of(row.name):
-			frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 			continue
 		_refuse_handover(row, new_owner)
 		_write_handover(row, new_owner)
@@ -982,7 +981,7 @@ def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hol
 		# The marker tells the old owner's later request that the macro changed hands
 		# (``macros_api.refuse_if_handed_away``).
 		_leave_comment(row.name, comment, subject=macros_api.handed_over_from(old_owner))
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist and release row lock
 		return row, stopped
 	frappe.throw(
 		_("The macro kept starting runs and was not handed over. Hand it over again."),

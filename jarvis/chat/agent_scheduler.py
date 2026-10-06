@@ -488,7 +488,7 @@ def _dispatch(
 			# generic ``_live_run`` branch below would reach for this row, made explicit
 			# so the money decision is not read out of a liveness query.
 			frappe.set_user(original_user)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- claimed slot survives the sweep
 			return
 		except agent_models.ModelRunRefused as e:
 			# The launch already failed its own run with the reason and logged the error.
@@ -501,7 +501,7 @@ def _dispatch(
 			else:
 				# Only a human or a platform upgrade fixes these: one notice, slot spent.
 				_notify_owner(row.owner, row, reason=str(e))
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- spent slot survives the sweep
 			return
 		except Exception:
 			frappe.set_user(original_user)
@@ -518,7 +518,7 @@ def _dispatch(
 				# started, and handing the slot back would each be untrue, and the last
 				# one is the duplicate dispatch this whole path exists to prevent. Keep
 				# the claim; the Error Log above is the operator's signal.
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- running claim survives the sweep
 				return
 			# Nothing durable was created, so this slot really is unspent: retry it about
 			# an hour from now. The retry is scheduled FIRST: the record and the notice
@@ -607,7 +607,7 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 	from jarvis.chat import agent_runs
 	from jarvis.tools.record_app_wiki import reconcile_run_pages
 
-	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking read
 	cur = frappe.db.get_value(
 		RUN,
 		run_name,
@@ -618,7 +618,7 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 	if not cur or cur.status != "running":
 		# A concurrent finish / stop already moved it off running — leave it alone.
 		# Release the lock and move on.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return False
 	nature = (frappe.db.get_value(LISTING, cur.agent, "nature") or "").strip().title()
 	pages = int(cur.pages_written or 0)
@@ -632,7 +632,7 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 			# Neither terminalization is safe (completing with 0 would drop real
 			# pages; failing would mislabel a success), so leave the run running and
 			# retry on the next sweep. Release the row lock and move on.
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 			return False
 		pages = pages_meta["count"]
 	if nature == "Scribe" and pages > 0:
@@ -648,9 +648,9 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 			values["pages_written"] = pages
 			values["pages_json"] = frappe.as_json(pages_meta["pages"])[:60000]
 		frappe.db.set_value(RUN, run_name, values, update_modified=False)
-		frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before session teardown
 		agent_runs.teardown_run_session(cur.session_key)
-		frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- survive later deadlock
 		log_activity(
 			agent=cur.agent,
 			agent_title=frappe.db.get_value(LISTING, cur.agent, "title"),
@@ -660,7 +660,7 @@ def _terminalize_stuck_run(run_name: str, *, error: str, detail: str) -> bool:
 			detail=f"reconciled to completed: scribe wrote {pages} page(s); finish not called",
 			owner=cur.owner,
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- completion survives later runs
 		return True
 	# The row lock is already held and the compare-and-set above has already
 	# established that the row is still ``running``, so this goes straight to
@@ -726,10 +726,10 @@ def _terminalize_failed(
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before session teardown
 	# A8: the session bearer must not outlive the (now-failed) run.
 	agent_runs.teardown_run_session(session_key)
-	frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- survive later deadlock
 	log_activity(
 		agent=agent,
 		agent_title=frappe.db.get_value(LISTING, agent, "title") if agent else "",
@@ -739,7 +739,7 @@ def _terminalize_failed(
 		detail=(detail or error or "")[:140],
 		owner=owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- failure survives later runs
 
 
 def fail_run(run_name: str, error: str, *, detail: str | None = None) -> bool:
@@ -940,7 +940,7 @@ def _backfill_model_used(now) -> int:
 			agent_models.record_model_used(name, state, pool=pool)
 			stored += 1
 	if stored:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before external call
 	return stored
 
 
@@ -1386,7 +1386,7 @@ def _launch_audit(
 		frappe.db.rollback(save_point=savepoint)
 		raise
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before activity log
 
 	# Activity trail (best-effort, Link-free): row is owner-scoped like the run.
 	log_activity(
@@ -1561,7 +1561,7 @@ def _launch_audit(
 		detail=f"trigger: {trigger}",
 		owner=owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- launched run visible to worker
 	return {"run": run.name, "conversation": conv.name, "session_key": session_key}
 
 
@@ -2103,12 +2103,12 @@ def _claim_slot(row, now) -> dict | None:
 	and confirming it is still due is what makes exactly one of them the dispatcher.
 	``compute_next_run`` returns a time strictly after ``now``, so a slot another
 	dispatcher has claimed reads as not-due here even within the same second."""
-	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 	cur = frappe.db.get_value(
 		INSTALLATION, row.name, ["next_run_at", "last_run_at"], as_dict=True, for_update=True
 	)
 	if not cur or not cur.next_run_at or frappe.utils.get_datetime(cur.next_run_at) > now:
-		frappe.db.commit()  # release the row lock; this slot is not ours to run
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return None
 	claimed = _advance(row, now)  # commits, releasing the row lock
 	return {"next_run_at": cur.next_run_at, "last_run_at": cur.last_run_at, "claimed": claimed}
@@ -2220,7 +2220,7 @@ def _advance(row, now, stamp_last_run: bool = True):
 	if stamp_last_run:
 		vals["last_run_at"] = now
 	frappe.db.set_value(INSTALLATION, row.name, vals, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 	return vals["next_run_at"]
 
 
@@ -2255,7 +2255,7 @@ def _record_failed(row, reason: str) -> None:
 		detail=(reason or "")[:140],
 		owner=row.owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- per-slot outcome survives the sweep
 
 
 def _notify_owner(owner: str, row, reason: str | None = None, *, retry_scheduled: bool = True) -> None:
