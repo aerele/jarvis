@@ -110,16 +110,12 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""First caller in the window wins; a racing second is deduped by job_id."""
-	key = _debounce_key(row_name)
-	if frappe.cache.get_value(key, expires=True) is not None:
-		return False
-	frappe.cache.set_value(key, 1, expires_in_sec=DEBOUNCE_S)
-	return True
+	"""Atomically take the debounce window: a lease left to expire. Raises on an outage."""
+	return frappe.cache.lock(_debounce_key(row_name), timeout=DEBOUNCE_S).acquire(blocking=False)
 
 
 def _debounce_key(row_name: str) -> str:
-	return f"jarvis:connectors:refresh:{row_name}"
+	return frappe.cache.make_key(f"jarvis:connectors:refresh:{row_name}")
 
 
 def refresh_tools_cache(name: str) -> None:

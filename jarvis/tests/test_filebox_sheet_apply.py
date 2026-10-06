@@ -12,11 +12,9 @@ import statistics
 import threading
 import time
 from contextlib import contextmanager
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
-from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import (
 	approvals_api,
@@ -29,6 +27,7 @@ from jarvis.chat import (
 )
 from jarvis.chat import pending_actions as pa
 from jarvis.chat.pending_actions import _reconcile, _seal, _sheet, _store
+from jarvis.compat import cache_get_fresh
 from jarvis.tests._pending_action_helpers import as_user
 from jarvis.tests.test_filebox_sheet_seal import SM, _SealBase
 from jarvis.tests.test_filebox_sheets import (
@@ -1130,6 +1129,16 @@ class TestResume(_ApplyBase):
 
 
 class TestLadderAndLocks(_ApplyBase):
+	def test_opening_progress_is_written_before_the_job_is_queued(self):
+		_conv, row = self.sheet_of(_supplier(), _item("zz-fbs I1"))
+		at_enqueue = []
+		with patch(
+			"frappe.enqueue",
+			side_effect=lambda *a, **k: at_enqueue.append(cache_get_fresh(_sheet._progress_key(row.name))),
+		):
+			self.assertTrue(self.apply(row.name)["ok"])
+		self.assertEqual(at_enqueue, [{"done": 0, "total": 2}])
+
 	def test_an_applying_sheet_shows_its_progress_and_links_to_it(self):
 		conv, row = self.sheet_of(_supplier(), _item("zz-fbs I1"))
 		self.assertTrue(self.apply(row.name)["ok"])
@@ -1316,15 +1325,6 @@ class TestLadderAndLocks(_ApplyBase):
 		self.assertEqual((done.status, done.stop_requested), ("Executed", 1))
 		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_skill_choice"), "zz-skill-a")
 		self.assertEqual(self.resumes(), [])
-
-	def test_the_requests_first_progress_never_overwrites_the_jobs(self):
-		_c, row = self.sheet_of(_supplier(), _item("zz-fbs I1"))
-		self.addCleanup(_sheet._clear_progress, row.name)
-		_sheet._progress(row, None, 1, 2)  # the job got there first
-		self.events.clear()
-		self.assertTrue(self.apply(row.name)["ok"])
-		self.assertEqual(_sheet.progress(row.name), {"done": 1, "total": 2})
-		self.assertEqual([p for _u, p in self.events if p.get("kind") == "sheet:progress"], [])
 
 	def test_a_legacy_held_create_takes_the_same_locks(self):
 		conv = self.conv()
@@ -1525,16 +1525,3 @@ class TestTiming(_ApplyBase):
 				f"n={n} preflight={preflight:.1f}s job={total:.1f}s per-record p50={statistics.median(took) * 1000:.0f}ms"
 			)
 		print("\nSHEET APPLY TIMING: " + " | ".join(report))
-
-
-class TestProgressValue(FrappeTestCase):
-	def test_opening_progress_never_overwrites_the_jobs(self):
-		row = SimpleNamespace(
-			name=f"zz-progress-{frappe.generate_hash(length=8)}", owner_user=None, conversation=None
-		)
-		self.addCleanup(_sheet._clear_progress, row.name)
-		_sheet._progress(row, None, 1, 2)
-		_sheet._progress(row, None, 0, 2, first=True)
-		self.assertEqual(_sheet.progress(row.name), {"done": 1, "total": 2})
-		_sheet._progress(row, None, 2, 2)
-		self.assertEqual(_sheet.progress(row.name), {"done": 2, "total": 2})

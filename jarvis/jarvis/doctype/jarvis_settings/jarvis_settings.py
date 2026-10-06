@@ -1161,13 +1161,15 @@ class JarvisSettings(Document):
 		else:
 			agent_models.on_enforcement_disabled()
 		# This in-memory doc must not write the catalog flag/version back on a later save.
-		self._mirror_saved(
-			agent_catalog_dirty=frappe.utils.cint(
-				frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty", cache=False)
-			),
-			agent_catalog_version=frappe.utils.cint(
-				frappe.db.get_single_value("Jarvis Settings", "agent_catalog_version", cache=False)
-			),
+		self.update(
+			{
+				"agent_catalog_dirty": frappe.utils.cint(
+					frappe.db.get_single_value("Jarvis Settings", "agent_catalog_dirty", cache=False)
+				),
+				"agent_catalog_version": frappe.utils.cint(
+					frappe.db.get_single_value("Jarvis Settings", "agent_catalog_version", cache=False)
+				),
+			}
 		)
 		# The dirty mark moved `modified`; keep this doc current so saving it again
 		# (a Desk form, a second save in one request) is not a TimestampMismatch.
@@ -1176,12 +1178,7 @@ class JarvisSettings(Document):
 			"select `value` from `tabSingles` where `doctype`=%s and `field`='modified'", "Jarvis Settings"
 		)
 		if row and row[0][0]:
-			self._mirror_saved(modified=row[0][0])
-
-	def _mirror_saved(self, **values):
-		"""Sync in-memory fields to saved values (setattr: update() skips ``modified``)."""
-		for fieldname, value in values.items():
-			setattr(self, fieldname, value)
+			self.set("modified", row[0][0])
 
 	def _on_update_unified_llm(self):
 		"""New LLM path: validate → derive proxy_active/proxy_recommended →
@@ -1252,7 +1249,7 @@ class JarvisSettings(Document):
 						"llm_api_key",
 					)
 					# Mask in-memory so nothing downstream re-writes plaintext.
-					self._mirror_saved(llm_api_key="*" * 10)
+					self.set("llm_api_key", "*" * 10)
 
 		# Step 4: Route to pool or single-model path. Keyed on pool_mode, NOT
 		# proxy_active: an agent-direct pool still has to be pushed as a whole
