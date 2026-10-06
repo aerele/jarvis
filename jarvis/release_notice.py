@@ -8,7 +8,7 @@ tenant that has updated is never stranded by an unreachable control plane.
 import frappe
 from frappe.utils import cint
 
-from jarvis import __version__
+from jarvis import __version__, compat
 
 SETTINGS = "Jarvis Settings"
 _FIELDS = (
@@ -61,7 +61,7 @@ def persist(notice: dict) -> None:
 			"release_notice_behind": cint(n.get("behind")),
 			"release_banner_interval_days": cint(n.get("banner_interval_days")) or 7,
 		}
-		current = frappe.db.get_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
+		current = compat.single_values(SETTINGS, _FIELDS)
 		if all(current.get(k) == v for k, v in fresh.items()):
 			return
 		frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)

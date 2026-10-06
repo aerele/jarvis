@@ -90,7 +90,7 @@ def scan(root, policy):
 	allowed_paths = set(policy["allowed_paths"])
 	scanned = dict.fromkeys(policy["minimum_files"], 0)
 	errors = []
-	for name in sorted(set(filter(None, paths))):
+	for name in sorted({name for name in paths if name}):
 		path = root / name
 		if not _relative_path(name) or path.is_symlink():
 			errors.append(f"{name}: unsupported source path")
