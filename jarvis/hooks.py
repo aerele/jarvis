@@ -706,6 +706,8 @@ permission_query_conditions.update(
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.conversation_query_conditions",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.message_query_conditions",
 		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.turn_query_conditions",
+		# A pattern mined from someone's chats stays theirs until they answer (#18).
+		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.pattern_query_conditions",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
 	}
@@ -715,6 +717,7 @@ has_permission.update(
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.has_conversation_permission",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.has_message_permission",
 		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.has_turn_permission",
+		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.has_pattern_permission",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
 	}

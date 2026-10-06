@@ -1248,6 +1248,23 @@ class TestSkillAutorunGate(FrappeTestCase):
 		self.assertFalse(disp.called)
 		self.assertTrue(frappe.db.exists("ToDo", todo.name))
 
+	def test_run_method_that_deletes_or_cancels_still_parks_when_autorun(self):
+		# run_method is covered, but not as a way around the delete / cancel brake.
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		for args in (
+			{"method": "frappe.client.delete", "args": {"doctype": "ToDo", "name": "x"}},
+			{"method": "frappe.client.cancel", "args": {"doctype": "ToDo", "name": "x"}},
+			{"method": "frappe.desk.form.save.savedocs", "args": {"doc": "{}", "action": "Cancel"}},
+			{"method": "cancel", "doctype": "ToDo", "name": "x"},
+		):
+			with self.subTest(args=args), patch("jarvis.api.dispatch_confirmed") as disp:
+				r = api._run_tool("run_method", args, conversation=conv)
+				self.assertEqual(r["data"]["status"], "pending_confirmation")
+				self.assertFalse(disp.called)
+			# one card at a time per conversation: clear it before the next case
+			pending_confirm.clear_for_conversation(TEST_USER, conv)
+
 	def test_create_custom_skill_still_parks_when_autorun(self):
 		conv = _make_conv(TEST_USER)
 		_stamp_autorun(conv)
