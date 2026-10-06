@@ -2256,7 +2256,10 @@ def dispatch_confirmed(
 		return _refuse_sensitive_import(tool, args, provenance=provenance, provenance_name=provenance_name)
 	allow = _write_risk.allow_entries(tool, args) if allow_risky else []
 	fence = _write_risk.no_commit_fence() if uncarded and tool in _FENCED_TOOLS else nullcontext()
-	with _write_risk.guard_scope(allow) as state, fence:
+	# An uncarded run_method may not delete or cancel anything, however it gets
+	# there (_write_risk._brake_doc_event): those verbs always park a card.
+	brake = uncarded and tool == "run_method"
+	with _write_risk.guard_scope(allow, brake=brake) as state, fence:
 		result = _dispatch_and_wrap(
 			tool, args, is_write=True, provenance=provenance, provenance_name=provenance_name
 		)
