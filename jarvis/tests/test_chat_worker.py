@@ -1681,3 +1681,32 @@ class TestRunAgentTurnFailedFinal(FrappeTestCase):
 		self.assertIn("run:error", kinds)
 		err_pub = next(c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "run:error")
 		self.assertEqual(err_pub["error"], FAILED_FINAL_ERROR)
+
+
+class TestUnreadableImageIsLogged(FrappeTestCase):
+	"""An attached image the vision helper can't decode reached the model as a
+	"could not be read" note and nothing else (#654): it must leave an Error Log."""
+
+	def test_an_undecodable_image_is_noted_and_logged(self):
+		import io
+		from unittest.mock import patch
+
+		from PIL import Image
+
+		buf = io.BytesIO()
+		Image.new("RGB", (4, 4)).save(buf, format="PNG")
+		f = frappe.get_doc(
+			{"doctype": "File", "file_name": "j2a-broken.png", "content": buf.getvalue(), "is_private": 1}
+		).insert(ignore_permissions=True)
+		# Frappe refuses to store a corrupt image, so the decode failure is simulated.
+		with (
+			patch.object(turn_handler.vision, "image_part", return_value=None),
+			patch.object(turn_handler.frappe, "log_error") as log,
+		):
+			msg, parts = turn_handler._prepare_attachments(
+				"see", [{"file_url": f.file_url, "file_name": f.file_name}], vision_ok=True
+			)
+		self.assertEqual(parts, [])
+		self.assertIn("could not be read", msg)
+		log.assert_called_once()
+		self.assertIn("j2a-broken.png", log.call_args.kwargs["message"])
