@@ -64,7 +64,7 @@ def persist(announcement: dict) -> None:
 		current = frappe.db.get_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
 		if all(_norm(k, current.get(k)) == _norm(k, v) for k, v in fresh.items()):
 			return
-		frappe.db.set_value(SETTINGS, SETTINGS, fresh, update_modified=False)
+		frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)
 	except Exception:
 		pass
 

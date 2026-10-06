@@ -225,11 +225,8 @@ def _resume_run(run_name: str, now, window_start) -> None:
 
 
 def _advance_next_run_at(now, window_start) -> None:
-	frappe.db.set_value(
-		SETTINGS,
-		SETTINGS,
-		{"pattern_next_run_at": compute_next_window_start(window_start, now)},
-		update_modified=False,
+	frappe.db.set_single_value(
+		SETTINGS, {"pattern_next_run_at": compute_next_window_start(window_start, now)}, update_modified=False
 	)
 
 

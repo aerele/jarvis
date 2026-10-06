@@ -175,7 +175,7 @@ class TestSyncRoleProfiles(FrappeTestCase):
 
 	The Jarvis Settings snapshot fields (``role_profiles_pushed`` /
 	``role_profiles_pushed_at``) are stood in with an in-memory fake behind
-	``frappe.db.get_single_value`` / ``frappe.db.set_value`` rather than
+	``frappe.db.get_single_value`` / ``frappe.db.set_single_value`` rather than
 	written to the real Single doctype: those two columns only exist once a
 	``bench migrate`` has run for this DocType JSON change, and this shared
 	bench points at a live production tenancy, so exercising the snapshot
@@ -188,7 +188,7 @@ class TestSyncRoleProfiles(FrappeTestCase):
 
 	@staticmethod
 	def _fake_settings_store(initial=None):
-		"""Returns ``(store, get_single_value, set_value)``: a plain dict plus
+		"""Returns ``(store, get_single_value, set_single_value)``: a plain dict plus
 		two callables shaped like the real ``frappe.db`` methods, scoped to
 		just the two fields ``sync_role_profiles`` touches."""
 		store = dict(initial or {})
@@ -197,19 +197,18 @@ class TestSyncRoleProfiles(FrappeTestCase):
 			assert doctype == role_profiles._SETTINGS
 			return store.get(fieldname)
 
-		def fake_set_value(doctype, name, values, *args, **kwargs):
+		def fake_set_single_value(doctype, values, *args, **kwargs):
 			assert doctype == role_profiles._SETTINGS
-			assert name == role_profiles._SETTINGS
 			store.update(values)
 
-		return store, fake_get_single_value, fake_set_value
+		return store, fake_get_single_value, fake_set_single_value
 
 	def test_first_sync_pushes_and_stamps_settings(self):
 		store, fake_get, fake_set = self._fake_settings_store()
 		with (
 			patch.object(role_profiles, "needed_profiles", return_value=self._fixture()),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
 		):
 			result = role_profiles.sync_role_profiles()
@@ -225,7 +224,7 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		with (
 			patch.object(role_profiles, "needed_profiles", return_value=self._fixture()),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
 		):
 			first = role_profiles.sync_role_profiles()
@@ -242,7 +241,7 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		with (
 			patch.object(role_profiles, "needed_profiles", return_value=self._fixture()),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
 		):
 			role_profiles.sync_role_profiles()
@@ -257,7 +256,7 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		with (
 			patch.object(role_profiles, "needed_profiles", return_value=self._fixture()),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch(
 				"jarvis.admin_client.post_push_role_profiles",
 				side_effect=RuntimeError("admin unreachable"),
@@ -332,7 +331,7 @@ class TestSyncRoleProfiles(FrappeTestCase):
 		with (
 			patch.object(role_profiles, "needed_profiles", return_value=[]),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
 		):
 			result = role_profiles.sync_role_profiles()
@@ -422,9 +421,9 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 			assert name == role_profiles._SETTINGS
 			store.update(values)
 
-		def fake_set_single_value(doctype, fieldname, value, *args, **kwargs):
+		def fake_set_single_value(doctype, fieldname, value=None, *args, **kwargs):
 			assert doctype == role_profiles._SETTINGS
-			store[fieldname] = value
+			store.update(fieldname if isinstance(fieldname, dict) else {fieldname: value})
 
 		return store, fake_get_single_value, fake_set_value, fake_set_single_value
 
@@ -444,7 +443,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(
 				role_profiles, "_invalidate_config_cache", side_effect=lambda: calls.append("invalidate")
@@ -483,7 +482,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(role_profiles, "_invalidate_config_cache"),
 			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": False, "profiles": []}),
@@ -509,7 +508,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(role_profiles, "_invalidate_config_cache"),
 			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": True, "profiles": []}),
@@ -533,7 +532,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=enveloped),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(role_profiles, "_invalidate_config_cache"),
 			patch.object(role_profiles, "sync_role_profiles", return_value={"pushed": True, "profiles": []}),
@@ -560,7 +559,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(role_profiles, "_invalidate_config_cache") as mock_invalidate,
 			patch.object(role_profiles, "sync_role_profiles") as mock_sync,
@@ -592,7 +591,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=resp),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(
 				role_profiles, "_invalidate_config_cache", side_effect=lambda: calls.append("invalidate")
@@ -619,7 +618,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
 			),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 		):
 			before = dict(store)
@@ -638,7 +637,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
 			),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 		):
 			result = role_profiles.sync_role_profile_config()
@@ -661,7 +660,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
 			),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(frappe, "log_error") as mock_log_error,
 		):
@@ -682,7 +681,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 				"jarvis.admin_client.get_role_profile_config", side_effect=RuntimeError("admin unreachable")
 			),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch.object(frappe, "log_error") as mock_log_error,
 		):
@@ -698,7 +697,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=bad),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 		):
 			result = role_profiles.sync_role_profile_config()
@@ -754,7 +753,7 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		with (
 			patch("jarvis.admin_client.get_role_profile_config", return_value=new_config),
 			patch.object(frappe.db, "get_single_value", side_effect=fake_get),
-			patch.object(frappe.db, "set_value", side_effect=fake_set),
+			patch.object(frappe.db, "set_single_value", side_effect=fake_set),
 			patch.object(frappe.db, "set_single_value", side_effect=fake_set_single),
 			patch("jarvis.admin_client.post_push_role_profiles", return_value={"ok": True}) as mock_push,
 		):

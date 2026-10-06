@@ -1640,8 +1640,7 @@ def _enqueued_push_custom_skills() -> None:
 		try:
 			payload = build_push_payload(strict=False)
 			admin_client.post_push_custom_skills(skills=payload)
-			frappe.db.set_value(
-				_SETTINGS,
+			frappe.db.set_single_value(
 				_SETTINGS,
 				{
 					"custom_skills_synced_at": frappe.utils.now(),
@@ -1684,8 +1683,6 @@ def _enqueued_push_custom_skills() -> None:
 
 
 def _fail(status: str) -> None:
-	frappe.db.set_value(
-		_SETTINGS,
-		_SETTINGS,
-		{"custom_skills_synced_at": frappe.utils.now(), "custom_skills_sync_status": status},
+	frappe.db.set_single_value(
+		_SETTINGS, {"custom_skills_synced_at": frappe.utils.now(), "custom_skills_sync_status": status}
 	)

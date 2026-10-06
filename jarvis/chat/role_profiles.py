@@ -416,8 +416,7 @@ def sync_role_profiles(force: bool = False) -> dict:
 
 		admin_client.post_push_role_profiles(role_profiles=profiles)
 
-		frappe.db.set_value(
-			_SETTINGS,
+		frappe.db.set_single_value(
 			_SETTINGS,
 			{
 				"role_profiles_pushed": frappe.as_json(profiles),
@@ -774,8 +773,7 @@ def sync_role_profile_config() -> dict:
 		previous_version = frappe.db.get_single_value(_SETTINGS, "role_profiles_config_version", cache=False)
 		previous_flag = frappe.db.get_single_value(_SETTINGS, "enable_role_profiles", cache=False)
 
-		frappe.db.set_value(
-			_SETTINGS,
+		frappe.db.set_single_value(
 			_SETTINGS,
 			{
 				"role_profiles_config": frappe.as_json(data),
@@ -798,7 +796,7 @@ def sync_role_profile_config() -> dict:
 			if not push_result.get("pushed"):
 				raise RuntimeError("role-profile push failed; config cached but not re-pushed")
 			if version != previous_version:
-				frappe.db.set_value(_SETTINGS, _SETTINGS, {"role_profiles_config_version": version})
+				frappe.db.set_single_value(_SETTINGS, {"role_profiles_config_version": version})
 
 		return {"synced": True}
 	except Exception:
