@@ -694,14 +694,18 @@ has_permission = {
 # (/api/resource, frappe.client.*, reportview) and every future endpoint
 # inherit it automatically instead of relying on a hand-rolled owner check in
 # each whitelisted function. Conversation/Voice scope by the row owner;
-# Message/Approval scope by the LINKED conversation's owner (+ DocShare for
+# Message/Turn/Approval scope by the LINKED conversation's owner (+ DocShare for
 # Approval). Matrix + SQL fragments live in jarvis/chat/chat_permissions.py.
 # The doctype permission rows carry role "Jarvis User" (not "All"), so the role
-# is genuinely load-bearing: revoking it denies all four via REST.
+# is genuinely load-bearing: revoking it denies all four via REST. Jarvis Chat
+# Turn is readable only by System Manager / Jarvis Admin, and the scoping below
+# limits them to turns of their OWN conversations (a turn holds the prompt and
+# the reply).
 permission_query_conditions.update(
 	{
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.conversation_query_conditions",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.message_query_conditions",
+		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.turn_query_conditions",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
 	}
@@ -710,6 +714,7 @@ has_permission.update(
 	{
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.has_conversation_permission",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.has_message_permission",
+		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.has_turn_permission",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
 	}
