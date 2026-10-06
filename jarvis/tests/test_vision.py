@@ -49,6 +49,17 @@ class TestVision(unittest.TestCase):
 		self.assertFalse(vision.supports_vision(None))
 		self.assertFalse(vision.supports_vision(""))
 
+	def test_supports_vision_reads_the_catalog_slugs(self):
+		# #654: a site connected through the admin's presets stores "anthropic";
+		# vision was silently off there and every photo reached the model as
+		# "couldn't be viewed".
+		for provider in ("anthropic", " ANTHROPIC ", "openai", "gemini", "google", "google gemini"):
+			with self.subTest(provider=provider):
+				self.assertTrue(vision.supports_vision(provider))
+		for provider in ("ollama", "mistral", "anthropic_cli", "openai-codex", "openai_compat"):
+			with self.subTest(provider=provider):
+				self.assertFalse(vision.supports_vision(provider))
+
 	def test_image_part(self):
 		part = vision.image_part(_png(), "x.png")
 		self.assertIsNotNone(part)
