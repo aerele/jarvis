@@ -170,6 +170,7 @@ const sending = computed(
 	() =>
 		!!live.value ||
 		!!queuedTurn.value ||
+		!!recoveryState.starting[convId.value] ||
 		sendBusy.value ||
 		localRequests.value.some((r) => r.state === "sending")
 );
@@ -211,10 +212,11 @@ async function refreshQueue() {
 	const ticket = { cid };
 	queueRead = ticket;
 	const q = recoveryState.queued[cid];
+	const starting = recoveryState.starting[cid];
 	const current = () => isCurrent(cid, generation) && epoch === queueGeneration;
 	try {
 		const result = await boundedRead(
-			q ? api.queuePosition(q.run_id) : api.activeQueuedTurn(cid)
+			q || starting ? api.queuePosition(q?.run_id || starting) : api.activeQueuedTurn(cid)
 		);
 		if (!current()) return;
 		if (q) {
@@ -237,6 +239,20 @@ async function refreshQueue() {
 				delete recoveryState.queued[cid];
 				load();
 			} else throw new Error("Unknown turn state");
+		} else if (starting) {
+			if (!result?.ok) return; // Legacy turns may have no admission row.
+			if (["done", "errored", "cancelled"].includes(result.state)) {
+				recoveryState.observedRuns[starting] = true;
+				delete recoveryState.starting[cid];
+				load();
+			} else if (["queued", "preparing", "ready"].includes(result.state)) {
+				delete recoveryState.starting[cid];
+				recoveryState.queued[cid] = {
+					run_id: starting,
+					state: result.state,
+					position: result.position,
+				};
+			}
 		} else if (
 			result?.ok &&
 			result.active &&
@@ -452,7 +468,16 @@ async function load(force = false) {
 		// state from the durable flag rather than assuming the turn is over.
 		const last = messages.value[messages.value.length - 1];
 		if (last?.role === "assistant" && last.streaming && !live.value) {
-			live.value = { runId: "", messageId: last.name, text: last.content || "", tools: [] };
+			live.value = {
+				runId: last.run_id || recoveryState.starting[cid] || "",
+				messageId: last.name,
+				text: last.content || "",
+				tools: [],
+			};
+			if (live.value.runId === recoveryState.starting[cid]) {
+				recoveryState.observedRuns[live.value.runId] = true;
+				delete recoveryState.starting[cid];
+			}
 		}
 		await scrollToBottom(force);
 	} catch (e) {
@@ -694,6 +719,65 @@ function editRequest(request, text) {
 	if (request.state === "rejected" && request.conversation === convId.value) request.text = text;
 }
 
+function editAsNew(request) {
+	if (request.state !== "uncertain" || request.conversation !== convId.value) return;
+	const current = { text: input.value, attachments: attachments.value };
+	if (hasDraft(current))
+		recoveryState.parkedDrafts.push({
+			...current,
+			id: crypto.randomUUID(),
+			conversation: convId.value,
+		});
+	input.value = request.text;
+	attachments.value = request.attachments.map((file, i) => ({
+		...file,
+		key: `${request.id}-${i}`,
+	}));
+	sendRecovery.remove(request);
+	saveDraft();
+	errorBanner.value =
+		"This is a new draft. The original request may already have executed; sending again could duplicate work.";
+}
+function downloadRecoveryBackup() {
+	saveDraft();
+	const payload = (draft) => ({
+		text: draft.text,
+		attachments: (draft.attachments || []).map((file) => ({
+			name: file.name,
+			file_url: file.file_url || null,
+		})),
+	});
+	const backup = {
+		warning:
+			"Delivery status may have changed. Check the conversation before sending again. File links require access to the original Jarvis site. Unfinished uploads must be attached again.",
+		requests: recoveryState.requests.map((r) => ({
+			conversation: r.conversation,
+			state: r.state,
+			...payload(r),
+		})),
+		drafts: Object.fromEntries(
+			Object.entries(recoveryState.drafts).map(([key, draft]) => [key, payload(draft)])
+		),
+		savedDrafts: recoveryState.parkedDrafts.map((draft) => ({
+			conversation: draft.conversation,
+			...payload(draft),
+		})),
+	};
+	const url = URL.createObjectURL(
+		new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" })
+	);
+	const link = document.createElement("a");
+	link.href = url;
+	link.download = "jarvis-preserved-messages.json";
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+	setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function reloadForUpdate() {
+	window.location.reload();
+}
+
 // Outcome handling belongs to the currently mounted originating view. A request
 // can finish while another chat (or no chat) is mounted; its state still survives.
 watch(
@@ -755,6 +839,8 @@ watch(
 						position: res.queued_position,
 					};
 				}
+				if (!res.queued && !recoveryState.observedRuns[res.run_id])
+					recoveryState.starting[cid] = res.run_id;
 				markCardsEarlier(pending.value, cid);
 				olderCardsNote.value = !!res.older_cards_waiting;
 			}
@@ -767,7 +853,9 @@ watch(
 
 async function stop() {
 	if (queuedTurn.value && !live.value) return cancelWaiting();
-	const runId = live.value?.runId || "";
+	const runId = live.value?.runId || recoveryState.starting[convId.value] || "";
+	delete recoveryState.starting[convId.value];
+	if (runId) recoveryState.observedRuns[runId] = true;
 	// Ignore anything still arriving for this run: the backend may well finish
 	// the turn anyway, and a reply the user stopped must not reappear.
 	if (runId) ignoredRuns.value.add(runId);
@@ -892,6 +980,8 @@ function onEvent(p) {
 		p.run_id
 	) {
 		recoveryState.observedRuns[p.run_id] = true;
+		if (recoveryState.starting[convId.value] === p.run_id)
+			delete recoveryState.starting[convId.value];
 		queueGeneration++;
 		if (queuedTurn.value?.run_id === p.run_id) delete recoveryState.queued[convId.value];
 	}
@@ -1352,6 +1442,9 @@ onUnmounted(() => {
 			v-for="request in localRequests"
 			:key="request.id"
 			:request="request"
+			:backup="downloadRecoveryBackup"
+			@edit-new="editAsNew(request)"
+			@reload="reloadForUpdate"
 			:disabled="sending || holdActive"
 			@retry="retryRequest(request)"
 			@check="checkRequest(request)"

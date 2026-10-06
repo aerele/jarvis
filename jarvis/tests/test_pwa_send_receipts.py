@@ -51,10 +51,11 @@ class TestPwaSendReceipts(unittest.TestCase):
 				}
 			),
 		)
+		self.after_commit = []
 		self.frappe = SimpleNamespace(
 			cache=lambda: self.cache,
 			session=SimpleNamespace(user="alice@example.test"),
-			db=SimpleNamespace(commit=Mock()),
+			db=SimpleNamespace(commit=Mock(), after_commit=SimpleNamespace(add=self.after_commit.append)),
 			DoesNotExistError=LookupError,
 			throw=Mock(side_effect=ValueError("invalid request")),
 		)
@@ -69,8 +70,17 @@ class TestPwaSendReceipts(unittest.TestCase):
 			self.addCleanup(p.stop)
 		self.request_id = "a" * 32
 
-	def send(self, **kwargs):
-		return pwa_send.send_message(self.request_id, conversation="A", message="private invoice", **kwargs)
+	def send(self, commit=True, **kwargs):
+		result = pwa_send.send_message(self.request_id, conversation="A", message="private invoice", **kwargs)
+		if commit:
+			self.finish_transaction()
+		return result
+
+	def finish_transaction(self):
+		callbacks, self.after_commit[:] = self.after_commit[:], []
+		self.frappe.db.commit()
+		for callback in callbacks:
+			callback()
 
 	def test_lost_ack_can_be_checked_without_another_send(self):
 		result = self.send(attachments='[{"file_url":"/private/files/invoice.pdf"}]')
@@ -109,9 +119,11 @@ class TestPwaSendReceipts(unittest.TestCase):
 		self.assertEqual(self.api.send_message.call_count, 1)
 
 	def test_commit_failure_cannot_publish_success(self):
+		self.send(commit=False)
+		self.frappe.db.commit.assert_not_called()
 		self.frappe.db.commit.side_effect = RuntimeError("commit failed")
 		with self.assertRaises(RuntimeError):
-			self.send()
+			self.finish_transaction()
 		self.assertEqual(pwa_send.check_delivery(self.request_id), {"delivery": "unknown"})
 
 	def test_typed_partial_confirmation_is_not_a_rejected_send(self):
@@ -173,7 +185,29 @@ class TestPwaSendReceipts(unittest.TestCase):
 		self.api.send_message.assert_not_called()
 
 	def test_result_is_not_visible_before_commit(self):
-		self.frappe.db.commit.side_effect = lambda: self.assertEqual(
-			json.loads(next(iter(self.cache.values.values())))["state"], "pending"
-		)
+		result = self.send(commit=False)
+		self.frappe.db.commit.assert_not_called()
+		self.assertEqual(pwa_send.check_delivery(self.request_id), {"delivery": "unknown"})
+		self.finish_transaction()
+		self.assertEqual(pwa_send.check_delivery(self.request_id), result)
+
+	def test_deleted_conversation_is_unknown_but_permission_error_propagates(self):
 		self.send()
+		self.api._get_owned_conversation.side_effect = LookupError()
+		self.assertEqual(pwa_send.check_delivery(self.request_id), {"delivery": "unknown"})
+		self.api._get_owned_conversation.side_effect = PermissionError()
+		with self.assertRaises(PermissionError):
+			pwa_send.check_delivery(self.request_id)
+
+	def test_original_send_owns_conversation_access_validation(self):
+		self.api.send_message.side_effect = PermissionError()
+		with self.assertRaises(PermissionError):
+			self.send()
+		self.api._get_owned_conversation.assert_not_called()
+		self.assertFalse(self.after_commit)
+
+	def test_rollback_discards_receipt_callback(self):
+		self.send(commit=False)
+		self.after_commit.clear()  # Frappe rollback clears the after_commit manager.
+		self.finish_transaction()
+		self.assertEqual(pwa_send.check_delivery(self.request_id), {"delivery": "unknown"})
