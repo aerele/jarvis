@@ -1,17 +1,21 @@
 """run_method follows the site's whitelisted-method overrides, and a call that
 deletes or cancels is braked like the delete / cancel tools.
 
-No database writes: overrides are injected through the real hook lookup, and the
+Nothing is committed: overrides are injected through the real hook lookup, the
 brake is a pure decision on the tool args (the gate that uses it is covered in
-test_skill_approve_and_run.TestSkillAutorunGate).
+test_skill_approve_and_run.TestSkillAutorunGate). The ORM backstop is exercised
+inside a guard scope directly, and everything it touches rolls back.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
+from frappe.model.document import Document
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.exceptions import PermissionDeniedError
+from jarvis import api
+from jarvis.exceptions import BrakeRefusedError, PermissionDeniedError
+from jarvis.tools import _write_risk
 from jarvis.tools import run_method as run_method_mod
 from jarvis.tools.run_method import needs_brake, run_method
 
@@ -82,3 +86,96 @@ class TestRunMethodBrake(FrappeTestCase):
 	def test_an_override_into_delete_is_braked(self):
 		with _overrides({"frappe.ping": "frappe.client.delete"}):
 			self.assertTrue(needs_brake({"method": "frappe.ping"}))
+
+
+class TestUncardedRunMethodCannotDeleteOrCancel(FrappeTestCase):
+	"""The backstop for what a name list can't see: inside a run_method that runs
+	without a card, no route may delete or cancel a root document."""
+
+	def setUp(self):
+		self.todo_meta = frappe.get_meta("ToDo")
+
+	def _submitted_todo(self):
+		with patch.object(self.todo_meta, "is_submittable", 1):
+			todo = frappe.get_doc({"doctype": "ToDo", "description": "brake probe"}).insert(
+				ignore_permissions=True
+			)
+			todo.submit()
+		return todo
+
+	def test_cancel_by_saving_docstatus_2_is_refused(self):
+		todo = self._submitted_todo()
+		payload = {**todo.as_dict(), "docstatus": 2}
+		with (
+			patch.object(self.todo_meta, "is_submittable", 1),
+			_write_risk.guard_scope([], brake=True),
+			self.assertRaises(BrakeRefusedError),
+		):
+			frappe.call("frappe.client.save", doc=payload)
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
+
+	def test_the_brake_runs_before_the_documents_own_cancel_handler(self):
+		# Nothing a cancel handler does outside the database (an e-invoice cancel,
+		# a mail) may happen before the refusal.
+		todo = self._submitted_todo()
+		handler = MagicMock()
+		with (
+			patch.object(type(todo), "before_cancel", handler, create=True),
+			patch.object(self.todo_meta, "is_submittable", 1),
+			_write_risk.guard_scope([], brake=True),
+			self.assertRaises(BrakeRefusedError),
+		):
+			todo.cancel()
+		handler.assert_not_called()
+
+	def test_cancel_by_db_set_is_refused(self):
+		todo = self._submitted_todo()
+		with _write_risk.guard_scope([], brake=True), self.assertRaises(BrakeRefusedError):
+			todo.db_set("docstatus", 2)
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 1)
+
+	def test_delete_is_refused(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "brake probe"}).insert(
+			ignore_permissions=True
+		)
+		with _write_risk.guard_scope([], brake=True), self.assertRaises(BrakeRefusedError):
+			frappe.delete_doc("ToDo", todo.name, ignore_permissions=True)
+		self.assertTrue(frappe.db.exists("ToDo", todo.name))
+
+	def test_discard_is_refused(self):
+		if not hasattr(Document, "discard"):
+			self.skipTest("this Frappe version has no discard")
+		with patch.object(self.todo_meta, "is_submittable", 1):
+			todo = frappe.get_doc({"doctype": "ToDo", "description": "brake probe"}).insert(
+				ignore_permissions=True
+			)
+			with _write_risk.guard_scope([], brake=True), self.assertRaises(BrakeRefusedError):
+				todo.discard()
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "docstatus"), 0)
+
+	def test_without_the_brake_the_same_delete_runs(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "brake probe"}).insert(
+			ignore_permissions=True
+		)
+		with _write_risk.guard_scope([]):
+			frappe.delete_doc("ToDo", todo.name, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("ToDo", todo.name))
+
+	def test_a_queued_job_carries_the_brake(self):
+		with _write_risk.guard_scope([], brake=True):
+			queue = _write_risk.guard_queue(MagicMock())
+		_, _, queue_args = queue._guard("frappe.ping", (), {})
+		self.assertIs(queue_args["_jarvis_brake"], True)
+
+	def test_only_an_uncarded_run_method_gets_the_brake(self):
+		seen = {}
+
+		def capture(tool, *args, **kwargs):
+			seen[tool] = _write_risk._active_state().brake
+			return {"ok": True, "data": {}}
+
+		with patch.object(api, "_dispatch_and_wrap", side_effect=capture):
+			api.dispatch_confirmed("run_method", {"method": "frappe.ping"}, uncarded=True)
+			self.assertIs(seen.pop("run_method"), True)
+			api.dispatch_confirmed("run_method", {"method": "frappe.ping"})
+			self.assertIs(seen.pop("run_method"), False)
