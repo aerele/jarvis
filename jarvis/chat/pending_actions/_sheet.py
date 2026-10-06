@@ -201,7 +201,7 @@ def _answers(row, raw, errors: dict) -> tuple[dict, bool]:
 	checked against its own options (a routing one: still eligible now)."""
 	questions = _questions(row)
 	given = raw if isinstance(raw, dict) else {}
-	for key in set(map(str, given)) - set(questions):
+	for key in {str(key) for key in given} - set(questions):
 		errors[key] = "Not a question on this sheet."
 	out, skip_all = {}, False
 	for name, q in questions.items():

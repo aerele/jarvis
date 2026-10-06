@@ -379,7 +379,7 @@ def _is_learned_cutover() -> bool:
 	``datetime(1,1,1)``. frappe.db.get_value (not get_single_value): the latter
 	serves a process-local cache that background status writes do not
 	invalidate, and a stale read here would re-fire (or skip) the reconcile."""
-	status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "learned_skills_sync_status")
+	status = frappe.db.get_single_value("Jarvis Settings", "learned_skills_sync_status", cache=False)
 	if (status or "").strip():
 		return False
 	# Positive Phase-1 evidence: this runs before the apply's upserts, so any

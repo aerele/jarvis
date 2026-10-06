@@ -874,7 +874,7 @@ def mark_resume_failed(conversations) -> None:
 	from jarvis.chat.filebox import _FAILURES
 
 	now = frappe.utils.now_datetime()
-	for conv in sorted(set(filter(None, conversations))):
+	for conv in sorted({conv for conv in conversations if conv}):
 		frappe.db.set_value(
 			CONV,
 			conv,

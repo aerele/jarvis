@@ -199,7 +199,7 @@ def stuck_runs() -> list[dict]:
 		fields=_RUN_FIELDS,
 		order_by="modified asc",
 	)
-	return [found for found in map(_stuck, rows) if found]
+	return [found for row in rows if (found := _stuck(row))]
 
 
 def left_by_the_check(run_name: str) -> dict | None:

@@ -296,7 +296,7 @@ def _begin_now(job: str, kwargs: dict) -> None:
 				# should not occur - every existing enqueue path stamps
 				# "pending: ..." synchronously before calling begin().
 				pending_status = (
-					frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+					frappe.db.get_single_value("Jarvis Settings", "last_sync_status", cache=False) or ""
 				)
 				if not pending_status.startswith("pending"):
 					pending_status = "pending: applying"
@@ -466,7 +466,7 @@ def _heal_lost_release_locked(rec: dict) -> dict | None:
 		value = getattr(job_status, "value", None) or str(job_status)
 		if value != "failed":
 			return None  # queued/started/finished/... - alive or already settled
-	last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+	last_status = frappe.db.get_single_value("Jarvis Settings", "last_sync_status", cache=False) or ""
 	if not last_status.startswith("pending"):
 		return None
 	frappe.log_error(
@@ -722,7 +722,7 @@ def reconcile() -> None:
 		if rec.get("awaiting_admin"):
 			_reconcile_awaiting_admin(rec)
 			return
-		last_status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+		last_status = frappe.db.get_single_value("Jarvis Settings", "last_sync_status", cache=False) or ""
 		if last_status.startswith("ok") or last_status.startswith("failed:"):
 			finish(rec.get("run_id"), last_status)
 	except Exception:
@@ -742,7 +742,7 @@ def _reconcile_awaiting_admin(rec: dict) -> None:
 	raises - called from ``reconcile()``'s own try/except, but the throttle
 	check touches redis on its own before that guard, so it gets one too."""
 	run_id = rec.get("run_id")
-	status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+	status_now = frappe.db.get_single_value("Jarvis Settings", "last_sync_status", cache=False) or ""
 	# Already terminal (2026 review, "avoid the double admin round-trip"): one
 	# of the four converged-ok guard sites just stamped from ITS OWN Ready
 	# probe (or a failure landed via some other path) and is about to call
@@ -787,7 +787,7 @@ def _reconcile_awaiting_admin(rec: dict) -> None:
 	# knowing which context it is.
 	_stamp_converged_ok(settings, is_pool=compute_pool_mode(settings))
 	_commit_terminal_sync_status()
-	status_now = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "last_sync_status") or ""
+	status_now = frappe.db.get_single_value("Jarvis Settings", "last_sync_status", cache=False) or ""
 	finish(run_id, status_now)
 
 
