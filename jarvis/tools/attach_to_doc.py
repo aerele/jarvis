@@ -1,9 +1,10 @@
 """Link an existing File DocType entry to a target doc as an attachment.
 
 Composes naturally with ``download_pdf``: the agent first generates a
-PDF (which lands attached to the source record), then the customer can
-ask to attach the same artifact to a different record (e.g. "attach the
-invoice PDF to the related Customer doc"). Without this tool the agent
+PDF (a private file only the requester can open), then the customer can
+ask to attach it to a record (e.g. "attach the invoice PDF to the
+invoice" or "to the related Customer doc"). This is the ONLY way a
+generated PDF reaches a record's Attachments, so it is write-gated. Without this tool the agent
 would have to re-render the PDF, doubling the storage cost and creating
 a content-hash mismatch in the File doctype's dedup table.
 

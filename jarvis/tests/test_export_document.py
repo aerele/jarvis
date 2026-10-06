@@ -47,6 +47,15 @@ from jarvis.tools.export_document import export_document
 
 _MD = "# Report\n\n| Metric | Value |\n|---|---|\n| Revenue | 1000 |\n\n- point one\n"
 
+# Fetch vectors outside <img>/<link>: inline CSS urls and media / table attributes.
+_URL_VECTORS = (
+	'<p style="background-image:url(http://169.254.169.254/latest/meta-data/)">kept</p>\n\n'
+	'<div style="background:url(file:///etc/passwd)">kept</div>\n\n'
+	'<table background="http://169.254.169.254/bg.png"><tr><td>kept</td></tr></table>\n\n'
+	'<video poster="http://169.254.169.254/poster.png"></video>\n\n'
+	'<audio src="http://169.254.169.254/a.mp3"></audio>\n'
+)
+
 
 def _saved(mock):
 	"""(filename, bytes) export_document handed save_file."""
@@ -207,6 +216,24 @@ class TestExportDocumentSanitization(FrappeTestCase):
 		)
 		self.assertNotIn("javascript:", text)
 		self.assertNotIn("onclick", text)
+
+	def test_url_bearing_attributes_and_css_stripped_both_branches(self):
+		"""wkhtmltopdf also fetches URLs in inline CSS and media attributes, which
+		frappe's sanitize_html keeps. None may survive on either branch."""
+		for content_is_html in (True, False):
+			with self.subTest(content_is_html=content_is_html):
+				text = self._rendered_html(_URL_VECTORS, content_is_html=content_is_html)
+				for leak in (
+					"169.254.169.254",
+					"file://",
+					"url(",
+					"background=",
+					"poster=",
+					"<video",
+					"<audio",
+				):
+					self.assertNotIn(leak, text)
+				self.assertIn("kept", text)
 
 	def test_benign_markdown_formatting_still_renders(self):
 		text = self._rendered_html("# Title\n\n**bold** and *italic*\n\n- one\n- two", content_is_html=False)
@@ -703,7 +730,7 @@ class TestTelemetry(_RichBase):
 		self.assertEqual(self._last_outcome(), "rejected")
 
 	def test_telemetry_carries_rich_flag(self):
-		# The rich path and the byte-preserved plain path must be distinguishable in
+		# The rich path and the plain path must be distinguishable in
 		# the telemetry stream (they would otherwise collapse to one tuple).
 		export_document(_RICH_MD, format="html", theme=True)
 		self.assertIs(self.telemetry.call_args.kwargs["rich"], True)
@@ -734,6 +761,11 @@ class TestPlainPathBackCompatUnit(_RichBase):
 		self.assertNotIn("<img", md)
 		html_text = self._plain_html("<p>hi</p><script>alert(1)</script>", content_is_html=True)
 		self.assertNotIn("<script", html_text)
+
+	def test_plain_css_and_media_urls_stripped(self):
+		text = self._plain_html(_URL_VECTORS, content_is_html=True)
+		self.assertNotIn("169.254.169.254", text)
+		self.assertNotIn("file://", text)
 
 	def test_plain_pdf_uses_get_pdf_not_rich(self):
 		out = export_document(_MD, format="pdf")  # content-only: title now activates rich
