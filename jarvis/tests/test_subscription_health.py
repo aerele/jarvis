@@ -1198,7 +1198,14 @@ class TestUnmigratedSite(unittest.TestCase):
 	def test_status_health_and_notice_return_the_no_health_shape(self):
 		from jarvis import account, admin_client
 
+		# An in-memory copy (never saved) with the two stored statuses blanked: whatever an earlier test
+		# or the site left in last_sync_status / last_subscription_status would otherwise turn the
+		# health to "attention" for reasons this test is not about (CI's shared DB did exactly that).
+		settings = frappe.get_single("Jarvis Settings")
+		settings.last_sync_status = ""
+		settings.last_subscription_status = ""
 		with (
+			patch("frappe.get_single", return_value=settings),
 			patch.object(account, "_has_llm_config", return_value=True),
 			patch.object(account, "compute_pool_mode", return_value=True),
 			patch.object(account, "_llm_apply_confirmed", return_value=True),
