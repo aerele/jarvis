@@ -365,5 +365,6 @@ def read_source_file(app: str, rel_path: str, src_dir: str | None = None) -> tup
 	size = os.path.getsize(full)
 	if size > PER_FILE_CAP_BYTES:
 		raise ValueError(f"file exceeds the per-file {PER_FILE_CAP_BYTES // 1024} KB cap")
+	# nosemgrep: frappe-security-file-traversal -- confined to the app tree, checked above
 	with open(full, "rb") as fh:
 		return fh.read().decode("utf-8", errors="replace"), size
