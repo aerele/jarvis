@@ -254,7 +254,7 @@ def _set_reason(ann: str, reason: str) -> None:
 		"UPDATE `tabJarvis Import Announcement` SET reason=%(r)s WHERE name=%(n)s AND announced=0",
 		{"r": reason, "n": ann},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- reason seen by concurrent classify
 
 
 def _mark_terminal(ann: str, reason: str, source: str) -> None:
@@ -265,7 +265,7 @@ def _mark_terminal(ann: str, reason: str, source: str) -> None:
 		"WHERE name=%(n)s AND announced=0",
 		{"s": source, "r": reason, "n": ann},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- announced seen by concurrent runs
 
 
 def _bump_attempts(row: dict) -> None:
@@ -308,7 +308,7 @@ def _post_completion(row: dict, source: str, reason: str, content: str) -> str:
 
 	msg = None
 	with impersonate(c.owner):
-		frappe.db.commit()  # commit-first: the FOR UPDATE is the first statement (REPEATABLE-READ)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 		msg = _locked_insert_chat_message(
 			conv,
 			{
@@ -340,7 +340,7 @@ def _post_completion(row: dict, source: str, reason: str, content: str) -> str:
 			"WHERE name=%(n)s AND announced=0",
 			{"s": source, "r": reason, "n": ann},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	if msg:
 		events.publish_to_user(
 			c.owner, {"kind": "import:finished", "conversation_id": conv, "message_id": msg}

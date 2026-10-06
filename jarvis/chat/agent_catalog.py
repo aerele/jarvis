@@ -237,7 +237,7 @@ def sync_agent_listings() -> dict:
 				frappe.db.set_value(LISTING, name, "status", "Deprecated", update_modified=False)
 				deprecated += 1
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before revalidation enqueue
 	if requirement_moved:
 		from jarvis.chat.agent_models import enqueue_revalidation
 

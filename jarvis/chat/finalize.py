@@ -114,7 +114,7 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		# Persist the EXCLUSIVE claim (status='running' + attempt increment) so a
 		# crash mid-effect still counts toward the force-done budget AND another
 		# finalizer sees the live claim (never runs the same effect twice, CDX-4).
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before effect
 		# 'done' (not required / already applied), 'busy' (another finalizer holds a
 		# live claim), or 'force_done' (budget spent) — skip.
 		if outcome != "attempt":
@@ -158,7 +158,7 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		and ts.visible_effects_done(run_id)
 		and ts.claim_enrichment_publish(run_id)
 	):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before publish
 		published = _publish_enriched(run_id, conversation, owner, assistant_message)
 
 	# Success path only: flip finalizing -> done once every required effect is done
@@ -168,10 +168,10 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 	if state == "finalizing" and ts.all_required_effects_done(run_id):
 		v = int(frappe.db.get_value(TURN, run_id, "version") or 0)
 		if ts.finalize_done(run_id, v):
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before publish
 			done = True
 			if not published and ts.claim_enrichment_publish(run_id):
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before publish
 				published = _publish_enriched(run_id, conversation, owner, assistant_message)
 	return {"ok": True, "ran": ran, "done": done, "published": published, "state": state}
 

@@ -84,14 +84,14 @@ def reset_onboarding(wipe_data: bool = False) -> dict:
 			frappe.logger().info("reset_onboarding: container unpair skipped/failed (non-fatal)")
 
 	settings_reset.apply(s, _FULL)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 
 	wiped: list = []
 	if wipe_data:
 		from jarvis.onboarding import _WIPE_DOCTYPES, _wipe_workspace_content
 
 		_wipe_workspace_content()
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 		wiped = list(_WIPE_DOCTYPES)
 
 	return {

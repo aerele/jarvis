@@ -62,7 +62,7 @@ def set_default_pdf_template(key: str) -> dict:
 		)
 	resolved = pdf_templates.resolve(key)["key"]
 	frappe.db.set_single_value(SETTINGS, _DEFAULT_FIELD, resolved, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"default": resolved}}
 
 
@@ -164,7 +164,7 @@ def save_pdf_template(payload: str) -> dict:
 					{"company": row["company"], "letter_head": row["letter_head"]},
 				)
 	doc.save(ignore_permissions=True)  # require_jarvis_admin above is the ACL
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"key": doc.template_key}}
 
 
@@ -176,7 +176,7 @@ def delete_pdf_template(key: str) -> dict:
 	if not key or not frappe.db.exists(CUSTOM_DT, key):
 		raise InvalidArgumentError("That template does not exist.")
 	frappe.delete_doc(CUSTOM_DT, key, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": key}}
 
 

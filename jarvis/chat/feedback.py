@@ -197,7 +197,7 @@ def submit_session_feedback(
 	# block on it: settlement's turn-count bump (delaying a run:end), and
 	# admission.accept_or_queue's _lock_conversation - which waits while holding the
 	# SITE-WIDE shard lock, turning one slow popup into a shard-wide send stall.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before slow work
 	if not chip_value:
 		return {"ok": True, "recorded": False}
 

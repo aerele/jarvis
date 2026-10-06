@@ -574,7 +574,7 @@ def _persist_rule_facts(rule_facts: list[dict]) -> dict:
 			},
 			update_modified=False,
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- stats survive a later failure
 	finally:
 		frappe.flags.jarvis_pattern_engine = prev_flag
 		frappe.set_user(original_user)
@@ -860,7 +860,7 @@ def _mark_processed(processed: list[tuple[str, str]]) -> None:
 				message=frappe.get_traceback(),
 			)
 	if processed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- processed marks survive later failure
 
 
 def _summary(

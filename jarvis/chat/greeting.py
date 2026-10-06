@@ -131,7 +131,7 @@ def hide_greeting() -> dict:
 	pref = _get_pref(user)
 	count = cint(pref.business_greeting_chat_count) if pref else 0
 	_upsert_pref(user, business_greeting_hidden_at_count=count)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -143,7 +143,7 @@ def dismiss_greeting() -> dict:
 	_require_system_user()
 	user = frappe.session.user
 	_upsert_pref(user, business_greeting_state="Dismissed")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 

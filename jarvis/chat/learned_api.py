@@ -701,7 +701,7 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	doc.approved_by = frappe.session.user
 	doc.reviewed_at = now
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	out = {"ok": True, "status": doc.status, "draft_edited": int(doc.draft_edited or 0)}
 	# TASK 16: an A-class approve compiles the pattern into the org-wide
 	# learned-<domain> skill every user gets; if it drew from a private
@@ -725,7 +725,7 @@ def reject_learned_pattern(name: str, reason: str) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status}
 
 
@@ -749,7 +749,7 @@ def acknowledge_learned_pattern(name: str) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status, "acknowledged": True}
 
 
@@ -767,7 +767,7 @@ def unapprove_learned_pattern(name: str) -> dict:
 	# The approval is withdrawn, so the frozen reviewed text goes with it.
 	doc.approved_draft = None
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status}
 
 
@@ -779,7 +779,7 @@ def restore_rejected_pattern(name: str) -> dict:
 	doc.status = "Proposed"
 	doc.review_note = None
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status}
 
 
@@ -801,7 +801,7 @@ def snooze_learned_pattern(name: str, days: int | str = 30) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status, "snoozed_until": str(doc.snoozed_until)}
 
 
@@ -932,7 +932,7 @@ def polish_learned_draft(name: str) -> dict:
 		name,
 		{"skill_draft": out["text"], "draft_edited": 0, "draft_polished": 1},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "text": out["text"]}
 
 
@@ -1084,7 +1084,7 @@ def apply_insight_skill_update(
 	doc.reviewed_at = now_datetime()
 	doc.materialized_skill = row_name
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	from jarvis.chat.custom_skills import apply_would_push
 
 	out = {"ok": True, "skill_name": slug, "needs_apply": apply_would_push(row_name)}
@@ -1479,7 +1479,7 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 				update["status"] = "Stale"
 				status = "Stale"
 	frappe.db.set_value(JLP, name, update, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 
 	if demoted:
 		_notify_flag_demotion(name, distinct_users, flags_count, band, staled=(status == "Stale"))
@@ -1576,7 +1576,7 @@ def _clear_stale_materialized_pointers() -> None:
 	for name in names:
 		frappe.db.set_value(JLP, name, {"materialized_skill": None}, update_modified=False)
 	if names:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 
 
 @frappe.whitelist()
@@ -1714,7 +1714,7 @@ def set_learning_settings(payload: str | dict | None = None) -> dict:
 	# set_single_value (not set_value on the Single, which Frappe deprecates):
 	# a direct write that never fires on_update. Wrap-aware validation ran above.
 	frappe.db.set_single_value(SETTINGS, values, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return get_learning_settings()
 
 
@@ -2143,7 +2143,7 @@ def trigger_followup_question(name: str, ask: str) -> dict:
 	)
 	q.flags.ignore_permissions = True
 	q.insert()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 
 	_publish_personalise_question(target_user)
 	return {"ok": True, "name": q.name, "question": question_text}

@@ -50,7 +50,7 @@ SHEET_REAPER: str | None = "jarvis.chat.pending_actions._sheet.reap"
 
 def _log(title: str, message: str) -> None:
 	frappe.log_error(title=f"jarvis.pending_action.{title}", message=message)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 
 
 def _reap_interrupted() -> int:
@@ -64,7 +64,7 @@ def _reap_interrupted() -> int:
 		as_dict=True,
 	)
 	flipped = [r for r in rows if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted")]
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if flipped:
 		_log(
 			"interrupted",
@@ -139,10 +139,10 @@ def _retry_waiters() -> dict:
 		if rowcount():
 			failed_convs.append(w.conversation)
 	failed = len(failed_convs)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if failed_convs and HELD_FAILED:
 		frappe.get_attr(HELD_FAILED)(failed_convs)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	retried = 0
 	if HELD_RESUME:
 		resume = frappe.get_attr(HELD_RESUME)
@@ -171,7 +171,7 @@ def _cancel_disabled_owners() -> int:
 		{"lim": _SCAN},
 	)
 	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="owner_disabled") == "ok"]
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if moved:
 		_log("owner_disabled", "Cancelled (owner disabled or missing): " + ", ".join(moved))
 	for name in moved:
@@ -188,7 +188,7 @@ def _cancel_orphaned_chat() -> int:
 		{"lim": _SCAN},
 	)
 	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="cancelled") == "ok"]
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if moved:
 		_log("orphan_cancel", "Cancelled (conversation deleted): " + ", ".join(moved))
 	for name in moved:
@@ -241,7 +241,7 @@ def _cards_health() -> dict:
 				"jarvis/chat/pending_actions/_reconcile.py."
 			),
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	return {"cards_open": open_n, "aged": aged}
 
 
@@ -314,7 +314,7 @@ def purge() -> int:
 			"DELETE FROM `tabJarvis Pending Action` WHERE name IN %(n)s AND settled=1 AND status IN %(t)s",
 			{"n": tuple(names), "t": TERMINAL},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 		total += len(names)
 		if len(names) < PURGE_BATCH:
 			break

@@ -1156,7 +1156,7 @@ def record_delegate_run(
 	# rows onto the shared site. All in-test asserts read the same connection, so the
 	# uncommitted writes are visible without it.
 	if not frappe.flags.in_test:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before readers
 
 	run_doc.reload()
 	return run_doc

@@ -161,7 +161,7 @@ def _continue(kind: str, conversation: str | None, items: list[dict]) -> None:
 		frappe.get_attr(path)(conversation, items)
 	else:
 		claim_settled([i["name"] for i in items])
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist settle step
 
 
 def _begin(row, force: bool) -> bool:
@@ -174,10 +174,10 @@ def _begin(row, force: bool) -> bool:
 				title="jarvis.pending_action.settle_quarantined",
 				message=f"{row.name}: settle failed {MAX_SETTLE_ATTEMPTS} times; use operator_settle.",
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist quarantine log
 		return False
 	bump_settle_attempts(row.name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist attempt count
 	return True
 
 

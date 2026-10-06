@@ -107,7 +107,7 @@ def _seed_settings_defaults() -> None:
 		# set_single_value (not the deprecated set_value on a Single); direct
 		# write, no on_update.
 		frappe.db.set_single_value(SETTINGS, updates, update_modified=False)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist seeded defaults
 
 
 def _seed_detector_state() -> None:
@@ -132,7 +132,7 @@ def _seed_detector_state() -> None:
 			doc.insert(ignore_permissions=True)
 			created += 1
 	if created:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist seeded defaults
 
 
 # --------------------------------------------------------------------------- #

@@ -159,5 +159,5 @@ def get_context(context):
 	except Exception:
 		context.boot["jarvis_worker_warning"] = False
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return context

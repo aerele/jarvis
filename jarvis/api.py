@@ -635,7 +635,7 @@ def persist_tool_receipt(
 		# with a concurrent receipt or the assistant placeholder, and a duplicate
 		# callback for the same tool call is a no-op. Commit-first so the FOR UPDATE
 		# is the first statement (REPEATABLE-READ discipline).
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh txn before row lock
 		# PR-1 flip-else-insert: when a confirm/discard/approve passes ``flip_token``,
 		# turn the PENDING action-row parked at park (tool_call_id=flip_token,
 		# tool_status='pending') INTO this receipt IN PLACE - one durable "action row"
@@ -712,7 +712,7 @@ def persist_tool_receipt(
 					else None
 				),
 			)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist receipt before reply
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
 			return
@@ -757,9 +757,9 @@ def persist_pending_action(
 	single-flight guard would treat the orphan as a live card and wedge the retry."""
 	# Commit-first so the FOR UPDATE is the transaction's first statement
 	# (REPEATABLE-READ discipline), matching persist_tool_receipt.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh txn before row lock
 	_insert_pending_row(conv_name, tool, preview, token, expires_at)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to other workers
 
 
 def _insert_pending_row(
@@ -924,7 +924,7 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	# Publish AFTER the winning commit (never inside the unit): a replay must not
 	# publish twice, and a realtime event for a card the transaction later loses
 	# would be worse than none.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	frappe.publish_realtime(
 		"jarvis:event",
 		{"kind": "canvas", "conversation_id": conv_name, "message_id": msg_name, "items": items},
@@ -1441,7 +1441,7 @@ def _skill_autorun_slide(conv: str) -> None:
 	frappe.db.set_value(
 		"Jarvis Conversation", conv, "skill_autorun_at", frappe.utils.now_datetime(), update_modified=False
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- freeze-point survives a worker death
 
 
 def _skill_autorun_clear(conv: str) -> None:
@@ -1454,7 +1454,7 @@ def _skill_autorun_clear(conv: str) -> None:
 		{"skill_autorun": 0, "skill_autorun_skill": None},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clear seen by other workers
 
 
 def _request_autorun_arm(conv: str, msg_id: str | None) -> None:
@@ -1474,7 +1474,7 @@ def _request_autorun_arm(conv: str, msg_id: str | None) -> None:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- arm seen by other workers
 
 
 def _request_autorun_slide(conv: str) -> None:
@@ -1487,7 +1487,7 @@ def _request_autorun_slide(conv: str) -> None:
 		frappe.utils.now_datetime(),
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- freeze-point survives a worker death
 
 
 def _request_autorun_clear(conv: str) -> None:
@@ -1502,7 +1502,7 @@ def _request_autorun_clear(conv: str) -> None:
 		{"request_autorun": 0, "request_autorun_at": None, "request_autorun_msg": None},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clear seen by other workers
 
 
 def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | None]:
@@ -2872,7 +2872,7 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		# dropper AFTER (the idiom chat_asks.materialize_from_turn uses).
 		if doc.owner != owner:
 			frappe.db.set_value("Jarvis Approval Request", name, "owner", owner, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- proposal durable before tool reply
 	return {
 		"ok": True,
 		"proposed": True,
@@ -4033,6 +4033,5 @@ def rotate_agent_token() -> dict:
 		settings.db_set("agent_token_issued_at", now)
 	except Exception:
 		pass
-	frappe.db.commit()
 
 	return {"ok": True, "data": {"rotated_at": now}}

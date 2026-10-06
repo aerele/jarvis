@@ -306,14 +306,14 @@ def _claim_slot(m, now):
 	row in hand can be stale. Re-reading ``next_run_at`` for update and confirming it
 	is still due is what makes exactly one dispatcher run a slot, and stops a sweep
 	overwriting a schedule the owner saved a moment ago."""
-	frappe.db.commit()  # REPEATABLE-READ discipline: the FOR UPDATE read goes first
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking read
 	current = frappe.db.get_value(MACRO, m.name, "next_run_at", for_update=True)
 	if not current or get_datetime(current) > now:
-		frappe.db.commit()  # release the row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return None
 	claimed = _next_occurrence(m, now)
 	frappe.db.set_value(MACRO, m.name, "next_run_at", claimed, update_modified=False)
-	frappe.db.commit()  # releases the row lock
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 	return claimed
 
 
@@ -402,7 +402,7 @@ def _stamp_last_run(m, now) -> None:
 	already moved it, and writing it again here would overwrite a schedule the owner
 	saved while the macro was dispatching."""
 	frappe.db.set_value(MACRO, m.name, "last_run_at", now, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist slot claim
 
 
 def _next_occurrence(m, now) -> datetime.datetime:
@@ -435,7 +435,7 @@ def _consume_slot(m, now, *, stamp_last_run: bool = True) -> None:
 	if stamp_last_run:
 		values["last_run_at"] = now
 	frappe.db.set_value(MACRO, {"name": m.name, "schedule_enabled": 1}, values, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist slot claim
 
 
 # The marker on every macro the sweep switched off. A row switched off here is
@@ -471,7 +471,7 @@ def _switch_off_leaver(m, now) -> None:
 			title="jarvis macro scheduler: schedules were switched off and not every admin was told",
 			message=untold,
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- log row survives later slots
 
 
 def _consume_barred_slot(m, now) -> None:
@@ -519,12 +519,12 @@ def _switch_off_and_record(m, now) -> tuple[list[str], str]:
 	does not stop a Desk form that was opened before the switch-off from saving the
 	schedule back on afterwards (``modified`` is not touched, so that save is not
 	refused as stale); the next due slot then switches it off again."""
-	frappe.db.commit()  # REPEATABLE-READ discipline: the FOR UPDATE read goes first
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking read
 	names = frappe.db.get_values(
 		MACRO, {"owner": m.owner, "schedule_enabled": 1}, "name", for_update=True, pluck=True
 	)
 	if not names:
-		frappe.db.commit()  # nothing was written; ends the locking read's transaction
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locking read transaction
 		return [], ""
 	comment = _SWITCHED_OFF_COMMENT + _barred_phrase(m.owner)
 	for name in names:
@@ -545,7 +545,7 @@ def _switch_off_and_record(m, now) -> tuple[list[str], str]:
 		).insert(ignore_permissions=True)
 	_insert_failed_run(m, _BARRED_OWNER)
 	untold = _insert_admin_notices(m.owner, len(names))
-	frappe.db.commit()  # the one commit; releases the row locks
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 	return names, untold
 
 

@@ -47,5 +47,5 @@ def update_branding(agent_name: str = "", logo_url: str = "", favicon_url: str =
 	name, logo, favicon = validate_branding_inputs(agent_name, logo_url, favicon_url)
 	for field, value in (("agent_name", name), ("brand_logo", logo), ("brand_favicon", favicon)):
 		frappe.db.set_single_value(SETTINGS, field, value, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": _branding_payload(name, logo, favicon)}

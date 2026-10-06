@@ -1008,7 +1008,7 @@ def create_conversation(origin_page: str = "") -> str:
 		}
 	)
 	doc.insert()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return doc.name
 
 
@@ -1063,7 +1063,7 @@ def archive_conversation(conversation: str) -> dict:
 		label=f"archive_conversation {conversation}",
 		friendly_message=_("Couldn't delete this chat right now. Please try again."),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- archive survives later card cleanup
 	# Decision 12: archiving cancels its pending chat cards (held rows just stop
 	# waiting). The archive itself is already committed; this must not undo it.
 	# A File Box run is signalled first, like Stop: a racing write opens no fresh sheet.
@@ -1204,13 +1204,13 @@ def _delete_idle_conversation(conversation: str) -> str:
 	failure is the caller's: the lock is still held when it raises."""
 	from jarvis.chat import macros, turn_state
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	reason = admission.reply_in_progress(conversation)
 	if reason:
 		return reason
 	# BEFORE the messages go: the step to cancel is found through them.
 	_stop_macro_runs_in([conversation], reason=macros._HISTORY_CLEARED_ERROR)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before history clear
 
 	def under_the_lock() -> str:
 		turn_state._lock_conversation(conversation)
@@ -1231,7 +1231,7 @@ def _delete_idle_conversation(conversation: str) -> str:
 			before_replay=turn_state.reset_lock_tracking,
 		)
 		if outcome == _DELETED:
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist delete outcome
 		else:
 			frappe.db.rollback()  # nothing was written: this lets go of the row lock
 		return outcome
@@ -1278,7 +1278,7 @@ def rename_conversation(conversation: str, title: str) -> dict:
 		label=f"rename_conversation {conversation}",
 		friendly_message=_("Couldn't rename this chat right now. Please try again."),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"title": title}}
 
 
@@ -1303,7 +1303,7 @@ def set_star(conversation: str, starred: str | int | bool) -> dict:
 		label=f"set_star {conversation}",
 		friendly_message=_("Couldn't update this chat right now. Please try again."),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"starred": on}}
 
 
@@ -2350,7 +2350,7 @@ def send_message(
 	if _claim is not None and not _claim():
 		frappe.db.rollback()
 		return {"ok": False, "reason": "already_claimed"}
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 
 	# R1: the typed reply acts only now that the user row is committed.
 	_typed_out = _apply_typed_reply(conversation, _typed_snap)
@@ -3326,7 +3326,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 			lambda: frappe.db.set_value(CONV, conversation, "model_override", "", update_modified=False),
 			label=f"set_conversation_model clear {conversation}",
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 		return {"ok": True, "data": {"effective_model": settings.llm_model or ""}}
 
 	# A pin must name a model the customer actually has (subscription allowlist unioned
@@ -3350,7 +3350,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 		lambda: frappe.db.set_value(CONV, conversation, "model_override", model, update_modified=False),
 		label=f"set_conversation_model {conversation}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"effective_model": model}}
 
 
@@ -3412,7 +3412,7 @@ def set_conversation_thinking(conversation: str, thinking: str | None = None) ->
 		lambda: frappe.db.set_value(CONV, conversation, "thinking_override", level, update_modified=False),
 		label=f"set_conversation_thinking {conversation}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"effective_thinking": level or "medium"}}
 
 
@@ -3814,7 +3814,7 @@ def _dispatch_turn(
 			# Flipped to pump-ON inside the window (per the DB-authoritative ROW): release the gate
 			# lock and reroute so no invisible legacy job lands after a cutover reached done=True.
 			# CDX-19: return the reroute's admission result so the caller merges queued/overloaded.
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release gate lock
 			_gate_ts.reset_lock_tracking()
 			return _reroute_legacy_to_pump(enqueue_kwargs, interactive, exempt_overload=exempt_overload)
 	try:
@@ -3885,7 +3885,7 @@ def _dispatch_turn(
 			# synchronously (enqueue_after_commit defaults False), and the pubsub after-commit
 			# publish fires on this commit — so a concurrent cutover that next acquires the
 			# lock sees the just-enqueued legacy job and will NOT flip.
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release gate lock
 			_gate_ts.reset_lock_tracking()
 
 
@@ -3997,7 +3997,7 @@ def _enqueue_turn(
 		# The conversation's bookkeeping (overrides, session key, last active) is its own
 		# commit: the gate's first act is a commit anyway (``_lock_shard``), and the row
 		# lock this write holds must not be held into it.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return _enqueue_turn_with_its_message(
 			conversation,
 			prompt,
@@ -4017,7 +4017,7 @@ def _enqueue_turn(
 	if claim is not None and not claim():
 		frappe.db.rollback()
 		return {"ok": False, "already_settled": True}
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 
 	run_id = uuid.uuid4().hex[:12]
 	_kwargs = {
@@ -4532,7 +4532,7 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 			"profile_n_tools": (choice.n_tools or 0) if choice else 0,
 		}
 	).insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- session row visible before dispatch
 
 	return session_key
 
