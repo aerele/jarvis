@@ -58,6 +58,7 @@ import tempfile
 
 import frappe
 import pdfkit
+from jinja2.sandbox import ImmutableSandboxedEnvironment, SecurityError
 
 from jarvis.exceptions import InvalidArgumentError
 
@@ -736,14 +737,31 @@ def resolve_company_letterhead_footer(
 		return "", "letter head footer could not be applied"
 
 
-def _render_company_footer(raw: str, company: str) -> str:
-	"""Letter Head footer Jinja rendered against Company data only, in an immutable
-	sandbox. A doc-bound template that can't render falls back to the raw HTML."""
-	from jinja2.sandbox import ImmutableSandboxedEnvironment
+class _FooterJinja(ImmutableSandboxedEnvironment):
+	"""Immutable sandbox for Letter Head footers; ``**`` refused (no CPU blow-up)."""
 
+	intercepted_binops = frozenset(["**"])
+
+	def call_binop(self, context, operator, left, right):
+		raise SecurityError(f"{operator} is not allowed")
+
+
+def _footer_env() -> _FooterJinja:
+	from frappe.utils.jinja import get_jinja_hooks, set_filters
+
+	env = _FooterJinja()
+	env.globals.pop("lipsum", None)
+	set_filters(env)
+	env.filters.update(get_jinja_hooks()[1] or {})
+	return env
+
+
+def _render_company_footer(raw: str, company: str) -> str:
+	"""Letter Head footer Jinja rendered against Company data only (Frappe's filters,
+	no ``frappe`` API). A template that can't render falls back to the raw HTML."""
 	try:
-		data = frappe.get_doc("Company", company).as_dict()
-		return ImmutableSandboxedEnvironment().from_string(raw).render(doc=data, company=data, _=frappe._)
+		data = dict(frappe.get_doc("Company", company).as_dict())  # missing field -> Undefined
+		return _footer_env().from_string(raw).render(doc=data, company=data, _=frappe._)
 	except Exception:
 		return raw
 

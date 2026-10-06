@@ -123,8 +123,10 @@ class TestAfterCallTriggers(unittest.TestCase):
 class TestRequestDebounce(unittest.TestCase):
 	def test_first_caller_enqueues_immediately_with_dedupe(self):
 		fake = _fake_frappe()
-		fake.cache.lock.return_value.acquire.return_value = True
-		with mock.patch.object(refresh, "frappe", fake):
+		with (
+			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "claim", return_value=True),
+		):
 			self.assertTrue(refresh.request("conn-1"))
 		fake.enqueue.assert_called_once()
 		_, kwargs = fake.enqueue.call_args
@@ -139,26 +141,25 @@ class TestRequestDebounce(unittest.TestCase):
 
 	def test_second_caller_in_window_does_not_enqueue(self):
 		fake = _fake_frappe()
-		fake.cache.lock.return_value.acquire.return_value = False
-		with mock.patch.object(refresh, "frappe", fake):
+		with (
+			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "claim", return_value=False),
+		):
 			self.assertFalse(refresh.request("conn-1"))
 		fake.enqueue.assert_not_called()
 
-	def test_claim_is_one_atomic_site_scoped_lease_for_the_window(self):
-		fake = _fake_frappe()
-		fake.cache.make_key.side_effect = lambda k: f"site|{k}"
-		fake.cache.lock.return_value.acquire.return_value = True
-		with mock.patch.object(refresh, "frappe", fake):
-			refresh.request("conn-1")
-		fake.cache.lock.assert_called_once_with(
-			"site|jarvis:connectors:refresh:conn-1", timeout=refresh.DEBOUNCE_S
-		)
-		fake.cache.lock.return_value.acquire.assert_called_once_with(blocking=False)
+	def test_claim_is_the_atomic_window(self):
+		with mock.patch.object(refresh, "claim", return_value=True) as claim:
+			refresh._claim("conn-1")
+		claim.assert_called_once_with("jarvis:connectors:refresh:conn-1", refresh.DEBOUNCE_S)
 
 	def test_cache_outage_queues_nothing(self):
 		fake = _fake_frappe()
-		fake.cache.lock.return_value.acquire.side_effect = ConnectionError("down")
-		with mock.patch.object(refresh, "frappe", fake), self.assertRaises(ConnectionError):
+		with (
+			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "claim", side_effect=ConnectionError("down")),
+			self.assertRaises(ConnectionError),
+		):
 			refresh.request("conn-1")
 		fake.enqueue.assert_not_called()
 

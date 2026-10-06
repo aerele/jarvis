@@ -1129,6 +1129,15 @@ class TestResume(_ApplyBase):
 
 
 class TestLadderAndLocks(_ApplyBase):
+	def test_a_failed_enqueue_hands_back_and_closes_the_progress(self):
+		_conv, row = self.sheet_of(_supplier(), _item("zz-fbs I1"))
+		self.events.clear()
+		with patch("frappe.enqueue", side_effect=RuntimeError("queue down")):
+			self.assertEqual(self.apply(row.name)["reason_code"], "unavailable")
+		self.assertIsNone(_sheet.progress(row.name))
+		states = [p["state"] for _u, p in self.events if p.get("kind") == "sheet:progress"]
+		self.assertEqual(states, ["applying", "returned"])
+
 	def test_opening_progress_is_written_before_the_job_is_queued(self):
 		_conv, row = self.sheet_of(_supplier(), _item("zz-fbs I1"))
 		at_enqueue = []

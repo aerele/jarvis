@@ -27,6 +27,7 @@ from datetime import timedelta
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
+from jarvis._redis_lock import claim
 from jarvis.connectors import oauth
 
 CONNECTOR_DOCTYPE = "Jarvis Connector"
@@ -110,12 +111,7 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""Atomically take the debounce window: a lease left to expire. Raises on an outage."""
-	return frappe.cache.lock(_debounce_key(row_name), timeout=DEBOUNCE_S).acquire(blocking=False)
-
-
-def _debounce_key(row_name: str) -> str:
-	return frappe.cache.make_key(f"jarvis:connectors:refresh:{row_name}")
+	return claim(f"jarvis:connectors:refresh:{row_name}", DEBOUNCE_S)
 
 
 def refresh_tools_cache(name: str) -> None:

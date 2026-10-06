@@ -147,15 +147,6 @@ class MobileDeviceBase(FrappeTestCase):
 
 
 class TestPairingThrottle(MobileDeviceBase):
-	def test_attempts_past_the_limit_are_rejected_within_the_window(self):
-		for _ in range(mobile_auth.PAIRING_LIMIT):
-			mobile_auth._throttle_pairing(USER_A)
-		with self.assertRaises(frappe.RateLimitExceededError):
-			mobile_auth._throttle_pairing(USER_A)
-		ttl = frappe.cache.ttl(mobile_auth._pairing_cache_key(USER_A))
-		self.assertTrue(0 < ttl <= mobile_auth.PAIRING_WINDOW_SECONDS)
-		mobile_auth._throttle_pairing(USER_B)
-
 	def test_a_counter_left_without_a_window_is_rearmed(self):
 		key = mobile_auth._pairing_cache_key(USER_A)
 		frappe.cache.incr(key)  # no TTL
@@ -245,6 +236,9 @@ class TestPairingMintsPerDeviceTokens(MobileDeviceBase):
 				mobile_auth._throttle_pairing(who)
 			with self.assertRaises(frappe.RateLimitExceededError):
 				mobile_auth._throttle_pairing(who)
+			ttl = frappe.cache.ttl(mobile_auth._pairing_cache_key(who))
+			self.assertTrue(0 < ttl <= mobile_auth.PAIRING_WINDOW_SECONDS)
+			mobile_auth._throttle_pairing(USER_B)  # counted per user
 		finally:
 			frappe.cache.delete(mobile_auth._pairing_cache_key(who))
 
