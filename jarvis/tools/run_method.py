@@ -214,6 +214,11 @@ def _bulk_action_cancels(args: dict) -> bool:
 	)
 
 
+def _merges(args: dict) -> bool:
+	# A merge rename deletes the old record. Read as Frappe reads it (sbool).
+	return bool(frappe.utils.sbool(args.get("merge")))
+
+
 def _workflow_cancels(args: dict) -> bool:
 	doctype = args.get("doctype")
 	if not doctype:
@@ -235,6 +240,9 @@ _BRAKED_PAYLOADS = {
 	"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs": _bulk_action_cancels,
 	"frappe.model.workflow.apply_workflow": _workflow_cancels,
 	"frappe.model.workflow.bulk_workflow_approval": _workflow_cancels,
+	"frappe.rename_doc": _merges,
+	"frappe.client.rename_doc": _merges,
+	"frappe.model.rename_doc.update_document_title": _merges,
 }
 
 
@@ -245,9 +253,9 @@ def needs_brake(tool_args: dict | None) -> bool:
 	method = tool_args.get("method")
 	if not isinstance(method, str) or not method:
 		return False
-	if tool_args.get("doctype"):
-		return method in _BRAKED_DOC_METHODS
 	call_args = tool_args.get("args") if isinstance(tool_args.get("args"), dict) else {}
+	if tool_args.get("doctype"):
+		return method in _BRAKED_DOC_METHODS or (method == "rename" and _merges(call_args))
 	for path in _call_paths(method):
 		if path in _BRAKED_METHODS:
 			return True
