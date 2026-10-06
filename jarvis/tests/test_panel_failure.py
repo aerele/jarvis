@@ -903,3 +903,29 @@ class TestPanelOnErpnext(_Hermetic, FrappeTestCase):
 		self.assertNotIn("closed", r)
 		self.assertIn("NOPE-j2b-item", r["error"]["message"])
 		self.assertEqual(outcomes, [chat_api.OUTCOME_FIXING_IN_PANEL])
+
+
+class TestFirstFailureClaim(FrappeTestCase):
+	def panel(self):
+		from jarvis.chat.panel_failure import PanelFailure
+
+		return PanelFailure(f"conv-{frappe.generate_hash(length=8)}", "create_doc", {}, {})
+
+	def test_once_per_draft_until_released(self):
+		p = self.panel()
+		self.assertTrue(p._first_failure_of("d1"))
+		self.assertFalse(p._first_failure_of("d1"))
+		self.assertTrue(p._first_failure_of("d2"))
+		self.assertGreater(frappe.cache.ttl(frappe.cache.make_key(p._key("d1"))), 0)
+		p._release("d1")
+		self.assertTrue(p._first_failure_of("d1"))
+
+	def test_no_draft_or_an_outage_sends_nothing(self):
+		import redis
+
+		p = self.panel()
+		self.assertFalse(p._first_failure_of(""))
+		with patch.object(
+			frappe.cache, "execute_command", side_effect=redis.exceptions.ConnectionError("down")
+		):
+			self.assertFalse(p._first_failure_of("d3"))
