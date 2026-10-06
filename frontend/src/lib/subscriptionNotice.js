@@ -41,3 +41,15 @@ export function watchSubscriptionNotice(socket) {
 		if (socket.off) socket.off("jarvis:subscription_health", handler);
 	};
 }
+
+// { "<model id>": { upstream, label } } for every model served by an expired sign-in, so a failed
+// turn whose own error text names nothing can still be recognised from the model that answered.
+export function expiredModelMap(expired) {
+	const map = {};
+	for (const entry of Array.isArray(expired) ? expired : []) {
+		for (const id of Array.isArray(entry && entry.models) ? entry.models : []) {
+			if (id && !map[id]) map[id] = { upstream: entry.upstream, label: entry.label };
+		}
+	}
+	return map;
+}

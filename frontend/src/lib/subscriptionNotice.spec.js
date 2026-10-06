@@ -7,6 +7,7 @@ import {
 	subscriptionNotice,
 	loadSubscriptionNotice,
 	watchSubscriptionNotice,
+	expiredModelMap,
 } from "./subscriptionNotice.js";
 
 beforeEach(() => {
@@ -71,5 +72,25 @@ describe("watchSubscriptionNotice", () => {
 
 	it("tolerates a missing socket", () => {
 		expect(() => watchSubscriptionNotice(null)()).not.toThrow();
+	});
+});
+
+describe("expiredModelMap", () => {
+	it("maps every model of an expired entry to its upstream, first entry winning", () => {
+		const map = expiredModelMap([
+			{ upstream: "openai", label: "OpenAI", models: ["a", "b"] },
+			{ upstream: "anthropic", label: "Anthropic", models: ["b", "c"] },
+			{ upstream: "xai", label: "xAI" },
+		]);
+		expect(map).toEqual({
+			a: { upstream: "openai", label: "OpenAI" },
+			b: { upstream: "openai", label: "OpenAI" },
+			c: { upstream: "anthropic", label: "Anthropic" },
+		});
+	});
+
+	it("is empty for anything that is not a list", () => {
+		expect(expiredModelMap(undefined)).toEqual({});
+		expect(expiredModelMap(null)).toEqual({});
 	});
 });

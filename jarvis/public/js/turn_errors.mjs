@@ -145,6 +145,37 @@ function providerFor(raw, context) {
   return matches.length === 1 && hosts.length === 0 ? matches[0] : undefined;
 }
 
+// Codes that say "the provider failed" without saying why. A dead sign-in on a pool tenant arrives
+// this way (CLIProxy's 503 is flattened to a bare "provider internal error"), so these are the only
+// codes the site's own expired-sign-in state may upgrade. Specific causes (authentication, quota,
+// rate-limit, safety, ...) are never overridden.
+const GENERIC_CODES = new Set([
+  "provider",
+  "gateway",
+  "service-unavailable",
+  "internal",
+]);
+// "openai_compat/gpt-5.6-terra" and "gpt-5.6-terra" are the same model.
+const bareModel = (id) =>
+  String(id ?? "")
+    .trim()
+    .split("/")
+    .pop();
+
+function expiredUpstreamFor(code, context) {
+  const map = context?.expiredModels;
+  const model = bareModel(context?.model);
+  if (!model || !map || !GENERIC_CODES.has(code)) return "";
+  for (const [id, entry] of Object.entries(map)) {
+    if (
+      bareModel(id) === model &&
+      Object.hasOwn(SUBSCRIPTION_LABELS, entry?.upstream)
+    )
+      return entry.upstream;
+  }
+  return "";
+}
+
 export function turnErrorInfo(raw, explicitCode, context = {}) {
   try {
     // Cap what the regexes see: error text is model-supplied and unbounded,
@@ -170,6 +201,13 @@ export function turnErrorInfo(raw, explicitCode, context = {}) {
       const known = context?.subscriptionUpstreams;
       if (!upstream || (Array.isArray(known) && !known.includes(upstream)))
         code = "authentication";
+    }
+    // The site already holds this model's sign-in as expired (admin poll): a generic failure on
+    // that model is that sign-in, whatever the flattened error text says.
+    const expiredUpstream = expiredUpstreamFor(code, context);
+    if (expiredUpstream) {
+      code = "subscription-expired";
+      upstream = expiredUpstream;
     }
     const rule = Object.hasOwn(byCode, code) ? byCode[code] : byCode.internal;
     if (code === "subscription-expired") {

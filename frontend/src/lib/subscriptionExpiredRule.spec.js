@@ -159,3 +159,86 @@ describe("subscriptionUpstreamFromError", () => {
 		});
 	});
 });
+
+describe("expired model upgrade of a generic failure", () => {
+	const POOL_503 =
+		"\u26a0\ufe0f openai_compat/gpt-5.6-terra request failed (provider internal error). This is usually temporary - try again shortly.";
+	const expiredModels = { "gpt-5.6-terra": { upstream: "openai", label: "OpenAI" } };
+
+	it("reads the flattened pool 503 as the generic failure without the site state", () => {
+		expect(["provider", "gateway", "service-unavailable", "internal"]).toContain(
+			turnErrorInfo(POOL_503).code
+		);
+	});
+
+	it("upgrades a generic failure on an expired model to the subscription card (admin)", () => {
+		const info = turnErrorInfo(POOL_503, "", {
+			model: "openai_compat/gpt-5.6-terra",
+			expiredModels,
+			admin: true,
+		});
+		expect(info.code).toBe("subscription-expired");
+		expect(info.upstream).toBe("openai");
+		expect(info.action).toBe("reconnect");
+		expect(info.headline).toBe(turnErrorInfo(PROD).headline);
+		expect(info.hint).toBe("Reconnect it in AI models, then send again.");
+	});
+
+	it("gives a member the ask-your-admin copy and no reconnect hint", () => {
+		const info = turnErrorInfo(POOL_503, "provider", {
+			model: "gpt-5.6-terra",
+			expiredModels,
+			admin: false,
+		});
+		expect(info.code).toBe("subscription-expired");
+		expect(info.hint).toBe(turnErrorInfo(PROD, "", { admin: false }).hint);
+	});
+
+	it("matches a prefixed key against a bare message model", () => {
+		const info = turnErrorInfo(POOL_503, "", {
+			model: "gpt-5.6-terra",
+			expiredModels: { "openai_compat/gpt-5.6-terra": { upstream: "openai" } },
+		});
+		expect(info.code).toBe("subscription-expired");
+	});
+
+	it("leaves a generic failure on a model that is not expired alone", () => {
+		const base = turnErrorInfo(POOL_503);
+		const info = turnErrorInfo(POOL_503, "", { model: "claude-x", expiredModels });
+		expect(info.code).toBe(base.code);
+		expect(info.action).toBeUndefined();
+	});
+
+	it("does nothing when the message has no model", () => {
+		expect(turnErrorInfo(POOL_503, "", { expiredModels }).code).toBe(
+			turnErrorInfo(POOL_503).code
+		);
+		expect(turnErrorInfo(POOL_503, "", { model: "", expiredModels }).code).toBe(
+			turnErrorInfo(POOL_503).code
+		);
+	});
+
+	it("never overrides a specific cause", () => {
+		for (const [text, code] of [
+			["401 unauthorized", "authentication"],
+			["429 rate limit", "rate-limit"],
+			["insufficient quota", "billing"],
+		]) {
+			const info = turnErrorInfo(text, "", { model: "gpt-5.6-terra", expiredModels });
+			expect(info.code).not.toBe("subscription-expired");
+			expect(turnErrorInfo(text).code).toBe(info.code);
+			expect(code).toBeTruthy();
+		}
+		expect(
+			turnErrorInfo("x", "authentication", { model: "gpt-5.6-terra", expiredModels }).code
+		).toBe("authentication");
+	});
+
+	it("ignores an entry whose upstream is unknown", () => {
+		const info = turnErrorInfo(POOL_503, "", {
+			model: "m",
+			expiredModels: { m: { upstream: "constructor" } },
+		});
+		expect(info.code).not.toBe("subscription-expired");
+	});
+});

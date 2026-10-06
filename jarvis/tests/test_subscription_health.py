@@ -835,7 +835,62 @@ class TestAttentionAndNotice(_Base):
 		self.seed({"ACC_OA1": _entry("ACC_OA1")})
 		with patch.object(sh, "fallback_label", return_value=""):
 			out = self._notice(admin=False)
-		self.assertEqual(out, {"expired": [{"upstream": "openai", "label": "OpenAI"}], "upstreams": None})
+		self.assertEqual(
+			out,
+			{"expired": [{"upstream": "openai", "label": "OpenAI", "models": []}], "upstreams": None},
+		)
+
+	def test_entries_carry_the_models_their_sign_in_serves(self):
+		self.seed({"ACC_OA1": _entry("ACC_OA1")})
+		served = {"ACC_OA1": ["gpt-5.6-terra", "gpt-5.5"], "ACC_CL1": ["claude-x"]}
+		with (
+			patch.object(sh, "fallback_label", return_value=""),
+			patch.object(sh, "_account_models", return_value=served),
+		):
+			admin = self._notice(admin=True)
+			member = self._notice(admin=False)
+		self.assertEqual(admin["expired"][0]["models"], ["gpt-5.6-terra", "gpt-5.5"])
+		self.assertEqual(
+			member["expired"],
+			[{"upstream": "openai", "label": "OpenAI", "models": ["gpt-5.6-terra", "gpt-5.5"]}],
+		)
+
+	def test_direct_entry_carries_the_direct_model(self):
+		self.live = DIRECT
+		self.seed({sh.DIRECT_REF: _entry(sh.DIRECT_REF, source="chat", accounts=DIRECT)})
+		with (
+			patch.object(sh, "fallback_label", return_value=""),
+			patch.object(sh, "_account_models", return_value={sh.DIRECT_REF: ["gpt-5.6"]}),
+		):
+			out = self._notice(admin=True)
+		self.assertEqual(out["expired"][0]["models"], ["gpt-5.6"])
+
+	def test_account_models_reads_pool_rows_and_the_direct_model(self):
+		def row(model, refs, credential_type="subscription", enabled=1):
+			return frappe._dict(
+				model=model,
+				enabled=enabled,
+				credential_type=credential_type,
+				accounts=[frappe._dict(account_ref=r) for r in refs],
+			)
+
+		pool = frappe._dict(
+			models=[
+				row("gpt-a", ["ACC_OA1", "ACC_OA2"]),
+				row("gpt-b", ["ACC_OA1"]),
+				row("claude-x", ["ACC_CL1"], enabled=0),
+				row("key-model", ["ACC_OA1"], credential_type="api_key"),
+			],
+			llm_model="gpt-direct",
+		)
+		with (
+			patch.object(sh, "_settings", return_value=pool),
+			patch("jarvis.jarvis.pool_serialize._get_password", return_value=""),
+		):
+			self.assertEqual(sh._account_models(), {"ACC_OA1": ["gpt-a", "gpt-b"], "ACC_OA2": ["gpt-a"]})
+			pool.models = []
+			self.live = DIRECT
+			self.assertEqual(sh._account_models(), {sh.DIRECT_REF: ["gpt-direct"]})
 
 	def test_member_sees_nothing_while_another_model_still_answers(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1")})

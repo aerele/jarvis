@@ -4486,6 +4486,7 @@ import {
 	subscriptionNotice,
 	loadSubscriptionNotice,
 	watchSubscriptionNotice,
+	expiredModelMap,
 } from "@/lib/subscriptionNotice";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner, suspendedBanner } from "@/account/format.js";
@@ -5965,11 +5966,16 @@ function errorInfo(m) {
 	// error for one it does not use falls back to the plain authentication copy. A member gets null
 	// (unknown): the rule's strong signals are specific enough on their own.
 	const known = subscriptionNotice.upstreams;
+	// Models whose sign-in the site already holds as expired: a generic failure on one of them is
+	// that sign-in (CLIProxy's dead-sign-in 503 reaches us as a bare "provider internal error").
+	const expiredModels = expiredModelMap(subscriptionNotice.expired);
 	const key = `${m.name}\u0000${m.error}\u0000${meta.code || ""}\u0000${
 		meta.changed_data
 	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
 		known ? known.join(",") : "-"
-	}`;
+	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels)
+		.map(([id, e]) => `${id}:${e.upstream}`)
+		.join(",")}`;
 	let info = errorInfoCache.get(key);
 	if (!info) {
 		info = {
@@ -5977,6 +5983,8 @@ function errorInfo(m) {
 				provider: m.provider,
 				admin: canConnectModel,
 				subscriptionUpstreams: known || undefined,
+				model: m.model,
+				expiredModels,
 			}),
 			noChange: meta.changed_data === false,
 		};
