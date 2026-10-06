@@ -22,6 +22,7 @@ import random
 import frappe
 from frappe.utils import add_days, now_datetime
 
+from jarvis._session import impersonate
 from jarvis.permissions import require_jarvis_user
 
 SECOND_USER = "seed-userb@example.com"
@@ -189,7 +190,7 @@ def _wipe(user: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# per-feature seeders (run inside a set_user(owner) context)
+# per-feature seeders (run inside an impersonate(owner) context)
 # --------------------------------------------------------------------------- #
 def _seed_skills(owner: str, n: int, prefix: str, share_to: str | None) -> None:
 	for i in range(1, n + 1):
@@ -382,9 +383,7 @@ def seed_varied_approvals(user: str) -> dict:
 	if not frappe.db.exists("User", user):
 		frappe.throw(f"Unknown user: {user}")
 	_wipe_varied(user)
-	original = frappe.session.user
-	frappe.set_user(user)
-	try:
+	with impersonate(user):
 		conv = _insert({"doctype": _CONV, "title": "seed-varied approvals", "status": "Active"})
 		for spec in _VARIED_PENDING:
 			_insert(
@@ -399,17 +398,13 @@ def seed_varied_approvals(user: str) -> dict:
 					"options": frappe.as_json(spec["options"]),
 				}
 			)
-	finally:
-		frappe.set_user(original)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 	return {"ok": True, "user": user, "varied_pending": len(_VARIED_PENDING)}
 
 
 def _seed_for(owner: str, share_to: str | None, scale: str) -> None:
 	"""Seed one user's data. ``scale`` = 'full' (primary) or 'small' (scoping proof)."""
-	original = frappe.session.user
-	frappe.set_user(owner)
-	try:
+	with impersonate(owner):
 		if scale == "full":
 			_seed_skills(owner, 120, "seed-skill-", share_to)
 			_seed_macros(owner, 120, "Seed macro ")
@@ -420,8 +415,6 @@ def _seed_for(owner: str, share_to: str | None, scale: str) -> None:
 			_seed_macros(owner, 20, "Seed macro ")
 			convs = _seed_filebox(owner, 50, "seed-")
 			_seed_standalone_approvals(owner, convs, n_pending=8, n_decided=4)
-	finally:
-		frappe.set_user(original)
 
 
 @frappe.whitelist()
