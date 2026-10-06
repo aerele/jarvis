@@ -1369,6 +1369,13 @@ _SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
 _DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
 
 
+def _run_method_brakes(args) -> bool:
+	"""A run_method call that deletes or cancels (``run_method.needs_brake``)."""
+	from jarvis.tools.run_method import needs_brake
+
+	return needs_brake(args)
+
+
 def _writes_a_skill(tool: str, args) -> bool:
 	"""Whether a covered write names a skill doctype anywhere in its arguments (a
 	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
@@ -2852,8 +2859,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		except WriteRefusedError as e:
 			return _refuse_risky_write(tool, args, e)
 	# Sensitive configuration never runs uncarded (R2-8): auto mode, "confirm all",
-	# an armed macro and an approved skill run all fall through to the park.
-	_must_card = _risk == "sensitive"
+	# an armed macro and an approved skill run all fall through to the park. Nor
+	# does a run_method that deletes or cancels: those verbs are braked as tools
+	# (_BRAKE), and run_method must not be the way around that.
+	_must_card = _risk == "sensitive" or (tool == "run_method" and _run_method_brakes(args))
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
@@ -3352,7 +3361,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
-			card, refusal = _build_park_card(tool, args, preview, sensitive=_must_card)
+			card, refusal = _build_park_card(tool, args, preview, sensitive=_risk == "sensitive")
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal

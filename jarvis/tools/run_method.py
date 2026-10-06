@@ -139,17 +139,84 @@ def run_method(
 		_enforce_blocklist(f"{doctype}.{method}")
 		return _run_doc_method(method, doctype, name, args)
 
-	_enforce_blocklist(method)
-	# By name too, so a Server Script API cannot shadow a denied endpoint's path.
-	if _is_denied_path(method):
-		raise PermissionDeniedError(f"method {method!r} cannot be called from a tool")
+	# A site can replace a whitelisted method (the override_whitelisted_methods
+	# hook, e.g. with an approval-gated make_stock_entry). Desk's handler always
+	# calls the replacement, so the agent must too, never the original.
+	resolved = resolve_method(method)
+	for name in dict.fromkeys((method, resolved)):
+		_enforce_blocklist(name)
+		# By name too, so a Server Script API cannot shadow a denied endpoint's path.
+		if _is_denied_path(name):
+			raise PermissionDeniedError(f"method {name!r} cannot be called from a tool")
 
 	# Classify (not fall back): the server-script map is authoritative for
 	# whether a bare name is a Server Script API method.
-	server_script = get_server_script_map().get("_api", {}).get(method)
+	server_script = get_server_script_map().get("_api", {}).get(resolved)
 	if server_script:
 		return _run_server_script(server_script, args)
-	return _run_whitelisted(method, args)
+	return _run_whitelisted(resolved, args)
+
+
+def resolve_method(method: str) -> str:
+	"""The dotted path Desk would actually run for ``method``: the site's
+	``override_whitelisted_methods`` replacement if any (frappe/handler.py)."""
+	return frappe.override_whitelisted_method(method)
+
+
+# The same verbs as the braked delete / cancel tools (api._BRAKE), which never run
+# without a confirmation card, not even in an armed macro or an approved skill
+# run. Reached through run_method they must not either.
+_BRAKED_METHODS = frozenset(
+	{
+		"frappe.client.delete",
+		"frappe.client.cancel",
+		"frappe.desk.form.save.cancel",
+		"frappe.desk.reportview.delete_items",
+		"frappe.desk.reportview.delete_report",
+	}
+)
+# Methods that delete or cancel only for some actions: path -> (arg name, actions).
+_BRAKED_ACTIONS = {
+	"frappe.desk.form.save.savedocs": ("action", frozenset({"cancel"})),
+	"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs": (
+		"action",
+		frozenset({"cancel", "delete"}),
+	),
+}
+# Whitelisted Document methods run through the doc-bound form (doctype + name).
+_BRAKED_DOC_METHODS = frozenset({"cancel", "discard"})
+
+
+def needs_brake(tool_args: dict | None) -> bool:
+	"""True when a ``run_method`` call (its tool args) would delete or cancel, so
+	it must park a confirmation card in every mode."""
+	tool_args = tool_args if isinstance(tool_args, dict) else {}
+	method = tool_args.get("method")
+	if not isinstance(method, str) or not method:
+		return False
+	if tool_args.get("doctype"):
+		return method in _BRAKED_DOC_METHODS
+	call_args = tool_args.get("args") if isinstance(tool_args.get("args"), dict) else {}
+	for path in _call_paths(method):
+		if path in _BRAKED_METHODS:
+			return True
+		arg, actions = _BRAKED_ACTIONS.get(path, (None, ()))
+		if arg and str(call_args.get(arg) or "").strip().lower() in actions:
+			return True
+	return False
+
+
+def _call_paths(method: str) -> set[str]:
+	"""Every name a call goes by: as asked, after the site's override, and the
+	resolved function's own module path (so an alias can't dodge the brake)."""
+	resolved = resolve_method(method)
+	paths = {method, resolved}
+	try:
+		fn = frappe.get_attr(resolved)
+	except Exception:
+		return paths  # unresolvable: run_method refuses it on its own
+	paths.add(f"{getattr(fn, '__module__', '')}.{getattr(fn, '__qualname__', '')}")
+	return paths
 
 
 def _enforce_blocklist(method: str) -> None:
