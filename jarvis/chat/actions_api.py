@@ -61,33 +61,7 @@ def _can_read_field(df, levels: set | None) -> bool:
 def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
-<<<<<<< HEAD
-	child marks none."""
-	meta = frappe.get_meta(child_doctype)
-	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
-	listed = [df for df in editable if df.in_list_view]
-	return [_field_dict(df, child_doctype, parent_doctype, parentfield) for df in (listed or editable[:4])]
-=======
 	child marks none. Columns at a permlevel the user cannot read are dropped."""
-	return [
-		_field_dict(df, child_doctype, parent_doctype, parentfield)
-		for df in _grid_fields(child_doctype, parent_doctype)[0]
-	]
-
-
-def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
-	"""Every other editable field of the child, so a row key the model proposes
-	outside the grid keeps its real type and label (#655). Fields at a permlevel
-	the user cannot read are dropped here too."""
-	return [
-		_field_dict(df, child_doctype, parent_doctype, parentfield)
-		for df in _grid_fields(child_doctype, parent_doctype)[1]
-	]
-
-
-def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
-	"""(the grid's columns, every other editable field) of a child doctype,
-	limited to the fields the user can read through ``parent_doctype``."""
 	meta = frappe.get_meta(child_doctype)
 	levels = _readable_permlevels(child_doctype, parent_doctype)
 	editable = [
@@ -95,9 +69,8 @@ def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
 		for df in meta.fields
 		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
 	]
-	listed = [df for df in editable if df.in_list_view] or editable[:4]
-	return listed, [df for df in editable if df not in listed]
->>>>>>> 52056a5 (fix(chat): keep permlevel-hidden fields out of load_doc and the draft form)
+	listed = [df for df in editable if df.in_list_view]
+	return [_field_dict(df, child_doctype, parent_doctype, parentfield) for df in (listed or editable[:4])]
 
 
 @frappe.whitelist()
