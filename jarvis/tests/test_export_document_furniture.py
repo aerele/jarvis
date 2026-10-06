@@ -41,27 +41,30 @@ from jarvis.tools._export.document.furniture import render_pdf, resolve_letterhe
 _HAS_SITE = bool(getattr(frappe.local, "site", None))
 
 
-class TestCompanyPlaceholders(unittest.TestCase):
-	def test_plain_placeholders_are_filled_and_escaped(self):
-		company = {"company_name": "A & B <Ltd>", "phone_no": 42}
-		out = furniture._fill_company_placeholders(
-			"<p>{{ doc.company_name }} | {{company.phone_no}}</p>", company
-		)
-		self.assertEqual(out, "<p>A &amp; B &lt;Ltd&gt; | 42</p>")
+class TestCompanyFooterRender(unittest.TestCase):
+	def render(self, raw, **company):
+		data = {"company_name": "Demo Co", **company}
+		with patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: data)):
+			return furniture._render_company_footer(raw, "Demo Co")
 
-	def test_other_jinja_is_dropped_never_evaluated(self):
-		raw = (
-			"<p>{% if doc.phone_no %}Call{% endif %}{{ doc.company_name | upper }}"
-			"{{ frappe.get_all('User') }}{# note #}{{ ''.__class__ }} Address</p>"
+	def test_conditionals_and_html_values_render_as_before(self):
+		raw = "{% if doc.tax_id %}GSTIN: {{ doc.tax_id }}{% else %}GST pending{% endif %} {{ company.description }}"
+		self.assertEqual(
+			self.render(raw, tax_id="29AB", description="<b>Est. 1990</b>"), "GSTIN: 29AB <b>Est. 1990</b>"
 		)
-		out = furniture._fill_company_placeholders(raw, {"company_name": "Demo"})
-		self.assertEqual(out, "<p>Call Address</p>")
+		self.assertEqual(self.render(raw, tax_id=None, description=""), "GST pending ")
 
-	def test_missing_or_non_scalar_fields_fill_blank(self):
-		out = furniture._fill_company_placeholders(
-			"{{ doc.nope }}|{{ doc.accounts }}", {"accounts": [{"account": "x"}]}
-		)
-		self.assertEqual(out, "|")
+	def test_values_are_data_never_template(self):
+		self.assertEqual(self.render("{{ doc.company_name }}|x", company_name="Foo {# Bar"), "Foo {# Bar|x")
+
+	def test_no_frappe_api_internals_or_mutation(self):
+		for raw in (
+			"{{ frappe.get_all('User') }}",
+			"{{ ''.__class__.__mro__ }}",
+			"{{ doc.update({'company_name': 'X'}) }}",
+		):
+			with self.subTest(raw=raw):
+				self.assertEqual(self.render(raw), raw)  # refused: the raw text, sanitized later
 
 
 class TestCompanyFooterPermissions(unittest.TestCase):
@@ -87,8 +90,8 @@ class TestCompanyFooterPermissions(unittest.TestCase):
 		with (
 			patch.object(frappe, "has_permission", return_value=True) as perm,
 			patch.object(frappe, "db", new=Mock()) as db,
-			patch.object(frappe, "get_doc", return_value={"company_name": "Demo Co"}),
-			patch.object(frappe, "render_template", side_effect=AssertionError("no template is run")),
+			patch.object(frappe, "get_doc", return_value=Mock(as_dict=lambda: {"company_name": "Demo Co"})),
+			patch.object(frappe, "render_template", side_effect=AssertionError("Frappe's env is not used")),
 		):
 			db.get_value.return_value = {
 				"footer": "<p>{{ doc.company_name }} - Approved footer</p>",

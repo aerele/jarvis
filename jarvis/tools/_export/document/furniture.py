@@ -694,9 +694,10 @@ def resolve_company_letterhead_footer(
 	template's pinned Company->Letter Head map. Returns ``(footer_html, note)``.
 
 	Unlike ``resolve_letterhead`` (which keeps only logos on a doc-less report), a
-	custom template's footer is PINNED per company, so we keep that company's Letter
-	Head ``footer`` text (address/contact); company placeholders are filled, never
-	rendered. Same safety gate as the header path: same-site logos
+	custom template's footer is PINNED per company, so we render that company's
+	Letter Head ``footer`` against its Company data in an immutable sandbox (no
+	``frappe`` API) and keep the text (address/contact). Same safety gate as the
+	header path: same-site logos
 	inlined to permission-checked ``data:`` URIs, remote ``<img>`` dropped, then the
 	nh3 letterhead sanitizer (data-images only, no scripts).
 
@@ -728,30 +729,23 @@ def resolve_company_letterhead_footer(
 		if len(raw) > _MAX_FURNITURE_CHARS:
 			_log_infra_failure("rich-pdf company letterhead footer too large", f"{len(raw)} chars")
 			return "", "letter head footer is too large — rendered without it"
-		company_doc = frappe.get_doc("Company", comp) if _COMPANY_PLACEHOLDER.search(raw) else {}
-		filled = _fill_company_placeholders(raw, company_doc)
-		footer_html = sanitize_letterhead(_inline_letterhead_images(filled))
+		footer_html = sanitize_letterhead(_inline_letterhead_images(_render_company_footer(raw, comp)))
 		return footer_html, None
 	except Exception:
 		_log_infra_failure("rich-pdf company letterhead footer failed", f"company={comp!r} lh={lh_name!r}")
 		return "", "letter head footer could not be applied"
 
 
-# e.g. {{ doc.company_name }}
-_COMPANY_PLACEHOLDER = re.compile(r"\{\{\s*(?:doc|company)\.([A-Za-z_]\w*)\s*\}\}")
-_JINJA_MARKUP = re.compile(r"\{%.*?%\}|\{\{.*?\}\}|\{#.*?#\}", re.S)
+def _render_company_footer(raw: str, company: str) -> str:
+	"""Letter Head footer Jinja rendered against Company data only, in an immutable
+	sandbox. A doc-bound template that can't render falls back to the raw HTML."""
+	from jinja2.sandbox import ImmutableSandboxedEnvironment
 
-
-def _fill_company_placeholders(raw: str, company) -> str:
-	"""Fill company placeholders (escaped); drop any other Jinja unexecuted."""
-
-	def value(match: re.Match) -> str:
-		field_value = company.get(match.group(1))
-		if field_value is None or isinstance(field_value, list | dict):
-			return ""
-		return html.escape(str(field_value))
-
-	return _JINJA_MARKUP.sub("", _COMPANY_PLACEHOLDER.sub(value, raw))
+	try:
+		data = frappe.get_doc("Company", company).as_dict()
+		return ImmutableSandboxedEnvironment().from_string(raw).render(doc=data, company=data, _=frappe._)
+	except Exception:
+		return raw
 
 
 def _letterhead_logos(raw: str) -> str:
