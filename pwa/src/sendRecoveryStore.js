@@ -8,6 +8,7 @@ export const recoveryState = reactive({
 	drafts: {},
 	parkedDrafts: [],
 	queued: {},
+	starting: {},
 	observedRuns: {},
 });
 export const sendRecovery = createSendRecovery(recoveryState);
