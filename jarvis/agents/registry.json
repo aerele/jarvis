@@ -708,7 +708,7 @@
       "domain": "inventory",
       "nature": "auditor",
       "delivery": "delegate",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "status": "Published",
       "description": "Read-only inventory-ageing review: derives each item's last genuine outward movement, buckets it by age, separates slow-moving from non-moving and dead stock, overlays batch-expiry write-off candidates, and totals the working capital frozen per ageing bucket and warehouse. Ships a ranked disposition worklist and dashboard. Never moves, adjusts, or writes off stock, and never sets a write-down value.",
       "tools_required": [
@@ -742,6 +742,7 @@
         "dsa-shelf-b7e5",
         "dsa-turn-9c48"
       ],
+      "advisory_tokens": [],
       "writes": null,
       "rule_pack": "inventory-health",
       "timeout_s": 1800,
