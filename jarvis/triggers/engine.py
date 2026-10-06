@@ -371,13 +371,14 @@ def _llm_cap_reached(row: dict) -> bool:
 	"""Cheap peek at today's per-trigger LLM counter so an over-cap trigger on
 	a high-churn doctype stops paying the snapshot + enqueue cost on every save
 	(the authoritative incr + the single Skipped marker still live in the job).
-	Returns True only once the count is STRICTLY over cap — published after the
-	cap+1 Skipped marker, so that marker is never suppressed. Never raises."""
+	Returns True only once the counter is STRICTLY over cap — i.e. after the
+	job has already logged the cap+1 Skipped marker — so we never suppress that
+	one marker. Never raises."""
 	try:
-		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, over_cap_count
+		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, daily_count
 
 		cap = cint(row.get("llm_daily_cap")) or _DEFAULT_DAILY_CAP
-		return over_cap_count(row.get("name")) > cap
+		return daily_count(row.get("name")) > cap
 	except Exception:
 		return False
 
