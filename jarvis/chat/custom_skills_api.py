@@ -16,6 +16,8 @@ import contextlib
 
 import frappe
 from frappe import _
+from frappe.query_builder.functions import Count
+from pypika.terms import Criterion
 
 from jarvis.chat import list_filters
 from jarvis.chat.custom_skills import (
@@ -1170,33 +1172,46 @@ def list_skill_promotion_requests(
 	if status and status != "All" and status not in _PROMO_STATUSES:
 		frappe.throw(_("Invalid status filter."))
 
-	params: dict = {"start": start, "page_length": pl}
-	conds: list[str] = []
+	promo = frappe.qb.DocType(PROMO)
+	conds = []
 	if status and status != "All":
-		params["status"] = status
-		conds.append("status = %(status)s")
+		conds.append(promo.status == status)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(skill_name LIKE %(q)s OR note LIKE %(q)s)")
-	where = " AND ".join(conds) or "1=1"
+		q = f"%{_lk(search)}%"
+		conds.append(promo.skill_name.like(q) | promo.note.like(q))
+	where = Criterion.all(conds)
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
+	total = frappe.qb.from_(promo).select(Count("*")).where(where).run()[0][0]
+	fields = [
+		"name",
+		"skill",
+		"skill_name",
+		"from_scope",
+		"to_scope",
+		"target_role",
+		"note",
+		"status",
+		"owner",
+		"creation",
+		"reviewer",
+		"decided_at",
+		"decision_note",
+		"instructions_snapshot",
+		"description_snapshot",
+		"user_invocable_snapshot",
+	]
 	# File Box's snapshot columns, once migrated (code may be served ahead of migrate).
-	file_box = (
-		", use_in_file_box_snapshot, file_box_creates_snapshot"
-		if frappe.get_meta(PROMO).has_field("file_box_creates_snapshot")
-		else ""
-	)
-	rows = frappe.db.sql(
-		f"""SELECT name, skill, skill_name, from_scope, to_scope, target_role,
-			note, status, owner, creation, reviewer, decided_at, decision_note,
-			instructions_snapshot, description_snapshot, user_invocable_snapshot{file_box}
-		FROM `tab{PROMO}`
-		WHERE {where}
-		ORDER BY creation DESC, name ASC
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	if frappe.get_meta(PROMO).has_field("file_box_creates_snapshot"):
+		fields += ["use_in_file_box_snapshot", "file_box_creates_snapshot"]
+	rows = (
+		frappe.qb.from_(promo)
+		.select(*(promo[f] for f in fields))
+		.where(where)
+		.orderby(promo.creation, order=frappe.qb.desc)
+		.orderby(promo.name, order=frappe.qb.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 
 	# Multi-role: attach every request's FULL target_roles set (one batched query),

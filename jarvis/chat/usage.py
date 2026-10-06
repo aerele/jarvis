@@ -27,6 +27,7 @@ import time
 from datetime import datetime, timedelta
 
 import frappe
+from frappe.query_builder.functions import Coalesce
 
 from jarvis.chat import txn
 
@@ -107,15 +108,6 @@ def period_tokens_effective(limit_period: str | None, period_key: str | None, pe
 	if not expected or period_key != expected:
 		return 0
 	return int(period_tokens or 0)
-
-
-# The current limit-window key for the row being updated, picked by its own
-# limit_period (the three candidate keys ride in as query params).
-_PERIOD_KEY_SQL = """CASE limit_period
-	WHEN 'Daily' THEN %(day_key)s
-	WHEN 'Weekly' THEN %(week_key)s
-	WHEN 'Monthly' THEN %(month_period_key)s
-	ELSE '' END"""
 
 
 def tenant_wide_per_model_tokens(month: str) -> list[dict]:
@@ -389,25 +381,14 @@ def _refresh_session_context_snapshot(
 	VALID_ZERO/RETRY paths' no-commit contract (see ``record_turn_usage``'s
 	docstring) - the caller's outer commit (RECORDED) or the finalize effect's
 	own commit covers it."""
-	params = {
-		"ctx": context_tokens,
-		"now": frappe.utils.now_datetime(),
-		"session_key": session_key,
-	}
-	capacity_set_sql = ""
+	session = frappe.qb.DocType(CHAT_SESSION)
+	query = frappe.qb.update(session).set(session.last_total_tokens, context_tokens)
 	if context_capacity > 0:
-		capacity_set_sql = "context_capacity = %(ctx_cap)s, context_pct = %(ctx_pct)s,"
-		params["ctx_cap"] = context_capacity
-		params["ctx_pct"] = context_pct
-	frappe.db.sql(
-		f"""
-		UPDATE `tabJarvis Chat Session`
-		SET last_total_tokens = %(ctx)s,
-			{capacity_set_sql}
-			last_usage_at = %(now)s
-		WHERE session_key = %(session_key)s
-		""",
-		params,
+		query = query.set(session.context_capacity, context_capacity).set(session.context_pct, context_pct)
+	(
+		query.set(session.last_usage_at, frappe.utils.now_datetime())
+		.where(session.session_key == session_key)
+		.run()
 	)
 
 
@@ -538,7 +519,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		# transaction before anything lands (rerun starts clean).
 		def _accrue_settings():
 			frappe.db.sql(
-				f"""
+				"""
 				UPDATE `tabJarvis User Settings`
 				SET
 					month_input_tokens = CASE WHEN usage_month = %(month)s
@@ -550,10 +531,22 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 					total_tokens = total_tokens + %(delta)s,
 					usage_month = %(month)s,
 					period_tokens = CASE
-						WHEN {_PERIOD_KEY_SQL} = '' THEN 0
-						WHEN period_key = {_PERIOD_KEY_SQL} THEN period_tokens + %(delta)s
+						WHEN CASE limit_period
+							WHEN 'Daily' THEN %(day_key)s
+							WHEN 'Weekly' THEN %(week_key)s
+							WHEN 'Monthly' THEN %(month_period_key)s
+							ELSE '' END = '' THEN 0
+						WHEN period_key = CASE limit_period
+							WHEN 'Daily' THEN %(day_key)s
+							WHEN 'Weekly' THEN %(week_key)s
+							WHEN 'Monthly' THEN %(month_period_key)s
+							ELSE '' END THEN period_tokens + %(delta)s
 						ELSE %(delta)s END,
-					period_key = {_PERIOD_KEY_SQL},
+					period_key = CASE limit_period
+						WHEN 'Daily' THEN %(day_key)s
+						WHEN 'Weekly' THEN %(week_key)s
+						WHEN 'Monthly' THEN %(month_period_key)s
+						ELSE '' END,
 					last_usage_at = %(now)s,
 					modified = %(now)s
 				WHERE user = %(user)s
@@ -1043,27 +1036,17 @@ def refresh_session_snapshots(rows: list[dict]) -> dict:
 			# context_pct are set ONLY when THIS row actually reported a
 			# capacity (review: a sweep row that carries none must never
 			# clobber a previously known capacity with 0).
-			params = {
-				"ctx": context_tokens,
-				"usage_at": last_at,
-				"now": now,
-				"session_key": session_key,
-			}
-			capacity_set_sql = ""
+			session = frappe.qb.DocType(CHAT_SESSION)
+			query = frappe.qb.update(session).set(session.last_total_tokens, context_tokens)
 			if context_capacity > 0:
-				capacity_set_sql = "context_capacity = %(ctx_cap)s, context_pct = %(ctx_pct)s,"
-				params["ctx_cap"] = context_capacity
-				params["ctx_pct"] = context_pct
-			frappe.db.sql(
-				f"""
-				UPDATE `tabJarvis Chat Session`
-				SET last_total_tokens = %(ctx)s,
-					{capacity_set_sql}
-					last_usage_at = COALESCE(%(usage_at)s, last_usage_at),
-					modified = %(now)s
-				WHERE session_key = %(session_key)s
-				""",
-				params,
+				query = query.set(session.context_capacity, context_capacity).set(
+					session.context_pct, context_pct
+				)
+			(
+				query.set(session.last_usage_at, Coalesce(last_at, session.last_usage_at))
+				.set(session.modified, now)
+				.where(session.session_key == session_key)
+				.run()
 			)
 			_write_budget_fields(session_key, row)
 			touched_users.add(user)

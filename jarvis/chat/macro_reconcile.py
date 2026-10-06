@@ -464,7 +464,9 @@ def _stuck_summary_candidates(*, limit: int | None = None) -> list:
 	one that is gone; those first, then the oldest chat first, ``MAX_SUMMARIES_PER_TICK``
 	at most. The cutoff is the site's clock, like the chat's ``creation``."""
 	return frappe.db.sql(
-		f"""SELECT m.name, m.merge_conversation AS conversation {_STUCK_SUMMARIES}
+		"""SELECT m.name, m.merge_conversation AS conversation
+		FROM `tabJarvis Macro` m LEFT JOIN `tabJarvis Conversation` c ON c.name = m.merge_conversation
+		WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)
 		ORDER BY c.creation IS NOT NULL, c.creation
 		LIMIT %(limit)s""",
 		{"cutoff": _stuck_summary_cutoff(), "limit": limit or MAX_SUMMARIES_PER_TICK},
@@ -475,12 +477,13 @@ def _stuck_summary_candidates(*, limit: int | None = None) -> list:
 def _stuck_summary_count() -> int:
 	"""How many macros ``_stuck_summary_candidates`` would list with no cap. Asked only
 	for a tick that was cut short."""
-	rows = frappe.db.sql(f"SELECT COUNT(*) {_STUCK_SUMMARIES}", {"cutoff": _stuck_summary_cutoff()})
+	rows = frappe.db.sql(
+		"""SELECT COUNT(*)
+		FROM `tabJarvis Macro` m LEFT JOIN `tabJarvis Conversation` c ON c.name = m.merge_conversation
+		WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)""",
+		{"cutoff": _stuck_summary_cutoff()},
+	)
 	return int(rows[0][0] or 0)
-
-
-_STUCK_SUMMARIES = f"""FROM `tab{MACRO}` m LEFT JOIN `tab{CONV}` c ON c.name = m.merge_conversation
-	WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)"""
 
 
 def _stuck_summary_cutoff():

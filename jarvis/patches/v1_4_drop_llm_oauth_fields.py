@@ -12,18 +12,20 @@ under the prior bench-driven flow (no real OAuth client IDs ever landed).
 import frappe
 from frappe.utils.password import remove_encrypted_password
 
-_FIELDS = [
-	"llm_oauth_refresh_token",
-	"llm_oauth_access_token",
-	"llm_oauth_access_token_expires_at",
-	"llm_oauth_account_email",
-	"llm_oauth_connected_at",
-	"llm_oauth_last_refresh_at",
-]
+_FIELDS = {
+	"llm_oauth_refresh_token": "ALTER TABLE `tabJarvis Settings` DROP COLUMN `llm_oauth_refresh_token`",
+	"llm_oauth_access_token": "ALTER TABLE `tabJarvis Settings` DROP COLUMN `llm_oauth_access_token`",
+	"llm_oauth_access_token_expires_at": (
+		"ALTER TABLE `tabJarvis Settings` DROP COLUMN `llm_oauth_access_token_expires_at`"
+	),
+	"llm_oauth_account_email": "ALTER TABLE `tabJarvis Settings` DROP COLUMN `llm_oauth_account_email`",
+	"llm_oauth_connected_at": "ALTER TABLE `tabJarvis Settings` DROP COLUMN `llm_oauth_connected_at`",
+	"llm_oauth_last_refresh_at": "ALTER TABLE `tabJarvis Settings` DROP COLUMN `llm_oauth_last_refresh_at`",
+}
 
 
 def execute():
-	for field in _FIELDS:
+	for field, drop_column in _FIELDS.items():
 		# Clear any __Auth rows for the password fields (refresh_token, access_token).
 		try:
 			remove_encrypted_password("Jarvis Settings", "Jarvis Settings", field)
@@ -31,7 +33,7 @@ def execute():
 			pass
 		# Drop the column from the table.
 		try:
-			frappe.db.sql(f"ALTER TABLE `tabJarvis Settings` DROP COLUMN `{field}`")
+			frappe.db.sql(drop_column)
 		except Exception:
 			pass  # column may already be gone
 	frappe.db.commit()

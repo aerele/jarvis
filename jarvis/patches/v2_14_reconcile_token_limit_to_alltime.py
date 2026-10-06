@@ -35,15 +35,15 @@ def execute() -> None:
 		return
 
 	(affected,) = frappe.db.sql(
-		f"""
-		SELECT COUNT(*) FROM `tab{SETTINGS}`
+		"""
+		SELECT COUNT(*) FROM `tabJarvis User Settings`
 		WHERE monthly_token_limit > 0
 		"""
 	)[0]
 
 	frappe.db.sql(
-		f"""
-		UPDATE `tab{SETTINGS}`
+		"""
+		UPDATE `tabJarvis User Settings`
 		SET monthly_token_limit = monthly_token_limit + total_tokens
 		WHERE monthly_token_limit > 0
 		"""
