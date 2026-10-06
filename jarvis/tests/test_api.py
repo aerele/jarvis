@@ -221,6 +221,29 @@ class TestCallToolPluginAuth(FrappeTestCase):
 		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
 		self.assertIn("unknown session", result["error"]["message"])
 
+	def test_session_of_a_disabled_user_is_refused(self):
+		# Disabling revokes access; their chat session row must stop working too.
+		email = "plugin-auth-disabled@example.com"
+		if not frappe.db.exists("User", email):
+			frappe.get_doc({"doctype": "User", "email": email, "first_name": "Disabled"}).insert(
+				ignore_permissions=True
+			)
+		frappe.db.set_value("User", email, "enabled", 0)
+		session_key = "agent:test:plugin-auth-disabled"
+		_cleanup_session(session_key)
+		frappe.get_doc({"doctype": "Jarvis Chat Session", "session_key": session_key, "user": email}).insert(
+			ignore_permissions=True
+		)
+		with (
+			self._with_headers({"X-Jarvis-Token": "plugin-auth-test-token", "X-Jarvis-Session": session_key}),
+			patch("jarvis.api._dispatch_from_session") as dispatch,
+		):
+			result = call_tool(tool="get_schema", args={"doctype": "Customer"})
+		self.assertEqual(result["ok"], False)
+		self.assertEqual(result["error"]["code"], "PermissionError")
+		self.assertEqual(frappe.local.response.http_status_code, 403)
+		dispatch.assert_not_called()
+
 	def test_session_user_restored_after_dispatch(self):
 		"""set_user is wrapped in try/finally - the calling user is preserved."""
 		original = frappe.session.user
