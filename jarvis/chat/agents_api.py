@@ -3094,7 +3094,7 @@ def _enqueued_push_agent_skills() -> None:
 			)
 			if fresh == version and stamped:
 				values["agent_catalog_dirty"] = 0
-			frappe.db.set_value(_SETTINGS, _SETTINGS, values)
+			frappe.db.set_single_value(_SETTINGS, values)
 			terminal_written = True
 		except admin_client.AdminAuthError as e:
 			_fail(f"failed: auth: {e}")
@@ -3155,8 +3155,6 @@ def _stamp_pushed_models(payload: list[dict], response=None, scope: dict | None 
 
 
 def _fail(status: str) -> None:
-	frappe.db.set_value(
-		_SETTINGS,
-		_SETTINGS,
-		{"agent_skills_synced_at": frappe.utils.now(), "agent_skills_sync_status": status},
+	frappe.db.set_single_value(
+		_SETTINGS, {"agent_skills_synced_at": frappe.utils.now(), "agent_skills_sync_status": status}
 	)

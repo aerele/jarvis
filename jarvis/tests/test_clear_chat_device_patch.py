@@ -13,7 +13,7 @@ class TestClearChatDevicePatch(FrappeTestCase):
 	def test_clears_device_and_triggers_resync(self):
 		with (
 			patch("frappe.db.exists", return_value=True),
-			patch("frappe.db.set_value") as sv,
+			patch("frappe.db.set_single_value") as sv,
 			patch("frappe.clear_cache"),
 			patch("frappe.get_single", return_value=MagicMock()) as gs,
 			patch("jarvis.onboarding._resync_after_rebuild") as resync,
@@ -23,8 +23,7 @@ class TestClearChatDevicePatch(FrappeTestCase):
 		sv.assert_called_once()
 		args = sv.call_args.args
 		self.assertEqual(args[0], "Jarvis Settings")
-		self.assertEqual(args[1], "Jarvis Settings")
-		cleared = args[2]
+		cleared = args[1]
 		self.assertEqual(set(cleared), FIELDS)
 		self.assertTrue(all(v == "" for v in cleared.values()))
 		# and the bench-owned skills + LLM credential are re-pushed
@@ -33,7 +32,7 @@ class TestClearChatDevicePatch(FrappeTestCase):
 	def test_noop_when_settings_doctype_absent(self):
 		with (
 			patch("frappe.db.exists", return_value=False),
-			patch("frappe.db.set_value") as sv,
+			patch("frappe.db.set_single_value") as sv,
 			patch("frappe.clear_cache"),
 			patch("jarvis.onboarding._resync_after_rebuild") as resync,
 		):

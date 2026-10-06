@@ -154,8 +154,7 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 		try:
 			payload, held_back = learned_push_split()
 			admin_client.post_push_learned_skills(learned_skills=payload)
-			frappe.db.set_value(
-				_SETTINGS,
+			frappe.db.set_single_value(
 				_SETTINGS,
 				{
 					"learned_skills_synced_at": frappe.utils.now(),
@@ -250,8 +249,7 @@ def _ok_status(installed: int, role_restricted: int) -> str:
 
 
 def _fail(status: str) -> None:
-	frappe.db.set_value(
-		_SETTINGS,
+	frappe.db.set_single_value(
 		_SETTINGS,
 		{"learned_skills_synced_at": frappe.utils.now(), "learned_skills_sync_status": status},
 		update_modified=False,
