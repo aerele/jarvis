@@ -298,10 +298,11 @@ export function formatWorked(seconds) {
 /**
  * The folded head of a finished (or answering) turn, which is also the saved
  * activity strip. Returns null when there is nothing worth a line (an old
- * reply with no duration and no tools).
+ * reply with no duration and no tools, or a settled turn that ran no tools).
  *
  * @param {{seconds?: number|string, toolNames?: string[], finishing?: boolean,
- *   stopped?: boolean, failed?: boolean, showDetail?: boolean}} input
+ *   stopped?: boolean, failed?: boolean, showDetail?: boolean,
+ *   settled?: boolean}} input
  * @returns {null|{label: string, count: string, finishing: boolean,
  *   subline: string, expandable: boolean, tone: "done"|"stopped"|"failed"}}
  */
@@ -312,7 +313,11 @@ export function foldedHead({
 	stopped = false,
 	failed = false,
 	showDetail = true,
+	settled = false,
 } = {}) {
+	// A finished turn that ran nothing has no steps to show: "Worked 3s" alone
+	// is an empty bar. Stopped / failed / finishing lines still carry news.
+	if (settled && !stopped && !failed && !finishing && !toolNames.length) return null;
 	const worked = formatWorked(seconds);
 	const verb = stopped ? "Stopped" : failed ? "Failed" : "Worked";
 	let label = "";
