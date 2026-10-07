@@ -29,6 +29,7 @@ mismatch IS the rollover.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 import frappe
 
@@ -267,6 +268,9 @@ PULSE_MAX_OFFERS = 3
 #: 30 days (spec: "monthly -> last 30 days"), a rolling window rather than the
 #: calendar bucket, so a survey offered on the 2nd still has something to show.
 _PULSE_WINDOW_DAYS = 30
+#: Through this day of the month the survey reviews the PREVIOUS month: on the
+#: 1st the user has barely used Jarvis yet this month.
+_PULSE_PREVIOUS_MONTH_DAYS = 10
 #: Bound on the free-text "is Jarvis solving your business use case?" answer.
 _MAX_USE_CASE = 1000
 
@@ -290,10 +294,27 @@ def _pulse_window_start():
 	return frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-_PULSE_WINDOW_DAYS)
 
 
-def _pulse_period_label(now=None) -> str:
-	"""Badge text for the dialog, e.g. "This month, Sep 2026"."""
+def _pulse_period(now=None) -> tuple[str, str, bool]:
+	"""The month the survey reviews, as ``(period_key, badge_label, is_previous)``.
+
+	Days 1..``_PULSE_PREVIOUS_MONTH_DAYS`` review the previous calendar month
+	(January -> December of the year before), later days the current one. The
+	label reads e.g. "Last month, Sep 2026" or "This month, Oct 2026"."""
+	from jarvis.chat.usage import current_period_key
+
 	now = now or frappe.utils.now_datetime()
-	return now.strftime("This month, %b %Y")
+	is_previous = now.day <= _PULSE_PREVIOUS_MONTH_DAYS
+	reviewed = _last_day_of_previous_month(now) if is_previous else now
+	prefix = "Last month, " if is_previous else "This month, "
+	return (
+		current_period_key(PULSE_SURVEY_CADENCE, reviewed),
+		reviewed.strftime(prefix + "%b %Y"),
+		is_previous,
+	)
+
+
+def _last_day_of_previous_month(now):
+	return now.replace(day=1) - timedelta(days=1)
 
 
 def _turns_since(user: str, since) -> int:
@@ -416,10 +437,8 @@ def pulse_context() -> dict:
 	require_jarvis_access()
 	if not _pulse_state_columns_present():
 		return {"due": False}
-	from jarvis.chat.usage import current_period_key
-
 	user = frappe.session.user
-	current_key = current_period_key(PULSE_SURVEY_CADENCE)
+	current_key, period_label, period_is_previous = _pulse_period()
 	# READ, never ``get_doc``: the settings doc carries a child table
 	# (``user_model_usage``) and this runs on every chat open, so the deciding
 	# path is three columns off one row - the same shape ``greeting._get_pref``
@@ -463,8 +482,9 @@ def pulse_context() -> dict:
 		return {"due": False}
 	return {
 		"due": True,
-		"period_label": _pulse_period_label(),
+		"period_label": period_label,
 		"period_key": current_key,
+		"period_is_previous": period_is_previous,
 		"features_offered": _feature_keys(list(features)),
 	}
 
@@ -498,6 +518,7 @@ def submit_pulse_feedback(
 	features_selected: list | str,
 	use_case_text: str = "",
 	note: str | None = None,
+	period_key: str | None = None,
 ) -> dict:
 	"""Record one business-pulse response: forward it to admin, then silence the
 	survey for the rest of this period.
@@ -509,6 +530,11 @@ def submit_pulse_feedback(
 	The full set that was OFFERED rides along with the subset the user picked as
 	most used, so the admin dashboard can tell "used it but did not pick it as
 	top" from "never offered because unused" (spec: Dynamic feature list).
+
+	``period_key`` is the month the dialog was shown for. It is honoured only
+	when it is the current or the previous month's key (a dialog opened on day
+	10 and sent after midnight); anything else falls back to the server's own
+	reviewed month.
 
 	A malformed rating is rejected BEFORE anything is written or sent, so a
 	broken client cannot burn the user's survey for the month on a value that
@@ -535,7 +561,13 @@ def submit_pulse_feedback(
 		frappe.throw("stars must be between 1 and 5", frappe.ValidationError)
 	from jarvis.chat.usage import current_period_key, get_or_create_user_settings
 
-	current_key = current_period_key(PULSE_SURVEY_CADENCE)
+	now = frappe.utils.now_datetime()
+	if period_key not in (
+		current_period_key(PULSE_SURVEY_CADENCE, now),
+		current_period_key(PULSE_SURVEY_CADENCE, _last_day_of_previous_month(now)),
+	):
+		period_key = None
+	current_key = period_key or _pulse_period(now)[0]
 	payload = {
 		"kind": "Pulse",
 		"period_key": current_key,

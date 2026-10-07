@@ -6,7 +6,7 @@ import { ref } from "vue";
 import { pulseContext } from "@/api";
 
 export const pulseFeedbackOpen = ref(false);
-export const pulseFeedbackContext = ref(null); // {period_label, period_key, features_offered}
+export const pulseFeedbackContext = ref(null); // {period_label, period_key, period_is_previous, features_offered}
 
 // Client-side "at most one offer per page load" rule. The server enforces its
 // own 3-per-month cap (see pulse_context's docstring), but that cap is keyed
