@@ -107,7 +107,9 @@ def _parse_js_filters(js: str) -> list[dict]:
 
 
 def _js_default(seg: str):
-	m = _DEFAULT_RE.search(seg)
+	# Only the filter's own keys: a default inside its get_data / on_change body is not its own.
+	own = re.split(r"\bfunction\b|\b(?:get_data|get_query|on_change)\s*:", seg, maxsplit=1)[0]
+	m = _DEFAULT_RE.search(own)
 	if not m:
 		return None
 	if m.group(1) is not None:

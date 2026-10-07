@@ -8944,7 +8944,10 @@ watch(
 	(preparing) => {
 		clearInterval(_reportPoll);
 		_reportPoll = preparing
-			? setInterval(() => refreshReportRuns(currentId.value), REPORT_POLL_MS)
+			? setInterval(
+					() => document.hidden || refreshReportRuns(currentId.value),
+					REPORT_POLL_MS
+			  )
 			: null;
 	}
 );
@@ -8989,6 +8992,11 @@ async function loadConversation(id) {
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
 	const _sameConv = _shownConvId === id;
+	if (!_sameConv) {
+		// another chat's cards must not linger (or be acted on) while this one loads
+		fileboxWaits.value = [];
+		reportRuns.value = [];
+	}
 	const _keepScrollTop =
 		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
