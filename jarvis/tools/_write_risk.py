@@ -778,6 +778,14 @@ def guard_scope(
 		setattr(frappe.local, _LOCAL, prev)
 
 
+def uncarded_write() -> bool:
+	"""Whether the tool call in progress is a write nobody was shown: auto mode,
+	"confirm all", an armed macro, an approved skill run or File Box (the ``brake``
+	the gate opens its scope with, carried into the jobs it queues)."""
+	state = getattr(frappe.local, _LOCAL, None)
+	return bool(state is not None and state.brake)
+
+
 def take_refusal() -> WriteRefusedError | None:
 	"""The refusal the ORM guard raised since the last call, cleared. A caller
 	checks it after a tool returns: a method that swallowed the guard's exception
@@ -1375,4 +1383,5 @@ __all__ = [
 	"risk_of",
 	"structure_refusal",
 	"take_refusal",
+	"uncarded_write",
 ]
