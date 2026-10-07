@@ -46,6 +46,11 @@ vi.mock("frappe-ui", () => ({
 	toast: { error: vi.fn(), success: vi.fn() },
 	// Banner.vue (the subscription Test result banner, below) needs this.
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<span/>" },
+	Badge: {
+		name: "Badge",
+		props: ["label", "theme", "variant"],
+		template: `<span class="stub-badge" :data-label="label">{{ label }}</span>`,
+	},
 }));
 
 const answer = vi.hoisted(() => ({ confirm: true }));

@@ -237,6 +237,24 @@ describe("GeneralPane Status badge, member seat", () => {
 });
 
 describe("GeneralPane Status badge, admin seat", () => {
+	it("names the expired sign-in and offers Open AI models", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() =>
+			Promise.resolve({
+				health: "attention",
+				attention_reason: "subscription_expired",
+				attention_detail: {
+					upstream: "openai",
+					label: "OpenAI",
+					since: 1,
+					account_ref: "A1",
+				},
+			})
+		);
+		const w = await mountAs({ admin: true });
+		expect(badge(w)).toEqual({ label: "Needs attention", theme: "red" });
+		expect(w.text()).toContain("OpenAI sign-in expired. Open AI models to reconnect it.");
+		expect(buttonLabels(w)).toContain("Open AI models");
+	});
 	it("still uses the admin endpoint and its full payload", async () => {
 		api.getLlmConnectionStatus.mockImplementation(() =>
 			Promise.resolve({

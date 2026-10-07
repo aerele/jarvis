@@ -96,6 +96,12 @@
 							</svg>
 							<FeatherIcon v-else :name="item.icon" class="size-4 shrink-0" />
 							<span class="truncate">{{ item.label }}</span>
+							<span
+								v-if="railDot(item.key)"
+								class="ml-auto size-1.5 shrink-0 rounded-full bg-surface-red-5"
+								role="img"
+								aria-label="Needs attention"
+							/>
 						</button>
 					</template>
 				</div>
@@ -135,13 +141,18 @@
 </template>
 
 <script setup>
-import { computed, defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent, inject, onMounted, onBeforeUnmount } from "vue";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
 // internally. Needed because overriding the #body slot drops the ones it
 // renders by default.
 import { DialogClose, DialogTitle } from "reka-ui";
 import { useShellStore } from "@/stores/shell";
+import {
+	subscriptionNotice,
+	loadSubscriptionNotice,
+	watchSubscriptionNotice,
+} from "@/lib/subscriptionNotice";
 // MUST be @/theme's useJarvisTheme, the same singleton the header toggle
 // writes to. @/composables/useTheme was a separate instance and is deleted.
 import { useJarvisTheme } from "@/theme";
@@ -187,6 +198,18 @@ const ConnectorsPane = defineAsyncComponent(() =>
 // is_jarvis_admin, which is true for System Managers too.
 const isSM = !!window.is_system_manager;
 const isAdmin = !!window.is_jarvis_admin;
+// Rail dots for an expired chat sign-in. Admins only: a member has no AI models pane to open, and
+// the shared reading is only fetched for the seats that can act on it.
+const socket = inject("$socket", null);
+const showExpiredDots = computed(() => (isSM || isAdmin) && subscriptionNotice.expired.length > 0);
+const railDot = (key) => showExpiredDots.value && (key === "aimodels" || key === "general");
+let unwatchNotice = () => {};
+onMounted(() => {
+	if (!(isSM || isAdmin)) return;
+	loadSubscriptionNotice();
+	unwatchNotice = watchSubscriptionNotice(socket);
+});
+onBeforeUnmount(() => unwatchNotice());
 
 const KEPT_PANES = ["GeneralPane", "UsagePane"];
 

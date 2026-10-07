@@ -466,7 +466,7 @@ const statusLabel = computed(
 		}[statusState.value] || "-")
 );
 // The server's reason for "attention" (jarvis#714) - see account._llm_health.
-// One of sync_failed / turn_error / subscription_unverified, or "" for every
+// One of sync_failed / turn_error / subscription_unverified / subscription_expired, or "" for every
 // other state. Empty until connStatus loads, same fallback shape as health.
 const attentionReason = computed(
 	() => (connStatus.value && connStatus.value.attention_reason) || ""
@@ -497,6 +497,10 @@ const statusHint = computed(() => {
 		return "";
 	}
 	if (statusState.value === "attention") {
+		if (attentionReason.value === "subscription_expired") {
+			const label = (connStatus.value.attention_detail || {}).label || "Your chat";
+			return `${label} sign-in expired. Open AI models to reconnect it.`;
+		}
 		return (
 			{
 				sync_failed:
