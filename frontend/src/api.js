@@ -266,6 +266,16 @@ export const getDoctypeFormMeta = (doctype) => call(AC + "get_doctype_form_meta"
 export const loadDocForEdit = (doctype, name) => call(AC + "load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// Park the confirm card for a create receipt's suggested next step (#621). Same
+// card the assistant's own submit/workflow call gets; nothing runs until Confirm.
+export const proposeNextAction = (conversation, step) =>
+	call(AC + "propose_next_action", {
+		conversation,
+		doctype: step.doctype,
+		name: step.name,
+		kind: step.kind,
+		...(step.action ? { action: step.action } : {}),
+	});
 // What ERPNext computes for a create card's blank read-only cells (a rolled-back
 // dry run): {ok, tables: {table: [{fieldname: value}]}}. Display only (#647).
 export const draftComputed = (action) =>

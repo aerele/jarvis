@@ -159,6 +159,17 @@
 				<span v-if="ts" class="jv-receipt-time">{{ ts }}</span>
 			</div>
 			<FailureReference :id="view.reference" />
+			<!-- Next step offered after a draft was created (#621): opens the normal
+			     confirm card; nothing runs from this button. -->
+			<div v-if="nextStep" class="jv-receipt-next">
+				<Button
+					size="sm"
+					variant="subtle"
+					:loading="nextBusy"
+					@click="$emit('next-action', nextStep)"
+					>{{ nextStep.label }}</Button
+				>
+			</div>
 			<div v-if="hasList && !open" class="jv-receipt-teaser">{{ teaser }}</div>
 			<div v-if="open && (hasWhy || hasList)" class="jv-receipt-detail">
 				<div v-if="hasWhy" class="jv-receipt-error">{{ view.error }}</div>
@@ -182,6 +193,7 @@
 
 <script setup>
 import { computed, ref } from "vue";
+import { Button } from "frappe-ui";
 import { receiptView } from "@/lib/actionSummary";
 import FailureReference from "./FailureReference.vue";
 
@@ -191,7 +203,12 @@ const props = defineProps({
 	// The chat runs in auto mode (#581): its writes apply without a card because of
 	// the chat, not a per-request approval, so the "confirm all" line below is false.
 	autoMode: { type: Boolean, default: false },
+	// The suggested next step was already acted on (the thread holds a later
+	// submit / workflow receipt for this record): the parent hides the button.
+	nextDone: { type: Boolean, default: false },
+	nextBusy: { type: Boolean, default: false },
 });
+defineEmits(["next-action"]);
 
 const open = ref(false);
 
@@ -250,6 +267,15 @@ const autoModeApplied = computed(
 const singleUrl = computed(() => {
 	const t = view.value.targets;
 	return view.value.count === 1 && t.length === 1 && t[0].url ? t[0].url : "";
+});
+// {kind: "workflow"|"submit", action, label} from the create receipt's result,
+// plus the record it applies to. Only a confirmed create carries one.
+const nextStep = computed(() => {
+	if (props.nextDone || view.value.outcome !== "confirmed") return null;
+	const data = (parseJson(props.message.tool_result) || {}).data || {};
+	const s = data.suggested_next;
+	if (!s || !s.label || !data.doctype || !data.name) return null;
+	return { ...s, doctype: data.doctype, name: data.name };
 });
 const hasWhy = computed(() => view.value.outcome === "failed" && !!view.value.error);
 const hasList = computed(() => view.value.count > 1 && view.value.targets.length > 0);
@@ -372,6 +398,9 @@ const ts = computed(() => {
 }
 .jv-receipt-chev.open {
 	transform: rotate(180deg);
+}
+.jv-receipt-next {
+	margin-top: 6px;
 }
 .jv-receipt-time {
 	margin-left: auto;

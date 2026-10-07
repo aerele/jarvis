@@ -791,6 +791,9 @@
 							v-else-if="m.role === 'tool'"
 							:message="m"
 							:auto-mode="!!convAutoMode"
+							:next-done="nextStepDone(m, mi)"
+							:next-busy="nextBusyKey === m.name"
+							@next-action="proposeNext(m, $event)"
 						/>
 						<!-- user -->
 						<Message
@@ -8114,6 +8117,48 @@ async function discardPending(pa) {
 		store.loadConversations();
 	} finally {
 		inflightTokens.delete(token);
+	}
+}
+
+// Next step offered on a create receipt (#621). The button opens the normal
+// confirm card (the server parks the same card the assistant's own submit /
+// workflow call gets, as the person), then the card is pulled in with the usual
+// resync. It is hidden once a later receipt in the thread acted on that record.
+const NEXT_STEP_TOOLS = ["submit_doc", "apply_workflow_action"];
+const nextBusyKey = ref("");
+function receiptRecord(m) {
+	try {
+		const a = typeof m.tool_args === "string" ? JSON.parse(m.tool_args) : m.tool_args || {};
+		const r = typeof m.tool_result === "string" ? JSON.parse(m.tool_result) : m.tool_result;
+		const d = (r && r.data) || {};
+		return { doctype: d.doctype || a.doctype, name: d.name || a.name };
+	} catch (e) {
+		return {};
+	}
+}
+function nextStepDone(m, idx) {
+	if (m.tool_name !== "create_doc") return false;
+	const me = receiptRecord(m);
+	return visibleMessages.value.slice(idx + 1).some((x) => {
+		if (x.role !== "tool" || !NEXT_STEP_TOOLS.includes(x.tool_name)) return false;
+		const o = receiptRecord(x);
+		return o.doctype === me.doctype && o.name === me.name;
+	});
+}
+async function proposeNext(m, step) {
+	if (nextBusyKey.value || !currentId.value) return;
+	nextBusyKey.value = m.name;
+	try {
+		const r = await api.proposeNextAction(currentId.value, step);
+		if (r && r.ok === false) {
+			notify(chatRefusalMessage(r), { type: "error" });
+			return;
+		}
+		await resyncPendingConfirmations(currentId.value);
+	} catch (e) {
+		notify(errMessage(e, "Could not open that step."), { type: "error" });
+	} finally {
+		nextBusyKey.value = "";
 	}
 }
 
