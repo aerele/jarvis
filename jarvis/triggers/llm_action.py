@@ -256,7 +256,11 @@ def run_llm_action(
 		reply, error = _complete(task_prompt, fenced, messages)
 	duration_ms = int((time.monotonic() - t0) * 1000)
 	# Rounds used and each lookup (tool, doctype, row count or refusal), never row data.
-	lookup_note = f"\n\nRounds: {rounds}. Lookups:\n" + ("\n".join(lookup_log) or "none") if rounds else ""
+	lookup_note = (
+		f"\n\n{lookups.LOOKUP_MARKER} Rounds: {rounds}. Lookups:\n" + ("\n".join(lookup_log) or "none")
+		if rounds
+		else ""
+	)
 	if error is not None:
 		_insert_activity(
 			**base, status="Failed", summary=error, detail=error + lookup_note, duration_ms=duration_ms

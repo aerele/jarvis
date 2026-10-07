@@ -411,6 +411,67 @@ class TestConditionTester(_TriggersApiTestCase):
 		self.assertNotIn("leak-canary-value-12345", r["data"]["error"])
 
 
+class TestLookupFindingVisibility(_TriggersApiTestCase):
+	"""Findings built from lookups read as the trigger owner, so only managers
+	and the owner may see those rows; lookup-off rows keep the target-doc rule."""
+
+	def _target(self):
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "lookup visibility target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		return todo.name
+
+	def _names(self, user, trigger):
+		frappe.set_user(user)
+		page = list_activity_page(filters=frappe.as_json({"trigger": trigger}))["data"]
+		return {r["name"] for r in page["rows"]}
+
+	def test_flag_roundtrips_through_the_api(self):
+		name = self._create_as_admin(llm_allow_lookups=1)
+		self.assertEqual(get_trigger(name)["data"]["llm_allow_lookups"], 1)
+		frappe.set_user(PLAIN_USER)
+		self.assertEqual(get_trigger(name)["data"]["llm_allow_lookups"], 1)
+		frappe.set_user(ADMIN_USER)
+		off = update_trigger(name, frappe.as_json({"llm_allow_lookups": 0}))
+		self.assertEqual(off["data"]["llm_allow_lookups"], 0)
+
+	def test_rows_of_a_lookup_trigger_are_hidden_from_non_managers(self):
+		name = self._create_as_admin(llm_allow_lookups=1)
+		docname = self._target()
+		row = self._insert_activity_row(trigger=name, target_docname=docname)
+		# manager (not the owner) and the owner both see it; the editor does not
+		self.assertIn(row, self._names(JADMIN_USER, name))
+		self.assertIn(row, self._names(ADMIN_USER, name))
+		self.assertNotIn(row, self._names(PLAIN_USER, name))
+
+	def test_a_non_manager_owner_still_sees_their_own_trigger_rows(self):
+		name = self._create_as_admin(llm_allow_lookups=1)
+		frappe.db.set_value(TRIGGER, name, "owner", PLAIN_USER, update_modified=False)
+		row = self._insert_activity_row(trigger=name, target_docname=self._target())
+		self.assertIn(row, self._names(PLAIN_USER, name))
+
+	def test_rows_stay_hidden_after_the_flag_is_turned_off(self):
+		from jarvis.triggers.lookups import LOOKUP_MARKER
+
+		name = self._create_as_admin(llm_allow_lookups=1)
+		docname = self._target()
+		used = self._insert_activity_row(
+			trigger=name, target_docname=docname, detail=f"finding\n\n{LOOKUP_MARKER} Rounds: 2."
+		)
+		frappe.set_user(ADMIN_USER)
+		update_trigger(name, frappe.as_json({"llm_allow_lookups": 0}))
+		later = self._insert_activity_row(trigger=name, target_docname=docname, detail="plain finding")
+		names = self._names(PLAIN_USER, name)
+		self.assertNotIn(used, names)
+		self.assertIn(later, names)
+
+	def test_lookup_off_triggers_keep_the_target_doc_rule(self):
+		name = self._create_as_admin()
+		row = self._insert_activity_row(trigger=name, target_docname=self._target(), detail=None)
+		self.assertIn(row, self._names(PLAIN_USER, name))
+
+
 class TestActivityFeed(_TriggersApiTestCase):
 	def _seed_visibility_rows(self) -> tuple[str, str, str]:
 		"""One row the plain user can see (their own ToDo) and one they cannot

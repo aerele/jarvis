@@ -31,12 +31,12 @@ export const getTriggersCaps = () => call(TR + "get_triggers_caps").then(unwrap)
 export const listTriggersPage = (p) => call(TR + "list_triggers_page", _page(p)).then(unwrap);
 
 // full detail: rows fields + condition, script_body, llm_instruction,
-// llm_daily_cap, server_script, source_conversation
+// llm_daily_cap, llm_allow_lookups, server_script, source_conversation
 export const getTrigger = (name) => call(TR + "get_trigger", { name }).then(unwrap);
 
 // payload fields: trigger_name, enabled, target_doctype, doc_event, condition,
 // action_type ('Script'|'LLM'), script_body, llm_instruction, llm_daily_cap,
-// description, source_conversation - JSON-encoded (dict arg). -> full detail
+// llm_allow_lookups, description, source_conversation - JSON-encoded (dict arg). -> full detail
 export const createTrigger = (payload = {}) =>
 	call(TR + "create_trigger", { payload: JSON.stringify(payload) }).then(unwrap);
 export const updateTrigger = (name, payload = {}) =>
