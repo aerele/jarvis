@@ -47,7 +47,53 @@ def _add(ws, chart, value_cols=(2,), anchor="F2", title=None):
 	ws.add_chart(chart, anchor)
 
 
-def _bytes(wb):
+def _fill_caches(wb):
+	"""Write numCache/strCache into every chart from the cells, as Excel does."""
+	from openpyxl.chart.data_source import AxDataSource, NumData, NumVal, StrData, StrRef, StrVal
+	from openpyxl.utils.datetime import to_excel
+
+	def cells(ws, ref):
+		got = ws[ref.split("!")[1].replace("$", "")]
+		if not isinstance(got, tuple):
+			return [got]
+		return [c for row in got for c in (row if isinstance(row, tuple) else (row,))]
+
+	for ws in wb.worksheets:
+		for chart in ws._charts:
+			for ser in chart.series:
+				if ser.tx and ser.tx.strRef:
+					(c,) = cells(ws, ser.tx.strRef.f)
+					ser.tx.strRef.strCache = StrData(ptCount=1, pt=[StrVal(idx=0, v=str(c.value))])
+				if ser.val and ser.val.numRef:
+					cs = cells(ws, ser.val.numRef.f)
+					pts = [
+						NumVal(idx=i, v=c.value)
+						for i, c in enumerate(cs)
+						if isinstance(c.value, (int, float))
+					]
+					ser.val.numRef.numCache = NumData(formatCode="General", ptCount=len(cs), pt=pts)
+				if ser.cat is not None and ser.cat.numRef:
+					cs = cells(ws, ser.cat.numRef.f)
+					if cs and isinstance(cs[0].value, (datetime.date, datetime.datetime)):
+						pts = [NumVal(idx=i, v=to_excel(c.value)) for i, c in enumerate(cs)]
+						ser.cat.numRef.numCache = NumData(
+							formatCode=cs[0].number_format, ptCount=len(cs), pt=pts
+						)
+					else:
+						ser.cat = AxDataSource(
+							strRef=StrRef(
+								f=ser.cat.numRef.f,
+								strCache=StrData(
+									ptCount=len(cs),
+									pt=[StrVal(idx=i, v=str(c.value)) for i, c in enumerate(cs)],
+								),
+							)
+						)
+
+
+def _bytes(wb, cached=True):
+	if cached:
+		_fill_caches(wb)
 	buf = io.BytesIO()
 	wb.save(buf)
 	return buf.getvalue()
@@ -141,7 +187,7 @@ class TestExtractCharts(unittest.TestCase):
 	def test_cache_fallback_when_cells_unavailable(self):
 		wb, ws = _book()
 		_add(ws, BarChart())
-		src = _bytes(wb)
+		src = _bytes(wb, cached=False)
 		out = io.BytesIO()
 		cache = (
 			'</f><numCache><ptCount val="2"/><pt idx="0"><v>7</v></pt><pt idx="1"><v>9</v></pt></numCache>'
@@ -157,18 +203,13 @@ class TestExtractCharts(unittest.TestCase):
 		(spec,) = extract_charts(out.getvalue())
 		self.assertEqual(spec["series"][0]["data"], [7.0, 9.0])
 
-	def test_no_cells_and_no_cache_skips_chart(self):
+	def test_no_cache_means_skipped_and_no_sheet_read(self):
 		wb, ws = _book()
 		_add(ws, BarChart())
-		src = _bytes(wb)
-		out = io.BytesIO()
-		with zipfile.ZipFile(io.BytesIO(src)) as zin, zipfile.ZipFile(out, "w") as zout:
-			for item in zin.infolist():
-				data = zin.read(item.filename)
-				if item.filename == "xl/charts/chart1.xml":
-					data = data.decode().replace("'Data'!", "'Gone'!").encode()
-				zout.writestr(item, data)
-		self.assertEqual(extract_charts(out.getvalue()), [])
+		src = _bytes(wb, cached=False)
+		with mock.patch.object(openpyxl, "load_workbook") as load:
+			self.assertEqual(extract_charts(src), [])
+		load.assert_not_called()
 
 	def test_bounds(self):
 		rows = [("k", "v")] + [(f"r{i}", i) for i in range(MAX_POINTS + 100)]
@@ -203,15 +244,15 @@ def _rewrite(src, edits):
 
 
 class TestHardening(unittest.TestCase):
-	def _one(self):
+	def _one(self, cached=True):
 		wb, ws = _book()
 		_add(ws, BarChart())
-		return _bytes(wb)
+		return _bytes(wb, cached=cached)
 
 	def test_huge_ptcount_and_idx_are_not_allocated(self):
 		cache = '</f><numCache><ptCount val="999999999"/><pt idx="0"><v>7</v></pt><pt idx="4000000000"><v>1</v></pt></numCache>'
 		src = _rewrite(
-			self._one(),
+			self._one(cached=False),
 			{
 				"xl/charts/chart1.xml": lambda d: d.decode()
 				.replace("'Data'!", "'Gone'!")
@@ -361,35 +402,6 @@ class _Counting:
 			p.stop()
 
 
-class _RowSpy:
-	"""Count openpyxl read-only iter_rows calls and the rows they yield."""
-
-	def __init__(self, fail=False):
-		self.fail = fail
-
-	def __enter__(self):
-		from openpyxl.worksheet._read_only import ReadOnlyWorksheet
-
-		self.calls = self.rows = 0
-		real = ReadOnlyWorksheet.iter_rows
-		spy = self
-
-		def iter_rows(ws, *a, **k):
-			spy.calls += 1
-			if spy.fail:
-				raise ValueError("broken sheet")
-			for row in real(ws, *a, **k):
-				spy.rows += 1
-				yield row
-
-		self._patch = mock.patch.object(ReadOnlyWorksheet, "iter_rows", iter_rows)
-		self._patch.start()
-		return self
-
-	def __exit__(self, *exc):
-		self._patch.stop()
-
-
 class TestParseBudget(unittest.TestCase):
 	def test_repeated_references_parse_each_part_once(self):
 		src = _crafted(sheets=400, drawings_per_sheet=200, charts_per_drawing=10, distinct=False)
@@ -414,79 +426,26 @@ class TestParseBudget(unittest.TestCase):
 		self.assertLessEqual(len(specs), 1)
 		self.assertEqual(len(extract_charts(good)), 1)
 
-	def test_series_and_range_reads_are_bounded(self):
+	def test_series_are_capped(self):
 		wb, ws = _book()
-		ws.append(("x", 1, 1))
 		chart = BarChart()
 		for _ in range(100):
-			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=5), titles_from_data=True)
-		chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=5))
-		ws.add_chart(chart, "F2")
-		real_load = openpyxl.load_workbook
-		with mock.patch.object(openpyxl, "load_workbook", wraps=real_load) as load:
-			(spec,) = extract_charts(_bytes(wb))
-		self.assertEqual(len(spec["series"]), MAX_SERIES)
-		self.assertEqual(load.call_count, 1)
-
-	def test_sheet_is_scanned_once_for_all_series(self):
-		wb, ws = _book()
-		chart = BarChart()
-		for _ in range(5):
 			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=True)
 		chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=4))
 		ws.add_chart(chart, "F2")
-		with _RowSpy() as spy:
-			(spec,) = extract_charts(_bytes(wb))
-		self.assertEqual(len(spec["series"]), 5)
-		self.assertEqual(spy.calls, 1)
-		self.assertEqual(spy.rows, 4)
+		(spec,) = extract_charts(_bytes(wb))
+		self.assertEqual(len(spec["series"]), MAX_SERIES)
 
-	def test_failing_sheet_read_is_not_repeated(self):
-		wb, ws = _book()
-		chart = BarChart()
-		for _ in range(10):
-			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=True)
-		ws.add_chart(chart, "F2")
-		with _RowSpy(fail=True) as spy:
-			self.assertEqual(extract_charts(_bytes(wb)), [])
-		self.assertEqual(spy.calls, 1)
-
-	def test_rows_scanned_budget_and_range_row_cap(self):
-		wb = openpyxl.Workbook()
-		for i in range(4):
-			ws = wb.active if i == 0 else wb.create_sheet()
-			ws.title = f"D{i}"
-			for r in range(1, 3001):
-				ws.append((f"c{r}", r))
-			_add(ws, BarChart())
-		with mock.patch.object(xlsx_charts, "MAX_ROWS_SCANNED", 4000), _RowSpy() as spy:
-			specs = extract_charts(_bytes(wb))
-		self.assertLessEqual(spy.rows, 4000)
-		self.assertLess(len(specs), 4)
-		ws = openpyxl.Workbook().active
-		ws.append(("a", "b"))
-		with mock.patch.object(xlsx_charts, "MAX_RANGE_ROW", 2), _RowSpy() as spy:
-			values = xlsx_charts._SheetValues(_bytes(ws.parent))
-			self.assertIsNone(values.read("Sheet!$A$3:$A$9"))
-		self.assertEqual(spy.calls, 0)
-
-	def test_cached_points_are_preferred_over_sheet_reads(self):
+	def test_wide_rows_large_cells_and_deep_rows_cost_nothing(self):
+		# worksheets are never read, however heavy they are
 		wb, ws = _book()
 		_add(ws, BarChart())
-		src = _rewrite(
-			_bytes(wb),
-			{
-				"xl/charts/chart1.xml": lambda d: d.replace(
-					b"</f>",
-					b'</f><numCache><formatCode>General</formatCode><ptCount val="2"/>'
-					b'<pt idx="0"><v>7</v></pt><pt idx="1"><v>8</v></pt></numCache>',
-				)
-			},
-		)
-		with _RowSpy() as spy:
-			(spec,) = extract_charts(src)
-		self.assertEqual(spy.calls, 0)
-		self.assertEqual(spec["series"][0]["data"], [7.0, 8.0])
+		ws["A9"] = "x" * 200_000
+		ws.cell(row=2000, column=300, value=1)
+		src = _bytes(wb)
+		with mock.patch.object(openpyxl, "load_workbook") as load:
+			self.assertEqual(len(extract_charts(src)), 1)
+		load.assert_not_called()
 
 	def test_sheet_cap(self):
 		src = _crafted(sheets=MAX_SHEETS + 20, drawings_per_sheet=1, charts_per_drawing=1, distinct=True)
@@ -512,6 +471,93 @@ class TestParseBudget(unittest.TestCase):
 		_add(data, BarChart(), title="On the second sheet")
 		(spec,) = extract_charts(_bytes(wb))
 		self.assertEqual(spec["sheet"], "Data")
+
+
+class TestFormatKind(unittest.TestCase):
+	def test_dates_times_and_others(self):
+		kind = xlsx_charts._format_kind
+		for code in (
+			"yyyy-mm-dd",
+			"dd/mm/yyyy",
+			"d-mmm-yy",
+			"mmm",
+			"yyyymmdd",
+			"yyyy-mm-dd hh:mm",
+			'"FY" yyyy',
+		):
+			self.assertEqual(kind(code), "date", code)
+		for code in ("h:mm", "hh:mm:ss", "[h]:mm:ss", "mm:ss", "h:mm AM/PM"):
+			self.assertEqual(kind(code), "time", code)
+		for code in ("General", "Standard", "0.00", "#,##0", r"0\ m", '0 "days"', r"0\ d", "0.0_m", "", None):
+			self.assertIsNone(kind(code), code)
+
+	def test_cached_dates_and_zero(self):
+		def cache(fmt, *vals):
+			pts = "".join(f'<pt idx="{i}"><v>{v}</v></pt>' for i, v in enumerate(vals))
+			xml = f'<numRef xmlns="{xlsx_charts._NS["c"]}"><f>S!A1</f><numCache><formatCode>{fmt}</formatCode>{pts}</numCache></numRef>'
+			return xlsx_charts._cache(xlsx_charts.ET.fromstring(xml))
+
+		self.assertEqual(
+			[xlsx_charts._label(v) for v in cache("yyyy-mm-dd", 46174, 0)], ["2026-06-01", "1899-12-30"]
+		)
+		self.assertEqual(cache(r"0\ m", 5), ["5"])
+		self.assertEqual(cache("General", 5), ["5"])
+		self.assertEqual(str(cache("h:mm:ss", 0)[0]), "00:00:00")
+
+
+class TestExportRoundTrip(unittest.TestCase):
+	"""Jarvis's own exports carry chart caches, so their charts preview."""
+
+	DATA = [
+		["Day", "Sales", "Cost"],
+		[datetime.date(2026, 6, 1), 10, 4.5],
+		[datetime.date(2026, 6, 2), 12, 5],
+		[datetime.date(2026, 6, 3), None, 6],
+	]
+
+	def _charts(self):
+		from jarvis._xlsx_charts import ExcelChart
+
+		return [ExcelChart("column", 0, (1, 2), "Sales vs cost")]
+
+	def _check(self, content):
+		(spec,) = extract_charts(content)
+		self.assertEqual(spec["title"], "Sales vs cost")
+		self.assertEqual(spec["x"], ["2026-06-01", "2026-06-02", "2026-06-03"])
+		self.assertEqual([s["name"] for s in spec["series"]], ["Sales", "Cost"])
+		self.assertEqual(spec["series"][0]["data"], [10.0, 12.0, None])
+		self.assertEqual(spec["series"][1]["data"], [4.5, 5.0, 6.0])
+
+	def test_openpyxl_path(self):
+		# the Frappe 15 export path: add_openpyxl_charts on a sheet holding the data
+		from jarvis._xlsx_charts import add_openpyxl_charts
+
+		wb = openpyxl.Workbook()
+		ws = wb.active
+		ws.title = "Data"
+		for row in self.DATA:
+			ws.append(row)
+		add_openpyxl_charts(ws, self.DATA, self._charts())
+		buf = io.BytesIO()
+		wb.save(buf)
+		self._check(buf.getvalue())
+
+	def test_xlsxwriter_path(self):
+		import xlsxwriter
+
+		from jarvis._xlsx_charts import add_xlsxwriter_charts
+
+		buf = io.BytesIO()
+		wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+		ws = wb.add_worksheet("Data")
+		for r, row in enumerate(self.DATA):
+			for c, v in enumerate(row):
+				if isinstance(v, datetime.date):
+					v = v.isoformat()
+				ws.write(r, c, v)
+		add_xlsxwriter_charts(wb, ws, self.DATA, self._charts())
+		wb.close()
+		self._check(buf.getvalue())
 
 
 class TestPreviewCell(unittest.TestCase):
