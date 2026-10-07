@@ -1,3 +1,5 @@
+import { cookieUser } from "./sessionCookie.js";
+
 // Shared extractor for a user-facing message out of a Frappe API error.
 // Single source for AccountView / OnboardingView / LlmPoolEditor so a change to
 // Frappe's error envelope only has to be made once.
@@ -26,8 +28,6 @@ function isInternalCrash(e) {
 	return e instanceof TypeError && INTERNAL_CRASH_MESSAGE.test((e && e.message) || "");
 }
 
-import { cookieUser } from "./sessionCookie.js";
-
 // Frappe HTML-escapes throw() messages before they reach the client, so a
 // backend "Settings -> Developer" arrives here as "Settings -&gt; Developer"
 // and would render literally if shown as-is. Decode entities + strip any
@@ -47,13 +47,12 @@ export const GENERIC_ERROR_MESSAGE =
 export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
 
 // An expired session (#644): Frappe answers 403 "not whitelisted ... Login to
-// access" (a PermissionError, with a `session_expired` body flag that frappe-ui
-// drops) AND clears the user_id cookie. So a 401/403 that arrives while the
+// access" (a PermissionError) AND clears the cookies, which is why the cookie
+// is the signal (frappe-ui drops the body's `session_expired` flag). So a 401/403 that arrives while the
 // cookie now reads Guest/absent is an expired session, not a permission error.
 // A 403 on a live session stays a genuine permission error.
 export function isSessionExpired(e) {
 	if (!e) return false;
-	if (e.session_expired) return true;
 	if (typeof document === "undefined") return false;
 	const authFailure = e.status === 401 || e.status === 403 || e.exc_type === "PermissionError";
 	return authFailure && !cookieUser();

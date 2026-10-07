@@ -492,12 +492,14 @@ test("#644: the same 403 on a live session keeps the server's own message", () =
 	});
 });
 
-test("#644: a body flagged session_expired is expired even with a live-looking cookie", () => {
-	withCookie("user_id=kavin%40aerele.in", () => {
-		const e = expired403();
-		e.session_expired = 1;
-		assert.equal(errMessage(e), SESSION_SENTENCE);
-	});
+test("#644: a stray % in user_id or a cookie-less document never throws", () => {
+	withCookie("user_id=100%; sid=x", () => assert.doesNotThrow(() => errMessage(expired403())));
+	globalThis.document = {};
+	try {
+		assert.doesNotThrow(() => errMessage(expired403()));
+	} finally {
+		delete globalThis.document;
+	}
 });
 
 test("#644: a non-auth error is never an expired session", () => {
