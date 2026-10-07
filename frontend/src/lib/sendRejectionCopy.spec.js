@@ -54,6 +54,18 @@ describe("sendRejectionCopy", () => {
 			type: "warning",
 		});
 	});
+
+	it("uses the caller's fallback for an unknown code", () => {
+		const retry = "Couldn't retry that.";
+		expect(sendRejectionCopy("insufficient_workers", "Jarvis", {}, retry).message).toBe(retry);
+	});
+
+	// The toasts render the message as HTML.
+	it("escapes a server sentence", () => {
+		expect(sendRejectionCopy("A <b>bold</b> reply & more.", "Jarvis").message).toBe(
+			"A &lt;b&gt;bold&lt;/b&gt; reply &amp; more."
+		);
+	});
 });
 
 describe("sendRejectionCopy, usage limit window", () => {
