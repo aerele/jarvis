@@ -15,7 +15,7 @@
 				v-model="name"
 				maxlength="40"
 				placeholder="Jarvis"
-				description="Shown in the chat header, the browser tab, notifications, and in the assistant's own replies. Leave blank to use “Jarvis”. Up to 40 characters."
+				description="Shown in the chat header, the browser tab, notifications and in the assistant's own replies. Leave blank to use “Jarvis”. Up to 40 characters."
 			/>
 
 			<!-- Logo -->

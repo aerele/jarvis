@@ -742,7 +742,7 @@ def validate_models(settings) -> list:
 					# only fires when there is genuinely no stored credential.)
 					errors.append(
 						f"{label} account[{j}] ({acc_ref}): no OAuth credential "
-						f"stored — reconnect this account to authorize"
+						f"stored, reconnect this account to authorize"
 					)
 
 				# Duplicate account_ref detection

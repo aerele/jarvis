@@ -1203,7 +1203,7 @@
 										Sign in with {{ upstreamLabelOf(panelRow.upstream) }}
 									</div>
 									<div class="jv-cdesc">
-										Open the verification page, enter the code, and approve
+										Open the verification page, enter the code and approve
 										access. This panel updates automatically.
 									</div>
 									<div class="jv-crow" style="margin-top: 8px">
@@ -2135,7 +2135,7 @@
 											Sign in with {{ upstreamLabelOf(m.upstream) }}
 										</div>
 										<div class="jv-cdesc">
-											Open the verification page, enter the code, and approve
+											Open the verification page, enter the code and approve
 											access. This panel updates automatically.
 										</div>
 										<div class="jv-crow" style="margin-top: 8px">

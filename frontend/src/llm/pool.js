@@ -529,7 +529,7 @@ export function apiKeyModelHealth(row, modelStatuses) {
 			label: detail ? `Not working: ${truncate(detail, 46)}` : "Not working",
 			title: detail
 				? `This model failed a test request: ${truncate(detail, 220)}`
-				: "This model failed a test request - check its API key, model id, and base URL. " +
+				: "This model failed a test request - check its API key, model id and base URL. " +
 				  "It's skipped during failover until it passes.",
 		};
 	}

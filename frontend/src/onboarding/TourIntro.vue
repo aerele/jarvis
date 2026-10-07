@@ -582,7 +582,7 @@
 					<h2>Ask for a chart. Watch it build.</h2>
 					<p>
 						Describe what you want to see in plain words and {{ agentName }} draws it
-						on a live canvas. Keep the ones that matter, save them to your dashboard,
+						on a live canvas. Keep the ones that matter, save them to your dashboard
 						and share them with the users you choose.
 					</p>
 					<p class="final-call">

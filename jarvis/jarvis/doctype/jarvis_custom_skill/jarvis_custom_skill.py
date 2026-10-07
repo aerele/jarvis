@@ -615,7 +615,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 			frappe.throw(
 				_(
 					"A shared skill named '{0}' already exists. Two Role/Org skills cannot "
-					"share a name — rename one, or edit the existing shared skill instead."
+					"share a name. Rename one, or edit the existing shared skill instead."
 				).format(self.skill_name)
 			)
 

@@ -191,7 +191,7 @@ def _fallback_dashboard_html(
 		sev = f.get("severity") or "note"
 		amt = f.get("amount")
 		try:
-			amt = "—" if amt is None or amt == "" else f"{float(amt):,.2f}"
+			amt = "-" if amt is None or amt == "" else f"{float(amt):,.2f}"
 		except (TypeError, ValueError):
 			amt = _esc(amt)
 		# PP-1 strong-verb gate: an evaluator row is never confirmed_outcome, so the

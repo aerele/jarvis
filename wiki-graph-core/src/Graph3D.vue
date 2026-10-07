@@ -5,8 +5,8 @@
 				<div class="wg3d-fallback-icon">◍</div>
 				<p><strong>3D graph unavailable</strong></p>
 				<p class="text-muted">
-					WebGL is disabled or unsupported in this browser. The analysis cards still work
-					— use them to explore hubs, gaps, and suggested links.
+					WebGL is disabled or unsupported in this browser. The analysis cards still
+					work. Use them to explore hubs, gaps and suggested links.
 				</p>
 			</div>
 		</div>

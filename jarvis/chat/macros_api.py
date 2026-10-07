@@ -1374,7 +1374,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		frappe.throw(held_message(doc.get(HOLD_REASON_FIELD)), MacroOnHoldError)
 	steps = doc.steps or []
 	if len(steps) < 2:
-		frappe.throw(_("Nothing to merge — the macro has fewer than 2 steps."))
+		frappe.throw(_("Nothing to merge: the macro has fewer than 2 steps."))
 	pending = doc.merge_conversation if (doc.merge_status or "") == "pending" else ""
 	# A mark whose chat is gone has nothing coming for it: that one is replaced too.
 	if pending and not frappe.utils.cint(force) and frappe.db.exists("Jarvis Conversation", pending):
@@ -1452,7 +1452,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		_abandon_summary(doc, conv.name, replaced=pending)
 		return {
 			"ok": False,
-			"reason": out.get("reason") or _("The site is busy — please try again in a moment."),
+			"reason": out.get("reason") or _("The site is busy. Please try again in a moment."),
 		}
 	# Hide from the sidebar (list_conversations skips Archived).
 	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)

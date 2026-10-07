@@ -455,7 +455,7 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 			as_dict=True,
 		)
 		if row and not int(row.notify_by_email or 0) and _open_todo_exists(doctype, name, user):
-			frappe.throw(_("This share backs an active assignment — remove the assignment instead."))
+			frappe.throw(_("This share backs an active assignment. Remove the assignment instead."))
 		frappe.db.delete("DocShare", {"share_doctype": doctype, "share_name": name, "user": user})
 
 	# Mirror the read-share onto the linked conversation so a tagged user can
