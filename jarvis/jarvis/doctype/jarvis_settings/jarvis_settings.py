@@ -138,11 +138,6 @@ _PENDING_HANDOVER_STATUS = "pending: handover to direct"
 _ATTEMPT_ERROR_FIELD = "last_sync_attempt_error"
 _ATTEMPT_ERROR_UNREACHABLE = "The AI service did not respond."
 
-# admin-v2#630: admin answers a fast-refused fleet with the same 200 "applying" as a
-# healthy slow apply, so age is the only signal. Measured live: a pool update takes
-# 8 to 22 s and a container-restart apply 70 to 85 s, so 120 s is past a healthy apply.
-_APPLY_STALE_AFTER_S = 120
-
 # 2026-09-25 review (production hazard): a fleet-side handover failure that
 # REPEATS (e.g. doctor fails every attempt) reaches the site as a
 # non-permanent AdminUnreachableError, which _handover_via_admin records as
@@ -185,6 +180,13 @@ def _handover_attempt(status: str) -> int:
 _POOL_CONVERGE_DEADLINE_S = 120.0
 _POOL_CONVERGE_INTERVAL_S = 20.0
 _POOL_CONVERGE_PROBE_TIMEOUT_S = 15
+
+# admin-v2#630: admin answers a fast-refused fleet with the same 200 "applying" as a
+# healthy slow apply, so age is the only signal. It is measured from the request, and
+# "applying" is only written once the converge poll gives up, so this is about 2 minutes
+# after the page starts saying "Still applying". Measured live: a pool update takes 8 to
+# 22 s and a container-restart apply 70 to 85 s, well inside it.
+_APPLY_STALE_AFTER_S = _POOL_CONVERGE_DEADLINE_S + 120
 
 
 def creds_wire_auth_mode(stored: str | None) -> str:
