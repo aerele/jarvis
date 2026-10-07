@@ -191,6 +191,24 @@ def _normalize_profile(raw: str | None) -> str:
 	return "full"
 
 
+_USER_AGGREGATES_SQL = """
+	SELECT user,
+		   profile_agent_id,
+		   COUNT(*) AS cnt,
+		   MAX(creation) AS last_seen,
+		   SUM(cache_read) AS cache_read,
+		   SUM(cache_write) AS cache_write,
+		   MAX(cache_reported) AS cache_reported,
+		   MAX(tokens_out_estimated) AS tokens_out_estimated
+	FROM `tabJarvis Turn Usage`
+	WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
+	GROUP BY user, profile_agent_id
+	ORDER BY user, cnt DESC, last_seen DESC
+"""
+# Same query for a site whose code is deployed but not yet migrated (no tokens_out_estimated column).
+_USER_AGGREGATES_SQL_NO_ESTIMATE = _USER_AGGREGATES_SQL.replace("MAX(tokens_out_estimated)", "0")
+
+
 def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 	"""Per-user turns / cache sums AND profile attribution for the month, ONE
 	grouped query (``GROUP BY user, profile_agent_id``) instead of two
@@ -212,26 +230,9 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 	out: dict[str, dict] = {}
 	# Code can deploy before the migrate that adds tokens_out_estimated; a push in that gap
 	# must not fail the whole rollup, so the column is selected only once it exists.
-	estimated_col = (
-		"MAX(tokens_out_estimated)"
-		if frappe.db.has_column("Jarvis Turn Usage", "tokens_out_estimated")
-		else "0"
-	)
+	has_estimated = frappe.db.has_column("Jarvis Turn Usage", "tokens_out_estimated")
 	for r in frappe.db.sql(
-		f"""
-		SELECT user,
-			   profile_agent_id,
-			   COUNT(*) AS cnt,
-			   MAX(creation) AS last_seen,
-			   SUM(cache_read) AS cache_read,
-			   SUM(cache_write) AS cache_write,
-			   MAX(cache_reported) AS cache_reported,
-			   {estimated_col} AS tokens_out_estimated
-		FROM `tabJarvis Turn Usage`
-		WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
-		GROUP BY user, profile_agent_id
-		ORDER BY user, cnt DESC, last_seen DESC
-		""",
+		_USER_AGGREGATES_SQL if has_estimated else _USER_AGGREGATES_SQL_NO_ESTIMATE,
 		{"start": start, "next_month": next_month},
 		as_dict=True,
 	):

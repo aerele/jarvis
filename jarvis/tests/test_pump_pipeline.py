@@ -2126,7 +2126,7 @@ class TestUsageHonesty(_PipelineCase):
 			"totalTokensFresh": True,
 			"inputTokens": 2,
 			"outputTokens": 2,
-			"agentRuntime": {"id": "openclaw", "source": "provider"},
+			"agentRuntime": {"id": "default", "source": "provider"},
 		}
 		for rid, key, row, expected in (
 			("pmp_usage_cli", "sess-cli", cli_row, 3),
