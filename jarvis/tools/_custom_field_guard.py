@@ -807,9 +807,13 @@ class CustomFieldEdit:
 			)
 		columns = gs.table_columns(CF)
 		values = {k: v for k, v in before.items() if k != "name" and k.lower() in columns}
-		assignments = ", ".join(f"`{k}`=%({k})s" for k in values)
-		frappe.db.sql(
-			f"UPDATE `tabCustom Field` SET {assignments} WHERE name=%(__name)s", {**values, "__name": name}
-		)
+		# Through the query builder (no hooks, `modified` restored as it was): the
+		# column names come from the table's own column list above.
+		table = frappe.qb.DocType(CF)
+		query = frappe.qb.update(table).where(table.name == name)
+		for key, value in values.items():
+			query = query.set(table[key], value)
+		if values:
+			query.run()
 		frappe.clear_cache(doctype=dt)
 		return CleanUp(f"The change to the field {fieldname} on {dt} was undone.", changed=True)
