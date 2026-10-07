@@ -333,7 +333,7 @@ def get_schema(doctype: str, verbose: bool = False, refresh: bool = False) -> di
 	# Report Filter while building a Report create) even as a System Manager.
 	allowed = frappe.has_permission(doctype, ptype="read")
 	if not allowed and frappe.get_meta(doctype).istable:
-		allowed = any(frappe.has_permission(p, ptype="read") for p in _parent_doctypes(doctype))
+		allowed = any(True for p in _parent_doctypes(doctype) if frappe.has_permission(p, ptype="read"))
 	if not allowed:
 		raise PermissionDeniedError(f"no read permission on {doctype}")
 

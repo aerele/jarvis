@@ -1,26 +1,37 @@
 <script setup>
-import { watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
+import { registerSheet } from "../lib/sheetFocus";
 
-// Bottom sheet — the phone's dialog. A centred modal is a desktop idiom; on a
-// phone the thumb is at the bottom, so that is where a decision belongs.
-const props = defineProps({ open: { type: Boolean, default: false } });
+const props = defineProps({
+	open: { type: Boolean, default: false },
+	label: { type: String, default: "" },
+});
 const emit = defineEmits(["close"]);
-
-// While a sheet is up the thread behind it must not scroll under the user's
-// finger.
+const panel = ref(null);
+let release;
 watch(
-	() => props.open,
-	(open) => {
-		document.body.style.overflow = open ? "hidden" : "";
-	}
+	panel,
+	(root) => {
+		release?.();
+		release = root ? registerSheet(root, () => emit("close")) : null;
+	},
+	{ flush: "post" }
 );
+onBeforeUnmount(() => release?.());
 </script>
 
 <template>
 	<Transition name="jv-sheet">
 		<div v-if="props.open" class="jv-sheet-root">
 			<div class="jv-sheet-scrim" @click="emit('close')" />
-			<div class="jv-sheet jv-safe-bottom" role="dialog" aria-modal="true">
+			<div
+				ref="panel"
+				class="jv-sheet jv-safe-bottom"
+				role="dialog"
+				aria-modal="true"
+				:aria-label="label || undefined"
+				tabindex="-1"
+			>
 				<div class="jv-sheet-grab" />
 				<slot />
 			</div>

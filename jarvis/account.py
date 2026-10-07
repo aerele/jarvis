@@ -1387,6 +1387,24 @@ def _direct_llm_usage() -> dict:
 	}
 
 
+def _subscription_expiry_fields(attention_reason: str) -> dict:
+	"""``attention_detail`` (I7) and the expired entries for the SPA. Admin-only payload: the member
+	endpoint never calls this."""
+	from jarvis import subscription_health
+
+	entries = subscription_health.ui_entries()
+	detail = {}
+	if attention_reason == "subscription_expired" and entries:
+		first = entries[0]
+		detail = {
+			"upstream": first["upstream"],
+			"label": first["label"],
+			"since": first.get("since"),
+			"account_ref": first["account_ref"],
+		}
+	return {"attention_detail": detail, "subscription_health": entries}
+
+
 @frappe.whitelist()
 def get_llm_connection_status() -> dict:
 	"""Connection card for Settings, General: how this workspace's LLM config is
@@ -1450,6 +1468,8 @@ def get_llm_connection_status() -> dict:
 			"disconnected": True,
 			"health": "down",
 			"attention_reason": "",
+			"attention_detail": {},
+			"subscription_health": [],
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
@@ -1463,6 +1483,7 @@ def get_llm_connection_status() -> dict:
 			"disconnected": False,
 			"health": health,
 			"attention_reason": attention_reason,
+			**_subscription_expiry_fields(attention_reason),
 			"auth_present": False,
 			"oauth_expires_at": None,
 			"profile_ids": [],
@@ -1477,6 +1498,7 @@ def get_llm_connection_status() -> dict:
 		"disconnected": False,
 		"health": health,
 		"attention_reason": attention_reason,
+		**_subscription_expiry_fields(attention_reason),
 		"auth_present": bool(data.get("auth_profile_present")),
 		"oauth_expires_at": data.get("openai_profile_expires_ms"),
 		"profile_ids": data.get("profile_ids", []),
@@ -1614,7 +1636,7 @@ def _llm_health(settings, pool_mode: bool) -> tuple:
 	"""``(health, attention_reason)`` for a workspace that HAS a credential
 	(``_has_llm_config`` has already said so). ``health`` is one of ``ok`` /
 	``applying`` / ``attention`` / ``down``. ``attention_reason`` is one of
-	``sync_failed`` / ``turn_error`` / ``subscription_unverified`` when
+	``sync_failed`` / ``subscription_expired`` / ``turn_error`` / ``subscription_unverified`` when
 	``health`` is ``attention``, else ``""`` - the SPA's Status hint (#714)
 	picks its copy off this instead of a single sentence that claimed every
 	cause was a failed chat message, which was not always true.
@@ -1669,6 +1691,14 @@ def _llm_health(settings, pool_mode: bool) -> tuple:
 		return "down", ""
 	if status.startswith("failed"):
 		return "attention", "sync_failed"
+	# A chat-subscription sign-in that stopped working (jarvis.subscription_health): a specific,
+	# actionable cause that outranks the generic turn_error it usually produces and the pool-wide
+	# subscription_unverified snapshot. Self-clearing: admin's poll, a reconnect (new account_ref) or a
+	# served turn removes the entry.
+	from jarvis import subscription_health
+
+	if subscription_health.expired_entries():
+		return "attention", "subscription_expired"
 	# A confirmed apply says the config REACHED the container, never that the
 	# provider answers. An api-key model pointed at a base URL nothing serves
 	# applies perfectly and then fails every turn, which is how a green badge

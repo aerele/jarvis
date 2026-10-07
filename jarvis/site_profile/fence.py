@@ -23,9 +23,10 @@ def fence_for_user(data: dict, user: str | None = None) -> dict:
 			return True
 		if doctype not in verdicts:
 			try:
-				verdicts[doctype] = bool(frappe.has_permission(doctype, ptype="read", user=user))
+				allowed = frappe.has_permission(doctype, ptype="read", user=user)
 			except Exception:
-				verdicts[doctype] = False
+				allowed = False
+			verdicts[doctype] = bool(allowed)
 		return verdicts[doctype]
 
 	return {

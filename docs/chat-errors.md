@@ -22,6 +22,7 @@ Desk chat, dashboard chat, and mobile chat use the shared formatter.
 | Rate limit / cooldown | Wait or use another available model |
 | Usage quota | Wait for reset or ask the account owner to review limits |
 | Invalid or expired authentication | Administrator reconnects the affected service |
+| Expired chat-subscription sign-in (OpenAI, Anthropic, xAI Grok, Kimi) | Administrator reconnects it in AI models; a member is told to ask their administrator |
 | Safety rejection | Review content or contact the provider |
 | Missing / unsupported / inaccessible model | Select another model or check its configuration |
 | Access denied | Administrator reviews access to the model, service, or record |

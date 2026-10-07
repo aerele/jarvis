@@ -775,13 +775,42 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 		self.assertTrue(frappe.db.exists("ToDo", {"description": "pa-test committed"}))
 
 	def test_custom_field_ddl_then_failure_is_partial(self):
+		# Real DDL, so on a scratch DocType made here and dropped again (table and
+		# all): never on ToDo, whose table kept the probe column for good.
+		import uuid
+
 		fieldname = "pa_probe_field"
+		scratch = "Pa Probe Scratch " + uuid.uuid4().hex[:6]
+
+		def drop_scratch():
+			frappe.db.rollback()
+			frappe.set_user("Administrator")
+			frappe.db.delete("Custom Field", {"dt": scratch})
+			frappe.delete_doc_if_exists("DocType", scratch, force=True)
+			frappe.db.delete("Deleted Document", {"deleted_doctype": "DocType", "deleted_name": scratch})
+			frappe.db.sql_ddl(f"DROP TABLE IF EXISTS `tab{scratch}`")
+			frappe.clear_cache(doctype=scratch)
+			frappe.db.commit()
+			assert not frappe.db.exists("DocType", scratch), "scratch DocType left behind"
+			assert not frappe.db.sql("SHOW TABLES LIKE %s", f"tab{scratch}"), "scratch table left behind"
+
+		self.addCleanup(drop_scratch)
+		frappe.get_doc(
+			{
+				"doctype": "DocType",
+				"name": scratch,
+				"module": "Custom",
+				"custom": 1,
+				"fields": [{"label": "Title", "fieldname": "title", "fieldtype": "Data"}],
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
 
 		def body(tool, args):
 			frappe.get_doc(
 				{
 					"doctype": "Custom Field",
-					"dt": "ToDo",
+					"dt": scratch,
 					"fieldname": fieldname,
 					"label": "PA Probe",
 					"fieldtype": "Data",
@@ -794,19 +823,11 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 		# DDL doctype the list does not know, which is what this test is about.
 		from jarvis.tools import _write_risk
 
-		try:
-			with patch.object(
-				_write_risk, "STRUCTURE_DOCTYPES", _write_risk.STRUCTURE_DOCTYPES - {"Custom Field"}
-			):
-				name, out, _ = self._run(
-					body, tool="run_import", args={"doctype": "ToDo", "file_url": "/y.csv"}
-				)
-			self.assertEqual(self.row(name).reason_code, "partial")
-		finally:
-			cf = frappe.db.get_value("Custom Field", {"dt": "ToDo", "fieldname": fieldname})
-			if cf:
-				frappe.delete_doc("Custom Field", cf, ignore_permissions=True, force=True)
-			frappe.db.commit()
+		with patch.object(
+			_write_risk, "STRUCTURE_DOCTYPES", _write_risk.STRUCTURE_DOCTYPES - {"Custom Field"}
+		):
+			name, out, _ = self._run(body, tool="run_import", args={"doctype": "ToDo", "file_url": "/y.csv"})
+		self.assertEqual(self.row(name).reason_code, "partial")
 
 	def test_mid_dispatch_rollback_then_commit_is_partial(self):
 		def body(tool, args):

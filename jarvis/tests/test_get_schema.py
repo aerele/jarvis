@@ -363,7 +363,14 @@ class TestGetSchemaCustomFlags(FrappeTestCase):
 			frappe.delete_doc("Custom Field", cf, force=True, ignore_permissions=True)
 		if frappe.db.exists("DocType", cls.CUSTOM_DT):
 			frappe.delete_doc("DocType", cls.CUSTOM_DT, force=True, ignore_permissions=True)
+		# Deleting a Custom Field keeps its column and deleting a DocType keeps its
+		# table: both were made here, so both go (they stayed on the test sites).
+		frappe.db.commit()
+		if cls.CF_FIELD in frappe.db.get_table_columns("ToDo"):
+			frappe.db.sql_ddl(f"ALTER TABLE `tabToDo` DROP COLUMN `{cls.CF_FIELD}`")
+		frappe.db.sql_ddl(f"DROP TABLE IF EXISTS `tab{cls.CUSTOM_DT}`")
 		frappe.clear_cache(doctype="ToDo")
+		frappe.db.commit()
 		super().tearDownClass()
 
 	def test_custom_field_carries_is_custom(self):

@@ -18,6 +18,37 @@ export default [
     "status": false
   },
   {
+    "code": "subscription-expired",
+    "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
+    "headline": "{provider} sign-in expired",
+    "hint": "Ask your workspace admin to reconnect it, then send again.",
+    "retryable": false,
+    "status": false,
+    "upstreams": {
+      "labels": {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "xai": "xAI Grok",
+        "kimi": "Kimi (Moonshot)"
+      },
+      "providerTokens": {
+        "codex": "openai",
+        "openai": "openai",
+        "xai": "xai",
+        "kimi": "kimi",
+        "claude": "anthropic",
+        "anthropic": "anthropic"
+      },
+      "signal": "refresh_token_(?:reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|invalid_grant|oauth token has expired|token expired",
+      "mentions": {
+        "openai": "\\b(?:codex|openai|chatgpt)\\b",
+        "anthropic": "\\b(?:claude code|anthropic|claude)\\b",
+        "xai": "\\b(?:xai|grok)\\b",
+        "kimi": "\\b(?:kimi|moonshot)\\b"
+      }
+    }
+  },
+  {
     "code": "models-exhausted",
     "pattern": "all (models|providers|fallbacks) failed",
     "headline": "The models tried could not complete this request",

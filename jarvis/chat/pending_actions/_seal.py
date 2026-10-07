@@ -147,6 +147,22 @@ def unseal_settlement(row) -> dict | None:
 	return payload
 
 
+def seal_undo(name: str, undo: dict) -> str:
+	"""Seal what a guarded structure write's clean-up needs (the before-image of the
+	record it changes), bound to the row it rides on."""
+	return _encrypt({"undo": undo, "v": VERSION, "name": name})
+
+
+def unseal_undo(row) -> dict | None:
+	"""The sealed clean-up state of ``row``, or None when it carries none."""
+	if not row.get("sealed_undo"):
+		return None
+	payload = _open(row.get("sealed_undo"))
+	if payload.get("name") != row.get("name"):
+		raise SealError("tampered", "name")
+	return payload.get("undo") or {}
+
+
 def open_key(owner: str, dedup_key: str) -> str:
 	"""Keyed dedup fingerprint: equal for the same owner + key, opaque otherwise."""
 	return hmac.new(_derive(_OPEN_KEY_INFO), f"{owner}\x00{dedup_key}".encode(), hashlib.sha256).hexdigest()
