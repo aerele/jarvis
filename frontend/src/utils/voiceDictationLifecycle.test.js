@@ -207,7 +207,7 @@ test("send() carries the composer text verbatim — there is nothing left to str
 	const body = sendBody();
 	assert.match(
 		body,
-		/const text = \(fromMain \? input\.value : textArg\)\.trim\(\);/,
+		/: \(fromMain \? input\.value : textArg\)\.trim\(\);/,
 		"a placeholder-stripping payload was only ever needed because clips could leave holes"
 	);
 	const post = body.indexOf("await api.sendMessage(");

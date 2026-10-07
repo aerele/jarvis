@@ -55,9 +55,11 @@ export function promoteNewChatScope({ queue, drafts, fromScope, toId, takeScope 
 //     leave guard with no chip and no action.
 //   * restoreText — a MAIN-composer send (fromMain) drops its bubble and restores its text to the
 //     composer, where its still-retained voice records stay re-captureable on the next send.
-// A MAIN send is left EXACTLY as rounds 1/2 (drop + restore); only the resend-with-voice path
-// changes. A programmatic non-voice send drops the bubble as before.
-export function planRejectedSend({ fromMain, bubbleVoiceAck }) {
+// Callers with a complete request that cannot be restored as text alone pass preserveRequest.
+// Otherwise retain the established text-only composer and voice recovery behavior.
+export function planRejectedSend({ fromMain, bubbleVoiceAck, preserveRequest = false }) {
+	// File-bearing sends and complete-payload retries have no safe text-only fallback.
+	if (preserveRequest) return { keepBubble: true, restoreText: false };
 	const hasVoice = !!(bubbleVoiceAck && bubbleVoiceAck.length);
 	if (!fromMain && hasVoice) return { keepBubble: true, restoreText: false };
 	return { keepBubble: false, restoreText: !!fromMain };
@@ -136,7 +138,10 @@ export function createPendingSends() {
 				dst = new Map();
 				byScope.set(tk, dst);
 			}
-			for (const [name, bubble] of src) if (!dst.has(name)) dst.set(name, bubble);
+			for (const [name, bubble] of src) {
+				if (bubble.sendRequest) bubble.sendRequest.conversation = toScope;
+				if (!dst.has(name)) dst.set(name, bubble);
+			}
 			byScope.delete(fk);
 		},
 	};
