@@ -439,6 +439,11 @@ def _effect_usage(ctx: _Ctx) -> None:
 		return
 	if outcome == _usage.USAGE_RETRY:
 		raise _UsageRetry(f"usage not fresh for {ctx.run_id} (session {session_key})")
+	# The unit above committed: this turn completed, which proves the sign-in it ran on works. Clears a
+	# chat-detected expiry; the runner commits this effect's done mark right after. Never raises.
+	from jarvis import subscription_health
+
+	subscription_health.note_session_row(row)
 
 
 def _stamp_reply_model(ctx: _Ctx, row: dict | None) -> None:

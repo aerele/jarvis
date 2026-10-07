@@ -1,5 +1,6 @@
 import { isReadyForChat } from "@/api.js";
 import { isOnboardComplete } from "@/onboarding/steps.js";
+import { autoLine } from "@/llm/pool.js";
 
 // Shared, memoized readiness verdict. Two callers need it per page load: the
 // router's first-navigation guard (bounce an already-onboarded user off a stale
@@ -334,4 +335,32 @@ export async function isLlmApplying() {
 export async function isLlmApplyStuck() {
 	const r = await checkReady();
 	return !!(r && !r.ready && r.reason === "llm_apply_stuck");
+}
+
+// Copy for the "chat sign-in expired" composer banner (spec section 3). `expired` is
+// subscriptionNotice.expired: the first entry drives the banner. An admin with another model
+// still answering is told which one; a member (who only ever receives an entry when their chats
+// are failing) is sent to their admin and gets no action.
+export function subscriptionExpiredBanner(expired, isAdmin) {
+	const entry = Array.isArray(expired) ? expired[0] : null;
+	if (!entry) return null;
+	const title = `${entry.label} sign-in expired`;
+	if (!isAdmin) {
+		return {
+			title,
+			message: "Ask your workspace admin to reconnect it.",
+			upstream: entry.upstream,
+			accountRef: "",
+			showReconnect: false,
+		};
+	}
+	return {
+		title,
+		message: entry.fallback
+			? autoLine(entry)
+			: "Chats that need it will fail until it is reconnected.",
+		upstream: entry.upstream,
+		accountRef: entry.account_ref || "",
+		showReconnect: true,
+	};
 }
