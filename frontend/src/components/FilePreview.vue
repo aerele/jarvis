@@ -67,6 +67,15 @@
 							@click="sheetIdx = si"
 						/>
 					</div>
+					<div v-if="curCharts.length" class="space-y-3 border-b p-3">
+						<div
+							v-for="(spec, ci) in curCharts"
+							:key="ci"
+							class="rounded bg-surface-white p-2"
+						>
+							<JvChart :spec="spec" :dark="effectiveDark" />
+						</div>
+					</div>
 					<div class="max-h-[65vh] overflow-auto">
 						<table class="w-full border-collapse text-sm">
 							<thead
@@ -143,6 +152,8 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
+import JvChart from "@/charts/JvChart.vue";
+import { useJarvisTheme } from "@/theme";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -163,7 +174,7 @@ const title = computed(
 		decodeURIComponent((props.fileUrl || "").split("?")[0].split("/").pop() || "File")
 );
 
-// {kind: 'pdf'|'image'|'html'|'svg'|'table'|'text'|'loading'|'none', content?, sheets?, text?}
+// {kind: 'pdf'|'image'|'html'|'svg'|'table'|'text'|'loading'|'none', content?, sheets?, charts?, text?}
 const view = ref({ kind: "loading" });
 const sheetIdx = ref(0);
 const curSheet = computed(() => {
@@ -171,6 +182,15 @@ const curSheet = computed(() => {
 	if (v.kind !== "table" || !v.sheets?.length) return { rows: [] };
 	return v.sheets[sheetIdx.value] || { rows: [] };
 });
+
+// charts the backend read from the xlsx, for the sheet on screen (jarvis-chart
+// specs, so the chat's JvChart renders them; its own title is drawn by the chart)
+const curCharts = computed(() =>
+	view.value.kind === "table"
+		? (view.value.charts || []).filter((c) => c.sheet === curSheet.value.name)
+		: []
+);
+const { effectiveDark } = useJarvisTheme();
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico"]);
 function detectKind() {
@@ -227,7 +247,11 @@ async function load() {
 		const r = await api.previewFile(props.fileUrl);
 		if (seq !== loadSeq) return;
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			view.value = { kind: "table", sheets: r.sheets };
+			view.value = {
+				kind: "table",
+				sheets: r.sheets,
+				charts: Array.isArray(r.charts) ? r.charts : [],
+			};
 			return;
 		}
 		if (r && r.kind === "text") {
