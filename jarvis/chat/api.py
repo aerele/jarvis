@@ -984,16 +984,26 @@ def preview_file(file_url: str) -> dict:
 	require_jarvis_access()
 	if not file_url:
 		return {"kind": "binary"}
-	from jarvis.tools.read_file import read_file
+	from jarvis import compat
+	from jarvis.chat.xlsx_charts import extract_charts, preview_cell
+	from jarvis.tools.read_file import _resolve_file, read_file
 
 	data = read_file(file_url=file_url, max_rows=300, max_chars=8000)
 	kind = data.get("kind")
 	if kind == "table":
 		sheets = [
-			{"name": s.get("name") or "Sheet", "rows": (s.get("rows") or [])}
+			{
+				"name": s.get("name") or "Sheet",
+				"rows": [[preview_cell(c) for c in row] for row in (s.get("rows") or [])],
+			}
 			for s in (data.get("sheets") or [])
 		]
-		return {"kind": "table", "sheets": sheets, "filename": data.get("filename")}
+		out = {"kind": "table", "sheets": sheets, "filename": data.get("filename")}
+		if data.get("format") == "xlsx":
+			# read_file (values only) cannot see charts; read them from the zip
+			content = compat.file_bytes(_resolve_file(file_url, None))
+			out["charts"] = extract_charts(content)
+		return out
 	if kind == "text":
 		return {"kind": "text", "text": data.get("text") or ""}
 	return {"kind": kind or "binary"}
