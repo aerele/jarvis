@@ -9,7 +9,8 @@ import path from "path";
 export default defineConfig({
 	plugins: [vue()],
 	resolve: {
-		dedupe: ["vue", "vue-router"],
+		// PWA modules tested here use this installation, including in frontend-only CI.
+		dedupe: ["vue", "vue-router", "frappe-ui"],
 		alias: {
 			"@": path.resolve(__dirname, "src"),
 			// The phone's components import the shared helpers as @shared (see

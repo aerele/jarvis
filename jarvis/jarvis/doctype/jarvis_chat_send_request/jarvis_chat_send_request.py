@@ -1,5 +1,7 @@
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisChatSendRequest(Document):
+
+class JarvisChatSendRequest(NotRenamable, Document):
 	pass

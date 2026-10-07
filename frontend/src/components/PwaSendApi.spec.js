@@ -1,7 +1,6 @@
 import { it, expect, vi } from "vitest";
 const { call } = vi.hoisted(() => ({ call: vi.fn(async () => ({ delivery: "unknown" })) }));
 vi.mock("frappe-ui", () => ({ call }));
-vi.mock("../../../pwa/node_modules/frappe-ui/src/index.ts", () => ({ call }));
 import { sendRecoverableMessage, checkDelivery } from "../../../pwa/src/api.js";
 it("new-chat retries preserve first-send preferences and use the shared receipt endpoint", async () => {
 	const request = {

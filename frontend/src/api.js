@@ -812,6 +812,10 @@ export const fileboxDrop = (file_url, file_name, skill, file) =>
 	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill, file });
 // Whether a skill may still tag the next drop ({available}): a bulk drop checks once.
 export const fileboxCheckSkill = (skill) => call("jarvis.chat.filebox.check_skill", { skill });
+// What a File Box file's chat waits on ({items}): its questions (answered with
+// decideApproval, as on the board) and held records / sheets (linked to the board).
+export const fileboxOpenWaits = (conversation) =>
+	call("jarvis.chat.filebox.open_waits", { conversation });
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
