@@ -17,7 +17,8 @@
 			</span>
 			<div class="mb-4">
 				<label class="mb-1.5 block text-sm font-medium"
-					>Overall, how satisfied are you this month?</label
+					>Overall, how satisfied
+					{{ isPrevious ? "were you last month" : "are you this month" }}?</label
 				>
 				<div class="flex gap-1 text-2xl">
 					<button
@@ -36,7 +37,9 @@
 				<label class="mb-1.5 block text-sm font-medium">
 					Which do you use most?
 					<span class="font-normal text-ink-gray-5"
-						>only what you've used this month</span
+						>only what you{{
+							isPrevious ? " used last month" : "'ve used this month"
+						}}</span
 					>
 				</label>
 				<div class="flex flex-wrap gap-1.5">
@@ -107,6 +110,8 @@ const FEATURE_LABELS = {
 const open = pulseFeedbackOpen;
 const ctx = pulseFeedbackContext;
 const features = computed(() => ctx.value?.features_offered || []);
+// Server flag: the first days of a month ask about the month just ended.
+const isPrevious = computed(() => !!ctx.value?.period_is_previous);
 
 const stars = ref(0);
 const selectedFeatures = ref([]);

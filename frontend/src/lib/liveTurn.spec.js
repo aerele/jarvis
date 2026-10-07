@@ -340,6 +340,31 @@ describe("folded head", () => {
 		expect(foldedHead({ stopped: true }).label).toBe("Stopped");
 	});
 
+	it("a settled turn that ran no tools has no bar; a running or tooled one keeps it", () => {
+		expect(foldedHead({ seconds: 3, toolNames: [], settled: true })).toBeNull();
+		expect(foldedHead({ seconds: 3, toolNames: [] }).label).toBe("Worked 3s");
+		expect(foldedHead({ seconds: 3, toolNames: ["get_doc"], settled: true }).expandable).toBe(
+			true
+		);
+		expect(foldedHead({ seconds: 3, stopped: true, settled: true }).label).toBe(
+			"Stopped after 3s"
+		);
+		expect(foldedHead({ seconds: 3, failed: true, settled: true }).tone).toBe("failed");
+		expect(foldedHead({ seconds: 3, finishing: true, settled: true }).finishing).toBe(true);
+	});
+
+	it("a saved reply whose tool strip is empty keeps its bar unless the caller knows nothing ran", () => {
+		// ChatView passes settled only when no tool row of any kind and no steps exist.
+		expect(foldedHead({ seconds: 53, toolNames: [], settled: false })).not.toBeNull();
+		expect(foldedHead({ seconds: 53, toolNames: [], settled: true })).toBeNull();
+	});
+
+	it("a streaming answer with no tool so far shows no bar; one appears when a tool has run", () => {
+		const base = { seconds: 2, showDetail: true, settled: true };
+		expect(foldedHead({ ...base, toolNames: [] })).toBeNull();
+		expect(foldedHead({ ...base, toolNames: ["get_doc"] }).count).toBe("1 tool");
+	});
+
 	it("finishing rides on the line until enrichment lands", () => {
 		expect(
 			foldedHead({ seconds: 52, toolNames: ["export_excel"], finishing: true }).finishing

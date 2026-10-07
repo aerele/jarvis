@@ -1,3 +1,5 @@
+import { cookieUser } from "./sessionCookie.js";
+
 // Shared extractor for a user-facing message out of a Frappe API error.
 // Single source for AccountView / OnboardingView / LlmPoolEditor so a change to
 // Frappe's error envelope only has to be made once.
@@ -42,7 +44,22 @@ function isInternalCrash(e) {
 export const GENERIC_ERROR_MESSAGE =
 	"Something went wrong. Try again, and check back if it keeps happening.";
 
+export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+
+// An expired session (#644): Frappe answers 403 "not whitelisted ... Login to
+// access" (a PermissionError) AND clears the cookies, which is why the cookie
+// is the signal (frappe-ui drops the body's `session_expired` flag). So a 401/403 that arrives while the
+// cookie now reads Guest/absent is an expired session, not a permission error.
+// A 403 on a live session stays a genuine permission error.
+export function isSessionExpired(e) {
+	if (!e) return false;
+	if (typeof document === "undefined") return false;
+	const authFailure = e.status === 401 || e.status === 403 || e.exc_type === "PermissionError";
+	return authFailure && !cookieUser();
+}
+
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
+	if (isSessionExpired(e)) return SESSION_EXPIRED_MESSAGE;
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4
 	// review F1): frappe.throw("You do not have permission to disconnect this
 	// model") is a real, actionable remedy, and burying it under a blanket
@@ -56,7 +73,7 @@ export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	// cannot explain. This outranks `fallback` deliberately: "sign in again" is
 	// an actionable remedy, a caller's "Could not save." is not.
 	if (!specific && e && (e.status === 401 || e.status === 403)) {
-		return "Your session has expired. Please sign in again.";
+		return SESSION_EXPIRED_MESSAGE;
 	}
 	const raw = specific || fallback;
 	if (typeof document === "undefined") return raw;
