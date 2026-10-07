@@ -394,7 +394,10 @@ def _user_messages_between(user: str, since, until) -> int:
 	``file_box``, ``agent``, ``system``). ``human`` is a typed send,
 	``board_answer`` an answer the person gave on an approval card, and blank is
 	a legacy row from before ``origin`` was stamped. ``hidden`` rows are
-	continuations the user did not type."""
+	continuations the user did not type.
+
+	A ``delegated`` row in an ordinary conversation is deliberately not counted
+	here, although the open-ended path (``turn_count``) does count its turn."""
 	msg = frappe.qb.DocType(MSG)
 	conv = frappe.qb.DocType(CONV)
 	rows = (

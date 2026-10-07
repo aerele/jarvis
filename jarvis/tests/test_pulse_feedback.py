@@ -148,7 +148,10 @@ class _PulseTestCase(FrappeTestCase):
 					"content": "hi",
 					"origin": origin,
 				}
-			).insert(ignore_permissions=True)
+			)
+			# ``origin`` is a server-owned field: only a flagged writer may set it.
+			doc.flags.jarvis_server_write = True
+			doc.insert(ignore_permissions=True)
 			frappe.db.set_value(MSG, doc.name, "creation", when, update_modified=False)
 
 
