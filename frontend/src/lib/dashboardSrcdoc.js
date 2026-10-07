@@ -233,7 +233,8 @@ export const RUNTIME_JS = `(function () {
 
 	// The sandbox has no allow-popups/allow-top-navigation, so an <a href> or
 	// window.open can never open anything from in here. Hand the raw href to the
-	// parent instead. In-page "#" anchors keep their default (scroll in-frame).
+	// parent instead. In-page "#" anchors scroll here by hand: in a srcdoc frame
+	// the default would resolve against the parent URL and navigate the frame.
 	function postLink(href) {
 		post({ type: "link", href: href });
 	}
@@ -241,15 +242,45 @@ export const RUNTIME_JS = `(function () {
 		postLink(String(url == null ? "" : url));
 		return null;
 	};
+	function scrollToFragment(href) {
+		var id = href.slice(1);
+		try {
+			id = decodeURIComponent(id);
+		} catch (err) {
+			// keep the raw id
+		}
+		var target = null;
+		if (id && id.toLowerCase() !== "top") {
+			target = document.getElementById(id);
+			if (!target) {
+				var named = document.getElementsByName(id);
+				for (var i = 0; i < named.length && !target; i++) {
+					if (named[i].tagName === "A") target = named[i];
+				}
+			}
+			if (!target) return;
+		} else {
+			target = document.documentElement;
+		}
+		if (target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "start" });
+	}
 	document.addEventListener(
 		"click",
 		function (e) {
-			var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+			var a = e.target && e.target.closest ? e.target.closest("a[href], area[href]") : null;
 			if (!a) return;
 			var href = a.getAttribute("href");
-			if (href.charAt(0) === "#") return;
 			e.preventDefault();
-			postLink(href);
+			if (href.charAt(0) === "#") scrollToFragment(href);
+			else postLink(href);
+		},
+		true
+	);
+	// A GET form would navigate the frame to the parent URL as well.
+	document.addEventListener(
+		"submit",
+		function (e) {
+			e.preventDefault();
 		},
 		true
 	);
