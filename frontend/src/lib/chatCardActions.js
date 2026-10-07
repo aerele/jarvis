@@ -97,3 +97,35 @@ export function chatStatusLine(rec) {
 	if (rec.status === "Discarded") return "Discarded. Nothing ran.";
 	return rec.reason || "This action was already handled.";
 }
+
+export function shouldHideNextStep(refusal) {
+	return !refusal.temporary;
+}
+
+const NEXT_STEP_TOOLS = ["submit_doc", "apply_workflow_action"];
+// A step is done once a receipt for it succeeded: confirmed on a card, or auto-applied
+// without one. failed / discarded / unknown / partial leave it open.
+const NEXT_STEP_DONE_OUTCOMES = ["confirmed", "auto_applied"];
+
+export function receiptRecord(m) {
+	try {
+		const a = typeof m.tool_args === "string" ? JSON.parse(m.tool_args) : m.tool_args || {};
+		const r = typeof m.tool_result === "string" ? JSON.parse(m.tool_result) : m.tool_result;
+		const d = (r && r.data) || {};
+		return { doctype: d.doctype || a.doctype, name: d.name || a.name };
+	} catch (e) {
+		return {};
+	}
+}
+
+// "Doctype|name" keys of the records the thread's receipts already acted on, plus `gone`.
+export function nextStepActedKeys(rows, gone = new Set()) {
+	const keys = new Set(gone);
+	for (const x of rows) {
+		if (x.role !== "tool" || !NEXT_STEP_DONE_OUTCOMES.includes(x.action_outcome)) continue;
+		if (!NEXT_STEP_TOOLS.includes(x.tool_name)) continue;
+		const o = receiptRecord(x);
+		keys.add(`${o.doctype}|${o.name}`);
+	}
+	return keys;
+}
