@@ -773,6 +773,8 @@ def get_conversation(conversation: str) -> dict:
 			"origin_page": doc.get("origin_page") or "",
 			# Per-chat auto mode (#581): 1 locks the composer toggle on.
 			"auto_mode": frappe.utils.cint(doc.get("auto_mode")),
+			# A File Box file's chat: the SPA shows what it waits on (filebox.open_waits).
+			"file_box": frappe.utils.cint(doc.get("file_box")),
 			"last_active_at": doc.last_active_at,
 		},
 		"messages": messages,
