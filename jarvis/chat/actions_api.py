@@ -359,10 +359,16 @@ def _append_receipt(
 	args: dict,
 	text: str,
 	suggested_next: dict | None = None,
+	submitted: int = 0,
 ) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
 	the transcript on its next turn - so it never re-applies the change."""
+	data = {"doctype": doctype, "name": name}
+	if verb == "create" and submitted:
+		# So the chip itself says "Created and submitted" (the assistant row repeating it is
+		# then a true duplicate); docstatus 1 is the saved state, read by receiptView.
+		data["docstatus"] = 1
 	receipt = frappe.get_doc(
 		{
 			"doctype": MSG,
@@ -375,11 +381,7 @@ def _append_receipt(
 			"tool_result": frappe.as_json(
 				{
 					"ok": True,
-					"data": {
-						"doctype": doctype,
-						"name": name,
-						**({"suggested_next": suggested_next} if suggested_next else {}),
-					},
+					"data": {**data, **({"suggested_next": suggested_next} if suggested_next else {})},
 				}
 			),
 			"tool_status": "completed",
@@ -620,7 +622,16 @@ def apply_action(action: dict | str | None = None) -> dict:
 	receipt = _receipt_text(verb, doctype, name, do_submit)
 	suggested_next = _suggest_next_safe(doctype, name) if verb == "create" and not do_submit else None
 	try:
-		_append_receipt(conversation, verb, doctype, name, args, receipt, suggested_next)
+		_append_receipt(
+			conversation,
+			verb,
+			doctype,
+			name,
+			args,
+			receipt,
+			suggested_next=suggested_next,
+			submitted=do_submit,
+		)
 		frappe.db.commit()
 	except Exception:
 		# The mutation is already committed - a receipt hiccup must not

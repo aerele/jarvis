@@ -811,6 +811,8 @@
 							@retry="resendFailed(m)"
 							@open-attachment="openArtifact(m, $event)"
 						/>
+						<!-- the assistant row repeating the receipt chip right above it -->
+						<template v-else-if="isReceiptEcho(m, visibleMessages[mi - 1])" />
 						<!-- assistant -->
 						<!-- copied/@copy here drive Message's BUILT-IN trailer, which #below-body
 						     suppresses — chat's real Copy button is in the slotted metabar below.
@@ -4364,6 +4366,7 @@ import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
+import { isReceiptEcho } from "@/lib/receiptEcho";
 import { firstSendPicks } from "@/lib/firstSendPicks";
 import {
 	CLEAR_HISTORY_CONFIRM,
