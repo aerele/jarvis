@@ -293,6 +293,61 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
   run, File Box, the Approval Board edit, `preview_doc`, and at Confirm for a card
   parked before the guard. Code `structure_refused`, `error.desk_path` names the
   Desk page. Any structure doctype in a batch refuses the whole batch.
+- **Guarded structure writes** (R2-10; `_guarded_structure.py`, shared, and
+  `_custom_field_guard.py`): the two structure changes chat may make, each only
+  through a confirmation card on an ordinary chat (never File Box, the Approval
+  Board, a sheet, `preview_doc` or an uncarded run), with NO trial run:
+  - ONE new Custom Field (`create_doc`, not a batch), and an edit of ONE Custom
+    Field that changes no column (`update_doc`: label, description, hidden,
+    mandatory ...). A delete, a change of type / length / name / `unique` / index,
+    a virtual, Table or HTML field, an app-made (`is_system_generated`) field, and
+    any field on a core, virtual, security, audit or Jarvis DocType (or one the
+    structure / sensitive lists name): refused, with the Desk page.
+  - Every check reads the values as the write stores them (`unique: "true"` is 1,
+    `length: "1,000"` is 1000), and the schema diff runs on a private `Meta` no
+    cache holds.
+  - `fetch_from` only as `<Link field of the form>.<ordinary field of the linked
+    form>` the requester may read (never a Password / secret-named / permlevel
+    field); a default with a quote or backslash is refused (it would leave the
+    table drifting).
+  - Park checks refuse what is known to fail, naming the field: a fieldname that
+    is already a field or a column of the real table (`information_schema`, so a
+    leftover column counts), leftover Property Setters for it, a row with no room
+    (MariaDB's 65,535-byte limit less a margin), no Custom Field create / DocType
+    write permission, and a schema diff (`schema_changes`: Frappe's own
+    `DBTable.alter` with `sql_ddl` recorded, inside a rolled-back savepoint) that is
+    not exactly the one expected `ADD COLUMN` (nothing, for an edit).
+  - The card is the sensitive full card with the banner "Confirming changes the
+    database structure for every user and cannot be undone." (`card.structural`),
+    followed by "This runs code for every user." for an `eval:` expression, the
+    access line for permlevel / ignore_user_permissions / mask / reqd / hidden /
+    Link options / fetch_from, and a line saying a fetch copies data from the
+    linked record.
+  - Confirm (`pending_actions.execute`): the form's structure lock (a MariaDB
+    `GET_LOCK` on its own connection: no cache clear or commit drops it, a dead
+    worker lets go at once) is taken BEFORE the claim (held: "try again", the card
+    stays), the checks run again under it, the ALTER waits 5 s at most for the
+    table (`lock_wait_timeout`, put back), and a failure after the field row
+    committed is cleaned up under the same lock. The row this confirmation wrote
+    is known exactly: its name and timestamp are stamped into `sealed_undo` in the
+    save's own transaction. A new field's row is removed when its column is
+    missing; an edit is put back from the before-image sealed at the claim.
+    Outcome: `failed` ("nothing was changed") when the clean-up proved nothing is
+    left, `partial` when something may remain (a complete field kept, a later edit
+    standing, a clean-up that failed twice); never fixable. The reconciler does
+    the same clean-up, under the same lock, for a row whose worker died and for a
+    clean-up that failed (retried for 24 h, then logged as needing a person).
+  - Shown in full on the card but NOT flagged or refused (owner-accepted): markup
+    in a label or description, and a fetch from an ordinary readable field of the
+    linked record (a User's mobile number, say). The person confirming reads every
+    value the field carries.
+  - The call is carded, sealed and run in its stored form (`_stored`: `"TRUE"` is
+    1, `"1,000"` is 1000, the doctype by its exact name), so the card, the checks
+    and the write never disagree. Re-pointing a Link re-checks every fetch through
+    it against the new target.
+  - Site config `jarvis_structure_writes_disabled: 1` turns both off (refused like
+    any structure write). Needs `bench migrate` (`sealed_undo`); until then they
+    are refused too.
 - **Sensitive** (Server Script, Client Script, Webhook, Notification, Auto Email
   Report, Custom DocPerm, Property Setter, Scheduled Job Type, Website Script,
   Custom HTML Block, Email Account / Domain, User, Role, Role Profile, Module
