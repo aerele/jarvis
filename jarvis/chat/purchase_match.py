@@ -180,7 +180,7 @@ def configuration_issues(raw):
 					)
 	policy = config.get("policy_version")
 	if not isinstance(policy, str) or not 1 <= len(policy.strip()) <= 128:
-		issues["policy_version"] = "Enter an AP matching policy reference (1–128 characters)."
+		issues["policy_version"] = "Enter an AP matching policy reference (1 to 128 characters)."
 	try:
 		tolerance = Decimal(str(config.get("price_tolerance_percent")))
 		if not tolerance.is_finite() or not 0 <= tolerance <= 100:

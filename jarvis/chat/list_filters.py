@@ -1821,7 +1821,7 @@ def bounded_sql(query: str, values: Any = None, **kwargs: Any):
 			raise
 		_fail(
 			ERR_QUERY_TOO_EXPENSIVE,
-			_("That filter is too broad to run on this list — narrow it and try again."),
+			_("That filter is too broad to run on this list. Narrow it and try again."),
 		)
 
 

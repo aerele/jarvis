@@ -42,7 +42,7 @@ export const CONFIG_FIELD_SET = [
 		label: "Recent-settlement hold",
 		type: "number",
 		suffix: "calendar days",
-		help: "Suggested: 3 calendar days (0–30). Hold recent allocations for reconciliation, not business-day or statutory grace-period calculation.",
+		help: "Suggested: 3 calendar days (0 to 30). Hold recent allocations for reconciliation, not business-day or statutory grace-period calculation.",
 	},
 	{
 		key: "bank_account",
@@ -100,7 +100,7 @@ export const CONFIG_FIELD_SET = [
 		options: [
 			{ label: "Confirm review scope", value: "" },
 			{
-				label: "Document matching only — no tax or posting approval",
+				label: "Document matching only: no tax or posting approval",
 				value: "document_matching_only",
 			},
 		],

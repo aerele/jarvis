@@ -997,7 +997,7 @@ class TestSupportContextCopyPreference(_UsageTestBase):
 		msg = str(cm.exception)
 		self.assertNotIn("<img", msg)
 		self.assertNotIn("onerror", msg)
-		self.assertIn("Yes, No, or blank", msg)
+		self.assertIn("Yes, No or blank", msg)
 
 	def test_non_string_value_does_not_500(self):
 		# Same arg-type-gate gap as preferred_persona (from __future__ import

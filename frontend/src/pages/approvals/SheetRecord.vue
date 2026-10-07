@@ -261,7 +261,7 @@ const props = defineProps({
 const emit = defineEmits(["choose"]);
 
 const HINTS = {
-	fix: __("Use Edit to fix it, use an existing one, or skip it."),
+	fix: __("Use Edit to fix it, use an existing one or skip it."),
 	fix_unchanged: __("Change the value it needs, or skip it."),
 	missing: __("Use Edit to fill it in, or skip it."),
 	existing: __("Pick the existing record to use."),

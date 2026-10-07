@@ -97,7 +97,7 @@ const meta = (tier) => BADGE_META[tier] || { theme: "gray", label: tier };
 						/>
 					</button>
 				</div>
-				<p class="jv-catalog-hint">Tap one to start — you can edit before sending.</p>
+				<p class="jv-catalog-hint">Tap one to start. You can edit before sending.</p>
 			</template>
 		</div>
 	</div>
