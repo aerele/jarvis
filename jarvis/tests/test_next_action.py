@@ -47,7 +47,14 @@ class TestSuggestNext(FrappeTestCase):
 
 	def test_first_permitted_workflow_action(self):
 		s = self._suggest(workflow="WF", actions=["Approve", "Reject"])
-		self.assertEqual(s, {"kind": "workflow", "action": "Approve", "label": "Approve"})
+		self.assertEqual(s, {"kind": "workflow", "action": "Approve"})
+
+	def test_negative_actions_are_skipped(self):
+		s = self._suggest(workflow="WF", actions=["Reject", "Cancel Request", "Approve"])
+		self.assertEqual(s["action"], "Approve")
+
+	def test_only_negative_actions_offer_nothing(self):
+		self.assertIsNone(self._suggest(workflow="WF", actions=["Reject", "Withdraw", "Decline"]))
 
 	def test_workflow_without_permitted_action_offers_nothing_not_submit(self):
 		self.assertIsNone(self._suggest(workflow="WF", actions=[]))
@@ -68,7 +75,7 @@ class TestApplyActionSuggestion(FrappeTestCase):
 		return conv, r
 
 	def test_suggestion_returned_and_persisted_on_receipt(self):
-		sug = {"kind": "submit", "action": None, "label": "Submit"}
+		sug = {"kind": "submit", "action": None}
 		with patch.object(actions_api, "_suggest_next", return_value=sug):
 			conv, r = self._create("ToDo", {"description": "next step"})
 		self.assertEqual(r["suggested_next"], sug)
@@ -101,37 +108,134 @@ class TestProposeNextAction(FrappeTestCase):
 			lambda: frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
 		)
 
-	def test_submit_parks_the_normal_card(self):
-		sug = {"kind": "submit", "action": None, "label": "Submit"}
+	def _receipt(self, conv, doctype="Sales Order", name="SO-1", outcome="confirmed"):
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Message",
+				"conversation": conv,
+				"seq": 1 + frappe.db.count("Jarvis Chat Message", {"conversation": conv}),
+				"role": "tool",
+				"streaming": 0,
+				"tool_name": "create_doc",
+				"tool_args": "{}",
+				"tool_result": frappe.as_json({"ok": True, "data": {"doctype": doctype, "name": name}}),
+				"tool_status": "completed",
+				"action_outcome": outcome,
+			}
+		).insert(ignore_permissions=True)
+
+	def _propose(self, *a, sug=None, run=None, perm=True, **kw):
 		with (
 			patch.object(actions_api, "_suggest_next", return_value=sug),
-			patch("jarvis.api._run_tool", return_value={"ok": True}) as run,
+			patch("frappe.db.exists", return_value=True),
+			patch("frappe.has_permission", return_value=perm),
+			patch("jarvis.api._run_tool", return_value={"ok": True}) as rt,
 		):
-			propose_next_action(self.conv, "Sales Order", "SO-1", "submit")
+			out = propose_next_action(*a, **kw)
+		return out, rt
+
+	def test_submit_parks_the_normal_card(self):
+		self._receipt(self.conv)
+		_, run = self._propose(
+			self.conv, "Sales Order", "SO-1", "submit", sug={"kind": "submit", "action": None}
+		)
 		run.assert_called_once_with(
 			"submit_doc", {"doctype": "Sales Order", "name": "SO-1"}, conversation=self.conv
 		)
 
 	def test_workflow_parks_apply_workflow_action(self):
-		sug = {"kind": "workflow", "action": "Approve", "label": "Approve"}
-		with (
-			patch.object(actions_api, "_suggest_next", return_value=sug),
-			patch("jarvis.api._run_tool", return_value={"ok": True}) as run,
-		):
-			propose_next_action(self.conv, "Leave Application", "LA-1", "workflow", "Approve")
+		self._receipt(self.conv, "Leave Application", "LA-1")
+		_, run = self._propose(
+			self.conv,
+			"Leave Application",
+			"LA-1",
+			"workflow",
+			"Approve",
+			sug={"kind": "workflow", "action": "Approve"},
+		)
 		run.assert_called_once_with(
 			"apply_workflow_action",
 			{"doctype": "Leave Application", "name": "LA-1", "action": "Approve"},
 			conversation=self.conv,
 		)
 
-	def test_stale_or_unpermitted_step_is_refused(self):
-		with patch.object(actions_api, "_suggest_next", return_value=None):
-			with self.assertRaises(InvalidArgumentError):
-				propose_next_action(self.conv, "Sales Order", "SO-1", "submit")
+	def test_stale_step_is_refused(self):
+		self._receipt(self.conv)
+		with self.assertRaises(InvalidArgumentError):
+			self._propose(self.conv, "Sales Order", "SO-1", "submit", sug=None)
 
 	def test_a_different_action_than_suggested_is_refused(self):
-		sug = {"kind": "workflow", "action": "Approve", "label": "Approve"}
-		with patch.object(actions_api, "_suggest_next", return_value=sug):
-			with self.assertRaises(InvalidArgumentError):
-				propose_next_action(self.conv, "Leave Application", "LA-1", "workflow", "Reject")
+		self._receipt(self.conv, "Leave Application", "LA-1")
+		with self.assertRaises(InvalidArgumentError):
+			self._propose(
+				self.conv,
+				"Leave Application",
+				"LA-1",
+				"workflow",
+				"Reject",
+				sug={"kind": "workflow", "action": "Approve"},
+			)
+
+	def test_record_not_created_in_this_conversation_is_refused(self):
+		with self.assertRaises(InvalidArgumentError):
+			self._propose(self.conv, "Sales Order", "SO-9", "submit", sug={"kind": "submit", "action": None})
+
+	def test_unconfirmed_create_receipt_does_not_count(self):
+		self._receipt(self.conv, outcome="discarded")
+		with self.assertRaises(InvalidArgumentError):
+			self._propose(self.conv, "Sales Order", "SO-1", "submit", sug={"kind": "submit", "action": None})
+
+	def test_another_users_conversation_is_refused(self):
+		self._receipt(self.conv)
+		with patch.object(actions_api, "_owns_conversation", return_value=False):
+			with self.assertRaises(frappe.PermissionError):
+				self._propose(
+					self.conv, "Sales Order", "SO-1", "submit", sug={"kind": "submit", "action": None}
+				)
+
+	def test_unreadable_and_missing_records_read_the_same(self):
+		self._receipt(self.conv)
+		sug = {"kind": "submit", "action": None}
+		with self.assertRaises(InvalidArgumentError) as unreadable:
+			self._propose(self.conv, "Sales Order", "SO-1", "submit", sug=sug, perm=False)
+		with self.assertRaises(InvalidArgumentError) as missing:
+			self._propose(self.conv, "Sales Order", "SO-404", "submit", sug=sug)
+		self.assertEqual(str(unreadable.exception), str(missing.exception))
+
+	def test_unknown_doctype_is_refused_cleanly(self):
+		with self.assertRaises(InvalidArgumentError):
+			propose_next_action(self.conv, "No Such DocType", "X-1", "submit")
+
+	def test_auto_mode_still_parks_and_never_runs(self):
+		"""The force-card flag is set while the tool runs, so every uncarded branch
+		(auto mode, armed macro, autorun) steps aside."""
+		self._receipt(self.conv)
+		frappe.db.set_value("Jarvis Conversation", self.conv, "auto_mode", 1)
+		seen = {}
+
+		def fake_run(tool, args, conversation=None):
+			seen["flag"] = frappe.flags.get("jarvis_force_card")
+			return {"ok": True, "data": {"status": "pending_confirmation"}}
+
+		self._receipt(self.conv, "ToDo", "TD-1")
+		with (
+			patch.object(actions_api, "_suggest_next", return_value={"kind": "submit", "action": None}),
+			patch("frappe.has_permission", return_value=True),
+			patch("jarvis.api._run_tool", side_effect=fake_run),
+		):
+			out = propose_next_action(self.conv, "ToDo", "TD-1", "submit")
+		self.assertTrue(seen["flag"])
+		self.assertEqual(out["data"]["status"], "pending_confirmation")
+		self.assertIsNone(frappe.flags.get("jarvis_force_card"))
+
+	def test_force_card_overrides_auto_mode_in_the_gate(self):
+		"""Through the real gate: auto mode on, submit_doc parks and nothing is submitted."""
+		from jarvis import api
+
+		frappe.db.set_value("Jarvis Conversation", self.conv, "auto_mode", 1)
+		frappe.flags["jarvis_force_card"] = True
+		self.addCleanup(lambda: frappe.flags.pop("jarvis_force_card", None))
+		with patch("jarvis.tools.submit_doc.submit_doc") as submit:
+			res = api._run_tool("submit_doc", {"doctype": "ToDo", "name": "nope"}, conversation=self.conv)
+		submit.assert_not_called()
+		self.assertNotEqual((res.get("data") or {}).get("status"), "applied")
