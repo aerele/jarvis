@@ -4,6 +4,11 @@ openpyxl never loads charts from an existing workbook, so ``read_file`` (values
 only) cannot show them. This reads the DrawingML chart parts straight from the
 zip and returns them as ``jarvis-chart`` specs the chat's chart component
 already renders. Preview only: nothing here feeds the agent's ``read_file``.
+
+A series is drawn only from the points cached in its chart part (numCache /
+strCache), which Excel and both of Jarvis's export paths write. Worksheet cells
+are never read: that would mean parsing whole sheets of an untrusted upload, and
+a series without a cache is skipped.
 """
 
 from __future__ import annotations
@@ -21,15 +26,11 @@ MAX_RELS = 200
 MAX_POINTS = 500
 MAX_SERIES = 20
 # Per-file budget, enforced before a part is read, so a crafted upload cannot make
-# one preview parse thousands of parts or rescan sheets per series. Not covered:
-# openpyxl's own loading of the workbook (shared strings, styles) when a series
-# has no cached points and a sheet has to be read.
+# one preview parse thousands of parts. Only chart, drawing, relationship and
+# workbook parts are ever read; worksheets and shared strings never are.
 MAX_SHEETS = 50
 MAX_PARTS_TOTAL = 150
 MAX_BYTES_TOTAL = 10_000_000
-MAX_RANGE_ROW = 5_000
-MAX_COLS = 50
-MAX_ROWS_SCANNED = 20_000
 _MAX_PART_BYTES = 2_000_000
 
 _NS = {
@@ -94,13 +95,12 @@ def extract_charts(content: bytes) -> list[dict]:
 	out = []
 	try:
 		with zipfile.ZipFile(io.BytesIO(content)) as zf:
-			values = _SheetValues(content)
 			per_sheet = {}
 			try:
 				for sheet, chart_xml in _charts_by_sheet(zf, _Budget()):
 					if per_sheet.get(sheet, 0) >= MAX_CHARTS_PER_SHEET:
 						continue
-					spec = _chart_spec(chart_xml, values)
+					spec = _chart_spec(chart_xml)
 					if spec:
 						out.append({"sheet": sheet, **spec})
 						per_sheet[sheet] = per_sheet.get(sheet, 0) + 1
@@ -182,102 +182,56 @@ def _charts_by_sheet(zf, budget):
 					yield sh.get("name"), chart
 
 
-class _SheetValues:
-	"""Cell values for series that carry no cached points in the chart part.
-
-	Each sheet is scanned once, from row 1 (read-only openpyxl must parse every
-	row before the one it is asked for), keeping at most MAX_RANGE_ROW rows and
-	MAX_COLS columns; ranges are then sliced from memory. Rows scanned are
-	charged against one MAX_ROWS_SCANNED budget for the file."""
-
-	def __init__(self, content):
-		self._content = content
-		self._wb = None
-		self._grids = {}
-		self.rows_scanned = 0
-
-	def read(self, ref):
-		"""Flat list of the cells in ``'Sheet'!$A$1:$A$9``, or None if unusable."""
-		from openpyxl.utils.cell import range_boundaries
-
-		m = re.match(r"^(?:'((?:[^']|'')+)'|([^'!]+))!(\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?)$", ref.strip())
-		if not m:
-			return None
-		sheet = (m.group(1) or m.group(2)).replace("''", "'")
-		min_col, min_row, max_col, max_row = range_boundaries(m.group(3).replace("$", ""))
-		if (min_col != max_col and min_row != max_row) or min_row > MAX_RANGE_ROW or max_col > MAX_COLS:
-			return None
-		grid = self._grid(sheet)
-		if grid is None:
-			return None
-		max_row = min(max_row, min_row + MAX_POINTS - 1, len(grid))
-		return [c for row in grid[min_row - 1 : max_row] for c in row[min_col - 1 : max_col]]
-
-	def _grid(self, sheet):
-		"""The sheet's leading rows (scanned once, failures remembered as None)."""
-		if sheet not in self._grids:
-			self._grids[sheet] = self._scan(sheet)
-		return self._grids[sheet]
-
-	def _scan(self, sheet):
-		try:
-			if self._wb is None:
-				import openpyxl
-
-				self._wb = openpyxl.load_workbook(io.BytesIO(self._content), read_only=True, data_only=True)
-			if sheet not in self._wb.sheetnames:
-				return None
-			grid = []
-			if self.rows_scanned >= MAX_ROWS_SCANNED:
-				return None
-			rows = self._wb[sheet].iter_rows(max_row=MAX_RANGE_ROW, max_col=MAX_COLS, values_only=True)
-			for row in rows:
-				self.rows_scanned += 1
-				grid.append(list(row))
-				if self.rows_scanned >= MAX_ROWS_SCANNED:
-					break
-			return grid
-		except Exception:
-			return None
+def _format_kind(code):
+	"""``"date"`` for a number format with day/month/year parts, ``"time"`` for a
+	time-only one, else None. Quoted text, backslash escapes, [..] sections and
+	padding are ignored, so "Standard" or ``0\\ m`` are not dates."""
+	text = re.sub(r'"[^"]*"|\\.|\[[^\]]*\]|[_*].', "", code or "").lower()
+	runs = re.findall(r"[a-z]+", text)
+	clock = any(re.fullmatch(r"[hs]+", r) for r in runs)
+	# a digit placeholder makes it a number with a unit (``0 m``), not a date
+	if not re.search(r"[0#?]", text) and any(
+		re.fullmatch(r"[ymd]+", r) and (set(r) - {"m"} or not clock) for r in runs
+	):
+		return "date"
+	return "time" if clock else None
 
 
-def _is_date_format(code):
-	"""True for a number format with date parts (quoted text and [..] stripped)."""
-	return bool(re.search(r"[ymd]", re.sub(r'"[^"]*"|\[[^\]]*\]', "", code or "").lower()))
+def _serial(value, kind):
+	"""A cached number under a date/time format as a date; unchanged if it is not one."""
+	from openpyxl.utils.datetime import from_excel
+
+	try:
+		number = float(value)
+		if kind == "date" and 0 <= number < 1:
+			# openpyxl reads serials below 1 as a bare time; a date format wants the date
+			return datetime.datetime(1899, 12, 30) + datetime.timedelta(days=number)
+		return from_excel(number)
+	except (TypeError, ValueError, OverflowError):
+		return value
 
 
 def _cache(node):
 	"""Cached points under a c:strRef / c:numRef as a list (ptCount/idx are untrusted).
 	Numbers under a date format come back as dates, like the live cells would."""
-	from openpyxl.utils.datetime import from_excel
-
 	fmt = node.find(".//c:formatCode", _NS)
-	dated = fmt is not None and _is_date_format(fmt.text)
+	kind = _format_kind(fmt.text) if fmt is not None else None
 	pts = {}
 	for pt in node.findall(".//c:pt", _NS):
 		v = pt.find("c:v", _NS)
 		idx = pt.get("idx", "")
 		if v is not None and idx.isdigit() and int(idx) < MAX_POINTS:
-			value = v.text
-			if dated:
-				try:
-					value = from_excel(float(value))
-				except (TypeError, ValueError, OverflowError):
-					pass
-			pts[int(idx)] = value
-	return [pts.get(i) for i in range(max(pts, default=-1) + 1)]
+			pts[int(idx)] = _serial(v.text, kind) if kind else v.text
+	count = node.find(".//c:ptCount", _NS)
+	declared = int(count.get("val", "")) if count is not None and count.get("val", "").isdigit() else 0
+	return [
+		pts.get(i) for i in range(max(max(pts, default=-1) + 1, (declared if declared <= MAX_POINTS else 0)))
+	]
 
 
-def _points(node, values):
-	"""Points of a series reference: the chart's cached points when it has any,
-	else the live cells; [] if none."""
-	if node is None:
-		return []
-	cells = _cache(node)
-	if all(c is None for c in cells):
-		f = node.find(".//c:f", _NS)
-		cells = (values.read(f.text) if f is not None and f.text else None) or []
-	return cells[:MAX_POINTS]
+def _points(node):
+	"""Cached points of a series reference, capped; [] if none."""
+	return _cache(node)[:MAX_POINTS] if node is not None else []
 
 
 def _label(v):
@@ -304,7 +258,7 @@ def _title(node):
 	return "".join(t.text or "" for t in title.iter("{%s}t" % _NS["a"])).strip() or None
 
 
-def _chart_spec(chart, values):
+def _chart_spec(chart):
 	plot = chart.find("c:chart/c:plotArea", _NS)
 	kind = next((el for el in plot if el.tag.split("}")[-1] in _PLOTS), None) if plot is not None else None
 	if kind is None:
@@ -321,11 +275,11 @@ def _chart_spec(chart, values):
 	x, series = [], []
 	for i, ser in enumerate(kind.findall("c:ser", _NS)[:MAX_SERIES]):
 		if not x:
-			x = [_label(v) for v in _points(ser.find("c:cat", _NS), values)]
+			x = [_label(v) for v in _points(ser.find("c:cat", _NS))]
 		tx = ser.find("c:tx", _NS)
 		literal = tx.find("c:v", _NS) if tx is not None else None
-		name_pts = [literal.text] if literal is not None else _points(tx, values)
-		data = [_number(v) for v in _points(ser.find("c:val", _NS), values)]
+		name_pts = [literal.text] if literal is not None else _points(tx)
+		data = [_number(v) for v in _points(ser.find("c:val", _NS))]
 		series.append({"name": _label(name_pts[0]) if name_pts else f"Series {i + 1}", "data": data})
 	if not series or not any(v is not None for s in series for v in s["data"]):
 		return None
