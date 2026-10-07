@@ -417,7 +417,7 @@ import {
 	retryMessage,
 } from "@/api";
 import { agentName } from "@/branding";
-import { errHtml, turnErrorInfo } from "@/lib/errors";
+import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
@@ -766,8 +766,9 @@ async function loadTranscript({ initial = false } = {}) {
 		// Reconstruct progress after a reload (and during the no-socket polling
 		// fallback). A normal realtime-driven transcript refresh must not overwrite
 		// the more precise live tool:start/tool:end state with durable receipts that
-		// naturally lag those events.
-		if (initial || !socket) {
+		// naturally lag those events. A pending retry of this pane is not in the
+		// transcript yet, so its failed reply would read as a finished run.
+		if (initial || (!socket && !pendingRetry)) {
 			const restoredRun = restoreDashboardRunState(messages.value);
 			runActive.value = restoredRun.active;
 			activeTools.value = restoredRun.tools;
@@ -953,8 +954,14 @@ async function dismiss(pa) {
 // ── run state + composer ──────────────────────────────────────────────────────
 const runActive = ref(false);
 const sending = ref(false);
-const retrying = ref(false); // the retry request; runActive then covers the run it starts
+// Retry state: `retrying` is true while the request is in flight; runActive then
+// covers the run it starts.
+const retrying = ref(false);
 let ownRunId = ""; // the turn this pane's last send or retry started (turn:cancelled)
+let pendingRetry = ""; // the failed reply a retry replaces, until the ladder sees a reply
+let runStarts = 0; // runs started (ours and run:start frames): a late refusal never ends a newer one
+let startTimer = null; // see watchRetryStart
+const RETRY_NO_START_MS = 90000;
 const draft = ref("");
 const box = ref(null);
 
@@ -1091,7 +1098,7 @@ async function send(gotoMessageId = "") {
 			if (!draft.value) draft.value = text;
 			forgetGotoClaim(gotoMessageId);
 			const { message, type } = sendRejectionCopy(r.reason, agentName, r);
-			(toast[type] || toast.error)(message);
+			(toast[type] || toast.error)(escapeHtml(message)); // the toast renders HTML
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {
@@ -1124,45 +1131,71 @@ function resetRun(active) {
 // "Understanding" from the instant of the click, not lag behind the socket
 // round trip. `retried`: the failed reply a retry replaces (see the ladder).
 function markRunStarted(retried = "") {
+	runStarts++;
 	resetRun(true);
+	pendingRetry = retried;
 	nextTick(scrollBottom);
 	if (!socket) startNoSocketLadder(retried);
+}
+
+// Undo markRunStarted for a retry the server did not start.
+function endStartedRun() {
+	resetRun(false);
+	pendingRetry = "";
+	clearStartTimer();
+	ladderTimers.forEach(clearTimeout);
+}
+
+// An accepted retry whose run never starts (its job died before the placeholder, and
+// no sweep publishes a frame) would show "Retrying…" for ever: after RETRY_NO_START_MS
+// with no frame, read the transcript again and take the run state from it.
+function watchRetryStart() {
+	clearStartTimer();
+	startTimer = setTimeout(async () => {
+		startTimer = null;
+		await loadTranscript();
+		const restored = restoreDashboardRunState(messages.value);
+		runActive.value = restored.active;
+		activeTools.value = restored.tools;
+		waitingFirstTool.value = restored.waiting;
+	}, RETRY_NO_START_MS);
+}
+function clearStartTimer() {
+	clearTimeout(startTimer);
+	startTimer = null;
 }
 
 const RETRY_FAILED = "Couldn't retry that.";
 
 // Retry a failed reply. The run shows as started before the request, so a
 // terminal frame that arrives first is not undone; a refusal or an error ends
-// it again. A reply for a chat the user has since left changes nothing here.
+// it again, unless a run started meanwhile. A reply for a chat the user has
+// since left changes nothing here.
 async function retryFailed(m) {
 	if (retrying.value || sending.value || runActive.value || compacting.value) return;
 	const conv = conversation.value;
 	retrying.value = true;
 	markRunStarted(m.name);
+	const starts = runStarts;
 	try {
 		const r = (await retryMessage(m.name)) || {};
 		if (conversation.value !== conv) return;
 		if (r.ok === false) {
-			endStartedRun();
+			if (runStarts === starts) endStartedRun();
 			const { message, type } = sendRejectionCopy(r.reason, agentName, r, RETRY_FAILED);
-			(toast[type] || toast.error)(message);
+			(toast[type] || toast.error)(escapeHtml(message)); // the toast renders HTML
 			scheduleRefetch(); // a stale Retry (a newer message) goes away
 			return;
 		}
 		ownRunId = r.run_id || "";
+		if (socket && !r.queued && runStarts === starts) watchRetryStart();
 	} catch (e) {
 		if (conversation.value !== conv) return;
-		endStartedRun();
+		if (runStarts === starts) endStartedRun();
 		toast.error(errHtml(e, RETRY_FAILED));
 	} finally {
 		retrying.value = false;
 	}
-}
-
-// Undo markRunStarted for a retry the server did not start.
-function endStartedRun() {
-	resetRun(false);
-	ladderTimers.forEach(clearTimeout);
 }
 
 // "New chat" ASKS the page rather than acting: the page owns the canvas and
@@ -1182,6 +1215,8 @@ function clearThread({ keepRun = false } = {}) {
 	pendingCards.value = [];
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
+	pendingRetry = "";
+	clearStartTimer();
 }
 
 function resetChat() {
@@ -1248,10 +1283,13 @@ function onEvent(p) {
 		loadDashboardChats();
 		return;
 	}
-	// any frame for OUR conversation refreshes the transcript (debounced)
+	// any frame for OUR conversation refreshes the transcript (debounced), and
+	// shows the turn is alive (watchRetryStart)
 	scheduleRefetch();
+	clearStartTimer();
 	switch (p.kind) {
 		case "run:start":
+			runStarts++;
 			resetRun(true);
 			break;
 		case "tool:start": {
@@ -1326,6 +1364,7 @@ function startNoSocketLadder(retried = "") {
 				last && last.role === "assistant" && !last.streaming && last.name !== retried;
 			if (settled || i === arr.length - 1) {
 				runActive.value = false;
+				pendingRetry = "";
 				emit("activity");
 			}
 		}, ms)
@@ -1350,5 +1389,6 @@ onBeforeUnmount(() => {
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 	clearTimeout(refetchTimer);
 	ladderTimers.forEach(clearTimeout);
+	clearStartTimer();
 });
 </script>
