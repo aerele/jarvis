@@ -418,6 +418,9 @@ def _effect_usage(ctx: _Ctx) -> None:
 	# the unit below starts on the present. Nothing is pending: the runner committed its
 	# claim and this effect has only read so far.
 	txn.fresh_snapshot()
+	# Reply length for the claude-cli output estimate, read once here (never inside the unit's
+	# commit window) and only for a row that can use it. None on any lookup failure.
+	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage._is_claude_cli_row(row) else None
 
 	def unit():
 		if ts._run_cas(guard_sql, {"r": ctx.run_id}) != 1:
@@ -426,7 +429,7 @@ def _effect_usage(ctx: _Ctx) -> None:
 		# the model whether or not its token counters have gone fresh yet, and an audit
 		# ("which model proposed this journal entry") must not be lost to a slow counter.
 		_stamp_reply_model(ctx, row)
-		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
+		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id, reply_chars=reply_chars)
 
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
