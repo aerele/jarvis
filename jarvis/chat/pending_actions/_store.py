@@ -267,6 +267,22 @@ def claim(
 	return rowcount() == 1
 
 
+def stash_undo(name: str, sealed: str) -> bool:
+	"""Keep a guarded structure write's sealed clean-up state on its row, while the
+	row is still Pending: written in the claim's own transaction, so a worker that
+	dies mid-way leaves the reconciler what it needs. True iff written."""
+	frappe.db.sql(
+		"UPDATE `tabJarvis Pending Action` SET sealed_undo=%(u)s WHERE name=%(n)s AND status='Pending'",
+		{"n": name, "u": sealed},
+	)
+	return rowcount() == 1
+
+
+def clear_undo(name: str) -> None:
+	"""Drop a guarded structure write's clean-up state: it ran, or was cleaned up."""
+	frappe.db.sql("UPDATE `tabJarvis Pending Action` SET sealed_undo=NULL WHERE name=%(n)s", {"n": name})
+
+
 def release_sheet(name: str, token: str, errors: dict) -> bool:
 	"""``Executing -> Pending`` for a sheet apply that rolled back cleanly (a CAS on
 	its token): the claim's decider and times cleared, ``errors`` stored, the
@@ -329,6 +345,9 @@ def claim_settled(names) -> list[str]:
 def null_sealed(names) -> None:
 	"""Drop both envelopes once a row is settled (the seal is not an audit record)."""
 	if names:
+		# Not ``sealed_undo``: a guarded structure write clears it itself once its
+		# clean-up is done (``clear_undo``); one whose clean-up failed keeps it for
+		# the reconciler to finish.
 		frappe.db.sql(
 			"UPDATE `tabJarvis Pending Action` SET sealed_call=NULL, sealed_settlement=NULL"
 			" WHERE name IN %(n)s AND settled=1",
