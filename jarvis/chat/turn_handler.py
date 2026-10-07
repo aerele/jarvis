@@ -2640,30 +2640,45 @@ def _note_subscription_error(err_text: str, code: str) -> None:
 		subscription_health.note_turn_error(err_text, code)
 
 
+# The runtime's empty-reply text alone; "other" when more text follows it.
+_EMPTY_REPLY_TEXT = re.compile(
+	r"^\W*agent couldn.?t generate a response\.?\s*(please try again\.?)?\s*$", re.I
+)
+
+
 def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
-	"""One telemetry line per empty reply of the model, with the last known context size.
-	Never raises."""
+	"""One telemetry line per empty reply of the model, with the context size the chat
+	session recorded after its previous turn. Never raises."""
 	if code not in ("empty-reply", "empty-reply-tools"):
 		return
 	try:
 		if code == "empty-reply-tools":
 			variant = "tools"
+		elif match := _EMPTY_REPLY_TEXT.match(err_text or ""):
+			variant = "plain" if match.group(1) else "bare"
 		else:
-			variant = "plain" if "try again" in (err_text or "").lower() else "bare"
-		tokens = frappe.db.sql(
-			"""SELECT s.last_total_tokens FROM `tabJarvis Chat Session` s
-			JOIN `tabJarvis Conversation` c ON c.session_key = s.session_key
-			WHERE c.name=%(c)s LIMIT 1""",
-			{"c": conversation},
-		)
+			variant = "other"
+		tokens, pct = "", ""
+		try:
+			row = frappe.db.sql(
+				"""SELECT s.last_total_tokens, s.context_pct FROM `tabJarvis Chat Session` s
+				JOIN `tabJarvis Conversation` c ON c.session_key = s.session_key
+				WHERE c.name=%(c)s LIMIT 1""",
+				{"c": conversation},
+			)
+			if row:
+				tokens, pct = row[0]
+		except Exception:
+			pass
 		from jarvis.chat.latency import get_logger
 
 		get_logger().info(
-			"empty_reply run_id=%s conv=%s variant=%s last_total_tokens=%s",
+			"empty_reply run_id=%s conv=%s variant=%s last_total_tokens=%s context_pct=%s",
 			run_id,
 			conversation,
 			variant,
-			tokens[0][0] if tokens else "",
+			tokens,
+			pct,
 		)
 	except Exception:
 		pass
