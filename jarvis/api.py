@@ -1422,6 +1422,31 @@ def _writes_a_skill(tool: str, args) -> bool:
 	return _names_a_skill_doctype(args, depth=0)
 
 
+_ARMING_REFUSED = "Approve & run is switched on from the skill's own page, not from chat."
+
+
+def _arms_a_skill(tool: str, args) -> bool:
+	"""Whether a create or an update switches a skill's ``allow_approve_run`` on: a
+	new skill born with it, or a stored one that does not have it yet. The controller
+	refuses that inside any tool call (``_guard_allow_approve_run_enable``); the gate
+	refuses it first, so no card is parked that could only fail at Confirm."""
+	from jarvis.tools import _write_risk
+
+	if tool not in ("create_doc", "create_docs", "update_doc"):
+		return False
+	for target in _write_risk._targets(tool, args):
+		if target.doctype != "Jarvis Custom Skill":
+			continue
+		if not frappe.utils.cint(target.values.get("allow_approve_run")):
+			continue
+		if target.op == "create" or not target.name:
+			return True
+		stored = frappe.db.get_value("Jarvis Custom Skill", str(target.name), "allow_approve_run")
+		if not frappe.utils.cint(stored):
+			return True
+	return False
+
+
 def _writes_skill_config(tool: str, args) -> bool:
 	"""Whether a gated write names a skill or learned-rule doctype anywhere in its
 	arguments (``_write_risk.SKILL_CONFIG_DOCTYPES``; found as ``_writes_a_skill``
@@ -3077,6 +3102,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
 	)
+	if _risk == "sensitive" and _arms_a_skill(tool, args):
+		return _error("PermissionDeniedError", _ARMING_REFUSED)
 	# Nor does a write to a skill or a learned rule, whichever tool names it: what
 	# they say is what later chats do, so a person sees each change.
 	if tool in _GATED_WRITES and not _must_card:

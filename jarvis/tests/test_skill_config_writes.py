@@ -221,3 +221,191 @@ class TestEveryModeAsks(_ModeBase):
 		with patch.object(api, "_writes_skill_config") as scan:
 			api._run_tool("get_schema", {"doctype": "ToDo"}, conversation=conv)
 		scan.assert_not_called()
+
+
+class TestRowsChangeThroughTheirParent(_ModeBase):
+	"""A share or role row is written when its skill is saved, where the skill's own
+	rules decide who may change it. A row written as a document of its own is refused."""
+
+	SHARE = "Jarvis Custom Skill Share"
+
+	def _share_row(self):
+		return {
+			"doctype": self.SHARE,
+			"parenttype": SKILL,
+			"parentfield": "shared_with",
+			"parent": self.skill,
+			"user": "Administrator",
+		}
+
+	def _rows(self):
+		return frappe.get_all(self.SHARE, filters={"parent": self.skill}, pluck="name")
+
+	def test_the_three_child_tables_carry_the_rule(self):
+		from jarvis.permissions import ChangedThroughParentOnly
+
+		for dt in (
+			"Jarvis Custom Skill Share",
+			"Jarvis Custom Skill Allowed Role",
+			"Jarvis Learned Pattern Role",
+		):
+			with self.subTest(doctype=dt):
+				self.assertTrue(issubclass(type(frappe.new_doc(dt)), ChangedThroughParentOnly))
+
+	def test_saving_the_skill_still_writes_its_rows(self):
+		from jarvis.chat import custom_skills_api
+
+		out = custom_skills_api.share_custom_skill(self.skill, ["Administrator"])
+		self.assertEqual(out["data"]["count"], 1)
+		self.assertEqual(len(self._rows()), 1)
+		custom_skills_api.share_custom_skill(self.skill, [])
+		self.assertEqual(self._rows(), [])
+
+	def test_a_row_inserted_by_itself_is_refused(self):
+		with self.assertRaises(frappe.PermissionError):
+			frappe.get_doc(self._share_row()).insert()
+		self.assertEqual(self._rows(), [])
+
+	def test_a_row_saved_or_deleted_by_itself_is_refused(self):
+		from jarvis.chat import custom_skills_api
+
+		custom_skills_api.share_custom_skill(self.skill, ["Administrator"])
+		(row,) = self._rows()
+		doc = frappe.get_doc(self.SHARE, row)
+		doc.user = TEST_USER
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+		with self.assertRaises(frappe.PermissionError):
+			frappe.delete_doc(self.SHARE, row)
+		self.assertEqual(frappe.db.get_value(self.SHARE, row, "user"), "Administrator")
+
+	def test_server_code_that_says_so_may_write_a_row(self):
+		# A patch or a fixture: it bypasses permissions on purpose and says so.
+		frappe.get_doc(self._share_row()).insert(ignore_permissions=True)
+		(row,) = self._rows()
+		frappe.delete_doc(self.SHARE, row, ignore_permissions=True)
+		self.assertEqual(self._rows(), [])
+
+
+class TestAnUnseenWriteIsRefusedAtTheSave(_ModeBase):
+	"""The gate parks a call whose arguments name one of these records. A write the
+	arguments could not show (a method, an import, a hook) is refused at the save."""
+
+	def test_under_a_write_nobody_was_shown(self):
+		doc = frappe.get_doc(SKILL, self.skill)
+		doc.instructions = "something else"
+		with wr.guard_scope([], brake=True):
+			self.assertTrue(wr.uncarded_write())
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+			with self.assertRaises(frappe.PermissionError):
+				frappe.delete_doc(SKILL, self.skill)
+			for dt in ("Jarvis Skill Promotion Request", "Jarvis Shared Skill Slug", PATTERN):
+				with self.subTest(doctype=dt):
+					with self.assertRaises(frappe.PermissionError):
+						frappe.new_doc(dt).run_method("validate")
+					with self.assertRaises(frappe.PermissionError):
+						frappe.new_doc(dt).run_method("on_trash")
+		self.assertFalse(wr.uncarded_write())
+		self.assertEqual(frappe.db.get_value(SKILL, self.skill, "instructions"), "do the thing")
+
+	def test_a_write_a_person_confirmed_goes_through(self):
+		doc = frappe.get_doc(SKILL, self.skill)
+		doc.instructions = "something else"
+		with wr.guard_scope([]):
+			self.assertFalse(wr.uncarded_write())
+			doc.save()
+		self.assertEqual(frappe.db.get_value(SKILL, self.skill, "instructions"), "something else")
+
+
+class TestTheAssistantDoesNotArm(_ModeBase):
+	"""Switching "Allow Approve & run" on decides what later runs do unasked. A person
+	does that on the skill's page; a tool call never does, whoever the chat belongs to."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		from jarvis.tests.test_skill_approve_and_run import _ensure_admin_user
+
+		_ensure_admin_user()
+
+	def _in_a_tool_call(self):
+		prev = getattr(frappe.local, "jarvis_dispatch_depth", 0)
+		frappe.local.jarvis_dispatch_depth = prev + 1
+		self.addCleanup(setattr, frappe.local, "jarvis_dispatch_depth", prev)
+
+	def _armed(self):
+		return int(frappe.db.get_value(SKILL, self.skill, "allow_approve_run") or 0)
+
+	def test_an_admin_arms_it_on_the_page(self):
+		from jarvis.tests.test_skill_approve_and_run import ADMIN_USER
+
+		frappe.set_user(ADMIN_USER)
+		doc = frappe.get_doc(SKILL, self.skill)
+		doc.allow_approve_run = 1
+		doc.save(ignore_permissions=True)
+		self.assertEqual(self._armed(), 1)
+
+	def test_a_tool_call_does_not_even_for_an_admin(self):
+		from jarvis.tests.test_skill_approve_and_run import ADMIN_USER
+
+		frappe.set_user(ADMIN_USER)
+		self._in_a_tool_call()
+		doc = frappe.get_doc(SKILL, self.skill)
+		doc.allow_approve_run = 1
+		with self.assertRaises(frappe.PermissionError):
+			doc.save(ignore_permissions=True)
+		self.assertEqual(self._armed(), 0)
+
+	def test_the_call_is_refused_before_a_card_exists(self):
+		# A card the user could only confirm into an error would be worse than a refusal.
+		from jarvis.tests.test_skill_approve_and_run import ADMIN_USER
+
+		frappe.set_user(ADMIN_USER)
+		calls = {
+			"update_doc": {"doctype": SKILL, "name": self.skill, "changes": {"allow_approve_run": 1}},
+			"update_doc (many)": {
+				"doctype": SKILL,
+				"updates": [{"name": self.skill, "changes": {"allow_approve_run": "1"}}],
+			},
+			"create_doc": {
+				"doctype": "jarvis custom skill",
+				"values": {
+					"skill_name": "cfgwrite-armed",
+					"description": "d",
+					"instructions": "i",
+					"allow_approve_run": True,
+				},
+			},
+		}
+		for label, args in calls.items():
+			with self.subTest(call=label):
+				conv = _make_conv(ADMIN_USER)
+				res = api._run_tool(label.split(" ")[0], args, conversation=conv)
+				self.assertFalse(res.get("ok"), res)
+				self.assertIn("skill's own page", str(res))
+				self.assertFalse(pending_confirm.has_live_card(ADMIN_USER, conv))
+		self.assertEqual(self._armed(), 0)
+		for conv in frappe.get_all(CONV, filters={"owner": ADMIN_USER}, pluck="name"):
+			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+
+	def test_switching_it_off_from_chat_still_parks_a_card(self):
+		frappe.db.set_value(SKILL, self.skill, "allow_approve_run", 1)
+		conv = _make_conv(TEST_USER)
+		res = api._run_tool(
+			"update_doc",
+			{"doctype": SKILL, "name": self.skill, "changes": {"allow_approve_run": 0}},
+			conversation=conv,
+		)
+		self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
+
+	def test_a_tool_call_may_edit_or_switch_off_an_armed_skill(self):
+		frappe.db.set_value(SKILL, self.skill, "allow_approve_run", 1)
+		self._in_a_tool_call()
+		doc = frappe.get_doc(SKILL, self.skill)
+		doc.description = "edited while armed"
+		doc.save()
+		self.assertEqual(self._armed(), 1)
+		doc.allow_approve_run = 0
+		doc.save()
+		self.assertEqual(self._armed(), 0)

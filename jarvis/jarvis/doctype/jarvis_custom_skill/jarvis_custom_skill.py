@@ -18,7 +18,12 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, NotRenamable, has_jarvis_admin_access
+from jarvis.permissions import (
+	ARMED_MACRO_WRITE_FLAG,
+	NotRenamable,
+	has_jarvis_admin_access,
+	refuse_unseen_change,
+)
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
@@ -244,6 +249,7 @@ def _refuse_an_armed_macro_write():
 class JarvisCustomSkill(NotRenamable, Document):
 	def validate(self):
 		_refuse_an_armed_macro_write()
+		refuse_unseen_change(self)
 		self._validate_slug()
 		self._validate_scope()
 		self._guard_new_scope()
@@ -264,6 +270,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 
 	def on_trash(self):
 		_refuse_an_armed_macro_write()
+		refuse_unseen_change(self)
 		_clear_personal_clause_cache(self.owner)
 		_clear_pushable_org_rows_memo()
 		self._release_slug_reservation()
@@ -674,6 +681,15 @@ class JarvisCustomSkill(NotRenamable, Document):
 		previous = self.get_doc_before_save()
 		if previous and bool(previous.allow_approve_run):
 			return
+		# Never from a tool call, whoever the chat belongs to: the assistant would be
+		# deciding what it may later do unasked. (A confirmed card is a tool call too.)
+		from jarvis.tools.registry import in_tool_dispatch
+
+		if in_tool_dispatch():
+			frappe.throw(
+				_("Approve & run is switched on from the skill's own page, not from chat."),
+				frappe.PermissionError,
+			)
 		if not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("Enabling Approve & run requires a Jarvis Admin or System Manager role."),
