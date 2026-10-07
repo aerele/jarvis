@@ -1864,18 +1864,23 @@
 											>{{ modelBadgeOf(m) }}</span
 										>
 									</div>
-									<div
-										v-if="!m.error && !m.streaming && m.content"
-										class="jv-msgbar"
-									>
+									<div v-if="replyBarParts(m).showBar" class="jv-msgbar">
 										<span
 											v-if="msgTime(m)"
 											class="jv-msgtime"
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
+										<!-- hidden (not removed) while streaming so the bar keeps its
+										     height; copying half a reply would be wrong -->
 										<button
 											class="jv-msgbtn"
+											:style="
+												replyBarParts(m).showCopy
+													? null
+													: 'visibility: hidden'
+											"
+											:disabled="!replyBarParts(m).showCopy"
 											@click="copyMsg(m.name, stripBlocks(m.content))"
 											:title="copiedId === m.name ? 'Copied' : 'Copy'"
 										>
@@ -4303,7 +4308,8 @@ import {
 	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
-import { shouldFollowBottom } from "@/lib/chatScroll";
+import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
+import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
@@ -5574,7 +5580,7 @@ function revealFrame() {
 	// chat just as much as a fresh one. The answer grows downward instead; only
 	// the jump-to-latest arrow is kept honest so the reader can snap to the newest
 	// when they choose. The one-time land on the new turn still happens at send.
-	if (painted) showScrollDown.value = distanceFromBottom() > 140;
+	if (painted) showScrollDown.value = arrowNeeded();
 	if (revealer.pending().length) _revealRaf = requestAnimationFrame(revealFrame);
 }
 function pumpReveal() {
@@ -8161,6 +8167,9 @@ function fallbackCopy(s) {
 // span elapsedOf() treats as the generation duration). So replies show
 // `modified`; user rows keep `creation` (their send time).
 function msgStamp(m) {
+	// A streaming reply shows the latest delta's client time; the server value
+	// (which can be the run start on a resumed row) rules once it has settled.
+	if (m.role === "assistant" && useClientStamp(m)) return null;
 	if (m.role === "assistant" && m.modified) return m.modified;
 	return m.creation;
 }
@@ -8552,6 +8561,24 @@ function liveBoxViewFor(m) {
  * worth a line (foldedHead's own "old reply, no duration, no tools" case).
  */
 // Saved tool rows plus tools seen live, never counted twice (liveTurn.turnToolNames).
+const toolRowAssistants = computed(() => {
+	const set = new Set();
+	let cur = null;
+	for (const m of transcript.value) {
+		if (m.role === "user") cur = null;
+		else if (m.role === "assistant") {
+			cur = m.name;
+			if (Array.isArray(m.steps) && m.steps.length) set.add(cur);
+		} else if (m.role === "tool" && cur) set.add(cur);
+	}
+	return set;
+});
+function anyToolRowFor(m) {
+	return (
+		toolRowAssistants.value.has(m.name) ||
+		(liveSteps.value.msgId === m.name && liveSteps.value.steps.length > 0)
+	);
+}
 function toolNamesFor(m, liveTools) {
 	return turnToolNames(activityByAssistant.value[m.name] || [], liveTools);
 }
@@ -8575,6 +8602,9 @@ function boxViewFor(m) {
 			stopped: !!m.stopped,
 			failed: !!m.error && errorInfo(m).code !== "cancelled",
 			showDetail: showActivityDetail.value,
+			// Hide the bar only when we KNOW nothing ran: no tool row of any kind
+			// (activityByAssistant drops chips and no-I/O built-ins) and no saved steps.
+			settled: !anyToolRowFor(m),
 		});
 		return head ? { mode: "folded", head } : null;
 	}
@@ -8586,14 +8616,14 @@ function boxViewFor(m) {
 	// never jumps when the turn settles (it used to freeze at the moment the
 	// answer first showed and then jump to the full span at run:end). A tab
 	// reloaded mid-answer reads the same reload-seeded clock.
-	return {
-		mode: "folded",
-		head: foldedHead({
-			seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
-			toolNames: toolNamesFor(m, visibleActiveTools.value),
-			showDetail: showActivityDetail.value,
-		}),
-	};
+	// No tool or step so far: nothing to show, so no bar to vanish at settle.
+	const head = foldedHead({
+		seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
+		toolNames: toolNamesFor(m, visibleActiveTools.value),
+		showDetail: showActivityDetail.value,
+		settled: !anyToolRowFor(m),
+	});
+	return head ? { mode: "folded", head } : null;
 }
 // A turn is in flight (queued, or sent and waiting on run:start) but has no
 // assistant row yet to hang a box on — the synthetic row T5b renders (one
@@ -8727,13 +8757,16 @@ function scrollBottomIfPinned() {
 	// Same rule as the ResizeObserver: streamed text arriving must never RE-PIN a
 	// reader who scrolled up. Only their own scroll does that. Just keep the
 	// jump-to-latest arrow's visibility honest as the thread grows.
-	else showScrollDown.value = distanceFromBottom() > 140;
+	else showScrollDown.value = arrowNeeded();
 }
 // Distance in px from the very bottom of the thread. 0 == pinned to newest.
 function distanceFromBottom() {
 	const el = threadEl.value;
 	if (!el) return 0;
 	return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+function arrowNeeded() {
+	return !!threadEl.value && needsJumpArrow(threadEl.value);
 }
 // Runs on every user scroll: decide whether we're "at the bottom" (keep pinning
 // as new content arrives) and whether to reveal the jump-to-latest arrow.
@@ -8743,7 +8776,7 @@ function onThreadScroll() {
 	_restoreTop = null;
 	const d = distanceFromBottom();
 	pinnedToBottom.value = d <= 80;
-	showScrollDown.value = d > 140;
+	showScrollDown.value = arrowNeeded();
 }
 // Arrow click: smooth-scroll to the newest message and re-pin.
 function jumpToBottom() {
@@ -8771,7 +8804,7 @@ watch(threadInnerEl, (el) => {
 				if (performance.now() > _restoreUntil) _restoreTop = null;
 				else if (Math.abs(threadEl.value.scrollTop - _restoreTop) > 2) {
 					threadEl.value.scrollTop = _restoreTop;
-					showScrollDown.value = distanceFromBottom() > 140;
+					showScrollDown.value = arrowNeeded();
 					return;
 				}
 			}
@@ -8791,7 +8824,7 @@ watch(threadInnerEl, (el) => {
 			// mid-render measurement — scrollHeight momentarily short — read as "at
 			// the bottom" and silently re-attach a reader who had scrolled up.
 			// Update only the arrow's visibility from geometry.
-			else showScrollDown.value = distanceFromBottom() > 140;
+			else showScrollDown.value = arrowNeeded();
 		});
 		threadRO.observe(el);
 		// Also reconcile on VIEWPORT size changes (composer growth, on-screen
@@ -9196,7 +9229,8 @@ async function loadConversation(id) {
 		// growth then flung the reader to the newest text. Their intent is already
 		// known (they scrolled up), so state it instead of re-deriving it.
 		pinnedToBottom.value = false;
-		showScrollDown.value = true;
+		// Geometry, not a blanket true: a short chat that fits has nothing to jump to.
+		showScrollDown.value = arrowNeeded();
 	} else {
 		// A genuinely fresh open: land on the newest message.
 		pinnedToBottom.value = true;
@@ -10362,6 +10396,9 @@ function onEvent(p) {
 			// live turn's own row now, blank or not, because it IS the box.
 			m.content = revealer.receive(p.message_id, answer);
 			m.streaming = true;
+			// Client time of the latest delta: the reply's time shows from its first
+			// words and, at the end, equals when the text finished.
+			stampDeltaTime(m);
 			pumpReveal();
 			nextTick(scrollBottomIfPinned);
 			break;
@@ -10532,10 +10569,6 @@ function onEvent(p) {
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
-			// The copy bar shows with the answer, so give it a time now rather
-			// than when the enrichment reload brings the saved one (msgTime).
-			if (m && !m.modified && !m.creation && !m.creation_browser)
-				m.creation_browser = Date.now();
 			// One-off smile on the brand avatar the moment the answer lands. Success
 			// terminal only: the stop/abort path (stopRun) and the error case never
 			// reach here, and we still skip a row that resolved to an error or stopped

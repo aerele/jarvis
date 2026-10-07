@@ -20,3 +20,12 @@
 export function shouldFollowBottom({ pinned, streaming, revealPending }) {
 	return !!pinned && !streaming && !revealPending;
 }
+
+// The jump-to-latest arrow is only useful when the thread really overflows its
+// viewport AND the reader is more than `threshold` px above the newest message.
+// Geometry only: a short chat that fits never shows it, whatever the scroll
+// bookkeeping says.
+export function needsJumpArrow({ scrollHeight, clientHeight, scrollTop }, threshold = 140) {
+	if (scrollHeight <= clientHeight) return false;
+	return scrollHeight - scrollTop - clientHeight > threshold;
+}
