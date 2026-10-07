@@ -543,6 +543,19 @@ class TestRetryMessage(_ChatTestCase):
 		self.assertTrue(result["ok"])
 		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 0)
 
+	def test_a_retry_the_site_is_too_busy_for_leaves_the_run_alone(self):
+		_user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(
+			CONV,
+			self.conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		with patch("jarvis.chat.api._dispatch_turn", return_value={"overloaded": True, "reason": "busy"}):
+			result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 1)
+
 	def test_a_refused_retry_leaves_the_run_alone(self):
 		user_id, _asst_id = self._make_turn(self.conv, with_error=True)
 		frappe.db.set_value(

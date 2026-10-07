@@ -378,6 +378,12 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
+	if row.kind == "chat":
+		# A card that fails before it runs ends an approved skill run, as one that
+		# fails when it runs does (``_claim_and_run``).
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
 	if not defer:
 		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
@@ -519,8 +525,12 @@ def _claim_and_run(
 		# ...and a card that fails ends the run, as a failed write does.
 		from jarvis.chat import turn_message_binding
 
+<<<<<<< HEAD
 		turn_message_binding.end_skill_autorun_if_open(row.conversation)
 >>>>>>> b483f0b (fix(chat): waiting on a card does not end an approved skill run)
+=======
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
+>>>>>>> d6d0f32 (fix(chat): a run nothing is driving ends where its write parks)
 	status = EXECUTED if ok else FAILED
 	lock_lost = structure is not None and not _still_locked(name, structure)
 	note = _clean_up_structure(name, structure) if structure is not None and not ok else None

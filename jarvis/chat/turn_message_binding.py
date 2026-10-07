@@ -191,17 +191,25 @@ def keep_skill_autorun_open(conversation: str | None) -> None:
 			pass
 
 
-def end_skill_autorun_if_open(conversation: str | None) -> None:
-	"""End an approved run on ``conversation`` if one is open (a failed confirmed card,
-	a retry, an archive). A no-op, with no write, when none is. Never raises."""
+def end_skill_autorun_if_open(conversation: str | None, reason: str, *, keep_halt: bool = False) -> None:
+	"""End an approved run on ``conversation`` if one is open, for ``reason`` (a card of
+	it that failed, a retry, an archive). A no-op, with no write, when none is.
+	``keep_halt`` leaves a Halt signal standing. Never raises."""
 	if not conversation:
 		return
 	try:
 		if not frappe.db.get_value(_CONV, conversation, "skill_autorun"):
 			return
+		halted = keep_halt and is_run_cancel_requested(conversation)
 	except Exception:
 		return
 	clear_skill_autorun(conversation)
+	try:
+		if halted:
+			request_run_cancel(conversation)
+		frappe.logger("jarvis.skill_run").info(f"skill run ended conversation={conversation} reason={reason}")
+	except Exception:
+		pass
 
 
 def _has_pending_card(owner: str | None, conversation: str) -> bool:

@@ -1270,15 +1270,15 @@ _ARMED_SKIP_COVERED = _COVERED
 _ARMED_SKIP_NEVER = _BRAKE
 _SKILL_AUTORUN_COVERED = _COVERED
 _SKILL_AUTORUN_NEVER = _BRAKE
-# Sliding-TTL horizon for an approved run: the auto-run branch runs a covered write
-# uncarded only while the LAST covered write (skill_autorun_at, which slides forward
-# on each success) is within this window. It must comfortably EXCEED the longest idle
-# gap between two consecutive covered writes - a model round-trip + latency + a
-# non-covered intervening step - which is minutes, so 900s (matching the confirm
-# token TTL) is ample. A stranded flag (worker died -> writes stop -> timestamp
-# freezes) therefore falls out of the window within the TTL and is cleared by the
-# reaper (task #42). This TTL bounds a normal idle gap, NOT a runaway - that is
-# bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate,
+# No-activity net for an approved run: the auto-run branch runs a covered write
+# uncarded only while the run was active within this window. skill_autorun_at is its
+# activity stamp: it moves on each covered write and when one of the run's cards is
+# confirmed, so the wait for a person never counts. The window only has to exceed
+# the longest gap a running turn leaves between two covered writes (a model
+# round-trip, a non-covered step), which is minutes. A run nothing is driving (a
+# worker died, so the stamp froze) falls out of it, parks its next write and is
+# ended there or by the reaper. It bounds an idle gap, NOT a runaway: that is
+# bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate
 # and per-skill un-arm.
 _SKILL_AUTORUN_IDLE_S = 1800
 # Sliding-TTL horizon for a request-scoped "confirm all" (design Layer B). Same
@@ -3450,7 +3450,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					# Roll back first: the clear commits, and must not keep what the
 					# failed write left half done.
 					frappe.db.rollback()
-					_skill_autorun_clear(conv)
+					try:
+						_skill_autorun_clear(conv)
+					except Exception:
+						pass  # the write's own error is the one to report
 					raise
 				# Hard-stop-on-error: the first covered ok:False clears the flag so the
 				# next write re-cards; a success slides the timestamp forward. On failure,
@@ -3466,7 +3469,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					if isinstance(err_obj, dict) and err_obj.get("message"):
 						err_obj["message"] += " The approved run has also ended - re-approve to continue."
 				return result
-			# No recent activity / no timestamp: fall through to the normal park.
+			# No recent activity / no timestamp: fall through to the normal park, and
+			# end the run unless one of this chat's cards is waiting (a card the run
+			# paused on resumes it when confirmed; nothing else may bring it back).
+			try:
+				from jarvis.chat import pending_confirm
+
+				if not pending_confirm.blocks_new_card(owner_user, conv):
+					_skill_autorun_clear(conv)
+			except Exception:
+				pass  # the park below is the safe outcome either way
 		# Request-scoped "confirm all" (design Layer B): the user approved this whole
 		# request's fan-out at once, so a COVERED write (_GATED_WRITES - _BRAKE) runs
 		# uncarded while the request is live - armed by _typed_confirmation / the upfront
