@@ -513,9 +513,9 @@ class TestBadCacheNumbers(unittest.TestCase):
 		src = _rewrite(
 			_bytes(wb),
 			{
-				"xl/charts/chart1.xml": lambda d: d.replace(b'<pt idx="0">', '<pt idx="\u00b2">'.encode()).replace(
-					b'<ptCount val="3"/>', '<ptCount val="\u00b2"/>'.encode()
-				)
+				"xl/charts/chart1.xml": lambda d: d.replace(
+					b'<pt idx="0">', '<pt idx="\u00b2">'.encode()
+				).replace(b'<ptCount val="3"/>', '<ptCount val="\u00b2"/>'.encode())
 			},
 		)
 		self.assertIn("Good", [s["title"] for s in extract_charts(src)])
