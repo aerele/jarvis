@@ -89,7 +89,7 @@ def _row_out(row: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # apps + overview
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_custom_apps() -> dict:
 	"""Installed non-core apps with a size probe and their latest run, for the
@@ -98,7 +98,7 @@ def list_custom_apps() -> dict:
 	return {"ok": True, "data": app_analysis.list_custom_apps_data()}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_app_learning_overview() -> dict:
 	"""State for the settings card: the active run (if any), the queued count
@@ -124,7 +124,7 @@ def get_app_learning_overview() -> dict:
 # --------------------------------------------------------------------------- #
 # schedule / cancel
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 	"""RETIRED (rollback-operable). The chat-batch custom-app learning pipeline has been
@@ -216,7 +216,7 @@ def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 	return {"ok": True, "data": {"runs": created, "scheduled_at": str(scheduled_at)}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def cancel_app_learning_run(name: str) -> dict:
 	"""Cancel a Queued/Zipping/Analyzing run. An in-flight turn finishes, but
@@ -247,7 +247,7 @@ def _order_by(sort_field: str, sort_dir: str) -> tuple[str, Order]:
 	return _RUN_SORTABLE[field], d
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_app_learning_runs_page(
 	search: str = "",

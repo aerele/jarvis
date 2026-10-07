@@ -109,7 +109,7 @@ def _shared_fields() -> list[str]:
 	]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_custom_skills() -> list[dict]:
 	"""The current user's own skills PLUS skills shared with them (read-only).
@@ -241,7 +241,7 @@ _load_filters = list_filters.load_legacy_filters
 _order_by = list_filters.order_by
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_custom_skills_page(
@@ -349,7 +349,7 @@ def list_custom_skills_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_custom_skill(name: str) -> dict:
 	"""Return one skill incl. the full markdown instructions. Readable by the
@@ -525,7 +525,7 @@ def update_custom_skill(
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def file_box_doctypes(txt: str = "") -> list[str]:
 	"""The editor's "File Box creates" search: document types matching ``txt`` that
@@ -538,18 +538,18 @@ def file_box_doctypes(txt: str = "") -> list[str]:
 	return frappe.get_all("DocType", filters=filters, pluck="name", order_by="name asc", limit=20)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_custom_skill(name: str) -> dict:
 	"""Delete a skill row (owner-gated). The delete only propagates to the
 	container on the next Apply (the fleet endpoint does a full reconcile)."""
 	_require_skill_owner(frappe.get_doc(SKILL, name), "delete")
 	frappe.delete_doc(SKILL, name)  # ORM hook also enforces owner-only delete
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 	"""Bulk delete skills the caller OWNS (DESIGN-V3 §8.3 / D20). ``names`` is a
@@ -579,7 +579,7 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 			# Never leak internal exception text to the client — log server-side.
 			frappe.log_error(title="Jarvis: bulk skill delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	# Only a reviewer's delete reconciles the shared catalog (TASK 12): a plain
 	# Jarvis User's rows are User/Role-scope and never in the shared push, so
 	# their delete changes nothing there and must not trigger a bench-wide
@@ -596,7 +596,7 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 # Sharing (owner shares a skill with specific users; recipients get read-only
 # use — they cannot edit, disable, delete, or re-share it)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_shareable_users() -> list[dict]:
 	"""Users the current user can share a skill with (staff on this bench,
@@ -611,7 +611,7 @@ def list_shareable_users() -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_skill_shares(name: str) -> dict:
 	"""Return who a skill is currently shared with (owner only)."""
@@ -621,7 +621,7 @@ def get_skill_shares(name: str) -> dict:
 	return {"users": [{"name": r.user, "full_name": _full_name(r.user)} for r in (doc.shared_with or [])]}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 	"""Replace a skill's share list with ``users`` (a JSON array or list of user
 	ids). Owner only. Recipients get read-only use; they can never re-share."""
@@ -641,7 +641,7 @@ def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 		clean.append(u)
 	doc.set("shared_with", [{"user": u} for u in clean])
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "data": {"count": len(clean)}}
 
 
@@ -743,7 +743,64 @@ def _promotion_roles(req_name: str, target_role: str = "") -> list[str]:
 	return rows or ([target_role] if target_role else [])
 
 
+<<<<<<< HEAD
 @frappe.whitelist()
+=======
+def _effective_shared_scope(skill_name: str) -> tuple[str | None, str]:
+	"""The skill's CURRENT effective shared scope, resolved by lineage (R3-SP-2):
+	if ``skill_name`` is itself already a shared (Role/Org) row, that IS the
+	effective scope (a Role -> Org widen keeps promoting the same row); otherwise
+	the most recent shared copy materialized FROM it (``source_skill ==
+	skill_name``), if any - a private (User) source has at most one live shared
+	descendant. Returns ``(existing_name, scope)``; ``existing_name`` is ``None``
+	and ``scope`` is ``"User"`` when nothing has ever been shared.
+
+	Single source of truth for the request-time guard
+	(``request_skill_promotion``), the approval-time guard
+	(``_materialize_promotion``) and the requester status read
+	(``my_skill_promotion``) - #595 was exactly the first two drifting apart: the
+	request-time check used to read the SOURCE row's own ``scope`` column, which
+	never changes once a SEPARATE shared row is materialized from it, so a skill
+	already promoted to Org could be re-requested endlessly and only fail (with a
+	late, confusing error) at approval time.
+
+	Looks ``skill_name`` up itself, rather than trusting a caller-supplied scope,
+	so a skill deleted between request and decision is a DISTINCT, clear failure -
+	never silently defaulted to "no scope = Org" (a deleted skill is not an
+	already-shared Org skill; #595 code review).
+
+	Uses ``get_list`` with an explicit ``ignore_permissions=True`` (never a bare
+	``get_all``): this is an internal lineage-integrity lookup, not a listing
+	served back to the caller, and the requester may have no read permission on
+	the system-owned shared row it can resolve to. ``get_list`` + the explicit
+	flag keeps the bypass visible in review instead of ``get_all``'s implicit
+	one."""
+	self_rows = frappe.get_list(
+		SKILL, filters={"name": skill_name}, fields=["scope"], limit=1, ignore_permissions=True
+	)
+	if not self_rows:
+		frappe.throw(_("This skill was deleted, so it cannot be promoted."))
+	live = (self_rows[0].scope or "Org").strip() or "Org"
+	if live == "Personal":
+		live = "User"
+	if live in ("Role", "Org"):
+		return skill_name, live
+	prior = frappe.get_list(
+		SKILL,
+		filters={"source_skill": skill_name, "scope": ("in", ("Role", "Org", ""))},
+		fields=["name", "scope"],
+		order_by="creation asc",
+		limit=1,
+		ignore_permissions=True,
+	)
+	if not prior:
+		return None, "User"
+	scope = (prior[0].scope or "Org").strip() or "Org"
+	return prior[0].name, ("User" if scope == "Personal" else scope)
+
+
+@frappe.whitelist(methods=["POST"])
+>>>>>>> 3db59d6 (fix(skills): skill, learned-rule and app-learning endpoints answer POST only)
 @require_jarvis_user
 def request_skill_promotion(
 	name: str,
@@ -833,7 +890,7 @@ def _stamp_decision(req, reviewer: str, approved: bool, note: str) -> None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision survives later failure
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def decide_skill_promotion(
 	request_name: str,
 	approve: int | str,
@@ -1151,7 +1208,7 @@ def _materialize_promotion(req, roles=None) -> dict:
 _PROMO_STATUSES = ("Pending", "Approved", "Rejected")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_skill_promotion_requests(
 	status: str = "Pending",
 	search: str = "",
@@ -1362,7 +1419,7 @@ def list_skill_promotion_requests(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preflight_skill_promotion(request_name: str) -> dict:
 	"""Fresh, reviewer-gated push-budget projection for one Pending promotion,
 	recomputed at the moment the reviewer is about to decide (CDX-SP-2) — a
@@ -1381,7 +1438,7 @@ def preflight_skill_promotion(request_name: str) -> dict:
 	return {"ok": True, "to_scope": req.to_scope or "", "push_projection": projection}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def my_skill_promotion(name: str) -> dict:
 	"""The caller's MOST-RECENT promotion request for one of their OWN skills —
@@ -1432,7 +1489,7 @@ def my_skill_promotion(name: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def promotable_target_roles() -> dict:
 	"""Role options for the promotion requester's Role picker: the caller's OWN
@@ -1456,7 +1513,7 @@ def promotable_target_roles() -> dict:
 # --------------------------------------------------------------------------- #
 # Apply (explicit push to the container, via admin → fleet)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_custom_skills_sync_status() -> dict:
 	"""Lightweight poller mirroring onboarding.get_llm_sync_status."""
@@ -1478,7 +1535,7 @@ def _custom_sync_status() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_custom_skills() -> dict:
 	"""Push all enabled skills to the assistant (one restart). Explicit action.
 
