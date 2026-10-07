@@ -385,7 +385,7 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	it("retries an empty reply through the chat retry API", async () => {
 		const { wrapper } = await mountFailed();
 		expect(wrapper.find(".text-ink-red-4").text()).toContain(
-			"The model sent back an empty reply"
+			"The model returned an empty reply"
 		);
 		await retryButton(wrapper).trigger("click");
 		await flushPromises();

@@ -29,6 +29,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import admission, pump
 from jarvis.chat import api as chat_api
+from jarvis.tests._write_conflicts import set_value_conflict
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -548,14 +549,16 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 			with self.subTest(label=label):
 				conv = self._mk_conv()
 				u, a = self._failed(conv, payload)
-				self.assertEqual(chat_api._failed_turn(conv, message=a, prev_user=u)["inputs"], expected)
+				self.assertEqual(chat_api._failed_turn(conv, message=a, prev_user=u).inputs, expected)
 
 	def test_an_unreadable_payload_is_logged(self):
-		conv = self._mk_conv()
-		u, a = self._failed(conv, "{not json")
-		with patch("jarvis.chat.latency.get_logger") as logger:
-			chat_api._failed_turn(conv, message=a, prev_user=u)
-		self.assertIn("retry_inputs_unreadable", logger.return_value.info.call_args.args[0])
+		for payload in ("{not json", json.dumps(["x"])):
+			with self.subTest(payload=payload):
+				conv = self._mk_conv()
+				u, a = self._failed(conv, payload)
+				with patch("jarvis.chat.latency.get_logger") as logger:
+					chat_api._failed_turn(conv, message=a, prev_user=u)
+				self.assertIn("retry_inputs_unreadable", logger.return_value.info.call_args.args[0])
 
 	def test_the_newest_turn_of_the_seed_is_used_when_none_names_the_reply(self):
 		# Only the pump binds a reply to its turn; Phase-0 turns have no assistant_message.
@@ -563,9 +566,9 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		u, a = self._failed(conv, {"context": self.DASHBOARD})
 		frappe.db.set_value(TURN, {"conversation": conv}, "assistant_message", None)
 		failed = chat_api._failed_turn(conv, message=a, prev_user=u)
-		self.assertEqual(failed, {"run_id": None, "seed": None, "inputs": {"context": self.DASHBOARD}})
+		self.assertEqual(failed, (None, u, {"context": self.DASHBOARD}))
 		frappe.db.delete(TURN, {"conversation": conv})
-		self.assertEqual(chat_api._failed_turn(conv, message=a, prev_user=u)["inputs"], {})
+		self.assertEqual(chat_api._failed_turn(conv, message=a, prev_user=u).inputs, {})
 
 	def test_the_turn_that_wrote_the_reply_wins_over_a_newer_turn_of_the_seed(self):
 		conv = self._mk_conv()
@@ -574,8 +577,8 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 			conv, "newer-" + conv[-6:], u, "done", dispatch_payload=json.dumps({"context": {"page": "x"}})
 		)
 		failed = chat_api._failed_turn(conv, message=a, prev_user=u)
-		self.assertEqual(failed["inputs"], {"context": self.DASHBOARD})
-		self.assertEqual(failed["run_id"], "failed-" + conv[-6:])
+		self.assertEqual(failed.inputs, {"context": self.DASHBOARD})
+		self.assertEqual(failed.run_id, "failed-" + conv[-6:])
 
 	def _two_sends_then_failure(self, conv, later_state):
 		"""uA's turn, then uB's turn, then uA's placeholder fails: prev_user is uB."""
@@ -693,8 +696,10 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		_u, a = self._failed(conv)
 		hidden = self._mk_msg(conv, 3, role="user", content="continue", hidden=1)
 		self._insert_turn(conv, "cont-" + conv[-6:], hidden, "queued")
-		res, calls = self._retry(a)
+		with patch("jarvis.chat.latency.get_logger") as logger:
+			res, calls = self._retry(a)
 		self._refused(res, calls, conv, "in progress", turns=2)
+		self.assertEqual(logger.return_value.info.call_args.args[-1], f"cont-{conv[-6:]}:queued", "blocker")
 
 	def test_a_turn_in_progress_is_named_before_a_newer_message(self):
 		conv = self._mk_conv()
@@ -705,7 +710,7 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		self.assertIn("in progress", res["reason"])
 
 	def test_a_seed_owned_by_another_user_is_refused(self):
-		for owner in ("Administrator", ""):
+		for owner in ("Administrator", "", None):
 			with self.subTest(owner=owner):
 				conv = self._mk_conv()
 				u, a = self._failed(conv, {"attachments": self.RAW})
@@ -715,41 +720,89 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 					res, calls = self._retry(a)
 				self._refused(res, calls, conv, "Send your message again")
 				logger.return_value.warning.assert_called_once_with(
-					"retry_refused conversation=%s message=%s reason=%s seed=%s", conv, a, "owner_mismatch", u
+					"retry_refused conversation=%s message=%s reason=%s seed=%s blocker=%s",
+					conv,
+					a,
+					"owner_mismatch",
+					u,
+					"",
 				)
 
-	def test_a_hidden_seed_of_another_owner_asks_to_run_the_macro_again(self):
-		# Hidden seeds written by a cron before their owner was fixed have no message to resend.
+	def test_the_bound_seed_is_the_one_checked_for_its_owner(self):
+		conv = self._mk_conv()
+		ua, _ub, a = self._two_sends_then_failure(conv, "done")
+		frappe.db.set_value(MSG, ua, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.chat.latency.get_logger") as logger:
+			res, calls = self._retry(a)
+		self._refused(res, calls, conv, "cannot be retried", turns=2)
+		self.assertEqual(logger.return_value.warning.call_args.args[3:5], ("owner_mismatch", ua))
+
+	def test_a_hidden_seed_of_another_owner_is_refused_without_a_resend_hint(self):
+		# Hidden seeds (enqueue_continuation) have no message the user could send again.
 		conv = self._mk_conv()
 		u, a = self._failed(conv)
 		frappe.db.set_value(MSG, u, {"owner": "Administrator", "hidden": 1}, update_modified=False)
 		frappe.db.commit()
 		res, calls = self._retry(a)
-		self._refused(res, calls, conv, "Run the macro again")
+		self._refused(res, calls, conv, "cannot be retried")
+		self.assertEqual(res["reason"], "This reply cannot be retried.")
+
+	def test_a_deleted_bound_seed_is_refused_as_missing(self):
+		conv = self._mk_conv()
+		u, a = self._failed(conv)
+		frappe.db.delete(MSG, u)
+		frappe.db.commit()
+		with patch("jarvis.chat.latency.get_logger") as logger:
+			res, calls = self._retry(a)
+		self._refused(res, calls, conv, "cannot be retried")
+		self.assertEqual(logger.return_value.info.call_args.args[3], "seed_missing")
 
 	def test_a_refusal_is_logged_with_its_reason_code_and_changes_nothing(self):
 		conv = self._mk_conv()
-		_u, a = self._failed(conv)
+		u, a = self._failed(conv)
 		self._mk_msg(conv, 3, role="user", content="next question")
 		before = frappe.db.get_value(CONV, conv, "last_active_at")
 		with patch("jarvis.chat.latency.get_logger") as logger:
 			self._retry(a)
 		logger.return_value.info.assert_called_once_with(
-			"retry_refused conversation=%s message=%s reason=%s seed=%s", conv, a, "not_latest", _u
+			"retry_refused conversation=%s message=%s reason=%s seed=%s blocker=%s",
+			conv,
+			a,
+			"not_latest",
+			u,
+			"",
 		)
 		self.assertEqual(frappe.db.get_value(CONV, conv, "last_active_at"), before)
+
+	def test_a_logger_failure_never_fails_a_refusal(self):
+		conv = self._mk_conv()
+		_u, a = self._failed(conv)
+		self._mk_msg(conv, 3, role="user", content="next question")
+		with patch("jarvis.chat.latency.get_logger", side_effect=RuntimeError("log down")):
+			res, _calls = self._retry(a)
+		self.assertIn("latest", res["reason"])
+
+	def test_an_overloaded_site_refuses_and_changes_nothing(self):
+		conv = self._mk_conv()
+		_u, a = self._failed(conv)
+		frappe.db.set_value(
+			CONV,
+			conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		overloaded = {"ok": False, "overloaded": True, "reason": "The site is busy."}
+		with patch.object(admission, "accept_or_queue", return_value=overloaded):
+			res, _calls = self._retry(a)
+		self.assertEqual(res, {"ok": False, "reason": "The site is busy."})
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 1, "the run stays open")
 
 	def test_a_failed_post_acceptance_write_keeps_the_retry_and_its_publish(self):
 		# The turn is committed before these writes. A raise there must not fail the
 		# request, and must not roll back: the Phase-0 python backend publishes the turn
 		# after the request's commit.
-		real_set_value = frappe.db.set_value
-
-		def set_value(doctype, name, field=None, *args, **kwargs):
-			if doctype == CONV and field == "last_active_at":
-				raise frappe.QueryDeadlockError("1020 record has changed")
-			return real_set_value(doctype, name, field, *args, **kwargs)
-
 		for skill_run in (0, 1):
 			with self.subTest(skill_run=skill_run):
 				conv = self._mk_conv()
@@ -769,7 +822,8 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 						"jarvis.chat.dispatch.publish_chat_send",
 						side_effect=lambda kw: published.append(kw["run_id"]),
 					),
-					patch.object(frappe.db, "set_value", side_effect=set_value),
+					set_value_conflict(CONV, "last_active_at"),
+					patch("jarvis.chat.latency.get_logger") as logger,
 					patch.object(admission, "_max_inflight", return_value=4),
 				):
 					res = chat_api.retry_message(a)
@@ -777,6 +831,28 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 				self.assertTrue(res["ok"], res)
 				self.assertEqual(published, [res["run_id"]], "the turn was still published")
 				self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+				logger.return_value.warning.assert_called_once_with(
+					"retry_accepted_write_failed conversation=%s write=%s",
+					conv,
+					"last_active_at",
+					exc_info=True,
+				)
+
+	def test_a_failed_skill_run_end_still_bumps_the_chat(self):
+		conv = self._mk_conv()
+		_u, a = self._failed(conv)
+		before = frappe.db.get_value(CONV, conv, "last_active_at")
+		with (
+			patch(
+				"jarvis.chat.turn_message_binding.end_skill_autorun_if_open", side_effect=RuntimeError("down")
+			),
+			patch("jarvis.chat.latency.get_logger") as logger,
+			patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None),
+		):
+			res = chat_api.retry_message(a)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(logger.return_value.warning.call_args.args[2], "skill_run")
+		self.assertNotEqual(frappe.db.get_value(CONV, conv, "last_active_at"), before)
 
 	def test_a_second_retry_of_the_same_reply_is_refused(self):
 		conv = self._mk_conv()
@@ -799,9 +875,12 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		inside, arrived = threading.Event(), threading.Event()
 		results, errors, waited = [], [], []
 
+		second_connection = []
+
 		def lock_shard(target):
-			if inside.is_set():
-				arrived.set()  # thread 2, just before it asks for the lock thread 1 holds
+			if inside.is_set():  # thread 2, just before it asks for the lock thread 1 holds
+				second_connection.append(frappe.db.sql("SELECT CONNECTION_ID()")[0][0])
+				arrived.set()
 			return real_lock(target)
 
 		def blocked_on_the_shard_lock() -> bool:
@@ -811,8 +890,8 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 			while time.monotonic() < deadline:
 				if frappe.db.sql(
 					"""SELECT 1 FROM information_schema.PROCESSLIST
-					WHERE ID != CONNECTION_ID() AND INFO LIKE %s""",
-					("%`tabJarvis Relay Pump`%FOR UPDATE%",),
+					WHERE ID = %s AND INFO LIKE %s""",
+					(second_connection[0], "%`tabJarvis Relay Pump`%FOR UPDATE%"),
 				):
 					return True
 				time.sleep(0.02)
@@ -856,6 +935,8 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		self.assertEqual(errors, [], f"worker error: {errors}")
 		self.assertEqual(waited, [True], "thread 2 waited on the lock thread 1 held")
 		self.assertEqual(sorted(bool(r["ok"]) for r in results), [False, True])
+		refused = next(r for r in results if not r["ok"])
+		self.assertEqual(refused["reason"], "A reply is already in progress. Wait for it to finish.")
 		self.assertEqual(frappe.db.count(TURN, {"seed_message": u}), 2, "the failed turn + one retry")
 
 

@@ -227,7 +227,7 @@ export default [
   {
     "code": "empty-reply",
     "pattern": "could(?:n.?t| not) generate a (?:response|reply)",
-    "headline": "The model sent back an empty reply",
+    "headline": "The model returned an empty reply",
     "hint": "Try again. If the error returns, start a new chat or choose another available model.",
     "retryable": true,
     "status": false
