@@ -730,7 +730,8 @@ class TestTheNotice(FrappeTestCase):
 			"without asking you first, including when it runs on a schedule with nobody watching. "
 			"Deleting, cancelling and amending records, creating or changing skills and calling "
 			"connectors still ask, and stop the run. So do changes to scripts, webhooks, email set-up, "
-			"user access, sign-in settings and other sensitive configuration. Its steps can apply only "
+			"user access, sign-in settings, learned rules and other sensitive configuration. Its steps "
+			"can apply only "
 			"skills you own, or skills only a reviewer can change.",
 		)
 		self.assertNotIn(EM_DASH, macros_api.arm_notice())
@@ -1768,7 +1769,11 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 		skill = self._skill(OWNER, "own")
 		conv = self._armed_conv()
 		frappe.set_user(OWNER)
-		with patch.object(api, "_writes_a_skill", return_value=False):
+		# Both readings of the arguments miss it: the guard's and the gate's own scan.
+		with (
+			patch("jarvis.tools._write_risk.check", return_value=None),
+			patch.object(api, "_writes_skill_config", return_value=False),
+		):
 			res = api._run_tool(
 				"update_doc",
 				{"doctype": SKILL, "name": skill, "changes": {"instructions": "something else"}},
