@@ -927,7 +927,8 @@ def _live_worker_count(queue_name: str) -> int:
 def _control_queue() -> str:
 	"""RQ queue for the pump's CONTROL jobs (prepare + finalize) — see the block
 	comment above. A dedicated ``jarvis_chat`` lane if live, else ``short``. Never
-	the shared ``long`` queue, whatever its worker count (#632)."""
+	the shared ``long`` queue (#632), unless ``short`` has no live worker at all and
+	``long`` has >= 2."""
 	try:
 		from jarvis.chat.api import _turn_queue
 
@@ -942,7 +943,11 @@ def _control_queue() -> str:
 	if q != PUMP_QUEUE:
 		return q
 	# It resolved to `long` (jarvis_chat absent, or overridden to long): `long` also
-	# carries multi-minute jobs, so control jobs always take `short` (#632).
+	# carries multi-minute jobs, so control jobs take `short` (#632). Only when `short`
+	# is confidently unserved (exactly 0, not None) and `long` has >= 2 workers do we
+	# fall back to `long`, so prepare/finalize are never stranded on a dead queue.
+	if _probe_worker_count("short") == 0 and _live_worker_count(PUMP_QUEUE) >= 2:
+		return PUMP_QUEUE
 	return "short"
 
 
@@ -952,7 +957,7 @@ def _pump_shape_starves() -> bool:
 	prepare/finalize it depends on (now on ``short``, #632) can still fight over one
 	worker that listens on both. Drives the loud ``ensure_pump`` warning (§8-I).
 	The ``long`` count check is explicit since ``_control_queue`` no longer
-	depends on it."""
+	depends on it. A separate short-only worker makes this a false alarm."""
 	return _control_queue() == "short" and _live_worker_count(PUMP_QUEUE) < 2
 
 
@@ -979,11 +984,11 @@ def _warn_provisioning_if_starved() -> None:
 			message=(
 				"Relay Pump provisioning WARNING: this site has no live `jarvis_chat` "
 				f"worker lane and only {long_workers} live `long` worker(s). Pump hops "
-				"ride `long`; with fewer than 2 `long` workers a 90s hop starves the "
-				"prepare/finalize jobs it enqueues (fresh turns strand for minutes until "
-				"the watchdog backstop). Control jobs are being routed to `short` as a "
-				"mitigation, but the supported shapes are >=2 `long` workers OR a live "
-				"`jarvis_chat` lane. See PUMP-RUNBOOK.md §6 (F1)."
+				"ride `long` and prepare/finalize ride `short`; if one worker serves both "
+				"queues, a 90s hop can block the prepare/finalize behind it (fresh turns "
+				"strand for minutes until the watchdog backstop). Add a worker or a live "
+				"`jarvis_chat` lane. A separate short-only worker makes this a false "
+				"alarm. See PUMP-RUNBOOK.md §6 (F1)."
 			),
 		)
 	except Exception:
@@ -998,8 +1003,8 @@ def _warn_provisioning_if_starved() -> None:
 #   * DEGRADED  -> warn only. Fires when TOTAL live RQ workers (any queue) < 2,
 #     not the stricter F1 "< 2 `long` workers" shape (_pump_shape_starves) used
 #     by the ops provisioning warning. Rationale: the pump routes
-#     prepare/finalize (control) jobs to `short` (#632; `_control_queue`), so 1 `long` worker plus a second worker to run those
-#     control jobs does NOT strand - the stricter "< 2 `long`" rule over-warned
+#     prepare/finalize (control) jobs to `short` (#632; `_control_queue`), so
+#     1 `long` worker plus a second worker to run those control jobs does NOT strand - the stricter "< 2 `long`" rule over-warned
 #     that case. The strand only truly happens with a single worker doing
 #     everything, so this warns on total headcount instead. Surfaced as a
 #     non-blocking onboarding banner; chat still works.
@@ -1141,8 +1146,8 @@ def _default_dispatch_prepare(run_id: str, relay_target_id: str) -> None:
 	by tests.
 
 	QUEUE (F1): routed via ``_control_queue`` — a live ``jarvis_chat`` lane else
-	``long`` (>=2 workers) else ``short`` — NEVER the single-worker ``long`` the hops
-	ride (which would self-starve; see the block comment above)."""
+	``short`` — NEVER the shared ``long`` the hops and multi-minute jobs ride
+	(#632; see the block comment above). Exception: ``short`` has no consumer."""
 	try:
 		frappe.enqueue(
 			"jarvis.chat.prepare.run_prepare",
@@ -1168,7 +1173,7 @@ def _default_enqueue_finalize(run_id: str, relay_target_id: str) -> None:
 	no-op re-enqueues for the job timeout (the §10.4 dedupe trap).
 
 	QUEUE (F1): routed via ``_control_queue`` (same rule as prepare) — NEVER the
-	single-worker ``long`` the hops ride."""
+	shared ``long`` the hops ride, bar the no-``short``-consumer fallback (#632)."""
 	try:
 		frappe.enqueue(
 			"jarvis.chat.finalize.run_finalize",

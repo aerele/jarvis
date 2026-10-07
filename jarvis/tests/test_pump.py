@@ -1548,9 +1548,19 @@ class TestControlQueueRouting(_PumpTestCase):
 		with (
 			patch("jarvis.chat.api._turn_queue", lambda: "long"),
 			patch.object(pump, "_live_worker_count", lambda q: 2),
+			patch.object(pump, "_probe_worker_count", lambda q: 1),
 		):
 			self.assertEqual(pump._control_queue(), "short")
 			self.assertFalse(pump._pump_shape_starves())
+
+	def test_short_unserved_with_two_long_workers_falls_back_to_long(self):
+		for short_n, want in ((0, "long"), (None, "short"), (1, "short")):
+			with (
+				patch("jarvis.chat.api._turn_queue", lambda: "long"),
+				patch.object(pump, "_live_worker_count", lambda q: 2),
+				patch.object(pump, "_probe_worker_count", lambda q, n=short_n: n),
+			):
+				self.assertEqual(pump._control_queue(), want, f"short={short_n}")
 
 	def test_single_long_no_jarvis_chat_uses_short(self):
 		with (
