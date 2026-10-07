@@ -82,7 +82,6 @@ describe("PulseFeedbackDialog", () => {
 	it("Send is disabled until a star is picked, then submits with offered+selected", async () => {
 		pulseFeedbackContext.value = {
 			period_label: "This month",
-			period_key: "M:2026-10",
 			features_offered: ["file_box"],
 		};
 		pulseFeedbackOpen.value = true;
@@ -104,8 +103,7 @@ describe("PulseFeedbackDialog", () => {
 			["file_box"],
 			["file_box"],
 			"",
-			"",
-			"M:2026-10"
+			""
 		);
 	});
 

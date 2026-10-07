@@ -266,7 +266,8 @@ PULSE_SURVEY_CADENCE = "Monthly"
 PULSE_MAX_OFFERS = 3
 #: The window "used this period" is measured over. Monthly cadence -> the last
 #: 30 days (spec: "monthly -> last 30 days"), a rolling window rather than the
-#: calendar bucket, so a survey offered on the 2nd still has something to show.
+#: calendar bucket. While the survey reviews the previous month the window
+#: instead starts on that month's 1st - see ``_pulse_window_start``.
 _PULSE_WINDOW_DAYS = 30
 #: Through this day of the month the survey reviews the PREVIOUS month: on the
 #: 1st the user has barely used Jarvis yet this month.
@@ -289,9 +290,13 @@ def _pulse_state_columns_present() -> bool:
 		return False
 
 
-def _pulse_window_start():
-	"""Start of the rolling usage window the survey asks about."""
-	return frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-_PULSE_WINDOW_DAYS)
+def _pulse_window_start(now=None):
+	"""Start of the usage window the survey asks about: the 1st (00:00) of the
+	reviewed month while it is the previous one, else the rolling 30 days."""
+	now = now or frappe.utils.now_datetime()
+	if now.day <= _PULSE_PREVIOUS_MONTH_DAYS:
+		return _last_day_of_previous_month(now).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+	return frappe.utils.add_to_date(now, days=-_PULSE_WINDOW_DAYS)
 
 
 def _pulse_period(now=None) -> tuple[str, str, bool]:
@@ -438,7 +443,8 @@ def pulse_context() -> dict:
 	if not _pulse_state_columns_present():
 		return {"due": False}
 	user = frappe.session.user
-	current_key, period_label, period_is_previous = _pulse_period()
+	now = frappe.utils.now_datetime()
+	current_key, period_label, period_is_previous = _pulse_period(now)
 	# READ, never ``get_doc``: the settings doc carries a child table
 	# (``user_model_usage``) and this runs on every chat open, so the deciding
 	# path is three columns off one row - the same shape ``greeting._get_pref``
@@ -456,7 +462,7 @@ def pulse_context() -> dict:
 	offer_count = int(row.pulse_offer_count or 0) if same_period else 0
 	if offer_count >= PULSE_MAX_OFFERS:
 		return {"due": False}
-	since = _pulse_window_start()
+	since = _pulse_window_start(now)
 	if _turns_since(user, since) < 1:
 		return {"due": False}
 	from jarvis.chat.feature_usage import get_used_features
@@ -518,7 +524,6 @@ def submit_pulse_feedback(
 	features_selected: list | str,
 	use_case_text: str = "",
 	note: str | None = None,
-	period_key: str | None = None,
 ) -> dict:
 	"""Record one business-pulse response: forward it to admin, then silence the
 	survey for the rest of this period.
@@ -530,11 +535,6 @@ def submit_pulse_feedback(
 	The full set that was OFFERED rides along with the subset the user picked as
 	most used, so the admin dashboard can tell "used it but did not pick it as
 	top" from "never offered because unused" (spec: Dynamic feature list).
-
-	``period_key`` is the month the dialog was shown for. It is honoured only
-	when it is the current or the previous month's key (a dialog opened on day
-	10 and sent after midnight); anything else falls back to the server's own
-	reviewed month.
 
 	A malformed rating is rejected BEFORE anything is written or sent, so a
 	broken client cannot burn the user's survey for the month on a value that
@@ -559,15 +559,9 @@ def submit_pulse_feedback(
 		frappe.throw("stars must be between 1 and 5", frappe.ValidationError)
 	if not 1 <= stars <= 5:
 		frappe.throw("stars must be between 1 and 5", frappe.ValidationError)
-	from jarvis.chat.usage import current_period_key, get_or_create_user_settings
+	from jarvis.chat.usage import get_or_create_user_settings
 
-	now = frappe.utils.now_datetime()
-	if period_key not in (
-		current_period_key(PULSE_SURVEY_CADENCE, now),
-		current_period_key(PULSE_SURVEY_CADENCE, _last_day_of_previous_month(now)),
-	):
-		period_key = None
-	current_key = period_key or _pulse_period(now)[0]
+	current_key = _pulse_period()[0]
 	payload = {
 		"kind": "Pulse",
 		"period_key": current_key,
