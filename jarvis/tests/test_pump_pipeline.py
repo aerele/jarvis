@@ -2119,9 +2119,15 @@ class TestUsageHonesty(_PipelineCase):
 			"totalTokensFresh": True,
 			"inputTokens": 2,
 			"outputTokens": 2,
-			"cliSessionIds": {"claude-cli": "abc"},
+			"agentRuntime": {"id": "claude-cli", "source": "model"},
 		}
-		gpt_row = {"key": "sess-gpt", "totalTokensFresh": True, "inputTokens": 2, "outputTokens": 2}
+		gpt_row = {
+			"key": "sess-gpt",
+			"totalTokensFresh": True,
+			"inputTokens": 2,
+			"outputTokens": 2,
+			"agentRuntime": {"id": "openclaw", "source": "provider"},
+		}
 		for rid, key, row, expected in (
 			("pmp_usage_cli", "sess-cli", cli_row, 3),
 			("pmp_usage_gpt", "sess-gpt", gpt_row, None),
