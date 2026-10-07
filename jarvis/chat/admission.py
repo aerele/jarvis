@@ -561,6 +561,7 @@ def accept_or_queue(
 	exempt_overload: bool = False,
 	seed_hidden: bool = False,
 	on_seed=None,
+	guard=None,
 ) -> dict:
 	"""Admit or durably queue one turn. Returns one of:
 
@@ -568,6 +569,10 @@ def accept_or_queue(
 	  {"ok": True, "dispatched": False, "run_id", "queued_position": N}
 	  {"ok": True, "dispatched": False, "run_id", "duplicate": True, "queued_position": None}
 	  {"ok": False, "overloaded": True, "reason": <friendly copy>}
+	  {"ok": False, "refused": True, "reason": <guard's copy>}
+
+	``guard``: a zero-arg callable run under both locks, before anything is written. A
+	non-empty return refuses the turn and is the reason (the retry's checks).
 
 	``duplicate``: a turn with this ``run_id`` already exists, so nothing was written
 	or dispatched. Answered before anything else, a full queue included.
@@ -641,6 +646,11 @@ def accept_or_queue(
 				"duplicate": True,
 				"queued_position": None,
 			}
+
+		if guard and (refusal := guard()):
+			frappe.db.rollback()  # releases both locks; nothing was written
+			_telemetry("accept_refused", run_id=run_id, target=target)
+			return {"ok": False, "refused": True, "reason": refusal}
 
 		if not machine_active:
 			# CDX-10 (reverse direction): the world reverted to pure-legacy (kill switch back on
