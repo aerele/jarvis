@@ -71,9 +71,12 @@ def _write_stored(text: str) -> None:
 
 
 def _publish_changed() -> None:
-	"""No ``user=``: every connected socket gets it and the SPA filters by role."""
+	"""To the site room (every connected socket of this site, as llm_switch does); the SPA filters by
+	role. The payload says only that something changed, never what."""
+	from frappe.realtime import get_site_room
+
 	try:
-		frappe.publish_realtime(EVENT, {"changed": True}, after_commit=True)
+		frappe.publish_realtime(EVENT, {"changed": True}, room=get_site_room(), after_commit=True)
 	except Exception:
 		_log_throttled()
 

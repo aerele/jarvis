@@ -387,6 +387,18 @@ class TestPersistentCacheKey(unittest.TestCase):
 			self.assertTrue(key.startswith(prefixes[0]), key)
 
 
+class TestPublishChanged(unittest.TestCase):
+	"""The change ping goes to the site room, never to an unscoped audience (the Marketplace audit's
+	semgrep rule fails a publish_realtime with no doctype, docname, room or user)."""
+
+	def test_publishes_to_the_site_room_after_commit(self):
+		from frappe.realtime import get_site_room
+
+		with patch("frappe.publish_realtime") as publish:
+			sh._publish_changed()
+		publish.assert_called_once_with(sh.EVENT, {"changed": True}, room=get_site_room(), after_commit=True)
+
+
 class TestHeartbeatWiring(_Base):
 	def _run(self, push):
 		from jarvis.chat import heartbeat
