@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeAll } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
@@ -98,11 +98,31 @@ async function mountDialog({ isSM = false, isAdmin = false, section = "general" 
 	shell.settingsSection = section;
 	shell.settingsApplying = false;
 	const w = mount(SettingsDialog);
+	mounted.push(w);
 	await flushPromises();
 	return w;
 }
 
+// Panes load lazily. Import the (mocked) pane modules once up front and unmount
+// every dialog after its test, so no pane import resolves after the test
+// environment is torn down (it would load the real pane without a window).
+const mounted = [];
+beforeAll(async () => {
+	await Promise.all([
+		import("@/components/settings/GeneralPane.vue"),
+		import("@/components/settings/UsagePane.vue"),
+		import("@/components/settings/ActivityPane.vue"),
+		import("@/components/settings/ShortcutsPane.vue"),
+		import("@/components/settings/PlanBillingPane.vue"),
+		import("@/components/settings/AiModelsPane.vue"),
+		import("@/components/settings/UsageAdminPane.vue"),
+		import("@/components/settings/BrandingPane.vue"),
+		import("@/components/settings/MacrosAdminPane.vue"),
+	]);
+});
+
 afterEach(() => {
+	mounted.splice(0).forEach((w) => w.unmount());
 	subscriptionNotice.expired = [];
 	delete window.is_system_manager;
 	delete window.is_jarvis_admin;
