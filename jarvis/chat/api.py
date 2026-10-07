@@ -3435,8 +3435,8 @@ def retry_message(message: str) -> dict:
 	# A retry is a human turn-entry too, so an armed macro-run conversation refuses
 	# it (T4): re-running a step there would run the covered set uncarded on demand.
 	_reject_send_into_armed_conversation(_get_owned_conversation(doc.conversation))
-	# Flag ON: a retry racing a live turn QUEUES (accept_or_queue) rather than
-	# rejecting; flag OFF keeps the legacy single-flight reject.
+	# Flag ON: _retry_errored refuses a retry while a later turn runs, else accept_or_queue
+	# queues it behind a live turn; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
 		if admission.shard_overloaded(doc.conversation):
 			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
@@ -3449,7 +3449,7 @@ def retry_message(message: str) -> dict:
 		if _rej := _compacting_reject(doc.conversation):
 			return _rej
 		if _conversation_busy(doc.conversation):
-			return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
+			return {"ok": False, "reason": _("A reply is already in progress. Wait for it to finish.")}
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}
 	if not doc.error:
@@ -3465,20 +3465,18 @@ def retry_message(message: str) -> dict:
 	)
 	if not prev_user:
 		return {"ok": False, "reason": _("no preceding user message to retry")}
-	return _retry_errored(doc.conversation, doc.name, prev_user[0][0])
+	return _retry_errored(doc.conversation, message=doc.name, seed=prev_user[0][0])
 
 
-def _retry_errored(conversation: str, message: str, seed: str) -> dict:
+def _retry_errored(conversation: str, *, message: str, seed: str) -> dict:
 	"""Start a new turn for ``seed``, the user message before the failed reply ``message``.
 
 	Private: ``retry_message`` does every caller check first. The new turn gets the
-	failed turn's context and original attachments. ``_retry_refusal`` runs under the
-	conversation row lock, so two tabs cannot both start a turn."""
-	# Bump the conversation's last_active_at so the sidebar surfaces it.
-	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now())
-
+	failed turn's context and original attachments. On the admission/pump path
+	``_retry_refusal`` runs under the conversation row lock, so two tabs cannot both
+	start a turn. The legacy path checks without that lock (best-effort)."""
 	run_id = uuid.uuid4().hex[:12]
-	inputs = _failed_turn_inputs(conversation, message, seed)
+	inputs = _failed_turn_inputs(conversation, message=message, seed=seed)
 	# Route through the SHARED dispatcher (after-commit publish on Path B,
 	# RQ on the default backend) - retry previously duplicated this branch
 	# inline with a synchronous publish, keeping the mid-transaction race
@@ -3501,22 +3499,20 @@ def _retry_errored(conversation: str, message: str, seed: str) -> dict:
 			turn_class="interactive",
 			dispatch=lambda: _dispatch_turn(payload),
 			dispatch_payload=inputs or None,
-			guard=lambda: _retry_refusal(conversation, message, seed),
+			refuse_if=lambda: _retry_refusal(conversation, message=message, seed=seed),
 		)
 		if not _adm.get("ok"):
+			if _adm.get("refused"):
+				return _refused_retry(conversation, message, _adm["refused"])
 			return {"ok": False, "reason": _adm.get("reason")}
-		_retry_ends_skill_run(conversation)
+		_retry_accepted(conversation)
 		out = {"ok": True, "run_id": run_id}
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
 			out["queued_position"] = _adm.get("queued_position")
 		return out
-	# Legacy: the same checks under the same conversation row lock, read after it is held.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before row lock
-	admission._lock_conversation(conversation)
-	if refusal := _retry_refusal(conversation, message, seed):
-		frappe.db.rollback()
-		return {"ok": False, "reason": refusal}
+	if refusal := _retry_refusal(conversation, message=message, seed=seed):
+		return _refused_retry(conversation, message, refusal)
 	# CDX-19: the legacy path may REROUTE to the pump accept path under the cutover gate; merge
 	# the returned admission result exactly like the machine branch (overload reject / queued
 	# chip). Retry reuses the existing user message as the seed, so — like the machine branch —
@@ -3524,7 +3520,7 @@ def _retry_errored(conversation: str, message: str, seed: str) -> dict:
 	_adm = _dispatch_turn(payload, cutover_gate=True)
 	if isinstance(_adm, dict) and _adm.get("overloaded"):
 		return {"ok": False, "reason": _adm.get("reason")}
-	_retry_ends_skill_run(conversation)
+	_retry_accepted(conversation)
 	out = {"ok": True, "run_id": run_id}
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
 		out["queued"] = True
@@ -3532,35 +3528,50 @@ def _retry_errored(conversation: str, message: str, seed: str) -> dict:
 	return out
 
 
-def _failed_turn_inputs(conversation: str, message: str, seed: str) -> dict:
+def _failed_turn_inputs(conversation: str, *, message: str, seed: str) -> dict:
 	"""``context`` and the user's original ``attachments`` of the turn that failed, in the
 	admission form. The turn that wrote ``message`` wins, else the newest turn for ``seed``."""
+	from jarvis.chat import prepare
+
 	rows = frappe.db.sql(
 		"""SELECT dispatch_payload FROM `tabJarvis Chat Turn`
 		WHERE conversation=%(c)s AND seed_message=%(s)s
 		ORDER BY assistant_message=%(m)s DESC, creation DESC LIMIT 1""",
 		{"c": conversation, "s": seed, "m": message},
 	)
+	if not rows or not rows[0][0]:
+		return {}
 	try:
-		stored = json.loads(rows[0][0]) if rows and rows[0][0] else {}
+		stored = json.loads(rows[0][0])
 	except ValueError:
-		stored = {}
+		stored = None
 	if not isinstance(stored, dict):
+		from jarvis.chat.latency import get_logger
+
+		get_logger().info("retry_inputs_unreadable conversation=%s message=%s", conversation, message)
 		return {}
 	inputs = {}
 	if stored.get("context"):
 		inputs["context"] = stored["context"]
-	# After prepare, ``attachments`` holds the managed vision form and the originals
-	# are ``attachments_raw`` (prepare._load_attachments).
-	attachments = stored.get("attachments_raw") if stored.get("session_key") else stored.get("attachments")
-	if attachments:
+	if attachments := prepare.original_attachments(stored):
 		inputs["attachments"] = attachments
 	return inputs
 
 
-def _retry_refusal(conversation: str, message: str, seed: str) -> str | None:
-	"""Why a retry of ``message`` must not start, or None. The newest message skips the
-	macro engine's closing row, as frontend/src/lib/retryTarget.js does."""
+def _retry_refusal(conversation: str, *, message: str, seed: str) -> tuple[str, str] | None:
+	"""Why a retry of ``message`` must not start, as ``(code, sentence)``, or None.
+
+	"Latest" counts every hidden=0 user/assistant row except the macro engine's closing
+	row (frontend/src/lib/retryTarget.js), the rows the dashboard pane also counts.
+	ChatView's visible list differs: it also shows receipt tool rows and hides blank
+	streaming rows."""
+	if frappe.db.get_value(MSG, seed, "owner") != frappe.db.get_value(CONV, conversation, "owner"):
+		return "owner_mismatch", _("This reply cannot be retried. Send your message again instead.")
+	from jarvis.chat import turn_state
+
+	# A turn created after the failed reply (a retry, a continuation); never the failed turn itself.
+	if turn_state.unfinished_turn_after(conversation, frappe.db.get_value(MSG, message, "creation")):
+		return "in_progress", _("A reply to this message is already in progress. Wait for it to finish.")
 	newest = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Chat Message`
 		WHERE conversation=%(c)s AND hidden=0 AND role IN ('user', 'assistant')
@@ -3569,20 +3580,26 @@ def _retry_refusal(conversation: str, message: str, seed: str) -> str | None:
 		{"c": conversation},
 	)
 	if not newest or newest[0][0] != message:
-		return _("You can retry only the latest reply.")
-	from jarvis.chat import turn_state
-
-	if turn_state.seed_turn_unfinished(conversation, seed):
-		return _("A reply to this message is already in progress.")
+		return "not_latest", _("Only the latest reply can be retried. Send your message again instead.")
 	return None
 
 
-def _retry_ends_skill_run(conversation: str) -> None:
-	"""An accepted retry re-runs the whole request, like a new message: an approved
-	skill run left open on the chat does not cover it. (A refused retry starts no
-	turn and leaves the run as it was.)"""
+def _refused_retry(conversation: str, message: str, refusal: tuple[str, str]) -> dict:
+	"""Log the reason code of a refused retry; return its sentence for the user."""
+	code, sentence = refusal
+	from jarvis.chat.latency import get_logger
+
+	get_logger().info("retry_refused conversation=%s message=%s reason=%s", conversation, message, code)
+	return {"ok": False, "reason": sentence}
+
+
+def _retry_accepted(conversation: str) -> None:
+	"""An accepted retry surfaces the chat in the sidebar and, like a new message, ends
+	an approved skill run left open on the chat (it does not cover the retry). A refused
+	retry changes neither."""
 	from jarvis.chat import turn_message_binding
 
+	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now())
 	turn_message_binding.end_skill_autorun_if_open(conversation, "retry")
 
 
