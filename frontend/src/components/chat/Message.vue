@@ -61,7 +61,7 @@
 				<template v-else>{{ text }}</template>
 			</div>
 			<div
-				v-if="failed"
+				v-if="failed || deliveryState === 'checking'"
 				style="
 					display: flex;
 					align-items: center;
@@ -71,9 +71,16 @@
 					color: var(--red);
 				"
 			>
-				<span>Not sent</span>
+				<span role="status">{{
+					deliveryState === "checking"
+						? "Checking delivery…"
+						: deliveryState === "uncertain"
+						? "Delivery not confirmed"
+						: "Not sent"
+				}}</span>
 				<button
 					@click="emit('retry')"
+					:disabled="deliveryState === 'checking'"
 					style="
 						background: none;
 						border: none;
@@ -84,7 +91,18 @@
 						text-decoration: underline;
 					"
 				>
-					Retry
+					{{
+						["uncertain", "checking"].includes(deliveryState)
+							? "Check delivery"
+							: "Retry"
+					}}
+				</button>
+				<button
+					v-if="deliveryState === 'uncertain'"
+					class="jv-btn"
+					@click="emit('dismiss')"
+				>
+					Dismiss
 				</button>
 			</div>
 			<!-- attached images → same clickable thumbnail + preview as generated ones -->
@@ -331,6 +349,7 @@ defineProps({
 	// A failed-to-send user message: shows "Not sent" + Retry instead of the
 	// hover bar.
 	failed: { type: Boolean, default: false },
+	deliveryState: { type: String, default: "" },
 	// Render an image attachment as the same filename chip as every other file
 	// (click through to view it) instead of an inline cropped thumbnail. Chat's
 	// generated-canvas images (charts/diagrams) rely on the thumbnail staying
@@ -340,7 +359,7 @@ defineProps({
 	imagesAsChips: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["edit", "copy", "retry", "open-attachment"]);
+const emit = defineEmits(["edit", "copy", "retry", "dismiss", "open-attachment"]);
 
 // When a consumer supplies #below-body it OWNS the whole post-body region
 // (chat does — its activity/cards/metabar live there, byte-identical), so the

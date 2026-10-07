@@ -5,7 +5,6 @@ import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
 import * as api from "../api";
-import { store } from "../store";
 import { EFFORT, effortOffered, sendThinking } from "../lib/effort";
 import { prefs, setPrefs } from "../lib/prefs";
 import { feed } from "../lib/notifications";
@@ -14,6 +13,8 @@ import { pickStarterPrompt } from "../lib/fillComposer";
 import Sheet from "../components/Sheet.vue";
 import AutoModeToggle from "../components/AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
+import { recoveryState, sendRecovery } from "../sendRecoveryStore";
+import { boundedDelivery } from "@shared/lib/sendDelivery.js";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -113,33 +114,36 @@ function useStarter(card) {
 	});
 }
 
+const pendingNewChat = computed(() => recoveryState.requests.some((r) => !r.conversation));
+
 async function send(text = input.value) {
+	if (pendingNewChat.value) {
+		router.push("/send-recovery");
+		return;
+	}
 	const t = String(text).trim();
 	const ready = attachments.value.filter((a) => a.file_url);
-	if ((!t && !ready.length) || busy.value || uploading.value) return;
-
+	if ((!t && !ready.length) || busy.value || uploading.value || holdActive.value) return;
 	busy.value = true;
 	error.value = "";
+	const request = sendRecovery.stage("", t, ready);
+	Object.assign(request, {
+		model: prefs.defaultModel || "",
+		thinking: sendThinking(settings.value, prefs.effort),
+		autoMode: autoView.value.on,
+	});
+	input.value = "";
+	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
+	attachments.value = [];
+	// The existing recovery view owns the preserved request, including navigation
+	// to the real conversation after acceptance. Never retry from this hero.
+	const completion = boundedDelivery(api.sendRecoverableMessage(request));
+	router.push("/send-recovery");
 	try {
-		// conversation "" → the backend creates (or focuses) the empty one and
-		// hands back its id, so a new chat costs one round-trip, not two.
-		const r = await api.sendMessage("", t, {
-			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
-			model: prefs.defaultModel || "",
-			thinking: sendThinking(settings.value, prefs.effort),
-			autoMode: autoView.value.on,
-		});
-		if (r?.ok === false || !r?.conversation_id) {
-			error.value = r?.reason || "Couldn't start that chat.";
-			busy.value = false;
-			return;
-		}
-		input.value = "";
-		attachments.value = [];
-		store.loadConversations();
-		router.push(`/c/${r.conversation_id}`);
-	} catch (e) {
-		error.value = e?.message || "Couldn't start that chat.";
+		sendRecovery.settle(request, await completion);
+	} catch {
+		sendRecovery.settle(request, null);
+	} finally {
 		busy.value = false;
 	}
 }
@@ -321,6 +325,10 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 			</svg>
 			{{ error }}
 		</div>
+
+		<button v-if="pendingNewChat" class="jv-btn" @click="router.push('/send-recovery')">
+			Review your pending message
+		</button>
 
 		<!-- One card: attachments, the field, and every control that acts on it.
 		     The chat bar belongs in a chat; a blank screen deserves a composer. -->

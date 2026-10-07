@@ -1,0 +1,64 @@
+{
+ "doctype": "DocType",
+ "name": "Jarvis Chat Send Request",
+ "module": "Jarvis",
+ "autoname": "field:request_key",
+ "naming_rule": "By fieldname",
+ "engine": "InnoDB",
+ "allow_rename": 0,
+ "field_order": [
+  "request_key",
+  "fingerprint",
+  "conversation",
+  "state",
+  "result_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "request_key",
+   "fieldtype": "Data",
+   "label": "Request Key",
+   "reqd": 1,
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "fingerprint",
+   "fieldtype": "Data",
+   "label": "Payload Fingerprint",
+   "reqd": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "conversation",
+   "fieldtype": "Data",
+   "label": "Original Conversation",
+   "reqd": 0,
+   "read_only": 1
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "Delivery State",
+   "reqd": 1,
+   "read_only": 1,
+   "options": "pending\nsettled",
+   "default": "pending"
+  },
+  {
+   "fieldname": "result_json",
+   "fieldtype": "Long Text",
+   "label": "Delivery Result",
+   "reqd": 0,
+   "read_only": 1
+  }
+ ],
+ "permissions": [],
+ "track_changes": 0,
+ "index_web_pages_for_search": 0,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "actions": [],
+ "links": [],
+ "states": []
+}

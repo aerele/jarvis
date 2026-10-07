@@ -23,8 +23,14 @@ function harness() {
 	const calls = [],
 		errors = [];
 	const noop = () => {};
+	let nextId = 0;
 	Object.assign(s, {
 		_NEW_CHAT_SCOPE: "NEW",
+		newSendRequestId: () => String(++nextId).padStart(32, "0"),
+		loadConversation: async (id, options) => {
+			s.loaded = id;
+			s.loadOptions = options;
+		},
 		_pendingSends: createPendingSends(),
 		_currentScope: () => s.currentId.value || "NEW",
 		dismissFeedback: noop,
@@ -41,7 +47,9 @@ function harness() {
 		discardedTokens: () => [],
 		removePending: noop,
 		markCardsEarlier: noop,
-		clearHold: noop,
+		clearHold: () => {
+			s.holdActive.value = false;
+		},
 		raiseHold: noop,
 		recheckMaintenance: noop,
 		sendRejectionCopy: () => ({ message: "Rejected" }),
@@ -112,7 +120,7 @@ for (const [label, text, files] of [
 		h.s.pendingFiles.value = copy(files);
 		h.s.api.sendMessage = async (...args) => {
 			h.calls.push(copy(args));
-			if (h.calls.length === 1) throw new Error("lost response");
+			if (h.calls.length === 1) return { ok: false, reason: "busy" };
 			return { ok: false, reason: "busy" };
 		};
 		await h.f.send();
@@ -126,12 +134,12 @@ for (const [label, text, files] of [
 		h.s.autoView.value.on = false;
 		await h.f.resendFailed(h.failed());
 		assert.equal(h.calls.length, 2);
-		assert.deepEqual(h.calls[1], original);
+		assert.deepEqual(h.calls[1].slice(0, 9), original.slice(0, 9));
+		assert.notEqual(h.calls[1][9], original[9]);
 		assert.equal(h.s.input.value, "Newer draft");
 		assert.equal(h.s.pendingFiles.value[0].file_name, "new.pdf");
 		assert.ok(h.failed(), "repeated rejection stays retryable");
-		assert.equal(h.errors.length, 1);
-		assert.equal(h.errors[0].message, "lost response");
+		assert.deepEqual(h.errors, []);
 	});
 }
 for (const guard of ["booting", "holdActive", "compacting", "noAiConnected", "waiting"]) {
@@ -309,5 +317,61 @@ for (const scenario of ["original document", "newer document", "Wiki selection"]
 		}
 		if (scenario === "Wiki selection") assert.equal(h.calls[1][4].ground_wiki, 1);
 		assert.deepEqual(h.errors, []);
+	});
+}
+
+for (const outcome of ["unknown", "accepted", "rejected", "confirmed", "partial confirmation"]) {
+	test(`lost response: Check delivery ${outcome} never dispatches another send`, async () => {
+		const h = harness();
+		h.s.api.sendMessage = async (...args) => {
+			h.calls.push(copy(args));
+			throw new Error("lost acknowledgement");
+		};
+		await h.f.send();
+		const original = h.failed();
+		assert.equal(original.deliveryState, "uncertain");
+		const id = original.sendRequest.requestId;
+		h.s.input.value = "Newer draft";
+		h.s.pendingFiles.value = [image];
+		const checked = [];
+		h.s.api.checkMessageDelivery = async (requestId) => {
+			checked.push(requestId);
+			if (outcome === "unknown") throw new Error("still unknown");
+			if (outcome === "rejected") return { ok: false, reason: "busy" };
+			if (["confirmed", "partial confirmation"].includes(outcome))
+				return {
+					ok: outcome === "confirmed",
+					confirmed: true,
+					conversation_id: "A",
+					queued: true,
+					run_id: "old",
+				};
+			return { ok: true, conversation_id: "A", message_id: "M", run_id: "R" };
+		};
+		// Read-only recovery remains possible while sending is unavailable.
+		h.s.holdActive.value = true;
+		h.s.noAiConnected.value = true;
+		await h.f.resendFailed(original);
+		assert.deepEqual(checked, [id]);
+		assert.equal(h.calls.length, 1);
+		assert.equal(h.s.input.value, "Newer draft");
+		assert.deepEqual(h.s.pendingFiles.value, [image]);
+		if (outcome === "unknown") {
+			assert.equal(h.failed().sendRequest.requestId, id);
+			assert.equal(h.failed().deliveryState, "uncertain");
+		} else if (["accepted", "confirmed", "partial confirmation"].includes(outcome)) {
+			assert.equal(h.failed(), undefined);
+			assert.equal(h.s.loaded, "A");
+			assert.deepEqual(h.s.loadOptions, { preserveComposer: true });
+			assert.equal(h.s.holdActive.value, true);
+			assert.equal(h.s.waiting.value, false);
+		} else {
+			assert.equal(h.failed().deliveryState, "rejected");
+			h.s.holdActive.value = false;
+			h.s.noAiConnected.value = false;
+			await h.f.resendFailed(h.failed());
+			assert.equal(h.calls.length, 2);
+			assert.notEqual(h.calls[1][9], id);
+		}
 	});
 }

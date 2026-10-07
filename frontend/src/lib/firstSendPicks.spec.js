@@ -68,9 +68,9 @@ describe("send() carries a new chat's picks", () => {
 		]);
 	});
 
-	it("passes the thinking pick as the last argument", () => {
+	it("passes the thinking pick before the request identifier", () => {
 		expect(src).toContain("thinking: _picks.thinking");
-		expect(sendCall.trimEnd().endsWith("sendRequest.thinking")).toBe(true);
+		expect(sendCall).toMatch(/sendRequest\.thinking,\s*sendRequest\.requestId\s*$/);
 	});
 });
 

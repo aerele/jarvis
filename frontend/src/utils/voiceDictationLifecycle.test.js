@@ -464,7 +464,7 @@ test("Send visibly refuses while a dictation is still landing, with the reason o
 	// The Enter path bypasses canSend (onKey calls send() directly), so send()'s own guard stays.
 	assert.match(
 		sendBody(),
-		/if \(micState\.value === "recording" \|\| voiceBusyCount\.value > 0\) \{/,
+		/if \(\s*!checkingDelivery &&\s*\(micState\.value === "recording" \|\| voiceBusyCount\.value > 0\)\s*\) \{/,
 		"the send-time guard is what actually prevents the words being dropped"
 	);
 });

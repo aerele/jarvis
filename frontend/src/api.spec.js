@@ -151,3 +151,24 @@ describe("setSidebarOrder", () => {
 		});
 	});
 });
+
+describe("durable send receipts", () => {
+	it("passes a stable id and unwraps only a settled result", async () => {
+		const result = { ok: true, conversation_id: "A", message_id: "M", run_id: "R" };
+		call.mockResolvedValueOnce({ delivery: "settled", result });
+		expect(
+			await sendMessage("A", "hello", null, [], null, [], false, false, null, "a".repeat(32))
+		).toEqual(result);
+		expect(call).toHaveBeenLastCalledWith("jarvis.chat.send_requests.send_message", {
+			conversation: "A",
+			message: "hello",
+			request_id: "a".repeat(32),
+		});
+	});
+	it("does not turn an unknown receipt into a retryable rejection", async () => {
+		call.mockResolvedValueOnce({ delivery: "unknown" });
+		await expect(
+			sendMessage("A", "hello", null, [], null, [], false, false, null, "a".repeat(32))
+		).rejects.toThrow("Delivery not confirmed");
+	});
+});

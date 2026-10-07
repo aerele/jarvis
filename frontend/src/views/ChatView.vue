@@ -800,12 +800,14 @@
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
-							editable
+							:editable="!['uncertain', 'checking'].includes(m.deliveryState)"
 							:copied="copiedId === m.name"
 							:failed="m.failed"
+							:delivery-state="m.deliveryState"
 							@edit="editCommand(m)"
 							@copy="copyMsg(m.name, m.content)"
 							@retry="resendFailed(m)"
+							@dismiss="dismissUncertain(m)"
 							@open-attachment="openArtifact(m, $event)"
 						/>
 						<!-- assistant -->
@@ -4383,6 +4385,7 @@ import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
+import { newSendRequestId } from "@/lib/sendDelivery.js";
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
@@ -9107,7 +9110,7 @@ function _checkPulseOnce(id) {
 	maybeOpenPulseFeedback();
 }
 
-async function loadConversation(id) {
+async function loadConversation(id, { preserveComposer = false } = {}) {
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
 	const _sameConv = _shownConvId === id;
@@ -9115,14 +9118,14 @@ async function loadConversation(id) {
 		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
-	groundNextTurn.value = false;
+	if (!preserveComposer) groundNextTurn.value = false;
 	// Trigger-build mode is per-conversation too: switching chats clears it.
-	triggerMode.value = false;
+	if (!preserveComposer) triggerMode.value = false;
 	createMenuOpen.value = false;
 	// Default to no focus; the id branch below reloads THIS conversation's own
 	// pick (unlike groundNextTurn/triggerMode, the pill persists — see
 	// _loadConnectorFocusFor).
-	connectorFocus.value = null;
+	if (!preserveComposer) connectorFocus.value = null;
 	if (!id) {
 		resetAutoModeFor(true);
 		messages.value = [];
@@ -9147,7 +9150,7 @@ async function loadConversation(id) {
 	if (currentId.value !== id) return;
 	// Reload THIS conversation's own connector-focus pick, if any (localStorage
 	// is the source of truth - see _loadConnectorFocusFor).
-	connectorFocus.value = _loadConnectorFocusFor(id);
+	if (!preserveComposer) connectorFocus.value = _loadConnectorFocusFor(id);
 	// Context meter: best-effort, off the critical path (never awaited) - a slow
 	// or failed get_conversation_context must not delay messages rendering.
 	// This is the conversation-open path, so this fetch is authoritative for
@@ -9181,8 +9184,8 @@ async function loadConversation(id) {
 	// get_conversation returns {conversation: {...}, messages: [...]}. Reading
 	// d.model_override (one level too high) silently yielded undefined, so a
 	// saved pin always rendered as "Auto" after a reload.
-	modelOverride.value = d?.conversation?.model_override || "";
-	thinkingOverride.value = d?.conversation?.thinking_override || "";
+	if (!preserveComposer) modelOverride.value = d?.conversation?.model_override || "";
+	if (!preserveComposer) thinkingOverride.value = d?.conversation?.thinking_override || "";
 	// Remember the fetched title so a titled-but-empty conversation (which the
 	// recent list omits) is recognised as existing, not rendered as a new chat.
 	loadedConvTitle.value = d?.conversation?.title || "";
@@ -9787,22 +9790,40 @@ function resendFailed(m) {
 	return send({ retryBubble: m }, m.voiceAck || null);
 }
 
+async function dismissUncertain(m) {
+	const scope = _currentScope();
+	if (
+		m.deliveryState !== "uncertain" ||
+		!(await confirm({
+			title: "Dismiss delivery check?",
+			message:
+				"Jarvis may already be working on this message. Dismissing it does not cancel that work. Check the conversation before sending it again.",
+			confirmLabel: "Dismiss",
+		}))
+	)
+		return;
+	if (m.deliveryState !== "uncertain") return;
+	_pendingSends.remove(scope, m.name);
+	if (_currentScope() === scope) messages.value = messages.value.filter((row) => row !== m);
+}
+
 // One-shot viewing context from a "Discuss in chat" hand-off (chatPrefill's
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
 async function send(textArg, resendAck) {
+	const checkingDelivery = textArg?.retryBubble?.deliveryState === "uncertain";
 	// Restoration must choose the destination before a send captures its conversation scope.
 	if (booting.value) return;
 	dismissFeedback(); // sending the next turn clears any pending feedback line
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
 	// send() directly (AskCard/answer/resend/prefill), not just the disabled composer. On the FIRST
 	// mid-session send holdActive is still false, so the detection branch below is preserved.
-	if (holdActive.value) return;
+	if (holdActive.value && !checkingDelivery) return;
 	// Don't race a dictation that hasn't landed: sending now would drop the spoken words (the
 	// transcript would arrive AFTER the message left the composer). Block on the real busy
 	// signal — recording, or a recording still being transcribed — NOT hasUnfinished(), which
 	// would also trap the user behind a terminally-failed chip.
-	if (micState.value === "recording" || voiceBusyCount.value > 0) {
+	if (!checkingDelivery && (micState.value === "recording" || voiceBusyCount.value > 0)) {
 		notify("Finishing dictation…", { type: "info" });
 		return;
 	}
@@ -9826,7 +9847,7 @@ async function send(textArg, resendAck) {
 	const compactCmd = parseCompactCommand(text);
 	if (compactCmd && !retryBubble) {
 		if (fromMain) input.value = "";
-		if (compacting.value) {
+		if (compacting.value && !checkingDelivery) {
 			notify("Already compacting this chat", { type: "info" });
 			return;
 		}
@@ -9856,7 +9877,7 @@ async function send(textArg, resendAck) {
 	// canSend already darkens Send while compacting, but Enter routes here
 	// directly (same gap noAiConnected below closes for that reason) and a
 	// programmatic send never sees the button at all.
-	if (compacting.value) {
+	if (compacting.value && !checkingDelivery) {
 		notify("Compacting this chat, try again in a moment", { type: "info" });
 		return;
 	}
@@ -9885,7 +9906,7 @@ async function send(textArg, resendAck) {
 	// preventDefaults and calls send()), and a programmatic send never sees the button
 	// at all. With no model connected the turn can only fail at the agent, so refuse it
 	// here and keep the banner's own wording rather than surfacing a backend error.
-	if (noAiConnected.value) {
+	if (noAiConnected.value && !checkingDelivery) {
 		// Same role split as the banner above (noAiConnectedMessage): a member
 		// cannot open the AI models pane, so telling them to "connect a model"
 		// is a dead end.
@@ -9998,6 +10019,8 @@ async function send(textArg, resendAck) {
 					groundWiki,
 				})
 		  );
+	// Only a definitive rejection starts a new attempt. Unknown delivery keeps its id.
+	if (!checkingDelivery) sendRequest.requestId = newSendRequestId();
 	// Hold a stable REFERENCE to the optimistic bubble (VR4-2): a mid-send conversation switch
 	// replaces messages.value, so on rejection we mutate/re-inject THIS object rather than a
 	// messages.value.find() that returns nothing once the array was swapped by loadConversation().
@@ -10012,6 +10035,7 @@ async function send(textArg, resendAck) {
 		// Omitted when there is no dictated audio to release.
 		voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
 		sendRequest,
+		deliveryState: checkingDelivery ? "checking" : undefined,
 	};
 	if (retryBubble) {
 		messages.value = messages.value.filter((bubble) => bubble.name !== retryBubble.name);
@@ -10031,21 +10055,24 @@ async function send(textArg, resendAck) {
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 	try {
-		const r = await api.sendMessage(
-			sendRequest.conversation,
-			sendRequest.text,
-			sendRequest.model,
-			sendRequest.attachments,
-			sendRequest.context,
-			sendRequest.approvalTokens,
-			// Same voice-ack token voiceDictationStore.captureSentInPayload already
-			// computed above (for releasing local audio blobs) — non-empty iff this
-			// payload's text came from a dictation, so reuse it verbatim rather than
-			// adding new detection logic.
-			!!(_voiceAck && _voiceAck.length),
-			sendRequest.autoMode,
-			sendRequest.thinking
-		);
+		const r = checkingDelivery
+			? await api.checkMessageDelivery(sendRequest.requestId)
+			: await api.sendMessage(
+					sendRequest.conversation,
+					sendRequest.text,
+					sendRequest.model,
+					sendRequest.attachments,
+					sendRequest.context,
+					sendRequest.approvalTokens,
+					// Same voice-ack token voiceDictationStore.captureSentInPayload already
+					// computed above (for releasing local audio blobs) — non-empty iff this
+					// payload's text came from a dictation, so reuse it verbatim rather than
+					// adding new detection logic.
+					!!(_voiceAck && _voiceAck.length),
+					sendRequest.autoMode,
+					sendRequest.thinking,
+					sendRequest.requestId
+			  );
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
 		// itself failed. It is handled further down, on the accepted path, where it
@@ -10053,6 +10080,7 @@ async function send(textArg, resendAck) {
 		// duplicating them (the lifecycle tests anchor on the FIRST occurrence of
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
+			_optBubble.deliveryState = "rejected";
 			// A typed "no" whose send then lost the admission race still discarded its
 			// cards (the server says which); they must not linger as live offers.
 			for (const t of discardedTokens(r)) removePending(t);
@@ -10138,11 +10166,12 @@ async function send(textArg, resendAck) {
 			return;
 		}
 		if (r && r.ok !== false) {
-			workersWarnNotice.value = null; // a send got through: workers are back
+			_optBubble.deliveryState = undefined;
+			if (!checkingDelivery) workersWarnNotice.value = null; // fresh send proves availability
 			// An accepted send proves the CP-side gate passed, i.e. any upgrade
 			// maintenance hold has lifted - clear the banner + wake the avatar now
 			// rather than stranding them until a reload (self-heal).
-			clearHold();
+			if (!checkingDelivery) clearHold();
 		}
 		// An accepted send consumes only its own one-shot context. A retry must
 		// not consume a newer selection made in the current composer.
@@ -10179,7 +10208,15 @@ async function send(textArg, resendAck) {
 			sending.value = false;
 			waiting.value = false;
 			for (const t of r.tokens || []) removePending(t);
-			await onTypedConfirmResolved(r);
+			if (checkingDelivery) {
+				// A receipt describes past work: refresh its chat without reviving an
+				// old queue chip or clearing choices for a newer message.
+				if (r.conversation_id === currentId.value)
+					await loadConversation(r.conversation_id, { preserveComposer: true });
+				store.loadConversations();
+			} else {
+				await onTypedConfirmResolved(r);
+			}
 			return;
 		}
 		// A typed "no" discarded these before its turn started: drop them now, no
@@ -10261,19 +10298,27 @@ async function send(textArg, resendAck) {
 				store.loadConversations();
 			}
 		}
+		if (checkingDelivery) {
+			sending.value = false;
+			waiting.value = false;
+			if (r?.message_id) _optBubble.name = r.message_id;
+			if (r?.conversation_id === currentId.value)
+				loadConversation(r.conversation_id, { preserveComposer: true }).catch(() => {});
+		}
 	} catch (e) {
-		// send_message threw (e.g. a 500). Stop the spinner and mark the bubble as not-sent with an
-		// inline Retry, instead of leaving it looking delivered. Keep it (a post-ack timeout may have
+		// A thrown request may already have executed. Keep its id and offer only
+		// a receipt check; a transport failure is never proof that nothing ran. Keep it (a post-ack timeout may have
 		// actually delivered it; a mid-send conversation switch shouldn't strand a draft). Store it
 		// ORIGIN-scoped (VR4-2) so it — and its voice token — survive a switch made during the POST,
 		// and show it now if the origin is still on screen.
 		_optBubble.failed = true;
+		_optBubble.deliveryState = "uncertain";
 		_pendingSends.add(_sentScope, _optBubble);
 		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
 			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
-		notifyActionError("Couldn't send your message", e);
+		notify("Delivery not confirmed. Check delivery before sending again.", { type: "info" });
 	}
 }
 

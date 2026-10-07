@@ -1,3 +1,4 @@
+import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // Thin wrappers around frappe-ui's `call` (which posts to /api/method/... with
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
@@ -316,7 +317,8 @@ export async function sendMessage(
 	approvalTokens,
 	voice,
 	autoMode,
-	thinkingOverride
+	thinkingOverride,
+	requestId
 ) {
 	// Empty conversation is allowed: the backend creates (or focuses) an empty
 	// conversation itself and returns its id as `conversation_id` - saves the
@@ -359,6 +361,12 @@ export async function sendMessage(
 				context.focus_connector.label))
 	)
 		args.context = JSON.stringify(context);
+	if (requestId) {
+		const envelope = await boundedDelivery(
+			call("jarvis.chat.send_requests.send_message", { ...args, request_id: requestId })
+		);
+		return settledSendResult(envelope);
+	}
 	return call("jarvis.chat.api.send_message", args);
 }
 
@@ -1032,4 +1040,13 @@ export async function supportUpload(ticket, file, comm) {
 	const data = await r.json();
 	const msg = data.message || data;
 	return msg.data || msg;
+}
+
+export async function checkMessageDelivery(requestId) {
+	return settledSendResult(
+		await boundedDelivery(
+			call("jarvis.chat.send_requests.check_delivery", { request_id: requestId }),
+			15000
+		)
+	);
 }

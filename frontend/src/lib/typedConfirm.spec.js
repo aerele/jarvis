@@ -128,8 +128,8 @@ describe("the card advertises both ways to approve", () => {
 });
 
 describe("a typed reply that goes on to Jarvis (decisions 13 and 14)", () => {
-	const at = src.indexOf("for (const t of r.tokens || []) removePending(t);");
-	const accepted = src.slice(at, at + 1200);
+	const at = src.indexOf("const _spokeIn = r?.conversation_id || sentFrom;");
+	const accepted = src.slice(at, src.indexOf("if (r && r.queued)", at));
 
 	it("drops the cards a typed no discarded, without a mid-send reload", () => {
 		expect(accepted).toContain("for (const t of discardedTokens(r)) removePending(t);");
