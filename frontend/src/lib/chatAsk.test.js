@@ -120,6 +120,29 @@ test("multi needs at least one pick (an empty array is not an answer)", () => {
 	assert.equal(isAskReady(spec, { 0: ["a"] }, {}), true);
 });
 
+test("select keeps its options (up to 200, past the 8 of the button types)", () => {
+	const opts = Array.from({ length: 250 }, (_, i) => `c${i}`);
+	const spec = parseAsk(
+		fence(JSON.stringify([{ q: "HSN Code?", type: "select", options: opts }]))
+	);
+	assert.equal(spec.questions[0].type, "select");
+	assert.equal(spec.questions[0].options.length, 200);
+	const few = parseAsk(fence('[{"q":"HSN?","type":"select","options":["8471","8517"]}]'));
+	assert.deepEqual(few.questions[0].options, ["8471", "8517"]);
+});
+
+test("a select with no options degrades to text", () => {
+	const spec = parseAsk(fence('[{"q":"HSN?","type":"select"}]'));
+	assert.equal(spec.questions[0].type, "text");
+});
+
+test("an answered select is ready and is a field type", () => {
+	const spec = parseAsk(fence('[{"q":"HSN?","type":"select","options":["8471"]}]'));
+	assert.equal(isAskReady(spec, {}, {}), false);
+	assert.equal(isAskReady(spec, { 0: "8471" }, {}), true);
+	assert.equal(askAnswerText(spec, { 0: "8471" }, {}), "Here are my answers:\n1. HSN? → 8471");
+});
+
 // ---- answer formatting ---------------------------------------------------
 
 test("answers render as a numbered list the agent can read back", () => {
@@ -153,7 +176,7 @@ test("an unanswered question is spelled out, never sent as an empty arrow", () =
 });
 
 test("ASK_FIELD_TYPES is the value-typed set (no option buttons)", () => {
-	assert.deepEqual([...ASK_FIELD_TYPES].sort(), ["date", "datetime", "link", "text"]);
+	assert.deepEqual([...ASK_FIELD_TYPES].sort(), ["date", "datetime", "link", "select", "text"]);
 });
 
 // ---- source fences: one parser, one renderer, two surfaces ---------------
@@ -221,8 +244,8 @@ test("an answered ask stays inert: every control disables on `answered`, not jus
 	const disabledOnAnswered = (askCardSrc.match(/:disabled="answered"/g) || []).length;
 	assert.equal(
 		disabledOnAnswered,
-		7,
-		"yesno + single/multi option buttons, date, datetime, text, link and Other inputs must all gate on `answered`"
+		8,
+		"yesno + single/multi option buttons, date, datetime, text, select, link and Other inputs must all gate on `answered`"
 	);
 });
 
