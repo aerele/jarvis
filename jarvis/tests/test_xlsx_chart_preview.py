@@ -18,6 +18,7 @@ from jarvis.chat.xlsx_charts import (
 	MAX_PARTS_TOTAL,
 	MAX_POINTS,
 	MAX_SERIES,
+	MAX_SHEETS,
 	extract_charts,
 	preview_cell,
 )
@@ -360,6 +361,35 @@ class _Counting:
 			p.stop()
 
 
+class _RowSpy:
+	"""Count openpyxl read-only iter_rows calls and the rows they yield."""
+
+	def __init__(self, fail=False):
+		self.fail = fail
+
+	def __enter__(self):
+		from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+		self.calls = self.rows = 0
+		real = ReadOnlyWorksheet.iter_rows
+		spy = self
+
+		def iter_rows(ws, *a, **k):
+			spy.calls += 1
+			if spy.fail:
+				raise ValueError("broken sheet")
+			for row in real(ws, *a, **k):
+				spy.rows += 1
+				yield row
+
+		self._patch = mock.patch.object(ReadOnlyWorksheet, "iter_rows", iter_rows)
+		self._patch.start()
+		return self
+
+	def __exit__(self, *exc):
+		self._patch.stop()
+
+
 class TestParseBudget(unittest.TestCase):
 	def test_repeated_references_parse_each_part_once(self):
 		src = _crafted(sheets=400, drawings_per_sheet=200, charts_per_drawing=10, distinct=False)
@@ -398,17 +428,81 @@ class TestParseBudget(unittest.TestCase):
 		self.assertEqual(len(spec["series"]), MAX_SERIES)
 		self.assertEqual(load.call_count, 1)
 
-	def test_same_range_is_read_once(self):
+	def test_sheet_is_scanned_once_for_all_series(self):
 		wb, ws = _book()
 		chart = BarChart()
 		for _ in range(5):
 			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=True)
+		chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=4))
 		ws.add_chart(chart, "F2")
-		with mock.patch.object(xlsx_charts._SheetValues, "_read", autospec=True) as read:
-			read.return_value = [1, 2, 3]
-			extract_charts(_bytes(wb))
-		# one title ref and one value ref for the repeated column, not 10
-		self.assertLessEqual(read.call_count, 2)
+		with _RowSpy() as spy:
+			(spec,) = extract_charts(_bytes(wb))
+		self.assertEqual(len(spec["series"]), 5)
+		self.assertEqual(spy.calls, 1)
+		self.assertEqual(spy.rows, 4)
+
+	def test_failing_sheet_read_is_not_repeated(self):
+		wb, ws = _book()
+		chart = BarChart()
+		for _ in range(10):
+			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=True)
+		ws.add_chart(chart, "F2")
+		with _RowSpy(fail=True) as spy:
+			self.assertEqual(extract_charts(_bytes(wb)), [])
+		self.assertEqual(spy.calls, 1)
+
+	def test_rows_scanned_budget_and_range_row_cap(self):
+		wb = openpyxl.Workbook()
+		for i in range(4):
+			ws = wb.active if i == 0 else wb.create_sheet()
+			ws.title = f"D{i}"
+			for r in range(1, 3001):
+				ws.append((f"c{r}", r))
+			_add(ws, BarChart())
+		with mock.patch.object(xlsx_charts, "MAX_ROWS_SCANNED", 4000), _RowSpy() as spy:
+			specs = extract_charts(_bytes(wb))
+		self.assertLessEqual(spy.rows, 4000)
+		self.assertLess(len(specs), 4)
+		ws = openpyxl.Workbook().active
+		ws.append(("a", "b"))
+		with mock.patch.object(xlsx_charts, "MAX_RANGE_ROW", 2), _RowSpy() as spy:
+			values = xlsx_charts._SheetValues(_bytes(ws.parent))
+			self.assertIsNone(values.read("Sheet!$A$3:$A$9"))
+		self.assertEqual(spy.calls, 0)
+
+	def test_cached_points_are_preferred_over_sheet_reads(self):
+		wb, ws = _book()
+		_add(ws, BarChart())
+		src = _rewrite(
+			_bytes(wb),
+			{
+				"xl/charts/chart1.xml": lambda d: d.replace(
+					b"</f>",
+					b'</f><numCache><formatCode>General</formatCode><ptCount val="2"/>'
+					b'<pt idx="0"><v>7</v></pt><pt idx="1"><v>8</v></pt></numCache>',
+				)
+			},
+		)
+		with _RowSpy() as spy:
+			(spec,) = extract_charts(src)
+		self.assertEqual(spy.calls, 0)
+		self.assertEqual(spec["series"][0]["data"], [7.0, 8.0])
+
+	def test_sheet_cap(self):
+		src = _crafted(sheets=MAX_SHEETS + 20, drawings_per_sheet=1, charts_per_drawing=1, distinct=True)
+		with _Counting() as n:
+			extract_charts(src)
+		# per sheet: its rels, drawing, drawing rels, chart; plus workbook and its rels
+		self.assertLessEqual(n.parses, 2 + 4 * MAX_SHEETS)
+
+	def test_byte_budget_stops_parsing(self):
+		src = _crafted(sheets=5, drawings_per_sheet=1, charts_per_drawing=3, distinct=True)
+		with mock.patch.object(xlsx_charts, "MAX_BYTES_TOTAL", 3000), _Counting() as n:
+			extract_charts(src)
+		self.assertLess(n.parses, 10)
+		with _Counting() as full:
+			extract_charts(src)
+		self.assertGreater(full.parses, n.parses)
 
 	def test_charts_on_a_later_sheet_are_returned_with_their_sheet(self):
 		wb, ws = _book("Summary")
