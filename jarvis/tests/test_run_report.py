@@ -81,6 +81,11 @@ def _completed(result, *, columns=None, filters=None, owner="Administrator"):
 		yield dn
 
 
+def _defaults(**defaults):
+	"""The report's literal filter defaults, as its client script would declare them."""
+	return patch.object(_prepared_reports, "_report_defaults", return_value=defaults)
+
+
 class TestRunReportInline(FrappeTestCase):
 	"""The non-prepared path must stay byte-identical - no envelope, no status."""
 
@@ -247,6 +252,45 @@ class TestRunReportPrepared(FrappeTestCase):
 			)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["result"], [{"name": "D"}])
+
+	def test_a_desk_copy_carrying_the_reports_defaults_is_reused(self):
+		# Desk sends every filter that has a value, the report's own defaults included;
+		# the agent names only what it sets. Same request, so the same report.
+		desk = {"company": "Acme", "valuation_field_type": "Currency", "item_code": []}
+		with _defaults(valuation_field_type="Currency"), _completed([{"name": "D"}], filters=desk):
+			env = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["result"], [{"name": "D"}])
+
+	def test_an_unticked_box_reads_as_unset(self):
+		# Desk drops a filter whose value is 0 / false; so does the match.
+		with _completed([{"name": "D"}], filters={"company": "Acme"}):
+			env = run_report(
+				report_name=PREP_REPORT, filters={"company": "Acme", "show_zero": False, "skip": 0}
+			)
+		self.assertEqual(env["status"], "ready")
+
+	def test_a_default_never_overrides_a_value_given(self):
+		desk = {"company": "Acme", "valuation_field_type": "Currency"}
+		with (
+			_defaults(valuation_field_type="Currency"),
+			_completed([{"name": "D"}], filters=desk),
+			patch(_ENQUEUE),
+		):
+			env = run_report(
+				report_name=PREP_REPORT, filters={"company": "Acme", "valuation_field_type": "Quantity"}
+			)
+		self.assertEqual(env["status"], "started")
+
+	def test_a_run_jarvis_starts_carries_the_reports_defaults(self):
+		with _defaults(valuation_field_type="Currency"), patch(_ENQUEUE):
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		stored = frappe.db.get_value("Prepared Report", {"report_name": PREP_REPORT}, "filters")
+		self.assertEqual(json.loads(stored), {"company": "Acme", "valuation_field_type": "Currency"})
+
+	def test_unreadable_report_filters_add_no_defaults(self):
+		with patch.object(_prepared_reports, "get_report_filters", side_effect=frappe.PermissionError):
+			self.assertEqual(_prepared_reports._report_defaults(PREP_REPORT), {})
 
 	def test_a_different_filter_value_is_not_reused(self):
 		with _completed([{"name": "D"}], filters={"company": "Acme"}), patch(_ENQUEUE):

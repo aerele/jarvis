@@ -47,6 +47,7 @@ from frappe.utils.scheduler import is_scheduler_inactive
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools.get_report_filters import get_report_filters
 
 # Cap rows folded into the envelope. A prepared report is the likeliest place to
 # hit a huge result; an uncapped dump becomes a chat-message payload AND a
@@ -83,7 +84,9 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	prepared report. Pull-model, stateless, runs as ``user``. Raises
 	InvalidArgumentError when the background queue can't run the report."""
 	_gate_report(report_name)
-	filters = _canonical_filters(raw_filters)
+	# The report's own defaults, as Desk sends them: a run started here is the run
+	# Desk would start, and a Desk run is found again.
+	filters = {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
 	_gate_filters(report_name, filters, user)
 
 	# 1. A completed copy we can read? (0 rows is a valid answer; unreadable -> fall through)
@@ -165,6 +168,24 @@ def _canonical_filters(raw: dict | str | None) -> dict:
 			continue
 		out[key] = value
 	return out
+
+
+def _report_defaults(report_name: str) -> dict:
+	"""The literal filter defaults the report's script declares, ``{fieldname: value}``.
+	Empty when its filters can't be read: then a Desk run may simply not be reused."""
+	try:
+		filters = get_report_filters(report_name)["filters"]
+	except (frappe.ValidationError, frappe.PermissionError, InvalidArgumentError, PermissionDeniedError):
+		return {}
+	return {f["fieldname"]: f["default"] for f in filters if not _unset(f.get("default"))}
+
+
+def _unset(value) -> bool:
+	"""Desk sends only the filters that have a value (``get_filter_values``): a blank,
+	0 / false, "%" or an empty selection reads as not set."""
+	if isinstance(value, list | tuple):
+		return not value
+	return value is None or value in ("", "%") or (isinstance(value, int | float) and value == 0)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,7 +333,7 @@ def _latest(report_name, filters, user, statuses):
 
 
 def _match_key(filters: dict) -> str:
-	"""The filters as a comparable string: bookkeeping and empty values dropped,
+	"""The filters as a comparable string: bookkeeping and unset values dropped,
 	scalars as text (1, 1.0, true and "1" read the same), lists as sorted text."""
 
 	def norm(value):
@@ -328,7 +349,7 @@ def _match_key(filters: dict) -> str:
 		{
 			key: norm(value)
 			for key, value in filters.items()
-			if key not in _BOOKKEEPING_KEYS and value not in (None, "", [], ())
+			if key not in _BOOKKEEPING_KEYS and not _unset(value)
 		},
 		sort_keys=True,
 	)
