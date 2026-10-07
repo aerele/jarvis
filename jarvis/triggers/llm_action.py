@@ -256,14 +256,19 @@ def run_llm_action(
 		reply, error = _complete(task_prompt, fenced, messages)
 	duration_ms = int((time.monotonic() - t0) * 1000)
 	# Rounds used and each lookup (tool, doctype, row count or refusal), never row data.
+	# The note LEADS the detail: the engine truncates detail at the tail, and the
+	# marker is what keeps this row hidden from non-managers (see
+	# triggers_api._hide_lookup_rows), so it must never be cut off.
 	lookup_note = (
-		f"\n\n{lookups.LOOKUP_MARKER} Rounds: {rounds}. Lookups:\n" + ("\n".join(lookup_log) or "none")
-		if rounds
+		f"{lookups.lookup_marker(row.owner)} Rounds: {rounds}. Lookups:\n"
+		+ ("\n".join(lookup_log) or "none")
+		+ "\n\n"
+		if cint(row.llm_allow_lookups)
 		else ""
 	)
 	if error is not None:
 		_insert_activity(
-			**base, status="Failed", summary=error, detail=error + lookup_note, duration_ms=duration_ms
+			**base, status="Failed", summary=error, detail=lookup_note + error, duration_ms=duration_ms
 		)
 	else:
 		reply = (reply or "").strip()
@@ -271,7 +276,7 @@ def run_llm_action(
 			**base,
 			status="Success",
 			summary=reply[:200],
-			detail=reply + lookup_note,
+			detail=lookup_note + reply,
 			duration_ms=duration_ms,
 		)
 	# Background job: nothing else commits for us.

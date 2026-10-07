@@ -56,6 +56,7 @@ def _invoice_meta():
 			_df("internal_cost", "Currency", permlevel=2),
 			_df("api_key", "Data"),
 			_df("items", "Table", options="Sales Invoice Item"),
+			_df("logs", "Table", options="Core Child"),
 		],
 		title_field="customer",
 	)
@@ -77,6 +78,8 @@ class _LookupCase(unittest.TestCase):
 			"Communication": _Meta("Communication", [_df("content", "Text Editor")], module="Core"),
 			"Contact": _Meta("Contact", [_df("email_id")], module="Contacts"),
 			"Gift Card": _Meta("Gift Card", [_df("code_label")], module="Custom", custom=1),
+			"Core Child": _Meta("Core Child", [_df("note")], istable=1, module="Core"),
+			"Fleet Thing": _Meta("Fleet Thing", [_df("label")], module="Jarvis Admin"),
 			"Plain Custom": _Meta("Plain Custom", [_df("label")], module="Custom"),
 		}
 		module_app = {
@@ -86,6 +89,7 @@ class _LookupCase(unittest.TestCase):
 			"contacts": "frappe",
 			"custom": "frappe",
 			"jarvis": "jarvis",
+			"jarvis_admin": "jarvis_admin",
 		}
 		p = patch.object(lookups, "_module_app", side_effect=lambda m: module_app.get((m or "").lower()))
 		p.start()
@@ -116,6 +120,12 @@ class _LookupCase(unittest.TestCase):
 
 	def lookup(self, tool, **args):
 		return lookups.execute_lookup(OWNER, {"tool": tool, "args": args})
+
+
+class TestMarker(unittest.TestCase):
+	def test_marker_names_the_owner_and_starts_with_the_prefix(self):
+		self.assertEqual(lookups.lookup_marker("a@b.com"), "[lookups:a@b.com]")
+		self.assertTrue(lookups.lookup_marker("a@b.com").startswith(lookups.LOOKUP_MARKER))
 
 
 class TestParseReply(unittest.TestCase):
@@ -221,6 +231,7 @@ class TestExecuteList(_LookupCase):
 			"email queue": dict(doctype="email queue"),
 			"communication": dict(doctype="Communication"),
 			"contact": dict(doctype="Contact"),
+			"jarvis_admin app": dict(doctype="Fleet Thing"),
 			"plain doctype in a framework module": dict(doctype="Plain Custom"),
 			"is with a non-string": dict(doctype="Sales Invoice", filters=[["status", "is", 1]]),
 			"between with three values": dict(
@@ -293,6 +304,7 @@ class TestExecuteGet(_LookupCase):
 			"api_key": "k",
 			"_user_tags": ",x",
 			"items": [{"item_code": "A", "idx": 1, "parent": "SINV-1", "api_key": "k"}],
+			"logs": [{"note": "framework child rows are dropped"}],
 		}
 		with patch(GET_DOC, return_value=doc) as read:
 			result, line = self.lookup("get", doctype="Sales Invoice", name="SINV-1")
@@ -302,6 +314,7 @@ class TestExecuteGet(_LookupCase):
 			self.assertNotIn(hidden, result["doc"])
 		# child rows go through the child's own readable set too
 		self.assertEqual(result["doc"]["items"], [{"item_code": "A", "idx": 1}])
+		self.assertNotIn("logs", result["doc"])
 		self.assertEqual(line, "get Sales Invoice: 1 record")
 
 	def test_missing_and_unreadable_look_the_same(self):
