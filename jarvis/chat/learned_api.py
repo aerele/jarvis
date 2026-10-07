@@ -646,7 +646,7 @@ def _load_for_transition(name: str, allowed_sources: tuple, action: str):
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) -> dict:
 	"""Proposed->Approved (or Stale->Approved). Optional edit freezes the
 	evidence line (section 6.5): ``draft_edited=1`` and the frozen label is shown
@@ -693,7 +693,7 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	doc.approved_by = frappe.session.user
 	doc.reviewed_at = now
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	out = {"ok": True, "status": doc.status, "draft_edited": int(doc.draft_edited or 0)}
 	# TASK 16: an A-class approve compiles the pattern into the org-wide
 	# learned-<domain> skill every user gets; if it drew from a private
@@ -703,7 +703,7 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reject_learned_pattern(name: str, reason: str) -> dict:
 	"""Proposed->Rejected (or Stale->Rejected). ``reason`` is mandatory and is
 	stored in ``review_note`` (durable, reversible via restore)."""
@@ -717,11 +717,11 @@ def reject_learned_pattern(name: str, reason: str) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def acknowledge_learned_pattern(name: str) -> dict:
 	"""B/C insight-only disposition (plan section 6.4: C is insight-only; B is
 	insight-only in Phase 1 pushed text). B/C patterns never compile into the
@@ -741,11 +741,11 @@ def acknowledge_learned_pattern(name: str) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status, "acknowledged": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def unapprove_learned_pattern(name: str) -> dict:
 	"""Approved->Proposed (the multi-SM disagreement window, section 6.5). Any
 	SM, but ONLY while the pattern has not yet been compiled into a push - so it
@@ -759,11 +759,11 @@ def unapprove_learned_pattern(name: str) -> dict:
 	# The approval is withdrawn, so the frozen reviewed text goes with it.
 	doc.approved_draft = None
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def restore_rejected_pattern(name: str) -> dict:
 	"""Rejected->Proposed (the Rejected-tab restore, section 6.5)."""
 	_guard()
@@ -771,11 +771,11 @@ def restore_rejected_pattern(name: str) -> dict:
 	doc.status = "Proposed"
 	doc.review_note = None
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def snooze_learned_pattern(name: str, days: int | str = 30) -> dict:
 	"""Proposed->Snoozed for 7/30/90 days (dismiss-for-now, section 6.4)."""
 	_guard()
@@ -793,11 +793,11 @@ def snooze_learned_pattern(name: str, days: int | str = 30) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status, "snoozed_until": str(doc.snoozed_until)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def batch_approve(names: str | list) -> dict:
 	"""Approve many at once - A-class ONLY. If ANY named row has an effective
 	sensitivity of B or C, the WHOLE batch is refused (B needs individual
@@ -861,7 +861,7 @@ def _apply_in_progress() -> bool:
 # --------------------------------------------------------------------------- #
 # LLM polish (plan 5.5 Phase 2): optional one-turn draft rewrite
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def polish_learned_draft(name: str) -> dict:
 	"""Rewrite a Proposed/Stale pattern's ``skill_draft`` for clarity via one
 	silent gateway turn (``jarvis.learning.polish``). Requires the
@@ -926,7 +926,7 @@ def polish_learned_draft(name: str) -> dict:
 		name,
 		{"skill_draft": out["text"], "draft_edited": 0, "draft_polished": 1},
 	)
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "text": out["text"]}
 
 
@@ -968,7 +968,7 @@ _INSIGHT_SKILL_SYSTEM = (
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def draft_insight_skill_update(pattern_name: str) -> dict:
 	"""Draft "apply this insight to a skill" (D5). Gathers the B/C insight
 	(statement, draft bullet, evidence tail) + up to ``_INSIGHT_TARGET_CAP``
@@ -1032,7 +1032,7 @@ def draft_insight_skill_update(pattern_name: str) -> dict:
 	return _validated_draft(parsed, candidates)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_insight_skill_update(
 	pattern_name: str,
 	action: str,
@@ -1079,7 +1079,7 @@ def apply_insight_skill_update(
 	doc.reviewed_at = now_datetime()
 	doc.materialized_skill = row_name
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	from jarvis.chat.custom_skills import apply_would_push
 
 	out = {"ok": True, "skill_name": slug, "needs_apply": apply_would_push(row_name)}
@@ -1391,7 +1391,7 @@ def _system_user_guard() -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def flag_learned_default(name: str, note: str = "") -> dict:
 	"""Record "this default was wrong here" against an Active/Approved learned
 	pattern (plan 6.5 correction loop - the JLP ref in every compiled bullet is
@@ -1474,7 +1474,7 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 				update["status"] = "Stale"
 				status = "Stale"
 	frappe.db.set_value(JLP, name, update, update_modified=False)
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 
 	if demoted:
 		_notify_flag_demotion(name, distinct_users, flags_count, band, staled=(status == "Stale"))
@@ -1544,7 +1544,7 @@ def _counter_evidence_list(raw) -> list:
 # --------------------------------------------------------------------------- #
 # apply / sync (dedicated learned-skills push - Phase-2 namespace, plan 13 Q5)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_learned_skills() -> dict:
 	"""Recompile approved patterns into the ``learned-<domain>`` skills and push
 	them (delegates to ``jarvis.learning.compiler.apply_learned_skills`` - Wave
@@ -1571,7 +1571,7 @@ def _clear_stale_materialized_pointers() -> None:
 	for name in names:
 		frappe.db.set_value(JLP, name, {"materialized_skill": None}, update_modified=False)
 	if names:
-		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 
 
 @frappe.whitelist()
@@ -1632,7 +1632,7 @@ def pending_learned_count() -> int:
 # --------------------------------------------------------------------------- #
 # run now (section 5.1 / 5.2 manual bypass)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_pattern_analysis_now() -> dict:
 	"""Enqueue a manual pattern-analysis run (bypasses the analysis window, keeps
 	the row budget + statement timeouts). Returns the orchestrator's
@@ -1677,7 +1677,7 @@ def get_learning_settings(include_preflight: int | str = 0) -> dict:
 	return {"settings": settings, "preflight": preflight}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_learning_settings(payload: str | dict | None = None) -> dict:
 	"""Write the ``pattern_*`` config via the Settings doc so window validation
 	runs (>=1h, wrap-aware - plan section 5.1). Only the config fields are
@@ -1709,7 +1709,7 @@ def set_learning_settings(payload: str | dict | None = None) -> dict:
 	# set_single_value (not set_value on the Single, which Frappe deprecates):
 	# a direct write that never fires on_update. Wrap-aware validation ran above.
 	frappe.db.set_single_value(SETTINGS, values, update_modified=False)
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return get_learning_settings()
 
 
@@ -1872,7 +1872,7 @@ def list_promotion_requests_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def decide_promotion(name: str, approve: int | str, note: str = "") -> dict:
 	"""Approve or reject a wiki-promotion request. The write itself - merge the
 	frozen ``body_snapshot`` into the Role/Org target page (audience-suffix slug
@@ -2110,7 +2110,7 @@ def _promotion_target_body_and_after(req):
 # --------------------------------------------------------------------------- #
 # Review tab: reviewer follow-up question (DESIGN.md 3.5 / 6 / 6b)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def trigger_followup_question(name: str, ask: str) -> dict:
 	"""Rephrase a reviewer's ask into ONE generic-tone Personalise question and
 	insert it into the target user's bank. ``name`` is a ``Jarvis Learned
