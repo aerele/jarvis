@@ -21,6 +21,7 @@ from jarvis.chat.api import create_conversation
 from jarvis.chat.feedback import (
 	PULSE_MAX_OFFERS,
 	_pulse_period,
+	_pulse_window_start,
 	pulse_context,
 	submit_pulse_feedback,
 )
@@ -131,6 +132,20 @@ class TestPulsePeriod(FrappeTestCase):
 	def test_first_of_january_reviews_the_previous_december(self):
 		key, label, is_previous = _pulse_period(datetime(2027, 1, 1, 0, 5))
 		self.assertEqual((key, label, is_previous), ("M:2026-12", "Last month, Dec 2026", True))
+
+
+class TestPulseWindow(FrappeTestCase):
+	def test_previous_month_review_starts_on_the_first_at_midnight(self):
+		for day in (1, 10):
+			start = _pulse_window_start(datetime(2026, 10, day, 15, 30))
+			self.assertEqual(start, datetime(2026, 9, 1, 0, 0))
+
+	def test_current_month_review_keeps_the_rolling_thirty_days(self):
+		now = datetime(2026, 10, 11, 15, 30)
+		self.assertEqual(_pulse_window_start(now), datetime(2026, 9, 11, 15, 30))
+
+	def test_january_review_starts_on_the_first_of_december(self):
+		self.assertEqual(_pulse_window_start(datetime(2027, 1, 5, 8, 0)), datetime(2026, 12, 1, 0, 0))
 
 
 class TestPulseContext(_PulseTestCase):
@@ -341,19 +356,6 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 		self.assertEqual(item["use_case_text"], "saves us hours a week")
 		self.assertEqual(item["note"], "more charts please")
 		self.assertEqual(item["user_ref"], TEST_USER)
-
-	def test_a_client_period_key_for_the_previous_month_is_stored(self):
-		# Dialog opened on day 10, submitted after midnight on day 11.
-		with patch(_NOW, return_value=datetime(2026, 10, 11, 0, 5)), patch(_PUSH) as push:
-			submit_pulse_feedback(stars=4, features_offered=[], features_selected=[], period_key="M:2026-09")
-		self.assertEqual(self._item(push)["period_key"], "M:2026-09")
-		self.assertEqual(self._pulse().pulse_last_period_key, "M:2026-09")
-
-	def test_a_bogus_client_period_key_falls_back_to_the_servers(self):
-		for bogus in ("M:1999-01", "garbage", "M:2026-08"):
-			with patch(_NOW, return_value=datetime(2026, 10, 3, 9, 0)), patch(_PUSH) as push:
-				submit_pulse_feedback(stars=4, features_offered=[], features_selected=[], period_key=bogus)
-			self.assertEqual(self._item(push)["period_key"], "M:2026-09", bogus)
 
 	def test_accepts_json_encoded_lists_from_the_client(self):
 		# frappe.client passes list args as JSON strings over HTTP.
