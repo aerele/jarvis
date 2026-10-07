@@ -9782,24 +9782,9 @@ async function retry(messageId) {
 }
 
 function resendFailed(m) {
-	// Re-send a message whose POST failed. Guard FIRST so we never drop the
-	// bubble when we can't actually resend: bail if a turn or dictation is
-	// active, or if there's no plain text (e.g. an attachment-only message,
-	// whose file can't be re-attached from the bubble). Then swap the failed
-	// bubble for a fresh optimistic one via send().
-	if (sending.value || micState.value === "recording" || voiceBusyCount.value > 0) return;
-	const txt = (m.content || "").replace(/\n*📎[^\n]*$/, "").trim();
-	if (!txt) return;
-	messages.value = messages.value.filter((x) => x.name !== m.name);
-	// VR4-2: this failed bubble is being REPLACED by a fresh send — drop its origin-scoped pending
-	// record so it isn't re-injected as a stale duplicate on return. A new failure records a new one.
-	// The bubble is on screen, so its origin is the current scope.
-	_pendingSends.remove(_currentScope(), m.name);
-	// Carry the ORIGINAL send's voice-release token: the first send failed (so its committed
-	// clips were never released), and this resend delivers the SAME text — on success it must
-	// release exactly those records (R2-1 inverse: a failed-bubble resend has fromMain=false and
-	// otherwise never releases delivered voice audio → a mirror leak + a guard that never clears).
-	send(txt, m.voiceAck || null);
+	// The original request lives on the scope-owned failed bubble. send() checks
+	// every guard before replacing it; a blocked Retry must never lose work.
+	return send({ retryBubble: m }, m.voiceAck || null);
 }
 
 // One-shot viewing context from a "Discuss in chat" hand-off (chatPrefill's
@@ -9825,10 +9810,21 @@ async function send(textArg, resendAck) {
 	// a successful main-composer send its transcribed recordings become durable, so their
 	// retained audio + leave guard can be released.
 	const _sentScope = _currentScope();
-	const fromMain = typeof textArg !== "string";
-	const text = (fromMain ? input.value : textArg).trim();
+	const retryBubble = textArg?.retryBubble;
+	if (
+		retryBubble &&
+		(busy.value ||
+			!retryBubble.sendRequest ||
+			retryBubble.sendRequest.conversation !== (currentId.value || "") ||
+			!_pendingSends.peek(_sentScope).some((bubble) => bubble.name === retryBubble.name))
+	)
+		return;
+	const fromMain = !retryBubble && typeof textArg !== "string";
+	const text = retryBubble
+		? retryBubble.sendRequest.text
+		: (fromMain ? input.value : textArg).trim();
 	const compactCmd = parseCompactCommand(text);
-	if (compactCmd) {
+	if (compactCmd && !retryBubble) {
 		if (fromMain) input.value = "";
 		if (compacting.value) {
 			notify("Already compacting this chat", { type: "info" });
@@ -9879,7 +9875,11 @@ async function send(textArg, resendAck) {
 	// the server accepts it, so their chips can stop reading like leftover clutter next to an
 	// already-answered message.
 	const _failedAtSend = fromMain && voiceStore ? voiceStore.failedIdsForScope(_sentScope) : [];
-	const attachments = fromMain ? pendingFiles.value.slice() : [];
+	const attachments = retryBubble
+		? retryBubble.sendRequest.attachments.map((file) => ({ ...file }))
+		: fromMain
+		? pendingFiles.value.slice()
+		: [];
 	if ((!text && !attachments.length) || sending.value) return;
 	// canSend already darkens the Send button, but Enter routes here directly (onKey
 	// preventDefaults and calls send()), and a programmatic send never sees the button
@@ -9944,6 +9944,60 @@ async function send(textArg, resendAck) {
 	// Auto mode is chosen with the chat's FIRST message only: decided here, before
 	// the optimistic bubble below lands in messages (autoView ignores it either way).
 	const _sendAutoMode = autoView.value.visible && !autoView.value.locked && autoView.value.on;
+	// The conversation we're sending FROM. The user may switch to another chat
+	// while this POST is in flight, so all post-send reconciliation gates on
+	// "still on the chat we sent from" — never yank them back to this one.
+	const sentFrom = retryBubble ? retryBubble.sendRequest.conversation : currentId.value || "";
+	// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
+	// successful send, so a rejected send (and its Retry) keeps grounding armed.
+	const groundWiki = groundNextTurn.value;
+	let sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
+	// Create → Create a trigger: keep the triggers page marker on every send so
+	// the agent stays in trigger-building mode through the whole Q&A. (The
+	// one-shot _prefillSendContext is cleared after the send is accepted, below,
+	// so a rejected send keeps it armed for retry.)
+	if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
+	// Connector-focus pill: carries every turn while armed (not one-shot like
+	// groundWiki/triggerMode above), so a rejection/resend needs no special
+	// handling — connectorFocus.value itself is untouched by a failed send.
+	// Captured now (not read again after the POST) so a clear mid-flight can't
+	// change what this SPECIFIC turn asked for.
+	const _sentFocus = retryBubble
+		? retryBubble.sendRequest.context?.focus_connector
+		: connectorFocus.value;
+	if (_sentFocus)
+		sendCtx = {
+			...(sendCtx || {}),
+			focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
+		};
+	// The confirmation cards currently on screen, in the order the numbers are
+	// shown, so a typed "confirm 2" binds to the card the user actually sees.
+	// Deliberately confirm-only (step-by-step): send_message forwards these
+	// tokens to confirm_tool server-side, never approve_and_run - a typed
+	// go-ahead can only ever resolve a card one confirm at a time. Approve & run
+	// is reachable ONLY through the card's own button (approveAndRunPending),
+	// by design (the typed shortcut pins to step-by-step, §3.5).
+	const approvalTokens = visiblePendingActions.value.map((a) => a.token);
+	// A chat started from the home screen has no conversation to save a model or
+	// thinking pick on, so the first send carries it.
+	const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
+	const sendRequest = retryBubble
+		? JSON.parse(JSON.stringify(retryBubble.sendRequest))
+		: JSON.parse(
+				JSON.stringify({
+					conversation: sentFrom,
+					text,
+					attachments,
+					context: sendCtx,
+					approvalTokens,
+					model: _picks.model,
+					thinking: _picks.thinking,
+					autoMode: _sendAutoMode,
+					// Local provenance: consume only the one-shot context this request owned.
+					prefillContext: _prefillSendContext,
+					groundWiki,
+				})
+		  );
 	// Hold a stable REFERENCE to the optimistic bubble (VR4-2): a mid-send conversation switch
 	// replaces messages.value, so on rejection we mutate/re-inject THIS object rather than a
 	// messages.value.find() that returns nothing once the array was swapped by loadConversation().
@@ -9957,7 +10011,12 @@ async function send(textArg, resendAck) {
 		// resend of this very bubble releases the SAME recordings this send would have (R2-1).
 		// Omitted when there is no dictated audio to release.
 		voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
+		sendRequest,
 	};
+	if (retryBubble) {
+		messages.value = messages.value.filter((bubble) => bubble.name !== retryBubble.name);
+		_pendingSends.remove(_sentScope, retryBubble.name);
+	}
 	messages.value = [...messages.value, _optBubble];
 	await nextTick();
 	// Two things, in this order, and both matter:
@@ -9972,55 +10031,20 @@ async function send(textArg, resendAck) {
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 	try {
-		// The conversation we're sending FROM. The user may switch to another chat
-		// while this POST is in flight, so all post-send reconciliation gates on
-		// "still on the chat we sent from" — never yank them back to this one.
-		const sentFrom = currentId.value || "";
-		// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
-		// successful send, so a rejected send (and its Retry) keeps grounding armed.
-		const groundWiki = groundNextTurn.value;
-		let sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
-		// Create → Create a trigger: keep the triggers page marker on every send so
-		// the agent stays in trigger-building mode through the whole Q&A. (The
-		// one-shot _prefillSendContext is cleared after the send is accepted, below,
-		// so a rejected send keeps it armed for retry.)
-		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
-		// Connector-focus pill: carries every turn while armed (not one-shot like
-		// groundWiki/triggerMode above), so a rejection/resend needs no special
-		// handling — connectorFocus.value itself is untouched by a failed send.
-		// Captured now (not read again after the POST) so a clear mid-flight can't
-		// change what this SPECIFIC turn asked for.
-		const _sentFocus = connectorFocus.value;
-		if (_sentFocus)
-			sendCtx = {
-				...(sendCtx || {}),
-				focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
-			};
-		// The confirmation cards currently on screen, in the order the numbers are
-		// shown, so a typed "confirm 2" binds to the card the user actually sees.
-		// Deliberately confirm-only (step-by-step): send_message forwards these
-		// tokens to confirm_tool server-side, never approve_and_run - a typed
-		// go-ahead can only ever resolve a card one confirm at a time. Approve & run
-		// is reachable ONLY through the card's own button (approveAndRunPending),
-		// by design (the typed shortcut pins to step-by-step, §3.5).
-		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
-		// A chat started from the home screen has no conversation to save a model or
-		// thinking pick on, so the first send carries it.
-		const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
 		const r = await api.sendMessage(
-			sentFrom,
-			text,
-			_picks.model,
-			attachments,
-			sendCtx,
-			approvalTokens,
+			sendRequest.conversation,
+			sendRequest.text,
+			sendRequest.model,
+			sendRequest.attachments,
+			sendRequest.context,
+			sendRequest.approvalTokens,
 			// Same voice-ack token voiceDictationStore.captureSentInPayload already
 			// computed above (for releasing local audio blobs) — non-empty iff this
 			// payload's text came from a dictation, so reuse it verbatim rather than
 			// adding new detection logic.
 			!!(_voiceAck && _voiceAck.length),
-			_sendAutoMode,
-			_picks.thinking
+			sendRequest.autoMode,
+			sendRequest.thinking
 		);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
@@ -10043,13 +10067,12 @@ async function send(textArg, resendAck) {
 			const _plan = planRejectedSend({
 				fromMain,
 				bubbleVoiceAck: _optBubble.voiceAck,
+				preserveRequest: !!retryBubble || attachments.length > 0,
 			});
 			if (_plan.keepBubble) {
-				// A failed-bubble RESEND of transcribed recordings: KEEP its bubble as failed carrying
-				// the SAME voiceAck so the user can resend again and eventually release them —
-				// dropping it would strand those records behind an armed leave guard with no chip
-				// and no action (R3-3). Store it ORIGIN-scoped so it survives a mid-send switch,
-				// and show it now if the origin is still on screen (VR4-2).
+				// Keep the complete request (including files and any voice token) retryable.
+				// A text-only composer fallback cannot represent it. Store it in its
+				// originating scope, even if another conversation is now on screen.
 				_optBubble.failed = true;
 				_pendingSends.add(_sentScope, _optBubble);
 				if (_originOnScreen && !messages.value.some((x) => x.name === tmpName))
@@ -10121,13 +10144,19 @@ async function send(textArg, resendAck) {
 			// rather than stranding them until a reload (self-heal).
 			clearHold();
 		}
-		// Send accepted — the one-shot grounding/prefill context is now consumed.
+		// An accepted send consumes only its own one-shot context. A retry must
+		// not consume a newer selection made in the current composer.
 		// Cleared HERE, not before the await: a rejected send (r.ok === false, above)
 		// returns before reaching this line, and a thrown send never reaches it either
 		// (see the catch block below) — so a retry after either failure still carries
 		// the same prefill context instead of silently sending without it.
-		if (groundWiki) groundNextTurn.value = false;
-		_prefillSendContext = null; // one-shot: only the prefill's first send carries it
+		if (JSON.stringify(_prefillSendContext) === JSON.stringify(sendRequest.prefillContext)) {
+			// Prefill is view-wide: consume it even if the user has switched chats.
+			// Wiki selection belongs to the current chat, so keep its scope guard.
+			if (_currentScope() === _sentScope && groundWiki && sendRequest.groundWiki)
+				groundNextTurn.value = false;
+			_prefillSendContext = null;
+		}
 		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
 		// the recordings this send captured (audio + leave guard). Payload-bound, so a same-scope
 		// recording that committed while this POST was in flight is NOT released, and a
@@ -10186,7 +10215,8 @@ async function send(textArg, resendAck) {
 			// Same visibility-independent reasoning as the promotion above: the pick
 			// this turn actually carried belongs to the conversation the server just
 			// created/used for it, whether or not that's still on screen.
-			if (_sentFocus) _saveConnectorFocusFor(r.conversation_id, _sentFocus);
+			if (sendRequest.context?.focus_connector)
+				_saveConnectorFocusFor(r.conversation_id, sendRequest.context.focus_connector);
 			// Mirror the server's flag from the send response itself (no reload needed).
 			// Only when the response carries it: a typed approval returns the confirmed
 			// form without the key, and that must not unlock an auto-mode chat.
