@@ -297,7 +297,7 @@ def _parse_json(raw, default):
 # --------------------------------------------------------------------------- #
 # list (frozen envelope + domain facets + board counters)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def list_learned_patterns_page(
 	domain: str | None = None,
 	status: str = "Proposed",
@@ -538,7 +538,7 @@ def _attach_question_enrichment(rows: list) -> None:
 # --------------------------------------------------------------------------- #
 # detail (full row + drill-down stats, section 6.4)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def get_learned_pattern(name: str) -> dict:
 	"""One pattern with everything the drill-down renders: parsed evidence +
 	temporal-spread JSON, detected roles, the exact compiled-bullet preview, run
@@ -1574,7 +1574,7 @@ def _clear_stale_materialized_pointers() -> None:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def get_learned_apply_status() -> dict:
 	"""Poll the Apply - learned skills ride their OWN dedicated push (Phase-2
 	namespace), so this proxies the learned sync-status poller
@@ -1621,7 +1621,7 @@ def _cutover_custom_sync_status(learned: dict):
 		return None
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def pending_learned_count() -> int:
 	"""Board badge: surfaced patterns still awaiting a decision (the sibling of
 	``approvals_api.pending_count``)."""
@@ -1646,7 +1646,7 @@ def run_pattern_analysis_now() -> dict:
 # --------------------------------------------------------------------------- #
 # settings + status (the in-tab config surface, section 6.4)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def get_learning_settings(include_preflight: int | str = 0) -> dict:
 	"""Read the ``pattern_*`` config the Analysis tab exposes (admin set only).
 	``include_preflight`` runs the (potentially expensive) enablement readiness
@@ -1713,7 +1713,7 @@ def set_learning_settings(payload: str | dict | None = None) -> dict:
 	return get_learning_settings()
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def get_learning_status() -> dict:
 	"""Last-run summary + next-run pointer. The Analysis-tab probe."""
 	_admin_guard()
@@ -1755,7 +1755,7 @@ def get_learning_status() -> dict:
 # --------------------------------------------------------------------------- #
 # Review tab: access probe (DESIGN.md 6b)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def get_review_access() -> dict:
 	"""Cheap reviewer-access probe - the Review-tab analogue of
 	``get_learning_status``. Role-only (reviewer set). Carries the two Review badge
@@ -1778,7 +1778,7 @@ def get_review_access() -> dict:
 _PROMO_STATUSES = ("Pending", "Approved", "Rejected")
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def list_promotion_requests_page(
 	status: str = "Pending",
 	search: str | None = None,
@@ -1889,7 +1889,7 @@ def decide_promotion(name: str, approve: int | str, note: str = "") -> dict:
 # --------------------------------------------------------------------------- #
 # Review tab: go to chat (server-assembled background bundle, DESIGN.md 6b)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def go_to_chat_context(kind: str, name: str) -> dict:
 	"""Assemble the background bundle the frontend passes through ``chatPrefill``
 	so a reviewer can talk the decision over with the assistant. Server-side
