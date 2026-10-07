@@ -14,7 +14,7 @@
 				class="rounded bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-7"
 				:aria-describedby="noteId(f.key)"
 			>
-				{{ f.value || "—" }}
+				{{ f.value || "-" }}
 			</div>
 			<FieldControl
 				v-else
@@ -51,7 +51,7 @@
 						class="rounded bg-surface-gray-2 px-2 py-1.5 text-base text-ink-gray-7"
 						:aria-describedby="noteId(c.key)"
 					>
-						{{ c.value || "—" }}
+						{{ c.value || "-" }}
 					</div>
 					<FieldControl
 						v-else

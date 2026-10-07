@@ -15,7 +15,7 @@
 		<Section
 			title="Knowledge debt (hot + stale)"
 			:items="lists.debt"
-			empty="None — knowledge is fresh"
+			empty="None, knowledge is fresh"
 			warn
 		>
 			<template #row="{ it }">

@@ -1157,7 +1157,7 @@ const runTooltip = computed(() => {
 	// available again. The install is kept so it can be uninstalled; it resumes automatically
 	// if the operator restores availability.
 	if (agent.value.install_disabled)
-		return "The operator has made this agent unavailable — it can't run until it's available again";
+		return "The operator has made this agent unavailable, so it can't run until it's available again";
 	const nature = agent.value.nature;
 	if (nature !== "Auditor" && nature !== "Scribe" && !agent.value.supports_manual_run)
 		return "Operators draft through the Approval Board - no on-demand runs";
@@ -1174,9 +1174,9 @@ const runTooltip = computed(() => {
 	return agent.value.agent_slug === "bank-recon-operator"
 		? "Review bank lines, proposals only"
 		: agent.value.agent_slug === "ar-collections-operator"
-		? "Review receivables — unsent drafts only"
+		? "Review receivables: unsent drafts only"
 		: nature === "Operator"
-		? "Review existing drafts — no posting or payment"
+		? "Review existing drafts: no posting or payment"
 		: nature === "Scribe"
 		? "Run this agent now"
 		: "Run this audit now";
@@ -1232,7 +1232,7 @@ function confirmUninstall() {
 		// overclaiming what actually gets deleted) nor the append-only provenance
 		// ledger (PP-5), which is immutable and outlives the install.
 		message:
-			"This removes the agent, its run history, and findings; saved dashboards and the compliance audit trail are kept. This can't be undone.",
+			"This removes the agent, its run history and findings; saved dashboards and the compliance audit trail are kept. This can't be undone.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await api.uninstallAgent(name);
@@ -1464,7 +1464,7 @@ async function saveConfig(merged) {
 		configurationDirty.value = false;
 		toast.success(
 			Object.keys(configurationIssues.value).length
-				? "Draft configuration saved — complete the highlighted settings before running."
+				? "Draft configuration saved. Complete the highlighted settings before running."
 				: "Configuration saved"
 		);
 	} catch (e) {

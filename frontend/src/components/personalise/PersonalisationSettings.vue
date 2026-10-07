@@ -51,7 +51,7 @@
 									</h2>
 									<p class="mt-1 text-p-base text-ink-gray-6">
 										Admin-authored questions {{ agentName }} asks everyone, a
-										role, or one person &mdash; separate from the questions it
+										role or one person, separate from the questions it
 										generates on its own from behaviour and chat patterns
 										(uncapped, materialized as soon as you save one).
 									</p>
@@ -209,7 +209,7 @@
 								<p class="mt-1 text-p-base text-ink-gray-6">
 									Control how many behavioural-learning / chat-pattern questions
 									{{ agentName }} adds to a person's bank each day. Organisation,
-									role, and reviewer follow-up questions are never capped.
+									role and reviewer follow-up questions are never capped.
 								</p>
 							</div>
 

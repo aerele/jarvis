@@ -547,7 +547,7 @@ def _friendly_condition_error(e: Exception, target_doctype: str) -> str:
 	(the raw str carries CPython artifacts like ``<unknown>`` a user can't act
 	on)."""
 	if isinstance(e, SyntaxError):
-		return _("The condition has a syntax error — check quotes, brackets and operators.")
+		return _("The condition has a syntax error. Check quotes, brackets and operators.")
 	if isinstance(e, NameError):
 		return _(
 			"Only 'doc' and 'utils' can be used in a condition "

@@ -158,13 +158,13 @@ class JarvisTrigger(NotRenamable, Document):
 			frappe.throw(
 				_(
 					"Triggers cannot target child tables ('{0}'). Target the parent "
-					"DocType instead — child rows ride its events."
+					"DocType instead. Child rows ride its events."
 				).format(self.target_doctype)
 			)
 		if self.target_doctype in DENYLISTED_DOCTYPES:
 			frappe.throw(
 				_(
-					"Triggers on '{0}' are not allowed — they could loop on their own "
+					"Triggers on '{0}' are not allowed. They could loop on their own "
 					"logs or fire on internal plumbing."
 				).format(self.target_doctype)
 			)
