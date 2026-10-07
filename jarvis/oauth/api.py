@@ -598,7 +598,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	except admin_client.AdminAuthError as e:
 		return _err(
 			"admin_auth",
-			f"Couldn't apply the sign-in — your session or admin credentials "
+			f"Couldn't apply the sign-in. Your session or admin credentials "
 			f"aren't valid. Refresh the page (re-login if prompted) and try "
 			f"again. ({e})",
 		)
@@ -609,7 +609,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	) as e:
 		return _err(
 			"push_failed",
-			f"Couldn't apply the sign-in to your agent right now — try again in a moment. ({e})",
+			f"Couldn't apply the sign-in to your agent right now. Try again in a moment. ({e})",
 		)
 	# force=True is mandatory here. The OAuth blob lives in the container's
 	# auth-profiles.json (out-of-band from Jarvis Settings), so on_update's

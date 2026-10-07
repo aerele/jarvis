@@ -457,7 +457,7 @@ describe("ApprovalsBoard one inbox", () => {
 		await flushPromises();
 		expect(api.decideApproval).toHaveBeenCalledWith(
 			"AR-1",
-			"Review acknowledged — no posting authorised",
+			"Review acknowledged: no posting authorised",
 			1
 		);
 	});

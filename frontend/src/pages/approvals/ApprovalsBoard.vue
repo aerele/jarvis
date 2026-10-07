@@ -394,8 +394,8 @@
 					<div class="flex flex-col items-center gap-1">
 						<span class="text-lg font-medium text-ink-gray-8">Select an approval</span>
 						<span class="text-p-base text-ink-gray-6">
-							Pick a request from the list to review it, decide, or tag someone in
-							the comments.
+							Pick a request from the list to review it, decide or tag someone in the
+							comments.
 						</span>
 					</div>
 				</div>
@@ -1205,7 +1205,7 @@ async function submitDecide(approve) {
 	const text = approve
 		? selectedOption.value ||
 		  noteText ||
-		  (reviewOnly ? "Review acknowledged — no posting authorised" : "Approved")
+		  (reviewOnly ? "Review acknowledged: no posting authorised" : "Approved")
 		: noteText || "Rejected";
 	const id = selected.value.name;
 	try {
@@ -1232,7 +1232,7 @@ async function submitDecide(approve) {
 		toast.success(
 			(approve
 				? reviewOnly
-					? "Review acknowledged — no accounting or sending action"
+					? "Review acknowledged: no accounting or sending action"
 					: "Approved"
 				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
 		);

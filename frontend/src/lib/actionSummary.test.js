@@ -406,11 +406,11 @@ test("receiptView: auto_applied counts like a real execution (from data), not th
 // truthy `result` proves each branch ignores it rather than trusting an
 // unconfirmed/unverified result the way "confirmed" does.
 const _HONEST_OUTCOMES = [
-	["cancelled", "muted", "Cancelled — not performed"],
-	["superseded", "muted", "Not confirmed — replaced by a newer proposal"],
-	["expired", "muted", "Expired — not performed"],
-	["unknown", "warning", "Outcome unknown — check before retrying"],
-	["partial", "warning", "Partly applied — check before retrying"],
+	["cancelled", "muted", "Cancelled: not performed"],
+	["superseded", "muted", "Not confirmed: replaced by a newer proposal"],
+	["expired", "muted", "Expired: not performed"],
+	["unknown", "warning", "Outcome unknown: check before retrying"],
+	["partial", "warning", "Partly applied: check before retrying"],
 ];
 for (const [outcome, tone, title] of _HONEST_OUTCOMES) {
 	test(`receiptView: ${outcome} renders its own honest chip, never confirmed`, () => {

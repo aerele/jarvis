@@ -302,7 +302,7 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 				<span class="jv-starter-p">{{ s.prompt }}</span>
 			</button>
 		</div>
-		<p class="jv-starter-hint">Tap to start — you can edit before sending.</p>
+		<p class="jv-starter-hint">Tap to start. You can edit before sending.</p>
 	</div>
 
 	<div class="jv-heroc jv-safe-bottom">

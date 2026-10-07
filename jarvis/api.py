@@ -1651,7 +1651,7 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 
 _PREVIEW_NOT_UNDONE = (
 	"A trial run cannot undo email or calls to other systems sent by the document's own code, live "
-	"notifications, or error log entries."
+	"notifications or error log entries."
 )
 
 

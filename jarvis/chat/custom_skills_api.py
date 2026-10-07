@@ -1057,7 +1057,7 @@ def decide_skill_promotion(
 					"to_scope": "Org",
 					"push_projection": fresh,
 					"reason": _(
-						"The shared catalog changed since you last checked — review the updated "
+						"The shared catalog changed since you last checked. Review the updated "
 						"push impact and confirm again."
 					),
 				}

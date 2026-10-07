@@ -596,7 +596,7 @@
 						<span>{{ greeting }}, {{ firstName }}</span>
 					</h1>
 					<p class="jv-welcome-sub">
-						Ask about your ERP data, run a workflow, or draft something.
+						Ask about your ERP data, run a workflow or draft something.
 						{{ agentName }}
 						is connected to your
 						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
@@ -7832,7 +7832,7 @@ const showOlderCardsNote = computed(
 );
 const olderCardsNoteText = computed(() =>
 	showOlderCardsNote.value
-		? "An earlier action card is still waiting — use its buttons or the Approval Board."
+		? "An earlier action card is still waiting. Use its buttons or the Approval Board."
 		: ""
 );
 const visiblePendingActions = computed(() =>
@@ -8110,8 +8110,8 @@ async function approveAndRunPending(pa) {
 				notify(
 					settledReason ||
 						(expired
-							? "This confirmation expired — tell me the action again to retry it."
-							: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again."),
+							? "This confirmation expired. Tell me the action again to retry it."
+							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
 					{ type: "error" }
 				);
 				return;

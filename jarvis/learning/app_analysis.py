@@ -739,7 +739,7 @@ def start_run(run_name: str) -> None:
 				"conversation": conv.name,
 				"seq": 1,
 				"role": "assistant",
-				"content": (f"▶ Learning from app **{run.app}** — {len(batches)} source batch(es)."),
+				"content": (f"▶ Learning from app **{run.app}**: {len(batches)} source batch(es)."),
 			}
 		)
 		intro.flags.ignore_permissions = True
@@ -1075,7 +1075,7 @@ def _recover_stale_runs() -> bool:
 					if int(cw.get("count") or 0) > _MAX_CAPACITY_WAITS:
 						_fail_run(
 							run.name,
-							"the site stayed busy — analysis could not get capacity to continue",
+							"the site stayed busy, so analysis could not get capacity to continue",
 						)
 						_enqueue_tick()
 						continue

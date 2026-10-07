@@ -31,7 +31,7 @@
    "fieldname": "installation",
    "fieldtype": "Data",
    "label": "Installation",
-   "description": "Installation row name snapshot (Data, not a Link — see agent)."
+   "description": "Installation row name snapshot (Data, not a Link, see agent)."
   },
   {
    "fieldname": "action",
@@ -46,7 +46,7 @@
    "fieldname": "run",
    "fieldtype": "Data",
    "label": "Run",
-   "description": "Run row name snapshot for run_* actions (Data, not a Link — see agent)."
+   "description": "Run row name snapshot for run_* actions (Data, not a Link, see agent)."
   },
   {
    "fieldname": "detail",

@@ -47,11 +47,11 @@
 					v-html="bodyHtml"
 				/>
 				<div v-if="long" class="mt-1 text-2xs text-ink-amber-6">
-					Long note — scroll the box above to review the full text before approving.
+					Long note: scroll the box above to review the full text before approving.
 				</div>
 			</template>
 			<div v-else class="mt-3 text-xs italic text-ink-gray-5">
-				(no body — a metadata-only page refresh)
+				(no body, a metadata-only page refresh)
 			</div>
 
 			<div v-if="gone" role="status" class="mt-3 text-sm text-ink-gray-6">
@@ -194,7 +194,7 @@ async function reject() {
 	busy.value = "reject";
 	try {
 		await rejectWikiWrite(props.name);
-		toast.success("Wiki note rejected — nothing was written");
+		toast.success("Wiki note rejected, nothing was written");
 		decided();
 	} catch (e) {
 		toast.error(errHtml(e));
@@ -213,7 +213,7 @@ async function retry() {
 			toast.success("Wiki note recorded");
 			decided(r);
 		} else {
-			toast.warning("Still did not land — check the failure reason");
+			toast.warning("Still did not land. Check the failure reason");
 			listChanged(r);
 		}
 	} catch (e) {

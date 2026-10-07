@@ -70,7 +70,7 @@
       "fieldtype": "Int",
       "label": "Capacity Attempts",
       "default": "0",
-      "description": "CDX-19: how many times the capacity-resume cron has re-attempted a waiting_capacity step. Bounded — once it exceeds the ceiling the run fails with an honest 'site stayed busy' reason instead of retrying forever."
+      "description": "CDX-19: how many times the capacity-resume cron has re-attempted a waiting_capacity step. Bounded: once it exceeds the ceiling the run fails with an honest 'site stayed busy' reason instead of retrying forever."
     },
     {
       "fieldname": "trigger",

@@ -113,7 +113,7 @@ export default {
 				(this.lists.hubs &&
 					this.lists.hubs[0] &&
 					(this.lists.hubs[0].label || this.lists.hubs[0].slug)) ||
-				"—"
+				"-"
 			);
 		},
 		brokerName() {
@@ -121,7 +121,7 @@ export default {
 				(this.lists.brokers &&
 					this.lists.brokers[0] &&
 					(this.lists.brokers[0].label || this.lists.brokers[0].slug)) ||
-				"—"
+				"-"
 			);
 		},
 		staleN() {

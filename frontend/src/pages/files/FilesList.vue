@@ -541,7 +541,7 @@ function bulkDelete(selections, unselectAll) {
 	confirmDialog({
 		title: `Delete ${names.length} document${names.length === 1 ? "" : "s"}?`,
 		message:
-			"Deletes the conversations, their messages, the uploaded files, and their approval requests.",
+			"Deletes the conversations, their messages, the uploaded files and their approval requests.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await api.fileboxDeleteBulk(names)) || {};
@@ -573,7 +573,7 @@ function clearProcessed() {
 	confirmDialog({
 		title: "Clear processed documents?",
 		message:
-			"Deletes every document marked Draft created or No draft (with its file, messages, and approvals). Failed, processing, and needs-approval documents, and files with wiki notes awaiting review, are kept. The drafts themselves are not touched.",
+			"Deletes every document marked Draft created or No draft (with its file, messages and approvals). Failed, processing and needs-approval documents, and files with wiki notes awaiting review, are kept. The drafts themselves are not touched.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await api.fileboxClearProcessed()) || {};

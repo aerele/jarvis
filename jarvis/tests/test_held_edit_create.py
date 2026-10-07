@@ -259,7 +259,7 @@ class TestClassifier(_EditBase):
 		_name, conv = self.held_missing()
 		row = self.ladder()[conv]
 		self.assertEqual(row["status"], "needs_approval")
-		self.assertEqual(row["result"], "Needs approval — missing: Supplier Type")
+		self.assertEqual(row["result"], "Needs approval (missing: Supplier Type)")
 		self.assertEqual(row["missing"], "Supplier Type")
 		self.assertEqual(held_writes.missing_summary(list("ABCDE")), "A, B, C (+2 more)")
 		self.assertEqual(held_writes.missing_summary(["A"]), "A")
