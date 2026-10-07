@@ -30,6 +30,17 @@ describe("deskLinkUrl", () => {
 		["/app/%2e%2e/api/method/x"],
 		["/\\evil.com/app/x"],
 		[" /app/x"],
+		["/app/sales-invoice?cmd=jarvis.chat.dashboards_api.delete_dashboard&name=DASH-0001"],
+		["/app/sales-invoice?status=Unpaid&cmd=x"],
+		["/app/sales-invoice?CMD=x"],
+		["/app/sales-invoice?Cmd=x"],
+		["/app/sales-invoice?%63md=x"],
+		["/app/sales-invoice?%43MD=x"],
+		["/app/sales-invoice?a=1&cmd=x&cmd=y"],
+		["/app/sales-invoice?a=1;cmd=x"],
+		["/app/sales-invoice?%2563md=x"],
+		["/desk/x?cmd=x"],
+		["/jarvis/x?cmd=x"],
 		["/app"],
 		["#top"],
 		[""],
@@ -38,6 +49,12 @@ describe("deskLinkUrl", () => {
 		[42],
 	])("refuses %s", (href) => {
 		expect(deskLinkUrl(href, ORIGIN)).toBeNull();
+	});
+
+	it("keeps a cmd hidden in the fragment (never sent to the server)", () => {
+		expect(deskLinkUrl("/app/sales-invoice#cmd=x", ORIGIN)).toBe(
+			`${ORIGIN}/app/sales-invoice#cmd=x`
+		);
 	});
 
 	it("strips tab/newline inside the href like the browser, still same-origin", () => {
