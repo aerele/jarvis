@@ -188,7 +188,10 @@ def _format_kind(code):
 	padding are ignored, so "Standard" or ``0\\ m`` are not dates."""
 	text = re.sub(r'"[^"]*"|\\.|\[[^\]]*\]|[_*].', "", code or "").lower()
 	runs = re.findall(r"[a-z]+", text)
-	clock = any(re.fullmatch(r"[hs]+", r) for r in runs)
+	# h/s tokens, or an elapsed-time bracket ([h], [mm], [s]), make a neighbouring mm minutes
+	clock = any(re.fullmatch(r"[hs]+", r) for r in runs) or bool(
+		re.search(r"\[(?:h+|m+|s+)\]", (code or "").lower())
+	)
 	# a digit placeholder makes it a number with a unit (``0 m``), not a date
 	if not re.search(r"[0#?]", text) and any(
 		re.fullmatch(r"[ymd]+", r) and (set(r) - {"m"} or not clock) for r in runs
@@ -220,10 +223,11 @@ def _cache(node):
 	for pt in node.findall(".//c:pt", _NS):
 		v = pt.find("c:v", _NS)
 		idx = pt.get("idx", "")
-		if v is not None and idx.isdigit() and int(idx) < MAX_POINTS:
+		if v is not None and re.fullmatch(r"[0-9]{1,9}", idx) and int(idx) < MAX_POINTS:
 			pts[int(idx)] = _serial(v.text, kind) if kind else v.text
 	count = node.find(".//c:ptCount", _NS)
-	declared = int(count.get("val", "")) if count is not None and count.get("val", "").isdigit() else 0
+	raw = count.get("val", "") if count is not None else ""
+	declared = int(raw) if re.fullmatch(r"[0-9]{1,9}", raw) else 0
 	return [
 		pts.get(i) for i in range(max(max(pts, default=-1) + 1, (declared if declared <= MAX_POINTS else 0)))
 	]
