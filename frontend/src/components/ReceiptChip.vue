@@ -164,7 +164,7 @@
 			<div v-if="nextStep" class="jv-receipt-next">
 				<Button
 					size="sm"
-					variant="subtle"
+					variant="outline"
 					:loading="nextBusy"
 					@click="$emit('next-action', nextStep)"
 					>{{ nextStep.label }}</Button
