@@ -340,6 +340,19 @@ describe("folded head", () => {
 		expect(foldedHead({ stopped: true }).label).toBe("Stopped");
 	});
 
+	it("a settled turn that ran no tools has no bar; a running or tooled one keeps it", () => {
+		expect(foldedHead({ seconds: 3, toolNames: [], settled: true })).toBeNull();
+		expect(foldedHead({ seconds: 3, toolNames: [] }).label).toBe("Worked 3s");
+		expect(foldedHead({ seconds: 3, toolNames: ["get_doc"], settled: true }).expandable).toBe(
+			true
+		);
+		expect(foldedHead({ seconds: 3, stopped: true, settled: true }).label).toBe(
+			"Stopped after 3s"
+		);
+		expect(foldedHead({ seconds: 3, failed: true, settled: true }).tone).toBe("failed");
+		expect(foldedHead({ seconds: 3, finishing: true, settled: true }).finishing).toBe(true);
+	});
+
 	it("finishing rides on the line until enrichment lands", () => {
 		expect(
 			foldedHead({ seconds: 52, toolNames: ["export_excel"], finishing: true }).finishing
