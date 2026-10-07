@@ -2135,7 +2135,7 @@ def send_message(
 		# A held File Box resume continues an already-decided approval: it queues,
 		# never bounces on overload (frappe.flags.jarvis_resume_exempt, server-set).
 		if admission.shard_overloaded(conversation) and not frappe.flags.get("jarvis_resume_exempt"):
-			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
 		if _rej := _compacting_reject(conversation):
 			return _rej
 	else:
@@ -3434,7 +3434,7 @@ def retry_message(message: str) -> dict:
 	# rejecting; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
 		if admission.shard_overloaded(doc.conversation):
-			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
 		if _rej := _compacting_reject(doc.conversation):
 			return _rej
 	else:
@@ -3750,7 +3750,7 @@ def _reroute_legacy_to_pump(enqueue_kwargs: dict, interactive: bool, exempt_over
 	if not (conversation and run_id and seed_message):
 		# Without the identity to build a Turn row we cannot reroute — fail closed (retryable)
 		# rather than silently drop a legacy job into a pump-owned world.
-		raise frappe.ValidationError(frappe._("The chat is switching transports — please resend."))
+		raise frappe.ValidationError(frappe._("The chat is switching transports. Please resend."))
 	payload = {}
 	if enqueue_kwargs.get("attachments"):
 		payload["attachments"] = enqueue_kwargs["attachments"]

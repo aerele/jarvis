@@ -690,7 +690,7 @@ def accept_or_queue(
 			return {
 				"ok": False,
 				"overloaded": True,
-				"reason": frappe._("The site is busy — please try again in a moment."),
+				"reason": frappe._("The site is busy. Please try again in a moment."),
 			}
 
 		# Seed the user Message if the caller delegated it (the insert branch, see the

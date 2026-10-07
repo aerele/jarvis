@@ -34,7 +34,7 @@ const planLabel = computed(() => {
 });
 
 function fmtDate(v) {
-	if (!v) return "—";
+	if (!v) return "-";
 	const d = new Date(String(v).replace(" ", "T"));
 	return Number.isNaN(d.getTime())
 		? String(v)
@@ -42,7 +42,7 @@ function fmtDate(v) {
 }
 
 function fmtTokens(n) {
-	if (n == null) return "—";
+	if (n == null) return "-";
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
 	if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
 	return String(n);
@@ -133,7 +133,7 @@ onMounted(async () => {
 					{{
 						[usage?.month_label, usage?.estimated ? "estimated" : null]
 							.filter(Boolean)
-							.join(" · ") || "—"
+							.join(" · ") || "-"
 					}}
 				</div>
 			</div>

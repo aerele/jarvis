@@ -338,7 +338,7 @@ PAIRING_RECONNECT_BACKOFF_SECONDS = 3.0
 # cap (fail-closed). Honest, not a fake success or a dead card: normal chat
 # resumes on the next turn once the fleet-agent's approval lands. Kept generic so
 # _classify_error still files it under "unreachable" (assistant starting up).
-PAIRING_PENDING_USER_MESSAGE = "Still getting your assistant ready — try again in a moment."
+PAIRING_PENDING_USER_MESSAGE = "Still getting your assistant ready. Try again in a moment."
 
 # agent's wire signal for "presented the gateway token, no paired device yet"
 # (spike-proven on the real 9.3 dist, invariant #3): error.code NOT_PAIRED, and

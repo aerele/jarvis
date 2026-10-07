@@ -2520,16 +2520,16 @@ async function fetchGstinDetails() {
 			revalidateBillingFields();
 			gstinFetchHint.value =
 				res.status && res.status !== "Active"
-					? `Fetched — but this GSTIN is ${String(
+					? `Fetched, but this GSTIN is ${String(
 							res.status
 					  ).toLowerCase()} in the GST registry. Please verify before continuing.`
 					: "";
 		} else {
 			gstinFetchHint.value =
-				"Couldn't fetch details for that GSTIN — please enter them manually.";
+				"Couldn't fetch details for that GSTIN. Please enter them manually.";
 		}
 	} catch (e) {
-		gstinFetchHint.value = "Couldn't fetch details right now — please enter them manually.";
+		gstinFetchHint.value = "Couldn't fetch details right now. Please enter them manually.";
 	} finally {
 		gstinFetching.value = false;
 	}
@@ -3091,7 +3091,7 @@ watch(billingIsIndia, (isIndiaNow) => {
 function stateError(v) {
 	const s = (v || "").trim();
 	if (!billingIsIndia.value) return s ? "" : "Enter your state or region."; // non-India: free-text, required
-	if (!s) return "Select your state — it's the place of supply on your GST invoice.";
+	if (!s) return "Select your state. It's the place of supply on your GST invoice.";
 	if (!isValidIndianState(s)) return "Select a valid Indian state.";
 	return "";
 }

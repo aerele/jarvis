@@ -254,13 +254,13 @@ async function doCancel() {
 	} else if (account.value.has_mandate) {
 		// AutoPay branch: turn off auto-renewal, keep full access, can re-arm anytime.
 		message = endsOn
-			? `Auto-renewal will turn off. You'll keep full access until ${endsOn}, and can set it up again anytime.`
-			: "Auto-renewal will turn off. You'll keep full access until the end of your current period, and can set it up again anytime.";
+			? `Auto-renewal will turn off. You'll keep full access until ${endsOn} and can set it up again anytime.`
+			: "Auto-renewal will turn off. You'll keep full access until the end of your current period and can set it up again anytime.";
 	} else {
 		// No-mandate branch: period-end cancellation unchanged.
 		message = endsOn
 			? `You'll keep full access until ${endsOn}. You can resume any time before then.`
-			: "You'll keep full access until the end of your current period, and can resume any time before then.";
+			: "You'll keep full access until the end of your current period and can resume any time before then.";
 	}
 	// A scheduled downgrade is dropped when you cancel (it doesn't survive to fire on a
 	// later renewal), so say so - the customer arranged it deliberately.

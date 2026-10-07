@@ -612,7 +612,7 @@ def _create_note(
 		duration_s = 0
 
 	if not text and not url and not attachment:
-		frappe.throw(_("Provide text, a link, or an attachment."))
+		frappe.throw(_("Provide text, a link or an attachment."))
 
 	kind = _derive_kind(url, attachment, duration_s)
 

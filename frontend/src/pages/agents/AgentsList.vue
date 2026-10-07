@@ -136,7 +136,7 @@
 						:key="a.agent_slug"
 						:role="a.masked ? 'img' : 'button'"
 						:tabindex="a.masked ? undefined : 0"
-						:aria-label="a.masked ? 'Coming soon — not yet available' : undefined"
+						:aria-label="a.masked ? 'Coming soon: not yet available' : undefined"
 						:title="
 							a.install_disabled
 								? 'Made unavailable by the operator; installed but paused - open to uninstall'
@@ -183,7 +183,7 @@
 										v-if="a.masked"
 										name="lock"
 										class="mt-0.5 size-4 shrink-0 text-ink-gray-4"
-										title="Coming soon — not yet available"
+										title="Coming soon: not yet available"
 									/>
 									<Badge
 										v-else-if="a.status === 'Coming Soon'"
