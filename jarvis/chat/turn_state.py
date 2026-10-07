@@ -320,6 +320,17 @@ def unfinished_turn_state(conversation: str) -> str | None:
 	return rows[0][0] if rows else None
 
 
+def seed_turn_unfinished(conversation: str, seed_message: str) -> bool:
+	"""True while a turn started from ``seed_message`` has not ended (any NONTERMINAL_STATES)."""
+	return bool(
+		frappe.db.sql(
+			"""SELECT 1 FROM `tabJarvis Chat Turn`
+			WHERE conversation=%(c)s AND seed_message=%(s)s AND state IN %(live)s LIMIT 1""",
+			{"c": conversation, "s": seed_message, "live": NONTERMINAL_STATES},
+		)
+	)
+
+
 def read_turn(run_id: str) -> dict | None:
 	"""Read the fields a caller/test needs to compute the next CAS (state,
 	version, epoch, watermark, reservation, recovery discriminators)."""
