@@ -138,6 +138,11 @@ _PENDING_HANDOVER_STATUS = "pending: handover to direct"
 _ATTEMPT_ERROR_FIELD = "last_sync_attempt_error"
 _ATTEMPT_ERROR_UNREACHABLE = "The AI service did not respond."
 
+# admin-v2#630: admin answers a fast-refused fleet with the same 200 "applying" as a
+# healthy slow apply, so age is the only signal. Measured live: a pool update takes
+# 8 to 22 s and a container-restart apply 70 to 85 s, so 120 s is past a healthy apply.
+_APPLY_STALE_AFTER_S = 120
+
 # 2026-09-25 review (production hazard): a fleet-side handover failure that
 # REPEATS (e.g. doctor fails every attempt) reaches the site as a
 # non-permanent AdminUnreachableError, which _handover_via_admin records as
