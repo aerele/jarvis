@@ -36,8 +36,24 @@ export const CSP_META =
 // Frames IN (validated e.source === window.parent && d.jarvis === 1):
 //   {type:"data:result", id, ok, rows|error} · {type:"theme", dark} ·
 //   {type:"export", id, format:"png"|"slides", lib, pixelRatio}
+// Make the active theme's palette ECharts' default: a config that sets no `color`
+// would otherwise get ECharts' built-in colours. A non-empty explicit theme arg still wins.
+export const ECHARTS_THEME_JS = `(function (w) {
+	var t = w.JARVIS_THEME, e = w.echarts;
+	if (!t || !t.palette || !e || !e.init || !e.registerTheme) return;
+	var name = "jarvis-" + (t.name || "theme");
+	e.registerTheme(name, { color: t.palette });
+	var init = e.init;
+	e.init = function (el, theme) {
+		var a = Array.prototype.slice.call(arguments);
+		if (theme == null || theme === "" || theme === false) a[1] = name;
+		return init.apply(e, a);
+	};
+})(window);`;
+
 export const RUNTIME_JS = `(function () {
 	"use strict";
+	${ECHARTS_THEME_JS}
 	var sources = {}; // name -> {tool, spec}
 	var pending = {}; // data request id -> {resolve, reject, timer}
 	var seq = 0;
