@@ -61,7 +61,7 @@ describe("openDeskLink", () => {
 		expect(win.open).toHaveBeenCalledWith(
 			`${ORIGIN}/app/sales-invoice`,
 			"_blank",
-			"noopener,noreferrer",
+			"noopener,noreferrer"
 		);
 	});
 
