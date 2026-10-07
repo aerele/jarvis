@@ -152,7 +152,7 @@ def fmt_amount(value: float | int | str | None, currency: str | None = None) -> 
 	(Indian lakh/crore grouping when the site's number format calls for it - do
 	NOT hand-roll digit grouping).
 
-	``None``, ``NaN``, and ``Inf``/``-Inf`` all render as ``"—"`` rather than
+	``None``, ``NaN``, and ``Inf``/``-Inf`` all render as ``"-"`` rather than
 	being handed to ``fmt_money`` (which would render the literal "nan"/"inf").
 	``-0.0`` is a non-negative zero. Negative amounts render in parentheses
 	wrapped in a ``.neg`` class hook, so a caller dropping the string straight
@@ -174,7 +174,7 @@ def fmt_pct(value: float | int | str | None) -> str:
 	has nothing to do with currency precision, so decoupling keeps the decimal
 	count locale-correct without accidentally inheriting a currency setting.
 
-	Same edge-case handling as ``fmt_amount``: ``None``/``NaN``/``Inf`` -> "—",
+	Same edge-case handling as ``fmt_amount``: ``None``/``NaN``/``Inf`` -> "-",
 	``-0.0`` is non-negative, negatives get parentheses + the ``.neg`` hook.
 	"""
 	num = _to_float_or_none(value)
@@ -232,7 +232,7 @@ def _clamp_pct(pct: object) -> str:
 def _to_float_or_none(value: object) -> float | None:
 	"""Normalize a raw numeric-ish value ahead of Frappe's formatters.
 
-	``None`` and any unparseable value collapse to ``None`` (rendered "—").
+	``None`` and any unparseable value collapse to ``None`` (rendered "-").
 	``NaN``/``Inf``/``-Inf`` also collapse to ``None`` rather than being handed to
 	``fmt_money``, which would render the literal string "nan"/"inf". ``-0.0``
 	survives as a float whose sign Python's own ``< 0`` already reports False
