@@ -2722,6 +2722,25 @@ def _file_box_wiki_write(
 	return result
 
 
+def _same_file_wiki_proposal(conv: str, slug: str, owner: str) -> str | None:
+	"""A Pending or Approved File Box wiki note for ``slug`` that another upload of the
+	same file bytes, by the same dropper, already proposed (#663), or None."""
+	rows = frappe.db.sql(
+		"""SELECT ar.name
+		FROM `tabJarvis Approval Request` ar
+		JOIN `tabJarvis Conversation` c ON c.name = ar.conversation
+		JOIN `tabFile` f ON f.name = c.filebox_source_file
+		JOIN `tabJarvis Conversation` this ON this.name = %(conv)s
+		JOIN `tabFile` tf ON tf.name = this.filebox_source_file
+		WHERE ar.source = %(src)s AND ar.ref_name = %(slug)s AND ar.status IN ('Pending', 'Approved')
+		  AND ar.conversation != %(conv)s AND c.owner = %(owner)s
+		  AND COALESCE(f.content_hash, '') != '' AND f.content_hash = tf.content_hash
+		ORDER BY ar.creation DESC LIMIT 1""",
+		{"conv": conv, "src": FILE_BOX_WIKI_SOURCE, "slug": slug, "owner": owner},
+	)
+	return rows[0][0] if rows else None
+
+
 def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	"""HOLD a File Box run's ``update_wiki`` as a Pending reviewer proposal
 	instead of landing it (review-before-landing).
@@ -2736,7 +2755,8 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	recorded for reviewer approval (never that it landed), so it does not
 	re-propose. Idempotent per (conversation, slug): a retried turn re-emitting
 	the same write folds into the existing Pending row instead of stacking
-	duplicates for the reviewer.
+	duplicates for the reviewer. Another upload of the same file proposes nothing
+	when that file's note for the page is already Pending or Approved (#663).
 
 	W: refuses BEFORE creating the Approval Request when the note would overflow
 	the page (see :func:`jarvis.chat.wiki.file_box_append_would_overflow`) - a
@@ -2874,6 +2894,18 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		)
 		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
 			existing = None
+	if not existing:
+		earlier = _same_file_wiki_proposal(conv, slug, owner)
+		if earlier:
+			# #663: an upload of the same file again proposes the same note; one is
+			# enough. Never rewritten: its digest binds it to its own conversation.
+			return {
+				"ok": True,
+				"proposed": False,
+				"approval": earlier,
+				"detail": "the same file already proposed a note for this page (waiting for "
+				"review or approved) - nothing new was proposed",
+			}
 	if existing:
 		name = existing
 	else:
