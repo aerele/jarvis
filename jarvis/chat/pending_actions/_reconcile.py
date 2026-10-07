@@ -48,22 +48,138 @@ SHEET_BACKSTOP: str | None = "jarvis.chat.held_sheet_seal.backstop"
 SHEET_REAPER: str | None = "jarvis.chat.pending_actions._sheet.reap"
 
 
+def _log_once(title: str, name: str, message: str) -> None:
+	"""``_log``, at most once per row and title: a clean-up that keeps failing is one
+	Error Log row, not one every five minutes."""
+	seen = frappe.db.sql(
+		"SELECT name FROM `tabError Log` WHERE method=%(t)s AND error LIKE %(n)s LIMIT 1",
+		{"t": f"jarvis.pending_action.{title}", "n": f"{name}:%"},
+	)
+	if not seen:
+		_log(title, f"{name}: {message}")
+
+
 def _log(title: str, message: str) -> None:
 	frappe.log_error(title=f"jarvis.pending_action.{title}", message=message)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 
 
+STRUCTURE_RETRY_HOURS = 24
+
+
+def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool:
+	"""Clean up after a guarded structure write whose confirm did not finish it (its
+	worker died after the claim, or its own clean-up failed), under the same per-form
+	lock its confirm takes. False when that lock is held or the clean-up fails again:
+	the row is left as it is for the next run, never cleaned up beside a change that
+	may still be running. True for every other row."""
+	from jarvis import agent_audit
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._store import clear_undo, get_row
+	from jarvis.tools import _guarded_structure
+
+	if not _guarded_structure.undo_ready():
+		return True
+	row = get_row(name)
+	if not row or not row.get("sealed_undo") or (interrupted and row.status != EXECUTING):
+		return True
+	try:
+		undo = _seal.unseal_undo(row) or {}
+	except _seal.SealError:
+		_log_once("structure_needs_a_person", name, "its clean-up state could not be read")
+		clear_undo(name)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
+		return True
+	try:
+		with _guarded_structure.structure_lock(str(undo.get("lock") or "")):
+			note = _guarded_structure.clean_up(undo)
+			if interrupted:
+				# Unverified, so filed as partial: the worker died somewhere inside it.
+				agent_audit.record_write(
+					actor=row.exec_user,
+					tool=row.tool,
+					args=(_seal.unseal_call(row).get("args") or {}),
+					result=None,
+					outcome="partial",
+					provenance="chat",
+				)
+			clear_undo(name)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
+	except _guarded_structure.StructureBusyError:
+		frappe.db.rollback()
+		return False
+	except Exception:
+		tb = frappe.get_traceback()
+		frappe.db.rollback()
+		_log_once("structure_cleanup_failed", name, tb)
+		return False
+	_log("structure_cleanup", f"{name}: {note.text}")
+	return True
+
+
+def _give_up_structure(name: str) -> None:
+	"""A clean-up that has failed for ``STRUCTURE_RETRY_HOURS``: say once that the
+	form needs a person, and drop the state so it is not tried for ever."""
+	from jarvis.chat.pending_actions._store import clear_undo
+
+	_log_once(
+		"structure_needs_a_person",
+		name,
+		"the clean-up of this structure change kept failing; check the form in Desk",
+	)
+	clear_undo(name)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
+
+
+def _retry_structure_cleanups() -> int:
+	"""Finish the clean-up of a guarded structure write whose own clean-up failed at
+	Confirm (the row is terminal and still carries its state). Tried on every run for
+	``STRUCTURE_RETRY_HOURS``; after that it is logged once as needing a person and
+	the state dropped, so the half-made field is found from the Error Log."""
+	from jarvis.tools import _guarded_structure
+
+	if not _guarded_structure.undo_ready():
+		return 0
+	rows = frappe.db.sql(
+		"SELECT name, modified FROM `tabJarvis Pending Action` WHERE sealed_undo IS NOT NULL"
+		" AND status IN %(t)s ORDER BY modified LIMIT %(lim)s",
+		{"t": TERMINAL, "lim": _SCAN},
+		as_dict=True,
+	)
+	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
+	done = 0
+	for r in rows:
+		if _structure_cleaned(r.name, interrupted=False):
+			done += 1
+		elif r.modified < give_up:
+			_give_up_structure(r.name)
+	return done
+
+
 def _reap_interrupted() -> int:
 	"""Executing past ``INTERRUPT_AFTER_S``: Failed/interrupted. Never a sheet (its
-	apply is a background job: ``SHEET_REAPER`` asks RQ)."""
+	apply is a background job: ``SHEET_REAPER`` asks RQ). A guarded structure write
+	is cleaned up first (``_structure_cleaned``)."""
 	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
 	rows = frappe.db.sql(
-		"SELECT name, batch_id FROM `tabJarvis Pending Action` WHERE status='Executing' AND executing_at < %(c)s"
-		" AND kind != %(sheet)s ORDER BY executing_at LIMIT %(lim)s",
+		"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+		" AND executing_at < %(c)s AND kind != %(sheet)s ORDER BY executing_at LIMIT %(lim)s",
 		{"c": cutoff, "lim": _SCAN, "sheet": SHEET},
 		as_dict=True,
 	)
-	flipped = [r for r in rows if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted")]
+	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
+	flipped = []
+	for r in rows:
+		if _structure_cleaned(r.name):
+			if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted"):
+				flipped.append(r)
+		elif r.executing_at < give_up:
+			# Its clean-up has failed (or its form's lock has been held) for a day: the
+			# row ends as partly applied, with one log line asking for a person,
+			# instead of staying Executing for ever.
+			_give_up_structure(r.name)
+			if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="partial"):
+				flipped.append(r)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if flipped:
 		_log(
@@ -267,6 +383,7 @@ def reconcile() -> dict:
 	try:
 		for step in (
 			_reap_interrupted,
+			_retry_structure_cleanups,
 			_reap_sheets,
 			_settle_unsettled,
 			_retry_waiters,
