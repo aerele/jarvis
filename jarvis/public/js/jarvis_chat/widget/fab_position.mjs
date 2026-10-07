@@ -18,6 +18,15 @@ export const STORAGE_KEY = "jarvis-fab-pos";
 
 /** A center X at or past the viewport midpoint counts as the right side
  * (matches which edge a released drag snaps to). */
+// The launcher moves only by its six-dot grip (#671); a press anywhere else is a tap.
+export function startsOnGrip(target) {
+  return !!(
+    target &&
+    typeof target.closest === "function" &&
+    target.closest(".jvw-grip")
+  );
+}
+
 export function chooseSide(centerX, vw) {
   return centerX >= vw / 2 ? "right" : "left";
 }
