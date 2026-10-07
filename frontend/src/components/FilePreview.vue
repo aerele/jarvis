@@ -67,15 +67,7 @@
 							@click="sheetIdx = si"
 						/>
 					</div>
-					<div v-if="curCharts.length" class="space-y-3 border-b p-3">
-						<div
-							v-for="(spec, ci) in curCharts"
-							:key="ci"
-							class="rounded bg-surface-white p-2"
-						>
-							<JvChart :spec="spec" :dark="effectiveDark" />
-						</div>
-					</div>
+					<SheetCharts :charts="curCharts" :dark="effectiveDark" />
 					<div class="max-h-[65vh] overflow-auto">
 						<table class="w-full border-collapse text-sm">
 							<thead
@@ -152,7 +144,8 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
-import JvChart from "@/charts/JvChart.vue";
+import SheetCharts from "@/components/SheetCharts.vue";
+import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import { useJarvisTheme } from "@/theme";
 
 const props = defineProps({
@@ -186,9 +179,7 @@ const curSheet = computed(() => {
 // charts the backend read from the xlsx, for the sheet on screen (jarvis-chart
 // specs, so the chat's JvChart renders them; its own title is drawn by the chart)
 const curCharts = computed(() =>
-	view.value.kind === "table"
-		? (view.value.charts || []).filter((c) => c.sheet === curSheet.value.name)
-		: []
+	view.value.kind === "table" ? chartsForSheet(view.value.charts, curSheet.value.name) : []
 );
 const { effectiveDark } = useJarvisTheme();
 
@@ -247,11 +238,7 @@ async function load() {
 		const r = await api.previewFile(props.fileUrl);
 		if (seq !== loadSeq) return;
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			view.value = {
-				kind: "table",
-				sheets: r.sheets,
-				charts: Array.isArray(r.charts) ? r.charts : [],
-			};
+			view.value = { kind: "table", ...tablePreviewFields(r) };
 			return;
 		}
 		if (r && r.kind === "text") {
