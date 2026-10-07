@@ -314,10 +314,17 @@ def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str
 	return text + _trigger_enabled_note(doctype, name)
 
 
-def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args: dict, text: str) -> None:
+def _append_receipt(
+	conversation: str, verb: str, doctype: str, name: str, args: dict, text: str, submitted: int = 0
+) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
 	the transcript on its next turn - so it never re-applies the change."""
+	data = {"doctype": doctype, "name": name}
+	if verb == "create" and submitted:
+		# So the chip itself says "Created and submitted" (the assistant row repeating it is
+		# then a true duplicate); docstatus 1 is the saved state, read by receiptView.
+		data["docstatus"] = 1
 	receipt = frappe.get_doc(
 		{
 			"doctype": MSG,
@@ -327,7 +334,7 @@ def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args:
 			"streaming": 0,
 			"tool_name": f"{verb}_doc",
 			"tool_args": frappe.as_json(args),
-			"tool_result": frappe.as_json({"ok": True, "data": {"doctype": doctype, "name": name}}),
+			"tool_result": frappe.as_json({"ok": True, "data": data}),
 			"tool_status": "completed",
 			# This row DID come from a confirmation card - the human pressed Confirm on
 			# the draft - so mark it and let the SPA render the same receipt chip (with
@@ -560,7 +567,7 @@ def apply_action(action: dict | str | None = None) -> dict:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
 	try:
-		_append_receipt(conversation, verb, doctype, name, args, receipt)
+		_append_receipt(conversation, verb, doctype, name, args, receipt, do_submit)
 		frappe.db.commit()
 	except Exception:
 		# The mutation is already committed - a receipt hiccup must not
