@@ -633,11 +633,9 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		self.assertTrue(res["ok"], res)
 
 	def test_retry_while_a_later_turn_for_the_same_message_is_live_is_refused(self):
-		from jarvis.chat import turn_state as ts
-
 		conv = self._mk_conv()
 		u, a = self._failed(conv)
-		for state in ts.NONTERMINAL_STATES:
+		for state in admission._CONV_BLOCKING_STATES:
 			with self.subTest(state=state):
 				self._insert_turn(conv, "live-" + state, u, state)
 				res, calls = self._retry(a)
@@ -654,15 +652,41 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 				res, _calls = self._retry(a)
 				self.assertTrue(res["ok"], res)
 
-	def test_the_shared_check_can_leave_out_the_callers_own_turn(self):
-		from jarvis.chat import turn_state as ts
+	def _unbind(self, conv):
+		"""Phase-0 and cut-back turns: no reply is bound to its turn."""
+		frappe.db.set_value(TURN, {"conversation": conv}, "assistant_message", None)
+		frappe.db.commit()
 
+	def test_an_unbound_failed_turn_left_unfinished_does_not_block_its_retry(self):
+		for state in ("recovering", "dispatching"):
+			with self.subTest(state=state):
+				conv = self._mk_conv()
+				_u, a = self._failed(conv, state=state)
+				self._unbind(conv)
+				res, _calls = self._retry(a)
+				self.assertTrue(res["ok"], res)
+
+	def test_an_unbound_reply_is_refused_while_a_later_turn_runs(self):
 		conv = self._mk_conv()
 		u, a = self._failed(conv)
-		created = frappe.db.get_value(MSG, a, "creation")
-		self._insert_turn(conv, "own-" + conv[-6:], u, "streaming")
-		self.assertTrue(ts.unfinished_turn_after(conv, created))
-		self.assertFalse(ts.unfinished_turn_after(conv, created, exclude_run_id="own-" + conv[-6:]))
+		self._unbind(conv)
+		self._insert_turn(conv, "later-" + conv[-6:], u, "queued")
+		res, calls = self._retry(a)
+		self._refused(res, calls, conv, "in progress", turns=2)
+
+	def test_an_older_finalizing_turn_does_not_block_retry_this_step(self):
+		# The previous macro step still runs its effects (finalizing); sends do not wait for it.
+		conv = self._mk_conv()
+		s1 = self._mk_msg(conv, 1, role="user", content="step 1")
+		self._insert_turn(conv, "step1-" + conv[-6:], s1, "finalizing")
+		self._mk_msg(conv, 2, role="assistant", content="step 1 done")
+		s2 = self._mk_msg(conv, 3, role="user", content="step 2")
+		self._insert_turn(conv, "step2-" + conv[-6:], s2, "errored")
+		a = self._mk_msg(conv, 4, role="assistant", content="", error=self.EMPTY_REPLY)
+		frappe.db.set_value(TURN, "step2-" + conv[-6:], "assistant_message", a)
+		self._mk_msg(conv, 5, role="assistant", content="Macro failed.", ref_doctype="Jarvis Macro Run")
+		res, _calls = self._retry(a)
+		self.assertTrue(res["ok"], res)
 
 	def test_a_later_hidden_continuation_blocks_the_retry(self):
 		conv = self._mk_conv()

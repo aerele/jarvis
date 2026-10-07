@@ -309,38 +309,39 @@ def _lock_conversation(conversation: str) -> None:
 	)
 
 
-def unfinished_turn_state(conversation: str) -> str | None:
+def unfinished_turn_state(
+	conversation: str,
+	*,
+	created_after: datetime.datetime | str | None = None,
+	exclude_run_id: str | None = None,
+	states: tuple[str, ...] = NONTERMINAL_STATES,
+) -> str | None:
 	"""The state of a turn of this conversation that has not ended (queued, running,
 	finishing or recovering), or None when every turn has. One row off the
 	(conversation, state) index, however many turns the chat has had."""
+	turn = unfinished_turn(
+		conversation, created_after=created_after, exclude_run_id=exclude_run_id, states=states
+	)
+	return turn[1] if turn else None
+
+
+def unfinished_turn(
+	conversation: str,
+	*,
+	created_after: datetime.datetime | str | None = None,
+	exclude_run_id: str | None = None,
+	states: tuple[str, ...] = NONTERMINAL_STATES,
+) -> tuple[str, str] | None:
+	"""``(run_id, state)`` of such a turn. ``created_after`` counts only newer turns,
+	``exclude_run_id`` leaves out the caller's own, ``states`` narrows the set."""
 	rows = frappe.db.sql(
-		"""SELECT state FROM `tabJarvis Chat Turn`
-		WHERE conversation=%(c)s AND state IN %(live)s LIMIT 1""",
-		{"c": conversation, "live": NONTERMINAL_STATES},
+		"""SELECT name, state FROM `tabJarvis Chat Turn`
+		WHERE conversation=%(c)s AND state IN %(live)s AND name != %(x)s
+		  AND (%(after)s IS NULL OR creation > %(after)s)
+		LIMIT 1""",
+		{"c": conversation, "live": states, "after": created_after, "x": exclude_run_id or ""},
 	)
-	return rows[0][0] if rows else None
-
-
-def unfinished_turn_after(
-	conversation: str, created_after: datetime.datetime | str | None, *, exclude_run_id: str | None = None
-) -> bool:
-	"""True while a turn of ``conversation`` has not ended (any NONTERMINAL_STATES).
-	Only turns created after ``created_after`` count, or every turn when it is None;
-	``exclude_run_id`` leaves out the caller's own turn."""
-	return bool(
-		frappe.db.sql(
-			"""SELECT 1 FROM `tabJarvis Chat Turn`
-			WHERE conversation=%(c)s AND state IN %(live)s AND name != %(x)s
-			  AND (%(after)s IS NULL OR creation > %(after)s)
-			LIMIT 1""",
-			{
-				"c": conversation,
-				"live": NONTERMINAL_STATES,
-				"after": created_after,
-				"x": exclude_run_id or "",
-			},
-		)
-	)
+	return (rows[0][0], rows[0][1]) if rows else None
 
 
 def read_turn(run_id: str) -> dict | None:

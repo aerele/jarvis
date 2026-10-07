@@ -3652,7 +3652,10 @@ def _retry_refusal(
 	# blocks (an older queued turn has no placeholder yet); unbound, only turns created
 	# after the reply can be told apart from it.
 	after = None if failed_run else frappe.db.get_value(MSG, message, "creation")
-	if turn_state.unfinished_turn_after(conversation, after, exclude_run_id=failed_run):
+	# The states a send waits for: a finalizing turn only runs its effects.
+	if turn_state.unfinished_turn(
+		conversation, created_after=after, exclude_run_id=failed_run, states=admission._CONV_BLOCKING_STATES
+	):
 		return "in_progress", _("A reply is already in progress. Wait for it to finish.")
 	newest = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Chat Message`
