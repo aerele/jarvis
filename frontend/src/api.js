@@ -46,7 +46,8 @@ export const submitPulseFeedback = (
 	features_offered,
 	features_selected,
 	use_case_text,
-	note
+	note,
+	period_key
 ) =>
 	call("jarvis.chat.feedback.submit_pulse_feedback", {
 		stars,
@@ -54,6 +55,7 @@ export const submitPulseFeedback = (
 		features_selected: JSON.stringify(features_selected || []),
 		use_case_text: use_case_text || "",
 		note: note || "",
+		period_key: period_key || undefined,
 	});
 export const archiveConversation = (conversation) =>
 	call("jarvis.chat.api.archive_conversation", { conversation });
