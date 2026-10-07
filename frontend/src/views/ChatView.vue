@@ -4426,7 +4426,10 @@ import {
 	chatRefusalMessage,
 	chatSettledReason,
 	keepsChatCard,
+	nextStepActedKeys,
 	nextStepRefusal,
+	receiptRecord,
+	shouldHideNextStep,
 } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
@@ -8129,32 +8132,13 @@ async function discardPending(pa) {
 // confirm card (the server parks the same card the assistant's own submit /
 // workflow call gets, as the person), then the card is pulled in with the usual
 // resync. It is hidden once a later receipt in the thread acted on that record.
-const NEXT_STEP_TOOLS = ["submit_doc", "apply_workflow_action"];
-const NEXT_STEP_DONE_OUTCOMES = ["confirmed", "auto_applied"];
 const nextBusyKey = ref("");
-function receiptRecord(m) {
-	try {
-		const a = typeof m.tool_args === "string" ? JSON.parse(m.tool_args) : m.tool_args || {};
-		const r = typeof m.tool_result === "string" ? JSON.parse(m.tool_result) : m.tool_result;
-		const d = (r && r.data) || {};
-		return { doctype: d.doctype || a.doctype, name: d.name || a.name };
-	} catch (e) {
-		return {};
-	}
-}
-// One pass over the thread: the records a submit / workflow receipt already acted on,
-// confirmed or auto-applied without a card (a failed or discarded one leaves the step open), plus any step a refusal
-// said is gone.
+// The records a submit / workflow receipt already acted on (confirmed, or auto-applied
+// without a card; a failed or discarded one leaves the step open), plus any step a
+// refusal said is gone.
 const nextStepGone = ref(new Set());
 const nextStepActed = computed(() => {
-	const keys = new Set(nextStepGone.value);
-	for (const x of visibleMessages.value) {
-		if (x.role !== "tool" || !NEXT_STEP_DONE_OUTCOMES.includes(x.action_outcome)) continue;
-		if (!NEXT_STEP_TOOLS.includes(x.tool_name)) continue;
-		const o = receiptRecord(x);
-		keys.add(`${o.doctype}|${o.name}`);
-	}
-	return keys;
+	return nextStepActedKeys(visibleMessages.value, nextStepGone.value);
 });
 function nextStepDone(m) {
 	if (m.tool_name !== "create_doc") return false;
@@ -8172,7 +8156,7 @@ async function proposeNext(m, step) {
 		if (r && r.ok === false) {
 			const refusal = nextStepRefusal(r);
 			notify(refusal.message, { type: "error" });
-			if (!refusal.temporary) hideNextStep(step);
+			if (shouldHideNextStep(refusal)) hideNextStep(step);
 			return;
 		}
 		await resyncPendingConfirmations(currentId.value);

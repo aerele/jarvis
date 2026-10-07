@@ -8,7 +8,9 @@ import {
 	chatStatusLine,
 	isChatSettled,
 	keepsChatCard,
+	nextStepActedKeys,
 	nextStepRefusal,
+	shouldHideNextStep,
 } from "./chatCardActions";
 
 describe("chatCardActions copy", () => {
@@ -243,10 +245,27 @@ describe("next-step refusals (propose_next_action)", () => {
 		expect(r.temporary).toBe(false);
 		expect(r.message).toBe("That next step is not available.");
 	});
-	it("ChatView hides the step only when the refusal is final, and counts auto_applied as acted", () => {
-		const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
-		expect(src).toContain("if (!refusal.temporary) hideNextStep(step);");
-		expect(src).toMatch(/NEXT_STEP_DONE_OUTCOMES = \["confirmed", "auto_applied"\]/);
-		expect(src).toContain("NEXT_STEP_DONE_OUTCOMES.includes(x.action_outcome)");
+	it("keeps the step for a temporary refusal and hides it for a final one", () => {
+		const temp = nextStepRefusal({ ok: false, error: { code: "ConfirmationPendingError" } });
+		const final = nextStepRefusal({ ok: false, error: { code: "Other" } });
+		expect(shouldHideNextStep(temp)).toBe(false);
+		expect(shouldHideNextStep(final)).toBe(true);
+	});
+	it("counts confirmed and auto_applied receipts as acted, nothing else", () => {
+		const row = (tool_name, action_outcome, name = "SO-1") => ({
+			role: "tool",
+			tool_name,
+			action_outcome,
+			tool_args: JSON.stringify({ doctype: "Sales Order", name }),
+		});
+		const acted = (r) => nextStepActedKeys([r]).has("Sales Order|SO-1");
+		expect(acted(row("submit_doc", "confirmed"))).toBe(true);
+		expect(acted(row("submit_doc", "auto_applied"))).toBe(true);
+		expect(acted(row("apply_workflow_action", "auto_applied"))).toBe(true);
+		for (const o of ["failed", "discarded", "unknown", "partial", "cancelled", ""]) {
+			expect(acted(row("submit_doc", o))).toBe(false);
+		}
+		expect(acted(row("create_doc", "confirmed"))).toBe(false);
+		expect(nextStepActedKeys([], new Set(["A|b"])).has("A|b")).toBe(true);
 	});
 });
