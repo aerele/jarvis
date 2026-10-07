@@ -138,6 +138,7 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 				"cache_read": agg.get("cache_read", 0),
 				"cache_write": agg.get("cache_write", 0),
 				"cache_reported": agg.get("cache_reported", False),
+				"tokens_out_estimated": agg.get("tokens_out_estimated", False),
 				# Deliberately from _tool_message_aggregates (the SAME
 				# role=tool-message population top_tools counts), NOT from
 				# Turn Usage - see that function's docstring (finding #2).
@@ -217,7 +218,8 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 			   MAX(creation) AS last_seen,
 			   SUM(cache_read) AS cache_read,
 			   SUM(cache_write) AS cache_write,
-			   MAX(cache_reported) AS cache_reported
+			   MAX(cache_reported) AS cache_reported,
+			   MAX(tokens_out_estimated) AS tokens_out_estimated
 		FROM `tabJarvis Turn Usage`
 		WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
 		GROUP BY user, profile_agent_id
@@ -234,12 +236,14 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 				"cache_read": 0,
 				"cache_write": 0,
 				"cache_reported": False,
+				"tokens_out_estimated": False,
 			},
 		)
 		bucket["turns"] += int(r.cnt or 0)
 		bucket["cache_read"] += int(r.cache_read or 0)
 		bucket["cache_write"] += int(r.cache_write or 0)
 		bucket["cache_reported"] = bucket["cache_reported"] or bool(r.cache_reported)
+		bucket["tokens_out_estimated"] = bucket["tokens_out_estimated"] or bool(r.tokens_out_estimated)
 	return out
 
 
