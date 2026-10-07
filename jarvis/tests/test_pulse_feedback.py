@@ -119,20 +119,30 @@ class _PulseTestCase(FrappeTestCase):
 		)
 
 	def _set_turns(self, count, *, days_ago=None, conversation=None, active_at=None):
+		conversation = conversation or self.conv
+		active_at = active_at or (
+			frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days_ago)
+			if days_ago
+			else _reviewed_month_activity()
+		)
 		frappe.db.set_value(
 			CONV,
-			conversation or self.conv,
-			{
-				"turn_count": count,
-				"last_active_at": active_at
-				or (
-					frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days_ago)
-					if days_ago
-					else _reviewed_month_activity()
-				),
-			},
+			conversation,
+			{"turn_count": count, "last_active_at": active_at},
 			update_modified=False,
 		)
+		# Bounded (previous-month) windows read the user's messages, not the
+		# conversation counter, so mirror the turns with one user message.
+		self._set_user_messages(conversation, [active_at] if count else [])
+
+	def _set_user_messages(self, conversation, created):
+		for name in frappe.get_all(MSG, filters={"conversation": conversation}, pluck="name"):
+			frappe.delete_doc(MSG, name, ignore_permissions=True, force=True)
+		for seq, when in enumerate(created, start=1):
+			doc = frappe.get_doc(
+				{"doctype": MSG, "conversation": conversation, "seq": seq, "role": "user", "content": "hi"}
+			).insert(ignore_permissions=True)
+			frappe.db.set_value(MSG, doc.name, "creation", when, update_modified=False)
 
 
 class TestPulsePeriod(FrappeTestCase):
@@ -206,10 +216,22 @@ class TestPulseContext(_PulseTestCase):
 		never used, nor list October's features as last month's."""
 		with patch(_NOW, return_value=datetime(2026, 10, 4, 9, 0)):
 			self._set_turns(5, active_at=datetime(2026, 10, 3, 9, 0))
+			self._set_user_messages(self.conv, [datetime(2026, 10, 3, 9, 0), datetime(2026, 10, 4, 8, 0)])
 			with patch(_FEATURES) as features:
 				self.assertFalse(pulse_context()["due"])
 		features.assert_not_called()
 		self.assertIsNone(self._pulse().pulse_last_period_key, "a non-offer burns nothing")
+
+	def test_a_conversation_spanning_the_boundary_is_due_for_the_previous_month(self):
+		"""One long-lived conversation used all September and again on Oct 2:
+		its ``last_active_at`` is Oct 2, but the September messages still count."""
+		with patch(_NOW, return_value=datetime(2026, 10, 5, 9, 0)):
+			self._set_turns(40, active_at=datetime(2026, 10, 2, 9, 0))
+			self._set_user_messages(self.conv, [datetime(2026, 9, 15, 10, 0), datetime(2026, 10, 2, 9, 0)])
+			with patch(_FEATURES, return_value={}):
+				result = pulse_context()
+		self.assertTrue(result["due"])
+		self.assertEqual(result["period_key"], "M:2026-09")
 
 	def test_after_day_ten_offers_the_current_month_again(self):
 		self._set_pulse("M:2026-09", PULSE_MAX_OFFERS)
