@@ -122,7 +122,7 @@
 								variant="subtle"
 								size="sm"
 								:label="retrying || runActive ? 'Retrying…' : retryText"
-								:disabled="retrying || sending || runActive || compacting"
+								:disabled="retryDisabled || m.name === stalledRetry"
 								@click="retryFailed(m)"
 							/>
 						</div>
@@ -770,9 +770,7 @@ async function loadTranscript({ initial = false } = {}) {
 		// transcript yet, so its failed reply would read as a finished run.
 		if (initial || (!socket && !pendingRetry)) {
 			const restoredRun = restoreDashboardRunState(messages.value);
-			runActive.value = restoredRun.active;
-			activeTools.value = restoredRun.tools;
-			waitingFirstTool.value = restoredRun.waiting;
+			applyRestoredRun(restoredRun);
 			if (initial && restoredRun.active && !socket) startNoSocketLadder();
 		}
 		// Navigating away unmounts the builder and drops its canvas html, but the
@@ -957,10 +955,15 @@ const sending = ref(false);
 // Retry state: `retrying` is true while the request is in flight; runActive then
 // covers the run it starts.
 const retrying = ref(false);
-let ownRunId = ""; // the turn this pane's last send or retry started (turn:cancelled)
-let pendingRetry = ""; // the failed reply a retry replaces, until the ladder sees a reply
+const retryDisabled = computed(
+	() => retrying.value || sending.value || runActive.value || compacting.value
+);
+const stalledRetry = ref(""); // a retry that never started: its Retry stays off (watchRetryStart)
+let ownRunId = ""; // the turn this pane's last send or retry started
+let pendingRetry = ""; // the failed reply a retry replaces, until its run starts or ends
 let runStarts = 0; // runs started (ours and run:start frames): a late refusal never ends a newer one
 let startTimer = null; // see watchRetryStart
+let disposed = false;
 const RETRY_NO_START_MS = 90000;
 const draft = ref("");
 const box = ref(null);
@@ -1097,8 +1100,7 @@ async function send(gotoMessageId = "") {
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
 			forgetGotoClaim(gotoMessageId);
-			const { message, type } = sendRejectionCopy(r.reason, agentName, r);
-			(toast[type] || toast.error)(escapeHtml(message)); // the toast renders HTML
+			toastRejection(r);
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {
@@ -1125,6 +1127,17 @@ function resetRun(active) {
 	activeTools.value = [];
 	waitingFirstTool.value = active;
 }
+function applyRestoredRun(restored) {
+	runActive.value = restored.active;
+	activeTools.value = restored.tools;
+	waitingFirstTool.value = restored.waiting;
+}
+
+// A refused send or retry. The toast renders HTML, so the whole message is escaped.
+function toastRejection(r, fallback) {
+	const { message, type } = sendRejectionCopy(r.reason, agentName, r, fallback);
+	(toast[type] || toast.error)(escapeHtml(message));
+}
 
 // A turn this pane just started. A run:start frame for the same run arrives
 // moments later and does the same reset, but the ticks should read
@@ -1147,17 +1160,22 @@ function endStartedRun() {
 }
 
 // An accepted retry whose run never starts (its job died before the placeholder, and
-// no sweep publishes a frame) would show "Retrying…" for ever: after RETRY_NO_START_MS
-// with no frame, read the transcript again and take the run state from it.
-function watchRetryStart() {
+// no sweep publishes a frame): after RETRY_NO_START_MS with no frame of it, take the
+// run state from the transcript. Its Retry stays off until a frame, a chat switch or a
+// reload: on the legacy path nothing else stops a second tab from a duplicate run.
+function watchRetryStart(retried) {
 	clearStartTimer();
 	startTimer = setTimeout(async () => {
 		startTimer = null;
+		const starts = runStarts;
 		await loadTranscript();
+		if (disposed || runStarts !== starts) return;
 		const restored = restoreDashboardRunState(messages.value);
-		runActive.value = restored.active;
-		activeTools.value = restored.tools;
-		waitingFirstTool.value = restored.waiting;
+		applyRestoredRun(restored);
+		if (!restored.active) {
+			stalledRetry.value = retried;
+			toast.info("The retry has not started. Reload the chat to try again.");
+		}
 	}, RETRY_NO_START_MS);
 }
 function clearStartTimer() {
@@ -1165,34 +1183,41 @@ function clearStartTimer() {
 	startTimer = null;
 }
 
-const RETRY_FAILED = "Couldn't retry that.";
+// A terminal frame the retry must not take as its own: the failed turn's re-published
+// terminal (same message), or another run than this pane's.
+function staleTerminal(p) {
+	if (!pendingRetry) return false;
+	return p.message_id === pendingRetry || (!!ownRunId && !!p.run_id && p.run_id !== ownRunId);
+}
+
+const RETRY_FALLBACK = "Couldn't retry that.";
 
 // Retry a failed reply. The run shows as started before the request, so a
 // terminal frame that arrives first is not undone; a refusal or an error ends
 // it again, unless a run started meanwhile. A reply for a chat the user has
-// since left changes nothing here.
+// since left, or for an unmounted pane, changes nothing here.
 async function retryFailed(m) {
-	if (retrying.value || sending.value || runActive.value || compacting.value) return;
+	if (retryDisabled.value || m.name === stalledRetry.value) return;
 	const conv = conversation.value;
 	retrying.value = true;
+	ownRunId = "";
 	markRunStarted(m.name);
 	const starts = runStarts;
 	try {
 		const r = (await retryMessage(m.name)) || {};
-		if (conversation.value !== conv) return;
+		if (disposed || conversation.value !== conv) return;
 		if (r.ok === false) {
 			if (runStarts === starts) endStartedRun();
-			const { message, type } = sendRejectionCopy(r.reason, agentName, r, RETRY_FAILED);
-			(toast[type] || toast.error)(escapeHtml(message)); // the toast renders HTML
+			toastRejection(r, RETRY_FALLBACK);
 			scheduleRefetch(); // a stale Retry (a newer message) goes away
 			return;
 		}
 		ownRunId = r.run_id || "";
-		if (socket && !r.queued && runStarts === starts) watchRetryStart();
+		if (socket && !r.queued && runStarts === starts) watchRetryStart(m.name);
 	} catch (e) {
-		if (conversation.value !== conv) return;
+		if (disposed || conversation.value !== conv) return;
 		if (runStarts === starts) endStartedRun();
-		toast.error(errHtml(e, RETRY_FAILED));
+		toast.error(errHtml(e, RETRY_FALLBACK));
 	} finally {
 		retrying.value = false;
 	}
@@ -1216,6 +1241,7 @@ function clearThread({ keepRun = false } = {}) {
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
 	pendingRetry = "";
+	stalledRetry.value = "";
 	clearStartTimer();
 }
 
@@ -1283,13 +1309,21 @@ function onEvent(p) {
 		loadDashboardChats();
 		return;
 	}
-	// any frame for OUR conversation refreshes the transcript (debounced), and
-	// shows the turn is alive (watchRetryStart)
+	// any frame for OUR conversation refreshes the transcript (debounced)
 	scheduleRefetch();
-	clearStartTimer();
+	// a frame of a turn of this pane shows it is alive (watchRetryStart)
+	if (
+		p.kind === "run:start" ||
+		p.kind === "turn:cancelled" ||
+		(p.run_id && p.run_id === ownRunId)
+	) {
+		clearStartTimer();
+		stalledRetry.value = "";
+	}
 	switch (p.kind) {
 		case "run:start":
 			runStarts++;
+			pendingRetry = "";
 			resetRun(true);
 			break;
 		case "tool:start": {
@@ -1315,6 +1349,8 @@ function onEvent(p) {
 			break;
 		}
 		case "run:end":
+			if (staleTerminal(p)) break;
+			pendingRetry = "";
 			resetRun(false);
 			// the compacted chip and the compacting lock are both scoped to one
 			// turn: the next terminal clears them and refetches the meter
@@ -1325,6 +1361,8 @@ function onEvent(p) {
 			loadDashboardChats();
 			break;
 		case "run:error":
+			if (staleTerminal(p)) break;
+			pendingRetry = "";
 			resetRun(false);
 			compacting.value = false;
 			if (p.message_id)
@@ -1333,7 +1371,10 @@ function onEvent(p) {
 			break;
 		case "turn:cancelled":
 			// This pane's queued turn was cancelled or aged out: no run is coming.
-			if (p.run_id && p.run_id === ownRunId) resetRun(false);
+			if (p.run_id && p.run_id === ownRunId) {
+				pendingRetry = "";
+				resetRun(false);
+			}
 			break;
 		case "context:compacted":
 			compacting.value = false;
@@ -1386,6 +1427,7 @@ onMounted(() => {
 	socket && socket.on && socket.on("jarvis:event", onEvent);
 });
 onBeforeUnmount(() => {
+	disposed = true;
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 	clearTimeout(refetchTimer);
 	ladderTimers.forEach(clearTimeout);
