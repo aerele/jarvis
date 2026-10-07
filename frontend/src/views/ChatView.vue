@@ -4429,6 +4429,7 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { cellOptions, markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
@@ -9195,6 +9196,14 @@ async function decideFileboxWait(item, text, approve) {
 	// the decision resumes the run in this chat: show it, and re-read what is left
 	if (id && currentId.value === id) loadConversation(id).catch(() => {});
 }
+// Whether the last loadConversation picked a live reply back up (read by checkSilentRun),
+// and when the open chat last heard from its run. Declared before loadConversation: a
+// watcher may load during setup.
+let _lastLoadResumed = false;
+let _lastRunSignalAt = Date.now();
+function noteRunSignal() {
+	_lastRunSignalAt = Date.now();
+}
 async function loadConversation(id) {
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
@@ -9331,9 +9340,9 @@ async function loadConversation(id) {
 		.find((m) => m.role === "assistant" && m.streaming);
 	let _resumed = false;
 	if (_streaming) {
-		const fresh =
-			_streaming.modified &&
-			new Date() - new Date(_streaming.modified.replace(" ", "T")) < 5 * 60 * 1000;
+		// Recently written, or its turn has not ended on the server (#591: a long tool
+		// call writes nothing for minutes, and reopening the chat showed it stopped).
+		const fresh = streamingRowIsLive(_streaming);
 		if (fresh && _streaming.recovering) {
 			// Parked for background recovery: show the recovering banner but fully
 			// UNLOCK the composer (clear the whole in-flight state we may have
@@ -9422,6 +9431,7 @@ async function loadConversation(id) {
 	// (run ended while we were on another route, or a stale streaming=1 flag),
 	// clear it — otherwise the dot pulses forever. A dot on a DIFFERENT
 	// conversation is left alone: its live socket deltas keep it honest.
+	_lastLoadResumed = _resumed;
 	if (!_resumed && store.streamingConvId === id) store.streamingConvId = null;
 	// F3 (defensive resync parity): if this (re)load shows the in-flight reply already
 	// settled — no fresh streaming row — but a live run left the streaming-activity block
@@ -10474,6 +10484,7 @@ function onEvent(p) {
 	if (p.conversation_id !== currentId.value) return;
 	if (p.run_id && p.run_id === stoppedRunId.value) return; // user stopped this run
 	if (p.message_id && stoppedMsgIds.value.has(p.message_id)) return; // …incl. a later "recovered" run for a stopped reply
+	noteRunSignal();
 	switch (p.kind) {
 		case "run:recovering":
 			// A managed turn was parked for background recovery (a connection
@@ -12350,6 +12361,40 @@ function onResync() {
 	// chat; here we just avoid an unhandled rejection on the dead id.
 	loadConversation(currentId.value).catch(() => {});
 }
+// A busy chat that heard nothing from its run for SILENT_RUN_RESYNC_MS (#590): a dropped
+// socket or a workspace that stopped responding leaves no terminal event, and the
+// spinner and Stop button used to stay up until a reload. Re-read the chat (which
+// resumes a live reply) and the workspace's availability; stop spinning only when the
+// server has nothing running or queued for this chat. Once per silent stretch.
+watch(busy, (b) => {
+	if (b) noteRunSignal();
+});
+let _silentCheck = false;
+async function checkSilentRun() {
+	const id = currentId.value;
+	if (!id || booting.value || _silentCheck || !isSilentRun(busy.value, _lastRunSignalAt)) return;
+	_silentCheck = true;
+	noteRunSignal();
+	try {
+		forgetReady();
+		isContainerUnavailable()
+			.then((v) => {
+				containerUnavailable.value = v;
+			})
+			.catch(() => {});
+		await loadConversation(id);
+		if (currentId.value !== id) return;
+		const r = await api.getActiveTurn(id);
+		if (currentId.value !== id) return;
+		const preStream = (r && r.ok && r.active) || null;
+		if (shouldStopSpinning({ busy: busy.value, resumed: _lastLoadResumed, preStream }))
+			clearStreamingActivity();
+	} catch (e) {
+		// best-effort: the next silent stretch tries again
+	} finally {
+		_silentCheck = false;
+	}
+}
 function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
 	// Going to the background stops requestAnimationFrame, so anything mid-reveal
@@ -12529,6 +12574,7 @@ onMounted(async () => {
 	_thinkTimer = setInterval(() => {
 		thinkTick.value = busy.value ? thinkTick.value + 1 : 0;
 		if (busy.value) nowMs.value = Date.now();
+		checkSilentRun();
 	}, 1000);
 	// "Discuss in chat" hand-off (Review tab → chatPrefill stash). Take the
 	// stash on EVERY mount — a stale prompt must never survive to pop into the
