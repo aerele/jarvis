@@ -374,6 +374,10 @@ def _turns_since(user: str, since, until=None) -> int:
 	return int((rows[0].total if rows else 0) or 0)
 
 
+#: ``Jarvis Chat Message.origin`` values written for something a person did.
+_HUMAN_ORIGINS = ("", "human", "board_answer")
+
+
 def _user_messages_between(user: str, since, until) -> int:
 	"""1 if the user sent a message in ``[since, until)``, else 0 (an existence
 	check, which is all the gate needs).
@@ -383,7 +387,14 @@ def _user_messages_between(user: str, since, until) -> int:
 	month in one long-lived conversation and wrote again this month would read
 	as having no last-month activity. Messages own their ``creation``; the join
 	runs on the indexed ``conversation`` link and stops at the first row.
-	``hidden`` rows are continuations the user did not type."""
+	Only messages a person produced count, matching the open-ended path where
+	``turn_count`` never advances on ``file_box`` / ``agent_initiated``
+	conversations: those conversations are excluded, and so are user rows
+	written by a server path (``delegated``, ``macro``, ``continuation``,
+	``file_box``, ``agent``, ``system``). ``human`` is a typed send,
+	``board_answer`` an answer the person gave on an approval card, and blank is
+	a legacy row from before ``origin`` was stamped. ``hidden`` rows are
+	continuations the user did not type."""
 	msg = frappe.qb.DocType(MSG)
 	conv = frappe.qb.DocType(CONV)
 	rows = (
@@ -393,8 +404,11 @@ def _user_messages_between(user: str, since, until) -> int:
 		.select(msg.name)
 		.where(
 			(conv.owner == user)
+			& (conv.file_box == 0)
+			& (conv.agent_initiated == 0)
 			& (msg.role == "user")
 			& (msg.hidden == 0)
+			& (msg.origin.isnull() | msg.origin.isin(_HUMAN_ORIGINS))
 			& (msg.creation >= since)
 			& (msg.creation < until)
 		)

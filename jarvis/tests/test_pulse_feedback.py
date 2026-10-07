@@ -135,12 +135,19 @@ class _PulseTestCase(FrappeTestCase):
 		# conversation counter, so mirror the turns with one user message.
 		self._set_user_messages(conversation, [active_at] if count else [])
 
-	def _set_user_messages(self, conversation, created):
+	def _set_user_messages(self, conversation, created, origin="human"):
 		for name in frappe.get_all(MSG, filters={"conversation": conversation}, pluck="name"):
 			frappe.delete_doc(MSG, name, ignore_permissions=True, force=True)
 		for seq, when in enumerate(created, start=1):
 			doc = frappe.get_doc(
-				{"doctype": MSG, "conversation": conversation, "seq": seq, "role": "user", "content": "hi"}
+				{
+					"doctype": MSG,
+					"conversation": conversation,
+					"seq": seq,
+					"role": "user",
+					"content": "hi",
+					"origin": origin,
+				}
 			).insert(ignore_permissions=True)
 			frappe.db.set_value(MSG, doc.name, "creation", when, update_modified=False)
 
@@ -232,6 +239,39 @@ class TestPulseContext(_PulseTestCase):
 				result = pulse_context()
 		self.assertTrue(result["due"])
 		self.assertEqual(result["period_key"], "M:2026-09")
+
+	def _early_october_is_due(self):
+		with patch(_NOW, return_value=datetime(2026, 10, 5, 9, 0)):
+			with patch(_FEATURES, return_value={}):
+				return pulse_context()["due"]
+
+	def test_only_agent_initiated_or_file_box_conversations_are_not_due_early(self):
+		"""The open-ended gate never counts these (turn_count stays 0), so the
+		previous-month gate must not either."""
+		for column in ("agent_initiated", "file_box"):
+			with self.subTest(column=column):
+				self._set_turns(0)
+				conv = create_conversation()
+				self._set_turns(5, conversation=conv, active_at=datetime(2026, 9, 20, 12, 0))
+				frappe.db.set_value(CONV, conv, column, 1, update_modified=False)
+				self.assertFalse(self._early_october_is_due())
+				self.assertIsNone(self._pulse().pulse_last_period_key)
+				frappe.db.set_value(CONV, conv, column, 0, update_modified=False)
+
+	def test_server_written_user_rows_in_a_normal_conversation_are_not_counted_early(self):
+		for origin in ("macro", "delegated", "continuation", "file_box", "agent", "system"):
+			with self.subTest(origin=origin):
+				self._set_turns(0)
+				self._set_user_messages(self.conv, [datetime(2026, 9, 20, 12, 0)], origin=origin)
+				self.assertFalse(self._early_october_is_due())
+
+	def test_typed_and_board_answer_rows_are_counted_early(self):
+		for origin in ("human", "board_answer", ""):
+			with self.subTest(origin=origin):
+				self._set_turns(0)
+				self._set_user_messages(self.conv, [datetime(2026, 9, 20, 12, 0)], origin=origin)
+				self.assertTrue(self._early_october_is_due())
+				self._set_pulse(None, 0)
 
 	def test_after_day_ten_offers_the_current_month_again(self):
 		self._set_pulse("M:2026-09", PULSE_MAX_OFFERS)
