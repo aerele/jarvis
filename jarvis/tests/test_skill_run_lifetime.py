@@ -23,6 +23,7 @@ from jarvis.tests.test_chat_api import TEST_USER, _cleanup_user_conversations, _
 from jarvis.tests.test_skill_approve_and_run import _park_pending_card, _stamp_autorun
 
 PING = ("run_method", {"method": "frappe.ping"})
+CARD_PATHS = ("pending action", "legacy token")
 
 
 def _ago(seconds: int):
@@ -69,6 +70,25 @@ class _Base(FrappeTestCase):
 		frappe.db.commit()
 		return conv
 
+	def _confirm_a_card(self, conv: str, path: str, result: dict) -> dict:
+		"""Park a delete card on ``conv`` and confirm it, the write itself answered by
+		``result``. ``path`` picks how the card is stored: a pending action (today), or
+		a legacy token (a site before the pending-action table)."""
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "lifetime-card"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		with (
+			patch("jarvis.chat.pending_confirm._pa_ready", return_value=path == "pending action"),
+			patch("jarvis.api.dispatch_confirmed", return_value=result),
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			token = _park_pending_card(conv, TEST_USER, todo.name)
+			self.assertEqual(pending_confirm.is_pending_action(token), path == "pending action")
+			return actions_api._confirm_core(token, conv)
+
 	def _covered_write_runs(self, conv: str) -> bool:
 		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp:
 			api._run_tool(*PING, conversation=conv)
@@ -111,45 +131,28 @@ class TestACardWaitDoesNotCostTheRun(_Base):
 		turn_message_binding.keep_skill_autorun_open(None)  # no conversation: no error
 
 	def test_a_run_resumes_after_a_three_hour_wait_on_its_card(self):
-		conv = self._open_run(idle_s=3 * 3600)
-		todo = frappe.get_doc({"doctype": "ToDo", "description": "lifetime-wait"}).insert(
-			ignore_permissions=True
-		)
-		frappe.db.commit()
-		token = _park_pending_card(conv, TEST_USER, todo.name)
-		# Before the click the run is idle past the net: a write would park.
-		self.assertGreater(_age_s(_run(conv).skill_autorun_at), api._SKILL_AUTORUN_IDLE_S)
-		with (
-			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}),
-			patch("jarvis.api.persist_tool_receipt"),
-			patch("jarvis.chat.admission.publish_action_confirmed"),
-			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
-		):
-			res = actions_api._confirm_core(token, conv)
-		self.assertTrue(res.get("ok"), res)
-		run = _run(conv)
-		self.assertEqual(int(run.skill_autorun), 1)
-		self.assertLess(_age_s(run.skill_autorun_at), 60)
-		# The run's next write goes through without a card.
-		self.assertTrue(self._covered_write_runs(conv))
+		for path in CARD_PATHS:
+			with self.subTest(card=path):
+				conv = self._open_run(idle_s=3 * 3600)
+				# Before the click the run is idle past the net: a write would park.
+				self.assertGreater(_age_s(_run(conv).skill_autorun_at), api._SKILL_AUTORUN_IDLE_S)
+				res = self._confirm_a_card(conv, path, {"ok": True, "data": {}})
+				self.assertTrue(res.get("ok"), res)
+				run = _run(conv)
+				self.assertEqual(int(run.skill_autorun), 1)
+				self.assertLess(_age_s(run.skill_autorun_at), 60)
+				# The run's next write goes through without a card.
+				self.assertTrue(self._covered_write_runs(conv))
 
 
 class TestWhatEndsARun(_Base):
 	def test_a_card_of_the_run_that_fails(self):
-		conv = self._open_run()
-		todo = frappe.get_doc({"doctype": "ToDo", "description": "lifetime-fail"}).insert(
-			ignore_permissions=True
-		)
-		frappe.db.commit()
-		token = _park_pending_card(conv, TEST_USER, todo.name)
 		failed = {"ok": False, "error": {"code": "ValidationError", "message": "no"}}
-		with (
-			patch("jarvis.api.dispatch_confirmed", return_value=failed),
-			patch("jarvis.api.persist_tool_receipt"),
-			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
-		):
-			actions_api._confirm_core(token, conv)
-		self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
+		for path in CARD_PATHS:
+			with self.subTest(card=path):
+				conv = self._open_run()
+				self._confirm_a_card(conv, path, failed)
+				self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
 
 	def test_a_write_that_raises(self):
 		conv = self._open_run()
