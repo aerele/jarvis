@@ -264,15 +264,30 @@ export const RUNTIME_JS = `(function () {
 		}
 		if (target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "start" });
 	}
+	// The link under an event target, with its href (SVG links may use xlink:href).
+	function linkOf(e) {
+		var a = e.target && e.target.closest ? e.target.closest("a, area") : null;
+		if (!a) return null;
+		var href = a.getAttribute("href");
+		if (href == null) href = a.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+		return href == null ? null : { href: href };
+	}
 	document.addEventListener(
 		"click",
 		function (e) {
-			var a = e.target && e.target.closest ? e.target.closest("a[href], area[href]") : null;
-			if (!a) return;
-			var href = a.getAttribute("href");
+			var link = linkOf(e);
+			if (!link) return;
 			e.preventDefault();
-			if (href.charAt(0) === "#") scrollToFragment(href);
-			else postLink(href);
+			if (link.href.charAt(0) === "#") scrollToFragment(link.href);
+			else postLink(link.href);
+		},
+		true
+	);
+	// A middle-click would open the parent-relative URL in a new tab: do nothing.
+	document.addEventListener(
+		"auxclick",
+		function (e) {
+			if (linkOf(e)) e.preventDefault();
 		},
 		true
 	);
