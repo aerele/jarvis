@@ -9,6 +9,18 @@ import { expect, test, vi } from "vitest";
 // resources chain does not resolve under vitest. Only searchLink is used here.
 vi.mock("@/api", () => ({ searchLink: vi.fn(async () => []) }));
 
+// frappe-ui does not load under vitest either: a stand-in Select that keeps its
+// props and emits like the real one.
+vi.mock("frappe-ui", () => ({
+	Select: {
+		name: "Select",
+		props: ["options", "modelValue", "placeholder", "disabled"],
+		emits: ["update:modelValue"],
+		template: "<div class='fui-select' />",
+	},
+}));
+
+import { Select } from "frappe-ui";
 import { searchLink } from "@/api";
 import AskCard from "../../src/components/chat/AskCard.vue";
 import { parseAsk } from "../../src/lib/chatAsk.js";
@@ -203,4 +215,22 @@ test("a mixed ask keeps the numbered-list look", () => {
 		spec: spec('[{"q":"From","type":"date"},{"q":"Scope","type":"single","options":["All"]}]'),
 	});
 	expect(w.find(".jv-ask").classes()).not.toContain("jv-ask--form");
+});
+
+test("a select question renders the frappe-ui dropdown and submits the chosen option", async () => {
+	const w = mountWithPalette(AskCard, {
+		spec: spec('[{"q":"HSN Code","type":"select","options":["84713010","99831"]}]'),
+	});
+	expect(w.find(".jv-ask").classes()).toContain("jv-ask--form");
+	// the frappe-ui Select, not a text box or option buttons
+	expect(w.find('input[type="text"]').exists()).toBe(false);
+	expect(w.findAll("button.jv-ask-opt")).toHaveLength(0);
+	const dd = w.findComponent(Select);
+	expect(dd.exists()).toBe(true);
+	expect(dd.props("options").map((o) => o.value)).toEqual(["84713010", "99831"]);
+	expect(submit(w).attributes("disabled")).toBeDefined();
+	dd.vm.$emit("update:modelValue", "99831");
+	await w.vm.$nextTick();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")[0][0]).toBe("Here are my answers:\n1. HSN Code → 99831");
 });
