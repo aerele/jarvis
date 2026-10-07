@@ -417,12 +417,17 @@ def apply_action(action: dict | str | None = None) -> dict:
 		else {"doctype": doctype, "name": name, "changes": values}
 	)
 	# Write-risk guard (round 2): a structure change is refused from the panel too
-	# (set up in Desk); sensitive configuration is turned into a gated card below,
-	# since the panel holds the values and its one click is not that card.
+	# (set up in Desk); sensitive configuration, and the guarded structure writes
+	# (one new Custom Field, a column-free Custom Field edit), are turned into a
+	# gated card below, since the panel holds the values and its one click is not
+	# that card.
 	try:
-		_risk = _write_risk.check(tool, args)
+		_risk = _write_risk.check(tool, args, guarded=True)
 	except api.WriteRefusedError as e:
 		return api._refuse_risky_write(tool, args, e)
+	if _risk in _write_risk.GUARDED_STRUCTURE:
+		# The gate refuses it where it cannot be carded (a File Box chat).
+		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
 
 	# A File Box chat's card goes through the File Box policy (filebox_cards), whether
 	# the turn end or this Confirm gets to it first - never straight to the write. The

@@ -85,7 +85,15 @@ class TestRiskOf(FrappeTestCase):
 		)
 		self.assertEqual(
 			wr.risk_of("update_doc", {"doctype": "Custom Field", "name": "x", "changes": {"label": "y"}}),
-			"structure",
+			"custom_field_edit",
+		)
+		# Only ONE named field: no name, or a batch, is plain structure.
+		self.assertEqual(
+			wr.risk_of("update_doc", {"doctype": "Custom Field", "changes": {"label": "y"}}), "structure"
+		)
+		updates = [{"name": "x", "changes": {"label": "y"}}]
+		self.assertEqual(
+			wr.risk_of("update_doc", {"doctype": "Custom Field", "updates": updates}), "structure"
 		)
 		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Custom Field", "name": "x"}), "structure")
 		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "DocType", "name": "ToDo"}), "structure")
@@ -249,6 +257,31 @@ class TestCheck(FrappeTestCase):
 		with self.assertRaises(StructureRefusedError) as ctx:
 			wr.check("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}})
 		self.assertEqual(ctx.exception.desk_path, "/app/customize-form")
+
+	def test_a_guarded_structure_write_is_handed_back_only_to_a_caller_that_cards_it(self):
+		"""R2-10: one new Custom Field / a single Custom Field edit. Every caller that
+		does not say ``guarded=True`` keeps the refusal, and so does everyone while the
+		site switch is set."""
+		from jarvis.tools import _guarded_structure
+
+		new = ("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}})
+		edit = ("update_doc", {"doctype": "Custom Field", "name": "x", "changes": {"label": "y"}})
+		self.assertEqual(wr.check(*new, guarded=True), "custom_field_new")
+		self.assertEqual(wr.check(*edit, guarded=True), "custom_field_edit")
+		for call in (new, edit):
+			with self.assertRaises(StructureRefusedError):
+				wr.check(*call)
+		with self.assertRaises(StructureRefusedError) as ctx:
+			wr.check(*edit)
+		self.assertEqual(ctx.exception.desk_path, "/app/custom-field/x")
+		frappe.conf[_guarded_structure.OFF_SWITCH] = 1
+		self.addCleanup(frappe.conf.pop, _guarded_structure.OFF_SWITCH, None)
+		for call in (new, edit):
+			with self.assertRaises(StructureRefusedError):
+				wr.check(*call, guarded=True)
+		# Never for a structure doctype that has no guarded class.
+		with self.assertRaises(StructureRefusedError):
+			wr.check("create_doc", {"doctype": "DocType", "values": {}}, guarded=True)
 
 	def test_sensitive_is_returned_not_refused(self):
 		self.assertEqual(wr.check("create_doc", {"doctype": "Webhook", "values": {}}), "sensitive")
