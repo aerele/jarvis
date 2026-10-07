@@ -188,6 +188,30 @@ describe("frame runtime link bridge", () => {
 		expect(received[0]).toMatchObject({ type: "link", href: "/app/customer" });
 	});
 
+	it("cancels a middle-click on a link and posts nothing", async () => {
+		boot('<a id="l" href="/app/customer"><span id="in">x</span></a>');
+		const ev = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+		document.getElementById("in").dispatchEvent(ev);
+		expect(ev.defaultPrevented).toBe(true);
+		expect(received).toHaveLength(0);
+	});
+
+	it("handles SVG links that use xlink:href", async () => {
+		boot(
+			'<svg xmlns:xlink="http://www.w3.org/1999/xlink"><a id="s1" xlink:href="#sec"><text id="t1">a</text></a>' +
+				'<a id="s2" xlink:href="/app/customer"><text id="t2">b</text></a></svg><div id="sec"></div>'
+		);
+		const target = document.getElementById("sec");
+		target.scrollIntoView = vi.fn();
+		const e1 = await click(document.getElementById("t1"));
+		expect(e1.defaultPrevented).toBe(true);
+		expect(target.scrollIntoView).toHaveBeenCalledTimes(1);
+		expect(received).toHaveLength(0);
+		const e2 = await click(document.getElementById("t2"));
+		expect(e2.defaultPrevented).toBe(true);
+		expect(received[0]).toMatchObject({ type: "link", href: "/app/customer" });
+	});
+
 	it("bridges window.open to a link message and returns null", async () => {
 		expect(window.open("/app/x")).toBeNull();
 		await new Promise((r) => setTimeout(r, 0));
