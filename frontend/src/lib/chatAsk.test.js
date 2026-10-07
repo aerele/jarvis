@@ -15,7 +15,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseAsk, isAskReady, askAnswerText, ASK_FIELD_TYPES } from "./chatAsk.js";
+import {
+	parseAsk,
+	isAskReady,
+	askAnswerText,
+	humanizeFieldname,
+	ASK_FIELD_TYPES,
+} from "./chatAsk.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const read = (...p) => fs.readFileSync(path.join(HERE, ...p), "utf8");
@@ -162,12 +168,18 @@ test("a field question may omit q (the card takes the label from meta)", () => {
 	assert.equal(spec.questions[0].q, "");
 });
 
-test("a field question missing doctype or fieldname is dropped", () => {
-	assert.equal(parseAsk(fence('[{"q":"x","type":"field","fieldname":"a"}]')), null);
-	assert.equal(parseAsk(fence('[{"q":"x","type":"field","doctype":"Item"}]')), null);
+test("a field question missing doctype or fieldname degrades to text", () => {
+	for (const raw of [
+		'[{"q":"x","type":"field","fieldname":"a"}]',
+		'[{"q":"x","type":"field","doctype":"Item"}]',
+	]) {
+		const [q] = parseAsk(fence(raw)).questions;
+		assert.equal(q.type, "text");
+		assert.equal(q.q, "x");
+	}
 });
 
-test("a field question with a non-identifier doctype or fieldname is dropped", () => {
+test("a field question with a non-identifier doctype or fieldname degrades to a text question", () => {
 	for (const [doctype, fieldname] of [
 		["Item", "gst hsn"],
 		["Item", "a-b"],
@@ -175,11 +187,50 @@ test("a field question with a non-identifier doctype or fieldname is dropped", (
 		["Item", "a.b"],
 		["Item<script>", "a"],
 		["It/em", "a"],
-		["Item", ""],
 	]) {
-		const raw = JSON.stringify([{ q: "x", type: "field", doctype, fieldname }]);
-		assert.equal(parseAsk(fence(raw)), null, `${doctype} / ${fieldname}`);
+		const raw = JSON.stringify([{ q: "My label", type: "field", doctype, fieldname }]);
+		const [q] = parseAsk(fence(raw)).questions;
+		assert.equal(q.type, "text", `${doctype} / ${fieldname}`);
+		assert.equal(q.q, "My label");
+		assert.equal(q.doctype, "");
+		assert.equal(q.fieldname, undefined);
 	}
+});
+
+test("a degraded field question with a blank q takes the humanized fieldname", () => {
+	const raw = JSON.stringify([
+		{ type: "field", doctype: "Item<x>", fieldname: "custom_gstin_2" },
+	]);
+	assert.equal(parseAsk(fence(raw)).questions[0].q, "Gstin 2");
+});
+
+test("a degraded field question with nothing usable left is dropped", () => {
+	const raw = JSON.stringify([{ type: "field", doctype: "Item", fieldname: "" }]);
+	assert.equal(parseAsk(fence(raw)), null);
+});
+
+test("humanizeFieldname strips custom_, spaces underscores and capitalises", () => {
+	assert.equal(humanizeFieldname("custom_gstin_2"), "Gstin 2");
+	assert.equal(humanizeFieldname("po_no"), "Po no");
+	assert.equal(humanizeFieldname("customer"), "Customer");
+	assert.equal(humanizeFieldname(""), "");
+});
+
+test("a number question is ready only for a finite number (commas allowed)", () => {
+	const spec = { questions: [{ q: "Qty", type: "number" }] };
+	for (const bad of [undefined, "", "  ", "abc", "1x", "Infinity"]) {
+		assert.equal(isAskReady(spec, { 0: bad }, {}), false, String(bad));
+	}
+	for (const ok of ["42", " 3.5 ", "-1", "1,234.50", "0"]) {
+		assert.equal(isAskReady(spec, { 0: ok }, {}), true, ok);
+	}
+	assert.equal(askAnswerText(spec, { 0: "1,234" }, {}), "Here are my answers:\n1. Qty → 1,234");
+});
+
+test("a loading question is never ready and prints as no answer", () => {
+	const spec = { questions: [{ q: "X", type: "loading" }] };
+	assert.equal(isAskReady(spec, { 0: "anything" }, {}), false);
+	assert.match(askAnswerText(spec, {}, {}), /1\. X → \(no answer\)/);
 });
 
 // ---- answer formatting ---------------------------------------------------

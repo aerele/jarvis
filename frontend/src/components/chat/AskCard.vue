@@ -159,7 +159,7 @@ import { FormControl, LoadingIndicator, Select } from "frappe-ui";
 import { getDoctypeFields, searchLink } from "@/api";
 import { controlFor } from "@/lib/docFields";
 import { vScrollFade } from "@/composables/useScrollFade";
-import { ASK_FIELD_TYPES, isAskReady, askAnswerText } from "@/lib/chatAsk";
+import { ASK_FIELD_TYPES, isAskReady, askAnswerText, humanizeFieldname } from "@/lib/chatAsk";
 
 const props = defineProps({
 	// A parsed ask: { questions: [{q, type, options, doctype, fieldname?}] } (see parseAsk).
@@ -192,12 +192,31 @@ const isForm = computed(
 
 // A `field` question names a DocType field; the card draws that field's real
 // control from its meta (get_doctype_fields, which checks read permission). One
-// request per DocType, shared by every card; a failure is dropped from the cache
-// so the next card retries, and the question falls back to a text box.
+// request per DocType per card; a failure (error, bad response or a hung
+// request) is dropped from the cache so it can retry, and the question falls
+// back to a text box.
+const FIELDS_TIMEOUT_MS = 8000;
 const fieldsCache = new Map();
+function fetchFields(doctype) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("timeout")), FIELDS_TIMEOUT_MS);
+		Promise.resolve(getDoctypeFields(doctype)).then(
+			(r) => {
+				clearTimeout(timer);
+				if (!r || r.ok === false || !Array.isArray(r.fields)) {
+					reject(new Error("bad response"));
+				} else resolve(r.fields);
+			},
+			(e) => {
+				clearTimeout(timer);
+				reject(e);
+			}
+		);
+	});
+}
 function loadFields(doctype) {
 	if (!fieldsCache.has(doctype)) {
-		const p = Promise.resolve(getDoctypeFields(doctype)).then((r) => (r && r.fields) || []);
+		const p = fetchFields(doctype);
 		p.catch(() => fieldsCache.delete(doctype));
 		fieldsCache.set(doctype, p);
 	}
@@ -224,7 +243,11 @@ watch(
 function drawn(q) {
 	if (q.type !== "field") return q;
 	const m = fieldMeta.value[fieldKey(q)];
-	const base = { ...q, fromField: true, q: q.q || (m && m.label) || q.fieldname };
+	const base = {
+		...q,
+		fromField: true,
+		q: q.q || (m && m.label) || humanizeFieldname(q.fieldname),
+	};
 	if (m === "loading" || !m) return { ...base, type: "loading" };
 	if (m === "failed") return { ...base, type: "text" };
 	const [control, opts] = controlFor(m.fieldtype, m.options);
@@ -241,7 +264,7 @@ function drawn(q) {
 	return { ...base, type: "text" };
 }
 const questions = computed(() => props.spec.questions.map(drawn));
-const ready = computed(() => isAskReady(props.spec, sel.value, other.value));
+const ready = computed(() => isAskReady({ questions: questions.value }, sel.value, other.value));
 
 async function onLinkSearch(i, doctype, val) {
 	link.value = { ...link.value, [i]: { ...(link.value[i] || {}), q: val, open: true } };
