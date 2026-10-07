@@ -102,6 +102,28 @@ class JarvisTrigger(NotRenamable, Document):
 		else:
 			self._validate_llm()
 		self._guard_server_script_link()
+		self._guard_lookup_authority()
+
+	def _guard_lookup_authority(self):
+		"""Lookups read with the trigger OWNER's permissions, so only the owner
+		(or Administrator) may turn them on or change what they act on. Any other
+		manager editing the instruction, target, event, condition or action of a
+		lookup-enabled trigger, or switching lookups on, would borrow the owner's
+		access. Turning lookups off and enabling/disabling stay open to every
+		manager. Covers the SPA API, Desk and the agent's tools alike."""
+		if self.action_type != "LLM" or not cint(self.llm_allow_lookups):
+			return
+		if frappe.session.user in (self.owner, "Administrator"):
+			return
+		before = None if self.is_new() else self.get_doc_before_save()
+		if before and cint(before.llm_allow_lookups) and before.action_type == "LLM":
+			watched = ("llm_instruction", "target_doctype", "doc_event", "condition", "action_type")
+			if not any(self.has_value_changed(f) for f in watched):
+				return
+		frappe.throw(
+			_("Only the trigger's owner can turn on or change read-only lookups."),
+			frappe.PermissionError,
+		)
 
 	def _managed_script_name(self) -> str | None:
 		"""The managed Server Script's name for this trigger. ``self.name`` is

@@ -27,7 +27,7 @@ from jarvis.triggers.engine import (
 	clear_cache,
 	eval_context,
 )
-from jarvis.triggers.lookups import LOOKUP_MARKER
+from jarvis.triggers.lookups import LOOKUP_MARKER, lookup_marker
 
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
@@ -614,24 +614,18 @@ def _activity_query(search: str, f: dict):
 def _hide_lookup_rows(query):
 	"""Withhold findings that were built from lookups. Lookups read as the
 	trigger OWNER, so what they surface can exceed what the target record's
-	readers may see. Non-managers therefore see such a row only if they own the
-	trigger.
+	readers may see. Non-managers therefore see such a row only if they are the
+	owner whose permissions that run read with.
 
-	A row counts as lookup-built when its trigger has lookups ON now, OR its
-	``detail`` carries the marker ``run_llm_action`` writes whenever lookups were
-	used, so rows written while the flag was on stay hidden after it is turned
-	off (no extra column or migrate: the marker rides in the detail already
-	written). ``detail`` is only filtered on here, never selected."""
+	``run_llm_action`` starts the ``detail`` of every lookup-enabled run with
+	``[lookups:<owner>]``. Matching that PREFIX (the engine truncates the tail,
+	never the head) keeps rows hidden after the flag is turned off or the
+	trigger is reassigned or deleted, with no extra column. ``detail`` is only
+	filtered on here, never selected."""
 	a = frappe.qb.DocType(ACTIVITY)
-	t = frappe.qb.DocType(TRIGGER)
-	hidden = IfNull(a.detail, "").like(f"%{LOOKUP_MARKER}%")
-	lookup_triggers = frappe.qb.from_(t).select(t.name).where(t.llm_allow_lookups == 1).run(pluck=True)
-	if lookup_triggers:
-		hidden = hidden | a.trigger.isin(lookup_triggers)
-	owned = frappe.qb.from_(t).select(t.name).where(t.owner == frappe.session.user).run(pluck=True)
-	visible = ~hidden
-	if owned:
-		visible = visible | a.trigger.isin(owned)
+	detail = IfNull(a.detail, "")
+	hidden = detail.like(f"{_lk(LOOKUP_MARKER)}%")
+	visible = ~hidden | detail.like(f"{_lk(lookup_marker(frappe.session.user))}%")
 	return query.where(visible)
 
 

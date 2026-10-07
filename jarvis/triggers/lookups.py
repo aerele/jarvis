@@ -44,7 +44,7 @@ FORCE_FINAL_BELOW_S = 20
 # feed hides such rows from everyone but managers and the trigger owner, and
 # reads this marker (not only the trigger's current flag) so rows stay hidden
 # after the flag is turned off.
-LOOKUP_MARKER = "[lookups]"
+LOOKUP_MARKER = "[lookups"
 
 TIMEOUT_MESSAGE = "LLM trigger ran out of time while looking up related records."
 
@@ -80,7 +80,7 @@ _FORBIDDEN_FIELDTYPES = frozenset(
 # (users, roles, queues, logs, files, contacts, settings, schema, code). This
 # app rule is the primary gate; a customer's own DocType (custom == 1) and every
 # other app's DocTypes (ERPNext and so on) stay lookable.
-_DENIED_APPS = frozenset({"frappe", "jarvis"})
+_DENIED_APPS = frozenset({"frappe", "jarvis", "jarvis_admin", "jarvis_admin_v2"})
 
 # Defense in depth behind the app rule: access control, schema and code, plus
 # the site and Jarvis configuration. Jarvis's own structure/sensitive lists are
@@ -103,6 +103,12 @@ _DENY_DOCTYPES = frozenset(
 		"System Settings",
 	}
 )
+
+
+def lookup_marker(owner: str | None) -> str:
+	"""The leading tag of a lookup run's activity detail, naming the owner whose
+	permissions the lookups read with. Starts with ``LOOKUP_MARKER``."""
+	return f"{LOOKUP_MARKER}:{owner or ''}]"
 
 
 class LookupRefused(Exception):
@@ -336,6 +342,14 @@ def _as_user(user: str):
 		frappe.set_user(previous)
 
 
+def _child_allowed(doctype: str) -> bool:
+	"""True when a child DocType is outside the denied DocTypes and apps."""
+	meta = frappe.get_meta(doctype)
+	if doctype in _denied_doctypes() or meta.module == "Jarvis":
+		return False
+	return bool(cint(getattr(meta, "custom", 0))) or _module_app(meta.module) not in (*_DENIED_APPS, None)
+
+
 def _keep_readable(values: dict, doctype: str) -> dict:
 	"""``values`` limited to the same readable-field set ``list`` selects from,
 	recursing into child tables with each child's own meta."""
@@ -345,6 +359,10 @@ def _keep_readable(values: dict, doctype: str) -> dict:
 	for key, value in values.items():
 		df = meta.get_field(key)
 		if df and df.fieldtype in frappe.model.table_fields:
+			# A child DocType that fails the app rule (or any DocType check
+			# other than "is a child table") contributes no rows.
+			if not _child_allowed(df.options):
+				continue
 			if isinstance(value, list):
 				value = [_keep_readable(row, df.options) if isinstance(row, dict) else row for row in value]
 			out[key] = value
