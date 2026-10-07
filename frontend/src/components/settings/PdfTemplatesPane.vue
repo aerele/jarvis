@@ -226,6 +226,13 @@
 							@click="confirmDeleteCurrent"
 						/>
 						<Button
+							v-if="selected && !selected.custom"
+							variant="subtle"
+							iconLeft="copy"
+							label="Duplicate to edit"
+							@click="duplicateBuiltIn(selected)"
+						/>
+						<Button
 							v-if="!isCurrentDefault"
 							variant="subtle"
 							iconLeft="star"
@@ -253,7 +260,7 @@
 					<div class="min-w-0">
 						<template v-if="selected && !selected.custom">
 							<p class="text-p-sm text-ink-gray-6">
-								Built-in looks can't be edited. Start a new template to change the
+								Built-in looks can't be edited. Duplicate this one to change the
 								colours, type or layout.
 							</p>
 							<div
@@ -959,6 +966,7 @@ onBeforeUnmount(() => {
 function blankForm() {
 	return {
 		template_key: "",
+		based_on: "",
 		label: "",
 		description: "",
 		accent_color: FALLBACK_SWATCH,
@@ -989,6 +997,7 @@ function toMargin(v) {
 function normalizeFormFromApi(d) {
 	return {
 		template_key: d.template_key || "",
+		based_on: d.based_on || "",
 		label: d.label || "",
 		description: d.description || "",
 		accent_color: d.accent_color || "",
@@ -1043,6 +1052,51 @@ function doNewTemplate() {
 	isCreating.value = true;
 	form.value = blankForm();
 	formSnapshot.value = JSON.stringify(form.value);
+	previewHtml.value = "";
+	previewError.value = "";
+	schedulePreviewFromForm();
+}
+
+// First free `<key>-copy`, `<key>-copy-2`, ... among every listed template
+// (admins get disabled custom ones too), so the suggestion never collides.
+function copyKeyFor(key) {
+	const taken = new Set(templates.value.map((t) => t.key));
+	let candidate = `${key}-copy`;
+	for (let n = 2; taken.has(candidate); n++) candidate = `${key}-copy-${n}`;
+	return candidate;
+}
+
+function duplicateBuiltIn(t) {
+	withDirtyGuard(() => doDuplicate(t));
+}
+
+// Opens the new-template editor prefilled from a built-in's summary spec. The
+// snapshot is the blank form, so the copy counts as unsaved and Save is live.
+function doDuplicate(t) {
+	const blank = blankForm();
+	selected.value = null;
+	isCreating.value = true;
+	error.value = "";
+	form.value = {
+		...blank,
+		template_key: copyKeyFor(t.key),
+		based_on: t.key,
+		label: `${t.label} (copy)`,
+		description: t.description || "",
+		accent_color: t.accent || blank.accent_color,
+		dark_color: t.dark || "",
+		body_font: t.body_font || blank.body_font,
+		display_font: t.display_font || blank.display_font,
+		masthead_align: t.masthead || blank.masthead_align,
+		cover: t.cover || blank.cover,
+		watermark: t.watermark || "",
+		page_size: t.page_size || blank.page_size,
+		orientation: t.orientation || blank.orientation,
+		margins_mm: toMargin(t.margins_mm),
+		show_logo: t.show_logo !== false,
+		accent_bar: !!t.accent_bar,
+	};
+	formSnapshot.value = JSON.stringify(blank);
 	previewHtml.value = "";
 	previewError.value = "";
 	schedulePreviewFromForm();
@@ -1116,6 +1170,9 @@ function payloadFromForm() {
 	// ABSENT, and save_pdf_template rejects a blank key outright either way.
 	const key = (f.template_key || "").trim().toLowerCase();
 	if (key) out.template_key = key;
+	// Create mode: the server refuses an existing key instead of upserting it.
+	if (isCreating.value) out.is_new = 1;
+	if (f.based_on) out.based_on = f.based_on;
 	if (out.use_letterhead_footer) {
 		out.company_letter_heads = (f.company_letter_heads || []).filter(
 			(r) => r.company && r.letter_head
