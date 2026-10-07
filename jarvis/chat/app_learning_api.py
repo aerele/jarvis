@@ -124,7 +124,7 @@ def get_app_learning_overview() -> dict:
 # --------------------------------------------------------------------------- #
 # schedule / cancel
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 	"""RETIRED (rollback-operable). The chat-batch custom-app learning pipeline has been
@@ -216,7 +216,7 @@ def schedule_app_learning(apps: str, when: str = "", consent: int = 0) -> dict:
 	return {"ok": True, "data": {"runs": created, "scheduled_at": str(scheduled_at)}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def cancel_app_learning_run(name: str) -> dict:
 	"""Cancel a Queued/Zipping/Analyzing run. An in-flight turn finishes, but
