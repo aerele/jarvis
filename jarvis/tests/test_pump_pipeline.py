@@ -423,6 +423,33 @@ class TestPanel4Chokepoint(_PipelineCase):
 		self.assertFalse(second["ok"])
 		self.assertIn("in progress", second["reason"])
 
+	def test_a_failed_post_acceptance_write_keeps_the_pump_retry(self):
+		from jarvis.chat import api as chat_api
+
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="build it")
+		self._mk_turn(conv, "pmp_failed_w", seed, "errored")
+		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
+		frappe.db.set_value(TURN, "pmp_failed_w", "assistant_message", amsg)
+		frappe.db.commit()
+		real_set_value = frappe.db.set_value
+
+		def set_value(doctype, name, field=None, *args, **kwargs):
+			if doctype == CONV and field == "last_active_at":
+				raise frappe.QueryDeadlockError("1020 record has changed")
+			return real_set_value(doctype, name, field, *args, **kwargs)
+
+		woken = _Recorder()
+		with (
+			self._pump_on(ensure=woken),
+			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+			patch.object(frappe.db, "set_value", side_effect=set_value),
+		):
+			res = chat_api.retry_message(amsg)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._state(res["run_id"]), "queued")
+		self.assertEqual(woken.count, 1, "the pump was woken")
+
 	def test_placeholder_seq_monotonic_under_conv_lock(self):
 		conv = self._mk_conv()
 		# A tool receipt sits at some seq; prepare's placeholder must not collide.

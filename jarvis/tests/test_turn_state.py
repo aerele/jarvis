@@ -155,6 +155,23 @@ class _TurnStateTestCase(FrappeTestCase):
 # --------------------------------------------------------------------------- #
 
 
+class TestUnfinishedTurnAfter(_TurnStateTestCase):
+	"""The retry's shared check for an unfinished turn of a conversation."""
+
+	def test_creation_bound_exclusion_and_terminal_states(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		self._mk_turn(conv, "uta-old", seed, "queued")
+		mark = frappe.db.get_value(MSG, seed, "creation")
+		self.assertTrue(ts.unfinished_turn_after(conv, None), "None counts every turn")
+		self.assertTrue(ts.unfinished_turn_after(conv, mark), "created after the user message")
+		later = frappe.db.get_value(TURN, "uta-old", "creation")
+		self.assertFalse(ts.unfinished_turn_after(conv, later), "nothing created after it")
+		self.assertFalse(ts.unfinished_turn_after(conv, None, exclude_run_id="uta-old"))
+		frappe.db.set_value(TURN, "uta-old", "state", "errored")
+		self.assertFalse(ts.unfinished_turn_after(conv, None), "a terminal turn does not count")
+
+
 class TestLinearPathWinAndReplay(_TurnStateTestCase):
 	def test_full_success_path(self):
 		conv = self._mk_conv()
