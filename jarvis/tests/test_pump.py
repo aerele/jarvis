@@ -1593,6 +1593,41 @@ class TestControlQueueRouting(_PumpTestCase):
 			self.assertEqual(pump._control_queue(), "short")
 			self.assertTrue(pump._pump_shape_starves())
 
+	def test_frappe_supervisor_layout_routes_to_short(self):
+		"""The stock Frappe supervisor layout: a `short,default` worker plus a
+		`long,default,short` worker. The first is a dedicated short consumer."""
+		p1, p2, p3 = self._layout({"a": ["short", "default"], "b": ["long", "default", "short"]}, long_n=1)
+		with p1, p2, p3:
+			self.assertEqual(pump._control_queue(), "short")
+			self.assertFalse(pump._pump_shape_starves())
+
+	def test_get_workers_raising_keeps_develop_rule(self):
+		def boom():
+			raise RuntimeError("redis down")
+
+		for long_n, want in ((2, "long"), (1, "short")):
+			with (
+				patch("jarvis.chat.api._turn_queue", lambda: "long"),
+				patch("frappe.utils.background_jobs.get_workers", boom),
+				patch.object(pump, "_live_worker_count", lambda q, n=long_n: n),
+			):
+				self.assertEqual(pump._control_queue(), want, f"long={long_n}")
+
+	def test_other_bench_short_worker_does_not_count(self):
+		"""A worker whose queue names carry another bench's prefix is not ours."""
+
+		class _W:
+			def queue_names(self):
+				return ["other-bench-id:short"]
+
+		with (
+			patch("jarvis.chat.api._turn_queue", lambda: "long"),
+			patch("frappe.utils.background_jobs.get_workers", lambda: [_W()]),
+			patch.object(pump, "_live_worker_count", lambda q: 2),
+		):
+			self.assertFalse(pump._has_dedicated_short_consumer())
+			self.assertEqual(pump._control_queue(), "long")
+
 	def test_jarvis_chat_lane_beats_short_consumer(self):
 		with (
 			patch("jarvis.chat.api._turn_queue", lambda: "jarvis_chat"),
