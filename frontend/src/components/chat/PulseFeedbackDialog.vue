@@ -153,10 +153,9 @@ async function submit() {
 	const selected = selectedFeatures.value;
 	const text = useCaseText.value;
 	const n = note.value;
-	const periodKey = ctx.value?.period_key;
 	closePulseFeedback();
 	try {
-		await api.submitPulseFeedback(stars.value, offered, selected, text, n, periodKey);
+		await api.submitPulseFeedback(stars.value, offered, selected, text, n);
 	} catch (e) {
 		/* best-effort */
 	}
