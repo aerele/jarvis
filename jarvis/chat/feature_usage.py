@@ -80,15 +80,17 @@ FEATURES = (
 )
 
 
-def get_used_features(user: str, since) -> dict[str, str]:
+def get_used_features(user: str, since, until=None) -> dict[str, str]:
 	"""``{feature: last_used}`` for every one of the 7 tracked features ``user``
-	has used since ``since``. A feature absent from the dict was not used in the
-	window, so an empty dict means "hide the question".
+	has used in ``[since, until)`` (open-ended when ``until`` is None). A feature
+	absent from the dict was not used in the window, so an empty dict means
+	"hide the question".
 
 	One source's failure must drop that one feature's entry, never blank the
 	whole survey - each source runs inside its own guard.
 	"""
 	since_dt = frappe.utils.get_datetime(since) if since else None
+	until_dt = frappe.utils.get_datetime(until) if until else None
 	if not user or not since_dt:
 		return {}
 	out: dict[str, str] = {}
@@ -96,7 +98,7 @@ def get_used_features(user: str, since) -> dict[str, str]:
 	# that swaps one source function out is honoured.
 	for name in FEATURES:
 		try:
-			last = globals()[f"_{name}"](user, since_dt)
+			last = globals()[f"_{name}"](user, since_dt, until_dt)
 		except Exception:
 			frappe.log_error(
 				title=f"get_used_features: {name} source failed",
@@ -106,6 +108,15 @@ def get_used_features(user: str, since) -> dict[str, str]:
 		if last:
 			out[name] = last
 	return out
+
+
+def _window(since, until) -> list:
+	"""``creation`` filter triplets for ``[since, until)``; no upper bound when
+	``until`` is None."""
+	window = [["creation", ">=", since]]
+	if until:
+		window.append(["creation", "<", until])
+	return window
 
 
 def _iso(value) -> str | None:
@@ -120,7 +131,7 @@ def _latest(*values) -> str | None:
 	return max(present) if present else None
 
 
-def _file_box(user: str, since) -> str | None:
+def _file_box(user: str, since, until=None) -> str | None:
 	"""A File-Box drop creates its conversation with ``file_box=1`` at drop time
 	(``jarvis.chat.filebox.drop_file``), so ``creation`` IS the usage moment -
 	no later toggle to chase."""
@@ -129,21 +140,21 @@ def _file_box(user: str, since) -> str | None:
 	return _iso(
 		frappe.db.get_value(
 			CONV,
-			{"owner": user, "file_box": 1, "creation": [">=", since]},
+			[["owner", "=", user], ["file_box", "=", 1], *_window(since, until)],
 			"creation",
 			order_by="creation desc",
 		)
 	)
 
 
-def _dashboard_builder(user: str, since) -> str | None:
+def _dashboard_builder(user: str, since, until=None) -> str | None:
 	"""Creating a dashboard, never viewing one. Attribution is by CONVERSATION
 	owner: Jarvis Chat Message carries no user field and a tool receipt's own
 	``owner`` is whichever server identity wrote it, so this joins exactly the
 	way ``jarvis.chat.usage_push`` already attributes tool calls."""
 	msg = frappe.qb.DocType(MSG)
 	conv = frappe.qb.DocType(CONV)
-	rows = (
+	query = (
 		frappe.qb.from_(msg)
 		.inner_join(conv)
 		.on(msg.conversation == conv.name)
@@ -154,13 +165,14 @@ def _dashboard_builder(user: str, since) -> str | None:
 			& (msg.tool_name.isin(_DASHBOARD_TOOLS))
 			& (msg.creation >= since)
 		)
-		.orderby(msg.creation, order=frappe.qb.desc)
-		.limit(1)
-	).run(as_dict=True)
+	)
+	if until:
+		query = query.where(msg.creation < until)
+	rows = query.orderby(msg.creation, order=frappe.qb.desc).limit(1).run(as_dict=True)
 	return _iso(rows[0].creation) if rows else None
 
 
-def _skills(user: str, since) -> str | None:
+def _skills(user: str, since, until=None) -> str | None:
 	"""Re-resolve ``/slug`` invocations out of the user's own stored messages.
 
 	``invoked_skill_slugs`` stays the single authority on "did this message
@@ -181,13 +193,13 @@ def _skills(user: str, since) -> str | None:
 	"""
 	rows = frappe.get_all(
 		MSG,
-		filters={
-			"owner": user,
-			"role": "user",
-			"hidden": 0,
-			"content": ["like", "%/%"],
-			"creation": [">=", since],
-		},
+		filters=[
+			["owner", "=", user],
+			["role", "=", "user"],
+			["hidden", "=", 0],
+			["content", "like", "%/%"],
+			*_window(since, until),
+		],
 		fields=["content", "creation"],
 		order_by="creation desc",
 		limit_page_length=_SKILLS_SCAN_LIMIT,
@@ -205,7 +217,7 @@ def _skills(user: str, since) -> str | None:
 	return None
 
 
-def _macros(user: str, since) -> str | None:
+def _macros(user: str, since, until=None) -> str | None:
 	"""Macro runs are attributed by the run row's own ``owner``: every writer
 	hands ownership to the macro owner right after insert
 	(``jarvis.chat.macros.run_macro``, ``macro_scheduler``), the table carries a
@@ -222,21 +234,21 @@ def _macros(user: str, since) -> str | None:
 	return _iso(
 		frappe.db.get_value(
 			MACRO_RUN,
-			{"owner": user, "creation": [">=", since]},
+			[["owner", "=", user], *_window(since, until)],
 			"creation",
 			order_by="creation desc",
 		)
 	)
 
 
-def _triggers_connectors(user: str, since) -> str | None:
+def _triggers_connectors(user: str, since, until=None) -> str | None:
 	"""One chip for both automation surfaces. ``event_user`` is the user whose
 	document event fired the trigger (see the module docstring's caveat);
 	``Jarvis Connector Log.user`` is the caller of the connector."""
 	trigger = _iso(
 		frappe.db.get_value(
 			TRIGGER_ACTIVITY,
-			{"event_user": user, "creation": [">=", since]},
+			[["event_user", "=", user], *_window(since, until)],
 			"creation",
 			order_by="creation desc",
 		)
@@ -244,7 +256,7 @@ def _triggers_connectors(user: str, since) -> str | None:
 	connector = _iso(
 		frappe.db.get_value(
 			CONNECTOR_LOG,
-			{"user": user, "creation": [">=", since]},
+			[["user", "=", user], *_window(since, until)],
 			"creation",
 			order_by="creation desc",
 		)
@@ -252,7 +264,7 @@ def _triggers_connectors(user: str, since) -> str | None:
 	return _latest(trigger, connector)
 
 
-def _voice_chat(user: str, since) -> str | None:
+def _voice_chat(user: str, since, until=None) -> str | None:
 	"""Voice notes and mic dictation are one chip. Every ``Jarvis Voice Note``
 	kind counts (the doctype IS the notes feature; Text/Attachment/Link are the
 	same capture surface), matching the design's "filtered by owner" source.
@@ -264,7 +276,7 @@ def _voice_chat(user: str, since) -> str | None:
 	note = _iso(
 		frappe.db.get_value(
 			VOICE_NOTE,
-			{"owner": user, "creation": [">=", since]},
+			[["owner", "=", user], *_window(since, until)],
 			"creation",
 			order_by="creation desc",
 		)
@@ -274,7 +286,7 @@ def _voice_chat(user: str, since) -> str | None:
 		dictated = _iso(
 			frappe.db.get_value(
 				MSG,
-				{"owner": user, "via_voice": 1, "creation": [">=", since]},
+				[["owner", "=", user], ["via_voice", "=", 1], *_window(since, until)],
 				"creation",
 				order_by="creation desc",
 			)
@@ -282,7 +294,7 @@ def _voice_chat(user: str, since) -> str | None:
 	return _latest(note, dictated)
 
 
-def _wiki(user: str, since) -> str | None:
+def _wiki(user: str, since, until=None) -> str | None:
 	"""``sources`` is a JSON provenance array per page
 	(``jarvis.chat.wiki.append_source`` -> ``{date, kind, ref, user}``, newest
 	20 kept) and ``frappe.qb`` has no JSON-containment filter, so this scans in
@@ -298,6 +310,7 @@ def _wiki(user: str, since) -> str | None:
 	therefore a ``YYYY-MM-DD`` date, not a datetime, unlike the other sources.
 	"""
 	since_str = str(since)[:10]
+	until_str = str(until)[:10] if until else None
 	pages = frappe.get_all(
 		WIKI,
 		filters={"modified": [">=", since_str]},
@@ -319,6 +332,6 @@ def _wiki(user: str, since) -> str | None:
 			if not isinstance(entry, dict) or entry.get("user") != user:
 				continue
 			date = entry.get("date") or ""
-			if date >= since_str:
+			if date >= since_str and (not until_str or date < until_str):
 				latest = _latest(latest, date)
 	return latest

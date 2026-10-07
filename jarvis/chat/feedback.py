@@ -299,6 +299,27 @@ def _pulse_window_start(now=None):
 	return frappe.utils.add_to_date(now, days=-_PULSE_WINDOW_DAYS)
 
 
+def _pulse_window_end(now=None):
+	"""Exclusive end of the window: the 1st (00:00) of the current month while
+	the survey reviews the previous one, so this month's activity is not read as
+	last month's. None (open-ended) once the current month is the one reviewed."""
+	now = now or frappe.utils.now_datetime()
+	if now.day <= _PULSE_PREVIOUS_MONTH_DAYS:
+		return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+	return None
+
+
+def _stored_key_is_ahead(stored: str | None, current: str) -> bool:
+	"""True when ``stored`` is a later month than ``current``.
+
+	Days 1..10 compute the PREVIOUS month's key, so a key stored by the earlier
+	behaviour (which stamped the current month on those days) reads as ahead and
+	means "already answered", not "a different period to re-ask". Both are
+	``M:YYYY-MM`` (``PULSE_SURVEY_CADENCE`` is fixed), which sort
+	chronologically; any other prefix is not comparable and counts as not ahead."""
+	return bool(stored) and stored.startswith("M:") and current.startswith("M:") and stored > current
+
+
 def _pulse_period(now=None) -> tuple[str, str, bool]:
 	"""The month the survey reviews, as ``(period_key, badge_label, is_previous)``.
 
@@ -322,9 +343,9 @@ def _last_day_of_previous_month(now):
 	return now.replace(day=1) - timedelta(days=1)
 
 
-def _turns_since(user: str, since) -> int:
+def _turns_since(user: str, since, until=None) -> int:
 	"""Total settled turns across this user's OWN conversations last active
-	since ``since``.
+	in ``[since, until)`` (open-ended when ``until`` is None).
 
 	A real SUM of the maintained ``turn_count`` counter, not a proxy like "has a
 	conversation": a user who opened chats but never sent anything has not used
@@ -342,11 +363,14 @@ def _turns_since(user: str, since) -> int:
 	from frappe.query_builder.functions import Sum
 
 	conv = frappe.qb.DocType(CONV)
-	rows = (
+	query = (
 		frappe.qb.from_(conv)
 		.select(Sum(conv.turn_count).as_("total"))
 		.where((conv.owner == user) & (conv.last_active_at >= since))
-	).run(as_dict=True)
+	)
+	if until:
+		query = query.where(conv.last_active_at < until)
+	rows = query.run(as_dict=True)
 	return int((rows[0].total if rows else 0) or 0)
 
 
@@ -456,6 +480,8 @@ def pulse_context() -> dict:
 		["name", "pulse_last_period_key", "pulse_offer_count"],
 		as_dict=True,
 	)
+	if row and _stored_key_is_ahead(row.pulse_last_period_key, current_key):
+		return {"due": False}
 	same_period = bool(row) and row.pulse_last_period_key == current_key
 	# A key from an earlier period IS the rollover: the count restarts at 0
 	# rather than carrying last month's exhausted total forward.
@@ -463,14 +489,15 @@ def pulse_context() -> dict:
 	if offer_count >= PULSE_MAX_OFFERS:
 		return {"due": False}
 	since = _pulse_window_start(now)
-	if _turns_since(user, since) < 1:
+	until = _pulse_window_end(now)
+	if _turns_since(user, since, until) < 1:
 		return {"due": False}
 	from jarvis.chat.feature_usage import get_used_features
 
 	# May be empty, and the survey is still due: the stars and the open question
 	# are worth asking regardless. Only the chip question hides (spec: "hidden
 	# if empty"), which the dialog decides from this list.
-	features = get_used_features(user, since)
+	features = get_used_features(user, since, until)
 	# A user chatting before their settings row exists is normal (the row is
 	# created lazily by whichever surface needs it first), and an offer has to be
 	# recorded somewhere, so this is where the create belongs.
