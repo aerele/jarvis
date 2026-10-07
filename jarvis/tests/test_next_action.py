@@ -71,7 +71,14 @@ class TestApplyActionSuggestion(FrappeTestCase):
 				{"verb": "create", "doctype": doctype, "values": values, "conversation": conv, **extra}
 			)
 		)
-		self.addCleanup(lambda: frappe.delete_doc(doctype, r["name"], force=True, ignore_permissions=True))
+
+		def _remove():
+			# A submitted record cannot be deleted until it is cancelled.
+			if frappe.db.get_value(doctype, r["name"], "docstatus") == 1:
+				frappe.get_doc(doctype, r["name"]).cancel()
+			frappe.delete_doc(doctype, r["name"], force=True, ignore_permissions=True)
+
+		self.addCleanup(_remove)
 		return conv, r
 
 	def test_suggestion_returned_and_persisted_on_receipt(self):
@@ -109,7 +116,7 @@ class TestProposeNextAction(FrappeTestCase):
 		)
 
 	def _receipt(self, conv, doctype="Sales Order", name="SO-1", outcome="confirmed"):
-		frappe.get_doc(
+		receipt = frappe.get_doc(
 			{
 				"doctype": "Jarvis Chat Message",
 				"conversation": conv,
@@ -122,7 +129,10 @@ class TestProposeNextAction(FrappeTestCase):
 				"tool_status": "completed",
 				"action_outcome": outcome,
 			}
-		).insert(ignore_permissions=True)
+		)
+		# tool_status / action_outcome / tool_args are server-owned fields.
+		receipt.flags.jarvis_server_write = True
+		receipt.insert(ignore_permissions=True)
 
 	def _propose(self, *a, sug=None, run=None, perm=True, **kw):
 		with (
