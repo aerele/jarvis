@@ -34,6 +34,21 @@ frappe.query_reports["Sample"] = {
 """
 
 
+# Literal defaults are read; computed ones (a user default, today's date) are not.
+_DEFAULTS_JS = """
+frappe.query_reports["Defaults"] = {
+    filters: [
+        { fieldname: "company", fieldtype: "Link", options: "Company", default: frappe.defaults.get_user_default("Company") },
+        { fieldname: "valuation_field_type", fieldtype: "Select", options: "Currency\\nFloat", default: "Currency" },
+        { fieldname: "periodicity", fieldtype: "Select", default: 'Monthly' },
+        { fieldname: "range1", fieldtype: "Int", default: 30 },
+        { fieldname: "show_zero", fieldtype: "Check", default: 0 },
+        { fieldname: "to_date", fieldtype: "Date", default: frappe.datetime.get_today() },
+    ],
+};
+"""
+
+
 def _a_report() -> str:
 	return frappe.get_all("Report", limit=1, pluck="name")[0]
 
@@ -49,6 +64,20 @@ class TestParseJsFilters(FrappeTestCase):
 		self.assertEqual(by["account"]["fieldtype"], "MultiSelectList")
 		self.assertFalse(by["account"]["reqd"])
 		self.assertTrue(by["to_date"]["reqd"])
+
+	def test_reads_only_literal_defaults(self):
+		by = {f["fieldname"]: f["default"] for f in _parse_js_filters(_DEFAULTS_JS)}
+		self.assertEqual(
+			by,
+			{
+				"company": None,
+				"valuation_field_type": "Currency",
+				"periodicity": "Monthly",
+				"range1": 30,
+				"show_zero": 0,
+				"to_date": None,
+			},
+		)
 
 	def test_no_filters_array_returns_empty(self):
 		self.assertEqual(_parse_js_filters("frappe.query_reports['x'] = {};"), [])
@@ -82,6 +111,7 @@ class TestGetReportFilters(FrappeTestCase):
 		):
 			out = get_report_filters(_a_report())
 		self.assertEqual([f["fieldname"] for f in out["filters"]], ["fiscal_year"])
+		self.assertIsNone(out["filters"][0]["default"])
 		self.assertEqual(out["required"], ["fiscal_year"])
 
 	def test_unknown_report_raises(self):
