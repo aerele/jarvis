@@ -559,7 +559,12 @@ class TestExportRoundTrip(unittest.TestCase):
 		self._check(buf.getvalue())
 
 	def test_xlsxwriter_path(self):
-		import xlsxwriter
+		# Frappe 16 export path; xlsxwriter is a Frappe 16 dependency only, so
+		# a Frappe 15 bench (openpyxl export) skips it.
+		try:
+			import xlsxwriter
+		except ImportError:
+			self.skipTest("xlsxwriter is not installed (Frappe 15 bench)")
 
 		from jarvis._xlsx_charts import add_xlsxwriter_charts
 
