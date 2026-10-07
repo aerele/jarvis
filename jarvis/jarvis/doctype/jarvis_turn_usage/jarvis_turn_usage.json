@@ -92,14 +92,14 @@
    "fieldtype": "Int",
    "label": "Cache Read",
    "default": "0",
-   "description": "Row cacheRead from sessions.list (every provider). 0 when the row carried no cache keys; see cache_reported. A multi-call turn carries the last call's number."
+   "description": "Row cacheRead when sessions.list carries it. Absent as of openclaw 2026.9.3 (re-verified 2026-10-07), so 0 until the runtime exposes it; see cache_reported. A multi-call turn carries the last call's number."
   },
   {
    "fieldname": "cache_write",
    "fieldtype": "Int",
    "label": "Cache Write",
    "default": "0",
-   "description": "Row cacheWrite from sessions.list; same rules as cache_read."
+   "description": "Row cacheWrite when sessions.list carries it; same rules as cache_read (absent as of openclaw 2026.9.3)."
   },
   {
    "fieldname": "cache_reported",

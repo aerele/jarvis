@@ -563,11 +563,10 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 	def _gpt_row(self, **kw):
 		base = {
 			"modelProvider": "openai_compat",
-			"model": "gpt-5.6-terra",
+			"model": "jarvis-pool",
+			"agentRuntime": {"id": "openclaw", "source": "provider"},
 			"inputTokens": 21017,
 			"outputTokens": 69,
-			"cacheRead": 37376,
-			"cacheWrite": 0,
 			"totalTokens": 58393,
 			"totalTokensFresh": True,
 		}
@@ -576,16 +575,18 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 
 	def _cli_row(self, **kw):
 		base = {
-			"modelProvider": "claude-cli",
+			"modelProvider": "anthropic",
 			"model": "claude-opus-5",
+			"agentRuntime": {
+				"id": "claude-cli",
+				"cloudPlacementSupported": False,
+				"devicePlacementSupported": False,
+				"source": "model",
+			},
 			"inputTokens": 2,
 			"outputTokens": 2,
-			"cacheRead": 0,
-			"cacheWrite": 120197,
-			"totalTokens": 120199,
+			"totalTokens": 119688,
 			"totalTokensFresh": True,
-			"claudeCliSessionId": "ee8218f2-0000",
-			"cliSessionIds": {"claude-cli": "ee8218f2-0000"},
 		}
 		base.update(kw)
 		return base
@@ -605,9 +606,11 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 			as_dict=True,
 		)
 
-	def test_cache_columns_filled_and_quota_math_unchanged(self):
+	def test_cache_columns_filled_when_keys_present_and_quota_math_unchanged(self):
 		_make_session("agent:tu-cache", USER_A)
-		outcome = usage.record_turn_usage("agent:tu-cache", self._gpt_row(), reply_chars=5000)
+		outcome = usage.record_turn_usage(
+			"agent:tu-cache", self._gpt_row(cacheRead=37376, cacheWrite=0), reply_chars=5000
+		)
 		self.assertEqual(outcome, usage.USAGE_RECORDED)
 		r = self._turn_row("agent:tu-cache")
 		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (37376, 0, 1))
@@ -624,17 +627,17 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		r = self._turn_row("agent:tu-cache0")
 		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (0, 0, 1))
 
-	def test_cache_zero_and_unreported_when_keys_absent(self):
+	def test_cache_zero_and_unreported_when_keys_absent_as_in_sessions_list_today(self):
 		_make_session("agent:tu-nocache", USER_A)
-		row = self._gpt_row(inputTokens=5, outputTokens=5)
-		del row["cacheRead"], row["cacheWrite"]
-		usage.record_turn_usage("agent:tu-nocache", row)
+		usage.record_turn_usage("agent:tu-nocache", self._gpt_row(inputTokens=5, outputTokens=5))
 		r = self._turn_row("agent:tu-nocache")
 		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (0, 0, 0))
 
 	def test_claude_cli_output_estimated_from_reply_chars(self):
 		_make_session("agent:tu-cli", USER_A)
-		outcome = usage.record_turn_usage("agent:tu-cli", self._cli_row(), reply_chars=2000)
+		outcome = usage.record_turn_usage(
+			"agent:tu-cli", self._cli_row(cacheRead=0, cacheWrite=120197), reply_chars=2000
+		)
 		self.assertEqual(outcome, usage.USAGE_RECORDED)
 		r = self._turn_row("agent:tu-cli")
 		self.assertEqual((r.tokens_in, r.tokens_out, r.tokens_out_estimated), (2, 500, 1))
@@ -643,10 +646,10 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "month_tokens"), 502)
 		self.assertEqual(frappe.db.get_value(SESSION, {"session_key": "agent:tu-cli"}, "output_tokens"), 500)
 
-	def test_claude_cli_marker_via_claude_cli_session_id_only(self):
+	def test_claude_cli_fallback_marker_via_claude_cli_session_id(self):
 		_make_session("agent:tu-cli2", USER_A)
-		row = self._cli_row()
-		del row["cliSessionIds"]
+		row = self._cli_row(claudeCliSessionId="ee8218f2-0000")
+		del row["agentRuntime"]
 		usage.record_turn_usage("agent:tu-cli2", row, reply_chars=401)
 		r = self._turn_row("agent:tu-cli2")
 		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (101, 1))  # ceil(401 / 4)
@@ -665,11 +668,23 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 
 	def test_claude_model_name_alone_is_not_a_cli_marker(self):
 		_make_session("agent:tu-api-claude", USER_A)
-		row = self._cli_row(modelProvider="anthropic")
-		del row["claudeCliSessionId"], row["cliSessionIds"]
+		row = self._cli_row(agentRuntime={"id": "openclaw", "source": "provider"})
 		usage.record_turn_usage("agent:tu-api-claude", row, reply_chars=2000)
 		r = self._turn_row("agent:tu-api-claude")
 		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (2, 0))
+
+	def test_row_without_agent_runtime_or_fallback_keys_never_estimated(self):
+		_make_session("agent:tu-no-rt", USER_A)
+		row = self._cli_row()
+		del row["agentRuntime"]
+		usage.record_turn_usage("agent:tu-no-rt", row, reply_chars=2000)
+		r = self._turn_row("agent:tu-no-rt")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (2, 0))
+
+	def test_agent_runtime_string_form_is_tolerated(self):
+		self.assertTrue(usage.is_claude_cli_row({"agentRuntime": "claude-cli"}))
+		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": "openclaw"}))
+		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": None}))
 
 	def test_no_reply_chars_means_no_estimate_for_claude_cli(self):
 		_make_session("agent:tu-cli-none", USER_A)
