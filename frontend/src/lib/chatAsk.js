@@ -12,7 +12,7 @@ export const ASK_RE = /```jarvis-ask[ \t]*\n([\s\S]*?)```/;
 
 // Types that take a typed/picked VALUE rather than option buttons. An ask made
 // only of these renders as a compact mini-form (no numbered badges).
-export const ASK_FIELD_TYPES = ["date", "datetime", "link", "text"];
+export const ASK_FIELD_TYPES = ["date", "datetime", "link", "select", "text"];
 
 /**
  * Parse the first ```jarvis-ask block out of a message.
@@ -32,11 +32,18 @@ export function parseAsk(content) {
 				let type = q.type === "boolean" ? "yesno" : q.type;
 				if (!["single", "multi", "yesno", ...ASK_FIELD_TYPES].includes(type))
 					type = "single";
+				// A Select field's choice list can be long; only the button types stay at 8.
+				const cap = type === "select" ? 200 : 8;
+				const options = Array.isArray(q.options)
+					? q.options.map(String).slice(0, cap)
+					: [];
+				// A dropdown with nothing to pick from is just a typed answer.
+				if (type === "select" && !options.length) type = "text";
 				return {
 					q: String(q.q || q.question || "").trim(),
 					type,
 					// yesno may carry exactly 2 custom labels (e.g. ["Approve","Reject"]).
-					options: Array.isArray(q.options) ? q.options.map(String).slice(0, 8) : [],
+					options,
 					doctype: type === "link" ? String(q.doctype || q.link || "").trim() : "",
 				};
 			})

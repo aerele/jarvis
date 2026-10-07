@@ -58,6 +58,16 @@
 				placeholder="Type your answer…"
 				@keydown.enter.prevent
 			/>
+			<!-- select: a Select field's fixed choices -->
+			<Select
+				v-else-if="q.type === 'select'"
+				class="w-full"
+				:options="q.options.map((o) => ({ label: o, value: o }))"
+				:model-value="sel[qi] || ''"
+				:disabled="answered"
+				placeholder="Select an option"
+				@update:model-value="pickSingle(qi, $event)"
+			/>
 			<!-- link: search a record of the given DocType -->
 			<div v-else-if="q.type === 'link'" class="jv-ask-link">
 				<input
@@ -128,6 +138,7 @@
 // identity) on every stream tick — resetting on a `spec` watcher would wipe
 // half-made picks. Remounting on a new message is what clears the draft.
 import { ref, computed } from "vue";
+import { Select } from "frappe-ui";
 import { searchLink } from "@/api";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { ASK_FIELD_TYPES, isAskReady, askAnswerText } from "@/lib/chatAsk";
@@ -144,7 +155,7 @@ const props = defineProps({
 // The formatted answer text; the host sends it as an ordinary user message.
 const emit = defineEmits(["submit"]);
 
-const sel = ref({}); // qIdx -> string (single/yesno/date/datetime/text/link) | string[] (multi)
+const sel = ref({}); // qIdx -> string (single/yesno/date/datetime/text/select/link) | string[] (multi)
 const other = ref({}); // qIdx -> free-text (option types only)
 const link = ref({}); // qIdx -> { q, items, open } for link-type record search
 // Locks the card once an answer has actually been DISPATCHED (not just typed).
