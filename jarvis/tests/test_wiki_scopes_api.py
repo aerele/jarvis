@@ -192,6 +192,16 @@ class TestWikiCapsAndLanguage(_WikiScopeFixture):
 		self.assertEqual(set(caps["creatable_scopes"]), {"Org", "Role", "User"})
 		self.assertIn(TEST_ROLE, caps["manageable_roles"])
 
+	def test_skill_reviewer_role_not_offered(self):
+		from jarvis.permissions import JARVIS_SKILL_REVIEWER_ROLE
+
+		if not frappe.db.exists("Role", JARVIS_SKILL_REVIEWER_ROLE):
+			frappe.get_doc(
+				{"doctype": "Role", "role_name": JARVIS_SKILL_REVIEWER_ROLE, "desk_access": 1}
+			).insert(ignore_permissions=True)
+		frappe.set_user("Administrator")
+		self.assertNotIn(JARVIS_SKILL_REVIEWER_ROLE, wiki.get_wiki_caps()["manageable_roles"])
+
 	def test_manager_with_no_targetable_roles_hides_role_scope(self):
 		# A wiki manager (here a Jarvis Admin) who holds only blanket roles has an
 		# empty manageable_roles: JARVIS_ADMIN_ROLE / JARVIS_USER_ROLE / "Desk User"
