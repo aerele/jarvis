@@ -8,7 +8,12 @@ export function replyBarParts(m) {
 	return { showBar, showCopy: showBar && !m.streaming };
 }
 
-/** Stamp the client time of the latest delta unless the server already has one. */
+/** Stamp the client time of the latest delta (always: a resumed row has a server creation too). */
 export function stampDeltaTime(m, now = Date.now()) {
-	if (!m.modified && !m.creation) m.creation_browser = now;
+	m.creation_browser = now;
+}
+
+/** While a reply streams its time is the latest delta's; the server value rules once settled. */
+export function useClientStamp(m) {
+	return !!m && !!m.streaming && !!m.creation_browser;
 }

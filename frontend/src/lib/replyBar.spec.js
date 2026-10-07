@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { replyBarParts, stampDeltaTime } from "./replyBar";
+import { replyBarParts, stampDeltaTime, useClientStamp } from "./replyBar";
 
 describe("replyBarParts", () => {
 	it("shows the bar (time) while streaming but not the copy button", () => {
@@ -25,12 +25,18 @@ describe("stampDeltaTime", () => {
 		stampDeltaTime(m, 2500);
 		expect(m.creation_browser).toBe(2500);
 	});
-	it("leaves a row that already has a server time alone", () => {
-		const m = { modified: "2026-10-07 10:00:00" };
-		stampDeltaTime(m, 1000);
-		expect(m.creation_browser).toBeUndefined();
-		const n = { creation: "2026-10-07 10:00:00" };
-		stampDeltaTime(n, 1000);
-		expect(n.creation_browser).toBeUndefined();
+	it("stamps a resumed row that already has a server creation", () => {
+		const m = { creation: "2026-10-07 10:00:00", streaming: true };
+		stampDeltaTime(m, 3000);
+		expect(m.creation_browser).toBe(3000);
+		expect(useClientStamp(m)).toBe(true);
+	});
+});
+
+describe("useClientStamp", () => {
+	it("prefers the client time only while streaming", () => {
+		expect(useClientStamp({ streaming: true, creation_browser: 1 })).toBe(true);
+		expect(useClientStamp({ streaming: false, creation_browser: 1 })).toBe(false);
+		expect(useClientStamp({ streaming: true })).toBe(false);
 	});
 });
