@@ -155,21 +155,22 @@ class _TurnStateTestCase(FrappeTestCase):
 # --------------------------------------------------------------------------- #
 
 
-class TestUnfinishedTurnAfter(_TurnStateTestCase):
-	"""The retry's shared check for an unfinished turn of a conversation."""
+class TestUnfinishedTurn(_TurnStateTestCase):
+	"""The shared check for an unfinished turn of a conversation (sends, deletes, retries)."""
 
-	def test_creation_bound_exclusion_and_terminal_states(self):
+	def test_filters(self):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv, 1)
-		self._mk_turn(conv, "uta-old", seed, "queued")
+		self._mk_turn(conv, "ut-old", seed, "queued")
 		mark = frappe.db.get_value(MSG, seed, "creation")
-		self.assertTrue(ts.unfinished_turn_after(conv, None), "None counts every turn")
-		self.assertTrue(ts.unfinished_turn_after(conv, mark), "created after the user message")
-		later = frappe.db.get_value(TURN, "uta-old", "creation")
-		self.assertFalse(ts.unfinished_turn_after(conv, later), "nothing created after it")
-		self.assertFalse(ts.unfinished_turn_after(conv, None, exclude_run_id="uta-old"))
-		frappe.db.set_value(TURN, "uta-old", "state", "errored")
-		self.assertFalse(ts.unfinished_turn_after(conv, None), "a terminal turn does not count")
+		later = frappe.db.get_value(TURN, "ut-old", "creation")
+		self.assertEqual(ts.unfinished_turn_state(conv), "queued", "no filter: every turn")
+		self.assertEqual(ts.unfinished_turn(conv, created_after=mark), ("ut-old", "queued"))
+		self.assertIsNone(ts.unfinished_turn(conv, created_after=later), "nothing created after it")
+		self.assertIsNone(ts.unfinished_turn(conv, exclude_run_id="ut-old"))
+		self.assertIsNone(ts.unfinished_turn(conv, states=("streaming",)))
+		frappe.db.set_value(TURN, "ut-old", "state", "errored")
+		self.assertIsNone(ts.unfinished_turn_state(conv), "a terminal turn does not count")
 
 
 class TestLinearPathWinAndReplay(_TurnStateTestCase):
