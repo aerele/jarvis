@@ -314,7 +314,7 @@ def _stored_key_is_ahead(stored: str | None, current: str) -> bool:
 
 	Days 1..10 compute the PREVIOUS month's key, so a key stored by the earlier
 	behaviour (which stamped the current month on those days) reads as ahead and
-	means "already answered", not "a different period to re-ask". Both are
+	means "already offered or answered for a later period", not "a different period to re-ask". Both are
 	``M:YYYY-MM`` (``PULSE_SURVEY_CADENCE`` is fixed), which sort
 	chronologically; any other prefix is not comparable and counts as not ahead."""
 	return bool(stored) and stored.startswith("M:") and current.startswith("M:") and stored > current
@@ -345,7 +345,8 @@ def _last_day_of_previous_month(now):
 
 def _turns_since(user: str, since, until=None) -> int:
 	"""Total settled turns across this user's OWN conversations last active
-	in ``[since, until)`` (open-ended when ``until`` is None).
+	in ``[since, until)`` (open-ended when ``until`` is None). A bounded window
+	is gated on the user's own messages instead - see ``_user_messages_between``.
 
 	A real SUM of the maintained ``turn_count`` counter, not a proxy like "has a
 	conversation": a user who opened chats but never sent anything has not used
@@ -363,15 +364,43 @@ def _turns_since(user: str, since, until=None) -> int:
 	from frappe.query_builder.functions import Sum
 
 	conv = frappe.qb.DocType(CONV)
-	query = (
+	if until:
+		return _user_messages_between(user, since, until)
+	rows = (
 		frappe.qb.from_(conv)
 		.select(Sum(conv.turn_count).as_("total"))
 		.where((conv.owner == user) & (conv.last_active_at >= since))
-	)
-	if until:
-		query = query.where(conv.last_active_at < until)
-	rows = query.run(as_dict=True)
+	).run(as_dict=True)
 	return int((rows[0].total if rows else 0) or 0)
+
+
+def _user_messages_between(user: str, since, until) -> int:
+	"""1 if the user sent a message in ``[since, until)``, else 0 (an existence
+	check, which is all the gate needs).
+
+	Bounded windows cannot use ``last_active_at``: it is one value per
+	conversation, bumped on every message, so a user who chatted all of last
+	month in one long-lived conversation and wrote again this month would read
+	as having no last-month activity. Messages own their ``creation``; the join
+	runs on the indexed ``conversation`` link and stops at the first row.
+	``hidden`` rows are continuations the user did not type."""
+	msg = frappe.qb.DocType(MSG)
+	conv = frappe.qb.DocType(CONV)
+	rows = (
+		frappe.qb.from_(msg)
+		.inner_join(conv)
+		.on(msg.conversation == conv.name)
+		.select(msg.name)
+		.where(
+			(conv.owner == user)
+			& (msg.role == "user")
+			& (msg.hidden == 0)
+			& (msg.creation >= since)
+			& (msg.creation < until)
+		)
+		.limit(1)
+	).run()
+	return 1 if rows else 0
 
 
 def _store_pulse_state(settings_name: str, period_key: str, offer_count: int) -> None:
@@ -480,6 +509,7 @@ def pulse_context() -> dict:
 		["name", "pulse_last_period_key", "pulse_offer_count"],
 		as_dict=True,
 	)
+	# Offered or answered for a later period already (see _stored_key_is_ahead).
 	if row and _stored_key_is_ahead(row.pulse_last_period_key, current_key):
 		return {"due": False}
 	same_period = bool(row) and row.pulse_last_period_key == current_key
