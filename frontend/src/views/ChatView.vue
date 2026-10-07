@@ -9674,19 +9674,6 @@ async function send(textArg, resendAck) {
 	// one-shot _prefillSendContext is cleared after the send is accepted, below,
 	// so a rejected send keeps it armed for retry.)
 	if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
-	// Connector-focus pill: carries every turn while armed (not one-shot like
-	// groundWiki/triggerMode above), so a rejection/resend needs no special
-	// handling — connectorFocus.value itself is untouched by a failed send.
-	// Captured now (not read again after the POST) so a clear mid-flight can't
-	// change what this SPECIFIC turn asked for.
-	const _sentFocus = retryBubble
-		? retryBubble.sendRequest.context?.focus_connector
-		: connectorFocus.value;
-	if (_sentFocus)
-		sendCtx = {
-			...(sendCtx || {}),
-			focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
-		};
 	// The confirmation cards currently on screen, in the order the numbers are
 	// shown, so a typed "confirm 2" binds to the card the user actually sees.
 	// Deliberately confirm-only (step-by-step): send_message forwards these
@@ -9748,33 +9735,6 @@ async function send(textArg, resendAck) {
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 	try {
-<<<<<<< HEAD
-		// The conversation we're sending FROM. The user may switch to another chat
-		// while this POST is in flight, so all post-send reconciliation gates on
-		// "still on the chat we sent from" — never yank them back to this one.
-		const sentFrom = currentId.value || "";
-		// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
-		// successful send, so a rejected send (and its Retry) keeps grounding armed.
-		const groundWiki = groundNextTurn.value;
-		let sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
-		// Create → Create a trigger: keep the triggers page marker on every send so
-		// the agent stays in trigger-building mode through the whole Q&A. (The
-		// one-shot _prefillSendContext is cleared after the send is accepted, below,
-		// so a rejected send keeps it armed for retry.)
-		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
-		// The confirmation cards currently on screen, in the order the numbers are
-		// shown, so a typed "confirm 2" binds to the card the user actually sees.
-		// Deliberately confirm-only (step-by-step): send_message forwards these
-		// tokens to confirm_tool server-side, never approve_and_run - a typed
-		// go-ahead can only ever resolve a card one confirm at a time. Approve & run
-		// is reachable ONLY through the card's own button (approveAndRunPending),
-		// by design (the typed shortcut pins to step-by-step, §3.5).
-		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
-		// A chat started from the home screen has no conversation to save a model or
-		// thinking pick on, so the first send carries it.
-		const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
-=======
->>>>>>> c409b5a (fix(chat): preserve desktop request payloads when retrying)
 		const r = await api.sendMessage(
 			sendRequest.conversation,
 			sendRequest.text,
@@ -9956,14 +9916,6 @@ async function send(textArg, resendAck) {
 			// Same helper newChat() uses. Only currentId + the URL below stay gated on visibility.
 			if (_sentScope === _NEW_CHAT_SCOPE && r.conversation_id !== _NEW_CHAT_SCOPE)
 				_promoteNewChatScope(r.conversation_id);
-<<<<<<< HEAD
-=======
-			// Same visibility-independent reasoning as the promotion above: the pick
-			// this turn actually carried belongs to the conversation the server just
-			// created/used for it, whether or not that's still on screen.
-			if (sendRequest.context?.focus_connector)
-				_saveConnectorFocusFor(r.conversation_id, sendRequest.context.focus_connector);
->>>>>>> c409b5a (fix(chat): preserve desktop request payloads when retrying)
 			// Mirror the server's flag from the send response itself (no reload needed).
 			// Only when the response carries it: a typed approval returns the confirmed
 			// form without the key, and that must not unlock an auto-mode chat.

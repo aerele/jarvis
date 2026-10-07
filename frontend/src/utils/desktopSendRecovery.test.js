@@ -51,7 +51,6 @@ function harness() {
 		store: { conversations: [{ name: "A" }], loadConversations: noop },
 		route: { params: { id: "A" } },
 		router: { replace: noop },
-		_saveConnectorFocusFor: noop,
 		_checkPulseOnce: noop,
 		onTypedConfirmResolved: async () => {},
 		api: {
@@ -80,7 +79,6 @@ function harness() {
 		autoView: { visible: true, locked: false, on: true },
 		groundNextTurn: false,
 		triggerMode: false,
-		connectorFocus: { key: "erp", label: "ERP" },
 		visiblePendingActions: [{ token: "approval-1" }],
 		modelOverride: "model-a",
 		thinkingOverride: "high",
@@ -120,7 +118,6 @@ for (const [label, text, files] of [
 		const original = h.calls[0];
 		h.s.input.value = "Newer draft";
 		h.s.pendingFiles.value = [{ file_url: "/private/files/new.pdf", file_name: "new.pdf" }];
-		h.s.connectorFocus.value.key = "different";
 		h.s.visiblePendingActions.value = [{ token: "different" }];
 		h.f.setPrefill({ doctype: "Customer", name: "Other" });
 		h.s.autoView.value.on = false;
@@ -268,7 +265,7 @@ test("successful retry consumes its original unchanged one-shot context", async 
 	h.s.input.value = "Next question";
 	await h.f.send();
 	assert.equal(h.calls[1][4].doctype, "Sales Invoice");
-	assert.equal(h.calls[2][4].doctype, undefined);
+	assert.equal(h.calls[2][4]?.doctype, undefined);
 	assert.deepEqual(h.errors, []);
 });
 
