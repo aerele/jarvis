@@ -11,7 +11,7 @@ Pending transitions are queued in Redis and ride the next heartbeat to admin
 (``drain_signals``). Nothing here sends a completion or raises into a caller that is serving a
 chat turn or the heartbeat.
 
-A lone OpenAI subscription served by openclaw directly (empty ``models[]``, flat ``llm_*``
+A lone OpenAI subscription served by the agent runtime directly (empty ``models[]``, flat ``llm_*``
 fields) has no ``account_ref``; both planes key it ``direct:openai``.
 
 No ``frappe.db.commit()``: the callers' own transaction (scheduler job, turn worker) commits.

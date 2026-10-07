@@ -162,7 +162,7 @@ const bareModel = (id) =>
     .split("/")
     .pop();
 
-// A failed turn's row has no `model` (only answered turns are stamped), but openclaw writes
+// A failed turn's row has no `model` (only answered turns are stamped), but the agent runtime writes
 // "<provider>/<model> request failed (...)" into the error, so read the model from there.
 const FAILED_MODEL =
   /^[\s\p{Extended_Pictographic}\uFE0F]*[\w.-]+\/([\w.:+-]+) request failed/u;
