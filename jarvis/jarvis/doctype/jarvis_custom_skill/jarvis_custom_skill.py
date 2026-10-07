@@ -223,8 +223,9 @@ def _batch_child_values(names: list, child_doctype: str, value_field: str) -> di
 def _refuse_an_armed_macro_write():
 	"""An armed macro's uncarded write never changes a skill: its steps apply skills,
 	and a run that rewrote one would change what its own later runs follow. The gate
-	parks such a call for a card (``api._writes_a_skill``); this refuses one it could
-	not read (a Server Script, a whitelisted method that saves a skill)."""
+	parks such a call for a card (``api._writes_skill_config``); this refuses one it
+	could not read (a Server Script, a whitelisted method that saves a skill).
+	``permissions.refuse_unseen_change`` is the same rule for every uncarded mode."""
 	if frappe.flags.get(ARMED_MACRO_WRITE_FLAG):
 		frappe.throw(
 			_("A macro that runs without asking for confirmation cannot change a skill."),
@@ -643,9 +644,11 @@ class JarvisCustomSkill(NotRenamable, Document):
 			return
 		# Never from a tool call, whoever the chat belongs to: the assistant would be
 		# deciding what it may later do unasked. (A confirmed card is a tool call too.)
+		# A job a tool call queued carries the guard's scope, not the dispatch depth.
+		from jarvis.tools import _write_risk
 		from jarvis.tools.registry import in_tool_dispatch
 
-		if in_tool_dispatch():
+		if in_tool_dispatch() or _write_risk.in_guarded_call():
 			frappe.throw(
 				_("Approve & run is switched on from the skill's own page, not from chat."),
 				frappe.PermissionError,
