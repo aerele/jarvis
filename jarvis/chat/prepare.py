@@ -493,14 +493,18 @@ def _prepare_error(
 
 
 def _load_dispatch_raw(run_id: str) -> dict:
-	raw = frappe.db.get_value(TURN, run_id, "dispatch_payload")
+	return parse_dispatch(frappe.db.get_value(TURN, run_id, "dispatch_payload")) or {}
+
+
+def parse_dispatch(raw) -> dict | None:
+	"""A stored dispatch_payload: {} when empty, None when it is not a JSON object."""
 	if not raw:
 		return {}
 	try:
 		parsed = json.loads(raw)
-		return parsed if isinstance(parsed, dict) else {}
 	except Exception:
-		return {}
+		return None
+	return parsed if isinstance(parsed, dict) else None
 
 
 def _load_context(run_id: str):

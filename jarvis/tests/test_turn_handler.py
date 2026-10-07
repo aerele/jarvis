@@ -554,7 +554,10 @@ class TestNoteEmptyReply(FrappeTestCase):
 			with self.subTest(variant=variant):
 				lines = self._lines(err, code)
 				self.assertEqual(len(lines), 1)
-				self.assertTrue(lines[0][0].startswith("empty_reply run_id="))
+				self.assertEqual(
+					lines[0][0],
+					"empty_reply run_id=%s conversation=%s variant=%s last_total_tokens=%s context_pct=%s",
+				)
 				self.assertEqual(lines[0][1:], ("r1", "no-such-conv", variant, "", ""))
 
 	def test_long_whitespace_is_read_in_linear_time(self):

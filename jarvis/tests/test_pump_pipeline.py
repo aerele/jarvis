@@ -37,6 +37,7 @@ import frappe
 from jarvis.chat import admission, finalize, prepare, pump, settlement
 from jarvis.chat import turn_state as ts
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
+from jarvis.tests._write_conflicts import set_value_conflict
 from jarvis.tests.test_pump import TEST_USER, _PumpTestCase, _Recorder
 
 CONV = "Jarvis Conversation"
@@ -432,23 +433,38 @@ class TestPanel4Chokepoint(_PipelineCase):
 		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
 		frappe.db.set_value(TURN, "pmp_failed_w", "assistant_message", amsg)
 		frappe.db.commit()
-		real_set_value = frappe.db.set_value
-
-		def set_value(doctype, name, field=None, *args, **kwargs):
-			if doctype == CONV and field == "last_active_at":
-				raise frappe.QueryDeadlockError("1020 record has changed")
-			return real_set_value(doctype, name, field, *args, **kwargs)
-
 		woken = _Recorder()
 		with (
 			self._pump_on(ensure=woken),
 			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
-			patch.object(frappe.db, "set_value", side_effect=set_value),
+			set_value_conflict(CONV, "last_active_at"),
 		):
 			res = chat_api.retry_message(amsg)
 		self.assertTrue(res["ok"], res)
 		self.assertEqual(self._state(res["run_id"]), "queued")
 		self.assertEqual(woken.count, 1, "the pump was woken")
+
+	def test_a_pump_retry_takes_the_bound_seed_and_waits_for_an_older_turn(self):
+		# uA's turn, then uB's turn, then uA's reply fails: prev_user (uB) is not the seed.
+		from jarvis.chat import api as chat_api
+
+		conv = self._mk_conv()
+		ua = self._mk_msg(conv, content="first")
+		self._mk_turn(conv, "pmp_a", ua, "errored")
+		ub = self._mk_msg(conv, content="second")
+		self._mk_turn(conv, "pmp_b", ub, "queued")
+		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
+		frappe.db.set_value(TURN, "pmp_a", "assistant_message", amsg)
+		frappe.db.commit()
+		gate = patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None})
+		with self._pump_on(), gate:
+			waiting = chat_api.retry_message(amsg)
+			frappe.db.set_value(TURN, "pmp_b", "state", "done")
+			frappe.db.commit()
+			res = chat_api.retry_message(amsg)
+		self.assertIn("in progress", waiting["reason"])
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._val(res["run_id"], "seed_message"), ua)
 
 	def test_placeholder_seq_monotonic_under_conv_lock(self):
 		conv = self._mk_conv()
