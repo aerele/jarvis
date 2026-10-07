@@ -13,7 +13,7 @@ from __future__ import annotations
 import frappe
 from frappe import _
 from frappe.query_builder import Order
-from frappe.query_builder.functions import Count
+from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_to_date, cint, getdate, now_datetime
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
@@ -27,6 +27,7 @@ from jarvis.triggers.engine import (
 	clear_cache,
 	eval_context,
 )
+from jarvis.triggers.lookups import LOOKUP_MARKER, lookup_marker
 
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
@@ -43,6 +44,7 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"script_body",
 	"llm_instruction",
 	"llm_daily_cap",
+	"llm_allow_lookups",
 	"description",
 	"source_conversation",
 }
@@ -283,6 +285,7 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"action_type": doc.action_type,
 		"server_script": doc.server_script or "",
 		"llm_daily_cap": cint(doc.llm_daily_cap),
+		"llm_allow_lookups": cint(doc.llm_allow_lookups),
 		"description": doc.description or "",
 		"source_conversation": doc.source_conversation or "",
 		"owner": doc.owner,
@@ -608,6 +611,24 @@ def _activity_query(search: str, f: dict):
 	return query
 
 
+def _hide_lookup_rows(query):
+	"""Withhold findings that were built from lookups. Lookups read as the
+	trigger OWNER, so what they surface can exceed what the target record's
+	readers may see. Non-managers therefore see such a row only if they are the
+	owner whose permissions that run read with.
+
+	``run_llm_action`` starts the ``detail`` of every lookup-enabled run with
+	``[lookups:<owner>]``. Matching that PREFIX (the engine truncates the tail,
+	never the head) keeps rows hidden after the flag is turned off or the
+	trigger is reassigned or deleted, with no extra column. ``detail`` is only
+	filtered on here, never selected."""
+	a = frappe.qb.DocType(ACTIVITY)
+	detail = IfNull(a.detail, "")
+	hidden = detail.like(f"{_lk(LOOKUP_MARKER)}%")
+	visible = ~hidden | detail.like(f"{_lk(lookup_marker(frappe.session.user))}%")
+	return query.where(visible)
+
+
 def _can_read_target(row) -> bool:
 	"""Visibility axis for non-admins: read access on the row's target doc.
 	Any error (deleted doc, broken meta) hides the row."""
@@ -673,6 +694,8 @@ def list_activity_page(
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _ACTIVITY_FILTERS)
 	query = _activity_query(search, f)
+	if not _can_manage():
+		query = _hide_lookup_rows(query)
 	order_col, order_dir = _sort(sort_field, sort_dir, _ACTIVITY_SORTABLE, "creation")
 	ordered = (
 		query.select(*_ACTIVITY_FIELDS)
