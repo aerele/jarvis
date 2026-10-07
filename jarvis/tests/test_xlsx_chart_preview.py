@@ -6,14 +6,18 @@ import datetime
 import io
 import unittest
 import zipfile
+from unittest import mock
 
 import openpyxl
-from openpyxl.chart import AreaChart, BarChart, LineChart, PieChart, Reference
+from openpyxl.chart import AreaChart, BarChart, LineChart, PieChart, Reference, ScatterChart
 
+from jarvis.chat import xlsx_charts
 from jarvis.chat.xlsx_charts import (
 	MAX_CHARTS_PER_SHEET,
 	MAX_CHARTS_TOTAL,
+	MAX_PARTS_TOTAL,
 	MAX_POINTS,
+	MAX_SERIES,
 	extract_charts,
 	preview_cell,
 )
@@ -266,6 +270,154 @@ class TestHardening(unittest.TestCase):
 			},
 		)
 		self.assertEqual(extract_charts(src), [])
+
+
+_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_OD = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _rels_xml(entries):
+	body = "".join(f'<Relationship Id="{i}" Type="{_OD}/{t}" Target="{p}"/>' for i, t, p in entries)
+	return f'<?xml version="1.0"?><Relationships xmlns="{_REL_NS}">{body}</Relationships>'.encode()
+
+
+def _scatter_part():
+	"""chart1.xml of a scatter chart: a type that never yields a spec."""
+	wb, ws = _book()
+	chart = ScatterChart()
+	chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=True)
+	ws.add_chart(chart, "F2")
+	with zipfile.ZipFile(io.BytesIO(_bytes(wb))) as z:
+		return z.read("xl/charts/chart1.xml")
+
+
+def _crafted(sheets, drawings_per_sheet, charts_per_drawing, distinct):
+	"""A workbook of ``sheets`` sheets, each pointing at ``drawings_per_sheet``
+	drawings that each reference ``charts_per_drawing`` scatter charts. With
+	``distinct`` every sheet/drawing/chart is its own part, else all repeat one."""
+	chart = _scatter_part()
+	parts = {}
+	wb_rels, sheet_tags = [], []
+	for si in range(sheets):
+		n = si + 1 if distinct else 1
+		wb_rels.append((f"rId{si + 1}", "worksheet", f"worksheets/sheet{n}.xml"))
+		sheet_tags.append(f'<sheet name="S{si}" sheetId="{si + 1}" r:id="rId{si + 1}"/>')
+		parts[f"xl/worksheets/sheet{n}.xml"] = b"<worksheet/>"
+		drawings = [f"/xl/drawings/drawing{n if distinct else 1}.xml"] * drawings_per_sheet
+		parts[f"xl/worksheets/_rels/sheet{n}.xml.rels"] = _rels_xml(
+			[(f"d{i}", "drawing", d) for i, d in enumerate(drawings)]
+		)
+		parts[f"xl/drawings/drawing{n if distinct else 1}.xml"] = (
+			'<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+			f'xmlns:c="{xlsx_charts._NS["c"]}" xmlns:r="{_OD}">'
+			+ "".join(f'<c:chart r:id="c{i}"/>' for i in range(charts_per_drawing))
+			+ "</xdr:wsDr>"
+		).encode()
+		parts[f"xl/drawings/_rels/drawing{n if distinct else 1}.xml.rels"] = _rels_xml(
+			[
+				(f"c{i}", "chart", f"/xl/charts/chart{n if distinct else 1}_{i if distinct else 0}.xml")
+				for i in range(charts_per_drawing)
+			]
+		)
+		for i in range(charts_per_drawing):
+			parts[f"xl/charts/chart{n if distinct else 1}_{i if distinct else 0}.xml"] = chart
+	parts["xl/workbook.xml"] = (
+		f'<workbook xmlns="{xlsx_charts._NS["s"]}" xmlns:r="{_OD}"><sheets>{"".join(sheet_tags)}</sheets></workbook>'
+	).encode()
+	parts["xl/_rels/workbook.xml.rels"] = _rels_xml(wb_rels)
+	out = io.BytesIO()
+	with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+		for name, data in parts.items():
+			z.writestr(name, data)
+	return out.getvalue()
+
+
+class _Counting:
+	"""Count XML parses and chart-spec builds done for one extract_charts call."""
+
+	def __enter__(self):
+		self.parses = self.specs = 0
+		real_parse, real_spec = xlsx_charts.ET.fromstring, xlsx_charts._chart_spec
+
+		def parse(*a, **k):
+			self.parses += 1
+			return real_parse(*a, **k)
+
+		def spec(*a, **k):
+			self.specs += 1
+			return real_spec(*a, **k)
+
+		self._patches = [
+			mock.patch.object(xlsx_charts.ET, "fromstring", parse),
+			mock.patch.object(xlsx_charts, "_chart_spec", spec),
+		]
+		for p in self._patches:
+			p.start()
+		return self
+
+	def __exit__(self, *exc):
+		for p in self._patches:
+			p.stop()
+
+
+class TestParseBudget(unittest.TestCase):
+	def test_repeated_references_parse_each_part_once(self):
+		src = _crafted(sheets=400, drawings_per_sheet=200, charts_per_drawing=10, distinct=False)
+		with _Counting() as n:
+			self.assertEqual(extract_charts(src), [])
+		# workbook, its rels, sheet rels, drawing, drawing rels, chart
+		self.assertLessEqual(n.parses, 6)
+		self.assertEqual(n.specs, 1)
+
+	def test_many_distinct_parts_stop_at_the_budget(self):
+		src = _crafted(sheets=400, drawings_per_sheet=1, charts_per_drawing=10, distinct=True)
+		with _Counting() as n:
+			self.assertEqual(extract_charts(src), [])
+		self.assertLessEqual(n.parses, MAX_PARTS_TOTAL)
+
+	def test_budget_keeps_charts_found_before_it_ran_out(self):
+		wb, ws = _book()
+		_add(ws, BarChart(), title="First")
+		good = _bytes(wb)
+		with mock.patch.object(xlsx_charts, "MAX_PARTS_TOTAL", 5):
+			specs = extract_charts(good)
+		self.assertLessEqual(len(specs), 1)
+		self.assertEqual(len(extract_charts(good)), 1)
+
+	def test_series_and_range_reads_are_bounded(self):
+		wb, ws = _book()
+		ws.append(("x", 1, 1))
+		chart = BarChart()
+		for _ in range(100):
+			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=5), titles_from_data=True)
+		chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=5))
+		ws.add_chart(chart, "F2")
+		real_load = openpyxl.load_workbook
+		with mock.patch.object(openpyxl, "load_workbook", wraps=real_load) as load:
+			(spec,) = extract_charts(_bytes(wb))
+		self.assertEqual(len(spec["series"]), MAX_SERIES)
+		self.assertEqual(load.call_count, 1)
+
+	def test_same_range_is_read_once(self):
+		wb, ws = _book()
+		chart = BarChart()
+		for _ in range(5):
+			chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=4), titles_from_data=True)
+		ws.add_chart(chart, "F2")
+		with mock.patch.object(xlsx_charts._SheetValues, "_read", autospec=True) as read:
+			read.return_value = [1, 2, 3]
+			extract_charts(_bytes(wb))
+		# one title ref and one value ref for the repeated column, not 10
+		self.assertLessEqual(read.call_count, 2)
+
+	def test_charts_on_a_later_sheet_are_returned_with_their_sheet(self):
+		wb, ws = _book("Summary")
+		data = wb.create_sheet("Data")
+		for row in [("k", "v"), ("a", 1), ("b", 2)]:
+			data.append(row)
+		_add(data, BarChart(), title="On the second sheet")
+		(spec,) = extract_charts(_bytes(wb))
+		self.assertEqual(spec["sheet"], "Data")
 
 
 class TestPreviewCell(unittest.TestCase):

@@ -28,6 +28,31 @@ describe("sheetCharts helpers", () => {
 	});
 });
 
+describe("charts on sheets the preview did not load", () => {
+	// preview_file loads only the first sheet's cells; the charts may live on another
+	const charts = [chart("Data", "On Data"), chart("Summary", "On Summary")];
+
+	it("shows them on the first (only) tab", () => {
+		expect(chartsForSheet(charts, "Summary", ["Summary"]).map((c) => c.title)).toEqual([
+			"On Data",
+			"On Summary",
+		]);
+	});
+
+	it("does not repeat them on other loaded tabs", () => {
+		expect(chartsForSheet(charts, "Data", ["Summary", "Data"]).map((c) => c.title)).toEqual([
+			"On Data",
+		]);
+	});
+
+	it("captions a chart that is not from the sheet on screen", () => {
+		const opts = { global: { stubs: { JvChart: JvChartStub } } };
+		const w = mount(SheetCharts, { ...opts, props: { charts, sheetName: "Summary" } });
+		expect(w.text()).toContain("Data");
+		expect(w.findAll(".text-xs").map((e) => e.text())).toEqual(["Data"]);
+	});
+});
+
 describe("SheetCharts", () => {
 	it("renders one JvChart per spec, nothing when empty", () => {
 		const opts = { global: { stubs: { JvChart: JvChartStub } } };

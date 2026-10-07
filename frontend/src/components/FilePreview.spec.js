@@ -72,6 +72,19 @@ describe("FilePreview xlsx charts", () => {
 		expect(w.findAllComponents(JvChartStub)).toHaveLength(1);
 	});
 
+	it("shows charts anchored on a sheet the preview did not load, under its name", async () => {
+		// preview_file carries only the first sheet; the chart lives on "Data"
+		const w = await open({
+			kind: "table",
+			sheets: [{ name: "Summary", rows: [["h"], ["r"]] }],
+			charts: [chart("Data", "Outstanding")],
+		});
+		const charts = w.findAllComponents(JvChartStub);
+		expect(charts).toHaveLength(1);
+		expect(charts[0].props("spec").title).toBe("Outstanding");
+		expect(w.text()).toContain("Data");
+	});
+
 	it("shows only the grid when the preview has no charts", async () => {
 		const w = await open({ kind: "table", sheets });
 		expect(w.findAllComponents(JvChartStub)).toHaveLength(0);

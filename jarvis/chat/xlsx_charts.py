@@ -19,6 +19,14 @@ MAX_CHARTS_PER_SHEET = 10
 MAX_CHARTS_TOTAL = 30
 MAX_RELS = 200
 MAX_POINTS = 500
+MAX_SERIES = 20
+# Per-file budget, enforced before a part is read: untrusted uploads must not
+# make one preview parse thousands of parts or re-read sheets per series.
+MAX_SHEETS = 50
+MAX_PARTS_TOTAL = 150
+MAX_BYTES_TOTAL = 10_000_000
+MAX_RANGE_READS = 60
+MAX_RANGE_ROW = 100_000
 _MAX_PART_BYTES = 2_000_000
 
 _NS = {
@@ -54,32 +62,61 @@ def preview_cell(v):
 	return v
 
 
+class _OverBudget(Exception):
+	"""The file used up its parse budget; keep what was found so far."""
+
+
+class _Budget:
+	"""Parts and bytes one file may cost; each zip path is parsed at most once."""
+
+	def __init__(self):
+		self.parts = 0
+		self.size = 0
+		self.seen = set()
+
+	def take(self, part, size):
+		"""True if ``part`` may be read now, False if already seen; raises when spent."""
+		if part in self.seen:
+			return False
+		if self.parts >= MAX_PARTS_TOTAL or self.size + size > MAX_BYTES_TOTAL:
+			raise _OverBudget
+		self.seen.add(part)
+		self.parts += 1
+		self.size += size
+		return True
+
+
 def extract_charts(content: bytes) -> list[dict]:
 	"""``[{sheet, title, type, x, series:[{name, data}], options}]``; never raises."""
+	out = []
 	try:
 		with zipfile.ZipFile(io.BytesIO(content)) as zf:
 			values = _SheetValues(content)
-			out, per_sheet = [], {}
-			for sheet, chart_xml in _charts_by_sheet(zf):
-				if per_sheet.get(sheet, 0) >= MAX_CHARTS_PER_SHEET:
-					continue
-				spec = _chart_spec(chart_xml, values)
-				if spec:
-					out.append({"sheet": sheet, **spec})
-					per_sheet[sheet] = per_sheet.get(sheet, 0) + 1
-				if len(out) >= MAX_CHARTS_TOTAL:
-					break
+			per_sheet = {}
+			try:
+				for sheet, chart_xml in _charts_by_sheet(zf, _Budget()):
+					if per_sheet.get(sheet, 0) >= MAX_CHARTS_PER_SHEET:
+						continue
+					spec = _chart_spec(chart_xml, values)
+					if spec:
+						out.append({"sheet": sheet, **spec})
+						per_sheet[sheet] = per_sheet.get(sheet, 0) + 1
+					if len(out) >= MAX_CHARTS_TOTAL:
+						break
+			except _OverBudget:
+				pass
 			return out
 	except Exception:
-		return []
+		return out
 
 
-def _xml(zf, part, root_tag):
+def _xml(zf, part, root_tag, budget):
 	"""Parsed XML of a zip member, or None. Only plain UTF-8/ASCII parts with the
 	expected root and no DOCTYPE/ENTITY are parsed (entity-expansion bombs and
 	encodings that would hide them in an untrusted upload)."""
 	try:
-		if zf.getinfo(part).file_size > _MAX_PART_BYTES:
+		size = zf.getinfo(part).file_size
+		if size > _MAX_PART_BYTES or not budget.take(part, size):
 			return None
 		data = zf.read(part)
 	except KeyError:
@@ -102,11 +139,11 @@ def _xml(zf, part, root_tag):
 	return root if root.tag.split("}")[-1] == root_tag else None
 
 
-def _rels(zf, part):
+def _rels(zf, part, budget):
 	"""[(rId, type suffix, absolute part path)] from the .rels file of ``part``;
 	targets resolving outside ``xl/`` are dropped."""
 	folder, name = posixpath.split(part)
-	root = _xml(zf, posixpath.join(folder, "_rels", name + ".rels"), "Relationships")
+	root = _xml(zf, posixpath.join(folder, "_rels", name + ".rels"), "Relationships", budget)
 	out = []
 	for rel in list(root)[:MAX_RELS] if root is not None else []:
 		target = rel.get("Target") or ""
@@ -116,28 +153,28 @@ def _rels(zf, part):
 	return out
 
 
-def _charts_by_sheet(zf):
+def _charts_by_sheet(zf, budget):
 	"""Yield (sheet name, chart XML root) in sheet then drawing order, lazily.
 
 	Worksheet XML is never parsed (it can be huge): a sheet's drawings are the
 	drawing relationships in its small .rels file."""
-	book = _xml(zf, "xl/workbook.xml", "workbook")
+	book = _xml(zf, "xl/workbook.xml", "workbook", budget)
 	if book is None:
 		return
-	book_rels = {rid: path for rid, _, path in _rels(zf, "xl/workbook.xml")}
-	for sh in book.findall("s:sheets/s:sheet", _NS):
+	book_rels = {rid: path for rid, _, path in _rels(zf, "xl/workbook.xml", budget)}
+	for sh in book.findall("s:sheets/s:sheet", _NS)[:MAX_SHEETS]:
 		sheet_part = book_rels.get(sh.get(_R_ID))
 		if not sheet_part:
 			continue
-		for _, kind, drawing_part in _rels(zf, sheet_part):
+		for _, kind, drawing_part in _rels(zf, sheet_part, budget):
 			if kind != "drawing":
 				continue
-			drawing = _xml(zf, drawing_part, "wsDr")
+			drawing = _xml(zf, drawing_part, "wsDr", budget)
 			if drawing is None:
 				continue
-			drawing_rels = {rid: path for rid, _, path in _rels(zf, drawing_part)}
+			drawing_rels = {rid: path for rid, _, path in _rels(zf, drawing_part, budget)}
 			for ref in list(drawing.iter("{%s}chart" % _NS["c"]))[:MAX_CHARTS_PER_SHEET]:
-				chart = _xml(zf, drawing_rels.get(ref.get(_R_ID), ""), "chartSpace")
+				chart = _xml(zf, drawing_rels.get(ref.get(_R_ID), ""), "chartSpace", budget)
 				if chart is not None:
 					yield sh.get("name"), chart
 
@@ -148,9 +185,18 @@ class _SheetValues:
 	def __init__(self, content):
 		self._content = content
 		self._wb = None
+		self._cache = {}
 
 	def read(self, ref):
-		"""Flat list of the cells in ``'Sheet'!$A$1:$A$9``, or None if unusable."""
+		"""Flat list of the cells in ``'Sheet'!$A$1:$A$9``, or None if unusable.
+		Each distinct range is read once, and only so many per file."""
+		if ref not in self._cache:
+			if len(self._cache) >= MAX_RANGE_READS:
+				return None
+			self._cache[ref] = self._read(ref)
+		return self._cache[ref]
+
+	def _read(self, ref):
 		from openpyxl.utils.cell import range_boundaries
 
 		m = re.match(r"^(?:'((?:[^']|'')+)'|([^'!]+))!(\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?)$", ref.strip())
@@ -158,7 +204,7 @@ class _SheetValues:
 			return None
 		sheet = (m.group(1) or m.group(2)).replace("''", "'")
 		min_col, min_row, max_col, max_row = range_boundaries(m.group(3).replace("$", ""))
-		if min_col != max_col and min_row != max_row:
+		if (min_col != max_col and min_row != max_row) or min_row > MAX_RANGE_ROW:
 			return None
 		max_row = min(max_row, min_row + MAX_POINTS - 1)
 		if self._wb is None:
@@ -239,7 +285,7 @@ def _chart_spec(chart, values):
 		options["stacked"] = True
 
 	x, series = [], []
-	for i, ser in enumerate(kind.findall("c:ser", _NS)):
+	for i, ser in enumerate(kind.findall("c:ser", _NS)[:MAX_SERIES]):
 		if not x:
 			x = [_label(v) for v in _points(ser.find("c:cat", _NS), values)]
 		tx = ser.find("c:tx", _NS)
