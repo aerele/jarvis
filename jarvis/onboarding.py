@@ -907,6 +907,7 @@ _DISCONNECTED_LLM_FIELDS = {
 	# recognise it, which is correct here: the editor's status strip hides itself
 	# rather than reporting on an apply that no longer has a subject.
 	"last_sync_status": "disconnected",
+	"last_sync_attempt_error": "",
 	# The apply this stamp described no longer has a subject either (jarvis#841).
 	"llm_last_apply_fingerprint": "",
 	"last_subscription_status": "",
@@ -2232,6 +2233,7 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	settings.db_set(
 		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
 	)
+	settings.db_set("last_sync_attempt_error", "")
 	# The container this stamp described is being torn down; left set, an
 	# identical re-save inside its window could dedup against a rebuilt
 	# container that never received the config (jarvis#841 review).
@@ -2321,6 +2323,7 @@ def _workspace_reset_poll() -> dict:
 
 		write_connection(data)
 		settings.db_set("last_sync_status", "ok (workspace reset)")
+		settings.db_set("last_sync_attempt_error", "")
 		# This "ok" is about the RESET, not about any config apply - the fresh
 		# container holds no direct-leg credential yet. Keep the jarvis#841
 		# dedup stamp cleared so the next save always applies for real.
@@ -2604,6 +2607,28 @@ def get_llm_sync_status() -> dict:
 	return _sync_status_payload(s, status)
 
 
+def _attempt_error_for(s, status: str) -> str:
+	"""The stored attempt error, or the unreachable reason once an "applying" status
+	has outlived ``_APPLY_STALE_AFTER_S`` since the apply was requested.
+
+	Computed on READ and never stored, so no job has to run for it to appear and a
+	slow apply that converges later flips to ok on its own. Every new attempt
+	re-stamps ``last_sync_requested_at``, which restarts the window."""
+	if not status.startswith("pending:"):
+		return ""
+	stored = s.get("last_sync_attempt_error") or ""
+	if stored or not status.startswith(_pending_applying_status()):
+		return stored
+	from jarvis.account import _apply_age_seconds
+	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+		_APPLY_STALE_AFTER_S,
+		_ATTEMPT_ERROR_UNREACHABLE,
+	)
+
+	age = _apply_age_seconds(s.get("last_sync_requested_at"))
+	return _ATTEMPT_ERROR_UNREACHABLE if age is not None and age > _APPLY_STALE_AFTER_S else ""
+
+
 def _sync_status_payload(s, status: str) -> dict:
 	"""Project Jarvis Settings into the poller's response shape. PURE: it reads and
 	formats, and unlike ``get_llm_sync_status`` it never probes admin and never
@@ -2629,6 +2654,9 @@ def _sync_status_payload(s, status: str) -> dict:
 		"last_sync_at": str(s.get("last_sync_at") or ""),
 		"last_sync_status": status,
 		"pending": status.startswith("pending:"),
+		# admin-v2#630: set while the status is pending but the last attempt failed
+		# and a retry is queued; the SPA says so instead of "Still applying".
+		"attempt_error": _attempt_error_for(s, status),
 		"subscription_status": s.get("last_subscription_status") or "",
 		"warnings": _json_list(s.get("last_sync_warnings")),
 		# Per-model verdicts from the last pool apply: [{provider, model, status}] where

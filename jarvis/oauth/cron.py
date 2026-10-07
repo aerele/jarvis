@@ -63,6 +63,7 @@ def poll_oauth_refresh_status() -> None:
 		settings.db_set(
 			{
 				"last_sync_status": f"failed: auth: {e}",
+				"last_sync_attempt_error": "",
 				"last_sync_at": frappe.utils.now(),
 			}
 		)
@@ -107,6 +108,7 @@ def poll_oauth_refresh_status() -> None:
 	settings.db_set(
 		{
 			"last_sync_status": _LAST_SYNC_OAUTH_EXPIRED,
+			"last_sync_attempt_error": "",
 			"last_sync_at": frappe.utils.now(),
 			"llm_oauth_account_email": "",
 		}
