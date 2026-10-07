@@ -2628,6 +2628,9 @@ def _sync_status_payload(s, status: str) -> dict:
 		"last_sync_at": str(s.get("last_sync_at") or ""),
 		"last_sync_status": status,
 		"pending": status.startswith("pending:"),
+		# admin-v2#630: set while the status is pending but the last attempt failed
+		# and a retry is queued; the SPA says so instead of "Still applying".
+		"attempt_error": (s.get("last_sync_attempt_error") or "") if status.startswith("pending:") else "",
 		"subscription_status": s.get("last_subscription_status") or "",
 		"warnings": _json_list(s.get("last_sync_warnings")),
 		# Per-model verdicts from the last pool apply: [{provider, model, status}] where
