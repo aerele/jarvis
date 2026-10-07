@@ -605,3 +605,87 @@ it("normal waiting state heals a missed terminal through server resync", async (
 	await flushPromises();
 	expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
 });
+
+it.each([
+	[
+		"finished",
+		{ name: "reply", role: "assistant", content: "Invoice reviewed", streaming: false },
+		false,
+	],
+	[
+		"streaming",
+		{ name: "reply", role: "assistant", content: "Reviewing invoice", streaming: true },
+		true,
+	],
+	["not started", null, true],
+])(
+	"legacy reply %s reconciles busy state after A → B → A without a Turn row",
+	async (_label, reply, busy) => {
+		api.queuePosition.mockResolvedValue({ ok: false });
+		api.sendRecoverableMessage.mockResolvedValue({
+			delivery: "settled",
+			result: {
+				ok: true,
+				conversation_id: "A",
+				message_id: "M",
+				run_id: "legacy-run",
+			},
+		});
+		await open();
+		savedSeed();
+		await send();
+		expect(wrapper.findComponent(Composer).props("sending")).toBe(true);
+		await wrapper.setProps({ id: "B" });
+		await flushPromises();
+		// Socket events for A are missed while B is selected.
+		event({ kind: "run:start", conversation_id: "A", run_id: "legacy-run" });
+		if (reply && !reply.streaming)
+			event({ kind: "run:end", conversation_id: "A", run_id: "legacy-run" });
+		api.getConversation.mockResolvedValue({
+			conversation: { name: "A" },
+			messages: [
+				{ name: "M", role: "user", content: "Review invoice" },
+				...(reply ? [reply] : []),
+			],
+		});
+		await wrapper.setProps({ id: "A" });
+		await flushPromises();
+		expect(api.queuePosition).toHaveBeenCalledWith("legacy-run");
+		expect(wrapper.findComponent(Composer).props("sending")).toBe(busy);
+		if (reply) {
+			expect(recoveryState.starting.A).toBeUndefined();
+			expect(recoveryState.observedRuns["legacy-run"]).toBe(true);
+		} else expect(recoveryState.starting.A).toBe("legacy-run");
+	}
+);
+
+it("a late status response cannot restore waiting after the transcript shows a completed reply", async () => {
+	api.sendRecoverableMessage.mockResolvedValue({
+		delivery: "settled",
+		result: {
+			ok: true,
+			conversation_id: "A",
+			message_id: "M",
+			run_id: "finished-run",
+		},
+	});
+	await open();
+	savedSeed();
+	await send();
+	const status = defer();
+	api.queuePosition.mockReturnValue(status.promise);
+	api.getConversation.mockResolvedValue({
+		conversation: { name: "A" },
+		messages: [
+			{ name: "M", role: "user", content: "Review invoice" },
+			{ name: "reply", role: "assistant", content: "Done", streaming: false },
+		],
+	});
+	window.dispatchEvent(new Event("jv:resync"));
+	await flushPromises();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
+	status.resolve({ ok: true, state: "queued", position: 1 });
+	await flushPromises();
+	expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
+	expect(recoveryState.queued.A).toBeUndefined();
+});
