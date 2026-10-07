@@ -384,3 +384,29 @@ describe("GeneralPane, Context section", () => {
 		expect(w.text()).toContain("Not measured yet");
 	});
 });
+
+describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
+	it("shows Loading, not the Auto/provider placeholder, until the connection answers", async () => {
+		api.getLlmConnectionStatus.mockImplementation(PENDING);
+		const w = await mountAs({ admin: true });
+		expect(w.text()).toContain("Loading");
+		expect(w.text()).not.toContain("Auto");
+		expect(w.text()).not.toContain("Provider");
+	});
+
+	it("shows the real rows once it answers", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() =>
+			Promise.resolve({ pool_mode: true, model_count: 2, health: "ok" })
+		);
+		const w = await mountAs({ admin: true });
+		expect(w.text()).not.toContain("Loading");
+		expect(w.text()).toContain("2 models");
+	});
+
+	it("starts its fetches together instead of one after another", async () => {
+		api.getUsage.mockImplementation(PENDING);
+		await mountAs({ admin: true });
+		expect(api.getLlmConnectionStatus).toHaveBeenCalledTimes(1);
+		expect(api.getMySettings).toHaveBeenCalledTimes(1);
+	});
+});

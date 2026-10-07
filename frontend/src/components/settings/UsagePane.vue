@@ -297,7 +297,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onActivated, watch } from "vue";
 import { Badge, Button } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo } from "@/utils/datetime";
@@ -461,12 +461,21 @@ async function loadMetering() {
 	meteringLoading.value = false;
 }
 
-onMounted(() => {
+// Staleness window for a kept-alive pane (SettingsDialog's KeepAlive): a quick
+// re-visit shows what it already has, an older one refreshes in place.
+const STALE_MS = 30000;
+let loadedAt = 0;
+function loadAll() {
+	loadedAt = Date.now();
 	loadUsage();
 	// Skip the round-trip entirely for a member who can never see this section -
 	// the backend gates every one of these three calls server-side anyway
 	// (require_jarvis_admin), so this is a UX/perf saving, not a security gate.
 	if (canSeeMetering) loadMetering();
+}
+onMounted(loadAll);
+onActivated(() => {
+	if (loadedAt && Date.now() - loadedAt > STALE_MS) loadAll();
 });
 watch(() => shell.chatContext?.conversationId, loadUsage);
 </script>
