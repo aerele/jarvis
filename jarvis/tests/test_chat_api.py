@@ -661,8 +661,34 @@ class TestRetryMessage(_ChatTestCase):
 		self.assertIn("latest", result["reason"])
 		dispatch.assert_not_called()
 		logger.return_value.info.assert_called_once_with(
-			"retry_refused conversation=%s message=%s reason=%s", self.conv, asst_id, "not_latest"
+			"retry_refused conversation=%s message=%s reason=%s seed=%s",
+			self.conv,
+			asst_id,
+			"not_latest",
+			_u,
 		)
+
+	def test_legacy_retry_while_a_reply_runs_is_refused_and_logged(self):
+		_u, asst_id = self._make_turn(self.conv, with_error=True)
+		with (
+			patch("jarvis.chat.api._conversation_busy", return_value=True),
+			patch("jarvis.chat.latency.get_logger") as logger,
+		):
+			result = retry_message(asst_id)
+		self.assertEqual(
+			result, {"ok": False, "reason": "A reply is already in progress. Wait for it to finish."}
+		)
+		self.assertEqual(logger.return_value.info.call_args.args[3], "busy")
+
+	def test_legacy_retry_of_a_seed_owned_by_another_user_is_refused(self):
+		user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(MSG, user_id, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+			result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertIn("cannot be retried", result["reason"])
+		dispatch.assert_not_called()
 
 	def test_legacy_retry_keeps_the_context_of_the_failed_turn(self):
 		# Pure legacy writes no Turn rows; this is a site cut back from the pump, whose

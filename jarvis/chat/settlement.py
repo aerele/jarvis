@@ -233,7 +233,8 @@ def invoke_settlement(
 	# S6 — enqueue enrichment (idempotent per (turn, effect_name); force-done at 3).
 	deps.enqueue_finalize(run_id, relay_target_id)
 
-	# Last, so its read takes no snapshot before the steps above.
+	# Last, so its read takes no snapshot before the steps above. The helper never raises;
+	# the try is for the import.
 	if pub_kind == "run:error":
 		try:
 			from jarvis.chat.turn_handler import _note_empty_reply

@@ -10,6 +10,7 @@ tests pin only the payload-mapping contract between the shim and the
 handler so a future refactor cannot silently change the payload shape.
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -555,6 +556,13 @@ class TestNoteEmptyReply(FrappeTestCase):
 				self.assertEqual(len(lines), 1)
 				self.assertTrue(lines[0][0].startswith("empty_reply run_id="))
 				self.assertEqual(lines[0][1:], ("r1", "no-such-conv", variant, "", ""))
+
+	def test_long_whitespace_is_read_in_linear_time(self):
+		text = "Agent couldn't generate a response." + " " * 30000 + "x"
+		started = time.monotonic()
+		self.assertIsNone(turn_handler._EMPTY_REPLY_TEXT.match(text))
+		self.assertEqual(self._lines(text, "empty-reply")[0][3], "bare", "only 300 characters are read")
+		self.assertLess(time.monotonic() - started, 0.5)
 
 	def test_a_failed_token_lookup_still_writes_the_line(self):
 		with patch.object(frappe.db, "sql", side_effect=RuntimeError("db down")):

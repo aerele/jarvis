@@ -2726,21 +2726,26 @@ def _note_subscription_error(err_text: str, code: str) -> None:
 		subscription_health.note_turn_error(err_text, code)
 
 
-# The runtime's empty-reply text alone; "other" when more text follows it.
+# The runtime's empty-reply text alone, deliberately narrower than the UI rule: any
+# text before or after it (a wrapper, a provider detail) is "other", a drift signal.
+# Linear on long whitespace; only the first 300 characters are read.
 _EMPTY_REPLY_TEXT = re.compile(
-	r"^\W*agent couldn.?t generate a response\.?\s*(please try again\.?)?\s*$", re.I
+	r"^\W*agent couldn.?t generate a response\.?(?:\s*(please try again\.?))?\s*$", re.I
 )
 
 
 def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
 	"""One telemetry line per empty reply of the model, with the context size the chat
-	session recorded after its previous turn. Never raises."""
+	session recorded after its previous turn. Never raises.
+
+	``variant``: ``plain`` (with "Please try again."), ``bare`` (the sentence alone),
+	``tools`` (the empty-reply-tools rule), ``other`` (more text around the sentence)."""
 	if code not in ("empty-reply", "empty-reply-tools"):
 		return
 	try:
 		if code == "empty-reply-tools":
 			variant = "tools"
-		elif match := _EMPTY_REPLY_TEXT.match(err_text or ""):
+		elif match := _EMPTY_REPLY_TEXT.match((err_text or "")[:300]):
 			variant = "plain" if match.group(1) else "bare"
 		else:
 			variant = "other"
@@ -2759,7 +2764,7 @@ def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) 
 		from jarvis.chat.latency import get_logger
 
 		get_logger().info(
-			"empty_reply run_id=%s conv=%s variant=%s last_total_tokens=%s context_pct=%s",
+			"empty_reply run_id=%s conversation=%s variant=%s last_total_tokens=%s context_pct=%s",
 			run_id,
 			conversation,
 			variant,
