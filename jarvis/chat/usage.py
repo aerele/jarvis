@@ -394,14 +394,14 @@ def _refresh_session_context_snapshot(
 
 
 # Characters per token for the claude-cli output estimate. Rough on purpose: the real
-# `result` totals never leave the openclaw process (jarvis-admin-v2#631).
+# `result` totals never leave the agent process (jarvis-admin-v2#631).
 _CHARS_PER_TOKEN = 4
 
 
 def is_claude_cli_row(row: dict | None) -> bool:
 	"""True when the gateway row says this reply ran through the ``claude-cli`` runtime,
 	which saves a partial streamed usage (see ``record_turn_usage``). Primary marker is
-	``agentRuntime.id`` (the only one ``sessions.list`` carries as of openclaw 2026.9.3);
+	``agentRuntime.id`` (the only one ``sessions.list`` carries as of agent image 2026.9.3);
 	``cliSessionIds`` / ``claudeCliSessionId`` are a fallback for rows that ever carry them.
 	Never inferred from the model name: a Claude model can also run on another runtime."""
 	if not isinstance(row, dict):
@@ -437,7 +437,7 @@ def reply_char_count(run_id: str | None) -> int | None:
 def _estimated_output_tokens(row: dict, output_tokens: int, reply_chars: int | None) -> tuple[int, bool]:
 	"""``(output_tokens, estimated)`` for one turn.
 
-	The openclaw ``claude-cli`` runtime saves the LAST streamed assistant event's partial
+	The ``claude-cli`` agent runtime saves the LAST streamed assistant event's partial
 	usage (output 1-8) and keeps the real ``result`` totals in memory only, so the row's
 	``outputTokens`` badly undercounts a Claude-plan reply (jarvis-admin-v2#631). For such a
 	row, with a reply length passed in, the output is ``max(row value, ceil(chars / 4))``
@@ -732,7 +732,7 @@ def _write_turn_usage_row(
 	deterministically discard the aggregate delta on the RECORDED path).
 
 	cache_read / cache_write / cache_reported are filled from the row's ``cacheRead`` /
-	``cacheWrite`` when present. They are ABSENT from ``sessions.list`` as of openclaw 2026.9.3
+	``cacheWrite`` when present. They are ABSENT from ``sessions.list`` as of agent image 2026.9.3
 	(re-verified 2026-10-07; only the stored session entry has them), so today these stay
 	0 / 0 / unreported until the runtime exposes them. ``cache_reported`` is 1 when either
 	key is present (a real 0 reads as reported). They are NOT in the
