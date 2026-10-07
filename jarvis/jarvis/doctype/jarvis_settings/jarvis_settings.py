@@ -542,6 +542,23 @@ def _stamp_pool_pending(settings) -> None:
 	)
 
 
+def _primary_identity(settings) -> tuple | None:
+	"""What the fleet would render as the pool's primary: the first enabled
+	model in fleet order, as (provider, model, credential_type). None when no
+	model is enabled."""
+	from jarvis.jarvis.pool_serialize import _enabled_models, _fleet_sort_key
+
+	rows = sorted(_enabled_models(settings), key=_fleet_sort_key)
+	if not rows:
+		return None
+	first = rows[0]
+	return (
+		(first.provider or "").strip().lower(),
+		first.model or "",
+		first.credential_type or "api_key",
+	)
+
+
 def _switch_or_enqueue(settings, job: str, *, is_switch: bool, **kwargs) -> None:
 	"""Route a due sync job through ``llm_switch.begin()`` when it is a PROXY
 	SWITCH (jarvis#1425 follow-up, plans/2026-09-27-seamless-llm-switch-design.md
@@ -1376,6 +1393,27 @@ class JarvisSettings(Document):
 			return False
 		return bool(compute_proxy_active(self)) != bool(getattr(before, "proxy_active", 0))
 
+	def _primary_changed(self) -> bool:
+		"""True when THIS save changes the FIRST enabled model of an already-
+		serving pool (admin-v2#629). The fleet renders the first model as the
+		agent's primary, and a new primary (a Claude plan moving into or out of
+		first place included: it renders native-primary vs native-fallback)
+		restarts the container, so it is held like a proxy switch until open
+		replies finish. A same-first reorder or an added/removed later model
+		reads False and keeps hot-reloading.
+
+		The first model is picked with the fleet's own ordering
+		(``pool_serialize._fleet_sort_key``) and identified by provider, model
+		and credential_type, so a Claude plan and a Claude API key never read
+		equal. Same "never synced" guard as ``_is_pool_switch``: a workspace
+		with no serving container has nothing to protect."""
+		before = self.get_doc_before_save()
+		if before is None:
+			return False
+		if not (getattr(before, "llm_pool_synced_at", None) or getattr(before, "llm_direct_synced_at", None)):
+			return False
+		return _primary_identity(before) != _primary_identity(self)
+
 	@staticmethod
 	def _pool_state_snapshot(doc) -> tuple:
 		"""Comparable snapshot of the pool-RELEVANT state of a settings doc.
@@ -1565,7 +1603,7 @@ class JarvisSettings(Document):
 		_switch_or_enqueue(
 			self,
 			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin_pool",
-			is_switch=self._is_pool_switch(),
+			is_switch=self._is_pool_switch() or self._primary_changed(),
 			# A teardown push carries its own job id. Sharing the ordinary one
 			# would let dedup drop it behind an already-queued normal sync, and
 			# the surviving job would run WITHOUT converge_teardown, hit the
