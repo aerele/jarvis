@@ -33,19 +33,6 @@ DESC_CAP = 200
 _CANDIDATES = 200
 _RECORD_CAP = 20
 _BACKSTOP_LIST = 10
-_FIELDS = (
-	"name",
-	"owner",
-	"skill_name",
-	"description",
-	"scope",
-	"target_role",
-	"enabled",
-	"use_in_file_box",
-	"file_box_creates",
-	"managed_by_learning",
-	"modified",
-)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 _LIST_HEAD = (
@@ -130,7 +117,9 @@ def eligible_skills(dropper: str, pin: str | None = None) -> list:
 	if not filebox_migrated():
 		return []
 	rows = frappe.db.sql(
-		f"""SELECT {", ".join(_FIELDS)} FROM `tabJarvis Custom Skill`
+		"""SELECT name, owner, skill_name, description, scope, target_role, enabled, use_in_file_box,
+		  file_box_creates, managed_by_learning, modified
+		FROM `tabJarvis Custom Skill`
 		WHERE enabled = 1 AND (owner = %(u)s OR (use_in_file_box = 1
 		  AND (name = %(pin)s OR (scope IN ('Role', 'Org') AND managed_by_learning = 0))))
 		ORDER BY modified DESC LIMIT %(n)s""",
@@ -258,7 +247,7 @@ def _record(conversation: str, row) -> str | None:
 	the model, or None."""
 	from jarvis.chat.pending_actions._store import lock_conversation
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	lock_conversation(conversation)
 	conv = frappe.db.get_value(
 		CONV, conversation, ["owner", "filebox_skills", "filebox_skill_choice"], as_dict=True
@@ -266,7 +255,7 @@ def _record(conversation: str, row) -> str | None:
 	entries = _parse(conv.filebox_skills)
 	pin = _pin(entries)
 	if pin and pin.get("docname") == row.name:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return None
 	new = entry(row)
 	found = [e for e in entries if not e.get("pinned") and e.get("docname") != row.name]
@@ -276,7 +265,7 @@ def _record(conversation: str, row) -> str | None:
 		pin and pin["creates"] and new["creates"] and new["creates"] != pin["creates"]
 	)
 	filed = _file_conflict(conversation, pin, new) if conflict else None
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notify
 	# Off a sheet and still Pending (a stopped run dismisses it): on the board.
 	if (
 		filed
@@ -336,7 +325,7 @@ def file_skill_missing(conversation: str, slug: str) -> None:
 		f"The skill '{_safe(slug, 60)}' chosen for {name} isn't available to you.",
 		[PROCESS_AUTO, SKIP],
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notify
 	if filed:
 		_notify(frappe.db.get_value(CONV, conversation, "owner"), conversation, *filed)
 
@@ -425,7 +414,7 @@ def apply_answer(doc) -> bool:
 		frappe.db.set_value(
 			CONV, doc.conversation, "filebox_skill_choice", doc.decision, update_modified=False
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resume
 		then = _FOLLOW.format(slug=doc.decision, creates=_safe(creates, 140))
 	message = _ANSWER.format(name=doc.name, title=_safe(doc.title, 140), decision=doc.decision, then=then)
 	return _resume(doc.conversation, message)
@@ -446,7 +435,7 @@ def skip_file(conversation: str) -> None:
 		{"filebox_skipped_at": frappe.utils.now_datetime(), "filebox_rerun_preamble": None},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- skip survives a later failure
 
 
 def _start_unpinned(conversation: str) -> bool:
@@ -460,11 +449,11 @@ def _start_unpinned(conversation: str) -> bool:
 	from jarvis.permissions import delegated_send
 
 	owner = frappe.db.get_value(CONV, conversation, "owner")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	lock_conversation(conversation)
 	r = filebox._rerun_row(conversation, owner)
 	if not r or r["live"] or r["has_draft"]:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		frappe.logger("jarvis").info(
 			"file_box routing start refused for %s: a draft or a live run", conversation
 		)
@@ -483,7 +472,7 @@ def _start_unpinned(conversation: str) -> bool:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 	try:
 		f = filebox._source_file(conversation)
 		ok, switch_to = approvals_api.owner_run_identity(conversation)

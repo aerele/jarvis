@@ -16,6 +16,8 @@ on_update / on_trash hooks; there is no user-facing surface.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisSharedSkillSlug(Document):
+
+class JarvisSharedSkillSlug(NotRenamable, Document):
 	pass

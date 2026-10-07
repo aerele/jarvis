@@ -76,6 +76,7 @@ import time
 import frappe
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
+from jarvis._session import impersonate
 from jarvis.learning.orchestrator import (
 	WORKER_TIMEOUT_S,
 	_feature_enabled,
@@ -165,56 +166,50 @@ def run_pattern_analysis(run_name: str) -> None:
 
 
 def _run_locked(run_name: str) -> None:
-	original_user = frappe.session.user
 	engine_flag_prev = frappe.flags.jarvis_pattern_engine
 	status_summary = "Failed: run did not start"
 	scan_mode = "full"
-	try:
-		frappe.set_user("Administrator")
-		frappe.flags.jarvis_pattern_engine = True
-		status_summary, scan_mode = _execute(run_name)
-	except Exception:
-		frappe.log_error(
-			title=f"jarvis pattern learning: engine crashed on {run_name}",
-			message=frappe.get_traceback(),
-		)
-		status_summary = f"Failed: unhandled engine error on {run_name} (see Error Log)"
+	with impersonate("Administrator"):
 		try:
-			_finalize_run(
-				run_name,
-				status="Failed",
-				counts=None,
-				skipped=None,
-				errors=None,
-				doctypes=None,
-				remaining=None,
-				note="Unhandled engine error; see the Error Log.",
+			frappe.flags.jarvis_pattern_engine = True
+			status_summary, scan_mode = _execute(run_name)
+		except Exception:
+			frappe.log_error(
+				title=f"jarvis pattern learning: engine crashed on {run_name}",
+				message=frappe.get_traceback(),
 			)
-		except Exception:
-			pass
-	finally:
-		# Terminal status-quartet backstop (plan section 5.6). set_value with
-		# update_modified=False so the Settings on_update LLM classifier never
-		# fires (never doc.save() here).
-		try:
-			frappe.db.set_value(
-				SETTINGS,
-				SETTINGS,
-				{
-					"pattern_last_run_at": now_datetime(),
-					"pattern_last_run_status": status_summary,
-					"pattern_scan_mode": scan_mode,
-				},
-				update_modified=False,
-			)
-			frappe.db.commit()
-		except Exception:
-			pass
-		frappe.flags.jarvis_pattern_engine = engine_flag_prev
-		try:
-			frappe.set_user(original_user)
-		except Exception:
-			pass
+			status_summary = f"Failed: unhandled engine error on {run_name} (see Error Log)"
+			try:
+				_finalize_run(
+					run_name,
+					status="Failed",
+					counts=None,
+					skipped=None,
+					errors=None,
+					doctypes=None,
+					remaining=None,
+					note="Unhandled engine error; see the Error Log.",
+				)
+			except Exception:
+				pass
+		finally:
+			# Terminal status-quartet backstop (plan section 5.6). set_value with
+			# update_modified=False so the Settings on_update LLM classifier never
+			# fires (never doc.save() here).
+			try:
+				frappe.db.set_single_value(
+					SETTINGS,
+					{
+						"pattern_last_run_at": now_datetime(),
+						"pattern_last_run_status": status_summary,
+						"pattern_scan_mode": scan_mode,
+					},
+					update_modified=False,
+				)
+				frappe.db.commit()
+			except Exception:
+				pass
+			frappe.flags.jarvis_pattern_engine = engine_flag_prev
 
 
 # --------------------------------------------------------------------------- #
@@ -230,7 +225,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 	if not run.started_at:
 		start_update["started_at"] = now
 	_write_run(run_name, start_update)
-	frappe.db.commit()  # clean transaction before the first fence
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clean transaction before fence
 
 	# Registry is provided by the parallel builder; import lazily so this
 	# module still imports standalone. Missing registry -> Failed, not a crash.
@@ -255,7 +250,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 
 	units = _load_work_units(run, active_companies, registry)
 	_write_run(run_name, {"detectors_total": len(units)})
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit count
 
 	if not units:
 		note = _no_units_note(companies, active_companies)
@@ -366,7 +361,7 @@ def _execute(run_name: str) -> tuple[str, str]:
 				"duplicates_suppressed": counts["duplicates"],
 			},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 
 	# Flush the last open FDR family. Partial on a pause: BH over the tests
 	# actually run is still valid; deferred units re-test next night. Guarded
@@ -504,7 +499,7 @@ def _read_and_persist(spec, company, run, fdr_buffer, mined=None, watch=None) ->
 	from jarvis.learning.executor import PER_DETECTOR_CANDIDATE_CAP, run_detector
 	from jarvis.learning.fdr import NO_FDR
 
-	frappe.db.commit()  # no pending writes before opening the READ ONLY fence
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clean transaction before fence
 	with read_only_transaction() as pdb:
 		raw = run_detector(spec, company, pdb)
 	# Fence closed (auto ROLLBACK); the connection is writable again.
@@ -760,9 +755,11 @@ def _promote_surfaced(run_name: str) -> None:
 	if slots <= 0:
 		return
 
+	# Chat-mined rows are skipped: they surface only when their owner answers
+	# (jarvis.learning.chat_pattern_privacy).
 	rows = frappe.get_all(
 		JLP,
-		filters={"status": "Proposed", "surfaced": 0},
+		filters={"status": "Proposed", "surfaced": 0, "detector_id": ["!=", "chat-context"]},
 		fields=["name", "domain", "strength_band", "support_n", "effective_sensitivity"],
 	)
 	if not rows:
@@ -797,7 +794,7 @@ def _promote_surfaced(run_name: str) -> None:
 	_fenced_write(JLP)
 	for name in chosen_names[:slots]:
 		frappe.db.set_value(JLP, name, {"surfaced": 1, "surfaced_at": now}, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist surfaced patterns
 
 
 # --------------------------------------------------------------------------- #
@@ -947,7 +944,7 @@ def _finalize_run(run_name, *, status, counts, skipped, errors, doctypes, remain
 		"coverage_note": ((note or "")[:1000] or None),
 	}
 	_write_run(run_name, update)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist run result
 
 
 def _write_run(run_name, update: dict) -> None:

@@ -55,7 +55,7 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 		):
 			llm_switch.begin("jarvis.tests.fake_job", foo="bar")
 
-		mock_pub.assert_called_once_with(llm_switch.EVENT, {"state": "switching"})
+		mock_pub.assert_called_once_with(llm_switch.EVENT, {"state": "switching"}, room="all")
 		mock_enqueue.assert_called_once()
 		args, kwargs = mock_enqueue.call_args
 		self.assertEqual(args[0], "jarvis.tests.fake_job")
@@ -209,7 +209,9 @@ class TestBeginAndTryApply(_LlmSwitchTestCase):
 			llm_switch.finish(run_id, "ok: moved")
 
 		self.assertIsNone(llm_switch.status())
-		mock_pub.assert_called_once_with(llm_switch.EVENT, {"state": "done", "outcome": "ok: moved"})
+		mock_pub.assert_called_once_with(
+			llm_switch.EVENT, {"state": "done", "outcome": "ok: moved"}, room="all"
+		)
 		mock_promote.assert_called_once()
 
 	def test_finish_with_a_stale_run_id_does_nothing(self):
@@ -659,7 +661,9 @@ class TestEnd(_LlmSwitchTestCase):
 			llm_switch.end("ok: moved")
 
 		self.assertIsNone(llm_switch.status())
-		mock_pub.assert_called_once_with(llm_switch.EVENT, {"state": "done", "outcome": "ok: moved"})
+		mock_pub.assert_called_once_with(
+			llm_switch.EVENT, {"state": "done", "outcome": "ok: moved"}, room="all"
+		)
 		mock_promote.assert_called_once()
 
 	def test_end_is_a_noop_without_an_active_record(self):

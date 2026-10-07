@@ -5,6 +5,7 @@ from contextlib import nullcontext
 
 import frappe
 from frappe.utils import strip_html
+from frappe.utils.caching import request_cache
 
 from jarvis import audit, telemetry
 from jarvis._http import validate_bearer as _validate_bearer
@@ -82,18 +83,26 @@ def call_tool(tool: str, args: dict | str | None = None) -> dict:
 				"InvalidArgumentError",
 				f"unknown session: {session_key}",
 			)
-		if not frappe.db.exists("User", plugin_user):
+		enabled = frappe.db.get_value("User", plugin_user, "enabled")
+		if enabled is None:
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
 				f"session references unknown user: {plugin_user}",
 			)
+		# Disabling a user is how access is revoked, but Frappe only ends their
+		# browser sessions, not this chat session row: refuse it here.
+		if not enabled:
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", f"session user is disabled: {plugin_user}")
 
 		# NOTE: no Jarvis-access role gate on the plugin path. It is
 		# machine-authenticated (token/HMAC proves the call came from agent),
-		# and `plugin_user` is the real chat user — already gated when they
-		# started the conversation. Per-DocType perms still apply under
-		# _dispatch_from_session.
+		# and `plugin_user` is the real chat user — role-gated when they sent
+		# the message (chat/api.py send_message). Delegated runs (agent
+		# run-as, approvals resume, File Box) legitimately act as an owner
+		# without the role, so a role check here would break them. Per-DocType
+		# perms still apply under _dispatch_from_session.
 
 		# C2 stretch (2026-06-16 review): bind session_key -> bench's
 		# device_id at session-create time, verify on every call. If the
@@ -634,7 +643,7 @@ def persist_tool_receipt(
 		# with a concurrent receipt or the assistant placeholder, and a duplicate
 		# callback for the same tool call is a no-op. Commit-first so the FOR UPDATE
 		# is the first statement (REPEATABLE-READ discipline).
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh txn before row lock
 		# PR-1 flip-else-insert: when a confirm/discard/approve passes ``flip_token``,
 		# turn the PENDING action-row parked at park (tool_call_id=flip_token,
 		# tool_status='pending') INTO this receipt IN PLACE - one durable "action row"
@@ -711,7 +720,7 @@ def persist_tool_receipt(
 					else None
 				),
 			)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist receipt before reply
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
 			return
@@ -756,9 +765,9 @@ def persist_pending_action(
 	single-flight guard would treat the orphan as a live card and wedge the retry."""
 	# Commit-first so the FOR UPDATE is the transaction's first statement
 	# (REPEATABLE-READ discipline), matching persist_tool_receipt.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh txn before row lock
 	_insert_pending_row(conv_name, tool, preview, token, expires_at)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to other workers
 
 
 def _insert_pending_row(
@@ -923,7 +932,7 @@ def _maybe_attach_artifact(conv_name: str, user: str, result: dict) -> None:
 	# Publish AFTER the winning commit (never inside the unit): a replay must not
 	# publish twice, and a realtime event for a card the transaction later loses
 	# would be worse than none.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	frappe.publish_realtime(
 		"jarvis:event",
 		{"kind": "canvas", "conversation_id": conv_name, "message_id": msg_name, "items": items},
@@ -1069,8 +1078,8 @@ _WRITE_TOOLS = frozenset(
 		"create_custom_skill",
 		"update_wiki",
 		# Audited but NOT gated (see _GATED_WRITES comment below):
-		# download_pdf/export_excel both insert a File doc (download_pdf also
-		# attaches it) - real DB writes that need an audit trail, not a
+		# download_pdf/export_excel both insert a private, unattached File doc
+		# - real DB writes that need an audit trail, not a
 		# confirmation card (audit-findings.md F24/F25). record_agent_run is the
 		# delegate's Phase-3 findings writeback: it inserts Jarvis Agent Run/Finding
 		# rows deterministically (validated, coverage-scoped) from a detached agent
@@ -1375,7 +1384,24 @@ def _armed_skip_disabled() -> bool:
 _SKILL_DOCTYPES = frozenset(
 	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
 )
+# Compared as Frappe finds a doctype: in any case, and spaces around it trimmed.
+_SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
 _DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
+
+
+def _run_method_brakes(args) -> bool:
+	"""A run_method call that deletes or cancels (``run_method.needs_brake``)."""
+	from jarvis.tools.run_method import needs_brake
+
+	return needs_brake(args)
+
+
+def _workflow_brakes(args) -> bool:
+	"""An apply_workflow_action whose action can cancel (``workflow_action_cancels``)."""
+	from jarvis.tools._write_risk import workflow_action_cancels
+
+	args = args if isinstance(args, dict) else {}
+	return workflow_action_cancels(args.get("doctype"), args.get("action"))
 
 
 def _writes_a_skill(tool: str, args) -> bool:
@@ -1407,12 +1433,16 @@ def _names_a_skill_doctype(value, *, depth: int) -> bool:
 			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
 			raise InvalidArgumentError("doctype must be the name of a document type")
 		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
-		if any(_SKILL_DOCTYPES.intersection(_texts(dt)) for dt in named):
+		if any(_is_a_skill_doctype(text) for dt in named for text in _texts(dt)):
 			return True
 		value = list(value.values())
 	if isinstance(value, list):
 		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
 	return False
+
+
+def _is_a_skill_doctype(text: str) -> bool:
+	return text.strip().casefold() in _SKILL_DOCTYPES_FOLDED
 
 
 def _texts(value) -> list:
@@ -1434,7 +1464,7 @@ def _skill_autorun_slide(conv: str) -> None:
 	frappe.db.set_value(
 		"Jarvis Conversation", conv, "skill_autorun_at", frappe.utils.now_datetime(), update_modified=False
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- freeze-point survives a worker death
 
 
 def _skill_autorun_clear(conv: str) -> None:
@@ -1447,7 +1477,7 @@ def _skill_autorun_clear(conv: str) -> None:
 		{"skill_autorun": 0, "skill_autorun_skill": None},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clear seen by other workers
 
 
 def _request_autorun_arm(conv: str, msg_id: str | None) -> None:
@@ -1467,7 +1497,7 @@ def _request_autorun_arm(conv: str, msg_id: str | None) -> None:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- arm seen by other workers
 
 
 def _request_autorun_slide(conv: str) -> None:
@@ -1480,7 +1510,7 @@ def _request_autorun_slide(conv: str) -> None:
 		frappe.utils.now_datetime(),
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- freeze-point survives a worker death
 
 
 def _request_autorun_clear(conv: str) -> None:
@@ -1495,7 +1525,7 @@ def _request_autorun_clear(conv: str) -> None:
 		{"request_autorun": 0, "request_autorun_at": None, "request_autorun_msg": None},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- clear seen by other workers
 
 
 def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | None]:
@@ -1880,15 +1910,18 @@ def _import_park(args: dict) -> tuple[dict | None, dict | None]:
 # in a fresh log, so the record-level specifics (which linked value blocked it)
 # are discarded - ``detail`` at most names the doctype the caller asked for.
 
+# A fixable value (R2-3): the message names the field. Nothing is highlighted here;
+# the draft panel's own field marks (``actions_api._mark_fields``) bring their
+# own hint.
+_FIXABLE_HINT = "Correct the value named above, then try again."
+
 # "what you can do" lines, keyed by the wire ``code``. Deliberately tiny.
 _ERROR_HINTS = {
 	"PermissionDeniedError": (
 		"You don't have access to do this. If you believe you should, ask your "
 		"administrator to review your permissions."
 	),
-	"InvalidArgumentError": (
-		"Some of the values need attention - check the highlighted fields and try again."
-	),
+	"InvalidArgumentError": _FIXABLE_HINT,
 	"OutgoingEmailError": (
 		"Ask your administrator to configure an enabled default outgoing Email Account before retrying."
 	),
@@ -1950,11 +1983,19 @@ def _flags_message() -> str:
 	return strip_html(str(frappe.flags.get("error_message") or "")).strip()
 
 
-def _hint_for(code: str, detail: str) -> str:
+def _hint_for(code: str, detail: str, *, kind: str | None = None) -> str:
+	"""The "what you can do" line. ``kind`` (``jarvis._failure_kind``): a business rule
+	raised as a plain ValidationError is enveloped as ``InvalidArgumentError`` too, and
+	"correct the value" does not fit something no value fixes (insufficient stock), so
+	only a fixable one gets that hint."""
+	from jarvis import _failure_kind
+
 	if code == "PermissionDeniedError" and (
 		"linked to" in detail.lower() or "not allowed to access" in detail.lower()
 	):
 		return _USER_PERM_HINT
+	if code == "InvalidArgumentError" and kind not in (None, _failure_kind.FIXABLE):
+		return ""
 	return _ERROR_HINTS.get(code, "")
 
 
@@ -2049,7 +2090,7 @@ def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dic
 	# Don't repeat the message under "Show details".
 	if detail and detail == strip_html(message).strip():
 		detail = ""
-	envelope = _error(code, message, detail=detail, hint=_hint_for(code, detail))
+	envelope = _error(code, message, detail=detail, hint=_hint_for(code, detail, kind=kind))
 	envelope["error"]["kind"] = kind
 	return envelope
 
@@ -2278,7 +2319,15 @@ def dispatch_confirmed(
 		return _refuse_sensitive_import(tool, args, provenance=provenance, provenance_name=provenance_name)
 	allow = _write_risk.allow_entries(tool, args) if allow_risky else []
 	fence = _write_risk.no_commit_fence() if uncarded and tool in _FENCED_TOOLS else nullcontext()
-	with _write_risk.guard_scope(allow) as state, fence:
+	# An uncarded write may not delete or cancel a document, however it gets there
+	# (_write_risk.brake_doc_event): those verbs always park a card. A run_method
+	# picks its own code, so it may not even nest one in another save.
+	with (
+		_write_risk.guard_scope(
+			allow, brake=uncarded, brake_nested=uncarded and tool == "run_method"
+		) as state,
+		fence,
+	):
 		result = _dispatch_and_wrap(
 			tool, args, is_write=True, provenance=provenance, provenance_name=provenance_name
 		)
@@ -2897,7 +2946,7 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		# dropper AFTER (the idiom chat_asks.materialize_from_turn uses).
 		if doc.owner != owner:
 			frappe.db.set_value("Jarvis Approval Request", name, "owner", owner, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- proposal durable before tool reply
 	return {
 		"ok": True,
 		"proposed": True,
@@ -2999,8 +3048,14 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		except WriteRefusedError as e:
 			return _refuse_risky_write(tool, args, e)
 	# Sensitive configuration never runs uncarded (R2-8): auto mode, "confirm all",
-	# an armed macro and an approved skill run all fall through to the park.
-	_must_card = _risk == "sensitive"
+	# an armed macro and an approved skill run all fall through to the park. Nor
+	# does a run_method or a workflow action that deletes or cancels: those verbs are
+	# braked as tools (_BRAKE), and nothing else may be the way around that.
+	_must_card = (
+		_risk == "sensitive"
+		or (tool == "run_method" and _run_method_brakes(args))
+		or (tool == "apply_workflow_action" and _workflow_brakes(args))
+	)
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
@@ -3516,7 +3571,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
-			card, refusal = _build_park_card(tool, args, preview, sensitive=_must_card)
+			card, refusal = _build_park_card(tool, args, preview, sensitive=_risk == "sensitive")
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal
@@ -3672,11 +3727,54 @@ def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> t
 			return _dispatch_and_wrap(tool, args, is_write), ""
 		finally:
 			frappe.flags[ARMED_SKILL_OWNER_FLAG] = before
-	result = _dispatch_and_wrap(tool, args, is_write)
+	# A skill list is asked, in an armed chat only, for the field that says which skill
+	# each row is of under a name of its own (``_JUDGE_ALIAS``), judged on that, and the
+	# field taken out again before the rows go back: the read is judged on exactly its
+	# rows, and the columns the agent asked for come back as it asked for them.
+	key = _judging_key(tool, args)
+	if key and not macros.armed_skill_owner(conversation):
+		key = None
+	alias = f"{_JUDGE_ALIAS}{key}" if key else None
+	judged = {**args, "fields": [*(args.get("fields") or ["name"]), f"{key} as {alias}"]} if key else args
+	result = _dispatch_and_wrap(tool, judged, is_write)
 	if not result.get("ok") or not _reads_skill_rows(tool, args):
-		return result, ""
+		return _without_column(result, alias), ""
 	data = result.get("data")
-	return result, macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data))
+	note = macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data, alias))
+	return _without_column(result, alias), note
+
+
+# The name a skill list's own key is asked for under: not one a caller's column has.
+_JUDGE_ALIAS = "__jv_judge_"
+
+
+def _judging_key(tool: str, args) -> str | None:
+	"""The field that tells a ``get_list`` row of a skill doctype apart (``name``, or
+	``parent`` for a child table); else None. Not for fields that are not plain
+	records' (an aggregate, ``distinct``), whose rows are not one per record: those are
+	judged on every skill the reader can read, as before."""
+	if tool != "get_list" or not isinstance(args, dict):
+		return None
+	doctype = args.get("doctype")
+	if not isinstance(doctype, str) or not _is_a_skill_doctype(doctype):
+		return None
+	key = "name" if doctype.strip().casefold() == "jarvis custom skill" else "parent"
+	fields = args.get("fields") or ["name"]  # get_list's own default
+	if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+		return None
+	if any("(" in f or "distinct" in f.casefold() for f in fields):
+		return None
+	return key
+
+
+def _without_column(result: dict, column: str | None) -> dict:
+	"""``result`` with ``column`` (added by ``_dispatch_judging_skills``) taken out of
+	each row."""
+	if column and result.get("ok") and isinstance(result.get("data"), list):
+		for row in result["data"]:
+			if isinstance(row, dict):
+				row.pop(column, None)
+	return result
 
 
 # Reads that return no stored row of the doctype they name (its schema, a would-be
@@ -3694,71 +3792,167 @@ _NO_STORED_ROWS = frozenset(
 		"preview_import",
 	}
 )
-_SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
 
 
 def _reads_skill_rows(tool: str, args) -> bool:
-	"""Whether a read may return rows of a skill doctype: one is named anywhere in its
-	arguments (a ``doctype``, a query's ``from`` or join, a parent, a JSON filter), or
-	it runs a report on one. A Script or Query Report's own SQL is not seen here."""
+	"""Whether a read may return rows of a skill doctype: its arguments use one as a
+	doctype (a ``doctype``, a query's ``from`` or join, a parent, or a filter on a field
+	that holds a doctype, JSON included), or it runs a report on one. A Script or Query
+	Report's own SQL is not seen here."""
 	if tool in _NO_STORED_ROWS:
 		return False
 	if tool in ("run_report", "report_pdf") and isinstance(args, dict):
 		report = args.get("report_name")
 		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
-		if ref and ref.casefold() in _SKILL_DOCTYPES_FOLDED:
+		if ref and _is_a_skill_doctype(ref):
 			return True
-	return _mentions_a_skill_doctype(args, depth=0)
+	if not _mentions_a_skill_doctype(args, depth=0, keys=None):
+		return False  # no skill doctype's name anywhere in it: no meta read
+	keys = _DOCTYPE_ARG_KEYS.union(*(_doctype_fields(dt) for dt in _doctypes_named(args, depth=0)))
+	return _mentions_a_skill_doctype(args, depth=0, keys=keys)
 
 
-def _mentions_a_skill_doctype(value, *, depth: int) -> bool:
+# Where a read's arguments use a value as a doctype: the tool's own arguments (its
+# ``doctype``, a query's ``from`` and a join's ``doctype``, a child table's parent),
+# ``parenttype``, and fields Frappe keeps a doctype in as plain text, which their
+# doctype's meta cannot tell (``Deleted Document.deleted_doctype``). Every other field
+# is told by the meta of the doctypes the read names (``_doctype_fields``). A skill
+# doctype's name anywhere else (a ToDo's description, a document's name) is a value
+# like any other, not a read of skill rows.
+_DOCTYPE_ARG_KEYS = frozenset(
+	{"doctype", "from", "parent_doctype", "parenttype", "reference_doctype", "ref_doctype", "deleted_doctype"}
+)
+# The argument keys that name the doctypes a read reads.
+_READ_DOCTYPE_KEYS = ("doctype", "from", "parent_doctype")
+
+
+@request_cache
+def _doctype_fields(doctype: str) -> frozenset:
+	"""The fields of ``doctype`` that hold a doctype, casefolded: a Link to DocType, and
+	the field a Dynamic Link takes its doctype from. Empty for a doctype that is not."""
+	try:
+		meta = frappe.get_meta(doctype)
+	except Exception:
+		return frozenset()
+	held = set()
+	for df in meta.fields:
+		if df.fieldtype == "Link" and df.options == "DocType":
+			held.add(df.fieldname)
+		elif df.fieldtype == "Dynamic Link" and df.options:
+			held.add(df.options)
+	return frozenset(field.casefold() for field in held)
+
+
+def _doctypes_named(value, *, depth: int) -> set:
+	"""The doctypes a read's arguments name as the ones it reads: under
+	``_READ_DOCTYPE_KEYS`` and as a four- or five-part filter's first part, JSON
+	included."""
+	if depth > 6:
+		return set()
+	value = _parsed(value)
+	named = set()
+	if isinstance(value, dict):
+		named.update(
+			dt.strip() for key in _READ_DOCTYPE_KEYS if isinstance(dt := value.get(key), str) and dt.strip()
+		)
+		value = list(value.values())
+	if isinstance(value, list | tuple):
+		if len(value) in (4, 5) and isinstance(value[0], str) and value[0].strip():
+			named.add(value[0].strip())
+		for item in value:
+			named |= _doctypes_named(item, depth=depth + 1)
+	return named
+
+
+def _parsed(value):
+	"""``value``, or the JSON a string that starts as an object or a list holds."""
+	if isinstance(value, str) and value.strip().startswith(("{", "[")):
+		try:
+			return json.loads(value)
+		except ValueError:
+			return value
+	return value
+
+
+def _is_doctype_key(key, keys) -> bool:
+	"""Whether ``key`` (an argument, or a filter's field, ``alias.field`` included) is
+	one of ``keys``, the fields that hold a doctype."""
+	return isinstance(key, str) and key.split(".")[-1].strip(" `").casefold() in keys
+
+
+def _mentions_a_skill_doctype(value, *, depth: int, keys, as_doctype: bool = False) -> bool:
+	"""Whether ``value`` holds a skill doctype's name where ``keys`` say a doctype is
+	held; with ``keys`` None, anywhere."""
 	if depth > 6:
 		return False
 	if isinstance(value, str):
-		text = value.strip()
-		if text.casefold() in _SKILL_DOCTYPES_FOLDED:
+		if (keys is None or as_doctype) and _is_a_skill_doctype(value):
 			return True
-		if not text.startswith(("{", "[")):
+		value = _parsed(value)
+		if isinstance(value, str):
 			return False
-		try:
-			value = json.loads(text)
-		except ValueError:
-			return False
+	if keys is None:
+		if isinstance(value, dict):
+			value = list(value.values())
+		if isinstance(value, list | tuple):
+			return any(_mentions_a_skill_doctype(item, depth=depth + 1, keys=None) for item in value)
+		return False
 	if isinstance(value, dict):
-		value = list(value.values())
+		# A query's where clause: ``{"field": "c.reference_doctype", "value": ...}``.
+		keyed = as_doctype or _is_doctype_key(value.get("field"), keys)
+		return any(
+			_mentions_a_skill_doctype(
+				item, depth=depth + 1, keys=keys, as_doctype=keyed or _is_doctype_key(key, keys)
+			)
+			for key, item in value.items()
+		)
 	if isinstance(value, list | tuple):
-		return any(_mentions_a_skill_doctype(item, depth=depth + 1) for item in value)
+		# A filter as a list: ``[field, op, value]``, or ``[doctype, field, op, value]``
+		# whose first part is a doctype too.
+		keyed = as_doctype or any(_is_doctype_key(part, keys) for part in value[:2])
+		if len(value) == 4 and all(isinstance(part, str) for part in value[:2]):
+			if _is_a_skill_doctype(value[0]):
+				return True
+		return any(
+			_mentions_a_skill_doctype(item, depth=depth + 1, keys=keys, as_doctype=keyed) for item in value
+		)
 	return False
 
 
-def _skill_rows_read(args, data):
+def _skill_rows_read(args, data, column: str | None = None):
 	"""The ``Jarvis Custom Skill`` docnames a skill read asked for or returned, or
 	None when they cannot be told apart (every skill the reader can read is judged).
 	Known: the record(s) named by ``name`` / ``names`` on a skill doctype (a child
-	row's skill is its parent), and ``get_list`` rows carrying ``name`` (or ``parent``
-	for a child table)."""
+	row's skill is its parent), and the rows of a ``get_list`` asked for its key under
+	``column`` (``_judging_key``). No column of the caller's stands in for it: a
+	``name`` can be another table's, or another field's alias."""
 	doctype = args.get("doctype") if isinstance(args, dict) else None
-	if not isinstance(doctype, str) or doctype.casefold() not in _SKILL_DOCTYPES_FOLDED:
+	if not isinstance(doctype, str) or not _is_a_skill_doctype(doctype):
 		return None
-	doctype = next(dt for dt in _SKILL_DOCTYPES if dt.casefold() == doctype.casefold())
-	key = "name" if doctype == "Jarvis Custom Skill" else "parent"
+	doctype = next(dt for dt in _SKILL_DOCTYPES if dt.casefold() == doctype.strip().casefold())
 	names = args.get("names") if isinstance(args.get("names"), list) else []
 	names = [n for n in [args.get("name"), *names] if n]
 	if names:
 		if not all(isinstance(n, str) for n in names):
 			return None
-		if key == "name":
+		if doctype == "Jarvis Custom Skill":
 			return names
 		return frappe.get_all(doctype, filters={"name": ["in", names]}, pluck="parent")
-	if isinstance(data, list) and all(isinstance(row, dict) and row.get(key) for row in data):
-		return [row[key] for row in data]
+	if column and isinstance(data, list) and all(isinstance(row, dict) and row.get(column) for row in data):
+		return [row[column] for row in data]
 	return None
 
 
 def _with_note(result: dict, note: str) -> dict:
-	"""``result`` with ``note`` added to its data, for the agent to read."""
-	if note and isinstance(result, dict) and result.get("ok") and isinstance(result.get("data"), dict):
+	"""``result`` with ``note`` added to its data, for the agent to read: a key of a
+	dict, and a list (``get_list``'s rows) wrapped as ``{"rows": ..., "note": ...}``,
+	the shape a truncated list already has. Without a note nothing changes."""
+	if not (note and isinstance(result, dict) and result.get("ok")):
+		return result
+	if isinstance(result.get("data"), dict):
 		result["data"]["note"] = note
+	elif isinstance(result.get("data"), list):
+		result["data"] = {"rows": result["data"], "note": note}
 	return result
 
 
@@ -3919,6 +4113,5 @@ def rotate_agent_token() -> dict:
 		settings.db_set("agent_token_issued_at", now)
 	except Exception:
 		pass
-	frappe.db.commit()
 
 	return {"ok": True, "data": {"rotated_at": now}}

@@ -5,8 +5,10 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import add_days, now_datetime
 
+from jarvis.permissions import NotRenamable
 
-class JarvisImportAnnouncement(Document):
+
+class JarvisImportAnnouncement(NotRenamable, Document):
 	"""Tracks one staged Data Import so its completion can be announced back into
 	the originating chat exactly once (Slice B). Backend-only: no role permissions,
 	so it is never readable by a user (every import-runner is a System Manager - a

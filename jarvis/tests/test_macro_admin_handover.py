@@ -21,7 +21,10 @@ What is pinned here:
 * nothing else holds on to the old owner (design assumption): the new owner can
   open, edit and run the macro, the old owner none of it;
 * before the migrate (no hold fields) it works, the macro stood down by switching
-  it off instead of a hold.
+  it off instead of a hold;
+* the owner the dialog showed is matched as the user is stored; the old owner's
+  Re-summarize afterwards is told the macro changed hands; a hand-over that failed
+  leaves its own hold reason, which the next one replaces (an admin's is kept).
 """
 
 from __future__ import annotations
@@ -298,6 +301,58 @@ class ArrivesClean:
 		self.assertEqual(self._row(macro).owner, TARGET)
 		frappe.set_user(TARGET)
 		self.assertEqual(macros_api.get_macro(macro)["name"], macro)
+
+	def test_the_owner_the_dialog_showed_is_matched_as_the_user_is_stored(self):
+		# An API caller may send the owner in another case or padded: that is the same
+		# person, so not "changed hands".
+		for i, shown in enumerate((OWNER.upper(), f"  {OWNER.title()} ")):
+			with self.subTest(shown=shown):
+				macro = self._macro(OWNER, f"shown{i}")
+				self.assertTrue(self._handover(macro, expected_owner=shown)["handed_over"])
+				self.assertEqual(self._row(macro).owner, TARGET)
+
+	def test_the_old_owners_resummarize_after_it_says_it_changed_hands(self):
+		# Their form was still open: the refusal says why, and starts nothing.
+		macro = self._macro(OWNER, "resum", steps=("one", "two"))
+		self._handover(macro)
+		with patch("jarvis.chat.api._enqueue_turn", return_value={"ok": True}) as enqueue:
+			frappe.set_user(OWNER)
+			with self.assertRaises(frappe.PermissionError) as raised:
+				macros_api.summarize_macro(macro, force=1)
+			self.assertIn("changed hands", str(raised.exception))
+			frappe.db.rollback()
+			# Someone who never owned it is refused as before, without that sentence.
+			frappe.set_user(OTHER)
+			with self.assertRaises(frappe.PermissionError) as raised:
+				macros_api.summarize_macro(macro, force=1)
+			self.assertNotIn("changed hands", str(raised.exception))
+			frappe.db.rollback()
+		enqueue.assert_not_called()
+		row = self._row(macro)
+		self.assertEqual((row.owner, row.merge_status or ""), (TARGET, ""))
+
+	def test_an_old_owner_who_may_still_write_it_is_not_told_it_changed_hands(self):
+		# Only someone who may not write the macro is ever refused. Administrator may
+		# write every macro: handed over from them, the marker names them, and still
+		# their Re-summarize goes ahead.
+		macro = self._macro(OWNER, "resum-admin", steps=("one", "two"))
+		frappe.db.set_value(MACRO, macro, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		self.assertTrue(self._handover(macro)["handed_over"])
+		self.assertTrue(
+			frappe.db.exists(
+				"Comment", {"reference_name": macro, "subject": macros_api.handed_over_from("Administrator")}
+			)
+		)
+		frappe.set_user("Administrator")
+		macros_api.refuse_if_handed_away(frappe.get_doc(MACRO, macro))  # does not raise
+		with (
+			patch.object(macros, "entitlement_block", return_value=None),
+			patch("jarvis.chat.api._enqueue_turn", return_value={"ok": True}) as enqueue,
+		):
+			macros_api.summarize_macro(macro, force=1)
+		enqueue.assert_called_once()
+		frappe.db.rollback()
 
 	def test_the_new_owner_can_open_edit_and_run_it_and_the_old_owner_cannot(self):
 		# Nothing but the macro row (and its steps) carries the macro's owner: the run
@@ -681,6 +736,42 @@ class TestLiveRuns(WithColumns):
 		frappe.db.set_value(RUN, run, "status", "stopped")
 		frappe.db.commit()
 
+	def _fails(self, macro, new_owner):
+		with patch.object(macros, "_stop_run", side_effect=frappe.ValidationError("stuck")):
+			with self.assertRaises(macros_admin_api.MacroHandoverError):
+				self._handover(macro, new_owner)
+
+	def test_a_second_failed_handover_holds_it_for_itself_not_for_the_first(self):
+		# The first hand-over's hold is its own, not an admin's reason to keep.
+		macro = self._macro(OWNER, "twice")
+		run = self._run_row(macro, OWNER, "running")
+		self._fails(macro, TARGET)
+		self.assertEqual(self._row(macro).admin_hold_reason, f"Being handed over to {TARGET}.")
+		self._fails(macro, SECOND_TARGET)
+		row = self._row(macro)
+		self.assertEqual(
+			(row.owner, row.admin_hold, row.admin_hold_reason),
+			(OWNER, 1, f"Being handed over to {SECOND_TARGET}."),
+		)
+		self.assertFalse([c for c in self._comments(macro) if "already on hold" in c.content])
+		# Once the run stops, the third goes through and names no other hold.
+		frappe.db.set_value(RUN, run, "status", "stopped")
+		frappe.db.commit()
+		self._handover(macro, SECOND_TARGET)
+		(note,) = [c.content for c in self._comments(macro) if "handed this macro over" in c.content]
+		self.assertNotIn("also released", note)
+
+	def test_an_admins_hold_reason_outlasts_two_failed_handovers(self):
+		macro = self._macro(OWNER, "twice-held")
+		frappe.set_user(ADMIN)
+		macros_admin_api.admin_hold(macro, "Emails customers wrongly, do not release")
+		run = self._run_row(macro, OWNER, "running")
+		self._fails(macro, TARGET)
+		self._fails(macro, SECOND_TARGET)
+		self.assertEqual(self._row(macro).admin_hold_reason, "Emails customers wrongly, do not release")
+		frappe.db.set_value(RUN, run, "status", "stopped")
+		frappe.db.commit()
+
 	def test_a_handover_that_lifts_an_earlier_hold_says_so(self):
 		macro = self._macro(OWNER, "held-ok")
 		frappe.set_user(ADMIN)
@@ -1030,7 +1121,7 @@ class TestRaces(WithColumns):
 		def sweep():
 			frappe.set_user("Administrator")
 			with patch.object(macro_scheduler, "_claim_slot", return_value=claimed):
-				macro_scheduler._sweep_one(m, now, "Administrator", set())
+				macro_scheduler._sweep_one(m, now, set())
 			return "swept"
 
 		def write(row, new_owner):
@@ -1096,8 +1187,9 @@ class TestRaces(WithColumns):
 			patch.object(macros, "entitlement_block", side_effect=block),
 			patch("jarvis.chat.api._enqueue_turn", return_value={"ok": True}) as enqueue,
 		):
-			with self.assertRaises(frappe.PermissionError):
+			with self.assertRaises(frappe.PermissionError) as raised:
 				macros_api.summarize_macro(macro)
+		self.assertIn("changed hands", str(raised.exception))
 		frappe.db.rollback()
 		enqueue.assert_not_called()
 		row = self._row(macro)

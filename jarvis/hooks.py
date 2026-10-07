@@ -346,6 +346,21 @@ scheduler_events = {
 			# failed runs or notifications.
 			# Cheap no-op (one query) when nothing is due.
 			"jarvis.chat.macro_scheduler.run_due_macros",
+			# Fire any due scheduled auditor agents. Identity-safe (runs each audit
+			# as its owner, never Administrator) and budget-capped; the slot is claimed
+			# under a per-installation lock before the launch, so an overlapping sweep
+			# cannot dispatch it twice. See jarvis/chat/agent_scheduler.py.
+			#
+			# Every five minutes, NOT hourly, for the same reason as the macro sweep
+			# above: the schedule takes a time to the minute, and an hourly sweep started
+			# a 10:15 audit at 11:00. The faster sweep does not run audits more often:
+			# each slot still runs once. A slot whose launch FAILED is retried 55 minutes
+			# later, and again after each failed retry until its next natural time
+			# (agent_scheduler._retry_later writes the retry time to the row). One sweep
+			# dispatches at most SWEEP_MAX_PER_TICK installations and starts none after
+			# SWEEP_TIME_BUDGET_S.
+			# Cheap no-op (one query on a small table) when nothing is due.
+			"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		],
 		"*/2 * * * *": [
 			"jarvis.chat.turn_recovery.recover_pending_turns",
@@ -429,10 +444,6 @@ scheduler_events = {
 		# window, logs both to the greppable latency channel, and alerts past a
 		# threshold. Read-only (never flips a row); cheap (one bounded scan + peeks).
 		"jarvis.chat.session_lifecycle.reconcile_action_cards",
-		# Fire any due scheduled auditor agents. Identity-safe (runs each audit
-		# as its owner, never Administrator); budget-capped; advances only on a
-		# successful enqueue. See jarvis/chat/agent_scheduler.py.
-		"jarvis.chat.agent_scheduler.run_due_agent_audits",
 		# A8 backstop: fail agent runs stuck `running` past the max duration and
 		# tear down their orphaned per-run session bearers (a crashed delegate
 		# would otherwise leave a live session credential forever).
@@ -643,15 +654,22 @@ for _trigger_event in (
 # Desk. A no-op outside a tool call. before_validate, not before_save: before_save
 # is skipped under flags.ignore_validate (create_custom_fields, CRM Settings set it);
 # before_change is what db_set fires. Merged like the trigger dispatcher above.
+# The brake (an uncarded write may not delete, cancel or discard a root document)
+# is merged last so it runs first.
 _WRITE_GUARD = "jarvis.tools._write_risk.guard_doc_event"
-for _guard_event in ("before_validate", "before_change", "before_rename", "on_trash"):
-	_existing_handlers = _star_doc_events.get(_guard_event)
-	if _existing_handlers is None:
-		_star_doc_events[_guard_event] = [_WRITE_GUARD]
-	elif isinstance(_existing_handlers, str):
-		_star_doc_events[_guard_event] = [_WRITE_GUARD, _existing_handlers]
-	else:
-		_existing_handlers.insert(0, _WRITE_GUARD)
+_WRITE_BRAKE = "jarvis.tools._write_risk.brake_doc_event"
+for _guard_handler, _guard_events in (
+	(_WRITE_GUARD, ("before_validate", "before_change", "before_rename", "on_trash")),
+	(_WRITE_BRAKE, ("before_cancel", "before_discard", "before_change", "on_trash")),
+):
+	for _guard_event in _guard_events:
+		_existing_handlers = _star_doc_events.get(_guard_event)
+		if _existing_handlers is None:
+			_star_doc_events[_guard_event] = [_guard_handler]
+		elif isinstance(_existing_handlers, str):
+			_star_doc_events[_guard_event] = [_guard_handler, _existing_handlers]
+		else:
+			_existing_handlers.insert(0, _guard_handler)
 
 # Jarvis Trigger Activity is an append-only log; frappe's standard Log
 # Settings clearing reaps rows older than 90 days (the controller's
@@ -700,14 +718,20 @@ has_permission = {
 # (/api/resource, frappe.client.*, reportview) and every future endpoint
 # inherit it automatically instead of relying on a hand-rolled owner check in
 # each whitelisted function. Conversation/Voice scope by the row owner;
-# Message/Approval scope by the LINKED conversation's owner (+ DocShare for
+# Message/Turn/Approval scope by the LINKED conversation's owner (+ DocShare for
 # Approval). Matrix + SQL fragments live in jarvis/chat/chat_permissions.py.
 # The doctype permission rows carry role "Jarvis User" (not "All"), so the role
-# is genuinely load-bearing: revoking it denies all four via REST.
+# is genuinely load-bearing: revoking it denies all four via REST. Jarvis Chat
+# Turn is readable only by System Manager / Jarvis Admin, and the scoping below
+# limits them to turns of their OWN conversations (a turn holds the prompt and
+# the reply).
 permission_query_conditions.update(
 	{
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.conversation_query_conditions",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.message_query_conditions",
+		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.turn_query_conditions",
+		# A pattern mined from someone's chats stays theirs until they answer (#18).
+		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.pattern_query_conditions",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.approval_query_conditions",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.voice_note_query_conditions",
 	}
@@ -716,6 +740,8 @@ has_permission.update(
 	{
 		"Jarvis Conversation": "jarvis.chat.chat_permissions.has_conversation_permission",
 		"Jarvis Chat Message": "jarvis.chat.chat_permissions.has_message_permission",
+		"Jarvis Chat Turn": "jarvis.chat.chat_permissions.has_turn_permission",
+		"Jarvis Learned Pattern": "jarvis.learning.chat_pattern_privacy.has_pattern_permission",
 		"Jarvis Approval Request": "jarvis.chat.chat_permissions.has_approval_permission",
 		"Jarvis Voice Note": "jarvis.chat.chat_permissions.has_voice_note_permission",
 	}
@@ -927,4 +953,18 @@ has_permission.update(
 # jarvis:macro_snapshot_unreadable: the "this run's unreadable steps snapshot was
 # reported" marker (``macros._report_unreadable_snapshot``); without it a run with a
 # broken snapshot queued a report job every five minutes.
-persistent_cache_keys = ["jarvis:llm_switch", "jarvis:macro_reconcile", "jarvis:macro_snapshot_unreadable"]
+#
+# jarvis:heartbeat_macro_health_log_hour: the once-an-hour log marker for a fault in the
+# heartbeat's scheduled-macro counts (``heartbeat._scheduled_macro_health_safe``); without
+# it a persistent fault would log every five minutes.
+#
+# jarvis:subscription_ (2026-10-06): the pending chat-subscription signals queue
+# (``subscription_health.SIGNAL_KEY``) and its log marker. Without it the same watchdog
+# clear would drop a dead-sign-in signal before the next heartbeat could carry it to admin.
+persistent_cache_keys = [
+	"jarvis:llm_switch",
+	"jarvis:macro_reconcile",
+	"jarvis:macro_snapshot_unreadable",
+	"jarvis:heartbeat_macro_health_log_hour",
+	"jarvis:subscription_",
+]

@@ -37,6 +37,7 @@ import re
 
 import frappe
 
+from jarvis._redis_lock import claim
 from jarvis.chat import filebox_skills, held_parties
 from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._store import (
@@ -162,7 +163,7 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return None
 	from jarvis.chat import held_sheets
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
 	lock_conversation(conversation)
 	collected = None
 	try:
@@ -179,7 +180,7 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 			title="jarvis.file_box.hold_failed", message=f"{conversation}: {tool}\n{frappe.get_traceback()}"
 		)
 		return _refuse("ConfirmationUnavailableError", _UNAVAILABLE)
-	frappe.db.commit()  # release the conversation lock before any dispatch
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 	if verdict == "apply":
 		result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 		if tool == "create_doc" and result.get("ok"):
@@ -364,17 +365,13 @@ def _missed_before(conversation: str, items: list[dict], needs_input: list[dict]
 def seen_once(keys, event: str = "held_miss_cache_failed") -> bool:
 	"""Tries once: True when one of ``keys`` was already seen. Records them for an
 	hour; a lost key just gives one more try, and a cache failure reads as seen
-	(never an endless retry loop). Raw ``get`` / ``set``: the wrappers
-	(``get_value``, ``exists``, ...) read an outage as a miss."""
-	keys = {frappe.cache.make_key(k) for k in keys}
+	(never an endless retry loop)."""
 	try:
-		seen = any(frappe.cache.get(k) is not None for k in keys)
-		for k in keys:
-			frappe.cache.set(k, 1, ex=MISS_TTL_S)
+		claimed = [claim(k, MISS_TTL_S) for k in set(keys)]
 	except Exception:
 		frappe.log_error(title=f"jarvis.file_box.{event}", message=frappe.get_traceback())
 		return True
-	return seen
+	return not all(claimed)
 
 
 def parse_needs_input(value) -> list[dict]:
@@ -505,7 +502,7 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 	from jarvis.tools._bulk import _MAX_BATCH
 
 	if len(items) > _MAX_BATCH:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 		return _refuse(
 			"InvalidArgumentError",
 			f"too many records in one batch ({len(items)}); the max is {_MAX_BATCH}. Split them into "
@@ -513,7 +510,7 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 		)
 	match = _existing_party(items)
 	if match:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 		label = match["title"] or match["name"]
 		return _refuse(
 			"InvalidArgumentError",
@@ -539,7 +536,7 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 		preview = None
 	frappe.clear_messages()
 	if not items:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 		return _refuse("InvalidArgumentError", "Nothing to write: give a doctype and values.")
 	keys = [held_parties.item_key(i) for i in items]
 	owner = frappe.db.get_value(CONV, conversation, "owner") or frappe.session.user
@@ -555,7 +552,7 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 		if attempt == 0:
 			lock_conversation(conversation)
 			if waiting_on(conversation):  # another write of this run was held while unlocked
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 				return _refuse("ApprovalPendingError", _PENDING_REFUSAL)
 	frappe.log_error(
 		title="jarvis.file_box.hold_failed", message=f"{conversation}: {tool} could not be held after a retry"
@@ -572,7 +569,7 @@ def _recent_refusal(name: str) -> dict:
 	data = (row and row.summary) or "held records"
 	if row and row.result_name:
 		data += f" -> {row.result_doctype} {row.result_name}"
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 	return _refuse("AlreadyApprovedError", _RECENT_NOTE.format(data=_safe_label_name(data)))
 
 
@@ -587,7 +584,7 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_
 	if verdict == "join":
 		if not _join(row, conversation):
 			raise _Rescan(row)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 		return _held(_WAIT_NOTE if subset else _OVERLAP_NOTE, labels)
 	# A held write that changes sensitive configuration (an Employee user, portal
 	# users) gets the chat gate's card: the risk line, the record in full, and the
@@ -597,7 +594,7 @@ def _dedup_or_park(tool, args, conversation, items, keys, owner, preview, needs_
 		tool, args, preview if isinstance(preview, dict) else {}, sensitive=sensitive
 	)
 	if refusal is not None:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 		return refusal
 	title = held_title(items)
 	name = park(
@@ -877,7 +874,7 @@ def mark_resume_failed(conversations) -> None:
 	from jarvis.chat.filebox import _FAILURES
 
 	now = frappe.utils.now_datetime()
-	for conv in sorted(set(filter(None, conversations))):
+	for conv in sorted({conv for conv in conversations if conv}):
 		frappe.db.set_value(
 			CONV,
 			conv,
@@ -893,7 +890,7 @@ def _resume_one(row, waiter, message: str) -> bool:
 	if not _set_state(waiter.name, "claimed", ("due",)):
 		frappe.db.rollback()
 		return False
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before resume
 	reason = _refusal_reason(row, waiter.conversation)
 	if reason:
 		lock_conversation(waiter.conversation)  # conversation -> waiter
@@ -902,7 +899,7 @@ def _resume_one(row, waiter, message: str) -> bool:
 		frappe.log_error(
 			title="jarvis.file_box.resume_failed", message=f"{row.name} -> {waiter.conversation}: {reason}"
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
 		return False
 	claim = {}
 
@@ -948,5 +945,5 @@ def _resume_one(row, waiter, message: str) -> bool:
 			message=f"{row.name} -> {waiter.conversation}: the resume reported a failure after it "
 			"committed; not retried",
 		)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- per-waiter outcome survives the loop
 	return False

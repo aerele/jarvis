@@ -89,12 +89,12 @@ def eligible_titles(user: str, *, limit: int = MAX_TITLES) -> list[str]:
 	"""
 	cutoff = frappe.utils.add_days(frappe.utils.now_datetime(), -LOOKBACK_DAYS)
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT c.title,
-		       (SELECT COUNT(*) FROM `tab{MSG_DT}` m
+		       (SELECT COUNT(*) FROM `tabJarvis Chat Message` m
 		         WHERE m.conversation = c.name AND m.role IN ('user', 'assistant'))
 		           AS message_count
-		FROM `tab{CONV}` c
+		FROM `tabJarvis Conversation` c
 		WHERE c.owner = %s AND c.status = 'Active' AND c.last_active_at >= %s
 		ORDER BY c.last_active_at DESC
 		""",
@@ -328,7 +328,6 @@ def touch(user: str) -> None:
 		)
 
 	txn.replay_on_conflict(write, label="suggestions.touch")
-	frappe.db.commit()
 
 
 def store(user: str, items: list[dict]) -> None:
@@ -358,7 +357,6 @@ def store(user: str, items: list[dict]) -> None:
 		)
 
 	txn.replay_on_conflict(write, label="suggestions.store")
-	frappe.db.commit()
 
 
 def read(user: str) -> list[dict]:

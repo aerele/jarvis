@@ -294,16 +294,18 @@ def _lock_shard(target: str) -> None:
 	acquiring the lock is NEVER a non-locking read. Callers commit their own
 	durable work BEFORE entering, so this commit never drops pending state."""
 	_ensure_control_row(target)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 	assert_lock_order("shard")
-	frappe.db.sql(f"SELECT name FROM `tab{PUMP}` WHERE name=%(t)s FOR UPDATE", {"t": target})
+	frappe.db.sql("SELECT name FROM `tabJarvis Relay Pump` WHERE name=%(t)s FOR UPDATE", {"t": target})
 
 
 def _lock_conversation(conversation: str) -> None:
 	"""Second lock in the canonical order (rank 2); defends per-conversation
 	single-flight / seq allocation (OAR-6)."""
 	assert_lock_order("conversation")
-	frappe.db.sql(f"SELECT name FROM `tab{CONV}` WHERE name=%(c)s FOR UPDATE", {"c": conversation})
+	frappe.db.sql(
+		"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE", {"c": conversation}
+	)
 
 
 def unfinished_turn_state(conversation: str) -> str | None:
@@ -311,7 +313,7 @@ def unfinished_turn_state(conversation: str) -> str | None:
 	finishing or recovering), or None when every turn has. One row off the
 	(conversation, state) index, however many turns the chat has had."""
 	rows = frappe.db.sql(
-		f"""SELECT state FROM `tab{TURN}`
+		"""SELECT state FROM `tabJarvis Chat Turn`
 		WHERE conversation=%(c)s AND state IN %(live)s LIMIT 1""",
 		{"c": conversation, "live": NONTERMINAL_STATES},
 	)
@@ -1281,7 +1283,7 @@ def all_required_effects_done(run_id: str) -> bool:
 	"""True iff no required effect row for the turn is still pending/running (the D2
 	row 12 finalize guard, mirrored in Python for the caller's pre-check)."""
 	return not frappe.db.sql(
-		f"""SELECT 1 FROM `tab{EFFECT}` WHERE turn=%(r)s AND status!='done' LIMIT 1""",
+		"""SELECT 1 FROM `tabJarvis Turn Effect` WHERE turn=%(r)s AND status!='done' LIMIT 1""",
 		{"r": run_id},
 	)
 
@@ -1295,7 +1297,7 @@ def visible_effects_done(run_id: str) -> bool:
 	a future required set with none) reads True vacuously, matching intent:
 	nothing visible is held, so there is nothing for the affordance to wait on."""
 	return not frappe.db.sql(
-		f"""SELECT 1 FROM `tab{EFFECT}` WHERE turn=%(r)s AND status!='done'
+		"""SELECT 1 FROM `tabJarvis Turn Effect` WHERE turn=%(r)s AND status!='done'
 		AND effect_name IN %(names)s LIMIT 1""",
 		{"r": run_id, "names": VISIBLE_EFFECT_NAMES},
 	)
@@ -1328,8 +1330,8 @@ def shards_with_open_effects() -> list[str]:
 	errored/cancelled (terminal) turn whose owed effects would otherwise be invisible
 	to a nonterminal-only scan."""
 	rows = frappe.db.sql(
-		f"""SELECT DISTINCT t.relay_target_id
-		FROM `tab{EFFECT}` e INNER JOIN `tab{TURN}` t ON t.run_id = e.turn
+		"""SELECT DISTINCT t.relay_target_id
+		FROM `tabJarvis Turn Effect` e INNER JOIN `tabJarvis Chat Turn` t ON t.run_id = e.turn
 		WHERE e.status != 'done'"""
 	)
 	return [r[0] for r in rows if r[0]]
@@ -1344,8 +1346,8 @@ def turns_with_open_effects(target: str) -> list[str]:
 	watchdog never fights a healthy in-flight finalize."""
 	stale_cut = frappe.utils.add_to_date(None, seconds=-EFFECT_CLAIM_STALE_S)
 	rows = frappe.db.sql(
-		f"""SELECT DISTINCT e.turn
-		FROM `tab{EFFECT}` e INNER JOIN `tab{TURN}` t ON t.run_id = e.turn
+		"""SELECT DISTINCT e.turn
+		FROM `tabJarvis Turn Effect` e INNER JOIN `tabJarvis Chat Turn` t ON t.run_id = e.turn
 		WHERE t.relay_target_id=%(t)s
 		  AND ( e.status='pending'
 		        OR (e.status='running' AND (e.claimed_at IS NULL OR e.claimed_at < %(stale)s)) )""",
@@ -1380,7 +1382,7 @@ def lease_acquire(target: str, holder: str, hop_counter: int | None = None) -> t
 	COMMITTED and REPEATABLE READ, D4 Q2). Returns (won, new_epoch). Manages its
 	own transaction (a standalone pump lifecycle op)."""
 	_ensure_control_row(target)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	now = _now()
 	exp = frappe.utils.add_to_date(None, seconds=LEASE_TTL_S)
 	hop_set = ", hop_counter=%(hop)s" if hop_counter is not None else ""
@@ -1424,7 +1426,7 @@ def lease_acquire(target: str, holder: str, hop_counter: int | None = None) -> t
 		WHERE relay_target_id=%(t)s AND state IN ('{inflight}')""",
 		{"e": epoch, "t": target},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist lease change
 	return (True, epoch)
 
 
@@ -1450,7 +1452,7 @@ def lease_handoff(target: str, epoch: int, next_hop: int, successor_holder: str)
 	    this value).
 	The caller COMMITS via this function, THEN enqueues the fresh successor id.
 	Returns won/lost. Commits its own transaction (a standalone lifecycle op)."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	past = frappe.utils.add_to_date(None, seconds=-1)
 	won = (
 		_run_cas(
@@ -1461,7 +1463,7 @@ def lease_handoff(target: str, epoch: int, next_hop: int, successor_holder: str)
 		)
 		== 1
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist lease change
 	return won
 
 
@@ -1492,7 +1494,7 @@ def force_expire_wedged(target: str, epoch: int, stale_after_s: int) -> bool:
 	The CALLER (the watchdog) clears the Redis lease mirror + ``ensure_pump`` on a won
 	result. Returns won/lost; idempotent under the epoch CAS (a second call at the same
 	E affects 0 rows). Commits (a standalone lifecycle op)."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	now = _now()
 	past = frappe.utils.add_to_date(None, seconds=-1)
 	cutoff = frappe.utils.add_to_date(now, seconds=-int(stale_after_s))
@@ -1517,7 +1519,7 @@ def force_expire_wedged(target: str, epoch: int, stale_after_s: int) -> bool:
 		WHERE relay_target_id=%(t)s AND state IN ('{inflight}')""",
 		{"e": new_epoch, "t": target},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist lease change
 	return True
 
 
@@ -1525,7 +1527,7 @@ def lease_renew(target: str, epoch: int, holder: str | None = None) -> bool:
 	"""Extend the lease TTL while THIS pump still holds the epoch (D2 §3). CAS on
 	``pump_epoch=E`` — a pump that lost the epoch to a takeover renews 0 rows and
 	must exit. Returns won/lost. Commits (a standalone heartbeat op)."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	exp = frappe.utils.add_to_date(None, seconds=LEASE_TTL_S)
 	sets = "lease_expires_at=%(exp)s"
 	params = {"exp": exp, "t": target, "e": epoch}
@@ -1539,7 +1541,7 @@ def lease_renew(target: str, epoch: int, holder: str | None = None) -> bool:
 		)
 		== 1
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist lease change
 	return won
 
 
@@ -1547,7 +1549,7 @@ def lease_heartbeat(target: str, epoch: int) -> bool:
 	"""Write ``loop_heartbeat_ts`` (loop-WRITTEN liveness, DISTINCT from lease
 	renewal, Amendment E) while THIS pump holds the epoch — catches the
 	live-but-wedged pump the lease alone cannot. Returns won/lost. Commits."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	won = (
 		_run_cas(
 			f"""UPDATE `tab{PUMP}` SET loop_heartbeat_ts=%(now)s
@@ -1556,7 +1558,7 @@ def lease_heartbeat(target: str, epoch: int) -> bool:
 		)
 		== 1
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist lease change
 	return won
 
 
@@ -1583,7 +1585,7 @@ def lease_release_if_idle(target: str, epoch: int) -> bool:
 	Commit-first REPEATABLE-READ discipline: the ``NOT EXISTS`` subquery must see
 	turns committed by concurrent senders, so we commit first to start a fresh
 	transaction whose read view is established at this statement. Commits."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	nonterm = "','".join(NONTERMINAL_STATES)
 	released = (
 		_run_cas(
@@ -1598,7 +1600,7 @@ def lease_release_if_idle(target: str, epoch: int) -> bool:
 		)
 		== 1
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist lease change
 	return released
 
 

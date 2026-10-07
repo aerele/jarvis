@@ -1008,4 +1008,45 @@ describe("MacrosAdminPane, hand over", () => {
 			w.unmount();
 		}
 	});
+
+	it("after a refusal, shows the open dialog the owner the re-read found", async () => {
+		const w = await mountWith([row("a")]);
+		await handoverButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(
+			page([row("a", { owner: "ben@example.test", owner_full_name: "Ben" })])
+		);
+		const dialog = w.findComponent({ name: "MacroHandoverDialog" });
+		dialog.vm.$emit("failed", { name: "a", message: "This macro changed hands." });
+		await flushPromises();
+		const stub = w.find(".stub-handover");
+		expect(stub.attributes("data-open")).toBe("1");
+		expect(stub.attributes("data-owner")).toBe("ben@example.test");
+		expect(stub.attributes("data-owner-label")).toBe("Ben (ben@example.test)");
+		expect(toast.error).not.toHaveBeenCalled();
+	});
+
+	it("after a refusal, closes the dialog with its message when the macro is no longer listed", async () => {
+		const w = await mountWith([row("a"), row("b")]);
+		await handoverButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([row("b")]));
+		const dialog = w.findComponent({ name: "MacroHandoverDialog" });
+		dialog.vm.$emit("failed", { name: "a", message: "<b>Changed</b> hands." });
+		await flushPromises();
+		expect(w.find(".stub-handover").attributes("data-open")).toBe("");
+		expect(toast.error).toHaveBeenCalledWith("&lt;b&gt;Changed&lt;/b&gt; hands.");
+	});
+
+	it("leaves the open dialog alone when another macro's action fails", async () => {
+		const w = await mountWith([row("a"), row("b")]);
+		await handoverButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([row("a")]));
+		const dialog = w.findComponent({ name: "MacroHandoverDialog" });
+		dialog.vm.$emit("failed", { name: "b", message: "Gone." });
+		await flushPromises();
+		const stub = w.find(".stub-handover");
+		expect(stub.attributes("data-open")).toBe("1");
+		expect(stub.attributes("data-name")).toBe("a");
+		expect(stub.attributes("data-owner")).toBe("asha@example.test");
+		expect(toast.error).not.toHaveBeenCalled();
+	});
 });

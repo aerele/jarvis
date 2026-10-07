@@ -257,6 +257,37 @@ export function toolFailureCopy(toolResult) {
 	};
 }
 
+// The failure reference (round 2): a failed confirmation's own id, which the bench
+// stamps as ``error.reference`` so a person can quote it to support. Read from an
+// envelope, its ``error``, or a receipt's stored JSON result; "" when there is none
+// (a draft-panel save or a legacy card has no confirmation row to point at).
+export function failureReferenceOf(value) {
+	let v = value;
+	if (typeof v === "string") {
+		try {
+			v = JSON.parse(v);
+		} catch (e) {
+			return "";
+		}
+	}
+	if (!v || typeof v !== "object") return "";
+	const err = v.error && typeof v.error === "object" ? v.error : v;
+	return typeof err.reference === "string" ? err.reference.trim() : "";
+}
+
+// Copy ``text`` to the clipboard: true when it took it. False when there is no
+// clipboard (an insecure page) or it refused, so the caller can fall back to
+// selecting the text for a manual copy.
+export async function copyText(text, clipboard = globalThis.navigator?.clipboard) {
+	if (!text || !clipboard || typeof clipboard.writeText !== "function") return false;
+	try {
+		await clipboard.writeText(text);
+		return true;
+	} catch (e) {
+		return false;
+	}
+}
+
 // Wall-clock expiry for a parked confirmation. ``expiresAt`` is epoch SECONDS (as
 // the server stamps it); ``nowMs`` is Date.now(). Returns {expired, secondsLeft}
 // (secondsLeft null when there is no expiry stamp — an older token).
@@ -375,7 +406,7 @@ function receiptNames(tool, args, data, outcome) {
 }
 
 // The render-ready receipt: { outcome, icon, tone, title, subject, doctype,
-// action, count, targets:[{name,url}], error }.
+// action, count, targets:[{name,url}], error, reference }.
 export function receiptView(tool, args, result, outcome) {
 	args = args || {};
 	const data = (result && typeof result === "object" && result.data) || {};
@@ -485,7 +516,23 @@ export function receiptView(tool, args, result, outcome) {
 		tone = "warning";
 		title = "Outcome unknown — check before retrying";
 	}
-	return { outcome, icon, tone, title, subject, doctype, action, count, targets, error };
+	// Only a chip whose change did not (fully) go through points at its confirmation.
+	const reference = ["failed", "partial", "unknown"].includes(icon)
+		? failureReferenceOf(result)
+		: "";
+	return {
+		outcome,
+		icon,
+		tone,
+		title,
+		subject,
+		doctype,
+		action,
+		count,
+		targets,
+		error,
+		reference,
+	};
 }
 
 // Convenience one-liner (tests / plain-text contexts).

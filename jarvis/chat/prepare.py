@@ -72,7 +72,7 @@ def _claim_preparing_unit(run_id: str) -> dict:
 	# won / the turn moved; no-op.
 	if not ts.claim_preparing(run_id, int(turn["version"])):
 		return {"turn": turn, "claimed": False, "skipped": "claim_lost"}
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
 	return {"turn": turn, "claimed": True, "skipped": None}
 
 
@@ -331,13 +331,13 @@ def _create_placeholder_locked(conversation: str) -> str:
 	conversation FOR UPDATE lock (R-1 / canonical rank 2), so it never collides with
 	a concurrent out-of-band tool receipt on the same conversation. Commit-first so
 	the lock is the first statement (REPEATABLE-READ discipline)."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh txn before row lock
 	ts._lock_conversation(conversation)
 	try:
 		seq = (
-			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[
-				0
-			][0]
+			frappe.db.sql(
+				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+			)[0][0]
 			or 0
 		) + 1
 		doc = frappe.get_doc(
@@ -352,7 +352,7 @@ def _create_placeholder_locked(conversation: str) -> str:
 		)
 		doc.flags.ignore_permissions = True
 		doc.insert()
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
 		return doc.name
 	finally:
 		ts.reset_lock_tracking()
@@ -405,7 +405,7 @@ def _attach_placeholder_unit(conversation: str, run_id: str, version: int) -> tu
 	if not won:
 		_discard_orphan_placeholder(assistant_msg)
 		return False, None
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
 	return True, assistant_msg
 
 
@@ -419,7 +419,7 @@ def _store_dispatch_payload_unit(run_id: str, version: int, payload_json: str) -
 	on that path."""
 	won = ts.store_dispatch_payload(run_id, version, payload_json)
 	if won:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
 	return won
 
 
@@ -428,7 +428,7 @@ def _mark_ready_unit(run_id: str, version: int) -> bool:
 	Same shape as ``_store_dispatch_payload_unit``."""
 	won = ts.mark_ready(run_id, version)
 	if won:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
 	return won
 
 

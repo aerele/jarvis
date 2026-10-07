@@ -422,8 +422,8 @@ class TestLeaverSchedulesAreSwitchedOff(MacroSchedulerBase):
 		m = _mk_macro(OWNER_OFF, "leave-overlap")
 		stale = frappe.get_all(MACRO, filters={"name": m.name}, fields=["*"])[0]
 
-		macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
-		macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+		macro_scheduler._sweep_one(stale, now_datetime(), set())
+		macro_scheduler._sweep_one(stale, now_datetime(), set())
 
 		self.assertEqual(len(_runs_for(m.name)), 1, "the second sweep recorded the failure again")
 		self._assert_switched_off(m)
@@ -525,7 +525,7 @@ class TestLeaverSchedulesAreSwitchedOff(MacroSchedulerBase):
 		stale = frappe.get_all(MACRO, filters={"name": paused.name}, fields=["*"])[0]
 		self._run_due()
 
-		macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+		macro_scheduler._sweep_one(stale, now_datetime(), set())
 
 		self._assert_switched_off(paused)
 		self.assertIsNone(_schedule_state(paused.name).last_run_at)
@@ -1256,8 +1256,8 @@ class TestScheduledMacroCadence(MacroSchedulerBase):
 		m = _mk_macro(OWNER_OK, "claimed-elsewhere")
 		stale = frappe.get_all(MACRO, filters={"name": m.name}, fields=["*"])[0]
 		with patch("jarvis.chat.macros.run_macro", return_value={"ok": True}) as mock_run:
-			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
-			macro_scheduler._sweep_one(stale, now_datetime(), frappe.session.user, set())
+			macro_scheduler._sweep_one(stale, now_datetime(), set())
+			macro_scheduler._sweep_one(stale, now_datetime(), set())
 		self.assertEqual(self._dispatches(mock_run, m), 1, "a stale read of a taken slot ran it twice")
 
 	def test_a_run_whose_bookkeeping_blew_up_is_neither_rerun_nor_reported_failed(self):

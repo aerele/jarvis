@@ -16,6 +16,8 @@ import contextlib
 
 import frappe
 from frappe import _
+from frappe.query_builder.functions import Count
+from pypika.terms import Criterion
 
 from jarvis.chat import list_filters
 from jarvis.chat.custom_skills import (
@@ -462,10 +464,10 @@ def _create_custom_skill_impl(
 	if (scope or "").strip() in ("Role", "Org"):
 		with _catalog_lock():
 			doc.insert(ignore_permissions=bool(ignore_permissions))
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- durable before catalog lock release
 	else:
 		doc.insert(ignore_permissions=bool(ignore_permissions))
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each skill durable in batch ingest
 	return {"ok": True, "data": {"name": doc.name, "skill_name": doc.skill_name}}
 
 
@@ -518,10 +520,8 @@ def update_custom_skill(
 	if scope in ("Role", "Org"):
 		with _catalog_lock():
 			doc.save()
-			frappe.db.commit()
 	else:
 		doc.save()
-		frappe.db.commit()
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
@@ -545,7 +545,7 @@ def delete_custom_skill(name: str) -> dict:
 	container on the next Apply (the fleet endpoint does a full reconcile)."""
 	_require_skill_owner(frappe.get_doc(SKILL, name), "delete")
 	frappe.delete_doc(SKILL, name)  # ORM hook also enforces owner-only delete
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -579,7 +579,7 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 			# Never leak internal exception text to the client — log server-side.
 			frappe.log_error(title="Jarvis: bulk skill delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	# Only a reviewer's delete reconciles the shared catalog (TASK 12): a plain
 	# Jarvis User's rows are User/Role-scope and never in the shared push, so
 	# their delete changes nothing there and must not trigger a bench-wide
@@ -641,7 +641,7 @@ def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 		clean.append(u)
 	doc.set("shared_with", [{"user": u} for u in clean])
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"count": len(clean)}}
 
 
@@ -890,7 +890,7 @@ def request_skill_promotion(
 		}
 	)
 	req.insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notifying
 	_notify_skill_reviewers(req.name)
 	return {"ok": True, "request": req.name, "skill": doc.skill_name}
 
@@ -918,7 +918,7 @@ def _stamp_decision(
 	if skip_link_validation:
 		req.flags.ignore_links = True
 	req.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision survives later failure
 
 
 @frappe.whitelist()
@@ -1261,33 +1261,46 @@ def list_skill_promotion_requests(
 	if status and status != "All" and status not in _PROMO_STATUSES:
 		frappe.throw(_("Invalid status filter."))
 
-	params: dict = {"start": start, "page_length": pl}
-	conds: list[str] = []
+	promo = frappe.qb.DocType(PROMO)
+	conds = []
 	if status and status != "All":
-		params["status"] = status
-		conds.append("status = %(status)s")
+		conds.append(promo.status == status)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(skill_name LIKE %(q)s OR note LIKE %(q)s)")
-	where = " AND ".join(conds) or "1=1"
+		q = f"%{_lk(search)}%"
+		conds.append(promo.skill_name.like(q) | promo.note.like(q))
+	where = Criterion.all(conds)
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
+	total = frappe.qb.from_(promo).select(Count("*")).where(where).run()[0][0]
+	fields = [
+		"name",
+		"skill",
+		"skill_name",
+		"from_scope",
+		"to_scope",
+		"target_role",
+		"note",
+		"status",
+		"owner",
+		"creation",
+		"reviewer",
+		"decided_at",
+		"decision_note",
+		"instructions_snapshot",
+		"description_snapshot",
+		"user_invocable_snapshot",
+	]
 	# File Box's snapshot columns, once migrated (code may be served ahead of migrate).
-	file_box = (
-		", use_in_file_box_snapshot, file_box_creates_snapshot"
-		if frappe.get_meta(PROMO).has_field("file_box_creates_snapshot")
-		else ""
-	)
-	rows = frappe.db.sql(
-		f"""SELECT name, skill, skill_name, from_scope, to_scope, target_role,
-			note, status, owner, creation, reviewer, decided_at, decision_note,
-			instructions_snapshot, description_snapshot, user_invocable_snapshot{file_box}
-		FROM `tab{PROMO}`
-		WHERE {where}
-		ORDER BY creation DESC, name ASC
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	if frappe.get_meta(PROMO).has_field("file_box_creates_snapshot"):
+		fields += ["use_in_file_box_snapshot", "file_box_creates_snapshot"]
+	rows = (
+		frappe.qb.from_(promo)
+		.select(*(promo[f] for f in fields))
+		.where(where)
+		.orderby(promo.creation, order=frappe.qb.desc)
+		.orderby(promo.name, order=frappe.qb.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 
 	# Multi-role: attach every request's FULL target_roles set (one batched query),
@@ -1601,7 +1614,7 @@ def _apply_custom_skills_impl() -> dict:
 	reviewer)."""
 	skills = build_push_payload(strict=True)
 	frappe.db.set_single_value(_SETTINGS, "custom_skills_sync_status", "pending: applying skills")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	frappe.enqueue(
 		"jarvis.chat.custom_skills_api._enqueued_push_custom_skills",
@@ -1633,15 +1646,14 @@ def _enqueued_push_custom_skills() -> None:
 			frappe.db.set_single_value(
 				_SETTINGS, "custom_skills_sync_status", "failed: skipped (concurrent sync)"
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- status survives caller rollback
 			return
 
 		terminal_written = False
 		try:
 			payload = build_push_payload(strict=False)
 			admin_client.post_push_custom_skills(skills=payload)
-			frappe.db.set_value(
-				_SETTINGS,
+			frappe.db.set_single_value(
 				_SETTINGS,
 				{
 					"custom_skills_synced_at": frappe.utils.now(),
@@ -1680,12 +1692,10 @@ def _enqueued_push_custom_skills() -> None:
 					_fail("failed: unexpected error; see Error Log")
 				except Exception:
 					pass
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- terminal status survives later failure
 
 
 def _fail(status: str) -> None:
-	frappe.db.set_value(
-		_SETTINGS,
-		_SETTINGS,
-		{"custom_skills_synced_at": frappe.utils.now(), "custom_skills_sync_status": status},
+	frappe.db.set_single_value(
+		_SETTINGS, {"custom_skills_synced_at": frappe.utils.now(), "custom_skills_sync_status": status}
 	)

@@ -80,6 +80,7 @@ class ServiceWorkerRenderer(BaseRenderer):
 		return self.path == SW_ROUTE and os.path.isfile(_sw_path())
 
 	def render(self):
+		# nosemgrep: frappe-security-file-traversal -- fixed bundled asset
 		with open(_sw_path(), "rb") as f:
 			data = f.read()
 

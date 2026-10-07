@@ -436,7 +436,7 @@ def maybe_autotitle(conversation_id: str, user: str, *, gateway_url, model, prov
 	landed = txn.replay_on_conflict(_write_title, label=f"autotitle {conversation_id}", fresh=True)
 	if not landed:
 		return
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before publish
 	publish_to_user(
 		user,
 		{

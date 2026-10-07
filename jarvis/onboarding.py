@@ -12,6 +12,7 @@ from jarvis import (
 	admin_client,
 	announcement,
 	catalogue_visibility,
+	compat,
 	maintenance_notice,
 	onboarding_contract,
 	release_notice,
@@ -223,7 +224,7 @@ def write_connection(data: dict) -> None:
 			elif data.get("runtime_profile_status") == "unsupported_runtime":
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
-				set_settings_password(s, "agent_token", data["agent_token"])
+				_store_agent_token(s, data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -255,6 +256,19 @@ def write_connection(data: dict) -> None:
 	# key means "cleared" - which would drop a live notice. It is persisted only
 	# where a full get_connection payload is in hand: sync_connection and the
 	# chat gate.
+
+
+def _store_agent_token(settings, token: str) -> None:
+	"""Store the agent token and stamp when this site got it. A new token (an
+	admin-side rotation or reconnect arrives here) restarts the clock, and a token
+	with no stamp yet gets one, so the age check (oauth.cron.check_agent_token_age)
+	always has a date to warn from."""
+	from jarvis._password_utils import set_settings_password
+
+	changed = (settings.get_password("agent_token", raise_exception=False) or "") != token
+	set_settings_password(settings, "agent_token", token)
+	if changed or not settings.get("agent_token_issued_at"):
+		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
 
 
 @frappe.whitelist()
@@ -769,7 +783,7 @@ def save_llm_pool(
 	idempotency_key = (idempotency_key or "").strip()
 	s.flags.suppress_pool_enqueue = True
 	s.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 	# The pool this workspace runs on just changed, so the readiness verdict admin
 	# gave about the PREVIOUS one is finished. account._admin_chat_gate keys its
 	# cache by config revision and this save moves it, so the old entry is already
@@ -853,12 +867,7 @@ def save_llm_pool(
 			# restart's confirmed apply (see readiness_budget_s comment above).
 			readiness_budget_s = 300
 
-	row = (
-		frappe.db.get_value(
-			"Jarvis Settings", "Jarvis Settings", ["last_sync_at", "last_sync_status"], as_dict=True
-		)
-		or {}
-	)
+	row = compat.single_values("Jarvis Settings", ["last_sync_at", "last_sync_status"])
 	return {
 		# Plan-05 D2 (review §8.4): the durable operation descriptor the SPA follows,
 		# or null on the legacy single-model path / an unallocated failure.
@@ -983,7 +992,7 @@ def apply_local_disconnect(settings) -> None:
 	_clear_llm_secrets(settings)
 	for field, value in _DISCONNECTED_LLM_FIELDS.items():
 		settings.db_set(field, value, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 	# There is no connection left for a cached "Ready" to be about.
 	from jarvis.account import _bust_chat_gate
 
@@ -2234,7 +2243,7 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	# container that never received the config (jarvis#841 review).
 	settings.db_set("llm_last_apply_fingerprint", "")
 	_bust_chat_gate()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 
 
 @frappe.whitelist()
@@ -2331,7 +2340,7 @@ def _workspace_reset_poll() -> dict:
 		settings._resync_custom_skills_after_restart()
 		settings._resync_learned_skills_after_restart()
 		_bust_chat_gate()
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 	elif _resetting() and data.get("agent_url") and not (settings.get("agent_url") or ""):
 		# New container reachable but not Ready yet: reconnect the transport, then re-push
 		# the bench-owned state the fresh container is missing. Previously this re-pushed
@@ -2351,9 +2360,9 @@ def _workspace_reset_poll() -> dict:
 		# (still-uncommitted) agent_url and strand the tenant transport-less while clearing
 		# the reset marker. Committing here scopes any later rollback to the resync's own
 		# writes. (reprovision review I-2.)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scope later rollback
 		_resync_after_rebuild(settings)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scope later rollback
 	return {
 		"ready": ready,
 		"resetting": _resetting(),
@@ -2471,7 +2480,7 @@ def save_llm_creds(
 		# (e.g. db_set for last_sync_status) doesn't double-fire.
 		s.flags.force_admin_sync = True
 	s.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 	# Same reason as save_llm_pool's: the cached readiness verdict was about the
 	# credential this save replaced.
 	from jarvis.account import _bust_chat_gate
@@ -2482,15 +2491,7 @@ def save_llm_creds(
 	# need rather than reloading the entire Singles doc (the previous
 	# shape was ``frappe.get_single(...)`` then ``.get(...)`` on
 	# every field - pointless re-fetch from the 2026-06-16 review).
-	row = (
-		frappe.db.get_value(
-			"Jarvis Settings",
-			"Jarvis Settings",
-			["last_sync_at", "last_sync_status"],
-			as_dict=True,
-		)
-		or {}
-	)
+	row = compat.single_values("Jarvis Settings", ["last_sync_at", "last_sync_status"])
 	return {
 		"last_sync_at": str(row.get("last_sync_at") or ""),
 		"last_sync_status": row.get("last_sync_status") or "",
@@ -2736,7 +2737,7 @@ def resync_llm() -> dict:
 		# reconcile(), which ends that switch on this same stamp.
 		if _stamp_converged_ok(settings, is_pool=compute_pool_mode(settings)):
 			# The stamp's own commit gate only fires in a worker; this is a request.
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 		return {**get_llm_sync_status(), "outcome": "converged", "leg": ""}
 
 	cache = frappe.cache()
@@ -2813,6 +2814,6 @@ def _reconcile_pending_applying(settings) -> str | None:
 	# _stamp_converged_ok's commit gate only fires in a worker/migrate context;
 	# this runs in a web request, where a GET would otherwise roll the terminal
 	# write back at request end.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	llm_switch.reconcile()
 	return settings.get("last_sync_status")

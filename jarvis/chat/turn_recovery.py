@@ -25,12 +25,14 @@ import contextlib
 from collections.abc import Iterator
 
 import frappe
+from frappe.query_builder import Order
+from frappe.query_builder.functions import Min
 
 from jarvis.chat import egress_rules, txn
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
 from jarvis.chat.runtime_profile import get_profile
-from jarvis.chat.seq_watermark import wm_expr
+from jarvis.chat.seq_watermark import wm_term
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
@@ -144,16 +146,15 @@ def _conditional_clear(name: str, fields: dict) -> bool:
 	"""Apply `fields` to a row ONLY if it is still streaming=1 AND recovering=1.
 	Returns True if this call won the row (so the caller publishes), False if
 	another cycle already finalized it. Idempotency guard for #8."""
-	set_clause = ", ".join(f"`{k}` = %({k})s" for k in fields)
-	params = dict(fields, name=name)
-	frappe.db.sql(
-		f"UPDATE `tab{MSG}` SET {set_clause} WHERE name = %(name)s AND streaming = 1 AND recovering = 1",
-		params,
-	)
+	msg = frappe.qb.DocType(MSG)
+	query = frappe.qb.update(msg).where(msg.name == name).where(msg.streaming == 1).where(msg.recovering == 1)
+	for field, value in fields.items():
+		query = query.set(msg[field], value)
+	query.run()
 	# Read rowcount BEFORE commit (commit can reset the cursor).
 	cursor = getattr(frappe.db, "_cursor", None)
 	won = bool(cursor and cursor.rowcount)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist conditional clear
 	return won
 
 
@@ -366,19 +367,28 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	# Query rows FIRST (so we never load Settings on an empty bench, #14).
 	# Ordered conversation, seq DESC so the first row per conversation is the
 	# latest (used for the no-bleed dedup, #2).
-	rows = frappe.db.sql(
-		f"""
-		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
-		FROM `tabJarvis Chat Message` m
-		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
-		WHERE m.streaming = 1 AND m.recovering = 1
-		  AND c.session_key IS NOT NULL AND c.session_key != ''
-		ORDER BY m.conversation ASC, m.seq DESC
-		LIMIT %(limit)s
-		""",
-		{"limit": limit},
-		as_dict=True,
+	m = frappe.qb.DocType(MSG)
+	c = frappe.qb.DocType(CONV)
+	rows = (
+		frappe.qb.from_(m)
+		.join(c)
+		.on(c.name == m.conversation)
+		.select(
+			m.name,
+			m.conversation,
+			c.session_key,
+			c.owner,
+			m.recovery_started_at,
+			m.seq,
+			wm_term(m).as_("agent_seq_watermark"),
+			m.creation,
+		)
+		.where((m.streaming == 1) & (m.recovering == 1))
+		.where(c.session_key.isnotnull() & (c.session_key != ""))
+		.orderby(m.conversation, order=Order.asc)
+		.orderby(m.seq, order=Order.desc)
+		.limit(limit)
+		.run(as_dict=True)
 	)
 	if not rows:
 		return {"checked": 0}
@@ -498,14 +508,13 @@ def _next_turn_watermark(conversation: str, seq: int) -> int | None:
 	past it belong to that later turn). None when there is no later turn
 	(or none with a usable watermark) - then the window stays open-ended,
 	which matches the common single-in-flight-turn case."""
-	val = frappe.db.sql(
-		f"""
-		SELECT MIN({wm_expr()})
-		FROM `tabJarvis Chat Message`
-		WHERE conversation = %(conv)s AND role = 'assistant'
-		  AND seq > %(seq)s AND {wm_expr()} > 0
-		""",
-		{"conv": conversation, "seq": seq},
+	m = frappe.qb.DocType(MSG)
+	wm = wm_term(m)
+	val = (
+		frappe.qb.from_(m)
+		.select(Min(wm))
+		.where((m.conversation == conversation) & (m.role == "assistant") & (m.seq > seq) & (wm > 0))
+		.run()
 	)[0][0]
 	return int(val) if val else None
 
@@ -516,20 +525,28 @@ def recover_now(conversation_id: str) -> str:
 	does not wait for the cron. Dedicated connection - the pooled WS may be
 	the very thing that just died. Idempotent vs the cron via
 	_conditional_clear inside _finalize/_error_clear."""
-	rows = frappe.db.sql(
-		f"""
-		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
-		FROM `tabJarvis Chat Message` m
-		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
-		WHERE m.streaming = 1 AND m.recovering = 1
-		  AND m.conversation = %(conv)s
-		  AND c.session_key IS NOT NULL AND c.session_key != ''
-		ORDER BY m.seq DESC
-		LIMIT 1
-		""",
-		{"conv": conversation_id},
-		as_dict=True,
+	m = frappe.qb.DocType(MSG)
+	c = frappe.qb.DocType(CONV)
+	rows = (
+		frappe.qb.from_(m)
+		.join(c)
+		.on(c.name == m.conversation)
+		.select(
+			m.name,
+			m.conversation,
+			c.session_key,
+			c.owner,
+			m.recovery_started_at,
+			m.seq,
+			wm_term(m).as_("agent_seq_watermark"),
+			m.creation,
+		)
+		.where((m.streaming == 1) & (m.recovering == 1))
+		.where(m.conversation == conversation_id)
+		.where(c.session_key.isnotnull() & (c.session_key != ""))
+		.orderby(m.seq, order=Order.desc)
+		.limit(1)
+		.run(as_dict=True)
 	)
 	if not rows:
 		return "skipped"

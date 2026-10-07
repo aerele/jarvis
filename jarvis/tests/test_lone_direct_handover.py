@@ -842,7 +842,7 @@ class TestHandoverEndsTheSwitch(FrappeTestCase):
 		to report follow_up, with last_sync_status set to whatever the real
 		function would have written for that outcome - _finish_switch_run
 		reads the CURRENT status straight from the DB, not from this bare
-		fixture, so frappe.db.get_value is patched to match.
+		fixture, so frappe.db.get_single_value is patched to match.
 
 		``switch_status``: what llm_switch.status() reports to
 		llm_switch.finish() - defaults to an APPLIED record under the SAME
@@ -857,7 +857,7 @@ class TestHandoverEndsTheSwitch(FrappeTestCase):
 				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._handover_via_admin",
 				return_value=follow_up,
 			),
-			patch("frappe.db.get_value", return_value=last_sync_status),
+			patch("frappe.db.get_single_value", return_value=last_sync_status),
 			patch("jarvis.chat.llm_switch.status", return_value=switch_status),
 		):
 			_enqueued_handover_via_admin(llm_switch_run_id=run_id)
@@ -1076,7 +1076,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 
 	def test_terminal_status_is_passed_through_unchanged(self):
 		with (
-			patch("frappe.db.get_value", return_value="ok (restart via admin)"),
+			patch("frappe.db.get_single_value", return_value="ok (restart via admin)"),
 			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
 			_finish_switch_run("run-1", crashed=False)
@@ -1091,7 +1091,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 		called (that would end the switch and clear the banner/send-hold
 		before the container actually finishes); await_admin() takes over."""
 		with (
-			patch("frappe.db.get_value", return_value=_PENDING_APPLYING_STATUS),
+			patch("frappe.db.get_single_value", return_value=_PENDING_APPLYING_STATUS),
 			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 			patch("jarvis.chat.llm_switch.await_admin") as mock_await,
 		):
@@ -1106,7 +1106,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 		backstop's own territory (rewrite to the generic failure, then
 		finish), unchanged."""
 		with (
-			patch("frappe.db.get_value", return_value=_PENDING_APPLYING_STATUS),
+			patch("frappe.db.get_single_value", return_value=_PENDING_APPLYING_STATUS),
 			patch(
 				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._write_settings_fields"
 			) as mock_write,
@@ -1126,7 +1126,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 		through untouched, never rewriting it to the generic CR-0 failure."""
 		with (
 			patch(
-				"frappe.db.get_value",
+				"frappe.db.get_single_value",
 				return_value=f"{_PENDING_HANDOVER_STATUS} (attempt 1)",
 			),
 			patch(
@@ -1146,7 +1146,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 		generic failure here first, guarded exactly like every worker's own
 		backstop (_write_settings_fields + _commit_terminal_sync_status)."""
 		with (
-			patch("frappe.db.get_value", return_value="pending: provisioning container"),
+			patch("frappe.db.get_single_value", return_value="pending: provisioning container"),
 			patch(
 				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._write_settings_fields"
 			) as mock_write,
@@ -1172,7 +1172,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 		for status in ("ok (restart via admin)", "failed: auth: token expired"):
 			with self.subTest(status=status):
 				with (
-					patch("frappe.db.get_value", return_value=status),
+					patch("frappe.db.get_single_value", return_value=status),
 					patch(
 						"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._write_settings_fields"
 					) as mock_write,
@@ -1187,7 +1187,7 @@ class TestFinishSwitchRun(FrappeTestCase):
 		"""CR-2: guard the status read so a DB hiccup here can never mask the
 		worker's own real exception propagating through its finally."""
 		with (
-			patch("frappe.db.get_value", side_effect=RuntimeError("db down")),
+			patch("frappe.db.get_single_value", side_effect=RuntimeError("db down")),
 			patch("frappe.log_error") as mock_log,
 			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
@@ -1216,7 +1216,7 @@ class TestFinishSwitchRunAfterFollowup(FrappeTestCase):
 		begin() call already ran synchronously by the time it returns, so
 		finishing immediately is safe."""
 		with (
-			patch("frappe.db.get_value", return_value="pending: provisioning container (pool)"),
+			patch("frappe.db.get_single_value", return_value="pending: provisioning container (pool)"),
 			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
 			_finish_switch_run_after_followup("run-1")
@@ -1241,7 +1241,7 @@ class TestFinishSwitchRunAfterFollowup(FrappeTestCase):
 				mock_finish.assert_not_called()
 
 				queued = list(frappe.db.after_commit._functions)[-1]
-				with patch("frappe.db.get_value", return_value="ok (pool_update via admin)"):
+				with patch("frappe.db.get_single_value", return_value="ok (pool_update via admin)"):
 					queued()
 
 				mock_finish.assert_called_once_with("run-1", "ok (pool_update via admin)")
@@ -1268,7 +1268,7 @@ class TestHandoverWorkerCrashWritesFailedAndEndsTheSwitch(FrappeTestCase):
 				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._handover_via_admin",
 				side_effect=RuntimeError("boom"),
 			),
-			patch("frappe.db.get_value", return_value=""),
+			patch("frappe.db.get_single_value", return_value=""),
 			patch(
 				"jarvis.chat.llm_switch.status",
 				return_value={"applied": True, "run_id": "run-1", "job": "x", "next": None},
@@ -1513,7 +1513,7 @@ class TestDirectLegJobEndsAnAppliedSwitch(FrappeTestCase):
 		settings._sync_via_admin = MagicMock()
 		with (
 			patch("frappe.get_single", return_value=settings),
-			patch("frappe.db.get_value", return_value="ok (restart via admin)"),
+			patch("frappe.db.get_single_value", return_value="ok (restart via admin)"),
 			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
 			_enqueued_sync_via_admin("restart", llm_switch_run_id="run-1")
@@ -1526,7 +1526,7 @@ class TestDirectLegJobEndsAnAppliedSwitch(FrappeTestCase):
 		settings._sync_via_admin = MagicMock()
 		with (
 			patch("frappe.get_single", return_value=settings),
-			patch("frappe.db.get_value", return_value="ok (restart via admin)"),
+			patch("frappe.db.get_single_value", return_value="ok (restart via admin)"),
 			patch("jarvis.chat.llm_switch.finish") as mock_finish,
 		):
 			_enqueued_sync_via_admin("restart")

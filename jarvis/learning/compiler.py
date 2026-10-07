@@ -320,7 +320,7 @@ def _apply_learned_skills_locked() -> dict:
 				deleted_domains.append(domain)
 
 		activated = _finalize_patterns(compiled, skill_by_domain)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before restoring flags
 	finally:
 		frappe.flags.jarvis_pattern_engine = prev_engine
 
@@ -379,7 +379,7 @@ def _is_learned_cutover() -> bool:
 	``datetime(1,1,1)``. frappe.db.get_value (not get_single_value): the latter
 	serves a process-local cache that background status writes do not
 	invalidate, and a stale read here would re-fire (or skip) the reconcile."""
-	status = frappe.db.get_value("Jarvis Settings", "Jarvis Settings", "learned_skills_sync_status")
+	status = frappe.db.get_single_value("Jarvis Settings", "learned_skills_sync_status", cache=False)
 	if (status or "").strip():
 		return False
 	# Positive Phase-1 evidence: this runs before the apply's upserts, so any

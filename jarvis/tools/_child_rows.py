@@ -45,7 +45,7 @@ def merge_child_rows(doc, fieldname: str, rows) -> None:
 	unknown = [n for n in names if n not in existing]
 	if unknown:
 		raise InvalidArgumentError(
-			f"'{fieldname}' has no row named {', '.join(map(str, unknown))} on this document"
+			f"'{fieldname}' has no row named {', '.join(str(name) for name in unknown)} on this document"
 		)
 	repeated = sorted({n for n in names if names.count(n) > 1})
 	if repeated:

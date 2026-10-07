@@ -257,6 +257,19 @@ describe("PendingActionDetail", () => {
 		expect(w.find('[role="status"]').exists()).toBe(false);
 	});
 
+	it("hands a chat card back to the board: never the File Box copy", async () => {
+		// A deep link (?held=<id>) to a failed chat card opens here first.
+		const onKind = vi.fn();
+		api.getPendingAction.mockResolvedValue(
+			rec({ kind: "chat", status: "Failed", can_act: 0, conversation: "c1" })
+		);
+		const w = mount(PendingActionDetail, { props: { name: "PA-1", onDecided, onKind } });
+		await flushPromises();
+		expect(onKind).toHaveBeenCalledWith("chat");
+		expect(w.text()).not.toContain("A File Box run wants to create this");
+		expect(w.text()).not.toContain("files waiting");
+	});
+
 	it("a batch offers no Use existing", async () => {
 		const w = await mountWith(rec({ can_use_existing: 0, doctype: "" }));
 		expect(button(w, "Use existing")).toBeFalsy();
@@ -413,10 +426,25 @@ describe("PendingActionDetail", () => {
 				"Couldn't create: Supplier Type cannot be Bogus"
 			);
 			expect(control(w, "Supplier Type").element.value).toBe("Company");
+			expect(w.find("code").text()).toBe("PA-1"); // the failed row's reference
 			expect(button(w, "Create & continue").attributes("disabled")).toBeDefined();
 			expect(onDecided).not.toHaveBeenCalled();
 			await button(w, "Close").trigger("click");
 			expect(onDecided).toHaveBeenCalledTimes(1);
+		});
+
+		it("a row someone else settled shows no reference: it did not fail", async () => {
+			const w = await editing();
+			await control(w, "Supplier Type").setValue("Company");
+			api.editAndCreateHeld.mockResolvedValue({
+				ok: false,
+				reason_code: "already_handled",
+				pa_status: "Discarded",
+				error: { message: "This approval was already handled." },
+			});
+			await button(w, "Create & continue").trigger("click");
+			await flushPromises();
+			expect(w.text()).not.toContain("Reference:");
 		});
 
 		it("refresh never wipes an open edit or a failure's values", async () => {
@@ -474,6 +502,24 @@ describe("PendingActionDetail", () => {
 			expect(w.element.querySelectorAll("img, script").length).toBe(0);
 			expect(w.text()).toContain(HOSTILE);
 			expect(window.__pwned).toBeUndefined();
+		});
+	});
+
+	describe("failure reference", () => {
+		it("a failed held row shows its reference", async () => {
+			const w = await mountWith(
+				rec({ status: "Failed", can_act: 0, reason: "The action could not be applied." })
+			);
+			expect(w.find("code").text()).toBe("PA-1");
+			expect(w.find('button[aria-label="Copy reference PA-1"]').exists()).toBe(true);
+		});
+
+		it("a pending or created row has none", async () => {
+			for (const over of [{}, { status: "Executed", can_act: 0 }]) {
+				const w = await mountWith(rec(over));
+				expect(w.text()).not.toContain("Reference:");
+				w.unmount();
+			}
 		});
 	});
 });

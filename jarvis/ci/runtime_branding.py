@@ -72,13 +72,14 @@ def load_policy(raw, expected_digest=None):
 
 def scan(root, policy):
 	root = Path(root).resolve()
-	checkout = subprocess.check_output(
+	# Fixed git argv, no shell.
+	checkout = subprocess.check_output(  # nosemgrep: frappe-subprocess-exec
 		["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True
 	).strip()
 	if Path(checkout).resolve() != root:
 		raise PolicyError("Scan root must be the checkout root.")
 	paths = (
-		subprocess.check_output(
+		subprocess.check_output(  # nosemgrep: frappe-subprocess-exec
 			["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
 		)
 		.decode()
@@ -89,7 +90,7 @@ def scan(root, policy):
 	allowed_paths = set(policy["allowed_paths"])
 	scanned = dict.fromkeys(policy["minimum_files"], 0)
 	errors = []
-	for name in sorted(set(filter(None, paths))):
+	for name in sorted({name for name in paths if name}):
 		path = root / name
 		if not _relative_path(name) or path.is_symlink():
 			errors.append(f"{name}: unsupported source path")

@@ -12,6 +12,8 @@ customer sees their own feed but cannot forge or edit entries.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentActivity(Document):
+
+class JarvisAgentActivity(NotRenamable, Document):
 	pass

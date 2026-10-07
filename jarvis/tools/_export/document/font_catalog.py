@@ -134,6 +134,7 @@ def _face_rule(family: str, weight: str, path: str) -> str:
 	cached = _FACE_RULE_CACHE.get(path)
 	if cached is not None:
 		return cached
+	# nosemgrep: frappe-security-file-traversal -- bundled font file
 	with open(path, "rb") as fh:
 		b64 = base64.b64encode(fh.read()).decode()
 	css_weight = "700" if weight == "bold" else "400"
@@ -205,6 +206,7 @@ def staged_fontconfig(keys):
 			yield None, notes
 			return
 		conf_path = os.path.join(tmp, "fonts.conf")
+		# nosemgrep: frappe-security-file-traversal -- our own temp dir
 		with open(conf_path, "w", encoding="utf-8") as fh:
 			fh.write(
 				'<?xml version="1.0"?>\n'

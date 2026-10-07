@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
+from frappe.query_builder import Order
+from frappe.query_builder.functions import Count
 from frappe.utils import add_to_date, cint, getdate, now_datetime
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
@@ -78,9 +80,20 @@ _ACTIVITY_SORTABLE = {
 # were permission-checked.
 _ACTIVITY_SCAN_CAP = 400
 
-_ACTIVITY_FIELDS_SQL = """name, `trigger` AS `trigger`, trigger_label,
-	target_doctype, target_docname, doc_event, action_type, status, summary,
-	duration_ms, event_user, creation"""
+_ACTIVITY_FIELDS = (
+	"name",
+	"trigger",
+	"trigger_label",
+	"target_doctype",
+	"target_docname",
+	"doc_event",
+	"action_type",
+	"status",
+	"summary",
+	"duration_ms",
+	"event_user",
+	"creation",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -99,14 +112,19 @@ def _require_manage() -> None:
 		)
 
 
-def _order_by(sort_field: str, sort_dir: str, sortable: dict, default_field: str) -> str:
-	"""Whitelisted ORDER BY (unknown sort field throws — stricter than the
-	macros list, which silently falls back)."""
+def _sort(sort_field: str, sort_dir: str, sortable: dict, default_field: str) -> tuple[str, str]:
+	"""Whitelisted sort column and direction (unknown sort field throws — stricter
+	than the macros list, which silently falls back)."""
 	field = (sort_field or "").strip() or default_field
 	if field not in sortable:
 		frappe.throw(_("Unknown sort field: {0}").format(field))
-	d = "desc" if (sort_dir or "desc").lower() == "desc" else "asc"
-	return f"`{sortable[field]}` {d}, `name` asc"
+	return sortable[field], "desc" if (sort_dir or "desc").lower() == "desc" else "asc"
+
+
+def _order_by(sort_field: str, sort_dir: str, sortable: dict, default_field: str) -> str:
+	"""Whitelisted ORDER BY."""
+	col, d = _sort(sort_field, sort_dir, sortable, default_field)
+	return f"`{col}` {d}, `name` asc"
 
 
 def _publish_changed() -> None:
@@ -322,7 +340,7 @@ def create_trigger(payload: str) -> dict:
 	fields = _parse_payload(payload)
 	doc = frappe.get_doc({"doctype": TRIGGER, **fields})
 	doc.insert()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": _trigger_detail(doc)}
 
 
@@ -335,7 +353,7 @@ def update_trigger(name: str, payload: str) -> dict:
 	doc = frappe.get_doc(TRIGGER, name)
 	doc.update(fields)
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": _trigger_detail(doc)}
 
 
@@ -351,7 +369,7 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 	doc.db_set("enabled", value)
 	clear_cache()
 	_publish_changed()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": value}}
 
 
@@ -363,7 +381,7 @@ def delete_trigger(name: str) -> dict:
 	Link)."""
 	_require_manage()
 	frappe.delete_doc(TRIGGER, name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": 1}}
 
 
@@ -393,7 +411,7 @@ def delete_triggers_bulk(names: str) -> dict:
 		except Exception:
 			frappe.log_error(title="Jarvis: bulk trigger delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": deleted, "skipped": skipped}}
 
 
@@ -561,40 +579,33 @@ def _date_bound(value, end: bool) -> str:
 	return f"{d} 23:59:59.999999" if end else f"{d} 00:00:00"
 
 
-def _activity_where(search: str, f: dict) -> tuple[str, dict]:
-	conds = ["1=1"]
-	params: dict = {}
+def _activity_query(search: str, f: dict):
+	a = frappe.qb.DocType(ACTIVITY)
+	query = frappe.qb.from_(a)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(trigger_label LIKE %(q)s OR target_docname LIKE %(q)s OR summary LIKE %(q)s)")
+		q = f"%{_lk(search)}%"
+		query = query.where(a.trigger_label.like(q) | a.target_docname.like(q) | a.summary.like(q))
 	if "trigger" in f:
-		params["trigger"] = str(f["trigger"])
-		conds.append("`trigger` = %(trigger)s")
+		query = query.where(a.trigger == str(f["trigger"]))
 	if "status" in f:
 		if f["status"] not in _ACTIVITY_STATUSES:
 			frappe.throw(_("Invalid status filter."))
-		params["status"] = f["status"]
-		conds.append("status = %(status)s")
+		query = query.where(a.status == f["status"])
 	if "action_type" in f:
 		if f["action_type"] not in _ACTION_TYPES:
 			frappe.throw(_("Invalid action_type filter."))
-		params["action_type"] = f["action_type"]
-		conds.append("action_type = %(action_type)s")
+		query = query.where(a.action_type == f["action_type"])
 	if "target_doctype" in f:
-		params["target_doctype"] = str(f["target_doctype"])
-		conds.append("target_doctype = %(target_doctype)s")
+		query = query.where(a.target_doctype == str(f["target_doctype"]))
 	if "doc_event" in f:
 		if f["doc_event"] not in SUPPORTED_EVENTS:
 			frappe.throw(_("Invalid doc_event filter."))
-		params["doc_event"] = f["doc_event"]
-		conds.append("doc_event = %(doc_event)s")
+		query = query.where(a.doc_event == f["doc_event"])
 	if "from_date" in f:
-		params["from_date"] = _date_bound(f["from_date"], end=False)
-		conds.append("creation >= %(from_date)s")
+		query = query.where(a.creation >= _date_bound(f["from_date"], end=False))
 	if "to_date" in f:
-		params["to_date"] = _date_bound(f["to_date"], end=True)
-		conds.append("creation <= %(to_date)s")
-	return " AND ".join(conds), params
+		query = query.where(a.creation <= _date_bound(f["to_date"], end=True))
+	return query
 
 
 def _can_read_target(row) -> bool:
@@ -623,17 +634,14 @@ def _clear_perm_message_noise() -> None:
 		pass
 
 
-def _readable_target_doctypes(where: str, params: dict) -> list:
+def _readable_target_doctypes(query) -> list:
 	"""The distinct target doctypes in the filtered activity that the caller
 	has ANY doctype-level read on. Lets the non-admin scan exclude, in SQL,
 	whole doctypes the user can't read at all (the common case — a trigger on a
 	doctype they have no role for) instead of paying a per-row permission check
 	for each of those rows. target_doctype is indexed, and the distinct set is
 	tiny, so this is cheap."""
-	dts = frappe.db.sql(
-		f"SELECT DISTINCT target_doctype FROM `tabJarvis Trigger Activity` WHERE {where}",
-		params,
-	)
+	dts = query.select("target_doctype").distinct().run()
 	out = []
 	for (dt,) in dts:
 		if not dt:
@@ -664,20 +672,17 @@ def list_activity_page(
 	as such)."""
 	start, pl = _clamp_page(start, page_length)
 	f = _load_filters(filters, _ACTIVITY_FILTERS)
-	where, params = _activity_where(search, f)
-	order = _order_by(sort_field, sort_dir, _ACTIVITY_SORTABLE, "creation")
+	query = _activity_query(search, f)
+	order_col, order_dir = _sort(sort_field, sort_dir, _ACTIVITY_SORTABLE, "creation")
+	ordered = (
+		query.select(*_ACTIVITY_FIELDS)
+		.orderby(order_col, order=Order[order_dir])
+		.orderby("name", order=Order.asc)
+	)
 
 	if _can_manage():
-		total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger Activity` WHERE {where}", params)[0][
-			0
-		]
-		rows = frappe.db.sql(
-			f"""SELECT {_ACTIVITY_FIELDS_SQL} FROM `tabJarvis Trigger Activity`
-			WHERE {where} ORDER BY {order}
-			LIMIT %(page_length)s OFFSET %(start)s""",
-			{**params, "page_length": pl, "start": start},
-			as_dict=True,
-		)
+		total = query.select(Count("*")).run()[0][0]
+		rows = ordered.limit(pl).offset(start).run(as_dict=True)
 		for r in rows:
 			r["creation"] = str(r["creation"])
 		return {
@@ -696,7 +701,7 @@ def list_activity_page(
 	# read on at all (the bulk of a burst is usually one such doctype), so the
 	# per-row record-level scan only runs over plausibly-visible rows. If NOTHING
 	# is readable, return an empty page immediately (no scan, no ~1s spin).
-	readable_dts = _readable_target_doctypes(where, params)
+	readable_dts = _readable_target_doctypes(query)
 	if not readable_dts:
 		_clear_perm_message_noise()  # drop the has_permission "no access" noise
 		return {
@@ -710,9 +715,7 @@ def list_activity_page(
 				"approximate": True,
 			},
 		}
-	dt_ph = ", ".join([f"%(rdt{i})s" for i in range(len(readable_dts))])
-	scan_where = f"({where}) AND target_doctype IN ({dt_ph})"
-	scan_params = {**params, **{f"rdt{i}": dt for i, dt in enumerate(readable_dts)}}
+	scan = ordered.where(frappe.qb.DocType(ACTIVITY).target_doctype.isin(readable_dts))
 
 	# `needed` includes one overflow row so a full page can still report
 	# has_more without another scan.
@@ -723,13 +726,7 @@ def list_activity_page(
 	offset = 0
 	exhausted = False
 	while True:
-		batch = frappe.db.sql(
-			f"""SELECT {_ACTIVITY_FIELDS_SQL} FROM `tabJarvis Trigger Activity`
-			WHERE {scan_where} ORDER BY {order}
-			LIMIT %(chunk)s OFFSET %(offset)s""",
-			{**scan_params, "chunk": chunk, "offset": offset},
-			as_dict=True,
-		)
+		batch = scan.limit(chunk).offset(offset).run(as_dict=True)
 		if not batch:
 			exhausted = True
 			break

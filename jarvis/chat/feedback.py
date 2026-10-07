@@ -197,7 +197,7 @@ def submit_session_feedback(
 	# block on it: settlement's turn-count bump (delaying a run:end), and
 	# admission.accept_or_queue's _lock_conversation - which waits while holding the
 	# SITE-WIDE shard lock, turning one slow popup into a shard-wide send stall.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before slow work
 	if not chip_value:
 		return {"ok": True, "recorded": False}
 
@@ -228,7 +228,7 @@ def _claim_session_feedback(conversation: str) -> bool:
 	equivalent): this is server-set popup metadata, not a user edit of the
 	conversation, and must not reorder the sidebar."""
 	frappe.db.sql(
-		f"""UPDATE `tab{CONV}` SET session_feedback_asked_at=%(now)s
+		"""UPDATE `tabJarvis Conversation` SET session_feedback_asked_at=%(now)s
 		WHERE name=%(c)s AND session_feedback_asked_at IS NULL""",
 		{"now": frappe.utils.now(), "c": conversation},
 	)
@@ -377,14 +377,14 @@ def _claim_pulse_offer(settings_name: str, period_key: str, seen_count: int, sam
 	left alone: server-owned state, not a user edit."""
 	if same_period:
 		frappe.db.sql(
-			f"""UPDATE `tab{USER_SETTINGS}`
+			"""UPDATE `tabJarvis User Settings`
 			SET pulse_offer_count=%(next)s
 			WHERE name=%(n)s AND pulse_last_period_key=%(k)s AND pulse_offer_count=%(seen)s""",
 			{"n": settings_name, "k": period_key, "seen": seen_count, "next": seen_count + 1},
 		)
 	else:
 		frappe.db.sql(
-			f"""UPDATE `tab{USER_SETTINGS}`
+			"""UPDATE `tabJarvis User Settings`
 			SET pulse_last_period_key=%(k)s, pulse_offer_count=1
 			WHERE name=%(n)s AND (pulse_last_period_key IS NULL OR pulse_last_period_key != %(k)s)""",
 			{"n": settings_name, "k": period_key},

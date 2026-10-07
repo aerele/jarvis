@@ -515,12 +515,12 @@ def _users_daily_rollup() -> list[dict]:
 	start = frappe.utils.add_days(today, -(_USERS_DAILY_WINDOW_DAYS - 1))
 	grouped: dict[tuple[str, str], dict] = {}
 	for r in frappe.db.sql(
-		f"""
+		"""
 		SELECT user, day, model,
 			   COUNT(*) AS turns,
 			   SUM(tokens_in) AS tokens_in,
 			   SUM(tokens_out) AS tokens_out
-		FROM `tab{TURN_USAGE}`
+		FROM `tabJarvis Turn Usage`
 		WHERE user != '' AND day >= %(start)s AND day <= %(today)s
 		GROUP BY user, day, model
 		ORDER BY user, day, (SUM(tokens_in) + SUM(tokens_out)) DESC

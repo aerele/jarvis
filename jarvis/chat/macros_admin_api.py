@@ -485,10 +485,11 @@ def _tell_the_owner(macro: str | None, admin: str) -> None:
 		)
 
 
-def _leave_comment(macro: str | None, text: str) -> None:
+def _leave_comment(macro: str | None, text: str, *, subject: str | None = None) -> None:
 	"""Record an admin's action on the macro's timeline. What ``Document.add_comment``
 	inserts, without loading or saving the macro (as the scheduler does when it
-	switches a leaver's schedules off). Nothing to write on when the macro is gone."""
+	switches a leaver's schedules off). Nothing to write on when the macro is gone.
+	``subject``: a marker the code looks the Comment up by, not shown."""
 	if not macro or not frappe.db.exists(MACRO, macro):
 		return
 	frappe.get_doc(
@@ -499,6 +500,7 @@ def _leave_comment(macro: str | None, text: str) -> None:
 			"reference_doctype": MACRO,
 			"reference_name": macro,
 			"content": frappe.utils.escape_html(text),
+			"subject": subject,
 		}
 	).insert(ignore_permissions=True)
 
@@ -586,7 +588,8 @@ def _stand_down(
 	instead).
 
 	With ``if_held_comment`` (a hand-over), a macro already on hold keeps the reason
-	another admin held it for, and that Comment is left instead. With
+	another admin held it for, and that Comment is left instead; a hold an earlier
+	hand-over that failed left is not an admin's reason, and is replaced. With
 	``expected_owner``, a macro owned by someone else by now is refused before
 	anything is written: the admin chose to act on that person's macro.
 
@@ -597,13 +600,17 @@ def _stand_down(
 	Returns the row as read under the lock."""
 	row = _lock(row)
 	if expected_owner is not None and row.owner != expected_owner:
-		frappe.db.commit()  # nothing written: releases the row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		_refuse_changed_hands()
 	_refuse_own_macro(row, own_macro_hint)
 	if hold_fields_exist():
 		values = {HOLD_FIELD: 1, **_SWITCHED_OFF}
 		comment = f"{admin} put this macro on hold: {reason}"
-		if if_held_comment and frappe.utils.cint(row.get(HOLD_FIELD)):
+		if (
+			if_held_comment
+			and frappe.utils.cint(row.get(HOLD_FIELD))
+			and not _is_handover_hold(row.get(HOLD_REASON_FIELD))
+		):
 			comment = if_held_comment
 		else:
 			values[HOLD_REASON_FIELD] = reason
@@ -611,8 +618,18 @@ def _stand_down(
 		_leave_comment(row.name, comment)
 	else:
 		frappe.db.set_value(MACRO, row.name, _SWITCHED_OFF)
-	frappe.db.commit()  # visible, and the row lock released, from here on
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist and release row lock
 	return row
+
+
+# The reason a hand-over holds the macro for while it runs. A failed one leaves it.
+_HANDOVER_HOLD = "Being handed over to {0}."
+
+
+def _is_handover_hold(reason) -> bool:
+	"""Whether a hold's reason is a hand-over's own (``_HANDOVER_HOLD``), not an admin's."""
+	prefix = _HANDOVER_HOLD.split("{0}")[0]
+	return isinstance(reason, str) and reason.startswith(prefix)
 
 
 def _stop_live_runs(macro: str, *, reason: str, admin: str, verb: str = "hold") -> tuple[int, list[str]]:
@@ -697,11 +714,10 @@ def admin_release(macro: str) -> dict:
 	row = _lock(row)
 	_refuse_own_macro(row, _("Another admin has to release it."))
 	if not frappe.utils.cint(row.get(HOLD_FIELD)):
-		frappe.db.commit()  # releases the row lock
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return {"ok": True, "released": False}
 	frappe.db.set_value(MACRO, row.name, {HOLD_FIELD: 0, HOLD_REASON_FIELD: None})
 	_leave_comment(row.name, f"{admin} released the hold on this macro.")
-	frappe.db.commit()
 	return {"ok": True, "released": True}
 
 
@@ -869,7 +885,8 @@ def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None
 
 	1. the macro is put on hold, under its row lock, and committed, so nothing starts
 	   it from here on (before the migrate it is only switched off: see
-	   ``_stand_down``). One already on hold keeps the reason another admin gave;
+	   ``_stand_down``). One already on hold keeps the reason another admin gave (not
+	   one an earlier, failed hand-over left: that is replaced);
 	2. its live runs are stopped, each on its own. One that cannot be stopped ends the
 	   request with the hold standing: the macro does not change hands over a live run
 	   of its old owner. Sending the hand-over again retries;
@@ -887,7 +904,9 @@ def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None
 	require_jarvis_admin()
 	row = _load_macro(macro)
 	new_owner = _new_owner_arg(new_owner)
+	# As stored, as the new owner is: a name in another case is the same person.
 	expected_owner = _name_arg(expected_owner, _("Current owner"))
+	expected_owner = frappe.db.get_value("User", {"name": expected_owner}, "name") or expected_owner
 	admin = frappe.session.user
 	own_macro_hint = _("Another admin has to hand it over.")
 	if row.owner != expected_owner:
@@ -896,7 +915,7 @@ def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None
 	_refuse_handover(row, new_owner)  # before anything is written
 
 	old_owner = row.owner
-	hold_reason = f"Being handed over to {new_owner}."
+	hold_reason = _HANDOVER_HOLD.format(new_owner)
 	row = _stand_down(
 		row,
 		admin,
@@ -927,7 +946,7 @@ def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hol
 	The write lifts any hold. One whose reason is not ``hold_reason`` (step 1 kept an
 	earlier admin's, or another admin held the macro between the steps) is named in
 	the Comment, so lifting it is on record."""
-	from jarvis.chat import macros
+	from jarvis.chat import macros, macros_api
 
 	stopped = 0
 	for _round in range(_HANDOVER_ROUNDS):
@@ -948,10 +967,10 @@ def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hol
 			)
 		row = _lock(row)
 		if row.owner != old_owner:
-			frappe.db.commit()  # releases the row lock
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 			_refuse_changed_hands()
 		if macros.live_runs_of(row.name):
-			frappe.db.commit()  # let go of the macro row: a stop waits for a run lock
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 			continue
 		_refuse_handover(row, new_owner)
 		_write_handover(row, new_owner)
@@ -959,8 +978,10 @@ def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hol
 		held_for = row.get(HOLD_REASON_FIELD) if frappe.utils.cint(row.get(HOLD_FIELD)) else None
 		if held_for and held_for != hold_reason:
 			comment += f" This also released the hold set for: {held_for}"
-		_leave_comment(row.name, comment)
-		frappe.db.commit()
+		# The marker tells the old owner's later request that the macro changed hands
+		# (``macros_api.refuse_if_handed_away``).
+		_leave_comment(row.name, comment, subject=macros_api.handed_over_from(old_owner))
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist and release row lock
 		return row, stopped
 	frappe.throw(
 		_("The macro kept starting runs and was not handed over. Hand it over again."),

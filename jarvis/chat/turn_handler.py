@@ -424,7 +424,7 @@ class _AssistantContentBatcher:
 
 		def _write() -> None:
 			frappe.db.set_value(MSG, self.msg_name, "content", text)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 		# The buffered text can span up to _ASSISTANT_BATCH_INTERVAL_MS since the
 		# transaction's last commit. A competing write to the SAME reply row in that
@@ -1458,6 +1458,10 @@ def handle_chat_send(payload: dict) -> None:
 		# changed_data: pass False only when we KNOW nothing was written (a
 		# pre-ack failure - the run never started). The SPA turns that into a
 		# "No changes were made to your data" reassurance; omit it when unknown.
+		code = code or _classify_error(err, exc)
+		# Every publish here is the turn's final error (mid-run or pre-ack): remember a dead sign-in.
+		# Before _mark_errored so its commit carries the write.
+		_note_subscription_error(err, code)
 		_mark_errored(assistant_msg.name, err)
 		payload = {
 			"kind": "run:error",
@@ -1465,7 +1469,7 @@ def handle_chat_send(payload: dict) -> None:
 			"message_id": assistant_msg.name,
 			"run_id": run_id,
 			"error": err,
-			"code": code or _classify_error(err, exc),
+			"code": code,
 		}
 		if changed_data is not None:
 			payload["changed_data"] = bool(changed_data)
@@ -1776,7 +1780,13 @@ def handle_chat_send(payload: dict) -> None:
 
 						_row = _usage.fetch_fresh_session_row(sess, conv.session_key)
 						if _row:
-							_usage.record_turn_usage(conv.session_key, _row)
+							_outcome = _usage.record_turn_usage(conv.session_key, _row)
+							# A completed turn proves its sign-in works, but only when its
+							# row was fresh (a retry row may name a previous turn's model).
+							# Never raises.
+							from jarvis import subscription_health as _sub_health
+
+							_sub_health.note_recorded_turn(_outcome, _row)
 					except Exception:
 						frappe.log_error(
 							title="chat: usage record hook failed",
@@ -2654,6 +2664,11 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 				blocks.append(f"[Attached image `{name}` sent for viewing.]")
 			else:
 				blocks.append(f"[Attached image `{name}` could not be read.]")
+				# The model only sees this note and tells the user the file is unreadable.
+				frappe.log_error(
+					title="chat worker: attached image could not be decoded",
+					message=f"{name} ({len(raw)} bytes)",
+				)
 		else:
 			try:
 				text = raw.decode("utf-8")
@@ -2683,7 +2698,7 @@ def _create_assistant_placeholder(conv) -> "frappe.model.document.Document":
 		}
 	)
 	msg.insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	return msg
 
 
@@ -2701,6 +2716,15 @@ def _classify_error(err_text: str, exc=None) -> str:
 	return code
 
 
+def _note_subscription_error(err_text: str, code: str) -> None:
+	"""Remember a dead chat sign-in seen at a run-error publish site (never inside the classifier,
+	which the pump's pre-ack paths also call). Never raises."""
+	if code == "subscription-expired":
+		from jarvis import subscription_health
+
+		subscription_health.note_turn_error(err_text, code)
+
+
 def _mark_errored(assistant_msg_name: str, error: str) -> None:
 	frappe.db.set_value(
 		MSG,
@@ -2710,7 +2734,7 @@ def _mark_errored(assistant_msg_name: str, error: str) -> None:
 			"error": error,
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	_maybe_apply_llm_switch()
 
 
@@ -2726,7 +2750,7 @@ def _mark_recovering(assistant_msg_name: str) -> None:
 			"recovery_started_at": frappe.utils.now_datetime(),
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def _try_recover_now(conversation_id: str) -> None:
@@ -2835,6 +2859,9 @@ def _handle_event_inner(
 					},
 				)
 				return
+			code = _classify_error(err_text)
+			# Before _mark_errored so its commit carries the write.
+			_note_subscription_error(err_text, code)
 			_mark_errored(assistant_msg_name, err_text)
 			_publish_to_user(
 				user,
@@ -2843,7 +2870,7 @@ def _handle_event_inner(
 					"conversation_id": conversation_id,
 					"message_id": assistant_msg_name,
 					"run_id": run_id,
-					"code": _classify_error(err_text),
+					"code": code,
 					"error": event.get("error"),
 				},
 			)
@@ -2897,7 +2924,7 @@ def _handle_event_inner(
 
 			def _record_owner() -> None:
 				record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 			# batcher.flush() just above can be a no-op (nothing pending), leaving this on
 			# the transaction's existing snapshot; drop it so record_tool_owner's FOR UPDATE
@@ -2934,7 +2961,7 @@ def _handle_event_inner(
 				)
 				doc.flags.jarvis_server_write = True
 				doc.insert(ignore_permissions=True)
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 				tool_msg_by_call_id[tool_call_id] = doc.name
 			_publish_to_user(
 				user,
@@ -2995,7 +3022,7 @@ def _handle_event_inner(
 					"streaming": 0,
 				},
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 			_publish_to_user(
 				user,
 				{

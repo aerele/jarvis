@@ -1,5 +1,7 @@
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisLLMPoolSubscriptionAccount(Document):
+
+class JarvisLLMPoolSubscriptionAccount(NotRenamable, Document):
 	pass

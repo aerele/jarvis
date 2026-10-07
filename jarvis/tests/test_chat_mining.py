@@ -466,7 +466,9 @@ class TestChatMiningSafety(ChatMiningTestCase):
 		self._simple_conv(USER_A)
 		with (
 			_mock_llm(_items_json(_item("Wholesale credit term is Net 45."))),
-			mock.patch("jarvis.learning.voice_facts._surface", side_effect=RuntimeError("boom")),
+			mock.patch(
+				"jarvis.learning.voice_facts._flag_personalise_origin", side_effect=RuntimeError("boom")
+			),
 		):
 			self._run()
 		runs = frappe.get_all(RUN, filters={"scan_mode": "chat"}, fields=["name", "status"])

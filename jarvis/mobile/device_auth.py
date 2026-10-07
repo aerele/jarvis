@@ -253,7 +253,7 @@ def authenticate_device_token() -> None:
 	# frappe.set_user() resets form_dict; core's api-key path restores it and so
 	# must we, or every argument of the request is lost.
 	form_dict = frappe.local.form_dict
-	frappe.set_user(device["user"])
+	frappe.set_user(device["user"])  # nosemgrep: frappe-setuser -- auth hook sets the request's user
 	frappe.local.form_dict = form_dict
 	frappe.local.flags.jarvis_mobile_device = device["token_id"]
 
@@ -384,7 +384,7 @@ def prune_revoked_devices() -> int:
 		except Exception:
 			frappe.logger("jarvis.mobile").warning(f"could not prune device row {name}", exc_info=True)
 	if deleted:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before audit
 		_audit("prune_revoked", deleted=deleted, retention_days=REVOKED_RETENTION_DAYS)
 	return deleted
 

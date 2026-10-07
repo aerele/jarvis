@@ -174,7 +174,14 @@ def invoke_settlement(
 				frappe.db.rollback()
 			return
 
-		frappe.db.commit()  # slot released; the NEXT turn can be promoted
+		if pub_kind == "run:error":
+			# A dead chat sign-in ends here as a relay:error: remember it in the same commit that
+			# settles the turn (idempotent, so a replay of this unit is harmless). Never raises.
+			from jarvis import subscription_health
+
+			subscription_health.note_turn_error(pub_extra["error"], pub_extra["code"])
+
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release turn slot
 		return row, am, pub_kind, pub_extra
 
 	settled = txn.replay_on_conflict(project, label=f"settlement {run_id}")
@@ -299,7 +306,7 @@ def _bump_turn_count(conversation: str, run_id: str) -> None:
 		if _is_hidden_turn(run_id):
 			return
 		frappe.db.sql(
-			f"""UPDATE `tab{CONV}` SET turn_count = turn_count + 1
+			"""UPDATE `tabJarvis Conversation` SET turn_count = turn_count + 1
 			WHERE name=%(c)s AND file_box=0 AND agent_initiated=0""",
 			{"c": conversation},
 		)

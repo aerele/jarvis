@@ -27,12 +27,14 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 SKILL = "Jarvis Custom Skill"
 FROM_SCOPES = ("User", "Role", "Org")
 TO_SCOPES = ("Role", "Org")
 
 
-class JarvisSkillPromotionRequest(Document):
+class JarvisSkillPromotionRequest(NotRenamable, Document):
 	def before_insert(self):
 		# The requester must be able to READ the source skill before a request is
 		# filed against it — closes the same generic-REST disclosure class as the

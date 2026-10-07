@@ -71,7 +71,7 @@ def set_session_statement_timeout(timeout_s: int) -> None:
 	"""Postgres: session statement_timeout in ms. No-op on MariaDB (which
 	uses the per-statement prefix instead)."""
 	if db_backend() == "postgres":
-		frappe.db.sql(f"SET statement_timeout TO {int(timeout_s) * 1000}")
+		frappe.db.sql("SET statement_timeout TO %s", (int(timeout_s) * 1000,))
 
 
 def reset_session_statement_timeout() -> None:

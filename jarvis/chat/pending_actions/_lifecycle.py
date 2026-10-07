@@ -63,7 +63,7 @@ def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -
 	allowed, _adopt = authorize(row, approver, kind, conversation)
 	if not allowed:
 		return _refusal("not_found", "This confirmation is no longer valid.")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	lock_conversation(row.conversation)
 	moved = _transition(row.name, [PENDING], DISCARDED, reason_code="discarded", decided_by=approver)
 	if moved != "ok":
@@ -94,7 +94,7 @@ def discard(name: str, *, kind: str = "chat", conversation: str | None = None) -
 			provenance="chat" if kind == "chat" else "approval",
 			provenance_name=row.name if kind != "chat" else "",
 		)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if kind == "chat" and row.conversation:
 		_clear_autorun(row.conversation)
 	settle(row.name)
@@ -156,7 +156,7 @@ def cancel_for_conversation(conversation: str, *, reason: str = "cancelled") -> 
 	the turn end instead). Returns the chat cards cancelled."""
 	if not conversation or not table_ready():
 		return []
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	lock_conversation(conversation)
 	# Blocking, not SKIP LOCKED: a Confirm refused under its row lock (an armed macro
 	# run) would otherwise leave its card Pending behind the sweep, confirmable once
@@ -170,7 +170,7 @@ def cancel_for_conversation(conversation: str, *, reason: str = "cancelled") -> 
 	held = _held_parents(conversation)
 	for parent in held:
 		_drop_waiter(parent, conversation, reason, sheet_to=DISCARDED)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	for name in cancelled + held:
 		settle(name)
 	return cancelled
@@ -214,7 +214,7 @@ def _bulk_terminal(sql: str, to: str, reason_code: str) -> int:
 	while True:
 		names = frappe.db.sql_list(sql + " LIMIT %(lim)s", {"lim": _BULK_LIMIT})
 		moved = [n for n in names if _transition(n, [PENDING], to, reason_code=reason_code) == "ok"]
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		for n in moved:
 			settle(n)
 		done += len(moved)
@@ -259,7 +259,7 @@ def cancel_unverifiable() -> int:
 		except _seal.SealError as e:
 			code = e.reason_code
 		if _transition(name, [PENDING], FAILED, reason_code=code) == "ok":
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 			settle(name)
 			done += 1
 		else:

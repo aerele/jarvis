@@ -17,6 +17,7 @@ from frappe import _
 from frappe.utils import cint
 
 from jarvis import audit
+from jarvis._commit_watch import CommitWatch
 from jarvis._session import impersonate
 from jarvis.chat.api import _NON_EDIT_FIELDTYPES, _next_seq, enqueue_continuation
 from jarvis.chat.link_filters import draft_link_query_filters
@@ -45,27 +46,51 @@ def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict
 	}
 
 
+def _readable_permlevels(doctype: str, parenttype: str | None = None) -> set | None:
+	"""Permlevels the session user may READ on ``doctype`` (a child through
+	``parenttype``): the set ``apply_fieldlevel_read_permissions`` uses. ``None``
+	means unrestricted (Administrator, which that method also skips)."""
+	if frappe.session.user == "Administrator":
+		return None
+	return set(frappe.get_meta(doctype).get_permlevel_access(permission_type="read", parenttype=parenttype))
+
+
+def _can_read_field(df, levels: set | None) -> bool:
+	"""A permlevel-0 field is readable to anyone who can read the document; a
+	higher permlevel only with a role granting it (Desk hides the rest)."""
+	return levels is None or not df.permlevel or df.permlevel in levels
+
+
 def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
-	child marks none."""
+	child marks none. Columns at a permlevel the user cannot read are dropped."""
 	return [
-		_field_dict(df, child_doctype, parent_doctype, parentfield) for df in _grid_fields(child_doctype)[0]
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[0]
 	]
 
 
 def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
 	"""Every other editable field of the child, so a row key the model proposes
-	outside the grid keeps its real type and label (#655)."""
+	outside the grid keeps its real type and label (#655). Fields at a permlevel
+	the user cannot read are dropped here too."""
 	return [
-		_field_dict(df, child_doctype, parent_doctype, parentfield) for df in _grid_fields(child_doctype)[1]
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[1]
 	]
 
 
-def _grid_fields(child_doctype: str) -> tuple[list, list]:
-	"""(the grid's columns, every other editable field) of a child doctype."""
+def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
+	"""(the grid's columns, every other editable field) of a child doctype,
+	limited to the fields the user can read through ``parent_doctype``."""
 	meta = frappe.get_meta(child_doctype)
-	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
+	levels = _readable_permlevels(child_doctype, parent_doctype)
+	editable = [
+		df
+		for df in meta.fields
+		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
+	]
 	listed = [df for df in editable if df.in_list_view] or editable[:4]
 	return listed, [df for df in editable if df not in listed]
 
@@ -75,16 +100,19 @@ def _grid_fields(child_doctype: str) -> tuple[list, list]:
 def get_doctype_form_meta(doctype: str) -> dict:
 	"""Form metadata for the draft panel: main fields INCLUDING Table fields,
 	plus per-table child columns - one call, so the panel never fans out.
-	Gated on read permission of the parent (child meta rides on that gate)."""
+	Gated on read permission of the parent (child meta rides on that gate).
+	Fields at a permlevel the user cannot read are left out, so the panel never
+	shows (or pre-fills, via ``load_doc``) a value Desk would hide from them."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return {"ok": False, "reason": _("unknown doctype")}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
+	levels = _readable_permlevels(doctype)
 	fields, tables = [], {}
 	for df in meta.fields:
-		if not df.fieldname:
+		if not df.fieldname or not _can_read_field(df, levels):
 			continue
 		if df.fieldtype == "Table" and df.options:
 			fields.append(_field_dict(df, doctype))
@@ -124,6 +152,11 @@ def load_doc(doctype: str, name: str) -> dict:
 		frappe.throw(_("You can't edit {0} {1}.").format(doctype, name), frappe.PermissionError)
 	fm = get_doctype_form_meta(doctype)
 	doc = frappe.get_doc(doctype, name)
+	# Write access does not imply read access at every permlevel: strip the
+	# fields (parent and child rows) the user cannot read, exactly as Desk's
+	# getdoc does. The form meta above already omits them, so they are neither
+	# returned nor shown for editing.
+	doc.apply_fieldlevel_read_permissions()
 	values = {}
 	for f in fm["fields"]:
 		if f["fieldtype"] == "Table":
@@ -425,6 +458,7 @@ def apply_action(action: dict | str | None = None) -> dict:
 	# the reason THIS write logged.
 	mark = api._msglog_mark()
 	_write_risk.take_refusal()
+	watch = CommitWatch().arm(savepoint=True)
 	try:
 		# The panel's write is a tool call with no card: the ORM guard is on (no
 		# record allowed) and the no-commit fence makes a doctype whose save runs
@@ -433,6 +467,10 @@ def apply_action(action: dict | str | None = None) -> dict:
 			if verb == "create":
 				from jarvis.tools.create_doc import create_doc
 
+				if not values:
+					# Every field left empty in the panel: a missing value it marks below,
+					# never the tool's generic "values must be a non-empty dict".
+					raise frappe.MandatoryError(_("Value missing"))
 				res = create_doc(doctype, values)
 				name = res.get("name")
 				if do_submit:
@@ -449,6 +487,10 @@ def apply_action(action: dict | str | None = None) -> dict:
 		if hidden is not None:
 			raise hidden  # a hook swallowed the guard's refusal: never report success
 	except Exception as e:
+		# Before any rollback, which resets the sentinel. The no-commit fence makes
+		# frappe.db.commit a no-op here, so the savepoint is what sees a raw commit. A
+		# deadlock's own rollback drops the savepoint too (a lock timeout does not).
+		partial = watch.disarm(probe=not isinstance(e, frappe.QueryDeadlockError))
 		hidden = _write_risk.take_refusal()
 		if hidden is not None and not isinstance(e, api.WriteRefusedError):
 			e = hidden
@@ -466,11 +508,12 @@ def apply_action(action: dict | str | None = None) -> dict:
 			raise
 		# A RETURNED envelope makes Frappe commit at end-of-request; roll back so
 		# a partial create+submit (create ok, submit failed) leaves NO changes -
-		# the SPA's "No changes were saved" line stays truthful.
+		# unless something committed part-way (``partial``), which no rollback undoes.
 		frappe.db.rollback()
 		err_obj = envelope["error"]
-		if verb == "create" and isinstance(e, frappe.MandatoryError):
-			_name_missing_fields(err_obj, doctype, values)
+		marked = None
+		if _value_failure(err_obj):
+			marked = _mark_fields(err_obj, verb, doctype, name, values, e)
 		audit.record(
 			tool=f"apply_action.{verb}_doc",
 			args=args,
@@ -492,7 +535,20 @@ def apply_action(action: dict | str | None = None) -> dict:
 				provenance="chat",
 				ref_doctype=err_obj.get("doctype"),
 			)
-		return envelope
+			return envelope
+		# R2-9: what the panel and the assistant are told depends on the failure's kind.
+		from jarvis.chat.panel_failure import PanelFailure
+
+		panel = PanelFailure(
+			conversation,
+			tool,
+			args,
+			envelope,
+			partial=partial,
+			fixable_here=_panel_can_fix(verb, doctype, name, err_obj, marked),
+		)
+		return panel.respond(draft=a.get("message"), editable=cint(a.get("editable", 1)))
+	watch.disarm()
 
 	# Audit as a human-authored write, distinct from a model tool call. The
 	# actor (frappe.session.user) is captured by audit.record; the tool label
@@ -501,7 +557,7 @@ def apply_action(action: dict | str | None = None) -> dict:
 		tool=f"apply_action.{verb}_doc", args=args, ok=True, result={"doctype": doctype, "name": name}
 	)
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
 	try:
 		_append_receipt(conversation, verb, doctype, name, args, receipt)
@@ -535,6 +591,19 @@ def apply_action(action: dict | str | None = None) -> dict:
 		resp["run_id"] = _cont.get("run_id")
 		resp["message_id"] = _cont.get("message_id")
 	return resp
+
+
+def _panel_can_fix(verb: str, doctype: str, name: str, err_obj: dict, marked: bool | None) -> bool:
+	"""Whether the draft panel can fix this failure (R2-9). Yes when it marked the
+	fields at fault (``_mark_fields``), whatever the failure's kind: a bad ``status``
+	is not fixable for the model (J2a) but is a choice the person changes here. No
+	when a missing value cannot be filled in the panel, or the record being updated
+	is gone (no edit brings it back). Otherwise a fixable failure is."""
+	if marked is not None:
+		return marked
+	if verb == "update" and not (name and frappe.db.exists(doctype, name)):
+		return False
+	return err_obj.get("kind") == "fixable"
 
 
 def _park_sensitive(
@@ -580,45 +649,59 @@ def _park_sensitive(
 	}
 
 
-def _name_missing_fields(err_obj: dict, doctype: str, values: dict) -> None:
-	"""Turn a create's bare "Value missing" into the fields the person must fill.
-
-	Meta ``reqd`` can't say this: controllers fill many required fields on insert
-	(ERPNext sets a Sales Order's currency and price list). So the create is re-run
-	in a rollback sandbox with mandatory checks off and Frappe reports what is still
-	empty. Left untouched when anything else is also wrong, or a field can't be
-	filled in the draft panel (a table, a secret, permlevel > 0).
-
-	The re-run runs the doctype's hooks under the same sandbox as the create_doc
-	pre-park dry-run: DB writes and queued webhooks/notifications are dropped, an
-	inline HTTP call in a hook is not."""
-	from jarvis.chat.held_writes import collect_missing
-
-	missing = collect_missing("create_doc", [{"op": "create", "doctype": doctype, "values": values}])
-	if not missing:
-		return
-	fields = [_missing_field_entry(doctype, m) for m in missing]
-	err_obj["fields"] = fields
-	err_obj["message"] = _("{0} needs a value for {1}.").format(
-		_(doctype), ", ".join(f["where"] for f in fields)
-	)
-	err_obj["hint"] = _("Fill it in, then create again.")
+def _value_failure(err_obj: dict) -> bool:
+	"""A failure about the values themselves, the only kind field marks may keep the
+	panel open for: every value failure is enveloped as ``InvalidArgumentError``
+	(fixable ones, and Frappe's own Select / Link checks). Never a permission denial:
+	Frappe checks permission before links, so marking (or even looking up) a link
+	there would tell someone who may not create the record whether a name exists."""
+	return err_obj.get("code") == "InvalidArgumentError" and err_obj.get("kind") != "retry_later"
 
 
-def _missing_field_entry(doctype: str, missing: dict) -> dict:
-	meta = frappe.get_meta(doctype)
-	parentfield = missing.get("parentfield")
-	if not parentfield:
-		label = _(meta.get_label(missing["fieldname"]))
-		return {"fieldname": missing["fieldname"], "label": label, "where": label}
-	label = _(frappe.get_meta(meta.get_field(parentfield).options).get_label(missing["fieldname"]))
-	return {
-		"fieldname": missing["fieldname"],
-		"label": label,
-		"parentfield": parentfield,
-		"idx": missing.get("idx"),
-		"where": _("{0} row {1}: {2}").format(_(meta.get_label(parentfield)), missing.get("idx"), label),
-	}
+def _mark_fields(err_obj: dict, verb: str, doctype: str, name: str, values: dict, exc) -> bool | None:
+	"""Mark the fields the person must fill or correct (``error.fields``,
+	``jarvis.chat.panel_fields``) and word the message after them. True when there
+	are marks, False when a missing value cannot be filled in the panel (and nothing
+	else is marked), None when nothing here is about a field.
+
+	Required values are looked for only on a "Value missing" failure (the draft is
+	re-run in a sandbox for it); after any other failure the controller had not
+	filled its own fields yet. A value the panel cannot fill never turns a failure
+	with a bad value marked into one it cannot fix."""
+	from jarvis.chat.panel_fields import invalid_marks, missing_marks
+
+	invalid = invalid_marks(verb, doctype, name, values)
+	missing = missing_marks(verb, doctype, name, values) if isinstance(exc, frappe.MandatoryError) else []
+	if missing is None:
+		if not invalid:
+			return False
+		missing = []
+	if not (missing or invalid):
+		return None
+	err_obj["fields"] = missing + invalid
+	where = ", ".join(f["where"] for f in missing)
+	if missing and invalid:
+		# The value problems first, then what is missing (the "Value missing" text that
+		# failed is Frappe's raw one, so it is replaced, not kept).
+		err_obj["message"] = _("{0} {1} also needs a value for {2}.").format(
+			_refused_sentence(invalid), _(doctype), where
+		)
+	elif missing:
+		err_obj["message"] = _("{0} needs a value for {1}.").format(_(doctype), where)
+	if missing and invalid:
+		err_obj["hint"] = _("Fill in and correct the marked fields, then save again.")
+	elif missing:
+		err_obj["hint"] = _("Fill it in, then create again.")
+	else:
+		err_obj["hint"] = _("Correct the marked fields, then save again.")
+	return True
+
+
+def _refused_sentence(invalid: list[dict]) -> str:
+	labels = ", ".join(f["where"] for f in invalid)
+	if len(invalid) == 1:
+		return _("{0} has a value it does not accept.").format(labels)
+	return _("{0} have values they do not accept.").format(labels)
 
 
 _INVALID_CONFIRM = {
@@ -801,7 +884,7 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		"SELECT status FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE", {"c": run_conv}
 	)
 	if not status or status[0] == "Archived" or turn_message_binding.is_run_cancel_requested(run_conv):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return
 	# Stamp skill_autorun_skill (C2) so the gate can re-read allow_approve_run LIVE
 	# off THIS exact armed row before each uncarded covered write - un-arming the
@@ -816,7 +899,7 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist armed run state
 
 
 def _clear_stale_halt(run_conv: str | None) -> None:
@@ -834,11 +917,16 @@ def _clear_stale_halt(run_conv: str | None) -> None:
 def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> dict:
 	"""Run a consumed LEGACY record AS its stored ``exec_user`` (confirm_tool and
 	approve_and_run). ``impersonate`` is session-safe: a bare ``frappe.set_user``
-	would gut the confirming browser's cookie session (sid + data) and log it out."""
+	would gut the confirming browser's cookie session (sid + data) and log it out.
+
+	A failure whose transaction was not its own (something committed part-way,
+	``jarvis._commit_watch``) comes back with ``outcome: "partial"``: its rollback could
+	not undo what was committed, so it is never reported as "nothing was saved"."""
 	from jarvis import api
 
 	# exec_user defaults to the owner for tokens minted before this field existed.
 	exec_user = record.get("exec_user") or record.get("owner") or frappe.session.user
+	watch = CommitWatch().arm(savepoint=True)
 	try:
 		with impersonate(exec_user):
 			# Same envelope + audit as an inline write - dispatch_confirmed bypasses
@@ -855,13 +943,38 @@ def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> di
 		# _dispatch_and_wrap re-raises such exceptions with its savepoint still open, so
 		# roll back the partial write, log it, and fall through to a graceful failure
 		# envelope: the "failed" receipt + continuation still fire.
+		partial = watch.disarm(probe=True)  # before the rollback, which resets the sentinel
 		frappe.db.rollback()
 		frappe.log_error(
 			title=crash_title,
 			message=f"token={token} conversation={guard_conv}\n{frappe.get_traceback()}",
 		)
-		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
+		if partial:
+			message = "the confirmed action may have partly run; check before retrying"
+			return {**api._error("InternalError", message), "outcome": "partial"}
+		return api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
+	if isinstance(result, dict) and result.get("ok"):
+		watch.disarm()
+		return result
+	# After a deadlock the write path rolled back (CommitWatch skips the probe then);
+	# a lock timeout keeps the savepoint, so a commit before it is still seen.
+	if watch.disarm(probe=True):
+		from jarvis.chat.panel_failure import mark_partial
+
+		result = mark_partial(dict(result) if isinstance(result, dict) else {"ok": False})
 	return result
+
+
+def _legacy_chip(tool: str, result) -> str:
+	"""The receipt chip of a LEGACY confirm: confirmed, failed, or partial."""
+	from jarvis import api
+
+	if isinstance(result, dict) and result.get("outcome") == "partial":
+		return "partial"
+	# envelope_ok unwraps a connector tool's inner {ok:false} so a blocked/denied
+	# connector call reads "failed", consistent with its receipt status; non-connector
+	# tools keep the outer ok.
+	return "confirmed" if api.envelope_ok(tool, result) else "failed"
 
 
 def _run_pending_action(
@@ -1018,10 +1131,7 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				record["tool"],
 				record["args"],
 				result,
-				# envelope_ok unwraps a connector tool's inner {ok:false} so a blocked/
-				# denied connector call reads "failed", consistent with its receipt
-				# status; non-connector tools keep the outer ok.
-				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
+				action_outcome=_legacy_chip(record["tool"], result),
 				# PR-1: flip the parked PENDING action-row into this receipt in place
 				# (else insert, for a directly-minted / pre-deploy token).
 				flip_token=token,
@@ -1147,10 +1257,7 @@ def _confirm_core(
 				record["tool"],
 				record["args"],
 				result,
-				# envelope_ok unwraps a connector tool's inner {ok:false} so a blocked/
-				# denied connector call reads "failed", consistent with its receipt
-				# status; non-connector tools keep the outer ok.
-				action_outcome="confirmed" if api.envelope_ok(record["tool"], result) else "failed",
+				action_outcome=_legacy_chip(record["tool"], result),
 				# PR-1: flip the parked PENDING action-row into this receipt in place
 				# (else insert, for a directly-minted / pre-deploy token).
 				flip_token=token,
@@ -1267,12 +1374,15 @@ def _cap_groups(groups: list[tuple[str, list[str]]]) -> dict[str, str]:
 def _legacy_outcome(result) -> str:
 	"""The continuation outcome of a LEGACY (Redis token) confirm. It has no Pending
 	Action row for the correction stamp, so the bench could not limit a fixable
-	failure to one correction: it is sent as not fixable (explain and stop)."""
+	failure to one correction: it is sent as not fixable (explain and stop). One that
+	committed part-way (``_dispatch_call``) is partial."""
 	from jarvis import _failure_kind
 	from jarvis.chat import api as chat_api
 
 	if isinstance(result, dict) and result.get("ok"):
 		return chat_api.OUTCOME_OK
+	if isinstance(result, dict) and result.get("outcome") == "partial":
+		return chat_api.OUTCOME_PARTIAL
 	if _failure_kind.envelope_kind(result) == _failure_kind.RETRY_LATER:
 		return chat_api.OUTCOME_RETRY_LATER
 	return chat_api.OUTCOME_NOT_FIXABLE
@@ -1554,7 +1664,7 @@ def _settled_plan(decided: list[dict]) -> dict:
 		)
 		plan["outcome"] = chat_api.OUTCOME_PARTIAL if partial_only else chat_api.OUTCOME_UNKNOWN
 		plan["receipt"] = " ".join(
-			filter(None, (applied, _join_capped([_pa_receipt_text(i) for i in failed])))
+			part for part in (applied, _join_capped([_pa_receipt_text(i) for i in failed])) if part
 		)
 		return plan
 	plan["stamp"] = [i["name"] for i in ran if i.get("corrects")]

@@ -49,6 +49,7 @@ import frappe
 from frappe.utils import get_datetime, now_datetime
 from rq.timeouts import JobTimeoutException
 
+from jarvis._session import impersonate
 from jarvis.chat import macros
 
 RUN = macros.RUN
@@ -199,7 +200,7 @@ def stuck_runs() -> list[dict]:
 		fields=_RUN_FIELDS,
 		order_by="modified asc",
 	)
-	return [found for found in map(_stuck, rows) if found]
+	return [found for row in rows if (found := _stuck(row))]
 
 
 def left_by_the_check(run_name: str) -> dict | None:
@@ -267,7 +268,6 @@ class _RunCheck:
 	def run(self) -> None:
 		if frappe.cache().get_value(_key("skip", self.name), expires=True):
 			return
-		session_user = frappe.session.user
 		failure = None
 		try:
 			self._under_the_lock()
@@ -276,9 +276,6 @@ class _RunCheck:
 		except Exception as e:
 			failure = (e, frappe.get_traceback())
 			_rollback()
-		finally:
-			if frappe.session.user != session_user:
-				frappe.set_user(session_user)
 		# The Error Logs are written here, after the session is the scheduler's again.
 		# Written while the check acted as the run's owner they were that user's rows,
 		# and were forwarded off the bench with a reference to them.
@@ -323,7 +320,7 @@ class _RunCheck:
 		self.summary["raised"] += 1
 		frappe.cache().set_value(_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
 		frappe.log_error(title=f"jarvis.chat.macros.reconcile_failed: {self.name}", message=traceback)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 
 	def _look(self) -> bool:
 		"""Under the lock. Returns whether the run was changed."""
@@ -371,17 +368,16 @@ class _RunCheck:
 			return _send_gate_refusal(owner)
 
 		shape = _lost_hook_shape(run.name, turn.name)
-		if owner_ok:
-			frappe.set_user(owner)
-		macros._apply_step_end(
-			run.name,
-			run.conversation,
-			errored=turn.state in macros._TURN_FAILED,
-			run_id=turn.name,
-			refuse_next_step=refuse_next_step,
-			a_stop_ends_the_run=True,
-		)
-		return self._after(shape, turn.state, was=("running", sent))
+		with impersonate(owner if owner_ok else None):
+			macros._apply_step_end(
+				run.name,
+				run.conversation,
+				errored=turn.state in macros._TURN_FAILED,
+				run_id=turn.name,
+				refuse_next_step=refuse_next_step,
+				a_stop_ends_the_run=True,
+			)
+			return self._after(shape, turn.state, was=("running", sent))
 
 	def _nothing_sent(self) -> bool:
 		"""The run has sent no step: no turn under step 1's id, no step message. With
@@ -412,7 +408,7 @@ class _RunCheck:
 		failed = macros._cas_run_status(
 			run.name, "running", "failed", finished_at=frappe.utils.now(), error=error[:500]
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before follow-up work
 		if not failed:
 			return False
 		macros._announce(run, self.macro_doc, "failed", error)
@@ -464,7 +460,9 @@ def _stuck_summary_candidates(*, limit: int | None = None) -> list:
 	one that is gone; those first, then the oldest chat first, ``MAX_SUMMARIES_PER_TICK``
 	at most. The cutoff is the site's clock, like the chat's ``creation``."""
 	return frappe.db.sql(
-		f"""SELECT m.name, m.merge_conversation AS conversation {_STUCK_SUMMARIES}
+		"""SELECT m.name, m.merge_conversation AS conversation
+		FROM `tabJarvis Macro` m LEFT JOIN `tabJarvis Conversation` c ON c.name = m.merge_conversation
+		WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)
 		ORDER BY c.creation IS NOT NULL, c.creation
 		LIMIT %(limit)s""",
 		{"cutoff": _stuck_summary_cutoff(), "limit": limit or MAX_SUMMARIES_PER_TICK},
@@ -475,12 +473,13 @@ def _stuck_summary_candidates(*, limit: int | None = None) -> list:
 def _stuck_summary_count() -> int:
 	"""How many macros ``_stuck_summary_candidates`` would list with no cap. Asked only
 	for a tick that was cut short."""
-	rows = frappe.db.sql(f"SELECT COUNT(*) {_STUCK_SUMMARIES}", {"cutoff": _stuck_summary_cutoff()})
+	rows = frappe.db.sql(
+		"""SELECT COUNT(*)
+		FROM `tabJarvis Macro` m LEFT JOIN `tabJarvis Conversation` c ON c.name = m.merge_conversation
+		WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)""",
+		{"cutoff": _stuck_summary_cutoff()},
+	)
 	return int(rows[0][0] or 0)
-
-
-_STUCK_SUMMARIES = f"""FROM `tab{MACRO}` m LEFT JOIN `tab{CONV}` c ON c.name = m.merge_conversation
-	WHERE m.merge_status = 'pending' AND (c.name IS NULL OR c.creation < %(cutoff)s)"""
 
 
 def _stuck_summary_cutoff():
@@ -553,7 +552,7 @@ class _SummaryCheck:
 		self.summary["raised"] += 1
 		frappe.cache().set_value(_summary_key("skip", self.name), 1, expires_in_sec=SKIP_AFTER_A_RAISE_S)
 		frappe.log_error(title=f"jarvis.chat.macros.summary_reconcile_failed: {self.name}", message=traceback)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 		return True
 
 	def _give_up_after_a_fault(self) -> bool:
@@ -879,7 +878,7 @@ def _signal(
 		title=f"jarvis.chat.macros.reconciled: {shape}",
 		message=f"{subject} {name}; turn state {turn_state or 'no turn'}; shape {shape}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 
 
 def _log_at_most_hourly(title: str, message: str) -> None:

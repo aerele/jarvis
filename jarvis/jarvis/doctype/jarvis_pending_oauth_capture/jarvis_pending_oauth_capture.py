@@ -3,8 +3,10 @@
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisPendingOAuthCapture(Document):
+
+class JarvisPendingOAuthCapture(NotRenamable, Document):
 	"""Durable, encrypted, short-lived home for a minted provider OAuth blob
 	between the token exchange and the desired-state save that adopts it
 	(plan-05 D2, review P0-04 / §8.2).

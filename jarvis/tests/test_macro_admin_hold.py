@@ -397,7 +397,7 @@ class TestAHeldMacroDoesNotRun(WithColumns):
 			patch.object(macro_scheduler, "_notify_owner") as notify,
 			patch.object(macro_scheduler, "_retry_later") as retry,
 		):
-			macro_scheduler._sweep_one(row, now_datetime(), "Administrator", set())
+			macro_scheduler._sweep_one(row, now_datetime(), set())
 		for untouched in (enqueue, record, notify, retry):
 			untouched.assert_not_called()
 		self.assertEqual(frappe.db.count(RUN, {"macro": macro}), 0)

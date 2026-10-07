@@ -26,6 +26,8 @@ _FIELDS = ("maintenance_active", "maintenance_message")
 _CHECK_CACHE_KEY = "jarvis:maintenance_checked"
 _CHECK_CACHE_TTL_S = 30
 
+from jarvis import compat
+
 
 def persist(notice: dict | None) -> None:
 	"""Mirror the admin-sent maintenance notice onto Jarvis Settings.
@@ -40,13 +42,13 @@ def persist(notice: dict | None) -> None:
 			"maintenance_active": 1 if notice.get("active") else 0,
 			"maintenance_message": notice.get("message") or "",
 		}
-		current = frappe.db.get_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
+		current = compat.single_values(SETTINGS, _FIELDS)
 		if (
 			frappe.utils.cint(current.get("maintenance_active")) == fresh["maintenance_active"]
 			and (current.get("maintenance_message") or "") == fresh["maintenance_message"]
 		):
 			return
-		frappe.db.set_value(SETTINGS, SETTINGS, fresh, update_modified=False)
+		frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)
 	except Exception:
 		frappe.log_error(title="maintenance_notice.persist failed", message=frappe.get_traceback())
 

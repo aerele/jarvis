@@ -132,6 +132,14 @@ class SensitiveWriteRefusedError(WriteRefusedError):
 	code = "sensitive_refused"
 
 
+class BrakeRefusedError(WriteRefusedError):
+	"""A delete or cancel inside a run_method that runs without a card (an armed
+	macro, an approved skill run, auto mode): deleting and cancelling always need
+	the user's confirmation, whatever route reaches them."""
+
+	code = "brake_refused"
+
+
 class InvalidArgumentError(JarvisError):
 	"""Raised when tool arguments fail validation."""
 

@@ -107,8 +107,8 @@ class TestWriteAudit(FrappeTestCase):
 		self.assertFalse(rec.called)
 
 	def test_download_pdf_write_is_audited(self):
-		# F25: download_pdf inserts a new File doc (and attaches it to the
-		# source record) but was absent from _WRITE_TOOLS.
+		# F25: download_pdf inserts a new (private, unattached) File doc but
+		# was absent from _WRITE_TOOLS.
 		with (
 			patch("jarvis.api.dispatch", return_value={"file_url": "/private/files/x.pdf"}),
 			patch("jarvis.api.audit.record") as rec,

@@ -81,6 +81,7 @@ from jarvis.exceptions import (
 	ResultTooLargeError,
 )
 from jarvis.tools import _expr
+from jarvis.tools._doctype_name import canonical_doctype
 
 # Row guard: refuse a result over this size unless the caller passes
 # ``confirm_large=True``. Mirrors the run_query guard so the agent's
@@ -250,10 +251,11 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	# Joins.
 	for j in spec.get("joins") or []:
 		# SEC-003: validate the join's table-name + alias sinks.
-		_validate_doctype(j["doctype"])
+		join_dt = canonical_doctype(j["doctype"])
+		_validate_doctype(join_dt)
 		_validate_identifier(j["alias"], "alias")
-		joined_table = frappe.qb.DocType(j["doctype"]).as_(j["alias"])
-		alias_map[j["alias"]] = (j["doctype"], joined_table)
+		joined_table = frappe.qb.DocType(join_dt).as_(j["alias"])
+		alias_map[j["alias"]] = (join_dt, joined_table)
 		on_criterion = _build_on_criterion(j["on"], alias_map)
 		join_method_name = _JOIN_METHODS[j.get("type", "inner")]
 		q = getattr(q, join_method_name)(joined_table).on(on_criterion)
@@ -272,12 +274,21 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	for w in spec.get("where") or []:
 		q = q.where(_build_predicate(w, alias_map))
 
+	# The SELECT output aliases a bare ORDER BY / GROUP BY name may refer to.
+	# Any other bare name is a real column and goes through the permlevel ACL.
+	select_aliases = frozenset(
+		item["as"] for item in (spec.get("select") or []) if isinstance(item, dict) and item.get("as")
+	)
+
 	# GROUP BY. ``allow_alias`` mirrors ORDER BY: a bare name may reference
-	# a SELECT output alias (e.g. a computed ``month`` bucket) rather than
-	# a physical column — MariaDB resolves aliases in GROUP BY. The alias
-	# still passes the SEC-003 identifier check inside ``_resolve_field``.
+	# a declared SELECT output alias (e.g. a computed ``month`` bucket) rather
+	# than a physical column. ``group_by=True`` refuses an alias that shadows a
+	# real column, since MariaDB resolves GROUP BY names against the FROM tables
+	# first (see ``_resolve_field``).
 	for gb in spec.get("group_by") or []:
-		q = q.groupby(_resolve_field(gb, alias_map, allow_alias=True))
+		q = q.groupby(
+			_resolve_field(gb, alias_map, allow_alias=True, select_aliases=select_aliases, group_by=True)
+		)
 
 	# HAVING.
 	for h in spec.get("having") or []:
@@ -285,7 +296,7 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 
 	# ORDER BY.
 	for ob in spec.get("order_by") or []:
-		field = _resolve_field(ob["field"], alias_map, allow_alias=True)
+		field = _resolve_field(ob["field"], alias_map, allow_alias=True, select_aliases=select_aliases)
 		direction = Order.desc if ob.get("dir", "asc").lower() == "desc" else Order.asc
 		q = q.orderby(field, order=direction)
 
@@ -320,7 +331,9 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	# ``for dt in doctypes: for alias ...`` double loop (every alias's
 	# doctype is in ``doctypes``), and lets the child branch resolve the
 	# scoping parent from THIS alias's join/where signals.
-	engine = _make_permission_engine(q, [table for (_, table) in alias_map.values()], spec["from"])
+	engine = _make_permission_engine(
+		q, [table for (_, table) in alias_map.values()], canonical_doctype(spec["from"])
+	)
 	for alias, (resolved_dt, table) in alias_map.items():
 		q = _weave_record_gate(q, engine, alias, resolved_dt, table, spec, alias_map)
 
@@ -369,7 +382,7 @@ def _validate_spec_shape(spec: dict) -> None:
 	unknown = set(spec) - allowed_keys
 	if unknown:
 		raise InvalidArgumentError(
-			f"unknown query spec keys: {', '.join(sorted(map(str, unknown)))}. "
+			f"unknown query spec keys: {', '.join(sorted(str(key) for key in unknown))}. "
 			"Use select for columns and aggregates, and where for filters. "
 			f"Allowed keys: {', '.join(sorted(allowed_keys))}"
 		)
@@ -487,11 +500,11 @@ def _collect_doctypes(spec: dict) -> list[str]:
 	def _walk(node: dict) -> None:
 		if not isinstance(node, dict):
 			return
-		from_dt = node.get("from")
+		from_dt = canonical_doctype(node.get("from"))
 		if isinstance(from_dt, str) and from_dt not in out:
 			out.append(from_dt)
 		for j in node.get("joins") or []:
-			dt = j.get("doctype")
+			dt = canonical_doctype(j.get("doctype"))
 			if isinstance(dt, str) and dt not in out:
 				out.append(dt)
 		for predicate_list_key in ("where", "having"):
@@ -629,9 +642,11 @@ def _compute_permitted_read_fields(dt: str, base_doctype: str | None) -> frozens
 	yields ``parenttype=None``). Resolve the child's owning parent(s) instead —
 	the same ``_child_table_parents`` derivation step 3 uses for the
 	record-level gate — and permit a field if it is readable under ANY owning
-	parent the caller can read the child through. A child JOINed under a
-	concrete parent already carries that parent as ``base_doctype``, so use it
-	directly (unchanged pre-fix behaviour). Non-child DocTypes keep the plain
+	parent the caller can read the child through. A child JOINed under a parent
+	that OWNS it carries that parent as ``base_doctype``, so use it directly. A
+	``base_doctype`` that does not own the child (no Table field pointing at it)
+	is NOT trusted: its DocPerms say nothing about the child, so the child's
+	real readable parents are used instead. Non-child DocTypes keep the plain
 	``parenttype`` resolution.
 	"""
 	if not frappe.get_meta(dt).istable:
@@ -645,17 +660,29 @@ def _compute_permitted_read_fields(dt: str, base_doctype: str | None) -> frozens
 			)
 		)
 	# Child table: evaluate its field ACL against the owning parent(s).
-	if base_doctype and base_doctype != dt and not frappe.get_meta(base_doctype).istable:
+	from jarvis.tools.get_list import _child_table_parents, _readable_child_parents
+
+	if (
+		base_doctype
+		and base_doctype != dt
+		and not frappe.get_meta(base_doctype).istable
+		and base_doctype in _child_table_parents(dt)
+	):
+		# The FROM/base genuinely OWNS this child (a Table field points at it), so
+		# its DocPerms govern the child's fields: the usual parent -> child join,
+		# and an EXISTS sub-FROM scoped to one owning parent.
 		parents = [base_doctype]
 	else:
-		from jarvis.tools.get_list import _readable_child_parents
-
-		# Only parents the caller can actually read the child THROUGH — mirrors
-		# step 3's record-level gate. Without this filter, an owning parent with
-		# zero DocPerm rows would make get_permitted_fieldnames fall through to
-		# its "no permissions defined -> all fields" branch (frappe/model/meta.py)
-		# and leak a permlevel-restricted child field to a caller whose only real
-		# access path is a different, more restrictive parent.
+		# Child as FROM, or JOINed under a DocType that does NOT own it. The FROM's
+		# DocPerms say nothing about this child: trusting them let a caller read,
+		# say, Delivery Note Item rates through their Sales Order permlevel by
+		# joining the two on any ON condition. Use only the child's real parents
+		# the caller can read it THROUGH - mirrors step 3's record-level gate.
+		# Without that filter, an owning parent with zero DocPerm rows would make
+		# get_permitted_fieldnames fall through to its "no permissions defined ->
+		# all fields" branch (frappe/model/meta.py) and leak a permlevel-restricted
+		# child field to a caller whose only real access path is a different, more
+		# restrictive parent.
 		parents = _readable_child_parents(dt)
 	permitted: set[str] = set()
 	for parent in parents:
@@ -988,13 +1015,13 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 	"""Build the FROM table and seed the alias_map with the FROM entry.
 	The alias_map maps spec-alias → (doctype, pypika.Table) so later
 	stages can resolve ``"alias.field"`` references."""
-	from_dt = spec["from"]
+	from_dt = canonical_doctype(spec["from"])
 	# SEC-003: validate the table-name sink and any explicit alias before
 	# they reach pypika. The doctype-name fallback (below) is guarded by
 	# the existence check; an explicitly-supplied alias flows into
 	# ``.as_()`` and must be a bare identifier.
 	_validate_doctype(from_dt)
-	alias = spec.get("alias") or from_dt
+	alias = spec.get("alias") or spec["from"]  # as the spec's own references spell it
 	if spec.get("alias"):
 		_validate_identifier(spec["alias"], "alias")
 	# ``frappe.qb.DocType("Name")`` returns a pypika Table; ``.as_(alias)``
@@ -1005,13 +1032,33 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 	return table, alias_map
 
 
-def _resolve_field(field_ref: str, alias_map: dict, allow_alias: bool = False):
+def _bare_name_is_column(name: str, alias_map: dict) -> bool:
+	"""True when ``name`` is a real column of any table in scope, i.e. one MariaDB
+	could resolve an unqualified reference to."""
+	return any(name in frappe.get_meta(dt).get_valid_columns() for dt, _table in alias_map.values())
+
+
+def _resolve_field(
+	field_ref: str,
+	alias_map: dict,
+	allow_alias: bool = False,
+	select_aliases: frozenset = frozenset(),
+	group_by: bool = False,
+):
 	"""Resolve a ``"alias.field"`` reference to a pypika Field.
 
-	When ``allow_alias=True``, a bare name (no dot) is permitted and
-	returned as a pypika ``Field`` without table qualification — this
-	is the ORDER BY case where the operator may reference a SELECT
-	alias like ``total_qty``."""
+	When ``allow_alias=True`` (ORDER BY / GROUP BY), a bare name (no dot) that
+	is a declared SELECT output alias (``select_aliases``, e.g. ``total_qty``) is
+	returned as an unqualified pypika ``Field``. Any OTHER bare name is a real
+	column and is resolved - and permlevel-checked - like any column: emitting it
+	unqualified would let MariaDB resolve it to the physical column and order or
+	group by a field the caller cannot read, leaking its ranking / distribution.
+
+	GROUP BY additionally refuses the alias shortcut when the alias shares its
+	name with a real column in scope: MariaDB resolves an unqualified GROUP BY
+	name against the FROM tables BEFORE the SELECT aliases (ORDER BY is the
+	reverse, so a colliding ORDER BY alias is safe), so ``group_by: ["rate"]``
+	with an innocuous ``... as rate`` would still group by the hidden column."""
 	# Reject empty / non-string / dot-only refs. Without this, callers
 	# producing accidental empty strings (e.g. GROUP BY with an empty
 	# entry, ORDER BY with an unset field) would silently produce
@@ -1020,11 +1067,14 @@ def _resolve_field(field_ref: str, alias_map: dict, allow_alias: bool = False):
 	if not isinstance(field_ref, str) or not field_ref.strip():
 		raise InvalidArgumentError(f"field reference must be a non-empty string, got {field_ref!r}")
 	if "." not in field_ref:
-		if allow_alias:
-			# ORDER BY / GROUP BY may reference a SELECT output alias
-			# (e.g. total_qty) rather than a physical column, so we can
-			# only enforce SEC-003 identifier syntax here — column
-			# existence isn't knowable for an output alias.
+		if (
+			allow_alias
+			and field_ref in select_aliases
+			and not (group_by and _bare_name_is_column(field_ref, alias_map))
+		):
+			# A declared SELECT output alias rather than a physical column: column
+			# existence isn't knowable for it, so only SEC-003 identifier syntax
+			# applies. The aliased expression was itself ACL-checked in SELECT.
 			_validate_identifier(field_ref, "field")
 			from pypika import Field
 
@@ -1365,10 +1415,11 @@ def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *
 		if j["alias"] in sub_alias_map:
 			raise InvalidArgumentError(f"EXISTS sub-spec alias {j['alias']!r} collides")
 		# SEC-003: validate the sub-spec join's table-name + alias sinks.
-		_validate_doctype(j["doctype"])
+		join_dt = canonical_doctype(j["doctype"])
+		_validate_doctype(join_dt)
 		_validate_identifier(j["alias"], "alias")
-		joined_table = frappe.qb.DocType(j["doctype"]).as_(j["alias"])
-		sub_alias_map[j["alias"]] = (j["doctype"], joined_table)
+		joined_table = frappe.qb.DocType(join_dt).as_(j["alias"])
+		sub_alias_map[j["alias"]] = (join_dt, joined_table)
 		on_criterion = _build_on_criterion(j["on"], sub_alias_map)
 		join_method_name = _JOIN_METHODS[j.get("type", "inner")]
 		sub_q = getattr(sub_q, join_method_name)(joined_table).on(on_criterion)
@@ -1404,7 +1455,7 @@ def _build_exists_criterion(sub_spec: dict, outer_alias_map: dict, depth: int, *
 		a: (dt, table) for a, (dt, table) in sub_alias_map.items() if a not in outer_alias_map
 	}
 	sub_engine = _make_permission_engine(
-		sub_q, [table for (_, table) in sub_local_aliases.values()], sub_spec["from"]
+		sub_q, [table for (_, table) in sub_local_aliases.values()], canonical_doctype(sub_spec["from"])
 	)
 	# Apply the record gate to every alias's table object. Earlier code
 	# de-duplicated by doctype on the assumption that the returned criterion

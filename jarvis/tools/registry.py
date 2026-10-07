@@ -22,6 +22,7 @@ from collections.abc import Callable
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, ToolNotFoundError
+from jarvis.tools._doctype_name import canonical_doctype
 from jarvis.tools._write_risk import guard_scope
 
 _TOOL_NAMES: tuple[str, ...] = (
@@ -104,6 +105,7 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_engagement_config",
 	"get_purchase_match_inputs",
 	"get_receivables_review_inputs",
+	"get_bank_recon_inputs",
 	"get_itemised_tax_breakup",
 	# Read-only GSTR-1 return-side period totals from india_compliance's filed
 	# return (the gzip filed_summary File, reduced server-side to the 5 heads), for
@@ -231,6 +233,9 @@ def in_tool_dispatch() -> bool:
 	return getattr(frappe.local, "jarvis_dispatch_depth", 0) > 0
 
 
+_DOCTYPE_ARGS = frozenset({"doctype", "parent_doctype"})
+
+
 def dispatch(tool_name: str, args: dict):
 	if tool_name not in _TOOLS:
 		raise ToolNotFoundError(f"no such tool: {tool_name}")
@@ -249,6 +254,10 @@ def dispatch(tool_name: str, args: dict):
 	if not _ACCEPTS_VAR_KW.get(tool_name, False):
 		accepted = _ACCEPTED_PARAMS[tool_name]
 		args = {k: v for k, v in args.items() if k in accepted}
+	# A doctype by its canonical name, so the hooks registered under it (a doctype's
+	# row scoping among them) apply to the tool's reads and writes.
+	for key in _DOCTYPE_ARGS.intersection(args):
+		args = {**args, key: canonical_doctype(args[key])}
 	# Validate the call binds *before* invoking, so a genuine arg/signature
 	# mismatch (a missing required arg - the caller's fault) becomes
 	# InvalidArgumentError, while a TypeError raised inside the tool body (a real

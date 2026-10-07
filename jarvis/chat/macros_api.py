@@ -10,6 +10,8 @@ import re
 
 import frappe
 from frappe import _, _lt
+from frappe.query_builder.functions import Coalesce, Count
+from pypika.terms import Case, PseudoColumn
 
 from jarvis.chat import list_filters
 from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import FORM_FLAG, join_words
@@ -330,6 +332,29 @@ ADMIN_DELETE_NOTICE = "Macro deleted by an admin"
 # the macro, and the new owner's shows it switched off with no word of why.
 ADMIN_HANDOVER_NOTICE = "Macro handed over by an admin"
 _NOTICE_KINDS = (ADMIN_DELETE_NOTICE, ADMIN_HANDOVER_NOTICE)
+# The subject of the Comment a hand-over leaves on the macro, naming its old owner.
+_HANDED_OVER_FROM = "macro-handover:from:"
+
+
+def handed_over_from(old_owner: str) -> str:
+	return f"{_HANDED_OVER_FROM}{old_owner}"
+
+
+def refuse_if_handed_away(doc) -> None:
+	"""Tell a macro's old owner that an admin handed it over (their form or list was
+	still open), instead of a bare permission error. Only ever refuses, and only
+	someone who may not write the macro: whoever passes it still passes
+	``check_permission``."""
+	user = frappe.session.user
+	if user == doc.owner or doc.has_permission("write"):
+		return
+	if frappe.db.exists(
+		"Comment",
+		{"reference_doctype": MACRO, "reference_name": doc.name, "subject": handed_over_from(user)},
+	):
+		frappe.throw(_("This macro changed hands. Reload it."), frappe.PermissionError)
+
+
 _NOTICES_MAX = 20
 
 
@@ -380,7 +405,6 @@ def dismiss_macro_notices(names: str | list | None = None) -> dict:
 	marked = frappe.get_all("Notification Log", filters=filters, or_filters=_notice_kinds(), pluck="name")
 	for name in marked:
 		frappe.db.set_value("Notification Log", name, "read", 1, update_modified=False)
-	frappe.db.commit()
 	return {"ok": True, "dismissed": len(marked)}
 
 
@@ -516,17 +540,30 @@ _ARM_NOTICE_ASKS = (
 	(_lt("creating or changing skills"), ("create_custom_skill",)),
 	(_lt("calling connectors"), ("call_connector",)),
 )
+# Writes the write-risk guard treats as sensitive configuration park a card in every
+# mode, an armed macro's run included (``api._run_tool``, ``_must_card``): one phrase per
+# kind of risk it knows (``_write_risk.RISK_LINES``), pinned by the same test.
+_ARM_NOTICE_SENSITIVE = (
+	("code", _lt("scripts")),
+	("outbound", _lt("webhooks")),
+	("mail", _lt("email set-up")),
+	("access", _lt("user access")),
+	("login", _lt("sign-in settings")),
+)
 
 
 def arm_notice() -> str:
 	"""What the form asks the owner to confirm before it switches Skip confirmation on."""
 	skips = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_SKIPS])
 	asks = join_words([str(phrase) for phrase, _tools in _ARM_NOTICE_ASKS])
+	sensitive = join_words(
+		[str(phrase) for _kind, phrase in _ARM_NOTICE_SENSITIVE] + [_("other sensitive configuration")]
+	)
 	return _(
 		"This macro will {0} without asking you first, including when it runs on a schedule "
-		"with nobody watching. {1} still ask, and stop the run. Its steps can apply only "
-		"skills you own, or skills only a reviewer can change."
-	).format(skips, asks[:1].upper() + asks[1:])
+		"with nobody watching. {1} still ask, and stop the run. So do changes to {2}. Its steps "
+		"can apply only skills you own, or skills only a reviewer can change."
+	).format(skips, asks[:1].upper() + asks[1:], sensitive)
 
 
 def _arming(owner: str, *, held) -> dict:
@@ -642,7 +679,6 @@ def create_macro(
 	)
 	doc.flags[FORM_FLAG] = True
 	doc.insert()
-	frappe.db.commit()
 	return {
 		"ok": True,
 		"data": {"name": doc.name, "macro_name": doc.macro_name, "summarize": len(doc.steps) >= 2},
@@ -744,7 +780,7 @@ def update_macro(
 	_refuse_schedule_for_barred_owner(doc.owner, doc.schedule_enabled)
 	doc.flags[FORM_FLAG] = True
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- save lands before summary starts
 	# An emptied summary is not one the owner wrote: with changed steps it is the same
 	# as the controller's clear, and a new summary follows.
 	# Not while held: ``summarize_macro`` refuses a held macro.
@@ -797,7 +833,7 @@ def _refuse_busy_delete(macro_name: str, stopped: int):
 			f"stops; {stopped} run(s) were stopped; the macro was not deleted."
 		),
 	)
-	frappe.db.commit()  # the throw below rolls the request back
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before raise
 	if stopped == 1:
 		said = _("The run was stopped, but another run started before the macro could be deleted.")
 	elif stopped:
@@ -846,7 +882,7 @@ def delete_macro(name: str) -> dict:
 	again, start from zero. The finished scheduled rows of the current month stay,
 	with no macro on them (``macros.drop_runs_of_deleted_macro``); for the user the
 	run history is gone all the same, since nothing that lists runs shows a row with
-	no macro (``_HAS_MACRO``). The hourly macro job removes them after the month ends.
+	no macro (``macro IS NOT NULL``). The hourly macro job removes them after the month ends.
 
 	The runs go in ONE statement. A ``delete_doc`` per run cost about ten queries
 	and a queued job each, inside the request, for a table that grows without
@@ -992,7 +1028,7 @@ def delete_macros_bulk(names: str | list | None = None) -> dict:
 				frappe.log_error(title="Jarvis: bulk macro delete failed", message=frappe.get_traceback())
 				frappe.db.commit()  # a later row's rollback must not take the log with it
 			skip(n, title, reason)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- log survives later rollback
 	return {"deleted": deleted, "skipped": skipped, "stopped_runs": stopped_runs}
 
 
@@ -1048,8 +1084,8 @@ def get_macro_run(run: str) -> dict:
 _RUN_STATUSES = {"queued", "running", "waiting_capacity", "completed", "failed", "stopped"}
 # A run row with no macro is not run history: ``delete_macro`` keeps the month's
 # scheduled rows of a deleted macro so the unattended budget still counts them, and
-# clears their macro. Every query that shows or counts runs for a person carries this.
-_HAS_MACRO = "macro IS NOT NULL"
+# clears their macro. Every query that shows or counts runs for a person carries
+# ``macro IS NOT NULL``.
 
 
 @frappe.whitelist()
@@ -1065,32 +1101,43 @@ def list_macro_runs(status: str = "", macro: str = "", limit: int | str = 30, st
 	footer (DESIGN-V3 D38 — additive)."""
 	limit = max(1, min(int(limit or 30), 100))
 	start = max(0, int(start or 0))
-	conditions = ["r.owner = %(owner)s", f"r.{_HAS_MACRO}"]
-	params = {"owner": frappe.session.user, "limit": limit + 1, "start": start}
+	r = frappe.qb.DocType(RUN).as_("r")
+	m = frappe.qb.DocType(MACRO).as_("m")
+	where = (r.owner == frappe.session.user) & r.macro.isnotnull()
 	if status and status in _RUN_STATUSES:
-		conditions.append("r.status = %(status)s")
-		params["status"] = status
+		where &= r.status == status
 	if macro:
-		conditions.append("r.macro = %(macro)s")
-		params["macro"] = macro
-	where = " AND ".join(conditions)
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Macro Run` r WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""
-		SELECT r.name, r.macro, COALESCE(m.macro_name, r.macro) AS macro_name,
-		       r.conversation, r.status, r.current_step, r.total_steps,
-		       r.`trigger` AS `trigger`, r.creation, r.started_at, r.finished_at, r.error, r.run_mode,
-		       CASE WHEN r.started_at IS NOT NULL AND r.finished_at IS NOT NULL
-		            THEN TIMESTAMPDIFF(SECOND, r.started_at, r.finished_at)
-		       END AS duration_s
-		FROM `tabJarvis Macro Run` r
-		LEFT JOIN `tabJarvis Macro` m ON m.name = r.macro
-		WHERE {where}
-		ORDER BY r.creation DESC
-		LIMIT %(limit)s OFFSET %(start)s
-		""",
-		params,
-		as_dict=True,
+		where &= r.macro == macro
+	total = frappe.qb.from_(r).select(Count("*")).where(where).run()[0][0]
+	duration_s = Case().when(
+		r.started_at.isnotnull() & r.finished_at.isnotnull(),
+		frappe.qb.functions("TIMESTAMPDIFF", PseudoColumn("SECOND"), r.started_at, r.finished_at),
+	)
+	rows = (
+		frappe.qb.from_(r)
+		.left_join(m)
+		.on(m.name == r.macro)
+		.select(
+			r.name,
+			r.macro,
+			Coalesce(m.macro_name, r.macro).as_("macro_name"),
+			r.conversation,
+			r.status,
+			r.current_step,
+			r.total_steps,
+			r.trigger.as_("trigger"),
+			r.creation,
+			r.started_at,
+			r.finished_at,
+			r.error,
+			r.run_mode,
+			duration_s.as_("duration_s"),
+		)
+		.where(where)
+		.orderby(r.creation, order=frappe.qb.desc)
+		.limit(limit + 1)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	return {"runs": rows[:limit], "has_more": len(rows) > limit, "total": total}
 
@@ -1109,8 +1156,8 @@ def macro_run_stats() -> dict:
 	every day would read 100%."""
 	owner = {"owner": frappe.session.user}
 	rows = frappe.db.sql(
-		f"""SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run`
-		WHERE owner = %(owner)s AND {_HAS_MACRO} GROUP BY status""",
+		"""SELECT status, COUNT(*) AS n FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND macro IS NOT NULL GROUP BY status""",
 		owner,
 		as_dict=True,
 	)
@@ -1118,13 +1165,13 @@ def macro_run_stats() -> dict:
 	completed = by.get("completed", 0)
 	failed = by.get("failed", 0)
 	stopped_with_reason = frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
-		WHERE owner = %(owner)s AND {_HAS_MACRO} AND status = 'stopped' AND IFNULL(error, '') != ''""",
+		"""SELECT COUNT(*) FROM `tabJarvis Macro Run`
+		WHERE owner = %(owner)s AND macro IS NOT NULL AND status = 'stopped' AND IFNULL(error, '') != ''""",
 		owner,
 	)[0][0]
 	finished = completed + failed + stopped_with_reason
 	last = frappe.db.sql(
-		f"SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s AND {_HAS_MACRO}", owner
+		"SELECT MAX(creation) FROM `tabJarvis Macro Run` WHERE owner = %(owner)s AND macro IS NOT NULL", owner
 	)[0][0]
 	return {
 		"total": sum(by.values()),
@@ -1292,6 +1339,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	from jarvis.chat import macros
 
 	doc = frappe.get_doc(MACRO, name)
+	refuse_if_handed_away(doc)
 	# Gated on WRITE, not read: a summary lands on the macro (merged_prompt,
 	# merge_status), and its turn runs in a chat created for whoever asks. On read
 	# alone, anyone who could SEE a macro could overwrite its owner's summary, and
@@ -1310,10 +1358,11 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 	# Again on the row as it is now: an admin can hand the macro over while the
 	# entitlement was asked, and a summary of the old owner's would then start an agent
 	# turn as the new owner, on a macro the new owner was told arrives with none.
-	doc.check_permission("write")
-	macros.refuse_acting_for_barred_owner(doc.owner)
+	# The owner first: the old owner fails the write check too, and is told why.
 	if doc.owner != asked_for:
 		frappe.throw(_("This macro changed hands. Reload it."), frappe.PermissionError)
+	doc.check_permission("write")
+	macros.refuse_acting_for_barred_owner(doc.owner)
 	if macros.is_held(doc):
 		# An admin's hold: the macro does nothing, and a summary is one agent turn.
 		from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import (
@@ -1365,7 +1414,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pending mark visible to turn worker
 	# A summary given up (``pending``, a forced call): the mark names the new chat as of
 	# the commit above, so a late result from the old one finds no macro waiting on it
 	# (``macros._apply_merge_after_turn`` looks the macro up by this link), whether or
@@ -1407,7 +1456,7 @@ def summarize_macro(name: str, force: int = 0) -> dict:
 		}
 	# Hide from the sidebar (list_conversations skips Archived).
 	frappe.db.set_value("Jarvis Conversation", conv.name, "status", "Archived", update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- archive survives summary chat cleanup
 	if pending:
 		_delete_summary_chat(pending, owned_by=doc.owner)
 	return {"ok": True, "conversation": conv.name}

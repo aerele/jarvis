@@ -13,6 +13,7 @@ real ``doc_events "*"`` hook wiring, so it needs the app's hooks loaded (bench
 migrate + restart after deploying this branch).
 """
 
+import json
 from unittest.mock import patch
 
 import frappe
@@ -431,6 +432,26 @@ class TestDispatch(_TriggerTestCase):
 		self.assertNotIn('"__islocal"', snapshot)
 		self.assertNotIn('"_user_tags"', snapshot)
 
+	def test_llm_snapshot_drops_fields_above_permlevel_0(self):
+		# The LLM's summary is shown to every reader of the record, so it must not
+		# be built from a field some of them can't see, in the parent or a row.
+		contact = frappe.get_doc(
+			{
+				"doctype": "Contact",
+				"first_name": "Snapshot",
+				"company_name": "Hidden Co",
+				"email_ids": [{"email_id": "hidden@example.com", "is_primary": 1}],
+			}
+		)
+		parent_df = frappe.get_meta("Contact").get_field("company_name")
+		child_df = frappe.get_meta("Contact Email").get_field("email_id")
+		with patch.object(parent_df, "permlevel", 1), patch.object(child_df, "permlevel", 2):
+			snapshot = json.loads(engine._snapshot_json(contact))
+		self.assertEqual(snapshot["first_name"], "Snapshot")
+		self.assertNotIn("company_name", snapshot)
+		self.assertEqual(snapshot["email_ids"][0]["is_primary"], 1)
+		self.assertNotIn("email_id", snapshot["email_ids"][0])
+
 	def test_depth_guard_stops_recursion(self):
 		trig = self._make_llm_trigger()
 		todo = self._make_todo()
@@ -574,6 +595,17 @@ class TestRunLLMAction(_TriggerTestCase):
 		self.assertEqual(sorted(r.status for r in rows), ["Skipped", "Success"])
 		skipped = next(r for r in rows if r.status == "Skipped")
 		self.assertIn("daily LLM cap reached (1)", skipped.summary)
+
+	def test_engine_peek_reads_the_published_count_against_the_current_cap(self):
+		trig = self._make_llm_trigger(cap=1)
+		row = {"name": trig.name, "llm_daily_cap": 1}
+		with patch(LLM_TASK_COMPLETE, return_value="ok"):
+			self._run(trig)  # == cap
+			self.assertFalse(engine._llm_cap_reached(row))
+			self._run(trig)  # cap+1
+		self.assertEqual(llm_action.daily_count(trig.name), 2)
+		self.assertTrue(engine._llm_cap_reached(row))
+		self.assertFalse(engine._llm_cap_reached({**row, "llm_daily_cap": 5}))
 
 	def test_missing_or_disabled_trigger_is_silent(self):
 		with patch(LLM_TASK_COMPLETE, return_value="ok") as task:

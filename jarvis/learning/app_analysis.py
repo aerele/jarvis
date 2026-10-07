@@ -209,7 +209,7 @@ def _set_run(run_name: str, fields: dict) -> None:
 	updating (default) — the stale-run watch uses it as the progress signal for
 	Zipping/Ingesting. Any status change busts the turn-hook conversation cache."""
 	frappe.db.set_value(RUN, run_name, fields)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist progress signal
 	if "status" in fields:
 		_bust_active_conversations()
 
@@ -226,10 +226,10 @@ def _cas_status(run_name: str, expected: str, fields: dict) -> bool:
 	restoring ``Analyzing`` on a row a cancel/retirement already moved to Cancelled."""
 	current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
 	if current != expected:
-		frappe.db.commit()  # release the row lock; nothing to change
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return False
 	frappe.db.set_value(RUN, run_name, fields)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist status transition
 	if "status" in fields:
 		_bust_active_conversations()
 	return True
@@ -243,7 +243,7 @@ def _fail_run(run_name: str, msg: str) -> None:
 	# no-op — the lock is released and the terminal state stands.
 	current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
 	if current in TERMINAL:
-		frappe.db.commit()  # release the row lock; a terminal row is left as-is
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return
 	_set_run(
 		run_name,
@@ -280,7 +280,7 @@ def mark_cancelled(run_name: str) -> None:
 		# busy (the block still runs), and the turn-end recheck backstops the rare case.
 		current = frappe.db.get_value(RUN, run_name, "status", for_update=True)
 		if current in TERMINAL:
-			frappe.db.commit()  # release the row lock; a terminal run is left as-is
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 			return
 		_set_run(run_name, {"status": "Cancelled", "finished_at": now_datetime()})
 
@@ -513,7 +513,7 @@ def _cleanup_zips() -> None:
 			_delete_zip_file(r.zip_path)
 			frappe.db.set_value(RUN, r.name, "zip_path", "", update_modified=False)
 	if rows:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist zip cleanup
 
 
 # --------------------------------------------------------------------------- #
@@ -1183,7 +1183,7 @@ def ingest(run: str) -> None:
 			# — never complete a cancelled run, never keep its pages.
 			if frappe.db.get_value(RUN, run, "status", for_update=True) != "Ingesting":
 				frappe.db.rollback(save_point=sp)
-				frappe.db.commit()  # release the row lock; the terminal state stands
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 				return
 			frappe.db.set_value(
 				RUN,
@@ -1195,7 +1195,7 @@ def ingest(run: str) -> None:
 					"notes": json.dumps(notes),
 				},
 			)
-			frappe.db.commit()  # pages + Completed land together, or (on loss above) neither
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist pages with completion
 			_bust_active_conversations()
 			# Post-completion side effects: the terminal transition is already durable, so
 			# the skill creates' internal commits are safe. A failure here logs + counts but
@@ -1354,6 +1354,7 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 	raw = payload.get("skills")
 	if not isinstance(raw, list):
 		return 0, 0, 0
+	from jarvis._session import impersonate
 	from jarvis.chat.custom_skills_api import _create_custom_skill_impl
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
 		MAX_DESC_LEN,
@@ -1374,9 +1375,7 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 			continue
 		user_invocable = 1 if item.get("user_invocable") else 0
 		try:
-			original_user = frappe.session.user
-			try:
-				frappe.set_user(doc.requested_by)
+			with impersonate(doc.requested_by):
 				_create_custom_skill_impl(
 					slug,
 					description,
@@ -1386,8 +1385,6 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 					scope="Org",
 					ignore_permissions=True,
 				)
-			finally:
-				frappe.set_user(original_user)
 			created += 1
 		except Exception:
 			failed += 1
