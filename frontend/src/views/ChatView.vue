@@ -9894,11 +9894,11 @@ async function send(textArg, resendAck) {
 		// returns before reaching this line, and a thrown send never reaches it either
 		// (see the catch block below) — so a retry after either failure still carries
 		// the same prefill context instead of silently sending without it.
-		if (
-			_currentScope() === _sentScope &&
-			JSON.stringify(_prefillSendContext) === JSON.stringify(sendRequest.prefillContext)
-		) {
-			if (groundWiki && sendRequest.groundWiki) groundNextTurn.value = false;
+		if (JSON.stringify(_prefillSendContext) === JSON.stringify(sendRequest.prefillContext)) {
+			// Prefill is view-wide: consume it even if the user has switched chats.
+			// Wiki selection belongs to the current chat, so keep its scope guard.
+			if (_currentScope() === _sentScope && groundWiki && sendRequest.groundWiki)
+				groundNextTurn.value = false;
 			_prefillSendContext = null;
 		}
 		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
