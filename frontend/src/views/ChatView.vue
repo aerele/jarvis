@@ -3648,6 +3648,11 @@
 									{{ sh.name }}
 								</button>
 							</div>
+							<SheetCharts
+								:charts="curCharts"
+								:sheet-name="curSheet.name"
+								:dark="effectiveDark"
+							/>
 							<div class="jv-sheet-scroll">
 								<table class="jv-sheet">
 									<thead v-if="curSheet.rows.length">
@@ -4265,6 +4270,8 @@ import Message from "@/components/chat/Message.vue";
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import SheetCharts from "@/components/SheetCharts.vue";
+import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
@@ -8253,7 +8260,7 @@ function cvFile(cv) {
 }
 // ---- artifact preview side panel (ChatGPT/Claude-style: click a card → slide-
 // in panel on the right; PDF/image render directly, xlsx/csv as a table) ----
-// { m, cv, url, kind, conv, content?, sheets?, sheetIdx?, text? }
+// { m, cv, url, kind, conv, content?, sheets?, charts?, sheetIdx?, text? }
 // `conv` is the conversation the artifact was opened FROM. The overlay is
 // absolutely positioned inside the ChatView container, so the AppShell's
 // conversation sidebar stays clickable behind it: the panel routinely outlives
@@ -8273,6 +8280,17 @@ const curSheet = computed(() => {
 	const a = artifact.value;
 	if (!a || a.kind !== "table" || !a.sheets?.length) return { rows: [] };
 	return a.sheets[a.sheetIdx] || { rows: [] };
+});
+// charts the backend read from the xlsx, for the sheet on screen
+const curCharts = computed(() => {
+	const a = artifact.value;
+	return a?.kind === "table"
+		? chartsForSheet(
+				a.charts,
+				curSheet.value.name,
+				a.sheets.map((s) => s.name)
+		  )
+		: [];
 });
 function closeArtifact() {
 	artifact.value = null;
@@ -8304,7 +8322,15 @@ async function openArtifact(m, cv) {
 	try {
 		const r = await api.previewFile(cv.file_url);
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			artifact.value = { m, cv, url, conv, kind: "table", sheets: r.sheets, sheetIdx: 0 };
+			artifact.value = {
+				m,
+				cv,
+				url,
+				conv,
+				kind: "table",
+				...tablePreviewFields(r),
+				sheetIdx: 0,
+			};
 			return;
 		}
 		if (r && r.kind === "text") {
