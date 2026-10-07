@@ -1,12 +1,16 @@
 <template>
 	<div class="jv-ask" :class="{ 'jv-ask--form': isForm }">
-		<div v-for="(q, qi) in spec.questions" :key="qi" class="jv-ask-q">
+		<div v-for="(q, qi) in questions" :key="qi" class="jv-ask-q">
 			<div class="jv-ask-qt">
 				<span class="jv-ask-num">{{ qi + 1 }}</span
 				>{{ q.q }}
 			</div>
+			<!-- field: waiting on the field's meta -->
+			<div v-if="q.type === 'loading'" class="jv-ask-loading">
+				<LoadingIndicator class="size-4" />
+			</div>
 			<!-- yes/no, with optional custom labels (e.g. Approve / Reject) -->
-			<div v-if="q.type === 'yesno'" class="jv-ask-opts">
+			<div v-else-if="q.type === 'yesno'" class="jv-ask-opts">
 				<button
 					v-for="(lbl, li) in q.options.length === 2 ? q.options : ['Yes', 'No']"
 					:key="li"
@@ -58,6 +62,26 @@
 				placeholder="Type your answer…"
 				@keydown.enter.prevent
 			/>
+			<!-- select: a Select field's fixed choices -->
+			<Select
+				v-else-if="q.type === 'select'"
+				class="w-full"
+				:options="q.options.map((o) => ({ label: o, value: o }))"
+				:model-value="sel[qi] || ''"
+				:disabled="answered"
+				placeholder="Select an option"
+				@update:model-value="pickSingle(qi, $event)"
+			/>
+			<!-- number: a field's Int / Float / Currency / Percent -->
+			<FormControl
+				v-else-if="q.type === 'number'"
+				type="text"
+				inputmode="decimal"
+				:model-value="sel[qi] || ''"
+				:disabled="answered"
+				placeholder="Type a number"
+				@update:model-value="pickSingle(qi, $event)"
+			/>
 			<!-- link: search a record of the given DocType -->
 			<div v-else-if="q.type === 'link'" class="jv-ask-link">
 				<input
@@ -88,7 +112,10 @@
 			</div>
 			<!-- Other free-text only for choice questions -->
 			<input
-				v-if="q.type === 'single' || q.type === 'multi' || q.type === 'yesno'"
+				v-if="
+					!q.fromField &&
+					(q.type === 'single' || q.type === 'multi' || q.type === 'yesno')
+				"
 				class="jv-ask-other"
 				v-model="other[qi]"
 				placeholder="Other…"
@@ -127,13 +154,15 @@
 // component, and `spec` is typically a computed that re-parses (new object
 // identity) on every stream tick — resetting on a `spec` watcher would wipe
 // half-made picks. Remounting on a new message is what clears the draft.
-import { ref, computed } from "vue";
-import { searchLink } from "@/api";
+import { ref, computed, watch } from "vue";
+import { FormControl, LoadingIndicator, Select } from "frappe-ui";
+import { getDoctypeFields, searchLink } from "@/api";
+import { controlFor } from "@/lib/docFields";
 import { vScrollFade } from "@/composables/useScrollFade";
-import { ASK_FIELD_TYPES, isAskReady, askAnswerText } from "@/lib/chatAsk";
+import { ASK_FIELD_TYPES, isAskReady, askAnswerText, humanizeFieldname } from "@/lib/chatAsk";
 
 const props = defineProps({
-	// A parsed ask: { questions: [{q, type, options, doctype}] } (see parseAsk).
+	// A parsed ask: { questions: [{q, type, options, doctype, fieldname?}] } (see parseAsk).
 	spec: { type: Object, required: true },
 	// True while the host would SILENTLY refuse a submit right now (a send
 	// already in flight, a turn's tail still running for this conversation).
@@ -144,7 +173,7 @@ const props = defineProps({
 // The formatted answer text; the host sends it as an ordinary user message.
 const emit = defineEmits(["submit"]);
 
-const sel = ref({}); // qIdx -> string (single/yesno/date/datetime/text/link) | string[] (multi)
+const sel = ref({}); // qIdx -> string (single/yesno/date/datetime/text/select/link) | string[] (multi)
 const other = ref({}); // qIdx -> free-text (option types only)
 const link = ref({}); // qIdx -> { q, items, open } for link-type record search
 // Locks the card once an answer has actually been DISPATCHED (not just typed).
@@ -160,7 +189,82 @@ const isForm = computed(
 		props.spec.questions.length > 0 &&
 		props.spec.questions.every((q) => ASK_FIELD_TYPES.includes(q.type))
 );
-const ready = computed(() => isAskReady(props.spec, sel.value, other.value));
+
+// A `field` question names a DocType field; the card draws that field's real
+// control from its meta (get_doctype_fields, which checks read permission). One
+// request per DocType per card; a failure (error, bad response or a hung
+// request) is dropped from the cache so it can retry, and the question falls
+// back to a text box.
+const FIELDS_TIMEOUT_MS = 8000;
+const fieldsCache = new Map();
+function fetchFields(doctype) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("timeout")), FIELDS_TIMEOUT_MS);
+		Promise.resolve(getDoctypeFields(doctype)).then(
+			(r) => {
+				clearTimeout(timer);
+				if (!r || r.ok === false || !Array.isArray(r.fields)) {
+					reject(new Error("bad response"));
+				} else resolve(r.fields);
+			},
+			(e) => {
+				clearTimeout(timer);
+				reject(e);
+			}
+		);
+	});
+}
+function loadFields(doctype) {
+	if (!fieldsCache.has(doctype)) {
+		const p = fetchFields(doctype);
+		p.catch(() => fieldsCache.delete(doctype));
+		fieldsCache.set(doctype, p);
+	}
+	return fieldsCache.get(doctype);
+}
+const fieldKey = (q) => `${q.doctype}\n${q.fieldname}`;
+const fieldMeta = ref({}); // "doctype\nfieldname" -> "loading" | "failed" | meta field
+watch(
+	() => props.spec,
+	(spec) => {
+		for (const q of spec.questions) {
+			const key = fieldKey(q);
+			if (q.type !== "field" || fieldMeta.value[key]) continue;
+			fieldMeta.value = { ...fieldMeta.value, [key]: "loading" };
+			loadFields(q.doctype)
+				.then((fields) => fields.find((f) => f.fieldname === q.fieldname) || "failed")
+				.catch(() => "failed")
+				.then((m) => (fieldMeta.value = { ...fieldMeta.value, [key]: m }));
+		}
+	},
+	{ immediate: true }
+);
+// The question as drawn: a field question becomes the control its meta calls for.
+function drawn(q) {
+	if (q.type !== "field") return q;
+	const m = fieldMeta.value[fieldKey(q)];
+	const base = {
+		...q,
+		fromField: true,
+		q: q.q || (m && m.label) || humanizeFieldname(q.fieldname),
+	};
+	if (m === "loading" || !m) return { ...base, type: "loading" };
+	if (m === "failed") return { ...base, type: "text" };
+	const [control, opts] = controlFor(m.fieldtype, m.options);
+	if (control === "select") {
+		const options = opts.filter(Boolean);
+		return options.length ? { ...base, type: "select", options } : { ...base, type: "text" };
+	}
+	if (control === "link") {
+		return opts ? { ...base, type: "link", doctype: opts } : { ...base, type: "text" };
+	}
+	if (control === "check") return { ...base, type: "yesno", options: [] };
+	if (control === "date" || control === "datetime") return { ...base, type: control };
+	if (control === "number") return { ...base, type: "number" };
+	return { ...base, type: "text" };
+}
+const questions = computed(() => props.spec.questions.map(drawn));
+const ready = computed(() => isAskReady({ questions: questions.value }, sel.value, other.value));
 
 async function onLinkSearch(i, doctype, val) {
 	link.value = { ...link.value, [i]: { ...(link.value[i] || {}), q: val, open: true } };
@@ -230,7 +334,7 @@ function submit() {
 	// a host is allowed to REFUSE the text (a send already in flight, a dictation
 	// still transcribing): clearing first would silently swallow the answers and
 	// leave the user staring at an empty, disabled card.
-	emit("submit", askAnswerText(props.spec, sel.value, other.value));
+	emit("submit", askAnswerText({ questions: questions.value }, sel.value, other.value));
 }
 </script>
 
@@ -296,6 +400,11 @@ function submit() {
 	text-transform: uppercase;
 	color: var(--text-3);
 	margin-bottom: 6px;
+}
+.jv-ask-loading {
+	display: flex;
+	padding: 8px 0;
+	color: var(--text-3);
 }
 .jv-ask-opts {
 	display: flex;
