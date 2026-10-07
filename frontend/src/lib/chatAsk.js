@@ -12,12 +12,31 @@ export const ASK_RE = /```jarvis-ask[ \t]*\n([\s\S]*?)```/;
 
 // Types that take a typed/picked VALUE rather than option buttons. An ask made
 // only of these renders as a compact mini-form (no numbered badges).
-export const ASK_FIELD_TYPES = ["date", "datetime", "link", "text"];
+export const ASK_FIELD_TYPES = ["date", "datetime", "field", "link", "select", "text"];
+
+// A field question names a DocType and a field; both are interpolated into an
+// API call, so only plain identifiers get through (DocType names may hold
+// spaces, fieldnames may not).
+const DOCTYPE_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
+const FIELDNAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * A readable label for a field whose question carries none: strip a leading
+ * `custom_`, underscores to spaces, capitalise the first letter
+ * (`custom_gstin_2` -> `Gstin 2`).
+ */
+export function humanizeFieldname(fieldname) {
+	const s = String(fieldname || "")
+		.replace(/^custom_/, "")
+		.replace(/_+/g, " ")
+		.trim();
+	return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 /**
  * Parse the first ```jarvis-ask block out of a message.
  * @param {string} content raw assistant message text
- * @returns {{questions: Array<{q: string, type: string, options: string[], doctype: string}>}|null}
+ * @returns {{questions: Array<{q: string, type: string, options: string[], doctype: string, fieldname: string}>}|null}
  */
 export function parseAsk(content) {
 	const mt = String(content || "").match(ASK_RE);
@@ -32,15 +51,39 @@ export function parseAsk(content) {
 				let type = q.type === "boolean" ? "yesno" : q.type;
 				if (!["single", "multi", "yesno", ...ASK_FIELD_TYPES].includes(type))
 					type = "single";
+				// A Select field's choice list can be long; only the button types stay at 8.
+				const cap = type === "select" ? 200 : 8;
+				const options = Array.isArray(q.options)
+					? q.options.map(String).slice(0, cap)
+					: [];
+				// A dropdown with nothing to pick from is just a typed answer.
+				if (type === "select" && !options.length) type = "text";
+				const text = String(q.q || q.question || "").trim();
+				if (type === "field") {
+					const doctype = String(q.doctype || "").trim();
+					const fieldname = String(q.fieldname || "").trim();
+					// A bad identifier must not reach the API call; the question
+					// degrades to a typed answer instead of vanishing.
+					if (!DOCTYPE_RE.test(doctype) || !FIELDNAME_RE.test(fieldname)) {
+						return {
+							q: text || humanizeFieldname(fieldname),
+							type: "text",
+							options: [],
+							doctype: "",
+						};
+					}
+					return { q: text, type, options: [], doctype, fieldname };
+				}
 				return {
-					q: String(q.q || q.question || "").trim(),
+					q: text,
 					type,
 					// yesno may carry exactly 2 custom labels (e.g. ["Approve","Reject"]).
-					options: Array.isArray(q.options) ? q.options.map(String).slice(0, 8) : [],
+					options,
 					doctype: type === "link" ? String(q.doctype || q.link || "").trim() : "",
 				};
 			})
 			.filter((q) => {
+				if (q.type === "field") return true;
 				if (!q.q) return false;
 				if (q.type === "yesno" || ASK_FIELD_TYPES.includes(q.type)) return true;
 				return q.options.length > 0;
@@ -56,6 +99,14 @@ export function isAskReady(spec, sel, other) {
 	if (!spec) return false;
 	return spec.questions.every((q, i) => {
 		const v = sel[i];
+		// Drawn-only types (a `field` question resolved to a control).
+		if (q.type === "loading") return false;
+		if (q.type === "number") {
+			const n = String(v == null ? "" : v)
+				.replace(/,/g, "")
+				.trim();
+			return n !== "" && Number.isFinite(Number(n));
+		}
 		if (ASK_FIELD_TYPES.includes(q.type)) return v != null && String(v).trim() !== "";
 		const free = (other[i] || "").trim();
 		if (q.type === "multi") return (Array.isArray(v) && v.length > 0) || !!free;
