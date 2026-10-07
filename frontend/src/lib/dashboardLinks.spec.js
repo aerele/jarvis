@@ -143,11 +143,49 @@ describe("frame runtime link bridge", () => {
 		expect(received).toHaveLength(0);
 	});
 
-	it("leaves in-page #fragment anchors alone", async () => {
-		boot('<a id="f" href="#sec">jump</a>');
+	it("scrolls an in-page #fragment itself and cancels navigation", async () => {
+		boot('<a id="f" href="#sec">jump</a><div id="sec">x</div>');
+		const target = document.getElementById("sec");
+		target.scrollIntoView = vi.fn();
 		const ev = await click(document.getElementById("f"));
-		expect(ev.defaultPrevented).toBe(false);
+		expect(ev.defaultPrevented).toBe(true);
+		expect(target.scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
 		expect(received).toHaveLength(0);
+	});
+
+	it("finds a#name targets and decodes the fragment", async () => {
+		boot('<a id="f" href="#a%20b">jump</a><a name="a b">t</a>');
+		const target = document.querySelector("a[name]");
+		target.scrollIntoView = vi.fn();
+		const ev = await click(document.getElementById("f"));
+		expect(ev.defaultPrevented).toBe(true);
+		expect(target.scrollIntoView).toHaveBeenCalledTimes(1);
+	});
+
+	it("scrolls to the top for # and #top, and ignores a missing target, never navigating", async () => {
+		const top = vi.fn();
+		document.documentElement.scrollIntoView = top;
+		boot('<a id="a" href="#">t</a><a id="b" href="#top">t</a><a id="c" href="#nope">t</a>');
+		for (const id of ["a", "b"]) {
+			expect((await click(document.getElementById(id))).defaultPrevented).toBe(true);
+		}
+		expect(top).toHaveBeenCalledTimes(2);
+		const ev = await click(document.getElementById("c"));
+		expect(ev.defaultPrevented).toBe(true);
+		expect(top).toHaveBeenCalledTimes(2);
+		expect(received).toHaveLength(0);
+		delete document.documentElement.scrollIntoView;
+	});
+
+	it("cancels GET form submits and posts area links", async () => {
+		boot('<form id="f" action="/x"><button id="s">go</button></form>');
+		const sub = new Event("submit", { bubbles: true, cancelable: true });
+		document.getElementById("f").dispatchEvent(sub);
+		expect(sub.defaultPrevented).toBe(true);
+		boot('<map><area id="ar" href="/app/customer"></map>');
+		const ev = await click(document.getElementById("ar"));
+		expect(ev.defaultPrevented).toBe(true);
+		expect(received[0]).toMatchObject({ type: "link", href: "/app/customer" });
 	});
 
 	it("bridges window.open to a link message and returns null", async () => {
