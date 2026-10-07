@@ -82,6 +82,9 @@ class TestPrimaryChanged(TestCase):
 	def test_never_synced_workspace_is_not_held(self):
 		self.assertFalse(_changed([_row("a", 0), _row("b", 1)], [_row("b", 0), _row("a", 1)], synced=False))
 
+	def test_first_model_over_an_empty_pool_is_not_held(self):
+		self.assertFalse(_changed([], [_row("a", 0), _row("b", 1)]))
+
 	def test_first_ever_save_is_not_held(self):
 		self.assertFalse(JarvisSettings._primary_changed(_doc(_row("a", 0), before=None)))
 

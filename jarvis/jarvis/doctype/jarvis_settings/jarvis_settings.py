@@ -1400,7 +1400,8 @@ class JarvisSettings(Document):
 		first place included: it renders native-primary vs native-fallback)
 		restarts the container, so it is held like a proxy switch until open
 		replies finish. A same-first reorder or an added/removed later model
-		reads False and keeps hot-reloading.
+		reads False and keeps hot-reloading, and so does a save that gives a
+		pool with no enabled model its first one.
 
 		The first model is picked with the fleet's own ordering
 		(``pool_serialize._fleet_sort_key``) and identified by provider, model
@@ -1412,7 +1413,13 @@ class JarvisSettings(Document):
 			return False
 		if not (getattr(before, "llm_pool_synced_at", None) or getattr(before, "llm_direct_synced_at", None)):
 			return False
-		return _primary_identity(before) != _primary_identity(self)
+		was = _primary_identity(before)
+		if was is None:
+			# No enabled model before this save: nothing was being served, so
+			# the first pool ever saved (even over a stale synced marker) is a
+			# plain apply, not a primary change to hold.
+			return False
+		return was != _primary_identity(self)
 
 	@staticmethod
 	def _pool_state_snapshot(doc) -> tuple:
