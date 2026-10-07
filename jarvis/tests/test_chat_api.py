@@ -649,6 +649,37 @@ class TestRetryMessage(_ChatTestCase):
 		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		self.assertGreaterEqual(after, before)
 
+	def test_legacy_retry_of_a_reply_that_is_not_the_newest_is_refused(self):
+		_u, asst_id = self._make_turn(self.conv, with_error=True)
+		self._make_turn(self.conv, user_text="next question")
+		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+			result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertIn("latest", result["reason"])
+		dispatch.assert_not_called()
+
+	def test_legacy_retry_keeps_the_context_of_the_failed_turn(self):
+		user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		context = {"page": "dashboards", "theme": "midnight"}
+		turn = frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Turn",
+				"run_id": "legacy-ctx-" + self.conv[-6:],
+				"conversation": self.conv,
+				"relay_target_id": admission.DEFAULT_RELAY_TARGET,
+				"state": "errored",
+				"seed_message": user_id,
+				"assistant_message": asst_id,
+				"dispatch_payload": frappe.as_json({"context": context}),
+			}
+		)
+		turn.insert(ignore_permissions=True)
+		self.addCleanup(frappe.db.delete, "Jarvis Chat Turn", {"conversation": self.conv})
+		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+			result = retry_message(asst_id)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(dispatch.call_args[0][0]["context"], context)
+
 	def test_rejects_when_subscription_suspended(self):
 		"""The Retry button sits on the exact error a stopped container produces.
 		A suspended retry must be refused HERE, not dispatched to the worker to
@@ -1315,8 +1346,9 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 		self.assertTrue(rename_conversation(self.conv, "my chat")["ok"])
 		self.assertTrue(set_star(self.conv, 1)["ok"])
 		with patch("jarvis.chat.api._dispatch_turn"):
-			self.assertTrue(send_message(self.conv, "hello")["ok"])
+			# Retry first: once "hello" is sent, the failed reply is no longer the latest.
 			self.assertTrue(retry_message(self.asst_msg)["ok"])
+			self.assertTrue(send_message(self.conv, "hello")["ok"])
 		self.assertTrue(archive_conversation(self.conv)["ok"])
 
 
