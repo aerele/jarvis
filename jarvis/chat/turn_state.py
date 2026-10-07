@@ -42,6 +42,7 @@ their own transaction and say so.
 
 from __future__ import annotations
 
+import datetime
 import json
 import threading
 
@@ -320,13 +321,17 @@ def unfinished_turn_state(conversation: str) -> str | None:
 	return rows[0][0] if rows else None
 
 
-def unfinished_turn_after(conversation: str, created_after, *, exclude_run_id: str | None = None) -> bool:
-	"""True while a turn of ``conversation`` created after ``created_after`` has not ended
-	(any NONTERMINAL_STATES). ``exclude_run_id`` leaves out the caller's own turn."""
+def unfinished_turn_after(
+	conversation: str, created_after: datetime.datetime | str | None, *, exclude_run_id: str | None = None
+) -> bool:
+	"""True while a turn of ``conversation`` has not ended (any NONTERMINAL_STATES).
+	Only turns created after ``created_after`` count, or every turn when it is None;
+	``exclude_run_id`` leaves out the caller's own turn."""
 	return bool(
 		frappe.db.sql(
 			"""SELECT 1 FROM `tabJarvis Chat Turn`
-			WHERE conversation=%(c)s AND state IN %(live)s AND creation > %(after)s AND name != %(x)s
+			WHERE conversation=%(c)s AND state IN %(live)s AND name != %(x)s
+			  AND (%(after)s IS NULL OR creation > %(after)s)
 			LIMIT 1""",
 			{
 				"c": conversation,
