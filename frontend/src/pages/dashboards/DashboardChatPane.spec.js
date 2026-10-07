@@ -415,6 +415,103 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		expect(retryButton(wrapper)).toBeUndefined();
 	});
 
+	it("shows the error of a retry that throws and offers Retry again", async () => {
+		const { retryMessage } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		toast.error.mockClear();
+		retryMessage.mockRejectedValueOnce(new Error("Network down"));
+		const { wrapper } = await mountFailed(failed());
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("Network down");
+		expect(retryButton(wrapper).text()).toBe("Retry");
+		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("offers Retry again when the retried run fails too", async () => {
+		api.getDashboardConversation.mockResolvedValue(failed());
+		const { wrapper, socket } = mountPane();
+		await flushPromises();
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		socket.fire({
+			kind: "run:error",
+			conversation_id: "conv1",
+			message_id: "m2",
+			code: "empty-reply",
+		});
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+		api.getDashboardConversation.mockResolvedValue({ messages: [] });
+	});
+
+	it("is not left running when the run fails before the retry request returns", async () => {
+		const { retryMessage } = await import("@/api");
+		let finish;
+		retryMessage.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+		const { wrapper, socket } = await mountFailed(failed());
+		await retryButton(wrapper).trigger("click");
+		socket.fire({ kind: "run:error", conversation_id: "conv1", message_id: "m2" });
+		finish({ ok: true, run_id: "r2" });
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+	});
+
+	it("offers Retry again when the queued retry is cancelled", async () => {
+		const { wrapper, socket } = await mountFailed(failed());
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "other" });
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "r2" });
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+	});
+
+	it("is disabled while the chat is compacting", async () => {
+		const { getConversationContext } = await import("@/api");
+		getConversationContext.mockResolvedValueOnce({ fresh: true, compacting: true });
+		const { wrapper } = await mountFailed(failed());
+		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+
+	it("refetches the chat after a refusal, so a stale Retry goes away", async () => {
+		const { retryMessage } = await import("@/api");
+		retryMessage.mockResolvedValueOnce({
+			ok: false,
+			reason: "Only the latest reply can be retried.",
+		});
+		const { wrapper } = await mountFailed(failed());
+		// Let the refetches that earlier tests scheduled run first.
+		await new Promise((r) => setTimeout(r, 350));
+		api.getDashboardConversation.mockClear();
+		await retryButton(wrapper).trigger("click");
+		await new Promise((r) => setTimeout(r, 350));
+		expect(api.getDashboardConversation).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves a chat the user has since left alone", async () => {
+		const { retryMessage } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		toast.error.mockClear();
+		let finish;
+		retryMessage.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+		const { wrapper } = await mountFailed(failed());
+		await retryButton(wrapper).trigger("click");
+		wrapper.vm.resetChat();
+		finish({ ok: false, reason: "Only the latest reply can be retried." });
+		await flushPromises();
+		expect(toast.error).not.toHaveBeenCalled();
+	});
+
+	it("offers no Retry when a blank reply the server counts follows the error", async () => {
+		const { wrapper } = await mountFailed(
+			failed(EMPTY_REPLY, [{ name: "m3", role: "assistant", content: "", streaming: 1 }])
+		);
+		expect(retryButton(wrapper)).toBeUndefined();
+	});
+
 	it("still offers Retry this step above a macro's closing message", async () => {
 		const closing = {
 			name: "m3",
@@ -424,5 +521,56 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		};
 		const { wrapper } = await mountFailed(failed(EMPTY_REPLY, [closing]));
 		expect(retryButton(wrapper).text()).toBe("Retry this step");
+	});
+});
+
+describe("DashboardChatPane run state", () => {
+	it("shows the run as started after a send", async () => {
+		const { wrapper } = mountPane();
+		await flushPromises();
+		const box = wrapper.find("textarea");
+		await box.setValue("Monthly sales");
+		await box.trigger("keydown", { key: "Enter" });
+		await flushPromises();
+		expect(wrapper.find('[aria-live="polite"]').exists()).toBe(true);
+	});
+
+	// The ladder ends the run (emits activity) only on a settled reply; after a retry
+	// the failed reply it replaces is not one.
+	it("without a socket, waits for a reply newer than the retried error", async () => {
+		vi.useFakeTimers();
+		try {
+			const transcript = {
+				conversation: { name: "conv1" },
+				messages: [
+					{ name: "m1", role: "user", content: "Build me a dashboard" },
+					{
+						name: "m2",
+						role: "assistant",
+						content: "",
+						error: "Agent couldn't generate a response.",
+					},
+				],
+			};
+			api.getDashboardConversation.mockResolvedValue(transcript);
+			const wrapper = mount(DashboardChatPane, { global: { provide: { $socket: null } } });
+			await vi.advanceTimersByTimeAsync(10);
+			const retry = () => wrapper.findAll("button").find((b) => /^Retry/.test(b.text()));
+			await retry().trigger("click");
+			await vi.advanceTimersByTimeAsync(3100);
+			expect(wrapper.emitted("activity")).toBeUndefined();
+			api.getDashboardConversation.mockResolvedValue({
+				...transcript,
+				messages: [
+					...transcript.messages,
+					{ name: "m3", role: "assistant", content: "Done." },
+				],
+			});
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(wrapper.emitted("activity")).toBeDefined();
+		} finally {
+			api.getDashboardConversation.mockResolvedValue({ messages: [] });
+			vi.useRealTimers();
+		}
 	});
 });
