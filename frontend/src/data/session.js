@@ -2,13 +2,9 @@
 // if nobody is, the SPA bounces to Frappe's /login with a redirect back.
 import { reactive, computed } from "vue";
 import { call } from "frappe-ui";
+import { cookieUser } from "../lib/sessionCookie.js";
 
-export function sessionUser() {
-	const cookies = new URLSearchParams(document.cookie.split("; ").join("&"));
-	let user = cookies.get("user_id");
-	if (user === "Guest") user = null;
-	return user ? decodeURIComponent(user) : null;
-}
+export const sessionUser = cookieUser;
 
 export const session = reactive({
 	user: sessionUser(),
