@@ -1535,8 +1535,7 @@ class TestAttemptSuffixJobIds(_PumpTestCase):
 class TestControlQueueRouting(_PumpTestCase):
 	"""F1 (long-queue self-starvation): the pump's CONTROL jobs (prepare + finalize)
 	must never share the single-worker ``long`` queue the 90s hops ride. Routing per
-	bench shape: a live ``jarvis_chat`` lane -> ride it; else ``long`` with >=2
-	workers; else ``short``. Hops stay on ``long`` unconditionally (asserted in the
+	bench shape: a live ``jarvis_chat`` lane -> ride it; else ``short`` (#632). Hops stay on ``long`` unconditionally (asserted in the
 	handoff test)."""
 
 	def test_jarvis_chat_lane_live_rides_it(self):
@@ -1544,12 +1543,13 @@ class TestControlQueueRouting(_PumpTestCase):
 			self.assertEqual(pump._control_queue(), "jarvis_chat")
 			self.assertFalse(pump._pump_shape_starves())
 
-	def test_long_with_two_workers_uses_long(self):
+	def test_long_with_two_workers_still_uses_short(self):
+		"""#632: control jobs never share `long`, even with >= 2 live workers."""
 		with (
 			patch("jarvis.chat.api._turn_queue", lambda: "long"),
 			patch.object(pump, "_live_worker_count", lambda q: 2),
 		):
-			self.assertEqual(pump._control_queue(), "long")
+			self.assertEqual(pump._control_queue(), "short")
 			self.assertFalse(pump._pump_shape_starves())
 
 	def test_single_long_no_jarvis_chat_uses_short(self):

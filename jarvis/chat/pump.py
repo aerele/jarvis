@@ -899,15 +899,18 @@ def _reconcile_gateway_active(ctx: "PumpContext", snap: dict | None = None) -> N
 # a live ``jarvis_chat`` lane (isolated parallel turn workers) still landed
 # prepare/finalize on ``long`` behind the hops.
 #
-# Routing (F1 ruling):
+# Routing (F1 ruling, amended by #632):
 #   * a live ``jarvis_chat`` lane  -> ride it (isolated parallel workers, exactly as
 #     the legacy turn path does via ``api._turn_queue``);
-#   * else ``long`` when it has >= 2 live workers (a hop can occupy one while the
-#     other runs prepare/finalize — no self-starvation);
-#   * else ``short`` — the single-``long``-no-``jarvis_chat`` shape. ``short`` is
-#     ALWAYS provisioned, its jobs are bounded, and prepare/finalize carry an
-#     EXPLICIT ``timeout=HOP_TIMEOUT_S`` (180s) that fits comfortably under short's
-#     300s queue envelope (a vision-heavy 4-page-PDF prepare is ~22s).
+#   * else ``short`` ALWAYS, whatever the ``long`` worker count. ``short`` is always
+#     provisioned, its jobs are bounded, and prepare/finalize carry an EXPLICIT
+#     ``timeout=HOP_TIMEOUT_S`` (180s) that fits under short's 300s queue envelope
+#     (a vision-heavy 4-page-PDF prepare is ~22s).
+#
+# #632: control jobs are short and latency-critical, while ``long`` carries
+# multi-minute jobs (settings sync 600s budget, 90s hops, compaction, wiki/learning
+# jobs). Even with >= 2 ``long`` workers, finalize could queue behind a sync on the
+# other worker and mark a reply done ~75s late. So control jobs never share ``long``.
 
 
 def _live_worker_count(queue_name: str) -> int:
@@ -923,8 +926,8 @@ def _live_worker_count(queue_name: str) -> int:
 
 def _control_queue() -> str:
 	"""RQ queue for the pump's CONTROL jobs (prepare + finalize) — see the block
-	comment above. Never returns the shared ``long`` queue when ``long`` has fewer
-	than 2 live workers (the F1 self-starvation shape); routes to ``short`` there."""
+	comment above. A dedicated ``jarvis_chat`` lane if live, else ``short``. Never
+	the shared ``long`` queue, whatever its worker count (#632)."""
 	try:
 		from jarvis.chat.api import _turn_queue
 
@@ -938,17 +941,19 @@ def _control_queue() -> str:
 	# a worker with the hops — ride it as the legacy turn path does.
 	if q != PUMP_QUEUE:
 		return q
-	# It resolved to `long` (jarvis_chat absent, or overridden to long): only safe to
-	# share with the hops when `long` has >= 2 live workers; otherwise use `short`.
-	return PUMP_QUEUE if _live_worker_count(PUMP_QUEUE) >= 2 else "short"
+	# It resolved to `long` (jarvis_chat absent, or overridden to long): `long` also
+	# carries multi-minute jobs, so control jobs always take `short` (#632).
+	return "short"
 
 
 def _pump_shape_starves() -> bool:
 	"""True on the F1 self-starvation shape: no live ``jarvis_chat`` lane AND the
 	shared ``long`` hop queue has fewer than 2 workers — so a hop and the
-	prepare/finalize it depends on would fight over one worker. Drives the loud
-	``ensure_pump`` provisioning warning (§8-I)."""
-	return _control_queue() == "short"
+	prepare/finalize it depends on (now on ``short``, #632) can still fight over one
+	worker that listens on both. Drives the loud ``ensure_pump`` warning (§8-I).
+	The ``long`` count check is explicit since ``_control_queue`` no longer
+	depends on it."""
+	return _control_queue() == "short" and _live_worker_count(PUMP_QUEUE) < 2
 
 
 def _warn_provisioning_if_starved() -> None:
@@ -992,9 +997,8 @@ def _warn_provisioning_if_starved() -> None:
 # customer):
 #   * DEGRADED  -> warn only. Fires when TOTAL live RQ workers (any queue) < 2,
 #     not the stricter F1 "< 2 `long` workers" shape (_pump_shape_starves) used
-#     by the ops provisioning warning. Rationale: the pump already reroutes
-#     prepare/finalize (control) jobs to `short` when `long` has < 2 workers
-#     (`_control_queue`), so 1 `long` worker plus a second worker to run those
+#     by the ops provisioning warning. Rationale: the pump routes
+#     prepare/finalize (control) jobs to `short` (#632; `_control_queue`), so 1 `long` worker plus a second worker to run those
 #     control jobs does NOT strand - the stricter "< 2 `long`" rule over-warned
 #     that case. The strand only truly happens with a single worker doing
 #     everything, so this warns on total headcount instead. Surfaced as a
