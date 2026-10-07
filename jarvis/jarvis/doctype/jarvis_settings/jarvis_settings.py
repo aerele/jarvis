@@ -130,6 +130,14 @@ _PENDING_APPLYING_STATUS = "pending: admin applying config"
 # close a handover that never happened.
 _PENDING_HANDOVER_STATUS = "pending: handover to direct"
 
+# admin-v2#630: the status stays "pending:" while a failed attempt is re-driven, so
+# the SPA could only say "Still applying" for 10 to 30 minutes. This plain-language
+# reason rides on its OWN field (never a suffix on last_sync_status:
+# _handover_attempt parses " (attempt N)" with fullmatch). Set where an attempt
+# dies on AdminUnreachableError, cleared by every other last_sync_status write.
+_ATTEMPT_ERROR_FIELD = "last_sync_attempt_error"
+_ATTEMPT_ERROR_UNREACHABLE = "The AI service did not respond."
+
 # 2026-09-25 review (production hazard): a fleet-side handover failure that
 # REPEATS (e.g. doctor fails every attempt) reaches the site as a
 # non-permanent AdminUnreachableError, which _handover_via_admin records as
@@ -350,6 +358,9 @@ def _write_settings_fields(settings, fields: dict) -> bool:
 	import time as _time
 
 	last_error: BaseException | None = None
+	if "last_sync_status" in fields and _ATTEMPT_ERROR_FIELD not in fields:
+		# A new status (request, success or terminal) retires the last attempt's error.
+		fields = {**fields, _ATTEMPT_ERROR_FIELD: ""}
 	for attempt in range(_SETTINGS_WRITE_ATTEMPTS):
 		try:
 			frappe.db.set_single_value("Jarvis Settings", dict(fields), update_modified=False)
@@ -1757,7 +1768,13 @@ class JarvisSettings(Document):
 			# old to thread it predates this contract).
 			if _is_applying_result(result) or (result.get("status") or "applied") != "applied":
 				if not _converge_via_admin(self, is_pool=False):
-					_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
+					_write_settings_fields(
+						self,
+						{
+							"last_sync_status": _PENDING_APPLYING_STATUS,
+							_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE,
+						},
+					)
 					_commit_terminal_sync_status()
 				terminal_written = True
 				return
@@ -2595,7 +2612,13 @@ def _enqueued_sync_via_admin_pool(
 				# otherwise record PENDING (not failed) and let the */5 reconcile
 				# finish it. Only genuine auth/validation/rate-limit stay terminal.
 				if not _converge_via_admin(settings, is_pool=True):
-					_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+					_write_settings_fields(
+						settings,
+						{
+							"last_sync_status": _PENDING_APPLYING_STATUS,
+							_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE,
+						},
+					)
 					_commit_terminal_sync_status()
 					_frappe.logger().warning(
 						"jarvis_settings: pool sync admin-unreachable; recorded pending for reconcile (%s)",
@@ -3183,7 +3206,10 @@ def _handover_via_admin(settings) -> str | None:
 		)
 		return "pool"
 	except (admin_client.AdminUnreachableError, *_WRITE_CONFLICT_ERRORS):
-		_write_settings_fields(settings, {"last_sync_status": pending_status})
+		_write_settings_fields(
+			settings,
+			{"last_sync_status": pending_status, _ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE},
+		)
 		_commit_terminal_sync_status()
 		terminal_written = True
 	except admin_client.AdminRateLimitedError as e:
@@ -3516,9 +3542,17 @@ def reconcile_pending_llm_sync() -> None:
 			# jarvis#1425 existed - once _HANDOVER_MAX_ATTEMPTS is spent, leaving
 			# the workspace on the proxy (working) until the next Apply retries
 			# the handover from a clean attempt-1 budget.
+			#
+			# admin-v2#630: an attempt that has already FAILED left its error on the
+			# settings, so its worker has exited and the age gate protects nothing;
+			# re-drive on this tick instead of idling out the remaining ~10 minutes.
+			# The attempt cap below still bounds the bounces.
 			requested_at = settings.get("last_sync_requested_at")
-			if requested_at and frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) < (
-				ADMIN_SYNC_RQ_TIMEOUT_S
+			if (
+				not settings.get(_ATTEMPT_ERROR_FIELD)
+				and requested_at
+				and frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at)
+				< ADMIN_SYNC_RQ_TIMEOUT_S
 			):
 				return
 			attempt = _handover_attempt(status)

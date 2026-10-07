@@ -103,6 +103,7 @@
   "last_sync_at",
   "last_sync_requested_at",
   "last_sync_status",
+  "last_sync_attempt_error",
   "llm_pool_synced_at",
   "llm_direct_synced_at",
   "chat_was_ready_at",
@@ -787,6 +788,13 @@
    "fieldname": "last_sync_status",
    "fieldtype": "Long Text",
    "label": "Last Sync Status",
+   "read_only": 1
+  },
+  {
+   "description": "Set when the last apply attempt FAILED but a retry is still queued (status stays pending:). Cleared on any new status write. The SPA shows 'Couldn't apply this change. Retrying automatically.' while it is set.",
+   "fieldname": "last_sync_attempt_error",
+   "fieldtype": "Small Text",
+   "label": "Last Sync Attempt Error",
    "read_only": 1
   },
   {
