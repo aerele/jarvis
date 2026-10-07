@@ -320,13 +320,20 @@ def unfinished_turn_state(conversation: str) -> str | None:
 	return rows[0][0] if rows else None
 
 
-def seed_turn_unfinished(conversation: str, seed_message: str) -> bool:
-	"""True while a turn started from ``seed_message`` has not ended (any NONTERMINAL_STATES)."""
+def unfinished_turn_after(conversation: str, created_after, *, exclude_run_id: str | None = None) -> bool:
+	"""True while a turn of ``conversation`` created after ``created_after`` has not ended
+	(any NONTERMINAL_STATES). ``exclude_run_id`` leaves out the caller's own turn."""
 	return bool(
 		frappe.db.sql(
 			"""SELECT 1 FROM `tabJarvis Chat Turn`
-			WHERE conversation=%(c)s AND seed_message=%(s)s AND state IN %(live)s LIMIT 1""",
-			{"c": conversation, "s": seed_message, "live": NONTERMINAL_STATES},
+			WHERE conversation=%(c)s AND state IN %(live)s AND creation > %(after)s AND name != %(x)s
+			LIMIT 1""",
+			{
+				"c": conversation,
+				"live": NONTERMINAL_STATES,
+				"after": created_after,
+				"x": exclude_run_id or "",
+			},
 		)
 	)
 
