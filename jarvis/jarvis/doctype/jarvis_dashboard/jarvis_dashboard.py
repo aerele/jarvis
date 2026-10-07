@@ -144,11 +144,7 @@ class JarvisDashboard(NotRenamable, Document):
 				),
 				frappe.PermissionError,
 			)
-		# An unchanged target was set by an authorized user earlier (a role since
-		# made non-targetable stays shared), so only re-check on a new or changed one.
-		if self.scope == "Role" and (
-			self.is_new() or self.has_value_changed("target_role") or self.has_value_changed("scope")
-		):
+		if self.scope == "Role":
 			from jarvis.chat.dashboard_permissions import manageable_roles
 
 			if self.target_role not in manageable_roles():

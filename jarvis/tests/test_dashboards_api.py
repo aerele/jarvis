@@ -235,7 +235,7 @@ class TestReviewerRoleNotShareable(_DashboardsApiTestCase):
 		frappe.set_user(ADMIN_USER)
 		self.assertNotIn(JARVIS_SKILL_REVIEWER_ROLE, manageable_roles())
 
-	def test_existing_reviewer_share_survives_unrelated_save(self):
+	def test_resave_of_existing_reviewer_share_is_refused(self):
 		frappe.set_user(ADMIN_USER)
 		d = self._save(
 			{
@@ -246,10 +246,8 @@ class TestReviewerRoleNotShareable(_DashboardsApiTestCase):
 			}
 		)
 		frappe.db.set_value(DASHBOARD, d["name"], "target_role", JARVIS_SKILL_REVIEWER_ROLE)
-		self._save({"name": d["name"], "dashboard_title": "rev share renamed"})
-		row = frappe.db.get_value(DASHBOARD, d["name"], ["dashboard_title", "target_role"], as_dict=True)
-		self.assertEqual(row.dashboard_title, "rev share renamed")
-		self.assertEqual(row.target_role, JARVIS_SKILL_REVIEWER_ROLE)
+		with self.assertRaisesRegex(frappe.ValidationError, "cannot target the role"):
+			save_dashboard(frappe.as_json({"name": d["name"], "dashboard_title": "renamed"}))
 
 	def test_retargeting_to_reviewer_role_is_refused(self):
 		frappe.set_user(ADMIN_USER)

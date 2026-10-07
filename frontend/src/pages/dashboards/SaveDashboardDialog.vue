@@ -131,13 +131,10 @@ const scopeOptions = computed(() =>
 		value: s,
 	}))
 );
-const roleOptions = computed(() => {
-	const roles = props.caps.manageable_roles || [];
-	// keep a grandfathered target (no longer offered) visible when editing
-	const current = props.editing && props.editing.target_role;
-	const all = current && !roles.includes(current) ? [current, ...roles] : roles;
-	return [{ label: "Select a role", value: "" }, ...all.map((r) => ({ label: r, value: r }))];
-});
+const roleOptions = computed(() => [
+	{ label: "Select a role", value: "" },
+	...(props.caps.manageable_roles || []).map((r) => ({ label: r, value: r })),
+]);
 
 const dialogTitle = computed(() =>
 	props.shareOnly ? "Share dashboard" : props.editing ? "Save changes" : "Save dashboard"
