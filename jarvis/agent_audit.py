@@ -23,8 +23,9 @@ import frappe
 # whitelisted read + the Script Report so the pane, the report, and validation
 # can never silently diverge.
 # ``refused``: the write-risk guard would not run it (jarvis.tools._write_risk);
-# ``partial``: reserved for the guarded structure writes (round-2 units J1b-cf /
-# J1c) whose failure may leave part of the change applied; nothing writes it yet.
+# ``partial``: a guarded structure write (``jarvis.tools._guarded_structure``:
+# round-2 unit J1b-cf, then J1c) that failed after part of it had committed, or
+# whose worker died mid-way; its clean-up has run by the time the row is written.
 OUTCOMES = frozenset({"applied", "failed", "discarded", "refused", "partial"})
 # Mirrors the doctype's provenance Select; an unknown value is coerced (and
 # logged) here rather than failing the insert and dropping the row.

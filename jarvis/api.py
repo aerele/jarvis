@@ -2144,6 +2144,7 @@ def _dispatch_and_wrap(
 	*,
 	provenance: str = "chat",
 	provenance_name: str = "",
+	precheck=None,
 ) -> dict:
 	"""Dispatch + translate exceptions into the ``{ok, data}`` / ``{ok, error}``
 	envelope + audit write tools. This is the shared core of ``_run_tool``'s
@@ -2165,7 +2166,11 @@ def _dispatch_and_wrap(
 	surrounding writes intact (``confirm_tool``'s failure receipt/continuation,
 	the model path's tool-call row). Unexpected exceptions re-raise unchanged:
 	Frappe's handler does a full request rollback (nothing persists, no envelope,
-	no traceback to the client)."""
+	no traceback to the client).
+
+	``precheck`` (a guarded structure write's checks, run again under its lock) runs
+	first, inside the same translation and audit: what it raises is this call's
+	failure, and the tool is never dispatched."""
 	mark = _msglog_mark()
 	sp = f"jarvis_{frappe.generate_hash(length=10)}" if is_write else None
 	if sp:
@@ -2181,6 +2186,8 @@ def _dispatch_and_wrap(
 
 	_write_risk.take_refusal()  # nothing stale from an earlier call
 	try:
+		if precheck is not None:
+			precheck()
 		data = dispatch(tool, args)
 		# A method that swallowed the ORM guard's refusal (reset_password does) must
 		# not report success: the refusal wins, and the savepoint undoes the rest.
@@ -2306,13 +2313,30 @@ def dispatch_confirmed(
 	the structure / sensitive records the card's arguments name, each once.
 	``uncarded`` (auto mode / "confirm all" / armed macro / approved skill / File
 	Box) runs a create / update behind the no-commit fence, so a doctype outside the
-	structure list whose save runs DDL is refused before the ALTER."""
-	from jarvis.tools import _write_risk
+	structure list whose save runs DDL is refused before the ALTER.
+
+	A guarded structure write (one new Custom Field, a column-free Custom Field edit;
+	R2-10) runs only for a confirmed card (``allow_risky``) whose confirm holds that
+	form's structure lock (``pending_actions.execute`` takes it before the claim):
+	any other caller gets the structure refusal. Its checks run again under the lock,
+	the ALTER waits only a few seconds for the table, a refusal by the database is
+	enveloped in plain words, and its failure is never fixable (E3)."""
+	from jarvis.tools import _guarded_structure, _write_risk
 
 	try:
-		risk = _write_risk.check(tool, args)
+		risk = _write_risk.check(tool, args, guarded=allow_risky)
 	except WriteRefusedError as e:
 		return _refuse_risky_write(tool, args, e, provenance=provenance, provenance_name=provenance_name)
+	guarded = _guarded_structure.handler_for(risk, args)
+	# Its form's lock must be held (the card's own confirm), and the call must be in
+	# the exact form the park sealed: a doctype in another letter case would still
+	# save on a case-insensitive database, around everything keyed on the name.
+	exact = isinstance(args, dict) and args.get("doctype") == _write_risk.canonical(args.get("doctype"))
+	if guarded is not None and not (exact and _guarded_structure.lock_held(guarded.lock_doctype)):
+		refusal = _write_risk.refusal_of(tool, args)
+		return _refuse_risky_write(
+			tool, args, refusal, provenance=provenance, provenance_name=provenance_name
+		)
 	if tool == "run_import" and risk == "sensitive":
 		# Also at Confirm: an import parked before this rule (its card sampled a few
 		# rows, clipped) that writes something sensitive is refused, nothing staged.
@@ -2327,16 +2351,49 @@ def dispatch_confirmed(
 			allow, brake=uncarded, brake_nested=uncarded and tool == "run_method"
 		) as state,
 		fence,
+		_guarded_structure.short_lock_wait() if guarded is not None else nullcontext(),
 	):
-		result = _dispatch_and_wrap(
-			tool, args, is_write=True, provenance=provenance, provenance_name=provenance_name
-		)
+		mark = _msglog_mark()
+		try:
+			result = _dispatch_and_wrap(
+				tool,
+				args,
+				is_write=True,
+				provenance=provenance,
+				provenance_name=provenance_name,
+				precheck=guarded.check if guarded is not None else None,
+			)
+		except Exception as e:
+			# The ALTER was refused for row size (MariaDB 1118): the known way for a
+			# new column to fail, said in plain words. Anything else stays a crash.
+			refused = _guarded_structure.database_refusal(e) if guarded is not None else None
+			if refused is None:
+				raise
+			result = _translate_write_error(refused, mark)
+	if guarded is not None and not result.get("ok"):
+		_never_fixable(result)
 	# One line per sensitive record the card's allow actually let through (none when
 	# a confirmed call touched nothing sensitive).
 	outcome = "applied" if result.get("ok") else "failed"
 	for doctype, name in state.admitted:
-		_write_risk.log_line("sensitive", doctype, name, outcome, tool=tool, provenance=provenance)
+		_write_risk.log_line(
+			risk if guarded is not None else "sensitive",
+			doctype,
+			name,
+			outcome,
+			tool=tool,
+			provenance=provenance,
+		)
 	return result
+
+
+def _never_fixable(result: dict) -> None:
+	"""E3: a failed structure write is never offered a correction, whatever failed
+	(a missing value included). A busy failure stays "try again"."""
+	err = result.get("error") if isinstance(result, dict) else None
+	if isinstance(err, dict) and err.get("kind") == "fixable":
+		err["kind"] = "not_fixable"
+		err["hint"] = _hint_for(err.get("code") or "", err.get("detail") or "", kind="not_fixable")
 
 
 # Uncarded writes that run behind the no-commit fence: the build-from-args pair.
@@ -2370,9 +2427,16 @@ def _refuse_risky_write(
 
 
 def _build_park_card(
-	tool: str, args: dict, preview: dict, *, sensitive: bool
+	tool: str, args: dict, preview: dict, *, sensitive: bool, structural: list | None = None
 ) -> tuple[dict | None, dict | None]:
 	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
+
+	A guarded structure write (``structural``: its further risk lines, a list;
+	R2-10) is shown exactly like a sensitive one, in full and never clipped, and
+	leads with the structural line in the banner, then what else the change does
+	(code for an ``eval:`` expression, access, a fetch; ``card.structural`` marks it
+	for the clients). It reuses the ``risk: "sensitive"`` rendering, so every client
+	that shows a sensitive card in full shows this one in full too.
 
 	A sensitive call (R2-8 / R2-12) gets ``preview["risk"]`` / ``risk_line`` (every
 	risk it carries, in target order), which makes ``build_card`` show it in full,
@@ -2384,11 +2448,17 @@ def _build_park_card(
 	from jarvis.chat import confirm_card
 	from jarvis.tools import _write_risk
 
-	if not sensitive:
+	if not sensitive and structural is None:
 		return confirm_card.build_card(tool, args, preview), None
 	if confirm_card.too_large(None, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
-	line = " ".join(_write_risk.risk_lines(tool, args))
+	if structural is not None:
+		from jarvis.tools._guarded_structure import STRUCTURAL_LINE
+
+		line = " ".join([STRUCTURAL_LINE, *structural])
+		preview["structural"] = True
+	else:
+		line = " ".join(_write_risk.risk_lines(tool, args))
 	preview["risk"] = "sensitive"
 	if line:
 		preview["risk_line"] = line
@@ -2396,11 +2466,56 @@ def _build_park_card(
 	if not isinstance(card, dict):
 		return None, _refuse_unshowable_card(tool, args, too_large=False)
 	card["risk"] = "sensitive"
+	if structural is not None:
+		card["structural"] = True
 	if line:
 		card["risk_line"] = line
 	if confirm_card.too_large(card, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
 	return card, None
+
+
+def _can_card_structure(conversation: str | None) -> bool:
+	"""Whether a guarded structure write can get its card here: a chat whose cards
+	are pending actions (the confirm that takes the structure lock and keeps the
+	before-image runs only there), and not a File Box chat (its writes are held for
+	the Approval Board, which cannot run one)."""
+	from jarvis.chat import pending_confirm
+
+	if not conversation or not pending_confirm.pa_minting(conversation):
+		return False
+	return not frappe.db.get_value("Jarvis Conversation", conversation, "file_box")
+
+
+def _structure_park(tool: str, args: dict, risk: str) -> tuple:
+	"""``(rejected, preview, lines, canonical_args)`` for a guarded structure write at
+	park: its checks, then a described preview, the risk lines its card shows after
+	the structural one, and the call in its stored form (``unique: "true"`` as 1, the
+	doctype by its exact name), which is what is carded, sealed and run: the card
+	can never show one thing and the save write another. Nothing is trial-run, so no row and no column exist
+	until Confirm. A refusal that is a structure refusal is audited like every
+	other; a value the request can correct comes back as fixable, naming the field."""
+	from jarvis.tools import _guarded_structure, _write_risk
+
+	mark = _msglog_mark()
+	handler = _guarded_structure.handler_for(risk, args)
+	try:
+		handler.check()
+	except WriteRefusedError as e:
+		return _refuse_risky_write(tool, args, e), None, None, None
+	except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
+		return _translate_write_error(e, mark) or _preview_error(e), None, None, None
+	canonical = handler.canonical_args()
+	handler = _guarded_structure.handler_for(risk, canonical)
+	doctype, name = _write_risk.first_risky_target(tool, canonical)
+	_write_risk.log_line(risk, doctype, name, "parked", tool=tool)
+	preview = {
+		"preview": False,
+		"described": True,
+		"summary": _describe_call(tool, canonical),
+		"note": "not a dry run - this changes the database structure on confirm",
+	}
+	return None, preview, handler.risk_lines(), canonical
 
 
 def _refuse_sensitive_import(tool: str, args: dict, **provenance) -> dict:
@@ -3039,20 +3154,28 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# is refused here with its Desk path and a ``refused`` audit row; sensitive configuration comes back as "sensitive" and
 	# must park behind its own card in EVERY mode (``_must_card`` below). The ORM
 	# guard on the save itself backs this up for what arguments cannot show.
+	# A guarded structure write (one new Custom Field, a column-free Custom Field
+	# edit; R2-10) comes back as its own class: it parks a card in every mode too,
+	# on a chat that can hold a pending-action card, and is refused anywhere else.
 	_risk = None
+	_guarded = False
 	if is_write:
 		from jarvis.tools import _write_risk
 
 		try:
-			_risk = _write_risk.check(tool, args)
+			_risk = _write_risk.check(tool, args, guarded=True)
 		except WriteRefusedError as e:
 			return _refuse_risky_write(tool, args, e)
+		_guarded = _risk in _write_risk.GUARDED_STRUCTURE
+		if _guarded and not _can_card_structure(conversation):
+			return _refuse_risky_write(tool, args, _write_risk.refusal_of(tool, args))
 	# Sensitive configuration never runs uncarded (R2-8): auto mode, "confirm all",
 	# an armed macro and an approved skill run all fall through to the park. Nor
 	# does a run_method or a workflow action that deletes or cancels: those verbs are
 	# braked as tools (_BRAKE), and nothing else may be the way around that.
 	_must_card = (
 		_risk == "sensitive"
+		or _guarded
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
 	)
@@ -3514,6 +3637,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# preview_doc). Every other gated write (submit/cancel/delete/amend since
 		# R2-2, send_email/run_method/create_custom_skill/update_wiki) parks a
 		# described-intent card via _pending_preview: nothing runs until Confirm.
+		_structure_lines = None
 		if tool == "run_import":
 			# run_import cannot be sandbox-run (staging + a background job), so it has its
 			# own pre-park validation: refuse a blocked / non-importable / non-admin import
@@ -3522,6 +3646,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if rejected is not None:
 				frappe.clear_messages()
 				return rejected
+		elif _guarded:
+			# No trial run (R2-10): the save would commit its row and then run DDL.
+			# The park checks refuse what is known to fail, naming the field.
+			rejected, preview, _structure_lines, canonical = _structure_park(tool, args, _risk)
+			if rejected is not None:
+				frappe.clear_messages()
+				return rejected
+			# From here on the call IS its stored form (a new dict: the caller's own
+			# arguments are left as they were): the card is built from it, it is what
+			# gets sealed, and it is what Confirm runs.
+			args = canonical
 		elif tool in _DRY_RUN_ON_PARK:
 			try:
 				preview = _run_preview(tool, args)
@@ -3562,8 +3697,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# refuses to run as step 1, so stamping it would dangle an unusable offer and
 		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
 		# card with no run offer.
+		# Never on a structure card: confirming it must not also open an approved run.
 		skill_docname, skill_slug = (
-			_resolve_approve_run_offer(conv) if tool in _SKILL_AUTORUN_COVERED else (None, None)
+			_resolve_approve_run_offer(conv)
+			if tool in _SKILL_AUTORUN_COVERED and not _guarded
+			else (None, None)
 		)
 		if isinstance(preview, dict):
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
@@ -3571,7 +3709,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
-			card, refusal = _build_park_card(tool, args, preview, sensitive=_risk == "sensitive")
+			card, refusal = _build_park_card(
+				tool,
+				args,
+				preview,
+				sensitive=_risk == "sensitive",
+				structural=_structure_lines,
+			)
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal
