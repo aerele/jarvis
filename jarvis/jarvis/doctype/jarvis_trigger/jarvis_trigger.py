@@ -102,7 +102,16 @@ class JarvisTrigger(NotRenamable, Document):
 		else:
 			self._validate_llm()
 		self._guard_server_script_link()
+		self._guard_owner_immutable()
 		self._guard_lookup_authority()
+
+	def _guard_owner_immutable(self):
+		"""``owner`` decides whose permissions lookups read with, and a REST
+		update or ``set_value`` would otherwise let any manager rewrite it. Only
+		Administrator may change it after insert."""
+		before = None if self.is_new() else self.get_doc_before_save()
+		if before and before.owner != self.owner and frappe.session.user != "Administrator":
+			frappe.throw(_("Only Administrator can change a trigger's owner."), frappe.PermissionError)
 
 	def _guard_lookup_authority(self):
 		"""Lookups read with the trigger OWNER's permissions, so only the owner
@@ -113,9 +122,11 @@ class JarvisTrigger(NotRenamable, Document):
 		manager. Covers the SPA API, Desk and the agent's tools alike."""
 		if self.action_type != "LLM" or not cint(self.llm_allow_lookups):
 			return
-		if frappe.session.user in (self.owner, "Administrator"):
-			return
 		before = None if self.is_new() else self.get_doc_before_save()
+		# The STORED owner (owner changes are blocked above), never an edited value.
+		owner = before.owner if before else self.owner
+		if frappe.session.user in (owner, "Administrator"):
+			return
 		if before and cint(before.llm_allow_lookups) and before.action_type == "LLM":
 			watched = ("llm_instruction", "target_doctype", "doc_event", "condition", "action_type")
 			if not any(self.has_value_changed(f) for f in watched):
