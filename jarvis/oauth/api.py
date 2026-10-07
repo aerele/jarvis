@@ -1204,6 +1204,7 @@ def disconnect() -> dict:
 	settings = frappe.get_single("Jarvis Settings")
 	settings.db_set("llm_auth_mode", "api_key", update_modified=False)
 	settings.db_set("last_sync_status", "disconnected", update_modified=False)
+	settings.db_set("last_sync_attempt_error", "", update_modified=False)
 	# Inert today ("disconnected" matches neither prefix the jarvis#841 dedup
 	# gate accepts) but cleared like every other non-direct status writer, so a
 	# future status rewording can never re-arm a stale stamp (#846 review).

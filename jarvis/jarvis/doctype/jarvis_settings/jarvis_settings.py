@@ -130,6 +130,14 @@ _PENDING_APPLYING_STATUS = "pending: admin applying config"
 # close a handover that never happened.
 _PENDING_HANDOVER_STATUS = "pending: handover to direct"
 
+# admin-v2#630: the status stays "pending:" while a failed attempt is re-driven, so
+# the SPA could only say "Still applying" for 10 to 30 minutes. This plain-language
+# reason rides on its OWN field (never a suffix on last_sync_status:
+# _handover_attempt parses " (attempt N)" with fullmatch). Set where an attempt
+# dies on AdminUnreachableError, cleared by every other last_sync_status write.
+_ATTEMPT_ERROR_FIELD = "last_sync_attempt_error"
+_ATTEMPT_ERROR_UNREACHABLE = "The AI service did not respond."
+
 # 2026-09-25 review (production hazard): a fleet-side handover failure that
 # REPEATS (e.g. doctor fails every attempt) reaches the site as a
 # non-permanent AdminUnreachableError, which _handover_via_admin records as
@@ -172,6 +180,13 @@ def _handover_attempt(status: str) -> int:
 _POOL_CONVERGE_DEADLINE_S = 120.0
 _POOL_CONVERGE_INTERVAL_S = 20.0
 _POOL_CONVERGE_PROBE_TIMEOUT_S = 15
+
+# admin-v2#630: admin answers a fast-refused fleet with the same 200 "applying" as a
+# healthy slow apply, so age is the only signal. It is measured from the request, and
+# "applying" is only written once the converge poll gives up, so this is about 2 minutes
+# after the page starts saying "Still applying". Measured live: a pool update takes 8 to
+# 22 s and a container-restart apply 70 to 85 s, well inside it.
+_APPLY_STALE_AFTER_S = _POOL_CONVERGE_DEADLINE_S + 120
 
 
 def creds_wire_auth_mode(stored: str | None) -> str:
@@ -350,6 +365,9 @@ def _write_settings_fields(settings, fields: dict) -> bool:
 	import time as _time
 
 	last_error: BaseException | None = None
+	if "last_sync_status" in fields and _ATTEMPT_ERROR_FIELD not in fields:
+		# A new status (request, success or terminal) retires the last attempt's error.
+		fields = {**fields, _ATTEMPT_ERROR_FIELD: ""}
 	for attempt in range(_SETTINGS_WRITE_ATTEMPTS):
 		try:
 			frappe.db.set_single_value("Jarvis Settings", dict(fields), update_modified=False)
@@ -1908,7 +1926,13 @@ class JarvisSettings(Document):
 			# reconcile, so an unreachable there stays terminal-failed as before.
 			if action == "restart":
 				if not _converge_via_admin(self, is_pool=False):
-					_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
+					_write_settings_fields(
+						self,
+						{
+							"last_sync_status": _PENDING_APPLYING_STATUS,
+							_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE,
+						},
+					)
 					_commit_terminal_sync_status()
 					frappe.logger().warning(
 						"jarvis_settings: creds sync admin-unreachable; recorded pending for reconcile (%s)",
@@ -2640,7 +2664,13 @@ def _enqueued_sync_via_admin_pool(
 				# otherwise record PENDING (not failed) and let the */5 reconcile
 				# finish it. Only genuine auth/validation/rate-limit stay terminal.
 				if not _converge_via_admin(settings, is_pool=True):
-					_write_settings_fields(settings, {"last_sync_status": _PENDING_APPLYING_STATUS})
+					_write_settings_fields(
+						settings,
+						{
+							"last_sync_status": _PENDING_APPLYING_STATUS,
+							_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE,
+						},
+					)
 					_commit_terminal_sync_status()
 					_frappe.logger().warning(
 						"jarvis_settings: pool sync admin-unreachable; recorded pending for reconcile (%s)",
@@ -3228,7 +3258,10 @@ def _handover_via_admin(settings) -> str | None:
 		)
 		return "pool"
 	except (admin_client.AdminUnreachableError, *_WRITE_CONFLICT_ERRORS):
-		_write_settings_fields(settings, {"last_sync_status": pending_status})
+		_write_settings_fields(
+			settings,
+			{"last_sync_status": pending_status, _ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE},
+		)
 		_commit_terminal_sync_status()
 		terminal_written = True
 	except admin_client.AdminRateLimitedError as e:
