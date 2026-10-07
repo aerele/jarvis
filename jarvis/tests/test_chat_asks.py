@@ -32,6 +32,7 @@ from jarvis.chat.approvals_api import (
 	restore_approval,
 )
 from jarvis.chat.chat_asks import (
+	humanize_fieldname,
 	materialize_from_turn,
 	parse_ask,
 	question_excerpt,
@@ -271,6 +272,55 @@ class TestParseAsk(unittest.TestCase):
 		qs = parse_ask(_fence([_ask(options=[f"o{i}" for i in range(12)])]))
 		self.assertEqual(len(qs[0]["options"]), 8)
 
+	def test_field_question_kept_with_identifiers_and_empty_q(self):
+		qs = parse_ask(
+			_fence(
+				[
+					{"type": "field", "doctype": "Sales Invoice", "fieldname": "custom_gstin_2"},
+					{"q": "Which tax ID?", "type": "field", "doctype": "Customer", "fieldname": "tax_id"},
+				]
+			)
+		)
+		self.assertEqual([q["type"] for q in qs], ["field", "field"])
+		self.assertEqual(
+			(qs[0]["q"], qs[0]["doctype"], qs[0]["fieldname"]), ("", "Sales Invoice", "custom_gstin_2")
+		)
+		self.assertEqual(qs[0]["options"], [])
+		self.assertEqual(qs[1]["q"], "Which tax ID?")
+
+	def test_field_bad_identifier_degrades_to_text_with_humanized_label(self):
+		qs = parse_ask(
+			_fence(
+				[
+					{"type": "field", "doctype": "Customer; drop", "fieldname": "custom_gstin_2"},
+					{"q": "Keep my words", "type": "field", "doctype": "Customer", "fieldname": "a-b"},
+					{"type": "field", "doctype": "", "fieldname": ""},  # nothing to label: dropped
+				]
+			)
+		)
+		self.assertEqual(
+			[(q["q"], q["type"], q["doctype"]) for q in qs],
+			[("Gstin 2", "text", ""), ("Keep my words", "text", "")],
+		)
+
+	def test_humanize_fieldname_matches_client(self):
+		self.assertEqual(humanize_fieldname("custom_gstin_2"), "Gstin 2")
+		self.assertEqual(humanize_fieldname("tax__id"), "Tax id")
+		self.assertEqual(humanize_fieldname(""), "")
+
+	def test_select_keeps_up_to_200_options_and_degrades_without_any(self):
+		many = [f"o{i}" for i in range(250)]
+		qs = parse_ask(_fence([{"q": "Pick", "type": "select", "options": many}]))
+		self.assertEqual((qs[0]["type"], len(qs[0]["options"])), ("select", 200))
+		qs = parse_ask(_fence([{"q": "Pick", "type": "select"}]))
+		self.assertEqual((qs[0]["type"], qs[0]["options"]), ("text", []))
+		qs = parse_ask(_fence([{"q": "Pick", "type": "single", "options": many}]))
+		self.assertEqual(len(qs[0]["options"]), 8)
+
+	def test_question_excerpt_labels_a_field_question(self):
+		content = _fence([{"type": "field", "doctype": "Customer", "fieldname": "custom_tax_id"}])
+		self.assertEqual(question_excerpt(content), "Tax id")
+
 	def test_question_excerpt_fence(self):
 		self.assertEqual(
 			question_excerpt("prose\n" + _fence([_ask(q="Which one?")])),
@@ -370,6 +420,30 @@ class TestMaterialize(unittest.TestCase):
 		self.assertEqual(row.title, "first?")
 		# one decision field can't answer two questions via chips
 		self.assertFalse(row.options)
+
+	def test_all_field_ask_materializes_a_board_row(self):
+		content = _fence([{"type": "field", "doctype": "Customer", "fieldname": "custom_tax_id"}])
+		with patch("jarvis.chat.chat_asks.publish_to_user") as pub:
+			name = materialize_from_turn(self.conv, content)
+		self.assertTrue(name)
+		row = self._rows()[0]
+		self.assertEqual((row.title, row.question), ("Tax id", "Tax id"))
+		self.assertFalse(row.options)  # no chips: the board hands off to "Answer in chat"
+		pub.assert_called_once()
+		self.assertEqual(pub.call_args[0][1]["kind"], "approval:new")
+
+	def test_long_select_is_not_truncated_into_partial_chips(self):
+		many = [f"o{i}" for i in range(30)]
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			materialize_from_turn(self.conv, _fence([{"q": "Pick", "type": "select", "options": many}]))
+		self.assertFalse(self._rows()[0].options)
+
+	def test_short_select_options_become_chips(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			materialize_from_turn(
+				self.conv, _fence([{"q": "Pick", "type": "select", "options": ["A", "B", "C"]}])
+			)
+		self.assertEqual(json.loads(self._rows()[0].options), ["A", "B", "C"])
 
 	def test_title_capped_at_100(self):
 		q = "why " * 40 + "?"
