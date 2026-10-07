@@ -16,13 +16,17 @@ from frappe.desk.query_report import get_script
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
 _FIELDNAME_RE = re.compile(r"""fieldname\s*:\s*["']([^"']+)["']""")
+# A literal default only: a quoted string or a number. A computed one (a user
+# default, today's date) is left out, since its value is only known in the browser.
+_DEFAULT_RE = re.compile(r"""\bdefault\s*:\s*(?:["']([^"']*)["']|(-?\d+(?:\.\d+)?)\s*[,}\n])""")
 
 
 def get_report_filters(report_name: str) -> dict:
 	"""Return the filter fields a saved Frappe Report accepts.
 
 	Result: ``{report_name, report_type, ref_doctype, filters:[{fieldname,
-	label, fieldtype, options, reqd}], required:[fieldname...], note}``.
+	label, fieldtype, options, reqd, default}], required:[fieldname...], note}``.
+	``default`` is the filter's literal default (None when computed or unset).
 	Filters come from the report's client script, so dynamically-added or
 	conditional filters may be absent (best-effort); ``required`` is the
 	reliable subset to always supply to run_report.
@@ -63,7 +67,12 @@ def _normalize(f: dict) -> dict:
 		"fieldtype": f.get("fieldtype"),
 		"options": opts if isinstance(opts, str) else None,
 		"reqd": bool(f.get("reqd") or f.get("mandatory")),
+		"default": _literal(f.get("default")),
 	}
+
+
+def _literal(value):
+	return value if isinstance(value, str | int | float) and not isinstance(value, bool) else None
 
 
 def _parse_js_filters(js: str) -> list[dict]:
@@ -91,9 +100,21 @@ def _parse_js_filters(js: str) -> list[dict]:
 					or _grab(r"""label\s*:\s*["']([^"']+)["']""", seg)
 				),
 				"reqd": bool(re.search(r"\breqd\s*:\s*1\b", seg)),
+				"default": _js_default(seg),
 			}
 		)
 	return out
+
+
+def _js_default(seg: str):
+	# Only the filter's own keys: a default inside its get_data / on_change body is not its own.
+	own = re.split(r"\bfunction\b|\b(?:get_data|get_query|on_change)\s*:", seg, maxsplit=1)[0]
+	m = _DEFAULT_RE.search(own)
+	if not m:
+		return None
+	if m.group(1) is not None:
+		return m.group(1)
+	return float(m.group(2)) if "." in m.group(2) else int(m.group(2))
 
 
 def _grab(pattern: str, text: str):
