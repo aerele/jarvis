@@ -7,7 +7,10 @@ import { expect, test, vi } from "vitest";
 
 // AskCard's link-type questions search records through @/api, whose frappe-ui
 // resources chain does not resolve under vitest. Only searchLink is used here.
-vi.mock("@/api", () => ({ searchLink: vi.fn(async () => []) }));
+vi.mock("@/api", () => ({
+	searchLink: vi.fn(async () => []),
+	getDoctypeFields: vi.fn(),
+}));
 
 // frappe-ui does not load under vitest either: a stand-in Select that keeps its
 // props and emits like the real one.
@@ -18,10 +21,18 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: "<div class='fui-select' />",
 	},
+	FormControl: {
+		name: "FormControl",
+		props: ["type", "modelValue", "disabled", "placeholder"],
+		emits: ["update:modelValue"],
+		template: "<input class='fui-control' />",
+	},
+	LoadingIndicator: { name: "LoadingIndicator", template: "<span class='fui-loading' />" },
 }));
 
 import { Select } from "frappe-ui";
-import { searchLink } from "@/api";
+import { searchLink, getDoctypeFields } from "@/api";
+import { flushPromises } from "@vue/test-utils";
 import AskCard from "../../src/components/chat/AskCard.vue";
 import { parseAsk } from "../../src/lib/chatAsk.js";
 import { mountWithPalette } from "./fixtures.js";
@@ -233,4 +244,107 @@ test("a select question renders the frappe-ui dropdown and submits the chosen op
 	await w.vm.$nextTick();
 	await submit(w).trigger("click");
 	expect(findCard(w).emitted("submit")[0][0]).toBe("Here are my answers:\n1. HSN Code → 99831");
+});
+
+// ---- field: the model names the field, the card draws its real control ------
+// Each test uses its own DocType name: the card caches a DocType's field list.
+let dtn = 0;
+const fieldCard = async (df, { q = "HSN Code", fail = false } = {}) => {
+	const doctype = "Doc" + ++dtn;
+	if (fail) getDoctypeFields.mockRejectedValueOnce(new Error("no"));
+	else
+		getDoctypeFields.mockResolvedValueOnce({
+			ok: true,
+			doctype,
+			fields: df ? [{ fieldname: "f", label: "Meta Label", ...df }] : [],
+		});
+	const w = mountWithPalette(AskCard, {
+		spec: spec(JSON.stringify([{ q, type: "field", doctype, fieldname: "f" }])),
+	});
+	await flushPromises();
+	return w;
+};
+
+test("field: shows the loading indicator until the meta arrives", async () => {
+	getDoctypeFields.mockReturnValueOnce(new Promise(() => {}));
+	const w = mountWithPalette(AskCard, {
+		spec: spec('[{"q":"X","type":"field","doctype":"Slow","fieldname":"f"}]'),
+	});
+	await flushPromises();
+	expect(w.find(".fui-loading").exists()).toBe(true);
+	expect(w.find("input").exists()).toBe(false);
+});
+
+test("field: a Select field renders the dropdown with ALL its options", async () => {
+	const opts = Array.from({ length: 12 }, (_, i) => "Opt " + i);
+	const w = await fieldCard({ fieldtype: "Select", options: "\n" + opts.join("\n") + "\n" });
+	const dd = w.findComponent(Select);
+	expect(dd.exists()).toBe(true);
+	expect(dd.props("options").map((o) => o.value)).toEqual(opts);
+	dd.vm.$emit("update:modelValue", "Opt 7");
+	await w.vm.$nextTick();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")[0][0]).toBe("Here are my answers:\n1. HSN Code → Opt 7");
+});
+
+test("field: a Link field renders the record picker over its DocType", async () => {
+	const w = await fieldCard({ fieldtype: "Link", options: "Customer" });
+	const input = w.find(".jv-ask-link input");
+	expect(input.exists()).toBe(true);
+	expect(input.attributes("placeholder")).toContain("Customer");
+	await input.trigger("focus");
+	expect(searchLink).toHaveBeenLastCalledWith("Customer", "");
+});
+
+test("field: Date and Datetime fields render the date pickers", async () => {
+	expect((await fieldCard({ fieldtype: "Date" })).find('input[type="date"]').exists()).toBe(
+		true
+	);
+	expect(
+		(await fieldCard({ fieldtype: "Datetime" })).find('input[type="datetime-local"]').exists()
+	).toBe(true);
+});
+
+test("field: a Check field renders the Yes/No buttons, with no Other box", async () => {
+	const w = await fieldCard({ fieldtype: "Check" });
+	expect(w.findAll("button.jv-ask-opt").map((b) => b.text())).toEqual(["Yes", "No"]);
+	expect(w.find(".jv-ask-other").exists()).toBe(false);
+	await optionNamed(w, "Yes").trigger("click");
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")[0][0]).toBe("Here are my answers:\n1. HSN Code → Yes");
+});
+
+test("field: Int / Float / Currency / Percent render a numeric frappe-ui input", async () => {
+	for (const fieldtype of ["Int", "Float", "Currency", "Percent"]) {
+		const w = await fieldCard({ fieldtype });
+		const c = w.findComponent({ name: "FormControl" });
+		expect(c.exists(), fieldtype).toBe(true);
+		c.vm.$emit("update:modelValue", "42");
+		await w.vm.$nextTick();
+		expect(submit(w).attributes("disabled")).toBeUndefined();
+	}
+});
+
+test("field: any other fieldtype renders the text input", async () => {
+	const w = await fieldCard({ fieldtype: "Data" });
+	expect(w.find('input[type="text"]').exists()).toBe(true);
+});
+
+test("field: an empty q takes the label from the meta", async () => {
+	const w = await fieldCard({ fieldtype: "Data" }, { q: "" });
+	expect(w.find(".jv-ask-qt").text()).toContain("Meta Label");
+	await w.find('input[type="text"]').setValue("abc");
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")[0][0]).toBe("Here are my answers:\n1. Meta Label → abc");
+});
+
+test("field: a failed meta fetch falls back to the text input", async () => {
+	const w = await fieldCard(null, { fail: true });
+	expect(w.find('input[type="text"]').exists()).toBe(true);
+	expect(w.find(".fui-loading").exists()).toBe(false);
+});
+
+test("field: a field the meta does not list falls back to the text input", async () => {
+	const w = await fieldCard(null);
+	expect(w.find('input[type="text"]').exists()).toBe(true);
 });
