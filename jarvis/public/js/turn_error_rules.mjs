@@ -217,6 +217,22 @@ export default [
     "status": false
   },
   {
+    "code": "empty-reply-tools",
+    "pattern": "could(?:n.?t| not) generate a (?:response|reply)[\\s\\S]{0,300}tool actions may have already been executed",
+    "headline": "The reply stopped before it was complete",
+    "hint": "Some actions may already be done. Check your records before you try again.",
+    "retryable": true,
+    "status": false
+  },
+  {
+    "code": "empty-reply",
+    "pattern": "could(?:n.?t| not) generate a (?:response|reply)",
+    "headline": "The AI model sent back an empty reply",
+    "hint": "Try again. If it happens again, start a new chat or select a different model.",
+    "retryable": true,
+    "status": false
+  },
+  {
     "code": "provider",
     "pattern": "(?!)",
     "headline": "The model provider could not complete this request",

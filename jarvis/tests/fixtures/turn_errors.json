@@ -270,5 +270,53 @@
   {
     "error": "MCP connector google_drive failed: invalid_grant",
     "code": "authentication"
+  },
+  {
+    "error": "⚠️ Agent couldn't generate a response. Please try again.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "⚠️ Agent couldn’t generate a response. Please try again.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "Agent couldn't generate a response.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
+    "code": "empty-reply-tools"
+  },
+  {
+    "error": "⚠️ Agent couldn’t generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
+    "code": "empty-reply-tools"
+  },
+  {
+    "error": "Agent couldn't generate a response: 429 rate_limit_error",
+    "code": "rate-limit"
+  },
+  {
+    "error": "Agent couldn't generate a response: content_policy violation",
+    "code": "safety"
+  },
+  {
+    "error": "Agent couldn't generate a response: context_length_exceeded",
+    "code": "context-limit"
+  },
+  {
+    "error": "All models failed: Agent couldn't generate a response. Please try again.",
+    "code": "models-exhausted"
+  },
+  {
+    "error": "The assistant could not complete this response and the turn ended without any output. This can happen when the conversation is too long for the current model, or the model hit an error. Please try again, or start a new chat.",
+    "code": "gateway"
+  },
+  {
+    "error": "Agent run failed (model: openai/gpt-5.6-terra)",
+    "code": "gateway"
+  },
+  {
+    "error": "Agent run failed.",
+    "code": "gateway"
   }
 ]
