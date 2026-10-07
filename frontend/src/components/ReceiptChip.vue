@@ -194,6 +194,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import { Button } from "frappe-ui";
+import { __ } from "@/lib/i18n";
 import { receiptView } from "@/lib/actionSummary";
 import FailureReference from "./FailureReference.vue";
 
@@ -274,8 +275,17 @@ const nextStep = computed(() => {
 	if (props.nextDone || view.value.outcome !== "confirmed") return null;
 	const data = (parseJson(props.message.tool_result) || {}).data || {};
 	const s = data.suggested_next;
-	if (!s || !s.label || !data.doctype || !data.name) return null;
-	return { ...s, doctype: data.doctype, name: data.name };
+	if (!s || !s.kind || !data.doctype || !data.name) return null;
+	// Worded here (and translatable), never persisted. Old rows carried a label.
+	const label = s.kind === "submit" ? __("Submit") : s.action || s.label;
+	if (!label) return null;
+	return {
+		kind: s.kind,
+		action: s.action || null,
+		label,
+		doctype: data.doctype,
+		name: data.name,
+	};
 });
 const hasWhy = computed(() => view.value.outcome === "failed" && !!view.value.error);
 const hasList = computed(() => view.value.count > 1 && view.value.targets.length > 0);
