@@ -1,12 +1,16 @@
 <template>
 	<div class="jv-ask" :class="{ 'jv-ask--form': isForm }">
-		<div v-for="(q, qi) in spec.questions" :key="qi" class="jv-ask-q">
+		<div v-for="(q, qi) in questions" :key="qi" class="jv-ask-q">
 			<div class="jv-ask-qt">
 				<span class="jv-ask-num">{{ qi + 1 }}</span
 				>{{ q.q }}
 			</div>
+			<!-- field: waiting on the field's meta -->
+			<div v-if="q.type === 'loading'" class="jv-ask-loading">
+				<LoadingIndicator class="size-4" />
+			</div>
 			<!-- yes/no, with optional custom labels (e.g. Approve / Reject) -->
-			<div v-if="q.type === 'yesno'" class="jv-ask-opts">
+			<div v-else-if="q.type === 'yesno'" class="jv-ask-opts">
 				<button
 					v-for="(lbl, li) in q.options.length === 2 ? q.options : ['Yes', 'No']"
 					:key="li"
@@ -68,6 +72,16 @@
 				placeholder="Select an option"
 				@update:model-value="pickSingle(qi, $event)"
 			/>
+			<!-- number: a field's Int / Float / Currency / Percent -->
+			<FormControl
+				v-else-if="q.type === 'number'"
+				type="text"
+				inputmode="decimal"
+				:model-value="sel[qi] || ''"
+				:disabled="answered"
+				placeholder="Type a number"
+				@update:model-value="pickSingle(qi, $event)"
+			/>
 			<!-- link: search a record of the given DocType -->
 			<div v-else-if="q.type === 'link'" class="jv-ask-link">
 				<input
@@ -98,7 +112,10 @@
 			</div>
 			<!-- Other free-text only for choice questions -->
 			<input
-				v-if="q.type === 'single' || q.type === 'multi' || q.type === 'yesno'"
+				v-if="
+					!q.fromField &&
+					(q.type === 'single' || q.type === 'multi' || q.type === 'yesno')
+				"
 				class="jv-ask-other"
 				v-model="other[qi]"
 				placeholder="Other…"
@@ -137,14 +154,15 @@
 // component, and `spec` is typically a computed that re-parses (new object
 // identity) on every stream tick — resetting on a `spec` watcher would wipe
 // half-made picks. Remounting on a new message is what clears the draft.
-import { ref, computed } from "vue";
-import { Select } from "frappe-ui";
-import { searchLink } from "@/api";
+import { ref, computed, watch } from "vue";
+import { FormControl, LoadingIndicator, Select } from "frappe-ui";
+import { getDoctypeFields, searchLink } from "@/api";
+import { controlFor } from "@/lib/docFields";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { ASK_FIELD_TYPES, isAskReady, askAnswerText } from "@/lib/chatAsk";
 
 const props = defineProps({
-	// A parsed ask: { questions: [{q, type, options, doctype}] } (see parseAsk).
+	// A parsed ask: { questions: [{q, type, options, doctype, fieldname?}] } (see parseAsk).
 	spec: { type: Object, required: true },
 	// True while the host would SILENTLY refuse a submit right now (a send
 	// already in flight, a turn's tail still running for this conversation).
@@ -171,6 +189,58 @@ const isForm = computed(
 		props.spec.questions.length > 0 &&
 		props.spec.questions.every((q) => ASK_FIELD_TYPES.includes(q.type))
 );
+
+// A `field` question names a DocType field; the card draws that field's real
+// control from its meta (get_doctype_fields, which checks read permission). One
+// request per DocType, shared by every card; a failure is dropped from the cache
+// so the next card retries, and the question falls back to a text box.
+const fieldsCache = new Map();
+function loadFields(doctype) {
+	if (!fieldsCache.has(doctype)) {
+		const p = Promise.resolve(getDoctypeFields(doctype)).then((r) => (r && r.fields) || []);
+		p.catch(() => fieldsCache.delete(doctype));
+		fieldsCache.set(doctype, p);
+	}
+	return fieldsCache.get(doctype);
+}
+const fieldKey = (q) => `${q.doctype}\n${q.fieldname}`;
+const fieldMeta = ref({}); // "doctype\nfieldname" -> "loading" | "failed" | meta field
+watch(
+	() => props.spec,
+	(spec) => {
+		for (const q of spec.questions) {
+			const key = fieldKey(q);
+			if (q.type !== "field" || fieldMeta.value[key]) continue;
+			fieldMeta.value = { ...fieldMeta.value, [key]: "loading" };
+			loadFields(q.doctype)
+				.then((fields) => fields.find((f) => f.fieldname === q.fieldname) || "failed")
+				.catch(() => "failed")
+				.then((m) => (fieldMeta.value = { ...fieldMeta.value, [key]: m }));
+		}
+	},
+	{ immediate: true }
+);
+// The question as drawn: a field question becomes the control its meta calls for.
+function drawn(q) {
+	if (q.type !== "field") return q;
+	const m = fieldMeta.value[fieldKey(q)];
+	const base = { ...q, fromField: true, q: q.q || (m && m.label) || q.fieldname };
+	if (m === "loading" || !m) return { ...base, type: "loading" };
+	if (m === "failed") return { ...base, type: "text" };
+	const [control, opts] = controlFor(m.fieldtype, m.options);
+	if (control === "select") {
+		const options = opts.filter(Boolean);
+		return options.length ? { ...base, type: "select", options } : { ...base, type: "text" };
+	}
+	if (control === "link") {
+		return opts ? { ...base, type: "link", doctype: opts } : { ...base, type: "text" };
+	}
+	if (control === "check") return { ...base, type: "yesno", options: [] };
+	if (control === "date" || control === "datetime") return { ...base, type: control };
+	if (control === "number") return { ...base, type: "number" };
+	return { ...base, type: "text" };
+}
+const questions = computed(() => props.spec.questions.map(drawn));
 const ready = computed(() => isAskReady(props.spec, sel.value, other.value));
 
 async function onLinkSearch(i, doctype, val) {
@@ -241,7 +311,7 @@ function submit() {
 	// a host is allowed to REFUSE the text (a send already in flight, a dictation
 	// still transcribing): clearing first would silently swallow the answers and
 	// leave the user staring at an empty, disabled card.
-	emit("submit", askAnswerText(props.spec, sel.value, other.value));
+	emit("submit", askAnswerText({ questions: questions.value }, sel.value, other.value));
 }
 </script>
 
@@ -307,6 +377,11 @@ function submit() {
 	text-transform: uppercase;
 	color: var(--text-3);
 	margin-bottom: 6px;
+}
+.jv-ask-loading {
+	display: flex;
+	padding: 8px 0;
+	color: var(--text-3);
 }
 .jv-ask-opts {
 	display: flex;
