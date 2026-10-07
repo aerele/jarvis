@@ -1864,10 +1864,7 @@
 											>{{ modelBadgeOf(m) }}</span
 										>
 									</div>
-									<div
-										v-if="replyBarParts(m).showBar"
-										class="jv-msgbar"
-									>
+									<div v-if="replyBarParts(m).showBar" class="jv-msgbar">
 										<span
 											v-if="msgTime(m)"
 											class="jv-msgtime"
@@ -1878,7 +1875,11 @@
 										     height; copying half a reply would be wrong -->
 										<button
 											class="jv-msgbtn"
-											:style="replyBarParts(m).showCopy ? null : 'visibility: hidden'"
+											:style="
+												replyBarParts(m).showCopy
+													? null
+													: 'visibility: hidden'
+											"
 											:disabled="!replyBarParts(m).showCopy"
 											@click="copyMsg(m.name, stripBlocks(m.content))"
 											:title="copiedId === m.name ? 'Copied' : 'Copy'"
@@ -4307,7 +4308,7 @@ import {
 	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
-import { replyBarParts, stampDeltaTime } from "@/lib/replyBar";
+import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
@@ -8166,6 +8167,9 @@ function fallbackCopy(s) {
 // span elapsedOf() treats as the generation duration). So replies show
 // `modified`; user rows keep `creation` (their send time).
 function msgStamp(m) {
+	// A streaming reply shows the latest delta's client time; the server value
+	// (which can be the run start on a resumed row) rules once it has settled.
+	if (m.role === "assistant" && useClientStamp(m)) return null;
 	if (m.role === "assistant" && m.modified) return m.modified;
 	return m.creation;
 }
@@ -8612,14 +8616,14 @@ function boxViewFor(m) {
 	// never jumps when the turn settles (it used to freeze at the moment the
 	// answer first showed and then jump to the full span at run:end). A tab
 	// reloaded mid-answer reads the same reload-seeded clock.
-	return {
-		mode: "folded",
-		head: foldedHead({
-			seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
-			toolNames: toolNamesFor(m, visibleActiveTools.value),
-			showDetail: showActivityDetail.value,
-		}),
-	};
+	// No tool or step so far: nothing to show, so no bar to vanish at settle.
+	const head = foldedHead({
+		seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
+		toolNames: toolNamesFor(m, visibleActiveTools.value),
+		showDetail: showActivityDetail.value,
+		settled: !anyToolRowFor(m),
+	});
+	return head ? { mode: "folded", head } : null;
 }
 // A turn is in flight (queued, or sent and waiting on run:start) but has no
 // assistant row yet to hang a box on — the synthetic row T5b renders (one
@@ -10565,10 +10569,6 @@ function onEvent(p) {
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
-			// The copy bar shows with the answer, so give it a time now rather
-			// than when the enrichment reload brings the saved one (msgTime).
-			if (m && !m.modified && !m.creation && !m.creation_browser)
-				m.creation_browser = Date.now();
 			// One-off smile on the brand avatar the moment the answer lands. Success
 			// terminal only: the stop/abort path (stopRun) and the error case never
 			// reach here, and we still skip a row that resolved to an error or stopped

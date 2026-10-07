@@ -359,6 +359,12 @@ describe("folded head", () => {
 		expect(foldedHead({ seconds: 53, toolNames: [], settled: true })).toBeNull();
 	});
 
+	it("a streaming answer with no tool so far shows no bar; one appears when a tool has run", () => {
+		const base = { seconds: 2, showDetail: true, settled: true };
+		expect(foldedHead({ ...base, toolNames: [] })).toBeNull();
+		expect(foldedHead({ ...base, toolNames: ["get_doc"] }).count).toBe("1 tool");
+	});
+
 	it("finishing rides on the line until enrichment lands", () => {
 		expect(
 			foldedHead({ seconds: 52, toolNames: ["export_excel"], finishing: true }).finishing
