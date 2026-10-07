@@ -1385,6 +1385,10 @@ def handle_chat_send(payload: dict) -> None:
 		# changed_data: pass False only when we KNOW nothing was written (a
 		# pre-ack failure - the run never started). The SPA turns that into a
 		# "No changes were made to your data" reassurance; omit it when unknown.
+		code = code or _classify_error(err, exc)
+		# Every publish here is the turn's final error (mid-run or pre-ack): remember a dead sign-in.
+		# Before _mark_errored so its commit carries the write.
+		_note_subscription_error(err, code)
 		_mark_errored(assistant_msg.name, err)
 		payload = {
 			"kind": "run:error",
@@ -1392,7 +1396,7 @@ def handle_chat_send(payload: dict) -> None:
 			"message_id": assistant_msg.name,
 			"run_id": run_id,
 			"error": err,
-			"code": code or _classify_error(err, exc),
+			"code": code,
 		}
 		if changed_data is not None:
 			payload["changed_data"] = bool(changed_data)
@@ -1703,7 +1707,13 @@ def handle_chat_send(payload: dict) -> None:
 
 						_row = _usage.fetch_fresh_session_row(sess, conv.session_key)
 						if _row:
-							_usage.record_turn_usage(conv.session_key, _row)
+							_outcome = _usage.record_turn_usage(conv.session_key, _row)
+							# A completed turn proves its sign-in works, but only when its
+							# row was fresh (a retry row may name a previous turn's model).
+							# Never raises.
+							from jarvis import subscription_health as _sub_health
+
+							_sub_health.note_recorded_turn(_outcome, _row)
 					except Exception:
 						frappe.log_error(
 							title="chat: usage record hook failed",
@@ -2601,6 +2611,15 @@ def _classify_error(err_text: str, exc=None) -> str:
 	return code
 
 
+def _note_subscription_error(err_text: str, code: str) -> None:
+	"""Remember a dead chat sign-in seen at a run-error publish site (never inside the classifier,
+	which the pump's pre-ack paths also call). Never raises."""
+	if code == "subscription-expired":
+		from jarvis import subscription_health
+
+		subscription_health.note_turn_error(err_text, code)
+
+
 def _mark_errored(assistant_msg_name: str, error: str) -> None:
 	frappe.db.set_value(
 		MSG,
@@ -2735,6 +2754,9 @@ def _handle_event_inner(
 					},
 				)
 				return
+			code = _classify_error(err_text)
+			# Before _mark_errored so its commit carries the write.
+			_note_subscription_error(err_text, code)
 			_mark_errored(assistant_msg_name, err_text)
 			_publish_to_user(
 				user,
@@ -2743,7 +2765,7 @@ def _handle_event_inner(
 					"conversation_id": conversation_id,
 					"message_id": assistant_msg_name,
 					"run_id": run_id,
-					"code": _classify_error(err_text),
+					"code": code,
 					"error": event.get("error"),
 				},
 			)

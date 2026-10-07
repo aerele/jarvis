@@ -675,6 +675,10 @@ export const disconnectSubscription = () => call("jarvis.oauth.api.disconnect");
 // --- LLM Monitor (System-Manager gated server-side). Real Bifrost usage, NOT the getUsage estimate. ---
 export const getLlmUsage = () => call("jarvis.account.get_llm_usage");
 export const getLlmConnectionStatus = () => call("jarvis.account.get_llm_connection_status");
+// Expired chat-subscription sign-ins for the banner, the failed-message card and the Settings
+// rail. Open to every workspace member; a member only learns whether THEIR chats are failing.
+export const getSubscriptionNotice = () =>
+	call("jarvis.subscription_health.get_subscription_notice");
 // The member-tier half of the same badge (jarvis#711). Returns ONLY { state },
 // one of ok / applying / attention / down - no shape, no model or provider
 // names, no profile ids, and no reason for "attention". Any workspace user may

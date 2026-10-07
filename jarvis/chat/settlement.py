@@ -174,6 +174,13 @@ def invoke_settlement(
 				frappe.db.rollback()
 			return
 
+		if pub_kind == "run:error":
+			# A dead chat sign-in ends here as a relay:error: remember it in the same commit that
+			# settles the turn (idempotent, so a replay of this unit is harmless). Never raises.
+			from jarvis import subscription_health
+
+			subscription_health.note_turn_error(pub_extra["error"], pub_extra["code"])
+
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release turn slot
 		return row, am, pub_kind, pub_extra
 

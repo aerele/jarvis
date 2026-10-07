@@ -3476,6 +3476,11 @@ def _settle_recover_errored(
 	err = error or _STALLED_ERROR
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
+	code = _classify_error(err)
+	if code == "subscription-expired":
+		from jarvis import subscription_health
+
+		subscription_health.note_turn_error(err, code)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:
@@ -3496,7 +3501,7 @@ def _settle_recover_errored(
 			run_id=run_id,
 			message_id=assistant_message,
 			error=err,
-			code=_classify_error(err),
+			code=code,
 		)
 	# jarvis#1425 review (live e2e2, 2026-09-27): this path settles WITHOUT
 	# going through invoke_settlement (settlement.py's own poke does not cover

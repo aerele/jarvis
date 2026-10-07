@@ -227,6 +227,49 @@ class TestRunAgentTurnShimForwardsToHandleChatSend(FrappeTestCase):
 		self.assertIsNone(payload["context"])
 
 
+class TestPreAckFailureRecordsDeadSignIn(FrappeTestCase):
+	"""A pre-ack run error is final too: a dead sign-in in it must become a chat signal."""
+
+	DEAD = "chat.send rejected: 401 auth_unavailable: unauthorized (openai/gpt-5.6)"
+
+	def setUp(self):
+		agent_session_pool._POOL.clear()
+		_ensure_test_user()
+		self._orig_user = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations()
+		self.conv, self.user_msg = _make_conversation_with_user_message("hello")
+
+	def tearDown(self):
+		_cleanup_user_conversations()
+		frappe.set_user(self._orig_user)
+
+	def _fail_pre_ack(self, text):
+		fake_sess = MagicMock()
+		fake_sess.chat_send.side_effect = AgentUnreachableError(text)
+		from jarvis import subscription_health
+
+		with (
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.worker.publish_to_user") as pub,
+			patch.object(subscription_health, "record_chat_failure") as rec,
+		):
+			turn_handler.handle_chat_send(
+				{"conversation_id": self.conv, "message_id": self.user_msg, "run_id": "r-preack"}
+			)
+		return rec, [c.args[1] for c in pub.call_args_list if c.args[1].get("kind") == "run:error"]
+
+	def test_a_pre_ack_dead_sign_in_records_the_signal(self):
+		rec, errors = self._fail_pre_ack(self.DEAD)
+		self.assertEqual([e.get("changed_data") for e in errors], [False])
+		rec.assert_called_once_with("openai")
+
+	def test_a_pre_ack_unrelated_error_records_nothing(self):
+		rec, errors = self._fail_pre_ack("agent WS closed: 1006")
+		self.assertEqual(len(errors), 1)
+		rec.assert_not_called()
+
+
 class TestOrgLocaleClause(unittest.TestCase):
 	"""_org_locale_clause folds the default Company's region + the site's
 	date / number / timezone formats into the context line so the agent
