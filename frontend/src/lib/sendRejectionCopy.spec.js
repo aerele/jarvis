@@ -60,11 +60,11 @@ describe("sendRejectionCopy", () => {
 		expect(sendRejectionCopy("insufficient_workers", "Jarvis", {}, retry).message).toBe(retry);
 	});
 
-	// The toasts render the message as HTML.
-	it("escapes a server sentence", () => {
-		expect(sendRejectionCopy("A <b>bold</b> reply & more.", "Jarvis").message).toBe(
-			"A &lt;b&gt;bold&lt;/b&gt; reply &amp; more."
-		);
+	// Plain text: a caller that renders HTML escapes the whole message, so the
+	// helper must not (a text caller would show the entities).
+	it("keeps a server sentence as plain text", () => {
+		const sentence = "Don't send <b>this</b> & that.";
+		expect(sendRejectionCopy(sentence, "Jarvis").message).toBe(sentence);
 	});
 });
 

@@ -1,9 +1,7 @@
 // Human copy for a rejected send ({ ok: false, reason }). The server sends
 // machine codes for the gates it owns and plain sentences for one-off guards;
-// a code the SPA does not know must never reach a toast. A server sentence is
-// escaped: the toasts render the message as HTML.
-import { escapeHtml } from "./errors.js";
-
+// a code the SPA does not know must never reach a toast. The copy is plain text:
+// a caller that renders HTML (a frappe-ui toast) escapes the whole message.
 const FALLBACK = "Couldn't send your message.";
 
 // A usage_limit envelope names its window (limit_period) only when the
@@ -46,6 +44,6 @@ export function sendRejectionCopy(reason, agentName, envelope, fallback = FALLBA
 		},
 	};
 	if (reason && known[reason]) return known[reason];
-	const sentence = typeof reason === "string" && reason.includes(" ") ? escapeHtml(reason) : "";
+	const sentence = typeof reason === "string" && reason.includes(" ") ? reason : "";
 	return { message: sentence || fallback, type: "error" };
 }
