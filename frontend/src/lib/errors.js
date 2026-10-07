@@ -26,6 +26,8 @@ function isInternalCrash(e) {
 	return e instanceof TypeError && INTERNAL_CRASH_MESSAGE.test((e && e.message) || "");
 }
 
+import { cookieUser } from "./sessionCookie.js";
+
 // Frappe HTML-escapes throw() messages before they reach the client, so a
 // backend "Settings -> Developer" arrives here as "Settings -&gt; Developer"
 // and would render literally if shown as-is. Decode entities + strip any
@@ -42,7 +44,23 @@ function isInternalCrash(e) {
 export const GENERIC_ERROR_MESSAGE =
 	"Something went wrong. Try again, and check back if it keeps happening.";
 
+export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+
+// An expired session (#644): Frappe answers 403 "not whitelisted ... Login to
+// access" (a PermissionError, with a `session_expired` body flag that frappe-ui
+// drops) AND clears the user_id cookie. So a 401/403 that arrives while the
+// cookie now reads Guest/absent is an expired session, not a permission error.
+// A 403 on a live session stays a genuine permission error.
+export function isSessionExpired(e) {
+	if (!e) return false;
+	if (e.session_expired) return true;
+	if (typeof document === "undefined") return false;
+	const authFailure = e.status === 401 || e.status === 403 || e.exc_type === "PermissionError";
+	return authFailure && !cookieUser();
+}
+
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
+	if (isSessionExpired(e)) return SESSION_EXPIRED_MESSAGE;
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4
 	// review F1): frappe.throw("You do not have permission to disconnect this
 	// model") is a real, actionable remedy, and burying it under a blanket
@@ -56,7 +74,7 @@ export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	// cannot explain. This outranks `fallback` deliberately: "sign in again" is
 	// an actionable remedy, a caller's "Could not save." is not.
 	if (!specific && e && (e.status === 401 || e.status === 403)) {
-		return "Your session has expired. Please sign in again.";
+		return SESSION_EXPIRED_MESSAGE;
 	}
 	const raw = specific || fallback;
 	if (typeof document === "undefined") return raw;
