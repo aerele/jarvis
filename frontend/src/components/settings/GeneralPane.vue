@@ -9,7 +9,11 @@
 			     the per-model story (every model in failover order, with its own
 			     status); this is a summary that points at it. The pair stays for a
 			     single-credential tenant, where it is accurate. -->
-			<div v-if="!connLoaded" class="py-2 text-p-sm text-ink-gray-6">Loading…</div>
+			<!-- No rows until a real answer: a failed first load shows the error
+			     line below, not the "Auto" placeholder. -->
+			<template v-if="!connLoaded">
+				<div v-if="!connErr" class="py-2 text-p-sm text-ink-gray-6">Loading…</div>
+			</template>
 			<KvRow v-else-if="isPool" label="Models" :value="poolSummary" />
 			<template v-else>
 				<KvRow label="Model" :value="modelLabel" />
@@ -286,10 +290,11 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onActivated, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Button, toast } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { useConfirm } from "@/composables/useConfirm";
+import { useKeptAlive } from "@/composables/useKeptAlive";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import { AUTO_MODE_COPY } from "@/lib/autoMode";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
@@ -351,13 +356,10 @@ const connStatus = ref(null);
 const memberState = ref("");
 const connErr = ref(false);
 const connLoading = ref(false);
-// True once a first answer (or failure) has landed. Until then the rows below
-// would show the conversation's "Auto" label and a blank Status, which read as
-// real values for a second before the server's answer replaced them.
+// True once a real answer has landed. Until then the rows below would show the
+// conversation's "Auto" label and a blank Status, which read as real values
+// until the server's answer replaced them.
 const connLoaded = ref(false);
-// Staleness window for a kept-alive pane: reactivating inside it refetches nothing.
-const STALE_MS = 30000;
-let loadedAt = 0;
 
 // Also ported from the removed ConnectionPane.vue: a fetch failure has to be
 // visible and recoverable. Swallowing it left Status showing its placeholder,
@@ -374,12 +376,13 @@ async function loadConnStatus() {
 			memberState.value = (res && res.state) || "";
 		}
 		connErr.value = false;
+		connLoaded.value = true;
 	} catch (e) {
 		connErr.value = true;
 	} finally {
 		connLoading.value = false;
-		connLoaded.value = true;
 	}
+	return !connErr.value;
 }
 // proxy_active means "a Bifrost + CLIProxyAPI sidecar pair is deployed", which
 // only a chat subscription needs. It is NOT "this is a pool": a pool of BYO api
@@ -555,16 +558,9 @@ async function loadSettings() {
 }
 // The three fetches are independent, so they run together instead of one
 // after another. A refresh swaps values in place and never blanks the pane.
-function loadAll() {
-	loadedAt = Date.now();
-	return Promise.all([loadUsage(), loadConnStatus(), loadSettings()]);
-}
-onMounted(loadAll);
-// Settings keeps this pane alive across tab switches (SettingsDialog's
-// KeepAlive). onMounted covers the first visit, so only a re-visit lands here.
-onActivated(() => {
-	if (loadedAt && Date.now() - loadedAt > STALE_MS) loadAll();
-});
+// SettingsDialog keeps this pane alive, so useKeptAlive owns the mount load and
+// the stale / config-changed refresh on re-activation.
+useKeptAlive(async () => (await Promise.all([loadUsage(), loadConnStatus(), loadSettings()]))[1]);
 
 // Device-local prefs live in the shell store (single source of truth) so that
 // toggling here also updates ChatView's live gating same-tab. Read + delegate.
@@ -716,6 +712,9 @@ async function doResetOnboarding() {
 	}
 }
 
+// The reset poll deliberately keeps running while this pane is hidden by a tab
+// switch: a reset is destructive and its "workspace is back" reload is wanted
+// from whichever tab the admin is on. It only exists while a reset is in flight.
 function startPoll() {
 	stopPoll();
 	pollStarted = Date.now();
