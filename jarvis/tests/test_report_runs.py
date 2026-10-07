@@ -123,6 +123,32 @@ class TestChatReportCard(FrappeTestCase):
 		_tool(self.conv, 2, "ready", other, filters={"company": "Other"})
 		self.assertEqual(_states(self.conv), [(run, "ready")])
 
+	def test_a_failure_jarvis_has_reported_closes_the_card(self):
+		run = _pr("Error")
+		_tool(self.conv, 1, "started", run)
+		self.assertEqual(_states(self.conv), [(run, "failed")])
+		_tool(self.conv, 2, "failed", run)
+		self.assertEqual(_states(self.conv), [])
+
+	def test_a_new_run_of_the_same_report_replaces_the_failed_card(self):
+		failed, again = _pr("Error"), _pr("Started")
+		_tool(self.conv, 1, "started", failed)
+		_tool(self.conv, 2, "started", again)
+		self.assertEqual(_states(self.conv), [(again, "preparing")])
+
+	def test_ready_time_falls_back_to_the_last_change(self):
+		run = _pr("Completed")
+		frappe.db.set_value("Prepared Report", run, "report_end_time", None, update_modified=False)
+		_tool(self.conv, 1, "started", run)
+		[item] = chat_report_runs(self.conv)["items"]
+		self.assertTrue(item["ready_at"])
+
+	def test_reads_the_same_without_mariadbs_json_functions(self):
+		run = _pr("Started")
+		_tool(self.conv, 1, "started", run)
+		with patch.object(frappe.db, "db_type", "postgres"):
+			self.assertEqual(_states(self.conv), [(run, "preparing")])
+
 	def test_cancelled_deleted_or_foreign_runs_are_dropped(self):
 		cancelled, foreign = _pr("Cancelled"), _pr("Completed", owner=OTHER)
 		_tool(self.conv, 1, "started", cancelled)
@@ -151,7 +177,9 @@ class TestChatReportCard(FrappeTestCase):
 			return frappe._dict(
 				conversation=conv,
 				tool_args=json.dumps({"report_name": PREP_REPORT, "filters": {"company": "Acme"}}),
-				tool_result=json.dumps({"data": {"status": status, "run": run, "report_name": PREP_REPORT}}),
+				status=status,
+				run=run,
+				report_name=PREP_REPORT,
 			)
 
 		runs = _open_runs([row("chat-a", "started", "PR-X"), row("chat-b", "ready", "PR-X")])
@@ -218,6 +246,20 @@ class TestReadyReportsOnTheBoard(FrappeTestCase):
 		for i in range(12):
 			_tool(conv, i + 1, "started", _pr("Completed", BOARD), filters={"company": f"Co {i}"})
 		self.assertEqual(len(ready_reports(BOARD)), 10)
+
+	def test_the_board_stays_up_when_the_list_fails(self):
+		frappe.set_user(BOARD)
+		try:
+			with (
+				patch("jarvis.chat.report_runs.ready_reports", side_effect=RuntimeError("boom")),
+				patch.object(frappe, "log_error") as log,
+			):
+				page = list_approvals_page()
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(page["ready_reports"], [])
+		self.assertIn("rows", page)
+		log.assert_called_once()
 
 	def test_on_the_first_page_of_the_board_only(self):
 		conv = _conv(BOARD)

@@ -34,7 +34,8 @@ const emit = defineEmits(["show"]);
 
 function stateText(it) {
 	if (it.status === "ready") return `Ready ${timeAgo(it.ready_at)}`;
-	if (it.status === "failed") return "Couldn't prepare this report. Ask Jarvis to run it again.";
+	if (it.status === "failed")
+		return "Couldn't prepare this report. Tell Jarvis which filter to change.";
 	return "Preparing in the background…";
 }
 </script>

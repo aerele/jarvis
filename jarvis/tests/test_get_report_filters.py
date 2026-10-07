@@ -79,6 +79,14 @@ class TestParseJsFilters(FrappeTestCase):
 			},
 		)
 
+	def test_a_default_inside_a_filters_function_is_not_its_own(self):
+		js = """filters: [
+			{ fieldname: "account", fieldtype: "Link", get_data: function (txt) { return { default: "Cash" }; } },
+			{ fieldname: "basis", fieldtype: "Select", default: "Accrual", on_change: () => ({ default: 1 }) },
+		]"""
+		by = {f["fieldname"]: f["default"] for f in _parse_js_filters(js)}
+		self.assertEqual(by, {"account": None, "basis": "Accrual"})
+
 	def test_no_filters_array_returns_empty(self):
 		self.assertEqual(_parse_js_filters("frappe.query_reports['x'] = {};"), [])
 

@@ -35,7 +35,7 @@ describe("ReportRunCards", () => {
 	it("a failed run says what to do", () => {
 		const w = mountWith([{ ...RUN, status: "failed" }]);
 		expect(w.find(".jv-rrc-state").text()).toBe(
-			"Couldn't prepare this report. Ask Jarvis to run it again."
+			"Couldn't prepare this report. Tell Jarvis which filter to change."
 		);
 		expect(w.find(".jv-rrc-show").exists()).toBe(false);
 	});
