@@ -362,7 +362,7 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		const { retryMessage } = await import("@/api");
 		const { wrapper } = await mountFailed(failed());
 		expect(wrapper.find(".text-ink-red-4").text()).toContain(
-			"The AI model sent back an empty reply"
+			"The model sent back an empty reply"
 		);
 		await retryButton(wrapper).trigger("click");
 		await flushPromises();
