@@ -1919,6 +1919,13 @@
 							</template>
 						</Message>
 					</template>
+					<!-- a File Box file's open questions, also on the Approval Board -->
+					<FileBoxWaits
+						v-if="fileboxWaits.length"
+						:items="fileboxWaits"
+						:busy="fileboxWaitBusy"
+						@decide="decideFileboxWait"
+					/>
 
 					<!-- T5b (design canvas rules 1-2): the goto-morph line, the artifact
 					     activity card, the generic tool/step line and the recovering
@@ -4255,6 +4262,7 @@ import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
 import AnnouncementBanner from "@/components/chat/AnnouncementBanner.vue";
@@ -8900,6 +8908,41 @@ function _checkPulseOnce(id) {
 	maybeOpenPulseFeedback();
 }
 
+// A File Box file's chat shows what the file waits on, the same items the Approval
+// Board lists: its questions are answered here as on the board. Re-read on every load
+// (a run's end reloads the chat, which is when a new question appears).
+const fileboxWaits = ref([]);
+const fileboxWaitBusy = ref("");
+async function refreshFileboxWaits(id, isFileBox) {
+	if (!id || !isFileBox) {
+		fileboxWaits.value = [];
+		return;
+	}
+	try {
+		const r = await api.fileboxOpenWaits(id);
+		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
+	} catch (e) {
+		// best-effort: the board still lists them
+	}
+}
+async function decideFileboxWait(item, text, approve) {
+	if (fileboxWaitBusy.value || !text) return;
+	const id = currentId.value;
+	fileboxWaitBusy.value = item.name;
+	try {
+		await api.decideApproval(item.name, text, approve);
+		notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
+			type: "success",
+		});
+		store.refreshApprovalsCount?.();
+	} catch (e) {
+		notifyActionError("Couldn't send that answer", e);
+	} finally {
+		fileboxWaitBusy.value = "";
+	}
+	// the decision resumes the run in this chat: show it, and re-read what is left
+	if (id && currentId.value === id) loadConversation(id).catch(() => {});
+}
 async function loadConversation(id) {
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
@@ -8915,6 +8958,7 @@ async function loadConversation(id) {
 	if (!id) {
 		resetAutoModeFor(true);
 		messages.value = [];
+		fileboxWaits.value = [];
 		originPage.value = "";
 		originOf.value = "";
 		modelOverride.value = "";
@@ -8995,6 +9039,7 @@ async function loadConversation(id) {
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
 	resyncQueuedTurn(id);
+	refreshFileboxWaits(id, d?.conversation?.file_box);
 	// Seed Up/Down recall from THIS conversation's past prompts. Without this,
 	// promptHistory only held prompts typed in the current page session, so
 	// after a reload or when opening an existing chat the arrows did nothing.
