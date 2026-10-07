@@ -188,10 +188,6 @@ def invoke_settlement(
 	if settled is None:
 		return
 	row, am, pub_kind, pub_extra = settled
-	if pub_kind == "run:error":
-		from jarvis.chat.turn_handler import _note_empty_reply
-
-		_note_empty_reply(run_id, conversation, pub_extra["error"], pub_extra["code"])
 
 	# jarvis#1425 review (live e2e2, 2026-09-27): a Relay Pump reply's terminal
 	# write lands here, not in turn_handler.py's legacy exit - e2e2's actual
@@ -236,6 +232,15 @@ def invoke_settlement(
 
 	# S6 — enqueue enrichment (idempotent per (turn, effect_name); force-done at 3).
 	deps.enqueue_finalize(run_id, relay_target_id)
+
+	# Last, so its read takes no snapshot before the steps above.
+	if pub_kind == "run:error":
+		try:
+			from jarvis.chat.turn_handler import _note_empty_reply
+
+			_note_empty_reply(run_id, conversation, pub_extra["error"], pub_extra["code"])
+		except Exception:
+			pass
 
 
 def _is_hidden_turn(run_id: str) -> bool:

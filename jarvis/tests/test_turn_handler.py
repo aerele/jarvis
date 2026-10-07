@@ -545,15 +545,21 @@ class TestNoteEmptyReply(FrappeTestCase):
 
 	def test_each_variant_is_named(self):
 		for err, code, variant in (
-			("Agent couldn't generate a response. Please try again.", "empty-reply", "plain"),
-			("Agent couldn't generate a response.", "empty-reply", "bare"),
+			("\u26a0\ufe0f Agent couldn't generate a response. Please try again.", "empty-reply", "plain"),
+			("Agent couldn\u2019t generate a response.", "empty-reply", "bare"),
+			("Agent couldn't generate a response: 500 from upstream", "empty-reply", "other"),
 			("Agent couldn't generate a response. Note: some tool actions ...", "empty-reply-tools", "tools"),
 		):
 			with self.subTest(variant=variant):
 				lines = self._lines(err, code)
 				self.assertEqual(len(lines), 1)
 				self.assertTrue(lines[0][0].startswith("empty_reply run_id="))
-				self.assertEqual(lines[0][1:], ("r1", "no-such-conv", variant, ""))
+				self.assertEqual(lines[0][1:], ("r1", "no-such-conv", variant, "", ""))
+
+	def test_a_failed_token_lookup_still_writes_the_line(self):
+		with patch.object(frappe.db, "sql", side_effect=RuntimeError("db down")):
+			lines = self._lines("Agent couldn't generate a response.", "empty-reply")
+		self.assertEqual(lines[0][1:], ("r1", "no-such-conv", "bare", "", ""))
 
 	def test_other_codes_write_nothing(self):
 		self.assertEqual(self._lines("429 rate_limit_error", "rate-limit"), [])

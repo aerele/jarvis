@@ -1019,14 +1019,18 @@ class TestSux11ErrorContract(_PipelineCase):
 		# Turn.error mirrors it too.
 		self.assertEqual(self._val(rid, "error"), "provider quota exceeded")
 
-	def test_an_empty_reply_writes_one_telemetry_line_with_the_context_size(self):
-		from unittest.mock import MagicMock
-
-		error = "⚠️ Agent couldn't generate a response. Please try again."
+	def _settle_empty_reply(self, finalize):
+		error = "\u26a0\ufe0f Agent couldn't generate a response. Please try again."
 		conv = self._mk_conv()
 		key = "sess-empty-" + frappe.generate_hash(length=6)
 		frappe.get_doc(
-			{"doctype": SESSION, "session_key": key, "user": TEST_USER, "last_total_tokens": 31000}
+			{
+				"doctype": SESSION,
+				"session_key": key,
+				"user": TEST_USER,
+				"last_total_tokens": 31000,
+				"context_pct": 72.5,
+			}
 		).insert(ignore_permissions=True)
 		frappe.db.set_value(CONV, conv, "session_key", key, update_modified=False)
 		seed = self._mk_msg(conv)
@@ -1047,27 +1051,43 @@ class TestSux11ErrorContract(_PipelineCase):
 			terminal_observed_at=frappe.utils.now(),
 		)
 		deps = pump.PumpDeps()
-		deps.enqueue_finalize = _Recorder()
-		logger = MagicMock()
-		with patch("jarvis.chat.latency.get_logger", return_value=logger):
-			settlement.invoke_settlement(
-				rid,
-				relay_target_id=self._target,
-				epoch=epoch,
-				version=4,
-				terminal_kind="relay:error",
-				terminal_payload={"state": "error", "error": error, "text": ""},
-				assistant_message=None,
-				owner=self._orig_user,
-				conversation=conv,
-				deps=deps,
-			)
+		deps.enqueue_finalize = finalize
+		settlement.invoke_settlement(
+			rid,
+			relay_target_id=self._target,
+			epoch=epoch,
+			version=4,
+			terminal_kind="relay:error",
+			terminal_payload={"state": "error", "error": error, "text": ""},
+			assistant_message=None,
+			owner=self._orig_user,
+			conversation=conv,
+			deps=deps,
+		)
 		self.assertEqual(self._state(rid), "errored")
-		lines = [c.args for c in logger.info.call_args_list if c.args[0].startswith("empty_reply")]
+		return rid, conv
+
+	def test_an_empty_reply_writes_one_telemetry_line_after_the_settlement(self):
+		from unittest.mock import MagicMock
+
+		order = []
+		logger = MagicMock()
+		logger.info.side_effect = lambda *args: order.append(args)
+		with patch("jarvis.chat.latency.get_logger", return_value=logger):
+			rid, conv = self._settle_empty_reply(lambda *a: order.append("finalize"))
+		lines = [a for a in order if a != "finalize" and a[0].startswith("empty_reply")]
 		self.assertEqual(len(lines), 1)
-		self.assertEqual(lines[0][1:], (rid, conv, "plain", 31000))
+		self.assertEqual(lines[0][1:], (rid, conv, "plain", 31000, 72.5))
+		self.assertLess(order.index("finalize"), order.index(lines[0]), "the line comes last")
 		err_pub = next(p for p in self._pubs if p.get("kind") == "run:error")
 		self.assertEqual(err_pub["code"], "empty-reply")
+
+	def test_a_telemetry_failure_never_breaks_the_settlement(self):
+		finalize = _Recorder()
+		with patch("jarvis.chat.turn_handler._note_empty_reply", side_effect=RuntimeError("log down")):
+			self._settle_empty_reply(finalize)
+		self.assertEqual(len(finalize.calls), 1, "finalize still enqueued")
+		self.assertIn("run:error", self._pub_kinds())
 
 
 # --------------------------------------------------------------------------- #
