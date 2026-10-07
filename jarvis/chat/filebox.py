@@ -935,6 +935,49 @@ def _attach_results(rows: list[dict], me: str) -> None:
 
 @frappe.whitelist()
 @require_jarvis_user
+def open_waits(conversation: str) -> dict:
+	"""What a File Box file is waiting on, for its own chat (the Approval Board shows
+	the same items): each Pending question with its text and options, answered with
+	``approvals_api.decide`` like the board, and a held record or approval sheet as a
+	title with its board link. Owner-only; an ordinary chat has none."""
+	from urllib.parse import quote
+
+	me = frappe.session.user
+	doc = frappe.get_doc(CONV, conversation)  # DoesNotExistError if missing
+	if doc.owner != me:
+		frappe.throw("Not permitted", frappe.PermissionError)
+	# _pending_waits_sql covers File Box conversations only: an ordinary chat has none.
+	waits = frappe.db.sql(
+		f"SELECT w.src, w.item, w.title FROM ({_pending_waits_sql()}) w "
+		"WHERE w.conversation = %(one)s ORDER BY w.creation",
+		{**_ladder_params(me), "one": conversation},
+		as_dict=True,
+	)
+	items = []
+	for w in waits:
+		item = {"src": w.src, "name": w.item, "title": w.title or ""}
+		if w.src == "ar":
+			ar = frappe.db.get_value(APPROVAL, w.item, ["question", "options"], as_dict=True) or {}
+			item["question"] = ar.get("question") or item["title"]
+			item["options"] = _options_list(ar.get("options"))
+			item["link"] = f"/approvals/{quote(w.item, safe='')}"
+		else:
+			item["link"] = f"/approvals?held={quote(w.item, safe='')}"
+		items.append(item)
+	return {"items": items}
+
+
+def _options_list(raw) -> list[str]:
+	"""An approval's stored options (a JSON list) as text, or []."""
+	try:
+		parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+	except ValueError:
+		return []
+	return [str(o) for o in parsed] if isinstance(parsed, list) else []
+
+
+@frappe.whitelist()
+@require_jarvis_user
 def list_inbound_page(
 	search: str = "",
 	filters: str | dict | None = None,
