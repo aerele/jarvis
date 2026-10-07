@@ -210,8 +210,15 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 	role=tool-message population ``top_tools`` counts (including
 	errored/in-flight turns), not Turn Usage's per-COMPLETED-turn count."""
 	out: dict[str, dict] = {}
+	# Code can deploy before the migrate that adds tokens_out_estimated; a push in that gap
+	# must not fail the whole rollup, so the column is selected only once it exists.
+	estimated_col = (
+		"MAX(tokens_out_estimated)"
+		if frappe.db.has_column("Jarvis Turn Usage", "tokens_out_estimated")
+		else "0"
+	)
 	for r in frappe.db.sql(
-		"""
+		f"""
 		SELECT user,
 			   profile_agent_id,
 			   COUNT(*) AS cnt,
@@ -219,7 +226,7 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 			   SUM(cache_read) AS cache_read,
 			   SUM(cache_write) AS cache_write,
 			   MAX(cache_reported) AS cache_reported,
-			   MAX(tokens_out_estimated) AS tokens_out_estimated
+			   {estimated_col} AS tokens_out_estimated
 		FROM `tabJarvis Turn Usage`
 		WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
 		GROUP BY user, profile_agent_id
