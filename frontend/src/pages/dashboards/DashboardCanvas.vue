@@ -36,7 +36,8 @@
 		<template v-else>
 			<!-- sandbox: allow-scripts ONLY (no allow-same-origin, no allow-popups) -
 			     paired with the srcdoc CSP (no network, inline-only) the dashboard
-			     runs fully isolated; all data arrives over postMessage. -->
+			     runs fully isolated; all data arrives over postMessage, and link
+			     clicks are relayed to onMessage, which opens allowlisted ones. -->
 			<!-- v-if="doc": render only once the real document exists, so the frame
 			     never mounts on an empty srcdoc it would have to navigate away from
 			     (that empty-first-navigation is intermittently dropped on a cold load,
@@ -78,6 +79,7 @@ import { ref, watch, onBeforeUnmount } from "vue";
 import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { buildSrcdoc, parseSourcesBlock, parseFiltersBlock } from "@/lib/dashboardSrcdoc";
+import { deskLinkUrl } from "@/lib/dashboardLinks";
 import { loadEchartsSource } from "@/lib/dashboardEcharts";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";
@@ -330,6 +332,9 @@ function onMessage(e) {
 		if (props.mode === "view") frameH.value = Math.max(480, Math.ceil(d.height || 0));
 	} else if (d.type === "data") {
 		handleData(d);
+	} else if (d.type === "link") {
+		const url = deskLinkUrl(d.href, window.location.origin);
+		if (url) window.open(url, "_blank", "noopener,noreferrer");
 	} else if (d.type === "export:progress") {
 		// Each captured slide re-arms the watchdog: steady progress => keep waiting.
 		const p = pendingExports[d.id];
