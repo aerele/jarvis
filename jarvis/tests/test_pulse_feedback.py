@@ -255,11 +255,15 @@ class TestPulseContext(_PulseTestCase):
 			with self.subTest(column=column):
 				self._set_turns(0)
 				conv = create_conversation()
+				# Each subcase owns its conversation and removes it afterwards: a
+				# leftover ordinary conversation with September messages would make
+				# the next subcase due for the wrong reason.
+				self.addCleanup(_delete_conv, conv)
 				self._set_turns(5, conversation=conv, active_at=datetime(2026, 9, 20, 12, 0))
 				frappe.db.set_value(CONV, conv, column, 1, update_modified=False)
 				self.assertFalse(self._early_october_is_due())
 				self.assertIsNone(self._pulse().pulse_last_period_key)
-				frappe.db.set_value(CONV, conv, column, 0, update_modified=False)
+				_delete_conv(conv)
 
 	def test_server_written_user_rows_in_a_normal_conversation_are_not_counted_early(self):
 		for origin in ("macro", "delegated", "continuation", "file_box", "agent", "system"):
