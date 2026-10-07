@@ -22,6 +22,7 @@ from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 	JarvisSettings,
 	_enqueued_sync_via_admin_pool,
 	_handover_via_admin,
+	_stamp_converged_ok,
 	_stamp_pool_pending,
 	_write_settings_fields,
 	reconcile_pending_llm_sync,
@@ -245,7 +246,10 @@ class TestApplyingOutlivesTheStaleWindow(FrappeTestCase):
 	def test_applying_for_60s_is_still_applying(self):
 		self.assertEqual(self._error(_aged(60)), "")
 
-	def test_applying_for_130s_shows_the_attempt_error(self):
+	def test_applying_for_130s_is_still_applying_while_the_converge_poll_window_runs(self):
+		self.assertEqual(self._error(_aged(130)), "")
+
+	def test_applying_past_the_stale_window_shows_the_attempt_error(self):
 		s = _aged(_APPLY_STALE_AFTER_S + 10)
 		payload = _sync_status_payload(s, s.last_sync_status)
 		self.assertTrue(payload["pending"])
@@ -280,9 +284,17 @@ class TestApplyingOutlivesTheStaleWindow(FrappeTestCase):
 		s.last_sync_status = _PENDING_APPLYING_STATUS
 		self.assertEqual(self._error(s), "")
 
+	def test_a_missing_or_unparseable_request_stamp_never_errors(self):
+		for stamp in (None, "", "not a date"):
+			s = frappe._dict({"last_sync_status": _PENDING_APPLYING_STATUS, "last_sync_requested_at": stamp})
+			self.assertEqual(self._error(s), "")
+
 	def test_converge_clears_everything(self):
-		s = _aged(600)
-		s.last_sync_status = "ok (restart via admin)"
-		payload = _sync_status_payload(s, s.last_sync_status)
-		self.assertFalse(payload["pending"])
-		self.assertEqual(payload["attempt_error"], "")
+		for is_pool in (False, True):
+			s = _aged(600)
+			self.assertEqual(self._error(s), _ATTEMPT_ERROR_UNREACHABLE)
+			with patch("frappe.db.set_single_value"), patch(f"{_JS}._commit_terminal_sync_status"):
+				self.assertTrue(_stamp_converged_ok(s, is_pool=is_pool))
+			payload = _sync_status_payload(s, s.last_sync_status)
+			self.assertFalse(payload["pending"])
+			self.assertEqual(payload["attempt_error"], "")
