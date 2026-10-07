@@ -34,6 +34,9 @@ _FILEBOX_SERVER_FIELDS = (
 # via ``frappe.db.set_value``. Re-read on the ORM save paths (never added to the File Box
 # forge guard) so a stale in-memory 0 can't trip _guard_auto_mode.
 _AUTO_MODE_SERVER_FIELDS = ("auto_mode", "auto_mode_at")
+# An approved skill run's activity stamp and the skill it was opened on: written only
+# by the server, straight to the row (``approve_and_run``, the gate).
+_SKILL_RUN_SERVER_FIELDS = ("skill_autorun_at", "skill_autorun_skill")
 
 
 class JarvisConversation(NotRenamable, Document):
@@ -48,6 +51,7 @@ class JarvisConversation(NotRenamable, Document):
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()
 		self._guard_skill_autorun_enable()
+		self._keep_skill_run_fields()
 		self._guard_request_autorun_enable()
 		self._guard_auto_mode()
 
@@ -149,6 +153,17 @@ class JarvisConversation(NotRenamable, Document):
 				_("Enabling skill auto-run requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
 			)
+
+	def _keep_skill_run_fields(self):
+		"""A save never changes ``_SKILL_RUN_SERVER_FIELDS``: it carries what is stored.
+
+		The gate reads them (how recently the run was active, and which skill's "Allow
+		Approve & run" it re-checks), so a save by the chat's owner must not move them.
+		Restored instead of refused, because a document loaded before the server wrote
+		them is saved later by ordinary actions (rename, star, archive)."""
+		previous = None if self.is_new() else self.get_doc_before_save()
+		for fieldname in _SKILL_RUN_SERVER_FIELDS:
+			self.set(fieldname, previous.get(fieldname) if previous else None)
 
 	def _guard_request_autorun_enable(self):
 		"""``request_autorun`` is the flag the write-confirmation gate reads to run the

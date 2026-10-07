@@ -97,7 +97,7 @@ describe("WikiProposalDetail", () => {
 	it("shows the preview summary, and the metadata-only state when there is no body", () => {
 		const w = mountWith(proposal({}, { append_md: "", summary: "Refresh the page's tags" }));
 		expect(w.text()).toContain("Refresh the page's tags");
-		expect(w.text()).toContain("(no body — a metadata-only page refresh)");
+		expect(w.text()).toContain("(no body, a metadata-only page refresh)");
 		expect(button(w, "View source")).toBeFalsy();
 	});
 

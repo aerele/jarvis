@@ -37,11 +37,16 @@ aerele/jarvis#1635): a whitelisted method that changes state WITHOUT saving a
 document (``frappe.db.set_value``, raw SQL, defaults) is not seen by this
 save-time check and runs uncarded in the uncarded modes.
 
-The guarded structure writes of R2-10 (one new Custom Field, a column-free
-Custom Field edit, Workflow, CRM / Domain Settings) are NOT enabled here: they
-are refused like every structure write. A later unit enables them by adding its
-risk class to ``_ALLOWABLE`` (an allow entry then names that record) and turning
-the refusal in ``check`` into its own card.
+The guarded structure writes of R2-10: ONE new Custom Field and an edit of a
+Custom Field that changes no column are enabled (unit J1b-cf; the checks, the lock
+and the clean-up live in ``_guarded_structure`` / ``_custom_field_guard``). They
+classify as their own risk class (``GUARDED_STRUCTURE``), which ``check`` hands
+back only to a caller that can card them (``guarded=True``: the chat gate, the
+draft panel, the confirm of that card) and refuses for everyone else, and always
+when the site switch ``jarvis_structure_writes_disabled`` is set. The ORM guard
+admits such a save only for the one record the confirmed card named. Workflow and
+CRM / Domain Settings (J1c) are still refused like every structure write; that
+unit adds its classes the same way.
 """
 
 from __future__ import annotations
@@ -126,6 +131,23 @@ _ARG_SENSITIVE = {
 	"MCP OAuth Token": "login",
 }
 
+# Skills and learned skills: what later chats are told to do, and who is told it.
+# Sensitive in the argument layer like the rest of Jarvis's own configuration above
+# (the learning engine, promotion and the skill tools write these as their job).
+# ``api._writes_skill_config`` also cards any other write that names one.
+SKILL_CONFIG_DOCTYPES = frozenset(
+	{
+		"Jarvis Custom Skill",
+		"Jarvis Custom Skill Share",
+		"Jarvis Custom Skill Allowed Role",
+		"Jarvis Skill Promotion Request",
+		"Jarvis Shared Skill Slug",
+		"Jarvis Learned Pattern",
+		"Jarvis Learned Pattern Role",
+	}
+)
+_ARG_SENSITIVE.update(dict.fromkeys(SKILL_CONFIG_DOCTYPES, "instructions"))
+
 # Sensitive by what the record IS: every write to one counts, delete included.
 _TYPED_SENSITIVE = {
 	"Report": ("code", "report_type", frozenset({"Script Report", "Query Report"})),
@@ -165,6 +187,7 @@ RISK_LINES = {
 	"mail": "This sends email to the listed people.",
 	"access": "This changes who can see or edit.",
 	"login": "This changes how people sign in.",
+	"instructions": "This changes what your assistant is told to do.",
 }
 # Where a person sets up each structure change in Desk (the refusal carries it).
 DESK_PATHS = {
@@ -179,11 +202,22 @@ DESK_PATHS = {
 	"Accounting Dimension": "/app/accounting-dimension/new",
 }
 
+# The structure writes a confirmation card may make (R2-10). Each is its own risk
+# class from the arguments (``risk_of``) to the save (``doc_risk``), so a card for
+# one never admits the other, and neither admits plain "structure".
+GUARDED_STRUCTURE = frozenset({"custom_field_new", "custom_field_edit"})
+# Every class that changes the database structure: refused wherever it is not the
+# confirmed card's own record, and never carried into a background job.
+_STRUCTURE_RISKS = frozenset({"structure", *GUARDED_STRUCTURE})
+
 # Which risk classes a confirmation card may authorise at the ORM, and the ORM risk
-# each one admits. A later unit (J1b-cf, J1c) adds its guarded structure classes
-# here AND changes ``_target_risk`` / ``doc_risk`` so those writes classify as that
-# class instead of plain "structure" (and ``check`` stops refusing them).
-_ALLOWABLE = {"sensitive": frozenset({"sensitive"})}
+# each one admits. J1c adds its guarded classes here, to ``GUARDED_STRUCTURE`` and
+# to ``risk_of`` / ``doc_risk``.
+_ALLOWABLE = {
+	"sensitive": frozenset({"sensitive"}),
+	"custom_field_new": frozenset({"custom_field_new"}),
+	"custom_field_edit": frozenset({"custom_field_edit"}),
+}
 
 _TOOLS_WITH_TARGETS = frozenset(
 	{
@@ -527,19 +561,22 @@ def _grants(target: _Target, fieldname: str) -> bool:
 
 
 def risk_of(tool: str, args) -> str | None:
-	"""``None`` / ``"structure"`` / ``"custom_field_new"`` / ``"sensitive"`` for one
-	tool call. ``custom_field_new`` is a single create of one Custom Field (not an
-	update, a delete or a batch); any structure doctype in a batch is
-	``structure``. ``run_method`` is not classified (R2-13); the ORM guard judges
-	what it saves."""
+	"""``None`` / ``"structure"`` / ``"custom_field_new"`` / ``"custom_field_edit"`` /
+	``"sensitive"`` for one tool call. ``custom_field_new`` is a single create of one
+	Custom Field and ``custom_field_edit`` a single update of one named Custom Field
+	(never a delete or a batch); any structure doctype in a batch is ``structure``.
+	``run_method`` is not classified (R2-13); the ORM guard judges what it saves."""
 	if tool not in _TOOLS_WITH_TARGETS:
 		return None
 	targets = _targets(tool, args)
 	risks = [_target_risk(t) for t in targets]
 	if "structure" in risks:
 		single = len(targets) == 1 and not _is_batch(tool, args)
-		if single and tool == "create_doc" and targets[0].doctype == "Custom Field":
-			return "custom_field_new"
+		if single and targets[0].doctype == "Custom Field":
+			if tool == "create_doc":
+				return "custom_field_new"
+			if tool == "update_doc" and targets[0].name:
+				return "custom_field_edit"
 		return "structure"
 	return "sensitive" if "sensitive" in risks else None
 
@@ -565,16 +602,33 @@ def risk_lines(tool: str, args) -> list[str]:
 	return out
 
 
-def check(tool: str, args) -> str | None:
+def check(tool: str, args, *, guarded: bool = False) -> str | None:
 	"""The argument-layer decision for one call: raise ``WriteRefusedError`` for a
 	refused write, return ``"sensitive"`` when it must park behind a card in every
-	mode, else ``None``."""
+	mode, else ``None``.
+
+	``guarded``: the caller can put a guarded structure write (``GUARDED_STRUCTURE``)
+	behind its own confirmation card, or is that card's confirm. Only then is the
+	class handed back instead of refused, and only while the site allows it
+	(``_guarded_structure.available``). Every other caller (File Box, the Approval
+	Board edit, ``preview_doc``, a sheet, an uncarded run) keeps the refusal."""
 	risk = risk_of(tool, args)
-	if risk in ("structure", "custom_field_new"):
-		first = next((t for t in _targets(tool, args) if t.doctype in STRUCTURE_DOCTYPES), None)
-		named = first.name if first is not None and first.op in ("update", "delete", "other") else None
-		raise structure_refusal(first.doctype if first else "", named)
+	if risk in GUARDED_STRUCTURE and guarded:
+		from jarvis.tools import _guarded_structure
+
+		if _guarded_structure.available():
+			return risk
+	if risk in _STRUCTURE_RISKS:
+		raise refusal_of(tool, args)
 	return risk
+
+
+def refusal_of(tool: str, args) -> StructureRefusedError:
+	"""The structure refusal of a call, naming its first structure target (and the
+	record's own Desk page when the call names one)."""
+	first = next((t for t in _targets(tool, args) if t.doctype in STRUCTURE_DOCTYPES), None)
+	named = first.name if first is not None and first.op in ("update", "delete", "other") else None
+	return structure_refusal(first.doctype if first else "", named)
 
 
 def first_risky_target(tool: str, args) -> tuple[str, str | None]:
@@ -679,6 +733,13 @@ def allow_entries(tool: str, args) -> list[_Allow]:
 	  method's writes cannot be named in advance (R2-13)."""
 	if tool == "run_method":
 		return [_Allow("*", None, _ALLOWABLE["sensitive"], multi=True)]
+	guarded = risk_of(tool, args)
+	if guarded in GUARDED_STRUCTURE:
+		# The card's one Custom Field: a new one binds to the first root insert, an
+		# edit to the record it names.
+		target = _targets(tool, args)[0]
+		name = None if target.op == "create" else str(target.name)
+		return [_Allow(target.doctype, name, _ALLOWABLE[guarded])]
 	out = []
 	for t in _targets(tool, args):
 		admits = _ALLOWABLE.get(_target_risk(t) or "")
@@ -717,6 +778,19 @@ def guard_scope(
 		setattr(frappe.local, _LOCAL, prev)
 
 
+def uncarded_write() -> bool:
+	"""Whether the tool call in progress is a write nobody was shown: auto mode,
+	"confirm all", an armed macro, an approved skill run or File Box (the ``brake``
+	the gate opens its scope with, carried into the jobs it queues)."""
+	state = getattr(frappe.local, _LOCAL, None)
+	return bool(state is not None and state.brake)
+
+
+def in_guarded_call() -> bool:
+	"""Whether a guard scope is open: a tool call, or a job one queued."""
+	return getattr(frappe.local, _LOCAL, None) is not None
+
+
 def take_refusal() -> WriteRefusedError | None:
 	"""The refusal the ORM guard raised since the last call, cleared. A caller
 	checks it after a tool returns: a method that swallowed the guard's exception
@@ -738,9 +812,14 @@ def _active_state() -> _GuardState | None:
 
 
 def doc_risk(doc, event: str) -> str | None:
-	"""``structure`` / ``sensitive`` / ``None`` for the document an event fires on."""
+	"""``structure`` / a guarded structure class / ``sensitive`` / ``None`` for the
+	document an event fires on. A Custom Field being inserted or saved is its guarded
+	class (admitted only by the card that named it); its delete or rename is plain
+	``structure``, which no card admits."""
 	dt = canonical(doc.doctype)
 	if dt in STRUCTURE_DOCTYPES:
+		if dt == "Custom Field" and event in ("before_validate", "before_change"):
+			return "custom_field_new" if _is_new(doc) else "custom_field_edit"
 		return "structure"
 	if dt in SENSITIVE_DOCTYPES:
 		return "sensitive"
@@ -883,9 +962,15 @@ def guard_doc_event(doc, method=None, *args, **kwargs):
 	if risk == "sensitive" and _in_sandbox():
 		return  # a dry run builds the card; everything it wrote is rolled back
 	if _consume_allow(state, doc, risk):
+		if risk in GUARDED_STRUCTURE:
+			# The card's own record is about to be written: its confirmation row
+			# learns exactly which row that is, in this same transaction.
+			from jarvis.tools import _guarded_structure
+
+			_guarded_structure.stamp_written(doc)
 		return
 	log_line(risk, dt, doc.name, "refused", event=method or "")
-	if risk == "structure":
+	if risk in _STRUCTURE_RISKS:
 		_refuse(structure_refusal(dt, None if _is_new(doc) else doc.name))
 	if state.allow:
 		_refuse(
@@ -1096,7 +1181,7 @@ def _allow_payload(state: _GuardState) -> list[dict]:
 	return [
 		{"doctype": e.doctype, "name": e.name, "risks": sorted(e.risks), "multi": e.multi, "bound": e.bound}
 		for e in state.allow
-		if "structure" not in e.risks and (e.multi or e.name is not None or e.bound is not None)
+		if not (e.risks & _STRUCTURE_RISKS) and (e.multi or e.name is not None or e.bound is not None)
 	]
 
 
@@ -1189,7 +1274,7 @@ def execute_guarded_job(
 			bound=tuple(e["bound"]) if e.get("bound") else None,
 		)
 		for e in _jarvis_allow or []
-		if "structure" not in e.get("risks", ())
+		if not (_STRUCTURE_RISKS & set(e.get("risks", ())))
 	]
 	real = queue_args["method"]
 
@@ -1274,9 +1359,11 @@ def is_implicit_commit(e: BaseException | None) -> bool:
 
 __all__ = [
 	"DESK_PATHS",
+	"GUARDED_STRUCTURE",
 	"REFUSAL_CODES",
 	"RISK_LINES",
 	"SENSITIVE_DOCTYPES",
+	"SKILL_CONFIG_DOCTYPES",
 	"STRUCTURE_DOCTYPES",
 	"WriteRefusedError",
 	"allow_entries",
@@ -1289,10 +1376,12 @@ __all__ = [
 	"guard_doc_event",
 	"guard_queue",
 	"guard_scope",
+	"in_guarded_call",
 	"is_implicit_commit",
 	"log_line",
 	"nested_under",
 	"no_commit_fence",
+	"refusal_of",
 	"refused_envelope",
 	"risk_class",
 	"risk_line",
@@ -1300,4 +1389,5 @@ __all__ = [
 	"risk_of",
 	"structure_refusal",
 	"take_refusal",
+	"uncarded_write",
 ]

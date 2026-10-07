@@ -773,6 +773,8 @@ def get_conversation(conversation: str) -> dict:
 			"origin_page": doc.get("origin_page") or "",
 			# Per-chat auto mode (#581): 1 locks the composer toggle on.
 			"auto_mode": frappe.utils.cint(doc.get("auto_mode")),
+			# A File Box file's chat: the SPA shows what it waits on (filebox.open_waits).
+			"file_box": frappe.utils.cint(doc.get("file_box")),
 			"last_active_at": doc.last_active_at,
 		},
 		"messages": messages,
@@ -982,16 +984,26 @@ def preview_file(file_url: str) -> dict:
 	require_jarvis_access()
 	if not file_url:
 		return {"kind": "binary"}
-	from jarvis.tools.read_file import read_file
+	from jarvis import compat
+	from jarvis.chat.xlsx_charts import extract_charts, preview_cell
+	from jarvis.tools.read_file import _resolve_file, read_file
 
 	data = read_file(file_url=file_url, max_rows=300, max_chars=8000)
 	kind = data.get("kind")
 	if kind == "table":
 		sheets = [
-			{"name": s.get("name") or "Sheet", "rows": (s.get("rows") or [])}
+			{
+				"name": s.get("name") or "Sheet",
+				"rows": [[preview_cell(c) for c in row] for row in (s.get("rows") or [])],
+			}
 			for s in (data.get("sheets") or [])
 		]
-		return {"kind": "table", "sheets": sheets, "filename": data.get("filename")}
+		out = {"kind": "table", "sheets": sheets, "filename": data.get("filename")}
+		if data.get("format") == "xlsx":
+			# read_file (values only) cannot see charts; read them from the zip
+			content = compat.file_bytes(_resolve_file(file_url, None))
+			out["charts"] = extract_charts(content)
+		return out
 	if kind == "text":
 		return {"kind": "text", "text": data.get("text") or ""}
 	return {"kind": kind or "binary"}
@@ -1087,6 +1099,11 @@ def archive_conversation(conversation: str) -> dict:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis.pending_action.archive_cancel_failed", message=frappe.get_traceback())
 		frappe.db.commit()
+	# Its cards are cancelled above, so nothing is left to end an approved skill run.
+	# (A File Box run's Halt signal, set above, is left standing.)
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.end_skill_autorun_if_open(doc.name, "archived", keep_halt=True)
 	_stop_macro_runs_in([doc.name])
 	return {"ok": True}
 
@@ -2123,7 +2140,7 @@ def send_message(
 		# A held File Box resume continues an already-decided approval: it queues,
 		# never bounces on overload (frappe.flags.jarvis_resume_exempt, server-set).
 		if admission.shard_overloaded(conversation) and not frappe.flags.get("jarvis_resume_exempt"):
-			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
 		if _rej := _compacting_reject(conversation):
 			return _rej
 	else:
@@ -2196,6 +2213,14 @@ def send_message(
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_skill_autorun(conversation)
+	elif conv_doc.skill_autorun_at:
+		# The run already ended since the last message (Halt, or a failed write): the
+		# flag is 0 and only its stamp is left. Finish the job the branch above does for
+		# a live run, so a Halt signal still standing does not reach into this turn.
+		stage("skill_autorun_at", None)
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.clear_run_cancel(conversation)
 
 	# I1 precedent (jarvis.chat.actions_api._open_skill_run): a File Box Stop sets a
 	# 120s run-cancel signal; a leftover one must not refuse THIS fresh turn's first
@@ -3456,7 +3481,7 @@ def retry_message(message: str) -> dict:
 	# rejecting; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
 		if admission.shard_overloaded(doc.conversation):
-			return {"ok": False, "reason": _("The site is busy — please try again in a moment.")}
+			return {"ok": False, "reason": _("The site is busy. Please try again in a moment.")}
 		if _rej := _compacting_reject(doc.conversation):
 			return _rej
 	else:
@@ -3511,6 +3536,7 @@ def retry_message(message: str) -> dict:
 		)
 		if _adm.get("overloaded"):
 			return {"ok": False, "reason": _adm.get("reason")}
+		_retry_ends_skill_run(doc.conversation)
 		out = {"ok": True, "run_id": run_id}
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
@@ -3523,11 +3549,21 @@ def retry_message(message: str) -> dict:
 	_adm = _dispatch_turn(payload, cutover_gate=True)
 	if isinstance(_adm, dict) and _adm.get("overloaded"):
 		return {"ok": False, "reason": _adm.get("reason")}
+	_retry_ends_skill_run(doc.conversation)
 	out = {"ok": True, "run_id": run_id}
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
 		out["queued"] = True
 		out["queued_position"] = _adm.get("queued_position")
 	return out
+
+
+def _retry_ends_skill_run(conversation: str) -> None:
+	"""An accepted retry re-runs the whole request, like a new message: an approved
+	skill run left open on the chat does not cover it. (A refused retry starts no
+	turn and leaves the run as it was.)"""
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.end_skill_autorun_if_open(conversation, "retry")
 
 
 @frappe.whitelist(methods=["POST"])
@@ -3608,6 +3644,18 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		api._request_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run request_autorun clear", message=frappe.get_traceback())
+	# Halt ends an approved skill run too, for the same reason and in its own try/except.
+	# A run paused on a card has no live turn to end it at settlement, and the cards were
+	# just swept, so a covered write after the two-minute signal lapsed would find the
+	# run still open. The signal stays set: a write already on its way is refused at
+	# the gate. skill_autorun_at is left as it is, which is how the next message knows
+	# a run ended here (send_message).
+	try:
+		from jarvis import api
+
+		api._skill_autorun_clear(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run skill_autorun clear", message=frappe.get_traceback())
 	if not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
@@ -3760,7 +3808,7 @@ def _reroute_legacy_to_pump(enqueue_kwargs: dict, interactive: bool, exempt_over
 	if not (conversation and run_id and seed_message):
 		# Without the identity to build a Turn row we cannot reroute — fail closed (retryable)
 		# rather than silently drop a legacy job into a pump-owned world.
-		raise frappe.ValidationError(frappe._("The chat is switching transports — please resend."))
+		raise frappe.ValidationError(frappe._("The chat is switching transports. Please resend."))
 	payload = {}
 	if enqueue_kwargs.get("attachments"):
 		payload["attachments"] = enqueue_kwargs["attachments"]

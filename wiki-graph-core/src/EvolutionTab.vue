@@ -131,7 +131,7 @@ export default {
 				}
 			}
 			if (spikeDate && spikeN >= Math.max(3, 0.4 * total)) {
-				return `${spikeN} pages appeared on ${spikeDate} — likely a bulk import, not organic growth.`;
+				return `${spikeN} pages appeared on ${spikeDate}. Likely a bulk import, not organic growth.`;
 			}
 			return "";
 		},

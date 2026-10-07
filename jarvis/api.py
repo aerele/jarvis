@@ -1282,17 +1282,17 @@ _ARMED_SKIP_COVERED = _COVERED
 _ARMED_SKIP_NEVER = _BRAKE
 _SKILL_AUTORUN_COVERED = _COVERED
 _SKILL_AUTORUN_NEVER = _BRAKE
-# Sliding-TTL horizon for an approved run: the auto-run branch runs a covered write
-# uncarded only while the LAST covered write (skill_autorun_at, which slides forward
-# on each success) is within this window. It must comfortably EXCEED the longest idle
-# gap between two consecutive covered writes - a model round-trip + latency + a
-# non-covered intervening step - which is minutes, so 900s (matching the confirm
-# token TTL) is ample. A stranded flag (worker died -> writes stop -> timestamp
-# freezes) therefore falls out of the window within the TTL and is cleared by the
-# reaper (task #42). This TTL bounds a normal idle gap, NOT a runaway - that is
-# bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate,
+# No-activity net for an approved run: the auto-run branch runs a covered write
+# uncarded only while the run was active within this window. skill_autorun_at is its
+# activity stamp: it moves on each covered write and when one of the run's cards is
+# confirmed, so the wait for a person never counts. The window only has to exceed
+# the longest gap a running turn leaves between two covered writes (a model
+# round-trip, a non-covered step), which is minutes. A run nothing is driving (a
+# worker died, so the stamp froze) falls out of it, parks its next write and is
+# ended there or by the reaper. It bounds an idle gap, NOT a runaway: that is
+# bounded by the destructive carve-out, hard-stop-on-error, the Halt cancel-gate
 # and per-skill un-arm.
-_SKILL_AUTORUN_TTL_S = 900
+_SKILL_AUTORUN_IDLE_S = 1800
 # Sliding-TTL horizon for a request-scoped "confirm all" (design Layer B). Same
 # rationale + value as the skill run's: it bounds a normal idle gap between two
 # covered writes of ONE request's fan-out, so a finished request (or a dead worker)
@@ -1378,15 +1378,20 @@ def _armed_skip_disabled() -> bool:
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
 
 
-# What a skill says is what a macro step that applies it does (``Apply these skills:
-# /slug``). An armed macro's run never changes one uncarded: it would rewrite what its
-# own later runs, scheduled and unwatched, follow. The skill and its child tables.
+# A skill and its child tables: what an armed macro's steps apply (``Apply these
+# skills: /slug``), so its reads of them are judged (``_skill_rows_read`` below). A
+# WRITE to one asks in every mode, with the rest of ``_write_risk.SKILL_CONFIG_DOCTYPES``
+# (``_writes_skill_config``).
 _SKILL_DOCTYPES = frozenset(
 	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
 )
 # Compared as Frappe finds a doctype: in any case, and spaces around it trimmed.
 _SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
-_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
+# Every argument name a gated tool gives a doctype under.
+_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype", "target_doctype", "ref_doctype", "dt")
+# Endpoints that start a learning sweep, which writes learned patterns: a person
+# sees the call (uncarded, the sweep's own saves would be refused as unseen).
+_LEARNING_ENTRY_PREFIXES = ("jarvis.chat.personalise_api.", "jarvis.chat.voice_notes_api.")
 
 
 def _run_method_brakes(args) -> bool:
@@ -1404,19 +1409,76 @@ def _workflow_brakes(args) -> bool:
 	return workflow_action_cancels(args.get("doctype"), args.get("action"))
 
 
-def _writes_a_skill(tool: str, args) -> bool:
-	"""Whether a covered write names a skill doctype anywhere in its arguments (a
-	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
-	``frappe.client``, a JSON ``doc`` string included), or calls the skills' own API.
-	Such a call parks a card on an armed macro's run, as the brake does. Raises
-	InvalidArgumentError for a doctype that is not text."""
+_ARMING_REFUSED = (
+	"Approve & run is switched on from the skill's own page, not from chat. "
+	"Leave allow_approve_run out of this change."
+)
+_ARMING_FIELD = "allow_approve_run"
+_TRUE_TEXT = frozenset({"true", "yes", "on", "y"})
+
+
+def _switched_on(value) -> bool:
+	if isinstance(value, str):
+		return value.strip().casefold() in _TRUE_TEXT or bool(frappe.utils.cint(value))
+	return bool(value)
+
+
+def _arms_a_skill(tool: str, args) -> bool:
+	"""Whether a call sets a skill's ``allow_approve_run`` on. The controller refuses
+	that inside any tool call (``_guard_allow_approve_run_enable``); the gate refuses
+	it first, so no card is parked that could only fail at Confirm. Judged on the
+	arguments alone (no read of the stored skill): a change that leaves the switch
+	out is never refused here."""
+	from jarvis.tools import _write_risk
+
+	if tool in ("create_doc", "create_docs", "update_doc"):
+		return any(
+			target.doctype == "Jarvis Custom Skill" and _switched_on(target.values.get(_ARMING_FIELD))
+			for target in _write_risk._targets(tool, args)
+		)
+	if tool == "run_method":
+		# ``frappe.client.set_value`` and the like: the field named beside a skill.
+		try:
+			text = json.dumps(args, default=str)
+		except (TypeError, ValueError):
+			return False
+		return _ARMING_FIELD in text and _names_a_skill_doctype(args, depth=0)
+	return False
+
+
+def _calls_a_denied_method(args) -> str | None:
+	"""The method a ``run_method`` call names that the tool refuses
+	(``run_method._is_denied_path``), as its ``method`` or as text anywhere in its
+	arguments (a whitelisted helper that calls the method it is handed). The gate
+	refuses such a call before parking a card nobody could confirm."""
+	from jarvis.tools.run_method import _is_denied_path
+
+	if not isinstance(args, dict):
+		return None
+	for text in _texts([args.get("method"), args.get("args")]):
+		path = text.strip()
+		if path.startswith("jarvis.") and _is_denied_path(path):
+			return path
+	return None
+
+
+def _writes_skill_config(tool: str, args) -> bool:
+	"""Whether a gated write names a skill or learned-skill doctype anywhere in its
+	arguments (``_write_risk.SKILL_CONFIG_DOCTYPES``: a single or batch ``update_doc``
+	/ ``create_doc``, a share, a comment, ``run_method`` on a doc or through
+	``frappe.client``, a JSON ``doc`` string included), or starts a learning sweep.
+	Such a call asks in every mode: what these records say is what later chats do.
+	Raises InvalidArgumentError for a doctype that is not text."""
+	from jarvis.tools._write_risk import SKILL_CONFIG_DOCTYPES
+
 	if tool == "run_method" and isinstance(args, dict):
-		if str(args.get("method") or "").startswith("jarvis.chat.custom_skills_api."):
+		if str(args.get("method") or "").strip().startswith(_LEARNING_ENTRY_PREFIXES):
 			return True
-	return _names_a_skill_doctype(args, depth=0)
+	folded = frozenset(dt.casefold() for dt in SKILL_CONFIG_DOCTYPES)
+	return _names_a_skill_doctype(args, depth=0, folded=folded)
 
 
-def _names_a_skill_doctype(value, *, depth: int) -> bool:
+def _names_a_skill_doctype(value, *, depth: int, folded: frozenset = _SKILL_DOCTYPES_FOLDED) -> bool:
 	if depth > 6:
 		return False
 	if isinstance(value, str):
@@ -1433,11 +1495,11 @@ def _names_a_skill_doctype(value, *, depth: int) -> bool:
 			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
 			raise InvalidArgumentError("doctype must be the name of a document type")
 		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
-		if any(_is_a_skill_doctype(text) for dt in named for text in _texts(dt)):
+		if any(text.strip().casefold() in folded for dt in named for text in _texts(dt)):
 			return True
 		value = list(value.values())
 	if isinstance(value, list):
-		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
+		return any(_names_a_skill_doctype(item, depth=depth + 1, folded=folded) for item in value)
 	return False
 
 
@@ -1589,7 +1651,7 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 
 _PREVIEW_NOT_UNDONE = (
 	"A trial run cannot undo email or calls to other systems sent by the document's own code, live "
-	"notifications, or error log entries."
+	"notifications or error log entries."
 )
 
 
@@ -2144,6 +2206,7 @@ def _dispatch_and_wrap(
 	*,
 	provenance: str = "chat",
 	provenance_name: str = "",
+	precheck=None,
 ) -> dict:
 	"""Dispatch + translate exceptions into the ``{ok, data}`` / ``{ok, error}``
 	envelope + audit write tools. This is the shared core of ``_run_tool``'s
@@ -2165,7 +2228,11 @@ def _dispatch_and_wrap(
 	surrounding writes intact (``confirm_tool``'s failure receipt/continuation,
 	the model path's tool-call row). Unexpected exceptions re-raise unchanged:
 	Frappe's handler does a full request rollback (nothing persists, no envelope,
-	no traceback to the client)."""
+	no traceback to the client).
+
+	``precheck`` (a guarded structure write's checks, run again under its lock) runs
+	first, inside the same translation and audit: what it raises is this call's
+	failure, and the tool is never dispatched."""
 	mark = _msglog_mark()
 	sp = f"jarvis_{frappe.generate_hash(length=10)}" if is_write else None
 	if sp:
@@ -2181,6 +2248,8 @@ def _dispatch_and_wrap(
 
 	_write_risk.take_refusal()  # nothing stale from an earlier call
 	try:
+		if precheck is not None:
+			precheck()
 		data = dispatch(tool, args)
 		# A method that swallowed the ORM guard's refusal (reset_password does) must
 		# not report success: the refusal wins, and the savepoint undoes the rest.
@@ -2306,13 +2375,30 @@ def dispatch_confirmed(
 	the structure / sensitive records the card's arguments name, each once.
 	``uncarded`` (auto mode / "confirm all" / armed macro / approved skill / File
 	Box) runs a create / update behind the no-commit fence, so a doctype outside the
-	structure list whose save runs DDL is refused before the ALTER."""
-	from jarvis.tools import _write_risk
+	structure list whose save runs DDL is refused before the ALTER.
+
+	A guarded structure write (one new Custom Field, a column-free Custom Field edit;
+	R2-10) runs only for a confirmed card (``allow_risky``) whose confirm holds that
+	form's structure lock (``pending_actions.execute`` takes it before the claim):
+	any other caller gets the structure refusal. Its checks run again under the lock,
+	the ALTER waits only a few seconds for the table, a refusal by the database is
+	enveloped in plain words, and its failure is never fixable (E3)."""
+	from jarvis.tools import _guarded_structure, _write_risk
 
 	try:
-		risk = _write_risk.check(tool, args)
+		risk = _write_risk.check(tool, args, guarded=allow_risky)
 	except WriteRefusedError as e:
 		return _refuse_risky_write(tool, args, e, provenance=provenance, provenance_name=provenance_name)
+	guarded = _guarded_structure.handler_for(risk, args)
+	# Its form's lock must be held (the card's own confirm), and the call must be in
+	# the exact form the park sealed: a doctype in another letter case would still
+	# save on a case-insensitive database, around everything keyed on the name.
+	exact = isinstance(args, dict) and args.get("doctype") == _write_risk.canonical(args.get("doctype"))
+	if guarded is not None and not (exact and _guarded_structure.lock_held(guarded.lock_doctype)):
+		refusal = _write_risk.refusal_of(tool, args)
+		return _refuse_risky_write(
+			tool, args, refusal, provenance=provenance, provenance_name=provenance_name
+		)
 	if tool == "run_import" and risk == "sensitive":
 		# Also at Confirm: an import parked before this rule (its card sampled a few
 		# rows, clipped) that writes something sensitive is refused, nothing staged.
@@ -2327,16 +2413,49 @@ def dispatch_confirmed(
 			allow, brake=uncarded, brake_nested=uncarded and tool == "run_method"
 		) as state,
 		fence,
+		_guarded_structure.short_lock_wait() if guarded is not None else nullcontext(),
 	):
-		result = _dispatch_and_wrap(
-			tool, args, is_write=True, provenance=provenance, provenance_name=provenance_name
-		)
+		mark = _msglog_mark()
+		try:
+			result = _dispatch_and_wrap(
+				tool,
+				args,
+				is_write=True,
+				provenance=provenance,
+				provenance_name=provenance_name,
+				precheck=guarded.check if guarded is not None else None,
+			)
+		except Exception as e:
+			# The ALTER was refused for row size (MariaDB 1118): the known way for a
+			# new column to fail, said in plain words. Anything else stays a crash.
+			refused = _guarded_structure.database_refusal(e) if guarded is not None else None
+			if refused is None:
+				raise
+			result = _translate_write_error(refused, mark)
+	if guarded is not None and not result.get("ok"):
+		_never_fixable(result)
 	# One line per sensitive record the card's allow actually let through (none when
 	# a confirmed call touched nothing sensitive).
 	outcome = "applied" if result.get("ok") else "failed"
 	for doctype, name in state.admitted:
-		_write_risk.log_line("sensitive", doctype, name, outcome, tool=tool, provenance=provenance)
+		_write_risk.log_line(
+			risk if guarded is not None else "sensitive",
+			doctype,
+			name,
+			outcome,
+			tool=tool,
+			provenance=provenance,
+		)
 	return result
+
+
+def _never_fixable(result: dict) -> None:
+	"""E3: a failed structure write is never offered a correction, whatever failed
+	(a missing value included). A busy failure stays "try again"."""
+	err = result.get("error") if isinstance(result, dict) else None
+	if isinstance(err, dict) and err.get("kind") == "fixable":
+		err["kind"] = "not_fixable"
+		err["hint"] = _hint_for(err.get("code") or "", err.get("detail") or "", kind="not_fixable")
 
 
 # Uncarded writes that run behind the no-commit fence: the build-from-args pair.
@@ -2370,9 +2489,16 @@ def _refuse_risky_write(
 
 
 def _build_park_card(
-	tool: str, args: dict, preview: dict, *, sensitive: bool
+	tool: str, args: dict, preview: dict, *, sensitive: bool, structural: list | None = None
 ) -> tuple[dict | None, dict | None]:
 	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
+
+	A guarded structure write (``structural``: its further risk lines, a list;
+	R2-10) is shown exactly like a sensitive one, in full and never clipped, and
+	leads with the structural line in the banner, then what else the change does
+	(code for an ``eval:`` expression, access, a fetch; ``card.structural`` marks it
+	for the clients). It reuses the ``risk: "sensitive"`` rendering, so every client
+	that shows a sensitive card in full shows this one in full too.
 
 	A sensitive call (R2-8 / R2-12) gets ``preview["risk"]`` / ``risk_line`` (every
 	risk it carries, in target order), which makes ``build_card`` show it in full,
@@ -2384,11 +2510,17 @@ def _build_park_card(
 	from jarvis.chat import confirm_card
 	from jarvis.tools import _write_risk
 
-	if not sensitive:
+	if not sensitive and structural is None:
 		return confirm_card.build_card(tool, args, preview), None
 	if confirm_card.too_large(None, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
-	line = " ".join(_write_risk.risk_lines(tool, args))
+	if structural is not None:
+		from jarvis.tools._guarded_structure import STRUCTURAL_LINE
+
+		line = " ".join([STRUCTURAL_LINE, *structural])
+		preview["structural"] = True
+	else:
+		line = " ".join(_write_risk.risk_lines(tool, args))
 	preview["risk"] = "sensitive"
 	if line:
 		preview["risk_line"] = line
@@ -2396,11 +2528,56 @@ def _build_park_card(
 	if not isinstance(card, dict):
 		return None, _refuse_unshowable_card(tool, args, too_large=False)
 	card["risk"] = "sensitive"
+	if structural is not None:
+		card["structural"] = True
 	if line:
 		card["risk_line"] = line
 	if confirm_card.too_large(card, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
 	return card, None
+
+
+def _can_card_structure(conversation: str | None) -> bool:
+	"""Whether a guarded structure write can get its card here: a chat whose cards
+	are pending actions (the confirm that takes the structure lock and keeps the
+	before-image runs only there), and not a File Box chat (its writes are held for
+	the Approval Board, which cannot run one)."""
+	from jarvis.chat import pending_confirm
+
+	if not conversation or not pending_confirm.pa_minting(conversation):
+		return False
+	return not frappe.db.get_value("Jarvis Conversation", conversation, "file_box")
+
+
+def _structure_park(tool: str, args: dict, risk: str) -> tuple:
+	"""``(rejected, preview, lines, canonical_args)`` for a guarded structure write at
+	park: its checks, then a described preview, the risk lines its card shows after
+	the structural one, and the call in its stored form (``unique: "true"`` as 1, the
+	doctype by its exact name), which is what is carded, sealed and run: the card
+	can never show one thing and the save write another. Nothing is trial-run, so no row and no column exist
+	until Confirm. A refusal that is a structure refusal is audited like every
+	other; a value the request can correct comes back as fixable, naming the field."""
+	from jarvis.tools import _guarded_structure, _write_risk
+
+	mark = _msglog_mark()
+	handler = _guarded_structure.handler_for(risk, args)
+	try:
+		handler.check()
+	except WriteRefusedError as e:
+		return _refuse_risky_write(tool, args, e), None, None, None
+	except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
+		return _translate_write_error(e, mark) or _preview_error(e), None, None, None
+	canonical = handler.canonical_args()
+	handler = _guarded_structure.handler_for(risk, canonical)
+	doctype, name = _write_risk.first_risky_target(tool, canonical)
+	_write_risk.log_line(risk, doctype, name, "parked", tool=tool)
+	preview = {
+		"preview": False,
+		"described": True,
+		"summary": _describe_call(tool, canonical),
+		"note": "not a dry run - this changes the database structure on confirm",
+	}
+	return None, preview, handler.risk_lines(), canonical
 
 
 def _refuse_sensitive_import(tool: str, args: dict, **provenance) -> dict:
@@ -2722,6 +2899,25 @@ def _file_box_wiki_write(
 	return result
 
 
+def _same_file_wiki_proposal(conv: str, slug: str, owner: str) -> str | None:
+	"""A Pending or Approved File Box wiki note for ``slug`` that another upload of the
+	same file bytes, by the same dropper, already proposed (#663), or None."""
+	rows = frappe.db.sql(
+		"""SELECT ar.name
+		FROM `tabJarvis Approval Request` ar
+		JOIN `tabJarvis Conversation` c ON c.name = ar.conversation
+		JOIN `tabFile` f ON f.name = c.filebox_source_file
+		JOIN `tabJarvis Conversation` this ON this.name = %(conv)s
+		JOIN `tabFile` tf ON tf.name = this.filebox_source_file
+		WHERE ar.source = %(src)s AND ar.ref_name = %(slug)s AND ar.status IN ('Pending', 'Approved')
+		  AND ar.conversation != %(conv)s AND c.owner = %(owner)s
+		  AND COALESCE(f.content_hash, '') != '' AND f.content_hash = tf.content_hash
+		ORDER BY ar.creation DESC LIMIT 1""",
+		{"conv": conv, "src": FILE_BOX_WIKI_SOURCE, "slug": slug, "owner": owner},
+	)
+	return rows[0][0] if rows else None
+
+
 def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	"""HOLD a File Box run's ``update_wiki`` as a Pending reviewer proposal
 	instead of landing it (review-before-landing).
@@ -2736,7 +2932,8 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 	recorded for reviewer approval (never that it landed), so it does not
 	re-propose. Idempotent per (conversation, slug): a retried turn re-emitting
 	the same write folds into the existing Pending row instead of stacking
-	duplicates for the reviewer.
+	duplicates for the reviewer. Another upload of the same file proposes nothing
+	when that file's note for the page is already Pending or Approved (#663).
 
 	W: refuses BEFORE creating the Approval Request when the note would overflow
 	the page (see :func:`jarvis.chat.wiki.file_box_append_would_overflow`) - a
@@ -2874,6 +3071,18 @@ def _propose_file_box_wiki_write(args: dict, conv: str) -> dict:
 		)
 		if frappe.db.get_value("Jarvis Approval Request", existing, "status") != "Pending":
 			existing = None
+	if not existing:
+		earlier = _same_file_wiki_proposal(conv, slug, owner)
+		if earlier:
+			# #663: an upload of the same file again proposes the same note; one is
+			# enough. Never rewritten: its digest binds it to its own conversation.
+			return {
+				"ok": True,
+				"proposed": False,
+				"approval": earlier,
+				"detail": "the same file already proposed a note for this page (waiting for "
+				"review or approved) - nothing new was proposed",
+			}
 	if existing:
 		name = existing
 	else:
@@ -3007,23 +3216,54 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# is refused here with its Desk path and a ``refused`` audit row; sensitive configuration comes back as "sensitive" and
 	# must park behind its own card in EVERY mode (``_must_card`` below). The ORM
 	# guard on the save itself backs this up for what arguments cannot show.
+	# A guarded structure write (one new Custom Field, a column-free Custom Field
+	# edit; R2-10) comes back as its own class: it parks a card in every mode too,
+	# on a chat that can hold a pending-action card, and is refused anywhere else.
 	_risk = None
+	_guarded = False
 	if is_write:
 		from jarvis.tools import _write_risk
 
 		try:
-			_risk = _write_risk.check(tool, args)
+			_risk = _write_risk.check(tool, args, guarded=True)
 		except WriteRefusedError as e:
 			return _refuse_risky_write(tool, args, e)
+		_guarded = _risk in _write_risk.GUARDED_STRUCTURE
+		if _guarded and not _can_card_structure(conversation):
+			return _refuse_risky_write(tool, args, _write_risk.refusal_of(tool, args))
 	# Sensitive configuration never runs uncarded (R2-8): auto mode, "confirm all",
 	# an armed macro and an approved skill run all fall through to the park. Nor
 	# does a run_method or a workflow action that deletes or cancels: those verbs are
 	# braked as tools (_BRAKE), and nothing else may be the way around that.
 	_must_card = (
 		_risk == "sensitive"
+		or _guarded
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
+		# A person's button that promises a Confirm card (propose_next_action): parks
+		# in every mode, auto mode, armed macro and autorun included.
+		or bool(frappe.flags.get("jarvis_force_card"))
 	)
+	# Nor does a write to a skill or a learned skill, whichever tool names it: what
+	# they say is what later chats do, so a person sees each change. Two calls are
+	# refused outright, before a card nobody could confirm is parked: a run_method
+	# the tool itself refuses, and one that switches a skill's Approve & run on.
+	if tool in _GATED_WRITES:
+		from jarvis.tools import _write_risk
+
+		try:
+			denied = _calls_a_denied_method(args) if tool == "run_method" else None
+			if denied:
+				_write_risk.log_line("denied_method", "", denied, "refused", tool=tool)
+				return _error("PermissionDeniedError", f"method {denied!r} cannot be called from a tool")
+			if _arms_a_skill(tool, args):
+				_write_risk.log_line("instructions", "Jarvis Custom Skill", "", "refused", tool=tool)
+				return _error("PermissionDeniedError", _ARMING_REFUSED)
+			_must_card = _must_card or _writes_skill_config(tool, args)
+		except InvalidArgumentError as e:
+			return _error(type(e).__name__, str(e))
+		except RecursionError:
+			_must_card = True  # arguments too deep to read: a person looks at them
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
@@ -3260,15 +3500,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# kill-switch Settings read runs only when a covered write is actually armed.
 		# Bulk covered writes skip too (an automation must not stall on a batch card);
 		# the F16 over-size cap above still bounces an oversized batch. A write the
-		# write-risk guard must card (``_must_card``) parks. A write to a skill parks
-		# too (``_writes_a_skill``): a macro step applies skills, so an armed run must
-		# not rewrite what its own later runs follow.
+		# write-risk guard must card (``_must_card``) parks. So does a write to a skill
+		# (``_writes_skill_config``, part of ``_must_card``): a macro step applies
+		# skills, so an armed run must not rewrite what its own later runs follow.
 		armed = bool(tool in _ARMED_SKIP_COVERED and not _must_card and _conv_flags.get("skip_confirmation"))
-		if armed:
-			try:
-				armed = not _writes_a_skill(tool, args)
-			except InvalidArgumentError as e:
-				return _error(type(e).__name__, str(e))
 		if armed and not _armed_skip_disabled():
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
 			# write. Always label an armed write (we are in the armed branch, so it IS
@@ -3336,29 +3571,43 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			):
 				_skill_autorun_clear(conv)
 				return _error(RunDisarmedError.__name__, "the skill was disarmed - run stopped")
-			# Sliding TTL: auto-run only while the last covered write is recent. If the
-			# timestamp is missing or older than the horizon, DON'T auto-run - fall
-			# through to the normal park below (the reaper, task #42, clears the stale
-			# flag; a park here is a safe, correct pause).
+			# No-activity net: auto-run only while the run was active recently. The
+			# stamp moves on each covered write and when one of the run's cards is
+			# confirmed (``turn_message_binding.keep_skill_autorun_open``), so waiting on
+			# a card never costs the run. A missing stamp, or one older than the net,
+			# means a run nothing is driving (a worker died): DON'T auto-run - fall
+			# through to the normal park below (the reaper clears the stale flag; a park
+			# here is a safe, correct pause).
 			autorun_at = _conv_flags.get("skill_autorun_at")
 			if (
 				autorun_at
 				and (frappe.utils.now_datetime() - frappe.utils.get_datetime(autorun_at)).total_seconds()
-				<= _SKILL_AUTORUN_TTL_S
+				<= _SKILL_AUTORUN_IDLE_S
 			):
 				# The covered-write CORE (dispatch + run_method read-filter + run_import
 				# announcement + provenance stash) is shared with the macro branch via
 				# _run_covered_write so the two can never drift; the skill run's provenance is
 				# the armed skill docname (queryable as armed_by_skill). The slide/clear below
 				# is skill-only post-dispatch handling and stays in this branch.
-				result = _run_covered_write(
-					tool,
-					args,
-					conv=conv,
-					owner_user=owner_user,
-					provenance_kind="skill",
-					provenance_name=autorun_skill,
-				)
+				try:
+					result = _run_covered_write(
+						tool,
+						args,
+						conv=conv,
+						owner_user=owner_user,
+						provenance_kind="skill",
+						provenance_name=autorun_skill,
+					)
+				except Exception:
+					# A write that raised ends the run like one that answered ok:False.
+					# Roll back first: the clear commits, and must not keep what the
+					# failed write left half done.
+					frappe.db.rollback()
+					try:
+						_skill_autorun_clear(conv)
+					except Exception:
+						pass  # the write's own error is the one to report
+					raise
 				# Hard-stop-on-error: the first covered ok:False clears the flag so the
 				# next write re-cards; a success slides the timestamp forward. On failure,
 				# append a one-line note to the tool's OWN error so the model (and the
@@ -3373,7 +3622,16 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 					if isinstance(err_obj, dict) and err_obj.get("message"):
 						err_obj["message"] += " The approved run has also ended - re-approve to continue."
 				return result
-			# TTL-expired / no timestamp: fall through to the normal park.
+			# No recent activity / no timestamp: fall through to the normal park, and
+			# end the run unless one of this chat's cards is waiting (a card the run
+			# paused on resumes it when confirmed; nothing else may bring it back).
+			try:
+				from jarvis.chat import pending_confirm
+
+				if not pending_confirm.blocks_new_card(owner_user, conv):
+					_skill_autorun_clear(conv)
+			except Exception:
+				pass  # the park below is the safe outcome either way
 		# Request-scoped "confirm all" (design Layer B): the user approved this whole
 		# request's fan-out at once, so a COVERED write (_GATED_WRITES - _BRAKE) runs
 		# uncarded while the request is live - armed by _typed_confirmation / the upfront
@@ -3482,6 +3740,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# preview_doc). Every other gated write (submit/cancel/delete/amend since
 		# R2-2, send_email/run_method/create_custom_skill/update_wiki) parks a
 		# described-intent card via _pending_preview: nothing runs until Confirm.
+		_structure_lines = None
 		if tool == "run_import":
 			# run_import cannot be sandbox-run (staging + a background job), so it has its
 			# own pre-park validation: refuse a blocked / non-importable / non-admin import
@@ -3490,6 +3749,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if rejected is not None:
 				frappe.clear_messages()
 				return rejected
+		elif _guarded:
+			# No trial run (R2-10): the save would commit its row and then run DDL.
+			# The park checks refuse what is known to fail, naming the field.
+			rejected, preview, _structure_lines, canonical = _structure_park(tool, args, _risk)
+			if rejected is not None:
+				frappe.clear_messages()
+				return rejected
+			# From here on the call IS its stored form (a new dict: the caller's own
+			# arguments are left as they were): the card is built from it, it is what
+			# gets sealed, and it is what Confirm runs.
+			args = canonical
 		elif tool in _DRY_RUN_ON_PARK:
 			try:
 				preview = _run_preview(tool, args)
@@ -3530,8 +3800,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# refuses to run as step 1, so stamping it would dangle an unusable offer and
 		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
 		# card with no run offer.
+		# Never on a structure card: confirming it must not also open an approved run.
 		skill_docname, skill_slug = (
-			_resolve_approve_run_offer(conv) if tool in _SKILL_AUTORUN_COVERED else (None, None)
+			_resolve_approve_run_offer(conv)
+			if tool in _SKILL_AUTORUN_COVERED and not _guarded
+			else (None, None)
 		)
 		if isinstance(preview, dict):
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
@@ -3539,7 +3812,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
-			card, refusal = _build_park_card(tool, args, preview, sensitive=_risk == "sensitive")
+			card, refusal = _build_park_card(
+				tool,
+				args,
+				preview,
+				sensitive=_risk == "sensitive",
+				structural=_structure_lines,
+			)
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal

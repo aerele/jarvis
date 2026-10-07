@@ -249,23 +249,41 @@ def _duplicates_ready() -> bool:
 	return frappe.db.has_column(CONV, "filebox_duplicate_of")
 
 
+# A row the File Box is still working: its outcome isn't known, so a re-drop waits on it.
+_IN_FLIGHT = ("processing", "needs_approval", "applying")
+
+
 def _prior_duplicate(fdoc) -> str | None:
-	"""The caller's earlier File Box row for the same file bytes whose draft still
-	stands, or None. Owner-only: a hash match across users would leak that a file exists."""
+	"""The caller's earlier File Box row for the same file bytes that is still being
+	worked (#663) or whose draft still stands (#619), or None. A run that ended
+	without a draft, or whose draft is gone, does not count: dropping the file again
+	is a retry. Owner-only: a hash match across users would leak that a file exists."""
 	if not fdoc.content_hash or not _duplicates_ready():
 		return None
-	rows = frappe.db.sql(
-		"""SELECT c.name, c.filebox_result_doctype AS dt, c.filebox_result_name AS dn
-		FROM `tabJarvis Conversation` c JOIN `tabFile` f ON f.name = c.filebox_source_file
+	me = frappe.session.user
+	names = frappe.db.sql_list(
+		"""SELECT c.name FROM `tabJarvis Conversation` c JOIN `tabFile` f ON f.name = c.filebox_source_file
 		WHERE c.file_box = 1 AND c.owner = %(me)s AND c.status != 'Archived'
 		  AND f.content_hash = %(h)s AND f.name != %(this)s
-		  AND COALESCE(c.filebox_result_name, '') != ''
 		ORDER BY c.creation DESC LIMIT 5""",
-		{"me": frappe.session.user, "h": fdoc.content_hash, "this": fdoc.name},
+		{"me": me, "h": fdoc.content_hash, "this": fdoc.name},
+	)
+	if not names:
+		return None
+	rows = frappe.db.sql(
+		"SELECT t.name, t.status, t.filebox_result_doctype AS dt, t.filebox_result_name AS dn "
+		f"FROM ({_inbound_inner_sql('AND c.name IN %(cands)s')}) t ORDER BY t.creation DESC",
+		{**_ladder_params(me), "cands": tuple(names)},
 		as_dict=True,
 	)
 	for r in rows:
-		if frappe.db.exists("DocType", r.dt) and frappe.db.get_value(r.dt, r.dn, "docstatus") in (0, 1):
+		if r.status in _IN_FLIGHT:
+			return r.name
+		if (
+			r.dn
+			and frappe.db.exists("DocType", r.dt)
+			and frappe.db.get_value(r.dt, r.dn, "docstatus") in (0, 1)
+		):
 			return r.name
 	return None
 
@@ -336,8 +354,8 @@ def drop_file(
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 
-	# The same bytes already made a draft: hold the row as a Duplicate, no run (#619).
-	# Re-run processes it anyway.
+	# The same bytes are still being worked or already made a draft: hold the row as a
+	# Duplicate, no run (#619, #663). Re-run processes it anyway.
 	# A tagged skill asks for a specific pass, so it always runs (K-D2: never silently dropped).
 	prior = None if requested else _prior_duplicate(fdoc)
 	if prior:
@@ -789,7 +807,7 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 		n = int(r["pending_approvals"])
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
 		if r.get("missing"):
-			line = f"Needs approval — missing: {r['missing']}"
+			line = f"Needs approval (missing: {r['missing']})"
 		if r.get("filebox_result_name"):
 			line = f"{_draft_line(r)} · {line}"
 		if not wait:
@@ -913,6 +931,49 @@ def _attach_results(rows: list[dict], me: str) -> None:
 		r["result"], r["result_link"] = _result(r, wait, msgs.get(r["lm_name"]))
 		for k in _INTERNAL:
 			r.pop(k, None)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def open_waits(conversation: str) -> dict:
+	"""What a File Box file is waiting on, for its own chat (the Approval Board shows
+	the same items): each Pending question with its text and options, answered with
+	``approvals_api.decide`` like the board, and a held record or approval sheet as a
+	title with its board link. Owner-only; an ordinary chat has none."""
+	from urllib.parse import quote
+
+	me = frappe.session.user
+	doc = frappe.get_doc(CONV, conversation)  # DoesNotExistError if missing
+	if doc.owner != me:
+		frappe.throw("Not permitted", frappe.PermissionError)
+	# _pending_waits_sql covers File Box conversations only: an ordinary chat has none.
+	waits = frappe.db.sql(
+		f"SELECT w.src, w.item, w.title FROM ({_pending_waits_sql()}) w "
+		"WHERE w.conversation = %(one)s ORDER BY w.creation",
+		{**_ladder_params(me), "one": conversation},
+		as_dict=True,
+	)
+	items = []
+	for w in waits:
+		item = {"src": w.src, "name": w.item, "title": w.title or ""}
+		if w.src == "ar":
+			ar = frappe.db.get_value(APPROVAL, w.item, ["question", "options"], as_dict=True) or {}
+			item["question"] = ar.get("question") or item["title"]
+			item["options"] = _options_list(ar.get("options"))
+			item["link"] = f"/approvals/{quote(w.item, safe='')}"
+		else:
+			item["link"] = f"/approvals?held={quote(w.item, safe='')}"
+		items.append(item)
+	return {"items": items}
+
+
+def _options_list(raw) -> list[str]:
+	"""An approval's stored options (a JSON list) as text, or []."""
+	try:
+		parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+	except ValueError:
+		return []
+	return [str(o) for o in parsed] if isinstance(parsed, list) else []
 
 
 @frappe.whitelist()
@@ -1084,20 +1145,20 @@ def _delete_one(conversation: str, live: int | None = None) -> None:
 		)
 		live = row[0][0] if row else 0
 	if live:
-		frappe.throw("Still processing — stop or wait for it to finish before deleting")
+		frappe.throw("Still processing: stop or wait for it to finish before deleting")
 	# nosemgrep: frappe-sql-format-injection -- constant predicate; value bound
 	if frappe.db.sql(
 		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_wiki_open('c')}", (conversation,)
 	):
 		frappe.throw(
-			"A wiki note from this file is still awaiting review — try again once a reviewer has handled it"
+			"A wiki note from this file is still awaiting review, try again once a reviewer has handled it"
 		)
 	# nosemgrep: frappe-sql-format-injection -- constant predicate; value bound
 	if frappe.db.sql(
 		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_held_open('c')}", (conversation,)
 	):
 		frappe.throw(
-			"This file is waiting on an approval — decide or skip it on the Approval Board before deleting"
+			"This file is waiting on an approval: decide or skip it on the Approval Board before deleting"
 		)
 	_cascade(conversation)
 
@@ -1256,6 +1317,28 @@ def _rerun_claimed(conversation: str, fresh) -> bool:
 	return not frappe.db.exists(MSG, {"conversation": conversation, "role": "user", "creation": [">", at]})
 
 
+def _refuse_rerun_of_duplicate(conversation: str) -> None:
+	"""Re-try on the same file bytes, while an earlier copy is still being worked or its
+	draft stands, keeps the row a Duplicate instead of processing it again (#663). Runs
+	before any write; a pinned skill always runs, as on drop (K-D2)."""
+	fname = frappe.db.get_value(CONV, conversation, "filebox_source_file")
+	fdoc = frappe.db.get_value("File", fname, ["name", "content_hash"], as_dict=True) if fname else None
+	prior = _prior_duplicate(fdoc) if fdoc else None
+	if not prior:
+		return
+	p = frappe.db.get_value(
+		CONV, prior, ["title", "filebox_result_doctype", "filebox_result_name"], as_dict=True
+	)
+	if p.filebox_result_name:
+		what = f"its draft {p.filebox_result_doctype} {p.filebox_result_name} stands"
+		hint = "To process it again, delete or cancel that draft first."
+	else:
+		what, hint = "it is still being worked", "Let that one finish first."
+	frappe.throw(
+		f"Same file as {p.title or 'an earlier file'} and {what}, so this one stays a Duplicate. {hint}"
+	)
+
+
 def _rerun_one(conversation: str) -> dict:
 	"""Re-run ONE File Box file in place. Raises on a hard refusal (not found /
 	not owned / not eligible) - every check runs before any write, so a refusal
@@ -1281,16 +1364,18 @@ def _rerun_one(conversation: str) -> dict:
 	if _rerun_claimed(conversation, _ladder_params(me)["fresh"]):
 		frappe.throw("A re-run of this file is already in progress")
 	if r["live"]:
-		frappe.throw("Still processing — wait for it to finish before re-running")
+		frappe.throw("Still processing: wait for it to finish before re-running")
 	if r["has_draft"]:
-		frappe.throw("A draft already exists for this file — nothing to re-run")
+		frappe.throw("A draft already exists for this file, nothing to re-run")
 	if r["status"] not in _RERUNNABLE:
 		frappe.throw("This file can't be re-run right now")
 	if frappe.db.exists(WAITER, {"conversation": conversation, "resume_state": "claimed"}):
-		frappe.throw("A resume of this file is on its way — wait for it before re-running")
+		frappe.throw("A resume of this file is on its way: wait for it before re-running")
 	f = _source_file(conversation)
 	if not f:
-		frappe.throw("The original file is no longer available — drop it again")
+		frappe.throw("The original file is no longer available, drop it again")
+	if not requested:
+		_refuse_rerun_of_duplicate(conversation)
 
 	# Claim-first: stamped now, cleared by ``_send_inbound`` once the send's
 	# outcome is known (either branch) - so a double click, racing in before that

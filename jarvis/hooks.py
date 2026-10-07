@@ -957,9 +957,14 @@ has_permission.update(
 # jarvis:heartbeat_macro_health_log_hour: the once-an-hour log marker for a fault in the
 # heartbeat's scheduled-macro counts (``heartbeat._scheduled_macro_health_safe``); without
 # it a persistent fault would log every five minutes.
+#
+# jarvis:subscription_ (2026-10-06): the pending chat-subscription signals queue
+# (``subscription_health.SIGNAL_KEY``) and its log marker. Without it the same watchdog
+# clear would drop a dead-sign-in signal before the next heartbeat could carry it to admin.
 persistent_cache_keys = [
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
 	"jarvis:macro_snapshot_unreadable",
 	"jarvis:heartbeat_macro_health_log_hour",
+	"jarvis:subscription_",
 ]

@@ -775,8 +775,10 @@ class TestPoolSyncSwitchDetection(_RT3SettingsTestCase):
 	def test_pool_sync_that_leaves_proxy_active_alone_enqueues_directly(self):
 		settings = self._save_two_api_key_pool()
 		# An unrelated pool-relevant change (still all api-key) - not redundant
-		# (the snapshot differs), but proxy_active stays 0 throughout.
-		settings.models[0].model = "gpt-4o-2"
+		# (the snapshot differs), but proxy_active stays 0 throughout. Edit the
+		# SECOND row: changing the first would move the primary (admin-v2#629),
+		# which is held like a switch.
+		settings.models[1].model = "gpt-4o-mini-2"
 
 		with (
 			patch("jarvis.chat.llm_switch.begin") as mock_begin,

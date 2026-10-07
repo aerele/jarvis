@@ -9,7 +9,12 @@
 			     the per-model story (every model in failover order, with its own
 			     status); this is a summary that points at it. The pair stays for a
 			     single-credential tenant, where it is accurate. -->
-			<KvRow v-if="isPool" label="Models" :value="poolSummary" />
+			<!-- No rows until a real answer: a failed first load shows the error
+			     line below, not the "Auto" placeholder. -->
+			<template v-if="!connLoaded">
+				<div v-if="!connErr" class="py-2 text-p-sm text-ink-gray-6">Loading…</div>
+			</template>
+			<KvRow v-else-if="isPool" label="Models" :value="poolSummary" />
 			<template v-else>
 				<KvRow label="Model" :value="modelLabel" />
 				<KvRow label="Provider" :value="ui.llm_provider || '-'" />
@@ -289,6 +294,7 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Button, toast } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { useConfirm } from "@/composables/useConfirm";
+import { useKeptAlive } from "@/composables/useKeptAlive";
 import { useAutoModeConsent } from "@/composables/useAutoModeConsent";
 import { AUTO_MODE_COPY } from "@/lib/autoMode";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
@@ -350,6 +356,10 @@ const connStatus = ref(null);
 const memberState = ref("");
 const connErr = ref(false);
 const connLoading = ref(false);
+// True once a real answer has landed. Until then the rows below would show the
+// conversation's "Auto" label and a blank Status, which read as real values
+// until the server's answer replaced them.
+const connLoaded = ref(false);
 
 // Also ported from the removed ConnectionPane.vue: a fetch failure has to be
 // visible and recoverable. Swallowing it left Status showing its placeholder,
@@ -366,11 +376,13 @@ async function loadConnStatus() {
 			memberState.value = (res && res.state) || "";
 		}
 		connErr.value = false;
+		connLoaded.value = true;
 	} catch (e) {
 		connErr.value = true;
 	} finally {
 		connLoading.value = false;
 	}
+	return !connErr.value;
 }
 // proxy_active means "a Bifrost + CLIProxyAPI sidecar pair is deployed", which
 // only a chat subscription needs. It is NOT "this is a pool": a pool of BYO api
@@ -454,7 +466,7 @@ const statusLabel = computed(
 		}[statusState.value] || "-")
 );
 // The server's reason for "attention" (jarvis#714) - see account._llm_health.
-// One of sync_failed / turn_error / subscription_unverified, or "" for every
+// One of sync_failed / turn_error / subscription_unverified / subscription_expired, or "" for every
 // other state. Empty until connStatus loads, same fallback shape as health.
 const attentionReason = computed(
 	() => (connStatus.value && connStatus.value.attention_reason) || ""
@@ -485,6 +497,10 @@ const statusHint = computed(() => {
 		return "";
 	}
 	if (statusState.value === "attention") {
+		if (attentionReason.value === "subscription_expired") {
+			const label = (connStatus.value.attention_detail || {}).label || "Your chat";
+			return `${label} sign-in expired. Open AI models to reconnect it.`;
+		}
 		return (
 			{
 				sync_failed:
@@ -526,13 +542,14 @@ const usagePct = computed(() => {
 	return Math.min(100, Math.round((u.month_tokens / u.budget_monthly) * 100));
 });
 
-onMounted(async () => {
+async function loadUsage() {
 	try {
 		usage.value = await api.getUsage(ctx.value && ctx.value.conversationId);
 	} catch (e) {
 		/* usage is best-effort — leave the placeholder */
 	}
-	await loadConnStatus();
+}
+async function loadSettings() {
 	// Roam notify/activity-detail prefs from the server row, falling back to the
 	// localStorage cache the store already booted from on any failure (endpoint
 	// not deployed yet, network error) — never blocks or errors the pane.
@@ -542,7 +559,12 @@ onMounted(async () => {
 	} catch (e) {
 		/* prefs stay on the localStorage cache */
 	}
-});
+}
+// The three fetches are independent, so they run together instead of one
+// after another. A refresh swaps values in place and never blanks the pane.
+// SettingsDialog keeps this pane alive, so useKeptAlive owns the mount load and
+// the stale / config-changed refresh on re-activation.
+useKeptAlive(async () => (await Promise.all([loadUsage(), loadConnStatus(), loadSettings()]))[1]);
 
 // Device-local prefs live in the shell store (single source of truth) so that
 // toggling here also updates ChatView's live gating same-tab. Read + delegate.
@@ -694,6 +716,9 @@ async function doResetOnboarding() {
 	}
 }
 
+// The reset poll deliberately keeps running while this pane is hidden by a tab
+// switch: a reset is destructive and its "workspace is back" reload is wanted
+// from whichever tab the admin is on. It only exists while a reset is in flight.
 function startPoll() {
 	stopPoll();
 	pollStarted = Date.now();

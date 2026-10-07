@@ -102,6 +102,41 @@ class JarvisTrigger(NotRenamable, Document):
 		else:
 			self._validate_llm()
 		self._guard_server_script_link()
+		self._guard_owner_immutable()
+		self._guard_lookup_authority()
+
+	def _guard_owner_immutable(self):
+		"""``owner`` decides whose permissions lookups read with. Frappe already
+		treats ``owner`` as a constant on save (CannotChangeConstantError, for
+		every user); this guard is defense in depth for paths that bypass that
+		check, and gives non-Administrators a clearer message. Only
+		Administrator may change it after insert."""
+		before = None if self.is_new() else self.get_doc_before_save()
+		if before and before.owner != self.owner and frappe.session.user != "Administrator":
+			frappe.throw(_("Only Administrator can change a trigger's owner."), frappe.PermissionError)
+
+	def _guard_lookup_authority(self):
+		"""Lookups read with the trigger OWNER's permissions, so only the owner
+		(or Administrator) may turn them on or change what they act on. Any other
+		manager editing the instruction, target, event, condition or action of a
+		lookup-enabled trigger, or switching lookups on, would borrow the owner's
+		access. Turning lookups off and enabling/disabling stay open to every
+		manager. Covers the SPA API, Desk and the agent's tools alike."""
+		if self.action_type != "LLM" or not cint(self.llm_allow_lookups):
+			return
+		before = None if self.is_new() else self.get_doc_before_save()
+		# The STORED owner (owner changes are blocked above), never an edited value.
+		owner = before.owner if before else self.owner
+		if frappe.session.user in (owner, "Administrator"):
+			return
+		if before and cint(before.llm_allow_lookups) and before.action_type == "LLM":
+			watched = ("llm_instruction", "target_doctype", "doc_event", "condition", "action_type")
+			if not any(self.has_value_changed(f) for f in watched):
+				return
+		frappe.throw(
+			_("Only the trigger's owner can turn on or change read-only lookups."),
+			frappe.PermissionError,
+		)
 
 	def _managed_script_name(self) -> str | None:
 		"""The managed Server Script's name for this trigger. ``self.name`` is
@@ -158,13 +193,13 @@ class JarvisTrigger(NotRenamable, Document):
 			frappe.throw(
 				_(
 					"Triggers cannot target child tables ('{0}'). Target the parent "
-					"DocType instead — child rows ride its events."
+					"DocType instead. Child rows ride its events."
 				).format(self.target_doctype)
 			)
 		if self.target_doctype in DENYLISTED_DOCTYPES:
 			frappe.throw(
 				_(
-					"Triggers on '{0}' are not allowed — they could loop on their own "
+					"Triggers on '{0}' are not allowed. They could loop on their own "
 					"logs or fire on internal plumbing."
 				).format(self.target_doctype)
 			)

@@ -414,6 +414,10 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
+	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
+	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
+	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
+	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage.is_claude_cli_row(row) else None
 	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
 	# the unit below starts on the present. Nothing is pending: the runner committed its
 	# claim and this effect has only read so far.
@@ -426,7 +430,7 @@ def _effect_usage(ctx: _Ctx) -> None:
 		# the model whether or not its token counters have gone fresh yet, and an audit
 		# ("which model proposed this journal entry") must not be lost to a slow counter.
 		_stamp_reply_model(ctx, row)
-		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
+		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id, reply_chars=reply_chars)
 
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
@@ -439,6 +443,11 @@ def _effect_usage(ctx: _Ctx) -> None:
 		return
 	if outcome == _usage.USAGE_RETRY:
 		raise _UsageRetry(f"usage not fresh for {ctx.run_id} (session {session_key})")
+	# The unit above committed: this turn completed, which proves the sign-in it ran on works. Clears a
+	# chat-detected expiry; the runner commits this effect's done mark right after. Never raises.
+	from jarvis import subscription_health
+
+	subscription_health.note_session_row(row)
 
 
 def _stamp_reply_model(ctx: _Ctx, row: dict | None) -> None:

@@ -208,8 +208,8 @@ const voiceDurationS = ref(0);
 
 const placeholder = computed(() =>
 	props.question
-		? "Answer in your own words: type, record, attach, or paste a link…"
-		: `Tell ${agentName} anything about how you work: type, record, attach, or paste a link…`
+		? "Answer in your own words: type, record, attach or paste a link…"
+		: `Tell ${agentName} anything about how you work: type, record, attach or paste a link…`
 );
 
 const linkLabel = computed(() => {

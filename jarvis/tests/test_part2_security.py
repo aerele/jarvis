@@ -430,6 +430,59 @@ class TestSkillPromotionWorkflow(Part2Base):
 				custom_skills_api.list_skill_promotion_requests()
 
 
+class TestOnlyTheOwnerShares(Part2Base):
+	"""``share_custom_skill`` replaces a skill's share list. Only its owner may."""
+
+	def setUp(self):
+		super().setUp()
+		# The base creates the users once per class and every tearDown starts with a
+		# rollback: on a fresh database they are gone after this class's first test.
+		_ensure_user(USER_A, ["Jarvis User", "Sales User"])
+		_ensure_user(USER_B, ["Jarvis User"])
+		_ensure_user(REVIEWER, ["Jarvis User", "Jarvis Skill Reviewer"])
+
+	def _shared(self, name):
+		return sorted(frappe.get_all("Jarvis Custom Skill Share", filters={"parent": name}, pluck="user"))
+
+	def test_owner_shares_and_the_list_is_cleaned(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-own")
+		with _as(USER_A):
+			out = custom_skills_api.share_custom_skill(
+				skill.name, [USER_B, USER_B, USER_A, "Guest", "nobody-here@example.com", "", None]
+			)
+		self.assertEqual(out["data"]["count"], 1)
+		self.assertEqual(self._shared(skill.name), [USER_B])
+
+	def test_a_recipient_cannot_share_it_on(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-recipient", shared_with=[USER_B])
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [REVIEWER])
+		self.assertEqual(self._shared(skill.name), [USER_B])
+
+	def test_a_reviewer_who_is_not_the_owner_cannot_share_it(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-reviewer")
+		with _as(REVIEWER):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [USER_B])
+		self.assertEqual(self._shared(skill.name), [])
+
+	def test_a_system_manager_who_is_not_the_owner_cannot_share_it(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-sm")
+		with _as("Administrator"):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [USER_B])
+		self.assertEqual(self._shared(skill.name), [])
+
+
 class TestWikiPromotionRequestLeak(Part2Base):
 	"""TASK 14: a generic-REST insert of a promotion request pointing at another
 	user's private wiki page must not snapshot that page's body."""

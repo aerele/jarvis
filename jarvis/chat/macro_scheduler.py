@@ -68,7 +68,7 @@ _MAX_SECONDS = 24 * 3600 - 1  # 23:59:59, the last representable time of day
 # switches them on.
 _BARRED_OWNER = (
 	"Scheduled run skipped: this macro's owner may not run unattended work "
-	"(Administrator, a disabled account, or no Jarvis access)."
+	"(Administrator, a disabled account or no Jarvis access)."
 )
 _DISPATCH_FAILED = "Scheduled run could not be started."
 # Appended to a failure sentence once the outcome of scheduling the retry is KNOWN.

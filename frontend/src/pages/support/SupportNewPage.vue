@@ -39,7 +39,7 @@
 						:pending="pending"
 						:can-submit="canSubmit"
 						:loading="creating"
-						placeholder="Describe the issue - what you expected, what happened, and where."
+						placeholder="Describe the issue - what you expected, what happened and where."
 						@submit="create"
 						@files-added="(fs) => onFiles(fs)"
 						@remove-attachment="removeFile"

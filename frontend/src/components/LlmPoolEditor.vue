@@ -91,13 +91,25 @@
 					style="font-size: 11px; color: var(--text-3)"
 					>{{ directStatus.account_email }}</span
 				>
-				<span class="jv-pool-dot jv-pool-dot--ok" aria-hidden="true"></span>
+				<span
+					class="jv-pool-dot"
+					:class="directExpiry ? 'jv-pool-dot--expired' : 'jv-pool-dot--ok'"
+					aria-hidden="true"
+				></span>
+				<Badge
+					v-if="directExpiry"
+					theme="red"
+					variant="subtle"
+					label="Sign-in expired"
+					:title="expiredLine(directExpiry)"
+				/>
 				<span class="jv-flist-acts">
 					<button
 						v-if="canEdit"
 						:disabled="!editable"
 						@click="directPanelOpen = !directPanelOpen"
-						class="jv-btn jv-btn--sm jv-btn--ghost"
+						class="jv-btn jv-btn--sm"
+						:class="directExpiry ? 'jv-btn--primary' : 'jv-btn--ghost'"
 					>
 						{{ directPanelOpen ? "Close" : "Reconnect" }}
 					</button>
@@ -110,11 +122,16 @@
 						Remove
 					</button>
 				</span>
+				<p v-if="directExpiry" class="jv-flist-expline">
+					{{ expiredLine(directExpiry) }}
+				</p>
 			</div>
 			<div v-if="showDirectRow && directPanelOpen" class="jv-cfgpanel">
 				<DirectSubscriptionCard
 					:status="directStatus"
 					:editable="editable"
+					:expired="directExpiry"
+					:autoStart="directAutoStart"
 					@reauthorized="onDirectCardChanged"
 					@disconnected="onDirectCardChanged"
 				/>
@@ -241,12 +258,21 @@
 							aria-hidden="true"
 						></span>
 						<span
-							v-if="accountHealth(row).label"
+							v-if="
+								accountHealth(row).label && accountHealth(row).level !== 'expired'
+							"
 							class="jv-pool-acct-health"
 							:class="'jv-pool-acct-health--' + accountHealth(row).level"
 							:title="accountHealth(row).title"
 							>{{ accountHealth(row).label }}</span
 						>
+						<Badge
+							v-if="accountHealth(row).level === 'expired'"
+							theme="red"
+							variant="subtle"
+							label="Sign-in expired"
+							:title="accountHealth(row).title"
+						/>
 						<!-- Reorder + [Edit][Reconnect|Replace key][Remove], always right-aligned.
              All stay LIVE while the config panel is open. The panel used to track its
              target row by ARRAY INDEX, so reordering or removing underneath it silently
@@ -327,7 +353,12 @@
 								v-if="canEdit && row.credentialType === 'subscription'"
 								:disabled="!editable"
 								@click="quickReconnect(i)"
-								class="jv-btn jv-btn--sm jv-btn--ghost"
+								class="jv-btn jv-btn--sm"
+								:class="
+									rowExpiry(row, expiredEntries)
+										? 'jv-btn--primary'
+										: 'jv-btn--ghost'
+								"
 							>
 								Reconnect
 							</button>
@@ -357,6 +388,9 @@
 								{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
 							</button>
 						</span>
+						<p v-if="rowExpiry(row, expiredEntries)" class="jv-flist-expline">
+							{{ rowExpiry(row, expiredEntries).line }}
+						</p>
 					</div>
 
 					<!-- 2+ accounts on a subscription row: a model row (no account chip, but
@@ -391,12 +425,22 @@
 									aria-hidden="true"
 								></span>
 								<span
-									v-if="accountHealth(row).label"
+									v-if="
+										accountHealth(row).label &&
+										accountHealth(row).level !== 'expired'
+									"
 									class="jv-pool-acct-health"
 									:class="'jv-pool-acct-health--' + accountHealth(row).level"
 									:title="accountHealth(row).title"
 									>{{ accountHealth(row).label }}</span
 								>
+								<Badge
+									v-if="accountHealth(row).level === 'expired'"
+									theme="red"
+									variant="subtle"
+									label="Sign-in expired"
+									:title="accountHealth(row).title"
+								/>
 								<!-- Reorder arrows + Edit/Reconnect/Remove, identical to the ungrouped
 			         row: this row's position in the failover chain and its whole-model
 			         removal are unaffected by its account count. Only the account-level
@@ -456,7 +500,12 @@
 										v-if="canEdit && rowHasConnectedAccount(row)"
 										:disabled="!editable"
 										@click="quickReconnect(i)"
-										class="jv-btn jv-btn--sm jv-btn--ghost"
+										class="jv-btn jv-btn--sm"
+										:class="
+											rowExpiry(row, expiredEntries)
+												? 'jv-btn--primary'
+												: 'jv-btn--ghost'
+										"
 									>
 										Reconnect
 									</button>
@@ -478,6 +527,9 @@
 										{{ isLastConnectedRow(row) ? "Disconnect" : "Remove" }}
 									</button>
 								</span>
+								<p v-if="rowExpiry(row, expiredEntries)" class="jv-flist-expline">
+									{{ rowExpiry(row, expiredEntries).line }}
+								</p>
 							</div>
 							<div
 								v-for="(account, ai) in row.accounts"
@@ -501,7 +553,30 @@
 								<span class="jv-flist-subrow-order">{{
 									ai === 0 ? "primary" : "backup"
 								}}</span>
+								<Badge
+									v-if="accountState(row, ai).entry"
+									theme="red"
+									variant="subtle"
+									label="Sign-in expired"
+								/>
+								<span
+									v-if="
+										accountState(row, ai).entry &&
+										!rowExpiry(row, expiredEntries)
+									"
+									class="jv-flist-subrow-note"
+									:title="accountState(row, ai).line"
+									>{{ accountState(row, ai).line }}</span
+								>
 								<span class="jv-flist-subrow-acts">
+									<button
+										v-if="canEdit && accountState(row, ai).entry"
+										:disabled="!editable"
+										@click="quickReconnect(i, ai)"
+										class="jv-btn jv-btn--sm jv-btn--primary"
+									>
+										Reconnect
+									</button>
 									<!-- jarvis#807: promote/demote an account within this row. account[0]
 							         is the primary the pool tries first, so Up on the second row makes
 							         it primary. Same icon buttons and disabled-at-the-ends rule as the
@@ -1051,12 +1126,20 @@
 									>{{ accountHealth(panelRow).label }}</span
 								>
 								<span class="jv-pool-acctacts">
+									<!-- Hidden while the sign-in steps are open below: they ARE the reconnect. -->
 									<button
-										v-if="canEdit"
+										v-if="
+											canEdit &&
+											!(
+												panelRow._connect &&
+												panelRow._connect.open &&
+												panelRow._connect.reconnectIdx === ai
+											)
+										"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 										:disabled="!editable"
 										@click="openConnectPanel(panelRow, ai)"
-										title="Re-authorize to mint fresh tokens"
+										title="Reconnect to mint fresh tokens"
 									>
 										Reconnect
 									</button>
@@ -1103,6 +1186,13 @@
                URL, since a URL pasted before sign-in has no nonce and finishConnect no-ops.
                The condition lives in panelConnectOpen because the panel's own primary
                action has to know when this spine owns the Connect button. -->
+					<p
+						v-if="panelConnectOpen && reconnectEmail"
+						class="jv-cdesc"
+						style="margin: 0 0 8px"
+					>
+						Use the same account: <b>{{ reconnectEmail }}</b>
+					</p>
 					<div v-if="panelConnectOpen" class="jv-csteps">
 						<!-- DEVICE-CODE (Kimi): show the code + verification link, poll for approval. -->
 						<template v-if="panelRow._connect.deviceFlow">
@@ -1113,7 +1203,7 @@
 										Sign in with {{ upstreamLabelOf(panelRow.upstream) }}
 									</div>
 									<div class="jv-cdesc">
-										Open the verification page, enter the code, and approve
+										Open the verification page, enter the code and approve
 										access. This panel updates automatically.
 									</div>
 									<div class="jv-crow" style="margin-top: 8px">
@@ -1936,11 +2026,19 @@
 										</svg>
 									</button>
 									<button
-										v-if="canEdit && !singleMode"
+										v-if="
+											canEdit &&
+											!singleMode &&
+											!(
+												m._connect &&
+												m._connect.open &&
+												m._connect.reconnectIdx === ai
+											)
+										"
 										class="jv-btn jv-btn--sm jv-btn--ghost"
 										:disabled="needsCatalog(m) || !editable"
 										@click="startConnect(m, ai)"
-										title="Re-authorize to mint fresh tokens"
+										title="Reconnect to mint fresh tokens"
 									>
 										Reconnect
 									</button>
@@ -2037,7 +2135,7 @@
 											Sign in with {{ upstreamLabelOf(m.upstream) }}
 										</div>
 										<div class="jv-cdesc">
-											Open the verification page, enter the code, and approve
+											Open the verification page, enter the code and approve
 											access. This panel updates automatically.
 										</div>
 										<div class="jv-crow" style="margin-top: 8px">
@@ -2304,12 +2402,17 @@
 			     (line 249 above): a resync mid-edit would submit whatever is
 			     half-typed there instead of leaving it for the customer to finish. -->
 			<button
-				v-if="canEdit && statusLine.kind === 'failed' && !orderDirty && !panel.open"
+				v-if="
+					canEdit &&
+					(statusLine.kind === 'failed' || statusLine.retrying) &&
+					!orderDirty &&
+					!panel.open
+				"
 				:disabled="!editable"
 				@click="resync"
 				class="jv-btn jv-btn--sm jv-btn--primary"
 			>
-				Resync
+				{{ statusLine.retrying ? "Retry now" : "Resync" }}
 			</button>
 		</div>
 	</div>
@@ -2317,6 +2420,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { Badge } from "frappe-ui";
 import * as api from "@/api";
 import {
 	deriveMode,
@@ -2338,6 +2442,9 @@ import {
 	effectiveApiKey,
 	LOCAL_PROVIDER_IDS,
 	isContainerOnlyRow,
+	expiredLine,
+	accountExpiryStates,
+	rowExpiry,
 } from "@/llm/pool";
 import { errMessage as _err } from "@/lib/errors";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
@@ -2383,6 +2490,11 @@ const props = defineProps({
 	// other's operation. `subscriptionTesting` (exposed below) is the mirror: the
 	// host reads it to disable its own "Start chatting" while a Test is in flight.
 	hostBusy: { type: Boolean, default: false },
+	// Expired chat sign-ins from the site (subscriptionNotice.expired): { account_ref, upstream, label,
+	// email, since, fallback }. Never passed by onboarding. `direct:openai` keys a direct-mode OpenAI row.
+	expiredEntries: { type: Array, default: () => [] },
+	// One-shot request from a Reconnect link: the account_ref to reconnect (or `direct:openai`).
+	reconnectRef: { type: String, default: "" },
 });
 // "settings-changed" is the footerless (onboarding) passive notice that the desired
 // pool was persisted - NOT a control-flow signal (the host controller owns the apply
@@ -2397,6 +2509,7 @@ const emit = defineEmits([
 	// `ready` above, rather than reading the exposed ref reactively through the
 	// template ref.
 	"subscription-testing",
+	"reconnect-handled",
 ]);
 
 // ---- state ---------------------------------------------------------------
@@ -2463,6 +2576,7 @@ const saving = ref(false);
 const sync = ref({
 	last_sync_status: "",
 	pending: false,
+	attempt_error: "",
 	subscription_status: "",
 	warnings: [],
 	model_statuses: [],
@@ -3568,11 +3682,12 @@ function expandApiKeyBackups(r) {
 // hurled you at the provider's login before you saw a single instruction. Same bug
 // as "+ Connect account" had. It now opens the panel; step 1's "Open sign-in" starts
 // OAuth, inside that click (which is what keeps the popup-blocker fix working).
-function quickReconnect(i) {
+function quickReconnect(i, accountIdx = null) {
 	const r = rows.value[i];
 	if (!r) return;
 	openEdit(i);
-	openConnectPanel(r, r.accounts && r.accounts.length ? 0 : null);
+	const idx = accountIdx !== null ? accountIdx : r.accounts && r.accounts.length ? 0 : null;
+	openConnectPanel(r, idx);
 }
 function setPanelSource(src) {
 	panel.value.source = src;
@@ -3771,13 +3886,63 @@ function missingApiKeyField(row) {
 const showDirectRow = computed(
 	() => !singleMode.value && !!(props.directStatus && props.directStatus.is_direct_subscription)
 );
+const directAutoStart = ref(false);
 const directPanelOpen = ref(false);
+// Auto-start belongs to the one explicit reconnect intent: once the panel closes it is spent.
+watch(directPanelOpen, (open) => {
+	if (!open) directAutoStart.value = false;
+});
 watch(
 	() => props.directStatus,
 	(v) => {
 		if (!v || !v.is_direct_subscription) directPanelOpen.value = false;
 	}
 );
+// Direct mode keys its one account `direct:openai` (no pool row, no account_ref).
+const directExpiry = computed(
+	() => (props.expiredEntries || []).find((e) => e && e.account_ref === "direct:openai") || null
+);
+// Tells DirectSubscriptionCard to start its sign-in as soon as the reconnect link opens it.
+function accountState(row, ai) {
+	return accountExpiryStates(row, props.expiredEntries)[ai] || { entry: null, line: "" };
+}
+// "Use the same account: {email}" above the reconnect steps: a different account would be a different
+// identity to the provider and a stranded old row. Email comes from the site's record, then the row.
+const reconnectEmail = computed(() => {
+	const r = panelRow.value;
+	const idx = r && r._connect ? r._connect.reconnectIdx : null;
+	if (idx === null || idx === undefined) return "";
+	const a = (r.accounts || [])[idx];
+	if (!a) return "";
+	const hit = (props.expiredEntries || []).find((e) => e.account_ref === a.account_ref);
+	const email = (hit && hit.email) || a.account_email || a.label || "";
+	return email.includes("@") ? email : "";
+});
+// A Reconnect link (I8): run the existing quickReconnect for the row holding that account, once the
+// rows (or the direct status) have loaded. Unknown refs are ignored, so a stale email link only
+// opens the pane.
+function runReconnectIntent() {
+	const target = (props.reconnectRef || "").trim();
+	if (!target || !props.editable) return;
+	if (target.startsWith("direct:")) {
+		if (!showDirectRow.value) return;
+		directAutoStart.value = true;
+		directPanelOpen.value = true;
+		emit("reconnect-handled");
+		return;
+	}
+	const i = rows.value.findIndex((r) =>
+		(r.accounts || []).some((a) => a.account_ref === target)
+	);
+	if (i < 0) return;
+	const ai = rows.value[i].accounts.findIndex((a) => a.account_ref === target);
+	quickReconnect(i, ai);
+	emit("reconnect-handled");
+}
+watch([() => props.reconnectRef, rows, showDirectRow], runReconnectIntent, {
+	flush: "post",
+	immediate: true,
+});
 function onDirectCardChanged() {
 	directPanelOpen.value = false;
 	emit("direct-changed");
@@ -4321,6 +4486,10 @@ function settledAccountHealth(m) {
 		// mode-agnostic for whenever that changes.
 		return apiKeyModelHealth(m, sync.value.model_statuses);
 	}
+	// A dead sign-in is decided per account, from the site's own record, and must run BEFORE the
+	// "more than one subscription row -> neutral" short-circuit below.
+	const expiry = rowExpiry(m, props.expiredEntries);
+	if (expiry) return subscriptionAccountHealth("", { expired: expiry.entry });
 	if (singleMode.value) {
 		// Onboarding's one connected account skips the failover-list's multi-row
 		// disambiguation below (there is only ever one row here) but must NOT inherit
@@ -5234,6 +5403,13 @@ const applyMessage = computed(() => {
 // Null hides the strip rather than leaving a bordered, empty band.
 const statusLine = computed(() => {
 	const r = applyResult.value;
+	// admin-v2#630: the status stays pending after a failed attempt. Say so (and
+	// offer Retry now) instead of "Still applying". No promise of an automatic
+	// retry: only a handover is re-driven by the site. A fresh result from an
+	// apply this editor just ran (ok or failed) still wins over this line.
+	if (sync.value.pending && sync.value.attempt_error && !(r && r.kind !== "pending")) {
+		return { kind: "warn", text: "Couldn't apply this change.", retrying: true };
+	}
 	// A failure is already reported inside the open panel, right next to the row it
 	// belongs to. Do not say it twice.
 	if (r && !(r.kind === "failed" && panel.value.open)) {
@@ -5681,6 +5857,9 @@ defineExpose({
 .jv-pool-dot--pending {
 	background: var(--link);
 }
+.jv-pool-dot--expired {
+	background: var(--red);
+}
 /* flex: none + a cap, not 0 1 auto: the label can now carry a provider's own error detail
    (apiKeyModelHealth's `detail`, e.g. a GLM/Z.ai balance message) instead of always being one
    of two fixed short strings - pool.js already truncates the text itself, this is just a
@@ -5896,6 +6075,24 @@ defineExpose({
 	white-space: nowrap;
 	font-size: 11px;
 	color: var(--text-3);
+}
+/* The second line under an expired row (spec 3): full width, below the row's own cluster. */
+.jv-flist-expline {
+	flex: 0 0 100%;
+	margin: 0;
+	font-size: 12px;
+	color: var(--text-2);
+}
+/* The same note on a per-account sub-row; capped like its neighbours so it never pushes the actions. */
+.jv-flist-subrow-note {
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 260px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 11.5px;
+	color: var(--text-2);
 }
 
 /* ---- grouped subscription row (2+ accounts) -----------------------------

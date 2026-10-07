@@ -8,6 +8,9 @@ import {
 	chatStatusLine,
 	isChatSettled,
 	keepsChatCard,
+	nextStepActedKeys,
+	nextStepRefusal,
+	shouldHideNextStep,
 } from "./chatCardActions";
 
 describe("chatCardActions copy", () => {
@@ -212,5 +215,57 @@ describe("chatRefusalMessage prefers the person's words", () => {
 			"This import cannot be run from chat. Use Data Import in Desk."
 		);
 		expect(chatRefusalMessage({ ok: false, error: { message: "Plain" } })).toBe("Plain");
+	});
+});
+
+describe("next-step refusals (propose_next_action)", () => {
+	const modelText = "a card is waiting. Do NOT retry this call; stop and end your turn now.";
+	it("keeps the button and shows the person's words for a temporary refusal", () => {
+		const pending = {
+			ok: false,
+			error: {
+				code: "ConfirmationPendingError",
+				message: modelText,
+				person_message: "Finish or discard the open card first.",
+			},
+		};
+		const r = nextStepRefusal(pending);
+		expect(r.temporary).toBe(true);
+		expect(r.message).toBe("Finish or discard the open card first.");
+		const down = nextStepRefusal({
+			ok: false,
+			error: { code: "ConfirmationUnavailableError", message: modelText },
+		});
+		expect(down.temporary).toBe(true);
+		expect(down.message).not.toContain("do NOT retry");
+		expect(down.message).toBe("Couldn't open the card right now. Try again.");
+	});
+	it("hides the step for a final refusal, never with model-facing text", () => {
+		const r = nextStepRefusal({ ok: false, error: { code: "Other", message: modelText } });
+		expect(r.temporary).toBe(false);
+		expect(r.message).toBe("That next step is not available.");
+	});
+	it("keeps the step for a temporary refusal and hides it for a final one", () => {
+		const temp = nextStepRefusal({ ok: false, error: { code: "ConfirmationPendingError" } });
+		const final = nextStepRefusal({ ok: false, error: { code: "Other" } });
+		expect(shouldHideNextStep(temp)).toBe(false);
+		expect(shouldHideNextStep(final)).toBe(true);
+	});
+	it("counts confirmed and auto_applied receipts as acted, nothing else", () => {
+		const row = (tool_name, action_outcome, name = "SO-1") => ({
+			role: "tool",
+			tool_name,
+			action_outcome,
+			tool_args: JSON.stringify({ doctype: "Sales Order", name }),
+		});
+		const acted = (r) => nextStepActedKeys([r]).has("Sales Order|SO-1");
+		expect(acted(row("submit_doc", "confirmed"))).toBe(true);
+		expect(acted(row("submit_doc", "auto_applied"))).toBe(true);
+		expect(acted(row("apply_workflow_action", "auto_applied"))).toBe(true);
+		for (const o of ["failed", "discarded", "unknown", "partial", "cancelled", ""]) {
+			expect(acted(row("submit_doc", o))).toBe(false);
+		}
+		expect(acted(row("create_doc", "confirmed"))).toBe(false);
+		expect(nextStepActedKeys([], new Set(["A|b"])).has("A|b")).toBe(true);
 	});
 });

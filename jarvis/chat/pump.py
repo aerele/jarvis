@@ -899,15 +899,18 @@ def _reconcile_gateway_active(ctx: "PumpContext", snap: dict | None = None) -> N
 # a live ``jarvis_chat`` lane (isolated parallel turn workers) still landed
 # prepare/finalize on ``long`` behind the hops.
 #
-# Routing (F1 ruling):
+# Routing (F1 ruling, amended by #632):
 #   * a live ``jarvis_chat`` lane  -> ride it (isolated parallel workers, exactly as
 #     the legacy turn path does via ``api._turn_queue``);
-#   * else ``long`` when it has >= 2 live workers (a hop can occupy one while the
-#     other runs prepare/finalize — no self-starvation);
-#   * else ``short`` — the single-``long``-no-``jarvis_chat`` shape. ``short`` is
-#     ALWAYS provisioned, its jobs are bounded, and prepare/finalize carry an
-#     EXPLICIT ``timeout=HOP_TIMEOUT_S`` (180s) that fits comfortably under short's
-#     300s queue envelope (a vision-heavy 4-page-PDF prepare is ~22s).
+#   * else ``short`` when a DEDICATED short consumer is live (a worker listening on
+#     ``short`` and NOT on ``long``). Control jobs are short and latency-critical,
+#     while ``long`` carries multi-minute jobs, so a free short-only worker runs
+#     them at once. Prepare/finalize carry an EXPLICIT ``timeout=HOP_TIMEOUT_S``
+#     (180s) that fits under short's 300s queue envelope;
+#   * else the pre-#632 rule: ``long`` when it has >= 2 live workers, else ``short``.
+#     A generic worker (all queues) is NOT a dedicated short consumer: it also takes
+#     90s hop slices from ``long``, so ``short`` would wait behind them (live on e2e2:
+#     finalize 74-86s late), while ``long`` with >= 2 workers runs on whichever is free.
 
 
 def _live_worker_count(queue_name: str) -> int:
@@ -921,39 +924,66 @@ def _live_worker_count(queue_name: str) -> int:
 	return _probe_worker_count(queue_name) or 0
 
 
+def _has_dedicated_short_consumer() -> bool:
+	"""True when a live RQ worker listens on ``short`` and NOT on ``long``. A generic
+	worker (all queues) does not count: it also runs the 90s hop slices from ``long``.
+	One ``get_workers()`` sweep per call; any probe trouble reads False so the caller
+	keeps the pre-#632 routing."""
+	try:
+		from frappe.utils.background_jobs import generate_qname, get_workers
+
+		short_q = generate_qname("short")
+		long_q = generate_qname(PUMP_QUEUE)
+		for w in get_workers():
+			names = w.queue_names() or []
+			if short_q in names and long_q not in names:
+				return True
+		return False
+	except Exception:
+		return False
+
+
 def _control_queue() -> str:
-	"""RQ queue for the pump's CONTROL jobs (prepare + finalize) — see the block
-	comment above. Never returns the shared ``long`` queue when ``long`` has fewer
-	than 2 live workers (the F1 self-starvation shape); routes to ``short`` there."""
+	"""RQ queue for the pump's CONTROL jobs (prepare + finalize) - see the block
+	comment above. A dedicated ``jarvis_chat`` lane if live, else ``short`` when a
+	dedicated short consumer is live (#632), else the pre-#632 rule (``long`` with
+	>= 2 live workers, otherwise ``short``)."""
 	try:
 		from jarvis.chat.api import _turn_queue
 
 		q = _turn_queue()
 	except Exception:
 		# _turn_queue itself is fully defensive, but if the import/probe blows up,
-		# never share the hop queue on an unknown shape — the bounded `short` lane is
+		# never share the hop queue on an unknown shape - the bounded `short` lane is
 		# always a correct executor for these jobs.
 		return "short"
 	# A dedicated isolated lane (jarvis_chat, or a non-`long` override) never shares
-	# a worker with the hops — ride it as the legacy turn path does.
+	# a worker with the hops - ride it as the legacy turn path does.
 	if q != PUMP_QUEUE:
 		return q
-	# It resolved to `long` (jarvis_chat absent, or overridden to long): only safe to
-	# share with the hops when `long` has >= 2 live workers; otherwise use `short`.
+	if _has_dedicated_short_consumer():
+		return "short"
 	return PUMP_QUEUE if _live_worker_count(PUMP_QUEUE) >= 2 else "short"
 
 
 def _pump_shape_starves() -> bool:
-	"""True on the F1 self-starvation shape: no live ``jarvis_chat`` lane AND the
-	shared ``long`` hop queue has fewer than 2 workers — so a hop and the
-	prepare/finalize it depends on would fight over one worker. Drives the loud
-	``ensure_pump`` provisioning warning (§8-I)."""
-	return _control_queue() == "short"
+	"""True when control jobs have no isolated executor: no live ``jarvis_chat`` lane
+	AND no dedicated short consumer (a worker on ``short`` but not ``long``). Then a
+	prepare/finalize shares workers with the 90s hops (#632 live evidence), so the
+	loud ``ensure_pump`` warning (§8-I) tells operators to add a short-only worker."""
+	try:
+		from jarvis.chat.api import _turn_queue
+
+		if _turn_queue() != PUMP_QUEUE:
+			return False
+	except Exception:
+		pass
+	return not _has_dedicated_short_consumer()
 
 
 def _warn_provisioning_if_starved() -> None:
-	"""§8-I: emit ONE loud provisioning warning (telemetry line + error log) when the
-	site is in the F1 self-starvation shape. Throttled to at most once / 5 min per
+	"""§8-I: emit ONE loud provisioning warning (telemetry line + error log) when no
+	isolated executor exists for control jobs. Throttled to at most once / 5 min per
 	site so the after-every-commit ``ensure_pump`` path never spams. Best-effort."""
 	if not _pump_shape_starves():
 		return
@@ -967,18 +997,19 @@ def _warn_provisioning_if_starved() -> None:
 		# If the throttle store is unavailable, still warn (better loud than silent).
 		pass
 	long_workers = _live_worker_count(PUMP_QUEUE)
-	_telemetry("provision_warning", queue=PUMP_QUEUE, long_workers=long_workers, control_queue="short")
+	_telemetry(
+		"provision_warning", queue=PUMP_QUEUE, long_workers=long_workers, control_queue=_control_queue()
+	)
 	try:
 		frappe.log_error(
-			title="pump.provisioning: single-long-no-jarvis_chat",
+			title="pump.provisioning: no-dedicated-short-worker",
 			message=(
 				"Relay Pump provisioning WARNING: this site has no live `jarvis_chat` "
-				f"worker lane and only {long_workers} live `long` worker(s). Pump hops "
-				"ride `long`; with fewer than 2 `long` workers a 90s hop starves the "
-				"prepare/finalize jobs it enqueues (fresh turns strand for minutes until "
-				"the watchdog backstop). Control jobs are being routed to `short` as a "
-				"mitigation, but the supported shapes are >=2 `long` workers OR a live "
-				"`jarvis_chat` lane. See PUMP-RUNBOOK.md §6 (F1)."
+				"worker lane and no dedicated short-queue worker (a worker listening on "
+				f"`short` but not `long`); {long_workers} live `long` worker(s). Pump hops "
+				"ride `long`, so prepare/finalize share workers with 90s hops and replies "
+				"can finish a minute or more late. Add a worker with `--queue short` "
+				"(not `long`) or a live `jarvis_chat` lane. See PUMP-RUNBOOK.md §6 (F1)."
 			),
 		)
 	except Exception:
@@ -992,11 +1023,11 @@ def _warn_provisioning_if_starved() -> None:
 # customer):
 #   * DEGRADED  -> warn only. Fires when TOTAL live RQ workers (any queue) < 2,
 #     not the stricter F1 "< 2 `long` workers" shape (_pump_shape_starves) used
-#     by the ops provisioning warning. Rationale: the pump already reroutes
-#     prepare/finalize (control) jobs to `short` when `long` has < 2 workers
-#     (`_control_queue`), so 1 `long` worker plus a second worker to run those
-#     control jobs does NOT strand - the stricter "< 2 `long`" rule over-warned
-#     that case. The strand only truly happens with a single worker doing
+#     by the ops provisioning warning. Rationale: the pump routes
+#     prepare/finalize (control) jobs by `_control_queue` (#632), so
+#     1 `long` worker plus a second worker to run those control jobs does NOT
+#     strand - the stricter "< 2 `long`" rule over-warned that case.
+#     The strand only truly happens with a single worker doing
 #     everything, so this warns on total headcount instead. Surfaced as a
 #     non-blocking onboarding banner; chat still works.
 #   * No hard block. RQ's registry can read zero workers while every worker is
@@ -1136,9 +1167,9 @@ def _default_dispatch_prepare(run_id: str, relay_target_id: str) -> None:
 	not exist yet, so it is a no-op-until-WP-1d in production and is ALWAYS replaced
 	by tests.
 
-	QUEUE (F1): routed via ``_control_queue`` — a live ``jarvis_chat`` lane else
-	``long`` (>=2 workers) else ``short`` — NEVER the single-worker ``long`` the hops
-	ride (which would self-starve; see the block comment above)."""
+	QUEUE (F1): routed via ``_control_queue``: a live ``jarvis_chat`` lane, else
+	``short`` when a dedicated short consumer is live, else the pre-#632 rule
+	(see the block comment above)."""
 	try:
 		frappe.enqueue(
 			"jarvis.chat.prepare.run_prepare",
@@ -1163,8 +1194,7 @@ def _default_enqueue_finalize(run_id: str, relay_target_id: str) -> None:
 	bare fixed id would let a hard-killed finalize's stale STARTED registration
 	no-op re-enqueues for the job timeout (the §10.4 dedupe trap).
 
-	QUEUE (F1): routed via ``_control_queue`` (same rule as prepare) — NEVER the
-	single-worker ``long`` the hops ride."""
+	QUEUE (F1): routed via ``_control_queue`` (same rule as prepare)."""
 	try:
 		frappe.enqueue(
 			"jarvis.chat.finalize.run_finalize",
@@ -3476,6 +3506,11 @@ def _settle_recover_errored(
 	err = error or _STALLED_ERROR
 	if not ts.recover_errored(run_id, version, error=err):
 		return False
+	code = _classify_error(err)
+	if code == "subscription-expired":
+		from jarvis import subscription_health
+
+		subscription_health.note_turn_error(err, code)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:
@@ -3496,7 +3531,7 @@ def _settle_recover_errored(
 			run_id=run_id,
 			message_id=assistant_message,
 			error=err,
-			code=_classify_error(err),
+			code=code,
 		)
 	# jarvis#1425 review (live e2e2, 2026-09-27): this path settles WITHOUT
 	# going through invoke_settlement (settlement.py's own poke does not cover
@@ -3601,7 +3636,7 @@ def ensure_pump(relay_target_id: str, *, deps: PumpDeps | None = None) -> dict:
 	if not pump_lifecycle_configured(target):
 		return {"enqueued": False, "reason": "not_configured"}
 
-	# §8-I / F1: if this site is in the single-long-no-jarvis_chat shape, warn LOUDLY
+	# §8-I / F1: if this site has no isolated control-job executor, warn LOUDLY
 	# (throttled). Emitted on the start path so it surfaces even when the pump is
 	# already leased (below) — the shape is a standing provisioning problem, not a
 	# per-hop one. Best-effort, never blocks the start decision.

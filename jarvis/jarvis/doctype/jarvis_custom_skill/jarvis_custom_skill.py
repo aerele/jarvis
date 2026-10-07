@@ -18,7 +18,12 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import ARMED_MACRO_WRITE_FLAG, NotRenamable, has_jarvis_admin_access
+from jarvis.permissions import (
+	ARMED_MACRO_WRITE_FLAG,
+	NotRenamable,
+	has_jarvis_admin_access,
+	refuse_unseen_change,
+)
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
@@ -232,8 +237,9 @@ def _batch_child_values(names: list, child_doctype: str, value_field: str) -> di
 def _refuse_an_armed_macro_write():
 	"""An armed macro's uncarded write never changes a skill: its steps apply skills,
 	and a run that rewrote one would change what its own later runs follow. The gate
-	parks such a call for a card (``api._writes_a_skill``); this refuses one it could
-	not read (a Server Script, a whitelisted method that saves a skill)."""
+	parks such a call for a card (``api._writes_skill_config``); this refuses one it
+	could not read (a Server Script, a whitelisted method that saves a skill).
+	``permissions.refuse_unseen_change`` is the same rule for every uncarded mode."""
 	if frappe.flags.get(ARMED_MACRO_WRITE_FLAG):
 		frappe.throw(
 			_("A macro that runs without asking for confirmation cannot change a skill."),
@@ -244,6 +250,7 @@ def _refuse_an_armed_macro_write():
 class JarvisCustomSkill(NotRenamable, Document):
 	def validate(self):
 		_refuse_an_armed_macro_write()
+		refuse_unseen_change(self)
 		self._validate_slug()
 		self._validate_scope()
 		self._guard_new_scope()
@@ -264,6 +271,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 
 	def on_trash(self):
 		_refuse_an_armed_macro_write()
+		refuse_unseen_change(self)
 		_clear_personal_clause_cache(self.owner)
 		_clear_pushable_org_rows_memo()
 		self._release_slug_reservation()
@@ -615,7 +623,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 			frappe.throw(
 				_(
 					"A shared skill named '{0}' already exists. Two Role/Org skills cannot "
-					"share a name — rename one, or edit the existing shared skill instead."
+					"share a name. Rename one, or edit the existing shared skill instead."
 				).format(self.skill_name)
 			)
 
@@ -674,6 +682,17 @@ class JarvisCustomSkill(NotRenamable, Document):
 		previous = self.get_doc_before_save()
 		if previous and bool(previous.allow_approve_run):
 			return
+		# Never from a tool call, whoever the chat belongs to: the assistant would be
+		# deciding what it may later do unasked. (A confirmed card is a tool call too.)
+		# A job a tool call queued carries the guard's scope, not the dispatch depth.
+		from jarvis.tools import _write_risk
+		from jarvis.tools.registry import in_tool_dispatch
+
+		if in_tool_dispatch() or _write_risk.in_guarded_call():
+			frappe.throw(
+				_("Approve & run is switched on from the skill's own page, not from chat."),
+				frappe.PermissionError,
+			)
 		if not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("Enabling Approve & run requires a Jarvis Admin or System Manager role."),

@@ -271,7 +271,7 @@ const visibleFields = computed(() => [
 				...field,
 				options: [
 					{
-						label: "Review and drafts only — no sending",
+						label: "Review and drafts only: no sending",
 						value: "review_and_drafts_only",
 					},
 				],

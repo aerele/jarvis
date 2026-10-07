@@ -348,7 +348,7 @@ def _record_errors(row, records: list[dict], merged: list[dict], plan: dict, err
 		elif kind == "use_existing":
 			errors[key] = _existing_error(record, entry.get("existing"), row.exec_user)
 		elif key in fix and entry["action"] != "edit":
-			errors[key] = "This record needs a fix: edit it, use an existing one, or skip it."
+			errors[key] = "This record needs a fix: edit it, use an existing one or skip it."
 		elif missing.get(i):
 			left = missing[i] if entry["action"] != "edit" else _still_missing(record, missing[i])
 			if left:

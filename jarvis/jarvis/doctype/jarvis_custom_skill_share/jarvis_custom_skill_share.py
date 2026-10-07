@@ -2,8 +2,8 @@
 
 from frappe.model.document import Document
 
-from jarvis.permissions import NotRenamable
+from jarvis.permissions import ChangedThroughParentOnly, NotRenamable
 
 
-class JarvisCustomSkillShare(NotRenamable, Document):
+class JarvisCustomSkillShare(ChangedThroughParentOnly, NotRenamable, Document):
 	pass

@@ -433,7 +433,9 @@ class TestBulkRerun(_Base):
 	def test_skip_reasons(self):
 		ok_conv = self._failed()
 		live_conv = self._conv()
-		self._file(live_conv)
+		# A different file: the same bytes still processing would hold ok_conv's re-run
+		# as a Duplicate (#663).
+		self._file(live_conv, content="fbr-other-content")
 		self._msg(live_conv, 1, "user", "process this file")
 		foreign_conv = self._failed(owner=OTHER)
 		with (

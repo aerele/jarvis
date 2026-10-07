@@ -198,7 +198,7 @@ def update_my_settings(
 	if support_context_copy_pref is not None:
 		pref = _s(support_context_copy_pref)
 		if pref not in ("", "Yes", "No"):
-			frappe.throw(frappe._("support_context_copy_pref must be Yes, No, or blank."))
+			frappe.throw(frappe._("support_context_copy_pref must be Yes, No or blank."))
 		doc.support_context_copy_pref = pref
 	# ignore_permissions: the row is owner-scoped by construction (we loaded the
 	# caller's own row), and only permlevel-0 pref fields are touched here.

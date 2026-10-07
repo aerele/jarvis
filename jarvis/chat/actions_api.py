@@ -12,6 +12,8 @@ the receipt, so the agent stages the plan's next step without the user typing
 "continue". See ``jarvis.chat.api.enqueue_continuation``.
 """
 
+import re
+
 import frappe
 from frappe import _
 from frappe.utils import cint
@@ -314,8 +316,50 @@ def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str
 	return text + _trigger_enabled_note(doctype, name)
 
 
+_NEGATIVE_ACTION = re.compile(r"reject|cancel|decline|withdraw", re.I)
+
+
+def _suggest_next(doctype: str, name: str) -> dict | None:
+	"""The ONE next step to offer after a draft was created, or None.
+
+	The first non-negative workflow action the caller may take on it now (role,
+	condition and self-approval, via ``get_workflow_transitions``); with no workflow,
+	Submit when the DocType is submittable and the caller holds submit permission.
+	A doc that already left draft (Create & Submit, or moved on) gets nothing.
+	Only ``kind`` and ``action`` are returned: the SPA words the button."""
+	if not name or frappe.db.get_value(doctype, name, "docstatus") != 0:
+		return None
+	from frappe.model.workflow import get_workflow_name
+
+	if get_workflow_name(doctype):
+		from jarvis.tools.get_workflow_transitions import get_workflow_transitions
+
+		actions = get_workflow_transitions(doctype, name).get("available_actions") or []
+		action = next((a["action"] for a in actions if not _NEGATIVE_ACTION.search(a["action"] or "")), None)
+		return {"kind": "workflow", "action": action} if action else None
+	if frappe.get_meta(doctype).is_submittable and frappe.has_permission(doctype, "submit", doc=name):
+		return {"kind": "submit", "action": None}
+	return None
+
+
+def _suggest_next_safe(doctype: str, name: str) -> dict | None:
+	"""A hint must never fail the create it follows."""
+	try:
+		return _suggest_next(doctype, name)
+	except Exception:
+		frappe.log_error(title="apply_action next-step suggestion failed", message=frappe.get_traceback())
+		return None
+
+
 def _append_receipt(
-	conversation: str, verb: str, doctype: str, name: str, args: dict, text: str, submitted: int = 0
+	conversation: str,
+	verb: str,
+	doctype: str,
+	name: str,
+	args: dict,
+	text: str,
+	suggested_next: dict | None = None,
+	submitted: int = 0,
 ) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
@@ -334,7 +378,12 @@ def _append_receipt(
 			"streaming": 0,
 			"tool_name": f"{verb}_doc",
 			"tool_args": frappe.as_json(args),
-			"tool_result": frappe.as_json({"ok": True, "data": data}),
+			"tool_result": frappe.as_json(
+				{
+					"ok": True,
+					"data": {**data, **({"suggested_next": suggested_next} if suggested_next else {})},
+				}
+			),
 			"tool_status": "completed",
 			# This row DID come from a confirmation card - the human pressed Confirm on
 			# the draft - so mark it and let the SPA render the same receipt chip (with
@@ -424,12 +473,17 @@ def apply_action(action: dict | str | None = None) -> dict:
 		else {"doctype": doctype, "name": name, "changes": values}
 	)
 	# Write-risk guard (round 2): a structure change is refused from the panel too
-	# (set up in Desk); sensitive configuration is turned into a gated card below,
-	# since the panel holds the values and its one click is not that card.
+	# (set up in Desk); sensitive configuration, and the guarded structure writes
+	# (one new Custom Field, a column-free Custom Field edit), are turned into a
+	# gated card below, since the panel holds the values and its one click is not
+	# that card.
 	try:
-		_risk = _write_risk.check(tool, args)
+		_risk = _write_risk.check(tool, args, guarded=True)
 	except api.WriteRefusedError as e:
 		return api._refuse_risky_write(tool, args, e)
+	if _risk in _write_risk.GUARDED_STRUCTURE:
+		# The gate refuses it where it cannot be carded (a File Box chat).
+		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
 
 	# A File Box chat's card goes through the File Box policy (filebox_cards), whether
 	# the turn end or this Confirm gets to it first - never straight to the write. The
@@ -566,8 +620,18 @@ def apply_action(action: dict | str | None = None) -> dict:
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
+	suggested_next = _suggest_next_safe(doctype, name) if verb == "create" and not do_submit else None
 	try:
-		_append_receipt(conversation, verb, doctype, name, args, receipt, do_submit)
+		_append_receipt(
+			conversation,
+			verb,
+			doctype,
+			name,
+			args,
+			receipt,
+			suggested_next=suggested_next,
+			submitted=do_submit,
+		)
 		frappe.db.commit()
 	except Exception:
 		# The mutation is already committed - a receipt hiccup must not
@@ -589,6 +653,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 			frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 	slug = doctype.lower().replace(" ", "-")
 	resp = {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
+	if suggested_next:
+		resp["suggested_next"] = suggested_next
 	# SUX-3/SUXI-2: when the continuation turn queued (all slots taken), thread
 	# its run_id + position so the SPA renders the standard queued chip instead
 	# of the card vanishing into silence after the "Change saved" ack clears.
@@ -598,6 +664,80 @@ def apply_action(action: dict | str | None = None) -> dict:
 		resp["run_id"] = _cont.get("run_id")
 		resp["message_id"] = _cont.get("message_id")
 	return resp
+
+
+def _created_in_conversation(conversation: str, doctype: str, name: str) -> bool:
+	"""True when this conversation holds a confirmed create receipt for the record."""
+	# get_all: the caller's ownership of the conversation was checked by the caller.
+	rows = frappe.get_all(
+		"Jarvis Chat Message",
+		filters={
+			"conversation": conversation,
+			"role": "tool",
+			"tool_name": "create_doc",
+			"action_outcome": "confirmed",
+		},
+		pluck="tool_result",
+	)
+	for raw in rows:
+		data = (frappe.parse_json(raw) or {}).get("data") or {}
+		if data.get("doctype") == doctype and data.get("name") == name:
+			return True
+	return False
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def propose_next_action(
+	conversation: str, doctype: str, name: str, kind: str, action: str | None = None
+) -> dict:
+	"""Park the confirmation card for a receipt's suggested next step.
+
+	ALWAYS parks (the force-card flag overrides auto mode, armed macros and
+	autoruns): the button promises a Confirm card and nothing runs from here.
+	The record must be one this conversation confirmed a create for, the caller
+	must be able to read it, and the suggestion is recomputed, so a stale button
+	is refused. Every refusal about the record reads the same, so this is no
+	existence oracle."""
+	refuse_in_tool_dispatch()
+	_require_own_conversation(conversation)
+	unavailable = InvalidArgumentError(_("That next step is not available."))
+	if not (doctype and name and frappe.db.exists("DocType", doctype)):
+		raise unavailable
+	if not _created_in_conversation(conversation, doctype, name):
+		raise unavailable
+	if not frappe.has_permission(doctype, "read", doc=name):
+		raise unavailable
+	suggested = _suggest_next(doctype, name)
+	if not suggested or suggested["kind"] != kind or (kind == "workflow" and suggested["action"] != action):
+		raise unavailable
+	from jarvis import api
+
+	tool, args = ("submit_doc", {"doctype": doctype, "name": name})
+	if kind == "workflow":
+		tool, args = ("apply_workflow_action", {**args, "action": action})
+	prev = frappe.flags.get("jarvis_force_card")
+	frappe.flags["jarvis_force_card"] = True
+	try:
+		res = api._run_tool(tool, args, conversation=conversation)
+	finally:
+		frappe.flags["jarvis_force_card"] = prev
+	return _person_next_refusal(res)
+
+
+def _person_next_refusal(res: dict) -> dict:
+	"""Words for the person on the two TEMPORARY refusals of a next-step click (another
+	card waiting, a retryable storage error): the gate's own text is written for the
+	model ("end your turn now"). The stable ``error.code`` stays, so the SPA keeps the
+	button for these and hides it only for a refusal that is final."""
+	err = res.get("error") if isinstance(res, dict) else None
+	if not isinstance(err, dict):
+		return res
+	if err.get("code") == "ConfirmationPendingError":
+		err["person_message"] = _("Finish or discard the open card first.")
+	elif err.get("code") == "ConfirmationUnavailableError":
+		err["person_message"] = _("Couldn't open the card right now. Try again.")
+	return res
 
 
 def _panel_can_fix(verb: str, doctype: str, name: str, err_obj: dict, marked: bool | None) -> bool:
@@ -1102,9 +1242,15 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		return _INVALID_CONFIRM
 
 	_clear_stale_halt(record.get("conversation"))
+	# A run already open on this chat: this click is one of its cards too.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	# STEP 1: execute the parked write AS the scoped exec_user the gate stored.
 	result = _dispatch_call(record, token, guard_conv, "approve_and_run dispatch crashed")
 	ok = isinstance(result, dict) and bool(result.get("ok"))
+	if not ok:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
 
 	# Announce a step-1 run_import's completion back into the chat (mirror
 	# _confirm_core). Self-gating + best-effort (no-ops unless tool == run_import +
@@ -1231,7 +1377,14 @@ def _confirm_core(
 	if not record:
 		return _INVALID_CONFIRM
 
+	# A card of an approved skill run: the wait for this click does not count
+	# against the run, and a card that fails ends it (as a failed write does).
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	result = _dispatch_call(record, token, guard_conv, "confirm dispatch crashed")
+	if not (isinstance(result, dict) and result.get("ok")):
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
 
 	# Slice B: bind a Jarvis Import Announcement so the import's completion is
 	# announced back into this chat unprompted. Best-effort + self-gating (tool ==

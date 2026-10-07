@@ -596,7 +596,7 @@
 						<span>{{ greeting }}, {{ firstName }}</span>
 					</h1>
 					<p class="jv-welcome-sub">
-						Ask about your ERP data, run a workflow, or draft something.
+						Ask about your ERP data, run a workflow or draft something.
 						{{ agentName }}
 						is connected to your
 						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
@@ -791,6 +791,9 @@
 							v-else-if="m.role === 'tool'"
 							:message="m"
 							:auto-mode="!!convAutoMode"
+							:next-done="nextStepDone(m)"
+							:next-busy="nextBusyKey === m.name"
+							@next-action="proposeNext(m, $event)"
 						/>
 						<!-- user -->
 						<Message
@@ -1104,23 +1107,23 @@
 											@click="retry(m.name)"
 											:disabled="retrying || busy"
 											:style="{
-												marginTop: '10px',
-												display: 'inline-flex',
-												alignItems: 'center',
-												gap: '6px',
-												padding: '6px 12px',
-												background: 'var(--red)',
-												color: '#fff',
-												border: 'none',
-												borderRadius: '7px',
-												fontFamily: 'inherit',
-												fontSize: '12px',
-												fontWeight: '550',
 												cursor: retrying || busy ? 'default' : 'pointer',
 												opacity: retrying || busy ? 0.6 : 1,
 											}"
 										>
 											{{ retrying || busy ? "Retrying…" : retryText }}
+										</button>
+										<!-- Expired chat sign-in: admins get the fix, members the hint above. Same
+										     look as the Retry button (shared .jv-retry class). -->
+										<button
+											v-if="
+												errorInfo(m).action === 'reconnect' &&
+												canConnectModel
+											"
+											class="jv-retry"
+											@click="goReconnectSubscription(errorInfo(m).upstream)"
+										>
+											{{ errorInfo(m).actionLabel }}
 										</button>
 									</div>
 								</div>
@@ -1871,18 +1874,23 @@
 											>{{ modelBadgeOf(m) }}</span
 										>
 									</div>
-									<div
-										v-if="!m.error && !m.streaming && m.content"
-										class="jv-msgbar"
-									>
+									<div v-if="replyBarParts(m).showBar" class="jv-msgbar">
 										<span
 											v-if="msgTime(m)"
 											class="jv-msgtime"
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
+										<!-- hidden (not removed) while streaming so the bar keeps its
+										     height; copying half a reply would be wrong -->
 										<button
 											class="jv-msgbtn"
+											:style="
+												replyBarParts(m).showCopy
+													? null
+													: 'visibility: hidden'
+											"
+											:disabled="!replyBarParts(m).showCopy"
 											@click="copyMsg(m.name, stripBlocks(m.content))"
 											:title="copiedId === m.name ? 'Copied' : 'Copy'"
 										>
@@ -1926,6 +1934,20 @@
 							</template>
 						</Message>
 					</template>
+					<!-- a File Box file's open questions, also on the Approval Board -->
+					<FileBoxWaits
+						v-if="fileboxWaits.length"
+						:items="fileboxWaits"
+						:busy="fileboxWaitBusy"
+						@decide="decideFileboxWait"
+					/>
+					<!-- background reports this chat started, until their results are shown -->
+					<ReportRunCards
+						v-if="reportRuns.length"
+						:items="reportRuns"
+						:busy="busy || convStreaming"
+						@show="showReportResults"
+					/>
 
 					<!-- T5b (design canvas rules 1-2): the goto-morph line, the artifact
 					     activity card, the generic tool/step line and the recovering
@@ -2138,6 +2160,16 @@
 						<div v-if="pa.error" style="margin: 0 14px 10px">
 							<ActionError :error="pa.error" />
 						</div>
+						<!-- What the amber button covers, as text: a title is invisible on
+						     touch and to anyone who does not hover. -->
+						<p
+							v-if="pendingCardOf(pa)?.approve_run"
+							:id="'jv-runnote-' + pa.token"
+							class="jv-action-runnote"
+						>
+							Approve &amp; run runs the rest of this request without asking. Delete,
+							cancel and amend still ask.
+						</p>
 						<div class="jv-action-foot">
 							<template v-if="pendingCardOf(pa)?.approve_run">
 								<!-- Step-by-step stays THIS card's plain confirm - the
@@ -2163,10 +2195,11 @@
 								<button
 									class="jv-action-runall"
 									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
+									:aria-describedby="'jv-runnote-' + pa.token"
 									:title="
 										convStreaming
 											? 'Waiting for the current reply to finish'
-											: 'Approves this step and runs the rest of the plan without asking again'
+											: ''
 									"
 									@click="approveAndRunPending(pa)"
 								>
@@ -2284,6 +2317,27 @@
 							@click="goRenew"
 						>
 							Renew
+						</button>
+					</template>
+				</Banner>
+				<!-- A chat-subscription sign-in expired (jarvis.subscription_health). AFTER the billing
+				     banners (billing wins) and BEFORE the soft worker heads-up and every later banner,
+				     so the specific cause wins over "Replies may be slow" and "Chat may not work yet".
+				     ORDER MATTERS, pinned by readiness.spec.js. A member only gets an entry while their
+				     chats are failing (the server drops it otherwise). -->
+				<Banner
+					v-else-if="subscriptionExpired"
+					type="warning"
+					:title="subscriptionExpired.title"
+					:message="subscriptionExpired.message"
+					style="margin-bottom: 10px"
+				>
+					<template v-if="subscriptionExpired.showReconnect" #action>
+						<button
+							class="jv-btn jv-btn--sm"
+							@click="goReconnectSubscription(subscriptionExpired.upstream)"
+						>
+							Reconnect
 						</button>
 					</template>
 				</Banner>
@@ -3451,6 +3505,7 @@
 								:show-providers="showProviders"
 								:persona-enabled="ui.persona_enabled"
 								:can-add-provider="canConnectModel"
+								:expired-models="expiredModels"
 								@select-model="selectModel"
 								@select-thinking="selectThinking"
 								@add-provider="goConnectModel"
@@ -3749,6 +3804,11 @@
 									{{ sh.name }}
 								</button>
 							</div>
+							<SheetCharts
+								:charts="curCharts"
+								:sheet-name="curSheet.name"
+								:dark="effectiveDark"
+							/>
 							<div class="jv-sheet-scroll">
 								<table class="jv-sheet">
 									<thead v-if="curSheet.rows.length">
@@ -4368,8 +4428,12 @@ import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import SheetCharts from "@/components/SheetCharts.vue";
+import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
 import AnnouncementBanner from "@/components/chat/AnnouncementBanner.vue";
@@ -4394,6 +4458,7 @@ import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
+import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { cellOptions, markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
 import {
@@ -4410,7 +4475,8 @@ import {
 	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
-import { shouldFollowBottom } from "@/lib/chatScroll";
+import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
+import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
@@ -4422,7 +4488,15 @@ import {
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
-import { chatRefusalMessage, chatSettledReason, keepsChatCard } from "@/lib/chatCardActions";
+import {
+	chatRefusalMessage,
+	chatSettledReason,
+	keepsChatCard,
+	nextStepActedKeys,
+	nextStepRefusal,
+	receiptRecord,
+	shouldHideNextStep,
+} from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -4461,8 +4535,15 @@ import {
 	isLlmApplying,
 	isLlmApplyStuck,
 	isContainerUnavailable,
+	subscriptionExpiredBanner,
 	forgetReady,
 } from "@/onboarding/readiness.js";
+import {
+	subscriptionNotice,
+	loadSubscriptionNotice,
+	watchSubscriptionNotice,
+	expiredModelMap,
+} from "@/lib/subscriptionNotice";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner, suspendedBanner } from "@/account/format.js";
 import {
@@ -4731,6 +4812,21 @@ const noAiConnectedMessage = computed(() =>
 );
 function goConnectModel() {
 	store.openSettings("aimodels");
+}
+// Expired chat-subscription sign-in (jarvis.subscription_health). Shared reading, loaded on mount and
+// refetched on the jarvis:subscription_health realtime event (see onMounted / onBeforeUnmount).
+let unwatchSubscriptionNotice = () => {};
+const subscriptionExpired = computed(() =>
+	subscriptionExpiredBanner(subscriptionNotice.expired, canConnectModel)
+);
+// The card and the banner know the upstream, the pool knows account_refs: take the first expired
+// account of that upstream. No match opens the pane without the link.
+function goReconnectSubscription(upstream) {
+	const entry = subscriptionNotice.expired.find((e) => e.upstream === upstream);
+	store.openSettings(
+		"aimodels",
+		entry && entry.account_ref ? { reconnect: entry.account_ref } : null
+	);
 }
 // Billing lifecycle banner. Dismissal is session-only (a ref, not storage): the
 // pre-expiry nudge should return on the next visit, since the deadline has not.
@@ -5668,7 +5764,7 @@ function revealFrame() {
 	// chat just as much as a fresh one. The answer grows downward instead; only
 	// the jump-to-latest arrow is kept honest so the reader can snap to the newest
 	// when they choose. The one-time land on the new turn still happens at send.
-	if (painted) showScrollDown.value = distanceFromBottom() > 140;
+	if (painted) showScrollDown.value = arrowNeeded();
 	if (revealer.pending().length) _revealRaf = requestAnimationFrame(revealFrame);
 }
 function pumpReveal() {
@@ -5920,15 +6016,32 @@ function queuedChipLabel(pos, state) {
 // several times per failed message per render, and classification is a regex
 // walk over the (capped) error text.
 const errorInfoCache = new Map();
+const expiredModels = computed(() => expiredModelMap(subscriptionNotice.expiredModels));
 function errorInfo(m) {
 	const meta = errorMeta.value[m.name] || {};
+	// An admin also learns which subscription upstreams the workspace has, so a stray sign-in-looking
+	// error for one it does not use falls back to the plain authentication copy. A member gets null
+	// (unknown): the rule's strong signals are specific enough on their own.
+	const known = subscriptionNotice.upstreams;
+	// Models whose sign-in the site already holds as expired: a generic failure on one of them is
+	// that sign-in (CLIProxy's dead-sign-in 503 reaches us as a bare "provider internal error").
 	const key = `${m.name}\u0000${m.error}\u0000${meta.code || ""}\u0000${
 		meta.changed_data
-	}\u0000${m.provider || ""}`;
+	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
+		known ? known.join(",") : "-"
+	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels.value)
+		.map(([id, e]) => `${id}:${e.upstream}`)
+		.join(",")}`;
 	let info = errorInfoCache.get(key);
 	if (!info) {
 		info = {
-			...turnErrorInfo(m.error, meta.code, { provider: m.provider }),
+			...turnErrorInfo(m.error, meta.code, {
+				provider: m.provider,
+				admin: canConnectModel,
+				subscriptionUpstreams: known || undefined,
+				model: m.model,
+				expiredModels: expiredModels.value,
+			}),
 			noChange: meta.changed_data === false,
 		};
 		if (errorInfoCache.size > 500) errorInfoCache.clear();
@@ -7722,7 +7835,7 @@ const showOlderCardsNote = computed(
 );
 const olderCardsNoteText = computed(() =>
 	showOlderCardsNote.value
-		? "An earlier action card is still waiting — use its buttons or the Approval Board."
+		? "An earlier action card is still waiting. Use its buttons or the Approval Board."
 		: ""
 );
 const visiblePendingActions = computed(() =>
@@ -8000,8 +8113,8 @@ async function approveAndRunPending(pa) {
 				notify(
 					settledReason ||
 						(expired
-							? "This confirmation expired — tell me the action again to retry it."
-							: "Couldn't confirm — it may have been handled in another tab. Refresh, or ask me to try again."),
+							? "This confirmation expired. Tell me the action again to retry it."
+							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
 					{ type: "error" }
 				);
 				return;
@@ -8117,6 +8230,46 @@ async function discardPending(pa) {
 		store.loadConversations();
 	} finally {
 		inflightTokens.delete(token);
+	}
+}
+
+// Next step offered on a create receipt (#621). The button opens the normal
+// confirm card (the server parks the same card the assistant's own submit /
+// workflow call gets, as the person), then the card is pulled in with the usual
+// resync. It is hidden once a later receipt in the thread acted on that record.
+const nextBusyKey = ref("");
+// The records a submit / workflow receipt already acted on (confirmed, or auto-applied
+// without a card; a failed or discarded one leaves the step open), plus any step a
+// refusal said is gone.
+const nextStepGone = ref(new Set());
+const nextStepActed = computed(() => {
+	return nextStepActedKeys(visibleMessages.value, nextStepGone.value);
+});
+function nextStepDone(m) {
+	if (m.tool_name !== "create_doc") return false;
+	const me = receiptRecord(m);
+	return nextStepActed.value.has(`${me.doctype}|${me.name}`);
+}
+function hideNextStep(step) {
+	nextStepGone.value = new Set(nextStepGone.value).add(`${step.doctype}|${step.name}`);
+}
+async function proposeNext(m, step) {
+	if (nextBusyKey.value || !currentId.value) return;
+	nextBusyKey.value = m.name;
+	try {
+		const r = await api.proposeNextAction(currentId.value, step);
+		if (r && r.ok === false) {
+			const refusal = nextStepRefusal(r);
+			notify(refusal.message, { type: "error" });
+			if (shouldHideNextStep(refusal)) hideNextStep(step);
+			return;
+		}
+		await resyncPendingConfirmations(currentId.value);
+	} catch (e) {
+		notify(errMessage(e, "Could not open that step."), { type: "error" });
+		hideNextStep(step);
+	} finally {
+		nextBusyKey.value = "";
 	}
 }
 
@@ -8302,6 +8455,9 @@ function fallbackCopy(s) {
 // span elapsedOf() treats as the generation duration). So replies show
 // `modified`; user rows keep `creation` (their send time).
 function msgStamp(m) {
+	// A streaming reply shows the latest delta's client time; the server value
+	// (which can be the run start on a resumed row) rules once it has settled.
+	if (m.role === "assistant" && useClientStamp(m)) return null;
 	if (m.role === "assistant" && m.modified) return m.modified;
 	return m.creation;
 }
@@ -8385,7 +8541,7 @@ function cvFile(cv) {
 }
 // ---- artifact preview side panel (ChatGPT/Claude-style: click a card → slide-
 // in panel on the right; PDF/image render directly, xlsx/csv as a table) ----
-// { m, cv, url, kind, conv, content?, sheets?, sheetIdx?, text? }
+// { m, cv, url, kind, conv, content?, sheets?, charts?, sheetIdx?, text? }
 // `conv` is the conversation the artifact was opened FROM. The overlay is
 // absolutely positioned inside the ChatView container, so the AppShell's
 // conversation sidebar stays clickable behind it: the panel routinely outlives
@@ -8405,6 +8561,17 @@ const curSheet = computed(() => {
 	const a = artifact.value;
 	if (!a || a.kind !== "table" || !a.sheets?.length) return { rows: [] };
 	return a.sheets[a.sheetIdx] || { rows: [] };
+});
+// charts the backend read from the xlsx, for the sheet on screen
+const curCharts = computed(() => {
+	const a = artifact.value;
+	return a?.kind === "table"
+		? chartsForSheet(
+				a.charts,
+				curSheet.value.name,
+				a.sheets.map((s) => s.name)
+		  )
+		: [];
 });
 function closeArtifact() {
 	artifact.value = null;
@@ -8436,7 +8603,15 @@ async function openArtifact(m, cv) {
 	try {
 		const r = await api.previewFile(cv.file_url);
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			artifact.value = { m, cv, url, conv, kind: "table", sheets: r.sheets, sheetIdx: 0 };
+			artifact.value = {
+				m,
+				cv,
+				url,
+				conv,
+				kind: "table",
+				...tablePreviewFields(r),
+				sheetIdx: 0,
+			};
 			return;
 		}
 		if (r && r.kind === "text") {
@@ -8693,6 +8868,24 @@ function liveBoxViewFor(m) {
  * worth a line (foldedHead's own "old reply, no duration, no tools" case).
  */
 // Saved tool rows plus tools seen live, never counted twice (liveTurn.turnToolNames).
+const toolRowAssistants = computed(() => {
+	const set = new Set();
+	let cur = null;
+	for (const m of transcript.value) {
+		if (m.role === "user") cur = null;
+		else if (m.role === "assistant") {
+			cur = m.name;
+			if (Array.isArray(m.steps) && m.steps.length) set.add(cur);
+		} else if (m.role === "tool" && cur) set.add(cur);
+	}
+	return set;
+});
+function anyToolRowFor(m) {
+	return (
+		toolRowAssistants.value.has(m.name) ||
+		(liveSteps.value.msgId === m.name && liveSteps.value.steps.length > 0)
+	);
+}
 function toolNamesFor(m, liveTools) {
 	return turnToolNames(activityByAssistant.value[m.name] || [], liveTools);
 }
@@ -8716,6 +8909,9 @@ function boxViewFor(m) {
 			stopped: !!m.stopped,
 			failed: !!m.error && errorInfo(m).code !== "cancelled",
 			showDetail: showActivityDetail.value,
+			// Hide the bar only when we KNOW nothing ran: no tool row of any kind
+			// (activityByAssistant drops chips and no-I/O built-ins) and no saved steps.
+			settled: !anyToolRowFor(m),
 		});
 		return head ? { mode: "folded", head } : null;
 	}
@@ -8727,14 +8923,14 @@ function boxViewFor(m) {
 	// never jumps when the turn settles (it used to freeze at the moment the
 	// answer first showed and then jump to the full span at run:end). A tab
 	// reloaded mid-answer reads the same reload-seeded clock.
-	return {
-		mode: "folded",
-		head: foldedHead({
-			seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
-			toolNames: toolNamesFor(m, visibleActiveTools.value),
-			showDetail: showActivityDetail.value,
-		}),
-	};
+	// No tool or step so far: nothing to show, so no bar to vanish at settle.
+	const head = foldedHead({
+		seconds: runStartMs.value ? (nowMs.value - runStartMs.value) / 1000 : null,
+		toolNames: toolNamesFor(m, visibleActiveTools.value),
+		showDetail: showActivityDetail.value,
+		settled: !anyToolRowFor(m),
+	});
+	return head ? { mode: "folded", head } : null;
 }
 // A turn is in flight (queued, or sent and waiting on run:start) but has no
 // assistant row yet to hang a box on — the synthetic row T5b renders (one
@@ -8868,13 +9064,16 @@ function scrollBottomIfPinned() {
 	// Same rule as the ResizeObserver: streamed text arriving must never RE-PIN a
 	// reader who scrolled up. Only their own scroll does that. Just keep the
 	// jump-to-latest arrow's visibility honest as the thread grows.
-	else showScrollDown.value = distanceFromBottom() > 140;
+	else showScrollDown.value = arrowNeeded();
 }
 // Distance in px from the very bottom of the thread. 0 == pinned to newest.
 function distanceFromBottom() {
 	const el = threadEl.value;
 	if (!el) return 0;
 	return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+function arrowNeeded() {
+	return !!threadEl.value && needsJumpArrow(threadEl.value);
 }
 // Runs on every user scroll: decide whether we're "at the bottom" (keep pinning
 // as new content arrives) and whether to reveal the jump-to-latest arrow.
@@ -8884,7 +9083,7 @@ function onThreadScroll() {
 	_restoreTop = null;
 	const d = distanceFromBottom();
 	pinnedToBottom.value = d <= 80;
-	showScrollDown.value = d > 140;
+	showScrollDown.value = arrowNeeded();
 }
 // Arrow click: smooth-scroll to the newest message and re-pin.
 function jumpToBottom() {
@@ -8912,7 +9111,7 @@ watch(threadInnerEl, (el) => {
 				if (performance.now() > _restoreUntil) _restoreTop = null;
 				else if (Math.abs(threadEl.value.scrollTop - _restoreTop) > 2) {
 					threadEl.value.scrollTop = _restoreTop;
-					showScrollDown.value = distanceFromBottom() > 140;
+					showScrollDown.value = arrowNeeded();
 					return;
 				}
 			}
@@ -8932,7 +9131,7 @@ watch(threadInnerEl, (el) => {
 			// mid-render measurement — scrollHeight momentarily short — read as "at
 			// the bottom" and silently re-attach a reader who had scrolled up.
 			// Update only the arrow's visibility from geometry.
-			else showScrollDown.value = distanceFromBottom() > 140;
+			else showScrollDown.value = arrowNeeded();
 		});
 		threadRO.observe(el);
 		// Also reconcile on VIEWPORT size changes (composer growth, on-screen
@@ -9049,10 +9248,95 @@ function _checkPulseOnce(id) {
 	maybeOpenPulseFeedback();
 }
 
+// A File Box file's chat shows what the file waits on, the same items the Approval
+// Board lists: its questions are answered here as on the board. Re-read on every load
+// (a run's end reloads the chat, which is when a new question appears).
+const fileboxWaits = ref([]);
+const fileboxWaitBusy = ref("");
+// Background reports this chat started: a card each until Jarvis shows the results.
+// Re-read on every load, on Frappe's report_generated event, and every 15s while one
+// is still preparing (an errored run sends no event).
+const reportRuns = ref([]);
+const REPORT_POLL_MS = 15000;
+let _reportPoll = null;
+async function refreshReportRuns(id) {
+	if (!id) {
+		reportRuns.value = [];
+		return;
+	}
+	try {
+		const r = await api.chatReportRuns(id);
+		if (currentId.value === id) reportRuns.value = (r && r.items) || [];
+	} catch (e) {
+		// best-effort: asking Jarvis still finds the report
+	}
+}
+watch(
+	() => reportRuns.value.some((r) => r.status === "preparing"),
+	(preparing) => {
+		clearInterval(_reportPoll);
+		_reportPoll = preparing
+			? setInterval(
+					() => document.hidden || refreshReportRuns(currentId.value),
+					REPORT_POLL_MS
+			  )
+			: null;
+	}
+);
+function onReportGenerated() {
+	if (reportRuns.value.some((r) => r.status === "preparing")) refreshReportRuns(currentId.value);
+}
+function showReportResults(item) {
+	if (busy.value || convStreaming.value) return;
+	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
+}
+async function refreshFileboxWaits(id, isFileBox) {
+	if (!id || !isFileBox) {
+		fileboxWaits.value = [];
+		return;
+	}
+	try {
+		const r = await api.fileboxOpenWaits(id);
+		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
+	} catch (e) {
+		// best-effort: the board still lists them
+	}
+}
+async function decideFileboxWait(item, text, approve) {
+	if (fileboxWaitBusy.value || !text) return;
+	const id = currentId.value;
+	fileboxWaitBusy.value = item.name;
+	try {
+		await api.decideApproval(item.name, text, approve);
+		notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
+			type: "success",
+		});
+		store.refreshApprovalsCount?.();
+	} catch (e) {
+		notifyActionError("Couldn't send that answer", e);
+	} finally {
+		fileboxWaitBusy.value = "";
+	}
+	// the decision resumes the run in this chat: show it, and re-read what is left
+	if (id && currentId.value === id) loadConversation(id).catch(() => {});
+}
+// Whether the last loadConversation picked a live reply back up (read by checkSilentRun),
+// and when the open chat last heard from its run. Declared before loadConversation: a
+// watcher may load during setup.
+let _lastLoadResumed = false;
+let _lastRunSignalAt = Date.now();
+function noteRunSignal() {
+	_lastRunSignalAt = Date.now();
+}
 async function loadConversation(id) {
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
 	const _sameConv = _shownConvId === id;
+	if (!_sameConv) {
+		// another chat's cards must not linger (or be acted on) while this one loads
+		fileboxWaits.value = [];
+		reportRuns.value = [];
+	}
 	const _keepScrollTop =
 		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
@@ -9068,6 +9352,8 @@ async function loadConversation(id) {
 	if (!id) {
 		resetAutoModeFor(true);
 		messages.value = [];
+		fileboxWaits.value = [];
+		reportRuns.value = [];
 		originPage.value = "";
 		originOf.value = "";
 		modelOverride.value = "";
@@ -9151,6 +9437,8 @@ async function loadConversation(id) {
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
 	resyncQueuedTurn(id);
+	refreshFileboxWaits(id, d?.conversation?.file_box);
+	refreshReportRuns(id);
 	// Seed Up/Down recall from THIS conversation's past prompts. Without this,
 	// promptHistory only held prompts typed in the current page session, so
 	// after a reload or when opening an existing chat the arrows did nothing.
@@ -9176,9 +9464,9 @@ async function loadConversation(id) {
 		.find((m) => m.role === "assistant" && m.streaming);
 	let _resumed = false;
 	if (_streaming) {
-		const fresh =
-			_streaming.modified &&
-			new Date() - new Date(_streaming.modified.replace(" ", "T")) < 5 * 60 * 1000;
+		// Recently written, or its turn has not ended on the server (#591: a long tool
+		// call writes nothing for minutes, and reopening the chat showed it stopped).
+		const fresh = streamingRowIsLive(_streaming);
 		if (fresh && _streaming.recovering) {
 			// Parked for background recovery: show the recovering banner but fully
 			// UNLOCK the composer (clear the whole in-flight state we may have
@@ -9267,6 +9555,7 @@ async function loadConversation(id) {
 	// (run ended while we were on another route, or a stale streaming=1 flag),
 	// clear it — otherwise the dot pulses forever. A dot on a DIFFERENT
 	// conversation is left alone: its live socket deltas keep it honest.
+	_lastLoadResumed = _resumed;
 	if (!_resumed && store.streamingConvId === id) store.streamingConvId = null;
 	// F3 (defensive resync parity): if this (re)load shows the in-flight reply already
 	// settled — no fresh streaming row — but a live run left the streaming-activity block
@@ -9307,7 +9596,8 @@ async function loadConversation(id) {
 		// growth then flung the reader to the newest text. Their intent is already
 		// known (they scrolled up), so state it instead of re-deriving it.
 		pinnedToBottom.value = false;
-		showScrollDown.value = true;
+		// Geometry, not a blanket true: a short chat that fits has nothing to jump to.
+		showScrollDown.value = arrowNeeded();
 	} else {
 		// A genuinely fresh open: land on the newest message.
 		pinnedToBottom.value = true;
@@ -9724,24 +10014,9 @@ async function retry(messageId) {
 }
 
 function resendFailed(m) {
-	// Re-send a message whose POST failed. Guard FIRST so we never drop the
-	// bubble when we can't actually resend: bail if a turn or dictation is
-	// active, or if there's no plain text (e.g. an attachment-only message,
-	// whose file can't be re-attached from the bubble). Then swap the failed
-	// bubble for a fresh optimistic one via send().
-	if (sending.value || micState.value === "recording" || voiceBusyCount.value > 0) return;
-	const txt = (m.content || "").replace(/\n*📎[^\n]*$/, "").trim();
-	if (!txt) return;
-	messages.value = messages.value.filter((x) => x.name !== m.name);
-	// VR4-2: this failed bubble is being REPLACED by a fresh send — drop its origin-scoped pending
-	// record so it isn't re-injected as a stale duplicate on return. A new failure records a new one.
-	// The bubble is on screen, so its origin is the current scope.
-	_pendingSends.remove(_currentScope(), m.name);
-	// Carry the ORIGINAL send's voice-release token: the first send failed (so its committed
-	// clips were never released), and this resend delivers the SAME text — on success it must
-	// release exactly those records (R2-1 inverse: a failed-bubble resend has fromMain=false and
-	// otherwise never releases delivered voice audio → a mirror leak + a guard that never clears).
-	send(txt, m.voiceAck || null);
+	// The original request lives on the scope-owned failed bubble. send() checks
+	// every guard before replacing it; a blocked Retry must never lose work.
+	return send({ retryBubble: m }, m.voiceAck || null);
 }
 
 // One-shot viewing context from a "Discuss in chat" hand-off (chatPrefill's
@@ -9767,10 +10042,21 @@ async function send(textArg, resendAck) {
 	// a successful main-composer send its transcribed recordings become durable, so their
 	// retained audio + leave guard can be released.
 	const _sentScope = _currentScope();
-	const fromMain = typeof textArg !== "string";
-	const text = (fromMain ? input.value : textArg).trim();
+	const retryBubble = textArg?.retryBubble;
+	if (
+		retryBubble &&
+		(busy.value ||
+			!retryBubble.sendRequest ||
+			retryBubble.sendRequest.conversation !== (currentId.value || "") ||
+			!_pendingSends.peek(_sentScope).some((bubble) => bubble.name === retryBubble.name))
+	)
+		return;
+	const fromMain = !retryBubble && typeof textArg !== "string";
+	const text = retryBubble
+		? retryBubble.sendRequest.text
+		: (fromMain ? input.value : textArg).trim();
 	const compactCmd = parseCompactCommand(text);
-	if (compactCmd) {
+	if (compactCmd && !retryBubble) {
 		if (fromMain) input.value = "";
 		if (compacting.value) {
 			notify("Already compacting this chat", { type: "info" });
@@ -9821,7 +10107,11 @@ async function send(textArg, resendAck) {
 	// the server accepts it, so their chips can stop reading like leftover clutter next to an
 	// already-answered message.
 	const _failedAtSend = fromMain && voiceStore ? voiceStore.failedIdsForScope(_sentScope) : [];
-	const attachments = fromMain ? pendingFiles.value.slice() : [];
+	const attachments = retryBubble
+		? retryBubble.sendRequest.attachments.map((file) => ({ ...file }))
+		: fromMain
+		? pendingFiles.value.slice()
+		: [];
 	if ((!text && !attachments.length) || sending.value) return;
 	// canSend already darkens the Send button, but Enter routes here directly (onKey
 	// preventDefaults and calls send()), and a programmatic send never sees the button
@@ -9886,6 +10176,60 @@ async function send(textArg, resendAck) {
 	// Auto mode is chosen with the chat's FIRST message only: decided here, before
 	// the optimistic bubble below lands in messages (autoView ignores it either way).
 	const _sendAutoMode = autoView.value.visible && !autoView.value.locked && autoView.value.on;
+	// The conversation we're sending FROM. The user may switch to another chat
+	// while this POST is in flight, so all post-send reconciliation gates on
+	// "still on the chat we sent from" — never yank them back to this one.
+	const sentFrom = retryBubble ? retryBubble.sendRequest.conversation : currentId.value || "";
+	// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
+	// successful send, so a rejected send (and its Retry) keeps grounding armed.
+	const groundWiki = groundNextTurn.value;
+	let sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
+	// Create → Create a trigger: keep the triggers page marker on every send so
+	// the agent stays in trigger-building mode through the whole Q&A. (The
+	// one-shot _prefillSendContext is cleared after the send is accepted, below,
+	// so a rejected send keeps it armed for retry.)
+	if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
+	// Connector-focus pill: carries every turn while armed (not one-shot like
+	// groundWiki/triggerMode above), so a rejection/resend needs no special
+	// handling — connectorFocus.value itself is untouched by a failed send.
+	// Captured now (not read again after the POST) so a clear mid-flight can't
+	// change what this SPECIFIC turn asked for.
+	const _sentFocus = retryBubble
+		? retryBubble.sendRequest.context?.focus_connector
+		: connectorFocus.value;
+	if (_sentFocus)
+		sendCtx = {
+			...(sendCtx || {}),
+			focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
+		};
+	// The confirmation cards currently on screen, in the order the numbers are
+	// shown, so a typed "confirm 2" binds to the card the user actually sees.
+	// Deliberately confirm-only (step-by-step): send_message forwards these
+	// tokens to confirm_tool server-side, never approve_and_run - a typed
+	// go-ahead can only ever resolve a card one confirm at a time. Approve & run
+	// is reachable ONLY through the card's own button (approveAndRunPending),
+	// by design (the typed shortcut pins to step-by-step, §3.5).
+	const approvalTokens = visiblePendingActions.value.map((a) => a.token);
+	// A chat started from the home screen has no conversation to save a model or
+	// thinking pick on, so the first send carries it.
+	const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
+	const sendRequest = retryBubble
+		? JSON.parse(JSON.stringify(retryBubble.sendRequest))
+		: JSON.parse(
+				JSON.stringify({
+					conversation: sentFrom,
+					text,
+					attachments,
+					context: sendCtx,
+					approvalTokens,
+					model: _picks.model,
+					thinking: _picks.thinking,
+					autoMode: _sendAutoMode,
+					// Local provenance: consume only the one-shot context this request owned.
+					prefillContext: _prefillSendContext,
+					groundWiki,
+				})
+		  );
 	// Hold a stable REFERENCE to the optimistic bubble (VR4-2): a mid-send conversation switch
 	// replaces messages.value, so on rejection we mutate/re-inject THIS object rather than a
 	// messages.value.find() that returns nothing once the array was swapped by loadConversation().
@@ -9899,7 +10243,12 @@ async function send(textArg, resendAck) {
 		// resend of this very bubble releases the SAME recordings this send would have (R2-1).
 		// Omitted when there is no dictated audio to release.
 		voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
+		sendRequest,
 	};
+	if (retryBubble) {
+		messages.value = messages.value.filter((bubble) => bubble.name !== retryBubble.name);
+		_pendingSends.remove(_sentScope, retryBubble.name);
+	}
 	messages.value = [...messages.value, _optBubble];
 	await nextTick();
 	// Two things, in this order, and both matter:
@@ -9914,55 +10263,20 @@ async function send(textArg, resendAck) {
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 	try {
-		// The conversation we're sending FROM. The user may switch to another chat
-		// while this POST is in flight, so all post-send reconciliation gates on
-		// "still on the chat we sent from" — never yank them back to this one.
-		const sentFrom = currentId.value || "";
-		// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
-		// successful send, so a rejected send (and its Retry) keeps grounding armed.
-		const groundWiki = groundNextTurn.value;
-		let sendCtx = groundWiki ? { ground_wiki: 1 } : _prefillSendContext || undefined;
-		// Create → Create a trigger: keep the triggers page marker on every send so
-		// the agent stays in trigger-building mode through the whole Q&A. (The
-		// one-shot _prefillSendContext is cleared after the send is accepted, below,
-		// so a rejected send keeps it armed for retry.)
-		if (triggerMode.value) sendCtx = { ...(sendCtx || {}), page: "triggers" };
-		// Connector-focus pill: carries every turn while armed (not one-shot like
-		// groundWiki/triggerMode above), so a rejection/resend needs no special
-		// handling — connectorFocus.value itself is untouched by a failed send.
-		// Captured now (not read again after the POST) so a clear mid-flight can't
-		// change what this SPECIFIC turn asked for.
-		const _sentFocus = connectorFocus.value;
-		if (_sentFocus)
-			sendCtx = {
-				...(sendCtx || {}),
-				focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
-			};
-		// The confirmation cards currently on screen, in the order the numbers are
-		// shown, so a typed "confirm 2" binds to the card the user actually sees.
-		// Deliberately confirm-only (step-by-step): send_message forwards these
-		// tokens to confirm_tool server-side, never approve_and_run - a typed
-		// go-ahead can only ever resolve a card one confirm at a time. Approve & run
-		// is reachable ONLY through the card's own button (approveAndRunPending),
-		// by design (the typed shortcut pins to step-by-step, §3.5).
-		const approvalTokens = visiblePendingActions.value.map((a) => a.token);
-		// A chat started from the home screen has no conversation to save a model or
-		// thinking pick on, so the first send carries it.
-		const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);
 		const r = await api.sendMessage(
-			sentFrom,
-			text,
-			_picks.model,
-			attachments,
-			sendCtx,
-			approvalTokens,
+			sendRequest.conversation,
+			sendRequest.text,
+			sendRequest.model,
+			sendRequest.attachments,
+			sendRequest.context,
+			sendRequest.approvalTokens,
 			// Same voice-ack token voiceDictationStore.captureSentInPayload already
 			// computed above (for releasing local audio blobs) — non-empty iff this
 			// payload's text came from a dictation, so reuse it verbatim rather than
 			// adding new detection logic.
 			!!(_voiceAck && _voiceAck.length),
-			_sendAutoMode,
-			_picks.thinking
+			sendRequest.autoMode,
+			sendRequest.thinking
 		);
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
 		// must not fall into the rejection branch below even when the confirmation
@@ -9985,13 +10299,12 @@ async function send(textArg, resendAck) {
 			const _plan = planRejectedSend({
 				fromMain,
 				bubbleVoiceAck: _optBubble.voiceAck,
+				preserveRequest: !!retryBubble || attachments.length > 0,
 			});
 			if (_plan.keepBubble) {
-				// A failed-bubble RESEND of transcribed recordings: KEEP its bubble as failed carrying
-				// the SAME voiceAck so the user can resend again and eventually release them —
-				// dropping it would strand those records behind an armed leave guard with no chip
-				// and no action (R3-3). Store it ORIGIN-scoped so it survives a mid-send switch,
-				// and show it now if the origin is still on screen (VR4-2).
+				// Keep the complete request (including files and any voice token) retryable.
+				// A text-only composer fallback cannot represent it. Store it in its
+				// originating scope, even if another conversation is now on screen.
 				_optBubble.failed = true;
 				_pendingSends.add(_sentScope, _optBubble);
 				if (_originOnScreen && !messages.value.some((x) => x.name === tmpName))
@@ -10063,13 +10376,19 @@ async function send(textArg, resendAck) {
 			// rather than stranding them until a reload (self-heal).
 			clearHold();
 		}
-		// Send accepted — the one-shot grounding/prefill context is now consumed.
+		// An accepted send consumes only its own one-shot context. A retry must
+		// not consume a newer selection made in the current composer.
 		// Cleared HERE, not before the await: a rejected send (r.ok === false, above)
 		// returns before reaching this line, and a thrown send never reaches it either
 		// (see the catch block below) — so a retry after either failure still carries
 		// the same prefill context instead of silently sending without it.
-		if (groundWiki) groundNextTurn.value = false;
-		_prefillSendContext = null; // one-shot: only the prefill's first send carries it
+		if (JSON.stringify(_prefillSendContext) === JSON.stringify(sendRequest.prefillContext)) {
+			// Prefill is view-wide: consume it even if the user has switched chats.
+			// Wiki selection belongs to the current chat, so keep its scope guard.
+			if (_currentScope() === _sentScope && groundWiki && sendRequest.groundWiki)
+				groundNextTurn.value = false;
+			_prefillSendContext = null;
+		}
 		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
 		// the recordings this send captured (audio + leave guard). Payload-bound, so a same-scope
 		// recording that committed while this POST was in flight is NOT released, and a
@@ -10128,7 +10447,8 @@ async function send(textArg, resendAck) {
 			// Same visibility-independent reasoning as the promotion above: the pick
 			// this turn actually carried belongs to the conversation the server just
 			// created/used for it, whether or not that's still on screen.
-			if (_sentFocus) _saveConnectorFocusFor(r.conversation_id, _sentFocus);
+			if (sendRequest.context?.focus_connector)
+				_saveConnectorFocusFor(r.conversation_id, sendRequest.context.focus_connector);
 			// Mirror the server's flag from the send response itself (no reload needed).
 			// Only when the response carries it: a typed approval returns the confirmed
 			// form without the key, and that must not unlock an auto-mode chat.
@@ -10289,6 +10609,7 @@ function onEvent(p) {
 	if (p.conversation_id !== currentId.value) return;
 	if (p.run_id && p.run_id === stoppedRunId.value) return; // user stopped this run
 	if (p.message_id && stoppedMsgIds.value.has(p.message_id)) return; // …incl. a later "recovered" run for a stopped reply
+	noteRunSignal();
 	switch (p.kind) {
 		case "run:recovering":
 			// A managed turn was parked for background recovery (a connection
@@ -10469,6 +10790,9 @@ function onEvent(p) {
 			// live turn's own row now, blank or not, because it IS the box.
 			m.content = revealer.receive(p.message_id, answer);
 			m.streaming = true;
+			// Client time of the latest delta: the reply's time shows from its first
+			// words and, at the end, equals when the text finished.
+			stampDeltaTime(m);
 			pumpReveal();
 			nextTick(scrollBottomIfPinned);
 			break;
@@ -10639,10 +10963,6 @@ function onEvent(p) {
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
 			if (m) m.streaming = false;
-			// The copy bar shows with the answer, so give it a time now rather
-			// than when the enrichment reload brings the saved one (msgTime).
-			if (m && !m.modified && !m.creation && !m.creation_browser)
-				m.creation_browser = Date.now();
 			// One-off smile on the brand avatar the moment the answer lands. Success
 			// terminal only: the stop/abort path (stopRun) and the error case never
 			// reach here, and we still skip a row that resolved to an error or stopped
@@ -12165,6 +12485,40 @@ function onResync() {
 	// chat; here we just avoid an unhandled rejection on the dead id.
 	loadConversation(currentId.value).catch(() => {});
 }
+// A busy chat that heard nothing from its run for SILENT_RUN_RESYNC_MS (#590): a dropped
+// socket or a workspace that stopped responding leaves no terminal event, and the
+// spinner and Stop button used to stay up until a reload. Re-read the chat (which
+// resumes a live reply) and the workspace's availability; stop spinning only when the
+// server has nothing running or queued for this chat. Once per silent stretch.
+watch(busy, (b) => {
+	if (b) noteRunSignal();
+});
+let _silentCheck = false;
+async function checkSilentRun() {
+	const id = currentId.value;
+	if (!id || booting.value || _silentCheck || !isSilentRun(busy.value, _lastRunSignalAt)) return;
+	_silentCheck = true;
+	noteRunSignal();
+	try {
+		forgetReady();
+		isContainerUnavailable()
+			.then((v) => {
+				containerUnavailable.value = v;
+			})
+			.catch(() => {});
+		await loadConversation(id);
+		if (currentId.value !== id) return;
+		const r = await api.getActiveTurn(id);
+		if (currentId.value !== id) return;
+		const preStream = (r && r.ok && r.active) || null;
+		if (shouldStopSpinning({ busy: busy.value, resumed: _lastLoadResumed, preStream }))
+			clearStreamingActivity();
+	} catch (e) {
+		// best-effort: the next silent stretch tries again
+	} finally {
+		_silentCheck = false;
+	}
+}
 function onVisibility() {
 	if (document.visibilityState === "visible") onResync();
 	// Going to the background stops requestAnimationFrame, so anything mid-reveal
@@ -12251,6 +12605,7 @@ onMounted(async () => {
 	socket?.on("jarvis:event", onEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
+	socket?.on("report_generated", onReportGenerated);
 	document.addEventListener("visibilitychange", onVisibility);
 	// Auto-heal (layered design, phase 1): window `focus` closes the gap visibility
 	// misses (OS focus returning to an already-visible tab, e.g. multi-monitor). Routes
@@ -12331,6 +12686,10 @@ onMounted(async () => {
 			llmApplyStuck.value = v;
 		})
 		.catch(() => {});
+	// ...and the expired chat sign-in (jarvis.subscription_health): one shared, realtime-refreshed
+	// reading. Same fail-open posture: an unreachable backend just leaves the banner off.
+	loadSubscriptionNotice();
+	unwatchSubscriptionNotice = watchSubscriptionNotice(socket);
 	document.addEventListener("pointerdown", onDocClick);
 	window.addEventListener("keydown", onGlobalKey);
 	// Never-lost guard: warn on tab close/reload while any dictated clip is
@@ -12339,6 +12698,7 @@ onMounted(async () => {
 	_thinkTimer = setInterval(() => {
 		thinkTick.value = busy.value ? thinkTick.value + 1 : 0;
 		if (busy.value) nowMs.value = Date.now();
+		checkSilentRun();
 	}, 1000);
 	// "Discuss in chat" hand-off (Review tab → chatPrefill stash). Take the
 	// stash on EVERY mount — a stale prompt must never survive to pop into the
@@ -12464,6 +12824,9 @@ onBeforeUnmount(() => {
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
+	socket?.off("report_generated", onReportGenerated);
+	clearInterval(_reportPoll);
+	unwatchSubscriptionNotice();
 	document.removeEventListener("visibilitychange", onVisibility);
 	window.removeEventListener("focus", onResync);
 	document.removeEventListener("pointerdown", onDocClick);
@@ -12603,6 +12966,24 @@ onUnmounted(() => {
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);
+}
+.jv-retry {
+	margin-top: 10px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	background: var(--red);
+	color: #fff;
+	border: none;
+	border-radius: 7px;
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 550;
+	cursor: pointer;
+}
+.jv-retry + .jv-retry {
+	margin-left: 8px;
 }
 .jv-retry:hover {
 	filter: brightness(0.94);
@@ -15705,6 +16086,12 @@ onUnmounted(() => {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+.jv-action-runnote {
+	margin: 0 14px 10px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--text-3);
 }
 .jv-action-discard {
 	margin-left: auto;

@@ -401,9 +401,9 @@ def _stamp_sync_status(result: dict) -> None:
 		if result.get("skipped"):
 			return
 		if result.get("ok"):
-			status = f"OK — {result.get('pushed_files', 0)} file(s) pushed"
+			status = f"OK: {result.get('pushed_files', 0)} file(s) pushed"
 		else:
-			status = f"Failed — {result.get('reason', 'see Error Log')}"
+			status = f"Failed: {result.get('reason', 'see Error Log')}"
 		frappe.db.set_single_value(
 			SETTINGS,
 			{

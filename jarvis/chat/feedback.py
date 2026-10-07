@@ -29,6 +29,7 @@ mismatch IS the rollover.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 
 import frappe
 
@@ -265,8 +266,12 @@ PULSE_SURVEY_CADENCE = "Monthly"
 PULSE_MAX_OFFERS = 3
 #: The window "used this period" is measured over. Monthly cadence -> the last
 #: 30 days (spec: "monthly -> last 30 days"), a rolling window rather than the
-#: calendar bucket, so a survey offered on the 2nd still has something to show.
+#: calendar bucket. While the survey reviews the previous month the window
+#: instead starts on that month's 1st - see ``_pulse_window_start``.
 _PULSE_WINDOW_DAYS = 30
+#: Through this day of the month the survey reviews the PREVIOUS month: on the
+#: 1st the user has barely used Jarvis yet this month.
+_PULSE_PREVIOUS_MONTH_DAYS = 10
 #: Bound on the free-text "is Jarvis solving your business use case?" answer.
 _MAX_USE_CASE = 1000
 
@@ -285,20 +290,63 @@ def _pulse_state_columns_present() -> bool:
 		return False
 
 
-def _pulse_window_start():
-	"""Start of the rolling usage window the survey asks about."""
-	return frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-_PULSE_WINDOW_DAYS)
-
-
-def _pulse_period_label(now=None) -> str:
-	"""Badge text for the dialog, e.g. "This month, Sep 2026"."""
+def _pulse_window_start(now=None):
+	"""Start of the usage window the survey asks about: the 1st (00:00) of the
+	reviewed month while it is the previous one, else the rolling 30 days."""
 	now = now or frappe.utils.now_datetime()
-	return now.strftime("This month, %b %Y")
+	if now.day <= _PULSE_PREVIOUS_MONTH_DAYS:
+		return _last_day_of_previous_month(now).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+	return frappe.utils.add_to_date(now, days=-_PULSE_WINDOW_DAYS)
 
 
-def _turns_since(user: str, since) -> int:
+def _pulse_window_end(now=None):
+	"""Exclusive end of the window: the 1st (00:00) of the current month while
+	the survey reviews the previous one, so this month's activity is not read as
+	last month's. None (open-ended) once the current month is the one reviewed."""
+	now = now or frappe.utils.now_datetime()
+	if now.day <= _PULSE_PREVIOUS_MONTH_DAYS:
+		return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+	return None
+
+
+def _stored_key_is_ahead(stored: str | None, current: str) -> bool:
+	"""True when ``stored`` is a later month than ``current``.
+
+	Days 1..10 compute the PREVIOUS month's key, so a key stored by the earlier
+	behaviour (which stamped the current month on those days) reads as ahead and
+	means "already offered or answered for a later period", not "a different period to re-ask". Both are
+	``M:YYYY-MM`` (``PULSE_SURVEY_CADENCE`` is fixed), which sort
+	chronologically; any other prefix is not comparable and counts as not ahead."""
+	return bool(stored) and stored.startswith("M:") and current.startswith("M:") and stored > current
+
+
+def _pulse_period(now=None) -> tuple[str, str, bool]:
+	"""The month the survey reviews, as ``(period_key, badge_label, is_previous)``.
+
+	Days 1..``_PULSE_PREVIOUS_MONTH_DAYS`` review the previous calendar month
+	(January -> December of the year before), later days the current one. The
+	label reads e.g. "Last month, Sep 2026" or "This month, Oct 2026"."""
+	from jarvis.chat.usage import current_period_key
+
+	now = now or frappe.utils.now_datetime()
+	is_previous = now.day <= _PULSE_PREVIOUS_MONTH_DAYS
+	reviewed = _last_day_of_previous_month(now) if is_previous else now
+	prefix = "Last month, " if is_previous else "This month, "
+	return (
+		current_period_key(PULSE_SURVEY_CADENCE, reviewed),
+		reviewed.strftime(prefix + "%b %Y"),
+		is_previous,
+	)
+
+
+def _last_day_of_previous_month(now):
+	return now.replace(day=1) - timedelta(days=1)
+
+
+def _turns_since(user: str, since, until=None) -> int:
 	"""Total settled turns across this user's OWN conversations last active
-	since ``since``.
+	in ``[since, until)`` (open-ended when ``until`` is None). A bounded window
+	is gated on the user's own messages instead - see ``_user_messages_between``.
 
 	A real SUM of the maintained ``turn_count`` counter, not a proxy like "has a
 	conversation": a user who opened chats but never sent anything has not used
@@ -316,12 +364,60 @@ def _turns_since(user: str, since) -> int:
 	from frappe.query_builder.functions import Sum
 
 	conv = frappe.qb.DocType(CONV)
+	if until:
+		return _user_messages_between(user, since, until)
 	rows = (
 		frappe.qb.from_(conv)
 		.select(Sum(conv.turn_count).as_("total"))
 		.where((conv.owner == user) & (conv.last_active_at >= since))
 	).run(as_dict=True)
 	return int((rows[0].total if rows else 0) or 0)
+
+
+#: ``Jarvis Chat Message.origin`` values written for something a person did.
+_HUMAN_ORIGINS = ("", "human", "board_answer")
+
+
+def _user_messages_between(user: str, since, until) -> int:
+	"""1 if the user sent a message in ``[since, until)``, else 0 (an existence
+	check, which is all the gate needs).
+
+	Bounded windows cannot use ``last_active_at``: it is one value per
+	conversation, bumped on every message, so a user who chatted all of last
+	month in one long-lived conversation and wrote again this month would read
+	as having no last-month activity. Messages own their ``creation``; the join
+	runs on the indexed ``conversation`` link and stops at the first row.
+	Only messages a person produced count, matching the open-ended path where
+	``turn_count`` never advances on ``file_box`` / ``agent_initiated``
+	conversations: those conversations are excluded, and so are user rows
+	written by a server path (``delegated``, ``macro``, ``continuation``,
+	``file_box``, ``agent``, ``system``). ``human`` is a typed send,
+	``board_answer`` an answer the person gave on an approval card, and blank is
+	a legacy row from before ``origin`` was stamped. ``hidden`` rows are
+	continuations the user did not type.
+
+	A ``delegated`` row in an ordinary conversation is deliberately not counted
+	here, although the open-ended path (``turn_count``) does count its turn."""
+	msg = frappe.qb.DocType(MSG)
+	conv = frappe.qb.DocType(CONV)
+	rows = (
+		frappe.qb.from_(msg)
+		.inner_join(conv)
+		.on(msg.conversation == conv.name)
+		.select(msg.name)
+		.where(
+			(conv.owner == user)
+			& (conv.file_box == 0)
+			& (conv.agent_initiated == 0)
+			& (msg.role == "user")
+			& (msg.hidden == 0)
+			& (msg.origin.isnull() | msg.origin.isin(_HUMAN_ORIGINS))
+			& (msg.creation >= since)
+			& (msg.creation < until)
+		)
+		.limit(1)
+	).run()
+	return 1 if rows else 0
 
 
 def _store_pulse_state(settings_name: str, period_key: str, offer_count: int) -> None:
@@ -416,10 +512,9 @@ def pulse_context() -> dict:
 	require_jarvis_access()
 	if not _pulse_state_columns_present():
 		return {"due": False}
-	from jarvis.chat.usage import current_period_key
-
 	user = frappe.session.user
-	current_key = current_period_key(PULSE_SURVEY_CADENCE)
+	now = frappe.utils.now_datetime()
+	current_key, period_label, period_is_previous = _pulse_period(now)
 	# READ, never ``get_doc``: the settings doc carries a child table
 	# (``user_model_usage``) and this runs on every chat open, so the deciding
 	# path is three columns off one row - the same shape ``greeting._get_pref``
@@ -431,21 +526,25 @@ def pulse_context() -> dict:
 		["name", "pulse_last_period_key", "pulse_offer_count"],
 		as_dict=True,
 	)
+	# Offered or answered for a later period already (see _stored_key_is_ahead).
+	if row and _stored_key_is_ahead(row.pulse_last_period_key, current_key):
+		return {"due": False}
 	same_period = bool(row) and row.pulse_last_period_key == current_key
 	# A key from an earlier period IS the rollover: the count restarts at 0
 	# rather than carrying last month's exhausted total forward.
 	offer_count = int(row.pulse_offer_count or 0) if same_period else 0
 	if offer_count >= PULSE_MAX_OFFERS:
 		return {"due": False}
-	since = _pulse_window_start()
-	if _turns_since(user, since) < 1:
+	since = _pulse_window_start(now)
+	until = _pulse_window_end(now)
+	if _turns_since(user, since, until) < 1:
 		return {"due": False}
 	from jarvis.chat.feature_usage import get_used_features
 
 	# May be empty, and the survey is still due: the stars and the open question
 	# are worth asking regardless. Only the chip question hides (spec: "hidden
 	# if empty"), which the dialog decides from this list.
-	features = get_used_features(user, since)
+	features = get_used_features(user, since, until)
 	# A user chatting before their settings row exists is normal (the row is
 	# created lazily by whichever surface needs it first), and an offer has to be
 	# recorded somewhere, so this is where the create belongs.
@@ -463,8 +562,9 @@ def pulse_context() -> dict:
 		return {"due": False}
 	return {
 		"due": True,
-		"period_label": _pulse_period_label(),
+		"period_label": period_label,
 		"period_key": current_key,
+		"period_is_previous": period_is_previous,
 		"features_offered": _feature_keys(list(features)),
 	}
 
@@ -533,9 +633,9 @@ def submit_pulse_feedback(
 		frappe.throw("stars must be between 1 and 5", frappe.ValidationError)
 	if not 1 <= stars <= 5:
 		frappe.throw("stars must be between 1 and 5", frappe.ValidationError)
-	from jarvis.chat.usage import current_period_key, get_or_create_user_settings
+	from jarvis.chat.usage import get_or_create_user_settings
 
-	current_key = current_period_key(PULSE_SURVEY_CADENCE)
+	current_key = _pulse_period()[0]
 	payload = {
 		"kind": "Pulse",
 		"period_key": current_key,

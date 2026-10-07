@@ -90,6 +90,49 @@
 						</button>
 					</div>
 				</div>
+				<!-- Background reports that finished in the viewer's chats and weren't
+				     shown there yet (envelope ready_reports, first page only). A row
+				     opens the chat, where the report card shows the results. -->
+				<section
+					v-if="isPending && readyReports.length"
+					class="border-b"
+					aria-labelledby="reports-title"
+				>
+					<div
+						id="reports-title"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+					>
+						Reports ready in your chats
+					</div>
+					<div class="flex flex-col divide-y">
+						<button
+							v-for="r in readyReports"
+							:key="r.conversation + ':' + r.run"
+							class="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-gray-2"
+							@click="openConversation(r)"
+						>
+							<FeatherIcon
+								name="bar-chart-2"
+								class="mt-1 size-3.5 shrink-0 text-ink-gray-5"
+							/>
+							<div class="min-w-0 flex-1">
+								<div class="truncate text-base text-ink-gray-9">
+									{{ r.report_name }}
+								</div>
+								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+									{{ [r.filters, r.title].filter(Boolean).join(" · ") }}
+								</div>
+								<div class="mt-1 flex items-center gap-2">
+									<Tooltip :text="exactDate(r.ready_at)">
+										<span class="whitespace-nowrap text-sm text-ink-gray-5"
+											>Ready {{ timeAgo(r.ready_at) }}</span
+										>
+									</Tooltip>
+								</div>
+							</div>
+						</button>
+					</div>
+				</section>
 				<!-- "Needs your decision" (one inbox): held File Box writes, the
 				     viewer's own chat cards and, for a reviewer, wiki notes - each
 				     pauses a run until someone decides, so they lead. Pending view
@@ -258,14 +301,14 @@
 				<div
 					v-else-if="loading || (isPending && !actionsLoaded)"
 					class="flex items-center justify-center"
-					:class="awaitingReply.length || showActions ? 'py-16' : 'h-full'"
+					:class="stripsShown || showActions ? 'py-16' : 'h-full'"
 				>
 					<JvSpinner />
 				</div>
 				<div
 					v-else-if="!showActions"
 					class="flex flex-col items-center justify-center gap-3 px-6 text-center"
-					:class="awaitingReply.length ? 'py-16' : 'h-full'"
+					:class="stripsShown ? 'py-16' : 'h-full'"
 				>
 					<FeatherIcon :name="emptyState.icon" class="size-7.5 text-ink-gray-5" />
 					<div class="flex flex-col items-center gap-1">
@@ -351,8 +394,8 @@
 					<div class="flex flex-col items-center gap-1">
 						<span class="text-lg font-medium text-ink-gray-8">Select an approval</span>
 						<span class="text-p-base text-ink-gray-6">
-							Pick a request from the list to review it, decide, or tag someone in
-							the comments.
+							Pick a request from the list to review it, decide or tag someone in the
+							comments.
 						</span>
 					</div>
 				</div>
@@ -747,14 +790,21 @@ const initialType = typeof route.query.type === "string" ? route.query.type : ""
 // start=0, and replacing with an empty array hides the strip); Load More
 // responses don't carry the key and leave it alone.
 const awaitingReply = ref([]);
+const readyReports = ref([]); // `ready_reports`, captured the same way
 let awaitReq = 0; // monotonic — stale responses dropped (paneReq idiom)
 async function fetchApprovals(p) {
 	const id = ++awaitReq;
 	const res = (await api.listApprovalsPage(p)) || {};
 	if (id === awaitReq && Array.isArray(res.awaiting_reply))
 		awaitingReply.value = res.awaiting_reply;
+	if (id === awaitReq && Array.isArray(res.ready_reports))
+		readyReports.value = res.ready_reports;
 	return res;
 }
+// a strip above the rail's empty state: it then sizes to its content, not the column
+const stripsShown = computed(
+	() => awaitingReply.value.length > 0 || (isPending.value && readyReports.value.length > 0)
+);
 
 const {
 	rows,
@@ -1155,7 +1205,7 @@ async function submitDecide(approve) {
 	const text = approve
 		? selectedOption.value ||
 		  noteText ||
-		  (reviewOnly ? "Review acknowledged — no posting authorised" : "Approved")
+		  (reviewOnly ? "Review acknowledged: no posting authorised" : "Approved")
 		: noteText || "Rejected";
 	const id = selected.value.name;
 	try {
@@ -1182,7 +1232,7 @@ async function submitDecide(approve) {
 		toast.success(
 			(approve
 				? reviewOnly
-					? "Review acknowledged — no accounting or sending action"
+					? "Review acknowledged: no accounting or sending action"
 					: "Approved"
 				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
 		);

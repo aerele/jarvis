@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeAll } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
@@ -31,11 +31,15 @@ vi.mock("@/composables/useConfirm", () => ({
 	confirmState: { value: null },
 }));
 
-const shell = vi.hoisted(() => ({
-	settingsOpen: true,
-	settingsSection: "general",
-	settingsApplying: false,
-}));
+// Reactive so a rail click (which writes settingsSection) re-renders the pane.
+const shell = await vi.hoisted(async () => {
+	const { reactive } = await import("vue");
+	return reactive({
+		settingsOpen: true,
+		settingsSection: "general",
+		settingsApplying: false,
+	});
+});
 vi.mock("@/stores/shell", () => ({
 	useShellStore: () => shell,
 }));
@@ -50,9 +54,24 @@ function paneStub(name) {
 		default: { name, template: `<div class="pane-marker">${name}</div>` },
 	};
 }
-vi.mock("@/components/settings/GeneralPane.vue", () => paneStub("GeneralPane"));
-vi.mock("@/components/settings/UsagePane.vue", () => paneStub("UsagePane"));
-vi.mock("@/components/settings/ActivityPane.vue", () => paneStub("ActivityPane"));
+// General and Usage count their mounts: SettingsDialog keeps them alive, so a
+// switch back must not mount (and so not refetch) them again.
+const mounts = vi.hoisted(() => ({ GeneralPane: 0, UsagePane: 0, ActivityPane: 0 }));
+function countingStub(name) {
+	return {
+		__esModule: true,
+		default: {
+			name,
+			setup() {
+				mounts[name]++;
+			},
+			template: `<div class="pane-marker">${name}</div>`,
+		},
+	};
+}
+vi.mock("@/components/settings/GeneralPane.vue", () => countingStub("GeneralPane"));
+vi.mock("@/components/settings/UsagePane.vue", () => countingStub("UsagePane"));
+vi.mock("@/components/settings/ActivityPane.vue", () => countingStub("ActivityPane"));
 vi.mock("@/components/settings/ShortcutsPane.vue", () => paneStub("ShortcutsPane"));
 vi.mock("@/components/settings/PlanBillingPane.vue", () => paneStub("PlanBillingPane"));
 vi.mock("@/components/settings/AiModelsPane.vue", () => paneStub("AiModelsPane"));
@@ -60,7 +79,17 @@ vi.mock("@/components/settings/UsageAdminPane.vue", () => paneStub("UsageAdminPa
 vi.mock("@/components/settings/BrandingPane.vue", () => paneStub("BrandingPane"));
 vi.mock("@/components/settings/MacrosAdminPane.vue", () => paneStub("MacrosAdminPane"));
 
+vi.mock("@/lib/subscriptionNotice", async () => {
+	const { reactive } = await import("vue");
+	return {
+		subscriptionNotice: reactive({ loaded: true, expired: [], upstreams: null }),
+		loadSubscriptionNotice: vi.fn(),
+		watchSubscriptionNotice: vi.fn(() => () => {}),
+	};
+});
+
 import SettingsDialog from "./SettingsDialog.vue";
+import { subscriptionNotice } from "@/lib/subscriptionNotice";
 
 async function mountDialog({ isSM = false, isAdmin = false, section = "general" } = {}) {
 	window.is_system_manager = isSM;
@@ -69,11 +98,32 @@ async function mountDialog({ isSM = false, isAdmin = false, section = "general" 
 	shell.settingsSection = section;
 	shell.settingsApplying = false;
 	const w = mount(SettingsDialog);
+	mounted.push(w);
 	await flushPromises();
 	return w;
 }
 
+// Panes load lazily. Import the (mocked) pane modules once up front and unmount
+// every dialog after its test, so no pane import resolves after the test
+// environment is torn down (it would load the real pane without a window).
+const mounted = [];
+beforeAll(async () => {
+	await Promise.all([
+		import("@/components/settings/GeneralPane.vue"),
+		import("@/components/settings/UsagePane.vue"),
+		import("@/components/settings/ActivityPane.vue"),
+		import("@/components/settings/ShortcutsPane.vue"),
+		import("@/components/settings/PlanBillingPane.vue"),
+		import("@/components/settings/AiModelsPane.vue"),
+		import("@/components/settings/UsageAdminPane.vue"),
+		import("@/components/settings/BrandingPane.vue"),
+		import("@/components/settings/MacrosAdminPane.vue"),
+	]);
+});
+
 afterEach(() => {
+	mounted.splice(0).forEach((w) => w.unmount());
+	subscriptionNotice.expired = [];
 	delete window.is_system_manager;
 	delete window.is_jarvis_admin;
 });
@@ -157,5 +207,58 @@ describe("SettingsDialog legacy section keys", () => {
 		// item - so this should resolve to Usage, not fall back to General.
 		const w = await mountDialog({ isSM: false, isAdmin: false, section: "billing" });
 		expect(w.find(".pane-marker").text()).toBe("UsagePane");
+	});
+});
+
+describe("SettingsDialog tab switching (jarvis-admin-v2#641)", () => {
+	const click = async (w, label) => {
+		await w
+			.findAll("button")
+			.find((b) => b.text() === label)
+			.trigger("click");
+		await flushPromises();
+	};
+
+	it("keeps General and Usage mounted, so switching back does not remount them", async () => {
+		Object.assign(mounts, { GeneralPane: 0, UsagePane: 0 });
+		const w = await mountDialog();
+		await click(w, "Usage");
+		await click(w, "General");
+		await click(w, "Usage");
+		expect(mounts).toMatchObject({ GeneralPane: 1, UsagePane: 1 });
+	});
+
+	it("still remounts the other panes each visit", async () => {
+		mounts.ActivityPane = 0;
+		const w = await mountDialog();
+		await click(w, "Activity");
+		await click(w, "General");
+		await click(w, "Activity");
+		expect(mounts.ActivityPane).toBe(2);
+	});
+});
+
+describe("rail dots for an expired chat sign-in", () => {
+	const dotsOn = (w) =>
+		w
+			.findAll("button")
+			.filter((b) => b.find('[aria-label="Needs attention"]').exists())
+			.map((b) => b.text());
+
+	it("marks AI models and General for an admin, and nothing else", async () => {
+		subscriptionNotice.expired = [{ upstream: "openai", label: "OpenAI", account_ref: "A1" }];
+		const w = await mountDialog({ isSM: true, isAdmin: true });
+		expect(dotsOn(w).sort()).toEqual(["AI models", "General"]);
+	});
+
+	it("shows no dot while nothing is expired", async () => {
+		const w = await mountDialog({ isSM: true, isAdmin: true });
+		expect(dotsOn(w)).toEqual([]);
+	});
+
+	it("never shows a member a dot (they have no AI models pane to open)", async () => {
+		subscriptionNotice.expired = [{ upstream: "openai", label: "OpenAI" }];
+		const w = await mountDialog({ isSM: false, isAdmin: false });
+		expect(dotsOn(w)).toEqual([]);
 	});
 });

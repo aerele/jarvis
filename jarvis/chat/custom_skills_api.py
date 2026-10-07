@@ -538,18 +538,18 @@ def file_box_doctypes(txt: str = "") -> list[str]:
 	return frappe.get_all("DocType", filters=filters, pluck="name", order_by="name asc", limit=20)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_custom_skill(name: str) -> dict:
 	"""Delete a skill row (owner-gated). The delete only propagates to the
 	container on the next Apply (the fleet endpoint does a full reconcile)."""
 	_require_skill_owner(frappe.get_doc(SKILL, name), "delete")
 	frappe.delete_doc(SKILL, name)  # ORM hook also enforces owner-only delete
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 	"""Bulk delete skills the caller OWNS (DESIGN-V3 §8.3 / D20). ``names`` is a
@@ -579,7 +579,7 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 			# Never leak internal exception text to the client — log server-side.
 			frappe.log_error(title="Jarvis: bulk skill delete failed", message=frappe.get_traceback())
 			skipped.append({"name": n, "reason": "error"})
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	# Only a reviewer's delete reconciles the shared catalog (TASK 12): a plain
 	# Jarvis User's rows are User/Role-scope and never in the shared push, so
 	# their delete changes nothing there and must not trigger a bench-wide
@@ -621,7 +621,7 @@ def get_skill_shares(name: str) -> dict:
 	return {"users": [{"name": r.user, "full_name": _full_name(r.user)} for r in (doc.shared_with or [])]}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 	"""Replace a skill's share list with ``users`` (a JSON array or list of user
 	ids). Owner only. Recipients get read-only use; they can never re-share."""
@@ -641,7 +641,7 @@ def share_custom_skill(name: str, users: str | list | None = None) -> dict:
 		clean.append(u)
 	doc.set("shared_with", [{"user": u} for u in clean])
 	doc.save()
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "data": {"count": len(clean)}}
 
 
@@ -796,7 +796,7 @@ def _effective_shared_scope(skill_name: str) -> tuple[str | None, str]:
 	return prior[0].name, ("User" if scope == "Personal" else scope)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def request_skill_promotion(
 	name: str,
@@ -921,7 +921,7 @@ def _stamp_decision(
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- decision survives later failure
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def decide_skill_promotion(
 	request_name: str,
 	approve: int | str,
@@ -1057,7 +1057,7 @@ def decide_skill_promotion(
 					"to_scope": "Org",
 					"push_projection": fresh,
 					"reason": _(
-						"The shared catalog changed since you last checked — review the updated "
+						"The shared catalog changed since you last checked. Review the updated "
 						"push impact and confirm again."
 					),
 				}
@@ -1583,7 +1583,7 @@ def _custom_sync_status() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_custom_skills() -> dict:
 	"""Push all enabled skills to the assistant (one restart). Explicit action.
 

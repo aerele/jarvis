@@ -127,6 +127,41 @@ class TestWikiWriteReviewLanding(FrappeTestCase):
 		self.assertFalse(res["ok"])
 		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": conv, "source": "File Box Wiki"}), 0)
 
+	# --- #663: the same file uploaded again ---------------------------------- #
+
+	def _file_conv(self, content: bytes = b"wiki-review same invoice", owner: str = DROPPER) -> str:
+		f = frappe.get_doc(
+			{"doctype": "File", "file_name": "wiki-review-src.txt", "content": content, "is_private": 1}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "File", f.name, force=True, ignore_permissions=True)
+		return self._conv(owner=owner, file_box=1, filebox_source_file=f.name)
+
+	def test_a_re_upload_of_the_same_file_proposes_no_second_note(self):
+		# Three uploads of one PDF left three Pending notes for the same page.
+		first = self._propose(self._file_conv())
+		again = self._file_conv()
+		res = api._propose_file_box_wiki_write(dict(_ARGS), again)
+		self.assertEqual((res["ok"], res["proposed"], res["approval"]), (True, False, first))
+		self.assertEqual(frappe.db.count(APPROVAL, {"conversation": again}), 0)
+
+	def test_a_different_file_or_another_page_still_proposes(self):
+		first = self._propose(self._file_conv())
+		other_file = self._propose(self._file_conv(content=b"wiki-review another invoice"))
+		other_page = self._propose(
+			self._file_conv(), {**_ARGS, "slug": "party-other-co", "title": "Other Co"}
+		)
+		self.assertEqual(len({first, other_file, other_page}), 3)
+
+	def test_another_dropper_of_the_same_file_still_proposes(self):
+		# Owner-scoped, like the duplicate check: never tells one user what another dropped.
+		first = self._propose(self._file_conv())
+		self.assertNotEqual(self._propose(self._file_conv(owner=PLAIN)), first)
+
+	def test_a_rejected_note_does_not_block_a_re_upload(self):
+		first = self._propose(self._file_conv())
+		frappe.db.set_value(APPROVAL, first, "status", "Rejected", update_modified=False)
+		self.assertNotEqual(self._propose(self._file_conv()), first)
+
 	def test_dedupe_refresh_leaves_a_decided_row_untouched(self):
 		# F2: a re-emitted write must never rewrite a proposal a reviewer already
 		# decided. Approve the row, then re-propose the same slug with a NEW payload:

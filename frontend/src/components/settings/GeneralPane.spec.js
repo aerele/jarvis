@@ -237,6 +237,24 @@ describe("GeneralPane Status badge, member seat", () => {
 });
 
 describe("GeneralPane Status badge, admin seat", () => {
+	it("names the expired sign-in and offers Open AI models", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() =>
+			Promise.resolve({
+				health: "attention",
+				attention_reason: "subscription_expired",
+				attention_detail: {
+					upstream: "openai",
+					label: "OpenAI",
+					since: 1,
+					account_ref: "A1",
+				},
+			})
+		);
+		const w = await mountAs({ admin: true });
+		expect(badge(w)).toEqual({ label: "Needs attention", theme: "red" });
+		expect(w.text()).toContain("OpenAI sign-in expired. Open AI models to reconnect it.");
+		expect(buttonLabels(w)).toContain("Open AI models");
+	});
 	it("still uses the admin endpoint and its full payload", async () => {
 		api.getLlmConnectionStatus.mockImplementation(() =>
 			Promise.resolve({
@@ -364,5 +382,40 @@ describe("GeneralPane, Context section", () => {
 		);
 		const w = await mountAs({ admin: false });
 		expect(w.text()).toContain("Not measured yet");
+	});
+});
+
+describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
+	it("shows Loading, not the Auto/provider placeholder, until the connection answers", async () => {
+		api.getLlmConnectionStatus.mockImplementation(PENDING);
+		const w = await mountAs({ admin: true });
+		expect(w.text()).toContain("Loading");
+		expect(w.text()).not.toContain("Auto");
+		expect(w.text()).not.toContain("Provider");
+	});
+
+	it("shows the real rows once it answers", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() =>
+			Promise.resolve({ pool_mode: true, model_count: 2, health: "ok" })
+		);
+		const w = await mountAs({ admin: true });
+		expect(w.text()).not.toContain("Loading");
+		expect(w.text()).toContain("2 models");
+	});
+
+	it("shows the error line, not the placeholder rows, when the first load fails", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() => Promise.reject(new Error("x")));
+		const w = await mountAs({ admin: true });
+		expect(w.text()).toContain("Connection status is unavailable");
+		expect(w.text()).not.toContain("Loading");
+		expect(w.text()).not.toContain("Auto");
+		expect(w.text()).not.toContain("Provider");
+	});
+
+	it("starts its fetches together instead of one after another", async () => {
+		api.getUsage.mockImplementation(PENDING);
+		await mountAs({ admin: true });
+		expect(api.getLlmConnectionStatus).toHaveBeenCalledTimes(1);
+		expect(api.getMySettings).toHaveBeenCalledTimes(1);
 	});
 });

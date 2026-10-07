@@ -31,7 +31,8 @@
   "margins_mm",
   "footer_section",
   "use_letterhead_footer",
-  "company_letter_heads"
+  "company_letter_heads",
+  "based_on"
  ],
  "fields": [
   {
@@ -188,6 +189,14 @@
    "fieldtype": "Table",
    "label": "Company Letter Heads",
    "options": "Jarvis PDF Template Company Letter Head"
+  },
+  {
+   "description": "Built-in template this one was duplicated from. Its full look (palette, type scale, footer) is the base; the fields above override it.",
+   "fieldname": "based_on",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Based On",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 1,
