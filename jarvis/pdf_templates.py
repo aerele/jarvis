@@ -149,7 +149,11 @@ def save_pdf_template(payload: str) -> dict:
 	# Create mode (the pane's "New template" and "Duplicate to edit") must never
 	# overwrite an existing key; edits omit the flag and keep upserting.
 	if data.get("is_new") and frappe.db.exists(CUSTOM_DT, key):
-		raise InvalidArgumentError(f"A template with key {key} already exists.")
+		# frappe.throw, not InvalidArgumentError: this reaches the editor as a
+		# validation message, not a bare "Internal Server Error".
+		frappe.throw(
+			frappe._("A template with key {0} already exists.").format(key), frappe.DuplicateEntryError
+		)
 
 	values = {f: data.get(f) for f in _TEMPLATE_FIELDS}
 	for c, dflt in _CHECK_DEFAULTS.items():
