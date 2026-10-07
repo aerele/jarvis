@@ -59,12 +59,18 @@ describe("send() carries a new chat's picks", () => {
 	});
 
 	it("passes the model pick where a literal undefined used to be", () => {
+		expect(src).toContain("model: _picks.model");
 		const args = sendCall.split("\n").map((line) => line.trim());
-		expect(args.slice(1, 4)).toEqual(["sentFrom,", "text,", "_picks.model,"]);
+		expect(args.slice(1, 4)).toEqual([
+			"sendRequest.conversation,",
+			"sendRequest.text,",
+			"sendRequest.model,",
+		]);
 	});
 
 	it("passes the thinking pick as the last argument", () => {
-		expect(sendCall.trimEnd().endsWith("_picks.thinking")).toBe(true);
+		expect(src).toContain("thinking: _picks.thinking");
+		expect(sendCall.trimEnd().endsWith("sendRequest.thinking")).toBe(true);
 	});
 });
 
