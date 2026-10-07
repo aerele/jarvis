@@ -476,6 +476,42 @@ describe("the status keeps updating past the blocking wait (defect 3)", () => {
 		expect(api.getLlmSyncStatus.mock.calls.length).toBe(after);
 	});
 
+	it("says a failed attempt is retrying, with Retry now, while the status is still pending", async () => {
+		const w = await slowApply();
+		expect(w.vm.applyResult.text).toMatch(/^Still applying/);
+
+		syncStatus = {
+			...syncStatus,
+			last_sync_status: "pending: admin applying config",
+			pending: true,
+			attempt_error: "The AI service did not respond.",
+		};
+		await vi.advanceTimersByTimeAsync(BG_POLL_MS + 100);
+
+		expect(w.text()).toContain("Couldn't apply this change. Retrying automatically.");
+		expect(w.text()).not.toContain("Still applying");
+		const retry = w.findAll("button").find((b) => b.text() === "Retry now");
+		expect(retry).toBeTruthy();
+
+		api.saveLlmPool.mockClear();
+		syncStatus = {
+			...syncStatus,
+			last_sync_status: "ok (restart via admin)",
+			pending: false,
+			attempt_error: "",
+		};
+		await retry.trigger("click");
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(api.saveLlmPool).toHaveBeenCalledTimes(1);
+	});
+
+	it("shows no retry line for a plain pending apply", async () => {
+		const w = await slowApply();
+		await vi.advanceTimersByTimeAsync(BG_POLL_MS + 100);
+		expect(w.text()).not.toContain("Retrying automatically");
+		expect(w.findAll("button").some((b) => b.text() === "Retry now")).toBe(false);
+	});
+
 	it("gives up on an apply that never settles instead of polling forever", async () => {
 		const w = await slowApply();
 

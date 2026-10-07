@@ -2304,12 +2304,17 @@
 			     (line 249 above): a resync mid-edit would submit whatever is
 			     half-typed there instead of leaving it for the customer to finish. -->
 			<button
-				v-if="canEdit && statusLine.kind === 'failed' && !orderDirty && !panel.open"
+				v-if="
+					canEdit &&
+					(statusLine.kind === 'failed' || statusLine.retrying) &&
+					!orderDirty &&
+					!panel.open
+				"
 				:disabled="!editable"
 				@click="resync"
 				class="jv-btn jv-btn--sm jv-btn--primary"
 			>
-				Resync
+				{{ statusLine.retrying ? "Retry now" : "Resync" }}
 			</button>
 		</div>
 	</div>
@@ -2463,6 +2468,7 @@ const saving = ref(false);
 const sync = ref({
 	last_sync_status: "",
 	pending: false,
+	attempt_error: "",
 	subscription_status: "",
 	warnings: [],
 	model_statuses: [],
@@ -5233,6 +5239,16 @@ const applyMessage = computed(() => {
 // covers an apply still landing from a previous visit or started in another tab.
 // Null hides the strip rather than leaving a bordered, empty band.
 const statusLine = computed(() => {
+	// admin-v2#630: the status stays pending while a failed attempt is re-driven.
+	// Say so (and offer Retry now) instead of "Still applying" for as long as the
+	// retry takes. Warn, not failed: nothing is lost, it is being retried.
+	if (sync.value.pending && sync.value.attempt_error) {
+		return {
+			kind: "warn",
+			text: "Couldn't apply this change. Retrying automatically.",
+			retrying: true,
+		};
+	}
 	const r = applyResult.value;
 	// A failure is already reported inside the open panel, right next to the row it
 	// belongs to. Do not say it twice.
