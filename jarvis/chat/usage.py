@@ -398,7 +398,7 @@ def _refresh_session_context_snapshot(
 _CHARS_PER_TOKEN = 4
 
 
-def _is_claude_cli_row(row: dict | None) -> bool:
+def is_claude_cli_row(row: dict | None) -> bool:
 	"""True when the gateway row carries the Claude CLI session marker. Read off the
 	row's own ``cliSessionIds`` / ``claudeCliSessionId`` keys, never inferred from the
 	model name: that is the one direct signal that this reply ran through the
@@ -437,7 +437,7 @@ def _estimated_output_tokens(row: dict, output_tokens: int, reply_chars: int | N
 	row, with a reply length passed in, the output is ``max(row value, ceil(chars / 4))``
 	and ``estimated`` is True only when the estimate won. Thinking tokens are not in the
 	reply text, so this still undercounts them. Every other case returns the row value."""
-	if reply_chars is None or not _is_claude_cli_row(row):
+	if reply_chars is None or not is_claude_cli_row(row):
 		return output_tokens, False
 	estimate = math.ceil(max(int(reply_chars), 0) / _CHARS_PER_TOKEN)
 	if estimate > output_tokens:
@@ -517,6 +517,8 @@ def record_turn_usage(
 		user = session.get("user") or ""
 		context_tokens = int(row.get("totalTokens") or 0)
 		context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
+		# A claude-cli row saved as 0/0 with a non-empty reply now has delta > 0 via the estimate and
+		# RECORDs (or RETRYs without a user mapping); that is intended.
 		if delta <= 0:
 			# Task U1: attribution is still worth recording even though there is
 			# no token delta - the turn happened and this is the only record of

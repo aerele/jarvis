@@ -2112,6 +2112,35 @@ class TestUsageHonesty(_PipelineCase):
 		self.assertEqual(int(self._val("pmp_usage_delay", "usage_recorded")), 1)
 		self.assertEqual(self._state("pmp_usage_delay"), "done")
 
+	def test_reply_chars_passed_for_claude_cli_row_only(self):
+		# jarvis-admin-v2#631: the reply length is looked up once, only for a claude-cli row.
+		cli_row = {
+			"key": "sess-cli",
+			"totalTokensFresh": True,
+			"inputTokens": 2,
+			"outputTokens": 2,
+			"cliSessionIds": {"claude-cli": "abc"},
+		}
+		gpt_row = {"key": "sess-gpt", "totalTokensFresh": True, "inputTokens": 2, "outputTokens": 2}
+		for rid, key, row, expected in (
+			("pmp_usage_cli", "sess-cli", cli_row, 3),
+			("pmp_usage_gpt", "sess-gpt", gpt_row, None),
+		):
+			self._finalizing_usage_turn(rid, key)
+			fake = _FakeSess()
+			fake._key = key
+			rec = _Recorder()
+			with (
+				self._gateway(fake),
+				patch("jarvis.chat.usage.fetch_fresh_session_row", return_value=row),
+				patch("jarvis.chat.usage.record_turn_usage", rec),
+				patch("jarvis.chat.usage.reply_char_count", return_value=3) as lookup,
+			):
+				finalize.run_finalize(rid, self._target)
+			self.assertEqual(rec.count, 1)
+			self.assertEqual(rec.calls[0][1].get("reply_chars"), expected)
+			self.assertEqual(lookup.call_count, 0 if expected is None else 1)
+
 	def test_no_session_key_does_not_mark_recorded(self):
 		# CDX-6: a SUCCESSFUL turn with NO session key is unattributed real usage, NOT
 		# legitimate zero — it must NOT permanently mark usage recorded; it retries (and
