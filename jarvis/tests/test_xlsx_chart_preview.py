@@ -486,7 +486,7 @@ class TestFormatKind(unittest.TestCase):
 			'"FY" yyyy',
 		):
 			self.assertEqual(kind(code), "date", code)
-		for code in ("h:mm", "hh:mm:ss", "[h]:mm:ss", "mm:ss", "h:mm AM/PM"):
+		for code in ("h:mm", "hh:mm:ss", "[h]:mm:ss", "[h]:mm", "[mm]:ss", "mm:ss", "[m]", "h:mm AM/PM"):
 			self.assertEqual(kind(code), "time", code)
 		for code in ("General", "Standard", "0.00", "#,##0", r"0\ m", '0 "days"', r"0\ d", "0.0_m", "", None):
 			self.assertIsNone(kind(code), code)
@@ -503,6 +503,22 @@ class TestFormatKind(unittest.TestCase):
 		self.assertEqual(cache(r"0\ m", 5), ["5"])
 		self.assertEqual(cache("General", 5), ["5"])
 		self.assertEqual(str(cache("h:mm:ss", 0)[0]), "00:00:00")
+
+
+class TestBadCacheNumbers(unittest.TestCase):
+	def test_unicode_digit_idx_does_not_drop_later_charts(self):
+		wb, ws = _book()
+		_add(ws, BarChart(), title="Bad")
+		_add(ws, LineChart(), anchor="F20", title="Good")
+		src = _rewrite(
+			_bytes(wb),
+			{
+				"xl/charts/chart1.xml": lambda d: d.replace(b'<pt idx="0">', '<pt idx="\u00b2">'.encode()).replace(
+					b'<ptCount val="3"/>', '<ptCount val="\u00b2"/>'.encode()
+				)
+			},
+		)
+		self.assertIn("Good", [s["title"] for s in extract_charts(src)])
 
 
 class TestExportRoundTrip(unittest.TestCase):
