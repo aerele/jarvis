@@ -161,8 +161,6 @@ class JarvisConversation(NotRenamable, Document):
 		Approve & run" it re-checks), so a save by the chat's owner must not move them.
 		Restored instead of refused, because a document loaded before the server wrote
 		them is saved later by ordinary actions (rename, star, archive)."""
-		if self.flags.jarvis_server_write:
-			return
 		previous = None if self.is_new() else self.get_doc_before_save()
 		for fieldname in _SKILL_RUN_SERVER_FIELDS:
 			self.set(fieldname, previous.get(fieldname) if previous else None)

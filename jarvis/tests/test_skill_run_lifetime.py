@@ -110,6 +110,39 @@ class TestTheNoActivityNet(_Base):
 	def test_the_net_is_half_an_hour(self):
 		self.assertEqual(api._SKILL_AUTORUN_IDLE_S, 1800)
 
+	def test_a_run_nothing_is_driving_is_ended_where_it_parks(self):
+		# Otherwise the card this write parks would hide the run from the reaper, and
+		# confirming that card would bring the run back.
+		conv = self._open_run(idle_s=api._SKILL_AUTORUN_IDLE_S + 60)
+		with patch("jarvis.api.dispatch_confirmed"):
+			res = api._run_tool(*PING, conversation=conv)
+		self.assertEqual(res["data"]["status"], "pending_confirmation")
+		self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
+		(card,) = pending_confirm.list_for_owner(TEST_USER, conversation=conv)
+		with (
+			patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}),
+			patch("jarvis.api.persist_tool_receipt"),
+			patch("jarvis.chat.admission.publish_action_confirmed"),
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			actions_api._confirm_core(card["token"], conv)
+		self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
+		self.assertFalse(self._covered_write_runs(conv))
+
+	def test_a_run_paused_on_a_card_is_kept_however_long_it_waits(self):
+		conv = self._open_run(idle_s=3 * 3600)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "lifetime-paused"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		_park_pending_card(conv, TEST_USER, todo.name)
+		# A write that arrives while that card waits is refused or parked, never run,
+		# and the run is still there for the card's Confirm.
+		with patch("jarvis.api.dispatch_confirmed") as disp:
+			api._run_tool(*PING, conversation=conv)
+		self.assertFalse(disp.called)
+		self.assertEqual(int(_run(conv).skill_autorun), 1)
+
 
 class TestACardWaitDoesNotCostTheRun(_Base):
 	def test_confirming_a_card_moves_the_stamp(self):
@@ -166,11 +199,37 @@ class TestWhatEndsARun(_Base):
 		chat_api.archive_conversation(conv)
 		self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
 
+	def test_a_card_that_fails_before_it_runs(self):
+		# The record the card would delete is gone by the time it is confirmed.
+		conv = self._open_run()
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "lifetime-gone"}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		token = _park_pending_card(conv, TEST_USER, todo.name)
+		self.assertTrue(pending_confirm.is_pending_action(token))
+		frappe.delete_doc("ToDo", todo.name, force=True, ignore_permissions=True)
+		frappe.db.commit()
+		with (
+			patch("jarvis.api.dispatch_confirmed") as disp,
+			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
+		):
+			res = actions_api._confirm_core(token, conv)
+		self.assertFalse(disp.called, res)
+		self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
+
+	def test_archiving_keeps_a_halt_signal_that_was_standing(self):
+		conv = self._open_run()
+		turn_message_binding.request_run_cancel(conv)
+		turn_message_binding.end_skill_autorun_if_open(conv, "archived", keep_halt=True)
+		self.assertEqual(int(_run(conv).skill_autorun or 0), 0)
+		self.assertTrue(turn_message_binding.is_run_cancel_requested(conv))
+
 	def test_ending_a_run_that_is_not_open_writes_nothing(self):
 		conv = _make_conv(TEST_USER)
 		with patch.object(turn_message_binding, "clear_skill_autorun") as clear:
-			turn_message_binding.end_skill_autorun_if_open(conv)
-			turn_message_binding.end_skill_autorun_if_open(None)
+			turn_message_binding.end_skill_autorun_if_open(conv, "retry")
+			turn_message_binding.end_skill_autorun_if_open(None, "retry")
 		clear.assert_not_called()
 
 
@@ -193,15 +252,17 @@ class TestOnlyTheServerWritesTheRunFields(_Base):
 	def test_a_document_loaded_before_the_server_wrote_them_saves_cleanly(self):
 		conv = _make_conv(TEST_USER)
 		doc = frappe.get_doc(CONV, conv)  # loaded with no run
-		_stamp_autorun(conv)  # the server opens a run meanwhile
+		# The server stamps the fields meanwhile, without touching ``modified`` (as its
+		# raw writes do), so this stale document still saves.
+		frappe.db.set_value(
+			CONV,
+			conv,
+			{"skill_autorun_at": _ago(60), "skill_autorun_skill": "stamped-meanwhile"},
+			update_modified=False,
+		)
 		frappe.db.commit()
 		stored = frappe.db.get_value(CONV, conv, ["skill_autorun_at", "skill_autorun_skill"], as_dict=True)
-		frappe.db.set_value(
-			CONV, conv, "skill_autorun", 0, update_modified=False
-		)  # keep the 0 -> 1 guard out of it
-		doc.reload()
-		doc.skill_autorun_at = None
-		doc.skill_autorun_skill = None
+		self.assertIsNone(doc.skill_autorun_at)
 		doc.title = "stale"
 		doc.save()
 		after = frappe.db.get_value(CONV, conv, ["skill_autorun_at", "skill_autorun_skill"], as_dict=True)
