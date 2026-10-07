@@ -526,7 +526,11 @@ describe("the status keeps updating past the blocking wait (defect 3)", () => {
 		await vi.advanceTimersByTimeAsync(BG_POLL_MS + 100);
 		expect(w.vm.statusLine.retrying).toBe(true);
 
-		w.vm.setApplyResult({ kind: "failed", text: "Could not apply this to your agent.", detail: "" });
+		w.vm.setApplyResult({
+			kind: "failed",
+			text: "Could not apply this to your agent.",
+			detail: "",
+		});
 		expect(w.vm.statusLine.retrying).toBeFalsy();
 		expect(w.vm.statusLine.kind).toBe("failed");
 	});
