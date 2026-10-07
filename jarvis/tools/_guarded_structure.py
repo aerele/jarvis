@@ -303,12 +303,12 @@ def short_lock_wait() -> Iterator[None]:
 	"""``lock_wait_timeout`` of a few seconds for the ALTER, put back afterwards (the
 	connection outlives this call inside the request)."""
 	previous = frappe.db.sql("SELECT @@SESSION.lock_wait_timeout")[0][0]
-	frappe.db.sql(f"SET SESSION lock_wait_timeout = {int(LOCK_WAIT_TIMEOUT_S)}")
+	frappe.db.sql("SET SESSION lock_wait_timeout = %s", (int(LOCK_WAIT_TIMEOUT_S),))
 	try:
 		yield
 	finally:
 		try:
-			frappe.db.sql(f"SET SESSION lock_wait_timeout = {int(previous)}")
+			frappe.db.sql("SET SESSION lock_wait_timeout = %s", (int(previous),))
 		except Exception:
 			pass
 
