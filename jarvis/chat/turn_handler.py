@@ -1390,6 +1390,7 @@ def handle_chat_send(payload: dict) -> None:
 		# Before _mark_errored so its commit carries the write.
 		_note_subscription_error(err, code)
 		_mark_errored(assistant_msg.name, err)
+		_note_empty_reply(run_id, conversation_id, err, code)
 		payload = {
 			"kind": "run:error",
 			"conversation_id": conversation_id,
@@ -2639,6 +2640,35 @@ def _note_subscription_error(err_text: str, code: str) -> None:
 		subscription_health.note_turn_error(err_text, code)
 
 
+def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
+	"""One telemetry line per empty reply of the model, with the last known context size.
+	Never raises."""
+	if code not in ("empty-reply", "empty-reply-tools"):
+		return
+	try:
+		if code == "empty-reply-tools":
+			variant = "tools"
+		else:
+			variant = "plain" if "try again" in (err_text or "").lower() else "bare"
+		tokens = frappe.db.sql(
+			"""SELECT s.last_total_tokens FROM `tabJarvis Chat Session` s
+			JOIN `tabJarvis Conversation` c ON c.session_key = s.session_key
+			WHERE c.name=%(c)s LIMIT 1""",
+			{"c": conversation},
+		)
+		from jarvis.chat.latency import get_logger
+
+		get_logger().info(
+			"empty_reply run_id=%s conv=%s variant=%s last_total_tokens=%s",
+			run_id,
+			conversation,
+			variant,
+			tokens[0][0] if tokens else "",
+		)
+	except Exception:
+		pass
+
+
 def _mark_errored(assistant_msg_name: str, error: str) -> None:
 	frappe.db.set_value(
 		MSG,
@@ -2777,6 +2807,7 @@ def _handle_event_inner(
 			# Before _mark_errored so its commit carries the write.
 			_note_subscription_error(err_text, code)
 			_mark_errored(assistant_msg_name, err_text)
+			_note_empty_reply(run_id, conversation_id, err_text, code)
 			_publish_to_user(
 				user,
 				{
