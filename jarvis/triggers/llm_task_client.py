@@ -110,7 +110,30 @@ def _extract_text(payload: dict) -> str:
 	raise LLMTaskError("llm-task returned an empty result")
 
 
-def llm_task_complete(prompt: str, input_payload: str, timeout: int = 60) -> str:
+def _extract_object_reply(payload: dict) -> dict | str:
+	"""The reply for an object-contract round (``expect_object``): the parsed
+	``details.json`` when it is an object, else the content text block parsed as
+	a JSON object, else the plain text (a model that ignored the contract)."""
+	result = payload.get("result") or {}
+	details = result.get("details") or {}
+	json_val = details.get("json")
+	if isinstance(json_val, dict):
+		return json_val
+	for block in result.get("content") or []:
+		if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+			try:
+				parsed = frappe.parse_json(str(block["text"]).strip())
+			except Exception:
+				break
+			if isinstance(parsed, dict):
+				return parsed
+			break
+	return _extract_text(payload)
+
+
+def llm_task_complete(
+	prompt: str, input_payload: str, timeout: int = 60, expect_object: bool = False
+) -> str | dict:
 	"""Run one llm-task completion on the tenant's own agent gateway + model.
 
 	``input_payload`` is sent as-is as the tool's ``input`` arg (the caller has
@@ -126,6 +149,11 @@ def llm_task_complete(prompt: str, input_payload: str, timeout: int = 60) -> str
 	``LLMTaskError`` on any other failure (unreachable gateway, no
 	agent_url/token configured, timeout, oversize or malformed response).
 	Never logs the bearer token.
+
+	``expect_object`` (LLM trigger lookups) asks for a JSON object instead of a
+	string literal: the schema becomes ``{"type": "object"}`` and the return is
+	the parsed object (``details.json`` first, then the content text), or the
+	plain text when the model did not answer with one.
 	"""
 	import requests
 
@@ -138,7 +166,7 @@ def llm_task_complete(prompt: str, input_payload: str, timeout: int = 60) -> str
 		"args": {
 			"prompt": prompt,
 			"input": input_payload,
-			"schema": {"type": "string"},
+			"schema": {"type": "object" if expect_object else "string"},
 			"maxTokens": _MAX_TOKENS,
 			"timeoutMs": timeout * 1000,
 		},
@@ -182,4 +210,4 @@ def llm_task_complete(prompt: str, input_payload: str, timeout: int = 60) -> str
 
 	if not payload.get("ok"):
 		_raise_for_gateway_error(status, payload)
-	return _extract_text(payload)
+	return _extract_object_reply(payload) if expect_object else _extract_text(payload)

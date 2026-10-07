@@ -103,6 +103,44 @@ class TestLLMTaskComplete(unittest.TestCase):
 			out = lt.llm_task_complete("p", "i")
 		self.assertEqual(out, "prose reply")
 
+	def _object_call(self, result):
+		body = json.dumps({"ok": True, "result": result}).encode()
+		with (
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("requests.post", return_value=_streamed_response(body=body)) as post,
+		):
+			out = lt.llm_task_complete("p", "i", expect_object=True)
+		return out, post.call_args.kwargs["json"]["args"]
+
+	def test_expect_object_returns_details_json_dict_and_asks_for_an_object_schema(self):
+		out, args = self._object_call(
+			{"content": [{"type": "text", "text": "ignored"}], "details": {"json": {"finding": "ok"}}}
+		)
+		self.assertEqual(out, {"finding": "ok"})
+		self.assertEqual(args["schema"], {"type": "object"})
+
+	def test_expect_object_parses_the_content_text_when_details_json_is_not_a_dict(self):
+		out, _args = self._object_call(
+			{
+				"content": [{"type": "text", "text": '{"lookup": {"tool": "get", "args": {}}}'}],
+				"details": {"json": "str"},
+			}
+		)
+		self.assertEqual(out, {"lookup": {"tool": "get", "args": {}}})
+
+	def test_expect_object_returns_plain_text_when_the_model_ignored_the_contract(self):
+		out, _args = self._object_call({"content": [{"type": "text", "text": "just prose"}]})
+		self.assertEqual(out, "just prose")
+
+	def test_default_call_still_asks_for_a_string_schema(self):
+		body = json.dumps({"ok": True, "result": {"details": {"json": "fine"}}}).encode()
+		with (
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("requests.post", return_value=_streamed_response(body=body)) as post,
+		):
+			self.assertEqual(lt.llm_task_complete("p", "i"), "fine")
+		self.assertEqual(post.call_args.kwargs["json"]["args"]["schema"], {"type": "string"})
+
 	def test_tool_not_available_raises_typed_error(self):
 		body = json.dumps(
 			{
