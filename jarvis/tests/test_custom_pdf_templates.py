@@ -408,7 +408,7 @@ class TestPdfTemplatesApiRoundTrip(FrappeTestCase):
 
 	def test_is_new_refuses_existing_key_but_plain_save_upserts(self):
 		self._save(description="v1")
-		with self.assertRaises(InvalidArgumentError) as ctx:
+		with self.assertRaises(frappe.DuplicateEntryError) as ctx:
 			self._save(description="clobber", is_new=1)
 		self.assertIn(f"A template with key {self.KEY} already exists.", str(ctx.exception))
 		self.assertEqual(api.get_pdf_template(self.KEY)["data"]["description"], "v1")
