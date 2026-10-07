@@ -1535,7 +1535,7 @@ class TestAttemptSuffixJobIds(_PumpTestCase):
 class TestControlQueueRouting(_PumpTestCase):
 	"""F1 (long-queue self-starvation): the pump's CONTROL jobs (prepare + finalize)
 	must never share the single-worker ``long`` queue the 90s hops ride. Routing per
-	bench shape: a live ``jarvis_chat`` lane -> ride it; else ``short`` (#632). Hops stay on ``long`` unconditionally (asserted in the
+	bench shape: a live ``jarvis_chat`` lane -> ride it; else ``short`` when a dedicated short worker is live, else the pre-#632 rule. Hops stay on ``long`` unconditionally (asserted in the
 	handoff test)."""
 
 	def test_jarvis_chat_lane_live_rides_it(self):
@@ -1543,32 +1543,63 @@ class TestControlQueueRouting(_PumpTestCase):
 			self.assertEqual(pump._control_queue(), "jarvis_chat")
 			self.assertFalse(pump._pump_shape_starves())
 
-	def test_long_with_two_workers_still_uses_short(self):
-		"""#632: control jobs never share `long`, even with >= 2 live workers."""
-		with (
+	def _layout(self, workers: dict, long_n: int):
+		"""Patch the probes for a bench whose workers are ``{name: [queues]}``."""
+
+		class _W:
+			def __init__(self, queues):
+				self._q = queues
+
+			def queue_names(self):
+				return self._q
+
+		from frappe.utils.background_jobs import generate_qname
+
+		fake = [_W([generate_qname(q) for q in qs]) for qs in workers.values()]
+		return (
 			patch("jarvis.chat.api._turn_queue", lambda: "long"),
-			patch.object(pump, "_live_worker_count", lambda q: 2),
-			patch.object(pump, "_probe_worker_count", lambda q: 1),
-		):
+			patch("frappe.utils.background_jobs.get_workers", lambda: fake),
+			patch.object(pump, "_live_worker_count", lambda q: long_n),
+		)
+
+	def test_generic_plus_long_only_keeps_develop_behaviour(self):
+		"""#632 live regression: a generic worker (short, default, long, compact) plus a
+		long-only worker has no dedicated short consumer, so control jobs ride `long`
+		(2 live long workers) exactly as before, not behind hops on `short`."""
+		p1, p2, p3 = self._layout(
+			{"generic": ["short", "default", "long", "compact"], "long": ["long"]}, long_n=2
+		)
+		with p1, p2, p3:
+			self.assertEqual(pump._control_queue(), "long")
+			self.assertTrue(pump._pump_shape_starves(), "no dedicated short worker -> warn")
+
+	def test_short_only_worker_routes_to_short(self):
+		p1, p2, p3 = self._layout(
+			{"generic": ["short", "default", "long"], "long": ["long"], "short": ["short"]}, long_n=2
+		)
+		with p1, p2, p3:
 			self.assertEqual(pump._control_queue(), "short")
 			self.assertFalse(pump._pump_shape_starves())
 
-	def test_short_unserved_with_two_long_workers_falls_back_to_long(self):
-		for short_n, want in ((0, "long"), (None, "short"), (1, "short")):
-			with (
-				patch("jarvis.chat.api._turn_queue", lambda: "long"),
-				patch.object(pump, "_live_worker_count", lambda q: 2),
-				patch.object(pump, "_probe_worker_count", lambda q, n=short_n: n),
-			):
-				self.assertEqual(pump._control_queue(), want, f"short={short_n}")
-
-	def test_single_long_no_jarvis_chat_uses_short(self):
-		with (
-			patch("jarvis.chat.api._turn_queue", lambda: "long"),
-			patch.object(pump, "_live_worker_count", lambda q: 1),
-		):
+	def test_single_long_worker_generic_only_uses_short(self):
+		p1, p2, p3 = self._layout({"generic": ["short", "default", "long"]}, long_n=1)
+		with p1, p2, p3:
 			self.assertEqual(pump._control_queue(), "short")
 			self.assertTrue(pump._pump_shape_starves())
+
+	def test_no_workers_safe_default(self):
+		p1, p2, p3 = self._layout({}, long_n=0)
+		with p1, p2, p3:
+			self.assertEqual(pump._control_queue(), "short")
+			self.assertTrue(pump._pump_shape_starves())
+
+	def test_jarvis_chat_lane_beats_short_consumer(self):
+		with (
+			patch("jarvis.chat.api._turn_queue", lambda: "jarvis_chat"),
+			patch.object(pump, "_has_dedicated_short_consumer", lambda: True),
+		):
+			self.assertEqual(pump._control_queue(), "jarvis_chat")
+			self.assertFalse(pump._pump_shape_starves())
 
 	def test_prepare_finalize_route_to_short_on_starve_shape(self):
 		"""The F1 scenario as a queue-name assertion on the enqueue calls: on the
@@ -1586,6 +1617,7 @@ class TestControlQueueRouting(_PumpTestCase):
 		with (
 			patch("jarvis.chat.api._turn_queue", lambda: "long"),
 			patch.object(pump, "_live_worker_count", lambda q: 1),
+			patch.object(pump, "_has_dedicated_short_consumer", lambda: False),
 			patch("frappe.enqueue", fake_enqueue),
 		):
 			pump._default_dispatch_prepare(rid, self._target)
@@ -1624,6 +1656,7 @@ class TestControlQueueRouting(_PumpTestCase):
 			with (
 				patch("jarvis.chat.api._turn_queue", lambda: "long"),
 				patch.object(pump, "_live_worker_count", lambda q: 1),
+				patch.object(pump, "_has_dedicated_short_consumer", lambda: False),
 				patch.object(pump, "_telemetry", lambda ev, **kw: events.append(ev)),
 				patch("frappe.log_error", lambda *a, **k: None),
 			):
