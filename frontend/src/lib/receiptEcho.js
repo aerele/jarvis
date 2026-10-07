@@ -22,10 +22,6 @@ export function isReceiptEcho(msg, prev) {
 		parseJson(prev.tool_result),
 		"confirmed"
 	);
-	const text = (msg.content || "")
-		.replace(/^Created and submitted /, "Created ")
-		.replace(/\s+/g, " ")
-		.trim()
-		.replace(/\.$/, "");
+	const text = (msg.content || "").replace(/\s+/g, " ").trim().replace(/\.$/, "");
 	return text === title;
 }

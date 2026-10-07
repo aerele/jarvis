@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isReceiptEcho } from "./receiptEcho";
+import { receiptView } from "./actionSummary";
 
 const chip = (over = {}) => ({
 	role: "tool",
@@ -18,11 +19,33 @@ describe("isReceiptEcho", () => {
 	it("hides the assistant row that repeats the confirmed chip", () => {
 		expect(isReceiptEcho(say("Updated Customer Grant Plastics Ltd."), chip())).toBe(true);
 	});
-	it("hides the create-and-submit wording", () => {
-		const c = chip({ tool_name: "create_doc" });
+	it("hides the create-and-submit wording when the chip says the same", () => {
+		const c = chip({
+			tool_name: "create_doc",
+			tool_result: JSON.stringify({
+				ok: true,
+				data: { doctype: "Customer", name: "Grant Plastics Ltd", docstatus: 1 },
+			}),
+		});
+		expect(receiptView("create_doc", {}, JSON.parse(c.tool_result), "confirmed").title).toBe(
+			"Created and submitted Customer Grant Plastics Ltd"
+		);
 		expect(isReceiptEcho(say("Created and submitted Customer Grant Plastics Ltd."), c)).toBe(
 			true
 		);
+	});
+	it("keeps the submitted wording when the chip only says Created", () => {
+		const c = chip({ tool_name: "create_doc" });
+		expect(receiptView("create_doc", {}, JSON.parse(c.tool_result), "confirmed").title).toBe(
+			"Created Customer Grant Plastics Ltd"
+		);
+		expect(isReceiptEcho(say("Created and submitted Customer Grant Plastics Ltd."), c)).toBe(
+			false
+		);
+	});
+	it("still hides a plain create echo", () => {
+		const c = chip({ tool_name: "create_doc" });
+		expect(isReceiptEcho(say("Created Customer Grant Plastics Ltd."), c)).toBe(true);
 	});
 	it("shows a different reply after the chip", () => {
 		expect(isReceiptEcho(say("Done. Anything else?"), chip())).toBe(false);

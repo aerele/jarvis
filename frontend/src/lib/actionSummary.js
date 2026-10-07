@@ -511,7 +511,10 @@ export function receiptView(tool, args, result, outcome) {
 	} else if (outcome === "confirmed") {
 		icon = "confirmed";
 		tone = "success";
-		title = `${verb.past} ${wfPrefix}${subject}`;
+		// A create that the Create & Submit card also submitted says so: the chip is the
+		// receipt, and a ledger-posting document must not read as a draft.
+		const createdSubmitted = tool === "create_doc" && Number(data.docstatus) === 1;
+		title = `${createdSubmitted ? "Created and submitted" : verb.past} ${wfPrefix}${subject}`;
 	} else {
 		// A future/unrecognised outcome value - render NEUTRAL, same as "unknown".
 		// Never fall back to the confirmed/✓ path for a value this build predates.
