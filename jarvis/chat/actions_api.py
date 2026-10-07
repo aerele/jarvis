@@ -1100,9 +1100,15 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		return _INVALID_CONFIRM
 
 	_clear_stale_halt(record.get("conversation"))
+	# A run already open on this chat: this click is one of its cards too.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	# STEP 1: execute the parked write AS the scoped exec_user the gate stored.
 	result = _dispatch_call(record, token, guard_conv, "approve_and_run dispatch crashed")
 	ok = isinstance(result, dict) and bool(result.get("ok"))
+	if not ok:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
 
 	# Announce a step-1 run_import's completion back into the chat (mirror
 	# _confirm_core). Self-gating + best-effort (no-ops unless tool == run_import +
@@ -1236,7 +1242,7 @@ def _confirm_core(
 	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	result = _dispatch_call(record, token, guard_conv, "confirm dispatch crashed")
 	if not (isinstance(result, dict) and result.get("ok")):
-		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"))
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
 
 	# Slice B: bind a Jarvis Import Announcement so the import's completion is
 	# announced back into this chat unprompted. Best-effort + self-gating (tool ==
