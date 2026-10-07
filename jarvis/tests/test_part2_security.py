@@ -380,6 +380,14 @@ class TestSkillPromotionWorkflow(Part2Base):
 class TestOnlyTheOwnerShares(Part2Base):
 	"""``share_custom_skill`` replaces a skill's share list. Only its owner may."""
 
+	def setUp(self):
+		super().setUp()
+		# The base creates the users once per class and every tearDown starts with a
+		# rollback: on a fresh database they are gone after this class's first test.
+		_ensure_user(USER_A, ["Jarvis User", "Sales User"])
+		_ensure_user(USER_B, ["Jarvis User"])
+		_ensure_user(REVIEWER, ["Jarvis User", "Jarvis Skill Reviewer"])
+
 	def _shared(self, name):
 		return sorted(frappe.get_all("Jarvis Custom Skill Share", filters={"parent": name}, pluck="user"))
 
