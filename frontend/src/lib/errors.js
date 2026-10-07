@@ -92,4 +92,7 @@ export function errHtml(e, fallback) {
 }
 
 // One implementation for desktop, Desk, and mobile; Python uses its rule data.
-export { turnErrorInfo } from "../../../jarvis/public/js/turn_errors.mjs";
+export {
+	turnErrorInfo,
+	subscriptionUpstreamFromError,
+} from "../../../jarvis/public/js/turn_errors.mjs";
