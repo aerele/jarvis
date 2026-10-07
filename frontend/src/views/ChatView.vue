@@ -791,6 +791,9 @@
 							v-else-if="m.role === 'tool'"
 							:message="m"
 							:auto-mode="!!convAutoMode"
+							:next-done="nextStepDone(m)"
+							:next-busy="nextBusyKey === m.name"
+							@next-action="proposeNext(m, $event)"
 						/>
 						<!-- user -->
 						<Message
@@ -4328,7 +4331,15 @@ import {
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
-import { chatRefusalMessage, chatSettledReason, keepsChatCard } from "@/lib/chatCardActions";
+import {
+	chatRefusalMessage,
+	chatSettledReason,
+	keepsChatCard,
+	nextStepActedKeys,
+	nextStepRefusal,
+	receiptRecord,
+	shouldHideNextStep,
+} from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7989,6 +8000,46 @@ async function discardPending(pa) {
 		store.loadConversations();
 	} finally {
 		inflightTokens.delete(token);
+	}
+}
+
+// Next step offered on a create receipt (#621). The button opens the normal
+// confirm card (the server parks the same card the assistant's own submit /
+// workflow call gets, as the person), then the card is pulled in with the usual
+// resync. It is hidden once a later receipt in the thread acted on that record.
+const nextBusyKey = ref("");
+// The records a submit / workflow receipt already acted on (confirmed, or auto-applied
+// without a card; a failed or discarded one leaves the step open), plus any step a
+// refusal said is gone.
+const nextStepGone = ref(new Set());
+const nextStepActed = computed(() => {
+	return nextStepActedKeys(visibleMessages.value, nextStepGone.value);
+});
+function nextStepDone(m) {
+	if (m.tool_name !== "create_doc") return false;
+	const me = receiptRecord(m);
+	return nextStepActed.value.has(`${me.doctype}|${me.name}`);
+}
+function hideNextStep(step) {
+	nextStepGone.value = new Set(nextStepGone.value).add(`${step.doctype}|${step.name}`);
+}
+async function proposeNext(m, step) {
+	if (nextBusyKey.value || !currentId.value) return;
+	nextBusyKey.value = m.name;
+	try {
+		const r = await api.proposeNextAction(currentId.value, step);
+		if (r && r.ok === false) {
+			const refusal = nextStepRefusal(r);
+			notify(refusal.message, { type: "error" });
+			if (shouldHideNextStep(refusal)) hideNextStep(step);
+			return;
+		}
+		await resyncPendingConfirmations(currentId.value);
+	} catch (e) {
+		notify(errMessage(e, "Could not open that step."), { type: "error" });
+		hideNextStep(step);
+	} finally {
+		nextBusyKey.value = "";
 	}
 }
 
