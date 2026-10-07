@@ -51,6 +51,14 @@ describe("charts on sheets the preview did not load", () => {
 		expect(w.text()).toContain("Data");
 		expect(w.findAll(".text-xs").map((e) => e.text())).toEqual(["Data"]);
 	});
+
+	it("captions a sheet group once, not per chart", () => {
+		const opts = { global: { stubs: { JvChart: JvChartStub } } };
+		const three = [chart("Data", "A"), chart("Data", "B"), chart("Summary", "C")];
+		const w = mount(SheetCharts, { ...opts, props: { charts: three, sheetName: "Summary" } });
+		expect(w.findAll(".text-xs")).toHaveLength(1);
+		expect(w.findAllComponents(JvChartStub)).toHaveLength(3);
+	});
 });
 
 describe("SheetCharts", () => {

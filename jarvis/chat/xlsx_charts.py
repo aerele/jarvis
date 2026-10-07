@@ -20,13 +20,16 @@ MAX_CHARTS_TOTAL = 30
 MAX_RELS = 200
 MAX_POINTS = 500
 MAX_SERIES = 20
-# Per-file budget, enforced before a part is read: untrusted uploads must not
-# make one preview parse thousands of parts or re-read sheets per series.
+# Per-file budget, enforced before a part is read, so a crafted upload cannot make
+# one preview parse thousands of parts or rescan sheets per series. Not covered:
+# openpyxl's own loading of the workbook (shared strings, styles) when a series
+# has no cached points and a sheet has to be read.
 MAX_SHEETS = 50
 MAX_PARTS_TOTAL = 150
 MAX_BYTES_TOTAL = 10_000_000
-MAX_RANGE_READS = 60
-MAX_RANGE_ROW = 100_000
+MAX_RANGE_ROW = 5_000
+MAX_COLS = 50
+MAX_ROWS_SCANNED = 20_000
 _MAX_PART_BYTES = 2_000_000
 
 _NS = {
@@ -180,23 +183,21 @@ def _charts_by_sheet(zf, budget):
 
 
 class _SheetValues:
-	"""Lazy cell-range reads against the workbook's cached values."""
+	"""Cell values for series that carry no cached points in the chart part.
+
+	Each sheet is scanned once, from row 1 (read-only openpyxl must parse every
+	row before the one it is asked for), keeping at most MAX_RANGE_ROW rows and
+	MAX_COLS columns; ranges are then sliced from memory. Rows scanned are
+	charged against one MAX_ROWS_SCANNED budget for the file."""
 
 	def __init__(self, content):
 		self._content = content
 		self._wb = None
-		self._cache = {}
+		self._grids = {}
+		self.rows_scanned = 0
 
 	def read(self, ref):
-		"""Flat list of the cells in ``'Sheet'!$A$1:$A$9``, or None if unusable.
-		Each distinct range is read once, and only so many per file."""
-		if ref not in self._cache:
-			if len(self._cache) >= MAX_RANGE_READS:
-				return None
-			self._cache[ref] = self._read(ref)
-		return self._cache[ref]
-
-	def _read(self, ref):
+		"""Flat list of the cells in ``'Sheet'!$A$1:$A$9``, or None if unusable."""
 		from openpyxl.utils.cell import range_boundaries
 
 		m = re.match(r"^(?:'((?:[^']|'')+)'|([^'!]+))!(\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?)$", ref.strip())
@@ -204,45 +205,78 @@ class _SheetValues:
 			return None
 		sheet = (m.group(1) or m.group(2)).replace("''", "'")
 		min_col, min_row, max_col, max_row = range_boundaries(m.group(3).replace("$", ""))
-		if (min_col != max_col and min_row != max_row) or min_row > MAX_RANGE_ROW:
+		if (min_col != max_col and min_row != max_row) or min_row > MAX_RANGE_ROW or max_col > MAX_COLS:
 			return None
-		max_row = min(max_row, min_row + MAX_POINTS - 1)
-		if self._wb is None:
-			import openpyxl
+		grid = self._grid(sheet)
+		if grid is None:
+			return None
+		max_row = min(max_row, min_row + MAX_POINTS - 1, len(grid))
+		return [c for row in grid[min_row - 1 : max_row] for c in row[min_col - 1 : max_col]]
 
-			self._wb = openpyxl.load_workbook(io.BytesIO(self._content), read_only=True, data_only=True)
-		if sheet not in self._wb.sheetnames:
+	def _grid(self, sheet):
+		"""The sheet's leading rows (scanned once, failures remembered as None)."""
+		if sheet not in self._grids:
+			self._grids[sheet] = self._scan(sheet)
+		return self._grids[sheet]
+
+	def _scan(self, sheet):
+		try:
+			if self._wb is None:
+				import openpyxl
+
+				self._wb = openpyxl.load_workbook(io.BytesIO(self._content), read_only=True, data_only=True)
+			if sheet not in self._wb.sheetnames:
+				return None
+			grid = []
+			if self.rows_scanned >= MAX_ROWS_SCANNED:
+				return None
+			rows = self._wb[sheet].iter_rows(max_row=MAX_RANGE_ROW, max_col=MAX_COLS, values_only=True)
+			for row in rows:
+				self.rows_scanned += 1
+				grid.append(list(row))
+				if self.rows_scanned >= MAX_ROWS_SCANNED:
+					break
+			return grid
+		except Exception:
 			return None
-		rows = self._wb[sheet].iter_rows(
-			min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True
-		)
-		return [c for row in rows for c in row]
+
+
+def _is_date_format(code):
+	"""True for a number format with date parts (quoted text and [..] stripped)."""
+	return bool(re.search(r"[ymd]", re.sub(r'"[^"]*"|\[[^\]]*\]', "", code or "").lower()))
 
 
 def _cache(node):
-	"""Cached points under a c:strRef / c:numRef as a list (ptCount/idx are untrusted)."""
+	"""Cached points under a c:strRef / c:numRef as a list (ptCount/idx are untrusted).
+	Numbers under a date format come back as dates, like the live cells would."""
+	from openpyxl.utils.datetime import from_excel
+
+	fmt = node.find(".//c:formatCode", _NS)
+	dated = fmt is not None and _is_date_format(fmt.text)
 	pts = {}
 	for pt in node.findall(".//c:pt", _NS):
 		v = pt.find("c:v", _NS)
 		idx = pt.get("idx", "")
 		if v is not None and idx.isdigit() and int(idx) < MAX_POINTS:
-			pts[int(idx)] = v.text
+			value = v.text
+			if dated:
+				try:
+					value = from_excel(float(value))
+				except (TypeError, ValueError, OverflowError):
+					pass
+			pts[int(idx)] = value
 	return [pts.get(i) for i in range(max(pts, default=-1) + 1)]
 
 
 def _points(node, values):
-	"""Cell values of a series reference (live cells, else the cache); [] if none."""
+	"""Points of a series reference: the chart's cached points when it has any,
+	else the live cells; [] if none."""
 	if node is None:
 		return []
-	f = node.find(".//c:f", _NS)
-	cells = None
-	if f is not None and f.text:
-		try:
-			cells = values.read(f.text)
-		except Exception:
-			cells = None
-	if cells is None or all(c is None for c in cells):
-		cells = _cache(node)
+	cells = _cache(node)
+	if all(c is None for c in cells):
+		f = node.find(".//c:f", _NS)
+		cells = (values.read(f.text) if f is not None and f.text else None) or []
 	return cells[:MAX_POINTS]
 
 
