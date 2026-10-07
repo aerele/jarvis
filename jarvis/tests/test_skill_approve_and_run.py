@@ -1058,6 +1058,34 @@ class TestStopRunRequestsRunCancel(FrappeTestCase):
 			"stop_run must set the transport-independent run-cancel signal",
 		)
 
+	def test_stop_run_ends_an_approved_run(self):
+		# Halt ends the run itself, not only the turn: the signal above lasts two minutes,
+		# so a covered write that arrived later would otherwise still find the run open.
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		chat_api.stop_run(conv)
+		row = frappe.db.get_value(CONV, conv, ["skill_autorun", "skill_autorun_skill"], as_dict=True)
+		self.assertEqual(int(row.skill_autorun or 0), 0)
+		self.assertFalse(row.skill_autorun_skill)
+		# The signal still stands for a write already on its way.
+		self.assertTrue(turn_message_binding.is_run_cancel_requested(conv))
+
+	def test_stop_run_ends_the_run_when_the_card_sweep_fails(self):
+		from jarvis.chat import api as chat_api
+
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		with (
+			patch(
+				"jarvis.chat.pending_confirm.clear_for_conversation", side_effect=RuntimeError("db hiccup")
+			),
+			patch("frappe.log_error"),
+		):
+			chat_api.stop_run(conv)
+		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0), 0)
+
 
 # --------------------------------------------------------------------------- #
 # The skill auto-run gate branch (design §3.4, task #39 - the READ side)
@@ -1990,6 +2018,25 @@ class TestNewMessageClearsAutorun(FrappeTestCase):
 			0,
 			"a genuine new top-level message ends the approved run",
 		)
+
+	def test_new_message_after_a_halted_run_clears_the_halt_signal(self):
+		# Halt ends the run and leaves its two-minute signal standing. The next message
+		# is a new instruction: the signal must not reach into its turn.
+		from jarvis.chat import api as chat_api
+		from jarvis.tests._transport_helpers import provision_legacy_site
+
+		provision_legacy_site(self)
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		chat_api.stop_run(conv)
+		self.addCleanup(turn_message_binding.clear_run_cancel, conv)
+		self.assertTrue(turn_message_binding.is_run_cancel_requested(conv))
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
+			with patch("frappe.enqueue"):
+				res = chat_api.send_message(conv, "make three todos please")
+		self.assertTrue(res["ok"])
+		self.assertFalse(turn_message_binding.is_run_cancel_requested(conv))
+		self.assertIsNone(frappe.db.get_value(CONV, conv, "skill_autorun_at"))
 
 	def test_busy_reject_leaves_autorun_set_but_real_send_clears_it(self):
 		"""I10: a second-tab/double-click/overload/quota reject creates NO turn, so
