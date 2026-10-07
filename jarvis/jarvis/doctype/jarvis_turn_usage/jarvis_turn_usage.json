@@ -14,6 +14,7 @@
   "model",
   "tokens_in",
   "tokens_out",
+  "tokens_out_estimated",
   "cache_read",
   "cache_write",
   "cache_reported",
@@ -79,25 +80,33 @@
    "in_list_view": 1
   },
   {
+   "fieldname": "tokens_out_estimated",
+   "fieldtype": "Check",
+   "label": "Output tokens estimated",
+   "default": "0",
+   "read_only": 1,
+   "description": "True when tokens_out is ceil(reply characters / 4) because the claude-cli runtime saved only a partial streamed output count (jarvis-admin-v2#631). Thinking tokens are not in the reply text, so an estimate still undercounts them."
+  },
+  {
    "fieldname": "cache_read",
    "fieldtype": "Int",
    "label": "Cache Read",
    "default": "0",
-   "description": "0 when the gateway build in use does not report cache token fields on sessions.list rows (verified empty against a live gateway on 2026-08-17; re-check resolved_model_identity's neighbouring cache decode if a later runtime adds cache*Tokens keys)."
+   "description": "Row cacheRead when sessions.list carries it. Absent as of agent image 2026.9.3 (re-verified 2026-10-07), so 0 until the runtime exposes it; see cache_reported. A multi-call turn carries the last call's number."
   },
   {
    "fieldname": "cache_write",
    "fieldtype": "Int",
    "label": "Cache Write",
    "default": "0",
-   "description": "See cache_read: 0 under the same no-cache-fields-reported condition."
+   "description": "Row cacheWrite when sessions.list carries it; same rules as cache_read (absent as of agent image 2026.9.3)."
   },
   {
    "fieldname": "cache_reported",
    "fieldtype": "Check",
    "label": "Cache Reported",
    "default": "0",
-   "description": "True only when the gateway row actually carried cache token fields for this turn. False means cache_read/cache_write are NOT a real zero measurement - the admin UI must render \"n/a\", not 0, when this is unchecked."
+   "description": "True when the gateway row carried a cacheRead or cacheWrite key for this turn (a real 0 counts). False means cache_read/cache_write are NOT a real zero measurement - the admin UI must render \"n/a\", not 0, when this is unchecked."
   },
   {
    "fieldname": "tool_calls",
@@ -118,7 +127,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-17 00:00:00.000000",
+ "modified": "2026-10-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Turn Usage",
