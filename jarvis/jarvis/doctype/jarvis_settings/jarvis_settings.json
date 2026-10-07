@@ -791,7 +791,7 @@
    "read_only": 1
   },
   {
-   "description": "Set when the last apply attempt FAILED but a retry is still queued (status stays pending:). Cleared on any new status write. The SPA shows 'Couldn't apply this change. Retrying automatically.' while it is set.",
+   "description": "Set when the last apply attempt FAILED while the status is still pending:. Cleared on any new status write. The SPA shows 'Couldn't apply this change.' with a Retry now button while it is set.",
    "fieldname": "last_sync_attempt_error",
    "fieldtype": "Small Text",
    "label": "Last Sync Attempt Error",

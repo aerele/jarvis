@@ -87,41 +87,35 @@ class TestHandoverRecordsTheFailedAttempt(FrappeTestCase):
 		self.assertEqual(settings.get(_ATTEMPT_ERROR_FIELD), "")
 
 
-class TestReconcileSkipsTheAgeGateOnAFailedAttempt(FrappeTestCase):
-	def _reconcile(self, **overrides):
+class TestReconcileKeepsTheRetrySpacing(FrappeTestCase):
+	"""Each handover attempt restarts the customer's container, so a recorded
+	failure must NOT shorten the 600 s spacing between attempts."""
+
+	def test_a_fresh_request_waits_even_with_an_error_set(self):
 		settings = _handover_ready_settings(
 			last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt 1)",
-			last_sync_requested_at=frappe.utils.now(),
-			**overrides,
-		)
-		settings.get_password = MagicMock(return_value="test-admin-key")
-		settings._enqueue_handover = MagicMock()
-		settings._enqueue_pool_sync = MagicMock()
-		with patch("frappe.get_single", return_value=settings):
-			reconcile_pending_llm_sync()
-		return settings
-
-	def test_a_fresh_request_without_an_error_still_waits(self):
-		settings = self._reconcile()
-		settings._enqueue_handover.assert_not_called()
-
-	def test_a_fresh_request_with_an_error_is_redriven_on_the_next_tick(self):
-		settings = self._reconcile(**{_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE})
-		settings._enqueue_handover.assert_called_once_with(attempt=2)
-
-	def test_the_attempt_cap_still_holds_with_an_error(self):
-		settings = _handover_ready_settings(
-			last_sync_status=f"{_PENDING_HANDOVER_STATUS} (attempt 3)",
 			last_sync_requested_at=frappe.utils.now(),
 			**{_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE},
 		)
 		settings.get_password = MagicMock(return_value="test-admin-key")
 		settings._enqueue_handover = MagicMock()
 		settings._enqueue_pool_sync = MagicMock()
-		with patch("frappe.get_single", return_value=settings), patch("frappe.log_error"):
+		with patch("frappe.get_single", return_value=settings):
 			reconcile_pending_llm_sync()
 		settings._enqueue_handover.assert_not_called()
-		settings._enqueue_pool_sync.assert_called_once()
+		settings._enqueue_pool_sync.assert_not_called()
+
+
+class TestBypassingWritersClearTheError(FrappeTestCase):
+	def test_the_disconnect_field_set_clears_it(self):
+		from jarvis.onboarding import _DISCONNECTED_LLM_FIELDS
+
+		self.assertEqual(_DISCONNECTED_LLM_FIELDS.get(_ATTEMPT_ERROR_FIELD), "")
+
+	def test_the_workspace_reset_blanks_it(self):
+		from jarvis import settings_reset
+
+		self.assertIn(_ATTEMPT_ERROR_FIELD, settings_reset.FULL.blank)
 
 
 class TestPoolSyncRecordsTheFailedAttempt(_RT3SettingsTestCase):

@@ -3542,17 +3542,9 @@ def reconcile_pending_llm_sync() -> None:
 			# jarvis#1425 existed - once _HANDOVER_MAX_ATTEMPTS is spent, leaving
 			# the workspace on the proxy (working) until the next Apply retries
 			# the handover from a clean attempt-1 budget.
-			#
-			# admin-v2#630: an attempt that has already FAILED left its error on the
-			# settings, so its worker has exited and the age gate protects nothing;
-			# re-drive on this tick instead of idling out the remaining ~10 minutes.
-			# The attempt cap below still bounds the bounces.
 			requested_at = settings.get("last_sync_requested_at")
-			if (
-				not settings.get(_ATTEMPT_ERROR_FIELD)
-				and requested_at
-				and frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at)
-				< ADMIN_SYNC_RQ_TIMEOUT_S
+			if requested_at and frappe.utils.time_diff_in_seconds(frappe.utils.now(), requested_at) < (
+				ADMIN_SYNC_RQ_TIMEOUT_S
 			):
 				return
 			attempt = _handover_attempt(status)

@@ -906,6 +906,7 @@ _DISCONNECTED_LLM_FIELDS = {
 	# recognise it, which is correct here: the editor's status strip hides itself
 	# rather than reporting on an apply that no longer has a subject.
 	"last_sync_status": "disconnected",
+	"last_sync_attempt_error": "",
 	# The apply this stamp described no longer has a subject either (jarvis#841).
 	"llm_last_apply_fingerprint": "",
 	"last_subscription_status": "",
@@ -2231,6 +2232,7 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	settings.db_set(
 		"last_sync_status", _RESETTING_RECONNECT_LLM_STATUS if reconnect_llm else _RESETTING_STATUS
 	)
+	settings.db_set("last_sync_attempt_error", "")
 	# The container this stamp described is being torn down; left set, an
 	# identical re-save inside its window could dedup against a rebuilt
 	# container that never received the config (jarvis#841 review).
@@ -2320,6 +2322,7 @@ def _workspace_reset_poll() -> dict:
 
 		write_connection(data)
 		settings.db_set("last_sync_status", "ok (workspace reset)")
+		settings.db_set("last_sync_attempt_error", "")
 		# This "ok" is about the RESET, not about any config apply - the fresh
 		# container holds no direct-leg credential yet. Keep the jarvis#841
 		# dedup stamp cleared so the next save always applies for real.

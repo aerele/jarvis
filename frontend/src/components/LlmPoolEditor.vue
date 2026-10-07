@@ -5381,17 +5381,14 @@ const applyMessage = computed(() => {
 // covers an apply still landing from a previous visit or started in another tab.
 // Null hides the strip rather than leaving a bordered, empty band.
 const statusLine = computed(() => {
-	// admin-v2#630: the status stays pending while a failed attempt is re-driven.
-	// Say so (and offer Retry now) instead of "Still applying" for as long as the
-	// retry takes. Warn, not failed: nothing is lost, it is being retried.
-	if (sync.value.pending && sync.value.attempt_error) {
-		return {
-			kind: "warn",
-			text: "Couldn't apply this change. Retrying automatically.",
-			retrying: true,
-		};
-	}
 	const r = applyResult.value;
+	// admin-v2#630: the status stays pending after a failed attempt. Say so (and
+	// offer Retry now) instead of "Still applying". No promise of an automatic
+	// retry: only a handover is re-driven by the site. A fresh result from an
+	// apply this editor just ran (ok or failed) still wins over this line.
+	if (sync.value.pending && sync.value.attempt_error && !(r && r.kind !== "pending")) {
+		return { kind: "warn", text: "Couldn't apply this change.", retrying: true };
+	}
 	// A failure is already reported inside the open panel, right next to the row it
 	// belongs to. Do not say it twice.
 	if (r && !(r.kind === "failed" && panel.value.open)) {
