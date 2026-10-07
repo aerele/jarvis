@@ -154,6 +154,8 @@ const GENERIC_CODES = new Set([
   "gateway",
   "service-unavailable",
   "internal",
+  "empty-reply",
+  "empty-reply-tools",
 ]);
 // "openai_compat/gpt-5.6-terra" and "gpt-5.6-terra" are the same model.
 const bareModel = (id) =>
