@@ -76,6 +76,7 @@ import time
 import frappe
 from frappe.utils import add_to_date, get_datetime, now_datetime
 
+from jarvis._session import impersonate
 from jarvis.learning.orchestrator import (
 	WORKER_TIMEOUT_S,
 	_feature_enabled,
@@ -165,55 +166,50 @@ def run_pattern_analysis(run_name: str) -> None:
 
 
 def _run_locked(run_name: str) -> None:
-	original_user = frappe.session.user
 	engine_flag_prev = frappe.flags.jarvis_pattern_engine
 	status_summary = "Failed: run did not start"
 	scan_mode = "full"
-	try:
-		frappe.set_user("Administrator")
-		frappe.flags.jarvis_pattern_engine = True
-		status_summary, scan_mode = _execute(run_name)
-	except Exception:
-		frappe.log_error(
-			title=f"jarvis pattern learning: engine crashed on {run_name}",
-			message=frappe.get_traceback(),
-		)
-		status_summary = f"Failed: unhandled engine error on {run_name} (see Error Log)"
+	with impersonate("Administrator"):
 		try:
-			_finalize_run(
-				run_name,
-				status="Failed",
-				counts=None,
-				skipped=None,
-				errors=None,
-				doctypes=None,
-				remaining=None,
-				note="Unhandled engine error; see the Error Log.",
+			frappe.flags.jarvis_pattern_engine = True
+			status_summary, scan_mode = _execute(run_name)
+		except Exception:
+			frappe.log_error(
+				title=f"jarvis pattern learning: engine crashed on {run_name}",
+				message=frappe.get_traceback(),
 			)
-		except Exception:
-			pass
-	finally:
-		# Terminal status-quartet backstop (plan section 5.6). set_value with
-		# update_modified=False so the Settings on_update LLM classifier never
-		# fires (never doc.save() here).
-		try:
-			frappe.db.set_single_value(
-				SETTINGS,
-				{
-					"pattern_last_run_at": now_datetime(),
-					"pattern_last_run_status": status_summary,
-					"pattern_scan_mode": scan_mode,
-				},
-				update_modified=False,
-			)
-			frappe.db.commit()
-		except Exception:
-			pass
-		frappe.flags.jarvis_pattern_engine = engine_flag_prev
-		try:
-			frappe.set_user(original_user)
-		except Exception:
-			pass
+			status_summary = f"Failed: unhandled engine error on {run_name} (see Error Log)"
+			try:
+				_finalize_run(
+					run_name,
+					status="Failed",
+					counts=None,
+					skipped=None,
+					errors=None,
+					doctypes=None,
+					remaining=None,
+					note="Unhandled engine error; see the Error Log.",
+				)
+			except Exception:
+				pass
+		finally:
+			# Terminal status-quartet backstop (plan section 5.6). set_value with
+			# update_modified=False so the Settings on_update LLM classifier never
+			# fires (never doc.save() here).
+			try:
+				frappe.db.set_single_value(
+					SETTINGS,
+					{
+						"pattern_last_run_at": now_datetime(),
+						"pattern_last_run_status": status_summary,
+						"pattern_scan_mode": scan_mode,
+					},
+					update_modified=False,
+				)
+				frappe.db.commit()
+			except Exception:
+				pass
+			frappe.flags.jarvis_pattern_engine = engine_flag_prev
 
 
 # --------------------------------------------------------------------------- #
@@ -759,9 +755,11 @@ def _promote_surfaced(run_name: str) -> None:
 	if slots <= 0:
 		return
 
+	# Chat-mined rows are skipped: they surface only when their owner answers
+	# (jarvis.learning.chat_pattern_privacy).
 	rows = frappe.get_all(
 		JLP,
-		filters={"status": "Proposed", "surfaced": 0},
+		filters={"status": "Proposed", "surfaced": 0, "detector_id": ["!=", "chat-context"]},
 		fields=["name", "domain", "strength_band", "support_n", "effective_sensitivity"],
 	)
 	if not rows:

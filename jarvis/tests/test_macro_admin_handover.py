@@ -1121,7 +1121,7 @@ class TestRaces(WithColumns):
 		def sweep():
 			frappe.set_user("Administrator")
 			with patch.object(macro_scheduler, "_claim_slot", return_value=claimed):
-				macro_scheduler._sweep_one(m, now, "Administrator", set())
+				macro_scheduler._sweep_one(m, now, set())
 			return "swept"
 
 		def write(row, new_owner):

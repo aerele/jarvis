@@ -39,6 +39,12 @@ def _get_value_supports_use_local_cache() -> bool:
 		return False
 
 
+def single_values(doctype: str, fields) -> frappe._dict:
+	"""Fresh, typed values of ``fields`` on a Single, the same on Frappe 15 and 16
+	(15's ``get_value`` on a Single returns them uncast)."""
+	return frappe._dict({f: frappe.db.get_single_value(doctype, f, cache=False) for f in fields})
+
+
 def cache_get_fresh(key):
 	"""``get_value(key)`` that always reads Redis, bypassing the in-process
 	``frappe.local.cache``, on Frappe 15 and 16.

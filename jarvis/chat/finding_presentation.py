@@ -11,6 +11,6 @@ def finding_text(finding: dict) -> tuple[str, str]:
 	if not title and detail:
 		title = detail.splitlines()[0]
 	if not title:
-		reference = " ".join(filter(None, (text("ref_doctype"), text("ref_name"))))
+		reference = " ".join(part for part in (text("ref_doctype"), text("ref_name")) if part)
 		title = f"Review {reference}" if reference else "Finding needs review"
 	return " ".join(title.split())[:140], detail

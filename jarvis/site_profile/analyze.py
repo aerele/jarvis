@@ -156,6 +156,7 @@ def _read_log_lines(site: str, bench_path: str) -> list:
 	lines = []
 	for path in _log_file_paths(site, bench_path):
 		try:
+			# nosemgrep: frappe-security-file-traversal -- bench log files, not user input
 			with open(path, encoding="utf-8", errors="replace") as f:
 				lines.extend(f.readlines())
 		except OSError:

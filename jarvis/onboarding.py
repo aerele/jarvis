@@ -12,6 +12,7 @@ from jarvis import (
 	admin_client,
 	announcement,
 	catalogue_visibility,
+	compat,
 	maintenance_notice,
 	onboarding_contract,
 	release_notice,
@@ -223,7 +224,7 @@ def write_connection(data: dict) -> None:
 			elif data.get("runtime_profile_status") == "unsupported_runtime":
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
-				set_settings_password(s, "agent_token", data["agent_token"])
+				_store_agent_token(s, data["agent_token"])
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -255,6 +256,19 @@ def write_connection(data: dict) -> None:
 	# key means "cleared" - which would drop a live notice. It is persisted only
 	# where a full get_connection payload is in hand: sync_connection and the
 	# chat gate.
+
+
+def _store_agent_token(settings, token: str) -> None:
+	"""Store the agent token and stamp when this site got it. A new token (an
+	admin-side rotation or reconnect arrives here) restarts the clock, and a token
+	with no stamp yet gets one, so the age check (oauth.cron.check_agent_token_age)
+	always has a date to warn from."""
+	from jarvis._password_utils import set_settings_password
+
+	changed = (settings.get_password("agent_token", raise_exception=False) or "") != token
+	set_settings_password(settings, "agent_token", token)
+	if changed or not settings.get("agent_token_issued_at"):
+		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
 
 
 @frappe.whitelist()
@@ -853,12 +867,7 @@ def save_llm_pool(
 			# restart's confirmed apply (see readiness_budget_s comment above).
 			readiness_budget_s = 300
 
-	row = (
-		frappe.db.get_value(
-			"Jarvis Settings", "Jarvis Settings", ["last_sync_at", "last_sync_status"], as_dict=True
-		)
-		or {}
-	)
+	row = compat.single_values("Jarvis Settings", ["last_sync_at", "last_sync_status"])
 	return {
 		# Plan-05 D2 (review §8.4): the durable operation descriptor the SPA follows,
 		# or null on the legacy single-model path / an unallocated failure.
@@ -2482,15 +2491,7 @@ def save_llm_creds(
 	# need rather than reloading the entire Singles doc (the previous
 	# shape was ``frappe.get_single(...)`` then ``.get(...)`` on
 	# every field - pointless re-fetch from the 2026-06-16 review).
-	row = (
-		frappe.db.get_value(
-			"Jarvis Settings",
-			"Jarvis Settings",
-			["last_sync_at", "last_sync_status"],
-			as_dict=True,
-		)
-		or {}
-	)
+	row = compat.single_values("Jarvis Settings", ["last_sync_at", "last_sync_status"])
 	return {
 		"last_sync_at": str(row.get("last_sync_at") or ""),
 		"last_sync_status": row.get("last_sync_status") or "",

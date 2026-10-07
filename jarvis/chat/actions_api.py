@@ -1664,7 +1664,7 @@ def _settled_plan(decided: list[dict]) -> dict:
 		)
 		plan["outcome"] = chat_api.OUTCOME_PARTIAL if partial_only else chat_api.OUTCOME_UNKNOWN
 		plan["receipt"] = " ".join(
-			filter(None, (applied, _join_capped([_pa_receipt_text(i) for i in failed])))
+			part for part in (applied, _join_capped([_pa_receipt_text(i) for i in failed])) if part
 		)
 		return plan
 	plan["stamp"] = [i["name"] for i in ran if i.get("corrects")]

@@ -6,6 +6,7 @@ context. ``frappe`` is faked at the module boundary; no bench, no socket, no red
 
 from __future__ import annotations
 
+import contextlib
 import unittest
 from datetime import datetime, timedelta
 from unittest import mock
@@ -271,14 +272,28 @@ class TestReprobeAll(unittest.TestCase):
 		tokens = [{"connector": "shar", "user": "holder@example.com"}]
 		fake = self._fake(rows, tokens)
 
+		active = []
+
+		@contextlib.contextmanager
+		def _impersonate(user):
+			active.append(user)
+			try:
+				yield
+			finally:
+				active.pop()
+
+		seen = []
+
 		# Queueing the Personal OAuth row raises; the sweep must continue.
 		def _request(name):
+			seen.append((name, active[-1] if active else None))
 			if name == "pers":
 				raise RuntimeError("redis blew up")
 			return True
 
 		with (
 			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "impersonate", _impersonate),
 			mock.patch.object(refresh, "request", side_effect=_request) as queued,
 			mock.patch.object(refresh, "refresh_tools_cache") as probe,
 		):
@@ -286,30 +301,24 @@ class TestReprobeAll(unittest.TestCase):
 		# Every row queued despite the middle failure; nothing probed inline.
 		self.assertEqual([c.args[0] for c in queued.call_args_list], ["tok", "pers", "shar"])
 		probe.assert_not_called()
-		# set_user drove each row's context and always restored Administrator.
-		users = [c.args[0] for c in fake.set_user.call_args_list]
+		# Each row was queued as its own user, and no switch outlived its row.
 		self.assertEqual(
-			users,
-			[
-				"Administrator",
-				"Administrator",
-				"owner@example.com",
-				"Administrator",
-				"holder@example.com",
-				"Administrator",
-			],
+			seen,
+			[("tok", "Administrator"), ("pers", "owner@example.com"), ("shar", "holder@example.com")],
 		)
+		self.assertEqual(active, [])
 
 	def test_shared_oauth_without_signin_is_skipped_entirely(self):
 		rows = [{"name": "shar", "scope": "Shared", "auth_method": "OAuth", "owner": "creator"}]
 		fake = self._fake(rows, tokens=[])  # no token for shar
 		with (
 			mock.patch.object(refresh, "frappe", fake),
+			mock.patch.object(refresh, "impersonate") as switched,
 			mock.patch.object(refresh, "request") as queued,
 		):
 			refresh.reprobe_all()
 		queued.assert_not_called()
-		fake.set_user.assert_not_called()
+		switched.assert_not_called()
 
 	def test_no_rows_is_a_no_op(self):
 		fake = _fake_frappe()

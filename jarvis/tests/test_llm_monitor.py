@@ -675,6 +675,8 @@ ADMIN_ONLY_FIELDS = (
 	"disconnected",
 	"health",
 	"attention_reason",
+	"attention_detail",
+	"subscription_health",
 	"auth_present",
 	"oauth_expires_at",
 	"profile_ids",
