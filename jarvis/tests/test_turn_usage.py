@@ -707,6 +707,33 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		frappe.db.commit()
 		return run_id
 
+	def test_zero_zero_claude_cli_row_with_reply_now_records(self):
+		# Intended contract change: the estimate lifts a 0/0 claude-cli row above zero.
+		_make_session("agent:tu-cli-zero", USER_A)
+		row = self._cli_row(inputTokens=0, outputTokens=0)
+		self.assertEqual(
+			usage.record_turn_usage("agent:tu-cli-zero", row, reply_chars=80), usage.USAGE_RECORDED
+		)
+		r = self._turn_row("agent:tu-cli-zero")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (20, 1))
+		# Without a reply it is still the old valid-zero outcome.
+		_make_session("agent:tu-cli-zero2", USER_A)
+		self.assertEqual(usage.record_turn_usage("agent:tu-cli-zero2", row), usage.USAGE_VALID_ZERO)
+
+	def test_zero_zero_claude_cli_row_with_reply_retries_without_user_mapping(self):
+		row = self._cli_row(inputTokens=0, outputTokens=0)
+		self.assertEqual(
+			usage.record_turn_usage("agent:tu-cli-nomap", row, reply_chars=80), usage.USAGE_RETRY
+		)
+
+	def test_usage_push_tolerates_missing_estimated_column(self):
+		_make_session("agent:tu-push-pre", USER_A)
+		usage.record_turn_usage("agent:tu-push-pre", self._cli_row(), reply_chars=2000)
+		with patch("jarvis.chat.usage_push.frappe.db.has_column", return_value=False):
+			rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertIs(users[USER_A]["tokens_out_estimated"], False)
+
 	def test_usage_push_carries_tokens_out_estimated(self):
 		_make_session("agent:tu-push", USER_A)
 		usage.record_turn_usage("agent:tu-push", self._cli_row(), reply_chars=2000)

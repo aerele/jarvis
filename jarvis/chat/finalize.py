@@ -414,13 +414,14 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
+	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
+	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
+	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
+	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage.is_claude_cli_row(row) else None
 	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
 	# the unit below starts on the present. Nothing is pending: the runner committed its
 	# claim and this effect has only read so far.
 	txn.fresh_snapshot()
-	# Reply length for the claude-cli output estimate, read once here (never inside the unit's
-	# commit window) and only for a row that can use it. None on any lookup failure.
-	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage._is_claude_cli_row(row) else None
 
 	def unit():
 		if ts._run_cas(guard_sql, {"r": ctx.run_id}) != 1:
