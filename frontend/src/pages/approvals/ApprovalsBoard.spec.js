@@ -208,6 +208,7 @@ function reset() {
 		],
 		wiki: [wikiRow()],
 		wikiTotal: 1,
+		drafts: [],
 		reports: [],
 	};
 }
@@ -253,6 +254,7 @@ describe("ApprovalsBoard one inbox", () => {
 			has_more: false,
 			facets: { document_type: [{ value: "Sales Order", count: state.ar.length }] },
 			awaiting_reply: [],
+			open_drafts: state.drafts,
 			ready_reports: state.reports,
 		}));
 		approvals.listPendingActionsLane.mockImplementation(async () => ({ rows: state.lane }));
@@ -791,6 +793,79 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(group(w).text()).toContain("1 file waiting");
 	});
 
+	describe("drafts open in your chats", () => {
+		const draft = (over = {}) => ({
+			conversation: "conv-d1",
+			title: "Quarter close",
+			origin_page: "",
+			verb: "create",
+			doctype: "Sales Order",
+			summary: "Sales Order - Fake Co, 2 items",
+			last_at: "2026-09-01 11:00:00",
+			...over,
+		});
+		const drafts = (w) => w.find('[aria-labelledby="drafts-title"]');
+
+		it("lists each open draft read-only and opens its chat", async () => {
+			state.drafts = [
+				draft(),
+				draft({
+					conversation: "conv-d2",
+					title: "",
+					origin_page: "dashboards",
+					verb: "update",
+					doctype: "Customer",
+					summary: "",
+				}),
+			];
+			const w = await board();
+			expect(drafts(w).find("#drafts-title").text()).toBe("Drafts open in your chats");
+			const rows = drafts(w).findAll("button");
+			const lines = (r) =>
+				[...r.findAll(".truncate"), r.find(".badge")].map((e) => e.text());
+			expect(rows.map(lines)).toEqual([
+				["Sales Order - Fake Co, 2 items", "Quarter close", "Create Sales Order"],
+				["Update Customer", "Untitled chat", "Update Customer"],
+			]);
+			await rows[0].trigger("click");
+			expect(router.push).toHaveBeenLastCalledWith("/c/conv-d1");
+			await rows[1].trigger("click");
+			expect(router.push).toHaveBeenLastCalledWith({
+				name: "DashboardsPage",
+				query: { conversation: "conv-d2" },
+			});
+			// nothing to decide here: the count is the 3 lane rows + 1 wiki note only
+			expect(group(w).text()).toContain("Needs your decision (4)");
+		});
+
+		it("shows a card's text as text", async () => {
+			state.drafts = [draft({ summary: HOSTILE })];
+			const w = await board();
+			expect(drafts(w).text()).toContain(HOSTILE);
+			expect(window.__pwned).toBeUndefined();
+		});
+
+		it("with nothing else waiting, the empty state sits below the strip", async () => {
+			state.ar = [];
+			state.lane = [];
+			state.wiki = [];
+			state.wikiTotal = 0;
+			state.drafts = [draft()];
+			const w = await board();
+			expect(drafts(w).exists()).toBe(true);
+			const empty = rail(w).find(".text-center");
+			expect(empty.classes()).toContain("py-16");
+			expect(empty.classes()).not.toContain("h-full");
+		});
+
+		it("is hidden when there are none, and outside the Pending view", async () => {
+			let w = await board();
+			expect(drafts(w).exists()).toBe(false);
+			state.drafts = [draft()];
+			w = await board({ status: "Decided" });
+			expect(drafts(w).exists()).toBe(false);
+		});
+	});
 	describe("reports ready in your chats", () => {
 		const report = (over = {}) => ({
 			conversation: "conv-r1",

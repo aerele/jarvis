@@ -383,6 +383,7 @@ def list_approvals_page(
 		from jarvis.chat.report_runs import ready_reports
 
 		out["awaiting_reply"] = _awaiting_reply(me)
+		out["open_drafts"] = _open_drafts(me)
 		try:
 			out["ready_reports"] = ready_reports(me)
 		except Exception:
@@ -464,7 +465,84 @@ def _awaiting_reply(me: str) -> list[dict]:
 			"last_at": str(r.last_at or ""),
 		}
 		for r in rows
+		if not _shows_a_card(r.content)  # the chat shows its card, listed under open drafts
 	]
+
+
+_CARD_FENCE = "%```jarvis-action%"
+
+
+def _shows_a_card(content: str | None) -> bool:
+	"""The chat draws this reply's card, not its question: its first ``jarvis-action``
+	block is a JSON object (ChatView ``actionOf``)."""
+	from jarvis.chat.filebox_cards import _ACTION_RE
+
+	m = _ACTION_RE.search(content or "")
+	if not m:
+		return False
+	try:
+		return isinstance(json.loads(m.group(1).strip()), dict)
+	except ValueError:
+		return False
+
+
+_OPEN_DRAFTS_MAX = 10
+
+
+def _open_drafts(me: str) -> list[dict]:
+	"""Create/update cards still open in chats OWNED by ``me``, newest first, at most
+	10. Read-only: confirming stays in the chat. Open is the chat page's live-card
+	rule: the chat's last turn message (user/assistant, not hidden; tool rows trail a
+	reply) is a finished reply carrying a create/update card. A Confirm's receipt or
+	any reply is a newer turn message, so the card closes. File Box chats are out:
+	their cards are held for the board already. Rows: {conversation, title,
+	origin_page, verb, doctype, summary, last_at}."""
+	from jarvis.chat.filebox_cards import parse_action
+
+	rows = frappe.db.sql(
+		"""SELECT c.name AS conversation, c.title, c.origin_page, m.content, m.creation AS last_at
+		FROM `tabJarvis Conversation` c
+		JOIN (SELECT mm.conversation, MAX(mm.seq) AS lseq
+		      FROM `tabJarvis Chat Message` mm
+		      JOIN `tabJarvis Conversation` mc
+		        ON mc.name = mm.conversation AND mc.owner = %(me)s
+		      WHERE mm.role IN ('user', 'assistant') AND mm.hidden = 0
+		      GROUP BY mm.conversation) x ON x.conversation = c.name
+		JOIN `tabJarvis Chat Message` m
+		  ON m.conversation = c.name AND m.seq = x.lseq
+		WHERE c.owner = %(me)s
+		AND c.status != 'Archived'
+		AND COALESCE(c.file_box, 0) = 0
+		AND m.role = 'assistant'
+		AND m.hidden = 0
+		AND m.streaming = 0
+		AND COALESCE(m.recovering, 0) = 0
+		AND m.content LIKE %(card)s
+		ORDER BY m.creation DESC
+		LIMIT 50""",
+		{"me": me, "card": _CARD_FENCE},
+		as_dict=True,
+	)
+	out = []
+	for r in rows:
+		a = parse_action(r.content)
+		if not a:
+			continue  # a submit/email card, or one the chat can't draw either
+		verb = a.get("verb") or "create"
+		out.append(
+			{
+				"conversation": r.conversation,
+				"title": r.title or "",
+				"origin_page": r.origin_page or "",
+				"verb": verb,
+				"doctype": a["doctype"],
+				"summary": str(a.get("summary") or a.get("title") or "")[:140],
+				"last_at": str(r.last_at or ""),
+			}
+		)
+		if len(out) == _OPEN_DRAFTS_MAX:
+			break
+	return out
 
 
 @frappe.whitelist()

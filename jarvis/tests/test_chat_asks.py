@@ -141,8 +141,8 @@ def _mk_conv(owner, title, status="Active", origin_page="") -> str:
 	return doc.name
 
 
-def _add_msg(conv, seq, role, content, streaming=0, recovering=0, error="") -> None:
-	frappe.get_doc(
+def _add_msg(conv, seq, role, content, streaming=0, recovering=0, error="", **extra) -> None:
+	msg = frappe.get_doc(
 		{
 			"doctype": MSG,
 			"conversation": conv,
@@ -152,8 +152,11 @@ def _add_msg(conv, seq, role, content, streaming=0, recovering=0, error="") -> N
 			"streaming": streaming,
 			"recovering": recovering,
 			"error": error,
+			**extra,
 		}
-	).insert(ignore_permissions=True)
+	)
+	msg.flags.jarvis_server_write = True  # e.g. a receipt's action_outcome
+	msg.insert(ignore_permissions=True)
 	frappe.db.commit()
 
 
@@ -704,6 +707,138 @@ class TestAwaitingReply(unittest.TestCase):
 		self.assertIn(self.conv_rowed, {r["conversation"] for r in self._lane()})
 		_add_msg(self.conv_rowed, 2, "user", "Acme")
 		self.assertNotIn(self.conv_rowed, {r["conversation"] for r in self._lane()})
+
+
+def _card(
+	verb="create", doctype="Sales Order", kind="doc", summary="ca draft summary", title="ca draft"
+) -> str:
+	a = {"kind": kind, "verb": verb, "doctype": doctype, "title": title, "summary": summary, "fields": []}
+	return f"Review and confirm:\n```jarvis-action\n{json.dumps(a)}\n```"
+
+
+class TestOpenDrafts(unittest.TestCase):
+	"""The board's read-only "Drafts open in your chats" list: a chat whose last
+	turn message is a finished assistant reply carrying a create/update card (the
+	chat page's live-card rule). Tool rows never count as a turn message."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_wipe_all()
+		# included: the run's tool rows land AFTER its reply row, as they do live
+		self.conv_open = _mk_conv(USER_A, "ca-draft-open", origin_page="dashboards")
+		_add_msg(self.conv_open, 1, "user", "make a sales order")
+		_add_msg(self.conv_open, 2, "assistant", _card(summary="Sales Order - ca customer, 2 items"))
+		_add_msg(self.conv_open, 3, "tool", "get_list → completed", tool_name="get_list")
+		_add_msg(self.conv_open, 4, "tool", "preview_doc → completed", tool_name="preview_doc")
+		self.conv_update = _mk_conv(USER_A, "ca-draft-update")
+		_add_msg(self.conv_update, 1, "assistant", _card(verb="update", doctype="Customer", summary=""))
+		# included: a hidden row (the post-apply continuation prompt) is never shown
+		self.conv_hidden = _mk_conv(USER_A, "ca-draft-hidden")
+		_add_msg(self.conv_hidden, 1, "assistant", _card())
+		_add_msg(self.conv_hidden, 2, "user", "[System] continue", hidden=1)
+		# included: a receipt chip alone (e.g. a discarded gated card) is a tool row
+		self.conv_chip = _mk_conv(USER_A, "ca-draft-chip")
+		_add_msg(self.conv_chip, 1, "assistant", _card())
+		_add_msg(self.conv_chip, 2, "tool", "", tool_name="submit_doc", action_outcome="discarded")
+		# excluded: a reply still being recovered
+		self.conv_recovering = _mk_conv(USER_A, "ca-draft-recovering")
+		_add_msg(self.conv_recovering, 1, "assistant", _card(), recovering=1)
+		# excluded: confirmed - the receipt is the newest turn message
+		self.conv_confirmed = _mk_conv(USER_A, "ca-draft-confirmed")
+		_add_msg(self.conv_confirmed, 1, "assistant", _card())
+		_add_msg(self.conv_confirmed, 2, "tool", "", tool_name="create_doc", action_outcome="confirmed")
+		_add_msg(self.conv_confirmed, 3, "assistant", "Created Sales Order SO-0001.")
+		# excluded: the user replied
+		self.conv_replied = _mk_conv(USER_A, "ca-draft-replied")
+		_add_msg(self.conv_replied, 1, "assistant", _card())
+		_add_msg(self.conv_replied, 2, "user", "make it 5")
+		# excluded: still being written
+		self.conv_stream = _mk_conv(USER_A, "ca-draft-stream")
+		_add_msg(self.conv_stream, 1, "assistant", _card(), streaming=1)
+		# excluded: not a create/update draft (a submit is gated; email is no record)
+		self.conv_submit = _mk_conv(USER_A, "ca-draft-submit")
+		_add_msg(self.conv_submit, 1, "assistant", _card(verb="submit"))
+		self.conv_email = _mk_conv(USER_A, "ca-draft-email")
+		_add_msg(self.conv_email, 1, "assistant", _card(kind="email"))
+		# excluded: a File Box file's card is held for the board already; archived chat
+		self.conv_filebox = _mk_conv(USER_A, "ca-draft-filebox")
+		frappe.db.set_value(CONV, self.conv_filebox, "file_box", 1, update_modified=False)
+		_add_msg(self.conv_filebox, 1, "assistant", _card())
+		self.conv_archived = _mk_conv(USER_A, "ca-draft-archived", status="Archived")
+		_add_msg(self.conv_archived, 1, "assistant", _card())
+		# excluded for A: owned by B
+		self.conv_b = _mk_conv(USER_B, "ca-draft-b")
+		_add_msg(self.conv_b, 1, "assistant", _card())
+		frappe.db.commit()
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.set_user("Administrator")
+		_wipe_all()
+
+	def _page(self, user=USER_A, **kw):
+		with _as(user):
+			return list_approvals_page(**kw)
+
+	def test_only_open_create_and_update_cards_are_listed(self):
+		lane = self._page()["open_drafts"]
+		self.assertEqual(
+			{r["conversation"] for r in lane},
+			{self.conv_open, self.conv_update, self.conv_hidden, self.conv_chip},
+		)
+		by_conv = {r["conversation"]: r for r in lane}
+		row = by_conv[self.conv_open]
+		self.assertEqual(
+			set(row.keys()), {"conversation", "title", "origin_page", "verb", "doctype", "summary", "last_at"}
+		)
+		self.assertEqual(
+			(row["title"], row["origin_page"], row["verb"], row["doctype"], row["summary"]),
+			("ca-draft-open", "dashboards", "create", "Sales Order", "Sales Order - ca customer, 2 items"),
+		)
+		self.assertTrue(row["last_at"])
+		# no summary: the card's own title stands in
+		self.assertEqual(
+			(by_conv[self.conv_update]["verb"], by_conv[self.conv_update]["summary"]), ("update", "ca draft")
+		)
+
+	def test_owner_scoped(self):
+		self.assertEqual({r["conversation"] for r in self._page(USER_B)["open_drafts"]}, {self.conv_b})
+
+	def test_first_page_only(self):
+		self.assertNotIn("open_drafts", self._page(start=20))
+
+	def test_newest_first_and_capped(self):
+		_wipe_all()
+		convs = []
+		for i in range(12):
+			conv = _mk_conv(USER_A, f"ca-draft-cap-{i}")
+			_add_msg(conv, 1, "assistant", _card())
+			frappe.db.set_value(
+				MSG,
+				{"conversation": conv},
+				"creation",
+				frappe.utils.add_to_date(None, minutes=i - 20),
+				update_modified=False,
+			)
+			convs.append(conv)
+		frappe.db.commit()
+		lane = self._page()["open_drafts"]
+		self.assertEqual([r["conversation"] for r in lane], convs[::-1][:10])
+
+	def test_a_draft_is_not_also_waiting_for_a_reply(self):
+		# The chat page shows the card, not the question, when one reply carries both.
+		conv = _mk_conv(USER_A, "ca-draft-and-ask")
+		_add_msg(conv, 1, "assistant", _card() + "\n" + _fence([_ask()]))
+		page = self._page()
+		self.assertIn(conv, {r["conversation"] for r in page["open_drafts"]})
+		self.assertNotIn(conv, {r["conversation"] for r in page["awaiting_reply"]})
+
+	def test_a_card_the_chat_cannot_draw_leaves_its_question_waiting(self):
+		conv = _mk_conv(USER_A, "ca-draft-broken-and-ask")
+		_add_msg(conv, 1, "assistant", "```jarvis-action\n{broken\n```\n" + _fence([_ask()]))
+		page = self._page()
+		self.assertNotIn(conv, {r["conversation"] for r in page["open_drafts"]})
+		self.assertIn(conv, {r["conversation"] for r in page["awaiting_reply"]})
 
 
 if __name__ == "__main__":

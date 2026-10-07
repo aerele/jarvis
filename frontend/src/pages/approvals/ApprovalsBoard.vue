@@ -90,6 +90,50 @@
 						</button>
 					</div>
 				</div>
+				<!-- Create/update cards still open in the viewer's chats (envelope
+				     open_drafts, first page only). Read-only: a row opens the chat,
+				     where the card is edited and confirmed. Pending view only. -->
+				<section
+					v-if="isPending && openDrafts.length"
+					class="border-b"
+					aria-labelledby="drafts-title"
+				>
+					<div
+						id="drafts-title"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+					>
+						Drafts open in your chats
+					</div>
+					<div class="flex flex-col divide-y">
+						<button
+							v-for="d in openDrafts"
+							:key="d.conversation"
+							class="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-gray-2"
+							@click="openConversation(d)"
+						>
+							<FeatherIcon
+								name="file-text"
+								class="mt-1 size-3.5 shrink-0 text-ink-gray-5"
+							/>
+							<div class="min-w-0 flex-1">
+								<div class="truncate text-base text-ink-gray-9">
+									{{ d.summary || draftLabel(d) }}
+								</div>
+								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+									{{ d.title || "Untitled chat" }}
+								</div>
+								<div class="mt-1 flex items-center gap-2">
+									<Badge variant="subtle" theme="gray" :label="draftLabel(d)" />
+									<Tooltip :text="exactDate(d.last_at)">
+										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
+											timeAgo(d.last_at)
+										}}</span>
+									</Tooltip>
+								</div>
+							</div>
+						</button>
+					</div>
+				</section>
 				<!-- Background reports that finished in the viewer's chats and weren't
 				     shown there yet (envelope ready_reports, first page only). A row
 				     opens the chat, where the report card shows the results. -->
@@ -790,21 +834,28 @@ const initialType = typeof route.query.type === "string" ? route.query.type : ""
 // start=0, and replacing with an empty array hides the strip); Load More
 // responses don't carry the key and leave it alone.
 const awaitingReply = ref([]);
-const readyReports = ref([]); // `ready_reports`, captured the same way
+const openDrafts = ref([]); // `open_drafts`, captured the same way
+const readyReports = ref([]); // `ready_reports`, likewise
 let awaitReq = 0; // monotonic — stale responses dropped (paneReq idiom)
 async function fetchApprovals(p) {
 	const id = ++awaitReq;
 	const res = (await api.listApprovalsPage(p)) || {};
 	if (id === awaitReq && Array.isArray(res.awaiting_reply))
 		awaitingReply.value = res.awaiting_reply;
+	if (id === awaitReq && Array.isArray(res.open_drafts)) openDrafts.value = res.open_drafts;
 	if (id === awaitReq && Array.isArray(res.ready_reports))
 		readyReports.value = res.ready_reports;
 	return res;
 }
 // a strip above the rail's empty state: it then sizes to its content, not the column
 const stripsShown = computed(
-	() => awaitingReply.value.length > 0 || (isPending.value && readyReports.value.length > 0)
+	() =>
+		awaitingReply.value.length > 0 ||
+		(isPending.value && (openDrafts.value.length > 0 || readyReports.value.length > 0))
 );
+function draftLabel(d) {
+	return `${d.verb === "update" ? "Update" : "Create"} ${d.doctype}`;
+}
 
 const {
 	rows,
