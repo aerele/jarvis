@@ -743,64 +743,7 @@ def _promotion_roles(req_name: str, target_role: str = "") -> list[str]:
 	return rows or ([target_role] if target_role else [])
 
 
-<<<<<<< HEAD
-@frappe.whitelist()
-=======
-def _effective_shared_scope(skill_name: str) -> tuple[str | None, str]:
-	"""The skill's CURRENT effective shared scope, resolved by lineage (R3-SP-2):
-	if ``skill_name`` is itself already a shared (Role/Org) row, that IS the
-	effective scope (a Role -> Org widen keeps promoting the same row); otherwise
-	the most recent shared copy materialized FROM it (``source_skill ==
-	skill_name``), if any - a private (User) source has at most one live shared
-	descendant. Returns ``(existing_name, scope)``; ``existing_name`` is ``None``
-	and ``scope`` is ``"User"`` when nothing has ever been shared.
-
-	Single source of truth for the request-time guard
-	(``request_skill_promotion``), the approval-time guard
-	(``_materialize_promotion``) and the requester status read
-	(``my_skill_promotion``) - #595 was exactly the first two drifting apart: the
-	request-time check used to read the SOURCE row's own ``scope`` column, which
-	never changes once a SEPARATE shared row is materialized from it, so a skill
-	already promoted to Org could be re-requested endlessly and only fail (with a
-	late, confusing error) at approval time.
-
-	Looks ``skill_name`` up itself, rather than trusting a caller-supplied scope,
-	so a skill deleted between request and decision is a DISTINCT, clear failure -
-	never silently defaulted to "no scope = Org" (a deleted skill is not an
-	already-shared Org skill; #595 code review).
-
-	Uses ``get_list`` with an explicit ``ignore_permissions=True`` (never a bare
-	``get_all``): this is an internal lineage-integrity lookup, not a listing
-	served back to the caller, and the requester may have no read permission on
-	the system-owned shared row it can resolve to. ``get_list`` + the explicit
-	flag keeps the bypass visible in review instead of ``get_all``'s implicit
-	one."""
-	self_rows = frappe.get_list(
-		SKILL, filters={"name": skill_name}, fields=["scope"], limit=1, ignore_permissions=True
-	)
-	if not self_rows:
-		frappe.throw(_("This skill was deleted, so it cannot be promoted."))
-	live = (self_rows[0].scope or "Org").strip() or "Org"
-	if live == "Personal":
-		live = "User"
-	if live in ("Role", "Org"):
-		return skill_name, live
-	prior = frappe.get_list(
-		SKILL,
-		filters={"source_skill": skill_name, "scope": ("in", ("Role", "Org", ""))},
-		fields=["name", "scope"],
-		order_by="creation asc",
-		limit=1,
-		ignore_permissions=True,
-	)
-	if not prior:
-		return None, "User"
-	scope = (prior[0].scope or "Org").strip() or "Org"
-	return prior[0].name, ("User" if scope == "Personal" else scope)
-
-
 @frappe.whitelist(methods=["POST"])
->>>>>>> 3db59d6 (fix(skills): skill, learned-rule and app-learning endpoints answer POST only)
 @require_jarvis_user
 def request_skill_promotion(
 	name: str,
