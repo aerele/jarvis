@@ -280,6 +280,7 @@ async function approve(mode = "step") {
 						/>
 						<span v-else>▶ Approve &amp; run</span>
 					</button>
+					<p class="jv-drun-note">Runs every change in this reply without asking.</p>
 				</div>
 			</template>
 		</div>
@@ -383,6 +384,13 @@ async function approve(mode = "step") {
 }
 .jv-drunbtn {
 	width: 100%;
+}
+.jv-drun-note {
+	margin: 8px 0 0;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--ink5);
+	text-align: center;
 }
 .jv-btn.is-run {
 	background: var(--amber-bg);

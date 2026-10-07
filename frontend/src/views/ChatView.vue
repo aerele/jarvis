@@ -2203,6 +2203,11 @@
 								Discard
 							</button>
 						</div>
+						<!-- What the amber button covers, as text: a title is invisible on
+						     touch and to anyone who does not hover. -->
+						<p v-if="pendingCardOf(pa)?.approve_run" class="jv-action-runnote">
+							Approve &amp; run runs every change in this reply without asking.
+						</p>
 					</div>
 					<!-- A typed yes/no that bound no card went to Jarvis as a normal
 					     message; say so without blocking anything (decision 13). The
@@ -15449,6 +15454,11 @@ onUnmounted(() => {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+.jv-action-runnote {
+	margin: 0 14px 12px;
+	font-size: 12px;
+	color: var(--text-3);
 }
 .jv-action-discard {
 	margin-left: auto;
