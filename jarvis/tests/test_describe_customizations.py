@@ -60,6 +60,10 @@ class _CustDiscFixtures(FrappeTestCase):
 					"app_name": FAKE_APP,
 				}
 			).insert(ignore_permissions=True)
+		# Stands in for a module a custom app ships. Frappe 16 clears a custom module's
+		# ``app_name`` when that app is not installed, and the fake app never is, so
+		# the column is written after the insert.
+		frappe.db.set_value("Module Def", FAKE_MODULE, "app_name", FAKE_APP)
 
 		_make_doctype(DT_OPEN, "Custom", [{"role": "All", "read": 1}])
 		_make_doctype(
