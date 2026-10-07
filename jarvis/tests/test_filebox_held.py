@@ -110,7 +110,7 @@ class _Base(FrappeTestCase):
 			{
 				"doctype": "File",
 				"file_name": f"fbh-{doc.name}.txt",
-				"content": "fbh invoice",
+				"content": f"fbh invoice {doc.name}",
 				"is_private": 1,
 				"attached_to_doctype": CONV,
 				"attached_to_name": doc.name,

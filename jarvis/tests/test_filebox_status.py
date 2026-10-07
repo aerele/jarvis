@@ -959,8 +959,9 @@ class TestCardResultBackfillPatch(_Base):
 
 
 class TestDuplicateDrop(_Base):
-	"""#619: the same bytes dropped again, while the first drop's draft stands, are held as
-	a Duplicate with no run; Re-run processes it anyway."""
+	"""#619 / #663: the same bytes dropped again, while the first drop is still being worked
+	(processing, waiting on an approval) or its draft stands, are held as a Duplicate with
+	no run; Re-run processes it anyway."""
 
 	def setUp(self):
 		super().setUp()
@@ -1015,10 +1016,71 @@ class TestDuplicateDrop(_Base):
 		res, sm = self._drop(file=self._file().name)
 		sm.assert_called_once()
 
-	def test_a_rerun_processes_the_duplicate_from_scratch(self):
+	def test_a_re_drop_while_the_first_still_processes_is_a_duplicate(self):
+		# #663: the second upload ran in full because the first had no draft yet.
+		first = self._first(stamp=False)
+		self._msg(first, 1, "user", "process this file")
+		self._msg(first, 2, "assistant", "...", streaming=1)
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_not_called()
+		self.assertEqual((res["run_id"], res["duplicate_of"]), (None, first))
+		self.assertEqual(self._row(res["conversation_id"])["result"], f"Duplicate of {PREFIX}invoice.txt")
+
+	def test_a_re_drop_while_the_first_waits_on_an_approval_is_a_duplicate(self):
+		first = self._first(stamp=False)
+		self._answered(first)
+		self._ar(first)
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_not_called()
+		self.assertEqual(res["duplicate_of"], first)
+
+	def test_a_re_drop_after_a_run_that_ended_without_a_draft_processes_again(self):
+		first = self._first(stamp=False)
+		self._answered(first, "There was nothing to draft from this file.")
+		res, sm = self._drop(file=self._file().name)
+		sm.assert_called_once()
+		self.assertNotIn("duplicate_of", res)
+
+	def test_a_rerun_of_a_duplicate_stays_a_duplicate_while_the_first_stands(self):
+		# Re-try on the same file used to process it anyway; it stays a Duplicate while
+		# the first copy's draft stands (or the first is still being worked).
+		first = self._first()
+		res, _ = self._drop(file=self._file().name)
+		conv = res["conversation_id"]
+		with (
+			_as(USER),
+			patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send,
+			self.assertRaises(frappe.ValidationError) as cm,
+		):
+			filebox._rerun_one(conv)
+		send.assert_not_called()
+		self.assertIn("stays a Duplicate", str(cm.exception))
+		self.assertIn("delete or cancel that draft", str(cm.exception))
+		self.assertEqual(self._row(conv)["status"], "duplicate")
+		self.assertEqual(frappe.db.get_value(CONV, conv, "filebox_duplicate_of"), first)
+		self.assertFalse(frappe.db.get_value(CONV, conv, "filebox_rerun_at"))  # nothing claimed
+
+	def test_a_rerun_while_the_first_still_processes_says_to_let_it_finish(self):
+		first = self._first(stamp=False)
+		self._msg(first, 1, "user", "process this file")
+		self._msg(first, 2, "assistant", "...", streaming=1)
+		res, _ = self._drop(file=self._file().name)
+		with (
+			_as(USER),
+			patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send,
+			self.assertRaises(frappe.ValidationError) as cm,
+		):
+			filebox._rerun_one(res["conversation_id"])
+		send.assert_not_called()
+		self.assertIn("still being worked", str(cm.exception))
+		self.assertIn("Let that one finish first.", str(cm.exception))
+		self.assertNotIn("draft", str(cm.exception))  # there is none yet
+
+	def test_a_rerun_processes_the_duplicate_once_the_first_draft_is_gone(self):
 		self._first()
 		res, _ = self._drop(file=self._file().name)
 		conv = res["conversation_id"]
+		frappe.db.delete("ToDo", {"name": self.todo.name})
 		with _as(USER), patch.object(filebox, "_send_inbound", return_value={"ok": True}) as send:
 			filebox._rerun_one(conv)
 		send.assert_called_once()
