@@ -39,6 +39,25 @@ export function chatRefusalMessage(res) {
 	return REFUSALS[code] || (server ? String(server) : "This action could not be completed.");
 }
 
+// A next-step click (propose_next_action) refused for a reason that passes: another
+// card is waiting, or the card store hiccuped. The step is still valid, so the button
+// stays; any other refusal means the step is gone.
+const TEMPORARY_NEXT_STEP_CODES = ["ConfirmationPendingError", "ConfirmationUnavailableError"];
+
+export function nextStepRefusal(res) {
+	const err = (res && res.error) || {};
+	const temporary = TEMPORARY_NEXT_STEP_CODES.includes(err.code);
+	const person = typeof err.person_message === "string" ? err.person_message.trim() : "";
+	// Never the model-facing text: only the person's words, else a plain line.
+	const fallback = temporary
+		? "Couldn't open the card right now. Try again."
+		: "That next step is not available.";
+	return {
+		temporary,
+		message: person || (res && res.reason_code ? chatRefusalMessage(res) : fallback),
+	};
+}
+
 export function chatOutcomeMessage(res, action) {
 	if (res && res.reason_code === "already_handled") return REFUSALS.already_handled;
 	if (action === "discard") return "Discarded. Nothing ran.";

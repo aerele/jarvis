@@ -169,6 +169,23 @@ class TestProposeNextAction(FrappeTestCase):
 			conversation=self.conv,
 		)
 
+	def test_temporary_refusals_carry_person_words_and_a_stable_code(self):
+		self._receipt(self.conv)
+		for code, words in (
+			("ConfirmationPendingError", "Finish or discard the open card first."),
+			("ConfirmationUnavailableError", "Couldn't open the card right now. Try again."),
+		):
+			gate = {"ok": False, "error": {"code": code, "message": "do NOT retry this call; stop"}}
+			with (
+				patch.object(actions_api, "_suggest_next", return_value={"kind": "submit", "action": None}),
+				patch("frappe.db.exists", return_value=True),
+				patch("frappe.has_permission", return_value=True),
+				patch("jarvis.api._run_tool", return_value=gate),
+			):
+				out = propose_next_action(self.conv, "Sales Order", "SO-1", "submit")
+			self.assertEqual(out["error"]["code"], code)
+			self.assertEqual(out["error"]["person_message"], words)
+
 	def test_stale_step_is_refused(self):
 		self._receipt(self.conv)
 		with self.assertRaises(InvalidArgumentError):

@@ -8,6 +8,7 @@ import {
 	chatStatusLine,
 	isChatSettled,
 	keepsChatCard,
+	nextStepRefusal,
 } from "./chatCardActions";
 
 describe("chatCardActions copy", () => {
@@ -212,5 +213,40 @@ describe("chatRefusalMessage prefers the person's words", () => {
 			"This import cannot be run from chat. Use Data Import in Desk."
 		);
 		expect(chatRefusalMessage({ ok: false, error: { message: "Plain" } })).toBe("Plain");
+	});
+});
+
+describe("next-step refusals (propose_next_action)", () => {
+	const modelText = "a card is waiting. Do NOT retry this call; stop and end your turn now.";
+	it("keeps the button and shows the person's words for a temporary refusal", () => {
+		const pending = {
+			ok: false,
+			error: {
+				code: "ConfirmationPendingError",
+				message: modelText,
+				person_message: "Finish or discard the open card first.",
+			},
+		};
+		const r = nextStepRefusal(pending);
+		expect(r.temporary).toBe(true);
+		expect(r.message).toBe("Finish or discard the open card first.");
+		const down = nextStepRefusal({
+			ok: false,
+			error: { code: "ConfirmationUnavailableError", message: modelText },
+		});
+		expect(down.temporary).toBe(true);
+		expect(down.message).not.toContain("do NOT retry");
+		expect(down.message).toBe("Couldn't open the card right now. Try again.");
+	});
+	it("hides the step for a final refusal, never with model-facing text", () => {
+		const r = nextStepRefusal({ ok: false, error: { code: "Other", message: modelText } });
+		expect(r.temporary).toBe(false);
+		expect(r.message).toBe("That next step is not available.");
+	});
+	it("ChatView hides the step only when the refusal is final, and counts auto_applied as acted", () => {
+		const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+		expect(src).toContain("if (!refusal.temporary) hideNextStep(step);");
+		expect(src).toMatch(/NEXT_STEP_DONE_OUTCOMES = \["confirmed", "auto_applied"\]/);
+		expect(src).toContain("NEXT_STEP_DONE_OUTCOMES.includes(x.action_outcome)");
 	});
 });

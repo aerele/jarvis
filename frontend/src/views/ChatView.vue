@@ -4318,7 +4318,12 @@ import {
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
-import { chatRefusalMessage, chatSettledReason, keepsChatCard } from "@/lib/chatCardActions";
+import {
+	chatRefusalMessage,
+	chatSettledReason,
+	keepsChatCard,
+	nextStepRefusal,
+} from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo } from "@/lib/errors";
 import { canOpenInDashboards, dashboardOpenRoute } from "@/lib/dashboardOpen";
 import {
@@ -7987,6 +7992,7 @@ async function discardPending(pa) {
 // workflow call gets, as the person), then the card is pulled in with the usual
 // resync. It is hidden once a later receipt in the thread acted on that record.
 const NEXT_STEP_TOOLS = ["submit_doc", "apply_workflow_action"];
+const NEXT_STEP_DONE_OUTCOMES = ["confirmed", "auto_applied"];
 const nextBusyKey = ref("");
 function receiptRecord(m) {
 	try {
@@ -7998,14 +8004,14 @@ function receiptRecord(m) {
 		return {};
 	}
 }
-// One pass over the thread: the records a CONFIRMED submit / workflow receipt already
-// acted on (a failed or discarded one leaves the step open), plus any step a refusal
+// One pass over the thread: the records a submit / workflow receipt already acted on,
+// confirmed or auto-applied without a card (a failed or discarded one leaves the step open), plus any step a refusal
 // said is gone.
 const nextStepGone = ref(new Set());
 const nextStepActed = computed(() => {
 	const keys = new Set(nextStepGone.value);
 	for (const x of visibleMessages.value) {
-		if (x.role !== "tool" || x.action_outcome !== "confirmed") continue;
+		if (x.role !== "tool" || !NEXT_STEP_DONE_OUTCOMES.includes(x.action_outcome)) continue;
 		if (!NEXT_STEP_TOOLS.includes(x.tool_name)) continue;
 		const o = receiptRecord(x);
 		keys.add(`${o.doctype}|${o.name}`);
@@ -8026,8 +8032,9 @@ async function proposeNext(m, step) {
 	try {
 		const r = await api.proposeNextAction(currentId.value, step);
 		if (r && r.ok === false) {
-			notify(chatRefusalMessage(r), { type: "error" });
-			hideNextStep(step);
+			const refusal = nextStepRefusal(r);
+			notify(refusal.message, { type: "error" });
+			if (!refusal.temporary) hideNextStep(step);
 			return;
 		}
 		await resyncPendingConfirmations(currentId.value);
