@@ -105,12 +105,13 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	# 3. Nothing usable -> (re)generate. Refuse (raise) if the queue can't run it,
 	#    so we never leave an orphan Queued row that no worker will drain.
 	_require_worker()
-	make_prepared_report(report_name, filters)
+	run = make_prepared_report(report_name, filters)["name"]
 	return _envelope(
 		report_name,
 		"started",
 		"This report is heavy, so it runs in the background - I've started it. "
 		"Ask me again in a little while and I'll have the results.",
+		run=run,
 	)
 
 
@@ -226,6 +227,7 @@ def _read_completed(dn: str) -> dict | None:
 	env["columns"] = columns or []
 	env["result"] = capped
 	env["as_of"] = str(as_of) if as_of else None
+	env["run"] = dn
 	if note:
 		env["row_note"] = note
 	return env
@@ -287,11 +289,11 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 		return None
 	if row.status == "Queued":
 		# Enqueued and waiting for a worker - never re-trigger (see _STARTED_STALL_MARGIN).
-		return _generating(report_name)
+		return _generating(report_name, row.name)
 	if row.status == "Started":
 		age = frappe.utils.time_diff_in_seconds(frappe.utils.now(), row.creation)
 		if age <= _report_timeout(report_name) + _STARTED_STALL_MARGIN:
-			return _generating(report_name)
+			return _generating(report_name, row.name)
 		return None  # started but the worker died mid-run -> caller re-generates
 	# Error / Failed - surface it and stop; re-firing the same doomed job on every
 	# ask is the loop we are avoiding. The user can adjust the filters (a new match
@@ -303,6 +305,7 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 		"That report failed to generate. If it needs a filter you didn't set "
 		"(a company, a date range, a required value), tell me and I'll run it "
 		"again with it.",
+		run=row.name,
 	)
 
 
@@ -355,12 +358,13 @@ def _match_key(filters: dict) -> str:
 	)
 
 
-def _generating(report_name: str) -> dict:
+def _generating(report_name: str, run: str) -> dict:
 	return _envelope(
 		report_name,
 		"generating",
 		"Your report is still running in the background. Ask me again in a "
 		"little while and I'll have the results.",
+		run=run,
 	)
 
 
@@ -403,6 +407,8 @@ def _queue_reachable() -> bool:
 # envelope
 # --------------------------------------------------------------------------- #
 def _envelope(report_name: str, status: str, message: str, **extra) -> dict:
+	# ``run`` (every status) names the Prepared Report it answers for: the chat's
+	# report card reads it (jarvis.chat.report_runs).
 	# prepared_report stays ALWAYS truthy so the dashboards_api run-time backstop
 	# (which rejects a tile whose run_report result carries prepared_report) keeps
 	# working regardless of status.
