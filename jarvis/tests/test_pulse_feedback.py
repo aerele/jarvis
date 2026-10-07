@@ -10,7 +10,7 @@ resets the two pulse fields itself instead of trusting a clean row.
 The admin forward is always mocked - these never hit a real admin.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import frappe
@@ -19,9 +19,12 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.api import create_conversation
 from jarvis.chat.feedback import (
+	_PULSE_PREVIOUS_MONTH_DAYS,
 	PULSE_MAX_OFFERS,
 	_pulse_period,
+	_pulse_window_end,
 	_pulse_window_start,
+	_stored_key_is_ahead,
 	pulse_context,
 	submit_pulse_feedback,
 )
@@ -74,6 +77,16 @@ def _cleanup_user_conversations(user: str = TEST_USER) -> None:
 		_delete_conv(name)
 
 
+def _reviewed_month_activity():
+	"""A moment inside the window the survey reviews right now, whatever day of
+	the month the suite runs on: days 1..10 review the previous month, whose
+	window ends before today, so "now" is NOT in it then."""
+	now = frappe.utils.now_datetime()
+	if now.day <= _PULSE_PREVIOUS_MONTH_DAYS:
+		return now.replace(day=1, hour=12, minute=0, second=0, microsecond=0) - timedelta(days=1)
+	return now
+
+
 class _PulseTestCase(FrappeTestCase):
 	def setUp(self):
 		_ensure_test_user()
@@ -105,13 +118,18 @@ class _PulseTestCase(FrappeTestCase):
 			SETTINGS, self.settings, ["pulse_last_period_key", "pulse_offer_count"], as_dict=True
 		)
 
-	def _set_turns(self, count, *, days_ago=0, conversation=None):
+	def _set_turns(self, count, *, days_ago=None, conversation=None, active_at=None):
 		frappe.db.set_value(
 			CONV,
 			conversation or self.conv,
 			{
 				"turn_count": count,
-				"last_active_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days_ago),
+				"last_active_at": active_at
+				or (
+					frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days_ago)
+					if days_ago
+					else _reviewed_month_activity()
+				),
 			},
 			update_modified=False,
 		)
@@ -147,25 +165,60 @@ class TestPulseWindow(FrappeTestCase):
 	def test_january_review_starts_on_the_first_of_december(self):
 		self.assertEqual(_pulse_window_start(datetime(2027, 1, 5, 8, 0)), datetime(2026, 12, 1, 0, 0))
 
+	def test_previous_month_review_ends_on_the_first_of_the_current_month(self):
+		for day in (1, 10):
+			end = _pulse_window_end(datetime(2026, 10, day, 15, 30))
+			self.assertEqual(end, datetime(2026, 10, 1, 0, 0))
+
+	def test_current_month_review_is_open_ended(self):
+		self.assertIsNone(_pulse_window_end(datetime(2026, 10, 11, 15, 30)))
+
+
+class TestStoredKeyIsAhead(FrappeTestCase):
+	def test_later_month_is_ahead_equal_and_earlier_are_not(self):
+		self.assertTrue(_stored_key_is_ahead("M:2026-10", "M:2026-09"))
+		self.assertTrue(_stored_key_is_ahead("M:2027-01", "M:2026-12"))
+		self.assertFalse(_stored_key_is_ahead("M:2026-09", "M:2026-09"))
+		self.assertFalse(_stored_key_is_ahead("M:2026-08", "M:2026-09"))
+
+	def test_blank_and_non_monthly_keys_are_never_ahead(self):
+		for stored in (None, "", "W:2026-10-04", "D:2026-10-05"):
+			self.assertFalse(_stored_key_is_ahead(stored, "M:2026-09"), stored)
+
 
 class TestPulseContext(_PulseTestCase):
 	def test_early_in_the_month_offers_the_previous_month(self):
 		with patch(_NOW, return_value=datetime(2026, 10, 1, 9, 0)):
-			self._set_turns(5)
-			with patch(_FEATURES, return_value={}):
+			self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+			with patch(_FEATURES, return_value={}) as features:
 				result = pulse_context()
+		# The feature sweep is bounded to September too.
+		features.assert_called_once_with(TEST_USER, datetime(2026, 9, 1, 0, 0), datetime(2026, 10, 1, 0, 0))
 		self.assertTrue(result["due"])
 		self.assertEqual(result["period_key"], "M:2026-09")
 		self.assertEqual(result["period_label"], "Last month, Sep 2026")
 		self.assertTrue(result["period_is_previous"])
 		self.assertEqual(self._pulse().pulse_last_period_key, "M:2026-09")
 
+	def test_only_this_months_activity_early_in_the_month_is_not_due(self):
+		"""A first chat on Oct 3 says nothing about September: the previous-month
+		window ends on Oct 1, so the survey must not ask about a month the user
+		never used, nor list October's features as last month's."""
+		with patch(_NOW, return_value=datetime(2026, 10, 4, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 10, 3, 9, 0))
+			with patch(_FEATURES) as features:
+				self.assertFalse(pulse_context()["due"])
+		features.assert_not_called()
+		self.assertIsNone(self._pulse().pulse_last_period_key, "a non-offer burns nothing")
+
 	def test_after_day_ten_offers_the_current_month_again(self):
 		self._set_pulse("M:2026-09", PULSE_MAX_OFFERS)
 		with patch(_NOW, return_value=datetime(2026, 10, 11, 9, 0)):
-			self._set_turns(5)
-			with patch(_FEATURES, return_value={}):
+			self._set_turns(5, active_at=datetime(2026, 10, 9, 12, 0))
+			with patch(_FEATURES, return_value={}) as features:
 				result = pulse_context()
+		features.assert_called_once()
+		self.assertIsNone(features.call_args.args[2], "days 11+ stay open-ended")
 		self.assertTrue(result["due"])
 		self.assertEqual(result["period_key"], "M:2026-10")
 		self.assertFalse(result["period_is_previous"])
@@ -173,10 +226,35 @@ class TestPulseContext(_PulseTestCase):
 	def test_answered_for_the_previous_month_is_not_re_asked_early(self):
 		self._set_pulse("M:2026-09", PULSE_MAX_OFFERS)
 		with patch(_NOW, return_value=datetime(2026, 10, 2, 9, 0)):
-			self._set_turns(5)
+			self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
 			with patch(_FEATURES) as features:
 				self.assertFalse(pulse_context()["due"])
 		features.assert_not_called()
+
+	def test_answer_stored_early_in_the_month_by_the_old_code_is_not_re_asked(self):
+		"""Before this fix days 1..10 stamped the CURRENT month's key. Such a user
+		must not be re-asked on days 1..10 (computed key is the previous month)
+		nor on day 11+ (computed key now equals the stored one, count capped)."""
+		for day in (5, 11):
+			with self.subTest(day=day):
+				self._set_pulse("M:2026-10", PULSE_MAX_OFFERS)
+				with patch(_NOW, return_value=datetime(2026, 10, day, 9, 0)):
+					self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+					with patch(_FEATURES) as features:
+						self.assertFalse(pulse_context()["due"])
+				features.assert_not_called()
+				row = self._pulse()
+				self.assertEqual(row.pulse_last_period_key, "M:2026-10")
+				self.assertEqual(row.pulse_offer_count, PULSE_MAX_OFFERS)
+
+	def test_an_older_stored_key_is_still_asked_early_in_the_month(self):
+		self._set_pulse("M:2026-08", PULSE_MAX_OFFERS)
+		with patch(_NOW, return_value=datetime(2026, 10, 5, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+			with patch(_FEATURES, return_value={}):
+				result = pulse_context()
+		self.assertTrue(result["due"])
+		self.assertEqual(result["period_key"], "M:2026-09")
 
 	def test_due_when_never_offered(self):
 		with patch(_FEATURES, return_value={}):
