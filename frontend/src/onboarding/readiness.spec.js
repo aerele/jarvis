@@ -17,6 +17,7 @@ const {
 	regateOnRouteChange,
 	forgetReady,
 	replacedBanner,
+	subscriptionExpiredBanner,
 	hasReconnectIntent,
 	landingStep,
 	isLlmApplying,
@@ -704,5 +705,158 @@ describe("bootstrap send gate", () => {
 		}
 		expect(bootBody).toContain("await bootStep(convsP)");
 		expect(bootBody).toContain("await bootStep(loadConversation(first))");
+	});
+});
+
+describe("subscriptionExpiredBanner skipped copy", () => {
+	const entry = {
+		upstream: "anthropic",
+		label: "Anthropic",
+		account_ref: "A",
+		fallback: "OpenAI",
+	};
+
+	it("says Auto skips it when the entry is skipped", () => {
+		expect(subscriptionExpiredBanner([{ ...entry, skipped: true }], true).message).toBe(
+			"Auto skips it until you reconnect."
+		);
+	});
+
+	it("keeps the Auto uses line when it is not skipped", () => {
+		expect(subscriptionExpiredBanner([{ ...entry, skipped: false }], true).message).toBe(
+			"Auto uses OpenAI until you reconnect."
+		);
+	});
+});
+
+describe("subscriptionExpiredBanner copy (spec section 3)", () => {
+	const openai = { upstream: "openai", label: "OpenAI", account_ref: "A1", fallback: "" };
+
+	it("returns null when nothing is expired", () => {
+		expect(subscriptionExpiredBanner([], true)).toBeNull();
+		expect(subscriptionExpiredBanner(undefined, false)).toBeNull();
+	});
+
+	it("an admin whose chats fail is told what happens and offered Reconnect", () => {
+		expect(subscriptionExpiredBanner([openai], true)).toEqual({
+			title: "OpenAI sign-in expired",
+			message: "Chats that need it will fail until it is reconnected.",
+			upstream: "openai",
+			accountRef: "A1",
+			showReconnect: true,
+		});
+	});
+
+	it("an admin whose other model still answers is told which one", () => {
+		const b = subscriptionExpiredBanner([{ ...openai, fallback: "Anthropic" }], true);
+		expect(b.message).toBe("Auto uses Anthropic until you reconnect.");
+		expect(b.showReconnect).toBe(true);
+	});
+
+	it("a member is sent to their admin and gets no action", () => {
+		const b = subscriptionExpiredBanner([{ upstream: "xai", label: "xAI Grok" }], false);
+		expect(b.title).toBe("xAI Grok sign-in expired");
+		expect(b.message).toBe("Ask your workspace admin to reconnect it.");
+		expect(b.showReconnect).toBe(false);
+		expect(b.accountRef).toBe("");
+	});
+
+	it("uses no em dashes", () => {
+		const b = subscriptionExpiredBanner([{ ...openai, fallback: "Anthropic" }], true);
+		expect(JSON.stringify(b)).not.toContain("\u2014");
+	});
+});
+
+describe("ChatView subscription-expired wiring", () => {
+	const HERE = path.dirname(fileURLToPath(import.meta.url));
+	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+	const at = (needle) => {
+		const i = chatSrc.indexOf(needle);
+		expect(i, `ChatView must contain ${needle}`).not.toBe(-1);
+		return i;
+	};
+
+	it("orders the composer banners: billing, then the expired sign-in, then the existing chain unchanged", () => {
+		const order = [
+			'v-else-if="suspendedNotice"',
+			'v-else-if="subscriptionExpired"',
+			'v-else-if="workersWarnNotice"',
+			'v-else-if="noAiConnected"',
+			'v-else-if="containerUnavailable"',
+			'v-else-if="notReadyNotice"',
+			'v-else-if="llmApplying"',
+			'v-else-if="llmApplyStuck"',
+		].map(at);
+		expect([...order].sort((a, b) => a - b)).toEqual(order);
+	});
+
+	it("puts the expired banner directly after the billing banner, before the soft worker comment", () => {
+		const start = at('v-else-if="subscriptionExpired"');
+		const comment = at("<!-- Soft worker warning");
+		const worker = at('v-else-if="workersWarnNotice"');
+		expect(comment).toBeGreaterThan(start);
+		expect(comment).toBeLessThan(worker);
+		const billing = at('v-else-if="suspendedNotice"');
+		const between = chatSrc.slice(billing + 'v-else-if="'.length, start);
+		expect(between).not.toContain('v-else-if="');
+	});
+
+	it("shows the Reconnect action on the banner only when the banner says so", () => {
+		const start = at('v-else-if="subscriptionExpired"');
+		const end = at('v-else-if="workersWarnNotice"');
+		const block = chatSrc.slice(start, end);
+		expect(block).toContain('v-if="subscriptionExpired.showReconnect"');
+		expect(block).toContain("goReconnectSubscription(subscriptionExpired.upstream)");
+	});
+
+	it("renders a Reconnect button on the failed-message card for admins only", () => {
+		const i = at("errorInfo(m).action === 'reconnect'");
+		const open = chatSrc.lastIndexOf("<button", i);
+		const close = chatSrc.indexOf("</button>", i);
+		expect(open).not.toBe(-1);
+		expect(close).toBeGreaterThan(i);
+		const button = chatSrc.slice(open, close);
+		expect(button).toContain("canConnectModel");
+		expect(button).toContain("errorInfo(m).actionLabel");
+		expect(button).toContain("goReconnectSubscription(errorInfo(m).upstream)");
+	});
+
+	it("shares one CSS class between Retry and Reconnect instead of copying inline styles", () => {
+		const i = at("errorInfo(m).action === 'reconnect'");
+		const button = chatSrc.slice(
+			chatSrc.lastIndexOf("<button", i),
+			chatSrc.indexOf("</button>", i)
+		);
+		expect(button).toContain('class="jv-retry"');
+		expect(button).not.toContain(":style");
+		expect(button).not.toContain("var(--red)");
+	});
+
+	it("tells the error classifier whether the viewer is an admin and which upstreams exist", () => {
+		const i = at("...turnErrorInfo(m.error, meta.code,");
+		const block = chatSrc.slice(i, i + 300);
+		expect(block).toContain("admin: canConnectModel");
+		expect(block).toContain("subscriptionUpstreams");
+	});
+
+	it("passes the expired-model map and the message model to the classifier, and keys the cache on them", () => {
+		const i = at("...turnErrorInfo(m.error, meta.code,");
+		const block = chatSrc.slice(i, i + 400);
+		expect(block).toContain("model: m.model");
+		expect(block).toContain("expiredModels");
+		expect(chatSrc).toContain("expiredModelMap(subscriptionNotice.expiredModels)");
+		const key = chatSrc.slice(chatSrc.indexOf("const key = `${m.name}"), i);
+		expect(key).toContain("m.model");
+		expect(key).toContain("expiredModels");
+	});
+
+	it("passes :expired-models to the model picker", () => {
+		expect(chatSrc).toContain(':expired-models="expiredModels"');
+	});
+
+	it("loads the notice on mount and listens for the realtime refresh", () => {
+		expect(chatSrc).toContain("loadSubscriptionNotice();");
+		expect(chatSrc).toContain("watchSubscriptionNotice(socket)");
+		expect(chatSrc).toContain("unwatchSubscriptionNotice()");
 	});
 });

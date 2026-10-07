@@ -137,18 +137,57 @@ def bench_liveness_vector() -> dict:
 	}
 
 
-def _log_failure_throttled() -> None:
+def _log_failure_throttled(
+	key: str = _LOG_THROTTLE_KEY, title: str = "jarvis.chat.heartbeat push failed"
+) -> None:
 	"""Log a push-path bug at most once per hour, so a persistent fault cannot flood the
 	local Error Log every 5 minutes. NEVER raises (mirrors error_push): a Redis/DB hiccup
-	in the logging path itself must not escape into the scheduler."""
+	in the logging path itself must not escape into the scheduler. ``key`` / ``title`` let
+	other modules (jarvis.subscription_health) keep their own once-an-hour marker."""
 	try:
 		hour = frappe.utils.now()[:13]
-		if frappe.cache().get_value(_LOG_THROTTLE_KEY) == hour:
+		if frappe.cache().get_value(key) == hour:
 			return
-		frappe.cache().set_value(_LOG_THROTTLE_KEY, hour)
-		frappe.log_error(title="jarvis.chat.heartbeat push failed", message=frappe.get_traceback())
+		frappe.cache().set_value(key, hour)
+		frappe.log_error(title=title, message=frappe.get_traceback())
 	except Exception:
 		pass
+
+
+def _drain_subscription_signals() -> list:
+	"""Pending dead-sign-in signals for admin. Never raises: a Redis fault must not stop the
+	liveness push, which is the dead-man's switch."""
+	try:
+		from jarvis import subscription_health
+
+		return subscription_health.drain_signals()
+	except Exception:
+		_log_failure_throttled()
+		return []
+
+
+def _requeue_subscription_signals(signals: list) -> None:
+	if not signals:
+		return
+	try:
+		from jarvis import subscription_health
+
+		subscription_health.requeue_signals(signals)
+	except Exception:
+		_log_failure_throttled()
+
+
+def _apply_subscription_health(reply) -> None:
+	"""Store admin's ``subscription_health`` (I3). Key absent (older admin) = change nothing. Never
+	raises: the heartbeat already landed, so a fault here is not a failed push."""
+	if not isinstance(reply, dict) or "subscription_health" not in reply:
+		return
+	try:
+		from jarvis import subscription_health
+
+		subscription_health.apply_admin_health(reply["subscription_health"])
+	except Exception:
+		_log_failure_throttled()
 
 
 def _positive_int(value) -> int | None:
@@ -176,17 +215,36 @@ def _apply_max_concurrent_chats(reply) -> None:
 	frappe.db.set_single_value("Jarvis Settings", "max_concurrent_chats", new, update_modified=False)
 
 
+def _apply_max_concurrent_chats_safely(reply) -> None:
+	"""The heartbeat already landed, so a fault storing the cap is not a failed push and must not
+	skip the subscription-health step after it."""
+	try:
+		_apply_max_concurrent_chats(reply)
+	except Exception:
+		_log_failure_throttled()
+
+
 def push_bench_heartbeat() -> None:
 	"""``*/5`` scheduler entry. Self-gating + best-effort; NEVER raises. UNCONDITIONAL:
 	posts every tick whenever admin is configured (that is the point — silence means the
 	scheduler is dead)."""
+	signals: list = []
 	try:
 		if not _admin_configured():
 			return
 		from jarvis import admin_client
 
-		reply = admin_client.push_bench_heartbeat(bench_liveness_vector())
-		_apply_max_concurrent_chats(reply)
+		vector = bench_liveness_vector()
+		signals = _drain_subscription_signals()
+		if signals:
+			vector["subscription_signals"] = signals
+		try:
+			reply = admin_client.push_bench_heartbeat(vector)
+		except Exception:
+			_requeue_subscription_signals(signals)
+			raise
+		_apply_max_concurrent_chats_safely(reply)
+		_apply_subscription_health(reply)
 	except (AdminAuthError, AdminUnreachableError, AdminRateLimitedError, AdminValidationError):
 		# Best-effort telemetry: ANY push the backend does not accept — not onboarded, admin
 		# down, throttled, or a 4xx (INCLUDING the ingest endpoint not existing yet, before

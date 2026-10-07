@@ -7,6 +7,72 @@ const compiled = rules.map((rule) => ({
 }));
 const byCode = Object.fromEntries(compiled.map((rule) => [rule.code, rule]));
 const MAX_CLASSIFY_CHARS = 8192;
+
+// Chat-subscription sign-ins. The labels and the upstream patterns live in the
+// subscription-expired rule data, which chat/error_taxonomy.py also reads.
+const SUBSCRIPTION = byCode["subscription-expired"].upstreams;
+export const SUBSCRIPTION_LABELS = SUBSCRIPTION.labels;
+// `providers=<id>` is how CLIProxy names the account that failed.
+const PROVIDERS_TOKEN = /providers=([a-z]+)/i;
+const SIGNAL = new RegExp(SUBSCRIPTION.signal, "i");
+const MENTIONS = Object.entries(SUBSCRIPTION.mentions).map(
+  ([upstream, pattern]) => [upstream, new RegExp(pattern, "gi")]
+);
+// The message's persisted provider id, when the text names no upstream.
+const PROVIDER_ALIASES = {
+  openai: "openai",
+  "openai-codex": "openai",
+  anthropic: "anthropic",
+  anthropic_cli: "anthropic",
+  "claude-cli": "anthropic",
+  xai: "xai",
+  kimi: "kimi",
+  moonshot: "kimi",
+};
+
+function toText(raw) {
+  return (
+    typeof raw === "object" && raw !== null
+      ? JSON.stringify(raw)
+      : String(raw ?? "")
+  ).slice(0, MAX_CLASSIFY_CHARS);
+}
+
+// Which subscription upstream an error text is about: "openai" | "anthropic" |
+// "xai" | "kimi", or "" when it cannot be told. A `providers=<id>` token wins;
+// else the upstream named nearest BEFORE the first sign-in-dead signal (the one
+// that failed in "openai/gpt: 500 auth_unavailable ... | xai/grok: timeout"),
+// else the first one after it. `contextProvider` is the chat message's own
+// provider id, used only when the text names nothing.
+// KEEP IN SYNC with subscription_upstream_from_error in chat/error_taxonomy.py
+// (fixtures/subscription_upstreams.json pins both).
+export function subscriptionUpstreamFromError(raw, contextProvider = "") {
+  const text = toText(raw);
+  const token = PROVIDERS_TOKEN.exec(text)?.[1].toLowerCase();
+  // Own keys only: "providers=constructor" must not resolve to a prototype member.
+  const named = Object.hasOwn(SUBSCRIPTION.providerTokens, token)
+    ? SUBSCRIPTION.providerTokens[token]
+    : "";
+  if (named) return named;
+  const signalAt = SIGNAL.exec(text)?.index ?? text.length;
+  let before = null;
+  let after = null;
+  for (const [upstream, pattern] of MENTIONS) {
+    for (const match of text.matchAll(pattern)) {
+      if (match.index < signalAt) {
+        if (!before || match.index > before.at)
+          before = { upstream, at: match.index };
+      } else if (!after || match.index < after.at) {
+        after = { upstream, at: match.index };
+      }
+    }
+  }
+  const nearest = before || after;
+  if (nearest) return nearest.upstream;
+  if (/refresh_token_/i.test(text)) return "openai";
+  if (/\/login|\bnot logged in\b/i.test(text)) return "anthropic";
+  return PROVIDER_ALIASES[String(contextProvider || "").toLowerCase()] || "";
+}
 // Routing / inference hosts: when one of these is named it is the provider
 // that answered, whatever model brand the text also mentions.
 const HOSTS = new Set(["openrouter", "groq", "together"]);
@@ -79,27 +145,93 @@ function providerFor(raw, context) {
   return matches.length === 1 && hosts.length === 0 ? matches[0] : undefined;
 }
 
+// Codes that say "the provider failed" without saying why. A dead sign-in on a pool tenant arrives
+// this way (CLIProxy's 503 is flattened to a bare "provider internal error"), so these are the only
+// codes the site's own expired-sign-in state may upgrade. Specific causes (authentication, quota,
+// rate-limit, safety, ...) are never overridden.
+const GENERIC_CODES = new Set([
+  "provider",
+  "gateway",
+  "service-unavailable",
+  "internal",
+]);
+// "openai_compat/gpt-5.6-terra" and "gpt-5.6-terra" are the same model.
+const bareModel = (id) =>
+  String(id ?? "")
+    .trim()
+    .split("/")
+    .pop();
+
+// A failed turn's row has no `model` (only answered turns are stamped), but the agent runtime writes
+// "<provider>/<model> request failed (...)" into the error, so read the model from there.
+const FAILED_MODEL =
+  /^[\s\p{Extended_Pictographic}\uFE0F]*[\w.-]+\/([\w.:+-]+) request failed/u;
+
+function expiredUpstreamFor(code, context, text) {
+  const map = context?.expiredModels;
+  const model = bareModel(context?.model) || FAILED_MODEL.exec(text)?.[1] || "";
+  if (!model || !map || !GENERIC_CODES.has(code)) return "";
+  for (const [id, entry] of Object.entries(map)) {
+    if (
+      bareModel(id) === model &&
+      Object.hasOwn(SUBSCRIPTION_LABELS, entry?.upstream)
+    )
+      return entry.upstream;
+  }
+  return "";
+}
+
 export function turnErrorInfo(raw, explicitCode, context = {}) {
   try {
     // Cap what the regexes see: error text is model-supplied and unbounded,
     // and a few patterns have bounded-but-real backtracking. Same cap as
     // the Python classifier so both sides read the same prefix.
-    const text = (
-      typeof raw === "object" && raw !== null
-        ? JSON.stringify(raw)
-        : String(raw ?? "")
-    ).slice(0, MAX_CLASSIFY_CHARS);
+    const text = toText(raw);
     const inferred =
       compiled.find((rule) => rule.test.test(text))?.code || "gateway";
     // Older servers publish broad gateway/provider codes. Refine those from
     // the saved text too, so historical and live errors get the same remedy.
-    const code =
+    let code =
       !explicitCode || ["gateway", "provider"].includes(explicitCode)
         ? inferred === "gateway"
           ? explicitCode || inferred
           : inferred
         : explicitCode;
+    // A dead chat-subscription sign-in needs an upstream to name. Without one, or
+    // when the caller says the workspace has no subscription row for it (an array
+    // that lacks it; undefined means "unknown"), the plain authentication copy fits.
+    let upstream = "";
+    if (code === "subscription-expired") {
+      upstream = subscriptionUpstreamFromError(text, context?.provider);
+      const known = context?.subscriptionUpstreams;
+      if (!upstream || (Array.isArray(known) && !known.includes(upstream)))
+        code = "authentication";
+    }
+    // The site already holds this model's sign-in as expired (admin poll): a generic failure on
+    // that model is that sign-in, whatever the flattened error text says.
+    const expiredUpstream = expiredUpstreamFor(code, context, text);
+    if (expiredUpstream) {
+      code = "subscription-expired";
+      upstream = expiredUpstream;
+    }
     const rule = Object.hasOwn(byCode, code) ? byCode[code] : byCode.internal;
+    if (code === "subscription-expired") {
+      const label = SUBSCRIPTION_LABELS[upstream];
+      return {
+        code,
+        headline: rule.headline.replace("{provider}", label),
+        hint:
+          context?.admin === true
+            ? "Reconnect it in AI models, then send again."
+            : rule.hint,
+        retryable: rule.retryable,
+        statusUrl: "",
+        statusLabel: "",
+        action: "reconnect",
+        actionLabel: `Reconnect ${label}`,
+        upstream,
+      };
+    }
     const provider = rule.status ? providerFor(text, context) : undefined;
     // A status link supplements the cause-specific guidance; it must not
     // turn a timeout or connection failure into an asserted provider outage.
