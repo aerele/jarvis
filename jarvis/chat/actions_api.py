@@ -703,9 +703,25 @@ def propose_next_action(
 	prev = frappe.flags.get("jarvis_force_card")
 	frappe.flags["jarvis_force_card"] = True
 	try:
-		return api._run_tool(tool, args, conversation=conversation)
+		res = api._run_tool(tool, args, conversation=conversation)
 	finally:
 		frappe.flags["jarvis_force_card"] = prev
+	return _person_next_refusal(res)
+
+
+def _person_next_refusal(res: dict) -> dict:
+	"""Words for the person on the two TEMPORARY refusals of a next-step click (another
+	card waiting, a retryable storage error): the gate's own text is written for the
+	model ("end your turn now"). The stable ``error.code`` stays, so the SPA keeps the
+	button for these and hides it only for a refusal that is final."""
+	err = res.get("error") if isinstance(res, dict) else None
+	if not isinstance(err, dict):
+		return res
+	if err.get("code") == "ConfirmationPendingError":
+		err["person_message"] = _("Finish or discard the open card first.")
+	elif err.get("code") == "ConfirmationUnavailableError":
+		err["person_message"] = _("Couldn't open the card right now. Try again.")
+	return res
 
 
 def _panel_can_fix(verb: str, doctype: str, name: str, err_obj: dict, marked: bool | None) -> bool:
