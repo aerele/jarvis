@@ -1026,7 +1026,8 @@ def _warn_provisioning_if_starved() -> None:
 #     by the ops provisioning warning. Rationale: the pump routes
 #     prepare/finalize (control) jobs by `_control_queue` (#632), so
 #     1 `long` worker plus a second worker to run those control jobs does NOT
-#     strand - the stricter "< 2 `long`" rule over-warned that case. The strand only truly happens with a single worker doing
+#     strand - the stricter "< 2 `long`" rule over-warned that case.
+#     The strand only truly happens with a single worker doing
 #     everything, so this warns on total headcount instead. Surfaced as a
 #     non-blocking onboarding banner; chat still works.
 #   * No hard block. RQ's registry can read zero workers while every worker is
@@ -1166,7 +1167,7 @@ def _default_dispatch_prepare(run_id: str, relay_target_id: str) -> None:
 	not exist yet, so it is a no-op-until-WP-1d in production and is ALWAYS replaced
 	by tests.
 
-	QUEUE (F1): routed via ``_control_queue`` — a live ``jarvis_chat`` lane, else
+	QUEUE (F1): routed via ``_control_queue``: a live ``jarvis_chat`` lane, else
 	``short`` when a dedicated short consumer is live, else the pre-#632 rule
 	(see the block comment above)."""
 	try:
@@ -3630,7 +3631,7 @@ def ensure_pump(relay_target_id: str, *, deps: PumpDeps | None = None) -> dict:
 	if not pump_lifecycle_configured(target):
 		return {"enqueued": False, "reason": "not_configured"}
 
-	# §8-I / F1: if this site is has no isolated control-job executor, warn LOUDLY
+	# §8-I / F1: if this site has no isolated control-job executor, warn LOUDLY
 	# (throttled). Emitted on the start path so it surfaces even when the pump is
 	# already leased (below) — the shape is a standing provisioning problem, not a
 	# per-hop one. Best-effort, never blocks the start decision.
