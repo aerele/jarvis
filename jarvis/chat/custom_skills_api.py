@@ -109,7 +109,7 @@ def _shared_fields() -> list[str]:
 	]
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def list_custom_skills() -> list[dict]:
 	"""The current user's own skills PLUS skills shared with them (read-only).
@@ -241,7 +241,7 @@ _load_filters = list_filters.load_legacy_filters
 _order_by = list_filters.order_by
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_custom_skills_page(
@@ -349,7 +349,7 @@ def list_custom_skills_page(
 	}
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def get_custom_skill(name: str) -> dict:
 	"""Return one skill incl. the full markdown instructions. Readable by the
@@ -525,7 +525,7 @@ def update_custom_skill(
 	return {"ok": True, "data": {"name": doc.name, "modified": str(doc.modified)}}
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def file_box_doctypes(txt: str = "") -> list[str]:
 	"""The editor's "File Box creates" search: document types matching ``txt`` that
@@ -596,7 +596,7 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 # Sharing (owner shares a skill with specific users; recipients get read-only
 # use — they cannot edit, disable, delete, or re-share it)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def list_shareable_users() -> list[dict]:
 	"""Users the current user can share a skill with (staff on this bench,
@@ -611,7 +611,7 @@ def list_shareable_users() -> list[dict]:
 	)
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def get_skill_shares(name: str) -> dict:
 	"""Return who a skill is currently shared with (owner only)."""
@@ -1240,7 +1240,7 @@ def _materialize_promotion(req, roles=None) -> dict:
 _PROMO_STATUSES = ("Pending", "Approved", "Rejected")
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def list_skill_promotion_requests(
 	status: str = "Pending",
 	search: str = "",
@@ -1451,7 +1451,7 @@ def list_skill_promotion_requests(
 	}
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 def preflight_skill_promotion(request_name: str) -> dict:
 	"""Fresh, reviewer-gated push-budget projection for one Pending promotion,
 	recomputed at the moment the reviewer is about to decide (CDX-SP-2) — a
@@ -1470,7 +1470,7 @@ def preflight_skill_promotion(request_name: str) -> dict:
 	return {"ok": True, "to_scope": req.to_scope or "", "push_projection": projection}
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def my_skill_promotion(name: str) -> dict:
 	"""The caller's MOST-RECENT promotion request for one of their OWN skills —
@@ -1537,7 +1537,7 @@ def my_skill_promotion(name: str) -> dict:
 	}
 
 
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def promotable_target_roles() -> dict:
 	"""Role options for the promotion requester's Role picker: the caller's OWN
@@ -1561,7 +1561,7 @@ def promotable_target_roles() -> dict:
 # --------------------------------------------------------------------------- #
 # Apply (explicit push to the container, via admin → fleet)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist(methods=["POST"])
+@frappe.whitelist()
 @require_jarvis_user
 def get_custom_skills_sync_status() -> dict:
 	"""Lightweight poller mirroring onboarding.get_llm_sync_status."""
