@@ -3240,6 +3240,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		or _guarded
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
+		# A person's button that promises a Confirm card (propose_next_action): parks
+		# in every mode, auto mode, armed macro and autorun included.
+		or bool(frappe.flags.get("jarvis_force_card"))
 	)
 	# Nor does a write to a skill or a learned skill, whichever tool names it: what
 	# they say is what later chats do, so a person sees each change. Two calls are

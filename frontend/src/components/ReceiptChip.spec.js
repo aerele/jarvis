@@ -1,6 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import ReceiptChip from "./ReceiptChip.vue";
+
+vi.mock("frappe-ui", () => ({
+	Button: {
+		props: ["loading"],
+		template: "<button><slot /></button>",
+	},
+}));
 
 // An uncarded write with no macro or skill name: a request-scoped "confirm all"
 // in a normal chat, or any covered write in an auto-mode chat (#581).
@@ -84,5 +91,65 @@ describe("ReceiptChip failure reference", () => {
 		expect(mount(ReceiptChip, { props: { message: bare } }).text()).not.toContain(
 			"Reference:"
 		);
+	});
+});
+
+describe("ReceiptChip next step (#621)", () => {
+	const created = (next) => ({
+		role: "tool",
+		tool_name: "create_doc",
+		tool_args: JSON.stringify({ doctype: "Sales Order", values: {} }),
+		tool_result: JSON.stringify({
+			ok: true,
+			data: {
+				doctype: "Sales Order",
+				name: "SO-1",
+				...(next ? { suggested_next: next } : {}),
+			},
+		}),
+		action_outcome: "confirmed",
+	});
+	const submit = { kind: "submit", action: null };
+
+	it("offers the suggested step and emits it on click", async () => {
+		const w = mount(ReceiptChip, { props: { message: created(submit) } });
+		const btn = w.find(".jv-receipt-next button");
+		expect(btn.text()).toBe("Submit");
+		await btn.trigger("click");
+		expect(w.emitted("next-action")[0][0]).toEqual({
+			...submit,
+			label: "Submit",
+			doctype: "Sales Order",
+			name: "SO-1",
+		});
+	});
+
+	it("shows a workflow action by its label", () => {
+		const wf = { kind: "workflow", action: "Approve" };
+		const w = mount(ReceiptChip, { props: { message: created(wf) } });
+		expect(w.find(".jv-receipt-next button").text()).toBe("Approve");
+	});
+
+	it("still words a legacy row that persisted its label", () => {
+		const w = mount(ReceiptChip, {
+			props: { message: created({ kind: "workflow", action: "Approve", label: "Approve" }) },
+		});
+		expect(w.find(".jv-receipt-next button").text()).toBe("Approve");
+	});
+
+	it("shows nothing without a suggestion", () => {
+		const w = mount(ReceiptChip, { props: { message: created(null) } });
+		expect(w.find(".jv-receipt-next").exists()).toBe(false);
+	});
+
+	it("hides the button once the step was acted on", () => {
+		const w = mount(ReceiptChip, { props: { message: created(submit), nextDone: true } });
+		expect(w.find(".jv-receipt-next").exists()).toBe(false);
+	});
+
+	it("never offers a step on a discarded create", () => {
+		const m = { ...created(submit), action_outcome: "discarded" };
+		const w = mount(ReceiptChip, { props: { message: m } });
+		expect(w.find(".jv-receipt-next").exists()).toBe(false);
 	});
 });
