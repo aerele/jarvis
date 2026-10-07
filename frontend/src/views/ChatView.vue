@@ -1865,7 +1865,7 @@
 										>
 									</div>
 									<div
-										v-if="!m.error && (!m.streaming || m.textDone) && m.content"
+										v-if="replyBarParts(m).showBar"
 										class="jv-msgbar"
 									>
 										<span
@@ -1874,8 +1874,12 @@
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
+										<!-- hidden (not removed) while streaming so the bar keeps its
+										     height; copying half a reply would be wrong -->
 										<button
 											class="jv-msgbtn"
+											:style="replyBarParts(m).showCopy ? null : 'visibility: hidden'"
+											:disabled="!replyBarParts(m).showCopy"
 											@click="copyMsg(m.name, stripBlocks(m.content))"
 											:title="copiedId === m.name ? 'Copied' : 'Copy'"
 										>
@@ -4303,8 +4307,8 @@ import {
 	toPanelRow,
 } from "@/lib/draftApply";
 import { stripBlocks } from "@/lib/chatBlocks";
+import { replyBarParts, stampDeltaTime } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
-import { createReplySettle } from "@/lib/replySettle";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
@@ -8553,6 +8557,24 @@ function liveBoxViewFor(m) {
  * worth a line (foldedHead's own "old reply, no duration, no tools" case).
  */
 // Saved tool rows plus tools seen live, never counted twice (liveTurn.turnToolNames).
+const toolRowAssistants = computed(() => {
+	const set = new Set();
+	let cur = null;
+	for (const m of transcript.value) {
+		if (m.role === "user") cur = null;
+		else if (m.role === "assistant") {
+			cur = m.name;
+			if (Array.isArray(m.steps) && m.steps.length) set.add(cur);
+		} else if (m.role === "tool" && cur) set.add(cur);
+	}
+	return set;
+});
+function anyToolRowFor(m) {
+	return (
+		toolRowAssistants.value.has(m.name) ||
+		(liveSteps.value.msgId === m.name && liveSteps.value.steps.length > 0)
+	);
+}
 function toolNamesFor(m, liveTools) {
 	return turnToolNames(activityByAssistant.value[m.name] || [], liveTools);
 }
@@ -8576,7 +8598,9 @@ function boxViewFor(m) {
 			stopped: !!m.stopped,
 			failed: !!m.error && errorInfo(m).code !== "cancelled",
 			showDetail: showActivityDetail.value,
-			settled: true,
+			// Hide the bar only when we KNOW nothing ran: no tool row of any kind
+			// (activityByAssistant drops chips and no-I/O built-ins) and no saved steps.
+			settled: !anyToolRowFor(m),
 		});
 		return head ? { mode: "folded", head } : null;
 	}
@@ -8731,25 +8755,6 @@ function scrollBottomIfPinned() {
 	// jump-to-latest arrow's visibility honest as the thread grows.
 	else showScrollDown.value = arrowNeeded();
 }
-// The reply's copy bar and time show once its text stops growing, not when the
-// server's run:end lands a couple of seconds later (lib/replySettle.js). Only
-// once the box has folded (answer showing, no tool running); the stamp is the
-// client time of the last delta until the saved `modified` replaces it.
-const replySettle = createReplySettle({
-	onSettle(id, ms) {
-		const m = messages.value.find((x) => x.name === id);
-		if (!m || !m.streaming) return;
-		// Still typing out or a tool running: look again shortly.
-		if (currentTool.value || revealer.pending().length) return replySettle.touch(id, ms);
-		if (!m.modified && !m.creation) m.creation_browser = ms;
-		m.textDone = true;
-	},
-	onResume(id) {
-		const m = messages.value.find((x) => x.name === id);
-		if (m) m.textDone = false;
-	},
-});
-onBeforeUnmount(() => messages.value.forEach((m) => replySettle.clear(m.name)));
 // Distance in px from the very bottom of the thread. 0 == pinned to newest.
 function distanceFromBottom() {
 	const el = threadEl.value;
@@ -10387,7 +10392,9 @@ function onEvent(p) {
 			// live turn's own row now, blank or not, because it IS the box.
 			m.content = revealer.receive(p.message_id, answer);
 			m.streaming = true;
-			replySettle.touch(m.name);
+			// Client time of the latest delta: the reply's time shows from its first
+			// words and, at the end, equals when the text finished.
+			stampDeltaTime(m);
 			pumpReveal();
 			nextTick(scrollBottomIfPinned);
 			break;
@@ -10557,10 +10564,7 @@ function onEvent(p) {
 			// the reveal cursor has caught up.
 			flushReveal(p.message_id);
 			const m = messages.value.find((x) => x.name === p.message_id);
-			if (m) {
-				replySettle.clear(m.name);
-				m.streaming = false;
-			}
+			if (m) m.streaming = false;
 			// The copy bar shows with the answer, so give it a time now rather
 			// than when the enrichment reload brings the saved one (msgTime).
 			if (m && !m.modified && !m.creation && !m.creation_browser)
