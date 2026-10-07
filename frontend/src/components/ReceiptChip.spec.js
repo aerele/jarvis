@@ -109,7 +109,7 @@ describe("ReceiptChip next step (#621)", () => {
 		}),
 		action_outcome: "confirmed",
 	});
-	const submit = { kind: "submit", action: null, label: "Submit" };
+	const submit = { kind: "submit", action: null };
 
 	it("offers the suggested step and emits it on click", async () => {
 		const w = mount(ReceiptChip, { props: { message: created(submit) } });
@@ -118,14 +118,22 @@ describe("ReceiptChip next step (#621)", () => {
 		await btn.trigger("click");
 		expect(w.emitted("next-action")[0][0]).toEqual({
 			...submit,
+			label: "Submit",
 			doctype: "Sales Order",
 			name: "SO-1",
 		});
 	});
 
 	it("shows a workflow action by its label", () => {
-		const wf = { kind: "workflow", action: "Approve", label: "Approve" };
+		const wf = { kind: "workflow", action: "Approve" };
 		const w = mount(ReceiptChip, { props: { message: created(wf) } });
+		expect(w.find(".jv-receipt-next button").text()).toBe("Approve");
+	});
+
+	it("still words a legacy row that persisted its label", () => {
+		const w = mount(ReceiptChip, {
+			props: { message: created({ kind: "workflow", action: "Approve", label: "Approve" }) },
+		});
 		expect(w.find(".jv-receipt-next button").text()).toBe("Approve");
 	});
 

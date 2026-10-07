@@ -3023,6 +3023,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		_risk == "sensitive"
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
+		# A person's button that promises a Confirm card (propose_next_action): parks
+		# in every mode, auto mode, armed macro and autorun included.
+		or bool(frappe.flags.get("jarvis_force_card"))
 	)
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an

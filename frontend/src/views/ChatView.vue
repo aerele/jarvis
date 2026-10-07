@@ -791,7 +791,7 @@
 							v-else-if="m.role === 'tool'"
 							:message="m"
 							:auto-mode="!!convAutoMode"
-							:next-done="nextStepDone(m, mi)"
+							:next-done="nextStepDone(m)"
 							:next-busy="nextBusyKey === m.name"
 							@next-action="proposeNext(m, $event)"
 						/>
@@ -8136,14 +8136,27 @@ function receiptRecord(m) {
 		return {};
 	}
 }
-function nextStepDone(m, idx) {
+// One pass over the thread: the records a CONFIRMED submit / workflow receipt already
+// acted on (a failed or discarded one leaves the step open), plus any step a refusal
+// said is gone.
+const nextStepGone = ref(new Set());
+const nextStepActed = computed(() => {
+	const keys = new Set(nextStepGone.value);
+	for (const x of visibleMessages.value) {
+		if (x.role !== "tool" || x.action_outcome !== "confirmed") continue;
+		if (!NEXT_STEP_TOOLS.includes(x.tool_name)) continue;
+		const o = receiptRecord(x);
+		keys.add(`${o.doctype}|${o.name}`);
+	}
+	return keys;
+});
+function nextStepDone(m) {
 	if (m.tool_name !== "create_doc") return false;
 	const me = receiptRecord(m);
-	return visibleMessages.value.slice(idx + 1).some((x) => {
-		if (x.role !== "tool" || !NEXT_STEP_TOOLS.includes(x.tool_name)) return false;
-		const o = receiptRecord(x);
-		return o.doctype === me.doctype && o.name === me.name;
-	});
+	return nextStepActed.value.has(`${me.doctype}|${me.name}`);
+}
+function hideNextStep(step) {
+	nextStepGone.value = new Set(nextStepGone.value).add(`${step.doctype}|${step.name}`);
 }
 async function proposeNext(m, step) {
 	if (nextBusyKey.value || !currentId.value) return;
@@ -8152,11 +8165,13 @@ async function proposeNext(m, step) {
 		const r = await api.proposeNextAction(currentId.value, step);
 		if (r && r.ok === false) {
 			notify(chatRefusalMessage(r), { type: "error" });
+			hideNextStep(step);
 			return;
 		}
 		await resyncPendingConfirmations(currentId.value);
 	} catch (e) {
 		notify(errMessage(e, "Could not open that step."), { type: "error" });
+		hideNextStep(step);
 	} finally {
 		nextBusyKey.value = "";
 	}
