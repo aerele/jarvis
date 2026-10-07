@@ -144,7 +144,7 @@
 					/>
 				</div>
 				<p v-if="blocked" :id="reasonId" class="mt-2 text-sm text-ink-amber-3">
-					{{ __("Fill {0} — use Edit & create.", [missingText]) }}
+					{{ __("Fill {0}. Use Edit & create.", [missingText]) }}
 				</p>
 				<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">
 					{{ notice }}

@@ -211,23 +211,23 @@ def _completion_copy(tally: dict, di: str) -> tuple[str, str]:
 	if status == "Timed Out":
 		return (
 			"timed_out",
-			f"⚠️ {head} timed out — **{s}** imported, **{f}** failed before it stopped. Check {link}.",
+			f"⚠️ {head} timed out: **{s}** imported, **{f}** failed before it stopped. Check {link}.",
 		)
 	if status == "Error":
-		return "error", f"✗ {head} failed — **{s}** imported, **{f}** failed. Check {link}."
+		return "error", f"✗ {head} failed: **{s}** imported, **{f}** failed. Check {link}."
 	if s == 0 and f == 0:
-		return "done", f"✓ {head}: nothing to import — 0 records. ({link})"
+		return "done", f"✓ {head}: nothing to import, 0 records. ({link})"
 	if f == 0:
 		return "done", f"✓ {head}: **{s}** record(s) imported. ({link})"
 	if s == 0:
-		return "error", f"✗ {head} failed — **0** imported, **{f}** failed. Check {link}."
+		return "error", f"✗ {head} failed: **0** imported, **{f}** failed. Check {link}."
 	return "partial", f"⚠️ {head}: **{s}** imported, **{f}** failed. Check {link}."
 
 
 def _copy_blocked(di: str) -> str:
 	doctype, fname = _di_context(di)
 	return (
-		f"✗ Import into **{doctype}** from **{fname}** was blocked — nothing imported. "
+		f"✗ Import into **{doctype}** from **{fname}** was blocked, nothing imported. "
 		f"Check the file's columns ({_link(di)})."
 	)
 
@@ -235,7 +235,7 @@ def _copy_blocked(di: str) -> str:
 def _copy_interrupted(tally: dict, di: str) -> str:
 	doctype, fname = _di_context(di)
 	return (
-		f"⚠️ Import into **{doctype}** from **{fname}** didn't complete — **{tally['success']}** "
+		f"⚠️ Import into **{doctype}** from **{fname}** didn't complete: **{tally['success']}** "
 		f"record(s) imported so far. Check {_link(di)}."
 	)
 
@@ -243,7 +243,7 @@ def _copy_interrupted(tally: dict, di: str) -> str:
 def _copy_status_unknown(di: str) -> str:
 	doctype, fname = _di_context(di)
 	return (
-		f"⚠️ Import into **{doctype}** from **{fname}** — status unknown after a long wait. Check {_link(di)}."
+		f"⚠️ Import into **{doctype}** from **{fname}**: status unknown after a long wait. Check {_link(di)}."
 	)
 
 

@@ -117,7 +117,7 @@
       "permlevel": 1,
       "read_only": 1,
       "no_copy": 1,
-      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it). Permlevel 1: server-owned app state, written only by jarvis.chat.greeting via raw db calls that bypass permlevel — a Jarvis User can read but never write it through a generic document update."
+      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it). Permlevel 1: server-owned app state, written only by jarvis.chat.greeting via raw db calls that bypass permlevel: a Jarvis User can read but never write it through a generic document update."
     },
     {
       "fieldname": "business_greeting_chat_count",

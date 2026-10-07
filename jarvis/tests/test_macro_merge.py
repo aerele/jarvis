@@ -456,7 +456,7 @@ class TestMacroCapacityDefer(_MacroMergeBase):
 		overload = {
 			"ok": False,
 			"overloaded": True,
-			"reason": "The site is busy — please try again in a moment.",
+			"reason": "The site is busy. Please try again in a moment.",
 		}
 		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
 			res = macros.run_macro(m.name)

@@ -807,7 +807,7 @@ def _result(r: dict, wait, msg) -> tuple[str, str | None]:
 		n = int(r["pending_approvals"])
 		line = f"{n} approval{'' if n == 1 else 's'} waiting" + (f": {wait.title}" if wait else "")
 		if r.get("missing"):
-			line = f"Needs approval — missing: {r['missing']}"
+			line = f"Needs approval (missing: {r['missing']})"
 		if r.get("filebox_result_name"):
 			line = f"{_draft_line(r)} · {line}"
 		if not wait:
@@ -1145,20 +1145,20 @@ def _delete_one(conversation: str, live: int | None = None) -> None:
 		)
 		live = row[0][0] if row else 0
 	if live:
-		frappe.throw("Still processing — stop or wait for it to finish before deleting")
+		frappe.throw("Still processing: stop or wait for it to finish before deleting")
 	# nosemgrep: frappe-sql-format-injection -- constant predicate; value bound
 	if frappe.db.sql(
 		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_wiki_open('c')}", (conversation,)
 	):
 		frappe.throw(
-			"A wiki note from this file is still awaiting review — try again once a reviewer has handled it"
+			"A wiki note from this file is still awaiting review, try again once a reviewer has handled it"
 		)
 	# nosemgrep: frappe-sql-format-injection -- constant predicate; value bound
 	if frappe.db.sql(
 		f"SELECT 1 FROM `tabJarvis Conversation` c WHERE c.name = %s AND {_held_open('c')}", (conversation,)
 	):
 		frappe.throw(
-			"This file is waiting on an approval — decide or skip it on the Approval Board before deleting"
+			"This file is waiting on an approval: decide or skip it on the Approval Board before deleting"
 		)
 	_cascade(conversation)
 
@@ -1364,16 +1364,16 @@ def _rerun_one(conversation: str) -> dict:
 	if _rerun_claimed(conversation, _ladder_params(me)["fresh"]):
 		frappe.throw("A re-run of this file is already in progress")
 	if r["live"]:
-		frappe.throw("Still processing — wait for it to finish before re-running")
+		frappe.throw("Still processing: wait for it to finish before re-running")
 	if r["has_draft"]:
-		frappe.throw("A draft already exists for this file — nothing to re-run")
+		frappe.throw("A draft already exists for this file, nothing to re-run")
 	if r["status"] not in _RERUNNABLE:
 		frappe.throw("This file can't be re-run right now")
 	if frappe.db.exists(WAITER, {"conversation": conversation, "resume_state": "claimed"}):
-		frappe.throw("A resume of this file is on its way — wait for it before re-running")
+		frappe.throw("A resume of this file is on its way: wait for it before re-running")
 	f = _source_file(conversation)
 	if not f:
-		frappe.throw("The original file is no longer available — drop it again")
+		frappe.throw("The original file is no longer available, drop it again")
 	if not requested:
 		_refuse_rerun_of_duplicate(conversation)
 

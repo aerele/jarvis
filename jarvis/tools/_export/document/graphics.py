@@ -146,7 +146,7 @@ def fmt_amount(value: float | int | str | None, currency: str | None = None) -> 
 	"""
 	num = _to_float_or_none(value)
 	if num is None:
-		return "—"
+		return "-"
 	formatted = html.escape(fmt_money(abs(num), currency=currency))
 	return f'<span class="neg">({formatted})</span>' if num < 0 else formatted
 
@@ -165,7 +165,7 @@ def fmt_pct(value: float | int | str | None) -> str:
 	"""
 	num = _to_float_or_none(value)
 	if num is None:
-		return "—"
+		return "-"
 	precision = get_number_format().precision
 	formatted = html.escape(fmt_money(abs(num), precision=precision))
 	return f'<span class="neg">({formatted}%)</span>' if num < 0 else f"{formatted}%"

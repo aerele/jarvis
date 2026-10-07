@@ -84,7 +84,7 @@ describe("PendingActionDetail", () => {
 		expect(w.text()).toContain("Acme");
 		expect(button(w, "Create & continue")).toBeTruthy();
 		expect(button(w, "Use existing")).toBeTruthy();
-		expect(button(w, "Don't create — skip 2 files")).toBeTruthy();
+		expect(button(w, "Don't create, skip 2 files")).toBeTruthy();
 	});
 
 	it("shows a load error with a retry", async () => {
@@ -149,8 +149,8 @@ describe("PendingActionDetail", () => {
 		let resolve;
 		api.decideHeldAction.mockReturnValue(new Promise((r) => (resolve = r)));
 		await button(w, "Create & continue").trigger("click");
-		expect(button(w, "Don't create — skip 2 files").attributes("disabled")).toBeDefined();
-		await button(w, "Don't create — skip 2 files").trigger("click");
+		expect(button(w, "Don't create, skip 2 files").attributes("disabled")).toBeDefined();
+		await button(w, "Don't create, skip 2 files").trigger("click");
 		resolve({ ok: true, reason_code: "created", waiters_count: 2 });
 		await flushPromises();
 		expect(api.decideHeldAction).toHaveBeenCalledTimes(1);
@@ -205,7 +205,7 @@ describe("PendingActionDetail", () => {
 	it("keeps the row on a transient refusal and shows why", async () => {
 		const w = await mountWith(rec());
 		api.decideHeldAction.mockResolvedValue({ ok: false, reason_code: "busy" });
-		await button(w, "Don't create — skip 2 files").trigger("click");
+		await button(w, "Don't create, skip 2 files").trigger("click");
 		await flushPromises();
 		expect(api.decideHeldAction).toHaveBeenCalledWith("PA-1", "skip", undefined);
 		expect(w.find('[role="alert"]').text()).toContain("Try again in a moment");
@@ -338,7 +338,7 @@ describe("PendingActionDetail", () => {
 			const create = button(w, "Create & continue");
 			expect(create.attributes("disabled")).toBeDefined();
 			const reason = w.find("#" + create.attributes("aria-describedby"));
-			expect(reason.text()).toBe("Fill Supplier Type — use Edit & create.");
+			expect(reason.text()).toBe("Fill Supplier Type. Use Edit & create.");
 			await create.trigger("click");
 			expect(api.decideHeldAction).not.toHaveBeenCalled();
 		});
