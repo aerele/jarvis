@@ -294,7 +294,48 @@ def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str
 	return f"{_RECEIPT[verb]} {doctype} {name}."
 
 
-def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args: dict, text: str) -> None:
+def _suggest_next(doctype: str, name: str) -> dict | None:
+	"""The ONE next step to offer after a draft was created, or None.
+
+	The first workflow action the caller may take on it now (role, condition and
+	self-approval, via ``get_workflow_transitions``); with no workflow, Submit when
+	the DocType is submittable and the caller holds submit permission. A doc that
+	already left draft (Create & Submit, or moved on) gets nothing."""
+	if not name or frappe.db.get_value(doctype, name, "docstatus") != 0:
+		return None
+	from frappe.model.workflow import get_workflow_name
+
+	if get_workflow_name(doctype):
+		from jarvis.tools.get_workflow_transitions import get_workflow_transitions
+
+		actions = get_workflow_transitions(doctype, name).get("available_actions") or []
+		if not actions:
+			return None
+		action = actions[0]["action"]
+		return {"kind": "workflow", "action": action, "label": action}
+	if frappe.get_meta(doctype).is_submittable and frappe.has_permission(doctype, "submit", doc=name):
+		return {"kind": "submit", "action": None, "label": _("Submit")}
+	return None
+
+
+def _suggest_next_safe(doctype: str, name: str) -> dict | None:
+	"""A hint must never fail the create it follows."""
+	try:
+		return _suggest_next(doctype, name)
+	except Exception:
+		frappe.log_error(title="apply_action next-step suggestion failed", message=frappe.get_traceback())
+		return None
+
+
+def _append_receipt(
+	conversation: str,
+	verb: str,
+	doctype: str,
+	name: str,
+	args: dict,
+	text: str,
+	suggested_next: dict | None = None,
+) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
 	the transcript on its next turn - so it never re-applies the change."""
@@ -307,7 +348,16 @@ def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args:
 			"streaming": 0,
 			"tool_name": f"{verb}_doc",
 			"tool_args": frappe.as_json(args),
-			"tool_result": frappe.as_json({"ok": True, "data": {"doctype": doctype, "name": name}}),
+			"tool_result": frappe.as_json(
+				{
+					"ok": True,
+					"data": {
+						"doctype": doctype,
+						"name": name,
+						**({"suggested_next": suggested_next} if suggested_next else {}),
+					},
+				}
+			),
 			"tool_status": "completed",
 			# This row DID come from a confirmation card - the human pressed Confirm on
 			# the draft - so mark it and let the SPA render the same receipt chip (with
@@ -544,8 +594,9 @@ def apply_action(action: dict | str | None = None) -> dict:
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
+	suggested_next = _suggest_next_safe(doctype, name) if verb == "create" and not do_submit else None
 	try:
-		_append_receipt(conversation, verb, doctype, name, args, receipt)
+		_append_receipt(conversation, verb, doctype, name, args, receipt, suggested_next)
 		frappe.db.commit()
 	except Exception:
 		# The mutation is already committed - a receipt hiccup must not
@@ -567,6 +618,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 			frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 	slug = doctype.lower().replace(" ", "-")
 	resp = {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
+	if suggested_next:
+		resp["suggested_next"] = suggested_next
 	# SUX-3/SUXI-2: when the continuation turn queued (all slots taken), thread
 	# its run_id + position so the SPA renders the standard queued chip instead
 	# of the card vanishing into silence after the "Change saved" ack clears.
@@ -576,6 +629,37 @@ def apply_action(action: dict | str | None = None) -> dict:
 		resp["run_id"] = _cont.get("run_id")
 		resp["message_id"] = _cont.get("message_id")
 	return resp
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def propose_next_action(
+	conversation: str, doctype: str, name: str, kind: str, action: str | None = None
+) -> dict:
+	"""Park the confirmation card for a receipt's suggested next step.
+
+	The same card the assistant's own ``submit_doc`` / ``apply_workflow_action``
+	call gets (``api._run_tool`` parks it, as the person); nothing runs until they
+	press Confirm, and no model turn is spent. The suggestion is recomputed here,
+	so a stale button (already submitted, role lost, state moved) is refused."""
+	refuse_in_tool_dispatch()
+	_require_own_conversation(conversation)
+	if not (doctype and name):
+		raise InvalidArgumentError("doctype and name are required")
+	suggested = _suggest_next(doctype, name)
+	if not suggested or suggested["kind"] != kind or (kind == "workflow" and suggested["action"] != action):
+		raise InvalidArgumentError(
+			_("That next step is no longer available for {0} {1}.").format(doctype, name)
+		)
+	from jarvis import api
+
+	if kind == "submit":
+		return api._run_tool("submit_doc", {"doctype": doctype, "name": name}, conversation=conversation)
+	return api._run_tool(
+		"apply_workflow_action",
+		{"doctype": doctype, "name": name, "action": action},
+		conversation=conversation,
+	)
 
 
 def _panel_can_fix(verb: str, doctype: str, name: str, err_obj: dict, marked: bool | None) -> bool:
