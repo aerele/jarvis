@@ -528,6 +528,33 @@ class TestRetryMessage(_ChatTestCase):
 		self.assertEqual(payload["message_id"], user_id)
 		self.assertEqual(payload["run_id"], result["run_id"])
 
+	def test_a_retry_ends_an_approved_skill_run(self):
+		# A retry re-runs the whole request, like a new message: a run left open on the
+		# chat does not cover it.
+		_user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(
+			CONV,
+			self.conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		with patch("jarvis.chat.api._dispatch_turn"):
+			result = retry_message(asst_id)
+		self.assertTrue(result["ok"])
+		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 0)
+
+	def test_a_refused_retry_leaves_the_run_alone(self):
+		user_id, _asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(
+			CONV,
+			self.conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		result = retry_message(user_id)  # not an assistant message
+		self.assertFalse(result["ok"])
+		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 1)
+
 	def test_enqueues_worker_against_preceding_user_message(self):
 		user_id, asst_id = self._make_turn(self.conv, with_error=True)
 		with patch("frappe.enqueue") as enqueue:
