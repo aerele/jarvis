@@ -179,7 +179,9 @@ def resolve(key: str | None) -> dict:
 
 def summaries() -> list[dict]:
 	"""Compact list for the settings pane: key, label, description, and a small
-	spec (accent, fonts, masthead, cover) - no rendering, no ``frappe``."""
+	spec (accent, fonts, masthead, cover) - no rendering, no ``frappe``. The rest
+	of the look (dark, logo, accent bar, watermark, page) rides along so the pane
+	can prefill a custom template from a built-in."""
 	out = []
 	for t in TEMPLATES.values():
 		css = t["css"]
@@ -193,6 +195,13 @@ def summaries() -> list[dict]:
 				"display_font": "sans" if css.get("font_display") == _SANS else "serif",
 				"masthead": t["placement"]["masthead_align"],
 				"cover": t["placement"]["cover"],
+				"dark": css.get("dark", ""),
+				"show_logo": t["placement"]["logo"],
+				"accent_bar": t["placement"]["accent_bar"],
+				"watermark": t["placement"]["watermark"],
+				"page_size": t["page"]["size"],
+				"orientation": t["page"]["orientation"],
+				"margins_mm": t["page"]["margins_mm"],
 			}
 		)
 	return out
