@@ -18,6 +18,7 @@ from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
 	_ATTEMPT_ERROR_UNREACHABLE,
 	_PENDING_APPLYING_STATUS,
 	_PENDING_HANDOVER_STATUS,
+	JarvisSettings,
 	_enqueued_sync_via_admin_pool,
 	_handover_via_admin,
 	_stamp_pool_pending,
@@ -168,6 +169,55 @@ class TestPoolSyncRecordsTheFailedAttempt(_RT3SettingsTestCase):
 			with patch(f"{_JS}._switch_or_enqueue"):
 				request_resync(settings)
 		self.assertEqual(frappe.get_single("Jarvis Settings").get(_ATTEMPT_ERROR_FIELD) or "", "")
+
+
+class TestSingleModelSyncRecordsTheFailedAttempt(FrappeTestCase):
+	"""The single-model (direct) path must mirror the pool path: an accepted
+	"applying" push is NOT a failure, only AdminUnreachableError is."""
+
+	def _run(self, post, *, converged=False):
+		settings = frappe._dict(
+			{
+				"llm_auth_mode": "api_key",
+				"llm_provider": "openai",
+				"llm_model": "gpt-4o",
+				"llm_base_url": "",
+				"last_sync_status": _PENDING_APPLYING_STATUS,
+				_ATTEMPT_ERROR_FIELD: "stale",
+			}
+		)
+		settings._resolve_llm_secret_for_push = MagicMock(return_value="sk-test")
+		settings._resync_custom_skills_after_restart = MagicMock()
+		settings._resync_learned_skills_after_restart = MagicMock()
+		with (
+			patch.object(admin_client, "post_update_llm_creds", **post),
+			patch("jarvis.installed_apps_sync.record_synced_snapshot"),
+			patch(f"{_JS}._converge_via_admin", return_value=converged),
+			patch(f"{_JS}._refresh_db_snapshot"),
+			patch(f"{_JS}._commit_terminal_sync_status"),
+			patch("frappe.db.set_single_value"),
+		):
+			JarvisSettings._sync_via_admin(settings, "restart")
+		return settings
+
+	def test_accepted_applying_leaves_no_attempt_error(self):
+		settings = self._run({"return_value": {"status": "applying"}})
+		self.assertEqual(settings.last_sync_status, _PENDING_APPLYING_STATUS)
+		self.assertEqual(settings.get(_ATTEMPT_ERROR_FIELD), "")
+		self.assertEqual(_sync_status_payload(settings, settings.last_sync_status)["attempt_error"], "")
+
+	def test_unreachable_sets_the_error_and_the_page_is_failed(self):
+		settings = self._run({"side_effect": AdminUnreachableError("timeout")})
+		self.assertEqual(settings.last_sync_status, _PENDING_APPLYING_STATUS)
+		self.assertEqual(settings.get(_ATTEMPT_ERROR_FIELD), _ATTEMPT_ERROR_UNREACHABLE)
+		payload = _sync_status_payload(settings, settings.last_sync_status)
+		self.assertTrue(payload["pending"])
+		self.assertEqual(payload["attempt_error"], _ATTEMPT_ERROR_UNREACHABLE)
+
+	def test_a_later_success_clears_it(self):
+		settings = self._run({"return_value": {"status": "applied", "action": "restart"}})
+		self.assertTrue(settings.last_sync_status.startswith("ok"))
+		self.assertEqual(settings.get(_ATTEMPT_ERROR_FIELD), "")
 
 
 class TestSyncStatusPayload(FrappeTestCase):

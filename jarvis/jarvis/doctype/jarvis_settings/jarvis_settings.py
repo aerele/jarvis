@@ -1768,13 +1768,7 @@ class JarvisSettings(Document):
 			# old to thread it predates this contract).
 			if _is_applying_result(result) or (result.get("status") or "applied") != "applied":
 				if not _converge_via_admin(self, is_pool=False):
-					_write_settings_fields(
-						self,
-						{
-							"last_sync_status": _PENDING_APPLYING_STATUS,
-							_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE,
-						},
-					)
+					_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
 					_commit_terminal_sync_status()
 				terminal_written = True
 				return
@@ -1880,7 +1874,13 @@ class JarvisSettings(Document):
 			# reconcile, so an unreachable there stays terminal-failed as before.
 			if action == "restart":
 				if not _converge_via_admin(self, is_pool=False):
-					_write_settings_fields(self, {"last_sync_status": _PENDING_APPLYING_STATUS})
+					_write_settings_fields(
+						self,
+						{
+							"last_sync_status": _PENDING_APPLYING_STATUS,
+							_ATTEMPT_ERROR_FIELD: _ATTEMPT_ERROR_UNREACHABLE,
+						},
+					)
 					_commit_terminal_sync_status()
 					frappe.logger().warning(
 						"jarvis_settings: creds sync admin-unreachable; recorded pending for reconcile (%s)",
