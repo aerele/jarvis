@@ -504,13 +504,8 @@ def _claim_and_run(
 			stamped.enter_context(stamping(name, structure.undo))
 		result, interfered, crash_tb = _dispatch(row, args)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
-<<<<<<< HEAD
-		_discard_failed_dispatch(row, args, crash_tb, result=result)
-	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
-=======
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
-	ok = not crash_tb and api.envelope_ok(row.tool, result)
->>>>>>> 3a8c58f (feat(structure): one new Custom Field, or a column-free edit of one, from chat behind a card)
+	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
 	status = EXECUTED if ok else FAILED
 	lock_lost = structure is not None and not _still_locked(name, structure)
 	note = _clean_up_structure(name, structure) if structure is not None and not ok else None
