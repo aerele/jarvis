@@ -14,6 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import admin_client
 from jarvis.admin_client import AdminUnreachableError
 from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+	_APPLY_STALE_AFTER_S,
 	_ATTEMPT_ERROR_FIELD,
 	_ATTEMPT_ERROR_UNREACHABLE,
 	_PENDING_APPLYING_STATUS,
@@ -227,3 +228,61 @@ class TestSyncStatusPayload(FrappeTestCase):
 			_sync_status_payload(s, _PENDING_APPLYING_STATUS)["attempt_error"], _ATTEMPT_ERROR_UNREACHABLE
 		)
 		self.assertEqual(_sync_status_payload(s, "ok (restart via admin)")["attempt_error"], "")
+
+
+def _aged(seconds: int, status: str = _PENDING_APPLYING_STATUS):
+	"""Settings whose apply was requested ``seconds`` ago and is still 'applying'
+	(the shape a single-model or a pool apply leaves when admin answers a fast-refused
+	fleet with a plain 200 'applying')."""
+	requested = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-seconds)
+	return frappe._dict({"last_sync_status": status, "last_sync_requested_at": requested})
+
+
+class TestApplyingOutlivesTheStaleWindow(FrappeTestCase):
+	def _error(self, s):
+		return _sync_status_payload(s, s.last_sync_status)["attempt_error"]
+
+	def test_applying_for_60s_is_still_applying(self):
+		self.assertEqual(self._error(_aged(60)), "")
+
+	def test_applying_for_130s_shows_the_attempt_error(self):
+		s = _aged(_APPLY_STALE_AFTER_S + 10)
+		payload = _sync_status_payload(s, s.last_sync_status)
+		self.assertTrue(payload["pending"])
+		self.assertEqual(payload["attempt_error"], _ATTEMPT_ERROR_UNREACHABLE)
+
+	def test_a_stored_error_is_kept(self):
+		s = _aged(10)
+		s[_ATTEMPT_ERROR_FIELD] = "boom"
+		self.assertEqual(self._error(s), "boom")
+
+	def test_other_pending_statuses_never_age_into_an_error(self):
+		self.assertEqual(self._error(_aged(600, "pending: provisioning container (pool)")), "")
+
+	def test_a_pool_retry_restarts_the_window(self):
+		s = _aged(600)
+		self.assertEqual(self._error(s), _ATTEMPT_ERROR_UNREACHABLE)
+		with patch("frappe.db.set_single_value"):
+			_stamp_pool_pending(s)
+		s.last_sync_status = _PENDING_APPLYING_STATUS
+		self.assertEqual(self._error(s), "")
+
+	def test_a_single_model_retry_restarts_the_window(self):
+		s = _aged(600)
+		with patch("frappe.db.set_single_value"):
+			_write_settings_fields(
+				s,
+				{
+					"last_sync_status": "pending: provisioning container",
+					"last_sync_requested_at": frappe.utils.now(),
+				},
+			)
+		s.last_sync_status = _PENDING_APPLYING_STATUS
+		self.assertEqual(self._error(s), "")
+
+	def test_converge_clears_everything(self):
+		s = _aged(600)
+		s.last_sync_status = "ok (restart via admin)"
+		payload = _sync_status_payload(s, s.last_sync_status)
+		self.assertFalse(payload["pending"])
+		self.assertEqual(payload["attempt_error"], "")

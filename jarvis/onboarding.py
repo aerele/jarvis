@@ -2606,6 +2606,28 @@ def get_llm_sync_status() -> dict:
 	return _sync_status_payload(s, status)
 
 
+def _attempt_error_for(s, status: str) -> str:
+	"""The stored attempt error, or the unreachable reason once an "applying" status
+	has outlived ``_APPLY_STALE_AFTER_S`` since the apply was requested.
+
+	Computed on READ and never stored, so no job has to run for it to appear and a
+	slow apply that converges later flips to ok on its own. Every new attempt
+	re-stamps ``last_sync_requested_at``, which restarts the window."""
+	if not status.startswith("pending:"):
+		return ""
+	stored = s.get("last_sync_attempt_error") or ""
+	if stored or not status.startswith(_pending_applying_status()):
+		return stored
+	from jarvis.account import _apply_age_seconds
+	from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+		_APPLY_STALE_AFTER_S,
+		_ATTEMPT_ERROR_UNREACHABLE,
+	)
+
+	age = _apply_age_seconds(s.get("last_sync_requested_at"))
+	return _ATTEMPT_ERROR_UNREACHABLE if age is not None and age > _APPLY_STALE_AFTER_S else ""
+
+
 def _sync_status_payload(s, status: str) -> dict:
 	"""Project Jarvis Settings into the poller's response shape. PURE: it reads and
 	formats, and unlike ``get_llm_sync_status`` it never probes admin and never
@@ -2633,7 +2655,7 @@ def _sync_status_payload(s, status: str) -> dict:
 		"pending": status.startswith("pending:"),
 		# admin-v2#630: set while the status is pending but the last attempt failed
 		# and a retry is queued; the SPA says so instead of "Still applying".
-		"attempt_error": (s.get("last_sync_attempt_error") or "") if status.startswith("pending:") else "",
+		"attempt_error": _attempt_error_for(s, status),
 		"subscription_status": s.get("last_subscription_status") or "",
 		"warnings": _json_list(s.get("last_sync_warnings")),
 		# Per-model verdicts from the last pool apply: [{provider, model, status}] where
