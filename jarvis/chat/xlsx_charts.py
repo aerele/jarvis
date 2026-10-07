@@ -15,7 +15,9 @@ import re
 import zipfile
 from xml.etree import ElementTree as ET
 
-MAX_CHARTS = 10
+MAX_CHARTS_PER_SHEET = 10
+MAX_CHARTS_TOTAL = 30
+MAX_RELS = 200
 MAX_POINTS = 500
 _MAX_PART_BYTES = 2_000_000
 
@@ -35,6 +37,7 @@ _PLOTS = {
 	"pieChart": "pie",
 	"doughnutChart": "donut",
 }
+_XML_ENCODING = re.compile(rb'^\s*<\?xml[^>]*encoding=["\']([^"\']+)["\']')
 _ISO_MIDNIGHT = re.compile(r"^(\d{4}-\d{2}-\d{2})T00:00:00$")
 
 
@@ -55,76 +58,88 @@ def extract_charts(content: bytes) -> list[dict]:
 	"""``[{sheet, title, type, x, series:[{name, data}], options}]``; never raises."""
 	try:
 		with zipfile.ZipFile(io.BytesIO(content)) as zf:
-			parsed = _charts_by_sheet(zf)
-			if not parsed:
-				return []
 			values = _SheetValues(content)
-			out = []
-			for sheet, chart_xml in parsed:
+			out, per_sheet = [], {}
+			for sheet, chart_xml in _charts_by_sheet(zf):
+				if per_sheet.get(sheet, 0) >= MAX_CHARTS_PER_SHEET:
+					continue
 				spec = _chart_spec(chart_xml, values)
 				if spec:
 					out.append({"sheet": sheet, **spec})
-				if len(out) >= MAX_CHARTS:
+					per_sheet[sheet] = per_sheet.get(sheet, 0) + 1
+				if len(out) >= MAX_CHARTS_TOTAL:
 					break
 			return out
 	except Exception:
 		return []
 
 
-def _xml(zf, part):
-	"""Parsed XML of a zip member, or None. DOCTYPE/ENTITY parts are refused
-	(entity-expansion bombs in an untrusted upload)."""
+def _xml(zf, part, root_tag):
+	"""Parsed XML of a zip member, or None. Only plain UTF-8/ASCII parts with the
+	expected root and no DOCTYPE/ENTITY are parsed (entity-expansion bombs and
+	encodings that would hide them in an untrusted upload)."""
 	try:
-		info = zf.getinfo(part)
-		if info.file_size > _MAX_PART_BYTES:
+		if zf.getinfo(part).file_size > _MAX_PART_BYTES:
 			return None
 		data = zf.read(part)
 	except KeyError:
 		return None
-	if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+	declared = _XML_ENCODING.search(data[:200])
+	if data[:2] in (b"\xff\xfe", b"\xfe\xff") or data[:4] in (b"\x00\x00\xfe\xff", b"\xff\xfe\x00\x00"):
+		return None
+	if declared and declared.group(1).lower() not in (b"utf-8", b"us-ascii"):
 		return None
 	try:
-		return ET.fromstring(data)
+		text = data.decode("utf-8")
+	except UnicodeDecodeError:
+		return None
+	if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
+		return None
+	try:
+		root = ET.fromstring(data)
 	except ET.ParseError:
 		return None
+	return root if root.tag.split("}")[-1] == root_tag else None
 
 
 def _rels(zf, part):
-	"""{rId: absolute part path} from the .rels file of ``part``."""
+	"""[(rId, type suffix, absolute part path)] from the .rels file of ``part``;
+	targets resolving outside ``xl/`` are dropped."""
 	folder, name = posixpath.split(part)
-	root = _xml(zf, posixpath.join(folder, "_rels", name + ".rels"))
-	out = {}
-	for rel in root if root is not None else []:
+	root = _xml(zf, posixpath.join(folder, "_rels", name + ".rels"), "Relationships")
+	out = []
+	for rel in list(root)[:MAX_RELS] if root is not None else []:
 		target = rel.get("Target") or ""
-		path = target[1:] if target.startswith("/") else posixpath.normpath(posixpath.join(folder, target))
-		out[rel.get("Id")] = path
+		path = posixpath.normpath(target[1:] if target.startswith("/") else posixpath.join(folder, target))
+		if path.startswith("xl/") and ".." not in path.split("/"):
+			out.append((rel.get("Id"), (rel.get("Type") or "").rsplit("/", 1)[-1], path))
 	return out
 
 
 def _charts_by_sheet(zf):
-	"""[(sheet name, chart XML root)] in sheet then drawing order."""
-	book = _xml(zf, "xl/workbook.xml")
+	"""Yield (sheet name, chart XML root) in sheet then drawing order, lazily.
+
+	Worksheet XML is never parsed (it can be huge): a sheet's drawings are the
+	drawing relationships in its small .rels file."""
+	book = _xml(zf, "xl/workbook.xml", "workbook")
 	if book is None:
-		return []
-	book_rels = _rels(zf, "xl/workbook.xml")
-	found = []
+		return
+	book_rels = {rid: path for rid, _, path in _rels(zf, "xl/workbook.xml")}
 	for sh in book.findall("s:sheets/s:sheet", _NS):
 		sheet_part = book_rels.get(sh.get(_R_ID))
-		sheet = _xml(zf, sheet_part) if sheet_part else None
-		if sheet is None:
+		if not sheet_part:
 			continue
-		sheet_rels = _rels(zf, sheet_part)
-		for d in sheet.findall("s:drawing", _NS):
-			drawing_part = sheet_rels.get(d.get(_R_ID))
-			drawing = _xml(zf, drawing_part) if drawing_part else None
+		for _, kind, drawing_part in _rels(zf, sheet_part):
+			if kind != "drawing":
+				continue
+			drawing = _xml(zf, drawing_part, "wsDr")
 			if drawing is None:
 				continue
-			drawing_rels = _rels(zf, drawing_part)
-			for ref in drawing.iter("{%s}chart" % _NS["c"]):
-				chart = _xml(zf, drawing_rels.get(ref.get(_R_ID), ""))
+			drawing_rels = {rid: path for rid, _, path in _rels(zf, drawing_part)}
+			for ref in list(drawing.iter("{%s}chart" % _NS["c"]))[:MAX_CHARTS_PER_SHEET]:
+				chart = _xml(zf, drawing_rels.get(ref.get(_R_ID), ""), "chartSpace")
 				if chart is not None:
-					found.append((sh.get("name"), chart))
-	return found
+					yield sh.get("name"), chart
 
 
 class _SheetValues:
@@ -159,15 +174,14 @@ class _SheetValues:
 
 
 def _cache(node):
-	"""Cached points under a c:strRef / c:numRef as a list."""
+	"""Cached points under a c:strRef / c:numRef as a list (ptCount/idx are untrusted)."""
 	pts = {}
 	for pt in node.findall(".//c:pt", _NS):
 		v = pt.find("c:v", _NS)
-		if v is not None and pt.get("idx", "").isdigit():
-			pts[int(pt.get("idx"))] = v.text
-	count = node.find(".//c:ptCount", _NS)
-	size = int(count.get("val")) if count is not None and count.get("val", "").isdigit() else 0
-	return [pts.get(i) for i in range(max(size, max(pts, default=-1) + 1))]
+		idx = pt.get("idx", "")
+		if v is not None and idx.isdigit() and int(idx) < MAX_POINTS:
+			pts[int(idx)] = v.text
+	return [pts.get(i) for i in range(max(pts, default=-1) + 1)]
 
 
 def _points(node, values):

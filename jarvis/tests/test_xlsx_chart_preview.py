@@ -10,7 +10,13 @@ import zipfile
 import openpyxl
 from openpyxl.chart import AreaChart, BarChart, LineChart, PieChart, Reference
 
-from jarvis.chat.xlsx_charts import MAX_CHARTS, MAX_POINTS, extract_charts, preview_cell
+from jarvis.chat.xlsx_charts import (
+	MAX_CHARTS_PER_SHEET,
+	MAX_CHARTS_TOTAL,
+	MAX_POINTS,
+	extract_charts,
+	preview_cell,
+)
 
 
 def _book(title="Data", rows=None):
@@ -167,9 +173,9 @@ class TestExtractCharts(unittest.TestCase):
 		self.assertEqual(len(spec["x"]), MAX_POINTS)
 		self.assertEqual(len(spec["series"][0]["data"]), MAX_POINTS)
 		wb, ws = _book()
-		for i in range(MAX_CHARTS + 3):
+		for i in range(MAX_CHARTS_PER_SHEET + 3):
 			_add(ws, BarChart(), anchor=f"F{2 + i * 20}")
-		self.assertEqual(len(extract_charts(_bytes(wb))), MAX_CHARTS)
+		self.assertEqual(len(extract_charts(_bytes(wb))), MAX_CHARTS_PER_SHEET)
 
 	def test_date_categories(self):
 		rows = [("Day", "v"), (datetime.datetime(2026, 6, 1), 1), (datetime.datetime(2026, 6, 2), 2)]
@@ -177,6 +183,89 @@ class TestExtractCharts(unittest.TestCase):
 		_add(ws, LineChart())
 		(spec,) = extract_charts(_bytes(wb))
 		self.assertEqual(spec["x"], ["2026-06-01", "2026-06-02"])
+
+
+def _rewrite(src, edits):
+	"""Copy a workbook, applying {member: fn(bytes) -> bytes}."""
+	out = io.BytesIO()
+	with zipfile.ZipFile(io.BytesIO(src)) as zin, zipfile.ZipFile(out, "w") as zout:
+		for item in zin.infolist():
+			data = zin.read(item.filename)
+			if item.filename in edits:
+				data = edits[item.filename](data)
+			zout.writestr(item, data)
+	return out.getvalue()
+
+
+class TestHardening(unittest.TestCase):
+	def _one(self):
+		wb, ws = _book()
+		_add(ws, BarChart())
+		return _bytes(wb)
+
+	def test_huge_ptcount_and_idx_are_not_allocated(self):
+		cache = '</f><numCache><ptCount val="999999999"/><pt idx="0"><v>7</v></pt><pt idx="4000000000"><v>1</v></pt></numCache>'
+		src = _rewrite(
+			self._one(),
+			{
+				"xl/charts/chart1.xml": lambda d: d.decode()
+				.replace("'Data'!", "'Gone'!")
+				.replace("</f></numRef>", cache + "</numRef>")
+				.encode()
+			},
+		)
+		(spec,) = extract_charts(src)
+		self.assertEqual(spec["series"][0]["data"], [7.0])
+
+	def test_utf16_part_refused(self):
+		src = _rewrite(
+			self._one(),
+			{
+				"xl/charts/chart1.xml": lambda d: ('<!DOCTYPE x [<!ENTITY a "b">]>' + d.decode()).encode(
+					"utf-16"
+				)
+			},
+		)
+		self.assertEqual(extract_charts(src), [])
+
+	def test_non_utf8_declaration_refused(self):
+		src = _rewrite(
+			self._one(),
+			{"xl/charts/chart1.xml": lambda d: b'<?xml version="1.0" encoding="UTF-16"?>' + d},
+		)
+		self.assertEqual(extract_charts(src), [])
+
+	def test_wrong_root_refused(self):
+		src = _rewrite(self._one(), {"xl/charts/chart1.xml": lambda d: b"<other/>"})
+		self.assertEqual(extract_charts(src), [])
+
+	def test_huge_worksheet_xml_is_not_parsed(self):
+		src = _rewrite(self._one(), {"xl/worksheets/sheet1.xml": lambda d: d + b" " * 3_000_000})
+		self.assertEqual(len(extract_charts(src)), 1)
+
+	def test_per_sheet_cap_leaves_later_sheets(self):
+		wb, ws = _book()
+		for i in range(MAX_CHARTS_PER_SHEET + 2):
+			_add(ws, BarChart(), anchor=f"F{2 + i * 20}")
+		ws2 = wb.create_sheet("Later")
+		ws2.append(("k", "v"))
+		ws2.append(("a", 1))
+		_add(ws2, PieChart(), title="Later chart")
+		specs = extract_charts(_bytes(wb))
+		self.assertEqual(len(specs), MAX_CHARTS_PER_SHEET + 1)
+		self.assertEqual(specs[-1]["sheet"], "Later")
+		self.assertLessEqual(len(specs), MAX_CHARTS_TOTAL)
+
+	def test_rels_target_outside_xl_ignored(self):
+		src = _rewrite(
+			self._one(),
+			{
+				"xl/drawings/_rels/drawing1.xml.rels": lambda d: d.replace(
+					b"/xl/charts/chart1.xml", b"../../evil.xml"
+				)
+			},
+		)
+		self.assertEqual(extract_charts(src), [])
 
 
 class TestPreviewCell(unittest.TestCase):
