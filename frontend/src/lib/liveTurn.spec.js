@@ -353,6 +353,12 @@ describe("folded head", () => {
 		expect(foldedHead({ seconds: 3, finishing: true, settled: true }).finishing).toBe(true);
 	});
 
+	it("a saved reply whose tool strip is empty keeps its bar unless the caller knows nothing ran", () => {
+		// ChatView passes settled only when no tool row of any kind and no steps exist.
+		expect(foldedHead({ seconds: 53, toolNames: [], settled: false })).not.toBeNull();
+		expect(foldedHead({ seconds: 53, toolNames: [], settled: true })).toBeNull();
+	});
+
 	it("finishing rides on the line until enrichment lands", () => {
 		expect(
 			foldedHead({ seconds: 52, toolNames: ["export_excel"], finishing: true }).finishing
