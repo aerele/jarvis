@@ -15,7 +15,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseAsk, isAskReady, askAnswerText, ASK_FIELD_TYPES } from "./chatAsk.js";
+import {
+	parseAsk,
+	isAskReady,
+	askAnswerText,
+	humanizeFieldname,
+	ASK_FIELD_TYPES,
+} from "./chatAsk.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const read = (...p) => fs.readFileSync(path.join(HERE, ...p), "utf8");
@@ -120,6 +126,113 @@ test("multi needs at least one pick (an empty array is not an answer)", () => {
 	assert.equal(isAskReady(spec, { 0: ["a"] }, {}), true);
 });
 
+test("select keeps its options (up to 200, past the 8 of the button types)", () => {
+	const opts = Array.from({ length: 250 }, (_, i) => `c${i}`);
+	const spec = parseAsk(
+		fence(JSON.stringify([{ q: "HSN Code?", type: "select", options: opts }]))
+	);
+	assert.equal(spec.questions[0].type, "select");
+	assert.equal(spec.questions[0].options.length, 200);
+	const few = parseAsk(fence('[{"q":"HSN?","type":"select","options":["8471","8517"]}]'));
+	assert.deepEqual(few.questions[0].options, ["8471", "8517"]);
+});
+
+test("a select with no options degrades to text", () => {
+	const spec = parseAsk(fence('[{"q":"HSN?","type":"select"}]'));
+	assert.equal(spec.questions[0].type, "text");
+});
+
+test("an answered select is ready and is a field type", () => {
+	const spec = parseAsk(fence('[{"q":"HSN?","type":"select","options":["8471"]}]'));
+	assert.equal(isAskReady(spec, {}, {}), false);
+	assert.equal(isAskReady(spec, { 0: "8471" }, {}), true);
+	assert.equal(askAnswerText(spec, { 0: "8471" }, {}), "Here are my answers:\n1. HSN? → 8471");
+});
+
+test("a field question keeps doctype + fieldname and is a field type", () => {
+	const spec = parseAsk(
+		fence('[{"q":"HSN Code","type":"field","doctype":"Item","fieldname":"gst_hsn_code"}]')
+	);
+	assert.equal(spec.questions[0].type, "field");
+	assert.equal(spec.questions[0].doctype, "Item");
+	assert.equal(spec.questions[0].fieldname, "gst_hsn_code");
+	assert.equal(isAskReady(spec, {}, {}), false);
+	assert.equal(isAskReady(spec, { 0: "8471" }, {}), true);
+});
+
+test("a field question may omit q (the card takes the label from meta)", () => {
+	const spec = parseAsk(
+		fence('[{"type":"field","doctype":"Sales Invoice","fieldname":"po_no"}]')
+	);
+	assert.equal(spec.questions.length, 1);
+	assert.equal(spec.questions[0].q, "");
+});
+
+test("a field question missing doctype or fieldname degrades to text", () => {
+	for (const raw of [
+		'[{"q":"x","type":"field","fieldname":"a"}]',
+		'[{"q":"x","type":"field","doctype":"Item"}]',
+	]) {
+		const [q] = parseAsk(fence(raw)).questions;
+		assert.equal(q.type, "text");
+		assert.equal(q.q, "x");
+	}
+});
+
+test("a field question with a non-identifier doctype or fieldname degrades to a text question", () => {
+	for (const [doctype, fieldname] of [
+		["Item", "gst hsn"],
+		["Item", "a-b"],
+		["Item", "1abc"],
+		["Item", "a.b"],
+		["Item<script>", "a"],
+		["It/em", "a"],
+	]) {
+		const raw = JSON.stringify([{ q: "My label", type: "field", doctype, fieldname }]);
+		const [q] = parseAsk(fence(raw)).questions;
+		assert.equal(q.type, "text", `${doctype} / ${fieldname}`);
+		assert.equal(q.q, "My label");
+		assert.equal(q.doctype, "");
+		assert.equal(q.fieldname, undefined);
+	}
+});
+
+test("a degraded field question with a blank q takes the humanized fieldname", () => {
+	const raw = JSON.stringify([
+		{ type: "field", doctype: "Item<x>", fieldname: "custom_gstin_2" },
+	]);
+	assert.equal(parseAsk(fence(raw)).questions[0].q, "Gstin 2");
+});
+
+test("a degraded field question with nothing usable left is dropped", () => {
+	const raw = JSON.stringify([{ type: "field", doctype: "Item", fieldname: "" }]);
+	assert.equal(parseAsk(fence(raw)), null);
+});
+
+test("humanizeFieldname strips custom_, spaces underscores and capitalises", () => {
+	assert.equal(humanizeFieldname("custom_gstin_2"), "Gstin 2");
+	assert.equal(humanizeFieldname("po_no"), "Po no");
+	assert.equal(humanizeFieldname("customer"), "Customer");
+	assert.equal(humanizeFieldname(""), "");
+});
+
+test("a number question is ready only for a finite number (commas allowed)", () => {
+	const spec = { questions: [{ q: "Qty", type: "number" }] };
+	for (const bad of [undefined, "", "  ", "abc", "1x", "Infinity"]) {
+		assert.equal(isAskReady(spec, { 0: bad }, {}), false, String(bad));
+	}
+	for (const ok of ["42", " 3.5 ", "-1", "1,234.50", "0"]) {
+		assert.equal(isAskReady(spec, { 0: ok }, {}), true, ok);
+	}
+	assert.equal(askAnswerText(spec, { 0: "1,234" }, {}), "Here are my answers:\n1. Qty → 1,234");
+});
+
+test("a loading question is never ready and prints as no answer", () => {
+	const spec = { questions: [{ q: "X", type: "loading" }] };
+	assert.equal(isAskReady(spec, { 0: "anything" }, {}), false);
+	assert.match(askAnswerText(spec, {}, {}), /1\. X → \(no answer\)/);
+});
+
 // ---- answer formatting ---------------------------------------------------
 
 test("answers render as a numbered list the agent can read back", () => {
@@ -153,7 +266,14 @@ test("an unanswered question is spelled out, never sent as an empty arrow", () =
 });
 
 test("ASK_FIELD_TYPES is the value-typed set (no option buttons)", () => {
-	assert.deepEqual([...ASK_FIELD_TYPES].sort(), ["date", "datetime", "link", "text"]);
+	assert.deepEqual([...ASK_FIELD_TYPES].sort(), [
+		"date",
+		"datetime",
+		"field",
+		"link",
+		"select",
+		"text",
+	]);
 });
 
 // ---- source fences: one parser, one renderer, two surfaces ---------------
@@ -221,8 +341,8 @@ test("an answered ask stays inert: every control disables on `answered`, not jus
 	const disabledOnAnswered = (askCardSrc.match(/:disabled="answered"/g) || []).length;
 	assert.equal(
 		disabledOnAnswered,
-		7,
-		"yesno + single/multi option buttons, date, datetime, text, link and Other inputs must all gate on `answered`"
+		9,
+		"yesno + single/multi option buttons, date, datetime, text, select, number, link and Other inputs must all gate on `answered`"
 	);
 });
 
