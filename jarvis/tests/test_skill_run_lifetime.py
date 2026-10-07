@@ -172,3 +172,50 @@ class TestWhatEndsARun(_Base):
 			turn_message_binding.end_skill_autorun_if_open(conv)
 			turn_message_binding.end_skill_autorun_if_open(None)
 		clear.assert_not_called()
+
+
+class TestOnlyTheServerWritesTheRunFields(_Base):
+	def test_a_save_carries_what_is_stored(self):
+		conv = self._open_run(idle_s=40 * 60)
+		stored = frappe.db.get_value(CONV, conv, ["skill_autorun_at", "skill_autorun_skill"], as_dict=True)
+		doc = frappe.get_doc(CONV, conv)
+		doc.skill_autorun_at = frappe.utils.now_datetime()
+		doc.skill_autorun_skill = "some-other-skill"
+		doc.title = "renamed"
+		doc.save()
+		after = frappe.db.get_value(
+			CONV, conv, ["skill_autorun_at", "skill_autorun_skill", "title"], as_dict=True
+		)
+		self.assertEqual(after.skill_autorun_at, stored.skill_autorun_at)
+		self.assertEqual(after.skill_autorun_skill, stored.skill_autorun_skill)
+		self.assertEqual(after.title, "renamed")
+
+	def test_a_document_loaded_before_the_server_wrote_them_saves_cleanly(self):
+		conv = _make_conv(TEST_USER)
+		doc = frappe.get_doc(CONV, conv)  # loaded with no run
+		_stamp_autorun(conv)  # the server opens a run meanwhile
+		frappe.db.commit()
+		stored = frappe.db.get_value(CONV, conv, ["skill_autorun_at", "skill_autorun_skill"], as_dict=True)
+		frappe.db.set_value(
+			CONV, conv, "skill_autorun", 0, update_modified=False
+		)  # keep the 0 -> 1 guard out of it
+		doc.reload()
+		doc.skill_autorun_at = None
+		doc.skill_autorun_skill = None
+		doc.title = "stale"
+		doc.save()
+		after = frappe.db.get_value(CONV, conv, ["skill_autorun_at", "skill_autorun_skill"], as_dict=True)
+		self.assertEqual(after.skill_autorun_at, stored.skill_autorun_at)
+		self.assertEqual(after.skill_autorun_skill, stored.skill_autorun_skill)
+
+	def test_a_new_conversation_cannot_be_born_with_them(self):
+		doc = frappe.get_doc(
+			{
+				"doctype": CONV,
+				"title": "born",
+				"skill_autorun_at": frappe.utils.now_datetime(),
+				"skill_autorun_skill": "x",
+			}
+		).insert()
+		self.assertIsNone(doc.skill_autorun_at)
+		self.assertIsNone(doc.skill_autorun_skill)
