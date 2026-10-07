@@ -61,18 +61,35 @@ This change does not automatically resend messages or alter recovery behavior.
 Retry (desktop chat and dashboard chat) runs the failed turn again. Where Turn
 rows exist (the admission and pump paths), it uses the context and the original
 attachments of the failed turn; pure legacy writes no Turn rows, so a retry
-there has neither. The server refuses a retry when another turn has not
-finished, when the failed reply is not the latest visible user or assistant
-message (the closing message of a macro run does not count), or when the user
-message has a different owner than the conversation. On the admission and pump
-paths these checks run under the conversation row lock, so two tabs cannot
-start two retries, except on the legacy fallback during a cutover; the legacy
-path checks without the lock.
+there has neither.
+
+The server refuses a retry with one of these codes:
+
+- `seed_missing`: the user message of the failed turn no longer exists.
+- `owner_mismatch`: that message has a different owner than the conversation.
+- `in_progress`: another turn has not finished (the states a send waits for; a
+  `finalizing` turn does not count). On the pump the failed reply is bound to
+  its own turn: that turn gives the user message to run again, and any other
+  unfinished turn blocks. Without a bound turn (Phase-0, a site cut back from
+  the pump) only turns created after the failed reply block, and the user
+  message right before the reply is run again. This misses one case: a turn
+  still queued when the failed turn wrote its reply.
+- `not_latest`: the failed reply is not the latest visible user or assistant
+  message (the closing message of a macro run does not count).
+- `busy` (legacy path): a reply is still streaming in the chat.
+
+Each refusal writes one line to the latency log:
+`retry_refused conversation=<name> message=<name> reason=<code> seed=<name>
+blocker=<run_id>:<state>` (`blocker` only for `in_progress`; `owner_mismatch`
+at WARNING). On the admission and pump paths the checks run under the
+conversation row lock, so two tabs cannot start two retries, except on the
+legacy fallback during a cutover; the legacy path checks without the lock.
 
 One documented edge: on the legacy path a dead worker can leave a blank
 streaming row after the failed reply. Desktop chat hides that row and shows
-Retry, but the server counts it and refuses (`not_latest`); there it is the
-only guard against a duplicate run.
+Retry; the server refuses with `busy` while the row is fresh
+(`_INFLIGHT_FRESH_SECONDS`), then with `not_latest`. There the row is the only
+guard against a duplicate run.
 
 ## Customer wording
 
@@ -126,8 +143,8 @@ fixtures before extending the ordered rules.
 
 This taxonomy covers failed **chat turns**. API admission refusals, uploads,
 connection setup forms, and action approval cards retain their existing
-operation-specific error handling (`errMessage`, `ActionError`, etc.). It does
-not change authorization, billing, or error-reporting policy.
+operation-specific error handling (`errMessage`, `ActionError`, etc.). This
+taxonomy does not change authorization, billing, or error-reporting policy.
 
 Both languages run `jarvis/tests/fixtures/turn_errors.json`. Frontend regression
 tests also cover provider routing, legacy-code refinement, retry guidance,

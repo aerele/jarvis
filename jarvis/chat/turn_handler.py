@@ -2634,7 +2634,8 @@ def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) 
 	session recorded after its previous turn. Never raises.
 
 	``variant``: ``plain`` (with "Please try again."), ``bare`` (the sentence alone),
-	``tools`` (the empty-reply-tools rule), ``other`` (more text around the sentence)."""
+	``tools`` (the empty-reply-tools rule), ``other`` (more text around the sentence).
+	Only the first 300 characters are read, so text after long whitespace reads as bare."""
 	if code not in ("empty-reply", "empty-reply-tools"):
 		return
 	try:
