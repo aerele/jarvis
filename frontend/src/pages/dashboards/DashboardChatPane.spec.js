@@ -89,6 +89,7 @@ vi.mock("@/api", () => ({
 	setConversationThinking: vi.fn(async () => ({ ok: true })),
 	getConversationContext: vi.fn(async () => null),
 	compactConversation: vi.fn(async () => ({ ok: true })),
+	retryMessage: vi.fn(async () => ({ ok: true, run_id: "r2" })),
 }));
 
 import DashboardChatPane from "./DashboardChatPane.vue";
@@ -328,5 +329,100 @@ describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
 		await flushPromises();
 		expect(toast.error).toHaveBeenCalledWith("This action is already running.");
 		expect(wrapper.findAll("button").filter((b) => b.text() === "Dismiss")).toHaveLength(1);
+	});
+});
+
+describe("DashboardChatPane Retry on a failed reply", () => {
+	const EMPTY_REPLY = "\u26a0\ufe0f Agent couldn't generate a response. Please try again.";
+	const failed = (error = EMPTY_REPLY, after = []) => ({
+		conversation: { name: "conv1" },
+		messages: [
+			{ name: "m1", role: "user", content: "Build me a dashboard" },
+			{ name: "m2", role: "assistant", content: "", error },
+			...after,
+		],
+	});
+	const retryButton = (wrapper) =>
+		wrapper.findAll("button").find((b) => /^Retry/.test(b.text()));
+
+	async function mountFailed(transcript) {
+		api.getDashboardConversation.mockResolvedValueOnce(transcript);
+		const mounted = mountPane();
+		await flushPromises();
+		return mounted;
+	}
+
+	beforeEach(async () => {
+		const { retryMessage } = await import("@/api");
+		retryMessage.mockReset();
+		retryMessage.mockResolvedValue({ ok: true, run_id: "r2" });
+	});
+
+	it("retries an empty reply through the chat retry API", async () => {
+		const { retryMessage } = await import("@/api");
+		const { wrapper } = await mountFailed(failed());
+		expect(wrapper.find(".text-ink-red-4").text()).toContain(
+			"The AI model sent back an empty reply"
+		);
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(retryMessage).toHaveBeenCalledWith("m2");
+		// The retried run is in progress: the button stays, disabled, and says so.
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+
+	it("is disabled while the retry request is in flight", async () => {
+		const { retryMessage } = await import("@/api");
+		let finish;
+		retryMessage.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+		const { wrapper } = await mountFailed(failed());
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
+		await retryButton(wrapper).trigger("click");
+		expect(retryMessage).toHaveBeenCalledTimes(1);
+		finish({ ok: true, run_id: "r2" });
+		await flushPromises();
+	});
+
+	it("shows the refusal and offers Retry again", async () => {
+		const { retryMessage } = await import("@/api");
+		const { toast } = await import("frappe-ui");
+		retryMessage.mockResolvedValueOnce({
+			ok: false,
+			reason: "You can retry only the latest reply.",
+		});
+		const { wrapper } = await mountFailed(failed());
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("You can retry only the latest reply.");
+		expect(retryButton(wrapper).text()).toBe("Retry");
+		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("offers no Retry for a cause a retry cannot fix", async () => {
+		const { wrapper } = await mountFailed(failed("401 Unauthorized"));
+		expect(wrapper.find(".text-ink-red-4").exists()).toBe(true);
+		expect(retryButton(wrapper)).toBeUndefined();
+	});
+
+	it("offers no Retry once another message follows the failed reply", async () => {
+		const { wrapper } = await mountFailed(
+			failed(EMPTY_REPLY, [{ name: "m3", role: "user", content: "Try a bar chart" }])
+		);
+		expect(retryButton(wrapper)).toBeUndefined();
+	});
+
+	it("still offers Retry this step above a macro's closing message", async () => {
+		const closing = {
+			name: "m3",
+			role: "assistant",
+			content: "Macro failed. Step 1 failed.",
+			ref_doctype: "Jarvis Macro Run",
+		};
+		const { wrapper } = await mountFailed(failed(EMPTY_REPLY, [closing]));
+		expect(retryButton(wrapper).text()).toBe("Retry this step");
 	});
 });
