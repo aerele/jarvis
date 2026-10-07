@@ -2198,6 +2198,14 @@ def send_message(
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_skill_autorun(conversation)
+	elif conv_doc.skill_autorun_at:
+		# The run already ended since the last message (Halt, or a failed write): the
+		# flag is 0 and only its stamp is left. Finish the job the branch above does for
+		# a live run, so a Halt signal still standing does not reach into this turn.
+		stage("skill_autorun_at", None)
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.clear_run_cancel(conversation)
 
 	# I1 precedent (jarvis.chat.actions_api._open_skill_run): a File Box Stop sets a
 	# 120s run-cancel signal; a leftover one must not refuse THIS fresh turn's first
@@ -3610,6 +3618,18 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		api._request_autorun_clear(conversation)
 	except Exception:
 		frappe.log_error(title="stop_run request_autorun clear", message=frappe.get_traceback())
+	# Halt ends an approved skill run too, for the same reason and in its own try/except.
+	# A run paused on a card has no live turn to end it at settlement, and the cards were
+	# just swept, so a covered write after the two-minute signal lapsed would find the
+	# run still open. The signal stays set: a write already on its way is refused at
+	# the gate. skill_autorun_at is left as it is, which is how the next message knows
+	# a run ended here (send_message).
+	try:
+		from jarvis import api
+
+		api._skill_autorun_clear(conversation)
+	except Exception:
+		frappe.log_error(title="stop_run skill_autorun clear", message=frappe.get_traceback())
 	if not conv.session_key:
 		return {"ok": True}  # nothing running yet
 	settings = frappe.get_cached_doc("Jarvis Settings")
