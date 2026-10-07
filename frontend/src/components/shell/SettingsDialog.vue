@@ -108,7 +108,15 @@
 				     the bottom. On a plain block wrapper both would clip silently
 				     with no scrollbar. -->
 				<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-					<component :is="pane" />
+					<!-- Visited panes stay mounted so switching back is instant instead
+					     of remounting and refetching (jarvis-admin-v2#641). Only the two
+					     data-heavy panes are kept; the rest remount so they still read
+					     fresh state (AI models, Billing, connectors). The cache dies with
+					     the dialog, so reopening Settings fetches again. GeneralPane and
+					     UsagePane refresh themselves in onActivated once stale. -->
+					<KeepAlive :include="KEPT_PANES">
+						<component :is="pane" />
+					</KeepAlive>
 				</div>
 
 				<!-- Close lives at the dialog level, not in SettingsPane, so panes
@@ -179,6 +187,8 @@ const ConnectorsPane = defineAsyncComponent(() =>
 // is_jarvis_admin, which is true for System Managers too.
 const isSM = !!window.is_system_manager;
 const isAdmin = !!window.is_jarvis_admin;
+
+const KEPT_PANES = ["GeneralPane", "UsagePane"];
 
 const PANES = {
 	general: GeneralPane,

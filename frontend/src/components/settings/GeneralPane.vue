@@ -9,7 +9,8 @@
 			     the per-model story (every model in failover order, with its own
 			     status); this is a summary that points at it. The pair stays for a
 			     single-credential tenant, where it is accurate. -->
-			<KvRow v-if="isPool" label="Models" :value="poolSummary" />
+			<div v-if="!connLoaded" class="py-2 text-p-sm text-ink-gray-6">Loading…</div>
+			<KvRow v-else-if="isPool" label="Models" :value="poolSummary" />
 			<template v-else>
 				<KvRow label="Model" :value="modelLabel" />
 				<KvRow label="Provider" :value="ui.llm_provider || '-'" />
@@ -285,7 +286,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onMounted, onActivated, onBeforeUnmount } from "vue";
 import { Badge, Button, toast } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { useConfirm } from "@/composables/useConfirm";
@@ -350,6 +351,13 @@ const connStatus = ref(null);
 const memberState = ref("");
 const connErr = ref(false);
 const connLoading = ref(false);
+// True once a first answer (or failure) has landed. Until then the rows below
+// would show the conversation's "Auto" label and a blank Status, which read as
+// real values for a second before the server's answer replaced them.
+const connLoaded = ref(false);
+// Staleness window for a kept-alive pane: reactivating inside it refetches nothing.
+const STALE_MS = 30000;
+let loadedAt = 0;
 
 // Also ported from the removed ConnectionPane.vue: a fetch failure has to be
 // visible and recoverable. Swallowing it left Status showing its placeholder,
@@ -370,6 +378,7 @@ async function loadConnStatus() {
 		connErr.value = true;
 	} finally {
 		connLoading.value = false;
+		connLoaded.value = true;
 	}
 }
 // proxy_active means "a Bifrost + CLIProxyAPI sidecar pair is deployed", which
@@ -526,13 +535,14 @@ const usagePct = computed(() => {
 	return Math.min(100, Math.round((u.month_tokens / u.budget_monthly) * 100));
 });
 
-onMounted(async () => {
+async function loadUsage() {
 	try {
 		usage.value = await api.getUsage(ctx.value && ctx.value.conversationId);
 	} catch (e) {
 		/* usage is best-effort — leave the placeholder */
 	}
-	await loadConnStatus();
+}
+async function loadSettings() {
 	// Roam notify/activity-detail prefs from the server row, falling back to the
 	// localStorage cache the store already booted from on any failure (endpoint
 	// not deployed yet, network error) — never blocks or errors the pane.
@@ -542,6 +552,18 @@ onMounted(async () => {
 	} catch (e) {
 		/* prefs stay on the localStorage cache */
 	}
+}
+// The three fetches are independent, so they run together instead of one
+// after another. A refresh swaps values in place and never blanks the pane.
+function loadAll() {
+	loadedAt = Date.now();
+	return Promise.all([loadUsage(), loadConnStatus(), loadSettings()]);
+}
+onMounted(loadAll);
+// Settings keeps this pane alive across tab switches (SettingsDialog's
+// KeepAlive). onMounted covers the first visit, so only a re-visit lands here.
+onActivated(() => {
+	if (loadedAt && Date.now() - loadedAt > STALE_MS) loadAll();
 });
 
 // Device-local prefs live in the shell store (single source of truth) so that
