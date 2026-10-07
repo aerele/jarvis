@@ -348,3 +348,89 @@ test("field: a field the meta does not list falls back to the text input", async
 	const w = await fieldCard(null);
 	expect(w.find('input[type="text"]').exists()).toBe(true);
 });
+
+test("field: a numeric control rejects non-numbers and accepts numbers", async () => {
+	const w = await fieldCard({ fieldtype: "Int" });
+	const c = w.findComponent({ name: "FormControl" });
+	c.vm.$emit("update:modelValue", "abc");
+	await w.vm.$nextTick();
+	expect(submit(w).attributes("disabled")).toBeDefined();
+	c.vm.$emit("update:modelValue", "1,200");
+	await w.vm.$nextTick();
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+});
+
+test("field: a loading question keeps Submit disabled", async () => {
+	getDoctypeFields.mockReturnValueOnce(new Promise(() => {}));
+	const w = mountWithPalette(AskCard, {
+		spec: spec('[{"q":"X","type":"field","doctype":"Pending","fieldname":"f"}]'),
+	});
+	await flushPromises();
+	expect(submit(w).attributes("disabled")).toBeDefined();
+});
+
+test("field: a meta request that never settles falls back to the text input after 8s", async () => {
+	vi.useFakeTimers();
+	try {
+		getDoctypeFields.mockReturnValueOnce(new Promise(() => {}));
+		const w = mountWithPalette(AskCard, {
+			spec: spec('[{"q":"X","type":"field","doctype":"Hung","fieldname":"f"}]'),
+		});
+		await flushPromises();
+		expect(w.find(".fui-loading").exists()).toBe(true);
+		await vi.advanceTimersByTimeAsync(7900);
+		expect(w.find(".fui-loading").exists()).toBe(true);
+		await vi.advanceTimersByTimeAsync(200);
+		await flushPromises();
+		expect(w.find(".fui-loading").exists()).toBe(false);
+		expect(w.find('input[type="text"]').exists()).toBe(true);
+	} finally {
+		vi.useRealTimers();
+	}
+});
+
+test("field: an ok:false or fields-less response is a failure, not a cached success", async () => {
+	for (const resp of [{ ok: false, error: "denied" }, { ok: true }, null]) {
+		getDoctypeFields.mockReset();
+		getDoctypeFields.mockResolvedValueOnce(resp);
+		const w = mountWithPalette(AskCard, {
+			spec: spec(`[{"q":"X","type":"field","doctype":"Bad${++dtn}","fieldname":"f"}]`),
+		});
+		await flushPromises();
+		expect(w.find(".fui-loading").exists()).toBe(false);
+		expect(w.find('input[type="text"]').exists()).toBe(true);
+	}
+});
+
+test("field: a failed fetch is dropped from the cache so a re-ask retries", async () => {
+	getDoctypeFields.mockReset();
+	getDoctypeFields.mockRejectedValueOnce(new Error("no"));
+	getDoctypeFields.mockResolvedValueOnce({
+		ok: true,
+		fields: [{ fieldname: "f", label: "L", fieldtype: "Date" }],
+	});
+	const s = spec('[{"q":"X","type":"field","doctype":"Retry","fieldname":"f"}]');
+	const w = mountWithPalette(AskCard, { spec: s });
+	await flushPromises();
+	expect(w.find('input[type="text"]').exists()).toBe(true);
+	expect(getDoctypeFields).toHaveBeenCalledTimes(1);
+});
+
+test("field: a blank q with no usable meta label shows the humanized fieldname", async () => {
+	const doctype = "Doc" + ++dtn;
+	getDoctypeFields.mockRejectedValueOnce(new Error("no"));
+	const w = mountWithPalette(AskCard, {
+		spec: spec(JSON.stringify([{ type: "field", doctype, fieldname: "custom_gstin_2" }])),
+	});
+	await flushPromises();
+	expect(w.find(".jv-ask-qt").text()).toContain("Gstin 2");
+	expect(w.find(".jv-ask-qt").text()).not.toContain("custom_");
+});
+
+test("field: a bad identifier renders as a text question instead of vanishing", () => {
+	const w = mountWithPalette(AskCard, {
+		spec: spec('[{"q":"Your GSTIN","type":"field","doctype":"Item","fieldname":"a b"}]'),
+	});
+	expect(w.find(".jv-ask-qt").text()).toContain("Your GSTIN");
+	expect(w.find('input[type="text"]').exists()).toBe(true);
+});

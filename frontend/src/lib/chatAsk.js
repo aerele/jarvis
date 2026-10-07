@@ -21,6 +21,19 @@ const DOCTYPE_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
 const FIELDNAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
+ * A readable label for a field whose question carries none: strip a leading
+ * `custom_`, underscores to spaces, capitalise the first letter
+ * (`custom_gstin_2` -> `Gstin 2`).
+ */
+export function humanizeFieldname(fieldname) {
+	const s = String(fieldname || "")
+		.replace(/^custom_/, "")
+		.replace(/_+/g, " ")
+		.trim();
+	return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
  * Parse the first ```jarvis-ask block out of a message.
  * @param {string} content raw assistant message text
  * @returns {{questions: Array<{q: string, type: string, options: string[], doctype: string, fieldname: string}>}|null}
@@ -45,24 +58,32 @@ export function parseAsk(content) {
 					: [];
 				// A dropdown with nothing to pick from is just a typed answer.
 				if (type === "select" && !options.length) type = "text";
+				const text = String(q.q || q.question || "").trim();
+				if (type === "field") {
+					const doctype = String(q.doctype || "").trim();
+					const fieldname = String(q.fieldname || "").trim();
+					// A bad identifier must not reach the API call; the question
+					// degrades to a typed answer instead of vanishing.
+					if (!DOCTYPE_RE.test(doctype) || !FIELDNAME_RE.test(fieldname)) {
+						return {
+							q: text || humanizeFieldname(fieldname),
+							type: "text",
+							options: [],
+							doctype: "",
+						};
+					}
+					return { q: text, type, options: [], doctype, fieldname };
+				}
 				return {
-					q: String(q.q || q.question || "").trim(),
+					q: text,
 					type,
 					// yesno may carry exactly 2 custom labels (e.g. ["Approve","Reject"]).
 					options,
-					doctype:
-						type === "link"
-							? String(q.doctype || q.link || "").trim()
-							: type === "field"
-							? String(q.doctype || "").trim()
-							: "",
-					// only a field question carries a fieldname
-					...(type === "field" ? { fieldname: String(q.fieldname || "").trim() } : {}),
+					doctype: type === "link" ? String(q.doctype || q.link || "").trim() : "",
 				};
 			})
 			.filter((q) => {
-				if (q.type === "field")
-					return DOCTYPE_RE.test(q.doctype) && FIELDNAME_RE.test(q.fieldname);
+				if (q.type === "field") return true;
 				if (!q.q) return false;
 				if (q.type === "yesno" || ASK_FIELD_TYPES.includes(q.type)) return true;
 				return q.options.length > 0;
@@ -78,6 +99,14 @@ export function isAskReady(spec, sel, other) {
 	if (!spec) return false;
 	return spec.questions.every((q, i) => {
 		const v = sel[i];
+		// Drawn-only types (a `field` question resolved to a control).
+		if (q.type === "loading") return false;
+		if (q.type === "number") {
+			const n = String(v == null ? "" : v)
+				.replace(/,/g, "")
+				.trim();
+			return n !== "" && Number.isFinite(Number(n));
+		}
 		if (ASK_FIELD_TYPES.includes(q.type)) return v != null && String(v).trim() !== "";
 		const free = (other[i] || "").trim();
 		if (q.type === "multi") return (Array.isArray(v) && v.length > 0) || !!free;
