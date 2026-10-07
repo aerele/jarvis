@@ -208,14 +208,20 @@
 							:disabled="readOnly || saving"
 							@update:modelValue="(v) => (form.llm_daily_cap = v)"
 						/>
-						<FormControl
-							type="checkbox"
-							label="Allow read-only lookups"
-							description="Lets the LLM read related records as the trigger owner. Findings are visible to the owner and managers only."
-							:modelValue="!!form.llm_allow_lookups"
-							:disabled="readOnly || saving"
-							@update:modelValue="(v) => (form.llm_allow_lookups = v ? 1 : 0)"
-						/>
+						<div class="flex flex-col gap-1.5">
+							<FormControl
+								type="checkbox"
+								label="Allow read-only lookups"
+								:modelValue="!!form.llm_allow_lookups"
+								:disabled="readOnly || saving"
+								@update:modelValue="(v) => (form.llm_allow_lookups = v ? 1 : 0)"
+							/>
+							<!-- frappe-ui's checkbox ignores the description prop; same classes as its text-input help line -->
+							<p class="text-p-base text-ink-gray-5">
+								Lets the LLM read related records as the trigger owner. Findings
+								are visible to the owner and managers only.
+							</p>
+						</div>
 					</template>
 				</div>
 			</DocSection>
