@@ -549,6 +549,8 @@ _ARM_NOTICE_SENSITIVE = (
 	("mail", _lt("email set-up")),
 	("access", _lt("user access")),
 	("login", _lt("sign-in settings")),
+	# Skills are named with the tools that still ask, above.
+	("instructions", _lt("learned rules")),
 )
 
 

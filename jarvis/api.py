@@ -1386,7 +1386,13 @@ _SKILL_DOCTYPES = frozenset(
 )
 # Compared as Frappe finds a doctype: in any case, and spaces around it trimmed.
 _SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
-_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
+_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype", "target_doctype")
+# The skills, learned-rules and app-learning endpoints (``run_method`` refuses them).
+_SKILL_API_PREFIXES = (
+	"jarvis.chat.custom_skills_api.",
+	"jarvis.chat.learned_api.",
+	"jarvis.chat.app_learning_api.",
+)
 
 
 def _run_method_brakes(args) -> bool:
@@ -1416,7 +1422,22 @@ def _writes_a_skill(tool: str, args) -> bool:
 	return _names_a_skill_doctype(args, depth=0)
 
 
-def _names_a_skill_doctype(value, *, depth: int) -> bool:
+def _writes_skill_config(tool: str, args) -> bool:
+	"""Whether a gated write names a skill or learned-rule doctype anywhere in its
+	arguments (``_write_risk.SKILL_CONFIG_DOCTYPES``; found as ``_writes_a_skill``
+	finds a skill), or calls their own API. Such a call asks in every mode: what
+	these records say is what later chats do. Raises InvalidArgumentError for a
+	doctype that is not text."""
+	from jarvis.tools._write_risk import SKILL_CONFIG_DOCTYPES
+
+	if tool == "run_method" and isinstance(args, dict):
+		if str(args.get("method") or "").startswith(_SKILL_API_PREFIXES):
+			return True
+	folded = frozenset(dt.casefold() for dt in SKILL_CONFIG_DOCTYPES)
+	return _names_a_skill_doctype(args, depth=0, folded=folded)
+
+
+def _names_a_skill_doctype(value, *, depth: int, folded: frozenset = _SKILL_DOCTYPES_FOLDED) -> bool:
 	if depth > 6:
 		return False
 	if isinstance(value, str):
@@ -1433,11 +1454,11 @@ def _names_a_skill_doctype(value, *, depth: int) -> bool:
 			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
 			raise InvalidArgumentError("doctype must be the name of a document type")
 		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
-		if any(_is_a_skill_doctype(text) for dt in named for text in _texts(dt)):
+		if any(text.strip().casefold() in folded for dt in named for text in _texts(dt)):
 			return True
 		value = list(value.values())
 	if isinstance(value, list):
-		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
+		return any(_names_a_skill_doctype(item, depth=depth + 1, folded=folded) for item in value)
 	return False
 
 
@@ -3056,6 +3077,13 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
 	)
+	# Nor does a write to a skill or a learned rule, whichever tool names it: what
+	# they say is what later chats do, so a person sees each change.
+	if tool in _GATED_WRITES and not _must_card:
+		try:
+			_must_card = _writes_skill_config(tool, args)
+		except InvalidArgumentError as e:
+			return _error(type(e).__name__, str(e))
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
@@ -3292,15 +3320,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# kill-switch Settings read runs only when a covered write is actually armed.
 		# Bulk covered writes skip too (an automation must not stall on a batch card);
 		# the F16 over-size cap above still bounces an oversized batch. A write the
-		# write-risk guard must card (``_must_card``) parks. A write to a skill parks
-		# too (``_writes_a_skill``): a macro step applies skills, so an armed run must
-		# not rewrite what its own later runs follow.
+		# write-risk guard must card (``_must_card``) parks. So does a write to a skill
+		# (``_writes_skill_config``, part of ``_must_card``): a macro step applies
+		# skills, so an armed run must not rewrite what its own later runs follow.
 		armed = bool(tool in _ARMED_SKIP_COVERED and not _must_card and _conv_flags.get("skip_confirmation"))
-		if armed:
-			try:
-				armed = not _writes_a_skill(tool, args)
-			except InvalidArgumentError as e:
-				return _error(type(e).__name__, str(e))
 		if armed and not _armed_skip_disabled():
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
 			# write. Always label an armed write (we are in the armed branch, so it IS
