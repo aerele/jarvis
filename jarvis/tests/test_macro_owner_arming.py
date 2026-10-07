@@ -730,7 +730,8 @@ class TestTheNotice(FrappeTestCase):
 			"without asking you first, including when it runs on a schedule with nobody watching. "
 			"Deleting, cancelling and amending records, creating or changing skills and calling "
 			"connectors still ask, and stop the run. So do changes to scripts, webhooks, email set-up, "
-			"user access, sign-in settings and other sensitive configuration. Its steps can apply only "
+			"user access, sign-in settings, learned skills and other sensitive configuration. Its steps "
+			"can apply only "
 			"skills you own, or skills only a reviewer can change.",
 		)
 		self.assertNotIn(EM_DASH, macros_api.arm_notice())
@@ -1722,10 +1723,6 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				"method": "frappe.client.save",
 				"args": {"doc": json.dumps({"doctype": SKILL, "name": skill, "instructions": "x"})},
 			},
-			"run_method (the skills' API)": {
-				"method": "jarvis.chat.custom_skills_api.update_custom_skill",
-				"args": {"name": skill, "instructions": "x"},
-			},
 		}
 		for label, args in calls.items():
 			with self.subTest(call=label):
@@ -1737,6 +1734,25 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				frappe.db.commit()
 				self.assertEqual(self._instructions(skill), "Summarise the open orders.")
 				self.assertFalse(frappe.db.exists(SKILL, {"skill_name": "armskill-made"}))
+
+	def test_the_skills_own_api_is_refused_before_a_card(self):
+		# run_method refuses these endpoints, so a card for one could only fail at
+		# Confirm: the gate answers at once and the run goes on to its next step.
+		skill = self._skill(OWNER, "own")
+		conv = self._armed_conv()
+		frappe.set_user(OWNER)
+		res = api._run_tool(
+			"run_method",
+			{
+				"method": "jarvis.chat.custom_skills_api.update_custom_skill",
+				"args": {"name": skill, "instructions": "x"},
+			},
+			conversation=conv,
+		)
+		self.assertFalse(res.get("ok"), res)
+		self.assertIn("cannot be called from a tool", json.dumps(res))
+		self.assertFalse(pending_confirm.has_live_card(OWNER, conv))
+		self.assertEqual(self._instructions(skill), "Summarise the open orders.")
 
 	def test_a_skill_doctype_in_any_case_parks_a_card(self):
 		skill = self._skill(OTHER, "side", share_with=OWNER)
@@ -1750,7 +1766,7 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 			if method == "frappe.client.get_list":
 				args = {"doctype": doctype, "fields": ["instructions"]}
 			with self.subTest(method=method, doctype=doctype):
-				self.assertTrue(api._writes_a_skill("run_method", {"method": "m", "args": args}))
+				self.assertTrue(api._writes_skill_config("run_method", {"method": "m", "args": args}))
 				conv = self._armed_conv()
 				frappe.set_user(OWNER)
 				res = api._run_tool("run_method", {"method": method, "args": args}, conversation=conv)
@@ -1762,13 +1778,17 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 			"method": "m",
 			"args": {"filters": {"reference_doctype": ["=", "jarvis custom skill share"]}},
 		}
-		self.assertTrue(api._writes_a_skill("run_method", filtered))
+		self.assertTrue(api._writes_skill_config("run_method", filtered))
 
 	def test_a_route_the_gate_cannot_read_is_refused(self):
 		skill = self._skill(OWNER, "own")
 		conv = self._armed_conv()
 		frappe.set_user(OWNER)
-		with patch.object(api, "_writes_a_skill", return_value=False):
+		# Both readings of the arguments miss it: the guard's and the gate's own scan.
+		with (
+			patch("jarvis.tools._write_risk.check", return_value=None),
+			patch.object(api, "_writes_skill_config", return_value=False),
+		):
 			res = api._run_tool(
 				"update_doc",
 				{"doctype": SKILL, "name": skill, "changes": {"instructions": "something else"}},
@@ -1794,7 +1814,7 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				frappe.db.rollback()
 		# Deeper, a list is a filter, read as one.
 		filtered = {"method": "m", "args": {"filters": {"reference_doctype": ["=", SKILL]}}}
-		self.assertTrue(api._writes_a_skill("run_method", filtered))
+		self.assertTrue(api._writes_skill_config("run_method", filtered))
 
 	def test_the_write_flag_is_put_back_as_it_was(self):
 		conv = self._armed_conv()
