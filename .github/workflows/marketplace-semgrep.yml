@@ -1,0 +1,44 @@
+name: Marketplace Semgrep
+
+# Runs the Frappe Marketplace audit's own Semgrep ruleset (frappe/press, fetched live so CI
+# tracks what the audit runs) and fails on what fails the audit: a blocking rule or a
+# Critical/Major finding. Minor findings are only reported. See jarvis/ci/marketplace_semgrep.py.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  RULES: press/marketplace/doctype/marketplace_app_audit/checks/semgrep-rules
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the Marketplace ruleset
+        run: |
+          git clone --quiet --depth 1 --filter=blob:none --sparse https://github.com/frappe/press.git "$RUNNER_TEMP/press"
+          git -C "$RUNNER_TEMP/press" sparse-checkout set "$RULES"
+          git -C "$RUNNER_TEMP/press" log -1 --format='Ruleset: frappe/press@%h (%cs)'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Semgrep
+        run: python -m pip install --quiet "semgrep==1.179.0"
+      - name: Scan the app as the audit does
+        # --timeout 0: the audit's default per-file timeout can skip the largest files.
+        # Exit 1 only means "findings"; the gate below decides.
+        run: |
+          set +e
+          semgrep scan --config "$RUNNER_TEMP/press/$RULES" --json --quiet --metrics=off --timeout 0 \
+            --output "$RUNNER_TEMP/semgrep.json" .
+          code=$?
+          [ "$code" -le 1 ] || exit "$code"
+      - name: Gate
+        run: python -m jarvis.ci.marketplace_semgrep "$RUNNER_TEMP/semgrep.json"
