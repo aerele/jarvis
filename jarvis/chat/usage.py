@@ -399,12 +399,18 @@ _CHARS_PER_TOKEN = 4
 
 
 def is_claude_cli_row(row: dict | None) -> bool:
-	"""True when the gateway row carries the Claude CLI session marker. Read off the
-	row's own ``cliSessionIds`` / ``claudeCliSessionId`` keys, never inferred from the
-	model name: that is the one direct signal that this reply ran through the
-	``claude-cli`` runtime, which saves a partial streamed usage (see ``record_turn_usage``)."""
+	"""True when the gateway row says this reply ran through the ``claude-cli`` runtime,
+	which saves a partial streamed usage (see ``record_turn_usage``). Primary marker is
+	``agentRuntime.id`` (the only one ``sessions.list`` carries as of openclaw 2026.9.3);
+	``cliSessionIds`` / ``claudeCliSessionId`` are a fallback for rows that ever carry them.
+	Never inferred from the model name: a Claude model can also run on another runtime."""
 	if not isinstance(row, dict):
 		return False
+	runtime = row.get("agentRuntime")
+	if isinstance(runtime, dict):
+		runtime = runtime.get("id")
+	if runtime == "claude-cli":
+		return True
 	cli_ids = row.get("cliSessionIds")
 	return bool(row.get("claudeCliSessionId") or (isinstance(cli_ids, dict) and cli_ids.get("claude-cli")))
 
@@ -725,10 +731,11 @@ def _write_turn_usage_row(
 	real accrual, and a rollback here would be equally wrong (it would
 	deterministically discard the aggregate delta on the RECORDED path).
 
-	cache_read / cache_write / cache_reported come from the row's ``cacheRead`` /
-	``cacheWrite`` (present for every provider; 386 of 386 e2e2 rows, 2026-10-07). An
-	August 2026 probe saw no cache keys, so these used to be hardcoded to 0. ``cache_reported``
-	is 1 when either key is present (a real 0 reads as reported). They are NOT in the
+	cache_read / cache_write / cache_reported are filled from the row's ``cacheRead`` /
+	``cacheWrite`` when present. They are ABSENT from ``sessions.list`` as of openclaw 2026.9.3
+	(re-verified 2026-10-07; only the stored session entry has them), so today these stay
+	0 / 0 / unreported until the runtime exposes them. ``cache_reported`` is 1 when either
+	key is present (a real 0 reads as reported). They are NOT in the
 	accrued delta: ``tokens_in`` stays the row's ``inputTokens`` (uncached). Known limit: a
 	multi-call turn carries the last call's cache numbers.
 
