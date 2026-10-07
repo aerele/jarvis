@@ -297,7 +297,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, watch } from "vue";
 import { Badge, Button } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo } from "@/utils/datetime";
@@ -311,6 +311,7 @@ import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { fmtTokens, contextReading, limitWindow } from "@/lib/tokens.js";
 import { connectionModeLabel } from "@/llm/pool";
 import { useJarvisTheme } from "@/theme";
+import { useKeptAlive } from "@/composables/useKeptAlive";
 import * as api from "@/api";
 
 const shell = useShellStore();
@@ -372,8 +373,10 @@ function modelPct(m) {
 async function loadUsage() {
 	try {
 		usage.value = await api.getUsage(shell.chatContext?.conversationId);
+		return true;
 	} catch {
 		usage.value = null;
+		return false;
 	}
 }
 
@@ -459,14 +462,21 @@ async function loadMetering() {
 	]);
 	if (results.includes(false)) meteringUsageError.value = true;
 	meteringLoading.value = false;
+	return !results.includes(false);
 }
 
-onMounted(() => {
-	loadUsage();
+// SettingsDialog keeps this pane alive: useKeptAlive loads on mount and
+// refreshes in place when stale or when the AI models config changed.
+const { isActive, markStale } = useKeptAlive(async () => {
 	// Skip the round-trip entirely for a member who can never see this section -
 	// the backend gates every one of these three calls server-side anyway
 	// (require_jarvis_admin), so this is a UX/perf saving, not a security gate.
-	if (canSeeMetering) loadMetering();
+	const results = await Promise.all([loadUsage(), canSeeMetering ? loadMetering() : true]);
+	return !results.includes(false);
 });
-watch(() => shell.chatContext?.conversationId, loadUsage);
+// A hidden (kept-alive) pane does not fetch; it is marked stale and refreshes on show.
+watch(
+	() => shell.chatContext?.conversationId,
+	() => (isActive() ? loadUsage() : markStale())
+);
 </script>
