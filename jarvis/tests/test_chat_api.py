@@ -652,13 +652,21 @@ class TestRetryMessage(_ChatTestCase):
 	def test_legacy_retry_of_a_reply_that_is_not_the_newest_is_refused(self):
 		_u, asst_id = self._make_turn(self.conv, with_error=True)
 		self._make_turn(self.conv, user_text="next question")
-		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+		with (
+			patch("jarvis.chat.api._dispatch_turn") as dispatch,
+			patch("jarvis.chat.latency.get_logger") as logger,
+		):
 			result = retry_message(asst_id)
 		self.assertFalse(result["ok"])
 		self.assertIn("latest", result["reason"])
 		dispatch.assert_not_called()
+		logger.return_value.info.assert_called_once_with(
+			"retry_refused conversation=%s message=%s reason=%s", self.conv, asst_id, "not_latest"
+		)
 
 	def test_legacy_retry_keeps_the_context_of_the_failed_turn(self):
+		# Pure legacy writes no Turn rows; this is a site cut back from the pump, whose
+		# failed turn still has its row.
 		user_id, asst_id = self._make_turn(self.conv, with_error=True)
 		context = {"page": "dashboards", "theme": "midnight"}
 		turn = frappe.get_doc(

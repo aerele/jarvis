@@ -391,6 +391,38 @@ class TestPanel4Chokepoint(_PipelineCase):
 		after = frappe.db.count(MSG, {"conversation": conv, "role": "user"})
 		self.assertEqual(after, before, "retry/orphan inserted NO duplicate user row")
 
+	def test_a_retry_in_pump_mode_queues_once_with_the_failed_turns_inputs(self):
+		from jarvis.chat import api as chat_api
+
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="build it")
+		context = {"page": "dashboards", "theme": "midnight"}
+		raw = [{"file_url": "/private/files/a.png", "file_name": "a.png"}]
+		stored = {
+			"session_key": "s",
+			"attachments": [{"type": "image"}],
+			"attachments_raw": raw,
+			"context": context,
+		}
+		self._mk_turn(conv, "pmp_failed", seed, "errored", dispatch_payload=json.dumps(stored))
+		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
+		frappe.db.set_value(TURN, "pmp_failed", "assistant_message", amsg)
+		frappe.db.commit()
+		with (
+			self._pump_on(),
+			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+		):
+			first = chat_api.retry_message(amsg)
+			second = chat_api.retry_message(amsg)
+		self.assertTrue(first["ok"], first)
+		self.assertEqual(self._state(first["run_id"]), "queued", "the pump owns the dispatch")
+		self.assertEqual(
+			json.loads(self._val(first["run_id"], "dispatch_payload")),
+			{"context": context, "attachments": raw},
+		)
+		self.assertFalse(second["ok"])
+		self.assertIn("in progress", second["reason"])
+
 	def test_placeholder_seq_monotonic_under_conv_lock(self):
 		conv = self._mk_conv()
 		# A tool receipt sits at some seq; prepare's placeholder must not collide.
