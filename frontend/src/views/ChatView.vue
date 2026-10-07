@@ -2150,6 +2150,16 @@
 						<div v-if="pa.error" style="margin: 0 14px 10px">
 							<ActionError :error="pa.error" />
 						</div>
+						<!-- What the amber button covers, as text: a title is invisible on
+						     touch and to anyone who does not hover. -->
+						<p
+							v-if="pendingCardOf(pa)?.approve_run"
+							:id="'jv-runnote-' + pa.token"
+							class="jv-action-runnote"
+						>
+							Approve &amp; run runs the rest of this request without asking. Delete,
+							cancel and amend still ask.
+						</p>
 						<div class="jv-action-foot">
 							<template v-if="pendingCardOf(pa)?.approve_run">
 								<!-- Step-by-step stays THIS card's plain confirm - the
@@ -2175,10 +2185,11 @@
 								<button
 									class="jv-action-runall"
 									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
+									:aria-describedby="'jv-runnote-' + pa.token"
 									:title="
 										convStreaming
 											? 'Waiting for the current reply to finish'
-											: 'Approves this step and runs the rest of the plan without asking again'
+											: ''
 									"
 									@click="approveAndRunPending(pa)"
 								>
@@ -15962,6 +15973,12 @@ onUnmounted(() => {
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+.jv-action-runnote {
+	margin: 0 14px 10px;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--text-3);
 }
 .jv-action-discard {
 	margin-left: auto;

@@ -271,6 +271,7 @@ async function approve(mode = "step") {
 				<div v-if="card?.approve_run" class="jv-drun-row">
 					<button
 						class="jv-btn is-run jv-drunbtn"
+						aria-describedby="jv-drun-note"
 						:disabled="state === 'busy' || expired || props.streaming"
 						@click="approve('run')"
 					>
@@ -280,6 +281,10 @@ async function approve(mode = "step") {
 						/>
 						<span v-else>▶ Approve &amp; run</span>
 					</button>
+					<p id="jv-drun-note" class="jv-drun-note">
+						Runs the rest of this request without asking. Delete, cancel and amend
+						still ask.
+					</p>
 				</div>
 			</template>
 		</div>
@@ -383,6 +388,13 @@ async function approve(mode = "step") {
 }
 .jv-drunbtn {
 	width: 100%;
+}
+.jv-drun-note {
+	margin: 8px 0 0;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--ink5);
+	text-align: center;
 }
 .jv-btn.is-run {
 	background: var(--amber-bg);
