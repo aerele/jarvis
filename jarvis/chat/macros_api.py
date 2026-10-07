@@ -517,7 +517,7 @@ def get_new_macro_arming() -> dict:
 # ``_BRAKE`` is in exactly one row of its table, and no other tool is: a test fails
 # when a gated tool is added, or moves, and the notice would no longer say what
 # arming lets through (``test_macro_owner_arming``).
-# Changing a skill asks too, whatever tool does it (``api._writes_a_skill``): the asks
+# Changing a skill asks too, whatever tool does it (``api._writes_skill_config``): the asks
 # row says so, under the one tool that only ever writes a skill.
 _ARM_NOTICE_SKIPS = (
 	(_lt("create, change and submit records"), ("create_doc", "create_docs", "update_doc", "submit_doc")),
@@ -549,6 +549,8 @@ _ARM_NOTICE_SENSITIVE = (
 	("mail", _lt("email set-up")),
 	("access", _lt("user access")),
 	("login", _lt("sign-in settings")),
+	# Skills are named with the tools that still ask, above.
+	("instructions", _lt("learned skills")),
 )
 
 
