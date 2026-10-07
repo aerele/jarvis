@@ -366,8 +366,9 @@ class TestGetSchemaCustomFlags(FrappeTestCase):
 		# Deleting a Custom Field keeps its column and deleting a DocType keeps its
 		# table: both were made here, so both go (they stayed on the test sites).
 		frappe.db.commit()
-		if cls.CF_FIELD in frappe.db.get_table_columns("ToDo"):
-			frappe.db.sql_ddl(f"ALTER TABLE `tabToDo` DROP COLUMN `{cls.CF_FIELD}`")
+		# IF EXISTS, not a get_table_columns check: that list is cached (Frappe 15), and
+		# a stale "it is there" made the DROP fail with 1091 on a fresh CI site.
+		frappe.db.sql_ddl(f"ALTER TABLE `tabToDo` DROP COLUMN IF EXISTS `{cls.CF_FIELD}`")
 		frappe.db.sql_ddl(f"DROP TABLE IF EXISTS `tab{cls.CUSTOM_DT}`")
 		frappe.clear_cache(doctype="ToDo")
 		frappe.db.commit()
