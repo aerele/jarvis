@@ -59,10 +59,27 @@ def _user(email: str, roles: tuple) -> None:
 		frappe.flags.in_import = prev
 
 
-def _drop_user(email: str) -> None:
+def _forget(doctype: str, name: str) -> None:
+	"""Remove the "Deleted" comment Frappe's ``delete_doc`` writes for every record it
+	deletes (``frappe.model.delete_doc.insert_feed``: no reference name, the record is
+	named in the subject). Exactly this record's, never a wider delete."""
+	frappe.db.delete(
+		"Comment",
+		{"comment_type": "Deleted", "reference_doctype": doctype, "subject": f"{doctype} {name}"},
+	)
+
+
+def _contacts_of(email: str) -> list[str]:
+	"""The contacts Frappe made for a user (they can be deleted with the user, or with
+	a Customer the user is a portal user of)."""
+	names = frappe.get_all("Contact", or_filters={"email_id": email, "user": email}, pluck="name")
+	names += frappe.get_all("Contact Email", filters={"email_id": email}, pluck="parent")
+	return sorted(set(names))
+
+
+def _drop_user(email: str, contacts: list[str]) -> None:
 	"""The user and everything Frappe keeps beside one: its rows, the contact made
 	for it, its defaults and the records of its deletion."""
-	contacts = frappe.get_all("Contact", or_filters={"email_id": email, "user": email}, pluck="name")
 	if frappe.db.exists("User", email):
 		frappe.delete_doc("User", email, force=True, ignore_permissions=True)
 	for doctype in ("Has Role", "Block Module", "DefaultValue"):
@@ -70,9 +87,12 @@ def _drop_user(email: str) -> None:
 	for contact in contacts:  # deleting the user may already have deleted its contact
 		frappe.delete_doc("Contact", contact, force=True, ignore_permissions=True, ignore_missing=True)
 		frappe.db.delete("Deleted Document", {"deleted_doctype": "Contact", "deleted_name": contact})
+		_forget("Contact", contact)
 	frappe.db.delete("Notification Settings", {"name": email})
 	frappe.db.delete("Version", {"ref_doctype": "User", "docname": email})
 	frappe.db.delete("Deleted Document", {"deleted_name": email})
+	_forget("User", email)
+	_forget("Notification Settings", email)
 	frappe.clear_cache(user=email)
 
 
@@ -80,6 +100,7 @@ def _drop_scratch() -> None:
 	frappe.delete_doc_if_exists("DocType", SCRATCH, force=True)
 	frappe.db.delete("Deleted Document", {"deleted_doctype": "DocType", "deleted_name": SCRATCH})
 	frappe.db.delete("Version", {"ref_doctype": "DocType", "docname": SCRATCH})
+	_forget("DocType", SCRATCH)
 	frappe.db.sql_ddl(f"DROP TABLE IF EXISTS `tab{SCRATCH}`")
 	frappe.clear_cache(doctype=SCRATCH)
 
@@ -89,6 +110,7 @@ def _drop(doctype: str, filters: dict) -> None:
 		frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
 		frappe.db.delete("Version", {"ref_doctype": doctype, "docname": name})
 		frappe.db.delete("Deleted Document", {"deleted_doctype": doctype, "deleted_name": name})
+		_forget(doctype, name)
 
 
 def _row(doctype: str, parent: str, parenttype: str) -> str:
@@ -286,6 +308,8 @@ class _Base(FrappeTestCase):
 	def _remove_fixtures(cls):
 		frappe.db.rollback()
 		frappe.set_user("Administrator")
+		# Read before anything is deleted: a contact can go with the Customer.
+		contacts = {email: _contacts_of(email) for email in (SM, TGT)}
 		for owner in (SM, TGT):
 			convs = frappe.get_all(CONV, filters={"owner": owner}, pluck="name")
 			if convs:
@@ -307,8 +331,8 @@ class _Base(FrappeTestCase):
 		for doctype in ("Has Role", "DocField", "Contact Phone"):
 			frappe.db.delete(doctype, {"name": ["like", PREFIX + "%"]})
 		_drop_scratch()
-		_drop_user(TGT)
-		_drop_user(SM)
+		_drop_user(TGT, contacts[TGT])
+		_drop_user(SM, contacts[SM])
 		# Whatever those deletes recorded (a user's contact goes with its Customer).
 		frappe.db.delete("Deleted Document", {"data": ["like", f"%{PREFIX}%"]})
 		frappe.db.commit()
