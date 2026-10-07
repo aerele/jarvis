@@ -249,23 +249,41 @@ def _duplicates_ready() -> bool:
 	return frappe.db.has_column(CONV, "filebox_duplicate_of")
 
 
+# A row the File Box is still working: its outcome isn't known, so a re-drop waits on it.
+_IN_FLIGHT = ("processing", "needs_approval", "applying")
+
+
 def _prior_duplicate(fdoc) -> str | None:
-	"""The caller's earlier File Box row for the same file bytes whose draft still
-	stands, or None. Owner-only: a hash match across users would leak that a file exists."""
+	"""The caller's earlier File Box row for the same file bytes that is still being
+	worked (#663) or whose draft still stands (#619), or None. A run that ended
+	without a draft, or whose draft is gone, does not count: dropping the file again
+	is a retry. Owner-only: a hash match across users would leak that a file exists."""
 	if not fdoc.content_hash or not _duplicates_ready():
 		return None
-	rows = frappe.db.sql(
-		"""SELECT c.name, c.filebox_result_doctype AS dt, c.filebox_result_name AS dn
-		FROM `tabJarvis Conversation` c JOIN `tabFile` f ON f.name = c.filebox_source_file
+	me = frappe.session.user
+	names = frappe.db.sql_list(
+		"""SELECT c.name FROM `tabJarvis Conversation` c JOIN `tabFile` f ON f.name = c.filebox_source_file
 		WHERE c.file_box = 1 AND c.owner = %(me)s AND c.status != 'Archived'
 		  AND f.content_hash = %(h)s AND f.name != %(this)s
-		  AND COALESCE(c.filebox_result_name, '') != ''
 		ORDER BY c.creation DESC LIMIT 5""",
-		{"me": frappe.session.user, "h": fdoc.content_hash, "this": fdoc.name},
+		{"me": me, "h": fdoc.content_hash, "this": fdoc.name},
+	)
+	if not names:
+		return None
+	rows = frappe.db.sql(
+		"SELECT t.name, t.status, t.filebox_result_doctype AS dt, t.filebox_result_name AS dn "
+		f"FROM ({_inbound_inner_sql('AND c.name IN %(cands)s')}) t ORDER BY t.creation DESC",
+		{**_ladder_params(me), "cands": tuple(names)},
 		as_dict=True,
 	)
 	for r in rows:
-		if frappe.db.exists("DocType", r.dt) and frappe.db.get_value(r.dt, r.dn, "docstatus") in (0, 1):
+		if r.status in _IN_FLIGHT:
+			return r.name
+		if (
+			r.dn
+			and frappe.db.exists("DocType", r.dt)
+			and frappe.db.get_value(r.dt, r.dn, "docstatus") in (0, 1)
+		):
 			return r.name
 	return None
 
@@ -336,8 +354,8 @@ def drop_file(
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 
-	# The same bytes already made a draft: hold the row as a Duplicate, no run (#619).
-	# Re-run processes it anyway.
+	# The same bytes are still being worked or already made a draft: hold the row as a
+	# Duplicate, no run (#619, #663). Re-run processes it anyway.
 	# A tagged skill asks for a specific pass, so it always runs (K-D2: never silently dropped).
 	prior = None if requested else _prior_duplicate(fdoc)
 	if prior:
@@ -1256,6 +1274,28 @@ def _rerun_claimed(conversation: str, fresh) -> bool:
 	return not frappe.db.exists(MSG, {"conversation": conversation, "role": "user", "creation": [">", at]})
 
 
+def _refuse_rerun_of_duplicate(conversation: str) -> None:
+	"""Re-try on the same file bytes, while an earlier copy is still being worked or its
+	draft stands, keeps the row a Duplicate instead of processing it again (#663). Runs
+	before any write; a pinned skill always runs, as on drop (K-D2)."""
+	fname = frappe.db.get_value(CONV, conversation, "filebox_source_file")
+	fdoc = frappe.db.get_value("File", fname, ["name", "content_hash"], as_dict=True) if fname else None
+	prior = _prior_duplicate(fdoc) if fdoc else None
+	if not prior:
+		return
+	p = frappe.db.get_value(
+		CONV, prior, ["title", "filebox_result_doctype", "filebox_result_name"], as_dict=True
+	)
+	if p.filebox_result_name:
+		what = f"its draft {p.filebox_result_doctype} {p.filebox_result_name} stands"
+		hint = "To process it again, delete or cancel that draft first."
+	else:
+		what, hint = "it is still being worked", "Let that one finish first."
+	frappe.throw(
+		f"Same file as {p.title or 'an earlier file'} and {what}, so this one stays a Duplicate. {hint}"
+	)
+
+
 def _rerun_one(conversation: str) -> dict:
 	"""Re-run ONE File Box file in place. Raises on a hard refusal (not found /
 	not owned / not eligible) - every check runs before any write, so a refusal
@@ -1291,6 +1331,8 @@ def _rerun_one(conversation: str) -> dict:
 	f = _source_file(conversation)
 	if not f:
 		frappe.throw("The original file is no longer available — drop it again")
+	if not requested:
+		_refuse_rerun_of_duplicate(conversation)
 
 	# Claim-first: stamped now, cleared by ``_send_inbound`` once the send's
 	# outcome is known (either branch) - so a double click, racing in before that
