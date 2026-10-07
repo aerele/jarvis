@@ -403,6 +403,15 @@ describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
 		expect(w.text()).toContain("2 models");
 	});
 
+	it("shows the error line, not the placeholder rows, when the first load fails", async () => {
+		api.getLlmConnectionStatus.mockImplementation(() => Promise.reject(new Error("x")));
+		const w = await mountAs({ admin: true });
+		expect(w.text()).toContain("Connection status is unavailable");
+		expect(w.text()).not.toContain("Loading");
+		expect(w.text()).not.toContain("Auto");
+		expect(w.text()).not.toContain("Provider");
+	});
+
 	it("starts its fetches together instead of one after another", async () => {
 		api.getUsage.mockImplementation(PENDING);
 		await mountAs({ admin: true });
