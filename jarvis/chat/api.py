@@ -1089,6 +1089,10 @@ def archive_conversation(conversation: str) -> dict:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis.pending_action.archive_cancel_failed", message=frappe.get_traceback())
 		frappe.db.commit()
+	# Its cards are cancelled above, so nothing is left to end an approved skill run.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.end_skill_autorun_if_open(doc.name)
 	_stop_macro_runs_in([doc.name])
 	return {"ok": True}
 
@@ -3454,6 +3458,12 @@ def retry_message(message: str) -> dict:
 
 	# Bump the conversation's last_active_at so the sidebar surfaces it.
 	frappe.db.set_value(CONV, doc.conversation, "last_active_at", frappe.utils.now())
+
+	# A retry re-runs the whole request, like a new message: an approved skill run
+	# left open on this chat does not cover it.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.end_skill_autorun_if_open(doc.conversation)
 
 	run_id = uuid.uuid4().hex[:12]
 	# Route through the SHARED dispatcher (after-commit publish on Path B,

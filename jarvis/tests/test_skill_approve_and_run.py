@@ -1416,7 +1416,7 @@ class TestSkillAutorunTTL(FrappeTestCase):
 
 	def test_ttl_expired_parks(self):
 		stale = frappe.utils.add_to_date(
-			frappe.utils.now_datetime(), seconds=-(api._SKILL_AUTORUN_TTL_S + 60)
+			frappe.utils.now_datetime(), seconds=-(api._SKILL_AUTORUN_IDLE_S + 60)
 		)
 		conv = _make_conv(TEST_USER)
 		_stamp_autorun(conv, at=stale)
@@ -2237,7 +2237,7 @@ class TestStrandedSkillAutorunReaper(FrappeTestCase):
 		# staleness discriminator is unambiguously satisfied (deterministic, no freeze_time).
 		self._old = frappe.utils.add_to_date(
 			frappe.utils.now_datetime(),
-			seconds=-(session_lifecycle._REAP_AUTORUN_TTL_MULTIPLE * api._SKILL_AUTORUN_TTL_S + 600),
+			seconds=-(session_lifecycle._REAP_AUTORUN_TTL_MULTIPLE * api._SKILL_AUTORUN_IDLE_S + 600),
 		)
 
 	def tearDown(self):
