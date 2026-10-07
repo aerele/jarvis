@@ -12,12 +12,18 @@ export const ASK_RE = /```jarvis-ask[ \t]*\n([\s\S]*?)```/;
 
 // Types that take a typed/picked VALUE rather than option buttons. An ask made
 // only of these renders as a compact mini-form (no numbered badges).
-export const ASK_FIELD_TYPES = ["date", "datetime", "link", "select", "text"];
+export const ASK_FIELD_TYPES = ["date", "datetime", "field", "link", "select", "text"];
+
+// A field question names a DocType and a field; both are interpolated into an
+// API call, so only plain identifiers get through (DocType names may hold
+// spaces, fieldnames may not).
+const DOCTYPE_RE = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
+const FIELDNAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Parse the first ```jarvis-ask block out of a message.
  * @param {string} content raw assistant message text
- * @returns {{questions: Array<{q: string, type: string, options: string[], doctype: string}>}|null}
+ * @returns {{questions: Array<{q: string, type: string, options: string[], doctype: string, fieldname: string}>}|null}
  */
 export function parseAsk(content) {
 	const mt = String(content || "").match(ASK_RE);
@@ -44,10 +50,19 @@ export function parseAsk(content) {
 					type,
 					// yesno may carry exactly 2 custom labels (e.g. ["Approve","Reject"]).
 					options,
-					doctype: type === "link" ? String(q.doctype || q.link || "").trim() : "",
+					doctype:
+						type === "link"
+							? String(q.doctype || q.link || "").trim()
+							: type === "field"
+							? String(q.doctype || "").trim()
+							: "",
+					// only a field question carries a fieldname
+					...(type === "field" ? { fieldname: String(q.fieldname || "").trim() } : {}),
 				};
 			})
 			.filter((q) => {
+				if (q.type === "field")
+					return DOCTYPE_RE.test(q.doctype) && FIELDNAME_RE.test(q.fieldname);
 				if (!q.q) return false;
 				if (q.type === "yesno" || ASK_FIELD_TYPES.includes(q.type)) return true;
 				return q.options.length > 0;

@@ -143,6 +143,45 @@ test("an answered select is ready and is a field type", () => {
 	assert.equal(askAnswerText(spec, { 0: "8471" }, {}), "Here are my answers:\n1. HSN? → 8471");
 });
 
+test("a field question keeps doctype + fieldname and is a field type", () => {
+	const spec = parseAsk(
+		fence('[{"q":"HSN Code","type":"field","doctype":"Item","fieldname":"gst_hsn_code"}]')
+	);
+	assert.equal(spec.questions[0].type, "field");
+	assert.equal(spec.questions[0].doctype, "Item");
+	assert.equal(spec.questions[0].fieldname, "gst_hsn_code");
+	assert.equal(isAskReady(spec, {}, {}), false);
+	assert.equal(isAskReady(spec, { 0: "8471" }, {}), true);
+});
+
+test("a field question may omit q (the card takes the label from meta)", () => {
+	const spec = parseAsk(
+		fence('[{"type":"field","doctype":"Sales Invoice","fieldname":"po_no"}]')
+	);
+	assert.equal(spec.questions.length, 1);
+	assert.equal(spec.questions[0].q, "");
+});
+
+test("a field question missing doctype or fieldname is dropped", () => {
+	assert.equal(parseAsk(fence('[{"q":"x","type":"field","fieldname":"a"}]')), null);
+	assert.equal(parseAsk(fence('[{"q":"x","type":"field","doctype":"Item"}]')), null);
+});
+
+test("a field question with a non-identifier doctype or fieldname is dropped", () => {
+	for (const [doctype, fieldname] of [
+		["Item", "gst hsn"],
+		["Item", "a-b"],
+		["Item", "1abc"],
+		["Item", "a.b"],
+		["Item<script>", "a"],
+		["It/em", "a"],
+		["Item", ""],
+	]) {
+		const raw = JSON.stringify([{ q: "x", type: "field", doctype, fieldname }]);
+		assert.equal(parseAsk(fence(raw)), null, `${doctype} / ${fieldname}`);
+	}
+});
+
 // ---- answer formatting ---------------------------------------------------
 
 test("answers render as a numbered list the agent can read back", () => {
@@ -176,7 +215,14 @@ test("an unanswered question is spelled out, never sent as an empty arrow", () =
 });
 
 test("ASK_FIELD_TYPES is the value-typed set (no option buttons)", () => {
-	assert.deepEqual([...ASK_FIELD_TYPES].sort(), ["date", "datetime", "link", "select", "text"]);
+	assert.deepEqual([...ASK_FIELD_TYPES].sort(), [
+		"date",
+		"datetime",
+		"field",
+		"link",
+		"select",
+		"text",
+	]);
 });
 
 // ---- source fences: one parser, one renderer, two surfaces ---------------
@@ -244,8 +290,8 @@ test("an answered ask stays inert: every control disables on `answered`, not jus
 	const disabledOnAnswered = (askCardSrc.match(/:disabled="answered"/g) || []).length;
 	assert.equal(
 		disabledOnAnswered,
-		8,
-		"yesno + single/multi option buttons, date, datetime, text, select, link and Other inputs must all gate on `answered`"
+		9,
+		"yesno + single/multi option buttons, date, datetime, text, select, number, link and Other inputs must all gate on `answered`"
 	);
 });
 
