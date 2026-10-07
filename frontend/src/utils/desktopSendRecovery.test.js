@@ -271,3 +271,43 @@ test("successful retry consumes its original unchanged one-shot context", async 
 	assert.equal(h.calls[2][4].doctype, undefined);
 	assert.deepEqual(h.errors, []);
 });
+
+for (const scenario of ["original document", "newer document", "Wiki selection"]) {
+	test(`accepted send after navigation preserves only the next chat's context: ${scenario}`, async () => {
+		const h = harness();
+		if (scenario === "Wiki selection") h.s.groundNextTurn.value = true;
+		let finish;
+		h.s.api.sendMessage = async (...args) => {
+			h.calls.push(copy(args));
+			if (h.calls.length === 1)
+				return new Promise((resolve) => {
+					finish = resolve;
+				});
+			return { ok: false, reason: "busy" };
+		};
+		const firstSend = h.f.send();
+		await Promise.resolve();
+		assert.equal(h.calls.length, 1);
+		h.s.currentId.value = "B";
+		h.s.messages.value = [];
+		h.s.groundNextTurn.value = scenario === "Wiki selection";
+		if (scenario === "newer document") h.f.setPrefill({ doctype: "Customer", name: "NEW" });
+		finish({ ok: true, conversation_id: "A", message_id: "M", run_id: "R" });
+		await firstSend;
+		assert.equal(h.s.groundNextTurn.value, scenario === "Wiki selection");
+		h.s.sending.value = false;
+		h.s.waiting.value = false;
+		h.s.input.value = "Question in B";
+		await h.f.send();
+		assert.equal(h.calls[1][0], "B");
+		if (scenario === "newer document") {
+			assert.equal(h.calls[1][4]?.doctype, "Customer");
+			assert.equal(h.calls[1][4]?.name, "NEW");
+		} else {
+			assert.equal(h.calls[1][4]?.doctype, undefined);
+			assert.equal(h.calls[1][4]?.name, undefined);
+		}
+		if (scenario === "Wiki selection") assert.equal(h.calls[1][4].ground_wiki, 1);
+		assert.deepEqual(h.errors, []);
+	});
+}
