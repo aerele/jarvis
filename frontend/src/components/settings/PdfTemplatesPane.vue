@@ -966,6 +966,7 @@ onBeforeUnmount(() => {
 function blankForm() {
 	return {
 		template_key: "",
+		based_on: "",
 		label: "",
 		description: "",
 		accent_color: FALLBACK_SWATCH,
@@ -996,6 +997,7 @@ function toMargin(v) {
 function normalizeFormFromApi(d) {
 	return {
 		template_key: d.template_key || "",
+		based_on: d.based_on || "",
 		label: d.label || "",
 		description: d.description || "",
 		accent_color: d.accent_color || "",
@@ -1078,6 +1080,7 @@ function doDuplicate(t) {
 	form.value = {
 		...blank,
 		template_key: copyKeyFor(t.key),
+		based_on: t.key,
 		label: `${t.label} (copy)`,
 		description: t.description || "",
 		accent_color: t.accent || blank.accent_color,
@@ -1167,6 +1170,9 @@ function payloadFromForm() {
 	// ABSENT, and save_pdf_template rejects a blank key outright either way.
 	const key = (f.template_key || "").trim().toLowerCase();
 	if (key) out.template_key = key;
+	// Create mode: the server refuses an existing key instead of upserting it.
+	if (isCreating.value) out.is_new = 1;
+	if (f.based_on) out.based_on = f.based_on;
 	if (out.use_letterhead_footer) {
 		out.company_letter_heads = (f.company_letter_heads || []).filter(
 			(r) => r.company && r.letter_head
