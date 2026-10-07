@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
@@ -25,7 +25,13 @@ vi.mock("@vueuse/core", async (importOriginal) => {
 });
 
 vi.mock("@/data/session", () => ({ session: { user: "u@x.com" } }));
-vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+// A getter, so a test can give the agent an admin-set name (an XSS probe).
+const brand = vi.hoisted(() => ({ name: "Jarvis" }));
+vi.mock("@/branding", () => ({
+	get agentName() {
+		return brand.name;
+	},
+}));
 
 vi.mock("frappe-ui", () => ({
 	Button: {
@@ -92,6 +98,14 @@ vi.mock("@/api", () => ({
 	retryMessage: vi.fn(async () => ({ ok: true, run_id: "r2" })),
 }));
 
+import {
+	confirmTool,
+	dismissTool,
+	getConversationContext,
+	listPendingConfirmations,
+	retryMessage,
+} from "@/api";
+import { toast } from "frappe-ui";
 import DashboardChatPane from "./DashboardChatPane.vue";
 
 // useJarvisTheme() (AskCard's paletteVars binding) reads the OS color scheme
@@ -117,11 +131,17 @@ function fakeSocket() {
 	};
 }
 
-function mountPane() {
-	const socket = fakeSocket();
+// Every pane a test mounts is unmounted after it, so no timer of one test runs in the next.
+const mounted = [];
+afterEach(() => {
+	while (mounted.length) mounted.pop().unmount();
+});
+
+function mountPane({ socket = fakeSocket() } = {}) {
 	const wrapper = mount(DashboardChatPane, {
 		global: { provide: { $socket: socket } },
 	});
+	mounted.push(wrapper);
 	return { wrapper, socket };
 }
 
@@ -230,7 +250,6 @@ describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	}
 
 	it("sends the cards' tokens in the order shown, like ChatView", async () => {
-		const { listPendingConfirmations } = await import("@/api");
 		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: cards } });
 		api.sendDashboardChat.mockClear();
 		const { wrapper } = mountPane();
@@ -241,7 +260,6 @@ describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	});
 
 	it("drops the card a typed no discarded", async () => {
-		const { listPendingConfirmations } = await import("@/api");
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
 		const { wrapper } = mountPane();
 		await flushPromises();
@@ -255,7 +273,6 @@ describe("DashboardChatPane typed replies to its parked cards (PR-3b)", () => {
 	});
 
 	it("never waits for a run a typed go-ahead did not start", async () => {
-		const { listPendingConfirmations } = await import("@/api");
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
 		const { wrapper } = mountPane();
 		await flushPromises();
@@ -283,8 +300,6 @@ describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
 	const cards = [{ token: "tok1", conversation: "conv1", tool: "update_doc" }];
 
 	it("settles a card as Failed with its specific reason, not the opaque guess", async () => {
-		const { listPendingConfirmations, confirmTool } = await import("@/api");
-		const { toast } = await import("frappe-ui");
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
 		confirmTool.mockResolvedValueOnce({
 			ok: false,
@@ -302,8 +317,6 @@ describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
 	});
 
 	it("keeps a busy card on screen and says so, instead of dropping it", async () => {
-		const { listPendingConfirmations, confirmTool } = await import("@/api");
-		const { toast } = await import("frappe-ui");
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
 		confirmTool.mockResolvedValueOnce({ ok: false, reason_code: "busy" });
 		const { wrapper } = mountPane();
@@ -318,8 +331,6 @@ describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
 	});
 
 	it("dismiss shows the specific reason too", async () => {
-		const { listPendingConfirmations, dismissTool } = await import("@/api");
-		const { toast } = await import("frappe-ui");
 		listPendingConfirmations.mockResolvedValueOnce({ ok: true, data: { pending: cards } });
 		dismissTool.mockResolvedValueOnce({ ok: false, reason_code: "executing" });
 		const { wrapper } = mountPane();
@@ -333,7 +344,7 @@ describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
 });
 
 describe("DashboardChatPane Retry on a failed reply", () => {
-	const EMPTY_REPLY = "\u26a0\ufe0f Agent couldn't generate a response. Please try again.";
+	const EMPTY_REPLY = "⚠️ Agent couldn't generate a response. Please try again.";
 	const failed = (error = EMPTY_REPLY, after = []) => ({
 		conversation: { name: "conv1" },
 		messages: [
@@ -344,23 +355,35 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	});
 	const retryButton = (wrapper) =>
 		wrapper.findAll("button").find((b) => /^Retry/.test(b.text()));
+	const deferred = () => {
+		let resolve, reject;
+		const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
+		return { promise, resolve, reject };
+	};
 
-	async function mountFailed(transcript) {
-		api.getDashboardConversation.mockResolvedValueOnce(transcript);
-		const mounted = mountPane();
+	async function mountFailed(transcript = failed(), options) {
+		api.getDashboardConversation.mockResolvedValue(transcript);
+		const mountedPane = mountPane(options);
 		await flushPromises();
-		return mounted;
+		return mountedPane;
 	}
 
-	beforeEach(async () => {
-		const { retryMessage } = await import("@/api");
+	beforeEach(() => {
 		retryMessage.mockReset();
 		retryMessage.mockResolvedValue({ ok: true, run_id: "r2" });
+		toast.error.mockClear();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		api.getDashboardConversation.mockReset();
+		api.getDashboardConversation.mockResolvedValue({ messages: [] });
+		getConversationContext.mockReset();
+		getConversationContext.mockResolvedValue(null);
+		brand.name = "Jarvis";
 	});
 
 	it("retries an empty reply through the chat retry API", async () => {
-		const { retryMessage } = await import("@/api");
-		const { wrapper } = await mountFailed(failed());
+		const { wrapper } = await mountFailed();
 		expect(wrapper.find(".text-ink-red-4").text()).toContain(
 			"The model sent back an empty reply"
 		);
@@ -372,34 +395,189 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
 	});
 
-	it("is disabled while the retry request is in flight", async () => {
-		const { retryMessage } = await import("@/api");
-		let finish;
-		retryMessage.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
-		const { wrapper } = await mountFailed(failed());
+	it("is disabled while the retry request is in flight, and ignores a second click", async () => {
+		const pending = deferred();
+		retryMessage.mockReturnValueOnce(pending.promise);
+		const { wrapper } = await mountFailed();
 		await retryButton(wrapper).trigger("click");
 		await flushPromises();
 		expect(retryButton(wrapper).text()).toBe("Retrying…");
 		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
-		await retryButton(wrapper).trigger("click");
+		// The function checks too, not only the disabled button.
+		const button = wrapper
+			.findAllComponents({ name: "Button" })
+			.find((b) => /^Retry/.test(b.text()));
+		button.vm.$emit("click");
 		expect(retryMessage).toHaveBeenCalledTimes(1);
-		finish({ ok: true, run_id: "r2" });
+		pending.resolve({ ok: true, run_id: "r2" });
 		await flushPromises();
 	});
 
 	it("shows the refusal and offers Retry again", async () => {
-		const { retryMessage } = await import("@/api");
-		const { toast } = await import("frappe-ui");
 		retryMessage.mockResolvedValueOnce({
 			ok: false,
-			reason: "You can retry only the latest reply.",
+			reason: "Only the latest reply can be retried.",
 		});
-		const { wrapper } = await mountFailed(failed());
+		const { wrapper } = await mountFailed();
 		await retryButton(wrapper).trigger("click");
 		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith("You can retry only the latest reply.");
+		expect(toast.error).toHaveBeenCalledWith("Only the latest reply can be retried.");
 		expect(retryButton(wrapper).text()).toBe("Retry");
 		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("says it could not retry for a refusal code it does not know", async () => {
+		retryMessage.mockResolvedValueOnce({ ok: false, reason: "maintenance" });
+		const { wrapper } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("Couldn&#39;t retry that.");
+	});
+
+	it("escapes the whole refusal message, the agent name too", async () => {
+		brand.name = "<img src=x onerror=1>";
+		retryMessage.mockResolvedValueOnce({ ok: false, reason: "usage_limit" });
+		const { wrapper } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		const [message] = toast.error.mock.calls.at(-1);
+		expect(message).not.toContain("<img");
+		expect(message).toContain("&lt;img src=x onerror=1&gt;");
+	});
+
+	it("shows the error of a retry that throws and offers Retry again", async () => {
+		retryMessage.mockRejectedValueOnce(new Error("Network down"));
+		const { wrapper } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(toast.error).toHaveBeenCalledWith("Network down");
+		expect(retryButton(wrapper).text()).toBe("Retry");
+		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("offers Retry again when the retried run fails too", async () => {
+		const { wrapper, socket } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		socket.fire({
+			kind: "run:error",
+			conversation_id: "conv1",
+			message_id: "m2",
+			code: "empty-reply",
+		});
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+	});
+
+	it("is not left running when the run fails before the retry request returns", async () => {
+		const pending = deferred();
+		retryMessage.mockReturnValueOnce(pending.promise);
+		const { wrapper, socket } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		socket.fire({ kind: "run:error", conversation_id: "conv1", message_id: "m2" });
+		pending.resolve({ ok: true, run_id: "r2" });
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+	});
+
+	it("never ends a run that started while a refused retry was in flight", async () => {
+		const pending = deferred();
+		retryMessage.mockReturnValueOnce(pending.promise);
+		const { wrapper, socket } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		socket.fire({ kind: "run:start", conversation_id: "conv1", run_id: "other" });
+		pending.resolve({
+			ok: false,
+			reason: "A reply is already in progress. Wait for it to finish.",
+		});
+		await flushPromises();
+		expect(retryButton(wrapper).text(), "the other run is still live").toBe("Retrying…");
+	});
+
+	// Production then writes a visible cancelled row (the refetch shows it); this pins
+	// the moment before it: the run state ends at once.
+	it("ends the run when the queued retry is cancelled", async () => {
+		const { wrapper, socket } = await mountFailed();
+		await retryButton(wrapper).trigger("click");
+		await flushPromises();
+		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "other" });
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "r2" });
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+	});
+
+	// Fake timers: flushPromises would wait on a faked timer, so time is advanced instead.
+	async function mountWithFakeTimers(options) {
+		vi.useFakeTimers();
+		api.getDashboardConversation.mockResolvedValue(failed());
+		const mountedPane = mountPane(options);
+		await vi.advanceTimersByTimeAsync(10);
+		return mountedPane;
+	}
+
+	it("reads the transcript again when an accepted retry never starts", async () => {
+		const { wrapper } = await mountWithFakeTimers();
+		await retryButton(wrapper).trigger("click");
+		await vi.advanceTimersByTimeAsync(10);
+		api.getDashboardConversation.mockClear();
+		await vi.advanceTimersByTimeAsync(89000);
+		expect(api.getDashboardConversation).not.toHaveBeenCalled();
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		await vi.advanceTimersByTimeAsync(1500);
+		expect(api.getDashboardConversation).toHaveBeenCalled();
+		expect(retryButton(wrapper).text(), "no live run in the transcript").toBe("Retry");
+	});
+
+	it("keeps waiting when a frame shows the retried turn is alive, or it is queued", async () => {
+		for (const [label, response, frame] of [
+			["a frame", { ok: true, run_id: "r2" }, { kind: "queue:position", position: 1 }],
+			["queued", { ok: true, run_id: "r2", queued: true }, null],
+		]) {
+			retryMessage.mockResolvedValueOnce(response);
+			const { wrapper, socket } = await mountWithFakeTimers();
+			await retryButton(wrapper).trigger("click");
+			await vi.advanceTimersByTimeAsync(10);
+			if (frame) socket.fire({ ...frame, conversation_id: "conv1" });
+			await vi.advanceTimersByTimeAsync(95000);
+			expect(retryButton(wrapper).text(), label).toBe("Retrying…");
+		}
+	});
+
+	it("is disabled while the chat is compacting", async () => {
+		getConversationContext.mockResolvedValue({ fresh: true, compacting: true });
+		const { wrapper } = await mountFailed();
+		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+
+	it("refetches the chat after a refusal, so a stale Retry goes away", async () => {
+		retryMessage.mockResolvedValueOnce({
+			ok: false,
+			reason: "Only the latest reply can be retried.",
+		});
+		const { wrapper } = await mountWithFakeTimers();
+		api.getDashboardConversation.mockClear();
+		await retryButton(wrapper).trigger("click");
+		await vi.advanceTimersByTimeAsync(310);
+		expect(api.getDashboardConversation).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves a chat the user has since left alone, after a refusal or an error", async () => {
+		for (const settle of [
+			(p) => p.resolve({ ok: false, reason: "Only the latest reply can be retried." }),
+			(p) => p.reject(new Error("Network down")),
+		]) {
+			toast.error.mockClear();
+			const pending = deferred();
+			retryMessage.mockReturnValueOnce(pending.promise);
+			const { wrapper } = await mountFailed();
+			await retryButton(wrapper).trigger("click");
+			wrapper.vm.resetChat();
+			settle(pending);
+			await flushPromises();
+			expect(toast.error).not.toHaveBeenCalled();
+		}
 	});
 
 	it("offers no Retry for a cause a retry cannot fix", async () => {
@@ -413,96 +591,6 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 			failed(EMPTY_REPLY, [{ name: "m3", role: "user", content: "Try a bar chart" }])
 		);
 		expect(retryButton(wrapper)).toBeUndefined();
-	});
-
-	it("shows the error of a retry that throws and offers Retry again", async () => {
-		const { retryMessage } = await import("@/api");
-		const { toast } = await import("frappe-ui");
-		toast.error.mockClear();
-		retryMessage.mockRejectedValueOnce(new Error("Network down"));
-		const { wrapper } = await mountFailed(failed());
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith("Network down");
-		expect(retryButton(wrapper).text()).toBe("Retry");
-		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
-	});
-
-	it("offers Retry again when the retried run fails too", async () => {
-		api.getDashboardConversation.mockResolvedValue(failed());
-		const { wrapper, socket } = mountPane();
-		await flushPromises();
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
-		socket.fire({
-			kind: "run:error",
-			conversation_id: "conv1",
-			message_id: "m2",
-			code: "empty-reply",
-		});
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retry");
-		api.getDashboardConversation.mockResolvedValue({ messages: [] });
-	});
-
-	it("is not left running when the run fails before the retry request returns", async () => {
-		const { retryMessage } = await import("@/api");
-		let finish;
-		retryMessage.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
-		const { wrapper, socket } = await mountFailed(failed());
-		await retryButton(wrapper).trigger("click");
-		socket.fire({ kind: "run:error", conversation_id: "conv1", message_id: "m2" });
-		finish({ ok: true, run_id: "r2" });
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retry");
-	});
-
-	it("offers Retry again when the queued retry is cancelled", async () => {
-		const { wrapper, socket } = await mountFailed(failed());
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "other" });
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
-		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "r2" });
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retry");
-	});
-
-	it("is disabled while the chat is compacting", async () => {
-		const { getConversationContext } = await import("@/api");
-		getConversationContext.mockResolvedValueOnce({ fresh: true, compacting: true });
-		const { wrapper } = await mountFailed(failed());
-		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
-	});
-
-	it("refetches the chat after a refusal, so a stale Retry goes away", async () => {
-		const { retryMessage } = await import("@/api");
-		retryMessage.mockResolvedValueOnce({
-			ok: false,
-			reason: "Only the latest reply can be retried.",
-		});
-		const { wrapper } = await mountFailed(failed());
-		// Let the refetches that earlier tests scheduled run first.
-		await new Promise((r) => setTimeout(r, 350));
-		api.getDashboardConversation.mockClear();
-		await retryButton(wrapper).trigger("click");
-		await new Promise((r) => setTimeout(r, 350));
-		expect(api.getDashboardConversation).toHaveBeenCalledTimes(1);
-	});
-
-	it("leaves a chat the user has since left alone", async () => {
-		const { retryMessage } = await import("@/api");
-		const { toast } = await import("frappe-ui");
-		toast.error.mockClear();
-		let finish;
-		retryMessage.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
-		const { wrapper } = await mountFailed(failed());
-		await retryButton(wrapper).trigger("click");
-		wrapper.vm.resetChat();
-		finish({ ok: false, reason: "Only the latest reply can be retried." });
-		await flushPromises();
-		expect(toast.error).not.toHaveBeenCalled();
 	});
 
 	it("offers no Retry when a blank reply the server counts follows the error", async () => {
@@ -522,55 +610,66 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		const { wrapper } = await mountFailed(failed(EMPTY_REPLY, [closing]));
 		expect(retryButton(wrapper).text()).toBe("Retry this step");
 	});
+
+	// The ladder ends the run only on a settled reply, and the transcript's run state is
+	// not applied while the retry is pending: the failed reply it replaces is not one.
+	it("without a socket, waits for a reply newer than the retried error", async () => {
+		const transcript = failed();
+		const { wrapper } = await mountWithFakeTimers({ socket: null });
+		await retryButton(wrapper).trigger("click");
+		await vi.advanceTimersByTimeAsync(3100);
+		expect(wrapper.emitted("activity")).toBeUndefined();
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		api.getDashboardConversation.mockResolvedValue({
+			...transcript,
+			messages: [
+				...transcript.messages,
+				{ name: "m3", role: "assistant", content: "Done." },
+			],
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(wrapper.emitted("activity")).toBeDefined();
+	});
 });
 
-describe("DashboardChatPane run state", () => {
-	it("shows the run as started after a send", async () => {
-		const { wrapper } = mountPane();
-		await flushPromises();
-		const box = wrapper.find("textarea");
-		await box.setValue("Monthly sales");
-		await box.trigger("keydown", { key: "Enter" });
-		await flushPromises();
-		expect(wrapper.find('[aria-live="polite"]').exists()).toBe(true);
+describe("DashboardChatPane send", () => {
+	afterEach(() => {
+		brand.name = "Jarvis";
+		api.sendDashboardChat.mockReset();
+		api.sendDashboardChat.mockResolvedValue({ ok: true, conversation_id: "conv1" });
 	});
 
-	// The ladder ends the run (emits activity) only on a settled reply; after a retry
-	// the failed reply it replaces is not one.
-	it("without a socket, waits for a reply newer than the retried error", async () => {
-		vi.useFakeTimers();
-		try {
-			const transcript = {
-				conversation: { name: "conv1" },
-				messages: [
-					{ name: "m1", role: "user", content: "Build me a dashboard" },
-					{
-						name: "m2",
-						role: "assistant",
-						content: "",
-						error: "Agent couldn't generate a response.",
-					},
-				],
-			};
-			api.getDashboardConversation.mockResolvedValue(transcript);
-			const wrapper = mount(DashboardChatPane, { global: { provide: { $socket: null } } });
-			await vi.advanceTimersByTimeAsync(10);
-			const retry = () => wrapper.findAll("button").find((b) => /^Retry/.test(b.text()));
-			await retry().trigger("click");
-			await vi.advanceTimersByTimeAsync(3100);
-			expect(wrapper.emitted("activity")).toBeUndefined();
-			api.getDashboardConversation.mockResolvedValue({
-				...transcript,
-				messages: [
-					...transcript.messages,
-					{ name: "m3", role: "assistant", content: "Done." },
-				],
-			});
-			await vi.advanceTimersByTimeAsync(5000);
-			expect(wrapper.emitted("activity")).toBeDefined();
-		} finally {
-			api.getDashboardConversation.mockResolvedValue({ messages: [] });
-			vi.useRealTimers();
-		}
+	async function send(wrapper, text = "Monthly sales") {
+		const box = wrapper.find("textarea");
+		await box.setValue(text);
+		await box.trigger("keydown", { key: "Enter" });
+		await flushPromises();
+	}
+
+	it("shows the run as started, and ends it when its queued turn is cancelled", async () => {
+		api.sendDashboardChat.mockResolvedValueOnce({
+			ok: true,
+			conversation_id: "conv1",
+			run_id: "s1",
+		});
+		const { wrapper, socket } = mountPane();
+		await flushPromises();
+		await send(wrapper);
+		expect(wrapper.find('[aria-live="polite"]').exists()).toBe(true);
+		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "s1" });
+		await flushPromises();
+		expect(wrapper.find('[aria-live="polite"]').exists()).toBe(false);
+	});
+
+	it("escapes the whole refusal message, the agent name too", async () => {
+		brand.name = "<img src=x onerror=1>";
+		toast.error.mockClear();
+		api.sendDashboardChat.mockResolvedValueOnce({ ok: false, reason: "usage_limit" });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		await send(wrapper);
+		const [message] = toast.error.mock.calls.at(-1);
+		expect(message).not.toContain("<img");
+		expect(message).toContain("&lt;img src=x onerror=1&gt;");
 	});
 });
