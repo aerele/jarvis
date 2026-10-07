@@ -126,7 +126,7 @@ _ARG_SENSITIVE = {
 	"MCP OAuth Token": "login",
 }
 
-# Skills and learned rules: what later chats are told to do, and who is told it.
+# Skills and learned skills: what later chats are told to do, and who is told it.
 # Sensitive in the argument layer like the rest of Jarvis's own configuration above
 # (the learning engine, promotion and the skill tools write these as their job).
 # ``api._writes_skill_config`` also cards any other write that names one.
@@ -743,6 +743,11 @@ def uncarded_write() -> bool:
 	return bool(state is not None and state.brake)
 
 
+def in_guarded_call() -> bool:
+	"""Whether a guard scope is open: a tool call, or a job one queued."""
+	return getattr(frappe.local, _LOCAL, None) is not None
+
+
 def take_refusal() -> WriteRefusedError | None:
 	"""The refusal the ORM guard raised since the last call, cleared. A caller
 	checks it after a tool returns: a method that swallowed the guard's exception
@@ -1316,6 +1321,7 @@ __all__ = [
 	"guard_doc_event",
 	"guard_queue",
 	"guard_scope",
+	"in_guarded_call",
 	"is_implicit_commit",
 	"log_line",
 	"nested_under",
