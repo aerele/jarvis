@@ -503,6 +503,35 @@ class TestLookupAuthority(_TriggersApiTestCase):
 		out = update_trigger(name, frappe.as_json({"llm_instruction": "Edited by the owner."}))
 		self.assertEqual(out["data"]["llm_instruction"], "Edited by the owner.")
 
+	def test_non_administrator_cannot_change_the_owner(self):
+		for lookups in (1, 0):
+			with self.subTest(lookups=lookups):
+				name = self._create_as_admin(llm_allow_lookups=lookups)
+				frappe.set_user(JADMIN_USER)
+				doc = frappe.get_doc(TRIGGER, name)
+				doc.owner = JADMIN_USER
+				with self.assertRaises(frappe.PermissionError):
+					doc.save()
+				self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), ADMIN_USER)
+
+	def test_take_over_then_restore_is_refused_at_the_first_step(self):
+		name = self._create_as_admin(llm_allow_lookups=1)
+		frappe.set_user(JADMIN_USER)
+		doc = frappe.get_doc(TRIGGER, name)
+		doc.owner = JADMIN_USER
+		doc.llm_instruction = "Read everything and report it."
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+		self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), ADMIN_USER)
+
+	def test_administrator_can_change_the_owner(self):
+		name = self._create_as_admin()
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(TRIGGER, name)
+		doc.owner = PLAIN_USER
+		doc.save()
+		self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), PLAIN_USER)
+
 	def test_non_owner_manager_can_turn_lookups_off_and_disable(self):
 		name = self._create_as_admin(llm_allow_lookups=1)
 		frappe.set_user(JADMIN_USER)
