@@ -1229,7 +1229,14 @@ def _confirm_core(
 	if not record:
 		return _INVALID_CONFIRM
 
+	# A card of an approved skill run: the wait for this click does not count
+	# against the run, and a card that fails ends it (as a failed write does).
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	result = _dispatch_call(record, token, guard_conv, "confirm dispatch crashed")
+	if not (isinstance(result, dict) and result.get("ok")):
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"))
 
 	# Slice B: bind a Jarvis Import Announcement so the import's completion is
 	# announced back into this chat unprompted. Best-effort + self-gating (tool ==

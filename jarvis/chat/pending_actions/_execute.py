@@ -496,6 +496,12 @@ def _claim_and_run(
 			frappe.log_error(title="jarvis.pending_action.arm_claimed_failed", message=frappe.get_traceback())
 			frappe.db.commit()
 
+	if row.kind == "chat":
+		# A card of an approved skill run: the wait for this click does not count
+		# against the run (outside the row lock; the claim is committed).
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.keep_skill_autorun_open(row.conversation)
 	args = call.get("args") or {}
 	with ExitStack() as stamped:
 		if structure is not None:
@@ -506,6 +512,11 @@ def _claim_and_run(
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
 	ok = not crash_tb and api.envelope_ok(row.tool, result)
+	if not ok and row.kind == "chat":
+		# ...and a card that fails ends the run, as a failed write does.
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation)
 	status = EXECUTED if ok else FAILED
 	lock_lost = structure is not None and not _still_locked(name, structure)
 	note = _clean_up_structure(name, structure) if structure is not None and not ok else None
