@@ -31,7 +31,8 @@ export const CSP_META =
 //                              DOMContentLoaded too).
 //   jarvis.renderError(el,e) → quiet inline per-widget error block.
 // Frames OUT: {jarvis:1, v:1, type:"data"|"ready"|"height"|"export:progress"
-//   |"export:result", ...}
+//   |"export:result"|"link", ...}  ("link" = {href}: a clicked <a href>, which
+//   the sandbox cannot navigate itself; the parent decides whether to open it)
 // Frames IN (validated e.source === window.parent && d.jarvis === 1):
 //   {type:"data:result", id, ok, rows|error} · {type:"theme", dark} ·
 //   {type:"export", id, format:"png"|"slides", lib, pixelRatio}
@@ -229,6 +230,19 @@ export const RUNTIME_JS = `(function () {
 			});
 		}
 	}
+
+	// The sandbox has no allow-popups/allow-top-navigation, so an <a href> can
+	// never open anything from in here. Hand the raw href to the parent instead.
+	document.addEventListener(
+		"click",
+		function (e) {
+			var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
+			if (!a) return;
+			e.preventDefault();
+			post({ type: "link", href: a.getAttribute("href") });
+		},
+		true
+	);
 
 	window.addEventListener("message", function (e) {
 		if (e.source !== window.parent) return;
