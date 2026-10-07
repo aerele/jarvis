@@ -292,6 +292,22 @@ class TestRunReportPrepared(FrappeTestCase):
 		with patch.object(_prepared_reports, "get_report_filters", side_effect=frappe.PermissionError):
 			self.assertEqual(_prepared_reports._report_defaults(PREP_REPORT), {})
 
+	def test_each_answer_names_its_run(self):
+		with patch(_ENQUEUE):
+			started = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		self.assertEqual(
+			started["run"], frappe.db.get_value("Prepared Report", {"report_name": PREP_REPORT}, "name")
+		)
+		self.assertEqual(
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})["run"], started["run"]
+		)
+		frappe.db.set_value("Prepared Report", started["run"], "status", "Error")
+		self.assertEqual(
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})["run"], started["run"]
+		)
+		with _completed([{"name": "D"}], filters={"company": "Other"}) as dn:
+			self.assertEqual(run_report(report_name=PREP_REPORT, filters={"company": "Other"})["run"], dn)
+
 	def test_a_different_filter_value_is_not_reused(self):
 		with _completed([{"name": "D"}], filters={"company": "Acme"}), patch(_ENQUEUE):
 			env = run_report(report_name=PREP_REPORT, filters={"company": "Other"})

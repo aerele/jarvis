@@ -380,7 +380,10 @@ def list_approvals_page(
 	# never create rows, so the board derives them. First page only — the
 	# lane sits above the rail and pagination never re-renders it.
 	if start == 0:
+		from jarvis.chat.report_runs import ready_reports
+
 		out["awaiting_reply"] = _awaiting_reply(me)
+		out["ready_reports"] = ready_reports(me)
 	return out
 
 

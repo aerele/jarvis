@@ -1926,6 +1926,13 @@
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
 					/>
+					<!-- background reports this chat started, until their results are shown -->
+					<ReportRunCards
+						v-if="reportRuns.length"
+						:items="reportRuns"
+						:busy="busy || convStreaming"
+						@show="showReportResults"
+					/>
 
 					<!-- T5b (design canvas rules 1-2): the goto-morph line, the artifact
 					     activity card, the generic tool/step line and the recovering
@@ -4263,6 +4270,7 @@ import FilePreview from "@/components/FilePreview.vue";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
 import AnnouncementBanner from "@/components/chat/AnnouncementBanner.vue";
@@ -8913,6 +8921,40 @@ function _checkPulseOnce(id) {
 // (a run's end reloads the chat, which is when a new question appears).
 const fileboxWaits = ref([]);
 const fileboxWaitBusy = ref("");
+// Background reports this chat started: a card each until Jarvis shows the results.
+// Re-read on every load, on Frappe's report_generated event, and every 15s while one
+// is still preparing (an errored run sends no event).
+const reportRuns = ref([]);
+const REPORT_POLL_MS = 15000;
+let _reportPoll = null;
+async function refreshReportRuns(id) {
+	if (!id) {
+		reportRuns.value = [];
+		return;
+	}
+	try {
+		const r = await api.chatReportRuns(id);
+		if (currentId.value === id) reportRuns.value = (r && r.items) || [];
+	} catch (e) {
+		// best-effort: asking Jarvis still finds the report
+	}
+}
+watch(
+	() => reportRuns.value.some((r) => r.status === "preparing"),
+	(preparing) => {
+		clearInterval(_reportPoll);
+		_reportPoll = preparing
+			? setInterval(() => refreshReportRuns(currentId.value), REPORT_POLL_MS)
+			: null;
+	}
+);
+function onReportGenerated() {
+	if (reportRuns.value.some((r) => r.status === "preparing")) refreshReportRuns(currentId.value);
+}
+function showReportResults(item) {
+	if (busy.value || convStreaming.value) return;
+	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
+}
 async function refreshFileboxWaits(id, isFileBox) {
 	if (!id || !isFileBox) {
 		fileboxWaits.value = [];
@@ -8959,6 +9001,7 @@ async function loadConversation(id) {
 		resetAutoModeFor(true);
 		messages.value = [];
 		fileboxWaits.value = [];
+		reportRuns.value = [];
 		originPage.value = "";
 		originOf.value = "";
 		modelOverride.value = "";
@@ -9040,6 +9083,7 @@ async function loadConversation(id) {
 	// tab / reconnect all lose the client-only chip otherwise).
 	resyncQueuedTurn(id);
 	refreshFileboxWaits(id, d?.conversation?.file_box);
+	refreshReportRuns(id);
 	// Seed Up/Down recall from THIS conversation's past prompts. Without this,
 	// promptHistory only held prompts typed in the current page session, so
 	// after a reload or when opening an existing chat the arrows did nothing.
@@ -12003,6 +12047,7 @@ onMounted(async () => {
 	socket?.on("jarvis:event", onEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
+	socket?.on("report_generated", onReportGenerated);
 	document.addEventListener("visibilitychange", onVisibility);
 	// Auto-heal (layered design, phase 1): window `focus` closes the gap visibility
 	// misses (OS focus returning to an already-visible tab, e.g. multi-monitor). Routes
@@ -12213,6 +12258,8 @@ onBeforeUnmount(() => {
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
+	socket?.off("report_generated", onReportGenerated);
+	clearInterval(_reportPoll);
 	unwatchSubscriptionNotice();
 	document.removeEventListener("visibilitychange", onVisibility);
 	window.removeEventListener("focus", onResync);
