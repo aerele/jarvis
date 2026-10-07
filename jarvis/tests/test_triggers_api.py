@@ -510,7 +510,8 @@ class TestLookupAuthority(_TriggersApiTestCase):
 				frappe.set_user(JADMIN_USER)
 				doc = frappe.get_doc(TRIGGER, name)
 				doc.owner = JADMIN_USER
-				with self.assertRaises(frappe.PermissionError):
+				# our guard fires first; Frappe's own constant check is the backstop
+				with self.assertRaises((frappe.PermissionError, frappe.CannotChangeConstantError)):
 					doc.save()
 				self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), ADMIN_USER)
 
@@ -520,17 +521,19 @@ class TestLookupAuthority(_TriggersApiTestCase):
 		doc = frappe.get_doc(TRIGGER, name)
 		doc.owner = JADMIN_USER
 		doc.llm_instruction = "Read everything and report it."
-		with self.assertRaises(frappe.PermissionError):
+		with self.assertRaises((frappe.PermissionError, frappe.CannotChangeConstantError)):
 			doc.save()
 		self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), ADMIN_USER)
 
-	def test_administrator_can_change_the_owner(self):
+	def test_administrator_cannot_change_the_owner_through_save_either(self):
+		# Frappe itself treats owner as a constant on save, for every user.
 		name = self._create_as_admin()
 		frappe.set_user("Administrator")
 		doc = frappe.get_doc(TRIGGER, name)
 		doc.owner = PLAIN_USER
-		doc.save()
-		self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), PLAIN_USER)
+		with self.assertRaises(frappe.CannotChangeConstantError):
+			doc.save()
+		self.assertEqual(frappe.db.get_value(TRIGGER, name, "owner"), ADMIN_USER)
 
 	def test_non_owner_manager_can_turn_lookups_off_and_disable(self):
 		name = self._create_as_admin(llm_allow_lookups=1)

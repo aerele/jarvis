@@ -106,8 +106,10 @@ class JarvisTrigger(NotRenamable, Document):
 		self._guard_lookup_authority()
 
 	def _guard_owner_immutable(self):
-		"""``owner`` decides whose permissions lookups read with, and a REST
-		update or ``set_value`` would otherwise let any manager rewrite it. Only
+		"""``owner`` decides whose permissions lookups read with. Frappe already
+		treats ``owner`` as a constant on save (CannotChangeConstantError, for
+		every user); this guard is defense in depth for paths that bypass that
+		check, and gives non-Administrators a clearer message. Only
 		Administrator may change it after insert."""
 		before = None if self.is_new() else self.get_doc_before_save()
 		if before and before.owner != self.owner and frappe.session.user != "Administrator":
