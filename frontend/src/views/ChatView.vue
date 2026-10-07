@@ -3747,7 +3747,11 @@
 									{{ sh.name }}
 								</button>
 							</div>
-							<SheetCharts :charts="curCharts" :dark="effectiveDark" />
+							<SheetCharts
+								:charts="curCharts"
+								:sheet-name="curSheet.name"
+								:dark="effectiveDark"
+							/>
 							<div class="jv-sheet-scroll">
 								<table class="jv-sheet">
 									<thead v-if="curSheet.rows.length">
@@ -8409,7 +8413,13 @@ const curSheet = computed(() => {
 // charts the backend read from the xlsx, for the sheet on screen
 const curCharts = computed(() => {
 	const a = artifact.value;
-	return a?.kind === "table" ? chartsForSheet(a.charts, curSheet.value.name) : [];
+	return a?.kind === "table"
+		? chartsForSheet(
+				a.charts,
+				curSheet.value.name,
+				a.sheets.map((s) => s.name)
+		  )
+		: [];
 });
 function closeArtifact() {
 	artifact.value = null;

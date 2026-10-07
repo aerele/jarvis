@@ -67,7 +67,11 @@
 							@click="sheetIdx = si"
 						/>
 					</div>
-					<SheetCharts :charts="curCharts" :dark="effectiveDark" />
+					<SheetCharts
+						:charts="curCharts"
+						:sheet-name="curSheet.name"
+						:dark="effectiveDark"
+					/>
 					<div class="max-h-[65vh] overflow-auto">
 						<table class="w-full border-collapse text-sm">
 							<thead
@@ -179,7 +183,13 @@ const curSheet = computed(() => {
 // charts the backend read from the xlsx, for the sheet on screen (jarvis-chart
 // specs, so the chat's JvChart renders them; its own title is drawn by the chart)
 const curCharts = computed(() =>
-	view.value.kind === "table" ? chartsForSheet(view.value.charts, curSheet.value.name) : []
+	view.value.kind === "table"
+		? chartsForSheet(
+				view.value.charts,
+				curSheet.value.name,
+				view.value.sheets.map((s) => s.name)
+		  )
+		: []
 );
 const { effectiveDark } = useJarvisTheme();
 
