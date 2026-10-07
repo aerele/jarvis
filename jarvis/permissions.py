@@ -57,7 +57,8 @@ JARVIS_ADMIN_ROLES = ("System Manager", JARVIS_ADMIN_ROLE)
 # imports) so the Jarvis Custom Skill controller / skill_permissions can import it
 # without pulling in the learned_api import graph. Keep in sync with
 # jarvis.chat.learned_api._REVIEWER_ROLES.
-JARVIS_REVIEWER_ROLES = ("Jarvis Skill Reviewer", "Jarvis Admin", "System Manager")
+JARVIS_SKILL_REVIEWER_ROLE = "Jarvis Skill Reviewer"
+JARVIS_REVIEWER_ROLES = (JARVIS_SKILL_REVIEWER_ROLE, "Jarvis Admin", "System Manager")
 
 
 def is_skill_reviewer(user: str | None = None) -> bool:
