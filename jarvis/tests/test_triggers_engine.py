@@ -629,7 +629,8 @@ class TestRunLLMAction(_TriggerTestCase):
 # LLM action job with read-only lookups (jarvis-admin-v2#608)
 # --------------------------------------------------------------------------- #
 class TestRunLLMActionLookups(_TriggerTestCase):
-	LOOKUP = {"lookup": {"tool": "list", "args": {"doctype": "ToDo", "filters": {"status": "Open"}}}}
+	# Customer (ERPNext) is outside the frappe/jarvis apps, so the REAL app rule lets it through.
+	LOOKUP = {"lookup": {"tool": "list", "args": {"doctype": "Customer"}}}
 
 	def _run(self, trig):
 		llm_action.run_llm_action(
@@ -685,7 +686,7 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 
 		def fake_get_list(doctype, **kwargs):
 			seen.append(frappe.session.user)
-			return [{"name": "TODO-SECRET-ROW"}]
+			return [{"name": "CUST-SECRET-ROW"}]
 
 		with (
 			patch(LLM_TASK_COMPLETE, side_effect=[self.LOOKUP, {"finding": "One open todo."}]) as task,
@@ -696,13 +697,13 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 		self.assertEqual(frappe.session.user, "Administrator")
 		self.assertEqual(task.call_count, 2)
 		self.assertTrue(task.call_args_list[0].kwargs["expect_object"])
-		self.assertIn("TODO-SECRET-ROW", task.call_args_list[1].args[1])
+		self.assertIn("CUST-SECRET-ROW", task.call_args_list[1].args[1])
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "One open todo."))
 		self.assertIn("Rounds: 2", rows[0].detail)
-		self.assertIn("list ToDo: 1 row", rows[0].detail)
-		self.assertNotIn("TODO-SECRET-ROW", rows[0].detail)
+		self.assertIn("list Customer: 1 row", rows[0].detail)
+		self.assertNotIn("CUST-SECRET-ROW", rows[0].detail)
 
 	def test_permission_refusal_is_fed_back_and_the_finding_still_lands(self):
 		from jarvis.exceptions import PermissionDeniedError
@@ -712,28 +713,53 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 			patch(LLM_TASK_COMPLETE, side_effect=[self.LOOKUP, {"finding": "Could not check."}]) as task,
 			patch(
 				"jarvis.tools.get_list.get_list",
-				side_effect=PermissionDeniedError("no read permission on ToDo"),
+				side_effect=PermissionDeniedError("no read permission on Customer"),
 			),
 		):
 			self._run(trig)  # must not raise
-		self.assertIn("no read permission on ToDo", task.call_args_list[1].args[1])
+		self.assertIn("no read permission on Customer", task.call_args_list[1].args[1])
 		rows = self._activities(trig.name)
 		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "Could not check."))
-		self.assertIn("refused: no read permission on ToDo", rows[0].detail)
+		self.assertIn("refused: no read permission on Customer", rows[0].detail)
 
 	def test_owner_without_read_permission_gets_a_refusal_from_the_real_tool(self):
-		# Error Log is System Manager only: the throwaway owner cannot read it, and
+		# A role-less owner cannot read Journal Entry, and
 		# get_list is NOT patched, so this exercises the real permission check.
 		trig = self._make_llm_trigger(lookups=1)
 		self._owned_by_new_user(trig)
-		lookup = {"lookup": {"tool": "list", "args": {"doctype": "Error Log"}}}
+		lookup = {"lookup": {"tool": "list", "args": {"doctype": "Journal Entry"}}}
 		with patch(LLM_TASK_COMPLETE, side_effect=[lookup, {"finding": "No access."}]) as task:
 			self._run(trig)
-		self.assertIn("no read permission on Error Log", task.call_args_list[1].args[1])
+		self.assertIn("no read permission on Journal Entry", task.call_args_list[1].args[1])
 		rows = self._activities(trig.name)
 		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "No access."))
-		self.assertIn("refused: no read permission on Error Log", rows[0].detail)
+		self.assertIn("refused: no read permission on Journal Entry", rows[0].detail)
 		self.assertEqual(frappe.session.user, "Administrator")
+
+	def test_a_long_reply_cannot_push_the_marker_out_of_detail(self):
+		from jarvis.triggers import lookups
+
+		trig = self._make_llm_trigger(lookups=1)
+		owner = self._owned_by_new_user(trig)
+		long_reply = "x" * (engine._DETAIL_CHAR_CAP + 500)
+		with patch(LLM_TASK_COMPLETE, return_value={"finding": long_reply}):
+			self._run(trig)
+		detail = self._activities(trig.name)[0].detail
+		self.assertTrue(detail.startswith(lookups.lookup_marker(owner)))
+		self.assertEqual(len(detail), engine._DETAIL_CHAR_CAP)
+
+	def test_framework_doctype_is_refused_by_the_app_rule_end_to_end(self):
+		trig = self._make_llm_trigger(lookups=1)
+		self._owned_by_new_user(trig)
+		lookup = {"lookup": {"tool": "list", "args": {"doctype": "ToDo"}}}
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=[lookup, {"finding": "Refused."}]) as task,
+			patch("jarvis.tools.get_list.get_list") as read,
+		):
+			self._run(trig)
+		read.assert_not_called()
+		self.assertIn("ToDo cannot be looked up", task.call_args_list[1].args[1])
+		self.assertEqual(self._activities(trig.name)[0].status, "Success")
 
 	def test_gateway_error_after_a_lookup_writes_a_failed_row_with_the_lookup_note(self):
 		from jarvis.triggers import lookups
@@ -750,7 +776,7 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 		self.assertEqual(rows[0].status, "Failed")
 		self.assertIn("timed out", rows[0].summary)
 		self.assertIn(lookups.LOOKUP_MARKER, rows[0].detail)
-		self.assertIn("list ToDo: 1 row", rows[0].detail)
+		self.assertIn("list Customer: 1 row", rows[0].detail)
 
 	def test_out_of_time_writes_a_failed_row_without_raising(self):
 		from jarvis.triggers import lookups
