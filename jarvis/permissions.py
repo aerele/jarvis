@@ -368,13 +368,14 @@ def refuse_in_tool_dispatch() -> None:
 def refuse_unseen_change(doc) -> None:
 	"""Refuse a save or a delete of ``doc`` made by a write nobody was shown.
 
-	For records whose every change a person confirms (skills and learned rules: what
+	For records whose every change a person confirms (skills and learned skills: what
 	they say is what later chats do). The gate parks a call that names one
 	(``api._writes_skill_config``); this refuses a change it could not read from the
 	arguments: a document method, an import, a hook, a queued job."""
 	from jarvis.tools import _write_risk
 
 	if _write_risk.uncarded_write():
+		_write_risk.log_line("instructions", doc.doctype, doc.name, "refused", event="unseen")
 		frappe.throw(
 			frappe._(
 				"A change to {0} always asks for confirmation, so a run that is not asking cannot make it."

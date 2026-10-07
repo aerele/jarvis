@@ -16,7 +16,12 @@ from jarvis.chat import pending_confirm
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests._conv_helpers import CONV, _make_conv
 from jarvis.tests.test_chat_api import TEST_USER, _cleanup_user_conversations, _ensure_test_user
-from jarvis.tests.test_skill_approve_and_run import _make_skill, _stamp_autorun
+from jarvis.tests.test_skill_approve_and_run import (
+	ADMIN_USER,
+	_ensure_admin_user,
+	_make_skill,
+	_stamp_autorun,
+)
 from jarvis.tools import _write_risk as wr
 
 SKILL = "Jarvis Custom Skill"
@@ -61,7 +66,17 @@ class TestWhatCountsAsAWrite(FrappeTestCase):
 			("assign_to", {"doctype": PATTERN, "name": "n", "users": ["a@example.com"]}),
 			("add_comment", {"reference_doctype": SKILL, "reference_name": "n", "content": "c"}),
 			("attach_to_doc", {"target_doctype": "jarvis custom skill ", "target_name": "n"}),
+			("add_tag", {"dt": "Jarvis Learned Pattern", "dn": "n", "tag": "t"}),
 			("create_doc", {"doctype": "ToDo", "values": {"parenttype": "Jarvis Custom Skill Share"}}),
+			(
+				"create_docs",
+				{
+					"docs": [
+						{"doctype": "ToDo", "values": {"description": "plain"}},
+						{"doctype": "Jarvis Shared Skill Slug", "values": {"slug": "x"}},
+					]
+				},
+			),
 			(
 				"run_method",
 				{"method": "frappe.client.set_value", "args": {"doctype": PATTERN, "name": "n"}},
@@ -70,9 +85,9 @@ class TestWhatCountsAsAWrite(FrappeTestCase):
 				"run_method",
 				{"method": "frappe.client.save", "args": {"doc": '{"doctype": "Jarvis Custom Skill"}'}},
 			),
-			("run_method", {"method": "jarvis.chat.custom_skills_api.update_custom_skill", "args": {}}),
-			("run_method", {"method": "jarvis.chat.learned_api.approve_learned_pattern", "args": {}}),
-			("run_method", {"method": "jarvis.chat.app_learning_api.schedule_app_learning", "args": {}}),
+			# A learning sweep writes learned patterns: a person sees the call that starts one.
+			("run_method", {"method": "jarvis.chat.personalise_api.anything", "args": {}}),
+			("run_method", {"method": "jarvis.chat.voice_notes_api.anything", "args": {}}),
 		):
 			with self.subTest(tool=tool, args=args):
 				self.assertTrue(api._writes_skill_config(tool, args))
@@ -91,6 +106,66 @@ class TestWhatCountsAsAWrite(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			api._writes_skill_config("update_doc", {"doctype": [SKILL], "name": "n"})
 
+	def test_a_method_the_tool_refuses_is_found_wherever_it_is_named(self):
+		denied = "jarvis.chat.custom_skills_api.update_custom_skill"
+		for args in (
+			{"method": denied, "args": {}},
+			{"method": f" {denied}", "args": {}},
+			# A whitelisted helper that calls the method it is handed.
+			{"method": "frappe.model.mapper.make_mapped_doc", "args": {"method": denied, "source_name": "n"}},
+			{
+				"method": "some.helper",
+				"args": {"calls": [{"method": "jarvis.chat.learned_api.batch_approve"}]},
+			},
+		):
+			with self.subTest(args=args):
+				self.assertTrue(api._calls_a_denied_method(args))
+		for args in (
+			{"method": "frappe.client.get_value", "args": {"doctype": "ToDo"}},
+			{"method": "erpnext.x.make_y", "args": {"note": "see jarvis.chat.custom_skills_api.x"}},
+			{"method": "jarvis.chat.custom_skills.something", "args": {}},
+		):
+			with self.subTest(args=args):
+				self.assertIsNone(api._calls_a_denied_method(args))
+
+	def test_what_switches_approve_and_run_on(self):
+		on = (
+			("update_doc", {"doctype": SKILL, "name": "n", "changes": {"allow_approve_run": 1}}),
+			(
+				"update_doc",
+				{"doctype": " jarvis custom skill", "name": "n", "changes": {"allow_approve_run": "true"}},
+			),
+			(
+				"update_doc",
+				{"doctype": SKILL, "updates": [{"name": "n", "changes": {"allow_approve_run": "1"}}]},
+			),
+			("create_doc", {"doctype": SKILL, "values": {"skill_name": "x", "allow_approve_run": True}}),
+			("create_docs", {"docs": [{"doctype": SKILL, "values": {"allow_approve_run": "Yes"}}]}),
+			(
+				"run_method",
+				{
+					"method": "frappe.client.set_value",
+					"args": {"doctype": SKILL, "name": "n", "fieldname": "allow_approve_run", "value": 1},
+				},
+			),
+		)
+		off = (
+			("update_doc", {"doctype": SKILL, "name": "n", "changes": {"allow_approve_run": 0}}),
+			("update_doc", {"doctype": SKILL, "name": "n", "changes": {"allow_approve_run": "false"}}),
+			("update_doc", {"doctype": SKILL, "name": "n", "changes": {"instructions": "x"}}),
+			("update_doc", {"doctype": "ToDo", "name": "n", "changes": {"allow_approve_run": 1}}),
+			(
+				"run_method",
+				{"method": "frappe.client.set_value", "args": {"doctype": SKILL, "fieldname": "enabled"}},
+			),
+		)
+		for tool, args in on:
+			with self.subTest(on=args):
+				self.assertTrue(api._arms_a_skill(tool, args))
+		for tool, args in off:
+			with self.subTest(off=args):
+				self.assertFalse(api._arms_a_skill(tool, args))
+
 
 class _ModeBase(FrappeTestCase):
 	@classmethod
@@ -101,17 +176,25 @@ class _ModeBase(FrappeTestCase):
 	def setUp(self):
 		self._orig = frappe.session.user
 		frappe.set_user(TEST_USER)
-		_cleanup_user_conversations(TEST_USER)
+		self._sweep()
 		self.skill = _make_skill(TEST_USER, name="cfgwrite-own")
 
 	def tearDown(self):
 		frappe.set_user(self._orig)
+		self._sweep()
+
+	@staticmethod
+	def _sweep():
 		from jarvis.tools import _agent_run_ctx
 
+		frappe.db.rollback()
 		_agent_run_ctx.take_request_autorun_applied()
-		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
-			pending_confirm.clear_for_conversation(TEST_USER, conv)
-		_cleanup_user_conversations(TEST_USER)
+		_agent_run_ctx.take_armed_by_skill()
+		for conv in frappe.get_all(
+			CONV, filters={"owner": ["in", [TEST_USER, ADMIN_USER]]}, fields=["name", "owner"]
+		):
+			pending_confirm.clear_for_conversation(conv.owner, conv.name)
+			frappe.delete_doc(CONV, conv.name, force=True, ignore_permissions=True)
 		for name in frappe.get_all(SKILL, filters={"skill_name": ["like", "cfgwrite-%"]}, pluck="name"):
 			frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
 		for name in frappe.get_all("ToDo", filters={"owner": TEST_USER}, pluck="name"):
@@ -136,18 +219,19 @@ class _ModeBase(FrappeTestCase):
 		frappe.db.set_value(CONV, conv, "auto_mode", 1, update_modified=False)
 		return conv
 
-	MODES = ("_confirm_all", "_skill_run", "_auto_mode")
+	MODES = ("confirm_all", "skill_run", "auto_mode")
 
-	def _each_mode(self):
+	def _in_each_mode(self, check):
+		"""Run ``check(conv)`` once per mode, each in its own subTest."""
 		for mode in self.MODES:
-			with self.subTest(mode=mode.strip("_")):
-				yield getattr(self, mode)()
+			with self.subTest(mode=mode):
+				check(getattr(self, f"_{mode}")())
 
 
 class TestEveryModeAsks(_ModeBase):
 	def test_an_ordinary_write_still_runs_without_a_card(self):
 		# Non-vacuity: each of these conversations really is writing unasked.
-		for conv in self._each_mode():
+		def check(conv):
 			with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {}}) as disp:
 				res = api._run_tool(
 					"create_doc",
@@ -156,8 +240,10 @@ class TestEveryModeAsks(_ModeBase):
 				)
 			self.assertTrue(disp.called, res)
 
+		self._in_each_mode(check)
+
 	def test_changing_a_skill_parks_a_card_that_says_why(self):
-		for conv in self._each_mode():
+		def check(conv):
 			with patch("jarvis.api.dispatch_confirmed") as disp:
 				res = api._run_tool(
 					"update_doc",
@@ -172,8 +258,10 @@ class TestEveryModeAsks(_ModeBase):
 			)
 			self.assertEqual(frappe.db.get_value(SKILL, self.skill, "instructions"), "do the thing")
 
+		self._in_each_mode(check)
+
 	def test_a_lower_case_doctype_is_the_same_skill(self):
-		for conv in self._each_mode():
+		def check(conv):
 			with patch("jarvis.api.dispatch_confirmed") as disp:
 				res = api._run_tool(
 					"update_doc",
@@ -181,8 +269,10 @@ class TestEveryModeAsks(_ModeBase):
 					conversation=conv,
 				)
 			self.assertFalse(disp.called, res)
-			self.assertNotEqual((res.get("data") or {}).get("status"), "ok")
+			self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
 			self.assertEqual(int(frappe.db.get_value(SKILL, self.skill, "enabled")), 1)
+
+		self._in_each_mode(check)
 
 	def test_other_tools_that_name_a_skill_park_too(self):
 		calls = (
@@ -196,17 +286,40 @@ class TestEveryModeAsks(_ModeBase):
 			),
 		)
 		for tool, args in calls:
-			for conv in self._each_mode():
-				with self.subTest(tool=tool):
-					with patch("jarvis.api.dispatch_confirmed") as disp:
-						res = api._run_tool(tool, args, conversation=conv)
-					self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
-					self.assertFalse(disp.called)
-					pending_confirm.clear_for_conversation(TEST_USER, conv)
-					frappe.db.commit()
+
+			def check(conv, tool=tool, args=args):
+				with patch("jarvis.api.dispatch_confirmed") as disp:
+					res = api._run_tool(tool, args, conversation=conv)
+				self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", (tool, res))
+				self.assertFalse(disp.called)
+
+			self._in_each_mode(check)
+
+	def test_a_method_the_tool_refuses_is_refused_before_a_card(self):
+		# A card for one could only fail at Confirm.
+		calls = (
+			{"method": "jarvis.chat.custom_skills_api.update_custom_skill", "args": {"name": self.skill}},
+			{"method": "jarvis.chat.learned_api.batch_approve", "args": {"names": ["x"]}},
+			{
+				"method": "frappe.model.mapper.make_mapped_doc",
+				"args": {"method": "jarvis.chat.custom_skills_api.delete_custom_skill", "source_name": "x"},
+			},
+		)
+		for args in calls:
+
+			def check(conv, args=args):
+				with patch("jarvis.api.dispatch_confirmed") as disp:
+					res = api._run_tool("run_method", args, conversation=conv)
+				self.assertFalse(res.get("ok"), res)
+				self.assertIn("cannot be called from a tool", str(res))
+				self.assertFalse(disp.called)
+				self.assertFalse(pending_confirm.has_live_card(TEST_USER, conv))
+
+			self._in_each_mode(check)
+			check(_make_conv(TEST_USER))  # and in a chat that asks for everything
 
 	def test_a_doctype_that_is_not_text_is_a_tool_error(self):
-		for conv in self._each_mode():
+		def check(conv):
 			with patch("jarvis.api.dispatch_confirmed") as disp:
 				res = api._run_tool(
 					"share_doc",
@@ -215,6 +328,20 @@ class TestEveryModeAsks(_ModeBase):
 				)
 			self.assertFalse(res.get("ok"), res)
 			self.assertFalse(disp.called)
+
+		self._in_each_mode(check)
+
+	def test_arguments_too_deep_to_read_park_a_card(self):
+		conv = self._confirm_all()
+		with (
+			patch.object(api, "_writes_skill_config", side_effect=RecursionError),
+			patch("jarvis.api.dispatch_confirmed") as disp,
+		):
+			res = api._run_tool(
+				"create_doc", {"doctype": "ToDo", "values": {"description": "cfgwrite"}}, conversation=conv
+			)
+		self.assertFalse(disp.called, res)
+		self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
 
 	def test_a_read_is_never_scanned(self):
 		conv = self._confirm_all()
@@ -325,8 +452,6 @@ class TestTheAssistantDoesNotArm(_ModeBase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		from jarvis.tests.test_skill_approve_and_run import _ensure_admin_user
-
 		_ensure_admin_user()
 
 	def _in_a_tool_call(self):
@@ -338,8 +463,6 @@ class TestTheAssistantDoesNotArm(_ModeBase):
 		return int(frappe.db.get_value(SKILL, self.skill, "allow_approve_run") or 0)
 
 	def test_an_admin_arms_it_on_the_page(self):
-		from jarvis.tests.test_skill_approve_and_run import ADMIN_USER
-
 		frappe.set_user(ADMIN_USER)
 		doc = frappe.get_doc(SKILL, self.skill)
 		doc.allow_approve_run = 1
@@ -347,8 +470,6 @@ class TestTheAssistantDoesNotArm(_ModeBase):
 		self.assertEqual(self._armed(), 1)
 
 	def test_a_tool_call_does_not_even_for_an_admin(self):
-		from jarvis.tests.test_skill_approve_and_run import ADMIN_USER
-
 		frappe.set_user(ADMIN_USER)
 		self._in_a_tool_call()
 		doc = frappe.get_doc(SKILL, self.skill)
@@ -357,10 +478,18 @@ class TestTheAssistantDoesNotArm(_ModeBase):
 			doc.save(ignore_permissions=True)
 		self.assertEqual(self._armed(), 0)
 
+	def test_nor_does_a_job_a_tool_call_queued(self):
+		# Such a job runs under the guard's scope, with no dispatch depth of its own.
+		frappe.set_user(ADMIN_USER)
+		doc = frappe.get_doc(SKILL, self.skill)
+		doc.allow_approve_run = 1
+		with wr.guard_scope([]):
+			with self.assertRaises(frappe.PermissionError):
+				doc.save(ignore_permissions=True)
+		self.assertEqual(self._armed(), 0)
+
 	def test_the_call_is_refused_before_a_card_exists(self):
 		# A card the user could only confirm into an error would be worse than a refusal.
-		from jarvis.tests.test_skill_approve_and_run import ADMIN_USER
-
 		frappe.set_user(ADMIN_USER)
 		calls = {
 			"update_doc": {"doctype": SKILL, "name": self.skill, "changes": {"allow_approve_run": 1}},
@@ -384,10 +513,9 @@ class TestTheAssistantDoesNotArm(_ModeBase):
 				res = api._run_tool(label.split(" ")[0], args, conversation=conv)
 				self.assertFalse(res.get("ok"), res)
 				self.assertIn("skill's own page", str(res))
+				self.assertIn("Leave allow_approve_run out", str(res))
 				self.assertFalse(pending_confirm.has_live_card(ADMIN_USER, conv))
 		self.assertEqual(self._armed(), 0)
-		for conv in frappe.get_all(CONV, filters={"owner": ADMIN_USER}, pluck="name"):
-			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 
 	def test_switching_it_off_from_chat_still_parks_a_card(self):
 		frappe.db.set_value(SKILL, self.skill, "allow_approve_run", 1)
