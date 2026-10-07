@@ -32,6 +32,8 @@ Desk chat, dashboard chat, and mobile chat use the shared formatter.
 | Timeout | Retry or reduce request size; check an identified provider's status |
 | Connection / DNS / TLS failure | Retry, then have an administrator check the connection |
 | Worker exception | Retry; send persistent error details to support |
+| Empty reply from the model | Retry; if it returns, start a new chat or choose another model |
+| Empty reply after tool actions | Check for completed actions, then retry |
 | Cancelled | Muted cancellation, without retry advice |
 | Unknown | Explain that the error did not establish a clear cause |
 
@@ -55,6 +57,14 @@ error or timeout; a specific rejection such as invalid credentials survives.
 Immediate Retry buttons are hidden for known failures requiring input,
 configuration, access, or account changes. Raw error details remain available.
 This change does not automatically resend messages or alter recovery behavior.
+
+Retry (desktop chat and dashboard chat) runs the failed turn again with the
+context and the original attachments of that turn. The server refuses a retry
+when a later turn has not finished, when the failed reply is not the latest
+user or assistant message (the closing message of a macro run does not count),
+or when the user message has a different owner than the conversation. On the
+admission and pump paths these checks run under the conversation row lock, so
+two tabs cannot start two retries; the legacy path checks without the lock.
 
 ## Customer wording
 
@@ -109,7 +119,7 @@ fixtures before extending the ordered rules.
 This taxonomy covers failed **chat turns**. API admission refusals, uploads,
 connection setup forms, and action approval cards retain their existing
 operation-specific error handling (`errMessage`, `ActionError`, etc.). It does
-not change authorization, retry execution, billing, or error-reporting policy.
+not change authorization, billing, or error-reporting policy.
 
 Both languages run `jarvis/tests/fixtures/turn_errors.json`. Frontend regression
 tests also cover provider routing, legacy-code refinement, retry guidance,
