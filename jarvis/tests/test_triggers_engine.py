@@ -641,12 +641,29 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 			fired_by="Administrator",
 		)
 
-	def _owned_by_other_user(self, trig):
-		user = frappe.db.get_value("User", {"enabled": 1, "name": ["not in", ["Administrator", "Guest"]]})
-		if not user:
-			self.skipTest("no enabled non-admin user on this site")
-		frappe.db.set_value(TRIGGER, trig.name, "owner", user, update_modified=False)
-		return user
+	def tearDown(self):
+		super().tearDown()
+		for email in getattr(self, "_users", []):
+			if frappe.db.exists("User", email):
+				frappe.delete_doc("User", email, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	def _owned_by_new_user(self, trig):
+		"""Hand ``trig`` to a throwaway enabled System User with no extra roles."""
+		email = f"trig-lookup-{frappe.generate_hash(length=8)}@example.com"
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Lookup",
+				"enabled": 1,
+				"send_welcome_email": 0,
+				"user_type": "System User",
+			}
+		).insert(ignore_permissions=True)
+		self._users = [*getattr(self, "_users", []), email]
+		frappe.db.set_value(TRIGGER, trig.name, "owner", email, update_modified=False)
+		return email
 
 	def test_off_by_default_makes_the_single_string_call(self):
 		trig = self._make_llm_trigger()
@@ -663,7 +680,7 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 
 	def test_lookup_runs_as_the_owner_then_the_finding_is_recorded(self):
 		trig = self._make_llm_trigger(lookups=1)
-		owner = self._owned_by_other_user(trig)
+		owner = self._owned_by_new_user(trig)
 		seen = []
 
 		def fake_get_list(doctype, **kwargs):
@@ -703,6 +720,20 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 		rows = self._activities(trig.name)
 		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "Could not check."))
 		self.assertIn("refused: no read permission on ToDo", rows[0].detail)
+
+	def test_owner_without_read_permission_gets_a_refusal_from_the_real_tool(self):
+		# Error Log is System Manager only: the throwaway owner cannot read it, and
+		# get_list is NOT patched, so this exercises the real permission check.
+		trig = self._make_llm_trigger(lookups=1)
+		self._owned_by_new_user(trig)
+		lookup = {"lookup": {"tool": "list", "args": {"doctype": "Error Log"}}}
+		with patch(LLM_TASK_COMPLETE, side_effect=[lookup, {"finding": "No access."}]) as task:
+			self._run(trig)
+		self.assertIn("no read permission on Error Log", task.call_args_list[1].args[1])
+		rows = self._activities(trig.name)
+		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "No access."))
+		self.assertIn("refused: no read permission on Error Log", rows[0].detail)
+		self.assertEqual(frappe.session.user, "Administrator")
 
 	def test_out_of_time_writes_a_failed_row_without_raising(self):
 		from jarvis.triggers import lookups
