@@ -406,6 +406,50 @@ class TestPdfTemplatesApiRoundTrip(FrappeTestCase):
 		self.assertEqual(got2["data"]["accent_color"], "#123456")
 		self.assertEqual(frappe.db.count(_DT, {"template_key": self.KEY}), 1)
 
+	def test_is_new_refuses_existing_key_but_plain_save_upserts(self):
+		self._save(description="v1")
+		with self.assertRaises(InvalidArgumentError) as ctx:
+			self._save(description="clobber", is_new=1)
+		self.assertIn(f"A template with key {self.KEY} already exists.", str(ctx.exception))
+		self.assertEqual(api.get_pdf_template(self.KEY)["data"]["description"], "v1")
+		self._save(description="v2")  # an edit still upserts
+		self.assertEqual(api.get_pdf_template(self.KEY)["data"]["description"], "v2")
+
+	def test_based_on_copy_renders_like_the_builtin_except_edited_fields(self):
+		base = _predef.TEMPLATES["formal"]
+		self._save(
+			is_new=1,
+			based_on="formal",
+			accent_color=base["css"]["primary"],
+			dark_color=base["css"]["dark"],
+			body_font="serif",
+			display_font="serif",
+			masthead_align=base["placement"]["masthead_align"],
+			cover=base["placement"]["cover"],
+			watermark=base["placement"]["watermark"],
+			margins_mm=base["page"]["margins_mm"],
+		)
+		self.assertEqual(api.get_pdf_template(self.KEY)["data"]["based_on"], "formal")
+		db_templates.clear_cache()
+		got = db_templates.resolve(self.KEY)
+		# The palette keys the form has no field for come from the built-in.
+		for token in ("ink", "muted", "line", "tint", "zebra", "callout_bg", "s1", "s2", "s3", "s4"):
+			self.assertEqual(got["css"][token], base["css"][token], token)
+		self.assertEqual(got["css"]["primary"], base["css"]["primary"])
+		self.assertEqual(got["placement"]["footer"], base["placement"]["footer"])
+		# An edited field wins over the base.
+		self._save(based_on="formal", accent_color="#123456")
+		db_templates.clear_cache()
+		edited = db_templates.resolve(self.KEY)
+		self.assertEqual(edited["css"]["primary"], "#123456")
+		self.assertEqual(edited["css"]["ink"], base["css"]["ink"])
+
+	def test_unknown_based_on_keeps_plain_custom_behaviour(self):
+		self._save(is_new=1, based_on="nope", accent_color="#123456")
+		db_templates.clear_cache()
+		got = db_templates.resolve(self.KEY)
+		self.assertNotIn("ink", got["css"])
+
 	def test_list_includes_created_template(self):
 		self._save()
 		out = api.list_pdf_templates()

@@ -194,6 +194,28 @@ describe("PdfTemplatesPane Duplicate to edit", () => {
 			show_logo: true,
 			accent_bar: false,
 			enabled: true,
+			// Faithful copy: the server layers these on the built-in's full spec,
+			// and refuses (rather than overwrites) a key that already exists.
+			based_on: "formal",
+			is_new: 1,
 		});
+	});
+
+	it("sends is_new for a blank New template too, and no based_on", async () => {
+		const w = await mountPane([FORMAL], { def: "formal" });
+		await w
+			.findAll(".stub-button")
+			.find((b) => b.attributes("data-label") === "New template")
+			.trigger("click");
+		await flushPromises();
+		await field(w, "Template key").setValue("acme");
+		await w
+			.findAll(".stub-button")
+			.find((b) => b.attributes("data-label") === "Save")
+			.trigger("click");
+		await flushPromises();
+		const payload = JSON.parse(api.savePdfTemplate.mock.calls[0][0]);
+		expect(payload.is_new).toBe(1);
+		expect(payload.based_on).toBeUndefined();
 	});
 });
