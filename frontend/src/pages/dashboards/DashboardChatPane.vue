@@ -65,7 +65,7 @@
 			</div>
 
 			<div v-else class="flex flex-col gap-3">
-				<template v-for="m in bubbles" :key="m.name">
+				<template v-for="(m, i) in bubbles" :key="m.name">
 					<!-- user: right-aligned surface-gray bubble -->
 					<div v-if="m.role === 'user'" class="flex justify-end">
 						<div
@@ -115,6 +115,16 @@
 								class="mt-1 whitespace-pre-wrap break-words font-sans text-xs"
 								>{{ m.error }}</pre
 							>
+							<!-- the same retry API and target rule as ChatView -->
+							<Button
+								v-if="m.err.retryable && i === retryIdx"
+								class="mt-1.5"
+								variant="subtle"
+								size="sm"
+								:label="retrying || runActive ? 'Retrying…' : retryText"
+								:disabled="retrying || sending || runActive || compacting"
+								@click="retryFailed(m)"
+							/>
 						</div>
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
@@ -404,6 +414,7 @@ import {
 	setConversationThinking,
 	getConversationContext,
 	compactConversation,
+	retryMessage,
 } from "@/api";
 import { agentName } from "@/branding";
 import { errHtml, turnErrorInfo } from "@/lib/errors";
@@ -412,6 +423,7 @@ import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
 import { compactFailureCopy } from "@/lib/compact";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
@@ -679,6 +691,9 @@ const bubbles = computed(() =>
 		)
 		.map((m) => ({ ...m, err: m.error ? errorNote(m) : null }))
 );
+// The one bubble that may show Retry, and its label (lib/retryTarget.js).
+const retryIdx = computed(() => retryTargetIndex(bubbles.value));
+const retryText = computed(() => retryLabel(bubbles.value));
 
 // ChatView's stripBlocks, minimal subset: internal fenced blocks (actions,
 // confirms, cards…) never render as raw fences in the pane. `jarvis-ask` is
@@ -933,6 +948,7 @@ async function dismiss(pa) {
 // ── run state + composer ──────────────────────────────────────────────────────
 const runActive = ref(false);
 const sending = ref(false);
+const retrying = ref(false); // the retry request; runActive then covers the run it starts
 const draft = ref("");
 const box = ref(null);
 
@@ -1078,15 +1094,7 @@ async function send(gotoMessageId = "") {
 		}
 		loadDashboardChats();
 		recordGotoConversation(gotoMessageId, r.conversation_id || conversation.value);
-		runActive.value = true;
-		// This send's own optimistic start - a run:start frame for the same run
-		// arrives moments later and does the same reset, but the ticks should
-		// read "Understanding" from the instant Send is clicked, not lag behind
-		// the socket round trip.
-		activeTools.value = [];
-		waitingFirstTool.value = true;
-		nextTick(scrollBottom);
-		if (!socket) startNoSocketLadder();
+		markRunStarted();
 	} catch (e) {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
@@ -1094,6 +1102,38 @@ async function send(gotoMessageId = "") {
 		toast.error(errHtml(e));
 	} finally {
 		sending.value = false;
+	}
+}
+
+// A turn this pane just started. A run:start frame for the same run arrives
+// moments later and does the same reset, but the ticks should read
+// "Understanding" from the instant of the click, not lag behind the socket
+// round trip.
+function markRunStarted() {
+	runActive.value = true;
+	activeTools.value = [];
+	waitingFirstTool.value = true;
+	nextTick(scrollBottom);
+	if (!socket) startNoSocketLadder();
+}
+
+// Retry a failed reply. The server refuses a retry that is no longer valid
+// (a newer message, a retry already running); show its reason.
+async function retryFailed(m) {
+	if (retrying.value || sending.value || runActive.value || compacting.value) return;
+	retrying.value = true;
+	try {
+		const r = (await retryMessage(m.name)) || {};
+		if (r.ok === false) {
+			const { message, type } = sendRejectionCopy(r.reason, agentName, r);
+			(toast[type] || toast.error)(message);
+			return;
+		}
+		markRunStarted();
+	} catch (e) {
+		toast.error(errHtml(e));
+	} finally {
+		retrying.value = false;
 	}
 }
 
