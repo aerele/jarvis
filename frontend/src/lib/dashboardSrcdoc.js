@@ -231,15 +231,25 @@ export const RUNTIME_JS = `(function () {
 		}
 	}
 
-	// The sandbox has no allow-popups/allow-top-navigation, so an <a href> can
-	// never open anything from in here. Hand the raw href to the parent instead.
+	// The sandbox has no allow-popups/allow-top-navigation, so an <a href> or
+	// window.open can never open anything from in here. Hand the raw href to the
+	// parent instead. In-page "#" anchors keep their default (scroll in-frame).
+	function postLink(href) {
+		post({ type: "link", href: href });
+	}
+	window.open = function (url) {
+		postLink(String(url == null ? "" : url));
+		return null;
+	};
 	document.addEventListener(
 		"click",
 		function (e) {
 			var a = e.target && e.target.closest ? e.target.closest("a[href]") : null;
 			if (!a) return;
+			var href = a.getAttribute("href");
+			if (href.charAt(0) === "#") return;
 			e.preventDefault();
-			post({ type: "link", href: a.getAttribute("href") });
+			postLink(href);
 		},
 		true
 	);

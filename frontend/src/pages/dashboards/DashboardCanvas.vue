@@ -79,7 +79,7 @@ import { ref, watch, onBeforeUnmount } from "vue";
 import { Button, ErrorMessage, FeatherIcon } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { buildSrcdoc, parseSourcesBlock, parseFiltersBlock } from "@/lib/dashboardSrcdoc";
-import { deskLinkUrl } from "@/lib/dashboardLinks";
+import { openDeskLink } from "@/lib/dashboardLinks";
 import { loadEchartsSource } from "@/lib/dashboardEcharts";
 import { THEMES, DEFAULT_THEME, themeKey } from "@/lib/dashboardThemes";
 import { loadCaptureLib, downloadPng, downloadPdf } from "@/lib/dashboardExport";
@@ -333,8 +333,7 @@ function onMessage(e) {
 	} else if (d.type === "data") {
 		handleData(d);
 	} else if (d.type === "link") {
-		const url = deskLinkUrl(d.href, window.location.origin);
-		if (url) window.open(url, "_blank", "noopener,noreferrer");
+		openDeskLink(d.href);
 	} else if (d.type === "export:progress") {
 		// Each captured slide re-arms the watchdog: steady progress => keep waiting.
 		const p = pendingExports[d.id];
