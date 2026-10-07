@@ -474,10 +474,15 @@ async function load(force = false) {
 				text: last.content || "",
 				tools: [],
 			};
-			if (live.value.runId === recoveryState.starting[cid]) {
-				recoveryState.observedRuns[live.value.runId] = true;
-				delete recoveryState.starting[cid];
-			}
+		}
+		// Legacy turns have no admission row. On return to this chat, the
+		// assistant row is the evidence that the accepted turn started or ended.
+		// Streaming stays busy through `live`; a finished reply needs no Stop.
+		if (last?.role === "assistant" && recoveryState.starting[cid]) {
+			recoveryState.observedRuns[recoveryState.starting[cid]] = true;
+			delete recoveryState.starting[cid];
+			// A status read started before this transcript must not restore a queue.
+			queueGeneration++;
 		}
 		await scrollToBottom(force);
 	} catch (e) {
