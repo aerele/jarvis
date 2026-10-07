@@ -1378,15 +1378,20 @@ def _armed_skip_disabled() -> bool:
 	return bool(frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", "disable_armed_skip")))
 
 
-# What a skill says is what a macro step that applies it does (``Apply these skills:
-# /slug``). An armed macro's run never changes one uncarded: it would rewrite what its
-# own later runs, scheduled and unwatched, follow. The skill and its child tables.
+# A skill and its child tables: what an armed macro's steps apply (``Apply these
+# skills: /slug``), so its reads of them are judged (``_skill_rows_read`` below). A
+# WRITE to one asks in every mode, with the rest of ``_write_risk.SKILL_CONFIG_DOCTYPES``
+# (``_writes_skill_config``).
 _SKILL_DOCTYPES = frozenset(
 	{"Jarvis Custom Skill", "Jarvis Custom Skill Share", "Jarvis Custom Skill Allowed Role"}
 )
 # Compared as Frappe finds a doctype: in any case, and spaces around it trimmed.
 _SKILL_DOCTYPES_FOLDED = frozenset(dt.casefold() for dt in _SKILL_DOCTYPES)
-_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype")
+# Every argument name a gated tool gives a doctype under.
+_DOCTYPE_KEYS = ("doctype", "parenttype", "reference_doctype", "target_doctype", "ref_doctype", "dt")
+# Endpoints that start a learning sweep, which writes learned patterns: a person
+# sees the call (uncarded, the sweep's own saves would be refused as unseen).
+_LEARNING_ENTRY_PREFIXES = ("jarvis.chat.personalise_api.", "jarvis.chat.voice_notes_api.")
 
 
 def _run_method_brakes(args) -> bool:
@@ -1404,19 +1409,76 @@ def _workflow_brakes(args) -> bool:
 	return workflow_action_cancels(args.get("doctype"), args.get("action"))
 
 
-def _writes_a_skill(tool: str, args) -> bool:
-	"""Whether a covered write names a skill doctype anywhere in its arguments (a
-	single or batch ``update_doc`` / ``create_doc``, ``run_method`` on a doc or through
-	``frappe.client``, a JSON ``doc`` string included), or calls the skills' own API.
-	Such a call parks a card on an armed macro's run, as the brake does. Raises
-	InvalidArgumentError for a doctype that is not text."""
+_ARMING_REFUSED = (
+	"Approve & run is switched on from the skill's own page, not from chat. "
+	"Leave allow_approve_run out of this change."
+)
+_ARMING_FIELD = "allow_approve_run"
+_TRUE_TEXT = frozenset({"true", "yes", "on", "y"})
+
+
+def _switched_on(value) -> bool:
+	if isinstance(value, str):
+		return value.strip().casefold() in _TRUE_TEXT or bool(frappe.utils.cint(value))
+	return bool(value)
+
+
+def _arms_a_skill(tool: str, args) -> bool:
+	"""Whether a call sets a skill's ``allow_approve_run`` on. The controller refuses
+	that inside any tool call (``_guard_allow_approve_run_enable``); the gate refuses
+	it first, so no card is parked that could only fail at Confirm. Judged on the
+	arguments alone (no read of the stored skill): a change that leaves the switch
+	out is never refused here."""
+	from jarvis.tools import _write_risk
+
+	if tool in ("create_doc", "create_docs", "update_doc"):
+		return any(
+			target.doctype == "Jarvis Custom Skill" and _switched_on(target.values.get(_ARMING_FIELD))
+			for target in _write_risk._targets(tool, args)
+		)
+	if tool == "run_method":
+		# ``frappe.client.set_value`` and the like: the field named beside a skill.
+		try:
+			text = json.dumps(args, default=str)
+		except (TypeError, ValueError):
+			return False
+		return _ARMING_FIELD in text and _names_a_skill_doctype(args, depth=0)
+	return False
+
+
+def _calls_a_denied_method(args) -> str | None:
+	"""The method a ``run_method`` call names that the tool refuses
+	(``run_method._is_denied_path``), as its ``method`` or as text anywhere in its
+	arguments (a whitelisted helper that calls the method it is handed). The gate
+	refuses such a call before parking a card nobody could confirm."""
+	from jarvis.tools.run_method import _is_denied_path
+
+	if not isinstance(args, dict):
+		return None
+	for text in _texts([args.get("method"), args.get("args")]):
+		path = text.strip()
+		if path.startswith("jarvis.") and _is_denied_path(path):
+			return path
+	return None
+
+
+def _writes_skill_config(tool: str, args) -> bool:
+	"""Whether a gated write names a skill or learned-skill doctype anywhere in its
+	arguments (``_write_risk.SKILL_CONFIG_DOCTYPES``: a single or batch ``update_doc``
+	/ ``create_doc``, a share, a comment, ``run_method`` on a doc or through
+	``frappe.client``, a JSON ``doc`` string included), or starts a learning sweep.
+	Such a call asks in every mode: what these records say is what later chats do.
+	Raises InvalidArgumentError for a doctype that is not text."""
+	from jarvis.tools._write_risk import SKILL_CONFIG_DOCTYPES
+
 	if tool == "run_method" and isinstance(args, dict):
-		if str(args.get("method") or "").startswith("jarvis.chat.custom_skills_api."):
+		if str(args.get("method") or "").strip().startswith(_LEARNING_ENTRY_PREFIXES):
 			return True
-	return _names_a_skill_doctype(args, depth=0)
+	folded = frozenset(dt.casefold() for dt in SKILL_CONFIG_DOCTYPES)
+	return _names_a_skill_doctype(args, depth=0, folded=folded)
 
 
-def _names_a_skill_doctype(value, *, depth: int) -> bool:
+def _names_a_skill_doctype(value, *, depth: int, folded: frozenset = _SKILL_DOCTYPES_FOLDED) -> bool:
 	if depth > 6:
 		return False
 	if isinstance(value, str):
@@ -1433,11 +1495,11 @@ def _names_a_skill_doctype(value, *, depth: int) -> bool:
 			# A list or a dict for the call's own doctype: the model's mistake, a tool error.
 			raise InvalidArgumentError("doctype must be the name of a document type")
 		# Deeper, a list can be a filter (``["=", "Jarvis Custom Skill"]``).
-		if any(_is_a_skill_doctype(text) for dt in named for text in _texts(dt)):
+		if any(text.strip().casefold() in folded for dt in named for text in _texts(dt)):
 			return True
 		value = list(value.values())
 	if isinstance(value, list):
-		return any(_names_a_skill_doctype(item, depth=depth + 1) for item in value)
+		return any(_names_a_skill_doctype(item, depth=depth + 1, folded=folded) for item in value)
 	return False
 
 
@@ -3179,6 +3241,26 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		or (tool == "run_method" and _run_method_brakes(args))
 		or (tool == "apply_workflow_action" and _workflow_brakes(args))
 	)
+	# Nor does a write to a skill or a learned skill, whichever tool names it: what
+	# they say is what later chats do, so a person sees each change. Two calls are
+	# refused outright, before a card nobody could confirm is parked: a run_method
+	# the tool itself refuses, and one that switches a skill's Approve & run on.
+	if tool in _GATED_WRITES:
+		from jarvis.tools import _write_risk
+
+		try:
+			denied = _calls_a_denied_method(args) if tool == "run_method" else None
+			if denied:
+				_write_risk.log_line("denied_method", "", denied, "refused", tool=tool)
+				return _error("PermissionDeniedError", f"method {denied!r} cannot be called from a tool")
+			if _arms_a_skill(tool, args):
+				_write_risk.log_line("instructions", "Jarvis Custom Skill", "", "refused", tool=tool)
+				return _error("PermissionDeniedError", _ARMING_REFUSED)
+			_must_card = _must_card or _writes_skill_config(tool, args)
+		except InvalidArgumentError as e:
+			return _error(type(e).__name__, str(e))
+		except RecursionError:
+			_must_card = True  # arguments too deep to read: a person looks at them
 
 	# File Box write policy (PR-2c): FIRST, after the P0d normalisation, so an
 	# unattended File Box run never reaches the preview / park / auto-apply paths
@@ -3415,15 +3497,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# kill-switch Settings read runs only when a covered write is actually armed.
 		# Bulk covered writes skip too (an automation must not stall on a batch card);
 		# the F16 over-size cap above still bounces an oversized batch. A write the
-		# write-risk guard must card (``_must_card``) parks. A write to a skill parks
-		# too (``_writes_a_skill``): a macro step applies skills, so an armed run must
-		# not rewrite what its own later runs follow.
+		# write-risk guard must card (``_must_card``) parks. So does a write to a skill
+		# (``_writes_skill_config``, part of ``_must_card``): a macro step applies
+		# skills, so an armed run must not rewrite what its own later runs follow.
 		armed = bool(tool in _ARMED_SKIP_COVERED and not _must_card and _conv_flags.get("skip_confirmation"))
-		if armed:
-			try:
-				armed = not _writes_a_skill(tool, args)
-			except InvalidArgumentError as e:
-				return _error(type(e).__name__, str(e))
 		if armed and not _armed_skip_disabled():
 			# Provenance for the receipt (T8): which armed macro authorized this uncarded
 			# write. Always label an armed write (we are in the armed branch, so it IS

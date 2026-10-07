@@ -131,6 +131,23 @@ _ARG_SENSITIVE = {
 	"MCP OAuth Token": "login",
 }
 
+# Skills and learned skills: what later chats are told to do, and who is told it.
+# Sensitive in the argument layer like the rest of Jarvis's own configuration above
+# (the learning engine, promotion and the skill tools write these as their job).
+# ``api._writes_skill_config`` also cards any other write that names one.
+SKILL_CONFIG_DOCTYPES = frozenset(
+	{
+		"Jarvis Custom Skill",
+		"Jarvis Custom Skill Share",
+		"Jarvis Custom Skill Allowed Role",
+		"Jarvis Skill Promotion Request",
+		"Jarvis Shared Skill Slug",
+		"Jarvis Learned Pattern",
+		"Jarvis Learned Pattern Role",
+	}
+)
+_ARG_SENSITIVE.update(dict.fromkeys(SKILL_CONFIG_DOCTYPES, "instructions"))
+
 # Sensitive by what the record IS: every write to one counts, delete included.
 _TYPED_SENSITIVE = {
 	"Report": ("code", "report_type", frozenset({"Script Report", "Query Report"})),
@@ -170,6 +187,7 @@ RISK_LINES = {
 	"mail": "This sends email to the listed people.",
 	"access": "This changes who can see or edit.",
 	"login": "This changes how people sign in.",
+	"instructions": "This changes what your assistant is told to do.",
 }
 # Where a person sets up each structure change in Desk (the refusal carries it).
 DESK_PATHS = {
@@ -760,6 +778,19 @@ def guard_scope(
 		setattr(frappe.local, _LOCAL, prev)
 
 
+def uncarded_write() -> bool:
+	"""Whether the tool call in progress is a write nobody was shown: auto mode,
+	"confirm all", an armed macro, an approved skill run or File Box (the ``brake``
+	the gate opens its scope with, carried into the jobs it queues)."""
+	state = getattr(frappe.local, _LOCAL, None)
+	return bool(state is not None and state.brake)
+
+
+def in_guarded_call() -> bool:
+	"""Whether a guard scope is open: a tool call, or a job one queued."""
+	return getattr(frappe.local, _LOCAL, None) is not None
+
+
 def take_refusal() -> WriteRefusedError | None:
 	"""The refusal the ORM guard raised since the last call, cleared. A caller
 	checks it after a tool returns: a method that swallowed the guard's exception
@@ -1332,6 +1363,7 @@ __all__ = [
 	"REFUSAL_CODES",
 	"RISK_LINES",
 	"SENSITIVE_DOCTYPES",
+	"SKILL_CONFIG_DOCTYPES",
 	"STRUCTURE_DOCTYPES",
 	"WriteRefusedError",
 	"allow_entries",
@@ -1344,6 +1376,7 @@ __all__ = [
 	"guard_doc_event",
 	"guard_queue",
 	"guard_scope",
+	"in_guarded_call",
 	"is_implicit_commit",
 	"log_line",
 	"nested_under",
@@ -1356,4 +1389,5 @@ __all__ = [
 	"risk_of",
 	"structure_refusal",
 	"take_refusal",
+	"uncarded_write",
 ]
