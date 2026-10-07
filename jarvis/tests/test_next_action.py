@@ -197,7 +197,7 @@ class TestProposeNextAction(FrappeTestCase):
 
 	def test_another_users_conversation_is_refused(self):
 		self._receipt(self.conv)
-		with patch.object(actions_api, "_owns_conversation", return_value=False):
+		with patch("frappe.db.get_value", return_value="someone.else@example.com"):
 			with self.assertRaises(frappe.PermissionError):
 				self._propose(
 					self.conv, "Sales Order", "SO-1", "submit", sug={"kind": "submit", "action": None}
