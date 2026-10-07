@@ -335,6 +335,22 @@ class TestWritersStillWrite(_Base):
 			"confirmed",
 		)
 
+	def test_append_receipt_marks_a_submitted_create(self):
+		# The chip must be able to say "Created and submitted": the saved result carries
+		# docstatus 1 for a create the card also submitted, and only then.
+		actions_api._append_receipt(
+			self.conv, "create", "ToDo", "td-1", {}, "Created and submitted ToDo td-1.", submitted=1
+		)
+		actions_api._append_receipt(
+			self.conv, "create", "ToDo", "td-2", {}, "Created ToDo td-2.", submitted=0
+		)
+		rows = frappe.get_all(
+			MSG, {"conversation": self.conv, "role": "tool"}, ["tool_result"], order_by="seq"
+		)
+		data = [frappe.parse_json(r.tool_result)["data"] for r in rows]
+		self.assertEqual(data[0].get("docstatus"), 1)
+		self.assertNotIn("docstatus", data[1])
+
 	def test_send_message_and_enqueue_turn_inserts(self):
 		with _as(USER), _no_dispatch():
 			human = chat_api.send_message(self.conv, "one")
