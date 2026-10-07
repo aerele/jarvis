@@ -1097,23 +1097,23 @@
 											@click="retry(m.name)"
 											:disabled="retrying || busy"
 											:style="{
-												marginTop: '10px',
-												display: 'inline-flex',
-												alignItems: 'center',
-												gap: '6px',
-												padding: '6px 12px',
-												background: 'var(--red)',
-												color: '#fff',
-												border: 'none',
-												borderRadius: '7px',
-												fontFamily: 'inherit',
-												fontSize: '12px',
-												fontWeight: '550',
 												cursor: retrying || busy ? 'default' : 'pointer',
 												opacity: retrying || busy ? 0.6 : 1,
 											}"
 										>
 											{{ retrying || busy ? "Retrying…" : retryText }}
+										</button>
+										<!-- Expired chat sign-in: admins get the fix, members the hint above. Same
+										     look as the Retry button (shared .jv-retry class). -->
+										<button
+											v-if="
+												errorInfo(m).action === 'reconnect' &&
+												canConnectModel
+											"
+											class="jv-retry"
+											@click="goReconnectSubscription(errorInfo(m).upstream)"
+										>
+											{{ errorInfo(m).actionLabel }}
 										</button>
 									</div>
 								</div>
@@ -2280,6 +2280,27 @@
 						</button>
 					</template>
 				</Banner>
+				<!-- A chat-subscription sign-in expired (jarvis.subscription_health). AFTER the billing
+				     banners (billing wins) and BEFORE the soft worker heads-up and every later banner,
+				     so the specific cause wins over "Replies may be slow" and "Chat may not work yet".
+				     ORDER MATTERS, pinned by readiness.spec.js. A member only gets an entry while their
+				     chats are failing (the server drops it otherwise). -->
+				<Banner
+					v-else-if="subscriptionExpired"
+					type="warning"
+					:title="subscriptionExpired.title"
+					:message="subscriptionExpired.message"
+					style="margin-bottom: 10px"
+				>
+					<template v-if="subscriptionExpired.showReconnect" #action>
+						<button
+							class="jv-btn jv-btn--sm"
+							@click="goReconnectSubscription(subscriptionExpired.upstream)"
+						>
+							Reconnect
+						</button>
+					</template>
+				</Banner>
 				<!-- Soft worker warning: worker_warning (degraded / under-provisioned
 					 workers). AFTER suspendedNotice (billing takes precedence) - ORDER
 					 MATTERS, pinned by readiness.spec.js. Non-blocking - the composer stays
@@ -3316,6 +3337,7 @@
 								:show-providers="showProviders"
 								:persona-enabled="ui.persona_enabled"
 								:can-add-provider="canConnectModel"
+								:expired-models="expiredModels"
 								@select-model="selectModel"
 								@select-thinking="selectThinking"
 								@add-provider="goConnectModel"
@@ -4324,8 +4346,15 @@ import {
 	isLlmApplying,
 	isLlmApplyStuck,
 	isContainerUnavailable,
+	subscriptionExpiredBanner,
 	forgetReady,
 } from "@/onboarding/readiness.js";
+import {
+	subscriptionNotice,
+	loadSubscriptionNotice,
+	watchSubscriptionNotice,
+	expiredModelMap,
+} from "@/lib/subscriptionNotice";
 import { suspensionNotice, SUSPENDED_FALLBACK } from "@/onboarding/steps.js";
 import { billingBanner, suspendedBanner } from "@/account/format.js";
 import {
@@ -4594,6 +4623,21 @@ const noAiConnectedMessage = computed(() =>
 );
 function goConnectModel() {
 	store.openSettings("aimodels");
+}
+// Expired chat-subscription sign-in (jarvis.subscription_health). Shared reading, loaded on mount and
+// refetched on the jarvis:subscription_health realtime event (see onMounted / onBeforeUnmount).
+let unwatchSubscriptionNotice = () => {};
+const subscriptionExpired = computed(() =>
+	subscriptionExpiredBanner(subscriptionNotice.expired, canConnectModel)
+);
+// The card and the banner know the upstream, the pool knows account_refs: take the first expired
+// account of that upstream. No match opens the pane without the link.
+function goReconnectSubscription(upstream) {
+	const entry = subscriptionNotice.expired.find((e) => e.upstream === upstream);
+	store.openSettings(
+		"aimodels",
+		entry && entry.account_ref ? { reconnect: entry.account_ref } : null
+	);
 }
 // Billing lifecycle banner. Dismissal is session-only (a ref, not storage): the
 // pre-expiry nudge should return on the next visit, since the deadline has not.
@@ -5774,15 +5818,32 @@ function queuedChipLabel(pos, state) {
 // several times per failed message per render, and classification is a regex
 // walk over the (capped) error text.
 const errorInfoCache = new Map();
+const expiredModels = computed(() => expiredModelMap(subscriptionNotice.expiredModels));
 function errorInfo(m) {
 	const meta = errorMeta.value[m.name] || {};
+	// An admin also learns which subscription upstreams the workspace has, so a stray sign-in-looking
+	// error for one it does not use falls back to the plain authentication copy. A member gets null
+	// (unknown): the rule's strong signals are specific enough on their own.
+	const known = subscriptionNotice.upstreams;
+	// Models whose sign-in the site already holds as expired: a generic failure on one of them is
+	// that sign-in (CLIProxy's dead-sign-in 503 reaches us as a bare "provider internal error").
 	const key = `${m.name}\u0000${m.error}\u0000${meta.code || ""}\u0000${
 		meta.changed_data
-	}\u0000${m.provider || ""}`;
+	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
+		known ? known.join(",") : "-"
+	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels.value)
+		.map(([id, e]) => `${id}:${e.upstream}`)
+		.join(",")}`;
 	let info = errorInfoCache.get(key);
 	if (!info) {
 		info = {
-			...turnErrorInfo(m.error, meta.code, { provider: m.provider }),
+			...turnErrorInfo(m.error, meta.code, {
+				provider: m.provider,
+				admin: canConnectModel,
+				subscriptionUpstreams: known || undefined,
+				model: m.model,
+				expiredModels: expiredModels.value,
+			}),
 			noChange: meta.changed_data === false,
 		};
 		if (errorInfoCache.size > 500) errorInfoCache.clear();
@@ -11943,6 +12004,10 @@ onMounted(async () => {
 			llmApplyStuck.value = v;
 		})
 		.catch(() => {});
+	// ...and the expired chat sign-in (jarvis.subscription_health): one shared, realtime-refreshed
+	// reading. Same fail-open posture: an unreachable backend just leaves the banner off.
+	loadSubscriptionNotice();
+	unwatchSubscriptionNotice = watchSubscriptionNotice(socket);
 	document.addEventListener("pointerdown", onDocClick);
 	window.addEventListener("keydown", onGlobalKey);
 	// Never-lost guard: warn on tab close/reload while any dictated clip is
@@ -12076,6 +12141,7 @@ onBeforeUnmount(() => {
 	socket?.off("jarvis:event", onEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
+	unwatchSubscriptionNotice();
 	document.removeEventListener("visibilitychange", onVisibility);
 	window.removeEventListener("focus", onResync);
 	document.removeEventListener("pointerdown", onDocClick);
@@ -12201,6 +12267,24 @@ onUnmounted(() => {
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);
+}
+.jv-retry {
+	margin-top: 10px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	background: var(--red);
+	color: #fff;
+	border: none;
+	border-radius: 7px;
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 550;
+	cursor: pointer;
+}
+.jv-retry + .jv-retry {
+	margin-left: 8px;
 }
 .jv-retry:hover {
 	filter: brightness(0.94);

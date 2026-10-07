@@ -49,6 +49,10 @@ const llmConfigVersion = ref(0);
 function bumpLlmConfig() {
 	llmConfigVersion.value += 1;
 }
+// One-shot payload a caller can leave for the pane it just opened (for example
+// { reconnect } for AI models). Cleared by takeSettingsIntent() below so a later
+// mount (or a plain openSettings() call with no intent) never replays a stale one.
+const settingsIntent = ref(null);
 const pendingNewChat = ref(false); // consumed + cleared by ChatView
 const paletteOpen = ref(false);
 
@@ -550,11 +554,21 @@ function requestNewChat(router) {
 // mid-apply. settingsApplying can only be true while the dialog is already open
 // on the applying pane (see its own doc above), so refusing here never blocks a
 // legitimate first open.
-async function openSettings(section) {
+async function openSettings(section, intent = null) {
 	if (await needsOnboarding()) return;
 	if (settingsApplying.value) return;
 	settingsOpen.value = true;
 	settingsSection.value = typeof section === "string" && section ? section : "general";
+	settingsIntent.value = intent || null;
+}
+
+// One-shot read for the pane openSettings() just opened - returns whatever
+// intent (if any) that call left and clears it in the same step, so it is
+// consumed at most once regardless of how many panes mount afterward.
+function takeSettingsIntent() {
+	const intent = settingsIntent.value;
+	settingsIntent.value = null;
+	return intent;
 }
 
 // ---- socket contract (§14 DA-04) — called by ChatView's handlers only ------
@@ -600,6 +614,7 @@ const store = reactive({
 	settingsOpen,
 	settingsSection,
 	settingsApplying,
+	settingsIntent,
 	llmConfigVersion,
 	chatContext,
 	settingsActions,
@@ -629,6 +644,7 @@ const store = reactive({
 	archiveConversation,
 	requestNewChat,
 	openSettings,
+	takeSettingsIntent,
 	setChatContext,
 	registerSettingsActions,
 	clearSettingsActions,

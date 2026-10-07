@@ -18,7 +18,7 @@ import time
 import frappe
 import requests
 
-from jarvis import admin_client, onboarding
+from jarvis import admin_client, onboarding, subscription_health
 from jarvis.exceptions import JarvisError
 from jarvis.oauth import pending_capture
 from jarvis.oauth.providers import (
@@ -615,6 +615,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	settings.db_set("llm_oauth_connected_at", frappe.utils.now_datetime(), update_modified=False)
 
 	frappe.cache.hdel(_CACHE_KEY, nonce)
+	subscription_health.record_signin_complete(p["agent_provider"], all_sources=True)
 	return _ok(
 		{
 			"account_email": email,
@@ -694,6 +695,7 @@ def complete_pool_account_signin(nonce: str, redirected_url: str) -> dict:
 		nonce=nonce,
 	)
 	frappe.cache.hdel(_CACHE_KEY, nonce)
+	subscription_health.record_signin_complete(get_provider(result["provider"])["agent_provider"])
 	return _ok(view)
 
 
@@ -978,6 +980,7 @@ def complete_claude_cli_login(login_id: str, code: str) -> dict:
 		safe_label=email or "Claude subscription",
 		provider_subject="",
 	)
+	subscription_health.record_signin_complete("anthropic", all_sources=True)
 	return _ok(view)
 
 

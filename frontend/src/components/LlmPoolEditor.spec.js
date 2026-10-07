@@ -46,6 +46,12 @@ vi.mock("frappe-ui", () => ({
 	dayjsLocal: () => ({ format: () => "", fromNow: () => "", isValid: () => false }),
 	getConfig: () => null,
 	toast: { error: vi.fn(), success: vi.fn() },
+	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: "<span/>" },
+	Badge: {
+		name: "Badge",
+		props: ["label", "theme", "variant"],
+		template: `<span class="stub-badge" :data-label="label">{{ label }}</span>`,
+	},
 }));
 
 const answer = vi.hoisted(() => ({ confirm: true }));

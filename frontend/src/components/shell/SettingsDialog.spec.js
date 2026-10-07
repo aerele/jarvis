@@ -60,7 +60,17 @@ vi.mock("@/components/settings/UsageAdminPane.vue", () => paneStub("UsageAdminPa
 vi.mock("@/components/settings/BrandingPane.vue", () => paneStub("BrandingPane"));
 vi.mock("@/components/settings/MacrosAdminPane.vue", () => paneStub("MacrosAdminPane"));
 
+vi.mock("@/lib/subscriptionNotice", async () => {
+	const { reactive } = await import("vue");
+	return {
+		subscriptionNotice: reactive({ loaded: true, expired: [], upstreams: null }),
+		loadSubscriptionNotice: vi.fn(),
+		watchSubscriptionNotice: vi.fn(() => () => {}),
+	};
+});
+
 import SettingsDialog from "./SettingsDialog.vue";
+import { subscriptionNotice } from "@/lib/subscriptionNotice";
 
 async function mountDialog({ isSM = false, isAdmin = false, section = "general" } = {}) {
 	window.is_system_manager = isSM;
@@ -74,6 +84,7 @@ async function mountDialog({ isSM = false, isAdmin = false, section = "general" 
 }
 
 afterEach(() => {
+	subscriptionNotice.expired = [];
 	delete window.is_system_manager;
 	delete window.is_jarvis_admin;
 });
@@ -157,5 +168,30 @@ describe("SettingsDialog legacy section keys", () => {
 		// item - so this should resolve to Usage, not fall back to General.
 		const w = await mountDialog({ isSM: false, isAdmin: false, section: "billing" });
 		expect(w.find(".pane-marker").text()).toBe("UsagePane");
+	});
+});
+
+describe("rail dots for an expired chat sign-in", () => {
+	const dotsOn = (w) =>
+		w
+			.findAll("button")
+			.filter((b) => b.find('[aria-label="Needs attention"]').exists())
+			.map((b) => b.text());
+
+	it("marks AI models and General for an admin, and nothing else", async () => {
+		subscriptionNotice.expired = [{ upstream: "openai", label: "OpenAI", account_ref: "A1" }];
+		const w = await mountDialog({ isSM: true, isAdmin: true });
+		expect(dotsOn(w).sort()).toEqual(["AI models", "General"]);
+	});
+
+	it("shows no dot while nothing is expired", async () => {
+		const w = await mountDialog({ isSM: true, isAdmin: true });
+		expect(dotsOn(w)).toEqual([]);
+	});
+
+	it("never shows a member a dot (they have no AI models pane to open)", async () => {
+		subscriptionNotice.expired = [{ upstream: "openai", label: "OpenAI" }];
+		const w = await mountDialog({ isSM: false, isAdmin: false });
+		expect(dotsOn(w)).toEqual([]);
 	});
 });
