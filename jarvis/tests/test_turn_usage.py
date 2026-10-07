@@ -564,7 +564,7 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		base = {
 			"modelProvider": "openai_compat",
 			"model": "jarvis-pool",
-			"agentRuntime": {"id": "openclaw", "source": "provider"},
+			"agentRuntime": {"id": "default", "source": "provider"},
 			"inputTokens": 21017,
 			"outputTokens": 69,
 			"totalTokens": 58393,
@@ -668,7 +668,7 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 
 	def test_claude_model_name_alone_is_not_a_cli_marker(self):
 		_make_session("agent:tu-api-claude", USER_A)
-		row = self._cli_row(agentRuntime={"id": "openclaw", "source": "provider"})
+		row = self._cli_row(agentRuntime={"id": "default", "source": "provider"})
 		usage.record_turn_usage("agent:tu-api-claude", row, reply_chars=2000)
 		r = self._turn_row("agent:tu-api-claude")
 		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (2, 0))
@@ -683,7 +683,7 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 
 	def test_agent_runtime_string_form_is_tolerated(self):
 		self.assertTrue(usage.is_claude_cli_row({"agentRuntime": "claude-cli"}))
-		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": "openclaw"}))
+		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": "default"}))
 		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": None}))
 
 	def test_no_reply_chars_means_no_estimate_for_claude_cli(self):
@@ -704,8 +704,12 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 	def _make_turn_with_reply(self, text: str) -> str:
 		conv = frappe.get_doc({"doctype": CONV, "title": "turnusage-fixture-reply", "status": "Active"})
 		conv.insert(ignore_permissions=True)
+		seed = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv.name, "seq": 1, "role": "user", "content": "hi"}
+		)
+		seed.insert(ignore_permissions=True)
 		doc = frappe.get_doc(
-			{"doctype": MSG, "conversation": conv.name, "seq": 1, "role": "assistant", "content": text}
+			{"doctype": MSG, "conversation": conv.name, "seq": 2, "role": "assistant", "content": text}
 		)
 		doc.insert(ignore_permissions=True)
 		run_id = f"test-turnusage-{frappe.generate_hash(length=10)}"
@@ -715,6 +719,7 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 				"run_id": run_id,
 				"conversation": conv.name,
 				"relay_target_id": run_id,
+				"seed_message": seed.name,
 				"assistant_message": doc.name,
 				"state": "done",
 			}
