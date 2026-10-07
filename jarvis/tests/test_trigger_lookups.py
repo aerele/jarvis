@@ -31,7 +31,7 @@ def _df(fieldname, fieldtype="Data", permlevel=0, in_list_view=0, options=None):
 
 
 class _Meta:
-	def __init__(self, name, fields, istable=0, issingle=0, module="Accounts", title_field=None):
+	def __init__(self, name, fields, istable=0, issingle=0, module="Accounts", title_field=None, custom=0):
 		self.name = name
 		self.fields = fields
 		self.istable = istable
@@ -39,6 +39,7 @@ class _Meta:
 		self.module = module
 		self.title_field = title_field
 		self.is_virtual = 0
+		self.custom = custom
 
 	def get_field(self, fieldname):
 		return next((df for df in self.fields if df.fieldname == fieldname), None)
@@ -68,9 +69,27 @@ class _LookupCase(unittest.TestCase):
 			"Stock Settings": _Meta("Stock Settings", [_df("default_warehouse")], issingle=1),
 			"Vault Entry": _Meta("Vault Entry", [_df("note"), _df("secret", "Password")]),
 			"Jarvis Thing": _Meta("Jarvis Thing", [_df("title")], module="Jarvis"),
-			"User": _Meta("User", [_df("email")]),
-			"Server Script": _Meta("Server Script", [_df("script", "Code")]),
+			"User": _Meta("User", [_df("email")], module="Core"),
+			"Server Script": _Meta("Server Script", [_df("script", "Code")], module="Core"),
+			"Role": _Meta("Role", [_df("role_name")], module="Core"),
+			"User Permission": _Meta("User Permission", [_df("allow")], module="Core"),
+			"Email Queue": _Meta("Email Queue", [_df("message", "Long Text")], module="Email"),
+			"Communication": _Meta("Communication", [_df("content", "Text Editor")], module="Core"),
+			"Contact": _Meta("Contact", [_df("email_id")], module="Contacts"),
+			"Gift Card": _Meta("Gift Card", [_df("code_label")], module="Custom", custom=1),
+			"Plain Custom": _Meta("Plain Custom", [_df("label")], module="Custom"),
 		}
+		module_app = {
+			"accounts": "erpnext",
+			"core": "frappe",
+			"email": "frappe",
+			"contacts": "frappe",
+			"custom": "frappe",
+			"jarvis": "jarvis",
+		}
+		p = patch.object(lookups, "_module_app", side_effect=lambda m: module_app.get((m or "").lower()))
+		p.start()
+		self.addCleanup(p.stop)
 		self.user = frappe._dict(user="Administrator")
 		self.user_calls = []
 
@@ -80,8 +99,9 @@ class _LookupCase(unittest.TestCase):
 
 		self.enabled = 1
 		db = MagicMock()
-		db.exists.side_effect = (
-			lambda dt, name=None: True if dt == "DocType" and name in self.metas else False
+		# MariaDB's DocType name match is case-insensitive and returns the real name.
+		db.exists.side_effect = lambda dt, name=None: next(
+			(k for k in self.metas if dt == "DocType" and k.lower() == (name or "").lower()), None
 		)
 		db.get_value.side_effect = lambda *a, **k: self.enabled
 		for p in (
@@ -103,6 +123,12 @@ class TestParseReply(unittest.TestCase):
 		self.assertEqual(lookups.parse_reply({"finding": " ok "})[:2], ("finding", "ok"))
 		self.assertEqual(lookups.parse_reply('{"finding": "ok"}')[:2], ("finding", "ok"))
 		self.assertEqual(lookups.parse_reply("plain prose")[:2], ("finding", "plain prose"))
+
+	def test_a_single_json_fence_is_stripped(self):
+		req = {"tool": "get", "args": {"doctype": "ToDo", "name": "x"}}
+		fenced = "```json\n" + json.dumps({"lookup": req}) + "\n```"
+		self.assertEqual(lookups.parse_reply(fenced)[:2], ("lookup", req))
+		self.assertEqual(lookups.parse_reply('```\n{"finding": "ok"}\n```')[:2], ("finding", "ok"))
 
 	def test_lookup_object_and_json_text(self):
 		req = {"tool": "list", "args": {"doctype": "ToDo"}}
@@ -190,6 +216,19 @@ class TestExecuteList(_LookupCase):
 			"child table": dict(doctype="Sales Invoice Item"),
 			"single": dict(doctype="Stock Settings"),
 			"unknown doctype": dict(doctype="Nope"),
+			"lowercase role": dict(doctype="role"),
+			"uppercase user permission": dict(doctype="USER PERMISSION"),
+			"email queue": dict(doctype="email queue"),
+			"communication": dict(doctype="Communication"),
+			"contact": dict(doctype="Contact"),
+			"plain doctype in a framework module": dict(doctype="Plain Custom"),
+			"is with a non-string": dict(doctype="Sales Invoice", filters=[["status", "is", 1]]),
+			"between with three values": dict(
+				doctype="Sales Invoice", filters=[["grand_total", "between", [1, 2, 3]]]
+			),
+			"dict filter with a bad operator": dict(
+				doctype="Sales Invoice", filters={"status": ["regexp", "x"]}
+			),
 			"permlevel 2 field": dict(doctype="Sales Invoice", fields=["internal_cost"]),
 			"secret-named field": dict(doctype="Sales Invoice", fields=["api_key"]),
 			"table field": dict(doctype="Sales Invoice", fields=["items"]),
@@ -212,6 +251,13 @@ class TestExecuteList(_LookupCase):
 				self.assertIn("refused", line)
 				read.assert_not_called()
 		self.assertEqual(self.user.user, "Administrator")
+
+	def test_app_rule_allows_custom_and_other_app_doctypes(self):
+		with patch(GET_LIST, return_value=[{"name": "G1"}]) as read:
+			self.assertEqual(self.lookup("list", doctype="Gift Card")[0]["count"], 1)
+			self.assertEqual(self.lookup("list", doctype="sales invoice")[0]["count"], 1)
+		# the canonical spelling is what gets read
+		self.assertEqual(read.call_args_list[1].args[0], "Sales Invoice")
 
 	def test_other_tools_are_refused(self):
 		for tool in ("report", "query", "run_method", "delete_doc", None):
@@ -246,7 +292,7 @@ class TestExecuteGet(_LookupCase):
 			"internal_cost": 99,
 			"api_key": "k",
 			"_user_tags": ",x",
-			"items": [{"item_code": "A", "idx": 1}],
+			"items": [{"item_code": "A", "idx": 1, "parent": "SINV-1", "api_key": "k"}],
 		}
 		with patch(GET_DOC, return_value=doc) as read:
 			result, line = self.lookup("get", doctype="Sales Invoice", name="SINV-1")
@@ -254,6 +300,8 @@ class TestExecuteGet(_LookupCase):
 		self.assertEqual(result["doc"]["customer"], "C1")
 		for hidden in ("internal_cost", "api_key", "_user_tags"):
 			self.assertNotIn(hidden, result["doc"])
+		# child rows go through the child's own readable set too
+		self.assertEqual(result["doc"]["items"], [{"item_code": "A", "idx": 1}])
 		self.assertEqual(line, "get Sales Invoice: 1 record")
 
 	def test_missing_and_unreadable_look_the_same(self):

@@ -151,7 +151,9 @@ def llm_task_complete(
 	Never logs the bearer token.
 
 	``expect_object`` (LLM trigger lookups) asks for a JSON object instead of a
-	string literal: the schema becomes ``{"type": "object"}`` and the return is
+	string literal: the schema becomes ``{"type": ["object", "string"]}`` (an
+	object-only schema makes the runtime fail a prose answer with HTTP 500, so
+	a string answer must stay valid and become the finding) and the return is
 	the parsed object (``details.json`` first, then the content text), or the
 	plain text when the model did not answer with one.
 	"""
@@ -166,7 +168,7 @@ def llm_task_complete(
 		"args": {
 			"prompt": prompt,
 			"input": input_payload,
-			"schema": {"type": "object" if expect_object else "string"},
+			"schema": {"type": ["object", "string"] if expect_object else "string"},
 			"maxTokens": _MAX_TOKENS,
 			"timeoutMs": timeout * 1000,
 		},
