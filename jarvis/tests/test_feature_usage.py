@@ -84,6 +84,16 @@ class TestGetUsedFeatures(FrappeTestCase):
 		self._backdate(CONV, conv, days=-30)
 		self.assertNotIn("file_box", get_used_features(USER, self.since))
 
+	def test_until_bounds_the_window_from_above(self):
+		"""``[since, until)``: use after ``until`` (e.g. this month, while the
+		survey reviews last month) is not reported; use before it is."""
+		conv = self._conv(file_box=1)
+		self._backdate(CONV, conv, days=-2)
+		until = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-3)
+		self.assertNotIn("file_box", get_used_features(USER, self.since, until))
+		until = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-1)
+		self.assertIn("file_box", get_used_features(USER, self.since, until))
+
 	def test_another_users_file_box_not_detected(self):
 		doc = frappe.get_doc({"doctype": CONV, "title": "someone else", "file_box": 0})
 		doc.insert(ignore_permissions=True)

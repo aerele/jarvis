@@ -107,6 +107,32 @@ describe("PulseFeedbackDialog", () => {
 		);
 	});
 
+	it("asks about last month when the context says the previous month", () => {
+		pulseFeedbackContext.value = {
+			period_label: "Last month, Sep 2026",
+			period_is_previous: true,
+			features_offered: ["file_box"],
+		};
+		pulseFeedbackOpen.value = true;
+		const w = mount(PulseFeedbackDialog);
+		expect(w.text()).toContain("Last month, Sep 2026");
+		expect(w.text()).toContain("how satisfied were you last month?");
+		expect(w.text()).toContain("only what you used last month");
+		expect(w.text()).not.toContain("this month");
+	});
+
+	it("keeps the this-month wording otherwise", () => {
+		pulseFeedbackContext.value = {
+			period_label: "This month, Oct 2026",
+			period_is_previous: false,
+			features_offered: ["file_box"],
+		};
+		pulseFeedbackOpen.value = true;
+		const w = mount(PulseFeedbackDialog);
+		expect(w.text()).toContain("how satisfied are you this month?");
+		expect(w.text()).toContain("only what you've used this month");
+	});
+
 	it("Maybe later closes without submitting", async () => {
 		pulseFeedbackContext.value = { period_label: "This month", features_offered: [] };
 		pulseFeedbackOpen.value = true;
