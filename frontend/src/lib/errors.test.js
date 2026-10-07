@@ -488,7 +488,8 @@ test("#644: the same 403 on a live session keeps the server's own message", () =
 	withCookie("user_id=kavin%40aerele.in; sid=abc", () => {
 		const e = expired403();
 		assert.equal(isSessionExpired(e), false);
-		assert.equal(errMessage(e), e.messages[0]);
+		const [serverMessage] = e.messages;
+		assert.equal(errMessage(e), serverMessage);
 	});
 });
 
