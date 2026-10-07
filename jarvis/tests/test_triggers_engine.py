@@ -735,6 +735,23 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 		self.assertIn("refused: no read permission on Error Log", rows[0].detail)
 		self.assertEqual(frappe.session.user, "Administrator")
 
+	def test_gateway_error_after_a_lookup_writes_a_failed_row_with_the_lookup_note(self):
+		from jarvis.triggers import lookups
+
+		trig = self._make_llm_trigger(lookups=1)
+		self._owned_by_new_user(trig)
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=[self.LOOKUP, LLMTaskError("llm-task request timed out")]),
+			patch("jarvis.tools.get_list.get_list", return_value=[{"name": "T1"}]),
+		):
+			self._run(trig)  # must not raise
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
+		self.assertIn("timed out", rows[0].summary)
+		self.assertIn(lookups.LOOKUP_MARKER, rows[0].detail)
+		self.assertIn("list ToDo: 1 row", rows[0].detail)
+
 	def test_out_of_time_writes_a_failed_row_without_raising(self):
 		from jarvis.triggers import lookups
 

@@ -208,6 +208,14 @@
 							:disabled="readOnly || saving"
 							@update:modelValue="(v) => (form.llm_daily_cap = v)"
 						/>
+						<FormControl
+							type="checkbox"
+							label="Allow read-only lookups"
+							description="Lets the LLM read related records as the trigger owner. Findings are visible to the owner and managers only."
+							:modelValue="!!form.llm_allow_lookups"
+							:disabled="readOnly || saving"
+							@update:modelValue="(v) => (form.llm_allow_lookups = v ? 1 : 0)"
+						/>
 					</template>
 				</div>
 			</DocSection>
@@ -400,6 +408,7 @@ const form = reactive({
 	script_body: "",
 	llm_instruction: "",
 	llm_daily_cap: 25,
+	llm_allow_lookups: 0,
 });
 // Saved-state copy for the dirty compare - a ref, per MacroDetail's lesson
 // (the computed must track it while the initial load is in flight).
@@ -467,9 +476,11 @@ const FIELDS = [
 	"script_body",
 	"llm_instruction",
 	"llm_daily_cap",
+	"llm_allow_lookups",
 ];
 function normalized(f) {
 	if (f === "enabled") return form.enabled ? 1 : 0;
+	if (f === "llm_allow_lookups") return form.llm_allow_lookups ? 1 : 0;
 	if (f === "llm_daily_cap") return Number(form.llm_daily_cap) || 0;
 	return String(form[f] == null ? "" : form[f]);
 }
@@ -536,6 +547,7 @@ function seed(data) {
 	form.script_body = data.script_body || "";
 	form.llm_instruction = data.llm_instruction || "";
 	form.llm_daily_cap = data.llm_daily_cap == null ? 25 : data.llm_daily_cap;
+	form.llm_allow_lookups = data.llm_allow_lookups ? 1 : 0;
 	const snap = {};
 	for (const f of FIELDS) snap[f] = normalized(f);
 	snapshot.value = snap;

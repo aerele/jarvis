@@ -40,6 +40,12 @@ ROUND_TIMEOUT_S = 60
 # Under this many seconds left, the next round must answer with the finding.
 FORCE_FINAL_BELOW_S = 20
 
+# Written into the activity detail of every run that used lookups. The activity
+# feed hides such rows from everyone but managers and the trigger owner, and
+# reads this marker (not only the trigger's current flag) so rows stay hidden
+# after the flag is turned off.
+LOOKUP_MARKER = "[lookups]"
+
 TIMEOUT_MESSAGE = "LLM trigger ran out of time while looking up related records."
 
 _TOOLS = ("list", "get")
@@ -49,11 +55,12 @@ _MAX_VALUE_CHARS = 200
 _MAX_IN_VALUES = 50
 
 _OPERATORS = frozenset({"=", "!=", "<", ">", "<=", ">=", "like", "in", "not in", "between", "is"})
+_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 _ORDER_BY = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(asc|desc)\s*$", re.IGNORECASE)
 _SECRET_NAME = re.compile(r"(password|passwd|secret|token|api_?key|private_key|credential)", re.IGNORECASE)
 
 # Standard columns every DocType has that are safe to read and filter on.
-_STANDARD_FIELDS = ("name", "owner", "creation", "modified", "docstatus")
+_STANDARD_FIELDS = ("name", "owner", "creation", "modified", "docstatus", "idx")
 
 # Field types a lookup never selects, filters or returns.
 _FORBIDDEN_FIELDTYPES = frozenset(
@@ -69,8 +76,14 @@ _FORBIDDEN_FIELDTYPES = frozenset(
 	}
 )
 
-# DocTypes a lookup may never touch: access control, schema and code, plus the
-# site and Jarvis configuration. Jarvis's own structure/sensitive lists are
+# Apps whose DocTypes a lookup never reads: the framework and Jarvis itself
+# (users, roles, queues, logs, files, contacts, settings, schema, code). This
+# app rule is the primary gate; a customer's own DocType (custom == 1) and every
+# other app's DocTypes (ERPNext and so on) stay lookable.
+_DENIED_APPS = frozenset({"frappe", "jarvis"})
+
+# Defense in depth behind the app rule: access control, schema and code, plus
+# the site and Jarvis configuration. Jarvis's own structure/sensitive lists are
 # folded in below, and any DocType in the Jarvis module or with a Password
 # field is refused in _check_doctype.
 _DENY_DOCTYPES = frozenset(
@@ -125,6 +138,9 @@ def parse_reply(reply) -> tuple[str, dict | str, str]:
 	text = text.strip()
 	if isinstance(reply, str):
 		data = None
+		fenced = _FENCE.match(text)
+		if fenced:
+			text = fenced.group(1).strip()
 		if text.startswith("{"):
 			try:
 				data = json.loads(text)
@@ -155,26 +171,35 @@ def _owner_can_look_up(owner: str) -> str | None:
 	return None
 
 
+def _module_app(module: str | None) -> str | None:
+	"""The app a Module Def belongs to, from frappe's module map."""
+	return frappe.local.module_app.get(frappe.scrub(module or ""))
+
+
 def _check_doctype(doctype) -> object:
-	"""The DocType's meta, or LookupRefused."""
+	"""The DocType's meta, or LookupRefused. The name is resolved to its
+	canonical spelling first (the DB match is case/accent-insensitive), and every
+	check runs on that canonical name."""
 	if not isinstance(doctype, str) or not doctype.strip():
 		raise LookupRefused("doctype is required")
-	doctype = doctype.strip()
-	if not frappe.db.exists("DocType", doctype):
-		raise LookupRefused(f"unknown doctype: {doctype}")
-	if doctype in _denied_doctypes():
-		raise LookupRefused(f"{doctype} cannot be looked up")
-	meta = frappe.get_meta(doctype)
+	name = frappe.db.exists("DocType", doctype.strip())
+	if not name:
+		raise LookupRefused(f"unknown doctype: {doctype.strip()[:60]}")
+	if name in _denied_doctypes():
+		raise LookupRefused(f"{name} cannot be looked up")
+	meta = frappe.get_meta(name)
+	if meta.name in _denied_doctypes() or meta.module == "Jarvis":
+		raise LookupRefused(f"{name} cannot be looked up")
+	if not cint(getattr(meta, "custom", 0)) and _module_app(meta.module) in (*_DENIED_APPS, None):
+		raise LookupRefused(f"{name} cannot be looked up")
 	if meta.istable:
-		raise LookupRefused(f"{doctype} is a child table; look up its parent instead")
+		raise LookupRefused(f"{name} is a child table; look up its parent instead")
 	if meta.issingle:
-		raise LookupRefused(f"{doctype} is a single settings record and cannot be looked up")
+		raise LookupRefused(f"{name} is a single settings record and cannot be looked up")
 	if getattr(meta, "is_virtual", 0):
-		raise LookupRefused(f"{doctype} cannot be looked up")
-	if meta.module == "Jarvis":
-		raise LookupRefused(f"{doctype} cannot be looked up")
+		raise LookupRefused(f"{name} cannot be looked up")
 	if any(df.fieldtype == "Password" for df in meta.fields):
-		raise LookupRefused(f"{doctype} holds secrets and cannot be looked up")
+		raise LookupRefused(f"{name} holds secrets and cannot be looked up")
 	return meta
 
 
@@ -311,21 +336,20 @@ def _as_user(user: str):
 		frappe.set_user(previous)
 
 
-def _strip_secrets(values: dict, doctype: str) -> dict:
-	"""``values`` without secret-typed or secret-named fields and private keys,
-	recursing into child tables (permlevel is handled by engine._permlevel_0)."""
+def _keep_readable(values: dict, doctype: str) -> dict:
+	"""``values`` limited to the same readable-field set ``list`` selects from,
+	recursing into child tables with each child's own meta."""
 	meta = frappe.get_meta(doctype)
+	readable = _readable_fieldnames(meta)
 	out = {}
 	for key, value in values.items():
-		if str(key).startswith("_") or _SECRET_NAME.search(str(key)):
-			continue
 		df = meta.get_field(key)
 		if df and df.fieldtype in frappe.model.table_fields:
 			if isinstance(value, list):
-				value = [_strip_secrets(row, df.options) if isinstance(row, dict) else row for row in value]
-		elif df and df.fieldtype in _FORBIDDEN_FIELDTYPES:
-			continue
-		out[key] = value
+				value = [_keep_readable(row, df.options) if isinstance(row, dict) else row for row in value]
+			out[key] = value
+		elif key in readable:
+			out[key] = value
 	return out
 
 
@@ -378,7 +402,7 @@ def _do_get(args: dict, budget: int) -> tuple[dict, int]:
 		# One answer for "missing" and "not allowed", so a lookup can't probe
 		# which records exist beyond the owner's reach.
 		raise LookupRefused("no such record, or no read permission") from None
-	doc = _strip_secrets(_permlevel_0(doc, meta.name), meta.name)
+	doc = _keep_readable(_permlevel_0(doc, meta.name), meta.name)
 	if _size(doc) > budget:
 		return {
 			"doc_truncated": json.dumps(doc, default=str, ensure_ascii=False)[:budget],
