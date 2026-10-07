@@ -58,13 +58,21 @@ Immediate Retry buttons are hidden for known failures requiring input,
 configuration, access, or account changes. Raw error details remain available.
 This change does not automatically resend messages or alter recovery behavior.
 
-Retry (desktop chat and dashboard chat) runs the failed turn again with the
-context and the original attachments of that turn. The server refuses a retry
-when a later turn has not finished, when the failed reply is not the latest
-user or assistant message (the closing message of a macro run does not count),
-or when the user message has a different owner than the conversation. On the
-admission and pump paths these checks run under the conversation row lock, so
-two tabs cannot start two retries; the legacy path checks without the lock.
+Retry (desktop chat and dashboard chat) runs the failed turn again. Where Turn
+rows exist (the admission and pump paths), it uses the context and the original
+attachments of the failed turn; pure legacy writes no Turn rows, so a retry
+there has neither. The server refuses a retry when another turn has not
+finished, when the failed reply is not the latest visible user or assistant
+message (the closing message of a macro run does not count), or when the user
+message has a different owner than the conversation. On the admission and pump
+paths these checks run under the conversation row lock, so two tabs cannot
+start two retries, except on the legacy fallback during a cutover; the legacy
+path checks without the lock.
+
+One documented edge: on the legacy path a dead worker can leave a blank
+streaming row after the failed reply. Desktop chat hides that row and shows
+Retry, but the server counts it and refuses (`not_latest`); there it is the
+only guard against a duplicate run.
 
 ## Customer wording
 
