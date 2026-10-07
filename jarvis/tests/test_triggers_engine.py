@@ -78,7 +78,7 @@ class _TriggerTestCase(FrappeTestCase):
 		self._todos.append(doc.name)
 		return doc
 
-	def _make_llm_trigger(self, condition="", event="on_update", cap=100, enabled=1):
+	def _make_llm_trigger(self, condition="", event="on_update", cap=100, enabled=1, lookups=0):
 		doc = frappe.get_doc(
 			{
 				"doctype": TRIGGER,
@@ -89,6 +89,7 @@ class _TriggerTestCase(FrappeTestCase):
 				"action_type": "LLM",
 				"llm_instruction": "Check this todo for problems.",
 				"llm_daily_cap": cap,
+				"llm_allow_lookups": lookups,
 				"enabled": enabled,
 			}
 		)
@@ -622,3 +623,93 @@ class TestRunLLMAction(_TriggerTestCase):
 			self._run(trig)
 		self.assertEqual(task.call_count, 0)
 		self.assertEqual(self._activities(trig.name), [])
+
+
+# --------------------------------------------------------------------------- #
+# LLM action job with read-only lookups (jarvis-admin-v2#608)
+# --------------------------------------------------------------------------- #
+class TestRunLLMActionLookups(_TriggerTestCase):
+	LOOKUP = {"lookup": {"tool": "list", "args": {"doctype": "ToDo", "filters": {"status": "Open"}}}}
+
+	def _run(self, trig):
+		llm_action.run_llm_action(
+			trigger=trig.name,
+			doctype="ToDo",
+			docname="some-todo",
+			doc_event="on_update",
+			snapshot_json='{"description": "x"}',
+			fired_by="Administrator",
+		)
+
+	def _owned_by_other_user(self, trig):
+		user = frappe.db.get_value("User", {"enabled": 1, "name": ["not in", ["Administrator", "Guest"]]})
+		if not user:
+			self.skipTest("no enabled non-admin user on this site")
+		frappe.db.set_value(TRIGGER, trig.name, "owner", user, update_modified=False)
+		return user
+
+	def test_off_by_default_makes_the_single_string_call(self):
+		trig = self._make_llm_trigger()
+		self.assertEqual(frappe.db.get_value(TRIGGER, trig.name, "llm_allow_lookups"), 0)
+		with patch(LLM_TASK_COMPLETE, return_value="All good.") as task:
+			self._run(trig)
+		self.assertEqual(task.call_count, 1)
+		self.assertEqual(task.call_args.kwargs, {"timeout": 60})
+		self.assertIn("JSON string literal", task.call_args.args[0])
+		rows = self._activities(trig.name)
+		self.assertEqual(
+			(rows[0].status, rows[0].summary, rows[0].detail), ("Success", "All good.", "All good.")
+		)
+
+	def test_lookup_runs_as_the_owner_then_the_finding_is_recorded(self):
+		trig = self._make_llm_trigger(lookups=1)
+		owner = self._owned_by_other_user(trig)
+		seen = []
+
+		def fake_get_list(doctype, **kwargs):
+			seen.append(frappe.session.user)
+			return [{"name": "TODO-SECRET-ROW"}]
+
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=[self.LOOKUP, {"finding": "One open todo."}]) as task,
+			patch("jarvis.tools.get_list.get_list", side_effect=fake_get_list),
+		):
+			self._run(trig)
+		self.assertEqual(seen, [owner])
+		self.assertEqual(frappe.session.user, "Administrator")
+		self.assertEqual(task.call_count, 2)
+		self.assertTrue(task.call_args_list[0].kwargs["expect_object"])
+		self.assertIn("TODO-SECRET-ROW", task.call_args_list[1].args[1])
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "One open todo."))
+		self.assertIn("Rounds: 2", rows[0].detail)
+		self.assertIn("list ToDo: 1 row", rows[0].detail)
+		self.assertNotIn("TODO-SECRET-ROW", rows[0].detail)
+
+	def test_permission_refusal_is_fed_back_and_the_finding_still_lands(self):
+		from jarvis.exceptions import PermissionDeniedError
+
+		trig = self._make_llm_trigger(lookups=1)
+		with (
+			patch(LLM_TASK_COMPLETE, side_effect=[self.LOOKUP, {"finding": "Could not check."}]) as task,
+			patch(
+				"jarvis.tools.get_list.get_list",
+				side_effect=PermissionDeniedError("no read permission on ToDo"),
+			),
+		):
+			self._run(trig)  # must not raise
+		self.assertIn("no read permission on ToDo", task.call_args_list[1].args[1])
+		rows = self._activities(trig.name)
+		self.assertEqual((rows[0].status, rows[0].summary), ("Success", "Could not check."))
+		self.assertIn("refused: no read permission on ToDo", rows[0].detail)
+
+	def test_out_of_time_writes_a_failed_row_without_raising(self):
+		from jarvis.triggers import lookups
+
+		trig = self._make_llm_trigger(lookups=1)
+		with patch(LLM_TASK_COMPLETE) as task, patch.object(lookups, "TOTAL_BUDGET_S", 0):
+			self._run(trig)  # must not raise
+		self.assertEqual(task.call_count, 0)
+		rows = self._activities(trig.name)
+		self.assertEqual((rows[0].status, rows[0].summary), ("Failed", lookups.TIMEOUT_MESSAGE))
