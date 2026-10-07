@@ -822,11 +822,12 @@ def save_llm_pool(
 	elif compute_pool_mode(s):
 		from jarvis.chat import llm_switch
 
-		if s._is_pool_switch() or llm_switch.is_active():
+		if s._is_pool_switch() or s._primary_changed() or llm_switch.is_active():
 			# jarvis#1425 follow-up (seamless switch, spec Part C; review round
 			# 2): this Apply either flips proxy_active itself (adding a model
 			# back turns the proxy back on, or a converge-teardown turns it
-			# off), OR a switch is ALREADY active for some other reason (e.g. a
+			# off), OR it moves a different model to FIRST (admin-v2#629: a new
+			# primary restarts the container), OR a switch is ALREADY active for some other reason (e.g. a
 			# handover pending) - either way, sync_pool_now would push
 			# SYNCHRONOUSLY and recreate the container immediately, cutting
 			# whatever reply is in flight, or racing/bypassing the switch
