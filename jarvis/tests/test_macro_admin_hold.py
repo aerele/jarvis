@@ -605,6 +605,9 @@ class TestTheOwnerCannotUndoIt(WithColumns):
 		importer = Importer.__new__(Importer)
 		importer.doctype = MACRO
 		importer.data_import = frappe._dict(doctype="Data Import", name="macro-hold-test")
+		# Built without ``__init__``: what ``update_record`` reads from it on newer Frappe 16.
+		importer._uses_tree_aliases = False
+		importer._tree_parent_field = None
 		frappe.set_user(OWNER)
 		frappe.flags.in_import = True
 		try:
