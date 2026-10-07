@@ -362,9 +362,10 @@ export async function sendMessage(
 	)
 		args.context = JSON.stringify(context);
 	if (requestId) {
-		const envelope = await boundedDelivery(
-			call("jarvis.chat.send_requests.send_message", { ...args, request_id: requestId })
-		);
+		const envelope = await call("jarvis.chat.send_requests.send_message", {
+			...args,
+			request_id: requestId,
+		});
 		return settledSendResult(envelope);
 	}
 	return call("jarvis.chat.api.send_message", args);

@@ -37,42 +37,9 @@ describe("firstSendPicks", () => {
 	});
 });
 
-/**
- * The helper is only a fix if send() uses it. There is no vitest harness for the
- * ChatView send() handler, so, like showCardRequestWiring.spec, this pins the
- * wiring at the source level.
- */
+// The actual SFC send boundary and wire arguments are exercised in
+// utils/desktopSendRecovery.test.js, including first-send model/effort picks.
 const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
-const sendAt = src.indexOf("await api.sendMessage(");
-const sendCall = src.slice(sendAt, src.indexOf(");", sendAt));
-
-describe("send() carries a new chat's picks", () => {
-	it("imports the shared helper", () => {
-		expect(src).toContain('import { firstSendPicks } from "@/lib/firstSendPicks";');
-	});
-
-	it("derives the picks from the conversation it is sending from", () => {
-		expect(src).toContain(
-			"const _picks = firstSendPicks(sentFrom, modelOverride.value, thinkingOverride.value);"
-		);
-		expect(src.indexOf("const _picks = firstSendPicks(")).toBeLessThan(sendAt);
-	});
-
-	it("passes the model pick where a literal undefined used to be", () => {
-		expect(src).toContain("model: _picks.model");
-		const args = sendCall.split("\n").map((line) => line.trim());
-		expect(args.slice(1, 4)).toEqual([
-			"sendRequest.conversation,",
-			"sendRequest.text,",
-			"sendRequest.model,",
-		]);
-	});
-
-	it("passes the thinking pick before the request identifier", () => {
-		expect(src).toContain("thinking: _picks.thinking");
-		expect(sendCall).toMatch(/sendRequest\.thinking,\s*sendRequest\.requestId\s*$/);
-	});
-});
 
 describe("newChat() starts a chat with no pick", () => {
 	// The server hands a new chat out with no pick (a reused empty one is cleared),

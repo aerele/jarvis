@@ -1,9 +1,10 @@
 // Relative shared import also supports the unbundled node --test suite (no Vite aliases).
+import { newSendRequestId, deliveryOutcome } from "../../../frontend/src/lib/sendDelivery.js";
 import { sendRejectionCopy } from "../../../frontend/src/lib/sendRejectionCopy.js";
 
 // Request state is independent of the view and transcript. The caller makes
 // `state` reactive; this module stays testable without a Vue runtime.
-export function createSendRecovery(state, id = () => crypto.randomUUID().replaceAll("-", "")) {
+export function createSendRecovery(state, id = newSendRequestId) {
 	return {
 		stage(conversation, text, attachments, approvalTokens = []) {
 			const request = {
@@ -26,32 +27,16 @@ export function createSendRecovery(state, id = () => crypto.randomUUID().replace
 			// Positive server evidence wins over a later lost/failed HTTP response.
 			if (["accepted", "confirmed", "rejected"].includes(request.state))
 				return request.state;
-			if (
-				result?.confirmed === true &&
-				typeof result.ok === "boolean" &&
-				result.conversation_id
-			) {
-				request.state = "confirmed";
-			} else if (
-				result?.ok === true &&
-				result.conversation_id &&
-				result.message_id &&
-				result.run_id
-			) {
-				request.state = "accepted";
-			} else if (result?.ok === false) {
-				request.state = "rejected";
-			} else {
-				request.state = "uncertain";
-			}
+			request.state = deliveryOutcome(envelope);
 			request.result = result;
 			return request.state;
 		},
-		retry(request) {
-			if (request.state !== "rejected" || request.checking) return false;
+		retry(request, sameId = false) {
+			if (request.state !== (sameId ? "uncertain" : "rejected") || request.checking)
+				return false;
 			// A definitively rejected attempt is finished. The next attempt gets
-			// its own receipt; an unknown attempt never reaches this path.
-			request.id = id();
+			// its own receipt; an uncertain retry retains the exact original ID.
+			if (!sameId) request.id = id();
 			request.state = "sending";
 			request.result = null;
 			request.note = "";
@@ -94,12 +79,12 @@ export function recoveryCopy(request, agentName = "Jarvis") {
 	if (request.state === "uncertain")
 		return {
 			title: "Delivery not confirmed",
-			detail: "Jarvis may already be working. Check delivery before sending again. Your message and files are preserved in this tab.",
+			detail: `${agentName} may already be working. Check delivery or retry the same request safely. Your message and files are preserved in this tab.`,
 		};
 	if (request.result?.reason === "maintenance")
 		return {
 			title: "Not sent · Maintenance",
-			detail: "Your message and files are preserved. Retry when Jarvis is available.",
+			detail: `Your message and files are preserved. Retry when ${agentName} is available.`,
 		};
 	if (request.result?.reason === "release_update_required")
 		return {

@@ -42,7 +42,7 @@
    "label": "Delivery State",
    "reqd": 1,
    "read_only": 1,
-   "options": "pending\nsettled",
+   "options": "pending\nsettled\nerased",
    "default": "pending"
   },
   {

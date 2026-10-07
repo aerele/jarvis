@@ -1,6 +1,7 @@
 // Execute the actual SFC send/resend functions at the API boundary. This avoids
 // duplicating their control flow while isolating the desktop view's many services.
 import test from "node:test";
+import { reactive, effect, stop } from "vue";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createPendingSends, planRejectedSend } from "./voiceSendGlue.js";
@@ -26,7 +27,16 @@ function harness() {
 	let nextId = 0;
 	Object.assign(s, {
 		_NEW_CHAT_SCOPE: "NEW",
-		newSendRequestId: () => String(++nextId).padStart(32, "0"),
+		reactive,
+		newSendRequestId: () => {
+			if (s.rngError) throw new Error("rng unavailable");
+			return String(++nextId).padStart(32, "0");
+		},
+		observeDelivery: (promise, deadline) => {
+			s.deadline = deadline;
+			return promise;
+		},
+		confirm: async () => true,
 		loadConversation: async (id, options) => {
 			s.loaded = id;
 			s.loadOptions = options;
@@ -54,14 +64,27 @@ function harness() {
 		recheckMaintenance: noop,
 		sendRejectionCopy: () => ({ message: "Rejected" }),
 		agentName: "Jarvis",
-		voiceStore: null,
+		voiceStore: {
+			captureSentInPayload: () => null,
+			failedIdsForScope: () => [],
+			markUnsentOrphans: noop,
+			markSentWithout: noop,
+			acknowledge: (token) => {
+				s.acked = token;
+			},
+			orphanToken: (token) => {
+				s.orphaned = token;
+			},
+		},
 		canConnectModel: true,
 		store: { conversations: [{ name: "A" }], loadConversations: noop },
 		route: { params: { id: "A" } },
 		router: { replace: noop },
 		_saveConnectorFocusFor: noop,
 		_checkPulseOnce: noop,
-		onTypedConfirmResolved: async () => {},
+		onTypedConfirmResolved: async () => {
+			if (s.failReload) throw new Error("reload failed");
+		},
 		api: {
 			sendMessage: async (...args) => {
 				calls.push(copy(args));
@@ -103,10 +126,17 @@ function harness() {
 	};
 	const f = new Function(
 		...Object.keys(s),
-		body + "\nreturn {send,resendFailed,setPrefill: value => {_prefillSendContext=value;}};"
+		body +
+			"\nreturn {send,resendFailed,recoverSend,dismissUncertain,setPrefill: value => {_prefillSendContext=value;}};"
 	)(...Object.values(s));
 	f.setPrefill({ doctype: "Sales Invoice", name: "INV-1" });
-	return { s, f, calls, errors, failed: () => s._pendingSends.peek(s._currentScope())[0] };
+	return {
+		s,
+		f,
+		calls,
+		errors,
+		failed: () => s._pendingSends.peek(s._currentScope()).find((m) => m.failed),
+	};
 }
 for (const [label, text, files] of [
 	["text and PDF", "Read this invoice", [file]],
@@ -361,8 +391,8 @@ for (const outcome of ["unknown", "accepted", "rejected", "confirmed", "partial 
 			assert.equal(h.failed().deliveryState, "uncertain");
 		} else if (["accepted", "confirmed", "partial confirmation"].includes(outcome)) {
 			assert.equal(h.failed(), undefined);
-			assert.equal(h.s.loaded, "A");
-			assert.deepEqual(h.s.loadOptions, { preserveComposer: true });
+			assert.equal(original.deliveryConversation, "A");
+			assert.equal(h.s.loaded, undefined);
 			assert.equal(h.s.holdActive.value, true);
 			assert.equal(h.s.waiting.value, false);
 		} else {
@@ -375,3 +405,156 @@ for (const outcome of ["unknown", "accepted", "rejected", "confirmed", "partial 
 		}
 	});
 }
+
+for (const reason of ["maintenance", "subscription_suspended", "release_update_required"]) {
+	test(`receipt ${reason} is historical and cannot change active run or gates`, async () => {
+		const h = harness();
+		h.s.api.sendMessage = async () => {
+			throw Error("offline");
+		};
+		await h.f.send();
+		const m = h.failed();
+		h.s.sending.value = true;
+		h.s.waiting.value = true;
+		h.s.currentMsgId.value = "live";
+		h.s.stoppedRunId.value = "stopped";
+		h.s.api.checkMessageDelivery = async () => ({ ok: false, reason });
+		await h.f.resendFailed(m);
+		assert.equal(m.deliveryState, "rejected");
+		assert.equal(h.s.sending.value, true);
+		assert.equal(h.s.waiting.value, true);
+		assert.equal(h.s.currentMsgId.value, "live");
+		assert.equal(h.s.stoppedRunId.value, "stopped");
+		assert.equal(h.s.holdActive.value, false);
+		assert.equal(h.s.suspendedNotice.value, null);
+	});
+}
+test("same-ID recovery preserves the exact wire payload after scope promotion", async () => {
+	const h = harness();
+	h.s.api.sendMessage = async (...args) => {
+		h.calls.push(copy(args));
+		throw Error("offline");
+	};
+	await h.f.send();
+	const m = h.failed();
+	h.s._pendingSends.reassign("A", "B");
+	h.s.currentId.value = "B";
+	h.s.input.value = "B draft";
+	await h.f.recoverSend(m, true);
+	assert.deepEqual(h.calls[1], h.calls[0]);
+	assert.equal(h.s.input.value, "B draft");
+	h.s.api.checkMessageDelivery = async () => ({
+		ok: true,
+		conversation_id: "A",
+		message_id: "M",
+		run_id: "R",
+		queued: true,
+	});
+	h.s.sending.value = true;
+	h.s.currentMsgId.value = "B-live";
+	await h.f.recoverSend(m);
+	assert.equal(h.s.currentId.value, "B");
+	assert.equal(h.s.currentMsgId.value, "B-live");
+	assert.equal(h.s.queuedTurn.value, null);
+	assert.equal(m.deliveryConversation, "A");
+	assert.equal(h.s.loaded, undefined);
+});
+test("late success after deadline settles only its bubble and voice token", async () => {
+	const h = harness();
+	let finish;
+	h.s.api.sendMessage = () =>
+		new Promise((r) => {
+			finish = r;
+		});
+	const sending = h.f.send();
+	await new Promise((r) => setImmediate(r));
+	h.s.deadline();
+	const m = h.failed();
+	m.voiceAck = ["voice1"];
+	h.s.currentId.value = "B";
+	h.s.input.value = "new draft";
+	h.s.sending.value = true;
+	h.s.currentMsgId.value = "new run";
+	finish({
+		ok: false,
+		confirmed: true,
+		conversation_id: "A",
+		error: { message: "Confirmation no longer valid" },
+	});
+	await sending;
+	assert.equal(m.deliveryState, "delivered");
+	assert.match(m.deliveryNote, /no longer valid/);
+	assert.deepEqual(h.s.acked, ["voice1"]);
+	assert.equal(h.s.currentId.value, "B");
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.currentMsgId.value, "new run");
+});
+test("random generator failure preserves the draft and unlocked composer", async () => {
+	const h = harness();
+	h.s.rngError = true;
+	await h.f.send();
+	assert.equal(h.s.input.value, "Review invoice");
+	assert.deepEqual(h.s.pendingFiles.value, [file]);
+	assert.equal(h.s.sending.value, false);
+	assert.equal(h.calls.length, 0);
+});
+test("dismiss surfaces retained voice records without acknowledging them", async () => {
+	const h = harness();
+	h.s.api.sendMessage = async () => {
+		throw Error("offline");
+	};
+	await h.f.send();
+	const m = h.failed();
+	m.voiceAck = ["voice1"];
+	await h.f.dismissUncertain(m);
+	assert.deepEqual(h.s.orphaned, ["voice1"]);
+	assert.equal(h.s.acked, undefined);
+	assert.equal(h.failed(), undefined);
+});
+
+test("new-chat send carries selected model and thinking on the actual API call", async () => {
+	const h = harness();
+	h.s.currentId.value = "";
+	await h.f.send();
+	assert.equal(h.calls[0][2], "model-a");
+	assert.equal(h.calls[0][8], "high");
+});
+
+test("confirmed approval remains settled when transcript refresh fails", async () => {
+	const { s, f } = harness();
+	s.input.value = "yes";
+	s.api.sendMessage = async () => ({
+		ok: false,
+		confirmed: true,
+		conversation_id: "A",
+		error: { message: "Action failed" },
+	});
+	s.failReload = true;
+	await f.send();
+	const bubble = s.messages.value.find((m) => m.deliveryState === "delivered");
+	assert.ok(bubble);
+	assert.equal(bubble.failed, false);
+	assert.equal(bubble.deliveryNote, "Action failed");
+	assert.equal(s.sending.value, false);
+});
+
+test("late delivery updates reactive bubble observers without unrelated UI changes", async () => {
+	const h = harness();
+	let finish;
+	h.s.api.sendMessage = () =>
+		new Promise((r) => {
+			finish = r;
+		});
+	const operation = h.f.send();
+	await new Promise((r) => setImmediate(r));
+	h.s.deadline();
+	const bubble = h.failed();
+	let displayed;
+	const runner = effect(() => {
+		displayed = bubble.deliveryState;
+	});
+	finish({ ok: true, conversation_id: "A", message_id: "M", run_id: "R" });
+	await operation;
+	assert.equal(displayed, "delivered");
+	stop(runner);
+});

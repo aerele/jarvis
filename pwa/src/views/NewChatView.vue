@@ -5,6 +5,7 @@ import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
 import { useRouter } from "vue-router";
 import * as api from "../api";
+import { store } from "../store";
 import { EFFORT, effortOffered, sendThinking } from "../lib/effort";
 import { prefs, setPrefs } from "../lib/prefs";
 import { feed } from "../lib/notifications";
@@ -14,7 +15,7 @@ import Sheet from "../components/Sheet.vue";
 import AutoModeToggle from "../components/AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
-import { boundedDelivery } from "@shared/lib/sendDelivery.js";
+import { observeDelivery } from "@shared/lib/sendDelivery.js";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -23,10 +24,22 @@ const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.v
 
 const router = useRouter();
 
-const input = ref("");
+const editing = recoveryState.requests.find(
+	(r) => r.id === recoveryState.editingNewRequest && r.state === "rejected"
+);
+const restored = editing || recoveryState.heroDraft;
+const selectedModel = ref(restored?.model ?? prefs.defaultModel ?? "");
+const selectedEffort = ref(
+	restored?.effort ||
+		EFFORT.find((e) => e.thinking === restored?.thinking)?.value ||
+		prefs.effort
+);
+const input = ref(restored?.text || "");
 const busy = ref(false);
 const error = ref("");
-const attachments = ref([]);
+const attachments = ref(
+	(restored?.attachments || []).map((a, i) => ({ ...a, key: a.key || `restored-${i}` }))
+);
 const settings = ref(null);
 const starters = ref(DEFAULT_STARTERS);
 const modelSheet = ref(false);
@@ -34,7 +47,7 @@ const voiceOpen = ref(false);
 // Auto mode (#581): /c/new has no conversation row until the first send, so the
 // toggle is local state. `armed` is pre-set from the user's default; the warning
 // sheet shows only until they have acknowledged it once.
-const autoArmed = ref(false);
+const autoArmed = ref(!!restored?.autoMode);
 // Not acknowledged until the server says so: an unloaded or failed settings read
 // asks (one extra confirm at worst), never skips the "not recommended" warning.
 const autoAcked = ref(false);
@@ -77,7 +90,7 @@ const models = computed(() => {
 	return s.subscription_models?.[s.llm_provider] || [];
 });
 
-const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "");
+const currentModel = computed(() => selectedModel.value || settings.value?.llm_model || "");
 const micEnabled = computed(() => !!settings.value?.stt_enabled);
 const effortOn = computed(() => effortOffered(settings.value));
 const hasDraft = computed(
@@ -116,39 +129,95 @@ function useStarter(card) {
 
 const pendingNewChat = computed(() => recoveryState.requests.some((r) => !r.conversation));
 
+function draftSnapshot() {
+	return {
+		text: input.value,
+		attachments: attachments.value.map(({ preview, ...file }) => file),
+		model: selectedModel.value,
+		effort: selectedEffort.value,
+		thinking: sendThinking(settings.value, selectedEffort.value),
+		autoMode: autoView.value.on,
+	};
+}
+let submitted = false;
+function preserveDraft() {
+	// A fast refusal can settle before navigation unmounts this cleared composer.
+	if (submitted && !input.value && !attachments.value.length) return;
+	const draft = draftSnapshot();
+	if (editing?.state === "rejected") Object.assign(editing, draft);
+	else if (!editing) recoveryState.heroDraft = draft;
+}
+function reviewPending() {
+	preserveDraft();
+	router.push("/send-recovery");
+}
 async function send(text = input.value) {
-	if (pendingNewChat.value) {
-		router.push("/send-recovery");
+	// Dictation is draft content even when submission is unavailable.
+	if (typeof text === "string" && text !== input.value)
+		input.value = [input.value, text].filter(Boolean).join("\n");
+	if (pendingNewChat.value && !editing) {
+		reviewPending();
 		return;
 	}
-	const t = String(text).trim();
+	const t = input.value.trim();
 	const ready = attachments.value.filter((a) => a.file_url);
-	if ((!t && !ready.length) || busy.value || uploading.value || holdActive.value) return;
-	busy.value = true;
+	if ((!t && !ready.length) || busy.value || uploading.value || holdActive.value) {
+		preserveDraft();
+		return;
+	}
 	error.value = "";
-	const request = sendRecovery.stage("", t, ready);
-	Object.assign(request, {
-		model: prefs.defaultModel || "",
-		thinking: sendThinking(settings.value, prefs.effort),
-		autoMode: autoView.value.on,
-	});
+	let request;
+	try {
+		if (editing) {
+			if (editing.state !== "rejected") {
+				reviewPending();
+				return;
+			}
+			Object.assign(editing, draftSnapshot(), {
+				text: t,
+				attachments: ready.map((a) => ({ file_url: a.file_url, name: a.name })),
+			});
+			if (!sendRecovery.retry(editing)) return;
+			request = editing;
+		} else {
+			request = sendRecovery.stage("", t, ready);
+			Object.assign(request, draftSnapshot(), {
+				text: t,
+				attachments: ready.map((a) => ({ file_url: a.file_url, name: a.name })),
+			});
+		}
+	} catch {
+		error.value = "Could not prepare the message. Your draft is preserved.";
+		preserveDraft();
+		return;
+	}
+	busy.value = true;
+	submitted = true;
+	recoveryState.newChatPicks = {
+		model: request.model,
+		thinking: request.thinking,
+		autoMode: request.autoMode,
+	};
+	const attempt = request.id;
 	input.value = "";
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
 	attachments.value = [];
-	// The existing recovery view owns the preserved request, including navigation
-	// to the real conversation after acceptance. Never retry from this hero.
-	const completion = boundedDelivery(api.sendRecoverableMessage(request));
+	if (!editing) recoveryState.heroDraft = null;
+	recoveryState.editingNewRequest = null;
 	router.push("/send-recovery");
 	try {
-		sendRecovery.settle(request, await completion);
+		const outcome = await observeDelivery(api.sendRecoverableMessage(request), () => {
+			if (request.id === attempt) sendRecovery.settle(request, null);
+		});
+		if (request.id === attempt) sendRecovery.settle(request, outcome);
 	} catch {
-		sendRecovery.settle(request, null);
+		if (request.id === attempt) sendRecovery.settle(request, null);
 	} finally {
 		busy.value = false;
 	}
 }
 
-let autoTouched = false;
+let autoTouched = !!restored;
 function toggleAuto() {
 	autoTouched = true;
 	if (autoArmed.value) {
@@ -241,7 +310,11 @@ onMounted(async () => {
 		if (d.default_auto_mode && !autoTouched) autoArmed.value = true;
 	}
 });
-onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)));
+onUnmounted(() => {
+	preserveDraft();
+	recoveryState.editingNewRequest = null;
+	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
+});
 </script>
 
 <template>
@@ -326,7 +399,7 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 			{{ error }}
 		</div>
 
-		<button v-if="pendingNewChat" class="jv-btn" @click="router.push('/send-recovery')">
+		<button v-if="pendingNewChat" class="jv-btn" @click="reviewPending">
 			Review your pending message
 		</button>
 
@@ -488,7 +561,10 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 					v-for="m in models"
 					:key="m"
 					class="jv-mrow"
-					@click="setPrefs({ defaultModel: m === currentModel ? '' : m })"
+					@click="
+						selectedModel = m === currentModel ? '' : m;
+						setPrefs({ defaultModel: selectedModel });
+					"
 				>
 					<span class="jv-radio" :class="{ 'is-on': m === currentModel }" />
 					<span class="jv-mrow-text">
@@ -526,8 +602,11 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 							v-for="e in EFFORT"
 							:key="e.value"
 							class="jv-seg-btn"
-							:class="{ 'is-on': prefs.effort === e.value }"
-							@click="setPrefs({ effort: e.value })"
+							:class="{ 'is-on': selectedEffort === e.value }"
+							@click="
+								selectedEffort = e.value;
+								setPrefs({ effort: e.value });
+							"
 						>
 							<span>{{ e.value }}</span>
 							<small>{{ e.hint }}</small>

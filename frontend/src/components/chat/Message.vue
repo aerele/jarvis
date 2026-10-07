@@ -61,24 +61,29 @@
 				<template v-else>{{ text }}</template>
 			</div>
 			<div
-				v-if="failed || deliveryState === 'checking'"
+				v-if="failed || ['checking', 'delivered'].includes(deliveryState)"
 				style="
 					display: flex;
 					align-items: center;
 					gap: 8px;
+					flex-wrap: wrap;
+					justify-content: flex-end;
 					margin-top: 4px;
 					font-size: 11.5px;
 					color: var(--red);
 				"
 			>
 				<span role="status">{{
-					deliveryState === "checking"
+					deliveryState === "delivered"
+						? "Delivery confirmed"
+						: deliveryState === "checking"
 						? "Checking delivery…"
 						: deliveryState === "uncertain"
 						? "Delivery not confirmed"
 						: "Not sent"
 				}}</span>
 				<button
+					v-if="deliveryState !== 'delivered'"
 					@click="emit('retry')"
 					:disabled="deliveryState === 'checking'"
 					style="
@@ -98,12 +103,29 @@
 					}}
 				</button>
 				<button
-					v-if="deliveryState === 'uncertain'"
+					v-if="['uncertain', 'delivered'].includes(deliveryState)"
 					class="jv-btn"
 					@click="emit('dismiss')"
 				>
 					Dismiss
 				</button>
+				<p v-if="deliveryNote" role="status" style="font-size: 12px; max-width: 78%">
+					{{ deliveryNote }}
+				</p>
+				<button
+					v-if="deliveryState === 'uncertain'"
+					class="jv-btn"
+					@click="emit('retry-same')"
+				>
+					Retry same request
+				</button>
+				<a
+					v-if="deliveryConversation"
+					:href="'/jarvis/c/' + encodeURIComponent(deliveryConversation)"
+					target="_blank"
+					rel="noopener noreferrer"
+					>View conversation</a
+				>
 			</div>
 			<!-- attached images → same clickable thumbnail + preview as generated ones -->
 			<template v-for="cv in attachments || []" :key="cv.name">
@@ -350,6 +372,8 @@ defineProps({
 	// hover bar.
 	failed: { type: Boolean, default: false },
 	deliveryState: { type: String, default: "" },
+	deliveryNote: { type: String, default: "" },
+	deliveryConversation: { type: String, default: "" },
 	// Render an image attachment as the same filename chip as every other file
 	// (click through to view it) instead of an inline cropped thumbnail. Chat's
 	// generated-canvas images (charts/diagrams) rely on the thumbnail staying
@@ -359,7 +383,7 @@ defineProps({
 	imagesAsChips: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["edit", "copy", "retry", "dismiss", "open-attachment"]);
+const emit = defineEmits(["edit", "copy", "retry", "dismiss", "retry-same", "open-attachment"]);
 
 // When a consumer supplies #below-body it OWNS the whole post-body region
 // (chat does — its activity/cards/metabar live there, byte-identical), so the

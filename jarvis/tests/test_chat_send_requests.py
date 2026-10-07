@@ -17,6 +17,11 @@ from jarvis.chat import send_requests as receipts
 
 
 class TestChatSendRequests(unittest.TestCase):
+	def keep_patch(self, context):
+		value = context.start()
+		self.addCleanup(context.stop)
+		return value
+
 	def setUp(self):
 		if not getattr(frappe.local, "site", "").endswith(".test"):
 			self.skipTest("requires a dedicated .test database")
@@ -24,9 +29,10 @@ class TestChatSendRequests(unittest.TestCase):
 		self.request_id = uuid.uuid4().hex
 		self.keys = []
 		self.success = {"ok": True, "conversation_id": "A", "message_id": "M", "run_id": "R"}
-		self.dispatch = self.enterContext(patch.object(api, "send_message", return_value=self.success))
-		self.owned = self.enterContext(patch.object(api, "_get_owned_conversation"))
-		self.access = self.enterContext(patch.object(receipts, "require_jarvis_access"))
+		self.real_send = api.send_message
+		self.dispatch = self.keep_patch(patch.object(api, "send_message", return_value=self.success))
+		self.owned = self.keep_patch(patch.object(api, "_get_owned_conversation"))
+		self.access = self.keep_patch(patch.object(receipts, "require_jarvis_access"))
 
 	def tearDown(self):
 		frappe.set_user(self.user)
@@ -132,13 +138,15 @@ class TestChatSendRequests(unittest.TestCase):
 		entered, release = threading.Event(), threading.Event()
 		errors = []
 
-		def dispatch(**kwargs):
+		settle = receipts._settle
+
+		def hold_settlement(key, result):
+			settle(key, result)
 			entered.set()
 			if not release.wait(10):
 				raise TimeoutError("test release")
-			return self.success
 
-		self.dispatch.side_effect = dispatch
+		self.keep_patch(patch.object(receipts, "_settle", side_effect=hold_settlement))
 
 		def winner():
 			frappe.init(site=site, sites_path=sites_path)
@@ -230,3 +238,81 @@ class TestChatSendRequests(unittest.TestCase):
 					self.assertTrue(all(not t.is_alive() for t in threads))
 				self.assertEqual(errors, [])
 				self.assertEqual(self.dispatch.call_count, 1 if same_id else 2)
+
+	def test_pre_effect_refusal_is_settled_but_post_effect_failure_is_unknown(self):
+		def refuse(**kwargs):
+			frappe.flags.jarvis_send_receipt_guard["safe"] = True
+			raise frappe.ValidationError("This is a macro run. Start a new chat.")
+
+		self.dispatch.side_effect = refuse
+		result = self.send()
+		self.assertEqual(result["delivery"], "settled")
+		self.assertFalse(result["result"]["ok"])
+		self.assertIn("macro run", result["result"]["message"])
+		frappe.db.commit()
+		self.assertFalse(receipts.check_delivery(self.request_id)["result"]["ok"])
+		self.send()
+		self.dispatch.assert_called_once()
+
+	def test_receipt_filters_private_summaries_and_preserves_confirmation_failure(self):
+		self.dispatch.return_value = {
+			"ok": False,
+			"confirmed": True,
+			"conversation_id": "A",
+			"error": {"type": "InvalidConfirmation", "message": "private business text"},
+			"typed_rejection": {"discarded": [{"token": "T", "summary": "private invoice"}], "skipped": []},
+		}
+		self.send()
+		frappe.db.commit()
+		row = receipts._read(self.keys[0])
+		self.assertNotIn("private", row.result_json)
+		result = receipts.check_delivery(self.request_id)["result"]
+		self.assertEqual(result["error"]["type"], "InvalidConfirmation")
+		self.assertEqual(result["typed_rejection"]["discarded"], [{"token": "T"}])
+
+	def test_wipe_keeps_only_tombstone_and_cannot_resurrect_or_replay(self):
+		self.send()
+		frappe.db.commit()
+		from jarvis import onboarding
+
+		# Exercise the actual wipe entry point without deleting unrelated test-site data.
+		with patch.object(onboarding, "_WIPE_DOCTYPES", ()):
+			onboarding._wipe_workspace_content()
+		frappe.db.commit()
+		row = receipts._read(self.keys[0])
+		self.assertEqual(row.state, "erased")
+		self.assertFalse(row.result_json)
+		self.assertFalse(row.conversation)
+		self.assertFalse(row.fingerprint)
+		receipts._settle(self.keys[0], self.success)
+		frappe.db.commit()
+		self.assertEqual(receipts._read(self.keys[0]).state, "erased")
+		self.assertEqual(self.send()["delivery"], "unknown")
+		self.dispatch.assert_called_once()
+
+	def test_real_pipeline_macro_refusal_keeps_actionable_reason(self):
+		self.dispatch.side_effect = self.real_send
+		self.owned.return_value = frappe._dict(name="A", skip_confirmation=1, origin_page="")
+		with (
+			patch.object(api, "has_jarvis_access", return_value=True),
+			patch.object(api, "validate_can_send", return_value=(True, None)),
+		):
+			result = self.send()
+		self.assertFalse(result["result"]["ok"])
+		self.assertEqual(result["result"]["reason"], "macro_run")
+		frappe.db.commit()
+		self.assertIn("Start a new chat", receipts.check_delivery(self.request_id)["result"]["message"])
+
+	def test_real_effect_boundary_prevents_rejection_after_possible_work(self):
+		def uncertain(**kwargs):
+			frappe.flags.jarvis_send_receipt_guard["safe"] = True
+			api._send_receipt_effect_boundary()
+			raise frappe.ValidationError("too late to prove no effect")
+
+		self.dispatch.side_effect = uncertain
+		with self.assertRaises(frappe.ValidationError):
+			self.send()
+		frappe.db.rollback()
+		self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
+		self.send()
+		self.dispatch.assert_called_once()

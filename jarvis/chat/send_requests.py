@@ -29,7 +29,6 @@ RESULT_FIELDS = (
 	"queued_position",
 	"limit_period",
 	"older_cards_waiting",
-	"typed_rejection",
 	"auto_mode",
 )
 
@@ -66,30 +65,94 @@ def _public(receipt):
 
 
 def _claim(key, fingerprint, conversation):
-	# Do not gap-lock a missing key: concurrent new IDs must not deadlock.
-	# The INSERT primary key is the claim arbiter; duplicate reads below lock
-	# only an existing row to see the winner under repeatable-read.
-	if _read(key):
-		return False
-	frappe.db.savepoint("chat_send_claim")
-	try:
-		frappe.get_doc(
-			{
-				"doctype": DOCTYPE,
-				"request_key": key,
-				"fingerprint": fingerprint,
-				"conversation": conversation,
-				"state": "pending",
-			}
-		).insert(ignore_permissions=True)
-	except frappe.DuplicateEntryError:
-		# Required on Postgres, where a duplicate otherwise aborts the transaction.
-		frappe.db.rollback(save_point="chat_send_claim")
-		return False
-	# This dedicated endpoint has made no other writes. The durable claim must
-	# survive an exception/rollback AFTER remote effects or internal send commits.
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- durable dispatch fence before side effects
-	return True
+	# This endpoint owns its transaction. A losing INSERT must release ALL
+	# locks/snapshots before reading the winner; never upgrade a duplicate lock.
+	for attempt in range(3):
+		if _read(key):
+			frappe.db.rollback()
+			return False
+		try:
+			frappe.get_doc(
+				{
+					"doctype": DOCTYPE,
+					"request_key": key,
+					"fingerprint": fingerprint,
+					"conversation": conversation,
+					"state": "pending",
+				}
+			).insert(ignore_permissions=True)
+		except (frappe.DuplicateEntryError, frappe.QueryDeadlockError):
+			# 1020/1213 can abort the whole transaction, including savepoints.
+			frappe.db.rollback()
+			if _read(key):
+				return False
+			frappe.db.rollback()
+			if attempt == 2:
+				raise
+			continue
+		# Never retry an ambiguous commit acknowledgement.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- durable claim before dispatch
+		return True
+
+
+def _safe_result(result):
+	out = {k: result[k] for k in RESULT_FIELDS if k in result}
+	if result.get("reason") == "send_refused":
+		out["message"] = "The request was not sent. Review the message and try again."
+	if isinstance(result.get("typed_rejection"), dict):
+		out["typed_rejection"] = {
+			kind: [
+				{k: item[k] for k in ("token", "reason_code") if k in item}
+				for item in result["typed_rejection"].get(kind, [])
+				if isinstance(item, dict)
+			]
+			for kind in ("discarded", "skipped")
+		}
+	if result.get("confirmed"):
+		out.pop("message", None)
+		out.pop("reason", None)
+	if result.get("confirmed") and result.get("ok") is False:
+		kind = (result.get("error") or {}).get("type")
+		messages = {
+			"InvalidConfirmation": "That confirmation is no longer valid. Check the action before trying again.",
+			"ConfirmationUnavailableError": "The confirmation could not be processed. Check the action before trying again.",
+		}
+		out["error"] = {
+			"type": kind if kind in messages else "ConfirmationFailed",
+			"message": messages.get(
+				kind,
+				"One or more actions could not be completed. Check the action receipts before continuing.",
+			),
+		}
+	return out
+
+
+def _settle(key, result):
+	# A workspace wipe may have erased this claim while dispatch was in flight.
+	# Never put conversation references or outcomes back into that tombstone.
+	table = frappe.qb.DocType(DOCTYPE)
+	(
+		frappe.qb.update(table)
+		.set(table.state, "settled")
+		.set(table.result_json, json.dumps(_safe_result(result)))
+		.where((table.name == key) & (table.state == "pending"))
+	).run()
+
+
+def erase_receipts():
+	"""Remove workspace metadata but retain opaque keys to fence stale retries."""
+	if not frappe.db.table_exists(DOCTYPE):
+		return
+	table = frappe.qb.DocType(DOCTYPE)
+	(
+		frappe.qb.update(table)
+		.set(table.state, "erased")
+		.set(table.fingerprint, "")
+		.set(table.conversation, "")
+		.set(table.result_json, None)
+		.set(table.owner, "Administrator")
+		.set(table.modified_by, "Administrator")
+	).run()
 
 
 @frappe.whitelist(methods=["POST"])
@@ -133,19 +196,29 @@ def send_message(
 	)
 	fingerprint = hashlib.sha256(json.dumps(args, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 	if not _claim(key, fingerprint, conversation):
-		existing = _read(key, for_update=True)
+		existing = _read(key)
 		if not existing or existing.fingerprint != fingerprint:
 			return {"delivery": "unknown", "reason": "request_mismatch"}
 		return _public(existing)
-	# Never retry on an exception: pending is durable even if this transaction rolls back.
-	result = api.send_message(**args)
-	frappe.db.set_value(
-		DOCTYPE,
-		key,
-		{
-			"state": "settled",
-			"result_json": json.dumps({k: result[k] for k in RESULT_FIELDS if k in result}),
-		},
-	)
-	# Frappe commits this result with the request before returning the response.
-	return {"delivery": "settled", "result": result}
+	# Only the instrumented pipeline can prove it is still before all effects.
+	previous = frappe.flags.get("jarvis_send_receipt_guard")
+	guard = {"safe": False}
+	frappe.flags.jarvis_send_receipt_guard = guard
+	try:
+		try:
+			result = api.send_message(**args)
+		except Exception as exc:
+			if not guard["safe"]:
+				raise
+			frappe.db.rollback()
+			result = {
+				"ok": False,
+				"reason": guard.get("reason") or "send_refused",
+				"message": str(exc)
+				if isinstance(exc, frappe.ValidationError)
+				else "The request was not sent. Please try again.",
+			}
+		_settle(key, result)
+		return {"delivery": "settled", "result": result}
+	finally:
+		frappe.flags.jarvis_send_receipt_guard = previous
