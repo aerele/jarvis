@@ -339,9 +339,11 @@ class TestWritersStillWrite(_Base):
 		# The chip must be able to say "Created and submitted": the saved result carries
 		# docstatus 1 for a create the card also submitted, and only then.
 		actions_api._append_receipt(
-			self.conv, "create", "ToDo", "td-1", {}, "Created and submitted ToDo td-1.", 1
+			self.conv, "create", "ToDo", "td-1", {}, "Created and submitted ToDo td-1.", submitted=1
 		)
-		actions_api._append_receipt(self.conv, "create", "ToDo", "td-2", {}, "Created ToDo td-2.", 0)
+		actions_api._append_receipt(
+			self.conv, "create", "ToDo", "td-2", {}, "Created ToDo td-2.", submitted=0
+		)
 		rows = frappe.get_all(
 			MSG, {"conversation": self.conv, "role": "tool"}, ["tool_result"], order_by="seq"
 		)
