@@ -987,6 +987,56 @@ class TestSux11ErrorContract(_PipelineCase):
 		# Turn.error mirrors it too.
 		self.assertEqual(self._val(rid, "error"), "provider quota exceeded")
 
+	def test_an_empty_reply_writes_one_telemetry_line_with_the_context_size(self):
+		from unittest.mock import MagicMock
+
+		error = "⚠️ Agent couldn't generate a response. Please try again."
+		conv = self._mk_conv()
+		key = "sess-empty-" + frappe.generate_hash(length=6)
+		frappe.get_doc(
+			{"doctype": SESSION, "session_key": key, "user": TEST_USER, "last_total_tokens": 31000}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value(CONV, conv, "session_key", key, update_modified=False)
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		rid = "pmp_empty_reply"
+		_won, epoch = ts.lease_acquire(self._target, "empty")
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"terminal_observed",
+			version=3,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			terminal_kind="relay:error",
+			terminal_payload=json.dumps({"state": "error", "error": error, "text": ""}),
+			terminal_observed_at=frappe.utils.now(),
+		)
+		deps = pump.PumpDeps()
+		deps.enqueue_finalize = _Recorder()
+		logger = MagicMock()
+		with patch("jarvis.chat.latency.get_logger", return_value=logger):
+			settlement.invoke_settlement(
+				rid,
+				relay_target_id=self._target,
+				epoch=epoch,
+				version=4,
+				terminal_kind="relay:error",
+				terminal_payload={"state": "error", "error": error, "text": ""},
+				assistant_message=None,
+				owner=self._orig_user,
+				conversation=conv,
+				deps=deps,
+			)
+		self.assertEqual(self._state(rid), "errored")
+		lines = [c.args for c in logger.info.call_args_list if c.args[0].startswith("empty_reply")]
+		self.assertEqual(len(lines), 1)
+		self.assertEqual(lines[0][1:], (rid, conv, "plain", 31000))
+		err_pub = next(p for p in self._pubs if p.get("kind") == "run:error")
+		self.assertEqual(err_pub["code"], "empty-reply")
+
 
 # --------------------------------------------------------------------------- #
 # 7b. #543: a failed final must settle as an ERROR, not a silent empty success
