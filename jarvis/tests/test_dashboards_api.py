@@ -25,6 +25,7 @@ from jarvis.chat.dashboards_api import (
 )
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
+	JARVIS_SKILL_REVIEWER_ROLE,
 	JARVIS_USER_ROLE,
 	ensure_jarvis_admin_role,
 	ensure_jarvis_user_role,
@@ -213,6 +214,64 @@ class TestCaps(_DashboardsApiTestCase):
 		data = get_dashboards_caps()["data"]
 		self.assertEqual(data["creatable_scopes"], ["Org", "Role", "User"])
 		self.assertIn(CUSTOM_ROLE, data["manageable_roles"])
+
+
+class TestReviewerRoleNotShareable(_DashboardsApiTestCase):
+	"""Jarvis Skill Reviewer is a capability role, never a share audience."""
+
+	def setUp(self):
+		super().setUp()
+		if not frappe.db.exists("Role", JARVIS_SKILL_REVIEWER_ROLE):
+			frappe.get_doc(
+				{"doctype": "Role", "role_name": JARVIS_SKILL_REVIEWER_ROLE, "desk_access": 1}
+			).insert(ignore_permissions=True)
+		_ensure_user(ADMIN_USER, [JARVIS_SKILL_REVIEWER_ROLE])
+
+	def test_absent_from_manageable_roles(self):
+		from jarvis.chat.dashboard_permissions import manageable_roles
+
+		frappe.set_user("Administrator")
+		self.assertNotIn(JARVIS_SKILL_REVIEWER_ROLE, manageable_roles())
+		frappe.set_user(ADMIN_USER)
+		self.assertNotIn(JARVIS_SKILL_REVIEWER_ROLE, manageable_roles())
+
+	def test_resave_of_existing_reviewer_share_is_refused(self):
+		frappe.set_user(ADMIN_USER)
+		d = self._save(
+			{
+				"dashboard_title": "rev share",
+				"html": "<h1>x</h1>",
+				"scope": "Role",
+				"target_role": CUSTOM_ROLE,
+			}
+		)
+		frappe.db.set_value(DASHBOARD, d["name"], "target_role", JARVIS_SKILL_REVIEWER_ROLE)
+		with self.assertRaisesRegex(frappe.ValidationError, "cannot target the role"):
+			save_dashboard(frappe.as_json({"name": d["name"], "dashboard_title": "renamed"}))
+
+	def test_retargeting_to_reviewer_role_is_refused(self):
+		frappe.set_user(ADMIN_USER)
+		d = self._save(
+			{
+				"dashboard_title": "rev retarget",
+				"html": "<h1>x</h1>",
+				"scope": "Role",
+				"target_role": CUSTOM_ROLE,
+			}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(frappe.as_json({"name": d["name"], "target_role": JARVIS_SKILL_REVIEWER_ROLE}))
+		with self.assertRaises(frappe.ValidationError):
+			save_dashboard(
+				frappe.as_json(
+					{
+						"dashboard_title": "rev new",
+						"html": "<h1>x</h1>",
+						"scope": "Role",
+						"target_role": JARVIS_SKILL_REVIEWER_ROLE,
+					}
+				)
+			)
 
 
 class TestDashboardList(_DashboardsApiTestCase):
