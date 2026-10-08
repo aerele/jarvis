@@ -934,6 +934,9 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 			frappe.connect()
 			frappe.set_user(TEST_USER)
 			frappe.local.conf[admission.FLAG] = 1
+			# Frappe 15's init sets flags.in_test False in a new thread (16 copies it), and
+			# validate_can_send then refuses on the CI site: no LLM is configured there.
+			frappe.flags.in_test = True
 			try:
 				results.append(chat_api.retry_message(a))
 			except Exception as e:
