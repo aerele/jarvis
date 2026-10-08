@@ -582,10 +582,13 @@ def mark_streaming(run_id: str, version: int, epoch: int, gateway_run_id: str | 
 	)
 
 
-def requeue_for_redispatch(run_id: str, version: int, epoch: int, dispatch_payload: str) -> bool:
+def requeue_for_redispatch(
+	run_id: str, version: int, epoch: int, dispatch_payload: str, *, fresh_recovery: bool = False
+) -> bool:
 	"""streaming -> ready, pump, EPOCH-fenced: send a turn again ONCE when the runtime
-	refused it before producing anything (admin-v2#656: a Claude CLI live session it
-	will not resume after the chat's model changed). Guarded IN the statement on
+	refused it before producing anything (admin-v2#656: a CLI live session it
+	will not resume after the chat's model changed) or, when a site turns it on, when it
+	ended with its plain empty reply (``empty_reply_recovery``). Guarded IN the statement on
 	``last_event_seq=0`` (no delta or tool event was applied) and
 	``cancel_requested=0``, so a turn that streamed or was stopped is never re-sent.
 	``dispatch_payload`` is the caller's read-add-write of the stored payload with
@@ -596,12 +599,18 @@ def requeue_for_redispatch(run_id: str, version: int, epoch: int, dispatch_paylo
 	``dispatching_at`` is KEPT on purpose: if a watchdog parks this turn before it is
 	re-sent, ``recover_adopt`` re-attaches it and the recovery budget ends it with an
 	error, instead of ``recover_to_queued`` re-preparing it and orphaning its
-	placeholder. Returns won/lost (0 => caller tells epoch loss from drift). No commit."""
+	placeholder. ``fresh_recovery`` (the empty-reply caller only) also clears
+	``recovery_started_at``, as ``recover_to_queued`` does, so the second attempt does not
+	start on a spent recovery budget. Returns won/lost (0 => caller tells epoch loss from
+	drift). No commit."""
+	fresh = ", recovery_started_at=NULL" if fresh_recovery else ""
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='ready', ready_at=%(now)s, gateway_run_id=NULL, first_event_at=NULL,
-			    dispatch_payload=%(p)s, version=version+1
+			    dispatch_payload=%(p)s, version=version+1"""
+			+ fresh
+			+ """
 			WHERE name=%(r)s AND state='streaming' AND version=%(v)s AND pump_epoch=%(e)s
 			  AND COALESCE(last_event_seq, 0)=0 AND COALESCE(cancel_requested, 0)=0""",
 			{"r": run_id, "p": dispatch_payload, "now": _now(), "v": version, "e": epoch},
