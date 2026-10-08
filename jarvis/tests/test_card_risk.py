@@ -457,6 +457,85 @@ class TestSensitiveFullCard(_Base):
 		self.assertEqual([r["cells"] for r in row["from_table"]["rows"]], [["X-One", "1"]])
 		self.assertEqual(row["from_table"]["unknown_columns"], 0, "stored row metadata is not counted")
 
+	def _hook(self, headers: list) -> "frappe.model.document.Document":
+		frappe.set_user("Administrator")
+		wh = frappe.get_doc(
+			{
+				"doctype": "Webhook",
+				"name": PREFIX + "hook-rows",
+				"webhook_doctype": "ToDo",
+				"webhook_docevent": "on_update",
+				"request_url": "https://example.com/hook",
+				"request_method": "POST",
+				"enabled": 0,
+				"webhook_headers": headers,
+			}
+		).insert()
+		self.addCleanup(frappe.delete_doc, "Webhook", wh.name, force=True, ignore_permissions=True)
+		return wh
+
+	def _table_diff(self, doctype, name, key, rows) -> dict:
+		card = build_card(
+			"update_doc",
+			{"doctype": doctype, "name": name, "changes": {key: rows}},
+			{"would": {key: rows}, **SENSITIVE},
+		)
+		return next(d for d in card["diff"] if "to_table" in d or "from_table" in d)
+
+	def test_the_new_side_of_a_table_shows_the_rows_as_they_will_be_stored(self):
+		"""Flow review: ``update_doc`` keeps a row sent by its ``name`` and lays only
+		the cells the call gives over it. The card showed the call's rows instead, so
+		a kept row sent by its name alone drew as a BLANK row: on an access card that
+		reads as "this role is removed"."""
+		wh = self._hook([{"key": "X-One", "value": "1"}, {"key": "X-Two", "value": "2"}])
+		one, two = (h.name for h in wh.webhook_headers)
+		row = self._table_diff(
+			"Webhook",
+			wh.name,
+			"webhook_headers",
+			[{"name": one}, {"key": "Authorization", "value": "Bearer"}],
+		)
+		self.assertEqual(row["to_table"]["fieldnames"][:2], ["key", "value"])
+		cells = [r["cells"][:2] for r in row["to_table"]["rows"]]
+		self.assertEqual(
+			cells, [["X-One", "1"], ["Authorization", "Bearer"]], "kept whole, added, X-Two gone"
+		)
+		self.assertEqual((row["from"], row["to"]), ("2 rows", "2 rows"))
+		self.assertEqual(
+			[r["cells"][:2] for r in row["from_table"]["rows"]], [["X-One", "1"], ["X-Two", "2"]]
+		)
+		# A kept row whose cell the call changes shows the new cell, the rest as stored.
+		row = self._table_diff(
+			"Webhook", wh.name, "webhook_headers", [{"name": one, "value": "9"}, {"name": two}]
+		)
+		self.assertEqual([r["cells"][:2] for r in row["to_table"]["rows"]], [["X-One", "9"], ["X-Two", "2"]])
+
+	def test_a_users_kept_role_is_never_a_blank_cell(self):
+		frappe.set_user("Administrator")
+		kept = frappe.get_all(
+			"Has Role", filters={"parent": TEST_USER, "parenttype": "User"}, fields=["name", "role"]
+		)
+		self.assertTrue(kept, "the test user holds a role")
+		new_role = "Sales User" if kept[0].role != "Sales User" else "Purchase User"
+		row = self._table_diff("User", TEST_USER, "roles", [{"name": kept[0].name}, {"role": new_role}])
+		at = row["to_table"]["fieldnames"].index("role")
+		self.assertEqual([r["cells"][at] for r in row["to_table"]["rows"]], [kept[0].role, new_role])
+		self.assertNotIn("", [r["cells"][at] for r in row["to_table"]["rows"]])
+		self.assertEqual(row["to"], "2 rows")
+
+	def test_a_kept_rows_secret_stays_masked(self):
+		from jarvis.chat import confirm_card
+
+		meta = frappe.get_meta("Jarvis Settings")
+		field = next(df for df in meta.get_table_fields() if df.options == "Jarvis LLM Pool Model")
+		stored = [{"name": "r1", "idx": 1, "api_key": "*" * 12, "enabled": 1}]
+		rows = confirm_card._resulting_rows(meta, field.fieldname, [{"name": "r1", "enabled": 0}], stored)
+		self.assertEqual(rows[0]["enabled"], 0, "the call's cell laid over the stored row")
+		self.assertNotIn("*", rows[0]["api_key"], "not the mask, which would read as not set")
+		table = confirm_card.table_rows(meta, field.fieldname, rows, True)
+		shown = dict(zip(table["fieldnames"], table["rows"][0]["cells"], strict=True))
+		self.assertEqual(shown["api_key"], "set", "never the value, never its mask")
+
 	def test_a_json_value_is_shown_not_dotted(self):
 		values = {"data": {"a": 1, "b": [1, 2]}}
 		card = build_card(

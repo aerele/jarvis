@@ -40,6 +40,8 @@ R2_12 = {
 	# defaults under R2-12 (review cycle 2)
 	"Automation Flow",
 	"Custom Role",
+	# Frappe 16: what a workflow transition runs (J1c)
+	"Workflow Transition Tasks",
 }
 
 
@@ -77,8 +79,10 @@ class TestDefinitions(FrappeTestCase):
 
 class TestRiskOf(FrappeTestCase):
 	def test_single_structure_create_update_delete(self):
-		for dt in wr.STRUCTURE_DOCTYPES - {"Custom Field"}:
+		# A single Custom Field or Workflow is its own guarded class (J1b-cf, J1c).
+		for dt in wr.STRUCTURE_DOCTYPES - {"Custom Field", "Workflow"}:
 			self.assertEqual(wr.risk_of("create_doc", {"doctype": dt, "values": {}}), "structure", dt)
+		self.assertEqual(wr.risk_of("create_doc", {"doctype": "Workflow", "values": {}}), "workflow_new")
 		self.assertEqual(
 			wr.risk_of("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}}),
 			"custom_field_new",
@@ -105,7 +109,11 @@ class TestRiskOf(FrappeTestCase):
 		)
 		self.assertEqual(wr.risk_of("create_doc", {"doctype": "SERVER SCRIPT", "values": {}}), "sensitive")
 		self.assertEqual(
-			wr.risk_of("update_doc", {"doctype": "workflow", "name": "w", "changes": {}}), "structure"
+			wr.risk_of("update_doc", {"doctype": "workflow", "name": "w", "changes": {}}), "workflow_edit"
+		)
+		self.assertEqual(
+			wr.risk_of("update_doc", {"doctype": "inventory DIMENSION", "name": "w", "changes": {}}),
+			"structure",
 		)
 
 	def test_any_structure_doctype_in_a_batch_is_structure(self):
@@ -123,6 +131,7 @@ class TestRiskOf(FrappeTestCase):
 			"structure",
 		)
 		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Workflow", "names": ["a", "b"]}), "structure")
+		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Workflow", "name": "a"}), "structure")
 
 	def test_sensitive_targets(self):
 		self.assertEqual(wr.risk_of("create_doc", {"doctype": "Webhook", "values": {}}), "sensitive")
@@ -254,6 +263,9 @@ class TestCheck(FrappeTestCase):
 			wr.check("create_doc", {"doctype": "Workflow", "values": {}})
 		self.assertEqual(ctx.exception.desk_path, "/app/workflow/new")
 		self.assertIn("Workflow changes the database structure", str(ctx.exception))
+		with self.assertRaises(StructureRefusedError) as ctx:
+			wr.check("create_doc", {"doctype": "Service Level Agreement", "values": {}}, guarded=True)
+		self.assertEqual(ctx.exception.desk_path, "/app/service-level-agreement/new")
 		with self.assertRaises(StructureRefusedError) as ctx:
 			wr.check("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}})
 		self.assertEqual(ctx.exception.desk_path, "/app/customize-form")

@@ -260,18 +260,24 @@ def _denied_itself(dt: str) -> bool:
 	)
 
 
+def denied_target(dt: str) -> bool:
+	"""Whether ``dt`` is a form chat never changes the structure or the rules of: a
+	denied form itself, or a child table of one. Shared by every guarded write that
+	names a form (a Custom Field, a Workflow)."""
+	if _denied_itself(dt):
+		return True
+	parents = set(
+		frappe.get_all("DocField", {"options": dt, "fieldtype": ["in", _TABLE_TYPES]}, pluck="parent")
+	) | set(frappe.get_all(CF, {"options": dt, "fieldtype": ["in", _TABLE_TYPES]}, pluck="dt"))
+	return any(_denied_itself(parent) for parent in parents)
+
+
 def _check_target(dt: str) -> None:
 	"""Forms whose fields are never changed from chat, new field or edit alike: the
 	denied forms themselves, and every child table of one (derived from the forms'
 	own Table fields, standard and custom: User Email, Workflow Transition, Webhook
 	Header ...), since a row of those is part of the denied record."""
-	denied = _denied_itself(dt)
-	if not denied:
-		parents = set(
-			frappe.get_all("DocField", {"options": dt, "fieldtype": ["in", _TABLE_TYPES]}, pluck="parent")
-		) | set(frappe.get_all(CF, {"options": dt, "fieldtype": ["in", _TABLE_TYPES]}, pluck="dt"))
-		denied = any(_denied_itself(parent) for parent in parents)
-	if denied:
+	if denied_target(dt):
 		raise StructureRefusedError(
 			f"The fields of {dt} are not changed from chat: it is a core, security, audit or "
 			f"Jarvis DocType (or a table of one). {_DESK_ONLY}",
@@ -418,6 +424,114 @@ def _check_fetches_through(dt: str, meta, link_fieldname: str) -> None:
 			f"{', '.join(broken)} on {dt} (fetch_from through this link). Change those fields first, "
 			"or keep the link as it is."
 		)
+
+
+# --------------------------------------------------------------------------- #
+# Fields another guarded save makes on the way
+# --------------------------------------------------------------------------- #
+def check_generated_fields(dt: str, rows: list[dict], changed: list[dict] | None = None) -> list[str]:
+	"""Pre-check the Custom Fields a guarded save will make on ``dt`` as part of
+	itself (a Workflow's state field; the fields the CRM data sync or a domain adds):
+	the same checks as a field asked for by name, for every row together. ``rows``
+	are the fields as Frappe will insert them (fieldname, fieldtype, options ...).
+
+	Each name must be a plain fieldname that is free on the form and on the real
+	table; the row must have room for all of them; and the table's schema diff must
+	be exactly their columns, nothing else. ``changed``: fields the save rewrites
+	in place (an app's field whose label was edited): they must change no column.
+	Returns the fieldnames that add a column. Raises ``InvalidFieldValueError``
+	naming the field, or ``StructureRefusedError`` when the table carries other
+	pending changes."""
+	if not rows and not changed:
+		return []
+	meta = _private_meta(dt)
+	single = bool(cint(meta.issingle))
+	for row in changed or []:
+		for df in meta.get("fields"):
+			if df.fieldname == row.get("fieldname") and df.get("is_custom_field"):
+				df.update({k: v for k, v in row.items() if _field_meta().has_field(k)})
+	checker = NewCustomField({})
+	fieldnames = []
+	for row in rows:
+		fieldname = str(row.get("fieldname") or "")
+		if not _FIELDNAME.match(fieldname) or len(fieldname) >= _MAX_FIELDNAME:
+			raise InvalidFieldValueError(
+				f"{fieldname!r} cannot be a fieldname on {dt}: use lowercase letters, digits and "
+				"underscores, starting with a letter, and fewer than 64 characters."
+			)
+		doc = frappe.new_doc(CF)
+		doc.update({**row, "dt": dt})
+		doc.set_fieldname()
+		if doc.fieldname != fieldname:
+			# Frappe keeps some names for itself and saves the field under another
+			# (``parent`` as ``parent1``): whoever asked would then use a missing field.
+			raise InvalidFieldValueError(
+				f"{fieldname!r} cannot be a fieldname on {dt}: Frappe keeps that name for itself."
+			)
+		checker._check_name_is_free(dt, meta, doc, fieldname)
+		if fieldname in fieldnames:
+			raise InvalidFieldValueError(f"The field {fieldname} would be added to {dt} twice.")
+		fieldnames.append(fieldname)
+		meta.append("fields", {**row, "is_custom_field": 1})
+	if single:
+		return []
+	statements, table = _diff(dt, meta)
+	definitions = {}
+	for fieldname in fieldnames:
+		column = table.columns.get(fieldname)
+		definition = column.get_definition() if column is not None else None
+		if definition:
+			definitions[fieldname] = " ".join(str(definition).split())
+	added = sum(gs.column_bytes(d) + 1 for d in definitions.values())
+	if gs.row_size(gs.table_columns(dt)) + added > gs.ROW_SIZE_LIMIT - gs.ROW_SIZE_MARGIN:
+		raise InvalidFieldValueError(
+			f"{dt}'s table has no room for the field {', '.join(definitions)}: its row is at the "
+			"database's size limit. The user frees up fields in Desk first."
+		)
+	if _added_columns(table.table_name, statements) != sorted(
+		f"`{name}` {definition}" for name, definition in definitions.items()
+	):
+		raise StructureRefusedError(
+			f"{dt}'s table has other structure changes waiting, so nothing that adds a field to it "
+			f"is done from chat. {_DESK_ONLY} An administrator brings the table in line first (bench "
+			"migrate applies pending structure changes).",
+			doctype=CF,
+			desk_path="/app/customize-form",
+		)
+	return list(definitions)
+
+
+def _added_columns(table_name: str, statements: list[str]) -> list[str] | None:
+	"""The columns ``statements`` add, as sorted "`name` definition" texts, or None
+	when any statement does something other than add columns to ``table_name``
+	(Frappe writes several new columns as one ALTER or as one each)."""
+	prefix = f"ALTER TABLE `{table_name}` ADD COLUMN "
+	added = []
+	for statement in statements:
+		if not statement.startswith(prefix):
+			return None
+		added.extend(statement[len(prefix) :].split(", ADD COLUMN "))
+	return sorted(added)
+
+
+def clean_up_generated(made) -> list[CleanUp]:
+	"""The clean-up of every field a guarded save made on the way (``undo["made"]``,
+	stamped by ``_guarded_structure.stamp_nested``): each exactly as a field asked
+	for by name, so a half-made one is removed and a complete one is left."""
+	notes = []
+	for field in made if isinstance(made, list) else []:
+		if not isinstance(field, dict):
+			continue
+		notes.append(
+			NewCustomField.clean_up(
+				{
+					"dt": field.get("dt"),
+					"fieldname": field.get("fieldname"),
+					"written": {"name": field.get("name"), "modified": field.get("modified")},
+				}
+			)
+		)
+	return notes
 
 
 # --------------------------------------------------------------------------- #
