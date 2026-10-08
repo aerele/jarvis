@@ -345,6 +345,7 @@ describe("DashboardChatPane shows the specific refusal reason (D3)", () => {
 
 describe("DashboardChatPane Retry on a failed reply", () => {
 	const EMPTY_REPLY = "⚠️ Agent couldn't generate a response. Please try again.";
+	const LATEST_ONLY = { ok: false, reason: "Only the latest reply can be retried." };
 	const failed = (error = EMPTY_REPLY, after = []) => ({
 		conversation: { name: "conv1" },
 		messages: [
@@ -360,12 +361,32 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		const promise = new Promise((res, rej) => ((resolve = res), (reject = rej)));
 		return { promise, resolve, reject };
 	};
+	// A frame of this chat: the retry's own run is r2 and its new placeholder m3; the
+	// failed turn is r1 with the failed reply m2.
+	const fire = (socket, kind, extra = {}) =>
+		socket.fire({ kind, conversation_id: "conv1", ...extra });
 
 	async function mountFailed(transcript = failed(), options) {
 		api.getDashboardConversation.mockResolvedValue(transcript);
 		const mountedPane = mountPane(options);
 		await flushPromises();
 		return mountedPane;
+	}
+	// Fake timers: flushPromises would wait on a faked timer, so time is advanced instead.
+	async function mountWithFakeTimers(options) {
+		vi.useFakeTimers();
+		api.getDashboardConversation.mockResolvedValue(failed());
+		const mountedPane = mountPane(options);
+		await vi.advanceTimersByTimeAsync(10);
+		return mountedPane;
+	}
+	// Click Retry with the request held open; returns the pane and the open request.
+	async function retryInFlight(transcript) {
+		const pending = deferred();
+		retryMessage.mockReturnValueOnce(pending.promise);
+		const pane = await mountFailed(transcript);
+		await retryButton(pane.wrapper).trigger("click");
+		return { ...pane, pending };
 	}
 
 	beforeEach(() => {
@@ -396,10 +417,7 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	});
 
 	it("is disabled while the retry request is in flight, and ignores a second click", async () => {
-		const pending = deferred();
-		retryMessage.mockReturnValueOnce(pending.promise);
-		const { wrapper } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
+		const { wrapper, pending } = await retryInFlight();
 		await flushPromises();
 		expect(retryButton(wrapper).text()).toBe("Retrying…");
 		expect(retryButton(wrapper).attributes("disabled")).toBeDefined();
@@ -413,93 +431,131 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		await flushPromises();
 	});
 
-	it("shows the refusal and offers Retry again", async () => {
-		retryMessage.mockResolvedValueOnce({
-			ok: false,
-			reason: "Only the latest reply can be retried.",
-		});
-		const { wrapper } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith("Only the latest reply can be retried.");
-		expect(retryButton(wrapper).text()).toBe("Retry");
-		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
-	});
-
-	it("says it could not retry for a refusal code it does not know", async () => {
-		retryMessage.mockResolvedValueOnce({ ok: false, reason: "maintenance" });
-		const { wrapper } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith("Couldn&#39;t retry that.");
+	it("shows a refusal or an error, escaped, and offers Retry again", async () => {
+		for (const [label, settle, toastText] of [
+			["refusal", (p) => p.resolve(LATEST_ONLY), "Only the latest reply can be retried."],
+			[
+				"unknown code",
+				(p) => p.resolve({ ok: false, reason: "maintenance" }),
+				"Couldn&#39;t retry that.",
+			],
+			["error", (p) => p.reject(new Error("Network down")), "Network down"],
+			[
+				"markup in an error",
+				(p) => p.reject(new Error("<img src=x onerror=1>")),
+				"&lt;img src=x onerror=1&gt;",
+			],
+		]) {
+			toast.error.mockClear();
+			const { wrapper, pending } = await retryInFlight();
+			settle(pending);
+			await flushPromises();
+			expect(toast.error, label).toHaveBeenCalledWith(toastText);
+			expect(retryButton(wrapper).text(), label).toBe("Retry");
+			expect(retryButton(wrapper).attributes("disabled"), label).toBeUndefined();
+		}
 	});
 
 	it("escapes the whole refusal message, the agent name too", async () => {
 		brand.name = "<img src=x onerror=1>";
-		retryMessage.mockResolvedValueOnce({ ok: false, reason: "usage_limit" });
-		const { wrapper } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
+		const { wrapper, pending } = await retryInFlight();
+		pending.resolve({ ok: false, reason: "usage_limit" });
 		await flushPromises();
 		const [message] = toast.error.mock.calls.at(-1);
 		expect(message).not.toContain("<img");
 		expect(message).toContain("&lt;img src=x onerror=1&gt;");
+		expect(wrapper.exists()).toBe(true);
 	});
 
-	it("shows the error of a retry that throws and offers Retry again", async () => {
-		retryMessage.mockRejectedValueOnce(new Error("Network down"));
-		const { wrapper } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		expect(toast.error).toHaveBeenCalledWith("Network down");
-		expect(retryButton(wrapper).text()).toBe("Retry");
-		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
+	it("offers Retry again when the retried run fails, also before the request returns", async () => {
+		for (const early of [false, true]) {
+			const { wrapper, socket, pending } = await retryInFlight();
+			if (early) fire(socket, "run:error", { message_id: "m3", run_id: "r2" });
+			pending.resolve({ ok: true, run_id: "r2" });
+			await flushPromises();
+			if (!early) {
+				expect(retryButton(wrapper).text()).toBe("Retrying…");
+				fire(socket, "run:error", { message_id: "m3", run_id: "r2", code: "empty-reply" });
+				await flushPromises();
+			}
+			expect(retryButton(wrapper).text(), `early=${early}`).toBe("Retry");
+		}
 	});
 
-	// The retried run's own terminal: a new placeholder (m3) of this pane's run (r2).
-	const retriedError = {
-		kind: "run:error",
-		conversation_id: "conv1",
-		message_id: "m3",
-		run_id: "r2",
-	};
-
-	it("offers Retry again when the retried run fails too", async () => {
-		const { wrapper, socket } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
-		socket.fire({ ...retriedError, code: "empty-reply" });
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retry");
-	});
-
-	it("is not left running when the run fails before the retry request returns", async () => {
-		const pending = deferred();
-		retryMessage.mockReturnValueOnce(pending.promise);
-		const { wrapper, socket } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		socket.fire(retriedError);
-		pending.resolve({ ok: true, run_id: "r2" });
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retry");
-	});
-
-	it("ignores the failed turn's re-published terminal while the retry is pending", async () => {
+	it("ignores the failed turn's re-published terminal, also after the retry's run:start", async () => {
 		// Finalize re-publishes the failed turn's terminal (same message, its own run).
-		const republished = { conversation_id: "conv1", message_id: "m2", run_id: "r1" };
 		for (const kind of ["run:error", "run:end"]) {
-			const pending = deferred();
-			retryMessage.mockReturnValueOnce(pending.promise);
-			const { wrapper, socket } = await mountFailed();
-			await retryButton(wrapper).trigger("click");
-			socket.fire({ ...republished, kind });
+			const { wrapper, socket, pending } = await retryInFlight();
+			fire(socket, kind, { message_id: "m2", run_id: "r1" });
 			pending.resolve({ ok: true, run_id: "r2" });
 			await flushPromises();
 			expect(retryButton(wrapper).text(), `${kind} before the response`).toBe("Retrying…");
-			socket.fire({ ...republished, kind, message_id: "m9" });
+			fire(socket, kind, { message_id: "m9", run_id: "r1" });
 			await flushPromises();
 			expect(retryButton(wrapper).text(), `${kind} of another run`).toBe("Retrying…");
+			fire(socket, "run:start", { run_id: "r2" });
+			fire(socket, kind, { message_id: "m2", run_id: "r1" });
+			await flushPromises();
+			expect(retryButton(wrapper).text(), `${kind} after run:start`).toBe("Retrying…");
+			fire(socket, kind, { message_id: "m3", run_id: "r2" });
+			await flushPromises();
+			expect(retryButton(wrapper).text(), `${kind} of the retry`).toBe("Retry");
 		}
+	});
+
+	it("keeps the failed reply fenced during a later send", async () => {
+		const { wrapper, socket, pending } = await retryInFlight();
+		pending.resolve({ ok: true, run_id: "r2" });
+		await flushPromises();
+		fire(socket, "run:error", { message_id: "m3", run_id: "r2" }); // the retry ends
+		await flushPromises();
+		api.sendDashboardChat.mockResolvedValueOnce({
+			ok: true,
+			conversation_id: "conv1",
+			run_id: "s1",
+		});
+		const box = wrapper.find("textarea");
+		await box.setValue("Monthly sales");
+		await box.trigger("keydown", { key: "Enter" });
+		await flushPromises();
+		fire(socket, "run:error", { message_id: "m2", run_id: "r1" }); // a late re-publish
+		await flushPromises();
+		expect(wrapper.find('[aria-live="polite"]').exists(), "the send still runs").toBe(true);
+	});
+
+	it("lets another run end the run once the retry has ended", async () => {
+		const { wrapper, socket, pending } = await retryInFlight();
+		fire(socket, "run:error", { message_id: "m3", run_id: "r2" }); // before the response
+		pending.resolve({ ok: true, run_id: "r2" });
+		await flushPromises();
+		fire(socket, "run:start", { run_id: "t2" }); // another tab
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retrying…");
+		fire(socket, "run:end", { message_id: "m5", run_id: "t2" });
+		await flushPromises();
+		expect(retryButton(wrapper).text()).toBe("Retry");
+	});
+
+	it("ends the retry on a terminal that does not name the run", async () => {
+		// Turn recovery publishes run_id "recovered"; stale_scan publishes none.
+		for (const runId of ["recovered", undefined]) {
+			const { wrapper, socket, pending } = await retryInFlight();
+			pending.resolve({ ok: true, run_id: "r2" });
+			await flushPromises();
+			fire(socket, "run:error", { message_id: "m3", run_id: runId });
+			await flushPromises();
+			expect(retryButton(wrapper).text(), String(runId)).toBe("Retry");
+		}
+	});
+
+	it("treats any frame of the retry's run as its start, when run:start was lost", async () => {
+		const { wrapper, socket, pending } = await retryInFlight();
+		pending.resolve({ ok: true, run_id: "r2" });
+		await flushPromises();
+		fire(socket, "tool:start", { run_id: "r2", tool_call_id: "t1", tool_name: "run_query" });
+		fire(socket, "run:end", { message_id: "m7", run_id: "other" });
+		await flushPromises();
+		expect(retryButton(wrapper).text(), "no longer fenced as another run").toBe("Retry");
 	});
 
 	it("takes the terminal of a second retry as its own, not as another run's", async () => {
@@ -512,50 +568,32 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 				{ name: "m3", role: "assistant", content: "", error: EMPTY_REPLY },
 			])
 		);
-		socket.fire({
-			kind: "run:error",
-			conversation_id: "conv1",
-			message_id: "m3",
-			run_id: "r2",
-		});
+		fire(socket, "run:error", { message_id: "m3", run_id: "r2" });
 		await vi.advanceTimersByTimeAsync(400);
 		const pending = deferred();
 		retryMessage.mockReturnValueOnce(pending.promise);
 		await retryButton(wrapper).trigger("click");
-		socket.fire({
-			kind: "run:error",
-			conversation_id: "conv1",
-			message_id: "m4",
-			run_id: "r3",
-		});
+		fire(socket, "run:error", { message_id: "m4", run_id: "r3" });
 		pending.resolve({ ok: true, run_id: "r3" });
 		await vi.advanceTimersByTimeAsync(10);
 		expect(retryButton(wrapper).text()).toBe("Retry");
 	});
 
-	it("never ends a run that started while a refused retry was in flight", async () => {
-		const pending = deferred();
-		retryMessage.mockReturnValueOnce(pending.promise);
-		const { wrapper, socket } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		socket.fire({ kind: "run:start", conversation_id: "conv1", run_id: "other" });
-		pending.resolve({
-			ok: false,
-			reason: "A reply is already in progress. Wait for it to finish.",
-		});
-		await flushPromises();
-		expect(retryButton(wrapper).text(), "the other run is still live").toBe("Retrying…");
-	});
-
-	it("never ends a run that started while a failed retry request was in flight", async () => {
-		const pending = deferred();
-		retryMessage.mockReturnValueOnce(pending.promise);
-		const { wrapper, socket } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
-		socket.fire({ kind: "run:start", conversation_id: "conv1", run_id: "other" });
-		pending.reject(new Error("Network down"));
-		await flushPromises();
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
+	it("never ends a run that started while a refused or failed retry was in flight", async () => {
+		for (const settle of [
+			(p) =>
+				p.resolve({
+					ok: false,
+					reason: "A reply is already in progress. Wait for it to finish.",
+				}),
+			(p) => p.reject(new Error("Network down")),
+		]) {
+			const { wrapper, socket, pending } = await retryInFlight();
+			fire(socket, "run:start", { run_id: "other" });
+			settle(pending);
+			await flushPromises();
+			expect(retryButton(wrapper).text(), "the other run is still live").toBe("Retrying…");
+		}
 	});
 
 	it("never ends a send that started while the retry request was in flight", async () => {
@@ -595,38 +633,32 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	// Production then writes a visible cancelled row (the refetch shows it); this pins
 	// the moment before it: the run state ends at once.
 	it("ends the run when the queued retry is cancelled", async () => {
-		const { wrapper, socket } = await mountFailed();
-		await retryButton(wrapper).trigger("click");
+		const { wrapper, socket, pending } = await retryInFlight();
+		pending.resolve({ ok: true, run_id: "r2" });
 		await flushPromises();
-		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "other" });
+		fire(socket, "turn:cancelled", { run_id: "other" });
 		await flushPromises();
 		expect(retryButton(wrapper).text()).toBe("Retrying…");
-		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "r2" });
+		fire(socket, "turn:cancelled", { run_id: "r2" });
 		await flushPromises();
 		expect(retryButton(wrapper).text()).toBe("Retry");
 	});
 
-	// Fake timers: flushPromises would wait on a faked timer, so time is advanced instead.
-	async function mountWithFakeTimers(options) {
-		vi.useFakeTimers();
-		api.getDashboardConversation.mockResolvedValue(failed());
-		const mountedPane = mountPane(options);
-		await vi.advanceTimersByTimeAsync(10);
-		return mountedPane;
-	}
-
 	it("does nothing for a pane unmounted while the retry request was in flight", async () => {
-		const pending = deferred();
-		retryMessage.mockReturnValueOnce(pending.promise);
-		const { wrapper } = await mountWithFakeTimers();
-		await retryButton(wrapper).trigger("click");
-		expect(wrapper.exists()).toBe(true);
-		mounted.pop().unmount();
-		pending.resolve({ ok: false, reason: "Only the latest reply can be retried." });
-		api.getDashboardConversation.mockClear();
-		await vi.advanceTimersByTimeAsync(95000);
-		expect(api.getDashboardConversation).not.toHaveBeenCalled();
-		expect(vi.getTimerCount()).toBe(0);
+		for (const settle of [(p) => p.resolve(LATEST_ONLY), (p) => p.reject(new Error("down"))]) {
+			const pending = deferred();
+			retryMessage.mockReturnValueOnce(pending.promise);
+			const { wrapper } = await mountWithFakeTimers();
+			await retryButton(wrapper).trigger("click");
+			mounted.pop().unmount();
+			toast.error.mockClear();
+			settle(pending);
+			api.getDashboardConversation.mockClear();
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(api.getDashboardConversation).not.toHaveBeenCalled();
+			expect(toast.error).not.toHaveBeenCalled();
+			expect(vi.getTimerCount()).toBe(0);
+		}
 	});
 
 	it("is disabled while the chat is compacting", async () => {
@@ -636,10 +668,7 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	});
 
 	it("refetches the chat after a refusal, so a stale Retry goes away", async () => {
-		retryMessage.mockResolvedValueOnce({
-			ok: false,
-			reason: "Only the latest reply can be retried.",
-		});
+		retryMessage.mockResolvedValueOnce(LATEST_ONLY);
 		const { wrapper } = await mountWithFakeTimers();
 		api.getDashboardConversation.mockClear();
 		await retryButton(wrapper).trigger("click");
@@ -648,15 +677,9 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	});
 
 	it("leaves a chat the user has since left alone, after a refusal or an error", async () => {
-		for (const settle of [
-			(p) => p.resolve({ ok: false, reason: "Only the latest reply can be retried." }),
-			(p) => p.reject(new Error("Network down")),
-		]) {
+		for (const settle of [(p) => p.resolve(LATEST_ONLY), (p) => p.reject(new Error("down"))]) {
 			toast.error.mockClear();
-			const pending = deferred();
-			retryMessage.mockReturnValueOnce(pending.promise);
-			const { wrapper } = await mountFailed();
-			await retryButton(wrapper).trigger("click");
+			const { wrapper, pending } = await retryInFlight();
 			wrapper.vm.resetChat();
 			settle(pending);
 			await flushPromises();
@@ -716,10 +739,7 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 	});
 
 	it("without a socket, a refused retry stops its refetch ladder", async () => {
-		retryMessage.mockResolvedValueOnce({
-			ok: false,
-			reason: "Only the latest reply can be retried.",
-		});
+		retryMessage.mockResolvedValueOnce(LATEST_ONLY);
 		const { wrapper } = await mountWithFakeTimers({ socket: null });
 		await retryButton(wrapper).trigger("click");
 		await vi.advanceTimersByTimeAsync(400); // the refusal's own refetch
@@ -742,6 +762,7 @@ describe("DashboardChatPane send", () => {
 		await box.trigger("keydown", { key: "Enter" });
 		await flushPromises();
 	}
+	const running = (wrapper) => wrapper.find('[aria-live="polite"]').exists();
 
 	it("shows the run as started, and ends it when its queued turn is cancelled", async () => {
 		api.sendDashboardChat.mockResolvedValueOnce({
@@ -752,10 +773,24 @@ describe("DashboardChatPane send", () => {
 		const { wrapper, socket } = mountPane();
 		await flushPromises();
 		await send(wrapper);
-		expect(wrapper.find('[aria-live="polite"]').exists()).toBe(true);
+		expect(running(wrapper)).toBe(true);
 		socket.fire({ kind: "turn:cancelled", conversation_id: "conv1", run_id: "s1" });
 		await flushPromises();
-		expect(wrapper.find('[aria-live="polite"]').exists()).toBe(false);
+		expect(running(wrapper)).toBe(false);
+	});
+
+	it("takes any run's terminal as the end of the run when no retry is pending", async () => {
+		api.sendDashboardChat.mockResolvedValueOnce({
+			ok: true,
+			conversation_id: "conv1",
+			run_id: "s1",
+		});
+		const { wrapper, socket } = mountPane();
+		await flushPromises();
+		await send(wrapper);
+		socket.fire({ kind: "run:end", conversation_id: "conv1", run_id: "other" });
+		await flushPromises();
+		expect(running(wrapper)).toBe(false);
 	});
 
 	it("escapes the whole refusal message, the agent name too", async () => {
