@@ -27,6 +27,7 @@ from unittest.mock import patch
 import frappe
 
 from jarvis import _redis_lock
+from jarvis._session import impersonate
 from jarvis.chat import admission, finalize, macro_reconcile, macros, prepare, pump, settlement, txn
 from jarvis.chat import turn_state as ts
 from jarvis.exceptions import AgentUnreachableError
@@ -1466,8 +1467,8 @@ class TestTheLimitsOfOneTick(CheckBase):
 
 		def look(check):
 			seen.append(frappe.session.user)
-			frappe.set_user(TEST_USER)  # as when it strikes mid-dispatch
-			raise JobTimeoutException("Task exceeded maximum timeout value (300 seconds)")
+			with impersonate(TEST_USER):  # as when it strikes mid-dispatch
+				raise JobTimeoutException("Task exceeded maximum timeout value (300 seconds)")
 
 		with patch.object(macro_reconcile._RunCheck, "_look", look), self.assertRaises(JobTimeoutException):
 			frappe.set_user("Administrator")

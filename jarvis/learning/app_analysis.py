@@ -1354,6 +1354,7 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 	raw = payload.get("skills")
 	if not isinstance(raw, list):
 		return 0, 0, 0
+	from jarvis._session import impersonate
 	from jarvis.chat.custom_skills_api import _create_custom_skill_impl
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
 		MAX_DESC_LEN,
@@ -1374,9 +1375,7 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 			continue
 		user_invocable = 1 if item.get("user_invocable") else 0
 		try:
-			original_user = frappe.session.user
-			try:
-				frappe.set_user(doc.requested_by)
+			with impersonate(doc.requested_by):
 				_create_custom_skill_impl(
 					slug,
 					description,
@@ -1386,8 +1385,6 @@ def _ingest_skills(doc, payload: dict) -> tuple[int, int, int]:
 					scope="Org",
 					ignore_permissions=True,
 				)
-			finally:
-				frappe.set_user(original_user)
 			created += 1
 		except Exception:
 			failed += 1
