@@ -136,3 +136,7 @@ Vue tests pass. Desktop and PWA production builds pass (existing desktop chunk-s
 warning remains). Scoped hooks pass. These results do not establish actual MariaDB
 11.6/PostgreSQL behavior or live remote effects. Follow-up patch does not reclaim
 unknown claims, so it does not weaken the at-most-one-dispatch contract.
+
+CI follow-up: the full frontend suite caught the new refresh epoch increment
+before the bootstrap guard. Moved it after the guard, preserving the existing
+no-side-effects-during-boot invariant; readiness and recovery regressions rerun.

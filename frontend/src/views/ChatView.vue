@@ -10036,9 +10036,9 @@ async function dismissUncertain(m) {
 let _prefillSendContext = null;
 let _prefillSendRevision = 0;
 async function send(textArg, resendAck) {
-	_recoveryRefreshEpoch++;
 	// Restoration must choose the destination before a send captures its conversation scope.
 	if (booting.value) return;
+	_recoveryRefreshEpoch++;
 	dismissFeedback(); // sending the next turn clears any pending feedback line
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
 	// send() directly (AskCard/answer/resend/prefill), not just the disabled composer. On the FIRST
