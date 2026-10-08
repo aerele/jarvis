@@ -190,7 +190,10 @@ class _PumpTestCase(FrappeTestCase):
 			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conv})[0][0] or 0
 		) + 1
 
-	def _mk_msg(self, conv: str, role: str = "user", content: str = "hi", **extra) -> str:
+	def _mk_msg(
+		self, conv: str, role: str = "user", content: str = "hi", *, server: bool = False, **extra
+	) -> str:
+		"""``server``: the row may set the server-only fields (origin, tool_*)."""
 		doc = frappe.get_doc(
 			{
 				"doctype": MSG,
@@ -202,6 +205,8 @@ class _PumpTestCase(FrappeTestCase):
 			}
 		)
 		doc.flags.ignore_permissions = True
+		if server:
+			doc.flags.jarvis_server_write = True
 		doc.insert()
 		frappe.db.commit()
 		return doc.name

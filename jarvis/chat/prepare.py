@@ -493,14 +493,18 @@ def _prepare_error(
 
 
 def _load_dispatch_raw(run_id: str) -> dict:
-	raw = frappe.db.get_value(TURN, run_id, "dispatch_payload")
+	return parse_dispatch(frappe.db.get_value(TURN, run_id, "dispatch_payload")) or {}
+
+
+def parse_dispatch(raw) -> dict | None:
+	"""A stored dispatch_payload: {} when empty, None when it is not a JSON object."""
 	if not raw:
 		return {}
 	try:
 		parsed = json.loads(raw)
-		return parsed if isinstance(parsed, dict) else {}
 	except Exception:
-		return {}
+		return None
+	return parsed if isinstance(parsed, dict) else None
 
 
 def _load_context(run_id: str):
@@ -508,14 +512,17 @@ def _load_context(run_id: str):
 
 
 def _load_attachments(run_id: str):
-	"""The ORIGINAL client attachment dicts ({file_url, file_name}).
+	return original_attachments(_load_dispatch_raw(run_id))
+
+
+def original_attachments(dp: dict):
+	"""The ORIGINAL client attachment dicts ({file_url, file_name}) of a stored dispatch_payload.
 
 	accept_or_queue stores them under ``attachments`` for a queued turn. Once
 	prepare rewrites ``dispatch_payload`` with the pump handoff, the originals live
 	under ``attachments_raw`` (the ``attachments`` key then holds the MANAGED vision
-	shape for the pump's chat.send) — so a re-prepare after recovery still assembles
-	with the real files. ``attachments_raw`` wins when present."""
-	dp = _load_dispatch_raw(run_id)
+	shape for the pump's chat.send) — so a re-prepare after recovery, or a retry, still
+	assembles with the real files. ``attachments_raw`` wins when present."""
 	if "attachments_raw" in dp:
 		return dp.get("attachments_raw")
 	return dp.get("attachments")

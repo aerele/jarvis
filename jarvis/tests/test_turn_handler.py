@@ -10,13 +10,14 @@ tests pin only the payload-mapping contract between the shim and the
 handler so a future refactor cannot silently change the payload shape.
 """
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_session_pool, turn_handler, worker
+from jarvis.chat import agent_session_pool, empty_reply_recovery, turn_handler, worker
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.test_chat_api import (
@@ -472,6 +473,71 @@ class TestClassifyError(unittest.TestCase):
 		exc = AgentUnreachableError("chat.send rejected: policy_denied: nope")
 		code = turn_handler._classify_error("chat.send rejected: policy_denied: nope", exc=exc)
 		self.assertEqual(code, "unreachable")
+
+
+class TestNoteEmptyReply(FrappeTestCase):
+	"""One telemetry line per classified empty reply: it measures how often the model
+	sends back nothing and at what context size."""
+
+	def _lines(self, err, code, logger=None):
+		logger = logger or MagicMock()
+		with patch("jarvis.chat.latency.get_logger", return_value=logger):
+			turn_handler._note_empty_reply("r1", "no-such-conv", err, code)
+		return [c.args for c in logger.info.call_args_list]
+
+	def test_each_variant_is_named(self):
+		for err, code, variant in (
+			("\u26a0\ufe0f Agent couldn't generate a response. Please try again.", "empty-reply", "plain"),
+			("Agent couldn\u2019t generate a response.", "empty-reply", "bare"),
+			("Agent couldn't generate a response: 500 from upstream", "empty-reply", "other"),
+			("Agent couldn't generate a response. Note: some tool actions ...", "empty-reply-tools", "tools"),
+		):
+			with self.subTest(variant=variant):
+				lines = self._lines(err, code)
+				self.assertEqual(len(lines), 1)
+				self.assertEqual(
+					lines[0][0],
+					"empty_reply run_id=%s conversation=%s variant=%s last_total_tokens=%s context_pct=%s",
+				)
+				self.assertEqual(lines[0][1:], ("r1", "no-such-conv", variant, "", ""))
+
+	def test_long_whitespace_is_read_in_linear_time(self):
+		text = "Agent couldn't generate a response." + " " * 30000 + "x"
+		started = time.monotonic()
+		self.assertIsNone(empty_reply_recovery.EMPTY_REPLY_RE.match(text))
+		self.assertEqual(self._lines(text, "empty-reply")[0][3], "bare", "only 300 characters are read")
+		self.assertLess(time.monotonic() - started, 0.5)
+
+	def test_a_failed_token_lookup_still_writes_the_line(self):
+		with patch.object(frappe.db, "sql", side_effect=RuntimeError("db down")):
+			lines = self._lines("Agent couldn't generate a response.", "empty-reply")
+		self.assertEqual(lines[0][1:], ("r1", "no-such-conv", "bare", "", ""))
+
+	def test_other_codes_write_nothing(self):
+		self.assertEqual(self._lines("429 rate_limit_error", "rate-limit"), [])
+
+	def test_a_lifecycle_error_frame_also_writes_the_line(self):
+		logger = MagicMock()
+		with (
+			patch.object(turn_handler, "_mark_errored"),
+			patch.object(turn_handler, "_publish_to_user"),
+			patch("jarvis.chat.latency.get_logger", return_value=logger),
+		):
+			turn_handler._handle_event_inner(
+				{"kind": "lifecycle", "phase": "error", "error": "Agent couldn't generate a response."},
+				conversation_id="c1",
+				assistant_msg_name="m1",
+				tool_msg_by_call_id={},
+				user="u@x",
+				run_id="r1",
+				batcher=MagicMock(),
+			)
+		self.assertEqual([c.args[1:4] for c in logger.info.call_args_list], [("r1", "c1", "bare")])
+
+	def test_a_logging_failure_never_raises(self):
+		logger = MagicMock()
+		logger.info.side_effect = RuntimeError("log down")
+		self._lines("Agent couldn't generate a response.", "empty-reply", logger)
 
 
 class TestPumpClassifyErrorForwardsExc(unittest.TestCase):

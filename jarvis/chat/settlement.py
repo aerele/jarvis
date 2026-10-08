@@ -233,6 +233,16 @@ def invoke_settlement(
 	# S6 — enqueue enrichment (idempotent per (turn, effect_name); force-done at 3).
 	deps.enqueue_finalize(run_id, relay_target_id)
 
+	# Last, so its read takes no snapshot before the steps above. The helper never raises;
+	# the try is for the import. A run:error pub_extra carries "error" and "code".
+	if pub_kind == "run:error":
+		try:
+			from jarvis.chat.turn_handler import _note_empty_reply
+
+			_note_empty_reply(run_id, conversation, pub_extra["error"], pub_extra["code"])
+		except Exception:
+			pass
+
 
 def _is_hidden_turn(run_id: str) -> bool:
 	"""True when this turn's SEED user message is hidden from the transcript - an
