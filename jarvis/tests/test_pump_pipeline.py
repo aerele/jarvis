@@ -3536,3 +3536,85 @@ class TestStopRunOnAResentTurn(_EmptyReplyCase):
 		with patch.object(empty_reply_recovery, "resent_turn", side_effect=RuntimeError("db hiccup")):
 			sess = self._stop(conv, rid)
 		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+
+class TestEmptyReplyOutcome(_EmptyReplyCase):
+	"""When a turn sent again for an empty reply settles, finalize writes its outcome with
+	the code the user saw; ``pump turn_finalized`` names the re-send."""
+
+	def _settled(self, rid, state, *, resent=empty_reply_recovery.REASON, error=None):
+		conv, _amsg = self._resent_turn(
+			rid, state, resent=resent, version=9, error=error, finalizing_at=frappe.utils.now()
+		)
+		ts.insert_required_effects(rid, ("telemetry_flush",))
+		frappe.db.commit()
+		with self._mock_enrichment():
+			finalize.run_finalize(rid, self._target)
+		return conv
+
+	def _finalized(self):
+		return [a[1:] for a in self.lines if a and str(a[0]).startswith("pump turn_finalized")]
+
+	def test_each_outcome_is_logged_with_its_code(self):
+		t = self._target
+		conv_ok = self._settled("pmp_ero_ok", "finalizing")
+		conv_stop = self._settled("pmp_ero_stop", "cancelled")
+		conv_fail = self._settled("pmp_ero_fail", "errored", error=EMPTY_REPLY)
+		conv_other = self._settled("pmp_ero_other", "errored", error="429 rate_limit_error")
+		self.assertEqual(
+			self._outcomes(),
+			[
+				("ok", "", "pmp_ero_ok", conv_ok, t),
+				("stopped", "", "pmp_ero_stop", conv_stop, t),
+				("failed", "empty-reply", "pmp_ero_fail", conv_fail, t),
+				("failed", "rate-limit", "pmp_ero_other", conv_other, t),
+			],
+		)
+		reason = empty_reply_recovery.REASON
+		self.assertEqual(
+			self._finalized(),
+			[
+				("pmp_ero_ok", 0, reason),
+				("pmp_ero_stop", 1, reason),
+				("pmp_ero_fail", 1, reason),
+				("pmp_ero_other", 1, reason),
+			],
+		)
+
+	def test_a_turn_not_sent_again_for_an_empty_reply_keeps_b1s_line(self):
+		self._settled("pmp_ero_none", "errored", resent=None, error=EMPTY_REPLY)
+		self._settled("pmp_ero_cli", "errored", resent=MARKER_ONLY, error=EMPTY_REPLY)
+		self.assertEqual(self._outcomes(), [])
+		self.assertEqual(
+			[a for a in self.lines if str(a[0]).startswith("pump turn_finalized")],
+			[
+				("pump turn_finalized run_id=%s errored=%d", "pmp_ero_none", 1),
+				("pump turn_finalized run_id=%s errored=%d", "pmp_ero_cli", 1),
+			],
+			"the line B1 writes, with no reason",
+		)
+
+	def test_a_failing_outcome_line_still_finalizes(self):
+		with patch.object(empty_reply_recovery, "note_outcome", side_effect=RuntimeError("log down")):
+			self._settled("pmp_ero_raise", "errored", error=EMPTY_REPLY)
+		self.assertEqual(self._finalized(), [("pmp_ero_raise", 1, empty_reply_recovery.REASON)])
+		status = frappe.db.get_value(
+			"Jarvis Turn Effect", {"turn": "pmp_ero_raise", "effect_name": "telemetry_flush"}, "status"
+		)
+		self.assertEqual(status, "done")
+
+	def test_a_replayed_finalize_does_not_count_twice(self):
+		replays = empty_reply_recovery.BREAKER_FAILURES - 1
+		for n in range(replays):
+			rid = f"pmp_ero_rep{n}"
+			self._settled(rid, "errored", error=EMPTY_REPLY)
+			frappe.db.set_value(
+				"Jarvis Turn Effect", {"turn": rid, "effect_name": "telemetry_flush"}, "status", "pending"
+			)
+			frappe.db.commit()
+			with self._mock_enrichment():
+				finalize.run_finalize(rid, self._target)
+		self.assertEqual(len(self._outcomes()), 2 * replays, "the line can repeat")
+		ctx, rs = self._streaming("pmp_ero_next")
+		self._terminal(ctx, rs)
+		self.assertEqual(self._decisions(), [("resent", "plain")], "the breaker counts the rows")
