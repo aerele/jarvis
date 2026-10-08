@@ -137,8 +137,10 @@ def _gc_expired_nonces() -> None:
 	nonce. ``frappe.cache.hset`` doesn't honour per-field TTLs (Redis HSET
 	can't), so abandoned sign-ins (customer started the flow, closed the
 	tab, never pasted the URL) leave their PKCE verifier + state hanging
-	in the hash until the whole key gets wiped. Punch-list "stale PKCE
-	verifiers + unconsumed nonces never GC'd" from the 2026-06-16 review.
+	in the hash. The hash is listed in hooks.py ``persistent_cache_keys``
+	(a full clear_cache() no longer empties it), so this sweep is what
+	keeps it bounded. Punch-list "stale PKCE verifiers + unconsumed nonces
+	never GC'd" from the 2026-06-16 review.
 
 	Called opportunistically from begin_paste_signin so the hash stays
 	bounded without a separate scheduled job. Cost is one HGETALL per
