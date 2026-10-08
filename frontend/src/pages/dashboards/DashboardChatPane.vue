@@ -122,7 +122,7 @@
 								variant="subtle"
 								size="sm"
 								:label="retrying || runActive ? 'Retrying…' : retryText"
-								:disabled="retryDisabled || m.name === stalledRetry"
+								:disabled="retryDisabled"
 								@click="retryFailed(m)"
 							/>
 						</div>
@@ -958,13 +958,10 @@ const retrying = ref(false);
 const retryDisabled = computed(
 	() => retrying.value || sending.value || runActive.value || compacting.value
 );
-const stalledRetry = ref(""); // a retry that never started: its Retry stays off (watchRetryStart)
 let ownRunId = ""; // the turn this pane's last send or retry started
 let pendingRetry = ""; // the failed reply a retry replaces, until its run starts or ends
 let runStarts = 0; // runs started (ours and run:start frames): a late refusal never ends a newer one
-let startTimer = null; // see watchRetryStart
 let disposed = false;
-const RETRY_NO_START_MS = 90000;
 const draft = ref("");
 const box = ref(null);
 
@@ -1155,32 +1152,7 @@ function markRunStarted(retried = "") {
 function endStartedRun() {
 	resetRun(false);
 	pendingRetry = "";
-	clearStartTimer();
 	ladderTimers.forEach(clearTimeout);
-}
-
-// An accepted retry whose run never starts (its job died before the placeholder, and
-// no sweep publishes a frame): after RETRY_NO_START_MS with no frame of it, take the
-// run state from the transcript. Its Retry stays off until a frame, a chat switch or a
-// reload: on the legacy path nothing else stops a second tab from a duplicate run.
-function watchRetryStart(retried) {
-	clearStartTimer();
-	startTimer = setTimeout(async () => {
-		startTimer = null;
-		const starts = runStarts;
-		await loadTranscript();
-		if (disposed || runStarts !== starts) return;
-		const restored = restoreDashboardRunState(messages.value);
-		applyRestoredRun(restored);
-		if (!restored.active) {
-			stalledRetry.value = retried;
-			toast.info("The retry has not started. Reload the chat to try again.");
-		}
-	}, RETRY_NO_START_MS);
-}
-function clearStartTimer() {
-	clearTimeout(startTimer);
-	startTimer = null;
 }
 
 // A terminal frame the retry must not take as its own: the failed turn's re-published
@@ -1197,7 +1169,7 @@ const RETRY_FALLBACK = "Couldn't retry that.";
 // it again, unless a run started meanwhile. A reply for a chat the user has
 // since left, or for an unmounted pane, changes nothing here.
 async function retryFailed(m) {
-	if (retryDisabled.value || m.name === stalledRetry.value) return;
+	if (retryDisabled.value) return;
 	const conv = conversation.value;
 	retrying.value = true;
 	ownRunId = "";
@@ -1213,7 +1185,6 @@ async function retryFailed(m) {
 			return;
 		}
 		ownRunId = r.run_id || "";
-		if (socket && !r.queued && runStarts === starts) watchRetryStart(m.name);
 	} catch (e) {
 		if (disposed || conversation.value !== conv) return;
 		if (runStarts === starts) endStartedRun();
@@ -1241,8 +1212,6 @@ function clearThread({ keepRun = false } = {}) {
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
 	pendingRetry = "";
-	stalledRetry.value = "";
-	clearStartTimer();
 }
 
 function resetChat() {
@@ -1311,15 +1280,6 @@ function onEvent(p) {
 	}
 	// any frame for OUR conversation refreshes the transcript (debounced)
 	scheduleRefetch();
-	// a frame of a turn of this pane shows it is alive (watchRetryStart)
-	if (
-		p.kind === "run:start" ||
-		p.kind === "turn:cancelled" ||
-		(p.run_id && p.run_id === ownRunId)
-	) {
-		clearStartTimer();
-		stalledRetry.value = "";
-	}
 	switch (p.kind) {
 		case "run:start":
 			runStarts++;
@@ -1431,6 +1391,5 @@ onBeforeUnmount(() => {
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 	clearTimeout(refetchTimer);
 	ladderTimers.forEach(clearTimeout);
-	clearStartTimer();
 });
 </script>
