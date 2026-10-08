@@ -38,6 +38,7 @@ import frappe
 
 from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
+from jarvis.chat.error_taxonomy import classify_error_text
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
@@ -595,8 +596,6 @@ def _effect_telemetry(ctx: _Ctx) -> None:
 def _note_resend_outcome(ctx: _Ctx) -> None:
 	"""The outcome line of a turn sent again for an empty reply. Best-effort."""
 	try:
-		from jarvis.chat.error_taxonomy import classify_error_text
-
 		row = frappe.db.get_value(TURN, ctx.run_id, ["relay_target_id", "error"], as_dict=True) or {}
 		state = ctx.turn.get("state")
 		empty_reply_recovery.note_outcome(
