@@ -121,7 +121,7 @@
 								class="mt-1.5"
 								variant="subtle"
 								size="sm"
-								:label="retrying || runActive ? 'Retrying…' : retryText"
+								:label="retryButtonLabel"
 								:disabled="retryDisabled"
 								@click="retryFailed(m)"
 							/>
@@ -954,12 +954,17 @@ const runActive = ref(false);
 const sending = ref(false);
 // Retry state: `retrying` is true while the request is in flight; runActive then
 // covers the run it starts.
+const RETRY_FALLBACK = "Couldn't retry that.";
 const retrying = ref(false);
 const retryDisabled = computed(
 	() => retrying.value || sending.value || runActive.value || compacting.value
 );
+const retryButtonLabel = computed(() =>
+	retrying.value || runActive.value ? "Retrying…" : retryText.value
+);
 let ownRunId = ""; // the turn this pane's last send or retry started
 let pendingRetry = ""; // the failed reply a retry replaces, until its run starts or ends
+let fencedReply = ""; // the reply the last retry replaces, until a chat switch (staleTerminal)
 let runStarts = 0; // runs started (ours and run:start frames): a late refusal never ends a newer one
 let disposed = false;
 const draft = ref("");
@@ -1119,10 +1124,12 @@ async function send(gotoMessageId = "") {
 }
 
 // The live-run state: a run that is starting (true) or one that has ended (false).
+// A pending retry is over either way: its run started or ended.
 function resetRun(active) {
 	runActive.value = active;
 	activeTools.value = [];
 	waitingFirstTool.value = active;
+	pendingRetry = "";
 }
 function applyRestoredRun(restored) {
 	runActive.value = restored.active;
@@ -1151,18 +1158,19 @@ function markRunStarted(retried = "") {
 // Undo markRunStarted for a retry the server did not start.
 function endStartedRun() {
 	resetRun(false);
-	pendingRetry = "";
-	ladderTimers.forEach(clearTimeout);
+	clearLadder();
 }
 
-// A terminal frame the retry must not take as its own: the failed turn's re-published
-// terminal (same message), or another run than this pane's.
+// A terminal frame the retry must not take as its own: the failed turn's terminal
+// (finalize re-publishes it, also after the retry's run:start), or, while the retry has
+// not started, another run's. Turn recovery ("recovered") and stale_scan (no run_id)
+// do not name the run, so they are never taken for another one. Only the failed turn
+// publishes terminals for its reply, so a fence that lasts until a switch drops nothing else.
 function staleTerminal(p) {
-	if (!pendingRetry) return false;
-	return p.message_id === pendingRetry || (!!ownRunId && !!p.run_id && p.run_id !== ownRunId);
+	if (fencedReply && p.message_id === fencedReply) return true;
+	if (!pendingRetry || !ownRunId || !p.run_id || p.run_id === "recovered") return false;
+	return p.run_id !== ownRunId;
 }
-
-const RETRY_FALLBACK = "Couldn't retry that.";
 
 // Retry a failed reply. The run shows as started before the request, so a
 // terminal frame that arrives first is not undone; a refusal or an error ends
@@ -1173,6 +1181,7 @@ async function retryFailed(m) {
 	const conv = conversation.value;
 	retrying.value = true;
 	ownRunId = "";
+	fencedReply = m.name;
 	markRunStarted(m.name);
 	const starts = runStarts;
 	try {
@@ -1212,6 +1221,7 @@ function clearThread({ keepRun = false } = {}) {
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
 	pendingRetry = "";
+	fencedReply = "";
 }
 
 function resetChat() {
@@ -1280,10 +1290,11 @@ function onEvent(p) {
 	}
 	// any frame for OUR conversation refreshes the transcript (debounced)
 	scheduleRefetch();
+	// any frame of this pane's run shows that run has started
+	if (ownRunId && p.run_id === ownRunId) pendingRetry = "";
 	switch (p.kind) {
 		case "run:start":
 			runStarts++;
-			pendingRetry = "";
 			resetRun(true);
 			break;
 		case "tool:start": {
@@ -1310,7 +1321,6 @@ function onEvent(p) {
 		}
 		case "run:end":
 			if (staleTerminal(p)) break;
-			pendingRetry = "";
 			resetRun(false);
 			// the compacted chip and the compacting lock are both scoped to one
 			// turn: the next terminal clears them and refetches the meter
@@ -1322,7 +1332,6 @@ function onEvent(p) {
 			break;
 		case "run:error":
 			if (staleTerminal(p)) break;
-			pendingRetry = "";
 			resetRun(false);
 			compacting.value = false;
 			if (p.message_id)
@@ -1331,10 +1340,7 @@ function onEvent(p) {
 			break;
 		case "turn:cancelled":
 			// This pane's queued turn was cancelled or aged out: no run is coming.
-			if (p.run_id && p.run_id === ownRunId) {
-				pendingRetry = "";
-				resetRun(false);
-			}
+			if (p.run_id && p.run_id === ownRunId) resetRun(false);
 			break;
 		case "context:compacted":
 			compacting.value = false;
@@ -1354,8 +1360,12 @@ function onEvent(p) {
 // each send; run-active clears when the reply settles (or at the ladder's end).
 // After a retry, the failed reply it replaces is not a settled reply.
 let ladderTimers = [];
-function startNoSocketLadder(retried = "") {
+function clearLadder() {
 	ladderTimers.forEach(clearTimeout);
+	ladderTimers = [];
+}
+function startNoSocketLadder(retried = "") {
+	clearLadder();
 	ladderTimers = [3000, 8000, 15000, 30000, 60000].map((ms, i, arr) =>
 		setTimeout(async () => {
 			await loadTranscript();
@@ -1364,8 +1374,7 @@ function startNoSocketLadder(retried = "") {
 			const settled =
 				last && last.role === "assistant" && !last.streaming && last.name !== retried;
 			if (settled || i === arr.length - 1) {
-				runActive.value = false;
-				pendingRetry = "";
+				resetRun(false);
 				emit("activity");
 			}
 		}, ms)
@@ -1390,6 +1399,6 @@ onBeforeUnmount(() => {
 	disposed = true;
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 	clearTimeout(refetchTimer);
-	ladderTimers.forEach(clearTimeout);
+	clearLadder();
 });
 </script>
