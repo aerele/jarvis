@@ -8,6 +8,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, formatdate, now
 
+from jarvis.chat import report_runs
 from jarvis.chat.approvals_api import list_approvals_page
 from jarvis.chat.report_runs import _filters_label, _open_runs, chat_report_runs, ready_reports
 from jarvis.tests.test_chat_asks import _ensure_user
@@ -146,7 +147,7 @@ class TestChatReportCard(FrappeTestCase):
 	def test_reads_the_same_without_mariadbs_json_functions(self):
 		run = _pr("Started")
 		_tool(self.conv, 1, "started", run)
-		with patch.object(frappe.db, "db_type", "postgres"):
+		with patch.object(report_runs, "_json_functions_available", return_value=False):
 			self.assertEqual(_states(self.conv), [(run, "preparing")])
 
 	def test_cancelled_deleted_or_foreign_runs_are_dropped(self):
