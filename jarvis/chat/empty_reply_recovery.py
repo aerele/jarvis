@@ -286,3 +286,22 @@ def _chat_failing(conversation: str, run_id: str, created) -> bool:
 		{"c": conversation, "r": run_id, "at": created, "since": since},
 	)
 	return bool(rows) and classify_error_text(rows[0][0]) in EMPTY_REPLY_CODES
+
+
+def note_outcome(
+	*, run_id: str, conversation: str, state: str | None, relay_target_id: str, code: str = ""
+) -> None:
+	"""``empty_reply outcome=ok|failed|stopped code=.. run_id=.. conversation=.. target=..``
+	for a turn sent again for an empty reply, once settlement settled it (``finalizing``,
+	``errored`` or ``cancelled``). ``code`` is the error code the user saw (``failed``
+	only). A replayed finalize can write the line again. Never raises."""
+	outcome = {"errored": "failed", "cancelled": "stopped"}.get(state, "ok")
+	_log(
+		"info",
+		"empty_reply outcome=%s code=%s run_id=%s conversation=%s target=%s",
+		outcome,
+		code if outcome == "failed" else "",
+		run_id,
+		conversation,
+		relay_target_id,
+	)
