@@ -335,9 +335,9 @@ class TestPanelNotFixable(_PanelBase):
 
 	def test_a_refusal_keeps_the_guards_panel_reply(self):
 		# Structure refusals (J1-guard) show their Desk path in the panel and send nothing.
-		# (A Workflow: one new Custom Field is the guarded exception since J1b-cf, and
-		# the panel turns that into its own card, test_custom_field_exception.)
-		r = self.apply({"workflow_name": "j2b-x", "document_type": "ToDo"}, doctype="Workflow")
+		# (A Service Level Agreement: a Custom Field and a Workflow are guarded
+		# exceptions, which the panel turns into their own card.)
+		r = self.apply({"service_level": "j2b-x", "document_type": "ToDo"}, doctype="Service Level Agreement")
 		self.assertEqual((r["ok"], r["error"]["code"]), (False, "structure_refused"))
 		self.assertNotIn("closed", r)
 		self.assertEqual(self.continuations(), [])

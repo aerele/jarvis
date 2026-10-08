@@ -44,9 +44,17 @@ classify as their own risk class (``GUARDED_STRUCTURE``), which ``check`` hands
 back only to a caller that can card them (``guarded=True``: the chat gate, the
 draft panel, the confirm of that card) and refuses for everyone else, and always
 when the site switch ``jarvis_structure_writes_disabled`` is set. The ORM guard
-admits such a save only for the one record the confirmed card named. Workflow and
-CRM / Domain Settings (J1c) are still refused like every structure write; that
-unit adds its classes the same way.
+admits such a save only for the one record the confirmed card named.
+
+Unit J1c adds four more the same way: a Workflow create (``workflow_new``) or
+update (``workflow_edit``, ``_workflow_guard``), a CRM Settings update that leaves
+the Frappe CRM data sync on (``crm_settings_sync``: that save adds fields to
+Quotation and Customer) and a Domain Settings update (``domain_settings``; both in
+``_settings_guard``). A CRM Settings update that leaves the data sync OFF changes
+no structure at all (crm_settings.py ``custom_fields_for_frappe_crm_data_sync``,
+ERPNext 15 and 16 :71-75), so it is ordinary sensitive configuration: always a
+card, with the usual trial run, and no lock. Deleting any of them, a batch, and a
+create of either settings document stay refused.
 
 A CHILD ROW written on its own (``update_doc`` / ``delete_doc`` on a Has Role,
 DocPerm, DocField, Webhook Header ... row, or a root save / delete of one through
@@ -54,7 +62,8 @@ DocPerm, DocField, Webhook Header ... row, or a root save / delete of one throug
 the call: under a structure or sensitive parent it is refused on every route and
 in every mode (``CHILD_ROW``), naming the parent record, where the same change
 gets the parent's own card or refusal. A row under an ordinary parent (a Sales
-Invoice Item) is not classified, as before.
+Invoice Item) is not classified, as before. That rule covers the rows of a
+Workflow, of a transition's task list and of the two settings documents too.
 """
 
 from __future__ import annotations
@@ -123,6 +132,8 @@ SENSITIVE_DOCTYPES = {
 	# Page or Report.
 	"Automation Flow": "code",
 	"Custom Role": "access",
+	# Frappe 16: the Server Scripts and Webhooks a workflow transition runs (J1c).
+	"Workflow Transition Tasks": "code",
 }
 
 # Jarvis's own configuration: sensitive in the ARGUMENT layer only (create_doc /
@@ -196,6 +207,7 @@ RISK_LINES = {
 	"access": "This changes who can see or edit.",
 	"login": "This changes how people sign in.",
 	"instructions": "This changes what your assistant is told to do.",
+	"settings": "This changes a setting for every user.",
 }
 # Where a person sets up each structure change in Desk (the refusal carries it).
 DESK_PATHS = {
@@ -213,7 +225,22 @@ DESK_PATHS = {
 # The structure writes a confirmation card may make (R2-10). Each is its own risk
 # class from the arguments (``risk_of``) to the save (``doc_risk``), so a card for
 # one never admits the other, and neither admits plain "structure".
-GUARDED_STRUCTURE = frozenset({"custom_field_new", "custom_field_edit"})
+GUARDED_STRUCTURE = frozenset(
+	{
+		"custom_field_new",
+		"custom_field_edit",
+		"workflow_new",
+		"workflow_edit",
+		"crm_settings_sync",
+		"domain_settings",
+	}
+)
+# The two settings documents (Singles: there is one record, named as its doctype)
+# and the guarded class an update of each is.
+_GUARDED_SETTINGS = {"CRM Settings": "crm_settings_sync", "Domain Settings": "domain_settings"}
+# The CRM Settings switch whose save adds fields to other forms; with it off the
+# save changes no structure.
+CRM_SYNC_FIELD = "enable_frappe_crm_data_synchronization"
 # Every class that changes the database structure: refused wherever it is not the
 # confirmed card's own record, and never carried into a background job.
 _STRUCTURE_RISKS = frozenset({"structure", *GUARDED_STRUCTURE})
@@ -224,13 +251,8 @@ _STRUCTURE_RISKS = frozenset({"structure", *GUARDED_STRUCTURE})
 CHILD_ROW = "child_row"
 
 # Which risk classes a confirmation card may authorise at the ORM, and the ORM risk
-# each one admits. J1c adds its guarded classes here, to ``GUARDED_STRUCTURE`` and
-# to ``risk_of`` / ``doc_risk``.
-_ALLOWABLE = {
-	"sensitive": frozenset({"sensitive"}),
-	"custom_field_new": frozenset({"custom_field_new"}),
-	"custom_field_edit": frozenset({"custom_field_edit"}),
-}
+# each one admits: a guarded class admits itself and nothing else.
+_ALLOWABLE = {"sensitive": frozenset({"sensitive"}), **{g: frozenset({g}) for g in GUARDED_STRUCTURE}}
 
 _TOOLS_WITH_TARGETS = frozenset(
 	{
@@ -288,6 +310,8 @@ def risk_class(doctype: str) -> str:
 		return _ARG_SENSITIVE[dt]
 	if dt == "Auto Repeat":
 		return "mail"
+	if dt == "CRM Settings":
+		return "settings"  # an update that leaves the data sync off (``_crm_sync_on``)
 	return ""
 
 
@@ -476,8 +500,35 @@ def _conditional_risky(doctype: str, view, op: str) -> bool:
 _ROW_OPS = ("update", "delete", "other")
 
 
+def check_on(value) -> bool:
+	"""A Check value as the write stores it (``_field_values``: true / "yes" / " 1 "
+	are 1). A value that cannot be read counts as on: the stricter path, whose own
+	check then names the bad value."""
+	if value is None:
+		return False
+	if isinstance(value, str):
+		word = value.strip().lower()
+		if word in ("", "false", "no", "n", "off"):
+			return False
+		if word in ("true", "yes", "y", "on"):
+			return True
+		value = word
+	try:
+		return bool(int(float(value)))
+	except (TypeError, ValueError, OverflowError):
+		return True
+
+
+def _crm_sync_on(view) -> bool:
+	"""Whether a CRM Settings save ends with the Frappe CRM data sync on (the call's
+	own value, else the stored one): only then does the save add fields."""
+	return check_on(view.get(CRM_SYNC_FIELD))
+
+
 def _target_risk(target: _Target) -> str | None:
 	dt = target.doctype
+	if dt == "CRM Settings" and target.op == "update" and not _crm_sync_on(_ArgView(target)):
+		return "sensitive"  # plain values: no structure changes (module docstring)
 	if dt in STRUCTURE_DOCTYPES:
 		return "structure"
 	if dt in SENSITIVE_DOCTYPES:
@@ -599,6 +650,9 @@ def _possible_parents(table: str) -> list[tuple[str, str]]:
 	"""Every ``(doctype, fieldname)`` whose table is ``table``: standard fields and
 	Custom Fields."""
 	out = []
+	# get_all (system context, no permission filter): which forms carry a table is
+	# schema, the same for every user, and the answer decides a refusal, never what
+	# the caller is shown. A user who cannot read DocField must get the same verdict.
 	for source, parent_column in (("DocField", "parent"), ("Custom Field", "dt")):
 		out += frappe.get_all(
 			source,
@@ -696,41 +750,135 @@ def _table_label(row: _ChildRow) -> str:
 	return (df.label if df is not None and df.label else row.parentfield) or "its table"
 
 
+def _parent_gets_a_card(row: _ChildRow) -> bool:
+	"""Whether the same change made through the row's PARENT parks a confirmation
+	card in every mode: asked of the guard's own classification of an ``update_doc``
+	on that record that rewrites the table, never guessed.
+
+	True for a sensitive parent (a User, a Script Report, CRM Settings with the data
+	sync off) and for a parent whose update is a guarded structure write (a
+	Workflow, CRM Settings with the data sync on, Domain Settings) while the site
+	allows those (``_guarded_structure.available``: with the off switch set the
+	guarded card does not exist). False for a parent the guard does not classify (a
+	Page, a Dashboard Chart, a Workspace), for a conditional one whose record is not
+	sensitive (a Report Builder report) and for every other structure parent (a
+	DocType): those are changed in Desk."""
+	try:
+		args = {"doctype": row.parenttype, "name": row.parent, "changes": {row.parentfield: [{}]}}
+		risk = risk_of("update_doc", args)
+		if risk in GUARDED_STRUCTURE:
+			from jarvis.tools import _guarded_structure
+
+			return _guarded_structure.available()
+		return risk == "sensitive"
+	except Exception:
+		return False
+
+
 def child_row_refusal(row: _ChildRow) -> WriteRefusedError:
 	"""The refusal of a child row written on its own: the parent's kind decides the
-	code, and the message names the record to go through (plain words, no markup)."""
+	code, and the message names the record to go through (plain words, no markup).
+
+	What it tells the model to do instead depends on what the PARENT gets
+	(``_parent_gets_a_card``): under a parent whose update is carded, sensitive or a
+	guarded structure write (a Workflow, the two settings), "use update_doc on the
+	parent" (one card showing the whole change); under any other structure parent,
+	Desk; under a parent the guard does
+	not card (a role list of a Page, a Dashboard Chart or a Workspace; a row of a
+	conditional record that is not sensitive), Desk too, and no promise of a card:
+	``update_doc`` on such a parent runs with no card in the uncarded modes, so the
+	refusal must not send the model there."""
 	if not row.parenttype:
 		parents = ", ".join(row.possible)
 		cls = StructureRefusedError if row.kind == "structure" else SensitiveWriteRefusedError
-		return cls(
-			f"This {row.doctype} row has no parent record, so it cannot be changed or deleted from chat. "
-			f"{row.doctype} rows belong to {parents}: change them through the record they are part of.",
-			doctype=row.doctype,
-			hint="Do not retry it with another tool; a row is changed through the record it belongs to.",
+		return _as_child_row(
+			cls(
+				f"This {row.doctype} row has no parent record, so it cannot be changed or deleted from "
+				f"chat. {row.doctype} rows belong to {parents}: change them through the record they are "
+				"part of.",
+				doctype=row.doctype,
+				hint="Do not retry it with another tool; a row is changed through the record it belongs to.",
+			),
+			row,
 		)
 	record = f"{row.parenttype} {row.parent}".rstrip()
 	through = f"Change this through its record: {record}, field {_table_label(row)}."
-	if row.kind == "structure":
-		return StructureRefusedError(
-			f"This {row.doctype} row is part of {record}, and {row.parenttype} changes the database "
-			f"structure, so it is set up in Desk, not from chat. {through} "
-			"Do not retry it with another tool; tell the user where to do it.",
-			doctype=row.doctype,
-			desk_path=desk_path(row.parenttype, row.parent or None),
+	path = desk_path(row.parenttype, row.parent or None)
+	# What to do instead when the parent's own update gets a card. The tool keeps a
+	# table's rows by their name, so it says so here: a first try without the names
+	# is refused by the tool itself.
+	use_parent = (
+		f"Use update_doc on {row.parenttype} with its {row.parentfield} rows as they should be (send "
+		"each kept or changed row with its name from get_doc), so the user gets one confirmation "
+		"card showing the whole change."
+	)
+	parent_hint = (
+		f"Change it through {record}: update that record's {row.parentfield} table, each kept row "
+		"with its name from get_doc."
+	)
+	carded = not row.grant and _parent_gets_a_card(row)
+	if row.kind == "structure" and carded:
+		# A structure parent chat MAY change, through its own guarded card (a
+		# Workflow, the two settings): sending the person to Desk would be wrong.
+		return _as_child_row(
+			StructureRefusedError(
+				f"This {row.doctype} row is part of {record}, so the row cannot be changed or deleted on "
+				f"its own. {through} {use_parent}",
+				doctype=row.doctype,
+				desk_path=path,
+				hint=parent_hint,
+			),
+			row,
 		)
-	if row.grant:
+	if row.kind == "structure":
+		return _as_child_row(
+			StructureRefusedError(
+				f"This {row.doctype} row is part of {record}, and {row.parenttype} changes the database "
+				f"structure, so it is set up in Desk, not from chat. {through} "
+				"Do not retry it with another tool; tell the user where to do it.",
+				doctype=row.doctype,
+				desk_path=path,
+			),
+			row,
+		)
+	if row.grant or _role_list(row.doctype):
+		# A role row decides who may open or use its record, whatever else that
+		# record is (a Report counts whole as code; its roles are still access).
 		why = f"a {row.doctype} row grants access ({RISK_LINES['access'].rstrip('.').lower()})"
 	else:
 		risk = RISK_LINES[risk_class(row.parenttype)].rstrip(".").lower()
 		why = f"{row.parenttype} is sensitive configuration ({risk})"
-	return SensitiveWriteRefusedError(
-		f"This {row.doctype} row is part of {record}, and {why}, so the row cannot be changed or "
-		f"deleted on its own. {through} "
-		f"Use update_doc on {row.parenttype} with its {row.parentfield} rows as they should be, so the "
-		"user gets one confirmation card showing the whole change.",
-		doctype=row.doctype,
-		hint=f"Change it through {record}: update that record's {row.parentfield} table.",
+	if carded:
+		return _as_child_row(
+			SensitiveWriteRefusedError(
+				f"This {row.doctype} row is part of {record}, and {why}, so the row cannot be changed or "
+				f"deleted on its own. {through} {use_parent}",
+				doctype=row.doctype,
+				hint=parent_hint,
+			),
+			row,
+		)
+	return _as_child_row(
+		SensitiveWriteRefusedError(
+			f"This {row.doctype} row is part of {record}, and {why}, so the row cannot be changed or "
+			f"deleted on its own from chat. {through} "
+			f"Do not retry it with another tool; tell the user to change it in Desk on {record}: open "
+			f"{path}.",
+			doctype=row.doctype,
+			desk_path=path,
+			hint=f"Tell the user to change it in Desk: open {path}.",
+		),
+		row,
 	)
+
+
+def _as_child_row(e: WriteRefusedError, row: _ChildRow) -> WriteRefusedError:
+	"""Mark a refusal as a child row's, for the audit line: one label
+	(``child_row``) in both layers, with what the row's parent is beside it."""
+	e.risk = CHILD_ROW
+	e.parent_kind = row.kind
+	e.under = f"{row.parenttype} {row.parent}".strip()
+	return e
 
 
 def child_row_refusal_of(tool: str, args) -> WriteRefusedError:
@@ -822,12 +970,13 @@ def _grants(target: _Target, fieldname: str) -> bool:
 
 
 def risk_of(tool: str, args) -> str | None:
-	"""``None`` / ``"structure"`` / ``"custom_field_new"`` / ``"custom_field_edit"`` /
-	``"child_row"`` / ``"sensitive"`` for one tool call. ``custom_field_new`` is a
-	single create of one Custom Field and ``custom_field_edit`` a single update of one
-	named Custom Field (never a delete or a batch); any structure doctype in a batch
-	is ``structure``. ``child_row`` is an update or delete of a row of a child table
-	under a structure or sensitive parent (always refused, ``check``).
+	"""``None`` / ``"structure"`` / a guarded structure class / ``"child_row"`` /
+	``"sensitive"`` for one tool call. ``custom_field_new`` is a single create of one
+	Custom Field and ``custom_field_edit`` a single update of one named Custom Field
+	(never a delete or a batch); Workflow and the two settings likewise
+	(``_guarded_class``); any structure doctype in a batch is ``structure``.
+	``child_row`` is an update or delete of a row of a child table under a structure
+	or sensitive parent (always refused, ``check``).
 	``run_method`` is not classified (R2-13); the ORM guard judges what it saves."""
 	if tool not in _TOOLS_WITH_TARGETS:
 		return None
@@ -835,15 +984,27 @@ def risk_of(tool: str, args) -> str | None:
 	risks = [_target_risk(t) for t in targets]
 	if "structure" in risks:
 		single = len(targets) == 1 and not _is_batch(tool, args)
-		if single and targets[0].doctype == "Custom Field":
-			if tool == "create_doc":
-				return "custom_field_new"
-			if tool == "update_doc" and targets[0].name:
-				return "custom_field_edit"
-		return "structure"
+		return (_guarded_class(tool, targets[0]) if single else None) or "structure"
 	if CHILD_ROW in risks:
 		return CHILD_ROW
 	return "sensitive" if "sensitive" in risks else None
+
+
+def _guarded_class(tool: str, target: _Target) -> str | None:
+	"""The guarded class (``GUARDED_STRUCTURE``) of a single structure target, or
+	None: one new Custom Field or Workflow, an update of one named Custom Field or
+	Workflow, an update of CRM Settings (data sync on) or Domain Settings."""
+	dt = target.doctype
+	if dt in ("Custom Field", "Workflow"):
+		kind = "custom_field" if dt == "Custom Field" else "workflow"
+		if tool == "create_doc":
+			return f"{kind}_new"
+		if tool == "update_doc" and target.name:
+			return f"{kind}_edit"
+	# A Single is named as its doctype; any other name is not that record.
+	if dt in _GUARDED_SETTINGS and tool == "update_doc" and target.name in (None, dt):
+		return _GUARDED_SETTINGS[dt]
+	return None
 
 
 def risk_line(tool: str, args) -> str:
@@ -925,6 +1086,18 @@ def structure_refusal(doctype: str = "", name=None) -> StructureRefusedError:
 	)
 
 
+def _kind_hint(e: WriteRefusedError) -> str:
+	if isinstance(e, StructureRefusedError):
+		if e.desk_path:
+			return f"Set this up in Desk: open {e.desk_path}."
+		return "Set this up in Desk; it cannot be done from chat."
+	if isinstance(e, SensitiveWriteRefusedError):
+		return "Ask for this change on its own in chat so it gets a confirmation card."
+	if isinstance(e, BrakeRefusedError):
+		return "Run it from the chat outside the automatic run, so the user gets a confirmation card."
+	return ""
+
+
 def refused_envelope(e: WriteRefusedError, detail: str = "") -> dict:
 	"""The ``{ok: false, error}`` envelope for a refusal: its own code, the refusing
 	doctype (``error.doctype``) and for a structure change the Desk page."""
@@ -932,19 +1105,9 @@ def refused_envelope(e: WriteRefusedError, detail: str = "") -> dict:
 
 	from jarvis._responses import err
 
-	hint = getattr(e, "hint", "")
-	if hint:
-		pass  # the refusal says what to do instead (a child row: go through its record)
-	elif isinstance(e, StructureRefusedError):
-		hint = (
-			f"Set this up in Desk: open {e.desk_path}."
-			if e.desk_path
-			else "Set this up in Desk; it cannot be done from chat."
-		)
-	elif isinstance(e, SensitiveWriteRefusedError):
-		hint = "Ask for this change on its own in chat so it gets a confirmation card."
-	elif isinstance(e, BrakeRefusedError):
-		hint = "Run it from the chat outside the automatic run, so the user gets a confirmation card."
+	# A refusal that says what to do instead (a child row: go through its record)
+	# keeps its own hint; the others get their kind's.
+	hint = e.hint or _kind_hint(e)
 	env = err(e.code, strip_html(str(e)).strip(), detail=detail, hint=hint)
 	if getattr(e, "desk_path", ""):
 		env["error"]["desk_path"] = e.desk_path
@@ -1004,10 +1167,10 @@ def allow_entries(tool: str, args) -> list[_Allow]:
 		return [_Allow("*", None, _ALLOWABLE["sensitive"], multi=True)]
 	guarded = risk_of(tool, args)
 	if guarded in GUARDED_STRUCTURE:
-		# The card's one Custom Field: a new one binds to the first root insert, an
-		# edit to the record it names.
+		# The card's one record: a new one binds to the first root insert, an edit to
+		# the record it names (a settings document is named as its doctype).
 		target = _targets(tool, args)[0]
-		name = None if target.op == "create" else str(target.name)
+		name = None if target.op == "create" else str(target.name or target.doctype)
 		return [_Allow(target.doctype, name, _ALLOWABLE[guarded])]
 	out = []
 	for t in _targets(tool, args):
@@ -1082,14 +1245,21 @@ def _active_state() -> _GuardState | None:
 
 def doc_risk(doc, event: str) -> str | None:
 	"""``structure`` / a guarded structure class / ``sensitive`` / ``None`` for the
-	document an event fires on. A Custom Field being inserted or saved is its guarded
-	class (admitted only by the card that named it); its delete or rename is plain
+	document an event fires on. A Custom Field or Workflow being inserted or saved,
+	and a save of CRM Settings (data sync on) or Domain Settings, is its guarded
+	class (admitted only by the card that named it); a delete or rename is plain
 	``structure``, which no card admits. A row of a child table under a structure or
 	sensitive parent is ``child_row``, which no card admits either."""
 	dt = canonical(doc.doctype)
 	if dt in STRUCTURE_DOCTYPES:
-		if dt == "Custom Field" and event in ("before_validate", "before_change"):
-			return "custom_field_new" if _is_new(doc) else "custom_field_edit"
+		if event in ("before_validate", "before_change"):
+			if dt in ("Custom Field", "Workflow"):
+				kind = "custom_field" if dt == "Custom Field" else "workflow"
+				return f"{kind}_new" if _is_new(doc) else f"{kind}_edit"
+			if dt == "CRM Settings" and not check_on(doc.get(CRM_SYNC_FIELD)):
+				return "sensitive"  # judged on the save itself: the sync is off, no fields
+			if dt in _GUARDED_SETTINGS:
+				return _GUARDED_SETTINGS[dt]
 		return "structure"
 	if dt in SENSITIVE_DOCTYPES:
 		return "sensitive"
@@ -1238,6 +1408,13 @@ def guard_doc_event(doc, method=None, *args, **kwargs):
 	parent = nested_under(doc)
 	if parent is not None:
 		log_line(risk, dt, doc.name, "nested", under=f"{parent.doctype} {parent.name}")
+		if risk in ("custom_field_new", "custom_field_edit"):
+			# A field the card's own record makes on the way (a Workflow's state
+			# field, the data sync's fields) or writes over (an existing field of
+			# that name): the confirmation row learns it too.
+			from jarvis.tools import _guarded_structure
+
+			_guarded_structure.stamp_nested(doc)
 		return
 	if risk == "sensitive" and _in_sandbox():
 		return  # a dry run builds the card; everything it wrote is rolled back
@@ -1275,7 +1452,15 @@ def _refuse_child_row(row: _ChildRow | None, event: str) -> None:
 	every mode, in a dry run too, and whatever a confirmed card allows."""
 	if row is None:
 		return
-	log_line(CHILD_ROW, row.doctype, row.name, "refused", event=event, under=f"{row.parenttype} {row.parent}")
+	log_line(
+		CHILD_ROW,
+		row.doctype,
+		row.name,
+		"refused",
+		event=event,
+		under=f"{row.parenttype} {row.parent}".strip(),
+		parent_kind=row.kind,
+	)
 	_refuse(child_row_refusal(row))
 
 

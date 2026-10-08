@@ -56,6 +56,8 @@ _DRAWS_NOTHING_RE = re.compile(
 _MARK_OPEN, _MARK_CLOSE = "\u27e6", "\u27e7"
 # Line breaks other than ``\n`` (what ``str.splitlines`` also breaks on): code may
 # run what follows them as a new line while the card draws one line.
+WIDE_TABLE_NOTE = "This table is wider than the card. Scroll it sideways to see every column."
+_WIDE_TABLE_COLS = 4  # more columns than this do not fit a phone
 HIDDEN_BREAK_NOTE = "Contains a line break the card shows as a marker: the code may run it as a new line."
 _HIDDEN_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
@@ -208,6 +210,25 @@ def secret_state(value, before=None, *, update: bool = False, stored: bool = Fal
 
 def _filled(value) -> bool:
 	return value is not None and cstr(value).strip() != ""
+
+
+def secret_word(meta, fieldname, value, before=None, *, update: bool = False) -> str:
+	"""``secret_state`` for the field ``fieldname`` of ``meta``, by what Frappe really
+	does with it: the ONE rule for a secret a write carries, top-level or in a row.
+
+	Only a Password field is masked. Frappe leaves a Password of all asterisks alone
+	(base_document.py ``_save_passwords``: its own dummy), so that reads "unchanged"
+	(or "not set" on a create). A field that is secret by its NAME only (a Data
+	field called ``api_token``) has no mask: all asterisks are an ordinary value and
+	are stored, so they read "changed" (or "set"), and the stored value is the real
+	one, so an echo of it is "unchanged". A field with no meta is judged as a
+	Password, as before."""
+	df = meta.get_field(fieldname) if meta else None
+	if df is None or df.fieldtype == "Password" or not _filled(value):
+		return secret_state(value, before, update=update)
+	if update and _filled(before):
+		return "unchanged" if cstr(value) == cstr(before) else "changed"
+	return "set"
 
 
 def line_diff(old: str, new: str, context: int = 2, force: bool = False) -> list[dict] | None:
@@ -505,14 +526,25 @@ def _whole_record(meta, doc) -> tuple[list[dict], list[dict]]:
 	return rows, tables
 
 
+class SecretWord(str):
+	"""What a card says for a secret cell whose state is already decided ("set",
+	"changed", "cleared", "unchanged"): drawn as it is, never judged again and never
+	a value."""
+
+
 def value_row(
 	meta, fieldname, label, value, df=None, doc=None, full: bool = False, limit=_MAX_VAL, stored: bool = False
 ) -> dict:
 	"""One ``{"label", "value"}`` row. A secret is masked ("[hidden]", or "set" on a
 	sensitive card); a ``full`` row keeps the whole value and marks a long one
 	``multiline`` so the clients give it its own block."""
+	if isinstance(value, SecretWord):
+		return {"label": label, "value": str(value) if full else "[hidden]"}
 	if is_secret(meta, fieldname):
-		return {"label": label, "value": secret_state(value, stored=stored) if full else "[hidden]"}
+		if not full:
+			return {"label": label, "value": "[hidden]"}
+		word = secret_state(value, stored=True) if stored else secret_word(meta, fieldname, value)
+		return {"label": label, "value": word}
 	if not full:
 		return {"label": label, "value": fmt(value, df, doc, limit)}
 	text = fmt_full(value, df, doc)
@@ -629,6 +661,11 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 		"extra_columns": max(0, len(columns) - len(shown_cols)),
 		"unknown_columns": len(unknown),
 	}
-	if hidden_break:
-		out["note"] = HIDDEN_BREAK_NOTE
+	notes = [HIDDEN_BREAK_NOTE] if hidden_break else []
+	if full and len(shown_cols) > _WIDE_TABLE_COLS:
+		# A full card never drops a column, so a wide table scrolls sideways inside
+		# the card; nothing else on a phone or the board says so.
+		notes.append(WIDE_TABLE_NOTE)
+	if notes:
+		out["note"] = " ".join(notes)
 	return out

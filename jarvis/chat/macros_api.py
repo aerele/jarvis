@@ -551,6 +551,8 @@ _ARM_NOTICE_SENSITIVE = (
 	("login", _lt("sign-in settings")),
 	# Skills are named with the tools that still ask, above.
 	("instructions", _lt("learned skills")),
+	# CRM Settings with the Frappe CRM data sync off (J1c): plain values, always a card.
+	("settings", _lt("CRM settings")),
 )
 
 
