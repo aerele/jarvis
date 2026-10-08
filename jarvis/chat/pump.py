@@ -77,8 +77,8 @@ from datetime import datetime, timezone
 import frappe
 
 from jarvis import compat
+from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
-from jarvis.chat import txn
 from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
@@ -1651,6 +1651,9 @@ class _RunState:
 	# path, just delayed).
 	yield_deadline: float | None = None
 	yield_payload: dict | None = None
+	# A step line was offered for this run, or a hop re-attached it (the client fence may
+	# hold its seqs): ``empty_reply_recovery`` then never sends it again.
+	stepped: bool = False
 
 	@property
 	def key(self) -> str:
@@ -2662,40 +2665,122 @@ def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
 	return not bool(frappe.db.get_value(TURN, run_id, "cancel_requested"))
 
 
-def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
-	"""admin-v2#656: send a turn again ONCE when the runtime refused it before producing
-	anything because it would not resume a Claude CLI live session. The refusal
-	discards the stale process, so the same turn sent again starts a fresh one. The
-	Turn goes back to ``ready`` (same row, placeholder and stored prompt) and the next
-	``_dispatch_ready`` pass sends it under a fresh gateway key. The CAS refuses a turn
-	that streamed anything or was stopped, and a lost CAS settles exactly as before.
-	True = requeued, the caller must not settle it."""
-	if kind != "relay:error" or payload.get("state") != "error" or (payload.get("text") or "").strip():
-		return False
-	if not _REFUSED_CLI_SESSION_RE.search(payload.get("error") or ""):
-		return False
-	stored = _json_or_none(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
-	if not isinstance(stored, dict) or stored.get("redispatch"):
-		return False
-	flagged = json.dumps({**stored, "redispatch": 1})
+# What ``_resend_once`` did (the empty-reply path logs them as skip reasons).
+_RESENT = "resent"
+_USED = "used"
+_NO_PAYLOAD = "no_payload"
+_CAS_LOST = "cas_lost"
+
+
+def _resend_once(ctx: PumpContext, rs: _RunState, reason: str | None = None) -> str:
+	"""Send a turn again ONCE. The Turn goes back to ``ready`` (same row, placeholder and
+	stored prompt) and the next ``_dispatch_ready`` pass sends it under a fresh gateway
+	key. The stored ``redispatch`` marker allows one re-send per turn, whatever the cause.
+	The CAS refuses a turn that streamed anything or was stopped, and a lost CAS settles
+	exactly as before. A ``reason`` (the empty reply) is stored as ``redispatch_reason``
+	and gives a fresh recovery budget; without it this is the refused-session re-send,
+	unchanged.
+
+	Returns ``_RESENT``, ``_USED`` (already re-sent), ``_NO_PAYLOAD`` or ``_CAS_LOST``."""
+	stored = empty_reply_recovery.stored_dispatch(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
+	if stored is None:
+		return _NO_PAYLOAD
+	if stored.get("redispatch"):
+		return _USED
+	marker = {"redispatch": 1, "redispatch_reason": reason} if reason else {"redispatch": 1}
+	flagged = json.dumps({**stored, **marker})
+	label = f"pump requeue {reason.replace('_', ' ') if reason else 'refused session'} {rs.run_id}"
 	txn.fresh_snapshot()
 	won = txn.replay_on_conflict(
-		lambda: ts.requeue_for_redispatch(rs.run_id, rs.version, ctx.epoch, flagged),
-		label=f"pump requeue refused session {rs.run_id}",
+		lambda: ts.requeue_for_redispatch(
+			rs.run_id, rs.version, ctx.epoch, flagged, fresh_recovery=bool(reason)
+		),
+		label=label,
 		before_replay=lambda: _resync_fresh(rs),
 	)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
 			ts.lease_lost_exit(rs.run_id)
-		return False
+		return _CAS_LOST
 	# Pump-owned transaction, as for every transition here: the requeue must be durable
 	# before the lane retires and the next slice re-sends it. A raise before this point
 	# leaves the turn streaming for the hop's own rollback and recovery.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	# The next dispatch builds a fresh run state and lane; this one is done.
 	ctx.runs.pop(rs.run_id, None)
+	return _RESENT
+
+
+def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
+	"""admin-v2#656: send a turn again ONCE when the runtime refused it before producing
+	anything because it would not resume a CLI live session. The refusal discards the
+	stale process, so the same turn sent again starts a fresh one (``_resend_once``).
+	True = requeued, the caller must not settle it."""
+	if kind != "relay:error" or payload.get("state") != "error" or (payload.get("text") or "").strip():
+		return False
+	if not _REFUSED_CLI_SESSION_RE.search(payload.get("error") or ""):
+		return False
+	if _resend_once(ctx, rs) != _RESENT:
+		return False
 	_telemetry("redispatch_refused_session", run_id=rs.run_id)
 	return True
+
+
+def _resend_empty_reply(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
+	"""Send a turn again ONCE when the agent runtime ended it with its plain empty reply
+	and nothing ran (``empty_reply_recovery.resend_decision``). One log line per
+	decision; none while the re-send is off. Any error except a lost lease rolls back
+	first, so the settle's commit cannot carry a half-done requeue, and the turn settles
+	as before. True = requeued, the caller must not settle it."""
+	try:
+		decision = empty_reply_recovery.resend_decision(
+			kind=kind,
+			payload=payload,
+			run_id=rs.run_id,
+			conversation=rs.conversation,
+			owner=rs.owner,
+			assistant_message=rs.assistant_message,
+			relay_target_id=ctx.relay_target_id,
+			sent_again=rs.key != rs.run_id,
+			saw_step=lambda: rs.stepped or bool(_read_run_step_lines(rs.run_id)),
+		)
+		if decision is None:
+			return False
+		if not decision.resend:
+			_log_resend(ctx, rs, "skip", decision.reason)
+			return False
+		done = _resend_once(ctx, rs, empty_reply_recovery.REASON)
+	except ts.LeaseLostExit:
+		raise
+	except Exception:
+		frappe.db.rollback()
+		_log_resend(ctx, rs, "skip", "error")
+		return False
+	if done != _RESENT:
+		_log_resend(ctx, rs, "skip", done)
+		return False
+	_log_resend(ctx, rs, "resent", decision.reason)
+	_note_first_attempt_empty(rs, payload.get("error") or "")
+	return True
+
+
+def _note_first_attempt_empty(rs: _RunState, err: str) -> None:
+	"""B1's ``empty_reply`` line (with the context size) for the attempt sent again:
+	settlement writes it only for a turn it settles. Its read opens a snapshot in the
+	pump's transaction, so end that after. Best-effort."""
+	try:
+		from jarvis.chat.turn_handler import _note_empty_reply
+
+		_note_empty_reply(rs.run_id, rs.conversation, err, "empty-reply")
+		txn.fresh_snapshot()
+	except Exception:
+		pass
+
+
+def _log_resend(ctx: PumpContext, rs: _RunState, decision: str, reason: str) -> None:
+	empty_reply_recovery.log_decision(
+		decision, reason, run_id=rs.run_id, conversation=rs.conversation, target=ctx.relay_target_id
+	)
 
 
 def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> None:
@@ -2864,6 +2949,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		_append_run_step_line(rs.run_id, text)
 		if preamble and raw:
 			_append_run_preamble(rs.run_id, raw)
+		rs.stepped = True
 		if rs.owner:
 			ts.publish_fenced(
 				rs.owner,
@@ -2887,6 +2973,8 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			# Message row holds the full streamed text if settlement carries no final.
 			_flush_deltas(ctx, rs)
 			if _redispatch_refused_session(ctx, rs, kind, payload):
+				return
+			if _resend_empty_reply(ctx, rs, kind, payload):
 				return
 			if _is_unprompted_yield(rs.run_id, kind, payload):
 				# the agent runtime's image/video/music tools unconditionally detach into a
@@ -3393,6 +3481,7 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 		send_key=_gateway_key(run_id, dispatch),
 		accept_ms=_dt_to_ms(frappe.db.get_value(TURN, run_id, "enqueued_at")),
 		first_delta_done=True,  # a re-attach resumes mid-stream; first token already sent
+		stepped=True,  # its earlier steps are unknown here
 	)
 	ctx.runs[run_id] = rs
 	ctx.peak_occupancy = max(ctx.peak_occupancy, len(ctx.runs))
@@ -4181,6 +4270,11 @@ def _gateway_key(run_id: str, dispatch: dict) -> str:
 	"""The ``chat.send`` idempotency key, which the gateway echoes as the run id. A
 	re-sent turn needs a fresh one: a reused key attaches to (or replays) the old run."""
 	return f"{run_id}-r1" if dispatch.get("redispatch") else run_id
+
+
+def resent_gateway_key(run_id: str) -> str:
+	"""The gateway run id of a turn after its one re-send."""
+	return _gateway_key(run_id, {"redispatch": 1})
 
 
 def _clear_agent_notes_on_ack(conversation: str, drained_note_ids) -> None:
