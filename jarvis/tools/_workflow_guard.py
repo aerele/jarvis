@@ -822,7 +822,6 @@ class _WorkflowWrite:
 				"An active workflow needs at least one state: without one, no record of the form could "
 				"be saved. Add its states, or save it inactive."
 			)
-		self._check_frappe_rules(doc)
 		if not cint(frappe.db.get_value("DocType", dt, "is_submittable")):
 			moved = [s["state"] for s in states if s.get("doc_status") in ("1", "2")]
 			if moved:
@@ -830,6 +829,7 @@ class _WorkflowWrite:
 					f"{dt} cannot be submitted, so the state {', '.join(moved)} cannot submit or cancel "
 					"it. Use doc_status 0 for every state."
 				)
+		self._check_frappe_rules(doc, dt)
 		self._check_updates(states, dt)
 		self._check_roles(states, transitions, labels)
 		self._check_code(states, transitions, labels, name, dt, cstr(doc.get("workflow_state_field")))
@@ -841,10 +841,12 @@ class _WorkflowWrite:
 			)
 		return fieldname
 
-	def _check_frappe_rules(self, doc: dict) -> None:
+	def _check_frappe_rules(self, doc: dict, dt: str) -> None:
 		"""Frappe's own rule on the document statuses of a transition
-		(``Workflow.validate_docstatus``), on a document that is never saved."""
+		(``Workflow.validate_docstatus``), on a document that is never saved.
+		Newer Frappe 16 reads the form's meta there, so the probe names it."""
 		probe = frappe.new_doc(WF)
+		probe.document_type = dt
 		for table in TABLES:
 			for row in doc[table]:
 				probe.append(table, {k: v for k, v in row.items() if k != "name"})
