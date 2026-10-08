@@ -54,13 +54,14 @@ class RunHaltedError(JarvisError):
 class RunDisarmedError(JarvisError):
 	"""Skill "Approve & run" (design §3.4, the documented kill lever): the covered write
 	was REFUSED because the skill that authorized this run is no longer armed. The gate
-	re-reads ``allow_approve_run`` LIVE off the run's ``skill_autorun_skill`` before each
-	uncarded covered write; when an admin un-arms the skill mid-run (or the docname is
-	missing) the gate clears ``skill_autorun`` and returns THIS instead of executing - so
-	un-arming stops the auto-run within one write, no deploy.
+	re-reads ``allow_approve_run`` and ``enabled`` LIVE off the run's
+	``skill_autorun_skill`` before each uncarded covered write; when an admin un-arms the
+	skill mid-run, or it is switched off (or the docname is missing), the gate clears
+	``skill_autorun`` and returns THIS instead of executing - so un-arming stops the
+	auto-run within one write, no deploy.
 
 	Never re-raised into a 500 - the gate returns it as a ``{ok:false}`` envelope so the
-	model sees a clean "the skill was disarmed - run stopped" and stops rather than
+	model sees a clean "the skill was disarmed or switched off - run stopped" and stops rather than
 	looping. The answer is FIXED until an admin re-arms the skill and the user re-approves,
 	so retrying the same call can never turn it into a yes."""
 

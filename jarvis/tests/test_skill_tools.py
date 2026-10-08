@@ -367,17 +367,78 @@ class TestGetSkill(SkillToolsTestCase):
 			with self.assertRaises(PermissionDeniedError):
 				get_skill(f"{PFX}-role-tier-x")
 
-	def test_own_row_preferred_over_same_named_foreign_row(self):
-		# skill_name is unique per owner, not globally. R3-SP-1 narrows that for
-		# SHARED rows only (at most one Role/Org row may carry a given slug), so
-		# the same-named pair is one shared row plus one private row rather than
-		# two Org rows. That is also the sharper form of this test: OWNER's Org
-		# row is genuinely VISIBLE to PEER, so the caller's own row has to
-		# actively win the tie instead of being the only usable candidate.
+	def test_a_reviewed_row_is_served_before_the_callers_own(self):
+		# skill_name is unique per owner, and at most one Role/Org row may carry a
+		# given slug (R3-SP-1), so a same-named pair is one reviewed row plus one
+		# private row. The reviewed one is what the name means: its file in the
+		# container points here, and a private row of that name must not answer for it.
 		_make_skill(OWNER, f"{PFX}-dup-name", "sttool dup owner copy")
 		_make_skill(PEER, f"{PFX}-dup-name", "sttool dup peer copy", scope="User")
 		with _as(PEER):
-			self.assertEqual(get_skill(f"{PFX}-dup-name")["description"], "sttool dup peer copy")
+			for name in (f"{PFX}-dup-name", f"custom-{PFX}-dup-name"):
+				self.assertEqual(get_skill(name)["description"], "sttool dup owner copy")
+
+	def test_a_role_skill_the_caller_holds_is_served_before_their_own(self):
+		_make_skill(OWNER, f"{PFX}-dup-role", "sttool role copy", scope="Role", target_role="Sales User")
+		_make_skill(PEER, f"{PFX}-dup-role", "sttool peer copy", scope="User")
+		with _as(PEER):  # PEER holds Sales User
+			self.assertEqual(get_skill(f"{PFX}-dup-role")["description"], "sttool role copy")
+
+	def test_a_reviewed_row_the_caller_may_not_use_does_not_hide_their_own(self):
+		_make_skill(
+			OWNER, f"{PFX}-dup-hidden", "sttool hidden copy", scope="Role", target_role="Accounts Manager"
+		)
+		_make_skill(PEER, f"{PFX}-dup-hidden", "sttool peer copy", scope="User")
+		with _as(PEER):  # PEER does not hold Accounts Manager
+			self.assertEqual(get_skill(f"{PFX}-dup-hidden")["description"], "sttool peer copy")
+
+	def test_a_system_manager_is_served_the_reviewed_row_too(self):
+		# A System Manager may read every skill, so a Role skill for a role they do
+		# not hold is usable for them, and it comes before their own like any other.
+		from jarvis.tools.get_skill import resolve_skill
+
+		manager = _ensure_system_user("sttool-sysmgr@example.com")
+		frappe.get_doc("User", manager).add_roles("System Manager")
+		role = _make_skill(
+			OWNER, f"{PFX}-dup-sm", "sttool role copy", scope="Role", target_role="Accounts Manager"
+		).name
+		_make_skill(manager, f"{PFX}-dup-sm", "sttool manager copy", scope="User")
+		self.assertNotIn("Accounts Manager", frappe.get_roles(manager))
+		self.assertEqual(resolve_skill(f"{PFX}-dup-sm", manager).name, role)
+
+	def test_a_disabled_reviewed_row_is_not_served(self):
+		row = _make_skill(OWNER, f"{PFX}-dup-off", "sttool off copy").name
+		_make_skill(PEER, f"{PFX}-dup-off", "sttool peer copy", scope="User")
+		frappe.db.set_value(SKILL, row, "enabled", 0)
+		with _as(PEER):
+			self.assertEqual(get_skill(f"{PFX}-dup-off")["description"], "sttool peer copy")
+		# For anyone else the name is now only PEER's private skill.
+		with _as(THIRD):
+			with self.assertRaises(PermissionDeniedError):
+				get_skill(f"{PFX}-dup-off")
+		# And a company skill switched off, with no other row of its name, is unknown.
+		lone = _make_skill(OWNER, f"{PFX}-lone-off", "sttool lone copy").name
+		frappe.db.set_value(SKILL, lone, "enabled", 0)
+		with _as(THIRD):
+			with self.assertRaises(InvalidArgumentError):
+				get_skill(f"custom-{PFX}-lone-off")
+
+	def test_with_no_reviewed_row_the_callers_own_is_served(self):
+		# OWNER shares a private skill with PEER, who has one of the same name.
+		_make_skill(OWNER, f"{PFX}-dup-priv", "sttool owner private", scope="User", shared_with=[PEER])
+		_make_skill(PEER, f"{PFX}-dup-priv", "sttool peer copy", scope="User")
+		with _as(PEER):
+			self.assertEqual(get_skill(f"{PFX}-dup-priv")["description"], "sttool peer copy")
+
+	def test_a_pinned_row_is_served_first(self):
+		from jarvis.tools.get_skill import resolve_skill
+
+		reviewed = _make_skill(OWNER, f"{PFX}-dup-pin", "sttool reviewed copy").name
+		own = _make_skill(PEER, f"{PFX}-dup-pin", "sttool peer copy", scope="User").name
+		self.assertEqual(resolve_skill(f"{PFX}-dup-pin", PEER).name, reviewed)
+		self.assertEqual(resolve_skill(f"{PFX}-dup-pin", PEER, pinned=own).name, own)
+		# A pin that is not one of the usable rows changes nothing.
+		self.assertEqual(resolve_skill(f"{PFX}-dup-pin", PEER, pinned="no-such-row").name, reviewed)
 
 
 class TestLearnedMissAudit(SkillToolsTestCase):
@@ -846,15 +907,15 @@ class TestSkillChildTableBatch(SkillToolsTestCase):
 		self.assertEqual(res["skill_name"], "sttool-solo")
 		pf.assert_not_called()
 
-	def test_get_skill_multi_row_caller_own_wins_and_batches(self):
-		"""Same slug as an Org shared skill AND the caller's own private override:
-		>1 row matches so the batch fires, and the caller's OWN row wins."""
+	def test_get_skill_multi_row_batches_and_serves_the_reviewed_row(self):
+		"""Same slug as an Org shared skill AND the caller's own private skill:
+		>1 row matches so the batch fires, and the reviewed row is served."""
 		_make_skill(OWNER, "sttool-dup", "org-shared-desc", scope="Org")  # visible to all
 		_make_skill(PEER, "sttool-dup", "peer-private-desc", scope="User")  # PEER's own
 		with patch(_PREFETCH, wraps=_real_prefetch) as pf, _as(PEER):
 			res = get_skill("sttool-dup")
 		pf.assert_called_once()  # R>1 -> batched
-		self.assertEqual(res["description"], "peer-private-desc")  # caller's own row wins
+		self.assertEqual(res["description"], "org-shared-desc")  # the reviewed row is served
 
 
 class TestAToolReadsADoctypeByItsCanonicalName(SkillToolsTestCase):
