@@ -29,13 +29,13 @@ _FAILED = ("Error", "Failed")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-@frappe.whitelist()
-@require_jarvis_user
 def _json_functions_available() -> bool:
 	"""MariaDB reads the card fields in SQL; elsewhere they are parsed in Python."""
 	return frappe.db.db_type == "mariadb"
 
 
+@frappe.whitelist()
+@require_jarvis_user
 def chat_report_runs(conversation: str) -> dict:
 	"""This chat's background reports not shown yet: ``{items: [{conversation, run,
 	report_name, filters, status: preparing|ready|failed, ready_at}]}``. Owner-only."""
