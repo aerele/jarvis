@@ -112,10 +112,13 @@ class WriteRefusedError(JarvisError):
 
 	code = "write_refused"
 
-	def __init__(self, message: str, *, doctype: str = "", desk_path: str = ""):
+	def __init__(self, message: str, *, doctype: str = "", desk_path: str = "", hint: str = ""):
 		super().__init__(message)
 		self.doctype = doctype
 		self.desk_path = desk_path
+		# What to do instead, when it is not the class's usual answer (a child row is
+		# changed through its parent record).
+		self.hint = hint
 
 
 class StructureRefusedError(WriteRefusedError):
