@@ -3715,7 +3715,7 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 		# the backstop, but the row-owned settle is driven through the bus). ``admission`` is the
 		# module-level import (used above); do not shadow it with a local one.
 		if pump.pump_lifecycle_configured(admission.relay_target_id(conversation)):
-			pump.request_cancel_conversation(conversation)
+			pump.request_cancel_conversation(conversation, run_id)
 	except Exception:
 		frappe.log_error(title="stop_run pump cancel", message=frappe.get_traceback())
 	# Skill "Approve & run" Halt cancel-gate (design §3.4): set the transport-
@@ -3782,13 +3782,29 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	from jarvis.chat import agent_session_pool
 
+	abort_run_id = _gateway_run_id(conversation, run_id)
 	try:
 		with agent_session_pool.checkout(gateway_url) as sess:
-			sess.chat_abort(conv.session_key, run_id or None)
+			sess.chat_abort(conv.session_key, abort_run_id)
 	except Exception as e:
 		frappe.log_error(title="jarvis stop_run", message=str(e))
 		return {"ok": False, "reason": _("couldn't reach the assistant to stop it")}
 	return {"ok": True}
+
+
+def _gateway_run_id(conversation: str, run_id: str | None) -> str | None:
+	"""The gateway run Stop aborts: a turn of this conversation the pump sent again for an
+	empty reply runs under its ``-r1`` key. While that re-send is off, or when the read
+	fails, the run id as before. Never raises."""
+	from jarvis.chat import empty_reply_recovery, pump
+
+	if not run_id or not empty_reply_recovery.switch_on():
+		return run_id or None
+	try:
+		resent = empty_reply_recovery.resent_turn(run_id, conversation)
+	except Exception:
+		return run_id
+	return pump.resent_gateway_key(run_id) if resent else run_id
 
 
 def _next_seq(conversation: str) -> int:

@@ -3758,7 +3758,7 @@ def ensure_pump(relay_target_id: str, *, deps: PumpDeps | None = None) -> dict:
 	return {"enqueued": True, "job_id": job_id, "hop_counter": hop}
 
 
-def request_cancel_conversation(relay_or_conversation: str) -> bool:
+def request_cancel_conversation(relay_or_conversation: str, run_id: str | None = None) -> bool:
 	"""Web ``stop_run`` hook (pump mode): flag the conversation's in-flight pump turn
 	for cancellation (D2 #17, actor-fenced) and wake the pump so its cancel sweep
 	drives the out-of-band ``chat.abort`` + aborted terminal + settle-cancelled.
@@ -3772,29 +3772,111 @@ def request_cancel_conversation(relay_or_conversation: str) -> bool:
 	Called from ``stop_run`` only after ``admission.mark_cancel_requested``'s own
 	commit (and read-only work before that), so nothing is pending when this unit
 	starts and replay is always safe. ``ensure_pump``/``lpush_wake`` are non-DB
-	side effects, so they stay after the winning commit, not inside the unit."""
+	side effects, so they stay after the winning commit, not inside the unit.
+
+	With the empty-reply re-send on (``empty_reply_recovery``), a turn it put back to
+	``ready`` has nothing in flight: Stop cancels it there when ``run_id`` (the run
+	``stop_run`` names) is absent or names that turn (``_is_stoppable_ready``). A CAS lost
+	on such a turn (its requeue or dispatch committed after the read) reads again once,
+	on a fresh transaction. Every other turn, and every turn while the re-send is off,
+	is handled exactly as before."""
 	conversation = relay_or_conversation
+	resend = empty_reply_recovery.switch_on()
+	states = ("dispatching", "streaming")
+	fields = ["run_id", "version", "relay_target_id"]
+	if resend:
+		states, fields = ("ready", *states), [*fields, "state", "assistant_message", "pump_epoch"]
 
 	def unit() -> tuple[bool, dict | None]:
 		row = frappe.db.get_value(
 			TURN,
-			{"conversation": conversation, "state": ["in", ("dispatching", "streaming")]},
-			["run_id", "version", "relay_target_id"],
+			{"conversation": conversation, "state": ["in", states]},
+			fields,
 			as_dict=True,
 		)
 		if not row:
 			return False, None
-		won = ts.request_cancel(row["run_id"], int(row["version"]))
+		if row.get("state") == "ready":
+			if not _is_stoppable_ready(row, run_id):
+				return False, None
+			won = _cancel_ready_turn(row)
+		else:
+			won = ts.request_cancel(row["run_id"], int(row["version"]))
 		if won:
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		return won, row
 
-	won, row = txn.replay_on_conflict(unit, label=f"pump.request_cancel_conversation {conversation}")
+	label = f"pump.request_cancel_conversation {conversation}"
+	won, row = txn.replay_on_conflict(unit, label=label)
+	if not won and row and resend and _resent_after_read(row["run_id"]):
+		won, row = txn.replay_on_conflict(unit, label=label)
 	if won and row:
+		if row.get("state") == "ready":
+			_finish_stop_before_dispatch(conversation, row)
 		ensure_pump(row["relay_target_id"])
 		lpush_wake(row["relay_target_id"], row["run_id"])
 		return True
 	return False
+
+
+def _resent_after_read(run_id: str) -> bool:
+	"""After a lost Stop CAS: end the transaction (the CAS wrote nothing) and tell if the
+	turn is now one the empty-reply re-send put back, so a second try can stop it."""
+	frappe.db.rollback()
+	return empty_reply_recovery.resent_turn(run_id)
+
+
+def _is_stoppable_ready(row: dict, run_id: str | None) -> bool:
+	"""A ``ready`` turn Stop cancels: one the empty-reply re-send put back, when ``run_id``
+	is absent or names it (its run id or its ``-r1`` key)."""
+	if run_id and run_id not in (row["run_id"], resent_gateway_key(row["run_id"])):
+		return False
+	return empty_reply_recovery.resent_turn(row["run_id"])
+
+
+def _cancel_ready_turn(row: dict) -> bool:
+	"""``ready`` -> cancelled, and the reply stops spinning and shows as stopped. A write
+	conflict on the placeholder is raised (the server aborted the cancel too, so the unit
+	replays); any other error there is logged and the cancel kept."""
+	won = ts.cancel_preparing_or_ready(row["run_id"], int(row["version"]))
+	if won and row["assistant_message"]:
+		try:
+			ts._run_cas(
+				"UPDATE `tabJarvis Chat Message` SET streaming=0, stopped=1 WHERE name=%(m)s",
+				{"m": row["assistant_message"]},
+			)
+		except Exception as e:
+			if txn.is_write_conflict(e):
+				raise
+			frappe.log_error(
+				title="pump.request_cancel_conversation placeholder cleanup",
+				message=frappe.get_traceback(),
+			)
+	return won
+
+
+def _finish_stop_before_dispatch(conversation: str, row: dict) -> None:
+	"""After Stop cancelled a re-sent turn in ``ready`` (no settlement runs for it). The
+	chat already shows this reply's spinner, so a ``run:end`` (stopped) ends it, with no
+	seq so the client fence takes it. Also pokes a held model switch. Never raises."""
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump.request_cancel_conversation")
+	try:
+		owner = frappe.db.get_value(CONV, conversation, "owner")
+	except Exception:
+		owner = None
+	if owner:
+		ts.publish_fenced(
+			owner,
+			"run:end",
+			conversation_id=conversation,
+			run_id=row["run_id"],
+			event_seq=None,
+			message_id=row["assistant_message"],
+			pump_epoch=row["pump_epoch"] or None,
+			stopped=True,
+		)
 
 
 def _handoff(ctx: PumpContext) -> None:
