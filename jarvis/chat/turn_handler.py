@@ -2740,11 +2740,16 @@ def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) 
 		variant = empty_reply_recovery.variant(err_text, code)
 		tokens, pct = "", ""
 		try:
-			row = frappe.db.sql(
-				"""SELECT s.last_total_tokens, s.context_pct FROM `tabJarvis Chat Session` s
-				JOIN `tabJarvis Conversation` c ON c.session_key = s.session_key
-				WHERE c.name=%(c)s LIMIT 1""",
-				{"c": conversation},
+			s = frappe.qb.DocType("Jarvis Chat Session")
+			c = frappe.qb.DocType("Jarvis Conversation")
+			row = (
+				frappe.qb.from_(s)
+				.join(c)
+				.on(c.session_key == s.session_key)
+				.select(s.last_total_tokens, s.context_pct)
+				.where(c.name == conversation)
+				.limit(1)
+				.run()
 			)
 			if row:
 				tokens, pct = row[0]

@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe.query_builder import Order
-from frappe.query_builder.functions import Coalesce, Count
+from frappe.query_builder.functions import Coalesce, Count, IfNull
 from pypika.terms import ExistsCriterion
 
 from jarvis.chat import admission, txn, user_settings_api
@@ -3619,13 +3619,19 @@ def _failed_turn(conversation: str, *, message: str, prev_user: str | None) -> _
 	when the reply failed is not seen (docs/chat-errors.md)."""
 	from jarvis.chat import prepare
 
-	rows = frappe.db.sql(
-		"""SELECT name, seed_message, dispatch_payload, IFNULL(assistant_message=%(m)s, 0) AS bound
-		FROM `tabJarvis Chat Turn`
-		WHERE conversation=%(c)s AND (assistant_message=%(m)s OR seed_message=%(s)s)
-		ORDER BY bound DESC, creation DESC LIMIT 1""",
-		{"c": conversation, "m": message, "s": prev_user},
-		as_dict=True,
+	t = frappe.qb.DocType(TURN)
+	bound_col = IfNull(t.assistant_message == message, 0).as_("bound")
+	match = t.assistant_message == message
+	if prev_user is not None:
+		match |= t.seed_message == prev_user
+	rows = (
+		frappe.qb.from_(t)
+		.select(t.name, t.seed_message, t.dispatch_payload, bound_col)
+		.where((t.conversation == conversation) & match)
+		.orderby(bound_col, order=Order.desc)
+		.orderby(t.creation, order=Order.desc)
+		.limit(1)
+		.run(as_dict=True)
 	)
 	row = rows[0] if rows else {}
 	bound = bool(row.get("bound"))
@@ -3670,12 +3676,16 @@ def _retry_refusal(conversation: str, *, message: str, seed: str, failed_run: st
 		conversation, created_after=after, exclude_run_id=failed_run, states=admission._CONV_BLOCKING_STATES
 	):
 		return _Refusal("in_progress", _in_progress_sentence(), ":".join(blocker))
-	newest = frappe.db.sql(
-		"""SELECT name FROM `tabJarvis Chat Message`
-		WHERE conversation=%(c)s AND hidden=0 AND role IN ('user', 'assistant')
-		  AND NOT (role='assistant' AND IFNULL(ref_doctype, '')='Jarvis Macro Run')
-		ORDER BY seq DESC LIMIT 1""",
-		{"c": conversation},
+	m = frappe.qb.DocType(MSG)
+	macro_close = (m.role == "assistant") & (IfNull(m.ref_doctype, "") == "Jarvis Macro Run")
+	newest = (
+		frappe.qb.from_(m)
+		.select(m.name)
+		.where((m.conversation == conversation) & (m.hidden == 0) & m.role.isin(("user", "assistant")))
+		.where(~macro_close)
+		.orderby(m.seq, order=Order.desc)
+		.limit(1)
+		.run()
 	)
 	if not newest or newest[0][0] != message:
 		return _Refusal(

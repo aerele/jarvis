@@ -136,8 +136,8 @@ class TestResentTurn(_PumpTestCase):
 			patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql,
 		):
 			self.assertIs(recovery.resent_turn(rid, conv), True)
-		(query,) = [c.args[0] for c in sql.call_args_list]
-		self.assertIn("SELECT JSON_VALUE(dispatch_payload, '$.redispatch_reason') FROM", query)
+		(query,) = [frappe.db.mogrify(*c.args[:2]) for c in sql.call_args_list]
+		self.assertIn("SELECT JSON_VALUE(`dispatch_payload`,'$.redispatch_reason') FROM", query)
 
 
 class TestDecisionLine(FrappeTestCase):
