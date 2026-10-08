@@ -2621,9 +2621,8 @@ def _note_subscription_error(err_text: str, code: str) -> None:
 		subscription_health.note_turn_error(err_text, code)
 
 
-# The runtime's empty-reply text alone, deliberately narrower than the UI rule: any
-# text before or after it (a wrapper, a provider detail) is "other", a drift signal.
-# Linear on long whitespace; only the first 300 characters are read.
+# The runtime's empty-reply text alone, narrower than the UI rule on purpose: "other"
+# (text around it) is a drift signal. Linear on long whitespace.
 _EMPTY_REPLY_TEXT = re.compile(
 	r"^\W*agent couldn.?t generate a response\.?(?:\s*(please try again\.?))?\s*$", re.I
 )

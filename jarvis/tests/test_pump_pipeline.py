@@ -30,11 +30,12 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 
 from jarvis.chat import admission, finalize, prepare, pump, settlement
+from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
 from jarvis.tests._write_conflicts import set_value_conflict
@@ -393,8 +394,6 @@ class TestPanel4Chokepoint(_PipelineCase):
 		self.assertEqual(after, before, "retry/orphan inserted NO duplicate user row")
 
 	def test_a_retry_in_pump_mode_queues_once_with_the_failed_turns_inputs(self):
-		from jarvis.chat import api as chat_api
-
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv, content="build it")
 		context = {"page": "dashboards", "theme": "midnight"}
@@ -425,8 +424,6 @@ class TestPanel4Chokepoint(_PipelineCase):
 		self.assertIn("in progress", second["reason"])
 
 	def test_a_failed_post_acceptance_write_keeps_the_pump_retry(self):
-		from jarvis.chat import api as chat_api
-
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv, content="build it")
 		self._mk_turn(conv, "pmp_failed_w", seed, "errored")
@@ -446,8 +443,6 @@ class TestPanel4Chokepoint(_PipelineCase):
 
 	def test_a_pump_retry_takes_the_bound_seed_and_waits_for_an_older_turn(self):
 		# uA's turn, then uB's turn, then uA's reply fails: prev_user (uB) is not the seed.
-		from jarvis.chat import api as chat_api
-
 		conv = self._mk_conv()
 		ua = self._mk_msg(conv, content="first")
 		self._mk_turn(conv, "pmp_a", ua, "errored")
@@ -1111,8 +1106,6 @@ class TestSux11ErrorContract(_PipelineCase):
 		return rid, conv
 
 	def test_an_empty_reply_writes_one_telemetry_line_after_the_settlement(self):
-		from unittest.mock import MagicMock
-
 		order = []
 		logger = MagicMock()
 		logger.info.side_effect = lambda *args: order.append(args)
