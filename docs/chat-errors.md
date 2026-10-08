@@ -77,19 +77,42 @@ The server refuses a retry with one of these codes:
 - `not_latest`: the failed reply is not the latest visible user or assistant
   message (the closing message of a macro run does not count).
 - `busy` (legacy path): a reply is still streaming in the chat.
+- `no_seed`: no user message comes before the failed reply.
 
-Each refusal writes one line to the latency log:
-`retry_refused conversation=<name> message=<name> reason=<code> seed=<name>
-blocker=<run_id>:<state>` (`blocker` only for `in_progress`; `owner_mismatch`
-at WARNING). On the admission and pump paths the checks run under the
-conversation row lock, so two tabs cannot start two retries, except on the
-legacy fallback during a cutover; the legacy path checks without the lock.
+On the admission and pump paths the checks run under the conversation row lock,
+so two tabs cannot start two retries, except on the legacy fallback during a
+cutover; the legacy path checks without the lock.
 
 One documented edge: on the legacy path a dead worker can leave a blank
 streaming row after the failed reply. Desktop chat hides that row and shows
 Retry; the server refuses with `busy` while the row is fresh
 (`_INFLIGHT_FRESH_SECONDS`), then with `not_latest`. There the row is the only
 guard against a duplicate run.
+
+### Log lines
+
+These lines go to `logs/jarvis.chat.latency.log` (in the bench `logs/` and the
+site `logs/`):
+
+- `retry_refused conversation=<name> message=<name> reason=<code> seed=<name>
+  blocker=<run_id>:<state>`: one line for each refusal with a code listed
+  above. `blocker` is empty except for `in_progress`; `seed` is empty for
+  `busy` and `no_seed`. `owner_mismatch` and `seed_missing` are at WARNING.
+  These refusals write no line: site busy, compacting, the entitlement check
+  (`validate_can_send`, for example a suspended subscription), an armed macro
+  run, "only assistant messages can be retried", "message did not error", and
+  an overload reject from `accept_or_queue` or the legacy cutover gate.
+- `retry_accepted_write_failed conversation=<name> write=skill_run|last_active_at`
+  (WARNING): a write after an accepted retry failed; the retry still runs.
+- `retry_inputs_unreadable conversation=<name> message=<name>` (WARNING): the
+  stored payload of the failed turn is not a JSON object, so the retry has no
+  context and no attachments.
+- `empty_reply run_id=<id> conversation=<name> variant=<v> last_total_tokens=<n>
+  context_pct=<pct>`: one line per empty reply. `variant` is `plain` (with
+  "Please try again."), `bare` (the sentence alone), `tools` (actions may be
+  done) or `other` (more text around the sentence). The token values are the
+  chat session's values after its previous turn; `context_pct=0` means the
+  capacity is not known.
 
 ## Customer wording
 

@@ -234,7 +234,7 @@ def invoke_settlement(
 	deps.enqueue_finalize(run_id, relay_target_id)
 
 	# Last, so its read takes no snapshot before the steps above. The helper never raises;
-	# the try is for the import.
+	# the try is for the import. A run:error pub_extra carries "error" and "code".
 	if pub_kind == "run:error":
 		try:
 			from jarvis.chat.turn_handler import _note_empty_reply

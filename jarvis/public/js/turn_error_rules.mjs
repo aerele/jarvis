@@ -219,7 +219,7 @@ export default [
   {
     "code": "empty-reply-tools",
     "pattern": "could(?:n.?t| not) generate a (?:response|reply)[\\s\\S]{0,300}tool actions may have already been executed",
-    "headline": "The reply stopped before it was complete",
+    "headline": "The model returned an empty reply after running actions",
     "hint": "Some actions may already be done, and a retry could repeat them. Check for completed actions before you try again.",
     "retryable": true,
     "status": false
