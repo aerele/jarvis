@@ -1099,6 +1099,11 @@ def archive_conversation(conversation: str) -> dict:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis.pending_action.archive_cancel_failed", message=frappe.get_traceback())
 		frappe.db.commit()
+	# Its cards are cancelled above, so nothing is left to end an approved skill run.
+	# (A File Box run's Halt signal, set above, is left standing.)
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.end_skill_autorun_if_open(doc.name, "archived", keep_halt=True)
 	_stop_macro_runs_in([doc.name])
 	return {"ok": True}
 
@@ -3489,6 +3494,7 @@ def retry_message(message: str) -> dict:
 		)
 		if _adm.get("overloaded"):
 			return {"ok": False, "reason": _adm.get("reason")}
+		_retry_ends_skill_run(doc.conversation)
 		out = {"ok": True, "run_id": run_id}
 		if not _adm.get("dispatched", True):
 			out["queued"] = True
@@ -3501,11 +3507,21 @@ def retry_message(message: str) -> dict:
 	_adm = _dispatch_turn(payload, cutover_gate=True)
 	if isinstance(_adm, dict) and _adm.get("overloaded"):
 		return {"ok": False, "reason": _adm.get("reason")}
+	_retry_ends_skill_run(doc.conversation)
 	out = {"ok": True, "run_id": run_id}
 	if isinstance(_adm, dict) and not _adm.get("dispatched", True):
 		out["queued"] = True
 		out["queued_position"] = _adm.get("queued_position")
 	return out
+
+
+def _retry_ends_skill_run(conversation: str) -> None:
+	"""An accepted retry re-runs the whole request, like a new message: an approved
+	skill run left open on the chat does not cover it. (A refused retry starts no
+	turn and leaves the run as it was.)"""
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.end_skill_autorun_if_open(conversation, "retry")
 
 
 @frappe.whitelist(methods=["POST"])
