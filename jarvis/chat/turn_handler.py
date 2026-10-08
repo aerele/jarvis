@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, seq_watermark, txn, vision
+from jarvis.chat import agent_session_pool, empty_reply_recovery, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.runtime_profile import get_profile
@@ -2621,29 +2621,18 @@ def _note_subscription_error(err_text: str, code: str) -> None:
 		subscription_health.note_turn_error(err_text, code)
 
 
-# The runtime's empty-reply text alone, narrower than the UI rule on purpose: "other"
-# (text around it) is a drift signal. Linear on long whitespace.
-_EMPTY_REPLY_TEXT = re.compile(
-	r"^\W*agent couldn.?t generate a response\.?(?:\s*(please try again\.?))?\s*$", re.I
-)
-
-
 def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
 	"""One telemetry line per empty reply of the model, with the context size the chat
 	session recorded after its previous turn. Never raises.
 
 	``variant``: ``plain`` (with "Please try again."), ``bare`` (the sentence alone),
 	``tools`` (the empty-reply-tools rule), ``other`` (more text around the sentence).
-	Only the first 300 characters are read, so text after long whitespace reads as bare."""
+	Only the first 300 characters are read, so text after long whitespace reads as bare
+	(``empty_reply_recovery.variant``)."""
 	if code not in ("empty-reply", "empty-reply-tools"):
 		return
 	try:
-		if code == "empty-reply-tools":
-			variant = "tools"
-		elif match := _EMPTY_REPLY_TEXT.match((err_text or "")[:300]):
-			variant = "plain" if match.group(1) else "bare"
-		else:
-			variant = "other"
+		variant = empty_reply_recovery.variant(err_text, code)
 		tokens, pct = "", ""
 		try:
 			row = frappe.db.sql(

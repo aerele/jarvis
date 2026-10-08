@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import agent_session_pool, turn_handler, worker
+from jarvis.chat import agent_session_pool, empty_reply_recovery, turn_handler, worker
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
 from jarvis.tests.test_chat_api import (
@@ -504,7 +504,7 @@ class TestNoteEmptyReply(FrappeTestCase):
 	def test_long_whitespace_is_read_in_linear_time(self):
 		text = "Agent couldn't generate a response." + " " * 30000 + "x"
 		started = time.monotonic()
-		self.assertIsNone(turn_handler._EMPTY_REPLY_TEXT.match(text))
+		self.assertIsNone(empty_reply_recovery.EMPTY_REPLY_RE.match(text))
 		self.assertEqual(self._lines(text, "empty-reply")[0][3], "bare", "only 300 characters are read")
 		self.assertLess(time.monotonic() - started, 0.5)
 
