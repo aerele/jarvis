@@ -592,6 +592,20 @@ class TestRequeueForRedispatch(_TurnStateTestCase):
 		self.assertIsNotNone(row.ready_at)
 		self.assertEqual(json.loads(row.dispatch_payload)["redispatch"], 1)
 
+	def test_only_the_empty_reply_caller_starts_a_fresh_recovery_budget(self):
+		spent = frappe.utils.add_to_date(None, seconds=-500)
+		for fresh, want in ((False, "kept"), (True, None)):
+			with self.subTest(fresh_recovery=fresh):
+				run_id = f"ts_rq_budget_{int(fresh)}"
+				self._streaming(run_id, recovery_started_at=spent)
+				self.assertTrue(ts.requeue_for_redispatch(run_id, 6, 3, "{}", fresh_recovery=fresh))
+				started = frappe.db.get_value(TURN, run_id, "recovery_started_at")
+				frappe.db.rollback()
+				if want is None:
+					self.assertIsNone(started, "the second attempt starts a fresh recovery budget")
+				else:
+					self.assertIsNotNone(started, "the refused-session caller keeps it, as before")
+
 	def test_refuses_once_anything_was_produced_or_asked_to_stop(self):
 		cases = [
 			("output seen", {"last_event_seq": 4}),
