@@ -967,6 +967,11 @@ has_permission.update(
 # spanned a watchdog tick failed with "Your sign-in session was lost" (unknown_nonce). The
 # hash has no key TTL; each entry carries its own 10-minute expiry, and the sweep on every
 # begin (``oauth.api._gc_expired_nonces``) drops expired ones, so the hash stays bounded.
+#
+# jarvis:mcp_oauth_state: and jarvis:mcp_oauth_signin_error: (2026-10-08): a connector
+# sign-in's in-flight state and its parked callback error (``connectors.mcp_oauth_store``).
+# Without them the same tick sent a sign-in back to an unknown state. Both keys keep their
+# 10-minute TTL.
 persistent_cache_keys = [
 	"jarvis:llm_switch",
 	"jarvis:macro_reconcile",
@@ -974,4 +979,6 @@ persistent_cache_keys = [
 	"jarvis:heartbeat_macro_health_log_hour",
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
+	"jarvis:mcp_oauth_state:",
+	"jarvis:mcp_oauth_signin_error:",
 ]
