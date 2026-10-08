@@ -129,8 +129,9 @@ when the whole text is 300 characters or fewer. All of these must also be true:
   `recall` (written with no call id). No confirmation card is parked.
 - No other attempt at the same user message is unfinished, and no earlier one
   ended with the plain empty reply.
-- The turn just before it in the chat, when it is less than 24 hours old, did
-  not end with an empty reply (either form).
+- The last finished turn before it in the chat (`done`, `errored` or
+  `cancelled`), when it is less than 24 hours old, did not end with an empty
+  reply (either form).
 - The turn applied no frame (delta or tool event), has no Stop, and its row did
   not change since the pump read it.
 
@@ -153,6 +154,8 @@ before. The legacy path (pump off) never sends again.
   (`-g` for every site of the bench). Off again: `bench --site <site> set-config
   jarvis_empty_reply_resend 0`. On values: `1`, `true`, `on`, `yes`. Absent, `0`,
   `false`, `no`, `off`, empty or any other value: off.
+- A config apply that writes `site_config.json` again must keep
+  `jarvis_empty_reply_resend`, or the re-send is off from the next hop.
 - No restart. Each pump hop reads site config when it starts, so a change
   applies from the next hop, within about 2 minutes.
 - To check: `bench --site <site> execute jarvis.chat.empty_reply_recovery.switch_state`
