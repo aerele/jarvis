@@ -403,6 +403,8 @@ test("retryable is pinned per code", () => {
 		"timeout",
 		"connection",
 		"session-reset",
+		"empty-reply",
+		"empty-reply-tools",
 		"gateway",
 	]);
 	for (const { code } of rules) {
@@ -411,6 +413,18 @@ test("retryable is pinned per code", () => {
 	assert.equal(turnErrorInfo("No endpoints found").retryable, true);
 	assert.equal(turnErrorInfo("429 model_not_found").retryable, false);
 	assert.equal(turnErrorInfo("503 Service Unavailable: upstream not found").retryable, true);
+});
+
+// An empty reply names no cause, so the site's expired sign-in for that model explains it.
+// The tools variant keeps its own copy: its warning that actions may be done must stay.
+test("an empty reply on a model with an expired sign-in reads as that sign-in", () => {
+	const expiredModels = { "gpt-5.6-terra": { upstream: "openai" } };
+	const context = { model: "gpt-5.6-terra", expiredModels };
+	for (const { error, code } of cases.filter((c) => c.code.startsWith("empty-reply"))) {
+		assert.equal(turnErrorInfo(error).code, code);
+		const expected = code === "empty-reply" ? "subscription-expired" : code;
+		assert.equal(turnErrorInfo(error, "", context).code, expected, error);
+	}
 });
 
 test("a known provider rewrites the availability copy but keeps the rule's retry", () => {

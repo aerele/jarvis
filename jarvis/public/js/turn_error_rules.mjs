@@ -217,6 +217,22 @@ export default [
     "status": false
   },
   {
+    "code": "empty-reply-tools",
+    "pattern": "could(?:n.?t| not) generate a (?:response|reply)[\\s\\S]{0,300}tool actions may have already been executed",
+    "headline": "The model returned an empty reply after running actions",
+    "hint": "Some actions may already be done, and a retry could repeat them. Check for completed actions before you try again.",
+    "retryable": true,
+    "status": false
+  },
+  {
+    "code": "empty-reply",
+    "pattern": "could(?:n.?t| not) generate a (?:response|reply)",
+    "headline": "The model returned an empty reply",
+    "hint": "Try again. If the error returns, start a new chat or choose another available model.",
+    "retryable": true,
+    "status": false
+  },
+  {
     "code": "provider",
     "pattern": "(?!)",
     "headline": "The model provider could not complete this request",

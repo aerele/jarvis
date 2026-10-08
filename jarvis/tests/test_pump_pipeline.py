@@ -30,13 +30,20 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 
-from jarvis.chat import admission, finalize, prepare, pump, settlement
+from jarvis.chat import admission, empty_reply_recovery, finalize, prepare, pump, settlement, txn
+from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
+from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.tests._empty_reply_fixtures import MARKER_ONLY, ResendOn
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
+from jarvis.tests._write_conflicts import set_value_conflict
+from jarvis.tests.harness import transcripts
+from jarvis.tests.harness.transcripts import EMPTY_REPLY
+from jarvis.tests.race_harness import other_connection, snapshot_isolation_off, snapshot_isolation_on
 from jarvis.tests.test_pump import TEST_USER, _PumpTestCase, _Recorder
 
 CONV = "Jarvis Conversation"
@@ -390,6 +397,77 @@ class TestPanel4Chokepoint(_PipelineCase):
 			)
 		after = frappe.db.count(MSG, {"conversation": conv, "role": "user"})
 		self.assertEqual(after, before, "retry/orphan inserted NO duplicate user row")
+
+	def test_a_retry_in_pump_mode_queues_once_with_the_failed_turns_inputs(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="build it")
+		context = {"page": "dashboards", "theme": "midnight"}
+		raw = [{"file_url": "/private/files/a.png", "file_name": "a.png"}]
+		stored = {
+			"session_key": "s",
+			"attachments": [{"type": "image"}],
+			"attachments_raw": raw,
+			"context": context,
+		}
+		self._mk_turn(conv, "pmp_failed", seed, "errored", dispatch_payload=json.dumps(stored))
+		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
+		frappe.db.set_value(TURN, "pmp_failed", "assistant_message", amsg)
+		frappe.db.commit()
+		with (
+			self._pump_on(),
+			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+		):
+			first = chat_api.retry_message(amsg)
+			second = chat_api.retry_message(amsg)
+		self.assertTrue(first["ok"], first)
+		self.assertEqual(self._state(first["run_id"]), "queued", "the pump owns the dispatch")
+		self.assertEqual(
+			json.loads(self._val(first["run_id"], "dispatch_payload")),
+			{"context": context, "attachments": raw},
+		)
+		self.assertFalse(second["ok"])
+		self.assertIn("in progress", second["reason"])
+
+	def test_a_failed_post_acceptance_write_keeps_the_pump_retry(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="build it")
+		self._mk_turn(conv, "pmp_failed_w", seed, "errored")
+		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
+		frappe.db.set_value(TURN, "pmp_failed_w", "assistant_message", amsg)
+		frappe.db.commit()
+		woken = _Recorder()
+		with (
+			self._pump_on(ensure=woken),
+			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+			set_value_conflict(CONV, "last_active_at"),
+		):
+			res = chat_api.retry_message(amsg)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._state(res["run_id"]), "queued")
+		self.assertEqual(woken.count, 1, "the pump was woken")
+
+	def test_a_pump_retry_takes_the_bound_seed_and_waits_for_an_older_turn(self):
+		# uA's turn, then uB's turn, then uA's reply fails: prev_user (uB) is not the seed.
+		conv = self._mk_conv()
+		ua = self._mk_msg(conv, content="first")
+		self._mk_turn(conv, "pmp_a", ua, "errored")
+		ub = self._mk_msg(conv, content="second")
+		self._mk_turn(conv, "pmp_b", ub, "queued")
+		amsg = self._mk_msg(conv, role="assistant", content="", error="Agent couldn't generate a response.")
+		frappe.db.set_value(TURN, "pmp_a", "assistant_message", amsg)
+		frappe.db.commit()
+		gate = patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None})
+		send_ok = patch("jarvis.chat.api.validate_can_send", return_value=(True, None))
+		with self._pump_on(), gate, send_ok:
+			waiting = chat_api.retry_message(amsg)
+			frappe.db.set_value(TURN, "pmp_b", "state", "done")
+			frappe.db.commit()
+			res = chat_api.retry_message(amsg)
+		self.assertIn("in progress", waiting["reason"])
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(self._val(res["run_id"], "seed_message"), ua)
 
 	def test_placeholder_seq_monotonic_under_conv_lock(self):
 		conv = self._mk_conv()
@@ -986,6 +1064,74 @@ class TestSux11ErrorContract(_PipelineCase):
 		self.assertEqual(err_pub["code"], "quota", "quota receives its own usage-limit category")
 		# Turn.error mirrors it too.
 		self.assertEqual(self._val(rid, "error"), "provider quota exceeded")
+
+	def _settle_empty_reply(self, finalize):
+		error = EMPTY_REPLY
+		conv = self._mk_conv()
+		key = "sess-empty-" + frappe.generate_hash(length=6)
+		frappe.get_doc(
+			{
+				"doctype": SESSION,
+				"session_key": key,
+				"user": TEST_USER,
+				"last_total_tokens": 31000,
+				"context_pct": 72.5,
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value(CONV, conv, "session_key", key, update_modified=False)
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		rid = "pmp_empty_reply"
+		_won, epoch = ts.lease_acquire(self._target, "empty")
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"terminal_observed",
+			version=3,
+			pump_epoch=epoch,
+			reserved=1,
+			assistant_message=amsg,
+			terminal_kind="relay:error",
+			terminal_payload=json.dumps({"state": "error", "error": error, "text": ""}),
+			terminal_observed_at=frappe.utils.now(),
+		)
+		deps = pump.PumpDeps()
+		deps.enqueue_finalize = finalize
+		settlement.invoke_settlement(
+			rid,
+			relay_target_id=self._target,
+			epoch=epoch,
+			version=4,
+			terminal_kind="relay:error",
+			terminal_payload={"state": "error", "error": error, "text": ""},
+			assistant_message=None,
+			owner=self._orig_user,
+			conversation=conv,
+			deps=deps,
+		)
+		self.assertEqual(self._state(rid), "errored")
+		return rid, conv
+
+	def test_an_empty_reply_writes_one_telemetry_line_after_the_settlement(self):
+		order = []
+		logger = MagicMock()
+		logger.info.side_effect = lambda *args: order.append(args)
+		with patch("jarvis.chat.latency.get_logger", return_value=logger):
+			rid, conv = self._settle_empty_reply(lambda *a: order.append("finalize"))
+		lines = [a for a in order if a != "finalize" and a[0].startswith("empty_reply")]
+		self.assertEqual(len(lines), 1)
+		self.assertEqual(lines[0][1:], (rid, conv, "plain", 31000, 72.5))
+		self.assertLess(order.index("finalize"), order.index(lines[0]), "the line comes last")
+		err_pub = next(p for p in self._pubs if p.get("kind") == "run:error")
+		self.assertEqual(err_pub["code"], "empty-reply")
+
+	def test_a_telemetry_failure_never_breaks_the_settlement(self):
+		finalize = _Recorder()
+		with patch("jarvis.chat.turn_handler._note_empty_reply", side_effect=RuntimeError("log down")):
+			self._settle_empty_reply(finalize)
+		self.assertEqual(len(finalize.calls), 1, "finalize still enqueued")
+		self.assertIn("run:error", self._pub_kinds())
 
 
 # --------------------------------------------------------------------------- #
@@ -2583,3 +2729,892 @@ class TestReplyModelAttribution(_PipelineCase):
 		row = next(m for m in out["messages"] if m["name"] == amsg)
 		self.assertEqual(row["model"], "glm-4.7")
 		self.assertEqual(row["provider"], "openai_compat")
+
+
+# --------------------------------------------------------------------------- #
+# 7d. the empty-reply re-send (empty_reply_recovery), switched on
+# --------------------------------------------------------------------------- #
+
+_SETTLED = ("errored", "finalizing", "done", "cancelled")
+# B1's empty_reply line, which settlement writes whatever the switch.
+_B1_LINE = "empty_reply run_id=%s conversation=%s variant=%s last_total_tokens=%s context_pct=%s"
+_REATTACH_FIELDS = [
+	"run_id",
+	"state",
+	"version",
+	"conversation",
+	"assistant_message",
+	"last_event_seq",
+	"gateway_run_id",
+]
+
+
+class _EmptyReplyCase(ResendOn, _PipelineCase):
+	"""The re-send switched on; every latency line in ``self.lines``."""
+
+	OUTCOME = "empty_reply outcome=%s code=%s run_id=%s conversation=%s target=%s"
+
+	def _decisions(self):
+		return [a[1:3] for a in self.lines if a and str(a[0]).startswith("empty_reply decision=")]
+
+	def _empty_reply_lines(self):
+		"""B1's line: (run_id, conversation, variant)."""
+		return [a[1:4] for a in self.lines if a and str(a[0]).startswith("empty_reply run_id=")]
+
+	def _outcomes(self):
+		return self.lines_of(self.OUTCOME)
+
+	def _human_msg(self, conv, content="hi"):
+		return self._mk_msg(conv, content=content, server=True, origin="human")
+
+	@staticmethod
+	def _stored(rid, resent=empty_reply_recovery.REASON):
+		"""The dispatch payload of a fresh turn (``resent`` None), of a turn with the marker
+		alone (``MARKER_ONLY``) or of a turn sent again for an empty reply."""
+		stored = {"session_key": f"sess-{rid}", "message": "hi"}
+		if resent:
+			stored["redispatch"] = 1
+		if resent == empty_reply_recovery.REASON:
+			stored["redispatch_reason"] = resent
+		return json.dumps(stored)
+
+	def _resent_turn(self, rid, state, *, resent=empty_reply_recovery.REASON, **extra):
+		"""A chat (with a session key) of a person's message and one turn in ``state``;
+		returns (conversation, reply placeholder)."""
+		conv = self._mk_conv()
+		frappe.db.set_value(CONV, conv, "session_key", f"sess-{rid}", update_modified=False)
+		seed = self._human_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			state,
+			assistant_message=amsg,
+			dispatch_payload=self._stored(rid, resent),
+			**extra,
+		)
+		return conv, amsg
+
+	def _ready(self, rid, resent=empty_reply_recovery.REASON, state="ready"):
+		return self._resent_turn(rid, state, resent=resent, version=6, pump_epoch=7, reserved=1)
+
+	def _streaming(self, rid, *, resent=None, **extra):
+		"""A streaming first attempt and its lane; returns (ctx, rs)."""
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+		conv, amsg = self._resent_turn(
+			rid,
+			"streaming",
+			resent=resent,
+			version=5,
+			pump_epoch=ctx.epoch,
+			reserved=1,
+			dispatching_at=frappe.utils.now(),
+			**extra,
+		)
+		rs = pump._RunState(
+			run_id=rid,
+			conversation=conv,
+			owner=TEST_USER,
+			assistant_message=amsg,
+			session_key=f"sess-{rid}",
+			version=5,
+		)
+		ctx.runs[rid] = rs
+		return ctx, rs
+
+	@staticmethod
+	def _terminal(ctx, rs, error=EMPTY_REPLY):
+		pump._make_handler(ctx, rs).on_terminal("relay:error", {"state": "error", "error": error, "text": ""})
+
+	@staticmethod
+	def _record_sends(double, on_send=None) -> list:
+		"""The idempotency key of every chat.send the double gets, in order. ``on_send(n)``
+		runs on the pump thread before the n-th send plays."""
+		keys: list = []
+		play = double._handle_chat_send
+
+		def record(req_id, params):
+			keys.append(params.get("idempotencyKey"))
+			if on_send is not None:
+				on_send(len(keys))
+			return play(req_id, params)
+
+		double._handle_chat_send = record
+		return keys
+
+
+class TestEmptyReplyRedispatch(_EmptyReplyCase):
+	"""The agent runtime's plain empty reply, before anything ran, is sent again once under
+	a fresh gateway key on the same Turn row and placeholder. Real mux + gateway double +
+	settlement, so the assertions are on what the customer's browser reads back."""
+
+	def _drive(self, rid, transcript, *, retry_transcript="success", on_send=None):
+		conv = self._mk_conv()
+		seed = self._human_msg(conv, "Reply with exactly one word: PONG")
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=0)
+		double = self._double()
+		double.arm(pump.resent_gateway_key(rid), retry_transcript)
+		keys = self._record_sends(double, on_send and (lambda n: on_send(conv, rid, n)))
+		deps = self._deps(double=double, prepare=self._prepare_stub(conv, double, transcript))
+		deps.apply_tool = pump.PumpDeps().apply_tool
+		self._ctx = self._make_ctx(deps)
+		self._pubs.clear()
+		self._pump_until(self._ctx, lambda: self._state(rid) in _SETTLED)
+		return conv, keys
+
+	def _run_errors(self):
+		return [p for p in self._pubs if p.get("kind") == "run:error"]
+
+	def _receipt(self, name):
+		"""A receipt row the bench writes during the first attempt, after the placeholder."""
+
+		def on_send(conv, rid, n):
+			if n == 1:
+				self._mk_msg(conv, "tool", "", server=True, tool_name=name, tool_status="completed")
+
+		return on_send
+
+	def test_resends_once_and_answers_without_an_error(self):
+		rid = "pmp_er_ok"
+		conv, keys = self._drive(rid, "empty-reply")
+		self.assertEqual(keys, [rid, f"{rid}-r1"], "one re-send, under a fresh idempotency key")
+		self.assertIn(self._state(rid), ("finalizing", "done"), "the re-sent turn answers")
+		self.assertEqual(self._val(rid, "terminal_kind"), "relay:final")
+		stored = json.loads(self._val(rid, "dispatch_payload"))
+		self.assertEqual(
+			(stored["redispatch"], stored["redispatch_reason"]), (1, empty_reply_recovery.REASON)
+		)
+		amsg = self._val(rid, "assistant_message")
+		self.assertFalse((frappe.db.get_value(MSG, amsg, "error") or "").strip(), "no error on the reply")
+		self.assertEqual(self._run_errors(), [], "the empty reply never reaches the browser")
+		starts = [p for p in self._pubs if p.get("kind") == "run:start"]
+		self.assertEqual({p.get("message_id") for p in starts}, {amsg}, "same placeholder both times")
+		self.assertEqual(self._decisions(), [("resent", "plain")])
+		self.assertEqual(self._empty_reply_lines(), [(rid, conv, "plain")], "the first attempt is counted")
+
+	def test_a_second_empty_reply_settles_with_the_empty_reply_error(self):
+		rid = "pmp_er_twice"
+		conv, keys = self._drive(rid, "empty-reply", retry_transcript="empty-reply")
+		self.assertEqual(keys, [rid, f"{rid}-r1"], "bounded: exactly one re-send")
+		self.assertEqual(self._state(rid), "errored")
+		self.assertEqual([e["code"] for e in self._run_errors()], ["empty-reply"])
+		self.assertEqual(int(self._val(rid, "reserved")), 0, "slot released")
+		self.assertEqual(self._decisions(), [("resent", "plain"), ("skip", "used")])
+		self.assertEqual(self._empty_reply_lines(), [(rid, conv, "plain")] * 2, "one line per empty reply")
+
+	def test_another_empty_reply_on_the_second_attempt_settles_with_it(self):
+		for variant in ("tools", "bare", "other"):
+			with self.subTest(variant=variant):
+				self.lines.clear()
+				rid = f"pmp_er_2nd_{variant}"
+				_conv, keys = self._drive(rid, "empty-reply", retry_transcript=f"empty-reply-{variant}")
+				self.assertEqual(keys, [rid, f"{rid}-r1"], "never a third attempt")
+				self.assertEqual(self._state(rid), "errored")
+				text = transcripts.get(f"empty-reply-{variant}")["terminal"]["errorMessage"]
+				codes = [e["code"] for e in self._run_errors() if e["run_id"] == rid]
+				self.assertEqual(codes, [classify_error_text(text)])
+				self.assertEqual(self._decisions(), [("resent", "plain"), ("skip", "variant")])
+
+	def test_the_tools_variant_is_never_sent_again(self):
+		rid = "pmp_er_tools"
+		_conv, keys = self._drive(rid, "empty-reply-tools")
+		self.assertEqual(keys, [rid])
+		self.assertEqual([e["code"] for e in self._run_errors()], ["empty-reply-tools"])
+		self.assertEqual(self._decisions(), [("skip", "variant")])
+
+	def test_a_relayed_tool_event_refuses_the_resend(self):
+		rid = "pmp_er_toolev"
+		with patch.object(frappe, "log_error"):
+			_conv, keys = self._drive(rid, "empty-reply-after-tool-event")
+		self.assertEqual(keys, [rid], "last_event_seq moved: the CAS refuses")
+		self.assertGreater(int(self._val(rid, "last_event_seq") or 0), 0)
+		self.assertEqual(self._state(rid), "errored")
+		self.assertEqual(self._decisions(), [("skip", "cas_lost")])
+
+	def test_the_memory_hook_recall_does_not_block(self):
+		_conv, keys = self._drive("pmp_er_recall", "empty-reply", on_send=self._receipt("recall"))
+		self.assertEqual(len(keys), 2, "recall with no call id is the bench's memory hook")
+		self.assertEqual(self._decisions(), [("resent", "plain")])
+
+	def test_a_model_tool_receipt_blocks(self):
+		rid = "pmp_er_getlist"
+		_conv, keys = self._drive(rid, "empty-reply", on_send=self._receipt("get_list"))
+		self.assertEqual(keys, [rid])
+		self.assertEqual(self._state(rid), "errored")
+		self.assertEqual(self._decisions(), [("skip", "tool:get_list")])
+
+	def test_off_by_default_and_when_switched_off_with_no_line(self):
+		for value, rid in ((None, "pmp_er_absent"), (0, "pmp_er_off")):
+			with self.subTest(switch=value):
+				self.lines.clear()
+				frappe.local.conf.pop(empty_reply_recovery.SWITCH, None)
+				if value is not None:
+					frappe.local.conf[empty_reply_recovery.SWITCH] = value
+				conv, keys = self._drive(rid, "empty-reply")
+				self.assertEqual(keys, [rid], "today's behaviour: one attempt, then the error card")
+				self.assertEqual(
+					[e["code"] for e in self._run_errors() if e["run_id"] == rid], ["empty-reply"]
+				)
+				b2 = [a for a in self.lines if str(a[0]).startswith("empty_reply ") and a[0] != _B1_LINE]
+				self.assertEqual(b2, [], "no line of the re-send")
+				self.assertEqual(self._empty_reply_lines(), [(rid, conv, "plain")], "B1's line, as before")
+
+	def test_a_turn_resent_for_a_refused_session_is_not_sent_again(self):
+		rid = "pmp_er_shared"
+		_conv, keys = self._drive(rid, "stale-cli-session", retry_transcript="empty-reply")
+		self.assertEqual(keys, [rid, f"{rid}-r1"], "one re-send per turn, whatever the cause")
+		self.assertEqual(self._state(rid), "errored")
+		self.assertNotIn("redispatch_reason", json.loads(self._val(rid, "dispatch_payload")))
+		self.assertEqual(self._decisions(), [("skip", "used")])
+
+	def test_an_open_breaker_keeps_todays_behaviour(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="earlier")
+		for n in range(empty_reply_recovery.BREAKER_FAILURES):
+			self._mk_turn(
+				conv,
+				f"pmp_er_brk{n}",
+				seed,
+				"errored",
+				error=EMPTY_REPLY,
+				finalizing_at=frappe.utils.now(),
+				dispatch_payload=self._stored(f"pmp_er_brk{n}"),
+			)
+		rid = "pmp_er_next"
+		with patch.object(frappe, "log_error"):
+			_conv, keys = self._drive(rid, "empty-reply")
+		self.assertEqual(keys, [rid], "the breaker is open: no re-send")
+		self.assertEqual(self._state(rid), "errored")
+		self.assertEqual(self._decisions(), [("skip", "breaker")])
+
+	def test_a_retry_after_a_failed_resend_is_sent_once(self):
+		rid = "pmp_er_retry"
+		_conv, keys = self._drive(rid, "empty-reply", retry_transcript="empty-reply")
+		self.assertEqual(self._state(rid), "errored", "premise: the re-send failed too")
+		with (
+			self._pump_on(),
+			patch.object(admission, "relay_target_id", lambda conversation=None: self._target),
+			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
+		):
+			res = chat_api.retry_message(self._val(rid, "assistant_message"))
+		self.assertTrue(res["ok"], res)
+		retry = res["run_id"]
+		self._pump_until(self._ctx, lambda: self._state(retry) in _SETTLED)
+		self.assertEqual(keys, [rid, f"{rid}-r1", retry], "the user's retry goes out once")
+		self.assertEqual(self._state(retry), "errored")
+		self.assertEqual(self._decisions(), [("resent", "plain"), ("skip", "used"), ("skip", "retried")])
+
+
+class TestEmptyReplyTerminalFallback(_EmptyReplyCase):
+	"""``on_terminal`` with a plain empty reply on a streaming row: every refusal and every
+	failure settles the turn errored, exactly as before."""
+
+	def test_the_requeue_commits_first_then_the_lines_then_the_snapshot_ends(self):
+		ctx, rs = self._streaming("pmp_erf_ok")
+		order: list = []
+		real_commit = frappe.db.commit
+		with (
+			patch.object(frappe.db, "commit", side_effect=lambda: (order.append("commit"), real_commit())),
+			patch.object(empty_reply_recovery, "log_decision", side_effect=lambda *a, **k: order.append(a)),
+			patch("jarvis.chat.turn_handler._note_empty_reply", side_effect=lambda *a: order.append(a)),
+			patch.object(txn, "fresh_snapshot", side_effect=lambda **k: order.append("snapshot")),
+		):
+			self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "ready")
+		self.assertEqual(int(self._val(rs.run_id, "last_event_seq") or 0), 0, "last_event_seq is unchanged")
+		self.assertNotIn(rs.run_id, ctx.runs, "the lane is retired; the next dispatch builds a new one")
+		line = (rs.run_id, rs.conversation, EMPTY_REPLY, "empty-reply")
+		self.assertEqual(order[-4:], ["commit", ("resent", "plain"), line, "snapshot"])
+		stored = json.loads(self._val(rs.run_id, "dispatch_payload"))
+		self.assertEqual(
+			(stored["redispatch"], stored["redispatch_reason"]), (1, empty_reply_recovery.REASON)
+		)
+
+	def test_a_failing_first_attempt_line_still_resends(self):
+		ctx, rs = self._streaming("pmp_erf_b1fail")
+		with patch("jarvis.chat.turn_handler._note_empty_reply", side_effect=RuntimeError("log down")):
+			self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "ready")
+		self.assertEqual(self._decisions(), [("resent", "plain")])
+
+	def test_a_failing_snapshot_end_after_the_line_still_resends(self):
+		ctx, rs = self._streaming("pmp_erf_snap")
+		noted: list = []
+		real = txn.fresh_snapshot
+
+		def snapshot(**kw):
+			if noted:
+				raise RuntimeError("connection lost")
+			return real(**kw)
+
+		with (
+			patch("jarvis.chat.turn_handler._note_empty_reply", side_effect=lambda *a: noted.append(a)),
+			patch.object(txn, "fresh_snapshot", side_effect=snapshot),
+		):
+			self._terminal(ctx, rs)
+		self.assertEqual(len(noted), 1)
+		self.assertEqual(self._state(rs.run_id), "ready")
+		self.assertNotIn(rs.run_id, ctx.runs)
+
+	def test_the_second_attempt_gets_a_fresh_recovery_budget(self):
+		ctx, rs = self._streaming(
+			"pmp_erf_budget", recovery_started_at=frappe.utils.add_to_date(None, seconds=-500)
+		)
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "ready")
+		self.assertIsNone(self._val(rs.run_id, "recovery_started_at"))
+
+	def test_a_resent_turn_whose_session_is_not_active_is_reattached(self):
+		ctx, rs = self._streaming("pmp_erf_lane")
+		self._terminal(ctx, rs)
+		frappe.db.set_value(TURN, rs.run_id, "state", "streaming", update_modified=False)
+		frappe.db.commit()
+		row = frappe.db.get_value(TURN, rs.run_id, _REATTACH_FIELDS, as_dict=True)
+		with (
+			patch.object(pump, "_reattach_lane") as reattach,
+			patch.object(pump, "_issue_recovery_tail") as tail,
+		):
+			pump._reattach_or_recover(ctx, row, set())
+		reattach.assert_called_once()
+		tail.assert_not_called()
+
+	def test_a_reattached_turn_is_never_sent_again(self):
+		ctx, rs = self._streaming("pmp_erf_hop")
+		ctx.runs.clear()
+		pump._reattach_lane(ctx, frappe.db.get_value(TURN, rs.run_id, _REATTACH_FIELDS, as_dict=True))
+		again = ctx.runs[rs.run_id]
+		self.assertTrue(again.stepped, "its earlier steps are unknown")
+		self._terminal(ctx, again)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "steps")])
+
+	def test_a_stopped_turn_is_not_sent_again(self):
+		ctx, rs = self._streaming("pmp_erf_stop", cancel_requested=1)
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "cas_lost")])
+
+	def test_a_turn_that_streamed_is_not_sent_again(self):
+		ctx, rs = self._streaming("pmp_erf_seq", last_event_seq=3)
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "cas_lost")])
+
+	def test_a_second_attempt_is_known_from_its_gateway_key(self):
+		ctx, rs = self._streaming("pmp_erf_key")
+		rs.send_key = pump.resent_gateway_key(rs.run_id)
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "used")])
+
+	def test_a_turn_with_the_stored_marker_is_not_sent_a_third_time(self):
+		ctx, rs = self._streaming("pmp_erf_used", resent=MARKER_ONLY)
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "used")])
+
+	def test_a_turn_with_no_stored_payload_is_not_sent_again(self):
+		ctx, rs = self._streaming("pmp_erf_payload")
+		frappe.db.set_value(TURN, rs.run_id, "dispatch_payload", None, update_modified=False)
+		frappe.db.commit()
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "no_payload")])
+
+	def test_a_step_line_in_the_cache_skips(self):
+		ctx, rs = self._streaming("pmp_erf_step_cache")
+		pump._append_run_step_line(rs.run_id, "Looking up the invoices")
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "steps")])
+
+	def test_a_step_offered_skips_when_its_cache_write_failed(self):
+		ctx, rs = self._streaming("pmp_erf_step_flag")
+		with patch.object(pump, "_append_run_step_line"):
+			pump._make_handler(ctx, rs).on_step(1, "Looking up the invoices")
+		self.assertEqual(pump._read_run_step_lines(rs.run_id), [], "premise: nothing cached")
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "steps")])
+
+	def test_a_status_frame_alone_does_not_skip(self):
+		ctx, rs = self._streaming("pmp_erf_status")
+		pump._make_handler(ctx, rs).on_status(1, "compacting")
+		self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "ready")
+		self.assertEqual(self._decisions(), [("resent", "plain")])
+
+	def test_a_failing_decision_settles_as_before(self):
+		ctx, rs = self._streaming("pmp_erf_raise")
+		with patch.object(empty_reply_recovery, "resend_decision", side_effect=RuntimeError("db hiccup")):
+			self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored")
+		self.assertEqual(self._decisions(), [("skip", "error")])
+
+	def test_a_raise_between_the_requeue_and_its_commit_settles_as_before(self):
+		ctx, rs = self._streaming("pmp_erf_half")
+		real = ts.requeue_for_redispatch
+
+		def requeue_then_fail(*args, **kwargs):
+			self.assertTrue(real(*args, **kwargs))
+			raise RuntimeError("connection lost before the commit")
+
+		with patch.object(ts, "requeue_for_redispatch", side_effect=requeue_then_fail):
+			self._terminal(ctx, rs)
+		self.assertEqual(self._state(rs.run_id), "errored", "the half-done requeue was rolled back")
+		self.assertIsNone(json.loads(self._val(rs.run_id, "dispatch_payload")).get("redispatch"))
+		self.assertIn("run:error", self._pub_kinds())
+		self.assertEqual(self._decisions(), [("skip", "error")])
+
+	def test_a_lost_lease_is_not_turned_into_a_skip(self):
+		ctx, rs = self._streaming("pmp_erf_lease")
+		with patch.object(empty_reply_recovery, "resend_decision", side_effect=ts.LeaseLostExit(rs.run_id)):
+			self._terminal(ctx, rs)
+		self.assertEqual(ctx.lease_lost, rs.run_id)
+		self.assertEqual(self._state(rs.run_id), "streaming", "a lost lease settles nothing")
+		self.assertEqual(self._decisions(), [])
+
+
+class TestRefusedSessionResendUnchanged(_EmptyReplyCase):
+	"""The refused-session re-send shares ``_resend_once`` and behaves as before: the marker
+	alone, the recovery budget and the step lines kept, its own telemetry line."""
+
+	def test_the_refused_session_resend_writes_what_it_wrote_before(self):
+		ctx, rs = self._streaming(
+			"pmp_rs_same", recovery_started_at=frappe.utils.add_to_date(None, seconds=-500)
+		)
+		rid = rs.run_id
+		pump._append_run_step_line(rid, "Checking the model")
+		self._terminal(ctx, rs, "Managed CLI live session is no longer reusable. | cli_live_session_changed")
+		self.assertEqual(self._state(rid), "ready")
+		self.assertEqual(
+			json.loads(self._val(rid, "dispatch_payload")),
+			{"session_key": f"sess-{rid}", "message": "hi", "redispatch": 1},
+		)
+		self.assertIsNotNone(self._val(rid, "recovery_started_at"), "the budget is kept, as before")
+		self.assertEqual([line["text"] for line in pump._read_run_step_lines(rid)], ["Checking the model"])
+		self.assertIn(("pump %s %s", "redispatch_refused_session", f"run_id={rid}"), self.lines)
+		self.assertEqual(self._decisions(), [], "no empty-reply decision")
+
+
+class TestStopAResentTurn(_EmptyReplyCase):
+	"""Stop on a turn the empty-reply re-send put back to ``ready``: cancelled there, never
+	sent, and the reply stops spinning in every tab. Every other turn, and every turn while
+	the re-send is off, is handled as before."""
+
+	@contextmanager
+	def _no_wake(self):
+		woken: list = []
+		with (
+			patch.object(pump, "ensure_pump", lambda target: woken.append(target)),
+			patch.object(pump, "lpush_wake", lambda target, run_id: woken.append(run_id)),
+		):
+			yield woken
+
+	@staticmethod
+	def _once(real, before):
+		"""``real`` with ``before()`` run ahead of its FIRST call only (a replay or the
+		re-read passes straight through, so a regression fails fast, not on a lock wait)."""
+		fired: list = []
+
+		def wrapper(*args):
+			if not fired:
+				fired.append(1)
+				before(*args)
+			return real(*args)
+
+		return wrapper
+
+	@staticmethod
+	def _commit_elsewhere(sql, params):
+		with other_connection() as other:
+			other.sql("SET SESSION innodb_lock_wait_timeout=3")
+			other.sql(sql, params)
+			other.commit()
+
+	def test_stop_cancels_a_resent_ready_turn_and_ends_the_spinner(self):
+		rid = "pmp_stop_ready"
+		conv, amsg = self._ready(rid)
+		with (
+			self._no_wake() as woken,
+			patch("jarvis.chat.llm_switch.apply_if_active") as switch,
+		):
+			self.assertTrue(pump.request_cancel_conversation(conv))
+		switch.assert_called_once_with(source="pump.request_cancel_conversation")
+		row = frappe.db.get_value(TURN, rid, ["state", "reserved", "cancel_requested"], as_dict=True)
+		self.assertEqual((row.state, int(row.reserved), int(row.cancel_requested)), ("cancelled", 0, 1))
+		msg = frappe.db.get_value(MSG, amsg, ["streaming", "stopped"], as_dict=True)
+		self.assertEqual((int(msg.streaming), int(msg.stopped)), (0, 1), "the reply shows as stopped")
+		ends = [p for p in self._pubs if p.get("kind") == "run:end"]
+		self.assertEqual(len(ends), 1, "other tabs end their spinner")
+		self.assertEqual(
+			(ends[0]["run_id"], ends[0]["message_id"], ends[0]["pump_epoch"], ends[0]["stopped"]),
+			(rid, amsg, 7, True),
+		)
+		self.assertNotIn("event_seq", ends[0], "no seq: the client fence takes it")
+		self.assertEqual(woken, [self._target, rid], "the freed credit wakes the pump")
+
+	def test_any_other_ready_turn_is_left_to_the_pump(self):
+		for resent in (None, MARKER_ONLY):
+			with self.subTest(resent=resent):
+				rid = f"pmp_stop_left_{resent or 'fresh'}"
+				conv, amsg = self._ready(rid, resent)
+				self._pubs.clear()
+				with self._no_wake() as woken:
+					self.assertFalse(pump.request_cancel_conversation(conv))
+				self.assertEqual(self._state(rid), "ready")
+				self.assertEqual(int(frappe.db.get_value(MSG, amsg, "streaming")), 1)
+				self.assertEqual((woken, self._pub_kinds()), ([], []))
+
+	def test_with_the_resend_off_stop_is_as_before(self):
+		rid = "pmp_stop_off"
+		conv, _amsg = self._ready(rid)
+		frappe.local.conf[empty_reply_recovery.SWITCH] = 0
+		reads: list = []
+		real = frappe.db.get_value
+		with (
+			self._no_wake(),
+			patch.object(
+				frappe.db, "get_value", side_effect=lambda *a, **k: (reads.append(a), real(*a, **k))[1]
+			),
+		):
+			self.assertFalse(pump.request_cancel_conversation(conv, rid))
+		self.assertEqual(self._state(rid), "ready")
+		self.assertEqual(
+			reads,
+			[
+				(
+					TURN,
+					{"conversation": conv, "state": ["in", ("dispatching", "streaming")]},
+					["run_id", "version", "relay_target_id"],
+				)
+			],
+		)
+
+	def test_a_stop_for_another_run_is_left_alone(self):
+		rid = "pmp_stop_other"
+		conv, _amsg = self._ready(rid)
+		with self._no_wake():
+			self.assertFalse(pump.request_cancel_conversation(conv, "some-other-run"))
+			self.assertEqual(self._state(rid), "ready")
+			self.assertTrue(
+				pump.request_cancel_conversation(conv, f"{rid}-r1"), "the gateway key names it too"
+			)
+		self.assertEqual(self._state(rid), "cancelled")
+
+	def test_a_turn_the_pump_sends_meanwhile_is_flagged_instead(self):
+		"""``ready`` at the read, ``dispatching`` at the cancel: Stop reads again and flags
+		it for the cancel sweep, with or without the engine's snapshot check."""
+		sent = "UPDATE `tabJarvis Chat Turn` SET state='dispatching', version=version+1 WHERE name=%s"
+		for label, isolation in (("off", snapshot_isolation_off), ("on", snapshot_isolation_on)):
+			with self.subTest(snapshot_isolation=label):
+				rid = f"pmp_stop_race_{label}"
+				conv, amsg = self._ready(rid)
+				self._pubs.clear()
+				wrapper = self._once(
+					ts.cancel_preparing_or_ready,
+					lambda run_id, version: self._commit_elsewhere(sent, (run_id,)),
+				)
+				with (
+					self._no_wake(),
+					isolation(),
+					patch.object(ts, "cancel_preparing_or_ready", side_effect=wrapper),
+				):
+					self.assertTrue(pump.request_cancel_conversation(conv))
+				row = frappe.db.get_value(TURN, rid, ["state", "cancel_requested"], as_dict=True)
+				self.assertEqual((row.state, int(row.cancel_requested)), ("dispatching", 1))
+				self.assertEqual(int(frappe.db.get_value(MSG, amsg, "streaming")), 1, "the sweep ends it")
+				self.assertNotIn("run:end", self._pub_kinds())
+
+	def test_a_requeue_between_the_read_and_the_flag_is_cancelled(self):
+		"""Stop reads the first attempt ``streaming``; the requeue commits before its flag:
+		the lost CAS reads again and cancels the re-sent turn in ``ready``."""
+		requeue = (
+			"UPDATE `tabJarvis Chat Turn` SET state='ready', version=version+1, dispatch_payload=%s"
+			" WHERE name=%s"
+		)
+		for label, isolation in (("off", snapshot_isolation_off), ("on", snapshot_isolation_on)):
+			with self.subTest(snapshot_isolation=label):
+				rid = f"pmp_stop_rq_{label}"
+				conv, amsg = self._ready(rid, None, "streaming")
+				stored = self._stored(rid)
+				wrapper = self._once(
+					ts.request_cancel,
+					lambda run_id, version: self._commit_elsewhere(requeue, (stored, run_id)),
+				)
+				with self._no_wake(), isolation(), patch.object(ts, "request_cancel", side_effect=wrapper):
+					self.assertTrue(pump.request_cancel_conversation(conv))
+				self.assertEqual(self._state(rid), "cancelled", "Stop wins: the re-send never goes out")
+				self.assertEqual(int(frappe.db.get_value(MSG, amsg, "stopped")), 1)
+
+	def test_a_lost_cas_on_any_other_turn_is_not_tried_again(self):
+		rid = "pmp_stop_lost"
+		conv, _amsg = self._ready(rid, None, "streaming")
+		calls: list = []
+		bump = "UPDATE `tabJarvis Chat Turn` SET version=version+1 WHERE name=%s"
+		wrapper = self._once(
+			ts.request_cancel, lambda run_id, version: self._commit_elsewhere(bump, (run_id,))
+		)
+		with (
+			self._no_wake(),
+			snapshot_isolation_off(),
+			patch.object(ts, "request_cancel", side_effect=lambda *a: (calls.append(a), wrapper(*a))[1]),
+		):
+			self.assertFalse(pump.request_cancel_conversation(conv), "as before: the lost CAS is the answer")
+		self.assertEqual(len(calls), 1)
+
+	def test_a_failing_wake_still_ends_the_spinner(self):
+		rid = "pmp_stop_wakefail"
+		conv, _amsg = self._ready(rid)
+		with patch.object(pump, "ensure_pump", side_effect=RuntimeError("redis down")):
+			self.assertRaises(RuntimeError, pump.request_cancel_conversation, conv)
+		self.assertEqual(self._state(rid), "cancelled")
+		self.assertIn("run:end", self._pub_kinds(), "the run:end went out before the wake")
+
+	def test_stop_while_the_resend_waits_sends_nothing(self):
+		rid = "pmp_stop_pipe"
+		conv = self._mk_conv()
+		seed = self._human_msg(conv, "Reply with exactly one word: PONG")
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=0)
+		double = self._double()
+		double.arm(pump.resent_gateway_key(rid), "success")
+		keys = self._record_sends(double)
+		ctx = self._make_ctx(
+			self._deps(double=double, prepare=self._prepare_stub(conv, double, "empty-reply"))
+		)
+
+		def requeued():
+			stored = json.loads(self._val(rid, "dispatch_payload") or "{}")
+			return self._state(rid) == "ready" and stored.get("redispatch") == 1
+
+		self._pump_until(ctx, requeued)
+		self.assertTrue(requeued(), "the empty reply put the turn back to ready")
+		with self._no_wake():
+			self.assertTrue(pump.request_cancel_conversation(conv, rid))
+		self._pump_until(ctx, lambda: False, max_slices=5)
+		self.assertEqual(keys, [rid], "the re-send never goes out")
+		self.assertEqual(self._state(rid), "cancelled")
+		self.assertTrue(any(p.get("kind") == "run:end" and p.get("stopped") for p in self._pubs))
+
+	def _row(self, rid):
+		return frappe.db.get_value(
+			TURN, rid, ["run_id", "relay_target_id", "assistant_message", "pump_epoch"], as_dict=True
+		)
+
+	def test_a_missing_owner_skips_only_the_publish(self):
+		rid = "pmp_stop_noowner"
+		self._ready(rid)
+		with patch("jarvis.chat.llm_switch.apply_if_active") as switch:
+			pump._finish_stop_before_dispatch("no-such-conversation", self._row(rid))
+		switch.assert_called_once()
+		self.assertNotIn("run:end", self._pub_kinds())
+
+	def test_a_failing_owner_read_skips_only_the_publish(self):
+		rid = "pmp_stop_ownerfail"
+		conv, _amsg = self._ready(rid)
+		row = self._row(rid)
+		with (
+			patch("jarvis.chat.llm_switch.apply_if_active") as switch,
+			patch.object(frappe.db, "get_value", side_effect=RuntimeError("db hiccup")),
+		):
+			pump._finish_stop_before_dispatch(conv, row)
+		switch.assert_called_once()
+		self.assertNotIn("run:end", self._pub_kinds())
+
+	@staticmethod
+	def _placeholder_fails(exc):
+		real = ts._run_cas
+
+		def run_cas(sql, params):
+			if f"`tab{MSG}`" in sql:
+				raise exc
+			return real(sql, params)
+
+		return patch.object(ts, "_run_cas", side_effect=run_cas)
+
+	def _cancel_row(self, rid):
+		return frappe.db.get_value(TURN, rid, ["run_id", "version", "assistant_message"], as_dict=True)
+
+	def test_a_failing_placeholder_update_is_logged_and_the_cancel_kept(self):
+		rid = "pmp_stop_phfail"
+		self._ready(rid)
+		with (
+			self._placeholder_fails(frappe.QueryTimeoutError("lock wait timeout")),
+			patch.object(frappe, "log_error") as log,
+		):
+			self.assertTrue(pump._cancel_ready_turn(self._cancel_row(rid)))
+		log.assert_called_once()
+		self.assertEqual(self._state(rid), "cancelled")
+
+	def test_a_write_conflict_on_the_placeholder_update_is_raised(self):
+		rid = "pmp_stop_phconflict"
+		self._ready(rid)
+		with (
+			self._placeholder_fails(frappe.QueryDeadlockError("1020 record has changed")),
+			patch.object(frappe, "log_error") as log,
+			self.assertRaises(frappe.QueryDeadlockError),
+		):
+			pump._cancel_ready_turn(self._cancel_row(rid))
+		log.assert_not_called()
+
+
+class TestStopRunOnAResentTurn(_EmptyReplyCase):
+	"""``stop_run``, the endpoint: a turn of this chat the empty-reply re-send put back is
+	stopped and the direct abort names its ``-r1`` run; any other turn as before."""
+
+	def _stop(self, conv, rid):
+		from jarvis.chat.turn_message_binding import clear_run_cancel
+
+		sess = MagicMock()
+
+		@contextmanager
+		def checkout(_url):
+			yield sess
+
+		try:
+			with (
+				patch.object(pump, "pump_lifecycle_configured", return_value=True),
+				patch.object(pump, "ensure_pump"),
+				patch.object(pump, "lpush_wake"),
+				patch("jarvis.chat.agent_session_pool.checkout", checkout),
+			):
+				out = chat_api.stop_run(conv, rid)
+		finally:
+			clear_run_cancel(conv)
+		self.assertTrue(out["ok"])
+		return sess
+
+	def test_a_resent_ready_turn_is_cancelled_and_its_r1_run_aborted(self):
+		rid = "pmp_sr_resent"
+		conv, _amsg = self._ready(rid)
+		sess = self._stop(conv, rid)
+		self.assertEqual(self._state(rid), "cancelled")
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", f"{rid}-r1")
+
+	def test_a_resent_streaming_turn_is_flagged_and_its_r1_run_aborted(self):
+		rid = "pmp_sr_streaming"
+		conv, _amsg = self._ready(rid, state="streaming")
+		sess = self._stop(conv, rid)
+		self.assertEqual(int(self._val(rid, "cancel_requested")), 1)
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", f"{rid}-r1")
+
+	def test_any_other_turn_is_left_and_aborted_by_its_run_id_as_before(self):
+		for resent in (None, MARKER_ONLY):
+			with self.subTest(resent=resent):
+				rid = f"pmp_sr_{resent or 'fresh'}"
+				conv, _amsg = self._ready(rid, resent)
+				sess = self._stop(conv, rid)
+				self.assertEqual(self._state(rid), "ready", "today's behaviour: the pump still sends it")
+				sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+	def test_with_the_resend_off_a_resent_turn_is_as_before(self):
+		rid = "pmp_sr_off"
+		conv, _amsg = self._ready(rid)
+		frappe.local.conf[empty_reply_recovery.SWITCH] = 0
+		sess = self._stop(conv, rid)
+		self.assertEqual(self._state(rid), "ready")
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+	def test_a_stop_for_another_run_leaves_it(self):
+		rid = "pmp_sr_other"
+		conv, _amsg = self._ready(rid)
+		self._stop(conv, "some-other-run")
+		self.assertEqual(self._state(rid), "ready")
+
+	def test_a_resent_run_of_another_chat_is_aborted_by_its_raw_id(self):
+		conv_a, _amsg = self._ready("pmp_sr_a", None, "done")
+		conv_b, _amsg = self._ready("pmp_sr_b")
+		sess = self._stop(conv_a, "pmp_sr_b")
+		sess.chat_abort.assert_called_once_with("sess-pmp_sr_a", "pmp_sr_b")
+		self.assertEqual(self._state("pmp_sr_b"), "ready", f"{conv_b} is not touched")
+
+	def test_a_failing_resent_read_aborts_by_the_raw_id(self):
+		rid = "pmp_sr_readfail"
+		conv, _amsg = self._ready(rid, state="streaming")
+		with patch.object(empty_reply_recovery, "resent_turn", side_effect=RuntimeError("db hiccup")):
+			sess = self._stop(conv, rid)
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+
+class TestEmptyReplyOutcome(_EmptyReplyCase):
+	"""When a turn sent again for an empty reply settles, finalize writes its outcome with
+	the code the user saw; ``pump turn_finalized`` names the re-send."""
+
+	def _settled(self, rid, state, *, resent=empty_reply_recovery.REASON, error=None):
+		conv, _amsg = self._resent_turn(
+			rid, state, resent=resent, version=9, error=error, finalizing_at=frappe.utils.now()
+		)
+		ts.insert_required_effects(rid, ("telemetry_flush",))
+		frappe.db.commit()
+		with self._mock_enrichment():
+			finalize.run_finalize(rid, self._target)
+		return conv
+
+	def _finalized(self):
+		return [a[1:] for a in self.lines if a and str(a[0]).startswith("pump turn_finalized")]
+
+	def test_each_outcome_is_logged_with_its_code(self):
+		t = self._target
+		conv_ok = self._settled("pmp_ero_ok", "finalizing")
+		conv_stop = self._settled("pmp_ero_stop", "cancelled")
+		conv_fail = self._settled("pmp_ero_fail", "errored", error=EMPTY_REPLY)
+		conv_other = self._settled("pmp_ero_other", "errored", error="429 rate_limit_error")
+		self.assertEqual(
+			self._outcomes(),
+			[
+				("ok", "", "pmp_ero_ok", conv_ok, t),
+				("stopped", "", "pmp_ero_stop", conv_stop, t),
+				("failed", "empty-reply", "pmp_ero_fail", conv_fail, t),
+				("failed", "rate-limit", "pmp_ero_other", conv_other, t),
+			],
+		)
+		reason = empty_reply_recovery.REASON
+		self.assertEqual(
+			self._finalized(),
+			[
+				("pmp_ero_ok", 0, reason),
+				("pmp_ero_stop", 1, reason),
+				("pmp_ero_fail", 1, reason),
+				("pmp_ero_other", 1, reason),
+			],
+		)
+
+	def test_a_turn_not_sent_again_for_an_empty_reply_keeps_b1s_line(self):
+		self._settled("pmp_ero_none", "errored", resent=None, error=EMPTY_REPLY)
+		self._settled("pmp_ero_cli", "errored", resent=MARKER_ONLY, error=EMPTY_REPLY)
+		self.assertEqual(self._outcomes(), [])
+		self.assertEqual(
+			[a for a in self.lines if str(a[0]).startswith("pump turn_finalized")],
+			[
+				("pump turn_finalized run_id=%s errored=%d", "pmp_ero_none", 1),
+				("pump turn_finalized run_id=%s errored=%d", "pmp_ero_cli", 1),
+			],
+			"the line B1 writes, with no reason",
+		)
+
+	def test_a_failing_outcome_line_still_finalizes(self):
+		with patch.object(empty_reply_recovery, "note_outcome", side_effect=RuntimeError("log down")):
+			self._settled("pmp_ero_raise", "errored", error=EMPTY_REPLY)
+		self.assertEqual(self._finalized(), [("pmp_ero_raise", 1, empty_reply_recovery.REASON)])
+		status = frappe.db.get_value(
+			"Jarvis Turn Effect", {"turn": "pmp_ero_raise", "effect_name": "telemetry_flush"}, "status"
+		)
+		self.assertEqual(status, "done")
+
+	def test_a_replayed_finalize_does_not_count_twice(self):
+		replays = empty_reply_recovery.BREAKER_FAILURES - 1
+		for n in range(replays):
+			rid = f"pmp_ero_rep{n}"
+			self._settled(rid, "errored", error=EMPTY_REPLY)
+			frappe.db.set_value(
+				"Jarvis Turn Effect", {"turn": rid, "effect_name": "telemetry_flush"}, "status", "pending"
+			)
+			frappe.db.commit()
+			with self._mock_enrichment():
+				finalize.run_finalize(rid, self._target)
+		self.assertEqual(len(self._outcomes()), 2 * replays, "the line can repeat")
+		ctx, rs = self._streaming("pmp_ero_next")
+		self._terminal(ctx, rs)
+		self.assertEqual(self._decisions(), [("resent", "plain")], "the breaker counts the rows")

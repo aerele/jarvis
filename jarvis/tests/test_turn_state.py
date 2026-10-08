@@ -155,6 +155,37 @@ class _TurnStateTestCase(FrappeTestCase):
 # --------------------------------------------------------------------------- #
 
 
+class TestUnfinishedTurn(_TurnStateTestCase):
+	"""The shared check for an unfinished turn of a conversation (sends, deletes, retries)."""
+
+	def test_only_the_given_filters_reach_the_sql(self):
+		# The default read stays covered by the conv_state index (no creation column).
+		with patch.object(frappe.db, "sql", return_value=()) as sql:
+			ts.unfinished_turn("c1")
+			ts.unfinished_turn("c1", exclude_run_id="r1")
+			ts.unfinished_turn("c1", created_after="2026-10-01 00:00:00")
+		default, bound, unbound = (c.args[0] for c in sql.call_args_list)
+		self.assertNotIn("creation", default)
+		self.assertNotIn("name !=", default)
+		self.assertIn("name !=", bound)
+		self.assertNotIn("creation", bound)
+		self.assertIn("creation >", unbound)
+
+	def test_each_filter_narrows_the_result(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		self._mk_turn(conv, "ut-old", seed, "queued")
+		mark = frappe.db.get_value(MSG, seed, "creation")
+		later = frappe.db.get_value(TURN, "ut-old", "creation")
+		self.assertEqual(ts.unfinished_turn_state(conv), "queued", "no filter: every turn")
+		self.assertEqual(ts.unfinished_turn(conv, created_after=mark), ("ut-old", "queued"))
+		self.assertIsNone(ts.unfinished_turn(conv, created_after=later), "nothing created after it")
+		self.assertIsNone(ts.unfinished_turn(conv, exclude_run_id="ut-old"))
+		self.assertIsNone(ts.unfinished_turn(conv, states=("streaming",)))
+		frappe.db.set_value(TURN, "ut-old", "state", "errored")
+		self.assertIsNone(ts.unfinished_turn_state(conv), "a terminal turn does not count")
+
+
 class TestLinearPathWinAndReplay(_TurnStateTestCase):
 	def test_full_success_path(self):
 		conv = self._mk_conv()
@@ -560,6 +591,20 @@ class TestRequeueForRedispatch(_TurnStateTestCase):
 		self.assertIsNotNone(row.dispatching_at)
 		self.assertIsNotNone(row.ready_at)
 		self.assertEqual(json.loads(row.dispatch_payload)["redispatch"], 1)
+
+	def test_only_the_empty_reply_caller_starts_a_fresh_recovery_budget(self):
+		spent = frappe.utils.add_to_date(None, seconds=-500)
+		for fresh, want in ((False, "kept"), (True, None)):
+			with self.subTest(fresh_recovery=fresh):
+				run_id = f"ts_rq_budget_{int(fresh)}"
+				self._streaming(run_id, recovery_started_at=spent)
+				self.assertTrue(ts.requeue_for_redispatch(run_id, 6, 3, "{}", fresh_recovery=fresh))
+				started = frappe.db.get_value(TURN, run_id, "recovery_started_at")
+				frappe.db.rollback()
+				if want is None:
+					self.assertIsNone(started, "the second attempt starts a fresh recovery budget")
+				else:
+					self.assertIsNotNone(started, "the refused-session caller keeps it, as before")
 
 	def test_refuses_once_anything_was_produced_or_asked_to_stop(self):
 		cases = [
