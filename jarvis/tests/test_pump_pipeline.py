@@ -42,6 +42,7 @@ from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, tr
 from jarvis.tests._write_conflicts import set_value_conflict
 from jarvis.tests.harness import transcripts
 from jarvis.tests.harness.transcripts import EMPTY_REPLY
+from jarvis.tests.race_harness import other_connection, snapshot_isolation_off, snapshot_isolation_on
 from jarvis.tests.test_empty_reply_recovery import MARKER_ONLY, ResendOn
 from jarvis.tests.test_pump import TEST_USER, _PumpTestCase, _Recorder
 
@@ -2795,6 +2796,9 @@ class _EmptyReplyCase(ResendOn, _PipelineCase):
 		)
 		return conv, amsg
 
+	def _ready(self, rid, resent=empty_reply_recovery.REASON, state="ready"):
+		return self._resent_turn(rid, state, resent=resent, version=6, pump_epoch=7, reserved=1)
+
 	def _streaming(self, rid, *, resent=None, **extra):
 		"""A streaming first attempt and its lane; returns (ctx, rs)."""
 		ctx = self._make_ctx(self._deps(), with_mux=False)
@@ -3193,3 +3197,342 @@ class TestRefusedSessionResendUnchanged(_EmptyReplyCase):
 		self.assertEqual([line["text"] for line in pump._read_run_step_lines(rid)], ["Checking the model"])
 		self.assertIn(("pump %s %s", "redispatch_refused_session", f"run_id={rid}"), self.lines)
 		self.assertEqual(self._decisions(), [], "no empty-reply decision")
+
+
+class TestStopAResentTurn(_EmptyReplyCase):
+	"""Stop on a turn the empty-reply re-send put back to ``ready``: cancelled there, never
+	sent, and the reply stops spinning in every tab. Every other turn, and every turn while
+	the re-send is off, is handled as before."""
+
+	@contextmanager
+	def _no_wake(self):
+		woken: list = []
+		with (
+			patch.object(pump, "ensure_pump", lambda target: woken.append(target)),
+			patch.object(pump, "lpush_wake", lambda target, run_id: woken.append(run_id)),
+		):
+			yield woken
+
+	@staticmethod
+	def _once(real, before):
+		"""``real`` with ``before()`` run ahead of its FIRST call only (a replay or the
+		re-read passes straight through, so a regression fails fast, not on a lock wait)."""
+		fired: list = []
+
+		def wrapper(*args):
+			if not fired:
+				fired.append(1)
+				before(*args)
+			return real(*args)
+
+		return wrapper
+
+	@staticmethod
+	def _commit_elsewhere(sql, params):
+		with other_connection() as other:
+			other.sql("SET SESSION innodb_lock_wait_timeout=3")
+			other.sql(sql, params)
+			other.commit()
+
+	def test_stop_cancels_a_resent_ready_turn_and_ends_the_spinner(self):
+		rid = "pmp_stop_ready"
+		conv, amsg = self._ready(rid)
+		with (
+			self._no_wake() as woken,
+			patch("jarvis.chat.llm_switch.apply_if_active") as switch,
+		):
+			self.assertTrue(pump.request_cancel_conversation(conv))
+		switch.assert_called_once_with(source="pump.request_cancel_conversation")
+		row = frappe.db.get_value(TURN, rid, ["state", "reserved", "cancel_requested"], as_dict=True)
+		self.assertEqual((row.state, int(row.reserved), int(row.cancel_requested)), ("cancelled", 0, 1))
+		msg = frappe.db.get_value(MSG, amsg, ["streaming", "stopped"], as_dict=True)
+		self.assertEqual((int(msg.streaming), int(msg.stopped)), (0, 1), "the reply shows as stopped")
+		ends = [p for p in self._pubs if p.get("kind") == "run:end"]
+		self.assertEqual(len(ends), 1, "other tabs end their spinner")
+		self.assertEqual(
+			(ends[0]["run_id"], ends[0]["message_id"], ends[0]["pump_epoch"], ends[0]["stopped"]),
+			(rid, amsg, 7, True),
+		)
+		self.assertNotIn("event_seq", ends[0], "no seq: the client fence takes it")
+		self.assertEqual(woken, [self._target, rid], "the freed credit wakes the pump")
+
+	def test_any_other_ready_turn_is_left_to_the_pump(self):
+		for resent in (None, MARKER_ONLY):
+			with self.subTest(resent=resent):
+				rid = f"pmp_stop_left_{resent or 'fresh'}"
+				conv, amsg = self._ready(rid, resent)
+				self._pubs.clear()
+				with self._no_wake() as woken:
+					self.assertFalse(pump.request_cancel_conversation(conv))
+				self.assertEqual(self._state(rid), "ready")
+				self.assertEqual(int(frappe.db.get_value(MSG, amsg, "streaming")), 1)
+				self.assertEqual((woken, self._pub_kinds()), ([], []))
+
+	def test_with_the_resend_off_stop_is_as_before(self):
+		rid = "pmp_stop_off"
+		conv, _amsg = self._ready(rid)
+		frappe.local.conf[empty_reply_recovery.SWITCH] = 0
+		reads: list = []
+		real = frappe.db.get_value
+		with (
+			self._no_wake(),
+			patch.object(
+				frappe.db, "get_value", side_effect=lambda *a, **k: (reads.append(a), real(*a, **k))[1]
+			),
+		):
+			self.assertFalse(pump.request_cancel_conversation(conv, rid))
+		self.assertEqual(self._state(rid), "ready")
+		self.assertEqual(
+			reads,
+			[
+				(
+					TURN,
+					{"conversation": conv, "state": ["in", ("dispatching", "streaming")]},
+					["run_id", "version", "relay_target_id"],
+				)
+			],
+		)
+
+	def test_a_stop_for_another_run_is_left_alone(self):
+		rid = "pmp_stop_other"
+		conv, _amsg = self._ready(rid)
+		with self._no_wake():
+			self.assertFalse(pump.request_cancel_conversation(conv, "some-other-run"))
+			self.assertEqual(self._state(rid), "ready")
+			self.assertTrue(
+				pump.request_cancel_conversation(conv, f"{rid}-r1"), "the gateway key names it too"
+			)
+		self.assertEqual(self._state(rid), "cancelled")
+
+	def test_a_turn_the_pump_sends_meanwhile_is_flagged_instead(self):
+		"""``ready`` at the read, ``dispatching`` at the cancel: Stop reads again and flags
+		it for the cancel sweep, with or without the engine's snapshot check."""
+		sent = "UPDATE `tabJarvis Chat Turn` SET state='dispatching', version=version+1 WHERE name=%s"
+		for label, isolation in (("off", snapshot_isolation_off), ("on", snapshot_isolation_on)):
+			with self.subTest(snapshot_isolation=label):
+				rid = f"pmp_stop_race_{label}"
+				conv, amsg = self._ready(rid)
+				self._pubs.clear()
+				wrapper = self._once(
+					ts.cancel_preparing_or_ready,
+					lambda run_id, version: self._commit_elsewhere(sent, (run_id,)),
+				)
+				with (
+					self._no_wake(),
+					isolation(),
+					patch.object(ts, "cancel_preparing_or_ready", side_effect=wrapper),
+				):
+					self.assertTrue(pump.request_cancel_conversation(conv))
+				row = frappe.db.get_value(TURN, rid, ["state", "cancel_requested"], as_dict=True)
+				self.assertEqual((row.state, int(row.cancel_requested)), ("dispatching", 1))
+				self.assertEqual(int(frappe.db.get_value(MSG, amsg, "streaming")), 1, "the sweep ends it")
+				self.assertNotIn("run:end", self._pub_kinds())
+
+	def test_a_requeue_between_the_read_and_the_flag_is_cancelled(self):
+		"""Stop reads the first attempt ``streaming``; the requeue commits before its flag:
+		the lost CAS reads again and cancels the re-sent turn in ``ready``."""
+		requeue = (
+			"UPDATE `tabJarvis Chat Turn` SET state='ready', version=version+1, dispatch_payload=%s"
+			" WHERE name=%s"
+		)
+		for label, isolation in (("off", snapshot_isolation_off), ("on", snapshot_isolation_on)):
+			with self.subTest(snapshot_isolation=label):
+				rid = f"pmp_stop_rq_{label}"
+				conv, amsg = self._ready(rid, None, "streaming")
+				stored = self._stored(rid)
+				wrapper = self._once(
+					ts.request_cancel,
+					lambda run_id, version: self._commit_elsewhere(requeue, (stored, run_id)),
+				)
+				with self._no_wake(), isolation(), patch.object(ts, "request_cancel", side_effect=wrapper):
+					self.assertTrue(pump.request_cancel_conversation(conv))
+				self.assertEqual(self._state(rid), "cancelled", "Stop wins: the re-send never goes out")
+				self.assertEqual(int(frappe.db.get_value(MSG, amsg, "stopped")), 1)
+
+	def test_a_lost_cas_on_any_other_turn_is_not_tried_again(self):
+		rid = "pmp_stop_lost"
+		conv, _amsg = self._ready(rid, None, "streaming")
+		calls: list = []
+		bump = "UPDATE `tabJarvis Chat Turn` SET version=version+1 WHERE name=%s"
+		wrapper = self._once(
+			ts.request_cancel, lambda run_id, version: self._commit_elsewhere(bump, (run_id,))
+		)
+		with (
+			self._no_wake(),
+			snapshot_isolation_off(),
+			patch.object(ts, "request_cancel", side_effect=lambda *a: (calls.append(a), wrapper(*a))[1]),
+		):
+			self.assertFalse(pump.request_cancel_conversation(conv), "as before: the lost CAS is the answer")
+		self.assertEqual(len(calls), 1)
+
+	def test_a_failing_wake_still_ends_the_spinner(self):
+		rid = "pmp_stop_wakefail"
+		conv, _amsg = self._ready(rid)
+		with patch.object(pump, "ensure_pump", side_effect=RuntimeError("redis down")):
+			self.assertRaises(RuntimeError, pump.request_cancel_conversation, conv)
+		self.assertEqual(self._state(rid), "cancelled")
+		self.assertIn("run:end", self._pub_kinds(), "the run:end went out before the wake")
+
+	def test_stop_while_the_resend_waits_sends_nothing(self):
+		rid = "pmp_stop_pipe"
+		conv = self._mk_conv()
+		seed = self._human_msg(conv, "Reply with exactly one word: PONG")
+		self._mk_turn(conv, rid, seed, "queued", version=0, reserved=0)
+		double = self._double()
+		double.arm(pump.resent_gateway_key(rid), "success")
+		keys = self._record_sends(double)
+		ctx = self._make_ctx(
+			self._deps(double=double, prepare=self._prepare_stub(conv, double, "empty-reply"))
+		)
+
+		def requeued():
+			stored = json.loads(self._val(rid, "dispatch_payload") or "{}")
+			return self._state(rid) == "ready" and stored.get("redispatch") == 1
+
+		self._pump_until(ctx, requeued)
+		self.assertTrue(requeued(), "the empty reply put the turn back to ready")
+		with self._no_wake():
+			self.assertTrue(pump.request_cancel_conversation(conv, rid))
+		self._pump_until(ctx, lambda: False, max_slices=5)
+		self.assertEqual(keys, [rid], "the re-send never goes out")
+		self.assertEqual(self._state(rid), "cancelled")
+		self.assertTrue(any(p.get("kind") == "run:end" and p.get("stopped") for p in self._pubs))
+
+	def _row(self, rid):
+		return frappe.db.get_value(
+			TURN, rid, ["run_id", "relay_target_id", "assistant_message", "pump_epoch"], as_dict=True
+		)
+
+	def test_a_missing_owner_skips_only_the_publish(self):
+		rid = "pmp_stop_noowner"
+		self._ready(rid)
+		with patch("jarvis.chat.llm_switch.apply_if_active") as switch:
+			pump._finish_stop_before_dispatch("no-such-conversation", self._row(rid))
+		switch.assert_called_once()
+		self.assertNotIn("run:end", self._pub_kinds())
+
+	def test_a_failing_owner_read_skips_only_the_publish(self):
+		rid = "pmp_stop_ownerfail"
+		conv, _amsg = self._ready(rid)
+		row = self._row(rid)
+		with (
+			patch("jarvis.chat.llm_switch.apply_if_active") as switch,
+			patch.object(frappe.db, "get_value", side_effect=RuntimeError("db hiccup")),
+		):
+			pump._finish_stop_before_dispatch(conv, row)
+		switch.assert_called_once()
+		self.assertNotIn("run:end", self._pub_kinds())
+
+	@staticmethod
+	def _placeholder_fails(exc):
+		real = ts._run_cas
+
+		def run_cas(sql, params):
+			if f"`tab{MSG}`" in sql:
+				raise exc
+			return real(sql, params)
+
+		return patch.object(ts, "_run_cas", side_effect=run_cas)
+
+	def _cancel_row(self, rid):
+		return frappe.db.get_value(TURN, rid, ["run_id", "version", "assistant_message"], as_dict=True)
+
+	def test_a_failing_placeholder_update_is_logged_and_the_cancel_kept(self):
+		rid = "pmp_stop_phfail"
+		self._ready(rid)
+		with (
+			self._placeholder_fails(frappe.QueryTimeoutError("lock wait timeout")),
+			patch.object(frappe, "log_error") as log,
+		):
+			self.assertTrue(pump._cancel_ready_turn(self._cancel_row(rid)))
+		log.assert_called_once()
+		self.assertEqual(self._state(rid), "cancelled")
+
+	def test_a_write_conflict_on_the_placeholder_update_is_raised(self):
+		rid = "pmp_stop_phconflict"
+		self._ready(rid)
+		with (
+			self._placeholder_fails(frappe.QueryDeadlockError("1020 record has changed")),
+			patch.object(frappe, "log_error") as log,
+			self.assertRaises(frappe.QueryDeadlockError),
+		):
+			pump._cancel_ready_turn(self._cancel_row(rid))
+		log.assert_not_called()
+
+
+class TestStopRunOnAResentTurn(_EmptyReplyCase):
+	"""``stop_run``, the endpoint: a turn of this chat the empty-reply re-send put back is
+	stopped and the direct abort names its ``-r1`` run; any other turn as before."""
+
+	def _stop(self, conv, rid):
+		from jarvis.chat.turn_message_binding import clear_run_cancel
+
+		sess = MagicMock()
+
+		@contextmanager
+		def checkout(_url):
+			yield sess
+
+		try:
+			with (
+				patch.object(pump, "pump_lifecycle_configured", return_value=True),
+				patch.object(pump, "ensure_pump"),
+				patch.object(pump, "lpush_wake"),
+				patch("jarvis.chat.agent_session_pool.checkout", checkout),
+			):
+				out = chat_api.stop_run(conv, rid)
+		finally:
+			clear_run_cancel(conv)
+		self.assertTrue(out["ok"])
+		return sess
+
+	def test_a_resent_ready_turn_is_cancelled_and_its_r1_run_aborted(self):
+		rid = "pmp_sr_resent"
+		conv, _amsg = self._ready(rid)
+		sess = self._stop(conv, rid)
+		self.assertEqual(self._state(rid), "cancelled")
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", f"{rid}-r1")
+
+	def test_a_resent_streaming_turn_is_flagged_and_its_r1_run_aborted(self):
+		rid = "pmp_sr_streaming"
+		conv, _amsg = self._ready(rid, state="streaming")
+		sess = self._stop(conv, rid)
+		self.assertEqual(int(self._val(rid, "cancel_requested")), 1)
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", f"{rid}-r1")
+
+	def test_any_other_turn_is_left_and_aborted_by_its_run_id_as_before(self):
+		for resent in (None, MARKER_ONLY):
+			with self.subTest(resent=resent):
+				rid = f"pmp_sr_{resent or 'fresh'}"
+				conv, _amsg = self._ready(rid, resent)
+				sess = self._stop(conv, rid)
+				self.assertEqual(self._state(rid), "ready", "today's behaviour: the pump still sends it")
+				sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+	def test_with_the_resend_off_a_resent_turn_is_as_before(self):
+		rid = "pmp_sr_off"
+		conv, _amsg = self._ready(rid)
+		frappe.local.conf[empty_reply_recovery.SWITCH] = 0
+		sess = self._stop(conv, rid)
+		self.assertEqual(self._state(rid), "ready")
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)
+
+	def test_a_stop_for_another_run_leaves_it(self):
+		rid = "pmp_sr_other"
+		conv, _amsg = self._ready(rid)
+		self._stop(conv, "some-other-run")
+		self.assertEqual(self._state(rid), "ready")
+
+	def test_a_resent_run_of_another_chat_is_aborted_by_its_raw_id(self):
+		conv_a, _amsg = self._ready("pmp_sr_a", None, "done")
+		conv_b, _amsg = self._ready("pmp_sr_b")
+		sess = self._stop(conv_a, "pmp_sr_b")
+		sess.chat_abort.assert_called_once_with("sess-pmp_sr_a", "pmp_sr_b")
+		self.assertEqual(self._state("pmp_sr_b"), "ready", f"{conv_b} is not touched")
+
+	def test_a_failing_resent_read_aborts_by_the_raw_id(self):
+		rid = "pmp_sr_readfail"
+		conv, _amsg = self._ready(rid, state="streaming")
+		with patch.object(empty_reply_recovery, "resent_turn", side_effect=RuntimeError("db hiccup")):
+			sess = self._stop(conv, rid)
+		sess.chat_abort.assert_called_once_with(f"sess-{rid}", rid)

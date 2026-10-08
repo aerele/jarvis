@@ -95,6 +95,12 @@ def resent(raw) -> bool:
 	return bool(stored) and stored.get("redispatch_reason") == REASON
 
 
+def resent_turn(run_id: str, conversation: str | None = None) -> bool:
+	"""The Turn ``run_id`` (of ``conversation``, when given) was sent again for an empty reply."""
+	filters = {"name": run_id, "conversation": conversation} if conversation else run_id
+	return resent(frappe.db.get_value(TURN, filters, "dispatch_payload"))
+
+
 def resend_decision(
 	*,
 	kind: str,
