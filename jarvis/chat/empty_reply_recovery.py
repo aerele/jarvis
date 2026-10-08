@@ -16,6 +16,8 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 import frappe
+from frappe.query_builder import CustomFunction, Order
+from frappe.query_builder.functions import Count, IfNull
 
 from jarvis.chat import turn_state, txn
 from jarvis.chat.error_taxonomy import classify_error_text
@@ -48,6 +50,9 @@ BREAKER_WINDOW_S = 600
 BREAKER_ALERT = "jarvis.empty_reply.breaker_open"
 # The chat rule looks at the turn before this one only when it is this recent.
 CHAT_WINDOW_S = 24 * 3600
+
+_JSON_VALUE = CustomFunction("JSON_VALUE", ["col", "path"])
+_MARKER = "$.redispatch_reason"
 
 
 class Decision(NamedTuple):
@@ -92,11 +97,11 @@ def stored_dispatch(raw) -> dict | None:
 def resent_turn(run_id: str, conversation: str | None = None) -> bool:
 	"""The Turn ``run_id`` (of ``conversation``, when given) was sent again for an empty reply.
 	Reads the marker key only, not the whole payload."""
-	rows = frappe.db.sql(
-		"""SELECT JSON_VALUE(dispatch_payload, '$.redispatch_reason') FROM `tabJarvis Chat Turn`
-		WHERE name=%(r)s AND (%(c)s IS NULL OR conversation=%(c)s)""",
-		{"r": run_id, "c": conversation or None},
-	)
+	t = frappe.qb.DocType(TURN)
+	query = frappe.qb.from_(t).select(_JSON_VALUE(t.dispatch_payload, _MARKER)).where(t.name == run_id)
+	if conversation:
+		query = query.where(t.conversation == conversation)
+	rows = query.run()
 	return bool(rows) and rows[0][0] == REASON
 
 
@@ -192,19 +197,22 @@ def _breaker_open(target: str) -> bool:
 def _breaker_count(target: str, since) -> int:
 	"""Reads the payloads only when enough rows of the window have an empty-reply error;
 	a count below ``BREAKER_FAILURES`` can include turns not sent again."""
-	rows = frappe.db.sql(
-		"""SELECT name, error FROM `tabJarvis Chat Turn`
-		WHERE state='errored' AND relay_target_id=%(t)s AND finalizing_at > %(since)s""",
-		{"t": target, "since": since},
+	t = frappe.qb.DocType(TURN)
+	rows = (
+		frappe.qb.from_(t)
+		.select(t.name, t.error)
+		.where((t.state == "errored") & (t.relay_target_id == target) & (t.finalizing_at > since))
+		.run()
 	)
 	names = [name for name, error in rows if classify_error_text(error) in EMPTY_REPLY_CODES]
 	if len(names) < BREAKER_FAILURES:
 		return len(names)
-	return frappe.db.sql(
-		"""SELECT COUNT(*) FROM `tabJarvis Chat Turn`
-		WHERE name IN %(names)s AND JSON_VALUE(dispatch_payload, '$.redispatch_reason')=%(reason)s""",
-		{"names": tuple(names), "reason": REASON},
-	)[0][0]
+	return (
+		frappe.qb.from_(t)
+		.select(Count("*"))
+		.where(t.name.isin(tuple(names)) & (_JSON_VALUE(t.dispatch_payload, _MARKER) == REASON))
+		.run()[0][0]
+	)
 
 
 def _alert_breaker(target: str, count: int, since) -> None:
@@ -258,12 +266,15 @@ def _tool_after(conversation: str, assistant_message: str | None) -> str | None:
 	"""A tool row written after this turn's reply placeholder, except the memory hook's
 	recall (written with no call id). No placeholder: every tool row counts."""
 	seq = frappe.db.get_value(MSG, assistant_message, "seq") if assistant_message else None
-	rows = frappe.db.sql(
-		"""SELECT IFNULL(tool_name, '') FROM `tabJarvis Chat Message`
-		WHERE conversation=%(c)s AND role='tool' AND seq > %(s)s
-		  AND NOT (IFNULL(tool_name, '')='recall' AND tool_call_id IS NULL)
-		LIMIT 1""",
-		{"c": conversation, "s": seq or 0},
+	m = frappe.qb.DocType(MSG)
+	tool = IfNull(m.tool_name, "")
+	rows = (
+		frappe.qb.from_(m)
+		.select(tool)
+		.where((m.conversation == conversation) & (m.role == "tool") & (m.seq > (seq or 0)))
+		.where(~((tool == "recall") & m.tool_call_id.isnull()))
+		.limit(1)
+		.run()
 	)
 	return (rows[0][0] or "unknown") if rows else None
 
@@ -271,10 +282,12 @@ def _tool_after(conversation: str, assistant_message: str | None) -> str | None:
 def _retried(conversation: str, run_id: str, seed: str) -> bool:
 	"""Another attempt at this user message has not finished, or one ended with the
 	plain empty reply (once per user message)."""
-	rows = frappe.db.sql(
-		"""SELECT state, error FROM `tabJarvis Chat Turn`
-		WHERE conversation=%(c)s AND seed_message=%(s)s AND name != %(r)s""",
-		{"c": conversation, "s": seed, "r": run_id},
+	t = frappe.qb.DocType(TURN)
+	rows = (
+		frappe.qb.from_(t)
+		.select(t.state, t.error)
+		.where((t.conversation == conversation) & (t.seed_message == seed) & (t.name != run_id))
+		.run()
 	)
 	return any(
 		state in turn_state.NONTERMINAL_STATES or (state == "errored" and variant(error) == "plain")
@@ -286,12 +299,16 @@ def _chat_failing(conversation: str, run_id: str, created) -> bool:
 	"""The last finished turn before this one in the chat, in the last ``CHAT_WINDOW_S``,
 	ended with an empty reply: the chat fails every time, so each message is not sent twice."""
 	since = frappe.utils.add_to_date(None, seconds=-CHAT_WINDOW_S)
-	rows = frappe.db.sql(
-		"""SELECT error FROM `tabJarvis Chat Turn`
-		WHERE conversation=%(c)s AND name != %(r)s AND creation < %(at)s AND creation > %(since)s
-		  AND state IN ('done', 'errored', 'cancelled')
-		ORDER BY creation DESC LIMIT 1""",
-		{"c": conversation, "r": run_id, "at": created, "since": since},
+	t = frappe.qb.DocType(TURN)
+	rows = (
+		frappe.qb.from_(t)
+		.select(t.error)
+		.where((t.conversation == conversation) & (t.name != run_id))
+		.where((t.creation < created) & (t.creation > since))
+		.where(t.state.isin(("done", "errored", "cancelled")))
+		.orderby(t.creation, order=Order.desc)
+		.limit(1)
+		.run()
 	)
 	return bool(rows) and classify_error_text(rows[0][0]) in EMPTY_REPLY_CODES
 
