@@ -5086,6 +5086,14 @@ onMounted(() => {
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
 const groundNextTurn = ref(false);
+const groundSelectionVersion = ref(0);
+watch(
+	groundNextTurn,
+	() => {
+		groundSelectionVersion.value++;
+	},
+	{ flush: "sync" }
+);
 // Per-chat auto mode (#581). `convAutoMode` mirrors the server's flag for the
 // shown chat (get_conversation, or the send response); `autoModeArmed` is the
 // local pre-send choice, pre-armed from the account default on an empty chat and
@@ -9158,6 +9166,7 @@ async function decideFileboxWait(item, text, approve) {
 	if (id && currentId.value === id) loadConversation(id).catch(() => {});
 }
 async function loadConversation(id) {
+	_recoveryRefreshEpoch++;
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
 	// the message array is swapped, restored after the re-render.
 	const _sameConv = _shownConvId === id;
@@ -9840,7 +9849,102 @@ function resendFailed(m) {
 	return send({ retryBubble: m }, m.voiceAck || null);
 }
 
-function settleRecoveredSend(m, r) {
+let _recoveryRefreshEpoch = 0;
+
+function consumeRecoveredContext(request, scope) {
+	if (!request) return;
+	if (request.prefillRevision === _prefillSendRevision) _prefillSendContext = null;
+	if (
+		_currentScope() === scope &&
+		request.groundWiki &&
+		request.groundRevision === groundSelectionVersion.value
+	)
+		groundNextTurn.value = false;
+}
+
+async function refreshRecoveredSend(m, r) {
+	const id = r.conversation_id;
+	if (!id || currentId.value !== id || sending.value || waiting.value) return;
+	const epoch = ++_recoveryRefreshEpoch;
+	const snapshot = () =>
+		JSON.stringify([
+			messages.value,
+			currentRunId.value,
+			currentMsgId.value,
+			stoppedRunId.value,
+			sending.value,
+			waiting.value,
+		]);
+	const before = snapshot();
+	try {
+		const data = await api.getConversation(id);
+		if (currentId.value !== id || epoch !== _recoveryRefreshEpoch || before !== snapshot())
+			return;
+		if (!Array.isArray(data?.messages)) return;
+		// Only a fresh read can restore run controls; a receipt's run/queue state
+		// describes the past. No navigation or composer/preferences reload here.
+		messages.value = injectPendingBubbles(data.messages, _pendingSends.peek(id));
+		const live = [...data.messages]
+			.reverse()
+			.find((row) => row.role === "assistant" && row.streaming);
+		const age = live?.modified
+			? Date.now() - Date.parse(live.modified.replace(" ", "T"))
+			: Infinity;
+		if (
+			live?.run_id === r.run_id &&
+			r.run_id &&
+			stoppedRunId.value !== r.run_id &&
+			(!currentRunId.value || currentRunId.value === r.run_id) &&
+			!live.recovering &&
+			!RUN_ENDED_STATES.has(live.turn_state) &&
+			age >= 0 &&
+			age < 5 * 60 * 1000
+		) {
+			currentRunId.value = live.run_id;
+			currentMsgId.value = live.name;
+			sending.value = true;
+			waiting.value = !(live.content || "").trim();
+			store.streamingConvId = id;
+			const started = Date.parse(String(live.creation || "").replace(" ", "T"));
+			if (
+				Number.isFinite(started) &&
+				Date.now() - started >= 0 &&
+				Date.now() - started < 30 * 60 * 1000
+			) {
+				runStartMs.value = started;
+				nowMs.value = Date.now();
+			}
+			const { candidate, answer } = splitNarration(live.content || "", { ended: false });
+			liveCandidate.value = {
+				runId: live.run_id,
+				msgId: live.name,
+				text: candidate,
+				full: live.content || "",
+			};
+			live.content = answer;
+			liveSteps.value = {
+				runId: live.run_id,
+				msgId: live.name,
+				steps: stepsFromTexts(live.live_steps, live.live_step_times),
+			};
+			if (live.pump_epoch != null)
+				pumpFenceAccept(
+					{
+						run_id: live.run_id,
+						pump_epoch: live.pump_epoch,
+						event_seq: live.last_event_seq,
+					},
+					false
+				);
+		}
+	} catch {
+		// Delivery stays authoritative even when refreshing the transcript fails.
+		m.deliveryNote +=
+			" The conversation could not be refreshed. Open it to see the latest result.";
+	}
+}
+
+async function settleRecoveredSend(m, r) {
 	if (m.deliveryDismissed || ["delivered", "rejected"].includes(m.deliveryState)) return;
 	const scope = _pendingSends.scopeOf(m);
 	if (scope == null) return;
@@ -9850,7 +9954,9 @@ function settleRecoveredSend(m, r) {
 		m.deliveryNote = r.message || r.reason || "The request was not sent.";
 		return;
 	}
+	consumeRecoveredContext(m.sendRequest, scope);
 	voiceStore?.acknowledge(m.voiceAck || []);
+	for (const id of m.failedVoiceIds || []) voiceStore?.markSentWithout(id);
 	m.deliveryState = "delivered";
 	m.failed = false;
 	m.deliveryConversation = r.conversation_id;
@@ -9863,6 +9969,7 @@ function settleRecoveredSend(m, r) {
 	// A receipt is historical evidence. It must not move the current draft,
 	// change run state or gates, restore old picks, or revive a queue chip.
 	store.loadConversations();
+	await refreshRecoveredSend(m, r);
 }
 
 async function recoverSend(m, retrySame = false) {
@@ -9887,15 +9994,17 @@ async function recoverSend(m, retrySame = false) {
 			},
 			retrySame ? 30000 : 15000
 		);
-		if (m.sendRequest.requestId === id) settleRecoveredSend(m, r);
-	} catch {
+		if (m.sendRequest.requestId === id) await settleRecoveredSend(m, r);
+	} catch (error) {
 		if (
 			!m.deliveryDismissed &&
 			m.deliveryReadEpoch === epoch &&
 			m.sendRequest.requestId === id &&
 			m.deliveryState === "checking"
-		)
+		) {
 			m.deliveryState = "uncertain";
+			if (error?.deliveryUncertain) m.deliveryNote = error.message;
+		}
 	} finally {
 		if (m.sendRequest.requestId === id && m.deliveryReadEpoch === epoch)
 			m.deliveryBusy = false;
@@ -9925,7 +10034,9 @@ async function dismissUncertain(m) {
 // One-shot viewing context from a "Discuss in chat" hand-off (chatPrefill's
 // optional `context`, e.g. a dashboard): consumed by the first send below.
 let _prefillSendContext = null;
+let _prefillSendRevision = 0;
 async function send(textArg, resendAck) {
+	_recoveryRefreshEpoch++;
 	// Restoration must choose the destination before a send captures its conversation scope.
 	if (booting.value) return;
 	dismissFeedback(); // sending the next turn clears any pending feedback line
@@ -10137,6 +10248,8 @@ async function send(textArg, resendAck) {
 					autoMode: _sendAutoMode,
 					// Local provenance: consume only the one-shot context this request owned.
 					prefillContext: _prefillSendContext,
+					prefillRevision: _prefillSendRevision,
+					groundRevision: groundSelectionVersion.value,
 					groundWiki,
 				})
 		  );
@@ -10155,6 +10268,7 @@ async function send(textArg, resendAck) {
 		// resend of this very bubble releases the SAME recordings this send would have (R2-1).
 		// Omitted when there is no dictated audio to release.
 		voiceAck: _voiceAck && _voiceAck.length ? _voiceAck : undefined,
+		failedVoiceIds: [..._failedAtSend],
 		sendRequest,
 		deliveryState: undefined,
 	});
@@ -10212,7 +10326,7 @@ async function send(textArg, resendAck) {
 			}
 		});
 		if (expired) {
-			settleRecoveredSend(_optBubble, r);
+			await settleRecoveredSend(_optBubble, r);
 			return;
 		}
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
@@ -10324,13 +10438,7 @@ async function send(textArg, resendAck) {
 		// returns before reaching this line, and a thrown send never reaches it either
 		// (see the catch block below) — so a retry after either failure still carries
 		// the same prefill context instead of silently sending without it.
-		if (JSON.stringify(_prefillSendContext) === JSON.stringify(sendRequest.prefillContext)) {
-			// Prefill is view-wide: consume it even if the user has switched chats.
-			// Wiki selection belongs to the current chat, so keep its scope guard.
-			if (_currentScope() === _sentScope && groundWiki && sendRequest.groundWiki)
-				groundNextTurn.value = false;
-			_prefillSendContext = null;
-		}
+		consumeRecoveredContext(sendRequest, _sentScope);
 		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
 		// the recordings this send captured (audio + leave guard). Payload-bound, so a same-scope
 		// recording that committed while this POST was in flight is NOT released, and a
@@ -10358,7 +10466,7 @@ async function send(textArg, resendAck) {
 			} catch {
 				// Transcript refresh failure cannot undo an authoritative confirmation.
 				_pendingSends.add(_sentScope, _optBubble);
-				settleRecoveredSend(_optBubble, r);
+				await settleRecoveredSend(_optBubble, r);
 				if (
 					_currentScope() === _sentScope &&
 					!messages.value.some((m) => m.name === tmpName)
@@ -10448,6 +10556,7 @@ async function send(textArg, resendAck) {
 		}
 	} catch (e) {
 		if (expired) {
+			if (e?.deliveryUncertain) _optBubble.deliveryNote = e.message;
 			markUncertain();
 			return;
 		}
@@ -10458,12 +10567,18 @@ async function send(textArg, resendAck) {
 		// and show it now if the origin is still on screen.
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
+		if (e?.deliveryUncertain) _optBubble.deliveryNote = e.message;
 		_pendingSends.add(_sentScope, _optBubble);
 		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
 			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
-		notify("Delivery not confirmed. Check delivery before sending again.", { type: "info" });
+		notify(
+			e?.deliveryUncertain
+				? e.message
+				: "Delivery not confirmed. Check delivery before sending again.",
+			{ type: "info" }
+		);
 	}
 }
 
@@ -10479,6 +10594,7 @@ function openProactive() {
 	proactiveToast.value = null;
 }
 function onEvent(p) {
+	_recoveryRefreshEpoch++;
 	// Auto-generated title arrives async (worker titles the chat after the
 	// first real turn). Handle it before the current-conversation guard so the
 	// sidebar updates even if the user has since switched chats.
@@ -12733,6 +12849,7 @@ onMounted(async () => {
 	// path).
 	if (applyPrefill) {
 		input.value = prefill.text;
+		_prefillSendRevision++;
 		_prefillSendContext = prefill.context || null; // rides send()'s context arg
 		await nextTick();
 		if (prefill.autoSend) await send();

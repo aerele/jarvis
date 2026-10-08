@@ -102,3 +102,15 @@ test("rejection copy uses readable gate messages and preserves the usage window"
 	assert.doesNotMatch(recoveryCopy(r).detail, /usage_limit/);
 	assert.match(recoveryCopy(r).detail, /preserved/);
 });
+
+test("interrupted diagnostic stays uncertain with preserved payload and safe same-ID retry", () => {
+	const state = { requests: [] },
+		recovery = createSendRecovery(state, () => "id");
+	const request = recovery.stage("A", "private draft", []);
+	recovery.settle(request, { delivery: "unknown", receipt_status: "interrupted" });
+	assert.equal(request.state, "uncertain");
+	assert.match(recoveryCopy(request).detail, /Some actions may have completed/);
+	assert.equal(recovery.retry(request, true), true);
+	assert.equal(request.id, "id");
+	assert.equal(request.text, "private draft");
+});

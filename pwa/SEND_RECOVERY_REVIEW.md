@@ -64,3 +64,75 @@ Browser evidence: Chrome at 390px on `http://jarvis-review.test`, `isSecureConte
 - The broader local API/voice/typed suite ran 134 cases with 28 failures/errors. Re-running with the unchanged PR API loaded in memory produced the identical 28 cases. The local site has stale schema (`Jarvis Message.steps` missing) and send-gate fixture issues; this is not a passing broader integration run. Clean-runner CI remains the integration check.
 
 Deployment still requires migration before updated assets, retaining receipt rows during rollback. Pending claims can remain unknown after a crash; the guarantee is at-most-one dispatch per ID, not exactly-once remote business effects. Database restoration or manual receipt deletion can invalidate it.
+
+## Follow-up architecture and plan-check (2026-10-08)
+
+Scope: reviewer comment 6038948409. T3 because a mistaken rejection/replay can
+repeat consequential actions. Keep receipt claims as the dispatch fence. Do not
+expire/reclaim pending claims or infer delivery from matching message text.
+
+Use additive fixed-code receipt diagnostics (`missing`, `pending`, `interrupted`,
+`unavailable`). An observed exception after the effect boundary rolls back only
+uncommitted work and records an unresolved outcome under the existing claim;
+it must never become a retryable rejection. A hard process crash cannot prove an
+outcome: report that absence of final evidence explicitly and retain the fence.
+Never persist raw exception messages, including pre-effect ValidationErrors.
+
+For desktop acceptance recovery, fetch current transcript separately from the
+navigation/reload handler. Preserve drafts, choices, navigation, newer sends and
+stopped/live runs. Fresh streaming metadata may restore Stop only for the same
+accepted run when no newer work/event intervened. Consume only the original
+one-shot context, using selection identity/revision rather than value equality.
+Do not apply stale receipt queue positions or availability gates.
+
+Plan-check: correctness/security/concurrency require real receipt rollback,
+repeat-request and wipe checks. Edge/API/resilience require old unknown envelopes,
+missing claims, pending crashes, interrupted outcomes and refresh failure. UI
+checks require late success, same-ID acceptance, navigation/new send during refresh,
+newer context and stopped-run preservation. Operability uses fixed explanatory
+copy plus request identity; no model or business-result inference. No schema change.
+Ready for scoped implementation; actual remote effects remain outside local tests.
+
+
+### Follow-up implementation and verification
+
+- Remaining #3 / crash diagnostics: distinguish missing claims, pending claims,
+  observed interrupted execution and erased receipts. Exceptions after possible
+  effects preserve the claim and record only a fixed interrupted marker after
+  rolling back uncommitted work. Same-ID retries cannot dispatch again. Hard
+  crashes still cannot be called rejected without evidence; copy says this
+  explicitly instead of implying that another check will necessarily settle it.
+- Exception privacy: pre-effect refusals use fixed copy even on the initial
+  response. The macro-run refusal retains an actionable, controlled explanation.
+- Late acceptance: both original late replies and same-ID recovery consume only
+  their own context revision and voice provenance. A newer same-valued selection
+  is a different revision and survives.
+- Transcript/live controls: a separate read refreshes the currently viewed chat.
+  Fresh same-run streaming metadata can restore run/message IDs, Stop state,
+  steps/narration and event fences. Receipt queue positions/gates are never
+  applied. Active work, navigation, new sends, realtime events and changed state
+  invalidate/skip the refresh; drafts, files, preferences and stopped runs survive.
+  Refresh failure cannot downgrade a confirmed outcome.
+
+Review-loop (single-agent): correctness and concurrency checked with actual
+handler execution plus real receipt transactions; security with fixed copy,
+permission paths and wipe fences; performance with one read per recovered result
+and no polling loop; edge cases with old envelopes, stale responses, failures and
+new selections; API changes are additive with no schema migration; resilience
+retains positive outcomes and duplicate protection; operability distinguishes
+uncertain causes. No further substantiated defect in this scoped follow-up.
+
+Wear-the-coat (same operations-user persona): coverage improves explanation,
+same-request recovery and seeing accepted work; the unavoidable gap is an outcome
+that cannot be proven after a crash; persistent cross-tab recovery remains optional
+future work; failure/recovery preserves newer work, audio and positive receipts.
+Existing status announcements/buttons render the fixed copy as text. A mounted
+Message test clicks same-ID retry and verifies escaping. No new full-browser,
+physical-device or live ERP-effect test was run for this follow-up.
+
+Validation: 37 real database tests pass with snapshot isolation ON and OFF on
+MariaDB 11.4.12; 1,114 desktop Node tests, 127 PWA Node tests and 56 focused mounted
+Vue tests pass. Desktop and PWA production builds pass (existing desktop chunk-size
+warning remains). Scoped hooks pass. These results do not establish actual MariaDB
+11.6/PostgreSQL behavior or live remote effects. Follow-up patch does not reclaim
+unknown claims, so it does not weaken the at-most-one-dispatch contract.

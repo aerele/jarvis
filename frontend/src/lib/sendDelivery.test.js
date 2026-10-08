@@ -66,3 +66,17 @@ test("a deadline exposes recovery but preserves late authoritative success", asy
 	resolve(result);
 	assert.equal(await completion, result);
 });
+
+test("uncertain diagnostics remain errors and never expose arbitrary server text", () => {
+	for (const status of ["missing", "pending", "interrupted", "unavailable"]) {
+		assert.throws(
+			() =>
+				settledSendResult({
+					delivery: "unknown",
+					receipt_status: status,
+					message: "PRIVATE",
+				}),
+			(error) => error.deliveryUncertain && !error.message.includes("PRIVATE")
+		);
+	}
+});

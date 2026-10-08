@@ -22,9 +22,26 @@ export async function observeDelivery(promise, onTimeout, timeout = 30000) {
 	}
 }
 
+// Fixed vocabulary: server/transport exception text never becomes recovery copy.
+export function deliveryDiagnostic(status) {
+	return (
+		{
+			missing: "No delivery receipt was found. Retry the same request to submit it safely.",
+			pending:
+				"The server received this request but has no final outcome. It may still be working or may have stopped unexpectedly. Check the conversation before sending a new request; retrying this same request will not dispatch it twice.",
+			interrupted:
+				"Processing was interrupted after work may have started. Some actions may have completed. Check the conversation and action receipts before sending a new request; retrying this same request will not repeat the work.",
+			unavailable:
+				"The delivery receipt is no longer available. Check the conversation before sending a new request.",
+		}[status] || "Delivery not confirmed. Check delivery before sending again."
+	);
+}
+
 export function settledSendResult(envelope) {
 	if (deliveryOutcome(envelope) !== "uncertain") return envelope.result;
-	throw new Error("Delivery not confirmed. Check delivery before sending again.");
+	const error = new Error(deliveryDiagnostic(envelope?.receipt_status));
+	error.deliveryUncertain = true;
+	throw error;
 }
 
 export async function boundedDelivery(promise, timeout = 30000) {

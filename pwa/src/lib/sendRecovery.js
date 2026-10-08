@@ -1,5 +1,9 @@
 // Relative shared import also supports the unbundled node --test suite (no Vite aliases).
-import { newSendRequestId, deliveryOutcome } from "../../../frontend/src/lib/sendDelivery.js";
+import {
+	newSendRequestId,
+	deliveryOutcome,
+	deliveryDiagnostic,
+} from "../../../frontend/src/lib/sendDelivery.js";
 import { sendRejectionCopy } from "../../../frontend/src/lib/sendRejectionCopy.js";
 
 // Request state is independent of the view and transcript. The caller makes
@@ -29,6 +33,7 @@ export function createSendRecovery(state, id = newSendRequestId) {
 				return request.state;
 			request.state = deliveryOutcome(envelope);
 			request.result = result;
+			request.receiptStatus = envelope?.receipt_status;
 			return request.state;
 		},
 		retry(request, sameId = false) {
@@ -79,7 +84,9 @@ export function recoveryCopy(request, agentName = "Jarvis") {
 	if (request.state === "uncertain")
 		return {
 			title: "Delivery not confirmed",
-			detail: `${agentName} may already be working. Check delivery or retry the same request safely. Your message and files are preserved in this tab.`,
+			detail: request.receiptStatus
+				? deliveryDiagnostic(request.receiptStatus)
+				: `${agentName} may already be working. Check delivery or retry the same request safely. Your message and files are preserved in this tab.`,
 		};
 	if (request.result?.reason === "maintenance")
 		return {

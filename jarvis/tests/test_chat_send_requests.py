@@ -72,25 +72,26 @@ class TestChatSendRequests(unittest.TestCase):
 
 	def test_failure_after_dispatch_survives_rollback_and_does_not_replay(self):
 		self.dispatch.side_effect = RuntimeError("effect may have happened")
-		with self.assertRaises(RuntimeError):
-			self.send()
+		result = self.send()
+		self.assertEqual(result["receipt_status"], "interrupted")
 		frappe.db.rollback()
-		self.assertEqual(self.send(), {"delivery": "unknown"})
+		self.assertEqual(self.send()["delivery"], "unknown")
 		self.dispatch.assert_called_once()
 
 	def test_result_rollback_keeps_durable_pending_claim(self):
 		self.send()
 		frappe.db.rollback()
-		self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
-		self.assertEqual(self.send(), {"delivery": "unknown"})
+		self.assertEqual(receipts.check_delivery(self.request_id)["receipt_status"], "pending")
+		self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
+		self.assertEqual(self.send()["delivery"], "unknown")
 		self.dispatch.assert_called_once()
 
 	def test_unknown_and_changed_user_cannot_read_or_replay_original_receipt(self):
-		self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
+		self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
 		self.send()
 		frappe.db.commit()
 		frappe.set_user("Guest")  # access mocked here: prove independent user keying
-		self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
+		self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
 		frappe.set_user(self.user)
 		self.owned.side_effect = frappe.PermissionError()
 		with self.assertRaises(frappe.PermissionError):
@@ -113,8 +114,8 @@ class TestChatSendRequests(unittest.TestCase):
 		self.send()
 		frappe.db.commit()
 		self.owned.side_effect = frappe.DoesNotExistError()
-		self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
-		self.assertEqual(self.send(), {"delivery": "unknown"})
+		self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
+		self.assertEqual(self.send()["delivery"], "unknown")
 		self.dispatch.assert_called_once()
 
 	def test_typed_partial_confirmation_is_settled_without_storing_business_results(self):
@@ -164,8 +165,8 @@ class TestChatSendRequests(unittest.TestCase):
 		thread.start()
 		try:
 			self.assertTrue(entered.wait(10))
-			self.assertEqual(self.send(), {"delivery": "unknown"})
-			self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
+			self.assertEqual(self.send()["delivery"], "unknown")
+			self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
 			frappe.db.commit()  # release duplicate's short read lock
 		finally:
 			release.set()
@@ -187,14 +188,14 @@ class TestChatSendRequests(unittest.TestCase):
 			with self.assertRaises(ConnectionError):
 				self.send()
 		frappe.db.rollback()
-		self.assertEqual(self.send(), {"delivery": "unknown"})
+		self.assertEqual(self.send()["delivery"], "unknown")
 		self.dispatch.assert_not_called()
 
 	def test_missing_receipt_schema_fails_closed_before_dispatch(self):
 		with patch.object(receipts, "_read", side_effect=RuntimeError("schema unavailable")):
 			with self.assertRaises(RuntimeError):
 				self.send()
-			self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
+			self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
 		self.dispatch.assert_not_called()
 
 	def test_simultaneous_missing_claims_use_unique_insert_without_gap_locks(self):
@@ -248,7 +249,7 @@ class TestChatSendRequests(unittest.TestCase):
 		result = self.send()
 		self.assertEqual(result["delivery"], "settled")
 		self.assertFalse(result["result"]["ok"])
-		self.assertIn("macro run", result["result"]["message"])
+		self.assertNotIn("macro run", result["result"]["message"])
 		frappe.db.commit()
 		self.assertFalse(receipts.check_delivery(self.request_id)["result"]["ok"])
 		self.send()
@@ -310,9 +311,63 @@ class TestChatSendRequests(unittest.TestCase):
 			raise frappe.ValidationError("too late to prove no effect")
 
 		self.dispatch.side_effect = uncertain
-		with self.assertRaises(frappe.ValidationError):
-			self.send()
-		frappe.db.rollback()
-		self.assertEqual(receipts.check_delivery(self.request_id), {"delivery": "unknown"})
+		result = self.send()
+		self.assertEqual(result["receipt_status"], "interrupted")
+		frappe.db.commit()
+		self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
 		self.send()
 		self.dispatch.assert_called_once()
+
+	def test_diagnostics_distinguish_missing_pending_and_interrupted_without_replay(self):
+		self.assertEqual(receipts.check_delivery(self.request_id)["receipt_status"], "missing")
+
+		def crash(**kwargs):
+			raise RuntimeError("private invoice and credentials")
+
+		self.dispatch.side_effect = crash
+		result = self.send()
+		self.assertEqual(result, {"delivery": "unknown", "receipt_status": "interrupted"})
+		frappe.db.commit()
+		self.assertEqual(receipts.check_delivery(self.request_id), result)
+		self.assertEqual(self.send(), result)
+		self.dispatch.assert_called_once()
+		self.assertNotIn("private", receipts._read(self.keys[0]).result_json)
+		receipts.erase_receipts()
+		frappe.db.commit()
+		self.assertEqual(receipts.check_delivery(self.request_id)["receipt_status"], "unavailable")
+
+	def test_pre_effect_exception_text_is_never_returned_or_persisted(self):
+		def refuse(**kwargs):
+			frappe.flags.jarvis_send_receipt_guard["safe"] = True
+			raise frappe.ValidationError("private business record")
+
+		self.dispatch.side_effect = refuse
+		r = self.send()
+		frappe.db.commit()
+		self.assertNotIn("private", json.dumps(r))
+		self.assertNotIn("private", receipts._read(self.keys[0]).result_json)
+		self.assertEqual(receipts.check_delivery(self.request_id)["result"], r["result"])
+
+	def test_interrupted_diagnostic_rolls_back_uncommitted_work_and_respects_wipe(self):
+		def partial(**kwargs):
+			frappe.db.set_value(
+				receipts.DOCTYPE, receipts._key(self.request_id), "conversation", "UNCOMMITTED"
+			)
+			raise RuntimeError("partial work")
+
+		self.dispatch.side_effect = partial
+		self.send()
+		frappe.db.commit()
+		self.assertEqual(receipts._read(self.keys[0]).conversation, "A")
+		# A reset that commits while work is in flight must not be resurrected.
+		self.request_id = uuid.uuid4().hex
+
+		def wiped(**kwargs):
+			receipts.erase_receipts()
+			frappe.db.commit()
+			raise RuntimeError("interrupted after reset")
+
+		self.dispatch.side_effect = wiped
+		self.assertEqual(self.send()["receipt_status"], "unavailable")
+		frappe.db.commit()
+		self.assertFalse(receipts._read(self.keys[-1]).result_json)

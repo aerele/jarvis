@@ -934,7 +934,7 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 	// "// Send accepted" comment (a workersWarnNotice self-heal block now sits
 	// between the two), so anchor on that sibling `if` instead of the comment.
 	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\tif (r && r.ok !== false) {");
-	const clearIdx = sendSrc.indexOf("_prefillSendContext = null;");
+	const clearIdx = sendSrc.indexOf("consumeRecoveredContext(sendRequest, _sentScope);");
 	assert.ok(
 		awaitIdx > -1 && rejectBlockCloseIdx > -1 && clearIdx > -1,
 		"all three anchors are present in send()"

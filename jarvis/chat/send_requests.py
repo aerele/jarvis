@@ -51,8 +51,13 @@ def _read(key, *, for_update=False):
 
 
 def _public(receipt):
-	if not receipt or receipt.state != "settled":
-		return {"delivery": "unknown"}
+	if not receipt:
+		return {"delivery": "unknown", "receipt_status": "missing"}
+	if receipt.state != "settled":
+		status = "pending" if receipt.state == "pending" else "unavailable"
+		if receipt.state == "pending" and receipt.result_json:
+			status = "interrupted"
+		return {"delivery": "unknown", "receipt_status": status}
 	result = json.loads(receipt.result_json)
 	if conversation := result.get("conversation_id") or receipt.conversation:
 		from jarvis.chat.api import _get_owned_conversation
@@ -207,16 +212,26 @@ def send_message(
 	try:
 		try:
 			result = api.send_message(**args)
-		except Exception as exc:
+		except Exception:
 			if not guard["safe"]:
-				raise
+				# Effects may already exist outside this transaction. Keep the durable
+				# claim, discard only uncommitted work, and expose a fixed diagnostic.
+				# Returning normally lets Frappe commit this metadata, not partial work.
+				frappe.db.rollback()
+				table = frappe.qb.DocType(DOCTYPE)
+				(
+					frappe.qb.update(table)
+					.set(table.result_json, json.dumps({"interrupted": True}))
+					.where((table.name == key) & (table.state == "pending"))
+				).run()
+				return _public(_read(key))
 			frappe.db.rollback()
 			result = {
 				"ok": False,
 				"reason": guard.get("reason") or "send_refused",
-				"message": str(exc)
-				if isinstance(exc, frappe.ValidationError)
-				else "The request was not sent. Please try again.",
+				"message": "This is a macro run. Start a new chat to send a message."
+				if guard.get("reason") == "macro_run"
+				else "The request was not sent. Review the message and try again.",
 			}
 		_settle(key, result)
 		return {"delivery": "settled", "result": result}

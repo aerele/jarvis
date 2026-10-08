@@ -23,3 +23,19 @@ it("announces the pending read and disables repeated checks", () => {
 	).toBeDefined();
 	w.unmount();
 });
+
+it("renders interrupted-delivery guidance as text and retains safe recovery controls", async () => {
+	const note =
+		"Processing was interrupted after work may have started. Check action receipts. <script>unsafe</script>";
+	const w = mount(Message, {
+		props: { text: "Invoice", failed: true, deliveryState: "uncertain", deliveryNote: note },
+	});
+	expect(w.text()).toContain(note);
+	expect(w.find("script").exists()).toBe(false);
+	await w
+		.findAll("button")
+		.find((b) => b.text() === "Retry same request")
+		.trigger("click");
+	expect(w.emitted("retry-same")).toHaveLength(1);
+	w.unmount();
+});
