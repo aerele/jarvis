@@ -135,9 +135,10 @@ def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
 	``names`` are rows a macro step tags: each is judged, enabled or not (its author
 	can enable it again). ``slugs`` are names the agent may fetch: each is judged by
 	the row ``get_skill`` would serve ``user`` for it (``served_row``), so the
-	``custom-`` wire name and any case count, ``user``'s own row of that name wins as
-	it does there, and a System Manager, who may read every skill, is judged on the
-	row they would be served and not on whether it was shared with them."""
+	``custom-`` wire name and any case count, a reviewed Role/Org row of that name
+	comes before ``user``'s own as it does there, and a System Manager, who may read
+	every skill, is judged on the row they would be served and not on whether it was
+	shared with them."""
 	found = set()
 	names = [n for n in names or () if n]
 	if names:

@@ -1096,6 +1096,7 @@ def assemble_prompt(
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name it in the system context so the agent activates it
 	# deterministically (the agent has no documented user-invocable trigger).
+<<<<<<< HEAD
 	# The clause comes in TWO shapes (issue #477), because not every invocable
 	# skill is on disk: only the pushed set (Org scope, no allowed_roles, inside
 	# the push cap) has a workspace/skills/custom-<slug>/SKILL.md. Role-scope,
@@ -1104,6 +1105,20 @@ def assemble_prompt(
 	# clause tells the agent to fetch the body with jarvis__get_skill rather than
 	# asserting a directory that does not exist.
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
+=======
+	# The clause has ONE shape: it tells the agent to fetch each invoked skill
+	# with jarvis__get_skill. No custom skill's instructions are in the container:
+	# the pushed set (Org scope, no allowed_roles, inside the push cap) has a
+	# workspace/skills/custom-<slug>/SKILL.md that only points at the same tool,
+	# and Role-scope, role-restricted, private and over-cap rows have no file at
+	# all (issue #477: the container has a single role-blind custom_skills dir).
+	from jarvis.chat.custom_skills import (
+		armed_skill_clause,
+		invoked_skill_clause,
+		invoked_skill_slugs,
+		learned_skill_clause,
+	)
+>>>>>>> 8a38536 (fix(skills): serve company skills from the bench)
 
 	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically

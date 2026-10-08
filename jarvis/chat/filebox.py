@@ -123,7 +123,8 @@ def _validated_pinned_skill(skill: str | None) -> dict | None:
 	"""Resolve a client-supplied skill slug to the pin entry ``{docname, slug,
 	creates, pinned}``, or None when it isn't usable. The client string is untrusted:
 	it is resolved for the dropper as a File Box run resolves it
-	(``filebox_skills.resolve``: system user + enabled + visible, own row first) and
+	(``filebox_skills.resolve``: system user + enabled + visible, a reviewed Role/Org
+	row before their own) and
 	must be eligible as a pin (``use_in_file_box``, not learned), so only a validated
 	slug (SLUG_RE) is ever embedded in the prompt or stored. UNIFORM: an unknown, an
 	inaccessible, an opted-out and a learned skill all return None (no oracle)."""
