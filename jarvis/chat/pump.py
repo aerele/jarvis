@@ -3808,7 +3808,7 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 
 	label = f"pump.request_cancel_conversation {conversation}"
 	won, row = txn.replay_on_conflict(unit, label=label)
-	if not won and row and resend and _resent_after_read(row["run_id"]):
+	if not won and row and resend and _rollback_and_check_resent(row["run_id"]):
 		won, row = txn.replay_on_conflict(unit, label=label)
 	if won and row:
 		if row.get("state") == "ready":
@@ -3819,7 +3819,7 @@ def request_cancel_conversation(relay_or_conversation: str, run_id: str | None =
 	return False
 
 
-def _resent_after_read(run_id: str) -> bool:
+def _rollback_and_check_resent(run_id: str) -> bool:
 	"""After a lost Stop CAS: end the transaction (the CAS wrote nothing) and tell if the
 	turn is now one the empty-reply re-send put back, so a second try can stop it."""
 	frappe.db.rollback()
