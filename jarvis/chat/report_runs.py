@@ -29,6 +29,11 @@ _FAILED = ("Error", "Failed")
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _json_functions_available() -> bool:
+	"""MariaDB reads the card fields in SQL; elsewhere they are parsed in Python."""
+	return frappe.db.db_type == "mariadb"
+
+
 @frappe.whitelist()
 @require_jarvis_user
 def chat_report_runs(conversation: str) -> dict:
@@ -80,7 +85,7 @@ def _run_rows(where) -> list:
 		.orderby(m.conversation)
 		.orderby(m.seq)
 	)
-	mariadb = frappe.db.db_type == "mariadb"
+	mariadb = _json_functions_available()
 	if mariadb:
 		query = query.select(
 			*(_JsonValue(m.tool_result, f"$.data.{k}").as_(k) for k in ("status", "run", "report_name"))
