@@ -284,6 +284,10 @@
     "code": "empty-reply"
   },
   {
+    "error": "Agent couldn't generate a response. Tool call failed.",
+    "code": "empty-reply"
+  },
+  {
     "error": "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
     "code": "empty-reply-tools"
   },

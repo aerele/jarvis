@@ -3452,7 +3452,9 @@ def retry_message(message: str) -> dict:
 			return _rej
 		if _conversation_busy(doc.conversation):
 			return _refusal_response(
-				conversation=doc.conversation, message=doc.name, refusal=("busy", _in_progress(), "")
+				conversation=doc.conversation,
+				message=doc.name,
+				refusal=_Refusal("busy", _in_progress_sentence()),
 			)
 	if doc.role != "assistant":
 		return {"ok": False, "reason": _("only assistant messages can be retried")}
@@ -3470,7 +3472,11 @@ def retry_message(message: str) -> dict:
 		doc.conversation, message=doc.name, prev_user=prev_rows[0][0] if prev_rows else None
 	)
 	if not failed.seed:
-		return {"ok": False, "reason": _("no preceding user message to retry")}
+		return _refusal_response(
+			conversation=doc.conversation,
+			message=doc.name,
+			refusal=_Refusal("no_seed", _("no preceding user message to retry")),
+		)
 	return _retry_errored(doc.conversation, message=doc.name, failed=failed)
 
 
@@ -3480,7 +3486,13 @@ class _FailedTurn(NamedTuple):
 	inputs: dict  # context and original attachments, in the admission form
 
 
-def _in_progress() -> str:
+class _Refusal(NamedTuple):
+	code: str
+	sentence: str
+	blocker: str = ""  # run_id:state of the turn that blocks an in_progress retry
+
+
+def _in_progress_sentence() -> str:
 	return _("A reply is already in progress. Wait for it to finish.")
 
 
@@ -3500,6 +3512,13 @@ def _retry_errored(conversation: str, *, message: str, failed: _FailedTurn) -> d
 	under which lock) is in docs/chat-errors.md."""
 	run_id = uuid.uuid4().hex[:12]
 	seed, inputs = failed.seed, failed.inputs
+
+	def check():
+		return _retry_refusal(conversation, message=message, seed=seed, failed_run=failed.run_id)
+
+	def refused(refusal):
+		return _refusal_response(conversation=conversation, message=message, refusal=refusal, seed=seed)
+
 	# Route through the SHARED dispatcher (after-commit publish on Path B,
 	# RQ on the default backend) - retry previously duplicated this branch
 	# inline with a synchronous publish, keeping the mid-transaction race
@@ -3522,15 +3541,11 @@ def _retry_errored(conversation: str, *, message: str, failed: _FailedTurn) -> d
 			turn_class="interactive",
 			dispatch=lambda: _dispatch_turn(payload),
 			dispatch_payload=inputs or None,
-			refuse_if=lambda: _retry_refusal(
-				conversation, message=message, seed=seed, failed_run=failed.run_id
-			),
+			refuse_if=check,
 		)
 		if not _adm.get("ok"):
 			if _adm.get("refused"):
-				return _refusal_response(
-					conversation=conversation, message=message, refusal=_adm["refused"], seed=seed
-				)
+				return refused(_adm["refused"])
 			return {"ok": False, "reason": _adm.get("reason")}
 		_retry_accepted(conversation)
 		out = {"ok": True, "run_id": run_id}
@@ -3538,8 +3553,8 @@ def _retry_errored(conversation: str, *, message: str, failed: _FailedTurn) -> d
 			out["queued"] = True
 			out["queued_position"] = _adm.get("queued_position")
 		return out
-	if refusal := _retry_refusal(conversation, message=message, seed=seed, failed_run=failed.run_id):
-		return _refusal_response(conversation=conversation, message=message, refusal=refusal, seed=seed)
+	if refusal := check():
+		return refused(refusal)
 	# CDX-19: the legacy path may REROUTE to the pump accept path under the cutover gate; merge
 	# the returned admission result exactly like the machine branch (overload reject / queued
 	# chip). Retry reuses the existing user message as the seed, so — like the machine branch —
@@ -3574,7 +3589,7 @@ def _failed_turn(conversation: str, *, message: str, prev_user: str | None) -> _
 	bound = bool(row.get("bound"))
 	stored = prepare.parse_dispatch(row.get("dispatch_payload"))
 	if stored is None:
-		_retry_log("info", "retry_inputs_unreadable conversation=%s message=%s", conversation, message)
+		_retry_log("warning", "retry_inputs_unreadable conversation=%s message=%s", conversation, message)
 		stored = {}
 	inputs = {}
 	if stored.get("context"):
@@ -3586,23 +3601,23 @@ def _failed_turn(conversation: str, *, message: str, prev_user: str | None) -> _
 	return _FailedTurn(None, prev_user, inputs)
 
 
-def _retry_refusal(
-	conversation: str, *, message: str, seed: str, failed_run: str | None
-) -> tuple[str, str, str] | None:
-	"""Why a retry of ``message`` must not start, as ``(code, sentence, blocker)``, or None.
+def _retry_refusal(conversation: str, *, message: str, seed: str, failed_run: str | None) -> _Refusal | None:
+	"""Why a retry of ``message`` must not start, or None.
+
 	Codes: ``seed_missing``, ``owner_mismatch``, ``in_progress`` (``blocker`` is
-	``run_id:state``), ``not_latest``; retry_message's legacy busy check adds ``busy``.
+	``run_id:state``), ``not_latest``; retry_message adds ``no_seed`` and, on the legacy
+	path, ``busy``.
 	"Latest" counts hidden=0 user/assistant rows except a macro's closing row
 	(docs/chat-errors.md)."""
 	row = frappe.db.get_value(MSG, seed, ["owner", "hidden"])
 	if not row:
-		return "seed_missing", _("This reply cannot be retried."), ""
+		return _Refusal("seed_missing", _("This reply cannot be retried. Send a new message instead."))
 	owner, hidden = row
 	# Prepare reads the attachments as the seed's owner.
 	if owner != frappe.db.get_value(CONV, conversation, "owner"):
 		if hidden:
-			return "owner_mismatch", _("This reply cannot be retried."), ""
-		return "owner_mismatch", _("This reply cannot be retried. Send your message again instead."), ""
+			return _Refusal("owner_mismatch", _("This reply cannot be retried. Send a new message instead."))
+		return _Refusal("owner_mismatch", _("This reply cannot be retried. Send your message again instead."))
 	from jarvis.chat import turn_state
 
 	# The failed turn itself never counts. Bound, any other unfinished turn blocks (an
@@ -3612,7 +3627,7 @@ def _retry_refusal(
 	if blocker := turn_state.unfinished_turn(
 		conversation, created_after=after, exclude_run_id=failed_run, states=admission._CONV_BLOCKING_STATES
 	):
-		return "in_progress", _in_progress(), ":".join(blocker)
+		return _Refusal("in_progress", _in_progress_sentence(), ":".join(blocker))
 	newest = frappe.db.sql(
 		"""SELECT name FROM `tabJarvis Chat Message`
 		WHERE conversation=%(c)s AND hidden=0 AND role IN ('user', 'assistant')
@@ -3621,17 +3636,18 @@ def _retry_refusal(
 		{"c": conversation},
 	)
 	if not newest or newest[0][0] != message:
-		return "not_latest", _("Only the latest reply can be retried. Send your message again instead."), ""
+		return _Refusal(
+			"not_latest", _("Only the latest reply can be retried. Send your message again instead.")
+		)
 	return None
 
 
-def _refusal_response(
-	*, conversation: str, message: str, refusal: tuple[str, str, str], seed: str | None = None
-) -> dict:
-	"""Log a refused retry with its code (owner_mismatch at WARNING); return the sentence."""
+def _refusal_response(*, conversation: str, message: str, refusal: _Refusal, seed: str | None = None) -> dict:
+	"""Log a refused retry with its code (owner_mismatch, seed_missing at WARNING); return
+	the sentence."""
 	code, sentence, blocker = refusal
 	_retry_log(
-		"warning" if code == "owner_mismatch" else "info",
+		"warning" if code in ("owner_mismatch", "seed_missing") else "info",
 		"retry_refused conversation=%s message=%s reason=%s seed=%s blocker=%s",
 		conversation,
 		message,

@@ -679,7 +679,9 @@ class TestRetryMessage(_ChatTestCase):
 		self.assertEqual(
 			result, {"ok": False, "reason": "A reply is already in progress. Wait for it to finish."}
 		)
-		self.assertEqual(logger.return_value.info.call_args.args[3], "busy")
+		line = logger.return_value.info.call_args.args
+		self.assertEqual(line[0].split()[3], "reason=%s")
+		self.assertEqual(line[3], "busy")
 
 	def test_legacy_retry_of_a_seed_owned_by_another_user_is_refused(self):
 		user_id, asst_id = self._make_turn(self.conv, with_error=True)

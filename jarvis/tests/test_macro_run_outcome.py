@@ -384,8 +384,16 @@ class TestAFailedStepIsRecordedWithItsReason(MacroRunOutcomeBase):
 		self.assertNotIn("{", error)
 
 	def test_an_empty_reply_of_the_model_is_named_as_the_chat_names_it(self):
-		reason = macros._plain_reason("⚠️ Agent couldn't generate a response. Please try again.")
-		self.assertEqual(reason, "The model returned an empty reply.")
+		for raw, reason in (
+			("⚠️ Agent couldn't generate a response. Please try again.", "The model returned an empty reply."),
+			(
+				"⚠️ Agent couldn't generate a response. Note: some tool actions may have already been"
+				" executed — please verify before retrying.",
+				"The model returned an empty reply after running actions.",
+			),
+		):
+			with self.subTest(reason=reason):
+				self.assertEqual(macros._plain_reason(raw), reason)
 
 	def test_text_that_says_nothing_to_an_owner_is_not_stored(self):
 		for raw in ("agent error", "x" * 2000, "unexpected worker error: KeyError"):
