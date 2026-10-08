@@ -158,7 +158,20 @@ class _TurnStateTestCase(FrappeTestCase):
 class TestUnfinishedTurn(_TurnStateTestCase):
 	"""The shared check for an unfinished turn of a conversation (sends, deletes, retries)."""
 
-	def test_filters(self):
+	def test_only_the_given_filters_reach_the_sql(self):
+		# The default read stays covered by the conv_state index (no creation column).
+		with patch.object(frappe.db, "sql", return_value=()) as sql:
+			ts.unfinished_turn("c1")
+			ts.unfinished_turn("c1", exclude_run_id="r1")
+			ts.unfinished_turn("c1", created_after="2026-10-01 00:00:00")
+		default, bound, unbound = (c.args[0] for c in sql.call_args_list)
+		self.assertNotIn("creation", default)
+		self.assertNotIn("name !=", default)
+		self.assertIn("name !=", bound)
+		self.assertNotIn("creation", bound)
+		self.assertIn("creation >", unbound)
+
+	def test_each_filter_narrows_the_result(self):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv, 1)
 		self._mk_turn(conv, "ut-old", seed, "queued")

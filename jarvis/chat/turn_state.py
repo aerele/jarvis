@@ -309,19 +309,11 @@ def _lock_conversation(conversation: str) -> None:
 	)
 
 
-def unfinished_turn_state(
-	conversation: str,
-	*,
-	created_after: datetime.datetime | str | None = None,
-	exclude_run_id: str | None = None,
-	states: tuple[str, ...] = NONTERMINAL_STATES,
-) -> str | None:
+def unfinished_turn_state(conversation: str) -> str | None:
 	"""The state of a turn of this conversation that has not ended (queued, running,
 	finishing or recovering), or None when every turn has. One row off the
 	(conversation, state) index, however many turns the chat has had."""
-	turn = unfinished_turn(
-		conversation, created_after=created_after, exclude_run_id=exclude_run_id, states=states
-	)
+	turn = unfinished_turn(conversation)
 	return turn[1] if turn else None
 
 
@@ -333,13 +325,16 @@ def unfinished_turn(
 	states: tuple[str, ...] = NONTERMINAL_STATES,
 ) -> tuple[str, str] | None:
 	"""``(run_id, state)`` of such a turn. ``created_after`` counts only newer turns,
-	``exclude_run_id`` leaves out the caller's own, ``states`` narrows the set."""
+	``exclude_run_id`` leaves out the caller's own, ``states`` narrows the set. A filter
+	is added only when given, so the default stays a covering conv_state read."""
+	query = "SELECT name, state FROM `tabJarvis Chat Turn` WHERE conversation=%(c)s AND state IN %(live)s"
+	if created_after is not None:
+		query += " AND creation > %(after)s"
+	if exclude_run_id:
+		query += " AND name != %(x)s"
 	rows = frappe.db.sql(
-		"""SELECT name, state FROM `tabJarvis Chat Turn`
-		WHERE conversation=%(c)s AND state IN %(live)s AND name != %(x)s
-		  AND (%(after)s IS NULL OR creation > %(after)s)
-		LIMIT 1""",
-		{"c": conversation, "live": states, "after": created_after, "x": exclude_run_id or ""},
+		query + " LIMIT 1",
+		{"c": conversation, "live": states, "after": created_after, "x": exclude_run_id},
 	)
 	return (rows[0][0], rows[0][1]) if rows else None
 
