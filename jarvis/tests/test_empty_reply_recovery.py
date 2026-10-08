@@ -117,20 +117,54 @@ class TestKillSwitch(FrappeTestCase):
 
 
 class TestStoredDispatch(FrappeTestCase):
-	def test_only_a_json_object_with_the_reason_is_resent(self):
-		for raw, stored, is_resent in (
-			(None, None, False),
-			("", None, False),
-			("not json", None, False),
-			("[1]", None, False),
-			('{"redispatch": 1}', {"redispatch": 1}, False),
-			('{"redispatch": 1, "redispatch_reason": "other_reason"}', None, False),
-			(json.dumps({"redispatch": 1, "redispatch_reason": recovery.REASON}), None, True),
+	def test_only_a_json_object_is_read(self):
+		for raw, stored in (
+			(None, None),
+			("", None),
+			("not json", None),
+			("[1]", None),
+			('{"redispatch": 1}', {"redispatch": 1}),
 		):
 			with self.subTest(raw=raw):
-				if stored is not None:
-					self.assertEqual(recovery.stored_dispatch(raw), stored)
-				self.assertIs(recovery.resent(raw), is_resent)
+				self.assertEqual(recovery.stored_dispatch(raw), stored)
+
+
+class TestResentTurn(_PumpTestCase):
+	def test_only_a_json_object_with_the_reason_is_resent(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		rid = "er_rt_" + frappe.generate_hash(length=8)
+		for i, (raw, is_resent) in enumerate(
+			(
+				(None, False),
+				("", False),
+				("not json", False),
+				("[1]", False),
+				('{"redispatch": 1}', False),
+				('{"redispatch": 1, "redispatch_reason": "other_reason"}', False),
+				('{"redispatch_reason": {"reason": "empty_reply"}}', False),
+				(json.dumps({"redispatch": 1, "redispatch_reason": recovery.REASON}), True),
+			)
+		):
+			self._mk_turn(conv, f"{rid}_{i}", seed, "done", dispatch_payload=raw)
+			with self.subTest(raw=raw):
+				self.assertIs(recovery.resent_turn(f"{rid}_{i}"), is_resent)
+				self.assertIs(recovery.resent_turn(f"{rid}_{i}", conv), is_resent)
+		self.assertIs(recovery.resent_turn(f"{rid}_7", conv + "x"), False, "another chat")
+		self.assertIs(recovery.resent_turn(rid + "_missing"), False)
+
+	def test_only_the_marker_key_is_read(self):
+		conv = self._mk_conv()
+		rid = "er_rk_" + frappe.generate_hash(length=8)
+		stored = {"message": "x" * 1000, "redispatch": 1, "redispatch_reason": recovery.REASON}
+		self._mk_turn(conv, rid, self._mk_msg(conv), "done", dispatch_payload=json.dumps(stored))
+		with (
+			patch.object(frappe.db, "get_value", side_effect=_no_read),
+			patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql,
+		):
+			self.assertIs(recovery.resent_turn(rid, conv), True)
+		(query,) = [c.args[0] for c in sql.call_args_list]
+		self.assertIn("SELECT JSON_VALUE(dispatch_payload, '$.redispatch_reason') FROM", query)
 
 
 class TestDecisionLine(FrappeTestCase):
@@ -386,6 +420,12 @@ class TestResendDecision(_DecisionCase):
 					"sent again or not",
 				)
 
+	def test_an_unfinished_turn_does_not_hide_the_last_finished_one(self):
+		self.assertEqual(
+			self._chat_after("cf_queued", ("errored", EMPTY_REPLY, 10, False), ("queued", None, 5, False)),
+			(False, "chat"),
+		)
+
 	def test_only_the_last_recent_turn_of_the_chat_counts(self):
 		day = recovery.CHAT_WINDOW_S // 60
 		for name, earlier in (
@@ -416,6 +456,18 @@ class TestBreaker(_DecisionCase):
 		with patch.object(frappe, "log_error"):
 			self.assertEqual(self._decide(), (False, "breaker"))
 		self.assertEqual(self.lines_of(self.OPEN), [(self._target, 3)], "a WARNING for each refusal")
+
+	def test_the_payloads_are_read_only_from_three_empty_replies(self):
+		since = frappe.utils.add_to_date(None, seconds=-recovery.BREAKER_WINDOW_S)
+		self._failed(2)
+		self._failed(3, error="429 rate_limit_error")
+		for failed, want, reads in ((0, 2, False), (1, 3, True)):
+			with self.subTest(empty_replies=2 + failed):
+				self._failed(failed)
+				with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+					self.assertEqual(recovery._breaker_count(self._target, since), want)
+				queries = [c.args[0] for c in sql.call_args_list]
+				self.assertEqual(any("dispatch_payload" in q for q in queries), reads)
 
 	def test_a_second_empty_reply_with_the_tools_form_counts(self):
 		self._failed(3, error=EMPTY_REPLY_TOOLS)
