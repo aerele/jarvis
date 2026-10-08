@@ -89,16 +89,15 @@ def stored_dispatch(raw) -> dict | None:
 	return parsed if isinstance(parsed, dict) else None
 
 
-def resent(raw) -> bool:
-	"""The stored dispatch payload ``raw`` says the turn was sent again for an empty reply."""
-	stored = stored_dispatch(raw)
-	return bool(stored) and stored.get("redispatch_reason") == REASON
-
-
 def resent_turn(run_id: str, conversation: str | None = None) -> bool:
-	"""The Turn ``run_id`` (of ``conversation``, when given) was sent again for an empty reply."""
-	filters = {"name": run_id, "conversation": conversation} if conversation else run_id
-	return resent(frappe.db.get_value(TURN, filters, "dispatch_payload"))
+	"""The Turn ``run_id`` (of ``conversation``, when given) was sent again for an empty reply.
+	Reads the marker key only, not the whole payload."""
+	rows = frappe.db.sql(
+		"""SELECT JSON_VALUE(dispatch_payload, '$.redispatch_reason') FROM `tabJarvis Chat Turn`
+		WHERE name=%(r)s AND (%(c)s IS NULL OR conversation=%(c)s)""",
+		{"r": run_id, "c": conversation or None},
+	)
+	return bool(rows) and rows[0][0] == REASON
 
 
 def resend_decision(
@@ -191,13 +190,21 @@ def _breaker_open(target: str) -> bool:
 
 
 def _breaker_count(target: str, since) -> int:
-	errors = frappe.db.sql(
-		"""SELECT error FROM `tabJarvis Chat Turn`
-		WHERE state='errored' AND relay_target_id=%(t)s AND finalizing_at > %(since)s
-		  AND JSON_VALUE(dispatch_payload, '$.redispatch_reason')=%(reason)s""",
-		{"t": target, "since": since, "reason": REASON},
+	"""Reads the payloads only when enough rows of the window have an empty-reply error;
+	a count below ``BREAKER_FAILURES`` can include turns not sent again."""
+	rows = frappe.db.sql(
+		"""SELECT name, error FROM `tabJarvis Chat Turn`
+		WHERE state='errored' AND relay_target_id=%(t)s AND finalizing_at > %(since)s""",
+		{"t": target, "since": since},
 	)
-	return sum(1 for (error,) in errors if classify_error_text(error) in EMPTY_REPLY_CODES)
+	names = [name for name, error in rows if classify_error_text(error) in EMPTY_REPLY_CODES]
+	if len(names) < BREAKER_FAILURES:
+		return len(names)
+	return frappe.db.sql(
+		"""SELECT COUNT(*) FROM `tabJarvis Chat Turn`
+		WHERE name IN %(names)s AND JSON_VALUE(dispatch_payload, '$.redispatch_reason')=%(reason)s""",
+		{"names": tuple(names), "reason": REASON},
+	)[0][0]
 
 
 def _alert_breaker(target: str, count: int, since) -> None:
@@ -276,12 +283,13 @@ def _retried(conversation: str, run_id: str, seed: str) -> bool:
 
 
 def _chat_failing(conversation: str, run_id: str, created) -> bool:
-	"""The turn just before this one in the chat, in the last ``CHAT_WINDOW_S``, ended with
-	an empty reply: the chat fails every time, so each message is not sent twice."""
+	"""The last finished turn before this one in the chat, in the last ``CHAT_WINDOW_S``,
+	ended with an empty reply: the chat fails every time, so each message is not sent twice."""
 	since = frappe.utils.add_to_date(None, seconds=-CHAT_WINDOW_S)
 	rows = frappe.db.sql(
 		"""SELECT error FROM `tabJarvis Chat Turn`
 		WHERE conversation=%(c)s AND name != %(r)s AND creation < %(at)s AND creation > %(since)s
+		  AND state IN ('done', 'errored', 'cancelled')
 		ORDER BY creation DESC LIMIT 1""",
 		{"c": conversation, "r": run_id, "at": created, "since": since},
 	)
