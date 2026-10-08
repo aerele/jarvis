@@ -411,6 +411,7 @@ class TestPanel4Chokepoint(_PipelineCase):
 		with (
 			self._pump_on(),
 			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
 		):
 			first = chat_api.retry_message(amsg)
 			second = chat_api.retry_message(amsg)
@@ -434,6 +435,7 @@ class TestPanel4Chokepoint(_PipelineCase):
 		with (
 			self._pump_on(ensure=woken),
 			patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None}),
+			patch("jarvis.chat.api.validate_can_send", return_value=(True, None)),
 			set_value_conflict(CONV, "last_active_at"),
 		):
 			res = chat_api.retry_message(amsg)
@@ -452,7 +454,8 @@ class TestPanel4Chokepoint(_PipelineCase):
 		frappe.db.set_value(TURN, "pmp_a", "assistant_message", amsg)
 		frappe.db.commit()
 		gate = patch("jarvis.account._admin_chat_gate", return_value={"ready": True, "reason": None})
-		with self._pump_on(), gate:
+		send_ok = patch("jarvis.chat.api.validate_can_send", return_value=(True, None))
+		with self._pump_on(), gate, send_ok:
 			waiting = chat_api.retry_message(amsg)
 			frappe.db.set_value(TURN, "pmp_b", "state", "done")
 			frappe.db.commit()
