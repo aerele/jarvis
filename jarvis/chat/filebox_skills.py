@@ -96,46 +96,70 @@ def is_eligible(row, dropper: str, pin: str | None = None, roles=None) -> bool:
 
 
 def resolve(slug: str, user: str, dropper: str, pin: str | None = None):
-	"""``slug``'s row in a File Box run: ``user``'s own row (even opted out, it hides
-	the slug), else the recorded pin's row, else the first eligible one (a row only
-	System Manager see-all shows never beats it). Raises as ``resolve_skill``."""
+	"""``slug``'s row in a File Box run, by the fetch's one rule
+	(``get_skill.served``): the recorded pin's row, else a reviewed row (even opted
+	out, it hides the slug), else ``user``'s own, else the first eligible one (a row
+	only System Manager see-all shows never beats it). Raises as ``resolve_skill``."""
 	from jarvis.tools.get_skill import resolve_skill
 
 	roles = frappe.get_roles(dropper)
 	return resolve_skill(
 		slug,
 		user,
-		prefer=lambda r: (r.name != pin, not is_eligible(r, dropper, pin, roles), not r.use_in_file_box),
+		prefer=lambda r: (not is_eligible(r, dropper, pin, roles), not r.use_in_file_box),
+		pinned=pin,
 	)
 
 
 def eligible_skills(dropper: str, pin: str | None = None) -> list:
-	"""Every skill ``dropper`` may route by, newest first, one per slug: their own
-	row wins (as in ``get_skill``), so an opted-out own row hides the slug."""
+	"""Every skill ``dropper`` may route by, newest first, one per slug.
+
+	A slug is listed only when the row the fetch would serve them for it is eligible
+	(``get_skill.served``: the pin, else a reviewed row, else their own), so the menu
+	never names a skill the fetch would then refuse or answer with another row. A
+	reviewed skill that is not opted in therefore hides a same-named skill of the
+	dropper's own."""
 	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import prefetch_child_values
+	from jarvis.tools.find_skills import _visible
+	from jarvis.tools.get_skill import served
 
 	if not filebox_migrated():
 		return []
-	rows = frappe.db.sql(
-		"""SELECT name, owner, skill_name, description, scope, target_role, enabled, use_in_file_box,
-		  file_box_creates, managed_by_learning, modified
-		FROM `tabJarvis Custom Skill`
+	# The slugs that could be listed, newest first: the dropper's own skills, the pin,
+	# and the reviewed skills opted in.
+	slugs = frappe.db.sql_list(
+		"""SELECT skill_name FROM `tabJarvis Custom Skill`
 		WHERE enabled = 1 AND (owner = %(u)s OR (use_in_file_box = 1
 		  AND (name = %(pin)s OR (scope IN ('Role', 'Org') AND managed_by_learning = 0))))
 		ORDER BY modified DESC LIMIT %(n)s""",
 		{"u": dropper, "pin": pin or "", "n": _CANDIDATES},
+	)
+	slugs = list(dict.fromkeys(slugs))
+	if not slugs:
+		return []
+	# Every enabled row of those slugs: which one a slug means is judged among all the
+	# rows the dropper may use, as the fetch judges it.
+	rows = frappe.db.sql(
+		"""SELECT name, owner, skill_name, description, scope, target_role, enabled, use_in_file_box,
+		  file_box_creates, managed_by_learning, modified
+		FROM `tabJarvis Custom Skill`
+		WHERE enabled = 1 AND skill_name IN %(slugs)s ORDER BY modified DESC""",
+		{"slugs": tuple(slugs)},
 		as_dict=True,
 	)
 	prefetch_child_values(rows)
-	rows.sort(key=lambda r: r.name != pin)  # the pin's row wins its slug, as in ``resolve``
 	roles = frappe.get_roles(dropper)
-	own = {r.skill_name for r in rows if r.owner == dropper}
-	picked, seen = [], set()
+	by_slug: dict[str, list] = {}
 	for row in rows:
-		if row.skill_name in seen or (row.owner != dropper and row.skill_name in own):
+		if _visible(row, dropper, roles):
+			by_slug.setdefault(row.skill_name, []).append(row)
+	picked = []
+	for slug in slugs:
+		usable = by_slug.get(slug)
+		if not usable:
 			continue
+		row = served(usable, dropper, pinned=pin)
 		if is_eligible(row, dropper, pin, roles):
-			seen.add(row.skill_name)
 			picked.append(row)
 	return picked
 

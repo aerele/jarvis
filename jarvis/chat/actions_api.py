@@ -1007,8 +1007,9 @@ def _approve_run_refusal(record) -> dict | None:
 	if record.get("tool") not in api._SKILL_AUTORUN_COVERED:
 		return _APPROVE_RUN_NEVER_TOOL
 	# TOCTOU re-check: the skill must be live-armed RIGHT NOW off the EXACT row
-	# the offer stamped (an admin may have un-armed it since).
-	if not frappe.db.get_value("Jarvis Custom Skill", skill_docname, "allow_approve_run"):
+	# the offer stamped (an admin may have un-armed it, or switched it off, since).
+	live = frappe.db.get_value("Jarvis Custom Skill", skill_docname, ["allow_approve_run", "enabled"])
+	if not live or not all(frappe.utils.cint(v) for v in live):
 		return _APPROVE_RUN_NOT_ARMED
 	# Defense-in-depth (design §3.4.1): the token's conversation must NOT be an
 	# armed macro run (skip_confirmation=1), so a both-flags conversation is

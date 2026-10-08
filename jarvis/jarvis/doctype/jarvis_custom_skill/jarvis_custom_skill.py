@@ -1,6 +1,8 @@
 """Jarvis Custom Skill DocType controller.
 
-One row per customer-authored skill. Each row renders to a SKILL.md that is
+One row per customer-authored skill. A company-wide row renders to a SKILL.md
+(its name, its description and a pointer to the ``jarvis__get_skill`` tool, which
+serves the instructions from this row) that is
 pushed into the customer's agent container (under the runtime state directory,
 relative path ``custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
 read-only persona skills. Rows are owned by the Frappe user who created them
@@ -75,7 +77,7 @@ def _clear_personal_clause_cache(owner: str | None) -> None:
 def _clear_pushable_org_rows_memo() -> None:
 	"""_pushable_org_rows (chat/custom_skills.py) memoizes its light Org-row scan
 	for the rest of the current request; drop it on any row change so a skill
-	created, armed/disarmed, enabled, or promoted mid-request (a promotion
+	created, enabled, disabled or promoted mid-request (a promotion
 	approval, an admin toggle) is seen by the very next call in the SAME
 	request instead of a stale cached scan."""
 	try:
@@ -417,6 +419,8 @@ class JarvisCustomSkill(NotRenamable, Document):
 		# ladder) is always safe — it reduces exposure — so the owner may
 		# self-demote without a reviewer (e.g. un-publish an Org skill back to
 		# private). WIDENING and lateral Role re-targeting stay reviewer-gated.
+		# (Of the narrowings only the one to User goes through in the end: one to a
+		# Role names a new audience, which ``_guard_content_change`` binds to review.)
 		rank = {"User": 0, "Role": 1, "Org": 2}
 		is_owner = (self.owner or "") == frappe.session.user
 		if is_owner and rank.get(self.scope, 2) < rank.get(prev_scope, 2):
@@ -432,7 +436,12 @@ class JarvisCustomSkill(NotRenamable, Document):
 	def _guard_content_change(self):
 		"""Only a reviewer (or the compiler) may change the CONTENT of an existing
 		Role/Org skill — the instructions, description, user-invocable flag or File
-		Box routing (target doctype, re-enabling) the shared audience runs. Without
+		Box routing (target doctype, re-enabling) the shared audience runs — or what
+		decides WHO is told it and under which name: its name, switching it back on,
+		and its audience (target role, allowed roles, a person added to the share
+		list). ``get_skill`` serves a reviewed
+		row before anyone's own of the same name, so each of those takes effect for
+		the whole audience on the next fetch. Switching it off stays free. Without
 		this, a promotion could be approved against a
 		reviewed body and then have its instructions rewritten afterwards (or a hidden
 		tail slipped in) with no second review — the four-eyes bypass Codex flagged
@@ -450,7 +459,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 			return
 		from jarvis.chat.pending_actions._store import filebox_migrated
 
-		fields = ["instructions", "description", "user_invocable"]
+		fields = ["instructions", "description", "user_invocable", "skill_name", "enabled", "target_role"]
 		file_box = filebox_migrated()  # code may be served ahead of the File Box columns
 		if file_box:
 			fields += ["file_box_creates", "use_in_file_box"]
@@ -462,6 +471,10 @@ class JarvisCustomSkill(NotRenamable, Document):
 			(self.instructions or "") != (prev.instructions or "")
 			or (self.description or "") != (prev.description or "")
 			or int(self.user_invocable or 0) != int(prev.user_invocable or 0)
+			or (self.skill_name or "") != (prev.skill_name or "")
+			or (int(self.enabled or 0) and not int(prev.enabled or 0))
+			or self._audience_changed(prev.target_role)
+			or self._share_added()
 			or (
 				file_box
 				and (
@@ -474,11 +487,47 @@ class JarvisCustomSkill(NotRenamable, Document):
 			return
 		frappe.throw(
 			_(
-				"Only a reviewer can change the content of a shared (Role/Org) skill. "
-				"Narrow it back to private to edit it, then request a fresh promotion."
+				"Only a reviewer can change a shared (Role/Org) skill's name, description, "
+				"instructions, audience or File Box settings, or switch it back on. "
+				"Ask a System Manager to make the change."
 			),
 			frappe.PermissionError,
 		)
+
+	def _audience_changed(self, stored_target_role) -> bool:
+		"""Whether this save changes who the skill reaches: its target role and its
+		``allowed_roles`` rows, taken together on each side.
+
+		``_validate_scope`` has already run and, for a Role skill, rewrites the rows
+		so they hold the target role: it adds it to an empty set and replaces a set
+		that lacks it. Neither is the user's change, so the stored side is read the
+		same way, or the owner of such an old skill could no longer save it at all,
+		not even to switch it off."""
+		stored = set(
+			frappe.get_all(
+				"Jarvis Custom Skill Allowed Role",
+				filters={"parent": self.name, "parenttype": self.doctype},
+				pluck="role",
+			)
+		)
+		if stored_target_role and stored_target_role not in stored:
+			stored = set()
+		now = {r.role for r in self.get("allowed_roles") or []}
+		return (stored | {stored_target_role or ""}) != (now | {self.target_role or ""})
+
+	def _share_added(self) -> bool:
+		"""Whether this save shares the skill with someone it was not shared with: a
+		share reaches a person whatever their roles, so on a Role/Org skill it widens
+		the audience like an added role. Taking a share away stays free."""
+		now = {r.user for r in self.get("shared_with") or []}
+		if not now:
+			return False
+		stored = frappe.get_all(
+			"Jarvis Custom Skill Share",
+			filters={"parent": self.name, "parenttype": self.doctype},
+			pluck="user",
+		)
+		return bool(now - set(stored))
 
 	def _validate_slug(self):
 		self.skill_name = (self.skill_name or "").strip().lower()
@@ -557,10 +606,10 @@ class JarvisCustomSkill(NotRenamable, Document):
 		# the requester's OWN owner happens to already be MANAGED_OWNER (an
 		# Administrator-owned private skill), the copy and its own source collide
 		# on this exact (owner, skill_name) check. Exempt the LINEAGE PAIR only
-		# (not the whole cross-tier check): ``resolve_armed_skill_docname`` assumes
-		# at most one enabled row per (owner, slug) in an owner's OWN tier, so an
-		# UNRELATED duplicate name under the same owner is still a real ambiguity
-		# and stays rejected here. Symmetric so it also holds on a later save of
+		# (not the whole cross-tier check): every chooser of a row by name
+		# (``jarvis.tools.get_skill.served``) assumes an owner has at most one row
+		# of a name, so an UNRELATED duplicate name under the same owner is still a
+		# real ambiguity and stays rejected here. Symmetric so it also holds on a later save of
 		# the PRIVATE source itself (self.source_skill is empty there; look up
 		# anything descended FROM self instead).
 		exclude_names = {self.name or ""}
