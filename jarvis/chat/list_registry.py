@@ -514,6 +514,9 @@ _BY_KEY: dict[str, ListView] = {v.view_key: v for v in _VIEWS}
 #: unclassified whatever it is named (the round-2 loophole: discovery keyed only on
 #: ``list_*``/``admin_list_*``, so a ``search_*`` or ``*_feed`` collection evaded it).
 NON_LIST_ENDPOINTS: dict[str, str] = {
+	# One chat's background-report cards: the few runs that chat started and hasn't
+	# shown yet, rendered inline in the thread. No filter, sort or page contract.
+	"jarvis.chat.report_runs.chat_report_runs": "one chat's background-report cards, shown inline in the thread",
 	# Unpaginated companions of a registered paginated list. They exist for a
 	# dropdown / autocomplete / first-paint and return a capped slice with no
 	# filter, sort or page contract. The registered *_page endpoint is the

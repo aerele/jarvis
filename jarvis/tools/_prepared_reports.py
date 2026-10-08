@@ -39,11 +39,7 @@ from __future__ import annotations
 import json
 
 import frappe
-from frappe.core.doctype.prepared_report.prepared_report import (
-	get_completed_prepared_report,
-	make_prepared_report,
-	process_filters_for_prepared_report,
-)
+from frappe.core.doctype.prepared_report.prepared_report import make_prepared_report
 from frappe.desk.query_report import get_report_doc, validate_filters_permissions
 from frappe.utils import cint
 from frappe.utils.background_jobs import get_redis_conn
@@ -51,6 +47,7 @@ from frappe.utils.scheduler import is_scheduler_inactive
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tools.get_report_filters import get_report_filters
 
 # Cap rows folded into the envelope. A prepared report is the likeliest place to
 # hit a huge result; an uncapped dump becomes a chat-message payload AND a
@@ -78,6 +75,8 @@ _INFLIGHT_STATUSES = ("Queued", "Started")
 # translate_data - run() passes that through and it changes the result content,
 # so it is a real request parameter that belongs in the match key.
 _BOOKKEEPING_KEYS = ("prepared_report_name",)
+# The caller's newest runs of one report compared by filter meaning (see _latest).
+_MATCH_SCAN = 50
 
 
 def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
@@ -85,13 +84,15 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	prepared report. Pull-model, stateless, runs as ``user``. Raises
 	InvalidArgumentError when the background queue can't run the report."""
 	_gate_report(report_name)
-	filters = _canonical_filters(raw_filters)
+	# The report's own defaults, as Desk sends them: a run started here is the run
+	# Desk would start, and a Desk run is found again.
+	filters = {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
 	_gate_filters(report_name, filters, user)
 
 	# 1. A completed copy we can read? (0 rows is a valid answer; unreadable -> fall through)
-	dn = get_completed_prepared_report(filters, user, report_name)
-	if dn:
-		ready = _read_completed(dn)
+	row = _latest(report_name, filters, user, ("Completed",))
+	if row:
+		ready = _read_completed(row.name)
 		if ready is not None:
 			return ready
 
@@ -104,12 +105,13 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	# 3. Nothing usable -> (re)generate. Refuse (raise) if the queue can't run it,
 	#    so we never leave an orphan Queued row that no worker will drain.
 	_require_worker()
-	make_prepared_report(report_name, filters)
+	run = make_prepared_report(report_name, filters)["name"]
 	return _envelope(
 		report_name,
 		"started",
 		"This report is heavy, so it runs in the background - I've started it. "
 		"Ask me again in a little while and I'll have the results.",
+		run=run,
 	)
 
 
@@ -169,6 +171,24 @@ def _canonical_filters(raw: dict | str | None) -> dict:
 	return out
 
 
+def _report_defaults(report_name: str) -> dict:
+	"""The literal filter defaults the report's script declares, ``{fieldname: value}``.
+	Empty when its filters can't be read: then a Desk run may simply not be reused."""
+	try:
+		filters = get_report_filters(report_name)["filters"]
+	except (frappe.ValidationError, frappe.PermissionError, InvalidArgumentError, PermissionDeniedError):
+		return {}
+	return {f["fieldname"]: f["default"] for f in filters if not _unset(f.get("default"))}
+
+
+def _unset(value) -> bool:
+	"""Desk sends only the filters that have a value (``get_filter_values``): a blank,
+	0 / false, "%" or an empty selection reads as not set."""
+	if isinstance(value, list | tuple):
+		return not value
+	return value is None or value in ("", "%") or (isinstance(value, int | float) and value == 0)
+
+
 # --------------------------------------------------------------------------- #
 # completed copy (read DIRECTLY - never via run() by name)
 # --------------------------------------------------------------------------- #
@@ -207,6 +227,7 @@ def _read_completed(dn: str) -> dict | None:
 	env["columns"] = columns or []
 	env["result"] = capped
 	env["as_of"] = str(as_of) if as_of else None
+	env["run"] = dn
 	if note:
 		env["row_note"] = note
 	return env
@@ -261,22 +282,18 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 	One query over the SINGLE newest attempt, so an old failure can never shadow a
 	newer in-flight run. Owner-scoped with ignore_permissions - a normal ERP user
 	lacks the Prepared Report read role, so a permission-checked read finds nothing."""
-	row = _latest(
-		report_name,
-		filters,
-		user,
-		(*_INFLIGHT_STATUSES, *_FAILED_STATUSES),
-		extra_fields=["status", "creation"],
-	)
-	if not row:
+	row = _latest(report_name, filters, user, (*_INFLIGHT_STATUSES, *_FAILED_STATUSES, "Cancelled"))
+	if not row or row.status == "Cancelled":
+		# A run someone stopped (v16 Cancelled) is not pending and is no failure to
+		# surface: asked again, start it again. Counted so it shadows an older Error.
 		return None
 	if row.status == "Queued":
 		# Enqueued and waiting for a worker - never re-trigger (see _STARTED_STALL_MARGIN).
-		return _generating(report_name)
+		return _generating(report_name, row.name)
 	if row.status == "Started":
 		age = frappe.utils.time_diff_in_seconds(frappe.utils.now(), row.creation)
 		if age <= _report_timeout(report_name) + _STARTED_STALL_MARGIN:
-			return _generating(report_name)
+			return _generating(report_name, row.name)
 		return None  # started but the worker died mid-run -> caller re-generates
 	# Error / Failed - surface it and stop; re-firing the same doomed job on every
 	# ask is the loop we are avoiding. The user can adjust the filters (a new match
@@ -288,33 +305,66 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 		"That report failed to generate. If it needs a filter you didn't set "
 		"(a company, a date range, a required value), tell me and I'll run it "
 		"again with it.",
+		run=row.name,
 	)
 
 
-def _latest(report_name, filters, user, statuses, extra_fields=None):
-	"""Newest owner-scoped Prepared Report for these filters in one of ``statuses``."""
+def _latest(report_name, filters, user, statuses):
+	"""Newest owner-scoped Prepared Report for these filters in one of ``statuses``.
+
+	Matched on the filters' meaning, not Frappe's exact JSON string (#635): a run
+	started from Desk stores the empty filters it showed and its own value types
+	(1 for true, a multi-select in its own order), so the copy it left was never
+	found and the report ran again."""
+	want = _match_key(filters)
 	rows = frappe.get_all(
 		"Prepared Report",
-		filters={
-			"report_name": report_name,
-			"filters": process_filters_for_prepared_report(filters),
-			"owner": user,
-			"status": ("in", statuses),
-		},
-		fields=["name", *(extra_fields or [])],
+		filters={"report_name": report_name, "owner": user, "status": ("in", statuses)},
+		fields=["name", "filters", "status", "creation"],
 		order_by="creation desc",
-		limit=1,
+		limit=_MATCH_SCAN,
 		ignore_permissions=True,
 	)
-	return rows[0] if rows else None
+	for row in rows:
+		try:
+			stored = json.loads(row.filters or "{}")
+		except (ValueError, TypeError):
+			continue
+		if isinstance(stored, dict) and _match_key(stored) == want:
+			return row
+	return None
 
 
-def _generating(report_name: str) -> dict:
+def _match_key(filters: dict) -> str:
+	"""The filters as a comparable string: bookkeeping and unset values dropped,
+	scalars as text (1, 1.0, true and "1" read the same), lists as sorted text."""
+
+	def norm(value):
+		if isinstance(value, bool):
+			value = int(value)
+		if isinstance(value, float) and value.is_integer():
+			value = int(value)
+		if isinstance(value, list | tuple):
+			return sorted(str(norm(v)) for v in value)
+		return str(value)
+
+	return json.dumps(
+		{
+			key: norm(value)
+			for key, value in filters.items()
+			if key not in _BOOKKEEPING_KEYS and not _unset(value)
+		},
+		sort_keys=True,
+	)
+
+
+def _generating(report_name: str, run: str) -> dict:
 	return _envelope(
 		report_name,
 		"generating",
 		"Your report is still running in the background. Ask me again in a "
 		"little while and I'll have the results.",
+		run=run,
 	)
 
 
@@ -357,6 +407,8 @@ def _queue_reachable() -> bool:
 # envelope
 # --------------------------------------------------------------------------- #
 def _envelope(report_name: str, status: str, message: str, **extra) -> dict:
+	# ``run`` (every status) names the Prepared Report it answers for: the chat's
+	# report card reads it (jarvis.chat.report_runs).
 	# prepared_report stays ALWAYS truthy so the dashboards_api run-time backstop
 	# (which rejects a tile whose run_report result carries prepared_report) keeps
 	# working regardless of status.

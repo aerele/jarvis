@@ -810,6 +810,9 @@ export const fileboxCheckSkill = (skill) => call("jarvis.chat.filebox.check_skil
 // decideApproval, as on the board) and held records / sheets (linked to the board).
 export const fileboxOpenWaits = (conversation) =>
 	call("jarvis.chat.filebox.open_waits", { conversation });
+// The background reports a chat started and hasn't shown yet ({items}).
+export const chatReportRuns = (conversation) =>
+	call("jarvis.chat.report_runs.chat_report_runs", { conversation });
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
