@@ -11,16 +11,14 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import empty_reply_recovery as recovery
+from jarvis.tests._empty_reply_fixtures import MARKER_ONLY, ResendOn
 from jarvis.tests.harness.transcripts import EMPTY_REPLY, EMPTY_REPLY_TOOLS
 from jarvis.tests.race_harness import as_job, other_connection
 from jarvis.tests.test_pump import MSG, TEST_USER, TURN, _PumpTestCase
 
 RUN = "Jarvis Macro Run"
 CONV = "Jarvis Conversation"
-# A stored dispatch payload with the re-send marker alone (as the refused-session re-send
-# writes it).
-MARKER_ONLY = "marker_only"
-# Every ``origin`` the code writes on a user message, and whether it is a person's send.
+# Every ``origin`` of a user message, and whether it is a person's send.
 ORIGINS = {
 	"human": True,
 	"": False,
@@ -40,31 +38,6 @@ def _error(error=EMPTY_REPLY, *, state="error", text=""):
 
 def _no_read(*_a, **_k):
 	raise AssertionError("read")
-
-
-class ResendOn:
-	"""Mixin: the re-send switched on; every latency line kept in ``self.lines``."""
-
-	def setUp(self):
-		super().setUp()
-		self._prev_switch = frappe.local.conf.get(recovery.SWITCH)
-		frappe.local.conf[recovery.SWITCH] = 1
-		self.lines: list = []
-		self.logger = MagicMock()
-		self.logger.info.side_effect = lambda *args, **kw: self.lines.append(args)
-		self.logger.warning.side_effect = lambda *args, **kw: self.lines.append(args)
-		self._log_patch = patch("jarvis.chat.latency.get_logger", return_value=self.logger)
-		self._log_patch.start()
-
-	def tearDown(self):
-		self._log_patch.stop()
-		frappe.local.conf.pop(recovery.SWITCH, None)
-		if self._prev_switch is not None:
-			frappe.local.conf[recovery.SWITCH] = self._prev_switch
-		super().tearDown()
-
-	def lines_of(self, fmt):
-		return [a[1:] for a in self.lines if a and a[0] == fmt]
 
 
 class TestVariant(FrappeTestCase):
@@ -203,7 +176,7 @@ class _DecisionCase(ResendOn, _PumpTestCase):
 	def setUp(self):
 		super().setUp()
 		self.conv = self._mk_conv()
-		self.seed = self._server_msg(self.conv, "user", content="Reply with one word", origin="human")
+		self.seed = self._mk_msg(self.conv, content="Reply with one word", server=True, origin="human")
 		self.amsg = self._mk_msg(self.conv, role="assistant", content="", streaming=1)
 		self.rid = "er_" + frappe.generate_hash(length=8)
 		self._mk_turn(
@@ -241,7 +214,7 @@ class _DecisionCase(ResendOn, _PumpTestCase):
 		self._mk_turn(conv, rid, seed, state, dispatch_payload=json.dumps(stored), error=error, **extra)
 
 	def _tool(self, name, call_id=None, *, conv=None):
-		return self._server_msg(conv or self.conv, "tool", content="", tool_name=name, tool_call_id=call_id)
+		return self._mk_msg(conv or self.conv, "tool", "", server=True, tool_name=name, tool_call_id=call_id)
 
 
 class TestResendDecision(_DecisionCase):
@@ -303,10 +276,12 @@ class TestResendDecision(_DecisionCase):
 		self.assertEqual(self._decide(), (False, "class"))
 
 	def test_only_a_message_a_person_typed_is_sent_again(self):
-		for origin, human in ORIGINS.items():
+		origins = frappe.get_meta(MSG).get_field("origin").options.split("\n")
+		self.assertEqual(sorted(origins), sorted(ORIGINS), "a new origin needs a row in ORIGINS")
+		for origin in origins:
 			with self.subTest(origin=origin):
 				frappe.db.set_value(MSG, self.seed, "origin", origin)
-				self.assertEqual(self._decide(), (True, "plain") if human else (False, "origin"))
+				self.assertEqual(self._decide(), (True, "plain") if ORIGINS[origin] else (False, "origin"))
 
 	def test_a_file_box_chat_is_never_sent_again(self):
 		frappe.db.set_value(CONV, self.conv, "file_box", 1)
@@ -366,7 +341,7 @@ class TestResendDecision(_DecisionCase):
 	def test_a_tool_row_of_an_earlier_turn_counts_only_without_a_placeholder(self):
 		conv = self._mk_conv()
 		self._tool("create_doc", "old", conv=conv)
-		seed = self._server_msg(conv, "user", content="hi", origin="human")
+		seed = self._mk_msg(conv, server=True, origin="human")
 		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
 		self._mk_turn(conv, "er_earlier", seed, "streaming", version=4, assistant_message=amsg)
 		self.assertEqual(self._decide(conv=conv, rid="er_earlier", amsg=amsg), (True, "plain"))
@@ -406,16 +381,21 @@ class TestResendDecision(_DecisionCase):
 			else:
 				self._mk_turn(conv, f"er_{name}_{i}", msg, state, error=error)
 			frappe.db.set_value(TURN, f"er_{name}_{i}", "creation", at, update_modified=False)
-		seed = self._server_msg(conv, "user", content="now", origin="human")
+		seed = self._mk_msg(conv, content="now", server=True, origin="human")
 		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
 		self._mk_turn(conv, f"er_{name}_now", seed, "streaming", version=4, assistant_message=amsg)
 		return self._decide(conv=conv, rid=f"er_{name}_now", amsg=amsg)
 
 	def test_a_chat_whose_last_turn_got_an_empty_reply_is_not_sent_again(self):
-		for name, error in (("plain", EMPTY_REPLY), ("tools", EMPTY_REPLY_TOOLS)):
+		day = recovery.CHAT_WINDOW_S // 60
+		for name, error, ago in (
+			("plain", EMPTY_REPLY, 5),
+			("tools", EMPTY_REPLY_TOOLS, 5),
+			("edge", EMPTY_REPLY, day - 5),
+		):
 			with self.subTest(previous=name):
 				self.assertEqual(
-					self._chat_after(f"cf_{name}", ("errored", error, 5, False)),
+					self._chat_after(f"cf_{name}", ("errored", error, ago, False)),
 					(False, "chat"),
 					"sent again or not",
 				)
@@ -480,6 +460,26 @@ class TestBreaker(_DecisionCase):
 		self._failed(3, resent=MARKER_ONLY)
 		self._failed(3, state="cancelled")
 		self.assertEqual(self._decide(), (True, "plain"))
+
+	def test_a_missing_or_broken_payload_is_not_counted(self):
+		since = frappe.utils.add_to_date(None, seconds=-recovery.BREAKER_WINDOW_S)
+		self._failed(2)
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="earlier")
+		for i, raw in enumerate((None, "not json")):
+			rid = f"erb_{frappe.generate_hash(length=8)}_{i}"
+			self._mk_turn(
+				conv,
+				rid,
+				seed,
+				"errored",
+				error=EMPTY_REPLY,
+				dispatch_payload=raw,
+				finalizing_at=frappe.utils.now(),
+			)
+		self.assertEqual(recovery._breaker_count(self._target, since), 2)
+		self.assertEqual(self._decide(), (True, "plain"))
+		self.assertEqual(self.lines_of("empty_reply breaker=unreadable target=%s"), [])
 
 	def test_the_window_is_ten_minutes(self):
 		for ago, want in (

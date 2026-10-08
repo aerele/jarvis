@@ -38,12 +38,12 @@ from jarvis.chat import admission, empty_reply_recovery, finalize, prepare, pump
 from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.tests._empty_reply_fixtures import MARKER_ONLY, ResendOn
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
 from jarvis.tests._write_conflicts import set_value_conflict
 from jarvis.tests.harness import transcripts
 from jarvis.tests.harness.transcripts import EMPTY_REPLY
 from jarvis.tests.race_harness import other_connection, snapshot_isolation_off, snapshot_isolation_on
-from jarvis.tests.test_empty_reply_recovery import MARKER_ONLY, ResendOn
 from jarvis.tests.test_pump import TEST_USER, _PumpTestCase, _Recorder
 
 CONV = "Jarvis Conversation"
@@ -2765,7 +2765,7 @@ class _EmptyReplyCase(ResendOn, _PipelineCase):
 		return self.lines_of(self.OUTCOME)
 
 	def _human_msg(self, conv, content="hi"):
-		return self._server_msg(conv, "user", content=content, origin="human")
+		return self._mk_msg(conv, content=content, server=True, origin="human")
 
 	@staticmethod
 	def _stored(rid, resent=empty_reply_recovery.REASON):
@@ -2871,7 +2871,7 @@ class TestEmptyReplyRedispatch(_EmptyReplyCase):
 
 		def on_send(conv, rid, n):
 			if n == 1:
-				self._server_msg(conv, content="", tool_name=name, tool_status="completed")
+				self._mk_msg(conv, "tool", "", server=True, tool_name=name, tool_status="completed")
 
 		return on_send
 
