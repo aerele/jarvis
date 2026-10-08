@@ -486,3 +486,27 @@ class TestBreaker(_DecisionCase):
 		with patch.object(frappe, "log_error", side_effect=RuntimeError("db hiccup")):
 			self.assertEqual(self._decide(), (False, "breaker"))
 		self.assertEqual(self.lines_of("empty_reply breaker_alert_failed target=%s"), [(self._target,)])
+
+
+class TestOutcomeLine(FrappeTestCase):
+	FMT = "empty_reply outcome=%s code=%s run_id=%s conversation=%s target=%s"
+
+	def test_each_settled_state(self):
+		logger = MagicMock()
+		with patch("jarvis.chat.latency.get_logger", return_value=logger):
+			for state, code in (("finalizing", ""), ("errored", "empty-reply"), ("cancelled", "x")):
+				recovery.note_outcome(
+					run_id="r1", conversation="c1", state=state, relay_target_id="t1", code=code
+				)
+		self.assertEqual(
+			[c.args for c in logger.info.call_args_list],
+			[
+				(self.FMT, "ok", "", "r1", "c1", "t1"),
+				(self.FMT, "failed", "empty-reply", "r1", "c1", "t1"),
+				(self.FMT, "stopped", "", "r1", "c1", "t1"),
+			],
+		)
+
+	def test_never_raises(self):
+		with patch("jarvis.chat.latency.get_logger", side_effect=RuntimeError("log down")):
+			recovery.note_outcome(run_id="r1", conversation="c1", state="errored", relay_target_id="t1")
