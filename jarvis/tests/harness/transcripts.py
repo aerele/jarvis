@@ -52,6 +52,14 @@ import os
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "transcripts")
 
+# The agent runtime's empty replies: the plain form (sent again once) and the form that
+# says tool actions may be done (never sent again).
+EMPTY_REPLY = "\u26a0\ufe0f Agent couldn't generate a response. Please try again."
+EMPTY_REPLY_TOOLS = (
+	"\u26a0\ufe0f Agent couldn't generate a response. Note: some tool actions may have "
+	"already been executed \u2014 please verify before retrying."
+)
+
 
 def _stream_text(full: str, chunk_words: int = 2) -> list[dict]:
 	"""Expand a full answer into cumulative assistant deltas (word-chunked),

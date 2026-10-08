@@ -206,6 +206,17 @@ class _PumpTestCase(FrappeTestCase):
 		frappe.db.commit()
 		return doc.name
 
+	def _server_msg(self, conv: str, role: str = "tool", **fields) -> str:
+		"""A message row with the server-only fields (origin, tool_*) set."""
+		doc = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv, "seq": self._next_seq(conv), "role": role, **fields}
+		)
+		doc.flags.ignore_permissions = True
+		doc.flags.jarvis_server_write = True
+		doc.insert()
+		frappe.db.commit()
+		return doc.name
+
 	def _mk_turn(self, conv, run_id, seed, state, *, version=1, pump_epoch=0, reserved=0, **extra) -> None:
 		row = {
 			"doctype": TURN,
