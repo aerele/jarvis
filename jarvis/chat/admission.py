@@ -323,14 +323,9 @@ def _conv_has_other_active_turn(conversation: str, run_id: str) -> bool:
 	pump-owned in-flight turn during coexistence (OAR-11). CDX-24: also treats a
 	sibling 'recovering' Turn as blocking — a parked turn's old gateway run may
 	still be live, so the conversation stays single-flight until it settles."""
-	return bool(
-		frappe.db.sql(
-			"""SELECT 1 FROM `tabJarvis Chat Turn`
-			WHERE conversation=%(c)s AND name!=%(r)s AND state IN %(states)s
-			LIMIT 1""",
-			{"c": conversation, "r": run_id, "states": _CONV_BLOCKING_STATES},
-		)
-	)
+	from jarvis.chat import turn_state
+
+	return bool(turn_state.unfinished_turn(conversation, exclude_run_id=run_id, states=_CONV_BLOCKING_STATES))
 
 
 def _conv_legacy_busy(conversation: str) -> bool:

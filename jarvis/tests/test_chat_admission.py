@@ -996,6 +996,19 @@ class TestAcceptRefuseIf(_AdmissionTestCase):
 		self.assertFalse(frappe.db.exists(TURN, "ri-raise"))
 
 
+class TestSiblingTurnBlocksASend(_AdmissionTestCase):
+	"""_conv_has_other_active_turn counts the states a send waits for."""
+
+	def test_a_finalizing_sibling_does_not_block_and_a_queued_one_does(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		self._insert_turn(conv, "sib-" + conv[-6:], seed, "finalizing")
+		self.assertFalse(admission._conv_has_other_active_turn(conv, "me"))
+		frappe.db.set_value(TURN, "sib-" + conv[-6:], "state", "queued")
+		self.assertTrue(admission._conv_has_other_active_turn(conv, "me"))
+		self.assertFalse(admission._conv_has_other_active_turn(conv, "sib-" + conv[-6:]), "its own turn")
+
+
 class TestReservationExpiry(_AdmissionTestCase):
 	def _mk_dispatching_turn(self, conv, seed, run_id, *, reservation_at, **extra):
 		row = {
