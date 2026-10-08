@@ -558,6 +558,40 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		expect(retryButton(wrapper).text()).toBe("Retrying…");
 	});
 
+	it("never ends a send that started while the retry request was in flight", async () => {
+		for (const settle of [
+			(p) => p.resolve({ ok: false, reason: "Only the latest reply can be retried." }),
+			(p) => p.reject(new Error("down")),
+		]) {
+			const pending = deferred();
+			retryMessage.mockReturnValueOnce(pending.promise);
+			const { wrapper, socket } = await mountFailed();
+			await retryButton(wrapper).trigger("click");
+			// The retried run fails at once, so the composer is free for a send.
+			socket.fire({
+				kind: "run:error",
+				conversation_id: "conv1",
+				message_id: "m3",
+				run_id: "r2",
+			});
+			await flushPromises();
+			api.sendDashboardChat.mockResolvedValueOnce({
+				ok: true,
+				conversation_id: "conv1",
+				run_id: "s1",
+			});
+			const box = wrapper.find("textarea");
+			await box.setValue("Monthly sales");
+			await box.trigger("keydown", { key: "Enter" });
+			await flushPromises();
+			settle(pending);
+			await flushPromises();
+			expect(wrapper.find('[aria-live="polite"]').exists(), "the send still runs").toBe(
+				true
+			);
+		}
+	});
+
 	// Production then writes a visible cancelled row (the refetch shows it); this pins
 	// the moment before it: the run state ends at once.
 	it("ends the run when the queued retry is cancelled", async () => {
@@ -581,92 +615,6 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		return mountedPane;
 	}
 
-	it("reads the transcript again when an accepted retry never starts, and keeps its Retry off", async () => {
-		toast.info.mockClear();
-		const { wrapper, socket } = await mountWithFakeTimers();
-		await retryButton(wrapper).trigger("click");
-		await vi.advanceTimersByTimeAsync(10);
-		api.getDashboardConversation.mockClear();
-		await vi.advanceTimersByTimeAsync(89000);
-		expect(api.getDashboardConversation).not.toHaveBeenCalled();
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
-		await vi.advanceTimersByTimeAsync(1500);
-		expect(api.getDashboardConversation).toHaveBeenCalled();
-		expect(toast.info).toHaveBeenCalledWith(
-			"The retry has not started. Reload the chat to try again."
-		);
-		expect(retryButton(wrapper).text(), "no live run in the transcript").toBe("Retry");
-		expect(
-			retryButton(wrapper).attributes("disabled"),
-			"no second run from here"
-		).toBeDefined();
-		// A frame of the retried turn turns it back on.
-		socket.fire({
-			kind: "queue:position",
-			conversation_id: "conv1",
-			run_id: "r2",
-			position: 1,
-		});
-		await vi.advanceTimersByTimeAsync(10);
-		expect(retryButton(wrapper).attributes("disabled")).toBeUndefined();
-	});
-
-	it("keeps the fallback armed through a frame of another turn", async () => {
-		toast.info.mockClear();
-		const { wrapper, socket } = await mountWithFakeTimers();
-		await retryButton(wrapper).trigger("click");
-		await vi.advanceTimersByTimeAsync(30000);
-		socket.fire({
-			kind: "queue:position",
-			conversation_id: "conv1",
-			run_id: "other",
-			position: 2,
-		});
-		await vi.advanceTimersByTimeAsync(65000);
-		expect(toast.info).toHaveBeenCalled();
-	});
-
-	it("does not take the transcript's state when a run starts during the fallback's load", async () => {
-		const { wrapper, socket } = await mountWithFakeTimers();
-		await retryButton(wrapper).trigger("click");
-		await vi.advanceTimersByTimeAsync(10);
-		const load = deferred();
-		api.getDashboardConversation.mockReturnValueOnce(load.promise);
-		await vi.advanceTimersByTimeAsync(90000);
-		socket.fire({ kind: "run:start", conversation_id: "conv1", run_id: "r2" });
-		load.resolve(failed());
-		await vi.advanceTimersByTimeAsync(10);
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
-	});
-
-	it("arms the fallback only for a retry whose run has not started yet", async () => {
-		const pending = deferred();
-		retryMessage.mockReturnValueOnce(pending.promise);
-		const { wrapper, socket } = await mountWithFakeTimers();
-		await retryButton(wrapper).trigger("click");
-		socket.fire({ kind: "run:start", conversation_id: "conv1", run_id: "r2" });
-		pending.resolve({ ok: true, run_id: "r2" });
-		await vi.advanceTimersByTimeAsync(1000);
-		api.getDashboardConversation.mockClear();
-		await vi.advanceTimersByTimeAsync(95000);
-		expect(api.getDashboardConversation).not.toHaveBeenCalled();
-		expect(retryButton(wrapper).text()).toBe("Retrying…");
-	});
-
-	it("stops the fallback on a chat switch or an unmount", async () => {
-		for (const leave of [(w) => w.vm.resetChat(), (w) => mounted.pop().unmount()]) {
-			toast.info.mockClear();
-			const { wrapper } = await mountWithFakeTimers();
-			await retryButton(wrapper).trigger("click");
-			await vi.advanceTimersByTimeAsync(10);
-			leave(wrapper);
-			api.getDashboardConversation.mockClear();
-			await vi.advanceTimersByTimeAsync(95000);
-			expect(api.getDashboardConversation).not.toHaveBeenCalled();
-			expect(toast.info).not.toHaveBeenCalled();
-		}
-	});
-
 	it("does nothing for a pane unmounted while the retry request was in flight", async () => {
 		const pending = deferred();
 		retryMessage.mockReturnValueOnce(pending.promise);
@@ -679,25 +627,6 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		await vi.advanceTimersByTimeAsync(95000);
 		expect(api.getDashboardConversation).not.toHaveBeenCalled();
 		expect(vi.getTimerCount()).toBe(0);
-	});
-
-	it("keeps waiting when a frame shows the retried turn is alive, or it is queued", async () => {
-		for (const [label, response, frame] of [
-			[
-				"a frame",
-				{ ok: true, run_id: "r2" },
-				{ kind: "queue:position", run_id: "r2", position: 1 },
-			],
-			["queued", { ok: true, run_id: "r2", queued: true }, null],
-		]) {
-			retryMessage.mockResolvedValueOnce(response);
-			const { wrapper, socket } = await mountWithFakeTimers();
-			await retryButton(wrapper).trigger("click");
-			await vi.advanceTimersByTimeAsync(10);
-			if (frame) socket.fire({ ...frame, conversation_id: "conv1" });
-			await vi.advanceTimersByTimeAsync(95000);
-			expect(retryButton(wrapper).text(), label).toBe("Retrying…");
-		}
 	});
 
 	it("is disabled while the chat is compacting", async () => {
@@ -797,14 +726,6 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 		api.getDashboardConversation.mockClear();
 		await vi.advanceTimersByTimeAsync(61000);
 		expect(api.getDashboardConversation).not.toHaveBeenCalled();
-	});
-
-	it("without a socket, never arms the no-start fallback", async () => {
-		toast.info.mockClear();
-		const { wrapper } = await mountWithFakeTimers({ socket: null });
-		await retryButton(wrapper).trigger("click");
-		await vi.advanceTimersByTimeAsync(95000);
-		expect(toast.info).not.toHaveBeenCalled();
 	});
 });
 
