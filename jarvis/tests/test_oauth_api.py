@@ -1552,3 +1552,144 @@ class TestFetchAccountEmail(_OAuthApiBase):
 		with patch("jarvis.oauth.api.requests.get", return_value=resp):
 			email = oauth_api._fetch_account_email("OpenAI", "AT", "not-a-jwt")
 		self.assertEqual(email, "carol@example.com")
+
+
+class TestSigninNonceSurvivesCacheClear(_OAuthApiBase):
+	"""Prod 2026-10-08: a ChatGPT sign-in failed with "Your sign-in session was lost"
+	(unknown_nonce). pump.watchdog ends every five-minute tick with frappe.db.set_default,
+	which runs a full frappe.clear_cache(), and that deletes every site key outside the
+	``persistent_cache_keys`` hook. Any sign-in that spanned a tick lost its nonce. The hook
+	now lists the nonce hash; these tests pin that the hash survives and that the nonce's own
+	rules (expiry, sweep, user binding, single use) still hold after a clear."""
+
+	_PROBE = "jarvis:test_non_persistent_probe"
+	_CALLBACK = "http://localhost:1455/auth/callback?code=ABC&state={state}"
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.cache.delete_value(self._PROBE)
+		super().tearDown()
+
+	def _seed(self, nonce, *, expires_in=600):
+		frappe.cache.hset(
+			_CACHE_KEY,
+			nonce,
+			{
+				"provider": "OpenAI",
+				"model": "gpt-5.5",
+				"status": "pending",
+				"expires_at_ts": int(time.time()) + expires_in,
+				"verifier": "test-verifier",
+				"state": "test-state",
+				"originator_user": frappe.session.user,
+				"pool": True,
+			},
+		)
+		return nonce
+
+	def _clear_and_check_probe(self, clear):
+		"""Run ``clear`` with an ordinary key set, and prove it really was a full clear."""
+		frappe.cache.set_value(self._PROBE, "x")
+		clear()
+		self.assertIsNone(
+			frappe.cache.get_value(self._PROBE),
+			"an ordinary key must still be cleared - proves the hook, not a no-op clear",
+		)
+
+	def test_hook_prefix_covers_the_nonce_hash(self):
+		# Read from the module: the bench may serve another checkout's hooks.
+		from jarvis import hooks
+
+		self.assertTrue(any(oauth_api._CACHE_KEY.startswith(p) for p in hooks.persistent_cache_keys))
+
+	def test_pool_and_direct_signins_survive_a_full_clear_cache(self):
+		pool = oauth_api.begin_pool_account_signin("OpenAI", "gpt-5.5")
+		direct = oauth_api.begin_paste_signin("OpenAI", "gpt-5.5")
+		self.assertTrue(pool["ok"] and direct["ok"], msg=f"{pool} {direct}")
+
+		self._clear_and_check_probe(frappe.clear_cache)
+
+		for out in (pool, direct):
+			entry, err = oauth_api._validate_signin_nonce(out["data"]["nonce"])
+			self.assertIsNone(err, msg=str(err))
+			self.assertEqual(entry["status"], "pending")
+
+	def test_signin_survives_the_watchdog_tick(self):
+		from jarvis.chat.pump import WATCHDOG_LAST_COMPLETED_KEY
+
+		nonce = self._seed("p_" + "a" * 46)
+		self._clear_and_check_probe(
+			lambda: frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+		)
+
+		entry, err = oauth_api._validate_signin_nonce(nonce)
+		self.assertIsNone(err, msg=str(err))
+
+	@patch("jarvis.oauth.api._exchange_code")
+	def test_complete_after_a_clear_reaches_the_state_check(self, mock_exchange):
+		nonce = self._seed("p_" + "b" * 46)
+		frappe.clear_cache()
+
+		out = oauth_api.complete_pool_account_signin(nonce, self._CALLBACK.format(state="wrong-state"))
+
+		self.assertEqual(out["error"]["code"], "state_mismatch", msg=str(out))
+		mock_exchange.assert_not_called()
+		self.assertIsNotNone(frappe.cache.hget(_CACHE_KEY, nonce), "a state mismatch must not burn the nonce")
+
+	def test_expired_entry_still_expires_after_a_clear(self):
+		nonce = self._seed("p_" + "c" * 46, expires_in=-1)
+		frappe.clear_cache()
+
+		entry, err = oauth_api._validate_signin_nonce(nonce)
+
+		self.assertIsNone(entry)
+		self.assertEqual(err["error"]["code"], "expired")
+		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))
+
+	def test_sweep_still_drops_expired_entries_after_a_clear(self):
+		# The five-minute clear used to empty the hash as a side effect. With the hash kept,
+		# the sweep on every begin is what bounds it.
+		live = self._seed("p_" + "d" * 46)
+		stale = self._seed("p_" + "e" * 46, expires_in=-1)
+		frappe.clear_cache()
+
+		oauth_api._gc_expired_nonces()
+
+		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, stale))
+		self.assertIsNotNone(frappe.cache.hget(_CACHE_KEY, live))
+
+	def test_user_binding_still_holds_after_a_clear(self):
+		nonce = self._seed("p_" + "f" * 46)
+		frappe.clear_cache()
+		frappe.set_user("Guest")
+
+		entry, err = oauth_api._validate_signin_nonce(nonce)
+
+		self.assertIsNone(entry)
+		self.assertEqual(err["error"]["code"], "unknown_nonce")
+		# The binding refused it, not a wipe: the user who began it still can.
+		frappe.set_user("Administrator")
+		self.assertIsNone(oauth_api._validate_signin_nonce(nonce)[1])
+
+	@patch("jarvis.oauth.api.subscription_health.record_signin_complete")
+	@patch("jarvis.oauth.api.pending_capture.create_capture", return_value={"capture_id": "oacap_test"})
+	@patch("jarvis.oauth.api._exchange_code")
+	def test_completed_nonce_is_still_single_use_after_a_clear(self, mock_exchange, _capture, _health):
+		mock_exchange.return_value = {
+			"access_token": _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"}}),
+			"refresh_token": "RT",
+			"expires_in": 3600,
+			"id_token": "ID.TOKEN",
+			"email": "one@example.com",
+		}
+		nonce = self._seed("p_" + "g" * 46)
+		frappe.clear_cache()
+		url = self._CALLBACK.format(state="test-state")
+
+		first = oauth_api.complete_pool_account_signin(nonce, url)
+		frappe.clear_cache()
+		second = oauth_api.complete_pool_account_signin(nonce, url)
+
+		self.assertTrue(first["ok"], msg=str(first))
+		self.assertEqual(second["error"]["code"], "unknown_nonce")
+		mock_exchange.assert_called_once()
