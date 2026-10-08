@@ -390,7 +390,7 @@ class TestScheduledSlotIsDispatchedOnce(DispatchIdempotencyTestCase):
 		frappe.db.commit()
 
 		with self._delegate_stubbed():
-			agent_scheduler._sweep_one(stale, now_datetime(), "Administrator", set())
+			agent_scheduler._sweep_one(stale, now_datetime(), set())
 
 		self.assertEqual(self._launched(inst), launched, "the stale worker must not re-dispatch")
 		self.assertEqual(len(self._dispatched_for(inst)), 1)

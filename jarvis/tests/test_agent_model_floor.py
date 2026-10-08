@@ -1140,7 +1140,7 @@ class TestRunGate(AgentModelDBBase):
 			patch.object(agent_scheduler, "_advance") as advance,
 			patch.object(agent_scheduler, "_dispatch") as dispatch,
 		):
-			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), "Administrator", set())
+			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), set())
 		dispatch.assert_not_called()
 		advance.assert_called_once()
 		self.assertIn("scheduled run skipped", record.call_args.args[1])
@@ -1354,7 +1354,6 @@ class TestScheduledModelRefusals(AgentModelDBBase):
 				row,
 				frappe.utils.now_datetime(),
 				run_as=OWNER,
-				original_user="Administrator",
 				source_apps=None,
 				model_gate={"ok": True, "model_source": "choice"},
 			)

@@ -2929,14 +2929,16 @@ def _log_unreadable_snapshot(run_name: str) -> None:
 	who queued it, here the run's owner: the row is written as Administrator. At most
 	one row per run even if the cache lost its marker. The row names the run, never
 	its text."""
-	frappe.set_user("Administrator")
-	title = f"{_UNREADABLE_SNAPSHOT_LOG}: {run_name}"
-	if frappe.db.exists("Error Log", {"method": title}):
-		return
-	frappe.log_error(
-		title=title,
-		message=f"run {run_name}: its steps snapshot could not be read; the live macro was used.",
-	)
+	from jarvis._session import impersonate
+
+	with impersonate("Administrator"):
+		title = f"{_UNREADABLE_SNAPSHOT_LOG}: {run_name}"
+		if frappe.db.exists("Error Log", {"method": title}):
+			return
+		frappe.log_error(
+			title=title,
+			message=f"run {run_name}: its steps snapshot could not be read; the live macro was used.",
+		)
 
 
 def _snapshot_cleared() -> dict:

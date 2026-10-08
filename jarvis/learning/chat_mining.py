@@ -47,6 +47,8 @@ import re
 import frappe
 from frappe.utils import add_days, cint, get_datetime, now_datetime
 
+from jarvis._session import impersonate
+
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 QUESTION = "Jarvis Personalise Question"
@@ -193,21 +195,17 @@ def _process_all() -> None:
 	with redis_lock(LOCK_NAME, timeout_s=JOB_TIMEOUT_S, blocking_timeout_s=0) as acquired:
 		if not acquired:
 			return
-		original_user = frappe.session.user
 		status = "failed: unexpected error; see Error Log"
 		try:
-			frappe.set_user("Administrator")
-			status = _process_locked()
-		except Exception:
-			frappe.log_error(
-				title="jarvis chat mining: sweep crashed",
-				message=frappe.get_traceback(),
-			)
+			with impersonate("Administrator"):
+				try:
+					status = _process_locked()
+				except Exception:
+					frappe.log_error(
+						title="jarvis chat mining: sweep crashed",
+						message=frappe.get_traceback(),
+					)
 		finally:
-			try:
-				frappe.set_user(original_user)
-			except Exception:
-				pass
 			_stamp_status(status)
 
 
@@ -644,88 +642,86 @@ def _persist_candidates(mined: list[dict]) -> dict:
 		return stats
 	from jarvis.learning import lifecycle, voice_facts
 
-	original_user = frappe.session.user
 	prev_flag = frappe.flags.jarvis_pattern_engine
 	try:
-		frappe.set_user("Administrator")
-		frappe.flags.jarvis_pattern_engine = True
-		run = frappe.get_doc(
-			{
-				"doctype": RUN,
-				"status": "Running",
-				"trigger": "manual",
-				"started_at": now_datetime(),
-				"scan_mode": "chat",
-				"coverage_note": "Chat-transcript question mining (daily sweep).",
-			}
-		)
-		run.flags.ignore_permissions = True
-		run.insert()
-		stats["run"] = run.name
+		with impersonate("Administrator"):
+			frappe.flags.jarvis_pattern_engine = True
+			run = frappe.get_doc(
+				{
+					"doctype": RUN,
+					"status": "Running",
+					"trigger": "manual",
+					"started_at": now_datetime(),
+					"scan_mode": "chat",
+					"coverage_note": "Chat-transcript question mining (daily sweep).",
+				}
+			)
+			run.flags.ignore_permissions = True
+			run.insert()
+			stats["run"] = run.name
 
-		completed = False
-		try:
-			for fact in mined:
-				cand = _candidate_from_fact(fact)
-				try:
-					outcome = lifecycle.upsert_candidate(cand, run)
-				except Exception:
-					frappe.log_error(
-						title="jarvis chat mining: candidate upsert failed",
-						message=frappe.get_traceback(),
-					)
-					continue
-				if outcome == "created":
-					stats["created"] += 1
-				elif outcome == "updated":
-					stats["updated"] += 1
-				else:
-					stats["duplicates"] += 1
-				if outcome in ("created", "updated"):
-					# NOT surfaced here: a pattern mined from someone's chats stays
-					# hidden from reviewers until its owner answers the question
-					# (chat_pattern_privacy; answering surfaces it). Stamp the
-					# private-provenance flag: a chat transcript is personal, so a
-					# reviewer promoting the pattern org-wide is warned to scrub
-					# personal nuances (voice_facts PART 2 TASK 16 idiom). Guarded:
-					# a failure here must never leave the Run row stuck "Running"
-					# (orchestrator treats ANY Running row — regardless of
-					# scan_mode — as a run-in-progress and would block the nightly
-					# behavioural engine).
+			completed = False
+			try:
+				for fact in mined:
+					cand = _candidate_from_fact(fact)
 					try:
-						voice_facts._flag_personalise_origin(cand["pattern_key"])
+						outcome = lifecycle.upsert_candidate(cand, run)
 					except Exception:
 						frappe.log_error(
-							title="jarvis chat mining: candidate post-processing failed",
+							title="jarvis chat mining: candidate upsert failed",
 							message=frappe.get_traceback(),
 						)
-			completed = True
-		finally:
-			# Always finalize the Run to a terminal status, even if the loop threw,
-			# so a stuck "Running" chat run can never wedge the pattern engine.
-			frappe.db.set_value(
-				RUN,
-				run.name,
-				{
-					"status": "Completed" if completed else "Failed",
-					"ended_at": now_datetime(),
-					"candidates_found": stats["total"],
-					"proposals_created": stats["created"],
-					"proposals_updated": stats["updated"],
-					"duplicates_suppressed": stats["duplicates"],
-					"coverage_note": (
-						f"Chat-transcript question mining: {stats['total']} candidate(s) "
-						f"({stats['created']} created, {stats['updated']} updated, "
-						f"{stats['duplicates']} suppressed)."
-						+ ("" if completed else " [run aborted early; see Error Log]")
-					),
-				},
-				update_modified=False,
-			)
-			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
+						continue
+					if outcome == "created":
+						stats["created"] += 1
+					elif outcome == "updated":
+						stats["updated"] += 1
+					else:
+						stats["duplicates"] += 1
+					if outcome in ("created", "updated"):
+						# NOT surfaced here: a pattern mined from someone's chats stays
+						# hidden from reviewers until its owner answers the question
+						# (chat_pattern_privacy; answering surfaces it). Stamp the
+						# private-provenance flag: a chat transcript is personal, so a
+						# reviewer promoting the pattern org-wide is warned to scrub
+						# personal nuances (voice_facts PART 2 TASK 16 idiom). Guarded:
+						# a failure here must never leave the Run row stuck "Running"
+						# (orchestrator treats ANY Running row — regardless of
+						# scan_mode — as a run-in-progress and would block the nightly
+						# behavioural engine).
+						try:
+							voice_facts._flag_personalise_origin(cand["pattern_key"])
+						except Exception:
+							frappe.log_error(
+								title="jarvis chat mining: candidate post-processing failed",
+								message=frappe.get_traceback(),
+							)
+				completed = True
+			finally:
+				# Always finalize the Run to a terminal status, even if the loop threw,
+				# so a stuck "Running" chat run can never wedge the pattern engine.
+				frappe.db.set_value(
+					RUN,
+					run.name,
+					{
+						"status": "Completed" if completed else "Failed",
+						"ended_at": now_datetime(),
+						"candidates_found": stats["total"],
+						"proposals_created": stats["created"],
+						"proposals_updated": stats["updated"],
+						"duplicates_suppressed": stats["duplicates"],
+						"coverage_note": (
+							f"Chat-transcript question mining: {stats['total']} candidate(s) "
+							f"({stats['created']} created, {stats['updated']} updated, "
+							f"{stats['duplicates']} suppressed)."
+							+ ("" if completed else " [run aborted early; see Error Log]")
+						),
+					},
+					update_modified=False,
+				)
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 	finally:
 		frappe.flags.jarvis_pattern_engine = prev_flag
-		frappe.set_user(original_user)
 	return stats
 
 

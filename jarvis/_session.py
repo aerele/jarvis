@@ -84,10 +84,10 @@ def impersonate(user: str | None):
 	# caller's session in the finally (never leave it gutted / half-switched).
 	try:
 		setattr(frappe.local, _AUTH_USER_ATTR, outer_auth or orig_user)
-		frappe.set_user(user)
+		frappe.set_user(user)  # nosemgrep: frappe-setuser -- the audited impersonation seam
 		yield
 	finally:
 		setattr(frappe.local, _AUTH_USER_ATTR, outer_auth)
-		frappe.set_user(orig_user)
+		frappe.set_user(orig_user)  # nosemgrep: frappe-setuser -- the audited impersonation seam
 		frappe.local.session.sid = orig_sid
 		frappe.local.session.data = orig_data
