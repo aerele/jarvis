@@ -337,7 +337,8 @@ test("DashboardChatPane restores run state on transcript load and uses semantic 
 		"utf8"
 	);
 	assert.match(paneSrc, /const restoredRun = restoreDashboardRunState\(messages\.value\)/);
-	assert.match(paneSrc, /runActive\.value = restoredRun\.active/);
+	assert.match(paneSrc, /applyRestoredRun\(restoredRun\)/);
+	assert.match(paneSrc, /runActive\.value = restored\.active/);
 	assert.match(paneSrc, /text-ink-green-3/);
 	assert.match(paneSrc, /text-ink-blue-3/);
 });

@@ -148,12 +148,14 @@ function providerFor(raw, context) {
 // Codes that say "the provider failed" without saying why. A dead sign-in on a pool tenant arrives
 // this way (CLIProxy's 503 is flattened to a bare "provider internal error"), so these are the only
 // codes the site's own expired-sign-in state may upgrade. Specific causes (authentication, quota,
-// rate-limit, safety, ...) are never overridden.
+// rate-limit, safety, ...) are never overridden, nor is empty-reply-tools: its warning that some
+// actions may already be done must stay.
 const GENERIC_CODES = new Set([
   "provider",
   "gateway",
   "service-unavailable",
   "internal",
+  "empty-reply",
 ]);
 // "openai_compat/gpt-5.6-terra" and "gpt-5.6-terra" are the same model.
 const bareModel = (id) =>

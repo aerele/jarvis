@@ -20,6 +20,11 @@ class TestErrorTaxonomy(unittest.TestCase):
 			with self.subTest(error=case["error"]):
 				self.assertEqual(classify_error_text(case["error"]), case["code"])
 
+	def test_the_tools_variant_is_matched_before_the_plain_empty_reply(self):
+		# Specific causes that also name an empty reply are pinned by the fixture cases.
+		codes = [code for code, _, _ in _RULES]
+		self.assertLess(codes.index("empty-reply-tools"), codes.index("empty-reply"))
+
 	def test_structured_error(self):
 		self.assertEqual(classify_error_text({"error": {"type": "overloaded_error"}}), "service-unavailable")
 
