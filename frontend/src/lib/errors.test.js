@@ -6,7 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { errMessage, turnErrorInfo, GENERIC_ERROR_MESSAGE } from "./errors.js";
+import { errMessage, isSessionExpired, turnErrorInfo, GENERIC_ERROR_MESSAGE } from "./errors.js";
 import rules from "../../../jarvis/public/js/turn_error_rules.mjs";
 
 test("extracts the first server message when present", () => {
@@ -403,6 +403,8 @@ test("retryable is pinned per code", () => {
 		"timeout",
 		"connection",
 		"session-reset",
+		"empty-reply",
+		"empty-reply-tools",
 		"gateway",
 	]);
 	for (const { code } of rules) {
@@ -411,6 +413,18 @@ test("retryable is pinned per code", () => {
 	assert.equal(turnErrorInfo("No endpoints found").retryable, true);
 	assert.equal(turnErrorInfo("429 model_not_found").retryable, false);
 	assert.equal(turnErrorInfo("503 Service Unavailable: upstream not found").retryable, true);
+});
+
+// An empty reply names no cause, so the site's expired sign-in for that model explains it.
+// The tools variant keeps its own copy: its warning that actions may be done must stay.
+test("an empty reply on a model with an expired sign-in reads as that sign-in", () => {
+	const expiredModels = { "gpt-5.6-terra": { upstream: "openai" } };
+	const context = { model: "gpt-5.6-terra", expiredModels };
+	for (const { error, code } of cases.filter((c) => c.code.startsWith("empty-reply"))) {
+		assert.equal(turnErrorInfo(error).code, code);
+		const expected = code === "empty-reply" ? "subscription-expired" : code;
+		assert.equal(turnErrorInfo(error, "", context).code, expected, error);
+	}
 });
 
 test("a known provider rewrites the availability copy but keeps the rule's retry", () => {
@@ -445,4 +459,67 @@ test("classification reads at most the first 8 KB", () => {
 	const started = Date.now();
 	turnErrorInfo("device " + "pairing ".repeat(40000));
 	assert.ok(Date.now() - started < 500, "pathological input must stay fast");
+});
+
+// #644: an expired session answers 403 with Frappe's own "not whitelisted"
+// PermissionError text, and Frappe clears the user_id cookie. The SPA must say
+// the session expired instead of echoing that text.
+function withCookie(cookie, fn) {
+	globalThis.document = {
+		cookie,
+		createElement: () => ({
+			set innerHTML(v) {
+				this.textContent = v;
+			},
+		}),
+	};
+	try {
+		return fn();
+	} finally {
+		delete globalThis.document;
+	}
+}
+const SESSION_SENTENCE = "Your session has expired. Please sign in again.";
+const expired403 = () => {
+	const e = new Error("jarvis.chat.dashboards_api.save_dashboard PermissionError");
+	e.status = 403;
+	e.exc_type = "PermissionError";
+	e.messages = [
+		"<details><summary>You are not permitted to access this resource. Login to access</summary>Function <strong>jarvis.chat.dashboards_api.save_dashboard</strong> is not whitelisted.</details>",
+	];
+	return e;
+};
+
+test("#644: a 403 with a server message and a cleared cookie reads as an expired session", () => {
+	withCookie("user_id=Guest; sid=Guest", () => {
+		assert.equal(errMessage(expired403()), SESSION_SENTENCE);
+		assert.equal(isSessionExpired(expired403()), true);
+	});
+	withCookie("", () => assert.equal(errMessage(expired403()), SESSION_SENTENCE));
+});
+
+test("#644: the same 403 on a live session keeps the server's own message", () => {
+	withCookie("user_id=kavin%40aerele.in; sid=abc", () => {
+		const e = expired403();
+		assert.equal(isSessionExpired(e), false);
+		const [serverMessage] = e.messages;
+		assert.equal(errMessage(e), serverMessage);
+	});
+});
+
+test("#644: a stray % in user_id or a cookie-less document never throws", () => {
+	withCookie("user_id=100%; sid=x", () => assert.doesNotThrow(() => errMessage(expired403())));
+	globalThis.document = {};
+	try {
+		assert.doesNotThrow(() => errMessage(expired403()));
+	} finally {
+		delete globalThis.document;
+	}
+});
+
+test("#644: a non-auth error is never an expired session", () => {
+	withCookie("user_id=Guest", () => {
+		assert.equal(isSessionExpired({ status: 500, message: "boom" }), false);
+		assert.equal(errMessage({ status: 500, message: "boom" }), "boom");
+	});
 });

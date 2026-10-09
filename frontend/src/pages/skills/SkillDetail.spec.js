@@ -278,6 +278,33 @@ describe("SkillDetail: File Box", () => {
 		expect(fileBoxSwitch(w).props("disabled")).toBe(false);
 	});
 
+	it("locks Enabled for a non-reviewer once a shared skill is saved off", async () => {
+		const enabledSwitch = (w) =>
+			w.findAllComponents({ name: "Switch" }).find((s) => s.props("label") === "Enabled");
+		const shared = { ...SAVED, scope: "Org" };
+		w = await mountSkill({ id: "SK-1" }, shared); // saved on: switching off is free
+		expect(enabledSwitch(w).props("disabled")).toBe(false);
+		expect(enabledSwitch(w).props("description")).toContain(
+			"Once off, only a reviewer can turn a shared skill back on"
+		);
+		w.unmount();
+		w = await mountSkill({ id: "SK-1" }, { ...shared, enabled: 0 });
+		expect(enabledSwitch(w).props("disabled")).toBe(true);
+		expect(enabledSwitch(w).props("description")).toContain(
+			"Only a reviewer can turn a shared skill back on"
+		);
+		w.unmount();
+		getSkillsAreaCaps.mockResolvedValueOnce({ review: 1 });
+		w = await mountSkill({ id: "SK-1" }, { ...shared, enabled: 0 }); // a reviewer may
+		expect(enabledSwitch(w).props("disabled")).toBe(false);
+		w.unmount();
+		w = await mountSkill({ id: "SK-1" }, { ...SAVED, enabled: 0 }); // a private skill
+		expect(enabledSwitch(w).props("disabled")).toBe(false);
+		expect(enabledSwitch(w).props("description")).toBe(
+			"Off = saved as a draft, not used by the assistant."
+		);
+	});
+
 	it("is read-only for a viewer who can't edit the skill", async () => {
 		w = await mountSkill({ id: "SK-1" }, { ...SAVED, can_edit: 0, use_in_file_box: 1 });
 		expect(fileBoxSwitch(w).props("disabled")).toBe(true);

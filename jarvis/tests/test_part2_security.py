@@ -430,6 +430,93 @@ class TestSkillPromotionWorkflow(Part2Base):
 				custom_skills_api.list_skill_promotion_requests()
 
 
+class TestOnlyTheOwnerShares(Part2Base):
+	"""``share_custom_skill`` replaces a skill's share list. Only its owner may."""
+
+	def setUp(self):
+		super().setUp()
+		# The base creates the users once per class and every tearDown starts with a
+		# rollback: on a fresh database they are gone after this class's first test.
+		_ensure_user(USER_A, ["Jarvis User", "Sales User"])
+		_ensure_user(USER_B, ["Jarvis User"])
+		_ensure_user(REVIEWER, ["Jarvis User", "Jarvis Skill Reviewer"])
+
+	def _shared(self, name):
+		return sorted(frappe.get_all("Jarvis Custom Skill Share", filters={"parent": name}, pluck="user"))
+
+	def test_owner_shares_and_the_list_is_cleaned(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-own")
+		with _as(USER_A):
+			out = custom_skills_api.share_custom_skill(
+				skill.name, [USER_B, USER_B, USER_A, "Guest", "nobody-here@example.com", "", None]
+			)
+		self.assertEqual(out["data"]["count"], 1)
+		self.assertEqual(self._shared(skill.name), [USER_B])
+
+	def test_a_recipient_cannot_share_it_on(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-recipient", shared_with=[USER_B])
+		with _as(USER_B):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [REVIEWER])
+		self.assertEqual(self._shared(skill.name), [USER_B])
+
+	def test_a_reviewer_who_is_not_the_owner_cannot_share_it(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-reviewer")
+		with _as(REVIEWER):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [USER_B])
+		self.assertEqual(self._shared(skill.name), [])
+
+	def test_sharing_a_role_skill_with_someone_new_needs_a_reviewer(self):
+		# A share reaches a person whatever their roles, and a reviewed skill is served
+		# before that person's own of the same name: adding one widens the audience.
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(
+			USER_A, f"{PFX}-share-role", scope="Role", target_role="Sales User", shared_with=[USER_B]
+		)
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [USER_B, REVIEWER])
+		self.assertEqual(self._shared(skill.name), [USER_B])
+		# Taking a share away is free, and putting it back is not.
+		with _as(USER_A):
+			custom_skills_api.share_custom_skill(skill.name, [])
+		self.assertEqual(self._shared(skill.name), [])
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [USER_B])
+		self.assertEqual(self._shared(skill.name), [])
+		# The same for a company skill narrowed to some roles.
+		narrowed = _mk_skill(USER_A, f"{PFX}-share-org", scope="Org", allowed_roles=["Sales User"])
+		with _as(USER_A):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(narrowed.name, [USER_B])
+
+	def test_a_reviewer_who_owns_a_role_skill_may_share_it(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill("Administrator", f"{PFX}-share-rev", scope="Role", target_role="Sales User")
+		with _as("Administrator"):
+			custom_skills_api.share_custom_skill(skill.name, [USER_B])
+		self.assertEqual(self._shared(skill.name), [USER_B])
+
+	def test_a_system_manager_who_is_not_the_owner_cannot_share_it(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-share-sm")
+		with _as("Administrator"):
+			with self.assertRaises(frappe.PermissionError):
+				custom_skills_api.share_custom_skill(skill.name, [USER_B])
+		self.assertEqual(self._shared(skill.name), [])
+
+
 class TestWikiPromotionRequestLeak(Part2Base):
 	"""TASK 14: a generic-REST insert of a promotion request pointing at another
 	user's private wiki page must not snapshot that page's body."""
@@ -912,6 +999,133 @@ class TestSkillPromotionContentBinding(Part2Base):
 		self.assertEqual(
 			frappe.db.get_value(SKILL, skill.name, "instructions"), "now editable as a private skill"
 		)
+
+	def test_guard_binds_the_name_the_switch_and_the_audience_of_a_shared_skill(self):
+		# get_skill serves a reviewed row before anyone's own of the same name, so who a
+		# shared skill reaches, and under which name, is as review-bound as its text.
+		skill = _mk_skill(USER_A, f"{PFX}-bound", scope="Org")
+		off = _mk_skill(USER_A, f"{PFX}-bound-off", scope="Org", enabled=0)
+		role = _mk_skill(USER_A, f"{PFX}-bound-role", scope="Role", target_role="Sales User")
+
+		def refused(name, change):
+			with _as(USER_A):
+				doc = frappe.get_doc(SKILL, name)
+				change(doc)
+				with self.assertRaises(frappe.PermissionError):
+					doc.save()
+
+		refused(skill.name, lambda d: d.update({"skill_name": f"{PFX}-bound-renamed"}))
+		refused(off.name, lambda d: d.update({"enabled": 1}))
+		refused(skill.name, lambda d: d.append("allowed_roles", {"role": "Sales User"}))
+		refused(role.name, lambda d: d.update({"target_role": "Jarvis User"}))
+		# Narrowing a company skill to one role names a new audience too.
+		refused(skill.name, lambda d: d.update({"scope": "Role", "target_role": "Sales User"}))
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "skill_name"), f"{PFX}-bound")
+		self.assertEqual(int(frappe.db.get_value(SKILL, off.name, "enabled")), 0)
+
+		# Switching it off is always allowed: fewer people told is safe.
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.enabled = 0
+			doc.save()
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill.name, "enabled")), 0)
+
+		# A reviewer (System Manager here, who may write any row) can do each of them.
+		with _as("Administrator"):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.enabled = 1
+			doc.append("allowed_roles", {"role": "Sales User"})
+			doc.save()
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill.name, "enabled")), 1)
+
+	def test_guard_binds_taking_a_role_away_from_a_shared_skill(self):
+		# Fewer allowed roles on a company skill means MORE people are told it.
+		skill = _mk_skill(USER_A, f"{PFX}-unrole", scope="Org", allowed_roles=["Sales User"])
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.set("allowed_roles", [])
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+		self.assertEqual(
+			frappe.get_all("Jarvis Custom Skill Allowed Role", filters={"parent": skill.name}, pluck="role"),
+			["Sales User"],
+		)
+
+	def test_guard_covers_an_old_skill_stored_with_no_scope(self):
+		# Rows from before the scope ladder carry no scope and mean company-wide.
+		skill = _mk_skill(USER_A, f"{PFX}-noscope", scope="Org")
+		off = _mk_skill(USER_A, f"{PFX}-noscope-off", scope="Org", enabled=0)
+		for name in (skill.name, off.name):
+			frappe.db.set_value(SKILL, name, "scope", None, update_modified=False)
+		for name, change in (
+			(skill.name, lambda d: d.update({"skill_name": f"{PFX}-noscope-renamed"})),
+			(skill.name, lambda d: d.append("allowed_roles", {"role": "Sales User"})),
+			(off.name, lambda d: d.update({"enabled": 1})),
+		):
+			with _as(USER_A):
+				doc = frappe.get_doc(SKILL, name)
+				change(doc)
+				with self.assertRaises(frappe.PermissionError):
+					doc.save()
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.enabled = 0
+			doc.save()
+		stored = frappe.db.get_value(SKILL, skill.name, ["enabled", "scope", "skill_name"], as_dict=True)
+		self.assertEqual((int(stored.enabled), stored.scope, stored.skill_name), (0, "Org", f"{PFX}-noscope"))
+
+	def test_an_old_role_skill_whose_roles_lack_its_target_role_can_still_be_switched_off(self):
+		# The save rewrites such a row's roles to its target role by itself; that is
+		# not the owner's change, and switching a skill off must stay possible.
+		skill = _mk_skill(USER_A, f"{PFX}-oldrole", scope="Role", target_role="Sales User")
+		frappe.db.set_value(
+			"Jarvis Custom Skill Allowed Role",
+			{"parent": skill.name},
+			"role",
+			"Jarvis User",
+			update_modified=False,
+		)
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.enabled = 0
+			doc.save()
+		self.assertEqual(int(frappe.db.get_value(SKILL, skill.name, "enabled")), 0)
+		self.assertEqual(
+			frappe.get_all("Jarvis Custom Skill Allowed Role", filters={"parent": skill.name}, pluck="role"),
+			["Sales User"],
+		)
+		# Its own change of audience is still refused.
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.append("allowed_roles", {"role": "Jarvis User"})
+			with self.assertRaises(frappe.PermissionError):
+				doc.save()
+
+	def test_the_operator_check_lists_shared_skills_no_reviewer_owns(self):
+		from jarvis.chat.skill_permissions import shared_skills_no_reviewer_owns
+
+		old = _mk_skill(USER_A, f"{PFX}-chk-old", scope="Org", shared_with=[USER_B])
+		frappe.db.set_value(SKILL, old.name, "scope", None, update_modified=False)
+		role = _mk_skill(USER_A, f"{PFX}-chk-role", scope="Role", target_role="Sales User")
+		_mk_skill(USER_B, f"{PFX}-chk-role", scope="User")  # someone's own, same name
+		_mk_skill(REVIEWER, f"{PFX}-chk-reviewed", scope="Org")
+		_mk_skill(USER_A, f"{PFX}-chk-private", scope="User")
+		found = {r["name"]: r for r in shared_skills_no_reviewer_owns() if r["skill_name"].startswith(PFX)}
+		self.assertEqual(set(found), {old.name, role.name})
+		self.assertEqual(
+			(found[old.name]["scope"], found[old.name]["shared_with"], found[old.name]["same_name_owned_by"]),
+			("Org", 1, []),
+		)
+		self.assertEqual(found[role.name]["same_name_owned_by"], [USER_B])
+
+	def test_a_private_skill_is_renamed_and_switched_freely(self):
+		skill = _mk_skill(USER_A, f"{PFX}-free", scope="User", enabled=0)
+		with _as(USER_A):
+			doc = frappe.get_doc(SKILL, skill.name)
+			doc.enabled = 1
+			doc.skill_name = f"{PFX}-free-renamed"
+			doc.save()
+		self.assertEqual(frappe.db.get_value(SKILL, skill.name, "skill_name"), f"{PFX}-free-renamed")
 
 	def test_reviewer_may_change_shared_skill_content(self):
 		# The guard binds CONTENT to the four-eyes authority (a reviewer), mirroring
@@ -2158,8 +2372,8 @@ class TestRoleScopedSkillInvocation(Part2Base):
 		self.assertEqual(roles_on(), [])
 		self.assertIn(prefixed_slug(f"{PFX}-widen"), {p["slug"] for p in custom_skills.build_push_payload()})
 
-	# ── #477: two clause shapes, only one of which claims the file is on disk ───
-	def test_pushed_org_skill_keeps_the_apply_them_clause(self):
+	# ── #477, then pointer bodies: every invoked skill is fetched, none is "on disk" ───
+	def test_pushed_org_skill_gets_the_fetch_clause_too(self):
 		from jarvis.chat.custom_skills import invoked_skill_clause
 
 		# Owned by the invoker: /slug matches on owner / shared_with / role, so an Org
@@ -2168,8 +2382,20 @@ class TestRoleScopedSkillInvocation(Part2Base):
 		self.assertIn(prefixed_slug(f"{PFX}-ondisk"), {p["slug"] for p in build_push_payload()})
 		with _as(USER_A):
 			clause = invoked_skill_clause(f"/{PFX}-ondisk run it")
-		self.assertIn(f"apply them: {prefixed_slug(f'{PFX}-ondisk')}", clause)
-		self.assertNotIn("jarvis__get_skill", clause)
+		# Its file in the container holds a pointer, not its instructions.
+		self.assertIn(prefixed_slug(f"{PFX}-ondisk"), clause)
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
+
+	def test_a_private_skill_shared_with_the_invoker_gets_the_fetch_clause(self):
+		from jarvis.chat.custom_skills import invoked_skill_clause
+
+		_mk_skill(USER_B, f"{PFX}-sharedpriv", scope="User", shared_with=[USER_A])
+		with _as(USER_A):
+			clause = invoked_skill_clause(f"/{PFX}-sharedpriv run it")
+		self.assertIn(prefixed_slug(f"{PFX}-sharedpriv"), clause)
+		self.assertIn("jarvis__get_skill", clause)
+		self.assertNotIn("apply them", clause)
 
 	def test_role_restricted_org_skill_gets_the_fetch_clause_not_the_on_disk_one(self):
 		# The exact failing scenario in #477: an Org skill narrowed by allowed_roles is
@@ -2211,9 +2437,8 @@ class TestRoleScopedSkillInvocation(Part2Base):
 		self.assertNotIn("apply them", clause)
 
 	def test_org_skill_past_the_push_cap_gets_the_fetch_clause(self):
-		# pushed_skill_names() must apply the SAME MAX_SKILLS_PER_PUSH truncation
-		# build_push_payload does, or a skill the push silently dropped off the tail
-		# would still be announced as an installed directory.
+		# A skill the push dropped off the tail has no file in the container at all:
+		# it is fetched like the rest.
 		from jarvis.chat import custom_skills
 		from jarvis.chat.custom_skills import invoked_skill_clause
 
@@ -2229,16 +2454,14 @@ class TestRoleScopedSkillInvocation(Part2Base):
 		self.assertIn("jarvis__get_skill", clause)
 		self.assertNotIn("apply them", clause)
 
-	def test_one_message_can_carry_both_clause_shapes(self):
+	def test_one_message_names_every_invoked_skill_once(self):
 		from jarvis.chat.custom_skills import invoked_skill_clause
 
 		_mk_skill(self.ROLE_HOLDER, f"{PFX}-bothdisk", scope="Org")  # owned -> pushed
 		_mk_skill(REVIEWER, f"{PFX}-bothrole", scope="Org", allowed_roles=[self.AUD_ROLE])
 		with _as(self.ROLE_HOLDER):
 			clause = invoked_skill_clause(f"/{PFX}-bothdisk then /{PFX}-bothrole")
-		self.assertIn(f"apply them: {prefixed_slug(f'{PFX}-bothdisk')}", clause)
-		self.assertIn("jarvis__get_skill", clause)
-		# each slug appears in exactly ONE shape, never both
-		fetch_half = clause.split("not loaded in this session:", 1)[1]
-		self.assertIn(prefixed_slug(f"{PFX}-bothrole"), fetch_half)
-		self.assertNotIn(prefixed_slug(f"{PFX}-bothdisk"), fetch_half)
+		self.assertNotIn("apply them", clause)
+		self.assertEqual(clause.count("jarvis__get_skill"), 1)
+		for slug in (f"{PFX}-bothdisk", f"{PFX}-bothrole"):
+			self.assertEqual(clause.count(prefixed_slug(slug)), 1)

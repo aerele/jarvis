@@ -128,6 +128,49 @@ def controlled_by(skill, user: str) -> bool:
 	return (skill.get("owner") or "") == user or reviewer_locked(skill)
 
 
+def shared_skills_no_reviewer_owns() -> list[dict]:
+	"""The Role and company skills (an old row with no scope is a company skill) whose
+	owner is not a skill reviewer, each with who else has a skill of the same name and
+	how many people it is shared with. Reads only.
+
+	``get_skill`` serves a reviewed (Role/Org) skill before a person's own of the same
+	name. Skills made before the review workflow are Role/Org rows too, and nobody
+	reviewed their text: this lists them so an operator can look before that rule goes
+	live on a site. Empty where every such skill came through a promotion.
+	``bench --site <site> execute jarvis.chat.skill_permissions.shared_skills_no_reviewer_owns``."""
+	from jarvis.permissions import is_skill_reviewer
+
+	rows = frappe.get_all(
+		SKILL,
+		filters={"scope": ("in", ("Role", "Org", "")), "managed_by_learning": 0},
+		fields=["name", "skill_name", "scope", "owner", "enabled"],
+		order_by="skill_name asc, name asc",
+	)
+	reviewer = {owner: is_skill_reviewer(owner) for owner in {r.owner for r in rows}}
+	found = []
+	for row in rows:
+		if reviewer[row.owner]:
+			continue
+		others = frappe.get_all(
+			SKILL,
+			filters={"skill_name": row.skill_name, "name": ("!=", row.name), "owner": ("!=", row.owner)},
+			pluck="owner",
+		)
+		shares = frappe.db.count("Jarvis Custom Skill Share", {"parent": row.name, "parenttype": SKILL})
+		found.append(
+			{
+				"name": row.name,
+				"skill_name": row.skill_name,
+				"scope": row.scope or "Org",
+				"owner": row.owner,
+				"enabled": int(row.enabled or 0),
+				"same_name_owned_by": sorted(set(others)),
+				"shared_with": shares,
+			}
+		)
+	return found
+
+
 def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
 	"""The ``skill_name`` of each skill, among the rows ``names`` and the slugs
 	``slugs``, that ``user`` does not control (``controlled_by``), sorted.
@@ -135,9 +178,10 @@ def skills_outside_control(user: str, *, names=(), slugs=()) -> list[str]:
 	``names`` are rows a macro step tags: each is judged, enabled or not (its author
 	can enable it again). ``slugs`` are names the agent may fetch: each is judged by
 	the row ``get_skill`` would serve ``user`` for it (``served_row``), so the
-	``custom-`` wire name and any case count, ``user``'s own row of that name wins as
-	it does there, and a System Manager, who may read every skill, is judged on the
-	row they would be served and not on whether it was shared with them."""
+	``custom-`` wire name and any case count, a reviewed Role/Org row of that name
+	comes before ``user``'s own as it does there, and a System Manager, who may read
+	every skill, is judged on the row they would be served and not on whether it was
+	shared with them."""
 	found = set()
 	names = [n for n in names or () if n]
 	if names:

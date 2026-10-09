@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { shouldFollowBottom } from "./chatScroll";
+import { needsJumpArrow, shouldFollowBottom } from "./chatScroll";
 
 /**
  * Regression guard for the "text keeps moving up" chat-scroll bug.
@@ -51,6 +51,28 @@ describe("shouldFollowBottom", () => {
 	it("resumes following once settled, so late images keep a pinned reader at the bottom", () => {
 		// Same inputs as a late image/chart load after the turn ended.
 		expect(shouldFollowBottom({ pinned: true, streaming: false, revealPending: 0 })).toBe(
+			true
+		);
+	});
+});
+
+describe("needsJumpArrow", () => {
+	it("is hidden when the thread does not overflow, wherever scrollTop is", () => {
+		expect(needsJumpArrow({ scrollHeight: 600, clientHeight: 800, scrollTop: 0 })).toBe(false);
+		expect(needsJumpArrow({ scrollHeight: 800, clientHeight: 800, scrollTop: 0 })).toBe(false);
+	});
+
+	it("is hidden when overflowing but within the threshold of the bottom", () => {
+		expect(needsJumpArrow({ scrollHeight: 1500, clientHeight: 800, scrollTop: 700 })).toBe(
+			false
+		);
+		expect(needsJumpArrow({ scrollHeight: 1500, clientHeight: 800, scrollTop: 600 })).toBe(
+			false
+		);
+	});
+
+	it("shows when overflowing and scrolled up past the threshold", () => {
+		expect(needsJumpArrow({ scrollHeight: 1500, clientHeight: 800, scrollTop: 100 })).toBe(
 			true
 		);
 	});

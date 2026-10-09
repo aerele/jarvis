@@ -249,7 +249,7 @@ async function copyBody() {
 		<div class="jv-action-body">
 			<div v-for="(f, i) in props.action.fields" :key="i" class="jv-field">
 				<span>{{ f.label }}</span>
-				<strong>{{ f.value || "—" }}</strong>
+				<strong>{{ f.value || "-" }}</strong>
 			</div>
 			<div v-for="t in tableLines" :key="`t-${t.label}`" class="jv-field">
 				<span>{{ t.label }}</span>

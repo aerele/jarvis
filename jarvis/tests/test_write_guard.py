@@ -546,18 +546,26 @@ class TestStructureRefusedEverywhere(_RouteBase):
 
 	def test_each_structure_doctype_refused_on_the_gated_route(self):
 		conv = self._conv()
-		for dt in sorted(wr.STRUCTURE_DOCTYPES):
+		# One new Custom Field and one new Workflow are guarded exceptions, each refused
+		# by its own park check when empty (test_custom_field_exception,
+		# test_workflow_settings_exception). Creating a settings document stays refused.
+		for dt in sorted(wr.STRUCTURE_DOCTYPES - {"Custom Field", "Workflow"}):
 			before = _refused_rows("create_doc", dt)
 			r = self._run("create_doc", {"doctype": dt, "values": {}}, conv)
 			self._assert_refused(r, dt)
 			self.assertEqual(_refused_rows("create_doc", dt), before + 1, f"{dt}: refused attempt recorded")
+		# An empty one names no form: refused by its own park check, nothing parked.
+		r = self._run("create_doc", {"doctype": "Custom Field", "values": {}}, conv)
+		self.assertEqual((r["ok"], r["error"]["code"]), (False, "InvalidArgumentError"), r)
 		self.assertFalse(frappe.db.exists(PENDING, {"conversation": conv}), "no card parked")
 
 	def test_update_delete_and_batch_refused(self):
 		conv = self._conv()
+		sla = "Service Level Agreement"
 		self._assert_refused(
-			self._run("update_doc", {"doctype": "Custom Field", "name": "x", "changes": {"label": "y"}}, conv)
+			self._run("update_doc", {"doctype": sla, "name": "x", "changes": {"enabled": 0}}, conv)
 		)
+		self._assert_refused(self._run("delete_doc", {"doctype": "Custom Field", "name": "x"}, conv))
 		self._assert_refused(self._run("delete_doc", {"doctype": "Workflow", "name": "x"}, conv))
 		self._assert_refused(self._run("delete_doc", {"doctype": "DocType", "name": "ToDo"}, conv))
 		docs = [
@@ -599,24 +607,25 @@ class TestStructureRefusedEverywhere(_RouteBase):
 		r = apply_action(
 			{
 				"verb": "create",
-				"doctype": "Custom Field",
-				"values": {"dt": "ToDo", "fieldname": "jarvis_wg_panel", "fieldtype": "Data"},
+				"doctype": "Inventory Dimension",
+				"values": {"dimension_name": "jarvis_wg_panel"},
 				"conversation": conv,
 			}
 		)
-		self._assert_refused(r, "Custom Field")
+		self._assert_refused(r, "Inventory Dimension")
 		r = apply_action(
 			{
 				"verb": "update",
-				"doctype": "Workflow",
+				"doctype": "Service Level Agreement",
 				"name": "x",
-				"values": {"is_active": 0},
+				"values": {"enabled": 0},
 				"conversation": conv,
 			}
 		)
 		self._assert_refused(r)
-		self.assertEqual(r["error"]["desk_path"], "/app/workflow/x", "m9: the record being edited")
-		self.assertFalse(frappe.db.exists("Custom Field", {"dt": "ToDo", "fieldname": "jarvis_wg_panel"}))
+		self.assertEqual(
+			r["error"]["desk_path"], "/app/service-level-agreement/x", "m9: the record being edited"
+		)
 
 	def test_approval_board_edit_refuses(self):
 		from jarvis.chat import approvals_api
@@ -1046,20 +1055,24 @@ class TestConfirmedRunMethod(_RouteBase):
 
 
 class TestEveryConfirmRoute(_RouteBase):
-	"""m8 / m2: the routes the review found untested."""
+	"""m8 / m2: the routes the review found untested.
 
-	CF = {
-		"doctype": "Custom Field",
-		"values": {"dt": "ToDo", "fieldname": "jarvis_wg_route", "fieldtype": "Data"},
-	}
+	A Service Level Agreement stands for "a structure write". A single new Custom
+	Field (J1b-cf) and a single Workflow (J1c) are guarded exceptions on a confirmed
+	chat card and run real DDL on their target, so they are exercised only on scratch
+	DocTypes (test_custom_field_exception, test_workflow_settings_exception), where
+	these same routes are shown to refuse them."""
+
+	SLA = "Service Level Agreement"
+	CF = {"doctype": SLA, "values": {"service_level": "jarvis-wg-route", "document_type": "ToDo"}}
 
 	def _no_field(self):
-		self.assertFalse(frappe.db.exists("Custom Field", {"dt": "ToDo", "fieldname": "jarvis_wg_route"}))
+		self.assertFalse(frappe.db.exists(self.SLA, {"service_level": "jarvis-wg-route"}))
 
 	def test_submit_cancel_amend_refused(self):
 		conv = self._conv()
 		for tool in ("submit_doc", "cancel_doc", "amend_doc"):
-			r = self._run(tool, {"doctype": "Workflow", "name": "x"}, conv)
+			r = self._run(tool, {"doctype": self.SLA, "name": "x"}, conv)
 			self.assertEqual(r["error"]["code"], "structure_refused", (tool, r))
 
 	def test_run_import(self):
@@ -1117,14 +1130,14 @@ class TestEveryConfirmRoute(_RouteBase):
 		token = pending_confirm.mint(
 			conversation=conv, owner=TEST_USER, tool="create_doc", args=self.CF, run_id=""
 		)
-		before = frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": "Custom Field"})
+		before = frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": self.SLA})
 		from jarvis.chat.actions_api import confirm_tool
 
 		with patch("jarvis.chat.api._dispatch_turn"):
 			res = confirm_tool(token, conversation=conv)
 		self.assertFalse(res["ok"])
 		self.assertEqual(
-			frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": "Custom Field"}), before + 1
+			frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": self.SLA}), before + 1
 		)
 		self._no_field()
 
@@ -1554,7 +1567,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 # --------------------------------------------------------------------------- #
 # The no-commit fence: a doctype outside the list whose save runs DDL
 # --------------------------------------------------------------------------- #
-SCRATCH = "Jarvis WG Fence Scratch"
+SCRATCH = "WG Fence Scratch"  # not "Jarvis ...": chat never customises Jarvis's own DocTypes
 STATE_FIELD = "jarvis_wg_state"
 
 
@@ -1632,14 +1645,20 @@ class TestNoCommitFence(FrappeTestCase):
 		self.assertFalse(frappe.db.exists("Custom Field", {"dt": SCRATCH, "fieldname": STATE_FIELD}))
 		self.assertNotIn(STATE_FIELD, _columns(SCRATCH), "no ALTER ran")
 
-	def test_custom_field_refused_with_no_row_and_no_column(self):
-		"""A listed structure doctype: refused on the gated route and uncarded, and
-		the target table is exactly as it was (DESCRIBE before / after)."""
+	def test_custom_field_leaves_no_row_and_no_column_before_confirm(self):
+		"""One new Custom Field is the guarded exception (J1b-cf): on the gated route
+		and in auto mode alike it only PARKS a card, never runs, and the target table
+		is exactly as it was (DESCRIBE before / after). Two in one call, or a delete,
+		are refused as before."""
 		before = _columns(SCRATCH)
 		cf = {"dt": SCRATCH, "fieldname": "jarvis_wg_cf", "label": "Wg", "fieldtype": "Data"}
 		gated = _make_conv("Administrator")
 		for conv in (gated, self.conv):
-			r = api._run_tool("create_doc", {"doctype": "Custom Field", "values": cf}, conversation=conv)
+			with patch("jarvis.chat.events.publish_to_user"):
+				r = api._run_tool("create_doc", {"doctype": "Custom Field", "values": cf}, conversation=conv)
+			self.assertEqual(r["data"]["status"], "pending_confirmation", r)
+			two = {"docs": [{"doctype": "Custom Field", "values": cf}] * 2}
+			r = api._run_tool("create_doc", two, conversation=conv)
 			self.assertEqual(r["error"]["code"], "structure_refused", r)
 		frappe.db.rollback()
 		self.assertEqual(_columns(SCRATCH), before)

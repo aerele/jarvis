@@ -27,7 +27,7 @@
 			</li>
 		</Sec>
 		<Sec
-			title="Orphans (unlinked — adopt them)"
+			title="Orphans (unlinked, adopt them)"
 			:n="actions.orphans.length"
 			empty="Every page is linked"
 		>

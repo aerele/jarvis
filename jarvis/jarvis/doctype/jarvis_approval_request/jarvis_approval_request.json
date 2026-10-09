@@ -153,7 +153,7 @@
    "options": "Jarvis Agent Listing",
    "read_only": 1,
    "in_standard_filter": 1,
-   "description": "PP-5 — set for an agent-originated request; a human File-Box/Chat request leaves it blank. Distinguishes the two provenance paths."
+   "description": "PP-5: set for an agent-originated request; a human File-Box/Chat request leaves it blank. Distinguishes the two provenance paths."
   },
   {
    "fieldname": "run",
@@ -161,7 +161,7 @@
    "label": "Run",
    "options": "Jarvis Agent Run",
    "read_only": 1,
-   "description": "PP-5 — the Jarvis Agent Run that raised this request (agent-originated requests only)."
+   "description": "PP-5: the Jarvis Agent Run that raised this request (agent-originated requests only)."
   },
   {
    "fieldname": "preparation_mode",
@@ -169,7 +169,7 @@
    "label": "Preparation Mode",
    "options": "shadow\nlive",
    "read_only": 1,
-   "description": "PP-5 — the activation mode (shadow|live) the originating run executed under; blank for human requests."
+   "description": "PP-5: the activation mode (shadow|live) the originating run executed under; blank for human requests."
   },
   {
    "fieldname": "result_class",
@@ -178,7 +178,7 @@
    "options": "observed_fact\nderived_candidate\nlegal_scenario\nconfirmed_outcome",
    "read_only": 1,
    "no_copy": 1,
-   "description": "PP-1 — the value grammar class for an agent-originated, value-bearing request. Blank for a human File-Box/Chat request. Set once, never editable afterwards."
+   "description": "PP-1: the value grammar class for an agent-originated, value-bearing request. Blank for a human File-Box/Chat request. Set once, never editable afterwards."
   },
   {
    "fieldname": "wiki_payload",
@@ -188,7 +188,7 @@
    "read_only": 1,
    "hidden": 1,
    "no_copy": 1,
-   "description": "WR — the held file_box update_wiki args (JSON) for a wiki_write proposal. Reviewer-approve replays this through the fenced funnel; never executed at drop time."
+   "description": "WR: the held file_box update_wiki args (JSON) for a wiki_write proposal. Reviewer-approve replays this through the fenced funnel; never executed at drop time."
   },
   {
    "fieldname": "apply_status",
@@ -199,7 +199,7 @@
    "permlevel": 1,
    "read_only": 1,
    "no_copy": 1,
-   "description": "WR — the fenced-write outcome after reviewer approval: Pending (held, not yet run), Applying (a landing-claim in flight — held under the row lock, never committed on its own), Applied (landed), Failed (funnel refused / errored — see apply_reason)."
+   "description": "WR: the fenced-write outcome after reviewer approval: Pending (held, not yet run), Applying (a landing-claim in flight, held under the row lock, never committed on its own), Applied (landed), Failed (funnel refused / errored, see apply_reason)."
   },
   {
    "fieldname": "apply_reason",
@@ -208,7 +208,7 @@
    "permlevel": 1,
    "read_only": 1,
    "no_copy": 1,
-   "description": "WR — the refusal / error detail when apply_status is Failed (e.g. curated-collision refused, own-pages-only)."
+   "description": "WR: the refusal / error detail when apply_status is Failed (e.g. curated-collision refused, own-pages-only)."
   },
   {
    "fieldname": "wiki_digest",

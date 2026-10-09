@@ -162,9 +162,15 @@ const SENSITIVE_LINE = "This changes sensitive settings.";
 
 // {risk, text} for a card that changes sensitive configuration, else null. The
 // text is the server's ``risk_line`` ("This runs code for every user."), with a
-// plain fallback when an older card carries none. Structure changes are refused
-// from chat, never carded, so there is no structure banner (a later unit that
-// cards a guarded structure write adds its own).
+// plain fallback when an older card carries none. The guarded structure changes
+// chat may make (one new Custom Field or a column-free edit of one, J1b-cf; a
+// Workflow create or update, CRM Settings with the data sync on, Domain Settings,
+// J1c) ride the same banner: the server sends them as ``risk: "sensitive"`` with
+// ``structural: true`` and a ``risk_line`` of several sentences, which leads with
+// "Confirming changes the database structure for every user and cannot be
+// undone." when a column is added and otherwise with what the change is, then
+// says what it does (the workflow it replaces, the records it fills, code,
+// access ...). Every other structure change is refused from chat and never carded.
 export function cardBannerOf(card) {
 	if (!card || card.risk !== "sensitive") return null;
 	const line = typeof card.risk_line === "string" ? card.risk_line.trim() : "";
@@ -479,26 +485,26 @@ export function receiptView(tool, args, result, outcome) {
 		// success, and distinct from "discarded" (a discard is the user's own no).
 		icon = "cancelled";
 		tone = "muted";
-		title = "Cancelled — not performed";
+		title = "Cancelled: not performed";
 	} else if (outcome === "superseded") {
 		// A newer proposal replaced this one before it was answered.
 		icon = "superseded";
 		tone = "muted";
-		title = "Not confirmed — replaced by a newer proposal";
+		title = "Not confirmed: replaced by a newer proposal";
 	} else if (outcome === "expired") {
 		icon = "expired";
 		tone = "muted";
-		title = "Expired — not performed";
+		title = "Expired: not performed";
 	} else if (outcome === "unknown") {
 		// The run was interrupted mid-dispatch; whether it applied is unverified -
 		// this must NEVER read as confirmed or as "nothing changed".
 		icon = "unknown";
 		tone = "warning";
-		title = "Outcome unknown — check before retrying";
+		title = "Outcome unknown: check before retrying";
 	} else if (outcome === "partial") {
 		icon = "partial";
 		tone = "warning";
-		title = "Partly applied — check before retrying";
+		title = "Partly applied: check before retrying";
 	} else if (outcome === "auto_applied") {
 		// An armed macro ran this write WITHOUT a confirmation card. Render a distinct
 		// receipt (not an identical "confirmed" chip) so it never reads as a silent run.
@@ -508,13 +514,16 @@ export function receiptView(tool, args, result, outcome) {
 	} else if (outcome === "confirmed") {
 		icon = "confirmed";
 		tone = "success";
-		title = `${verb.past} ${wfPrefix}${subject}`;
+		// A create that the Create & Submit card also submitted says so: the chip is the
+		// receipt, and a ledger-posting document must not read as a draft.
+		const createdSubmitted = tool === "create_doc" && Number(data.docstatus) === 1;
+		title = `${createdSubmitted ? "Created and submitted" : verb.past} ${wfPrefix}${subject}`;
 	} else {
 		// A future/unrecognised outcome value - render NEUTRAL, same as "unknown".
 		// Never fall back to the confirmed/✓ path for a value this build predates.
 		icon = "unknown";
 		tone = "warning";
-		title = "Outcome unknown — check before retrying";
+		title = "Outcome unknown: check before retrying";
 	}
 	// Only a chip whose change did not (fully) go through points at its confirmation.
 	const reference = ["failed", "partial", "unknown"].includes(icon)

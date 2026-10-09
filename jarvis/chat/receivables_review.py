@@ -120,7 +120,7 @@ def configuration_issues(raw):
 		}
 	)
 	if "policy_version" in issues:
-		issues["policy_version"] = "Enter an AR review policy reference (1–128 characters)."
+		issues["policy_version"] = "Enter an AR review policy reference (1 to 128 characters)."
 	if not {"from_date", "to_date", "report_date"}.intersection(issues):
 		if not config["from_date"] <= config["report_date"] <= config["to_date"]:
 			issues["report_date"] = (

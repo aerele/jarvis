@@ -730,7 +730,9 @@ class TestTheNotice(FrappeTestCase):
 			"without asking you first, including when it runs on a schedule with nobody watching. "
 			"Deleting, cancelling and amending records, creating or changing skills and calling "
 			"connectors still ask, and stop the run. So do changes to scripts, webhooks, email set-up, "
-			"user access, sign-in settings and other sensitive configuration. Its steps can apply only "
+			"user access, sign-in settings, learned skills, CRM settings and other sensitive "
+			"configuration. Its steps "
+			"can apply only "
 			"skills you own, or skills only a reviewer can change.",
 		)
 		self.assertNotIn(EM_DASH, macros_api.arm_notice())
@@ -989,8 +991,9 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 				self.assertIn("/armskill-typed, which another user", sent)
 
 	def test_the_owners_own_skill_of_that_name_is_the_one_it_runs(self):
-		# ``get_skill`` serves the owner's own row first, so another user's skill of the
-		# same name, shared with them, never runs and does not disarm the run.
+		# ``get_skill`` serves the owner's own row before another user's private skill
+		# of the same name shared with them, so that one never runs and does not disarm
+		# the run. (Only a reviewed Role/Org row comes before the owner's own.)
 		own = self._skill(OWNER, "g")
 		macro = self._tagged(OWNER, own, armed=True)
 		frappe.set_user(OTHER)
@@ -1008,6 +1011,16 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 		_data, [(prompt, armed)] = self._run(macro)
 		self.assertEqual(armed, 1)
 		self.assertNotIn("Skip confirmation is off", prompt)
+
+	def test_a_reviewed_skill_of_the_same_name_is_the_one_judged(self):
+		# The owner has a private skill and there is a company skill of the same name:
+		# the company one is what the name is served from, and it counts as controlled.
+		from jarvis.chat.skill_permissions import served_row, skills_outside_control
+
+		self._skill(OWNER, "pair")
+		org = self._skill(OTHER, "pair", scope="Org")
+		self.assertEqual(served_row("armskill-pair", OWNER).name, org)
+		self.assertEqual(skills_outside_control(OWNER, slugs={"armskill-pair"}), [])
 
 	def test_a_system_manager_is_judged_on_the_skill_they_would_be_served(self):
 		# A System Manager reads every skill: another user's private one, shared with
@@ -1722,10 +1735,6 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				"method": "frappe.client.save",
 				"args": {"doc": json.dumps({"doctype": SKILL, "name": skill, "instructions": "x"})},
 			},
-			"run_method (the skills' API)": {
-				"method": "jarvis.chat.custom_skills_api.update_custom_skill",
-				"args": {"name": skill, "instructions": "x"},
-			},
 		}
 		for label, args in calls.items():
 			with self.subTest(call=label):
@@ -1737,6 +1746,25 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				frappe.db.commit()
 				self.assertEqual(self._instructions(skill), "Summarise the open orders.")
 				self.assertFalse(frappe.db.exists(SKILL, {"skill_name": "armskill-made"}))
+
+	def test_the_skills_own_api_is_refused_before_a_card(self):
+		# run_method refuses these endpoints, so a card for one could only fail at
+		# Confirm: the gate answers at once and the run goes on to its next step.
+		skill = self._skill(OWNER, "own")
+		conv = self._armed_conv()
+		frappe.set_user(OWNER)
+		res = api._run_tool(
+			"run_method",
+			{
+				"method": "jarvis.chat.custom_skills_api.update_custom_skill",
+				"args": {"name": skill, "instructions": "x"},
+			},
+			conversation=conv,
+		)
+		self.assertFalse(res.get("ok"), res)
+		self.assertIn("cannot be called from a tool", json.dumps(res))
+		self.assertFalse(pending_confirm.has_live_card(OWNER, conv))
+		self.assertEqual(self._instructions(skill), "Summarise the open orders.")
 
 	def test_a_skill_doctype_in_any_case_parks_a_card(self):
 		skill = self._skill(OTHER, "side", share_with=OWNER)
@@ -1750,7 +1778,7 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 			if method == "frappe.client.get_list":
 				args = {"doctype": doctype, "fields": ["instructions"]}
 			with self.subTest(method=method, doctype=doctype):
-				self.assertTrue(api._writes_a_skill("run_method", {"method": "m", "args": args}))
+				self.assertTrue(api._writes_skill_config("run_method", {"method": "m", "args": args}))
 				conv = self._armed_conv()
 				frappe.set_user(OWNER)
 				res = api._run_tool("run_method", {"method": method, "args": args}, conversation=conv)
@@ -1762,13 +1790,17 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 			"method": "m",
 			"args": {"filters": {"reference_doctype": ["=", "jarvis custom skill share"]}},
 		}
-		self.assertTrue(api._writes_a_skill("run_method", filtered))
+		self.assertTrue(api._writes_skill_config("run_method", filtered))
 
 	def test_a_route_the_gate_cannot_read_is_refused(self):
 		skill = self._skill(OWNER, "own")
 		conv = self._armed_conv()
 		frappe.set_user(OWNER)
-		with patch.object(api, "_writes_a_skill", return_value=False):
+		# Both readings of the arguments miss it: the guard's and the gate's own scan.
+		with (
+			patch("jarvis.tools._write_risk.check", return_value=None),
+			patch.object(api, "_writes_skill_config", return_value=False),
+		):
 			res = api._run_tool(
 				"update_doc",
 				{"doctype": SKILL, "name": skill, "changes": {"instructions": "something else"}},
@@ -1794,7 +1826,7 @@ class TestAnArmedRunDoesNotChangeASkill(SkillsBase):
 				frappe.db.rollback()
 		# Deeper, a list is a filter, read as one.
 		filtered = {"method": "m", "args": {"filters": {"reference_doctype": ["=", SKILL]}}}
-		self.assertTrue(api._writes_a_skill("run_method", filtered))
+		self.assertTrue(api._writes_skill_config("run_method", filtered))
 
 	def test_the_write_flag_is_put_back_as_it_was(self):
 		conv = self._armed_conv()

@@ -65,6 +65,15 @@ _DENIED_PREFIXES = (
 	# The Jarvis Admin's view of every user's macros. An admin's own assistant must
 	# not reach it: one call would read every user's prompts into the model's context.
 	"jarvis.chat.macros_admin_api.",
+	# Skills, learned rules and app learning: what these say steers every later chat,
+	# and their reviewer screens read other users' text. The assistant has its own
+	# tools for skills (find_skills, get_skill, create_custom_skill); a person
+	# decides the rest.
+	"jarvis.chat.custom_skills_api.",
+	"jarvis.chat.learned_api.",
+	"jarvis.chat.app_learning_api.",
+	# Developer seeding: takes the user to write as.
+	"jarvis.chat.dev_seed.",
 )
 _DENIED = frozenset(
 	{
@@ -73,20 +82,9 @@ _DENIED = frozenset(
 		"jarvis.chat.api.stop_run",
 		"jarvis.chat.api.archive_conversation",
 		"jarvis.chat.api.clear_chat_history",
-		# Reviewer sign-offs, sharing and org-wide pushes: a human decision, never the agent's.
-		"jarvis.chat.custom_skills_api.decide_skill_promotion",
-		"jarvis.chat.custom_skills_api.apply_custom_skills",
-		"jarvis.chat.custom_skills_api.share_custom_skill",
-		"jarvis.chat.learned_api.decide_promotion",
-		"jarvis.chat.learned_api.approve_learned_pattern",
-		"jarvis.chat.learned_api.batch_approve",
-		"jarvis.chat.learned_api.reject_learned_pattern",
-		"jarvis.chat.learned_api.unapprove_learned_pattern",
-		"jarvis.chat.learned_api.acknowledge_learned_pattern",
-		"jarvis.chat.learned_api.restore_rejected_pattern",
-		"jarvis.chat.learned_api.snooze_learned_pattern",
-		"jarvis.chat.learned_api.apply_insight_skill_update",
-		"jarvis.chat.learned_api.apply_learned_skills",
+		# Resetting the workspace clears every skill and learned rule: a person's decision.
+		"jarvis.onboarding.request_workspace_reset",
+		"jarvis.onboarding.reset_onboarding",
 		"jarvis.chat.agents_api.promote_installation",
 		"jarvis.chat.agents_api.demote_installation",
 		"jarvis.chat.agents_api.raise_activation_ceiling",

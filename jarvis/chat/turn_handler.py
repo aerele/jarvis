@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, seq_watermark, txn, vision
+from jarvis.chat import agent_session_pool, empty_reply_recovery, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.runtime_profile import get_profile
@@ -1137,13 +1137,12 @@ def assemble_prompt(
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name it in the system context so the agent activates it
 	# deterministically (the agent has no documented user-invocable trigger).
-	# The clause comes in TWO shapes (issue #477), because not every invocable
-	# skill is on disk: only the pushed set (Org scope, no allowed_roles, inside
-	# the push cap) has a workspace/skills/custom-<slug>/SKILL.md. Role-scope,
-	# role-restricted, private and over-cap rows are NOT written to the container
-	# (the container has a single role-blind custom_skills dir), so for those the
-	# clause tells the agent to fetch the body with jarvis__get_skill rather than
-	# asserting a directory that does not exist.
+	# The clause has ONE shape: it tells the agent to fetch each invoked skill
+	# with jarvis__get_skill. No custom skill's instructions are in the container:
+	# the pushed set (Org scope, no allowed_roles, inside the push cap) has a
+	# workspace/skills/custom-<slug>/SKILL.md that only points at the same tool,
+	# and Role-scope, role-restricted, private and over-cap rows have no file at
+	# all (issue #477: the container has a single role-blind custom_skills dir).
 	from jarvis.chat.custom_skills import (
 		armed_skill_clause,
 		invoked_skill_clause,
@@ -1463,6 +1462,7 @@ def handle_chat_send(payload: dict) -> None:
 		# Before _mark_errored so its commit carries the write.
 		_note_subscription_error(err, code)
 		_mark_errored(assistant_msg.name, err)
+		_note_empty_reply(run_id, conversation_id, err, code)
 		payload = {
 			"kind": "run:error",
 			"conversation_id": conversation_id,
@@ -2725,6 +2725,49 @@ def _note_subscription_error(err_text: str, code: str) -> None:
 		subscription_health.note_turn_error(err_text, code)
 
 
+def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
+	"""One telemetry line per empty reply of the model, with the context size the chat
+	session recorded after its previous turn. Never raises.
+
+	``variant``: ``plain`` (with "Please try again."), ``bare`` (the sentence alone),
+	``tools`` (the empty-reply-tools rule), ``other`` (more text around the sentence).
+	Only the first 300 characters are read, so text after long whitespace reads as bare
+	(``empty_reply_recovery.variant``)."""
+	if code not in ("empty-reply", "empty-reply-tools"):
+		return
+	try:
+		variant = empty_reply_recovery.variant(err_text, code)
+		tokens, pct = "", ""
+		try:
+			s = frappe.qb.DocType("Jarvis Chat Session")
+			c = frappe.qb.DocType("Jarvis Conversation")
+			row = (
+				frappe.qb.from_(s)
+				.join(c)
+				.on(c.session_key == s.session_key)
+				.select(s.last_total_tokens, s.context_pct)
+				.where(c.name == conversation)
+				.limit(1)
+				.run()
+			)
+			if row:
+				tokens, pct = row[0]
+		except Exception:
+			pass
+		from jarvis.chat.latency import get_logger
+
+		get_logger().info(
+			"empty_reply run_id=%s conversation=%s variant=%s last_total_tokens=%s context_pct=%s",
+			run_id,
+			conversation,
+			variant,
+			tokens,
+			pct,
+		)
+	except Exception:
+		pass
+
+
 def _mark_errored(assistant_msg_name: str, error: str) -> None:
 	frappe.db.set_value(
 		MSG,
@@ -2863,6 +2906,7 @@ def _handle_event_inner(
 			# Before _mark_errored so its commit carries the write.
 			_note_subscription_error(err_text, code)
 			_mark_errored(assistant_msg_name, err_text)
+			_note_empty_reply(run_id, conversation_id, err_text, code)
 			_publish_to_user(
 				user,
 				{

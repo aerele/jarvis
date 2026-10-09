@@ -1629,7 +1629,7 @@ onUnmounted(() => {
 				@open="decision = p"
 			/>
 			<p v-if="showOlderCardsNote" class="jv-typehint">
-				An earlier action card is still waiting — tap it to approve or discard.
+				An earlier action card is still waiting. Tap it to approve or discard.
 			</p>
 		</div>
 		<!-- Both ways to approve, shown once under the stack. -->

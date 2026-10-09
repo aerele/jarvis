@@ -9,7 +9,7 @@ export function filesWaiting(n) {
 
 export function skipLabel(n) {
 	const count = Math.max(1, Number(n) || 1);
-	return `Don't create — skip ${count === 1 ? "1 file" : `${count} files`}`;
+	return `Don't create, skip ${count === 1 ? "1 file" : `${count} files`}`;
 }
 
 // Refusals the board words itself; the rest carry a server message naming the record.

@@ -592,17 +592,17 @@ def reclaim_throwaway_session(
 # UNLESS the worker dies mid-run: then no terminal fires, the sliding timestamp
 # FREEZES, and the flag sits durably 1. That is safe (nothing auto-runs unless a
 # NEW turn dispatches, and the gate's inline TTL check parks a covered write once
-# the frozen timestamp is older than ``_SKILL_AUTORUN_TTL_S``), but the flag is
+# the frozen timestamp is older than ``_SKILL_AUTORUN_IDLE_S``), but the flag is
 # now dead weight the terminal clears will never collect. This reaper is the
 # backstop that clears it - the durable equivalent of the macro reaper, for a
 # chat that has no Jarvis Macro Run row to key on.
 
 # The reaper acts only once the frozen (or absent) ``skill_autorun_at`` is older
-# than THIS window, which MUST be >= the gate's ``_SKILL_AUTORUN_TTL_S``: a flag
+# than THIS window, which MUST be >= the gate's ``_SKILL_AUTORUN_IDLE_S``: a flag
 # already past that TTL cannot auto-run anyway (the gate parks the write instead,
 # api.py), so clearing it strands nothing live. We use 2x the gate TTL for a full
 # extra-TTL safety margin PAST that no-auto-run point, so the reaper never races a
-# flag that has only just crossed the auto-run horizon. ``_SKILL_AUTORUN_TTL_S`` is
+# flag that has only just crossed the auto-run horizon. ``_SKILL_AUTORUN_IDLE_S`` is
 # read lazily inside the sweep (api is a heavy module - no import-time coupling from
 # this scheduler module).
 _REAP_AUTORUN_TTL_MULTIPLE = 2
@@ -614,13 +614,13 @@ _REAP_AUTORUN_BATCH_MAX = 200
 
 
 def _skill_autorun_ttl_s() -> int:
-	"""The gate's sliding-TTL horizon (``api._SKILL_AUTORUN_TTL_S``), read lazily so
+	"""The gate's sliding-TTL horizon (``api._SKILL_AUTORUN_IDLE_S``), read lazily so
 	this scheduler module never imports the heavy ``api`` module at load time. The reap
 	window is a MULTIPLE of this (see ``_REAP_AUTORUN_TTL_MULTIPLE``), keeping the
 	reaper's cutoff provably >= the point past which a flag can no longer auto-run."""
-	from jarvis.api import _SKILL_AUTORUN_TTL_S
+	from jarvis.api import _SKILL_AUTORUN_IDLE_S
 
-	return _SKILL_AUTORUN_TTL_S
+	return _SKILL_AUTORUN_IDLE_S
 
 
 def reap_stranded_skill_autorun() -> int:

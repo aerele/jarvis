@@ -36,8 +36,9 @@ import time
 
 import frappe
 
+from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
-from jarvis.chat import txn
+from jarvis.chat.error_taxonomy import classify_error_text
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
@@ -414,6 +415,10 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
+	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
+	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
+	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
+	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage.is_claude_cli_row(row) else None
 	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
 	# the unit below starts on the present. Nothing is pending: the runner committed its
 	# claim and this effect has only read so far.
@@ -426,7 +431,7 @@ def _effect_usage(ctx: _Ctx) -> None:
 		# the model whether or not its token counters have gone fresh yet, and an audit
 		# ("which model proposed this journal entry") must not be lost to a slow counter.
 		_stamp_reply_model(ctx, row)
-		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
+		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id, reply_chars=reply_chars)
 
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
@@ -568,16 +573,38 @@ def _effect_terminal_publish(ctx: _Ctx) -> None:
 
 def _effect_telemetry(ctx: _Ctx) -> None:
 	# Latency summary + turn telemetry (customization discovery). Best-effort.
+	reason = ctx.payload.get("redispatch_reason")
 	try:
 		from jarvis.chat.latency import get_logger
 
-		get_logger().info("pump turn_finalized run_id=%s errored=%d", ctx.run_id, int(ctx.errored))
+		fmt, args = "pump turn_finalized run_id=%s errored=%d", [ctx.run_id, int(ctx.errored)]
+		if reason:
+			fmt, args = fmt + " redispatch_reason=%s", [*args, reason]
+		get_logger().info(fmt, *args)
 	except Exception:
 		pass
+	if reason == empty_reply_recovery.REASON:
+		_note_resend_outcome(ctx)
 	try:
 		from jarvis import telemetry
 
 		telemetry.emit_turn(ctx.conversation, ctx.run_id, 0)
+	except Exception:
+		pass
+
+
+def _note_resend_outcome(ctx: _Ctx) -> None:
+	"""The outcome line of a turn sent again for an empty reply. Best-effort."""
+	try:
+		row = frappe.db.get_value(TURN, ctx.run_id, ["relay_target_id", "error"], as_dict=True) or {}
+		state = ctx.turn.get("state")
+		empty_reply_recovery.note_outcome(
+			run_id=ctx.run_id,
+			conversation=ctx.conversation,
+			state=state,
+			relay_target_id=row.get("relay_target_id"),
+			code=classify_error_text(row.get("error")) if state == "errored" else "",
+		)
 	except Exception:
 		pass
 

@@ -11,7 +11,7 @@ see ``jarvis.chat.turn_handler`` and the design at
 Three entry points:
   * ``get_or_create_user_settings(user)`` — race-safe lazy row creation with an
     explicit ``owner`` so the ``if_owner`` grant holds when an admin triggers it.
-  * ``record_turn_usage(session_key, row, run_id=None)`` - atomic SQL increments
+  * ``record_turn_usage(session_key, row, run_id=None, reply_chars=None)`` - atomic SQL increments
     on both the per-user ``Jarvis User Settings`` (month-rollover aware) and the
     cumulative ``Jarvis Chat Session`` fields, plus a best-effort per-turn
     ``Jarvis Turn Usage`` row (usage-dashboard Part A, task U1) carrying the
@@ -23,6 +23,7 @@ Three entry points:
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timedelta
 
@@ -392,13 +393,77 @@ def _refresh_session_context_snapshot(
 	)
 
 
-def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = None) -> str:
+# Characters per token for the claude-cli output estimate. Rough on purpose: the real
+# `result` totals never leave the agent process (jarvis-admin-v2#631).
+_CHARS_PER_TOKEN = 4
+
+
+def is_claude_cli_row(row: dict | None) -> bool:
+	"""True when the gateway row says this reply ran through the ``claude-cli`` runtime,
+	which saves a partial streamed usage (see ``record_turn_usage``). Primary marker is
+	``agentRuntime.id`` (the only one ``sessions.list`` carries as of agent image 2026.9.3);
+	``cliSessionIds`` / ``claudeCliSessionId`` are a fallback for rows that ever carry them.
+	Never inferred from the model name: a Claude model can also run on another runtime."""
+	if not isinstance(row, dict):
+		return False
+	runtime = row.get("agentRuntime")
+	if isinstance(runtime, dict):
+		runtime = runtime.get("id")
+	if runtime == "claude-cli":
+		return True
+	cli_ids = row.get("cliSessionIds")
+	return bool(row.get("claudeCliSessionId") or (isinstance(cli_ids, dict) and cli_ids.get("claude-cli")))
+
+
+def reply_char_count(run_id: str | None) -> int | None:
+	"""Character length of the reply text of the turn named ``run_id``, or ``None`` when it
+	cannot be read (no run, no assistant message, or any lookup failure). Never raises:
+	it feeds ``record_turn_usage``'s optional output estimate, which must not be able to
+	break usage accounting. Two ``get_value`` reads, so the caller runs it BEFORE the
+	guard/write unit, not inside the commit window."""
+	if not run_id:
+		return None
+	try:
+		message = frappe.db.get_value(CHAT_TURN, run_id, "assistant_message")
+		if not message:
+			return None
+		content = frappe.db.get_value(CHAT_MESSAGE, message, "content")
+		return len(content or "")
+	except Exception:
+		frappe.logger("jarvis.usage").warning(f"could not read reply length for {run_id}", exc_info=True)
+		return None
+
+
+def _estimated_output_tokens(row: dict, output_tokens: int, reply_chars: int | None) -> tuple[int, bool]:
+	"""``(output_tokens, estimated)`` for one turn.
+
+	The ``claude-cli`` agent runtime saves the LAST streamed assistant event's partial
+	usage (output 1-8) and keeps the real ``result`` totals in memory only, so the row's
+	``outputTokens`` badly undercounts a Claude-plan reply (jarvis-admin-v2#631). For such a
+	row, with a reply length passed in, the output is ``max(row value, ceil(chars / 4))``
+	and ``estimated`` is True only when the estimate won. Thinking tokens are not in the
+	reply text, so this still undercounts them. Every other case returns the row value."""
+	if reply_chars is None or not is_claude_cli_row(row):
+		return output_tokens, False
+	estimate = math.ceil(max(int(reply_chars), 0) / _CHARS_PER_TOKEN)
+	if estimate > output_tokens:
+		return estimate, True
+	return output_tokens, False
+
+
+def record_turn_usage(
+	session_key: str, row: dict | None, run_id: str | None = None, reply_chars: int | None = None
+) -> str:
 	"""Record one completed turn's token delta from a ``sessions.list`` row.
 
 	``row`` is the gateway row for THIS session (matched by ``key`` upstream).
 	``inputTokens``/``outputTokens`` are last-run values, so the turn delta is
 	their sum; ``totalTokens`` is the context size (snapshot only). A row with
 	``totalTokensFresh`` false/missing, or null token fields, is do-not-record.
+
+	``reply_chars`` is the reply text length finalize looked up before this call. Only a
+	``claude-cli`` row uses it (output estimate, flagged on the Turn Usage row; see
+	``_estimated_output_tokens``); ``None`` leaves every provider's numbers as the row says.
 
 	``run_id`` (task U1, usage-dashboard Part A) is the ``Jarvis Chat Turn.name``
 	finalize's usage effect calls this with, threaded through ONLY to attribute
@@ -439,7 +504,7 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		if raw_in is None and raw_out is None:
 			return USAGE_RETRY
 		input_tokens = int(raw_in or 0)
-		output_tokens = int(raw_out or 0)
+		output_tokens, output_estimated = _estimated_output_tokens(row, int(raw_out or 0), reply_chars)
 		delta = input_tokens + output_tokens
 		# CDX-review: ONE session fetch (user + profile_agent_id + profile_tier)
 		# covers both branches below - the RECORDED path used to fetch only
@@ -458,11 +523,15 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		user = session.get("user") or ""
 		context_tokens = int(row.get("totalTokens") or 0)
 		context_capacity, context_pct = _context_capacity_and_pct(row, context_tokens)
+		# A claude-cli row saved as 0/0 with a non-empty reply now has delta > 0 via the estimate and
+		# RECORDs (or RETRYs without a user mapping); that is intended.
 		if delta <= 0:
 			# Task U1: attribution is still worth recording even though there is
 			# no token delta - the turn happened and this is the only record of
 			# WHO it happened for. Isolated; raises only a write conflict (see the docstring).
-			_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
+			_write_turn_usage_row(
+				session_key, row, run_id, input_tokens, output_tokens, session, output_estimated
+			)
 			# C1 review: a zero-delta turn is still a real turn - the session's
 			# context snapshot (and, when this row reports one, its capacity)
 			# can have moved even though no tokens were spent this turn. Same
@@ -615,7 +684,9 @@ def record_turn_usage(session_key: str, row: dict | None, run_id: str | None = N
 		# Task U1: the per-turn usage row, same isolation as the per-model
 		# write just above - a failure here must not lose the aggregate delta
 		# already applied in this transaction, so it only logs and continues.
-		_write_turn_usage_row(session_key, row, run_id, input_tokens, output_tokens, session)
+		_write_turn_usage_row(
+			session_key, row, run_id, input_tokens, output_tokens, session, output_estimated
+		)
 		frappe.db.commit()
 		return USAGE_RECORDED
 	except Exception as e:
@@ -639,6 +710,7 @@ def _write_turn_usage_row(
 	tokens_in: int,
 	tokens_out: int,
 	session: dict,
+	tokens_out_estimated: bool = False,
 ) -> None:
 	"""Best-effort ``Jarvis Turn Usage`` row (task U1, usage-dashboard Part A).
 
@@ -659,14 +731,18 @@ def _write_turn_usage_row(
 	real accrual, and a rollback here would be equally wrong (it would
 	deterministically discard the aggregate delta on the RECORDED path).
 
-	cache_read / cache_write / cache_reported: live-checked against a real gateway
-	(tenant jarvis-pool-68b37b, 2026-08-17) - the union of keys across 23 live
-	``sessions.list`` rows carried no cache-token field at all, so these are
-	always ``0 / 0 / False`` (an honest "not reported", not a fabricated zero)
-	until a later agent-runtime build adds one. Re-run the Step-1 live probe from
-	the task-U1 brief to check."""
+	cache_read / cache_write / cache_reported are filled from the row's ``cacheRead`` /
+	``cacheWrite`` when present. They are ABSENT from ``sessions.list`` as of agent image 2026.9.3
+	(re-verified 2026-10-07; only the stored session entry has them), so today these stay
+	0 / 0 / unreported until the runtime exposes them. ``cache_reported`` is 1 when either
+	key is present (a real 0 reads as reported). They are NOT in the
+	accrued delta: ``tokens_in`` stays the row's ``inputTokens`` (uncached). Known limit: a
+	multi-call turn carries the last call's cache numbers.
+
+	``tokens_out_estimated`` marks a ``tokens_out`` that is the reply-length estimate."""
 	try:
 		model, _provider = resolved_model_identity(row)
+		cache_keys = [k for k in ("cacheRead", "cacheWrite") if (row or {}).get(k) is not None]
 		fields = {
 			"run_id": run_id or "",
 			"session_key": session_key,
@@ -676,9 +752,10 @@ def _write_turn_usage_row(
 			"model": model,
 			"tokens_in": int(tokens_in or 0),
 			"tokens_out": int(tokens_out or 0),
-			"cache_read": 0,
-			"cache_write": 0,
-			"cache_reported": 0,
+			"tokens_out_estimated": 1 if tokens_out_estimated else 0,
+			"cache_read": int((row or {}).get("cacheRead") or 0),
+			"cache_write": int((row or {}).get("cacheWrite") or 0),
+			"cache_reported": 1 if cache_keys else 0,
 			"tool_calls": _turn_tool_call_count(run_id),
 			"day": frappe.utils.today(),
 		}

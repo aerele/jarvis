@@ -4,7 +4,7 @@ export function resultLine(row) {
 	if (!row) return "";
 	if (row.status === "needs_approval")
 		return row.missing
-			? `Needs approval on desktop — missing: ${row.missing}`
-			: `${row.result || "Needs approval"} — resolve on desktop`;
+			? `Needs approval on desktop (missing: ${row.missing})`
+			: `${row.result || "Needs approval"} (resolve on desktop)`;
 	return row.result || "";
 }

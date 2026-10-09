@@ -88,6 +88,13 @@ def _doc_to_template(d: dict) -> dict:
 		"page_numbers": True,
 	}
 	rows = d.get("company_letter_heads") or []
+	# A copy of a built-in starts from that built-in's FULL spec (palette, font
+	# scale, footer/page-number settings) and layers this row's own values on top.
+	# `.get` keeps a site that has not migrated the column yet on today's behaviour.
+	base = _predef.TEMPLATES.get(_predef._norm(d.get("based_on")))
+	if base:
+		css = {**base["css"], **css}
+		placement = {**base["placement"], **placement}
 	return {
 		"key": _predef._norm(d["template_key"]),
 		"label": d.get("label") or d["template_key"],

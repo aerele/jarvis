@@ -137,8 +137,10 @@ def _gc_expired_nonces() -> None:
 	nonce. ``frappe.cache.hset`` doesn't honour per-field TTLs (Redis HSET
 	can't), so abandoned sign-ins (customer started the flow, closed the
 	tab, never pasted the URL) leave their PKCE verifier + state hanging
-	in the hash until the whole key gets wiped. Punch-list "stale PKCE
-	verifiers + unconsumed nonces never GC'd" from the 2026-06-16 review.
+	in the hash. The hash is listed in hooks.py ``persistent_cache_keys``
+	(a full clear_cache() no longer empties it), so this sweep is what
+	keeps it bounded. Punch-list "stale PKCE verifiers + unconsumed nonces
+	never GC'd" from the 2026-06-16 review.
 
 	Called opportunistically from begin_paste_signin so the hash stays
 	bounded without a separate scheduled job. Cost is one HGETALL per
@@ -598,7 +600,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	except admin_client.AdminAuthError as e:
 		return _err(
 			"admin_auth",
-			f"Couldn't apply the sign-in — your session or admin credentials "
+			f"Couldn't apply the sign-in. Your session or admin credentials "
 			f"aren't valid. Refresh the page (re-login if prompted) and try "
 			f"again. ({e})",
 		)
@@ -609,7 +611,7 @@ def complete_paste_signin(nonce: str, redirected_url: str) -> dict:
 	) as e:
 		return _err(
 			"push_failed",
-			f"Couldn't apply the sign-in to your agent right now — try again in a moment. ({e})",
+			f"Couldn't apply the sign-in to your agent right now. Try again in a moment. ({e})",
 		)
 	# force=True is mandatory here. The OAuth blob lives in the container's
 	# auth-profiles.json (out-of-band from Jarvis Settings), so on_update's
@@ -1204,6 +1206,7 @@ def disconnect() -> dict:
 	settings = frappe.get_single("Jarvis Settings")
 	settings.db_set("llm_auth_mode", "api_key", update_modified=False)
 	settings.db_set("last_sync_status", "disconnected", update_modified=False)
+	settings.db_set("last_sync_attempt_error", "", update_modified=False)
 	# Inert today ("disconnected" matches neither prefix the jarvis#841 dedup
 	# gate accepts) but cleared like every other non-direct status writer, so a
 	# future status rewording can never re-arm a stale stamp (#846 review).

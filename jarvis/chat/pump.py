@@ -77,8 +77,8 @@ from datetime import datetime, timezone
 import frappe
 
 from jarvis import compat
+from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
-from jarvis.chat import txn
 from jarvis.chat.agent_client import YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.relay_mux import LaneHandler, RelayMux
 from jarvis.exceptions import AgentUnreachableError
@@ -899,15 +899,18 @@ def _reconcile_gateway_active(ctx: "PumpContext", snap: dict | None = None) -> N
 # a live ``jarvis_chat`` lane (isolated parallel turn workers) still landed
 # prepare/finalize on ``long`` behind the hops.
 #
-# Routing (F1 ruling):
+# Routing (F1 ruling, amended by #632):
 #   * a live ``jarvis_chat`` lane  -> ride it (isolated parallel workers, exactly as
 #     the legacy turn path does via ``api._turn_queue``);
-#   * else ``long`` when it has >= 2 live workers (a hop can occupy one while the
-#     other runs prepare/finalize — no self-starvation);
-#   * else ``short`` — the single-``long``-no-``jarvis_chat`` shape. ``short`` is
-#     ALWAYS provisioned, its jobs are bounded, and prepare/finalize carry an
-#     EXPLICIT ``timeout=HOP_TIMEOUT_S`` (180s) that fits comfortably under short's
-#     300s queue envelope (a vision-heavy 4-page-PDF prepare is ~22s).
+#   * else ``short`` when a DEDICATED short consumer is live (a worker listening on
+#     ``short`` and NOT on ``long``). Control jobs are short and latency-critical,
+#     while ``long`` carries multi-minute jobs, so a free short-only worker runs
+#     them at once. Prepare/finalize carry an EXPLICIT ``timeout=HOP_TIMEOUT_S``
+#     (180s) that fits under short's 300s queue envelope;
+#   * else the pre-#632 rule: ``long`` when it has >= 2 live workers, else ``short``.
+#     A generic worker (all queues) is NOT a dedicated short consumer: it also takes
+#     90s hop slices from ``long``, so ``short`` would wait behind them (live on e2e2:
+#     finalize 74-86s late), while ``long`` with >= 2 workers runs on whichever is free.
 
 
 def _live_worker_count(queue_name: str) -> int:
@@ -921,39 +924,66 @@ def _live_worker_count(queue_name: str) -> int:
 	return _probe_worker_count(queue_name) or 0
 
 
+def _has_dedicated_short_consumer() -> bool:
+	"""True when a live RQ worker listens on ``short`` and NOT on ``long``. A generic
+	worker (all queues) does not count: it also runs the 90s hop slices from ``long``.
+	One ``get_workers()`` sweep per call; any probe trouble reads False so the caller
+	keeps the pre-#632 routing."""
+	try:
+		from frappe.utils.background_jobs import generate_qname, get_workers
+
+		short_q = generate_qname("short")
+		long_q = generate_qname(PUMP_QUEUE)
+		for w in get_workers():
+			names = w.queue_names() or []
+			if short_q in names and long_q not in names:
+				return True
+		return False
+	except Exception:
+		return False
+
+
 def _control_queue() -> str:
-	"""RQ queue for the pump's CONTROL jobs (prepare + finalize) — see the block
-	comment above. Never returns the shared ``long`` queue when ``long`` has fewer
-	than 2 live workers (the F1 self-starvation shape); routes to ``short`` there."""
+	"""RQ queue for the pump's CONTROL jobs (prepare + finalize) - see the block
+	comment above. A dedicated ``jarvis_chat`` lane if live, else ``short`` when a
+	dedicated short consumer is live (#632), else the pre-#632 rule (``long`` with
+	>= 2 live workers, otherwise ``short``)."""
 	try:
 		from jarvis.chat.api import _turn_queue
 
 		q = _turn_queue()
 	except Exception:
 		# _turn_queue itself is fully defensive, but if the import/probe blows up,
-		# never share the hop queue on an unknown shape — the bounded `short` lane is
+		# never share the hop queue on an unknown shape - the bounded `short` lane is
 		# always a correct executor for these jobs.
 		return "short"
 	# A dedicated isolated lane (jarvis_chat, or a non-`long` override) never shares
-	# a worker with the hops — ride it as the legacy turn path does.
+	# a worker with the hops - ride it as the legacy turn path does.
 	if q != PUMP_QUEUE:
 		return q
-	# It resolved to `long` (jarvis_chat absent, or overridden to long): only safe to
-	# share with the hops when `long` has >= 2 live workers; otherwise use `short`.
+	if _has_dedicated_short_consumer():
+		return "short"
 	return PUMP_QUEUE if _live_worker_count(PUMP_QUEUE) >= 2 else "short"
 
 
 def _pump_shape_starves() -> bool:
-	"""True on the F1 self-starvation shape: no live ``jarvis_chat`` lane AND the
-	shared ``long`` hop queue has fewer than 2 workers — so a hop and the
-	prepare/finalize it depends on would fight over one worker. Drives the loud
-	``ensure_pump`` provisioning warning (§8-I)."""
-	return _control_queue() == "short"
+	"""True when control jobs have no isolated executor: no live ``jarvis_chat`` lane
+	AND no dedicated short consumer (a worker on ``short`` but not ``long``). Then a
+	prepare/finalize shares workers with the 90s hops (#632 live evidence), so the
+	loud ``ensure_pump`` warning (§8-I) tells operators to add a short-only worker."""
+	try:
+		from jarvis.chat.api import _turn_queue
+
+		if _turn_queue() != PUMP_QUEUE:
+			return False
+	except Exception:
+		pass
+	return not _has_dedicated_short_consumer()
 
 
 def _warn_provisioning_if_starved() -> None:
-	"""§8-I: emit ONE loud provisioning warning (telemetry line + error log) when the
-	site is in the F1 self-starvation shape. Throttled to at most once / 5 min per
+	"""§8-I: emit ONE loud provisioning warning (telemetry line + error log) when no
+	isolated executor exists for control jobs. Throttled to at most once / 5 min per
 	site so the after-every-commit ``ensure_pump`` path never spams. Best-effort."""
 	if not _pump_shape_starves():
 		return
@@ -967,18 +997,19 @@ def _warn_provisioning_if_starved() -> None:
 		# If the throttle store is unavailable, still warn (better loud than silent).
 		pass
 	long_workers = _live_worker_count(PUMP_QUEUE)
-	_telemetry("provision_warning", queue=PUMP_QUEUE, long_workers=long_workers, control_queue="short")
+	_telemetry(
+		"provision_warning", queue=PUMP_QUEUE, long_workers=long_workers, control_queue=_control_queue()
+	)
 	try:
 		frappe.log_error(
-			title="pump.provisioning: single-long-no-jarvis_chat",
+			title="pump.provisioning: no-dedicated-short-worker",
 			message=(
 				"Relay Pump provisioning WARNING: this site has no live `jarvis_chat` "
-				f"worker lane and only {long_workers} live `long` worker(s). Pump hops "
-				"ride `long`; with fewer than 2 `long` workers a 90s hop starves the "
-				"prepare/finalize jobs it enqueues (fresh turns strand for minutes until "
-				"the watchdog backstop). Control jobs are being routed to `short` as a "
-				"mitigation, but the supported shapes are >=2 `long` workers OR a live "
-				"`jarvis_chat` lane. See PUMP-RUNBOOK.md §6 (F1)."
+				"worker lane and no dedicated short-queue worker (a worker listening on "
+				f"`short` but not `long`); {long_workers} live `long` worker(s). Pump hops "
+				"ride `long`, so prepare/finalize share workers with 90s hops and replies "
+				"can finish a minute or more late. Add a worker with `--queue short` "
+				"(not `long`) or a live `jarvis_chat` lane. See PUMP-RUNBOOK.md §6 (F1)."
 			),
 		)
 	except Exception:
@@ -992,11 +1023,11 @@ def _warn_provisioning_if_starved() -> None:
 # customer):
 #   * DEGRADED  -> warn only. Fires when TOTAL live RQ workers (any queue) < 2,
 #     not the stricter F1 "< 2 `long` workers" shape (_pump_shape_starves) used
-#     by the ops provisioning warning. Rationale: the pump already reroutes
-#     prepare/finalize (control) jobs to `short` when `long` has < 2 workers
-#     (`_control_queue`), so 1 `long` worker plus a second worker to run those
-#     control jobs does NOT strand - the stricter "< 2 `long`" rule over-warned
-#     that case. The strand only truly happens with a single worker doing
+#     by the ops provisioning warning. Rationale: the pump routes
+#     prepare/finalize (control) jobs by `_control_queue` (#632), so
+#     1 `long` worker plus a second worker to run those control jobs does NOT
+#     strand - the stricter "< 2 `long`" rule over-warned that case.
+#     The strand only truly happens with a single worker doing
 #     everything, so this warns on total headcount instead. Surfaced as a
 #     non-blocking onboarding banner; chat still works.
 #   * No hard block. RQ's registry can read zero workers while every worker is
@@ -1136,9 +1167,9 @@ def _default_dispatch_prepare(run_id: str, relay_target_id: str) -> None:
 	not exist yet, so it is a no-op-until-WP-1d in production and is ALWAYS replaced
 	by tests.
 
-	QUEUE (F1): routed via ``_control_queue`` — a live ``jarvis_chat`` lane else
-	``long`` (>=2 workers) else ``short`` — NEVER the single-worker ``long`` the hops
-	ride (which would self-starve; see the block comment above)."""
+	QUEUE (F1): routed via ``_control_queue``: a live ``jarvis_chat`` lane, else
+	``short`` when a dedicated short consumer is live, else the pre-#632 rule
+	(see the block comment above)."""
 	try:
 		frappe.enqueue(
 			"jarvis.chat.prepare.run_prepare",
@@ -1163,8 +1194,7 @@ def _default_enqueue_finalize(run_id: str, relay_target_id: str) -> None:
 	bare fixed id would let a hard-killed finalize's stale STARTED registration
 	no-op re-enqueues for the job timeout (the §10.4 dedupe trap).
 
-	QUEUE (F1): routed via ``_control_queue`` (same rule as prepare) — NEVER the
-	single-worker ``long`` the hops ride."""
+	QUEUE (F1): routed via ``_control_queue`` (same rule as prepare)."""
 	try:
 		frappe.enqueue(
 			"jarvis.chat.finalize.run_finalize",
@@ -1621,6 +1651,9 @@ class _RunState:
 	# path, just delayed).
 	yield_deadline: float | None = None
 	yield_payload: dict | None = None
+	# A step line was offered for this run, or a hop re-attached it (the client fence may
+	# hold its seqs): ``empty_reply_recovery`` then never sends it again.
+	stepped: bool = False
 
 	@property
 	def key(self) -> str:
@@ -2632,40 +2665,122 @@ def _is_unprompted_yield(run_id: str, kind: str, payload: dict) -> bool:
 	return not bool(frappe.db.get_value(TURN, run_id, "cancel_requested"))
 
 
-def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
-	"""admin-v2#656: send a turn again ONCE when the runtime refused it before producing
-	anything because it would not resume a Claude CLI live session. The refusal
-	discards the stale process, so the same turn sent again starts a fresh one. The
-	Turn goes back to ``ready`` (same row, placeholder and stored prompt) and the next
-	``_dispatch_ready`` pass sends it under a fresh gateway key. The CAS refuses a turn
-	that streamed anything or was stopped, and a lost CAS settles exactly as before.
-	True = requeued, the caller must not settle it."""
-	if kind != "relay:error" or payload.get("state") != "error" or (payload.get("text") or "").strip():
-		return False
-	if not _REFUSED_CLI_SESSION_RE.search(payload.get("error") or ""):
-		return False
-	stored = _json_or_none(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
-	if not isinstance(stored, dict) or stored.get("redispatch"):
-		return False
-	flagged = json.dumps({**stored, "redispatch": 1})
+# What ``_resend_once`` did (the empty-reply path logs them as skip reasons).
+_RESENT = "resent"
+_USED = "used"
+_NO_PAYLOAD = "no_payload"
+_CAS_LOST = "cas_lost"
+
+
+def _resend_once(ctx: PumpContext, rs: _RunState, reason: str | None = None) -> str:
+	"""Send a turn again ONCE. The Turn goes back to ``ready`` (same row, placeholder and
+	stored prompt) and the next ``_dispatch_ready`` pass sends it under a fresh gateway
+	key. The stored ``redispatch`` marker allows one re-send per turn, whatever the cause.
+	The CAS refuses a turn that streamed anything or was stopped, and a lost CAS settles
+	exactly as before. A ``reason`` (the empty reply) is stored as ``redispatch_reason``
+	and gives a fresh recovery budget; without it this is the refused-session re-send,
+	unchanged.
+
+	Returns ``_RESENT``, ``_USED`` (already re-sent), ``_NO_PAYLOAD`` or ``_CAS_LOST``."""
+	stored = empty_reply_recovery.stored_dispatch(frappe.db.get_value(TURN, rs.run_id, "dispatch_payload"))
+	if stored is None:
+		return _NO_PAYLOAD
+	if stored.get("redispatch"):
+		return _USED
+	marker = {"redispatch": 1, "redispatch_reason": reason} if reason else {"redispatch": 1}
+	flagged = json.dumps({**stored, **marker})
+	label = f"pump requeue {reason.replace('_', ' ') if reason else 'refused session'} {rs.run_id}"
 	txn.fresh_snapshot()
 	won = txn.replay_on_conflict(
-		lambda: ts.requeue_for_redispatch(rs.run_id, rs.version, ctx.epoch, flagged),
-		label=f"pump requeue refused session {rs.run_id}",
+		lambda: ts.requeue_for_redispatch(
+			rs.run_id, rs.version, ctx.epoch, flagged, fresh_recovery=bool(reason)
+		),
+		label=label,
 		before_replay=lambda: _resync_fresh(rs),
 	)
 	if not won:
 		if _epoch_lost(ctx, rs.run_id):
 			ts.lease_lost_exit(rs.run_id)
-		return False
+		return _CAS_LOST
 	# Pump-owned transaction, as for every transition here: the requeue must be durable
 	# before the lane retires and the next slice re-sends it. A raise before this point
 	# leaves the turn streaming for the hop's own rollback and recovery.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	# The next dispatch builds a fresh run state and lane; this one is done.
 	ctx.runs.pop(rs.run_id, None)
+	return _RESENT
+
+
+def _redispatch_refused_session(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
+	"""admin-v2#656: send a turn again ONCE when the runtime refused it before producing
+	anything because it would not resume a CLI live session. The refusal discards the
+	stale process, so the same turn sent again starts a fresh one (``_resend_once``).
+	True = requeued, the caller must not settle it."""
+	if kind != "relay:error" or payload.get("state") != "error" or (payload.get("text") or "").strip():
+		return False
+	if not _REFUSED_CLI_SESSION_RE.search(payload.get("error") or ""):
+		return False
+	if _resend_once(ctx, rs) != _RESENT:
+		return False
 	_telemetry("redispatch_refused_session", run_id=rs.run_id)
 	return True
+
+
+def _resend_empty_reply(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> bool:
+	"""Send a turn again ONCE when the agent runtime ended it with its plain empty reply
+	and nothing ran (``empty_reply_recovery.resend_decision``). One log line per
+	decision; none while the re-send is off. Any error except a lost lease rolls back
+	first, so the settle's commit cannot carry a half-done requeue, and the turn settles
+	as before. True = requeued, the caller must not settle it."""
+	try:
+		decision = empty_reply_recovery.resend_decision(
+			kind=kind,
+			payload=payload,
+			run_id=rs.run_id,
+			conversation=rs.conversation,
+			owner=rs.owner,
+			assistant_message=rs.assistant_message,
+			relay_target_id=ctx.relay_target_id,
+			sent_again=rs.key != rs.run_id,
+			saw_step=lambda: rs.stepped or bool(_read_run_step_lines(rs.run_id)),
+		)
+		if decision is None:
+			return False
+		if not decision.resend:
+			_log_resend(ctx, rs, "skip", decision.reason)
+			return False
+		done = _resend_once(ctx, rs, empty_reply_recovery.REASON)
+	except ts.LeaseLostExit:
+		raise
+	except Exception:
+		frappe.db.rollback()
+		_log_resend(ctx, rs, "skip", "error")
+		return False
+	if done != _RESENT:
+		_log_resend(ctx, rs, "skip", done)
+		return False
+	_log_resend(ctx, rs, "resent", decision.reason)
+	_note_first_attempt_empty(rs, payload.get("error") or "")
+	return True
+
+
+def _note_first_attempt_empty(rs: _RunState, err: str) -> None:
+	"""B1's ``empty_reply`` line (with the context size) for the attempt sent again:
+	settlement writes it only for a turn it settles. Its read opens a snapshot in the
+	pump's transaction, so end that after. Best-effort."""
+	try:
+		from jarvis.chat.turn_handler import _note_empty_reply
+
+		_note_empty_reply(rs.run_id, rs.conversation, err, "empty-reply")
+		txn.fresh_snapshot()
+	except Exception:
+		pass
+
+
+def _log_resend(ctx: PumpContext, rs: _RunState, decision: str, reason: str) -> None:
+	empty_reply_recovery.log_decision(
+		decision, reason, run_id=rs.run_id, conversation=rs.conversation, target=ctx.relay_target_id
+	)
 
 
 def _settle_terminal(ctx: PumpContext, rs: _RunState, kind: str, payload: dict) -> None:
@@ -2834,6 +2949,7 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 		_append_run_step_line(rs.run_id, text)
 		if preamble and raw:
 			_append_run_preamble(rs.run_id, raw)
+		rs.stepped = True
 		if rs.owner:
 			ts.publish_fenced(
 				rs.owner,
@@ -2857,6 +2973,8 @@ def _make_handler(ctx: PumpContext, rs: _RunState) -> LaneHandler:
 			# Message row holds the full streamed text if settlement carries no final.
 			_flush_deltas(ctx, rs)
 			if _redispatch_refused_session(ctx, rs, kind, payload):
+				return
+			if _resend_empty_reply(ctx, rs, kind, payload):
 				return
 			if _is_unprompted_yield(rs.run_id, kind, payload):
 				# the agent runtime's image/video/music tools unconditionally detach into a
@@ -3363,6 +3481,7 @@ def _reattach_lane(ctx: PumpContext, r: dict) -> None:
 		send_key=_gateway_key(run_id, dispatch),
 		accept_ms=_dt_to_ms(frappe.db.get_value(TURN, run_id, "enqueued_at")),
 		first_delta_done=True,  # a re-attach resumes mid-stream; first token already sent
+		stepped=True,  # its earlier steps are unknown here
 	)
 	ctx.runs[run_id] = rs
 	ctx.peak_occupancy = max(ctx.peak_occupancy, len(ctx.runs))
@@ -3606,7 +3725,7 @@ def ensure_pump(relay_target_id: str, *, deps: PumpDeps | None = None) -> dict:
 	if not pump_lifecycle_configured(target):
 		return {"enqueued": False, "reason": "not_configured"}
 
-	# §8-I / F1: if this site is in the single-long-no-jarvis_chat shape, warn LOUDLY
+	# §8-I / F1: if this site has no isolated control-job executor, warn LOUDLY
 	# (throttled). Emitted on the start path so it surfaces even when the pump is
 	# already leased (below) — the shape is a standing provisioning problem, not a
 	# per-hop one. Best-effort, never blocks the start decision.
@@ -3639,7 +3758,7 @@ def ensure_pump(relay_target_id: str, *, deps: PumpDeps | None = None) -> dict:
 	return {"enqueued": True, "job_id": job_id, "hop_counter": hop}
 
 
-def request_cancel_conversation(relay_or_conversation: str) -> bool:
+def request_cancel_conversation(relay_or_conversation: str, run_id: str | None = None) -> bool:
 	"""Web ``stop_run`` hook (pump mode): flag the conversation's in-flight pump turn
 	for cancellation (D2 #17, actor-fenced) and wake the pump so its cancel sweep
 	drives the out-of-band ``chat.abort`` + aborted terminal + settle-cancelled.
@@ -3653,29 +3772,111 @@ def request_cancel_conversation(relay_or_conversation: str) -> bool:
 	Called from ``stop_run`` only after ``admission.mark_cancel_requested``'s own
 	commit (and read-only work before that), so nothing is pending when this unit
 	starts and replay is always safe. ``ensure_pump``/``lpush_wake`` are non-DB
-	side effects, so they stay after the winning commit, not inside the unit."""
+	side effects, so they stay after the winning commit, not inside the unit.
+
+	With the empty-reply re-send on (``empty_reply_recovery``), a turn it put back to
+	``ready`` has nothing in flight: Stop cancels it there when ``run_id`` (the run
+	``stop_run`` names) is absent or names that turn (``_is_stoppable_ready``). A CAS lost
+	on such a turn (its requeue or dispatch committed after the read) reads again once,
+	on a fresh transaction. Every other turn, and every turn while the re-send is off,
+	is handled exactly as before."""
 	conversation = relay_or_conversation
+	resend = empty_reply_recovery.switch_on()
+	states = ("dispatching", "streaming")
+	fields = ["run_id", "version", "relay_target_id"]
+	if resend:
+		states, fields = ("ready", *states), [*fields, "state", "assistant_message", "pump_epoch"]
 
 	def unit() -> tuple[bool, dict | None]:
 		row = frappe.db.get_value(
 			TURN,
-			{"conversation": conversation, "state": ["in", ("dispatching", "streaming")]},
-			["run_id", "version", "relay_target_id"],
+			{"conversation": conversation, "state": ["in", states]},
+			fields,
 			as_dict=True,
 		)
 		if not row:
 			return False, None
-		won = ts.request_cancel(row["run_id"], int(row["version"]))
+		if row.get("state") == "ready":
+			if not _is_stoppable_ready(row, run_id):
+				return False, None
+			won = _cancel_ready_turn(row)
+		else:
+			won = ts.request_cancel(row["run_id"], int(row["version"]))
 		if won:
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 		return won, row
 
-	won, row = txn.replay_on_conflict(unit, label=f"pump.request_cancel_conversation {conversation}")
+	label = f"pump.request_cancel_conversation {conversation}"
+	won, row = txn.replay_on_conflict(unit, label=label)
+	if not won and row and resend and _rollback_and_check_resent(row["run_id"]):
+		won, row = txn.replay_on_conflict(unit, label=label)
 	if won and row:
+		if row.get("state") == "ready":
+			_finish_stop_before_dispatch(conversation, row)
 		ensure_pump(row["relay_target_id"])
 		lpush_wake(row["relay_target_id"], row["run_id"])
 		return True
 	return False
+
+
+def _rollback_and_check_resent(run_id: str) -> bool:
+	"""After a lost Stop CAS: end the transaction (the CAS wrote nothing) and tell if the
+	turn is now one the empty-reply re-send put back, so a second try can stop it."""
+	frappe.db.rollback()
+	return empty_reply_recovery.resent_turn(run_id)
+
+
+def _is_stoppable_ready(row: dict, run_id: str | None) -> bool:
+	"""A ``ready`` turn Stop cancels: one the empty-reply re-send put back, when ``run_id``
+	is absent or names it (its run id or its ``-r1`` key)."""
+	if run_id and run_id not in (row["run_id"], resent_gateway_key(row["run_id"])):
+		return False
+	return empty_reply_recovery.resent_turn(row["run_id"])
+
+
+def _cancel_ready_turn(row: dict) -> bool:
+	"""``ready`` -> cancelled, and the reply stops spinning and shows as stopped. A write
+	conflict on the placeholder is raised (the server aborted the cancel too, so the unit
+	replays); any other error there is logged and the cancel kept."""
+	won = ts.cancel_preparing_or_ready(row["run_id"], int(row["version"]))
+	if won and row["assistant_message"]:
+		try:
+			ts._run_cas(
+				"UPDATE `tabJarvis Chat Message` SET streaming=0, stopped=1 WHERE name=%(m)s",
+				{"m": row["assistant_message"]},
+			)
+		except Exception as e:
+			if txn.is_write_conflict(e):
+				raise
+			frappe.log_error(
+				title="pump.request_cancel_conversation placeholder cleanup",
+				message=frappe.get_traceback(),
+			)
+	return won
+
+
+def _finish_stop_before_dispatch(conversation: str, row: dict) -> None:
+	"""After Stop cancelled a re-sent turn in ``ready`` (no settlement runs for it). The
+	chat already shows this reply's spinner, so a ``run:end`` (stopped) ends it, with no
+	seq so the client fence takes it. Also pokes a held model switch. Never raises."""
+	from jarvis.chat import llm_switch
+
+	llm_switch.apply_if_active(source="pump.request_cancel_conversation")
+	try:
+		owner = frappe.db.get_value(CONV, conversation, "owner")
+	except Exception:
+		owner = None
+	if owner:
+		ts.publish_fenced(
+			owner,
+			"run:end",
+			conversation_id=conversation,
+			run_id=row["run_id"],
+			event_seq=None,
+			message_id=row["assistant_message"],
+			pump_epoch=row["pump_epoch"] or None,
+			stopped=True,
+		)
 
 
 def _handoff(ctx: PumpContext) -> None:
@@ -4151,6 +4352,11 @@ def _gateway_key(run_id: str, dispatch: dict) -> str:
 	"""The ``chat.send`` idempotency key, which the gateway echoes as the run id. A
 	re-sent turn needs a fresh one: a reused key attaches to (or replays) the old run."""
 	return f"{run_id}-r1" if dispatch.get("redispatch") else run_id
+
+
+def resent_gateway_key(run_id: str) -> str:
+	"""The gateway run id of a turn after its one re-send."""
+	return _gateway_key(run_id, {"redispatch": 1})
 
 
 def _clear_agent_notes_on_ack(conversation: str, drained_note_ids) -> None:

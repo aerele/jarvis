@@ -143,7 +143,7 @@ _MACRO_CHANGED_ERROR = (
 )
 # The capacity resume is a cron: its turn never binds a disabled user, Administrator or Guest.
 _OWNER_INELIGIBLE_ERROR = "The run's owner can no longer run unattended work, so the run was closed."
-_NO_CAPACITY_ERROR = "The site stayed busy — the macro could not get capacity to run this step."
+_NO_CAPACITY_ERROR = "The site stayed busy, so the macro could not get capacity to run this step."
 
 # Human sentences for the MANUAL path (thrown, so the SPA's existing toast renders
 # them). The scheduled path reports the machine code instead and the scheduler
@@ -395,7 +395,7 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return {"ok": False, "reason": "macro disabled"}
 	if (doc.merge_status or "") == "pending" and trigger != "scheduled":
-		frappe.throw(_("Still summarizing this macro — try again in a few seconds."))
+		frappe.throw(_("Still summarizing this macro. Try again in a few seconds."))
 	owner = doc.owner
 	# A stored merged prompt (the background LLM summary) runs as ONE turn
 	# instead of chaining the steps — the steps stay as the editable source
@@ -431,9 +431,9 @@ def run_macro(macro_name: str, *, trigger: str = "manual") -> dict:
 			"seq": 1,
 			"role": "assistant",
 			"content": (
-				f"▶ Running macro **{doc.macro_name}** — summarized prompt."
+				f"▶ Running macro **{doc.macro_name}**: summarized prompt."
 				if merged
-				else f"▶ Running macro **{doc.macro_name}** — {len(steps)} step(s)."
+				else f"▶ Running macro **{doc.macro_name}**: {len(steps)} step(s)."
 			),
 		}
 	)
@@ -2153,11 +2153,9 @@ def _skill_invocations(step) -> str:
 	``invoked_skill_clause`` names them at turn time (which also re-checks
 	owner/shared visibility). Disabled or since-deleted skills drop out silently.
 
-	How strong that activation is depends on the skill, and the step inherits the
-	difference silently (issue #477). A skill the container push writes is named as
-	an installed ``custom-<slug>`` and activates deterministically. A Role-scope,
-	role-restricted, private or over-cap skill is not on disk, so the clause instead
-	instructs the agent to fetch it with ``jarvis__get_skill``: reliable in practice
+	The activation is the same for every skill: the clause instructs the agent to
+	fetch it with ``jarvis__get_skill`` (no custom skill's instructions are in the
+	container; a pushed one's file only points at that tool). Reliable in practice
 	but model-mediated, not a container guarantee."""
 	try:
 		names = frappe.parse_json(step.skills) if step.skills else []

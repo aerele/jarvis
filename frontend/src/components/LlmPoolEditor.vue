@@ -1203,7 +1203,7 @@
 										Sign in with {{ upstreamLabelOf(panelRow.upstream) }}
 									</div>
 									<div class="jv-cdesc">
-										Open the verification page, enter the code, and approve
+										Open the verification page, enter the code and approve
 										access. This panel updates automatically.
 									</div>
 									<div class="jv-crow" style="margin-top: 8px">
@@ -2135,7 +2135,7 @@
 											Sign in with {{ upstreamLabelOf(m.upstream) }}
 										</div>
 										<div class="jv-cdesc">
-											Open the verification page, enter the code, and approve
+											Open the verification page, enter the code and approve
 											access. This panel updates automatically.
 										</div>
 										<div class="jv-crow" style="margin-top: 8px">
@@ -2402,12 +2402,17 @@
 			     (line 249 above): a resync mid-edit would submit whatever is
 			     half-typed there instead of leaving it for the customer to finish. -->
 			<button
-				v-if="canEdit && statusLine.kind === 'failed' && !orderDirty && !panel.open"
+				v-if="
+					canEdit &&
+					(statusLine.kind === 'failed' || statusLine.retrying) &&
+					!orderDirty &&
+					!panel.open
+				"
 				:disabled="!editable"
 				@click="resync"
 				class="jv-btn jv-btn--sm jv-btn--primary"
 			>
-				Resync
+				{{ statusLine.retrying ? "Retry now" : "Resync" }}
 			</button>
 		</div>
 	</div>
@@ -2571,6 +2576,7 @@ const saving = ref(false);
 const sync = ref({
 	last_sync_status: "",
 	pending: false,
+	attempt_error: "",
 	subscription_status: "",
 	warnings: [],
 	model_statuses: [],
@@ -5397,6 +5403,13 @@ const applyMessage = computed(() => {
 // Null hides the strip rather than leaving a bordered, empty band.
 const statusLine = computed(() => {
 	const r = applyResult.value;
+	// admin-v2#630: the status stays pending after a failed attempt. Say so (and
+	// offer Retry now) instead of "Still applying". No promise of an automatic
+	// retry: only a handover is re-driven by the site. A fresh result from an
+	// apply this editor just ran (ok or failed) still wins over this line.
+	if (sync.value.pending && sync.value.attempt_error && !(r && r.kind !== "pending")) {
+		return { kind: "warn", text: "Couldn't apply this change.", retrying: true };
+	}
 	// A failure is already reported inside the open panel, right next to the row it
 	// belongs to. Do not say it twice.
 	if (r && !(r.kind === "failed" && panel.value.open)) {

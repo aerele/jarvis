@@ -6,6 +6,7 @@ import {
 	parseFiltersBlock,
 	CSP_META,
 	RUNTIME_JS,
+	ECHARTS_THEME_JS,
 } from "./dashboardSrcdoc.js";
 
 // A stable marker that only appears where the runtime was inlined.
@@ -455,4 +456,37 @@ test("export: RUNTIME caps pixelRatio for large dashboards and heartbeats progre
 		"drops to 1x past a large-area threshold"
 	);
 	assert.ok(RUNTIME_JS.includes("export:progress"), "posts a per-slide progress heartbeat");
+});
+
+test("ECharts default theme: init(el) gets the theme palette, an explicit theme wins", () => {
+	const calls = { reg: [], init: [] };
+	const echarts = {
+		registerTheme: (n, o) => calls.reg.push([n, o]),
+		init: (...a) => calls.init.push(a),
+	};
+	const palette = ["#383838", "#5d78d1"];
+	const win = { JARVIS_THEME: { name: "jarvis", palette }, echarts };
+	new Function("window", ECHARTS_THEME_JS)(win);
+	assert.deepEqual(calls.reg, [["jarvis-jarvis", { color: palette }]]);
+	win.echarts.init("el");
+	win.echarts.init("el", "dark");
+	win.echarts.init("el", null, { renderer: "svg" });
+	win.echarts.init("el", "");
+	win.echarts.init("el", false);
+	win.echarts.init("el", { color: ["#111"] });
+	assert.deepEqual(calls.init, [
+		["el", "jarvis-jarvis"],
+		["el", "dark"],
+		["el", "jarvis-jarvis", { renderer: "svg" }],
+		["el", "jarvis-jarvis"],
+		["el", "jarvis-jarvis"],
+		["el", { color: ["#111"] }],
+	]);
+	assert.ok(RUNTIME_JS.includes("registerTheme"));
+	assert.ok(!/<\/script/i.test(RUNTIME_JS));
+});
+
+test("ECharts default theme: no-op without echarts or a theme", () => {
+	new Function("window", ECHARTS_THEME_JS)({});
+	new Function("window", ECHARTS_THEME_JS)({ JARVIS_THEME: { palette: ["#fff"] } });
 });

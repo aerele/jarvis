@@ -4,11 +4,18 @@ The row is claimed (committed ``Executing``) before the call runs, so a crash
 anywhere after the claim ends ``Failed``/``interrupted`` via the reconciler and is
 never re-run. A failed dispatch is fully rolled back, so nothing it queued for
 after-commit (jobs, webhooks, realtime) escapes; its failure audit row is
-re-recorded after the rollback."""
+re-recorded after the rollback.
+
+A guarded structure write (``jarvis.tools._guarded_structure``; R2-10) runs under
+the structure lock of every form it alters, taken BEFORE the claim and held to the
+end: a held lock leaves the row Pending ("try again"), what its clean-up needs is
+sealed on the row in the claim's transaction, and a failure is cleaned up before
+the locks are let go."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 import frappe
@@ -29,7 +36,9 @@ from jarvis.chat.pending_actions._store import (
 	TERMINAL,
 	_terminal_update,
 	claim,
+	clear_undo,
 	get_row,
+	stash_undo,
 )
 from jarvis.permissions import is_valid_unattended_owner, refuse_in_tool_dispatch
 
@@ -158,6 +167,151 @@ def value_free(fn, title: str, *args, **kwargs):
 		raise ExecuteCrashed(_CRASHED) from None
 
 
+@dataclass
+class _Structure:
+	"""A guarded structure write being confirmed: its handler and what its clean-up
+	needs (sealed on the row at the claim; ``stamp_written`` adds the exact row the
+	save wrote, in the save's own transaction)."""
+
+	handler: object
+	undo: dict
+
+
+def _structure_of(row, args: dict) -> _Structure | None:
+	"""The guarded structure write a chat card stands for, else None."""
+	from jarvis.tools import _guarded_structure, _write_risk
+
+	if row.kind != "chat" or row.tool not in ("create_doc", "update_doc"):
+		return None
+	risk = _write_risk.risk_of(row.tool, args)
+	if risk not in _write_risk.GUARDED_STRUCTURE or not _guarded_structure.available():
+		return None  # dispatch_confirmed refuses it as any structure write
+	if not _parked_as_structure(row):
+		# The call is a guarded structure write NOW but its card was not parked as
+		# one (CRM Settings was carded as plain settings, then the data sync was
+		# switched on in Desk): the person never saw what it would do. No lock is
+		# taken, so dispatch_confirmed refuses it as any structure write.
+		return None
+	return _Structure(_guarded_structure.handler_for(risk, args), {})
+
+
+def _card_holds(row, structure: _Structure) -> bool:
+	"""Under the form's lock, before the claim: whether the card still says what the
+	write will do (the handler's ``card_holds``, when it has one). A handler whose
+	own checks now refuse the call says so itself a moment later: the write tool
+	runs those checks again under this same lock before it writes anything, and its
+	refusal says why. Any other failure counts as a card that no longer holds: a
+	check that could not be made never lets the write run."""
+	from jarvis.exceptions import JarvisError
+
+	holds = getattr(structure.handler, "card_holds", None)
+	if holds is None:
+		return True
+	card = row.get("card")
+	try:
+		card = frappe.parse_json(card) if isinstance(card, str) else card
+		return bool(holds(str((card or {}).get("risk_line") or "")))
+	except JarvisError:
+		frappe.clear_messages()
+		return True
+	except Exception:
+		frappe.log_error(title="jarvis.pending_action.card_check_failed", message=frappe.get_traceback())
+		frappe.clear_messages()
+		return False
+
+
+def _parked_as_structure(row) -> bool:
+	"""Whether the card the person confirmed was a guarded structure card
+	(``card.structural``, set at park and bound into the seal with the card)."""
+	card = row.get("card")
+	try:
+		card = frappe.parse_json(card) if isinstance(card, str) else card
+	except Exception:
+		return False
+	return isinstance(card, dict) and card.get("structural") is True
+
+
+def _busy_structure(e: Exception) -> dict:
+	"""The lock of that form is held: nothing ran and the card stays Pending."""
+	from jarvis import api
+
+	out = api._error("RetryLaterError", str(e), hint=api._ERROR_HINTS["RetryLaterError"])
+	out["error"]["kind"] = "retry_later"
+	return {**out, "reason_code": "busy", "pa_status": PENDING, "outcome": None}
+
+
+def _clean_up_structure(name: str, structure: _Structure):
+	"""After a failed guarded structure write (already rolled back), still under its
+	lock: remove what it left half-made, from the clean-up state as it COMMITTED
+	(what the save stamped went with the rollback unless the save's row committed).
+	Tried twice. The ``CleanUp``, or None when it failed both times: the outcome
+	then stays partial, the state stays on the row, and the reconciler finishes it
+	(``_reconcile._retry_structure_cleanups``)."""
+	from jarvis.tools import _guarded_structure
+
+	for attempt in (1, 2):
+		try:
+			undo = _seal.unseal_undo(get_row(name)) or structure.undo
+			if structure.undo.get("unstamped"):
+				# The stamp never reached the row: clean up from what the save held
+				# in memory (the same exact name and timestamp), and never call the
+				# result proven.
+				note = _guarded_structure.clean_up(structure.undo)
+				note.clean = False
+				return note
+			return _guarded_structure.clean_up(undo)
+		except Exception:
+			frappe.db.rollback()
+			if attempt == 2:
+				frappe.log_error(
+					title="jarvis.pending_action.structure_cleanup_failed",
+					message=f"{name}: needs a person if the next reconcile cannot finish it\n"
+					+ frappe.get_traceback(),
+				)
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
+	return None
+
+
+def _still_locked(name: str, structure: _Structure) -> bool:
+	"""After the dispatch: is the form's structure lock still this confirm's, as the
+	database sees it? Logged when not."""
+	from jarvis.tools._guarded_structure import lock_names, locks_held
+
+	if locks_held(lock_names(structure.handler)):
+		return True
+	frappe.log_error(
+		title="jarvis.pending_action.structure_lock_lost",
+		message=f"{name}: the structure lock of {', '.join(lock_names(structure.handler))} was lost during "
+		"the confirm (its database connection was dropped); the outcome could not be verified",
+	)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
+	return False
+
+
+def _report_structure_failure(row, args: dict, structure: _Structure, result, note, code: str) -> None:
+	"""Say on the failure what the clean-up did (the receipt and the card show it),
+	file the attempt (``partial`` when part of it had committed, E4) and log it."""
+	from jarvis.tools import _write_risk
+
+	err = result.get("error") if isinstance(result, dict) and isinstance(result.get("error"), dict) else None
+	said = note.text if note else "The clean-up could not be completed; check the form in Desk."
+	if err is not None:
+		err["message"] = f"{str(err.get('message') or '').rstrip()} {said}".strip()
+	# A refusal under the lock (the table changed since the park) is already filed
+	# as refused by ``_discard_failed_dispatch``.
+	if (err or {}).get("code") not in _write_risk.REFUSAL_CODES:
+		_record_failed_write(row, args, "partial" if code == "partial" else "failed")
+	doctype, name = _write_risk.first_risky_target(row.tool, args)
+	_write_risk.log_line(structure.handler.risk, doctype, name, code, tool=row.tool, cleanup=said)
+	if note is not None and note.needs_person:
+		# The same line the reconciler files for a row it had to leave: found from
+		# the Error Log, also when the clean-up ran inside the confirm itself.
+		frappe.log_error(
+			title="jarvis.pending_action.structure_needs_a_person", message=f"{row.name}: {note.text}"
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
+
+
 def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None, bool, str]:
 	"""Run the sealed call as ``exec_user`` (or ``user``: an Edit & create runs as the
 	approver). Returns ``(result, interfered, crash_tb)``.
@@ -187,13 +341,38 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 	return result, watch.disarm(), crash_tb
 
 
+def _record_failed_write(
+	row, args: dict, outcome: str, *, actor: str | None = None, ref_doctype: str | None = None
+) -> None:
+	"""The ``Jarvis Agent Write`` row of a failed confirm, written after its rollback."""
+	from jarvis import agent_audit
+
+	agent_audit.record_write(
+		actor=actor or row.exec_user,
+		tool=row.tool,
+		args=args,
+		result=None,
+		outcome=outcome,
+		provenance=_PROVENANCE[row.kind],
+		provenance_name=row.name if row.kind != "chat" else "",
+		ref_doctype=ref_doctype,
+	)
+
+
 def _discard_failed_dispatch(
-	row, args: dict, crash_tb: str, *, actor: str | None = None, result: dict | None = None
+	row,
+	args: dict,
+	crash_tb: str,
+	*,
+	actor: str | None = None,
+	result: dict | None = None,
+	record: bool = True,
 ) -> None:
 	"""Full rollback of a failed dispatch, then re-record what must survive it. A
 	write the risk guard refused stays ``refused`` (the rollback dropped the row
-	``_dispatch_and_wrap`` wrote), against the doctype it refused."""
-	from jarvis import agent_audit
+	``_dispatch_and_wrap`` wrote), against the doctype it refused. ``record=False``:
+	the caller files the attempt itself, once its clean-up has said how it ended
+	(a guarded structure write)."""
 	from jarvis.tools._write_risk import REFUSAL_CODES
 
 	err = (result or {}).get("error") if isinstance(result, dict) else None
@@ -206,16 +385,14 @@ def _discard_failed_dispatch(
 	frappe.local._webhook_queue = []
 	if hasattr(frappe.local, "_link_count"):
 		del frappe.local._link_count
-	agent_audit.record_write(
-		actor=actor or row.exec_user,
-		tool=row.tool,
-		args=args,
-		result=None,
-		outcome="refused" if refused else "failed",
-		provenance=_PROVENANCE[row.kind],
-		provenance_name=row.name if row.kind != "chat" else "",
-		ref_doctype=err.get("doctype") if refused else None,
-	)
+	if record or refused:
+		_record_failed_write(
+			row,
+			args,
+			"refused" if refused else "failed",
+			actor=actor,
+			ref_doctype=err.get("doctype") if refused else None,
+		)
 	if crash_tb:
 		frappe.log_error(title="jarvis.pending_action.dispatch_crashed", message=crash_tb)
 
@@ -251,6 +428,12 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
+	if row.kind == "chat":
+		# A card that fails before it runs ends an approved skill run, as one that
+		# fails when it runs does (``_claim_and_run``).
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
 	if not defer:
 		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
@@ -293,9 +476,7 @@ def execute(
 def _execute_locked(
 	name: str, approver: str, adopt: str | None, *, defer_continuation: bool, batch_id, arm
 ) -> dict:
-	"""Steps 3-13: lock, preflight, unseal, claim, dispatch, final write, settle."""
-	from jarvis import api
-
+	"""Steps 3-5: lock, preflight, unseal, staleness; then ``_claim_and_run``."""
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	try:
 		row = get_row(name, lock="nowait")
@@ -323,6 +504,57 @@ def _execute_locked(
 	if stale:
 		return _fail_unrun(row, approver, stale, **unrun)
 
+	structure = _structure_of(row, call.get("args") or {})
+	with ExitStack() as held:
+		if structure is not None:
+			from jarvis.tools._guarded_structure import StructureBusyError, lock_names, structure_locks
+
+			# Before the claim: a held lock leaves the row Pending, so the same card
+			# can be confirmed once the other change to that form is done.
+			try:
+				held.enter_context(structure_locks(lock_names(structure.handler)))
+			except StructureBusyError as e:
+				frappe.db.rollback()
+				return _busy_structure(e)
+			if not _card_holds(row, structure):
+				# What the save would do to the form is no longer what the card says
+				# (another workflow was activated since): never run it.
+				return _fail_unrun(row, approver, "stale", **unrun)
+		return _claim_and_run(
+			row,
+			call,
+			approver,
+			adopt,
+			structure,
+			defer_continuation=defer_continuation,
+			batch_id=batch_id,
+			arm=arm,
+		)
+
+
+def _claim_and_run(
+	row, call: dict, approver: str, adopt: str | None, structure, *, defer_continuation: bool, batch_id, arm
+) -> dict:
+	"""Steps 6-13: claim, dispatch, final write, settle. For a guarded structure
+	write (``structure``) the caller holds its form's lock throughout."""
+	from jarvis import api
+
+	name = row.name
+	if structure is not None:
+		# With the claim, in its transaction: a worker that dies mid-way leaves the
+		# reconciler what to clean up (and, for an edit, the record to restore).
+		from jarvis.tools import _guarded_structure
+		from jarvis.tools._guarded_structure import lock_names
+
+		structure.undo = {**structure.handler.snapshot(), "lock": lock_names(structure.handler)}
+		if structure.undo.get(_guarded_structure.INCOMPLETE) and not structure.undo.get(
+			_guarded_structure.REFUSED
+		):
+			# Nothing to undo by: not claimed and not run, so the same card can be
+			# confirmed once whatever kept the snapshot from being read has passed.
+			frappe.db.rollback()
+			return _busy_structure(RuntimeError(_guarded_structure.NO_SNAPSHOT))
+		stash_undo(name, _seal.seal_undo(name, structure.undo))
 	if not claim(name, approver, batch_id=batch_id, adopted_conversation=adopt):
 		frappe.db.rollback()
 		return _refusal(*_BUSY)
@@ -334,13 +566,39 @@ def _execute_locked(
 			frappe.log_error(title="jarvis.pending_action.arm_claimed_failed", message=frappe.get_traceback())
 			frappe.db.commit()
 
+	if row.kind == "chat":
+		# A card of an approved skill run: the wait for this click does not count
+		# against the run (outside the row lock; the claim is committed).
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.keep_skill_autorun_open(row.conversation)
 	args = call.get("args") or {}
-	result, interfered, crash_tb = _dispatch(row, args)
+	with ExitStack() as stamped:
+		if structure is not None:
+			from jarvis.tools._guarded_structure import stamping
+
+			stamped.enter_context(stamping(name, structure.undo))
+		result, interfered, crash_tb = _dispatch(row, args)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
-		_discard_failed_dispatch(row, args, crash_tb, result=result)
+		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
 	ok = not crash_tb and api.envelope_ok(row.tool, result)
+	if not ok and row.kind == "chat":
+		# ...and a card that fails ends the run, as a failed write does.
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
 	status = EXECUTED if ok else FAILED
-	code = None if ok else ("partial" if interfered else "failed")
+	lock_lost = structure is not None and not _still_locked(name, structure)
+	note = _clean_up_structure(name, structure) if structure is not None and not ok else None
+	# Owner decision D1: a guarded structure write whose clean-up PROVED nothing is
+	# left (the half-made field removed, the edit put back) failed, plainly: nothing
+	# was changed. Partial only when something may remain (the field was complete
+	# and kept, a later edit stands, the clean-up itself failed).
+	# Never when the form's lock was lost during the confirm (its connection was
+	# dropped by the server): another change may have run beside this one, so what
+	# is on the form could not be verified.
+	nothing_left = note is not None and note.clean and not lock_lost
+	code = None if ok else ("partial" if lock_lost or (interfered and not nothing_left) else "failed")
 	outcome = outcome_for(status, code, row.tool)
 	if crash_tb:
 		result = api._error(
@@ -349,6 +607,16 @@ def _execute_locked(
 			if outcome == "failed"
 			else "the confirmed action may have partly run; check before retrying",
 		)
+	if structure is not None:
+		if not ok:
+			_report_structure_failure(row, args, structure, result, note, code)
+		from jarvis.tools._guarded_structure import keeps_undo
+
+		# Done with: only a failed clean-up keeps its state for the reconciler, and a
+		# confirmed write whose snapshot is its undo (the roles it removed, the
+		# states it filled) keeps it on the row.
+		if (ok and not keeps_undo(structure.handler.risk)) or (not ok and note is not None):
+			clear_undo(name)
 	if not ok:
 		result = with_reference(result, name)
 

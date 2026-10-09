@@ -2747,3 +2747,73 @@ class TestPersistProbeResult(_ConnectorApiTestCase):
 		reloaded = frappe.get_doc(CONNECTOR, name)
 		cached = json.loads(reloaded.tools_cache)["tools"]
 		self.assertEqual([t["name"] for t in cached], ["good"])
+
+
+class TestSigninStateSurvivesCacheClear(FrappeTestCase):
+	"""The wipe behind test_oauth_api.TestSigninNonceSurvivesCacheClear also hit connector
+	sign-ins: the in-flight state and the parked callback error are site cache keys, and
+	pump.watchdog's full frappe.clear_cache() every five minutes deleted them, so a sign-in
+	that spanned a tick came back to an unknown state. hooks.py lists both prefixes. Plain
+	FrappeTestCase on purpose: these are cache-only and need no connector row."""
+
+	_PROBE = "jarvis:test_non_persistent_probe"
+	_STATE = "test-state-survives-clear"
+	_CONNECTOR = "test-connector-survives-clear"
+	_USER = "a@example.com"
+
+	def tearDown(self):
+		mcp_oauth_store.consume_state(self._STATE)
+		mcp_oauth_store.take_signin_error(self._CONNECTOR, self._USER)
+		frappe.cache.delete_value(self._PROBE)
+		super().tearDown()
+
+	def _clear_and_check_probe(self, clear):
+		"""Run ``clear`` with an ordinary key set, and prove it really was a full clear."""
+		frappe.cache.set_value(self._PROBE, "x")
+		clear()
+		self.assertIsNone(
+			frappe.cache.get_value(self._PROBE),
+			"an ordinary key must still be cleared - proves the hook, not a no-op clear",
+		)
+
+	def _ttl(self, key):
+		return frappe.cache.ttl(frappe.cache.make_key(key))
+
+	def test_hook_prefixes_cover_the_state_and_error_keys(self):
+		# Read from the module: the bench may serve another checkout's hooks.
+		from jarvis import hooks
+
+		for key in (mcp_oauth_store._state_key("s"), mcp_oauth_store._signin_error_key("c", "u")):
+			self.assertTrue(any(key.startswith(p) for p in hooks.persistent_cache_keys), key)
+
+	def test_state_survives_a_clear_keeps_its_ttl_and_stays_single_use(self):
+		record = {"verifier": "v", "user": self._USER}
+		mcp_oauth_store.put_state(self._STATE, record)
+
+		self._clear_and_check_probe(frappe.clear_cache)
+
+		ttl = self._ttl(mcp_oauth_store._state_key(self._STATE))
+		self.assertTrue(0 < ttl <= mcp_oauth_store.STATE_TTL_S, ttl)
+		self.assertEqual(mcp_oauth_store.consume_state(self._STATE), record)
+		self.assertIsNone(mcp_oauth_store.consume_state(self._STATE))
+
+	def test_state_survives_the_watchdog_tick(self):
+		from jarvis.chat.pump import WATCHDOG_LAST_COMPLETED_KEY
+
+		mcp_oauth_store.put_state(self._STATE, {"verifier": "v"})
+		self._clear_and_check_probe(
+			lambda: frappe.db.set_default(WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+		)
+
+		self.assertEqual(mcp_oauth_store.consume_state(self._STATE), {"verifier": "v"})
+
+	def test_parked_signin_error_survives_a_clear_and_is_read_once(self):
+		message = "We could not finish signing you in."
+		mcp_oauth_store.park_signin_error(self._CONNECTOR, self._USER, message)
+
+		self._clear_and_check_probe(frappe.clear_cache)
+
+		ttl = self._ttl(mcp_oauth_store._signin_error_key(self._CONNECTOR, self._USER))
+		self.assertTrue(0 < ttl <= mcp_oauth_store.SIGNIN_ERROR_TTL_S, ttl)
+		self.assertEqual(mcp_oauth_store.take_signin_error(self._CONNECTOR, self._USER), message)
+		self.assertEqual(mcp_oauth_store.take_signin_error(self._CONNECTOR, self._USER), "")

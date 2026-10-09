@@ -40,6 +40,8 @@ R2_12 = {
 	# defaults under R2-12 (review cycle 2)
 	"Automation Flow",
 	"Custom Role",
+	# Frappe 16: what a workflow transition runs (J1c)
+	"Workflow Transition Tasks",
 }
 
 
@@ -77,15 +79,25 @@ class TestDefinitions(FrappeTestCase):
 
 class TestRiskOf(FrappeTestCase):
 	def test_single_structure_create_update_delete(self):
-		for dt in wr.STRUCTURE_DOCTYPES - {"Custom Field"}:
+		# A single Custom Field or Workflow is its own guarded class (J1b-cf, J1c).
+		for dt in wr.STRUCTURE_DOCTYPES - {"Custom Field", "Workflow"}:
 			self.assertEqual(wr.risk_of("create_doc", {"doctype": dt, "values": {}}), "structure", dt)
+		self.assertEqual(wr.risk_of("create_doc", {"doctype": "Workflow", "values": {}}), "workflow_new")
 		self.assertEqual(
 			wr.risk_of("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}}),
 			"custom_field_new",
 		)
 		self.assertEqual(
 			wr.risk_of("update_doc", {"doctype": "Custom Field", "name": "x", "changes": {"label": "y"}}),
-			"structure",
+			"custom_field_edit",
+		)
+		# Only ONE named field: no name, or a batch, is plain structure.
+		self.assertEqual(
+			wr.risk_of("update_doc", {"doctype": "Custom Field", "changes": {"label": "y"}}), "structure"
+		)
+		updates = [{"name": "x", "changes": {"label": "y"}}]
+		self.assertEqual(
+			wr.risk_of("update_doc", {"doctype": "Custom Field", "updates": updates}), "structure"
 		)
 		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Custom Field", "name": "x"}), "structure")
 		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "DocType", "name": "ToDo"}), "structure")
@@ -97,7 +109,11 @@ class TestRiskOf(FrappeTestCase):
 		)
 		self.assertEqual(wr.risk_of("create_doc", {"doctype": "SERVER SCRIPT", "values": {}}), "sensitive")
 		self.assertEqual(
-			wr.risk_of("update_doc", {"doctype": "workflow", "name": "w", "changes": {}}), "structure"
+			wr.risk_of("update_doc", {"doctype": "workflow", "name": "w", "changes": {}}), "workflow_edit"
+		)
+		self.assertEqual(
+			wr.risk_of("update_doc", {"doctype": "inventory DIMENSION", "name": "w", "changes": {}}),
+			"structure",
 		)
 
 	def test_any_structure_doctype_in_a_batch_is_structure(self):
@@ -115,6 +131,7 @@ class TestRiskOf(FrappeTestCase):
 			"structure",
 		)
 		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Workflow", "names": ["a", "b"]}), "structure")
+		self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Workflow", "name": "a"}), "structure")
 
 	def test_sensitive_targets(self):
 		self.assertEqual(wr.risk_of("create_doc", {"doctype": "Webhook", "values": {}}), "sensitive")
@@ -247,8 +264,36 @@ class TestCheck(FrappeTestCase):
 		self.assertEqual(ctx.exception.desk_path, "/app/workflow/new")
 		self.assertIn("Workflow changes the database structure", str(ctx.exception))
 		with self.assertRaises(StructureRefusedError) as ctx:
+			wr.check("create_doc", {"doctype": "Service Level Agreement", "values": {}}, guarded=True)
+		self.assertEqual(ctx.exception.desk_path, "/app/service-level-agreement/new")
+		with self.assertRaises(StructureRefusedError) as ctx:
 			wr.check("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}})
 		self.assertEqual(ctx.exception.desk_path, "/app/customize-form")
+
+	def test_a_guarded_structure_write_is_handed_back_only_to_a_caller_that_cards_it(self):
+		"""R2-10: one new Custom Field / a single Custom Field edit. Every caller that
+		does not say ``guarded=True`` keeps the refusal, and so does everyone while the
+		site switch is set."""
+		from jarvis.tools import _guarded_structure
+
+		new = ("create_doc", {"doctype": "Custom Field", "values": {"dt": "ToDo"}})
+		edit = ("update_doc", {"doctype": "Custom Field", "name": "x", "changes": {"label": "y"}})
+		self.assertEqual(wr.check(*new, guarded=True), "custom_field_new")
+		self.assertEqual(wr.check(*edit, guarded=True), "custom_field_edit")
+		for call in (new, edit):
+			with self.assertRaises(StructureRefusedError):
+				wr.check(*call)
+		with self.assertRaises(StructureRefusedError) as ctx:
+			wr.check(*edit)
+		self.assertEqual(ctx.exception.desk_path, "/app/custom-field/x")
+		frappe.conf[_guarded_structure.OFF_SWITCH] = 1
+		self.addCleanup(frappe.conf.pop, _guarded_structure.OFF_SWITCH, None)
+		for call in (new, edit):
+			with self.assertRaises(StructureRefusedError):
+				wr.check(*call, guarded=True)
+		# Never for a structure doctype that has no guarded class.
+		with self.assertRaises(StructureRefusedError):
+			wr.check("create_doc", {"doctype": "DocType", "values": {}}, guarded=True)
 
 	def test_sensitive_is_returned_not_refused(self):
 		self.assertEqual(wr.check("create_doc", {"doctype": "Webhook", "values": {}}), "sensitive")

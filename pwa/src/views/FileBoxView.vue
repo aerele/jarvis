@@ -6,6 +6,7 @@ import * as api from "../api";
 import { store } from "../store";
 import { relativeTime } from "../lib/time";
 import { resultLine } from "../lib/fileboxResult";
+import { dropFiles } from "../lib/fileboxDrop";
 
 // File Box: drop a document and get back a chat that has already read it.
 // This is the screen that most wants to be on a phone — the invoice arrives as a
@@ -52,19 +53,16 @@ async function pick(e) {
 	busy.value = true;
 	error.value = "";
 	try {
-		// Upload, then hand the file to the agent. drop_file opens (and starts) a
-		// conversation about it, so go straight there — the processing IS the chat.
-		const up = await api.uploadFile(files[0]);
-		const r = await api.dropFile(up.file_url, up.file_name, up.name);
-		if (r?.ok === false) {
-			error.value = r.reason || "Jarvis couldn't take that file.";
-			return;
-		}
-		store.loadConversations();
-		if (r?.conversation_id) router.push(`/c/${r.conversation_id}`);
+		// drop_file opens (and starts) a chat about each file. One file: go to its chat,
+		// the processing IS the chat. More files: stay on this list, which shows each one.
+		const { added, failed } = await dropFiles(files, {
+			upload: api.uploadFile,
+			drop: api.dropFile,
+		});
+		if (failed.length) error.value = failed.map((f) => `${f.name}: ${f.reason}`).join(" ");
+		if (added.length) store.loadConversations();
+		if (files.length === 1 && added[0]) router.push(`/c/${added[0]}`);
 		else await load();
-	} catch (e) {
-		error.value = e?.message || "Couldn't upload that file.";
 	} finally {
 		busy.value = false;
 	}
@@ -102,9 +100,9 @@ onMounted(load);
 					it.</span
 				>
 			</div>
-			<input ref="fileEl" type="file" hidden @change="pick" />
+			<input ref="fileEl" type="file" multiple hidden @change="pick" />
 			<button class="jv-primary-btn" :disabled="busy" @click="fileEl.click()">
-				{{ busy ? "Uploading…" : "Choose file" }}
+				{{ busy ? "Uploading…" : "Choose files" }}
 			</button>
 		</div>
 

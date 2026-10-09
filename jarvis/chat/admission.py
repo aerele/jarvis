@@ -323,14 +323,9 @@ def _conv_has_other_active_turn(conversation: str, run_id: str) -> bool:
 	pump-owned in-flight turn during coexistence (OAR-11). CDX-24: also treats a
 	sibling 'recovering' Turn as blocking — a parked turn's old gateway run may
 	still be live, so the conversation stays single-flight until it settles."""
-	return bool(
-		frappe.db.sql(
-			"""SELECT 1 FROM `tabJarvis Chat Turn`
-			WHERE conversation=%(c)s AND name!=%(r)s AND state IN %(states)s
-			LIMIT 1""",
-			{"c": conversation, "r": run_id, "states": _CONV_BLOCKING_STATES},
-		)
-	)
+	from jarvis.chat import turn_state
+
+	return bool(turn_state.unfinished_turn(conversation, exclude_run_id=run_id, states=_CONV_BLOCKING_STATES))
 
 
 def _conv_legacy_busy(conversation: str) -> bool:
@@ -561,6 +556,7 @@ def accept_or_queue(
 	exempt_overload: bool = False,
 	seed_hidden: bool = False,
 	on_seed=None,
+	refuse_if=None,
 ) -> dict:
 	"""Admit or durably queue one turn. Returns one of:
 
@@ -568,6 +564,11 @@ def accept_or_queue(
 	  {"ok": True, "dispatched": False, "run_id", "queued_position": N}
 	  {"ok": True, "dispatched": False, "run_id", "duplicate": True, "queued_position": None}
 	  {"ok": False, "overloaded": True, "reason": <friendly copy>}
+	  {"ok": False, "refused": <refuse_if's return>}
+
+	``refuse_if``: a zero-arg callable run under both locks, after the duplicate check and
+	before anything is written. A truthy return refuses the turn and comes back as
+	``refused``. A caller that passes this must test ``ok``.
 
 	``duplicate``: a turn with this ``run_id`` already exists, so nothing was written
 	or dispatched. Answered before anything else, a full queue included.
@@ -642,6 +643,10 @@ def accept_or_queue(
 				"queued_position": None,
 			}
 
+		if refuse_if and (refusal := refuse_if()):
+			frappe.db.rollback()  # releases both locks; this call wrote nothing
+			return {"ok": False, "refused": refusal}
+
 		if not machine_active:
 			# CDX-10 (reverse direction): the world reverted to pure-legacy (kill switch back on
 			# AND Phase-0 off) while this sender waited on the shard lock — its stale conf still said
@@ -690,7 +695,7 @@ def accept_or_queue(
 			return {
 				"ok": False,
 				"overloaded": True,
-				"reason": frappe._("The site is busy — please try again in a moment."),
+				"reason": frappe._("The site is busy. Please try again in a moment."),
 			}
 
 		# Seed the user Message if the caller delegated it (the insert branch, see the

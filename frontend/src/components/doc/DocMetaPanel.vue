@@ -82,22 +82,22 @@
 			<div class="px-5 py-4">
 				<div class="flex items-center justify-between">
 					<div class="text-sm text-ink-gray-5">Attachments</div>
-					<FileUploader
-						v-if="canWrite"
-						:upload-args="{ doctype: docmeta.doctype, docname: docName, private: 1 }"
-						@success="(f) => docmeta.afterUpload(f)"
-						@failure="onUploadError"
-					>
-						<template #default="{ openFileSelector, uploading }">
-							<Button
-								variant="ghost"
-								icon="paperclip"
-								:loading="uploading"
-								:tooltip="'Attach file'"
-								@click="openFileSelector()"
-							/>
-						</template>
-					</FileUploader>
+					<template v-if="canWrite">
+						<Button
+							variant="ghost"
+							icon="paperclip"
+							:loading="uploading"
+							:tooltip="'Attach files'"
+							@click="attachInput?.click()"
+						/>
+						<input
+							ref="attachInput"
+							type="file"
+							multiple
+							class="hidden"
+							@change="onAttachPicked"
+						/>
+					</template>
 				</div>
 				<div v-if="attachments.length" class="mt-2 flex flex-col gap-1">
 					<div
@@ -224,7 +224,7 @@ import {
 	Autocomplete,
 	Button,
 	FeatherIcon,
-	FileUploader,
+	FileUploadHandler,
 	Popover,
 	Tooltip,
 	confirmDialog,
@@ -233,6 +233,7 @@ import {
 import { listShareableUsers } from "@/api";
 import { timeAgo } from "@/utils/datetime";
 import { errHtml, escapeHtml } from "@/lib/errors";
+import { uploadEach } from "@/lib/uploadEach";
 
 const props = defineProps({
 	docmeta: { type: Object, required: true }, // useDocmeta() object
@@ -308,8 +309,29 @@ function confirmDeleteAttachment(f) {
 // if_owner write on approvals) - surface the server message as a toast and
 // show the allowed-types caveat as an inline hint.
 const uploadHint = ref("");
-function onUploadError(e) {
-	toast.error(uploadErrMsg(e));
+const attachInput = ref(null);
+const uploading = ref(false);
+// frappe-ui's FileUploader takes one file; this input takes several (#674).
+async function onAttachPicked(e) {
+	const files = Array.from(e.target.files || []);
+	e.target.value = ""; // so picking the same file again still fires `change`
+	if (!files.length || uploading.value) return;
+	uploading.value = true;
+	const args = { doctype: props.docmeta.doctype, docname: docName.value, private: 1 };
+	try {
+		await uploadEach(
+			files,
+			(file) => new FileUploadHandler().upload(file, args),
+			(f) => props.docmeta.afterUpload(f),
+			onUploadError
+		);
+	} finally {
+		uploading.value = false;
+	}
+}
+// Frappe's message does not name the file, so with several files the toast does.
+function onUploadError(e, file) {
+	toast.error(`${escapeHtml(file.name)}: ${uploadErrMsg(e)}`);
 	uploadHint.value =
 		"Portal accounts can attach JPG, PNG, GIF, PDF, TXT, CSV and MS Office files only.";
 }

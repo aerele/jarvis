@@ -57,7 +57,8 @@ JARVIS_ADMIN_ROLES = ("System Manager", JARVIS_ADMIN_ROLE)
 # imports) so the Jarvis Custom Skill controller / skill_permissions can import it
 # without pulling in the learned_api import graph. Keep in sync with
 # jarvis.chat.learned_api._REVIEWER_ROLES.
-JARVIS_REVIEWER_ROLES = ("Jarvis Skill Reviewer", "Jarvis Admin", "System Manager")
+JARVIS_SKILL_REVIEWER_ROLE = "Jarvis Skill Reviewer"
+JARVIS_REVIEWER_ROLES = (JARVIS_SKILL_REVIEWER_ROLE, "Jarvis Admin", "System Manager")
 
 
 def is_skill_reviewer(user: str | None = None) -> bool:
@@ -363,6 +364,55 @@ def refuse_in_tool_dispatch() -> None:
 
 	if in_tool_dispatch():
 		frappe.throw(frappe._("Not permitted inside a tool call"), frappe.PermissionError)
+
+
+def refuse_unseen_change(doc) -> None:
+	"""Refuse a save or a delete of ``doc`` made by a write nobody was shown.
+
+	For records whose every change a person confirms (skills and learned skills: what
+	they say is what later chats do). The gate parks a call that names one
+	(``api._writes_skill_config``); this refuses a change it could not read from the
+	arguments: a document method, an import, a hook, a queued job."""
+	from jarvis.tools import _write_risk
+
+	if _write_risk.uncarded_write():
+		_write_risk.log_line("instructions", doc.doctype, doc.name, "refused", event="unseen")
+		frappe.throw(
+			frappe._(
+				"A change to {0} always asks for confirmation, so a run that is not asking cannot make it."
+			).format(frappe._(doc.doctype)),
+			frappe.PermissionError,
+		)
+
+
+class ChangedThroughParentOnly:
+	"""Mix into a child-table controller whose rows change only when their parent
+	is saved.
+
+	Saving a parent writes its rows without calling these methods, so the parent's
+	own ``validate`` decides who may change them. A row inserted, saved or deleted as
+	a document of its own never reaches that ``validate``, so it is refused. Server
+	code that writes a row on purpose (a patch, a fixture) says so with
+	``ignore_permissions``."""
+
+	def before_insert(self):
+		self._refuse_direct_write()
+
+	def validate(self):
+		self._refuse_direct_write()
+
+	def on_trash(self):
+		self._refuse_direct_write()
+
+	def _refuse_direct_write(self):
+		if self.flags.ignore_permissions:
+			return
+		frappe.throw(
+			frappe._("{0} rows are changed by saving their {1}.").format(
+				frappe._(self.doctype), frappe._(self.get("parenttype") or "parent")
+			),
+			frappe.PermissionError,
+		)
 
 
 class NotRenamable:
