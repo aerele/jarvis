@@ -18,13 +18,35 @@
 		<div class="flex items-center justify-between gap-2 px-5 py-4">
 			<div class="-ml-1 flex h-9 flex-1 items-center overflow-x-auto">
 				<div v-for="qf in quickFilters" :key="qf.key" class="m-1 min-w-36">
-					<FormControl
+					<!-- A Dropdown, not FormControl select: frappe-ui's Select opens item-aligned,
+					     over its field, so a chosen option moved the list up the page. -->
+					<Dropdown
 						v-if="qf.type === 'select'"
-						type="select"
-						:options="qf.options"
-						:modelValue="quickValue(qf)"
-						@update:modelValue="(v) => applyQuick(qf, v)"
-					/>
+						:options="quickOptions(qf)"
+						placement="left"
+						@update:open="(open) => open && focusOpenMenu()"
+					>
+						<!-- frappe-ui's subtle select trigger; a plain button, because Button sets
+						     aria-label to its label and the name must also say which filter. -->
+						<button
+							type="button"
+							:aria-label="`${qf.label}: ${quickLabel(qf)}`"
+							class="relative inline-flex min-h-7 w-full items-center justify-between gap-2 rounded border border-[--surface-gray-2] bg-surface-gray-2 px-2 text-left text-base text-ink-gray-7 outline-none ring-outline-gray-3 transition-colors hover:border-outline-gray-modals hover:bg-surface-gray-3 focus-visible:ring-2 data-[state=open]:ring-2"
+						>
+							<span class="truncate">{{ quickLabel(qf) }}</span>
+							<FeatherIcon
+								name="chevron-down"
+								class="size-4 shrink-0 text-ink-gray-4"
+							/>
+						</button>
+						<template #item-suffix="{ selected }">
+							<FeatherIcon
+								v-if="selected"
+								name="check"
+								class="size-4 text-ink-gray-7"
+							/>
+						</template>
+					</Dropdown>
 					<FormControl
 						v-else
 						type="text"
@@ -284,6 +306,7 @@ import {
 	ListFooter,
 	Breadcrumbs,
 	Button,
+	Dropdown,
 	FormControl,
 	FeatherIcon,
 } from "frappe-ui";
@@ -378,6 +401,22 @@ const visibleColumns = computed(() =>
 function quickValue(qf) {
 	const v = props.filters ? props.filters[qf.key] : undefined;
 	return v == null ? "" : v;
+}
+function quickLabel(qf) {
+	const chosen = (qf.options || []).find((o) => o.value === quickValue(qf));
+	return chosen ? chosen.label : qf.label;
+}
+function quickOptions(qf) {
+	return (qf.options || []).map((o) => ({
+		label: o.label,
+		selected: o.value === quickValue(qf),
+		onClick: () => applyQuick(qf, o.value),
+	}));
+}
+// reka-ui does not move focus into this opened menu, so the arrow keys and Enter would not
+// reach the options, as they did in the select it replaces. Focus it after it renders.
+function focusOpenMenu() {
+	requestAnimationFrame(() => document.querySelector("[data-reka-menu-content]")?.focus());
 }
 function applyQuick(qf, value) {
 	const next = { ...(props.filters || {}) };
