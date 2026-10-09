@@ -99,6 +99,9 @@ function button(label) {
 beforeEach(() => {
 	vi.resetAllMocks();
 	recoveryState.requests = [];
+	recoveryState.heroDraft = null;
+	recoveryState.newChatPicks = {};
+	recoveryState.editingNewRequest = null;
 	recoveryState.drafts = {};
 	recoveryState.parkedDrafts = [];
 	recoveryState.queued = {};
@@ -688,4 +691,68 @@ it("a late status response cannot restore waiting after the transcript shows a c
 	await flushPromises();
 	expect(wrapper.findComponent(Composer).props("sending")).toBe(false);
 	expect(recoveryState.queued.A).toBeUndefined();
+});
+
+it("retries an uncertain request with its unchanged id, files and payload without restoring an old hold", async () => {
+	api.sendRecoverableMessage.mockRejectedValueOnce(new Error("offline"));
+	recoveryState.drafts.A = { text: "", attachments: [{ ...file }] };
+	await open();
+	await send();
+	const original = JSON.parse(JSON.stringify(recoveryState.requests[0]));
+	api.sendRecoverableMessage.mockResolvedValue({
+		delivery: "settled",
+		result: { ok: false, reason: "maintenance", message: "old hold" },
+	});
+	await button("Retry same request").trigger("click");
+	await flushPromises();
+	expect(api.sendRecoverableMessage).toHaveBeenCalledTimes(2);
+	expect(recoveryState.requests[0]).toMatchObject({
+		id: original.id,
+		text: original.text,
+		attachments: original.attachments,
+		state: "rejected",
+	});
+	const { raiseHold } = await import("../../../pwa/src/maintenanceGate");
+	expect(raiseHold).not.toHaveBeenCalled();
+});
+it("recovery composer retains the first-send preferences and files", async () => {
+	recoveryState.newChatPicks = { model: "chosen-model", thinking: "high", autoMode: true };
+	recoveryState.drafts[""] = {
+		text: "draft",
+		attachments: [{ ...file }],
+		picks: { ...recoveryState.newChatPicks },
+	};
+	await open("");
+	await send("Follow up");
+	expect(api.sendRecoverableMessage.mock.calls[0][0]).toMatchObject({
+		model: "chosen-model",
+		thinking: "high",
+		autoMode: true,
+		attachments: [{ name: file.name, file_url: file.file_url }],
+	});
+	await button("Edit message and model").trigger("click");
+	expect(recoveryState.editingNewRequest).toBe(recoveryState.requests[0].id);
+});
+it("Edit as new retains original first-send picks while parking a newer draft", async () => {
+	api.sendRecoverableMessage.mockRejectedValue(new Error("offline"));
+	recoveryState.newChatPicks = { model: "chosen-model", thinking: "high", autoMode: true };
+	await open("");
+	await send("Original");
+	wrapper.findComponent(Composer).vm.$emit("update:modelValue", "Newer draft");
+	await flushPromises();
+	await button("Edit as new message").trigger("click");
+	await flushPromises();
+	await button("Move to composer").trigger("click");
+	await flushPromises();
+	expect(recoveryState.heroDraft).toMatchObject({
+		text: "Original",
+		model: "chosen-model",
+		thinking: "high",
+		autoMode: true,
+	});
+	expect(
+		recoveryState.parkedDrafts.some(
+			(d) => d.text === "Newer draft" && d.picks.model === "chosen-model"
+		)
+	).toBe(true);
 });

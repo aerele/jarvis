@@ -1,9 +1,12 @@
 // Execute the actual SFC send/resend functions at the API boundary. This avoids
 // duplicating their control flow while isolating the desktop view's many services.
 import test from "node:test";
+import { reactive, effect, stop } from "vue";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createPendingSends, planRejectedSend } from "./voiceSendGlue.js";
+import { createPendingSends, planRejectedSend, injectPendingBubbles } from "./voiceSendGlue.js";
+import { deliveryFailureCopy } from "../lib/sendDelivery.js";
+import { stampDeltaTime } from "../lib/replyBar.js";
 import { firstSendPicks } from "../lib/firstSendPicks.js";
 const source = readFileSync(
 	process.env.DESKTOP_CHAT_SOURCE || new URL("../views/ChatView.vue", import.meta.url),
@@ -16,16 +19,38 @@ const body = source.slice(
 const file = { file_url: "/private/files/invoice.pdf", file_name: "invoice.pdf" };
 const image = { file_url: "/private/files/photo.png", file_name: "photo.png" };
 const copy = (value) => JSON.parse(JSON.stringify(value));
-function harness() {
+function harness(pendingStore) {
 	const s = Object.fromEntries(
 		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }])
 	);
 	const calls = [],
 		errors = [];
 	const noop = () => {};
+	let nextId = 0;
 	Object.assign(s, {
 		_NEW_CHAT_SCOPE: "NEW",
-		_pendingSends: createPendingSends(),
+		injectPendingBubbles,
+		deliveryFailureCopy,
+		toLocalMs: (value) => Date.parse(value),
+		RUN_ENDED_STATES: new Set(["done", "failed", "cancelled"]),
+		stepsFromTexts: () => [],
+		splitNarration: (text) => ({ candidate: "", answer: text }),
+		pumpFenceAccept: noop,
+		reactive,
+		newSendRequestId: () => {
+			if (s.rngError) throw new Error("rng unavailable");
+			return String(++nextId).padStart(32, "0");
+		},
+		observeDelivery: (promise, deadline) => {
+			s.deadline = deadline;
+			return promise;
+		},
+		confirm: async () => true,
+		loadConversation: async (id, options) => {
+			s.loaded = id;
+			s.loadOptions = options;
+		},
+		_pendingSends: pendingStore || createPendingSends(),
 		_currentScope: () => s.currentId.value || "NEW",
 		dismissFeedback: noop,
 		notify: noop,
@@ -41,19 +66,36 @@ function harness() {
 		discardedTokens: () => [],
 		removePending: noop,
 		markCardsEarlier: noop,
-		clearHold: noop,
+		clearHold: () => {
+			s.holdActive.value = false;
+		},
 		raiseHold: noop,
 		recheckMaintenance: noop,
 		sendRejectionCopy: () => ({ message: "Rejected" }),
 		agentName: "Jarvis",
-		voiceStore: null,
+		voiceStore: {
+			captureSentInPayload: () => null,
+			failedIdsForScope: () => [],
+			markUnsentOrphans: noop,
+			markSentWithout: (id) => {
+				s.markedWithout = [...(s.markedWithout || []), id];
+			},
+			acknowledge: (token) => {
+				s.acked = token;
+			},
+			orphanToken: (token) => {
+				s.orphaned = token;
+			},
+		},
 		canConnectModel: true,
 		store: { conversations: [{ name: "A" }], loadConversations: noop },
 		route: { params: { id: "A" } },
 		router: { replace: noop },
 		_saveConnectorFocusFor: noop,
 		_checkPulseOnce: noop,
-		onTypedConfirmResolved: async () => {},
+		onTypedConfirmResolved: async () => {
+			if (s.failReload) throw new Error("reload failed");
+		},
 		api: {
 			sendMessage: async (...args) => {
 				calls.push(copy(args));
@@ -79,6 +121,7 @@ function harness() {
 		messages: [],
 		autoView: { visible: true, locked: false, on: true },
 		groundNextTurn: false,
+		groundSelectionVersion: 0,
 		triggerMode: false,
 		connectorFocus: { key: "erp", label: "ERP" },
 		visiblePendingActions: [{ token: "approval-1" }],
@@ -95,10 +138,17 @@ function harness() {
 	};
 	const f = new Function(
 		...Object.keys(s),
-		body + "\nreturn {send,resendFailed,setPrefill: value => {_prefillSendContext=value;}};"
+		body +
+			"\nreturn {send,resendFailed,recoverSend,dismissUncertain,unmount: () => {_recoveryViewActive=false;},invalidateRefresh: () => {_recoveryRefreshEpoch++;}, getPrefill: () => _prefillSendContext, setPrefill: value => {_prefillSendRevision++;_prefillSendContext=value;}};"
 	)(...Object.values(s));
 	f.setPrefill({ doctype: "Sales Invoice", name: "INV-1" });
-	return { s, f, calls, errors, failed: () => s._pendingSends.peek(s._currentScope())[0] };
+	return {
+		s,
+		f,
+		calls,
+		errors,
+		failed: () => s._pendingSends.peek(s._currentScope()).find((m) => m.failed),
+	};
 }
 for (const [label, text, files] of [
 	["text and PDF", "Read this invoice", [file]],
@@ -112,7 +162,7 @@ for (const [label, text, files] of [
 		h.s.pendingFiles.value = copy(files);
 		h.s.api.sendMessage = async (...args) => {
 			h.calls.push(copy(args));
-			if (h.calls.length === 1) throw new Error("lost response");
+			if (h.calls.length === 1) return { ok: false, reason: "busy" };
 			return { ok: false, reason: "busy" };
 		};
 		await h.f.send();
@@ -126,12 +176,12 @@ for (const [label, text, files] of [
 		h.s.autoView.value.on = false;
 		await h.f.resendFailed(h.failed());
 		assert.equal(h.calls.length, 2);
-		assert.deepEqual(h.calls[1], original);
+		assert.deepEqual(h.calls[1].slice(0, 9), original.slice(0, 9));
+		assert.notEqual(h.calls[1][9], original[9]);
 		assert.equal(h.s.input.value, "Newer draft");
 		assert.equal(h.s.pendingFiles.value[0].file_name, "new.pdf");
 		assert.ok(h.failed(), "repeated rejection stays retryable");
-		assert.equal(h.errors.length, 1);
-		assert.equal(h.errors[0].message, "lost response");
+		assert.deepEqual(h.errors, []);
 	});
 }
 for (const guard of ["booting", "holdActive", "compacting", "noAiConnected", "waiting"]) {
@@ -311,3 +361,503 @@ for (const scenario of ["original document", "newer document", "Wiki selection"]
 		assert.deepEqual(h.errors, []);
 	});
 }
+
+for (const outcome of ["unknown", "accepted", "rejected", "confirmed", "partial confirmation"]) {
+	test(`lost response: Check delivery ${outcome} never dispatches another send`, async () => {
+		const h = harness();
+		h.s.api.sendMessage = async (...args) => {
+			h.calls.push(copy(args));
+			throw new Error("lost acknowledgement");
+		};
+		await h.f.send();
+		const original = h.failed();
+		assert.equal(original.deliveryState, "uncertain");
+		const id = original.sendRequest.requestId;
+		h.s.input.value = "Newer draft";
+		h.s.pendingFiles.value = [image];
+		const checked = [];
+		h.s.api.checkMessageDelivery = async (requestId) => {
+			checked.push(requestId);
+			if (outcome === "unknown") throw new Error("still unknown");
+			if (outcome === "rejected") return { ok: false, reason: "busy" };
+			if (["confirmed", "partial confirmation"].includes(outcome))
+				return {
+					ok: outcome === "confirmed",
+					confirmed: true,
+					conversation_id: "A",
+					queued: true,
+					run_id: "old",
+				};
+			return { ok: true, conversation_id: "A", message_id: "M", run_id: "R" };
+		};
+		// Read-only recovery remains possible while sending is unavailable.
+		h.s.holdActive.value = true;
+		h.s.noAiConnected.value = true;
+		await h.f.resendFailed(original);
+		assert.deepEqual(checked, [id]);
+		assert.equal(h.calls.length, 1);
+		assert.equal(h.s.input.value, "Newer draft");
+		assert.deepEqual(h.s.pendingFiles.value, [image]);
+		if (outcome === "unknown") {
+			assert.equal(h.failed().sendRequest.requestId, id);
+			assert.equal(h.failed().deliveryState, "uncertain");
+		} else if (["accepted", "confirmed", "partial confirmation"].includes(outcome)) {
+			assert.equal(h.failed(), undefined);
+			assert.equal(original.deliveryConversation, "A");
+			assert.equal(h.s.loaded, undefined);
+			assert.equal(h.s.holdActive.value, true);
+			assert.equal(h.s.waiting.value, false);
+		} else {
+			assert.equal(h.failed().deliveryState, "rejected");
+			h.s.holdActive.value = false;
+			h.s.noAiConnected.value = false;
+			await h.f.resendFailed(h.failed());
+			assert.equal(h.calls.length, 2);
+			assert.notEqual(h.calls[1][9], id);
+		}
+	});
+}
+
+for (const reason of ["maintenance", "subscription_suspended", "release_update_required"]) {
+	test(`receipt ${reason} is historical and cannot change active run or gates`, async () => {
+		const h = harness();
+		h.s.api.sendMessage = async () => {
+			throw Error("offline");
+		};
+		await h.f.send();
+		const m = h.failed();
+		h.s.sending.value = true;
+		h.s.waiting.value = true;
+		h.s.currentMsgId.value = "live";
+		h.s.stoppedRunId.value = "stopped";
+		h.s.api.checkMessageDelivery = async () => ({ ok: false, reason });
+		await h.f.resendFailed(m);
+		assert.equal(m.deliveryState, "rejected");
+		assert.equal(h.s.sending.value, true);
+		assert.equal(h.s.waiting.value, true);
+		assert.equal(h.s.currentMsgId.value, "live");
+		assert.equal(h.s.stoppedRunId.value, "stopped");
+		assert.equal(h.s.holdActive.value, false);
+		assert.equal(h.s.suspendedNotice.value, null);
+	});
+}
+test("same-ID recovery preserves the exact wire payload after scope promotion", async () => {
+	const h = harness();
+	h.s.api.sendMessage = async (...args) => {
+		h.calls.push(copy(args));
+		throw Error("offline");
+	};
+	await h.f.send();
+	const m = h.failed();
+	h.s._pendingSends.reassign("A", "B");
+	h.s.currentId.value = "B";
+	h.s.input.value = "B draft";
+	await h.f.recoverSend(m, true);
+	assert.deepEqual(h.calls[1], h.calls[0]);
+	assert.equal(h.s.input.value, "B draft");
+	h.s.api.checkMessageDelivery = async () => ({
+		ok: true,
+		conversation_id: "A",
+		message_id: "M",
+		run_id: "R",
+		queued: true,
+	});
+	h.s.sending.value = true;
+	h.s.currentMsgId.value = "B-live";
+	await h.f.recoverSend(m);
+	assert.equal(h.s.currentId.value, "B");
+	assert.equal(h.s.currentMsgId.value, "B-live");
+	assert.equal(h.s.queuedTurn.value, null);
+	assert.equal(m.deliveryConversation, "A");
+	assert.equal(h.s.loaded, undefined);
+});
+test("late success after deadline settles only its bubble and voice token", async () => {
+	const h = harness();
+	let finish;
+	h.s.api.sendMessage = () =>
+		new Promise((r) => {
+			finish = r;
+		});
+	const sending = h.f.send();
+	await new Promise((r) => setImmediate(r));
+	h.s.deadline();
+	const m = h.failed();
+	m.voiceAck = ["voice1"];
+	h.s.currentId.value = "B";
+	h.s.input.value = "new draft";
+	h.s.sending.value = true;
+	h.s.currentMsgId.value = "new run";
+	finish({
+		ok: false,
+		confirmed: true,
+		conversation_id: "A",
+		error: { message: "Confirmation no longer valid" },
+	});
+	await sending;
+	assert.equal(m.deliveryState, "delivered");
+	assert.match(m.deliveryNote, /no longer valid/);
+	assert.deepEqual(h.s.acked, ["voice1"]);
+	assert.equal(h.s.currentId.value, "B");
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.currentMsgId.value, "new run");
+});
+test("random generator failure preserves the draft and unlocked composer", async () => {
+	const h = harness();
+	h.s.rngError = true;
+	await h.f.send();
+	assert.equal(h.s.input.value, "Review invoice");
+	assert.deepEqual(h.s.pendingFiles.value, [file]);
+	assert.equal(h.s.sending.value, false);
+	assert.equal(h.calls.length, 0);
+});
+test("dismiss surfaces retained voice records without acknowledging them", async () => {
+	const h = harness();
+	h.s.api.sendMessage = async () => {
+		throw Error("offline");
+	};
+	await h.f.send();
+	const m = h.failed();
+	m.voiceAck = ["voice1"];
+	await h.f.dismissUncertain(m);
+	assert.deepEqual(h.s.orphaned, ["voice1"]);
+	assert.equal(h.s.acked, undefined);
+	assert.equal(h.failed(), undefined);
+});
+
+test("new-chat send carries selected model and thinking on the actual API call", async () => {
+	const h = harness();
+	h.s.currentId.value = "";
+	await h.f.send();
+	assert.equal(h.calls[0][2], "model-a");
+	assert.equal(h.calls[0][8], "high");
+});
+
+test("confirmed approval remains settled when transcript refresh fails", async () => {
+	const { s, f } = harness();
+	s.input.value = "yes";
+	s.api.sendMessage = async () => ({
+		ok: false,
+		confirmed: true,
+		conversation_id: "A",
+		error: { message: "Action failed" },
+	});
+	s.failReload = true;
+	await f.send();
+	const bubble = s.messages.value.find((m) => m.deliveryState === "delivered");
+	assert.ok(bubble);
+	assert.equal(bubble.failed, false);
+	assert.match(bubble.deliveryNote, /^Action failed/);
+	assert.equal(s.sending.value, false);
+});
+
+test("late delivery updates reactive bubble observers without unrelated UI changes", async () => {
+	const h = harness();
+	let finish;
+	h.s.api.sendMessage = () =>
+		new Promise((r) => {
+			finish = r;
+		});
+	const operation = h.f.send();
+	await new Promise((r) => setImmediate(r));
+	h.s.deadline();
+	const bubble = h.failed();
+	let displayed;
+	const runner = effect(() => {
+		displayed = bubble.deliveryState;
+	});
+	finish({ ok: true, conversation_id: "A", message_id: "M", run_id: "R" });
+	await operation;
+	assert.equal(displayed, "delivered");
+	stop(runner);
+});
+
+async function uncertainRequest(h) {
+	h.s.api.sendMessage = async () => {
+		throw Error("offline");
+	};
+	await h.f.send();
+	return h.failed();
+}
+const acceptance = { ok: true, conversation_id: "A", message_id: "M", run_id: "R" };
+const liveReply = () => ({
+	name: "reply",
+	role: "assistant",
+	streaming: 1,
+	run_id: "R",
+	modified: new Date().toISOString(),
+	content: "",
+	turn_state: "running",
+});
+test("same-ID acceptance refreshes the current transcript and restores live Stop without changing draft/picks", async () => {
+	const h = harness(),
+		m = await uncertainRequest(h);
+	h.s.input.value = "new draft";
+	h.s.modelOverride.value = "new model";
+	h.s.api.sendMessage = async () => acceptance;
+	h.s.api.getConversation = async () => ({
+		messages: [{ name: "M", role: "user", content: "saved" }, liveReply()],
+	});
+	await h.f.recoverSend(m, true);
+	assert.equal(m.deliveryState, "delivered");
+	assert.equal(h.s.currentRunId.value, "R");
+	assert.equal(h.s.currentMsgId.value, "reply");
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.waiting.value, true);
+	assert.equal(h.s.input.value, "new draft");
+	assert.equal(h.s.modelOverride.value, "new model");
+	assert.ok(h.s.messages.value.some((x) => x.name === "M"));
+	assert.equal(h.f.getPrefill(), null);
+});
+for (const interruption of ["navigate", "send", "event", "stop"])
+	test(`refresh cannot overwrite newer ${interruption}`, async () => {
+		const h = harness(),
+			m = await uncertainRequest(h);
+		let finish;
+		h.s.api.checkMessageDelivery = async () => acceptance;
+		h.s.api.getConversation = () =>
+			new Promise((r) => {
+				finish = r;
+			});
+		const pending = h.f.recoverSend(m);
+		await new Promise((r) => setImmediate(r));
+		if (interruption === "navigate") h.s.currentId.value = "B";
+		else if (interruption === "stop") h.s.stoppedRunId.value = "R";
+		else h.f.invalidateRefresh();
+		const before = h.s.messages.value;
+		finish({ messages: [liveReply()] });
+		await pending;
+		assert.equal(h.s.messages.value, before);
+		assert.equal(h.s.sending.value, false);
+		assert.equal(m.deliveryState, "delivered");
+	});
+test("stopped run is never revived by fresh recovery data", async () => {
+	const h = harness(),
+		m = await uncertainRequest(h);
+	h.s.stoppedRunId.value = "R";
+	h.s.api.checkMessageDelivery = async () => acceptance;
+	h.s.api.getConversation = async () => ({ messages: [liveReply()] });
+	await h.f.recoverSend(m);
+	assert.equal(h.s.sending.value, false);
+	assert.equal(h.s.stoppedRunId.value, "R");
+});
+test("failed refresh cannot downgrade delivery or erase newer one-shot context", async () => {
+	const h = harness(),
+		m = await uncertainRequest(h);
+	h.f.setPrefill({ doctype: "Sales Invoice", name: "INV-1" });
+	h.s.api.checkMessageDelivery = async () => acceptance;
+	h.s.api.getConversation = async () => {
+		throw Error("offline");
+	};
+	await h.f.recoverSend(m);
+	assert.equal(m.deliveryState, "delivered");
+	assert.match(m.deliveryNote, /could not be refreshed/);
+	assert.deepEqual(h.f.getPrefill(), { doctype: "Sales Invoice", name: "INV-1" });
+});
+
+test("late original acceptance restores live state from the server and consumes only its own context", async () => {
+	const h = harness();
+	h.s.voiceStore.failedIdsForScope = () => ["failed-original"];
+	let finish;
+	h.s.api.sendMessage = () =>
+		new Promise((r) => {
+			finish = r;
+		});
+	h.s.api.getConversation = async () => ({
+		messages: [{ name: "M", role: "user" }, liveReply()],
+	});
+	const send = h.f.send();
+	await new Promise((r) => setImmediate(r));
+	h.s.deadline();
+	h.s.input.value = "new draft";
+	finish(acceptance);
+	await send;
+	assert.equal(h.s.currentRunId.value, "R");
+	assert.equal(h.s.currentMsgId.value, "reply");
+	assert.equal(h.s.sending.value, true);
+	assert.equal(h.s.input.value, "new draft");
+	assert.equal(h.f.getPrefill(), null);
+	assert.deepEqual(h.s.markedWithout, ["failed-original"]);
+});
+test("same-valued newly selected Wiki context survives historical acceptance", async () => {
+	const h = harness();
+	h.s.groundNextTurn.value = true;
+	const m = await uncertainRequest(h);
+	h.s.groundSelectionVersion.value++;
+	h.s.api.checkMessageDelivery = async () => acceptance;
+	h.s.api.getConversation = async () => ({ messages: [] });
+	await h.f.recoverSend(m);
+	assert.equal(h.s.groundNextTurn.value, true);
+});
+
+const tick = () => new Promise((r) => setImmediate(r));
+test("timeout reinjects recovery controls after a transcript resync removed the optimistic row", async () => {
+	const h = harness();
+	let fail;
+	h.s.api.sendMessage = () =>
+		new Promise((_, reject) => {
+			fail = reject;
+		});
+	const pending = h.f.send();
+	await tick();
+	h.s.messages.value = [];
+	h.s.deadline();
+	assert.equal(h.s.messages.value[0], h.failed());
+	assert.equal(h.failed().deliveryState, "uncertain");
+	fail(Error("offline"));
+	await pending;
+});
+test("pending request survives desktop unmount and an old failure cannot unlock a newer check", async () => {
+	const shared = createPendingSends();
+	const old = harness(shared);
+	let fail, checked;
+	old.s.api.sendMessage = () =>
+		new Promise((_, reject) => {
+			fail = reject;
+		});
+	const pending = old.f.send();
+	await tick();
+	const original = shared.peek("A")[0];
+	assert.ok(original.sendRequest.requestId);
+	old.f.unmount();
+	old.s.deadline();
+	const fresh = harness(shared);
+	fresh.s.messages.value = injectPendingBubbles([], shared.peek("A"));
+	fresh.s.api.checkMessageDelivery = () =>
+		new Promise((resolve) => {
+			checked = resolve;
+		});
+	const check = fresh.f.recoverSend(original);
+	fail(Error("old transport failed"));
+	await pending;
+	assert.equal(original.deliveryState, "checking");
+	assert.equal(original.deliveryBusy, true);
+	checked({ ok: true, conversation_id: "A", message_id: "M" });
+	await check;
+	assert.equal(original.deliveryState, "delivered");
+});
+for (const newerDraft of [false, true])
+	test(`late home acceptance adopts only its empty surface (new draft=${newerDraft})`, async () => {
+		const h = harness();
+		h.s.currentId.value = "";
+		let finish;
+		h.s.api.sendMessage = () =>
+			new Promise((resolve) => {
+				finish = resolve;
+			});
+		const pending = h.f.send();
+		await tick();
+		h.s.deadline();
+		const original = h.failed();
+		if (newerDraft) h.s.input.value = "a different task";
+		finish({ ok: true, conversation_id: "created", message_id: "M", auto_mode: 1 });
+		await pending;
+		assert.equal(h.s.currentId.value, newerDraft ? "" : "created");
+		assert.equal(h.s.input.value, newerDraft ? "a different task" : "");
+		assert.equal(original.deliveryConversation, "created");
+		if (!newerDraft) assert.equal(h.s.convAutoMode.value, 1);
+	});
+for (const ok of [true, false])
+	test(`typed confirmation retires its preserved request (ok=${ok})`, async () => {
+		const h = harness();
+		h.s.api.sendMessage = async () => ({
+			ok,
+			confirmed: true,
+			conversation_id: "A",
+			tokens: [],
+		});
+		await h.f.send();
+		assert.equal(h.s._pendingSends.peek("A").length, 0);
+		assert.equal(h.s.messages.value.length, 0);
+		assert.equal(h.s.sending.value, false);
+		assert.equal(h.s.waiting.value, false);
+	});
+
+// Execute the actual event and Stop handlers, including conversation/epoch fences.
+function eventsHarness() {
+	const events = source.slice(
+		source.indexOf("function onEvent(p) {"),
+		source.indexOf('// A brief "answer landed"')
+	);
+	const stopBody = source.slice(
+		source.indexOf("function stopRun() {"),
+		source.indexOf("async function", source.indexOf("function stopRun() {"))
+	);
+	// Cut at the matching closing brace using the next top-level declaration.
+	const stopFunction = stopBody.split(/\n(?:const|let|function|\/\/)/)[0];
+	const body = events + stopFunction;
+	const s = Object.fromEntries(
+		[...body.matchAll(/\b(\w+)\.value\b/g)].map((m) => [m[1], { value: null }])
+	);
+	Object.assign(s, {
+		currentId: { value: "A" },
+		messages: { value: [] },
+		stoppedMsgIds: { value: new Set() },
+		activeTools: { value: [] },
+		visibleActiveTools: { value: [] },
+		pendingActions: { value: [] },
+		store: {},
+		pumpFenceReject: () => false,
+		pumpFenceAccept: () => {},
+		// The activity watchdog is outside this event/Stop test boundary.
+		noteRunSignal: () => {},
+		stampDeltaTime,
+		startPendingPoll: () => {},
+		stopPendingPoll: () => {},
+		scrollBottomIfPinned: () => {},
+		nextTick: () => {},
+		scrollBottom: () => {},
+		splitNarration: (text) => ({ candidate: "", answer: text }),
+		candidateAfterDelta: (_, x) => x,
+		revealer: { receive: (_, text) => text },
+		pumpReveal: () => {},
+		snapCandidateInto: () => {},
+		flushReveal: () => {},
+		dropGotoMorph: () => {},
+		shownRunSeconds: () => 1,
+		notify: () => {},
+		api: {
+			stopRun: async (...args) => {
+				s.stopped = args;
+			},
+		},
+	});
+	const f = new Function(...Object.keys(s), body + "\nreturn {onEvent,stopRun};")(
+		...Object.values(s)
+	);
+	return { s, ...f };
+}
+for (const kind of ["run:start", "assistant:delta"])
+	test(`a late ${kind} restores actionable Stop after the delivery timeout`, async () => {
+		const h = eventsHarness();
+		h.s.sending.value = false;
+		h.s.waiting.value = false;
+		h.onEvent({ kind, conversation_id: "A", run_id: "R", message_id: "M", text: "Answer" });
+		assert.equal(h.s.sending.value, true);
+		assert.equal(h.s.currentRunId.value, "R");
+		assert.equal(h.s.currentMsgId.value, "M");
+		h.stopRun();
+		assert.equal(h.s.sending.value, false);
+		assert.equal(h.s.stoppedRunId.value, "R");
+		assert.deepEqual(h.s.stopped, ["A", "R"]);
+		h.onEvent({ kind, conversation_id: "A", run_id: "R", message_id: "M", text: "stale" });
+		assert.equal(h.s.sending.value, false);
+	});
+
+test("a fast home acceptance cannot sweep a parked home draft into the delivered chat", async () => {
+	const h = harness();
+	h.s.currentId.value = "";
+	let finish;
+	h.s.api.sendMessage = () =>
+		new Promise((resolve) => {
+			finish = resolve;
+		});
+	const pending = h.f.send();
+	await tick();
+	h.s.drafts.value.NEW = "saved unrelated task";
+	finish({ ok: true, conversation_id: "created", message_id: "M", run_id: "R" });
+	await pending;
+	assert.equal(h.s.currentId.value, "");
+	assert.equal(h.s.drafts.value.NEW, "saved unrelated task");
+	assert.equal(h.s._pendingSends.peek("NEW")[0].deliveryConversation, "created");
+	assert.equal(h.s.sending.value, false);
+});

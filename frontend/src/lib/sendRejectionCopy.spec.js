@@ -49,9 +49,16 @@ describe("sendRejectionCopy", () => {
 		expect(sendRejectionCopy(undefined, "Jarvis").message).toBe(FALLBACK);
 	});
 
+	it("uses maintenance copy even when the caller supplies a fallback", () => {
+		expect(sendRejectionCopy("maintenance", "Jarvis", {}, "Couldn't retry that.")).toEqual({
+			message: "Jarvis is temporarily unavailable for maintenance. Try again shortly.",
+			type: "warning",
+		});
+	});
+
 	it("uses the caller's fallback for an unknown code", () => {
 		const retry = "Couldn't retry that.";
-		expect(sendRejectionCopy("maintenance", "Jarvis", {}, retry).message).toBe(retry);
+		expect(sendRejectionCopy("unknown_future_code", "Jarvis", {}, retry).message).toBe(retry);
 	});
 
 	// Plain text: a caller that renders HTML escapes the whole message, so the

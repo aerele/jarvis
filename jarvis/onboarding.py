@@ -2199,6 +2199,10 @@ def reset_onboarding(wipe_data: bool = True) -> dict:
 
 
 def _wipe_workspace_content() -> None:
+	from jarvis.chat.send_requests import erase_receipts
+
+	# Scrub receipt metadata while retaining tombstones against stale-tab replay.
+	erase_receipts()
 	for dt in _WIPE_DOCTYPES:
 		frappe.db.delete(dt)
 
