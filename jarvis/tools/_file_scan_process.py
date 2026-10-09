@@ -19,7 +19,10 @@ def scan_file(content, filename, sheet=None, cursor=None):
 	# Use this checkout's parser even when a bench has another editable checkout.
 	env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
 	try:
-		completed = subprocess.run(
+		# Security review: fixed interpreter/module argv, shell disabled. All
+		# caller-controlled bytes and labels travel only as JSON on stdin.
+		# This child is required to enforce parser CPU/memory/wall limits.
+		completed = subprocess.run(  # nosemgrep: frappe-subprocess-exec
 			[sys.executable, "-m", "jarvis.tools._file_scan_worker"],
 			input=json.dumps(
 				{
@@ -29,6 +32,7 @@ def scan_file(content, filename, sheet=None, cursor=None):
 					"cursor": cursor,
 				}
 			),
+			shell=False,
 			text=True,
 			stdout=subprocess.PIPE,
 			stderr=subprocess.DEVNULL,

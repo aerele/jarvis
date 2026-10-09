@@ -343,6 +343,24 @@ class TestFileCoverage(unittest.TestCase):
 
 
 class TestIsolatedFileParser(unittest.TestCase):
+	def test_untrusted_labels_are_stdin_data_not_process_arguments(self):
+		import base64
+		import sys
+
+		from jarvis.tools._file_scan_process import scan_file
+
+		label = "$(touch /tmp/must-not-execute);`whoami`\n--help"
+		with patch("jarvis.tools._file_scan_process.subprocess.run") as run:
+			run.return_value = SimpleNamespace(returncode=0, stdout='{"result": {"records": []}}')
+			scan_file(b"private bytes", label, sheet=label, cursor=label)
+		args, kwargs = run.call_args
+		self.assertEqual(args, ([sys.executable, "-m", "jarvis.tools._file_scan_worker"],))
+		self.assertIs(kwargs["shell"], False)
+		payload = json.loads(kwargs["input"])
+		self.assertEqual(base64.b64decode(payload["content"]), b"private bytes")
+		self.assertEqual([payload[k] for k in ("filename", "sheet", "cursor")], [label] * 3)
+		self.assertNotIn(label, kwargs["env"].values())
+
 	def test_real_child_reads_csv_and_rejects_bad_cursor(self):
 		from jarvis.tools._file_scan_process import scan_file
 
