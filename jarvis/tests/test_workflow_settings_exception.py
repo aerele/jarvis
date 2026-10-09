@@ -56,6 +56,14 @@ def wf_validation_hook(doc, method=None):
 	raise frappe.ValidationError("planted: a hook refused the workflow")
 
 
+def wf_other_hook(doc, method=None):
+	"""Stores something the card never showed, as a controller change in a later
+	Frappe (or another app's hook) could."""
+	doc.send_email_alert = 1
+	if doc.transitions:
+		doc.transitions[0].allowed = "All"
+
+
 def wf_crash_hook(doc, method=None):
 	raise PlantedError("planted crash")
 
@@ -1298,6 +1306,108 @@ class TestWorkflowConfirm(_WfBase):
 		self.assertFalse(self.row(name).sealed_undo, "cleaned up: nothing kept")
 		self.assertIn("nothing was changed", self.last_continuation())
 
+	def test_a_save_that_stores_something_else_than_the_card_is_not_kept(self):
+		"""Owner decision R2-17: the record is read back and held to the card. Here a
+		hook turns the email alert on and opens the transition to everyone signed in;
+		the card said neither. The column had been added by then, so the clean-up
+		runs as after any failed confirm."""
+		names = self.records(2)
+		name = self.park_wf()
+		self.assertNotIn("It emails", self.card(name)["risk_line"])
+		self.wf_hook("wf_other_hook", event="validate")
+		out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		self.assertIn("did not match the confirmation card", out["error"]["message"])
+		self.assertNotIn("was not kept", out["error"]["message"], "the clean-up says what stays")
+		self.assertIn("was removed", out["error"]["message"])
+		frappe.db.rollback()
+		self.assertFalse(
+			frappe.db.exists(WF, f"Jwf Flow {self.tag}"), "what the card did not show is not kept"
+		)
+		self.assertEqual(self.active(), [])
+		self.assertEqual(self.states_of(), dict.fromkeys(names, None), "no state was left filled in")
+		logged = self.logged("post_write_mismatch", name)
+		self.assertEqual(len(logged), 1, logged)
+		self.assertIn("differs from the card in:", logged[0])
+		self.assertEqual(self.row(name).status, "Failed")
+
+	def test_the_card_shows_markup_as_the_save_stores_it(self):
+		"""Frappe's XSS pass rewrites markup in a state's message on save. The card
+		shows the stored form, so the post-write check finds what the card showed;
+		a new row's document status sent as null is shown as the default it takes."""
+		states = [
+			{
+				"state": self.s_open,
+				"allow_edit": "System Manager",
+				"message": "<p>Please approve & sign</p>",
+				"doc_status": None,
+			},
+			{"state": self.s_ok, "allow_edit": "System Manager", "message": "Line 1<br/>Line 2"},
+		]
+		name = self.park_wf(states=states)
+		sealed = self.call(name)["values"]["states"]
+		self.assertEqual(
+			[s["message"] for s in sealed], ["<p>Please approve &amp; sign</p>", "Line 1<br>Line 2"]
+		)
+		self.assertEqual(sealed[0]["doc_status"], "0")
+		self.assertTrue(self.confirm(name)["ok"])
+		doc = frappe.get_doc(WF, f"Jwf Flow {self.tag}")
+		self.assertEqual([s.message for s in doc.states], [s["message"] for s in sealed])
+		self.assertEqual(self.logged("post_write_mismatch"), [])
+
+	def test_markup_the_card_cannot_show_as_stored_is_refused(self):
+		"""The save sanitises the stored form again, so text that comes out
+		different on every pass, and an update value the HTML filter would rewrite
+		(it reads ``<doc.b and doc.c>`` as a tag), are refused at the card."""
+		first = {"state": self.s_open, "allow_edit": "System Manager"}
+		second = {"state": self.s_ok, "allow_edit": "System Manager", "update_field": "title"}
+		r = self.create_wf(states=[first, {**second, "update_value": "doc.idx<doc.docstatus and doc.idx>1"}])
+		self.assert_refused(r, "InvalidArgumentError", ["HTML filter would rewrite", "Put spaces around"])
+		from frappe.utils import html_utils
+
+		with patch.object(html_utils, "sanitize_html", side_effect=lambda text, **kw: text + "!"):
+			r = self.create_wf(states=[{**first, "message": "<p>never settles</p>"}, second])
+		self.assert_refused(r, "InvalidArgumentError", "rewrites differently each time it is saved")
+		# Spaced, the same comparison is an ordinary value.
+		name = self.park_wf(states=[first, {**second, "update_value": "a < b and c > 1"}])
+		self.assertEqual(self.call(name)["values"]["states"][1]["update_value"], "a < b and c > 1")
+
+	def test_the_post_write_check_reads_only_what_the_call_named(self):
+		from jarvis.chat.pending_actions import _verify
+
+		name = self.park_wf()
+		args = self.call(name)  # the sealed call is gone once the card has run
+		self.assertTrue(self.confirm(name)["ok"], "an ordinary confirm is like its card")
+		wf = f"Jwf Flow {self.tag}"
+		undo = {"written": {"name": wf}}
+		self.assertIsNone(_verify.unlike_the_card(args, undo))
+		values = copy.deepcopy(args["values"])
+		# What the call did not name is not the card's claim.
+		self.assertIsNone(_verify.unlike_the_card({"doctype": WF, "values": {"is_active": 1}}, undo))
+		self.assertIsNone(
+			_verify.unlike_the_card({"doctype": WF, "values": {**values, "no_such_key": 1}}, undo)
+		)
+		other = copy.deepcopy(values)
+		other["transitions"][0]["allowed"] = "All"
+		said = _verify.unlike_the_card({"doctype": WF, "values": other}, undo)
+		self.assertEqual(said, "Transitions row 1, Allowed")
+		self.assertNotIn("All", said.replace("Allowed", ""), "which field, never a value")
+		fewer = {**values, "states": values["states"][:1]}
+		self.assertIn(
+			"2 rows were saved, the card showed 1",
+			_verify.unlike_the_card({"doctype": WF, "values": fewer}, undo),
+		)
+		self.assertEqual(
+			_verify.unlike_the_card({"doctype": WF, "values": {**values, "send_email_alert": 1}}, undo),
+			"Send Email Alert",
+		)
+		# Fails closed: a record that cannot be named or read back is unlike its card.
+		self.assertIn("could not be found", _verify.unlike_the_card(args, {}))
+		self.assertIn(
+			"could not be read back", _verify.unlike_the_card(args, {"written": {"name": "Jwf Nope"}})
+		)
+		self.assertIn("could not be read", _verify.unlike_the_card({"doctype": WF}, undo))
+
 	def test_a_hook_that_fails_after_the_column_was_added(self):
 		"""The workflow and its column both committed before the hook raised. The
 		failure is reported, so the workflow does not stay live; the complete field
@@ -2131,6 +2241,21 @@ class TestWorkflowEdit(_WfBase):
 		after = frappe.get_doc(WF, self.wf).as_dict()
 		self.assertEqual(after, before, "restored exactly, rows and timestamps included")
 		self.assertEqual(self.active(), [old])
+
+	def test_an_edit_that_stores_something_else_than_the_card_is_rolled_back(self):
+		"""No column is added, so the edit is one transaction: the mismatch rolls it
+		back and nothing of it is left."""
+		before = frappe.get_doc(WF, self.wf).as_dict()
+		row = frappe.get_doc(WF, self.wf).transitions[0].name
+		name = self.park_update(self.wf, transitions=[{"name": row, "allow_self_approval": 0}])
+		self.wf_hook("wf_other_hook", event="validate")
+		out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		self.assertIn("did not match the confirmation card", out["error"]["message"])
+		frappe.db.rollback()
+		frappe.clear_document_cache(WF, self.wf)
+		self.assertEqual(frappe.get_doc(WF, self.wf).as_dict(), before, "rows and timestamps included")
+		self.assertEqual(len(self.logged("post_write_mismatch", name)), 1)
 
 	def test_an_edit_waits_for_the_lock_and_obeys_the_off_switch(self):
 		name = self.park_update(self.wf, send_email_alert=1)
