@@ -222,6 +222,52 @@ def snapshot_failed(out: dict, what: str) -> dict:
 	return out
 
 
+def as_sanitized(df, value):
+	"""``value`` as Frappe's save stores it after its XSS pass
+	(model/base_document.py ``_sanitize_content``): text that
+	holds ``<`` or ``>`` is rewritten by ``sanitize_html`` (``<br/>`` becomes
+	``<br>``, ``&`` inside markup becomes ``&amp;``, what looks like a tag is
+	dropped), except in a Code / JSON / Attach / Barcode field, an Email field, or
+	one marked "Ignore XSS Filter". A guarded card shows the stored form, so its
+	sealed call carries it: the post-write check then finds what the card showed."""
+	if not value or not isinstance(value, str) or ("<" not in value and ">" not in value):
+		return value
+	# Frappe 16 leaves a JSON field alone; Frappe 15 does not.
+	exempt = ("Attach", "Attach Image", "Barcode", "Code", *(("JSON",) if _frappe_major() >= 16 else ()))
+	if df is not None and (
+		df.get("ignore_xss_filter")
+		or (df.get("fieldtype") in ("Data", "Small Text", "Text") and df.get("options") == "Email")
+		or df.get("fieldtype") in exempt
+	):
+		return value
+	from bs4 import BeautifulSoup
+	from frappe.utils.html_utils import sanitize_html
+
+	if "<!-- markdown -->" in value and not bool(BeautifulSoup(value, "html.parser").find()):
+		return value
+	once = sanitize_html(value)
+	if sanitize_html(once) != once:
+		# The save sanitises the stored form again. Markup that comes out different
+		# on every pass (a comment holding quotes, a block inside a stripped tag)
+		# can never be shown as it will be stored.
+		from jarvis.exceptions import InvalidFieldValueError
+
+		label = (df.get("label") or df.get("fieldname")) if df is not None else "A value"
+		raise InvalidFieldValueError(
+			f"{label} holds HTML that Frappe rewrites differently each time it is saved, so it "
+			"cannot be shown as it will be stored. Use simpler markup (no HTML comments, no "
+			"blocks nested inside other tags), or plain text."
+		)
+	return once
+
+
+def _frappe_major() -> int:
+	try:
+		return int(str(frappe.__version__).split(".")[0])
+	except (ValueError, AttributeError):
+		return 16
+
+
 def counted(n: int, one: str, many: str | None = None) -> str:
 	"""``n`` with its noun, singular for exactly one: "1 record", "0 records",
 	"2 people" (``many`` where adding an s is not the plural)."""

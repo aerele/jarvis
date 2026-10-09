@@ -503,10 +503,78 @@ class TestClassifiedByTheStoredParent(_Base):
 			with self.assertRaises(SensitiveWriteRefusedError) as raised:
 				wr.check("update_doc", self._update(case))
 			self.assertIn("grants access", str(raised.exception))
-		# The parents themselves are classified as before.
+		# Owner decision R2-18: the parent's own update is sensitive when it sets the
+		# role list, and ordinary when it does not.
 		chart = self.role_cases[1].parent[1]
 		args = {"doctype": "Dashboard Chart", "name": chart, "changes": {"roles": [{"role": "Guest"}]}}
-		self.assertIsNone(wr.risk_of("update_doc", args))
+		self.assertEqual(wr.risk_of("update_doc", args), "sensitive")
+		args = {"doctype": "Dashboard Chart", "name": chart, "changes": {"roles": []}}
+		self.assertEqual(wr.risk_of("update_doc", args), "sensitive", "emptying it opens the chart")
+		args = {"doctype": "Dashboard Chart", "name": chart, "changes": {"color": "#ff0000"}}
+		self.assertIsNone(wr.risk_of("update_doc", args), "anything else on it is ordinary")
+		self.assertEqual(wr.risk_class("Dashboard Chart"), "access")
+		self.assertEqual(wr.risk_class("ToDo"), "")
+		self.assertEqual(wr._role_tables("Dashboard Chart"), ["roles"])
+		self.assertEqual(wr._role_tables("ToDo"), [])
+		self.assertEqual(wr._role_tables("Has Role"), [], "a child table has none of its own")
+		self.assertEqual(wr._role_tables("No Such Form"), [])
+		new = {"doctype": "Dashboard Chart", "values": {"chart_name": "x", "roles": [{"role": "Guest"}]}}
+		self.assertEqual(wr.risk_of("create_doc", new), "sensitive")
+		new["values"]["roles"] = []
+		self.assertIsNone(wr.risk_of("create_doc", new), "a create that lists no role grants nothing")
+
+	def test_a_role_list_set_through_its_parent_parks_a_card_in_every_mode(self):
+		"""R2-18. The row is refused on its own (#1841); its parent's update ran with
+		no card in the uncarded modes. Now it parks the access card everywhere."""
+		chart = self.role_cases[1].parent[1]
+		kept = frappe.get_all(
+			"Has Role", filters={"parent": chart, "parenttype": "Dashboard Chart"}, pluck="name"
+		)
+		roles = [*({"name": n} for n in kept), {"role": "Guest"}]
+		args = {"doctype": "Dashboard Chart", "name": chart, "changes": {"roles": roles}}
+		for mode, conv in self._modes().items():
+			result = self._run("update_doc", args, conv)
+			self.assertTrue(result["ok"], (mode, result))
+			self.assertEqual(result["data"]["status"], "pending_confirmation", mode)
+			card = frappe.parse_json(frappe.db.get_value(PENDING, {"conversation": conv}, "card"))
+			self.assertEqual(card.get("risk_line"), wr.RISK_LINES["access"], mode)
+			frappe.db.rollback()
+		self.assertEqual(
+			frappe.db.count("Has Role", {"parent": chart, "parenttype": "Dashboard Chart"}), len(kept)
+		)
+		# And the card, confirmed, writes exactly that list (auto mode's card).
+		from jarvis.chat import pending_actions as pa
+
+		conv = self._conv(auto_mode=1, auto_mode_at=frappe.utils.now())
+		self.assertEqual(self._run("update_doc", args, conv)["data"]["status"], "pending_confirmation")
+		done = pa.execute(frappe.db.get_value(PENDING, {"conversation": conv}, "name"), conversation=conv)
+		self.assertTrue(done["ok"], done)
+		stored = frappe.get_all(
+			"Has Role",
+			filters={"parent": chart, "parenttype": "Dashboard Chart"},
+			pluck="role",
+			order_by="idx",
+		)
+		self.assertEqual(stored[-1], "Guest")
+		self.assertEqual(len(stored), len(kept) + 1)
+		frappe.db.delete("Has Role", {"parent": chart, "parenttype": "Dashboard Chart", "role": "Guest"})
+		frappe.db.commit()
+
+	def test_the_save_itself_sees_a_changed_role_list(self):
+		"""The same rule at the save, for the routes that never pass the argument
+		check (``frappe.client`` through run_method)."""
+		chart = frappe.get_doc("Dashboard Chart", self.role_cases[1].parent[1])
+		chart.get_doc_before_save = lambda: frappe.get_doc("Dashboard Chart", chart.name)
+		self.assertIsNone(wr.doc_risk(chart, "before_validate"), "unchanged roles")
+		chart.append("roles", {"role": "Guest"})
+		self.assertEqual(wr.doc_risk(chart, "before_validate"), "sensitive")
+		self.assertIsNone(wr.doc_risk(chart, "on_trash"))
+		chart.set("roles", [])
+		self.assertEqual(wr.doc_risk(chart, "before_validate"), "sensitive", "emptied")
+		fresh = frappe.new_doc("Dashboard Chart")
+		self.assertIsNone(wr.doc_risk(fresh, "before_validate"), "a new record with no role")
+		fresh.append("roles", {"role": "Guest"})
+		self.assertEqual(wr.doc_risk(fresh, "before_validate"), "sensitive")
 
 	def test_a_role_list_of_jarviss_own_configuration(self):
 		"""Refused when asked for by row (it parked a card before); the ORM guard still
@@ -619,25 +687,28 @@ class TestWhatTheRefusalSays(_Base):
 			self.assertNotIn("update_doc", text)
 			self.assertNotIn("confirmation card", text)
 
-	def test_under_an_unclassified_parent_it_promises_no_card_and_names_no_write(self):
-		"""Review of aerele/jarvis#1841: a Page, a Dashboard Chart or a Workspace is not
-		classified, so ``update_doc`` on it runs with no card in the uncarded modes.
-		The refusal of its role row must not send the model there."""
+	def test_under_a_parent_with_a_role_list_it_points_at_the_parents_card(self):
+		"""Review of aerele/jarvis#1841 said the refusal of a Page's, Dashboard
+		Chart's or Workspace's role row must not promise a card the parent would not
+		get. Owner decision R2-18 gives the parent that card, so the refusal now
+		sends the model there, as under a User."""
 		for case in self.role_cases:
 			with self.assertRaises(SensitiveWriteRefusedError) as raised:
 				wr.check("update_doc", self._update(case))
 			e = raised.exception
 			record = f"{case.parent[0]} {case.parent[1]}"
-			path = wr.desk_path(*case.parent)
 			self.assertIn("grants access (this changes who can see or edit)", str(e), record)
-			self.assertIn(f"tell the user to change it in Desk on {record}: open {path}.", str(e))
-			self.assertEqual(e.desk_path, path)
-			self.assertIn(path, e.hint)
-			for text in (str(e), e.hint):
-				self.assertNotIn("update_doc", text, record)
-				self.assertNotIn("confirmation card", text, record)
-			env = wr.refused_envelope(e)
-			self.assertEqual((env["error"]["hint"], env["error"]["desk_path"]), (e.hint, path))
+			if case.parent[0] == "Page":
+				# Frappe lets only the Administrator save a Page: no card is promised
+				# that nobody else could confirm.
+				self.assertIn(f"tell the user to change it in Desk on {record}", str(e))
+				self.assertNotIn("update_doc", str(e) + e.hint, record)
+				continue
+			self.assertIn("update_doc", str(e) + e.hint, record)
+			self.assertIn("confirmation card", str(e) + e.hint, record)
+			self.assertTrue(
+				wr._parent_gets_a_card(wr._target_child_row(wr._Target(case.dt, "update", case.row)))
+			)
 
 	def test_a_role_row_is_about_access_whatever_its_parent_runs(self):
 		"""A Report counts whole as a conditional (code) doctype, but a role row of it
@@ -648,14 +719,52 @@ class TestWhatTheRefusalSays(_Base):
 			e = self._refusal("Has Role", "sensitive", "Report", report, "roles")
 			self.assertIn("grants access (this changes who can see or edit)", str(e), report)
 			self.assertNotIn("runs code", str(e), report)
-		# A Script Report's update is carded (it is sensitive); a Report Builder
-		# report's is not, so no card is promised for it.
-		carded = str(self._refusal("Has Role", "sensitive", "Report", script, "roles"))
-		self.assertIn("confirmation card", carded)
-		plain = self._refusal("Has Role", "sensitive", "Report", builder, "roles")
-		for text in (str(plain), plain.hint):
-			self.assertNotIn("confirmation card", text)
-			self.assertNotIn("update_doc", text)
+		# A Script Report's update is carded (it is sensitive). A Report Builder
+		# report's is carded too when it sets the role list (R2-18), and only then.
+		for name in (script, builder):
+			self.assertIn(
+				"confirmation card", str(self._refusal("Has Role", "sensitive", "Report", name, "roles"))
+			)
+		args = {"doctype": "Report", "name": builder, "changes": {"roles": []}}
+		self.assertEqual(wr.risk_of("update_doc", args), "sensitive", "who may open the report")
+		args = {"doctype": "Report", "name": builder, "changes": {"disabled": 1}}
+		self.assertIsNone(wr.risk_of("update_doc", args), "the rest of a Report Builder report is ordinary")
+		self.assertEqual(
+			wr.risk_line("update_doc", args | {"changes": {"roles": []}}), wr.RISK_LINES["access"]
+		)
+		# A NEW Report Builder report takes its form's roles from Frappe itself
+		# (``Report.before_insert``): that is not a role list the caller set, so
+		# creating one stays an ordinary write, at the arguments and at the save.
+		values = {
+			"report_name": PREFIX + "new builder",
+			"ref_doctype": "ToDo",
+			"report_type": "Report Builder",
+			"is_standard": "No",
+		}
+		self.assertIsNone(wr.risk_of("create_doc", {"doctype": "Report", "values": values}))
+		fresh = frappe.get_doc({"doctype": "Report", **values})
+		fresh.set("__islocal", True)  # as ``insert`` marks it before ``before_insert`` runs
+		fresh.set_doctype_roles()
+		self.assertTrue(fresh.roles, "Frappe filled them in")
+		self.assertIsNone(wr.doc_risk(fresh, "before_validate"), "its own default roles")
+		fresh.append("roles", {"role": "Guest"})
+		self.assertEqual(wr.doc_risk(fresh, "before_validate"), "sensitive", "a list of the caller's")
+		conv = self._conv(auto_mode=1, auto_mode_at=frappe.utils.now())
+		made = self._run("create_doc", {"doctype": "Report", "values": values}, conv)
+		self.addCleanup(
+			lambda: (frappe.db.delete("Report", {"name": values["report_name"]}), frappe.db.commit())
+		)
+		self.addCleanup(
+			frappe.db.delete, "Has Role", {"parent": values["report_name"], "parenttype": "Report"}
+		)
+		self.assertTrue(made.get("ok"), made)
+		self.assertNotEqual((made.get("data") or {}).get("status"), "pending_confirmation", "no card")
+		self.assertTrue(frappe.db.exists("Report", values["report_name"]), "created as before")
+		doc = frappe.get_doc("Report", builder)
+		doc.get_doc_before_save = lambda: frappe.get_doc("Report", builder)
+		self.assertIsNone(wr.doc_risk(doc, "before_validate"))
+		doc.append("roles", {"role": "Guest"})
+		self.assertEqual(wr.doc_risk(doc, "before_validate"), "sensitive", "the same at the save")
 		# A row that is not a role list keeps the parent's own reason.
 		e = self._refusal("Report Filter", "sensitive", "Report", script, "filters")
 		self.assertIn("runs code", str(e))

@@ -312,7 +312,8 @@ def risk_class(doctype: str) -> str:
 		return "mail"
 	if dt == "CRM Settings":
 		return "settings"  # an update that leaves the data sync off (``_crm_sync_on``)
-	return ""
+	# A record of any other form is sensitive only for its role list (``_role_tables``).
+	return "access" if _role_tables(dt) else ""
 
 
 def desk_path(doctype: str, name=None) -> str:
@@ -538,7 +539,11 @@ def _target_risk(target: _Target) -> str | None:
 			# A Data Import runs in a background job where the ORM guard is inert, and
 			# its rows are not known here: any conditional doctype parks a card.
 			return "sensitive"
-		return "sensitive" if _conditional_risky(dt, _ArgView(target), target.op) else None
+		if _conditional_risky(dt, _ArgView(target), target.op):
+			return "sensitive"
+		# Not risky by its own condition (a Report Builder report): its role list is
+		# still who may open it.
+		return "sensitive" if target.op in ("create", "update") and _sets_role_table(target) else None
 	if dt in _ARG_SENSITIVE:
 		# A role list of Jarvis's own (a skill's allowed roles) changed by row is
 		# refused like every other role list; anything else here parks its card.
@@ -551,9 +556,13 @@ def _target_risk(target: _Target) -> str | None:
 		_risk, fields = _FIELD_SENSITIVE[dt]
 		if any(_grants(target, f) for f in fields):
 			return "sensitive"
-		return "sensitive" if dt == "Employee" and _toggles_login(_ArgView(target)) else None
+		if dt == "Employee" and _toggles_login(_ArgView(target)):
+			return "sensitive"
+		return "sensitive" if target.op != "import" and _sets_role_table(target) else None
 	if target.op in _ROW_OPS and _target_child_row(target) is not None:
 		return CHILD_ROW
+	if target.op in ("create", "update") and _sets_role_table(target):
+		return "sensitive"
 	return None
 
 
@@ -614,6 +623,90 @@ def _role_list(table: str) -> bool:
 	except Exception:
 		return False
 	return bool(fields) and all(df.fieldtype == "Link" and df.options == "Role" for df in fields)
+
+
+def _role_tables(doctype) -> list[str]:
+	"""The tables of ``doctype`` that are role lists (``_role_list``): who may open a
+	Page, a Dashboard Chart, a Workspace, a Report, or a custom app's form. Owner
+	decision R2-18: a write that sets one is sensitive by what the table IS, on any
+	form, so a form nobody listed is covered too."""
+	try:
+		if not _is_doctype(doctype) or frappe.is_table(doctype):
+			return []
+		fields = frappe.get_meta(doctype).get_table_fields()
+	except Exception:
+		return []
+	return [df.fieldname for df in fields if _role_list(df.options)]
+
+
+def _sets_role_table(target) -> bool:
+	"""Whether a create / update carries a role list. An update that names the table
+	at all counts, an empty list too (emptying a Page's roles opens it to everyone);
+	a create only when it lists a role."""
+	for fieldname in _role_tables(target.doctype):
+		if fieldname in target.values and (target.op == "update" or _filled(target.values[fieldname])):
+			return True
+	return False
+
+
+def _default_roles(doc, keys: list[str]) -> list[dict]:
+	"""The role list a new record gets from its own controller with nothing asked:
+	a Report that is not standard takes the permlevel-0 roles of its form
+	(core/doctype/report/report.py ``set_doctype_roles``, in ``before_insert``, the
+	same on 15 and 16), so creating a Report Builder report with no roles named
+	sets no access of its own. Any other list on it is the caller's."""
+	if canonical(doc.doctype) != "Report" or doc.get("is_standard") != "No" or not doc.get("ref_doctype"):
+		return []
+	try:
+		meta = frappe.get_meta(doc.ref_doctype)
+		if meta.istable:
+			return []
+		return [dict.fromkeys(keys, p.role) for p in meta.permissions if frappe.utils.cint(p.permlevel) == 0]
+	except Exception:
+		return []
+
+
+def _doc_changes_roles(doc) -> bool:
+	"""The same rule at the save, so it holds on every route: a root save that adds
+	a role list or leaves one different from what is stored. Read from the
+	document's own meta (no query for a form with no role list, which is nearly
+	every save), never for Jarvis's own configuration (the argument layer only,
+	like the rest of it), and never raising: a rule that cannot be read does not
+	break a save."""
+	try:
+		if canonical(doc.doctype) in _ARG_SENSITIVE:
+			return False
+		tables = [df for df in doc.meta.get_table_fields() if _role_list(df.options)]
+		if not tables:
+			return False
+		before = None if _is_new(doc) else doc.get_doc_before_save()
+		for df in tables:
+			keys = [f.fieldname for f in frappe.get_meta(df.options).fields if f.options == "Role"]
+
+			def roles(rows, keys=keys):
+				return sorted(tuple(str(r.get(k) or "") for k in keys) for r in rows or [])
+
+			now = roles(doc.get(df.fieldname))
+			if _is_new(doc):
+				# What the form's own controller fills in on a new record is not
+				# a role list the caller set (``_default_roles``).
+				then = roles(_default_roles(doc, keys)) if now else []
+			elif before is not None:
+				then = roles(before.get(df.fieldname))
+			else:
+				# Saved with nothing to compare against (a db_set): the stored rows decide.
+				then = roles(
+					frappe.get_all(
+						df.options,
+						filters={"parent": doc.name, "parenttype": doc.doctype, "parentfield": df.fieldname},
+						fields=keys,
+					)
+				)
+			if now != then:
+				return True
+	except Exception:
+		return False
+	return False
 
 
 def _parent_kind(parenttype: str, parentfield: str, *, own_config: bool) -> str | None:
@@ -765,6 +858,11 @@ def _parent_gets_a_card(row: _ChildRow) -> bool:
 	DocType): those are changed in Desk."""
 	try:
 		args = {"doctype": row.parenttype, "name": row.parent, "changes": {row.parentfield: [{}]}}
+		if row.parenttype == "Page":
+			# Frappe lets only the Administrator save a Page, and a site sets a page's
+			# roles through Role Permission for Page and Report: the card would be one
+			# nobody else can confirm.
+			return False
 		risk = risk_of("update_doc", args)
 		if risk in GUARDED_STRUCTURE:
 			from jarvis.tools import _guarded_structure
@@ -816,7 +914,9 @@ def child_row_refusal(row: _ChildRow) -> WriteRefusedError:
 		f"Change it through {record}: update that record's {row.parentfield} table, each kept row "
 		"with its name from get_doc."
 	)
-	carded = not row.grant and _parent_gets_a_card(row)
+	# A role row under an otherwise ordinary parent too: that parent's update is
+	# carded for the role list it sets (R2-18, ``_sets_role_table``).
+	carded = _parent_gets_a_card(row)
 	if row.kind == "structure" and carded:
 		# A structure parent chat MAY change, through its own guarded card (a
 		# Workflow, the two settings): sending the person to Desk would be wrong.
@@ -1007,12 +1107,26 @@ def _guarded_class(tool: str, target: _Target) -> str | None:
 	return None
 
 
+def _target_class(target) -> str:
+	"""The risk class a sensitive target is shown under. A record that is sensitive
+	only for the role list it sets (a Report Builder report: not code by its own
+	condition) is about access, not about what its doctype can otherwise be."""
+	dt = target.doctype
+	if (
+		dt in _CONDITIONAL
+		and target.op in ("create", "update")
+		and not _conditional_risky(dt, _ArgView(target), target.op)
+	):
+		return "access"
+	return risk_class(dt)
+
+
 def risk_line(tool: str, args) -> str:
 	"""The line a card shows for a sensitive call: the risk of its first sensitive
 	target."""
 	for t in _targets(tool, args):
 		if _target_risk(t) == "sensitive":
-			return RISK_LINES[risk_class(t.doctype)]
+			return RISK_LINES[_target_class(t)]
 	return ""
 
 
@@ -1022,7 +1136,7 @@ def risk_lines(tool: str, args) -> list[str]:
 	out = []
 	for t in _targets(tool, args):
 		if _target_risk(t) == "sensitive":
-			line = RISK_LINES[risk_class(t.doctype)]
+			line = RISK_LINES[_target_class(t)]
 			if line not in out:
 				out.append(line)
 	return out
@@ -1265,12 +1379,19 @@ def doc_risk(doc, event: str) -> str | None:
 		return "sensitive"
 	if dt in _CONDITIONAL:
 		op = "delete" if event in ("on_trash", "before_rename") else "update"
-		return "sensitive" if _conditional_risky(dt, _DocView(doc), op) else None
-	if dt in _FIELD_SENSITIVE and event in ("before_validate", "before_change"):
-		return "sensitive" if _doc_grants(dt, _DocView(doc)) else None
-	if _is_table(doc.doctype) and _doc_child_row(doc) is not None:
-		return CHILD_ROW
+		if _conditional_risky(dt, _DocView(doc), op):
+			return "sensitive"
+		return "sensitive" if event in _SAVE_EVENTS and _doc_changes_roles(doc) else None
+	if dt in _FIELD_SENSITIVE and event in _SAVE_EVENTS:
+		return "sensitive" if _doc_grants(dt, _DocView(doc)) or _doc_changes_roles(doc) else None
+	if _is_table(doc.doctype):
+		return CHILD_ROW if _doc_child_row(doc) is not None else None
+	if event in _SAVE_EVENTS and _doc_changes_roles(doc):
+		return "sensitive"
 	return None
+
+
+_SAVE_EVENTS = ("before_validate", "before_change")
 
 
 def _doc_grants(dt: str, view) -> bool:
@@ -1439,12 +1560,22 @@ def guard_doc_event(doc, method=None, *args, **kwargs):
 		)
 	_refuse(
 		SensitiveWriteRefusedError(
-			f"{dt} is sensitive configuration ({RISK_LINES[risk_class(dt)].rstrip('.').lower()}), so it "
+			f"{dt} is sensitive configuration ({RISK_LINES[_doc_class(doc, dt)].rstrip('.').lower()}), so it "
 			"needs its own confirmation card. Ask for it with create_doc, update_doc or delete_doc so the "
 			"user sees it in full; it cannot be changed as part of another action.",
 			doctype=dt,
 		)
 	)
+
+
+def _doc_class(doc, dt: str) -> str:
+	"""As ``_target_class``, for a document at its save."""
+	try:
+		if dt in _CONDITIONAL and not _conditional_risky(dt, _DocView(doc), "update"):
+			return "access"
+	except Exception:
+		pass
+	return risk_class(dt)
 
 
 def _refuse_child_row(row: _ChildRow | None, event: str) -> None:
