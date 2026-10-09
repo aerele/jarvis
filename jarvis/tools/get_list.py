@@ -149,8 +149,20 @@ def get_list(
 	limit: int = 20,
 	confirm_large: bool = False,
 	parent_doctype: str | None = None,
-) -> list[dict]:
+	list_mode: str | None = None,
+	start: int = 0,
+) -> list[dict] | dict:
 	"""List documents with filters.
+
+	``list_mode="list-page-v1"`` opts into a rows/coverage envelope and ``start``
+	offset (0..100000); omitted mode preserves the legacy bare list. Plain fields
+	and deterministic ordering are required in paged mode. A permission-aware
+	limit+1 query detects more rows without a separate count. ``complete`` means
+	one initial page exhausted the readable query, never business completion.
+	Offsets are live, not snapshot cursors. The agent response-budget guard can
+	shorten a page and adjusts coverage to resume at the first omitted row.
+	The canonical specimens in tests/fixtures/list-page-v1.json are shared with
+	the OpenClaw plugin; evolve producer and consumer tests together.
 
 	Frappe's get_list applies per-user record permissions automatically.
 	We additionally enforce DocType-level read permission and cap the limit.
@@ -173,8 +185,33 @@ def get_list(
 	"""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
-	if limit <= 0 or limit > MAX_LIMIT:
+	if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > MAX_LIMIT:
 		raise InvalidArgumentError(f"limit must be between 1 and {MAX_LIMIT}")
+
+	paged = list_mode == "list-page-v1"
+	if isinstance(start, bool) or not isinstance(start, int) or not 0 <= start <= 100_000:
+		raise InvalidArgumentError("start must be an integer between 0 and 100000")
+	if start and not paged:
+		raise InvalidArgumentError("Continuation requires list-page-v1 mode; restart or use a report.")
+	if paged:
+		if fields is not None and not isinstance(fields, list):
+			raise InvalidArgumentError("Paged fields must be a list of plain record fields.")
+		if order_by is not None and not isinstance(order_by, str):
+			raise InvalidArgumentError("Paged order_by must be a string.")
+		if any(
+			not isinstance(f, str)
+			or not re.fullmatch(r"\*|[A-Za-z_][A-Za-z0-9_]*(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?", f, re.I)
+			for f in fields or []
+		):
+			raise InvalidArgumentError(
+				"Paged get_list requires plain record fields (optional aliases); use query or run_report for expressions/aggregates/distinct."
+			)
+		parts = [part.strip() for part in (order_by or "name asc").split(",")]
+		if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?", part, re.I) for part in parts):
+			raise InvalidArgumentError("Paged order_by requires plain field names with optional asc/desc.")
+		if not any(part.split()[0].lower() == "name" for part in parts):
+			parts.append("name asc")
+		order_by = ", ".join(parts)
 
 	if frappe.get_meta(doctype).istable:
 		if not parent_doctype:
@@ -194,18 +231,40 @@ def get_list(
 		raise PermissionDeniedError(f"no read permission on {doctype}")
 	assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, order_by)
 
+	page_args = {"limit_start": start} if paged else {}
 	rows = frappe.get_list(
 		doctype,
 		fields=fields or ["name"],
 		filters=filters or {},
 		order_by=order_by,
-		limit=limit,
+		limit=limit + 1 if paged else limit,
 		parent_doctype=parent_doctype,
+		**page_args,
 	)
+	has_more = paged and len(rows) > limit
+	if paged:
+		rows = rows[:limit]
 	if len(rows) > ROW_GUARD and not confirm_large:
 		raise ResultTooLargeError(
 			row_count=len(rows),
 			limit=ROW_GUARD,
 			tool="get_list",
 		)
-	return rows
+	if not paged:
+		return rows
+	next_start = start + len(rows) if has_more and start + len(rows) <= 100_000 else None
+	return {
+		"list_contract": "list-page-v1",
+		"rows": rows,
+		"coverage": {
+			"start": start,
+			"limit": limit,
+			"returned": len(rows),
+			"has_more": bool(has_more),
+			"next_start": next_start,
+			"complete": start == 0 and not has_more,
+			"order_by": order_by,
+			"scope": "current user's readable matching records at query time",
+		},
+		"note": "This is a live query, not a snapshot or a total count. Keep filters, fields and order unchanged when paging. Later pages do not prove earlier rows were read. Reconcile expected records and states before claiming workflow completion. If has_more is true but next_start is null, use a narrower query or report.",
+	}

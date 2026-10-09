@@ -1634,6 +1634,27 @@ class TestAnArmedRunReadingAroundSkills(ArmedChatBase):
 		self.assertEqual(res["data"], [])
 		self.assertEqual(self._armed(conv), 1)
 
+	def test_paged_skill_read_judges_only_returned_skills_and_removes_private_alias(self):
+		self._skill(OWNER, "mine")
+		self._skill(OTHER, "side", share_with=OWNER)
+		conv = self._armed_conv()
+		args = {
+			"doctype": SKILL,
+			"fields": ["skill_name"],
+			"filters": {"owner": OWNER},
+			"list_mode": "list-page-v1",
+		}
+		res = self._read(conv, "get_list", args)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"]["rows"], [{"skill_name": "armskill-mine"}])
+		self.assertTrue(res["data"]["coverage"]["complete"])
+		self.assertEqual(self._armed(conv), 1)
+		args["filters"] = {"owner": OTHER}
+		res = self._read(conv, "get_list", args)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"]["rows"], [{"skill_name": "armskill-side"}])
+		self.assertEqual(self._armed(conv), 0)
+
 	def test_a_child_list_with_the_default_fields_is_judged_on_its_own_rows(self):
 		own = self._skill(OWNER, "mine", share_with=ADMIN)
 		self._skill(OTHER, "side", share_with=OWNER)

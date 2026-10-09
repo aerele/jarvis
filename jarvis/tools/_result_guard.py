@@ -20,8 +20,8 @@ _SAFETY = 200  # pad for note-digit / separator variance below the hard cap
 # Routing help (model-facing): the full-data escapes are report_pdf for a saved
 # report (runs server-side, returns a file, bypasses this cap) and
 # export_document / export_excel for record exports on already-narrowed data.
-# There is deliberately no "request specific rows" advice - no get_list offset
-# exists - so the guidance is narrow / aggregate / report_pdf.
+# Generic/legacy results have no reliable continuation. Paged get_list below
+# updates its own next_start to the rows actually retained by this guard.
 _NOTE = (
 	"Result truncated to fit the context window: showing the first {shown} of "
 	"{total} rows. PARTIAL - do not treat as complete; any file, summary, or count "
@@ -90,6 +90,20 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 		if k != key and k not in _META_KEYS:
 			out[k] = v
 	out[key] = kept
+	if data.get("list_contract") == "list-page-v1":
+		# Never leave a pre-truncation completeness claim or skip omitted rows.
+		original = data.get("coverage")
+		coverage = dict(original) if isinstance(original, dict) else {}
+		start = coverage.get("start")
+		valid_start = type(start) is int and 0 <= start <= 100_000
+		next_start = start + len(kept) if valid_start else None
+		coverage.update(
+			returned=len(kept),
+			has_more=True,
+			complete=False,
+			next_start=next_start if kept and next_start is not None and next_start <= 100_000 else None,
+		)
+		out["coverage"] = coverage
 	return out
 
 

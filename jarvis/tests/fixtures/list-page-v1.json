@@ -1,0 +1,425 @@
+[
+  {
+    "name": "empty",
+    "source": [],
+    "request": {
+      "start": 0
+    },
+    "response": {
+      "list_contract": "list-page-v1",
+      "rows": [],
+      "coverage": {
+        "start": 0,
+        "limit": 20,
+        "returned": 0,
+        "has_more": false,
+        "next_start": null,
+        "complete": true,
+        "order_by": "name asc",
+        "scope": "current user's readable matching records at query time"
+      }
+    }
+  },
+  {
+    "name": "exact",
+    "source": [
+      {
+        "name": "row-000"
+      },
+      {
+        "name": "row-001"
+      },
+      {
+        "name": "row-002"
+      },
+      {
+        "name": "row-003"
+      },
+      {
+        "name": "row-004"
+      },
+      {
+        "name": "row-005"
+      },
+      {
+        "name": "row-006"
+      },
+      {
+        "name": "row-007"
+      },
+      {
+        "name": "row-008"
+      },
+      {
+        "name": "row-009"
+      },
+      {
+        "name": "row-010"
+      },
+      {
+        "name": "row-011"
+      },
+      {
+        "name": "row-012"
+      },
+      {
+        "name": "row-013"
+      },
+      {
+        "name": "row-014"
+      },
+      {
+        "name": "row-015"
+      },
+      {
+        "name": "row-016"
+      },
+      {
+        "name": "row-017"
+      },
+      {
+        "name": "row-018"
+      },
+      {
+        "name": "row-019"
+      }
+    ],
+    "request": {
+      "start": 0
+    },
+    "response": {
+      "list_contract": "list-page-v1",
+      "rows": [
+        {
+          "name": "row-000"
+        },
+        {
+          "name": "row-001"
+        },
+        {
+          "name": "row-002"
+        },
+        {
+          "name": "row-003"
+        },
+        {
+          "name": "row-004"
+        },
+        {
+          "name": "row-005"
+        },
+        {
+          "name": "row-006"
+        },
+        {
+          "name": "row-007"
+        },
+        {
+          "name": "row-008"
+        },
+        {
+          "name": "row-009"
+        },
+        {
+          "name": "row-010"
+        },
+        {
+          "name": "row-011"
+        },
+        {
+          "name": "row-012"
+        },
+        {
+          "name": "row-013"
+        },
+        {
+          "name": "row-014"
+        },
+        {
+          "name": "row-015"
+        },
+        {
+          "name": "row-016"
+        },
+        {
+          "name": "row-017"
+        },
+        {
+          "name": "row-018"
+        },
+        {
+          "name": "row-019"
+        }
+      ],
+      "coverage": {
+        "start": 0,
+        "limit": 20,
+        "returned": 20,
+        "has_more": false,
+        "next_start": null,
+        "complete": true,
+        "order_by": "name asc",
+        "scope": "current user's readable matching records at query time"
+      }
+    }
+  },
+  {
+    "name": "first",
+    "source": [
+      {
+        "name": "row-000"
+      },
+      {
+        "name": "row-001"
+      },
+      {
+        "name": "row-002"
+      },
+      {
+        "name": "row-003"
+      },
+      {
+        "name": "row-004"
+      },
+      {
+        "name": "row-005"
+      },
+      {
+        "name": "row-006"
+      },
+      {
+        "name": "row-007"
+      },
+      {
+        "name": "row-008"
+      },
+      {
+        "name": "row-009"
+      },
+      {
+        "name": "row-010"
+      },
+      {
+        "name": "row-011"
+      },
+      {
+        "name": "row-012"
+      },
+      {
+        "name": "row-013"
+      },
+      {
+        "name": "row-014"
+      },
+      {
+        "name": "row-015"
+      },
+      {
+        "name": "row-016"
+      },
+      {
+        "name": "row-017"
+      },
+      {
+        "name": "row-018"
+      },
+      {
+        "name": "row-019"
+      },
+      {
+        "name": "row-020"
+      }
+    ],
+    "request": {
+      "start": 0
+    },
+    "response": {
+      "list_contract": "list-page-v1",
+      "rows": [
+        {
+          "name": "row-000"
+        },
+        {
+          "name": "row-001"
+        },
+        {
+          "name": "row-002"
+        },
+        {
+          "name": "row-003"
+        },
+        {
+          "name": "row-004"
+        },
+        {
+          "name": "row-005"
+        },
+        {
+          "name": "row-006"
+        },
+        {
+          "name": "row-007"
+        },
+        {
+          "name": "row-008"
+        },
+        {
+          "name": "row-009"
+        },
+        {
+          "name": "row-010"
+        },
+        {
+          "name": "row-011"
+        },
+        {
+          "name": "row-012"
+        },
+        {
+          "name": "row-013"
+        },
+        {
+          "name": "row-014"
+        },
+        {
+          "name": "row-015"
+        },
+        {
+          "name": "row-016"
+        },
+        {
+          "name": "row-017"
+        },
+        {
+          "name": "row-018"
+        },
+        {
+          "name": "row-019"
+        }
+      ],
+      "coverage": {
+        "start": 0,
+        "limit": 20,
+        "returned": 20,
+        "has_more": true,
+        "next_start": 20,
+        "complete": false,
+        "order_by": "name asc",
+        "scope": "current user's readable matching records at query time"
+      }
+    }
+  },
+  {
+    "name": "last",
+    "source": [
+      {
+        "name": "row-020"
+      },
+      {
+        "name": "row-021"
+      },
+      {
+        "name": "row-022"
+      },
+      {
+        "name": "row-023"
+      },
+      {
+        "name": "row-024"
+      },
+      {
+        "name": "row-025"
+      },
+      {
+        "name": "row-026"
+      },
+      {
+        "name": "row-027"
+      },
+      {
+        "name": "row-028"
+      },
+      {
+        "name": "row-029"
+      },
+      {
+        "name": "row-030"
+      },
+      {
+        "name": "row-031"
+      },
+      {
+        "name": "row-032"
+      },
+      {
+        "name": "row-033"
+      },
+      {
+        "name": "row-034"
+      }
+    ],
+    "request": {
+      "start": 20
+    },
+    "response": {
+      "list_contract": "list-page-v1",
+      "rows": [
+        {
+          "name": "row-020"
+        },
+        {
+          "name": "row-021"
+        },
+        {
+          "name": "row-022"
+        },
+        {
+          "name": "row-023"
+        },
+        {
+          "name": "row-024"
+        },
+        {
+          "name": "row-025"
+        },
+        {
+          "name": "row-026"
+        },
+        {
+          "name": "row-027"
+        },
+        {
+          "name": "row-028"
+        },
+        {
+          "name": "row-029"
+        },
+        {
+          "name": "row-030"
+        },
+        {
+          "name": "row-031"
+        },
+        {
+          "name": "row-032"
+        },
+        {
+          "name": "row-033"
+        },
+        {
+          "name": "row-034"
+        }
+      ],
+      "coverage": {
+        "start": 20,
+        "limit": 20,
+        "returned": 15,
+        "has_more": false,
+        "next_start": null,
+        "complete": false,
+        "order_by": "name asc",
+        "scope": "current user's readable matching records at query time"
+      }
+    }
+  }
+]
