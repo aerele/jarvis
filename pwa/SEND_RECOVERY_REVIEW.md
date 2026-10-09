@@ -4,6 +4,31 @@ This section supersedes the earlier review below. Scope: Navin-S-R's round-2 com
 6066998312 against `c02675a5`. Followed architect → plan-check → implementation →
 review-loop and wear-the-coat. Both reviews were single-agent self-reviews.
 
+## CI integration correction — latest develop
+
+The first round-2 local run tested the branch alone; GitHub tested its merge with
+newer develop. CI exposed two tests using `maintenance` as an unknown-code fixture,
+although this PR deliberately makes it a known code. Reproduced both failures after
+merging `e690e59e` (no conflicts). The fallback tests now use `unknown_future_code`;
+separate helper and mounted-dashboard assertions cover maintenance copy and the
+re-enabled Retry button. No production behavior was changed to satisfy the tests.
+The subsequent Node stage also required wiring develop's new activity-watchdog
+boundary and real delta-timestamp helper into the desktop event test harness.
+
+SOP: architect/plan-check scoped this as T1 test integration: retain known-code copy,
+unknown-code fallback, escaping and actionable Retry/Stop. Implementation followed
+those criteria. Review-loop self-review found no further issue: correctness/edges
+are asserted by the actual helper/component/handler; API and concurrency behavior
+are unchanged; security retains escaped error tests; no new runtime cost or logging;
+resilience retains Retry and Stop tests. Wear-the-coat confirms that dashboard users
+see the maintenance explanation and can retry, while unknown failures stay readable.
+No new browser validation was needed for test-only corrections.
+
+On the merged branch, 3,497 Vitest tests, 1,156 desktop Node tests and 347 combined
+Desk-widget/shared/PWA Node tests pass. The existing single-file Vitest quarantine
+is unchanged. Future PR checks must include the current base merge, rather than
+assuming a green branch-only run represents GitHub's tested tree.
+
 ## Solution and acceptance
 
 Keep the durable claim before dispatch and never reclaim an uncertain request.

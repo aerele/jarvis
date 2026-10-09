@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createPendingSends, planRejectedSend, injectPendingBubbles } from "./voiceSendGlue.js";
 import { deliveryFailureCopy } from "../lib/sendDelivery.js";
+import { stampDeltaTime } from "../lib/replyBar.js";
 import { firstSendPicks } from "../lib/firstSendPicks.js";
 const source = readFileSync(
 	process.env.DESKTOP_CHAT_SOURCE || new URL("../views/ChatView.vue", import.meta.url),
@@ -797,6 +798,9 @@ function eventsHarness() {
 		store: {},
 		pumpFenceReject: () => false,
 		pumpFenceAccept: () => {},
+		// The activity watchdog is outside this event/Stop test boundary.
+		noteRunSignal: () => {},
+		stampDeltaTime,
 		startPendingPoll: () => {},
 		stopPendingPoll: () => {},
 		scrollBottomIfPinned: () => {},
