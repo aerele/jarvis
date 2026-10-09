@@ -42,6 +42,13 @@ cards parked before them have neither):
   instead of clipping it. The gate (``api._build_park_card``, shared with the File
   Box hold) adds ``risk`` / ``risk_line``.
 
+Whatever a card reads from the CALL (a table's rows, a bulk update's values) it
+reads as the write stores it (``_stored_args``: "yes" is 1, "1,000" is 1000), and a
+full card's table shows the rows as they will be stored (``_resulting_rows``: a
+kept row whole, a new row with Frappe's defaults, a secret as a word, no cell the
+requester may not write); a table an update leaves as it is gets no row, except on
+a guarded structure card, which shows its tables whole.
+
 A verb card also says what the action does (``consequence``): submit / cancel /
 amend / delete park a described card with no trial run (R2-2).
 
@@ -72,6 +79,7 @@ from jarvis.chat._record_summary import (
 	_MAX_TABLES,
 	_MAX_VAL,
 	HIDDEN_BREAK_NOTE,
+	SecretWord,
 	fmt,
 	fmt_full,
 	has_hidden_break,
@@ -80,6 +88,7 @@ from jarvis.chat._record_summary import (
 	line_diff,
 	same_value,
 	secret_state,
+	secret_word,
 	summary_rows,
 	table_rows,
 	value_row,
@@ -191,13 +200,19 @@ def _add_warning(card: dict, preview) -> None:
 def _card_of(tool: str, args: dict, preview) -> dict | None:
 	would = preview.get("would") if isinstance(preview, dict) else None
 	full = _is_sensitive(preview)
+	if tool in ("create_doc", "create_docs", "update_doc"):
+		# Every value the card reads from the call is read as the write stores it.
+		args = _stored_args(tool, args)
 	bulk_key, bulk_items = _bulk(args)
 	if tool in ("create_doc", "create_docs"):
 		if bulk_key == "docs" or tool == "create_docs":
 			return _batch_create_card(args, would, full)
 		return _create_card(args, would, full)
 	if tool == "update_doc" and not bulk_key:
-		return _update_card(args, would, full)
+		# A guarded structure card (a Workflow) shows its tables whole even when an
+		# edit leaves them as they are: what is being switched on is the point.
+		whole = isinstance(preview, dict) and preview.get("structural") is True
+		return _update_card(args, would, full, whole)
 	if tool == "update_doc" and bulk_key == "updates":
 		return _bulk_update_card(args, bulk_items, full)
 	if tool in _VERB:
@@ -275,7 +290,7 @@ def _create_card(args: dict, would, full: bool = False) -> dict:
 			continue
 		if isinstance(would, dict) and key not in would:
 			continue  # perm-dropped from the resolved doc: the save will not write it
-		t = table_rows(meta, key, value, full)
+		t = table_rows(meta, key, _resulting_rows(meta, key, value, []) if full else value, full)
 		if t:
 			tables.append(t)
 			table_keys.add(key)
@@ -301,8 +316,233 @@ def _create_card(args: dict, would, full: bool = False) -> dict:
 		rows.append(value_row(meta, key, _label(meta, key), val, df, None, full))
 		if not full and len(rows) >= _MAX_ROWS:
 			break
+	if full:
+		for label, _old, new in _code_cells(doctype, values, {}):
+			row = value_row(None, "", label, new, None, None, True)
+			rows.append({**row, "multiline": True})
 	name = would.get("name") if isinstance(would, dict) else None
 	return {"kind": "create", "doctype": doctype, "name": name, "rows": rows, "tables": tables}
+
+
+# Code a record carries inside a child table: (table, the cell, what marks the cell
+# as code or None for always, how its row is named). A full card's table scrolls
+# sideways on the board and the phone, so each such cell ALSO gets a full-width
+# row of its own, whole and wrapped (a Workflow transition's condition; Frappe
+# 16: a state's update value marked as an expression). The table keeps its column.
+_CODE_CELLS = {
+	"Workflow": (
+		("transitions", "condition", None, "Condition on {action}, from {state} to {next_state}"),
+		("states", "update_value", "evaluate_as_expression", "Update value of {state} (an expression)"),
+	)
+}
+
+
+def _code_cells(doctype, new: dict, old: dict) -> list[tuple[str, str, str]]:
+	"""``(label, old text, new text)`` for every code cell (``_CODE_CELLS``) of the
+	rows ``new`` writes, against the stored rows ``old`` (matched by row name; {} on
+	a create). Rows that share a label say which row they are."""
+	out = []
+	for table, cell, marker, wording in _CODE_CELLS.get(doctype or "", ()):
+		rows = new.get(table) if isinstance(new.get(table), list) else []
+		stored = {r.get("name"): r for r in old.get(table) or [] if isinstance(r, dict)}
+		found = []
+		for i, row in enumerate(rows, 1):
+			if not isinstance(row, dict):
+				continue
+			was = stored.get(row.get("name")) or {}
+			texts = [
+				str(r.get(cell) or "") if (marker is None or frappe.utils.cint(r.get(marker))) else ""
+				for r in (was, row)
+			]
+			if any(texts):
+				label = wording.format(**{k: row.get(k) or "" for k in ("action", "state", "next_state")})
+				found.append((label, i, *texts))
+		labels = [f[0] for f in found]
+		for label, i, before, after in found:
+			out.append((f"{label} (row {i})" if labels.count(label) > 1 else label, before, after))
+	return out
+
+
+def _code_diff_rows(doctype, changes: dict, old: dict) -> list[dict]:
+	"""The code cells of an update as rows after the diff: a changed one as a from ->
+	to block with its line diff, a kept one whole and marked unchanged."""
+	out = []
+	for label, before, after in _code_cells(doctype, changes, old):
+		if before == after:
+			text = fmt_full(after)
+			out.append({"label": f"{label} (unchanged)", "from": text, "to": text, "multiline": True})
+			continue
+		row = {"label": label, "from": fmt_full(before), "to": fmt_full(after), "multiline": True}
+		lines = line_diff(row["from"], row["to"], force=True)
+		if lines:
+			row["lines"] = lines
+		if has_hidden_break(row["from"]) or has_hidden_break(row["to"]):
+			row["note"] = HIDDEN_BREAK_NOTE
+		out.append(row)
+	return out
+
+
+def _stored_args(tool: str, args: dict) -> dict:
+	"""The call with its values as the write will STORE them
+	(``_field_values.stored_values``), for the card only: the sealed call is left as
+	it was sent, and Confirm runs the same reading on it, so what is drawn is what is
+	written. A value the write would refuse (the park refuses it first) leaves that
+	part as sent."""
+	from jarvis.tools._field_values import stored_values
+
+	def stored(doctype, values):
+		if not isinstance(values, dict) or not isinstance(doctype, str):
+			return values
+		try:
+			return stored_values(doctype, values)
+		except Exception:
+			frappe.clear_messages()
+			return values
+
+	out = dict(args)
+	if tool in ("create_doc", "create_docs"):
+		if isinstance(out.get("values"), dict):
+			out["values"] = stored(out.get("doctype"), out["values"])
+		if isinstance(out.get("docs"), list):
+			out["docs"] = [
+				{**d, "values": stored(d.get("doctype"), d.get("values"))} if isinstance(d, dict) else d
+				for d in out["docs"]
+			]
+	elif tool == "update_doc":
+		if isinstance(out.get("changes"), dict):
+			out["changes"] = stored(out.get("doctype"), out["changes"])
+		if isinstance(out.get("updates"), list):
+			out["updates"] = [
+				{**u, "changes": stored(out.get("doctype"), u.get("changes"))} if isinstance(u, dict) else u
+				for u in out["updates"]
+			]
+	return out
+
+
+def _resulting_rows(meta, key, rows: list, stored, doc=None) -> list:
+	"""The rows of child table ``key`` as a write STORES them, for a full card.
+
+	``update_doc`` keeps a saved row sent by its ``name`` and lays only the cells the
+	call gives over it; a row without a name is added as given; a saved row the call
+	does not name is removed (``tools._child_rows.merge_child_rows``). The card used
+	to show the call's own rows, so a kept row sent by its name alone drew as a blank
+	row: on an access card, a role that looks removed.
+
+	Mirrors that merge on the card's own perm-filtered copy of the stored rows
+	(``stored``) instead of reading the trial's resolved rows: a guarded structure
+	card has no trial, and resolved rows carry masked secrets. On top of the merge:
+
+	- a secret cell says what happens to it (``_secret_word``), never its value;
+	- a cell above the requester's permission level is not drawn as written: Frappe
+	  puts back the stored value of a kept row and the default of a new one
+	  (document.py ``validate_higher_perm_levels``; ``doc``: the stored parent, whose
+	  permissions decide; not on a create, where Frappe skips the rows).
+
+	A Table MultiSelect is replaced as a set, so its rows are the call's."""
+	from jarvis.tools._child_rows import row_values
+
+	df = meta.get_field(key) if meta else None
+	if df is None or df.fieldtype != "Table":
+		return rows
+	saved = {r.get("name"): r for r in stored or [] if isinstance(r, dict) and r.get("name")}
+	try:
+		child = frappe.get_meta(df.options)
+	except Exception:
+		child = None
+	locked = _unwritable_cells(child, doc)
+	secrets = [f.fieldname for f in (child.fields if child else []) if is_secret(child, f.fieldname)]
+	out = []
+	for row in rows:
+		if not isinstance(row, dict):
+			out.append(row)
+			continue
+		was = saved.get(row.get("name"))
+		# A new row starts from Frappe's own defaults (a Select's first option, a
+		# Check that defaults to on): what it stores in the cells the call leaves out.
+		before = row_values(was) if was is not None else _row_defaults(child)
+		given = {k: v for k, v in row_values(row).items() if k not in locked}
+		merged = {**before, **given}
+		for fieldname in secrets:
+			word = _secret_word(child, fieldname, given, before, kept=was is not None)
+			if word is None:
+				merged.pop(fieldname, None)
+			else:
+				merged[fieldname] = word
+		out.append(merged)
+	return out
+
+
+def _row_defaults(child) -> dict:
+	"""The cells Frappe fills in on a new row of ``child`` by itself, where that is
+	something to see (not an empty text or a zero)."""
+	if child is None:
+		return {}
+	try:
+		fresh = frappe.new_doc(child.name, as_dict=True)
+	except Exception:
+		return {}
+	from frappe.model import no_value_fields
+
+	fields = [f.fieldname for f in child.fields if f.fieldtype not in no_value_fields]
+	return {k: fresh.get(k) for k in fields if fresh.get(k) not in (None, "", 0, 0.0)}
+
+
+def _unwritable_cells(child, doc) -> set:
+	"""The value fields of a child row the requester may not write: above permlevel
+	0, at a level the parent's permissions do not give them."""
+	if child is None or doc is None or frappe.session.user == "Administrator":
+		return set()
+	from frappe.model import display_fieldtypes
+
+	high = [f for f in child.get_high_permlevel_fields() if f.fieldtype not in display_fieldtypes]
+	if not high:
+		return set()
+	try:
+		writable = set(doc.get_permlevel_access("write"))
+	except Exception:
+		return {f.fieldname for f in high}
+	return {f.fieldname for f in high if f.permlevel not in writable}
+
+
+def _secret_word(child, fieldname: str, given: dict, before: dict, *, kept: bool):
+	"""What the card says for a secret cell of a row, or None for nothing: "set" for
+	one a new row carries or a kept row keeps, "changed" / "cleared" for one the call
+	replaces or empties, "unchanged" for Frappe's own mask sent back: the same rule
+	as a top-level secret (``_record_summary.secret_word``)."""
+	stored = before.get(fieldname)
+	if fieldname not in given:
+		return SecretWord("set") if kept and stored not in (None, "") else None
+	word = secret_word(child, fieldname, given[fieldname], stored if kept else None, update=kept)
+	return SecretWord(word) if word else None
+
+
+def _same_rows(meta, key, rows, stored) -> bool:
+	"""Whether the rows a write leaves (``_resulting_rows``) are the stored rows: a
+	table sent whole by its row names, nothing changed. Compared cell by cell as the
+	save would store them; a secret that stays is the same."""
+	from jarvis.tools._child_rows import row_values
+
+	df = meta.get_field(key) if meta else None
+	if df is None or df.fieldtype != "Table" or not isinstance(rows, list) or not isinstance(stored, list):
+		return False
+	if len(rows) != len(stored):
+		return False
+	try:
+		child = frappe.get_meta(df.options)
+	except Exception:
+		return False
+	for row, was in zip(rows, stored, strict=True):
+		if not isinstance(row, dict) or not isinstance(was, dict):
+			return False
+		before = row_values(was)
+		for fieldname in {*row, *before}:
+			new, old = row.get(fieldname), before.get(fieldname)
+			if isinstance(new, SecretWord):
+				if new not in ("set", "unchanged"):
+					return False
+			elif not same_value(old, new, child.get_field(fieldname)):
+				return False
+	return True
 
 
 def _diff_row(meta, key, from_val, to_val, doc, full: bool) -> dict:
@@ -319,7 +559,7 @@ def _diff_row(meta, key, from_val, to_val, doc, full: bool) -> dict:
 			return {
 				"label": label,
 				"from": secret_state(from_val, stored=True),
-				"to": secret_state(to_val, from_val, update=True),
+				"to": secret_word(meta, key, to_val, from_val, update=True),
 			}
 		return {"label": label, "from": "[hidden]", "to": "[hidden]"}
 	if not full:
@@ -355,7 +595,7 @@ def _crlf_as_lf(text: str) -> str:
 	return text.replace("\r\n", "\n")
 
 
-def _update_card(args: dict, would, full: bool = False) -> dict:
+def _update_card(args: dict, would, full: bool = False, whole: bool = False) -> dict:
 	doctype = args.get("doctype")
 	name = args.get("name")
 	changes = args.get("changes") if isinstance(args.get("changes"), dict) else {}
@@ -388,10 +628,14 @@ def _update_card(args: dict, would, full: bool = False) -> dict:
 			# The resolved doc holds the masked column (one "*" per character), so a
 			# new password of the same length would compare equal and vanish: judge
 			# what the call sets. Only "set" / "changed" is ever shown. A child table
-			# is shown as the call writes it too (the resolved rows carry masked
-			# secrets and bookkeeping).
+			# is built from the call too (the resolved rows carry masked secrets and
+			# bookkeeping), as the rows the save will STORE (``_resulting_rows``).
 			to_val = changes.get(key)
 		from_val = old.get(key)
+		if full and isinstance(to_val, list):
+			to_val = _resulting_rows(meta, key, to_val, from_val, doc)
+			if not whole and _same_rows(meta, key, to_val, from_val):
+				continue  # every row kept as it is: nothing to show
 		df = meta.get_field(key) if meta else None
 		if same_value(from_val, to_val, df):
 			continue  # the save would not change the stored value
@@ -399,6 +643,8 @@ def _update_card(args: dict, would, full: bool = False) -> dict:
 		diff.append(_diff_row(meta, key, from_val, to_val, doc, full))
 		if not full and len(diff) >= _MAX_ROWS:
 			break
+	if full:
+		diff.extend(_code_diff_rows(doctype, changes, old))
 	title = ""
 	if doc is not None and meta:
 		try:
@@ -459,10 +705,16 @@ def _bulk_update_card(args: dict, updates, full: bool = False) -> dict | None:
 			if loaded and key not in old:
 				continue
 			cdf = meta.get_field(key) if meta else None
-			if same_value(old.get(key), changes.get(key), cdf):
+			to_val = changes.get(key)
+			if full and isinstance(to_val, list):
+				# As it will be stored.
+				to_val = _resulting_rows(meta, key, to_val, old.get(key), doc if loaded else None)
+				if _same_rows(meta, key, to_val, old.get(key)):
+					continue
+			if same_value(old.get(key), to_val, cdf):
 				continue  # the save would not change the stored value
 			# Never a password / secret value (_diff_row masks it).
-			row = _diff_row(meta, key, old.get(key), changes.get(key), doc if loaded else None, full)
+			row = _diff_row(meta, key, old.get(key), to_val, doc if loaded else None, full)
 			fields.append(row["label"])
 			diff.append(row)
 			if not full and len(diff) >= _MAX_ROWS:
@@ -541,7 +793,7 @@ def _batch_create_card(args: dict, would, full: bool = False) -> dict | None:
 				break
 			if not isinstance(value, list) or not value:
 				continue
-			t = table_rows(meta, key, value, full)
+			t = table_rows(meta, key, _resulting_rows(meta, key, value, []) if full else value, full)
 			if t:
 				tables.append(t)
 				table_keys.add(key)

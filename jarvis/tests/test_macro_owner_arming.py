@@ -730,7 +730,8 @@ class TestTheNotice(FrappeTestCase):
 			"without asking you first, including when it runs on a schedule with nobody watching. "
 			"Deleting, cancelling and amending records, creating or changing skills and calling "
 			"connectors still ask, and stop the run. So do changes to scripts, webhooks, email set-up, "
-			"user access, sign-in settings, learned skills and other sensitive configuration. Its steps "
+			"user access, sign-in settings, learned skills, CRM settings and other sensitive "
+			"configuration. Its steps "
 			"can apply only "
 			"skills you own, or skills only a reviewer can change.",
 		)

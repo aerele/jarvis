@@ -311,11 +311,26 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
   itself is classified as before. A row with no parent
   record is refused when its child table can sit under a structure or sensitive
   parent at all. A row the parent's save writes, or another document's save, is
-  nested and passes, as from Desk.
-- **Guarded structure writes** (R2-10; `_guarded_structure.py`, shared, and
-  `_custom_field_guard.py`): the two structure changes chat may make, each only
-  through a confirmation card on an ordinary chat (never File Box, the Approval
-  Board, a sheet, `preview_doc` or an uncarded run), with NO trial run:
+  nested and passes, as from Desk. What the refusal tells the assistant to do
+  instead follows the parent: `update_doc` on the parent (each kept row with its
+  name) where that update is carded: a sensitive parent (a User, a Webhook, a
+  Script Report) or one changed through a guarded card (a Workflow, CRM Settings,
+  Domain Settings, while the site switch allows those); Desk, with the parent's
+  page, under any other structure parent and under a parent whose update is NOT
+  carded (the
+  role list of a Page, a Dashboard Chart or a Workspace; a Report Builder
+  report). It never promises a card the parent would not get. Known limits: a
+  `run_method` of `frappe.client.set_value` on the PARENT that rewrites its
+  table, and a plain `update_doc` on an UNCLASSIFIED parent that changes its role
+  table (a Page's, a Dashboard Chart's, a Workspace's roles), still run with no
+  card in the uncarded modes: the row is refused, the parent is not. Closing
+  that means classifying those parents (an owner decision, not done here).
+- **Guarded structure writes** (R2-10; `_guarded_structure.py`, shared, with
+  `_custom_field_guard.py`, `_workflow_guard.py` and `_settings_guard.py`): the
+  structure changes chat may make, each only through a confirmation card on an
+  ordinary chat (never File Box, the Approval Board, a sheet, `preview_doc` or an
+  uncarded run), with NO trial run. A Custom Field first; Workflow and the two
+  settings documents follow it below.
   - ONE new Custom Field (`create_doc`, not a batch), and an edit of ONE Custom
     Field that changes no column (`update_doc`: label, description, hidden,
     mandatory ...). A delete, a change of type / length / name / `unique` / index,
@@ -364,9 +379,122 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
     1, `"1,000"` is 1000, the doctype by its exact name), so the card, the checks
     and the write never disagree. Re-pointing a Link re-checks every fetch through
     it against the new target.
-  - Site config `jarvis_structure_writes_disabled: 1` turns both off (refused like
-    any structure write). Needs `bench migrate` (`sealed_undo`); until then they
-    are refused too.
+  - Site config `jarvis_structure_writes_disabled: 1` turns every guarded write
+    off (refused like any structure write). Set it with `bench --site <site>
+    set-config jarvis_structure_writes_disabled 1`; it is read from the config
+    files at park and at Confirm, so no restart is needed. Only a number counts
+    (Frappe's own rule): a hand-typed `"yes"` does not switch it on. Either file
+    switches it off: a `0` in `site_config.json` does not switch back on what
+    `common_site_config.json` set off. A config file that cannot be read is off
+    too, with one Error Log (`jarvis.structure.switch_unreadable`). Needs
+    `bench migrate` (`sealed_undo`); until then they are refused too.
+  - ONE Workflow created (`create_doc`) or updated (`update_doc` by name); a
+    delete, a batch, a rename and a move to another form stay refused. Saving a
+    Workflow sets every other workflow of the form inactive when it is active,
+    adds a hidden state field (a committed row, then `ALTER TABLE`) when the form
+    has none by that name, and fills the state on every record that has none. So
+    the card (in stored form: every state and transition whole, Frappe's defaults
+    spelled out, each linked name exact; an update always carries both tables)
+    says which active workflow it replaces, how many records get a state and how
+    many keep one this workflow lacks and so cannot be saved until their state is
+    changed (what Frappe's `get_workflow_state_count` counts; both counts stop at
+    a bound, the second reads "more than 10000"). What is particular to this
+    workflow comes first: an active workflow with no transitions, which states
+    submit or cancel, how many transitions allow self-approval, what
+    `update_field` writes, an existing text field used as the state field, a state
+    or action open to everyone signed in (role All) or to the Administrator only.
+    Then the lines every workflow card carries: the access line, and that it
+    emails. "This runs code for every user." is said only for a condition or
+    expression chat could not have written (set up in Desk, kept unchanged and
+    not checked here), which is named. A condition
+    written from chat is ONE restricted expression over the document
+    (`_workflow_guard.expression_problem`): a comparison, or and / or / not of
+    comparisons, of this form's real fields (`doc.field`, `doc["field"]`,
+    `doc.get("field")`), text, numbers and arithmetic on numbers and number
+    fields; `in` / `not in` take a literal list of at most 100 values. Refused,
+    with the Desk pointer: `frappe.`, any other call or name, a field the form
+    does not have, a bare value, arithmetic on text or on a list, a huge number,
+    a lambda, a comprehension, an f-string, a hidden or look-alike character,
+    more than 500 characters (controller default; the owner may relax it). Also
+    refused, because Frappe evaluates a condition with nothing to catch an error
+    and it would reach every user who opens or moves a record: ordering (`<`
+    `>` `<=` `>=`) anything but two numbers, a number being an Int, Float,
+    Currency, Percent or Check field (the types Frappe never leaves empty; a
+    Duration, Long Int or Rating can be) (a Date field against text raises,
+    so a date rule is set up in Desk; text against text raises when the field is
+    empty), and dividing by anything but a plain non-zero number. A Frappe 16 update value marked as an expression follows the
+    same rule but may be a plain value. An edit may keep a richer condition a row already has, as it
+    is. Guest is never an approving or editing role. It leads with the
+    structural line only when a column is added. Refused at park: a form chat
+    never customises (the Custom Field list), a child table or Single, a missing
+    or differently spelled Workflow State / Action / Role, an expression that does
+    not compile, a submit / cancel state on a form that cannot be submitted, an
+    active workflow with no state, a state listed twice, a virtual form or one
+    with no table yet, an `update_field` that gives access (`_FIELD_SENSITIVE`),
+    a change of the state field on an edit, `transition_tasks` (Frappe 16:
+    scripts and webhooks), a state field that cannot be added (the Custom Field checks) or
+    that Frappe would rename or cannot fill (`parent`, `select`), and a fill of
+    more than 5,000 records, whether the state column is new or not. Every state
+    and action that does not exist yet is named in one refusal. Under the lock,
+    before the claim, a card that no longer says which workflow is replaced ends
+    `stale`, and so does one whose check could not be made at all. A snapshot
+    that cannot be read whole stops the write before its record is saved
+    (`_guarded_structure.snapshot_failed`): nothing is changed and the card stays
+    to be confirmed again. When the confirm
+    does not end as done, the workflow is removed (or put back from its
+    before-image), the one that was active is active again, a state field whose
+    column is missing is removed and the states filled in are emptied: a reported
+    failure never leaves a workflow live. A confirm whose worker died is cleaned
+    up as soon as its form's lock is free (after 60 s, not the 10 minutes other
+    rows wait: the lock is held for the whole confirm; a confirm that outlives 60 s
+    AND lost its lock connection could be cleaned up beside itself, as one that
+    outlived 10 minutes could before, and `structure_lock_lost` reports that). One exception: a workflow
+    that people have used since it was saved (any record of the form carrying a
+    state was saved since, or a filled record carries another state) is NOT
+    taken away, and a record saved since never has its state emptied; the row ends
+    `partial`, the workflow stays, and one Error Log
+    (`jarvis.pending_action.structure_needs_a_person`) names it.
+  - Operator recovery aid, not a product feature: for a Workflow and for Domain
+    Settings the snapshot stays sealed on the confirmation row after a successful
+    confirm, and `_guarded_structure.undo_confirmation` puts it back:
+    `bench --site <site> execute jarvis.tools._guarded_structure.undo_confirmation
+    --kwargs "{'name': '<confirmation id>'}"`. It removes the workflow (or
+    restores the edited one), re-activates the one it replaced and empties the
+    states it filled; for Domain Settings it restores the list, the removed role
+    assignments and the switched roles and modules. It changes nothing when the
+    record was changed since or the workflow has been used. Not whitelisted,
+    refused inside a tool call, System Manager only when a request calls it, same
+    locks, one `Jarvis Agent Write` row, idempotent. The snapshot exists only in
+    `Jarvis Pending Action.sealed_undo` and goes when `pending_actions.purge`
+    deletes the settled row (seven days). Nothing on a card or in chat says an
+    undo exists.
+  - CRM Settings (`update_doc`). With `enable_frappe_crm_data_synchronization` off
+    in the saved document the save changes no structure: ordinary sensitive
+    configuration (risk line "This changes a setting for every user."), trial-run
+    like any update. With it on, every save runs ERPNext's `create_custom_fields`
+    for Quotation and Customer: the guarded class `crm_settings_sync`, which locks
+    the settings and both forms, pre-checks each table (exactly the missing
+    fields' columns), names the fields on the card and says what the sync lets the
+    allowed users do; on failure the settings are put back and a field without a
+    column is removed. ERPNext also writes its own values over an EXISTING field
+    of the same name: the card names that field and what changes ("It also
+    rewrites the existing field ..."), and a failed confirm puts it back exactly. A card parked as plain settings never runs once the sync
+    is on.
+  - A row of these records saved by its own name (a Workflow Document State or
+    Workflow Transition, a Has Domain, a Frappe CRM Allowed User) falls under the
+    child-row rule above: refused by its stored parent, changed through its
+    record. A Workflow Transition Tasks list (Frappe 16: the scripts and webhooks
+    a transition runs) is sensitive (code), so its Workflow Transition Task rows
+    are covered the same way.
+  - Domain Settings (`update_doc`, the whole `active_domains` list). Refused where
+    any declared domain (the `domains` hook; none in stock frappe / erpnext /
+    hrms) carries `on_setup`, `set_value` or `properties`, or where the save would
+    delete a domain's fields. Otherwise the card names the roles and modules
+    turned off, how many role assignments are removed, and the roles given to the
+    person confirming; the `Has Role` rows it removes are kept on the confirmation
+    row (the operator aid above). As the confirmed save begins, Frappe's cached
+    list of active domains is dropped: left stale, Frappe treats the domain being
+    switched on as inactive (its roles removed, its fields deleted).
 - **Sensitive** (Server Script, Client Script, Webhook, Notification, Auto Email
   Report, Custom DocPerm, Property Setter, Scheduled Job Type, Website Script,
   Custom HTML Block, Email Account / Domain, User, Role, Role Profile, Module

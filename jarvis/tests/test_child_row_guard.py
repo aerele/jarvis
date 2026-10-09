@@ -14,6 +14,9 @@ disabled Webhook and Notification, a Customer and a Contact. Everything is remov
 in ``tearDownClass``; every attempt is rolled back, so a failing run (the unfixed
 code executes these writes) leaves nothing changed either. Starting a turn is
 stubbed as in ``test_panel_failure._Hermetic``.
+
+SERIAL ONLY: ``setUpClass`` commits its fixtures (users, a DocType, records), so
+this module must not run on a shared local site at the same time as another run.
 """
 
 from unittest.mock import patch
@@ -589,6 +592,93 @@ class TestClassifiedByTheStoredParent(_Base):
 			self.assertEqual(wr.risk_of("delete_doc", {"doctype": "Portal User", "name": "x"}), "child_row")
 		with patch.object(wr, "_stored_parent", return_value=("Customer", "c", "sales_team")):
 			self.assertIsNone(wr.risk_of("delete_doc", {"doctype": "Sales Team", "name": "x"}))
+
+
+class TestWhatTheRefusalSays(_Base):
+	"""What the model is told to do instead depends on what the PARENT gets: a card,
+	the Desk, or (a parent the guard does not classify) nothing at all, in which case
+	the refusal must not send the model to a write that would run uncarded."""
+
+	def _refusal(self, dt, kind, parenttype, parent, field, grant=False):
+		return wr.child_row_refusal(wr._ChildRow(dt, "row-1", kind, parenttype, parent, field, grant=grant))
+
+	def test_under_a_sensitive_parent_it_points_at_the_parents_card(self):
+		e = self._refusal("Has Role", "sensitive", "User", TGT, "roles")
+		self.assertIsInstance(e, SensitiveWriteRefusedError)
+		self.assertIn("Use update_doc on User with its roles rows as they should be", str(e))
+		self.assertIn("so the user gets one confirmation card showing the whole change.", str(e))
+		self.assertIn("each kept or changed row with its name from get_doc", str(e), "what the tool asks for")
+		self.assertIn("update that record's roles table", e.hint)
+
+	def test_under_a_structure_parent_it_points_at_desk_only(self):
+		e = self._refusal("DocField", "structure", "DocType", SCRATCH, "fields")
+		self.assertIsInstance(e, StructureRefusedError)
+		self.assertIn("it is set up in Desk, not from chat", str(e))
+		self.assertEqual(e.desk_path, wr.desk_path("DocType", SCRATCH))
+		for text in (str(e), e.hint):
+			self.assertNotIn("update_doc", text)
+			self.assertNotIn("confirmation card", text)
+
+	def test_under_an_unclassified_parent_it_promises_no_card_and_names_no_write(self):
+		"""Review of aerele/jarvis#1841: a Page, a Dashboard Chart or a Workspace is not
+		classified, so ``update_doc`` on it runs with no card in the uncarded modes.
+		The refusal of its role row must not send the model there."""
+		for case in self.role_cases:
+			with self.assertRaises(SensitiveWriteRefusedError) as raised:
+				wr.check("update_doc", self._update(case))
+			e = raised.exception
+			record = f"{case.parent[0]} {case.parent[1]}"
+			path = wr.desk_path(*case.parent)
+			self.assertIn("grants access (this changes who can see or edit)", str(e), record)
+			self.assertIn(f"tell the user to change it in Desk on {record}: open {path}.", str(e))
+			self.assertEqual(e.desk_path, path)
+			self.assertIn(path, e.hint)
+			for text in (str(e), e.hint):
+				self.assertNotIn("update_doc", text, record)
+				self.assertNotIn("confirmation card", text, record)
+			env = wr.refused_envelope(e)
+			self.assertEqual((env["error"]["hint"], env["error"]["desk_path"]), (e.hint, path))
+
+	def test_a_role_row_is_about_access_whatever_its_parent_runs(self):
+		"""A Report counts whole as a conditional (code) doctype, but a role row of it
+		decides who may open it: the reason is the access one."""
+		script = frappe.db.get_value("Report", {"report_type": "Script Report"}, "name")
+		builder = frappe.db.get_value("Report", {"report_type": "Report Builder"}, "name")
+		for report in (script, builder):
+			e = self._refusal("Has Role", "sensitive", "Report", report, "roles")
+			self.assertIn("grants access (this changes who can see or edit)", str(e), report)
+			self.assertNotIn("runs code", str(e), report)
+		# A Script Report's update is carded (it is sensitive); a Report Builder
+		# report's is not, so no card is promised for it.
+		carded = str(self._refusal("Has Role", "sensitive", "Report", script, "roles"))
+		self.assertIn("confirmation card", carded)
+		plain = self._refusal("Has Role", "sensitive", "Report", builder, "roles")
+		for text in (str(plain), plain.hint):
+			self.assertNotIn("confirmation card", text)
+			self.assertNotIn("update_doc", text)
+		# A row that is not a role list keeps the parent's own reason.
+		e = self._refusal("Report Filter", "sensitive", "Report", script, "filters")
+		self.assertIn("runs code", str(e))
+
+	def test_one_audit_label_in_both_layers(self):
+		"""A child-row refusal is logged as ``child_row`` whether the arguments or the
+		save itself were refused, with what its parent is beside it."""
+		case = self.cases[0]
+		for layer in ("arguments", "save"):
+			with patch.object(wr, "log_line") as logged:
+				if layer == "arguments":
+					self._run("update_doc", self._update(case), self._conv())
+				else:
+					frappe.set_user("Administrator")
+					with wr.guard_scope([]), self.assertRaises(WriteRefusedError):
+						frappe.get_doc(case.dt, case.row).save(ignore_permissions=True)
+			frappe.db.rollback()
+			wr.take_refusal()
+			refused = [c for c in logged.call_args_list if c.args[3] == "refused"]
+			self.assertEqual(len(refused), 1, layer)
+			self.assertEqual(refused[0].args[:2], ("child_row", case.dt), layer)
+			self.assertEqual(refused[0].kwargs.get("parent_kind"), case.risk, layer)
+			self.assertEqual(refused[0].kwargs.get("under"), f"{case.parent[0]} {case.parent[1]}", layer)
 
 
 class TestRefusedOnEveryRoute(_Base):
