@@ -74,23 +74,6 @@ def _clear_personal_clause_cache(owner: str | None) -> None:
 		pass
 
 
-<<<<<<< HEAD
-=======
-def _clear_pushable_org_rows_memo() -> None:
-	"""_pushable_org_rows (chat/custom_skills.py) memoizes its light Org-row scan
-	for the rest of the current request; drop it on any row change so a skill
-	created, enabled, disabled or promoted mid-request (a promotion
-	approval, an admin toggle) is seen by the very next call in the SAME
-	request instead of a stale cached scan."""
-	try:
-		from jarvis.chat.custom_skills import _clear_pushable_org_rows_memo as _clear
-
-		_clear()
-	except Exception:
-		pass
-
-
->>>>>>> 8a38536 (fix(skills): serve company skills from the bench)
 def _managed_flag_privileged(user: str | None = None) -> bool:
 	"""True for writes allowed to touch the engine-owned ``managed_by_learning``
 	flag: the compiler (which sets ``frappe.flags.jarvis_pattern_engine``),
@@ -602,33 +585,6 @@ class JarvisCustomSkill(NotRenamable, Document):
 			from jarvis.chat.custom_skills import MANAGED_OWNER
 
 			owner = MANAGED_OWNER
-<<<<<<< HEAD
-=======
-		# #595 code review: a materialized shared copy (scope Role/Org) is a
-		# SEPARATE row from its private lineage source (``source_skill``), owned by
-		# the system identity (MANAGED_OWNER) rather than the requester - but when
-		# the requester's OWN owner happens to already be MANAGED_OWNER (an
-		# Administrator-owned private skill), the copy and its own source collide
-		# on this exact (owner, skill_name) check. Exempt the LINEAGE PAIR only
-		# (not the whole cross-tier check): every chooser of a row by name
-		# (``jarvis.tools.get_skill.served``) assumes an owner has at most one row
-		# of a name, so an UNRELATED duplicate name under the same owner is still a
-		# real ambiguity and stays rejected here. Symmetric so it also holds on a later save of
-		# the PRIVATE source itself (self.source_skill is empty there; look up
-		# anything descended FROM self instead).
-		exclude_names = {self.name or ""}
-		if self.source_skill:
-			exclude_names.add(self.source_skill)
-		elif self.name:
-			exclude_names.update(
-				frappe.get_list(
-					"Jarvis Custom Skill",
-					filters={"source_skill": self.name},
-					pluck="name",
-					ignore_permissions=True,
-				)
-			)
->>>>>>> 8a38536 (fix(skills): serve company skills from the bench)
 		clash = frappe.db.exists(
 			"Jarvis Custom Skill",
 			{

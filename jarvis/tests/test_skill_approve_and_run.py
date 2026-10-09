@@ -25,7 +25,11 @@ from jarvis.chat import (
 	session_lifecycle,
 	turn_message_binding,
 )
-from jarvis.chat.custom_skills import invoked_skill_clause, invoked_skill_slugs
+from jarvis.chat.custom_skills import (
+	invoked_skill_clause,
+	invoked_skill_slugs,
+	resolve_armed_skill_docname,
+)
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
@@ -484,30 +488,6 @@ class TestInvokedSkillSlugs(FrappeTestCase):
 			"names to read its instructions, then follow them",
 		)
 
-<<<<<<< HEAD
-=======
-	def test_unrestricted_org_skill_is_invocable_by_anyone(self):
-		"""issue #580: an Org-scope skill with no allowed_roles is pushed into
-		EVERY container (_pushable_org_rows), so it must be invocable by ANY
-		user, not only owner/share/role holders. Before the fix, an Org-promoted
-		skill's `/slug` matched NOBODY but its (system) owner, so the "Approve &
-		run" offer - gated on len(invoked_skill_slugs(...)) == 1 - could never
-		even reach resolve_armed_skill_docname for a real chat user."""
-		_mk_org_skill("org-wide-slug")
-		self.assertEqual(
-			invoked_skill_slugs("/org-wide-slug do it", user=SLUGSET_USER_B),
-			{"org-wide-slug"},
-		)
-
-	def test_role_restricted_org_skill_still_needs_the_role(self):
-		"""Negative control: the org-wide fallback must NOT swallow role-restricted
-		Org rows (TASK 11) - a non-matching user still gets no match."""
-		_mk_org_skill("org-role-restricted", allowed_roles=["Sales Manager"])
-		self.assertEqual(
-			invoked_skill_slugs("/org-role-restricted do it", user=SLUGSET_USER_B),
-			set(),
-		)
-
 
 def _mk_org_skill(
 	slug: str,
@@ -550,7 +530,7 @@ def _mk_org_skill(
 	if armed:
 		# A raw write: bypasses the doctype's admin-only guard, deliberately - it
 		# simulates an already-armed row. The arm is read live, so it is seen at once.
-		custom_skills.set_skill_raw(doc.name, "allow_approve_run", 1)
+		frappe.db.set_value(SKILL, doc.name, "allow_approve_run", 1, update_modified=False)
 		frappe.db.commit()
 	return doc.name
 
@@ -650,7 +630,7 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		self.assertIsNone(resolve_armed_skill_docname("orgres-lineage-privarmed", SLUGSET_USER_A))
 		# Confirm it's the descendant governing (unarmed), not a fallback to the
 		# armed source: arming the descendant directly now offers it.
-		custom_skills.set_skill_raw(shared, "allow_approve_run", 1)  # raw: on_update never fired
+		frappe.db.set_value(SKILL, shared, "allow_approve_run", 1, update_modified=False)
 		self.assertEqual(resolve_armed_skill_docname("orgres-lineage-privarmed", SLUGSET_USER_A), shared)
 
 	def test_promoted_lineage_resolves_to_the_org_copy_when_both_are_armed(self):
@@ -739,275 +719,6 @@ class TestResolveArmedSkillDocnameOrgWide(FrappeTestCase):
 		_mk_org_skill("orgres-restricted", armed=True, allowed_roles=["Sales Manager"])
 		self.assertIsNone(resolve_armed_skill_docname("orgres-restricted", SLUGSET_USER_B))
 
-
-def _is_pushable_org_scan(args, kwargs) -> bool:
-	"""True for the exact frappe.get_all call _pushable_org_rows issues (its
-	distinctive scope filter), so a counting spy can't be fooled by an
-	unrelated Jarvis Custom Skill read (e.g. role_scoped_skill_rows) that
-	happens to request the same field list."""
-	doctype = args[0] if args else kwargs.get("doctype")
-	if doctype != SKILL:
-		return False
-	return kwargs.get("filters", {}).get("scope") == ("in", ("Org", ""))
-
-
-class TestPushableOrgRowsMemoization(FrappeTestCase):
-	"""_pushable_org_rows's request-scoped memo (issue #580 code review, perf):
-	invoked_skill_slugs and apply_would_push can run several times within ONE
-	turn's gate; they must share a single table scan rather than each
-	re-scanning every enabled Org skill. (resolve_armed_skill_docname reads the
-	rows of one name and does not scan.)"""
-
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		_ensure_slugset_user(SLUGSET_USER_A)
-		_ensure_slugset_user(SLUGSET_USER_B)
-
-	def setUp(self):
-		custom_skills._clear_pushable_org_rows_memo()
-
-	def tearDown(self):
-		for name in frappe.get_all(SKILL, filters={"skill_name": ["like", "orgres-memo-%"]}, pluck="name"):
-			frappe.delete_doc(SKILL, name, force=True, ignore_permissions=True)
-		frappe.db.commit()
-		custom_skills._clear_pushable_org_rows_memo()
-
-	def test_one_turn_scans_the_light_projection_once(self):
-		_mk_org_skill("orgres-memo-once", armed=True)
-		real_get_all = frappe.get_all
-		scans = []
-
-		def counting_get_all(*args, **kwargs):
-			if _is_pushable_org_scan(args, kwargs):
-				scans.append(1)
-			return real_get_all(*args, **kwargs)
-
-		with patch.object(frappe, "get_all", side_effect=counting_get_all):
-			invoked_skill_slugs("/orgres-memo-once do it", user=SLUGSET_USER_B)
-			resolve_armed_skill_docname("orgres-memo-once", SLUGSET_USER_B)
-			custom_skills.apply_would_push("no-such-row")
-		self.assertEqual(len(scans), 1, "expected one shared scan across the whole turn, not one per caller")
-
-	def test_a_skill_armed_mid_turn_is_still_seen_within_the_same_turn(self):
-		"""Arming a skill through the real endpoint is seen by a read right after,
-		in the same turn: the arm is read live, off the row."""
-		from jarvis.chat import custom_skills_api
-
-		orig_user = frappe.session.user
-		frappe.set_user("Administrator")  # passes _guard_allow_approve_run_enable
-		try:
-			docname = _mk_org_skill("orgres-memo-fresh", armed=False)
-			self.assertIsNone(resolve_armed_skill_docname("orgres-memo-fresh", SLUGSET_USER_B))
-			custom_skills_api.update_custom_skill(name=docname, allow_approve_run=1)
-		finally:
-			frappe.set_user(orig_user)
-		self.assertEqual(resolve_armed_skill_docname("orgres-memo-fresh", SLUGSET_USER_B), docname)
-
-	def test_set_skill_raw_clears_the_memo_for_a_relevant_field(self):
-		"""set_skill_raw (code review on #580 round 2) is the ONE sanctioned raw
-		-write path for enabled/scope: unlike a bare frappe.db.set_value, it
-		clears the memo itself, so a read right after sees the write within the
-		SAME request/test - no manual clear needed at the call site."""
-		docname = _mk_org_skill("orgres-memo-rawoff", armed=False)
-		self.assertEqual(
-			invoked_skill_slugs("/orgres-memo-rawoff", user=SLUGSET_USER_B), {"orgres-memo-rawoff"}
-		)
-		custom_skills.set_skill_raw(docname, "enabled", 0)
-		self.assertEqual(invoked_skill_slugs("/orgres-memo-rawoff", user=SLUGSET_USER_B), set())
-
-	def test_a_raw_arm_is_seen_at_once(self):
-		"""The arm is not in the memo: it is read live off the served row."""
-		docname = _mk_org_skill("orgres-memo-rawarm", armed=False)
-		self.assertIsNone(resolve_armed_skill_docname("orgres-memo-rawarm", SLUGSET_USER_B))
-		frappe.db.set_value(SKILL, docname, "allow_approve_run", 1, update_modified=False)
-		self.assertEqual(resolve_armed_skill_docname("orgres-memo-rawarm", SLUGSET_USER_B), docname)
-
-	def test_set_skill_raw_skips_the_clear_for_an_irrelevant_field(self):
-		"""A field _pushable_org_rows never reads (description) still writes
-		correctly but does not pay for a memo clear - the helper only clears
-		when the write actually could desync the cached scan."""
-		docname = _mk_org_skill("orgres-memo-irrelevant", armed=True)
-		# Populate the memo, then write an unrelated field through the helper.
-		invoked_skill_slugs("/orgres-memo-irrelevant", user=SLUGSET_USER_B)
-		self.assertTrue(hasattr(frappe.local, custom_skills._PUSHABLE_ORG_ROWS_MEMO))
-		custom_skills.set_skill_raw(docname, "description", "a new description")
-		self.assertTrue(
-			hasattr(frappe.local, custom_skills._PUSHABLE_ORG_ROWS_MEMO), "unrelated write must not clear"
-		)
-		self.assertEqual(frappe.db.get_value(SKILL, docname, "description"), "a new description")
-
-
-class TestArmedSkillClause(FrappeTestCase):
-	"""armed_skill_clause(message, user) - issue #580's real-world fix. The
-	persona always stages a create/update as a jarvis-action draft card, which
-	never reaches the write-confirmation gate, so an armed skill's FIRST
-	covered write (usually a create/update) could never offer "Approve & run".
-	This clause tells the agent to stage that first write as a direct tool
-	call instead - the caller (turn_handler.assemble_prompt) is silent about it
-	once a run is already approved, exercised separately below."""
-
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		_ensure_slugset_user(SLUGSET_USER_A)
-		_ensure_slugset_user(SLUGSET_USER_B)
-
-	def tearDown(self):
-		frappe.db.delete(SKILL, {"owner": SLUGSET_USER_A})
-		frappe.db.commit()
-
-	def test_armed_invoked_skill_gets_the_clause(self):
-		_make_skill(SLUGSET_USER_A, armed=True, name="armedclause-armed")
-		clause = armed_skill_clause("/armedclause-armed do it", SLUGSET_USER_A)
-		self.assertIn("armed skill: Approve & run available for custom-armedclause-armed", clause)
-
-	def test_unarmed_invoked_skill_gets_nothing(self):
-		_mk_slug_skill(SLUGSET_USER_A, "armedclause-unarmed")
-		self.assertEqual(armed_skill_clause("/armedclause-unarmed do it", SLUGSET_USER_A), "")
-
-	def test_two_invoked_skills_gets_nothing_even_when_both_armed(self):
-		# Mirrors _resolve_approve_run_offer's own "exactly one" rule (design
-		# §3.3): a co-invoked skill has no per-write attribution, so no offer.
-		_make_skill(SLUGSET_USER_A, armed=True, name="armedclause-a")
-		_make_skill(SLUGSET_USER_A, armed=True, name="armedclause-b")
-		clause = armed_skill_clause("/armedclause-a and /armedclause-b please", SLUGSET_USER_A)
-		self.assertEqual(clause, "")
-
-	def test_no_invoked_skill_gets_nothing(self):
-		self.assertEqual(armed_skill_clause("just a plain message, no slug here", SLUGSET_USER_A), "")
-
-
-class TestArmedSkillFirstWriteContext(FrappeTestCase):
-	"""End-to-end through turn_handler.assemble_prompt (the one place the
-	[Context:] bracket is built), mirroring TestApprovedRunContextClause's
-	shape: the armed-skill clause folds in on an ordinary turn, and is silent
-	once a run is already approved or an armed macro is already running - the
-	existing clauses for those states already tell the agent to call every
-	write tool directly."""
-
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		_ensure_test_user()
-
-	def setUp(self):
-		self._orig = frappe.session.user
-		frappe.set_user(TEST_USER)
-
-	def tearDown(self):
-		frappe.set_user(self._orig)
-		for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
-			frappe.db.delete(MSG, {"conversation": conv})
-			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
-		frappe.db.delete(SKILL, {"owner": TEST_USER})
-		frappe.db.commit()
-
-	def _assembled(self, conv_doc, content: str) -> str:
-		from jarvis.chat.turn_handler import assemble_prompt
-
-		msg = frappe.get_doc(
-			{"doctype": MSG, "conversation": conv_doc.name, "seq": 1, "role": "user", "content": content}
-		).insert(ignore_permissions=True)
-		frappe.db.commit()
-		ap = assemble_prompt(
-			conv_doc,
-			message_id=msg.name,
-			conversation_id=conv_doc.name,
-			context={},
-			attachments=[],
-			user=TEST_USER,
-		)
-		return ap.user_message
-
-	def test_clause_present_for_an_ordinary_turn_invoking_an_armed_skill(self):
-		_make_skill(TEST_USER, armed=True, name="ctxarmed-plain")
-		conv = _make_conv(TEST_USER)
-		doc = frappe.get_doc(CONV, conv)
-		prompt = self._assembled(doc, "/ctxarmed-plain do it")
-		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-plain", prompt)
-
-	def test_clause_absent_when_a_run_is_already_approved(self):
-		"""The existing "approved skill run" clause already tells the agent to
-		call every covered write directly - stacking the armed-skill clause on
-		top would be redundant noise on every turn of an already-open run."""
-		_make_skill(TEST_USER, armed=True, name="ctxarmed-autorun")
-		conv = _make_conv(TEST_USER)
-		doc = frappe.get_doc(CONV, conv)
-		doc.skill_autorun = 1
-		prompt = self._assembled(doc, "/ctxarmed-autorun do it")
-		self.assertNotIn("armed skill: Approve & run available", prompt)
-		self.assertIn("approved skill run: apply the plan's covered writes directly", prompt)
-
-	def test_clause_absent_when_an_armed_macro_is_already_running(self):
-		_make_skill(TEST_USER, armed=True, name="ctxarmed-macro")
-		conv = _make_conv(TEST_USER)
-		doc = frappe.get_doc(CONV, conv)
-		doc.skip_confirmation = 1
-		prompt = self._assembled(doc, "/ctxarmed-macro do it")
-		self.assertNotIn("armed skill: Approve & run available", prompt)
-		self.assertIn("armed macro run: apply changes directly", prompt)
-
-	def test_invoked_skill_slugs_is_resolved_once_per_turn(self):
-		"""Code review on #580 round 2: assemble_prompt must resolve
-		invoked_skill_slugs EXACTLY once per turn and hand that SAME set to
-		both invoked_skill_clause and armed_skill_clause, rather than each
-		clause re-scanning under its own (possibly different) identity."""
-		from jarvis.chat import custom_skills
-
-		_make_skill(TEST_USER, armed=True, name="ctxarmed-once")
-		conv = _make_conv(TEST_USER)
-		doc = frappe.get_doc(CONV, conv)
-		real = custom_skills.invoked_skill_slugs
-		calls = []
-
-		def counting(*args, **kwargs):
-			calls.append(kwargs.get("user"))
-			return real(*args, **kwargs)
-
-		with patch.object(custom_skills, "invoked_skill_slugs", side_effect=counting):
-			prompt = self._assembled(doc, "/ctxarmed-once do it")
-		self.assertEqual(len(calls), 1, "invoked_skill_slugs must resolve exactly once per turn")
-		self.assertEqual(calls[0], TEST_USER)
-		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-once", prompt)
-
-	def test_both_clauses_resolve_under_the_message_sender_not_the_exec_user(self):
-		"""Identity consistency (code review on #580 round 2): in a shared/pump
-		scenario the message's actual sender (chat_user = msg_row.owner) can
-		differ from the identity assemble_prompt executes as (`user`). Both
-		invoked_skill_clause and armed_skill_clause must key off chat_user, not
-		the exec identity - an admin-armed skill owned by the SENDER (never
-		shared with the exec identity) must still be named and offered."""
-		_ensure_non_admin_user()
-		sender = NON_ADMIN_USER
-		_make_skill(sender, armed=True, name="ctxarmed-sender")
-		conv = _make_conv(TEST_USER)
-		doc = frappe.get_doc(CONV, conv)
-		orig = frappe.session.user
-		frappe.set_user(sender)
-		try:
-			msg = frappe.get_doc(
-				{
-					"doctype": MSG,
-					"conversation": conv,
-					"seq": 1,
-					"role": "user",
-					"content": "/ctxarmed-sender do it",
-				}
-			).insert(ignore_permissions=True)
-			frappe.db.commit()
-		finally:
-			frappe.set_user(orig)
-		from jarvis.chat.turn_handler import assemble_prompt
-
-		ap = assemble_prompt(
-			doc, message_id=msg.name, conversation_id=conv, context={}, attachments=[], user=TEST_USER
-		)
-		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-sender", ap.user_message)
-		frappe.db.delete(SKILL, {"owner": sender})
-		frappe.db.commit()
-
->>>>>>> 8a38536 (fix(skills): serve company skills from the bench)
 
 # --------------------------------------------------------------------------- #
 # Turn -> triggering-message binding (design §3.3, security-C1)

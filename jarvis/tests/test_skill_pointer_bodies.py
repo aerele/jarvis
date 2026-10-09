@@ -86,7 +86,6 @@ class TestWhatIsPushed(FrappeTestCase):
 	@staticmethod
 	def _sweep():
 		frappe.db.delete(SKILL, {"name": ["like", "ptr-row-%"]})
-		custom_skills._clear_pushable_org_rows_memo()
 
 	def test_an_item_carries_a_pointer_and_none_of_the_instructions(self):
 		_mk("one", description="First", user_invocable=1)
