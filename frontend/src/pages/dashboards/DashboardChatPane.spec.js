@@ -436,7 +436,7 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 			["refusal", (p) => p.resolve(LATEST_ONLY), "Only the latest reply can be retried."],
 			[
 				"unknown code",
-				(p) => p.resolve({ ok: false, reason: "maintenance" }),
+				(p) => p.resolve({ ok: false, reason: "insufficient_workers" }),
 				"Couldn&#39;t retry that.",
 			],
 			["error", (p) => p.reject(new Error("Network down")), "Network down"],
