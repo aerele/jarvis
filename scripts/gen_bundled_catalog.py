@@ -15,6 +15,7 @@ Run from the bench root after any change to PROVIDER_SEED:
 import argparse
 import importlib.util
 import pprint
+from pathlib import Path
 
 HEADER_LINES = [
 	'"""Bundled fallback for the admin-owned LLM provider + model catalog.',
@@ -44,7 +45,7 @@ def load_seed(path):
 		# provider_catalog imports frappe at module scope; re-read the literal.
 		import ast
 
-		tree = ast.parse(open(path).read())
+		tree = ast.parse(Path(path).read_text())
 		for node in tree.body:
 			if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "PROVIDER_SEED":
 				return ast.literal_eval(node.value)
@@ -89,6 +90,5 @@ if __name__ == "__main__":
 	ap.add_argument("--out", required=True)
 	a = ap.parse_args()
 	data = [to_wire(e) for e in load_seed(a.seed)]
-	with open(a.out, "w") as fh:
-		fh.write("\n".join(HEADER_LINES) + pprint.pformat(data, width=100, sort_dicts=False) + "\n")
+	Path(a.out).write_text("\n".join(HEADER_LINES) + pprint.pformat(data, width=100, sort_dicts=False) + "\n")
 	print(f"wrote {len(data)} providers to {a.out}")
