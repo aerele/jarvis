@@ -137,8 +137,7 @@ def disabled() -> bool:
 def _read_json(path: str, *, missing_ok: bool = False) -> dict:
 	if missing_ok and not os.path.exists(path):
 		return {}
-	with open(path) as f:
-		data = json.load(f)
+	data = frappe.get_file_json(path)
 	if not isinstance(data, dict):
 		raise ValueError(f"{path} is not a JSON object")
 	return data

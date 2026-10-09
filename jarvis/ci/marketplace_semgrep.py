@@ -49,11 +49,10 @@ def annotation(result: dict) -> str:
 
 
 def main(argv=None) -> int:
-	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("report", help="output of `semgrep scan --json`")
-	args = parser.parse_args(argv)
-	with open(args.report, encoding="utf-8") as fh:
-		report = json.load(fh)
+	argparse.ArgumentParser(
+		description=__doc__, epilog="Reads `semgrep scan --json` output on stdin."
+	).parse_args(argv)
+	report = json.load(sys.stdin)
 	results = report.get("results", [])
 	failing = [r for r in results if fails_audit(r)]
 	for result in failing:
