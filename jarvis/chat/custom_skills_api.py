@@ -13,6 +13,7 @@ and flip the status to a terminal ``ok ...`` / ``failed: ...`` the SPA polls.
 """
 
 import contextlib
+import time
 
 import frappe
 from frappe import _
@@ -25,6 +26,7 @@ from jarvis.chat.custom_skills import (
 	MAX_SKILLS_PER_PUSH,
 	build_push_payload,
 	project_org_promotion_push,
+	push_is_over_cap,
 	pushable_org_skill_count,
 	role_scoped_skill_rows,
 )
@@ -1546,15 +1548,20 @@ def _enqueued_push_custom_skills() -> None:
 
 		terminal_written = False
 		try:
-			payload = build_push_payload(strict=False)
-			admin_client.post_push_custom_skills(skills=payload)
-			frappe.db.set_single_value(
-				_SETTINGS,
-				{
-					"custom_skills_synced_at": frappe.utils.now(),
-					"custom_skills_sync_status": f"ok (applied {len(payload)} via admin)",
-				},
-			)
+			payload, settled = _send_until_settled()
+			if settled:
+				frappe.db.set_single_value(
+					_SETTINGS,
+					{
+						"custom_skills_synced_at": frappe.utils.now(),
+						"custom_skills_sync_status": f"ok (applied {len(payload)} via admin)",
+					},
+				)
+			else:
+				_fail("failed: skills changed while they were being applied; apply again")
+				frappe.logger("jarvis").info(
+					f"custom-skills push not settled: sent {len(payload)} skill(s), the list changed since"
+				)
 			terminal_written = True
 		except admin_client.AdminAuthError as e:
 			_fail(f"failed: auth: {e}")
@@ -1588,6 +1595,43 @@ def _enqueued_push_custom_skills() -> None:
 				except Exception:
 					pass
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- terminal status survives later failure
+
+
+# How many times one push job sends at most.
+_MAX_PUSH_SENDS = 3
+# A send can take minutes (the container restarts and is polled for health) and the
+# job has one timeout for all of them: it sends again only this soon after it began.
+_PUSH_RESEND_WITHIN_S = 60
+
+
+def _send_until_settled() -> tuple[list, bool]:
+	"""Send the push payload, and again while it has changed since: ``(what was last
+	sent, whether that is still the current payload)``.
+
+	A skill saved while a push runs is not in what was sent, and the Apply made for it
+	was dropped, because an enqueue with this job's id is refused while the job is
+	queued or started. So after each send the job commits (ending its snapshot, or it
+	would not see rows saved meanwhile) and builds the payload again; a different one
+	is sent too, at most ``_MAX_PUSH_SENDS`` sends and only while the job is young
+	(``_PUSH_RESEND_WITHIN_S``). Past either limit the answer is "not settled", which
+	the next Apply heals."""
+	from jarvis import admin_client
+
+	began = time.monotonic()
+	payload = build_push_payload(strict=False)
+	# A build logs an over-cap truncation; once per job is enough.
+	logged = push_is_over_cap()
+	for sends in range(1, _MAX_PUSH_SENDS + 1):
+		admin_client.post_push_custom_skills(skills=payload)
+		sent = payload
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- see rows saved during the send
+		payload = build_push_payload(strict=False, log_truncation=not logged)
+		logged = logged or push_is_over_cap()
+		if payload == sent:
+			return sent, True
+		if sends == _MAX_PUSH_SENDS or time.monotonic() - began > _PUSH_RESEND_WITHIN_S:
+			break
+	return sent, False
 
 
 def _fail(status: str) -> None:

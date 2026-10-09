@@ -201,6 +201,143 @@ class TestUnattendedPushGraceful(FrappeTestCase):
 		titles = [c.kwargs.get("title") for c in log.call_args_list]
 		self.assertIn("Jarvis: custom-skills push truncated", titles)
 
+	# A change saved while a push runs is not in what was sent, and the Apply made for
+	# it was dropped (the job id was already queued or started): the job looks again.
+	def _slugs_sent(self, post):
+		return [[item["slug"] for item in call.kwargs["skills"]] for call in post.call_args_list]
+
+	def _status(self):
+		return frappe.db.get_single_value(SETTINGS, "custom_skills_sync_status", cache=False)
+
+	def test_worker_sends_once_when_nothing_changed_meanwhile(self):
+		_mk("once-a")
+		with patch("jarvis.admin_client.post_push_custom_skills") as post:
+			custom_skills_api._enqueued_push_custom_skills()
+		self.assertEqual(post.call_count, 1)
+		self.assertIn("custom-jcsp-once-a", self._slugs_sent(post)[0])
+		self.assertTrue(self._status().startswith("ok (applied "), self._status())
+
+	def test_worker_sends_again_for_a_skill_saved_during_the_send(self):
+		_mk("mid-a")
+
+		def _a_save_lands(skills=None):
+			if post.call_count == 1:
+				_mk("mid-b")
+
+		with patch("jarvis.admin_client.post_push_custom_skills", side_effect=_a_save_lands) as post:
+			custom_skills_api._enqueued_push_custom_skills()
+		first, second = self._slugs_sent(post)
+		self.assertNotIn("custom-jcsp-mid-b", first)
+		self.assertIn("custom-jcsp-mid-b", second)
+		self.assertIn("custom-jcsp-mid-a", second)
+		self.assertTrue(self._status().startswith("ok (applied "), self._status())
+
+	def test_worker_commits_after_a_send_before_it_looks_again(self):
+		# Without the commit the job keeps its snapshot from before the send and cannot
+		# see a skill another request saved meanwhile.
+		from jarvis.chat import custom_skills
+
+		_mk("order-a")
+		events = []
+		real_commit, real_build = frappe.db.commit, custom_skills.build_push_payload
+
+		def _commit(*a, **kw):
+			events.append("commit")
+			return real_commit(*a, **kw)
+
+		def _build(*a, **kw):
+			events.append("build")
+			return real_build(*a, **kw)
+
+		with (
+			patch(
+				"jarvis.admin_client.post_push_custom_skills",
+				side_effect=lambda skills=None: events.append("send"),
+			),
+			patch.object(frappe.db, "commit", side_effect=_commit),
+			patch("jarvis.chat.custom_skills_api.build_push_payload", side_effect=_build),
+		):
+			custom_skills_api._enqueued_push_custom_skills()
+		self.assertEqual(events[:4], ["build", "send", "commit", "build"], events)
+
+	def test_worker_does_not_send_again_when_the_first_send_was_slow(self):
+		_mk("slow-a")
+
+		def _a_save_lands(skills=None):
+			_mk("slow-b")
+
+		with (
+			patch("jarvis.admin_client.post_push_custom_skills", side_effect=_a_save_lands) as post,
+			patch.object(custom_skills_api, "_PUSH_RESEND_WITHIN_S", -1),
+		):
+			custom_skills_api._enqueued_push_custom_skills()
+		self.assertEqual(post.call_count, 1)
+		self.assertTrue(self._status().startswith("failed: "), self._status())
+		self.assertIn("apply again", self._status())
+
+	def test_worker_logs_an_over_cap_truncation_once_per_job(self):
+		for i in range(MAX_SKILLS_PER_PUSH + 2):
+			_mk(f"once-cap-{i:02d}")
+		with (
+			patch("jarvis.admin_client.post_push_custom_skills"),
+			patch.object(frappe, "log_error") as log,
+		):
+			custom_skills_api._enqueued_push_custom_skills()
+		titles = [c.kwargs.get("title") for c in log.call_args_list]
+		self.assertEqual(titles.count("Jarvis: custom-skills push truncated"), 1)
+
+	def test_worker_logs_a_truncation_first_reached_during_the_send(self):
+		from jarvis.chat import custom_skills
+
+		_mk("late-cap-a")
+		cap = custom_skills.pushable_org_skill_count()  # at the cap, not over it
+
+		def _two_saves_land(skills=None):
+			if post.call_count == 1:
+				_mk("late-cap-b")
+				_mk("late-cap-c")
+
+		with (
+			patch.object(custom_skills, "MAX_SKILLS_PER_PUSH", cap),
+			patch("jarvis.admin_client.post_push_custom_skills", side_effect=_two_saves_land) as post,
+			patch.object(frappe, "log_error") as log,
+		):
+			custom_skills_api._enqueued_push_custom_skills()
+		titles = [c.kwargs.get("title") for c in log.call_args_list]
+		self.assertEqual(titles.count("Jarvis: custom-skills push truncated"), 1)
+
+	def test_worker_stops_after_three_sends_and_says_it_is_not_settled(self):
+		_mk("churn-0")
+
+		def _another_save_lands(skills=None):
+			_mk(f"churn-{post.call_count}")
+
+		with patch("jarvis.admin_client.post_push_custom_skills", side_effect=_another_save_lands) as post:
+			custom_skills_api._enqueued_push_custom_skills()
+		self.assertEqual(post.call_count, custom_skills_api._MAX_PUSH_SENDS)
+		self.assertEqual(custom_skills_api._MAX_PUSH_SENDS, 3)
+		self.assertTrue(self._status().startswith("failed: "), self._status())
+		self.assertIn("apply again", self._status())
+
+	def test_worker_reports_a_failure_on_a_later_send(self):
+		from jarvis import admin_client
+
+		_mk("late-a")
+
+		def _fails_second_time(skills=None):
+			if post.call_count == 1:
+				_mk("late-b")
+				return
+			raise admin_client.AdminUnreachableError("down")
+
+		with (
+			patch("jarvis.admin_client.post_push_custom_skills", side_effect=_fails_second_time) as post,
+			patch.object(frappe, "log_error"),
+		):
+			custom_skills_api._enqueued_push_custom_skills()
+		self.assertEqual(post.call_count, 2)
+		self.assertTrue(self._status().startswith("failed: admin unreachable"), self._status())
+
 	def test_restart_resync_swallows_enqueue_failure(self):
 		_mk("resync-seed")  # non-empty so the resync reaches the enqueue
 		settings = frappe.get_single(SETTINGS)
