@@ -47,6 +47,12 @@ def validate_branding_inputs(agent_name, logo_url, favicon_url):
 	return name, logo, favicon
 
 
+def clear_brand_boot_cache():
+	"""Drop every user's cached Desk boot. The Desk widget reads the name and the logo from it,
+	so without this only a "clear cache and reload" shows a new brand (admin-v2#622)."""
+	frappe.cache.delete_key("bootinfo")
+
+
 # Subscription-mode auth modes - the container owns credentials, so the
 # bench's classifier treats a save with no structural change as a no-op.
 # We accept both "oauth" (REV-1 canonical) and the legacy "subscription"
@@ -887,6 +893,8 @@ class JarvisSettings(Document):
 		self._validate_pattern_window()
 		self._validate_conversation_retention()
 		self._validate_branding()
+		# The Desk boot carries the name and the logo; on_update drops its cache on a change.
+		self.flags.brand_changed = any(self.has_value_changed(f) for f in ("agent_name", "brand_logo"))
 
 	def _validate_conversation_retention(self):
 		"""Retention floor. The daily sweep frees idle chats' agent sessions
@@ -1115,6 +1123,8 @@ class JarvisSettings(Document):
 		# that both reconfigures the LLM and disables the wiki still scrubs.
 		self._maybe_scrub_wiki_on_disable()
 		self._maybe_flip_agent_min_model()
+		if self.flags.get("brand_changed"):
+			clear_brand_boot_cache()
 
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
