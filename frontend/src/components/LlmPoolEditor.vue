@@ -1647,7 +1647,7 @@
 				</svg>
 				<span
 					><b>No backup yet.</b> If this model fails or hits its limit, chat stops. Add a
-					second one and {{ agentName }} switches over automatically.</span
+					second one and {{ brand.agentName }} switches over automatically.</span
 				>
 			</div>
 		</section>
@@ -2433,7 +2433,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import DirectSubscriptionCard from "@/components/DirectSubscriptionCard.vue";
 import ProviderLogo from "@/components/ProviderLogo.vue";
 import Banner from "@/components/Banner.vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
 const { confirm } = useConfirm();
 
@@ -3937,7 +3937,7 @@ async function removeDirect() {
 	if (
 		!(await confirm({
 			title: "Disconnect chat subscription?",
-			message: `${agentName} chat will stop working until you reconnect.`,
+			message: `${brand.agentName} chat will stop working until you reconnect.`,
 			confirmLabel: "Disconnect",
 			danger: true,
 		}))
@@ -4238,8 +4238,8 @@ async function disconnect() {
 	if (busy.value.active) return;
 	if (
 		!(await confirm({
-			title: `Disconnect ${agentName} from AI?`,
-			message: `Your API keys and connected accounts will be permanently deleted from ${agentName} and from your workspace container. Chat will stop working until you connect a model. Your chat history, skills and macros are kept.`,
+			title: `Disconnect ${brand.agentName} from AI?`,
+			message: `Your API keys and connected accounts will be permanently deleted from ${brand.agentName} and from your workspace container. Chat will stop working until you connect a model. Your chat history, skills and macros are kept.`,
 			confirmLabel: "Disconnect",
 			danger: true,
 		}))

@@ -55,7 +55,7 @@ import JarvisMark from "@/components/JarvisMark.vue";
 import { useShellStore } from "@/stores/shell";
 import { useSupportStore } from "@/stores/support";
 import { useJarvisTheme } from "@/theme";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { holdActive } from "@/maintenanceGate";
 
 const props = defineProps({
@@ -70,9 +70,9 @@ const props = defineProps({
 // hover surface is the parent button, wider than the mark JarvisMark owns.
 const brandPeek = ref(false);
 
-// Card title: agentName ("Jarvis") in chat; "<agentName> Support" on the support rail.
+// Card title: brand.agentName ("Jarvis") in chat; "<brand.agentName> Support" on the support rail.
 const cardTitle = computed(() =>
-	props.variant === "support" ? `${agentName} Support` : agentName
+	props.variant === "support" ? `${brand.agentName} Support` : brand.agentName
 );
 
 const shellStore = useShellStore();
@@ -118,7 +118,7 @@ const menuOptions = computed(() => {
 	const menu = [];
 	if (props.variant === "support") {
 		menu.push({
-			label: `Switch to ${agentName} chat`,
+			label: `Switch to ${brand.agentName} chat`,
 			icon: "message-circle",
 			onClick: () => router.push({ name: "Chat" }),
 		});

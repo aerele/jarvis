@@ -12,7 +12,7 @@
 import { computed, ref } from "vue";
 import { call } from "frappe-ui";
 import { holdShouldShow, holdMessage, nextNotice } from "@/maintenanceHold";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
 const boot = window.maintenance || {};
 const notice = ref({ active: !!boot.active, message: (boot.message || "").trim() });
@@ -21,9 +21,9 @@ const notice = ref({ active: !!boot.active, message: (boot.message || "").trim()
 // banner, the presence avatar's "upgrading" mood, and the send refusal.
 export const holdActive = computed(() => holdShouldShow(notice.value));
 
-// The banner / refusal sentence, white-label aware: agentName comes from branding
+// The banner / refusal sentence, white-label aware: brand.agentName comes from branding
 // (the operator's custom message, already brand-scrubbed server-side, wins when set).
-export const holdText = computed(() => holdMessage(notice.value, agentName));
+export const holdText = computed(() => holdMessage(notice.value, brand.agentName));
 
 export const rechecking = ref(false);
 

@@ -33,10 +33,10 @@
 // a plain hide when the pill rect can't be measured. Mounting/visibility (yield
 // to greeting/booting/urgent alerts; shows over the welcome screen too) is
 // decided by the caller's v-if in ChatView.
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import Banner from "@/components/Banner.vue";
 import { FeatherIcon } from "frappe-ui";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { bannerToneFor } from "@/releaseNudge";
 import { notice, snoozeBanner, openWhatsNew } from "@/noticeGate";
 
@@ -46,7 +46,9 @@ const props = defineProps({
 	pill: { type: Object, default: null },
 });
 
-const message = `A new version of ${agentName} is available. Ask your administrator to update.`;
+const message = computed(
+	() => `A new version of ${brand.agentName} is available. Ask your administrator to update.`
+);
 
 // Severity drives the Banner's colour, mirroring the pill - single-sourced via
 // bannerToneFor (releaseNudge.js) so the pill and banner can never disagree, and
