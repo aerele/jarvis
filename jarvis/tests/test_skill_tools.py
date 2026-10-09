@@ -399,6 +399,7 @@ class TestGetSkill(SkillToolsTestCase):
 
 		manager = _ensure_system_user("sttool-sysmgr@example.com")
 		frappe.get_doc("User", manager).add_roles("System Manager")
+		self.addCleanup(lambda: frappe.get_doc("User", manager).remove_roles("System Manager"))
 		role = _make_skill(
 			OWNER, f"{PFX}-dup-sm", "sttool role copy", scope="Role", target_role="Accounts Manager"
 		).name

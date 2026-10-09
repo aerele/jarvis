@@ -449,8 +449,8 @@ class TestOnlyTheOwnerShares(Part2Base):
 	def test_a_reviewer_who_owns_a_role_skill_may_share_it(self):
 		from jarvis.chat import custom_skills_api
 
-		skill = _mk_skill("Administrator", f"{PFX}-share-rev", scope="Role", target_role="Sales User")
-		with _as("Administrator"):
+		skill = _mk_skill(REVIEWER, f"{PFX}-share-rev", scope="Role", target_role="Sales User")
+		with _as(REVIEWER):
 			custom_skills_api.share_custom_skill(skill.name, [USER_B])
 		self.assertEqual(self._shared(skill.name), [USER_B])
 
@@ -1051,13 +1051,51 @@ class TestSkillPromotionContentBinding(Part2Base):
 		_mk_skill(USER_B, f"{PFX}-chk-role", scope="User")  # someone's own, same name
 		_mk_skill(REVIEWER, f"{PFX}-chk-reviewed", scope="Org")
 		_mk_skill(USER_A, f"{PFX}-chk-private", scope="User")
-		found = {r["name"]: r for r in shared_skills_no_reviewer_owns() if r["skill_name"].startswith(PFX)}
-		self.assertEqual(set(found), {old.name, role.name})
+		blank = _mk_skill(USER_A, f"{PFX}-chk-blank", scope="Org")
+		frappe.db.set_value(SKILL, blank.name, "scope", "", update_modified=False)
+		learned = _mk_skill(USER_A, f"{PFX}-chk-learned", scope="Org")
+		frappe.db.set_value(SKILL, learned.name, "managed_by_learning", 1, update_modified=False)
+		orphan = _mk_skill(REVIEWER, f"{PFX}-chk-orphan", scope="Org")
+		frappe.db.set_value(SKILL, orphan.name, "owner", "", update_modified=False)
+		with _as(REVIEWER):  # whoever runs the check does not stand in for a missing owner
+			listed = shared_skills_no_reviewer_owns()
+		found = {r["name"]: r for r in listed if r["skill_name"].startswith(PFX)}
+		self.assertEqual(set(found), {old.name, role.name, blank.name, orphan.name})
+		self.assertEqual(found[blank.name]["scope"], "Org")
 		self.assertEqual(
 			(found[old.name]["scope"], found[old.name]["shared_with"], found[old.name]["same_name_owned_by"]),
 			("Org", 1, []),
 		)
 		self.assertEqual(found[role.name]["same_name_owned_by"], [USER_B])
+
+	def test_a_shared_skill_cannot_be_handed_to_another_owner_by_a_save(self):
+		# Who owns a shared skill decides who may save it, so a save must not change it.
+		# Nothing of ours says so: the owner giving it away fails the write check (it
+		# reads the owner off the document being saved), and someone else taking it
+		# fails Frappe's rule that ``owner`` is set once. This pins both.
+		skill = _mk_skill(USER_A, f"{PFX}-owner", scope="Org")
+		for actor, refusal in (
+			(USER_A, frappe.PermissionError),
+			(USER_B, frappe.CannotChangeConstantError),
+		):
+			with _as(actor):
+				doc = frappe.get_doc(SKILL, skill.name)
+				doc.owner = USER_B
+				with self.assertRaises(refusal):
+					doc.save()
+			self.assertEqual(frappe.db.get_value(SKILL, skill.name, "owner"), USER_A)
+
+	def test_the_guard_reads_stored_roles_and_shares_without_a_save_too(self):
+		skill = _mk_skill(
+			USER_A, f"{PFX}-stored", scope="Org", allowed_roles=["Sales User"], shared_with=[USER_B]
+		)
+		doc = frappe.get_doc(SKILL, skill.name)  # never saved: no before-save copy
+		self.assertIsNone(doc.get_doc_before_save())
+		doc.append("allowed_roles", {"role": "Jarvis User"})
+		doc.set("shared_with", [])
+		roles = doc._stored_child_values("allowed_roles", "role", "Jarvis Custom Skill Allowed Role")
+		shares = doc._stored_child_values("shared_with", "user", "Jarvis Custom Skill Share")
+		self.assertEqual((roles, shares), ({"Sales User"}, {USER_B}))
 
 	def test_a_private_skill_is_renamed_and_switched_freely(self):
 		skill = _mk_skill(USER_A, f"{PFX}-free", scope="User", enabled=0)
