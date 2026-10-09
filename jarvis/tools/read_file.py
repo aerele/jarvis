@@ -56,7 +56,12 @@ def read_file(
 	Each call rechecks permissions and bytes. No jobs, model calls or cached content.
 	"""
 	if read_mode not in {"preview", "file-cursor-v1"}:
-		raise InvalidArgumentError("Unsupported file reading mode.")
+		# Independently upgraded plugins must degrade truthfully, never execute
+		# an unknown mode. A continuation remains distinguishable as a preview.
+		read_mode, cursor, version = "preview", None, None
+	if read_mode == "file-cursor-v1" and not frappe.conf.get("jarvis_file_sections_enabled", True):
+		frappe.logger("jarvis.file_read").info("status=preview reason=disabled")
+		read_mode, cursor, version = "preview", None, None
 	if (cursor is None) != (version is None) or (preview and cursor is not None):
 		raise InvalidArgumentError("Cursor and version must be supplied together, without preview.")
 	if cursor is not None and read_mode != "file-cursor-v1":
@@ -287,6 +292,11 @@ def _cell(v):
 		return ""
 	if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
 		return v.isoformat()
+	if isinstance(v, datetime.timedelta):
+		# Preserve durations beyond 24h (and negative durations) without wrapping.
+		return str(v)
 	if isinstance(v, decimal.Decimal):
 		return float(v)
-	return v
+	if isinstance(v, (str, int, float, bool)):
+		return v
+	return str(v)

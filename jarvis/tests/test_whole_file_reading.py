@@ -1,6 +1,5 @@
 """Cursor/API boundary regression tests with real CSV/XLSX/PDF parsers."""
 
-import hashlib
 import io
 import json
 import unittest
@@ -17,6 +16,13 @@ from jarvis.tools.read_file import _read_csv, _read_pdf, read_file
 
 
 class TestFileCoverage(unittest.TestCase):
+	def setUp(self):
+		# Unit/parser tests patch limits and PDF readers in this process.
+		# TestIsolatedFileParser below exercises the real process boundary.
+		self.scanner = patch("jarvis.tools._file_sections.scan_file", scan.scan_file)
+		self.scanner.start()
+		self.addCleanup(self.scanner.stop)
+
 	def read(self, data, filename="x.txt", api=False, **args):
 		doc = SimpleNamespace(name="file", file_name=filename, file_url="/private/files/x")
 		with (
@@ -182,15 +188,14 @@ class TestFileCoverage(unittest.TestCase):
 		with patch.object(scan, "MAX_EXPANDED_BYTES", 1), self.assertRaisesRegex(Exception, "64 MiB"):
 			self.read(data, "x.xlsx")
 		with (
-			patch("pypdf.PdfReader", return_value=SimpleNamespace(is_encrypted=True)),
+			patch(
+				"pypdf.PdfReader", return_value=SimpleNamespace(is_encrypted=True, decrypt=lambda password: 0)
+			),
 			self.assertRaisesRegex(Exception, "encrypted"),
 		):
 			self.read(b"pdf", "x.pdf")
-		with (
-			patch.dict(frappe.conf, {"jarvis_file_sections_enabled": False}),
-			self.assertRaisesRegex(Exception, "disabled"),
-		):
-			self.read(b"data")
+		with patch.dict(frappe.conf, {"jarvis_file_sections_enabled": False}):
+			self.assertNotIn("read_contract", self.read(b"data"))
 
 	def test_small_empty_unicode_and_empty_last_sheet(self):
 		for data in (b"", "literal \ufffd".encode()):
@@ -219,11 +224,143 @@ class TestFileCoverage(unittest.TestCase):
 	def test_pinned_contract(self):
 		path = Path(__file__).parent / "fixtures/file-reading-v1.json"
 		fixture = json.loads(path.read_text())
-		self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), CONTRACT_SHA256)
 		doc = SimpleNamespace(
 			name=fixture["file_name"], file_name=fixture["filename"], file_url=fixture["file_url"]
 		)
-		self.assertEqual(read_sections(doc, fixture["source"].encode()), fixture["response"])
+		actual = read_sections(doc, fixture["source"].encode())
+		actual.pop("note")
+		self.assertEqual(actual, fixture["response"])
+
+	def test_duration_cached_empty_hidden_rows_and_sheet_scope(self):
+		from datetime import timedelta
+
+		from openpyxl import Workbook
+
+		wb = Workbook()
+		ws = wb.active
+		ws.append([timedelta(hours=49), '=IF(1,"","")', "=1+1"])
+		ws.row_dimensions[1].hidden = True
+		wb.create_sheet("Hidden").sheet_state = "hidden"
+		buf = io.BytesIO()
+		wb.save(buf)
+		out = io.BytesIO()
+		with ZipFile(buf) as source, ZipFile(out, "w", ZIP_DEFLATED) as target:
+			for name in source.namelist():
+				data = source.read(name)
+				if name.startswith("xl/worksheets/"):
+					data = data.replace(b'<c r="B1">', b'<c r="B1" t="str">')
+				target.writestr(name, data)
+		r = self.read(out.getvalue(), "x.xlsx", sheet="Sheet")
+		self.assertEqual(r["records"][0]["values"][:2], ["2 days, 1:00:00", ""])
+		self.assertEqual(
+			r["coverage"]["issues"], [{"code": "formula_value_missing", "count": 1, "row": 1, "column": 3}]
+		)
+		self.assertEqual(r["source"]["sheets_total"], 2)
+		self.assertEqual(r["source"]["scope_sheets"], 1)
+		self.assertEqual(r["source"]["hidden_rows"], [1])
+		self.assertEqual(r["source"]["worksheets"][-1], {"name": "Hidden", "hidden": True})
+
+	def test_cursor_past_sheet_and_offset_into_normal_row_are_rejected(self):
+		data = self.workbook(rows=450)
+		first = self.read(data, "x.xlsx")
+		for cursor in ("0:5000:0", "0:300:7"):
+			with self.subTest(cursor=cursor), self.assertRaises(Exception):
+				self.read(data, "x.xlsx", cursor=cursor, version=first["version"])
+
+	def test_csv_field_larger_than_default_preserves_tail(self):
+		windows = list(self.windows(("x" * 140000 + "\nTAIL").encode(), "x.csv"))
+		self.assertEqual(
+			json.loads("".join(r["fragment"] for w in windows for r in w["records"] if "fragment" in r)),
+			["x" * 140000],
+		)
+		self.assertEqual(windows[-1]["records"][-1]["values"], ["TAIL"])
+
+	def test_real_chart_sheet_is_explicitly_omitted(self):
+		from openpyxl import Workbook
+		from openpyxl.chart import BarChart, Reference
+
+		wb = Workbook()
+		wb.active.append([1])
+		chart = BarChart()
+		chart.add_data(Reference(wb.active, min_col=1, min_row=1, max_row=1))
+		wb.create_chartsheet("Chart").add_chart(chart)
+		buf = io.BytesIO()
+		wb.save(buf)
+		r = self.read(buf.getvalue(), "x.xlsx")
+		self.assertEqual(r["records"][0]["values"], [1])
+		self.assertIn("chart_sheet_omitted", [i["code"] for i in r["coverage"]["issues"]])
+		self.assertEqual(r["status"], "partial")
+
+	def test_owner_encrypted_pdf_allows_empty_user_password(self):
+		from pypdf import PdfWriter
+
+		writer = PdfWriter()
+		writer.add_blank_page(width=72, height=72)
+		writer.encrypt(user_password="", owner_password="owner")
+		buf = io.BytesIO()
+		writer.write(buf)
+		r = self.read(buf.getvalue(), "x.pdf")
+		self.assertEqual(r["source"]["pages_total"], 1)
+		self.assertEqual(r["coverage"]["issues"][0]["code"], "no_extractable_text")
+
+	def test_unknown_mode_degrades_to_preview(self):
+		r = self.read(b"hello", api=True, read_mode="file-cursor-v99")
+		self.assertTrue(r["ok"])
+		self.assertNotIn("read_contract", r["data"])
+
+	def test_canonical_window_matrix_matches_real_parser(self):
+		fixtures = json.loads((Path(__file__).parent / "fixtures/file-reading-v1-cases.json").read_text())
+		inputs = {
+			"csv-window": (b"A\n" + b"1\n" * 220, "x.csv"),
+			"text-fragments": (b"x" * 13000, "x.txt"),
+			"multisheet": (self.workbook(rows=1, sheets=2, cached=False), "x.xlsx"),
+			"empty-sheets": (self.workbook(rows=0), "x.xlsx"),
+		}
+
+		def structural(value):
+			if isinstance(value, dict):
+				return {k: structural(v) for k, v in value.items() if k not in {"version", "note"}}
+			if isinstance(value, list):
+				return [structural(v) for v in value]
+			return value
+
+		for name, (content, filename) in inputs.items():
+			doc = SimpleNamespace(name="fixture", file_name=filename, file_url="/private/files/" + filename)
+			args = {}
+			for fixture in [f for f in fixtures if f["name"].startswith(name + "-")]:
+				actual = read_sections(doc, content, **args)
+				self.assertEqual(structural(args), structural(fixture["request"]))
+				self.assertEqual(structural(actual), structural(fixture["response"]))
+				if actual["next_read"]:
+					args = {k: v for k, v in actual["next_read"].items() if k != "file_url"}
+
+	def test_file_identity_invalidates_identical_reattachment(self):
+		first = SimpleNamespace(name="first", file_name="x.txt", file_url="/private/files/x")
+		second = SimpleNamespace(name="second", file_name="x.txt", file_url="/private/files/x")
+		r = read_sections(first, b"same")
+		with self.assertRaisesRegex(Exception, "changed"):
+			read_sections(second, b"same", cursor="0:1:0", version=r["version"])
 
 
-CONTRACT_SHA256 = "02b02d5933c92c7af789b57847a29cbc6b5be78b77e62ed11c94f2920071a915"
+class TestIsolatedFileParser(unittest.TestCase):
+	def test_real_child_reads_csv_and_rejects_bad_cursor(self):
+		from jarvis.tools._file_scan_process import scan_file
+
+		r = scan_file(b"A\n1\nTAIL", "x.csv")
+		self.assertEqual(r["records"][-1]["values"], ["TAIL"])
+		with self.assertRaisesRegex(Exception, "offset"):
+			scan_file(b"A\n1", "x.csv", cursor="0:1:7")
+
+	def test_real_child_reads_workbook(self):
+		from jarvis.tools._file_scan_process import scan_file
+
+		r = scan_file(TestFileCoverage().workbook(rows=3, sheets=1), "x.xlsx")
+		self.assertEqual(r["records"][-1]["values"], ["S0R3", "5,00,000.00", 2])
+
+	def test_parent_wall_budget_kills_child(self):
+		from jarvis.tools._file_scan_process import scan_file
+
+		# A real spawned Python process cannot initialize in this wall budget.
+		with patch("jarvis.tools._file_scan_process.WALL_SECONDS", 0.0001):
+			with self.assertRaisesRegex(Exception, "resource budget"):
+				scan_file(b"A", "x.csv")

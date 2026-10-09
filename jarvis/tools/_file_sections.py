@@ -8,7 +8,8 @@ import time
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.tools._file_scan import parse_cursor, scan_file, scanner_profile
+from jarvis.tools._file_scan import parse_cursor, scanner_profile
+from jarvis.tools._file_scan_process import scan_file
 
 CONTRACT = "file-cursor-v1"
 
@@ -36,6 +37,9 @@ def read_sections(fdoc, content, *, sheet=None, cursor=None, version=None):
 	try:
 		scan = scan_file(content, fdoc.file_name, sheet, cursor)
 	except InvalidArgumentError:
+		frappe.logger("jarvis.file_read").warning(
+			"status=failed reason=reader_rejected cursor=%s version=%s", cursor or "0:1:0", digest[:12]
+		)
 		raise
 	except Exception:
 		frappe.logger("jarvis.file_read").warning("status=failed reason=invalid_format")
@@ -52,11 +56,13 @@ def read_sections(fdoc, content, *, sheet=None, cursor=None, version=None):
 	complete = cursor is None and next_cursor is None and window_complete
 	status = "partial" if not window_complete else "complete" if complete else "window"
 	frappe.logger("jarvis.file_read").info(
-		"status=%s elapsed_ms=%d first=%d last=%d",
+		"status=%s elapsed_ms=%d first=%d last=%d cursor=%s version=%s",
 		status,
 		int((time.monotonic() - started) * 1000),
 		scan["range"]["first"],
 		scan["range"]["last"],
+		cursor or "0:1:0",
+		digest[:12],
 	)
 	issues = scan.pop("issues")
 	return {
@@ -69,13 +75,9 @@ def read_sections(fdoc, content, *, sheet=None, cursor=None, version=None):
 		"coverage": {"complete": complete, "window_complete": window_complete, "issues": issues},
 		"next_read": next_read,
 		"note": (
-			"Read one window at a time. For whole-file tasks follow next_read sequentially without asking the user to page. "
-			"window means only this range was returned; coverage.complete means this response alone holds the whole scope. "
-			"partial means gaps: retain each issue and stop_reason across all windows. end_of_file does not prove earlier ranges were read. "
-			"After a failed call, that range is unread: retry the same arguments, never skip it. "
-			"Before continuing, retain task-relevant evidence with source positions in assistant working notes; old tool results may be pruned. "
-			"Re-read the same cursor for exact earlier evidence. Do not claim exhaustive knowledge from cleared source results. "
-			"Give periodic user-visible progress. Missing PDF text needs get_file_pages; missing formula values need a recalculated workbook. "
-			"Hard limits have no continuation for the omitted range; disclose them. Rows are extracted values, not interpreted business totals."
+			"This is one exact extraction window, not computed business totals. Follow next_read only within the task budget. "
+			"Stop after at most 20 windows or 100,000 returned characters and disclose unread ranges. "
+			"Retain all coverage issues and stop_reason; a final window does not prove prior windows were read. "
+			"Fragments of the same unit must be joined by offset before decoding json-row."
 		),
 	}

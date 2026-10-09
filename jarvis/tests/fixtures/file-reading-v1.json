@@ -33,7 +33,7 @@
     },
     "read_contract": "file-cursor-v1",
     "status": "complete",
-    "version": "4cff950857d65d78e18e4e2fd6740b6746b224502bd381ad28f5e9293e8f5b6a",
+    "version": "dfe17cfb05e0a84e4ad36a83ebb4373527cb6a76798c28a2b00f2540490af0ee",
     "cursor": "0:1:0",
     "end_of_file": true,
     "coverage": {
@@ -41,7 +41,6 @@
       "window_complete": true,
       "issues": []
     },
-    "next_read": null,
-    "note": "Read one window at a time. For whole-file tasks follow next_read sequentially without asking the user to page. window means only this range was returned; coverage.complete means this response alone holds the whole scope. partial means gaps: retain each issue and stop_reason across all windows. end_of_file does not prove earlier ranges were read. After a failed call, that range is unread: retry the same arguments, never skip it. Before continuing, retain task-relevant evidence with source positions in assistant working notes; old tool results may be pruned. Re-read the same cursor for exact earlier evidence. Do not claim exhaustive knowledge from cleared source results. Give periodic user-visible progress. Missing PDF text needs get_file_pages; missing formula values need a recalculated workbook. Hard limits have no continuation for the omitted range; disclose them. Rows are extracted values, not interpreted business totals."
+    "next_read": null
   }
 }

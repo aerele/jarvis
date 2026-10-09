@@ -6,7 +6,8 @@ import csv
 import io
 import json
 import re
-from itertools import islice, zip_longest
+from itertools import islice
+from xml.etree.ElementTree import iterparse
 from zipfile import ZipFile
 
 from jarvis.exceptions import InvalidArgumentError
@@ -20,7 +21,7 @@ MAX_COLUMNS = 128
 WINDOW_CHARS = 12_000
 WINDOW_ROWS = 200
 WINDOW_PAGES = 4
-SCANNER_REVISION = "cursor-1"
+SCANNER_REVISION = "cursor-2"
 CURSOR_PATTERN = r"[0-9]{1,2}:[0-9]{1,6}:[0-9]{1,8}"
 
 
@@ -94,6 +95,10 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 		key = "row" if is_row else "page" if ext == "pdf" else "text"
 		record = {key: unit, "values" if is_row else "text": value}
 		encoded = json.dumps(record, ensure_ascii=False)
+		if char and len(encoded) + 3 <= WINDOW_CHARS:
+			raise InvalidArgumentError(
+				"Nonzero cursor offset requires an oversized source unit. Use returned next_read."
+			)
 		if char == 0 and used + len(encoded) + 1 <= WINDOW_CHARS:
 			out["records"].append(record)
 			used += len(encoded) + 1
@@ -164,7 +169,7 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 		if source != 0:
 			raise InvalidArgumentError("PDF cursor must use source 0.")
 		reader = PdfReader(io.BytesIO(content))
-		if reader.is_encrypted:
+		if reader.is_encrypted and not reader.decrypt(""):
 			raise InvalidArgumentError("PDF is encrypted. Supply an unlocked copy to read it.")
 		total = len(reader.pages)
 		if start > max(total, 1):
@@ -203,28 +208,76 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 					"Expanded workbook exceeds 64 MiB. Split the workbook before reading."
 				)
 		wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-		formula_wb = None
 		try:
 			if any(len(name) > 128 for name in wb.sheetnames):
 				raise InvalidArgumentError("Workbook contains a worksheet name longer than 128 characters.")
 			if sheet is not None and sheet not in wb.sheetnames:
 				raise InvalidArgumentError("Requested worksheet does not exist. Check the worksheet name.")
-			names = [sheet] if sheet is not None else wb.sheetnames
+			worksheet_names = [ws.title for ws in wb.worksheets]
+			if sheet is not None and sheet not in worksheet_names:
+				raise InvalidArgumentError(
+					"Requested sheet is a chart sheet, not a worksheet. Use visual/chart data separately."
+				)
+			names = [sheet] if sheet is not None else worksheet_names
+			if len(wb.sheetnames) != len(worksheet_names):
+				issue("chart_sheet_omitted")
 			if source >= len(names):
 				raise InvalidArgumentError("Workbook cursor worksheet is outside the file.")
 			name = names[source]
-			out.update(kind="table", source={"filename": filename, "sheet": name, "sheets_total": len(names)})
-			formula_wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=False)
-			ws, fs = wb[name], formula_wb[name]
-			ws.reset_dimensions()
-			fs.reset_dimensions()
-			table(
-				zip_longest(
-					ws.iter_rows(min_row=start, values_only=True),
-					fs.iter_rows(min_row=start, values_only=True),
-					fillvalue=(),
-				)
+			out.update(
+				kind="table",
+				source={
+					"filename": filename,
+					"sheet": name,
+					"sheets_total": len(wb.sheetnames),
+					"scope_sheets": len(names),
+					"sheet_hidden": wb[name].sheet_state != "visible",
+				},
 			)
+			ws = wb[name]
+			missing, hidden = set(), []
+			# Distinguish an actual cached empty string (t=str) from an absent
+			# formula cache. Streaming XML avoids a second workbook/shared-string load.
+			with ZipFile(io.BytesIO(content)) as archive, archive.open(ws._worksheet_path) as xml:
+				for _, element in iterparse(xml, events=("end",)):
+					if element.tag.rsplit("}", 1)[-1] != "row":
+						continue
+					number = int(element.get("r", "0"))
+					if number >= start + WINDOW_ROWS:
+						break
+					if number >= start:
+						if element.get("hidden") in {"1", "true"}:
+							hidden.append(number)
+						for cell in element:
+							parts = {child.tag.rsplit("}", 1)[-1]: child for child in cell}
+							if "f" in parts and (
+								"v" not in parts or (parts["v"].text is None and cell.get("t") != "str")
+							):
+								missing.add(cell.get("r"))
+					element.clear()
+			ws.reset_dimensions()
+			from openpyxl.utils import get_column_letter
+
+			table(
+				(
+					row,
+					[
+						"=missing" if f"{get_column_letter(col)}{number}" in missing else None
+						for col in range(1, min(len(row), MAX_COLUMNS) + 1)
+					],
+				)
+				for number, row in enumerate(ws.iter_rows(min_row=start, values_only=True), start)
+			)
+			out["source"]["hidden_rows"] = [row for row in hidden if row <= out["range"]["last"]]
+			out["source"]["worksheets"] = [
+				{"name": item.title, "hidden": item.sheet_state != "visible"}
+				for item in wb.worksheets[:MAX_SHEETS]
+			]
+
+			if not out["records"] and not out["stop_reason"]:
+				if start != 1 or offset:
+					raise InvalidArgumentError("File cursor is outside its source. Restart this file read.")
+				out["records"].append({"source_empty": True})
 			if not out["next_cursor"] and source + 1 < len(names):
 				if source + 1 < MAX_SHEETS:
 					out["next_cursor"] = pos(1, src=source + 1)
@@ -232,8 +285,6 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 					stop("sheet_limit", next_sheet=source + 1)
 		finally:
 			wb.close()
-			if formula_wb:
-				formula_wb.close()
 	else:
 		if source != 0:
 			raise InvalidArgumentError("Text/CSV cursor must use source 0.")
@@ -244,18 +295,18 @@ def scan_file(content: bytes, filename: str, sheet: str | None = None, cursor=No
 			issue("encoding_replacements")
 		if ext in {"csv", "tsv"}:
 			out["kind"] = "table"
-			rows = csv.reader(io.StringIO(text), delimiter="\t" if ext == "tsv" else ",")
-			table((row, ()) for row in islice(rows, start - 1, None))
+			# At most the already bounded input size; avoids the platform's 128KiB
+			# field default truncating the file at a large but supported cell.
+			previous_limit = csv.field_size_limit(MAX_BYTES)
+			try:
+				rows = csv.reader(io.StringIO(text), delimiter="\t" if ext == "tsv" else ",")
+				table((row, ()) for row in islice(rows, start - 1, None))
+			finally:
+				csv.field_size_limit(previous_limit)
 		else:
 			if start != 1:
 				raise InvalidArgumentError("Plain text cursor must use unit 1.")
 			add(1, text)
-	if (
-		cursor is not None
-		and (start != 1 or offset != 0)
-		and not out["records"]
-		and not out["stop_reason"]
-		and not out["next_cursor"]
-	):
+	if cursor is not None and (start != 1 or offset != 0) and not out["records"] and not out["stop_reason"]:
 		raise InvalidArgumentError("File cursor is outside its source. Restart this file read.")
 	return out
