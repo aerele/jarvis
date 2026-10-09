@@ -213,11 +213,20 @@ def _agent_read_time_limit(tool: str):
 	if not limit or frappe.db.db_type != "mariadb":
 		yield
 		return
-	previous = frappe.db.sql("SELECT @@max_statement_time")[0][0]
-	if 0 < float(previous) <= limit:
+	try:
+		previous = frappe.db.sql("SELECT @@max_statement_time")[0][0]
+		if 0 < float(previous) <= limit:
+			previous = None
+		else:
+			frappe.db.set_execution_timeout(limit)
+	except Exception:
+		# A server without max_statement_time (MySQL reports itself as mariadb
+		# here): run the tool unlimited rather than fail every read.
+		frappe.logger("jarvis").warning("could not set max_statement_time", exc_info=True)
+		previous = None
+	if previous is None:
 		yield
 		return
-	frappe.db.set_execution_timeout(limit)
 	try:
 		yield
 	finally:
