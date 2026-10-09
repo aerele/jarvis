@@ -45,7 +45,7 @@ def parse_cursor(cursor):
 		return 0, 1, 0
 	if not isinstance(cursor, str) or not re.fullmatch(CURSOR_PATTERN, cursor):
 		raise InvalidArgumentError("Invalid file cursor. Retry using the returned next_read arguments.")
-	source, unit, offset = map(int, cursor.split(":"))
+	source, unit, offset = (int(part) for part in cursor.split(":"))
 	if source >= MAX_SHEETS or not 1 <= unit <= MAX_ROWS:
 		raise InvalidArgumentError("File cursor is outside the supported source range.")
 	return source, unit, offset
