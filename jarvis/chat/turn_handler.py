@@ -31,6 +31,7 @@ call time, so the patch on the worker module still wins.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -2525,7 +2526,13 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 				from jarvis.tools.read_file import _read_pdf
 
 				try:
-					text = (_read_pdf(raw, _MAX_INLINE_CHARS).get("text") or "").strip()
+					extracted = _read_pdf(raw, _MAX_INLINE_CHARS)
+					text = (extracted.get("text") or "").strip()
+					blocks.append(
+						"[PDF text coverage: "
+						+ json.dumps(extracted.get("coverage", {"complete": False}))
+						+ ". For a whole-file task, use jarvis__read_file with the attachment URL; follow next_read sequentially when supplied and check the returned contract and coverage before claiming a whole-file read. Missing text may require jarvis__get_file_pages. Do not present this preview as an exhaustive reading.]"
+					)
 				except Exception:
 					text = ""
 				if text:
@@ -2546,6 +2553,10 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 					f"all {total} pages" if total <= len(parts) else f"first {len(parts)} of {total} pages"
 				)
 				blocks.append(f"[Attached PDF `{name}` - {shown} sent as images.]")
+				if total > len(parts):
+					blocks.append(
+						"[Whole-file work requires the remaining pages too. Automatically use jarvis__get_file_pages for subsequent page windows, or jarvis__read_file for text, checking its returned contract and coverage. Do not ask the user to request each page.]"
+					)
 			else:
 				blocks.append(f"[Attached PDF `{name}` could not be rendered.]")
 		elif ext in _IMAGE_EXT:
@@ -2563,14 +2574,23 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 					title="chat worker: attached image could not be decoded",
 					message=f"{name} ({len(raw)} bytes)",
 				)
+		elif ext == "xlsx" or (ext in {"csv", "tsv"} and len(raw) > _MAX_INLINE_CHARS):
+			blocks.append(
+				f"[Attached spreadsheet `{name}`: use jarvis__read_file with its attachment URL to inspect the file. Follow next_read sequentially when supplied; check the returned contract and coverage before claiming a whole-file read. For arithmetic preserve currency, header, subtotal and total-row semantics; do not estimate from sampled rows. Disclose any reported incomplete coverage.]"
+			)
 		else:
 			try:
 				text = raw.decode("utf-8")
 			except UnicodeDecodeError:
-				blocks.append(f"[Attached file `{name}` is binary ({len(raw)} bytes); not inlined.]")
+				blocks.append(
+					f"[Attached file `{name}` is binary ({len(raw)} bytes); not inlined. Use jarvis__read_file to check whether this file format is supported.]"
+				)
 				continue
 			if len(text) > _MAX_INLINE_CHARS:
 				text = text[:_MAX_INLINE_CHARS] + "\n…[truncated]"
+				blocks.append(
+					"[Attachment preview is incomplete. Use jarvis__read_file with the attachment URL; follow next_read sequentially when supplied and check the returned contract and coverage before claiming a whole-file read; do not ask the user to request the next section.]"
+				)
 			blocks.append(f"Attached file `{name}`:\n" + _fence_untrusted(text, f"attached file: {name}"))
 	if blocks:
 		user_message = user_message + "\n\n" + "\n\n".join(blocks)
