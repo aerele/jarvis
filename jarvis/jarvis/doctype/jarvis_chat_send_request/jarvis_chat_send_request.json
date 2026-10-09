@@ -19,8 +19,7 @@
    "fieldtype": "Data",
    "label": "Request Key",
    "reqd": 1,
-   "read_only": 1,
-   "unique": 1
+   "read_only": 1
   },
   {
    "fieldname": "fingerprint",

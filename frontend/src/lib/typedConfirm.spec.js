@@ -35,7 +35,13 @@ describe("send() handles a confirmed response", () => {
 	it("reuses the accepted path's one-shot clear and voice release", () => {
 		// Duplicating them above the rejection block is what broke the voice
 		// lifecycle tests, which anchor on the FIRST occurrence of each.
-		expect(src.indexOf("_prefillSendContext = null;")).toBeLessThan(confirmedAt);
+		const sendStart = src.indexOf("async function send(textArg, resendAck)");
+		const consumed = src.indexOf(
+			"consumeRecoveredContext(sendRequest, _sentScope);",
+			sendStart
+		);
+		expect(consumed).toBeGreaterThan(sendStart);
+		expect(consumed).toBeLessThan(confirmedAt);
 		expect(src.indexOf("if (_voiceAck) voiceStore?.acknowledge(_voiceAck);")).toBeLessThan(
 			confirmedAt
 		);

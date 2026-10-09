@@ -31,6 +31,8 @@ export function deliveryDiagnostic(status) {
 				"The server received this request but has no final outcome. It may still be working or may have stopped unexpectedly. Check the conversation before sending a new request; retrying this same request will not dispatch it twice.",
 			interrupted:
 				"Processing was interrupted after work may have started. Some actions may have completed. Check the conversation and action receipts before sending a new request; retrying this same request will not repeat the work.",
+			conversation_deleted:
+				"This conversation was deleted. The original request will not be sent again. Review any action receipts before starting a new chat.",
 			unavailable:
 				"The delivery receipt is no longer available. Check the conversation before sending a new request.",
 		}[status] || "Delivery not confirmed. Check delivery before sending again."
@@ -56,4 +58,21 @@ export async function boundedDelivery(promise, timeout = 30000) {
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+// Transport gates need an actionable recovery step, not raw server exception text.
+// Keep the same request ID: a failed check does not disprove an earlier dispatch.
+export function deliveryFailureCopy(error) {
+	if (error?.exc_type === "CSRFTokenError")
+		return "Your session security token expired. Keep a copy of this message before reloading, then check delivery before sending again.";
+	if (
+		error?.status === 401 ||
+		["AuthenticationError", "SessionExpired"].includes(error?.exc_type)
+	)
+		return "Sign in again, then check delivery before sending again. Your message is preserved in this tab.";
+	if (error?.status === 403 || error?.exc_type === "PermissionError")
+		return "Access was refused. Sign in again or ask an administrator to restore your Jarvis access, then check delivery. Your message is preserved.";
+	return error?.deliveryUncertain
+		? error.message
+		: "Delivery not confirmed. Check delivery before sending again.";
 }

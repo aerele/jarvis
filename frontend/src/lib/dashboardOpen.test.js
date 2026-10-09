@@ -613,9 +613,11 @@ test("every path that swaps the conversation out resets the pair too", () => {
 	assert.notEqual(adopt, "", "the send-adopt fallback must still exist");
 	assert.match(adopt, /currentId\.value = r\.conversation_id;[^]*?originPage\.value = "";/);
 	assert.match(adopt, /originOf\.value = "";/);
-	// six writers of the empty value, no more: the id-less arm plus the five swap
-	// sites above (a seventh would mean a path nobody reviewed)
-	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 6);
+	// Recovery can adopt a first-chat id without calling loadConversation.
+	const recovered = fnBody(chatSrc, "async function settleRecoveredSend(");
+	assert.match(recovered, /currentId\.value = r\.conversation_id;[^]*?originPage\.value = "";/);
+	assert.match(recovered, /originOf\.value = "";/);
+	assert.equal((chatSrc.match(/originPage\.value = "";/g) || []).length, 7);
 	// and the binding is dropped with it, every time — one write is never enough
 	assert.equal(
 		(chatSrc.match(/originOf\.value = "";/g) || []).length,

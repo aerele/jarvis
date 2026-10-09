@@ -1,3 +1,125 @@
+# PR #1785 — round 2 corrections (9 October 2026)
+
+This section supersedes the earlier review below. Scope: Navin-S-R's round-2 comment
+6066998312 against `c02675a5`. Followed architect → plan-check → implementation →
+review-loop and wear-the-coat. Both reviews were single-agent self-reviews.
+
+## Solution and acceptance
+
+Keep the durable claim before dispatch and never reclaim an uncertain request.
+Remove the safe-by-default effect markers. A read-only macro preflight returns a
+controlled refusal before calling the pipeline; **every exception from the pipeline
+is uncertain**, even a validation refusal raised after a committed message. The
+legacy API keeps its existing exception contract. Correlated structured logging
+contains the opaque key, exception type and code locations, excluding exception
+text, locals and payload. It deliberately avoids Frappe's telemetry-forwarding logger.
+
+Desktop requests live outside the view, including in-flight sends. Operation versions
+prevent old failures/timeouts from undoing newer checks; settled evidence for the same
+ID still wins. First-chat adoption requires its empty home surface with no newer or
+parked draft. Otherwise the delivered request keeps its conversation link. Live events
+restore Stop independently of receipt timing. Fresh server reads use site-aware dates.
+
+PWA requests adopt their conversation independently of navigation. Empty recovery
+snapshots cannot revive submitted model/auto choices. Explicit hero choices and
+meaningful drafts survive; upload completion updates the same retained attachment.
+A failed/incomplete attachment blocks retry rather than being silently omitted.
+
+## Round-2 finding dispositions
+
+| # | Fix | Evidence |
+|---|---|---|
+| 1 | Timeout reinjects the request after transcript replacement. | Actual desktop send handler: clear rendered transcript, fire timeout, recovery row reappears. |
+| 2 | Late start **and delta-only** events restore run/message IDs and actionable Stop; refresh uses `toLocalMs`; unrelated events no longer invalidate every read. | Actual event and Stop handlers, stopped-run fences, fresh/stale refresh tests; timezone helper source inspected. |
+| 3 | In-tab desktop store survives unmount and keeps requests already in flight. | Two view-handler instances share the store; original ID survives, old failure cannot unlock new check. |
+| 4 | Late first-chat acceptance adopts only its empty home surface; newer/parked drafts stay put. | Actual send-handler timelines with empty/newer/parked drafts. |
+| 5 | Submitted first-send picks are cleared; empty draft snapshots do not restore them. | Recovery store tests and mounted PWA recovery suite. |
+| 6 | Empty hero visits do not save implicit choices or override updated defaults. | Mounted hero: visit, leave empty, change settings default, return. |
+| 7 | Authentication, CSRF and permission failures explain sign-in/reload/access recovery while retaining the request ID. | Shared error-copy tests; real frappe-ui exception shape inspected. A failed check never proves the original send had no effect. |
+| 8 | Unexpected failures emit safe correlated diagnostics and retain the claim. | Real receipt tests and logger-field/privacy assertions. |
+| 9 | Removed all mutable effect markers; pipeline exceptions cannot become safe rejections by omission. | Actual send handler commits a message, then dispatch raises a validation error; same-ID retry leaves one message and one dispatch attempt. |
+| 10 | Operation versions protect newer checks/retries from an original POST failure. | Desktop actual-handler race and PWA recovery state tests for check and retry; existing mounted late-response tests. |
+| 11 | Off-route hero acceptance sets request conversation and refreshes sidebar; next new-chat send is independent. | Mounted hero unmount/late acceptance/remount/send test. |
+| 12 | Uploads retain object identity through drafts/unmount; incomplete files cannot be retried silently. | Mounted hero: upload pending, unmount, complete, remount and send with the file URL. Failed uploads expose remove/reattach copy. |
+| 13 | Accepted first-send auto mode mirrors server state, including recovery on an existing chat. | Actual home-adoption handler test, fresh-read tests and response-path inspection. |
+| 14 | Confirmed control messages retire from the request store; accepted messages reconcile against persisted IDs. | Typed-success/failure handler tests, existing late-confirmation tests and store reconciliation inspection. |
+| 15 | Historical rejection codes use shared human copy, including maintenance. | Shared rejection-copy coverage and recovered-result handler inspection. |
+
+Four targeted tests fail against the original `c02675a5` handler: timeout after
+transcript replacement, late home adoption, late run:start Stop, and delta-only Stop.
+They pass against the corrected handler. These are actual-handler tests with mocked
+services, not full desktop browser or live LLM tests.
+
+## Smaller findings and deliberate limits
+
+- MariaDB 1020: a test explicitly enables snapshot isolation, creates a real
+  competing connection/write, observes error 1020, and verifies a successful claim
+  retry before exactly one dispatch. It runs in the normal database test suite;
+  it fails rather than silently skipping if the isolation feature is unavailable.
+- Deleted conversations have an explicit receipt status and human explanation.
+  The claim remains a replay fence; deletion cannot authorize repeating old effects.
+- Same-ID desktop submission respects boot/maintenance/compaction/model gates;
+  read-only delivery checks remain available. Dismiss removes the rendered row.
+  Fast home acceptance no longer sweeps a separately saved home draft into its result.
+- Conservative interrupted outcomes remain intentional: a generic exception does
+  not prove absence of committed or remote effects. The explicit macro preflight
+  is safe; all other unexpected pipeline failures require checking the conversation.
+- The vacuous context source assertion now targets the real send handler and checks
+  that the context-consumption call exists. Executable typed-outcome tests cover
+  composer unlock and request retirement as well.
+- Sidebar dot after desktop unmount: intentionally cleared because that view owns
+  the event listener; remount reconciles server state. A cross-view live activity
+  indicator would need shell-level event ownership and is deferred, not claimed fixed.
+- Receipt cost/retention: removed the redundant unique field declaration; the opaque
+  primary key already enforces uniqueness. Keep the ORM insert and pre-dispatch commit
+  for correctness. No latency improvement is claimed without a benchmark. Opaque replay
+  fences cannot have a TTL while arbitrary old retries are accepted. Wipe scrubs
+  metadata; a separate compaction/storage policy remains a future optimization.
+
+## Review-loop and user journey
+
+| Dimension | Assessment |
+|---|---|
+| Correctness/stability | Actual send/event/Stop handlers, mounted views, real claim/commit/rollback and snapshot-conflict tests pass. |
+| Security/data | Ownership checks remain; claims fence retries after wipe; diagnostics exclude private payload and exception text. In-tab stores clear with full reload/logout. |
+| Performance/concurrency | Bounded claim retries, no recovery polling loop; stale-operation protection. Macro preflight adds one owned-conversation read to a new attempt. No benchmark claim. |
+| Edge cases | Empty/newer/parked drafts, unmount, partial confirmations, missing/deleted receipts, settings changes and pending uploads covered. |
+| Maintainability/API | Existing APIs and legacy exception behavior retained; removes manual effect-boundary maintenance. |
+| Testing | Full frontend suites, focused database suite, builds, hooks; four before-fix reproductions. Mocked services distinguished from actual database/browser evidence. |
+| Resilience | Same-ID recovery survives response loss and navigation; positive evidence cannot be downgraded by an older error. |
+| Operability | Clear refusal versus uncertainty, actionable auth copy, request-correlated crash logs and deleted-conversation explanation. |
+
+Wear-the-coat persona: an operations user sending invoices/files and follow-ups,
+occasionally moving to Files/Approvals or losing connectivity. Coverage: send,
+inspect uncertainty, check/retry the same request, follow the accepted conversation,
+and Stop late streaming. Gaps: this round closes the identified draft/upload/control
+failures; full-reload/cross-tab recovery is still unavailable. Good-to-haves: shell-owned
+live activity and a measured receipt compaction policy. Failure/recovery: text, files,
+voice provenance and newer drafts remain separate; unknown effects are never
+represented as safe to repeat. Existing voice-store tests pass; no physical-device
+microphone or remote ERP-side-effect validation was performed in this round.
+
+## Verification
+
+- 1,124 desktop Node tests and 3,306 Vitest tests pass under Node 24 (CI's existing
+  `support-thread.test.js` quarantine retained). 130 PWA Node tests pass.
+- 23 real MariaDB receipt tests pass on dedicated `jarvis.test`, including actual
+  send/message commit, post-commit validation failure, concurrent claims, wipe,
+  lost acknowledgement, and an explicitly observed 1020 conflict. Local Frappe is
+  development v17; supported v15/v16 compatibility still relies on CI.
+- Desktop and PWA production builds pass. Existing large-chunk warnings remain.
+- Built PWA exercised in headless Chrome at 390px using synthetic intercepted API
+  responses: failed POST → recovery → identical-payload/ID retry → adopted chat
+  with one saved message; no page errors. This is a browser simulation, not live ERP.
+- Scoped repository hooks pass. No production deployment or live tenant changes.
+
+No further material defect found within this reviewed scope. This is not a guarantee
+against future defects, nor independent review. CI must pass on the pushed head.
+
+---
+
+# Earlier review history (superseded where this section conflicts)
+
 # PR #1785 — reviewer corrections
 
 Review scope: Navin-S-R’s findings against `59dadbb0`, desktop and mobile interactive sends, receipt transactions, and workspace wipe. Workflow: ct-architect → ct-plan-check → ct-implement → ct-review-loop + ct-wear-the-coat. These are single-agent reviews, not independent verification.

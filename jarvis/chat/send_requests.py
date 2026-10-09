@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import traceback
+from pathlib import Path
 
 import frappe
 
@@ -65,7 +67,7 @@ def _public(receipt):
 		try:
 			_get_owned_conversation(conversation)
 		except frappe.DoesNotExistError:
-			return {"delivery": "unknown"}
+			return {"delivery": "unknown", "receipt_status": "conversation_deleted"}
 	return {"delivery": "settled", "result": result}
 
 
@@ -205,35 +207,45 @@ def send_message(
 		if not existing or existing.fingerprint != fingerprint:
 			return {"delivery": "unknown", "reason": "request_mismatch"}
 		return _public(existing)
-	# Only the instrumented pipeline can prove it is still before all effects.
-	previous = frappe.flags.get("jarvis_send_receipt_guard")
-	guard = {"safe": False}
-	frappe.flags.jarvis_send_receipt_guard = guard
 	try:
-		try:
-			result = api.send_message(**args)
-		except Exception:
-			if not guard["safe"]:
-				# Effects may already exist outside this transaction. Keep the durable
-				# claim, discard only uncommitted work, and expose a fixed diagnostic.
-				# Returning normally lets Frappe commit this metadata, not partial work.
-				frappe.db.rollback()
-				table = frappe.qb.DocType(DOCTYPE)
-				(
-					frappe.qb.update(table)
-					.set(table.result_json, json.dumps({"interrupted": True}))
-					.where((table.name == key) & (table.state == "pending"))
-				).run()
-				return _public(_read(key))
-			frappe.db.rollback()
+		# A read-only preflight can prove this specific request was refused.
+		# Never classify exceptions from the pipeline by type: a nested send can
+		# raise the same refusal after the outer call already performed work.
+		conv = None
+		if conversation:
+			try:
+				conv = api._get_owned_conversation(conversation)
+			except frappe.DoesNotExistError:
+				pass  # the legacy handler owns the deleted-chat fallback
+		if conv and conv.get("skip_confirmation"):
 			result = {
 				"ok": False,
-				"reason": guard.get("reason") or "send_refused",
-				"message": "This is a macro run. Start a new chat to send a message."
-				if guard.get("reason") == "macro_run"
-				else "The request was not sent. Review the message and try again.",
+				"reason": "macro_run",
+				"message": "This is a macro run. Start a new chat to send a message.",
 			}
-		_settle(key, result)
-		return {"delivery": "settled", "result": result}
-	finally:
-		frappe.flags.jarvis_send_receipt_guard = previous
+		else:
+			result = api.send_message(**args)
+	except Exception as exc:
+		frappe.db.rollback()
+		# No message, payload or locals: exception text may contain business data.
+		# Keep a correlation key and stack locations so crashes remain diagnosable.
+		diagnostic = {
+			"request_key": key,
+			"exception_type": type(exc).__name__,
+			"frames": [
+				{"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+				for frame in traceback.extract_tb(exc.__traceback__)
+			],
+		}
+		# log_error can forward the active exception and POST body to telemetry.
+		# A plain structured log intentionally includes only this safe diagnostic.
+		frappe.logger("jarvis.chat").error("Chat send interrupted %s", json.dumps(diagnostic))
+		table = frappe.qb.DocType(DOCTYPE)
+		(
+			frappe.qb.update(table)
+			.set(table.result_json, json.dumps({"interrupted": True}))
+			.where((table.name == key) & (table.state == "pending"))
+		).run()
+		return _public(_read(key))
+	_settle(key, result)
+	return {"delivery": "settled", "result": result}

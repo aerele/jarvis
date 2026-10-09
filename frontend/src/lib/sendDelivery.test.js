@@ -80,3 +80,10 @@ test("uncertain diagnostics remain errors and never expose arbitrary server text
 		);
 	}
 });
+
+test("authentication, CSRF and access failures explain recovery without claiming delivery failed", async () => {
+	const { deliveryFailureCopy } = await import("./sendDelivery.js");
+	assert.match(deliveryFailureCopy({ status: 401 }), /sign in/i);
+	assert.match(deliveryFailureCopy({ exc_type: "CSRFTokenError" }), /copy.*reload/i);
+	assert.match(deliveryFailureCopy({ status: 403 }), /access|permission/i);
+});

@@ -57,9 +57,6 @@ def _reject_send_into_armed_conversation(conv_doc) -> None:
 	endpoints, so they are unaffected. Disarming (``skip_confirmation`` -> 0, e.g.
 	when the run ends) reopens the conversation."""
 	if conv_doc and conv_doc.get("skip_confirmation"):
-		guard = frappe.flags.get("jarvis_send_receipt_guard")
-		if guard is not None:
-			guard["reason"] = "macro_run"
 		from frappe import _
 
 		frappe.throw(
@@ -1649,14 +1646,6 @@ def _arm_request_autorun(conversation: str) -> None:
 		frappe.log_error(title="arm request_autorun (typed sweep)", message=frappe.get_traceback())
 
 
-def _send_receipt_effect_boundary():
-	# Internal flag, never a browser argument. Mark BEFORE any commit/remote
-	# effect so an exception cannot falsely authorize a new attempt.
-	guard = frappe.flags.get("jarvis_send_receipt_guard")
-	if guard is not None:
-		guard["safe"] = False
-
-
 def _run_typed_batch(conversation, items, *, typed: str = ""):
 	"""Confirm an ordered list of {token, position, summary} (owner-bound single-use
 	consume per token), compose ONE continuation for the batch, and return the client
@@ -1664,7 +1653,6 @@ def _run_typed_batch(conversation, items, *, typed: str = ""):
 	so they cannot drift; each caller supplies the positions (the on-screen card numbers,
 	or 1..N for a server-truth sweep). ``typed``: the user's words, which the
 	continuation quotes as DATA (decision 15)."""
-	_send_receipt_effect_boundary()
 	prev = frappe.flags.get(TYPED_REPLY_FLAG)
 	frappe.flags[TYPED_REPLY_FLAG] = typed or None
 	try:
@@ -2018,10 +2006,6 @@ def send_message(
 			_("You need the Jarvis User role to use Jarvis."),
 			frappe.PermissionError,
 		)
-	guard = frappe.flags.get("jarvis_send_receipt_guard")
-	if guard is not None and not guard.get("entered"):
-		guard["entered"] = True
-		guard["safe"] = True
 	t0 = time.monotonic()
 	user = frappe.session.user
 
@@ -2209,7 +2193,6 @@ def send_message(
 	# + drops the redis run-state) so an early return before that write still ends the
 	# run. clear_skill_autorun is itself best-effort.
 	if conv_doc.skill_autorun:
-		_send_receipt_effect_boundary()
 		stage("skill_autorun", 0)
 		stage("skill_autorun_at", None)
 		from jarvis.chat import turn_message_binding
@@ -2224,7 +2207,6 @@ def send_message(
 	# chat (#581) needs the same: its covered writes check the signal too, so a Stop on
 	# a reply that made no write would otherwise refuse the next message's first write.
 	if conv_doc.file_box or conv_doc.get("auto_mode"):
-		_send_receipt_effect_boundary()
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.clear_run_cancel(conversation)
@@ -2239,7 +2221,6 @@ def send_message(
 	# construction. If THIS message itself carries a 'confirm all' directive, the
 	# upfront-arm AFTER the write below re-arms on top of this reset.
 	if conv_doc.request_autorun:
-		_send_receipt_effect_boundary()
 		stage("request_autorun", 0)
 		stage("request_autorun_at", None)
 		stage("request_autorun_msg", None)
@@ -2377,7 +2358,6 @@ def send_message(
 	if _claim is not None and not _claim():
 		frappe.db.rollback()
 		return {"ok": False, "reason": "already_claimed"}
-	_send_receipt_effect_boundary()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 
 	# R1: the typed reply acts only now that the user row is committed.

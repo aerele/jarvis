@@ -1,3 +1,4 @@
+import { store } from "./store";
 import { reactive } from "vue";
 import { createSendRecovery } from "./lib/sendRecovery";
 
@@ -14,4 +15,6 @@ export const recoveryState = reactive({
 	starting: {},
 	observedRuns: {},
 });
-export const sendRecovery = createSendRecovery(recoveryState);
+export const sendRecovery = createSendRecovery(recoveryState, undefined, () => {
+	store.loadConversations();
+});

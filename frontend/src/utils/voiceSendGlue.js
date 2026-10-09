@@ -132,6 +132,16 @@ export function createPendingSends() {
 			m.delete(name);
 			if (!m.size) byScope.delete(k);
 		},
+		reconcile(scope, messages) {
+			const names = new Set(messages.map((m) => m.name));
+			for (const bubble of this.peek(scope)) {
+				if (
+					bubble.deliveryState === "delivered" &&
+					(bubble.deliveryConfirmed || names.has(bubble.deliveryMessageId))
+				)
+					this.remove(scope, bubble.name);
+			}
+		},
 		has(scope) {
 			const m = byScope.get(_key(scope));
 			return !!(m && m.size);
@@ -160,3 +170,6 @@ export function createPendingSends() {
 		},
 	};
 }
+
+// Tab-owned recovery survives navigation out of ChatView; reload/logout clears it.
+export const pendingSends = createPendingSends();

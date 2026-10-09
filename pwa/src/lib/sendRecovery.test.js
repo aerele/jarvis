@@ -114,3 +114,53 @@ test("interrupted diagnostic stays uncertain with preserved payload and safe sam
 	assert.equal(request.id, "id");
 	assert.equal(request.text, "private draft");
 });
+
+for (const operation of ["check", "retry"])
+	test(`old POST failure cannot supersede a newer ${operation}`, () => {
+		const state = { requests: [] };
+		const recovery = createSendRecovery(state, () => "x");
+		const request = recovery.stage("A", "original", []);
+		const old = recovery.begin(request);
+		recovery.settle(request, null, old);
+		if (operation === "retry") recovery.retry(request, true);
+		const current = recovery.begin(request);
+		request.checking = operation === "check";
+		recovery.settle(request, null, old);
+		assert.equal(request.state, operation === "retry" ? "sending" : "uncertain");
+		assert.equal(request.operation, current);
+		assert.equal(request.checking, operation === "check");
+		recovery.settle(
+			request,
+			{
+				delivery: "settled",
+				result: { ok: true, conversation_id: "A", message_id: "M", run_id: "R" },
+			},
+			old
+		);
+		assert.equal(request.state, "accepted");
+	});
+test("off-route acceptance adopts the request and clears only empty first-send picks", () => {
+	for (const newer of [false, true]) {
+		let refreshed = 0;
+		const state = {
+			requests: [],
+			drafts: { "": { text: newer ? "new task" : "", attachments: [] } },
+			newChatPicks: { autoMode: true, model: "old" },
+		};
+		const recovery = createSendRecovery(
+			state,
+			() => "x",
+			() => refreshed++
+		);
+		const request = recovery.stage("", "original", []);
+		recovery.settle(request, {
+			delivery: "settled",
+			result: { ok: true, conversation_id: "created", message_id: "M", run_id: "R" },
+		});
+		assert.equal(request.conversation, "created");
+		assert.equal(request.needsAdoption, true);
+		assert.equal(refreshed, 1);
+		assert.equal(!!state.newChatPicks.autoMode, newer);
+		assert.equal(state.drafts[""]?.text, newer ? "new task" : undefined);
+	}
+});

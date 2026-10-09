@@ -8,7 +8,7 @@ import { sendRejectionCopy } from "../../../frontend/src/lib/sendRejectionCopy.j
 
 // Request state is independent of the view and transcript. The caller makes
 // `state` reactive; this module stays testable without a Vue runtime.
-export function createSendRecovery(state, id = newSendRequestId) {
+export function createSendRecovery(state, id = newSendRequestId, onAccepted = () => {}) {
 	return {
 		stage(conversation, text, attachments, approvalTokens = []) {
 			const request = {
@@ -26,14 +26,34 @@ export function createSendRecovery(state, id = newSendRequestId) {
 			// Return the proxy if state is reactive, not the raw object.
 			return state.requests[state.requests.length - 1];
 		},
-		settle(request, envelope) {
+		begin(request) {
+			request.operation = (request.operation || 0) + 1;
+			return request.operation;
+		},
+		settle(request, envelope, operation = request.operation) {
 			const result = envelope?.delivery === "settled" ? envelope.result : null;
 			// Positive server evidence wins over a later lost/failed HTTP response.
 			if (["accepted", "confirmed", "rejected"].includes(request.state))
 				return request.state;
-			request.state = deliveryOutcome(envelope);
+			const outcome = deliveryOutcome(envelope);
+			if (outcome === "uncertain" && operation !== request.operation) return request.state;
+			request.state = outcome;
 			request.result = result;
 			request.receiptStatus = envelope?.receipt_status;
+			if (["accepted", "confirmed"].includes(outcome)) {
+				if (!request.conversation && result.conversation_id) {
+					request.conversation = result.conversation_id;
+					request.needsAdoption = true;
+					// These picks belonged to the submitted first message, not the
+					// next empty recovery composer. Never reuse a prior chat's auto mode.
+					const draft = state.drafts?.[""];
+					if (!draft?.text?.trim() && !draft?.attachments?.length) {
+						state.newChatPicks = {};
+						delete (state.drafts || {})[""];
+					}
+				}
+				onAccepted(request);
+			}
 			return request.state;
 		},
 		retry(request, sameId = false) {

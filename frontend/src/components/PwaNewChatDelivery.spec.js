@@ -7,6 +7,8 @@ vi.mock("vue-router", () => ({ useRouter: () => router }));
 vi.mock("../../../pwa/src/maintenanceGate", () => ({ holdActive: ref(false) }));
 vi.mock("@/branding", () => ({ agentName: ref("Jarvis") }));
 vi.mock("../../../pwa/src/api", () => ({
+	listConversations: vi.fn(async () => []),
+	uploadFile: vi.fn(),
 	getChatUiSettings: vi.fn(async () => ({ llm_model: "model-a" })),
 	getPromptSuggestions: vi.fn(async () => ({})),
 	getMySettings: vi.fn(async () => ({})),
@@ -21,6 +23,7 @@ let wrapper;
 beforeEach(() => {
 	vi.clearAllMocks();
 	recoveryState.requests = [];
+	recoveryState.drafts = {};
 	recoveryState.heroDraft = null;
 	recoveryState.editingNewRequest = null;
 	recoveryState.newChatPicks = {};
@@ -194,4 +197,78 @@ it("observes a late hero success after the recovery deadline", async () => {
 	await flushPromises();
 	expect(recoveryState.requests[0].state).toBe("accepted");
 	vi.useRealTimers();
+});
+
+it("an empty hero visit does not override the user's updated auto-mode default", async () => {
+	api.getMySettings.mockResolvedValue({ data: { default_auto_mode: 0 } });
+	await open();
+	await wrapper.get("textarea").setValue("");
+	wrapper.unmount();
+	expect(recoveryState.heroDraft).toBeNull();
+	api.getMySettings.mockResolvedValue({ data: { default_auto_mode: 1 } });
+	await open();
+	expect(wrapper.vm.autoArmed).toBe(true);
+});
+it("upload completion updates a hero draft after unmount and the remounted send includes the file", async () => {
+	let finish;
+	api.uploadFile.mockImplementation(
+		() =>
+			new Promise((resolve) => {
+				finish = resolve;
+			})
+	);
+	await open();
+	const upload = wrapper.vm.attach({
+		target: {
+			files: [new File(["synthetic"], "invoice.pdf", { type: "application/pdf" })],
+			value: "",
+		},
+	});
+	await flushPromises();
+	wrapper.unmount();
+	expect(recoveryState.heroDraft.attachments[0].uploading).toBe(true);
+	finish({ file_url: "/private/files/invoice.pdf" });
+	await upload;
+	await flushPromises();
+	await open();
+	expect(wrapper.vm.uploading).toBe(false);
+	api.sendRecoverableMessage.mockResolvedValue({
+		delivery: "settled",
+		result: { ok: false, reason: "busy" },
+	});
+	await wrapper.get('[aria-label="Send"]').trigger("click");
+	await flushPromises();
+	expect(api.sendRecoverableMessage).toHaveBeenCalledWith(
+		expect.objectContaining({
+			attachments: [expect.objectContaining({ file_url: "/private/files/invoice.pdf" })],
+		})
+	);
+});
+it("late acceptance off the hero does not intercept the next new-chat message", async () => {
+	let finish;
+	api.sendRecoverableMessage.mockImplementationOnce(
+		() =>
+			new Promise((resolve) => {
+				finish = resolve;
+			})
+	);
+	await open();
+	await wrapper.get('[aria-label="Send"]').trigger("click");
+	wrapper.unmount();
+	finish({
+		delivery: "settled",
+		result: { ok: true, conversation_id: "A", message_id: "M", run_id: "R" },
+	});
+	await flushPromises();
+	expect(recoveryState.requests[0].conversation).toBe("A");
+	expect(api.listConversations).toHaveBeenCalled();
+	api.sendRecoverableMessage.mockResolvedValue({
+		delivery: "settled",
+		result: { ok: true, conversation_id: "B", message_id: "N", run_id: "S" },
+	});
+	await open();
+	await wrapper.get('[aria-label="Send"]').trigger("click");
+	await flushPromises();
+	expect(api.sendRecoverableMessage).toHaveBeenCalledTimes(2);
+	expect(recoveryState.requests[1].conversation).toBe("B");
 });

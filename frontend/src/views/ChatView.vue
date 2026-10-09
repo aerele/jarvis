@@ -4358,7 +4358,7 @@ import { isNearSilent } from "@/utils/voiceSilenceGate";
 import {
 	promoteNewChatScope,
 	planRejectedSend,
-	createPendingSends,
+	pendingSends,
 	injectPendingBubbles,
 } from "@/utils/voiceSendGlue";
 import {
@@ -4380,7 +4380,7 @@ import {
 	supportAwaitingRoute,
 } from "@/lib/supportHeaderPill";
 // timezone-safe: naive server datetimes must go through dayjsLocal (site tz)
-import { formatDate, formatLocalMs, exactDate, dayLabel } from "@/utils/datetime";
+import { formatDate, formatLocalMs, exactDate, dayLabel, toLocalMs } from "@/utils/datetime";
 import { fenceReject, fenceAccept } from "@/utils/eventFence";
 import { BOOT_TIMEOUT_MS, withDeadline } from "@/utils/bootDeadline";
 import { createEnrichmentPending, ENRICHMENT_CUE_DELAY_MS } from "@/lib/enrichmentPending";
@@ -4396,7 +4396,7 @@ import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
-import { newSendRequestId, observeDelivery } from "@/lib/sendDelivery.js";
+import { newSendRequestId, observeDelivery, deliveryFailureCopy } from "@/lib/sendDelivery.js";
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
@@ -9184,7 +9184,7 @@ async function loadConversation(id) {
 	connectorFocus.value = null;
 	if (!id) {
 		resetAutoModeFor(true);
-		messages.value = [];
+		messages.value = injectPendingBubbles([], _pendingSends.peek(_NEW_CHAT_SCOPE));
 		fileboxWaits.value = [];
 		originPage.value = "";
 		originOf.value = "";
@@ -9232,6 +9232,7 @@ async function loadConversation(id) {
 	// was off-screen (their rendered copy was dropped when messages was replaced). They are kept
 	// origin-scoped and carry the voice-release token, so the resend affordance survives a mid-send
 	// switch. Dedupe by name (a rejection that lands while we're on-screen already holds one).
+	_pendingSends.reconcile(id, messages.value);
 	messages.value = injectPendingBubbles(messages.value, _pendingSends.peek(id));
 	// Auto mode: the server flag always wins. The local armed choice is reset only
 	// on a real chat switch, never on an in-place resync of the chat on screen (a
@@ -9850,6 +9851,7 @@ function resendFailed(m) {
 }
 
 let _recoveryRefreshEpoch = 0;
+let _recoveryViewActive = true;
 
 function consumeRecoveredContext(request, scope) {
 	if (!request) return;
@@ -9864,7 +9866,8 @@ function consumeRecoveredContext(request, scope) {
 
 async function refreshRecoveredSend(m, r) {
 	const id = r.conversation_id;
-	if (!id || currentId.value !== id || sending.value || waiting.value) return;
+	if (!_recoveryViewActive || !id || currentId.value !== id || sending.value || waiting.value)
+		return;
 	const epoch = ++_recoveryRefreshEpoch;
 	const snapshot = () =>
 		JSON.stringify([
@@ -9878,18 +9881,23 @@ async function refreshRecoveredSend(m, r) {
 	const before = snapshot();
 	try {
 		const data = await api.getConversation(id);
-		if (currentId.value !== id || epoch !== _recoveryRefreshEpoch || before !== snapshot())
+		if (
+			!_recoveryViewActive ||
+			currentId.value !== id ||
+			epoch !== _recoveryRefreshEpoch ||
+			before !== snapshot()
+		)
 			return;
 		if (!Array.isArray(data?.messages)) return;
 		// Only a fresh read can restore run controls; a receipt's run/queue state
 		// describes the past. No navigation or composer/preferences reload here.
+		_pendingSends.reconcile(id, data.messages);
 		messages.value = injectPendingBubbles(data.messages, _pendingSends.peek(id));
+		convAutoMode.value = data.conversation?.auto_mode ? 1 : 0;
 		const live = [...data.messages]
 			.reverse()
 			.find((row) => row.role === "assistant" && row.streaming);
-		const age = live?.modified
-			? Date.now() - Date.parse(live.modified.replace(" ", "T"))
-			: Infinity;
+		const age = live?.modified ? Date.now() - toLocalMs(live.modified) : Infinity;
 		if (
 			live?.run_id === r.run_id &&
 			r.run_id &&
@@ -9905,7 +9913,7 @@ async function refreshRecoveredSend(m, r) {
 			sending.value = true;
 			waiting.value = !(live.content || "").trim();
 			store.streamingConvId = id;
-			const started = Date.parse(String(live.creation || "").replace(" ", "T"));
+			const started = toLocalMs(live.creation);
 			if (
 				Number.isFinite(started) &&
 				Date.now() - started >= 0 &&
@@ -9951,7 +9959,7 @@ async function settleRecoveredSend(m, r) {
 	if (r.ok === false && !r.confirmed) {
 		m.deliveryState = "rejected";
 		m.failed = true;
-		m.deliveryNote = r.message || r.reason || "The request was not sent.";
+		m.deliveryNote = r.message || sendRejectionCopy(r.reason, agentName, r).message;
 		return;
 	}
 	consumeRecoveredContext(m.sendRequest, scope);
@@ -9961,11 +9969,40 @@ async function settleRecoveredSend(m, r) {
 	m.failed = false;
 	m.deliveryConversation = r.conversation_id;
 	m.deliveryMessageId = r.message_id;
+	m.deliveryConfirmed = !!r.confirmed;
 	m.deliveryNote =
 		r.confirmed && r.ok === false
 			? r.error?.message ||
 			  "One or more actions could not be completed. Check the action receipts."
 			: "Delivery confirmed. View the conversation for the current result.";
+	// Only adopt this home send while the same empty surface still owns it.
+	// A newer draft/request or another mounted route must never be moved.
+	if (
+		_recoveryViewActive &&
+		scope === _NEW_CHAT_SCOPE &&
+		!currentId.value &&
+		!input.value &&
+		!pendingFiles.value.length &&
+		!drafts.value[_NEW_CHAT_SCOPE] &&
+		_pendingSends.peek(scope).at(-1) === m &&
+		r.conversation_id
+	) {
+		_pendingSends.remove(scope, m.name);
+		_pendingSends.add(r.conversation_id, m);
+		currentId.value = r.conversation_id;
+		convAutoMode.value = r.auto_mode ? 1 : 0;
+		originPage.value = "";
+		originOf.value = "";
+		router.replace("/c/" + r.conversation_id);
+	}
+	if (_recoveryViewActive && currentId.value === r.conversation_id && r.message_id) {
+		autoModeDecided.value = true;
+		if ("auto_mode" in r) convAutoMode.value = r.auto_mode ? 1 : 0;
+	}
+	if (r.confirmed) {
+		_pendingSends.remove(_pendingSends.scopeOf(m), m.name);
+		if (_recoveryViewActive && r.ok === false) notify(m.deliveryNote, { type: "error" });
+	}
 	// A receipt is historical evidence. It must not move the current draft,
 	// change run state or gates, restore old picks, or revive a queue chip.
 	store.loadConversations();
@@ -9974,6 +10011,13 @@ async function settleRecoveredSend(m, r) {
 
 async function recoverSend(m, retrySame = false) {
 	if (m.deliveryState !== "uncertain" || m.deliveryBusy) return;
+	if (
+		retrySame &&
+		(booting.value || holdActive.value || compacting.value || noAiConnected.value)
+	) {
+		m.deliveryNote = "Submission is currently unavailable. You can still check delivery.";
+		return;
+	}
 	const id = m.sendRequest?.requestId;
 	if (!id || _pendingSends.scopeOf(m) == null) return;
 	const epoch = (m.deliveryReadEpoch || 0) + 1;
@@ -10003,7 +10047,7 @@ async function recoverSend(m, retrySame = false) {
 			m.deliveryState === "checking"
 		) {
 			m.deliveryState = "uncertain";
-			if (error?.deliveryUncertain) m.deliveryNote = error.message;
+			m.deliveryNote = deliveryFailureCopy(error);
 		}
 	} finally {
 		if (m.sendRequest.requestId === id && m.deliveryReadEpoch === epoch)
@@ -10303,10 +10347,13 @@ async function send(textArg, resendAck) {
 			sendRequest.requestId,
 		])
 	);
+	_pendingSends.add(_sentScope, _optBubble);
+	const initialEpoch = _optBubble.deliveryReadEpoch || 0;
 	let expired = false;
 	const markUncertain = () => {
 		if (
 			_optBubble.deliveryDismissed ||
+			(_optBubble.deliveryReadEpoch || 0) !== initialEpoch ||
 			["delivered", "rejected"].includes(_optBubble.deliveryState)
 		)
 			return;
@@ -10314,6 +10361,8 @@ async function send(textArg, resendAck) {
 		_optBubble.deliveryState = "uncertain";
 		const scope = _pendingSends.scopeOf(_optBubble) || _sentScope;
 		_pendingSends.add(scope, _optBubble);
+		if (_recoveryViewActive && _currentScope() === scope)
+			messages.value = injectPendingBubbles(messages.value, [_optBubble]);
 	};
 	try {
 		const r = await observeDelivery(api.sendMessage(...sendRequest.args), () => {
@@ -10325,8 +10374,17 @@ async function send(textArg, resendAck) {
 				waiting.value = false;
 			}
 		});
-		if (expired) {
+		if (
+			expired ||
+			!_recoveryViewActive ||
+			(_sentScope === _NEW_CHAT_SCOPE &&
+				(input.value || pendingFiles.value.length || drafts.value[_NEW_CHAT_SCOPE]))
+		) {
 			await settleRecoveredSend(_optBubble, r);
+			if (_recoveryViewActive && _currentScope() === _sentScope && !currentMsgId.value) {
+				sending.value = false;
+				waiting.value = false;
+			}
 			return;
 		}
 		// A typed go-ahead was consumed as an approval, not rejected as a send, so it
@@ -10337,7 +10395,8 @@ async function send(textArg, resendAck) {
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
 			_optBubble.deliveryState = "rejected";
-			_optBubble.deliveryNote = r.message || r.reason;
+			_optBubble.deliveryNote =
+				r.message || sendRejectionCopy(r.reason, agentName, r).message;
 			// A typed "no" whose send then lost the admission race still discarded its
 			// cards (the server says which); they must not linger as live offers.
 			for (const t of discardedTokens(r)) removePending(t);
@@ -10363,6 +10422,7 @@ async function send(textArg, resendAck) {
 				if (_originOnScreen && !messages.value.some((x) => x.name === tmpName))
 					messages.value = [...messages.value, _optBubble];
 			} else {
+				_pendingSends.remove(_sentScope, _optBubble.name);
 				// Drop the bubble (a main-composer send / a programmatic send). Restore its text to
 				// the ORIGIN composer when it is on screen, else that scope's draft — never bleed it
 				// into whatever chat the user switched to, nor lose it on a mid-send switch (VR4-2).
@@ -10425,8 +10485,9 @@ async function send(textArg, resendAck) {
 			return;
 		}
 		if (r && r.ok !== false) {
-			_optBubble.deliveryState = undefined;
 			workersWarnNotice.value = null; // fresh send proves availability
+			_pendingSends.remove(_pendingSends.scopeOf(_optBubble), _optBubble.name);
+			_optBubble.deliveryState = undefined;
 			// An accepted send proves the CP-side gate passed, i.e. any upgrade
 			// maintenance hold has lifted - clear the banner + wake the avatar now
 			// rather than stranding them until a reload (self-heal).
@@ -10456,6 +10517,7 @@ async function send(textArg, resendAck) {
 		// reply are the record. Placed after the release above, which a confirmed
 		// message has legitimately earned.
 		if (r && r.confirmed) {
+			_pendingSends.remove(_sentScope, _optBubble.name);
 			if (_currentScope() === _sentScope)
 				messages.value = messages.value.filter((x) => x.name !== tmpName);
 			sending.value = false;
@@ -10555,8 +10617,12 @@ async function send(textArg, resendAck) {
 			}
 		}
 	} catch (e) {
-		if (expired) {
-			if (e?.deliveryUncertain) _optBubble.deliveryNote = e.message;
+		if (expired || !_recoveryViewActive) {
+			if (
+				(_optBubble.deliveryReadEpoch || 0) === initialEpoch &&
+				!["delivered", "rejected"].includes(_optBubble.deliveryState)
+			)
+				_optBubble.deliveryNote = deliveryFailureCopy(e);
 			markUncertain();
 			return;
 		}
@@ -10567,18 +10633,13 @@ async function send(textArg, resendAck) {
 		// and show it now if the origin is still on screen.
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
-		if (e?.deliveryUncertain) _optBubble.deliveryNote = e.message;
+		_optBubble.deliveryNote = deliveryFailureCopy(e);
 		_pendingSends.add(_sentScope, _optBubble);
 		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
 			messages.value = [...messages.value, _optBubble];
 		sending.value = false;
 		waiting.value = false;
-		notify(
-			e?.deliveryUncertain
-				? e.message
-				: "Delivery not confirmed. Check delivery before sending again.",
-			{ type: "info" }
-		);
+		notify(deliveryFailureCopy(e), { type: "info" });
 	}
 }
 
@@ -10594,7 +10655,6 @@ function openProactive() {
 	proactiveToast.value = null;
 }
 function onEvent(p) {
-	_recoveryRefreshEpoch++;
 	// Auto-generated title arrives async (worker titles the chat after the
 	// first real turn). Handle it before the current-conversation guard so the
 	// sidebar updates even if the user has since switched chats.
@@ -10770,6 +10830,7 @@ function onEvent(p) {
 			runStartMs.value = Date.now();
 			nowMs.value = Date.now();
 			activeTools.value = [];
+			sending.value = true;
 			waiting.value = true;
 			statusPhase.value = "model";
 			store.streamingConvId = p.conversation_id || currentId.value;
@@ -10814,6 +10875,10 @@ function onEvent(p) {
 			// bypass and are always applied, unchanged.
 			if (pumpFenceReject(p)) break;
 			pumpFenceAccept(p, false);
+			currentRunId.value = p.run_id || currentRunId.value;
+			currentMsgId.value = p.message_id || currentMsgId.value;
+			store.streamingConvId = currentId.value;
+			sending.value = true;
 			// The "compacted" run:status frame is lossy (see the run:status case
 			// below); if it never arrived, real progress after a "compacting"
 			// marker means the compaction already ended, so clear the stuck lock
@@ -11439,7 +11504,7 @@ const _currentScope = () => currentId.value || _NEW_CHAT_SCOPE;
 // Failed optimistic bubbles whose send was rejected, kept ORIGIN-scoped and DECOUPLED from the
 // rendered `messages` array so they (and the voice-release token they carry) survive a mid-send
 // conversation switch — loadConversation() re-injects a scope's entries when the user returns.
-const _pendingSends = createPendingSends();
+const _pendingSends = pendingSends;
 let _micConvId = null; // scope the take was started in — its transcript belongs to that scope
 let voiceStore = null; // createVoiceDictationStore — one per browser session
 let voiceMirror = null; // createVoiceAudioMirror — IndexedDB, one per session
@@ -12857,6 +12922,8 @@ onMounted(async () => {
 	composerRef.value?.focusInput();
 });
 onBeforeUnmount(() => {
+	_recoveryViewActive = false;
+	_recoveryRefreshEpoch++;
 	// review C3: the component itself is being torn down (route navigation
 	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole

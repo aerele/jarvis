@@ -31,7 +31,9 @@ class TestChatSendRequests(unittest.TestCase):
 		self.success = {"ok": True, "conversation_id": "A", "message_id": "M", "run_id": "R"}
 		self.real_send = api.send_message
 		self.dispatch = self.keep_patch(patch.object(api, "send_message", return_value=self.success))
-		self.owned = self.keep_patch(patch.object(api, "_get_owned_conversation"))
+		self.owned = self.keep_patch(
+			patch.object(api, "_get_owned_conversation", return_value=frappe._dict(name="A"))
+		)
 		self.access = self.keep_patch(patch.object(receipts, "require_jarvis_access"))
 
 	def tearDown(self):
@@ -114,7 +116,7 @@ class TestChatSendRequests(unittest.TestCase):
 		self.send()
 		frappe.db.commit()
 		self.owned.side_effect = frappe.DoesNotExistError()
-		self.assertEqual(receipts.check_delivery(self.request_id)["delivery"], "unknown")
+		self.assertEqual(receipts.check_delivery(self.request_id)["receipt_status"], "conversation_deleted")
 		self.assertEqual(self.send()["delivery"], "unknown")
 		self.dispatch.assert_called_once()
 
@@ -240,20 +242,15 @@ class TestChatSendRequests(unittest.TestCase):
 				self.assertEqual(errors, [])
 				self.assertEqual(self.dispatch.call_count, 1 if same_id else 2)
 
-	def test_pre_effect_refusal_is_settled_but_post_effect_failure_is_unknown(self):
-		def refuse(**kwargs):
-			frappe.flags.jarvis_send_receipt_guard["safe"] = True
-			raise frappe.ValidationError("This is a macro run. Start a new chat.")
-
-		self.dispatch.side_effect = refuse
+	def test_macro_preflight_is_settled_without_entering_the_pipeline(self):
+		self.owned.return_value = frappe._dict(name="A", skip_confirmation=1)
 		result = self.send()
 		self.assertEqual(result["delivery"], "settled")
 		self.assertFalse(result["result"]["ok"])
-		self.assertNotIn("macro run", result["result"]["message"])
 		frappe.db.commit()
 		self.assertFalse(receipts.check_delivery(self.request_id)["result"]["ok"])
 		self.send()
-		self.dispatch.assert_called_once()
+		self.dispatch.assert_not_called()
 
 	def test_receipt_filters_private_summaries_and_preserves_confirmation_failure(self):
 		self.dispatch.return_value = {
@@ -291,7 +288,7 @@ class TestChatSendRequests(unittest.TestCase):
 		self.assertEqual(self.send()["delivery"], "unknown")
 		self.dispatch.assert_called_once()
 
-	def test_real_pipeline_macro_refusal_keeps_actionable_reason(self):
+	def test_macro_preflight_keeps_actionable_reason(self):
 		self.dispatch.side_effect = self.real_send
 		self.owned.return_value = frappe._dict(name="A", skip_confirmation=1, origin_page="")
 		with (
@@ -304,10 +301,8 @@ class TestChatSendRequests(unittest.TestCase):
 		frappe.db.commit()
 		self.assertIn("Start a new chat", receipts.check_delivery(self.request_id)["result"]["message"])
 
-	def test_real_effect_boundary_prevents_rejection_after_possible_work(self):
+	def test_unclassified_exception_is_never_a_safe_rejection(self):
 		def uncertain(**kwargs):
-			frappe.flags.jarvis_send_receipt_guard["safe"] = True
-			api._send_receipt_effect_boundary()
 			raise frappe.ValidationError("too late to prove no effect")
 
 		self.dispatch.side_effect = uncertain
@@ -338,7 +333,6 @@ class TestChatSendRequests(unittest.TestCase):
 
 	def test_pre_effect_exception_text_is_never_returned_or_persisted(self):
 		def refuse(**kwargs):
-			frappe.flags.jarvis_send_receipt_guard["safe"] = True
 			raise frappe.ValidationError("private business record")
 
 		self.dispatch.side_effect = refuse
@@ -346,7 +340,7 @@ class TestChatSendRequests(unittest.TestCase):
 		frappe.db.commit()
 		self.assertNotIn("private", json.dumps(r))
 		self.assertNotIn("private", receipts._read(self.keys[0]).result_json)
-		self.assertEqual(receipts.check_delivery(self.request_id)["result"], r["result"])
+		self.assertEqual(receipts.check_delivery(self.request_id), r)
 
 	def test_interrupted_diagnostic_rolls_back_uncommitted_work_and_respects_wipe(self):
 		def partial(**kwargs):
@@ -371,3 +365,88 @@ class TestChatSendRequests(unittest.TestCase):
 		self.assertEqual(self.send()["receipt_status"], "unavailable")
 		frappe.db.commit()
 		self.assertFalse(receipts._read(self.keys[-1]).result_json)
+
+	def test_interruption_logs_correlated_frames_without_private_exception_text(self):
+		self.dispatch.side_effect = RuntimeError("secret key and invoice")
+		with patch("frappe.logger") as logger:
+			self.send()
+		log = logger.return_value.error
+		log.assert_called_once()
+		diagnostic = json.loads(log.call_args.args[1])
+		self.assertEqual(diagnostic["request_key"], self.keys[0])
+		self.assertEqual(diagnostic["exception_type"], "RuntimeError")
+		self.assertTrue(diagnostic["frames"])
+		self.assertNotIn("secret", json.dumps(diagnostic))
+
+	def test_real_pipeline_commit_then_dispatch_crash_cannot_send_twice(self):
+		conv = frappe.get_doc({"doctype": api.CONV, "title": "Receipt regression", "status": "Active"})
+		conv.insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.owned.return_value = conv
+		self.dispatch.side_effect = self.real_send
+		self.keys.append(receipts._key(self.request_id))
+		try:
+			with (
+				patch.object(api, "has_jarvis_access", return_value=True),
+				patch.object(api, "validate_can_send", return_value=(True, None)),
+				patch.object(api.admission, "turn_machine_enabled", return_value=False),
+				patch.object(api, "_compacting_reject", return_value=None),
+				patch.object(api, "_conversation_busy", return_value=False),
+				patch.object(
+					api,
+					"_dispatch_turn",
+					side_effect=frappe.ValidationError("macro refusal after committed message"),
+				) as dispatch,
+			):
+				args = dict(conversation=conv.name, message="synthetic receipt regression")
+				result = receipts.send_message(self.request_id, **args)
+				self.assertEqual(result["receipt_status"], "interrupted")
+				frappe.db.commit()
+				self.assertEqual(frappe.db.count(api.MSG, {"conversation": conv.name}), 1)
+				self.assertEqual(receipts.send_message(self.request_id, **args)["delivery"], "unknown")
+				self.assertEqual(frappe.db.count(api.MSG, {"conversation": conv.name}), 1)
+				dispatch.assert_called_once()
+				self.dispatch.assert_called_once()
+		finally:
+			frappe.db.rollback()
+			frappe.db.delete(api.MSG, {"conversation": conv.name})
+			frappe.db.delete(api.CONV, {"name": conv.name})
+			frappe.db.commit()
+
+	def test_real_1020_claim_conflict_retries_before_dispatch(self):
+		from frappe.model.document import Document
+
+		from jarvis.tests.race_harness import other_connection, snapshot_isolation_on
+
+		# A committed row gives the second connection a real stale-lock conflict.
+		self.send()
+		frappe.db.commit()
+		contended = self.keys[0]
+		self.request_id = uuid.uuid4().hex
+		self.dispatch.reset_mock()
+		insert = Document.insert
+		conflicts = []
+
+		def insert_with_race(doc, *args, **kwargs):
+			if doc.doctype == receipts.DOCTYPE and not conflicts:
+				frappe.db.sql(f"SELECT name FROM `tab{receipts.DOCTYPE}` WHERE name=%s", contended)
+				with other_connection() as other:
+					other.sql(
+						f"UPDATE `tab{receipts.DOCTYPE}` SET result_json='{{}}' WHERE name=%s", contended
+					)
+					other.commit()
+				try:
+					frappe.db.sql(
+						f"SELECT name FROM `tab{receipts.DOCTYPE}` WHERE name=%s FOR UPDATE", contended
+					)
+				except frappe.QueryDeadlockError as exc:
+					cause = exc.args[0]
+					conflicts.append(cause.args[0] if isinstance(cause, Exception) else cause)
+					raise
+				self.fail("snapshot isolation did not produce the armed conflict")
+			return insert(doc, *args, **kwargs)
+
+		with snapshot_isolation_on(), patch.object(Document, "insert", insert_with_race):
+			self.assertEqual(self.send()["delivery"], "settled")
+		self.assertEqual(conflicts, [1020])
+		self.dispatch.assert_called_once()

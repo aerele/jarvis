@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import BrandMark from "../components/BrandMark.vue";
 import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
@@ -15,7 +15,7 @@ import Sheet from "../components/Sheet.vue";
 import AutoModeToggle from "../components/AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
-import { observeDelivery } from "@shared/lib/sendDelivery.js";
+import { observeDelivery, deliveryFailureCopy } from "@shared/lib/sendDelivery.js";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -38,7 +38,10 @@ const input = ref(restored?.text || "");
 const busy = ref(false);
 const error = ref("");
 const attachments = ref(
-	(restored?.attachments || []).map((a, i) => ({ ...a, key: a.key || `restored-${i}` }))
+	(restored?.attachments || []).map((a, i) => {
+		a.key ||= `restored-${i}`;
+		return a;
+	})
 );
 const settings = ref(null);
 const starters = ref(DEFAULT_STARTERS);
@@ -96,7 +99,7 @@ const effortOn = computed(() => effortOffered(settings.value));
 const hasDraft = computed(
 	() => input.value.trim().length > 0 || attachments.value.some((a) => a.file_url)
 );
-const uploading = computed(() => attachments.value.some((a) => a.uploading));
+const uploading = computed(() => attachments.value.some((a) => a.uploading || !a.file_url));
 
 function modelDesc(name) {
 	const n = String(name).toLowerCase();
@@ -127,16 +130,26 @@ function useStarter(card) {
 	});
 }
 
+watch(
+	() => recoveryState.requests.map((r) => `${r.id}:${r.state}`).join("|"),
+	() => {
+		for (const request of recoveryState.requests)
+			if (["accepted", "confirmed"].includes(request.state)) request.needsAdoption = false;
+	},
+	{ immediate: true }
+);
+
 const pendingNewChat = computed(() => recoveryState.requests.some((r) => !r.conversation));
 
 function draftSnapshot() {
 	return {
 		text: input.value,
-		attachments: attachments.value.map(({ preview, ...file }) => file),
+		attachments: [...attachments.value],
 		model: selectedModel.value,
 		effort: selectedEffort.value,
 		thinking: sendThinking(settings.value, selectedEffort.value),
 		autoMode: autoView.value.on,
+		autoTouched,
 	};
 }
 let submitted = false;
@@ -145,7 +158,9 @@ function preserveDraft() {
 	if (submitted && !input.value && !attachments.value.length) return;
 	const draft = draftSnapshot();
 	if (editing?.state === "rejected") Object.assign(editing, draft);
-	else if (!editing) recoveryState.heroDraft = draft;
+	else if (!editing)
+		recoveryState.heroDraft =
+			draft.text.trim() || draft.attachments.length || draft.autoTouched ? draft : null;
 }
 function reviewPending() {
 	preserveDraft();
@@ -199,6 +214,7 @@ async function send(text = input.value) {
 		autoMode: request.autoMode,
 	};
 	const attempt = request.id;
+	const operation = sendRecovery.begin(request);
 	input.value = "";
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
 	attachments.value = [];
@@ -207,17 +223,21 @@ async function send(text = input.value) {
 	router.push("/send-recovery");
 	try {
 		const outcome = await observeDelivery(api.sendRecoverableMessage(request), () => {
-			if (request.id === attempt) sendRecovery.settle(request, null);
+			if (request.id === attempt) sendRecovery.settle(request, null, operation);
 		});
-		if (request.id === attempt) sendRecovery.settle(request, outcome);
-	} catch {
-		if (request.id === attempt) sendRecovery.settle(request, null);
+		if (request.id === attempt) sendRecovery.settle(request, outcome, operation);
+	} catch (error) {
+		if (request.id === attempt) {
+			sendRecovery.settle(request, null, operation);
+			if (request.operation === operation && request.state === "uncertain")
+				request.note = deliveryFailureCopy(error);
+		}
 	} finally {
 		busy.value = false;
 	}
 }
 
-let autoTouched = !!restored;
+let autoTouched = !!editing || !!restored?.autoTouched;
 function toggleAuto() {
 	autoTouched = true;
 	if (autoArmed.value) {
@@ -261,16 +281,13 @@ async function attach(e) {
 	attachments.value.push(...staged);
 
 	await Promise.all(
-		staged.map(async (a) => {
+		attachments.value.slice(-staged.length).map(async (a) => {
 			try {
 				const up = await api.uploadFile(a.file);
-				const row = attachments.value.find((x) => x.key === a.key);
-				if (row) {
-					row.file_url = up.file_url;
-					row.uploading = false;
-				}
+				Object.assign(a, { file_url: up.file_url, uploading: false });
 			} catch (err) {
-				removeAttachment(a.key);
+				a.uploading = false;
+				a.uploadError = true;
 				error.value = err?.message || `Couldn't upload ${a.name}.`;
 			}
 		})
@@ -425,6 +442,9 @@ onUnmounted(() => {
 						</svg>
 						<span class="jv-att-name">{{ a.name }}</span>
 					</div>
+					<span v-if="a.uploadError" role="alert"
+						>Upload failed. Remove and attach again.</span
+					>
 					<div v-if="a.uploading" class="jv-att-busy">
 						<span class="jv-spinner is-light" />
 					</div>
