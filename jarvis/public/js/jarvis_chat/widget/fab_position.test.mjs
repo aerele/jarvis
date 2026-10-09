@@ -9,6 +9,7 @@ import {
   IDLE_OPACITY,
   STORAGE_KEY,
   chooseSide,
+  startsOnGrip,
   clampY,
   xForSide,
   yToRatio,
@@ -264,4 +265,14 @@ test("createIdleTimer: dispose() cancels the pending fire and further pokes are 
   timer.poke();
   clock.advance(10000);
   assert.equal(fired, 0);
+});
+
+test("startsOnGrip: only a press on the grip (or inside it) starts a drag (#671)", () => {
+  const el = (insideGrip) => ({
+    closest: (sel) => (sel === ".jvw-grip" && insideGrip ? {} : null),
+  });
+  assert.equal(startsOnGrip(el(true)), true);
+  assert.equal(startsOnGrip(el(false)), false);
+  assert.equal(startsOnGrip(null), false);
+  assert.equal(startsOnGrip({}), false); // a target with no closest(), e.g. a text node
 });
