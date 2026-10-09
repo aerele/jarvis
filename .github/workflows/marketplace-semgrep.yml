@@ -1,8 +1,8 @@
 name: Marketplace Semgrep
 
 # Runs the Frappe Marketplace audit's own Semgrep ruleset (frappe/press, fetched live so CI
-# tracks what the audit runs) and fails on what fails the audit: a blocking rule or a
-# Critical/Major finding. Minor findings are only reported. See jarvis/ci/marketplace_semgrep.py.
+# tracks what the audit runs) and fails on what lowers the audit result: a blocking rule or a
+# Critical, Major or Minor finding. Info findings are only reported. See jarvis/ci/marketplace_semgrep.py.
 
 on:
   workflow_call:
