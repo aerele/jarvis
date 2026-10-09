@@ -245,7 +245,7 @@
 // host (ChatView) owns the data and the persistence, passed via props and
 // select-model / select-thinking emits (mirrors how <Composer> was extracted).
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { useDismissable } from "@/composables/useDismissable";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { useShellStore } from "@/stores/shell";
@@ -280,7 +280,7 @@ const props = defineProps({
 const emit = defineEmits(["select-model", "select-thinking", "add-provider"]);
 
 const store = useShellStore();
-const assistantName = agentName;
+const assistantName = computed(() => brand.agentName);
 const open = ref(false);
 const effortOpen = ref(false);
 const personaOpen = ref(false);

@@ -1,7 +1,7 @@
 <template>
 	<SettingsPane
 		title="Connectors"
-		:description="`Give ${agentName} access to other tools like GitHub, Linear or Stripe.`"
+		:description="`Give ${brand.agentName} access to other tools like GitHub, Linear or Stripe.`"
 	>
 		<template v-if="loaded" #actions>
 			<TabButtons
@@ -155,7 +155,7 @@ import AddConnectorDialog from "@/components/settings/AddConnectorDialog.vue";
 import ConnectorDirectory from "@/components/settings/ConnectorDirectory.vue";
 import ConnectorRow from "@/components/settings/ConnectorRow.vue";
 import { deleteConnector, listConnectors, testConnector, updateConnector } from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 import { useShellStore } from "@/stores/shell";
 
@@ -293,7 +293,7 @@ async function toggleEnabled(row, value) {
 function confirmDelete(row) {
 	confirmDialog({
 		title: "Delete this connector?",
-		message: `${agentName} will no longer be able to use "${row.label}". This cannot be undone.`,
+		message: `${brand.agentName} will no longer be able to use "${row.label}". This cannot be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await deleteConnector(row.name);

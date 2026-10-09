@@ -10,7 +10,7 @@
 						>No access to Dashboards</span
 					>
 					<span class="text-p-base text-ink-gray-6">
-						Ask your {{ agentName }} admin for access to dashboards.
+						Ask your {{ brand.agentName }} admin for access to dashboards.
 					</span>
 				</div>
 			</div>
@@ -237,7 +237,7 @@ import TabBar from "@/components/list/TabBar.vue";
 import { session } from "@/data/session";
 import { useShellStore } from "@/stores/shell";
 import { getCanvas } from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import {
 	getDashboardsCaps,
 	getDashboard,

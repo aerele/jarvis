@@ -160,7 +160,7 @@
 							heldOff(form.schedule_enabled) ||
 							armedOff(form.schedule_enabled) ||
 							scheduleBlocked ||
-							`${agentName} runs this macro automatically.`
+							`${brand.agentName} runs this macro automatically.`
 						"
 						:disabled="
 							saving ||
@@ -332,7 +332,7 @@ import {
 } from "@/lib/scheduleAnchor";
 import * as api from "@/api";
 import * as apiMacros from "@/api/macros";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { session } from "@/data/session";
 import { cannotScheduleReason } from "@/lib/macroSchedule";

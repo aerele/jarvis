@@ -12,7 +12,7 @@
 					>Describe a dashboard</span
 				>
 				<span class="truncate text-p-sm text-ink-gray-6"
-					>{{ agentName }} draws it on the canvas</span
+					>{{ brand.agentName }} draws it on the canvas</span
 				>
 			</div>
 			<div class="flex shrink-0 items-center gap-1">
@@ -416,7 +416,7 @@ import {
 	compactConversation,
 	retryMessage,
 } from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
@@ -1139,7 +1139,7 @@ function applyRestoredRun(restored) {
 
 // A refused send or retry. The toast renders HTML, so the whole message is escaped.
 function toastRejection(r, fallback) {
-	const { message, type } = sendRejectionCopy(r.reason, agentName, r, fallback);
+	const { message, type } = sendRejectionCopy(r.reason, brand.agentName, r, fallback);
 	(toast[type] || toast.error)(escapeHtml(message));
 }
 

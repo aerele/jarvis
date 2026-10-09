@@ -55,6 +55,7 @@
 // self-owned key, §14 DA-06). Empty query = nav items + 10 recent chats;
 // typing = filtered nav + server title search (D40, 300ms debounce).
 import { ref, computed, watch, nextTick } from "vue";
+import { brand } from "@/branding";
 import { useRouter } from "vue-router";
 import { Dialog, FeatherIcon } from "frappe-ui";
 import { useShellStore } from "@/stores/shell";
@@ -126,7 +127,7 @@ const navItems = computed(() => [
 	},
 	{
 		name: "nav-what-can-i-ask",
-		label: "What can I ask Jarvis?",
+		label: `What can I ask ${brand.agentName}?`,
 		icon: "help-circle",
 		action: () => store.requestNewChat(router),
 	},
