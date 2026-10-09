@@ -329,8 +329,9 @@ async function onAttachPicked(e) {
 		uploading.value = false;
 	}
 }
-function onUploadError(e) {
-	toast.error(uploadErrMsg(e));
+// Frappe's message does not name the file, so with several files the toast does.
+function onUploadError(e, file) {
+	toast.error(`${escapeHtml(file.name)}: ${uploadErrMsg(e)}`);
 	uploadHint.value =
 		"Portal accounts can attach JPG, PNG, GIF, PDF, TXT, CSV and MS Office files only.";
 }
