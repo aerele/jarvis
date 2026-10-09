@@ -24,7 +24,7 @@ const REFUSALS = {
 	needs_own_confirm:
 		"This action must be confirmed on its own, not run automatically. Use Confirm instead.",
 	skill_not_armed:
-		"The skill this would run is no longer armed. Use Confirm instead, or arm it again.",
+		"The skill this would run is no longer armed, or was switched off. Use Confirm instead.",
 	storage_unavailable: "Couldn't reach confirmation storage. Try again in a moment.",
 	storage_outcome_unknown: "Lost track of whether that went through. Check before retrying.",
 };
