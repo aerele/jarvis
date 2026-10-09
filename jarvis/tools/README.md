@@ -383,8 +383,11 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
     off (refused like any structure write). Set it with `bench --site <site>
     set-config jarvis_structure_writes_disabled 1`; it is read from the config
     files at park and at Confirm, so no restart is needed. Only a number counts
-    (Frappe's own rule): a hand-typed `"yes"` does not switch it on. Needs `bench migrate` (`sealed_undo`);
-    until then they are refused too.
+    (Frappe's own rule): a hand-typed `"yes"` does not switch it on. Either file
+    switches it off: a `0` in `site_config.json` does not switch back on what
+    `common_site_config.json` set off. A config file that cannot be read is off
+    too, with one Error Log (`jarvis.structure.switch_unreadable`). Needs
+    `bench migrate` (`sealed_undo`); until then they are refused too.
   - ONE Workflow created (`create_doc`) or updated (`update_doc` by name); a
     delete, a batch, a rename and a move to another form stay refused. Saving a
     Workflow sets every other workflow of the form inactive when it is active,
@@ -393,39 +396,62 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
     the card (in stored form: every state and transition whole, Frappe's defaults
     spelled out, each linked name exact; an update always carries both tables)
     says which active workflow it replaces, how many records get a state and how
-    many keep one this workflow lacks (Frappe's `get_workflow_state_count`), "This
-    runs code for every user." for a transition `condition` (a Python expression
-    Frappe evaluates on the server) or an expression as update value, the access
-    line, a state or action open to everyone signed in (role All) or to the
-    Administrator only, which states submit or cancel, what `update_field` writes,
-    how many transitions allow self-approval, and that it emails. A condition
+    many keep one this workflow lacks and so cannot be saved until their state is
+    changed (what Frappe's `get_workflow_state_count` counts; both counts stop at
+    a bound, the second reads "more than 10000"). What is particular to this
+    workflow comes first: an active workflow with no transitions, which states
+    submit or cancel, how many transitions allow self-approval, what
+    `update_field` writes, an existing text field used as the state field, a state
+    or action open to everyone signed in (role All) or to the Administrator only.
+    Then the lines every workflow card carries: the access line, and that it
+    emails. "This runs code for every user." is said only for a condition or
+    expression chat could not have written (set up in Desk, kept unchanged and
+    not checked here), which is named. A condition
     written from chat is ONE restricted expression over the document
     (`_workflow_guard.expression_problem`): a comparison, or and / or / not of
     comparisons, of this form's real fields (`doc.field`, `doc["field"]`,
     `doc.get("field")`), text, numbers and arithmetic on numbers and number
     fields; `in` / `not in` take a literal list of at most 100 values. Refused,
     with the Desk pointer: `frappe.`, any other call or name, a field the form
-    does not have, a bare value, arithmetic on text or on a list, division by
-    zero, a huge number, a lambda, a comprehension, an f-string, a hidden or
-    look-alike character, more than 500 characters (controller default; the owner
-    may relax it). A Frappe 16 update value marked as an expression follows the
+    does not have, a bare value, arithmetic on text or on a list, a huge number,
+    a lambda, a comprehension, an f-string, a hidden or look-alike character,
+    more than 500 characters (controller default; the owner may relax it). Also
+    refused, because Frappe evaluates a condition with nothing to catch an error
+    and it would reach every user who opens or moves a record: ordering (`<`
+    `>` `<=` `>=`) anything but two numbers, a number being an Int, Float,
+    Currency, Percent or Check field (the types Frappe never leaves empty; a
+    Duration, Long Int or Rating can be) (a Date field against text raises,
+    so a date rule is set up in Desk; text against text raises when the field is
+    empty), and dividing by anything but a plain non-zero number. A Frappe 16 update value marked as an expression follows the
     same rule but may be a plain value. An edit may keep a richer condition a row already has, as it
     is. Guest is never an approving or editing role. It leads with the
     structural line only when a column is added. Refused at park: a form chat
     never customises (the Custom Field list), a child table or Single, a missing
     or differently spelled Workflow State / Action / Role, an expression that does
     not compile, a submit / cancel state on a form that cannot be submitted, an
-    active workflow with no state, `transition_tasks` (Frappe 16: scripts and
-    webhooks), a state field that cannot be added (the Custom Field checks) or
+    active workflow with no state, a state listed twice, a virtual form or one
+    with no table yet, an `update_field` that gives access (`_FIELD_SENSITIVE`),
+    a change of the state field on an edit, `transition_tasks` (Frappe 16:
+    scripts and webhooks), a state field that cannot be added (the Custom Field checks) or
     that Frappe would rename or cannot fill (`parent`, `select`), and a fill of
-    more than 5,000 records, whether the state column is new or not. Under the lock, before the claim, a card
-    that no longer says which workflow is replaced ends `stale`. When the confirm
+    more than 5,000 records, whether the state column is new or not. Every state
+    and action that does not exist yet is named in one refusal. Under the lock,
+    before the claim, a card that no longer says which workflow is replaced ends
+    `stale`, and so does one whose check could not be made at all. A snapshot
+    that cannot be read whole stops the write before its record is saved
+    (`_guarded_structure.snapshot_failed`): nothing is changed and the card stays
+    to be confirmed again. When the confirm
     does not end as done, the workflow is removed (or put back from its
     before-image), the one that was active is active again, a state field whose
     column is missing is removed and the states filled in are emptied: a reported
-    failure never leaves a workflow live. One exception: a workflow whose worker
-    died after it was saved and that people have used since (a record has moved
-    on from the state it was filled with) is NOT taken away; the row ends
+    failure never leaves a workflow live. A confirm whose worker died is cleaned
+    up as soon as its form's lock is free (after 60 s, not the 10 minutes other
+    rows wait: the lock is held for the whole confirm; a confirm that outlives 60 s
+    AND lost its lock connection could be cleaned up beside itself, as one that
+    outlived 10 minutes could before, and `structure_lock_lost` reports that). One exception: a workflow
+    that people have used since it was saved (any record of the form carrying a
+    state was saved since, or a filled record carries another state) is NOT
+    taken away, and a record saved since never has its state emptied; the row ends
     `partial`, the workflow stays, and one Error Log
     (`jarvis.pending_action.structure_needs_a_person`) names it.
   - Operator recovery aid, not a product feature: for a Workflow and for Domain

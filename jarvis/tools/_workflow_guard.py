@@ -66,7 +66,12 @@ from dataclasses import dataclass, field
 import frappe
 from frappe.utils import cint, cstr, get_datetime, strip_html
 
-from jarvis.exceptions import InvalidFieldValueError, PermissionDeniedError, StructureRefusedError
+from jarvis.exceptions import (
+	InvalidFieldValueError,
+	JarvisError,
+	PermissionDeniedError,
+	StructureRefusedError,
+)
 from jarvis.tools import _custom_field_guard as cfg
 from jarvis.tools import _guarded_structure as gs
 from jarvis.tools._guarded_structure import CleanUp
@@ -81,6 +86,9 @@ _BUILDER_KEYS = ("workflow_data",)
 _STATE_FIELDTYPES = ("Link", "Data")
 # Filling the state on more records than this cannot be snapshotted for an undo.
 FILL_NAMES_MAX = 5000
+# The card counts records left in a state the workflow lacks up to here, then says
+# "more than".
+KEPT_COUNT_MAX = 10000
 _ROW_SYSTEM_KEYS = frozenset(
 	{
 		"idx",
@@ -160,10 +168,36 @@ def _exact(doctype: str, value, what: str) -> str:
 	return found
 
 
+_MADE_FIRST = {"Workflow State": "state", "Workflow Action Master": "action"}
+
+
+def _all_exist(doc: dict) -> None:
+	"""Every state and action the workflow names that does not exist yet, in one
+	refusal: a request with three new states is one round trip, not three."""
+	missing: dict[str, list[str]] = {}
+	for table in TABLES:
+		for row in doc[table]:
+			for key, target in _LINKS[table]:
+				value = row.get(key)
+				if target not in _MADE_FIRST or not isinstance(value, str) or not value.strip():
+					continue
+				if value not in missing.get(target, ()) and not frappe.db.get_value(target, value, "name"):
+					missing.setdefault(target, []).append(value)
+	if not missing:
+		return
+	parts = []
+	for target, names in missing.items():
+		word = _MADE_FIRST[target]
+		parts.append(f"{word if len(names) == 1 else word + 's'} {', '.join(repr(n) for n in names)}")
+	raise InvalidFieldValueError(
+		f"The workflow names what does not exist yet: {'; '.join(parts)}. Each is an ordinary record "
+		f"({' / '.join(missing)}): create them first, or use existing ones, then send the workflow again."
+	)
+
+
 def _scalar(df, value, where: str):
 	"""One value as the save stores it: a Check as 0 / 1, a document status as the
-	text "0" / "1" / "2" (Frappe's own checks compare it as text), other text
-	trimmed. Anything that is not one plain value is refused."""
+	text "0" / "1" / "2" (how Frappe stores it), other text trimmed. Anything that is not one plain value is refused."""
 	label = f"{where}{df.label or df.fieldname}"
 	if df.fieldtype == "Check":
 		return cint(value)
@@ -312,12 +346,17 @@ def expression_problem(
 	is compared: this document's own fields (``doc.field``, ``doc["field"]``,
 	``doc.get("field")`` / ``doc.get("field", default)``, each a real field of
 	``doctype``), text, numbers, True / False / None, and arithmetic (``+ - * / //
-	%``) on numbers and fields. ``in`` / ``not in`` take a literal list of at most
-	a hundred such values on the right. Everything else is refused: any other name
-	(``frappe``), call or attribute, arithmetic on text or on a list (formatting,
-	repetition), a division by zero, a huge number, a lambda, a comprehension, an
-	f-string, a conditional, a hidden or look-alike character, more than 500
-	characters.
+	%``) on numbers and number fields. ``in`` / ``not in`` take a literal list of at
+	most a hundred such values on the right. Everything else is refused: any other
+	name (``frappe``), call or attribute, arithmetic on text or on a list
+	(formatting, repetition), a huge number, a lambda, a comprehension, an f-string,
+	a conditional, a hidden or look-alike character, more than 500 characters.
+
+	Refused too, because Frappe evaluates a condition with nothing to catch an
+	error and it would reach every user who opens or moves a record: ordering
+	(``< > <= >=``) anything but two numbers (a date field against text, text
+	against text when the field is empty), and dividing by anything but a plain
+	number that is not zero. A date rule is set up in Desk.
 
 	``value``: the expression gives a value instead of a yes / no (Frappe 16: a
 	state's update value marked as an expression), so its top level may also be a
@@ -335,7 +374,7 @@ def expression_problem(
 	except (SyntaxError, ValueError, RecursionError):
 		return "it is not one Python expression"
 	# The state field too: a workflow that is about to add it may already name it.
-	fields = {state_field: False, **_fields_of(doctype)} if doctype else None
+	fields = {state_field: TEXT, **_fields_of(doctype)} if doctype else None
 	try:
 		if value and not _is_condition(tree.body):
 			_operand(tree.body, fields, text=True)
@@ -346,21 +385,36 @@ def expression_problem(
 	return None
 
 
-_NUMERIC_TYPES = frozenset({"Int", "Long Int", "Float", "Currency", "Percent", "Check", "Rating", "Duration"})
+# The column types Frappe never leaves empty (database/schema.py ``NOT_NULL_TYPES``)
+# and hands to a condition as a number (``as_dict`` casts exactly these). A
+# Duration, a Long Int and a Rating can be NULL, and None cannot be ordered or
+# added to: they count as text here.
+_NUMERIC_TYPES = frozenset({"Int", "Float", "Currency", "Percent", "Check"})
+_DATE_TYPES = frozenset({"Date", "Datetime", "Time"})
+# What a value is, for the two things Python refuses at run time: ordering (< > <=
+# >=) anything but two numbers, and arithmetic on anything but numbers.
+NUMBER, DATE, TEXT, EMPTY = "number", "date", "text", "empty"
+_ORDERING = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 
 
-def _fields_of(doctype: str) -> dict[str, bool]:
+def _fields_of(doctype: str) -> dict[str, str]:
 	"""Every name a document of ``doctype`` carries a value under (its fields, custom
-	ones among them, and Frappe's own), and whether that value is a number: only a
-	number may stand in arithmetic (text times a number is repetition)."""
+	ones among them, and Frappe's own), and what that value is: a number, a date or
+	time, or text. Only a number may stand in arithmetic (text times a number is
+	repetition), and only numbers may be ordered: a column of ``_NUMERIC_TYPES`` is
+	never empty, while a date, a text field and the other number-like types can be,
+	and Frappe hands a date over as a date, so ordering any of them raises for
+	every user who opens the record."""
 	from frappe.model import default_fields, no_value_fields
 
 	meta = frappe.get_meta(doctype)
-	fields = dict.fromkeys(default_fields, False)
-	fields.update(docstatus=True, idx=True)
+	fields = dict.fromkeys(default_fields, TEXT)
+	fields.update(docstatus=NUMBER, idx=NUMBER, creation=DATE, modified=DATE)
 	for df in meta.fields:
 		if df.fieldtype not in no_value_fields:
-			fields[df.fieldname] = df.fieldtype in _NUMERIC_TYPES
+			fields[df.fieldname] = (
+				NUMBER if df.fieldtype in _NUMERIC_TYPES else DATE if df.fieldtype in _DATE_TYPES else TEXT
+			)
 	return fields
 
 
@@ -383,14 +437,38 @@ def _condition(node, fields) -> None:
 		raise _NotAllowed(
 			"it is not a comparison (such as doc.status == 'Open'), nor and / or / not of comparisons"
 		)
-	_operand(node.left, fields, text=True)
+	left = _operand(node.left, fields, text=True)
 	for op, right in zip(node.ops, node.comparators, strict=True):
 		if isinstance(op, ast.In | ast.NotIn):
 			_literal_list(right)
-		elif isinstance(op, _COMPARISONS):
-			_operand(right, fields, text=True)
-		else:
+			left = TEXT  # a list is never ordered in a chained comparison
+			continue
+		if not isinstance(op, _COMPARISONS):
 			raise _NotAllowed("it uses a comparison that is not allowed")
+		kind = _operand(right, fields, text=True)
+		if isinstance(op, _ORDERING):
+			_orderable(left, kind)
+		left = kind
+
+
+def _orderable(left: str, right: str) -> None:
+	"""``<`` ``>`` ``<=`` ``>=`` only between two numbers: Python raises on a date
+	against text, on text against a number, and on an empty value against anything,
+	and Frappe evaluates a condition with nothing to catch that."""
+	if left == NUMBER and right == NUMBER:
+		return
+	if DATE in (left, right):
+		raise _NotAllowed(
+			"it orders a date or time field with a less-than or greater-than comparison, which fails "
+			"when a record is opened (the field can be empty, and a date is not compared with text); "
+			"a date rule is set up in the Workflow form in Desk"
+		)
+	# No angle brackets in a refusal: the tool layer strips what looks like a tag.
+	raise _NotAllowed(
+		"it orders something other than two numbers with a less-than or greater-than comparison, "
+		"which fails when a record is opened; use == or != for text, or an Int, Float, Currency "
+		"or Percent field"
+	)
 
 
 def _literal_list(node) -> None:
@@ -405,55 +483,76 @@ def _literal_list(node) -> None:
 		_literal(item, text=True)
 
 
-def _literal(node, *, text: bool) -> None:
+def _literal(node, *, text: bool) -> str:
 	v = node.value
-	if v is None or isinstance(v, bool):
-		return
+	if v is None:
+		if not text:
+			raise _NotAllowed("it does arithmetic on None")
+		return EMPTY
+	if isinstance(v, bool):
+		return NUMBER
 	if isinstance(v, str):
 		if not text:
 			raise _NotAllowed("it does arithmetic on text")
-		return
+		return TEXT
 	if isinstance(v, int | float) and abs(v) <= _NUMBER_MAX:  # nan and inf fail the comparison
-		return
+		return NUMBER
 	raise _NotAllowed("it holds a value that is not text, a reasonable number, True, False or None")
 
 
-def _operand(node, fields, *, text: bool) -> None:
+def _operand(node, fields, *, text: bool) -> str:
 	"""One side of a comparison: a field of the document, a plain value, or
 	arithmetic on numbers and fields. ``text``: a text literal may stand here (never
-	inside arithmetic, where it would format or repeat)."""
+	inside arithmetic, where it would format or repeat). Returns what the value is
+	(``NUMBER`` / ``DATE`` / ``TEXT`` / ``EMPTY``)."""
 	if isinstance(node, ast.Constant):
-		_literal(node, text=text)
-	elif _field_read(node, fields, numeric=not text):
-		return
-	elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
+		return _literal(node, text=text)
+	kind = _field_read(node, fields, numeric=not text)
+	if kind:
+		return kind
+	if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
 		_operand(node.operand, fields, text=False)
-	elif isinstance(node, ast.BinOp) and isinstance(node.op, _ARITHMETIC):
+		return NUMBER
+	if isinstance(node, ast.BinOp) and isinstance(node.op, _ARITHMETIC):
 		_operand(node.left, fields, text=False)
 		_operand(node.right, fields, text=False)
-		by_zero = isinstance(node.right, ast.Constant) and node.right.value in (0, 0.0)
-		if isinstance(node.op, ast.Div | ast.FloorDiv | ast.Mod) and by_zero:
-			raise _NotAllowed("it divides by zero")
-	elif isinstance(node, ast.Name):
+		if isinstance(node.op, ast.Div | ast.FloorDiv | ast.Mod) and not _nonzero_number(node.right):
+			raise _NotAllowed(
+				"it divides by something other than a plain number that is not zero (a field can "
+				"hold 0, and the division then fails when a record is opened)"
+			)
+		return NUMBER
+	if isinstance(node, ast.Name):
 		raise _NotAllowed(f"it uses the name {node.id}, and only doc may be used")
-	elif isinstance(node, ast.Call):
+	if isinstance(node, ast.Call):
 		raise _NotAllowed("it calls something other than doc.get('fieldname')")
-	elif isinstance(node, ast.Attribute | ast.Subscript):
+	if isinstance(node, ast.Attribute | ast.Subscript):
 		raise _NotAllowed("it reaches beyond a field of doc")
-	else:
-		raise _NotAllowed("it uses more than comparisons of doc's fields")
+	raise _NotAllowed("it uses more than comparisons of doc's fields")
 
 
-def _field_read(node, fields, *, numeric: bool = False) -> bool:
-	"""Whether ``node`` reads one field of the document (``doc.x``, ``doc["x"]``,
-	``doc.get("x")`` or ``doc.get("x", plain default)``). Raises when it reads a
-	name the form does not have, or (``numeric``: inside arithmetic) a field that
-	does not hold a number."""
+def _nonzero_number(node) -> bool:
+	"""A divisor chat may write: a number literal other than zero, signed or not."""
+	if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub | ast.UAdd):
+		node = node.operand
+	if not isinstance(node, ast.Constant):
+		return False
+	v = node.value
+	return isinstance(v, int | float) and not isinstance(v, bool) and v != 0
+
+
+def _field_read(node, fields, *, numeric: bool = False) -> str | None:
+	"""What the one field of the document ``node`` reads is (``doc.x``, ``doc["x"]``,
+	``doc.get("x")`` or ``doc.get("x", plain default)``), or None when ``node`` is
+	not such a read. Raises when it reads a name the form does not have, or
+	(``numeric``: inside arithmetic) a field that does not hold a number. A
+	``doc.get`` whose default is not what the field holds is text: it is never
+	ordered."""
 
 	def is_doc(n) -> bool:
 		return isinstance(n, ast.Name) and n.id == "doc"
 
-	name = None
+	name, default = None, None
 	if isinstance(node, ast.Attribute) and is_doc(node.value):
 		name = node.attr
 	elif isinstance(node, ast.Subscript) and is_doc(node.value):
@@ -464,7 +563,7 @@ def _field_read(node, fields, *, numeric: bool = False) -> bool:
 	elif isinstance(node, ast.Call):
 		get = node.func
 		if not (isinstance(get, ast.Attribute) and get.attr == "get" and is_doc(get.value)):
-			return False
+			return None
 		plain = (
 			not node.keywords
 			and 1 <= len(node.args) <= 2
@@ -473,16 +572,22 @@ def _field_read(node, fields, *, numeric: bool = False) -> bool:
 		)
 		if not plain:
 			raise _NotAllowed("it calls doc.get with something other than a fieldname and a plain default")
-		for default in node.args[1:]:
-			_literal(default, text=True)
+		for given in node.args[1:]:
+			default = _literal(given, text=True)
 		name = node.args[0].value
 	if name is None:
-		return False
+		return None
 	if name.startswith("_") or (fields is not None and name not in fields):
 		raise _NotAllowed(f"{name} is not a field of this form")
-	if numeric and fields is not None and not fields[name]:
+	# With no form to read (``fields`` None) nothing is known to be a number.
+	kind = fields[name] if fields is not None else TEXT
+	if numeric and fields is not None and kind != NUMBER:
 		raise _NotAllowed(f"it does arithmetic on {name}, which is not a number field")
-	return True
+	if default is not None and default != kind:
+		if numeric:
+			raise _NotAllowed(f"it does arithmetic on {name} with a default that is not a number")
+		return TEXT
+	return kind
 
 
 def _role_lines(states: list[dict], transitions: list[dict]) -> list[str]:
@@ -552,26 +657,34 @@ def _empty_state(table, fieldname: str):
 
 
 def _count_fill(dt: str, fieldname: str, statuses: list[int], has_column: bool) -> int:
-	from frappe.query_builder.functions import Count
-
+	"""How many records the save fills a state on, counted no further than one past
+	the most chat will fill (``FILL_NAMES_MAX``): a form of millions of rows is
+	never counted whole inside a request."""
 	if not statuses:
 		return 0
 	table = frappe.qb.DocType(dt)
-	query = frappe.qb.from_(table).select(Count("*")).where(table.docstatus.isin(statuses))
+	query = frappe.qb.from_(table).select(table.name).where(table.docstatus.isin(statuses))
 	if has_column:
 		query = query.where(_empty_state(table, fieldname))
-	return cint(query.run()[0][0])
+	return len(query.limit(FILL_NAMES_MAX + 1).run())
 
 
 def _count_kept(dt: str, fieldname: str, states: list[str]) -> int:
-	"""Records whose state is not one of this workflow's: Frappe's own count, the
-	one Desk shows before a workflow is saved."""
-	from frappe.workflow.doctype.workflow.workflow import get_workflow_state_count
-
+	"""Records whose state is not one of this workflow's (what Frappe's
+	``get_workflow_state_count`` counts, the number Desk shows before a workflow is
+	saved), counted no further than one past ``KEPT_COUNT_MAX``."""
 	if not states:
 		return 0
-	rows = get_workflow_state_count(dt, fieldname, states) or []
-	return sum(cint(r.get("count")) for r in rows)
+	table = frappe.qb.DocType(dt)
+	rows = (
+		frappe.qb.from_(table)
+		.select(table.name)
+		.where(table[fieldname].notin(states))
+		.where(table[fieldname] != "")  # an empty state is filled, not kept (as Frappe counts)
+		.limit(KEPT_COUNT_MAX + 1)
+		.run()
+	)
+	return len(rows)
 
 
 @dataclass
@@ -641,43 +754,71 @@ class _WorkflowWrite:
 		return f"Confirming changes the workflow rules of {plan.dt} for every user."
 
 	def risk_lines(self) -> list[str]:
-		"""What the card says after its first line. Called after ``check``."""
+		"""What the card says after its first line. Called after ``check``. What is
+		particular to this workflow and this site comes first (what it replaces is in
+		the head lines; then what happens to existing records, what submits, who can
+		approve their own); the lines every workflow card carries come last."""
 		from jarvis.tools._write_risk import RISK_LINES
 
 		plan = self._plan()
 		states, transitions = plan.doc.get("states") or [], plan.doc.get("transitions") or []
 		lines = self._head_lines(plan)
 		if plan.fill or plan.kept:
+			lines.append(_records_line(plan))
+		if plan.active and states and not transitions:
 			lines.append(
-				f"It fills the state on {gs.counted(plan.fill, 'record')} that "
-				f"{'has' if plan.fill == 1 else 'have'} none; {gs.counted(plan.kept, 'record')} "
-				f"{'keeps a state' if plan.kept == 1 else 'keep states'} this workflow lacks."
+				"It has no transitions: no record of this form can be moved from one state to another."
 			)
-		if any(t.get("condition") for t in transitions) or any(
-			cint(s.get("evaluate_as_expression")) and s.get("update_value") for s in states
-		):
-			lines.append(RISK_LINES["code"])
-		lines.append(RISK_LINES["access"])
 		for status, verb in (("1", "submits"), ("2", "cancels")):
 			names = [s["state"] for s in states if s.get("doc_status") == status]
 			if names:
 				lines.append(f"Moving a record to {', '.join(names)} {verb} it.")
+		own = sum(1 for t in transitions if cint(t.get("allow_self_approval")))
+		if own:
+			lines.append(
+				f"Self-approval is allowed on {own} of {len(transitions)} transitions: a person who "
+				"holds the role can approve a record they created themselves."
+			)
 		for s in states:
 			if s.get("update_field"):
 				lines.append(
 					f"Moving a record to {s['state']} also sets its {s['update_field']} to "
 					f"{cstr(s.get('update_value'))!r}."
 				)
+		if not plan.adds_field and plan.fieldname != "workflow_state":
+			df = frappe.get_meta(plan.dt).get_field(plan.fieldname)
+			if df is not None and not (df.fieldtype == "Link" and df.options == "Workflow State"):
+				lines.append(
+					f"The state is kept in the existing field {df.label or plan.fieldname} "
+					f"({plan.fieldname}): the workflow writes state names into it."
+				)
 		lines.extend(_role_lines(states, transitions))
-		own = sum(1 for t in transitions if cint(t.get("allow_self_approval")))
-		if own:
-			lines.append(
-				f"Self-approval is allowed on {own} of {len(transitions)} transitions: a person can "
-				"move a record they created themselves."
-			)
+		kept_code = self._kept_code(plan)
+		if kept_code:
+			lines.append(f"{'; '.join(kept_code)}: set up in Desk and kept as it is. It is not checked here.")
+			lines.append(RISK_LINES["code"])
+		lines.append(RISK_LINES["access"])
 		if cint(plan.doc.get("send_email_alert")):
 			lines.append("It emails the people who can act next on each record.")
 		return lines
+
+	def _kept_code(self, plan: _Plan) -> list[str]:
+		"""The conditions and expression values this write keeps that chat could not
+		have written (richer than a comparison of the document's own fields: set up
+		in Desk, kept unchanged, never checked here). Everything else on the card
+		passed ``expression_problem``."""
+		out = []
+		for t in plan.doc.get("transitions") or []:
+			if t.get("condition") and expression_problem(t["condition"], plan.dt, state_field=plan.fieldname):
+				out.append(f"The condition on {t.get('action')} from {t.get('state')}")
+		for st in plan.doc.get("states") or []:
+			if (
+				cint(st.get("evaluate_as_expression"))
+				and st.get("update_value")
+				and expression_problem(st["update_value"], plan.dt, value=True, state_field=plan.fieldname)
+			):
+				out.append(f"The update value of {st.get('state')}")
+		return out
 
 	def _head_lines(self, plan: _Plan) -> list[str]:
 		"""What the save does to the form: the field it adds, whether the workflow is
@@ -719,18 +860,22 @@ class _WorkflowWrite:
 
 	def snapshot(self) -> dict:
 		"""What the clean-up needs, taken under the lock with the claim. Never raises:
-		a call that can no longer be resolved fails its own check a moment later."""
+		a call that can no longer be resolved fails its own check a moment later, and
+		a snapshot that could not be read whole says so (``gs.snapshot_failed``), which
+		stops the write before its record is saved."""
 		out = {"risk": self.risk, "name": "", "dt": "", "before": None, "was_active": [], "fill": None}
 		try:
-			with cfg._own_messages():
-				plan = self._analyse()
+			# The plan ``card_holds`` built a moment ago, under this same lock.
+			plan = self._plan()
 			stored = self._stored()
 			out.update(name=plan.name, dt=plan.dt, was_active=_other_active(plan.dt, plan.name))
 			if stored is not None:
 				out["before"] = _before_image(plan.name)
 			out["fill"] = _fill_snapshot(plan)
+		except JarvisError:
+			return gs.snapshot_refused(out)
 		except Exception:
-			pass
+			return gs.snapshot_failed(out, f"Workflow {self.risk}")
 		return out
 
 	# -- analysis ----------------------------------------------------------------
@@ -791,12 +936,18 @@ class _WorkflowWrite:
 				"DocType (or a table of one).",
 				name,
 			)
-		row = frappe.db.get_value("DocType", dt, ["istable", "issingle"], as_dict=True) or {}
+		row = frappe.db.get_value("DocType", dt, ["istable", "issingle", "is_virtual"], as_dict=True) or {}
 		if cint(row.get("istable")) or cint(row.get("issingle")):
 			kind = "a child table" if cint(row.get("istable")) else "a single settings document"
 			raise InvalidFieldValueError(
 				f"{dt} is {kind}: a workflow needs a form whose records are saved one by one. "
 				"Choose the form the records belong to."
+			)
+		if cint(row.get("is_virtual")) or not frappe.db.table_exists(dt):
+			raise _refuse(
+				f"{dt} has no table of its own (a virtual form, or one not migrated yet), so a workflow "
+				"on it is not set up from chat.",
+				name,
 			)
 		if not frappe.has_permission(dt, "read"):
 			raise PermissionDeniedError(
@@ -808,6 +959,7 @@ class _WorkflowWrite:
 		"""The states and transitions themselves. Returns the state fieldname."""
 		states, transitions = doc["states"], doc["transitions"]
 		labels = {t: (_meta().get_field(t).label or t) for t in TABLES}
+		_all_exist(doc)
 		for table in TABLES:
 			for i, row in enumerate(doc[table], 1):
 				where = f"{labels[table]} row {i}"
@@ -817,6 +969,12 @@ class _WorkflowWrite:
 				for key, target in _LINKS[table]:
 					if row.get(key):
 						_exact(target, row[key], f"{where} ({key})")
+		listed = [s["state"] for s in states]
+		twice = sorted({n for n in listed if listed.count(n) > 1})
+		if twice:
+			raise InvalidFieldValueError(
+				f"The state {', '.join(twice)} is listed more than once. List each state once."
+			)
 		if cint(doc.get("is_active")) and not states:
 			raise InvalidFieldValueError(
 				"An active workflow needs at least one state: without one, no record of the form could "
@@ -860,6 +1018,8 @@ class _WorkflowWrite:
 	def _check_updates(self, states: list[dict], dt: str) -> None:
 		from frappe.model import no_value_fields
 
+		from jarvis.tools._write_risk import _FIELD_SENSITIVE
+
 		meta = frappe.get_meta(dt)
 		for s in states:
 			target = s.get("update_field")
@@ -874,6 +1034,17 @@ class _WorkflowWrite:
 				raise InvalidFieldValueError(
 					f"The state {s['state']} sets {target!r}, which is not a field of {dt} that holds a "
 					"value. Use a real fieldname or leave update_field out."
+				)
+			# Employee status switches the linked login on and off (``_toggles_login``).
+			if (dt in _FIELD_SENSITIVE and target in _FIELD_SENSITIVE[dt][1]) or (dt, target) == (
+				"Employee",
+				"status",
+			):
+				# Carded once here, then written on every transition with no card.
+				raise InvalidFieldValueError(
+					f"The state {s['state']} sets {target!r}, a field of {dt} that gives access. A "
+					"workflow that writes it is not set up from chat: leave update_field out, or tell "
+					"the user to set it up in the Workflow form in Desk."
 				)
 
 	def _check_roles(self, states: list[dict], transitions: list[dict], labels: dict) -> None:
@@ -1017,11 +1188,32 @@ class _WorkflowWrite:
 		# inside the request that confirms.
 		if plan.fill > FILL_NAMES_MAX:
 			raise _refuse(
-				f"{plan.fill} records of {plan.dt} have no workflow state, and saving this workflow "
-				f"would fill them all in at once. More than {FILL_NAMES_MAX} is not done from chat, so "
+				f"More than {FILL_NAMES_MAX} records of {plan.dt} have no workflow state, and saving "
+				"this workflow would fill them all in at once. That many is not done from chat, so "
 				"this workflow is saved in Desk.",
 				name,
 			)
+
+
+def _records_line(plan: _Plan) -> str:
+	"""What the save does to the records that exist: how many get a state, and how
+	many are left in a state the workflow does not have (Frappe's
+	``validate_workflow`` then refuses every save of such a record)."""
+	kept = (
+		f"more than {gs.counted(KEPT_COUNT_MAX, 'record')} keep states"
+		if plan.kept > KEPT_COUNT_MAX
+		else f"{gs.counted(plan.kept, 'record')} {'keeps a state' if plan.kept == 1 else 'keep states'}"
+	)
+	stuck = ""
+	if plan.kept and plan.active:
+		stuck = (
+			f", and {'it' if plan.kept == 1 else 'they'} cannot be saved or moved until "
+			f"{'its' if plan.kept == 1 else 'their'} state is changed to one of this workflow's"
+		)
+	return (
+		f"It fills the state on {gs.counted(plan.fill, 'record')} that "
+		f"{'has' if plan.fill == 1 else 'have'} none; {kept} this workflow lacks{stuck}."
+	)
 
 
 _REPLACES = "It replaces the active workflow"
@@ -1199,6 +1391,15 @@ class WorkflowEdit(_WorkflowWrite):
 					self.name,
 				)
 			call.pop(key, None)
+		# The states of the records that exist live in this field: another field
+		# starts every record without one.
+		key = "workflow_state_field"
+		if key in call and call[key] != (stored.get(key) or "workflow_state"):
+			raise _refuse(
+				f"Changing the state field of the workflow {self.name} leaves the state of every "
+				"existing record behind in the old field, so it is done in Desk, not from chat.",
+				self.name,
+			)
 		return call
 
 	def canonical_args(self) -> dict:
@@ -1267,7 +1468,8 @@ def _put_back(undo: dict, dt: str, said: list[str], *, changed: bool) -> CleanUp
 		clean = clean and note.clean
 		changed = changed or note.changed
 	if changed:
-		emptied = _empty_fill(dt, undo.get("fill"))
+		written = undo.get("written") if isinstance(undo.get("written"), dict) else {}
+		emptied = _empty_fill(dt, undo.get("fill"), written.get("modified"))
 		if emptied:
 			said.append(f"The state filled in on {gs.counted(emptied, 'record')} was emptied again.")
 	_clear(dt, [str(undo.get("name") or ""), *(undo.get("was_active") or [])])
@@ -1280,33 +1482,42 @@ def _used_since(dt: str, fill, since=None) -> bool:
 	would leave records in a state no workflow owns. Two signs, each one bounded
 	query:
 
+	- any record of the form that carries a state and was saved or created after
+	  ``since``: a record created under this workflow holds one of ITS states, which
+	  the workflow that would be active again may lack. The state alone cannot tell: the save fills
+	  the first state of every document status, so a record approved since (Draft
+	  to Approved, submitted) carries exactly the state the save would have filled
+	  on a record that was submitted all along. The fill itself does not touch
+	  ``modified``; a person's save does. An edit that moved nothing counts too:
+	  that errs towards leaving the workflow for a person;
 	- a record whose state the save filled in (every record, when the column was
-	  new) now carries another state;
-	- any record of the form saved after ``since`` that carries a state other than
-	  the one the save fills in: one created under the workflow and moved on. (A
-	  record that kept an older state the workflow lacks cannot be saved at all while
-	  the workflow is active: Frappe's ``validate_workflow`` refuses it.)"""
+	  new) now carries a state the save does not fill, whenever it was saved."""
 	if not isinstance(fill, dict) or not fill.get("values") or not dt:
 		return False
 	fieldname = str(fill.get("field") or "")
 	if fieldname.lower() not in gs.table_columns(dt):
 		return False
 	table = frappe.qb.DocType(dt)
+	has_state = table[fieldname].isnotnull() & (table[fieldname] != "")
 
-	def moved_on():
-		return (
-			frappe.qb.from_(table)
-			.select(table.name)
-			.where(table[fieldname].isnotnull() & (table[fieldname] != ""))
-			.where(table[fieldname].notin(fill["values"]))
-			.limit(1)
-		)
-
-	if since and moved_on().where(table.modified > get_datetime(since)).run():
+	if since and (
+		frappe.qb.from_(table)
+		.select(table.name)
+		.where(has_state)
+		.where(table.modified > get_datetime(since))
+		.limit(1)
+		.run()
+	):
 		return True
 	names = fill.get("names")
 	for chunk in [None] if names is None else [names[i : i + 500] for i in range(0, len(names), 500)]:
-		query = moved_on()
+		query = (
+			frappe.qb.from_(table)
+			.select(table.name)
+			.where(has_state)
+			.where(table[fieldname].notin(fill["values"]))
+			.limit(1)
+		)
 		if chunk is not None:
 			query = query.where(table.name.isin(chunk))
 		if query.run():
@@ -1323,10 +1534,11 @@ def _left_in_use(name: str) -> CleanUp:
 	)
 
 
-def _empty_fill(dt: str, fill) -> int:
+def _empty_fill(dt: str, fill, since=None) -> int:
 	"""Empty the states the save filled in: only on the records that had none
-	(every record when the column itself was new), and only where the state is
-	still the one that was filled in."""
+	(every record when the column itself was new), only where the state is still
+	one that was filled in, and never on a record saved after ``since`` (the
+	timestamp the workflow was written with): its state is a person's."""
 	if not isinstance(fill, dict) or not fill.get("values") or not dt:
 		return 0
 	fieldname = str(fill.get("field") or "")
@@ -1342,6 +1554,8 @@ def _empty_fill(dt: str, fill) -> int:
 		)
 		if chunk is not None:
 			query = query.where(table.name.isin(chunk))
+		if since:
+			query = query.where(table.modified <= get_datetime(since))
 		query.run()
 		done += gs._stamp_rows()
 	return done
