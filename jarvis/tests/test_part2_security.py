@@ -1042,6 +1042,23 @@ class TestSkillPromotionContentBinding(Part2Base):
 			with self.assertRaises(frappe.PermissionError):
 				doc.save()
 
+	def test_the_operator_check_lists_shared_skills_no_reviewer_owns(self):
+		from jarvis.chat.skill_permissions import shared_skills_no_reviewer_owns
+
+		old = _mk_skill(USER_A, f"{PFX}-chk-old", scope="Org", shared_with=[USER_B])
+		frappe.db.set_value(SKILL, old.name, "scope", None, update_modified=False)
+		role = _mk_skill(USER_A, f"{PFX}-chk-role", scope="Role", target_role="Sales User")
+		_mk_skill(USER_B, f"{PFX}-chk-role", scope="User")  # someone's own, same name
+		_mk_skill(REVIEWER, f"{PFX}-chk-reviewed", scope="Org")
+		_mk_skill(USER_A, f"{PFX}-chk-private", scope="User")
+		found = {r["name"]: r for r in shared_skills_no_reviewer_owns() if r["skill_name"].startswith(PFX)}
+		self.assertEqual(set(found), {old.name, role.name})
+		self.assertEqual(
+			(found[old.name]["scope"], found[old.name]["shared_with"], found[old.name]["same_name_owned_by"]),
+			("Org", 1, []),
+		)
+		self.assertEqual(found[role.name]["same_name_owned_by"], [USER_B])
+
 	def test_a_private_skill_is_renamed_and_switched_freely(self):
 		skill = _mk_skill(USER_A, f"{PFX}-free", scope="User", enabled=0)
 		with _as(USER_A):
