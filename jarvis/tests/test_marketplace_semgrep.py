@@ -27,30 +27,38 @@ class TestMarketplaceSemgrepGate(unittest.TestCase):
 			code = gate.main([])
 		return code, out.getvalue()
 
-	def test_critical_major_and_blocking_fail(self):
+	def test_critical_major_minor_and_blocking_fail(self):
 		for result in (
 			_result("ERROR"),
 			_result("CRITICAL"),
 			_result("HIGH"),
-			_result("WARNING", blocking=True),
+			_result("WARNING"),
+			_result("MEDIUM"),
+			_result("LOW", blocking=True),
 		):
 			with self.subTest(result=result["extra"]):
 				self.assertTrue(gate.fails_audit(result))
 
-	def test_minor_and_info_pass(self):
-		for severity in ("WARNING", "MEDIUM", "LOW", "INFO", "unknown"):
+	def test_info_passes(self):
+		for severity in ("LOW", "INFO", "unknown"):
 			with self.subTest(severity=severity):
 				self.assertFalse(gate.fails_audit(_result(severity, blocking=False)))
-		self.assertFalse(gate.fails_audit(_result("WARNING", blocking="true")))  # only an explicit True
+		self.assertFalse(gate.fails_audit(_result("INFO", blocking="true")))  # only an explicit True
+
+	def test_an_internal_only_minor_fails(self):
+		# The audit hides its occurrences, but its category still reads "Needs Improvement".
+		result = _result("WARNING")
+		result["extra"]["metadata"]["is_internal_only"] = True
+		self.assertTrue(gate.fails_audit(result))
 
 	def test_exit_code_and_annotations(self):
 		code, out = self.run_gate(
-			[_result("WARNING"), _result("HIGH", rule="frappe-sql", path="a,b.py", line=7)]
+			[_result("INFO"), _result("WARNING", rule="frappe-open", path="a,b.py", line=7)]
 		)
 		self.assertEqual(code, 1)
-		self.assertIn("::error file=a%2Cb.py,line=7,title=frappe-sql (Major)::msg", out)
-		self.assertIn("1 finding(s) fail the Marketplace audit; 1 minor", out)
-		code, out = self.run_gate([_result("WARNING")], errors=[{"message": "Timeout on x.py"}])
+		self.assertIn("::error file=a%2Cb.py,line=7,title=frappe-open (Minor)::msg", out)
+		self.assertIn("1 finding(s) fail the Marketplace audit; 1 info", out)
+		code, out = self.run_gate([_result("INFO")], errors=[{"message": "Timeout on x.py"}])
 		self.assertEqual(code, 0)
 		self.assertIn("::warning title=semgrep::Timeout on x.py", out)
 
