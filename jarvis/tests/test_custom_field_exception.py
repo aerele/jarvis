@@ -5,7 +5,9 @@ confirmation card with no trial run; everything else about database structure st
 refused. These tests run REAL DDL, so every one targets a scratch ``custom=1``
 DocType made in ``setUpClass`` under a unique name and torn down by
 ``addClassCleanup`` (fields, table, DocType, caches), which then asserts nothing is
-left. Never ToDo or any shared doctype. Run serially.
+left. Never ToDo or any shared doctype. SERIAL ONLY: one run of this module per site
+at a time (it holds real structure locks and drops its own tables). It writes no
+file of the site, and reconciles only its own rows (``reconcile_own``).
 
 Continuation turns are written for real and never started (``_Hermetic``).
 """
@@ -195,6 +197,14 @@ class _ScratchBase(_Hermetic, PendingActionTestMixin, FrappeTestCase):
 		self.assertTrue(r.get("ok"), r)
 		self.assertEqual(r["data"]["status"], "pending_confirmation", r)
 		return self.card_name()
+
+	def reconcile_own(self, name: str) -> None:
+		"""The reconciler's two structure steps for THIS test's row only: the real
+		``pa.reconcile()`` also reaps, settles and retries every other row on the site."""
+		from jarvis.chat.pending_actions import _reconcile
+
+		_reconcile._reap_interrupted(only=name)
+		_reconcile._retry_structure_cleanups(only=name)
 
 	def card_name(self, conv=None) -> str:
 		names = frappe.get_all(
@@ -682,20 +692,35 @@ class TestParkChecks(_ScratchBase):
 		self.assert_refused(r, "structure_refused")
 
 	def _switch_in_the_file(self, on: bool) -> None:
-		"""Set / unset the off switch in the site's own site_config.json, as an
-		operator does, WITHOUT touching this process's cached ``frappe.conf``."""
+		"""Set / unset the off switch in a site_config.json, as an operator does,
+		WITHOUT touching this process's cached ``frappe.conf``. Never the site's real
+		file (another run on the site would read it): a copy in a temporary
+		directory, which the reader is pointed at through ``frappe.local.site_path``
+		for exactly the calls ``disabled()`` makes."""
 		import json
 		import os
+		import tempfile
 
-		path = os.path.join(frappe.local.site_path, "site_config.json")
-		with open(path) as f:
-			original = f.read()
-		self.addCleanup(lambda: open(path, "w").write(original))
-		config = json.loads(original)
+		if not getattr(self, "_config_dir", None):
+			self._config_dir = tempfile.mkdtemp(prefix="jcf-site-config-")
+			self.addCleanup(__import__("shutil").rmtree, self._config_dir, True)
+			real_read = gs._read_json
+			real_dir = frappe.local.site_path
+
+			def _read(path, *, missing_ok=False):
+				if os.path.dirname(path) == real_dir:
+					path = os.path.join(self._config_dir, os.path.basename(path))
+				return real_read(path, missing_ok=missing_ok)
+
+			reader = patch.object(gs, "_read_json", side_effect=_read)
+			reader.start()
+			self.addCleanup(reader.stop)
+		with open(os.path.join(frappe.local.site_path, "site_config.json")) as f:
+			config = json.load(f)
 		config.pop(gs.OFF_SWITCH, None)
 		if on:
 			config[gs.OFF_SWITCH] = 1
-		with open(path, "w") as f:
+		with open(os.path.join(self._config_dir, "site_config.json"), "w") as f:
 			f.write(json.dumps(config, indent=1))
 
 	def test_the_off_switch_is_read_from_the_file_not_a_cached_config(self):
@@ -779,7 +804,8 @@ class TestParkChecks(_ScratchBase):
 			("create_doc", {"docs": [self.new_field("jcf_a")]}),
 			("delete_doc", {"doctype": CF, "name": f"{self.dt}-title"}),
 			("create_doc", {"doctype": "DocType", "values": {"name": "Jarvis Cf Nope", "module": "Custom"}}),
-			("create_doc", {"doctype": "Workflow", "values": {"document_type": self.dt}}),
+			("create_doc", {"doctype": "Inventory Dimension", "values": {"reference_document": self.dt}}),
+			("delete_doc", {"doctype": "Workflow", "name": "x"}),
 			("update_doc", {"doctype": CF, "updates": [{"name": "x", "changes": {"label": "y"}}]}),
 			("update_doc", {"doctype": "DocType", "name": self.dt, "changes": {"sort_field": "creation"}}),
 		]
@@ -995,7 +1021,7 @@ class TestConfirm(_ScratchBase):
 		self.assertEqual(_field_rows(self.wide), ["jcf_note"], "still half-made")
 		self.assertTrue(self.row(name).sealed_undo, "kept: the reconciler finishes it")
 		self.assertTrue(self.logged("structure_cleanup_failed"))
-		pa.reconcile()
+		self.reconcile_own(name)
 		self.assert_untouched(self.wide)
 		self.assertFalse(self.row(name).sealed_undo)
 		self.assertTrue(self.logged("structure_cleanup", "was removed"))
@@ -1192,7 +1218,7 @@ class TestConfirm(_ScratchBase):
 	def test_the_reconciler_cleans_up_an_interrupted_confirm(self):
 		name = self.park_new()
 		self._die_mid_confirm(name)
-		pa.reconcile()
+		self.reconcile_own(name)
 		row = self.row(name)
 		self.assertEqual((row.status, row.reason_code), ("Failed", "interrupted"))
 		self.assert_untouched()
@@ -1205,7 +1231,7 @@ class TestConfirm(_ScratchBase):
 		self._die_mid_confirm(name)
 		with patch.object(gs, "clean_up", side_effect=RuntimeError("planted")):
 			for _ in range(3):
-				pa.reconcile()
+				self.reconcile_own(name)
 			self.assertEqual(self.row(name).status, "Executing", "kept for the next run")
 			self.assertEqual(
 				len(self.logged("structure_cleanup_failed", name)), 1, "logged once, not per run"
@@ -1215,8 +1241,8 @@ class TestConfirm(_ScratchBase):
 				{"t": frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-25), "n": name},
 			)
 			frappe.db.commit()
-			pa.reconcile()
-			pa.reconcile()
+			self.reconcile_own(name)
+			self.reconcile_own(name)
 		row = self.row(name)
 		self.assertEqual((row.status, row.reason_code), ("Failed", "partial"))
 		self.assertFalse(row.sealed_undo)
@@ -1249,10 +1275,10 @@ class TestConfirm(_ScratchBase):
 		name = self.park_new()
 		self._die_mid_confirm(name)
 		with gs.structure_lock(self.dt):
-			pa.reconcile()
+			self.reconcile_own(name)
 		self.assertEqual(self.row(name).status, "Executing", "left for the next run")
 		self.assertEqual(_field_rows(self.dt), ["jcf_note"], "no clean-up without the lock")
-		pa.reconcile()
+		self.reconcile_own(name)
 		self.assertEqual(self.row(name).status, "Failed")
 		self.assert_untouched()
 
@@ -1411,7 +1437,7 @@ class TestEdit(_ScratchBase):
 			{"t": frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-11), "n": name},
 		)
 		frappe.db.commit()
-		pa.reconcile()
+		self.reconcile_own(name)
 		self.assertEqual(self.row(name).status, "Failed")
 		self.assertEqual(self.stored("label"), "Set in Desk")
 
@@ -1437,7 +1463,7 @@ class TestEdit(_ScratchBase):
 			{"t": frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-11), "n": name},
 		)
 		frappe.db.commit()
-		pa.reconcile()
+		self.reconcile_own(name)
 		self.assertEqual(self.stored("label"), "Set in Desk")
 		self.assertTrue(self.logged("structure_cleanup", "changed again"))
 
@@ -1458,7 +1484,7 @@ class TestEdit(_ScratchBase):
 			{"t": frappe.utils.add_to_date(frappe.utils.now_datetime(), minutes=-11), "n": name},
 		)
 		frappe.db.commit()
-		pa.reconcile()
+		self.reconcile_own(name)
 		self.assertEqual(self.stored("label"), "Made", "back to the before-image")
 		self.assertTrue(self.logged("structure_cleanup", "was undone"))
 

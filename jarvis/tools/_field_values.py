@@ -90,6 +90,44 @@ def check_values(doctype: str, values: dict, *, where: str = "") -> dict:
 	return {**values, **changed} if changed else values
 
 
+def stored_values(doctype: str, values: dict) -> dict:
+	"""``values`` as a create / update of ``doctype`` STORES them, for whoever must
+	show what will be written (a confirmation card): the check the write itself runs
+	(``check_values``: "yes" is 1, "1,000" is 1000, a date in ISO form), then the
+	casts Frappe applies on the way to the row (``cint`` for a Check or an Int,
+	``flt`` for a Float / Currency / Percent, a Select trimmed), in the rows of a
+	table too. Raises what the write would raise. The write does not call this: it
+	runs the same steps on the document, so the two cannot be told apart by the
+	stored row (pinned by ``test_card_stored_form``)."""
+	checked = check_values(doctype, values)
+	if not isinstance(checked, dict):
+		return checked
+	try:
+		meta = frappe.get_meta(doctype)
+	except Exception:
+		return checked
+	out = {}
+	for fieldname, value in checked.items():
+		df = meta.get_field(fieldname) if isinstance(fieldname, str) else None
+		if df is None or value is None:
+			out[fieldname] = value
+		elif df.fieldtype == "Table" and isinstance(value, list):
+			out[fieldname] = [stored_values(df.options, r) if isinstance(r, dict) else r for r in value]
+		elif df.fieldtype == "Check":
+			out[fieldname] = 1 if cint(value) else 0
+		elif isinstance(value, str) and not value.strip():
+			out[fieldname] = value
+		elif df.fieldtype in _INT_TYPES:
+			out[fieldname] = cint(value)
+		elif df.fieldtype in _FLOAT_TYPES:
+			out[fieldname] = flt(value)
+		elif df.fieldtype == "Select" and isinstance(value, str):
+			out[fieldname] = value.strip()
+		else:
+			out[fieldname] = value
+	return out
+
+
 def cast_numbers(doc) -> None:
 	"""Cast the numeric fields of ``doc`` and its rows that still hold a string, as
 	Frappe casts them for storage (``cint`` / ``flt``).

@@ -546,8 +546,10 @@ class TestStructureRefusedEverywhere(_RouteBase):
 
 	def test_each_structure_doctype_refused_on_the_gated_route(self):
 		conv = self._conv()
-		# One new Custom Field is the guarded exception (test_custom_field_exception).
-		for dt in sorted(wr.STRUCTURE_DOCTYPES - {"Custom Field"}):
+		# One new Custom Field and one new Workflow are guarded exceptions, each refused
+		# by its own park check when empty (test_custom_field_exception,
+		# test_workflow_settings_exception). Creating a settings document stays refused.
+		for dt in sorted(wr.STRUCTURE_DOCTYPES - {"Custom Field", "Workflow"}):
 			before = _refused_rows("create_doc", dt)
 			r = self._run("create_doc", {"doctype": dt, "values": {}}, conv)
 			self._assert_refused(r, dt)
@@ -559,8 +561,9 @@ class TestStructureRefusedEverywhere(_RouteBase):
 
 	def test_update_delete_and_batch_refused(self):
 		conv = self._conv()
+		sla = "Service Level Agreement"
 		self._assert_refused(
-			self._run("update_doc", {"doctype": "Workflow", "name": "x", "changes": {"is_active": 0}}, conv)
+			self._run("update_doc", {"doctype": sla, "name": "x", "changes": {"enabled": 0}}, conv)
 		)
 		self._assert_refused(self._run("delete_doc", {"doctype": "Custom Field", "name": "x"}, conv))
 		self._assert_refused(self._run("delete_doc", {"doctype": "Workflow", "name": "x"}, conv))
@@ -613,14 +616,16 @@ class TestStructureRefusedEverywhere(_RouteBase):
 		r = apply_action(
 			{
 				"verb": "update",
-				"doctype": "Workflow",
+				"doctype": "Service Level Agreement",
 				"name": "x",
-				"values": {"is_active": 0},
+				"values": {"enabled": 0},
 				"conversation": conv,
 			}
 		)
 		self._assert_refused(r)
-		self.assertEqual(r["error"]["desk_path"], "/app/workflow/x", "m9: the record being edited")
+		self.assertEqual(
+			r["error"]["desk_path"], "/app/service-level-agreement/x", "m9: the record being edited"
+		)
 
 	def test_approval_board_edit_refuses(self):
 		from jarvis.chat import approvals_api
@@ -1052,23 +1057,22 @@ class TestConfirmedRunMethod(_RouteBase):
 class TestEveryConfirmRoute(_RouteBase):
 	"""m8 / m2: the routes the review found untested.
 
-	A Workflow stands for "a structure write": since J1b-cf a single new Custom Field
-	is the guarded exception on a confirmed chat card (a real ALTER TABLE on its
-	target), so it is exercised only on a scratch DocType, in
-	test_custom_field_exception, where these same routes are shown to refuse it."""
+	A Service Level Agreement stands for "a structure write". A single new Custom
+	Field (J1b-cf) and a single Workflow (J1c) are guarded exceptions on a confirmed
+	chat card and run real DDL on their target, so they are exercised only on scratch
+	DocTypes (test_custom_field_exception, test_workflow_settings_exception), where
+	these same routes are shown to refuse them."""
 
-	CF = {
-		"doctype": "Workflow",
-		"values": {"workflow_name": "jarvis-wg-route", "document_type": "ToDo", "is_active": 0},
-	}
+	SLA = "Service Level Agreement"
+	CF = {"doctype": SLA, "values": {"service_level": "jarvis-wg-route", "document_type": "ToDo"}}
 
 	def _no_field(self):
-		self.assertFalse(frappe.db.exists("Workflow", "jarvis-wg-route"))
+		self.assertFalse(frappe.db.exists(self.SLA, {"service_level": "jarvis-wg-route"}))
 
 	def test_submit_cancel_amend_refused(self):
 		conv = self._conv()
 		for tool in ("submit_doc", "cancel_doc", "amend_doc"):
-			r = self._run(tool, {"doctype": "Workflow", "name": "x"}, conv)
+			r = self._run(tool, {"doctype": self.SLA, "name": "x"}, conv)
 			self.assertEqual(r["error"]["code"], "structure_refused", (tool, r))
 
 	def test_run_import(self):
@@ -1126,14 +1130,14 @@ class TestEveryConfirmRoute(_RouteBase):
 		token = pending_confirm.mint(
 			conversation=conv, owner=TEST_USER, tool="create_doc", args=self.CF, run_id=""
 		)
-		before = frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": "Workflow"})
+		before = frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": self.SLA})
 		from jarvis.chat.actions_api import confirm_tool
 
 		with patch("jarvis.chat.api._dispatch_turn"):
 			res = confirm_tool(token, conversation=conv)
 		self.assertFalse(res["ok"])
 		self.assertEqual(
-			frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": "Workflow"}), before + 1
+			frappe.db.count(AGENT_WRITE, {"outcome": "refused", "ref_doctype": self.SLA}), before + 1
 		)
 		self._no_field()
 
