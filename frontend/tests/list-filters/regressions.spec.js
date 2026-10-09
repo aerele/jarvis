@@ -148,7 +148,7 @@ describe("P1-1 tab switches must not destroy the filter set", () => {
 		const read = (p) => readFileSync(resolve(root, p), "utf8");
 		const macros = read("src/pages/macros/MacrosList.vue");
 		expect(macros).toMatch(
-			/name: v === "runs" \? "MacroRuns" : "MacrosList",\s*\n\s*query: \{ \.\.\.route\.query \}/
+			/name: TAB_ROUTES\[v\] \|\| "MacrosList",\s*\n\s*query: \{ \.\.\.route\.query \}/
 		);
 
 		// Every hash navigation on the Skills shell — the tab strip plus the three
