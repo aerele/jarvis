@@ -7,8 +7,9 @@ document row, THEN runs ``ALTER TABLE``, so a failed ALTER leaves a field row wi
 no column and the form cannot be listed, saved or opened by anyone. So these writes
 get no trial run and no retry. What they get instead, shared by every guarded class
 (this unit: one new Custom Field and a column-free Custom Field edit, in
-``_custom_field_guard``; J1c adds Workflow and the two settings by registering a
-handler in ``HANDLERS``):
+``_custom_field_guard``; unit J1c: a Workflow create or update in
+``_workflow_guard``, and the CRM Settings data sync and Domain Settings in
+``_settings_guard``; each registers a handler in ``HANDLERS``):
 
 - checks at park that refuse what can be known to fail, naming the field;
 - a schema diff (``schema_changes``): what Frappe's own ``DBTable.alter`` WOULD run
@@ -19,14 +20,16 @@ handler in ``HANDLERS``):
 - a per-doctype lock (``structure_lock``, a database lock on its own connection)
   held across the whole confirm, clean-up included: taken before the row is
   claimed, so a second confirm on the same form is told to try again and its card
-  stays live;
+  stays live. A write that alters several forms (the CRM data sync: Quotation and
+  Customer) takes every one of them (``lock_doctypes``), all or none;
 - the checks again under that lock (the table may have changed since the park);
 - a short ``lock_wait_timeout`` for the ALTER, reset afterwards: on a busy table the
   ALTER gives up in seconds instead of piling every request up behind it;
 - a clean-up when the write fails after its row committed, limited to the row THAT
-  confirmation wrote (``stamp_written``: known exactly, not by owner or time), and
-  the same clean-up from the reconciler (under the same lock) when the worker died
-  mid-way or the clean-up itself failed;
+  confirmation wrote (``stamp_written``: known exactly, not by owner or time) and
+  the fields its save made on the way (``stamp_nested``), and the same clean-up
+  from the reconciler (under the same lock) when the worker died mid-way or the
+  clean-up itself failed;
 - the site-config off switch ``jarvis_structure_writes_disabled``.
 
 Everything else about database structure stays refused (``_write_risk``).
@@ -40,7 +43,7 @@ import math
 import os
 import re
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 
 import frappe
@@ -61,10 +64,18 @@ ROW_SIZE_MARGIN = 1024
 
 # Risk class (``_write_risk.risk_of``) -> its handler class, as a dotted path. A
 # handler is built from the call's arguments and offers ``lock_doctype``,
-# ``check()``, ``risk_lines()``, ``snapshot()`` and the static ``clean_up(undo)``.
+# ``check()``, ``canonical_args()``, ``risk_lines()``, ``snapshot()`` and the static
+# ``clean_up(undo)``. Optional: ``lock_doctypes`` (every form the write alters, when
+# more than one), ``lead_line()`` (what the card says first, when the write changes
+# no column) and ``KEEP_UNDO`` (the snapshot stays on the confirmation row after a
+# successful confirm: ``undo_confirmation``).
 HANDLERS: dict[str, str] = {
 	"custom_field_new": "jarvis.tools._custom_field_guard.NewCustomField",
 	"custom_field_edit": "jarvis.tools._custom_field_guard.CustomFieldEdit",
+	"workflow_new": "jarvis.tools._workflow_guard.NewWorkflow",
+	"workflow_edit": "jarvis.tools._workflow_guard.WorkflowEdit",
+	"crm_settings_sync": "jarvis.tools._settings_guard.CrmSettingsSync",
+	"domain_settings": "jarvis.tools._settings_guard.DomainSettingsUpdate",
 }
 
 UNDO_COLUMN = "sealed_undo"
@@ -89,6 +100,9 @@ class CleanUp:
 	text: str
 	clean: bool = True
 	changed: bool = False
+	# What the confirmation wrote was left in place on purpose (people have used it
+	# since): never clean, and a person has to look.
+	needs_person: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -113,8 +127,11 @@ def disabled() -> bool:
 		common = _read_json(os.path.join(sites_path, "common_site_config.json"), missing_ok=True)
 		site = _read_json(os.path.join(frappe.local.site_path, "site_config.json"))
 	except Exception:
+		# Off, and said: otherwise the only sign is a refusal that reads like any other.
+		frappe.log_error(title="jarvis.structure.switch_unreadable", message=frappe.get_traceback())
 		return True
-	return bool(frappe.utils.cint({**common, **site}.get(OFF_SWITCH)))
+	# Either file: a site that sets 0 does not switch back on what the bench set off.
+	return bool(frappe.utils.cint(common.get(OFF_SWITCH)) or frappe.utils.cint(site.get(OFF_SWITCH)))
 
 
 def _read_json(path: str, *, missing_ok: bool = False) -> dict:
@@ -154,11 +171,144 @@ def handler_for(risk: str | None, args):
 
 def clean_up(undo: dict) -> CleanUp:
 	"""Run the clean-up a stored ``undo`` names (``handler.snapshot()``, plus what
-	``stamp_written`` added)."""
+	``stamp_written`` / ``stamp_nested`` added)."""
 	path = HANDLERS.get(str((undo or {}).get("risk") or ""))
 	if not path:
 		return CleanUp("")
+	if undo.get(INCOMPLETE) and undo.get("written"):
+		# Never reached through a confirm (``stamp_written`` refuses the write), kept
+		# for a row an older worker stamped: something was written and what it
+		# replaced was never recorded, so nothing here may call that clean.
+		return CleanUp(
+			"The change was written, but what it replaced could not be recorded, so it could not "
+			"be undone. It needs a person: check it in Desk.",
+			clean=False,
+			needs_person=True,
+		)
 	return frappe.get_attr(path).clean_up(undo)
+
+
+INCOMPLETE = "incomplete"
+# With ``INCOMPLETE``: the handler's own checks refused the call while the snapshot
+# was taken. The write tool runs those checks again and says why; nothing is logged.
+REFUSED = "refused"
+NO_SNAPSHOT = (
+	"Jarvis could not record what this change replaces, so it was not made. Nothing was changed. "
+	"Confirm again in a moment."
+)
+
+
+def snapshot_refused(out: dict) -> dict:
+	"""The call no longer passes its handler's own checks (a role deleted since the
+	park): no snapshot is possible and none is needed, because the write tool
+	refuses it with the reason a moment later. Marked incomplete all the same, so a
+	write that somehow got past that refusal still stops at ``stamp_written``."""
+	frappe.clear_messages()
+	out[INCOMPLETE] = True
+	out[REFUSED] = True
+	return out
+
+
+def snapshot_failed(out: dict, what: str) -> dict:
+	"""A handler's ``snapshot`` could not read everything its clean-up needs. The
+	snapshot says so (``INCOMPLETE``) instead of passing as a whole one: the write is
+	then refused at the moment its record would be saved (``stamp_written``), after
+	the handler's own checks have had their say, and nothing is changed."""
+	frappe.log_error(
+		title="jarvis.pending_action.snapshot_failed", message=f"{what}\n{frappe.get_traceback()}"
+	)
+	frappe.clear_messages()
+	out[INCOMPLETE] = True
+	return out
+
+
+def counted(n: int, one: str, many: str | None = None) -> str:
+	"""``n`` with its noun, singular for exactly one: "1 record", "0 records",
+	"2 people" (``many`` where adding an s is not the plural)."""
+	return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def lead_line(handler) -> str:
+	"""What a guarded card says first: the structural line, unless the handler knows
+	this write changes no column (a Workflow whose state field already exists, a
+	Domain Settings save that adds no field) and says what it does instead."""
+	own = getattr(handler, "lead_line", None)
+	return (own() if callable(own) else None) or STRUCTURAL_LINE
+
+
+def keeps_undo(risk: str | None) -> bool:
+	"""Whether the snapshot of a ``risk`` write stays on its confirmation row after
+	the confirm succeeded (the records it filled or removed: what the operator's
+	recovery aid ``undo_confirmation`` works from)."""
+	path = HANDLERS.get(risk or "")
+	return bool(path and getattr(frappe.get_attr(path), "KEEP_UNDO", False))
+
+
+def undo_confirmation(name: str) -> dict:
+	"""An OPERATOR'S RECOVERY AID, not a product feature: put back what the confirmed
+	guarded write ``name`` (a confirmation id, ``Jarvis Pending Action``) did, from
+	the snapshot kept on its row (``KEEP_UNDO``: a Workflow, Domain Settings).
+
+	Run by a person with server access::
+
+	    bench --site <site> execute jarvis.tools._guarded_structure.undo_confirmation \
+	        --kwargs "{'name': '<confirmation id>'}"
+
+	A Workflow is removed (or put back as it was before the edit), the workflow it
+	replaced is active again and the states it filled in are emptied; Domain
+	Settings gets its list, the role assignments it removed and the roles and
+	modules it switched back. It REFUSES, changing nothing, when the record was
+	changed since the confirmation wrote it or when people have used the workflow
+	since (records have moved on in it): then a person decides in Desk.
+
+	Not whitelisted and never reachable from a chat turn (refused inside a tool
+	call); when a web request does call it, only for a System Manager. It takes the
+	same structure locks as the confirm, files a ``Jarvis Agent Write`` row, and is
+	idempotent: once undone (or once the row has been purged, seven days after it
+	settled, ``pending_actions.purge``) there is nothing left to undo.
+
+	Returns plain values, which ``bench execute`` prints: ``message`` (what was put
+	back and what was left), ``restored`` (something was changed), ``complete``
+	(nothing of the confirmed write is left) and ``needs_person``."""
+	from jarvis import agent_audit
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._store import EXECUTED, clear_undo, get_row
+	from jarvis.permissions import refuse_in_tool_dispatch
+
+	refuse_in_tool_dispatch()
+	if getattr(frappe.local, "request", None) and "System Manager" not in frappe.get_roles():
+		raise frappe.PermissionError("Only a System Manager may undo a confirmed structure change.")
+	nothing = _undo_result(CleanUp("Nothing is kept to undo for this confirmation."), restored=False)
+	row = get_row(str(name or ""))
+	if not row or row.status != EXECUTED or not row.get("sealed_undo"):
+		return nothing
+	undo = _seal.unseal_undo(row)
+	if not undo or not keeps_undo(str(undo.get("risk") or "")):
+		return nothing
+	with structure_locks(undo.get("lock")):
+		note = clean_up(undo)
+		if not note.needs_person and (note.clean or note.changed):
+			clear_undo(row.name)
+		agent_audit.record_write(
+			actor=frappe.session.user,
+			tool="undo_confirmation",
+			args={"name": row.name, "undoes": row.tool},
+			result=None,
+			outcome=("applied" if note.clean else "partial") if note.changed else "refused",
+			provenance="chat",
+			provenance_name=row.name,
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- a person's own undo
+	return _undo_result(note, restored=note.changed)
+
+
+def _undo_result(note: CleanUp, *, restored: bool) -> dict:
+	return {
+		"message": note.text,
+		"restored": bool(restored),
+		"complete": bool(note.clean),
+		"needs_person": bool(note.needs_person),
+	}
 
 
 # --------------------------------------------------------------------------- #
@@ -191,10 +341,50 @@ def stamp_written(doc) -> None:
 	target = getattr(frappe.local, _LOCAL_STAMP, None)
 	if not target:
 		return
+	pa_name, undo = target
+	if undo.get(INCOMPLETE):
+		# Before the row is written, in its transaction: nothing has committed.
+		raise RetryLaterError(NO_SNAPSHOT)
+	# ``user``: who the write ran as (a settings save can hand that person roles).
+	undo["written"] = {"name": doc.name, "modified": str(doc.modified), "user": frappe.session.user}
+	_seal_stamp(pa_name, undo)
+	# What a handler has to do at the moment its record is written (``before_write``).
+	path = HANDLERS.get(str(undo.get("risk") or ""))
+	before_write = getattr(frappe.get_attr(path), "before_write", None) if path else None
+	if before_write is not None:
+		before_write(doc)
+
+
+def stamp_nested(doc) -> None:
+	"""Called by the ORM guard for a Custom Field that the card's own record saves
+	while it is being saved itself: a NEW one (a Workflow's state field, the CRM data
+	sync's fields; ``undo["made"]``) or an existing one it writes over
+	(``undo["rewrote"]``). Its name and timestamp join the confirmation row's
+	clean-up state in that same transaction, so a failure is cleaned up for exactly
+	the fields this confirmation touched. A no-op outside a confirm."""
+	target = getattr(frappe.local, _LOCAL_STAMP, None)
+	if not target or not target[1].get("written"):
+		return  # no confirm running, or not under the card's own record
+	pa_name, undo = target
+	try:
+		new = bool(doc.is_new())
+	except Exception:
+		new = False
+	# ``made``: fields it inserted; ``rewrote``: existing fields it saved over.
+	undo.setdefault("made" if new else "rewrote", []).append(
+		{
+			"name": doc.name,
+			"dt": doc.get("dt"),
+			"fieldname": doc.get("fieldname"),
+			"modified": str(doc.modified),
+		}
+	)
+	_seal_stamp(pa_name, undo)
+
+
+def _seal_stamp(pa_name: str, undo: dict) -> None:
 	from jarvis.chat.pending_actions import _seal
 
-	pa_name, undo = target
-	undo["written"] = {"name": doc.name, "modified": str(doc.modified)}
 	frappe.db.sql(
 		"UPDATE `tabJarvis Pending Action` SET sealed_undo=%(u)s WHERE name=%(n)s AND status='Executing'",
 		{"n": pa_name, "u": _seal.seal_undo(pa_name, undo)},
@@ -273,6 +463,33 @@ def structure_lock(doctype: str) -> Iterator[None]:
 		except Exception:
 			pass  # closing the connection releases it too
 		_close(conn)
+
+
+def lock_names(handler) -> list[str]:
+	"""Every form whose structure lock a handler's confirm holds: the forms it
+	alters (``lock_doctypes``), or its one ``lock_doctype``. Sorted, so two confirms
+	that share forms ask in the same order."""
+	several = getattr(handler, "lock_doctypes", None)
+	return sorted({str(d) for d in (several or [handler.lock_doctype]) if d})
+
+
+@contextmanager
+def structure_locks(doctypes) -> Iterator[None]:
+	"""Hold the structure lock of every form in ``doctypes`` (a name, or a list of
+	names: what ``lock_names`` gave and the clean-up state carries). All or none:
+	one that is held raises ``StructureBusyError`` and lets go of the others."""
+	# A state that names no form still takes one lock (the unnamed one), never none.
+	names = [doctypes] if isinstance(doctypes, str) else list(doctypes or [""])
+	with ExitStack() as held:
+		for doctype in sorted({str(d) for d in names}):
+			held.enter_context(structure_lock(doctype))
+		yield
+
+
+def locks_held(doctypes) -> bool:
+	"""Whether THIS request holds every one of the locks (``lock_held`` each)."""
+	names = [doctypes] if isinstance(doctypes, str) else list(doctypes or [])
+	return bool(names) and all(lock_held(str(d)) for d in names)
 
 
 def _close(conn) -> None:
@@ -413,6 +630,24 @@ def room_for(columns: dict, definition: str) -> bool:
 	``ROW_SIZE_MARGIN`` to spare."""
 	added = column_bytes(definition) + 1  # at most one more byte of null bits
 	return row_size(columns) + added <= ROW_SIZE_LIMIT - ROW_SIZE_MARGIN
+
+
+def write_row(doctype: str, row: dict, *, name: str | None = None) -> None:
+	"""A clean-up's own write: insert ``row`` into ``doctype``, or update the row
+	``name`` to it, through the query builder (no hooks, timestamps as they were).
+	Only the table's own columns, read from the table itself."""
+	columns = table_columns(doctype)
+	values = {k: v for k, v in row.items() if k.lower() in columns and (name is None or k != "name")}
+	if not values:
+		return
+	table = frappe.qb.DocType(doctype)
+	if name is None:
+		frappe.qb.into(table).columns(*values).insert(*values.values()).run()
+		return
+	query = frappe.qb.update(table).where(table.name == name)
+	for key, value in values.items():
+		query = query.set(table[key], value)
+	query.run()
 
 
 # --------------------------------------------------------------------------- #

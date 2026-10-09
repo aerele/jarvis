@@ -162,12 +162,15 @@ const SENSITIVE_LINE = "This changes sensitive settings.";
 
 // {risk, text} for a card that changes sensitive configuration, else null. The
 // text is the server's ``risk_line`` ("This runs code for every user."), with a
-// plain fallback when an older card carries none. The two structure changes chat
-// may make (one new Custom Field, a column-free edit of one; J1b-cf) ride the
-// same banner: the server sends them as ``risk: "sensitive"`` with
-// ``structural: true`` and a ``risk_line`` that leads with "Confirming changes
-// the database structure for every user and cannot be undone." Every other
-// structure change is refused from chat and never carded.
+// plain fallback when an older card carries none. The guarded structure changes
+// chat may make (one new Custom Field or a column-free edit of one, J1b-cf; a
+// Workflow create or update, CRM Settings with the data sync on, Domain Settings,
+// J1c) ride the same banner: the server sends them as ``risk: "sensitive"`` with
+// ``structural: true`` and a ``risk_line`` of several sentences, which leads with
+// "Confirming changes the database structure for every user and cannot be
+// undone." when a column is added and otherwise with what the change is, then
+// says what it does (the workflow it replaces, the records it fills, code,
+// access ...). Every other structure change is refused from chat and never carded.
 export function cardBannerOf(card) {
 	if (!card || card.risk !== "sensitive") return null;
 	const line = typeof card.risk_line === "string" ? card.risk_line.trim() : "";
