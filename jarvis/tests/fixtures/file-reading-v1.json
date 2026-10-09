@@ -1,0 +1,46 @@
+{
+  "source": "Amount\n\"5,00,000.00\"\nTotal\n",
+  "filename": "contract.csv",
+  "file_name": "contract-file",
+  "file_url": "/private/files/contract.csv",
+  "request": {
+    "file_url": "/private/files/contract.csv"
+  },
+  "response": {
+    "kind": "table",
+    "records": [
+      {
+        "row": 1,
+        "values": ["Amount"]
+      },
+      {
+        "row": 2,
+        "values": ["5,00,000.00"]
+      },
+      {
+        "row": 3,
+        "values": ["Total"]
+      }
+    ],
+    "stop_reason": null,
+    "source": {
+      "filename": "contract.csv"
+    },
+    "range": {
+      "source": 0,
+      "first": 1,
+      "last": 3
+    },
+    "read_contract": "file-cursor-v1",
+    "status": "complete",
+    "version": "dfe17cfb05e0a84e4ad36a83ebb4373527cb6a76798c28a2b00f2540490af0ee",
+    "cursor": "0:1:0",
+    "end_of_file": true,
+    "coverage": {
+      "complete": true,
+      "window_complete": true,
+      "issues": []
+    },
+    "next_read": null
+  }
+}

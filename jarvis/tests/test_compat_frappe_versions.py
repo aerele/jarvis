@@ -91,7 +91,8 @@ class TestFileBytesAcrossMajors(FrappeTestCase):
 
 	def test_read_file_handles_a_pdf_without_raising(self):
 		fdoc = _make_file("compat-probe-readable.pdf", _minimal_pdf())
-		out = read_file(file_url=fdoc.file_url)
+		# Exercise immediate bytes/parser compatibility, separate from queued whole-file jobs.
+		out = read_file(file_url=fdoc.file_url, preview=True)
 		self.assertEqual(out["kind"], "pdf")
 		# No text layer, so the tool should say so rather than blow up.
 		self.assertIn("note", out)
