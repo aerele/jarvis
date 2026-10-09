@@ -2153,11 +2153,9 @@ def _skill_invocations(step) -> str:
 	``invoked_skill_clause`` names them at turn time (which also re-checks
 	owner/shared visibility). Disabled or since-deleted skills drop out silently.
 
-	How strong that activation is depends on the skill, and the step inherits the
-	difference silently (issue #477). A skill the container push writes is named as
-	an installed ``custom-<slug>`` and activates deterministically. A Role-scope,
-	role-restricted, private or over-cap skill is not on disk, so the clause instead
-	instructs the agent to fetch it with ``jarvis__get_skill``: reliable in practice
+	The activation is the same for every skill: the clause instructs the agent to
+	fetch it with ``jarvis__get_skill`` (no custom skill's instructions are in the
+	container; a pushed one's file only points at that tool). Reliable in practice
 	but model-mediated, not a container guarantee."""
 	try:
 		names = frappe.parse_json(step.skills) if step.skills else []

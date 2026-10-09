@@ -16,6 +16,15 @@ export const IDLE_FADE_MS = 8000; // inactivity delay before the FAB fades, ms
 export const IDLE_OPACITY = 0.4;
 export const STORAGE_KEY = "jarvis-fab-pos";
 
+// The launcher moves only by its six-dot grip (#671); a press anywhere else is a tap.
+export function startsOnGrip(target) {
+  return !!(
+    target &&
+    typeof target.closest === "function" &&
+    target.closest(".jvw-grip")
+  );
+}
+
 /** A center X at or past the viewport midpoint counts as the right side
  * (matches which edge a released drag snaps to). */
 export function chooseSide(centerX, vw) {

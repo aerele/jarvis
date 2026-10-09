@@ -11,6 +11,7 @@ from frappe.utils import add_to_date, now_datetime
 from jarvis.chat.pending_actions._settle import LATE_SETTLE_FLAG, MAX_SETTLE_ATTEMPTS, settle, settle_batch
 from jarvis.chat.pending_actions._store import (
 	CANCELLED,
+	EXECUTED,
 	EXECUTING,
 	FAILED,
 	PENDING,
@@ -65,9 +66,15 @@ def _log(title: str, message: str) -> None:
 
 
 STRUCTURE_RETRY_HOURS = 24
+# A guarded structure write still Executing after this long, whose form lock can be
+# taken, has no worker any more (the lock is held for the whole confirm).
+STRUCTURE_DEAD_AFTER_S = 60
+# ``_structure_cleaned``: the clean-up ran and left what the confirmation wrote in
+# place on purpose (people have used it since): the row ends as partly applied.
+KEPT = "kept"
 
 
-def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool:
+def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool | str:
 	"""Clean up after a guarded structure write whose confirm did not finish it (its
 	worker died after the claim, or its own clean-up failed), under the same per-form
 	lock its confirm takes. False when that lock is held or the clean-up fails again:
@@ -91,7 +98,7 @@ def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 		return True
 	try:
-		with _guarded_structure.structure_lock(str(undo.get("lock") or "")):
+		with _guarded_structure.structure_locks(undo.get("lock") or ""):
 			note = _guarded_structure.clean_up(undo)
 			if interrupted:
 				# Unverified, so filed as partial: the worker died somewhere inside it.
@@ -114,36 +121,50 @@ def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool:
 		_log_once("structure_cleanup_failed", name, tb)
 		return False
 	_log("structure_cleanup", f"{name}: {note.text}")
+	if getattr(note, "needs_person", False):
+		_log_once("structure_needs_a_person", name, note.text)
+		return KEPT
 	return True
 
 
 def _give_up_structure(name: str) -> None:
 	"""A clean-up that has failed for ``STRUCTURE_RETRY_HOURS``: say once that the
 	form needs a person, and drop the state so it is not tried for ever."""
-	from jarvis.chat.pending_actions._store import clear_undo
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._store import clear_undo, get_row
 
+	what = ""
+	try:
+		undo = _seal.unseal_undo(get_row(name)) or {}
+		parts = [str(undo.get(k)) for k in ("risk", "dt", "name") if undo.get(k)]
+		what = f" ({', '.join(parts)})" if parts else ""
+	except Exception:
+		what = ""
 	_log_once(
 		"structure_needs_a_person",
 		name,
-		"the clean-up of this structure change kept failing; check the form in Desk",
+		f"the clean-up of this structure change{what} kept failing; check it in Desk",
 	)
 	clear_undo(name)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 
 
-def _retry_structure_cleanups() -> int:
+def _retry_structure_cleanups(only: str | None = None) -> int:
 	"""Finish the clean-up of a guarded structure write whose own clean-up failed at
 	Confirm (the row is terminal and still carries its state). Tried on every run for
 	``STRUCTURE_RETRY_HOURS``; after that it is logged once as needing a person and
-	the state dropped, so the half-made field is found from the Error Log."""
+	the state dropped, so the half-made field is found from the Error Log. ``only``:
+	that one row (a test on a shared site reconciles nothing but its own)."""
 	from jarvis.tools import _guarded_structure
 
 	if not _guarded_structure.undo_ready():
 		return 0
+	# Never a row that ran: what it still carries is its undo, kept on purpose
+	# (``_guarded_structure.keeps_undo``), not a clean-up left to do.
 	rows = frappe.db.sql(
 		"SELECT name, modified FROM `tabJarvis Pending Action` WHERE sealed_undo IS NOT NULL"
-		" AND status IN %(t)s ORDER BY modified LIMIT %(lim)s",
-		{"t": TERMINAL, "lim": _SCAN},
+		" AND status IN %(t)s AND (%(only)s IS NULL OR name = %(only)s) ORDER BY modified LIMIT %(lim)s",
+		{"t": tuple(s for s in TERMINAL if s != EXECUTED), "lim": _SCAN, "only": only},
 		as_dict=True,
 	)
 	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
@@ -156,22 +177,45 @@ def _retry_structure_cleanups() -> int:
 	return done
 
 
-def _reap_interrupted() -> int:
+def _reap_interrupted(only: str | None = None) -> int:
 	"""Executing past ``INTERRUPT_AFTER_S``: Failed/interrupted. Never a sheet (its
 	apply is a background job: ``SHEET_REAPER`` asks RQ). A guarded structure write
-	is cleaned up first (``_structure_cleaned``)."""
+	is cleaned up first (``_structure_cleaned``); one whose clean-up left what it
+	wrote in place because people have used it since ends ``partial``. ``only``: that
+	one row."""
+	from jarvis.tools import _guarded_structure
+
 	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
-	rows = frappe.db.sql(
-		"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
-		" AND executing_at < %(c)s AND kind != %(sheet)s ORDER BY executing_at LIMIT %(lim)s",
-		{"c": cutoff, "lim": _SCAN, "sheet": SHEET},
-		as_dict=True,
-	)
+	# A guarded structure write holds its form's lock for the whole confirm, so its
+	# row is known dead as soon as that lock can be taken: ``_structure_cleaned``
+	# takes it and leaves the row alone while it is held. No need to wait out
+	# ``INTERRUPT_AFTER_S`` with a field row that has no column.
+	early = add_to_date(now_datetime(), seconds=-STRUCTURE_DEAD_AFTER_S)
+	params = {"c": cutoff, "early": early, "lim": _SCAN, "sheet": SHEET, "only": only}
+	if _guarded_structure.undo_ready():
+		rows = frappe.db.sql(
+			"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+			" AND (executing_at < %(c)s OR (sealed_undo IS NOT NULL AND executing_at < %(early)s))"
+			" AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
+			" ORDER BY executing_at LIMIT %(lim)s",
+			params,
+			as_dict=True,
+		)
+	else:
+		rows = frappe.db.sql(
+			"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+			" AND executing_at < %(c)s AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
+			" ORDER BY executing_at LIMIT %(lim)s",
+			params,
+			as_dict=True,
+		)
 	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
 	flipped = []
 	for r in rows:
-		if _structure_cleaned(r.name):
-			if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted"):
+		cleaned = _structure_cleaned(r.name)
+		if cleaned:
+			code = "partial" if cleaned == KEPT else "interrupted"
+			if _terminal_update(r.name, [EXECUTING], FAILED, reason_code=code):
 				flipped.append(r)
 		elif r.executing_at < give_up:
 			# Its clean-up has failed (or its form's lock has been held) for a day: the
@@ -403,11 +447,13 @@ def reconcile() -> dict:
 	return out
 
 
-def purge() -> int:
+def purge(only: str | None = None) -> int:
 	"""Daily (D3): delete settled terminal rows older than 7 days with their waiters,
 	in committed batches. Never a Pending/Executing row, nor a held row with a waiter
 	not yet resumed (due, claimed, or failed: a re-run or delete drops that one), nor
-	a row another session holds (skipped, retried tomorrow)."""
+	a row another session holds (skipped, retried tomorrow). The whole row goes, so
+	what a guarded structure write kept on it for an operator's undo (``sealed_undo``)
+	goes with it: nothing else holds that snapshot. ``only``: that one row."""
 	if not table_ready():
 		return 0
 	cutoff = add_to_date(now_datetime(), days=-PURGE_AFTER_DAYS)
@@ -417,8 +463,9 @@ def purge() -> int:
 			"SELECT pa.name FROM `tabJarvis Pending Action` pa WHERE pa.settled=1 AND pa.status IN %(t)s"
 			" AND pa.settled_at < %(c)s AND NOT EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` w"
 			" WHERE w.parent=pa.name AND w.parenttype='Jarvis Pending Action'"
-			" AND IFNULL(w.resume_state, '') != 'done') LIMIT %(lim)s FOR UPDATE SKIP LOCKED",
-			{"t": TERMINAL, "c": cutoff, "lim": PURGE_BATCH},
+			" AND IFNULL(w.resume_state, '') != 'done') AND (%(only)s IS NULL OR pa.name = %(only)s)"
+			" LIMIT %(lim)s FOR UPDATE SKIP LOCKED",
+			{"t": TERMINAL, "c": cutoff, "lim": PURGE_BATCH, "only": only},
 		)
 		if not names:
 			break

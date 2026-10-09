@@ -730,7 +730,8 @@ class TestTheNotice(FrappeTestCase):
 			"without asking you first, including when it runs on a schedule with nobody watching. "
 			"Deleting, cancelling and amending records, creating or changing skills and calling "
 			"connectors still ask, and stop the run. So do changes to scripts, webhooks, email set-up, "
-			"user access, sign-in settings, learned skills and other sensitive configuration. Its steps "
+			"user access, sign-in settings, learned skills, CRM settings and other sensitive "
+			"configuration. Its steps "
 			"can apply only "
 			"skills you own, or skills only a reviewer can change.",
 		)
@@ -990,8 +991,9 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 				self.assertIn("/armskill-typed, which another user", sent)
 
 	def test_the_owners_own_skill_of_that_name_is_the_one_it_runs(self):
-		# ``get_skill`` serves the owner's own row first, so another user's skill of the
-		# same name, shared with them, never runs and does not disarm the run.
+		# ``get_skill`` serves the owner's own row before another user's private skill
+		# of the same name shared with them, so that one never runs and does not disarm
+		# the run. (Only a reviewed Role/Org row comes before the owner's own.)
 		own = self._skill(OWNER, "g")
 		macro = self._tagged(OWNER, own, armed=True)
 		frappe.set_user(OTHER)
@@ -1009,6 +1011,16 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 		_data, [(prompt, armed)] = self._run(macro)
 		self.assertEqual(armed, 1)
 		self.assertNotIn("Skip confirmation is off", prompt)
+
+	def test_a_reviewed_skill_of_the_same_name_is_the_one_judged(self):
+		# The owner has a private skill and there is a company skill of the same name:
+		# the company one is what the name is served from, and it counts as controlled.
+		from jarvis.chat.skill_permissions import served_row, skills_outside_control
+
+		self._skill(OWNER, "pair")
+		org = self._skill(OTHER, "pair", scope="Org")
+		self.assertEqual(served_row("armskill-pair", OWNER).name, org)
+		self.assertEqual(skills_outside_control(OWNER, slugs={"armskill-pair"}), [])
 
 	def test_a_system_manager_is_judged_on_the_skill_they_would_be_served(self):
 		# A System Manager reads every skill: another user's private one, shared with

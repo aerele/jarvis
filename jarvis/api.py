@@ -1607,10 +1607,11 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 	   offer: the run flag is conversation-wide with no per-write skill
 	   attribution, so a co-invoked (even unarmed) skill's writes would otherwise
 	   ride the approval.
-	4. That one slug resolves to a single live-armed row the owner would invoke
+	4. The row ``get_skill`` would serve the owner for that slug is live-armed
 	   (:func:`jarvis.chat.custom_skills.resolve_armed_skill_docname` - the same
-	   owned/shared/role-scoped resolution :func:`invoked_skill_slugs` uses, so the
-	   two can never drift apart).
+	   choice of row as the fetch, :func:`jarvis.tools.get_skill.served`: a reviewed
+	   Role/Org row before the owner's own - so the offer is made on the row whose
+	   instructions the run reads).
 
 	Best-effort: any exception -> ``(None, None)``; this is an additive nicety on
 	the hot gate path and must never break the park."""
@@ -2377,9 +2378,11 @@ def dispatch_confirmed(
 	Box) runs a create / update behind the no-commit fence, so a doctype outside the
 	structure list whose save runs DDL is refused before the ALTER.
 
-	A guarded structure write (one new Custom Field, a column-free Custom Field edit;
-	R2-10) runs only for a confirmed card (``allow_risky``) whose confirm holds that
-	form's structure lock (``pending_actions.execute`` takes it before the claim):
+	A guarded structure write (one new Custom Field, a column-free Custom Field edit,
+	a Workflow create or update, CRM Settings with the data sync on, Domain Settings;
+	R2-10) runs only for a confirmed card (``allow_risky``) whose confirm holds the
+	structure lock of every form it alters (``pending_actions.execute`` takes them
+	before the claim):
 	any other caller gets the structure refusal. Its checks run again under the lock,
 	the ALTER waits only a few seconds for the table, a refusal by the database is
 	enveloped in plain words, and its failure is never fixable (E3)."""
@@ -2394,7 +2397,9 @@ def dispatch_confirmed(
 	# the exact form the park sealed: a doctype in another letter case would still
 	# save on a case-insensitive database, around everything keyed on the name.
 	exact = isinstance(args, dict) and args.get("doctype") == _write_risk.canonical(args.get("doctype"))
-	if guarded is not None and not (exact and _guarded_structure.lock_held(guarded.lock_doctype)):
+	if guarded is not None and not (
+		exact and _guarded_structure.locks_held(_guarded_structure.lock_names(guarded))
+	):
 		refusal = _write_risk.refusal_of(tool, args)
 		return _refuse_risky_write(
 			tool, args, refusal, provenance=provenance, provenance_name=provenance_name
@@ -2476,7 +2481,12 @@ def _refuse_risky_write(
 	env["error"]["kind"] = "not_fixable"
 	doctype, name = _write_risk.first_risky_target(tool, args)
 	risk = "structure" if e.code == "structure_refused" else "sensitive"
-	_write_risk.log_line(risk, e.doctype or doctype, name, "refused", tool=tool, code=e.code)
+	extra = {}
+	if getattr(e, "risk", None) == _write_risk.CHILD_ROW:
+		# One label for a child row refused by its arguments or at its save
+		# (``_write_risk._refuse_child_row``); what its parent is rides beside it.
+		risk, extra = _write_risk.CHILD_ROW, {"under": e.under, "parent_kind": e.parent_kind}
+	_write_risk.log_line(risk, e.doctype or doctype, name, "refused", tool=tool, code=e.code, **extra)
 	audit.record(tool=tool, args=args, ok=False, error_code=e.code, error_message=env["error"]["message"])
 	agent_audit.record_write(
 		actor=frappe.session.user,
@@ -2496,12 +2506,15 @@ def _build_park_card(
 ) -> tuple[dict | None, dict | None]:
 	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
 
-	A guarded structure write (``structural``: its further risk lines, a list;
-	R2-10) is shown exactly like a sensitive one, in full and never clipped, and
-	leads with the structural line in the banner, then what else the change does
-	(code for an ``eval:`` expression, access, a fetch; ``card.structural`` marks it
-	for the clients). It reuses the ``risk: "sensitive"`` rendering, so every client
-	that shows a sensitive card in full shows this one in full too.
+	A guarded structure write (``structural``: every line of its banner, a list;
+	R2-10) is shown exactly like a sensitive one, in full and never clipped. Its
+	banner leads with the structural line (or, for a write that changes no column,
+	with what it is: ``_guarded_structure.lead_line``), then what else the change
+	does (code, access, a fetch, the workflow it replaces, the roles it turns off).
+	``card.structural`` marks it as a guarded card, for the clients and for the
+	confirm (``pending_actions._execute._structure_of``). It reuses the
+	``risk: "sensitive"`` rendering, so every client that shows a sensitive card in
+	full shows this one in full too.
 
 	A sensitive call (R2-8 / R2-12) gets ``preview["risk"]`` / ``risk_line`` (every
 	risk it carries, in target order), which makes ``build_card`` show it in full,
@@ -2518,9 +2531,7 @@ def _build_park_card(
 	if confirm_card.too_large(None, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
 	if structural is not None:
-		from jarvis.tools._guarded_structure import STRUCTURAL_LINE
-
-		line = " ".join([STRUCTURAL_LINE, *structural])
+		line = " ".join(structural)
 		preview["structural"] = True
 	else:
 		line = " ".join(_write_risk.risk_lines(tool, args))
@@ -2554,8 +2565,8 @@ def _can_card_structure(conversation: str | None) -> bool:
 
 def _structure_park(tool: str, args: dict, risk: str) -> tuple:
 	"""``(rejected, preview, lines, canonical_args)`` for a guarded structure write at
-	park: its checks, then a described preview, the risk lines its card shows after
-	the structural one, and the call in its stored form (``unique: "true"`` as 1, the
+	park: its checks, then a described preview, the lines of its card's banner (the
+	structural line first), and the call in its stored form (``unique: "true"`` as 1, the
 	doctype by its exact name), which is what is carded, sealed and run: the card
 	can never show one thing and the save write another. Nothing is trial-run, so no row and no column exist
 	until Confirm. A refusal that is a structure refusal is audited like every
@@ -2578,9 +2589,9 @@ def _structure_park(tool: str, args: dict, risk: str) -> tuple:
 		"preview": False,
 		"described": True,
 		"summary": _describe_call(tool, canonical),
-		"note": "not a dry run - this changes the database structure on confirm",
+		"note": "not a dry run - nothing is saved or changed until Confirm",
 	}
-	return None, preview, handler.risk_lines(), canonical
+	return None, preview, [_guarded_structure.lead_line(handler), *handler.risk_lines()], canonical
 
 
 def _refuse_sensitive_import(tool: str, args: dict, **provenance) -> dict:
@@ -3219,9 +3230,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# is refused here with its Desk path and a ``refused`` audit row; sensitive configuration comes back as "sensitive" and
 	# must park behind its own card in EVERY mode (``_must_card`` below). The ORM
 	# guard on the save itself backs this up for what arguments cannot show.
-	# A guarded structure write (one new Custom Field, a column-free Custom Field
-	# edit; R2-10) comes back as its own class: it parks a card in every mode too,
-	# on a chat that can hold a pending-action card, and is refused anywhere else.
+	# A guarded structure write (a Custom Field, a Workflow, CRM Settings with the
+	# data sync on, Domain Settings; R2-10) comes back as its own class: it parks a
+	# card in every mode too, on a chat that can hold a pending-action card, and is
+	# refused anywhere else.
 	_risk = None
 	_guarded = False
 	if is_write:
@@ -3568,12 +3580,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# the flag and refuse WITHOUT dispatching, within one write, no deploy. Placed
 			# after the cancel-gate and before the TTL/dispatch so it fires on every
 			# would-be uncarded covered write regardless of the run's age.
+			# The same for a skill switched off mid-run: its name would then be served
+			# from another row (the user's own), which nobody armed.
 			autorun_skill = _conv_flags.get("skill_autorun_skill")
-			if not autorun_skill or not frappe.db.get_value(
-				"Jarvis Custom Skill", autorun_skill, "allow_approve_run"
-			):
+			still_armed = autorun_skill and frappe.db.get_value(
+				"Jarvis Custom Skill", autorun_skill, ["allow_approve_run", "enabled"]
+			)
+			if not still_armed or not all(frappe.utils.cint(v) for v in still_armed):
 				_skill_autorun_clear(conv)
-				return _error(RunDisarmedError.__name__, "the skill was disarmed - run stopped")
+				return _error(
+					RunDisarmedError.__name__, "the skill was disarmed or switched off - run stopped"
+				)
 			# No-activity net: auto-run only while the run was active recently. The
 			# stamp moves on each covered write and when one of the run's cards is
 			# confirmed (``turn_message_binding.keep_skill_autorun_open``), so waiting on
