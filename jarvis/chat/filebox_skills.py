@@ -18,6 +18,7 @@ import json
 import re
 
 import frappe
+from frappe.query_builder import Order
 
 from jarvis._responses import err
 from jarvis.chat.pending_actions._store import filebox_migrated
@@ -119,39 +120,56 @@ def eligible_skills(dropper: str, pin: str | None = None) -> list:
 	never names a skill the fetch would then refuse or answer with another row. A
 	reviewed skill that is not opted in therefore hides a same-named skill of the
 	dropper's own."""
-	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import prefetch_child_values
-	from jarvis.tools.find_skills import _visible
+	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
+		prefetch_child_values,
+		user_can_use_skill,
+	)
 	from jarvis.tools.get_skill import served
 
 	if not filebox_migrated():
 		return []
 	# The slugs that could be listed, newest first: the dropper's own skills, the pin,
 	# and the reviewed skills opted in.
-	slugs = frappe.db.sql_list(
-		"""SELECT skill_name FROM `tabJarvis Custom Skill`
-		WHERE enabled = 1 AND (owner = %(u)s OR (use_in_file_box = 1
-		  AND (name = %(pin)s OR (scope IN ('Role', 'Org') AND managed_by_learning = 0))))
-		ORDER BY modified DESC LIMIT %(n)s""",
-		{"u": dropper, "pin": pin or "", "n": _CANDIDATES},
+	skill = frappe.qb.DocType(SKILL)
+	reviewed = skill.scope.isin(["Role", "Org"]) & (skill.managed_by_learning == 0)
+	listable = (skill.owner == dropper) | (
+		(skill.use_in_file_box == 1) & ((skill.name == (pin or "")) | reviewed)
 	)
+	slugs = (
+		frappe.qb.from_(skill)
+		.select(skill.skill_name)
+		.where((skill.enabled == 1) & listable)
+		.orderby(skill.modified, order=Order.desc)
+		.limit(_CANDIDATES)
+	).run(pluck=True)
 	slugs = list(dict.fromkeys(slugs))
 	if not slugs:
 		return []
 	# Every enabled row of those slugs: which one a slug means is judged among all the
 	# rows the dropper may use, as the fetch judges it.
-	rows = frappe.db.sql(
-		"""SELECT name, owner, skill_name, description, scope, target_role, enabled, use_in_file_box,
-		  file_box_creates, managed_by_learning, modified
-		FROM `tabJarvis Custom Skill`
-		WHERE enabled = 1 AND skill_name IN %(slugs)s ORDER BY modified DESC""",
-		{"slugs": tuple(slugs)},
-		as_dict=True,
-	)
+	rows = (
+		frappe.qb.from_(skill)
+		.select(
+			skill.name,
+			skill.owner,
+			skill.skill_name,
+			skill.description,
+			skill.scope,
+			skill.target_role,
+			skill.enabled,
+			skill.use_in_file_box,
+			skill.file_box_creates,
+			skill.managed_by_learning,
+			skill.modified,
+		)
+		.where((skill.enabled == 1) & skill.skill_name.isin(slugs))
+		.orderby(skill.modified, order=Order.desc)
+	).run(as_dict=True)
 	prefetch_child_values(rows)
 	roles = frappe.get_roles(dropper)
 	by_slug: dict[str, list] = {}
 	for row in rows:
-		if _visible(row, dropper, roles):
+		if user_can_use_skill(row, dropper, roles):
 			by_slug.setdefault(row.skill_name, []).append(row)
 	picked = []
 	for slug in slugs:
