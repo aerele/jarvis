@@ -171,6 +171,29 @@ def _private_meta(dt: str):
 	return Meta(dt)
 
 
+def _as_saved(values: dict, fieldtype: str | None, dt: str | None, *, new: bool = False) -> dict:
+	"""What ``CustomField.validate`` and Frappe's defaults do to the stored form of
+	a call, so the card shows it (custom_field.py ``validate``, the same on 15 and
+	16): ``insert_after: "append"`` becomes the form's last fieldname,
+	"translatable" is switched off on a field type that has no translation, and on
+	a new field a value sent as null takes the field's default (left out, the save
+	fills it)."""
+	from frappe.model.docfield import supports_translation
+
+	out = {k: v for k, v in values.items() if not (new and v is None)}
+	if out.get("insert_after") == "append" and dt:
+		try:
+			last = [df.fieldname for df in frappe.get_meta(dt, cached=False).get("fields")]
+		except Exception:
+			last = []
+		if last:
+			out["insert_after"] = last[-1]
+	kind = out.get("fieldtype") or fieldtype or "Data"
+	if cint(out.get("translatable")) and not supports_translation(kind):
+		out["translatable"] = 0
+	return out
+
+
 def _stored(values: dict) -> dict:
 	"""``values`` as the write stores them on a Custom Field: the tools' own value
 	check (``_field_values.check_values``: "true" / "yes" / "on" are 1, "1,000" is
@@ -189,6 +212,8 @@ def _stored(values: dict) -> dict:
 			value = value.strip()
 		if df is not None and df.fieldtype == "Select" and isinstance(value, str):
 			value = value.strip()  # as the write's own Select check stores it (precision " 2")
+		if df is not None:
+			value = gs.as_sanitized(df, value)  # the save's XSS pass, so the card shows it
 		if key == "default" and value is not None and not isinstance(value, str):
 			# The column is text. A number is kept as its text; anything else (true, a
 			# list) has no one text form, and crashed Frappe's schema diff.
@@ -553,7 +578,7 @@ class NewCustomField:
 		"""The call as it is carded, sealed and run: the doctype by its exact name and
 		the values in their stored form, so the card shows what the save writes and
 		the save writes what the card showed. Called after ``check``."""
-		return {"doctype": CF, "values": _stored(self.given)}
+		return {"doctype": CF, "values": _as_saved(_stored(self.given), None, self.dt, new=True)}
 
 	def _probe(self):
 		"""The exact document the tool will save: the stored form of the values, on a
@@ -793,7 +818,13 @@ class CustomFieldEdit:
 
 	def canonical_args(self) -> dict:
 		"""As ``NewCustomField.canonical_args``: exact doctype, stored changes."""
-		return {"doctype": CF, "name": self.name, "changes": _stored(self.given)}
+		row = frappe.db.get_value(CF, self.name, ["fieldtype", "dt"], as_dict=True) if self.name else None
+		row = row or {}
+		return {
+			"doctype": CF,
+			"name": self.name,
+			"changes": _as_saved(_stored(self.given), row.get("fieldtype"), row.get("dt")),
+		}
 
 	def _refuse(self, why: str) -> StructureRefusedError:
 		from jarvis.tools._write_risk import desk_path

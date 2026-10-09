@@ -349,7 +349,8 @@ class CrmSettingsSync:
 			elif df.fieldtype in ("Check", "Int"):
 				out[key] = cint(value)
 			elif value is None or isinstance(value, str):
-				out[key] = (value or "").strip() or None
+				# In the form the save's XSS pass stores, as every guarded card shows.
+				out[key] = (gs.as_sanitized(df, (value or "").strip()) or "").strip() or None
 			elif isinstance(value, bool) or not isinstance(value, int | float):
 				raise InvalidFieldValueError(f"The CRM setting {key} must be one plain value.")
 			else:
