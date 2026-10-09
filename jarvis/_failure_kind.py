@@ -132,7 +132,13 @@ def too_slow(exc: BaseException) -> bool:
 	"""Whether ``exc`` is the database stopping a statement at its time limit
 	(MariaDB error 1969), on the exception itself or the driver error it wraps."""
 	for candidate in (exc, exc.__cause__):
-		if candidate is not None and frappe.db.is_statement_timeout(candidate):
+		# Frappe 15's helper reads args[0] unguarded, and a bare ``raise
+		# frappe.PermissionError`` (has_permission, only_for) has no args.
+		if (
+			candidate is not None
+			and getattr(candidate, "args", None)
+			and frappe.db.is_statement_timeout(candidate)
+		):
 			return True
 	return False
 
