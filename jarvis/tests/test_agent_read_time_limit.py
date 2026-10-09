@@ -128,6 +128,14 @@ class TestAgentReadTimeLimit(FrappeTestCase):
 		finally:
 			frappe.db.sql("SET SESSION max_statement_time = %s", (self.before,))
 
+	def test_a_server_that_cannot_set_the_limit_runs_the_read_unlimited(self):
+		frappe.conf[CONFIG_KEY] = 1
+		with patch.object(frappe.db, "set_execution_timeout", side_effect=Exception("unknown variable")):
+			res = self._dispatch(READ_TOOL, _reports_limit, {"doctype": "ToDo"})
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(res["data"]["limit"], self.before)
+		self.assertEqual(_session_limit(), self.before)
+
 	def test_a_looser_session_limit_is_tightened_then_restored(self):
 		frappe.db.sql("SET SESSION max_statement_time = 120")
 		try:
@@ -227,6 +235,15 @@ class TestTooSlowKind(FrappeTestCase):
 		read = api._translate_write_error(err, api._msglog_mark())
 		self.assertEqual(read["error"]["code"], "QueryTooSlowError")
 		self.assertIsNone(api._translate_write_error(err, api._msglog_mark(), is_write=True))
+
+	def test_an_exception_without_args_is_not_too_slow(self):
+		# A bare ``raise frappe.PermissionError`` carries no args; Frappe 15's
+		# helper indexes args[0] unguarded, so this must not raise IndexError.
+		self.assertFalse(_failure_kind.too_slow(frappe.PermissionError()))
+		self.assertEqual(
+			_failure_kind.kind_of(frappe.PermissionError()),
+			_failure_kind.kind_of(frappe.PermissionError("x")),
+		)
 
 	def test_a_lock_wait_is_not_too_slow(self):
 		self.assertFalse(_failure_kind.too_slow(frappe.QueryTimeoutError("lock wait")))
