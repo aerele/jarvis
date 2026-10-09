@@ -162,7 +162,7 @@ def get_list(
 	Offsets are live, not snapshot cursors. The agent response-budget guard can
 	shorten a page and adjusts coverage to resume at the first omitted row.
 	The canonical specimens in tests/fixtures/list-page-v1.json are shared with
-	the OpenClaw plugin; evolve producer and consumer tests together.
+	the runtime tool plugin; evolve producer and consumer tests together.
 
 	Frappe's get_list applies per-user record permissions automatically.
 	We additionally enforce DocType-level read permission and cap the limit.
