@@ -1087,17 +1087,13 @@ def _registry_is_stale(workers=None) -> bool:
 
 def _total_live_workers() -> "int | None":
 	"""Count of ALL live RQ workers on this bench, across every queue - not just
-	the pump's hop/control lanes. Falls back to heartbeat hashes when the registry
-	lists nobody (a queue-Redis restart empties ``rq:workers`` while the workers
-	keep running). Returns ``None`` (not 0) on any probe trouble so the caller
-	fails SAFE (not degraded) rather than reading a broken probe as a real
-	shortage."""
-	try:
-		from frappe.utils.background_jobs import get_workers
-
-		return len(get_workers()) or _fresh_heartbeat_count()
-	except Exception:
-		return None
+	the pump's hop/control lanes. Counted by fresh heartbeat, never by registry
+	length: ``rq:workers`` can keep a worker killed weeks ago (its hash outlives
+	it with an expired ``last_heartbeat``) while live workers drop out of the set,
+	so one ghost read as 1 live worker and warned on a healthy bench (#1221).
+	Returns ``None`` (not 0) on any probe trouble so the caller fails SAFE (not
+	degraded) rather than reading a broken probe as a real shortage."""
+	return _fresh_heartbeat_count()
 
 
 def _fresh_heartbeat_count() -> "int | None":
@@ -1111,7 +1107,9 @@ def _fresh_heartbeat_count() -> "int | None":
 		conn = get_redis_conn()
 		now = datetime.now(timezone.utc)
 		fresh = 0
-		for key in conn.scan_iter(match="rq:worker:*"):
+		# Runs on every SPA boot since #1221; SCAN's default COUNT (10) would cost one
+		# round trip per ten queue keys.
+		for key in conn.scan_iter(match="rq:worker:*", count=1000):
 			seen = _heartbeat_time(conn.hget(key, "last_heartbeat"))
 			if seen and (now - seen).total_seconds() <= _HEARTBEAT_FRESH_S:
 				fresh += 1
@@ -1139,8 +1137,8 @@ def chat_worker_status() -> dict:
 	reports not degraded.
 
 	``degraded`` fires on fewer than 2 TOTAL live RQ workers (any queue) - see
-	the block comment above. It is a banner, never a send block: the registry it
-	reads can misreport zero (``_registry_is_stale``)."""
+	the block comment above. It is a banner, never a send block: worker probes can
+	misreport (``_registry_is_stale``, #1221)."""
 	try:
 		n = _total_live_workers()
 		degraded = n is not None and n < 2
