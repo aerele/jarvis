@@ -210,7 +210,7 @@ test("send() carries the composer text verbatim — there is nothing left to str
 		/: \(fromMain \? input\.value : textArg\)\.trim\(\);/,
 		"a placeholder-stripping payload was only ever needed because clips could leave holes"
 	);
-	const post = body.indexOf("await api.sendMessage(");
+	const post = body.indexOf("api.sendMessage(");
 	const capture = body.indexOf("voiceStore.captureSentInPayload(_sentScope, text)");
 	assert.notEqual(capture, -1, "the payload-bound release must still be captured…");
 	assert.ok(capture < post, "…BEFORE the POST, so it binds to exactly what is going out");
@@ -219,7 +219,7 @@ test("send() carries the composer text verbatim — there is nothing left to str
 test("send() flags sent-without recordings only in the ACCEPTED branch, after the release", () => {
 	const body = sendBody();
 	const read = body.indexOf("voiceStore.failedIdsForScope(_sentScope)");
-	const post = body.indexOf("await api.sendMessage(");
+	const post = body.indexOf("api.sendMessage(");
 	const ack = body.indexOf("if (_voiceAck) voiceStore?.acknowledge(_voiceAck);");
 	const flag = body.indexOf("voiceStore.markSentWithout(_fid)");
 	assert.notEqual(read, -1, "the recordings a message is leaving behind must be read up front");

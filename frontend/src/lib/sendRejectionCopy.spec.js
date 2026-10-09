@@ -48,6 +48,12 @@ describe("sendRejectionCopy", () => {
 		expect(sendRejectionCopy("", "Jarvis").message).toBe(FALLBACK);
 		expect(sendRejectionCopy(undefined, "Jarvis").message).toBe(FALLBACK);
 	});
+	it("uses maintenance copy on the v15 send path", () => {
+		expect(sendRejectionCopy("maintenance", "Jarvis")).toEqual({
+			message: "Jarvis is temporarily unavailable for maintenance. Try again shortly.",
+			type: "warning",
+		});
+	});
 });
 
 describe("sendRejectionCopy, usage limit window", () => {

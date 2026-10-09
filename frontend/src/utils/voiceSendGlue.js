@@ -77,7 +77,17 @@ export function injectPendingBubbles(messages, pendingBubbles) {
 	const base = Array.isArray(messages) ? messages : [];
 	if (!pendingBubbles || !pendingBubbles.length) return base;
 	const have = new Set(base.map((m) => m && m.name));
-	const add = pendingBubbles.filter((b) => b && b.name && !have.has(b.name));
+	const add = pendingBubbles.filter(
+		(b) =>
+			b &&
+			b.name &&
+			!have.has(b.name) &&
+			!(
+				b.deliveryState === "delivered" &&
+				b.deliveryMessageId &&
+				have.has(b.deliveryMessageId)
+			)
+	);
 	return add.length ? [...base, ...add] : base;
 }
 
@@ -122,9 +132,23 @@ export function createPendingSends() {
 			m.delete(name);
 			if (!m.size) byScope.delete(k);
 		},
+		reconcile(scope, messages) {
+			const names = new Set(messages.map((m) => m.name));
+			for (const bubble of this.peek(scope)) {
+				if (
+					bubble.deliveryState === "delivered" &&
+					(bubble.deliveryConfirmed || names.has(bubble.deliveryMessageId))
+				)
+					this.remove(scope, bubble.name);
+			}
+		},
 		has(scope) {
 			const m = byScope.get(_key(scope));
 			return !!(m && m.size);
+		},
+		scopeOf(bubble) {
+			for (const [scope, entries] of byScope) if (entries.has(bubble.name)) return scope;
+			return null;
 		},
 		// Move every entry from `fromScope` to `toScope` when the new-chat sentinel is promoted to
 		// its real id, so a bubble that failed under the sentinel re-injects on the real conversation.
@@ -146,3 +170,6 @@ export function createPendingSends() {
 		},
 	};
 }
+
+// Tab-owned recovery survives navigation out of ChatView; reload/logout clears it.
+export const pendingSends = createPendingSends();

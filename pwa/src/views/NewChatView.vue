@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import BrandMark from "../components/BrandMark.vue";
 import { holdActive } from "../maintenanceGate";
 import { agentName } from "@/branding";
@@ -14,6 +14,8 @@ import { pickStarterPrompt } from "../lib/fillComposer";
 import Sheet from "../components/Sheet.vue";
 import AutoModeToggle from "../components/AutoModeToggle.vue";
 import { autoModeView } from "../lib/autoMode";
+import { recoveryState, sendRecovery } from "../sendRecoveryStore";
+import { observeDelivery, deliveryFailureCopy } from "@shared/lib/sendDelivery.js";
 
 // New chat: the hero screen, not an empty thread with a chat bar bolted to the
 // bottom. Brand mark, a greeting that knows the time of day and who you are, and
@@ -22,10 +24,25 @@ const VoiceSheet = defineAsyncComponent(() => import("../components/VoiceSheet.v
 
 const router = useRouter();
 
-const input = ref("");
+const editing = recoveryState.requests.find(
+	(r) => r.id === recoveryState.editingNewRequest && r.state === "rejected"
+);
+const restored = editing || recoveryState.heroDraft;
+const selectedModel = ref(restored?.model ?? prefs.defaultModel ?? "");
+const selectedEffort = ref(
+	restored?.effort ||
+		EFFORT.find((e) => e.thinking === restored?.thinking)?.value ||
+		prefs.effort
+);
+const input = ref(restored?.text || "");
 const busy = ref(false);
 const error = ref("");
-const attachments = ref([]);
+const attachments = ref(
+	(restored?.attachments || []).map((a, i) => {
+		a.key ||= `restored-${i}`;
+		return a;
+	})
+);
 const settings = ref(null);
 const starters = ref(DEFAULT_STARTERS);
 const modelSheet = ref(false);
@@ -33,7 +50,7 @@ const voiceOpen = ref(false);
 // Auto mode (#581): /c/new has no conversation row until the first send, so the
 // toggle is local state. `armed` is pre-set from the user's default; the warning
 // sheet shows only until they have acknowledged it once.
-const autoArmed = ref(false);
+const autoArmed = ref(!!restored?.autoMode);
 // Not acknowledged until the server says so: an unloaded or failed settings read
 // asks (one extra confirm at worst), never skips the "not recommended" warning.
 const autoAcked = ref(false);
@@ -76,13 +93,13 @@ const models = computed(() => {
 	return s.subscription_models?.[s.llm_provider] || [];
 });
 
-const currentModel = computed(() => prefs.defaultModel || settings.value?.llm_model || "");
+const currentModel = computed(() => selectedModel.value || settings.value?.llm_model || "");
 const micEnabled = computed(() => !!settings.value?.stt_enabled);
 const effortOn = computed(() => effortOffered(settings.value));
 const hasDraft = computed(
 	() => input.value.trim().length > 0 || attachments.value.some((a) => a.file_url)
 );
-const uploading = computed(() => attachments.value.some((a) => a.uploading));
+const uploading = computed(() => attachments.value.some((a) => a.uploading || !a.file_url));
 
 function modelDesc(name) {
 	const n = String(name).toLowerCase();
@@ -113,38 +130,114 @@ function useStarter(card) {
 	});
 }
 
-async function send(text = input.value) {
-	const t = String(text).trim();
-	const ready = attachments.value.filter((a) => a.file_url);
-	if ((!t && !ready.length) || busy.value || uploading.value) return;
+watch(
+	() => recoveryState.requests.map((r) => `${r.id}:${r.state}`).join("|"),
+	() => {
+		for (const request of recoveryState.requests)
+			if (["accepted", "confirmed"].includes(request.state)) request.needsAdoption = false;
+	},
+	{ immediate: true }
+);
 
-	busy.value = true;
+const pendingNewChat = computed(() => recoveryState.requests.some((r) => !r.conversation));
+
+function draftSnapshot() {
+	return {
+		text: input.value,
+		attachments: [...attachments.value],
+		model: selectedModel.value,
+		effort: selectedEffort.value,
+		thinking: sendThinking(settings.value, selectedEffort.value),
+		autoMode: autoView.value.on,
+		autoTouched,
+	};
+}
+let submitted = false;
+function preserveDraft() {
+	// A fast refusal can settle before navigation unmounts this cleared composer.
+	if (submitted && !input.value && !attachments.value.length) return;
+	const draft = draftSnapshot();
+	if (editing?.state === "rejected") Object.assign(editing, draft);
+	else if (!editing)
+		recoveryState.heroDraft =
+			draft.text.trim() || draft.attachments.length || draft.autoTouched ? draft : null;
+}
+function reviewPending() {
+	preserveDraft();
+	router.push("/send-recovery");
+}
+async function send(text = input.value) {
+	// Dictation is draft content even when submission is unavailable.
+	if (typeof text === "string" && text !== input.value)
+		input.value = [input.value, text].filter(Boolean).join("\n");
+	if (pendingNewChat.value && !editing) {
+		reviewPending();
+		return;
+	}
+	const t = input.value.trim();
+	const ready = attachments.value.filter((a) => a.file_url);
+	if ((!t && !ready.length) || busy.value || uploading.value || holdActive.value) {
+		preserveDraft();
+		return;
+	}
 	error.value = "";
+	let request;
 	try {
-		// conversation "" → the backend creates (or focuses) the empty one and
-		// hands back its id, so a new chat costs one round-trip, not two.
-		const r = await api.sendMessage("", t, {
-			attachments: ready.map((a) => ({ file_url: a.file_url, file_name: a.name })),
-			model: prefs.defaultModel || "",
-			thinking: sendThinking(settings.value, prefs.effort),
-			autoMode: autoView.value.on,
-		});
-		if (r?.ok === false || !r?.conversation_id) {
-			error.value = r?.reason || "Couldn't start that chat.";
-			busy.value = false;
-			return;
+		if (editing) {
+			if (editing.state !== "rejected") {
+				reviewPending();
+				return;
+			}
+			Object.assign(editing, draftSnapshot(), {
+				text: t,
+				attachments: ready.map((a) => ({ file_url: a.file_url, name: a.name })),
+			});
+			if (!sendRecovery.retry(editing)) return;
+			request = editing;
+		} else {
+			request = sendRecovery.stage("", t, ready);
+			Object.assign(request, draftSnapshot(), {
+				text: t,
+				attachments: ready.map((a) => ({ file_url: a.file_url, name: a.name })),
+			});
 		}
-		input.value = "";
-		attachments.value = [];
-		store.loadConversations();
-		router.push(`/c/${r.conversation_id}`);
-	} catch (e) {
-		error.value = e?.message || "Couldn't start that chat.";
+	} catch {
+		error.value = "Could not prepare the message. Your draft is preserved.";
+		preserveDraft();
+		return;
+	}
+	busy.value = true;
+	submitted = true;
+	recoveryState.newChatPicks = {
+		model: request.model,
+		thinking: request.thinking,
+		autoMode: request.autoMode,
+	};
+	const attempt = request.id;
+	const operation = sendRecovery.begin(request);
+	input.value = "";
+	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
+	attachments.value = [];
+	if (!editing) recoveryState.heroDraft = null;
+	recoveryState.editingNewRequest = null;
+	router.push("/send-recovery");
+	try {
+		const outcome = await observeDelivery(api.sendRecoverableMessage(request), () => {
+			if (request.id === attempt) sendRecovery.settle(request, null, operation);
+		});
+		if (request.id === attempt) sendRecovery.settle(request, outcome, operation);
+	} catch (error) {
+		if (request.id === attempt) {
+			sendRecovery.settle(request, null, operation);
+			if (request.operation === operation && request.state === "uncertain")
+				request.note = deliveryFailureCopy(error);
+		}
+	} finally {
 		busy.value = false;
 	}
 }
 
-let autoTouched = false;
+let autoTouched = !!editing || !!restored?.autoTouched;
 function toggleAuto() {
 	autoTouched = true;
 	if (autoArmed.value) {
@@ -188,16 +281,13 @@ async function attach(e) {
 	attachments.value.push(...staged);
 
 	await Promise.all(
-		staged.map(async (a) => {
+		attachments.value.slice(-staged.length).map(async (a) => {
 			try {
 				const up = await api.uploadFile(a.file);
-				const row = attachments.value.find((x) => x.key === a.key);
-				if (row) {
-					row.file_url = up.file_url;
-					row.uploading = false;
-				}
+				Object.assign(a, { file_url: up.file_url, uploading: false });
 			} catch (err) {
-				removeAttachment(a.key);
+				a.uploading = false;
+				a.uploadError = true;
 				error.value = err?.message || `Couldn't upload ${a.name}.`;
 			}
 		})
@@ -237,7 +327,11 @@ onMounted(async () => {
 		if (d.default_auto_mode && !autoTouched) autoArmed.value = true;
 	}
 });
-onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview)));
+onUnmounted(() => {
+	preserveDraft();
+	recoveryState.editingNewRequest = null;
+	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
+});
 </script>
 
 <template>
@@ -322,6 +416,10 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 			{{ error }}
 		</div>
 
+		<button v-if="pendingNewChat" class="jv-btn" @click="reviewPending">
+			Review your pending message
+		</button>
+
 		<!-- One card: attachments, the field, and every control that acts on it.
 		     The chat bar belongs in a chat; a blank screen deserves a composer. -->
 		<div class="jv-card">
@@ -344,6 +442,9 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 						</svg>
 						<span class="jv-att-name">{{ a.name }}</span>
 					</div>
+					<span v-if="a.uploadError" role="alert"
+						>Upload failed. Remove and attach again.</span
+					>
 					<div v-if="a.uploading" class="jv-att-busy">
 						<span class="jv-spinner is-light" />
 					</div>
@@ -480,7 +581,10 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 					v-for="m in models"
 					:key="m"
 					class="jv-mrow"
-					@click="setPrefs({ defaultModel: m === currentModel ? '' : m })"
+					@click="
+						selectedModel = m === currentModel ? '' : m;
+						setPrefs({ defaultModel: selectedModel });
+					"
 				>
 					<span class="jv-radio" :class="{ 'is-on': m === currentModel }" />
 					<span class="jv-mrow-text">
@@ -518,8 +622,11 @@ onUnmounted(() => attachments.value.forEach((a) => a.preview && URL.revokeObject
 							v-for="e in EFFORT"
 							:key="e.value"
 							class="jv-seg-btn"
-							:class="{ 'is-on': prefs.effort === e.value }"
-							@click="setPrefs({ effort: e.value })"
+							:class="{ 'is-on': selectedEffort === e.value }"
+							@click="
+								selectedEffort = e.value;
+								setPrefs({ effort: e.value });
+							"
 						>
 							<span>{{ e.value }}</span>
 							<small>{{ e.hint }}</small>
