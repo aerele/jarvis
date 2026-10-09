@@ -222,6 +222,12 @@ class TestTooSlowKind(FrappeTestCase):
 		except RuntimeError as outer:
 			self.assertTrue(_failure_kind.too_slow(outer))
 
+	def test_only_a_read_is_translated(self):
+		err = Exception(1969, "max_statement_time exceeded")
+		read = api._translate_write_error(err, api._msglog_mark())
+		self.assertEqual(read["error"]["code"], "QueryTooSlowError")
+		self.assertIsNone(api._translate_write_error(err, api._msglog_mark(), is_write=True))
+
 	def test_a_lock_wait_is_not_too_slow(self):
 		self.assertFalse(_failure_kind.too_slow(frappe.QueryTimeoutError("lock wait")))
 		self.assertEqual(_failure_kind.kind_of(frappe.QueryTimeoutError("t")), _failure_kind.RETRY_LATER)
