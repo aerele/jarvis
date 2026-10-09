@@ -138,6 +138,16 @@
 								</template>
 								<template v-else-if="testState.status === 'failed'">
 									<p class="text-xs text-ink-red-4">{{ testState.message }}</p>
+									<a
+										v-if="guideUrl"
+										:href="guideUrl"
+										target="_blank"
+										rel="noopener"
+										class="inline-flex w-fit items-center gap-1 text-xs text-ink-blue-link hover:underline"
+									>
+										Setup guide
+										<FeatherIcon name="external-link" class="size-3" />
+									</a>
 									<div class="flex justify-end">
 										<Button
 											variant="ghost"
@@ -152,6 +162,16 @@
 							</template>
 							<template v-else-if="connectError">
 								<p class="text-xs text-ink-red-4">{{ connectError }}</p>
+								<a
+									v-if="guideUrl"
+									:href="guideUrl"
+									target="_blank"
+									rel="noopener"
+									class="inline-flex w-fit items-center gap-1 text-xs text-ink-blue-link hover:underline"
+								>
+									Setup guide
+									<FeatherIcon name="external-link" class="size-3" />
+								</a>
 								<div class="flex justify-end">
 									<Button
 										variant="solid"
@@ -191,6 +211,16 @@
 								<p v-if="staticHint" class="mt-1 text-p-sm text-ink-gray-6">
 									{{ staticHint }}
 								</p>
+								<a
+									v-if="guideUrl"
+									:href="guideUrl"
+									target="_blank"
+									rel="noopener"
+									class="mt-1 inline-flex w-fit items-center gap-1 text-xs text-ink-blue-link hover:underline"
+								>
+									Setup guide
+									<FeatherIcon name="external-link" class="size-3" />
+								</a>
 							</div>
 
 							<div class="grid grid-cols-[20px_minmax(0,1fr)] gap-x-2.5 gap-y-1.5">
@@ -620,7 +650,7 @@ const props = defineProps({
 	// The row being edited, or null for a fresh Add.
 	connector: { type: Object, default: null },
 	// listConnectors()'s catalog: [{ name, key, auth, category, description,
-	// logo, help_url, hint, token_hint, token_help_url }], enabled providers,
+	// logo, help_url, hint, token_hint, token_help_url, guide_url }], enabled providers,
 	// catalog order.
 	catalog: { type: Array, default: () => [] },
 });
@@ -881,6 +911,10 @@ const staticHint = computed(() => {
 const staticHelpUrl = computed(() => {
 	if (form.preset === "Custom URL") return "";
 	return catalogEntry.value?.help_url || "";
+});
+const guideUrl = computed(() => {
+	if (form.preset === "Custom URL") return "";
+	return catalogEntry.value?.guide_url || "";
 });
 
 // ── reset on open ───────────────────────────────────────────────────────────
