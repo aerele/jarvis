@@ -41,4 +41,4 @@ jobs:
           code=$?
           [ "$code" -le 1 ] || exit "$code"
       - name: Gate
-        run: python -m jarvis.ci.marketplace_semgrep "$RUNNER_TEMP/semgrep.json"
+        run: python -m jarvis.ci.marketplace_semgrep < "$RUNNER_TEMP/semgrep.json"
