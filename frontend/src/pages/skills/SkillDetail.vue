@@ -63,8 +63,8 @@
 					<Switch
 						v-model="form.enabled"
 						label="Enabled"
-						description="Off = saved as a draft, not used by the assistant."
-						:disabled="readonly"
+						:description="enabledDescription"
+						:disabled="enabledLocked"
 					/>
 					<Switch
 						v-model="form.user_invocable"
@@ -498,6 +498,19 @@ const fileBoxGated = computed(
 		!!skill.value &&
 		["Role", "Org"].includes(skill.value.scope)
 );
+
+// "Enabled" follows the same rule on a shared skill: off is free, back on needs a
+// reviewer, so the switch is locked once it is saved off (the server refuses it).
+const ENABLED_HELP = "Off = saved as a draft, not used by the assistant.";
+const enabledLocked = computed(
+	() => readonly.value || (fileBoxGated.value && !snapshot.value.enabled)
+);
+const enabledDescription = computed(() => {
+	if (!fileBoxGated.value) return ENABLED_HELP;
+	return snapshot.value.enabled
+		? `${ENABLED_HELP} Once off, only a reviewer can turn a shared skill back on.`
+		: `${ENABLED_HELP} Only a reviewer can turn a shared skill back on.`;
+});
 const fileBoxLocked = computed(
 	() => readonly.value || (fileBoxGated.value && !snapshot.value.use_in_file_box)
 );
