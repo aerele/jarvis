@@ -2747,6 +2747,22 @@ class TestConservativeAdmission(_PumpTestCase):
 # --------------------------------------------------------------------------- #
 
 
+def _beat(age_s: float) -> bytes:
+	"""An RQ ``last_heartbeat`` value written ``age_s`` seconds ago."""
+	from datetime import datetime, timedelta, timezone
+
+	return (datetime.now(timezone.utc) - timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%S.%fZ").encode()
+
+
+def _heartbeat_conn(*beats):
+	"""Queue-Redis stand-in holding one ``rq:worker:*`` hash per ``beats`` entry."""
+	by_key = {f"rq:worker:w{i}".encode(): beat for i, beat in enumerate(beats)}
+	conn = MagicMock()
+	conn.scan_iter.side_effect = lambda **_: iter(by_key)
+	conn.hget.side_effect = lambda key, _field: by_key[key]
+	return conn
+
+
 class TestWorkerStatus(FrappeTestCase):  # reuse module base
 	def test_probe_returns_none_on_error(self):
 		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
@@ -2774,15 +2790,29 @@ class TestWorkerStatus(FrappeTestCase):  # reuse module base
 			self.assertEqual(pump._probe_worker_count("long"), 1)
 
 	def test_total_live_workers_counts_all_queues(self):
-		fake_workers = [MagicMock(), MagicMock(), MagicMock()]
-		with patch("frappe.utils.background_jobs.get_workers", return_value=fake_workers):
+		conn = _heartbeat_conn(_beat(5), _beat(5), _beat(5))
+		with patch("frappe.utils.background_jobs.get_redis_conn", return_value=conn):
 			self.assertEqual(pump._total_live_workers(), 3)
 
 	def test_total_live_workers_none_on_probe_error(self):
-		with patch("frappe.utils.background_jobs.get_workers", side_effect=RuntimeError):
+		with patch("frappe.utils.background_jobs.get_redis_conn", side_effect=RuntimeError):
 			self.assertIsNone(pump._total_live_workers())
 
-	def test_total_live_workers_falls_back_to_heartbeats_when_the_registry_is_empty(self):
+	def test_stale_registry_member_does_not_hide_fresh_heartbeats(self):
+		# #1221: `rq:workers` kept a worker killed weeks earlier (hash still there,
+		# heartbeat long expired) while the live workers had been pruned from the
+		# set. Registry length read 1 and a bench with healthy workers warned.
+		ghost = MagicMock()
+		ghost.queue_names.return_value = ["bench:long"]
+		conn = _heartbeat_conn(_beat(40 * 86400), _beat(30), _beat(30))
+		with (
+			patch("frappe.utils.background_jobs.get_workers", return_value=[ghost]),
+			patch("frappe.utils.background_jobs.get_redis_conn", return_value=conn),
+		):
+			self.assertEqual(pump._total_live_workers(), 2)
+			self.assertFalse(pump.chat_worker_status()["degraded"])
+
+	def test_total_live_workers_counts_heartbeats_when_the_registry_is_empty(self):
 		# A queue-Redis restart empties `rq:workers` while the workers keep running
 		# and heartbeating; their hashes are still there to count.
 		with (
