@@ -531,7 +531,12 @@ class TestAuthorizeParams(unittest.TestCase):
 			)
 			self.assertEqual(provider.token_endpoint, "https://oauth2.googleapis.com/token", name)
 			self.assertTrue(provider.scopes, name)
-			self.assertEqual(provider.help_url, "https://console.cloud.google.com/apis/credentials", name)
+			self.assertEqual(
+				provider.help_url,
+				"https://developers.google.com/workspace/guides/configure-mcp-servers",
+				name,
+			)
+			self.assertIn("Developer Preview", provider.hint, name)
 
 	def test_only_google_declares_authorize_params(self):
 		declaring = {p.name for p in catalog.PROVIDERS if p.authorize_params}

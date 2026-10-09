@@ -110,8 +110,12 @@ _GOOGLE_ISSUER = "https://accounts.google.com"
 _GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _GOOGLE_AUTHORIZE_PARAMS = (("access_type", "offline"), ("prompt", "consent"))
-_GOOGLE_HELP_URL = "https://console.cloud.google.com/apis/credentials"
-_GOOGLE_HINT = "Register your own Google Cloud OAuth client, then paste its details here."
+# The customer's Cloud project must enable BOTH the product API and its MCP API
+# (else 403 on connect) and be enrolled in the Workspace Developer Preview (else the
+# connector adds but every tool call is refused). Google's own guide walks through
+# both plus the consent screen and OAuth client, so the help link points there.
+_GOOGLE_HELP_URL = "https://developers.google.com/workspace/guides/configure-mcp-servers"
+_GOOGLE_HINT = "Enable the API and its MCP API, then join Google's Developer Preview."
 
 # The free-form path: a caller's own base_url (any remote MCP server that passes
 # the SSRF guard and its connection test). Not a Provider, so it can never end up
