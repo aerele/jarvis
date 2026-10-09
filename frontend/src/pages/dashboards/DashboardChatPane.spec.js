@@ -28,8 +28,10 @@ vi.mock("@/data/session", () => ({ session: { user: "u@x.com" } }));
 // A getter, so a test can give the agent an admin-set name (an XSS probe).
 const brand = vi.hoisted(() => ({ name: "Jarvis" }));
 vi.mock("@/branding", () => ({
-	get agentName() {
-		return brand.name;
+	brand: {
+		get agentName() {
+			return brand.name;
+		},
 	},
 }));
 

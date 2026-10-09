@@ -406,7 +406,7 @@
 
 				<div class="flex items-center justify-between gap-3">
 					<p class="text-sm text-ink-gray-6">
-						Choose what {{ agentName }} may do with {{ connectorDisplayName }}.
+						Choose what {{ brand.agentName }} may do with {{ connectorDisplayName }}.
 						Read-only actions are pre-checked; writes are off by default.
 					</p>
 					<Button
@@ -601,7 +601,7 @@ import {
 	testConnector,
 	updateConnector,
 } from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errMessage, errHtml } from "@/lib/errors";
 
 const props = defineProps({
@@ -1094,7 +1094,7 @@ async function beginSignIn() {
 	// signIn() calls it synchronously in this same click, after opening the
 	// tab, per the interface contract.
 	const target = rowName.value || (() => createRowForSignIn(gen));
-	const pending = signIn(target, { label: signinAppName.value, agentName });
+	const pending = signIn(target, { label: signinAppName.value, agentName: brand.agentName });
 	currentSignIn = pending;
 	try {
 		const res = await pending;

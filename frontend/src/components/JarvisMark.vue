@@ -16,9 +16,9 @@
 	     an uploaded logo keeps their logo during an upgrade; the maintenance
 	     banner still carries the "back shortly" message). -->
 	<img
-		v-if="brandLogoUrl"
+		v-if="brand.logoUrl"
 		class="jv-mark jv-mark-img"
-		:src="brandLogoUrl"
+		:src="brand.logoUrl"
 		:style="markStyle"
 		alt=""
 	/>
@@ -49,7 +49,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { brandLogoUrl } from "@/branding";
+import { brand } from "@/branding";
 import { BRAND_STAR_PATH } from "@/lib/brand";
 
 const props = defineProps({

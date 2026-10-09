@@ -103,7 +103,7 @@
 			/>
 			<ToggleRow
 				title="Notify when a reply is ready"
-				:help="`Browser notification when ${agentName} finishes while you are in another tab.`"
+				:help="`Browser notification when ${brand.agentName} finishes while you are in another tab.`"
 				:modelValue="notifyEnabled"
 				:disabled="!notifySupported"
 				@update:modelValue="onToggleNotify"
@@ -301,7 +301,7 @@ import SettingsPane from "@/components/settings/SettingsPane.vue";
 import KvRow from "@/components/settings/KvRow.vue";
 import ToggleRow from "@/components/settings/ToggleRow.vue";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
 import { fmtTokens, contextReading } from "@/lib/tokens.js";

@@ -28,14 +28,14 @@
 			>
 				<div class="flex items-baseline justify-between">
 					<h3 class="text-base font-semibold text-ink-gray-9">
-						{{ agentName }} usage limit
+						{{ brand.agentName }} usage limit
 					</h3>
 					<span class="text-p-sm text-ink-gray-6">{{ reading.pct }}%</span>
 				</div>
 				<!-- Named so nobody reads it as their ChatGPT / API-provider usage. -->
 				<p class="mt-1 text-p-sm text-ink-gray-5">
-					Your allowance in {{ agentName }}, set by your admin. Not your model provider's
-					usage.
+					Your allowance in {{ brand.agentName }}, set by your admin. Not your model
+					provider's usage.
 				</p>
 				<div class="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-gray-3">
 					<div
@@ -57,7 +57,7 @@
 					/>
 				</div>
 				<p v-if="reading.state !== 'quiet'" class="mt-3 text-p-sm text-ink-gray-5">
-					Ask your {{ agentName }} admin to raise it.
+					Ask your {{ brand.agentName }} admin to raise it.
 				</p>
 			</div>
 		</template>
@@ -72,7 +72,7 @@ import { computed } from "vue";
 import { Popover } from "frappe-ui";
 import KvRow from "@/components/settings/KvRow.vue";
 import { fmtTokens, limitReading } from "@/lib/tokens";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
 const props = defineProps({
 	usage: { type: Object, default: null },

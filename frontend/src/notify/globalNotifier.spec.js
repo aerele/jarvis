@@ -25,7 +25,7 @@ const store = {
 vi.mock("@/stores/shell", () => ({ useShellStore: () => store }));
 vi.mock("@/data/session", () => ({ session: { user: "u@example.com" } }));
 vi.mock("@/lib/errorReporter", () => ({ report: vi.fn() }));
-vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 
 // Recent Node versions expose an experimental localStorage getter that is
 // undefined without --localstorage-file, which can shadow jsdom's storage.

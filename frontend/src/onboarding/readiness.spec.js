@@ -523,7 +523,15 @@ describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
 	it("seeds workersWarnNotice from the boot readiness poll's worker_warning field", () => {
 		const idx = chatSrc.indexOf("r && r.worker_warning");
 		expect(idx, "the boot checkReady().then() block must read r.worker_warning").not.toBe(-1);
-		expect(chatSrc.slice(idx, idx + 80)).toContain("WORKERS_WARN_MSG");
+		expect(chatSrc.slice(Math.max(0, idx - 40), idx)).toContain(
+			"workersWarnShown.value = !!("
+		);
+		// The text follows the brand: built from the live brand, never a copy made at setup.
+		const start = chatSrc.indexOf("const workersWarnNotice = computed(");
+		expect(start, "workersWarnNotice must be computed from workersWarnShown").not.toBe(-1);
+		expect(chatSrc.slice(start, start + 160)).toContain(
+			"workerWarningMessage(brand.agentName)"
+		);
 	});
 
 	it("clears workersWarnNotice on the next successful retry", () => {
@@ -532,7 +540,7 @@ describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
 		expect(fnStart, "ChatView must still define retry()").not.toBe(-1);
 		expect(fnEnd, "ChatView must still define send() after retry()").not.toBe(-1);
 		const body = chatSrc.slice(fnStart, fnEnd);
-		const idx = body.indexOf("workersWarnNotice.value = null");
+		const idx = body.indexOf("workersWarnShown.value = false");
 		expect(idx, "retry() must clear workersWarnNotice on a successful response").not.toBe(-1);
 		// Only after the server answered, gated on a genuinely accepted retry.
 		const awaitIdx = body.indexOf("await api.retryMessage(messageId)");
@@ -541,8 +549,8 @@ describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
 	});
 
 	it("also clears workersWarnNotice on the next successful send (mirrors retry())", () => {
-		const first = chatSrc.indexOf("workersWarnNotice.value = null");
-		const second = chatSrc.indexOf("workersWarnNotice.value = null", first + 1);
+		const first = chatSrc.indexOf("workersWarnShown.value = false");
+		const second = chatSrc.indexOf("workersWarnShown.value = false", first + 1);
 		expect(
 			second,
 			"send() must also clear workersWarnNotice on a successful response"
@@ -556,6 +564,7 @@ describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
 		expect(start, "ChatView must still define canSend").not.toBe(-1);
 		const end = chatSrc.indexOf("\n);", start);
 		expect(chatSrc.slice(start, end)).not.toContain("workersWarnNotice");
+		expect(chatSrc.slice(start, end)).not.toContain("workersWarnShown");
 	});
 });
 

@@ -89,7 +89,7 @@
 						type="textarea"
 						label="Summary (optional)"
 						:rows="2"
-						:placeholder="`One or two lines ${agentName} can cite in chat context`"
+						:placeholder="`One or two lines ${brand.agentName} can cite in chat context`"
 						:modelValue="form.summary"
 						:disabled="saving"
 						@update:modelValue="(v) => (form.summary = v)"
@@ -403,7 +403,7 @@ import {
 	requestWikiPromotion,
 	myWikiPromotion,
 } from "@/api/wiki";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { WIKI_TYPES, SCOPE_THEME, scrub } from "@/lib/wikiMeta";
 

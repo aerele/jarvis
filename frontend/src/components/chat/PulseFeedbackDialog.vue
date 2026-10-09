@@ -7,7 +7,7 @@
 	<Dialog
 		:model-value="open"
 		@update:model-value="onDialogModelUpdate"
-		:options="{ title: `How is ${agentName} doing for your business?`, size: 'md' }"
+		:options="{ title: `How is ${brand.agentName} doing for your business?`, size: 'md' }"
 	>
 		<template #body-content>
 			<span
@@ -61,7 +61,7 @@
 			</div>
 			<div class="mb-4">
 				<label class="mb-1.5 block text-sm font-medium">
-					Is {{ agentName }} solving your business use case? If so, what?
+					Is {{ brand.agentName }} solving your business use case? If so, what?
 				</label>
 				<FormControl v-model="useCaseText" type="textarea" :rows="3" />
 			</div>
@@ -85,7 +85,7 @@
 import { computed, ref, watch } from "vue";
 import { Dialog, Button, FormControl } from "frappe-ui";
 import * as api from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import {
 	pulseFeedbackOpen,
 	pulseFeedbackContext,

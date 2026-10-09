@@ -57,14 +57,14 @@
 // track + since from jarvis.__version__). The result is cached per target
 // version so re-opening the panel never refetches - `notice.version` is stable
 // for the page's lifetime (a hard-gate recheck forces a full reload).
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { Dialog, Button, FeatherIcon, call } from "frappe-ui";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { renderMarkdown } from "@/markdown";
 import { notice, whatsNewOpen } from "@/noticeGate";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
-const whatsNewTitle = `What's new in ${agentName}`;
+const whatsNewTitle = computed(() => `What's new in ${brand.agentName}`);
 
 // Module-scope cache keyed by target version, so it survives close/reopen (and
 // is shared across the ChatView and hard-gate instances of this dialog).
