@@ -462,9 +462,15 @@ function persistOrder() {
 // destroyed mid-drag. Items can move within a group OR between groups.
 const editing = ref(false);
 const dragging = ref(null);
+let _dragStartTimer = null;
 function onDragStart(group, index, e) {
-	dragging.value = { group, index };
-	moreOpen.value = true; // expose the More group as a drop target during a drag
+	// Set the drag state after the drag is under way: the drop zones it shows push the
+	// More rows down, and Chrome ends a drag at once if its source moves in dragstart.
+	clearTimeout(_dragStartTimer);
+	_dragStartTimer = setTimeout(() => {
+		dragging.value = { group, index };
+		moreOpen.value = true; // expose the More group as a drop target during a drag
+	});
 	if (e && e.dataTransfer) {
 		e.dataTransfer.effectAllowed = "move";
 		// drag the whole row's picture, not only the small grip
@@ -494,6 +500,7 @@ function onDrop(group, index) {
 	persistOrder();
 }
 function onDragEnd() {
+	clearTimeout(_dragStartTimer);
 	dragging.value = null;
 }
 function resetOrder() {

@@ -1,4 +1,5 @@
 import { flushPromises, mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // #671: in edit mode each menu row has a six-dot grip, and only the grip starts a drag.
@@ -32,7 +33,10 @@ vi.mock("@/api", () => ({
 vi.mock("./UserMenu.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("./ConversationRow.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("./SidebarLink.vue", () => ({
-	default: { props: ["label"], template: '<a class="link">{{ label }}</a>' },
+	default: {
+		props: ["label", "onClick"],
+		template: '<a class="link" @click="onClick && onClick()">{{ label }}</a>',
+	},
 }));
 
 import * as api from "@/api";
@@ -40,6 +44,13 @@ import Sidebar from "./Sidebar.vue";
 
 const rows = (w) => w.findAll("nav > div.relative");
 const editButton = (w) => w.find('button[title="Edit sidebar order"]');
+const grip = (w, label) => w.find(`[title="Drag to move ${label}"]`);
+const dropZones = (w) => w.findAll(".border-dashed");
+const openMore = (w) =>
+	w
+		.findAll(".link")
+		.find((l) => l.text() === "More")
+		.trigger("click");
 
 async function editing() {
 	const w = mount(Sidebar);
@@ -71,10 +82,11 @@ describe("Sidebar reorder grip", () => {
 		const w = await editing();
 		const setDragImage = vi.fn();
 		const dataTransfer = { setData: vi.fn(), setDragImage, effectAllowed: "" };
-		await rows(w)[0].find(".lucide-grip-vertical").trigger("dragstart", { dataTransfer });
-		expect(setDragImage).toHaveBeenCalledWith(rows(w)[0].element, 16, 14);
 		vi.useFakeTimers();
 		try {
+			await rows(w)[0].find(".lucide-grip-vertical").trigger("dragstart", { dataTransfer });
+			expect(setDragImage).toHaveBeenCalledWith(rows(w)[0].element, 16, 14);
+			vi.runOnlyPendingTimers(); // the drag state is set once the drag is under way
 			await rows(w)[2].trigger("drop");
 			expect(
 				rows(w)
@@ -90,6 +102,55 @@ describe("Sidebar reorder grip", () => {
 			"File Box",
 			"Dashboard",
 		]);
+	});
+
+	it("a drag start changes nothing on the page until the drag is under way", async () => {
+		// Chrome ends a drag at once when its source moves during dragstart, and the
+		// drop zones push the More rows down.
+		const w = await editing();
+		await openMore(w);
+		vi.useFakeTimers();
+		try {
+			await grip(w, "Macros").trigger("dragstart", { dataTransfer: { setData: vi.fn() } });
+			expect(dropZones(w)).toHaveLength(0);
+			vi.runOnlyPendingTimers();
+			await nextTick();
+			expect(dropZones(w)).toHaveLength(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("a row in More moves back into the top group", async () => {
+		const w = await editing();
+		await openMore(w);
+		vi.useFakeTimers();
+		try {
+			await grip(w, "Macros").trigger("dragstart", { dataTransfer: { setData: vi.fn() } });
+			vi.runOnlyPendingTimers();
+			await rows(w)[0].trigger("drop");
+			vi.advanceTimersByTime(400);
+		} finally {
+			vi.useRealTimers();
+		}
+		const saved = api.setSidebarOrder.mock.calls[0][0];
+		expect(saved.top[0]).toBe("Macros");
+		expect(saved.more).toEqual(["Triggers"]);
+	});
+
+	it("a drag that ends before it is under way leaves no drop zones", async () => {
+		const w = await editing();
+		vi.useFakeTimers();
+		try {
+			const g = grip(w, "File Box");
+			await g.trigger("dragstart", { dataTransfer: { setData: vi.fn() } });
+			await g.trigger("dragend");
+			vi.runOnlyPendingTimers();
+			await nextTick();
+			expect(dropZones(w)).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("a drag that starts on the row itself does nothing", async () => {
