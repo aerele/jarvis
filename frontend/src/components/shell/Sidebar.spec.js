@@ -84,8 +84,12 @@ describe("Sidebar reorder grip", () => {
 		const dataTransfer = { setData: vi.fn(), setDragImage, effectAllowed: "" };
 		vi.useFakeTimers();
 		try {
-			await rows(w)[0].find(".lucide-grip-vertical").trigger("dragstart", { dataTransfer });
-			expect(setDragImage).toHaveBeenCalledWith(rows(w)[0].element, 16, 14);
+			rows(w)[0].element.getBoundingClientRect = () => ({ left: 8, top: 100 });
+			await rows(w)[0]
+				.find(".lucide-grip-vertical")
+				.trigger("dragstart", { dataTransfer, clientX: 208, clientY: 114 });
+			// the row picture stays where the pointer took it (the grip), not at its left edge
+			expect(setDragImage).toHaveBeenCalledWith(rows(w)[0].element, 200, 14);
 			vi.runOnlyPendingTimers(); // the drag state is set once the drag is under way
 			await rows(w)[2].trigger("drop");
 			expect(
