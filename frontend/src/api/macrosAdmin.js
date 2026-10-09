@@ -1,5 +1,5 @@
-// The Jarvis Admin's view of every user's macros (Settings, Administration,
-// Macros). `src/api.js` is frozen: new endpoints get thin wrappers in per-feature
+// The Jarvis Admin's view of every user's macros (the Admin tab of the Macros
+// page). `src/api.js` is frozen: new endpoints get thin wrappers in per-feature
 // modules under src/api/.
 //
 // The server gates each of these on the Jarvis Admin role and accepts POST only

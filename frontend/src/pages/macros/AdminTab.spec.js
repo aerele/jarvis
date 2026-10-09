@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
- * The Jarvis Admin's Macros pane (Settings, Administration): every user's macros,
+ * The Jarvis Admin's tab on the Macros page (/macros/admin): every user's macros,
  * the filters, the loading / empty / error states, and the row actions: Stop run,
  * Hold (the reason is asked by MacroHoldDialog, stubbed here), Release and Delete.
  * The decisions behind the cells (lib/macroRunOutcome, lib/macroSchedule) are the
@@ -22,6 +22,11 @@ vi.mock("frappe-ui", () => ({
 		template: `<span class="badge">{{ label }}</span>`,
 	},
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: `<i class="stub-icon" />` },
+	Breadcrumbs: {
+		name: "Breadcrumbs",
+		props: ["items"],
+		template: `<nav class="stub-crumbs" />`,
+	},
 	ErrorMessage: {
 		name: "ErrorMessage",
 		props: ["message"],
@@ -60,10 +65,15 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("@/api/macrosAdmin", () => api);
 
+// The page header teleports in the app; here it renders in place.
+vi.mock("@/components/LayoutHeader.vue", () => ({
+	default: { name: "LayoutHeader", template: `<div><slot name="left-header" /></div>` },
+}));
+
 const confirm = vi.hoisted(() => vi.fn());
 vi.mock("@/composables/useConfirm", () => ({ useConfirm: () => ({ confirm }) }));
 
-vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
+vi.mock("./MacroAdminDialog.vue", () => ({
 	default: {
 		name: "MacroAdminDialog",
 		props: ["modelValue", "name"],
@@ -72,7 +82,7 @@ vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
 	},
 }));
 
-vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
+vi.mock("./MacroHoldDialog.vue", () => ({
 	default: {
 		name: "MacroHoldDialog",
 		props: ["modelValue", "name", "macroName", "ownerLabel"],
@@ -81,7 +91,7 @@ vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
 	},
 }));
 
-vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
+vi.mock("./MacroHandoverDialog.vue", () => ({
 	default: {
 		name: "MacroHandoverDialog",
 		props: ["modelValue", "name", "macroName", "owner", "ownerLabel"],
@@ -94,7 +104,7 @@ vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
 vi.mock("@/data/session", () => ({ session: { user: "admin@example.test" } }));
 
 import { toast } from "frappe-ui";
-import MacrosAdminPane from "./MacrosAdminPane.vue";
+import AdminTab from "./AdminTab.vue";
 
 const row = (name, extra = {}) => ({
 	name,
@@ -139,7 +149,7 @@ const serve = (all) => (q) =>
 
 async function mountWith(rows, extra, options) {
 	api.adminListMacros.mockResolvedValue(page(rows, extra));
-	const w = mount(MacrosAdminPane, options);
+	const w = mount(AdminTab, options);
 	await flushPromises();
 	return w;
 }
@@ -169,11 +179,11 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe("MacrosAdminPane, states", () => {
+describe("Macros AdminTab, states", () => {
 	it("says Loading until the first answer, then lists the macros", async () => {
 		let answer;
 		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		expect(w.text()).toContain("Loading…");
 		expect(rowsOf(w)).toHaveLength(0);
@@ -205,7 +215,7 @@ describe("MacrosAdminPane, states", () => {
 
 	it("shows the error with Try again when the first load fails, and recovers", async () => {
 		api.adminListMacros.mockRejectedValue(new Error("You need the Jarvis Admin role"));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		expect(w.find("[role='alert']").text()).toContain("You need the Jarvis Admin role");
 		expect(w.text()).not.toContain("Nobody has made a macro yet.");
@@ -248,7 +258,7 @@ describe("MacrosAdminPane, states", () => {
 	});
 });
 
-describe("MacrosAdminPane, rows", () => {
+describe("Macros AdminTab, rows", () => {
 	it("shows the owner, the name, on or off, armed, the schedule and the last run", async () => {
 		const w = await mountWith([
 			row("a", {
@@ -393,7 +403,7 @@ describe("MacrosAdminPane, rows", () => {
 		// stop) cut the list back to its first 100.
 		const all = many(130);
 		api.adminListMacros.mockImplementation(serve(all));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		for (let i = 0; i < 6; i++) {
 			await button(w, "Load more").trigger("click");
@@ -416,7 +426,7 @@ describe("MacrosAdminPane, rows", () => {
 	it("keeps Load more going after a Refresh of a long list", async () => {
 		const all = many(150);
 		api.adminListMacros.mockImplementation(serve(all));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		for (let i = 0; i < 5; i++) {
 			await button(w, "Load more").trigger("click");
@@ -442,7 +452,7 @@ describe("MacrosAdminPane, rows", () => {
 	});
 });
 
-describe("MacrosAdminPane, filters", () => {
+describe("Macros AdminTab, filters", () => {
 	it("labels every control", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.findAll(".stub-label").map((l) => l.text())).toEqual([
@@ -612,7 +622,7 @@ describe("MacrosAdminPane, filters", () => {
 	});
 });
 
-describe("MacrosAdminPane, Stop run", () => {
+describe("Macros AdminTab, Stop run", () => {
 	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
 	const live = (extra = {}) =>
 		row("a", { live_run: "RUN-1", last_run: { status: "running" }, ...extra });
@@ -770,7 +780,7 @@ describe("MacrosAdminPane, Stop run", () => {
 	});
 });
 
-describe("MacrosAdminPane, hold, release and delete", () => {
+describe("Macros AdminTab, hold, release and delete", () => {
 	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
 	const holdButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-hold");
 	const releaseButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-release");
@@ -950,7 +960,7 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 	});
 });
 
-describe("MacrosAdminPane, hand over", () => {
+describe("Macros AdminTab, hand over", () => {
 	const handoverButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-handover");
 
 	it("offers Hand over on another user's macro, held or not", async () => {
