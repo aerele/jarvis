@@ -31,6 +31,27 @@ class TestPrepareAttachments(FrappeTestCase):
 		self.assertEqual(parts, [])
 		self.assertIn("hello world", msg)
 
+	def test_spreadsheet_routes_to_all_row_reading_instead_of_sampled_arithmetic(self):
+		att = _make_file("whole-table.csv", b"amount\n" + b"10\n" * 10000)
+		msg, parts = _prepare_attachments("Total this file", [att], vision_ok=False)
+		self.assertEqual(parts, [])
+		self.assertIn("jarvis__read_file", msg)
+		self.assertIn("check the returned contract and coverage", msg)
+		self.assertIn("preserve currency, header, subtotal and total-row semantics", msg)
+		self.assertIn("incomplete coverage", msg)
+
+	def test_small_csv_is_still_inlined(self):
+		att = _make_file("small.csv", b"Amount\n10\n20\n")
+		msg, _ = _prepare_attachments("Read this", [att], vision_ok=False)
+		self.assertIn("Amount\n10\n20", msg)
+		self.assertIn("<untrusted-data", msg)
+
+	def test_long_text_preview_requests_automatic_full_read(self):
+		att = _make_file("long-file.txt", b"x" * 30000 + b"TAIL CLAUSE")
+		msg, _ = _prepare_attachments("Read this", [att], vision_ok=False)
+		self.assertIn("Attachment preview is incomplete", msg)
+		self.assertIn("follow next_read sequentially when supplied", msg)
+
 	def test_image_routed_to_vision(self):
 		att = _make_file("pic.png", b"mocked")
 		fake = {"mime": "image/jpeg", "data_b64": "QUJD", "file_name": "pic.png"}
@@ -67,11 +88,20 @@ class TestPrepareAttachments(FrappeTestCase):
 		buf = _io.BytesIO()
 		w.write(buf)
 		att = _make_file("digital.pdf", buf.getvalue())
-		with patch("jarvis.tools.read_file._read_pdf", return_value={"text": "hello pdf"}):
+		with patch(
+			"jarvis.tools.read_file._read_pdf",
+			return_value={
+				"text": "hello pdf",
+				"coverage": {"complete": False, "pages_visited": 1, "pages_total": 2},
+			},
+		):
 			msg, parts = _prepare_attachments("hi", [att], vision_ok=False)
 		self.assertEqual(parts, [])
 		self.assertIn("hello pdf", msg)
 		self.assertIn("extracted text", msg)
+		self.assertIn('"complete": false', msg)
+		self.assertIn('"pages_total": 2', msg)
+		self.assertIn("jarvis__read_file", msg)
 
 	def test_pdf_no_text_notes_scanned_without_vision(self):
 		# Vision off + a PDF with no text layer -> a note, not silence.
