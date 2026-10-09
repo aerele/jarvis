@@ -503,13 +503,7 @@ class JarvisCustomSkill(NotRenamable, Document):
 		that lacks it. Neither is the user's change, so the stored side is read the
 		same way, or the owner of such an old skill could no longer save it at all,
 		not even to switch it off."""
-		stored = set(
-			frappe.get_all(
-				"Jarvis Custom Skill Allowed Role",
-				filters={"parent": self.name, "parenttype": self.doctype},
-				pluck="role",
-			)
-		)
+		stored = self._stored_child_values("allowed_roles", "role", "Jarvis Custom Skill Allowed Role")
 		if stored_target_role and stored_target_role not in stored:
 			stored = set()
 		now = {r.role for r in self.get("allowed_roles") or []}
@@ -522,12 +516,19 @@ class JarvisCustomSkill(NotRenamable, Document):
 		now = {r.user for r in self.get("shared_with") or []}
 		if not now:
 			return False
-		stored = frappe.get_all(
-			"Jarvis Custom Skill Share",
-			filters={"parent": self.name, "parenttype": self.doctype},
-			pluck="user",
+		return bool(now - self._stored_child_values("shared_with", "user", "Jarvis Custom Skill Share"))
+
+	def _stored_child_values(self, fieldname: str, column: str, child_doctype: str) -> set:
+		"""The values one child table holds in the database: off the copy Frappe loads
+		for a save (``get_doc_before_save``), else (``validate`` called on its own) a read."""
+		before = self.get_doc_before_save()
+		if before is not None:
+			return {row.get(column) for row in before.get(fieldname) or []}
+		return set(
+			frappe.get_all(
+				child_doctype, filters={"parent": self.name, "parenttype": self.doctype}, pluck=column
+			)
 		)
-		return bool(now - set(stored))
 
 	def _validate_slug(self):
 		self.skill_name = (self.skill_name or "").strip().lower()
