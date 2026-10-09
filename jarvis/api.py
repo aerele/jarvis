@@ -1607,10 +1607,11 @@ def _resolve_approve_run_offer(conversation: str) -> tuple[str | None, str | Non
 	   offer: the run flag is conversation-wide with no per-write skill
 	   attribution, so a co-invoked (even unarmed) skill's writes would otherwise
 	   ride the approval.
-	4. That one slug resolves to a single live-armed row the owner would invoke
+	4. The row ``get_skill`` would serve the owner for that slug is live-armed
 	   (:func:`jarvis.chat.custom_skills.resolve_armed_skill_docname` - the same
-	   owned/shared/role-scoped resolution :func:`invoked_skill_slugs` uses, so the
-	   two can never drift apart).
+	   choice of row as the fetch, :func:`jarvis.tools.get_skill.served`: a reviewed
+	   Role/Org row before the owner's own - so the offer is made on the row whose
+	   instructions the run reads).
 
 	Best-effort: any exception -> ``(None, None)``; this is an additive nicety on
 	the hot gate path and must never break the park."""
@@ -3579,12 +3580,17 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# the flag and refuse WITHOUT dispatching, within one write, no deploy. Placed
 			# after the cancel-gate and before the TTL/dispatch so it fires on every
 			# would-be uncarded covered write regardless of the run's age.
+			# The same for a skill switched off mid-run: its name would then be served
+			# from another row (the user's own), which nobody armed.
 			autorun_skill = _conv_flags.get("skill_autorun_skill")
-			if not autorun_skill or not frappe.db.get_value(
-				"Jarvis Custom Skill", autorun_skill, "allow_approve_run"
-			):
+			still_armed = autorun_skill and frappe.db.get_value(
+				"Jarvis Custom Skill", autorun_skill, ["allow_approve_run", "enabled"]
+			)
+			if not still_armed or not all(frappe.utils.cint(v) for v in still_armed):
 				_skill_autorun_clear(conv)
-				return _error(RunDisarmedError.__name__, "the skill was disarmed - run stopped")
+				return _error(
+					RunDisarmedError.__name__, "the skill was disarmed or switched off - run stopped"
+				)
 			# No-activity net: auto-run only while the run was active recently. The
 			# stamp moves on each covered write and when one of the run's cards is
 			# confirmed (``turn_message_binding.keep_skill_autorun_open``), so waiting on

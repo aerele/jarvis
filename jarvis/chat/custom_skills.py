@@ -111,21 +111,37 @@ def _yaml_quote(s: str) -> str:
 	return f'"{escaped}"'
 
 
-def render_skill_md(skill_name: str, description: str, user_invocable: bool, instructions: str) -> str:
-	"""Build the full SKILL.md text (YAML frontmatter + markdown body).
+# The body of every pushed custom skill. The container holds a skill's name and
+# description, so the assistant's catalog lists it; the instructions are served by the
+# bench at the moment of use, where "enabled" and who may use the skill are checked.
+# The two quoted answers are ``tools.get_skill``'s own, for a skill that is gone or
+# is not this user's.
+_POINTER_BODY = (
+	"This skill's instructions are kept on the site, not in this file.\n"
+	'Call the jarvis__get_skill tool with skill_name "{slug}" and follow the instructions it returns.\n'
+	'If it answers "unknown skill" or "no access to skill", this skill is not available here: '
+	"carry on without it, and say so only if the user asked for it by name. "
+	"Any other error means it could not be loaded: say so."
+)
+
+
+def render_skill_md(skill_name: str, description: str, user_invocable: bool) -> str:
+	"""Build the SKILL.md text the container is sent for a custom skill: YAML
+	frontmatter, and a pointer to ``jarvis__get_skill`` in place of the instructions
+	(``_POINTER_BODY``).
 
 	Frontmatter matches the shared persona skills (name / description /
 	user-invocable). ``name`` uses the PREFIXED slug.
 	"""
-	body = (instructions or "").strip()
+	slug = prefixed_slug(skill_name)
 	lines = [
 		"---",
-		f"name: {prefixed_slug(skill_name)}",
+		f"name: {slug}",
 		f"description: {_yaml_quote(description)}",
 		f"user-invocable: {'true' if user_invocable else 'false'}",
 		"---",
 		"",
-		body,
+		_POINTER_BODY.format(slug=slug),
 		"",
 	]
 	return "\n".join(lines)
@@ -196,16 +212,18 @@ def role_restricted_names(row_names) -> set[str]:
 
 
 def fetch_required_clause(lead_in: str, names) -> str:
-	"""The context-line clause for skills that apply to this user but are NOT
-	installed in the container, because their bodies are deliberately kept off
-	the shared, role-blind blob. The agent's only way to read one is the bench
-	tool named here, which re-derives the caller's roles at fetch time.
+	"""The context-line clause for skills that apply to this user and whose
+	instructions are NOT in the container: every custom skill (a pushed one's file
+	only points at the tool) and a role-restricted learned one, kept off the
+	shared, role-blind blob. The agent's only way to read one is the bench tool
+	named here, which re-derives the caller's roles at fetch time.
 
 	``lead_in`` is the caller's half-sentence (what these skills ARE); the tail is
 	fixed so every caller issues the same instruction. Shared by
 	:func:`invoked_skill_clause` (issue #477) and :func:`learned_skill_clause`
 	(issue #479). Deliberately says nothing about the workspace or a skill
-	directory: there is no directory to point at.
+	directory: for most of these there is none, and where there is one it holds
+	no instructions.
 	"""
 	names = list(names or [])
 	if not names:
@@ -278,10 +296,9 @@ def invoked_skill_slugs(message: str, *, user: str, include_org_wide: bool = Tru
 	# learned_skill_clause).
 	enabled |= _role_scoped_invocable_names(user)
 	# Unrestricted Org rows (issue #580): an Org-scope skill with no allowed_roles
-	# is pushed into EVERY container (:func:`_pushable_org_rows`, the same set
-	# build_push_payload writes), so it is already loaded and invocable by ANY
-	# user - unlike a private/shared/role row it needs no per-user ownership
-	# check. Before this, invoked_skill_slugs only recognised owner/share/role
+	# is named in EVERY container (:func:`_pushable_org_rows`, the same set
+	# build_push_payload writes) and is invocable by ANY user - unlike a
+	# private/shared/role row it needs no per-user ownership check. Before this, invoked_skill_slugs only recognised owner/share/role
 	# rows, so a promoted-to-Org skill's `/slug` was silently unmatched for
 	# everyone but its (system) owner and its "Approve & run" arm could never be
 	# offered - the exact symptom of #580.
@@ -290,157 +307,36 @@ def invoked_skill_slugs(message: str, *, user: str, include_org_wide: bool = Tru
 	return {s for s in slugs if s in enabled}
 
 
-_GET_SKILL_CONTENT_FIELDS = ("instructions", "description", "user_invocable")
-
-
-def _skill_served_content(name: str) -> tuple:
-	"""The exact ``(instructions, description, user_invocable)`` triple
-	:func:`jarvis.tools.get_skill.get_skill` would serve for row ``name`` - the
-	EXECUTABLE content, not the arm state. Used only to compare two rows in a
-	promoted lineage; missing row -> an empty/zero triple (never equal to a
-	real row's), so a raced delete fails safe."""
-	row = frappe.db.get_value("Jarvis Custom Skill", name, list(_GET_SKILL_CONTENT_FIELDS), as_dict=True)
-	if not row:
-		return ("", "", 0)
-	return (row.instructions or "", row.description or "", int(row.user_invocable or 0))
-
-
-def _supersede_promoted_lineage(own: dict, *pools: dict, sources: dict) -> None:
-	"""Collapse a promoted lineage in place: if a row in ``own`` was the SOURCE
-	of a shared/role/org-wide row (``source_skill``, stamped by
-	:func:`jarvis.chat.custom_skills_api._materialize_promotion`), that
-	descendant is the SAME conceptual skill, not a second independent claim -
-	it is the copy actually pushed to the container and run, while the private
-	original becomes a secondary, usually-stale leftover (issue #580: promotion
-	deliberately leaves it intact). Replace the stale own entry with the
-	descendant's (name, armed) and drop the descendant from its own pool, so
-	precedence and the ambiguity count both see ONE candidate for the lineage,
-	not two. The DESCENDANT's own ``allow_approve_run`` is what counts either
-	way (code review on #580, security): an armed private source must never
-	auto-arm its still-unarmed shared copy, and an armed shared copy must not
-	be shadowed by an unarmed private source - promotion never carries the
-	flag, only an admin arming the shared copy directly does.
-
-	TOCTOU fail-safe (code review on #580, security round 2):
-	:func:`jarvis.tools.get_skill.get_skill` serves the OWNER's OWN row over
-	any other match FOR THAT OWNER (its own-wins precedence), regardless of
-	what this function decides - and a private row's content is the owner's
-	to edit any time, with no reviewer gate. So authorizing an uncarded run
-	off the descendant's arm is only safe when the own row's content is
-	PROVABLY what get_skill would actually serve for it right now - i.e.
-	byte-identical to the descendant's reviewed content. On a mismatch this
-	drops BOTH the own row and the descendant for this owner (never lets the
-	descendant fall through via a lower tier): get_skill would still serve the
-	drifted own row for this owner no matter which docname is returned here,
-	so there is no armed docname this owner can safely be offered for this
-	slug. A row without a recorded source (an unrelated same-named skill
-	elsewhere) is untouched and still shadows/competes exactly as before."""
-	for pool in pools:
-		for desc_name, src_name in list(sources.items()):
-			if desc_name not in pool or src_name not in own:
-				continue
-			if _skill_served_content(src_name) != _skill_served_content(desc_name):
-				del own[src_name]
-				pool.pop(desc_name, None)
-				continue
-			armed = pool.pop(desc_name)
-			del own[src_name]
-			own[desc_name] = armed
-
-
 def resolve_armed_skill_docname(slug: str, owner: str) -> str | None:
-	"""The single live-ARMED Jarvis Custom Skill row ``owner`` would invoke by
-	``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3 rule 4).
+	"""The Jarvis Custom Skill row "Approve & run" is offered on when ``owner``
+	invokes ``/slug``, or ``None`` (skill "Approve & run the plan", design §3.3
+	rule 4).
 
-	Mirrors :func:`invoked_skill_slugs`'s owner/shared/role/org-wide precedence -
-	the ONE definition of that resolution, so the "Approve & run" offer path
-	(``jarvis.api._resolve_approve_run_offer``) and skill invocation can no
-	longer drift apart the way they had (each used to hand-duplicate this query;
-	only :func:`role_scoped_skill_rows` was actually shared). The owner's OWN
-	enabled row wins the invocation; failing that, a shared or role-scoped
-	enabled row; failing that, an unrestricted Org-wide row (issue #580 - an
-	Org-promoted skill has no per-user owner/share/role row at all, so without
-	this tier it could never resolve for anyone but the system owner). A
-	shared/org-wide row that is a PROMOTED COPY of the owner's own row
-	supersedes it instead of competing with it (:func:`_supersede_promoted_lineage`
-	- issue #580 again: without this, an admin who arms either half of a
-	promoted lineage independently of the other could never get an offer, or
-	got a false "ambiguous" refusal when both happened to be armed).
-	``allow_approve_run`` is read LIVE off the resolved row and must be 1.
-	Fail-safe on ambiguity - a slug can map to several UNRELATED rows across
-	owned/shared/role-scoped/org-wide, so ``None`` when the winning tier holds
-	2+ rows OR when 2+ ARMED invocable rows exist anywhere (an ambiguous arm
-	cannot authorize a run). O(1)-ish: a few indexed reads, no per-skill N+1."""
-	# The owner's OWN enabled rows named `slug`.
-	own = {
-		r.name: int(r.allow_approve_run or 0)
-		for r in frappe.get_all(
-			"Jarvis Custom Skill",
-			filters={"enabled": 1, "owner": owner, "skill_name": slug},
-			fields=["name", "allow_approve_run"],
-		)
-	}
-	# Enabled rows SHARED with the owner, or reachable via a role the owner holds,
-	# named `slug` (deduped - a row can be both shared and role-scoped). Also
-	# tracks each row's `source_skill` (its promotion lineage, if any) for the
-	# supersession pass below.
-	shared_role: dict[str, int] = {}
-	lineage: dict[str, str] = {}
-	shared_names = [
-		r.parent
-		for r in frappe.get_all(
-			"Jarvis Custom Skill Share",
-			filters={"user": owner, "parenttype": "Jarvis Custom Skill"},
-			fields=["parent"],
-		)
-	]
-	if shared_names:
-		for r in frappe.get_all(
-			"Jarvis Custom Skill",
-			filters={"enabled": 1, "name": ["in", shared_names], "skill_name": slug},
-			fields=["name", "allow_approve_run", "source_skill"],
-		):
-			shared_role[r.name] = int(r.allow_approve_run or 0)
-			if r.source_skill:
-				lineage[r.name] = r.source_skill
-	for r in role_scoped_skill_rows(owner, ["name", "skill_name", "allow_approve_run", "source_skill"]):
-		if r.skill_name == slug:
-			shared_role.setdefault(r.name, int(r.allow_approve_run or 0))
-			if r.get("source_skill"):
-				lineage.setdefault(r.name, r.source_skill)
+	It is the row the fetch would serve them (:func:`jarvis.tools.get_skill.served`:
+	a reviewed Role/Org row, else their own), and only when that row's
+	``allow_approve_run``, read live, is 1. So at the moment of the offer, the row
+	offered on and the row whose instructions a fetch returns are the same one: an
+	arm on any other row of the name counts for nothing, and a private original
+	left behind by a promotion neither shadows nor stands in for the reviewed copy.
+	(Later in the run the gate re-reads that row and stops the run if it was
+	disarmed or switched off: ``jarvis.api._run_tool``.)
 
-	# Unrestricted Org rows named `slug` (issue #580): pushed into EVERY
-	# container (:func:`_pushable_org_rows`, the same set build_push_payload
-	# writes), so an Org-wide skill is invocable by ANY user - not only its
-	# (system) owner. Without this tier, resolve_armed_skill_docname mirrored
-	# invoked_skill_slugs's blind spot: a promoted-to-Org skill could never
-	# resolve to an armed row for anyone but its owner, so its "Approve & run"
-	# offer could never fire. Computed unconditionally (like shared_role above)
-	# so the ambiguity guard below still sees every candidate row.
-	org_wide: dict[str, int] = {}
-	for r in _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS):
-		if r.skill_name == slug:
-			org_wide[r.name] = int(r.allow_approve_run or 0)
-			if r.source_skill:
-				lineage.setdefault(r.name, r.source_skill)
+	``None`` too when the served row is neither reviewed nor the owner's own and
+	other rows share the name: which of several private skills shared with someone a
+	name means is not defined, and an undefined choice cannot authorize a run."""
+	from jarvis.chat.skill_permissions import reviewer_locked
+	from jarvis.exceptions import JarvisError
+	from jarvis.tools.get_skill import served, usable_rows
 
-	_supersede_promoted_lineage(own, shared_role, org_wide, sources=lineage)
-
-	# Precedence: the owner's own row wins (a promoted descendant now stands in
-	# for its stale source, per the supersession pass above); then a shared/role
-	# row; an unrestricted Org row (invocable by everyone, so the weakest
-	# per-identity claim) is the last fallback.
-	tier = own or shared_role or org_wide
-	if len(tier) != 1:
-		return None  # no candidate, or an ambiguous winning tier -> fail safe
-	docname, armed = next(iter(tier.items()))
-	if not armed:
-		return None  # the row the owner would actually invoke is not armed
-	# Global ambiguity guard: refuse if the slug maps to 2+ ARMED invocable rows
-	# anywhere (owned + shared + role + org-wide), even across tiers.
-	if sum(1 for v in {**org_wide, **shared_role, **own}.values() if v) != 1:
+	try:
+		rows = usable_rows(slug, owner, audit=False)
+	except JarvisError:
 		return None
-	return docname
+	row = served(rows, owner)
+	if len(rows) > 1 and not (reviewer_locked(row) or row.owner == owner):
+		return None
+	armed = frappe.db.get_value("Jarvis Custom Skill", row.name, "allow_approve_run")
+	return row.name if frappe.utils.cint(armed) else None
 
 
 def invoked_skill_clause(message: str, user: str | None = None, *, slugs: set[str] | None = None) -> str:
@@ -457,23 +353,13 @@ def invoked_skill_clause(message: str, user: str | None = None, *, slugs: set[st
 	resolution (kept for the docstring's identity note and so a stale caller
 	that ignores the new params still behaves).
 
-	The matched set - resolved fresh under ``user`` when ``slugs`` is not
-	given - is turned into the two clause shapes below, because only SOME
-	invocable skills physically exist in the container (issue #477):
-
-	* skills the push actually writes (Org scope, no ``allowed_roles``, inside
-	  ``MAX_SKILLS_PER_PUSH``, see :func:`pushed_skill_names`) keep the original
-	  "apply them" clause: the ``custom-<slug>`` directory really is on disk;
-	* everything else the user may invoke is NOT on disk: a role-restricted body
-	  TASK 11 deliberately keeps off the shared blob, a Role-scope promotion
-	  (excluded from the push outright), a private User skill, or a row past the
-	  push cap. Naming those as installed asserted a directory that does not
-	  exist, so they get a fetch-by-tool clause instead, pointing the agent at
-	  ``jarvis__get_skill`` (which is role-gated and DOES serve the body).
-
-	There is no per-role container mount to push them into (one ``custom_skills``
-	dir per container, keyed on container name only), so this degrades the clause
-	rather than pretending the file is there.
+	Every matched skill - resolved fresh under ``user`` when ``slugs`` is not
+	given - gets the same fetch-by-tool clause (:func:`fetch_required_clause`):
+	no custom skill's instructions are in the container. A company skill's file
+	there holds only a pointer (:func:`render_skill_md`), and a role-restricted,
+	Role-scope or private skill has no file at all (issue #477). The agent reads
+	the instructions through ``jarvis__get_skill``, which checks at that moment
+	that the skill is enabled and that this user may use it.
 
 	The clause is folded INTO the worker's leading ``[Context: ...]`` line,
 	which the persona's AGENTS.md tells the agent to treat as system, not user.
@@ -482,18 +368,10 @@ def invoked_skill_clause(message: str, user: str | None = None, *, slugs: set[st
 	matched = sorted(slugs if slugs is not None else invoked_skill_slugs(message, user=user))
 	if not matched:
 		return ""
-	installed = pushed_skill_names()
-	on_disk = [s for s in matched if s in installed]
-	off_disk = [s for s in matched if s not in installed]
-	clause = ""
-	if on_disk:
-		names = ", ".join(prefixed_slug(s) for s in on_disk)
-		clause += f"; the user invoked these skills, apply them: {names}"
-	clause += fetch_required_clause(
+	return fetch_required_clause(
 		"the user invoked these skills, which are not loaded in this session",
-		[prefixed_slug(s) for s in off_disk],
+		[prefixed_slug(s) for s in matched],
 	)
-	return clause
 
 
 def armed_skill_clause(message: str, user: str, *, slugs: set[str] | None = None) -> str:
@@ -584,8 +462,7 @@ def learned_skill_clause(user: str | None = None) -> str:
 	roles) never intersect desk-role allowed_roles, so learned skills
 	self-suppress for them at this layer.
 
-	TWO clause shapes, for the same reason :func:`invoked_skill_clause` has two
-	(issue #479): a role-restricted managed row is NOT pushed into the shared,
+	TWO clause shapes (issue #479): a role-restricted managed row is NOT pushed into the shared,
 	role-blind container, so naming it as installed points the agent at a
 	directory that does not exist. The split predicate is exactly the push
 	filter's - a row is installed iff it carries no ``allowed_roles`` - so
@@ -680,14 +557,13 @@ def personal_skill_clause(user: str | None = None) -> str:
 	)
 
 
-_PUSHABLE_FIELDS = ("name", "skill_name", "description", "user_invocable", "instructions")
-# The light, identity-plus-arming projection: enough to rank/name a pushable
-# row and resolve its "Approve & run" arm, without dragging every Org skill's
-# 20k-char body onto the chat hot path. Every per-turn caller
-# (invoked_skill_slugs, resolve_armed_skill_docname, pushed_skill_names,
-# apply_would_push) requests EXACTLY this tuple so they all hit the same
-# request-scoped memo below instead of each re-scanning the table.
-_PUSHABLE_LIGHT_FIELDS = ("name", "skill_name", "allow_approve_run", "source_skill")
+# What the push sends of a skill. Not its instructions: those are fetched at use.
+_PUSHABLE_FIELDS = ("name", "skill_name", "description", "user_invocable")
+# The light, identity-only projection: enough to rank/name a pushable row.
+# Every per-turn caller (invoked_skill_slugs, apply_would_push) requests EXACTLY
+# this tuple so they all hit the same request-scoped memo below instead of each
+# re-scanning the table.
+_PUSHABLE_LIGHT_FIELDS = ("name", "skill_name")
 _PUSHABLE_ORG_ROWS_MEMO = "_jarvis_pushable_org_rows_light"
 
 
@@ -696,22 +572,22 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 	exact eligibility set + ``skill_name asc`` order :func:`build_push_payload`
 	renders — MINUS the ``MAX_SKILLS_PER_PUSH`` cap. Single source of truth shared
 	by :func:`build_push_payload`, :func:`pushable_org_skill_count`,
-	:func:`pushed_skill_names` and :func:`project_org_promotion_push`, so the
+	:func:`apply_would_push` and :func:`project_org_promotion_push`, so the
 	reviewer's budget projection can never drift from what Apply actually does.
 	``owner`` scopes tests only; ``fields`` trims the projection for callers that
 	only need identity (``name`` + ``skill_name`` are load-bearing here: the
 	role-restriction filter and the sort key both read them).
 
 	The default-scope, ``_PUSHABLE_LIGHT_FIELDS`` call (every per-turn caller -
-	a turn can call ``invoked_skill_slugs``, ``resolve_armed_skill_docname`` and
-	``pushed_skill_names`` more than once) is memoized on ``frappe.local`` for
+	a turn can call ``invoked_skill_slugs`` and ``apply_would_push`` more than
+	once) is memoized on ``frappe.local`` for
 	the rest of THIS request: one table scan instead of one per caller. Scoped
 	narrowly - only that exact, hot-path signature is cached; a caller passing
 	``owner`` (tests only) or the heavier ``_PUSHABLE_FIELDS`` (an explicit push,
 	not a per-turn read) always scans fresh. The memo is cleared whenever a
 	Jarvis Custom Skill row is written (see the doctype's ``on_update``/
-	``on_trash``), so a skill created or armed mid-request is still seen by a
-	later call in the SAME request."""
+	``on_trash``), so a skill created or switched on mid-request is still seen by
+	a later call in the SAME request."""
 	memoize = owner is None and fields == _PUSHABLE_LIGHT_FIELDS
 	if memoize:
 		cached = getattr(frappe.local, _PUSHABLE_ORG_ROWS_MEMO, None)
@@ -746,7 +622,7 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 def _clear_pushable_org_rows_memo() -> None:
 	"""Drop the request-scoped :func:`_pushable_org_rows` memo. Called from the
 	Jarvis Custom Skill doctype's ``on_update``/``on_trash`` (mirroring
-	``_clear_personal_clause_cache``'s pattern) so a skill created, armed, or
+	``_clear_personal_clause_cache``'s pattern) so a skill created, enabled or
 	disabled mid-request - a promotion approval, an admin toggle - is visible to
 	the very next call in the SAME request rather than a stale cached scan."""
 	try:
@@ -761,10 +637,11 @@ def _clear_pushable_org_rows_memo() -> None:
 # on_update/on_trash - the ONLY other place the memo is cleared - so it must
 # route through set_skill_raw below instead of a bare frappe.db.set_value, or
 # a scan cached before the write silently outlives it for the rest of the
-# request. `owner`/`source_skill`/`skill_name` etc. are NOT in this set: they
-# don't feed _pushable_org_rows's filter or light projection, so a raw write
-# to them alone cannot desync it.
-_PUSHABLE_ORG_ROWS_MEMO_FIELDS = frozenset({"enabled", "scope", "allow_approve_run", "managed_by_learning"})
+# request. `owner`/`source_skill`/`allow_approve_run` etc. are NOT in this set:
+# they don't feed _pushable_org_rows's filter or light projection (the arm is
+# always read live, off the row itself), so a raw write to them alone cannot
+# desync it.
+_PUSHABLE_ORG_ROWS_MEMO_FIELDS = frozenset({"enabled", "scope", "managed_by_learning"})
 
 
 def set_skill_raw(name: str, field_or_values, value=None, *, update_modified: bool = False) -> None:
@@ -773,17 +650,18 @@ def set_skill_raw(name: str, field_or_values, value=None, *, update_modified: bo
 	field the memo's query reads (see ``_PUSHABLE_ORG_ROWS_MEMO_FIELDS``).
 	Mirrors ``frappe.db.set_value``'s two call shapes - a single
 	``(field, value)`` pair, or a ``{field: value}`` dict for several fields
-	at once - so every raw write to arm/enable/scope on this doctype (an
-	admin kill-switch, a test fixture simulating an already-armed row, any
-	FUTURE such site) can go through here instead of hand-duplicating the
-	memo-clear at each call site."""
+	at once - so every raw write to enable/scope on this doctype (an admin
+	kill-switch, a test fixture, any FUTURE such site) can go through here
+	instead of hand-duplicating the memo-clear at each call site."""
 	values = field_or_values if isinstance(field_or_values, dict) else {field_or_values: value}
 	frappe.db.set_value("Jarvis Custom Skill", name, values, update_modified=update_modified)
 	if _PUSHABLE_ORG_ROWS_MEMO_FIELDS & set(values):
 		_clear_pushable_org_rows_memo()
 
 
-def build_push_payload(owner: str | None = None, strict: bool = False) -> list[dict]:
+def build_push_payload(
+	owner: str | None = None, strict: bool = False, *, log_truncation: bool = True
+) -> list[dict]:
 	"""Collect the enabled custom skills into the fleet push payload.
 
 	Bench-global by design: a Jarvis bench maps to one customer / one
@@ -797,16 +675,15 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 	into the 25-skill push budget. NULL/empty scope (pre-migration rows) means
 	Org and IS pushed.
 
-	Role-restricted bodies are kept off the shared blob (security review PART 2
-	TASK 11): an Org row narrowed by ``allowed_roles`` is a role-restricted skill
-	whose full instructions would otherwise be physically written to the shared,
-	role-BLIND container and be readable + auto-activatable by every user's agent
-	(a mass-exfil vector). So this push carries ONLY skills visible to EVERYONE —
-	Org scope with NO ``allowed_roles``. Role-restricted skills stay reachable via
-	the role-gated ``jarvis__find_skills`` / ``jarvis__get_skill`` tools, and
-	:func:`invoked_skill_clause` routes an invoked-but-unpushed skill to
-	``jarvis__get_skill`` instead of naming a container directory that was never
-	written (issue #477). Restoring true /slug CONTAINER activation for them still
+	Role-restricted skills are kept off the shared blob (security review PART 2
+	TASK 11): an Org row narrowed by ``allowed_roles`` is a role-restricted skill,
+	and the container is shared and role-BLIND, so anything written there (today
+	its name and description; before pointer bodies, its full instructions) is
+	shown to every user's agent. So this push carries ONLY skills visible to
+	EVERYONE — Org scope with NO ``allowed_roles``. Role-restricted skills stay
+	reachable via the role-gated ``jarvis__find_skills`` / ``jarvis__get_skill``
+	tools, and :func:`invoked_skill_clause` routes every invoked skill, pushed or
+	not, to ``jarvis__get_skill`` (issue #477). Restoring true /slug CONTAINER activation for them still
 	needs a per-role workspace mount in the fleet-agent (a follow-up outside the
 	bench).
 
@@ -828,7 +705,9 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 	  and the post-restart resync): truncate to the first
 	  ``MAX_SKILLS_PER_PUSH`` rows (``skill_name`` asc, as before) but
 	  ``frappe.log_error`` a loud warning naming the dropped slugs, so the
-	  truncation is never silent again.
+	  truncation is never silent again. ``log_truncation=False`` is for a
+	  caller that builds more than once for one push and has already logged
+	  (:func:`push_is_over_cap` tells it whether a build did).
 	"""
 	rows = _pushable_org_rows(owner)
 	if len(rows) > MAX_SKILLS_PER_PUSH:
@@ -841,13 +720,14 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 			)
 		dropped = [prefixed_slug(r.skill_name) for r in rows[MAX_SKILLS_PER_PUSH:]]
 		preview = ", ".join(dropped[:5]) + (", ..." if len(dropped) > 5 else "")
-		frappe.log_error(
-			title="Jarvis: custom-skills push truncated",
-			message=(
-				f"custom-skills push truncated: {len(rows)} enabled, "
-				f"{MAX_SKILLS_PER_PUSH} pushed, {len(dropped)} dropped: {preview}"
-			),
-		)
+		if log_truncation:
+			frappe.log_error(
+				title="Jarvis: custom-skills push truncated",
+				message=(
+					f"custom-skills push truncated: {len(rows)} enabled, "
+					f"{MAX_SKILLS_PER_PUSH} pushed, {len(dropped)} dropped: {preview}"
+				),
+			)
 	payload = []
 	for r in rows[:MAX_SKILLS_PER_PUSH]:
 		ui = bool(r.user_invocable)
@@ -856,32 +736,10 @@ def build_push_payload(owner: str | None = None, strict: bool = False) -> list[d
 				"slug": prefixed_slug(r.skill_name),
 				"description": r.description or "",
 				"user_invocable": ui,
-				"body": render_skill_md(r.skill_name, r.description, ui, r.instructions),
+				"body": render_skill_md(r.skill_name, r.description, ui),
 			}
 		)
 	return payload
-
-
-def pushed_skill_names() -> set[str]:
-	"""Bare authored slugs the container push writes: the
-	:func:`_pushable_org_rows` eligibility set truncated by the same
-	``MAX_SKILLS_PER_PUSH`` cap :func:`build_push_payload` applies.
-
-	Anything OUTSIDE this set has no ``custom-<slug>`` directory in the container,
-	so no context clause may tell the agent to apply it as an installed skill
-	(issue #477). Identity-only projection so the chat hot path never loads
-	instruction bodies.
-
-	Read this as push ELIGIBILITY, not confirmed container state. It is recomputed
-	from current DB rows, and the push is a separate job: an Org approval (or an
-	insight applied to an Org skill) returns ``needs_apply`` and the reviewer's
-	client runs the Apply straight away (see :func:`apply_would_push`). So for the
-	~30s that push takes, a newly eligible skill is named as installed while its
-	directory does not exist yet. Closing that last window needs per-row
-	applied-state tracking, which the bench does not have (the sync status is one
-	bench-wide Single)."""
-	rows = _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)
-	return {r.skill_name for r in rows[:MAX_SKILLS_PER_PUSH]}
 
 
 def apply_would_push(name: str) -> bool:
@@ -890,9 +748,15 @@ def apply_would_push(name: str) -> bool:
 	fits ``MAX_SKILLS_PER_PUSH`` (the strict Apply refuses an over-cap catalog
 	outright, so asking the client to run one would only fail right after a success
 	toast). An insight applied to an Org skill returns this as ``needs_apply`` so the
-	client pushes now instead of leaving the change out until an unrelated restart."""
+	client pushes now. (A change to the instructions alone is served at the next
+	fetch without a push; the container holds the name and the description.)"""
 	rows = _pushable_org_rows(fields=_PUSHABLE_LIGHT_FIELDS)
 	return len(rows) <= MAX_SKILLS_PER_PUSH and any(r.name == name for r in rows)
+
+
+def push_is_over_cap() -> bool:
+	"""Whether :func:`build_push_payload` would drop skills past the cap right now."""
+	return len(_pushable_org_rows()) > MAX_SKILLS_PER_PUSH
 
 
 def pushable_org_skill_count() -> int:

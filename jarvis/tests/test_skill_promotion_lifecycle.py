@@ -303,9 +303,8 @@ class TestAdministratorOwnedSourceApproves(PromotionLifecycleBase):
 	Fix: ``_validate_unique_per_owner`` (jarvis_custom_skill.py) now exempts the
 	LINEAGE PAIR specifically (self <-> self.source_skill), not the whole
 	cross-tier check - a genuine unrelated duplicate name under the same owner is
-	still real ambiguity for ``resolve_armed_skill_docname``'s owner-tier
-	resolution (it assumes at most one enabled row per (owner, slug)), so that
-	stays rejected below."""
+	still real ambiguity (every chooser of a row by name assumes an owner has at
+	most one of a name), so that stays rejected below."""
 
 	def test_administrator_owned_private_skill_promotes_successfully(self):
 		from jarvis.chat import custom_skills_api
