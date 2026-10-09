@@ -316,21 +316,14 @@ def _create_card(args: dict, would, full: bool = False) -> dict:
 		rows.append(value_row(meta, key, _label(meta, key), val, df, None, full))
 		if not full and len(rows) >= _MAX_ROWS:
 			break
-<<<<<<< HEAD
-=======
-	if doctype == _TRIGGER_DOCTYPE:
-		_ensure_effective_enabled_row(meta, would, rows)
 	if full:
 		for label, _old, new in _code_cells(doctype, values, {}):
 			row = value_row(None, "", label, new, None, None, True)
 			rows.append({**row, "multiline": True})
->>>>>>> 4cd84d9 (feat(structure): Workflow, CRM Settings and Domain Settings from chat behind a card; cards draw what is stored)
 	name = would.get("name") if isinstance(would, dict) else None
 	return {"kind": "create", "doctype": doctype, "name": name, "rows": rows, "tables": tables}
 
 
-<<<<<<< HEAD
-=======
 # Code a record carries inside a child table: (table, the cell, what marks the cell
 # as code or None for always, how its row is named). A full card's table scrolls
 # sideways on the board and the phone, so each such cell ALSO gets a full-width
@@ -387,35 +380,6 @@ def _code_diff_rows(doctype, changes: dict, old: dict) -> list[dict]:
 			row["note"] = HIDDEN_BREAK_NOTE
 		out.append(row)
 	return out
-
-
-def _ensure_effective_enabled_row(meta, source, rows: list) -> None:
-	"""jarvis#596: always show Jarvis Trigger's effective Enabled state on a
-	create card, even when the caller's ``values`` never set it.
-
-	Reads ONLY from ``source`` - the perm-filtered ``would`` for a single
-	create - and honours the same perm-drop convention every other field in
-	this file uses: ``enabled`` ABSENT from ``source`` means it did not
-	survive field-level read permissions, so nothing is shown rather than a
-	guessed default. No hardcoded fallback: the value shown is always the
-	real one the resolved doc carries.
-
-	Respects ``_MAX_ROWS`` like every other row list here: replaces an
-	existing Enabled row in place, inserts when there is room, otherwise
-	replaces the last row rather than growing past the cap.
-	"""
-	if not isinstance(source, dict) or "enabled" not in source:
-		return
-	label = _label(meta, "enabled")
-	row = {"label": label, "value": fmt(source.get("enabled"), meta.get_field("enabled") if meta else None)}
-	for i, existing in enumerate(rows):
-		if existing["label"] == label:
-			rows[i] = row
-			return
-	if len(rows) < _MAX_ROWS:
-		rows.insert(0, row)
-	else:
-		rows[-1] = row
 
 
 def _stored_args(tool: str, args: dict) -> dict:
@@ -581,7 +545,6 @@ def _same_rows(meta, key, rows, stored) -> bool:
 	return True
 
 
->>>>>>> 4cd84d9 (feat(structure): Workflow, CRM Settings and Domain Settings from chat behind a card; cards draw what is stored)
 def _diff_row(meta, key, from_val, to_val, doc, full: bool) -> dict:
 	"""One from -> to row. A secret is "[hidden]" both sides, or on a sensitive
 	card "set" / "changed" / "unchanged". On a sensitive card a child table comes
