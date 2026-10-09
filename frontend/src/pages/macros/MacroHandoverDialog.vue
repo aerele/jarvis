@@ -1,7 +1,6 @@
 <template>
 	<!-- Picks who another user's macro goes to, then says what arrives and asks
-	     once. A second dialog over Settings, as MacroHoldDialog is, so Escape
-	     closes this one alone. -->
+	     once. A dialog over the Macros page's Admin tab, as MacroHoldDialog is. -->
 	<Dialog v-model="show" :options="{ title }">
 		<template #body-content>
 			<div class="flex flex-col gap-3">
