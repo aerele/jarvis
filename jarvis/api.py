@@ -3431,7 +3431,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# after the cancel-gate and before the TTL/dispatch so it fires on every
 			# would-be uncarded covered write regardless of the run's age.
 			# The same for a skill switched off mid-run: its name would then be served
-			# from another row (the user's own), which nobody armed.
+			# from another row (the user's own, or a private one shared with them),
+			# which nobody armed.
 			autorun_skill = _conv_flags.get("skill_autorun_skill")
 			still_armed = autorun_skill and frappe.db.get_value(
 				"Jarvis Custom Skill", autorun_skill, ["allow_approve_run", "enabled"]
