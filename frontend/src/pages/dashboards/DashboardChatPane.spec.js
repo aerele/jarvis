@@ -436,8 +436,13 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 			["refusal", (p) => p.resolve(LATEST_ONLY), "Only the latest reply can be retried."],
 			[
 				"unknown code",
-				(p) => p.resolve({ ok: false, reason: "maintenance" }),
+				(p) => p.resolve({ ok: false, reason: "unknown_future_code" }),
 				"Couldn&#39;t retry that.",
+			],
+			[
+				"maintenance",
+				(p) => p.resolve({ ok: false, reason: "maintenance" }),
+				"Jarvis is temporarily unavailable for maintenance. Try again shortly.",
 			],
 			["error", (p) => p.reject(new Error("Network down")), "Network down"],
 			[

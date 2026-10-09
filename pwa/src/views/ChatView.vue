@@ -49,6 +49,11 @@ import {
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
 import Composer from "../components/Composer.vue";
+import {
+	boundedDelivery,
+	newSendRequestId,
+	deliveryFailureCopy,
+} from "@shared/lib/sendDelivery.js";
 import SendRecoveryCard from "../components/SendRecoveryCard.vue";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
@@ -164,7 +169,9 @@ const dismissedActions = ref(new Set());
 const parkedActions = ref(new Map());
 
 const localRequests = computed(() =>
-	recoveryState.requests.filter((r) => r.conversation === convId.value)
+	recoveryState.requests.filter(
+		(r) => r.conversation === convId.value || (!convId.value && r.needsAdoption)
+	)
 );
 const sending = computed(
 	() =>
@@ -180,27 +187,21 @@ const savedDrafts = computed(() =>
 );
 const hasDraft = (draft) => !!(draft?.text || draft?.attachments?.length);
 function useSavedDraft(draft) {
-	const current = { text: input.value, attachments: attachments.value };
+	const current = {
+		text: input.value,
+		attachments: attachments.value,
+		...(!convId.value ? { picks: { ...recoveryState.newChatPicks } } : {}),
+	};
 	input.value = draft.text;
 	attachments.value = draft.attachments;
+	if (!convId.value && draft.picks) recoveryState.newChatPicks = { ...draft.picks };
 	if (hasDraft(current)) Object.assign(draft, current);
 	else recoveryState.parkedDrafts.splice(recoveryState.parkedDrafts.indexOf(draft), 1);
 	saveDraft();
 }
 // Bounded reads settle exactly once: late network results cannot mutate a new check.
-async function boundedRead(promise) {
-	let timer;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise((_, reject) => {
-				timer = setTimeout(() => reject(new Error("Read timed out")), 15000);
-			}),
-		]);
-	} finally {
-		clearTimeout(timer);
-	}
-}
+const boundedRead = (promise) => boundedDelivery(promise, 15000);
+
 let queueGeneration = 0;
 let queueRead = null;
 let queuePoll;
@@ -294,12 +295,18 @@ const isCurrent = (cid, generation) =>
 	viewActive && cid === convId.value && generation === viewGeneration;
 
 function saveDraft() {
-	recoveryState.drafts[convId.value] = { text: input.value, attachments: attachments.value };
+	recoveryState.drafts[convId.value] = {
+		text: input.value,
+		attachments: attachments.value,
+		...(!convId.value ? { picks: { ...recoveryState.newChatPicks } } : {}),
+	};
 }
 function restoreDraft() {
 	const draft = recoveryState.drafts[convId.value];
 	input.value = draft?.text || "";
 	attachments.value = draft?.attachments || [];
+	if (!convId.value && hasDraft(draft) && draft?.picks)
+		recoveryState.newChatPicks = { ...draft.picks };
 }
 restoreDraft();
 const title = computed(
@@ -645,12 +652,19 @@ async function send() {
 	}
 	if ((!text && !ready.length) || sending.value) return;
 	errorBanner.value = "";
-	const request = sendRecovery.stage(
-		cid,
-		input.value,
-		ready,
-		orderedPending.value.map((p) => p.token)
-	);
+	let request;
+	try {
+		request = sendRecovery.stage(
+			cid,
+			input.value,
+			ready,
+			orderedPending.value.map((p) => p.token)
+		);
+	} catch {
+		errorBanner.value = "Could not prepare the message. Your draft is preserved.";
+		return;
+	}
+	if (!cid) Object.assign(request, recoveryState.newChatPicks);
 	input.value = "";
 	composer.value?.reset();
 	// The preserved request uses durable file URLs; release only local thumbnails.
@@ -664,59 +678,88 @@ async function send() {
 	await completion;
 }
 
-async function dispatchRequest(request) {
+async function dispatchRequest(request, historical = false) {
 	const attempt = request.id;
+	const operation = sendRecovery.begin(request);
 	// The browser can keep a stalled POST pending indefinitely. A UI deadline
 	// makes its preserved request checkable; it does not cancel server work.
 	const deadline = setTimeout(() => {
-		if (request.id === attempt && request.state === "sending")
-			sendRecovery.settle(request, null);
+		if (
+			request.id === attempt &&
+			request.operation === operation &&
+			request.state === "sending"
+		)
+			sendRecovery.settle(request, null, operation);
 	}, 30000);
 	try {
 		const outcome = await api.sendRecoverableMessage(request);
 		if (request.id === attempt) {
-			sendRecovery.settle(request, outcome);
+			const fresh =
+				!historical && request.operation === operation && request.state === "sending";
+			sendRecovery.settle(request, outcome, operation);
 			// Only a fresh send response can update global maintenance readiness.
 			// A receipt read later describes the past, not current availability.
-			if (["accepted", "confirmed"].includes(request.state)) clearHold();
-			else if (request.state === "rejected" && request.result?.reason === "maintenance") {
+			if (fresh && ["accepted", "confirmed"].includes(request.state)) clearHold();
+			else if (
+				fresh &&
+				request.state === "rejected" &&
+				request.result?.reason === "maintenance"
+			) {
 				raiseHold(request.result.message);
 				recheckMaintenance();
 			}
 		}
-	} catch {
+	} catch (error) {
 		// A delivery check may have settled this attempt while its POST was
 		// stalled. A late transport error must not undo that evidence.
-		if (request.id === attempt) sendRecovery.settle(request, null);
+		if (request.id === attempt && request.operation === operation) {
+			sendRecovery.settle(request, null, operation);
+			if (request.state === "uncertain") request.note = deliveryFailureCopy(error);
+		}
 	} finally {
 		clearTimeout(deadline);
 	}
 }
 
-async function retryRequest(request) {
-	if (request.conversation !== convId.value || sending.value || holdActive.value) return;
-	if (!sendRecovery.retry(request)) return;
-	await dispatchRequest(request);
+async function retryRequest(request, sameId = false) {
+	if (request.attachments.some((a) => a.uploading || !a.file_url)) {
+		request.note = "Finish uploading or remove the failed attachment before retrying.";
+		return;
+	}
+	if (request.conversation !== convId.value || (!sameId && (sending.value || holdActive.value)))
+		return;
+	try {
+		if (!sendRecovery.retry(request, sameId)) return;
+	} catch {
+		errorBanner.value = "Could not prepare the retry. Your message is preserved.";
+		return;
+	}
+	await dispatchRequest(request, sameId);
 }
 
 async function checkRequest(request) {
 	if (request.state !== "uncertain" || request.checking) return;
 	const attempt = request.id;
+	const operation = sendRecovery.begin(request);
 	request.checking = true;
 	request.note = "";
 	try {
 		const outcome = await boundedRead(api.checkDelivery(attempt));
 		if (request.id !== attempt) return;
-		sendRecovery.settle(request, outcome);
+		sendRecovery.settle(request, outcome, operation);
 		if (request.state === "uncertain")
 			request.note =
 				"Delivery is still unknown. No second message was sent. Check again later or ask support to inspect this conversation.";
-	} catch {
-		if (request.id !== attempt || request.state !== "uncertain") return;
-		request.note =
-			"Delivery check did not finish. Check again when connected. No second message was sent.";
+	} catch (error) {
+		if (
+			request.id !== attempt ||
+			request.operation !== operation ||
+			request.state !== "uncertain"
+		)
+			return;
+		request.note = deliveryFailureCopy(error);
 	} finally {
-		if (request.id === attempt) request.checking = false;
+		if (request.id === attempt && request.operation === operation) request.checking = false;
 	}
 }
 
@@ -724,13 +767,48 @@ function editRequest(request, text) {
 	if (request.state === "rejected" && request.conversation === convId.value) request.text = text;
 }
 
+function editNewChatPicks(request) {
+	if (request.state !== "rejected" || request.conversation) return;
+	recoveryState.editingNewRequest = request.id;
+	router.push("/c/new");
+}
+function openNewChatComposer() {
+	const current = {
+		...recoveryState.newChatPicks,
+		text: input.value,
+		attachments: attachments.value,
+	};
+	if (hasDraft(current)) {
+		if (hasDraft(recoveryState.heroDraft))
+			recoveryState.parkedDrafts.push({
+				...recoveryState.heroDraft,
+				picks: {
+					model: recoveryState.heroDraft.model,
+					thinking: recoveryState.heroDraft.thinking,
+					autoMode: recoveryState.heroDraft.autoMode,
+				},
+				id: newSendRequestId(),
+				conversation: "",
+			});
+		recoveryState.heroDraft = current;
+	}
+	recoveryState.editingNewRequest = null;
+	input.value = "";
+	attachments.value = [];
+	saveDraft();
+	router.push("/c/new");
+}
 function editAsNew(request) {
 	if (request.state !== "uncertain" || request.conversation !== convId.value) return;
-	const current = { text: input.value, attachments: attachments.value };
+	const current = {
+		text: input.value,
+		attachments: attachments.value,
+		...(!convId.value ? { picks: { ...recoveryState.newChatPicks } } : {}),
+	};
 	if (hasDraft(current))
 		recoveryState.parkedDrafts.push({
 			...current,
-			id: crypto.randomUUID(),
+			id: newSendRequestId(),
 			conversation: convId.value,
 		});
 	input.value = request.text;
@@ -738,8 +816,15 @@ function editAsNew(request) {
 		...file,
 		key: `${request.id}-${i}`,
 	}));
+	if (!request.conversation)
+		recoveryState.newChatPicks = {
+			model: request.model,
+			thinking: request.thinking,
+			autoMode: request.autoMode,
+		};
 	sendRecovery.remove(request);
 	saveDraft();
+	if (!request.conversation) openNewChatComposer();
 	errorBanner.value =
 		"This is a new draft. The original request may already have executed; sending again could duplicate work.";
 }
@@ -804,23 +889,37 @@ watch(
 			}
 			if (!["accepted", "confirmed"].includes(request.state)) continue;
 			if (res.conversation_id && res.conversation_id !== cid) {
-				saveDraft();
+				if (cid) {
+					saveDraft();
+					request.conversation = res.conversation_id;
+					for (const draft of recoveryState.parkedDrafts) {
+						if (draft.conversation === cid) draft.conversation = res.conversation_id;
+					}
+					const source = recoveryState.drafts[cid];
+					if (hasDraft(source)) {
+						if (hasDraft(recoveryState.drafts[res.conversation_id])) {
+							recoveryState.parkedDrafts.push({
+								...source,
+								id: request.id,
+								conversation: res.conversation_id,
+							});
+						} else recoveryState.drafts[res.conversation_id] = source;
+					}
+					input.value = "";
+					attachments.value = [];
+					delete recoveryState.drafts[cid];
+					router.replace(`/c/${res.conversation_id}`);
+					store.loadConversations();
+					return;
+				}
+				request.needsAdoption = false;
 				request.conversation = res.conversation_id;
-				for (const draft of recoveryState.parkedDrafts) {
-					if (draft.conversation === cid) draft.conversation = res.conversation_id;
+				// Keep any newly composed home draft on the home surface.
+				if (input.value.trim() || attachments.value.length) {
+					saveDraft();
+					continue;
 				}
-				const source = recoveryState.drafts[cid];
-				if (hasDraft(source)) {
-					if (hasDraft(recoveryState.drafts[res.conversation_id])) {
-						recoveryState.parkedDrafts.push({
-							...source,
-							id: request.id,
-							conversation: res.conversation_id,
-						});
-					} else recoveryState.drafts[res.conversation_id] = source;
-				}
-				input.value = "";
-				attachments.value = [];
+				recoveryState.newChatPicks = {};
 				delete recoveryState.drafts[cid];
 				router.replace(`/c/${res.conversation_id}`);
 				store.loadConversations();
@@ -1443,6 +1542,9 @@ onUnmounted(() => {
 			</div>
 		</template>
 
+		<button v-if="!convId" class="jv-btn" @click="openNewChatComposer">
+			New-chat settings
+		</button>
 		<SendRecoveryCard
 			v-for="request in localRequests"
 			:key="request.id"
@@ -1452,6 +1554,8 @@ onUnmounted(() => {
 			@reload="reloadForUpdate"
 			:disabled="sending || holdActive"
 			@retry="retryRequest(request)"
+			@retry-same="retryRequest(request, true)"
+			@edit-picks="editNewChatPicks(request)"
 			@check="checkRequest(request)"
 			@edit="editRequest(request, $event)"
 			@discard="sendRecovery.remove(request)"
