@@ -988,7 +988,7 @@ def preview_file(file_url: str) -> dict:
 	from jarvis.chat.xlsx_charts import extract_charts, preview_cell
 	from jarvis.tools.read_file import _resolve_file, read_file
 
-	data = read_file(file_url=file_url, max_rows=300, max_chars=8000)
+	data = read_file(file_url=file_url, max_rows=300, max_chars=8000, preview=True)
 	kind = data.get("kind")
 	if kind == "table":
 		sheets = [
