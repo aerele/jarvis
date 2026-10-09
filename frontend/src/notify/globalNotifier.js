@@ -22,7 +22,7 @@ import { report as reportError } from "@/lib/errorReporter";
 // The SAME fence ChatView applies to terminals, from the same module, so the two
 // listeners on this socket cannot disagree about what counts as a duplicate.
 import { fenceAccept, fenceReject } from "@/utils/eventFence";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { macroDoneSignal } from "@/lib/macroRunOutcome";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
@@ -38,7 +38,10 @@ export function useToasts() {
 
 export function pushToast({ title, body, onClick }) {
 	const id = ++_seq;
-	const next = [...toasts.value, { id, title: title || agentName, body: body || "", onClick }];
+	const next = [
+		...toasts.value,
+		{ id, title: title || brand.agentName, body: body || "", onClick },
+	];
 	// max 3 stacked — drop the oldest (and its timer) instead of growing a pile
 	while (next.length > MAX_TOASTS) {
 		const drop = next.shift();
@@ -218,14 +221,14 @@ export function attachGlobalNotifier({ socket, router }) {
 					// keep the row's title/order honest (debounced reload)
 					store.applyRemoteNew();
 				}
-				const title = convTitle(conv) || agentName;
+				const title = convTitle(conv) || brand.agentName;
 				// A stop is the user's own click, seconds ago - the dot is useful, a
 				// notification saying "Reply ready" for the reply they just killed is not.
 				if (p.stopped) return;
 				if (p.kind === "run:error") runErrorSignalAt.set(conv, Date.now());
 				const body =
 					p.kind === "run:error"
-						? `${agentName} hit an error in ${convTitle(conv) || "your chat"}`
+						? `${brand.agentName} hit an error in ${convTitle(conv) || "your chat"}`
 						: _excerpt(p.preview) || "Reply ready";
 				signal({
 					conv,
@@ -245,8 +248,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				if (conv === dashboardsPaneConv() && !document.hidden) return;
 				signal({
 					conv,
-					title: convTitle(conv) || agentName,
-					body: `${agentName} needs your confirmation` + (tool ? ": " + tool : ""),
+					title: convTitle(conv) || brand.agentName,
+					body: `${brand.agentName} needs your confirmation` + (tool ? ": " + tool : ""),
 					tag: "jarvis-" + (conv || "confirm"),
 					open: () => go(conversationPath(conv, p.origin_page || "")),
 				});
@@ -263,7 +266,7 @@ export function attachGlobalNotifier({ socket, router }) {
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
-					title: `${agentName} is waiting on you`,
+					title: `${brand.agentName} is waiting on you`,
 					body: dashboardApproval
 						? _excerpt(p.question) || "A dashboard question needs your answer."
 						: _excerpt(p.question) ||
@@ -363,9 +366,10 @@ export function attachGlobalNotifier({ socket, router }) {
 				// off the chat routes ChatView isn't mounted to refresh the sidebar
 				// list — do it here (debounced; harmless double when both run)
 				if (!router.currentRoute.value.meta.chat) store.applyRemoteNew();
-				const title = p.title || `Message from ${agentName}`;
+				const title = p.title || `Message from ${brand.agentName}`;
 				const body =
-					_excerpt(p.preview) || `${agentName} started a new conversation with you.`;
+					_excerpt(p.preview) ||
+					`${brand.agentName} started a new conversation with you.`;
 				const open = () => go("/c/" + conv);
 				if (document.hidden) {
 					browserNotify({ title, body, tag: "jarvis-" + conv, onclick: open });

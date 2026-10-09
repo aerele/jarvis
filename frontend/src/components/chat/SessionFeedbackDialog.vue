@@ -10,7 +10,7 @@
 	>
 		<template #body-content>
 			<p class="mb-3 text-sm text-ink-gray-6">
-				Takes 2 seconds. Helps us improve {{ agentName }}.
+				Takes 2 seconds. Helps us improve {{ brand.agentName }}.
 			</p>
 			<div class="flex flex-col gap-1.5">
 				<button
@@ -49,7 +49,7 @@
 import { computed, ref, watch } from "vue";
 import { Dialog, Button, FormControl } from "frappe-ui";
 import * as api from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import {
 	sessionFeedbackOpen,
 	sessionFeedbackConversation,

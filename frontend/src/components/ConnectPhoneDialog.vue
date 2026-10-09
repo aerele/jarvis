@@ -1,12 +1,12 @@
 <template>
 	<Dialog
 		:modelValue="modelValue"
-		:options="{ title: `Get ${agentName} on your phone`, size: 'sm' }"
+		:options="{ title: `Get ${brand.agentName} on your phone`, size: 'sm' }"
 		@update:modelValue="(v) => emit('update:modelValue', v)"
 	>
 		<template #body-content>
 			<p class="text-p-sm text-ink-gray-6">
-				Scan this code to open <b>{{ agentName }}</b> on your phone.
+				Scan this code to open <b>{{ brand.agentName }}</b> on your phone.
 			</p>
 
 			<div class="mt-4 flex flex-col items-center">
@@ -52,7 +52,7 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errMessage } from "@/lib/errors";
 
 const props = defineProps({

@@ -254,8 +254,8 @@
 								Personalisation questions
 							</div>
 							<div class="mt-0.5 text-sm text-ink-gray-6">
-								Configure what {{ agentName }} asks your team (org-wide, per role,
-								or per person) on the Personalise tab.
+								Configure what {{ brand.agentName }} asks your team (org-wide, per
+								role, or per person) on the Personalise tab.
 							</div>
 						</div>
 						<Button
@@ -300,7 +300,7 @@ import {
 	setLearningSettings,
 	getLearningStatus,
 } from "@/api/learning";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 
 const emit = defineEmits(["changed"]);

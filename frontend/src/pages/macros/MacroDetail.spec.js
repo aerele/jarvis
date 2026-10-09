@@ -119,7 +119,7 @@ vi.mock("@/pages/macros/StepsBuilder.vue", () => ({
 }));
 vi.mock("@/composables/useDocmeta", () => ({ useDocmeta: () => ({}) }));
 vi.mock("@/composables/macroPrefill", () => ({ takeMacroPrefill: () => null }));
-vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 // A named user is logged in throughout: the schedule switch for a SAVED macro must
 // follow what the server says about the macro's owner, not who is looking.
 const session = vi.hoisted(() => ({ user: "priya@example.com" }));

@@ -26,7 +26,7 @@
 					<!-- brand header: JarvisMark + name + per-step subtitle -->
 					<div class="mb-2 flex items-center justify-center gap-2.5">
 						<JarvisMark :size="30" :radius="8" />
-						<span class="text-base font-semibold">{{ agentName }}</span>
+						<span class="text-base font-semibold">{{ brand.agentName }}</span>
 						<span
 							class="border-l border-outline-gray-1 pl-2.5 text-p-sm text-ink-gray-6"
 							>{{ frameSub }}</span
@@ -39,7 +39,7 @@
 						v-if="workerWarning"
 						type="warning"
 						:title="WORKER_WARNING_TITLE"
-						:message="workerWarningMessage(agentName)"
+						:message="workerWarningMessage(brand.agentName)"
 						class="mb-4 w-full max-w-[720px]"
 					/>
 
@@ -308,8 +308,8 @@
 								<div class="ob-head">
 									<h1>Your details</h1>
 									<p>
-										We'll set {{ agentName }} up for this workspace and send
-										receipts here.
+										We'll set {{ brand.agentName }} up for this workspace and
+										send receipts here.
 									</p>
 								</div>
 								<div
@@ -1803,7 +1803,7 @@
 										<div class="ob-head">
 											<!-- Follows the live phase (waitPhases.setupHeadline,
 												 jarvis#727): this used to be a fixed "Setting up
-												 {agentName}" sitting above a phase list that jarvis#722
+												 {brand.agentName}" sitting above a phase list that jarvis#722
 												 had already made real, so the largest text on the screen
 												 was the only part saying nothing. It falls back to
 												 exactly that sentence whenever the phase names no
@@ -2057,7 +2057,7 @@
 									<div class="ob-head">
 										<h1>Connect an AI model</h1>
 										<p>
-											Choose which AI powers {{ agentName }}, a chat
+											Choose which AI powers {{ brand.agentName }}, a chat
 											subscription or your own API key. You can change this
 											anytime in Settings → AI models.
 										</p>
@@ -2189,7 +2189,7 @@ import {
 import { forgetReady, hasReconnectIntent, landingStep } from "@/onboarding/readiness.js";
 import { errMessage as errMsg } from "@/lib/errors";
 import { report as reportError } from "@/lib/errorReporter";
-import { agentName, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
+import { brand, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
 import { createPaymentFlow } from "@/onboarding/usePaymentFlow";
 import {
 	STATES as PAY_STATES,
@@ -4599,12 +4599,12 @@ let retryTimer = null;
 let lastOpChatReadinessReason = "";
 
 // The setup screen's headline, following the live phase (jarvis#727) instead of
-// the fixed "Setting up {agentName}" that used to sit above a phase list which
+// the fixed "Setting up {brand.agentName}" that used to sit above a phase list which
 // had already become real (jarvis#722). setupHeadline owns every honesty
 // decision; this only supplies what it cannot know: the brand name, and the
 // fact that a ready verdict arrived and we are now navigating.
 const setupTitle = computed(() =>
-	setupHeadline(readinessStage.value, agentName, { navigating: navigated.value })
+	setupHeadline(readinessStage.value, brand.agentName, { navigating: navigated.value })
 );
 
 // jarvis#727. True once THIS attempt has watched the pipeline stall or fail on
