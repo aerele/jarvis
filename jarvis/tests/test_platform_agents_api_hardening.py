@@ -221,6 +221,21 @@ class TestListFindingsStrongVerbGate(FrappeTestCase):
 			self.assertNotIn("saved", r[field].lower())
 			self.assertIn("[unverified]", r[field])
 
+	def test_blank_legacy_finding_has_a_title_without_fabricating_evidence(self):
+		_mk_finding(
+			self.user,
+			self.SLUG,
+			result_class="observed_fact",
+			title=" ",
+			detail_md="",
+			ref_doctype="Supplier",
+			ref_name="SUPP-LEGACY",
+		)
+		row = self._rows()[0]
+		self.assertEqual(row["title"], "Review Supplier SUPP-LEGACY")
+		self.assertEqual(row["detail_md"], "")
+		self.assertEqual(frappe.db.get_value(FINDING, row["name"], "detail_md"), "")
+
 	def test_confirmed_outcome_with_provenance_keeps_verb(self):
 		"""Control: a genuine confirmed_outcome row WITH a resolving outcome_provenance
 		link keeps the strong verb — the gate neutralises only UNEARNED claims."""
@@ -457,9 +472,12 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		"""THE regression: owner A uninstalls; owner B's and the shared reviewer's
 		own findings survive, while A's own history is still fully cascaded."""
 		self._uninstall_a()
-		# A's own history is gone — the cascade still does its job.
+		# A's own history is gone: the cascade still does its job. (A completed run of
+		# this month stays for the monthly run budget, with no installation: it is no
+		# longer anybody's run history; see test_agent_budget_survives_delete.)
 		self.assertFalse(frappe.db.exists(FINDING, self.f_a))
-		self.assertFalse(frappe.db.exists(RUN, self.run_a))
+		self.assertTrue(frappe.db.exists(RUN, self.run_a))
+		self.assertIsNone(frappe.db.get_value(RUN, self.run_a, "installation"))
 		self.assertFalse(frappe.db.exists(INSTALLATION, self.inst_a.name))
 		# Nobody else's is.
 		self.assertTrue(frappe.db.exists(FINDING, self.f_b))
@@ -496,9 +514,11 @@ class TestUninstallCascadeScope(FrappeTestCase):
 		ev.insert(ignore_permissions=True)
 		frappe.db.commit()
 		self._uninstall_a()
-		# The install and its own run/finding history are cascaded away...
+		# The install and its own run/finding history are cascaded away (the month's
+		# completed run is kept for the run budget, with no installation)...
 		self.assertFalse(frappe.db.exists(INSTALLATION, self.inst_a.name))
-		self.assertFalse(frappe.db.exists(RUN, self.run_a))
+		self.assertTrue(frappe.db.exists(RUN, self.run_a))
+		self.assertIsNone(frappe.db.get_value(RUN, self.run_a, "installation"))
 		self.assertFalse(frappe.db.exists(FINDING, self.f_a))
 		# ...but the immutable provenance event survives, UNMUTATED — its installation link
 		# is preserved as a historical fact, never nulled (the ledger is not rewritten).

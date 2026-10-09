@@ -137,7 +137,8 @@ def render_charts(specs: dict[int, dict], *, deadline: float, colors=None, notes
 		# exclude it without changing the serving process or PDF renderer's PATH.
 		env = {**os.environ, "MPLBACKEND": "Agg", "MPLCONFIGDIR": str(font_cache), "PATH": ""}
 		try:
-			with subprocess.Popen(
+			# Fixed argv, no shell.
+			with subprocess.Popen(  # nosemgrep: frappe-subprocess-exec
 				[sys.executable, str(Path(__file__).with_name("chart_worker.py"))],
 				text=True,
 				stdin=subprocess.PIPE,

@@ -1,3 +1,4 @@
+import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // Thin wrappers around frappe-ui's `call` (which posts to /api/method/... with
 // the session cookie + CSRF). Same backend the Desk chat uses, so conversations
 // stay consistent across surfaces.
@@ -234,10 +235,14 @@ export const stopMacroRun = (run) => call(MC + "stop_macro_run", { run });
 // Run-history dashboard (settings → Macro runs).
 export const listMacroRuns = (params) => call(MC + "list_macro_runs", params || {});
 export const macroRunStats = () => call(MC + "macro_run_stats");
-// Background summarize: fired after every 2+ step save; the WORKER applies the
-// summary when the turn ends (macro:merged event) - no client round-trip needed.
-// Run is gated on merge_status while pending.
-export const summarizeMacro = (name) => call(MC + "summarize_macro", { name });
+// Background summarize: fired after a save the server answered `summarize: true`
+// to (the steps changed and two or more are left), and by Re-summarize. The WORKER
+// applies the summary when the turn ends (macro:merged event) - no client
+// round-trip needed. Run is gated on merge_status while pending.
+// `force` is Re-summarize only: a summary already pending is given up and a new one
+// started. Without it the server answers with the pending one.
+export const summarizeMacro = (name, force = false) =>
+	call(MC + "summarize_macro", force ? { name, force: 1 } : { name });
 export const setConversationModel = (conversation, model) =>
 	call("jarvis.chat.api.set_conversation_model", { conversation, model: model || "" });
 // Reasoning effort. "" clears the override, so the turn inherits Jarvis Settings.
@@ -262,6 +267,20 @@ export const getDoctypeFormMeta = (doctype) => call(AC + "get_doctype_form_meta"
 export const loadDocForEdit = (doctype, name) => call(AC + "load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// Park the confirm card for a create receipt's suggested next step (#621). Same
+// card the assistant's own submit/workflow call gets; nothing runs until Confirm.
+export const proposeNextAction = (conversation, step) =>
+	call(AC + "propose_next_action", {
+		conversation,
+		doctype: step.doctype,
+		name: step.name,
+		kind: step.kind,
+		...(step.action ? { action: step.action } : {}),
+	});
+// What ERPNext computes for a create card's blank read-only cells (a rolled-back
+// dry run): {ok, tables: {table: [{fieldname: value}]}}. Display only (#647).
+export const draftComputed = (action) =>
+	call(AC + "draft_computed", { action: JSON.stringify(action) });
 // Write-safety gate (issue #186): confirm a parked ERP write by its one-time
 // token. Pass the conversation the click came from so the server enforces the
 // real conversation guard (#11). Returns the tool result envelope {ok, ...} on
@@ -306,7 +325,10 @@ export async function sendMessage(
 	attachments,
 	context,
 	approvalTokens,
-	voice
+	voice,
+	autoMode,
+	thinkingOverride,
+	requestId
 ) {
 	// Empty conversation is allowed: the backend creates (or focuses) an empty
 	// conversation itself and returns its id as `conversation_id` - saves the
@@ -317,7 +339,12 @@ export async function sendMessage(
 	// this payload. Omitted (not even `voice: 0`) for every ordinary typed
 	// send, matching every existing caller that doesn't pass this arg.
 	if (voice) args.voice = 1;
+	// Per-chat auto mode (#581): honoured server-side only with the chat's first
+	// message. Omitted (not even `auto_mode: 0`) for every send that doesn't ask.
+	if (autoMode) args.auto_mode = 1;
 	if (modelOverride) args.model_override = modelOverride;
+	// Omitted when empty: the server reads a present-but-empty value as "clear the level".
+	if (thinkingOverride) args.thinking_override = thinkingOverride;
 	if (attachments && attachments.length) args.attachments = JSON.stringify(attachments);
 	// The ordered tokens of the confirmation cards on screen. A typed "confirm 2"
 	// selects by the number the user sees, so the server must resolve that number
@@ -338,6 +365,13 @@ export async function sendMessage(
 			context.page === "dashboards")
 	)
 		args.context = JSON.stringify(context);
+	if (requestId) {
+		const envelope = await call("jarvis.chat.send_requests.send_message", {
+			...args,
+			request_id: requestId,
+		});
+		return settledSendResult(envelope);
+	}
 	return call("jarvis.chat.api.send_message", args);
 }
 
@@ -374,12 +408,13 @@ export const getActiveTurn = (conversation) =>
 // the target's read permission regardless — and are sent only when known
 // (mentions omit them). The list FilterGroup passes the schema entry's own
 // (doctype, fieldname), which the shared schema already knows.
-export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname) => {
+export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname, filters) => {
 	const args = { doctype, txt: txt || "", page_length: pageLength || 8 };
 	// Frappe's search_link params (frappe/desk/search.py): reference_doctype +
 	// keyword-only link_fieldname. Sent only when known.
 	if (referenceDoctype) args.reference_doctype = referenceDoctype;
 	if (linkFieldname) args.link_fieldname = linkFieldname;
+	if (filters?.length) args.filters = filters;
 	return call("frappe.desk.search.search_link", args);
 };
 
@@ -659,6 +694,10 @@ export const disconnectSubscription = () => call("jarvis.oauth.api.disconnect");
 // --- LLM Monitor (System-Manager gated server-side). Real Bifrost usage, NOT the getUsage estimate. ---
 export const getLlmUsage = () => call("jarvis.account.get_llm_usage");
 export const getLlmConnectionStatus = () => call("jarvis.account.get_llm_connection_status");
+// Expired chat-subscription sign-ins for the banner, the failed-message card and the Settings
+// rail. Open to every workspace member; a member only learns whether THEIR chats are failing.
+export const getSubscriptionNotice = () =>
+	call("jarvis.subscription_health.get_subscription_notice");
 // The member-tier half of the same badge (jarvis#711). Returns ONLY { state },
 // one of ok / applying / attention / down - no shape, no model or provider
 // names, no profile ids, and no reason for "attention". Any workspace user may
@@ -776,6 +815,13 @@ export const fileboxDrop = (file_url, file_name, skill, file) =>
 	call("jarvis.chat.filebox.drop_file", { file_url, file_name, skill, file });
 // Whether a skill may still tag the next drop ({available}): a bulk drop checks once.
 export const fileboxCheckSkill = (skill) => call("jarvis.chat.filebox.check_skill", { skill });
+// What a File Box file's chat waits on ({items}): its questions (answered with
+// decideApproval, as on the board) and held records / sheets (linked to the board).
+export const fileboxOpenWaits = (conversation) =>
+	call("jarvis.chat.filebox.open_waits", { conversation });
+// The background reports a chat started and hasn't shown yet ({items}).
+export const chatReportRuns = (conversation) =>
+	call("jarvis.chat.report_runs.chat_report_runs", { conversation });
 
 // ── Approvals: pending-decision queue + decide-and-resume ──
 export const listApprovals = (status = "Pending") =>
@@ -953,4 +999,13 @@ export async function supportUpload(ticket, file, comm) {
 	const data = await r.json();
 	const msg = data.message || data;
 	return msg.data || msg;
+}
+
+export async function checkMessageDelivery(requestId) {
+	return settledSendResult(
+		await boundedDelivery(
+			call("jarvis.chat.send_requests.check_delivery", { request_id: requestId }),
+			15000
+		)
+	);
 }

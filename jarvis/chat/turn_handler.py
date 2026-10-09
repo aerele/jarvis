@@ -31,6 +31,7 @@ call time, so the patch on the worker module still wins.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -38,12 +39,12 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, seq_watermark, vision
+from jarvis.chat import agent_session_pool, empty_reply_recovery, seq_watermark, txn, vision
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
-from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
+from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -420,8 +421,22 @@ class _AssistantContentBatcher:
 		flush happened (caller can use this for trace logging)."""
 		if self._pending_text is None:
 			return False
-		frappe.db.set_value(MSG, self.msg_name, "content", self._pending_text)
-		frappe.db.commit()
+		text = self._pending_text
+
+		def _write() -> None:
+			frappe.db.set_value(MSG, self.msg_name, "content", text)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
+
+		# The buffered text can span up to _ASSISTANT_BATCH_INTERVAL_MS since the
+		# transaction's last commit. A competing write to the SAME reply row in that
+		# window (a jarvis__* tool's file card, tool_ownership.record_tool_owner) leaves
+		# this SET on a stale snapshot. Drop it right before the write, then replay once
+		# if it still loses the race: the write is an absolute overwrite (the latest
+		# cumulative text), safe to rerun. The fresh snapshot (and the others in
+		# handle_chat_send) commits only where this runs as an RQ job; on the socketio
+		# greenlet path no job is set, it is a no-op, and the replay alone covers it.
+		txn.fresh_snapshot()
+		txn.replay_on_conflict(_write, label=f"turn_handler content flush {self.msg_name}")
 		self._pending_text = None
 		self._events_since_flush = 0
 		self._last_flush_ms = self._now_ms()
@@ -685,6 +700,47 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 	return True, f"{provider}/{model}" if provider and model else model
 
 
+# Effort levels the chat pickers offer. Mirrors ``Jarvis Conversation.thinking_override``,
+# a Select limited to low/medium/high; the agent knows more levels, but offering one the
+# Select rejects would fail the save.
+#
+# The proxy route cannot think at all. Its models are a custom ``openai_compat`` provider
+# with no ``reasoning`` flag, so the agent allows only "off" there, and an explicit
+# per-turn level is not clamped: the agent answers it with an error reply instead of
+# running the turn (Aerele-RnD/jarvis-admin-v2#648). A Claude-plan leg runs on the native
+# claude-cli runtime and keeps the full range.
+CHAT_THINKING_LEVELS = ("low", "medium", "high")
+
+
+def offered_thinking_levels(settings) -> list[str]:
+	"""The effort levels to offer: none when every turn runs on the proxy."""
+	if getattr(settings, "proxy_active", 0) and not has_native_claude_subscription(settings):
+		return []
+	return list(CHAT_THINKING_LEVELS)
+
+
+def _turn_thinking(conv) -> str | None:
+	"""The thinking level to send with this turn, or None to send none.
+
+	The conversation keeps its stored level: a later pin to a Claude-plan model can use it.
+	"""
+	level = (conv.thinking_override or "").strip() or None
+	if level and _runs_on_proxy_route(conv):
+		return None
+	return level
+
+
+def _runs_on_proxy_route(conv) -> bool:
+	settings = frappe.get_cached_doc("Jarvis Settings")
+	if not settings.proxy_active:
+		return False
+	model, provider = _resolve_model_and_provider(conv)
+	if provider:  # a Claude-plan pick, served by claude-cli
+		return False
+	# A pinned bare id resolves through the proxy; an unpinned turn runs the pool primary.
+	return not _is_native_claude_pick(settings, model or pool_primary_model(settings))
+
+
 def _org_locale_clause() -> str:
 	"""Region/locale of the site's default Company, folded into the turn's
 	``[Context: ...]`` line so the agent formats dates, currency, and numbers
@@ -881,11 +937,17 @@ def _persona_clause(chat_user: str) -> str:
 	return ""
 
 
-def _advance_macro(conversation_id: str, *, errored: bool, run_id: str | None = None) -> None:
+def _advance_macro(
+	conversation_id: str, *, errored: bool, run_id: str | None = None, seed_message: str | None = None
+) -> None:
 	"""Chaining hook for the macro engine: if this conversation is a running
 	macro, advance it (enqueue the next step, or finish). Best-effort — a macro
 	bug must never affect the normal turn. Every legacy (pump-off) turn end passes
-	through here, so it also seals the File Box sheet ``run_id`` collected."""
+	through here, so it also seals the File Box sheet ``run_id`` collected.
+
+	``seed_message`` is the user message this turn was started for: the engine
+	advances only on its own step's turn, and this path may have no Turn row to
+	look that up from."""
 	if run_id:
 		from jarvis.chat import held_sheet_seal
 
@@ -893,7 +955,7 @@ def _advance_macro(conversation_id: str, *, errored: bool, run_id: str | None = 
 	try:
 		from jarvis.chat import macros
 
-		macros.advance_after_turn(conversation_id, errored=errored)
+		macros.advance_after_turn(conversation_id, errored=errored, run_id=run_id, seed_message=seed_message)
 	except Exception:
 		frappe.log_error(title="jarvis macro advance hook failed", message=frappe.get_traceback())
 	try:
@@ -1008,7 +1070,7 @@ def assemble_prompt(
 	# unchanged; only the value sent over to agent is augmented.
 	now = frappe.utils.now_datetime()
 	today = now.strftime("%Y-%m-%d (%A)")
-	# Armed macro run: this run's conversation carries skip_confirmation=1 (an admin
+	# Armed macro run: this run's conversation carries skip_confirmation=1 (its owner
 	# armed the macro). Signal the persona to call EVERY write tool directly - incl.
 	# create/update, which it would otherwise route through a jarvis-action card,
 	# leaving armed-skip inert on those two. The bench still enforces the gate; this
@@ -1028,16 +1090,19 @@ def assemble_prompt(
 		if conv.skill_autorun
 		else ""
 	)
+	# Per-chat auto mode (#581): the user chose it with this chat's first message (server
+	# flag, never a client claim). Same shape as armed_run: tell the agent to call every
+	# covered write directly; the bench gate still parks the brake (delete/cancel/amend).
+	auto_run = "; auto mode: apply changes directly" if conv.get("auto_mode") else ""
 	# Custom-skill invocation: if the user typed /slug for an enabled custom
 	# skill, name it in the system context so the agent activates it
 	# deterministically (the agent has no documented user-invocable trigger).
-	# The clause comes in TWO shapes (issue #477), because not every invocable
-	# skill is on disk: only the pushed set (Org scope, no allowed_roles, inside
-	# the push cap) has a workspace/skills/custom-<slug>/SKILL.md. Role-scope,
-	# role-restricted, private and over-cap rows are NOT written to the container
-	# (the container has a single role-blind custom_skills dir), so for those the
-	# clause tells the agent to fetch the body with jarvis__get_skill rather than
-	# asserting a directory that does not exist.
+	# The clause has ONE shape: it tells the agent to fetch each invoked skill
+	# with jarvis__get_skill. No custom skill's instructions are in the container:
+	# the pushed set (Org scope, no allowed_roles, inside the push cap) has a
+	# workspace/skills/custom-<slug>/SKILL.md that only points at the same tool,
+	# and Role-scope, role-restricted, private and over-cap rows have no file at
+	# all (issue #477: the container has a single role-blind custom_skills dir).
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
 
 	skill_clause = invoked_skill_clause(msg_row.get("content") or "")
@@ -1139,7 +1204,7 @@ def assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
@@ -1320,14 +1385,19 @@ def handle_chat_send(payload: dict) -> None:
 		# changed_data: pass False only when we KNOW nothing was written (a
 		# pre-ack failure - the run never started). The SPA turns that into a
 		# "No changes were made to your data" reassurance; omit it when unknown.
+		code = code or _classify_error(err, exc)
+		# Every publish here is the turn's final error (mid-run or pre-ack): remember a dead sign-in.
+		# Before _mark_errored so its commit carries the write.
+		_note_subscription_error(err, code)
 		_mark_errored(assistant_msg.name, err)
+		_note_empty_reply(run_id, conversation_id, err, code)
 		payload = {
 			"kind": "run:error",
 			"conversation_id": conversation_id,
 			"message_id": assistant_msg.name,
 			"run_id": run_id,
 			"error": err,
-			"code": code or _classify_error(err, exc),
+			"code": code,
 		}
 		if changed_data is not None:
 			payload["changed_data"] = bool(changed_data)
@@ -1524,7 +1594,7 @@ def handle_chat_send(payload: dict) -> None:
 							conv.session_key,
 							user_message,
 							run_id,
-							thinking=(conv.thinking_override or "").strip() or None,
+							thinking=_turn_thinking(conv),
 							attachments=managed_attachments,
 							timeout_s=ack_timeout,
 						)
@@ -1638,7 +1708,13 @@ def handle_chat_send(payload: dict) -> None:
 
 						_row = _usage.fetch_fresh_session_row(sess, conv.session_key)
 						if _row:
-							_usage.record_turn_usage(conv.session_key, _row)
+							_outcome = _usage.record_turn_usage(conv.session_key, _row)
+							# A completed turn proves its sign-in works, but only when its
+							# row was fresh (a retry row may name a previous turn's model).
+							# Never raises.
+							from jarvis import subscription_health as _sub_health
+
+							_sub_health.note_recorded_turn(_outcome, _row)
 					except Exception:
 						frappe.log_error(
 							title="chat: usage record hook failed",
@@ -1655,7 +1731,7 @@ def handle_chat_send(payload: dict) -> None:
 			# in_flight for the identical resend, so true double-runs are
 			# confined to the ghost-run-already-finished case.
 			_publish_run_error(str(e), changed_data=False, exc=e)
-			_advance_macro(conversation_id, errored=True, run_id=run_id)
+			_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 			_admission_settle(run_id, "errored", str(e))
 			return
 
@@ -1701,9 +1777,20 @@ def handle_chat_send(payload: dict) -> None:
 				# `stopped`, so a mid-sentence stop is finally distinguishable
 				# from a short reply. `stopped` means the abort LANDED - the
 				# several paths where stop_run never reaches here leave it 0.
-				frappe.db.set_value(MSG, assistant_msg.name, "stopped", 1)
-				frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
-				frappe.db.commit()
+				def _write_stopped() -> None:
+					frappe.db.set_value(MSG, assistant_msg.name, "stopped", 1)
+					frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
+					frappe.db.commit()
+
+				# The stream (sess.chat_send + relay_turn_events) can run for the rest of
+				# the turn since the transaction's last commit; drop that snapshot before
+				# this terminal write so a competing write on the same reply row in the
+				# meantime (a jarvis__* tool's file card, a retried content flush) does not
+				# escape to the outer except-Exception backstop below, which would mark the
+				# whole turn errored over a stop that actually landed. Both fields are
+				# absolute final values, safe to rerun whole on a lost race.
+				txn.fresh_snapshot()
+				txn.replay_on_conflict(_write_stopped, label=f"turn_handler stopped {run_id}")
 				_publish_to_user(
 					user,
 					{
@@ -1714,11 +1801,11 @@ def handle_chat_send(payload: dict) -> None:
 						"stopped": True,
 					},
 				)
-				_advance_macro(conversation_id, errored=True, run_id=run_id)
+				_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 				_admission_settle(run_id, "cancelled")
 				return
 			_publish_run_error(err_text)
-			_advance_macro(conversation_id, errored=True, run_id=run_id)
+			_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 			_admission_settle(run_id, "errored", err_text)
 			return
 		if terminal["kind"] == "relay:interrupted":
@@ -1742,15 +1829,23 @@ def handle_chat_send(payload: dict) -> None:
 			)
 			_try_recover_now(conversation_id)
 			return
+
 		# relay:final - authoritative text beats the batcher tail. A media/marker-only
 		# reply strips to empty text but sets marker_stripped; overwrite (to "") anyway
 		# so the raw batcher tail can never survive the marker into stored content.
-		if terminal.get("text") or terminal.get("marker_stripped"):
-			frappe.db.set_value(MSG, assistant_msg.name, "content", terminal.get("text") or "")
+		def _write_terminal_content() -> None:
+			if terminal.get("text") or terminal.get("marker_stripped"):
+				frappe.db.set_value(MSG, assistant_msg.name, "content", terminal.get("text") or "")
+			# Streaming exited cleanly via lifecycle.end
+			frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
+			frappe.db.commit()
 
-		# Streaming exited cleanly via lifecycle.end
-		frappe.db.set_value(MSG, assistant_msg.name, "streaming", 0)
-		frappe.db.commit()
+		# Same reasoning as the "stopped" terminal above: drop the transaction's
+		# snapshot right before this write (absolute final content + streaming=0, safe
+		# to rerun whole) so a competing write on the reply row does not escape to the
+		# outer except-Exception backstop and mark a turn errored that actually finished.
+		txn.fresh_snapshot()
+		txn.replay_on_conflict(_write_terminal_content, label=f"turn_handler terminal content {run_id}")
 		_maybe_apply_llm_switch()
 
 		# Canvas + generated-image persistence and publish (extracted so
@@ -1815,7 +1910,7 @@ def handle_chat_send(payload: dict) -> None:
 			# already in an error path and re-raising would mask the
 			# original exception that RQ should see.
 			pass
-		_advance_macro(conversation_id, errored=True, run_id=run_id)
+		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 		# Backstop terminal: settle the Turn row errored + promote before the
 		# re-raise so a queued turn never waits on a crashed worker. Best-effort
 		# inside _admission_settle - it never masks the re-raised exception.
@@ -1830,6 +1925,7 @@ def handle_chat_send(payload: dict) -> None:
 		conversation_id,
 		errored=_turn_errored,
 		run_id=run_id,
+		seed_message=message_id,
 	)
 	_publish_to_user(
 		user,
@@ -2431,7 +2527,13 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 				from jarvis.tools.read_file import _read_pdf
 
 				try:
-					text = (_read_pdf(raw, _MAX_INLINE_CHARS).get("text") or "").strip()
+					extracted = _read_pdf(raw, _MAX_INLINE_CHARS)
+					text = (extracted.get("text") or "").strip()
+					blocks.append(
+						"[PDF text coverage: "
+						+ json.dumps(extracted.get("coverage", {"complete": False}))
+						+ ". For a whole-file task, use jarvis__read_file with the attachment URL; follow next_read sequentially when supplied and check the returned contract and coverage before claiming a whole-file read. Missing text may require jarvis__get_file_pages. Do not present this preview as an exhaustive reading.]"
+					)
 				except Exception:
 					text = ""
 				if text:
@@ -2452,6 +2554,10 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 					f"all {total} pages" if total <= len(parts) else f"first {len(parts)} of {total} pages"
 				)
 				blocks.append(f"[Attached PDF `{name}` - {shown} sent as images.]")
+				if total > len(parts):
+					blocks.append(
+						"[Whole-file work requires the remaining pages too. Automatically use jarvis__get_file_pages for subsequent page windows, or jarvis__read_file for text, checking its returned contract and coverage. Do not ask the user to request each page.]"
+					)
 			else:
 				blocks.append(f"[Attached PDF `{name}` could not be rendered.]")
 		elif ext in _IMAGE_EXT:
@@ -2464,14 +2570,28 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 				blocks.append(f"[Attached image `{name}` sent for viewing.]")
 			else:
 				blocks.append(f"[Attached image `{name}` could not be read.]")
+				# The model only sees this note and tells the user the file is unreadable.
+				frappe.log_error(
+					title="chat worker: attached image could not be decoded",
+					message=f"{name} ({len(raw)} bytes)",
+				)
+		elif ext == "xlsx" or (ext in {"csv", "tsv"} and len(raw) > _MAX_INLINE_CHARS):
+			blocks.append(
+				f"[Attached spreadsheet `{name}`: use jarvis__read_file with its attachment URL to inspect the file. Follow next_read sequentially when supplied; check the returned contract and coverage before claiming a whole-file read. For arithmetic preserve currency, header, subtotal and total-row semantics; do not estimate from sampled rows. Disclose any reported incomplete coverage.]"
+			)
 		else:
 			try:
 				text = raw.decode("utf-8")
 			except UnicodeDecodeError:
-				blocks.append(f"[Attached file `{name}` is binary ({len(raw)} bytes); not inlined.]")
+				blocks.append(
+					f"[Attached file `{name}` is binary ({len(raw)} bytes); not inlined. Use jarvis__read_file to check whether this file format is supported.]"
+				)
 				continue
 			if len(text) > _MAX_INLINE_CHARS:
 				text = text[:_MAX_INLINE_CHARS] + "\n…[truncated]"
+				blocks.append(
+					"[Attachment preview is incomplete. Use jarvis__read_file with the attachment URL; follow next_read sequentially when supplied and check the returned contract and coverage before claiming a whole-file read; do not ask the user to request the next section.]"
+				)
 			blocks.append(f"Attached file `{name}`:\n" + _fence_untrusted(text, f"attached file: {name}"))
 	if blocks:
 		user_message = user_message + "\n\n" + "\n\n".join(blocks)
@@ -2493,7 +2613,7 @@ def _create_assistant_placeholder(conv) -> "frappe.model.document.Document":
 		}
 	)
 	msg.insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	return msg
 
 
@@ -2511,6 +2631,58 @@ def _classify_error(err_text: str, exc=None) -> str:
 	return code
 
 
+def _note_subscription_error(err_text: str, code: str) -> None:
+	"""Remember a dead chat sign-in seen at a run-error publish site (never inside the classifier,
+	which the pump's pre-ack paths also call). Never raises."""
+	if code == "subscription-expired":
+		from jarvis import subscription_health
+
+		subscription_health.note_turn_error(err_text, code)
+
+
+def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
+	"""One telemetry line per empty reply of the model, with the context size the chat
+	session recorded after its previous turn. Never raises.
+
+	``variant``: ``plain`` (with "Please try again."), ``bare`` (the sentence alone),
+	``tools`` (the empty-reply-tools rule), ``other`` (more text around the sentence).
+	Only the first 300 characters are read, so text after long whitespace reads as bare
+	(``empty_reply_recovery.variant``)."""
+	if code not in ("empty-reply", "empty-reply-tools"):
+		return
+	try:
+		variant = empty_reply_recovery.variant(err_text, code)
+		tokens, pct = "", ""
+		try:
+			s = frappe.qb.DocType("Jarvis Chat Session")
+			c = frappe.qb.DocType("Jarvis Conversation")
+			row = (
+				frappe.qb.from_(s)
+				.join(c)
+				.on(c.session_key == s.session_key)
+				.select(s.last_total_tokens, s.context_pct)
+				.where(c.name == conversation)
+				.limit(1)
+				.run()
+			)
+			if row:
+				tokens, pct = row[0]
+		except Exception:
+			pass
+		from jarvis.chat.latency import get_logger
+
+		get_logger().info(
+			"empty_reply run_id=%s conversation=%s variant=%s last_total_tokens=%s context_pct=%s",
+			run_id,
+			conversation,
+			variant,
+			tokens,
+			pct,
+		)
+	except Exception:
+		pass
+
+
 def _mark_errored(assistant_msg_name: str, error: str) -> None:
 	frappe.db.set_value(
 		MSG,
@@ -2520,7 +2692,7 @@ def _mark_errored(assistant_msg_name: str, error: str) -> None:
 			"error": error,
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	_maybe_apply_llm_switch()
 
 
@@ -2536,7 +2708,7 @@ def _mark_recovering(assistant_msg_name: str) -> None:
 			"recovery_started_at": frappe.utils.now_datetime(),
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 
 
 def _try_recover_now(conversation_id: str) -> None:
@@ -2645,7 +2817,11 @@ def _handle_event_inner(
 					},
 				)
 				return
+			code = _classify_error(err_text)
+			# Before _mark_errored so its commit carries the write.
+			_note_subscription_error(err_text, code)
 			_mark_errored(assistant_msg_name, err_text)
+			_note_empty_reply(run_id, conversation_id, err_text, code)
 			_publish_to_user(
 				user,
 				{
@@ -2653,7 +2829,7 @@ def _handle_event_inner(
 					"conversation_id": conversation_id,
 					"message_id": assistant_msg_name,
 					"run_id": run_id,
-					"code": _classify_error(err_text),
+					"code": code,
 					"error": event.get("error"),
 				},
 			)
@@ -2705,8 +2881,18 @@ def _handle_event_inner(
 		if phase in ("start", "end"):
 			from jarvis.chat.tool_ownership import record_tool_owner
 
-			record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
-			frappe.db.commit()
+			def _record_owner() -> None:
+				record_tool_owner(conversation_id, assistant_msg_name, tool_call_id)
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
+
+			# batcher.flush() just above can be a no-op (nothing pending), leaving this on
+			# the transaction's existing snapshot; drop it so record_tool_owner's FOR UPDATE
+			# reads the present. Same race that stalled exports ~80 s: a jarvis__* tool's web
+			# request commits the file card on this same reply row (api._maybe_attach_artifact)
+			# a few ms before this event arrives. record_tool_owner is read-append-if-missing-
+			# write under its own FOR UPDATE, so a replay from a fresh snapshot is safe.
+			txn.fresh_snapshot()
+			txn.replay_on_conflict(_record_owner, label=f"turn_handler tool owner {run_id}")
 		# jarvis__* tools execute through the backend call_tool path, which
 		# ALREADY persists a role=tool message carrying the full args + result
 		# (jarvis.api._persist_and_publish_tool_call). Persisting again here
@@ -2734,7 +2920,7 @@ def _handle_event_inner(
 				)
 				doc.flags.jarvis_server_write = True
 				doc.insert(ignore_permissions=True)
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 				tool_msg_by_call_id[tool_call_id] = doc.name
 			_publish_to_user(
 				user,
@@ -2795,7 +2981,7 @@ def _handle_event_inner(
 					"streaming": 0,
 				},
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 			_publish_to_user(
 				user,
 				{

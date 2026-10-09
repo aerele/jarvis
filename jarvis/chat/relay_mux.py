@@ -89,6 +89,7 @@ from jarvis.chat.steps import (
 	is_step,
 	join_segments,
 	remove_steps,
+	strip_preambles,
 	strip_steps,
 )
 from jarvis.exceptions import AgentUnreachableError
@@ -264,11 +265,12 @@ class LaneHandler:
 	  * ``on_status(event_seq: int, status: str)`` — a transient run-status
 	    marker (e.g. an in-flight compaction) (LOSSY, like a delta): a raise
 	    drops the frame, counts it, and continues the same lane.
-	  * ``on_step(event_seq: int, text: str, raw: str | None)`` — the live step
-	    line: one line saying what the model is doing right now (LOSSY, never
-	    shown after the answer). ``raw`` is the step's full text when it is also
-	    in the reply, kept so a re-adopted lane can re-seed it. See
-	    ``jarvis.chat.steps``.
+	  * ``on_step(event_seq: int, text: str, raw: str | None, preamble: bool)`` —
+	    the live step line: one line saying what the model is doing right now
+	    (LOSSY). ``raw`` is the step's full text when it is also in the reply,
+	    kept so a re-adopted lane can re-seed it; ``preamble`` is True when the
+	    runtime flagged it (the saved reply strips it), kept for the same re-seed.
+	    See ``jarvis.chat.steps``.
 	"""
 
 	on_delta: Callable[[int, str, str, str | None], None] | None = None
@@ -277,7 +279,7 @@ class LaneHandler:
 	on_quarantine: Callable[[str], None] | None = None
 	on_closing: Callable[[str], None] | None = None
 	on_status: Callable[[int, str], None] | None = None
-	on_step: Callable[[int, str, str | None], None] | None = None
+	on_step: Callable[[int, str, str | None, bool], None] | None = None
 
 
 class _Lane:
@@ -329,6 +331,11 @@ class _Lane:
 		self.stream_text = ""
 		self.since_tool = 0
 		self.steps: list[str] = []
+		# The texts in ``steps`` that came from a runtime-flagged preamble
+		# (_record_preamble_step), reader-thread only like ``steps``. Re-seeded
+		# on a pump hop from the pump's preamble cache (register_run's
+		# ``preamble_steps=``); a flag lost with that cache falls back to is_step.
+		self.preamble_steps: set[str] = set()
 		self.shown_text = ""
 		# R6 saved-reply glue: the tail of each earlier segment (relay_mux
 		# module docstring / _reply_delta), reader-thread only like the steps
@@ -778,14 +785,15 @@ class RelayMux:
 		on the step line and in the reply bubble, until the next tool call's
 		_move_pending_step catches up - or never, for narration longer than one
 		sentence (is_step's narrow rule), which then stays glued into the saved
-		reply too.
+		reply too (before strip_preambles).
 
 		When the (stripped) text is already sitting in the reply written since
 		the last tool call AND passes ``is_preamble_step`` (R4, looser than
 		is_step - MAX_PREAMBLE_STEP_CHARS), treat it as that reply text arriving
 		early: record + hide it now, same order _move_pending_step uses at the
 		tool boundary, so the boundary later finds nothing left to move and never
-		double-offers. Otherwise (a genuine harness preamble never in the reply -
+		double-offers. The saved reply drops it too (steps.strip_preambles) unless
+		nothing else would remain. Otherwise (a genuine harness preamble never in the reply -
 		Codex direct mode - or text that fails is_preamble_step, including every
 		preamble when MAX_PREAMBLE_STEP_CHARS=0) keep today's path: offered on
 		the step line only, raw=None, untouched in the reply.
@@ -818,6 +826,7 @@ class RelayMux:
 		dangling in the saved reply.
 		"""
 		if text in lane.steps:
+			lane.preamble_steps.add(text)
 			return
 		# A growing resend replaces the step it extends, in place, whichever
 		# recorded step that is (not only the last), so order and the cache
@@ -827,12 +836,14 @@ class RelayMux:
 		region = lane.stream_text[lane.since_tool :]
 		for i, step in enumerate(lane.steps):
 			if text.startswith(step) and step in region:
+				lane.preamble_steps.discard(step)
 				lane.steps[i] = text
 				break
 		else:
 			lane.steps.append(text)
+		lane.preamble_steps.add(text)
 		self._offer(lane, self._shown_delta(lane, remove_steps(lane.stream_text, lane.steps)))
-		self._offer_step(lane, text, raw=text)
+		self._offer_step(lane, text, raw=text, preamble=True)
 
 	def _shown_delta(self, lane: _Lane, shown: str, delta: str = "") -> _LaneEvent:
 		"""The one delta shape: raw ``stream_text`` for the mirror, ``shown`` for the chat."""
@@ -844,9 +855,11 @@ class RelayMux:
 			data={"text": lane.stream_text, "delta": delta, "shown": shown},
 		)
 
-	def _offer_step(self, lane: _Lane, text: str, raw: str | None = None) -> None:
+	def _offer_step(self, lane: _Lane, text: str, raw: str | None = None, preamble: bool = False) -> None:
 		"""``raw`` is set for step text that is also in the reply (so the pump
 		keeps it across a hop); the ChatGPT harness's separate updates have none.
+		``preamble`` marks a runtime-flagged one, which the pump also keeps so a
+		re-adopted lane still strips it from the saved reply.
 		``text`` rides the queue FULL and RAW - ``display_line``'s shaping
 		(prose extraction + the 160-char truncation) runs on the PUMP thread,
 		AFTER redaction (see ``_apply``): truncating before redacting could cut
@@ -860,7 +873,12 @@ class RelayMux:
 			return
 		self._offer(
 			lane,
-			_LaneEvent(cls=LOSSY, kind="step", event_seq=lane.next_seq(), data={"text": text, "raw": raw}),
+			_LaneEvent(
+				cls=LOSSY,
+				kind="step",
+				event_seq=lane.next_seq(),
+				data={"text": text, "raw": raw, "preamble": preamble},
+			),
 		)
 
 	def _route_terminal(self, lane: _Lane, payload: dict) -> None:
@@ -906,6 +924,7 @@ class RelayMux:
 					"kind_hint": "final",
 					"text": text,
 					"steps": list(lane.steps),
+					"preamble_steps": [s for s in lane.steps if s in lane.preamble_steps],
 					# R6: segment tails recorded so far (see _Lane.segment_tails)
 					# so _finalize_terminal can glue the runtime's separator-
 					# free segment boundaries back together on the pump thread.
@@ -989,21 +1008,20 @@ class RelayMux:
 		# stripping, has no such divergence: there is only one piece of text
 		# and one pass.
 		joined = join_segments(raw["text"], raw["tails"])
-		# C1 (code review, lead decision - supersedes plan R4's strip default):
-		# a runtime-flagged preamble longer than one sentence is still hidden
-		# LIVE (is_preamble_step, MAX_PREAMBLE_STEP_CHARS) but is NOT stripped
-		# from the saved reply - only a genuine one-sentence step (is_step,
-		# #1435's existing rule) is. is_preamble_step accepted anything up to
-		# 320 chars on the runtime's own say-so alone, and strip_steps' "keep
-		# final whole when shorter" guard does not catch a multi-sentence
-		# lead-in followed by a longer continuation (a plausible answer
-		# opening, not narration, stripped with no safety net - see the code
-		# review's C1 finding). Filtered HERE, statelessly, every time: a pump
-		# hop re-seeds ``lane.steps`` from the cache with no flag attached, so
-		# there is nothing to carry across a hop - is_step is re-applied fresh
-		# at every final.
-		strip_candidates = [step for step in raw["steps"] if is_step(step)]
-		stripped_of_steps = strip_steps(joined, strip_candidates)
+		# A step the runtime flagged as a preamble (lane.preamble_steps) is
+		# hidden live, so it never comes back into the saved reply: it is cut
+		# whenever any answer text remains (strip_preambles), else the reply
+		# stays whole. Before, a two-sentence preamble, or a one-sentence one
+		# followed by a shorter answer (strip_steps' keep-whole guard), stayed
+		# in the saved reply and the reshow flashed the narration back into
+		# the finished answer. Every other step (text before a tool call,
+		# lane.steps from the Claude/API-key runtimes) keeps the is_step rule
+		# and strip_steps' guard. A pump hop re-seeds lane.steps and these flags
+		# from the pump's caches; a flag lost with its cache falls back to is_step.
+		flagged = set(raw.get("preamble_steps") or [])
+		preambles = [step for step in raw["steps"] if step in flagged]
+		sentences = [step for step in raw["steps"] if step not in flagged and is_step(step)]
+		stripped_of_steps = strip_steps(strip_preambles(joined, preambles), sentences)
 		answer, _, _ = egress_rules.redact_final_with_media(stripped_of_steps, run_id=raw["run_id"])
 		reshow = None
 		if raw["steps"] and answer and answer != lane.last_shown:
@@ -1144,13 +1162,16 @@ class RelayMux:
 		start_seq: int = 0,
 		is_readopt: bool = False,
 		steps: list[str] | None = None,
+		preamble_steps: list[str] | None = None,
 	) -> _Lane | None:
 		"""Create + install a lane in the run map. Used both for FRESH sends
 		(pre-registration under ``run_id``, OAR-15) and for reconnect rebuild /
 		retry-attach (the pump feeds the lane spec). When the poison-rate breaker
 		is OPEN and this is a RE-ADOPT, the mux REFUSES (returns ``None``) rather
 		than loop the run through the recovery budget again (OAR-7). ``steps``
-		re-seeds the step text a re-adopted run already recorded before the hop.
+		re-seeds the step text a re-adopted run already recorded before the hop,
+		and ``preamble_steps`` which of them the runtime flagged (their raw text),
+		so the saved reply still strips those after the hop.
 		R6 segment tails are NOT re-seeded here - see ``_Lane.segment_tails``'s
 		known-limit comment - so a segment boundary recorded before a hop is
 		not joined; a fresh lane always starts with an empty ``segment_tails``."""
@@ -1158,6 +1179,7 @@ class RelayMux:
 			return None
 		lane = _Lane(run_id, handler, session_key=session_key, start_seq=start_seq)
 		lane.steps = list(steps or [])
+		lane.preamble_steps = {step for step in preamble_steps or [] if step in lane.steps}
 		with self._map_lock:
 			self._runs[run_id] = lane
 		return lane
@@ -1321,7 +1343,7 @@ class RelayMux:
 					# match on the very next hop.
 					line = display_line(egress_rules.redact(ev.data["text"]))
 					if line:
-						h.on_step(ev.event_seq, line, ev.data.get("raw"))
+						h.on_step(ev.event_seq, line, ev.data.get("raw"), bool(ev.data.get("preamble")))
 			elif ev.kind == "terminal":
 				term_kind, term_payload, reshow = self._finalize_terminal(lane, ev)
 				if reshow is not None and h.on_delta is not None:

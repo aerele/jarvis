@@ -622,7 +622,6 @@ def set_agent_model(agent: str, provider: str, model: str) -> dict:
 	_require_enforced()
 	listing = _write_gate(agent)
 	_apply_pick(listing.name, _validated_pick(listing, provider, model), frappe.session.user)
-	frappe.db.commit()
 	return _model_view(listing)
 
 
@@ -651,7 +650,6 @@ def reset_agent_model(agent: str) -> dict:
 		listing.name, f"model reset to {values.get('model') or 'none available'} by {me}", actor=me
 	)
 	_mark_dirty()
-	frappe.db.commit()
 	return _model_view(listing)
 
 
@@ -672,7 +670,7 @@ def plan_install(
 		return None
 	# REPEATABLE-READ discipline: install_agent has written nothing yet, so end the
 	# snapshot and let the existence reads below see a concurrent last-uninstall.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before reads
 	if picked:  # same check as set_agent_model; the row is written after the install
 		if if_unpinned:
 			# COR8-1: the shown pick may have gone ineligible since the dialog loaded.
@@ -987,7 +985,7 @@ def _degrade(agent: str, eligible) -> dict:
 	cannot roll the verdict back."""
 	doc = _get_row(agent, for_update=True)
 	if doc is None or doc.state not in _PINNED or _contains(eligible, doc.as_dict()):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return doc.as_dict() if doc else {}
 	old = doc.model
 	fb = next((r for r in _refs(doc.fallbacks) if _contains(eligible, r)), None)
@@ -1007,7 +1005,7 @@ def _degrade(agent: str, eligible) -> dict:
 	doc.save(ignore_permissions=True)
 	_log_for_owners(agent, doc.note)
 	_mark_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- state survives a later failure
 	return doc.as_dict()
 
 
@@ -1077,7 +1075,7 @@ def handle_run_error(agent: str, token: str) -> str:
 			doc.save(ignore_permissions=True)
 			_log_for_owners(agent, doc.note)
 			_mark_dirty()
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return _("This agent has no usable model. Choose one on the agent page, then apply catalog changes.")
 	# delegate_model_unresolved: the fleet could not place the pushed model in its render.
 	doc = _get_row(agent, for_update=True) if is_enforced() else None
@@ -1092,7 +1090,7 @@ def handle_run_error(agent: str, token: str) -> str:
 			doc.save(ignore_permissions=True)
 		else:
 			state = _degrade(agent, eligible).get("state")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- note survives the run failure
 	if state == "needs_model":
 		return _blocked_message(agent)
 	return _(
@@ -1105,7 +1103,7 @@ def _note_row(agent: str, note: str) -> None:
 	if doc and doc.note != note:
 		doc.note = note
 		doc.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- note survives a later failure
 
 
 def on_run_started(run: str, agent: str, response) -> None:
@@ -1315,5 +1313,4 @@ def revalidate_all() -> dict:
 		_mark_dirty()
 	if not failed:
 		frappe.db.set_single_value(_SETTINGS, "last_validated_pool_fp", scope["fp"])
-	frappe.db.commit()
 	return {"changed": changed, "failed": failed}

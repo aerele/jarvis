@@ -4,10 +4,21 @@
 import frappe
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 WIKI_SOURCE = "File Box Wiki"
 # Written only by server code that sets ``flags.jarvis_server_write`` (raw-SQL
 # transitions never reach validate). No Administrator / ignore_permissions exemption.
-_SERVER_FIELDS = ("wiki_payload", "apply_status", "apply_reason", "wiki_digest", "routing", "sheet")
+_SERVER_FIELDS = (
+	"wiki_payload",
+	"apply_status",
+	"apply_reason",
+	"wiki_digest",
+	"routing",
+	"sheet",
+	"assessment_key",
+	"assessment_evidence",
+)
 # Frozen on a wiki proposal: what the reviewer reads and where it lands.
 _WIKI_FIELDS = ("title", "question", "context_md", "document_type", "conversation", "source", "status")
 # Frozen on a File Box routing question (its answer is validated against its options)
@@ -23,7 +34,7 @@ def sheet_ready() -> bool:
 	return filebox_migrated()
 
 
-class JarvisApprovalRequest(Document):
+class JarvisApprovalRequest(NotRenamable, Document):
 	"""A decision the agent needs a human for.
 
 	Created by the agent itself (via the generic ``jarvis__create_doc``
@@ -53,15 +64,32 @@ class JarvisApprovalRequest(Document):
 				for f in _SERVER_FIELDS
 				if meta.has_field(f) and (self.get(f) or "") not in ("", meta.get_field(f).default or "")
 			]
-			if self.source == WIKI_SOURCE:
+			if self.source in (WIKI_SOURCE, "Agent Review"):
 				touched.append("source")
 		else:
 			touched = [f for f in _SERVER_FIELDS if self.has_value_changed(f)]
 			before = self.get_doc_before_save()
-			if (before and before.source == WIKI_SOURCE) or self.source == WIKI_SOURCE:
+			if (before and before.source in (WIKI_SOURCE, "Agent Review")) or self.source in (
+				WIKI_SOURCE,
+				"Agent Review",
+			):
 				touched += [f for f in _WIKI_FIELDS if self.has_value_changed(f)]
 			if any((before and before.get(f)) or self.get(f) for f in ("routing", "sheet")):
 				touched += [f for f in _ROUTING_FIELDS if self.has_value_changed(f)]
+			if (before and before.get("assessment_key")) or self.get("assessment_key"):
+				touched += [
+					f
+					for f in (
+						*_ROUTING_FIELDS,
+						"agent",
+						"run",
+						"ref_doctype",
+						"ref_name",
+						"preparation_mode",
+						"result_class",
+					)
+					if self.has_value_changed(f)
+				]
 		if touched:
 			frappe.throw(
 				frappe._("These approval fields are server-managed: {0}").format(

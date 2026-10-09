@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 vi.mock("frappe-ui", () => ({ call: vi.fn(async () => ({})) }));
 
 import { call } from "frappe-ui";
-import { sendMessage, setSidebarOrder } from "./api.js";
+import { sendMessage, setSidebarOrder, searchLink } from "./api.js";
 
 // The args object handed to `call("jarvis.chat.api.send_message", args)`.
 function lastSendArgs() {
@@ -18,6 +18,29 @@ function lastSendArgs() {
 }
 
 beforeEach(() => call.mockClear());
+
+describe("Link search field context", () => {
+	it("keeps mentions and other generic callers unchanged", async () => {
+		await searchLink("Item", "Demo");
+		expect(call).toHaveBeenCalledWith("frappe.desk.search.search_link", {
+			doctype: "Item",
+			txt: "Demo",
+			page_length: 8,
+		});
+	});
+	it("forwards field constraints with the parent and field identity", async () => {
+		const filters = [["Account", "company", "=", "Company A"]];
+		await searchLink("Account", "Pay", 8, "Purchase Invoice", "credit_to", filters);
+		expect(call).toHaveBeenCalledWith("frappe.desk.search.search_link", {
+			doctype: "Account",
+			txt: "Pay",
+			page_length: 8,
+			reference_doctype: "Purchase Invoice",
+			link_fieldname: "credit_to",
+			filters,
+		});
+	});
+});
 
 describe("sendMessage context forwarding", () => {
 	it("posts to the send_message endpoint with conversation + message", async () => {
@@ -71,6 +94,34 @@ describe("sendMessage context forwarding", () => {
 		expect(JSON.parse(args.attachments)).toEqual([{ file_url: "/f.png" }]);
 	});
 
+	it("forwards a thinking level picked before the chat's first message", async () => {
+		// Ninth positional argument; a brand-new chat has no conversation to save
+		// the pick on, so it rides on the send (like model_override).
+		await sendMessage("", "hi", "gpt-x", undefined, undefined, undefined, false, false, "low");
+		const args = lastSendArgs();
+		expect(args.thinking_override).toBe("low");
+		expect(args.model_override).toBe("gpt-x");
+	});
+
+	it("omits thinking_override when no level was picked", async () => {
+		// The server treats a present-but-empty value as "clear the level", so an
+		// ordinary send must not carry the key at all.
+		await sendMessage("C1", "hi");
+		expect("thinking_override" in lastSendArgs()).toBe(false);
+		await sendMessage(
+			"C1",
+			"hi",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			false,
+			false,
+			""
+		);
+		expect("thinking_override" in lastSendArgs()).toBe(false);
+	});
+
 	it("forwards the displayed confirmation-card tokens, in order, for a typed approval", async () => {
 		// The server resolves a typed "confirm 2" against THIS ordered list, so the
 		// wire contract must carry it verbatim - a dropped or reordered token would
@@ -98,5 +149,26 @@ describe("setSidebarOrder", () => {
 		expect(call).toHaveBeenCalledWith("jarvis.chat.user_settings_api.set_sidebar_order", {
 			order: "{}",
 		});
+	});
+});
+
+describe("durable send receipts", () => {
+	it("passes a stable id and unwraps only a settled result", async () => {
+		const result = { ok: true, conversation_id: "A", message_id: "M", run_id: "R" };
+		call.mockResolvedValueOnce({ delivery: "settled", result });
+		expect(
+			await sendMessage("A", "hello", null, [], null, [], false, false, null, "a".repeat(32))
+		).toEqual(result);
+		expect(call).toHaveBeenLastCalledWith("jarvis.chat.send_requests.send_message", {
+			conversation: "A",
+			message: "hello",
+			request_id: "a".repeat(32),
+		});
+	});
+	it("does not turn an unknown receipt into a retryable rejection", async () => {
+		call.mockResolvedValueOnce({ delivery: "unknown" });
+		await expect(
+			sendMessage("A", "hello", null, [], null, [], false, false, null, "a".repeat(32))
+		).rejects.toThrow("Delivery not confirmed");
 	});
 });

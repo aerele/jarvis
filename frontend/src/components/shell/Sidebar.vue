@@ -44,23 +44,23 @@
 				v-for="(link, index) in navLinks"
 				:key="link.label"
 				class="relative flex flex-col"
-				:draggable="editing"
-				@dragstart="onDragStart('top', index, $event)"
 				@dragover.prevent
 				@drop.prevent="onDrop('top', index)"
-				@dragend="onDragEnd"
-				:class="[
-					editing ? 'cursor-grab' : '',
+				:class="
 					dragging && dragging.group === 'top' && dragging.index === index
 						? 'opacity-40'
-						: '',
-				]"
+						: ''
+				"
 			>
+				<!-- the six-dot grip is the only drag source; the row is the drop target -->
 				<span
 					v-if="editing"
-					class="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-gray-4"
-					><FeatherIcon name="more-vertical" class="size-4"
-				/></span>
+					class="lucide-grip-vertical absolute right-1.5 top-1/2 z-10 size-4 -translate-y-1/2 cursor-grab text-ink-gray-4 hover:text-ink-gray-7"
+					draggable="true"
+					:title="`Drag to move ${link.label}`"
+					@dragstart="onDragStart('top', index, $event)"
+					@dragend="onDragEnd"
+				/>
 				<SidebarLink
 					:label="link.label"
 					:icon="link.icon"
@@ -132,23 +132,23 @@
 					v-for="(link, index) in moreLinks"
 					:key="link.label"
 					class="relative flex flex-col"
-					:draggable="editing"
-					@dragstart="onDragStart('more', index, $event)"
 					@dragover.prevent
 					@drop.prevent="onDrop('more', index)"
-					@dragend="onDragEnd"
-					:class="[
-						editing ? 'cursor-grab' : '',
+					:class="
 						dragging && dragging.group === 'more' && dragging.index === index
 							? 'opacity-40'
-							: '',
-					]"
+							: ''
+					"
 				>
+					<!-- the six-dot grip is the only drag source; the row is the drop target -->
 					<span
 						v-if="editing"
-						class="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-gray-4"
-						><FeatherIcon name="more-vertical" class="size-4"
-					/></span>
+						class="lucide-grip-vertical absolute right-1.5 top-1/2 z-10 size-4 -translate-y-1/2 cursor-grab text-ink-gray-4 hover:text-ink-gray-7"
+						draggable="true"
+						:title="`Drag to move ${link.label}`"
+						@dragstart="onDragStart('more', index, $event)"
+						@dragend="onDragEnd"
+					/>
 					<SidebarLink
 						:label="link.label"
 						:icon="link.icon"
@@ -462,11 +462,24 @@ function persistOrder() {
 // destroyed mid-drag. Items can move within a group OR between groups.
 const editing = ref(false);
 const dragging = ref(null);
+let _dragStartTimer = null;
 function onDragStart(group, index, e) {
-	dragging.value = { group, index };
-	moreOpen.value = true; // expose the More group as a drop target during a drag
+	// Set the drag state after the drag is under way: the drop zones it shows push the
+	// More rows down, and Chrome ends a drag at once if its source moves in dragstart.
+	clearTimeout(_dragStartTimer);
+	_dragStartTimer = setTimeout(() => {
+		dragging.value = { group, index };
+		moreOpen.value = true; // expose the More group as a drop target during a drag
+	});
 	if (e && e.dataTransfer) {
 		e.dataTransfer.effectAllowed = "move";
+		// drag the whole row's picture, not only the small grip, and keep it under the
+		// pointer where it was taken (the grip), not at the row's left edge
+		const row = e.currentTarget && e.currentTarget.parentElement;
+		if (row && e.dataTransfer.setDragImage) {
+			const r = row.getBoundingClientRect();
+			e.dataTransfer.setDragImage(row, e.clientX - r.left, e.clientY - r.top);
+		}
 		try {
 			e.dataTransfer.setData("text/plain", String(index));
 		} catch (_) {
@@ -491,6 +504,7 @@ function onDrop(group, index) {
 	persistOrder();
 }
 function onDragEnd() {
+	clearTimeout(_dragStartTimer);
 	dragging.value = null;
 }
 function resetOrder() {

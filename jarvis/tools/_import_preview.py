@@ -77,25 +77,9 @@ def build_import_preview(
 	if mapping is not None and not isinstance(mapping, dict):
 		raise InvalidArgumentError("mapping must be an object of {column: field} entries")
 
-	# 1. Resolve + permission-gate the File AS THE CALLER. _resolve_file's file_url branch
-	#    does NOT permission-check (only its filename branch does, per-candidate), so gate
-	#    the read here - mirrors read_file.py:60 - else a raw file_url discloses a private
-	#    file the caller can't read. Generic message: never confirm a private file's
-	#    existence to a caller who cannot see it.
-	file_doc = _resolve_file(file_url, filename)
-	if not frappe.has_permission("File", "read", doc=file_doc.name):
-		raise InvalidArgumentError("no matching file found")
+	# 1-2. The file, permission-gated as the caller and byte-bounded (_import_file).
+	file_doc = _import_file(file_url, filename)
 	resolved_url = file_doc.file_url
-
-	# 2. Byte bound BEFORE any parse (cheap metadata read; the importer would otherwise
-	#    fully parse even a huge file just to show 10 rows). Fall back to the content
-	#    length when file_size is missing so an oversized file is still bounded pre-parse.
-	size = file_doc.file_size or len(file_doc.get_content() or b"")
-	if size and size > _max_bytes():
-		raise InvalidArgumentError(
-			f"file is {size} bytes; the import limit is {_max_bytes()} bytes - "
-			"use the Desk importer for larger files"
-		)
 
 	# 3. Transient (un-inserted) Data Import doc.
 	doc = frappe.new_doc("Data Import")
@@ -180,6 +164,70 @@ def build_import_preview(
 		"template_options": resolved_template_options,
 		"note": ("read-only preview - nothing was created. Use run_import to import."),
 	}
+
+
+def _import_file(file_url: str | None, filename: str | None):
+	"""The File to import, read as the caller. _resolve_file's file_url branch does NOT
+	permission-check (only its filename branch does, per-candidate), so the read is
+	gated here - mirrors read_file.py:60 - else a raw file_url discloses a private file
+	the caller can't read. Generic message: never confirm a private file's existence
+	to a caller who cannot see it. Byte-bounded BEFORE any parse (cheap metadata read;
+	the importer would otherwise fully parse even a huge file just to show 10 rows),
+	falling back to the content length when file_size is missing."""
+	file_doc = _resolve_file(file_url, filename)
+	if not frappe.has_permission("File", "read", doc=file_doc.name):
+		raise InvalidArgumentError("no matching file found")
+	size = file_doc.file_size or len(file_doc.get_content() or b"")
+	if size and size > _max_bytes():
+		raise InvalidArgumentError(
+			f"file is {size} bytes; the import limit is {_max_bytes()} bytes - "
+			"use the Desk importer for larger files"
+		)
+	return file_doc
+
+
+def import_columns(
+	*,
+	doctype: str,
+	file_url: str | None = None,
+	filename: str | None = None,
+	import_type: str = "Insert New Records",
+	mapping: dict | None = None,
+) -> list[dict]:
+	"""Every mapped column of an import file, read exactly as the preview reads it (the
+	same file gate, mapping and Frappe importer): ``[{"field", "tables", "filled"}]``.
+	``field`` is the target fieldname; ``tables`` names the parent's table field(s) for
+	a child-table column (empty for a parent field); ``filled`` is True when ANY row
+	has a non-blank value. For the write-risk guard (``_write_risk``), which must know
+	whether an import writes an access-granting field. Raises on anything it cannot
+	read (the caller fails closed)."""
+	file_doc = _import_file(file_url, filename)
+	doc = frappe.new_doc("Data Import")
+	doc.reference_doctype = doctype
+	doc.import_type = import_type or "Insert New Records"
+	doc.import_file = file_doc.file_url
+	if mapping:
+		doc.template_options = json.dumps({"column_to_field_map": _resolve_mapping(mapping, doc)})
+	compat.set_delimiters_flag(doc)
+	columns = doc.get_importer().import_file.columns
+	tables: dict[str, list[str]] = {}
+	for df in frappe.get_meta(doctype).get_table_fields():
+		tables.setdefault(df.options, []).append(df.fieldname)
+	out = []
+	for col in columns:
+		df = col.df
+		if not df or col.skip_import:
+			continue
+		child = df.get("parent") and df.get("parent") != doctype
+		values = col.column_values or []
+		out.append(
+			{
+				"field": df.get("fieldname"),
+				"tables": tables.get(df.get("parent"), []) if child else [],
+				"filled": any(v is not None and str(v).strip() for v in values),
+			}
+		)
+	return out
 
 
 def _classify_warnings(preview, columns, doctype, import_type, total_rows, total_records) -> dict:

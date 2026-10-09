@@ -81,6 +81,12 @@
 						>
 							<FeatherIcon :name="item.icon" class="size-4 shrink-0" />
 							<span class="truncate">{{ item.label }}</span>
+							<span
+								v-if="railDot(item.key)"
+								class="ml-auto size-1.5 shrink-0 rounded-full bg-surface-red-5"
+								role="img"
+								aria-label="Needs attention"
+							/>
 						</button>
 					</template>
 				</div>
@@ -93,7 +99,15 @@
 				     the bottom. On a plain block wrapper both would clip silently
 				     with no scrollbar. -->
 				<div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-					<component :is="pane" />
+					<!-- Visited panes stay mounted so switching back is instant instead
+					     of remounting and refetching (jarvis-admin-v2#641). Only the two
+					     data-heavy panes are kept; the rest remount so they still read
+					     fresh state (AI models, Billing, connectors). The cache dies with
+					     the dialog, so reopening Settings fetches again. GeneralPane and
+					     UsagePane refresh themselves in onActivated once stale. -->
+					<KeepAlive :include="KEPT_PANES">
+						<component :is="pane" />
+					</KeepAlive>
 				</div>
 
 				<!-- Close lives at the dialog level, not in SettingsPane, so panes
@@ -112,13 +126,18 @@
 </template>
 
 <script setup>
-import { computed, defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent, inject, onMounted, onBeforeUnmount } from "vue";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
 // internally. Needed because overriding the #body slot drops the ones it
 // renders by default.
 import { DialogClose, DialogTitle } from "reka-ui";
 import { useShellStore } from "@/stores/shell";
+import {
+	subscriptionNotice,
+	loadSubscriptionNotice,
+	watchSubscriptionNotice,
+} from "@/lib/subscriptionNotice";
 // MUST be @/theme's useJarvisTheme, the same singleton the header toggle
 // writes to. @/composables/useTheme was a separate instance and is deleted.
 import { useJarvisTheme } from "@/theme";
@@ -147,6 +166,10 @@ const AiModelsPane = defineAsyncComponent(() => import("@/components/settings/Ai
 const UsageAdminPane = defineAsyncComponent(() =>
 	import("@/components/settings/UsageAdminPane.vue")
 );
+// Every user's macros, for a Jarvis Admin: see, open read-only, stop a run.
+const MacrosAdminPane = defineAsyncComponent(() =>
+	import("@/components/settings/MacrosAdminPane.vue")
+);
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
 const PdfTemplatesPane = defineAsyncComponent(() =>
 	import("@/components/settings/PdfTemplatesPane.vue")
@@ -157,6 +180,20 @@ const PdfTemplatesPane = defineAsyncComponent(() =>
 // is_jarvis_admin, which is true for System Managers too.
 const isSM = !!window.is_system_manager;
 const isAdmin = !!window.is_jarvis_admin;
+// Rail dots for an expired chat sign-in. Admins only: a member has no AI models pane to open, and
+// the shared reading is only fetched for the seats that can act on it.
+const socket = inject("$socket", null);
+const showExpiredDots = computed(() => (isSM || isAdmin) && subscriptionNotice.expired.length > 0);
+const railDot = (key) => showExpiredDots.value && (key === "aimodels" || key === "general");
+let unwatchNotice = () => {};
+onMounted(() => {
+	if (!(isSM || isAdmin)) return;
+	loadSubscriptionNotice();
+	unwatchNotice = watchSubscriptionNotice(socket);
+});
+onBeforeUnmount(() => unwatchNotice());
+
+const KEPT_PANES = ["GeneralPane", "UsagePane"];
 
 const PANES = {
 	general: GeneralPane,
@@ -168,6 +205,7 @@ const PANES = {
 	branding: BrandingPane,
 	pdftemplates: PdfTemplatesPane,
 	usageadmin: UsageAdminPane,
+	macroadmin: MacrosAdminPane,
 };
 
 // Rail labels live here; the header title and description each pane shows are
@@ -197,7 +235,10 @@ const NAV = [
 	{
 		name: "Administration",
 		gate: () => isAdmin,
-		items: [{ key: "usageadmin", label: "User usage", icon: "users" }],
+		items: [
+			{ key: "usageadmin", label: "User usage", icon: "users" },
+			{ key: "macroadmin", label: "Macros", icon: "layers" },
+		],
 	},
 ];
 

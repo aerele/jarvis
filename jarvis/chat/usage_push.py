@@ -138,6 +138,7 @@ def _build_rollup(cap: int = _MAX_USERS) -> tuple[dict, bool]:
 				"cache_read": agg.get("cache_read", 0),
 				"cache_write": agg.get("cache_write", 0),
 				"cache_reported": agg.get("cache_reported", False),
+				"tokens_out_estimated": agg.get("tokens_out_estimated", False),
 				# Deliberately from _tool_message_aggregates (the SAME
 				# role=tool-message population top_tools counts), NOT from
 				# Turn Usage - see that function's docstring (finding #2).
@@ -190,6 +191,24 @@ def _normalize_profile(raw: str | None) -> str:
 	return "full"
 
 
+_USER_AGGREGATES_SQL = """
+	SELECT user,
+		   profile_agent_id,
+		   COUNT(*) AS cnt,
+		   MAX(creation) AS last_seen,
+		   SUM(cache_read) AS cache_read,
+		   SUM(cache_write) AS cache_write,
+		   MAX(cache_reported) AS cache_reported,
+		   MAX(tokens_out_estimated) AS tokens_out_estimated
+	FROM `tabJarvis Turn Usage`
+	WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
+	GROUP BY user, profile_agent_id
+	ORDER BY user, cnt DESC, last_seen DESC
+"""
+# Same query for a site whose code is deployed but not yet migrated (no tokens_out_estimated column).
+_USER_AGGREGATES_SQL_NO_ESTIMATE = _USER_AGGREGATES_SQL.replace("MAX(tokens_out_estimated)", "0")
+
+
 def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 	"""Per-user turns / cache sums AND profile attribution for the month, ONE
 	grouped query (``GROUP BY user, profile_agent_id``) instead of two
@@ -209,20 +228,11 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 	role=tool-message population ``top_tools`` counts (including
 	errored/in-flight turns), not Turn Usage's per-COMPLETED-turn count."""
 	out: dict[str, dict] = {}
+	# Code can deploy before the migrate that adds tokens_out_estimated; a push in that gap
+	# must not fail the whole rollup, so the column is selected only once it exists.
+	has_estimated = frappe.db.has_column("Jarvis Turn Usage", "tokens_out_estimated")
 	for r in frappe.db.sql(
-		"""
-		SELECT user,
-			   profile_agent_id,
-			   COUNT(*) AS cnt,
-			   MAX(creation) AS last_seen,
-			   SUM(cache_read) AS cache_read,
-			   SUM(cache_write) AS cache_write,
-			   MAX(cache_reported) AS cache_reported
-		FROM `tabJarvis Turn Usage`
-		WHERE user != '' AND day >= %(start)s AND day < %(next_month)s
-		GROUP BY user, profile_agent_id
-		ORDER BY user, cnt DESC, last_seen DESC
-		""",
+		_USER_AGGREGATES_SQL if has_estimated else _USER_AGGREGATES_SQL_NO_ESTIMATE,
 		{"start": start, "next_month": next_month},
 		as_dict=True,
 	):
@@ -234,12 +244,14 @@ def _turn_usage_user_aggregates(start: str, next_month: str) -> dict[str, dict]:
 				"cache_read": 0,
 				"cache_write": 0,
 				"cache_reported": False,
+				"tokens_out_estimated": False,
 			},
 		)
 		bucket["turns"] += int(r.cnt or 0)
 		bucket["cache_read"] += int(r.cache_read or 0)
 		bucket["cache_write"] += int(r.cache_write or 0)
 		bucket["cache_reported"] = bucket["cache_reported"] or bool(r.cache_reported)
+		bucket["tokens_out_estimated"] = bucket["tokens_out_estimated"] or bool(r.tokens_out_estimated)
 	return out
 
 
@@ -515,12 +527,12 @@ def _users_daily_rollup() -> list[dict]:
 	start = frappe.utils.add_days(today, -(_USERS_DAILY_WINDOW_DAYS - 1))
 	grouped: dict[tuple[str, str], dict] = {}
 	for r in frappe.db.sql(
-		f"""
+		"""
 		SELECT user, day, model,
 			   COUNT(*) AS turns,
 			   SUM(tokens_in) AS tokens_in,
 			   SUM(tokens_out) AS tokens_out
-		FROM `tab{TURN_USAGE}`
+		FROM `tabJarvis Turn Usage`
 		WHERE user != '' AND day >= %(start)s AND day <= %(today)s
 		GROUP BY user, day, model
 		ORDER BY user, day, (SUM(tokens_in) + SUM(tokens_out)) DESC

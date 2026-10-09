@@ -19,7 +19,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createEnrichmentPending, ENRICHMENT_PENDING_MAX_MS } from "./enrichmentPending.js";
+import {
+	createEnrichmentPending,
+	ENRICHMENT_CUE_DELAY_MS,
+	ENRICHMENT_PENDING_MAX_MS,
+} from "./enrichmentPending.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const chatViewSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
@@ -55,12 +59,13 @@ function fakeClock() {
 }
 
 // Builds a tracker on the fake clock and records everything it emits.
-function harness(maxMs = ENRICHMENT_PENDING_MAX_MS) {
+function harness(maxMs = ENRICHMENT_PENDING_MAX_MS, showAfterMs = 0) {
 	const clock = fakeClock();
 	const changes = [];
 	const expired = [];
 	const tracker = createEnrichmentPending({
 		maxMs,
+		showAfterMs,
 		setTimer: clock.setTimer,
 		clearTimer: clock.clearTimer,
 		onChange: (set) => changes.push(set),
@@ -166,6 +171,78 @@ test("enrichment landing for one reply leaves another reply's affordance alone",
 	assert.deepEqual(expired, ["msg-2"]);
 });
 
+// ---- the line only shows for a finish that is actually slow ----------------
+
+test("a reply that enriches within the cue delay never shows the line", () => {
+	// The ordinary turn: enrichment lands ~4 s after run:end with nothing visible to add,
+	// and a "Finishing…" appearing then vanishing under the answer read as a glitch.
+	const { tracker, changes, clock } = harness(
+		ENRICHMENT_PENDING_MAX_MS,
+		ENRICHMENT_CUE_DELAY_MS
+	);
+	tracker.mark("msg-1");
+	assert.equal(tracker.has("msg-1"), true, "still pending for the deadline and resync");
+	clock.advance(4000);
+	tracker.clear("msg-1");
+	assert.equal(changes.length, 0, "the line never rendered");
+	assert.equal(clock.liveTimers, 0, "both timers cancelled");
+});
+
+test("a slow finish shows the line after the delay, and enrichment still clears it", () => {
+	const { tracker, changes, clock } = harness(
+		ENRICHMENT_PENDING_MAX_MS,
+		ENRICHMENT_CUE_DELAY_MS
+	);
+	tracker.mark("msg-slow");
+	clock.advance(ENRICHMENT_CUE_DELAY_MS - 1);
+	assert.equal(changes.length, 0);
+	clock.advance(1);
+	assert.deepEqual([...latest(changes)], ["msg-slow"]);
+	tracker.clear("msg-slow");
+	assert.equal(latest(changes).size, 0);
+	assert.equal(clock.liveTimers, 0);
+});
+
+test("the deadline still bounds a slow finish's line", () => {
+	const { tracker, changes, expired, clock } = harness(10000, ENRICHMENT_CUE_DELAY_MS);
+	tracker.mark("msg-stuck");
+	clock.advance(10000);
+	assert.equal(latest(changes).size, 0, "shown at 6 s, dropped at the deadline");
+	assert.deepEqual(expired, ["msg-stuck"]);
+	assert.equal(clock.liveTimers, 0);
+});
+
+test("reset before the delay leaves no timer and renders nothing", () => {
+	const { tracker, changes, clock } = harness(
+		ENRICHMENT_PENDING_MAX_MS,
+		ENRICHMENT_CUE_DELAY_MS
+	);
+	tracker.mark("msg-1");
+	tracker.reset();
+	assert.equal(tracker.size, 0);
+	assert.equal(clock.liveTimers, 0);
+	clock.advance(ENRICHMENT_PENDING_MAX_MS);
+	assert.equal(changes.length, 0);
+});
+
+test("a reply whose enrichment adds the generated file shows the line at once", () => {
+	const { tracker, changes, clock } = harness(
+		ENRICHMENT_PENDING_MAX_MS,
+		ENRICHMENT_CUE_DELAY_MS
+	);
+	tracker.mark("msg-image", { immediate: true });
+	assert.deepEqual([...latest(changes)], ["msg-image"]);
+	tracker.clear("msg-image");
+	assert.equal(latest(changes).size, 0);
+	assert.equal(clock.liveTimers, 0);
+});
+
+test("the cue delay sits past a slow healthy finish and far inside the deadline", () => {
+	// e2e2 2026-09-29: a report turn's enrichment took 12 s (usage poll + its retry).
+	assert.ok(ENRICHMENT_CUE_DELAY_MS > 12000, "must clear a slow but healthy finish");
+	assert.ok(ENRICHMENT_CUE_DELAY_MS * 4 <= ENRICHMENT_PENDING_MAX_MS);
+});
+
 // ---- teardown ------------------------------------------------------------
 
 test("reset cancels every deadline so a torn-down view never resyncs", () => {
@@ -201,12 +278,17 @@ test("the bound is generous enough for a healthy slow finalize and short enough 
 test("ChatView drives the affordance through this module, not a raw Set", () => {
 	assert.match(
 		chatViewSrc,
-		/import \{ createEnrichmentPending \} from "@\/lib\/enrichmentPending"/,
+		/import \{[^}]*\bcreateEnrichmentPending\b[^}]*\} from "@\/lib\/enrichmentPending"/,
 		"ChatView must import the bounded tracker"
 	);
 	assert.match(
 		chatViewSrc,
-		/enrichmentTracker\.mark\(p\.message_id\)/,
+		/showAfterMs: ENRICHMENT_CUE_DELAY_MS/,
+		"ChatView must hold the line back until the finish is actually slow"
+	);
+	assert.match(
+		chatViewSrc,
+		/enrichmentTracker\.mark\(p\.message_id, \{ immediate: visibleEnrichment \}\)/,
 		"run:end must mark through the tracker so the deadline is armed"
 	);
 	assert.match(

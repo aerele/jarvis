@@ -27,7 +27,7 @@
 			:empty-state="{
 				icon: 'inbox',
 				title: 'No files yet',
-				description: `Add or drop a document and ${agentName} will process it.`,
+				description: `Add or drop a document and ${brand.agentName} will process it.`,
 			}"
 			@update:filters="onFiltersUpdate"
 			@update:sort="(s) => setSort(s.field, s.dir)"
@@ -84,9 +84,9 @@
 						</div>
 						<div class="max-w-2xl text-p-sm text-ink-gray-6">
 							Drop your files - single or in bulk - and leave them.
-							{{ agentName }} identifies each file's nature, processes it in the
-							background and shows what happened on each row - the draft it created,
-							or why it couldn't. If it needs your input, it asks in the
+							{{ brand.agentName }} identifies each file's nature, processes it in
+							the background and shows what happened on each row - the draft it
+							created, or why it couldn't. If it needs your input, it asks in the
 							<!-- .stop keeps the link from also triggering the card's pickFiles
 							     (click) and from having Enter swallowed by the card's
 							     keydown.enter.prevent -->
@@ -266,7 +266,7 @@ import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
 import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
 import {
@@ -541,7 +541,7 @@ function bulkDelete(selections, unselectAll) {
 	confirmDialog({
 		title: `Delete ${names.length} document${names.length === 1 ? "" : "s"}?`,
 		message:
-			"Deletes the conversations, their messages, the uploaded files, and their approval requests.",
+			"Deletes the conversations, their messages, the uploaded files and their approval requests.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await api.fileboxDeleteBulk(names)) || {};
@@ -573,7 +573,7 @@ function clearProcessed() {
 	confirmDialog({
 		title: "Clear processed documents?",
 		message:
-			"Deletes every document marked Draft created or No draft (with its file, messages, and approvals). Failed, processing, and needs-approval documents, and files with wiki notes awaiting review, are kept. The drafts themselves are not touched.",
+			"Deletes every document marked Draft created or No draft (with its file, messages and approvals). Failed, processing and needs-approval documents, and files with wiki notes awaiting review, are kept. The drafts themselves are not touched.",
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				const res = (await api.fileboxClearProcessed()) || {};

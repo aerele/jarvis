@@ -52,8 +52,18 @@ MSG = "Jarvis Chat Message"
 # (decision 11); automatic resumes never are.
 HUMAN_ORIGINS = ("human", "board_answer")
 _COLS = (
-	"name, kind, status, conversation, owner_user, exec_user, tool, run_id, preview,"
-	" skill_docname, summary, creation"
+	"name",
+	"kind",
+	"status",
+	"conversation",
+	"owner_user",
+	"exec_user",
+	"tool",
+	"run_id",
+	"preview",
+	"skill_docname",
+	"summary",
+	"creation",
 )
 
 
@@ -78,16 +88,16 @@ def pa_minting(conversation: str | None) -> bool:
 	return _pa_ready() and bool(frappe.db.exists("Jarvis Conversation", conversation))
 
 
-def _select(where: str, params: dict, *, strict: bool) -> list:
-	"""Chat pending-action rows matching ``where`` (sealed columns never read)."""
+def _select(filters: dict, *, strict: bool) -> list:
+	"""Chat pending-action rows equal to ``filters`` (sealed columns never read)."""
 	if not _pa_ready():
 		return []
+	pa = frappe.qb.DocType("Jarvis Pending Action")
+	query = frappe.qb.from_(pa).select(*_COLS).where(pa.kind == "chat")
+	for field, value in filters.items():
+		query = query.where(pa[field] == value)
 	try:
-		return frappe.db.sql(
-			f"SELECT {_COLS} FROM `tabJarvis Pending Action` WHERE kind='chat' AND {where}",
-			params,
-			as_dict=True,
-		)
+		return query.run(as_dict=True)
 	except _db_errors() as exc:
 		frappe.logger("jarvis.pending_confirm").error("pending action read failed: %s", type(exc).__name__)
 		if strict:
@@ -222,7 +232,7 @@ def _supersede_for_legacy(conversation: str, owner: str, token: str) -> str | No
 	from jarvis.chat.pending_actions._settle import settle
 	from jarvis.chat.pending_actions._store import lock_conversation
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
 	try:
 		lock_conversation(conversation)
 		superseded = _check_single_flight(conversation, owner, None)
@@ -251,7 +261,7 @@ def rollback_token(token: str, owner: str) -> None:
 	if not token:
 		return
 	try:
-		rows = _select("name=%(n)s", {"n": token}, strict=True)
+		rows = _select({"name": token}, strict=True)
 	except Exception:
 		rows = []
 	if not rows:
@@ -286,7 +296,7 @@ def peek(token: str, *, strict: bool = False) -> dict | None:
 	outage as "gone"."""
 	if not token:
 		return None
-	rows = _select("name=%(n)s", {"n": token}, strict=strict)
+	rows = _select({"name": token}, strict=strict)
 	if rows:
 		return _record(rows[0]) if _live(rows[0]) else None
 	return legacy.peek(token, strict=strict)
@@ -295,7 +305,7 @@ def peek(token: str, *, strict: bool = False) -> dict | None:
 def is_pending_action(token: str) -> bool:
 	"""``token`` names a chat pending action in any state: a click on a card that left
 	Pending still goes to the executor, which says why and settles a lost settle."""
-	return bool(token) and bool(_select("name=%(n)s", {"n": token}, strict=False))
+	return bool(token) and bool(_select({"name": token}, strict=False))
 
 
 def consume(token: str, *, owner: str, conversation: str) -> dict | None:
@@ -317,11 +327,10 @@ def list_for_owner(owner: str, conversation: str | None = None, *, strict: bool 
 	failure (on Redis only while it is the minting store, ``_legacy_strict``)."""
 	if not owner:
 		return []
-	where, params = "owner_user=%(o)s AND status='Pending'", {"o": owner}
+	filters = {"owner_user": owner, "status": "Pending"}
 	if conversation is not None:
-		where += " AND conversation=%(c)s"
-		params["c"] = conversation
-	cards = [_record(r) for r in _select(where, params, strict=strict)]
+		filters["conversation"] = conversation
+	cards = [_record(r) for r in _select(filters, strict=strict)]
 	return cards + legacy.list_for_owner(owner, conversation=conversation, strict=_legacy_strict(strict))
 
 
@@ -474,7 +483,7 @@ def blocks_new_card(owner: str, conversation: str) -> bool:
 	]
 	if any(not (c.get("pending_action") and _supersedable(c["token"], conversation)) for c in cards):
 		return True
-	return bool(_select("conversation=%(c)s AND status='Executing'", {"c": conversation}, strict=True))
+	return bool(_select({"conversation": conversation, "status": "Executing"}, strict=True))
 
 
 def clear_for_conversation(owner: str, conversation: str, run_id: str | None = None) -> int:
@@ -504,7 +513,7 @@ def has_live_card(owner: str, conversation: str) -> bool:
 	"""Whether a card is still live in ``conversation`` after a sweep (any pending
 	action there, or ``owner``'s legacy token); an unreadable store counts as one."""
 	try:
-		return bool(_select("conversation=%(c)s AND status='Pending'", {"c": conversation}, strict=True)) or (
+		return bool(_select({"conversation": conversation, "status": "Pending"}, strict=True)) or (
 			_legacy_pending(owner, conversation)
 		)
 	except PendingConfirmStorageError:

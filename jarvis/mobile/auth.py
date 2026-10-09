@@ -70,12 +70,15 @@ def _pairing_cache_key(user: str):
 
 
 def _throttle_pairing(user: str) -> None:
-	"""Reject a pairing storm. Mirrors frappe.rate_limiter's counter shape but
-	keyed by user instead of IP."""
+	"""Reject a pairing storm, per user. Re-arms a counter left without a TTL."""
 	key = _pairing_cache_key(user)
-	if not frappe.cache.get(key):
-		frappe.cache.setex(key, PAIRING_WINDOW_SECONDS, 0)
-	if cint(frappe.cache.incrby(key, 1)) > PAIRING_LIMIT:
+	pipe = frappe.cache.pipeline()
+	pipe.incr(key)
+	pipe.ttl(key)
+	attempts, ttl = pipe.execute()
+	if ttl < 0:
+		frappe.cache.expire(key, PAIRING_WINDOW_SECONDS)
+	if cint(attempts) > PAIRING_LIMIT:
 		frappe.throw(
 			"Too many pairing attempts. Please try again in a few minutes.",
 			frappe.RateLimitExceededError,

@@ -308,6 +308,17 @@ class TestPP2RunStateResolution(FrappeTestCase):
 
 
 class TestPP2FalseCleanUnreachable(FrappeTestCase):
+	def test_finding_text_does_not_replace_the_dashboard_title(self):
+		html = agent_runs._fallback_dashboard_html(
+			"Audit overview",
+			[_finding(title="Review this record", note="")],
+			{"blocker": 0, "warning": 0, "note": 1},
+			"",
+			result_state="evaluated_clean",
+		)
+		self.assertIn("<title>Audit overview</title>", html)
+		self.assertIn("Review this record. No explanation was recorded", html)
+
 	def _html(self, result_state, notes=None):
 		return agent_runs._fallback_dashboard_html(
 			"T",
@@ -441,6 +452,56 @@ class TestWritebackIntegration(FrappeTestCase):
 		frappe.db.commit()
 
 	# ---- PP-1 persistence + set-once -------------------------------------- #
+	def test_authored_title_and_full_explanation_survive_writeback(self):
+		note = "Two records need review.\n\nEvidence: both documents.\n\nNext step: verify the source."
+		agent_runs.record_delegate_run(
+			_mk_run(self.owner),
+			self.inst,
+			[_finding(title="Possible duplicate payment", note=note)],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		finding = frappe.get_doc(FINDING, {"agent": SLUG})
+		self.assertEqual(finding.title, "Possible duplicate payment")
+		self.assertEqual(finding.detail_md, note)
+
+	def test_rerun_repairs_missing_explanation_without_duplicating_finding(self):
+		agent_runs.record_delegate_run(
+			_mk_run(self.owner),
+			self.inst,
+			[_finding(note="")],
+			coverage={TOKEN: "evaluated"},
+			scope={"company": self.company},
+		)
+		finding = frappe.get_doc(FINDING, {"agent": SLUG})
+		self.assertTrue(finding.title)
+		for original_title in ("", finding.title):
+			frappe.db.set_value(FINDING, finding.name, {"title": original_title, "detail_md": ""})
+			agent_runs.record_delegate_run(
+				_mk_run(self.owner),
+				self.inst,
+				[_finding(title="A clear finding", note="Evidence and the reviewer's next step.")],
+				coverage={TOKEN: "evaluated"},
+				scope={"company": self.company},
+			)
+			finding.reload()
+			self.assertEqual(finding.title, "A clear finding")
+			self.assertEqual(finding.detail_md, "Evidence and the reviewer's next step.")
+		self.assertEqual(frappe.db.count(FINDING, {"agent": SLUG}), 1)
+
+	def test_rerun_preserves_an_existing_authored_explanation(self):
+		for note in ("Original evidence", "Later evidence"):
+			agent_runs.record_delegate_run(
+				_mk_run(self.owner),
+				self.inst,
+				[_finding(note=note)],
+				coverage={TOKEN: "evaluated"},
+				scope={"company": self.company},
+			)
+		finding = frappe.get_doc(FINDING, {"agent": SLUG})
+		self.assertEqual(finding.title, "Original evidence")
+		self.assertEqual(finding.detail_md, "Original evidence")
+
 	def test_result_class_persisted_and_set_once(self):
 		run = _mk_run(self.owner)
 		agent_runs.record_delegate_run(

@@ -5,8 +5,9 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import frappe
+from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat import heartbeat, pump
+from jarvis.chat import admission, heartbeat, pump
 from jarvis.chat import turn_state as ts
 from jarvis.exceptions import AdminUnreachableError, AdminValidationError
 from jarvis.tests.test_pump import _PumpTestCase
@@ -108,3 +109,124 @@ class TestPushBenchHeartbeatClient(_PumpTestCase):
 		_, kwargs = post.call_args
 		self.assertIn("ingest_bench_heartbeat", kwargs["path"])
 		self.assertEqual(kwargs["body"], {"heartbeat": vector})
+
+
+class _MaxChatsCase(FrappeTestCase):
+	"""Writes Jarvis Settings.max_concurrent_chats via set_single_value INSIDE the test
+	transaction only (never a commit, never a doc save); tearDown rolls it back and drops
+	the document cache so nothing leaks onto the shared local site."""
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+
+	def _store(self, value):
+		frappe.db.set_single_value("Jarvis Settings", "max_concurrent_chats", value, update_modified=False)
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+
+	def _stored(self):
+		return frappe.db.get_single_value("Jarvis Settings", "max_concurrent_chats")
+
+
+class TestHeartbeatAppliesMaxConcurrentChats(_MaxChatsCase):
+	def _beat(self, reply=None, side_effect=None):
+		with (
+			patch.object(heartbeat, "_admin_configured", return_value=True),
+			patch("jarvis.admin_client.push_bench_heartbeat", return_value=reply, side_effect=side_effect),
+		):
+			heartbeat.push_bench_heartbeat()  # must never raise
+
+	def test_positive_int_is_stored(self):
+		self._store(None)
+		self._beat({"tenant": "t", "max_concurrent_chats": 8})
+		self.assertEqual(self._stored(), 8)
+
+	def test_positive_int_replaces_stored(self):
+		self._store(4)
+		self._beat({"tenant": "t", "max_concurrent_chats": 12})
+		self.assertEqual(self._stored(), 12)
+
+	def test_key_absent_keeps_stored(self):
+		self._store(8)
+		self._beat({"tenant": "t"})
+		self.assertEqual(self._stored(), 8)
+
+	def test_non_dict_reply_keeps_stored(self):
+		self._store(8)
+		self._beat(None)
+		self._beat("ok")
+		self.assertEqual(self._stored(), 8)
+
+	def test_explicit_null_clears(self):
+		self._store(8)
+		self._beat({"tenant": "t", "max_concurrent_chats": None})
+		self.assertFalse(self._stored())
+
+	def test_bad_values_keep_stored(self):
+		self._store(8)
+		for bad in (0, -3, True, False, "8", 8.0, [8], {"n": 8}):
+			with self.subTest(bad=bad):
+				self._beat({"tenant": "t", "max_concurrent_chats": bad})
+				self.assertEqual(self._stored(), 8)
+
+	def test_unchanged_value_does_not_write(self):
+		self._store(8)
+		with patch.object(frappe.db, "set_single_value") as write:
+			self._beat({"tenant": "t", "max_concurrent_chats": 8})
+		write.assert_not_called()
+
+	def test_null_with_nothing_stored_does_not_write(self):
+		self._store(None)
+		with patch.object(frappe.db, "set_single_value") as write:
+			self._beat({"tenant": "t", "max_concurrent_chats": None})
+		write.assert_not_called()
+
+	def test_write_does_not_touch_modified(self):
+		self._store(None)
+		with patch.object(frappe.db, "set_single_value") as write:
+			self._beat({"tenant": "t", "max_concurrent_chats": 8})
+		write.assert_called_once_with("Jarvis Settings", "max_concurrent_chats", 8, update_modified=False)
+
+	def test_admin_error_keeps_stored(self):
+		self._store(8)
+		self._beat(side_effect=AdminUnreachableError("down"))
+		self.assertEqual(self._stored(), 8)
+
+	def test_apply_failure_never_breaks_heartbeat(self):
+		self._store(None)
+		with (
+			patch.object(frappe.db, "set_single_value", side_effect=RuntimeError("db")),
+			patch.object(heartbeat, "_log_failure_throttled") as logged,
+		):
+			self._beat({"tenant": "t", "max_concurrent_chats": 8})
+		logged.assert_called_once()
+
+
+class TestMaxInflightFromSettings(_MaxChatsCase):
+	def test_nothing_stored_is_default(self):
+		self._store(None)
+		self.assertEqual(admission._max_inflight(), admission.DEFAULT_MAX_INFLIGHT)
+		self.assertEqual(admission.DEFAULT_MAX_INFLIGHT, 4)
+
+	def test_stored_value_is_used(self):
+		self._store(8)
+		self.assertEqual(admission._max_inflight(), 8)
+
+	def test_garbage_is_default(self):
+		for bad in (0, -2, "x", True):
+			with (
+				self.subTest(bad=bad),
+				patch("frappe.get_cached_value", return_value=bad),
+			):
+				self.assertEqual(admission._max_inflight(), admission.DEFAULT_MAX_INFLIGHT)
+
+	def test_write_invalidates_cached_read(self):
+		self._store(8)
+		self.assertEqual(admission._max_inflight(), 8)
+		self._store(6)
+		self.assertEqual(admission._max_inflight(), 6)
+
+	def test_site_config_key_is_ignored(self):
+		self._store(None)
+		with patch.dict(frappe.local.conf, {"jarvis_site_max_inflight_turns": 9}):
+			self.assertEqual(admission._max_inflight(), admission.DEFAULT_MAX_INFLIGHT)

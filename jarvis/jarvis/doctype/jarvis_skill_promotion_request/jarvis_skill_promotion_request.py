@@ -27,12 +27,17 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable, refuse_unseen_change
+
 SKILL = "Jarvis Custom Skill"
 FROM_SCOPES = ("User", "Role", "Org")
 TO_SCOPES = ("Role", "Org")
 
 
-class JarvisSkillPromotionRequest(Document):
+class JarvisSkillPromotionRequest(NotRenamable, Document):
+	def on_trash(self):
+		refuse_unseen_change(self)
+
 	def before_insert(self):
 		# The requester must be able to READ the source skill before a request is
 		# filed against it — closes the same generic-REST disclosure class as the
@@ -45,6 +50,7 @@ class JarvisSkillPromotionRequest(Document):
 			self.skill_name = frappe.db.get_value(SKILL, self.skill, "skill_name") or ""
 
 	def validate(self):
+		refuse_unseen_change(self)
 		self._validate_skill()
 		self._validate_scopes()
 		self._validate_snapshot_bound()

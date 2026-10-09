@@ -36,7 +36,9 @@ import time
 
 import frappe
 
+from jarvis.chat import empty_reply_recovery, txn
 from jarvis.chat import turn_state as ts
+from jarvis.chat.error_taxonomy import classify_error_text
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
@@ -113,7 +115,7 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		# Persist the EXCLUSIVE claim (status='running' + attempt increment) so a
 		# crash mid-effect still counts toward the force-done budget AND another
 		# finalizer sees the live claim (never runs the same effect twice, CDX-4).
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before effect
 		# 'done' (not required / already applied), 'busy' (another finalizer holds a
 		# live claim), or 'force_done' (budget spent) — skip.
 		if outcome != "attempt":
@@ -157,7 +159,7 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		and ts.visible_effects_done(run_id)
 		and ts.claim_enrichment_publish(run_id)
 	):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before publish
 		published = _publish_enriched(run_id, conversation, owner, assistant_message)
 
 	# Success path only: flip finalizing -> done once every required effect is done
@@ -167,10 +169,10 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 	if state == "finalizing" and ts.all_required_effects_done(run_id):
 		v = int(frappe.db.get_value(TURN, run_id, "version") or 0)
 		if ts.finalize_done(run_id, v):
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before publish
 			done = True
 			if not published and ts.claim_enrichment_publish(run_id):
-				frappe.db.commit()
+				frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before publish
 				published = _publish_enriched(run_id, conversation, owner, assistant_message)
 	return {"ok": True, "ran": ran, "done": done, "published": published, "state": state}
 
@@ -345,7 +347,7 @@ def _effect_macro_advance(ctx: _Ctx) -> None:
 	# _advance_macro). Each has its own per-run redis lock (idempotent).
 	from jarvis.chat import macros
 
-	macros.advance_after_turn(ctx.conversation, errored=ctx.errored)
+	macros.advance_after_turn(ctx.conversation, errored=ctx.errored, run_id=ctx.run_id)
 	from jarvis.learning import app_analysis
 
 	app_analysis.on_turn_end(ctx.conversation, errored=ctx.errored)
@@ -384,16 +386,20 @@ def _effect_usage(ctx: _Ctx) -> None:
 	#     retries next cycle (never a silent permanent loss on a transient hiccup);
 	#   * a later finalize replay after a committed accrual sees usage_recorded=1
 	#     and no-ops (never double-count the soft monthly cap).
-	won = ts._run_cas(
-		f"UPDATE `tab{TURN}` SET usage_recorded=1 WHERE name=%(r)s AND usage_recorded=0",
-		{"r": ctx.run_id},
-	)
-	if won != 1:
-		return  # already recorded — never double-count
+	#
+	# Snapshot isolation: the guard, the reply-model stamp and the accrual are ONE unit,
+	# taken after the poll on a fresh snapshot and replayed whole if it loses a race (the
+	# settings row it accrues into is written by other turns of the same user). The unit
+	# never commits before record_turn_usage's own commit, so the retry contract above
+	# holds: a RETRY returns uncommitted and the runner's rollback undoes the guard.
+	guard_sql = f"UPDATE `tab{TURN}` SET usage_recorded=1 WHERE name=%(r)s AND usage_recorded=0"
 	if ctx.errored:
 		# An errored/cancelled turn accrues no usage; the guard commits with the
 		# effect (record only on a real completed run). Leave counters untouched.
+		ts._run_cas(guard_sql, {"r": ctx.run_id})
 		return
+	if frappe.db.get_value(TURN, ctx.run_id, "usage_recorded"):
+		return  # already recorded (skip the poll); the guard CAS below re-checks atomically
 	session_key = ctx.payload.get("session_key") or frappe.db.get_value(CONV, ctx.conversation, "session_key")
 	if not session_key:
 		# CDX-6: a SUCCESSFUL (non-errored) turn with no session key cannot be attributed
@@ -409,19 +415,40 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
-	# jarvis#560: attribute the reply BEFORE the freshness gate below. The row names
-	# the model whether or not its token counters have gone fresh yet, and an audit
-	# ("which model proposed this journal entry") must not be lost to a slow counter.
-	_stamp_reply_model(ctx, row)
+	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
+	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
+	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
+	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage.is_claude_cli_row(row) else None
+	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
+	# the unit below starts on the present. Nothing is pending: the runner committed its
+	# claim and this effect has only read so far.
+	txn.fresh_snapshot()
+
+	def unit():
+		if ts._run_cas(guard_sql, {"r": ctx.run_id}) != 1:
+			return None  # already recorded: never double-count
+		# jarvis#560: attribute the reply BEFORE the freshness gate below. The row names
+		# the model whether or not its token counters have gone fresh yet, and an audit
+		# ("which model proposed this journal entry") must not be lost to a slow counter.
+		_stamp_reply_model(ctx, row)
+		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id, reply_chars=reply_chars)
+
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
 	# rolls back the guard CAS above and RELEASES the effect to pending for the next
 	# cycle (subject to the bounded force-done budget, which logs the undercount at
 	# the cap). `recorded` / `valid_zero` return normally: the guard commits with the
 	# effect (done), never double-counting the soft monthly cap on a later replay.
-	outcome = _usage.record_turn_usage(session_key, row, run_id=ctx.run_id)
+	outcome = txn.replay_on_conflict(unit, label=f"finalize usage {ctx.run_id}")
+	if outcome is None:
+		return
 	if outcome == _usage.USAGE_RETRY:
 		raise _UsageRetry(f"usage not fresh for {ctx.run_id} (session {session_key})")
+	# The unit above committed: this turn completed, which proves the sign-in it ran on works. Clears a
+	# chat-detected expiry; the runner commits this effect's done mark right after. Never raises.
+	from jarvis import subscription_health
+
+	subscription_health.note_session_row(row)
 
 
 def _stamp_reply_model(ctx: _Ctx, row: dict | None) -> None:
@@ -546,16 +573,38 @@ def _effect_terminal_publish(ctx: _Ctx) -> None:
 
 def _effect_telemetry(ctx: _Ctx) -> None:
 	# Latency summary + turn telemetry (customization discovery). Best-effort.
+	reason = ctx.payload.get("redispatch_reason")
 	try:
 		from jarvis.chat.latency import get_logger
 
-		get_logger().info("pump turn_finalized run_id=%s errored=%d", ctx.run_id, int(ctx.errored))
+		fmt, args = "pump turn_finalized run_id=%s errored=%d", [ctx.run_id, int(ctx.errored)]
+		if reason:
+			fmt, args = fmt + " redispatch_reason=%s", [*args, reason]
+		get_logger().info(fmt, *args)
 	except Exception:
 		pass
+	if reason == empty_reply_recovery.REASON:
+		_note_resend_outcome(ctx)
 	try:
 		from jarvis import telemetry
 
 		telemetry.emit_turn(ctx.conversation, ctx.run_id, 0)
+	except Exception:
+		pass
+
+
+def _note_resend_outcome(ctx: _Ctx) -> None:
+	"""The outcome line of a turn sent again for an empty reply. Best-effort."""
+	try:
+		row = frappe.db.get_value(TURN, ctx.run_id, ["relay_target_id", "error"], as_dict=True) or {}
+		state = ctx.turn.get("state")
+		empty_reply_recovery.note_outcome(
+			run_id=ctx.run_id,
+			conversation=ctx.conversation,
+			state=state,
+			relay_target_id=row.get("relay_target_id"),
+			code=classify_error_text(row.get("error")) if state == "errored" else "",
+		)
 	except Exception:
 		pass
 

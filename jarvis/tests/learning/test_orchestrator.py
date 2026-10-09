@@ -115,15 +115,14 @@ class TestStaleThreshold(FrappeTestCase):
 
 
 class TestAdvanceNextRunAt(FrappeTestCase):
-	def test_writes_computed_next_start_via_set_value(self):
+	def test_writes_computed_next_start_via_set_single_value(self):
 		now = _dt(2026, 7, 5, 1, 15)
-		with mock.patch("frappe.db.set_value") as sv:
+		with mock.patch("frappe.db.set_single_value") as sv:
 			orchestrator._advance_next_run_at(now, "01:00:00")
 		sv.assert_called_once()
 		args, kwargs = sv.call_args
 		self.assertEqual(args[0], "Jarvis Settings")
-		self.assertEqual(args[1], "Jarvis Settings")
-		payload = args[2]
+		payload = args[1]
 		self.assertEqual(payload["pattern_next_run_at"], _dt(2026, 7, 6, 1, 0))
 		self.assertFalse(kwargs.get("update_modified"))
 

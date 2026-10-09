@@ -4,12 +4,25 @@
 // an optional model-written headline. It imposes no opinion on which fields matter
 // or what to total - that is the model's job, since it knows the doctype.
 // Relative, not "@/": actionSummary.test.js runs under plain `node --test`.
-import { removedSavedRows } from "./draftApply.js";
+import { isFieldMissing, removedSavedRows } from "./draftApply.js";
 
 export function proposedFields(action) {
 	return (action.fields || [])
 		.filter((f) => String(f.value ?? "").trim() !== "")
 		.map((f) => ({ label: f.label, value: f.value }));
+}
+
+// Required fields the model put on the card blank. Shown flagged so the person sees
+// what Confirm still needs, instead of the row silently vanishing (#603). Only fields
+// the model proposed: meta `reqd` alone is not the truth (controllers fill many).
+export function requiredBlanks(model) {
+	return (model.fields || [])
+		.filter(isRequiredBlank)
+		.map((f) => ({ label: f.label, value: "", missing: true }));
+}
+
+export function isRequiredBlank(field) {
+	return !!field.proposed && !!field.reqd && isFieldMissing(field);
 }
 
 export function changedFields(model) {
@@ -18,26 +31,59 @@ export function changedFields(model) {
 		.map((f) => ({ label: f.label, from: f.orig ?? "", to: f.value ?? "" }));
 }
 
-export function lineItemSummary(table) {
+// `computed`: the dry run's rows for this table (index-aligned). A read-only cell
+// the model left blank shows ERPNext's value, flagged so the card can mark it as
+// calculated; the model's own values and editable blanks are never replaced (#647).
+export function lineItemSummary(table, computed) {
+	const filled = new Set();
+	const rows = table.rows.map((r, i) => {
+		const cells = [];
+		const flags = [];
+		for (const c of table.columns) {
+			const own = r[c.fieldname] ?? "";
+			const v = computed && computed[i] ? computed[i][c.fieldname] : null;
+			const fill = !!c.read_only && String(own) === "" && v != null && v !== "";
+			cells.push(fill ? computedText(c, v) : own);
+			flags.push(fill);
+			if (fill) filled.add(c.label);
+		}
+		return { cells, computed: flags };
+	});
 	return {
 		fieldname: table.fieldname,
 		label: table.label,
 		count: table.rows.length,
 		columns: table.columns.map((c) => c.label),
-		rows: table.rows.map((r) => ({ cells: table.columns.map((c) => r[c.fieldname] ?? "") })),
+		rows,
+		// Which columns show a calculated value, named in a line under the table so
+		// the cue is text, not only the muted colour.
+		computedLabels: table.columns.map((c) => c.label).filter((l) => filled.has(l)),
 		removed: removedSavedRows(table),
 	};
 }
 
+function computedText(column, v) {
+	if (typeof v !== "number") return String(v);
+	if (column.fieldtype === "Currency")
+		return v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+	return v.toLocaleString("en-IN");
+}
+
 export function summarize(model, action = {}) {
 	const headline = String(action.summary ?? "").trim();
+	const computed = model.computed || {};
 	const tables = (model.tables || [])
-		.map(lineItemSummary)
+		.map((t) => lineItemSummary(t, computed[t.fieldname]))
 		.filter((t) => t.count || t.removed.length);
 	if (model.verb === "update") {
 		return { kind: "update", headline, diff: changedFields(model), tables };
 	}
-	return { kind: "create", headline, rows: proposedFields(action), tables };
+	return {
+		kind: "create",
+		headline,
+		rows: [...proposedFields(action), ...requiredBlanks(model)],
+		tables,
+	};
 }
 
 // A create_docs batch parks one card. Its dry-run preview carries the created
@@ -104,6 +150,148 @@ export function verbSentence(card) {
 	}
 	const name = (card.targets && card.targets[0]) || "";
 	return `Will ${verb}${act} this ${dt}${name ? " " + name : ""}`;
+}
+
+// ── Risk banner + trial warning (round 2, J1-cards) ─────────────────────────
+// Two optional card keys the server adds (jarvis/chat/confirm_card.py and the
+// gate in jarvis/api.py), read the same way by the desktop card, the phone card
+// and the Approval Board. Both tolerate a card parked before they existed. The
+// card renders the banner first, then the warning, so the risk always leads.
+// Wording fits every surface's button (Confirm in chat, Approve on the board).
+const SENSITIVE_LINE = "This changes sensitive settings.";
+
+// {risk, text} for a card that changes sensitive configuration, else null. The
+// text is the server's ``risk_line`` ("This runs code for every user."), with a
+// plain fallback when an older card carries none. The guarded structure changes
+// chat may make (one new Custom Field or a column-free edit of one, J1b-cf; a
+// Workflow create or update, CRM Settings with the data sync on, Domain Settings,
+// J1c) ride the same banner: the server sends them as ``risk: "sensitive"`` with
+// ``structural: true`` and a ``risk_line`` of several sentences, which leads with
+// "Confirming changes the database structure for every user and cannot be
+// undone." when a column is added and otherwise with what the change is, then
+// says what it does (the workflow it replaces, the records it fills, code,
+// access ...). Every other structure change is refused from chat and never carded.
+export function cardBannerOf(card) {
+	if (!card || card.risk !== "sensitive") return null;
+	const line = typeof card.risk_line === "string" ? card.risk_line.trim() : "";
+	return { risk: "sensitive", text: line || SENSITIVE_LINE };
+}
+
+const ROLLED_BACK_LINE =
+	"During the check, the record's own code stopped part-way, so the result may differ.";
+
+// The ONE warning line for a create / update card whose trial found something
+// (``card.warning = {jobs, rolled_back}``), else "". ``jobs`` is the real count
+// of background jobs Confirm will start, not the number of kinds.
+export function cardWarningOf(card) {
+	const w = card && card.warning;
+	if (!w || typeof w !== "object") return "";
+	const jobs = Number.isInteger(w.jobs) && w.jobs > 0 ? w.jobs : 0;
+	const parts = [];
+	if (w.rolled_back === true) parts.push(ROLLED_BACK_LINE);
+	if (jobs) {
+		parts.push(`This will also start ${jobs} background job${jobs === 1 ? "" : "s"}.`);
+	}
+	return parts.join(" ");
+}
+
+// One line of a sensitive update's line diff (``diff[i].lines``: {op, text} with op
+// " " / "-" / "+" / "gap", a gap carrying ``count``), as {kind, text}: kind picks the line's style (same /
+// del / add / gap) in each app's own class vocabulary, text is what the line shows.
+const DIFF_LINE = new Map([
+	["+", ["add", "+ "]],
+	["-", ["del", "- "]],
+	["gap", ["gap", ""]],
+]);
+export function diffLineView(line) {
+	const [kind, mark] = DIFF_LINE.get(line && line.op) || ["same", "  "];
+	if (kind === "gap") {
+		const n = Number.isInteger(line.count) && line.count > 0 ? line.count : 0;
+		return { kind, text: n ? `… ${n} unchanged line${n === 1 ? "" : "s"}` : "…" };
+	}
+	return { kind, text: mark + String((line && line.text) ?? "") };
+}
+
+// A sensitive update's child-table change (``diff[i].from_table`` / ``to_table``,
+// each a full table) as both sides, current first: [{name, table, heading}]. An
+// empty side (the server sends no table for zero rows) is still named, "none", so
+// emptying a table never reads as only its old rows. [] when neither side is a table.
+export function diffTablesOf(row) {
+	const sides = [
+		["Current", row && row.from_table],
+		["New", row && row.to_table],
+	].map(([name, t]) => [name, t && typeof t === "object" && Array.isArray(t.rows) ? t : null]);
+	if (!sides.some(([, t]) => t)) return [];
+	return sides.map(([name, table]) => {
+		const n = table ? (Number.isInteger(table.count) ? table.count : table.rows.length) : 0;
+		const heading = n ? `${name} · ${n} row${n === 1 ? "" : "s"}` : `${name} · none`;
+		return { name, table: n ? table : null, heading };
+	});
+}
+
+// An error envelope's ``error`` as a PERSON should read it. Some refusals are
+// written for the model ("Do not retry it with another tool; tell the user ...")
+// and carry a plain twin, ``person_message`` (jarvis/api.py
+// _refuse_unshowable_card / _refuse_sensitive_import); every surface a person
+// reads shows that instead, and the model still gets ``message``. Tolerates a
+// bare string and a missing error.
+export function personError(err) {
+	if (typeof err === "string") return { message: err };
+	if (!err || typeof err !== "object") return {};
+	const person = typeof err.person_message === "string" ? err.person_message.trim() : "";
+	return person ? { ...err, message: person } : err;
+}
+
+// The copy for a failed tool row in the chat transcript ("<tool> didn't run"):
+// {message, hint} from the row's stored result (a JSON string or an object),
+// in the person's words when the bench wrote them.
+export function toolFailureCopy(toolResult) {
+	let v = toolResult;
+	if (typeof v === "string") {
+		try {
+			v = JSON.parse(v);
+		} catch (e) {
+			v = null;
+		}
+	}
+	const err = personError((v && v.error) || {});
+	return {
+		message:
+			(typeof err.message === "string" && err.message.trim()) ||
+			"This step couldn't be completed.",
+		hint: (typeof err.hint === "string" && err.hint.trim()) || "",
+	};
+}
+
+// The failure reference (round 2): a failed confirmation's own id, which the bench
+// stamps as ``error.reference`` so a person can quote it to support. Read from an
+// envelope, its ``error``, or a receipt's stored JSON result; "" when there is none
+// (a draft-panel save or a legacy card has no confirmation row to point at).
+export function failureReferenceOf(value) {
+	let v = value;
+	if (typeof v === "string") {
+		try {
+			v = JSON.parse(v);
+		} catch (e) {
+			return "";
+		}
+	}
+	if (!v || typeof v !== "object") return "";
+	const err = v.error && typeof v.error === "object" ? v.error : v;
+	return typeof err.reference === "string" ? err.reference.trim() : "";
+}
+
+// Copy ``text`` to the clipboard: true when it took it. False when there is no
+// clipboard (an insecure page) or it refused, so the caller can fall back to
+// selecting the text for a manual copy.
+export async function copyText(text, clipboard = globalThis.navigator?.clipboard) {
+	if (!text || !clipboard || typeof clipboard.writeText !== "function") return false;
+	try {
+		await clipboard.writeText(text);
+		return true;
+	} catch (e) {
+		return false;
+	}
 }
 
 // Wall-clock expiry for a parked confirmation. ``expiresAt`` is epoch SECONDS (as
@@ -224,7 +412,7 @@ function receiptNames(tool, args, data, outcome) {
 }
 
 // The render-ready receipt: { outcome, icon, tone, title, subject, doctype,
-// action, count, targets:[{name,url}], error }.
+// action, count, targets:[{name,url}], error, reference }.
 export function receiptView(tool, args, result, outcome) {
 	args = args || {};
 	const data = (result && typeof result === "object" && result.data) || {};
@@ -297,26 +485,26 @@ export function receiptView(tool, args, result, outcome) {
 		// success, and distinct from "discarded" (a discard is the user's own no).
 		icon = "cancelled";
 		tone = "muted";
-		title = "Cancelled — not performed";
+		title = "Cancelled: not performed";
 	} else if (outcome === "superseded") {
 		// A newer proposal replaced this one before it was answered.
 		icon = "superseded";
 		tone = "muted";
-		title = "Not confirmed — replaced by a newer proposal";
+		title = "Not confirmed: replaced by a newer proposal";
 	} else if (outcome === "expired") {
 		icon = "expired";
 		tone = "muted";
-		title = "Expired — not performed";
+		title = "Expired: not performed";
 	} else if (outcome === "unknown") {
 		// The run was interrupted mid-dispatch; whether it applied is unverified -
 		// this must NEVER read as confirmed or as "nothing changed".
 		icon = "unknown";
 		tone = "warning";
-		title = "Outcome unknown — check before retrying";
+		title = "Outcome unknown: check before retrying";
 	} else if (outcome === "partial") {
 		icon = "partial";
 		tone = "warning";
-		title = "Partly applied — check before retrying";
+		title = "Partly applied: check before retrying";
 	} else if (outcome === "auto_applied") {
 		// An armed macro ran this write WITHOUT a confirmation card. Render a distinct
 		// receipt (not an identical "confirmed" chip) so it never reads as a silent run.
@@ -326,15 +514,34 @@ export function receiptView(tool, args, result, outcome) {
 	} else if (outcome === "confirmed") {
 		icon = "confirmed";
 		tone = "success";
-		title = `${verb.past} ${wfPrefix}${subject}`;
+		// A create that the Create & Submit card also submitted says so: the chip is the
+		// receipt, and a ledger-posting document must not read as a draft.
+		const createdSubmitted = tool === "create_doc" && Number(data.docstatus) === 1;
+		title = `${createdSubmitted ? "Created and submitted" : verb.past} ${wfPrefix}${subject}`;
 	} else {
 		// A future/unrecognised outcome value - render NEUTRAL, same as "unknown".
 		// Never fall back to the confirmed/✓ path for a value this build predates.
 		icon = "unknown";
 		tone = "warning";
-		title = "Outcome unknown — check before retrying";
+		title = "Outcome unknown: check before retrying";
 	}
-	return { outcome, icon, tone, title, subject, doctype, action, count, targets, error };
+	// Only a chip whose change did not (fully) go through points at its confirmation.
+	const reference = ["failed", "partial", "unknown"].includes(icon)
+		? failureReferenceOf(result)
+		: "";
+	return {
+		outcome,
+		icon,
+		tone,
+		title,
+		subject,
+		doctype,
+		action,
+		count,
+		targets,
+		error,
+		reference,
+	};
 }
 
 // Convenience one-liner (tests / plain-text contexts).

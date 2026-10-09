@@ -139,9 +139,8 @@ class TestTurnUsage(FrappeTestCase):
 		self.assertEqual(row.model, "gpt-5.5")
 		self.assertEqual(row.tokens_in, 10)
 		self.assertEqual(row.tokens_out, 5)
-		# Live-checked 2026-08-17: the gateway build in use reports no cache
-		# token fields on sessions.list rows, so these are always the honest
-		# "not reported" state, never a fabricated zero.
+		# This fixture row carries no cacheRead/cacheWrite keys, so it is the
+		# honest "not reported" state, never a fabricated zero.
 		self.assertEqual(row.cache_read, 0)
 		self.assertEqual(row.cache_write, 0)
 		self.assertEqual(row.cache_reported, 0)
@@ -472,6 +471,7 @@ def _seed_turn_row(
 	cache_read: int = 0,
 	cache_write: int = 0,
 	cache_reported: int = 0,
+	tokens_out_estimated: int = 0,
 	tool_calls: int = 0,
 	creation=None,
 	day=None,
@@ -501,6 +501,7 @@ def _seed_turn_row(
 			"cache_read": cache_read,
 			"cache_write": cache_write,
 			"cache_reported": cache_reported,
+			"tokens_out_estimated": tokens_out_estimated,
 			"tool_calls": tool_calls,
 			"day": day or frappe.utils.today(),
 			"run_id": "",
@@ -540,6 +541,225 @@ def _seed_tool_messages(owner: str, title: str, tool_names: list[str]) -> None:
 		row.flags.jarvis_server_write = True  # a server-written fixture (P0a guard)
 		row.insert(ignore_permissions=True)
 	frappe.db.commit()
+
+
+class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
+	"""jarvis-admin-v2#631: cache columns from the row for every provider, and a flagged
+	reply-length output estimate for claude-cli rows only."""
+
+	def setUp(self):
+		self._orig_user = frappe.session.user
+		frappe.set_user("Administrator")
+		_ensure_user(USER_A)
+		_cleanup()
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		_cleanup()
+		frappe.db.commit()
+		frappe.set_user(self._orig_user)
+
+	def _gpt_row(self, **kw):
+		base = {
+			"modelProvider": "openai_compat",
+			"model": "jarvis-pool",
+			"agentRuntime": {"id": "default", "source": "provider"},
+			"inputTokens": 21017,
+			"outputTokens": 69,
+			"totalTokens": 58393,
+			"totalTokensFresh": True,
+		}
+		base.update(kw)
+		return base
+
+	def _cli_row(self, **kw):
+		base = {
+			"modelProvider": "anthropic",
+			"model": "claude-opus-5",
+			"agentRuntime": {
+				"id": "claude-cli",
+				"cloudPlacementSupported": False,
+				"devicePlacementSupported": False,
+				"source": "model",
+			},
+			"inputTokens": 2,
+			"outputTokens": 2,
+			"totalTokens": 119688,
+			"totalTokensFresh": True,
+		}
+		base.update(kw)
+		return base
+
+	def _turn_row(self, session_key):
+		return frappe.db.get_value(
+			TURN_USAGE,
+			{"session_key": session_key},
+			[
+				"tokens_in",
+				"tokens_out",
+				"tokens_out_estimated",
+				"cache_read",
+				"cache_write",
+				"cache_reported",
+			],
+			as_dict=True,
+		)
+
+	def test_cache_columns_filled_when_keys_present_and_quota_math_unchanged(self):
+		_make_session("agent:tu-cache", USER_A)
+		outcome = usage.record_turn_usage(
+			"agent:tu-cache", self._gpt_row(cacheRead=37376, cacheWrite=0), reply_chars=5000
+		)
+		self.assertEqual(outcome, usage.USAGE_RECORDED)
+		r = self._turn_row("agent:tu-cache")
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (37376, 0, 1))
+		# Regression guard: input stays uncached-only, output is the row value, never
+		# estimated for a non-CLI row even with a long reply passed.
+		self.assertEqual((r.tokens_in, r.tokens_out, r.tokens_out_estimated), (21017, 69, 0))
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "month_tokens"), 21017 + 69)
+
+	def test_cache_reported_when_keys_present_with_zero_values(self):
+		_make_session("agent:tu-cache0", USER_A)
+		usage.record_turn_usage(
+			"agent:tu-cache0", self._gpt_row(cacheRead=0, cacheWrite=0, inputTokens=5, outputTokens=5)
+		)
+		r = self._turn_row("agent:tu-cache0")
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (0, 0, 1))
+
+	def test_cache_zero_and_unreported_when_keys_absent_as_in_sessions_list_today(self):
+		_make_session("agent:tu-nocache", USER_A)
+		usage.record_turn_usage("agent:tu-nocache", self._gpt_row(inputTokens=5, outputTokens=5))
+		r = self._turn_row("agent:tu-nocache")
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (0, 0, 0))
+
+	def test_claude_cli_output_estimated_from_reply_chars(self):
+		_make_session("agent:tu-cli", USER_A)
+		outcome = usage.record_turn_usage(
+			"agent:tu-cli", self._cli_row(cacheRead=0, cacheWrite=120197), reply_chars=2000
+		)
+		self.assertEqual(outcome, usage.USAGE_RECORDED)
+		r = self._turn_row("agent:tu-cli")
+		self.assertEqual((r.tokens_in, r.tokens_out, r.tokens_out_estimated), (2, 500, 1))
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (0, 120197, 1))
+		# The accrued delta (user counters) uses the estimate too.
+		self.assertEqual(frappe.db.get_value(USETT, {"user": USER_A}, "month_tokens"), 502)
+		self.assertEqual(frappe.db.get_value(SESSION, {"session_key": "agent:tu-cli"}, "output_tokens"), 500)
+
+	def test_claude_cli_fallback_marker_via_claude_cli_session_id(self):
+		_make_session("agent:tu-cli2", USER_A)
+		row = self._cli_row(claudeCliSessionId="ee8218f2-0000")
+		del row["agentRuntime"]
+		usage.record_turn_usage("agent:tu-cli2", row, reply_chars=401)
+		r = self._turn_row("agent:tu-cli2")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (101, 1))  # ceil(401 / 4)
+
+	def test_claude_cli_row_value_kept_when_larger_than_estimate(self):
+		_make_session("agent:tu-cli-big", USER_A)
+		usage.record_turn_usage("agent:tu-cli-big", self._cli_row(outputTokens=900), reply_chars=2000)
+		r = self._turn_row("agent:tu-cli-big")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (900, 0))
+
+	def test_non_cli_row_never_estimated(self):
+		_make_session("agent:tu-gpt-tiny", USER_A)
+		usage.record_turn_usage("agent:tu-gpt-tiny", self._gpt_row(outputTokens=3), reply_chars=100000)
+		r = self._turn_row("agent:tu-gpt-tiny")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (3, 0))
+
+	def test_claude_model_name_alone_is_not_a_cli_marker(self):
+		_make_session("agent:tu-api-claude", USER_A)
+		row = self._cli_row(agentRuntime={"id": "default", "source": "provider"})
+		usage.record_turn_usage("agent:tu-api-claude", row, reply_chars=2000)
+		r = self._turn_row("agent:tu-api-claude")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (2, 0))
+
+	def test_row_without_agent_runtime_or_fallback_keys_never_estimated(self):
+		_make_session("agent:tu-no-rt", USER_A)
+		row = self._cli_row()
+		del row["agentRuntime"]
+		usage.record_turn_usage("agent:tu-no-rt", row, reply_chars=2000)
+		r = self._turn_row("agent:tu-no-rt")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (2, 0))
+
+	def test_agent_runtime_string_form_is_tolerated(self):
+		self.assertTrue(usage.is_claude_cli_row({"agentRuntime": "claude-cli"}))
+		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": "default"}))
+		self.assertFalse(usage.is_claude_cli_row({"agentRuntime": None}))
+
+	def test_no_reply_chars_means_no_estimate_for_claude_cli(self):
+		_make_session("agent:tu-cli-none", USER_A)
+		usage.record_turn_usage("agent:tu-cli-none", self._cli_row())
+		r = self._turn_row("agent:tu-cli-none")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (2, 0))
+
+	def test_reply_lookup_failure_returns_none_and_never_raises(self):
+		with patch("jarvis.chat.usage.frappe.db.get_value", side_effect=RuntimeError("db gone")):
+			self.assertIsNone(usage.reply_char_count("run-x"))
+		self.assertIsNone(usage.reply_char_count(None))
+
+	def test_reply_char_count_reads_the_assistant_message(self):
+		run_id = self._make_turn_with_reply("x" * 40)
+		self.assertEqual(usage.reply_char_count(run_id), 40)
+
+	def _make_turn_with_reply(self, text: str) -> str:
+		conv = frappe.get_doc({"doctype": CONV, "title": "turnusage-fixture-reply", "status": "Active"})
+		conv.insert(ignore_permissions=True)
+		seed = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv.name, "seq": 1, "role": "user", "content": "hi"}
+		)
+		seed.insert(ignore_permissions=True)
+		doc = frappe.get_doc(
+			{"doctype": MSG, "conversation": conv.name, "seq": 2, "role": "assistant", "content": text}
+		)
+		doc.insert(ignore_permissions=True)
+		run_id = f"test-turnusage-{frappe.generate_hash(length=10)}"
+		frappe.get_doc(
+			{
+				"doctype": CHAT_TURN,
+				"run_id": run_id,
+				"conversation": conv.name,
+				"relay_target_id": run_id,
+				"seed_message": seed.name,
+				"assistant_message": doc.name,
+				"state": "done",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		return run_id
+
+	def test_zero_zero_claude_cli_row_with_reply_now_records(self):
+		# Intended contract change: the estimate lifts a 0/0 claude-cli row above zero.
+		_make_session("agent:tu-cli-zero", USER_A)
+		row = self._cli_row(inputTokens=0, outputTokens=0)
+		self.assertEqual(
+			usage.record_turn_usage("agent:tu-cli-zero", row, reply_chars=80), usage.USAGE_RECORDED
+		)
+		r = self._turn_row("agent:tu-cli-zero")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (20, 1))
+		# Without a reply it is still the old valid-zero outcome.
+		_make_session("agent:tu-cli-zero2", USER_A)
+		self.assertEqual(usage.record_turn_usage("agent:tu-cli-zero2", row), usage.USAGE_VALID_ZERO)
+
+	def test_zero_zero_claude_cli_row_with_reply_retries_without_user_mapping(self):
+		row = self._cli_row(inputTokens=0, outputTokens=0)
+		self.assertEqual(
+			usage.record_turn_usage("agent:tu-cli-nomap", row, reply_chars=80), usage.USAGE_RETRY
+		)
+
+	def test_usage_push_tolerates_missing_estimated_column(self):
+		_make_session("agent:tu-push-pre", USER_A)
+		usage.record_turn_usage("agent:tu-push-pre", self._cli_row(), reply_chars=2000)
+		with patch("jarvis.chat.usage_push.frappe.db.has_column", return_value=False):
+			rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertIs(users[USER_A]["tokens_out_estimated"], False)
+
+	def test_usage_push_carries_tokens_out_estimated(self):
+		_make_session("agent:tu-push", USER_A)
+		usage.record_turn_usage("agent:tu-push", self._cli_row(), reply_chars=2000)
+		rollup, _ = usage_push._build_rollup()
+		users = {u["email"]: u for u in rollup["users"]}
+		self.assertIs(users[USER_A]["tokens_out_estimated"], True)
 
 
 class TestUsageRollup(FrappeTestCase):

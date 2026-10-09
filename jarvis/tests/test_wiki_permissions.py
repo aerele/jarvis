@@ -292,6 +292,20 @@ class TestVisibility(WikiPermTestCase):
 		)
 		return {r[0] for r in rows}
 
+	def _criterion_names(self, user) -> set:
+		page = frappe.qb.DocType(WIKI)
+		q = frappe.qb.from_(page).select(page.name).where(page.slug.like(f"%{SLUG_MARK}%"))
+		vis = wiki_permissions.visible_scope_criterion(page, user)
+		if vis is not None:
+			q = q.where(vis)
+		return set(q.run(pluck=True))
+
+	def test_qb_criterion_matches_the_sql_condition(self):
+		frappe.db.set_value(WIKI, self.org_page.name, "scope", None, update_modified=False)  # pre-v2 row
+		for user in (USER_PLAIN, USER_KW, USER_KW_MGR, USER_SM):
+			with self.subTest(user=user):
+				self.assertEqual(self._criterion_names(user), self._visible_names(user))
+
 	def test_sm_reads_everything(self):
 		for page in (
 			self.org_page,

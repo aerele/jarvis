@@ -25,7 +25,9 @@ vi.mock("@/stores/support", () => ({ useSupportStore: () => store }));
 vi.mock("@/stores/shell", () => ({ useShellStore: () => ({ openSettings: vi.fn() }) }));
 
 import UserMenu from "@/components/shell/UserMenu.vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
+
+const agentName = brand.agentName;
 
 const menuLabels = (w) =>
 	w

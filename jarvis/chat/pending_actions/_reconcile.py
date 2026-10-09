@@ -8,9 +8,10 @@ from __future__ import annotations
 import frappe
 from frappe.utils import add_to_date, now_datetime
 
-from jarvis.chat.pending_actions._settle import MAX_SETTLE_ATTEMPTS, settle, settle_batch
+from jarvis.chat.pending_actions._settle import LATE_SETTLE_FLAG, MAX_SETTLE_ATTEMPTS, settle, settle_batch
 from jarvis.chat.pending_actions._store import (
 	CANCELLED,
+	EXECUTED,
 	EXECUTING,
 	FAILED,
 	PENDING,
@@ -48,23 +49,182 @@ SHEET_BACKSTOP: str | None = "jarvis.chat.held_sheet_seal.backstop"
 SHEET_REAPER: str | None = "jarvis.chat.pending_actions._sheet.reap"
 
 
+def _log_once(title: str, name: str, message: str) -> None:
+	"""``_log``, at most once per row and title: a clean-up that keeps failing is one
+	Error Log row, not one every five minutes."""
+	seen = frappe.db.sql(
+		"SELECT name FROM `tabError Log` WHERE method=%(t)s AND error LIKE %(n)s LIMIT 1",
+		{"t": f"jarvis.pending_action.{title}", "n": f"{name}:%"},
+	)
+	if not seen:
+		_log(title, f"{name}: {message}")
+
+
 def _log(title: str, message: str) -> None:
 	frappe.log_error(title=f"jarvis.pending_action.{title}", message=message)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 
 
-def _reap_interrupted() -> int:
-	"""Executing past ``INTERRUPT_AFTER_S``: Failed/interrupted. Never a sheet (its
-	apply is a background job: ``SHEET_REAPER`` asks RQ)."""
-	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
+STRUCTURE_RETRY_HOURS = 24
+# A guarded structure write still Executing after this long, whose form lock can be
+# taken, has no worker any more (the lock is held for the whole confirm).
+STRUCTURE_DEAD_AFTER_S = 60
+# ``_structure_cleaned``: the clean-up ran and left what the confirmation wrote in
+# place on purpose (people have used it since): the row ends as partly applied.
+KEPT = "kept"
+
+
+def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool | str:
+	"""Clean up after a guarded structure write whose confirm did not finish it (its
+	worker died after the claim, or its own clean-up failed), under the same per-form
+	lock its confirm takes. False when that lock is held or the clean-up fails again:
+	the row is left as it is for the next run, never cleaned up beside a change that
+	may still be running. True for every other row."""
+	from jarvis import agent_audit
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._store import clear_undo, get_row
+	from jarvis.tools import _guarded_structure
+
+	if not _guarded_structure.undo_ready():
+		return True
+	row = get_row(name)
+	if not row or not row.get("sealed_undo") or (interrupted and row.status != EXECUTING):
+		return True
+	try:
+		undo = _seal.unseal_undo(row) or {}
+	except _seal.SealError:
+		_log_once("structure_needs_a_person", name, "its clean-up state could not be read")
+		clear_undo(name)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
+		return True
+	try:
+		with _guarded_structure.structure_locks(undo.get("lock") or ""):
+			note = _guarded_structure.clean_up(undo)
+			if interrupted:
+				# Unverified, so filed as partial: the worker died somewhere inside it.
+				agent_audit.record_write(
+					actor=row.exec_user,
+					tool=row.tool,
+					args=(_seal.unseal_call(row).get("args") or {}),
+					result=None,
+					outcome="partial",
+					provenance="chat",
+				)
+			clear_undo(name)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
+	except _guarded_structure.StructureBusyError:
+		frappe.db.rollback()
+		return False
+	except Exception:
+		tb = frappe.get_traceback()
+		frappe.db.rollback()
+		_log_once("structure_cleanup_failed", name, tb)
+		return False
+	_log("structure_cleanup", f"{name}: {note.text}")
+	if getattr(note, "needs_person", False):
+		_log_once("structure_needs_a_person", name, note.text)
+		return KEPT
+	return True
+
+
+def _give_up_structure(name: str) -> None:
+	"""A clean-up that has failed for ``STRUCTURE_RETRY_HOURS``: say once that the
+	form needs a person, and drop the state so it is not tried for ever."""
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._store import clear_undo, get_row
+
+	what = ""
+	try:
+		undo = _seal.unseal_undo(get_row(name)) or {}
+		parts = [str(undo.get(k)) for k in ("risk", "dt", "name") if undo.get(k)]
+		what = f" ({', '.join(parts)})" if parts else ""
+	except Exception:
+		what = ""
+	_log_once(
+		"structure_needs_a_person",
+		name,
+		f"the clean-up of this structure change{what} kept failing; check it in Desk",
+	)
+	clear_undo(name)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
+
+
+def _retry_structure_cleanups(only: str | None = None) -> int:
+	"""Finish the clean-up of a guarded structure write whose own clean-up failed at
+	Confirm (the row is terminal and still carries its state). Tried on every run for
+	``STRUCTURE_RETRY_HOURS``; after that it is logged once as needing a person and
+	the state dropped, so the half-made field is found from the Error Log. ``only``:
+	that one row (a test on a shared site reconciles nothing but its own)."""
+	from jarvis.tools import _guarded_structure
+
+	if not _guarded_structure.undo_ready():
+		return 0
+	# Never a row that ran: what it still carries is its undo, kept on purpose
+	# (``_guarded_structure.keeps_undo``), not a clean-up left to do.
 	rows = frappe.db.sql(
-		"SELECT name, batch_id FROM `tabJarvis Pending Action` WHERE status='Executing' AND executing_at < %(c)s"
-		" AND kind != %(sheet)s ORDER BY executing_at LIMIT %(lim)s",
-		{"c": cutoff, "lim": _SCAN, "sheet": SHEET},
+		"SELECT name, modified FROM `tabJarvis Pending Action` WHERE sealed_undo IS NOT NULL"
+		" AND status IN %(t)s AND (%(only)s IS NULL OR name = %(only)s) ORDER BY modified LIMIT %(lim)s",
+		{"t": tuple(s for s in TERMINAL if s != EXECUTED), "lim": _SCAN, "only": only},
 		as_dict=True,
 	)
-	flipped = [r for r in rows if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="interrupted")]
-	frappe.db.commit()
+	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
+	done = 0
+	for r in rows:
+		if _structure_cleaned(r.name, interrupted=False):
+			done += 1
+		elif r.modified < give_up:
+			_give_up_structure(r.name)
+	return done
+
+
+def _reap_interrupted(only: str | None = None) -> int:
+	"""Executing past ``INTERRUPT_AFTER_S``: Failed/interrupted. Never a sheet (its
+	apply is a background job: ``SHEET_REAPER`` asks RQ). A guarded structure write
+	is cleaned up first (``_structure_cleaned``); one whose clean-up left what it
+	wrote in place because people have used it since ends ``partial``. ``only``: that
+	one row."""
+	from jarvis.tools import _guarded_structure
+
+	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
+	# A guarded structure write holds its form's lock for the whole confirm, so its
+	# row is known dead as soon as that lock can be taken: ``_structure_cleaned``
+	# takes it and leaves the row alone while it is held. No need to wait out
+	# ``INTERRUPT_AFTER_S`` with a field row that has no column.
+	early = add_to_date(now_datetime(), seconds=-STRUCTURE_DEAD_AFTER_S)
+	params = {"c": cutoff, "early": early, "lim": _SCAN, "sheet": SHEET, "only": only}
+	if _guarded_structure.undo_ready():
+		rows = frappe.db.sql(
+			"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+			" AND (executing_at < %(c)s OR (sealed_undo IS NOT NULL AND executing_at < %(early)s))"
+			" AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
+			" ORDER BY executing_at LIMIT %(lim)s",
+			params,
+			as_dict=True,
+		)
+	else:
+		rows = frappe.db.sql(
+			"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+			" AND executing_at < %(c)s AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
+			" ORDER BY executing_at LIMIT %(lim)s",
+			params,
+			as_dict=True,
+		)
+	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
+	flipped = []
+	for r in rows:
+		cleaned = _structure_cleaned(r.name)
+		if cleaned:
+			code = "partial" if cleaned == KEPT else "interrupted"
+			if _terminal_update(r.name, [EXECUTING], FAILED, reason_code=code):
+				flipped.append(r)
+		elif r.executing_at < give_up:
+			# Its clean-up has failed (or its form's lock has been held) for a day: the
+			# row ends as partly applied, with one log line asking for a person,
+			# instead of staying Executing for ever.
+			_give_up_structure(r.name)
+			if _terminal_update(r.name, [EXECUTING], FAILED, reason_code="partial"):
+				flipped.append(r)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if flipped:
 		_log(
 			"interrupted",
@@ -139,10 +299,10 @@ def _retry_waiters() -> dict:
 		if rowcount():
 			failed_convs.append(w.conversation)
 	failed = len(failed_convs)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if failed_convs and HELD_FAILED:
 		frappe.get_attr(HELD_FAILED)(failed_convs)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	retried = 0
 	if HELD_RESUME:
 		resume = frappe.get_attr(HELD_RESUME)
@@ -171,7 +331,7 @@ def _cancel_disabled_owners() -> int:
 		{"lim": _SCAN},
 	)
 	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="owner_disabled") == "ok"]
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if moved:
 		_log("owner_disabled", "Cancelled (owner disabled or missing): " + ", ".join(moved))
 	for name in moved:
@@ -188,7 +348,7 @@ def _cancel_orphaned_chat() -> int:
 		{"lim": _SCAN},
 	)
 	moved = [n for n in names if _transition(n, [PENDING], CANCELLED, reason_code="cancelled") == "ok"]
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	if moved:
 		_log("orphan_cancel", "Cancelled (conversation deleted): " + ", ".join(moved))
 	for name in moved:
@@ -241,7 +401,7 @@ def _cards_health() -> dict:
 				"jarvis/chat/pending_actions/_reconcile.py."
 			),
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
 	return {"cards_open": open_n, "aged": aged}
 
 
@@ -260,30 +420,40 @@ def reconcile() -> dict:
 	if not table_ready():
 		return {}
 	out = {}
-	for step in (
-		_reap_interrupted,
-		_reap_sheets,
-		_settle_unsettled,
-		_retry_waiters,
-		_cancel_disabled_owners,
-		_cancel_orphaned_chat,
-		_sheet_backstop,
-		_warn_old_pending,
-		_cards_health,
-	):
-		try:
-			out[step.__name__.lstrip("_")] = step()
-		except Exception:
-			frappe.db.rollback()
-			_log("reconcile_failed", frappe.get_traceback())
+	# Every settle made here is a late one: no failure it reports is offered a
+	# correction (R2-3), because nobody is in that turn any more.
+	prev = frappe.flags.get(LATE_SETTLE_FLAG)
+	frappe.flags[LATE_SETTLE_FLAG] = True
+	try:
+		for step in (
+			_reap_interrupted,
+			_retry_structure_cleanups,
+			_reap_sheets,
+			_settle_unsettled,
+			_retry_waiters,
+			_cancel_disabled_owners,
+			_cancel_orphaned_chat,
+			_sheet_backstop,
+			_warn_old_pending,
+			_cards_health,
+		):
+			try:
+				out[step.__name__.lstrip("_")] = step()
+			except Exception:
+				frappe.db.rollback()
+				_log("reconcile_failed", frappe.get_traceback())
+	finally:
+		frappe.flags[LATE_SETTLE_FLAG] = prev
 	return out
 
 
-def purge() -> int:
+def purge(only: str | None = None) -> int:
 	"""Daily (D3): delete settled terminal rows older than 7 days with their waiters,
 	in committed batches. Never a Pending/Executing row, nor a held row with a waiter
 	not yet resumed (due, claimed, or failed: a re-run or delete drops that one), nor
-	a row another session holds (skipped, retried tomorrow)."""
+	a row another session holds (skipped, retried tomorrow). The whole row goes, so
+	what a guarded structure write kept on it for an operator's undo (``sealed_undo``)
+	goes with it: nothing else holds that snapshot. ``only``: that one row."""
 	if not table_ready():
 		return 0
 	cutoff = add_to_date(now_datetime(), days=-PURGE_AFTER_DAYS)
@@ -293,8 +463,9 @@ def purge() -> int:
 			"SELECT pa.name FROM `tabJarvis Pending Action` pa WHERE pa.settled=1 AND pa.status IN %(t)s"
 			" AND pa.settled_at < %(c)s AND NOT EXISTS (SELECT 1 FROM `tabJarvis Pending Action Waiter` w"
 			" WHERE w.parent=pa.name AND w.parenttype='Jarvis Pending Action'"
-			" AND IFNULL(w.resume_state, '') != 'done') LIMIT %(lim)s FOR UPDATE SKIP LOCKED",
-			{"t": TERMINAL, "c": cutoff, "lim": PURGE_BATCH},
+			" AND IFNULL(w.resume_state, '') != 'done') AND (%(only)s IS NULL OR pa.name = %(only)s)"
+			" LIMIT %(lim)s FOR UPDATE SKIP LOCKED",
+			{"t": TERMINAL, "c": cutoff, "lim": PURGE_BATCH, "only": only},
 		)
 		if not names:
 			break
@@ -307,7 +478,7 @@ def purge() -> int:
 			"DELETE FROM `tabJarvis Pending Action` WHERE name IN %(n)s AND settled=1 AND status IN %(t)s",
 			{"n": tuple(names), "t": TERMINAL},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 		total += len(names)
 		if len(names) < PURGE_BATCH:
 			break

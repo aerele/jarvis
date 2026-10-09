@@ -292,7 +292,7 @@ test("submitting the ask keeps the picks until the answer is actually posted", (
 	const submit = fnBody(askCardSrc, "function submit()");
 	assert.match(
 		submit,
-		/emit\("submit", askAnswerText\(props\.spec, sel\.value, other\.value\)\);/
+		/emit\(\s*"submit",\s*askAnswerText\(\{ questions: questions\.value \}, sel\.value, other\.value\)\s*\);/
 	);
 	assert.doesNotMatch(submit, /sel\.value = \{\};/);
 	assert.doesNotMatch(submit, /other\.value = \{\};/);

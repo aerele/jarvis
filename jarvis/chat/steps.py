@@ -28,17 +28,13 @@ MAX_STEP_CHARS = 160
 # early in the reply (R4 owner decision, default 320). Looser than
 # MAX_STEP_CHARS/is_step: the runtime already told us this text is narration,
 # so a two-sentence preamble is accepted, only structural text is rejected
-# (see is_preamble_step). HIDDEN LIVE ONLY: it is offered on the step line and
-# taken out of the live reply the same as any step, but it is KEPT IN THE
-# SAVED REPLY unless it is ALSO a one-sentence step (is_step, #1435's existing
-# rule) - relay_mux._finalize_terminal filters lane.steps down to is_step
-# entries before strip_steps runs (C1, code review: is_preamble_step's 320-char
-# runtime-flag-alone acceptance has no safety net against silently dropping a
-# real multi-sentence answer opening from the saved reply). 0 rejects every
+# (see is_preamble_step). It is offered on the step line and taken out of the
+# live reply the same as any step, and stripped from the SAVED reply too
+# (strip_preambles) unless nothing else would remain. 0 rejects every
 # preamble, which restores today's pre-feature behaviour: a flagged preamble
-# that is not also is_step is then treated as not-a-step by relay_mux
-# (unconditionally offered, never hidden from the reply early). Keep in
-# lockstep with MAX_CANDIDATE_CHARS in frontend/src/lib/liveTurn.js.
+# is then treated as not-a-step by relay_mux (unconditionally offered, never
+# hidden from the reply early, never flagged). Keep in lockstep with
+# MAX_CANDIDATE_CHARS in frontend/src/lib/liveTurn.js.
 MAX_PREAMBLE_STEP_CHARS = 320
 
 _TABLE_RULE = re.compile(r"^[\s|:\-]+$")
@@ -85,10 +81,9 @@ def is_preamble_step(text: str) -> bool:
 	anything structural (a newline, or a table/list/heading/code start) - that
 	is answer shape, never narration, whatever the runtime called it.
 
-	Governs the LIVE hide only (relay_mux._record_preamble_step): a True here
-	is hidden from the live reply and offered on the step line, but is kept in
-	the SAVED reply unless it is also a one-sentence step (``is_step``) - see
-	MAX_PREAMBLE_STEP_CHARS's comment and relay_mux._finalize_terminal (C1).
+	Governs which flagged text is hidden as a step early
+	(relay_mux._record_preamble_step); the saved reply then drops it too, see
+	``strip_preambles``.
 	"""
 	text = (text or "").strip()
 	if not text or len(text) > MAX_PREAMBLE_STEP_CHARS or "\n" in text:
@@ -152,6 +147,20 @@ def strip_steps(final: str | None, steps: list[str]) -> str | None:
 	if not answer or len(answer) < removed:
 		return final
 	return answer
+
+
+def strip_preambles(final: str | None, preambles: list[str]) -> str | None:
+	"""The saved reply: ``final`` minus its runtime-flagged preamble steps.
+
+	The runtime called this text a progress update and the user saw it as a
+	step, so it never comes back into the saved reply. Kept whole only when
+	nothing else would remain, and unlike ``strip_steps`` there is no length
+	guard: a short answer after the narration is still the answer.
+	"""
+	if not final or not preambles:
+		return final
+	answer = remove_steps(final, preambles)
+	return answer if answer.strip() else final
 
 
 # C2 (code review): join_segments must never insert a break that could split

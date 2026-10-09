@@ -26,6 +26,7 @@ import uuid
 import frappe
 from frappe import _
 
+from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
 
 CONV = "Jarvis Conversation"
@@ -166,7 +167,7 @@ def _try_take_lock(conversation: str) -> bool:
 		},
 	)
 	won = frappe.db.sql("SELECT ROW_COUNT()")[0][0] > 0
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
 	return won
 
 
@@ -209,8 +210,29 @@ def write_compaction_result(session_key: str, row: dict | None) -> None:
 
 
 def _clear_lock(conversation: str) -> None:
-	frappe.db.set_value(CONV, conversation, "compacting_since", None, update_modified=False)
-	frappe.db.commit()
+	"""Release the CAS lock start_compaction took (compacting_since). Called from
+	run_compact's finally, so it runs on whatever snapshot the job's transaction opened
+	at its first read, AFTER up to COMPACT_RPC_TIMEOUT_S (200 s) of RPC time (and, on the
+	success path, after the write_compaction_result write already refreshed it - but on
+	the declined/failed/exception paths nothing has refreshed it yet). A competing write
+	to the SAME conversation row in that window (autotitle, another compact attempt's own
+	CAS) must not turn "clear the lock" into "leave it stuck" for the full
+	COMPACT_LOCK_SECONDS (300 s)."""
+
+	def _clear() -> None:
+		frappe.db.set_value(CONV, conversation, "compacting_since", None, update_modified=False)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
+
+	txn.fresh_snapshot()
+	try:
+		txn.replay_on_conflict(_clear, label=f"chat: compact clear lock {conversation}")
+	except Exception as e:
+		# Both attempts lost the race (or a write already pending made replay unsafe):
+		# the lock stays set until COMPACT_LOCK_SECONDS elapses - a bounded, customer-
+		# visible "still compacting" state, not silent data loss, so report it rather
+		# than crash run_compact's finally over a lock that self-heals. Anything that
+		# is not a write conflict is re-raised untouched by report_lost_race.
+		txn.report_lost_race(e, title="chat: compact lock clear lost a write race")
 
 
 def _gateway_session_row(sess, session_key: str) -> dict:
@@ -239,6 +261,12 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 			before = int(row.get("totalTokens") or 0)
 			capacity = int(row.get("contextTokens") or 0)
 			res = sess.compact_session(session_key, hint or None, timeout_s=COMPACT_RPC_TIMEOUT_S)
+			# The RPC above can run up to COMPACT_RPC_TIMEOUT_S (200 s) on the transaction's
+			# ORIGINAL snapshot (taken at the job's first read, before the RPC). Drop it now,
+			# before any write to the shared session row, so usage.refresh_session_snapshots
+			# (admin sync) or another writer that committed to this row during the wait does
+			# not make the write below fail with 1020.
+			txn.fresh_snapshot()
 			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "failed"
 			if outcome != "compacted":
 				reason = "runtime_declined" if outcome == "skipped" else "runtime_failed"
@@ -250,8 +278,15 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 				)
 			else:
 				after_row = _gateway_session_row(sess, session_key) or None
-				write_compaction_result(session_key, after_row)
-				frappe.db.commit()
+
+				def _write() -> None:
+					write_compaction_result(session_key, after_row)
+					frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by other workers
+
+				# write_compaction_result's two UPDATEs are both absolute/GREATEST (budget
+				# fields set from `after_row`, compaction_count only moves forward) - safe to
+				# rerun whole on a lost race, so a replay is correct here, not just a retry.
+				txn.replay_on_conflict(_write, label=f"chat: compact write {conversation}")
 				count = int(
 					frappe.db.get_value(CHAT_SESSION, {"session_key": session_key}, "compaction_count") or 0
 				)

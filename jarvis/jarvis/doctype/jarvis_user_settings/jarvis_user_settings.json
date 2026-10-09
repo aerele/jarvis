@@ -12,6 +12,8 @@
     "prefs_section",
     "notify_enabled",
     "activity_detail",
+    "default_auto_mode",
+    "auto_mode_acknowledged",
     "preferred_persona",
     "support_context_copy_pref",
     "app_state_section",
@@ -74,6 +76,20 @@
       "default": "1"
     },
     {
+      "fieldname": "default_auto_mode",
+      "fieldtype": "Check",
+      "label": "Start New Chats In Auto Mode",
+      "default": "0",
+      "description": "Per-chat auto mode (#581): when 1 the composer pre-arms auto mode for each new chat. The chat's own flag is still fixed by its first message."
+    },
+    {
+      "fieldname": "auto_mode_acknowledged",
+      "fieldtype": "Check",
+      "label": "Auto Mode Warning Acknowledged",
+      "default": "0",
+      "description": "Set once the user has confirmed the first-time auto mode warning dialog, so it is not shown again."
+    },
+    {
       "fieldname": "preferred_persona",
       "fieldtype": "Select",
       "label": "Assistant Persona",
@@ -101,7 +117,7 @@
       "permlevel": 1,
       "read_only": 1,
       "no_copy": 1,
-      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it). Permlevel 1: server-owned app state, written only by jarvis.chat.greeting via raw db calls that bypass permlevel — a Jarvis User can read but never write it through a generic document update."
+      "description": "Merged from Jarvis User Preference. Blank = eligible for the every-third-new-chat greeting; Dismissed = permanent 'Don't ask again' (DB-only so cache flushes can't resurrect it). Permlevel 1: server-owned app state, written only by jarvis.chat.greeting via raw db calls that bypass permlevel: a Jarvis User can read but never write it through a generic document update."
     },
     {
       "fieldname": "business_greeting_chat_count",

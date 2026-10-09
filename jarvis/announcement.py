@@ -12,6 +12,8 @@ browser (see frontend/src/announcementNudge.js).
 import frappe
 from frappe.utils import cint, get_datetime, now_datetime
 
+from jarvis import compat
+
 SETTINGS = "Jarvis Settings"
 _FIELDS = (
 	"announcement_active",
@@ -61,10 +63,10 @@ def persist(announcement: dict) -> None:
 			# absent/blank expiry is stored as NULL, never "" (H2).
 			"announcement_expires_on": n.get("expires_on") or None,
 		}
-		current = frappe.db.get_value(SETTINGS, SETTINGS, list(_FIELDS), as_dict=True) or {}
+		current = compat.single_values(SETTINGS, _FIELDS)
 		if all(_norm(k, current.get(k)) == _norm(k, v) for k, v in fresh.items()):
 			return
-		frappe.db.set_value(SETTINGS, SETTINGS, fresh, update_modified=False)
+		frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)
 	except Exception:
 		pass
 

@@ -353,7 +353,11 @@ def has_subscription_model(settings) -> bool:
 
 def _subscription_upstream(m) -> str:
 	"""Stored upstream for a subscription row, including an accountless draft."""
-	accounts = _model_accounts(m)
+	return _upstream_of(m, _model_accounts(m))
+
+
+def _upstream_of(m, accounts: list) -> str:
+	"""``_subscription_upstream`` for a caller that already read the row's ``accounts``."""
 	if accounts:
 		return (_field(accounts[0], "upstream") or "").strip().lower()
 	return normalize_provider(_field(m, "provider"))
@@ -750,7 +754,7 @@ def validate_models(settings) -> list:
 					# only fires when there is genuinely no stored credential.)
 					errors.append(
 						f"{label} account[{j}] ({acc_ref}): no OAuth credential "
-						f"stored — reconnect this account to authorize"
+						f"stored, reconnect this account to authorize"
 					)
 
 				# Duplicate account_ref detection

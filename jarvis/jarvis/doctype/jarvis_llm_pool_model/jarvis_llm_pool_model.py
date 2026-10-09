@@ -1,5 +1,7 @@
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisLLMPoolModel(Document):
+
+class JarvisLLMPoolModel(NotRenamable, Document):
 	pass

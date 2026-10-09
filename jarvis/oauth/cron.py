@@ -63,6 +63,7 @@ def poll_oauth_refresh_status() -> None:
 		settings.db_set(
 			{
 				"last_sync_status": f"failed: auth: {e}",
+				"last_sync_attempt_error": "",
 				"last_sync_at": frappe.utils.now(),
 			}
 		)
@@ -107,6 +108,7 @@ def poll_oauth_refresh_status() -> None:
 	settings.db_set(
 		{
 			"last_sync_status": _LAST_SYNC_OAUTH_EXPIRED,
+			"last_sync_attempt_error": "",
 			"last_sync_at": frappe.utils.now(),
 			"llm_oauth_account_email": "",
 		}
@@ -118,27 +120,25 @@ def poll_oauth_refresh_status() -> None:
 	)
 
 
-# Warning thresholds for the agent_token age check below. Tune via the
-# Jarvis Settings.agent_token_max_age_days field, not these constants.
-_AGENT_TOKEN_WARN_WITHIN_DAYS = 7
+# Days before agent_token_max_age_days when System Managers are told to rotate;
+# past it they are told every day.
+_AGENT_TOKEN_NOTIFY_DAYS_LEFT = (14, 7)
 
 
 def check_agent_token_age() -> None:
-	"""Daily scheduled job: warn the operator when the bench's
-	agent_token is approaching or past its configured max age.
+	"""Daily scheduled job: tell System Managers to rotate the agent_token as it
+	ages.
 
-	C2 (2026-06-16 review): the plugin_auth validator HARD-rejects past
-	max-age tokens so the bench doesn't keep accepting stale credentials.
-	The cron's job is observability + nudge - operators see the warning
-	in Error Log before the hard cutoff lands.
+	The max age is advisory for now (#16b): nothing rotates the token on its own
+	yet, so the plugin path does not refuse an old one (that would take the agent
+	down on day N). The site stamps ``agent_token_issued_at`` whenever it receives
+	a token (``onboarding.sync_connection``, ``rotate_agent_token``, and a backfill
+	patch), so the age is known.
 
 	Decision tree:
-	  - max_age_days unset / <= 0: no-op (expiry disabled)
-	  - no issued_at recorded: log once per day (legacy token; nudge to
-	    do a one-time rotate so the timestamp is captured going forward)
-	  - issued_at + max_age <= now: error-log (token IS expired right now)
-	  - issued_at + (max_age - warn_within_days) <= now: warn-log (about
-	    to expire; rotate in the next few days)
+	  - max_age_days unset / <= 0: no-op
+	  - no issued_at recorded: log (the next token sync stamps it)
+	  - 14 or 7 days left, or past the max age (daily): Desk notification
 	  - otherwise: no-op
 	"""
 	try:
@@ -151,11 +151,7 @@ def check_agent_token_age() -> None:
 
 	issued_at = getattr(settings, "agent_token_issued_at", None)
 	if not issued_at:
-		frappe.logger().warning(
-			"check_agent_token_age: agent_token has no issued_at "
-			"timestamp; rotate via /api/method/jarvis.api.rotate_agent_token "
-			"so the expiry check can apply going forward",
-		)
+		frappe.logger().warning("check_agent_token_age: agent_token has no issued_at timestamp yet")
 		return
 
 	try:
@@ -167,23 +163,24 @@ def check_agent_token_age() -> None:
 	except Exception:
 		return
 
-	if age_days >= max_age_days:
-		# Hard expiry. plugin_auth is already rejecting; just shout.
-		frappe.log_error(
-			title="agent_token past max age",
-			message=(
-				f"agent_token is {age_days}d old (max {max_age_days}d). "
-				"All plugin call_tool requests now fail with "
-				"AgentTokenExpired. Rotate immediately via "
-				"/api/method/jarvis.api.rotate_agent_token."
-			),
-		)
+	days_left = max_age_days - age_days
+	if days_left > 0 and days_left not in _AGENT_TOKEN_NOTIFY_DAYS_LEFT:
 		return
+	from jarvis.learning.lifecycle import notify_system_managers
 
-	if age_days >= max_age_days - _AGENT_TOKEN_WARN_WITHIN_DAYS:
-		frappe.logger().warning(
-			"check_agent_token_age: agent_token is %dd old (max %dd; %dd remaining before hard rejection)",
-			age_days,
-			max_age_days,
-			max_age_days - age_days,
+	if days_left > 0:
+		status = frappe._("The Jarvis agent token is {0} days old. Rotate it within {1} days.").format(
+			age_days, days_left
 		)
+	else:
+		status = frappe._("The Jarvis agent token is {0} days old, past its {1}-day limit.").format(
+			age_days, max_age_days
+		)
+	notify_system_managers(
+		frappe._("Rotate the Jarvis agent token"),
+		status
+		+ " "
+		+ frappe._(
+			"Open Jarvis Settings and click Rotate Agent Token (the agent restarts for a few seconds)."
+		),
+	)

@@ -31,6 +31,12 @@ export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
 export const getPromptSuggestions = () =>
 	call("jarvis.chat.user_settings_api.get_prompt_suggestions");
 
+// The caller's own prefs. Carries default_auto_mode and auto_mode_acknowledged
+// (#581); update_my_settings takes either. Returns {ok, data}.
+const US = "jarvis.chat.user_settings_api.";
+export const getMySettings = () => call(US + "get_my_settings");
+export const updateMySettings = (p) => call(US + "update_my_settings", p || {});
+
 // An empty `conversation` is allowed: the backend creates (or focuses) the
 // user's empty conversation and returns its id as `conversation_id`, which
 // saves the new-chat round-trip before the very first send.
@@ -41,7 +47,7 @@ export const getPromptSuggestions = () =>
 export const sendMessage = (
 	conversation,
 	message,
-	{ attachments = [], model, thinking, approvalTokens } = {}
+	{ attachments = [], model, thinking, approvalTokens, autoMode } = {}
 ) =>
 	call(CHAT + "send_message", {
 		conversation: conversation || "",
@@ -55,6 +61,9 @@ export const sendMessage = (
 		...(approvalTokens && approvalTokens.length
 			? { approval_tokens: JSON.stringify(approvalTokens) }
 			: {}),
+		// Auto mode (#581) is chosen with a chat's first message only; the server
+		// ignores it on any chat that already has messages.
+		...(autoMode ? { auto_mode: 1 } : {}),
 	});
 
 export const stopRun = (conversation, runId) =>
@@ -181,3 +190,27 @@ export async function uploadFile(file) {
 // 150-second client budget, same error unwrapping. The mic is a place where two subtly
 // different clients would be two subtly different bugs.
 export { transcribeAudio } from "@shared/api/voice.js";
+
+// F01 recovery: a check only reads the scoped receipt, never resends a message.
+export const sendRecoverableMessage = (request) =>
+	call("jarvis.chat.send_requests.send_message", {
+		request_id: request.id,
+		conversation: request.conversation,
+		message: request.text,
+		attachments: JSON.stringify(
+			request.attachments.map((a) => ({ file_url: a.file_url, file_name: a.name }))
+		),
+		approval_tokens: JSON.stringify(request.approvalTokens),
+		...(request.model ? { model_override: request.model } : {}),
+		...(request.thinking ? { thinking_override: request.thinking } : {}),
+		...(request.autoMode ? { auto_mode: 1 } : {}),
+	});
+export const checkDelivery = (requestId) =>
+	call("jarvis.chat.send_requests.check_delivery", { request_id: requestId });
+
+// Reuse the desktop admission contract; these endpoints enforce ownership.
+export const activeQueuedTurn = (conversation) =>
+	call("jarvis.chat.admission.active_turn_for_conversation", { conversation });
+export const queuePosition = (run_id) => call("jarvis.chat.admission.queue_position", { run_id });
+export const cancelQueuedTurn = (run_id) =>
+	call("jarvis.chat.admission.cancel_queued_turn", { run_id });

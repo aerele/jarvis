@@ -83,7 +83,7 @@ class Harness:
 		from jarvis.chat import admission
 
 		self.durable_flag = frappe.conf.get(admission.FLAG)
-		self.durable_cap = frappe.conf.get("jarvis_site_max_inflight_turns")
+		self.durable_cap = admission._max_inflight()
 		self._cleanup()
 
 	def teardown(self):
@@ -309,7 +309,6 @@ def scenario_burst_incident(h: Harness, gateway: FakeGateway):
 		frappe = h.frappe
 		frappe.set_user(HARNESS_USER)
 		frappe.local.conf[admission.FLAG] = 1
-		frappe.local.conf["jarvis_site_max_inflight_turns"] = 4
 		admission._ensure_control_row(admission.DEFAULT_RELAY_TARGET)
 
 		run_tmpl: dict = {}
@@ -381,6 +380,9 @@ def scenario_burst_incident(h: Harness, gateway: FakeGateway):
 	rec_off.dump(os.path.join(h.out_dir, "trace_burst_flag_off.json"))
 
 	# --- FLAG ON (real admission cap 4) ---
+	# Pin the cap at 4 for the whole pass, whatever the site's Jarvis Settings carry.
+	real_max_inflight = admission._max_inflight
+	admission._max_inflight = lambda: 4
 	h.reset_shard_baseline()
 	rec_on = TraceRecorder(label="burst_flag_on")
 	R.set_active_recorder(rec_on)
@@ -396,8 +398,8 @@ def scenario_burst_incident(h: Harness, gateway: FakeGateway):
 	pool_on.stop()
 	rec_on.attach_gateway(gateway)
 	rec_on.dump(os.path.join(h.out_dir, "trace_burst_flag_on.json"))
-	# restore process cap override
-	h.frappe.local.conf.pop("jarvis_site_max_inflight_turns", None)
+	# restore the real cap
+	admission._max_inflight = real_max_inflight
 	h.frappe.local.conf[admission.FLAG] = h.durable_flag
 
 	return {

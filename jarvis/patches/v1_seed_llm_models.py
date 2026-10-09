@@ -17,7 +17,7 @@ import frappe
 
 
 def execute():
-	frappe.set_user("Administrator")
+	frappe.set_user("Administrator")  # nosemgrep: frappe-setuser -- one-shot migrate patch
 	settings = frappe.get_single("Jarvis Settings")
 
 	# Idempotent guard: already migrated

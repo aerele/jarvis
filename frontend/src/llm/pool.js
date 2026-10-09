@@ -552,7 +552,7 @@ export function apiKeyModelHealth(row, modelStatuses) {
 			label: detail ? `Not working: ${truncate(detail, 46)}` : "Not working",
 			title: detail
 				? `This model failed a test request: ${truncate(detail, 220)}`
-				: "This model failed a test request - check its API key, model id, and base URL. " +
+				: "This model failed a test request - check its API key, model id and base URL. " +
 				  "It's skipped during failover until it passes.",
 		};
 	}
@@ -582,7 +582,20 @@ export function apiKeyModelHealth(row, modelStatuses) {
 //     how an out-of-quota account got shown "Account connected" before anyone had
 //     checked it (2026-07-23 trace). Green there is earned only by an explicit
 //     "verified".
-export function subscriptionAccountHealth(status, { knownGood = true, warningDetail = "" } = {}) {
+export function subscriptionAccountHealth(
+	status,
+	{ knownGood = true, warningDetail = "", expired = null } = {}
+) {
+	// A dead sign-in (jarvis.subscription_health) is decided per ACCOUNT by the caller and beats the
+	// pool-wide probe verdict below: a "verified" snapshot from the last apply cannot vouch for it.
+	if (expired) {
+		const when = expired.since ? ` ${defaultFormatDate(expired.since)}` : "";
+		return {
+			level: "expired",
+			label: "Sign-in expired",
+			title: `Sign-in expired${when}. Reconnect it to restore chat.`,
+		};
+	}
 	if (status === "unverified") {
 		return {
 			level: "warn",
@@ -634,10 +647,81 @@ export function subscriptionAccountHealth(status, { knownGood = true, warningDet
 // never be confused for one another.
 export function dirtyAccountHealth(settled, isDirtyOrPending) {
 	if (!isDirtyOrPending) return settled;
+	if (settled.level === "expired") return settled;
 	if (settled.level !== "ok") return { level: "neutral" };
 	return {
 		level: "pending",
 		label: "Pending re-check",
 		title: "This account was verified before your latest changes. It will be re-checked once they're applied.",
 	};
+}
+
+// ---- expired chat-subscription sign-ins (jarvis.subscription_health) ----------------------------------
+// Entries come from the site: { account_ref, upstream, label, email, state: "expired", source, since,
+// fallback }. `fallback` is the label of the next row that can still answer, computed once on the site.
+
+function defaultFormatDate(epochSeconds) {
+	return new Date(Number(epochSeconds) * 1000).toLocaleDateString(undefined, {
+		year: "numeric",
+		month: "short",
+		day: "numeric",
+	});
+}
+
+// "Another OpenAI account" is a sentence-initial label; mid-sentence it reads "another OpenAI account".
+export function fallbackInSentence(fallback) {
+	return fallback.replace(/^Another /, "another ");
+}
+
+// Auto tries rows in pool order, so an expired row that sits after the answering one was already
+// being skipped: nothing switched, and "Auto uses X" would claim a change that did not happen.
+export function autoLine(entry) {
+	return entry.skipped
+		? "Auto skips it until you reconnect."
+		: `Auto uses ${fallbackInSentence(entry.fallback)} until you reconnect.`;
+}
+
+// The line under an expired row (spec 3). Another account in the SAME row that still works is the most
+// specific truth and wins over the pool-wide fallback.
+export function expiredLine(entry, { sameRowOk = false, formatDate = defaultFormatDate } = {}) {
+	if (!entry) return "";
+	// Skipped wins: Auto is already past this row, so a healthy sibling on it changes nothing.
+	if (sameRowOk && entry.skipped) return "Auto skips it until you reconnect.";
+	if (sameRowOk) return "Auto uses another account until you reconnect.";
+	if (entry.fallback) {
+		const when = entry.since ? `Expired ${formatDate(entry.since)}. ` : "";
+		return `${when}${autoLine(entry)}`;
+	}
+	return "Chats fail until you reconnect.";
+}
+
+export function expiredEntryMap(entries) {
+	return new Map(
+		(Array.isArray(entries) ? entries : [])
+			.filter((e) => e && e.account_ref)
+			.map((e) => [e.account_ref, e])
+	);
+}
+
+// One state per account on a row: { account, entry|null, line }. `line` is only set for an expired
+// account, and says "another account answers" when a sibling on the same row is not expired.
+export function accountExpiryStates(row, entries) {
+	const map = expiredEntryMap(entries);
+	const accounts = (row && row.accounts) || [];
+	const hits = accounts.map((a) => (a && a.account_ref && map.get(a.account_ref)) || null);
+	return accounts.map((account, i) => {
+		const entry = hits[i];
+		if (!entry) return { account, entry: null, line: "" };
+		const sameRowOk = hits.some((h, j) => j !== i && !h);
+		return { account, entry, line: expiredLine(entry, { sameRowOk }) };
+	});
+}
+
+// A subscription row is expired as a whole only when EVERY account on it is. With one still working
+// the row keeps its normal health and the dead account is badged on its own sub-row.
+export function rowExpiry(row, entries) {
+	if (!row || row.credentialType !== "subscription") return null;
+	const states = accountExpiryStates(row, entries);
+	if (!states.length || states.some((s) => !s.entry)) return null;
+	return { entry: states[0].entry, line: states[0].line };
 }

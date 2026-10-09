@@ -6,6 +6,7 @@
 import { computed, ref } from "vue";
 import { Badge } from "frappe-ui";
 import { getCapabilityCatalog, logCapabilityPick } from "@/api";
+import { brand } from "@/branding";
 import { BADGE_META, CATALOG_LEGEND } from "@/lib/capabilityBadges";
 
 const emit = defineEmits(["select"]);
@@ -60,7 +61,7 @@ const meta = (tier) => BADGE_META[tier] || { theme: "gray", label: tier };
 <template>
 	<div class="jv-catalog">
 		<button type="button" class="jv-catalog-toggle" :aria-expanded="open" @click="toggle">
-			What can I ask Jarvis?
+			What can I ask {{ brand.agentName }}?
 			<span class="jv-catalog-chev" :class="{ 'is-open': open }" aria-hidden="true">›</span>
 		</button>
 
@@ -97,7 +98,7 @@ const meta = (tier) => BADGE_META[tier] || { theme: "gray", label: tier };
 						/>
 					</button>
 				</div>
-				<p class="jv-catalog-hint">Tap one to start — you can edit before sending.</p>
+				<p class="jv-catalog-hint">Tap one to start. You can edit before sending.</p>
 			</template>
 		</div>
 	</div>

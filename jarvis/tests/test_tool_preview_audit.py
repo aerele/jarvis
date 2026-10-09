@@ -107,8 +107,8 @@ class TestWriteAudit(FrappeTestCase):
 		self.assertFalse(rec.called)
 
 	def test_download_pdf_write_is_audited(self):
-		# F25: download_pdf inserts a new File doc (and attaches it to the
-		# source record) but was absent from _WRITE_TOOLS.
+		# F25: download_pdf inserts a new (private, unattached) File doc but
+		# was absent from _WRITE_TOOLS.
 		with (
 			patch("jarvis.api.dispatch", return_value={"file_url": "/private/files/x.pdf"}),
 			patch("jarvis.api.audit.record") as rec,
@@ -155,7 +155,8 @@ class TestWriteAudit(FrappeTestCase):
 			patch("jarvis.api.dispatch", side_effect=fake_dispatch),
 			patch.object(api, "_GATED_WRITES", frozenset()),
 		):
-			r = api._run_tool("run_method", {"method": "x", "preview": True})
+			# update_doc: run_method is no longer trial-run at all (round 2, R2-2).
+			r = api._run_tool("update_doc", {"doctype": "ToDo", "name": "x", "preview": True})
 		self.assertTrue(r["ok"])
 		self.assertTrue(r["data"]["preview"])
 		self.assertFalse(frappe.db.exists("ToDo", {"description": sentinel}))

@@ -97,7 +97,7 @@ def enqueue_learned_skills_push(chain_custom_reconcile: bool = False) -> dict:
 	frappe.db.set_single_value(
 		_SETTINGS, "learned_skills_sync_status", _PENDING_STATUS, update_modified=False
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- visible to the job before enqueue
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	frappe.enqueue(
 		"jarvis.chat.learned_skills_api._enqueued_push_learned_skills",
@@ -146,7 +146,7 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 				"failed: skipped (concurrent sync)",
 				update_modified=False,
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync status
 			return
 
 		terminal_written = False
@@ -154,8 +154,7 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 		try:
 			payload, held_back = learned_push_split()
 			admin_client.post_push_learned_skills(learned_skills=payload)
-			frappe.db.set_value(
-				_SETTINGS,
+			frappe.db.set_single_value(
 				_SETTINGS,
 				{
 					"learned_skills_synced_at": frappe.utils.now(),
@@ -191,7 +190,7 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 					_fail("failed: unexpected error; see Error Log")
 				except Exception:
 					pass
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync status
 		if push_ok and chain_custom_reconcile:
 			_enqueue_cutover_custom_reconcile()
 
@@ -250,8 +249,7 @@ def _ok_status(installed: int, role_restricted: int) -> str:
 
 
 def _fail(status: str) -> None:
-	frappe.db.set_value(
-		_SETTINGS,
+	frappe.db.set_single_value(
 		_SETTINGS,
 		{"learned_skills_synced_at": frappe.utils.now(), "learned_skills_sync_status": status},
 		update_modified=False,

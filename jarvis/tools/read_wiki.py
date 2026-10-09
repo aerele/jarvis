@@ -113,16 +113,12 @@ def _visible_links(by_page: dict) -> dict[str, list[str]]:
 	if not wanted:
 		return {name: [] for name in parsed}
 
-	where = "status = 'Active'"
-	vis = (wiki_permissions.visible_scope_condition(frappe.session.user) or "").strip()
-	if vis:
-		where += f" and ({vis})"
-	rows = frappe.db.sql(
-		f"select slug from `tabJarvis Wiki Page` where {where} and slug in %(slugs)s",
-		{"slugs": wanted},
-		as_dict=True,
-	)
-	allowed = {r.slug for r in rows}
+	page = frappe.qb.DocType(WIKI)
+	q = frappe.qb.from_(page).select(page.slug).where((page.status == "Active") & page.slug.isin(wanted))
+	vis = wiki_permissions.visible_scope_criterion(page, frappe.session.user)
+	if vis is not None:
+		q = q.where(vis)
+	allowed = set(q.run(pluck=True))
 	return {name: [t for t in targets if t in allowed] for name, targets in parsed.items()}
 
 
@@ -132,25 +128,33 @@ def _search(query: str, limit: int) -> list[dict]:
 		raise InvalidArgumentError("query must not be empty")
 	if not frappe.has_permission(WIKI, ptype="read"):
 		raise PermissionDeniedError(f"no read permission on {WIKI}")
-	# Raw SQL: the scope-visibility fragment (pre-escaped by
-	# wiki_permissions) doesn't fit get_all's filters, and post-filtering
-	# would silently shrink the LIMIT.
-	where = "status = 'Active'"
-	vis = (wiki_permissions.visible_scope_condition(frappe.session.user) or "").strip()
-	if vis:
-		where += f" and ({vis})"
-	rows = frappe.db.sql(
-		f"""select name, slug, title, page_type, summary, manual_links,
-			last_confirmed_at, modified
-		from `tabJarvis Wiki Page`
-		where {where}
-			and (slug like %(like)s or title like %(like)s
-				or summary like %(like)s or ref_name = %(query)s)
-		order by modified desc
-		limit %(limit)s""",
-		{"like": f"%{query[:140]}%", "query": query, "limit": limit},
-		as_dict=True,
+	# qb, not get_all: the scope-visibility criterion doesn't fit get_all's
+	# filters, and post-filtering would silently shrink the LIMIT.
+	page = frappe.qb.DocType(WIKI)
+	like = f"%{query[:140]}%"
+	q = (
+		frappe.qb.from_(page)
+		.select(
+			page.name,
+			page.slug,
+			page.title,
+			page.page_type,
+			page.summary,
+			page.manual_links,
+			page.last_confirmed_at,
+			page.modified,
+		)
+		.where(page.status == "Active")
+		.where(
+			page.slug.like(like) | page.title.like(like) | page.summary.like(like) | (page.ref_name == query)
+		)
+		.orderby(page.modified, order=frappe.qb.desc)
+		.limit(limit)
 	)
+	vis = wiki_permissions.visible_scope_criterion(page, frappe.session.user)
+	if vis is not None:
+		q = q.where(vis)
+	rows = q.run(as_dict=True)
 	links = _visible_links({r.name: r.manual_links for r in rows})
 	return [
 		{

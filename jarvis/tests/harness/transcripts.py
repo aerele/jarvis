@@ -52,6 +52,14 @@ import os
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "transcripts")
 
+# The agent runtime's empty replies: the plain form (sent again once) and the form that
+# says tool actions may be done (never sent again).
+EMPTY_REPLY = "\u26a0\ufe0f Agent couldn't generate a response. Please try again."
+EMPTY_REPLY_TOOLS = (
+	"\u26a0\ufe0f Agent couldn't generate a response. Note: some tool actions may have "
+	"already been executed \u2014 please verify before retrying."
+)
+
 
 def _stream_text(full: str, chunk_words: int = 2) -> list[dict]:
 	"""Expand a full answer into cumulative assistant deltas (word-chunked),
@@ -300,6 +308,79 @@ def _build() -> dict[str, dict]:
 			{"op": "tool_end", "call_id": "e2", "status": "completed"},
 		],
 		"terminal": {"kind": "failed_final", "stopReason": "stop"},
+	}
+
+	# admin-v2#656: after the chat's model changes, the runtime refuses to resume
+	# its live Claude CLI process and fails the run before producing anything. The
+	# failure discards the stale process, so the same message sent again under a
+	# fresh key starts a new one and succeeds. The pump re-sends exactly once.
+	stale_cli = "Managed CLI live session is no longer reusable. | cli_live_session_changed"
+	t["stale-cli-session"] = {
+		"name": "stale-cli-session",
+		"description": (
+			"Claude CLI live session refused after a model change: an error terminal with no "
+			"frames at all. The pump re-sends it once under a fresh key (admin-v2#656)."
+		),
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [],
+		"terminal": {"kind": "error", "state": "error", "errorMessage": stale_cli},
+	}
+	# Same error after output reached the user: re-sending would repeat it, so it settles.
+	t["stale-cli-session-after-output"] = {
+		"name": "stale-cli-session-after-output",
+		"description": "The stale-session error after a streamed delta: must settle, never re-send.",
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": _stream_text("Checking the invoices now."),
+		"terminal": {"kind": "error", "state": "error", "errorMessage": stale_cli},
+	}
+	# The runtime's plain empty reply (the model sent back nothing) with no frames: the
+	# pump sends the turn again once.
+	t["empty-reply"] = {
+		"name": "empty-reply",
+		"description": "The plain empty reply before any frame: the pump re-sends it once.",
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [],
+		"terminal": {"kind": "error", "state": "error", "errorMessage": EMPTY_REPLY},
+	}
+	# The other empty replies settle and are never sent again: tool actions may be done
+	# (tools), the sentence alone (bare), more text around it (other).
+	for variant, text in (
+		("tools", EMPTY_REPLY_TOOLS),
+		("bare", "Agent couldn't generate a response."),
+		("other", f"{EMPTY_REPLY} Then contact support."),
+	):
+		t[f"empty-reply-{variant}"] = {
+			"name": f"empty-reply-{variant}",
+			"description": f"The {variant} empty reply: settles, never re-sent.",
+			"ack": {"status": "started"},
+			"ack_behavior": "normal",
+			"frames": [],
+			"terminal": {"kind": "error", "state": "error", "errorMessage": text},
+		}
+	# A relayed tool event (callback-owned: no row yet) moved ``last_event_seq``: the
+	# requeue CAS refuses it.
+	t["empty-reply-after-tool-event"] = {
+		"name": "empty-reply-after-tool-event",
+		"description": "The plain empty reply after a relayed tool event: settles, never re-sent.",
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [
+			{"op": "tool_start", "name": "jarvis__get_list", "call_id": "er1", "title": "get_list Customer"},
+			{"op": "tool_end", "call_id": "er1", "status": "completed"},
+		],
+		"terminal": {"kind": "error", "state": "error", "errorMessage": EMPTY_REPLY},
+	}
+	# Any other error before output keeps today's behaviour: one attempt, then the card.
+	t["plain-error"] = {
+		"name": "plain-error",
+		"description": "An unrelated error terminal with no frames: settles errored, no re-send.",
+		"ack": {"status": "started"},
+		"ack_behavior": "normal",
+		"frames": [],
+		"terminal": {"kind": "error", "state": "error", "errorMessage": "upstream closed the stream"},
 	}
 
 	return t

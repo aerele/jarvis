@@ -29,8 +29,9 @@
 					<span class="eyebrow">Welcome</span>
 					<h2>Harness AI agents inside your ERPNext.</h2>
 					<p>
-						{{ agentName }} is an AI teammate that lives in your ERP. Ask a question,
-						hand off a task, or let it watch the books, all in plain language.
+						{{ brand.agentName }} is an AI teammate that lives in your ERP. Ask a
+						question, hand off a task, or let it watch the books, all in plain
+						language.
 					</p>
 					<ul class="pts">
 						<li>
@@ -94,7 +95,8 @@
 				</div>
 				<div class="mock">
 					<div class="mock-bar">
-						<i></i><i></i><i></i><span>{{ agentName }} · Stock &amp; dispatch</span>
+						<i></i><i></i><i></i
+						><span>{{ brand.agentName }} · Stock &amp; dispatch</span>
 					</div>
 					<div class="mock-body">
 						<div class="m-side" v-html="sideHtml('')"></div>
@@ -205,9 +207,9 @@
 					<span class="eyebrow">Skills &amp; Knowledge</span>
 					<h2>It learns how your business runs.</h2>
 					<p>
-						{{ agentName }} ships knowing Frappe &amp; ERPNext, then keeps a private
-						wiki of how <em>your</em> team works: your terms, rules and routines, so
-						every answer fits your business, not a generic one.
+						{{ brand.agentName }} ships knowing Frappe &amp; ERPNext, then keeps a
+						private wiki of how <em>your</em> team works: your terms, rules and
+						routines, so every answer fits your business, not a generic one.
 					</p>
 				</div>
 				<div class="mock">
@@ -502,9 +504,9 @@
 					<span class="eyebrow">File Box</span>
 					<h2>Drop files in, get clean entries out.</h2>
 					<p>
-						Upload invoices, bank statements or price lists. {{ agentName }} reads
-						them, extracts the details, and drafts the entries in ERPNext. You just
-						review and approve.
+						Upload invoices, bank statements or price lists.
+						{{ brand.agentName }} reads them, extracts the details, and drafts the
+						entries in ERPNext. You just review and approve.
 					</p>
 				</div>
 				<div class="mock">
@@ -581,14 +583,14 @@
 					<span class="eyebrow">Dashboards</span>
 					<h2>Ask for a chart. Watch it build.</h2>
 					<p>
-						Describe what you want to see in plain words and {{ agentName }} draws it
-						on a live canvas. Keep the ones that matter, save them to your dashboard,
-						and share them with the users you choose.
+						Describe what you want to see in plain words and
+						{{ brand.agentName }} draws it on a live canvas. Keep the ones that matter,
+						save them to your dashboard and share them with the users you choose.
 					</p>
 					<p class="final-call">
 						<mark
-							>Ready to see it on your data? Onboard {{ agentName }} and explore
-							everything hands-on. It takes about two minutes.</mark
+							>Ready to see it on your data? Onboard {{ brand.agentName }} and
+							explore everything hands-on. It takes about two minutes.</mark
 						>
 					</p>
 					<a
@@ -689,7 +691,7 @@
 					Next
 				</button>
 				<button v-else class="btn btn--primary btn--sm" @click="$emit('finish')">
-					Onboard {{ agentName }}
+					Onboard {{ brand.agentName }}
 				</button>
 			</div>
 		</div>
@@ -698,7 +700,7 @@
 
 <script setup>
 import { ref, computed, watch, onUnmounted } from "vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { PERMISSION_TOUR_COPY } from "@/onboarding/permissionCopy";
 
 // 'finish' = the final-slide CTA (or advancing past the last slide);
@@ -995,7 +997,7 @@ function sideHtml(active) {
 		  ).join("")
 		: "";
 	return (
-		`<div class="m-brand"><span class="d"><svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"/></svg></span><span class="col"><b>${agentName}</b><small>Administrator</small></span></div>` +
+		`<div class="m-brand"><span class="d"><svg width="10" height="10" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"/></svg></span><span class="col"><b>${brand.agentName}</b><small>Administrator</small></span></div>` +
 		`<div class="m-act">${FI('<path d="M12 5v14M5 12h14"/>')}New Chat</div>` +
 		`<div class="m-act">${FI(
 			'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>'

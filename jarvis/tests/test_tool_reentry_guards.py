@@ -35,6 +35,10 @@ POST_ONLY = (
 	"jarvis.chat.approvals_api.edit_and_create_held",
 	"jarvis.chat.actions_api.apply_action",
 	"jarvis.chat.macros_api.run_macro",
+	"jarvis.chat.macros_admin_api.admin_list_macros",
+	"jarvis.chat.macros_admin_api.admin_macro_owners",
+	"jarvis.chat.macros_admin_api.admin_get_macro",
+	"jarvis.chat.macros_admin_api.admin_stop_run",
 	"jarvis.chat.admission.cancel_queued_turn",
 	"jarvis.chat.agents_api.take_finding_to_chat",
 	"jarvis.chat.agents_api.install_agent",  # writes the tenant-wide model: never on a GET
@@ -61,6 +65,10 @@ NESTED_REFUSED = {
 	"jarvis.chat.actions_api.approve_and_run": {"token": "zz-no-token"},
 	"jarvis.chat.actions_api.dismiss_tool": {"token": "zz-no-token"},
 	"jarvis.chat.macros_api.run_macro": {"name": "zz-no-macro"},
+	"jarvis.chat.macros_admin_api.admin_list_macros": {},
+	"jarvis.chat.macros_admin_api.admin_macro_owners": {},
+	"jarvis.chat.macros_admin_api.admin_get_macro": {"name": "zz-no-macro"},
+	"jarvis.chat.macros_admin_api.admin_stop_run": {"run": "zz-no-run"},
 	"jarvis.chat.approvals_api.decide": {"name": "zz-no-ar", "decision": "yes"},
 	"jarvis.chat.approvals_api.dismiss_approval": {"name": "zz-no-ar"},
 	"jarvis.chat.approvals_api.restore_approval": {"name": "zz-no-ar"},
@@ -235,10 +243,44 @@ class TestRunMethodDenylist(FrappeTestCase):
 		("jarvis.chat.api.archive_conversation", {"conversation": "zz"}),
 		("jarvis.chat.api.clear_chat_history", {}),
 		("jarvis.chat.macros_api.run_macro", {"name": "zz"}),
+		("jarvis.chat.macros_admin_api.admin_list_macros", {}),
+		("jarvis.chat.macros_admin_api.admin_macro_owners", {}),
+		("jarvis.chat.macros_admin_api.admin_get_macro", {"name": "zz"}),
+		("jarvis.chat.macros_admin_api.admin_stop_run", {"run": "zz"}),
 		("jarvis.api.call_tool", {"tool": "get_schema", "args": {"doctype": "ToDo"}}),
 		("jarvis.chat.pending_actions.operator_fail", {"name": "zz"}),
 		("jarvis.chat.pending_actions.operator_settle", {"name": "zz"}),
 	)
+
+	def test_skill_and_learning_endpoints_are_refused_without_running(self):
+		# Every endpoint of the three modules, found in Frappe's own registry, so one
+		# added later is covered without naming it here.
+		from jarvis.chat import app_learning_api, custom_skills_api, learned_api
+
+		for module in (custom_skills_api, learned_api, app_learning_api):
+			names = sorted(
+				fn.__name__ for fn in frappe.whitelisted if getattr(fn, "__module__", "") == module.__name__
+			)
+			self.assertTrue(names, module.__name__)
+			for name in names:
+				with self.subTest(method=f"{module.__name__}.{name}"):
+					with patch("frappe.call") as call:
+						with self.assertRaises(PermissionDeniedError):
+							run_method(f"{module.__name__}.{name}", {})
+					call.assert_not_called()
+
+	def test_workspace_reset_and_seeding_are_refused_without_running(self):
+		for method in (
+			"jarvis.onboarding.request_workspace_reset",
+			"jarvis.onboarding.reset_onboarding",
+			"jarvis.chat.dev_seed.seed_varied_approvals",
+			"jarvis.chat.dev_seed.seed_feature_pages",
+		):
+			with self.subTest(method=method):
+				with patch("frappe.call") as call:
+					with self.assertRaises(PermissionDeniedError):
+						run_method(method, {})
+				call.assert_not_called()
 
 	def test_denied_targets_are_refused_without_running(self):
 		for method, args in self.DENIED:

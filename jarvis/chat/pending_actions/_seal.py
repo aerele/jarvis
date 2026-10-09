@@ -31,6 +31,9 @@ BOUND_FIELDS = (
 	"origin_conversation",
 	"skill_docname",
 	"run_id",
+	# R2-3: the failed card this one corrects. Bound so clearing it in the table
+	# (to win a second correction) reads as tampered; "" on rows sealed before it.
+	"corrects",
 )
 
 
@@ -142,6 +145,22 @@ def unseal_settlement(row) -> dict | None:
 	if payload.get("name") != row.get("name"):
 		raise SealError("tampered", "name")
 	return payload
+
+
+def seal_undo(name: str, undo: dict) -> str:
+	"""Seal what a guarded structure write's clean-up needs (the before-image of the
+	record it changes), bound to the row it rides on."""
+	return _encrypt({"undo": undo, "v": VERSION, "name": name})
+
+
+def unseal_undo(row) -> dict | None:
+	"""The sealed clean-up state of ``row``, or None when it carries none."""
+	if not row.get("sealed_undo"):
+		return None
+	payload = _open(row.get("sealed_undo"))
+	if payload.get("name") != row.get("name"):
+		raise SealError("tampered", "name")
+	return payload.get("undo") or {}
 
 
 def open_key(owner: str, dedup_key: str) -> str:

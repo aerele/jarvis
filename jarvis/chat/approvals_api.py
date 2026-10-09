@@ -15,6 +15,8 @@ import json
 import math
 
 import frappe
+from frappe.query_builder.functions import Coalesce, Count, IfNull, NullIf, Trim
+from pypika.terms import Criterion, ExistsCriterion, Not, ValueWrapper
 
 from jarvis._session import impersonate
 from jarvis.chat import filebox_skills
@@ -231,12 +233,20 @@ def _load_filters(filters, allowed: set) -> dict:
 	return out
 
 
-def _order_by(sort_field, sort_dir, sortable: dict, default_field, default_dir, prefix="") -> str:
-	col = sortable.get(sort_field or "")
-	if not col:
-		return f"{prefix}`{sortable[default_field]}` {default_dir}, {prefix}`name` asc"
-	d = "desc" if (sort_dir or "").lower() == "desc" else "asc"
-	return f"{prefix}`{col}` {d}, {prefix}`name` asc"
+def _owns_conversation(a, me: str):
+	c = frappe.qb.DocType("Jarvis Conversation").as_("c")
+	return ExistsCriterion(frappe.qb.from_(c).select(1).where((c.name == a.conversation) & (c.owner == me)))
+
+
+def _tagged(a, me: str):
+	ds = frappe.qb.DocType("DocShare").as_("ds")
+	return ExistsCriterion(
+		frappe.qb.from_(ds)
+		.select(1)
+		.where(
+			(ds.share_doctype == APPROVAL) & (ds.share_name == a.name) & (ds.user == me) & (ds["read"] == 1)
+		)
+	)
 
 
 @frappe.whitelist()
@@ -266,84 +276,79 @@ def list_approvals_page(
 	f = _load_filters(filters, _APPROVALS_FILTERS)
 	is_sm = "System Manager" in frappe.get_roles()
 
-	from_sql = "`tabJarvis Approval Request` a"
-
-	params: dict = {"me": me, "start": start, "page_length": pl}
+	a = frappe.qb.DocType(APPROVAL).as_("a")
 
 	# `base` applies to BOTH the main query and the facet query; the
 	# document_type filter applies ONLY to the main query (facets drop it).
-	base: list[str] = []
 	# Wiki-write proposals live on the reviewer lane only (SoD) - keep them OFF
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
-	params["wiki_src"] = FILE_BOX_WIKI_SOURCE
-	base.append("(a.source IS NULL OR a.source <> %(wiki_src)s)")
+	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
 	if _ar.sheet_ready():
-		base.append("IFNULL(a.sheet, '') = ''")  # answered in its File Box sheet
+		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	if not is_sm:
 		# Owner OR tagged: the caller owns the linked conversation, or holds a
 		# DocShare read grant on the approval (docmeta_api.toggle_share /
 		# assignment). EXISTS, not JOIN: a row matching BOTH arms must still
 		# appear exactly once in rows/total/facets.
-		base.append(
-			"(EXISTS (SELECT 1 FROM `tabJarvis Conversation` c "
-			"WHERE c.name = a.conversation AND c.owner = %(me)s) "
-			"OR EXISTS (SELECT 1 FROM `tabDocShare` ds "
-			"WHERE ds.share_doctype = 'Jarvis Approval Request' "
-			"AND ds.share_name = a.name "
-			"AND ds.user = %(me)s AND ds.`read` = 1))"
-		)
+		base.append(_owns_conversation(a, me) | _tagged(a, me))
 	status = f.get("status") or "Pending"
 	if status not in _APPROVAL_STATUSES:
 		frappe.throw("Invalid status filter")
 	if status == "Decided":
-		base.append("a.status IN ('Approved', 'Rejected')")
+		base.append(a.status.isin(("Approved", "Rejected")))
 	elif status != "All":
-		params["status"] = status
-		base.append("a.status = %(status)s")
+		base.append(a.status == status)
 	if "conversation" in f:
-		params["conv"] = f["conversation"]
-		base.append("a.conversation = %(conv)s")
+		base.append(a.conversation == str(f["conversation"]))
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		base.append("(a.title LIKE %(q)s OR a.question LIKE %(q)s OR a.ref_name LIKE %(q)s)")
+		q = f"%{_lk(search)}%"
+		base.append(a.title.like(q) | a.question.like(q) | a.ref_name.like(q))
 
-	doc_cond = None
+	main = list(base)
 	if "document_type" in f:
-		dt = f["document_type"]
-		if dt == "Unclassified":
-			doc_cond = "TRIM(COALESCE(a.document_type, '')) = ''"
-		else:
-			params["dt"] = dt
-			doc_cond = "a.document_type = %(dt)s"
+		dt = str(f["document_type"])
+		main.append(
+			Trim(Coalesce(a.document_type, "")) == "" if dt == "Unclassified" else a.document_type == dt
+		)
 
-	main_where = " AND ".join(base + ([doc_cond] if doc_cond else [])) or "1=1"
-	base_where = " AND ".join(base) or "1=1"
-	order = _order_by(sort_field, sort_dir, _APPROVALS_SORTABLE, "creation", "desc", prefix="a.")
+	sort_col = _APPROVALS_SORTABLE.get(sort_field or "")
+	sort_order = frappe.qb.desc if not sort_col or (sort_dir or "").lower() == "desc" else frappe.qb.asc
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM {from_sql} WHERE {main_where}", params)[0][0]
+	total = frappe.qb.from_(a).select(Count("*")).where(Criterion.all(main)).run()[0][0]
 	# `shared` (contract): non-SM rows the caller sees WITHOUT owning the linked
 	# conversation (i.e. only via a DocShare tag) carry 1; SM sees all rows by
 	# role, so shared is hardcoded 0 there.
-	shared_expr = (
-		"0 AS shared"
-		if is_sm
-		else "(NOT EXISTS (SELECT 1 FROM `tabJarvis Conversation` c "
-		"WHERE c.name = a.conversation AND c.owner = %(me)s)) AS shared"
-	)
-	rows = frappe.db.sql(
-		f"""SELECT a.name, a.title, a.status, a.source, a.document_type, a.question,
-		a.context_md, a.options, a.conversation, a.ref_doctype, a.ref_name,
-		a.decision, a.decided_by, a.decided_at, a.creation,
-		COALESCE((SELECT oc.origin_page FROM `tabJarvis Conversation` oc
-		          WHERE oc.name = a.conversation), '') AS origin_page,
-		{shared_expr}
-		FROM {from_sql}
-		WHERE {main_where}
-		ORDER BY {order}
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	shared = ValueWrapper(0) if is_sm else Not(_owns_conversation(a, me))
+	oc = frappe.qb.DocType("Jarvis Conversation").as_("oc")
+	origin_page = frappe.qb.from_(oc).select(oc.origin_page).where(oc.name == a.conversation)
+	rows = (
+		frappe.qb.from_(a)
+		.select(
+			a.name,
+			a.title,
+			a.status,
+			a.source,
+			a.document_type,
+			a.question,
+			a.context_md,
+			a.options,
+			a.conversation,
+			a.ref_doctype,
+			a.ref_name,
+			a.decision,
+			a.decided_by,
+			a.decided_at,
+			a.creation,
+			Coalesce(origin_page, "").as_("origin_page"),
+			shared.as_("shared"),
+		)
+		.where(Criterion.all(main))
+		.orderby(a[sort_col or "creation"], order=sort_order)
+		.orderby(a.name, order=frappe.qb.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
@@ -351,15 +356,15 @@ def list_approvals_page(
 		# NULL = a row from before the source field existed = File Box.
 		r["source"] = r.get("source") or "File Box"
 
-	facet_rows = frappe.db.sql(
-		f"""SELECT COALESCE(NULLIF(TRIM(a.document_type), ''), 'Unclassified') AS dtv,
-		COUNT(*) AS n
-		FROM {from_sql}
-		WHERE {base_where}
-		GROUP BY dtv
-		ORDER BY n DESC""",
-		params,
-		as_dict=True,
+	dtv = Coalesce(NullIf(Trim(a.document_type), ""), "Unclassified").as_("dtv")
+	n = Count("*").as_("n")
+	facet_rows = (
+		frappe.qb.from_(a)
+		.select(dtv, n)
+		.where(Criterion.all(base))
+		.groupby(dtv)
+		.orderby(n, order=frappe.qb.desc)
+		.run(as_dict=True)
 	)
 	facets = {"document_type": [{"value": x.dtv, "count": x.n} for x in facet_rows]}
 
@@ -375,7 +380,16 @@ def list_approvals_page(
 	# never create rows, so the board derives them. First page only — the
 	# lane sits above the rail and pagination never re-renders it.
 	if start == 0:
+		from jarvis.chat.report_runs import ready_reports
+
 		out["awaiting_reply"] = _awaiting_reply(me)
+		out["open_drafts"] = _open_drafts(me)
+		try:
+			out["ready_reports"] = ready_reports(me)
+		except Exception:
+			# a convenience list: it never takes the board down with it
+			frappe.log_error(title="jarvis.approvals: ready reports unavailable")
+			out["ready_reports"] = []
 	return out
 
 
@@ -451,7 +465,84 @@ def _awaiting_reply(me: str) -> list[dict]:
 			"last_at": str(r.last_at or ""),
 		}
 		for r in rows
+		if not _shows_a_card(r.content)  # the chat shows its card, listed under open drafts
 	]
+
+
+_CARD_FENCE = "%```jarvis-action%"
+
+
+def _shows_a_card(content: str | None) -> bool:
+	"""The chat draws this reply's card, not its question: its first ``jarvis-action``
+	block is a JSON object (ChatView ``actionOf``)."""
+	from jarvis.chat.filebox_cards import _ACTION_RE
+
+	m = _ACTION_RE.search(content or "")
+	if not m:
+		return False
+	try:
+		return isinstance(json.loads(m.group(1).strip()), dict)
+	except ValueError:
+		return False
+
+
+_OPEN_DRAFTS_MAX = 10
+
+
+def _open_drafts(me: str) -> list[dict]:
+	"""Create/update cards still open in chats OWNED by ``me``, newest first, at most
+	10. Read-only: confirming stays in the chat. Open is the chat page's live-card
+	rule: the chat's last turn message (user/assistant, not hidden; tool rows trail a
+	reply) is a finished reply carrying a create/update card. A Confirm's receipt or
+	any reply is a newer turn message, so the card closes. File Box chats are out:
+	their cards are held for the board already. Rows: {conversation, title,
+	origin_page, verb, doctype, summary, last_at}."""
+	from jarvis.chat.filebox_cards import parse_action
+
+	rows = frappe.db.sql(
+		"""SELECT c.name AS conversation, c.title, c.origin_page, m.content, m.creation AS last_at
+		FROM `tabJarvis Conversation` c
+		JOIN (SELECT mm.conversation, MAX(mm.seq) AS lseq
+		      FROM `tabJarvis Chat Message` mm
+		      JOIN `tabJarvis Conversation` mc
+		        ON mc.name = mm.conversation AND mc.owner = %(me)s
+		      WHERE mm.role IN ('user', 'assistant') AND mm.hidden = 0
+		      GROUP BY mm.conversation) x ON x.conversation = c.name
+		JOIN `tabJarvis Chat Message` m
+		  ON m.conversation = c.name AND m.seq = x.lseq
+		WHERE c.owner = %(me)s
+		AND c.status != 'Archived'
+		AND COALESCE(c.file_box, 0) = 0
+		AND m.role = 'assistant'
+		AND m.hidden = 0
+		AND m.streaming = 0
+		AND COALESCE(m.recovering, 0) = 0
+		AND m.content LIKE %(card)s
+		ORDER BY m.creation DESC
+		LIMIT 50""",
+		{"me": me, "card": _CARD_FENCE},
+		as_dict=True,
+	)
+	out = []
+	for r in rows:
+		a = parse_action(r.content)
+		if not a:
+			continue  # a submit/email card, or one the chat can't draw either
+		verb = a.get("verb") or "create"
+		out.append(
+			{
+				"conversation": r.conversation,
+				"title": r.title or "",
+				"origin_page": r.origin_page or "",
+				"verb": verb,
+				"doctype": a["doctype"],
+				"summary": str(a.get("summary") or a.get("title") or "")[:140],
+				"last_at": str(r.last_at or ""),
+			}
+		)
+		if len(out) == _OPEN_DRAFTS_MAX:
+			break
+	return out
 
 
 @frappe.whitelist()
@@ -465,9 +556,18 @@ def get_approval(name: str) -> dict:
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
 	can_act = _may_act_on(doc.conversation)
-	if not can_act and not frappe.db.exists(
-		"DocShare",
-		{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+	can_read = can_act
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import may_review
+
+		can_act = may_review(doc)
+	if (
+		not can_read
+		and not can_act
+		and not frappe.db.exists(
+			"DocShare",
+			{"share_doctype": APPROVAL, "share_name": name, "user": frappe.session.user, "read": 1},
+		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	return {
@@ -532,27 +632,21 @@ def _ar_pending_count() -> int:
 	# materializing the pending list. EXISTS also keeps the COUNT exact when a
 	# row matches both arms.
 	# Exclude wiki-write proposals (reviewer lane, not the customer badge).
-	# Raw SQL, NULL-safe: a `!=` filter would drop legacy rows (source NULL).
+	# NULL-safe: a `!=` filter would drop legacy rows (source NULL).
 	# A sheet's questions count through their sheet (the held count), never here.
-	unlinked = _unlinked()
-	if "System Manager" in frappe.get_roles():
-		return frappe.db.sql(
-			f"""SELECT COUNT(*) FROM `tabJarvis Approval Request`
-			WHERE status = 'Pending' AND (source IS NULL OR source <> %(wiki_src)s){unlinked}""",
-			{"wiki_src": FILE_BOX_WIKI_SOURCE},
-		)[0][0]
-	return frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tabJarvis Approval Request` a
-		WHERE a.status = 'Pending'
-		AND (a.source IS NULL OR a.source <> %(wiki_src)s){unlinked}
-		AND (EXISTS (SELECT 1 FROM `tabJarvis Conversation` c
-		             WHERE c.name = a.conversation AND c.owner = %(me)s)
-		     OR EXISTS (SELECT 1 FROM `tabDocShare` ds
-		                WHERE ds.share_doctype = 'Jarvis Approval Request'
-		                AND ds.share_name = a.name
-		                AND ds.user = %(me)s AND ds.`read` = 1))""",
-		{"me": frappe.session.user, "wiki_src": FILE_BOX_WIKI_SOURCE},
-	)[0][0]
+	a = frappe.qb.DocType(APPROVAL).as_("a")
+	query = (
+		frappe.qb.from_(a)
+		.select(Count("*"))
+		.where(a.status == "Pending")
+		.where(a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE))
+	)
+	if _ar.sheet_ready():
+		query = query.where(IfNull(a.sheet, "") == "")
+	if "System Manager" not in frappe.get_roles():
+		me = frappe.session.user
+		query = query.where(_owns_conversation(a, me) | _tagged(a, me))
+	return query.run()[0][0]
 
 
 def _resume_conversation(
@@ -614,7 +708,11 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, bool(int(approve)))
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.status != "Pending":
@@ -637,10 +735,12 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		(name, new_status, frappe.session.user),
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before reload and hooks
 	doc.reload()
 	# fire the trace-comment hook (db update bypasses on_update)
 	doc.run_method("on_update")
+	if doc.get("assessment_key"):
+		return {"ok": True, "status": doc.status, "resumed": False}
 
 	if doc.get("routing"):
 		return {"ok": True, "status": doc.status, "resumed": _apply_routing_answer(doc)}
@@ -711,7 +811,11 @@ def dismiss_approval(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, False)
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.status != "Pending":
@@ -730,7 +834,7 @@ def dismiss_approval(name: str) -> dict:
 		(name,),
 	):
 		frappe.throw(f"Approval {name} was decided concurrently")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resuming agent
 	resumed = False
 	if doc.get("routing"):
 		doc.decision = decision
@@ -746,7 +850,11 @@ def restore_approval(name: str) -> dict:
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
 	_refuse_if_wiki_write(doc)
-	if not _may_act_on(doc.conversation):
+	if doc.get("assessment_key"):
+		from jarvis.chat.operator_review import check_review
+
+		check_review(doc, False)
+	elif not _may_act_on(doc.conversation):
 		frappe.throw("Not permitted", frappe.PermissionError)
 	_refuse_if_linked(doc)
 	if doc.get("routing"):
@@ -764,7 +872,6 @@ def restore_approval(name: str) -> dict:
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Pending'", (name,)
 	):
 		frappe.throw(f"Approval {name} was changed concurrently")
-	frappe.db.commit()
 	return {"ok": True, "status": "Pending"}
 
 
@@ -857,32 +964,40 @@ def list_wiki_write_proposals(
 	if order not in ("newest", "oldest"):
 		frappe.throw("Invalid order")
 	start, pl = _clamp_page(start, page_length)
-	params: dict = {"src": FILE_BOX_WIKI_SOURCE, "start": start, "pl": pl}
-	where = ["a.source = %(src)s"]
+	a = frappe.qb.DocType(APPROVAL).as_("a")
+	where = a.source == FILE_BOX_WIKI_SOURCE
 	if status == "Actionable":
 		# Needs a reviewer's hand: awaiting decision, OR approved but the fenced
 		# write has not landed (Failed, or an interrupted Pending) — re-drivable.
-		where.append(
-			"(a.status = 'Pending' OR (a.status = 'Approved' "
-			"AND COALESCE(a.apply_status, 'Pending') <> 'Applied'))"
+		where &= (a.status == "Pending") | (
+			(a.status == "Approved") & (Coalesce(a.apply_status, "Pending") != "Applied")
 		)
 	elif status != "All":
-		params["status"] = status
-		where.append("a.status = %(status)s")
-	where_sql = " AND ".join(where)
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tabJarvis Approval Request` a WHERE {where_sql}", params)[
-		0
-	][0]
-	rows = frappe.db.sql(
-		f"""SELECT a.name, a.title, a.status, a.apply_status, a.apply_reason,
-		a.wiki_payload, a.wiki_digest, a.ref_name, a.conversation, a.owner, a.decision,
-		a.decided_by, a.decided_at, a.creation
-		FROM `tabJarvis Approval Request` a
-		WHERE {where_sql}
-		ORDER BY a.creation {"ASC" if order == "oldest" else "DESC"}
-		LIMIT %(pl)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+		where &= a.status == status
+	total = frappe.qb.from_(a).select(Count("*")).where(where).run()[0][0]
+	rows = (
+		frappe.qb.from_(a)
+		.select(
+			a.name,
+			a.title,
+			a.status,
+			a.apply_status,
+			a.apply_reason,
+			a.wiki_payload,
+			a.wiki_digest,
+			a.ref_name,
+			a.conversation,
+			a.owner,
+			a.decision,
+			a.decided_by,
+			a.decided_at,
+			a.creation,
+		)
+		.where(where)
+		.orderby(a.creation, order=frappe.qb.asc if order == "oldest" else frappe.qb.desc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 	for r in rows:
 		r["preview"] = _decode_wiki_preview(r.pop("wiki_payload", None))
@@ -988,7 +1103,7 @@ def _land_and_record(name: str, doc, dropper: str | None) -> dict:
 			token,
 		),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	return {
 		"ok": True,
 		"name": name,
@@ -1042,7 +1157,7 @@ def approve_wiki_write(name: str, expected_digest: str | None = None) -> dict:
 		if frappe.db.get_value(APPROVAL, name, "status") == "Pending":
 			frappe.throw(_WIKI_CHANGED, frappe.PermissionError)
 		frappe.throw(f"Proposal {name} was decided concurrently")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before landing file
 	return _land_and_record(name, doc, dropper)
 
 
@@ -1081,23 +1196,26 @@ def reject_wiki_write(name: str) -> dict:
 	if doc.status != "Pending" and not needs_retry:
 		frappe.throw(f"Proposal {name} is already {doc.status}")
 	me = frappe.session.user
+	ar = frappe.qb.DocType(APPROVAL)
 	cond = (
-		"status='Pending'"
+		ar.status == "Pending"
 		if doc.status == "Pending"
-		else "status='Approved' AND COALESCE(apply_status, 'Pending') <> 'Applied'"
+		else (ar.status == "Approved") & (Coalesce(ar.apply_status, "Pending") != "Applied")
 	)
-	frappe.db.sql(
-		f"""update `tabJarvis Approval Request`
-		set status='Rejected', decision=%s, decided_by=%s, decided_at=%s
-		where name=%s and {cond}""",
-		("(rejected - not written to the wiki)", me, frappe.utils.now_datetime(), name),
+	(
+		frappe.qb.update(ar)
+		.set(ar.status, "Rejected")
+		.set(ar.decision, "(rejected - not written to the wiki)")
+		.set(ar.decided_by, me)
+		.set(ar.decided_at, frappe.utils.now_datetime())
+		.where((ar.name == name) & cond)
+		.run()
 	)
 	if not frappe.db.sql(
 		"select 1 from `tabJarvis Approval Request` where name=%s and status='Rejected' and decided_by=%s",
 		(name, me),
 	):
 		frappe.throw(f"Proposal {name} was decided concurrently")
-	frappe.db.commit()
 	return {"ok": True, "name": name, "status": "Rejected"}
 
 
@@ -1214,30 +1332,23 @@ def list_pending_actions_lane() -> dict:
 	if not table_ready():
 		return {"rows": [], "total": 0}
 	me = frappe.session.user
-	params = {
-		"held": HELD,
-		"chat": CHAT,
-		"sm": int("System Manager" in frappe.get_roles()),
-		"me": me,
-		"lim": _HELD_LANE_LIMIT,
-	}
+	sm = int("System Manager" in frappe.get_roles())
+	params = {"sm": sm, "me": me, "lim": _HELD_LANE_LIMIT}
 	rows = []
 	# One capped query per kind: an SM's backlog of held rows never crowds out their own cards.
-	for scope in (
-		"pa.kind = %(held)s AND (%(sm)s OR pa.owner_user = %(me)s)",
-		"pa.kind = %(chat)s AND pa.owner_user = %(me)s",
-	):
+	for kind, any_owner in ((HELD, sm), (CHAT, 0)):
 		rows += frappe.db.sql(
-			f"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
+			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
 			pa.conversation, c.title AS conversation_title, c.origin_page,
 			(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
 			 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
 			FROM `tabJarvis Pending Action` pa
 			LEFT JOIN `tabJarvis Conversation` c ON c.name = pa.conversation
-			WHERE pa.status IN ('Pending', 'Executing') AND {scope}
+			WHERE pa.status IN ('Pending', 'Executing') AND pa.kind = %(kind)s
+			AND (%(any_owner)s OR pa.owner_user = %(me)s)
 			ORDER BY pa.creation ASC, pa.name ASC
 			LIMIT %(lim)s""",
-			params,
+			{**params, "kind": kind, "any_owner": any_owner},
 			as_dict=True,
 		)
 	# ``collecting``/``record_count``/``sheet_counts`` name the S1a migrate's columns:
@@ -1515,7 +1626,7 @@ def _lock_pending(name: str):
 	"""Commit, then take the row lock without waiting: ``(row, refusal)``."""
 	from jarvis.chat.pending_actions._store import get_row
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking read
 	try:
 		return get_row(name, lock="nowait"), None
 	except (frappe.QueryTimeoutError, frappe.QueryDeadlockError):
@@ -1625,7 +1736,7 @@ def _seal_failed(locked, approver: str, e) -> dict:
 		title=f"jarvis.pending_action.{e.reason_code}",
 		message=f"{locked.name}: failed binding {e.binding}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	return _held_refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED, outcome="failed")
 
@@ -1681,7 +1792,7 @@ def _use_existing_locked(row, approver: str, link) -> dict:
 		result_name=link,
 		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	return {**result, "reason_code": "use_existing", "pa_status": EXECUTED, "outcome": "confirmed"}
 
@@ -1749,9 +1860,27 @@ def _edit_dry_run(tool: str, args: dict, items: list[dict]) -> dict | None:
 	come back inline, anything else as a banner; nothing is claimed."""
 	from jarvis import api
 	from jarvis.chat import held_writes
+	from jarvis.tools import _write_risk
 
 	try:
+		# A structure change is refused before the dry run (round 2): set up in Desk.
+		_write_risk.check(tool, args)
+	except api.WriteRefusedError as e:
+		frappe.clear_messages()
+		return _held_refusal("invalid", frappe.utils.strip_html(str(e)))
+	try:
 		api._run_preview(tool, args)
+	except api.PreviewSandboxLost:
+		# Not a validation error: the dry run could not be undone cleanly (the
+		# sandbox logged it). The caller rolls back and shows this to the
+		# approver; nothing is claimed or created.
+		frappe.clear_messages()
+		return _held_refusal(
+			"invalid",
+			"These values could not be checked safely, so nothing was created. If this record changes "
+			"database structure (for example a Custom Field), part of it may already be saved: check "
+			"before trying again.",
+		)
 	except (api.JarvisError, frappe.PermissionError, frappe.ValidationError, frappe.DuplicateEntryError) as e:
 		frappe.clear_messages()
 		missing = held_writes.collect_missing(tool, items)
@@ -1834,7 +1963,7 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
 		**cols,
 	):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		settle(locked.name)
 		return {
 			**result,
@@ -1849,12 +1978,12 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols)
 	):
 		_claim_lost(locked.name, ref)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		settle(locked.name)
 		message = f"{REASON_TEXT['partial']} Check {ref[0]} {ref[1]} before retrying."
 		return _held_refusal("partial", message, pa_status=FAILED, outcome="partial")
 	late_outcome(locked.name, EXECUTED, None, "confirmed")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	final = get_row(locked.name) or frappe._dict()
 	return {
@@ -1886,7 +2015,7 @@ def _edit_failed(locked, approver: str, stamp, result, interfered: bool) -> dict
 			_claim_lost(locked.name)
 	elif fresh and interfered:
 		late_outcome(locked.name, FAILED, code, outcome_for(FAILED, code, locked.tool))
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(locked.name)
 	final = get_row(locked.name) or frappe._dict()
 	error = (result or {}).get("error") if isinstance(result, dict) else None
@@ -1950,9 +2079,9 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 	if ok and not hidden:
 		return _edit_created(locked, approver, stamp, result, refs[0] if refs else ("", ""))
 
-	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver)  # full rollback
+	_discard_failed_dispatch(locked, edited, crash_tb, actor=approver, result=result)  # full rollback
 	if ok and not interfered:
-		frappe.db.commit()  # the failure audit; the row is Pending again
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist failure audit
 		return _held_refusal(
 			"unreadable",
 			f"The person who dropped the file couldn't open the new {hidden[0]}, so nothing was "

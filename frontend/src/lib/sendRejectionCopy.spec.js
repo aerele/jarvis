@@ -48,6 +48,24 @@ describe("sendRejectionCopy", () => {
 		expect(sendRejectionCopy("", "Jarvis").message).toBe(FALLBACK);
 		expect(sendRejectionCopy(undefined, "Jarvis").message).toBe(FALLBACK);
 	});
+	it("uses maintenance copy on the v15 send path", () => {
+		expect(sendRejectionCopy("maintenance", "Jarvis")).toEqual({
+			message: "Jarvis is temporarily unavailable for maintenance. Try again shortly.",
+			type: "warning",
+		});
+	});
+
+	it("uses the caller's fallback for an unknown code", () => {
+		const retry = "Couldn't retry that.";
+		expect(sendRejectionCopy("insufficient_workers", "Jarvis", {}, retry).message).toBe(retry);
+	});
+
+	// Plain text: a caller that renders HTML escapes the whole message, so the
+	// helper must not (a text caller would show the entities).
+	it("keeps a server sentence as plain text", () => {
+		const sentence = "Don't send <b>this</b> & that.";
+		expect(sendRejectionCopy(sentence, "Jarvis").message).toBe(sentence);
+	});
 });
 
 describe("sendRejectionCopy, usage limit window", () => {

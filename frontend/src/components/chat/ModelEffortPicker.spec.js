@@ -139,3 +139,135 @@ describe("ModelEffortPicker narrow-host geometry", () => {
 		expect(validator("left")).toBe(false);
 	});
 });
+
+// A proxy-only workspace's model cannot think, so the server lists no effort levels
+// (jarvis-admin-v2#648). The picker must not offer a choice the turn would drop.
+describe("ModelEffortPicker effort row", () => {
+	const effortRow = (w) => w.findAll(".mep-item").filter((b) => b.text().startsWith("Effort"));
+
+	it("is offered when the server lists thinking levels", async () => {
+		const w = openPicker({ thinkingLevels: ["low", "medium", "high"] });
+		await w.vm.$nextTick();
+		expect(effortRow(w)).toHaveLength(1);
+		expect(w.find(".mep-div").exists()).toBe(true);
+	});
+
+	it("is hidden, with its divider, when the server lists none", async () => {
+		const w = openPicker({ thinkingLevels: [] });
+		await w.vm.$nextTick();
+		expect(w.findAll(".mep-item").length).toBeGreaterThan(0);
+		expect(effortRow(w)).toHaveLength(0);
+		expect(w.find(".mep-div").exists()).toBe(false);
+	});
+
+	it("drops a stored level from the pill when no level is offered", () => {
+		const w = mount(ModelEffortPicker, {
+			props: { modelsByProvider: POOL, thinkingOverride: "high", thinkingLevels: [] },
+		});
+		expect(w.find(".mep-effort").classes()).toContain("mep-hide");
+		expect(w.find(".mep-dot").classes()).toContain("mep-hide");
+	});
+});
+
+const ADMIN_TIP = "Sign-in expired. Reconnect it in AI models.";
+const MEMBER_TIP = "Sign-in expired. Ask your workspace admin to reconnect it.";
+const MAP = { "gpt-5.6": { upstream: "codex", label: "ChatGPT" } };
+const EXPIRED_GROUPS = [
+	{ provider: "openai", models: [{ model: "gpt-5.6" }, { model: "claude-x" }] },
+];
+
+function buildExpired(props = {}) {
+	return mount(ModelEffortPicker, {
+		props: { modelsByProvider: EXPIRED_GROUPS, expiredModels: MAP, ...props },
+	});
+}
+const dot = (w) => w.find('[data-testid="mep-expired-dot"]');
+const pill = (w) => w.find(".mep-pill");
+
+describe("ModelEffortPicker expired sign-in", () => {
+	it("shows the dot and admin tooltip for an expired explicit pick", () => {
+		const w = buildExpired({ modelOverride: "gpt-5.6", canAddProvider: true });
+		expect(dot(w).exists()).toBe(true);
+		expect(dot(w).classes()).toEqual(
+			expect.arrayContaining(["size-1.5", "shrink-0", "rounded-full", "bg-surface-red-5"])
+		);
+		expect(pill(w).attributes("title")).toBe(ADMIN_TIP);
+	});
+
+	it("shows the member tooltip when the viewer cannot add providers", () => {
+		const w = buildExpired({ modelOverride: "gpt-5.6", canAddProvider: false });
+		expect(pill(w).attributes("title")).toBe(MEMBER_TIP);
+	});
+
+	it("matches a prefixed id against a bare map key", () => {
+		const w = buildExpired({ modelOverride: "openai/gpt-5.6" });
+		expect(dot(w).exists()).toBe(true);
+	});
+
+	it("shows the dot when the pill names an expired default model", () => {
+		const w = buildExpired({
+			modelOverride: "",
+			defaultModel: "gpt-5.6",
+			canAddProvider: true,
+		});
+		expect(w.find(".mep-model").text()).toBe("gpt-5.6");
+		expect(dot(w).exists()).toBe(true);
+		expect(pill(w).attributes("title")).toBe(ADMIN_TIP);
+	});
+
+	it("shows no dot on Auto", () => {
+		const w = buildExpired({ modelOverride: "", defaultModel: "", canAddProvider: true });
+		expect(w.find(".mep-model").text()).toBe("Auto");
+		expect(dot(w).exists()).toBe(false);
+		expect(pill(w).attributes("title")).toBe("Model and effort");
+	});
+
+	it("shows no dot for a model that is not expired", () => {
+		const w = buildExpired({ modelOverride: "claude-x" });
+		expect(dot(w).exists()).toBe(false);
+		expect(pill(w).attributes("title")).toBe("Model and effort");
+	});
+
+	it("marks an expired menu row and keeps it clickable", async () => {
+		const w = buildExpired({ modelOverride: "claude-x" });
+		await pill(w).trigger("click");
+		const rows = w.findAll(".mep-item").filter((r) => r.text().includes("gpt-5.6"));
+		expect(rows).toHaveLength(1);
+		expect(rows[0].find(".mep-desc").text()).toBe("Sign-in expired");
+		await rows[0].trigger("click");
+		expect(w.emitted("select-model")[0]).toEqual(["gpt-5.6"]);
+		const other = buildExpired({ modelOverride: "claude-x" });
+		await pill(other).trigger("click");
+		expect(other.text()).toContain("claude-x");
+		expect(
+			other.findAll(".mep-desc").filter((d) => d.text() === "Sign-in expired")
+		).toHaveLength(1);
+	});
+
+	it("keeps the tier under the expired line, and a healthy row shows only its tier", async () => {
+		const w = buildExpired({
+			modelsByProvider: [
+				{
+					provider: "openai",
+					models: [
+						{ model: "gpt-5.6", tier: "Plus" },
+						{ model: "claude-x", tier: "Pro" },
+					],
+				},
+			],
+			modelOverride: "claude-x",
+		});
+		await pill(w).trigger("click");
+		const row = (name) => w.findAll(".mep-item").find((r) => r.text().includes(name));
+		expect(
+			row("gpt-5.6")
+				.findAll(".mep-desc")
+				.map((d) => d.text())
+		).toEqual(["Sign-in expired", "Plus"]);
+		expect(
+			row("claude-x")
+				.findAll(".mep-desc")
+				.map((d) => d.text())
+		).toEqual(["Pro"]);
+	});
+});

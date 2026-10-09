@@ -86,10 +86,11 @@ class TestDownloadPdfEnvelope(FrappeTestCase):
 
 		gp.assert_called_once()
 		sf.assert_called_once()
-		# The save_file call must attach the new file to the source
-		# record so the audit trail in the File doc reflects who asked.
-		self.assertEqual(sf.call_args.kwargs.get("dt"), "User")
-		self.assertEqual(sf.call_args.kwargs.get("dn"), user_name)
+		# The file must NOT be attached to the source record: it is rendered
+		# with the requester's field-level access, and every reader of the
+		# record could read an attachment (see TestDownloadPdfNotAttached).
+		self.assertIsNone(sf.call_args.kwargs.get("dt"))
+		self.assertIsNone(sf.call_args.kwargs.get("dn"))
 		self.assertEqual(sf.call_args.kwargs.get("is_private"), 1)
 
 		# Envelope keys are the contract; pin every one. ("title" is the
@@ -109,6 +110,62 @@ class TestDownloadPdfEnvelope(FrappeTestCase):
 		with patch("frappe.get_print", return_value=b""):
 			with self.assertRaises(InvalidArgumentError):
 				download_pdf("User", user_name)
+
+
+_OTHER_READER = "jarvis-pdf-other-reader@example.com"
+
+
+def _blank_pdf() -> bytes:
+	# File.validate parses a PDF (pdf_contains_js), so the bytes must be a real PDF.
+	from io import BytesIO
+
+	from pypdf import PdfWriter
+
+	writer = PdfWriter()
+	writer.add_blank_page(width=72, height=72)
+	buf = BytesIO()
+	writer.write(buf)
+	return buf.getvalue()
+
+
+class TestDownloadPdfNotAttached(FrappeTestCase):
+	"""The PDF is rendered with the requester's field-level access (a print
+	hook blanks permlevel fields they can't read, and shows the ones they
+	can). Attached to the record, it would be readable by everyone who can
+	read the record, including users who can't see those fields. And
+	attaching is a write the read-only caller may not have. So the File
+	must stay unattached and owner-only. Only get_print is mocked; save_file
+	and File's own has_permission run for real."""
+
+	def setUp(self):
+		if not frappe.db.exists("User", _OTHER_READER):
+			frappe.get_doc(
+				{"doctype": "User", "email": _OTHER_READER, "first_name": "PDF Other Reader"}
+			).insert(ignore_permissions=True)
+		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "pdf attach probe"}).insert(
+			ignore_permissions=True
+		)
+
+	def test_pdf_is_private_unattached_and_owner_only(self):
+		with patch("frappe.get_print", return_value=_blank_pdf()):
+			out = download_pdf("ToDo", self.todo.name)
+
+		attached_to, owner, is_private = frappe.db.get_value(
+			"File", out["name"], ["attached_to_doctype", "owner", "is_private"]
+		)
+		self.assertFalse(attached_to)
+		self.assertEqual(owner, frappe.session.user)
+		self.assertEqual(is_private, 1)
+		self.assertFalse(
+			frappe.get_all(
+				"File",
+				filters={"attached_to_doctype": "ToDo", "attached_to_name": self.todo.name},
+				pluck="name",
+			),
+			"download_pdf must not add an attachment to the source record",
+		)
+		# Another user who can read the record still can't open the file.
+		self.assertFalse(frappe.has_permission("File", "read", doc=out["name"], user=_OTHER_READER))
 
 
 # ---------------------------------------------------------------------

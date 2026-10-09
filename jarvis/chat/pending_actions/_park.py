@@ -83,6 +83,44 @@ def _check_single_flight(conversation: str, owner_user: str, legacy_pending) -> 
 	return superseded
 
 
+def stamp_ready() -> bool:
+	"""The R2-3 stamp columns exist (False between a deploy and its migrate: cards
+	still park and settle, without a correction stamp)."""
+	try:
+		return bool(frappe.db.has_column("Jarvis Pending Action", "correction_message"))
+	except Exception:
+		return False
+
+
+def correction_of(conversation: str | None) -> str:
+	"""R2-3: the failed card a card parked now corrects, or "".
+
+	A failed card the assistant may correct is stamped with the hidden continuation
+	message that told it so (``actions_api._stamp_correction``); so is a card that ran
+	as a correction (update the missing value, then submit again). A card parked in
+	the turn THAT message started is the correction: it carries ``corrects``, sealed,
+	and its own failure is never offered another one. Any other turn (the user wrote
+	something new) starts clean. The running turn is read from the turn binding
+	(``turn_message_binding``), never from the model."""
+	if not conversation:
+		return ""
+	from jarvis.chat import turn_message_binding
+
+	try:
+		message = turn_message_binding.current_turn_message_id(conversation)
+	except Exception:
+		return ""
+	if not message or not stamp_ready():
+		return ""
+	rows = frappe.db.sql(
+		"SELECT name, corrects FROM `tabJarvis Pending Action` WHERE conversation=%(c)s"
+		" AND correction_message=%(m)s ORDER BY creation, name LIMIT 1",
+		{"c": conversation, "m": message},
+		as_dict=True,
+	)
+	return (rows[0].corrects or rows[0].name) if rows else ""
+
+
 def park(
 	*,
 	kind: str,
@@ -131,7 +169,7 @@ def park(
 	if waiters and waiters[0] != conversation:
 		raise ValueError("park: the primary waiter must be the conversation")
 	if not locked:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	try:
 		if not locked:
 			lock_conversation(conversation)
@@ -155,6 +193,7 @@ def park(
 				"exec_user": exec_user,
 				"skill_docname": skill_docname or "",
 				"run_id": run_id or "",
+				"corrects": correction_of(conversation) if kind == "chat" else "",
 				"open_key": _seal.open_key(owner_user, dedup_key) if dedup_key else None,
 				"dedup_keys": _seal.canonical([_seal.open_key(owner_user, k) for k in dedup_keys])
 				if dedup_keys

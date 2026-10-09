@@ -66,3 +66,5 @@ jarvis.patches.v2_22_backfill_filebox_results
 jarvis.patches.v2_23_never_expire_chat_cards
 jarvis.patches.v2_24_backfill_skill_use_in_file_box
 jarvis.patches.v2_25_backfill_filebox_card_results
+jarvis.patches.v2_26_hide_unanswered_chat_patterns
+jarvis.patches.v2_27_stamp_agent_token_issued_at

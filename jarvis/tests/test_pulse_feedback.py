@@ -10,6 +10,7 @@ resets the two pulse fields itself instead of trusting a clean row.
 The admin forward is always mocked - these never hit a real admin.
 """
 
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 import frappe
@@ -18,12 +19,16 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat.api import create_conversation
 from jarvis.chat.feedback import (
+	_PULSE_PREVIOUS_MONTH_DAYS,
 	PULSE_MAX_OFFERS,
-	PULSE_SURVEY_CADENCE,
+	_pulse_period,
+	_pulse_window_end,
+	_pulse_window_start,
+	_stored_key_is_ahead,
 	pulse_context,
 	submit_pulse_feedback,
 )
-from jarvis.chat.usage import current_period_key, get_or_create_user_settings
+from jarvis.chat.usage import get_or_create_user_settings
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -33,6 +38,7 @@ TEST_USER = "jarvis-pulse-feedback-test@example.com"
 
 _PUSH = "jarvis.admin_client.push_pulse_feedback"
 _FEATURES = "jarvis.chat.feature_usage.get_used_features"
+_NOW = "frappe.utils.now_datetime"
 #: A key that can never be the current one, so the row reads as "last offered
 #: in some earlier period".
 _STALE_KEY = "M:1999-01"
@@ -71,6 +77,16 @@ def _cleanup_user_conversations(user: str = TEST_USER) -> None:
 		_delete_conv(name)
 
 
+def _reviewed_month_activity():
+	"""A moment inside the window the survey reviews right now, whatever day of
+	the month the suite runs on: days 1..10 review the previous month, whose
+	window ends before today, so "now" is NOT in it then."""
+	now = frappe.utils.now_datetime()
+	if now.day <= _PULSE_PREVIOUS_MONTH_DAYS:
+		return now.replace(day=1, hour=12, minute=0, second=0, microsecond=0) - timedelta(days=1)
+	return now
+
+
 class _PulseTestCase(FrappeTestCase):
 	def setUp(self):
 		_ensure_test_user()
@@ -102,31 +118,225 @@ class _PulseTestCase(FrappeTestCase):
 			SETTINGS, self.settings, ["pulse_last_period_key", "pulse_offer_count"], as_dict=True
 		)
 
-	def _set_turns(self, count, *, days_ago=0, conversation=None):
+	def _set_turns(self, count, *, days_ago=None, conversation=None, active_at=None):
+		conversation = conversation or self.conv
+		active_at = active_at or (
+			frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days_ago)
+			if days_ago
+			else _reviewed_month_activity()
+		)
 		frappe.db.set_value(
 			CONV,
-			conversation or self.conv,
-			{
-				"turn_count": count,
-				"last_active_at": frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days_ago),
-			},
+			conversation,
+			{"turn_count": count, "last_active_at": active_at},
 			update_modified=False,
 		)
+		# Bounded (previous-month) windows read the user's messages, not the
+		# conversation counter, so mirror the turns with one user message.
+		self._set_user_messages(conversation, [active_at] if count else [])
+
+	def _set_user_messages(self, conversation, created, origin="human"):
+		for name in frappe.get_all(MSG, filters={"conversation": conversation}, pluck="name"):
+			frappe.delete_doc(MSG, name, ignore_permissions=True, force=True)
+		for seq, when in enumerate(created, start=1):
+			doc = frappe.get_doc(
+				{
+					"doctype": MSG,
+					"conversation": conversation,
+					"seq": seq,
+					"role": "user",
+					"content": "hi",
+					"origin": origin,
+				}
+			)
+			# ``origin`` is a server-owned field: only a flagged writer may set it.
+			doc.flags.jarvis_server_write = True
+			doc.insert(ignore_permissions=True)
+			frappe.db.set_value(MSG, doc.name, "creation", when, update_modified=False)
+
+
+class TestPulsePeriod(FrappeTestCase):
+	"""The month the survey reviews: the previous one for the first 10 days."""
+
+	def test_day_one_and_day_ten_review_the_previous_month(self):
+		for day in (1, 10):
+			key, label, is_previous = _pulse_period(datetime(2026, 10, day, 9, 0))
+			self.assertEqual((key, label, is_previous), ("M:2026-09", "Last month, Sep 2026", True))
+
+	def test_day_eleven_reviews_the_current_month(self):
+		key, label, is_previous = _pulse_period(datetime(2026, 10, 11, 9, 0))
+		self.assertEqual((key, label, is_previous), ("M:2026-10", "This month, Oct 2026", False))
+
+	def test_first_of_january_reviews_the_previous_december(self):
+		key, label, is_previous = _pulse_period(datetime(2027, 1, 1, 0, 5))
+		self.assertEqual((key, label, is_previous), ("M:2026-12", "Last month, Dec 2026", True))
+
+
+class TestPulseWindow(FrappeTestCase):
+	def test_previous_month_review_starts_on_the_first_at_midnight(self):
+		for day in (1, 10):
+			start = _pulse_window_start(datetime(2026, 10, day, 15, 30))
+			self.assertEqual(start, datetime(2026, 9, 1, 0, 0))
+
+	def test_current_month_review_keeps_the_rolling_thirty_days(self):
+		now = datetime(2026, 10, 11, 15, 30)
+		self.assertEqual(_pulse_window_start(now), datetime(2026, 9, 11, 15, 30))
+
+	def test_january_review_starts_on_the_first_of_december(self):
+		self.assertEqual(_pulse_window_start(datetime(2027, 1, 5, 8, 0)), datetime(2026, 12, 1, 0, 0))
+
+	def test_previous_month_review_ends_on_the_first_of_the_current_month(self):
+		for day in (1, 10):
+			end = _pulse_window_end(datetime(2026, 10, day, 15, 30))
+			self.assertEqual(end, datetime(2026, 10, 1, 0, 0))
+
+	def test_current_month_review_is_open_ended(self):
+		self.assertIsNone(_pulse_window_end(datetime(2026, 10, 11, 15, 30)))
+
+
+class TestStoredKeyIsAhead(FrappeTestCase):
+	def test_later_month_is_ahead_equal_and_earlier_are_not(self):
+		self.assertTrue(_stored_key_is_ahead("M:2026-10", "M:2026-09"))
+		self.assertTrue(_stored_key_is_ahead("M:2027-01", "M:2026-12"))
+		self.assertFalse(_stored_key_is_ahead("M:2026-09", "M:2026-09"))
+		self.assertFalse(_stored_key_is_ahead("M:2026-08", "M:2026-09"))
+
+	def test_blank_and_non_monthly_keys_are_never_ahead(self):
+		for stored in (None, "", "W:2026-10-04", "D:2026-10-05"):
+			self.assertFalse(_stored_key_is_ahead(stored, "M:2026-09"), stored)
 
 
 class TestPulseContext(_PulseTestCase):
+	def test_early_in_the_month_offers_the_previous_month(self):
+		with patch(_NOW, return_value=datetime(2026, 10, 1, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+			with patch(_FEATURES, return_value={}) as features:
+				result = pulse_context()
+		# The feature sweep is bounded to September too.
+		features.assert_called_once_with(TEST_USER, datetime(2026, 9, 1, 0, 0), datetime(2026, 10, 1, 0, 0))
+		self.assertTrue(result["due"])
+		self.assertEqual(result["period_key"], "M:2026-09")
+		self.assertEqual(result["period_label"], "Last month, Sep 2026")
+		self.assertTrue(result["period_is_previous"])
+		self.assertEqual(self._pulse().pulse_last_period_key, "M:2026-09")
+
+	def test_only_this_months_activity_early_in_the_month_is_not_due(self):
+		"""A first chat on Oct 3 says nothing about September: the previous-month
+		window ends on Oct 1, so the survey must not ask about a month the user
+		never used, nor list October's features as last month's."""
+		with patch(_NOW, return_value=datetime(2026, 10, 4, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 10, 3, 9, 0))
+			self._set_user_messages(self.conv, [datetime(2026, 10, 3, 9, 0), datetime(2026, 10, 4, 8, 0)])
+			with patch(_FEATURES) as features:
+				self.assertFalse(pulse_context()["due"])
+		features.assert_not_called()
+		self.assertIsNone(self._pulse().pulse_last_period_key, "a non-offer burns nothing")
+
+	def test_a_conversation_spanning_the_boundary_is_due_for_the_previous_month(self):
+		"""One long-lived conversation used all September and again on Oct 2:
+		its ``last_active_at`` is Oct 2, but the September messages still count."""
+		with patch(_NOW, return_value=datetime(2026, 10, 5, 9, 0)):
+			self._set_turns(40, active_at=datetime(2026, 10, 2, 9, 0))
+			self._set_user_messages(self.conv, [datetime(2026, 9, 15, 10, 0), datetime(2026, 10, 2, 9, 0)])
+			with patch(_FEATURES, return_value={}):
+				result = pulse_context()
+		self.assertTrue(result["due"])
+		self.assertEqual(result["period_key"], "M:2026-09")
+
+	def _early_october_is_due(self):
+		with patch(_NOW, return_value=datetime(2026, 10, 5, 9, 0)):
+			with patch(_FEATURES, return_value={}):
+				return pulse_context()["due"]
+
+	def test_only_agent_initiated_or_file_box_conversations_are_not_due_early(self):
+		"""The open-ended gate never counts these (turn_count stays 0), so the
+		previous-month gate must not either."""
+		for column in ("agent_initiated", "file_box"):
+			with self.subTest(column=column):
+				self._set_turns(0)
+				conv = create_conversation()
+				# Each subcase owns its conversation and removes it afterwards: a
+				# leftover ordinary conversation with September messages would make
+				# the next subcase due for the wrong reason.
+				self.addCleanup(_delete_conv, conv)
+				self._set_turns(5, conversation=conv, active_at=datetime(2026, 9, 20, 12, 0))
+				frappe.db.set_value(CONV, conv, column, 1, update_modified=False)
+				self.assertFalse(self._early_october_is_due())
+				self.assertIsNone(self._pulse().pulse_last_period_key)
+				_delete_conv(conv)
+
+	def test_server_written_user_rows_in_a_normal_conversation_are_not_counted_early(self):
+		for origin in ("macro", "delegated", "continuation", "file_box", "agent", "system"):
+			with self.subTest(origin=origin):
+				self._set_turns(0)
+				self._set_user_messages(self.conv, [datetime(2026, 9, 20, 12, 0)], origin=origin)
+				self.assertFalse(self._early_october_is_due())
+
+	def test_typed_and_board_answer_rows_are_counted_early(self):
+		for origin in ("human", "board_answer", ""):
+			with self.subTest(origin=origin):
+				self._set_turns(0)
+				self._set_user_messages(self.conv, [datetime(2026, 9, 20, 12, 0)], origin=origin)
+				self.assertTrue(self._early_october_is_due())
+				self._set_pulse(None, 0)
+
+	def test_after_day_ten_offers_the_current_month_again(self):
+		self._set_pulse("M:2026-09", PULSE_MAX_OFFERS)
+		with patch(_NOW, return_value=datetime(2026, 10, 11, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 10, 9, 12, 0))
+			with patch(_FEATURES, return_value={}) as features:
+				result = pulse_context()
+		features.assert_called_once()
+		self.assertIsNone(features.call_args.args[2], "days 11+ stay open-ended")
+		self.assertTrue(result["due"])
+		self.assertEqual(result["period_key"], "M:2026-10")
+		self.assertFalse(result["period_is_previous"])
+
+	def test_answered_for_the_previous_month_is_not_re_asked_early(self):
+		self._set_pulse("M:2026-09", PULSE_MAX_OFFERS)
+		with patch(_NOW, return_value=datetime(2026, 10, 2, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+			with patch(_FEATURES) as features:
+				self.assertFalse(pulse_context()["due"])
+		features.assert_not_called()
+
+	def test_answer_stored_early_in_the_month_by_the_old_code_is_not_re_asked(self):
+		"""Before this fix days 1..10 stamped the CURRENT month's key. Such a user
+		must not be re-asked on days 1..10 (computed key is the previous month)
+		nor on day 11+ (computed key now equals the stored one, count capped)."""
+		for day in (5, 11):
+			with self.subTest(day=day):
+				self._set_pulse("M:2026-10", PULSE_MAX_OFFERS)
+				with patch(_NOW, return_value=datetime(2026, 10, day, 9, 0)):
+					self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+					with patch(_FEATURES) as features:
+						self.assertFalse(pulse_context()["due"])
+				features.assert_not_called()
+				row = self._pulse()
+				self.assertEqual(row.pulse_last_period_key, "M:2026-10")
+				self.assertEqual(row.pulse_offer_count, PULSE_MAX_OFFERS)
+
+	def test_an_older_stored_key_is_still_asked_early_in_the_month(self):
+		self._set_pulse("M:2026-08", PULSE_MAX_OFFERS)
+		with patch(_NOW, return_value=datetime(2026, 10, 5, 9, 0)):
+			self._set_turns(5, active_at=datetime(2026, 9, 20, 12, 0))
+			with patch(_FEATURES, return_value={}):
+				result = pulse_context()
+		self.assertTrue(result["due"])
+		self.assertEqual(result["period_key"], "M:2026-09")
+
 	def test_due_when_never_offered(self):
 		with patch(_FEATURES, return_value={}):
 			result = pulse_context()
 		self.assertTrue(result["due"])
-		self.assertEqual(result["period_key"], current_period_key(PULSE_SURVEY_CADENCE))
-		self.assertTrue(result["period_label"].startswith("This month,"))
+		self.assertEqual(result["period_key"], _pulse_period()[0])
+		self.assertEqual(result["period_label"], _pulse_period()[1])
 
 	def test_an_offer_stamps_the_current_period_and_counts_one(self):
 		with patch(_FEATURES, return_value={}):
 			pulse_context()
 		row = self._pulse()
-		self.assertEqual(row.pulse_last_period_key, current_period_key(PULSE_SURVEY_CADENCE))
+		self.assertEqual(row.pulse_last_period_key, _pulse_period()[0])
 		self.assertEqual(row.pulse_offer_count, 1)
 
 	def test_maybe_later_re_offers_up_to_the_cap_then_goes_quiet(self):
@@ -146,13 +356,13 @@ class TestPulseContext(_PulseTestCase):
 		with patch(_FEATURES, return_value={}):
 			self.assertTrue(pulse_context()["due"])
 		row = self._pulse()
-		self.assertEqual(row.pulse_last_period_key, current_period_key(PULSE_SURVEY_CADENCE))
+		self.assertEqual(row.pulse_last_period_key, _pulse_period()[0])
 		self.assertEqual(row.pulse_offer_count, 1)
 
 	def test_capped_never_computes_the_feature_list(self):
 		"""The cheap period-key comparison gates the comparatively expensive
 		feature-usage sweep (spec: performance review)."""
-		self._set_pulse(current_period_key(PULSE_SURVEY_CADENCE), PULSE_MAX_OFFERS)
+		self._set_pulse(_pulse_period()[0], PULSE_MAX_OFFERS)
 		with patch(_FEATURES) as features:
 			self.assertFalse(pulse_context()["due"])
 		features.assert_not_called()
@@ -204,7 +414,7 @@ class TestPulseContext(_PulseTestCase):
 			self.assertTrue(pulse_context()["due"])
 		self.settings = get_or_create_user_settings(TEST_USER).name
 		row = self._pulse()
-		self.assertEqual(row.pulse_last_period_key, current_period_key(PULSE_SURVEY_CADENCE))
+		self.assertEqual(row.pulse_last_period_key, _pulse_period()[0])
 		self.assertEqual(row.pulse_offer_count, 1)
 
 	def test_features_offered_are_the_used_keys_in_canonical_order(self):
@@ -221,7 +431,7 @@ class TestPulseContext(_PulseTestCase):
 		afterwards dragged the answered marker back down to 2 and re-offered a
 		survey already filled in. The offer is a compare-and-set now: it loses,
 		reports not due, and the answered marker stays put."""
-		current = current_period_key(PULSE_SURVEY_CADENCE)
+		current = _pulse_period()[0]
 		self._set_pulse(current, 1)
 
 		def answer_in_another_tab(*_args, **_kwargs):
@@ -240,7 +450,7 @@ class TestPulseContext(_PulseTestCase):
 		"""Both tabs read count=0 before either writes. Only the first claim sees
 		rowcount 1; the second reads the row as already moved and reports not
 		due instead of burning a second of the three monthly offers."""
-		current = current_period_key(PULSE_SURVEY_CADENCE)
+		current = _pulse_period()[0]
 
 		def other_tab_claims_first(*_args, **_kwargs):
 			# The concurrent open's claim, landing between this call's read and
@@ -257,7 +467,7 @@ class TestPulseContext(_PulseTestCase):
 		"""Same race across a period boundary: the stale-key branch must also
 		lose to a write that landed first, not stamp over it."""
 		self._set_pulse(_STALE_KEY, PULSE_MAX_OFFERS)
-		current = current_period_key(PULSE_SURVEY_CADENCE)
+		current = _pulse_period()[0]
 
 		def answer_lands_first(*_args, **_kwargs):
 			self._set_pulse(current, PULSE_MAX_OFFERS)
@@ -287,7 +497,7 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 		item = self._item(push)
 		self.assertEqual(item["kind"], "Pulse")
 		self.assertEqual(item["stars"], 4)
-		self.assertEqual(item["period_key"], current_period_key(PULSE_SURVEY_CADENCE))
+		self.assertEqual(item["period_key"], _pulse_period()[0])
 		self.assertEqual(item["features_offered"], ["file_box", "wiki"])
 		self.assertEqual(item["features_selected"], ["file_box"])
 		self.assertEqual(item["use_case_text"], "saves us hours a week")
@@ -338,7 +548,7 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 		with patch(_PUSH):
 			submit_pulse_feedback(stars=5, features_offered=[], features_selected=[])
 		row = self._pulse()
-		self.assertEqual(row.pulse_last_period_key, current_period_key(PULSE_SURVEY_CADENCE))
+		self.assertEqual(row.pulse_last_period_key, _pulse_period()[0])
 		self.assertEqual(row.pulse_offer_count, PULSE_MAX_OFFERS)
 		with patch(_FEATURES) as features:
 			self.assertFalse(pulse_context()["due"])

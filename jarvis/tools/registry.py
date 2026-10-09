@@ -22,6 +22,8 @@ from collections.abc import Callable
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, ToolNotFoundError
+from jarvis.tools._doctype_name import canonical_doctype
+from jarvis.tools._write_risk import guard_scope
 
 _TOOL_NAMES: tuple[str, ...] = (
 	"get_schema",
@@ -100,7 +102,15 @@ _TOOL_NAMES: tuple[str, ...] = (
 	"get_party_dashboard_info",
 	"get_exchange_rate",
 	"get_fiscal_year",
+	"get_engagement_config",
+	"get_purchase_match_inputs",
+	"get_receivables_review_inputs",
+	"get_bank_recon_inputs",
 	"get_itemised_tax_breakup",
+	# Read-only GSTR-1 return-side period totals from india_compliance's filed
+	# return (the gzip filed_summary File, reduced server-side to the 5 heads), for
+	# a books-vs-return tie-out. Never triggers IC generation / GSTN sync.
+	"get_gstr1_summary",
 	# Tier 2b HRMS + Frappe computed reads: leave/shift/holiday lookups
 	# the LLM gets wrong because they need policy-aware math, plus
 	# Frappe linked-doc walking + naming-series preview.
@@ -220,6 +230,9 @@ def in_tool_dispatch() -> bool:
 	return getattr(frappe.local, "jarvis_dispatch_depth", 0) > 0
 
 
+_DOCTYPE_ARGS = frozenset({"doctype", "parent_doctype"})
+
+
 def dispatch(tool_name: str, args: dict):
 	if tool_name not in _TOOLS:
 		raise ToolNotFoundError(f"no such tool: {tool_name}")
@@ -238,6 +251,10 @@ def dispatch(tool_name: str, args: dict):
 	if not _ACCEPTS_VAR_KW.get(tool_name, False):
 		accepted = _ACCEPTED_PARAMS[tool_name]
 		args = {k: v for k, v in args.items() if k in accepted}
+	# A doctype by its canonical name, so the hooks registered under it (a doctype's
+	# row scoping among them) apply to the tool's reads and writes.
+	for key in _DOCTYPE_ARGS.intersection(args):
+		args = {**args, key: canonical_doctype(args[key])}
 	# Validate the call binds *before* invoking, so a genuine arg/signature
 	# mismatch (a missing required arg - the caller's fault) becomes
 	# InvalidArgumentError, while a TypeError raised inside the tool body (a real
@@ -248,9 +265,12 @@ def dispatch(tool_name: str, args: dict):
 	except TypeError as e:
 		raise InvalidArgumentError(str(e))
 	# The ONLY dispatch site (normal, confirmed and preview), so the depth covers
-	# every tool body; gate/chat endpoints refuse while it is > 0.
+	# every tool body; gate/chat endpoints refuse while it is > 0. The write-risk
+	# guard scope rides the same site (joining a confirm path's scope when one is
+	# open), so every tool body runs with the ORM guard on.
 	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
 	try:
-		return fn(**args)
+		with guard_scope():
+			return fn(**args)
 	finally:
 		frappe.local.jarvis_dispatch_depth -= 1

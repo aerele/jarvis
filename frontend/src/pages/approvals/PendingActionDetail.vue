@@ -30,8 +30,9 @@
 				{{ __("Missing: {0}", [missingText]) }}
 			</p>
 
-			<div v-if="!rec.can_act" class="mt-3 text-sm text-ink-gray-6" role="status">
-				{{ closedText }}
+			<div v-if="!rec.can_act" class="mt-3">
+				<div class="text-sm text-ink-gray-6" role="status">{{ closedText }}</div>
+				<FailureReference v-if="rec.status === 'Failed'" :id="rec.name" />
 			</div>
 
 			<section
@@ -84,6 +85,8 @@
 				>
 					{{ banner }}
 				</div>
+				<!-- Failed after the claim: the confirmation's own id, for support. -->
+				<FailureReference v-if="ended && ended.pa_status === 'Failed'" :id="props.name" />
 				<div class="flex flex-wrap items-center gap-2">
 					<Button
 						variant="solid"
@@ -141,7 +144,7 @@
 					/>
 				</div>
 				<p v-if="blocked" :id="reasonId" class="mt-2 text-sm text-ink-amber-3">
-					{{ __("Fill {0} — use Edit & create.", [missingText]) }}
+					{{ __("Fill {0}. Use Edit & create.", [missingText]) }}
 				</p>
 				<div v-if="notice" role="alert" class="mt-2 text-sm text-ink-red-5">
 					{{ notice }}
@@ -213,6 +216,7 @@ import { Autocomplete, Button, toast } from "frappe-ui";
 import PendingCard from "@/components/PendingCard.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import DocFieldsForm from "@/components/forms/DocFieldsForm.vue";
+import FailureReference from "@/components/FailureReference.vue";
 import { getPendingAction, decideHeldAction, editAndCreateHeld } from "@/api/approvals";
 import { getDoctypeFormMeta, searchLink } from "@/api";
 import { deskNewUrl, errorsByKey, patchOf, stillMissing } from "@/lib/heldEdit";
@@ -276,6 +280,8 @@ async function load() {
 		const res = await getPendingAction(props.name);
 		if (id !== req) return;
 		if (res && res.kind === "file_box_sheet" && props.onKind) return props.onKind("sheet");
+		// A deep link to a chat card lands here first: the board opens its own detail.
+		if (res && res.kind === "chat" && props.onKind) return props.onKind("chat");
 		rec.value = res || null;
 	} catch (e) {
 		if (id !== req) return;

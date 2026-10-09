@@ -39,7 +39,7 @@ def save_export_file(
 	-> an UNATTACHED private File, whose ``has_permission`` falls through to
 	owner-only, so an export is readable only by the user who ran it. Pass
 	``dt``/``dn`` only to attach to a record the same audience may already read
-	(e.g. download_pdf attaching to its own record)."""
+	(never for content rendered with the caller's own field-level access)."""
 	from frappe.exceptions import ValidationError
 	from frappe.utils.file_manager import save_file
 

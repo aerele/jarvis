@@ -39,7 +39,7 @@ def operator_fail(name: str, reason: str = "") -> dict:
 	refuse_in_tool_dispatch()
 	frappe.only_for("System Manager")
 	operator = authenticated_user()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	row = get_row(str(name or "").strip(), lock="update")
 	if not row or row.status not in (PENDING, EXECUTING):
 		frappe.db.rollback()
@@ -52,7 +52,7 @@ def operator_fail(name: str, reason: str = "") -> dict:
 		title="jarvis.pending_action.operator_fail",
 		message=f"{row.name}: {row.status} -> Failed/{code} by {operator}. Note: {str(reason or '')[:500]}",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	settle(row.name)
 	return {"ok": True, "pa_status": FAILED, "reason_code": code}
 
@@ -79,5 +79,5 @@ def operator_settle(name: str) -> dict:
 		title="jarvis.pending_action.operator_settle",
 		message=f"{row.name}: settled by {operator} (delivered={delivered})",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 	return {"ok": True, "delivered": delivered}

@@ -16,11 +16,17 @@ invoked inside ``get_print``). A user who can't read the record can't
 PDF it; a user who can read but can't print (e.g. a Print Role gate)
 gets a clean InvalidArgumentError instead of a stack trace.
 
-The PDF is stored as a **private** File (``is_private=1``), so the
-returned URL is auth-gated by the customer's bench session. The agent
-hands back ``file_url`` plus ``filename`` + ``size_bytes`` + a stable
-``name`` (File doc id) so a follow-up tool call can re-attach the same
-file to another doc without regenerating.
+The PDF is stored as a **private, unattached** File owned by the
+requester, so only that user can open the returned URL. It is NOT
+attached to the record: the PDF is rendered with the requester's
+field-level (permlevel) access, and anyone who can read a record can read
+its attachments, so an attached copy would hand hidden fields (e.g. a
+permlevel-2 rate) to every reader of the record. Attaching is also a
+write, which this read-only tool must not perform. ``attach_to_doc`` is
+the explicit, write-gated step for that. The agent hands back
+``file_url`` plus ``filename`` + ``size_bytes`` + a stable ``name``
+(File doc id) so a follow-up call can attach the same file without
+regenerating.
 """
 
 import frappe
@@ -38,7 +44,7 @@ def download_pdf(
 	language: str | None = None,
 ) -> dict:
 	"""Render ``doctype/name`` as a PDF via the named print format and
-	store the bytes in a private File doc attached to the record.
+	store the bytes in a private, unattached File doc owned by the caller.
 
 	Returns ``{file_url, filename, mime_type, size_bytes, name}`` where
 	``name`` is the File doc id (so a follow-up attach_to_doc can reuse
@@ -78,11 +84,12 @@ def download_pdf(
 	safe_name = name.replace(" ", "-").replace("/", "-")
 	filename = f"{safe_name}.pdf"
 
+	# Unattached (dt/dn None): owner-only, see the module docstring.
 	file_doc = save_file(
 		fname=filename,
 		content=pdf_bytes,
-		dt=doctype,
-		dn=name,
+		dt=None,
+		dn=None,
 		is_private=1,
 	)
 

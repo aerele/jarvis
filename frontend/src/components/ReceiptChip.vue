@@ -14,7 +14,7 @@
   also NEUTRALIZES any outcome it doesn't recognise to the "unknown" chip -
   never the confirmed/✓ path. Bulk shows a name teaser collapsed and the full
   linked list expanded; failures show the rolled-back reason behind a "why"
-  toggle.
+  toggle, and a failed / partial / unknown chip its confirmation's reference.
 -->
 <template>
 	<div class="jv-receipt" :class="'jv-receipt--' + view.tone">
@@ -60,6 +60,22 @@
 				<circle cx="12" cy="12" r="9" />
 				<path d="M12 8v5" />
 				<path d="M12 16.5h.01" />
+			</svg>
+			<!-- Applied by the chat's auto mode (#581): the composer toggle's own icon,
+			     so the receipt and the control that caused it read as one thing. -->
+			<svg
+				v-else-if="autoModeApplied"
+				class="jv-receipt-automode"
+				width="14"
+				height="14"
+				viewBox="0 0 24 24"
+				fill="currentColor"
+				stroke="currentColor"
+				stroke-width="1.6"
+				stroke-linejoin="round"
+			>
+				<path d="M5 7.5v9l6-4.5z" />
+				<path d="M13.5 7.5v9l6-4.5z" />
 			</svg>
 			<svg
 				v-else-if="view.icon === 'auto_applied'"
@@ -142,6 +158,18 @@
 				</button>
 				<span v-if="ts" class="jv-receipt-time">{{ ts }}</span>
 			</div>
+			<FailureReference :id="view.reference" />
+			<!-- Next step offered after a draft was created (#621): opens the normal
+			     confirm card; nothing runs from this button. -->
+			<div v-if="nextStep" class="jv-receipt-next">
+				<Button
+					size="sm"
+					variant="outline"
+					:loading="nextBusy"
+					@click="$emit('next-action', nextStep)"
+					>{{ nextStep.label }}</Button
+				>
+			</div>
 			<div v-if="hasList && !open" class="jv-receipt-teaser">{{ teaser }}</div>
 			<div v-if="open && (hasWhy || hasList)" class="jv-receipt-detail">
 				<div v-if="hasWhy" class="jv-receipt-error">{{ view.error }}</div>
@@ -165,12 +193,23 @@
 
 <script setup>
 import { computed, ref } from "vue";
+import { Button } from "frappe-ui";
+import { __ } from "@/lib/i18n";
 import { receiptView } from "@/lib/actionSummary";
+import FailureReference from "./FailureReference.vue";
 
 const props = defineProps({
 	// A role="tool" Jarvis Chat Message with a non-empty action_outcome.
 	message: { type: Object, required: true },
+	// The chat runs in auto mode (#581): its writes apply without a card because of
+	// the chat, not a per-request approval, so the "confirm all" line below is false.
+	autoMode: { type: Boolean, default: false },
+	// The suggested next step was already acted on (the thread holds a later
+	// submit / workflow receipt for this record): the parent hides the button.
+	nextDone: { type: Boolean, default: false },
+	nextBusy: { type: Boolean, default: false },
 });
+defineEmits(["next-action"]);
 
 const open = ref(false);
 
@@ -205,9 +244,23 @@ const armedSkill = computed(() => props.message.armed_by_skill || "");
 // Request-scoped "confirm all" (design Layer B): ran uncarded because the user
 // approved the whole request. Unlike a macro/skill run there is no external armer
 // NAME, so a bare auto_applied chip would carry no "why"; this fallback labels it.
-// Only for an auto_applied outcome with neither macro nor skill provenance.
+// Only for an auto_applied outcome with neither macro nor skill provenance, and
+// never in an auto-mode chat, where "Applied automatically" alone is the truth.
 const requestApproved = computed(
-	() => view.value.icon === "auto_applied" && !armedMacro.value && !armedSkill.value
+	() =>
+		view.value.icon === "auto_applied" &&
+		!armedMacro.value &&
+		!armedSkill.value &&
+		!props.autoMode
+);
+// The same receipt in an auto-mode chat: applied by the chat's auto mode, so it
+// carries the toggle's icon. A macro or skill run keeps the bolt even there.
+const autoModeApplied = computed(
+	() =>
+		view.value.icon === "auto_applied" &&
+		!armedMacro.value &&
+		!armedSkill.value &&
+		props.autoMode
 );
 
 // A single-record outcome with a Desk link → show a compact "open" affordance
@@ -215,6 +268,24 @@ const requestApproved = computed(
 const singleUrl = computed(() => {
 	const t = view.value.targets;
 	return view.value.count === 1 && t.length === 1 && t[0].url ? t[0].url : "";
+});
+// {kind: "workflow"|"submit", action, label} from the create receipt's result,
+// plus the record it applies to. Only a confirmed create carries one.
+const nextStep = computed(() => {
+	if (props.nextDone || view.value.outcome !== "confirmed") return null;
+	const data = (parseJson(props.message.tool_result) || {}).data || {};
+	const s = data.suggested_next;
+	if (!s || !s.kind || !data.doctype || !data.name) return null;
+	// Worded here (and translatable), never persisted. Old rows carried a label.
+	const label = s.kind === "submit" ? __("Submit") : s.action || s.label;
+	if (!label) return null;
+	return {
+		kind: s.kind,
+		action: s.action || null,
+		label,
+		doctype: data.doctype,
+		name: data.name,
+	};
 });
 const hasWhy = computed(() => view.value.outcome === "failed" && !!view.value.error);
 const hasList = computed(() => view.value.count > 1 && view.value.targets.length > 0);
@@ -337,6 +408,9 @@ const ts = computed(() => {
 }
 .jv-receipt-chev.open {
 	transform: rotate(180deg);
+}
+.jv-receipt-next {
+	margin-top: 6px;
 }
 .jv-receipt-time {
 	margin-left: auto;

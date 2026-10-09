@@ -254,6 +254,7 @@ class TestSkillEditorEndpoints(_Base):
 					custom_skills_api.update_custom_skill(name=row.name, **change)
 			on = skill(PEER, "ed-org-on", scope="Org", creates=PI)
 			custom_skills_api.update_custom_skill(name=on.name, use_in_file_box=0)  # opting out is free
+			frappe.db.commit()  # the POST request's own commit
 		frappe.db.rollback()
 		self.assertEqual(self.fields(row.name), {"use_in_file_box": 0, "file_box_creates": PI})
 		self.assertEqual(self.fields(on.name).use_in_file_box, 0)
@@ -403,16 +404,34 @@ class TestEligibility(_Base):
 		org = skill(PEER, "pin-learned", scope="Org", managed_by_learning=1)
 		self.assertFalse(self.eligible(org, pin=org.name))
 
-	def test_the_list_is_deduped_own_row_first_and_ordered_by_recency(self):
-		skill(PEER, "dup", scope="Org", description="the org copy")
-		own = skill(OWNER, "dup", description="my copy")
+	def test_the_list_is_deduped_reviewed_row_first_and_ordered_by_recency(self):
+		# One row per slug, and it is the row the fetch would serve: the reviewed one
+		# before the dropper's own of the same name.
+		org = skill(PEER, "dup", scope="Org", description="the org copy")
+		skill(OWNER, "dup", description="my copy")
 		later = skill(PEER, "later", scope="Org")
 		skill(PEER, "hidden", shared_with=[OWNER])
 		got = filebox_skills.eligible_skills(OWNER)
 		slugs = [r.skill_name for r in got if r.skill_name.startswith(PFX)]
 		self.assertEqual(slugs, [f"{PFX}-later", f"{PFX}-dup"])
-		self.assertEqual(got[slugs.index(f"{PFX}-dup")].name, own.name)
+		self.assertEqual(got[slugs.index(f"{PFX}-dup")].name, org.name)
 		self.assertEqual(got[0].name, later.name)
+
+	def test_the_list_and_the_fetch_name_the_same_row(self):
+		# A reviewed skill that is not opted in hides the dropper's own of that name:
+		# the fetch would serve the reviewed row and refuse it, so the menu leaves it out.
+		skill(PEER, "hides", scope="Org", use=0)
+		skill(OWNER, "hides")
+		# A pinned row wins its slug in both.
+		org = skill(PEER, "pinned", scope="Org")
+		mine = skill(OWNER, "pinned")
+		listed = {r.skill_name: r.name for r in filebox_skills.eligible_skills(OWNER)}
+		self.assertNotIn(f"{PFX}-hides", listed)
+		self.assertEqual(listed[f"{PFX}-pinned"], org.name)
+		self.assertEqual(filebox_skills.resolve(f"{PFX}-pinned", OWNER, OWNER).name, org.name)
+		pinned = {r.skill_name: r.name for r in filebox_skills.eligible_skills(OWNER, mine.name)}
+		self.assertEqual(pinned[f"{PFX}-pinned"], mine.name)
+		self.assertEqual(filebox_skills.resolve(f"{PFX}-pinned", OWNER, OWNER, mine.name).name, mine.name)
 
 
 # --------------------------------------------------------------------------- #
@@ -804,8 +823,8 @@ class TestGetSkillGate(_Base):
 		private = skill(PEER, "private")
 		shared = skill(PEER, "shared", shared_with=[OWNER])
 		off = skill(OWNER, "off", use=0)
-		skill(PEER, "dup", scope="Org")
-		mine_off = skill(OWNER, "dup", use=0)  # own row wins, and it is opted out
+		skill(PEER, "dup", scope="Org", use=0)  # the reviewed row is served, and it is opted out
+		mine_off = skill(OWNER, "dup")  # so the dropper's own, opted in, does not answer for it
 		conv = self.conv()
 		seen = set()
 		for slug in (
@@ -1076,14 +1095,19 @@ class TestEnforcement(_Base):
 		skill(OWNER, "undeclared")
 		self.assertTrue(self.call("create_doc", _draft(SI), self.conv())["ok"])
 		skill(OWNER, "declared2", creates=PI)
-		conv, real = self.conv(), frappe.cache.get
+		import redis
 
-		def get(key, *a, **k):
-			if "filebox_backstop" in str(key):
-				raise ConnectionError("down")
-			return real(key, *a, **k)
+		conv, real = self.conv(), frappe.cache.execute_command
 
-		with patch.object(frappe.cache, "get", side_effect=get), patch.object(frappe, "log_error") as log:
+		def execute(*args, **kwargs):
+			if any("filebox_backstop" in str(a) for a in args):
+				raise redis.exceptions.ConnectionError("down")
+			return real(*args, **kwargs)
+
+		with (
+			patch.object(frappe.cache, "execute_command", side_effect=execute),
+			patch.object(frappe, "log_error") as log,
+		):
 			self.assertTrue(self.call("create_doc", _draft(SI), conv)["ok"])
 		titles = [c.kwargs.get("title") for c in log.call_args_list]
 		self.assertIn("jarvis.file_box.skill_backstop_cache_failed", titles)

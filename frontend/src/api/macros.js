@@ -2,10 +2,28 @@
 // endpoints get thin wrappers in per-feature modules under src/api/.
 import { call } from "frappe-ui";
 
-// §8.3 - bulk delete of own macros (each row's run history goes first, server
-// side). Not-owned rows are skipped with per-row reasons.
-// -> { deleted: int, skipped: [{name, reason}] }
+// §8.3 - bulk delete of own macros (each row's live runs are stopped and its run
+// history goes first, server side). A row that was not deleted is skipped with its
+// reason: `reason` is a code, `message` the sentence to show, `title` the macro's
+// own name. `stopped_runs` counts the runs stopped, skipped macros included.
+// -> { deleted: int, skipped: [{name, title, reason, message}], stopped_runs: int }
 export const deleteMacrosBulk = (names) =>
 	call("jarvis.chat.macros_api.delete_macros_bulk", {
 		names: JSON.stringify(Array.from(names || [])),
 	});
+
+// The owner's notices that an admin deleted one of their macros arrive with the
+// list page (`notices: [{ name, message, creation }]` on list_macros_page). This
+// marks them read, so the list stops showing them: the ones named, or all of
+// them when `names` is empty.
+// -> { ok, dismissed }
+export const dismissMacroNotices = (names) =>
+	call("jarvis.chat.macros_api.dismiss_macro_notices", {
+		names: JSON.stringify(Array.from(names || [])),
+	});
+
+// For the new-macro form, which has no macro to load: whether the caller may switch
+// Skip confirmation on for a macro they are about to create, why not, and the notice
+// the form asks them to confirm first (get_macro returns the same three keys).
+// -> { can_arm: 0|1, arm_blocked_reason: string, arm_notice: string }
+export const getNewMacroArming = () => call("jarvis.chat.macros_api.get_new_macro_arming");

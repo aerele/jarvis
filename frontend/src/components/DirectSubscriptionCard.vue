@@ -81,9 +81,17 @@
 
 		<!-- ===== Connected (Screen 3) ===== -->
 		<div v-else-if="status.connected">
+			<div
+				v-if="expired"
+				class="jv-dsub-actions"
+				style="margin: 0 0 10px; align-items: center"
+			>
+				<Badge theme="red" variant="subtle" label="Sign-in expired" />
+				<span class="jv-dsub-muted">{{ expiredText }}</span>
+			</div>
 			<p class="jv-dsub-muted" style="margin: 0 0 12px">
 				Your chat subscription is served directly to the provider. Refresh state lives
-				inside your Jarvis container - if chat starts failing, re-authorize to mint fresh
+				inside your Jarvis container - if chat starts failing, reconnect to mint fresh
 				tokens.
 			</p>
 			<div class="jv-dsub-kv">
@@ -112,7 +120,7 @@
 					class="jv-dsub-btn jv-dsub-btn-primary"
 					@click="startSignin()"
 				>
-					Re-authorize
+					Reconnect
 				</button>
 			</div>
 			<div v-if="err" class="jv-dsub-err">{{ err }}</div>
@@ -172,11 +180,12 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import * as api from "@/api";
+import { Badge } from "frappe-ui";
 import { errMessage as _err } from "@/lib/errors";
-import { isCodeOnlyPaste, subModelSuggestions } from "@/llm/pool";
+import { isCodeOnlyPaste, subModelSuggestions, expiredLine } from "@/llm/pool";
 import { exactDate } from "@/utils/datetime";
 import { useConfirm } from "@/composables/useConfirm";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
 const { confirm } = useConfirm();
 
@@ -185,6 +194,10 @@ const props = defineProps({
 	// account_email, connected_at, auth_mode, is_direct_subscription }.
 	status: { type: Object, required: true },
 	editable: { type: Boolean, default: true },
+	// The `direct:openai` entry from jarvis.subscription_health (null = signed in fine).
+	expired: { type: Object, default: null },
+	// Start the sign-in as soon as the card mounts (the reconnect deep link).
+	autoStart: { type: Boolean, default: false },
 });
 // reauthorized: a complete_paste_signin succeeded (parent reloads status +
 // sync). disconnected: the subscription was torn down.
@@ -204,6 +217,11 @@ onMounted(async () => {
 		/* built-in SUB_PROVIDERS fallback below covers this */
 	}
 });
+onMounted(() => {
+	// The reconnect link opens this card to sign in straight away. Only a connected card can reconnect.
+	if (props.autoStart && props.status.connected) startSignin();
+});
+const expiredText = computed(() => expiredLine(props.expired));
 
 // Built-in fallback: subscription providers offered for a fresh DIRECT connect
 // before the catalog fetch lands or if it fails. The model list is the pool
@@ -369,7 +387,7 @@ async function doDisconnect() {
 	if (
 		!(await confirm({
 			title: "Disconnect chat subscription?",
-			message: `${agentName} chat will stop working until you reconnect.`,
+			message: `${brand.agentName} chat will stop working until you reconnect.`,
 			confirmLabel: "Disconnect",
 			danger: true,
 		}))

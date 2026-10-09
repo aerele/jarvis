@@ -50,9 +50,9 @@
 										Question sources
 									</h2>
 									<p class="mt-1 text-p-base text-ink-gray-6">
-										Admin-authored questions {{ agentName }} asks everyone, a
-										role, or one person &mdash; separate from the questions it
-										generates on its own from behaviour and chat patterns
+										Admin-authored questions {{ brand.agentName }} asks
+										everyone, a role or one person, separate from the questions
+										it generates on its own from behaviour and chat patterns
 										(uncapped, materialized as soon as you save one).
 									</p>
 								</div>
@@ -80,9 +80,9 @@
 									/>
 									<FormControl
 										type="textarea"
-										:label="`Context for ${agentName} (optional)`"
+										:label="`Context for ${brand.agentName} (optional)`"
 										:rows="3"
-										:placeholder="`What should ${agentName} share when asking this?`"
+										:placeholder="`What should ${brand.agentName} share when asking this?`"
 										:modelValue="editor.context_md"
 										@update:modelValue="(v) => (editor.context_md = v)"
 									/>
@@ -156,8 +156,8 @@
 									No configured questions yet
 								</div>
 								<div class="max-w-sm text-p-base text-ink-gray-6">
-									Add what {{ agentName }} should ask every employee, a role, or
-									one person.
+									Add what {{ brand.agentName }} should ask every employee, a
+									role, or one person.
 								</div>
 							</div>
 							<div v-else class="flex flex-col gap-2">
@@ -208,8 +208,9 @@
 								</h2>
 								<p class="mt-1 text-p-base text-ink-gray-6">
 									Control how many behavioural-learning / chat-pattern questions
-									{{ agentName }} adds to a person's bank each day. Organisation,
-									role, and reviewer follow-up questions are never capped.
+									{{ brand.agentName }} adds to a person's bank each day.
+									Organisation, role and reviewer follow-up questions are never
+									capped.
 								</p>
 							</div>
 
@@ -221,7 +222,7 @@
 										Personalisation questions
 									</div>
 									<div class="mt-0.5 text-sm text-ink-gray-6">
-										Turn off to stop {{ agentName }} asking anyone new
+										Turn off to stop {{ brand.agentName }} asking anyone new
 										questions. Existing questions stay listed and answerable.
 									</div>
 								</div>
@@ -236,9 +237,9 @@
 										Learn from chats
 									</div>
 									<div class="mt-0.5 text-sm text-ink-gray-6">
-										Once a day, {{ agentName }} reviews recent chats and drafts
-										questions so people can confirm what it should remember.
-										Answers become wiki notes and skills.
+										Once a day, {{ brand.agentName }} reviews recent chats and
+										drafts questions so people can confirm what it should
+										remember. Answers become wiki notes and skills.
 									</div>
 									<div
 										v-if="settings.chat_mining_last_run_status"
@@ -347,7 +348,7 @@ import {
 	generateChatQuestionsNow,
 } from "@/api/personalise";
 import { timeAgo } from "@/utils/datetime";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 
 const props = defineProps({
@@ -517,7 +518,7 @@ async function saveEditor() {
 function confirmDeleteRule(rule) {
 	confirmDialog({
 		title: "Delete this question?",
-		message: `Removes this configured question. Questions ${agentName} already asked people from this rule stay in their own banks. This only stops new ones.`,
+		message: `Removes this configured question. Questions ${brand.agentName} already asked people from this rule stay in their own banks. This only stops new ones.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await deleteQuestionRule(rule.name);

@@ -299,7 +299,7 @@ def _strip_mention_spans(content: str) -> str:
 	return str(soup) if changed else content
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def add_comment(doctype: str, name: str, content: str) -> dict:
 	"""Add a comment (read-gated, matching desk's 'read is enough to comment').
@@ -323,7 +323,7 @@ def add_comment(doctype: str, name: str, content: str) -> dict:
 			"comment_by": _full_name(frappe.session.user),
 		}
 	).insert(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return _comment_row(comment)
 
 
@@ -338,7 +338,7 @@ def _comment_gated(comment: str):
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def update_comment(comment: str, content: str) -> dict:
 	"""Edit a comment's HTML (author or System Manager only)."""
@@ -348,23 +348,23 @@ def update_comment(comment: str, content: str) -> dict:
 		frappe.throw(_("Comment is empty."))
 	doc.content = content
 	doc.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return _comment_row(doc)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_comment(comment: str) -> None:
 	"""Delete a comment (author or System Manager only)."""
 	_comment_gated(comment)
 	frappe.delete_doc("Comment", comment, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 
 
 # --------------------------------------------------------------------------- #
 # assignment (ToDo + DocShare read-grant — D23, §14 DA-09)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def toggle_assignment(doctype: str, name: str, user: str, action: str = "add") -> list[dict]:
 	"""Assign/unassign ``user`` on the doc (write-gated: owner / approval-
@@ -411,14 +411,14 @@ def toggle_assignment(doctype: str, name: str, user: str, action: str = "add") -
 					"notify_by_email": 0,
 				},
 			)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return _assignees(doctype, name)
 
 
 # --------------------------------------------------------------------------- #
 # sharing (DocShare read — §14 F1)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> list[dict]:
 	"""Share/unshare the doc with ``user`` (write-gated). Returns the fresh
@@ -455,7 +455,7 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 			as_dict=True,
 		)
 		if row and not int(row.notify_by_email or 0) and _open_todo_exists(doctype, name, user):
-			frappe.throw(_("This share backs an active assignment — remove the assignment instead."))
+			frappe.throw(_("This share backs an active assignment. Remove the assignment instead."))
 		frappe.db.delete("DocShare", {"share_doctype": doctype, "share_name": name, "user": user})
 
 	# Mirror the read-share onto the linked conversation so a tagged user can
@@ -487,14 +487,14 @@ def toggle_share(doctype: str, name: str, user: str, action: str = "add") -> lis
 				title="Jarvis: conversation share mirror failed",
 				message=frappe.get_traceback(),
 			)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return _shares(doctype, name, doc.owner)
 
 
 # --------------------------------------------------------------------------- #
 # like (direct _liked_by update — §14 DA-03)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def toggle_like(doctype: str, name: str, like: int = 1) -> list[str]:
 	"""Like (``like=1``) / unlike (``like=0``) the doc for the current user.
@@ -523,7 +523,7 @@ def toggle_like(doctype: str, name: str, like: int = 1) -> list[str]:
 			):
 				frappe.delete_doc("Comment", c, ignore_permissions=True, force=True)
 	_set_liked_by(doctype, name, liked_by)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return liked_by
 
 
@@ -544,7 +544,7 @@ def _set_liked_by(doctype: str, name: str, liked_by: list[str]) -> None:
 # --------------------------------------------------------------------------- #
 # attachments (upload rides stock /api/method/upload_file; delete is gated here)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_attachment(doctype: str, name: str, file: str) -> None:
 	"""Delete an attachment of the doc (write-gated). The File must actually be
@@ -554,4 +554,4 @@ def delete_attachment(doctype: str, name: str, file: str) -> None:
 	if not f or f.attached_to_doctype != doctype or f.attached_to_name != name:
 		frappe.throw(_("File is not attached to this document."))
 	frappe.delete_doc("File", file, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET

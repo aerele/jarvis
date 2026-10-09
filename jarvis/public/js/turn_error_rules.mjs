@@ -3,7 +3,7 @@
 export default [
   {
     "code": "cancelled",
-    "pattern": "^(you cancelled this message|waited too long in the queue)",
+    "pattern": "^(you cancelled this message|waited too long in the queue|stopped before it started)",
     "headline": "This message was cancelled",
     "hint": "",
     "retryable": false,
@@ -16,6 +16,37 @@ export default [
     "hint": "Try again. If the error returns, share the details with your administrator or support.",
     "retryable": true,
     "status": false
+  },
+  {
+    "code": "subscription-expired",
+    "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
+    "headline": "{provider} sign-in expired",
+    "hint": "Ask your workspace admin to reconnect it, then send again.",
+    "retryable": false,
+    "status": false,
+    "upstreams": {
+      "labels": {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "xai": "xAI Grok",
+        "kimi": "Kimi (Moonshot)"
+      },
+      "providerTokens": {
+        "codex": "openai",
+        "openai": "openai",
+        "xai": "xai",
+        "kimi": "kimi",
+        "claude": "anthropic",
+        "anthropic": "anthropic"
+      },
+      "signal": "refresh_token_(?:reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|invalid_grant|oauth token has expired|token expired",
+      "mentions": {
+        "openai": "\\b(?:codex|openai|chatgpt)\\b",
+        "anthropic": "\\b(?:claude code|anthropic|claude)\\b",
+        "xai": "\\b(?:xai|grok)\\b",
+        "kimi": "\\b(?:kimi|moonshot)\\b"
+      }
+    }
   },
   {
     "code": "models-exhausted",
@@ -47,6 +78,14 @@ export default [
     "headline": "The assistant’s setup needs attention",
     "hint": "Ask your administrator to check the assistant’s configuration. The details below can help identify what needs fixing.",
     "retryable": false,
+    "status": false
+  },
+  {
+    "code": "session-reset",
+    "pattern": "\\bcli_live_session_(changed|missing)\\b|live session is no longer reusable",
+    "headline": "The model session restarted",
+    "hint": "This can happen right after switching models. Try again.",
+    "retryable": true,
     "status": false
   },
   {
@@ -175,6 +214,22 @@ export default [
     "headline": "Something needed for this request could not be found",
     "hint": "Check that the referenced item still exists. Share the details with your administrator if you need help.",
     "retryable": false,
+    "status": false
+  },
+  {
+    "code": "empty-reply-tools",
+    "pattern": "could(?:n.?t| not) generate a (?:response|reply)[\\s\\S]{0,300}tool actions may have already been executed",
+    "headline": "The model returned an empty reply after running actions",
+    "hint": "Some actions may already be done, and a retry could repeat them. Check for completed actions before you try again.",
+    "retryable": true,
+    "status": false
+  },
+  {
+    "code": "empty-reply",
+    "pattern": "could(?:n.?t| not) generate a (?:response|reply)",
+    "headline": "The model returned an empty reply",
+    "hint": "Try again. If the error returns, start a new chat or choose another available model.",
+    "retryable": true,
     "status": false
   },
   {

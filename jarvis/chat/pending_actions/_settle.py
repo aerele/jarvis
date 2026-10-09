@@ -24,6 +24,10 @@ from jarvis.chat.pending_actions._store import (
 )
 
 MAX_SETTLE_ATTEMPTS = 5
+# frappe.flags key set by the reconciler around its settles: a settle that is not the
+# confirming request's own (or a retry of a failed one, ``settle_attempts``) is LATE,
+# and a late failure is never offered a correction (R2-3).
+LATE_SETTLE_FLAG = "jarvis_pa_late_settle"
 # Failures of these may still have reached the outside world: the chip says
 # "unknown" instead of "nothing changed" (presentation only; the code stays).
 MAY_HAVE_EXTERNAL_EFFECT = frozenset({"call_connector", "run_method"})
@@ -63,6 +67,21 @@ def outcome_for(status: str, reason_code: str | None, tool: str | None) -> str:
 	return _CHIP_BY_STATUS.get(status, "failed")
 
 
+def with_reference(result, name: str) -> dict:
+	"""A failed result carrying ``error.reference``: the confirmation's own id, which the
+	failed card, its chip and the Approval Board show for support (R2-3 default, never
+	a new Error Log row). The continuation reads only ``message`` / ``detail``, so it
+	never reaches the assistant. An envelope that dispatched but failed inside (a
+	connector's own failure: outer ok, inner ok false) carries it as ``reference``
+	instead, beside its data, so its outer ``ok`` is not given an ``error``."""
+	if isinstance(result, dict) and result.get("ok"):
+		return {**result, "reference": name}
+	out = dict(result) if isinstance(result, dict) else {"ok": False}
+	err = out.get("error") if isinstance(out.get("error"), dict) else {}
+	out["error"] = {**err, "reference": name}
+	return out
+
+
 def _item(row) -> dict:
 	"""What a continuation needs; args/result come from the seals (``{}`` / ``None``
 	when a seal can't be opened: a tampered or unverifiable row)."""
@@ -90,6 +109,8 @@ def _item(row) -> dict:
 		"result_doctype": row.result_doctype,
 		"result_name": row.result_name,
 		"batch_id": row.batch_id,
+		"corrects": row.get("corrects") or "",
+		"late": bool(frappe.flags.get(LATE_SETTLE_FLAG) or row.settle_attempts),
 	}
 
 
@@ -114,11 +135,14 @@ def _deliver(item: dict) -> None:
 		overwrite = ("superseded",)
 	else:
 		overwrite = ()
+	# A failed chip shows its reference, also for a failure that never dispatched
+	# (seal, stale, interrupted) and so has no stored result.
+	result = with_reference(item["result"], item["name"]) if item["status"] == FAILED else item["result"]
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",
 		item["args"],
-		item["result"],
+		result,
 		action_outcome=item["outcome"],
 		flip_token=item["name"],
 		overwrite_outcomes=overwrite,
@@ -155,7 +179,7 @@ def _continue(kind: str, conversation: str | None, items: list[dict]) -> None:
 		frappe.get_attr(path)(conversation, items)
 	else:
 		claim_settled([i["name"] for i in items])
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist settle step
 
 
 def _begin(row, force: bool) -> bool:
@@ -168,10 +192,10 @@ def _begin(row, force: bool) -> bool:
 				title="jarvis.pending_action.settle_quarantined",
 				message=f"{row.name}: settle failed {MAX_SETTLE_ATTEMPTS} times; use operator_settle.",
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist quarantine log
 		return False
 	bump_settle_attempts(row.name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist attempt count
 	return True
 
 

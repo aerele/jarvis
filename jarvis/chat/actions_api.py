@@ -12,12 +12,17 @@ the receipt, so the agent stages the plan's next step without the user typing
 "continue". See ``jarvis.chat.api.enqueue_continuation``.
 """
 
+import re
+
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 from jarvis import audit
+from jarvis._commit_watch import CommitWatch
 from jarvis._session import impersonate
 from jarvis.chat.api import _NON_EDIT_FIELDTYPES, _next_seq, enqueue_continuation
+from jarvis.chat.link_filters import draft_link_query_filters
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_user
 
@@ -29,7 +34,7 @@ CONV = "Jarvis Conversation"
 _SKIP_CHILD_FIELDTYPES = _NON_EDIT_FIELDTYPES | {"Table", "Table MultiSelect"}
 
 
-def _field_dict(df) -> dict:
+def _field_dict(df, doctype=None, parent_doctype=None, parentfield=None) -> dict:
 	return {
 		"fieldname": df.fieldname,
 		"label": df.label or df.fieldname,
@@ -37,17 +42,56 @@ def _field_dict(df) -> dict:
 		"options": df.options or "",
 		"reqd": int(df.reqd or 0),
 		"read_only": int(df.read_only or 0),
+		"link_filters": df.get("link_filters") or "",
+		"link_query_filters": draft_link_query_filters(doctype or df.parent, df, parent_doctype, parentfield),
 	}
 
 
-def _child_columns(child_doctype: str) -> list[dict]:
+def _readable_permlevels(doctype: str, parenttype: str | None = None) -> set | None:
+	"""Permlevels the session user may READ on ``doctype`` (a child through
+	``parenttype``): the set ``apply_fieldlevel_read_permissions`` uses. ``None``
+	means unrestricted (Administrator, which that method also skips)."""
+	if frappe.session.user == "Administrator":
+		return None
+	return set(frappe.get_meta(doctype).get_permlevel_access(permission_type="read", parenttype=parenttype))
+
+
+def _can_read_field(df, levels: set | None) -> bool:
+	"""A permlevel-0 field is readable to anyone who can read the document; a
+	higher permlevel only with a role granting it (Desk hides the rest)."""
+	return levels is None or not df.permlevel or df.permlevel in levels
+
+
+def _child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
 	"""Grid columns for one child table: the child's in_list_view fields (what
 	the Desk grid shows), falling back to the first 4 editable fields when the
-	child marks none."""
+	child marks none. Columns at a permlevel the user cannot read are dropped."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[0]
+	]
+
+
+def _extra_child_columns(child_doctype: str, parent_doctype=None, parentfield=None) -> list[dict]:
+	"""Every other readable editable field of the child, so a row key the model
+	proposes outside the grid keeps its real type and label (#655)."""
+	return [
+		_field_dict(df, child_doctype, parent_doctype, parentfield)
+		for df in _grid_fields(child_doctype, parent_doctype)[1]
+	]
+
+
+def _grid_fields(child_doctype: str, parent_doctype=None) -> tuple[list, list]:
+	"""(the grid's columns, every other readable editable field) of a child doctype."""
 	meta = frappe.get_meta(child_doctype)
-	editable = [df for df in meta.fields if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES]
-	listed = [df for df in editable if df.in_list_view]
-	return [_field_dict(df) for df in (listed or editable[:4])]
+	levels = _readable_permlevels(child_doctype, parent_doctype)
+	editable = [
+		df
+		for df in meta.fields
+		if df.fieldname and df.fieldtype not in _SKIP_CHILD_FIELDTYPES and _can_read_field(df, levels)
+	]
+	listed = [df for df in editable if df.in_list_view] or editable[:4]
+	return listed, [df for df in editable if df not in listed]
 
 
 @frappe.whitelist()
@@ -55,28 +99,32 @@ def _child_columns(child_doctype: str) -> list[dict]:
 def get_doctype_form_meta(doctype: str) -> dict:
 	"""Form metadata for the draft panel: main fields INCLUDING Table fields,
 	plus per-table child columns - one call, so the panel never fans out.
-	Gated on read permission of the parent (child meta rides on that gate)."""
+	Gated on read permission of the parent (child meta rides on that gate).
+	Fields at a permlevel the user cannot read are left out, so the panel never
+	shows (or pre-fills, via ``load_doc``) a value Desk would hide from them."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return {"ok": False, "reason": _("unknown doctype")}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
+	levels = _readable_permlevels(doctype)
 	fields, tables = [], {}
 	for df in meta.fields:
-		if not df.fieldname:
+		if not df.fieldname or not _can_read_field(df, levels):
 			continue
 		if df.fieldtype == "Table" and df.options:
-			fields.append(_field_dict(df))
+			fields.append(_field_dict(df, doctype))
 			tables[df.fieldname] = {
 				"child_doctype": df.options,
 				"label": df.label or df.fieldname,
-				"columns": _child_columns(df.options),
+				"columns": _child_columns(df.options, doctype, df.fieldname),
+				"extra_columns": _extra_child_columns(df.options, doctype, df.fieldname),
 			}
 			continue
 		if df.fieldtype in _NON_EDIT_FIELDTYPES:
 			continue
-		fields.append(_field_dict(df))
+		fields.append(_field_dict(df, doctype))
 	return {
 		"ok": True,
 		"doctype": doctype,
@@ -103,6 +151,11 @@ def load_doc(doctype: str, name: str) -> dict:
 		frappe.throw(_("You can't edit {0} {1}.").format(doctype, name), frappe.PermissionError)
 	fm = get_doctype_form_meta(doctype)
 	doc = frappe.get_doc(doctype, name)
+	# Write access does not imply read access at every permlevel: strip the
+	# fields (parent and child rows) the user cannot read, exactly as Desk's
+	# getdoc does. The form meta above already omits them, so they are neither
+	# returned nor shown for editing.
+	doc.apply_fieldlevel_read_permissions()
 	values = {}
 	for f in fm["fields"]:
 		if f["fieldtype"] == "Table":
@@ -123,6 +176,89 @@ def load_doc(doctype: str, name: str) -> dict:
 		"values": values,
 		"tables": tables,
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def draft_computed(action: dict | str | None = None) -> dict:
+	"""What ERPNext computes for a create card's rows (item amounts, tax totals) that
+	the model leaves blank (#647). The card's values are set on an UNSAVED document
+	(same checks as the write) and only ERPNext's totals arithmetic runs on them, as
+	Desk's form recomputes while you type: nothing is inserted or saved, so no
+	document hook, trigger or Server Script runs for a card that is only being shown.
+	Only a doctype ERPNext totals is computed; only the requested read-only
+	``columns`` (``{table field: [fieldnames]}``) come back, after permlevel masking.
+	Any refusal or failure is ``{"ok": False}`` and the card keeps its blanks."""
+	refuse_in_tool_dispatch()
+	a = frappe.parse_json(action) if isinstance(action, str) else (action or {})
+	doctype = (a.get("doctype") or "").strip()
+	conversation = (a.get("conversation") or "").strip()
+	values, columns = a.get("values"), a.get("columns")
+	if not doctype or not conversation or not isinstance(values, dict) or not isinstance(columns, dict):
+		raise InvalidArgumentError("doctype, conversation, values and columns are required")
+	_require_own_conversation(conversation)
+
+	from jarvis.exceptions import PreviewSandboxLost
+	from jarvis.tools import _write_risk
+	from jarvis.tools.create_doc import _validate_create_args
+
+	frappe.local.jarvis_dispatch_depth = getattr(frappe.local, "jarvis_dispatch_depth", 0) + 1
+	try:
+		# Structure and sensitive configuration are never computed from a card.
+		if _write_risk.check("create_doc", {"doctype": doctype, "values": values}) == "sensitive":
+			return {"ok": False}
+		_validate_create_args(doctype, values)
+		doc = _calculate_draft(doctype, values)
+		if doc is None:
+			return {"ok": False}
+		doc.apply_fieldlevel_read_permissions()
+		return {"ok": True, "tables": _requested_rows(doc, columns)}
+	except PreviewSandboxLost:
+		raise  # not undone cleanly: fail the request so nothing is committed
+	except Exception:  # a refusal or a failed calculation: the card keeps its blanks
+		return {"ok": False}
+	finally:
+		frappe.local.jarvis_dispatch_depth -= 1
+		frappe.clear_messages()
+
+
+def _calculate_draft(doctype: str, values: dict):
+	"""The unsaved document with ERPNext's totals computed from the card's own values,
+	or None for a doctype ERPNext does not total (it totals only one with a currency,
+	as its validate does). Deliberately not ``set_missing_values``: fetching item
+	details can insert or update an Item Price (Stock Settings' auto-insert), and that
+	write would run hooks. In the preview sandbox all the same."""
+	from jarvis.tools._preview_sandbox import preview_sandbox
+	from jarvis.tools.create_doc import build_doc
+
+	doc = build_doc(doctype, values)
+	if not (doc.meta.get_field("currency") and hasattr(doc, "calculate_taxes_and_totals")):
+		return None
+	with preview_sandbox():
+		doc.calculate_taxes_and_totals()
+	return doc
+
+
+def _requested_rows(doc, columns: dict) -> dict:
+	tables = {}
+	for tf, wanted in columns.items():
+		df = doc.meta.get_field(tf) if isinstance(tf, str) else None
+		if not df or df.fieldtype != "Table" or not isinstance(wanted, list):
+			continue
+		child = frappe.get_meta(df.options)
+		known = [f for f in wanted if isinstance(f, str) and _is_shown(child.get_field(f))]
+		tables[tf] = [{f: row.get(f) for f in known} for row in doc.get(tf) or []]
+	return tables
+
+
+def _is_shown(df) -> bool:
+	"""A child field ERPNext computes for the card: read-only, data-bearing, never a secret."""
+	return (
+		bool(df)
+		and bool(df.read_only)
+		and df.fieldtype not in _SKIP_CHILD_FIELDTYPES
+		and df.fieldtype != "Password"
+	)
 
 
 # apply_action is the human-authored EDIT path only: the human deliberately
@@ -160,10 +296,59 @@ def _receipt_text(verb: str, doctype: str, name: str, submitted: int = 0) -> str
 	return f"{_RECEIPT[verb]} {doctype} {name}."
 
 
-def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args: dict, text: str) -> None:
+_NEGATIVE_ACTION = re.compile(r"reject|cancel|decline|withdraw", re.I)
+
+
+def _suggest_next(doctype: str, name: str) -> dict | None:
+	"""The ONE next step to offer after a draft was created, or None.
+
+	The first non-negative workflow action the caller may take on it now (role,
+	condition and self-approval, via ``get_workflow_transitions``); with no workflow,
+	Submit when the DocType is submittable and the caller holds submit permission.
+	A doc that already left draft (Create & Submit, or moved on) gets nothing.
+	Only ``kind`` and ``action`` are returned: the SPA words the button."""
+	if not name or frappe.db.get_value(doctype, name, "docstatus") != 0:
+		return None
+	from frappe.model.workflow import get_workflow_name
+
+	if get_workflow_name(doctype):
+		from jarvis.tools.get_workflow_transitions import get_workflow_transitions
+
+		actions = get_workflow_transitions(doctype, name).get("available_actions") or []
+		action = next((a["action"] for a in actions if not _NEGATIVE_ACTION.search(a["action"] or "")), None)
+		return {"kind": "workflow", "action": action} if action else None
+	if frappe.get_meta(doctype).is_submittable and frappe.has_permission(doctype, "submit", doc=name):
+		return {"kind": "submit", "action": None}
+	return None
+
+
+def _suggest_next_safe(doctype: str, name: str) -> dict | None:
+	"""A hint must never fail the create it follows."""
+	try:
+		return _suggest_next(doctype, name)
+	except Exception:
+		frappe.log_error(title="apply_action next-step suggestion failed", message=frappe.get_traceback())
+		return None
+
+
+def _append_receipt(
+	conversation: str,
+	verb: str,
+	doctype: str,
+	name: str,
+	args: dict,
+	text: str,
+	suggested_next: dict | None = None,
+	submitted: int = 0,
+) -> None:
 	"""Tool message first (feeds the SPA's docRefs → the receipt's doc id
 	linkifies to Desk), then a short assistant receipt the agent also sees in
 	the transcript on its next turn - so it never re-applies the change."""
+	data = {"doctype": doctype, "name": name}
+	if verb == "create" and submitted:
+		# So the chip itself says "Created and submitted" (the assistant row repeating it is
+		# then a true duplicate); docstatus 1 is the saved state, read by receiptView.
+		data["docstatus"] = 1
 	receipt = frappe.get_doc(
 		{
 			"doctype": MSG,
@@ -173,7 +358,12 @@ def _append_receipt(conversation: str, verb: str, doctype: str, name: str, args:
 			"streaming": 0,
 			"tool_name": f"{verb}_doc",
 			"tool_args": frappe.as_json(args),
-			"tool_result": frappe.as_json({"ok": True, "data": {"doctype": doctype, "name": name}}),
+			"tool_result": frappe.as_json(
+				{
+					"ok": True,
+					"data": {**data, **({"suggested_next": suggested_next} if suggested_next else {})},
+				}
+			),
 			"tool_status": "completed",
 			# This row DID come from a confirmation card - the human pressed Confirm on
 			# the draft - so mark it and let the SPA render the same receipt chip (with
@@ -251,6 +441,30 @@ def apply_action(action: dict | str | None = None) -> dict:
 		if (frappe.get_meta(doctype).autoname or "").lower().startswith("prompt"):
 			values = {**values, "name": name}
 
+	from jarvis import api
+	from jarvis.tools import _write_risk
+
+	# The call as the gated route would see it: create {doctype, values}, update
+	# {doctype, name, changes}. Also the audit/receipt args below.
+	tool = f"{verb}_doc"
+	args = (
+		{"doctype": doctype, "values": values}
+		if verb == "create"
+		else {"doctype": doctype, "name": name, "changes": values}
+	)
+	# Write-risk guard (round 2): a structure change is refused from the panel too
+	# (set up in Desk); sensitive configuration, and the guarded structure writes
+	# (one new Custom Field, a column-free Custom Field edit), are turned into a
+	# gated card below, since the panel holds the values and its one click is not
+	# that card.
+	try:
+		_risk = _write_risk.check(tool, args, guarded=True)
+	except api.WriteRefusedError as e:
+		return api._refuse_risky_write(tool, args, e)
+	if _risk in _write_risk.GUARDED_STRUCTURE:
+		# The gate refuses it where it cannot be carded (a File Box chat).
+		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
+
 	# A File Box chat's card goes through the File Box policy (filebox_cards), whether
 	# the turn end or this Confirm gets to it first - never straight to the write. The
 	# policy only drafts, so a "Create & Submit" leaves the submit to a human.
@@ -276,40 +490,52 @@ def apply_action(action: dict | str | None = None) -> dict:
 				frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 		return res
 
-	from jarvis import api
-
-	# The audit/receipt args, built up front (independent of the write outcome);
-	# a create fills in its real `name` after insert. For create the args are
-	# {doctype, values}; for update {doctype, name, changes}.
-	args = (
-		{"doctype": doctype, "values": values}
-		if verb == "create"
-		else {"doctype": doctype, "name": name, "changes": values}
-	)
+	if _risk == "sensitive":
+		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
 
 	# Surface a failed apply through the SAME {ok:false, error} envelope the
 	# model/confirm paths use (rich detail + hint), instead of leaking Frappe's
 	# raw 403/417 to the SPA. ``mark`` lets _translate_write_error harvest only
 	# the reason THIS write logged.
 	mark = api._msglog_mark()
+	_write_risk.take_refusal()
+	watch = CommitWatch().arm(savepoint=True)
 	try:
-		if verb == "create":
-			from jarvis.tools.create_doc import create_doc
+		# The panel's write is a tool call with no card: the ORM guard is on (no
+		# record allowed) and the no-commit fence makes a doctype whose save runs
+		# DDL raise ImplicitCommitError before the ALTER (refused as structure).
+		with _write_risk.guard_scope([]), _write_risk.no_commit_fence():
+			if verb == "create":
+				from jarvis.tools.create_doc import create_doc
 
-			res = create_doc(doctype, values)
-			name = res.get("name")
-			if do_submit:
-				# Submit of the JUST-created draft the human authored (the same
-				# payload they saw) - low risk, kept as part of the draft-editor UX.
-				from jarvis.tools.submit_doc import submit_doc
+				if not values:
+					# Every field left empty in the panel: a missing value it marks below,
+					# never the tool's generic "values must be a non-empty dict".
+					raise frappe.MandatoryError(_("Value missing"))
+				res = create_doc(doctype, values)
+				name = res.get("name")
+				if do_submit:
+					# Submit of the JUST-created draft the human authored (the same
+					# payload they saw) - low risk, kept as part of the draft-editor UX.
+					from jarvis.tools.submit_doc import submit_doc
 
-				submit_doc(doctype, name)
-		else:  # update
-			from jarvis.tools.update_doc import update_doc
+					submit_doc(doctype, name)
+			else:  # update
+				from jarvis.tools.update_doc import update_doc
 
-			update_doc(doctype, name, values)
+				update_doc(doctype, name, values)
+		hidden = _write_risk.take_refusal()
+		if hidden is not None:
+			raise hidden  # a hook swallowed the guard's refusal: never report success
 	except Exception as e:
-		envelope = api._translate_write_error(e, mark)
+		# Before any rollback, which resets the sentinel. The no-commit fence makes
+		# frappe.db.commit a no-op here, so the savepoint is what sees a raw commit. A
+		# deadlock's own rollback drops the savepoint too (a lock timeout does not).
+		partial = watch.disarm(probe=not isinstance(e, frappe.QueryDeadlockError))
+		hidden = _write_risk.take_refusal()
+		if hidden is not None and not isinstance(e, api.WriteRefusedError):
+			e = hidden
+		envelope = api._translate_write_error(e, mark, doctype=doctype)
 		if envelope is None:
 			# Unexpected - audit + re-raise so a real bug still surfaces as a 500
 			# (never enveloped, never leaks a traceback to the client).
@@ -323,9 +549,12 @@ def apply_action(action: dict | str | None = None) -> dict:
 			raise
 		# A RETURNED envelope makes Frappe commit at end-of-request; roll back so
 		# a partial create+submit (create ok, submit failed) leaves NO changes -
-		# the SPA's "No changes were saved" line stays truthful.
+		# unless something committed part-way (``partial``), which no rollback undoes.
 		frappe.db.rollback()
 		err_obj = envelope["error"]
+		marked = None
+		if _value_failure(err_obj):
+			marked = _mark_fields(err_obj, verb, doctype, name, values, e)
 		audit.record(
 			tool=f"apply_action.{verb}_doc",
 			args=args,
@@ -333,7 +562,34 @@ def apply_action(action: dict | str | None = None) -> dict:
 			error_code=err_obj["code"],
 			error_message=err_obj["message"],
 		)
-		return envelope
+		if err_obj["code"] in _write_risk.REFUSAL_CODES:
+			# The guard refused it (the ORM, or the fence before DDL): a refused row in
+			# Jarvis Agent Write, like every other route (E4).
+			from jarvis import agent_audit
+
+			agent_audit.record_write(
+				actor=frappe.session.user,
+				tool=tool,
+				args=args,
+				result=None,
+				outcome="refused",
+				provenance="chat",
+				ref_doctype=err_obj.get("doctype"),
+			)
+			return envelope
+		# R2-9: what the panel and the assistant are told depends on the failure's kind.
+		from jarvis.chat.panel_failure import PanelFailure
+
+		panel = PanelFailure(
+			conversation,
+			tool,
+			args,
+			envelope,
+			partial=partial,
+			fixable_here=_panel_can_fix(verb, doctype, name, err_obj, marked),
+		)
+		return panel.respond(draft=a.get("message"), editable=cint(a.get("editable", 1)))
+	watch.disarm()
 
 	# Audit as a human-authored write, distinct from a model tool call. The
 	# actor (frappe.session.user) is captured by audit.record; the tool label
@@ -342,10 +598,20 @@ def apply_action(action: dict | str | None = None) -> dict:
 		tool=f"apply_action.{verb}_doc", args=args, ok=True, result={"doctype": doctype, "name": name}
 	)
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
+	suggested_next = _suggest_next_safe(doctype, name) if verb == "create" and not do_submit else None
 	try:
-		_append_receipt(conversation, verb, doctype, name, args, receipt)
+		_append_receipt(
+			conversation,
+			verb,
+			doctype,
+			name,
+			args,
+			receipt,
+			suggested_next=suggested_next,
+			submitted=do_submit,
+		)
 		frappe.db.commit()
 	except Exception:
 		# The mutation is already committed - a receipt hiccup must not
@@ -367,6 +633,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 			frappe.log_error(title="apply_action continuation failed", message=frappe.get_traceback())
 	slug = doctype.lower().replace(" ", "-")
 	resp = {"ok": True, "verb": verb, "name": name, "doc_url": f"/app/{slug}/{name}"}
+	if suggested_next:
+		resp["suggested_next"] = suggested_next
 	# SUX-3/SUXI-2: when the continuation turn queued (all slots taken), thread
 	# its run_id + position so the SPA renders the standard queued chip instead
 	# of the card vanishing into silence after the "Change saved" ack clears.
@@ -376,6 +644,191 @@ def apply_action(action: dict | str | None = None) -> dict:
 		resp["run_id"] = _cont.get("run_id")
 		resp["message_id"] = _cont.get("message_id")
 	return resp
+
+
+def _created_in_conversation(conversation: str, doctype: str, name: str) -> bool:
+	"""True when this conversation holds a confirmed create receipt for the record."""
+	# get_all: the caller's ownership of the conversation was checked by the caller.
+	rows = frappe.get_all(
+		"Jarvis Chat Message",
+		filters={
+			"conversation": conversation,
+			"role": "tool",
+			"tool_name": "create_doc",
+			"action_outcome": "confirmed",
+		},
+		pluck="tool_result",
+	)
+	for raw in rows:
+		data = (frappe.parse_json(raw) or {}).get("data") or {}
+		if data.get("doctype") == doctype and data.get("name") == name:
+			return True
+	return False
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def propose_next_action(
+	conversation: str, doctype: str, name: str, kind: str, action: str | None = None
+) -> dict:
+	"""Park the confirmation card for a receipt's suggested next step.
+
+	ALWAYS parks (the force-card flag overrides auto mode, armed macros and
+	autoruns): the button promises a Confirm card and nothing runs from here.
+	The record must be one this conversation confirmed a create for, the caller
+	must be able to read it, and the suggestion is recomputed, so a stale button
+	is refused. Every refusal about the record reads the same, so this is no
+	existence oracle."""
+	refuse_in_tool_dispatch()
+	_require_own_conversation(conversation)
+	unavailable = InvalidArgumentError(_("That next step is not available."))
+	if not (doctype and name and frappe.db.exists("DocType", doctype)):
+		raise unavailable
+	if not _created_in_conversation(conversation, doctype, name):
+		raise unavailable
+	if not frappe.has_permission(doctype, "read", doc=name):
+		raise unavailable
+	suggested = _suggest_next(doctype, name)
+	if not suggested or suggested["kind"] != kind or (kind == "workflow" and suggested["action"] != action):
+		raise unavailable
+	from jarvis import api
+
+	tool, args = ("submit_doc", {"doctype": doctype, "name": name})
+	if kind == "workflow":
+		tool, args = ("apply_workflow_action", {**args, "action": action})
+	prev = frappe.flags.get("jarvis_force_card")
+	frappe.flags["jarvis_force_card"] = True
+	try:
+		res = api._run_tool(tool, args, conversation=conversation)
+	finally:
+		frappe.flags["jarvis_force_card"] = prev
+	return _person_next_refusal(res)
+
+
+def _person_next_refusal(res: dict) -> dict:
+	"""Words for the person on the two TEMPORARY refusals of a next-step click (another
+	card waiting, a retryable storage error): the gate's own text is written for the
+	model ("end your turn now"). The stable ``error.code`` stays, so the SPA keeps the
+	button for these and hides it only for a refusal that is final."""
+	err = res.get("error") if isinstance(res, dict) else None
+	if not isinstance(err, dict):
+		return res
+	if err.get("code") == "ConfirmationPendingError":
+		err["person_message"] = _("Finish or discard the open card first.")
+	elif err.get("code") == "ConfirmationUnavailableError":
+		err["person_message"] = _("Couldn't open the card right now. Try again.")
+	return res
+
+
+def _panel_can_fix(verb: str, doctype: str, name: str, err_obj: dict, marked: bool | None) -> bool:
+	"""Whether the draft panel can fix this failure (R2-9). Yes when it marked the
+	fields at fault (``_mark_fields``), whatever the failure's kind: a bad ``status``
+	is not fixable for the model (J2a) but is a choice the person changes here. No
+	when a missing value cannot be filled in the panel, or the record being updated
+	is gone (no edit brings it back). Otherwise a fixable failure is."""
+	if marked is not None:
+		return marked
+	if verb == "update" and not (name and frappe.db.exists(doctype, name)):
+		return False
+	return err_obj.get("kind") == "fixable"
+
+
+def _park_sensitive(
+	tool: str, args: dict, conversation: str, verb: str, name: str, message: str = ""
+) -> dict:
+	"""Turn a draft-panel write of sensitive configuration into the gated card
+	(R2-8): the same park the assistant's own call gets, run as the person, so it
+	is shown in full and needs its own Confirm. ``parked`` tells the panel the
+	change is waiting on that card, not saved; a refusal (another card already
+	waiting, a failed dry run) comes back as the gate's own envelope."""
+	from jarvis import api
+
+	# ``message``: the draft's message; stamped on the card (preview.from_draft) so
+	# both clients show that draft as waiting, also after a reload.
+	prev = frappe.flags.get("jarvis_park_from_draft")
+	frappe.flags["jarvis_park_from_draft"] = message or None
+	try:
+		res = api._run_tool(tool, args, conversation=conversation)
+	finally:
+		frappe.flags["jarvis_park_from_draft"] = prev
+	if not (res.get("ok") and (res.get("data") or {}).get("status") == "pending_confirmation"):
+		err = res.get("error") if isinstance(res.get("error"), dict) else {}
+		if err.get("code") == "ConfirmationPendingError":
+			# The gate's text is written for the model ("end your turn"); a person
+			# clicked the panel, so say it plainly.
+			err["message"] = _(
+				"A confirmation for an earlier change is already waiting in this chat. "
+				"Confirm or discard it first."
+			)
+		elif err.get("person_message"):
+			# A sensitive card that cannot be shown in full (api._refuse_unshowable_card).
+			err["message"] = err.pop("person_message")
+		return res
+	return {
+		"ok": True,
+		"verb": verb,
+		"name": name,
+		"parked": True,
+		"doc_url": "",
+		"note": _(
+			"This needs its own confirmation card, now waiting in the chat. Nothing is saved until it is confirmed."
+		),
+	}
+
+
+def _value_failure(err_obj: dict) -> bool:
+	"""A failure about the values themselves, the only kind field marks may keep the
+	panel open for: every value failure is enveloped as ``InvalidArgumentError``
+	(fixable ones, and Frappe's own Select / Link checks). Never a permission denial:
+	Frappe checks permission before links, so marking (or even looking up) a link
+	there would tell someone who may not create the record whether a name exists."""
+	return err_obj.get("code") == "InvalidArgumentError" and err_obj.get("kind") != "retry_later"
+
+
+def _mark_fields(err_obj: dict, verb: str, doctype: str, name: str, values: dict, exc) -> bool | None:
+	"""Mark the fields the person must fill or correct (``error.fields``,
+	``jarvis.chat.panel_fields``) and word the message after them. True when there
+	are marks, False when a missing value cannot be filled in the panel (and nothing
+	else is marked), None when nothing here is about a field.
+
+	Required values are looked for only on a "Value missing" failure (the draft is
+	re-run in a sandbox for it); after any other failure the controller had not
+	filled its own fields yet. A value the panel cannot fill never turns a failure
+	with a bad value marked into one it cannot fix."""
+	from jarvis.chat.panel_fields import invalid_marks, missing_marks
+
+	invalid = invalid_marks(verb, doctype, name, values)
+	missing = missing_marks(verb, doctype, name, values) if isinstance(exc, frappe.MandatoryError) else []
+	if missing is None:
+		if not invalid:
+			return False
+		missing = []
+	if not (missing or invalid):
+		return None
+	err_obj["fields"] = missing + invalid
+	where = ", ".join(f["where"] for f in missing)
+	if missing and invalid:
+		# The value problems first, then what is missing (the "Value missing" text that
+		# failed is Frappe's raw one, so it is replaced, not kept).
+		err_obj["message"] = _("{0} {1} also needs a value for {2}.").format(
+			_refused_sentence(invalid), _(doctype), where
+		)
+	elif missing:
+		err_obj["message"] = _("{0} needs a value for {1}.").format(_(doctype), where)
+	if missing and invalid:
+		err_obj["hint"] = _("Fill in and correct the marked fields, then save again.")
+	elif missing:
+		err_obj["hint"] = _("Fill it in, then create again.")
+	else:
+		err_obj["hint"] = _("Correct the marked fields, then save again.")
+	return True
+
+
+def _refused_sentence(invalid: list[dict]) -> str:
+	labels = ", ".join(f["where"] for f in invalid)
+	if len(invalid) == 1:
+		return _("{0} has a value it does not accept.").format(labels)
+	return _("{0} have values they do not accept.").format(labels)
 
 
 _INVALID_CONFIRM = {
@@ -534,8 +987,9 @@ def _approve_run_refusal(record) -> dict | None:
 	if record.get("tool") not in api._SKILL_AUTORUN_COVERED:
 		return _APPROVE_RUN_NEVER_TOOL
 	# TOCTOU re-check: the skill must be live-armed RIGHT NOW off the EXACT row
-	# the offer stamped (an admin may have un-armed it since).
-	if not frappe.db.get_value("Jarvis Custom Skill", skill_docname, "allow_approve_run"):
+	# the offer stamped (an admin may have un-armed it, or switched it off, since).
+	live = frappe.db.get_value("Jarvis Custom Skill", skill_docname, ["allow_approve_run", "enabled"])
+	if not live or not all(frappe.utils.cint(v) for v in live):
 		return _APPROVE_RUN_NOT_ARMED
 	# Defense-in-depth (design §3.4.1): the token's conversation must NOT be an
 	# armed macro run (skip_confirmation=1), so a both-flags conversation is
@@ -558,7 +1012,7 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		"SELECT status FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE", {"c": run_conv}
 	)
 	if not status or status[0] == "Archived" or turn_message_binding.is_run_cancel_requested(run_conv):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return
 	# Stamp skill_autorun_skill (C2) so the gate can re-read allow_approve_run LIVE
 	# off THIS exact armed row before each uncarded covered write - un-arming the
@@ -573,7 +1027,7 @@ def _open_skill_run(run_conv: str, skill_docname: str) -> None:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist armed run state
 
 
 def _clear_stale_halt(run_conv: str | None) -> None:
@@ -591,16 +1045,23 @@ def _clear_stale_halt(run_conv: str | None) -> None:
 def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> dict:
 	"""Run a consumed LEGACY record AS its stored ``exec_user`` (confirm_tool and
 	approve_and_run). ``impersonate`` is session-safe: a bare ``frappe.set_user``
-	would gut the confirming browser's cookie session (sid + data) and log it out."""
+	would gut the confirming browser's cookie session (sid + data) and log it out.
+
+	A failure whose transaction was not its own (something committed part-way,
+	``jarvis._commit_watch``) comes back with ``outcome: "partial"``: its rollback could
+	not undo what was committed, so it is never reported as "nothing was saved"."""
 	from jarvis import api
 
 	# exec_user defaults to the owner for tokens minted before this field existed.
 	exec_user = record.get("exec_user") or record.get("owner") or frappe.session.user
+	watch = CommitWatch().arm(savepoint=True)
 	try:
 		with impersonate(exec_user):
 			# Same envelope + audit as an inline write - dispatch_confirmed bypasses
 			# the gate so the stored call actually executes instead of parking again.
-			result = api.dispatch_confirmed(record["tool"], record["args"])
+			# allow_risky: the human confirmed this card, so the write-risk guard
+			# admits the sensitive records its arguments name (and nothing else).
+			result = api.dispatch_confirmed(record["tool"], record["args"], allow_risky=True)
 			# run_method returns its target verbatim; strip permlevel>0 fields the agent
 			# can't read before they reach the receipt / continuation (still as exec_user).
 			api._apply_run_method_read_filter(record["tool"], result)
@@ -610,13 +1071,33 @@ def _dispatch_call(record: dict, token: str, guard_conv, crash_title: str) -> di
 		# _dispatch_and_wrap re-raises such exceptions with its savepoint still open, so
 		# roll back the partial write, log it, and fall through to a graceful failure
 		# envelope: the "failed" receipt + continuation still fire.
+		partial = watch.disarm(probe=True)  # before the rollback, which resets the sentinel
 		frappe.db.rollback()
 		frappe.log_error(
 			title=crash_title,
 			message=f"token={token} conversation={guard_conv}\n{frappe.get_traceback()}",
 		)
-		result = api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
+		if partial:
+			message = "the confirmed action may have partly run; check before retrying"
+			return {**api._error("InternalError", message), "outcome": "partial"}
+		return api._error("InternalError", "the confirmed action failed unexpectedly and was not saved")
+	if isinstance(result, dict) and result.get("ok"):
+		watch.disarm()
+		return result
+	# After a deadlock the write path rolled back (CommitWatch skips the probe then);
+	# a lock timeout keeps the savepoint, so a commit before it is still seen.
+	if watch.disarm(probe=True):
+		from jarvis.chat.panel_failure import mark_partial
+
+		result = mark_partial(dict(result) if isinstance(result, dict) else {"ok": False})
 	return result
+
+
+def _legacy_chip(result) -> str:
+	"""The receipt chip of a LEGACY confirm: confirmed, failed, or partial."""
+	if isinstance(result, dict) and result.get("outcome") == "partial":
+		return "partial"
+	return "confirmed" if isinstance(result, dict) and result.get("ok") else "failed"
 
 
 def _run_pending_action(
@@ -737,9 +1218,15 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		return _INVALID_CONFIRM
 
 	_clear_stale_halt(record.get("conversation"))
+	# A run already open on this chat: this click is one of its cards too.
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	# STEP 1: execute the parked write AS the scoped exec_user the gate stored.
 	result = _dispatch_call(record, token, guard_conv, "approve_and_run dispatch crashed")
 	ok = isinstance(result, dict) and bool(result.get("ok"))
+	if not ok:
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
 
 	# Announce a step-1 run_import's completion back into the chat (mirror
 	# _confirm_core). Self-gating + best-effort (no-ops unless tool == run_import +
@@ -773,7 +1260,7 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 				record["tool"],
 				record["args"],
 				result,
-				action_outcome="confirmed" if ok else "failed",
+				action_outcome=_legacy_chip(result),
 				# PR-1: flip the parked PENDING action-row into this receipt in place
 				# (else insert, for a directly-minted / pre-deploy token).
 				flip_token=token,
@@ -791,7 +1278,9 @@ def approve_and_run(token: str, conversation: str | None = None) -> dict:
 		# scaffold (on failure - explain + stop, do not auto-retry).
 		_cont = None
 		try:
-			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
+			_cont = enqueue_continuation(
+				conv, _confirm_receipt_text(record, result), outcome=_legacy_outcome(result)
+			)
 		except Exception:
 			frappe.log_error(
 				title="approve_and_run continuation failed",
@@ -864,7 +1353,14 @@ def _confirm_core(
 	if not record:
 		return _INVALID_CONFIRM
 
+	# A card of an approved skill run: the wait for this click does not count
+	# against the run, and a card that fails ends it (as a failed write does).
+	from jarvis.chat import turn_message_binding
+
+	turn_message_binding.keep_skill_autorun_open(record.get("conversation"))
 	result = _dispatch_call(record, token, guard_conv, "confirm dispatch crashed")
+	if not (isinstance(result, dict) and result.get("ok")):
+		turn_message_binding.end_skill_autorun_if_open(record.get("conversation"), "card_failed")
 
 	# Slice B: bind a Jarvis Import Announcement so the import's completion is
 	# announced back into this chat unprompted. Best-effort + self-gating (tool ==
@@ -897,7 +1393,7 @@ def _confirm_core(
 				record["tool"],
 				record["args"],
 				result,
-				action_outcome="confirmed" if ok else "failed",
+				action_outcome=_legacy_chip(result),
 				# PR-1: flip the parked PENDING action-row into this receipt in place
 				# (else insert, for a directly-minted / pre-deploy token).
 				flip_token=token,
@@ -932,7 +1428,9 @@ def _confirm_core(
 			return result
 		_cont = None
 		try:
-			_cont = enqueue_continuation(conv, _confirm_receipt_text(record, result), failed=not ok)
+			_cont = enqueue_continuation(
+				conv, _confirm_receipt_text(record, result), outcome=_legacy_outcome(result)
+			)
 		except Exception:
 			frappe.log_error(
 				title="confirm continuation failed",
@@ -959,6 +1457,71 @@ def _confirm_pending_action(token: str, passed_conv: str, *, batch: bool, batch_
 			res["receipt_text"] = _pa_receipt_text(_item(row))
 			res["pa_deferred"] = True
 	return res
+
+
+# R2-3: a failure's own words reach the assistant in full up to these caps (they are
+# tenant text, quoted as DATA by enqueue_continuation): per failed row, and in total
+# for the failures of one continuation.
+RECEIPT_ROW_CAP = 600
+RECEIPT_TOTAL_CAP = 4000
+
+
+def _failure_text(err) -> str:
+	"""The failure's message and, when it adds something, Frappe's detail (the reason
+	``_harvest_reason`` kept), capped at ``RECEIPT_ROW_CAP`` characters."""
+	if not isinstance(err, dict):
+		return ""
+	message = str(err.get("message") or "").strip()
+	detail = str(err.get("detail") or "").strip()
+	text = f"{message} {detail}".strip() if detail and detail not in message else message
+	if len(text) > RECEIPT_ROW_CAP:
+		text = text[: RECEIPT_ROW_CAP - 3].rstrip() + "..."
+	return text
+
+
+def _join_capped(receipts: list[str]) -> str:
+	"""Failure receipts joined up to ``RECEIPT_TOTAL_CAP`` characters (``_cap_groups``)."""
+	return _cap_groups([("all", receipts)])["all"]
+
+
+def _cap_groups(groups: list[tuple[str, list[str]]]) -> dict[str, str]:
+	"""Each group's failure receipts joined, under ONE ``RECEIPT_TOTAL_CAP`` budget for
+	all of them together. No non-empty group is dropped: each first gets its first
+	receipt (each already capped at ``RECEIPT_ROW_CAP``), then the rest fill what is
+	left in order. What does not fit is counted in its own group ("and N more."),
+	never cut mid-way."""
+	shown = {key: texts[:1] for key, texts in groups}
+	used = sum(len(t[0]) + 1 for _key, t in groups if t)
+	for key, texts in groups:
+		for text in texts[1:]:
+			if used + 1 + len(text) > RECEIPT_TOTAL_CAP - 20 * len(groups):
+				break
+			shown[key].append(text)
+			used += len(text) + 1
+	out = {}
+	for key, texts in groups:
+		parts = [t[:RECEIPT_TOTAL_CAP] for t in shown[key]]
+		if len(texts) > len(parts):
+			parts.append(f"and {len(texts) - len(parts)} more.")
+		out[key] = " ".join(parts)
+	return out
+
+
+def _legacy_outcome(result) -> str:
+	"""The continuation outcome of a LEGACY (Redis token) confirm. It has no Pending
+	Action row for the correction stamp, so the bench could not limit a fixable
+	failure to one correction: it is sent as not fixable (explain and stop). One that
+	committed part-way (``_dispatch_call``) is partial."""
+	from jarvis import _failure_kind
+	from jarvis.chat import api as chat_api
+
+	if isinstance(result, dict) and result.get("ok"):
+		return chat_api.OUTCOME_OK
+	if isinstance(result, dict) and result.get("outcome") == "partial":
+		return chat_api.OUTCOME_PARTIAL
+	if _failure_kind.envelope_kind(result) == _failure_kind.RETRY_LATER:
+		return chat_api.OUTCOME_RETRY_LATER
+	return chat_api.OUTCOME_NOT_FIXABLE
 
 
 def _confirm_receipt_text(record: dict, result) -> str:
@@ -994,9 +1557,7 @@ def _confirm_receipt_text(record: dict, result) -> str:
 	if not is_run_method and isinstance(data, dict) and data.get("name"):
 		desc += f" -> {data['name']}"
 	if isinstance(result, dict) and not result.get("ok"):
-		err = result.get("error") or {}
-		msg = str(err.get("message") or "")[:200] if isinstance(err, dict) else ""
-		return f"{desc} FAILED. {msg}".strip()
+		return f"{desc} FAILED. {_failure_text(result.get('error'))}".strip()
 	if is_run_method:
 		try:
 			payload = frappe.as_json(data)
@@ -1198,6 +1759,90 @@ def _take_continuation(name: str):
 	return (frappe.flags.jarvis_pa_continuations or {}).pop(name, None)
 
 
+def _settled_kind(item: dict) -> str:
+	"""The failure kind a settled, failed card is reported with. Never fixable for a
+	card that was itself the correction (``corrects``: the one correction is spent),
+	nor for a late settle (the reconciler, long after the click: nobody is in the
+	turn to correct it). Only FIXABLE is downgraded: a busy failure stays busy."""
+	from jarvis import _failure_kind
+
+	kind = _failure_kind.envelope_kind(item.get("result"))
+	if kind == _failure_kind.FIXABLE and (item.get("corrects") or item.get("late")):
+		return _failure_kind.NOT_FIXABLE
+	return kind
+
+
+def _settled_plan(decided: list[dict]) -> dict:
+	"""The continuation for settled Executed / Failed cards (R2-3): its outcome, the
+	DATA spans, and the cards to stamp as "may be corrected in the next turn".
+
+	``unknown`` / ``partial`` win over every failure kind (an unverified write is
+	never offered a retry). Otherwise one kind for all the failures is that kind's
+	outcome, and anything else (some ran, or kinds differ) is ``mixed``. Stamped:
+	each fixable failure, and each card that ran as a correction (``corrects``), so
+	"update the missing value, then submit again" is still the one correction."""
+	from jarvis import _failure_kind
+	from jarvis.chat import api as chat_api
+	from jarvis.chat.pending_actions._store import EXECUTED
+
+	ran = [i for i in decided if i["status"] == EXECUTED]
+	failed = [i for i in decided if i["status"] != EXECUTED]
+	applied = " ".join(_pa_receipt_text(i) for i in ran)
+	plan = {"receipt": "", "spans": None, "stamp": []}
+	if any(i["outcome"] in ("unknown", "partial") for i in decided):
+		partial_only = all(
+			i["outcome"] != "unknown" for i in decided if i["outcome"] in ("unknown", "partial")
+		)
+		plan["outcome"] = chat_api.OUTCOME_PARTIAL if partial_only else chat_api.OUTCOME_UNKNOWN
+		plan["receipt"] = " ".join(
+			part for part in (applied, _join_capped([_pa_receipt_text(i) for i in failed])) if part
+		)
+		return plan
+	plan["stamp"] = [i["name"] for i in ran if i.get("corrects")]
+	if not failed:
+		plan["outcome"] = chat_api.OUTCOME_OK
+		plan["receipt"] = applied
+		return plan
+	kinds = {i["name"]: _settled_kind(i) for i in failed}
+	plan["stamp"] += [n for n, k in kinds.items() if k == _failure_kind.FIXABLE]
+	if not ran and len(set(kinds.values())) == 1:
+		kind = next(iter(kinds.values()))
+		plan["outcome"] = {
+			_failure_kind.FIXABLE: chat_api.OUTCOME_FIXABLE,
+			_failure_kind.RETRY_LATER: chat_api.OUTCOME_RETRY_LATER,
+		}.get(kind, chat_api.OUTCOME_NOT_FIXABLE)
+		plan["receipt"] = _join_capped([_pa_receipt_text(i) for i in failed])
+		return plan
+	# One cap across every failure span of the continuation, not one per span.
+	groups = _cap_groups(
+		[
+			(span, [_pa_receipt_text(i) for i in failed if kinds[i["name"]] == kind])
+			for span, kind in (
+				("fixable", _failure_kind.FIXABLE),
+				("busy", _failure_kind.RETRY_LATER),
+				("not_fixable", _failure_kind.NOT_FIXABLE),
+			)
+		]
+	)
+	plan["outcome"] = chat_api.OUTCOME_MIXED
+	plan["spans"] = {"applied": applied, **groups}
+	plan["receipt"] = groups["not_fixable"]
+	return plan
+
+
+def _stamp_correction(names: list[str], message: str) -> None:
+	"""R2-3 correction stamp, written in the continuation's own user-row transaction:
+	these cards may be corrected by a card parked in the turn ``message`` starts
+	(``pending_actions.park`` seals ``corrects`` on it)."""
+	from jarvis.chat.pending_actions._park import stamp_ready
+
+	if names and message and stamp_ready():
+		frappe.db.sql(
+			"UPDATE `tabJarvis Pending Action` SET correction_message=%(m)s WHERE name IN %(n)s",
+			{"m": message, "n": tuple(names)},
+		)
+
+
 def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 	"""``_settle.CONTINUATIONS["chat"]``: tell the agent how its settled card(s) ended,
 	at most once (D5). Executed/Failed: ONE hidden continuation turn carrying every
@@ -1235,19 +1880,17 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 			won.extend(claim_settled(names))
 			return bool(won)
 
-		ran = [i for i in decided if i["status"] == EXECUTED]
-		unknown = any(i["outcome"] in ("unknown", "partial") for i in decided)
-		# A mixed batch quotes what ran apart from what failed; an unverified outcome
-		# keeps its check-before-retrying scaffold over everything.
-		mixed = bool(ran) and len(ran) < len(decided) and not unknown
+		plan = _settled_plan(decided)
 		with impersonate(switch_to):
 			cont = enqueue_continuation(
 				conversation,
-				" ".join(_pa_receipt_text(i) for i in decided if not (mixed and i["status"] == EXECUTED)),
-				failed=len(ran) < len(decided),
-				outcome="unknown" if unknown else None,
+				plan["receipt"],
+				outcome=plan["outcome"],
 				claim=_claim,
-				applied=" ".join(_pa_receipt_text(i) for i in ran) if mixed else None,
+				spans=plan["spans"],
+				on_seed=(lambda message: _stamp_correction(plan["stamp"], message))
+				if plan["stamp"]
+				else None,
 			)
 		_stash_continuation(won or names, cont)
 		return

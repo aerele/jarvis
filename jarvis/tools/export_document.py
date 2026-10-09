@@ -11,48 +11,39 @@ Two rendering paths share this one entry point:
 
   * The PLAIN path (the original, in-prod behaviour) — a runaway-guarded
     Markdown/HTML → ``get_pdf`` render with a minimal built-in stylesheet. It is
-    taken whenever NO rich kwarg is truthy, and its behaviour is byte-preserved
-    (same sanitizer, same shell, same ``save_file``) so every legacy call is
-    unaffected. See ``_render_plain`` and the sanitizer note below.
+    taken whenever NO rich kwarg is truthy and keeps its original shell,
+    engines and ``save_file``, so every legacy call renders the same. It shares
+    the rich path's sanitizer (see the security note below). See ``_render_plain``.
   * The RICH path (Slice 1) — a branded, class-styled document rendered through
     the hard-timed direct-wkhtmltopdf pipeline (``_export/document``). It is
     opt-in: passing any truthy rich kwarg (``theme``/``letterhead``/``header``/
     ``footer``/``watermark``/``charts``) switches to it. See ``_render_rich``.
 
-Security (PLAIN path): ``content`` is agent-composed, i.e. effectively
+Security (both paths): ``content`` is agent-composed, i.e. effectively
 LLM-controlled text — it must never reach the HTML unsanitized. Two distinct
 threats, both closed at one choke point:
 
   * XSS in the standalone HTML output — ``<script>``, inline event handlers,
     ``javascript:`` hrefs.
-  * SSRF-via-render — ``get_pdf`` runs wkhtmltopdf, which FETCHES any
-    ``<img src>`` / ``<link href>`` / SVG ``<image href>`` it finds at render
-    time, server-side. An agent-composed ``<img src="http://169.254.169.254/…">``
-    (cloud metadata) or ``file:///etc/passwd`` would make the PDF renderer
-    issue that request. The plain path supports no embedded images, so every
-    fetch-capable tag is stripped outright rather than merely attribute-filtered.
+  * SSRF-via-render — wkhtmltopdf FETCHES any URL it finds at render time,
+    server-side: ``<img src>`` / ``<link href>`` / SVG ``<image href>``, and
+    equally attribute and CSS URLs such as ``style="background-image:url(…)"``,
+    ``<table background>``, ``<video poster>`` and ``<audio src>``. An
+    agent-composed ``http://169.254.169.254/…`` (cloud metadata) or
+    ``file:///etc/passwd`` URL in any of those would make the PDF renderer
+    issue that request.
 
-Two layers, mirroring the pattern ``frappe.utils.html_utils`` already uses for
-``<script>``/``<style>`` (``clean_script_and_style``, a BeautifulSoup decompose
-pass ahead of ``bleach.clean``):
-
-  1. ``_strip_unsafe_tags`` — a BeautifulSoup decompose pass that REMOVES the
-     fetch-capable tags outright (``img``/``svg``/``image``/``link``/``meta``/
-     ``style``), plus ``<script>``. Bleach's own default behaviour for a tag
-     outside its allowlist is to *escape* it into visible garbled text, not
-     remove it — safe (nothing executes or fetches) but ugly in a document
-     meant to read as a clean report, and it would leave a stripped
-     ``<script>``'s payload sitting as visible inert text. Decomposing first
-     gives a clean removal instead.
-  2. ``frappe.utils.sanitize_html`` (bleach-based) on what remains — blocks
-     event-handler attributes and non-``{cid,http,https,mailto}`` protocols
-     as part of its base allowlist (belt-and-suspenders once ``<script>`` and
-     every fetch-capable tag are already gone).
+Both paths run ``sanitize_rich`` (``_export/document/sanitizer.py``): one
+``nh3.clean`` pass with a tight tag / attribute / url-scheme allowlist that
+removes every fetch-capable or active tag together with its subtree and keeps
+no ``style``, ``src``, ``background`` or ``poster`` attribute at all. The plain
+path used to run ``frappe.utils.sanitize_html``, whose defaults keep those
+URL-bearing attributes (that module's docstring explains why it can't be
+tightened through its signature).
 
 Applied identically to BOTH the Markdown-rendered branch and the
 ``content_is_html=True`` raw-HTML branch — the flag changes how ``content``
-becomes HTML, never whether the result gets sanitized. The rich path uses its
-own, tighter ``sanitize_rich`` (a direct ``nh3.clean``); see that module.
+becomes HTML, never whether the result gets sanitized.
 """
 
 import contextlib
@@ -62,7 +53,6 @@ import time
 from collections.abc import Mapping
 
 import frappe
-from frappe.utils.html_utils import sanitize_html
 
 from jarvis import telemetry
 from jarvis.exceptions import InvalidArgumentError, NoDataError
@@ -92,16 +82,6 @@ _FORMATS = {
 	"html": ("html", "text/html"),
 	"png": ("png", "image/png"),
 }
-
-# Every tag capable of triggering an out-of-band fetch when wkhtmltopdf renders
-# the page, plus <script> — decomposed here (not left to sanitize_html's own
-# allowlist filtering) so its content disappears cleanly instead of surviving
-# as inert escaped text sitting visibly in the rendered document. A duplicate
-# <html>/<head>/<body> in the caller's content is not a separate risk to name
-# here: the HTML5 tree-construction algorithm (which html5lib implements)
-# already folds a second html/head/body into the single real one rather than
-# nesting it — verified empirically before relying on it.
-_UNSAFE_TAGS = {"img", "image", "svg", "link", "meta", "style", "script"}
 
 # A runaway model must not be able to hand wkhtmltopdf an unbounded document.
 _MAX_CONTENT_CHARS = 200_000
@@ -371,7 +351,7 @@ def _rich_requested(
 	masthead from the title, and the persona no longer hand-writes the title into
 	Markdown, so a titled export MUST render branded (title-only on the plain path
 	would show no title at all). A bare content-only call (no title, no rich kwarg)
-	stays on the byte-preserved plain path."""
+	stays on the plain path."""
 	return bool(
 		theme
 		or letterhead
@@ -836,37 +816,13 @@ ul,ol{margin:.4em 0 .4em 1.2em;} p{margin:.5em 0;}
 """
 
 
-def _strip_unsafe_tags(html: str) -> str:
-	"""Remove (not merely escape) every tag in ``_UNSAFE_TAGS``.
-
-	Same technique ``frappe.utils.html_utils.clean_script_and_style`` already
-	uses for ``<script>``/``<style>``: a BeautifulSoup decompose pass. Doing
-	this ahead of ``sanitize_html`` gives a clean removal — bleach's own
-	default for a disallowed tag is to escape it into visible text, which is
-	safe but leaves garbled tag source sitting in the rendered document.
-
-	``BeautifulSoup(html, "html5lib")`` always parses into a full document
-	(wrapping bare content in its own ``<html><head></head><body>…</body></html>``,
-	confirmed empirically), so this returns ``soup.body``'s inner HTML, not the
-	whole parsed tree — ``html`` here is a fragment about to be spliced into
-	this module's own page shell, not a full page in its own right.
-	"""
-	from bs4 import BeautifulSoup
-
-	soup = BeautifulSoup(html, "html5lib")
-	for tag in soup(list(_UNSAFE_TAGS)):
-		tag.decompose()
-	return frappe.as_unicode(soup.body.decode_contents()) if soup.body else frappe.as_unicode(soup)
-
-
 def _render_plain(content: str, fmt: str, title: str | None, content_is_html: bool) -> dict:
-	"""The original plain render — byte-preserved so every legacy call is
-	unchanged: same two-layer sanitizer, same self-contained shell, same
+	"""The original plain render: same self-contained shell, same
 	``get_pdf``/``_pdf_to_png`` engines, same ``save_file`` (its own filename
-	sanitizer + return shape, without a ``notes`` key)."""
+	sanitizer + return shape, without a ``notes`` key). It sanitizes with
+	``sanitize_rich``, like the rich path (see the module docstring)."""
 	body = content if content_is_html else frappe.utils.md_to_html(content)
-	body = _strip_unsafe_tags(body)
-	body = sanitize_html(body)
+	body = sanitize_rich(body)
 	doc_title = frappe.utils.escape_html(title) if title else "Document"
 	html = (
 		f"<!doctype html><html><head><meta charset='utf-8'>"

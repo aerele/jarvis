@@ -164,7 +164,7 @@ import {
 } from "frappe-ui";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
 import { session } from "@/data/session";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
 const props = defineProps({
 	// STT availability (pass caps.stt_enabled) - hides the recorder when off.
@@ -208,8 +208,8 @@ const voiceDurationS = ref(0);
 
 const placeholder = computed(() =>
 	props.question
-		? "Answer in your own words: type, record, attach, or paste a link…"
-		: `Tell ${agentName} anything about how you work: type, record, attach, or paste a link…`
+		? "Answer in your own words: type, record, attach or paste a link…"
+		: `Tell ${brand.agentName} anything about how you work: type, record, attach or paste a link…`
 );
 
 const linkLabel = computed(() => {

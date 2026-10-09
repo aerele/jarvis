@@ -1,8 +1,56 @@
 <template>
-	<div>
+	<fieldset :disabled="operatorReview && saving" class="min-w-0">
 		<p class="text-sm text-ink-gray-6">
-			Settings this agent reads when it runs. Leave a field empty to use the default.
+			{{
+				operatorReview
+					? bankRecon
+						? "Bank reconciliation review reads one company bank account for the statement window below and proposes matches for a named reviewer. Manual runs only; nothing is reconciled, allocated or posted."
+						: arReview
+						? "AR review includes older open receivables, uses the evidence cutoff and prepares unsent reminder text only. Manual runs; no sending, Dunning creation or accounting changes."
+						: "AP document review uses the company, fiscal period, evidence cutoff and matching settings below. Manual runs only. Preview creates no review requests; live review never submits or pays an invoice."
+					: "Settings this agent reads when it runs. Leave a field empty to use the default."
+			}}
 		</p>
+		<div
+			v-if="operatorReview"
+			class="mt-3 rounded-lg bg-surface-gray-1 p-3 text-sm text-ink-gray-6"
+		>
+			<p v-if="bankRecon">
+				Starter settings: the previous calendar month, a 30-calendar-day voucher lookback
+				and proposals only. Choose the bank account with your named reviewer and save.
+			</p>
+			<p v-else-if="arReview">
+				Starter settings: a 3-calendar-day settlement hold and current records only. The
+				fiscal year provides review context; older open invoices remain included.
+				India-specific context is detected from India Compliance and the company country.
+				No accounting framework, tax compliance or policy approval is inferred.
+			</p>
+			<p v-else>
+				Starter settings: 0% net-price tolerance, current records and document matching
+				only. Dates come from ERPNext fiscal years and this site's date. These are
+				application defaults, not accounting-standard certification or policy approval.
+				Existing values are preserved; review the settings with your named reviewer and
+				save.
+			</p>
+			<Button
+				class="mt-2"
+				label="Fill empty settings"
+				:loading="defaultsLoading"
+				@click="loadDefaults"
+			/>
+			<p v-if="defaultsMessage" class="mt-2">{{ defaultsMessage }}</p>
+		</div>
+		<div
+			v-if="operatorReview && Object.keys(shownErrors).length"
+			class="mt-3 rounded-lg border border-outline-gray-2 bg-surface-gray-1 p-3 text-sm text-ink-gray-7"
+			role="status"
+		>
+			<p class="font-medium">Complete these settings before running</p>
+			<ul class="mt-2 list-disc space-y-1 pl-5">
+				<li v-for="(message, key) in shownErrors" :key="key">{{ message }}</li>
+			</ul>
+			<p class="mt-2">Fill the fields below, then save to check the configuration.</p>
+		</div>
 
 		<div class="mt-4 space-y-5">
 			<template v-for="f in visibleFields" :key="f.key || f.keys.join('-')">
@@ -45,13 +93,22 @@
 				</div>
 
 				<FormControl
+					v-else-if="['text', 'date'].includes(f.type)"
+					:type="f.type"
+					:label="f.label"
+					:description="f.help"
+					:modelValue="form[f.key]"
+					@update:modelValue="(value) => (form[f.key] = value)"
+				/>
+
+				<FormControl
 					v-else-if="f.type === 'select'"
 					type="select"
 					:label="f.label"
 					:options="f.options"
 					:description="f.help"
 					:modelValue="form[f.key]"
-					@update:modelValue="(v) => (form[f.key] = v)"
+					@update:modelValue="(value) => onSelect(f.key, value)"
 				/>
 
 				<FormControl
@@ -67,6 +124,11 @@
 						<span class="text-ink-gray-5">{{ f.suffix }}</span>
 					</template>
 				</FormControl>
+				<ErrorMessage
+					v-for="key in (f.keys || [f.key]).filter((field) => shownErrors[field])"
+					:key="key"
+					:message="shownErrors[key]"
+				/>
 			</template>
 
 			<p v-if="!agentSpecificFields.length" class="text-p-xs text-ink-gray-5">
@@ -95,8 +157,12 @@
 
 		<div class="mt-4">
 			<Button label="Save configuration" :loading="saving" @click="save" />
+			<p v-if="operatorReview" class="mt-2 text-p-xs text-ink-gray-5">
+				You can save unfinished setup. Run Now stays unavailable until all required
+				settings are valid and saved. Suggestions are not applied to a run until you save.
+			</p>
 		</div>
-	</div>
+	</fieldset>
 </template>
 
 <script setup>
@@ -110,10 +176,15 @@
 // persists via setAgentConfig. An empty field means the key is ABSENT from
 // the saved config, not saved as "" - that is what "leave it to use the
 // default" means server-side.
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import DocSection from "@/components/doc/DocSection.vue";
 import { searchLink } from "@/api";
+import {
+	getAPReviewDefaults,
+	getARReviewDefaults,
+	getBankReconReviewDefaults,
+} from "@/api/agents";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import {
 	SCOPE_CONFIG_FIELDS,
@@ -133,6 +204,7 @@ const props = defineProps({
 	// Gates which AGENT_SPECIFIC_CONFIG_FIELDS render - the scope fields
 	// (SCOPE_CONFIG_FIELDS) always render regardless.
 	configKeys: { type: Array, default: () => [] },
+	validationErrors: { type: Object, default: () => ({}) },
 	saving: { type: Boolean, default: false },
 });
 
@@ -145,7 +217,68 @@ const agentSpecificFields = computed(() =>
 );
 // Scope fields first (always), then whichever agent-specific fields apply -
 // the single list the template's v-for renders.
-const visibleFields = computed(() => [...SCOPE_CONFIG_FIELDS, ...agentSpecificFields.value]);
+const operatorReview = computed(() => props.configKeys.includes("review_scope"));
+const arReview = computed(() => props.configKeys.includes("settlement_hold_days"));
+const bankRecon = computed(() => props.configKeys.includes("voucher_lookback_days"));
+const defaultsData = ref(null);
+const defaultsLoading = ref(false);
+const defaultsMessage = ref("");
+let defaultsRequest = 0;
+const visibleFields = computed(() => [
+	// Bank reconciliation reads a statement window only; a fiscal year does not apply.
+	...SCOPE_CONFIG_FIELDS.filter(
+		(field) => !(bankRecon.value && field.key === "fiscal_year")
+	).map((field) => {
+		if (!operatorReview.value || field.key === "fiscal_year") return field;
+		if (bankRecon.value && field.type === "date-range")
+			return { ...field, help: "Statement window. Lines dated inside it are reviewed." };
+		return {
+			...field,
+			help:
+				field.key === "company"
+					? "Suggested from your readable default company; confirm the company before saving."
+					: arReview.value
+					? "Fiscal-year review context only: all older open receivables remain included through the evidence cutoff. Choosing a year resets dates through today or year end."
+					: "Choosing a fiscal year resets this posting-date window through today or year end. Dates remain editable; clear Fiscal year for a cross-year period. Linked sources may predate it.",
+		};
+	}),
+	...agentSpecificFields.value.map((field) => {
+		if (bankRecon.value) {
+			if (field.key === "policy_version")
+				return {
+					...field,
+					label: "Bank reconciliation policy reference",
+					help: "BANK-RECON-v1 identifies the saved starter settings, not evidence of policy approval.",
+				};
+			if (field.key === "review_scope")
+				return {
+					...field,
+					options: [
+						{ label: "Proposals only, no reconciling", value: "proposals_only" },
+					],
+				};
+			return field;
+		}
+		if (!arReview.value) return field;
+		if (field.key === "policy_version")
+			return {
+				...field,
+				label: "AR review policy reference",
+				help: "AR-REVIEW-v1 identifies the saved starter settings, not an accounting standard or evidence of policy approval.",
+			};
+		if (field.key === "review_scope")
+			return {
+				...field,
+				options: [
+					{
+						label: "Review and drafts only: no sending",
+						value: "review_and_drafts_only",
+					},
+				],
+			};
+		return field;
+	}),
+]);
 // jarvis#1063: the key set for THIS agent's rendered fields - not the global
 // CONFIG_FIELD_SET. A key this agent's config_keys does not name (e.g. a
 // stale benchmark_value on a non-close-auditor installation, saved back when
@@ -153,11 +286,32 @@ const visibleFields = computed(() => [...SCOPE_CONFIG_FIELDS, ...agentSpecificFi
 // Advanced (JSON) - seed()/save() key off this.
 const visibleKeys = computed(() => new Set(visibleFields.value.flatMap((f) => f.keys || [f.key])));
 
-const emit = defineEmits(["save"]);
+// Server issues describe the SAVED config. Hide a field's issue once its value
+// differs from what is saved (a filled default or an edit) until the next save
+// re-checks it; issues without a form field always show.
+const shownErrors = computed(() =>
+	Object.fromEntries(
+		Object.entries(props.validationErrors || {}).filter(([key]) => {
+			if (!(key in form)) return true;
+			const saved = getPath(props.config || {}, KEY_TO_PATH[key] || key);
+			return String(form[key]) === String(saved == null ? "" : saved);
+		})
+	)
+);
+
+const emit = defineEmits(["save", "dirty"]);
 
 // One string per known key - every control (link/date/number/select) binds
 // here as plain text; numbers are validated/coerced only on save.
 const form = reactive({
+	report_date: "",
+	policy_version: "",
+	bank_account: "",
+	voucher_lookback_days: "",
+	price_tolerance_percent: "",
+	settlement_hold_days: "",
+	basis: "",
+	review_scope: "",
 	company: "",
 	fiscal_year: "",
 	from_date: "",
@@ -169,6 +323,14 @@ const form = reactive({
 });
 const advanced = ref("{}");
 const advancedError = ref("");
+const initialState = ref("");
+
+// Only rendered fields count: a default filled into a field this agent never
+// shows or saves (e.g. report_date) must not leave the form looking unsaved.
+function formState() {
+	const shown = Object.fromEntries([...visibleKeys.value].sort().map((key) => [key, form[key]]));
+	return JSON.stringify({ form: shown, advanced: advanced.value });
+}
 
 function seed(cfg) {
 	const c = cfg || {};
@@ -205,9 +367,16 @@ function seed(cfg) {
 	}
 	advanced.value = JSON.stringify(rest, null, 2);
 	advancedError.value = "";
+	initialState.value = formState();
 }
 
-watch([() => props.config, visibleKeys], () => seed(props.config), { immediate: true });
+watch([() => props.config, () => [...visibleKeys.value].join(",")], () => seed(props.config), {
+	immediate: true,
+});
+watch([form, advanced, initialState], () => emit("dirty", formState() !== initialState.value), {
+	deep: true,
+	immediate: true,
+});
 
 function onAdvancedInput(v) {
 	advanced.value = v;
@@ -218,21 +387,144 @@ function onAdvancedInput(v) {
 // (mirrors AgentAccessEditor.vue's people picker and FilterValueControl.vue's
 // generic Link control - all three now share useLinkSearch, jarvis#1062.)
 function makeLinkField(doctype) {
-	return useLinkSearch((q) => searchLink(doctype, q), {
-		mapper: (rows) => rows.map((r) => ({ label: r.value, value: r.value })),
-	});
+	return useLinkSearch(
+		(query) => {
+			if (operatorReview.value && doctype === "Fiscal Year") {
+				const data = defaultsData.value;
+				if (data?.defaults.company !== form.company) return [];
+				return data.fiscal_years
+					.filter((fiscal) =>
+						fiscal.name.toLowerCase().includes(query.trim().toLowerCase())
+					)
+					.map((fiscal) => ({ value: fiscal.name }));
+			}
+			if (bankRecon.value && doctype === "Bank Account") {
+				const data = defaultsData.value;
+				if (data?.defaults.company !== form.company) return [];
+				return (data.bank_accounts || [])
+					.filter((row) =>
+						`${row.name} ${row.account || ""}`
+							.toLowerCase()
+							.includes(query.trim().toLowerCase())
+					)
+					.map((row) => ({ value: row.name }));
+			}
+			return searchLink(doctype, query);
+		},
+		{ mapper: (rows) => rows.map((row) => ({ label: row.value, value: row.value })) }
+	);
 }
 
 const linkFields = {
 	company: makeLinkField("Company"),
 	fiscal_year: makeLinkField("Fiscal Year"),
+	bank_account: makeLinkField("Bank Account"),
 };
+watch([operatorReview, defaultsData], () => {
+	linkFields.fiscal_year.reprime();
+	linkFields.bank_account.reprime();
+	if (operatorReview.value && defaultsData.value) linkFields.fiscal_year.prime();
+});
 function linkValue(key) {
 	return form[key] ? { label: form[key], value: form[key] } : null;
 }
 function onLinkPick(key, opt) {
-	form[key] = opt && opt.value ? String(opt.value) : "";
+	const value = opt && opt.value ? String(opt.value) : "";
+	if (form[key] === value) return;
+	if (operatorReview.value && key === "company") {
+		form.fiscal_year = "";
+		form.bank_account = "";
+	}
+	onSelect(key, value);
 }
+
+function fiscalDates(fiscal) {
+	if (!fiscal || !defaultsData.value?.site_date) return null;
+	const cutoff = [fiscal.to_date, defaultsData.value.site_date].sort()[0];
+	if (cutoff < fiscal.from_date) return null;
+	return { from_date: fiscal.from_date, to_date: cutoff, report_date: cutoff };
+}
+
+function onSelect(key, value) {
+	form[key] = value;
+	if (
+		operatorReview.value &&
+		key === "fiscal_year" &&
+		value &&
+		defaultsData.value?.defaults.company === form.company
+	) {
+		const fiscal = defaultsData.value?.fiscal_years.find((entry) => entry.name === value);
+		const dates = fiscalDates(fiscal);
+		if (dates) {
+			Object.assign(form, dates);
+			defaultsMessage.value = "";
+		} else
+			defaultsMessage.value =
+				"This fiscal year is unavailable or has not started. Enter a period on or before today's site date.";
+	}
+}
+
+function fillEmptySettings() {
+	const data = defaultsData.value;
+	if (!data || (form.company && data.defaults.company !== form.company)) return;
+	for (const [key, value] of Object.entries(data.defaults)) {
+		if (visibleKeys.value.has(key) && form[key] === "") form[key] = String(value);
+	}
+	const anchor = form.from_date || form.to_date || form.report_date || data.site_date;
+	const candidates = data.fiscal_years.filter((fiscal) => {
+		if (form.fiscal_year) return fiscal.name === form.fiscal_year;
+		return [anchor, form.from_date, form.to_date]
+			.filter(Boolean)
+			.every((value) => fiscal.from_date <= value && value <= fiscal.to_date);
+	});
+	const fiscal = candidates.length === 1 ? candidates[0] : null;
+	const dates = fiscalDates(fiscal);
+	if (dates) {
+		if (!form.fiscal_year && visibleKeys.value.has("fiscal_year"))
+			form.fiscal_year = fiscal.name;
+		if (!form.from_date) form.from_date = dates.from_date;
+		if (!form.to_date)
+			form.to_date = [dates.to_date, form.report_date || data.site_date].sort()[0];
+	}
+	if (!form.report_date && visibleKeys.value.has("report_date"))
+		form.report_date = [form.to_date || data.site_date, data.site_date].sort()[0];
+}
+
+async function loadDefaults() {
+	const request = ++defaultsRequest;
+	defaultsData.value = null;
+	defaultsMessage.value = "";
+	defaultsLoading.value = false;
+	if (!operatorReview.value || props.saving) return;
+	const state = formState();
+	defaultsLoading.value = true;
+	try {
+		const data = await (bankRecon.value
+			? getBankReconReviewDefaults
+			: arReview.value
+			? getARReviewDefaults
+			: getAPReviewDefaults)(form.company || undefined);
+		if (request !== defaultsRequest) return;
+		defaultsData.value = data;
+		defaultsMessage.value = data.message || "";
+		if (!props.saving && state === formState()) fillEmptySettings();
+	} catch {
+		if (request === defaultsRequest) {
+			defaultsMessage.value =
+				"Could not load suggested settings. Check company and fiscal-year read access, then retry, or enter settings manually.";
+		}
+	} finally {
+		if (request === defaultsRequest) defaultsLoading.value = false;
+	}
+}
+
+watch([() => props.config, operatorReview, () => form.company, () => props.saving], loadDefaults, {
+	immediate: true,
+});
+onBeforeUnmount(() => {
+	defaultsRequest += 1;
+	for (const link of Object.values(linkFields)) link.cleanup();
+});
 
 function save() {
 	// 1) advanced JSON must parse to an object
@@ -281,6 +573,8 @@ function save() {
 		}
 	}
 	advancedError.value = "";
+	defaultsRequest += 1;
+	defaultsLoading.value = false;
 	emit("save", merged);
 }
 </script>

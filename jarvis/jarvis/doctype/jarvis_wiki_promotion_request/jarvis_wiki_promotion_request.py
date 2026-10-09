@@ -23,11 +23,13 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
+
 FROM_SCOPES = ("Org", "Role", "User")
 TO_SCOPES = ("Role", "Org")
 
 
-class JarvisWikiPromotionRequest(Document):
+class JarvisWikiPromotionRequest(NotRenamable, Document):
 	def before_insert(self):
 		# Security review PART 2 TASK 14: this row's before_insert back-fills
 		# body_snapshot from the source page with a permission-bypassing

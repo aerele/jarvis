@@ -39,6 +39,12 @@ def _get_value_supports_use_local_cache() -> bool:
 		return False
 
 
+def single_values(doctype: str, fields) -> frappe._dict:
+	"""Fresh, typed values of ``fields`` on a Single, the same on Frappe 15 and 16
+	(15's ``get_value`` on a Single returns them uncast)."""
+	return frappe._dict({f: frappe.db.get_single_value(doctype, f, cache=False) for f in fields})
+
+
 def cache_get_fresh(key):
 	"""``get_value(key)`` that always reads Redis, bypassing the in-process
 	``frappe.local.cache``, on Frappe 15 and 16.
@@ -206,7 +212,7 @@ def _xlsx_number(v) -> bool:
 	return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
 
-def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
+def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None, highlights=None) -> bytes:
 	"""Build a one-or-many-tab .xlsx workbook and return its bytes.
 
 	Probes for ``XLSXStyleBuilder`` (the Frappe 16 rewrite) rather than for the
@@ -217,11 +223,11 @@ def xlsx_bytes(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
 	try:
 		from frappe.utils.xlsxutils import XLSXStyleBuilder
 	except ImportError:
-		return _xlsx_bytes_openpyxl(sheet_data, charts=charts)
-	return _xlsx_bytes_xlsxwriter(sheet_data, charts=charts)
+		return _xlsx_bytes_openpyxl(sheet_data, charts=charts, highlights=highlights)
+	return _xlsx_bytes_xlsxwriter(sheet_data, charts=charts, highlights=highlights)
 
 
-def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
+def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]], *, charts=None, highlights=None) -> bytes:
 	"""Frappe 16: mirror ``make_xlsx``'s own workbook options so dates format
 	identically, then let it append a worksheet per tab, laid out by
 	:func:`_sheet_layout`: fitted widths, number and date formats per column,
@@ -285,11 +291,15 @@ def _xlsx_bytes_xlsxwriter(sheet_data: list[tuple[str, list]], *, charts=None) -
 			from jarvis._xlsx_charts import add_xlsxwriter_charts
 
 			add_xlsxwriter_charts(wb, ws, data, charts[index])
+		if highlights and highlights[index]:
+			from jarvis._xlsx_highlights import add_xlsxwriter_highlights
+
+			add_xlsxwriter_highlights(wb, ws, data, highlights[index])
 	wb.close()
 	return out.getvalue()
 
 
-def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None) -> bytes:
+def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None, highlights=None) -> bytes:
 	"""Frappe 15: build the workbook here instead of via ``make_xlsx``.
 
 	15's ``make_xlsx`` saves the whole workbook on every call and returns the
@@ -354,6 +364,10 @@ def _xlsx_bytes_openpyxl(sheet_data: list[tuple[str, list]], *, charts=None) -> 
 			from jarvis._xlsx_charts import add_openpyxl_charts
 
 			add_openpyxl_charts(ws, data, charts[index])
+		if highlights and highlights[index]:
+			from jarvis._xlsx_highlights import add_openpyxl_highlights
+
+			add_openpyxl_highlights(ws, data, highlights[index])
 
 	out = BytesIO()
 	wb.save(out)

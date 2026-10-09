@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	alignComputedRows,
+	blankComputedColumns,
 	checkToYesNo,
 	coerceOut,
 	coerceRow,
+	draftValues,
 	isFieldMissing,
 	isFieldWritable,
 	isRowKeyColumn,
 	overlaySavedRows,
 	readonlyDisplay,
 	removedSavedRows,
+	rowKeyColumn,
 	tableChanged,
 	tableRowsPayload,
 	toPanelRow,
@@ -43,6 +47,14 @@ describe("isFieldMissing", () => {
 	});
 	it("not required -> never missing", () => {
 		expect(isFieldMissing({ reqd: 0, read_only: 0, value: "" })).toBe(false);
+	});
+	it("named missing by the server -> missing even when meta says optional", () => {
+		expect(isFieldMissing({ reqd: 0, serverMissing: true, read_only: 0, value: "" })).toBe(
+			true
+		);
+		expect(isFieldMissing({ reqd: 0, serverMissing: true, read_only: 0, value: "x" })).toBe(
+			false
+		);
 	});
 });
 
@@ -267,5 +279,169 @@ describe("removedSavedRows", () => {
 
 	it("system keys are not grid columns either", () => {
 		expect(["idx", "parent", "creation", "doctype"].some(isRowKeyColumn)).toBe(false);
+	});
+});
+
+describe("rowKeyColumn (#655)", () => {
+	const extra = [
+		{
+			fieldname: "conversion_factor",
+			label: "UOM Conversion Factor",
+			fieldtype: "Float",
+			options: "",
+			reqd: 0,
+			read_only: 0,
+		},
+		{
+			fieldname: "uom",
+			label: "UOM",
+			fieldtype: "Link",
+			options: "UOM",
+			reqd: 1,
+			read_only: 0,
+		},
+	];
+	it("a proposed key the grid does not list keeps its real type and label", () => {
+		const c = rowKeyColumn("conversion_factor", extra);
+		expect([c.label, c.fieldtype]).toEqual(["UOM Conversion Factor", "Float"]);
+		expect(c).not.toBe(extra[0]); // a copy: the cached meta is never mutated
+	});
+	it("so a numeric cell is sent as a number", () => {
+		const table = { columns: [rowKeyColumn("conversion_factor", extra)] };
+		expect(coerceRow(table, { conversion_factor: "1" }, "create")).toEqual({
+			conversion_factor: 1,
+		});
+	});
+	it("an unknown key is still a text column", () => {
+		expect(rowKeyColumn("custom_note", extra)).toEqual({
+			fieldname: "custom_note",
+			label: "custom_note",
+			fieldtype: "Data",
+			options: "",
+			reqd: 0,
+			read_only: 0,
+		});
+		expect(rowKeyColumn("x", undefined).fieldtype).toBe("Data");
+	});
+});
+
+describe("draftValues", () => {
+	const field = (fieldname, value, extra = {}) => ({
+		fieldname,
+		value,
+		control: "data",
+		...extra,
+	});
+	const items = {
+		fieldname: "items",
+		columns: [
+			{ fieldname: "item_code", fieldtype: "Link" },
+			{ fieldname: "qty", fieldtype: "Float" },
+		],
+		rows: [
+			{ item_code: "A", qty: "2" },
+			{ item_code: "", qty: "" },
+		],
+		origJson: "null",
+	};
+	it("create: non-blank writable fields and filled rows, coerced", () => {
+		const model = {
+			verb: "create",
+			fields: [
+				field("customer", "C"),
+				field("po_no", " "),
+				field("total_qty", "9", { control: "number", read_only: 1 }),
+			],
+			tables: [items],
+		};
+		expect(draftValues(model)).toEqual({ customer: "C", items: [{ item_code: "A", qty: 2 }] });
+	});
+	it("update: only changed fields; an unchanged table is not resent", () => {
+		const model = {
+			verb: "update",
+			fields: [field("customer", "C", { orig: "C" }), field("po_no", "P2", { orig: "P1" })],
+			tables: [
+				{
+					...items,
+					rows: [{ __name: "r1", item_code: "A", qty: "2" }],
+					origJson: JSON.stringify([{ name: "r1", item_code: "A", qty: 2 }]),
+				},
+			],
+		};
+		expect(draftValues(model)).toEqual({ po_no: "P2" });
+	});
+});
+
+describe("blankComputedColumns (#647)", () => {
+	it("asks only for read-only columns that are blank somewhere", () => {
+		const model = {
+			tables: [
+				{
+					fieldname: "items",
+					columns: [
+						{ fieldname: "qty", read_only: 0 },
+						{ fieldname: "amount", read_only: 1 },
+						{ fieldname: "item_name", read_only: 1 },
+					],
+					rows: [{ qty: "", amount: "", item_name: "X" }],
+				},
+				{
+					fieldname: "taxes",
+					columns: [{ fieldname: "total", read_only: 1 }],
+					rows: [{ total: "5" }],
+				},
+			],
+		};
+		expect(blankComputedColumns(model)).toEqual({ items: ["amount"] });
+	});
+});
+
+describe("review follow-ups", () => {
+	it("update: a read-only extra column is never sent, like a listed one (card must not overwrite a server field)", () => {
+		const t = {
+			fieldname: "items",
+			columns: [
+				{ fieldname: "qty", fieldtype: "Float", read_only: 0 },
+				{ fieldname: "so_detail", fieldtype: "Data", read_only: 1 },
+			],
+			rows: [
+				{ __name: "r1", qty: "3", so_detail: "x" },
+				{ qty: "1", so_detail: "y" },
+			],
+			origJson: JSON.stringify([{ name: "r1", qty: 2, so_detail: "x" }]),
+		};
+		expect(draftValues({ verb: "update", fields: [], tables: [t] })).toEqual({
+			items: [{ name: "r1", qty: 3 }, { qty: 1 }],
+		});
+	});
+	it("a grouped or non-plain number is sent as written, for the server to read or refuse", () => {
+		const table = { columns: [{ fieldname: "rate", fieldtype: "Currency" }] };
+		expect(coerceRow(table, { rate: "1,250.5" }, "create")).toEqual({ rate: "1,250.5" });
+		expect(coerceRow(table, { rate: "12.5" }, "create")).toEqual({ rate: 12.5 });
+	});
+});
+
+describe("alignComputedRows (#647)", () => {
+	const table = {
+		columns: [
+			{ fieldname: "item_code", fieldtype: "Link" },
+			{ fieldname: "amount", fieldtype: "Currency", read_only: 1 },
+		],
+		rows: [
+			{ item_code: "A", amount: "" },
+			{ item_code: "", amount: "" },
+			{ item_code: "B", amount: "" },
+		],
+	};
+	it("puts each dry-run row back on the card row it came from (blank rows are never sent)", () => {
+		expect(alignComputedRows(table, [{ amount: 10 }, { amount: 20 }])).toEqual([
+			{ amount: 10 },
+			undefined,
+			{ amount: 20 },
+		]);
+	});
+	it("gives up when ERPNext returns a different number of rows", () => {
+		expect(alignComputedRows(table, [{ amount: 10 }])).toBeNull();
+		expect(alignComputedRows(table, undefined)).toBeNull();
 	});
 });

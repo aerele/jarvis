@@ -43,7 +43,7 @@ vi.mock("@/components/FilePreview.vue", () => ({ default: { template: "<div/>" }
 const shell = vi.hoisted(() => ({ refreshApprovalsCount: vi.fn() }));
 vi.mock("@/stores/shell", () => ({ useShellStore: () => shell }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "now", exactDate: () => "" }));
-vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 vi.mock("@/api", () => ({
 	fileboxListPage: vi.fn(),
 	listCustomSkills: vi.fn(async () => []),

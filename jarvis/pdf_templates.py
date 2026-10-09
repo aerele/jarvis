@@ -24,6 +24,7 @@ from jarvis.exceptions import InvalidArgumentError
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_access, require_jarvis_admin
 from jarvis.tools._export import load_render_sidecar
 from jarvis.tools._export.document import db_templates as pdf_templates
+from jarvis.tools._export.document import templates as _predef
 from jarvis.tools.export_document import export_document
 
 SETTINGS = "Jarvis Settings"
@@ -62,7 +63,7 @@ def set_default_pdf_template(key: str) -> dict:
 		)
 	resolved = pdf_templates.resolve(key)["key"]
 	frappe.db.set_single_value(SETTINGS, _DEFAULT_FIELD, resolved, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"default": resolved}}
 
 
@@ -145,6 +146,15 @@ def save_pdf_template(payload: str) -> dict:
 	if not key:
 		raise InvalidArgumentError("Template Key is required.")
 
+	# Create mode (the pane's "New template" and "Duplicate to edit") must never
+	# overwrite an existing key; edits omit the flag and keep upserting.
+	if data.get("is_new") and frappe.db.exists(CUSTOM_DT, key):
+		# frappe.throw, not InvalidArgumentError: this reaches the editor as a
+		# validation message, not a bare "Internal Server Error".
+		frappe.throw(
+			frappe._("A template with key {0} already exists.").format(key), frappe.DuplicateEntryError
+		)
+
 	values = {f: data.get(f) for f in _TEMPLATE_FIELDS}
 	for c, dflt in _CHECK_DEFAULTS.items():
 		values[c] = 1 if data.get(c, dflt) else 0
@@ -154,6 +164,10 @@ def save_pdf_template(payload: str) -> dict:
 		doc.update(values)
 	else:
 		doc = frappe.get_doc({"doctype": CUSTOM_DT, "template_key": key, **values})
+		based_on = (data.get("based_on") or "").strip().lower()
+		# Only on create, only a real built-in, and only once the column exists.
+		if based_on in _predef.TEMPLATES and frappe.db.has_column(CUSTOM_DT, "based_on"):
+			doc.based_on = based_on
 
 	doc.set("company_letter_heads", [])
 	if values["use_letterhead_footer"]:
@@ -164,7 +178,7 @@ def save_pdf_template(payload: str) -> dict:
 					{"company": row["company"], "letter_head": row["letter_head"]},
 				)
 	doc.save(ignore_permissions=True)  # require_jarvis_admin above is the ACL
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"key": doc.template_key}}
 
 
@@ -176,7 +190,7 @@ def delete_pdf_template(key: str) -> dict:
 	if not key or not frappe.db.exists(CUSTOM_DT, key):
 		raise InvalidArgumentError("That template does not exist.")
 	frappe.delete_doc(CUSTOM_DT, key, ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": key}}
 
 
@@ -187,7 +201,7 @@ def get_pdf_template(key: str) -> dict:
 	if not key or not frappe.db.exists(CUSTOM_DT, key):
 		raise InvalidArgumentError("That template does not exist.")
 	doc = frappe.get_doc(CUSTOM_DT, key)
-	out = {"template_key": doc.template_key}
+	out = {"template_key": doc.template_key, "based_on": doc.get("based_on") or ""}
 	for f in _TEMPLATE_FIELDS:
 		out[f] = doc.get(f)
 	for c in _CHECK_DEFAULTS:

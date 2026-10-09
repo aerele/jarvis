@@ -81,6 +81,11 @@ def _completed(result, *, columns=None, filters=None, owner="Administrator"):
 		yield dn
 
 
+def _defaults(**defaults):
+	"""The report's literal filter defaults, as its client script would declare them."""
+	return patch.object(_prepared_reports, "_report_defaults", return_value=defaults)
+
+
 class TestRunReportInline(FrappeTestCase):
 	"""The non-prepared path must stay byte-identical - no envelope, no status."""
 
@@ -235,6 +240,102 @@ class TestRunReportPrepared(FrappeTestCase):
 		self.assertEqual(env["result"], [{"name": "X"}])
 
 	# ---- in-flight + stall self-heal ----------------------------------------
+	# ---- #635: finding the copy the background run left ------------------------
+	def test_a_desk_copy_with_empty_and_typed_filters_is_reused(self):
+		# Desk stores the empty filters it showed and its own value types; Jarvis drops
+		# the empties and may send true for 1. Same request, so the same report.
+		desk = {"company": "Acme", "cost_center": "", "show_zero": 1, "periods": ["Q2", "Q1"]}
+		with _completed([{"name": "D"}], filters=desk):
+			env = run_report(
+				report_name=PREP_REPORT,
+				filters={"company": "Acme", "show_zero": True, "periods": ["Q1", "Q2"]},
+			)
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["result"], [{"name": "D"}])
+
+	def test_a_desk_copy_carrying_the_reports_defaults_is_reused(self):
+		# Desk sends every filter that has a value, the report's own defaults included;
+		# the agent names only what it sets. Same request, so the same report.
+		desk = {"company": "Acme", "valuation_field_type": "Currency", "item_code": []}
+		with _defaults(valuation_field_type="Currency"), _completed([{"name": "D"}], filters=desk):
+			env = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["result"], [{"name": "D"}])
+
+	def test_an_unticked_box_reads_as_unset(self):
+		# Desk drops a filter whose value is 0 / false; so does the match.
+		with _completed([{"name": "D"}], filters={"company": "Acme"}):
+			env = run_report(
+				report_name=PREP_REPORT, filters={"company": "Acme", "show_zero": False, "skip": 0}
+			)
+		self.assertEqual(env["status"], "ready")
+
+	def test_a_default_never_overrides_a_value_given(self):
+		desk = {"company": "Acme", "valuation_field_type": "Currency"}
+		with (
+			_defaults(valuation_field_type="Currency"),
+			_completed([{"name": "D"}], filters=desk),
+			patch(_ENQUEUE),
+		):
+			env = run_report(
+				report_name=PREP_REPORT, filters={"company": "Acme", "valuation_field_type": "Quantity"}
+			)
+		self.assertEqual(env["status"], "started")
+
+	def test_a_run_jarvis_starts_carries_the_reports_defaults(self):
+		with _defaults(valuation_field_type="Currency"), patch(_ENQUEUE):
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		stored = frappe.db.get_value("Prepared Report", {"report_name": PREP_REPORT}, "filters")
+		self.assertEqual(json.loads(stored), {"company": "Acme", "valuation_field_type": "Currency"})
+
+	def test_unreadable_report_filters_add_no_defaults(self):
+		with patch.object(_prepared_reports, "get_report_filters", side_effect=frappe.PermissionError):
+			self.assertEqual(_prepared_reports._report_defaults(PREP_REPORT), {})
+
+	def test_each_answer_names_its_run(self):
+		with patch(_ENQUEUE):
+			started = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		self.assertEqual(
+			started["run"], frappe.db.get_value("Prepared Report", {"report_name": PREP_REPORT}, "name")
+		)
+		self.assertEqual(
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})["run"], started["run"]
+		)
+		frappe.db.set_value("Prepared Report", started["run"], "status", "Error")
+		self.assertEqual(
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})["run"], started["run"]
+		)
+		with _completed([{"name": "D"}], filters={"company": "Other"}) as dn:
+			self.assertEqual(run_report(report_name=PREP_REPORT, filters={"company": "Other"})["run"], dn)
+
+	def test_a_different_filter_value_is_not_reused(self):
+		with _completed([{"name": "D"}], filters={"company": "Acme"}), patch(_ENQUEUE):
+			env = run_report(report_name=PREP_REPORT, filters={"company": "Other"})
+		self.assertEqual(env["status"], "started")
+
+	def test_the_newest_completed_copy_is_read(self):
+		older = _make_pr("Completed", filters={"company": "Acme"}, age_seconds=3600)
+		newer = _make_pr("Completed", filters={"company": "Acme"})
+		with patch.object(_prepared_reports, "_read_completed", return_value={"status": "ready"}) as read:
+			run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		read.assert_called_once_with(newer)
+		self.assertNotEqual(older, newer)
+
+	def test_a_desk_started_run_is_generating_not_started_again(self):
+		_make_pr("Started", filters={"company": "Acme", "cost_center": ""})
+		before = frappe.db.count("Prepared Report", {"report_name": PREP_REPORT})
+		with patch(_ENQUEUE):
+			env = run_report(report_name=PREP_REPORT, filters={"company": "Acme"})
+		self.assertEqual(env["status"], "generating")
+		self.assertEqual(frappe.db.count("Prepared Report", {"report_name": PREP_REPORT}), before)
+
+	def test_a_cancelled_newest_run_starts_again_rather_than_an_older_failure(self):
+		_make_pr("Error", age_seconds=600)
+		_make_pr("Cancelled")
+		with patch(_ENQUEUE):
+			env = run_report(report_name=PREP_REPORT)
+		self.assertEqual(env["status"], "started")
+
 	def test_generating_when_recent_started(self):
 		_make_pr("Started", age_seconds=30)
 		env = run_report(report_name=PREP_REPORT)

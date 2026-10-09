@@ -9,8 +9,15 @@ import path from "path";
 export default defineConfig({
 	plugins: [vue()],
 	resolve: {
+		// PWA modules tested here use this installation, including in frontend-only CI.
+		dedupe: ["vue", "vue-router", "frappe-ui"],
 		alias: {
 			"@": path.resolve(__dirname, "src"),
+			// The phone's components import the shared helpers as @shared (see
+			// pwa/vite.config.js); mapped the same way so a spec can mount them
+			// (src/components/PwaPendingCard.spec.js).
+			"@shared": path.resolve(__dirname, "src"),
+			"@jsshared": path.resolve(__dirname, "../jarvis/public/js/shared"),
 		},
 	},
 	test: {

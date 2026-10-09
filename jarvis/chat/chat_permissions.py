@@ -1,6 +1,6 @@
 """Row-level ownership scoping for the Jarvis chat doctypes (Jarvis
-Conversation, Jarvis Chat Message, Jarvis Approval Request, Jarvis Voice
-Note).
+Conversation, Jarvis Chat Message, Jarvis Chat Turn, Jarvis Approval Request,
+Jarvis Voice Note).
 
 This is the data-layer twin of ``jarvis/chat/wiki_permissions.py``: list /
 report / generic-REST queries are scoped via the ``permission_query_conditions``
@@ -21,6 +21,13 @@ Ownership axes (deliberately NOT uniform - each doctype's real owner differs):
     worker or tool dispatcher (as the impersonated owner or Administrator), so
     the row owner is not a reliable authority; ``api.get_conversation``
     deliberately treats the conversation owner as the single source of truth.
+  * Jarvis Chat Turn      -> the owner of the LINKED conversation, like Message.
+    A turn row carries the user's prompt (``dispatch_payload``) and the
+    assistant's reply (``terminal_payload``), so it is exactly as private as the
+    conversation: System Manager and Jarvis Admin see only their own turns, as
+    with Jarvis Conversation. The turn pipeline (pump / turn_state / settlement)
+    reads and writes turns through ``frappe.db`` in system context, so it never
+    consults these hooks.
   * Jarvis Approval Request -> owner of the linked conversation OR a DocShare
     read grant on the approval itself (mirrors ``approvals_api``'s EXISTS
     probes: a tagged user may READ/view on the board, only the owner or a
@@ -117,6 +124,35 @@ def has_message_permission(doc, ptype: str = "read", user: str | None = None) ->
 	owning the LINKED conversation. This is the primary control that blocks the
 	cross-user injection (inserting a message with ``conversation`` = another
 	user's id) at the ORM, so it covers generic REST too."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return True
+	return _conversation_owner(doc.get("conversation")) == user
+
+
+# --------------------------------------------------------------------------- #
+# Jarvis Chat Turn - the LINKED conversation's owner is the axis (like Message).
+# --------------------------------------------------------------------------- #
+def turn_query_conditions(user: str | None = None) -> str:
+	"""Scope Jarvis Chat Turn queries to turns whose linked conversation the
+	caller owns. Administrator is unrestricted; System Manager and Jarvis Admin
+	see only turns of their own conversations, matching Jarvis Conversation (a
+	turn's prompt and reply are the conversation's content)."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ""
+	esc = frappe.db.escape(user)
+	return (
+		"exists (select 1 from `tabJarvis Conversation` c "
+		"where c.name = `tabJarvis Chat Turn`.`conversation` "
+		f"and c.owner = {esc})"
+	)
+
+
+def has_turn_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
+	"""Per-doc gate for Jarvis Chat Turn: every ptype requires owning the LINKED
+	conversation, so another user's prompt and reply never leak through desk,
+	``/api/resource`` or ``frappe.client.*``."""
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return True
