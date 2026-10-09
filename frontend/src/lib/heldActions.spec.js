@@ -13,9 +13,9 @@ describe("heldActions copy", () => {
 	it("counts waiting files and labels Skip with them", () => {
 		expect(filesWaiting(1)).toBe("1 file waiting");
 		expect(filesWaiting(3)).toBe("3 files waiting");
-		expect(skipLabel(1)).toBe("Don't create — skip 1 file");
-		expect(skipLabel(4)).toBe("Don't create — skip 4 files");
-		expect(skipLabel(0)).toBe("Don't create — skip 1 file");
+		expect(skipLabel(1)).toBe("Don't create, skip 1 file");
+		expect(skipLabel(4)).toBe("Don't create, skip 4 files");
+		expect(skipLabel(0)).toBe("Don't create, skip 1 file");
 	});
 
 	it("words every refusal code, keeping the server's record-naming messages", () => {

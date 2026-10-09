@@ -38,6 +38,14 @@ import frappe
 LOCK_PREFIX = "jarvis:lock:"
 
 
+def claim(key: str, ttl_s: float) -> bool:
+	"""Atomically take the site-scoped ``key`` for ``ttl_s`` (SET NX PX); False if
+	already taken. It expires, or the caller deletes ``make_key(key)``. Raises on a
+	Redis outage."""
+	cache = frappe.cache()
+	return cache.lock(cache.make_key(key), timeout=ttl_s).acquire(blocking=False)
+
+
 @contextlib.contextmanager
 def redis_lock(name: str, *, timeout_s: int = 60, blocking_timeout_s: float = 0.0) -> Iterator[bool]:
 	"""Acquire a Redis advisory lock named ``name``.

@@ -41,8 +41,11 @@ import json
 
 import frappe
 from frappe import _
+from frappe.query_builder import Case, Order
+from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_days, now_datetime, today
 
+from jarvis.learning import chat_pattern_privacy
 from jarvis.learning.lifecycle import REDRAFT_STALE_PREFIX
 from jarvis.permissions import JARVIS_REVIEWER_ROLES, require_jarvis_admin
 
@@ -339,74 +342,59 @@ def list_learned_patterns_page(
 	if domain and domain not in _DOMAINS:
 		frappe.throw(_("Invalid domain filter."))
 
-	params: dict = {"start": start, "page_length": pl}
+	p = frappe.qb.DocType(JLP)
 	# `base` = status + surfaced + strength + search (shared with the facet
-	# query). The domain condition applies to the row/total query only.
-	base: list[str] = []
+	# query). The domain condition applies to the row/total query only. A pattern
+	# mined from someone's chats is left out until its owner answers.
+	base = frappe.qb.from_(p).where(chat_pattern_privacy.reviewable(p))
 	if decided:
-		params["decided_statuses"] = list(_DECIDED_STATUSES)
-		base.append("status IN %(decided_statuses)s")
+		base = base.where(p.status.isin(_DECIDED_STATUSES))
 		if disposition == "approved":
-			base.append("status IN ('Approved', 'Active')")
+			base = base.where(p.status.isin(("Approved", "Active")))
 		elif disposition == "snoozed":
-			base.append("status = 'Snoozed'")
+			base = base.where(p.status == "Snoozed")
 		elif disposition == "applied":
-			params["applied_like"] = f"{_lk(APPLIED_NOTE_PREFIX)}%"
-			base.append("review_note LIKE %(applied_like)s")
+			base = base.where(p.review_note.like(f"{_lk(APPLIED_NOTE_PREFIX)}%"))
 		elif disposition == "acknowledged":
-			params["ack_note"] = ACK_NOTE
-			base.append("review_note = %(ack_note)s")
+			base = base.where(p.review_note == ACK_NOTE)
 		elif disposition == "rejected":
-			params["ack_prefix"] = f"{_lk('Acknowledged')}%"
-			base.append("status = 'Rejected' AND ifnull(review_note, '') NOT LIKE %(ack_prefix)s")
+			base = base.where(
+				(p.status == "Rejected") & IfNull(p.review_note, "").not_like(f"{_lk('Acknowledged')}%")
+			)
 	elif status and status != "All":
-		params["status"] = status
-		base.append("status = %(status)s")
+		base = base.where(p.status == status)
 	sc = _surfaced_cond(surfaced) if not decided else None
 	if sc is not None:
-		params["surfaced"] = sc
-		base.append("surfaced = %(surfaced)s")
+		base = base.where(p.surfaced == sc)
 	if strength:
-		params["strength"] = strength
-		base.append("strength_band = %(strength)s")
+		base = base.where(p.strength_band == strength)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		base.append("(pattern_statement LIKE %(q)s OR skill_draft LIKE %(q)s)")
+		q = f"%{_lk(search)}%"
+		base = base.where(p.pattern_statement.like(q) | p.skill_draft.like(q))
 
-	domain_cond = None
-	if domain:
-		params["domain"] = domain
-		domain_cond = "domain = %(domain)s"
+	main = base.where(p.domain == domain) if domain else base
 
-	main_where = " AND ".join(base + ([domain_cond] if domain_cond else [])) or "1=1"
-	base_where = " AND ".join(base) or "1=1"
-
-	col_list = ", ".join(f"`{c}`" for c in _CARD_FIELDS)
 	# MariaDB has no NULLS LAST: `IS NULL` sorts the undated rows behind the
 	# dated ones for the Decided log; the default board keeps strength-first.
-	order_by = (
-		(
-			"(`reviewed_at` IS NULL) ASC, `reviewed_at` ASC, `creation` ASC, `name` ASC"
-			if sort == "oldest"
-			else "(`reviewed_at` IS NULL) ASC, `reviewed_at` DESC, `creation` DESC, `name` ASC"
+	if decided:
+		d = Order.asc if sort == "oldest" else Order.desc
+		order_by = [(p.reviewed_at.isnull(), Order.asc), (p.reviewed_at, d), (p.creation, d)]
+	else:
+		strength_rank = (
+			Case()
+			.when(p.strength_band == "High", 0)
+			.when(p.strength_band == "Medium", 1)
+			.when(p.strength_band == "Low", 2)
+			.else_(3)
 		)
-		if decided
-		else (
-			"CASE `strength_band` "
-			"WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 WHEN 'Low' THEN 2 ELSE 3 END, "
-			"`creation` DESC, `name` ASC"
-		)
-	)
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{JLP}` WHERE {main_where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""SELECT {col_list}
-		FROM `tab{JLP}`
-		WHERE {main_where}
-		ORDER BY {order_by}
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
-	)
+		order_by = [(strength_rank, Order.asc), (p.creation, Order.desc)]
+	order_by.append((p.name, Order.asc))
+
+	total = main.select(Count("*")).run()[0][0]
+	rows = main.select(*_CARD_FIELDS)
+	for term, direction in order_by:
+		rows = rows.orderby(term, order=direction)
+	rows = rows.limit(pl).offset(start).run(as_dict=True)
 	for r in rows:
 		# normalize the check fields to ints for the client
 		for k in ("not_applicable", "draft_edited", "surfaced"):
@@ -430,14 +418,9 @@ def list_learned_patterns_page(
 	# say). Batched - never a per-row lookup.
 	_attach_question_enrichment(rows)
 
-	facet_rows = frappe.db.sql(
-		f"""SELECT domain AS dv, COUNT(*) AS n
-		FROM `tab{JLP}`
-		WHERE {base_where}
-		GROUP BY domain
-		ORDER BY n DESC""",
-		params,
-		as_dict=True,
+	n = Count("*").as_("n")
+	facet_rows = (
+		base.select(p.domain.as_("dv"), n).groupby(p.domain).orderby(n, order=Order.desc).run(as_dict=True)
 	)
 	facets = {"domain": [{"value": x.dv, "count": x.n} for x in facet_rows]}
 
@@ -456,8 +439,15 @@ def list_learned_patterns_page(
 
 
 def _queued_count() -> int:
-	"""Proposed but not yet surfaced (the "N more queued" escape hatch)."""
-	return frappe.db.count(JLP, {"status": "Proposed", "surfaced": 0})
+	"""Proposed but not yet surfaced (the "N more queued" escape hatch), leaving
+	out chat-mined patterns still awaiting their owner."""
+	p = frappe.qb.DocType(JLP)
+	return (
+		frappe.qb.from_(p)
+		.select(Count("*"))
+		.where((p.status == "Proposed") & (p.surfaced == 0) & chat_pattern_privacy.reviewable(p))
+		.run()[0][0]
+	)
 
 
 def _pending_apply_count() -> int:
@@ -554,6 +544,7 @@ def get_learned_pattern(name: str) -> dict:
 	temporal-spread JSON, detected roles, the exact compiled-bullet preview, run
 	links, and the exceptions list (SM may see named parties)."""
 	_guard()
+	chat_pattern_privacy.require_reviewable(name)
 	doc = frappe.get_doc(JLP, name)
 	evidence = _parse_json(doc.evidence, {})
 	exceptions = evidence.get("exceptions") if isinstance(evidence, dict) else None
@@ -648,13 +639,14 @@ def _compiled_preview(doc) -> str:
 def _load_for_transition(name: str, allowed_sources: tuple, action: str):
 	"""Re-read the row and guard its source status (the TOCTOU re-read). The
 	subsequent ``doc.save`` adds the modified-timestamp concurrency check."""
+	chat_pattern_privacy.require_reviewable(name)
 	doc = frappe.get_doc(JLP, name)
 	if doc.status not in allowed_sources:
 		frappe.throw(_("Pattern {0} is {1}; cannot {2}.").format(name, doc.status, action))
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) -> dict:
 	"""Proposed->Approved (or Stale->Approved). Optional edit freezes the
 	evidence line (section 6.5): ``draft_edited=1`` and the frozen label is shown
@@ -701,7 +693,7 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	doc.approved_by = frappe.session.user
 	doc.reviewed_at = now
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	out = {"ok": True, "status": doc.status, "draft_edited": int(doc.draft_edited or 0)}
 	# TASK 16: an A-class approve compiles the pattern into the org-wide
 	# learned-<domain> skill every user gets; if it drew from a private
@@ -711,7 +703,7 @@ def approve_learned_pattern(name: str, edited_skill_draft: str | None = None) ->
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reject_learned_pattern(name: str, reason: str) -> dict:
 	"""Proposed->Rejected (or Stale->Rejected). ``reason`` is mandatory and is
 	stored in ``review_note`` (durable, reversible via restore)."""
@@ -725,11 +717,11 @@ def reject_learned_pattern(name: str, reason: str) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def acknowledge_learned_pattern(name: str) -> dict:
 	"""B/C insight-only disposition (plan section 6.4: C is insight-only; B is
 	insight-only in Phase 1 pushed text). B/C patterns never compile into the
@@ -749,11 +741,11 @@ def acknowledge_learned_pattern(name: str) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status, "acknowledged": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def unapprove_learned_pattern(name: str) -> dict:
 	"""Approved->Proposed (the multi-SM disagreement window, section 6.5). Any
 	SM, but ONLY while the pattern has not yet been compiled into a push - so it
@@ -767,11 +759,11 @@ def unapprove_learned_pattern(name: str) -> dict:
 	# The approval is withdrawn, so the frozen reviewed text goes with it.
 	doc.approved_draft = None
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def restore_rejected_pattern(name: str) -> dict:
 	"""Rejected->Proposed (the Rejected-tab restore, section 6.5)."""
 	_guard()
@@ -779,11 +771,11 @@ def restore_rejected_pattern(name: str) -> dict:
 	doc.status = "Proposed"
 	doc.review_note = None
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def snooze_learned_pattern(name: str, days: int | str = 30) -> dict:
 	"""Proposed->Snoozed for 7/30/90 days (dismiss-for-now, section 6.4)."""
 	_guard()
@@ -801,11 +793,11 @@ def snooze_learned_pattern(name: str, days: int | str = 30) -> dict:
 	doc.reviewed_by = frappe.session.user
 	doc.reviewed_at = now_datetime()
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "status": doc.status, "snoozed_until": str(doc.snoozed_until)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def batch_approve(names: str | list) -> dict:
 	"""Approve many at once - A-class ONLY. If ANY named row has an effective
 	sensitivity of B or C, the WHOLE batch is refused (B needs individual
@@ -824,7 +816,8 @@ def batch_approve(names: str | list) -> dict:
 		fields=["name", "effective_sensitivity", "status"],
 	)
 	found = {r.name for r in rows}
-	missing = [n for n in names if n not in found]
+	# A chat-mined pattern awaiting its owner does not exist for reviewers.
+	missing = [n for n in names if n not in found or chat_pattern_privacy.awaiting_owner(n)]
 	if missing:
 		frappe.throw(_("Unknown pattern(s): {0}.").format(", ".join(missing)))
 	blocked = [r.name for r in rows if (r.effective_sensitivity or "") in ("B", "C")]
@@ -868,7 +861,7 @@ def _apply_in_progress() -> bool:
 # --------------------------------------------------------------------------- #
 # LLM polish (plan 5.5 Phase 2): optional one-turn draft rewrite
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def polish_learned_draft(name: str) -> dict:
 	"""Rewrite a Proposed/Stale pattern's ``skill_draft`` for clarity via one
 	silent gateway turn (``jarvis.learning.polish``). Requires the
@@ -920,6 +913,7 @@ def polish_learned_draft(name: str) -> dict:
 	# the status still allows polish, then write ONLY the changed columns.
 	# update_modified stays at its default so a genuine concurrent SM edit is
 	# still caught by the modified-timestamp concurrency check.
+	chat_pattern_privacy.require_reviewable(name)
 	status = frappe.db.get_value(JLP, name, "status")
 	if status not in ("Proposed", "Stale"):
 		return {
@@ -932,7 +926,7 @@ def polish_learned_draft(name: str) -> dict:
 		name,
 		{"skill_draft": out["text"], "draft_edited": 0, "draft_polished": 1},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return {"ok": True, "text": out["text"]}
 
 
@@ -974,7 +968,7 @@ _INSIGHT_SKILL_SYSTEM = (
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def draft_insight_skill_update(pattern_name: str) -> dict:
 	"""Draft "apply this insight to a skill" (D5). Gathers the B/C insight
 	(statement, draft bullet, evidence tail) + up to ``_INSIGHT_TARGET_CAP``
@@ -989,6 +983,7 @@ def draft_insight_skill_update(pattern_name: str) -> dict:
 	the OFFERED candidates (managed/Personal rows are never offered) and stay
 	inside the doctype instruction cap."""
 	_guard()
+	chat_pattern_privacy.require_reviewable(pattern_name)
 	doc = frappe.get_doc(JLP, pattern_name)
 	if (doc.effective_sensitivity or "") not in ("B", "C"):
 		return _draft_envelope(
@@ -1037,7 +1032,7 @@ def draft_insight_skill_update(pattern_name: str) -> dict:
 	return _validated_draft(parsed, candidates)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_insight_skill_update(
 	pattern_name: str,
 	action: str,
@@ -1084,7 +1079,7 @@ def apply_insight_skill_update(
 	doc.reviewed_at = now_datetime()
 	doc.materialized_skill = row_name
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	from jarvis.chat.custom_skills import apply_would_push
 
 	out = {"ok": True, "skill_name": slug, "needs_apply": apply_would_push(row_name)}
@@ -1396,7 +1391,7 @@ def _system_user_guard() -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def flag_learned_default(name: str, note: str = "") -> dict:
 	"""Record "this default was wrong here" against an Active/Approved learned
 	pattern (plan 6.5 correction loop - the JLP ref in every compiled bullet is
@@ -1479,7 +1474,7 @@ def flag_learned_default(name: str, note: str = "") -> dict:
 				update["status"] = "Stale"
 				status = "Stale"
 	frappe.db.set_value(JLP, name, update, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 
 	if demoted:
 		_notify_flag_demotion(name, distinct_users, flags_count, band, staled=(status == "Stale"))
@@ -1549,7 +1544,7 @@ def _counter_evidence_list(raw) -> list:
 # --------------------------------------------------------------------------- #
 # apply / sync (dedicated learned-skills push - Phase-2 namespace, plan 13 Q5)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_learned_skills() -> dict:
 	"""Recompile approved patterns into the ``learned-<domain>`` skills and push
 	them (delegates to ``jarvis.learning.compiler.apply_learned_skills`` - Wave
@@ -1576,7 +1571,7 @@ def _clear_stale_materialized_pointers() -> None:
 	for name in names:
 		frappe.db.set_value(JLP, name, {"materialized_skill": None}, update_modified=False)
 	if names:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 
 
 @frappe.whitelist()
@@ -1637,7 +1632,7 @@ def pending_learned_count() -> int:
 # --------------------------------------------------------------------------- #
 # run now (section 5.1 / 5.2 manual bypass)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_pattern_analysis_now() -> dict:
 	"""Enqueue a manual pattern-analysis run (bypasses the analysis window, keeps
 	the row budget + statement timeouts). Returns the orchestrator's
@@ -1682,7 +1677,7 @@ def get_learning_settings(include_preflight: int | str = 0) -> dict:
 	return {"settings": settings, "preflight": preflight}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_learning_settings(payload: str | dict | None = None) -> dict:
 	"""Write the ``pattern_*`` config via the Settings doc so window validation
 	runs (>=1h, wrap-aware - plan section 5.1). Only the config fields are
@@ -1714,7 +1709,7 @@ def set_learning_settings(payload: str | dict | None = None) -> dict:
 	# set_single_value (not set_value on the Single, which Frappe deprecates):
 	# a direct write that never fires on_update. Wrap-aware validation ran above.
 	frappe.db.set_single_value(SETTINGS, values, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- kept from when this endpoint also answered GET
 	return get_learning_settings()
 
 
@@ -1801,26 +1796,33 @@ def list_promotion_requests_page(
 	if status and status != "All" and status not in _PROMO_STATUSES:
 		frappe.throw(_("Invalid status filter."))
 
-	params: dict = {"start": start, "page_length": pl}
-	conds: list[str] = []
+	pr = frappe.qb.DocType(PROMO)
+	query = frappe.qb.from_(pr)
 	if status and status != "All":
-		params["status"] = status
-		conds.append("status = %(status)s")
+		query = query.where(pr.status == status)
 	if search:
-		params["q"] = f"%{_lk(search)}%"
-		conds.append("(page LIKE %(q)s OR note LIKE %(q)s OR body_snapshot LIKE %(q)s)")
-	where = " AND ".join(conds) or "1=1"
+		q = f"%{_lk(search)}%"
+		query = query.where(pr.page.like(q) | pr.note.like(q) | pr.body_snapshot.like(q))
 
-	total = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{PROMO}` WHERE {where}", params)[0][0]
-	rows = frappe.db.sql(
-		f"""SELECT name, page, from_scope, to_scope, target_role, note,
-			body_snapshot, status, owner, creation
-		FROM `tab{PROMO}`
-		WHERE {where}
-		ORDER BY creation DESC, name ASC
-		LIMIT %(page_length)s OFFSET %(start)s""",
-		params,
-		as_dict=True,
+	total = query.select(Count("*")).run()[0][0]
+	rows = (
+		query.select(
+			pr.name,
+			pr.page,
+			pr.from_scope,
+			pr.to_scope,
+			pr.target_role,
+			pr.note,
+			pr.body_snapshot,
+			pr.status,
+			pr.owner,
+			pr.creation,
+		)
+		.orderby(pr.creation, order=Order.desc)
+		.orderby(pr.name, order=Order.asc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
 	)
 
 	# Batched enrichment: page titles + requester names in one query each.
@@ -1870,7 +1872,7 @@ def list_promotion_requests_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def decide_promotion(name: str, approve: int | str, note: str = "") -> dict:
 	"""Approve or reject a wiki-promotion request. The write itself - merge the
 	frozen ``body_snapshot`` into the Role/Org target page (audience-suffix slug
@@ -1981,7 +1983,7 @@ def _evidence_owner(doc):
 
 
 def _pattern_chat_bundle(name: str) -> str:
-	if not frappe.db.exists(JLP, name):
+	if not frappe.db.exists(JLP, name) or chat_pattern_privacy.awaiting_owner(name):
 		frappe.throw(_("Unknown learned pattern: {0}.").format(name))
 	doc = frappe.get_doc(JLP, name)
 	domain = doc.domain or "org"
@@ -2108,7 +2110,7 @@ def _promotion_target_body_and_after(req):
 # --------------------------------------------------------------------------- #
 # Review tab: reviewer follow-up question (DESIGN.md 3.5 / 6 / 6b)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def trigger_followup_question(name: str, ask: str) -> dict:
 	"""Rephrase a reviewer's ask into ONE generic-tone Personalise question and
 	insert it into the target user's bank. ``name`` is a ``Jarvis Learned
@@ -2143,7 +2145,7 @@ def trigger_followup_question(name: str, ask: str) -> dict:
 	)
 	q.flags.ignore_permissions = True
 	q.insert()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 
 	_publish_personalise_question(target_user)
 	return {"ok": True, "name": q.name, "question": question_text}
@@ -2154,6 +2156,7 @@ def _resolve_followup_target(name: str):
 	question's user, else the evidence owner (source_pattern carried through for
 	provenance). Promotion -> the request owner (no source_pattern)."""
 	if frappe.db.exists(JLP, name):
+		chat_pattern_privacy.require_reviewable(name)
 		q = _linked_question(name)
 		if q and q.get("user"):
 			return q["user"], name

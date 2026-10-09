@@ -208,6 +208,8 @@ function reset() {
 		],
 		wiki: [wikiRow()],
 		wikiTotal: 1,
+		drafts: [],
+		reports: [],
 	};
 }
 
@@ -252,6 +254,8 @@ describe("ApprovalsBoard one inbox", () => {
 			has_more: false,
 			facets: { document_type: [{ value: "Sales Order", count: state.ar.length }] },
 			awaiting_reply: [],
+			open_drafts: state.drafts,
+			ready_reports: state.reports,
 		}));
 		approvals.listPendingActionsLane.mockImplementation(async () => ({ rows: state.lane }));
 		api.listWikiWriteProposals.mockImplementation(async () => ({
@@ -437,6 +441,27 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(router.replace).not.toHaveBeenCalled();
 		expect(router.push).not.toHaveBeenCalled();
 		expect(refreshApprovalsCount).toHaveBeenCalled();
+	});
+
+	it("labels AP review as acknowledgement, never posting approval", async () => {
+		state.ar = [ar("AR-1", { source: "Agent Review" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "Agent Review" }),
+			can_act: 1,
+			options: [],
+			question: "Document review only; no posting is authorised.",
+		}));
+		api.decideApproval.mockResolvedValue({ resumed: false });
+		const wrapper = await board();
+		expect(rail(wrapper).text()).toContain("Agent Review");
+		expect(button(pane(wrapper), "Approve")).toBeFalsy();
+		await button(pane(wrapper), "Acknowledge review").trigger("click");
+		await flushPromises();
+		expect(api.decideApproval).toHaveBeenCalledWith(
+			"AR-1",
+			"Review acknowledged: no posting authorised",
+			1
+		);
 	});
 
 	it("a question decided after the board is gone never navigates back to it", async () => {
@@ -766,5 +791,147 @@ describe("ApprovalsBoard one inbox", () => {
 		await flushPromises();
 		expect(group(w).find('[role="alert"]').exists()).toBe(false);
 		expect(group(w).text()).toContain("1 file waiting");
+	});
+
+	describe("drafts open in your chats", () => {
+		const draft = (over = {}) => ({
+			conversation: "conv-d1",
+			title: "Quarter close",
+			origin_page: "",
+			verb: "create",
+			doctype: "Sales Order",
+			summary: "Sales Order - Fake Co, 2 items",
+			last_at: "2026-09-01 11:00:00",
+			...over,
+		});
+		const drafts = (w) => w.find('[aria-labelledby="drafts-title"]');
+
+		it("lists each open draft read-only and opens its chat", async () => {
+			state.drafts = [
+				draft(),
+				draft({
+					conversation: "conv-d2",
+					title: "",
+					origin_page: "dashboards",
+					verb: "update",
+					doctype: "Customer",
+					summary: "",
+				}),
+			];
+			const w = await board();
+			expect(drafts(w).find("#drafts-title").text()).toBe("Drafts open in your chats");
+			const rows = drafts(w).findAll("button");
+			const lines = (r) =>
+				[...r.findAll(".truncate"), r.find(".badge")].map((e) => e.text());
+			expect(rows.map(lines)).toEqual([
+				["Sales Order - Fake Co, 2 items", "Quarter close", "Create Sales Order"],
+				["Update Customer", "Untitled chat", "Update Customer"],
+			]);
+			await rows[0].trigger("click");
+			expect(router.push).toHaveBeenLastCalledWith("/c/conv-d1");
+			await rows[1].trigger("click");
+			expect(router.push).toHaveBeenLastCalledWith({
+				name: "DashboardsPage",
+				query: { conversation: "conv-d2" },
+			});
+			// nothing to decide here: the count is the 3 lane rows + 1 wiki note only
+			expect(group(w).text()).toContain("Needs your decision (4)");
+		});
+
+		it("shows a card's text as text", async () => {
+			state.drafts = [draft({ summary: HOSTILE })];
+			const w = await board();
+			expect(drafts(w).text()).toContain(HOSTILE);
+			expect(window.__pwned).toBeUndefined();
+		});
+
+		it("with nothing else waiting, the empty state sits below the strip", async () => {
+			state.ar = [];
+			state.lane = [];
+			state.wiki = [];
+			state.wikiTotal = 0;
+			state.drafts = [draft()];
+			const w = await board();
+			expect(drafts(w).exists()).toBe(true);
+			const empty = rail(w).find(".text-center");
+			expect(empty.classes()).toContain("py-16");
+			expect(empty.classes()).not.toContain("h-full");
+		});
+
+		it("is hidden when there are none, and outside the Pending view", async () => {
+			let w = await board();
+			expect(drafts(w).exists()).toBe(false);
+			state.drafts = [draft()];
+			w = await board({ status: "Decided" });
+			expect(drafts(w).exists()).toBe(false);
+		});
+	});
+	describe("reports ready in your chats", () => {
+		const report = (over = {}) => ({
+			conversation: "conv-r1",
+			title: "Stock check",
+			origin_page: "",
+			run: "PR-1",
+			report_name: "Stock Balance",
+			filters: "Fake Co · 01-09-2026",
+			status: "ready",
+			ready_at: "2026-10-07 14:03:00",
+			...over,
+		});
+		const reports = (w) => w.find('[aria-labelledby="reports-title"]');
+
+		it("lists each ready report and opens its chat", async () => {
+			state.reports = [
+				report(),
+				report({
+					conversation: "conv-r2",
+					run: "PR-2",
+					title: "",
+					origin_page: "dashboards",
+				}),
+			];
+			const w = await board();
+			expect(reports(w).find("#reports-title").text()).toBe("Reports ready in your chats");
+			const rows = reports(w).findAll("button");
+			expect(rows[0].findAll(".truncate").map((e) => e.text())).toEqual([
+				"Stock Balance",
+				"Fake Co · 01-09-2026 · Stock check",
+			]);
+			expect(rows[0].text()).toContain("Ready 5 minutes ago");
+			await rows[0].trigger("click");
+			expect(router.push).toHaveBeenLastCalledWith("/c/conv-r1");
+			await rows[1].trigger("click");
+			expect(router.push).toHaveBeenLastCalledWith({
+				name: "DashboardsPage",
+				query: { conversation: "conv-r2" },
+			});
+		});
+
+		it("shows a report's text as text", async () => {
+			state.reports = [report({ report_name: HOSTILE })];
+			const w = await board();
+			expect(reports(w).text()).toContain(HOSTILE);
+			expect(window.__pwned).toBeUndefined();
+		});
+
+		it("with nothing else waiting, the empty state sits below the list", async () => {
+			state.ar = [];
+			state.lane = [];
+			state.wiki = [];
+			state.wikiTotal = 0;
+			state.reports = [report()];
+			const w = await board();
+			const empty = rail(w).find(".text-center");
+			expect(empty.classes()).toContain("py-16");
+			expect(empty.classes()).not.toContain("h-full");
+		});
+
+		it("is hidden when there are none, and outside the Pending view", async () => {
+			let w = await board();
+			expect(reports(w).exists()).toBe(false);
+			state.reports = [report()];
+			w = await board({ status: "Decided" });
+			expect(reports(w).exists()).toBe(false);
+		});
 	});
 });

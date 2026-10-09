@@ -83,9 +83,17 @@ class _MacroMergeBase(FrappeTestCase):
 		frappe.db.commit()
 
 	def _resumable(self, conv, owner=None):
-		"""Hand a run's conversation to an eligible owner (the resume refuses Administrator)."""
+		"""Hand a run to an eligible owner (the resume refuses Administrator).
+
+		The conversation, its run and the macro move TOGETHER, as ``run_macro`` creates
+		them: the engine refuses a run whose three records do not share one owner."""
 		owner = owner or ensure_user(RESUME_OWNER)
 		frappe.db.set_value("Jarvis Conversation", conv, "owner", owner, update_modified=False)
+		for run in frappe.get_all(
+			"Jarvis Macro Run", filters={"conversation": conv}, fields=["name", "macro"]
+		):
+			frappe.db.set_value("Jarvis Macro Run", run.name, "owner", owner, update_modified=False)
+			frappe.db.set_value("Jarvis Macro", run.macro, "owner", owner, update_modified=False)
 		frappe.db.commit()
 
 
@@ -448,7 +456,7 @@ class TestMacroCapacityDefer(_MacroMergeBase):
 		overload = {
 			"ok": False,
 			"overloaded": True,
-			"reason": "The site is busy — please try again in a moment.",
+			"reason": "The site is busy. Please try again in a moment.",
 		}
 		with patch("jarvis.chat.api._enqueue_turn", return_value=overload):
 			res = macros.run_macro(m.name)
@@ -709,7 +717,17 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 		self.assertEqual(self._row(run_name).status, "completed")
 
 	# ---- direction (b): a merged run whose summary is cleared mid-park ----------- #
-	def test_merged_run_whose_summary_is_cleared_mid_park_does_not_complete_early(self):
+	def _forget_the_steps_snapshot(self, run_name):
+		"""The run as one started before the steps snapshot existed left it. Needs the
+		column (CI's fresh site has it; a local site needs `bench migrate`)."""
+		self.assertTrue(
+			frappe.db.has_column(self.RUN, "steps_snapshot"),
+			"this test needs the steps_snapshot column of Jarvis Macro Run: run `bench migrate`",
+		)
+		frappe.db.set_value(self.RUN, run_name, "steps_snapshot", None, update_modified=False)
+		frappe.db.commit()
+
+	def _merged_run_whose_summary_is_cleared_mid_park(self, *, snapshot: bool):
 		from jarvis.chat import macros
 
 		m = self._mk(3)
@@ -719,6 +737,8 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 		with patch("jarvis.chat.api._enqueue_turn", side_effect=fake):
 			run_name, conv = self._start(m)
 			self.assertEqual(self._row(run_name).status, "waiting_capacity")
+			if not snapshot:
+				self._forget_the_steps_snapshot(run_name)
 
 			# The user edits the steps mid-park; update_macro clears the stale summary.
 			update_macro(m.name, steps=[{"prompt": f"q{i}"} for i in range(1, 5)])
@@ -727,31 +747,53 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 			state["overloaded"] = False
 			macros.resume_waiting_capacity_runs()
 			macros.advance_after_turn(conv, errored=False)
+		return run_name, state["sent"]
 
+	def test_merged_run_whose_summary_is_cleared_mid_park_sends_the_summary_it_started_with(self):
+		# The run keeps the steps it started with: its summary, which covers all three
+		# of them, is its one turn. The edit applies from the next run.
+		run_name, sent = self._merged_run_whose_summary_is_cleared_mid_park(snapshot=True)
+		self.assertEqual(sent, ["MERGED"])
+		row = self._row(run_name)
+		self.assertEqual((row.status, row.current_step, row.total_steps), ("completed", 1, 1))
+
+	def test_merged_run_without_a_steps_snapshot_does_not_complete_early(self):
+		run_name, sent = self._merged_run_whose_summary_is_cleared_mid_park(snapshot=False)
 		# Re-deriving the mode ran q1 as a step and then finished the run "completed" off
 		# total=min(total_steps=1, 4)=1, i.e. 1 of 4 steps with a success in the history.
 		row = self._row(run_name)
 		self.assertNotEqual(row.status, "completed", "1 of 4 steps ran and the run claimed success")
 		self.assertEqual(row.status, "failed")
-		self.assertEqual(state["sent"], [], "nothing may dispatch once the snapshot is unrunnable")
+		self.assertEqual(sent, [], "nothing may dispatch once the snapshot is unrunnable")
 		self.assertIn("edited", (frappe.db.get_value(self.RUN, run_name, "error") or "").lower())
 
-	def test_stepped_run_whose_steps_shrank_past_the_cursor_fails_honestly(self):
+	def _stepped_run_whose_steps_shrank_past_the_cursor(self, *, snapshot: bool):
 		from jarvis.chat import macros
 
 		m = self._mk(3)
 		state, fake = self._recorder()
 		with patch("jarvis.chat.api._enqueue_turn", side_effect=fake):
 			run_name, conv = self._start(m)  # p1 dispatches, current_step = 1
+			if not snapshot:
+				self._forget_the_steps_snapshot(run_name)
 			state["overloaded"] = True
 			macros.advance_after_turn(conv, errored=False)  # parks at current_step = 1
-			# The macro is cut to a single step, so index 1 no longer exists. Left alone
-			# this is an IndexError re-raised once per cron cycle until the attempt cap.
+			# The macro is cut to a single step, so index 1 no longer exists on it.
 			update_macro(m.name, steps=[{"prompt": "only"}])
 			state["overloaded"] = False
 			macros.resume_waiting_capacity_runs()
+		return run_name, state["sent"]
 
-		self.assertEqual(state["sent"], ["p1"])
+	def test_stepped_run_whose_steps_shrank_past_the_cursor_sends_the_step_it_started_with(self):
+		run_name, sent = self._stepped_run_whose_steps_shrank_past_the_cursor(snapshot=True)
+		self.assertEqual(sent, ["p1", "p2"])
+		self.assertEqual(self._row(run_name).status, "running")
+
+	def test_stepped_run_without_a_steps_snapshot_whose_steps_shrank_fails_honestly(self):
+		# Left alone this is an IndexError re-raised once per cron cycle until the
+		# attempt cap.
+		run_name, sent = self._stepped_run_whose_steps_shrank_past_the_cursor(snapshot=False)
+		self.assertEqual(sent, ["p1"])
 		self.assertEqual(self._row(run_name).status, "failed")
 		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "capacity_attempts"), 0)
 

@@ -416,7 +416,7 @@ def _ingest_print_log(detector_id: str, max_rows: int, run=None, paused: bool = 
 		for (period, company), payload in aggregate_events(events).items():
 			snapshot_names.add(upsert_monthly(detector_id, period, company, payload))
 		_advance_watermark(detector_id, last, len(rows))
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- batch progress
 		if len(rows) < PRINT_LOG_CHUNK:
 			break
 		if not frappe.flags.in_test:

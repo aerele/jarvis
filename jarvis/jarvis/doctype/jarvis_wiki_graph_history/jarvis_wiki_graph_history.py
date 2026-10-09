@@ -3,6 +3,8 @@
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisWikiGraphHistory(Document):
+
+class JarvisWikiGraphHistory(NotRenamable, Document):
 	pass

@@ -49,6 +49,10 @@ const llmConfigVersion = ref(0);
 function bumpLlmConfig() {
 	llmConfigVersion.value += 1;
 }
+// One-shot payload a caller can leave for the pane it just opened (for example
+// { reconnect } for AI models). Cleared by takeSettingsIntent() below so a later
+// mount (or a plain openSettings() call with no intent) never replays a stale one.
+const settingsIntent = ref(null);
 const pendingNewChat = ref(false); // consumed + cleared by ChatView
 const paletteOpen = ref(false);
 
@@ -115,6 +119,46 @@ function setActivityDetail(v, { persist = true } = {}) {
 			toast.error(errHtml(e))
 		);
 	}
+}
+// Per-chat auto mode (#581): the account-level default for new chats and the
+// one-time "not recommended" warning flag. Server-only (no localStorage cache):
+// a wrong cached default would silently pre-arm auto mode on a new device.
+const defaultAutoMode = ref(false);
+const autoModeAcknowledged = ref(false);
+// Optimistic write with revert on failure, so a rejected save never leaves the
+// switch or the pre-armed composer showing a value the server did not accept.
+function _saveAutoModeSetting(ref_, field, v) {
+	const prev = ref_.value;
+	ref_.value = !!v;
+	api.updateMySettings({ [field]: v ? 1 : 0 }).catch((e) => {
+		ref_.value = prev;
+		toast.error(errHtml(e));
+	});
+}
+function setDefaultAutoMode(v) {
+	_saveAutoModeSetting(defaultAutoMode, "default_auto_mode", v);
+}
+// save: false only marks it locally, for a caller whose next request records it
+// server-side anyway (turning the default on does): two saves of the same settings
+// row back to back can collide.
+function acknowledgeAutoMode({ save = true } = {}) {
+	if (save) _saveAutoModeSetting(autoModeAcknowledged, "auto_mode_acknowledged", true);
+	else autoModeAcknowledged.value = true;
+}
+// Best-effort read for surfaces that need the two flags before Settings is ever
+// opened (the chat composer pre-arms from defaultAutoMode).
+async function loadAutoModeSettings() {
+	try {
+		const r = await api.getMySettings();
+		if (r && r.data) syncAutoModeFromServer(r.data);
+	} catch (e) {
+		/* keep the defaults: off, not yet acknowledged */
+	}
+}
+function syncAutoModeFromServer(data) {
+	if (data.default_auto_mode !== undefined) defaultAutoMode.value = !!data.default_auto_mode;
+	if (data.auto_mode_acknowledged !== undefined)
+		autoModeAcknowledged.value = !!data.auto_mode_acknowledged;
 }
 // Per-user persona voice (Jarvis default / Jara). Same localStorage-cache +
 // roaming-server pattern as activityDetail; a string, default "Jarvis". Voice
@@ -256,6 +300,7 @@ async function toggleNotify() {
 // permission still can't fire one, so local state must reflect that.
 function syncSettingsFromServer(data) {
 	if (!data) return;
+	syncAutoModeFromServer(data);
 	if (data.activity_detail !== undefined)
 		setActivityDetail(!!data.activity_detail, { persist: false });
 	if (data.notify_enabled !== undefined) {
@@ -509,11 +554,21 @@ function requestNewChat(router) {
 // mid-apply. settingsApplying can only be true while the dialog is already open
 // on the applying pane (see its own doc above), so refusing here never blocks a
 // legitimate first open.
-async function openSettings(section) {
+async function openSettings(section, intent = null) {
 	if (await needsOnboarding()) return;
 	if (settingsApplying.value) return;
 	settingsOpen.value = true;
 	settingsSection.value = typeof section === "string" && section ? section : "general";
+	settingsIntent.value = intent || null;
+}
+
+// One-shot read for the pane openSettings() just opened - returns whatever
+// intent (if any) that call left and clears it in the same step, so it is
+// consumed at most once regardless of how many panes mount afterward.
+function takeSettingsIntent() {
+	const intent = settingsIntent.value;
+	settingsIntent.value = null;
+	return intent;
 }
 
 // ---- socket contract (§14 DA-04) — called by ChatView's handlers only ------
@@ -559,12 +614,15 @@ const store = reactive({
 	settingsOpen,
 	settingsSection,
 	settingsApplying,
+	settingsIntent,
 	llmConfigVersion,
 	chatContext,
 	settingsActions,
 	activityDetail,
 	notifyEnabled,
 	preferredPersona,
+	defaultAutoMode,
+	autoModeAcknowledged,
 	pendingNewChat,
 	paletteOpen,
 	sidebarPref,
@@ -586,10 +644,14 @@ const store = reactive({
 	archiveConversation,
 	requestNewChat,
 	openSettings,
+	takeSettingsIntent,
 	setChatContext,
 	registerSettingsActions,
 	clearSettingsActions,
 	setActivityDetail,
+	setDefaultAutoMode,
+	acknowledgeAutoMode,
+	loadAutoModeSettings,
 	setPreferredPersona,
 	toggleNotify,
 	syncSettingsFromServer,

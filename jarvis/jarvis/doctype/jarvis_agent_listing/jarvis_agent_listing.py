@@ -13,8 +13,10 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisAgentListing(Document):
+
+class JarvisAgentListing(NotRenamable, Document):
 	def validate(self):
 		self._guard_operator_visibility_authority()
 

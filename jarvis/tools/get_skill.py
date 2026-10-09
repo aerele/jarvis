@@ -3,7 +3,7 @@
 Accepts the bare authored slug (``invoicing``), the container wire slug
 (``custom-invoicing``) or a learned-namespace slug (``learned-selling`` —
 stored verbatim as the row's skill_name). ``skill_name`` is unique per OWNER,
-not globally, so several rows may match; the caller's own row wins.
+not globally, so several rows may match; ``served`` says which one a name means.
 """
 
 from __future__ import annotations
@@ -28,10 +28,11 @@ def get_skill(skill_name: str) -> dict:
 	"""Return one skill the calling user may use: ``{skill_name, description,
 	instructions, scope, enabled, user_invocable}``.
 
-	This is the ONLY delivery path for a role-restricted body, custom or learned
-	(issues #477 / #479): those are never written into the shared, role-blind
-	container, so the role check here is enforcement on the bytes rather than
-	advice on a context line. It re-derives the caller's roles at fetch time and
+	This is the ONLY delivery path for a custom skill's instructions (a pushed
+	company skill's file holds a pointer to this tool) and for a role-restricted
+	learned one (issues #477 / #479): those are never written into the shared,
+	role-blind container, so the role check here is enforcement on the bytes
+	rather than advice on a context line. It re-derives the caller's roles at fetch time and
 	runs them through ``user_can_use_skill``, the same predicate that decided
 	whether to name the slug in the first place."""
 	return payload(resolve_skill(skill_name, _require_system_user()))
@@ -48,10 +49,44 @@ def payload(row) -> dict:
 	}
 
 
-def resolve_skill(skill_name: str, user: str, prefer=None):
-	"""The row ``get_skill`` serves ``user`` (enabled + visible, own row wins; else the
-	lowest ``prefer(row)`` key, ties in query order). Raises InvalidArgumentError
-	(unknown) / PermissionDeniedError (not visible)."""
+def served(usable: list, user: str, prefer=None, pinned: str | None = None):
+	"""Which of ``usable`` (the enabled rows of one name that ``user`` may use, at
+	least one) the name means for ``user``. The one rule, for every caller:
+
+	1. the row named ``pinned``, when it is one of them (a File Box run's pin);
+	2. a reviewer-locked row (Role or Org: at most one per name carries a slug).
+	   Its file in the container points at this fetch, so a private row of the same
+	   name must not answer for it;
+	3. ``user``'s own row;
+	4. the lowest ``prefer(row)`` key, else the first in query order."""
+	from jarvis.chat.skill_permissions import reviewer_locked
+
+	if pinned:
+		row = next((r for r in usable if r.name == pinned), None)
+		if row is not None:
+			return row
+	reviewed = [r for r in usable if reviewer_locked(r)]
+	if reviewed:
+		# More than one only if a reservation was bypassed: Org first, then by name.
+		return min(reviewed, key=lambda r: ((r.scope or "Org") != "Org", r.name))
+	own = next((r for r in usable if r.owner == user), None)
+	if own is not None:
+		return own
+	return min(usable, key=prefer) if prefer else usable[0]
+
+
+def resolve_skill(skill_name: str, user: str, prefer=None, *, pinned: str | None = None, audit: bool = True):
+	"""The row ``get_skill`` serves ``user``: one of ``usable_rows``, chosen by
+	``served``. Raises as ``usable_rows``."""
+	return served(usable_rows(skill_name, user, audit=audit), user, prefer, pinned)
+
+
+def usable_rows(skill_name: str, user: str, *, audit: bool = True) -> list:
+	"""The enabled rows named ``skill_name`` that ``user`` may use, never empty.
+	Raises InvalidArgumentError (unknown) / PermissionDeniedError (not visible).
+	``audit=False`` for a caller that only checks which row a fetch would serve: a
+	missed ``learned-`` slug is audited (``_audit_learned_miss``) only when it was
+	fetched."""
 	raw = (skill_name or "").strip().lower()
 	if not raw:
 		raise InvalidArgumentError("skill_name is required")
@@ -86,7 +121,8 @@ def resolve_skill(skill_name: str, user: str, prefer=None):
 		],
 	)
 	if not rows:
-		_audit_learned_miss(raw, user, "unknown")
+		if audit:
+			_audit_learned_miss(raw, user, "unknown")
 		raise InvalidArgumentError(f"unknown skill: {skill_name}")
 
 	user_roles = frappe.get_roles(user)
@@ -96,13 +132,10 @@ def resolve_skill(skill_name: str, user: str, prefer=None):
 	_maybe_prefetch_children(rows, user, user_roles)
 	usable = [r for r in rows if _visible(r, user, user_roles)]
 	if not usable:
-		_audit_learned_miss(raw, user, "denied")
+		if audit:
+			_audit_learned_miss(raw, user, "denied")
 		raise PermissionDeniedError(f"no access to skill: {skill_name}")
-
-	own = next((r for r in usable if r.owner == user), None)
-	if own or not prefer:
-		return own or usable[0]
-	return min(usable, key=prefer)
+	return usable
 
 
 def _audit_learned_miss(slug: str, user: str, reason: str) -> None:

@@ -21,6 +21,7 @@ from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
 from jarvis.chat.agent_catalog import build_agent_push_payload
 from jarvis.chat.filebox import _clamp_page, _lk
+from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
@@ -72,7 +73,7 @@ _DISCOVERABLE_STATUSES = ("Published", "Coming Soon")
 _NON_SELECTABLE_ROLES = ("Administrator", "Guest", "All")
 
 # #672: how long a manual "Run now" waits for the per-installation dispatch lock
-# before refusing. Long enough to swallow an ordinary overlap with the hourly sweep,
+# before refusing. Long enough to swallow an ordinary overlap with the scheduled sweep,
 # short enough that a human never sits on a spinner.
 DISPATCH_LOCK_WAIT_S = 5.0
 
@@ -220,6 +221,7 @@ def _opaque_id(slug: str) -> str:
 _TEASER_STRIP_FIELDS = (
 	"category",
 	"nature",
+	"supports_manual_run",
 	"version",
 	"publisher",
 	"rule_pack",
@@ -494,6 +496,9 @@ def get_agent(agent_slug: str) -> dict:
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+	from jarvis.chat.operator_review import backend
+
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
 	except frappe.DoesNotExistError:
@@ -543,6 +548,8 @@ def get_agent(agent_slug: str) -> dict:
 		"description": listing.description,
 		"category": listing.category,
 		"nature": listing.nature,
+		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
+		or listing.agent_slug in REVIEW_OPERATORS,
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -607,6 +614,8 @@ def get_agent(agent_slug: str) -> dict:
 		i["schedule_time"] = str(i.schedule_time) if i.schedule_time else None
 		i["next_run_at"] = str(i.next_run_at) if i.next_run_at else None
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
+		if listing.agent_slug in REVIEW_OPERATORS:
+			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -803,7 +812,7 @@ def set_agent_access(
 	# allowed listing, not only the enabled-install set), so an access change moves
 	# the container roster exactly as install/enable does and must show as pending.
 	_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 
 	applied = False
 	if frappe.utils.cint(apply):
@@ -892,7 +901,7 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 		or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
 	):
 		_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "status": doc.status}
 
 
@@ -927,7 +936,7 @@ def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
 			or frappe.db.exists(ALLOWED_USER, {"parenttype": LISTING, "parent": doc.name})
 		):
 			_mark_catalog_dirty()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "visibility": doc.operator_visibility}
 
 
@@ -1239,7 +1248,7 @@ def install_agent(
 		action="installed",
 		detail=f"v{listing.version}" if listing.version else None,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before response
 	return {"ok": True, "data": {"name": doc.name, "agent": listing.name}}
 
 
@@ -1301,7 +1310,7 @@ def set_enabled(installation: str, enabled: int) -> dict:
 		installation=doc.name,
 		action="enabled" if doc.enabled else "disabled",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
@@ -1324,6 +1333,8 @@ def set_schedule(
 	anchors - optional, and only meaningful for their own frequency; the doctype's
 	own ``validate()`` re-checks both ranges (a Desk edit or data import bypasses
 	this endpoint entirely, so the range check cannot live here alone)."""
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
@@ -1331,6 +1342,8 @@ def set_schedule(
 	if int(schedule_enabled or 0):
 		from jarvis.chat.agent_installability import assert_installable
 
+		if doc.agent in REVIEW_OPERATORS:
+			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
@@ -1369,7 +1382,7 @@ def set_schedule(
 			else "schedule off"
 		),
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {
@@ -1377,6 +1390,33 @@ def set_schedule(
 			"next_run_at": str(doc.next_run_at) if doc.next_run_at else None,
 		},
 	}
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_ap_review_defaults(company: str | None = None) -> dict:
+	"""Permission-bounded AP starter settings; this endpoint never saves configuration."""
+	from jarvis.chat.purchase_match import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_ar_review_defaults(company: str | None = None) -> dict:
+	"""Read-only AR suggestions, including company-bound fiscal years."""
+	from jarvis.chat.receivables_review import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist()
+@require_jarvis_user
+def get_bank_recon_review_defaults(company: str | None = None) -> dict:
+	"""Read-only bank reconciliation starter settings; never saves configuration."""
+	from jarvis.chat.bank_reconciliation_review import configuration_defaults
+
+	return configuration_defaults(company)
 
 
 @frappe.whitelist()
@@ -1413,7 +1453,7 @@ def set_config(installation: str, config: str) -> dict:
 		# Key names only — engagement config VALUES stay out of the feed.
 		detail=", ".join(sorted(parsed)) or None,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name}}
 
 
@@ -1435,7 +1475,7 @@ def set_run_as_user(installation: str, user: str) -> dict:
 	# it fires on EVERY write surface, Desk / import / bulk / direct save, not just
 	# this SPA endpoint; a self-map is correctly not audited).
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {
@@ -1515,7 +1555,7 @@ def _detach_last_seen_run(run_names: list) -> None:
 	if not run_names:
 		return
 	for name, first_seen_run in frappe.db.sql(
-		f"""SELECT name, first_seen_run FROM `tab{FINDING}`
+		"""SELECT name, first_seen_run FROM `tabJarvis Agent Finding`
 		WHERE last_seen_run IN %(runs)s""",
 		{"runs": tuple(run_names)},
 	):
@@ -1568,16 +1608,68 @@ def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
 	``run`` / ``first_seen_run`` / ``last_seen_run``) and runs link the
-	installation. The cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
+	installation, except the month's counted runs, which are kept for the A14 budget
+	with no installation (``agent_scheduler.keep_budget_rows_of_uninstalled``). The
+	cascade is scoped STRICTLY BY INSTALLATION MEMBERSHIP, the
 	way ``_rehome_installation_outputs`` scopes it, never by a broad
 	``(agent, owner)`` match (#455 — see ``_installation_finding_names``). The
 	``uninstalled`` activity row is written FIRST — it is Link-free by design, so
 	the history survives the cascade. The bundle leaves the container on the next
 	Apply (the fleet endpoint does a full reconcile); the dirty flag records that
 	an Apply is now pending — but only when the install was ENABLED (a disabled
-	install was never in the pushed set, so removing it changes nothing)."""
+	install was never in the pushed set, so removing it changes nothing).
+
+	**A live run is stopped first**, as ``macros_api.delete_macro`` does. Deleting the
+	row of a run still going left its session bearer live and gave its budget back.
+	The uninstall holds the installation's dispatch lock throughout, the one the sweep
+	and Run Now take before a launch, so no run can start while it cascades; if a
+	launch holds it, the uninstall is refused with "try again". Each running run is
+	stopped (``_stop_running_run``, committed whatever happens next), then kept and
+	counted like any other stopped run. Returns ``{"ok", "stopped_runs"}``."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	via_admin = _check_installation_write(doc, "delete")  # S3 owner-gate (or admin)
+	from jarvis._redis_lock import redis_lock
+	from jarvis.chat.agent_scheduler import DISPATCH_LOCK_TTL_S, _dispatch_lock_name
+
+	with redis_lock(
+		_dispatch_lock_name(doc.name),
+		timeout_s=DISPATCH_LOCK_TTL_S,
+		blocking_timeout_s=DISPATCH_LOCK_WAIT_S,
+	) as acquired:
+		if not acquired:
+			frappe.throw(_("A run for this agent is starting right now. Try again in a moment."))
+		# A fresh read view: this request's snapshot opened at the get_doc above, and a
+		# launch that held the lock while we waited may have committed a running run.
+		# Nothing is pending here, so the commit only ends the stale snapshot.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot after lock wait
+		stopped = _stop_live_runs_for_uninstall(doc.name)
+		_uninstall_cascade(doc, via_admin)
+	from jarvis.chat import agent_models
+
+	agent_models.on_uninstalled(doc.agent)
+	return {"ok": True, "stopped_runs": stopped}
+
+
+def _stop_live_runs_for_uninstall(installation: str) -> int:
+	"""Stop every run of the installation that is still ``running``, however old.
+	Returns how many this call stopped."""
+	running = frappe.get_all(
+		RUN,
+		filters={"installation": installation, "status": "running"},
+		pluck="name",
+		ignore_permissions=True,
+	)
+	stopped = 0
+	for run in running:
+		status = _stop_running_run(
+			run, error=_("Stopped: its agent was uninstalled."), detail="stopped by the uninstall"
+		)
+		stopped += status == "stopped"
+	return stopped
+
+
+def _uninstall_cascade(doc, via_admin: bool) -> None:
+	"""The delete itself, under the caller's dispatch lock; commits."""
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1602,18 +1694,21 @@ def uninstall_agent(installation: str) -> dict:
 			flags={"jarvis_uninstall_installation": doc.name},
 		)
 	_detach_last_seen_run(run_names)
+	# The month's counted runs are KEPT, detached from the installation, so uninstalling
+	# and installing again does not hand the month's run budget back (A14). For the user
+	# the run history is gone all the same: no screen lists a run with no installation.
+	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+
+	kept = set(keep_budget_rows_of_uninstalled(doc.name, doc.owner))
 	for name in run_names:
-		frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
+		if name not in kept:
+			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
 	_delete_installation_preserving_provenance(doc, via_admin)
 	if doc.enabled:
 		_mark_catalog_dirty()
-	frappe.db.commit()
-	from jarvis.chat import agent_models
-
-	agent_models.on_uninstalled(doc.agent)
-	return {"ok": True}
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before stopping runs
 
 
 @frappe.whitelist()
@@ -1683,9 +1778,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	from jarvis.chat.agent_installability import assert_installable
 
 	assert_installable(doc.agent)
+	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
+
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe"):
+	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)
@@ -1786,7 +1883,7 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	# #672: the manual path takes the SAME per-installation dispatch lock as the cron
 	# sweep, and refuses to start a second CONCURRENT audit of one installation.
 	# Without the lock the two paths were an unguarded check-then-act on shared state:
-	# a Run Now landing in the same tick as the hourly sweep had both pass every gate
+	# a Run Now landing in the same tick as the scheduled sweep had both pass every gate
 	# above and both launch, so one customer paid twice out of one A14 budget for two
 	# audits of the same books. A short wait rather than an immediate refusal, because
 	# the common overlap is a launch already in progress that finishes in well under a
@@ -1801,6 +1898,11 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	) as acquired:
 		if not acquired:
 			frappe.throw(_("A run for this agent is already starting. Try again in a moment."))
+		# An uninstall holds this lock while it cascades, so one that finished while we
+		# waited has deleted the installation read above. A locking read, because this
+		# transaction's snapshot may predate the delete; ``_launch_audit`` commits it.
+		if not frappe.db.get_value(INSTALLATION, installation, "name", for_update=True):
+			frappe.throw(_("This agent was uninstalled."), frappe.DoesNotExistError)
 		# Freshness-bounded (see agent_scheduler._live_run), so a wedged run cannot
 		# lock the button out until the 3h reaper clears it.
 		if _live_run(installation):
@@ -1906,7 +2008,7 @@ def stop_agent_run(run: str) -> dict:
 	consumed the installation's ``next_run_at``/``last_run_at`` BEFORE the dispatch,
 	and neither the reaper nor ``_terminalize_failed`` ever unclaims it — a run that
 	really started spent its slot, and resurrecting it here would re-dispatch the same
-	slot on the next hourly tick. The A14 monthly BUDGET is a separate ledger and
+	slot on the next sweep. The A14 monthly BUDGET is a separate ledger and
 	deliberately differs from ``failed``: ``_runs_this_month`` excludes only ``failed``
 	rows (because every skip path writes one, which would make the cap
 	self-perpetuating), and that reasoning does not extend to an operator act. A
@@ -1914,8 +2016,24 @@ def stop_agent_run(run: str) -> dict:
 	start-then-stop would be an unlimited free-run loop around the budget."""
 	doc = frappe.get_doc(RUN, run)
 	_guard_run_control(doc)
+	status = _stop_running_run(
+		run, error=_("Stopped by operator."), detail=f"stopped by {frappe.session.user}"
+	)
+	if status is None:
+		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+	if status != "stopped":
+		return {"ok": True, "status": status, "idempotent": True}
+	return {"ok": True, "status": "stopped"}
 
-	frappe.db.commit()  # REPEATABLE-READ discipline: FOR UPDATE goes first
+
+def _stop_running_run(run: str, *, error: str, detail: str) -> str | None:
+	"""Move one run from ``running`` to ``stopped``, revoke its session bearer and
+	best-effort abort its gateway session. Returns the status the run ends in (that is
+	``stopped`` only when this call stopped it), or None when the row is gone. No
+	permission check: the caller has made it (``stop_agent_run``, ``uninstall_agent``).
+
+	The transition and its ordering are ``stop_agent_run``'s (see there)."""
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before row lock
 	row = frappe.db.get_value(
 		RUN,
 		run,
@@ -1924,29 +2042,28 @@ def stop_agent_run(run: str) -> dict:
 		for_update=True,
 	)
 	if not row:
-		frappe.db.commit()
-		frappe.throw(_("That run no longer exists."), frappe.DoesNotExistError)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
+		return None
 	if row.status != "running":
 		# Already terminal — a concurrent finish, reap or a second click. Release the
 		# row lock and report the state it actually reached; never overwrite it.
-		frappe.db.commit()
-		return {"ok": True, "status": row.status, "idempotent": True}
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
+		return row.status
 
-	stop_error = _("Stopped by operator.")
 	frappe.db.set_value(
 		RUN,
 		run,
-		{"status": "stopped", "finished_at": frappe.utils.now(), "error": stop_error[:140]},
+		{"status": "stopped", "finished_at": frappe.utils.now(), "error": error[:140]},
 		update_modified=False,
 	)
-	frappe.db.commit()  # win + release the row lock BEFORE tearing down the session
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before session teardown
 	# The session bearer must not outlive the run: with the row gone the delegate's
 	# late jarvis__* calls (record_agent_run included) resolve no identity and 401,
 	# so nothing it does after this can write back onto the stopped run.
 	from jarvis.chat import agent_runs
 
 	agent_runs.teardown_run_session(row.session_key)
-	frappe.db.commit()  # RES8-2: survive a deadlock in the trailing log_activity below
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before gateway abort
 	_try_abort_gateway_session(row.session_key, run)
 	log_activity(
 		agent=row.agent,
@@ -1954,11 +2071,11 @@ def stop_agent_run(run: str) -> dict:
 		installation=row.installation,
 		action="run_stopped",
 		run=run,
-		detail=f"stopped by {frappe.session.user}",
+		detail=detail,
 		owner=row.owner,
 	)
-	frappe.db.commit()
-	return {"ok": True, "status": "stopped"}
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist stopped run
+	return "stopped"
 
 
 # --------------------------------------------------------------------------- #
@@ -2159,7 +2276,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 			frappe.throw(
 				_("Another activation change for this customer is in progress. Please retry in a moment.")
 			)
-		frappe.db.commit()  # fresh snapshot under the lock (defeats stale REPEATABLE-READ count)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot under lock
 		doc = frappe.get_doc(INSTALLATION, installation)  # re-read the row under the lock
 		if doc.activation_state == "live":
 			frappe.throw(_("This installation is already live."))
@@ -2199,7 +2316,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 			detail=f"signed off by {me}",
 			owner=owner,
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before response
 	return {
 		"ok": True,
 		"data": {
@@ -2238,7 +2355,7 @@ def demote_installation(installation: str, reason: str | None = None) -> dict:
 		detail=((reason or "").strip()[:140] or f"by {me}"),
 		owner=doc.owner,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "activation_state": "shadow"}}
 
 
@@ -2282,7 +2399,7 @@ def raise_activation_ceiling(customer: str, justification: str, new_ceiling: int
 		result_link_name=customer,
 		detail=f"activation_module_ceiling -> {nc} for {customer}; reviewer {reviewer}; {just}"[:500],
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"data": {
@@ -2308,6 +2425,12 @@ def _count(doctype: str, filters: dict, or_filters: list | None = None) -> int:
 	return frappe.db.count(doctype, filters=filters)
 
 
+# A run row with no installation is not run history: an uninstall keeps the month's
+# counted runs for the A14 budget and clears their installation
+# (``agent_scheduler.keep_budget_rows_of_uninstalled``). Every reader that shows runs to
+# a person leaves them out, as it did when they were deleted.
+_HAS_INSTALLATION = {"installation": ["is", "set"]}
+
 _RUN_LIST_FIELDS = [
 	"name",
 	"agent",
@@ -2318,6 +2441,7 @@ _RUN_LIST_FIELDS = [
 	"finished_at",
 	"conversation",
 	"findings_count",
+	"advisory_findings_count",
 	"blocker_count",
 	"error",
 	"coverage_note",
@@ -2353,7 +2477,7 @@ def _stamp_run_nature(rows: list[dict]) -> list[dict]:
 def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	"""This owner's run history (optionally filtered to one agent)."""
 	me = frappe.session.user
-	filters = {"owner": me}
+	filters = {"owner": me, **_HAS_INSTALLATION}
 	if agent:
 		filters["agent"] = agent
 	rows = frappe.get_all(
@@ -2384,7 +2508,7 @@ def list_runs_page(
 	matches name/status (LIKE-escaped)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
-	filters: dict = {"owner": me}
+	filters: dict = {"owner": me, **_HAS_INSTALLATION}
 	if agent:
 		filters["agent"] = agent
 	if status:
@@ -2448,6 +2572,7 @@ def list_findings(
 		return {
 			"rows": [],
 			"total": 0,
+			"advisory_count": 0,
 			"has_more": False,
 			"start": start,
 			"page_length": pl,
@@ -2490,6 +2615,9 @@ def list_findings(
 	total = frappe.db.count(FINDING, filters=filters)
 	for sev in severity_counts:
 		severity_counts[sev] = frappe.db.count(FINDING, filters={**filters, "severity": sev})
+	# advisory findings are non-attesting; expose their count so the UI distinguishes an
+	# advisory-only run from one carrying real exceptions (non-advisory = total - advisory_count).
+	advisory_count = frappe.db.count(FINDING, filters={**filters, "advisory": 1})
 
 	rows = frappe.get_all(
 		FINDING,
@@ -2500,6 +2628,9 @@ def list_findings(
 			"agent",
 			"rule_id",
 			"severity",
+			# non-attesting advisory signal (RET-3/RET-6-class): the SPA badges it and excludes
+			# it from the actionable-exception count so an advisory-only run never reads clean.
+			"advisory",
 			# PP-1: the immutable result class + its class-conditional metadata ride on
 			# EVERY read row so the SPA can label the class beside the amount and mark a
 			# derived_candidate / legal_scenario as unconfirmed — a candidate must never
@@ -2541,6 +2672,7 @@ def list_findings(
 		# confirmed_outcome with a resolving provenance link is neutralised server-side —
 		# no read surface (this list, FindingsPanel's v-html) can emit an unearned strong
 		# verb, and the guard holds by construction, not author discipline.
+		r["title"], r["detail_md"] = finding_text(r)
 		_rc = r.get("result_class")
 		_op = r.get("outcome_provenance")
 		if r.get("title"):
@@ -2556,6 +2688,7 @@ def list_findings(
 	return {
 		"rows": rows,
 		"total": total,
+		"advisory_count": advisory_count,
 		"has_more": start + len(rows) < total,
 		"start": start,
 		"page_length": pl,
@@ -2595,8 +2728,9 @@ def list_run_steps(run: str) -> dict:
 	if not run:
 		return empty
 	me = frappe.session.user
-	run_row = frappe.db.get_value(RUN, run, ["name", "owner"], as_dict=True)
-	if not run_row:
+	run_row = frappe.db.get_value(RUN, run, ["name", "owner", "installation"], as_dict=True)
+	if not run_row or not run_row.installation:
+		# A run kept for the budget after an uninstall reads like a deleted one.
 		return empty
 	if run_row.owner != me and not has_jarvis_admin_access(me):
 		return empty
@@ -2633,7 +2767,7 @@ def set_finding_state(finding: str, state: str) -> dict:
 	doc.check_permission("write")  # S3 owner-gate
 	doc.state = state
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "state": state}}
 
 
@@ -2653,7 +2787,7 @@ def list_agent_activity_page(
 	Search matches agent_title/detail (LIKE-escaped). Each row also carries a
 	live-joined ``run_status`` (the named run's CURRENT status, not the
 	action verb's point-in-time label; ``None`` when the row names no run or
-	that run no longer exists)."""
+	that run no longer exists, or is one an uninstall kept for the budget)."""
 	me = frappe.session.user
 	start, pl = _clamp_page(start, page_length)
 	filters: dict = {"owner": me}
@@ -2697,7 +2831,11 @@ def list_agent_activity_page(
 	if run_names:
 		status_by_run = {
 			d.name: d.status
-			for d in frappe.get_all(RUN, filters={"name": ["in", list(run_names)]}, fields=["name", "status"])
+			for d in frappe.get_all(
+				RUN,
+				filters={"name": ["in", list(run_names)], **_HAS_INSTALLATION},
+				fields=["name", "status"],
+			)
 		}
 	for r in rows:
 		r["run_status"] = status_by_run.get(r["run"]) if r.get("run") else None
@@ -2736,7 +2874,7 @@ def take_finding_to_chat(finding: str) -> dict:
 		}
 	)
 	conv.insert()  # owned by the current user; respects perms
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before reply build
 
 	parts = [
 		f"I want to act on audit finding {doc.name} (rule {doc.rule_id}, severity: {doc.severity}).",
@@ -2768,7 +2906,7 @@ def take_finding_to_chat(finding: str) -> dict:
 		# no trace, mirroring filebox._cascade's cleanup shape.
 		frappe.db.delete(MSG, {"conversation": conv.name})
 		frappe.delete_doc(CONV, conv.name, ignore_permissions=True, force=True)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist cleanup before return
 		return {
 			"ok": False,
 			"conversation": None,
@@ -2861,7 +2999,7 @@ def _enqueue_apply() -> dict:
 	_rate_limit_apply()
 	payload = build_agent_push_payload()
 	frappe.db.set_single_value(_SETTINGS, "agent_skills_sync_status", "pending: applying agents")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before enqueue
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
 	frappe.enqueue(
 		"jarvis.chat.agents_api._enqueued_push_agent_skills",
@@ -2905,7 +3043,7 @@ def _enqueued_push_agent_skills() -> None:
 			frappe.db.set_single_value(
 				_SETTINGS, "agent_skills_sync_status", "failed: skipped (concurrent sync)"
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 			return
 
 		terminal_written = False
@@ -2938,7 +3076,7 @@ def _enqueued_push_agent_skills() -> None:
 			# happen. The terminal write below is a single ``set_value`` in the fresh
 			# transaction, still covered by the try/except/finally and the trailing
 			# commit, so the "status is never left pending" invariant is unchanged.
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before status write
 			stamped = _stamp_pushed_models(payload, pushed, scope)
 			values = {
 				"agent_skills_synced_at": frappe.utils.now(),
@@ -2953,7 +3091,7 @@ def _enqueued_push_agent_skills() -> None:
 			)
 			if fresh == version and stamped:
 				values["agent_catalog_dirty"] = 0
-			frappe.db.set_value(_SETTINGS, _SETTINGS, values)
+			frappe.db.set_single_value(_SETTINGS, values)
 			terminal_written = True
 		except admin_client.AdminAuthError as e:
 			_fail(f"failed: auth: {e}")
@@ -2988,7 +3126,7 @@ def _enqueued_push_agent_skills() -> None:
 					_fail("failed: unexpected error; see Error Log")
 				except Exception:
 					pass
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist job result
 
 
 def _model_push_scope(payload: list[dict]) -> dict | None:
@@ -3014,8 +3152,6 @@ def _stamp_pushed_models(payload: list[dict], response=None, scope: dict | None 
 
 
 def _fail(status: str) -> None:
-	frappe.db.set_value(
-		_SETTINGS,
-		_SETTINGS,
-		{"agent_skills_synced_at": frappe.utils.now(), "agent_skills_sync_status": status},
+	frappe.db.set_single_value(
+		_SETTINGS, {"agent_skills_synced_at": frappe.utils.now(), "agent_skills_sync_status": status}
 	)

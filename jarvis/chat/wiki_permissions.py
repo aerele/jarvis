@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import frappe
 
-from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
+from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_SKILL_REVIEWER_ROLE, JARVIS_USER_ROLE
 
 WIKI = "Jarvis Wiki Page"
 
@@ -48,6 +48,7 @@ WIKI_MANAGER_ROLE = "Knowledge Wiki Manager"
 # publish org-wide through a side door the write matrix reserves for SMs.
 # "Jarvis User"/"Jarvis Admin" are excluded for the same reason (the former is
 # every app user, the latter the blanket admin tier — like System Manager).
+# "Jarvis Skill Reviewer" is a capability role (who may review skills), not an audience.
 _NON_TARGETABLE_ROLES = (
 	"Administrator",
 	"Guest",
@@ -57,6 +58,7 @@ _NON_TARGETABLE_ROLES = (
 	"Website Manager",
 	JARVIS_USER_ROLE,
 	JARVIS_ADMIN_ROLE,
+	JARVIS_SKILL_REVIEWER_ROLE,
 )
 
 # ptypes that reveal page content; everything read-shaped maps to visibility.
@@ -186,6 +188,21 @@ def visible_scope_condition(user: str | None = None) -> str:
 		clauses.append(f"({table}.`scope` = 'Role' and {table}.`target_role` in ({role_list}))")
 	clauses.append(f"({table}.`scope` = 'User' and {table}.`target_user` = {frappe.db.escape(user)})")
 	return "(" + " or ".join(clauses) + ")"
+
+
+def visible_scope_criterion(page, user: str | None = None):
+	"""``visible_scope_condition`` as a ``frappe.qb`` criterion over ``page``;
+	None when nothing is hidden (System Managers)."""
+	from frappe.query_builder.functions import Coalesce
+
+	user = user or frappe.session.user
+	if _is_sm(user):
+		return None
+	visible = Coalesce(page.scope, "").isin(["", "Org"])
+	roles = [r for r in frappe.get_roles(user) if r]
+	if roles:
+		visible |= (page.scope == "Role") & page.target_role.isin(roles)
+	return visible | ((page.scope == "User") & (page.target_user == user))
 
 
 def wiki_page_query_conditions(user: str | None = None) -> str:

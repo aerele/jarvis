@@ -90,6 +90,93 @@
 						</button>
 					</div>
 				</div>
+				<!-- Create/update cards still open in the viewer's chats (envelope
+				     open_drafts, first page only). Read-only: a row opens the chat,
+				     where the card is edited and confirmed. Pending view only. -->
+				<section
+					v-if="isPending && openDrafts.length"
+					class="border-b"
+					aria-labelledby="drafts-title"
+				>
+					<div
+						id="drafts-title"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+					>
+						Drafts open in your chats
+					</div>
+					<div class="flex flex-col divide-y">
+						<button
+							v-for="d in openDrafts"
+							:key="d.conversation"
+							class="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-gray-2"
+							@click="openConversation(d)"
+						>
+							<FeatherIcon
+								name="file-text"
+								class="mt-1 size-3.5 shrink-0 text-ink-gray-5"
+							/>
+							<div class="min-w-0 flex-1">
+								<div class="truncate text-base text-ink-gray-9">
+									{{ d.summary || draftLabel(d) }}
+								</div>
+								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+									{{ d.title || "Untitled chat" }}
+								</div>
+								<div class="mt-1 flex items-center gap-2">
+									<Badge variant="subtle" theme="gray" :label="draftLabel(d)" />
+									<Tooltip :text="exactDate(d.last_at)">
+										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
+											timeAgo(d.last_at)
+										}}</span>
+									</Tooltip>
+								</div>
+							</div>
+						</button>
+					</div>
+				</section>
+				<!-- Background reports that finished in the viewer's chats and weren't
+				     shown there yet (envelope ready_reports, first page only). A row
+				     opens the chat, where the report card shows the results. -->
+				<section
+					v-if="isPending && readyReports.length"
+					class="border-b"
+					aria-labelledby="reports-title"
+				>
+					<div
+						id="reports-title"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+					>
+						Reports ready in your chats
+					</div>
+					<div class="flex flex-col divide-y">
+						<button
+							v-for="r in readyReports"
+							:key="r.conversation + ':' + r.run"
+							class="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-gray-2"
+							@click="openConversation(r)"
+						>
+							<FeatherIcon
+								name="bar-chart-2"
+								class="mt-1 size-3.5 shrink-0 text-ink-gray-5"
+							/>
+							<div class="min-w-0 flex-1">
+								<div class="truncate text-base text-ink-gray-9">
+									{{ r.report_name }}
+								</div>
+								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+									{{ [r.filters, r.title].filter(Boolean).join(" · ") }}
+								</div>
+								<div class="mt-1 flex items-center gap-2">
+									<Tooltip :text="exactDate(r.ready_at)">
+										<span class="whitespace-nowrap text-sm text-ink-gray-5"
+											>Ready {{ timeAgo(r.ready_at) }}</span
+										>
+									</Tooltip>
+								</div>
+							</div>
+						</button>
+					</div>
+				</section>
 				<!-- "Needs your decision" (one inbox): held File Box writes, the
 				     viewer's own chat cards and, for a reviewer, wiki notes - each
 				     pauses a run until someone decides, so they lead. Pending view
@@ -258,14 +345,14 @@
 				<div
 					v-else-if="loading || (isPending && !actionsLoaded)"
 					class="flex items-center justify-center"
-					:class="awaitingReply.length || showActions ? 'py-16' : 'h-full'"
+					:class="stripsShown || showActions ? 'py-16' : 'h-full'"
 				>
 					<JvSpinner />
 				</div>
 				<div
 					v-else-if="!showActions"
 					class="flex flex-col items-center justify-center gap-3 px-6 text-center"
-					:class="awaitingReply.length ? 'py-16' : 'h-full'"
+					:class="stripsShown ? 'py-16' : 'h-full'"
 				>
 					<FeatherIcon :name="emptyState.icon" class="size-7.5 text-ink-gray-5" />
 					<div class="flex flex-col items-center gap-1">
@@ -351,8 +438,8 @@
 					<div class="flex flex-col items-center gap-1">
 						<span class="text-lg font-medium text-ink-gray-8">Select an approval</span>
 						<span class="text-p-base text-ink-gray-6">
-							Pick a request from the list to review it, decide, or tag someone in
-							the comments.
+							Pick a request from the list to review it, decide or tag someone in the
+							comments.
 						</span>
 					</div>
 				</div>
@@ -520,7 +607,11 @@
 											<Button
 												variant="solid"
 												theme="green"
-												label="Approve"
+												:label="
+													sourceOf(selected) === 'Agent Review'
+														? 'Acknowledge review'
+														: 'Approve'
+												"
 												:loading="deciding === 1"
 												:disabled="deciding !== null"
 												@click="submitDecide(1)"
@@ -743,13 +834,27 @@ const initialType = typeof route.query.type === "string" ? route.query.type : ""
 // start=0, and replacing with an empty array hides the strip); Load More
 // responses don't carry the key and leave it alone.
 const awaitingReply = ref([]);
+const openDrafts = ref([]); // `open_drafts`, captured the same way
+const readyReports = ref([]); // `ready_reports`, likewise
 let awaitReq = 0; // monotonic — stale responses dropped (paneReq idiom)
 async function fetchApprovals(p) {
 	const id = ++awaitReq;
 	const res = (await api.listApprovalsPage(p)) || {};
 	if (id === awaitReq && Array.isArray(res.awaiting_reply))
 		awaitingReply.value = res.awaiting_reply;
+	if (id === awaitReq && Array.isArray(res.open_drafts)) openDrafts.value = res.open_drafts;
+	if (id === awaitReq && Array.isArray(res.ready_reports))
+		readyReports.value = res.ready_reports;
 	return res;
+}
+// a strip above the rail's empty state: it then sizes to its content, not the column
+const stripsShown = computed(
+	() =>
+		awaitingReply.value.length > 0 ||
+		(isPending.value && (openDrafts.value.length > 0 || readyReports.value.length > 0))
+);
+function draftLabel(d) {
+	return `${d.verb === "update" ? "Update" : "Create"} ${d.doctype}`;
 }
 
 const {
@@ -877,6 +982,7 @@ function docType(row) {
 
 // NULL/absent source predates the field — reads as File Box (backend contract)
 function sourceOf(row) {
+	if (row && row.source === "Agent Review") return "Agent Review";
 	return row && row.source === "Chat" ? "Chat" : "File Box";
 }
 
@@ -1146,7 +1252,12 @@ async function submitDecide(approve) {
 	// decide() requires non-empty decision text - Approve sends the selected
 	// option chip, else the note, else the verdict word; Reject sends the note
 	// or the verdict word (the picked option was what got refused)
-	const text = approve ? selectedOption.value || noteText || "Approved" : noteText || "Rejected";
+	const reviewOnly = sourceOf(selected.value) === "Agent Review";
+	const text = approve
+		? selectedOption.value ||
+		  noteText ||
+		  (reviewOnly ? "Review acknowledged: no posting authorised" : "Approved")
+		: noteText || "Rejected";
 	const id = selected.value.name;
 	try {
 		const res = (await api.decideApproval(id, text, approve)) || {};
@@ -1170,7 +1281,11 @@ async function submitDecide(approve) {
 		selectedOption.value = "";
 		note.value = "";
 		toast.success(
-			(approve ? "Approved" : "Rejected") + (res.resumed ? " - conversation resumed" : "")
+			(approve
+				? reviewOnly
+					? "Review acknowledged: no accounting or sending action"
+					: "Approved"
+				: "Rejected") + (res.resumed ? " - conversation resumed" : "")
 		);
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") {

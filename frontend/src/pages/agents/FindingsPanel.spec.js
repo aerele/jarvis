@@ -591,6 +591,222 @@ describe("stopped run explanation (jarvis#1062 polish)", () => {
 	});
 });
 
+describe("AR finding readability", () => {
+	function arFinding(overrides = {}) {
+		return {
+			name: "F-AR",
+			agent: "ar-collections-operator",
+			rule_id: "ar-review-v1",
+			severity: "note",
+			state: "open",
+			title: "Settled — SI-1",
+			ref_doctype: "Sales Invoice",
+			ref_name: "SI-1",
+			amount: 0,
+			result_class: "derived_candidate",
+			confirmation_status: "unconfirmed",
+			match_basis: "Recorded invoice and payment-ledger evidence.",
+			false_positive_path: "Verify disputes and unrecorded settlements before contact.",
+			detail_md: [
+				"Settled — SI-1",
+				"Customer: Example Ltd.; account: Debtors - E; company: Example.",
+				"Recorded balance at cutoff: 0.0 INR. No positive recorded balance to chase; no reminder prepared.",
+				"Cutoff 2026-09-30; current records, not historical reconstruction. Confirm disputes, unrecorded payments and the recipient with the named reviewer. No interest, fees, sending, posting, ECL or credit-risk conclusion.",
+				"India review: Verify the recorded tax evidence. E-invoice applicability and tax compliance are not determined. billing_address_gstin: not recorded; company_gstin: not recorded; einvoice_status: not recorded; gst_category: not recorded; irn: not recorded",
+			].join("\n"),
+			...overrides,
+		};
+	}
+
+	async function showArFinding(finding = arFinding()) {
+		api.listAgentFindings.mockResolvedValue({ rows: [finding], total: 1, has_more: false });
+		const wrapper = mount(FindingsPanel, {
+			props: { run: baseRun({ agent: "ar-collections-operator", nature: "Operator" }) },
+			attachTo: document.body,
+		});
+		await flushPromises();
+		await wrapper.find('[role="button"]').trigger("click");
+		return wrapper;
+	}
+
+	it("shows a settled result and labelled facts without implying it is a collection candidate", async () => {
+		const wrapper = await showArFinding();
+		const row = wrapper.find('[role="button"]');
+		expect(row.text()).toContain("Derived review");
+		expect(row.text()).toContain("Not independently confirmed");
+		expect(row.text()).not.toContain("Candidate for review");
+		const detail = wrapper.get('[data-testid="ar-finding-details"]');
+		expect(detail.find("h3").text()).toBe("No reminder needed");
+		expect(detail.get('[data-testid="ar-balance"]').text()).toBe("0.0 INR");
+		expect(detail.findAll("dt").map((label) => label.text())).toContain("Receivable account");
+		expect(detail.get('[aria-label="Review boundaries"]').findAll("li")).toHaveLength(3);
+		expect(wrapper.text()).not.toContain("Why it was flagged");
+		expect(wrapper.find('[data-testid="ar-reminder-draft"]').exists()).toBe(false);
+		expect(api.setFindingState).not.toHaveBeenCalled();
+		wrapper.unmount();
+	});
+
+	it("collapses technical context and retains the original recorded explanation verbatim", async () => {
+		const source = arFinding();
+		const wrapper = await showArFinding(source);
+		const indiaButton = wrapper
+			.findAll("button")
+			.find((button) => button.text() === "India Compliance context");
+		expect(indiaButton.attributes("aria-expanded")).toBe("false");
+		expect(wrapper.get('[data-testid="ar-recorded-explanation"]').isVisible()).toBe(false);
+		await indiaButton.trigger("click");
+		expect(indiaButton.attributes("aria-expanded")).toBe("true");
+		const evidenceButton = wrapper
+			.findAll("button")
+			.find((button) => button.text() === "Recorded evidence");
+		await evidenceButton.trigger("click");
+		expect(evidenceButton.attributes("aria-expanded")).toBe("true");
+		expect(wrapper.get('[data-testid="ar-recorded-explanation"]').text()).toBe(
+			source.detail_md
+		);
+		expect(wrapper.get('[data-testid="ar-recorded-explanation"]').isVisible()).toBe(true);
+		expect(wrapper.text()).toContain("Evidence used");
+		expect(wrapper.text()).toContain("Customer GSTIN");
+		wrapper.unmount();
+	});
+
+	it("gives a recorded reminder a separate unsent, paragraph-preserving section", async () => {
+		const source = arFinding();
+		const draft =
+			"Subject: Balance confirmation for invoice SI-1\n\nDear Customer,\nPlease confirm the recorded balance.";
+		source.title = "Reminder Candidate — SI-1";
+		source.detail_md =
+			source.detail_md.replace("Settled —", "Reminder Candidate —") +
+			"\n\nUNSENT DRAFT — human verification required\n" +
+			draft;
+		const wrapper = await showArFinding(source);
+		const draftElement = wrapper.get('[data-testid="ar-reminder-draft"]');
+		expect(draftElement.text()).toBe(draft);
+		expect(draftElement.classes()).toContain("whitespace-pre-wrap");
+		expect(wrapper.get('[aria-label="Unsent reminder draft"]').text()).toContain(
+			"This review does not send messages"
+		);
+		expect(
+			wrapper.findAll("button").some((button) => /send reminder/i.test(button.text()))
+		).toBe(false);
+		wrapper.unmount();
+	});
+
+	it("renders customer and evidence markup as inert text", async () => {
+		const source = arFinding();
+		const untrusted = '<img src=x onerror="alert(1)"> [Pay now](https://example.invalid)';
+		source.detail_md = source.detail_md.replace("Example Ltd.", untrusted);
+		const wrapper = await showArFinding(source);
+		expect(wrapper.get('[data-testid="ar-finding-details"]').text()).toContain(untrusted);
+		expect(wrapper.find('[data-testid="ar-finding-details"] img').exists()).toBe(false);
+		expect(wrapper.find('[data-testid="ar-finding-details"] a').exists()).toBe(false);
+		wrapper.unmount();
+	});
+
+	it("retains explicit reviewer confirmation without changing the saved finding state", async () => {
+		const wrapper = await showArFinding(
+			arFinding({ confirmation_status: "confirmed", state: "acknowledged" })
+		);
+		expect(wrapper.find('[role="button"]').text()).toContain("Confirmed");
+		expect(wrapper.find('[role="button"]').text()).not.toContain(
+			"Not independently confirmed"
+		);
+		expect(wrapper.findComponent({ name: "FormControl" }).props("modelValue")).toBe(
+			"acknowledged"
+		);
+		expect(api.setFindingState).not.toHaveBeenCalled();
+		wrapper.unmount();
+	});
+
+	it("keeps an unfamiliar AR explanation on the unchanged generic renderer", async () => {
+		const explanation = "New-format evidence that must not disappear.";
+		const wrapper = await showArFinding(arFinding({ detail_md: explanation }));
+		expect(wrapper.find('[data-testid="ar-finding-details"]').exists()).toBe(false);
+		expect(wrapper.text()).toContain(explanation);
+		expect(wrapper.find('[role="button"]').text()).toContain("Candidate for review");
+		wrapper.unmount();
+	});
+});
+
+describe("auditor finding explanations", () => {
+	async function showFinding(overrides = {}) {
+		api.listAgentFindings.mockResolvedValue({
+			rows: [
+				{
+					name: "F-LEGACY",
+					severity: "note",
+					state: "open",
+					title: "",
+					detail_md: "",
+					ref_doctype: "Supplier",
+					ref_name: "SUPP-001",
+					amount: 0,
+					result_class: "derived_candidate",
+					confirmation_status: "unconfirmed",
+					match_basis: "The recorded tax details do not match.",
+					false_positive_path: "The identifier may be maintained in another field.",
+					...overrides,
+				},
+			],
+			total: 1,
+			has_more: false,
+		});
+		const wrapper = mountPanel(baseRun());
+		await flushPromises();
+		return wrapper;
+	}
+
+	it("gives a legacy blank finding an identifiable title and honest result label", async () => {
+		const wrapper = await showFinding({ title: "   " });
+		const row = wrapper.find('[role="button"]');
+		expect(row.text()).toContain("Review Supplier SUPP-001");
+		expect(row.text()).toContain("Candidate for review");
+		expect(row.text()).toContain("Awaiting confirmation");
+		expect(wrapper.find('[data-testid="finding-amount"]').exists()).toBe(false);
+		wrapper.unmount();
+	});
+
+	it("exposes recorded evidence and alternative explanations for a blank legacy note", async () => {
+		const wrapper = await showFinding();
+		await wrapper.find('[role="button"]').trigger("click");
+		expect(wrapper.text()).toContain("did not record an explanation");
+		expect(wrapper.text()).toContain("Why it was flagged");
+		expect(wrapper.text()).toContain("The recorded tax details do not match.");
+		expect(wrapper.text()).toContain("What to rule out");
+		expect(wrapper.text()).toContain("The identifier may be maintained in another field.");
+		expect(wrapper.find('a[href="/app/supplier/SUPP-001"]').exists()).toBe(true);
+		wrapper.unmount();
+	});
+
+	it("keeps authored titles readable and retains nonzero amounts", async () => {
+		const title = "Possible duplicate payment against the same supplier invoice";
+		const wrapper = await showFinding({
+			title,
+			amount: 50000,
+			detail_md: "Review both entries.",
+		});
+		const heading = wrapper.find('[role="button"] .font-medium');
+		expect(heading.text()).toBe(title);
+		expect(heading.classes()).not.toContain("truncate");
+		expect(wrapper.get('[data-testid="finding-amount"]').text()).toBe("50,000");
+		await wrapper.find('[role="button"]').trigger("click");
+		expect(wrapper.text()).not.toContain("did not record an explanation");
+		wrapper.unmount();
+	});
+
+	it("renders structured evidence as text rather than executable HTML", async () => {
+		const evidence = '<img src=x onerror="alert(1)">';
+		const wrapper = await showFinding({
+			match_basis: evidence,
+			false_positive_path: evidence,
+		});
+		await wrapper.find('[role="button"]').trigger("click");
+		expect(wrapper.text()).toContain(evidence);
+		expect(wrapper.find("img").exists()).toBe(false);
+		wrapper.unmount();
+	});
+});
+
 describe("Discuss in chat honors ok/reason, not just conversation (jarvis#1062 polish)", () => {
 	function findingRow() {
 		return {

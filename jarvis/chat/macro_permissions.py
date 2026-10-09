@@ -18,10 +18,9 @@ Ownership axes:
     side (``macros.run_macro`` with ``ignore_permissions``) and its owner is
     reassigned to the MACRO's owner by construction (``macros.py``: the
     ``_reassign_owner`` handoff), so scoping by the run's own owner is exactly
-    the macro-owner axis. On CREATE (the only path a generic-REST insert can
-    reach — legit runs bypass this hook via ``ignore_permissions``) the hook
-    additionally rejects a run whose linked ``macro`` (or ``conversation``, if
-    set) is not owned by the caller (MAC-2 cross-inject guard).
+    the macro-owner axis. The row is READ-ONLY through the document API: it is
+    engine state, and every create / write / delete from a user session is
+    refused (see ``has_macro_run_permission``).
 
 System Manager gets org-wide READ (oversight; the SM perm rows added to both
 doctypes are read-only, mirroring ``Jarvis Voice Note``). ``Administrator``
@@ -39,7 +38,6 @@ import frappe
 
 MACRO = "Jarvis Macro"
 MACRO_RUN = "Jarvis Macro Run"
-CONVERSATION = "Jarvis Conversation"
 
 
 def _is_sm(user: str) -> bool:
@@ -82,21 +80,31 @@ def macro_run_query_conditions(user: str | None = None) -> str:
 	return f"`tab{MACRO_RUN}`.`owner` = {frappe.db.escape(user)}"
 
 
+# What a user may do to a run row through the document API: look at it. Nothing else.
+_RUN_READ_PTYPES = frozenset({"read", "select", "report", "export", "print"})
+
+
 def has_macro_run_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
-	"""Per-doc gate for Jarvis Macro Run. Read/write/delete: own-owner axis. On
-	CREATE (MAC-2): reject a run whose linked ``macro`` (or ``conversation``, if
-	set) is not owned by the caller, so a generic-REST insert cannot attach a run
-	to another user's macro. Legit runs are inserted server-side with
-	``ignore_permissions`` and never consult this hook."""
+	"""Per-doc gate for Jarvis Macro Run: READ-ONLY to everyone, on the own-owner axis.
+
+	A run row is engine state. The engine reads it to decide whose conversation the
+	next step is dispatched into, whether the run is over, and how much of the
+	unattended budget is spent. Every legitimate writer is server-side (``macros``,
+	``macro_scheduler``) and goes around this hook with ``ignore_permissions`` or a
+	raw ``db.set_value``.
+
+	MAC-2 guarded CREATE only, so an owner could still UPDATE their own row over
+	generic REST: repoint ``conversation`` at another user's chat (the engine then
+	ran the next step there AS that user), set a terminal ``status`` by hand
+	(skipping the code that disarms an armed run), or delete rows directly. Refusing
+	every write ptype here closes all three, and takes effect on deploy without
+	waiting for a migrate to re-sync the role rows.
+
+	The other way a user could make budget rows disappear, deleting the macro, is
+	closed in ``macros_api.delete_macro``: it keeps the month's scheduled rows, with
+	no macro on them. Such a row is still its owner's to read here until the hourly
+	macro job removes it; the Macros screens do not show it."""
 	user = user or frappe.session.user
-	if _is_sm(user):
-		return True
-	if ptype == "create":
-		macro = doc.get("macro")
-		if macro and frappe.db.get_value(MACRO, macro, "owner") != user:
-			return False
-		conv = doc.get("conversation")
-		if conv and frappe.db.get_value(CONVERSATION, conv, "owner") != user:
-			return False
-		return True
-	return doc.get("owner") == user
+	if ptype not in _RUN_READ_PTYPES:
+		return False
+	return _is_sm(user) or doc.get("owner") == user

@@ -27,9 +27,11 @@
 			@pointerenter="wake"
 			@focus="wake"
 		>
-			<!-- Grip dots: the drag affordance. design.md 1.3 forbids hover
-			     motion, so this fades in on OPACITY alone — nothing moves. -->
-			<span class="jvw-grip" aria-hidden="true"><i></i><i></i><i></i></span>
+			<!-- Six-dot grip: the only place a drag starts (#671). design.md 1.3
+			     forbids hover motion, so it changes on OPACITY alone. -->
+			<span class="jvw-grip" title="Drag to move" aria-hidden="true"
+				><i></i><i></i><i></i><i></i><i></i><i></i
+			></span>
 			<svg v-if="!brandLogoUrl" viewBox="0 0 24 24" width="24" height="24" fill="#fff">
 				<path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" />
 			</svg>
@@ -398,7 +400,7 @@ function onDocumentActivity() {
 function onPointerDown(e) {
 	wake();
 	suppressClick = false;
-	if (e.button !== 0) return;
+	if (e.button !== 0 || !fabPos.startsOnGrip(e.target)) return; // a press elsewhere is a tap
 	dragSession = fabPos.dragStart(fabXY.value.x, fabXY.value.y, e.clientX, e.clientY);
 	fabEl.value?.setPointerCapture?.(e.pointerId);
 }
@@ -607,7 +609,7 @@ onBeforeUnmount(() => {
 	overflow: hidden;
 	background: var(--accent-grad);
 	border: none;
-	cursor: grab;
+	cursor: pointer;
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -652,21 +654,23 @@ onBeforeUnmount(() => {
    snap the button back to the origin mid-press. */
 .jvw-grip {
 	position: absolute;
-	left: 7px;
+	left: 2px;
 	top: 50%;
 	transform: translateY(-50%);
-	display: flex;
-	flex-direction: column;
+	display: grid;
+	grid-template-columns: repeat(2, 2.5px);
 	gap: 2.5px;
+	padding: 5px; /* a larger target than the dots */
+	cursor: grab;
 	opacity: 0;
 	transition: opacity 0.12s ease;
-	pointer-events: none;
+	z-index: 1;
 }
 /* Keep the grip on the edge facing into the page, not the one against the
    viewport edge the FAB is snapped to. */
 .jvw-fab--dock-left .jvw-grip {
 	left: auto;
-	right: 7px;
+	right: 2px;
 }
 .jvw-grip i {
 	display: block;
@@ -678,7 +682,16 @@ onBeforeUnmount(() => {
 .jvw-fab:hover .jvw-grip,
 .jvw-fab:focus-visible .jvw-grip,
 .jvw-fab--dragging .jvw-grip {
-	opacity: 0.55;
+	opacity: 0.85;
+}
+.jvw-fab--dragging .jvw-grip {
+	cursor: grabbing;
+}
+/* A touch screen has no hover, so there the grip shows at rest. */
+@media (hover: none) {
+	.jvw-grip {
+		opacity: 0.45;
+	}
 }
 
 /* ---- blink face ----

@@ -252,22 +252,22 @@ class TestFmtGuards(unittest.TestCase):
 		patch.object(graphics, "get_number_format", _get_number_format_stub).start()
 		self.addCleanup(patch.stopall)
 
-	def test_fmt_amount_none_nan_inf_render_em_dash(self) -> None:
+	def test_fmt_amount_none_nan_inf_render_dash(self) -> None:
 		for bad in [None, float("nan"), float("inf"), float("-inf")]:
 			with self.subTest(bad=bad):
-				self.assertEqual(fmt_amount(bad), "—")
+				self.assertEqual(fmt_amount(bad), "-")
 				self.assertEqual(self.calls["fmt_money"], [])  # never reaches the (stubbed) formatter
 
-	def test_fmt_pct_none_nan_inf_render_em_dash(self) -> None:
+	def test_fmt_pct_none_nan_inf_render_dash(self) -> None:
 		for bad in [None, float("nan"), float("inf"), float("-inf")]:
 			with self.subTest(bad=bad):
-				self.assertEqual(fmt_pct(bad), "—")
+				self.assertEqual(fmt_pct(bad), "-")
 				self.assertEqual(self.calls["fmt_money"], [])
 				self.assertEqual(self.calls["get_number_format"], 0)
 
 	def test_fmt_amount_negative_zero_is_not_negative(self) -> None:
 		out = fmt_amount(-0.0)
-		self.assertNotEqual(out, "—")
+		self.assertNotEqual(out, "-")
 		self.assertNotIn("neg", out)
 		# the stub received a non-negative magnitude, never a bare "-0.00"
 		((amount, _precision, _currency),) = self.calls["fmt_money"]
@@ -276,7 +276,7 @@ class TestFmtGuards(unittest.TestCase):
 
 	def test_fmt_pct_negative_zero_is_not_negative(self) -> None:
 		out = fmt_pct(-0.0)
-		self.assertNotEqual(out, "—")
+		self.assertNotEqual(out, "-")
 		self.assertNotIn("neg", out)
 
 	def test_fmt_amount_negative_wraps_in_parens_and_neg_class(self) -> None:
@@ -317,8 +317,8 @@ class TestFmtGuards(unittest.TestCase):
 		out = fmt_amount("1,234.5")
 		self.assertEqual(out, "1234.50")
 
-	def test_fmt_amount_unparseable_string_renders_em_dash(self) -> None:
-		self.assertEqual(fmt_amount("not-a-number"), "—")
+	def test_fmt_amount_unparseable_string_renders_dash(self) -> None:
+		self.assertEqual(fmt_amount("not-a-number"), "-")
 		self.assertEqual(self.calls["fmt_money"], [])
 
 

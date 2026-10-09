@@ -75,6 +75,27 @@ class TestGetSchema(FrappeTestCase):
 			self.assertIn("fieldname", cf)
 			self.assertIn("fieldtype", cf)
 
+	def test_purchase_receipt_and_invoice_link_fields_are_not_interchangeable(self):
+		for parent, child in (
+			("Purchase Receipt", "Purchase Receipt Item"),
+			("Purchase Invoice", "Purchase Invoice Item"),
+		):
+			with self.subTest(doctype=parent):
+				parent_schema = get_schema(doctype=parent)
+				items = next(field for field in parent_schema["fields"] if field["fieldname"] == "items")
+				self.assertEqual(items["options"], child)
+				self.assertNotIn("child_fields", items)
+		receipt_fields = {
+			field["fieldname"] for field in get_schema(doctype="Purchase Receipt Item")["fields"]
+		}
+		invoice_fields = {
+			field["fieldname"] for field in get_schema(doctype="Purchase Invoice Item")["fields"]
+		}
+		self.assertIn("purchase_order_item", receipt_fields)
+		self.assertNotIn("po_detail", receipt_fields)
+		self.assertNotIn("pr_detail", receipt_fields)
+		self.assertTrue({"po_detail", "pr_detail", "purchase_receipt"}.issubset(invoice_fields))
+
 	def test_verbose_non_table_fields_have_no_child_fields_key(self):
 		result = get_schema(doctype="Customer", verbose=True)
 		customer_name = next(f for f in result["fields"] if f["fieldname"] == "customer_name")
@@ -342,7 +363,15 @@ class TestGetSchemaCustomFlags(FrappeTestCase):
 			frappe.delete_doc("Custom Field", cf, force=True, ignore_permissions=True)
 		if frappe.db.exists("DocType", cls.CUSTOM_DT):
 			frappe.delete_doc("DocType", cls.CUSTOM_DT, force=True, ignore_permissions=True)
+		# Deleting a Custom Field keeps its column and deleting a DocType keeps its
+		# table: both were made here, so both go (they stayed on the test sites).
+		frappe.db.commit()
+		# IF EXISTS, not a get_table_columns check: that list is cached (Frappe 15), and
+		# a stale "it is there" made the DROP fail with 1091 on a fresh CI site.
+		frappe.db.sql_ddl(f"ALTER TABLE `tabToDo` DROP COLUMN IF EXISTS `{cls.CF_FIELD}`")
+		frappe.db.sql_ddl(f"DROP TABLE IF EXISTS `tab{cls.CUSTOM_DT}`")
 		frappe.clear_cache(doctype="ToDo")
+		frappe.db.commit()
 		super().tearDownClass()
 
 	def test_custom_field_carries_is_custom(self):

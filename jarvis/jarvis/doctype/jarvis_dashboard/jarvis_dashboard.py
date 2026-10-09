@@ -31,7 +31,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 
 MAX_TITLE_LEN = 140
 MAX_HTML_CHARS = 1_000_000
@@ -51,7 +51,7 @@ class ThemeStandardError(frappe.ValidationError):
 	these' (surfaced as ``exc_type`` to the SPA) rather than a dead-end error."""
 
 
-class JarvisDashboard(Document):
+class JarvisDashboard(NotRenamable, Document):
 	def validate(self):
 		self._validate_title()
 		self._validate_theme()

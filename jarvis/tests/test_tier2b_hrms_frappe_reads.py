@@ -163,68 +163,14 @@ class TestGetHolidaysForEmployee(FrappeTestCase):
 
 
 class TestGetEmployeeShift(FrappeTestCase):
+	# Everything past argument checks is tested against the real HRMS functions
+	# in test_get_employee_shift_real_hrms.py. A mock of the HRMS call is what let
+	# this tool ship broken: it accepted the date STRING the tool passed, where
+	# the real function calls for_timestamp.date().
+
 	def test_rejects_empty_employee(self):
 		with self.assertRaises(InvalidArgumentError):
 			get_employee_shift("")
-
-	def test_calls_real_signature_with_for_timestamp(self):
-		# autospec=True validates the call against the REAL hrms function's
-		# signature (employee, for_timestamp, consider_default_shift,
-		# next_shift_direction) - it has no `for_date` parameter, so this
-		# raises TypeError pre-fix, catching the exact bug a loose
-		# MagicMock(return_value=...) mock would silently swallow.
-		with (
-			_all_exist(),
-			_allow_perm(),
-			patch(
-				"hrms.hr.doctype.shift_assignment.shift_assignment.get_employee_shift",
-				autospec=True,
-				return_value={"name": "Day Shift", "start_time": "09:00"},
-			) as ges,
-		):
-			out = get_employee_shift("HR-EMP-001", "2026-06-18")
-		ges.assert_called_once_with(
-			employee="HR-EMP-001",
-			for_timestamp="2026-06-18",
-			consider_default_shift=True,
-		)
-		self.assertEqual(out["shift"], {"name": "Day Shift", "start_time": "09:00"})
-		self.assertEqual(out["employee"], "HR-EMP-001")
-		self.assertEqual(out["for_date"], "2026-06-18")
-
-	def test_returns_envelope_when_shift_assigned(self):
-		# The real helper returns a plain dict (frappe._dict), never a
-		# Document - it has no .as_dict() method. Mock with a real dict so
-		# a stray `.as_dict()` call on the result raises, not silently
-		# resolves via frappe._dict's dict.get-based __getattr__.
-		with (
-			_all_exist(),
-			_allow_perm(),
-			patch(
-				"hrms.hr.doctype.shift_assignment.shift_assignment.get_employee_shift",
-				return_value={"name": "Day Shift", "start_time": "09:00"},
-			),
-		):
-			out = get_employee_shift("HR-EMP-001", "2026-06-18")
-		self.assertEqual(out["shift"], {"name": "Day Shift", "start_time": "09:00"})
-		self.assertEqual(out["employee"], "HR-EMP-001")
-		self.assertEqual(out["for_date"], "2026-06-18")
-
-	def test_returns_none_when_no_shift(self):
-		# The real helper returns `{}` (never None) when nothing is found
-		# (`return shift_details or {}`) - assert the tool collapses that
-		# falsy empty dict to None rather than calling a nonexistent
-		# .as_dict() on it.
-		with (
-			_all_exist(),
-			_allow_perm(),
-			patch(
-				"hrms.hr.doctype.shift_assignment.shift_assignment.get_employee_shift",
-				return_value={},
-			),
-		):
-			out = get_employee_shift("HR-EMP-001", "2026-06-18")
-		self.assertIsNone(out["shift"])
 
 
 # ---------------------------------------------------------------------

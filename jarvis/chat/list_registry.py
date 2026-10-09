@@ -234,6 +234,7 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.triggers_api.list_activity_page",),
 		surface="frontend/src/pages/triggers/ActivityTab.vue",
 		wave=1,
+		excluded_fields=("detail",),
 		curated_filters={
 			"trigger": "trigger",
 			"status": "status",
@@ -243,7 +244,8 @@ _VIEWS: tuple[ListView, ...] = (
 			"from_date": "creation",
 			"to_date": "creation",
 		},
-		notes="C08-6: the per-row target-permission scan caps the count, so totals stay `approximate: True` — a declared exception, surfaced in the UI.",
+		notes="Rows of lookup-enabled triggers (flag on now, or detail carries the lookup marker) are visible to managers and the trigger owner only: triggers_api._hide_lookup_rows scopes the non-manager query, so the filter and search compile against the scoped rows. A migrated view must keep that predicate. "
+		"C08-6: the per-row target-permission scan caps the count, so totals stay `approximate: True`, a declared exception, surfaced in the UI.",
 	),
 	# ---------------------------------------------------------------- wave 2 --
 	ListView(
@@ -424,6 +426,38 @@ _VIEWS: tuple[ListView, ...] = (
 		),
 	),
 	ListView(
+		view_key="settings_macros_admin",
+		label="Settings → Macros (admin, every user's macros)",
+		classification=DOCUMENT_LIST,
+		root_doctype="Jarvis Macro",
+		endpoints=("jarvis.chat.macros_admin_api.admin_list_macros",),
+		surface="frontend/src/components/settings/MacrosAdminPane.vue",
+		wave=3,
+		curated_filters={
+			"owner": "owner",
+			"armed": "skip_confirmation",
+			"scheduled": "schedule_enabled",
+			"live_run": None,
+		},
+		# The list shows who owns a macro and its state, never what it says: the step
+		# and summary text is read one macro at a time. A filter on either would let
+		# an admin's search rebuild it one LIKE at a time across every user.
+		excluded_fields=(
+			"description",
+			"merged_prompt",
+			"merge_conversation",
+			"Jarvis Macro Step.label",
+			"Jarvis Macro Step.prompt",
+			"Jarvis Macro Step.skills",
+		),
+		notes=(
+			"Cross-user, Jarvis-Admin gated, paginated with four server-authored "
+			"filters. `live_run` is a pseudo filter (EXISTS over Jarvis Macro Run). It "
+			"does not take filters_v2: that schema is built from the caller's document "
+			"permissions, and an admin has none on another user's macro."
+		),
+	),
+	ListView(
 		view_key="settings_tool_activity",
 		label="Settings → Activity (tool-run feed)",
 		classification=EXCLUDED_NOT_A_LIST,
@@ -480,6 +514,9 @@ _BY_KEY: dict[str, ListView] = {v.view_key: v for v in _VIEWS}
 #: unclassified whatever it is named (the round-2 loophole: discovery keyed only on
 #: ``list_*``/``admin_list_*``, so a ``search_*`` or ``*_feed`` collection evaded it).
 NON_LIST_ENDPOINTS: dict[str, str] = {
+	# One chat's background-report cards: the few runs that chat started and hasn't
+	# shown yet, rendered inline in the thread. No filter, sort or page contract.
+	"jarvis.chat.report_runs.chat_report_runs": "one chat's background-report cards, shown inline in the thread",
 	# Unpaginated companions of a registered paginated list. They exist for a
 	# dropdown / autocomplete / first-paint and return a capped slice with no
 	# filter, sort or page contract. The registered *_page endpoint is the

@@ -12,7 +12,9 @@ import {
 // weakening cannot silently make the onboarding promise false again (as "Asks
 // before it changes anything" was once auto_apply existed). Admin Auto-Apply is
 // now removed, so every real change asks - the promise is unconditionally true;
-// the only axis left is the destructive carve-out.
+// the only axis left is the destructive carve-out. Per-chat auto mode (#581) skips
+// the cards for covered changes only in a chat started in auto mode, which is why
+// the wording says "By default"; destructive actions still always confirm there.
 describe("permission tour copy ⇄ policy contract", () => {
 	it("uses the approved wording", () => {
 		expect(PERMISSION_TOUR_COPY).toBe(

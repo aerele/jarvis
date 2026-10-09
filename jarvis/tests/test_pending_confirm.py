@@ -269,7 +269,7 @@ class TestReads(_Base):
 		real_sql = frappe.db.sql
 
 		def _sql(query, *a, **k):
-			if "FROM `tabJarvis Pending Action` WHERE kind='chat'" in str(query):
+			if "FROM `tabJarvis Pending Action` WHERE `kind`=" in str(query):
 				raise outage
 			return real_sql(query, *a, **k)
 
@@ -875,6 +875,6 @@ class TestDbErrorsOnV15(FrappeTestCase):
 			patch.object(pending_confirm, "_pa_ready", return_value=True),
 			patch.object(frappe.db, "sql", side_effect=frappe.db.OperationalError(2013, "lost")),
 		):
-			self.assertEqual(pending_confirm._select("name=%(n)s", {"n": "x"}, strict=False), [])
+			self.assertEqual(pending_confirm._select({"name": "x"}, strict=False), [])
 			with self.assertRaises(pending_confirm.PendingConfirmStorageError):
-				pending_confirm._select("name=%(n)s", {"n": "x"}, strict=True)
+				pending_confirm._select({"name": "x"}, strict=True)

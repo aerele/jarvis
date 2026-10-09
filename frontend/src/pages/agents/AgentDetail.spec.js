@@ -157,7 +157,12 @@ vi.mock("@/pages/agents/ActivationPanel.vue", () => ({
 	default: { name: "ActivationPanel", template: "<div />" },
 }));
 vi.mock("@/pages/agents/ConfigForm.vue", () => ({
-	default: { name: "ConfigForm", template: "<div />" },
+	default: {
+		name: "ConfigForm",
+		props: ["validationErrors"],
+		emits: ["save", "dirty"],
+		template: "<div />",
+	},
 }));
 // T6: covered by their own spec files (AgentModelCard.spec.js /
 // AgentInstallDialog.spec.js) - stubbed here like every other Configure-tab
@@ -729,7 +734,9 @@ describe("Configure tab: Schedule section - Save visibility, dirty tracking, sav
 	it("Save appears once a control is edited (dirty) - toggling the switch", async () => {
 		routeMock.hash = "#configure";
 		const w = await mountDetail(
-			baseAgent({ installation: installedInstallation({ enabled: 1, schedule_enabled: 0 }) })
+			baseAgent({
+				installation: installedInstallation({ enabled: 1, schedule_enabled: 0 }),
+			})
 		);
 		expect(scheduleSaveBtn(w)).toBeFalsy();
 		await runAutomaticallyToggle(w).trigger("click");
@@ -1107,10 +1114,151 @@ describe("Breadcrumb: no slug flash while the agent is loading (jarvis#1062 P1-6
 	});
 });
 
+describe("AR configuration readiness", () => {
+	it("gates Run Now on saved AR settings and permits manual review only", async () => {
+		const fixture = baseAgent({
+			agent_slug: "ar-collections-operator",
+			nature: "Operator",
+			supports_manual_run: true,
+			installation: installedInstallation({
+				configuration_issues: { report_date: "Choose a cutoff" },
+			}),
+		});
+		const wrapper = await mountDetail(fixture);
+		expect(wrapper.find('[data-label="Run Now"]').attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain("Complete and save the required review settings");
+		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
+		expect(wrapper.text()).toContain("Manual review only");
+		expect(wrapper.text()).not.toContain("Run automatically");
+	});
+});
+
+describe("bank reconciliation on-demand review", () => {
+	function bankAgent(issues = {}) {
+		return baseAgent({
+			agent_slug: "bank-recon-operator",
+			nature: "Operator",
+			supports_manual_run: true,
+			installation: installedInstallation({ configuration_issues: issues }),
+		});
+	}
+	const runButton = (wrapper) => wrapper.find('[data-label="Run Now"]');
+
+	it("enables Run when configuration is complete", async () => {
+		const wrapper = await mountDetail(bankAgent({}));
+		expect(wrapper.text()).toContain("proposes bank matches; never reconciles");
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("blocks Run with the review-settings hint while issues exist", async () => {
+		const wrapper = await mountDetail(bankAgent({ bank_account: "Select a bank account." }));
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain(
+			"Complete and save the required review settings in Configure before running."
+		);
+	});
+});
+
+describe("AP configuration readiness", () => {
+	function apAgent(issues = {}) {
+		return baseAgent({
+			agent_slug: "ap-3way-match-operator",
+			nature: "Operator",
+			supports_manual_run: true,
+			installation: installedInstallation({ configuration_issues: issues }),
+		});
+	}
+
+	function runButton(wrapper) {
+		return wrapper.find('[data-label="Run Now"]');
+	}
+
+	it("blocks incomplete setup and links to field-level guidance without launching", async () => {
+		const issues = {
+			policy_version: "Enter an approved AP policy reference (1–128 characters).",
+		};
+		const wrapper = await mountDetail(apAgent(issues));
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain("Complete and save the required review settings");
+		await runButton(wrapper).trigger("click");
+		expect(api.runAgentNow).not.toHaveBeenCalled();
+		await wrapper.find('[data-label="Complete configuration"]').trigger("click");
+		expect(wrapper.findComponent({ name: "ConfigForm" }).props("validationErrors")).toEqual(
+			issues
+		);
+	});
+
+	it("holds run readiness until server validation is available", async () => {
+		const fixture = apAgent();
+		delete fixture.installation.configuration_issues;
+		const wrapper = await mountDetail(fixture);
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+
+	it("does not run saved settings while edits are unsaved", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(apAgent());
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+		const form = wrapper.findComponent({ name: "ConfigForm" });
+		form.vm.$emit("dirty", true);
+		await flushPromises();
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+		expect(wrapper.text()).toContain("Save your configuration changes before running.");
+		form.vm.$emit("dirty", false);
+		await flushPromises();
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("enables running after saving and rechecking the completed configuration", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(
+			apAgent({ policy_version: "Enter an approved AP policy reference." })
+		);
+		apiAgents.getAgent.mockResolvedValue(apAgent());
+		api.setAgentConfig.mockResolvedValueOnce({ ok: true });
+		const form = wrapper.findComponent({ name: "ConfigForm" });
+		form.vm.$emit("dirty", true);
+		form.vm.$emit("save", { policy_version: "AP-v1" });
+		await flushPromises();
+		expect(api.setAgentConfig).toHaveBeenCalledWith("INST-1", { policy_version: "AP-v1" });
+		expect(runButton(wrapper).attributes("disabled")).toBeUndefined();
+	});
+
+	it("does not clear unsaved state after a failed save", async () => {
+		routeMock.hash = "#configure";
+		const wrapper = await mountDetail(apAgent());
+		api.setAgentConfig.mockRejectedValueOnce(new Error("Save failed"));
+		const form = wrapper.findComponent({ name: "ConfigForm" });
+		form.vm.$emit("dirty", true);
+		form.vm.$emit("save", { policy_version: "AP-v1" });
+		await flushPromises();
+		expect(runButton(wrapper).attributes("disabled")).toBeDefined();
+	});
+});
+
 describe("operator-withdrawn (install_disabled) detail", () => {
+	it("only enables an operator with a server-declared manual dispatch path", async () => {
+		for (const supported of [false, true]) {
+			const wrapper = await mountDetail(
+				baseAgent({
+					nature: "Operator",
+					supports_manual_run: supported,
+					installation: installedInstallation({ enabled: 1, configuration_issues: {} }),
+				})
+			);
+			const button = wrapper
+				.findAll("button")
+				.find((entry) => entry.attributes("data-label") === "Run Now");
+			expect(button.attributes("disabled") !== undefined).toBe(!supported);
+			wrapper.unmount();
+		}
+	});
 	it("disables Run Now, shows the Unavailable badge + a visible hint", async () => {
 		const w = await mountDetail(
-			baseAgent({ install_disabled: 1, installation: installedInstallation({ enabled: 1 }) })
+			baseAgent({
+				install_disabled: 1,
+				installation: installedInstallation({ enabled: 1 }),
+			})
 		);
 		expect(w.text()).toContain("Unavailable");
 		expect(w.text()).toContain("The operator has made this agent unavailable");

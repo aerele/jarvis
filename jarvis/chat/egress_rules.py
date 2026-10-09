@@ -49,8 +49,7 @@ def persist(patterns) -> None:
 		current = frappe.db.get_single_value(SETTINGS, _PATTERNS_FIELD, cache=False) or ""
 		if current == blob:
 			return
-		frappe.db.set_value(
-			SETTINGS,
+		frappe.db.set_single_value(
 			SETTINGS,
 			{_PATTERNS_FIELD: blob, _SYNCED_AT_FIELD: frappe.utils.now_datetime()},
 			update_modified=False,

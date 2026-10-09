@@ -31,12 +31,29 @@ export const CSP_META =
 //                              DOMContentLoaded too).
 //   jarvis.renderError(el,e) → quiet inline per-widget error block.
 // Frames OUT: {jarvis:1, v:1, type:"data"|"ready"|"height"|"export:progress"
-//   |"export:result", ...}
+//   |"export:result"|"link", ...}  ("link" = {href}: a clicked <a href>, which
+//   the sandbox cannot navigate itself; the parent decides whether to open it)
 // Frames IN (validated e.source === window.parent && d.jarvis === 1):
 //   {type:"data:result", id, ok, rows|error} · {type:"theme", dark} ·
 //   {type:"export", id, format:"png"|"slides", lib, pixelRatio}
+// Make the active theme's palette ECharts' default: a config that sets no `color`
+// would otherwise get ECharts' built-in colours. A non-empty explicit theme arg still wins.
+export const ECHARTS_THEME_JS = `(function (w) {
+	var t = w.JARVIS_THEME, e = w.echarts;
+	if (!t || !t.palette || !e || !e.init || !e.registerTheme) return;
+	var name = "jarvis-" + (t.name || "theme");
+	e.registerTheme(name, { color: t.palette });
+	var init = e.init;
+	e.init = function (el, theme) {
+		var a = Array.prototype.slice.call(arguments);
+		if (theme == null || theme === "" || theme === false) a[1] = name;
+		return init.apply(e, a);
+	};
+})(window);`;
+
 export const RUNTIME_JS = `(function () {
 	"use strict";
+	${ECHARTS_THEME_JS}
 	var sources = {}; // name -> {tool, spec}
 	var pending = {}; // data request id -> {resolve, reject, timer}
 	var seq = 0;
@@ -229,6 +246,75 @@ export const RUNTIME_JS = `(function () {
 			});
 		}
 	}
+
+	// The sandbox has no allow-popups/allow-top-navigation, so an <a href> or
+	// window.open can never open anything from in here. Hand the raw href to the
+	// parent instead. In-page "#" anchors scroll here by hand: in a srcdoc frame
+	// the default would resolve against the parent URL and navigate the frame.
+	function postLink(href) {
+		post({ type: "link", href: href });
+	}
+	window.open = function (url) {
+		postLink(String(url == null ? "" : url));
+		return null;
+	};
+	function scrollToFragment(href) {
+		var id = href.slice(1);
+		try {
+			id = decodeURIComponent(id);
+		} catch (err) {
+			// keep the raw id
+		}
+		var target = null;
+		if (id && id.toLowerCase() !== "top") {
+			target = document.getElementById(id);
+			if (!target) {
+				var named = document.getElementsByName(id);
+				for (var i = 0; i < named.length && !target; i++) {
+					if (named[i].tagName === "A") target = named[i];
+				}
+			}
+			if (!target) return;
+		} else {
+			target = document.documentElement;
+		}
+		if (target.scrollIntoView) target.scrollIntoView({ behavior: "smooth", block: "start" });
+	}
+	// The link under an event target, with its href (SVG links may use xlink:href).
+	function linkOf(e) {
+		var a = e.target && e.target.closest ? e.target.closest("a, area") : null;
+		if (!a) return null;
+		var href = a.getAttribute("href");
+		if (href == null) href = a.getAttributeNS("http://www.w3.org/1999/xlink", "href");
+		return href == null ? null : { href: href };
+	}
+	document.addEventListener(
+		"click",
+		function (e) {
+			var link = linkOf(e);
+			if (!link) return;
+			e.preventDefault();
+			if (link.href.charAt(0) === "#") scrollToFragment(link.href);
+			else postLink(link.href);
+		},
+		true
+	);
+	// A middle-click would open the parent-relative URL in a new tab: do nothing.
+	document.addEventListener(
+		"auxclick",
+		function (e) {
+			if (linkOf(e)) e.preventDefault();
+		},
+		true
+	);
+	// A GET form would navigate the frame to the parent URL as well.
+	document.addEventListener(
+		"submit",
+		function (e) {
+			e.preventDefault();
+		},
+		true
+	);
 
 	window.addEventListener("message", function (e) {
 		if (e.source !== window.parent) return;

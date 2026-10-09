@@ -37,7 +37,7 @@ import time
 import frappe
 
 from jarvis._session import impersonate
-from jarvis.chat import seq_watermark
+from jarvis.chat import seq_watermark, txn
 from jarvis.chat import turn_state as ts
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.exceptions import AgentUnreachableError
@@ -47,10 +47,14 @@ MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
 
 
-def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
-	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
-	returns a small status dict. Never raises out (a prepare crash must not kill the
-	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+def _claim_preparing_unit(run_id: str) -> dict:
+	"""Read the turn and attempt the ``queued`` -> ``preparing`` claim CAS as one
+	unit, replayed whole by ``txn.replay_on_conflict`` (P6): this job's first read
+	fixes a snapshot, and a competing commit on this row (promote, watchdog reclaim,
+	a user cancel) between that read and the claim CAS would otherwise crash the job
+	with 1020, breaking its "never raises out" contract. Losing the race for real
+	still resolves to the existing ``claim_lost``/state-skip outcome - a replay just
+	re-reads the present row before deciding."""
 	turn = frappe.db.get_value(
 		TURN,
 		run_id,
@@ -58,21 +62,43 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		as_dict=True,
 	)
 	if not turn:
-		return {"ok": False, "reason": "no turn"}
+		return {"turn": None, "claimed": False, "skipped": None}
 	if turn["state"] != "queued":
 		# Already claimed (this prepare was re-offered) or advanced/cancelled.
-		return {"ok": True, "skipped": turn["state"]}
-
-	conversation = turn["conversation"]
-	relay_target_id = relay_target_id or frappe.db.get_value(TURN, run_id, "relay_target_id")
-
+		return {"turn": turn, "claimed": False, "skipped": turn["state"]}
 	# (D2 #2) queued -> preparing FIRST: NULLs the reservation expiry so a slow
 	# prepare (22s/4-page PDF vision) is never reclaimed mid-flight (OAR-5). Requires
 	# the held credit (reserved=1, granted at promote). A lost CAS = another prepare
 	# won / the turn moved; no-op.
 	if not ts.claim_preparing(run_id, int(turn["version"])):
+		return {"turn": turn, "claimed": False, "skipped": "claim_lost"}
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
+	return {"turn": turn, "claimed": True, "skipped": None}
+
+
+def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
+	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
+	returns a small status dict. Never raises out (a prepare crash must not kill the
+	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+	try:
+		result = txn.replay_on_conflict(
+			lambda: _claim_preparing_unit(run_id), label=f"prepare.claim_preparing {run_id}", fresh=True
+		)
+	except Exception as e:
+		# Exhausted the replay (rare: a third writer landed inside the retry window
+		# too) - the "never raises out" docstring still holds, so this resolves to
+		# the same claim_lost the ordinary lost-CAS path already returns.
+		txn.report_lost_race(e, title="prepare.claim_preparing")
 		return {"ok": True, "skipped": "claim_lost"}
-	frappe.db.commit()
+
+	turn = result["turn"]
+	if turn is None:
+		return {"ok": False, "reason": "no turn"}
+	if not result["claimed"]:
+		return {"ok": True, "skipped": result["skipped"]}
+
+	conversation = turn["conversation"]
+	relay_target_id = relay_target_id or frappe.db.get_value(TURN, run_id, "relay_target_id")
 	version = int(turn["version"]) + 1
 
 	# Turn -> triggering-message binding (skill "Approve & run", design §3.3, correctness-C1):
@@ -106,11 +132,27 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	# preparing claim (state='preparing' AND version=V). A prepare that paused past a
 	# watchdog reclaim / cancel loses the CAS and must NOT attach a streaming
 	# placeholder to a re-queued/cancelled row — it cleans its own orphan + aborts.
-	assistant_msg = _create_placeholder_locked(conversation)
-	if not ts.attach_placeholder(run_id, version, assistant_msg):
-		_discard_orphan_placeholder(assistant_msg)
+	#
+	# Full-diff review: create + attach is ONE replayable unit (not attach alone),
+	# so a snapshot race on the attach CAS discards the placeholder THIS attempt
+	# just created (inside the unit, before re-raising) instead of leaving it
+	# behind. A replay's fresh ``_create_placeholder_locked`` call then makes a
+	# NEW placeholder rather than ending up with two.
+	try:
+		won, assistant_msg = txn.replay_on_conflict(
+			lambda: _attach_placeholder_unit(conversation, run_id, version),
+			label=f"prepare.attach_placeholder {run_id}",
+			fresh=True,
+		)
+	except Exception as e:
+		# The unit already discarded its own placeholder before re-raising, so
+		# there is nothing left here to clean up (unlike the payload/ready sites
+		# below, whose placeholder was attached by an EARLIER, already-durable
+		# unit and so still needs an explicit discard on this exhaustion path).
+		txn.report_lost_race(e, title="prepare.attach_placeholder")
 		return {"ok": True, "skipped": "attach_lost"}
-	frappe.db.commit()
+	if not won:
+		return {"ok": True, "skipped": "attach_lost"}
 
 	turn_start_ms = int(time.time() * 1000)
 
@@ -225,7 +267,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	payload = {
 		"session_key": conv.session_key or session_key,
 		"message": ap.user_message,
-		"thinking": (conv.thinking_override or "").strip() or None,
+		"thinking": turn_handler._turn_thinking(conv),
 		"attachments": managed_attachments,
 		"drained_note_ids": ap.drained_ids,
 		"chat_user": chat_user,
@@ -236,18 +278,40 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	# (CDX-7) store the handoff payload through an ACTOR-fenced CAS: a prepare that
 	# lost the preparing claim discards its payload (never stamping dispatch state onto
 	# a recovered/re-queued/cancelled row) + cleans its orphan placeholder + aborts.
-	if not ts.store_dispatch_payload(run_id, version, json.dumps(payload)):
+	#
+	# Full-diff review: the whole assemble+gateway-bootstrap phase above (HTTP to
+	# the agent) is the "slow part" that can leave this job's snapshot stale
+	# relative to a concurrent cancel/watchdog reclaim on the Turn row; wrap the
+	# CAS as its own replayable unit, fresh=True closing that window right before
+	# the write (same policy as the pump's tool applier / settlement).
+	try:
+		won = txn.replay_on_conflict(
+			lambda: _store_dispatch_payload_unit(run_id, version, json.dumps(payload)),
+			label=f"prepare.store_dispatch_payload {run_id}",
+			fresh=True,
+		)
+	except Exception as e:
+		txn.report_lost_race(e, title="prepare.store_dispatch_payload")
 		_discard_orphan_placeholder(assistant_msg)
 		return {"ok": True, "skipped": "payload_lost"}
-	frappe.db.commit()
+	if not won:
+		_discard_orphan_placeholder(assistant_msg)
+		return {"ok": True, "skipped": "payload_lost"}
 
 	# (D2 #3) preparing -> ready.
-	if not ts.mark_ready(run_id, version):
+	try:
+		won = txn.replay_on_conflict(
+			lambda: _mark_ready_unit(run_id, version), label=f"prepare.mark_ready {run_id}", fresh=True
+		)
+	except Exception as e:
 		# Lost (a watchdog reclaimed a slow prepare, or a cancel raced). The stale
 		# state wins; do not dispatch — clean the orphan placeholder this prepare made.
+		txn.report_lost_race(e, title="prepare.mark_ready")
 		_discard_orphan_placeholder(assistant_msg)
 		return {"ok": True, "skipped": "ready_lost"}
-	frappe.db.commit()
+	if not won:
+		_discard_orphan_placeholder(assistant_msg)
+		return {"ok": True, "skipped": "ready_lost"}
 
 	# Wake the pump to dispatch this ready turn (PRIMARY path; watchdog backstops).
 	from jarvis.chat import pump
@@ -267,13 +331,13 @@ def _create_placeholder_locked(conversation: str) -> str:
 	conversation FOR UPDATE lock (R-1 / canonical rank 2), so it never collides with
 	a concurrent out-of-band tool receipt on the same conversation. Commit-first so
 	the lock is the first statement (REPEATABLE-READ discipline)."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh txn before row lock
 	ts._lock_conversation(conversation)
 	try:
 		seq = (
-			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[
-				0
-			][0]
+			frappe.db.sql(
+				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+			)[0][0]
 			or 0
 		) + 1
 		doc = frappe.get_doc(
@@ -288,7 +352,7 @@ def _create_placeholder_locked(conversation: str) -> str:
 		)
 		doc.flags.ignore_permissions = True
 		doc.insert()
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
 		return doc.name
 	finally:
 		ts.reset_lock_tracking()
@@ -317,6 +381,55 @@ def _discard_orphan_placeholder(assistant_msg: str | None) -> None:
 			frappe.db.commit()
 		except Exception:
 			frappe.log_error(title="prepare.discard_orphan", message=frappe.get_traceback())
+
+
+def _attach_placeholder_unit(conversation: str, run_id: str, version: int) -> tuple[bool, str | None]:
+	"""Create the assistant placeholder, then attach it to the Turn, as one
+	replayable unit (full-diff review of #1527). ``ts.attach_placeholder``'s CAS
+	is the previously-unprotected write: a competing commit on the Turn row
+	(a user cancel, a watchdog reclaim) between ``_create_placeholder_locked``'s
+	reads and this CAS used to raise ``QueryDeadlockError`` straight out of the
+	job. On ANY failure here - a genuine lost actor claim (0 rows, no exception)
+	OR a snapshot conflict (caught, re-raised) - THIS attempt's placeholder is
+	discarded before returning/re-raising, so ``txn.replay_on_conflict``'s retry,
+	which calls ``_create_placeholder_locked`` again, never leaves a second
+	placeholder sitting next to the first. Returns ``(won, assistant_msg)``;
+	``assistant_msg`` is only meaningful when ``won`` (the caller has nothing to
+	clean up on a loss - already discarded here)."""
+	assistant_msg = _create_placeholder_locked(conversation)
+	try:
+		won = ts.attach_placeholder(run_id, version, assistant_msg)
+	except Exception:
+		_discard_orphan_placeholder(assistant_msg)
+		raise
+	if not won:
+		_discard_orphan_placeholder(assistant_msg)
+		return False, None
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
+	return True, assistant_msg
+
+
+def _store_dispatch_payload_unit(run_id: str, version: int, payload_json: str) -> bool:
+	"""``ts.store_dispatch_payload``'s CAS as one unit, replayed whole (full-diff
+	review): the whole assemble+gateway-bootstrap phase between the attach step
+	and this call is the job's "slow part" (HTTP to the agent), so a snapshot
+	fixed before it can easily be stale by the time this write runs. A win
+	commits; a genuine lost claim (0 rows, no exception) is left for the caller
+	to discard the already-durable placeholder - nothing here needs rolling back
+	on that path."""
+	won = ts.store_dispatch_payload(run_id, version, payload_json)
+	if won:
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
+	return won
+
+
+def _mark_ready_unit(run_id: str, version: int) -> bool:
+	"""``ts.mark_ready``'s CAS as one unit, replayed whole (full-diff review).
+	Same shape as ``_store_dispatch_payload_unit``."""
+	won = ts.mark_ready(run_id, version)
+	if won:
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist unit before next step
+	return won
 
 
 def _prepare_error(
@@ -380,14 +493,18 @@ def _prepare_error(
 
 
 def _load_dispatch_raw(run_id: str) -> dict:
-	raw = frappe.db.get_value(TURN, run_id, "dispatch_payload")
+	return parse_dispatch(frappe.db.get_value(TURN, run_id, "dispatch_payload")) or {}
+
+
+def parse_dispatch(raw) -> dict | None:
+	"""A stored dispatch_payload: {} when empty, None when it is not a JSON object."""
 	if not raw:
 		return {}
 	try:
 		parsed = json.loads(raw)
-		return parsed if isinstance(parsed, dict) else {}
 	except Exception:
-		return {}
+		return None
+	return parsed if isinstance(parsed, dict) else None
 
 
 def _load_context(run_id: str):
@@ -395,14 +512,17 @@ def _load_context(run_id: str):
 
 
 def _load_attachments(run_id: str):
-	"""The ORIGINAL client attachment dicts ({file_url, file_name}).
+	return original_attachments(_load_dispatch_raw(run_id))
+
+
+def original_attachments(dp: dict):
+	"""The ORIGINAL client attachment dicts ({file_url, file_name}) of a stored dispatch_payload.
 
 	accept_or_queue stores them under ``attachments`` for a queued turn. Once
 	prepare rewrites ``dispatch_payload`` with the pump handoff, the originals live
 	under ``attachments_raw`` (the ``attachments`` key then holds the MANAGED vision
-	shape for the pump's chat.send) — so a re-prepare after recovery still assembles
-	with the real files. ``attachments_raw`` wins when present."""
-	dp = _load_dispatch_raw(run_id)
+	shape for the pump's chat.send) — so a re-prepare after recovery, or a retry, still
+	assembles with the real files. ``attachments_raw`` wins when present."""
 	if "attachments_raw" in dp:
 		return dp.get("attachments_raw")
 	return dp.get("attachments")

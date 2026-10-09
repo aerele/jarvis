@@ -924,7 +924,7 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 
 	// Anchor on the call itself, not its first arg: prettier wraps a long
 	// sendMessage(...) across lines, so "sendMessage(sentFrom" is not contiguous.
-	const awaitIdx = sendSrc.indexOf("await api.sendMessage(");
+	const awaitIdx = sendSrc.indexOf("api.sendMessage(");
 	// Anchors the rejection block's CLOSING brace, not just its opening `if (...)` — a scope-aware
 	// check. A regression that clears the context as the FIRST statement inside the rejected branch
 	// (unconditionally wiping it on every rejection, reintroducing the jarvis#496 bug) would still
@@ -934,7 +934,7 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 	// "// Send accepted" comment (a workersWarnNotice self-heal block now sits
 	// between the two), so anchor on that sibling `if` instead of the comment.
 	const rejectBlockCloseIdx = sendSrc.indexOf("return;\n\t\t}\n\t\tif (r && r.ok !== false) {");
-	const clearIdx = sendSrc.indexOf("_prefillSendContext = null;");
+	const clearIdx = sendSrc.indexOf("consumeRecoveredContext(sendRequest, _sentScope);");
 	assert.ok(
 		awaitIdx > -1 && rejectBlockCloseIdx > -1 && clearIdx > -1,
 		"all three anchors are present in send()"
@@ -948,5 +948,21 @@ test("jarvis#496 source pin: ChatView clears _prefillSendContext only on the acc
 		"the clear must sit strictly OUTSIDE the rejection block (after its closing brace), not merely " +
 			"after the `if` condition text — a clear placed inside that block would still wipe the " +
 			"context on every rejection"
+	);
+});
+
+test("settled recovery merges only by exact saved message id", () => {
+	const receipt = {
+		name: "local",
+		deliveryState: "delivered",
+		deliveryMessageId: "M",
+		content: "same",
+	};
+	const rows = [{ name: "M", content: "same" }];
+	assert.deepEqual(injectPendingBubbles(rows, [receipt]), rows);
+	assert.equal(injectPendingBubbles([{ name: "other", content: "same" }], [receipt]).length, 2);
+	assert.equal(
+		injectPendingBubbles(rows, [{ ...receipt, deliveryState: "uncertain" }]).length,
+		2
 	);
 });

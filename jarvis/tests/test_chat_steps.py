@@ -22,6 +22,7 @@ from jarvis.chat.steps import (
 	is_step,
 	join_segments,
 	remove_steps,
+	strip_preambles,
 	strip_steps,
 )
 
@@ -139,6 +140,28 @@ class TestStripSteps(FrappeTestCase):
 		self.assertEqual(strip_steps("Answer.", []), "Answer.")
 		self.assertEqual(strip_steps("", ["Checking."]), "")
 		self.assertIsNone(strip_steps(None, ["Checking."]))
+
+
+class TestStripPreambles(FrappeTestCase):
+	def test_strips_a_flagged_preamble_even_before_a_shorter_answer(self):
+		final = "Checking your customer count.\n\nYou have **3 customers**."
+		self.assertEqual(
+			strip_preambles(final, ["Checking your customer count."]),
+			"You have **3 customers**.",
+		)
+
+	def test_strips_a_multi_sentence_preamble(self):
+		preamble = "I found the report. I'm checking its filters."
+		self.assertEqual(strip_preambles(f"{preamble}\n\nThe answer is 3.", [preamble]), "The answer is 3.")
+
+	def test_keeps_the_reply_whole_when_nothing_would_remain(self):
+		final = "I found the report. I'm checking its filters."
+		self.assertEqual(strip_preambles(final, [final]), final)
+
+	def test_no_preambles_or_no_text_is_a_no_op(self):
+		self.assertEqual(strip_preambles("Answer.", []), "Answer.")
+		self.assertEqual(strip_preambles("", ["Checking."]), "")
+		self.assertIsNone(strip_preambles(None, ["Checking."]))
 
 
 class TestIsPreambleStep(FrappeTestCase):

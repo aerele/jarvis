@@ -41,6 +41,7 @@ import time
 
 import frappe
 
+from jarvis.chat import txn
 from jarvis.chat.events import publish_to_user
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_access
 
@@ -54,7 +55,8 @@ FLAG = "jarvis_phase0_admission_enabled"
 # One gateway per bench in Phase 0 -> one site-wide admission shard.
 DEFAULT_RELAY_TARGET = "default"
 
-# Container main-lane ceiling (fleet agents.defaults.maxConcurrent, default 4).
+# Chat concurrency cap used when Jarvis admin has not supplied one for this site (Jarvis
+# Settings.max_concurrent_chats, pushed from the plan via the bench heartbeat reply).
 DEFAULT_MAX_INFLIGHT = 4
 
 # Accept-time overload guard (SUX-5): reject (no row) past this queued depth.
@@ -96,10 +98,6 @@ _CONV_ACTIVE_STATES = ("queued",) + _INFLIGHT_STATES
 _CONV_BLOCKING_STATES = _CONV_ACTIVE_STATES + ("recovering",)
 
 
-def _in_sql(values) -> str:
-	return ", ".join(f"'{v}'" for v in values)
-
-
 # --------------------------------------------------------------------------- #
 # Flag / shard helpers
 # --------------------------------------------------------------------------- #
@@ -139,11 +137,13 @@ def relay_target_id(conversation: str | None = None) -> str:
 
 
 def _max_inflight() -> int:
-	try:
-		v = int(frappe.conf.get("jarvis_site_max_inflight_turns") or 0)
-	except (TypeError, ValueError):
-		v = 0
-	return v if v > 0 else DEFAULT_MAX_INFLIGHT
+	"""The plan's chat concurrency cap, else DEFAULT_MAX_INFLIGHT. Runs on every send and
+	every pump pass under the shard lock, so it reads the Redis document cache (no network;
+	``db.get_single_value`` would miss after every commit) and never raises on garbage."""
+	v = frappe.get_cached_value("Jarvis Settings", "Jarvis Settings", "max_concurrent_chats")
+	if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+		return v
+	return DEFAULT_MAX_INFLIGHT
 
 
 def _now() -> str:
@@ -188,9 +188,9 @@ def _lock_shard(target: str) -> None:
 	READ COMMITTED and REPEATABLE READ). Callers commit their own durable work
 	BEFORE entering admission, so this commit never drops pending state."""
 	_ensure_control_row(target)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before row lock
 	frappe.db.sql(
-		f"SELECT name FROM `tab{PUMP}` WHERE name=%(t)s FOR UPDATE",
+		"SELECT name FROM `tabJarvis Relay Pump` WHERE name=%(t)s FOR UPDATE",
 		{"t": target},
 	)
 
@@ -198,10 +198,17 @@ def _lock_shard(target: str) -> None:
 def on_conversation_trash(doc, method=None) -> None:
 	"""doc_events hook: cascade-delete a deleted conversation's Turn rows so a
 	removed conversation never leaves ghost queued/dispatching rows in the
-	admission shard. Best-effort - never blocks the trash."""
+	admission shard. Best-effort - never blocks the trash, with one exception: a
+	write conflict (1020 / 1213) is raised to the caller. The server has by then
+	aborted the whole transaction, the caller's earlier deletes included, so carrying
+	on would delete the conversation alone in a new transaction and leave its
+	messages and Turn rows behind. Raised, it reaches whoever owns the transaction:
+	``clear_chat_history`` replays the delete (``txn.replay_on_conflict``)."""
 	try:
 		frappe.db.delete(TURN, {"conversation": doc.name})
-	except Exception:
+	except Exception as e:
+		if txn.is_write_conflict(e):
+			raise
 		frappe.log_error(title="admission.on_conversation_trash", message=frappe.get_traceback())
 
 
@@ -209,7 +216,7 @@ def _lock_conversation(conversation: str) -> None:
 	"""Second lock in the canonical order; defends per-conversation
 	single-flight / seq (OAR-6)."""
 	frappe.db.sql(
-		f"SELECT name FROM `tab{CONV}` WHERE name=%(c)s FOR UPDATE",
+		"SELECT name FROM `tabJarvis Conversation` WHERE name=%(c)s FOR UPDATE",
 		{"c": conversation},
 	)
 
@@ -231,16 +238,16 @@ def _turn_dispatching_count(target: str) -> int:
 	# Byte-identical to `state='dispatching'` when the pump is off; counts pump
 	# in-flight turns during coexistence (OAR-11).
 	return frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tab{TURN}` WHERE relay_target_id=%(t)s AND state IN ({_in_sql(_INFLIGHT_STATES)})",
-		{"t": target},
+		"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE relay_target_id=%(t)s AND state IN %(states)s",
+		{"t": target, "states": _INFLIGHT_STATES},
 	)[0][0]
 
 
 def _turn_dispatching_count_by_class(target: str, turn_class: str) -> int:
 	return frappe.db.sql(
-		f"""SELECT COUNT(*) FROM `tab{TURN}`
-		WHERE relay_target_id=%(t)s AND state IN ({_in_sql(_INFLIGHT_STATES)}) AND turn_class=%(k)s""",
-		{"t": target, "k": turn_class},
+		"""SELECT COUNT(*) FROM `tabJarvis Chat Turn`
+		WHERE relay_target_id=%(t)s AND state IN %(states)s AND turn_class=%(k)s""",
+		{"t": target, "k": turn_class, "states": _INFLIGHT_STATES},
 	)[0][0]
 
 
@@ -267,24 +274,27 @@ def _legacy_streaming_count(target: str, *, fresh_cutoff=None) -> int:
 	live reply as idle and cut it. Every other caller keeps the default and
 	stays byte-identical."""
 	return frappe.db.sql(
-		f"""
+		"""
 		SELECT COUNT(*) FROM (
 			SELECT m.conversation
-			FROM `tab{MSG}` m
+			FROM `tabJarvis Chat Message` m
 			INNER JOIN (
 				SELECT conversation, MAX(seq) AS mseq
-				FROM `tab{MSG}` WHERE role='assistant' GROUP BY conversation
+				FROM `tabJarvis Chat Message` WHERE role='assistant' GROUP BY conversation
 			) latest ON latest.conversation = m.conversation AND latest.mseq = m.seq
 			WHERE m.role='assistant' AND m.streaming=1 AND m.recovering=0
 			  AND m.modified > %(fresh)s
 			  AND NOT EXISTS (
-					SELECT 1 FROM `tab{TURN}` t
+					SELECT 1 FROM `tabJarvis Chat Turn` t
 					WHERE t.conversation = m.conversation
-					  AND t.state IN ({_in_sql(_INFLIGHT_STATES)})
+					  AND t.state IN %(states)s
 			  )
 		) x
 		""",
-		{"fresh": fresh_cutoff if fresh_cutoff is not None else _fresh_cutoff()},
+		{
+			"fresh": fresh_cutoff if fresh_cutoff is not None else _fresh_cutoff(),
+			"states": _INFLIGHT_STATES,
+		},
 	)[0][0]
 
 
@@ -295,7 +305,7 @@ def _shard_inflight(target: str) -> int:
 
 def _shard_queued_depth(target: str) -> int:
 	return frappe.db.sql(
-		f"SELECT COUNT(*) FROM `tab{TURN}` WHERE relay_target_id=%(t)s AND state='queued'",
+		"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE relay_target_id=%(t)s AND state='queued'",
 		{"t": target},
 	)[0][0]
 
@@ -313,14 +323,9 @@ def _conv_has_other_active_turn(conversation: str, run_id: str) -> bool:
 	pump-owned in-flight turn during coexistence (OAR-11). CDX-24: also treats a
 	sibling 'recovering' Turn as blocking — a parked turn's old gateway run may
 	still be live, so the conversation stays single-flight until it settles."""
-	return bool(
-		frappe.db.sql(
-			f"""SELECT 1 FROM `tab{TURN}`
-			WHERE conversation=%(c)s AND name!=%(r)s AND state IN ({_in_sql(_CONV_BLOCKING_STATES)})
-			LIMIT 1""",
-			{"c": conversation, "r": run_id},
-		)
-	)
+	from jarvis.chat import turn_state
+
+	return bool(turn_state.unfinished_turn(conversation, exclude_run_id=run_id, states=_CONV_BLOCKING_STATES))
 
 
 def _conv_legacy_busy(conversation: str) -> bool:
@@ -349,6 +354,34 @@ def _conv_legacy_busy(conversation: str) -> bool:
 	return _conversation_busy(conversation) or _conv_legacy_recovering_busy(conversation)
 
 
+# What ``reply_in_progress`` answers for a reply the turn machine holds no live Turn for.
+REPLY_WITHOUT_A_LIVE_TURN = "reply streaming, no live turn"
+
+
+def reply_in_progress(conversation: str) -> str:
+	"""Why this conversation counts as waiting for a reply, or "" when it does not.
+	The one answer to "may this conversation be deleted now?".
+
+	Either sign is enough, the same two ``accept_or_queue`` goes by for single-flight:
+
+	* a Turn that has not ended: the answer is ``turn <state>``. Deleting the
+	  conversation deletes its Turn rows (``on_conversation_trash``), and the pump
+	  reads the missing row of a turn it is streaming as a lost lease;
+	* no such Turn, but a reply row still streaming (``_conv_legacy_busy``): a site
+	  that is draining, or back on the legacy transport, sends without a Turn row,
+	  so a chat can have old ended Turns and a live reply. The answer is
+	  ``REPLY_WITHOUT_A_LIVE_TURN``. This sign ages out as it does for a send (a
+	  flag left by a dead worker stops counting once the chat has been silent for
+	  ``_INFLIGHT_FRESH_SECONDS``), and it is also true while the chat is being
+	  compacted, which a delete should not cut across either."""
+	from jarvis.chat import turn_state
+
+	state = turn_state.unfinished_turn_state(conversation)
+	if state:
+		return f"turn {state}"
+	return REPLY_WITHOUT_A_LIVE_TURN if _conv_legacy_busy(conversation) else ""
+
+
 def _conv_legacy_recovering_busy(conversation: str) -> bool:
 	"""CDX-24 legacy dual-signal: True when this conversation's newest assistant
 	Message is ``streaming=1 AND recovering=1`` with NO owning blocking Turn row.
@@ -361,7 +394,7 @@ def _conv_legacy_recovering_busy(conversation: str) -> bool:
 	The ``NOT EXISTS`` de-dups against an owning Turn already caught by
 	``_conv_has_other_active_turn`` (this signal is for the Turn-less legacy park)."""
 	rows = frappe.db.sql(
-		f"""SELECT streaming, recovering FROM `tab{MSG}`
+		"""SELECT streaming, recovering FROM `tabJarvis Chat Message`
 		WHERE conversation=%(c)s AND role='assistant'
 		ORDER BY seq DESC LIMIT 1""",
 		{"c": conversation},
@@ -376,9 +409,9 @@ def _conv_legacy_recovering_busy(conversation: str) -> bool:
 	# NOT EXISTS, which de-dups only against _INFLIGHT_STATES).
 	return not bool(
 		frappe.db.sql(
-			f"""SELECT 1 FROM `tab{TURN}`
-			WHERE conversation=%(c)s AND state IN ({_in_sql(_INFLIGHT_STATES + ("recovering",))}) LIMIT 1""",
-			{"c": conversation},
+			"""SELECT 1 FROM `tabJarvis Chat Turn`
+			WHERE conversation=%(c)s AND state IN %(states)s LIMIT 1""",
+			{"c": conversation, "states": _INFLIGHT_STATES + ("recovering",)},
 		)
 	)
 
@@ -390,10 +423,10 @@ def _conv_legacy_recovering_busy(conversation: str) -> bool:
 
 def _queued_ordered(target: str) -> list[dict]:
 	return frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, c.owner
-		FROM `tab{TURN}` t
-		INNER JOIN `tab{CONV}` c ON c.name = t.conversation
+		FROM `tabJarvis Chat Turn` t
+		INNER JOIN `tabJarvis Conversation` c ON c.name = t.conversation
 		WHERE t.relay_target_id=%(t)s AND t.state='queued'
 		ORDER BY CASE t.turn_class WHEN 'interactive' THEN 0 ELSE 1 END,
 		         t.enqueued_at ASC, t.run_id ASC
@@ -475,6 +508,41 @@ def _telemetry(event: str, **fields) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _insert_seed(conversation: str, content: str | None, origin: str, hidden: bool) -> str:
+	"""The user row of a turn whose caller asked admission to write it. Not committed.
+
+	Called with the conversation row locked, so ``MAX(seq) + 1`` is the next seq (the
+	same reasoning as OAR-6). The row belongs to the conversation's owner, as every
+	user row of a chat does: the worker runs the turn as that row's owner, and a cron
+	(Administrator) inserting it would otherwise own it (``api._enqueue_turn`` does the
+	same)."""
+	seq = (
+		frappe.db.sql(
+			"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+		)[0][0]
+		or 0
+	) + 1
+	msg = frappe.get_doc(
+		{
+			"doctype": MSG,
+			"conversation": conversation,
+			"seq": seq,
+			"role": "user",
+			"content": content or "",
+			"streaming": 0,
+			"hidden": 1 if hidden else 0,
+			"origin": origin,
+		}
+	)
+	msg.flags.ignore_permissions = True
+	msg.flags.jarvis_server_write = True
+	msg.insert()
+	owner = frappe.db.get_value(CONV, conversation, "owner")
+	if owner and msg.owner != owner:
+		frappe.db.set_value(MSG, msg.name, "owner", owner, update_modified=False)
+	return msg.name
+
+
 def accept_or_queue(
 	*,
 	conversation: str,
@@ -486,18 +554,36 @@ def accept_or_queue(
 	seed_content: str | None = None,
 	seed_origin: str | None = None,
 	exempt_overload: bool = False,
+	seed_hidden: bool = False,
+	on_seed=None,
+	refuse_if=None,
 ) -> dict:
 	"""Admit or durably queue one turn. Returns one of:
 
 	  {"ok": True, "dispatched": True,  "run_id", "queued_position": None}
 	  {"ok": True, "dispatched": False, "run_id", "queued_position": N}
+	  {"ok": True, "dispatched": False, "run_id", "duplicate": True, "queued_position": None}
 	  {"ok": False, "overloaded": True, "reason": <friendly copy>}
+	  {"ok": False, "refused": <refuse_if's return>}
+
+	``refuse_if``: a zero-arg callable run under both locks, after the duplicate check and
+	before anything is written. A truthy return refuses the turn and comes back as
+	``refused``. A caller that passes this must test ``ok``.
+
+	``duplicate``: a turn with this ``run_id`` already exists, so nothing was written
+	or dispatched. Answered before anything else, a full queue included.
 
 	``seed_message`` is the already-committed user Message (send/retry/orphan/
-	macro all insert it before dispatch today - OAR-3's retry/orphan reuse is
-	automatic here since no caller asks admission to insert). ``seed_content``
-	+ ``seed_message=None`` is the WP-1 insert branch, wired but unused in
-	Phase-0's legacy integration; ``seed_origin`` is the caller's origin for it.
+	continuation insert it before dispatch - OAR-3's retry/orphan reuse is
+	automatic here). ``seed_content`` + ``seed_message=None`` is the insert branch
+	(WP-1): admission writes the user row itself, after the duplicate check and the
+	overload guard and in the SAME transaction as the Turn, so a duplicate or a full
+	site writes nothing and a process that dies leaves both rows or neither. The
+	macro engine sends its steps this way (``api._enqueue_turn`` with a fixed
+	``run_id``). ``seed_origin`` / ``seed_hidden`` stamp that row, which is owned by
+	the conversation's owner (the worker's chat user, never a cron's Administrator);
+	``on_seed(name)`` is called with its name before anything is dispatched, for a
+	``dispatch`` callable that needs it.
 
 	``exempt_overload`` (SUXI-2 ruling): a confirm continuation is the follow-up
 	of an ALREADY-committed write - it must never be rejected by the accept-time
@@ -538,6 +624,29 @@ def accept_or_queue(
 	# failure must also release the locks immediately (not linger until request/job
 	# teardown), so the whole locked section is guarded - rollback + re-raise (never mask).
 	try:
+		# Was this very turn accepted before? Asked FIRST, ahead of the legacy fallback
+		# and the overload guard. An id is minted per send (so this is one primary-key
+		# miss for a typed message, a retry, a continuation), except for a macro step,
+		# whose id is fixed per (run, step): a second dispatcher of the same step must
+		# be told "already accepted" whatever else is true. Behind the overload guard
+		# it was told "the site is full" instead, and parked a run whose step was
+		# already out; behind the fallback it enqueued a second legacy job. Read under
+		# both locks, so it sees every turn accepted before this call got them.
+		if frappe.db.exists(TURN, run_id):
+			frappe.db.rollback()  # releases both locks; nothing was written
+			_telemetry("accept_duplicate", run_id=run_id, target=target)
+			return {
+				"ok": True,
+				"dispatched": False,
+				"run_id": run_id,
+				"duplicate": True,
+				"queued_position": None,
+			}
+
+		if refuse_if and (refusal := refuse_if()):
+			frappe.db.rollback()  # releases both locks; this call wrote nothing
+			return {"ok": False, "refused": refusal}
+
 		if not machine_active:
 			# CDX-10 (reverse direction): the world reverted to pure-legacy (kill switch back on
 			# AND Phase-0 off) while this sender waited on the shard lock — its stale conf still said
@@ -547,6 +656,24 @@ def accept_or_queue(
 			# concurrent cutover scan sees it — same guarantee as _dispatch_turn's gate) and commit;
 			# no Turn row is created. The seed user Message already exists (every caller inserts it
 			# before dispatch), so nothing is orphaned.
+			if not seed_message:
+				# The insert branch: the user row first, committed, and only then the job, so a
+				# worker never starts on a row it cannot read yet. That legacy job is the turn,
+				# as on any legacy path (no Turn row); this is the commit-then-enqueue order
+				# every legacy sender has.
+				seed_message = _insert_seed(conversation, seed_content, seed_origin, seed_hidden)
+				if on_seed:
+					on_seed(seed_message)
+				frappe.db.commit()  # releases both locks
+				dispatch()
+				_telemetry("accept_legacy_fallback", run_id=run_id, target=target)
+				return {
+					"ok": True,
+					"dispatched": True,
+					"run_id": run_id,
+					"queued_position": None,
+					"legacy_fallback": True,
+				}
 			dispatch()
 			frappe.db.commit()  # releases both locks; the legacy job is durably enqueued
 			_telemetry("accept_legacy_fallback", run_id=run_id, target=target)
@@ -568,33 +695,15 @@ def accept_or_queue(
 			return {
 				"ok": False,
 				"overloaded": True,
-				"reason": frappe._("The site is busy — please try again in a moment."),
+				"reason": frappe._("The site is busy. Please try again in a moment."),
 			}
 
-		# Seed the user Message if the caller delegated it (WP-1 branch; unused in
-		# Phase-0 wiring because every legacy caller inserts before dispatch).
+		# Seed the user Message if the caller delegated it (the insert branch, see the
+		# docstring): uncommitted until the Turn below is, and rolled back with it.
 		if not seed_message:
-			seq = (
-				frappe.db.sql(
-					f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation}
-				)[0][0]
-				or 0
-			) + 1
-			msg = frappe.get_doc(
-				{
-					"doctype": MSG,
-					"conversation": conversation,
-					"seq": seq,
-					"role": "user",
-					"content": seed_content or "",
-					"streaming": 0,
-					"origin": seed_origin,
-				}
-			)
-			msg.flags.ignore_permissions = True
-			msg.flags.jarvis_server_write = True
-			msg.insert()
-			seed_message = msg.name
+			seed_message = _insert_seed(conversation, seed_content, seed_origin, seed_hidden)
+			if on_seed:
+				on_seed(seed_message)
 
 		# Insert the durable Turn row (idempotent on the run_id PK).
 		try:
@@ -615,7 +724,8 @@ def accept_or_queue(
 			turn.flags.ignore_permissions = True
 			turn.insert()
 		except frappe.DuplicateEntryError:
-			# Same send replayed (double-click / retry-after-ack): already accepted.
+			# Same send replayed (double-click / retry-after-ack): already accepted. The
+			# look at the top answers this first; kept for an insert that still collides.
 			frappe.db.rollback()
 			return {
 				"ok": True,
@@ -906,9 +1016,9 @@ def _pick_next(target: str, cap: int, promoted_convs: set[str]) -> dict | None:
 	and per-conversation single-flight. Reads a small ordered batch and filters
 	in Python (bounded work: at most a handful of credits per round)."""
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, t.dispatch_payload
-		FROM `tab{TURN}` t
+		FROM `tabJarvis Chat Turn` t
 		WHERE t.relay_target_id=%(t)s AND t.state='queued'
 		ORDER BY t.enqueued_at ASC, t.run_id ASC
 		LIMIT 200
@@ -1036,10 +1146,20 @@ def settle_conversation_dispatching(conversation: str, terminal_state: str, erro
 def mark_cancel_requested(conversation: str) -> None:
 	"""stop_run hook: record cancel intent on the dispatching Turn (D2's
 	dispatching->cancel-intent transition). NOT terminal - the legacy worker's
-	aborted-terminal settles + promotes. Flag-gated, best-effort."""
+	aborted-terminal settles + promotes. Flag-gated, best-effort.
+
+	W2: the read + CAS is one unit, replayed whole by ``txn.replay_on_conflict``
+	if it loses a snapshot race against the pump's own CASes on this row (a lost
+	race here used to be silently dropped by the bare ``except``, with no log -
+	settlement then reports "error" instead of "stopped" for a mid-stream Stop).
+	Called from ``stop_run`` after only read-only work (``_get_owned_conversation``),
+	so nothing is pending when this unit starts and replay is always safe. This
+	hook must still never raise into ``stop_run`` (not wrapped there), so a
+	conflict that survives the replay is LOGGED, not silently dropped as before."""
 	if not admission_enabled():
 		return
-	try:
+
+	def unit() -> None:
 		run_id = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
 		if run_id:
 			_run_cas(
@@ -1047,9 +1167,18 @@ def mark_cancel_requested(conversation: str) -> None:
 				WHERE name=%(r)s AND state='dispatching'""",
 				{"r": run_id},
 			)
-			frappe.db.commit()
-	except Exception:
-		frappe.db.rollback()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist cancel marker
+
+	try:
+		txn.replay_on_conflict(unit, label=f"admission.mark_cancel_requested {conversation}")
+	except Exception as e:
+		try:
+			# report_lost_race re-raises a non-conflict exception; this hook must
+			# never raise into stop_run (not wrapped there), so catch that re-raise
+			# and log it too instead of letting it propagate.
+			txn.report_lost_race(e, title="admission.mark_cancel_requested")
+		except Exception:
+			frappe.log_error(title="admission.mark_cancel_requested", message=frappe.get_traceback())
 
 
 # --------------------------------------------------------------------------- #
@@ -1064,6 +1193,137 @@ def _assert_owner(conversation: str) -> str:
 	if owner != frappe.session.user and "System Manager" not in frappe.get_roles():
 		raise frappe.PermissionError("not your conversation")
 	return owner
+
+
+def _cancel_pre_dispatch(run_id: str, *, owner_of, label: str, attempts: int = 1) -> dict:
+	"""Cancel a turn that has not been dispatched yet, ROUTED BY STATE (CDX-8). The
+	one implementation behind the owner's endpoint (``cancel_queued_turn``) and the
+	macro engine's own cancel (``macros._cancel_undispatched_turn``).
+
+	Returns ``{"row", "owner", "path"}``: ``row`` is None when there is no such turn,
+	``path`` is ``"queued"`` / ``"preparing_ready"`` for a won cancel and None when
+	the turn was not in a pre-dispatch state or the cancel lost its race.
+
+	``owner_of(conversation)`` returns the conversation's owner. It is where a caller
+	refuses someone who may not cancel this turn (the endpoint passes
+	``_assert_owner``); it runs inside the unit, before any write.
+
+	W1: the read (prelude) + state-routed CAS (+ placeholder cleanup) is ONE unit,
+	replayed whole by ``txn.replay_on_conflict``: the pump commits promote/claim/
+	dispatch CASes on this same row roughly every 0.2s, so a plain read here can
+	easily be stale by the time the CAS runs, which used to surface as a raw 500.
+	The prelude (the read + the owner check) is read-only, so re-running it on
+	replay just re-reads the present row/version - correct, not merely safe. A
+	conflict that outlives the replay is raised to the caller (never swallowed
+	inside the unit, which must stay a plain re-raise).
+
+	``attempts``: on a server that does not refuse a stale write (no snapshot
+	isolation) a lost race is not an error, the CAS just matches no row: the pump
+	promoted ``queued`` to ``preparing`` between the read and the CAS, and the turn
+	has still not started. With ``attempts=2`` the unit runs once more on a fresh
+	read and takes the other route. The endpoint keeps 1 (it reports "already
+	started" and the chip stays); the engine passes 2, because a step it failed to
+	cancel runs after the run was stopped.
+
+	Each unit commits: call it with nothing pending."""
+	from jarvis.chat import turn_state as ts
+
+	def unit() -> dict:
+		row = frappe.db.get_value(
+			TURN,
+			run_id,
+			["conversation", "state", "version", "relay_target_id", "seed_message", "assistant_message"],
+			as_dict=True,
+		)
+		if not row:
+			return {"row": None, "owner": None, "path": None}
+		owner = owner_of(row["conversation"])
+		state = row["state"]
+		version = int(row["version"] or 0)
+		path = None
+		if state == "queued":
+			if ts.cancel_queued(run_id, version):
+				path = "queued"
+		elif state in ("preparing", "ready"):
+			if ts.cancel_preparing_or_ready(run_id, version):
+				path = "preparing_ready"
+				# Clean the assistant placeholder prepare attached so a reload never shows
+				# a stuck spinner for a cancelled turn (credit already released by the CAS).
+				if row.get("assistant_message"):
+					try:
+						_run_cas(
+							f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s",
+							{"m": row["assistant_message"]},
+						)
+					except Exception as e:
+						if txn.is_write_conflict(e):
+							# The server already aborted the WHOLE transaction on this
+							# statement - including the cancel CAS above, even though it
+							# looked like a local success. A bare swallow here used to
+							# let the unit fall through to `frappe.db.commit()` (a no-op
+							# on an already-aborted transaction) and report success while
+							# nothing landed. Re-raise so replay_on_conflict reruns the
+							# WHOLE unit from a fresh snapshot instead.
+							raise
+						frappe.log_error(
+							title="admission.cancel_queued_turn placeholder cleanup",
+							message=frappe.get_traceback(),
+						)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- retry unit commits on its own
+		return {"row": row, "owner": owner, "path": path}
+
+	result = txn.replay_on_conflict(unit, label=label)
+	for _ in range(attempts - 1):
+		row = result["row"]
+		if result["path"] or not row or row["state"] not in ("queued", "preparing", "ready"):
+			break
+		result = txn.replay_on_conflict(unit, label=label)
+	return result
+
+
+def _finish_pre_dispatch_cancel(run_id: str, row: dict, owner: str, path: str, *, reason: str, source: str):
+	"""Everything that follows a WON pre-dispatch cancel, for both callers of
+	``_cancel_pre_dispatch``: the model-switch hook, the live event, the durable
+	transcript marker carrying ``reason``, and handing the freed credit on."""
+	if path == "preparing_ready":
+		# jarvis#1425 review (scoped re-review, 2026-09-27): preparing/ready are
+		# in-flight states (_INFLIGHT_STATES) - a cancel leaves one.
+		from jarvis.chat import llm_switch
+
+		llm_switch.apply_if_active(source=source)
+	try:
+		publish_to_user(
+			owner,
+			{
+				"kind": "turn:cancelled",
+				"conversation_id": row["conversation"],
+				"run_id": run_id,
+				"message_id": row["seed_message"],
+				"reason": reason,
+			},
+		)
+	except Exception:
+		pass
+	# SUXI-4: durable transcript marker so a later reload shows the send was
+	# cancelled (not silently dropped).
+	_write_cancel_marker(row["conversation"], reason)
+	target = row["relay_target_id"] or DEFAULT_RELAY_TARGET
+	# The freed credit lets the next queued turn run. In pump mode wake the pump to
+	# re-promote (promote_next is a no-op there); else best-effort legacy promote.
+	# CDX-21 (Residual A): the pump-vs-legacy wake decision reads the AUTHORITATIVE shard ROW
+	# (``pump_lifecycle_configured``), NOT the config mirror — so a stale mirror can never route the
+	# credit-freed wake to the wrong owner.
+	from jarvis.chat import pump
+
+	if pump.pump_lifecycle_configured(target):
+		try:
+			pump.ensure_pump(target)
+			pump.lpush_wake(target, run_id)
+			_publish_queue_positions(target)
+		except Exception:
+			pass
+	else:
+		promote_next(target)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1086,81 +1346,31 @@ def cancel_queued_turn(run_id: str) -> dict:
 	Returns ``{"ok": True, "run_id", "path": "queued"|"preparing_ready"}`` so the
 	caller/UI knows which path won; ``{"ok": False, ...}`` when the turn already
 	advanced (e.g. dispatched) — the UI then KEEPS its chip until the server confirms
-	(no optimistic clear on failure)."""
+	(no optimistic clear on failure).
+
+	The cancel itself is ``_cancel_pre_dispatch`` (W1: one replayed unit). On
+	exhaustion the conflict is caught at this endpoint boundary ONLY and turned into
+	the same ``{"ok": False, ...}`` shape a lost CAS already returns, logged rather
+	than surfaced as a 500."""
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
-	row = frappe.db.get_value(
-		TURN,
-		run_id,
-		["conversation", "state", "version", "relay_target_id", "seed_message", "assistant_message"],
-		as_dict=True,
-	)
-	if not row:
+
+	try:
+		result = _cancel_pre_dispatch(
+			run_id, owner_of=_assert_owner, label=f"admission.cancel_queued_turn {run_id}"
+		)
+	except Exception as e:
+		txn.report_lost_race(e, title="admission.cancel_queued_turn")
+		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
+
+	row, owner, path = result["row"], result["owner"], result["path"]
+	if row is None:
 		return {"ok": False, "reason": frappe._("This turn no longer exists.")}
-	owner = _assert_owner(row["conversation"])
-	from jarvis.chat import turn_state as ts
-
-	state = row["state"]
-	version = int(row["version"] or 0)
-	path = None
-	if state == "queued":
-		if ts.cancel_queued(run_id, version):
-			path = "queued"
-	elif state in ("preparing", "ready"):
-		if ts.cancel_preparing_or_ready(run_id, version):
-			path = "preparing_ready"
-			# Clean the assistant placeholder prepare attached so a reload never shows
-			# a stuck spinner for a cancelled turn (credit already released by the CAS).
-			if row.get("assistant_message"):
-				try:
-					_run_cas(
-						f"UPDATE `tab{MSG}` SET streaming=0 WHERE name=%(m)s",
-						{"m": row["assistant_message"]},
-					)
-				except Exception:
-					pass
-	frappe.db.commit()
-	if path == "preparing_ready":
-		# jarvis#1425 review (scoped re-review, 2026-09-27): preparing/ready are
-		# in-flight states (_INFLIGHT_STATES) - a user cancel leaves one.
-		from jarvis.chat import llm_switch
-
-		llm_switch.apply_if_active(source="admission.cancel_queued_turn")
 	if path is None:
 		return {"ok": False, "reason": frappe._("This turn already started or was cancelled.")}
-	try:
-		publish_to_user(
-			owner,
-			{
-				"kind": "turn:cancelled",
-				"conversation_id": row["conversation"],
-				"run_id": run_id,
-				"message_id": row["seed_message"],
-				"reason": USER_CANCEL_REASON,
-			},
-		)
-	except Exception:
-		pass
-	# SUXI-4: durable transcript marker so a later reload shows the send was
-	# cancelled (not silently dropped).
-	_write_cancel_marker(row["conversation"], USER_CANCEL_REASON)
-	target = row["relay_target_id"] or DEFAULT_RELAY_TARGET
-	# The freed credit lets the next queued turn run. In pump mode wake the pump to
-	# re-promote (promote_next is a no-op there); else best-effort legacy promote.
-	# CDX-21 (Residual A): the pump-vs-legacy wake decision reads the AUTHORITATIVE shard ROW
-	# (``pump_lifecycle_configured``), NOT the config mirror — so a stale mirror can never route the
-	# credit-freed wake to the wrong owner.
-	from jarvis.chat import pump
-
-	if pump.pump_lifecycle_configured(target):
-		try:
-			pump.ensure_pump(target)
-			pump.lpush_wake(target, run_id)
-			_publish_queue_positions(target)
-		except Exception:
-			pass
-	else:
-		promote_next(target)
+	_finish_pre_dispatch_cancel(
+		run_id, row, owner, path, reason=USER_CANCEL_REASON, source="admission.cancel_queued_turn"
+	)
 	return {"ok": True, "run_id": run_id, "path": path}
 
 
@@ -1411,7 +1621,7 @@ def pump_cutover_execute(relay_target: str | None = None) -> dict:
 			_telemetry("cutover_execute", target=target, done=0, verdict="retry")
 			return {"ok": True, "done": False, "action": "reverted", "verdict": "retry", "preflight": post}
 
-		frappe.db.commit()  # (4) commit the gate: the ROW flip is durable, the lock is released
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist gate flip, release lock
 	except Exception:
 		# Any fault mid-pass: roll back (undoing the uncommitted transport_mode flip), releasing
 		# the lock. Nothing was mirrored, so there is nothing to restore.
@@ -1478,7 +1688,7 @@ def pump_set_transport_mode(mode: str, relay_target: str | None = None) -> dict:
 	try:
 		_ts._lock_shard(target)  # commit-first; the FOR UPDATE is the first statement
 		mode_epoch = pump.set_transport_mode(target, mode)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist transport mode, release lock
 	except Exception:
 		frappe.db.rollback()
 		raise
@@ -1506,16 +1716,29 @@ def _write_cancel_marker(conversation: str, reason: str) -> None:
 	"""SUXI-4: leave a durable assistant marker Message when a queued turn is
 	cancelled (user-initiated or system age-out) so a later reload shows WHY the
 	send has no reply - indistinguishable otherwise from a silently dropped send.
-	Reuses the error-card pattern (``error`` field) so the transcript renders it
-	as a card with a Retry affordance. seq is allocated under the conversation
-	FOR UPDATE lock (R-9 discipline) so it never collides with a concurrent
-	writer on the same conversation. Best-effort - never blocks the cancel."""
+	Reuses the ``error`` field of an assistant row. The desktop SPA and the PWA
+	classify every reason text written here as ``cancelled``
+	(``public/js/turn_error_rules.mjs``: the user's cancel, the age-out, and the
+	macro engine's "Stopped before it started.") and render a muted note with NO
+	Retry button, not the red error card. A new reason needs its text in that rule.
+
+	seq is allocated under the conversation FOR UPDATE lock (R-9 discipline), from a
+	read view opened AFTER the lock is held: the commit below closes whatever view
+	the caller's earlier reads opened (the live publish reads the conversation),
+	so the lock is the first statement and ``MAX(seq)`` sees every row committed
+	before the lock was granted. The guarantee is against writers that allocate seq
+	under the same lock; there is no unique index on ``(conversation, seq)`` behind
+	it. Call it only with nothing pending: every caller commits its cancel first,
+	and this commit (like the one after the insert) would commit a caller's
+	half-done work. Best-effort - never blocks the cancel, but it does wait for
+	the conversation lock (up to ``innodb_lock_wait_timeout``)."""
 	try:
+		frappe.db.commit()
 		_lock_conversation(conversation)
 		seq = (
-			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conversation})[
-				0
-			][0]
+			frappe.db.sql(
+				"SELECT MAX(seq) FROM `tabJarvis Chat Message` WHERE conversation=%(c)s", {"c": conversation}
+			)[0][0]
 			or 0
 		) + 1
 		marker = frappe.get_doc(
@@ -1587,7 +1810,7 @@ def sweep() -> dict:
 		return summary
 	try:
 		open_count = frappe.db.sql(
-			f"SELECT COUNT(*) FROM `tab{TURN}` WHERE state IN ('queued','dispatching')"
+			"SELECT COUNT(*) FROM `tabJarvis Chat Turn` WHERE state IN ('queued','dispatching')"
 		)[0][0]
 	except Exception:
 		return summary
@@ -1630,10 +1853,10 @@ def _sweep_reconcile(targets: set[str]) -> int:
 	well beyond the 720s worker cap) is closed errored so a post-deploy batch of
 	orphans frees its shard credits instead of pinning them for extra cycles."""
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.reservation_expires_at
-		FROM `tab{TURN}` t
+		FROM `tabJarvis Chat Turn` t
 		WHERE t.state='dispatching'
 		""",
 		as_dict=True,
@@ -1644,9 +1867,9 @@ def _sweep_reconcile(targets: set[str]) -> int:
 	for r in rows:
 		# THIS turn's own latest assistant (strictly after its seed user row).
 		latest = frappe.db.sql(
-			f"""SELECT streaming, recovering, error, modified FROM `tab{MSG}`
+			"""SELECT streaming, recovering, error, modified FROM `tabJarvis Chat Message`
 			WHERE conversation=%(c)s AND role='assistant'
-			  AND seq > (SELECT seq FROM `tab{MSG}` WHERE name=%(seed)s)
+			  AND seq > (SELECT seq FROM `tabJarvis Chat Message` WHERE name=%(seed)s)
 			ORDER BY seq DESC LIMIT 1""",
 			{"c": r["conversation"], "seed": r["seed_message"]},
 			as_dict=True,
@@ -1684,7 +1907,7 @@ def _sweep_reconcile(targets: set[str]) -> int:
 			closed += 1
 			targets.add(r["relay_target_id"] or DEFAULT_RELAY_TARGET)
 	if closed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sweep result
 	return closed
 
 
@@ -1703,10 +1926,10 @@ def _sweep_reservations(targets: set[str]) -> int:
 	a placeholder is CANCELLED (terminal), never re-dispatched - a turn the user
 	explicitly stopped must not run again."""
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.cancel_requested
-		FROM `tab{TURN}` t
+		FROM `tabJarvis Chat Turn` t
 		WHERE t.state='dispatching' AND t.reservation_expires_at IS NOT NULL
 		  AND t.reservation_expires_at < %(now)s
 		""",
@@ -1716,9 +1939,9 @@ def _sweep_reservations(targets: set[str]) -> int:
 	reclaimed = 0
 	for r in rows:
 		has_own_assistant = frappe.db.sql(
-			f"""SELECT 1 FROM `tab{MSG}`
+			"""SELECT 1 FROM `tabJarvis Chat Message`
 			WHERE conversation=%(c)s AND role='assistant'
-			  AND seq > (SELECT seq FROM `tab{MSG}` WHERE name=%(seed)s) LIMIT 1""",
+			  AND seq > (SELECT seq FROM `tabJarvis Chat Message` WHERE name=%(seed)s) LIMIT 1""",
 			{"c": r["conversation"], "seed": r["seed_message"]},
 		)
 		if has_own_assistant:
@@ -1748,7 +1971,7 @@ def _sweep_reservations(targets: set[str]) -> int:
 			reclaimed += 1
 			targets.add(r["relay_target_id"] or DEFAULT_RELAY_TARGET)
 	if reclaimed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sweep result
 	return reclaimed
 
 
@@ -1757,9 +1980,9 @@ def _sweep_age_out(targets: set[str]) -> int:
 	reason + publish (SUX-5)."""
 	cutoff = frappe.utils.add_to_date(None, seconds=-QUEUED_MAX_AGE_S)
 	rows = frappe.db.sql(
-		f"""
+		"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message, c.owner
-		FROM `tab{TURN}` t INNER JOIN `tab{CONV}` c ON c.name = t.conversation
+		FROM `tabJarvis Chat Turn` t INNER JOIN `tabJarvis Conversation` c ON c.name = t.conversation
 		WHERE t.state='queued' AND t.enqueued_at IS NOT NULL AND t.enqueued_at < %(cut)s
 		""",
 		{"cut": cutoff},
@@ -1778,7 +2001,7 @@ def _sweep_age_out(targets: set[str]) -> int:
 		# Make the cancel durable BEFORE the side-effects: _write_cancel_marker
 		# runs its own txn (and rolls back on failure), which would otherwise
 		# undo an uncommitted CAS.
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before side effects
 		cancelled += 1
 		targets.add(r["relay_target_id"] or DEFAULT_RELAY_TARGET)
 		try:

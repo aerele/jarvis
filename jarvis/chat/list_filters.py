@@ -1812,6 +1812,7 @@ def bounded_sql(query: str, values: Any = None, **kwargs: Any):
 	# the ceiling instead of lowering it. MariaDB's max_statement_time takes
 	# fractional seconds, so there is nothing to round for.
 	seconds = float(STATEMENT_TIMEOUT_SECONDS)
+	# nosemgrep: frappe-sql-format-injection -- statement-timeout prefix; float constant
 	bounded = f"SET STATEMENT max_statement_time={seconds} FOR {query.lstrip()}"
 	try:
 		return frappe.db.sql(bounded, *args, **kwargs)
@@ -1820,7 +1821,7 @@ def bounded_sql(query: str, values: Any = None, **kwargs: Any):
 			raise
 		_fail(
 			ERR_QUERY_TOO_EXPENSIVE,
-			_("That filter is too broad to run on this list — narrow it and try again."),
+			_("That filter is too broad to run on this list. Narrow it and try again."),
 		)
 
 

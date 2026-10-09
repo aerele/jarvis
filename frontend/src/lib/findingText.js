@@ -111,7 +111,7 @@ export function extractTechnicalDetails(raw) {
 		.replace(/\(\s+/g, "(")
 		.replace(/\s+\)/g, ")")
 		.replace(/([,.;:])\s*\1+/g, "$1")
-		.replace(/\s{2,}/g, " ")
+		.replace(/[^\S\r\n]{2,}/g, " ")
 		.replace(/\s+([,.;:])/g, "$1")
 		.replace(/^[\s,:;-]+/, "")
 		.replace(/[\s,:;-]+$/, "")

@@ -84,7 +84,7 @@ describe("PendingActionDetail", () => {
 		expect(w.text()).toContain("Acme");
 		expect(button(w, "Create & continue")).toBeTruthy();
 		expect(button(w, "Use existing")).toBeTruthy();
-		expect(button(w, "Don't create — skip 2 files")).toBeTruthy();
+		expect(button(w, "Don't create, skip 2 files")).toBeTruthy();
 	});
 
 	it("shows a load error with a retry", async () => {
@@ -98,6 +98,15 @@ describe("PendingActionDetail", () => {
 		await button(w, "Try again").trigger("click");
 		await flushPromises();
 		expect(button(w, "Create & continue")).toBeTruthy();
+	});
+
+	it("shows the trial's warning line on a held card", async () => {
+		const w = await mountWith(
+			rec({ card: { ...rec().card, warning: { jobs: 0, rolled_back: true } } })
+		);
+		expect(w.findAll('[role="note"]').map((n) => n.text())).toEqual([
+			"During the check, the record's own code stopped part-way, so the result may differ.",
+		]);
 	});
 
 	it("renders hostile model text as text, never HTML", async () => {
@@ -140,8 +149,8 @@ describe("PendingActionDetail", () => {
 		let resolve;
 		api.decideHeldAction.mockReturnValue(new Promise((r) => (resolve = r)));
 		await button(w, "Create & continue").trigger("click");
-		expect(button(w, "Don't create — skip 2 files").attributes("disabled")).toBeDefined();
-		await button(w, "Don't create — skip 2 files").trigger("click");
+		expect(button(w, "Don't create, skip 2 files").attributes("disabled")).toBeDefined();
+		await button(w, "Don't create, skip 2 files").trigger("click");
 		resolve({ ok: true, reason_code: "created", waiters_count: 2 });
 		await flushPromises();
 		expect(api.decideHeldAction).toHaveBeenCalledTimes(1);
@@ -196,7 +205,7 @@ describe("PendingActionDetail", () => {
 	it("keeps the row on a transient refusal and shows why", async () => {
 		const w = await mountWith(rec());
 		api.decideHeldAction.mockResolvedValue({ ok: false, reason_code: "busy" });
-		await button(w, "Don't create — skip 2 files").trigger("click");
+		await button(w, "Don't create, skip 2 files").trigger("click");
 		await flushPromises();
 		expect(api.decideHeldAction).toHaveBeenCalledWith("PA-1", "skip", undefined);
 		expect(w.find('[role="alert"]').text()).toContain("Try again in a moment");
@@ -246,6 +255,19 @@ describe("PendingActionDetail", () => {
 		expect(onKind).toHaveBeenCalledWith("sheet");
 		expect(button(w, "Create & continue")).toBeFalsy();
 		expect(w.find('[role="status"]').exists()).toBe(false);
+	});
+
+	it("hands a chat card back to the board: never the File Box copy", async () => {
+		// A deep link (?held=<id>) to a failed chat card opens here first.
+		const onKind = vi.fn();
+		api.getPendingAction.mockResolvedValue(
+			rec({ kind: "chat", status: "Failed", can_act: 0, conversation: "c1" })
+		);
+		const w = mount(PendingActionDetail, { props: { name: "PA-1", onDecided, onKind } });
+		await flushPromises();
+		expect(onKind).toHaveBeenCalledWith("chat");
+		expect(w.text()).not.toContain("A File Box run wants to create this");
+		expect(w.text()).not.toContain("files waiting");
 	});
 
 	it("a batch offers no Use existing", async () => {
@@ -316,7 +338,7 @@ describe("PendingActionDetail", () => {
 			const create = button(w, "Create & continue");
 			expect(create.attributes("disabled")).toBeDefined();
 			const reason = w.find("#" + create.attributes("aria-describedby"));
-			expect(reason.text()).toBe("Fill Supplier Type — use Edit & create.");
+			expect(reason.text()).toBe("Fill Supplier Type. Use Edit & create.");
 			await create.trigger("click");
 			expect(api.decideHeldAction).not.toHaveBeenCalled();
 		});
@@ -404,10 +426,25 @@ describe("PendingActionDetail", () => {
 				"Couldn't create: Supplier Type cannot be Bogus"
 			);
 			expect(control(w, "Supplier Type").element.value).toBe("Company");
+			expect(w.find("code").text()).toBe("PA-1"); // the failed row's reference
 			expect(button(w, "Create & continue").attributes("disabled")).toBeDefined();
 			expect(onDecided).not.toHaveBeenCalled();
 			await button(w, "Close").trigger("click");
 			expect(onDecided).toHaveBeenCalledTimes(1);
+		});
+
+		it("a row someone else settled shows no reference: it did not fail", async () => {
+			const w = await editing();
+			await control(w, "Supplier Type").setValue("Company");
+			api.editAndCreateHeld.mockResolvedValue({
+				ok: false,
+				reason_code: "already_handled",
+				pa_status: "Discarded",
+				error: { message: "This approval was already handled." },
+			});
+			await button(w, "Create & continue").trigger("click");
+			await flushPromises();
+			expect(w.text()).not.toContain("Reference:");
 		});
 
 		it("refresh never wipes an open edit or a failure's values", async () => {
@@ -465,6 +502,24 @@ describe("PendingActionDetail", () => {
 			expect(w.element.querySelectorAll("img, script").length).toBe(0);
 			expect(w.text()).toContain(HOSTILE);
 			expect(window.__pwned).toBeUndefined();
+		});
+	});
+
+	describe("failure reference", () => {
+		it("a failed held row shows its reference", async () => {
+			const w = await mountWith(
+				rec({ status: "Failed", can_act: 0, reason: "The action could not be applied." })
+			);
+			expect(w.find("code").text()).toBe("PA-1");
+			expect(w.find('button[aria-label="Copy reference PA-1"]').exists()).toBe(true);
+		});
+
+		it("a pending or created row has none", async () => {
+			for (const over of [{}, { status: "Executed", can_act: 0 }]) {
+				const w = await mountWith(rec(over));
+				expect(w.text()).not.toContain("Reference:");
+				w.unmount();
+			}
 		});
 	});
 });

@@ -211,23 +211,23 @@ def _completion_copy(tally: dict, di: str) -> tuple[str, str]:
 	if status == "Timed Out":
 		return (
 			"timed_out",
-			f"⚠️ {head} timed out — **{s}** imported, **{f}** failed before it stopped. Check {link}.",
+			f"⚠️ {head} timed out: **{s}** imported, **{f}** failed before it stopped. Check {link}.",
 		)
 	if status == "Error":
-		return "error", f"✗ {head} failed — **{s}** imported, **{f}** failed. Check {link}."
+		return "error", f"✗ {head} failed: **{s}** imported, **{f}** failed. Check {link}."
 	if s == 0 and f == 0:
-		return "done", f"✓ {head}: nothing to import — 0 records. ({link})"
+		return "done", f"✓ {head}: nothing to import, 0 records. ({link})"
 	if f == 0:
 		return "done", f"✓ {head}: **{s}** record(s) imported. ({link})"
 	if s == 0:
-		return "error", f"✗ {head} failed — **0** imported, **{f}** failed. Check {link}."
+		return "error", f"✗ {head} failed: **0** imported, **{f}** failed. Check {link}."
 	return "partial", f"⚠️ {head}: **{s}** imported, **{f}** failed. Check {link}."
 
 
 def _copy_blocked(di: str) -> str:
 	doctype, fname = _di_context(di)
 	return (
-		f"✗ Import into **{doctype}** from **{fname}** was blocked — nothing imported. "
+		f"✗ Import into **{doctype}** from **{fname}** was blocked, nothing imported. "
 		f"Check the file's columns ({_link(di)})."
 	)
 
@@ -235,7 +235,7 @@ def _copy_blocked(di: str) -> str:
 def _copy_interrupted(tally: dict, di: str) -> str:
 	doctype, fname = _di_context(di)
 	return (
-		f"⚠️ Import into **{doctype}** from **{fname}** didn't complete — **{tally['success']}** "
+		f"⚠️ Import into **{doctype}** from **{fname}** didn't complete: **{tally['success']}** "
 		f"record(s) imported so far. Check {_link(di)}."
 	)
 
@@ -243,7 +243,7 @@ def _copy_interrupted(tally: dict, di: str) -> str:
 def _copy_status_unknown(di: str) -> str:
 	doctype, fname = _di_context(di)
 	return (
-		f"⚠️ Import into **{doctype}** from **{fname}** — status unknown after a long wait. Check {_link(di)}."
+		f"⚠️ Import into **{doctype}** from **{fname}**: status unknown after a long wait. Check {_link(di)}."
 	)
 
 
@@ -254,7 +254,7 @@ def _set_reason(ann: str, reason: str) -> None:
 		"UPDATE `tabJarvis Import Announcement` SET reason=%(r)s WHERE name=%(n)s AND announced=0",
 		{"r": reason, "n": ann},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- reason seen by concurrent classify
 
 
 def _mark_terminal(ann: str, reason: str, source: str) -> None:
@@ -265,7 +265,7 @@ def _mark_terminal(ann: str, reason: str, source: str) -> None:
 		"WHERE name=%(n)s AND announced=0",
 		{"s": source, "r": reason, "n": ann},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- announced seen by concurrent runs
 
 
 def _bump_attempts(row: dict) -> None:
@@ -308,7 +308,7 @@ def _post_completion(row: dict, source: str, reason: str, content: str) -> str:
 
 	msg = None
 	with impersonate(c.owner):
-		frappe.db.commit()  # commit-first: the FOR UPDATE is the first statement (REPEATABLE-READ)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 		msg = _locked_insert_chat_message(
 			conv,
 			{
@@ -340,7 +340,7 @@ def _post_completion(row: dict, source: str, reason: str, content: str) -> str:
 			"WHERE name=%(n)s AND announced=0",
 			{"s": source, "r": reason, "n": ann},
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	if msg:
 		events.publish_to_user(
 			c.owner, {"kind": "import:finished", "conversation_id": conv, "message_id": msg}

@@ -25,12 +25,14 @@ import contextlib
 from collections.abc import Iterator
 
 import frappe
+from frappe.query_builder import Order
+from frappe.query_builder.functions import Min
 
-from jarvis.chat import egress_rules
+from jarvis.chat import egress_rules, txn
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.events import publish_to_user
 from jarvis.chat.runtime_profile import get_profile
-from jarvis.chat.seq_watermark import wm_expr
+from jarvis.chat.seq_watermark import wm_term
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
@@ -144,20 +146,19 @@ def _conditional_clear(name: str, fields: dict) -> bool:
 	"""Apply `fields` to a row ONLY if it is still streaming=1 AND recovering=1.
 	Returns True if this call won the row (so the caller publishes), False if
 	another cycle already finalized it. Idempotency guard for #8."""
-	set_clause = ", ".join(f"`{k}` = %({k})s" for k in fields)
-	params = dict(fields, name=name)
-	frappe.db.sql(
-		f"UPDATE `tab{MSG}` SET {set_clause} WHERE name = %(name)s AND streaming = 1 AND recovering = 1",
-		params,
-	)
+	msg = frappe.qb.DocType(MSG)
+	query = frappe.qb.update(msg).where(msg.name == name).where(msg.streaming == 1).where(msg.recovering == 1)
+	for field, value in fields.items():
+		query = query.set(msg[field], value)
+	query.run()
 	# Read rowcount BEFORE commit (commit can reset the cursor).
 	cursor = getattr(frappe.db, "_cursor", None)
 	won = bool(cursor and cursor.rowcount)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist conditional clear
 	return won
 
 
-def _advance_macro(conversation_id: str, *, errored: bool) -> None:
+def _advance_macro(conversation_id: str, *, errored: bool, assistant_message: str | None = None) -> None:
 	"""Chaining hook for the macro engine (mirrors turn_handler._advance_macro;
 	not imported from there to avoid a cycle risk between chat.turn_handler
 	and chat.turn_recovery). A macro chain that ends its turn via park-and-
@@ -171,7 +172,9 @@ def _advance_macro(conversation_id: str, *, errored: bool) -> None:
 	try:
 		from jarvis.chat import macros
 
-		macros.advance_after_turn(conversation_id, errored=errored)
+		# Recovery works from the assistant row; the engine finds the turn by it, and
+		# advances a macro only when that turn was the macro's own step.
+		macros.advance_after_turn(conversation_id, errored=errored, assistant_message=assistant_message)
 	except Exception:
 		frappe.log_error(
 			title="turn_recovery: macro advance hook failed",
@@ -246,7 +249,7 @@ def _finalize(row: dict, text: str, *, media_rels: list[str] | None = None) -> N
 			"run_id": "recovered",
 		},
 	)
-	_advance_macro(conv, errored=False)
+	_advance_macro(conv, errored=False, assistant_message=name)
 
 	# Best-effort: a recovered long turn is exactly the kind that produced
 	# charts / generated images, so it deserves the same rich-output
@@ -304,8 +307,18 @@ def _admission_settle_conv(conversation: str, state: str, error: str | None = No
 		frappe.log_error(title="admission recovery settle", message=frappe.get_traceback())
 
 
-def _error(row: dict, message: str) -> None:
-	if not _conditional_clear(
+def _error_clear(row: dict, message: str) -> bool:
+	"""The row's terminal-error write: the conditional CAS + its own commit.
+	Returns True iff THIS call won the row (the caller's side effects should
+	then run), False if another cycle already finalized it (idempotency guard).
+
+	Split from the side effects below (P8, turn_recovery review) so the ceiling
+	loop can replay JUST this unit on a snapshot-race loss: replaying BOTH
+	together used to be wrong when the loss happened AFTER this write's own
+	commit (inside the side effects) - a retry's fresh `_conditional_clear` call
+	would then see the row already cleared, return False, and SKIP the side
+	effects that never actually ran on the failed attempt."""
+	return _conditional_clear(
 		row["name"],
 		{
 			"streaming": 0,
@@ -313,13 +326,17 @@ def _error(row: dict, message: str) -> None:
 			"error": message,
 			"was_recovered": 1,
 		},
-	):
-		return
+	)
+
+
+def _error_side_effects(row: dict, message: str) -> None:
+	"""Everything that follows a WON `_error_clear`. Run exactly once, never
+	inside a replayed unit (see `_error_clear`'s docstring)."""
 	# jarvis#1425 review (scoped re-review, 2026-09-27): poke a held switch
 	# forward right after this terminal write's own commit above.
 	from jarvis.chat import llm_switch
 
-	llm_switch.apply_if_active(source="turn_recovery._error")
+	llm_switch.apply_if_active(source="turn_recovery._error_side_effects")
 	_admission_settle_conv(row["conversation"], "errored", message)
 	publish_to_user(
 		row["owner"],
@@ -331,7 +348,7 @@ def _error(row: dict, message: str) -> None:
 			"error": message,
 		},
 	)
-	_advance_macro(row["conversation"], errored=True)
+	_advance_macro(row["conversation"], errored=True, assistant_message=row["name"])
 
 
 def _active_map(sess: AgentSession) -> dict:
@@ -350,19 +367,28 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	# Query rows FIRST (so we never load Settings on an empty bench, #14).
 	# Ordered conversation, seq DESC so the first row per conversation is the
 	# latest (used for the no-bleed dedup, #2).
-	rows = frappe.db.sql(
-		f"""
-		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
-		FROM `tabJarvis Chat Message` m
-		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
-		WHERE m.streaming = 1 AND m.recovering = 1
-		  AND c.session_key IS NOT NULL AND c.session_key != ''
-		ORDER BY m.conversation ASC, m.seq DESC
-		LIMIT %(limit)s
-		""",
-		{"limit": limit},
-		as_dict=True,
+	m = frappe.qb.DocType(MSG)
+	c = frappe.qb.DocType(CONV)
+	rows = (
+		frappe.qb.from_(m)
+		.join(c)
+		.on(c.name == m.conversation)
+		.select(
+			m.name,
+			m.conversation,
+			c.session_key,
+			c.owner,
+			m.recovery_started_at,
+			m.seq,
+			wm_term(m).as_("agent_seq_watermark"),
+			m.creation,
+		)
+		.where((m.streaming == 1) & (m.recovering == 1))
+		.where(c.session_key.isnotnull() & (c.session_key != ""))
+		.orderby(m.conversation, order=Order.asc)
+		.orderby(m.seq, order=Order.desc)
+		.limit(limit)
+		.run(as_dict=True)
 	)
 	if not rows:
 		return {"checked": 0}
@@ -374,8 +400,39 @@ def recover_pending_turns(limit: int = 20) -> dict:
 	live = []
 	for r in rows:
 		if _age_minutes(r["recovery_started_at"]) > _RECOVERY_CEILING_MINUTES:
-			_error(r, CEILING_ERROR_MESSAGE)
-			counts["errored"] += 1
+			# P8: same try/log shape as the eligible loop below (#13): a snapshot-race
+			# loss on this row's terminal write must not crash the whole cycle and
+			# strand every later row (including the eligible ones the loop below
+			# feeds from `live`). Only `_error_clear` (the CAS + its own commit) is
+			# replayed, NOT `_error_side_effects` (llm_switch, admission settle,
+			# publish, macro advance): those run AFTER that commit, so replaying
+			# them together with the CAS would re-run `_error_clear` on a fresh
+			# snapshot after a side-effect-stage conflict, find the row it just
+			# committed already cleared, and SILENTLY SKIP side effects that never
+			# actually ran on the failed attempt. Side effects run exactly once
+			# here, outside the replay, only when this attempt actually won the row.
+			try:
+				won = txn.replay_on_conflict(
+					lambda r=r: _error_clear(r, CEILING_ERROR_MESSAGE),
+					label=f"turn_recovery ceiling {r['name']}",
+					fresh=True,
+				)
+			except Exception as e:
+				try:
+					# report_lost_race re-raises a non-conflict exception; this loop
+					# must not crash the whole cycle for ANY reason (same "never stop
+					# on one row" contract as the eligible loop below), so catch that
+					# re-raise and log it too instead of letting it propagate.
+					txn.report_lost_race(e, title="turn_recovery: ceiling row failed")
+				except Exception:
+					frappe.log_error(
+						title="turn_recovery: ceiling row failed",
+						message=frappe.get_traceback(),
+					)
+			else:
+				if won:
+					_error_side_effects(r, CEILING_ERROR_MESSAGE)
+				counts["errored"] += 1
 		else:
 			live.append(r)
 	if not live:
@@ -451,14 +508,13 @@ def _next_turn_watermark(conversation: str, seq: int) -> int | None:
 	past it belong to that later turn). None when there is no later turn
 	(or none with a usable watermark) - then the window stays open-ended,
 	which matches the common single-in-flight-turn case."""
-	val = frappe.db.sql(
-		f"""
-		SELECT MIN({wm_expr()})
-		FROM `tabJarvis Chat Message`
-		WHERE conversation = %(conv)s AND role = 'assistant'
-		  AND seq > %(seq)s AND {wm_expr()} > 0
-		""",
-		{"conv": conversation, "seq": seq},
+	m = frappe.qb.DocType(MSG)
+	wm = wm_term(m)
+	val = (
+		frappe.qb.from_(m)
+		.select(Min(wm))
+		.where((m.conversation == conversation) & (m.role == "assistant") & (m.seq > seq) & (wm > 0))
+		.run()
 	)[0][0]
 	return int(val) if val else None
 
@@ -468,21 +524,29 @@ def recover_now(conversation_id: str) -> str:
 	row, so the common case (run already finished when the stream was lost)
 	does not wait for the cron. Dedicated connection - the pooled WS may be
 	the very thing that just died. Idempotent vs the cron via
-	_conditional_clear inside _finalize/_error."""
-	rows = frappe.db.sql(
-		f"""
-		SELECT m.name, m.conversation, c.session_key, c.owner,
-			   m.recovery_started_at, m.seq, {wm_expr("m.")} AS agent_seq_watermark, m.creation
-		FROM `tabJarvis Chat Message` m
-		JOIN `tabJarvis Conversation` c ON c.name = m.conversation
-		WHERE m.streaming = 1 AND m.recovering = 1
-		  AND m.conversation = %(conv)s
-		  AND c.session_key IS NOT NULL AND c.session_key != ''
-		ORDER BY m.seq DESC
-		LIMIT 1
-		""",
-		{"conv": conversation_id},
-		as_dict=True,
+	_conditional_clear inside _finalize/_error_clear."""
+	m = frappe.qb.DocType(MSG)
+	c = frappe.qb.DocType(CONV)
+	rows = (
+		frappe.qb.from_(m)
+		.join(c)
+		.on(c.name == m.conversation)
+		.select(
+			m.name,
+			m.conversation,
+			c.session_key,
+			c.owner,
+			m.recovery_started_at,
+			m.seq,
+			wm_term(m).as_("agent_seq_watermark"),
+			m.creation,
+		)
+		.where((m.streaming == 1) & (m.recovering == 1))
+		.where(m.conversation == conversation_id)
+		.where(c.session_key.isnotnull() & (c.session_key != ""))
+		.orderby(m.seq, order=Order.desc)
+		.limit(1)
+		.run(as_dict=True)
 	)
 	if not rows:
 		return "skipped"

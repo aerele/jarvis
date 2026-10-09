@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onBeforeUnmount } from "vue";
+import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
 
 const props = defineProps({
 	model: { type: Object, required: true },
@@ -16,15 +17,25 @@ const docTitle = computed(() => {
 		m.docName ? " · " + m.docName : ""
 	}`;
 });
-// Read-only fields to show: create -> the proposed (non-empty) fields; update ->
-// populated or changed fields (so the change shows in context).
+// Read-only fields to show: create -> the proposed (non-empty) fields plus required
+// ones the model left blank; update -> populated or changed fields (so the change
+// shows in context).
 const fields = computed(() =>
 	(props.model.fields || []).filter((f) => {
 		const set = String(f.value ?? "").trim() !== "";
-		return isUpdate.value ? set || f.changed : set;
+		return isUpdate.value ? set || f.changed : set || isRequiredBlank(f);
 	})
 );
-const tables = computed(() => (props.model.tables || []).filter((t) => (t.rows || []).length));
+// Each table through the card's own summary, so a cell ERPNext calculated (#647)
+// reads the same here as on the card.
+const tables = computed(() =>
+	(props.model.tables || [])
+		.filter((t) => (t.rows || []).length)
+		.map((t) => ({
+			...t,
+			view: lineItemSummary(t, (props.model.computed || {})[t.fieldname]),
+		}))
+);
 
 // Resizable width - drag the left (inner) edge. Mirrors Resizer.vue's behaviour:
 // clamp to [min, max], snap to the default within +/-10px, persist to localStorage.
@@ -137,7 +148,12 @@ onBeforeUnmount(() => {
 					<div v-if="headline" class="dp-headline">{{ headline }}</div>
 					<dl v-if="fields.length" class="dp-fields">
 						<template v-for="f in fields" :key="f.fieldname">
-							<dt>{{ f.label }}</dt>
+							<dt>
+								{{ f.label
+								}}<span v-if="!isUpdate && isRequiredBlank(f)" class="dp-req">
+									*</span
+								>
+							</dt>
 							<dd :class="{ 'dp-changed': f.changed }">
 								<template v-if="f.changed"
 									><span class="dp-old">{{ f.orig || "(empty)" }}</span>
@@ -146,7 +162,7 @@ onBeforeUnmount(() => {
 										f.value || "(empty)"
 									}}</span></template
 								>
-								<template v-else>{{ f.value }}</template>
+								<template v-else>{{ f.value || "-" }}</template>
 							</dd>
 						</template>
 					</dl>
@@ -162,13 +178,21 @@ onBeforeUnmount(() => {
 									</tr>
 								</thead>
 								<tbody>
-									<tr v-for="(r, ri) in t.rows" :key="ri">
-										<td v-for="c in t.columns" :key="c.fieldname">
-											{{ r[c.fieldname] ?? "" }}
+									<tr v-for="(r, ri) in t.view.rows" :key="ri">
+										<td
+											v-for="(cell, ci) in r.cells"
+											:key="t.columns[ci].fieldname"
+											:class="{ 'dp-computed': r.computed[ci] }"
+										>
+											{{ cell }}
 										</td>
 									</tr>
 								</tbody>
 							</table>
+						</div>
+						<div v-if="t.view.computedLabels.length" class="dp-computed-note">
+							{{ t.view.computedLabels.join(", ") }}: calculated by ERPNext, saved
+							when you confirm.
 						</div>
 					</div>
 					<div v-if="!fields.length && !tables.length" class="dp-empty">
@@ -332,6 +356,9 @@ onBeforeUnmount(() => {
 	font-size: 13.5px;
 	color: var(--text);
 }
+.dp-req {
+	color: var(--red);
+}
 .dp-changed .dp-old {
 	color: var(--text-3);
 	text-decoration: line-through;
@@ -379,6 +406,15 @@ onBeforeUnmount(() => {
 }
 .dp-grid tbody tr:last-child td {
 	border-bottom: none;
+}
+.dp-grid td.dp-computed {
+	color: var(--text-2);
+	font-variant-numeric: tabular-nums;
+}
+.dp-computed-note {
+	padding: 6px 0 0;
+	font-size: 11.5px;
+	color: var(--text-3);
 }
 .dp-empty {
 	font-size: 12.5px;

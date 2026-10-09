@@ -8,6 +8,8 @@ organization and audit, not a delivery guarantee.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import ChangedThroughParentOnly, NotRenamable
 
-class JarvisLearnedPatternRole(Document):
+
+class JarvisLearnedPatternRole(ChangedThroughParentOnly, NotRenamable, Document):
 	pass

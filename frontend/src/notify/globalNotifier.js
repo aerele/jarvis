@@ -22,7 +22,8 @@ import { report as reportError } from "@/lib/errorReporter";
 // The SAME fence ChatView applies to terminals, from the same module, so the two
 // listeners on this socket cannot disagree about what counts as a duplicate.
 import { fenceAccept, fenceReject } from "@/utils/eventFence";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
+import { macroDoneSignal } from "@/lib/macroRunOutcome";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
 const MAX_TOASTS = 3;
@@ -37,7 +38,10 @@ export function useToasts() {
 
 export function pushToast({ title, body, onClick }) {
 	const id = ++_seq;
-	const next = [...toasts.value, { id, title: title || agentName, body: body || "", onClick }];
+	const next = [
+		...toasts.value,
+		{ id, title: title || brand.agentName, body: body || "", onClick },
+	];
 	// max 3 stacked — drop the oldest (and its timer) instead of growing a pile
 	while (next.length > MAX_TOASTS) {
 		const drop = next.shift();
@@ -152,6 +156,12 @@ export function attachGlobalNotifier({ socket, router }) {
 	const trigSignalAt = new Map();
 	const TRIG_SIGNAL_WINDOW_MS = 5000;
 
+	// When each conversation last had a failed turn announced. A macro step that
+	// fails raises run:error for its turn and, a moment later, macro:done for the
+	// run: one failure, and it gets one signal.
+	const runErrorSignalAt = new Map();
+	const MACRO_AFTER_RUN_ERROR_MS = 5000;
+
 	// Terminal fence, per listener. The server publishes a turn's terminal MORE THAN
 	// ONCE (settlement, then the finalize backstop re-publish), and ChatView has always
 	// deduped it one-shot so its announce + reload fire once. This listener did not, so
@@ -211,13 +221,14 @@ export function attachGlobalNotifier({ socket, router }) {
 					// keep the row's title/order honest (debounced reload)
 					store.applyRemoteNew();
 				}
-				const title = convTitle(conv) || agentName;
+				const title = convTitle(conv) || brand.agentName;
 				// A stop is the user's own click, seconds ago - the dot is useful, a
 				// notification saying "Reply ready" for the reply they just killed is not.
 				if (p.stopped) return;
+				if (p.kind === "run:error") runErrorSignalAt.set(conv, Date.now());
 				const body =
 					p.kind === "run:error"
-						? `${agentName} hit an error in ${convTitle(conv) || "your chat"}`
+						? `${brand.agentName} hit an error in ${convTitle(conv) || "your chat"}`
 						: _excerpt(p.preview) || "Reply ready";
 				signal({
 					conv,
@@ -237,8 +248,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				if (conv === dashboardsPaneConv() && !document.hidden) return;
 				signal({
 					conv,
-					title: convTitle(conv) || agentName,
-					body: `${agentName} needs your confirmation` + (tool ? ": " + tool : ""),
+					title: convTitle(conv) || brand.agentName,
+					body: `${brand.agentName} needs your confirmation` + (tool ? ": " + tool : ""),
 					tag: "jarvis-" + (conv || "confirm"),
 					open: () => go(conversationPath(conv, p.origin_page || "")),
 				});
@@ -255,7 +266,7 @@ export function attachGlobalNotifier({ socket, router }) {
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
-					title: `${agentName} is waiting on you`,
+					title: `${brand.agentName} is waiting on you`,
 					body: dashboardApproval
 						? _excerpt(p.question) || "A dashboard question needs your answer."
 						: _excerpt(p.question) ||
@@ -323,15 +334,42 @@ export function attachGlobalNotifier({ socket, router }) {
 				}
 				return;
 			}
+			case "macro:done": {
+				// A macro run that FAILED. Before this, nothing outside the run's own
+				// conversation said so: the Runs tab had to be opened to find out.
+				const sig = macroDoneSignal(p);
+				if (!sig) return;
+				const conv = p.conversation || null;
+				if (
+					conv &&
+					Date.now() - (runErrorSignalAt.get(conv) || 0) < MACRO_AFTER_RUN_ERROR_MS
+				)
+					return; // the step's own failure was just announced
+				if (conv && conv !== onScreenConv()) {
+					store.markUnread(conv);
+					store.applyRemoteNew();
+				}
+				signal({
+					conv,
+					// A run with no conversation left has no screen that shows it.
+					toastAnywhere: !conv,
+					title: sig.title,
+					body: _excerpt(sig.body, 160),
+					tag: "jarvis-" + (conv || "macro"),
+					open: () => go(conv ? "/c/" + conv : "/macros/runs"),
+				});
+				return;
+			}
 			case "conversation:new": {
 				const conv = p.conversation_id;
 				if (!conv) return;
 				// off the chat routes ChatView isn't mounted to refresh the sidebar
 				// list — do it here (debounced; harmless double when both run)
 				if (!router.currentRoute.value.meta.chat) store.applyRemoteNew();
-				const title = p.title || `Message from ${agentName}`;
+				const title = p.title || `Message from ${brand.agentName}`;
 				const body =
-					_excerpt(p.preview) || `${agentName} started a new conversation with you.`;
+					_excerpt(p.preview) ||
+					`${brand.agentName} started a new conversation with you.`;
 				const open = () => go("/c/" + conv);
 				if (document.hidden) {
 					browserNotify({ title, body, tag: "jarvis-" + conv, onclick: open });

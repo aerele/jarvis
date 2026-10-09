@@ -122,12 +122,14 @@ def render(document: dict) -> str:
 
 
 def load_contract(path: str = CONTRACT_PATH) -> dict:
+	# nosemgrep: frappe-security-file-traversal -- checked-in contract artifact
 	with open(path, encoding="utf-8") as fh:
 		return json.load(fh)
 
 
 def write_contract(path: str = CONTRACT_PATH) -> str:
 	rendered = render(build_contract())
+	# nosemgrep: frappe-security-file-traversal -- checked-in contract artifact
 	with open(path, "w", encoding="utf-8") as fh:
 		fh.write(rendered)
 	return rendered
@@ -140,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 		write_contract()
 		print(f"wrote {CONTRACT_PATH}")
 		return 0
+	# nosemgrep: frappe-security-file-traversal -- checked-in contract artifact
 	with open(CONTRACT_PATH, encoding="utf-8") as fh:
 		current = fh.read()
 	if current == render(build_contract()):

@@ -300,7 +300,7 @@ def _audio_format(upload) -> str:
 	if extension in _AUDIO_EXTENSION_FORMATS:
 		return _AUDIO_EXTENSION_FORMATS[extension]
 	frappe.throw(
-		_("This audio format is not supported. Record again in WebM, OGG, WAV, MP3, M4A, AAC, or FLAC."),
+		_("This audio format is not supported. Record again in WebM, OGG, WAV, MP3, M4A, AAC or FLAC."),
 		frappe.ValidationError,
 	)
 

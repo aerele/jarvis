@@ -55,9 +55,11 @@ export function promoteNewChatScope({ queue, drafts, fromScope, toId, takeScope 
 //     leave guard with no chip and no action.
 //   * restoreText — a MAIN-composer send (fromMain) drops its bubble and restores its text to the
 //     composer, where its still-retained voice records stay re-captureable on the next send.
-// A MAIN send is left EXACTLY as rounds 1/2 (drop + restore); only the resend-with-voice path
-// changes. A programmatic non-voice send drops the bubble as before.
-export function planRejectedSend({ fromMain, bubbleVoiceAck }) {
+// Callers with a complete request that cannot be restored as text alone pass preserveRequest.
+// Otherwise retain the established text-only composer and voice recovery behavior.
+export function planRejectedSend({ fromMain, bubbleVoiceAck, preserveRequest = false }) {
+	// File-bearing sends and complete-payload retries have no safe text-only fallback.
+	if (preserveRequest) return { keepBubble: true, restoreText: false };
 	const hasVoice = !!(bubbleVoiceAck && bubbleVoiceAck.length);
 	if (!fromMain && hasVoice) return { keepBubble: true, restoreText: false };
 	return { keepBubble: false, restoreText: !!fromMain };
@@ -75,7 +77,17 @@ export function injectPendingBubbles(messages, pendingBubbles) {
 	const base = Array.isArray(messages) ? messages : [];
 	if (!pendingBubbles || !pendingBubbles.length) return base;
 	const have = new Set(base.map((m) => m && m.name));
-	const add = pendingBubbles.filter((b) => b && b.name && !have.has(b.name));
+	const add = pendingBubbles.filter(
+		(b) =>
+			b &&
+			b.name &&
+			!have.has(b.name) &&
+			!(
+				b.deliveryState === "delivered" &&
+				b.deliveryMessageId &&
+				have.has(b.deliveryMessageId)
+			)
+	);
 	return add.length ? [...base, ...add] : base;
 }
 
@@ -120,9 +132,23 @@ export function createPendingSends() {
 			m.delete(name);
 			if (!m.size) byScope.delete(k);
 		},
+		reconcile(scope, messages) {
+			const names = new Set(messages.map((m) => m.name));
+			for (const bubble of this.peek(scope)) {
+				if (
+					bubble.deliveryState === "delivered" &&
+					(bubble.deliveryConfirmed || names.has(bubble.deliveryMessageId))
+				)
+					this.remove(scope, bubble.name);
+			}
+		},
 		has(scope) {
 			const m = byScope.get(_key(scope));
 			return !!(m && m.size);
+		},
+		scopeOf(bubble) {
+			for (const [scope, entries] of byScope) if (entries.has(bubble.name)) return scope;
+			return null;
 		},
 		// Move every entry from `fromScope` to `toScope` when the new-chat sentinel is promoted to
 		// its real id, so a bubble that failed under the sentinel re-injects on the real conversation.
@@ -136,8 +162,14 @@ export function createPendingSends() {
 				dst = new Map();
 				byScope.set(tk, dst);
 			}
-			for (const [name, bubble] of src) if (!dst.has(name)) dst.set(name, bubble);
+			for (const [name, bubble] of src) {
+				if (bubble.sendRequest) bubble.sendRequest.conversation = toScope;
+				if (!dst.has(name)) dst.set(name, bubble);
+			}
 			byScope.delete(fk);
 		},
 	};
 }
+
+// Tab-owned recovery survives navigation out of ChatView; reload/logout clears it.
+export const pendingSends = createPendingSends();

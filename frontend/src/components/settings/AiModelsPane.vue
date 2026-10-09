@@ -66,6 +66,9 @@
 					ref="poolEditor"
 					:editable="isSM"
 					:directStatus="directSub"
+					:expiredEntries="subscriptionNotice.expired"
+					:reconnectRef="reconnectRef"
+					@reconnect-handled="reconnectRef = ''"
 					:hostScrim="true"
 					@saved="onSaved"
 					@direct-changed="onDirectChanged"
@@ -91,21 +94,42 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, inject, onMounted, onUnmounted } from "vue";
 import { Button } from "frappe-ui";
 import { getDirectSubscriptionStatus } from "@/api";
 import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { isSyncDisconnected } from "@/lib/syncStatus";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { useShellStore } from "@/stores/shell";
+import {
+	subscriptionNotice,
+	loadSubscriptionNotice,
+	watchSubscriptionNotice,
+} from "@/lib/subscriptionNotice";
 
 const store = useShellStore();
 
 // Template ref onto LlmPoolEditor's exposed { save, busy } - read busy.active/
 // busy.label above for the pane-wide scrim in the #scrim slot.
 const poolEditor = ref(null);
+// Expired chat sign-ins (shared reading, refreshed on jarvis:subscription_health) and the one-shot
+// reconnect request a Reconnect link left (`store.openSettings("aimodels", { reconnect })`, or the
+// `?settings=aimodels&reconnect=` deep link). The editor runs it once its rows have loaded and
+// answers with `reconnect-handled`.
+const socket = inject("$socket", null);
+const reconnectRef = ref(((store.takeSettingsIntent() || {}).reconnect || "").toString());
+let unwatchNotice = () => {};
+// openSettings("aimodels", { reconnect }) while this pane is already open: consume and clear it.
+watch(
+	() => store.settingsIntent,
+	(intent) => {
+		if (!intent || !intent.reconnect) return;
+		reconnectRef.value = String(intent.reconnect);
+		store.takeSettingsIntent();
+	}
+);
 
 // The rail already gates this section to the tenant-admin tier; this flag
 // additionally gates the editor's edit affordances + which probes fire. PART 4
@@ -113,9 +137,7 @@ const poolEditor = ref(null);
 // endpoints are all require_jarvis_admin now).
 const isSM = !!(window.is_system_manager || window.is_jarvis_admin);
 
-// agentName is a boot-time constant (read once from the page payload, never
-// reactive - see @/branding), so a plain string is enough here.
-const paneDescription = `The AI connection that powers ${agentName}.`;
+const paneDescription = computed(() => `The AI connection that powers ${brand.agentName}.`);
 
 // ---- AI models: brief save acknowledgement (editor persists itself) --------
 const savedNote = ref("");
@@ -206,7 +228,11 @@ async function onSaved(sync) {
 	store.bumpLlmConfig();
 }
 
-onMounted(loadDirectSub);
+onMounted(() => {
+	loadDirectSub();
+	loadSubscriptionNotice();
+	unwatchNotice = watchSubscriptionNotice(socket);
+});
 
 // True while a model change is applying, mirroring LlmPoolEditor's own
 // busy.active through the poolEditor template ref above. Still exposed (some
@@ -230,6 +256,7 @@ onMounted(loadDirectSub);
 const applying = computed(() => !!poolEditor.value?.busy?.active);
 watch(applying, (v) => (store.settingsApplying = v), { immediate: true });
 onUnmounted(() => {
+	unwatchNotice();
 	store.settingsApplying = false;
 });
 

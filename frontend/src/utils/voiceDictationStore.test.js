@@ -859,3 +859,23 @@ test("get() joins the fragments of a take still being spoken, so Download is nev
 	q.discard(id);
 	assert.equal(q.get(id), null, "a discarded recording exposes nothing");
 });
+
+test("dismissing an uncertain send surfaces only its retained voice token", async () => {
+	const tx = makeTranscriber(),
+		mirror = makeMirror();
+	const q = createVoiceDictationStore({ transcribe: tx.fn, mirror, retainUntilSent: true });
+	const a = dictate(q, { conversationId: "c1", fragments: ["a"] });
+	await flush();
+	tx.resolve(a, "original words");
+	await flush();
+	const token = q.captureSentInPayload("c1", "original words");
+	assert.equal(q.hasUnfinishedReason(), "live");
+	q.orphanToken(token);
+	assert.deepEqual(
+		q.snapshot().retained.map((r) => r.id),
+		[a]
+	);
+	assert.equal(q.hasUnfinishedReason(), "unresolved");
+	q.discard(a);
+	assert.equal(q.hasUnfinishedReason(), null);
+});

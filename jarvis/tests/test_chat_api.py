@@ -209,6 +209,19 @@ class TestCreateOrFocusEmpty(_ChatTestCase):
 		self.assertIn(filled, all_names)
 		self.assertNotIn(returned, all_names)
 
+	def test_reused_empty_starts_without_a_model_or_effort_pick(self):
+		# A draft abandoned after a pick is handed out again as a fresh chat. The
+		# caller's pill shows no pick, so one that survived here would run the first
+		# message on a model the user never chose for this chat.
+		existing = create_conversation()
+		frappe.db.set_value(CONV, existing, {"model_override": "gpt-x", "thinking_override": "low"})
+
+		self.assertEqual(create_or_focus_empty(), existing)
+
+		row = frappe.db.get_value(CONV, existing, ["model_override", "thinking_override"], as_dict=True)
+		self.assertFalse(row.model_override)
+		self.assertFalse(row.thinking_override)
+
 	def test_prefers_most_recent_empty(self):
 		older = create_conversation()
 		# Force older to have an earlier last_active_at
@@ -515,6 +528,46 @@ class TestRetryMessage(_ChatTestCase):
 		self.assertEqual(payload["message_id"], user_id)
 		self.assertEqual(payload["run_id"], result["run_id"])
 
+	def test_a_retry_ends_an_approved_skill_run(self):
+		# A retry re-runs the whole request, like a new message: a run left open on the
+		# chat does not cover it.
+		_user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(
+			CONV,
+			self.conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		with patch("jarvis.chat.api._dispatch_turn"):
+			result = retry_message(asst_id)
+		self.assertTrue(result["ok"])
+		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 0)
+
+	def test_a_retry_the_site_is_too_busy_for_leaves_the_run_alone(self):
+		_user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(
+			CONV,
+			self.conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		with patch("jarvis.chat.api._dispatch_turn", return_value={"overloaded": True, "reason": "busy"}):
+			result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 1)
+
+	def test_a_refused_retry_leaves_the_run_alone(self):
+		user_id, _asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(
+			CONV,
+			self.conv,
+			{"skill_autorun": 1, "skill_autorun_at": frappe.utils.now_datetime()},
+			update_modified=False,
+		)
+		result = retry_message(user_id)  # not an assistant message
+		self.assertFalse(result["ok"])
+		self.assertEqual(int(frappe.db.get_value(CONV, self.conv, "skill_autorun") or 0), 1)
+
 	def test_enqueues_worker_against_preceding_user_message(self):
 		user_id, asst_id = self._make_turn(self.conv, with_error=True)
 		with patch("frappe.enqueue") as enqueue:
@@ -595,6 +648,91 @@ class TestRetryMessage(_ChatTestCase):
 			retry_message(asst_id)
 		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
 		self.assertGreaterEqual(after, before)
+
+	def test_legacy_retry_of_a_reply_that_is_not_the_newest_is_refused(self):
+		u, asst_id = self._make_turn(self.conv, with_error=True)
+		self._make_turn(self.conv, user_text="next question")
+		with (
+			patch("jarvis.chat.api._dispatch_turn") as dispatch,
+			patch("jarvis.chat.latency.get_logger") as logger,
+		):
+			result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertIn("latest", result["reason"])
+		dispatch.assert_not_called()
+		logger.return_value.info.assert_called_once_with(
+			"retry_refused conversation=%s message=%s reason=%s seed=%s blocker=%s",
+			self.conv,
+			asst_id,
+			"not_latest",
+			u,
+			"",
+		)
+
+	def test_legacy_retry_while_a_reply_runs_is_refused_and_logged(self):
+		_u, asst_id = self._make_turn(self.conv, with_error=True)
+		with (
+			patch("jarvis.chat.api._conversation_busy", return_value=True),
+			patch("jarvis.chat.latency.get_logger") as logger,
+		):
+			result = retry_message(asst_id)
+		self.assertEqual(
+			result, {"ok": False, "reason": "A reply is already in progress. Wait for it to finish."}
+		)
+		line = logger.return_value.info.call_args.args
+		self.assertEqual(line[0].split()[3], "reason=%s")
+		self.assertEqual(line[3], "busy")
+
+	def test_legacy_retry_of_a_seed_owned_by_another_user_is_refused(self):
+		user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		frappe.db.set_value(MSG, user_id, "owner", "Administrator", update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+			result = retry_message(asst_id)
+		self.assertFalse(result["ok"])
+		self.assertIn("cannot be retried", result["reason"])
+		dispatch.assert_not_called()
+
+	def _pump_era_turn(self, run_id, seed, state, **extra):
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Turn",
+				"run_id": run_id + self.conv[-6:],
+				"conversation": self.conv,
+				"relay_target_id": admission.DEFAULT_RELAY_TARGET,
+				"state": state,
+				"seed_message": seed,
+				**extra,
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.db.delete, "Jarvis Chat Turn", {"conversation": self.conv})
+
+	def test_legacy_retry_keeps_the_context_of_the_failed_turn(self):
+		# Pure legacy writes no Turn rows; this is a site cut back from the pump, whose
+		# failed turn still has its row.
+		user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		context = {"page": "dashboards", "theme": "midnight"}
+		self._pump_era_turn(
+			"legacy-ctx-",
+			user_id,
+			"errored",
+			assistant_message=asst_id,
+			dispatch_payload=frappe.as_json({"context": context}),
+		)
+		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+			result = retry_message(asst_id)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(dispatch.call_args[0][0]["context"], context)
+		self.assertEqual(dispatch.call_args[0][0]["message_id"], user_id, "the bound turn's seed")
+
+	def test_legacy_retry_of_a_bound_reply_waits_for_an_older_unfinished_turn(self):
+		user_id, asst_id = self._make_turn(self.conv, with_error=True)
+		self._pump_era_turn("legacy-older-", user_id, "queued")
+		self._pump_era_turn("legacy-own-", user_id, "errored", assistant_message=asst_id)
+		with patch("jarvis.chat.api._dispatch_turn") as dispatch:
+			result = retry_message(asst_id)
+		self.assertIn("in progress", result["reason"])
+		dispatch.assert_not_called()
 
 	def test_rejects_when_subscription_suspended(self):
 		"""The Retry button sits on the exact error a stopped container produces.
@@ -1262,8 +1400,9 @@ class TestConversationOwnershipEnforcement(_ChatTestCase):
 		self.assertTrue(rename_conversation(self.conv, "my chat")["ok"])
 		self.assertTrue(set_star(self.conv, 1)["ok"])
 		with patch("jarvis.chat.api._dispatch_turn"):
-			self.assertTrue(send_message(self.conv, "hello")["ok"])
+			# Retry first: once "hello" is sent, the failed reply is no longer the latest.
 			self.assertTrue(retry_message(self.asst_msg)["ok"])
+			self.assertTrue(send_message(self.conv, "hello")["ok"])
 		self.assertTrue(archive_conversation(self.conv)["ok"])
 
 

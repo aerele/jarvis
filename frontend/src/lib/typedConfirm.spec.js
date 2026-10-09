@@ -35,7 +35,13 @@ describe("send() handles a confirmed response", () => {
 	it("reuses the accepted path's one-shot clear and voice release", () => {
 		// Duplicating them above the rejection block is what broke the voice
 		// lifecycle tests, which anchor on the FIRST occurrence of each.
-		expect(src.indexOf("_prefillSendContext = null;")).toBeLessThan(confirmedAt);
+		const sendStart = src.indexOf("async function send(textArg, resendAck)");
+		const consumed = src.indexOf(
+			"consumeRecoveredContext(sendRequest, _sentScope);",
+			sendStart
+		);
+		expect(consumed).toBeGreaterThan(sendStart);
+		expect(consumed).toBeLessThan(confirmedAt);
 		expect(src.indexOf("if (_voiceAck) voiceStore?.acknowledge(_voiceAck);")).toBeLessThan(
 			confirmedAt
 		);
@@ -128,8 +134,8 @@ describe("the card advertises both ways to approve", () => {
 });
 
 describe("a typed reply that goes on to Jarvis (decisions 13 and 14)", () => {
-	const at = src.indexOf("for (const t of r.tokens || []) removePending(t);");
-	const accepted = src.slice(at, at + 1200);
+	const at = src.indexOf("const _spokeIn = r?.conversation_id || sentFrom;");
+	const accepted = src.slice(at, src.indexOf("if (r && r.queued)", at));
 
 	it("drops the cards a typed no discarded, without a mid-send reload", () => {
 		expect(accepted).toContain("for (const t of discardedTokens(r)) removePending(t);");

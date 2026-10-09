@@ -401,9 +401,9 @@ def _stamp_sync_status(result: dict) -> None:
 		if result.get("skipped"):
 			return
 		if result.get("ok"):
-			status = f"OK — {result.get('pushed_files', 0)} file(s) pushed"
+			status = f"OK: {result.get('pushed_files', 0)} file(s) pushed"
 		else:
-			status = f"Failed — {result.get('reason', 'see Error Log')}"
+			status = f"Failed: {result.get('reason', 'see Error Log')}"
 		frappe.db.set_single_value(
 			SETTINGS,
 			{
@@ -485,7 +485,7 @@ def _sync(full: bool) -> dict:
 		if last:
 			for r in deletes:
 				frappe.db.set_value(WIKI, r.name, "mirror_hash", "", update_modified=False)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync progress
 
 	return {
 		"ok": True,
@@ -615,7 +615,7 @@ def _scrub() -> dict:
 	# stay consistent and a later re-enable full sync re-pushes cleanly.
 	for r in rows:
 		frappe.db.set_value(WIKI, r.name, "mirror_hash", "", update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync progress
 
 	return {
 		"ok": True,

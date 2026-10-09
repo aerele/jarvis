@@ -18,6 +18,7 @@ import json
 import re
 
 import frappe
+from frappe.query_builder import Order
 
 from jarvis._responses import err
 from jarvis.chat.pending_actions._store import filebox_migrated
@@ -33,19 +34,6 @@ DESC_CAP = 200
 _CANDIDATES = 200
 _RECORD_CAP = 20
 _BACKSTOP_LIST = 10
-_FIELDS = (
-	"name",
-	"owner",
-	"skill_name",
-	"description",
-	"scope",
-	"target_role",
-	"enabled",
-	"use_in_file_box",
-	"file_box_creates",
-	"managed_by_learning",
-	"modified",
-)
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 _LIST_HEAD = (
@@ -109,44 +97,87 @@ def is_eligible(row, dropper: str, pin: str | None = None, roles=None) -> bool:
 
 
 def resolve(slug: str, user: str, dropper: str, pin: str | None = None):
-	"""``slug``'s row in a File Box run: ``user``'s own row (even opted out, it hides
-	the slug), else the recorded pin's row, else the first eligible one (a row only
-	System Manager see-all shows never beats it). Raises as ``resolve_skill``."""
+	"""``slug``'s row in a File Box run, by the fetch's one rule
+	(``get_skill.served``): the recorded pin's row, else a reviewed row (even opted
+	out, it hides the slug), else ``user``'s own, else the first eligible one (a row
+	only System Manager see-all shows never beats it). Raises as ``resolve_skill``."""
 	from jarvis.tools.get_skill import resolve_skill
 
 	roles = frappe.get_roles(dropper)
 	return resolve_skill(
 		slug,
 		user,
-		prefer=lambda r: (r.name != pin, not is_eligible(r, dropper, pin, roles), not r.use_in_file_box),
+		prefer=lambda r: (not is_eligible(r, dropper, pin, roles), not r.use_in_file_box),
+		pinned=pin,
 	)
 
 
 def eligible_skills(dropper: str, pin: str | None = None) -> list:
-	"""Every skill ``dropper`` may route by, newest first, one per slug: their own
-	row wins (as in ``get_skill``), so an opted-out own row hides the slug."""
-	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import prefetch_child_values
+	"""Every skill ``dropper`` may route by, newest first, one per slug.
+
+	A slug is listed only when the row the fetch would serve them for it is eligible
+	(``get_skill.served``: the pin, else a reviewed row, else their own), so the menu
+	never names a skill the fetch would then refuse or answer with another row. A
+	reviewed skill that is not opted in therefore hides a same-named skill of the
+	dropper's own."""
+	from jarvis.jarvis.doctype.jarvis_custom_skill.jarvis_custom_skill import (
+		prefetch_child_values,
+		user_can_use_skill,
+	)
+	from jarvis.tools.get_skill import served
 
 	if not filebox_migrated():
 		return []
-	rows = frappe.db.sql(
-		f"""SELECT {", ".join(_FIELDS)} FROM `tabJarvis Custom Skill`
-		WHERE enabled = 1 AND (owner = %(u)s OR (use_in_file_box = 1
-		  AND (name = %(pin)s OR (scope IN ('Role', 'Org') AND managed_by_learning = 0))))
-		ORDER BY modified DESC LIMIT %(n)s""",
-		{"u": dropper, "pin": pin or "", "n": _CANDIDATES},
-		as_dict=True,
+	# The slugs that could be listed, newest first: the dropper's own skills, the pin,
+	# and the reviewed skills opted in.
+	skill = frappe.qb.DocType(SKILL)
+	reviewed = skill.scope.isin(["Role", "Org"]) & (skill.managed_by_learning == 0)
+	listable = (skill.owner == dropper) | (
+		(skill.use_in_file_box == 1) & ((skill.name == (pin or "")) | reviewed)
 	)
+	slugs = (
+		frappe.qb.from_(skill)
+		.select(skill.skill_name)
+		.where((skill.enabled == 1) & listable)
+		.orderby(skill.modified, order=Order.desc)
+		.limit(_CANDIDATES)
+	).run(pluck=True)
+	slugs = list(dict.fromkeys(slugs))
+	if not slugs:
+		return []
+	# Every enabled row of those slugs: which one a slug means is judged among all the
+	# rows the dropper may use, as the fetch judges it.
+	rows = (
+		frappe.qb.from_(skill)
+		.select(
+			skill.name,
+			skill.owner,
+			skill.skill_name,
+			skill.description,
+			skill.scope,
+			skill.target_role,
+			skill.enabled,
+			skill.use_in_file_box,
+			skill.file_box_creates,
+			skill.managed_by_learning,
+			skill.modified,
+		)
+		.where((skill.enabled == 1) & skill.skill_name.isin(slugs))
+		.orderby(skill.modified, order=Order.desc)
+	).run(as_dict=True)
 	prefetch_child_values(rows)
-	rows.sort(key=lambda r: r.name != pin)  # the pin's row wins its slug, as in ``resolve``
 	roles = frappe.get_roles(dropper)
-	own = {r.skill_name for r in rows if r.owner == dropper}
-	picked, seen = [], set()
+	by_slug: dict[str, list] = {}
 	for row in rows:
-		if row.skill_name in seen or (row.owner != dropper and row.skill_name in own):
+		if user_can_use_skill(row, dropper, roles):
+			by_slug.setdefault(row.skill_name, []).append(row)
+	picked = []
+	for slug in slugs:
+		usable = by_slug.get(slug)
+		if not usable:
 			continue
+		row = served(usable, dropper, pinned=pin)
 		if is_eligible(row, dropper, pin, roles):
-			seen.add(row.skill_name)
 			picked.append(row)
 	return picked
 
@@ -258,7 +289,7 @@ def _record(conversation: str, row) -> str | None:
 	the model, or None."""
 	from jarvis.chat.pending_actions._store import lock_conversation
 
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	lock_conversation(conversation)
 	conv = frappe.db.get_value(
 		CONV, conversation, ["owner", "filebox_skills", "filebox_skill_choice"], as_dict=True
@@ -266,7 +297,7 @@ def _record(conversation: str, row) -> str | None:
 	entries = _parse(conv.filebox_skills)
 	pin = _pin(entries)
 	if pin and pin.get("docname") == row.name:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return None
 	new = entry(row)
 	found = [e for e in entries if not e.get("pinned") and e.get("docname") != row.name]
@@ -276,7 +307,7 @@ def _record(conversation: str, row) -> str | None:
 		pin and pin["creates"] and new["creates"] and new["creates"] != pin["creates"]
 	)
 	filed = _file_conflict(conversation, pin, new) if conflict else None
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notify
 	# Off a sheet and still Pending (a stopped run dismisses it): on the board.
 	if (
 		filed
@@ -336,7 +367,7 @@ def file_skill_missing(conversation: str, slug: str) -> None:
 		f"The skill '{_safe(slug, 60)}' chosen for {name} isn't available to you.",
 		[PROCESS_AUTO, SKIP],
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notify
 	if filed:
 		_notify(frappe.db.get_value(CONV, conversation, "owner"), conversation, *filed)
 
@@ -425,7 +456,7 @@ def apply_answer(doc) -> bool:
 		frappe.db.set_value(
 			CONV, doc.conversation, "filebox_skill_choice", doc.decision, update_modified=False
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resume
 		then = _FOLLOW.format(slug=doc.decision, creates=_safe(creates, 140))
 	message = _ANSWER.format(name=doc.name, title=_safe(doc.title, 140), decision=doc.decision, then=then)
 	return _resume(doc.conversation, message)
@@ -446,7 +477,7 @@ def skip_file(conversation: str) -> None:
 		{"filebox_skipped_at": frappe.utils.now_datetime(), "filebox_rerun_preamble": None},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- skip survives a later failure
 
 
 def _start_unpinned(conversation: str) -> bool:
@@ -460,11 +491,11 @@ def _start_unpinned(conversation: str) -> bool:
 	from jarvis.permissions import delegated_send
 
 	owner = frappe.db.get_value(CONV, conversation, "owner")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
 	lock_conversation(conversation)
 	r = filebox._rerun_row(conversation, owner)
 	if not r or r["live"] or r["has_draft"]:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		frappe.logger("jarvis").info(
 			"file_box routing start refused for %s: a draft or a live run", conversation
 		)
@@ -483,7 +514,7 @@ def _start_unpinned(conversation: str) -> bool:
 		},
 		update_modified=False,
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before run starts
 	try:
 		f = filebox._source_file(conversation)
 		ok, switch_to = approvals_api.owner_run_identity(conversation)

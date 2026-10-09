@@ -9,7 +9,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 
 # File Box status/result stamps: written by server code via ``frappe.db.set_value``
 # (or a doc carrying ``flags.jarvis_server_write``). No Admin/SM exemption (M12).
@@ -30,7 +30,16 @@ _FILEBOX_SERVER_FIELDS = (
 )
 
 
-class JarvisConversation(Document):
+# Per-chat auto mode (#581) stamps: written only by send_message's locked _write_conv
+# via ``frappe.db.set_value``. Re-read on the ORM save paths (never added to the File Box
+# forge guard) so a stale in-memory 0 can't trip _guard_auto_mode.
+_AUTO_MODE_SERVER_FIELDS = ("auto_mode", "auto_mode_at")
+# An approved skill run's activity stamp and the skill it was opened on: written only
+# by the server, straight to the row (``approve_and_run``, the gate).
+_SKILL_RUN_SERVER_FIELDS = ("skill_autorun_at", "skill_autorun_skill")
+
+
+class JarvisConversation(NotRenamable, Document):
 	def before_insert(self):
 		if not self.last_active_at:
 			self.last_active_at = frappe.utils.now()
@@ -42,7 +51,9 @@ class JarvisConversation(Document):
 		self._guard_file_box_enable()
 		self._guard_skip_confirmation_enable()
 		self._guard_skill_autorun_enable()
+		self._keep_skill_run_fields()
 		self._guard_request_autorun_enable()
+		self._guard_auto_mode()
 
 	def _guard_file_box_server_fields(self):
 		"""The File Box list reads these as ground truth (Draft created / Failed), so
@@ -60,11 +71,11 @@ class JarvisConversation(Document):
 			)
 
 	def sync_file_box_fields(self):
-		"""Re-read the server-stamped File Box fields, row-locked until commit: a live
-		run stamps them via ``db.set_value`` while a request holds this doc, and a stale
-		save would trip the guard (or revert the stamp). A field not migrated yet is
-		skipped (new code ahead of its migrate)."""
-		fields = [f for f in _FILEBOX_SERVER_FIELDS if self.meta.has_field(f)]
+		"""Re-read the server-stamped fields (File Box status + auto_mode), row-locked
+		until commit: a live run stamps them via ``db.set_value`` while a request holds
+		this doc, and a stale save would trip the guard (or revert the stamp). A field
+		not migrated yet is skipped (new code ahead of its migrate)."""
+		fields = [f for f in _FILEBOX_SERVER_FIELDS + _AUTO_MODE_SERVER_FIELDS if self.meta.has_field(f)]
 		if not fields:
 			return
 		current = frappe.db.get_value(self.doctype, self.name, fields, as_dict=True, for_update=True)
@@ -143,6 +154,17 @@ class JarvisConversation(Document):
 				frappe.PermissionError,
 			)
 
+	def _keep_skill_run_fields(self):
+		"""A save never changes ``_SKILL_RUN_SERVER_FIELDS``: it carries what is stored.
+
+		The gate reads them (how recently the run was active, and which skill's "Allow
+		Approve & run" it re-checks), so a save by the chat's owner must not move them.
+		Restored instead of refused, because a document loaded before the server wrote
+		them is saved later by ordinary actions (rename, star, archive)."""
+		previous = None if self.is_new() else self.get_doc_before_save()
+		for fieldname in _SKILL_RUN_SERVER_FIELDS:
+			self.set(fieldname, previous.get(fieldname) if previous else None)
+
 	def _guard_request_autorun_enable(self):
 		"""``request_autorun`` is the flag the write-confirmation gate reads to run the
 		CURRENT request's covered writes uncarded after the user typed 'confirm all' /
@@ -165,4 +187,19 @@ class JarvisConversation(Document):
 			frappe.throw(
 				_("Enabling request auto-run requires a Jarvis Admin or System Manager role."),
 				frappe.PermissionError,
+			)
+
+	def _guard_auto_mode(self):
+		"""auto_mode is chosen with the chat's first human message and can never be
+		turned off. The one legitimate writer is send_message's locked _write_conv
+		(frappe.db.set_value, which bypasses this controller); every other path is refused."""
+		# .get(): new code can run ahead of its migrate, when the field is not on the doc.
+		previous = self.get_doc_before_save()
+		was_on = bool(previous and previous.get("auto_mode"))
+		now_on = bool(self.get("auto_mode"))
+		if was_on and not now_on:
+			frappe.throw(_("Auto mode can't be turned off for this chat."), frappe.PermissionError)
+		if now_on and not was_on:
+			frappe.throw(
+				_("Auto mode can only be turned on with the chat's first message."), frappe.PermissionError
 			)

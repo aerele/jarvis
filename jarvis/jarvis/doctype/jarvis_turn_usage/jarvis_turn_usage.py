@@ -11,6 +11,8 @@ path with ``ignore_permissions=True``.
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisTurnUsage(Document):
+
+class JarvisTurnUsage(NotRenamable, Document):
 	pass

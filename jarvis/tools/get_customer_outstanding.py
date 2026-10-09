@@ -11,6 +11,11 @@ gated by Company User Permission scope (not Company-doctype read - see
 - or who is restricted to a different company - can't probe an
 outstanding balance outside what they can see. The underlying helper
 itself applies no company-level permission filter.
+
+Customer read alone is not enough, though: the figure is a ledger sum
+(plus unbilled Sales Order value), and Stock / Sales Users read customers
+without any ledger access. So it also needs GL Entry read or the Accounts
+Receivable report (``jarvis.tools._ledger_access``).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from jarvis.exceptions import (
 	PermissionDeniedError,
 )
 from jarvis.tools._company_scope import assert_company_permitted
+from jarvis.tools._ledger_access import assert_ledger_readable
 
 
 def get_customer_outstanding(
@@ -44,6 +50,7 @@ def get_customer_outstanding(
 		raise InvalidArgumentError(f"unknown Company: {company}")
 	if not frappe.has_permission("Customer", "read", doc=customer):
 		raise PermissionDeniedError(f"no read permission on Customer {customer}")
+	assert_ledger_readable("Customer")
 	assert_company_permitted(company)
 
 	from erpnext.selling.doctype.customer.customer import (

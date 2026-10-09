@@ -11,6 +11,8 @@
   "enabled",
   "skip_confirmation",
   "stop_on_error",
+  "admin_hold",
+  "admin_hold_reason",
   "description",
   "steps",
   "merged_prompt",
@@ -49,7 +51,7 @@
    "default": "0",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "ADMIN ONLY. When on, this macro's runs execute gated writes WITHOUT a confirmation card - including run_method, send_email and run_import. The irreversible trio (delete/cancel/amend) still parks and STOPS the run. Enabling requires the Jarvis Admin / System Manager role. Trust model: arming trusts this macro's OWNER for its current AND future steps - editing steps does not clear it. Re-running a stopped run repeats earlier steps."
+   "description": "Switched on by the macro's OWNER only, on the macro's own page in Jarvis (never from Desk, REST, an import or the assistant). When on, this macro's runs execute gated writes WITHOUT a confirmation card - including run_method, send_email and run_import. Delete, cancel, amend, creating a skill and a connector call still park and STOP the run. While on, the steps, the summary, switching the macro on and its schedule change only on that page; switching it off, unscheduling and disarming work from anywhere. Re-running a stopped run repeats earlier steps."
   },
   {
    "fieldname": "stop_on_error",
@@ -57,6 +59,26 @@
    "label": "Stop on Error",
    "default": "1",
    "description": "When on, a failed step aborts the run. When off, the run continues to the next step."
+  },
+  {
+   "fieldname": "admin_hold",
+   "fieldtype": "Check",
+   "label": "On hold (admin)",
+   "default": "0",
+   "read_only": 1,
+   "no_copy": 1,
+   "permlevel": 1,
+   "description": "Set and cleared by a Jarvis Admin from the admin Macros screen, never by the owner. While on, the macro does not run (by hand, on a schedule or by resuming a run), and it cannot be switched on, scheduled or armed."
+  },
+  {
+   "fieldname": "admin_hold_reason",
+   "fieldtype": "Small Text",
+   "label": "Hold reason",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1,
+   "permlevel": 1,
+   "description": "Why the admin put the macro on hold, shown to its owner on the macro form. Hidden in Desk: the text is stored as the admin typed it, and the Desk form would show it as HTML. The SPA shows it as plain text."
   },
   {
    "fieldname": "description",

@@ -43,6 +43,7 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.chat import pump
 from jarvis.chat import turn_state as ts
 from jarvis.chat.relay_mux import RelayMux
+from jarvis.chat.runtime_profile import RuntimeProfileError
 from jarvis.tests.test_relay_mux import _DoubleGateway
 
 CONV = "Jarvis Conversation"
@@ -189,7 +190,10 @@ class _PumpTestCase(FrappeTestCase):
 			frappe.db.sql(f"SELECT MAX(seq) FROM `tab{MSG}` WHERE conversation=%(c)s", {"c": conv})[0][0] or 0
 		) + 1
 
-	def _mk_msg(self, conv: str, role: str = "user", content: str = "hi", **extra) -> str:
+	def _mk_msg(
+		self, conv: str, role: str = "user", content: str = "hi", *, server: bool = False, **extra
+	) -> str:
+		"""``server``: the row may set the server-only fields (origin, tool_*)."""
 		doc = frappe.get_doc(
 			{
 				"doctype": MSG,
@@ -201,6 +205,8 @@ class _PumpTestCase(FrappeTestCase):
 			}
 		)
 		doc.flags.ignore_permissions = True
+		if server:
+			doc.flags.jarvis_server_write = True
 		doc.insert()
 		frappe.db.commit()
 		return doc.name
@@ -1534,8 +1540,7 @@ class TestAttemptSuffixJobIds(_PumpTestCase):
 class TestControlQueueRouting(_PumpTestCase):
 	"""F1 (long-queue self-starvation): the pump's CONTROL jobs (prepare + finalize)
 	must never share the single-worker ``long`` queue the 90s hops ride. Routing per
-	bench shape: a live ``jarvis_chat`` lane -> ride it; else ``long`` with >=2
-	workers; else ``short``. Hops stay on ``long`` unconditionally (asserted in the
+	bench shape: a live ``jarvis_chat`` lane -> ride it; else ``short`` when a dedicated short worker is live, else the pre-#632 rule. Hops stay on ``long`` unconditionally (asserted in the
 	handoff test)."""
 
 	def test_jarvis_chat_lane_live_rides_it(self):
@@ -1543,21 +1548,98 @@ class TestControlQueueRouting(_PumpTestCase):
 			self.assertEqual(pump._control_queue(), "jarvis_chat")
 			self.assertFalse(pump._pump_shape_starves())
 
-	def test_long_with_two_workers_uses_long(self):
-		with (
+	def _layout(self, workers: dict, long_n: int):
+		"""Patch the probes for a bench whose workers are ``{name: [queues]}``."""
+
+		class _W:
+			def __init__(self, queues):
+				self._q = queues
+
+			def queue_names(self):
+				return self._q
+
+		from frappe.utils.background_jobs import generate_qname
+
+		fake = [_W([generate_qname(q) for q in qs]) for qs in workers.values()]
+		return (
 			patch("jarvis.chat.api._turn_queue", lambda: "long"),
-			patch.object(pump, "_live_worker_count", lambda q: 2),
-		):
+			patch("frappe.utils.background_jobs.get_workers", lambda: fake),
+			patch.object(pump, "_live_worker_count", lambda q: long_n),
+		)
+
+	def test_generic_plus_long_only_keeps_develop_behaviour(self):
+		"""#632 live regression: a generic worker (short, default, long, compact) plus a
+		long-only worker has no dedicated short consumer, so control jobs ride `long`
+		(2 live long workers) exactly as before, not behind hops on `short`."""
+		p1, p2, p3 = self._layout(
+			{"generic": ["short", "default", "long", "compact"], "long": ["long"]}, long_n=2
+		)
+		with p1, p2, p3:
 			self.assertEqual(pump._control_queue(), "long")
+			self.assertTrue(pump._pump_shape_starves(), "no dedicated short worker -> warn")
+
+	def test_short_only_worker_routes_to_short(self):
+		p1, p2, p3 = self._layout(
+			{"generic": ["short", "default", "long"], "long": ["long"], "short": ["short"]}, long_n=2
+		)
+		with p1, p2, p3:
+			self.assertEqual(pump._control_queue(), "short")
 			self.assertFalse(pump._pump_shape_starves())
 
-	def test_single_long_no_jarvis_chat_uses_short(self):
-		with (
-			patch("jarvis.chat.api._turn_queue", lambda: "long"),
-			patch.object(pump, "_live_worker_count", lambda q: 1),
-		):
+	def test_single_long_worker_generic_only_uses_short(self):
+		p1, p2, p3 = self._layout({"generic": ["short", "default", "long"]}, long_n=1)
+		with p1, p2, p3:
 			self.assertEqual(pump._control_queue(), "short")
 			self.assertTrue(pump._pump_shape_starves())
+
+	def test_no_workers_safe_default(self):
+		p1, p2, p3 = self._layout({}, long_n=0)
+		with p1, p2, p3:
+			self.assertEqual(pump._control_queue(), "short")
+			self.assertTrue(pump._pump_shape_starves())
+
+	def test_frappe_supervisor_layout_routes_to_short(self):
+		"""The stock Frappe supervisor layout: a `short,default` worker plus a
+		`long,default,short` worker. The first is a dedicated short consumer."""
+		p1, p2, p3 = self._layout({"a": ["short", "default"], "b": ["long", "default", "short"]}, long_n=1)
+		with p1, p2, p3:
+			self.assertEqual(pump._control_queue(), "short")
+			self.assertFalse(pump._pump_shape_starves())
+
+	def test_get_workers_raising_keeps_develop_rule(self):
+		def boom():
+			raise RuntimeError("redis down")
+
+		for long_n, want in ((2, "long"), (1, "short")):
+			with (
+				patch("jarvis.chat.api._turn_queue", lambda: "long"),
+				patch("frappe.utils.background_jobs.get_workers", boom),
+				patch.object(pump, "_live_worker_count", lambda q, n=long_n: n),
+			):
+				self.assertEqual(pump._control_queue(), want, f"long={long_n}")
+
+	def test_other_bench_short_worker_does_not_count(self):
+		"""A worker whose queue names carry another bench's prefix is not ours."""
+
+		class _W:
+			def queue_names(self):
+				return ["other-bench-id:short"]
+
+		with (
+			patch("jarvis.chat.api._turn_queue", lambda: "long"),
+			patch("frappe.utils.background_jobs.get_workers", lambda: [_W()]),
+			patch.object(pump, "_live_worker_count", lambda q: 2),
+		):
+			self.assertFalse(pump._has_dedicated_short_consumer())
+			self.assertEqual(pump._control_queue(), "long")
+
+	def test_jarvis_chat_lane_beats_short_consumer(self):
+		with (
+			patch("jarvis.chat.api._turn_queue", lambda: "jarvis_chat"),
+			patch.object(pump, "_has_dedicated_short_consumer", lambda: True),
+		):
+			self.assertEqual(pump._control_queue(), "jarvis_chat")
+			self.assertFalse(pump._pump_shape_starves())
 
 	def test_prepare_finalize_route_to_short_on_starve_shape(self):
 		"""The F1 scenario as a queue-name assertion on the enqueue calls: on the
@@ -1575,6 +1657,7 @@ class TestControlQueueRouting(_PumpTestCase):
 		with (
 			patch("jarvis.chat.api._turn_queue", lambda: "long"),
 			patch.object(pump, "_live_worker_count", lambda q: 1),
+			patch.object(pump, "_has_dedicated_short_consumer", lambda: False),
 			patch("frappe.enqueue", fake_enqueue),
 		):
 			pump._default_dispatch_prepare(rid, self._target)
@@ -1613,6 +1696,7 @@ class TestControlQueueRouting(_PumpTestCase):
 			with (
 				patch("jarvis.chat.api._turn_queue", lambda: "long"),
 				patch.object(pump, "_live_worker_count", lambda q: 1),
+				patch.object(pump, "_has_dedicated_short_consumer", lambda: False),
 				patch.object(pump, "_telemetry", lambda ev, **kw: events.append(ev)),
 				patch("frappe.log_error", lambda *a, **k: None),
 			):
@@ -1861,6 +1945,96 @@ class TestCleanHandoffSuccession(_PumpTestCase):
 		self.assertEqual(rec.calls[0][1]["transport_retry"], 1)
 		won, _ = ts.lease_acquire(self._target, "succ")
 		self.assertTrue(won, "successor can acquire after the no_transport release")
+
+	def _crashing_hop(self, *, transport_retry=0):
+		"""Run one hop over a live streaming turn whose drain raises a non-operational error."""
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv)
+		amsg = self._mk_msg(conv, role="assistant", content="partial", streaming=1)
+		self._mk_turn(
+			conv, f"pmp_crash_{transport_retry}", seed, "streaming", version=1, assistant_message=amsg
+		)
+		deps = self._deps(double=self._double())
+		rec = _Recorder()
+		deps.enqueue_pump_job = rec
+		boom = RuntimeProfileError("profile unavailable")
+		with patch.object(pump, "drain_slice", side_effect=boom), patch.object(frappe, "log_error") as log:
+			res = pump.run_pump_hop(
+				self._target, deps=deps, soft_budget_s=999, transport_retry=transport_retry
+			)
+		return res, rec, log
+
+	def test_hop_crash_enqueues_successor_instead_of_dying(self):
+		"""M-01: an unexpected exception mid-hop (here the RuntimeProfileError a recovery
+		tail raises) must not end the RQ job successor-less, freezing every live reply on
+		the shard until the next send or the */5 watchdog."""
+		res, rec, log = self._crashing_hop()
+		self.assertEqual(res["exit"], "crashed")
+		self.assertEqual(rec.count, 1, "a crashed hop with live work enqueues a successor")
+		self.assertEqual(rec.calls[0][1]["transport_retry"], 1, "the retry budget is spent by one")
+		self.assertIn("pump.hop_crash", [c.kwargs.get("title") for c in log.call_args_list])
+		won, _ = ts.lease_acquire(self._target, "succ")
+		self.assertTrue(won, "the lease is released at once, not held for its TTL")
+
+	def test_repeated_hop_crash_stops_at_the_retry_budget(self):
+		"""A poison fault that crashes every hop is bounded: past the budget no successor
+		is enqueued (the watchdog revives) instead of a tight crash loop."""
+		res, rec, _ = self._crashing_hop(transport_retry=pump.TRANSPORT_RETRY_MAX)
+		self.assertEqual(res["exit"], "crashed")
+		self.assertEqual(rec.count, 0, "over the budget -> defer to the watchdog")
+		rid = f"pmp_crash_{pump.TRANSPORT_RETRY_MAX}"
+		self.assertEqual(self._state(rid), "recovering", "the live reply is parked, not left spinning")
+		won, _ = ts.lease_acquire(self._target, "succ")
+		self.assertTrue(won)
+
+	def test_recovery_tail_failure_is_isolated_to_its_turn(self):
+		"""M-01: a recovery tail that raises re-attaches THAT turn and lets the other
+		pending recoveries resolve; it never escapes to end the hop."""
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+
+		class _Done:
+			done = True
+
+			def result(self, _timeout):
+				return {"payload": {"messages": []}}
+
+		def pending(rid):
+			r = {"run_id": rid, "conversation": "c", "version": 1}
+			return pump._PendingRecovery(_Done(), 0.0, r, "s", 0, None)
+
+		ctx.pending_recoveries = {"bad": pending("bad"), "good": pending("good")}
+		resolved, reattached = [], []
+
+		def resolve(_ctx, pr, _frame):
+			if pr.r["run_id"] == "bad":
+				raise RuntimeProfileError("profile unavailable")
+			resolved.append(pr.r["run_id"])
+
+		with (
+			patch.object(pump, "_resolve_recovery_tail", side_effect=resolve),
+			patch.object(pump, "_reattach_lane", lambda _c, r: reattached.append(r["run_id"])),
+			patch.object(frappe, "log_error") as log,
+		):
+			pump._poll_recoveries(ctx)
+		self.assertEqual(resolved, ["good"], "the other turn's recovery still resolves")
+		self.assertEqual(reattached, ["bad"], "the failing turn re-attaches and keeps waiting")
+		self.assertEqual(ctx.pending_recoveries, {})
+		self.assertIn("pump.recovery_tail", [c.kwargs.get("title") for c in log.call_args_list])
+
+	def test_recovery_tail_lease_loss_still_takes_the_shared_exit(self):
+		ctx = self._make_ctx(self._deps(), with_mux=False)
+
+		class _Done:
+			done = True
+
+			def result(self, _timeout):
+				return {}
+
+		r = {"run_id": "x", "conversation": "c", "version": 1}
+		ctx.pending_recoveries = {"x": pump._PendingRecovery(_Done(), 0.0, r, "s", 0, None)}
+		with patch.object(pump, "_resolve_recovery_tail", side_effect=ts.LeaseLostExit("x")):
+			with self.assertRaises(ts.LeaseLostExit):
+				pump._poll_recoveries(ctx)
 
 
 # --------------------------------------------------------------------------- #

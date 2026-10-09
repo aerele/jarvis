@@ -45,18 +45,27 @@ def read_file(
 	sheet: str | None = None,
 	max_rows: int = 500,
 	max_chars: int = 20000,
+	preview: bool = False,
+	read_mode: str = "preview",
+	cursor: str | None = None,
+	version: str | None = None,
 ) -> dict:
-	"""Read an attached file and return its contents.
+	"""Read a bounded preview, or opt into the file-cursor-v1 exact text contract.
 
-	Identify the file by ``file_url`` (preferred — exact) or ``filename`` (the
-	name shown in the ``📎`` marker; resolves to the most recent matching File
-	the user can read). ``sheet`` selects one worksheet by name for xlsx;
-	omitted returns the first sheet. ``max_rows`` / ``max_chars`` bound the
-	payload so a huge file doesn't blow the turn's context. Images return
-	metadata only — when the customer attaches an image or PDF in chat I receive
-	it as native vision and see it directly, so I don't need this tool for
-	visual content (use it for spreadsheets, text, and text-PDF extraction).
+	Cursor continuations require the returned version and identical worksheet scope.
+	Each call rechecks permissions and bytes. No jobs, model calls or cached content.
 	"""
+	if read_mode not in {"preview", "file-cursor-v1"}:
+		# Independently upgraded plugins must degrade truthfully, never execute
+		# an unknown mode. A continuation remains distinguishable as a preview.
+		read_mode, cursor, version = "preview", None, None
+	if read_mode == "file-cursor-v1" and not frappe.conf.get("jarvis_file_sections_enabled", True):
+		frappe.logger("jarvis.file_read").info("status=preview reason=disabled")
+		read_mode, cursor, version = "preview", None, None
+	if (cursor is None) != (version is None) or (preview and cursor is not None):
+		raise InvalidArgumentError("Cursor and version must be supplied together, without preview.")
+	if cursor is not None and read_mode != "file-cursor-v1":
+		raise InvalidArgumentError("Cursor references require file-cursor-v1 mode.")
 	fdoc = _resolve_file(file_url, filename)
 	if not frappe.has_permission("File", "read", doc=fdoc.name):
 		# Generic on purpose - do not echo the resolved file's real name back
@@ -71,10 +80,26 @@ def read_file(
 	# unhandled HTTP 500 for every file type.
 	content = compat.file_bytes(fdoc)
 
-	max_rows = min(int(max_rows or 500), _MAX_ROWS)
-	max_chars = min(int(max_chars or 20000), _MAX_CHARS)
+	max_rows = max(1, min(int(max_rows or 500), _MAX_ROWS))
+	max_chars = max(1, min(int(max_chars or 20000), _MAX_CHARS))
 
-	base = {"filename": fdoc.file_name, "file_url": fdoc.file_url, "size_bytes": len(content)}
+	base = {
+		"filename": fdoc.file_name,
+		"file_url": fdoc.file_url,
+		"size_bytes": len(content),
+		"read_capability": "file-cursor-v1",
+	}
+	if (
+		not preview
+		and read_mode == "file-cursor-v1"
+		and (
+			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT
+			or (ext not in _IMAGE_EXT | {"xls"} and _looks_text(content))
+		)
+	):
+		from jarvis.tools._file_sections import read_sections
+
+		return {**base, **read_sections(fdoc, content, sheet=sheet, cursor=cursor, version=version)}
 
 	if ext in _PDF_EXT:
 		return {**base, **_read_pdf(content, max_chars)}
@@ -137,10 +162,12 @@ def _read_pdf(content: bytes, max_chars: int) -> dict:
 	reader = PdfReader(io.BytesIO(content))
 	pages = []
 	total = 0
-	for page in reader.pages:
+	failed_pages = []
+	for number, page in enumerate(reader.pages, 1):
 		try:
 			txt = page.extract_text() or ""
 		except Exception:
+			failed_pages.append(number)
 			txt = ""
 		pages.append(txt)
 		total += len(txt)
@@ -151,7 +178,16 @@ def _read_pdf(content: bytes, max_chars: int) -> dict:
 		"kind": "pdf",
 		"page_count": len(reader.pages),
 		"text": text[:max_chars],
-		"truncated": len(text) > max_chars,
+		"truncated": len(text) > max_chars or len(pages) < len(reader.pages),
+		"coverage": {
+			"pages_visited": len(pages),
+			"pages_total": len(reader.pages),
+			"failed_pages": failed_pages,
+			"complete": len(text) <= max_chars
+			and len(pages) == len(reader.pages)
+			and not failed_pages
+			and all(p.strip() for p in pages),
+		},
 	}
 	if not text.strip():
 		result["note"] = (
@@ -167,7 +203,9 @@ def _read_xlsx(content: bytes, sheet: str | None, max_rows: int) -> dict:
 
 	wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
 	names = wb.sheetnames
-	targets = [sheet] if sheet and sheet in names else ([names[0]] if names else [])
+	if sheet and sheet not in names:
+		sheet = None
+	targets = [sheet] if sheet else ([names[0]] if names else [])
 	out_sheets = []
 	for sname in targets:
 		ws = wb[sname]
@@ -192,14 +230,17 @@ def _read_csv(content: bytes, ext: str, max_rows: int) -> dict:
 	text = content.decode("utf-8-sig", "replace")
 	delim = "\t" if ext == "tsv" else ","
 	rows = []
+	has_more = False
 	for row in csv.reader(io.StringIO(text), delimiter=delim):
-		rows.append(row)
 		if len(rows) >= max_rows:
+			has_more = True
 			break
+		rows.append(row)
 	return {
 		"kind": "table",
 		"format": ext,
-		"sheets": [{"name": "Sheet1", "rows": rows, "row_count": len(rows)}],
+		"sheets": [{"name": "Sheet1", "rows": rows, "row_count": len(rows), "truncated": has_more}],
+		"coverage": {"rows_visited": len(rows), "has_more": has_more, "complete": not has_more},
 	}
 
 
@@ -251,6 +292,11 @@ def _cell(v):
 		return ""
 	if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
 		return v.isoformat()
+	if isinstance(v, datetime.timedelta):
+		# Preserve durations beyond 24h (and negative durations) without wrapping.
+		return str(v)
 	if isinstance(v, decimal.Decimal):
 		return float(v)
-	return v
+	if isinstance(v, (str, int, float, bool)):
+		return v
+	return str(v)

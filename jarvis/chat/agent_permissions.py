@@ -5,7 +5,8 @@ The data-layer twin of ``jarvis/chat/chat_permissions.py`` for the four
 owner/installer-scoped agent doctypes:
 
   * Jarvis Agent Installation -> the row's own ``owner`` (the installer).
-  * Jarvis Agent Run          -> the row's own ``owner``.
+  * Jarvis Agent Run          -> the row's own ``owner``, and only while it has an
+                                 installation (see ``run_query_conditions``).
   * Jarvis Agent Finding      -> the row's own ``owner``.
   * Jarvis Agent Activity     -> the row's own ``owner``.
 
@@ -77,11 +78,21 @@ def has_installation_permission(doc, ptype: str = "read", user: str | None = Non
 # --------------------------------------------------------------------------- #
 # Jarvis Agent Run
 # --------------------------------------------------------------------------- #
+# A run with no installation is one an uninstall kept for the month's A14 budget
+# (``agent_scheduler.keep_budget_rows_of_uninstalled``); every run the engine starts
+# carries its installation. A kept row is not run history, and under PP-4 it may be a
+# reviewer's shadow run handed back to the installer, so only an admin reads it.
 def run_query_conditions(user: str | None = None) -> str:
-	return _owner_query(RUN, user)
+	cond = _owner_query(RUN, user)
+	if not cond:
+		return ""
+	return f"{cond} and ifnull(`tab{RUN}`.`installation`, '') != ''"
 
 
 def has_run_permission(doc, ptype: str = "read", user: str | None = None) -> bool:
+	user = user or frappe.session.user
+	if ptype != "create" and not doc.get("installation") and not _is_sm(user):
+		return False
 	return _owner_has_permission(doc, ptype, user)
 
 

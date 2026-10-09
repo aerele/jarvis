@@ -39,6 +39,8 @@ import json
 import frappe
 from frappe.utils import cint, now_datetime
 
+from jarvis._session import impersonate
+
 NOTE = "Jarvis Voice Note"
 RUN = "Jarvis Pattern Run"
 JLP = "Jarvis Learned Pattern"
@@ -175,7 +177,6 @@ def _process_all() -> None:
 	with redis_lock(LOCK_NAME, timeout_s=JOB_TIMEOUT_S, blocking_timeout_s=0) as acquired:
 		if not acquired:
 			return
-		original_user = frappe.session.user
 		status = "failed: unexpected error; see Error Log"
 		try:
 			status = _process_locked()
@@ -185,10 +186,6 @@ def _process_all() -> None:
 				message=frappe.get_traceback(),
 			)
 		finally:
-			try:
-				frappe.set_user(original_user)
-			except Exception:
-				pass
 			_stamp_settings(status)
 
 
@@ -511,73 +508,71 @@ def _persist_rule_facts(rule_facts: list[dict]) -> dict:
 		return stats
 	from jarvis.learning import lifecycle
 
-	original_user = frappe.session.user
 	prev_flag = frappe.flags.jarvis_pattern_engine
 	try:
-		frappe.set_user("Administrator")
-		frappe.flags.jarvis_pattern_engine = True
-		run = frappe.get_doc(
-			{
-				"doctype": RUN,
-				"status": "Running",
-				"trigger": "manual",
-				"started_at": now_datetime(),
-				"scan_mode": "voice",
-				"coverage_note": "Voice-note fact extraction (daily sweep).",
-			}
-		)
-		run.flags.ignore_permissions = True
-		run.insert()
-		stats["run"] = run.name
+		with impersonate("Administrator"):
+			frappe.flags.jarvis_pattern_engine = True
+			run = frappe.get_doc(
+				{
+					"doctype": RUN,
+					"status": "Running",
+					"trigger": "manual",
+					"started_at": now_datetime(),
+					"scan_mode": "voice",
+					"coverage_note": "Voice-note fact extraction (daily sweep).",
+				}
+			)
+			run.flags.ignore_permissions = True
+			run.insert()
+			stats["run"] = run.name
 
-		for fact in rule_facts:
-			cand = _candidate_from_fact(fact)
-			try:
-				outcome = lifecycle.upsert_candidate(cand, run)
-			except Exception:
-				frappe.log_error(
-					title="jarvis voice facts: candidate upsert failed",
-					message=frappe.get_traceback(),
-				)
-				continue
-			if outcome == "created":
-				stats["created"] += 1
-			elif outcome == "updated":
-				stats["updated"] += 1
-			else:
-				stats["duplicates"] += 1
-			if outcome in ("created", "updated"):
-				_surface(cand["pattern_key"])
-				# Security review PART 2 TASK 16: a rule fact drawn (even partly)
-				# from a PRIVATE Personalise answer note carries personal nuances;
-				# stamp the pattern so a reviewer promoting it org-wide is warned to
-				# scrub them (the owner did not request the promotion). Sticky once
-				# set — a mixed-cohort pattern stays flagged (conservative).
-				if fact.get("personalise_users"):
-					_flag_personalise_origin(cand["pattern_key"])
+			for fact in rule_facts:
+				cand = _candidate_from_fact(fact)
+				try:
+					outcome = lifecycle.upsert_candidate(cand, run)
+				except Exception:
+					frappe.log_error(
+						title="jarvis voice facts: candidate upsert failed",
+						message=frappe.get_traceback(),
+					)
+					continue
+				if outcome == "created":
+					stats["created"] += 1
+				elif outcome == "updated":
+					stats["updated"] += 1
+				else:
+					stats["duplicates"] += 1
+				if outcome in ("created", "updated"):
+					_surface(cand["pattern_key"])
+					# Security review PART 2 TASK 16: a rule fact drawn (even partly)
+					# from a PRIVATE Personalise answer note carries personal nuances;
+					# stamp the pattern so a reviewer promoting it org-wide is warned to
+					# scrub them (the owner did not request the promotion). Sticky once
+					# set — a mixed-cohort pattern stays flagged (conservative).
+					if fact.get("personalise_users"):
+						_flag_personalise_origin(cand["pattern_key"])
 
-		frappe.db.set_value(
-			RUN,
-			run.name,
-			{
-				"status": "Completed",
-				"ended_at": now_datetime(),
-				"candidates_found": stats["total"],
-				"proposals_created": stats["created"],
-				"proposals_updated": stats["updated"],
-				"duplicates_suppressed": stats["duplicates"],
-				"coverage_note": (
-					f"Voice-note fact extraction: {stats['total']} rule fact(s) from "
-					f"the daily voice sweep ({stats['created']} created, "
-					f"{stats['updated']} updated, {stats['duplicates']} suppressed)."
-				),
-			},
-			update_modified=False,
-		)
-		frappe.db.commit()
+			frappe.db.set_value(
+				RUN,
+				run.name,
+				{
+					"status": "Completed",
+					"ended_at": now_datetime(),
+					"candidates_found": stats["total"],
+					"proposals_created": stats["created"],
+					"proposals_updated": stats["updated"],
+					"duplicates_suppressed": stats["duplicates"],
+					"coverage_note": (
+						f"Voice-note fact extraction: {stats['total']} rule fact(s) from "
+						f"the daily voice sweep ({stats['created']} created, "
+						f"{stats['updated']} updated, {stats['duplicates']} suppressed)."
+					),
+				},
+				update_modified=False,
+			)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- stats survive a later failure
 	finally:
 		frappe.flags.jarvis_pattern_engine = prev_flag
-		frappe.set_user(original_user)
 	return stats
 
 
@@ -860,7 +855,7 @@ def _mark_processed(processed: list[tuple[str, str]]) -> None:
 				message=frappe.get_traceback(),
 			)
 	if processed:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- processed marks survive later failure
 
 
 def _summary(

@@ -138,6 +138,45 @@ def add_openpyxl_charts(worksheet, data, charts):
 				Reference(worksheet, min_col=col + 1, min_row=1, max_row=len(data)), titles_from_data=True
 			)
 		chart.set_categories(Reference(worksheet, min_col=spec.categories + 1, min_row=2, max_row=len(data)))
+		_cache_openpyxl_points(chart, data, spec, worksheet.title)
 		if spec.title:
 			chart.title = spec.title
 		worksheet.add_chart(chart, f"{get_column_letter(len(data[0]) + 2)}{2 + index * 20}")
+
+
+def _cache_openpyxl_points(chart, data, spec, sheet_title):
+	"""Write the cell values into the chart part (numCache / strCache), as the
+	xlsxwriter path does, so previews and other readers can draw the chart without
+	reading the worksheet. openpyxl leaves these out."""
+	from openpyxl.chart.data_source import AxDataSource, NumData, NumVal, StrData, StrRef, StrVal
+	from openpyxl.utils import get_column_letter
+
+	def cell(row, col):
+		return row[col] if col < len(row) else None
+
+	def label(value):
+		if isinstance(value, (datetime.date, datetime.time)):
+			return value.isoformat()
+		if isinstance(value, bool):
+			return "TRUE" if value else "FALSE"
+		return "" if value is None else str(value)
+
+	cat_col = get_column_letter(spec.categories + 1)
+	cat_ref = f"'{sheet_title.replace(chr(39), chr(39) * 2)}'!${cat_col}$2:${cat_col}${len(data)}"
+	cats = [label(cell(row, spec.categories)) for row in data[1:]]
+	for series, col in zip(chart.series, spec.values, strict=True):
+		if series.tx and series.tx.strRef:
+			series.tx.strRef.strCache = StrData(ptCount=1, pt=[StrVal(idx=0, v=label(cell(data[0], col)))])
+		if series.val and series.val.numRef:
+			points = []
+			for i, row in enumerate(data[1:]):
+				value = cell(row, col)
+				if isinstance(value, (Real, Decimal)) and not isinstance(value, bool):
+					points.append(NumVal(idx=i, v=float(value)))
+			series.val.numRef.numCache = NumData(formatCode="General", ptCount=len(data) - 1, pt=points)
+		series.cat = AxDataSource(
+			strRef=StrRef(
+				f=cat_ref,
+				strCache=StrData(ptCount=len(cats), pt=[StrVal(idx=i, v=c) for i, c in enumerate(cats)]),
+			)
+		)

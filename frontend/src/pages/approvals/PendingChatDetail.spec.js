@@ -111,6 +111,23 @@ describe("PendingChatDetail", () => {
 		expect(window.__pwned).toBeUndefined();
 	});
 
+	it("shows the card's risk banner, then its warning line, as the chat does", async () => {
+		const w = await mountWith(
+			rec({
+				card: {
+					...rec().card,
+					risk: "sensitive",
+					risk_line: "This sends data outside the site.",
+					warning: { jobs: 3, rolled_back: false },
+				},
+			})
+		);
+		expect(w.findAll('[role="note"]').map((n) => n.text())).toEqual([
+			"This sends data outside the site.",
+			"This will also start 3 background jobs.",
+		]);
+	});
+
 	it("falls back to the summary when the card can't render", async () => {
 		const w = await mountWith(rec({ card: "not a card" }));
 		expect(w.text()).toContain("Create a ToDo");
@@ -232,5 +249,32 @@ describe("PendingChatDetail", () => {
 		expect(w.find('[role="status"]').text()).toBe("Running now…");
 		expect(button(w, "Confirm")).toBeFalsy();
 		expect(button(w, "Open chat")).toBeTruthy();
+	});
+
+	it("a failed card shows its reference (the confirmation's own id) with a copy button", async () => {
+		const w = await mountWith(
+			rec({
+				status: "Failed",
+				can_act: 0,
+				reason_code: "failed",
+				reason: "The action could not be applied.",
+			})
+		);
+		expect(w.find('[role="status"]').text()).toBe("The action could not be applied.");
+		expect(w.text()).toContain("Reference:");
+		expect(w.find("code").text()).toBe("PA-9");
+		expect(w.find('button[aria-label="Copy reference PA-9"]').exists()).toBe(true);
+	});
+
+	it("no reference while it waits, or once it ran", async () => {
+		for (const over of [
+			{},
+			{ status: "Executed", can_act: 0 },
+			{ status: "Discarded", can_act: 0 },
+		]) {
+			const w = await mountWith(rec(over));
+			expect(w.text()).not.toContain("Reference:");
+			w.unmount();
+		}
 	});
 });

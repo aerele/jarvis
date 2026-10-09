@@ -268,14 +268,15 @@ class TestOrigin(_Base):
 		from jarvis.learning import app_analysis
 
 		step = frappe._dict(prompt="p1", model_override=None, thinking_override=None, skills=None)
-		macro_doc = frappe._dict(steps=[step], name="m", owner=USER)
-		run = frappe._dict(conversation=self.conv, name="r")
+		macro_doc = frappe._dict(steps=[step], name="m", owner=USER, merged_prompt="merged")
+		stepped = frappe._dict(conversation=self.conv, name="r", run_mode="stepped")
+		summarized = frappe._dict(conversation=self.conv, name="r", run_mode="merged")
 		with (
 			patch("jarvis.chat.api._enqueue_turn", return_value={"overloaded": True}) as enq,
 			patch.object(macros, "_defer_capacity"),
 		):
-			macros._run_step(run, macro_doc, 0)
-			macros._run_merged(run, macro_doc, "merged")
+			macros._dispatch_step(stepped, macro_doc, 0)
+			macros._dispatch_step(summarized, macro_doc, 0)
 		self.assertEqual([c.kwargs["origin"] for c in enq.call_args_list], ["macro", "macro"])
 
 		lrun = frappe._dict(conversation=self.conv, app="x", zip_path="z", batches_total=1)
@@ -333,6 +334,22 @@ class TestWritersStillWrite(_Base):
 			frappe.db.get_value(MSG, {"conversation": self.conv, "role": "tool"}, "action_outcome"),
 			"confirmed",
 		)
+
+	def test_append_receipt_marks_a_submitted_create(self):
+		# The chip must be able to say "Created and submitted": the saved result carries
+		# docstatus 1 for a create the card also submitted, and only then.
+		actions_api._append_receipt(
+			self.conv, "create", "ToDo", "td-1", {}, "Created and submitted ToDo td-1.", submitted=1
+		)
+		actions_api._append_receipt(
+			self.conv, "create", "ToDo", "td-2", {}, "Created ToDo td-2.", submitted=0
+		)
+		rows = frappe.get_all(
+			MSG, {"conversation": self.conv, "role": "tool"}, ["tool_result"], order_by="seq"
+		)
+		data = [frappe.parse_json(r.tool_result)["data"] for r in rows]
+		self.assertEqual(data[0].get("docstatus"), 1)
+		self.assertNotIn("docstatus", data[1])
 
 	def test_send_message_and_enqueue_turn_inserts(self):
 		with _as(USER), _no_dispatch():

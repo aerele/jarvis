@@ -164,6 +164,54 @@ def clear_skill_autorun(conversation: str) -> None:
 	clear_run_cancel(conversation)
 
 
+def keep_skill_autorun_open(conversation: str | None) -> None:
+	"""One of an approved run's cards was just confirmed: move the run's activity stamp
+	to now, so the write that follows runs under it however long the card waited.
+
+	Only for a run that is open and has a stamp (a missing stamp is a malformed run the
+	gate parks, and stays one). Committed at once so the worker that continues the turn
+	sees it. Best-effort: a confirm must not fail on it."""
+	if not conversation:
+		return
+	try:
+		conv = frappe.qb.DocType(_CONV)
+		(
+			frappe.qb.update(conv)
+			.set(conv.skill_autorun_at, frappe.utils.now_datetime())
+			.where(
+				(conv.name == conversation) & (conv.skill_autorun == 1) & conv.skill_autorun_at.isnotnull()
+			)
+			.run()
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seen by the continuing worker
+	except Exception:
+		try:
+			frappe.log_error(title="keep_skill_autorun_open failed", message=frappe.get_traceback())
+		except Exception:
+			pass
+
+
+def end_skill_autorun_if_open(conversation: str | None, reason: str, *, keep_halt: bool = False) -> None:
+	"""End an approved run on ``conversation`` if one is open, for ``reason`` (a card of
+	it that failed, a retry, an archive). A no-op, with no write, when none is.
+	``keep_halt`` leaves a Halt signal standing. Never raises."""
+	if not conversation:
+		return
+	try:
+		if not frappe.db.get_value(_CONV, conversation, "skill_autorun"):
+			return
+		halted = keep_halt and is_run_cancel_requested(conversation)
+	except Exception:
+		return
+	clear_skill_autorun(conversation)
+	try:
+		if halted:
+			request_run_cancel(conversation)
+		frappe.logger("jarvis.skill_run").info(f"skill run ended conversation={conversation} reason={reason}")
+	except Exception:
+		pass
+
+
 def _has_pending_card(owner: str | None, conversation: str) -> bool:
 	"""True iff a pending confirmation card is STRICTLY bound to ``conversation``.
 

@@ -128,7 +128,7 @@ import { Badge, Button, Dialog, FeatherIcon, toast, confirmDialog } from "frappe
 import JvSpinner from "@/components/JvSpinner.vue";
 import { exactDate } from "@/utils/datetime";
 import { getNote, deleteNote } from "@/api/personalise";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 
 const router = useRouter();
@@ -205,8 +205,8 @@ function confirmDelete() {
 		title: "Delete this note?",
 		message:
 			note.value && note.value.status === "Processed"
-				? `This removes the note from your list. Knowledge ${agentName} already extracted from it is kept.`
-				: `This note hasn't been processed yet - ${agentName} won't learn from it if you delete it now.`,
+				? `This removes the note from your list. Knowledge ${brand.agentName} already extracted from it is kept.`
+				: `This note hasn't been processed yet - ${brand.agentName} won't learn from it if you delete it now.`,
 		onConfirm: async ({ hideDialog }) => {
 			deleting.value = true;
 			try {

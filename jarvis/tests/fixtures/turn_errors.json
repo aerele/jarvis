@@ -232,7 +232,95 @@
     "code": "cancelled"
   },
   {
+    "error": "Stopped before it started.",
+    "code": "cancelled"
+  },
+  {
     "error": "İnvalid api key",
+    "code": "gateway"
+  },
+  {
+    "error": "Managed CLI live session is no longer reusable. | cli_live_session_changed",
+    "code": "session-reset"
+  },
+  {
+    "error": "Managed CLI live session is no longer reusable. | cli_live_session_missing",
+    "code": "session-reset"
+  },
+  {
+    "error": "Still verifying your openai subscription: internal_server_error: auth_unavailable: no auth available (providers=codex, model=gpt-5.6-terra; last upstream error: unauthorized: token: [REDACTED] \"error\": { \"message\": \"Your refresh token: [REDACTED] \"type\": \"invalid_request_error\", \"param\": null, \"code\": \"refresh_token_reused\" } })",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "All models failed (2): openai/gpt-5.6: 500 auth_unavailable: unauthorized: refresh_token_reused | xai/grok: timeout",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "API Error: 401 Invalid API key · Please run /login",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "auth_unavailable: no auth available (providers=kimi, model=kimi-k2; last upstream error: invalid_grant",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "OpenAI API error: 401 Unauthorized. Incorrect API key provided: sk-xxxx",
+    "code": "authentication"
+  },
+  {
+    "error": "MCP connector google_drive failed: invalid_grant",
+    "code": "authentication"
+  },
+  {
+    "error": "⚠️ Agent couldn't generate a response. Please try again.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "⚠️ Agent couldn’t generate a response. Please try again.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "Agent couldn't generate a response.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "Agent couldn't generate a response. Tool call failed.",
+    "code": "empty-reply"
+  },
+  {
+    "error": "⚠️ Agent couldn't generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
+    "code": "empty-reply-tools"
+  },
+  {
+    "error": "⚠️ Agent couldn’t generate a response. Note: some tool actions may have already been executed — please verify before retrying.",
+    "code": "empty-reply-tools"
+  },
+  {
+    "error": "Agent couldn't generate a response: 429 rate_limit_error",
+    "code": "rate-limit"
+  },
+  {
+    "error": "Agent couldn't generate a response: content_policy violation",
+    "code": "safety"
+  },
+  {
+    "error": "Agent couldn't generate a response: context_length_exceeded",
+    "code": "context-limit"
+  },
+  {
+    "error": "All models failed: Agent couldn't generate a response. Please try again.",
+    "code": "models-exhausted"
+  },
+  {
+    "error": "The assistant could not complete this response and the turn ended without any output. This can happen when the conversation is too long for the current model, or the model hit an error. Please try again, or start a new chat.",
+    "code": "gateway"
+  },
+  {
+    "error": "Agent run failed (model: openai/gpt-5.6-terra)",
+    "code": "gateway"
+  },
+  {
+    "error": "Agent run failed.",
     "code": "gateway"
   }
 ]

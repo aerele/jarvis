@@ -554,7 +554,7 @@ def save_dashboard(payload: str) -> dict:
 		doc.insert()
 	else:
 		doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": _dashboard_detail(doc)}
 
 
@@ -569,7 +569,7 @@ def delete_dashboard(name: str) -> dict:
 			frappe.PermissionError,
 		)
 	frappe.delete_doc(DASHBOARD, name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": name}}
 
 

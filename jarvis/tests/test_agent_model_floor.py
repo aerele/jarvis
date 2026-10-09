@@ -1140,7 +1140,7 @@ class TestRunGate(AgentModelDBBase):
 			patch.object(agent_scheduler, "_advance") as advance,
 			patch.object(agent_scheduler, "_dispatch") as dispatch,
 		):
-			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), "Administrator", set())
+			agent_scheduler._sweep_one(row, frappe.utils.now_datetime(), set())
 		dispatch.assert_not_called()
 		advance.assert_called_once()
 		self.assertIn("scheduled run skipped", record.call_args.args[1])
@@ -1354,7 +1354,6 @@ class TestScheduledModelRefusals(AgentModelDBBase):
 				row,
 				frappe.utils.now_datetime(),
 				run_as=OWNER,
-				original_user="Administrator",
 				source_apps=None,
 				model_gate={"ok": True, "model_source": "choice"},
 			)
@@ -1370,15 +1369,20 @@ class TestScheduledModelRefusals(AgentModelDBBase):
 			self.assertEqual(notices, 1, token)
 			self.assertGreater(next_run, frappe.utils.now_datetime(), token)  # no hourly retry
 
-	def test_apply_in_progress_hands_the_slot_back_without_a_notice(self):
+	def test_apply_in_progress_retries_the_slot_without_a_notice(self):
 		for flag in (True, False):
 			self._reset()
 			_flag(flag)
+			before = frappe.utils.now_datetime()
 			runs, notices, next_run = self._dispatch("apply_in_progress")
 			self.assertEqual(len(runs), 1, flag)  # the launch's own run, nothing recorded on top
 			self.assertIn("Try again", runs[0].error)
 			self.assertEqual(notices, 0, flag)
-			self.assertLess(next_run, frappe.utils.now_datetime(), flag)  # still due: retried next sweep
+			# One retry, within the hour and never later than the next natural slot (the
+			# sweep runs every five minutes, so handing the slot back still due would
+			# relaunch it on every tick).
+			self.assertGreater(next_run, before, flag)
+			self.assertLessEqual(next_run, frappe.utils.add_to_date(before, minutes=56), flag)
 
 
 class TestRevalidation(AgentModelDBBase):

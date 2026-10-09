@@ -10,7 +10,7 @@
 			class="mep-pill"
 			type="button"
 			:aria-expanded="open"
-			title="Model and effort"
+			:title="pillTitle"
 			@click="open = !open"
 		>
 			<svg
@@ -28,12 +28,17 @@
 				<path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3" />
 			</svg>
 			<span class="mep-model">{{ pillModel }}</span>
+			<span
+				v-if="pillExpired"
+				data-testid="mep-expired-dot"
+				class="size-1.5 shrink-0 rounded-full bg-surface-red-5"
+				role="img"
+				aria-label="Sign-in expired"
+			/>
 			<!-- kept in layout (visibility, not v-if) so toggling thinkingOverride
 			     does not shift the Enter hint / Send button beside this pill -->
-			<span class="mep-dot" :class="{ 'mep-hide': !thinkingOverride }">·</span>
-			<span class="mep-effort" :class="{ 'mep-hide': !thinkingOverride }">{{
-				effortLabel
-			}}</span>
+			<span class="mep-dot" :class="{ 'mep-hide': !showEffort }">·</span>
+			<span class="mep-effort" :class="{ 'mep-hide': !showEffort }">{{ effortLabel }}</span>
 			<svg
 				class="mep-caret"
 				width="12"
@@ -83,6 +88,7 @@
 					>
 						<span class="mep-item-body">
 							<span class="mep-name">{{ r.model }}</span>
+							<span v-if="isExpired(r.model)" class="mep-desc">Sign-in expired</span>
 							<!-- `tier` belongs to a configured pool row. An `extra` row is another
 						     model on a provider the customer ALREADY configured, offered so they
 						     can switch without re-saving Settings; its catalog label is the more
@@ -118,11 +124,17 @@
 				<span class="mep-plus" aria-hidden="true">+</span>
 			</button>
 
-			<div class="mep-div" />
+			<div v-if="thinkingLevels.length || personaEnabled" class="mep-div" />
 
 			<!-- effort → side flyout (wrapper keeps the flyout a SIBLING of the row
-			     button, never nested inside it — interactive-in-button is invalid) -->
-			<div class="mep-sub" @mouseenter="cancelEffortClose" @mouseleave="scheduleEffortClose">
+			     button, never nested inside it — interactive-in-button is invalid).
+			     No levels = the workspace's model cannot think, so no choice. -->
+			<div
+				v-if="thinkingLevels.length"
+				class="mep-sub"
+				@mouseenter="cancelEffortClose"
+				@mouseleave="scheduleEffortClose"
+			>
 				<!-- click OPENS, it does not toggle. For a mouse user the pointer order
 				     is mouseenter (opens) then click, so a toggling click would close
 				     what the hover just opened and the flyout could never open by
@@ -233,7 +245,7 @@
 // host (ChatView) owns the data and the persistence, passed via props and
 // select-model / select-thinking emits (mirrors how <Composer> was extracted).
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { useDismissable } from "@/composables/useDismissable";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { useShellStore } from "@/stores/shell";
@@ -249,6 +261,8 @@ const props = defineProps({
 	showProviders: { type: Boolean, default: false },
 	personaEnabled: { type: Boolean, default: false },
 	canAddProvider: { type: Boolean, default: false },
+	// { "<model id>": { upstream, label } } for models whose sign-in has expired.
+	expiredModels: { type: Object, default: () => ({}) },
 	// Where the menu hangs off the pill. "end" (main chat: the pill sits at the
 	// composer's left, the menu grows leftward over the wide input) or "start"
 	// (a narrow host such as the dashboard builder pane, whose overflow-hidden
@@ -266,7 +280,7 @@ const props = defineProps({
 const emit = defineEmits(["select-model", "select-thinking", "add-provider"]);
 
 const store = useShellStore();
-const assistantName = agentName;
+const assistantName = computed(() => brand.agentName);
 const open = ref(false);
 const effortOpen = ref(false);
 const personaOpen = ref(false);
@@ -274,6 +288,25 @@ const rootRef = ref(null);
 const triggerRef = ref(null);
 
 const pillModel = computed(() => props.modelOverride || props.defaultModel || "Auto");
+// Same match the error card uses: "provider/model" and "model" are one model.
+const bareModel = (id) =>
+	String(id ?? "")
+		.trim()
+		.split("/")
+		.pop();
+const expiredBare = computed(() => new Set(Object.keys(props.expiredModels || {}).map(bareModel)));
+const isExpired = (id) => !!id && expiredBare.value.has(bareModel(id));
+// The dot follows the model the pill names (the pick, else the default model). "Auto" is never
+// a model id, so it never shows one.
+const pillExpired = computed(() => isExpired(pillModel.value));
+const pillTitle = computed(() => {
+	if (!pillExpired.value) return "Model and effort";
+	return props.canAddProvider
+		? "Sign-in expired. Reconnect it in AI models."
+		: "Sign-in expired. Ask your workspace admin to reconnect it.";
+});
+// A stored level the workspace cannot use (no levels offered) is not shown.
+const showEffort = computed(() => !!props.thinkingOverride && props.thinkingLevels.length > 0);
 const effortLabel = computed(() => {
 	const t = props.thinkingOverride;
 	return t ? t.charAt(0).toUpperCase() + t.slice(1) : "Auto";

@@ -63,8 +63,8 @@
 					<Switch
 						v-model="form.enabled"
 						label="Enabled"
-						description="Off = saved as a draft, not used by the assistant."
-						:disabled="readonly"
+						:description="enabledDescription"
+						:disabled="enabledLocked"
 					/>
 					<Switch
 						v-model="form.user_invocable"
@@ -489,7 +489,9 @@ async function submitPromotion({ to_scope, target_role, target_roles, note }) {
 
 // ── File Box: "Use in File Box" + "File Box creates" ─────────────────────────
 // A shared (Role/Org) skill: opting out is free, opting back in needs a reviewer
-// (the doctype's content guard), so a non-reviewer can't turn it on here.
+// (the doctype's content guard), so a non-reviewer can't turn it on here. The hint
+// names a System Manager: only the owner or a System Manager can save the skill,
+// and the owner reading this is not a reviewer.
 const FILE_BOX_HELP = "Let File Box use this skill automatically for matching documents";
 const fileBoxGated = computed(
 	() =>
@@ -498,14 +500,27 @@ const fileBoxGated = computed(
 		!!skill.value &&
 		["Role", "Org"].includes(skill.value.scope)
 );
+
+// "Enabled" follows the same rule on a shared skill: off is free, back on needs a
+// reviewer, so the switch is locked once it is saved off (the server refuses it).
+const ENABLED_HELP = "Off = saved as a draft, not used by the assistant.";
+const enabledLocked = computed(
+	() => readonly.value || (fileBoxGated.value && !snapshot.value.enabled)
+);
+const enabledDescription = computed(() => {
+	if (!fileBoxGated.value) return ENABLED_HELP;
+	return snapshot.value.enabled
+		? `${ENABLED_HELP} Once off, only a System Manager can turn a shared skill back on.`
+		: `${ENABLED_HELP} Only a System Manager can turn a shared skill back on.`;
+});
 const fileBoxLocked = computed(
 	() => readonly.value || (fileBoxGated.value && !snapshot.value.use_in_file_box)
 );
 const fileBoxDescription = computed(() => {
 	if (!fileBoxGated.value) return FILE_BOX_HELP;
 	return snapshot.value.use_in_file_box
-		? `${FILE_BOX_HELP}. Once off, only a reviewer can turn it back on for a shared skill.`
-		: `${FILE_BOX_HELP}. Only a reviewer can turn it on for a shared skill.`;
+		? `${FILE_BOX_HELP}. Once off, only a System Manager can turn it back on for a shared skill.`
+		: `${FILE_BOX_HELP}. Only a System Manager can turn it on for a shared skill.`;
 });
 
 // The picker searches the types the server accepts there (submittable, not in a

@@ -89,12 +89,21 @@ class TestTemplatesModule(FrappeTestCase):
 		by_key = {d["key"]: d for d in tpl.summaries()}
 		self.assertEqual(set(by_key), _ALL)
 		fields = {"key", "label", "description", "accent", "body_font", "display_font", "masthead", "cover"}
+		fields |= {"dark", "show_logo", "accent_bar", "watermark", "page_size", "orientation", "margins_mm"}
 		for d in by_key.values():
 			self.assertEqual(set(d), fields)
 		self.assertEqual(by_key["editorial"]["body_font"], "serif")
 		self.assertEqual(by_key["editorial"]["masthead"], "center")
 		self.assertEqual(by_key["minimal"]["display_font"], "sans")
 		self.assertEqual(by_key["branded"]["accent"], "#2e7d6b")
+		# The rest of the look, so the pane can prefill a copy of a built-in.
+		self.assertEqual(by_key["branded"]["dark"], "#0f3d34")
+		self.assertTrue(by_key["branded"]["accent_bar"])
+		self.assertFalse(by_key["minimal"]["show_logo"])
+		self.assertEqual(by_key["formal"]["watermark"], "CONFIDENTIAL")
+		self.assertEqual(by_key["formal"]["margins_mm"], 20)
+		self.assertEqual(by_key["classic"]["dark"], "")
+		self.assertEqual(by_key["classic"]["page_size"], "A4")
 
 
 class TestComponentCssTokens(FrappeTestCase):

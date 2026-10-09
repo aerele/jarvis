@@ -1340,6 +1340,17 @@ class _RT3SettingsTestCase(_SettingsSingletonTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		cls._rt3_snapshot = {f: settings.get(f) for f in cls._RT3_PLAIN_FIELDS}
 
+	def setUp(self):
+		super().setUp()
+		# A Settings save that moves the primary model becomes a held switch
+		# (admin-v2#629) and writes a real record into redis, which the SQL
+		# rollback does not undo. Clear it before AND after every test so one
+		# test's switch cannot park the next one's apply.
+		from jarvis.chat import llm_switch
+
+		llm_switch._reset_for_tests()
+		self.addCleanup(llm_switch._reset_for_tests)
+
 	@classmethod
 	def tearDownClass(cls):
 		try:

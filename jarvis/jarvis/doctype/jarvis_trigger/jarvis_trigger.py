@@ -22,6 +22,7 @@ from frappe.model.document import Document
 from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
+from jarvis.permissions import NotRenamable
 from jarvis.triggers.engine import (
 	LLM_EVENTS,
 	SCRIPT_EVENT_MAP,
@@ -90,7 +91,7 @@ def _denylisted_doctypes() -> frozenset:
 DENYLISTED_DOCTYPES = _denylisted_doctypes()
 
 
-class JarvisTrigger(Document):
+class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
 		self._validate_target_doctype()
@@ -101,6 +102,41 @@ class JarvisTrigger(Document):
 		else:
 			self._validate_llm()
 		self._guard_server_script_link()
+		self._guard_owner_immutable()
+		self._guard_lookup_authority()
+
+	def _guard_owner_immutable(self):
+		"""``owner`` decides whose permissions lookups read with. Frappe already
+		treats ``owner`` as a constant on save (CannotChangeConstantError, for
+		every user); this guard is defense in depth for paths that bypass that
+		check, and gives non-Administrators a clearer message. Only
+		Administrator may change it after insert."""
+		before = None if self.is_new() else self.get_doc_before_save()
+		if before and before.owner != self.owner and frappe.session.user != "Administrator":
+			frappe.throw(_("Only Administrator can change a trigger's owner."), frappe.PermissionError)
+
+	def _guard_lookup_authority(self):
+		"""Lookups read with the trigger OWNER's permissions, so only the owner
+		(or Administrator) may turn them on or change what they act on. Any other
+		manager editing the instruction, target, event, condition or action of a
+		lookup-enabled trigger, or switching lookups on, would borrow the owner's
+		access. Turning lookups off and enabling/disabling stay open to every
+		manager. Covers the SPA API, Desk and the agent's tools alike."""
+		if self.action_type != "LLM" or not cint(self.llm_allow_lookups):
+			return
+		before = None if self.is_new() else self.get_doc_before_save()
+		# The STORED owner (owner changes are blocked above), never an edited value.
+		owner = before.owner if before else self.owner
+		if frappe.session.user in (owner, "Administrator"):
+			return
+		if before and cint(before.llm_allow_lookups) and before.action_type == "LLM":
+			watched = ("llm_instruction", "target_doctype", "doc_event", "condition", "action_type")
+			if not any(self.has_value_changed(f) for f in watched):
+				return
+		frappe.throw(
+			_("Only the trigger's owner can turn on or change read-only lookups."),
+			frappe.PermissionError,
+		)
 
 	def _managed_script_name(self) -> str | None:
 		"""The managed Server Script's name for this trigger. ``self.name`` is
@@ -157,13 +193,13 @@ class JarvisTrigger(Document):
 			frappe.throw(
 				_(
 					"Triggers cannot target child tables ('{0}'). Target the parent "
-					"DocType instead — child rows ride its events."
+					"DocType instead. Child rows ride its events."
 				).format(self.target_doctype)
 			)
 		if self.target_doctype in DENYLISTED_DOCTYPES:
 			frappe.throw(
 				_(
-					"Triggers on '{0}' are not allowed — they could loop on their own "
+					"Triggers on '{0}' are not allowed. They could loop on their own "
 					"logs or fire on internal plumbing."
 				).format(self.target_doctype)
 			)
@@ -205,7 +241,38 @@ class JarvisTrigger(Document):
 		except Exception as e:
 			frappe.throw(_("Invalid Condition: {0}").format(str(e)))
 
+	def _require_script_authoring_rights(self):
+		"""A Script action materializes a managed Server Script that runs with full
+		server-script globals on other users' saves, so authoring one must need the
+		same rights as authoring a Server Script directly.
+
+		Core gates Server Script authoring behind ``only_for("Script Manager")``
+		plus the Server Script DocType create permission (System Manager). The
+		managed sync writes with ``ignore_permissions`` / ``ignore_validate``, which
+		would skip that gate and let a Jarvis Admin (who holds neither) run
+		arbitrary server-side code, i.e. become System Manager where
+		``server_script_enabled`` is on. Re-impose the gate here.
+
+		Skipped for system / programmatic saves (``ignore_permissions``): patches,
+		the scheduler and fixtures manage these rows without a user in context,
+		exactly as core's own permission checks are skipped there."""
+		if self.flags.ignore_permissions or frappe.session.user == "Administrator":
+			return
+		if "Script Manager" not in frappe.get_roles() or not frappe.has_permission(
+			"Server Script", ptype="create"
+		):
+			frappe.throw(
+				_(
+					"A Script action runs a Server Script with full privileges, so it "
+					"needs the Script Manager role and permission to create Server "
+					"Scripts. Use an LLM action, or ask an administrator to set up the "
+					"Script trigger."
+				),
+				frappe.PermissionError,
+			)
+
 	def _validate_script(self):
+		self._require_script_authoring_rights()
 		if not (self.script_body or "").strip():
 			frappe.throw(_("Script body is required for a Script action."))
 		if not is_safe_exec_enabled():
@@ -263,10 +330,11 @@ class JarvisTrigger(Document):
 				"disabled": 1,
 			}
 		)
-		# Server Script.validate() is only_for("Script Manager") — a Jarvis
-		# Admin saving a trigger legitimately is not one. Skipping validate is
-		# safe: _validate_script() above already compile-checked the body (and
-		# throws where core only warns).
+		# Server Script.validate() is only_for("Script Manager"). Skipping validate
+		# here is safe because _validate_script() has already enforced that same
+		# authoring right (_require_script_authoring_rights) and compile-checked the
+		# body (throwing where core only warns), so this managed write never grants
+		# a capability the author does not already hold.
 		ss.flags.ignore_validate = True
 		if ss.is_new():
 			ss.name = f"{MANAGED_SCRIPT_PREFIX}{self.name}"

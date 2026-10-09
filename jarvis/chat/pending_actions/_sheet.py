@@ -8,7 +8,6 @@ transaction holds its naming-series rows until it commits."""
 
 from __future__ import annotations
 
-import pickle
 from collections import deque
 from contextlib import contextmanager
 
@@ -202,7 +201,7 @@ def _answers(row, raw, errors: dict) -> tuple[dict, bool]:
 	checked against its own options (a routing one: still eligible now)."""
 	questions = _questions(row)
 	given = raw if isinstance(raw, dict) else {}
-	for key in set(map(str, given)) - set(questions):
+	for key in {str(key) for key in given} - set(questions):
 		errors[key] = "Not a question on this sheet."
 	out, skip_all = {}, False
 	for name, q in questions.items():
@@ -349,7 +348,7 @@ def _record_errors(row, records: list[dict], merged: list[dict], plan: dict, err
 		elif kind == "use_existing":
 			errors[key] = _existing_error(record, entry.get("existing"), row.exec_user)
 		elif key in fix and entry["action"] != "edit":
-			errors[key] = "This record needs a fix: edit it, use an existing one, or skip it."
+			errors[key] = "This record needs a fix: edit it, use an existing one or skip it."
 		elif missing.get(i):
 			left = missing[i] if entry["action"] != "edit" else _still_missing(record, missing[i])
 			if left:
@@ -410,7 +409,7 @@ def _actionable(name, approver: str) -> tuple:
 
 def _lock_sheet(row) -> tuple:
 	"""Commit, then the conversation lock and the row lock (no wait): ``(row, refusal)``."""
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
 	lock_conversation(row.conversation)
 	try:
 		locked = get_row(row.name, lock="nowait")
@@ -468,14 +467,16 @@ def _apply_locked(row, approver: str, decisions: dict) -> dict:
 	if not claim(locked.name, approver, apply_token=token, apply_request={**plan, "approver": approver}):
 		frappe.db.rollback()
 		return _refusal(*_BUSY)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before enqueue
+	_progress(locked, approver, 0, len(records))  # before the job: it can't overwrite the job's
 	try:
 		frappe.enqueue(JOB, queue="long", timeout=JOB_TIMEOUT_S, job_id=token, name=locked.name, token=token)
 	except Exception:
 		frappe.log_error(title="jarvis.file_box.sheet_apply_enqueue_failed", message=frappe.get_traceback())
+		_clear_progress(locked.name)
+		_progress(locked, approver, 0, len(records), state="returned")
 		_hand_back(locked.name, token, {"sheet": INTERRUPTED_TEXT})
 		return _refusal("unavailable", "The apply couldn't start: nothing was created. Try again.")
-	_progress(locked, approver, 0, len(records), first=True)
 	return {"ok": True, "applying": True, "reason_code": "applying", "pa_status": EXECUTING}
 
 
@@ -511,7 +512,7 @@ def _discard_locked(row, approver: str) -> dict:
 	_terminal_update(
 		locked.name, [PENDING], DISCARDED, reason_code="discarded", decided_by=approver, sheet_outcome=outcome
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	_settle(locked.name)
 	return {"ok": True, "reason_code": "discarded", "pa_status": DISCARDED}
 
@@ -523,7 +524,7 @@ def _fail_sealed(row, e: _seal.SealError, *, decided_by: str | None = None, toke
 	frappe.log_error(
 		title=f"jarvis.file_box.sheet_{e.reason_code}", message=f"{row.name}: failed binding {e.binding}"
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if moved:
 		_settle(row.name)
 	return _refusal(e.reason_code, REASON_TEXT[e.reason_code], pa_status=FAILED, outcome="failed")
@@ -544,9 +545,9 @@ def run_apply(name: str, token: str) -> None:
 		frappe.log_error(
 			title="jarvis.file_box.sheet_apply_stale", message=f"{name}: this job's claim is gone"
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row locks
 		return
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before apply
 	try:
 		_run(row, token)
 	except Exception:
@@ -951,7 +952,7 @@ def _finish(row, token: str, plan: dict, merged: list[dict], outcome: list[dict]
 		_lost(row.name)
 		return
 	_audit(row, written, "applied")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before progress
 	_progress(row, plan.get("approver"), len(outcome), len(outcome), state="applied")
 	_settle(row.name)
 
@@ -1000,7 +1001,7 @@ def _hand_back(name: str, token: str, errors: dict, *, failed=()) -> str | None:
 		[{"doctype": r["doctype"], "op": r["op"], "name": r.get("name") or ""} for r in failed],
 		"failed",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if status == DISCARDED:
 		_settle(name)
 	return status
@@ -1012,20 +1013,20 @@ def _lost(name: str) -> None:
 		title="jarvis.file_box.sheet_apply_lost",
 		message=f"{name}: its claim moved on (an operator or the reaper); nothing from this apply was kept",
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist log before return
 
 
 def _log_crashes(name: str, crashes) -> None:
 	for tb in crashes:
 		frappe.log_error(title="jarvis.file_box.sheet_apply_record_crashed", message=f"{name}\n{tb}")
 	if crashes:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist error log
 
 
 def _crashed(row, token: str, tb: str) -> None:
 	_rollback()
 	frappe.log_error(title="jarvis.file_box.sheet_apply_crashed", message=f"{row.name}\n{tb}")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before hand back
 	try:
 		if not _hand_back(row.name, token, {"sheet": _CRASHED_TEXT}):
 			_lost(row.name)
@@ -1063,19 +1064,16 @@ def _clear_progress(name: str) -> None:
 		pass
 
 
-def _progress(
-	row, approver: str | None, done: int, total: int, *, state: str = "applying", first: bool = False
-) -> None:
+def _progress(row, approver: str | None, done: int, total: int, *, state: str = "applying") -> None:
 	"""Best-effort: the File Box line reads it; the owner (and a different approver)
-	get ``sheet:progress``. ``first`` (the request's 0/N) never overwrites the job's."""
+	get ``sheet:progress``."""
 	from jarvis.chat import events
 
 	if state == "applying":
-		value = pickle.dumps({"done": done, "total": total})
 		try:
-			key = frappe.cache.make_key(_progress_key(row.name))
-			if not frappe.cache.set(key, value, ex=PROGRESS_TTL_S, nx=first):
-				return
+			frappe.cache.set_value(
+				_progress_key(row.name), {"done": done, "total": total}, expires_in_sec=PROGRESS_TTL_S
+			)
 		except Exception:
 			pass
 	payload = {
@@ -1130,7 +1128,7 @@ def reap() -> list[str]:
 	for r in rows:
 		if _job_alive(r.apply_token) is not False:
 			continue
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before hand back
 		if _hand_back(r.name, r.apply_token or "", {"sheet": INTERRUPTED_TEXT}):
 			released.append(r.name)
 	if released:
@@ -1139,6 +1137,6 @@ def reap() -> list[str]:
 			message="Handed back to Pending (their apply job was gone; nothing was created): "
 			+ ", ".join(released),
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before alert
 		_alert(f"{len(released)} File Box sheet apply job(s) went missing: " + ", ".join(released))
 	return released

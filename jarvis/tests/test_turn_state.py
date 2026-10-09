@@ -30,6 +30,7 @@ site-wide "default" admission shard the WP-0 suite counts. Tests clean up their
 own Turn / Turn Effect / Relay Pump / Conversation rows.
 """
 
+import json
 import threading
 from unittest.mock import patch
 
@@ -152,6 +153,37 @@ class _TurnStateTestCase(FrappeTestCase):
 # --------------------------------------------------------------------------- #
 # The happy-path linear machine: legal actor wins once, replay affects 0.
 # --------------------------------------------------------------------------- #
+
+
+class TestUnfinishedTurn(_TurnStateTestCase):
+	"""The shared check for an unfinished turn of a conversation (sends, deletes, retries)."""
+
+	def test_only_the_given_filters_reach_the_sql(self):
+		# The default read stays covered by the conv_state index (no creation column).
+		with patch.object(frappe.db, "sql", return_value=()) as sql:
+			ts.unfinished_turn("c1")
+			ts.unfinished_turn("c1", exclude_run_id="r1")
+			ts.unfinished_turn("c1", created_after="2026-10-01 00:00:00")
+		default, bound, unbound = (c.args[0] for c in sql.call_args_list)
+		self.assertNotIn("creation", default)
+		self.assertNotIn("name !=", default)
+		self.assertIn("name !=", bound)
+		self.assertNotIn("creation", bound)
+		self.assertIn("creation >", unbound)
+
+	def test_each_filter_narrows_the_result(self):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		self._mk_turn(conv, "ut-old", seed, "queued")
+		mark = frappe.db.get_value(MSG, seed, "creation")
+		later = frappe.db.get_value(TURN, "ut-old", "creation")
+		self.assertEqual(ts.unfinished_turn_state(conv), "queued", "no filter: every turn")
+		self.assertEqual(ts.unfinished_turn(conv, created_after=mark), ("ut-old", "queued"))
+		self.assertIsNone(ts.unfinished_turn(conv, created_after=later), "nothing created after it")
+		self.assertIsNone(ts.unfinished_turn(conv, exclude_run_id="ut-old"))
+		self.assertIsNone(ts.unfinished_turn(conv, states=("streaming",)))
+		frappe.db.set_value(TURN, "ut-old", "state", "errored")
+		self.assertIsNone(ts.unfinished_turn_state(conv), "a terminal turn does not count")
 
 
 class TestLinearPathWinAndReplay(_TurnStateTestCase):
@@ -487,6 +519,8 @@ class TestIllegalCombinationsRejected(_TurnStateTestCase):
 		frappe.db.rollback()
 		self.assertFalse(ts.mark_terminal_observed("ts_ep", 8, 4, "relay:final"), "terminal at stale epoch")
 		frappe.db.rollback()
+		self.assertFalse(ts.requeue_for_redispatch("ts_ep", 8, 4, "{}"), "requeue at stale epoch")
+		frappe.db.rollback()
 		# terminal_observed variant for the settle CAS.
 		self._mk_turn(
 			conv, "ts_ep2", self._mk_msg(conv, 3), "terminal_observed", version=8, pump_epoch=E, reserved=1
@@ -508,6 +542,87 @@ class TestIllegalCombinationsRejected(_TurnStateTestCase):
 		# ...and terminal states are equally excluded.
 		self._mk_turn(conv, "ts_done", self._mk_msg(conv, 2), "done", version=9)
 		self.assertFalse(ts.mark_recovering("ts_done", 9))
+		frappe.db.rollback()
+
+
+class TestRequeueForRedispatch(_TurnStateTestCase):
+	"""admin-v2#656: streaming -> ready, once, for a turn that produced nothing."""
+
+	def _streaming(self, run_id, **extra):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, 1)
+		fields = {
+			"version": 6,
+			"pump_epoch": 3,
+			"reserved": 1,
+			"dispatching_at": frappe.utils.now(),
+			"first_event_at": frappe.utils.now(),
+			"gateway_run_id": run_id,
+			"dispatch_payload": json.dumps({"session_key": "sk", "message": "hi"}),
+		}
+		fields.update(extra)
+		state = fields.pop("state", "streaming")
+		self._mk_turn(conv, run_id, seed, state, **fields)
+
+	def test_requeues_a_turn_that_produced_nothing(self):
+		self._streaming("ts_rq")
+		payload = json.dumps({"session_key": "sk", "message": "hi", "redispatch": 1})
+		self.assertTrue(ts.requeue_for_redispatch("ts_rq", 6, 3, payload))
+		row = frappe.db.get_value(
+			TURN,
+			"ts_rq",
+			[
+				"state",
+				"version",
+				"gateway_run_id",
+				"first_event_at",
+				"dispatching_at",
+				"ready_at",
+				"dispatch_payload",
+			],
+			as_dict=True,
+		)
+		frappe.db.rollback()
+		self.assertEqual(row.state, "ready")
+		self.assertEqual(int(row.version), 7)
+		self.assertIsNone(row.gateway_run_id, "the next ack records the new run's id")
+		self.assertIsNone(row.first_event_at)
+		# Kept on purpose: a parked requeued turn re-attaches instead of re-preparing.
+		self.assertIsNotNone(row.dispatching_at)
+		self.assertIsNotNone(row.ready_at)
+		self.assertEqual(json.loads(row.dispatch_payload)["redispatch"], 1)
+
+	def test_only_the_empty_reply_caller_starts_a_fresh_recovery_budget(self):
+		spent = frappe.utils.add_to_date(None, seconds=-500)
+		for fresh, want in ((False, "kept"), (True, None)):
+			with self.subTest(fresh_recovery=fresh):
+				run_id = f"ts_rq_budget_{int(fresh)}"
+				self._streaming(run_id, recovery_started_at=spent)
+				self.assertTrue(ts.requeue_for_redispatch(run_id, 6, 3, "{}", fresh_recovery=fresh))
+				started = frappe.db.get_value(TURN, run_id, "recovery_started_at")
+				frappe.db.rollback()
+				if want is None:
+					self.assertIsNone(started, "the second attempt starts a fresh recovery budget")
+				else:
+					self.assertIsNotNone(started, "the refused-session caller keeps it, as before")
+
+	def test_refuses_once_anything_was_produced_or_asked_to_stop(self):
+		cases = [
+			("output seen", {"last_event_seq": 4}),
+			("cancel requested", {"cancel_requested": 1}),
+			("not streaming", {"state": "dispatching"}),
+		]
+		for label, extra in cases:
+			run_id = "ts_rq_" + label.replace(" ", "_")
+			self._streaming(run_id, **extra)
+			self.assertFalse(ts.requeue_for_redispatch(run_id, 6, 3, "{}"), label)
+			frappe.db.rollback()
+
+	def test_refuses_a_stale_version_or_epoch(self):
+		self._streaming("ts_rq_fence")
+		self.assertFalse(ts.requeue_for_redispatch("ts_rq_fence", 5, 3, "{}"), "stale version")
+		frappe.db.rollback()
+		self.assertFalse(ts.requeue_for_redispatch("ts_rq_fence", 6, 2, "{}"), "stale epoch")
 		frappe.db.rollback()
 
 

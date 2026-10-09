@@ -1,6 +1,8 @@
 """Jarvis Custom Skill DocType controller.
 
-One row per customer-authored skill. Each row renders to a SKILL.md that is
+One row per customer-authored skill. A company-wide row renders to a SKILL.md
+(its name, its description and a pointer to the ``jarvis__get_skill`` tool, which
+serves the instructions from this row) that is
 pushed into the customer's agent container (under the runtime state directory,
 relative path ``custom_skills/custom-<slug>/SKILL.md``) and loaded ALONGSIDE the shared
 read-only persona skills. Rows are owned by the Frappe user who created them
@@ -18,7 +20,12 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import (
+	ARMED_MACRO_WRITE_FLAG,
+	NotRenamable,
+	has_jarvis_admin_access,
+	refuse_unseen_change,
+)
 
 # A skill_name is a bare slug the customer authors (e.g. "invoicing"). It is
 # lowercased and must be hyphen-separated alphanumerics. Everywhere it reaches
@@ -96,7 +103,8 @@ def user_can_use_skill(skill, user: str | None = None, user_roles: list[str] | N
 	System Manager (and Administrator) always passes. ``skill`` may be a Document
 	or any dict-like row; child tables absent from a ``frappe.get_all`` row are
 	fetched by parent name. Instruction-level enforcement — see TASK 11 for why
-	role-restricted bodies must ALSO be kept off the shared container push.
+	role-restricted skills must ALSO be kept off the shared container push (their
+	name and description would show to every user's agent).
 	"""
 	user = user or frappe.session.user
 	if user == "Administrator":
@@ -215,8 +223,23 @@ def _batch_child_values(names: list, child_doctype: str, value_field: str) -> di
 	return grouped
 
 
-class JarvisCustomSkill(Document):
+def _refuse_an_armed_macro_write():
+	"""An armed macro's uncarded write never changes a skill: its steps apply skills,
+	and a run that rewrote one would change what its own later runs follow. The gate
+	parks such a call for a card (``api._writes_skill_config``); this refuses one it
+	could not read (a Server Script, a whitelisted method that saves a skill).
+	``permissions.refuse_unseen_change`` is the same rule for every uncarded mode."""
+	if frappe.flags.get(ARMED_MACRO_WRITE_FLAG):
+		frappe.throw(
+			_("A macro that runs without asking for confirmation cannot change a skill."),
+			frappe.PermissionError,
+		)
+
+
+class JarvisCustomSkill(NotRenamable, Document):
 	def validate(self):
+		_refuse_an_armed_macro_write()
+		refuse_unseen_change(self)
 		self._validate_slug()
 		self._validate_scope()
 		self._guard_new_scope()
@@ -235,6 +258,8 @@ class JarvisCustomSkill(Document):
 		self._sync_slug_reservation()
 
 	def on_trash(self):
+		_refuse_an_armed_macro_write()
+		refuse_unseen_change(self)
 		_clear_personal_clause_cache(self.owner)
 		self._release_slug_reservation()
 
@@ -379,6 +404,8 @@ class JarvisCustomSkill(Document):
 		# ladder) is always safe — it reduces exposure — so the owner may
 		# self-demote without a reviewer (e.g. un-publish an Org skill back to
 		# private). WIDENING and lateral Role re-targeting stay reviewer-gated.
+		# (Of the narrowings only the one to User goes through in the end: one to a
+		# Role names a new audience, which ``_guard_content_change`` binds to review.)
 		rank = {"User": 0, "Role": 1, "Org": 2}
 		is_owner = (self.owner or "") == frappe.session.user
 		if is_owner and rank.get(self.scope, 2) < rank.get(prev_scope, 2):
@@ -394,7 +421,12 @@ class JarvisCustomSkill(Document):
 	def _guard_content_change(self):
 		"""Only a reviewer (or the compiler) may change the CONTENT of an existing
 		Role/Org skill — the instructions, description, user-invocable flag or File
-		Box routing (target doctype, re-enabling) the shared audience runs. Without
+		Box routing (target doctype, re-enabling) the shared audience runs — or what
+		decides WHO is told it and under which name: its name, switching it back on,
+		and its audience (target role, allowed roles, a person added to the share
+		list). ``get_skill`` serves a reviewed
+		row before anyone's own of the same name, so each of those takes effect for
+		the whole audience on the next fetch. Switching it off stays free. Without
 		this, a promotion could be approved against a
 		reviewed body and then have its instructions rewritten afterwards (or a hidden
 		tail slipped in) with no second review — the four-eyes bypass Codex flagged
@@ -412,7 +444,7 @@ class JarvisCustomSkill(Document):
 			return
 		from jarvis.chat.pending_actions._store import filebox_migrated
 
-		fields = ["instructions", "description", "user_invocable"]
+		fields = ["instructions", "description", "user_invocable", "skill_name", "enabled", "target_role"]
 		file_box = filebox_migrated()  # code may be served ahead of the File Box columns
 		if file_box:
 			fields += ["file_box_creates", "use_in_file_box"]
@@ -424,6 +456,10 @@ class JarvisCustomSkill(Document):
 			(self.instructions or "") != (prev.instructions or "")
 			or (self.description or "") != (prev.description or "")
 			or int(self.user_invocable or 0) != int(prev.user_invocable or 0)
+			or (self.skill_name or "") != (prev.skill_name or "")
+			or (int(self.enabled or 0) and not int(prev.enabled or 0))
+			or self._audience_changed(prev.target_role)
+			or self._share_added()
 			or (
 				file_box
 				and (
@@ -436,10 +472,48 @@ class JarvisCustomSkill(Document):
 			return
 		frappe.throw(
 			_(
-				"Only a reviewer can change the content of a shared (Role/Org) skill. "
-				"Narrow it back to private to edit it, then request a fresh promotion."
+				"Only a reviewer can change a shared (Role/Org) skill's name, description, "
+				"instructions, audience or File Box settings, or switch it back on. "
+				"Ask a System Manager to make the change."
 			),
 			frappe.PermissionError,
+		)
+
+	def _audience_changed(self, stored_target_role) -> bool:
+		"""Whether this save changes who the skill reaches: its target role and its
+		``allowed_roles`` rows, taken together on each side.
+
+		``_validate_scope`` has already run and, for a Role skill, rewrites the rows
+		so they hold the target role: it adds it to an empty set and replaces a set
+		that lacks it. Neither is the user's change, so the stored side is read the
+		same way, or the owner of such an old skill could no longer save it at all,
+		not even to switch it off."""
+		stored = self._stored_child_values("allowed_roles", "role", "Jarvis Custom Skill Allowed Role")
+		if stored_target_role and stored_target_role not in stored:
+			stored = set()
+		now = {r.role for r in self.get("allowed_roles") or []}
+		return (stored | {stored_target_role or ""}) != (now | {self.target_role or ""})
+
+	def _share_added(self) -> bool:
+		"""Whether this save shares the skill with someone it was not shared with: a
+		share reaches a person whatever their roles, so on a Role/Org skill it widens
+		the audience like an added role. Taking a share away stays free."""
+		now = {r.user for r in self.get("shared_with") or []}
+		if not now:
+			return False
+		return bool(now - self._stored_child_values("shared_with", "user", "Jarvis Custom Skill Share"))
+
+	def _stored_child_values(self, fieldname: str, column: str, child_doctype: str) -> set:
+		"""The values one child table holds in the database: off the copy Frappe loads
+		at the start of every save (``get_doc_before_save``). When there is none
+		(``validate`` called on an object that was never saved) it reads them."""
+		before = self.get_doc_before_save()
+		if before is not None:
+			return {row.get(column) for row in before.get(fieldname) or []}
+		return set(
+			frappe.get_all(
+				child_doctype, filters={"parent": self.name, "parenttype": self.doctype}, pluck=column
+			)
 		)
 
 	def _validate_slug(self):
@@ -561,7 +635,7 @@ class JarvisCustomSkill(Document):
 			frappe.throw(
 				_(
 					"A shared skill named '{0}' already exists. Two Role/Org skills cannot "
-					"share a name — rename one, or edit the existing shared skill instead."
+					"share a name. Rename one, or edit the existing shared skill instead."
 				).format(self.skill_name)
 			)
 
@@ -620,6 +694,17 @@ class JarvisCustomSkill(Document):
 		previous = self.get_doc_before_save()
 		if previous and bool(previous.allow_approve_run):
 			return
+		# Never from a tool call, whoever the chat belongs to: the assistant would be
+		# deciding what it may later do unasked. (A confirmed card is a tool call too.)
+		# A job a tool call queued carries the guard's scope, not the dispatch depth.
+		from jarvis.tools import _write_risk
+		from jarvis.tools.registry import in_tool_dispatch
+
+		if in_tool_dispatch() or _write_risk.in_guarded_call():
+			frappe.throw(
+				_("Approve & run is switched on from the skill's own page, not from chat."),
+				frappe.PermissionError,
+			)
 		if not has_jarvis_admin_access(frappe.session.user):
 			frappe.throw(
 				_("Enabling Approve & run requires a Jarvis Admin or System Manager role."),

@@ -26,6 +26,8 @@ import time
 import frappe
 from frappe.utils import cint, nowdate
 
+from jarvis import compat
+from jarvis.triggers import lookups
 from jarvis.triggers.engine import TRIGGER, _insert_activity
 
 _SYSTEM_PROMPT = (
@@ -58,7 +60,22 @@ def _cap_key(trigger: str) -> str:
 	return f"jarvis:trigcap:{trigger}:{nowdate().replace('-', '')}"
 
 
-def _llm_task_prompt(instruction: str, doctype: str, docname: str, doc_event: str) -> str:
+def daily_count(trigger: str) -> int:
+	"""Today's LLM evaluations for ``trigger``, as the job last published them."""
+	return cint(compat.cache_get_fresh(_count_key(_cap_key(trigger))))
+
+
+def _count_key(cap_key: str) -> str:
+	return f"{cap_key}:count"
+
+
+def _llm_task_prompt(
+	instruction: str,
+	doctype: str,
+	docname: str,
+	doc_event: str,
+	json_instruction: str = _LLM_TASK_JSON_INSTRUCTION,
+) -> str:
 	"""System prompt + instruction folded into one ``prompt`` string for
 	llm-task (no separate system-message slot on that tool). Carries the same
 	doctype/docname/event context the OpenRouter path puts in its user message
@@ -66,12 +83,14 @@ def _llm_task_prompt(instruction: str, doctype: str, docname: str, doc_event: st
 	makes sense knowing this fired on ``on_cancel``); the snapshot itself stays
 	OUT of prompt and travels only as the fenced ``input``."""
 	return (
-		f"{_SYSTEM_PROMPT}\n\n{_LLM_TASK_JSON_INSTRUCTION}\n\n{instruction}\n\n"
+		f"{_SYSTEM_PROMPT}\n\n{json_instruction}\n\n{instruction}\n\n"
 		f"Document ({doctype} {docname}, event: {doc_event}) is provided as the input JSON."
 	)
 
 
-def _evaluate(prompt: str, fenced: str, messages: list) -> tuple[str | None, str | None]:
+def _evaluate(
+	prompt: str, fenced: str, messages: list, timeout: int = 60, expect_object: bool = False
+) -> tuple[str | dict | None, str | None]:
 	"""Typed fallback decision: try the tenant's agent gateway first, fall back
 	to OpenRouter only when the gateway doesn't expose llm-task (older/
 	unconfigured runtime) AND an OpenRouter/STT key is actually resolvable.
@@ -85,7 +104,10 @@ def _evaluate(prompt: str, fenced: str, messages: list) -> tuple[str | None, str
 	from jarvis.triggers.llm_task_client import LLMTaskError, LLMTaskNotAvailableError, llm_task_complete
 
 	try:
-		return llm_task_complete(prompt, fenced, timeout=60), None
+		# expect_object is passed only by the lookup loop, so a trigger without
+		# lookups makes exactly the call it always did.
+		extra = {"expect_object": True} if expect_object else {}
+		return llm_task_complete(prompt, fenced, timeout=timeout, **extra), None
 	except LLMTaskNotAvailableError:
 		pass
 	except LLMTaskError as e:
@@ -100,14 +122,16 @@ def _evaluate(prompt: str, fenced: str, messages: list) -> tuple[str | None, str
 	if not key:
 		return None, _NO_AGENT_UPDATE_MESSAGE
 	try:
-		reply = voice.openrouter_complete(messages, max_tokens=1000, timeout=60)
+		reply = voice.openrouter_complete(messages, max_tokens=1000, timeout=timeout)
 	except Exception as e:
 		# voice already secret-scrubs its messages.
 		return None, str(e)
 	return reply, None
 
 
-def _complete(prompt: str, fenced: str, messages: list) -> tuple[str | None, str | None]:
+def _complete(
+	prompt: str, fenced: str, messages: list, timeout: int = 60, expect_object: bool = False
+) -> tuple[str | dict | None, str | None]:
 	"""Run one evaluation. Returns ``(reply, None)`` on success or ``(None,
 	error_message)`` on failure. Never raises: anything outside ``_evaluate``'s
 	typed llm_task_client/voice contract (e.g. ``frappe.get_cached_doc("Jarvis
@@ -117,7 +141,7 @@ def _complete(prompt: str, fenced: str, messages: list) -> tuple[str | None, str
 	never-raises contract. Never logs the bearer token (the traceback logged
 	below never contains it - see llm_task_client)."""
 	try:
-		return _evaluate(prompt, fenced, messages)
+		return _evaluate(prompt, fenced, messages, timeout, expect_object)
 	except Exception as e:
 		frappe.log_error(
 			title="Jarvis Trigger: LLM evaluation failed",
@@ -149,6 +173,7 @@ def run_llm_action(
 			"owner",
 			"llm_instruction",
 			"llm_daily_cap",
+			"llm_allow_lookups",
 		],
 		as_dict=True,
 	)
@@ -168,11 +193,16 @@ def run_llm_action(
 	}
 
 	cap = cint(row.llm_daily_cap) or _DEFAULT_DAILY_CAP
+	cap_key = _cap_key(trigger)
 	cache = frappe.cache()
-	counter_key = cache.make_key(_cap_key(trigger))
+	counter_key = cache.make_key(cap_key)
 	count = cint(cache.incr(counter_key))
 	if count == 1:
 		cache.expire(counter_key, _CAP_TTL_SECONDS)
+	try:  # the engine's peek; the cap itself is enforced below
+		frappe.cache.set_value(_count_key(cap_key), count, expires_in_sec=_CAP_TTL_SECONDS)
+	except Exception:
+		pass
 	if count > cap:
 		if count == cap + 1:
 			# Exactly one Skipped row marks the day's cutoff; the rest of the
@@ -183,7 +213,7 @@ def run_llm_action(
 				summary=f"daily LLM cap reached ({cap})",
 				detail=f"daily LLM cap reached ({cap}); further evaluations today are dropped silently",
 			)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist activity log
 		return
 
 	# Imported lazily (background job only): turn_handler for the
@@ -204,19 +234,50 @@ def run_llm_action(
 	]
 
 	t0 = time.monotonic()
-	task_prompt = _llm_task_prompt(instruction, doctype, docname, doc_event)
-	reply, error = _complete(task_prompt, fenced, messages)
+	lookup_log: list[str] = []
+	rounds = 0
+	if cint(row.llm_allow_lookups):
+		reply, error, lookup_log, rounds = lookups.run_loop(
+			owner=row.owner or "",
+			system_prompt=_SYSTEM_PROMPT,
+			instruction=instruction,
+			doc_label=f"{doctype} {docname}, event: {doc_event}",
+			snapshot_fenced=fenced,
+			build_prompt=lambda contract: _llm_task_prompt(
+				instruction, doctype, docname, doc_event, contract
+			),
+			complete=lambda prompt, input_text, msgs, timeout: _complete(
+				prompt, input_text, msgs, timeout, expect_object=True
+			),
+			fence=_fence_untrusted,
+		)
+	else:
+		task_prompt = _llm_task_prompt(instruction, doctype, docname, doc_event)
+		reply, error = _complete(task_prompt, fenced, messages)
 	duration_ms = int((time.monotonic() - t0) * 1000)
+	# Rounds used and each lookup (tool, doctype, row count or refusal), never row data.
+	# The note LEADS the detail: the engine truncates detail at the tail, and the
+	# marker is what keeps this row hidden from non-managers (see
+	# triggers_api._hide_lookup_rows), so it must never be cut off.
+	lookup_note = (
+		f"{lookups.lookup_marker(row.owner)} Rounds: {rounds}. Lookups:\n"
+		+ ("\n".join(lookup_log) or "none")
+		+ "\n\n"
+		if cint(row.llm_allow_lookups)
+		else ""
+	)
 	if error is not None:
-		_insert_activity(**base, status="Failed", summary=error, detail=error, duration_ms=duration_ms)
+		_insert_activity(
+			**base, status="Failed", summary=error, detail=lookup_note + error, duration_ms=duration_ms
+		)
 	else:
 		reply = (reply or "").strip()
 		_insert_activity(
 			**base,
 			status="Success",
 			summary=reply[:200],
-			detail=reply,
+			detail=lookup_note + reply,
 			duration_ms=duration_ms,
 		)
 	# Background job: nothing else commits for us.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist job result

@@ -67,6 +67,11 @@
 							@click="sheetIdx = si"
 						/>
 					</div>
+					<SheetCharts
+						:charts="curCharts"
+						:sheet-name="curSheet.name"
+						:dark="effectiveDark"
+					/>
 					<div class="max-h-[65vh] overflow-auto">
 						<table class="w-full border-collapse text-sm">
 							<thead
@@ -143,6 +148,9 @@
 import { ref, computed, watch } from "vue";
 import { Dialog, Button, FeatherIcon } from "frappe-ui";
 import * as api from "@/api";
+import SheetCharts from "@/components/SheetCharts.vue";
+import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
+import { useJarvisTheme } from "@/theme";
 
 const props = defineProps({
 	modelValue: { type: Boolean, default: false },
@@ -163,7 +171,7 @@ const title = computed(
 		decodeURIComponent((props.fileUrl || "").split("?")[0].split("/").pop() || "File")
 );
 
-// {kind: 'pdf'|'image'|'html'|'svg'|'table'|'text'|'loading'|'none', content?, sheets?, text?}
+// {kind: 'pdf'|'image'|'html'|'svg'|'table'|'text'|'loading'|'none', content?, sheets?, charts?, text?}
 const view = ref({ kind: "loading" });
 const sheetIdx = ref(0);
 const curSheet = computed(() => {
@@ -171,6 +179,19 @@ const curSheet = computed(() => {
 	if (v.kind !== "table" || !v.sheets?.length) return { rows: [] };
 	return v.sheets[sheetIdx.value] || { rows: [] };
 });
+
+// charts the backend read from the xlsx, for the sheet on screen (jarvis-chart
+// specs, so the chat's JvChart renders them; its own title is drawn by the chart)
+const curCharts = computed(() =>
+	view.value.kind === "table"
+		? chartsForSheet(
+				view.value.charts,
+				curSheet.value.name,
+				view.value.sheets.map((s) => s.name)
+		  )
+		: []
+);
+const { effectiveDark } = useJarvisTheme();
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "ico"]);
 function detectKind() {
@@ -227,7 +248,7 @@ async function load() {
 		const r = await api.previewFile(props.fileUrl);
 		if (seq !== loadSeq) return;
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
-			view.value = { kind: "table", sheets: r.sheets };
+			view.value = { kind: "table", ...tablePreviewFields(r) };
 			return;
 		}
 		if (r && r.kind === "text") {

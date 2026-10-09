@@ -22,10 +22,23 @@ import frappe
 # The two enum-shaped invariants of this doctype, owned here and imported by the
 # whitelisted read + the Script Report so the pane, the report, and validation
 # can never silently diverge.
-OUTCOMES = frozenset({"applied", "failed", "discarded"})
+# ``refused``: the write-risk guard would not run it (jarvis.tools._write_risk);
+# ``partial``: a guarded structure write (``jarvis.tools._guarded_structure``:
+# round-2 unit J1b-cf, then J1c) that failed after part of it had committed, or
+# whose worker died mid-way; its clean-up has run by the time the row is written.
+OUTCOMES = frozenset({"applied", "failed", "discarded", "refused", "partial"})
 # Mirrors the doctype's provenance Select; an unknown value is coerced (and
 # logged) here rather than failing the insert and dropping the row.
-PROVENANCES = ("chat", "auto_apply", "macro", "skill", "request", "approval", "reviewer_approved")
+PROVENANCES = (
+	"chat",
+	"auto_apply",
+	"macro",
+	"skill",
+	"request",
+	"approval",
+	"reviewer_approved",
+	"auto_mode",
+)
 
 # The full, explicit safe projection for the metadata-only trail. The doctype has
 # NO content columns, so there is nothing content-adjacent to leak; the allowlist
@@ -45,7 +58,7 @@ AGENT_WRITE_FIELDS = (
 )
 
 
-def record_write(actor, tool, args, result, outcome, provenance, provenance_name=""):
+def record_write(actor, tool, args, result, outcome, provenance, provenance_name="", ref_doctype=None):
 	"""Insert one metadata-only ``Jarvis Agent Write`` row for an agent write.
 
 	Best-effort: never raises and never commits, so it is safe to call from
@@ -63,12 +76,18 @@ def record_write(actor, tool, args, result, outcome, provenance, provenance_name
 		a = args if isinstance(args, dict) else {}
 
 		# _ref returns a 3-tuple (doctype, name, method); we keep the first two.
-		ref_doctype = ref_name = ""
+		ref_doctype_from_args = ref_name = ""
 		try:
-			ref_doctype, ref_name, _method = _ref(a, result if isinstance(result, dict) else {})
+			ref_doctype_from_args, ref_name, _method = _ref(a, result if isinstance(result, dict) else {})
 		except Exception:
 			pass
 
+		if ref_doctype:
+			# The doctype the write-risk guard refused (a run_method's own write may
+			# not be the doctype its arguments name).
+			ref_doctype = str(ref_doctype)
+		else:
+			ref_doctype = ref_doctype_from_args
 		bulk_count = 0
 		if _is_bulk_call(a):
 			# One row per bulk call: the target doctype + N, blank ref_name (a batch

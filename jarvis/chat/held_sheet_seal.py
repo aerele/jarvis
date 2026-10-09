@@ -87,11 +87,11 @@ def seal_turn(conversation: str, turn: str | None, *, legacy: bool = False) -> s
 		PA, {"conversation": conversation, "kind": SHEET, "status": PENDING, "collecting": 1}
 	):
 		return None
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- fresh snapshot before locking
 	lock_conversation(conversation)
 	sheet = _collecting(conversation)
 	if not sheet or not _ended_by(sheet, turn, legacy):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return None
 	if held_sheets.user_stopped(conversation, sheet.collecting_turn or turn):
 		_discard(sheet, "cancelled", by=sheet.owner_user)
@@ -131,7 +131,7 @@ def _seal_locked(sheet) -> str | None:
 	empty sheet quietly. A sheet of routing questions alone gives its pause back: it
 	never counts toward ``MAX_SHEETS``. Commits."""
 	if not seal_sheet(sheet.name):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release row lock
 		return None
 	if not (sheet.record_count or sheet.question_count):
 		_discard(sheet, "discarded", empty=True)
@@ -141,7 +141,7 @@ def _seal_locked(sheet) -> str | None:
 		{"s": sheet.name},
 	):
 		_give_back(sheet.conversation)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before notify
 	line = counts_line(sheet.sheet_counts, sheet.question_count)
 	title = held_writes._clean_title(f"{sheet.summary} ({line})" if line else sheet.summary)
 	held_writes._notify(sheet.owner_user, sheet.conversation, title, sheet.name)
@@ -158,7 +158,7 @@ def _discard(sheet, reason: str, *, by: str | None = None, empty: bool = False) 
 	moved = _terminal_update(sheet.name, [PENDING], DISCARDED, reason_code=reason, **cols)
 	if moved and empty:
 		_give_back(sheet.conversation)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 	if moved:
 		settle(sheet.name)
 	return moved
@@ -368,7 +368,7 @@ def _seal_stranded() -> list[str]:
 			title="jarvis.file_box.sheet_seal_backstop",
 			message="Sealed by the reconciler (their turn-end seal never ran): " + ", ".join(sealed),
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- seals survive later reconcile steps
 	return sealed
 
 
@@ -406,7 +406,7 @@ def _close_orphans() -> int:
 		{"t": TERMINAL, "lim": _SCAN},
 	)
 	closed = close_ended(names) if names else 0
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- closures survive later reconcile steps
 	return closed
 
 
@@ -435,7 +435,7 @@ def alert(event: str, message: str, commit: bool = True) -> None:
 	if not _age_alert_deduped(frappe.utils.now_datetime(), f"jarvis.file_box.{event}"):
 		frappe.log_error(title=f"jarvis.file_box.{event}", message=message)
 		if commit:
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- alert survives caller rollback
 
 
 def backstop() -> dict:

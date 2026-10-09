@@ -41,20 +41,44 @@ CONV = "Jarvis Conversation"
 # the LAST fence in the final content (see ``parse_ask``).
 _ASK_RE = re.compile(r"```jarvis-ask[ \t]*\n([\s\S]*?)```")
 
-_FIELD_TYPES = ("date", "datetime", "link", "text")
+_FIELD_TYPES = ("date", "datetime", "field", "link", "select", "text")
+
+# Same identifier guards as the client parser (chatAsk.js DOCTYPE_RE/FIELDNAME_RE).
+_DOCTYPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]*")
+_FIELDNAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# The board shows options as chips; a long Select list is answered in chat
+# (where the real dropdown is) rather than truncated into a misleading chip row.
+_BOARD_MAX_CHIPS = 8
 
 _ANSWERED_DECISION = "(answered in chat)"
 
 
-def parse_ask(content: str | None) -> list[dict]:
-	"""Normalized questions ``[{q, type, options}]`` from the LAST
-	```jarvis-ask``` fence in ``content``, or ``[]``.
+def humanize_fieldname(fieldname: str | None) -> str:
+	"""Port of chatAsk.js ``humanizeFieldname``: ``custom_gstin_2`` -> ``Gstin 2``."""
+	s = re.sub(r"_+", " ", re.sub(r"^custom_", "", str(fieldname or ""))).strip()
+	return s[:1].upper() + s[1:]
 
-	Mirrors ChatView.vue ``askOf`` exactly: JSON body is a list or
+
+def ask_label(question: dict) -> str:
+	"""Board label of a parsed question: its text, else (a ``field`` question
+	may carry none; the card labels itself from the field) the humanized
+	fieldname."""
+	return question["q"] or humanize_fieldname(question.get("fieldname"))
+
+
+def parse_ask(content: str | None) -> list[dict]:
+	"""Normalized questions ``[{q, type, options, doctype, fieldname}]`` from
+	the LAST ```jarvis-ask``` fence in ``content``, or ``[]``.
+
+	Mirrors chatAsk.js ``parseAsk`` exactly: JSON body is a list or
 	``{questions: [...]}``; at most 6 questions; ``type`` normalized
-	("boolean" -> "yesno", unknown -> "single"); at most 8 string options;
-	a question is kept only when it has text AND (it is yesno / a field
-	type, or it carries options). Malformed JSON -> ``[]`` (skip silently).
+	("boolean" -> "yesno", unknown -> "single"); at most 8 string options
+	(200 for ``select``, which with none degrades to ``text``); a ``field``
+	question needs a plain-identifier doctype and fieldname (else it degrades
+	to a ``text`` question labelled by the humanized fieldname) and may have an
+	empty ``q``; any other question is kept only when it has text AND (it is
+	yesno / a field type, or it carries options). Malformed JSON -> ``[]``.
 	"""
 	matches = _ASK_RE.findall(content or "")
 	if not matches:
@@ -80,14 +104,29 @@ def parse_ask(content: str | None) -> list[dict]:
 			qtype = "yesno"
 		if qtype not in ("single", "multi", "yesno", *_FIELD_TYPES):
 			qtype = "single"
-		text = str(q.get("q") or q.get("question") or "").strip()
+		cap = 200 if qtype == "select" else 8
 		options = q.get("options")
-		options = [str(o) for o in options[:8]] if isinstance(options, list) else []
+		options = [str(o) for o in options[:cap]] if isinstance(options, list) else []
+		if qtype == "select" and not options:
+			qtype = "text"
+		text = str(q.get("q") or q.get("question") or "").strip()
+		if qtype == "field":
+			doctype = str(q.get("doctype") or "").strip()
+			fieldname = str(q.get("fieldname") or "").strip()
+			if _DOCTYPE_RE.fullmatch(doctype) and _FIELDNAME_RE.fullmatch(fieldname):
+				out.append(
+					{"q": text, "type": qtype, "options": [], "doctype": doctype, "fieldname": fieldname}
+				)
+				continue
+			# a bad identifier degrades to a typed answer instead of vanishing
+			text = text or humanize_fieldname(fieldname)
+			qtype, options = "text", []
 		if not text:
 			continue
 		if qtype not in ("yesno", *_FIELD_TYPES) and not options:
 			continue
-		out.append({"q": text, "type": qtype, "options": options})
+		doctype = str(q.get("doctype") or q.get("link") or "").strip() if qtype == "link" else ""
+		out.append({"q": text, "type": qtype, "options": options, "doctype": doctype, "fieldname": ""})
 	return out
 
 
@@ -99,7 +138,7 @@ def question_excerpt(content: str | None, limit: int = 140) -> str:
 	content = content or ""
 	questions = parse_ask(content) if "```jarvis-ask" in content else []
 	if questions:
-		text = re.sub(r"\s+", " ", " ".join(q["q"] for q in questions)).strip()
+		text = re.sub(r"\s+", " ", " ".join(ask_label(q) for q in questions)).strip()
 		return text[:limit]
 	# a malformed/unparseable fence must not leak raw JSON into the excerpt —
 	# drop fence blocks before falling back to the prose tail
@@ -137,12 +176,17 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# One decision field per row: a single question carries its options as
 	# board chips; a multi-question block becomes a free-form row (the board
 	# routes those to "Answer in chat").
-	question_text = "\n".join(q["q"] for q in questions)
+	question_text = "\n".join(ask_label(q) for q in questions)
 	options = questions[0]["options"] if len(questions) == 1 else []
+	# A field question has no options (the board cannot draw its real control:
+	# it takes a typed answer in chat); a long Select list is answered in chat
+	# too, not cut to a partial chip row.
+	if len(options) > _BOARD_MAX_CHIPS:
+		options = []
 	doc = frappe.get_doc(
 		{
 			"doctype": APPROVAL,
-			"title": questions[0]["q"][:100],
+			"title": ask_label(questions[0])[:100],
 			"status": "Pending",
 			"source": "Chat",
 			"conversation": conversation,
@@ -158,7 +202,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# trace Comment's owner.
 	if doc.owner != owner:
 		frappe.db.set_value(APPROVAL, doc.name, "owner", owner, update_modified=False)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	publish_to_user(
 		owner,
 		{
@@ -200,7 +244,7 @@ def resolve_on_user_message(conversation: str) -> None:
 			"conversation": conversation,
 		},
 	)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
 	# The board badge counted it: tell the owner's shell to re-count.
 	owner = frappe.db.get_value(CONV, conversation, "owner")
 	if owner:

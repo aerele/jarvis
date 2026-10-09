@@ -11,5 +11,5 @@ export const BADGE_META = {
 
 export const CATALOG_LEGEND =
 	"Jarvis always works within your own permissions. Each label shows what happens by " +
-	"default when you ask — if you've turned on auto-approve or a saved macro, some steps " +
+	"default when you ask. If you've turned on auto-approve or a saved macro, some steps " +
 	"run without asking first.";

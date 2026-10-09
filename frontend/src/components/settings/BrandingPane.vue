@@ -15,7 +15,7 @@
 				v-model="name"
 				maxlength="40"
 				placeholder="Jarvis"
-				description="Shown in the chat header, the browser tab, notifications, and in the assistant's own replies. Leave blank to use “Jarvis”. Up to 40 characters."
+				description="Shown in the chat header, the browser tab, notifications and in the assistant's own replies. Leave blank to use “Jarvis”. Up to 40 characters."
 			/>
 
 			<!-- Logo -->
@@ -31,7 +31,7 @@
 					<!-- No logo yet: the same brand-mark glyph JarvisMark renders
 					     elsewhere (onboarding, chat avatars). Kept local rather than
 					     reusing <JarvisMark> because that component reads the
-					     committed brandLogoUrl, not this pane's unsaved draft - after
+					     committed brand.logoUrl, not this pane's unsaved draft - after
 					     "Remove" the preview must go blank immediately, before Save. -->
 					<span
 						v-else
@@ -142,6 +142,7 @@ import { ref, computed, onMounted } from "vue";
 import { Button, FormControl, toast } from "frappe-ui";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import * as api from "@/api";
+import { applyBranding } from "@/branding";
 
 const loading = ref(true);
 const saving = ref(false);
@@ -201,11 +202,19 @@ async function save() {
 	error.value = "";
 	saving.value = true;
 	try {
-		await api.updateBranding({
+		const res = await api.updateBranding({
 			agent_name: name.value.trim(),
 			logo_url: logoUrl.value,
 			favicon_url: faviconUrl.value,
 		});
+		// Show the saved brand at once across the app (the server returns the cleaned values).
+		applyBranding(
+			(res && res.data) || {
+				agent_name: name.value.trim(),
+				brand_logo_url: logoUrl.value,
+				brand_favicon_url: faviconUrl.value,
+			}
+		);
 		original = {
 			name: name.value.trim(),
 			logoUrl: logoUrl.value,
@@ -214,7 +223,7 @@ async function save() {
 		name.value = original.name;
 		// Success flows through toast, not a bespoke inline green node
 		// (design.md §5 anti-pattern 16) - see SettingsPane's own doc comment.
-		toast.success("Saved. Refresh to apply across the app.");
+		toast.success("Saved.");
 	} catch (e) {
 		error.value = (e && e.message) || "Save failed.";
 	} finally {

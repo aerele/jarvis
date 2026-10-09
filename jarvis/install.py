@@ -39,7 +39,7 @@ _INSTALL_ONLY_ROLES = (WIKI_MANAGER_ROLE,)
 
 def after_install() -> None:
 	seed_roles_and_settings()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 
 	# seed_roles_and_settings is best-effort BY DESIGN: it wraps its body in
 	# try/except + log_error and never re-raises, because a failed seed must

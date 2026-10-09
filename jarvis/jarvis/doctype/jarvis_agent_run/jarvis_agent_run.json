@@ -22,6 +22,7 @@
   "finished_at",
   "conversation",
   "findings_count",
+  "advisory_findings_count",
   "blocker_count",
   "error",
   "coverage_note",
@@ -32,6 +33,9 @@
   "pages_json",
   "coverage_json",
   "scope_json",
+  "assessment_config_json",
+  "input_snapshot_json",
+  "assessment_output_json",
   "wm_row_count",
   "wm_gl_max_modified",
   "permission_profile",
@@ -43,6 +47,27 @@
   "model_source"
  ],
  "fields": [
+  {
+   "fieldname": "assessment_output_json",
+   "fieldtype": "Long Text",
+   "label": "Assessment Output Evidence",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "assessment_config_json",
+   "fieldtype": "Long Text",
+   "label": "Assessment Policy Snapshot",
+   "read_only": 1,
+   "permlevel": 1
+  },
+  {
+   "fieldname": "input_snapshot_json",
+   "fieldtype": "Long Text",
+   "label": "Assessment Input Evidence",
+   "read_only": 1,
+   "permlevel": 1
+  },
   {
    "fieldname": "agent",
    "fieldtype": "Link",
@@ -101,6 +126,13 @@
   },
   {
    "default": "0",
+   "fieldname": "advisory_findings_count",
+   "fieldtype": "Int",
+   "label": "Advisory Findings Count",
+   "description": "Count of this run's findings that are advisory (non-attesting). The clean-attestation gate counts only findings_count - advisory_findings_count."
+  },
+  {
+   "default": "0",
    "fieldname": "blocker_count",
    "fieldtype": "Int",
    "label": "Blocker Count"
@@ -137,7 +169,7 @@
    "fieldtype": "Int",
    "label": "Source Bytes Read",
    "read_only": 1,
-   "description": "CX5-3 — Custom App Learning scribe run only: DURABLE running total of custom-app source bytes this run has been served. read_app_source enforces + advances the per-run byte budget against this row under a lock, so the budget survives a cache outage (fail-closed: an unreadable row refuses the read)."
+   "description": "CX5-3 (Custom App Learning scribe run only): DURABLE running total of custom-app source bytes this run has been served. read_app_source enforces + advances the per-run byte budget against this row under a lock, so the budget survives a cache outage (fail-closed: an unreadable row refuses the read)."
   },
   {
    "default": "0",
@@ -195,7 +227,7 @@
    "fieldtype": "Data",
    "label": "Integrity Digest",
    "read_only": 1,
-   "description": "The evaluator's sha256 over its canonicalized findings (A1), passed through record_agent_run. Two runs on unchanged data must produce the same digest — the reproducibility proof stored alongside the run."
+   "description": "The evaluator's sha256 over its canonicalized findings (A1), passed through record_agent_run. Two runs on unchanged data must produce the same digest: the reproducibility proof stored alongside the run."
   },
   {
    "fieldname": "canvas_ref",
@@ -249,7 +281,7 @@
    "label": "Bundle Version",
    "read_only": 1,
    "no_copy": 1,
-   "description": "PP-5 — the agent/bundle version stamped IMMUTABLY at launch (unlike the mutable listing/installation version). Controller set-once: changing it after insert raises."
+   "description": "PP-5: the agent/bundle version stamped IMMUTABLY at launch (unlike the mutable listing/installation version). Controller set-once: changing it after insert raises."
   },
   {
    "fieldname": "preparation_mode",
@@ -258,7 +290,7 @@
    "options": "shadow\nlive",
    "read_only": 1,
    "no_copy": 1,
-   "description": "PP-5 — snapshot of the installation's activation_state at launch (shadow|live), immutable."
+   "description": "PP-5: snapshot of the installation's activation_state at launch (shadow|live), immutable."
   },
   {
    "fieldname": "initiating_human",
@@ -267,7 +299,7 @@
    "options": "User",
    "read_only": 1,
    "no_copy": 1,
-   "description": "PP-5 — the human who triggered a manual run (distinct from the run-as user and from the reassigned owner)."
+   "description": "PP-5: the human who triggered a manual run (distinct from the run-as user and from the reassigned owner)."
   },
   {
    "fieldname": "capability_contract",
@@ -276,7 +308,7 @@
    "options": "\nsnapshot\nlegacy",
    "read_only": 1,
    "no_copy": 1,
-   "description": "JF-017 — which capability regime governs this run. 'snapshot': the three fields below are the authority (a tool outside tools_allow_json is refused at dispatch). 'legacy': the run predates the guard, so no tools_allow gate applies and the write caps read the live listing. Blank on a run created AFTER the guard landed means no launch stamped it: everything is refused."
+   "description": "JF-017: which capability regime governs this run. 'snapshot': the three fields below are the authority (a tool outside tools_allow_json is refused at dispatch). 'legacy': the run predates the guard, so no tools_allow gate applies and the write caps read the live listing. Blank on a run created AFTER the guard landed means no launch stamped it: everything is refused."
   },
   {
    "fieldname": "tools_allow_json",
@@ -284,7 +316,7 @@
    "label": "Tools Allow JSON",
    "read_only": 1,
    "no_copy": 1,
-   "description": "JF-017 — the EXACT tools_allow the agent's bundled manifest declared, snapshotted at launch. The bench refuses any jarvis__* call outside it before dispatch, so a compromised container/plugin holding this run's session bearer cannot reach a tool the agent never declared. Immutable once stamped."
+   "description": "JF-017: the EXACT tools_allow the agent's bundled manifest declared, snapshotted at launch. The bench refuses any jarvis__* call outside it before dispatch, so a compromised container/plugin holding this run's session bearer cannot reach a tool the agent never declared. Immutable once stamped."
   },
   {
    "fieldname": "capability_nature",
@@ -292,7 +324,7 @@
    "label": "Capability Nature",
    "read_only": 1,
    "no_copy": 1,
-   "description": "JF-017 — the listing's nature (auditor|operator|scribe) AT LAUNCH. The delegate write caps read this instead of the mutable listing, so re-naturing a listing mid-run cannot grant an in-flight run new write authority."
+   "description": "JF-017: the listing's nature (auditor|operator|scribe) AT LAUNCH. The delegate write caps read this instead of the mutable listing, so re-naturing a listing mid-run cannot grant an in-flight run new write authority."
   },
   {
    "fieldname": "capability_writes_json",
@@ -300,7 +332,7 @@
    "label": "Capability Writes JSON",
    "read_only": 1,
    "no_copy": 1,
-   "description": "JF-017 — the declarative operator write contract ([{doctype, mode}]) AT LAUNCH. The create/update capability gate binds to this snapshot, never to the current Jarvis Agent Listing.writes."
+   "description": "JF-017: the declarative operator write contract ([{doctype, mode}]) AT LAUNCH. The create/update capability gate binds to this snapshot, never to the current Jarvis Agent Listing.writes."
   }
  ],
  "index_web_pages_for_search": 0,
