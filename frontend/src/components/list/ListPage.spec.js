@@ -15,7 +15,7 @@ vi.mock("frappe-ui", () => {
 		ListHeaderItem: blank,
 		ListRows: blank,
 		ListRowItem: blank,
-		ListSelectBanner: blank,
+		ListSelectBanner: { name: "ListSelectBanner", template: "<div><slot /></div>" },
 		ListFooter: blank,
 		Breadcrumbs: blank,
 		FormControl: blank,
@@ -60,5 +60,21 @@ describe("ListPage: a list that failed to load", () => {
 		});
 		expect(w.text()).toContain("No Macros Found");
 		expect(tryAgain(w)).toBeUndefined();
+	});
+});
+
+describe("ListPage: the selection bar", () => {
+	it("uses the raised pop-up surface, so it stands out in dark mode too", () => {
+		// frappe-ui's own bar is bg-surface-white, the page colour in dark mode (admin-v2#625)
+		const w = mount(ListPage, {
+			props: {
+				rows: [{ name: "a" }],
+				columns: [{ label: "A", key: "a" }],
+				selectable: true,
+			},
+		});
+		const bar = w.findComponent({ name: "ListSelectBanner" });
+		expect(bar.exists()).toBe(true);
+		expect(bar.classes()).toEqual(expect.arrayContaining(["border", "!bg-surface-modal"]));
 	});
 });

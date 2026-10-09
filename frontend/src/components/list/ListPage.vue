@@ -160,7 +160,12 @@
 					/>
 				</ListHeader>
 				<ListRows class="mx-3 sm:mx-5" />
-				<ListSelectBanner v-if="selectable">
+				<!-- frappe-ui's bar is bg-surface-white, the page colour in dark mode, where its black
+				     shadow does not show; the popover surface and a border keep it raised in both. -->
+				<ListSelectBanner
+					v-if="selectable"
+					class="border border-outline-gray-2 !bg-surface-modal"
+				>
 					<template #actions="{ selections, unselectAll }">
 						<slot name="select-actions" v-bind="{ selections, unselectAll }" />
 					</template>
