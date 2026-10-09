@@ -585,7 +585,10 @@ def delete_custom_skills_bulk(names: str | list | None = None) -> dict:
 	# Only a reviewer's delete reconciles the shared catalog (TASK 12): a plain
 	# Jarvis User's rows are User/Role-scope and never in the shared push, so
 	# their delete changes nothing there and must not trigger a bench-wide
-	# restart. A reviewer deleting an Org skill DOES need the reconcile.
+	# restart. A reviewer deleting an Org skill DOES need the reconcile. (The
+	# exception is a company skill from before the review workflow that a plain
+	# user still owns: its entry stays in the container until a reviewer next
+	# applies; a fetch of that name finds no company skill meanwhile.)
 	if deleted:
 		from jarvis.permissions import is_skill_reviewer
 

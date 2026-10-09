@@ -605,7 +605,8 @@ def _pushable_org_rows(owner: str | None = None, fields: tuple = _PUSHABLE_FIELD
 		order_by="skill_name asc",
 	)
 	# TASK 11: drop role-restricted Org rows (any with allowed_roles) so a
-	# role-scoped body is never written to the shared, role-blind container.
+	# role-scoped skill's name and description are never written to the shared,
+	# role-blind container (no skill's instructions are written there any more).
 	# Shared with the learned push through :func:`role_restricted_names` (#479).
 	restricted = role_restricted_names([r.name for r in rows])
 	kept = [r for r in rows if r.name not in restricted]
