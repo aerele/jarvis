@@ -198,7 +198,12 @@ def _structure_of(row, args: dict) -> _Structure | None:
 def _card_holds(row, structure: _Structure) -> bool:
 	"""Under the form's lock, before the claim: whether the card still says what the
 	write will do (the handler's ``card_holds``, when it has one). A handler whose
-	own checks now fail says so itself a moment later, under the same lock."""
+	own checks now refuse the call says so itself a moment later: the write tool
+	runs those checks again under this same lock before it writes anything, and its
+	refusal says why. Any other failure counts as a card that no longer holds: a
+	check that could not be made never lets the write run."""
+	from jarvis.exceptions import JarvisError
+
 	holds = getattr(structure.handler, "card_holds", None)
 	if holds is None:
 		return True
@@ -206,9 +211,13 @@ def _card_holds(row, structure: _Structure) -> bool:
 	try:
 		card = frappe.parse_json(card) if isinstance(card, str) else card
 		return bool(holds(str((card or {}).get("risk_line") or "")))
-	except Exception:
+	except JarvisError:
 		frappe.clear_messages()
 		return True
+	except Exception:
+		frappe.log_error(title="jarvis.pending_action.card_check_failed", message=frappe.get_traceback())
+		frappe.clear_messages()
+		return False
 
 
 def _parked_as_structure(row) -> bool:
@@ -294,6 +303,13 @@ def _report_structure_failure(row, args: dict, structure: _Structure, result, no
 		_record_failed_write(row, args, "partial" if code == "partial" else "failed")
 	doctype, name = _write_risk.first_risky_target(row.tool, args)
 	_write_risk.log_line(structure.handler.risk, doctype, name, code, tool=row.tool, cleanup=said)
+	if note is not None and note.needs_person:
+		# The same line the reconciler files for a row it had to leave: found from
+		# the Error Log, also when the clean-up ran inside the confirm itself.
+		frappe.log_error(
+			title="jarvis.pending_action.structure_needs_a_person", message=f"{row.name}: {note.text}"
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
 
 
 def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None, bool, str]:
@@ -527,9 +543,17 @@ def _claim_and_run(
 	if structure is not None:
 		# With the claim, in its transaction: a worker that dies mid-way leaves the
 		# reconciler what to clean up (and, for an edit, the record to restore).
+		from jarvis.tools import _guarded_structure
 		from jarvis.tools._guarded_structure import lock_names
 
 		structure.undo = {**structure.handler.snapshot(), "lock": lock_names(structure.handler)}
+		if structure.undo.get(_guarded_structure.INCOMPLETE) and not structure.undo.get(
+			_guarded_structure.REFUSED
+		):
+			# Nothing to undo by: not claimed and not run, so the same card can be
+			# confirmed once whatever kept the snapshot from being read has passed.
+			frappe.db.rollback()
+			return _busy_structure(RuntimeError(_guarded_structure.NO_SNAPSHOT))
 		stash_undo(name, _seal.seal_undo(name, structure.undo))
 	if not claim(name, approver, batch_id=batch_id, adopted_conversation=adopt):
 		frappe.db.rollback()

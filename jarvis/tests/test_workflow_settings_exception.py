@@ -474,8 +474,11 @@ class TestWorkflowPark(_WfBase):
 		)
 		self.assertEqual(transitions["Condition"][0], "doc.title == 'go'")
 		line = card["risk_line"]
-		self.assertIn(CODE_LINE, line, "a condition is code")
+		self.assertNotIn(CODE_LINE, line, "a comparison chat may write is shown, not called code")
 		self.assertIn("Self-approval is allowed on 1 of 2 transitions", line)
+		self.assertLess(
+			line.index("Self-approval is allowed"), line.index(ACCESS_LINE), "what is particular comes first"
+		)
 
 	def test_each_condition_gets_a_row_of_its_own_shown_whole(self):
 		"""Flow review: the Transitions table scrolls sideways on the board and the
@@ -625,7 +628,17 @@ class TestWorkflowPark(_WfBase):
 			({"document_type": self.dt.lower()}, f"is named {self.dt!r}"),
 			(
 				{"states": [{"state": "Jwf Nope", "allow_edit": "System Manager"}]},
-				"no Workflow State named 'Jwf Nope'",
+				"does not exist yet: state 'Jwf Nope'",
+			),
+			(
+				{
+					"states": [
+						{"state": "Jwf Nope", "allow_edit": "System Manager"},
+						{"state": "Jwf Nada", "allow_edit": "System Manager"},
+					],
+					"transitions": [{**t, "state": "Jwf Nope", "action": "Jwf Go", "next_state": "Jwf Nada"}],
+				},
+				"does not exist yet: states 'Jwf Nope', 'Jwf Nada'; action 'Jwf Go'. Each is an ordinary record",
 			),
 			(
 				{"states": [{"state": self.s_open.upper(), "allow_edit": "System Manager"}]},
@@ -633,12 +646,13 @@ class TestWorkflowPark(_WfBase):
 			),
 			({"states": [{"state": self.s_open, "allow_edit": "Jwf No Role"}]}, "no Role named"),
 			({"states": [{"state": self.s_open}]}, "allow_edit is missing"),
-			({"transitions": [{**t, "action": "Jwf Nope"}]}, "no Workflow Action Master named"),
+			({"transitions": [{**t, "action": "Jwf Nope"}]}, "does not exist yet: action 'Jwf Nope'"),
 			({"transitions": [{**t, "next_state": self.s_no}]}, "not a valid State"),
 			({"transitions": [{**t, "condition": "doc.title ="}]}, "is not set from chat"),
 			({"transitions": [{**t, "condition": "(lambda: 1)()"}]}, "is not set from chat"),
 			({"transitions": [{**t, "condition": "doc.__class__"}]}, "is not set from chat"),
 			({"states": [], "transitions": []}, "needs at least one state"),
+			({"states": [one, one], "transitions": []}, "is listed more than once"),
 			(
 				{"states": [{**one, "doc_status": 1}], "transitions": []},
 				"cannot be submitted",
@@ -722,7 +736,7 @@ class TestWorkflowPark(_WfBase):
 		r = self.create_wf(states=[first, {**state, "update_value": "doc.title +"}])
 		self.assert_refused(r, "InvalidArgumentError", "is not set from chat")
 		name = self.park_wf(states=[first, {**state, "update_value": "doc.who"}])
-		self.assertIn(CODE_LINE, self.card(name)["risk_line"])
+		self.assertNotIn(CODE_LINE, self.card(name)["risk_line"], "an allowed expression is shown whole")
 
 	def test_a_state_field_that_cannot_be_added_is_refused_at_park(self):
 		"""Lesson 8: what could only fail at Confirm is refused at park."""
@@ -747,6 +761,11 @@ class TestWorkflowPark(_WfBase):
 			"doc.workflow_state == 'x' or doc.name != 'y'",
 			"1 < doc.idx <= 5",
 			"not (doc.idx > 3 or doc.title in {'a', 'b'})",
+			# ordering two numbers, equality of anything, a plain non-zero divisor
+			"doc.idx > 1 and doc.creation == '2026-01-01'",
+			"doc.get('idx', 0) > 1 and doc.title != None",
+			"doc.idx / 2 > 1 and doc.idx % -3 == 0",
+			"doc.idx >= True",
 		)
 		refused = (
 			"frappe.db.get_value('User', doc.owner, 'api_key') == 1",
@@ -803,6 +822,31 @@ class TestWorkflowPark(_WfBase):
 			"doc.idx / 0 > 1",
 			"doc.idx % 0 == 1",
 			"doc.idx // 0.0 == 1",
+			# what raises when Frappe evaluates it, for every user who opens the record:
+			# ordering anything but two numbers, and a divisor that can be zero
+			"doc.creation > '2026-01-01'",
+			"doc.idx > 1 and doc.modified >= '2026-11-01'",
+			"'2026-01-01' < doc.creation",
+			"doc.idx >= '10'",
+			"doc.title > 'a'",
+			"1 < doc.title",
+			"doc.idx > None",
+			"1 < doc.idx < doc.title",
+			"doc.get('idx', 'x') > 1",
+			"doc.get('title', 0) > 1",
+			"doc.idx / doc.docstatus > 1",
+			"doc.idx / (1 - 1) > 1",
+			"doc.idx % doc.idx == 0",
+			"doc.idx // -0 == 1",
+			"doc.idx / True > 1",
+			"-None > 1",
+			"None + 1 > 0",
+			"True + None == 1",
+			# enforced since the first cut, pinned here (the review's surviving mutations)
+			"doc.db_set('title') == 1",
+			"doc.get_value('title') == 1",
+			"doc.idx * 'abc' > 1",
+			"other['title'] == 1",
 			# in / not in a literal list only
 			"doc.title in doc.who",
 			"doc.title in 'abc'",
@@ -813,11 +857,45 @@ class TestWorkflowPark(_WfBase):
 		for expression in refused:
 			self.assertTrue(wg.expression_problem(expression, self.dt), expression)
 		self.assertIn("nope", wg.expression_problem("doc.nope > 1", self.dt), "the field is named")
+		self.assertIn(
+			"Desk", wg.expression_problem("doc.creation > '2026-01-01'", self.dt), "where a date rule goes"
+		)
+		self.assertIn("use == or !=", wg.expression_problem("doc.title > 'a'", self.dt))
+		for expression in ("doc.creation > '2026-01-01'", "doc.title > 'a'"):
+			# The tool layer strips what looks like a tag: "< or >" came out as "".
+			said = wg.expression_problem(expression, self.dt)
+			self.assertEqual(frappe.utils.strip_html(said), said)
+			self.assertNotIn("<", said)
+		# Only the types Frappe never leaves empty are numbers: a Duration, a Long Int
+		# and a Rating can be NULL, and None is neither ordered nor added to.
+		kinds = wg._fields_of(self.dt)
+		self.assertEqual((kinds["idx"], kinds["title"], kinds["creation"]), (wg.NUMBER, wg.TEXT, wg.DATE))
+		self.assertEqual(wg._NUMERIC_TYPES, {"Int", "Float", "Currency", "Percent", "Check"})
+		nullable = {**kinds, "dur": wg.TEXT, "stars": wg.TEXT, "big": wg.TEXT}
+		with patch.object(wg, "_fields_of", return_value=nullable):
+			for expression in (
+				"doc.dur > 86400",
+				"doc.get('stars', 0) > 3",
+				"doc.big + 1 == 2",
+				"-doc.dur < 0",
+				"doc['dur'] / 60 > 3",
+			):
+				self.assertTrue(wg.expression_problem(expression, self.dt), expression)
+			self.assertIsNone(wg.expression_problem("doc.dur == None or doc.stars == 3", self.dt))
+		self.assertIn("not zero", wg.expression_problem("doc.idx / doc.docstatus > 1", self.dt))
 		# A value Frappe 16 computes for a state (update value as an expression) need
 		# not be a comparison; everything else holds for it too.
 		for expression in ("doc.idx + 1", "doc.title", "'x'", "doc.idx > 1", "-doc.idx * 2"):
 			self.assertIsNone(wg.expression_problem(expression, self.dt, value=True), expression)
-		for expression in ("frappe.session.user", "[0] * 9", "doc.nope", "doc.title * 3", "[1, 2]"):
+		for expression in (
+			"frappe.session.user",
+			"[0] * 9",
+			"doc.nope",
+			"doc.title * 3",
+			"[1, 2]",
+			"doc.idx / doc.docstatus",
+			"doc.creation > '2026-01-01'",
+		):
 			self.assertTrue(wg.expression_problem(expression, self.dt, value=True), expression)
 		t = {"state": self.s_open, "action": self.a_ok, "next_state": self.s_ok, "allowed": "System Manager"}
 		bad = "frappe.db.get_value('User', doc.owner, 'api_key')"
@@ -830,7 +908,7 @@ class TestWorkflowPark(_WfBase):
 		r = self.create_wf(transitions=[{**t, "condition": "doc.amount > 5"}])
 		self.assert_refused(r, "InvalidArgumentError", ["amount", f"not a field of {self.dt}"])
 		name = self.park_wf(transitions=[{**t, "condition": "doc.get('title') in ('a', 'b')"}])
-		self.assertIn(CODE_LINE, self.card(name)["risk_line"], "an allowed condition is still code")
+		self.assertNotIn(CODE_LINE, self.card(name)["risk_line"], "an allowed condition is not called code")
 
 	def test_roles_a_workflow_hands_out(self):
 		"""Guest is never an approver or an editor; everyone signed in may be, and
@@ -864,7 +942,7 @@ class TestWorkflowPark(_WfBase):
 			with self.subTest(existing=existing):
 				with patch.object(wg, "_count_fill", return_value=5001):
 					r = self.create_wf()
-				self.assert_refused(r, "structure_refused", ["5001 records", "5000"])
+				self.assert_refused(r, "structure_refused", "More than 5000 records")
 				with patch.object(wg, "_count_fill", return_value=5000):
 					name = self.park_wf()
 				self.assertIn(
@@ -933,8 +1011,73 @@ class TestWorkflowPark(_WfBase):
 		frappe.db.commit()
 		line = self.card(self.park_wf())["risk_line"]
 		self.assertIn(
-			"It fills the state on 2 records that have none; 2 records keep states this workflow lacks.", line
+			"It fills the state on 2 records that have none; 2 records keep states this workflow lacks, "
+			"and they cannot be saved or moved until their state is changed to one of this workflow's.",
+			line,
 		)
+		self.conv = self.make_conv(SM_USER)
+		line = self.card(self.park_wf(is_active=0))["risk_line"]
+		self.assertIn("2 records keep states this workflow lacks.", line, "inactive: nothing is held yet")
+		self.conv = self.make_conv(SM_USER)
+		with patch.object(wg, "KEPT_COUNT_MAX", 1):
+			line = self.card(self.park_wf())["risk_line"]
+		self.assertIn("more than 1 record keep states this workflow lacks", line, "counted to a bound")
+		frappe.db.set_value(self.dt, names[3], STATE, "", update_modified=False)
+		frappe.db.commit()
+		self.assertEqual(
+			wg._count_kept(self.dt, STATE, [self.s_open, self.s_ok]), 2, "an empty state is filled, not kept"
+		)
+
+	def test_the_counts_stop_at_their_bound(self):
+		"""Review: the fill was counted whole before the cap was applied."""
+		self.desk_workflow(name=f"Jwf Old {self.tag}", is_active=0, states=[], transitions=[])
+		self.records(4)
+		with patch.object(wg, "FILL_NAMES_MAX", 2):
+			self.assertEqual(wg._count_fill(self.dt, STATE, [0], True), 3, "one past the cap, no further")
+		with patch.object(wg, "KEPT_COUNT_MAX", 2):
+			self.assertEqual(wg._count_kept(self.dt, STATE, [self.s_open]), 0)
+			frappe.db.sql(f"UPDATE `tab{self.dt}` SET `{STATE}`=%s", self.s_no)
+			self.assertEqual(wg._count_kept(self.dt, STATE, [self.s_open]), 3)
+
+	def test_a_form_with_no_table_is_refused(self):
+		real = frappe.db.table_exists
+
+		def gone(doctype, *args, **kwargs):
+			return False if doctype == self.dt else real(doctype, *args, **kwargs)
+
+		with patch.object(frappe.db, "table_exists", side_effect=gone):
+			r = self.create_wf()
+		self.assert_refused(r, "structure_refused", "has no table of its own")
+
+	def test_what_changes_a_lot_is_said_or_refused(self):
+		"""Review: an active workflow with no transitions, an existing text field used
+		as the state field, and a state that writes an access-bearing field."""
+		line = self.card(self.park_wf(transitions=[]))["risk_line"]
+		self.assertIn("It has no transitions: no record of this form can be moved", line)
+		self.conv = self.make_conv(SM_USER)
+		line = self.card(self.park_wf(workflow_state_field="title"))["risk_line"]
+		self.assertIn("The state is kept in the existing field Title 0 (title)", line)
+		self.conv = self.make_conv(SM_USER)
+		states = [
+			{"state": self.s_open, "allow_edit": "System Manager"},
+			{"state": self.s_ok, "allow_edit": "System Manager", "update_field": "who", "update_value": "x"},
+		]
+		with patch.dict(wr._FIELD_SENSITIVE, {self.dt: ("access", ("who",))}):
+			r = self.create_wf(states=states)
+		self.assert_refused(r, "InvalidArgumentError", ["'who'", "gives access"])
+		# Employee status switches the linked login on and off.
+		real = frappe.get_meta
+		employee = frappe._dict(get_field=lambda name: frappe._dict(fieldtype="Select"))
+		with (
+			patch.object(
+				frappe,
+				"get_meta",
+				side_effect=lambda dt, *a, **k: employee if dt == "Employee" else real(dt, *a, **k),
+			),
+			self.assertRaises(wg.InvalidFieldValueError) as caught,
+		):
+			wg.NewWorkflow({})._check_updates([{"state": "x", "update_field": "status"}], "Employee")
+		self.assertIn("gives access", str(caught.exception))
 
 	def test_it_says_which_active_workflow_it_replaces(self):
 		old = self.desk_workflow(name=f"Jwf Old {self.tag}")
@@ -952,7 +1095,7 @@ class TestWorkflowPark(_WfBase):
 		self.records(3)
 		with patch.object(wg, "FILL_NAMES_MAX", 2):
 			r = self.create_wf()
-		self.assert_refused(r, "structure_refused", "3 records")
+		self.assert_refused(r, "structure_refused", "More than 2 records")
 
 	def test_someone_who_is_not_a_system_manager_is_refused_at_park(self):
 		r = self.run_tool(
@@ -1266,6 +1409,75 @@ class TestWorkflowConfirm(_WfBase):
 		frappe.db.commit()
 		return name, names
 
+	def _executing_since(self, name: str, seconds: int) -> None:
+		frappe.db.sql(
+			f"UPDATE `tab{PA}` SET executing_at=%(t)s WHERE name=%(n)s AND status='Executing'",
+			{"t": frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-seconds), "n": name},
+		)
+		frappe.db.commit()
+
+	def test_a_dead_confirm_is_cleaned_up_as_soon_as_its_lock_is_free(self):
+		"""Review: recovery waited out ten minutes with a field row that has no
+		column. The form's lock is held for the whole confirm, so a row still
+		Executing whose lock can be taken has no worker."""
+		from jarvis.chat.pending_actions import _reconcile
+
+		self.assertLess(_reconcile.STRUCTURE_DEAD_AFTER_S, _reconcile.INTERRUPT_AFTER_S)
+		name, _names = self._saved_but_never_recorded()
+		self._executing_since(name, _reconcile.STRUCTURE_DEAD_AFTER_S - 30)
+		self.reconcile_own(name)
+		self.assertEqual(self.row(name).status, "Executing", "too fresh to judge")
+		self._executing_since(name, _reconcile.STRUCTURE_DEAD_AFTER_S + 30)
+		with gs.structure_lock(self.dt):  # its confirm is still running
+			self.reconcile_own(name)
+		self.assertEqual(self.row(name).status, "Executing", "never beside a running change")
+		self.assertEqual(self.active(), [f"Jwf Flow {self.tag}"])
+		self.reconcile_own(name)
+		row = self.row(name)
+		self.assertEqual((row.status, row.reason_code), ("Failed", "interrupted"))
+		self.assertFalse(frappe.db.exists(WF, f"Jwf Flow {self.tag}"))
+
+	def test_a_clean_up_given_up_on_names_what_it_was(self):
+		from jarvis.chat.pending_actions import _reconcile
+
+		name, _names = self._saved_but_never_recorded()
+		_reconcile._give_up_structure(name)
+		logged = self.logged("structure_needs_a_person", name)
+		self.assertEqual(len(logged), 1)
+		self.assertIn(self.dt, logged[0])
+		self.assertIn(f"Jwf Flow {self.tag}", logged[0])
+
+	def test_a_failed_confirm_left_for_a_person_is_logged(self):
+		"""Review: only the reconciler logged it; a clean-up inside the confirm that
+		had to leave the workflow in place said so on the card and nowhere else."""
+		self.wf_hook("wf_validation_hook")
+		name = self.park_wf()
+		left = gs.CleanUp("left in place, it needs a person", clean=False, needs_person=True)
+		with patch.object(gs, "clean_up", return_value=left):
+			out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		logged = self.logged("structure_needs_a_person", name)
+		self.assertEqual(len(logged), 1, logged)
+		self.assertIn("left in place", logged[0])
+
+	def test_the_off_switch_is_off_when_either_file_says_so(self):
+		"""Review: a site-level 0 switched back on what the bench had set off."""
+
+		def files(common, site):
+			return lambda path, missing_ok=False: common if "common_site_config" in path else site
+
+		was = frappe.conf.pop(gs.OFF_SWITCH, None)
+		if was is not None:
+			self.addCleanup(frappe.conf.__setitem__, gs.OFF_SWITCH, was)
+		for common, site, off in (
+			({gs.OFF_SWITCH: 1}, {gs.OFF_SWITCH: 0}, True),
+			({gs.OFF_SWITCH: 0}, {gs.OFF_SWITCH: 1}, True),
+			({}, {gs.OFF_SWITCH: 0}, False),
+			({}, {}, False),
+		):
+			with patch.object(gs, "_read_json", side_effect=files(common, site)):
+				self.assertEqual(gs.disabled(), off, (common, site))
+
 	def test_an_interrupted_workflow_nobody_used_is_reverted(self):
 		name, names = self._saved_but_never_recorded()
 		self.reconcile_own(name)
@@ -1370,16 +1582,25 @@ class TestWorkflowConfirm(_WfBase):
 		self.assertFalse(note.restored)
 		self.assertEqual(self.active(), [f"Jwf Flow {self.tag}"], "left for a person")
 
-	def test_a_record_only_created_after_the_confirm_is_not_use(self):
-		self.desk_workflow(name=f"Jwf Old {self.tag}", is_active=0, states=[], transitions=[])
+	def test_a_record_created_after_the_confirm_counts_as_use(self):
+		"""Review: a record made under the new workflow holds one of ITS states. Put
+		the workflow it replaced back and that record can no longer be saved."""
+		old = self.desk_workflow(
+			name=f"Jwf Old {self.tag}",
+			states=[{"state": self.s_no, "allow_edit": "System Manager"}],
+			transitions=[],
+		)
 		name = self.park_wf()
 		self.assertTrue(self.confirm(name)["ok"])
+		self.assertEqual(self.active(), [f"Jwf Flow {self.tag}"], f"it replaced {old}")
 		with as_user(SM_USER):
-			frappe.get_doc({"doctype": self.dt, "title": "made afterwards"}).insert()
+			doc = frappe.get_doc({"doctype": self.dt, "title": "made afterwards"}).insert()
 		frappe.db.commit()
 		note = frappe._dict(gs.undo_confirmation(name))
-		self.assertTrue(note.restored, note.message)
-		self.assertFalse(frappe.db.exists(WF, f"Jwf Flow {self.tag}"))
+		self.assertTrue(note.needs_person, note.message)
+		self.assertFalse(note.restored)
+		self.assertEqual(self.active(), [f"Jwf Flow {self.tag}"], "left for a person")
+		self.assertEqual(frappe.db.get_value(self.dt, doc.name, STATE), self.s_open)
 
 	def test_the_kept_undo_is_purged_with_its_row(self):
 		"""M1 (b). The snapshot lives on the confirmation row and nowhere else, and
@@ -1440,6 +1661,86 @@ class TestWorkflowConfirm(_WfBase):
 			out["error"]["kind"], "not_fixable", "a structure write is never offered a correction"
 		)
 		self.assertFalse(frappe.db.exists(WF, f"Jwf Flow {self.tag}"))
+
+	def test_what_changed_since_the_park_is_refused_at_confirm(self):
+		"""Review: "checks repeated at Confirm" was pinned for two kinds of change. A
+		role deleted since, a fill grown past the cap, and a confirmer who lost the
+		permission are each refused there too, with nothing made."""
+		role = f"Jwf Role {self.tag}"
+		frappe.get_doc({"doctype": "Role", "role_name": role}).insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.addCleanup(lambda: (frappe.db.delete("Role", {"name": role}), frappe.db.commit()))
+		states = [{"state": self.s_open, "allow_edit": role}, {"state": self.s_ok, "allow_edit": role}]
+		name = self.park_wf(states=states)
+		frappe.db.delete("Role", {"name": role})
+		frappe.db.commit()
+		out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		self.assertIn("no Role named", out["error"]["message"])
+		self.assert_no_workflow()
+		self.assertEqual(self.logged("snapshot_failed"), [], "a refusal is not logged as a fault")
+
+		self.conv = self.make_conv(SM_USER)
+		name = self.park_wf()
+		self.records(3)
+		with patch.object(wg, "FILL_NAMES_MAX", 2):
+			out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		self.assertIn("More than 2 records", out["error"]["message"])
+		self.assert_no_workflow()
+
+		self.conv = self.make_conv(SM_USER)
+		name = self.park_wf()
+		real = frappe.has_permission
+
+		def lost(doctype=None, *args, **kwargs):
+			return False if doctype == WF else real(doctype, *args, **kwargs)
+
+		with patch.object(frappe, "has_permission", side_effect=lost):
+			out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		self.assert_no_workflow()
+
+	def test_a_write_with_no_chat_behind_it_never_parks(self):
+		"""An agent run has no conversation bound to its session: there is no card to
+		show anyone, so the workflow write is refused before anything parks."""
+		before = frappe.db.count(PA)
+		with as_user(SM_USER):
+			r = api._run_tool("create_doc", {"doctype": WF, "values": self.wf_values()}, conversation=None)
+		self.assertFalse(r.get("ok"), r)
+		self.assertEqual(frappe.db.count(PA), before, "nothing parked")
+		self.assert_no_workflow()
+
+	def test_a_snapshot_that_cannot_be_taken_stops_the_write(self):
+		"""Review: a failed snapshot was swallowed, the confirm went on with nothing
+		to undo by, and a failure after the commit then read "Nothing was changed"."""
+		names = self.records(2)
+		name = self.park_wf()
+		with patch.object(wg, "_fill_snapshot", side_effect=RuntimeError("boom")):
+			r = self.confirm(name)
+		self.assertFalse(r["ok"], r)
+		self.assertIn("could not record what this change replaces", frappe.as_json(r))
+		self.assertEqual(r["error"]["kind"], "retry_later")
+		self.assertEqual(self.row(name).status, "Pending", "not claimed: the same card confirms again")
+		self.assert_no_workflow()
+		self.assertEqual(self.states_of(), {}, "no state field, nothing filled")
+		self.assertEqual(len(names), frappe.db.count(self.dt))
+		self.assertTrue(self.logged("snapshot_failed", "Workflow"))
+		self.assertTrue(self.confirm(name)["ok"], "and it confirms once the snapshot can be read")
+
+	def test_a_written_change_with_no_whole_snapshot_is_never_called_clean(self):
+		note = gs.clean_up({"risk": wg.RISK_NEW, "name": "", gs.INCOMPLETE: True, "written": {"name": "x"}})
+		self.assertFalse(note.clean)
+		self.assertTrue(note.needs_person)
+		self.assertNotIn("Nothing was changed", note.text)
+
+	def test_a_card_check_that_cannot_be_made_does_not_run_the_write(self):
+		name = self.park_wf()
+		with patch.object(wg.NewWorkflow, "card_holds", side_effect=RuntimeError("boom")):
+			r = self.confirm(name)
+		self.assertFalse(r["ok"], r)
+		self.assert_no_workflow()
+		self.assertEqual(self.row(name).reason_code, "stale")
 
 	def test_a_card_that_no_longer_says_what_it_does_is_stale(self):
 		"""Card == write, also over time: the card said nothing of replacing a
@@ -1589,6 +1890,7 @@ class TestWorkflowEdit(_WfBase):
 			({}, "InvalidArgumentError", "changes is empty"),
 			({"document_type": "ToDo"}, "structure_refused", "makes it another workflow"),
 			({"workflow_name": "Jwf Renamed"}, "structure_refused", "makes it another workflow"),
+			({"workflow_state_field": "jwf_state"}, "structure_refused", "Changing the state field"),
 			(
 				{"states": [{"state": self.s_open, "allow_edit": "System Manager"}]},
 				"InvalidArgumentError",
@@ -1639,7 +1941,24 @@ class TestWorkflowEdit(_WfBase):
 	def test_an_update_card_carries_the_code_line_and_the_same_rules(self):
 		row = frappe.get_doc(WF, self.wf).transitions[0].name
 		name = self.park_update(self.wf, transitions=[{"name": row, "condition": "doc.title == 'go'"}])
-		self.assertIn(CODE_LINE, self.card(name)["risk_line"])
+		self.assertNotIn(CODE_LINE, self.card(name)["risk_line"])
+		# A richer condition someone set up in Desk is kept, named, and called code.
+		frappe.db.set_value(
+			"Workflow Transition", row, "condition", "frappe.session.user == 'x'", update_modified=False
+		)
+		frappe.db.commit()
+		frappe.clear_document_cache(WF, self.wf)
+		self.conv = self.make_conv(SM_USER)
+		line = self.card(self.park_update(self.wf, send_email_alert=1))["risk_line"]
+		self.assertIn(
+			f"The condition on {self.a_ok} from {self.s_open}: set up in Desk and kept as it is. "
+			"It is not checked here.",
+			line,
+		)
+		self.assertIn(CODE_LINE, line)
+		frappe.db.set_value("Workflow Transition", row, "condition", None, update_modified=False)
+		frappe.db.commit()
+		frappe.clear_document_cache(WF, self.wf)
 		self.conv = self.make_conv(SM_USER)
 		r = self.update_wf(self.wf, transitions=[{"name": row, "condition": "frappe.session.user == 'x'"}])
 		self.assert_refused(r, "InvalidArgumentError", "may only compare this document's own fields")
@@ -1747,32 +2066,94 @@ class TestWorkflowEdit(_WfBase):
 		frappe.db.commit()
 		line = self.card(self.park_update(self.wf, send_email_alert=1))["risk_line"]
 		self.assertIn(
-			"It fills the state on 1 record that has none; 1 record keeps a state this workflow lacks.", line
+			"It fills the state on 1 record that has none; 1 record keeps a state this workflow lacks, "
+			"and it cannot be saved or moved until its state is changed to one of this workflow's.",
+			line,
 		)
 		self.assertIn("Self-approval is allowed on 1 of 1 transitions", line)
 
 	def test_a_failure_after_the_edit_committed_restores_the_workflow(self):
-		"""The edit names a new state field, so Frappe commits the edited workflow
-		and then alters the table; the planted failure comes after that."""
+		"""The form lost its state field since the workflow was saved, so the edit
+		adds it again: Frappe commits the edited workflow and then alters the table;
+		the planted failure comes after that."""
 		old = self.desk_workflow(name=f"Jwf Old {self.tag}")
+		frappe.db.delete("Custom Field", {"dt": self.dt, "fieldname": STATE})
+		frappe.db.commit()
+		frappe.db.sql_ddl(f"ALTER TABLE `tab{self.dt}` DROP COLUMN `{STATE}`")
+		frappe.clear_cache(doctype=self.dt)
 		before = frappe.get_doc(WF, self.wf).as_dict()
 		self.wf_hook("wf_validation_hook")
 		doc = frappe.get_doc(WF, self.wf)
 		name = self.park_update(
 			self.wf,
 			is_active=1,
-			workflow_state_field="jwf_state",
 			transitions=[{"name": doc.transitions[0].name, "allow_self_approval": 0}],
 		)
 		out = self.confirm(name)
 		self.assertFalse(out["ok"], out)
-		self.assertEqual(out["outcome"], "partial", "the complete field jwf_state stays")
+		self.assertEqual(out["outcome"], "partial", "the complete field workflow_state stays")
 		self.assertIn(f"The change to the workflow {self.wf} was undone.", out["error"]["message"])
 		self.assertIn(f"The workflow {old} is active again.", out["error"]["message"])
 		frappe.db.rollback()
 		after = frappe.get_doc(WF, self.wf).as_dict()
 		self.assertEqual(after, before, "restored exactly, rows and timestamps included")
 		self.assertEqual(self.active(), [old])
+
+	def test_an_edit_waits_for_the_lock_and_obeys_the_off_switch(self):
+		name = self.park_update(self.wf, send_email_alert=1)
+		with gs.structure_lock(self.dt):
+			out = self.confirm(name)
+		self.assertEqual((out["ok"], out["error"]["kind"]), (False, "retry_later"), out)
+		self.assertEqual(self.row(name).status, "Pending", "the card is still there to confirm")
+		frappe.conf[gs.OFF_SWITCH] = 1
+		self.addCleanup(frappe.conf.pop, gs.OFF_SWITCH, None)
+		out = self.confirm(name)
+		self.assertEqual((out["ok"], out["error"]["code"]), (False, "structure_refused"), out)
+		self.assertEqual(frappe.db.get_value(WF, self.wf, "send_email_alert"), 0)
+		frappe.conf.pop(gs.OFF_SWITCH, None)
+		self.conv = self.make_conv(SM_USER)
+		self.assert_refused_edit_when_off()
+
+	def assert_refused_edit_when_off(self):
+		frappe.conf[gs.OFF_SWITCH] = 1
+		r = self.update_wf(self.wf, send_email_alert=1)
+		frappe.conf.pop(gs.OFF_SWITCH, None)
+		self.assert_refused(r, "structure_refused")
+
+	def test_the_operators_undo_puts_an_edit_back(self):
+		before = frappe.get_doc(WF, self.wf).as_dict()
+		name = self.park_update(self.wf, send_email_alert=1, is_active=1)
+		self.assertTrue(self.confirm(name)["ok"])
+		self.assertEqual(self.active(), [self.wf])
+		note = frappe._dict(gs.undo_confirmation(name))
+		self.assertTrue(note.restored, note.message)
+		frappe.db.rollback()
+		frappe.clear_document_cache(WF, self.wf)
+		self.assertEqual(frappe.get_doc(WF, self.wf).as_dict(), before, "rows and timestamps included")
+		self.assertEqual(self.active(), [])
+
+	def test_an_edit_whose_worker_died_is_put_back(self):
+		before = frappe.get_doc(WF, self.wf).as_dict()
+		name = self.park_update(self.wf, send_email_alert=1)
+		with (
+			patch("jarvis.chat.pending_actions._execute._terminal_update", side_effect=SystemExit("killed")),
+			self.assertRaises(SystemExit),
+		):
+			self.confirm(name)
+		frappe.db.rollback()
+		# No column is added, so the edit and its record of it are one transaction:
+		# the dead worker's edit went with it, and the row is all that is left.
+		self.assertEqual(self.row(name).status, "Executing")
+		frappe.db.sql(
+			f"UPDATE `tab{PA}` SET executing_at=%(t)s WHERE name=%(n)s AND status='Executing'",
+			{"t": frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-700), "n": name},
+		)
+		frappe.db.commit()
+		self.reconcile_own(name)
+		row = self.row(name)
+		self.assertEqual((row.status, row.reason_code), ("Failed", "interrupted"))
+		frappe.clear_document_cache(WF, self.wf)
+		self.assertEqual(frappe.get_doc(WF, self.wf).as_dict(), before)
 
 	def test_clean_up_never_overwrites_a_later_edit(self):
 		before = wg._before_image(self.wf)
@@ -1821,6 +2202,148 @@ class TestWorkflowEdit(_WfBase):
 # --------------------------------------------------------------------------- #
 # The two settings documents
 # --------------------------------------------------------------------------- #
+class TestSubmittableWorkflow(_WfBase):
+	"""A workflow on a form that can be submitted: what the card says about it,
+	Frappe's own document-status rules, and that an approval counts as use."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.sub = "Jcf Sub " + uuid.uuid4().hex[:6]
+		cls.scratch.append(cls.sub)
+		frappe.get_doc(
+			{
+				"doctype": "DocType",
+				"name": cls.sub,
+				"module": "Custom",
+				"custom": 1,
+				"autoname": "hash",
+				"is_submittable": 1,
+				"fields": [{"label": "Title", "fieldname": "title", "fieldtype": "Data"}],
+				"permissions": [
+					{
+						"role": "System Manager",
+						"read": 1,
+						"write": 1,
+						"create": 1,
+						"submit": 1,
+						"cancel": 1,
+					}
+				],
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+
+	def sub_values(self, **over) -> dict:
+		return self.wf_values(
+			dt=self.sub,
+			states=[
+				{"state": self.s_open, "doc_status": "0", "allow_edit": "System Manager"},
+				{"state": self.s_ok, "doc_status": "1", "allow_edit": "System Manager"},
+				{"state": self.s_no, "doc_status": "2", "allow_edit": "System Manager"},
+			],
+			transitions=[
+				{
+					"state": self.s_open,
+					"action": self.a_ok,
+					"next_state": self.s_ok,
+					"allowed": "System Manager",
+				},
+				{
+					"state": self.s_ok,
+					"action": self.a_no,
+					"next_state": self.s_no,
+					"allowed": "System Manager",
+				},
+			],
+			**over,
+		)
+
+	def park_sub(self, **over) -> str:
+		r = self.run_tool("create_doc", {"doctype": WF, "values": self.sub_values(**over)})
+		self.assertTrue(r.get("ok"), r)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", r)
+		return self.card_name()
+
+	def test_the_card_says_which_states_submit_and_cancel(self):
+		line = self.card(self.park_sub())["risk_line"]
+		self.assertIn(f"Moving a record to {self.s_ok} submits it.", line)
+		self.assertIn(f"Moving a record to {self.s_no} cancels it.", line)
+
+	def test_frappes_own_document_status_rules_are_refused_at_park(self):
+		back = self.sub_values()
+		back["transitions"].append(
+			{"state": self.s_ok, "action": self.a_ok, "next_state": self.s_open, "allowed": "System Manager"}
+		)
+		r = self.run_tool("create_doc", {"doctype": WF, "values": back})
+		self.assert_refused(r, "InvalidArgumentError", "cannot be converted back to draft")
+		self.assert_no_workflow(dt=self.sub)
+
+	def test_the_probe_frappe_checks_names_its_form(self):
+		"""Frappe 16.51 reads the form's meta inside ``validate_docstatus``; an older
+		bench does not, so this holds the probe to it on every version."""
+		from frappe.workflow.doctype.workflow.workflow import Workflow
+
+		seen = []
+		real = Workflow.validate_docstatus
+
+		def spy(doc):
+			seen.append(doc.document_type)
+			frappe.get_meta(doc.document_type)
+			return real(doc)
+
+		with patch.object(Workflow, "validate_docstatus", spy):
+			self.park_sub()
+		self.assertTrue(seen)
+		self.assertEqual(set(seen), {self.sub})
+
+	def _confirmed_with_records(self):
+		names = self.records(2, dt=self.sub)
+		name = self.park_sub()
+		self.assertTrue(self.confirm(name)["ok"])
+		self.assertEqual(set(self.states_of(self.sub).values()), {self.s_open})
+		return name, names
+
+	def test_an_approved_record_counts_as_use(self):
+		"""Review: the save fills the first state of every document status, so a
+		record approved since carries a state the fill itself could have written.
+		Only its save tells, and the undo must leave the workflow for a person."""
+		from frappe.model.workflow import apply_workflow
+
+		name, names = self._confirmed_with_records()
+		with as_user(SM_USER):
+			apply_workflow(frappe.get_doc(self.sub, names[0]), self.a_ok)
+		frappe.db.commit()
+		self.assertEqual(frappe.db.get_value(self.sub, names[0], ["docstatus", STATE]), (1, self.s_ok))
+		note = frappe._dict(gs.undo_confirmation(name))
+		self.assertTrue(note.needs_person, note.message)
+		self.assertFalse(note.restored)
+		self.assertEqual(self.active(self.sub), [f"Jwf Flow {self.tag}"], "left for a person")
+		self.assertEqual(
+			self.states_of(self.sub), {names[0]: self.s_ok, names[1]: self.s_open}, "nothing was emptied"
+		)
+
+	def test_emptying_the_fill_never_touches_a_record_saved_since(self):
+		name, names = self._confirmed_with_records()
+		undo = _seal.unseal_undo(self.row(name))
+		since = undo["written"]["modified"]
+		frappe.db.set_value(
+			self.sub, names[0], "modified", frappe.utils.add_to_date(since, seconds=5), update_modified=False
+		)
+		frappe.db.commit()
+		self.assertTrue(wg._used_since(self.sub, undo["fill"], since), "a save since is use")
+		self.assertEqual(wg._empty_fill(self.sub, undo["fill"], since), 1)
+		frappe.db.commit()
+		self.assertEqual(self.states_of(self.sub), {names[0]: self.s_open, names[1]: None})
+
+	def test_an_undo_nobody_used_is_clean(self):
+		name, names = self._confirmed_with_records()
+		note = frappe._dict(gs.undo_confirmation(name))
+		self.assertTrue(note.restored, note.message)
+		self.assertFalse(frappe.db.exists(WF, f"Jwf Flow {self.tag}"))
+		self.assertEqual(self.states_of(self.sub), dict.fromkeys(names, None), "what it filled is emptied")
+
+
 class _SettingsBase(_WfBase):
 	"""Scratch forms to stand in for the forms a setting adds fields to, and the
 	shared settings documents put back exactly as they were found."""

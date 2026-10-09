@@ -47,7 +47,12 @@ from dataclasses import dataclass, field
 import frappe
 from frappe.utils import cint, get_datetime, strip_html
 
-from jarvis.exceptions import InvalidFieldValueError, PermissionDeniedError, StructureRefusedError
+from jarvis.exceptions import (
+	InvalidFieldValueError,
+	JarvisError,
+	PermissionDeniedError,
+	StructureRefusedError,
+)
 from jarvis.tools import _custom_field_guard as cfg
 from jarvis.tools import _guarded_structure as gs
 from jarvis.tools._guarded_structure import CleanUp
@@ -447,8 +452,10 @@ class CrmSettingsSync:
 			out["default"] = frappe.db.get_default("campaign_naming_by")
 			with cfg._own_messages():
 				out["rewritten"] = _rewritten_before(self._analyse().rewrites)
+		except JarvisError:
+			return gs.snapshot_refused(out)
 		except Exception:
-			pass
+			return gs.snapshot_failed(out, "CRM Settings")
 		return out
 
 	@staticmethod
@@ -751,8 +758,10 @@ class DomainSettingsUpdate:
 				)
 			out["roles_on"] = plan.roles_on
 			out["rewritten"] = _rewritten_before(plan.rewrites)
+		except JarvisError:
+			return gs.snapshot_refused(out)
 		except Exception:
-			pass
+			return gs.snapshot_failed(out, "Domain Settings")
 		return out
 
 	@staticmethod
