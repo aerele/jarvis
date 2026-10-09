@@ -42,6 +42,7 @@ their own transaction and say so.
 
 from __future__ import annotations
 
+import datetime
 import json
 import threading
 
@@ -312,12 +313,30 @@ def unfinished_turn_state(conversation: str) -> str | None:
 	"""The state of a turn of this conversation that has not ended (queued, running,
 	finishing or recovering), or None when every turn has. One row off the
 	(conversation, state) index, however many turns the chat has had."""
+	turn = unfinished_turn(conversation)
+	return turn[1] if turn else None
+
+
+def unfinished_turn(
+	conversation: str,
+	*,
+	created_after: datetime.datetime | str | None = None,
+	exclude_run_id: str | None = None,
+	states: tuple[str, ...] = NONTERMINAL_STATES,
+) -> tuple[str, str] | None:
+	"""``(run_id, state)`` of such a turn. ``created_after`` counts only newer turns,
+	``exclude_run_id`` leaves out the caller's own, ``states`` narrows the set. A filter
+	is added only when given, so the default stays a covering conv_state read."""
+	query = "SELECT name, state FROM `tabJarvis Chat Turn` WHERE conversation=%(c)s AND state IN %(live)s"
+	if created_after is not None:
+		query += " AND creation > %(after)s"
+	if exclude_run_id:
+		query += " AND name != %(x)s"
 	rows = frappe.db.sql(
-		"""SELECT state FROM `tabJarvis Chat Turn`
-		WHERE conversation=%(c)s AND state IN %(live)s LIMIT 1""",
-		{"c": conversation, "live": NONTERMINAL_STATES},
+		query + " LIMIT 1",
+		{"c": conversation, "live": states, "after": created_after, "x": exclude_run_id},
 	)
-	return rows[0][0] if rows else None
+	return (rows[0][0], rows[0][1]) if rows else None
 
 
 def read_turn(run_id: str) -> dict | None:
@@ -563,10 +582,13 @@ def mark_streaming(run_id: str, version: int, epoch: int, gateway_run_id: str | 
 	)
 
 
-def requeue_for_redispatch(run_id: str, version: int, epoch: int, dispatch_payload: str) -> bool:
+def requeue_for_redispatch(
+	run_id: str, version: int, epoch: int, dispatch_payload: str, *, fresh_recovery: bool = False
+) -> bool:
 	"""streaming -> ready, pump, EPOCH-fenced: send a turn again ONCE when the runtime
-	refused it before producing anything (admin-v2#656: a Claude CLI live session it
-	will not resume after the chat's model changed). Guarded IN the statement on
+	refused it before producing anything (admin-v2#656: a CLI live session it
+	will not resume after the chat's model changed) or, when a site turns it on, when it
+	ended with its plain empty reply (``empty_reply_recovery``). Guarded IN the statement on
 	``last_event_seq=0`` (no delta or tool event was applied) and
 	``cancel_requested=0``, so a turn that streamed or was stopped is never re-sent.
 	``dispatch_payload`` is the caller's read-add-write of the stored payload with
@@ -577,12 +599,18 @@ def requeue_for_redispatch(run_id: str, version: int, epoch: int, dispatch_paylo
 	``dispatching_at`` is KEPT on purpose: if a watchdog parks this turn before it is
 	re-sent, ``recover_adopt`` re-attaches it and the recovery budget ends it with an
 	error, instead of ``recover_to_queued`` re-preparing it and orphaning its
-	placeholder. Returns won/lost (0 => caller tells epoch loss from drift). No commit."""
+	placeholder. ``fresh_recovery`` (the empty-reply caller only) also clears
+	``recovery_started_at``, as ``recover_to_queued`` does, so the second attempt does not
+	start on a spent recovery budget. Returns won/lost (0 => caller tells epoch loss from
+	drift). No commit."""
+	fresh = ", recovery_started_at=NULL" if fresh_recovery else ""
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='ready', ready_at=%(now)s, gateway_run_id=NULL, first_event_at=NULL,
-			    dispatch_payload=%(p)s, version=version+1
+			    dispatch_payload=%(p)s, version=version+1"""
+			+ fresh
+			+ """
 			WHERE name=%(r)s AND state='streaming' AND version=%(v)s AND pump_epoch=%(e)s
 			  AND COALESCE(last_event_seq, 0)=0 AND COALESCE(cancel_requested, 0)=0""",
 			{"r": run_id, "p": dispatch_payload, "now": _now(), "v": version, "e": epoch},

@@ -115,6 +115,16 @@
 								class="mt-1 whitespace-pre-wrap break-words font-sans text-xs"
 								>{{ m.error }}</pre
 							>
+							<!-- the same retry API and target rule as ChatView -->
+							<Button
+								v-if="m.err.retryable && m.name === retryTarget"
+								class="mt-1.5"
+								variant="subtle"
+								size="sm"
+								:label="retryButtonLabel"
+								:disabled="retryDisabled"
+								@click="retryFailed(m)"
+							/>
 						</div>
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
@@ -404,14 +414,16 @@ import {
 	setConversationThinking,
 	getConversationContext,
 	compactConversation,
+	retryMessage,
 } from "@/api";
 import { agentName } from "@/branding";
-import { errHtml, turnErrorInfo } from "@/lib/errors";
+import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
 import { compactFailureCopy } from "@/lib/compact";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
 // dialog; stt_enabled - when the backend sends it - gates the mic)
@@ -679,6 +691,14 @@ const bubbles = computed(() =>
 		)
 		.map((m) => ({ ...m, err: m.error ? errorNote(m) : null }))
 );
+// The one message that may show Retry, and its label (lib/retryTarget.js). The server
+// refuses a retry of any reply but the latest user/assistant row, so the pane counts
+// the same rows: not `bubbles`, which drops a blank reply.
+const retryRows = computed(() =>
+	messages.value.filter((m) => m.role === "user" || m.role === "assistant")
+);
+const retryTarget = computed(() => retryRows.value[retryTargetIndex(retryRows.value)]?.name);
+const retryText = computed(() => retryLabel(retryRows.value));
 
 // ChatView's stripBlocks, minimal subset: internal fenced blocks (actions,
 // confirms, cards…) never render as raw fences in the pane. `jarvis-ask` is
@@ -746,12 +766,11 @@ async function loadTranscript({ initial = false } = {}) {
 		// Reconstruct progress after a reload (and during the no-socket polling
 		// fallback). A normal realtime-driven transcript refresh must not overwrite
 		// the more precise live tool:start/tool:end state with durable receipts that
-		// naturally lag those events.
-		if (initial || !socket) {
+		// naturally lag those events. A pending retry of this pane is not in the
+		// transcript yet, so its failed reply would read as a finished run.
+		if (initial || (!socket && !pendingRetry)) {
 			const restoredRun = restoreDashboardRunState(messages.value);
-			runActive.value = restoredRun.active;
-			activeTools.value = restoredRun.tools;
-			waitingFirstTool.value = restoredRun.waiting;
+			applyRestoredRun(restoredRun);
 			if (initial && restoredRun.active && !socket) startNoSocketLadder();
 		}
 		// Navigating away unmounts the builder and drops its canvas html, but the
@@ -933,6 +952,21 @@ async function dismiss(pa) {
 // ── run state + composer ──────────────────────────────────────────────────────
 const runActive = ref(false);
 const sending = ref(false);
+// Retry state: `retrying` is true while the request is in flight; runActive then
+// covers the run it starts.
+const RETRY_FALLBACK = "Couldn't retry that.";
+const retrying = ref(false);
+const retryDisabled = computed(
+	() => retrying.value || sending.value || runActive.value || compacting.value
+);
+const retryButtonLabel = computed(() =>
+	retrying.value || runActive.value ? "Retrying…" : retryText.value
+);
+let ownRunId = ""; // the turn this pane's last send or retry started
+let pendingRetry = ""; // the failed reply a retry replaces, until its run starts or ends
+let fencedReply = ""; // the reply the last retry replaces, until a chat switch (staleTerminal)
+let runStarts = 0; // runs started (ours and run:start frames): a late refusal never ends a newer one
+let disposed = false;
 const draft = ref("");
 const box = ref(null);
 
@@ -1068,8 +1102,7 @@ async function send(gotoMessageId = "") {
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
 			forgetGotoClaim(gotoMessageId);
-			const { message, type } = sendRejectionCopy(r.reason, agentName, r);
-			(toast[type] || toast.error)(message);
+			toastRejection(r);
 			return;
 		}
 		if (r.conversation_id && r.conversation_id !== conversation.value) {
@@ -1078,15 +1111,8 @@ async function send(gotoMessageId = "") {
 		}
 		loadDashboardChats();
 		recordGotoConversation(gotoMessageId, r.conversation_id || conversation.value);
-		runActive.value = true;
-		// This send's own optimistic start - a run:start frame for the same run
-		// arrives moments later and does the same reset, but the ticks should
-		// read "Understanding" from the instant Send is clicked, not lag behind
-		// the socket round trip.
-		activeTools.value = [];
-		waitingFirstTool.value = true;
-		nextTick(scrollBottom);
-		if (!socket) startNoSocketLadder();
+		ownRunId = r.run_id || "";
+		markRunStarted();
 	} catch (e) {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
@@ -1094,6 +1120,86 @@ async function send(gotoMessageId = "") {
 		toast.error(errHtml(e));
 	} finally {
 		sending.value = false;
+	}
+}
+
+// The live-run state: a run that is starting (true) or one that has ended (false).
+// A pending retry is over either way: its run started or ended.
+function resetRun(active) {
+	runActive.value = active;
+	activeTools.value = [];
+	waitingFirstTool.value = active;
+	pendingRetry = "";
+}
+function applyRestoredRun(restored) {
+	runActive.value = restored.active;
+	activeTools.value = restored.tools;
+	waitingFirstTool.value = restored.waiting;
+}
+
+// A refused send or retry. The toast renders HTML, so the whole message is escaped.
+function toastRejection(r, fallback) {
+	const { message, type } = sendRejectionCopy(r.reason, agentName, r, fallback);
+	(toast[type] || toast.error)(escapeHtml(message));
+}
+
+// A turn this pane just started. A run:start frame for the same run arrives
+// moments later and does the same reset, but the ticks should read
+// "Understanding" from the instant of the click, not lag behind the socket
+// round trip. `retried`: the failed reply a retry replaces (see the ladder).
+function markRunStarted(retried = "") {
+	runStarts++;
+	resetRun(true);
+	pendingRetry = retried;
+	nextTick(scrollBottom);
+	if (!socket) startNoSocketLadder(retried);
+}
+
+// Undo markRunStarted for a retry the server did not start.
+function endStartedRun() {
+	resetRun(false);
+	clearLadder();
+}
+
+// A terminal frame the retry must not take as its own: the failed turn's terminal
+// (finalize re-publishes it, also after the retry's run:start), or, while the retry has
+// not started, another run's. Turn recovery ("recovered") and stale_scan (no run_id)
+// do not name the run, so they are never taken for another one. Only the failed turn
+// publishes terminals for its reply, so a fence that lasts until a switch drops nothing else.
+function staleTerminal(p) {
+	if (fencedReply && p.message_id === fencedReply) return true;
+	if (!pendingRetry || !ownRunId || !p.run_id || p.run_id === "recovered") return false;
+	return p.run_id !== ownRunId;
+}
+
+// Retry a failed reply. The run shows as started before the request, so a
+// terminal frame that arrives first is not undone; a refusal or an error ends
+// it again, unless a run started meanwhile. A reply for a chat the user has
+// since left, or for an unmounted pane, changes nothing here.
+async function retryFailed(m) {
+	if (retryDisabled.value) return;
+	const conv = conversation.value;
+	retrying.value = true;
+	ownRunId = "";
+	fencedReply = m.name;
+	markRunStarted(m.name);
+	const starts = runStarts;
+	try {
+		const r = (await retryMessage(m.name)) || {};
+		if (disposed || conversation.value !== conv) return;
+		if (r.ok === false) {
+			if (runStarts === starts) endStartedRun();
+			toastRejection(r, RETRY_FALLBACK);
+			scheduleRefetch(); // a stale Retry (a newer message) goes away
+			return;
+		}
+		ownRunId = r.run_id || "";
+	} catch (e) {
+		if (disposed || conversation.value !== conv) return;
+		if (runStarts === starts) endStartedRun();
+		toast.error(errHtml(e, RETRY_FALLBACK));
+	} finally {
+		retrying.value = false;
 	}
 }
 
@@ -1114,6 +1220,8 @@ function clearThread({ keepRun = false } = {}) {
 	pendingCards.value = [];
 	if (!keepRun) runActive.value = false;
 	draft.value = "";
+	pendingRetry = "";
+	fencedReply = "";
 }
 
 function resetChat() {
@@ -1182,11 +1290,12 @@ function onEvent(p) {
 	}
 	// any frame for OUR conversation refreshes the transcript (debounced)
 	scheduleRefetch();
+	// any frame of this pane's run shows that run has started
+	if (ownRunId && p.run_id === ownRunId) pendingRetry = "";
 	switch (p.kind) {
 		case "run:start":
-			runActive.value = true;
-			activeTools.value = [];
-			waitingFirstTool.value = true;
+			runStarts++;
+			resetRun(true);
 			break;
 		case "tool:start": {
 			const id = p.tool_call_id || `${p.tool_name}-${activeTools.value.length}`;
@@ -1211,9 +1320,8 @@ function onEvent(p) {
 			break;
 		}
 		case "run:end":
-			runActive.value = false;
-			activeTools.value = [];
-			waitingFirstTool.value = false;
+			if (staleTerminal(p)) break;
+			resetRun(false);
 			// the compacted chip and the compacting lock are both scoped to one
 			// turn: the next terminal clears them and refetches the meter
 			compactedChip.value = false;
@@ -1223,13 +1331,16 @@ function onEvent(p) {
 			loadDashboardChats();
 			break;
 		case "run:error":
-			runActive.value = false;
-			activeTools.value = [];
-			waitingFirstTool.value = false;
+			if (staleTerminal(p)) break;
+			resetRun(false);
 			compacting.value = false;
 			if (p.message_id)
 				errorMeta.value = { ...errorMeta.value, [p.message_id]: p.code || "" };
 			loadContext();
+			break;
+		case "turn:cancelled":
+			// This pane's queued turn was cancelled or aged out: no run is coming.
+			if (p.run_id && p.run_id === ownRunId) resetRun(false);
 			break;
 		case "context:compacted":
 			compacting.value = false;
@@ -1247,17 +1358,23 @@ function onEvent(p) {
 
 // no-socket fallback (?nosocket / headless QA): a bounded refetch ladder after
 // each send; run-active clears when the reply settles (or at the ladder's end).
+// After a retry, the failed reply it replaces is not a settled reply.
 let ladderTimers = [];
-function startNoSocketLadder() {
+function clearLadder() {
 	ladderTimers.forEach(clearTimeout);
+	ladderTimers = [];
+}
+function startNoSocketLadder(retried = "") {
+	clearLadder();
 	ladderTimers = [3000, 8000, 15000, 30000, 60000].map((ms, i, arr) =>
 		setTimeout(async () => {
 			await loadTranscript();
 			await refreshPending();
 			const last = bubbles.value[bubbles.value.length - 1];
-			const settled = last && last.role === "assistant" && !last.streaming;
+			const settled =
+				last && last.role === "assistant" && !last.streaming && last.name !== retried;
 			if (settled || i === arr.length - 1) {
-				runActive.value = false;
+				resetRun(false);
 				emit("activity");
 			}
 		}, ms)
@@ -1279,8 +1396,9 @@ onMounted(() => {
 	socket && socket.on && socket.on("jarvis:event", onEvent);
 });
 onBeforeUnmount(() => {
+	disposed = true;
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 	clearTimeout(refetchTimer);
-	ladderTimers.forEach(clearTimeout);
+	clearLadder();
 });
 </script>
