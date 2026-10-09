@@ -66,6 +66,9 @@ def _log(title: str, message: str) -> None:
 
 
 STRUCTURE_RETRY_HOURS = 24
+# A guarded structure write still Executing after this long, whose form lock can be
+# taken, has no worker any more (the lock is held for the whole confirm).
+STRUCTURE_DEAD_AFTER_S = 60
 # ``_structure_cleaned``: the clean-up ran and left what the confirmation wrote in
 # place on purpose (people have used it since): the row ends as partly applied.
 KEPT = "kept"
@@ -127,12 +130,20 @@ def _structure_cleaned(name: str, *, interrupted: bool = True) -> bool | str:
 def _give_up_structure(name: str) -> None:
 	"""A clean-up that has failed for ``STRUCTURE_RETRY_HOURS``: say once that the
 	form needs a person, and drop the state so it is not tried for ever."""
-	from jarvis.chat.pending_actions._store import clear_undo
+	from jarvis.chat.pending_actions import _seal
+	from jarvis.chat.pending_actions._store import clear_undo, get_row
 
+	what = ""
+	try:
+		undo = _seal.unseal_undo(get_row(name)) or {}
+		parts = [str(undo.get(k)) for k in ("risk", "dt", "name") if undo.get(k)]
+		what = f" ({', '.join(parts)})" if parts else ""
+	except Exception:
+		what = ""
 	_log_once(
 		"structure_needs_a_person",
 		name,
-		"the clean-up of this structure change kept failing; check the form in Desk",
+		f"the clean-up of this structure change{what} kept failing; check it in Desk",
 	)
 	clear_undo(name)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist reconcile step
@@ -172,14 +183,32 @@ def _reap_interrupted(only: str | None = None) -> int:
 	is cleaned up first (``_structure_cleaned``); one whose clean-up left what it
 	wrote in place because people have used it since ends ``partial``. ``only``: that
 	one row."""
+	from jarvis.tools import _guarded_structure
+
 	cutoff = add_to_date(now_datetime(), seconds=-INTERRUPT_AFTER_S)
-	rows = frappe.db.sql(
-		"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
-		" AND executing_at < %(c)s AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
-		" ORDER BY executing_at LIMIT %(lim)s",
-		{"c": cutoff, "lim": _SCAN, "sheet": SHEET, "only": only},
-		as_dict=True,
-	)
+	# A guarded structure write holds its form's lock for the whole confirm, so its
+	# row is known dead as soon as that lock can be taken: ``_structure_cleaned``
+	# takes it and leaves the row alone while it is held. No need to wait out
+	# ``INTERRUPT_AFTER_S`` with a field row that has no column.
+	early = add_to_date(now_datetime(), seconds=-STRUCTURE_DEAD_AFTER_S)
+	params = {"c": cutoff, "early": early, "lim": _SCAN, "sheet": SHEET, "only": only}
+	if _guarded_structure.undo_ready():
+		rows = frappe.db.sql(
+			"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+			" AND (executing_at < %(c)s OR (sealed_undo IS NOT NULL AND executing_at < %(early)s))"
+			" AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
+			" ORDER BY executing_at LIMIT %(lim)s",
+			params,
+			as_dict=True,
+		)
+	else:
+		rows = frappe.db.sql(
+			"SELECT name, batch_id, executing_at FROM `tabJarvis Pending Action` WHERE status='Executing'"
+			" AND executing_at < %(c)s AND kind != %(sheet)s AND (%(only)s IS NULL OR name = %(only)s)"
+			" ORDER BY executing_at LIMIT %(lim)s",
+			params,
+			as_dict=True,
+		)
 	give_up = add_to_date(now_datetime(), hours=-STRUCTURE_RETRY_HOURS)
 	flipped = []
 	for r in rows:

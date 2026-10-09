@@ -127,8 +127,11 @@ def disabled() -> bool:
 		common = _read_json(os.path.join(sites_path, "common_site_config.json"), missing_ok=True)
 		site = _read_json(os.path.join(frappe.local.site_path, "site_config.json"))
 	except Exception:
+		# Off, and said: otherwise the only sign is a refusal that reads like any other.
+		frappe.log_error(title="jarvis.structure.switch_unreadable", message=frappe.get_traceback())
 		return True
-	return bool(frappe.utils.cint({**common, **site}.get(OFF_SWITCH)))
+	# Either file: a site that sets 0 does not switch back on what the bench set off.
+	return bool(frappe.utils.cint(common.get(OFF_SWITCH)) or frappe.utils.cint(site.get(OFF_SWITCH)))
 
 
 def _read_json(path: str, *, missing_ok: bool = False) -> dict:
@@ -172,7 +175,51 @@ def clean_up(undo: dict) -> CleanUp:
 	path = HANDLERS.get(str((undo or {}).get("risk") or ""))
 	if not path:
 		return CleanUp("")
+	if undo.get(INCOMPLETE) and undo.get("written"):
+		# Never reached through a confirm (``stamp_written`` refuses the write), kept
+		# for a row an older worker stamped: something was written and what it
+		# replaced was never recorded, so nothing here may call that clean.
+		return CleanUp(
+			"The change was written, but what it replaced could not be recorded, so it could not "
+			"be undone. It needs a person: check it in Desk.",
+			clean=False,
+			needs_person=True,
+		)
 	return frappe.get_attr(path).clean_up(undo)
+
+
+INCOMPLETE = "incomplete"
+# With ``INCOMPLETE``: the handler's own checks refused the call while the snapshot
+# was taken. The write tool runs those checks again and says why; nothing is logged.
+REFUSED = "refused"
+NO_SNAPSHOT = (
+	"Jarvis could not record what this change replaces, so it was not made. Nothing was changed. "
+	"Confirm again in a moment."
+)
+
+
+def snapshot_refused(out: dict) -> dict:
+	"""The call no longer passes its handler's own checks (a role deleted since the
+	park): no snapshot is possible and none is needed, because the write tool
+	refuses it with the reason a moment later. Marked incomplete all the same, so a
+	write that somehow got past that refusal still stops at ``stamp_written``."""
+	frappe.clear_messages()
+	out[INCOMPLETE] = True
+	out[REFUSED] = True
+	return out
+
+
+def snapshot_failed(out: dict, what: str) -> dict:
+	"""A handler's ``snapshot`` could not read everything its clean-up needs. The
+	snapshot says so (``INCOMPLETE``) instead of passing as a whole one: the write is
+	then refused at the moment its record would be saved (``stamp_written``), after
+	the handler's own checks have had their say, and nothing is changed."""
+	frappe.log_error(
+		title="jarvis.pending_action.snapshot_failed", message=f"{what}\n{frappe.get_traceback()}"
+	)
+	frappe.clear_messages()
+	out[INCOMPLETE] = True
+	return out
 
 
 def counted(n: int, one: str, many: str | None = None) -> str:
@@ -295,6 +342,9 @@ def stamp_written(doc) -> None:
 	if not target:
 		return
 	pa_name, undo = target
+	if undo.get(INCOMPLETE):
+		# Before the row is written, in its transaction: nothing has committed.
+		raise RetryLaterError(NO_SNAPSHOT)
 	# ``user``: who the write ran as (a settings save can hand that person roles).
 	undo["written"] = {"name": doc.name, "modified": str(doc.modified), "user": frappe.session.user}
 	_seal_stamp(pa_name, undo)
