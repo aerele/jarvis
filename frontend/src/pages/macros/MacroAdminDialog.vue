@@ -1,8 +1,7 @@
 <template>
 	<!-- One macro of another user, to look at. Nothing here edits, saves or runs it:
-	     an admin does not act as the owner. A second dialog over Settings (as
-	     TokenLimitDialog is), so Escape closes this one alone and focus returns to
-	     the row that opened it. -->
+	     an admin does not act as the owner. A dialog over the Macros page's Admin
+	     tab: Escape closes it and focus returns to the row that opened it. -->
 	<Dialog v-model="show" :options="{ title, size: '3xl' }">
 		<template #body-content>
 			<!-- Deleted since the list was loaded: nothing to retry, only to close. The
