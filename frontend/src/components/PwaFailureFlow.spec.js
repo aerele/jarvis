@@ -3,6 +3,9 @@ import { mount, flushPromises } from "@vue/test-utils";
 
 // The phone's DecisionSheet and draft card (pwa/src/components), mounted here as
 // PwaPendingCard.spec.js does: the PWA has no component runner of its own.
+// PWA components import agentName from "@/branding". In this frontend runner "@" is
+// frontend/src, whose branding has no agentName, so give them the PWA's values.
+vi.mock("@/branding", () => ({ agentName: "Jarvis", brandLogoUrl: "" }));
 vi.mock("../../../pwa/src/api", () => ({
 	confirmTool: vi.fn(),
 	approveAndRun: vi.fn(),

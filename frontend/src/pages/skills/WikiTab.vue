@@ -213,7 +213,7 @@ import {
 	syncWikiMirrorNow,
 	runWikiLintNow,
 } from "@/api/wiki";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 import { WIKI_TYPES, SCOPE_THEME } from "@/lib/wikiMeta";
 
@@ -314,7 +314,7 @@ const emptyState = computed(() => {
 		return {
 			icon: "book-open",
 			title: "No personal pages yet",
-			description: `Personal pages are private to you and ${agentName}. Pick Personal scope in "New page" to create one.`,
+			description: `Personal pages are private to you and ${brand.agentName}. Pick Personal scope in "New page" to create one.`,
 		};
 	// Panel clauses count as "filtered" too. Without this a panel-only narrowing
 	// to zero rows claimed "No wiki pages yet" — on a knowledge base that reads
@@ -329,7 +329,7 @@ const emptyState = computed(() => {
 	return {
 		icon: "book-open",
 		title: "No wiki pages yet",
-		description: `${agentName} builds this from chat and voice notes. Use "New page" to add one yourself.`,
+		description: `${brand.agentName} builds this from chat and voice notes. Use "New page" to add one yourself.`,
 	};
 });
 

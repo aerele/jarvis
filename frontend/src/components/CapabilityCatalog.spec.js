@@ -16,6 +16,8 @@ vi.mock("@/api", () => ({
 }));
 import { getCapabilityCatalog, logCapabilityPick } from "@/api";
 import CapabilityCatalog from "./CapabilityCatalog.vue";
+import { applyBranding } from "@/branding";
+import { nextTick } from "vue";
 
 const mountIt = () => mount(CapabilityCatalog);
 
@@ -36,6 +38,21 @@ const OK = {
 
 describe("CapabilityCatalog", () => {
 	beforeEach(() => vi.clearAllMocks());
+
+	it("names the brand in its toggle, and follows a saved name at once (admin-v2#622)", async () => {
+		const w = mountIt();
+		const toggle = () => w.find(".jv-catalog-toggle").text();
+		expect(toggle()).toContain("What can I ask Jarvis?");
+		try {
+			applyBranding({ agent_name: "Acme", brand_logo_url: "", brand_favicon_url: "" });
+			await nextTick();
+			expect(toggle()).toContain("What can I ask Acme?");
+		} finally {
+			applyBranding({ agent_name: "", brand_logo_url: "", brand_favicon_url: "" });
+		}
+		await nextTick();
+		expect(toggle()).toContain("What can I ask Jarvis?");
+	});
 
 	it("is lazy: fetches only on first expand, groups, shows badge labels, forwards select + logs pick", async () => {
 		getCapabilityCatalog.mockResolvedValueOnce(OK);

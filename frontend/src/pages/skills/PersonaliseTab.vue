@@ -183,7 +183,7 @@
 							<template v-if="selected">
 								<OriginBadge :origin="selected.origin" />
 								<div class="mt-3 text-sm font-semibold text-ink-gray-9">
-									What {{ agentName }} noticed
+									What {{ brand.agentName }} noticed
 								</div>
 								<div
 									v-if="selected.context_md"
@@ -191,8 +191,8 @@
 									v-html="contextHtml"
 								/>
 								<div v-else class="mt-2 text-p-base text-ink-gray-6">
-									{{ agentName }} didn't attach any extra detail to this one.
-									Just answer in your own words below.
+									{{ brand.agentName }} didn't attach any extra detail to this
+									one. Just answer in your own words below.
 								</div>
 
 								<div
@@ -205,8 +205,8 @@
 										>
 									</div>
 									<div class="mt-0.5 text-xs text-ink-gray-5">
-										Answering again adds a new note. {{ agentName }} uses your
-										latest answer. Your earlier note stays in Notes.
+										Answering again adds a new note. {{ brand.agentName }} uses
+										your latest answer. Your earlier note stays in Notes.
 									</div>
 								</div>
 							</template>
@@ -214,7 +214,7 @@
 							<!-- nothing selected: warm guidance + the mental model -->
 							<template v-else>
 								<div class="text-base font-semibold text-ink-gray-9">
-									Teach {{ agentName }} how you work
+									Teach {{ brand.agentName }} how you work
 								</div>
 								<p class="mt-1 text-p-base text-ink-gray-6">
 									Answer a question on the left, or just say anything in the box
@@ -243,17 +243,17 @@
 									<span class="font-medium text-ink-gray-9">Skills</span>
 								</div>
 								<div class="mt-1 text-xs text-ink-gray-5">
-									{{ agentName }} asks · you answer · it remembers · it turns the
-									how-to into reusable skills.
+									{{ brand.agentName }} asks · you answer · it remembers · it
+									turns the how-to into reusable skills.
 								</div>
 
 								<div
 									class="mt-4 text-xs font-medium uppercase tracking-wide text-ink-gray-5"
 								>
-									Things worth telling {{ agentName }}
+									Things worth telling {{ brand.agentName }}
 								</div>
 								<ul class="mt-2 space-y-1 text-p-base text-ink-gray-6">
-									<li v-for="s in SUGGESTIONS" :key="s">{{ s }}</li>
+									<li v-for="s in suggestions" :key="s">{{ s }}</li>
 								</ul>
 							</template>
 						</div>
@@ -330,21 +330,21 @@ import {
 } from "@/api/personalise";
 import { renderMarkdown } from "@/markdown";
 import { timeAgo, exactDate } from "@/utils/datetime";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 
 const PAGE = 20;
 
 // Suggestion prompts (plain-text, from the old Business tab). Shown in the
 // guidance card - click-to-answer lives on the generated questions instead.
-const SUGGESTIONS = [
+const suggestions = computed(() => [
 	"What does your business do, and who are your customers?",
 	"How does your team use ERPNext day to day?",
-	`Any customisations or quirks ${agentName} should know about`,
+	`Any customisations or quirks ${brand.agentName} should know about`,
 	"Your month-end rituals and recurring tasks",
 	"Vendors or customers that need special handling",
-	`What you'd love ${agentName} to handle for you`,
-];
+	`What you'd love ${brand.agentName} to handle for you`,
+]);
 
 const STATUS_PILLS = [
 	{ label: "Unanswered", value: "Unanswered" },
@@ -484,7 +484,7 @@ async function ignore(row) {
 function confirmDelete(row) {
 	confirmDialog({
 		title: "Stop asking this?",
-		message: `${agentName} will stop asking this question. This can't be undone.`,
+		message: `${brand.agentName} will stop asking this question. This can't be undone.`,
 		onConfirm: async ({ hideDialog }) => {
 			try {
 				await deleteQuestion(row.name);
@@ -511,7 +511,7 @@ async function onSubmit(payload) {
 		if (wasQuestion) await answerQuestion({ name: selected.value.name, ...payload });
 		else await saveNote({ ...payload, source: "Personalise" });
 		composer.value?.clear?.();
-		toast.success(`Saved. ${agentName} will use this`);
+		toast.success(`Saved. ${brand.agentName} will use this`);
 		// answered questions flip to the Answered filter; drop back to free capture
 		selected.value = null;
 		if (wasQuestion) fetchQuestions("reset");
@@ -580,7 +580,7 @@ function onEvent(p) {
 	toast.info(
 		titles.length
 			? `Added to your wiki: ${titles.join(", ")}`
-			: `${agentName} finished processing your note`
+			: `${brand.agentName} finished processing your note`
 	);
 }
 
@@ -603,13 +603,13 @@ const emptyState = computed(() => {
 		if (caps.questions_total === 0)
 			return {
 				icon: "message-circle",
-				title: `${agentName} hasn't asked anything yet`,
-				body: `Questions appear here as ${agentName} learns how you work. You don't have to wait, tell it anything below.`,
+				title: `${brand.agentName} hasn't asked anything yet`,
+				body: `Questions appear here as ${brand.agentName} learns how you work. You don't have to wait, tell it anything below.`,
 			};
 		return {
 			icon: "check-circle",
 			title: "You're all caught up",
-			body: `${agentName} will ask when it learns something new. You can still tell it anything below.`,
+			body: `${brand.agentName} will ask when it learns something new. You can still tell it anything below.`,
 		};
 	}
 	if (status.value === "Answered")

@@ -11,13 +11,13 @@
 
 			<span v-if="notice.version" class="jv-gate-badge">Version {{ notice.version }}</span>
 
-			<h1 class="jv-gate-title">A new {{ agentName }} update is available</h1>
+			<h1 class="jv-gate-title">A new {{ brand.agentName }} update is available</h1>
 
 			<p v-if="notice.message" class="jv-gate-sub">{{ notice.message }}</p>
 
 			<p class="jv-gate-block">
-				Chat with {{ agentName }} is paused for this workspace until it's updated. Please
-				ask your administrator to update.
+				Chat with {{ brand.agentName }} is paused for this workspace until it's updated.
+				Please ask your administrator to update.
 			</p>
 
 			<button class="jv-gate-btn" :disabled="checking" @click="recheck">
@@ -37,7 +37,7 @@
 import { onMounted, onBeforeUnmount } from "vue";
 import JarvisMark from "@/components/JarvisMark.vue";
 import WhatsNewDialog from "@/components/chat/WhatsNewDialog.vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { checking, notice, openWhatsNew, recheck } from "@/noticeGate";
 
 // Boot read a mirror that may predate the update, so re-pull once on mount and

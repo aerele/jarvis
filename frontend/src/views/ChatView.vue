@@ -597,7 +597,7 @@
 					</h1>
 					<p class="jv-welcome-sub">
 						Ask about your ERP data, run a workflow or draft something.
-						{{ agentName }}
+						{{ brand.agentName }}
 						is connected to your
 						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
 						instance.
@@ -682,7 +682,7 @@
 				ref="threadEl"
 				@scroll.passive="onThreadScroll"
 				role="log"
-				:aria-label="`Conversation with ${agentName}`"
+				:aria-label="`Conversation with ${brand.agentName}`"
 				style="flex: 1; overflow-y: auto"
 			>
 				<div
@@ -2491,7 +2491,7 @@
 						:canSend="canSend"
 						:sendTitle="voiceSendBlockReason"
 						:placeholder="composerPlaceholder"
-						:disclaimer="`${agentName} can make mistakes. Verify important actions before submitting to ERPNext.`"
+						:disclaimer="`${brand.agentName} can make mistakes. Verify important actions before submitting to ERPNext.`"
 						@submit="send()"
 						@stop="stopRun"
 						@input="onInput"
@@ -2664,7 +2664,7 @@
 										:aria-disabled="!ui.stt_enabled ? 'true' : undefined"
 										:title="
 											ui.stt_enabled
-												? `Record a voice note (saved for ${agentName} to learn from)`
+												? `Record a voice note (saved for ${brand.agentName} to learn from)`
 												: 'Voice notes are not set up on this workspace'
 										"
 										:aria-label="
@@ -4251,7 +4251,7 @@ import * as api from "@/api";
 import FeedbackBar from "@/components/chat/FeedbackBar.vue";
 import { shouldOfferFeedback, markRated, markIgnored } from "@/lib/feedbackGate";
 import * as voice from "@/api/voice";
-import { agentName, isWhitelabeled } from "@/branding";
+import { brand, workerWarningMessage } from "@/branding";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { useDictationRecorder } from "@/composables/useDictationRecorder";
 import { createVoiceDictationStore } from "@/utils/voiceDictationStore";
@@ -4592,8 +4592,10 @@ const suspendedNotice = ref(null);
 // gate on this (see the "never gates canSend" test) - this is a heads-up only,
 // not a stop sign. Self-heals: cleared on the next successful retry/send, never
 // re-derived from a re-poll (checkReady() is memoized). Null while healthy.
-const workersWarnNotice = ref(null);
-const WORKERS_WARN_MSG = `${agentName} is low on background workers, so answers may take longer. Add more workers to your bench to speed this up.`;
+const workersWarnShown = ref(false);
+const workersWarnNotice = computed(() =>
+	workersWarnShown.value ? workerWarningMessage(brand.agentName) : null
+);
 // A DIFFERENT not-ready reason (container_provisioning - e.g. the connected LLM
 // account itself ran out of quota, or a container is still coming up) - never a
 // billing lapse, so it gets its own quiet copy instead of suspendedNotice's "Chat is
@@ -4873,7 +4875,7 @@ const supportStore = supportOn ? useSupportStore() : null;
 // the rest, same mechanism a macro/prefill link already uses. The formatting
 // itself lives in lib/supportCopyFormat.js (pure, unit-tested on its own).
 function recentMessagesForSupport() {
-	return formatRecentMessagesForSupport(messages.value, agentName);
+	return formatRecentMessagesForSupport(messages.value, brand.agentName);
 }
 // Guards the async gap below (a settings fetch, maybe a dialog await) against
 // a double-click firing openSupport() twice concurrently: without this, a
@@ -6693,7 +6695,7 @@ const composerPlaceholder = computed(() =>
 		? "Compacting this chat, try again in a moment"
 		: triggerMode.value
 		? TRIGGER_PLACEHOLDER
-		: `Ask ${agentName}…   @ to mention a user, / for a doctype or tool`
+		: `Ask ${brand.agentName}…   @ to mention a user, / for a doctype or tool`
 );
 function onCreateMacro() {
 	createMenuOpen.value = false;
@@ -7539,7 +7541,7 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 				fallback: { messageKey: draftKey, card: activeAction.value },
 			})
 		);
-		const outcome = draftSaveOutcome(r, agentName);
+		const outcome = draftSaveOutcome(r, brand.agentName);
 		if (outcome.kind === "closed") {
 			// R2-9: no value in the panel fixes this one (a business rule, a
 			// permission) or part of it was saved: the panel closes and the reply in
@@ -9795,7 +9797,7 @@ async function retry(messageId) {
 			}
 		}
 		if (r && r.ok !== false) {
-			workersWarnNotice.value = null; // a retry got through: workers are back
+			workersWarnShown.value = false; // a retry got through: workers are back
 			// A retry that got through also proves any maintenance hold lifted.
 			clearHold();
 		}
@@ -9924,7 +9926,7 @@ async function settleRecoveredSend(m, r) {
 	if (r.ok === false && !r.confirmed) {
 		m.deliveryState = "rejected";
 		m.failed = true;
-		m.deliveryNote = r.message || sendRejectionCopy(r.reason, agentName, r).message;
+		m.deliveryNote = r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
 		return;
 	}
 	consumeRecoveredContext(m.sendRequest, scope);
@@ -10027,7 +10029,7 @@ async function dismissUncertain(m) {
 		m.deliveryState === "uncertain" &&
 		!(await confirm({
 			title: "Dismiss delivery check?",
-			message: `${agentName} may already be working on this message. Dismissing it does not cancel that work. Check the conversation before sending it again.`,
+			message: `${brand.agentName} may already be working on this message. Dismissing it does not cancel that work. Check the conversation before sending it again.`,
 			confirmLabel: "Dismiss",
 		}))
 	)
@@ -10348,7 +10350,7 @@ async function send(textArg, resendAck) {
 		if (r && r.ok === false && !r.confirmed) {
 			_optBubble.deliveryState = "rejected";
 			_optBubble.deliveryNote =
-				r.message || sendRejectionCopy(r.reason, agentName, r).message;
+				r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
 			// A typed "no" whose send then lost the admission race still discarded its
 			// cards (the server says which); they must not linger as live offers.
 			for (const t of discardedTokens(r)) removePending(t);
@@ -10398,7 +10400,7 @@ async function send(textArg, resendAck) {
 			// boot. Keep recovery work in memory until the user chooses to reload.
 			if (r.reason === "release_update_required") {
 				notify(
-					`${agentName} needs an update. Keep a copy of preserved messages before reloading this tab.`,
+					`${brand.agentName} needs an update. Keep a copy of preserved messages before reloading this tab.`,
 					{ type: "error" }
 				);
 				return;
@@ -10414,7 +10416,7 @@ async function send(textArg, resendAck) {
 				return;
 			}
 			if (r.reason === "workspace_resetting") {
-				notify(`${agentName} is being reset. Chat will be back in a few minutes.`, {
+				notify(`${brand.agentName} is being reset. Chat will be back in a few minutes.`, {
 					type: "warning",
 				});
 				return;
@@ -10430,14 +10432,14 @@ async function send(textArg, resendAck) {
 				// per-model cap; the envelope names the window (limit_period) only for
 				// the former, so the copy stays period-neutral for the latter.
 				r.reason === "usage_limit"
-					? sendRejectionCopy(r.reason, agentName, r).message
+					? sendRejectionCopy(r.reason, brand.agentName, r).message
 					: r.message || r.reason || "Couldn't send your message.",
 				{ type: "error" }
 			);
 			return;
 		}
 		if (r && r.ok !== false) {
-			workersWarnNotice.value = null; // fresh send proves availability
+			workersWarnShown.value = false; // fresh send proves availability
 			_pendingSends.remove(_pendingSends.scopeOf(_optBubble), _optBubble.name);
 			_optBubble.deliveryState = undefined;
 			// An accepted send proves the CP-side gate passed, i.e. any upgrade
@@ -10615,7 +10617,7 @@ function onEvent(p) {
 		store.applyRemoteNew();
 		proactiveToast.value = {
 			id: p.conversation_id,
-			title: p.title || `Message from ${agentName}`,
+			title: p.title || `Message from ${brand.agentName}`,
 			preview: p.preview || "",
 		};
 		return;
@@ -11120,7 +11122,7 @@ function onEvent(p) {
 			// (browser notification moved to the app-scoped global notifier —
 			// AppShell attaches it, so it fires on every route, not just here)
 			recovering.value = null;
-			announceSR(`${agentName} replied.`);
+			announceSR(`${brand.agentName} replied.`);
 			store.loadConversations();
 			// SUX-6 identical-skip (OARF-7): the streamed deltas already painted the
 			// final cumulative text, so on the normal path a full reload would just
@@ -12134,7 +12136,7 @@ async function saveNudgeNote() {
 			entities: JSON.stringify(n.entities || []),
 			source: "Chat Nudge",
 		});
-		notify(`Noted, ${agentName} will remember this`, { type: "success" });
+		notify(`Noted, ${brand.agentName} will remember this`, { type: "success" });
 		nudge.value = null;
 	} catch (e) {
 		n.saving = false;
@@ -12580,7 +12582,7 @@ onMounted(async () => {
 			// Seed the soft workers banner from the same boot verdict. checkReady() is
 			// memoized and never re-polls, so this is a ONE-TIME seed only - the banner
 			// then self-heals through send()/retry() success, never through a re-check.
-			workersWarnNotice.value = r && r.worker_warning ? WORKERS_WARN_MSG : null;
+			workersWarnShown.value = !!(r && r.worker_warning);
 		})
 		.catch(() => {});
 	// Same boot promise, the container_provisioning half: readinessDetailOf reads the

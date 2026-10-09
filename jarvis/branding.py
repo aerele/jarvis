@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import frappe
 
-from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import validate_branding_inputs
+from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+	clear_brand_boot_cache,
+	validate_branding_inputs,
+)
 from jarvis.permissions import require_jarvis_admin
 
 SETTINGS = "Jarvis Settings"
@@ -48,4 +51,5 @@ def update_branding(agent_name: str = "", logo_url: str = "", favicon_url: str =
 	for field, value in (("agent_name", name), ("brand_logo", logo), ("brand_favicon", favicon)):
 		frappe.db.set_single_value(SETTINGS, field, value, update_modified=False)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
+	clear_brand_boot_cache()
 	return {"ok": True, "data": _branding_payload(name, logo, favicon)}

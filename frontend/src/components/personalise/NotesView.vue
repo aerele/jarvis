@@ -49,7 +49,7 @@
 			<FeatherIcon name="edit-3" class="size-6 text-ink-gray-5" />
 			<span class="mt-1 text-base font-medium text-ink-gray-8">No notes yet</span>
 			<span class="text-p-base text-ink-gray-6">
-				Answers and anything you tell {{ agentName }} land here.
+				Answers and anything you tell {{ brand.agentName }} land here.
 			</span>
 		</div>
 		<div v-else class="divide-y rounded-lg border">
@@ -141,7 +141,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import { listNotesPage } from "@/api/personalise";
 import JvSpinner from "@/components/JvSpinner.vue";
 import NoteDetailModal from "./NoteDetailModal.vue";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 
 const emit = defineEmits(["reanswer"]);

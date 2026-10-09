@@ -101,7 +101,7 @@ import LlmPoolEditor from "@/components/LlmPoolEditor.vue";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { isSyncDisconnected } from "@/lib/syncStatus";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { useShellStore } from "@/stores/shell";
 import {
 	subscriptionNotice,
@@ -137,9 +137,7 @@ watch(
 // endpoints are all require_jarvis_admin now).
 const isSM = !!(window.is_system_manager || window.is_jarvis_admin);
 
-// agentName is a boot-time constant (read once from the page payload, never
-// reactive - see @/branding), so a plain string is enough here.
-const paneDescription = `The AI connection that powers ${agentName}.`;
+const paneDescription = computed(() => `The AI connection that powers ${brand.agentName}.`);
 
 // ---- AI models: brief save acknowledgement (editor persists itself) --------
 const savedNote = ref("");

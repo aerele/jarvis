@@ -14,24 +14,24 @@
 			<JarvisMark :size="56" :radius="14" class="mb-6" />
 
 			<h1 class="mb-2.5 text-2xl font-semibold leading-tight text-ink-gray-9">
-				Finish setting up {{ agentName }}
+				Finish setting up {{ brand.agentName }}
 			</h1>
 
 			<Banner
 				v-if="workerWarning"
 				type="warning"
 				:title="WORKER_WARNING_TITLE"
-				:message="workerWarningMessage(agentName)"
+				:message="workerWarningMessage(brand.agentName)"
 				class="mb-5"
 			/>
 
 			<p v-if="isSystemManager" class="mb-7 text-p-base text-ink-gray-6">
 				This workspace isn't connected to an AI agent yet. Complete a short setup to start
-				chatting with {{ agentName }} about your ERPNext data.
+				chatting with {{ brand.agentName }} about your ERPNext data.
 			</p>
 			<p v-else class="mb-7 text-p-base text-ink-gray-6">
-				{{ agentName }} isn't set up for this workspace yet. Please ask your administrator
-				(a System Manager) to complete onboarding.
+				{{ brand.agentName }} isn't set up for this workspace yet. Please ask your
+				administrator (a System Manager) to complete onboarding.
 			</p>
 
 			<Button
@@ -61,7 +61,7 @@ import { useRouter } from "vue-router";
 import { Button } from "frappe-ui";
 import JarvisMark from "@/components/JarvisMark.vue";
 import Banner from "@/components/Banner.vue";
-import { agentName, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
+import { brand, WORKER_WARNING_TITLE, workerWarningMessage } from "@/branding";
 
 const router = useRouter();
 
