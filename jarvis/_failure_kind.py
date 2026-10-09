@@ -3,6 +3,7 @@
 - ``fixable``: the request itself was wrong (a missing required value, a value of the
   wrong type, a link to a record that does not exist, a duplicate name). The assistant
   may correct only the fields named in the failure and ask again with a NEW card, once.
+  A read stopped by the statement time limit is fixable too: a narrower question runs.
 - ``retry_later``: the site was busy (a deadlock, a lock wait that timed out, a lock
   held by another write). Nothing was saved; the user can try again in a moment.
 - ``not_fixable``: everything else (insufficient stock, credit limit, a closed period,
@@ -62,7 +63,7 @@ RETRY_LATER_CLASSES: tuple[type[BaseException], ...] = (
 # maps every FIXABLE class to ``InvalidArgumentError``). A ``kind`` next to any other
 # code is not trusted.
 _CODES_BY_KIND = {
-	FIXABLE: frozenset({"InvalidArgumentError"}),
+	FIXABLE: frozenset({"InvalidArgumentError", "QueryTooSlowError"}),
 	RETRY_LATER: frozenset({"RetryLaterError"}),
 }
 
@@ -127,6 +128,15 @@ def bad_date(exc: BaseException) -> dict | None:
 	}
 
 
+def too_slow(exc: BaseException) -> bool:
+	"""Whether ``exc`` is the database stopping a statement at its time limit
+	(MariaDB error 1969), on the exception itself or the driver error it wraps."""
+	for candidate in (exc, exc.__cause__):
+		if candidate is not None and frappe.db.is_statement_timeout(candidate):
+			return True
+	return False
+
+
 def kind_of(exc: BaseException) -> str:
 	"""The failure kind of ``exc`` raised by a write."""
 	if getattr(exc, "code", None) in REFUSAL_CODES:
@@ -135,7 +145,7 @@ def kind_of(exc: BaseException) -> str:
 		return NOT_FIXABLE
 	if isinstance(exc, RETRY_LATER_CLASSES):
 		return RETRY_LATER
-	if isinstance(exc, FIXABLE_CLASSES) or bad_date(exc):
+	if isinstance(exc, FIXABLE_CLASSES) or bad_date(exc) or too_slow(exc):
 		return FIXABLE
 	return NOT_FIXABLE
 
