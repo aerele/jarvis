@@ -12,8 +12,9 @@ per-doc access (``has_permission``) inherit it automatically — exactly the
 ``jarvis/chat/wiki_permissions.py`` pattern.
 
 Writes stay owner-only (create/save/delete of your own row); scope WIDENING is
-guarded in the controller (``_guard_scope_change`` / ``_guard_new_scope``) so it
-holds under ``ignore_permissions`` too. Reviewer/compiler writes (the promotion
+guarded in the controller (``_guard_scope_change`` / ``_guard_new_scope``), and so
+is what a shared (Role/Org) skill says and whom it reaches
+(``_guard_content_change``), so both hold under ``ignore_permissions`` too. Reviewer/compiler writes (the promotion
 decide + insight-apply + compiler upsert) go through ``ignore_permissions`` and
 so never consult ``has_permission``.
 
@@ -146,7 +147,9 @@ def shared_skills_no_reviewer_owns() -> list[dict]:
 		fields=["name", "skill_name", "scope", "owner", "enabled"],
 		order_by="skill_name asc, name asc",
 	)
-	reviewer = {owner: is_skill_reviewer(owner) for owner in {r.owner for r in rows}}
+	# A row with no owner has no reviewer for an owner (and ``is_skill_reviewer`` of
+	# nobody would answer for whoever runs this).
+	reviewer = {owner: bool(owner) and is_skill_reviewer(owner) for owner in {r.owner for r in rows}}
 	found = []
 	for row in rows:
 		if reviewer[row.owner]:

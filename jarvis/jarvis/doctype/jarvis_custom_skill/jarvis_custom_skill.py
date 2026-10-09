@@ -103,7 +103,8 @@ def user_can_use_skill(skill, user: str | None = None, user_roles: list[str] | N
 	System Manager (and Administrator) always passes. ``skill`` may be a Document
 	or any dict-like row; child tables absent from a ``frappe.get_all`` row are
 	fetched by parent name. Instruction-level enforcement — see TASK 11 for why
-	role-restricted bodies must ALSO be kept off the shared container push.
+	role-restricted skills must ALSO be kept off the shared container push (their
+	name and description would show to every user's agent).
 	"""
 	user = user or frappe.session.user
 	if user == "Administrator":
@@ -504,7 +505,8 @@ class JarvisCustomSkill(NotRenamable, Document):
 
 	def _stored_child_values(self, fieldname: str, column: str, child_doctype: str) -> set:
 		"""The values one child table holds in the database: off the copy Frappe loads
-		for a save (``get_doc_before_save``), else (``validate`` called on its own) a read."""
+		at the start of every save (``get_doc_before_save``). When there is none
+		(``validate`` called on an object that was never saved) it reads them."""
 		before = self.get_doc_before_save()
 		if before is not None:
 			return {row.get(column) for row in before.get(fieldname) or []}
