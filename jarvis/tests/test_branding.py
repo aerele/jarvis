@@ -1,6 +1,8 @@
 """Tests for jarvis.branding (whitelabel get/update) and the shared
 validate_branding_inputs guard. Fake names only - never a real customer."""
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
@@ -89,6 +91,43 @@ class TestBrandingApi(FrappeTestCase):
 			branding.update_branding("Hacker", "", "")
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.get_single("Jarvis Settings").agent_name, "Aria")
+
+
+class TestBrandingClearsTheDeskBoot(FrappeTestCase):
+	"""The Desk widget reads the brand from boot, which Frappe caches per user. A brand change
+	must drop that cache, else only a "clear cache and reload" shows it (admin-v2#622)."""
+
+	def setUp(self):
+		self._snap = _snapshot()
+		frappe.cache.hset("bootinfo", "Administrator", {"jarvis_brand_logo_url": "/files/old.png"})
+
+	def tearDown(self):
+		_restore(self._snap)
+		frappe.cache.hdel("bootinfo", "Administrator")
+
+	def _save_settings(self, **values):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		s = frappe.get_single("Jarvis Settings")
+		s.update(values)
+		with (
+			patch.object(JarvisSettings, "_on_update_unified_llm"),
+			patch.object(JarvisSettings, "_on_update_single_model_legacy"),
+			patch("frappe.enqueue"),
+		):
+			s.save(ignore_permissions=True)
+
+	def test_update_branding_drops_the_cached_boot(self):
+		branding.update_branding("Acme Assistant", "/files/acme-logo.png", "")
+		self.assertIsNone(frappe.cache.hget("bootinfo", "Administrator"))
+
+	def test_a_brand_change_in_the_settings_form_drops_the_cached_boot(self):
+		self._save_settings(brand_logo="/files/acme-logo-2.png")
+		self.assertIsNone(frappe.cache.hget("bootinfo", "Administrator"))
+
+	def test_a_settings_save_without_a_brand_change_keeps_the_cached_boot(self):
+		self._save_settings()
+		self.assertIsNotNone(frappe.cache.hget("bootinfo", "Administrator"))
 
 
 class TestAssistantNameClause(FrappeTestCase):
