@@ -39,7 +39,8 @@ What a Workflow can CARRY, all of it shown on the card and said in its lines:
   (workflow.py :104-116).
 - A transition's ``transition_tasks`` (Frappe 16) runs Server Scripts and Webhooks
   (workflow.py :153-204): not set from chat.
-- ``allow_self_approval`` (default ON), the approving role, ``update_field`` /
+- ``allow_self_approval`` (Frappe's default is ON; from chat it is off unless
+  asked for), the approving role, ``update_field`` /
   ``update_value`` (written to the record on every move into the state),
   ``doc_status`` (a state that submits or cancels), ``send_email_alert``.
 
@@ -269,7 +270,7 @@ def _parent_values(given: dict, *, edit: bool) -> dict:
 def _rows(table: str, given, stored: list[dict] | None) -> list[dict]:
 	"""The complete rows of ``table`` as the save stores them: every value field of
 	the row, the stored value where an edit leaves one out and Frappe's default on a
-	new row, so the card's table shows each state and transition whole (approving
+	new row (but self-approval off on a new transition, R2-14), so the card's table shows each state and transition whole (approving
 	role, self-approval, condition ...). ``stored``: the rows of the workflow being
 	edited, kept by their ``name`` exactly as ``update_doc`` merges them."""
 	child = _child_meta(table)
@@ -318,6 +319,11 @@ def _rows(table: str, given, stored: list[dict] | None) -> list[dict]:
 				values[key] = _scalar(df, row[key], where)
 			else:
 				values[key] = _scalar(df, base.get(key), where) if base is not None else _default(df)
+				if base is None and (table, key) == ("transitions", "allow_self_approval"):
+					# Owner decision R2-14: a transition written from chat does not let a
+					# person approve their own record unless the request says so (Frappe's
+					# default is 1). A stored row keeps what it has.
+					values[key] = 0
 		out.append({"name": row["name"], **values} if row.get("name") else values)
 	return out
 
@@ -778,6 +784,13 @@ class _WorkflowWrite:
 			lines.append(
 				f"Self-approval is allowed on {own} of {len(transitions)} transitions: a person who "
 				"holds the role can approve a record they created themselves."
+			)
+		elif transitions:
+			# Only what Frappe enforces (``has_approval_access``): the action is refused
+			# for the record's owner, and never for the Administrator.
+			lines.append(
+				"Self-approval is off on every transition: the workflow action refuses the person "
+				"who created the record (the Administrator excepted)."
 			)
 		for s in states:
 			if s.get("update_field"):
