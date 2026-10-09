@@ -893,6 +893,52 @@ class TestParkChecks(_ScratchBase):
 class TestConfirm(_ScratchBase):
 	WIDE = True
 
+	def test_the_card_shows_what_frappes_save_makes_of_the_values(self):
+		"""Owner decision R2-17 reads the saved field back and holds it to the card,
+		so the card has to show the STORED form: Frappe's XSS pass rewrites markup
+		in a description, turns ``insert_after: "append"`` into the last fieldname,
+		switches "translatable" off on a type that has none, and fills a default
+		where a value was sent as null."""
+		name = self.park_new(
+			fieldtype="Int",
+			description="Line 1<br/>Line 2 <b>fast & safe</b>",
+			insert_after="append",
+			translatable=1,
+			in_list_view=None,
+		)
+		sealed = _seal.unseal_call(self.row(name))["args"]["values"]
+		self.assertEqual(sealed["description"], "Line 1<br>Line 2 <b>fast &amp; safe</b>")
+		self.assertEqual(sealed["insert_after"], frappe.get_meta(self.dt).fields[-1].fieldname)
+		self.assertEqual(sealed["translatable"], 0)
+		self.assertNotIn("in_list_view", sealed)
+		out = self.confirm(name)
+		self.assertTrue(out["ok"], out)
+		stored = frappe.db.get_value(
+			CF, {"dt": self.dt, "fieldname": "jcf_note"}, ["description", "insert_after", "translatable"]
+		)
+		self.assertEqual(
+			stored, (sealed["description"], sealed["insert_after"], 0), "the card showed what was stored"
+		)
+		self.assertEqual(self.logged("post_write_mismatch"), [])
+
+	def test_a_new_field_unlike_its_card_fails_and_says_what_stays(self):
+		"""The column was added before the check could run, so the complete field
+		stays (as after any failure at that point). The message must not say the
+		change was not kept."""
+		from jarvis.chat.pending_actions import _verify
+
+		name = self.park_new()
+		with patch.object(_verify, "unlike_the_card", return_value="Description"):
+			out = self.confirm(name)
+		self.assertFalse(out["ok"], out)
+		said = out["error"]["message"]
+		self.assertIn("did not match the confirmation card (it differed in: Description)", said)
+		self.assertIn("left in place", said)
+		self.assertNotIn("was not kept", said)
+		self.assertEqual(out["outcome"], "partial")
+		self.assertIn("jcf_note", _columns(self.dt))
+		self.assertEqual(len(self.logged("post_write_mismatch", name)), 1)
+
 	def test_confirm_makes_the_field_and_its_column_once(self):
 		name = self.park_new()
 		out = self.confirm(name)
