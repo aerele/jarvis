@@ -193,7 +193,7 @@ export { transcribeAudio } from "@shared/api/voice.js";
 
 // F01 recovery: a check only reads the scoped receipt, never resends a message.
 export const sendRecoverableMessage = (request) =>
-	call("jarvis.chat.pwa_send.send_message", {
+	call("jarvis.chat.send_requests.send_message", {
 		request_id: request.id,
 		conversation: request.conversation,
 		message: request.text,
@@ -201,9 +201,12 @@ export const sendRecoverableMessage = (request) =>
 			request.attachments.map((a) => ({ file_url: a.file_url, file_name: a.name }))
 		),
 		approval_tokens: JSON.stringify(request.approvalTokens),
+		...(request.model ? { model_override: request.model } : {}),
+		...(request.thinking ? { thinking_override: request.thinking } : {}),
+		...(request.autoMode ? { auto_mode: 1 } : {}),
 	});
 export const checkDelivery = (requestId) =>
-	call("jarvis.chat.pwa_send.check_delivery", { request_id: requestId });
+	call("jarvis.chat.send_requests.check_delivery", { request_id: requestId });
 
 // Reuse the desktop admission contract; these endpoints enforce ownership.
 export const activeQueuedTurn = (conversation) =>

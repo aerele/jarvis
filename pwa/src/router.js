@@ -10,6 +10,12 @@ import ChatsView from "./views/ChatsView.vue";
 // opens. Chat write approvals are answered in the chat that raised them; File Box
 // approvals are decided on the desktop Approval Board (File Box rows say so).
 const routes = [
+	{
+		path: "/send-recovery",
+		name: "SendRecovery",
+		component: () => import("./views/ChatView.vue"),
+		props: { id: "new" },
+	},
 	{ path: "/", name: "Chats", component: ChatsView },
 	{ path: "/login", name: "Login", component: () => import("./views/LoginView.vue") },
 	{ path: "/c/new", name: "NewChat", component: () => import("./views/NewChatView.vue") },

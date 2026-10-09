@@ -9,7 +9,16 @@ const props = defineProps({
 	disabled: Boolean,
 	backup: Function,
 });
-const emit = defineEmits(["retry", "check", "discard", "edit", "edit-new", "reload"]);
+const emit = defineEmits([
+	"retry",
+	"check",
+	"discard",
+	"edit",
+	"edit-new",
+	"reload",
+	"retry-same",
+	"edit-picks",
+]);
 const copy = computed(() => recoveryCopy(props.request, agentName));
 const mode = ref("");
 const text = ref("");
@@ -108,11 +117,21 @@ function fileHref(file) {
 					{{ updateRequired ? "Reload" : "Retry" }}
 				</button>
 				<button :disabled="request.checking" @click="open('edit')">Edit</button>
+				<button
+					v-if="!request.conversation"
+					:disabled="request.checking"
+					@click="emit('edit-picks')"
+				>
+					Edit message and model
+				</button>
 				<button :disabled="request.checking" @click="open('discard')">Discard</button>
 			</div>
 			<div v-else-if="request.state === 'uncertain'" class="jv-recovery-actions">
 				<button class="is-primary" :disabled="request.checking" @click="emit('check')">
 					Check delivery
+				</button>
+				<button :disabled="request.checking || disabled" @click="emit('retry-same')">
+					Retry same request
 				</button>
 				<button :disabled="request.checking" @click="open('new')">
 					Edit as new message

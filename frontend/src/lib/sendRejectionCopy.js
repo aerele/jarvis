@@ -16,6 +16,10 @@ const WINDOW_COPY = {
 export function sendRejectionCopy(reason, agentName, envelope, fallback = FALLBACK) {
 	const window = WINDOW_COPY[envelope && envelope.limit_period];
 	const known = {
+		maintenance: {
+			message: `${agentName} is temporarily unavailable for maintenance. Try again shortly.`,
+			type: "warning",
+		},
 		usage_limit: {
 			message:
 				window ||
