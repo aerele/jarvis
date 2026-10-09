@@ -847,6 +847,15 @@ export function createVoiceDictationStore(deps = {}) {
 	// the composer before the send, so a later payload match can never release it: without this it
 	// lingers as a silent committed record that arms the leave guard forever with no chip. An
 	// orphaned recording surfaces in snapshot().retained as ACTIONABLE (Restore/Download/Discard).
+	function orphanToken(token) {
+		if (disposed) return;
+		for (const id of token || []) {
+			const rec = records.get(id);
+			if (rec?.committed && rec.state !== "discarded") rec.orphaned = true;
+		}
+		_safe(onChange);
+	}
+
 	function markUnsentOrphans(scope, keepToken) {
 		if (disposed) return;
 		const target = scope == null ? null : scope;
@@ -1066,6 +1075,7 @@ export function createVoiceDictationStore(deps = {}) {
 		acknowledge,
 		reassignScope,
 		markUnsentOrphans,
+		orphanToken,
 		markSentWithout,
 		failedIdsForScope,
 		unorphan,

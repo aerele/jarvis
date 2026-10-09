@@ -1,9 +1,14 @@
 // Relative shared import also supports the unbundled node --test suite (no Vite aliases).
+import {
+	newSendRequestId,
+	deliveryOutcome,
+	deliveryDiagnostic,
+} from "../../../frontend/src/lib/sendDelivery.js";
 import { sendRejectionCopy } from "../../../frontend/src/lib/sendRejectionCopy.js";
 
 // Request state is independent of the view and transcript. The caller makes
 // `state` reactive; this module stays testable without a Vue runtime.
-export function createSendRecovery(state, id = () => crypto.randomUUID().replaceAll("-", "")) {
+export function createSendRecovery(state, id = newSendRequestId, onAccepted = () => {}) {
 	return {
 		stage(conversation, text, attachments, approvalTokens = []) {
 			const request = {
@@ -21,37 +26,42 @@ export function createSendRecovery(state, id = () => crypto.randomUUID().replace
 			// Return the proxy if state is reactive, not the raw object.
 			return state.requests[state.requests.length - 1];
 		},
-		settle(request, envelope) {
+		begin(request) {
+			request.operation = (request.operation || 0) + 1;
+			return request.operation;
+		},
+		settle(request, envelope, operation = request.operation) {
 			const result = envelope?.delivery === "settled" ? envelope.result : null;
 			// Positive server evidence wins over a later lost/failed HTTP response.
 			if (["accepted", "confirmed", "rejected"].includes(request.state))
 				return request.state;
-			if (
-				result?.confirmed === true &&
-				typeof result.ok === "boolean" &&
-				result.conversation_id
-			) {
-				request.state = "confirmed";
-			} else if (
-				result?.ok === true &&
-				result.conversation_id &&
-				result.message_id &&
-				result.run_id
-			) {
-				request.state = "accepted";
-			} else if (result?.ok === false) {
-				request.state = "rejected";
-			} else {
-				request.state = "uncertain";
-			}
+			const outcome = deliveryOutcome(envelope);
+			if (outcome === "uncertain" && operation !== request.operation) return request.state;
+			request.state = outcome;
 			request.result = result;
+			request.receiptStatus = envelope?.receipt_status;
+			if (["accepted", "confirmed"].includes(outcome)) {
+				if (!request.conversation && result.conversation_id) {
+					request.conversation = result.conversation_id;
+					request.needsAdoption = true;
+					// These picks belonged to the submitted first message, not the
+					// next empty recovery composer. Never reuse a prior chat's auto mode.
+					const draft = state.drafts?.[""];
+					if (!draft?.text?.trim() && !draft?.attachments?.length) {
+						state.newChatPicks = {};
+						delete (state.drafts || {})[""];
+					}
+				}
+				onAccepted(request);
+			}
 			return request.state;
 		},
-		retry(request) {
-			if (request.state !== "rejected" || request.checking) return false;
+		retry(request, sameId = false) {
+			if (request.state !== (sameId ? "uncertain" : "rejected") || request.checking)
+				return false;
 			// A definitively rejected attempt is finished. The next attempt gets
-			// its own receipt; an unknown attempt never reaches this path.
-			request.id = id();
+			// its own receipt; an uncertain retry retains the exact original ID.
+			if (!sameId) request.id = id();
 			request.state = "sending";
 			request.result = null;
 			request.note = "";
@@ -94,12 +104,14 @@ export function recoveryCopy(request, agentName = "Jarvis") {
 	if (request.state === "uncertain")
 		return {
 			title: "Delivery not confirmed",
-			detail: "Jarvis may already be working. Check delivery before sending again. Your message and files are preserved in this tab.",
+			detail: request.receiptStatus
+				? deliveryDiagnostic(request.receiptStatus)
+				: `${agentName} may already be working. Check delivery or retry the same request safely. Your message and files are preserved in this tab.`,
 		};
 	if (request.result?.reason === "maintenance")
 		return {
 			title: "Not sent · Maintenance",
-			detail: "Your message and files are preserved. Retry when Jarvis is available.",
+			detail: `Your message and files are preserved. Retry when ${agentName} is available.`,
 		};
 	if (request.result?.reason === "release_update_required")
 		return {
