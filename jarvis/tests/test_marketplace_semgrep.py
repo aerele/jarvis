@@ -2,10 +2,9 @@
 
 import io
 import json
-import os
-import tempfile
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from jarvis.ci import marketplace_semgrep as gate
 
@@ -22,12 +21,10 @@ def _result(severity, *, blocking=None, rule="frappe-x", path="jarvis/a.py", lin
 
 class TestMarketplaceSemgrepGate(unittest.TestCase):
 	def run_gate(self, results, errors=()):
-		with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-			json.dump({"results": list(results), "errors": list(errors)}, fh)
-		self.addCleanup(os.unlink, fh.name)
+		report = io.StringIO(json.dumps({"results": list(results), "errors": list(errors)}))
 		out = io.StringIO()
-		with redirect_stdout(out):
-			code = gate.main([fh.name])
+		with patch("sys.stdin", report), redirect_stdout(out):
+			code = gate.main([])
 		return code, out.getvalue()
 
 	def test_critical_major_and_blocking_fail(self):

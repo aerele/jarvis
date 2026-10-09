@@ -25,6 +25,7 @@ from contextlib import contextmanager
 import frappe
 from frappe.utils import cint
 
+from jarvis._session import impersonate
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
 MAX_LOOKUPS = 3
@@ -331,17 +332,6 @@ def _check_limit(limit) -> int:
 # --------------------------------------------------------------------------- #
 # Execution
 # --------------------------------------------------------------------------- #
-@contextmanager
-def _as_user(user: str):
-	"""Run as ``user`` and ALWAYS restore the previous session user."""
-	previous = frappe.session.user
-	frappe.set_user(user)
-	try:
-		yield
-	finally:
-		frappe.set_user(previous)
-
-
 def _child_allowed(doctype: str) -> bool:
 	"""True when a child DocType is outside the denied DocTypes and apps."""
 	meta = frappe.get_meta(doctype)
@@ -447,7 +437,7 @@ def execute_lookup(owner: str, request: dict, budget: int = MAX_RESULT_CHARS) ->
 		reason = "lookup data budget for this round is used up"
 	if not reason:
 		try:
-			with _as_user(owner):
+			with impersonate(owner):
 				if tool == "list":
 					result, count = _do_list(args, budget)
 				elif tool == "get":
