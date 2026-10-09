@@ -26,7 +26,7 @@ vi.mock("frappe-ui", () => ({
 	},
 }));
 
-vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 
 vi.mock("@/api", () => ({
 	submitPulseFeedback: vi.fn().mockResolvedValue({ ok: true }),

@@ -32,7 +32,7 @@ test("the summary card is stamped, never editable", () => {
 test("a save sends the helper's payload and follows its outcome, closing on closed", () => {
 	const fn = body("applyDraft");
 	assert.match(fn, /api\.applyAction\(\s*applyActionPayload\(p,/);
-	assert.match(fn, /draftSaveOutcome\(r, agentName\)/);
+	assert.match(fn, /draftSaveOutcome\(r, brand\.agentName\)/);
 	assert.match(
 		fn,
 		/outcome\.kind === "closed"\) \{\s*(\/\/[^\n]*\n\s*)*closeDraftPanel\(\);\s*notify\(outcome\.note/

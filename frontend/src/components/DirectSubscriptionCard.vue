@@ -185,7 +185,7 @@ import { errMessage as _err } from "@/lib/errors";
 import { isCodeOnlyPaste, subModelSuggestions, expiredLine } from "@/llm/pool";
 import { exactDate } from "@/utils/datetime";
 import { useConfirm } from "@/composables/useConfirm";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 
 const { confirm } = useConfirm();
 
@@ -387,7 +387,7 @@ async function doDisconnect() {
 	if (
 		!(await confirm({
 			title: "Disconnect chat subscription?",
-			message: `${agentName} chat will stop working until you reconnect.`,
+			message: `${brand.agentName} chat will stop working until you reconnect.`,
 			confirmLabel: "Disconnect",
 			danger: true,
 		}))

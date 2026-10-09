@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { nextTick } from "vue";
+// PWA components import agentName from "@/branding". In this frontend runner "@" is
+// frontend/src, whose branding has no agentName, so give them the PWA's values.
+vi.mock("@/branding", () => ({ agentName: "Jarvis", brandLogoUrl: "" }));
 import SendRecoveryCard from "../../../pwa/src/components/SendRecoveryCard.vue";
 import { createSendRecovery } from "../../../pwa/src/lib/sendRecovery";
 

@@ -25,7 +25,7 @@ vi.mock("@vueuse/core", async (importOriginal) => {
 });
 
 vi.mock("@/data/session", () => ({ session: { user: "u@x.com" } }));
-vi.mock("@/branding", () => ({ agentName: "Jarvis" }));
+vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 
 vi.mock("frappe-ui", () => ({
 	Button: {

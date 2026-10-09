@@ -12,7 +12,7 @@
 					>Describe a dashboard</span
 				>
 				<span class="truncate text-p-sm text-ink-gray-6"
-					>{{ agentName }} draws it on the canvas</span
+					>{{ brand.agentName }} draws it on the canvas</span
 				>
 			</div>
 			<div class="flex shrink-0 items-center gap-1">
@@ -405,7 +405,7 @@ import {
 	getConversationContext,
 	compactConversation,
 } from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml, turnErrorInfo } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
@@ -1068,7 +1068,7 @@ async function send(gotoMessageId = "") {
 			messages.value = messages.value.filter((m) => m.name !== tmpName);
 			if (!draft.value) draft.value = text;
 			forgetGotoClaim(gotoMessageId);
-			const { message, type } = sendRejectionCopy(r.reason, agentName, r);
+			const { message, type } = sendRejectionCopy(r.reason, brand.agentName, r);
 			(toast[type] || toast.error)(message);
 			return;
 		}
