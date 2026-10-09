@@ -473,9 +473,13 @@ function onDragStart(group, index, e) {
 	});
 	if (e && e.dataTransfer) {
 		e.dataTransfer.effectAllowed = "move";
-		// drag the whole row's picture, not only the small grip
+		// drag the whole row's picture, not only the small grip, and keep it under the
+		// pointer where it was taken (the grip), not at the row's left edge
 		const row = e.currentTarget && e.currentTarget.parentElement;
-		if (row && e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(row, 16, 14);
+		if (row && e.dataTransfer.setDragImage) {
+			const r = row.getBoundingClientRect();
+			e.dataTransfer.setDragImage(row, e.clientX - r.left, e.clientY - r.top);
+		}
 		try {
 			e.dataTransfer.setData("text/plain", String(index));
 		} catch (_) {
