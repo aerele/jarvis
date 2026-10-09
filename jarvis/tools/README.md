@@ -400,7 +400,11 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
     changed (what Frappe's `get_workflow_state_count` counts; both counts stop at
     a bound, the second reads "more than 10000"). What is particular to this
     workflow comes first: an active workflow with no transitions, which states
-    submit or cancel, how many transitions allow self-approval, what
+    submit or cancel, how many transitions allow self-approval (a transition
+    written from chat has it OFF unless the request sets `allow_self_approval`,
+    owner decision R2-14: Frappe's default is on; a stored row keeps what it
+    has; with none, the card says self-approval is off and that the workflow
+    action refuses the record's creator, the Administrator excepted), what
     `update_field` writes, an existing text field used as the state field, a state
     or action open to everyone signed in (role All) or to the Administrator only.
     Then the lines every workflow card carries: the access line, and that it

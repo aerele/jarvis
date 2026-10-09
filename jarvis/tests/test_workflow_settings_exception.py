@@ -447,13 +447,13 @@ class TestWorkflowPark(_WfBase):
 					"next_state": self.s_ok,
 					"allowed": "System Manager",
 					"condition": "doc.title == 'go'",
+					"allow_self_approval": 1,
 				},
 				{
 					"state": self.s_open,
 					"action": self.a_no,
 					"next_state": self.s_ok,
 					"allowed": "Administrator",
-					"allow_self_approval": 0,
 				},
 			]
 		)
@@ -470,7 +470,7 @@ class TestWorkflowPark(_WfBase):
 		self.assertEqual(transitions["Action"], [self.a_ok, self.a_no])
 		self.assertEqual(transitions["Allowed"], ["System Manager", "Administrator"])
 		self.assertEqual(
-			transitions["Allow Self Approval"], ["Yes", "No"], "the default is shown, not left out"
+			transitions["Allow Self Approval"], ["Yes", "No"], "asked for on one; off where nothing was said"
 		)
 		self.assertEqual(transitions["Condition"][0], "doc.title == 'go'")
 		line = card["risk_line"]
@@ -479,6 +479,37 @@ class TestWorkflowPark(_WfBase):
 		self.assertLess(
 			line.index("Self-approval is allowed"), line.index(ACCESS_LINE), "what is particular comes first"
 		)
+
+	def test_a_transition_from_chat_does_not_allow_self_approval_unless_asked(self):
+		"""Owner decision R2-14: Frappe's default is on, and a request for "needs the
+		manager's approval" then made a rule its own author could pass."""
+		from frappe.model.workflow import apply_workflow
+
+		name = self.park_wf()
+		card = self.card(name)
+		self.assertEqual(self.call(name)["values"]["transitions"][0]["allow_self_approval"], 0)
+		self.assertEqual(self.table_of(card, "Transitions")["Allow Self Approval"], ["No"])
+		self.assertIn(
+			"Self-approval is off on every transition: the workflow action refuses the person who "
+			"created the record (the Administrator excepted).",
+			card["risk_line"],
+		)
+		self.assertNotIn("Self-approval is allowed", card["risk_line"])
+		self.assertTrue(self.confirm(name)["ok"])
+		with as_user(SM_USER):
+			doc = frappe.get_doc({"doctype": self.dt, "title": "mine"}).insert()
+			with self.assertRaisesRegex(frappe.ValidationError, "Self approval is not allowed"):
+				apply_workflow(doc, self.a_ok)
+		frappe.db.rollback()
+		# A transition someone made in Desk keeps what it has when chat edits the workflow.
+		wf = f"Jwf Flow {self.tag}"
+		frappe.db.set_value("Workflow Transition", {"parent": wf}, "allow_self_approval", 1)
+		frappe.db.commit()
+		frappe.clear_document_cache(WF, wf)
+		self.conv = self.make_conv(SM_USER)
+		row = frappe.get_doc(WF, wf).transitions[0].name
+		edit = self.park_update(wf, send_email_alert=1, transitions=[{"name": row}])
+		self.assertEqual(self.call(edit)["changes"]["transitions"][0]["allow_self_approval"], 1)
 
 	def test_each_condition_gets_a_row_of_its_own_shown_whole(self):
 		"""Flow review: the Transitions table scrolls sideways on the board and the
@@ -1571,10 +1602,12 @@ class TestWorkflowConfirm(_WfBase):
 		self.records(2)
 		name = self.park_wf()
 		self.assertTrue(self.confirm(name)["ok"])
+		# Made by one person, approved by another: chat's transitions do not let a
+		# person approve their own record.
+		doc = frappe.get_doc({"doctype": self.dt, "title": "made afterwards"}).insert()
+		self.assertEqual(doc.get(STATE), self.s_open)
 		with as_user(SM_USER):
-			doc = frappe.get_doc({"doctype": self.dt, "title": "made afterwards"}).insert()
-			self.assertEqual(doc.get(STATE), self.s_open)
-			apply_workflow(doc, self.a_ok)
+			apply_workflow(frappe.get_doc(self.dt, doc.name), self.a_ok)
 		frappe.db.commit()
 		self.assertEqual(frappe.db.get_value(self.dt, doc.name, STATE), self.s_ok)
 		note = frappe._dict(gs.undo_confirmation(name))
