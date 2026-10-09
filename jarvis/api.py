@@ -2416,6 +2416,9 @@ def _refuse_risky_write(
 	from jarvis.tools import _write_risk
 
 	env = _write_risk.refused_envelope(e)
+	# Never fixable, said on the envelope as the refusals of a save are
+	# (``_translate_write_error``): a refusal is not corrected by changing a value.
+	env["error"]["kind"] = "not_fixable"
 	doctype, name = _write_risk.first_risky_target(tool, args)
 	risk = "structure" if e.code == "structure_refused" else "sensitive"
 	_write_risk.log_line(risk, e.doctype or doctype, name, "refused", tool=tool, code=e.code)

@@ -293,6 +293,25 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
   run, File Box, the Approval Board edit, `preview_doc`, and at Confirm for a card
   parked before the guard. Code `structure_refused`, `error.desk_path` names the
   Desk page. Any structure doctype in a batch refuses the whole batch.
+- **A child row on its own** (`update_doc` / `delete_doc` on a row of a child
+  table, or a root save / delete of one through `run_method`): judged by the row's
+  PARENT, read from the stored row and never from the call. Under a structure
+  parent (DocField, DocPerm, Workflow Transition ...) or a sensitive one (Has Role
+  and Block Module of a User, Webhook Header, Notification Recipient; every
+  conditional doctype; a Customer's / Supplier's portal users; Jarvis's own
+  configuration in the argument layer) it is refused on every route and in every
+  mode, with the parent's code (`structure_refused` / `sensitive_refused`) and
+  "Change this through its record: User x, field Roles." No card admits it: the
+  change goes through the parent, which gets its own card or refusal. A row under
+  an ordinary parent (a Sales Invoice Item) is unchanged, except a ROLE LIST (a
+  child table whose only value field is a Link to Role: Has Role, OAuth Client
+  Role, User Role, Workflow Action Permitted Role, Onboarding Permission, Jarvis's
+  allowed-role tables): its rows grant access by what they are, so they are
+  refused under every parent (a Page, a Dashboard Chart, a Workspace); the parent
+  itself is classified as before. A row with no parent
+  record is refused when its child table can sit under a structure or sensitive
+  parent at all. A row the parent's save writes, or another document's save, is
+  nested and passes, as from Desk.
 - **Guarded structure writes** (R2-10; `_guarded_structure.py`, shared, and
   `_custom_field_guard.py`): the two structure changes chat may make, each only
   through a confirmation card on an ordinary chat (never File Box, the Approval
