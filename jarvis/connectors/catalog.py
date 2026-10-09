@@ -113,8 +113,10 @@ _GOOGLE_AUTHORIZE_PARAMS = (("access_type", "offline"), ("prompt", "consent"))
 # The customer's Cloud project must enable BOTH the product API and its MCP API
 # (else 403 on connect) and be enrolled in the Workspace Developer Preview (else the
 # connector adds but every tool call is refused). Google's own guide walks through
-# both plus the consent screen and OAuth client, so the help link points there.
-_GOOGLE_HELP_URL = "https://developers.google.com/workspace/guides/configure-mcp-servers"
+# both plus the consent screen and OAuth client, so it is the "Setup guide" link;
+# step 2's help link stays on the Credentials page where the client is created.
+_GOOGLE_HELP_URL = "https://console.cloud.google.com/apis/credentials"
+_GOOGLE_GUIDE_URL = "https://developers.google.com/workspace/guides/configure-mcp-servers"
 _GOOGLE_HINT = "Enable the API and its MCP API, then join Google's Developer Preview."
 
 # The free-form path: a caller's own base_url (any remote MCP server that passes
@@ -146,6 +148,11 @@ class Provider:
 	now carry the register-your-own-app guide, not token guidance. A `dcr` preset
 	(Atlassian, Linear) self-registers its app, so its `hint` / `help_url` are
 	unaffected and still carry token guidance.
+
+	`guide_url` is an optional vendor setup guide, shown as its own "Setup guide"
+	link under the hint, for a vendor whose app needs more than creating it (Google:
+	two APIs plus the Workspace Developer Preview). Display copy on any auth class;
+	`validate` only requires it be https.
 
 	`description` is one short plain line naming what the app is for (its data, not
 	a protocol), shown under the name in the SPA's preset picker. `validate` requires
@@ -183,6 +190,7 @@ class Provider:
 	scopes: str | None = None
 	token_hint: str | None = None
 	token_help_url: str | None = None
+	guide_url: str | None = None
 	authorize_params: tuple[tuple[str, str], ...] | None = None
 	accepts_key: bool = True
 
@@ -257,6 +265,8 @@ def validate(providers: tuple[Provider, ...]) -> None:
 			raise ValueError(
 				f"token_help_url must be https for {provider.name!r}: {provider.token_help_url!r}"
 			)
+		if provider.guide_url and not provider.guide_url.startswith("https://"):
+			raise ValueError(f"guide_url must be https for {provider.name!r}: {provider.guide_url!r}")
 		if not provider.accepts_key and provider.auth not in (AUTH_DCR, AUTH_STATIC):
 			raise ValueError(f"only a sign-in preset may refuse a key: {provider.name!r}")
 
@@ -546,6 +556,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="gmail",
 		help_url=_GOOGLE_HELP_URL,
 		hint=_GOOGLE_HINT,
+		guide_url=_GOOGLE_GUIDE_URL,
 		issuer=_GOOGLE_ISSUER,
 		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
@@ -563,6 +574,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="google_calendar",
 		help_url=_GOOGLE_HELP_URL,
 		hint=_GOOGLE_HINT,
+		guide_url=_GOOGLE_GUIDE_URL,
 		issuer=_GOOGLE_ISSUER,
 		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
@@ -645,6 +657,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="google_drive",
 		help_url=_GOOGLE_HELP_URL,
 		hint=_GOOGLE_HINT,
+		guide_url=_GOOGLE_GUIDE_URL,
 		issuer=_GOOGLE_ISSUER,
 		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
@@ -662,6 +675,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="google_sheets",
 		help_url=_GOOGLE_HELP_URL,
 		hint=_GOOGLE_HINT,
+		guide_url=_GOOGLE_GUIDE_URL,
 		issuer=_GOOGLE_ISSUER,
 		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
@@ -679,6 +693,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="google_docs",
 		help_url=_GOOGLE_HELP_URL,
 		hint=_GOOGLE_HINT,
+		guide_url=_GOOGLE_GUIDE_URL,
 		issuer=_GOOGLE_ISSUER,
 		authorization_endpoint=_GOOGLE_AUTHORIZATION_ENDPOINT,
 		token_endpoint=_GOOGLE_TOKEN_ENDPOINT,
@@ -994,7 +1009,7 @@ def authorize_params_of(name: str, *, providers: tuple[Provider, ...] = PROVIDER
 def to_public(*, providers: tuple[Provider, ...] = PROVIDERS) -> list[dict]:
 	"""The fields the SPA may see, enabled entries only, catalog order: name,
 	key, auth, category, logo, help_url, hint, description, token_hint,
-	token_help_url, accepts_key. Never `base_url`, the endpoint is server-pinned and never client
+	token_help_url, guide_url, accepts_key. Never `base_url`, the endpoint is server-pinned and never client
 	input, and never `enabled` (a disabled entry is simply absent instead).
 	`token_hint` / `token_help_url` are public strings (paste-a-token guidance) the
 	SPA shows on the "use a token instead" fallback. `description` is the one-line
@@ -1011,6 +1026,7 @@ def to_public(*, providers: tuple[Provider, ...] = PROVIDERS) -> list[dict]:
 			"description": provider.description,
 			"token_hint": provider.token_hint,
 			"token_help_url": provider.token_help_url,
+			"guide_url": provider.guide_url,
 			"accepts_key": provider.accepts_key,
 		}
 		for provider in providers
@@ -1056,6 +1072,7 @@ def apply_overlay(
 		"scopes",
 		"token_hint",
 		"token_help_url",
+		"guide_url",
 		"authorize_params",
 		"accepts_key",
 	)
@@ -1096,6 +1113,7 @@ def apply_overlay(
 				scopes=entry.get("scopes"),
 				token_hint=entry.get("token_hint"),
 				token_help_url=entry.get("token_help_url"),
+				guide_url=entry.get("guide_url"),
 				authorize_params=_freeze_authorize_params(entry.get("authorize_params")),
 				accepts_key=entry.get("accepts_key", True),
 			)

@@ -101,7 +101,7 @@ import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 
 const props = defineProps({
 	// listConnectors()'s catalog: [{ name, key, auth, category, description,
-	// logo, help_url, hint, token_hint, token_help_url }], enabled providers
+	// logo, help_url, hint, token_hint, token_help_url, guide_url }], enabled providers
 	// in catalog order.
 	catalog: { type: Array, default: () => [] },
 	// Every row visible to the current viewer (Shared + their own Mine, exactly

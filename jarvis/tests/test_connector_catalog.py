@@ -190,6 +190,7 @@ class TestToPublic(unittest.TestCase):
 			"description",
 			"token_hint",
 			"token_help_url",
+			"guide_url",
 			"accepts_key",
 		}
 		for row in catalog.to_public():
@@ -502,6 +503,44 @@ class TestTokenGuidanceFields(unittest.TestCase):
 			catalog.apply_overlay(overlay)
 
 
+class TestGuideUrl(unittest.TestCase):
+	"""`guide_url` is an optional vendor setup guide shown as its own "Setup guide"
+	link, separate from `help_url` (step 2's app-settings page)."""
+
+	_GOOGLE = ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs")
+	_GUIDE = "https://developers.google.com/workspace/guides/configure-mcp-servers"
+
+	def test_to_public_ships_the_guide_for_google_only(self):
+		for row in catalog.to_public():
+			expected = self._GUIDE if row["name"] in self._GOOGLE else None
+			self.assertEqual(row["guide_url"], expected, row["name"])
+
+	def test_guide_url_must_be_https(self):
+		bad = replace(catalog.by_name("Gmail"), guide_url="http://insecure.example/guide")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_overlay_may_not_change_it(self):
+		overlay = [{"name": "Gmail", "guide_url": "https://evil.example/guide"}]
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay(overlay)
+
+	def test_overlay_new_entry_carries_it(self):
+		overlay = [
+			{
+				"name": "Acme Docs",
+				"key": "acme_docs",
+				"base_url": "https://mcp.acme.example/mcp",
+				"auth": catalog.AUTH_OPEN,
+				"category": "docs",
+				"description": "Product documentation",
+				"guide_url": "https://docs.acme.example/mcp",
+			}
+		]
+		added = catalog.by_name("Acme Docs", providers=catalog.apply_overlay(overlay))
+		self.assertEqual(added.guide_url, "https://docs.acme.example/mcp")
+
+
 if __name__ == "__main__":
 	unittest.main()
 
@@ -531,8 +570,9 @@ class TestAuthorizeParams(unittest.TestCase):
 			)
 			self.assertEqual(provider.token_endpoint, "https://oauth2.googleapis.com/token", name)
 			self.assertTrue(provider.scopes, name)
+			self.assertEqual(provider.help_url, "https://console.cloud.google.com/apis/credentials", name)
 			self.assertEqual(
-				provider.help_url,
+				provider.guide_url,
 				"https://developers.google.com/workspace/guides/configure-mcp-servers",
 				name,
 			)
