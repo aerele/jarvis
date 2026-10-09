@@ -2161,7 +2161,9 @@ def _bad_date_message(found: dict) -> str:
 	return f"{where} has an invalid {found['type']} value '{found['value'][:80]}'; use {shape}."
 
 
-def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dict | None:
+def _translate_write_error(
+	e: Exception, mark: int, *, doctype: str = "", is_write: bool = False
+) -> dict | None:
 	"""Enriched ``{ok:false, error}`` envelope for a KNOWN write-path exception,
 	promoting Frappe's discarded reason into ``message``/``detail``/``hint``.
 	Returns ``None`` for an unexpected exception - the caller MUST re-raise it so
@@ -2209,7 +2211,8 @@ def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dic
 		code, message = "RetryLaterError", _BUSY_MESSAGE
 	elif _failure_kind.bad_date(e):
 		code, message = "InvalidArgumentError", _bad_date_message(_failure_kind.bad_date(e))
-	elif _failure_kind.too_slow(e):
+	elif not is_write and _failure_kind.too_slow(e):
+		# Reads only: "narrow the question" is wrong advice for a write.
 		code, message = "QueryTooSlowError", _TOO_SLOW_MESSAGE
 	else:
 		return None
@@ -2326,7 +2329,7 @@ def _dispatch_and_wrap(
 		if hidden is not None and not isinstance(e, WriteRefusedError):
 			e = hidden  # re-raised as something else: still the refusal
 		a = args if isinstance(args, dict) else {}
-		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "")
+		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "", is_write=is_write)
 		if envelope is None:  # unexpected - audit then re-raise to Frappe (500)
 			if is_write:
 				audit.record(
