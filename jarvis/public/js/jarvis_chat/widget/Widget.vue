@@ -662,7 +662,7 @@ onBeforeUnmount(() => {
 	gap: 2.5px;
 	padding: 5px; /* a larger target than the dots */
 	cursor: grab;
-	opacity: 0.45;
+	opacity: 0;
 	transition: opacity 0.12s ease;
 	z-index: 1;
 }
@@ -686,6 +686,12 @@ onBeforeUnmount(() => {
 }
 .jvw-fab--dragging .jvw-grip {
 	cursor: grabbing;
+}
+/* A touch screen has no hover, so there the grip shows at rest. */
+@media (hover: none) {
+	.jvw-grip {
+		opacity: 0.45;
+	}
 }
 
 /* ---- blink face ----
