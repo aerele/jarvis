@@ -307,30 +307,63 @@ R2-4 REVISED AGAIN, R2-8, R2-10, R2-12).
   child table whose only value field is a Link to Role: Has Role, OAuth Client
   Role, User Role, Workflow Action Permitted Role, Onboarding Permission, Jarvis's
   allowed-role tables): its rows grant access by what they are, so they are
-  refused under every parent (a Page, a Dashboard Chart, a Workspace); the parent
-  itself is classified as before. A row with no parent
+  refused under every parent (a Page, a Dashboard Chart, a Workspace). The parent's
+  own write is sensitive when it SETS such a table (owner decision R2-18,
+  `_role_tables` / `_sets_role_table`): an `update_doc` that names the role list
+  at all (an empty list too: emptying a Page's roles opens it to everyone) or a
+  `create_doc` that lists a role parks the access card in every mode, on any
+  form, listed or not, a custom app's included; anything else on that record
+  stays ordinary. The same rule holds at the save (`_doc_changes_roles`: a root
+  save that adds a role list or leaves one different from what is stored), so
+  `frappe.client` through `run_method` is covered too. A row with no parent
   record is refused when its child table can sit under a structure or sensitive
   parent at all. A row the parent's save writes, or another document's save, is
   nested and passes, as from Desk. What the refusal tells the assistant to do
   instead follows the parent: `update_doc` on the parent (each kept row with its
   name) where that update is carded: a sensitive parent (a User, a Webhook, a
-  Script Report) or one changed through a guarded card (a Workflow, CRM Settings,
-  Domain Settings, while the site switch allows those); Desk, with the parent's
-  page, under any other structure parent and under a parent whose update is NOT
-  carded (the
-  role list of a Page, a Dashboard Chart or a Workspace; a Report Builder
-  report). It never promises a card the parent would not get. Known limits: a
-  `run_method` of `frappe.client.set_value` on the PARENT that rewrites its
-  table, and a plain `update_doc` on an UNCLASSIFIED parent that changes its role
-  table (a Page's, a Dashboard Chart's, a Workspace's roles), still run with no
-  card in the uncarded modes: the row is refused, the parent is not. Closing
-  that means classifying those parents (an owner decision, not done here).
+  Script Report), a parent with a role list (a Dashboard Chart, a Workspace, a
+  Report Builder report) or one changed through a guarded card (a Workflow, CRM
+  Settings, Domain Settings, while the site switch allows those); Desk, with the
+  parent's page, under any other structure parent and under a Page (Frappe lets
+  only the Administrator save one; a site sets a page's roles through Role
+  Permission for Page and Report). It never promises a card the parent would
+  not get. The role rule also applies where a form is otherwise classified by a
+  condition or by a field (a Report Builder report, an Employee with a role
+  table added by Custom Field); such a card carries the access line, not the
+  doctype's own. The roles Frappe itself gives a new Report Builder report
+  (its form's permlevel-0 roles, `Report.before_insert`) are not a list the
+  caller set, so creating one stays ordinary. At the save the rule is not
+  applied to Jarvis's own configuration (the argument layer only). Not covered: a Data Import of such a
+  form.
 - **Guarded structure writes** (R2-10; `_guarded_structure.py`, shared, with
   `_custom_field_guard.py`, `_workflow_guard.py` and `_settings_guard.py`): the
   structure changes chat may make, each only through a confirmation card on an
   ordinary chat (never File Box, the Approval Board, a sheet, `preview_doc` or an
   uncarded run), with NO trial run. A Custom Field first; Workflow and the two
   settings documents follow it below.
+  - After every guarded write is saved, and before anything says so, the record
+    is read back and held to the card (owner decision R2-17,
+    `chat/pending_actions/_verify.py`): each value the sealed call named and each
+    cell of each row of a table it sent, through the card's own value rule
+    (`same_value`). What the call did not name (timestamps, defaults, what a
+    controller derives) and the record counts on the card are not compared. A
+    difference fails the confirm: it is rolled back where the write was one
+    transaction and cleaned up as after any failed guarded write where a column
+    had been added (the record is removed or put back; a column that was added
+    stays, and a NEW Custom Field with it, as the clean-up text then says), the
+    card ends Failed with "What was saved did not match the confirmation card",
+    and one Error Log (`jarvis.pending_action.post_write_mismatch`) names the
+    field, never a value. A record that cannot be read back counts as a
+    difference. So the sealed call carries the form Frappe's save stores, and
+    the card shows it: markup in a text value as the XSS pass rewrites it
+    (`_guarded_structure.as_sanitized`: `<br/>` is stored as `<br>`), a Custom
+    Field's `insert_after: "append"` as the form's last fieldname, its
+    "translatable" off on a type with no translation, and a null on a new field
+    or a new workflow row as the default it takes. Text the card cannot show as
+    stored is refused at the card: markup that comes out different on every
+    sanitising pass (the save sanitises the stored form again), and a workflow
+    update value the HTML filter would rewrite (`doc.a<doc.b and doc.c>1` is
+    read as a tag; with spaces around the signs it is left alone).
   - ONE new Custom Field (`create_doc`, not a batch), and an edit of ONE Custom
     Field that changes no column (`update_doc`: label, description, hidden,
     mandatory ...). A delete, a change of type / length / name / `unique` / index,

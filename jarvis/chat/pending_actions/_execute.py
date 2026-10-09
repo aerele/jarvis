@@ -272,6 +272,35 @@ def _clean_up_structure(name: str, structure: _Structure):
 	return None
 
 
+def _held_to_the_card(name: str, args: dict, structure: _Structure, result: dict) -> dict:
+	"""After a guarded structure write was saved, before anything says so: is what
+	was stored what the card showed (``_verify.unlike_the_card``)? ``result`` when
+	it is. Otherwise a failure in its place: the caller then rolls back and cleans
+	up exactly as after any failed guarded write, so the difference is not kept."""
+	from jarvis import api
+	from jarvis.chat.pending_actions import _verify
+
+	tracebacks: list = []
+	unlike = _verify.unlike_the_card(args, structure.undo, tracebacks)
+	if not unlike:
+		return result
+	frappe.db.rollback()
+	frappe.log_error(
+		title="jarvis.pending_action.post_write_mismatch",
+		message=f"{name}: what was saved differs from the card in: {unlike}\n" + "\n".join(tracebacks),
+	)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
+	# What was and was not kept is the clean-up's to say (it is appended to this):
+	# a column that had been added stays, and its field with it.
+	out = api._error(
+		"InternalError",
+		f"What was saved did not match the confirmation card (it differed in: {unlike}), so the "
+		"change was undone as far as it can be.",
+	)
+	out["error"]["kind"] = "not_fixable"
+	return out
+
+
 def _still_locked(name: str, structure: _Structure) -> bool:
 	"""After the dispatch: is the form's structure lock still this confirm's, as the
 	database sees it? Logged when not."""
@@ -579,6 +608,8 @@ def _claim_and_run(
 
 			stamped.enter_context(stamping(name, structure.undo))
 		result, interfered, crash_tb = _dispatch(row, args)
+	if structure is not None and not crash_tb and isinstance(result, dict) and result.get("ok"):
+		result = _held_to_the_card(name, args, structure, result)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
 	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))

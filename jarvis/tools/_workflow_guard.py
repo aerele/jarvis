@@ -216,8 +216,19 @@ def _scalar(df, value, where: str):
 			)
 		return text
 	if df.fieldtype in ("Text", "Small Text", "Long Text", "Code"):
-		return (cstr(value) if df.fieldtype != "Code" else cstr(value).strip()) or None
-	text = cstr(value).strip()
+		text = cstr(value) if df.fieldtype != "Code" else cstr(value).strip()
+		return gs.as_sanitized(df, text) or None
+	# As the save's XSS pass stores it: the card shows that form.
+	given = cstr(value).strip()
+	text = cstr(gs.as_sanitized(df, given)).strip()
+	if df.fieldname == "update_value" and text != given:
+		# It may be an expression: ``doc.a<doc.b and doc.c>1`` would be stored as
+		# ``doc.a1``, and judged and evaluated as that.
+		raise InvalidFieldValueError(
+			f"{label} holds text Frappe's HTML filter would rewrite (it reads what sits between "
+			"a less-than and a greater-than sign as a tag). Put spaces around those signs, or "
+			"leave markup out of an update value."
+		)
 	if len(text) > (cint(df.length) or _MAX_TEXT):
 		raise InvalidFieldValueError(
 			f"{label} is longer than the {cint(df.length) or _MAX_TEXT} characters it can hold."
@@ -317,6 +328,10 @@ def _rows(table: str, given, stored: list[dict] | None) -> list[dict]:
 			df = child.get_field(key)
 			if key in row:
 				values[key] = _scalar(df, row[key], where)
+				if values[key] is None and base is None:
+					# A new row sent with an explicit null: Frappe fills the field's
+					# default at save, so the card shows that.
+					values[key] = _default(df)
 			else:
 				values[key] = _scalar(df, base.get(key), where) if base is not None else _default(df)
 				if base is None and (table, key) == ("transitions", "allow_self_approval"):
