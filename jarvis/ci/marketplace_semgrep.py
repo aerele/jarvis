@@ -1,8 +1,9 @@
 """Gate a Semgrep JSON report the way the Frappe Marketplace audit scores it.
 
-The audit (frappe/press ``marketplace_app_audit/checks/semgrep_rules.py``) fails a
-Semgrep check when any finding is blocking or maps to Critical/Major, and yanks the
-release on a blocking one. This fails on exactly those; Minor findings are reported."""
+The audit (frappe/press ``marketplace_app_audit``) gives "Fail" for a Critical or Major
+finding and "Needs Improvement" for a Minor one, and yanks the release on a blocking
+one. Findings of internal-only rules count too. This fails on all of them; only Info
+findings pass."""
 
 import argparse
 import json
@@ -18,7 +19,7 @@ SEVERITY = {
 	"LOW": "Info",
 	"INFO": "Info",
 }
-FAILING = frozenset(("Critical", "Major"))
+FAILING = frozenset(("Critical", "Major", "Minor"))
 
 
 def audit_severity(result: dict) -> str:
@@ -49,11 +50,10 @@ def annotation(result: dict) -> str:
 
 
 def main(argv=None) -> int:
-	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("report", help="output of `semgrep scan --json`")
-	args = parser.parse_args(argv)
-	with open(args.report, encoding="utf-8") as fh:
-		report = json.load(fh)
+	argparse.ArgumentParser(
+		description=__doc__, epilog="Reads `semgrep scan --json` output on stdin."
+	).parse_args(argv)
+	report = json.load(sys.stdin)
 	results = report.get("results", [])
 	failing = [r for r in results if fails_audit(r)]
 	for result in failing:
@@ -62,7 +62,7 @@ def main(argv=None) -> int:
 		print(f"::warning title=semgrep::{_escape(str(error.get('message') or error.get('type'))[:500])}")
 	print(
 		f"{len(failing)} finding(s) fail the Marketplace audit; "
-		f"{len(results) - len(failing)} minor (reported by the audit, not gated)."
+		f"{len(results) - len(failing)} info (reported by the audit, not gated)."
 	)
 	return 1 if failing else 0
 
