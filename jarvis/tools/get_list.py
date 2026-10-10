@@ -1,6 +1,7 @@
 import re
 
 import frappe
+from frappe.model import get_permitted_fields
 
 from jarvis.exceptions import (
 	InvalidArgumentError,
@@ -9,6 +10,7 @@ from jarvis.exceptions import (
 )
 
 MAX_LIMIT = 1000
+LIST_PAGE_V1 = "list-page-v1"
 
 # Row guard: refuse a result over this size unless the caller passes
 # ``confirm_large=True``. Sits below ``MAX_LIMIT`` (the hard ceiling on
@@ -149,8 +151,20 @@ def get_list(
 	limit: int = 20,
 	confirm_large: bool = False,
 	parent_doctype: str | None = None,
-) -> list[dict]:
+	list_mode: str | None = None,
+	start: int = 0,
+) -> list[dict] | dict:
 	"""List documents with filters.
+
+	``list_mode="list-page-v1"`` opts into a rows/coverage envelope and ``start``
+	offset (0..100000); omitted mode preserves the legacy bare list. Plain fields
+	and deterministic ordering are required in paged mode. A permission-aware
+	limit+1 query detects more rows without a separate count. ``complete`` means
+	one initial page exhausted the readable query, never business completion.
+	Offsets are live, not snapshot cursors. The agent response-budget guard can
+	shorten a page and adjusts coverage to resume at the first omitted row.
+	The canonical specimens in tests/fixtures/list-page-v1.json are shared with
+	the runtime tool plugin; evolve producer and consumer tests together.
 
 	Frappe's get_list applies per-user record permissions automatically.
 	We additionally enforce DocType-level read permission and cap the limit.
@@ -173,8 +187,42 @@ def get_list(
 	"""
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
-	if limit <= 0 or limit > MAX_LIMIT:
+	if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > MAX_LIMIT:
 		raise InvalidArgumentError(f"limit must be between 1 and {MAX_LIMIT}")
+
+	if list_mode not in (None, LIST_PAGE_V1):
+		# A near-miss must not quietly lose the coverage the caller asked for.
+		raise InvalidArgumentError(f"list_mode must be omitted or {LIST_PAGE_V1!r}, got {list_mode!r}")
+	paged = list_mode == LIST_PAGE_V1
+	if isinstance(start, bool) or not isinstance(start, int) or not 0 <= start <= 100_000:
+		raise InvalidArgumentError("start must be an integer between 0 and 100000")
+	if start and not paged:
+		raise InvalidArgumentError("Continuation requires list-page-v1 mode; restart or use a report.")
+	if paged:
+		if fields is not None and not isinstance(fields, list):
+			raise InvalidArgumentError("Paged fields must be a list of plain record fields.")
+		if order_by is not None and not isinstance(order_by, str):
+			raise InvalidArgumentError("Paged order_by must be a string.")
+		if any(
+			not isinstance(f, str)
+			or not re.fullmatch(r"\*|[A-Za-z_][A-Za-z0-9_]*(?:\s+as\s+[A-Za-z_][A-Za-z0-9_]*)?", f, re.I)
+			for f in fields or []
+		):
+			raise InvalidArgumentError(
+				"Paged get_list requires plain record fields (optional aliases); use query or run_report for expressions/aggregates/distinct."
+			)
+		parts = [part.strip() for part in (order_by or "name asc").split(",")]
+		if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\s+(?:asc|desc))?", part, re.I) for part in parts):
+			raise InvalidArgumentError("Paged order_by requires plain field names with optional asc/desc.")
+		keys = [(part.split()[0], (part.split() + ["asc"])[1].lower()) for part in parts]
+		if not any(field.lower() == "name" for field, _ in keys):
+			# Same direction as the last key: a mixed asc/desc sort cannot use an index.
+			keys.append(("name", keys[-1][1]))
+			parts.append(f"name {keys[-1][1]}")
+		order_by = ", ".join(parts)
+		# Frappe 15 passes a caller's order_by through as written, so a bare `name` is
+		# ambiguous once a child-table filter joins a second table (MariaDB 1052).
+		query_order_by = ", ".join(f"`tab{doctype}`.`{field}` {direction}" for field, direction in keys)
 
 	if frappe.get_meta(doctype).istable:
 		if not parent_doctype:
@@ -194,18 +242,59 @@ def get_list(
 		raise PermissionDeniedError(f"no read permission on {doctype}")
 	assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, order_by)
 
+	if paged:
+		# Sort keys too: the qualified form must not slip past Frappe's own sort gate.
+		_assert_requested_fields_readable(doctype, parent_doctype, [*(fields or []), *(f for f, _ in keys)])
+
+	page_args = {"limit_start": start} if paged else {}
 	rows = frappe.get_list(
 		doctype,
 		fields=fields or ["name"],
 		filters=filters or {},
-		order_by=order_by,
-		limit=limit,
+		order_by=query_order_by if paged else order_by,
+		limit=limit + 1 if paged else limit,
 		parent_doctype=parent_doctype,
+		**page_args,
 	)
+	has_more = paged and len(rows) > limit
+	if paged:
+		rows = rows[:limit]
 	if len(rows) > ROW_GUARD and not confirm_large:
 		raise ResultTooLargeError(
 			row_count=len(rows),
 			limit=ROW_GUARD,
 			tool="get_list",
 		)
-	return rows
+	if not paged:
+		return rows
+	next_start = start + len(rows) if has_more and start + len(rows) <= 100_000 else None
+	return {
+		"list_contract": LIST_PAGE_V1,
+		"rows": rows,
+		"coverage": {
+			"start": start,
+			"limit": limit,
+			"returned": len(rows),
+			"has_more": bool(has_more),
+			"next_start": next_start,
+			"complete": start == 0 and not has_more,
+			"order_by": order_by,
+			"scope": "current user's readable matching records at query time",
+		},
+		"note": "This is a live query, not a snapshot or a total count. Keep filters, fields and order unchanged when paging. Later pages do not prove earlier rows were read. Reconcile expected records and states before claiming workflow completion. If has_more is true but next_start is null, use a narrower query or report.",
+	}
+
+
+def _assert_requested_fields_readable(doctype: str, parent_doctype: str | None, fields: list | None) -> None:
+	"""Frappe drops a SELECT field the user cannot read without saying so, and returns
+	no rows at all when it drops every one. A page must not report that as complete."""
+	meta = frappe.get_meta(doctype)
+	requested = [field.split()[0] for field in fields or [] if meta.has_field(field.split()[0])]
+	if not requested:
+		return
+	permitted = set(get_permitted_fields(doctype, parenttype=parent_doctype))
+	denied = [name for name in requested if name not in permitted]
+	if denied:
+		raise PermissionDeniedError(
+			f"no read permission on field(s) {', '.join(denied)} of {doctype}; ask again without them"
+		)

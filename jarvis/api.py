@@ -4038,8 +4038,10 @@ def _judging_key(tool: str, args) -> str | None:
 def _without_column(result: dict, column: str | None) -> dict:
 	"""``result`` with ``column`` (added by ``_dispatch_judging_skills``) taken out of
 	each row."""
-	if column and result.get("ok") and isinstance(result.get("data"), list):
-		for row in result["data"]:
+	data = result.get("data")
+	rows = data.get("rows") if isinstance(data, dict) else data
+	if column and result.get("ok") and isinstance(rows, list):
+		for row in rows:
 			if isinstance(row, dict):
 				row.pop(column, None)
 	return result
@@ -4206,6 +4208,8 @@ def _skill_rows_read(args, data, column: str | None = None):
 		if doctype == "Jarvis Custom Skill":
 			return names
 		return frappe.get_all(doctype, filters={"name": ["in", names]}, pluck="parent")
+	if isinstance(data, dict) and data.get("list_contract") == "list-page-v1":
+		data = data.get("rows")
 	if column and isinstance(data, list) and all(isinstance(row, dict) and row.get(column) for row in data):
 		return [row[column] for row in data]
 	return None
