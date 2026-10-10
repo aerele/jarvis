@@ -12,11 +12,14 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError, ResultTooLargeError
 from jarvis.tools.get_list import get_list
 
+# No field "exists" on the mocked meta, so the field-permission check stays quiet.
+META = SimpleNamespace(istable=False, has_field=lambda fieldname: False)
+
 
 class TestListCoverage(unittest.TestCase):
 	def read(self, rows, **args):
 		with (
-			patch.object(frappe, "get_meta", return_value=SimpleNamespace(istable=False)),
+			patch.object(frappe, "get_meta", return_value=META),
 			patch.object(frappe, "has_permission", return_value=True),
 			patch.object(frappe, "get_list", return_value=rows) as query,
 		):
@@ -45,10 +48,48 @@ class TestListCoverage(unittest.TestCase):
 		r, q = self.read([{}] * 15, start=40, order_by="modified desc")
 		self.assertFalse(r["coverage"]["complete"])
 		self.assertFalse(r["coverage"]["has_more"])
-		self.assertEqual(q["order_by"], "modified desc, name asc")
+		# Same direction as the last key, so one index scan can serve the sort.
+		self.assertEqual(q["order_by"], "`tabToDo`.`modified` desc, `tabToDo`.`name` desc")
+		self.assertEqual(r["coverage"]["order_by"], "modified desc, name desc")
 		r, _ = self.read([{}] * 21, start=100000)
 		self.assertTrue(r["coverage"]["has_more"])
 		self.assertIsNone(r["coverage"]["next_start"])
+
+	def test_sort_keys_are_table_qualified_for_the_query_only(self):
+		r, q = self.read([{}])
+		self.assertEqual(q["order_by"], "`tabToDo`.`name` asc")
+		self.assertEqual(r["coverage"]["order_by"], "name asc")
+		_, q = self.read([{}], order_by="status, name desc")
+		self.assertEqual(q["order_by"], "`tabToDo`.`status` asc, `tabToDo`.`name` desc")
+
+	def test_unknown_list_mode_is_refused(self):
+		for mode in ["list-page-v2", "LIST-PAGE-V1", "", True]:
+			with (
+				self.subTest(mode=mode),
+				patch.object(frappe, "get_list") as query,
+				self.assertRaises(InvalidArgumentError),
+			):
+				get_list("ToDo", list_mode=mode)
+			query.assert_not_called()
+
+	def test_unreadable_requested_field_is_refused_not_dropped(self):
+		meta = SimpleNamespace(istable=False, has_field=lambda fieldname: True)
+		for args in [
+			{"fields": ["margin"]},
+			{"fields": ["name", "margin as m"]},
+			{"order_by": "margin desc"},
+		]:
+			with (
+				self.subTest(args=args),
+				patch.object(frappe, "get_meta", return_value=meta),
+				patch.object(frappe, "has_permission", return_value=True),
+				patch("jarvis.tools.get_list.get_permitted_fields", return_value=["name", "status"]),
+				patch.object(frappe, "get_list") as query,
+				self.assertRaises(PermissionDeniedError) as denied,
+			):
+				get_list("ToDo", list_mode="list-page-v1", **args)
+			self.assertIn("margin", str(denied.exception))
+			query.assert_not_called()
 
 	def test_invalid_pagination_does_not_query(self):
 		for args in [
@@ -74,7 +115,7 @@ class TestListCoverage(unittest.TestCase):
 
 	def test_legacy_return_stays_a_list(self):
 		with (
-			patch.object(frappe, "get_meta", return_value=SimpleNamespace(istable=False)),
+			patch.object(frappe, "get_meta", return_value=META),
 			patch.object(frappe, "has_permission", return_value=True),
 			patch.object(frappe, "get_list", return_value=[{"name": "a"}]) as query,
 		):
@@ -86,7 +127,7 @@ class TestListCoverage(unittest.TestCase):
 
 	def test_denied_call_never_queries(self):
 		with (
-			patch.object(frappe, "get_meta", return_value=SimpleNamespace(istable=False)),
+			patch.object(frappe, "get_meta", return_value=META),
 			patch.object(frappe, "has_permission", return_value=False),
 			patch.object(frappe, "get_list") as query,
 		):
@@ -124,6 +165,45 @@ class TestListCoverage(unittest.TestCase):
 			self.assertEqual(out["coverage"]["returned"], len(out["rows"]))
 			self.assertEqual(out["coverage"]["next_start"], len(out["rows"]) if out["rows"] else None)
 			self.assertTrue(r["coverage"]["complete"])  # no mutation of original metadata
+
+	def test_truncated_later_page_resumes_after_its_own_start_and_says_so(self):
+		from jarvis.tools._result_guard import enforce_result_budget
+
+		r, _ = self.read([{"name": str(i), "description": "x" * 3000} for i in range(21)], start=40)
+		out, _ = enforce_result_budget(r, tool="get_list")
+		kept = len(out["rows"])
+		self.assertEqual(out["coverage"]["next_start"], 40 + kept)
+		self.assertIn(f"start={40 + kept}", out["note"])
+		self.assertNotIn("of 20 rows", out["note"])  # 20 is the page size, not the match count
+		self.assertNotIn("total", out)
+
+	def test_truncated_page_with_no_row_kept_says_how_to_get_unstuck(self):
+		from jarvis.tools._result_guard import MAX_RESULT_CHARS, enforce_result_budget
+
+		r, _ = self.read([{"name": "a", "description": "x" * MAX_RESULT_CHARS * 2}])
+		out, _ = enforce_result_budget(r, tool="get_list")
+		self.assertEqual(out["rows"], [])
+		self.assertIsNone(out["coverage"]["next_start"])
+		self.assertIn("fewer fields", out["note"])
+
+
+class TestListCoverageJoinedQuery(unittest.TestCase):
+	def test_child_field_filter_without_name_in_fields_still_sorts(self):
+		if not frappe.local.site.endswith(".test"):
+			self.skipTest("dedicated .test site required")
+		previous = frappe.session.user
+		frappe.set_user("Administrator")
+		try:
+			# `role` lives on the Has Role child table, so Frappe joins it.
+			args = {"doctype": "User", "fields": ["email"], "filters": {"role": "System Manager"}}
+			for order_by in [None, "creation desc"]:
+				with self.subTest(order_by=order_by):
+					r = get_list(**args, order_by=order_by, list_mode="list-page-v1")
+					self.assertTrue(r["rows"])
+					self.assertTrue(all("email" in row for row in r["rows"]))
+					self.assertEqual(r["coverage"]["returned"], len(r["rows"]))
+		finally:
+			frappe.set_user(previous)
 
 
 class TestListCoverageDatabase(unittest.TestCase):
