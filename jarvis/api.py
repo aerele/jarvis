@@ -180,9 +180,11 @@ def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
 # #707 B3: the agent's reads run on a web worker, and the database's own limit is
 # none, so one slow query or inline report holds the worker until the web server
 # kills it (and the query keeps running). Per site: ``jarvis_agent_read_timeout_s``
-# in site_config.json, whole seconds, 0 switches the limit off.
+# in site_config.json, whole seconds, 0 switches the limit off. The default sits under
+# the plugin's own 30 s call_tool abort (frappe-client.ts), so a slow read comes back
+# as QueryTooSlowError with its "narrow the question" advice instead of a bare abort.
 _AGENT_READ_TIMEOUT_KEY = "jarvis_agent_read_timeout_s"
-_AGENT_READ_TIMEOUT_DEFAULT_S = 30
+_AGENT_READ_TIMEOUT_DEFAULT_S = 25
 
 
 def _agent_read_timeout_s() -> int:
