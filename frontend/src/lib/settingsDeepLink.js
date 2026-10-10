@@ -12,7 +12,18 @@ const MOVED = { macroadmin: "MacroAdmin" };
 export function movedSettingsRoute(section, rest = "", hash = "") {
 	const name = MOVED[section];
 	if (!name) return null;
-	return { name, query: Object.fromEntries(new URLSearchParams(rest || "")), hash: hash || "" };
+	return { name, query: queryOf(rest), hash: hash || "" };
+}
+
+// A query string as the router takes it: a key given more than once keeps every
+// value, as an array (Object.fromEntries would keep only the last). No prototype,
+// so a key named like an inherited property (`toString`) is a key like any other.
+function queryOf(search) {
+	const query = Object.create(null);
+	for (const [key, value] of new URLSearchParams(search || "")) {
+		query[key] = key in query ? [].concat(query[key], value) : value;
+	}
+	return query;
 }
 
 export function parseSettingsDeepLink(search, keys) {

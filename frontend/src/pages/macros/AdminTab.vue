@@ -159,12 +159,15 @@
 					</div>
 
 					<!-- The list scrolls sideways inside this box when the tab is narrow;
-				     the page never does. Focusable, so the keyboard can
+				     the page never does. `relative` is what keeps that true: the table's
+				     screen-reader-only header is absolutely positioned, and without a
+				     positioned ancestor here it is laid out against the page and widens it
+				     (the Settings dialog used to be that ancestor). Focusable, so the keyboard can
 				     scroll it too. Table roles: a screen reader hears each value with
 				     its column. -->
 					<div
 						ref="listEl"
-						class="jv-macro-admin-scroll overflow-x-auto rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
+						class="jv-macro-admin-scroll relative overflow-x-auto rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
 						tabindex="0"
 						role="region"
 						aria-label="Macros list"
