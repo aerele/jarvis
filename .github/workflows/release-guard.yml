@@ -1,10 +1,11 @@
 name: Release guard
 
-# Stable branches (version-N) accept exactly one kind of PR: the release PR from their own
-# hotfix branch (version-N-hotfix). Backports target the hotfix branch; a release is the
-# merge of hotfix into stable. This job fails any other PR into a stable branch, and on a
-# release PR it also fails unless __version__ moved up and matches the line. See
-# CONTRIBUTING.md.
+# Stable branches (version-N) accept two kinds of PR: the release PR from their own
+# hotfix branch (version-N-hotfix), and a patch PR from version-N-patch. Backports target
+# the hotfix branch; a release is the merge of hotfix into stable. A patch branch is cut
+# from version-N for an urgent fix that cannot wait for the next release. This job fails
+# any other PR into a stable branch. On a release or patch PR it also fails unless
+# __version__ moved up and matches the line. See CONTRIBUTING.md.
 #
 # Enforcement is a repo-settings matter, not this file's: the job only blocks a merge once
 # `release-source` is listed as a required status check on the version-* rulesets. Until
@@ -54,7 +55,7 @@ jobs:
           echo "::error::Base changed from ${{ github.event.changes.base.ref.from }} to $BASE. CI has not run against the new base: push a commit or close and reopen this PR."
           exit 1
 
-      - name: Only version-N-hotfix (same repo) may open a PR into version-N
+      - name: Only version-N-hotfix or version-N-patch (same repo) may open a PR into version-N
         run: |
           case "$BASE" in
             version-[0-9]*-hotfix) echo "hotfix base: any head is allowed"; exit 0 ;;
@@ -65,11 +66,11 @@ jobs:
             echo "::error::PRs into $BASE must come from a branch in $THIS_REPO, not a fork (got $HEAD_REPO:$HEAD)."
             exit 1
           fi
-          if [ "$HEAD" != "${BASE}-hotfix" ]; then
-            echo "::error::PRs into $BASE must come from ${BASE}-hotfix (got $HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
+          if [ "$HEAD" != "${BASE}-hotfix" ] && [ "$HEAD" != "${BASE}-patch" ]; then
+            echo "::error::PRs into $BASE must come from ${BASE}-hotfix or ${BASE}-patch (got $HEAD). Retarget this PR to ${BASE}-hotfix; a release is cut by merging ${BASE}-hotfix into $BASE."
             exit 1
           fi
-          echo "release PR: $HEAD -> $BASE"
+          echo "release or patch PR: $HEAD -> $BASE"
 
       - name: A release PR must raise __version__ and stay on its line
         # Runs only for the release-PR shape (a non-release PR into a stable branch already
