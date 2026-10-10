@@ -68,6 +68,20 @@ it("does not repeat the title inside the generic note", () => {
 	w.unmount();
 });
 
+it("keeps the stale title out of the note while a check is running", () => {
+	const w = mount(Message, {
+		props: {
+			text: "Invoice",
+			failed: true,
+			deliveryState: "checking",
+			deliveryNote: "Delivery not confirmed. Check delivery before sending again.",
+		},
+	});
+	expect(w.get(".jv-delivery-title").text()).toBe("Checking delivery…");
+	expect(w.get(".jv-delivery-note").text()).toBe("Check delivery before sending again.");
+	w.unmount();
+});
+
 it("links a confirmed delivery to its conversation and offers no retry", () => {
 	const w = mount(Message, {
 		props: {

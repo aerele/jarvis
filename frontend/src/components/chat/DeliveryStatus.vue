@@ -14,7 +14,8 @@
   The parent's note often opens by repeating the title ("Delivery not confirmed.
   Check delivery before sending again."), because the same sentence is also shown
   alone in a toast. Under the title that reads as a stutter, so the lead is cut
-  here and the shared copy in lib/sendDelivery.js stays whole.
+  here and the shared copy in lib/sendDelivery.js stays whole. While a check
+  runs the note is still the previous state's, so every state's title is cut.
 
   Two structural rules tests rely on: the head is the first role="status" and
   holds only the title, and the first button is the retry/check action.
@@ -89,9 +90,11 @@ const props = defineProps({
 const emit = defineEmits(["retry", "dismiss", "retry-same"]);
 
 const view = computed(() => VIEWS[props.state] || NOT_SENT);
+// Any state's title, not only the current one: while a check runs the note is
+// still the previous state's sentence.
 const detail = computed(() => {
-	const lead = view.value.title + ". ";
-	return props.note.startsWith(lead) ? props.note.slice(lead.length) : props.note;
+	const lead = LEADS.find((l) => props.note.startsWith(l));
+	return lead ? props.note.slice(lead.length) : props.note;
 });
 
 const CIRCLE = "M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18z";
@@ -119,6 +122,7 @@ const VIEWS = {
 		icon: [CIRCLE, "M8.5 12.5l2.5 2.5 4.5-5"],
 	},
 };
+const LEADS = [NOT_SENT, ...Object.values(VIEWS)].map((v) => v.title + ". ");
 </script>
 
 <style scoped>
