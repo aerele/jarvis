@@ -10,91 +10,106 @@
 		     list box keeps its height however short the window is. -->
 		<div class="jv-scroll-overlay min-h-0 flex-1 overflow-y-auto px-5 py-4">
 			<div class="flex flex-col gap-4">
-				<!-- What this tab is, and its one header action. The page header above
-			     holds only the breadcrumbs, like the Runs tab. -->
-				<div class="flex items-start justify-between gap-4">
-					<p class="max-w-2xl text-p-sm text-ink-gray-6">
-						Every user's macros on this site. Open one to read it, stop a run, put a
-						macro on hold, hand it to another user or delete it. Only its owner can
-						edit or run a macro.
-					</p>
-					<Button
-						class="shrink-0"
-						variant="subtle"
-						iconLeft="refresh-cw"
-						label="Refresh"
-						:loading="loading"
-						@click="refresh"
-					/>
-				</div>
+				<!-- One quiet line saying what this tab is, then two short rows of
+				     controls: search with Refresh at the far end, and the filters. The
+				     filters carry no label above them: each one's first option says what
+				     it filters ("Armed: any"), and each has its name for a screen reader.
+				     Each keeps its own width, with one even gap between them, and the
+				     row wraps when the tab is narrow. -->
+				<p class="text-p-sm text-ink-gray-5">
+					Everyone's macros on this site. Only a macro's owner can edit or run it.
+				</p>
 
-				<!-- Filters, on two rows on purpose: the search box has the first to itself
-			     and the selects wrap under it, so nothing is squeezed at any width.
-			     Each control carries its own visible label: four selects side by side
-			     that all read "All" could not be told apart. -->
-				<div class="flex flex-col gap-2">
-					<FormControl
-						class="w-full"
-						type="text"
-						label="Search"
-						placeholder="Macro, owner's name or email"
-						:modelValue="search"
-						@update:modelValue="onSearch"
-					/>
-					<div class="flex flex-wrap items-end gap-2">
-						<FormControl
-							class="min-w-36 flex-1"
-							type="select"
-							label="Owner"
-							:options="ownerOptions"
-							:modelValue="filters.owner"
-							@update:modelValue="(v) => setFilter('owner', v)"
-						/>
-						<FormControl
-							class="min-w-28 flex-1"
-							type="select"
-							label="Armed"
-							:title="ARMED_HELP"
-							:options="ARMED_OPTIONS"
-							:modelValue="filters.armed"
-							@update:modelValue="(v) => setFilter('armed', v)"
-						/>
-						<FormControl
-							class="min-w-28 flex-1"
-							type="select"
-							label="Schedule"
-							:options="SCHEDULE_OPTIONS"
-							:modelValue="filters.scheduled"
-							@update:modelValue="(v) => setFilter('scheduled', v)"
-						/>
-						<FormControl
-							class="min-w-28 flex-1"
-							type="select"
-							label="Runs"
-							:options="LIVE_OPTIONS"
-							:modelValue="filters.live_run"
-							@update:modelValue="(v) => setFilter('live_run', v)"
-						/>
-						<FormControl
-							class="min-w-28 flex-1"
-							type="select"
-							label="Hold"
-							:options="HOLD_OPTIONS"
-							:modelValue="filters.on_hold"
-							@update:modelValue="(v) => setFilter('on_hold', v)"
-						/>
-						<!-- The combination an admin looks for, in one step: it sets the two
-					     selects beside it, so what is filtered stays in plain sight. -->
+				<div class="jv-macro-admin-toolbar flex flex-col gap-2">
+					<div class="flex items-center gap-2">
+						<div class="min-w-0 max-w-md flex-1">
+							<FormControl
+								type="text"
+								aria-label="Search"
+								placeholder="Search by macro, owner's name or email"
+								:modelValue="search"
+								@update:modelValue="onSearch"
+							>
+								<template #prefix>
+									<FeatherIcon name="search" class="size-4 text-ink-gray-5" />
+								</template>
+							</FormControl>
+						</div>
 						<Button
-							class="jv-macro-admin-preset"
+							class="jv-macro-admin-refresh ml-auto shrink-0"
+							variant="subtle"
+							icon="refresh-cw"
+							label="Refresh"
+							tooltip="Refresh"
+							:loading="loading"
+							@click="refresh"
+						/>
+					</div>
+					<div class="flex flex-wrap items-center gap-2">
+						<div class="shrink-0">
+							<FormControl
+								type="select"
+								aria-label="Owner"
+								:options="ownerOptions"
+								:modelValue="filters.owner"
+								@update:modelValue="(v) => setFilter('owner', v)"
+							/>
+						</div>
+						<div class="shrink-0">
+							<FormControl
+								type="select"
+								aria-label="Armed"
+								:title="ARMED_HELP"
+								:options="ARMED_OPTIONS"
+								:modelValue="filters.armed"
+								@update:modelValue="(v) => setFilter('armed', v)"
+							/>
+						</div>
+						<div class="shrink-0">
+							<FormControl
+								type="select"
+								aria-label="Schedule"
+								:options="SCHEDULE_OPTIONS"
+								:modelValue="filters.scheduled"
+								@update:modelValue="(v) => setFilter('scheduled', v)"
+							/>
+						</div>
+						<div class="shrink-0">
+							<FormControl
+								type="select"
+								aria-label="Runs"
+								:options="LIVE_OPTIONS"
+								:modelValue="filters.live_run"
+								@update:modelValue="(v) => setFilter('live_run', v)"
+							/>
+						</div>
+						<div class="shrink-0">
+							<FormControl
+								type="select"
+								aria-label="Hold"
+								:options="HOLD_OPTIONS"
+								:modelValue="filters.on_hold"
+								@update:modelValue="(v) => setFilter('on_hold', v)"
+							/>
+						</div>
+						<!-- The combination an admin looks for, in one step: it sets the two
+						     selects beside it, so what is filtered stays in plain sight. -->
+						<Button
+							class="jv-macro-admin-preset shrink-0"
 							:variant="armedAndScheduled ? 'solid' : 'subtle'"
 							label="Armed and scheduled"
 							:aria-pressed="armedAndScheduled ? 'true' : 'false'"
 							title="Macros that write without asking for confirmation and run on a schedule"
 							@click="toggleArmedAndScheduled"
 						/>
+						<Button
+							v-if="filtering"
+							class="jv-macro-admin-clear shrink-0"
+							variant="ghost"
+							label="Clear"
+							@click="clearFilters"
+						/>
 					</div>
-					<p class="jv-macro-admin-help text-xs text-ink-gray-5">{{ ARMED_HELP }}</p>
 				</div>
 
 				<!-- Nothing to show and the load failed: say so, with a way to retry. -->
@@ -175,7 +190,7 @@
 						<div role="table" aria-label="Macros" :style="GRID_MIN">
 							<div
 								role="row"
-								class="grid items-center gap-3.5 pb-2 text-xs font-medium text-ink-gray-5"
+								class="grid items-center gap-4 border-b pb-2 text-xs font-medium text-ink-gray-5"
 								:style="GRID"
 							>
 								<div role="columnheader">Macro</div>
@@ -189,7 +204,7 @@
 								v-for="row in rows"
 								:key="row.name"
 								role="row"
-								class="jv-macro-admin-row grid items-center gap-3.5 border-t py-3"
+								class="jv-macro-admin-row grid items-center gap-4 border-b py-2.5 last:border-b-0"
 								:style="GRID"
 								:data-macro="row.name"
 							>
@@ -217,7 +232,14 @@
 											class="jv-macro-admin-armed inline-flex"
 											:title="ARMED_HELP"
 										>
-											<Badge variant="subtle" theme="orange" label="Armed" />
+											<Tooltip :text="ARMED_HELP">
+												<Badge
+													variant="subtle"
+													theme="orange"
+													label="Armed"
+												/>
+											</Tooltip>
+											<span class="sr-only">{{ ARMED_HELP }}</span>
 										</span>
 										<span
 											v-if="row.admin_hold"
@@ -227,6 +249,18 @@
 											<Badge variant="subtle" theme="red" label="On hold" />
 											<!-- The title shows on hover only: the reason is in the text too. -->
 											<span class="sr-only">{{ holdTitle(row) }}</span>
+										</span>
+										<!-- An admin's own macro has no Hold and no Hand over: they
+										     switch it off on its form, and another admin hands it
+										     over. The server refuses both too. Marked and said, so
+										     the shorter set of actions does not read as a fault. -->
+										<span
+											v-if="isMine(row)"
+											class="jv-macro-admin-own inline-flex"
+											:title="OWN_HELP"
+										>
+											<Badge variant="subtle" theme="gray" label="Yours" />
+											<span class="sr-only">{{ OWN_HELP }}</span>
 										</span>
 									</div>
 								</div>
@@ -272,29 +306,42 @@
 									>
 								</div>
 
-								<div role="cell" class="jv-macro-admin-last min-w-0">
-									<div
-										v-if="lastRun(row)"
-										class="truncate text-sm"
-										:class="lastRun(row).class || 'text-ink-gray-8'"
-										:title="lastRun(row).hint"
-									>
-										{{ lastRun(row).text }}
+								<div role="cell" class="min-w-0">
+									<div class="jv-macro-admin-last min-w-0">
+										<div
+											v-if="lastRun(row)"
+											class="truncate text-sm"
+											:class="lastRun(row).class || 'text-ink-gray-8'"
+											:title="lastRun(row).hint"
+										>
+											{{ lastRun(row).text }}
+										</div>
+										<span v-else class="text-sm text-ink-gray-5"
+											>Never ran</span
+										>
 									</div>
-									<span v-else class="text-sm text-ink-gray-5">Never ran</span>
-								</div>
-
-								<div role="cell" class="flex flex-col items-end gap-1">
 									<!-- The run Stop acts on is not always the last one: an older
-								     run can still be going after a newer one has ended, and
-								     the cell beside this one then reads "Failed". -->
+									     run can still be going after a newer one has ended, and
+									     the line above then reads "Failed". -->
 									<span
 										v-if="row.live_run && !isLiveRun(row.last_run)"
-										class="jv-macro-admin-running text-xs text-ink-blue-3"
+										class="jv-macro-admin-running mt-0.5 flex"
 										title="An earlier run of this macro is still running"
 									>
-										Running
+										<Badge variant="subtle" theme="blue" label="Running" />
 									</span>
+								</div>
+
+								<!-- The menu's button is an icon alone: its name goes in `label`
+								     (frappe-ui's Button renders it for screen readers only and
+								     sets aria-label from it; an aria-label attribute would be
+								     overwritten with nothing).
+								     One line of actions, right-aligned, in fixed order so the
+								     lanes line up down the list: Stop run (only while a run is
+								     going), Hold or Release (the act an admin comes here for),
+								     then a menu with the two that end the owner's hold on the
+								     macro: Hand over and Delete. -->
+								<div role="cell" class="flex items-center justify-end gap-1">
 									<Button
 										v-if="row.live_run"
 										class="jv-macro-admin-stop"
@@ -309,16 +356,6 @@
 										}, owned by ${ownerText(row)}`"
 										@click="stop(row)"
 									/>
-									<!-- An admin's own macro has no Hold and no Hand over: they
-								     switch it off on its form, and another admin hands it over.
-								     The server refuses both too. Said, so the missing buttons
-								     do not read as a fault. -->
-									<p
-										v-if="isMine(row)"
-										class="jv-macro-admin-own text-right text-xs text-ink-gray-5"
-									>
-										You cannot hold, release or hand over your own macro.
-									</p>
 									<Button
 										v-if="!row.admin_hold && !isMine(row)"
 										class="jv-macro-admin-hold"
@@ -344,31 +381,19 @@
 										}, owned by ${ownerText(row)}`"
 										@click="release(row)"
 									/>
-									<Button
-										v-if="!isMine(row)"
-										class="jv-macro-admin-handover"
-										size="sm"
-										variant="subtle"
-										label="Hand over"
-										:disabled="busy"
-										:aria-label="`Hand ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}, to another user`"
-										@click="askHandover(row)"
-									/>
-									<Button
-										class="jv-macro-admin-delete"
-										size="sm"
-										variant="ghost"
-										theme="red"
-										label="Delete"
-										:loading="acting === `delete:${row.name}`"
-										:disabled="busy"
-										:aria-label="`Delete ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}`"
-										@click="remove(row)"
-									/>
+									<Dropdown :options="moreActions(row)" placement="right">
+										<Button
+											class="jv-macro-admin-more"
+											size="sm"
+											variant="ghost"
+											icon="more-horizontal"
+											:loading="acting === `delete:${row.name}`"
+											:disabled="busy"
+											:label="`More actions for ${
+												row.macro_name || row.name
+											}, owned by ${ownerText(row)}`"
+										/>
+									</Dropdown>
 								</div>
 							</div>
 						</div>
@@ -426,8 +451,17 @@
 // when window.is_jarvis_admin. The server checks the Jarvis Admin role itself on
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import { Badge, Breadcrumbs, Button, FeatherIcon, FormControl, toast } from "frappe-ui";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import {
+	Badge,
+	Breadcrumbs,
+	Button,
+	Dropdown,
+	FeatherIcon,
+	FormControl,
+	Tooltip,
+	toast,
+} from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import MacroAdminDialog from "./MacroAdminDialog.vue";
 import MacroHoldDialog from "./MacroHoldDialog.vue";
@@ -455,28 +489,39 @@ const PAGE_MAX = 100;
 // list falls back to its first 500 rows, and Load more continues from there.
 const KEEP_MAX_PAGES = 5;
 const SEARCH_WAIT_MS = 300;
-const GRID = "grid-template-columns: 2fr 1.4fr 1.6fr 1fr 6rem";
+// The last lane holds the row's actions on one line: wide enough for Stop run,
+// Hold and the menu together, so the lanes do not shift from row to row.
+const GRID = "grid-template-columns: 2fr 1.4fr 1.6fr 1.1fr 11rem";
 // Below this the columns would be a few characters of ellipsis each: the list
 // scrolls sideways inside its own box instead.
-const GRID_MIN = "min-width: 40rem";
+const GRID_MIN = "min-width: 46rem";
 
+// A dialog hands focus back as it closes; the row is focused just after that.
+const FOCUS_AFTER_CLOSE_MS = 50;
+// Why an admin's own macro shows fewer actions.
+const OWN_HELP = "You cannot hold, release or hand over your own macro.";
+
+// The selects have no label above them, so the "everything" option of each says
+// what it is all of: five controls side by side that all read "All" could not be
+// told apart.
 const ARMED_OPTIONS = [
-	{ label: "All", value: "" },
-	{ label: "Armed", value: "1" },
+	{ label: "Armed: any", value: "" },
+	// Not "Armed" alone: with no label above, a chosen value has to say it is a filter.
+	{ label: "Armed only", value: "1" },
 	{ label: "Not armed", value: "0" },
 ];
 const SCHEDULE_OPTIONS = [
-	{ label: "All", value: "" },
+	{ label: "Schedule: any", value: "" },
 	{ label: "Scheduled", value: "1" },
 	{ label: "Not scheduled", value: "0" },
 ];
 const LIVE_OPTIONS = [
-	{ label: "All", value: "" },
+	{ label: "Runs: any", value: "" },
 	{ label: "Running now", value: "1" },
 	{ label: "Not running", value: "0" },
 ];
 const HOLD_OPTIONS = [
-	{ label: "All", value: "" },
+	{ label: "Hold: any", value: "" },
 	{ label: "On hold", value: "1" },
 	{ label: "Not on hold", value: "0" },
 ];
@@ -510,6 +555,32 @@ const ownerOptions = computed(() => [
 		: []),
 ]);
 const armedAndScheduled = computed(() => filters.armed === "1" && filters.scheduled === "1");
+
+// The row's menu: the two acts that take the macro from its owner. `key` names
+// each for the tests; the menu itself ignores it.
+function moreActions(row) {
+	return [
+		...(isMine(row)
+			? []
+			: [
+					{
+						key: "handover",
+						label: "Hand over",
+						icon: "user-check",
+						disabled: busy.value,
+						onClick: () => askHandover(row),
+					},
+			  ]),
+		{
+			key: "delete",
+			label: "Delete",
+			icon: "trash-2",
+			theme: "red",
+			disabled: busy.value,
+			onClick: () => remove(row),
+		},
+	];
+}
 
 // ── data ─────────────────────────────────────────────────────────────────────
 // Three kinds of load, as the Macros Runs tab has (RunsTab.vue, #1597):
@@ -801,6 +872,14 @@ function askHandover(row) {
 	handingOver.value = row;
 	handoverOpen.value = true;
 }
+// Hand over is opened from a menu item, which is gone by the time its dialog
+// closes, and the menu's own button is disabled while the dialog is open: left
+// alone, closing the dialog would drop keyboard focus on the page. Put it on the
+// row the dialog was about, just after the dialog has given focus up.
+watch(handoverOpen, (isOpen, wasOpen) => {
+	const row = handingOver.value;
+	if (wasOpen && !isOpen && row) setTimeout(() => focusRow(row.name), FOCUS_AFTER_CLOSE_MS);
+});
 
 // After a hold or a hand-over, answered or refused: the row's state on the server
 // may have changed either way. A hand-over dialog still open (refused) is given the
