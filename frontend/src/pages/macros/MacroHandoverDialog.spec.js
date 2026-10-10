@@ -148,6 +148,26 @@ describe("MacroHandoverDialog", () => {
 		expect(handButton(w).attributes("disabled")).toBeUndefined();
 	});
 
+	it("says who to whom once, then what happens as short points that name nobody", async () => {
+		const w = await open();
+		await pick(w, "ben@example.test");
+		const summary = w.find(".jv-macro-handover-summary");
+		const points = summary.findAll("li").map((li) => li.text().replace(/\s+/g, " "));
+		expect(points).toEqual([
+			"It arrives switched off, unscheduled and not armed.",
+			"Its summary, the skills on its steps, its shares and its assignments are cleared.",
+			"A run that is going now is stopped.",
+			"Both of them are told.",
+			"Its past runs stay with the current owner.",
+		]);
+		// The names and addresses are in the question, not repeated down the list.
+		expect(points.join(" ")).not.toContain("example.test");
+		expect(summary.find("p").text().split("asha@example.test")).toHaveLength(2);
+		// Long names wrap inside the dialog, and the list of people cannot widen it.
+		expect(summary.find("p").classes()).toContain("break-words");
+		expect(w.find("fieldset").classes()).toContain("min-w-0");
+	});
+
 	it("hands over, says so, tells the pane and closes", async () => {
 		api.adminHandover.mockResolvedValue({
 			ok: true,

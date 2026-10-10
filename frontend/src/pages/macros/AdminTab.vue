@@ -13,9 +13,10 @@
 				<!-- One quiet line saying what this tab is, then two short rows of
 				     controls: search with Refresh at the far end, and the filters. The
 				     filters carry no label above them: each one's first option says what
-				     it filters ("Armed: any"), and each has its name for a screen reader.
-				     Each keeps its own width, with one even gap between them, and the
-				     row wraps when the tab is narrow. -->
+				     it filters ("All run states"), and each has its name for a screen reader.
+				     Each sits in a slot of fixed width and fills it, so a long owner's
+				     name cannot stretch its control past the tab; on a phone the slots
+				     become two columns. -->
 				<p class="text-p-sm text-ink-gray-5">
 					Everyone's macros on this site. Only a macro's owner can edit or run it.
 				</p>
@@ -45,9 +46,12 @@
 							@click="refresh"
 						/>
 					</div>
-					<div class="flex flex-wrap items-center gap-2">
-						<div class="shrink-0">
+					<div
+						class="jv-macro-admin-filters grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center"
+					>
+						<div class="jv-macro-admin-filter min-w-0 sm:w-48">
 							<FormControl
+								class="w-full"
 								type="select"
 								aria-label="Owner"
 								:options="ownerOptions"
@@ -55,8 +59,9 @@
 								@update:modelValue="(v) => setFilter('owner', v)"
 							/>
 						</div>
-						<div class="shrink-0">
+						<div class="jv-macro-admin-filter min-w-0 sm:w-40">
 							<FormControl
+								class="w-full"
 								type="select"
 								aria-label="Armed"
 								:title="ARMED_HELP"
@@ -65,8 +70,9 @@
 								@update:modelValue="(v) => setFilter('armed', v)"
 							/>
 						</div>
-						<div class="shrink-0">
+						<div class="jv-macro-admin-filter min-w-0 sm:w-40">
 							<FormControl
+								class="w-full"
 								type="select"
 								aria-label="Schedule"
 								:options="SCHEDULE_OPTIONS"
@@ -74,8 +80,9 @@
 								@update:modelValue="(v) => setFilter('scheduled', v)"
 							/>
 						</div>
-						<div class="shrink-0">
+						<div class="jv-macro-admin-filter min-w-0 sm:w-40">
 							<FormControl
+								class="w-full"
 								type="select"
 								aria-label="Runs"
 								:options="LIVE_OPTIONS"
@@ -83,8 +90,9 @@
 								@update:modelValue="(v) => setFilter('live_run', v)"
 							/>
 						</div>
-						<div class="shrink-0">
+						<div class="jv-macro-admin-filter min-w-0 sm:w-40">
 							<FormControl
+								class="w-full"
 								type="select"
 								aria-label="Hold"
 								:options="HOLD_OPTIONS"
@@ -95,7 +103,7 @@
 						<!-- The combination an admin looks for, in one step: it sets the two
 						     selects beside it, so what is filtered stays in plain sight. -->
 						<Button
-							class="jv-macro-admin-preset shrink-0"
+							class="jv-macro-admin-preset min-w-0 sm:shrink-0"
 							:variant="armedAndScheduled ? 'solid' : 'subtle'"
 							label="Armed and scheduled"
 							:aria-pressed="armedAndScheduled ? 'true' : 'false'"
@@ -173,13 +181,14 @@
 						/>
 					</div>
 
-					<!-- The list scrolls sideways inside this box when the tab is narrow;
-				     the page never does. `relative` is what keeps that true: the table's
-				     screen-reader-only header is absolutely positioned, and without a
-				     positioned ancestor here it is laid out against the page and widens it
-				     (the Settings dialog used to be that ancestor). Focusable, so the keyboard can
-				     scroll it too. Table roles: a screen reader hears each value with
-				     its column. -->
+					<!-- The list never needs sideways scrolling: when its box is too
+				     narrow for the five lanes, each macro becomes a card (the styles
+				     below, by the box's own width, not the window's). `relative` keeps
+				     the screen-reader-only header inside the box: it is absolutely
+				     positioned, and without a positioned ancestor here it is laid out
+				     against the page and widens it. Focusable, so the keyboard can
+				     scroll it. Table roles: a screen reader hears each value with its
+				     column. -->
 					<div
 						ref="listEl"
 						class="jv-macro-admin-scroll relative overflow-x-auto rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
@@ -187,11 +196,10 @@
 						role="region"
 						aria-label="Macros list"
 					>
-						<div role="table" aria-label="Macros" :style="GRID_MIN">
+						<div role="table" aria-label="Macros">
 							<div
 								role="row"
-								class="grid items-center gap-4 border-b pb-2 text-xs font-medium text-ink-gray-5"
-								:style="GRID"
+								class="jv-macro-admin-head border-b pb-2 text-xs font-medium text-ink-gray-5"
 							>
 								<div role="columnheader">Macro</div>
 								<div role="columnheader">Owner</div>
@@ -204,11 +212,10 @@
 								v-for="row in rows"
 								:key="row.name"
 								role="row"
-								class="jv-macro-admin-row grid items-center gap-4 border-b py-2.5 last:border-b-0"
-								:style="GRID"
+								class="jv-macro-admin-row border-b py-2.5 last:border-b-0"
 								:data-macro="row.name"
 							>
-								<div role="cell" class="min-w-0">
+								<div role="cell" class="jv-macro-admin-cell-macro min-w-0">
 									<button
 										type="button"
 										class="jv-macro-admin-open max-w-full truncate rounded text-left text-sm font-medium text-ink-gray-9 underline-offset-2 hover:underline focus-visible:underline"
@@ -265,7 +272,7 @@
 									</div>
 								</div>
 
-								<div role="cell" class="min-w-0">
+								<div role="cell" class="jv-macro-admin-cell-owner min-w-0">
 									<div
 										class="truncate text-sm text-ink-gray-8"
 										:title="row.owner_full_name || row.owner"
@@ -284,7 +291,7 @@
 									</div>
 								</div>
 
-								<div role="cell" class="min-w-0">
+								<div role="cell" class="jv-macro-admin-cell-schedule min-w-0">
 									<template v-if="row.schedule_enabled">
 										<div
 											class="jv-macro-admin-schedule truncate text-sm text-ink-gray-8"
@@ -306,7 +313,7 @@
 									>
 								</div>
 
-								<div role="cell" class="min-w-0">
+								<div role="cell" class="jv-macro-admin-cell-last min-w-0">
 									<div class="jv-macro-admin-last min-w-0">
 										<div
 											v-if="lastRun(row)"
@@ -332,16 +339,13 @@
 									</span>
 								</div>
 
-								<!-- The menu's button is an icon alone: its name goes in `label`
-								     (frappe-ui's Button renders it for screen readers only and
-								     sets aria-label from it; an aria-label attribute would be
-								     overwritten with nothing).
-								     One line of actions, right-aligned, in fixed order so the
-								     lanes line up down the list: Stop run (only while a run is
-								     going), Hold or Release (the act an admin comes here for),
-								     then a menu with the two that end the owner's hold on the
-								     macro: Hand over and Delete. -->
-								<div role="cell" class="flex items-center justify-end gap-1">
+								<!-- Every action is a button on the row, in one fixed order so
+								     the lanes line up down the list: Stop run (only while a run
+								     is going), Hold or Release, Hand over, Delete. None is in a
+								     menu: this app's menus do not take keyboard focus, and what
+								     an admin does to someone's macro has to be reachable by
+								     keyboard and stay beside the macro it acts on. -->
+								<div role="cell" class="jv-macro-admin-cell-actions">
 									<Button
 										v-if="row.live_run"
 										class="jv-macro-admin-stop"
@@ -381,19 +385,31 @@
 										}, owned by ${ownerText(row)}`"
 										@click="release(row)"
 									/>
-									<Dropdown :options="moreActions(row)" placement="right">
-										<Button
-											class="jv-macro-admin-more"
-											size="sm"
-											variant="ghost"
-											icon="more-horizontal"
-											:loading="acting === `delete:${row.name}`"
-											:disabled="busy"
-											:label="`More actions for ${
-												row.macro_name || row.name
-											}, owned by ${ownerText(row)}`"
-										/>
-									</Dropdown>
+									<Button
+										v-if="!isMine(row)"
+										class="jv-macro-admin-handover"
+										size="sm"
+										variant="subtle"
+										label="Hand over"
+										:disabled="busy"
+										:aria-label="`Hand ${
+											row.macro_name || row.name
+										}, owned by ${ownerText(row)}, to another user`"
+										@click="askHandover(row)"
+									/>
+									<Button
+										class="jv-macro-admin-delete"
+										size="sm"
+										variant="ghost"
+										theme="red"
+										label="Delete"
+										:loading="acting === `delete:${row.name}`"
+										:disabled="busy"
+										:aria-label="`Delete ${
+											row.macro_name || row.name
+										}, owned by ${ownerText(row)}`"
+										@click="remove(row)"
+									/>
 								</div>
 							</div>
 						</div>
@@ -451,17 +467,8 @@
 // when window.is_jarvis_admin. The server checks the Jarvis Admin role itself on
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import {
-	Badge,
-	Breadcrumbs,
-	Button,
-	Dropdown,
-	FeatherIcon,
-	FormControl,
-	Tooltip,
-	toast,
-} from "frappe-ui";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { Badge, Breadcrumbs, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import MacroAdminDialog from "./MacroAdminDialog.vue";
 import MacroHoldDialog from "./MacroHoldDialog.vue";
@@ -489,39 +496,30 @@ const PAGE_MAX = 100;
 // list falls back to its first 500 rows, and Load more continues from there.
 const KEEP_MAX_PAGES = 5;
 const SEARCH_WAIT_MS = 300;
-// The last lane holds the row's actions on one line: wide enough for Stop run,
-// Hold and the menu together, so the lanes do not shift from row to row.
-const GRID = "grid-template-columns: 2fr 1.4fr 1.6fr 1.1fr 11rem";
-// Below this the columns would be a few characters of ellipsis each: the list
-// scrolls sideways inside its own box instead.
-const GRID_MIN = "min-width: 46rem";
-
-// A dialog hands focus back as it closes; the row is focused just after that.
-const FOCUS_AFTER_CLOSE_MS = 50;
 // Why an admin's own macro shows fewer actions.
 const OWN_HELP = "You cannot hold, release or hand over your own macro.";
 
 // The selects have no label above them, so the "everything" option of each says
-// what it is all of: five controls side by side that all read "All" could not be
-// told apart.
+// what it is all of ("All run states"): five controls side by side that all read
+// "All" could not be told apart.
 const ARMED_OPTIONS = [
-	{ label: "Armed: any", value: "" },
+	{ label: "All arming states", value: "" },
 	// Not "Armed" alone: with no label above, a chosen value has to say it is a filter.
 	{ label: "Armed only", value: "1" },
 	{ label: "Not armed", value: "0" },
 ];
 const SCHEDULE_OPTIONS = [
-	{ label: "Schedule: any", value: "" },
+	{ label: "All schedules", value: "" },
 	{ label: "Scheduled", value: "1" },
 	{ label: "Not scheduled", value: "0" },
 ];
 const LIVE_OPTIONS = [
-	{ label: "Runs: any", value: "" },
+	{ label: "All run states", value: "" },
 	{ label: "Running now", value: "1" },
 	{ label: "Not running", value: "0" },
 ];
 const HOLD_OPTIONS = [
-	{ label: "Hold: any", value: "" },
+	{ label: "All hold states", value: "" },
 	{ label: "On hold", value: "1" },
 	{ label: "Not on hold", value: "0" },
 ];
@@ -555,32 +553,6 @@ const ownerOptions = computed(() => [
 		: []),
 ]);
 const armedAndScheduled = computed(() => filters.armed === "1" && filters.scheduled === "1");
-
-// The row's menu: the two acts that take the macro from its owner. `key` names
-// each for the tests; the menu itself ignores it.
-function moreActions(row) {
-	return [
-		...(isMine(row)
-			? []
-			: [
-					{
-						key: "handover",
-						label: "Hand over",
-						icon: "user-check",
-						disabled: busy.value,
-						onClick: () => askHandover(row),
-					},
-			  ]),
-		{
-			key: "delete",
-			label: "Delete",
-			icon: "trash-2",
-			theme: "red",
-			disabled: busy.value,
-			onClick: () => remove(row),
-		},
-	];
-}
 
 // ── data ─────────────────────────────────────────────────────────────────────
 // Three kinds of load, as the Macros Runs tab has (RunsTab.vue, #1597):
@@ -872,15 +844,6 @@ function askHandover(row) {
 	handingOver.value = row;
 	handoverOpen.value = true;
 }
-// Hand over is opened from a menu item, which is gone by the time its dialog
-// closes, and the menu's own button is disabled while the dialog is open: left
-// alone, closing the dialog would drop keyboard focus on the page. Put it on the
-// row the dialog was about, just after the dialog has given focus up.
-watch(handoverOpen, (isOpen, wasOpen) => {
-	const row = handingOver.value;
-	if (wasOpen && !isOpen && row) setTimeout(() => focusRow(row.name), FOCUS_AFTER_CLOSE_MS);
-});
-
 // After a hold or a hand-over, answered or refused: the row's state on the server
 // may have changed either way. A hand-over dialog still open (refused) is given the
 // row as re-read, so its owner is the one the server now has: a macro that changed
@@ -971,3 +934,124 @@ onBeforeUnmount(() => {
 	latest++; // an answer still on its way is nobody's now
 });
 </script>
+
+<style scoped>
+/* A filter fills its slot and no more: the select's own button would otherwise be
+   as wide as its longest option (an owner's full name), and push past the tab. */
+.jv-macro-admin-filter :deep([data-slot="trigger"]) {
+	width: 100%;
+	min-width: 0;
+	max-width: 100%;
+}
+/* The button's width is half of it. Inside, the select keeps an invisible "sizer"
+   holding every option's text on one line, in the same grid track as the value:
+   left alone the track stays as wide as the longest option, the value never
+   truncates, and the text runs out of the button and makes the tab pan sideways.
+   Letting the sizer shrink lets the value's own ellipsis work. */
+.jv-macro-admin-filter :deep(.select-trigger-sizer) {
+	min-width: 0;
+	overflow: hidden;
+}
+
+/* The list lays itself out by its own width, not the window's: the sidebar may be
+   open or closed, and the same tab is 1,180 px wide on a desktop and 335 on a
+   phone. */
+.jv-macro-admin-scroll {
+	container-type: inline-size;
+}
+
+/* Wide: five lanes. The last holds every action on one line and is as wide as
+   the most a row can show (Stop run, Hold, Hand over, Delete), so the lanes do
+   not shift from row to row. */
+.jv-macro-admin-head,
+.jv-macro-admin-row {
+	display: grid;
+	grid-template-columns: 2fr 1.4fr 1.6fr 1.1fr 19rem;
+	align-items: center;
+	column-gap: 1rem;
+}
+.jv-macro-admin-cell-actions {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 0.25rem;
+}
+
+/* Too narrow for five lanes: no sideways scrolling, the row folds. The header row
+   stays for a screen reader and is not drawn. First to two lines, the macro and
+   its owner over its schedule and last run, with the actions still at the end of
+   the row. */
+@container (max-width: 60rem) {
+	.jv-macro-admin-head {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+		padding: 0;
+	}
+	.jv-macro-admin-row {
+		grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) 19rem;
+		grid-template-areas:
+			"macro owner actions"
+			"schedule last actions";
+		align-items: start;
+		row-gap: 0.375rem;
+	}
+	.jv-macro-admin-cell-macro {
+		grid-area: macro;
+	}
+	.jv-macro-admin-cell-owner {
+		grid-area: owner;
+	}
+	.jv-macro-admin-cell-schedule {
+		grid-area: schedule;
+	}
+	.jv-macro-admin-cell-last {
+		grid-area: last;
+	}
+	.jv-macro-admin-cell-actions {
+		grid-area: actions;
+		align-self: center;
+	}
+	/* The header row is not drawn here, and "Completed" alone does not say what
+	   it is the state of. A screen reader already has the header, so the second
+	   declaration gives the caption an empty spoken form where that is supported
+	   (generated content is otherwise read out). */
+	.jv-macro-admin-cell-last::before {
+		content: "Last run";
+		content: "Last run" / "";
+		display: block;
+		font-size: 0.75rem;
+		line-height: 1rem;
+		color: var(--ink-gray-5, #7c7c7c);
+	}
+}
+
+/* A phone: a card. The macro, its owner beside its last run, its schedule, then
+   its actions on a line of their own, so each is in sight with the macro it acts
+   on. */
+@container (max-width: 48rem) {
+	.jv-macro-admin-row {
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas:
+			"macro macro"
+			"owner last"
+			"schedule schedule"
+			"actions actions";
+		row-gap: 0.5rem;
+		padding-top: 0.875rem;
+		padding-bottom: 0.875rem;
+	}
+	.jv-macro-admin-cell-last {
+		text-align: right;
+	}
+	.jv-macro-admin-cell-actions {
+		justify-content: flex-start;
+		flex-wrap: wrap;
+		align-self: start;
+	}
+}
+</style>
