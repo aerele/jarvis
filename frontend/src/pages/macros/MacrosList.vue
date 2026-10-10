@@ -466,12 +466,15 @@ onMounted(() => {
 	socket && socket.on && socket.on("jarvis:event", onEvent);
 });
 // /macros/admin opened by someone who is not an admin: the Macros tab is what
-// they see, so make the address say so too. Watched, not only on mount: the three
-// tab routes share this one component instance.
+// they see, so make the address say so too, and keep the rest of it (an old
+// Settings link is sent here with whatever else it carried). Watched, not only on
+// mount: the three tab routes share this one component instance.
 watch(
 	() => props.tab,
 	(tab) => {
-		if (tab === "admin" && !isAdmin) router.replace({ name: "MacrosList" });
+		if (tab === "admin" && !isAdmin) {
+			router.replace({ name: "MacrosList", query: { ...route.query }, hash: route.hash });
+		}
 	},
 	{ immediate: true }
 );

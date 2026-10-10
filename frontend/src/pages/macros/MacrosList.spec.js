@@ -20,7 +20,7 @@ vi.mock("@/pages/list/listFetchers", () => ({ macrosListFetch: fetchPage }));
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
-	const route = reactive({ name: "MacrosList", params: {}, query: {} });
+	const route = reactive({ name: "MacrosList", params: {}, query: {}, hash: "" });
 	return { useRoute: () => route, useRouter: () => router };
 });
 // jsdom has no usable localStorage for useStorage; a plain ref is all the page needs.
@@ -76,6 +76,7 @@ vi.mock("@/components/list/ListPage.vue", () => ({
 
 import { toast, confirmDialog } from "frappe-ui";
 import { deleteMacrosBulk, dismissMacroNotices } from "@/api/macros";
+import { useRoute } from "vue-router";
 import MacrosList from "./MacrosList.vue";
 
 const macro = (name, extra = {}) => ({
@@ -104,6 +105,8 @@ const runBtn = (w, name) => rowEl(w, name).findComponent({ name: "Button" });
 beforeEach(() => {
 	vi.clearAllMocks();
 	delete window.is_jarvis_admin;
+	// The mocked route is one shared object: every test starts from a bare address.
+	Object.assign(useRoute(), { query: {}, hash: "" });
 });
 
 describe("MacrosList: the Admin tab", () => {
@@ -140,8 +143,15 @@ describe("MacrosList: the Admin tab", () => {
 	it("sends a non-admin back when the route changes to /macros/admin on the mounted page", async () => {
 		const { w } = await mountList([]);
 		expect(router.replace).not.toHaveBeenCalled();
+		const route = useRoute();
+		Object.assign(route, { query: { tag: ["one", "two"], nosocket: "" }, hash: "#kept" });
 		await w.setProps({ tab: "admin" });
-		expect(router.replace).toHaveBeenCalledWith({ name: "MacrosList" });
+		// The rest of the address goes with them.
+		expect(router.replace).toHaveBeenCalledWith({
+			name: "MacrosList",
+			query: { tag: ["one", "two"], nosocket: "" },
+			hash: "#kept",
+		});
 		expect(w.findComponent({ name: "AdminTab" }).exists()).toBe(false);
 	});
 
@@ -150,7 +160,18 @@ describe("MacrosList: the Admin tab", () => {
 		expect(w.findComponent({ name: "AdminTab" }).exists()).toBe(false);
 		expect(listPage(w).exists()).toBe(true);
 		expect(tabBar(w).props("modelValue")).toBe("macros");
-		expect(router.replace).toHaveBeenCalledWith({ name: "MacrosList" });
+		expect(router.replace).toHaveBeenCalledWith({ name: "MacrosList", query: {}, hash: "" });
+	});
+
+	it("keeps the query and the hash when it sends a non-admin back on open", async () => {
+		const route = useRoute();
+		Object.assign(route, { query: { ref: "mail" }, hash: "#kept" });
+		await mountList([], { tab: "admin" });
+		expect(router.replace).toHaveBeenCalledWith({
+			name: "MacrosList",
+			query: { ref: "mail" },
+			hash: "#kept",
+		});
 	});
 });
 
