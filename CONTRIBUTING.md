@@ -21,7 +21,7 @@ then `python -m jarvis.ci.runtime_branding --policy /tmp/jarvis-policy.json`.
 |---|---|---|
 | `develop` | default; all work lands here first | feature and fix PRs |
 | `version-16-hotfix`, `version-15-hotfix` | backports waiting for the next release | backport PRs (cherry-picks from `develop`), fixes found in production |
-| `version-16`, `version-15` | stable; what customers install and what Frappe Cloud tracks | **only** the release PR from the matching hotfix branch |
+| `version-16`, `version-15` | stable; what customers install and what Frappe Cloud tracks | **only** the release PR from the matching hotfix branch, or a patch PR from `version-N-patch` |
 
 - A backport PR targets `version-N-hotfix`, never `version-N`. The `release-source` check
   (`.github/workflows/release-guard.yml`) fails any other PR into a stable branch. It
@@ -36,6 +36,12 @@ then `python -m jarvis.ci.runtime_branding --policy /tmp/jarvis-policy.json`.
   publishes a GitHub Release with notes generated from the previous tag on that line.
   Check the Releases page afterwards; if the run failed, re-run it from the Actions tab.
   It resumes whatever step was missing (tag, Release, or nothing).
+- An urgent fix that cannot wait for the next release uses a patch branch. Cut
+  `version-N-patch` from `version-N` and add only the fix. Bump the patch number of
+  `__version__`. Open the PR `version-N-patch` -> `version-N` and merge it with a merge
+  commit; the `Release` workflow tags it. Then merge `version-N` into `version-N-hotfix`,
+  so that the next release starts from the patched version. The fix must also be on
+  `develop`. Cut a new `version-N-patch` for each patch.
 - Never push directly to any of these five branches; everything lands through a PR.
   The `version-N` rulesets enforce this today, and the `version-N-hotfix` rulesets should
   match them (PR required, no force-push, no deletion).
