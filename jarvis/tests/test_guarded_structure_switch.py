@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 
 from frappe.tests.utils import FrappeTestCase
@@ -12,12 +13,12 @@ from jarvis.tools import _guarded_structure as gs
 class TestReadJson(FrappeTestCase):
 	def setUp(self):
 		self.dir = tempfile.mkdtemp()
+		self.addCleanup(shutil.rmtree, self.dir)
 
 	def write(self, name, value):
 		path = os.path.join(self.dir, name)
 		with open(path, "w") as fh:
 			json.dump(value, fh)
-		self.addCleanup(os.unlink, path)
 		return path
 
 	def test_an_object_is_read(self):
