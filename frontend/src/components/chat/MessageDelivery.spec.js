@@ -82,6 +82,24 @@ it("keeps the stale title out of the note while a check is running", () => {
 	w.unmount();
 });
 
+it("keeps every action in place but locked while a check or retry is running", async () => {
+	const w = mount(Message, {
+		props: { text: "Invoice", failed: true, deliveryState: "checking" },
+	});
+	const buttons = w.get(".jv-delivery").findAll("button");
+	expect(buttons.map((b) => b.text())).toEqual([
+		"Check delivery",
+		"Retry same request",
+		"Dismiss",
+	]);
+	for (const b of buttons) {
+		expect(b.attributes("disabled")).toBeDefined();
+		await b.trigger("click");
+	}
+	expect(w.emitted()).toEqual({});
+	w.unmount();
+});
+
 it("links a confirmed delivery to its conversation and offers no retry", () => {
 	const w = mount(Message, {
 		props: {

@@ -46,14 +46,15 @@
 			<button
 				v-if="view.action"
 				class="jv-delivery-btn jv-delivery-btn--primary"
-				:disabled="state === 'checking'"
+				:disabled="busy"
 				@click="emit('retry')"
 			>
 				{{ view.action }}
 			</button>
 			<button
-				v-if="state === 'uncertain'"
+				v-if="recoverable"
 				class="jv-delivery-btn"
+				:disabled="busy"
 				@click="emit('retry-same')"
 			>
 				Retry same request
@@ -67,8 +68,9 @@
 				>View conversation</a
 			>
 			<button
-				v-if="['uncertain', 'delivered'].includes(state)"
+				v-if="recoverable || state === 'delivered'"
 				class="jv-delivery-btn jv-delivery-btn--quiet"
+				:disabled="busy"
 				@click="emit('dismiss')"
 			>
 				Dismiss
@@ -90,6 +92,10 @@ const props = defineProps({
 const emit = defineEmits(["retry", "dismiss", "retry-same"]);
 
 const view = computed(() => VIEWS[props.state] || NOT_SENT);
+// A check or a same-request retry is in flight. Its actions stay where they
+// were, locked, so the panel does not jump and nothing can be fired twice.
+const busy = computed(() => props.state === "checking");
+const recoverable = computed(() => ["uncertain", "checking"].includes(props.state));
 // Any state's title, not only the current one: while a check runs the note is
 // still the previous state's sentence.
 const detail = computed(() => {
@@ -242,9 +248,11 @@ const LEADS = [NOT_SENT, ...Object.values(VIEWS)].map((v) => v.title + ". ");
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
+/* no hover feedback either: a locked button must not look clickable */
 .jv-delivery-btn:disabled {
 	opacity: 0.5;
 	cursor: default;
+	pointer-events: none;
 }
 @media (max-width: 640px) {
 	.jv-delivery {
