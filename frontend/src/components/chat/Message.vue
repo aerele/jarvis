@@ -60,73 +60,15 @@
 				/>
 				<template v-else>{{ text }}</template>
 			</div>
-			<div
+			<DeliveryStatus
 				v-if="failed || ['checking', 'delivered'].includes(deliveryState)"
-				style="
-					display: flex;
-					align-items: center;
-					gap: 8px;
-					flex-wrap: wrap;
-					justify-content: flex-end;
-					margin-top: 4px;
-					font-size: 11.5px;
-					color: var(--red);
-				"
-			>
-				<span role="status">{{
-					deliveryState === "delivered"
-						? "Delivery confirmed"
-						: deliveryState === "checking"
-						? "Checking delivery…"
-						: deliveryState === "uncertain"
-						? "Delivery not confirmed"
-						: "Not sent"
-				}}</span>
-				<button
-					v-if="deliveryState !== 'delivered'"
-					@click="emit('retry')"
-					:disabled="deliveryState === 'checking'"
-					style="
-						background: none;
-						border: none;
-						color: var(--link);
-						font: inherit;
-						cursor: pointer;
-						padding: 0;
-						text-decoration: underline;
-					"
-				>
-					{{
-						["uncertain", "checking"].includes(deliveryState)
-							? "Check delivery"
-							: "Retry"
-					}}
-				</button>
-				<button
-					v-if="['uncertain', 'delivered'].includes(deliveryState)"
-					class="jv-btn"
-					@click="emit('dismiss')"
-				>
-					Dismiss
-				</button>
-				<p v-if="deliveryNote" role="status" style="font-size: 12px; max-width: 78%">
-					{{ deliveryNote }}
-				</p>
-				<button
-					v-if="deliveryState === 'uncertain'"
-					class="jv-btn"
-					@click="emit('retry-same')"
-				>
-					Retry same request
-				</button>
-				<a
-					v-if="deliveryConversation"
-					:href="'/jarvis/c/' + encodeURIComponent(deliveryConversation)"
-					target="_blank"
-					rel="noopener noreferrer"
-					>View conversation</a
-				>
-			</div>
+				:state="deliveryState"
+				:note="deliveryNote"
+				:conversation="deliveryConversation"
+				@retry="emit('retry')"
+				@dismiss="emit('dismiss')"
+				@retry-same="emit('retry-same')"
+			/>
 			<!-- attached images → same clickable thumbnail + preview as generated ones -->
 			<template v-for="cv in attachments || []" :key="cv.name">
 				<button
@@ -337,6 +279,7 @@
 
 <script setup>
 import { computed, useSlots } from "vue";
+import DeliveryStatus from "./DeliveryStatus.vue";
 
 defineProps({
 	// 'bubble' (right-aligned chat/support-customer message) | 'row'
