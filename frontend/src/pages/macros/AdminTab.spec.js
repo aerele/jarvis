@@ -258,6 +258,20 @@ describe("Macros AdminTab, states", () => {
 	});
 });
 
+describe("Macros AdminTab, frame", () => {
+	it("gives the table's scroll box a position, so its hidden header cannot widen the page", async () => {
+		// The screen-reader-only "Actions" header is absolutely positioned. With no
+		// positioned ancestor it is laid out against the page: at phone width the
+		// page then scrolls sideways (measured in a real browser: 564 px in a 375 px
+		// window). jsdom has no layout, so this pins the class that prevents it.
+		const w = await mountWith([row("m1")]);
+		const box = w.find(".jv-macro-admin-scroll");
+		expect(box.classes()).toContain("relative");
+		expect(box.classes()).toContain("overflow-x-auto");
+		expect(box.find(".sr-only").exists()).toBe(true);
+	});
+});
+
 describe("Macros AdminTab, rows", () => {
 	it("shows the owner, the name, on or off, armed, the schedule and the last run", async () => {
 		const w = await mountWith([
