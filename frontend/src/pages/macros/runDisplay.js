@@ -1,5 +1,5 @@
 // How a macro and its runs are worded and coloured, wherever they are listed: the
-// owner's Macros list and Runs tab, and the admin's pane in Settings. One copy, so
+// owner's Macros list and Runs tab, and the admin's tab beside them. One copy, so
 // an admin and an owner talking about the same macro use the same words for it.
 
 // Colour of a "Last run" cell, by the tone lib/macroRunOutcome's lastRunCell gives.

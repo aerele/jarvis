@@ -1,7 +1,6 @@
 <template>
 	<!-- Asks why before an admin puts another user's macro on hold: the owner reads
-	     the reason on their macro form. A second dialog over Settings, as
-	     TokenLimitDialog is, so Escape closes this one alone. -->
+	     the reason on their macro form. A dialog over the Macros page's Admin tab. -->
 	<Dialog v-model="show" :options="{ title }">
 		<template #body-content>
 			<div class="flex flex-col gap-3">

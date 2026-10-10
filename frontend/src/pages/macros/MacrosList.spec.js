@@ -20,7 +20,7 @@ vi.mock("@/pages/list/listFetchers", () => ({ macrosListFetch: fetchPage }));
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
-	const route = reactive({ name: "MacrosList", params: {}, query: {} });
+	const route = reactive({ name: "MacrosList", params: {}, query: {}, hash: "" });
 	return { useRoute: () => route, useRouter: () => router };
 });
 // jsdom has no usable localStorage for useStorage; a plain ref is all the page needs.
@@ -53,8 +53,11 @@ vi.mock("frappe-ui", () => ({
 	},
 	Dropdown: { name: "Dropdown", props: ["options"], template: "<div />" },
 }));
-vi.mock("@/components/list/TabBar.vue", () => ({ default: { template: "<div />" } }));
+vi.mock("@/components/list/TabBar.vue", () => ({
+	default: { name: "TabBar", props: ["tabs", "modelValue"], template: "<div />" },
+}));
 vi.mock("./RunsTab.vue", () => ({ default: { name: "RunsTab", template: "<div />" } }));
+vi.mock("./AdminTab.vue", () => ({ default: { name: "AdminTab", template: "<div />" } }));
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		name: "ListPage",
@@ -73,6 +76,7 @@ vi.mock("@/components/list/ListPage.vue", () => ({
 
 import { toast, confirmDialog } from "frappe-ui";
 import { deleteMacrosBulk, dismissMacroNotices } from "@/api/macros";
+import { useRoute } from "vue-router";
 import MacrosList from "./MacrosList.vue";
 
 const macro = (name, extra = {}) => ({
@@ -85,11 +89,11 @@ const macro = (name, extra = {}) => ({
 	...extra,
 });
 
-async function mountList(rows = []) {
+async function mountList(rows = [], props = {}) {
 	if (rows) fetchPage.mockResolvedValue({ rows, total: rows.length, has_more: false });
 	const handlers = [];
 	const socket = { on: (_e, fn) => handlers.push(fn), off: () => {} };
-	const w = mount(MacrosList, { global: { provide: { $socket: socket } } });
+	const w = mount(MacrosList, { props, global: { provide: { $socket: socket } } });
 	await flushPromises();
 	return { w, emit: (p) => handlers.forEach((fn) => fn(p)) };
 }
@@ -100,6 +104,75 @@ const runBtn = (w, name) => rowEl(w, name).findComponent({ name: "Button" });
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	delete window.is_jarvis_admin;
+	// The mocked route is one shared object: every test starts from a bare address.
+	Object.assign(useRoute(), { query: {}, hash: "" });
+});
+
+describe("MacrosList: the Admin tab", () => {
+	const tabBar = (w) => w.findComponent({ name: "TabBar" });
+	const tabValues = (w) =>
+		tabBar(w)
+			.props("tabs")
+			.map((t) => t.value);
+
+	it("offers Macros and Runs only to someone who is not an admin", async () => {
+		const { w } = await mountList([]);
+		expect(tabValues(w)).toEqual(["macros", "runs"]);
+	});
+
+	it("offers an admin a third tab and shows every user's macros on /macros/admin", async () => {
+		window.is_jarvis_admin = true;
+		const { w } = await mountList([], { tab: "admin" });
+		expect(tabValues(w)).toEqual(["macros", "runs", "admin"]);
+		expect(tabBar(w).props("modelValue")).toBe("admin");
+		expect(w.findComponent({ name: "AdminTab" }).exists()).toBe(true);
+		expect(listPage(w).exists()).toBe(false);
+		expect(router.replace).not.toHaveBeenCalled();
+	});
+
+	it("goes to each tab's own address", async () => {
+		window.is_jarvis_admin = true;
+		const { w } = await mountList([]);
+		tabBar(w).vm.$emit("update:model-value", "admin");
+		expect(router.push).toHaveBeenLastCalledWith({ name: "MacroAdmin", query: {} });
+		tabBar(w).vm.$emit("update:model-value", "runs");
+		expect(router.push).toHaveBeenLastCalledWith({ name: "MacroRuns", query: {} });
+	});
+
+	it("sends a non-admin back when the route changes to /macros/admin on the mounted page", async () => {
+		const { w } = await mountList([]);
+		expect(router.replace).not.toHaveBeenCalled();
+		const route = useRoute();
+		Object.assign(route, { query: { tag: ["one", "two"], nosocket: "" }, hash: "#kept" });
+		await w.setProps({ tab: "admin" });
+		// The rest of the address goes with them.
+		expect(router.replace).toHaveBeenCalledWith({
+			name: "MacrosList",
+			query: { tag: ["one", "two"], nosocket: "" },
+			hash: "#kept",
+		});
+		expect(w.findComponent({ name: "AdminTab" }).exists()).toBe(false);
+	});
+
+	it("shows the Macros tab, and its address, to a non-admin who opens /macros/admin", async () => {
+		const { w } = await mountList([], { tab: "admin" });
+		expect(w.findComponent({ name: "AdminTab" }).exists()).toBe(false);
+		expect(listPage(w).exists()).toBe(true);
+		expect(tabBar(w).props("modelValue")).toBe("macros");
+		expect(router.replace).toHaveBeenCalledWith({ name: "MacrosList", query: {}, hash: "" });
+	});
+
+	it("keeps the query and the hash when it sends a non-admin back on open", async () => {
+		const route = useRoute();
+		Object.assign(route, { query: { ref: "mail" }, hash: "#kept" });
+		await mountList([], { tab: "admin" });
+		expect(router.replace).toHaveBeenCalledWith({
+			name: "MacrosList",
+			query: { ref: "mail" },
+			hash: "#kept",
+		});
+	});
 });
 
 describe("MacrosList: a load that failed", () => {

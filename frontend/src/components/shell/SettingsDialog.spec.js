@@ -77,7 +77,6 @@ vi.mock("@/components/settings/PlanBillingPane.vue", () => paneStub("PlanBilling
 vi.mock("@/components/settings/AiModelsPane.vue", () => paneStub("AiModelsPane"));
 vi.mock("@/components/settings/UsageAdminPane.vue", () => paneStub("UsageAdminPane"));
 vi.mock("@/components/settings/BrandingPane.vue", () => paneStub("BrandingPane"));
-vi.mock("@/components/settings/MacrosAdminPane.vue", () => paneStub("MacrosAdminPane"));
 
 vi.mock("@/lib/subscriptionNotice", async () => {
 	const { reactive } = await import("vue");
@@ -117,7 +116,6 @@ beforeAll(async () => {
 		import("@/components/settings/AiModelsPane.vue"),
 		import("@/components/settings/UsageAdminPane.vue"),
 		import("@/components/settings/BrandingPane.vue"),
-		import("@/components/settings/MacrosAdminPane.vue"),
 	]);
 });
 
@@ -165,20 +163,19 @@ describe("SettingsDialog rail", () => {
 describe("SettingsDialog Administration group", () => {
 	const railLabels = (w) => w.findAll("button").map((b) => b.text());
 
-	it("shows Macros beside User usage to a Jarvis Admin", async () => {
+	it("has no Macros item: every user's macros is a tab of the Macros page now", async () => {
 		const w = await mountDialog({ isAdmin: true });
 		const labels = railLabels(w);
 		expect(labels).toContain("User usage");
-		expect(labels).toContain("Macros");
-		expect(labels.indexOf("Macros")).toBe(labels.indexOf("User usage") + 1);
+		expect(labels).not.toContain("Macros");
 	});
 
-	it("opens the Macros pane for a Jarvis Admin", async () => {
+	it("opens General for the old macroadmin key, even for a Jarvis Admin", async () => {
 		const w = await mountDialog({ isAdmin: true, section: "macroadmin" });
-		expect(w.find(".pane-marker").text()).toBe("MacrosAdminPane");
+		expect(w.find(".pane-marker").text()).toBe("GeneralPane");
 	});
 
-	it("hides Macros from an ordinary member, on the rail and by its key", async () => {
+	it("shows an ordinary member no Administration items", async () => {
 		const w = await mountDialog({ isSM: false, isAdmin: false, section: "macroadmin" });
 		expect(railLabels(w)).not.toContain("Macros");
 		expect(railLabels(w)).not.toContain("User usage");

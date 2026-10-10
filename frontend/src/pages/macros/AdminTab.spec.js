@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
- * The Jarvis Admin's Macros pane (Settings, Administration): every user's macros,
+ * The Jarvis Admin's tab on the Macros page (/macros/admin): every user's macros,
  * the filters, the loading / empty / error states, and the row actions: Stop run,
  * Hold (the reason is asked by MacroHoldDialog, stubbed here), Release and Delete.
  * The decisions behind the cells (lib/macroRunOutcome, lib/macroSchedule) are the
@@ -12,7 +12,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 vi.mock("frappe-ui", () => ({
 	Button: {
 		name: "Button",
-		props: ["label", "variant", "iconLeft", "loading", "disabled", "size", "theme"],
+		props: ["label", "variant", "icon", "iconLeft", "loading", "disabled", "size", "theme"],
 		emits: ["click"],
 		template: `<button class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" @click="$emit('click')">{{ label }}</button>`,
 	},
@@ -22,6 +22,16 @@ vi.mock("frappe-ui", () => ({
 		template: `<span class="badge">{{ label }}</span>`,
 	},
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: `<i class="stub-icon" />` },
+	Tooltip: {
+		name: "Tooltip",
+		props: ["text"],
+		template: `<span class="stub-tooltip" :data-text="text"><slot /></span>`,
+	},
+	Breadcrumbs: {
+		name: "Breadcrumbs",
+		props: ["items"],
+		template: `<nav class="stub-crumbs" />`,
+	},
 	ErrorMessage: {
 		name: "ErrorMessage",
 		props: ["message"],
@@ -31,9 +41,10 @@ vi.mock("frappe-ui", () => ({
 		name: "FormControl",
 		props: ["type", "options", "modelValue", "label", "placeholder"],
 		emits: ["update:modelValue"],
+		// The filters carry no visible label: their name is the aria-label.
 		template: `
 			<label class="stub-control">
-				<span class="stub-label">{{ label }}</span>
+				<span class="stub-label">{{ label || $attrs["aria-label"] }}</span>
 				<select v-if="type === 'select'" :value="modelValue"
 					@change="$emit('update:modelValue', $event.target.value)">
 					<option v-for="o in options" :key="o.value" :value="o.value" :disabled="o.disabled">{{ o.label }}</option>
@@ -60,10 +71,15 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("@/api/macrosAdmin", () => api);
 
+// The page header teleports in the app; here it renders in place.
+vi.mock("@/components/LayoutHeader.vue", () => ({
+	default: { name: "LayoutHeader", template: `<div><slot name="left-header" /></div>` },
+}));
+
 const confirm = vi.hoisted(() => vi.fn());
 vi.mock("@/composables/useConfirm", () => ({ useConfirm: () => ({ confirm }) }));
 
-vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
+vi.mock("./MacroAdminDialog.vue", () => ({
 	default: {
 		name: "MacroAdminDialog",
 		props: ["modelValue", "name"],
@@ -72,7 +88,7 @@ vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
 	},
 }));
 
-vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
+vi.mock("./MacroHoldDialog.vue", () => ({
 	default: {
 		name: "MacroHoldDialog",
 		props: ["modelValue", "name", "macroName", "ownerLabel"],
@@ -81,7 +97,7 @@ vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
 	},
 }));
 
-vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
+vi.mock("./MacroHandoverDialog.vue", () => ({
 	default: {
 		name: "MacroHandoverDialog",
 		props: ["modelValue", "name", "macroName", "owner", "ownerLabel"],
@@ -94,7 +110,7 @@ vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
 vi.mock("@/data/session", () => ({ session: { user: "admin@example.test" } }));
 
 import { toast } from "frappe-ui";
-import MacrosAdminPane from "./MacrosAdminPane.vue";
+import AdminTab from "./AdminTab.vue";
 
 const row = (name, extra = {}) => ({
 	name,
@@ -139,12 +155,16 @@ const serve = (all) => (q) =>
 
 async function mountWith(rows, extra, options) {
 	api.adminListMacros.mockResolvedValue(page(rows, extra));
-	const w = mount(MacrosAdminPane, options);
+	const w = mount(AdminTab, options);
 	await flushPromises();
 	return w;
 }
 
-const button = (w, label) => w.findAll("button.stub-button").find((b) => b.text() === label);
+// By its words, or by its name when it is an icon alone (Refresh).
+const button = (w, label) =>
+	w
+		.findAll("button.stub-button")
+		.find((b) => b.text() === label || b.attributes("aria-label") === label);
 const rowsOf = (w) => w.findAll(".jv-macro-admin-row");
 const control = (w, label) =>
 	w.findAll(".stub-control").find((c) => c.find(".stub-label").text() === label);
@@ -169,11 +189,11 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe("MacrosAdminPane, states", () => {
+describe("Macros AdminTab, states", () => {
 	it("says Loading until the first answer, then lists the macros", async () => {
 		let answer;
 		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		expect(w.text()).toContain("Loading…");
 		expect(rowsOf(w)).toHaveLength(0);
@@ -205,7 +225,7 @@ describe("MacrosAdminPane, states", () => {
 
 	it("shows the error with Try again when the first load fails, and recovers", async () => {
 		api.adminListMacros.mockRejectedValue(new Error("You need the Jarvis Admin role"));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		expect(w.find("[role='alert']").text()).toContain("You need the Jarvis Admin role");
 		expect(w.text()).not.toContain("Nobody has made a macro yet.");
@@ -248,7 +268,88 @@ describe("MacrosAdminPane, states", () => {
 	});
 });
 
-describe("MacrosAdminPane, rows", () => {
+describe("Macros AdminTab, frame", () => {
+	it("gives the table's scroll box a position, so its hidden header cannot widen the page", async () => {
+		// The screen-reader-only "Actions" header is absolutely positioned. With no
+		// positioned ancestor it is laid out against the page: at phone width the
+		// page then scrolls sideways (measured in a real browser: 564 px in a 375 px
+		// window). jsdom has no layout, so this pins the class that prevents it.
+		const w = await mountWith([row("m1")]);
+		const box = w.find(".jv-macro-admin-scroll");
+		expect(box.classes()).toContain("relative");
+		expect(box.classes()).toContain("overflow-x-auto");
+		expect(box.find(".sr-only").exists()).toBe(true);
+	});
+});
+
+describe("Macros AdminTab, layout", () => {
+	it("names every filter for a screen reader, and says what each 'All' is all of", async () => {
+		const w = await mountWith([row("a")]);
+		for (const [name, any] of [
+			["Owner", "All owners"],
+			["Armed", "All arming states"],
+			["Schedule", "All schedules"],
+			["Runs", "All run states"],
+			["Hold", "All hold states"],
+		]) {
+			expect(control(w, name).find("option").text()).toBe(any);
+		}
+		expect(control(w, "Search").exists()).toBe(true);
+	});
+
+	it("offers Clear in the toolbar only while something is filtered", async () => {
+		const w = await mountWith([row("a")]);
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		await control(w, "Armed").find("select").setValue("1");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(true);
+		await w.find(".jv-macro-admin-clear").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		expect(lastCall().filters || {}).not.toHaveProperty("armed");
+	});
+
+	it("puts every action on the row as a button, in one fixed order", async () => {
+		// None is in a menu: each has to be reachable by keyboard, beside its macro.
+		const w = await mountWith([
+			row("a", { live_run: "RUN-1" }),
+			row("b", { enabled: 0, admin_hold: 1, admin_hold_reason: "Sends too many emails" }),
+			row("mine", { owner: "admin@example.test" }),
+		]);
+		const actions = (i) => {
+			const cell = rowsOf(w)[i].find(".jv-macro-admin-cell-actions");
+			return cell.findAll("button").map((b) => b.text());
+		};
+		expect(actions(0)).toEqual(["Stop run", "Hold", "Hand over", "Delete"]);
+		expect(actions(1)).toEqual(["Release", "Hand over", "Delete"]);
+		expect(actions(2)).toEqual(["Delete"]);
+		expect(w.findComponent({ name: "Dropdown" }).exists()).toBe(false);
+	});
+
+	it("gives each cell its lane, for the table and for the folded layouts", async () => {
+		// The lanes are CSS (by the list's own width); jsdom lays nothing out, so this
+		// pins the names the styles hang on.
+		const w = await mountWith([row("a")]);
+		const lanes = rowsOf(w)[0]
+			.findAll('[role="cell"]')
+			.map((c) => c.classes().find((k) => k.startsWith("jv-macro-admin-cell-")));
+		expect(lanes).toEqual([
+			"jv-macro-admin-cell-macro",
+			"jv-macro-admin-cell-owner",
+			"jv-macro-admin-cell-schedule",
+			"jv-macro-admin-cell-last",
+			"jv-macro-admin-cell-actions",
+		]);
+		expect(w.find(".jv-macro-admin-head").findAll('[role="columnheader"]')).toHaveLength(5);
+		// Every filter sits in a bounded slot: a long owner's name cannot stretch it.
+		expect(w.findAll(".jv-macro-admin-filter")).toHaveLength(5);
+		for (const slot of w.findAll(".jv-macro-admin-filter")) {
+			expect(slot.classes()).toContain("min-w-0");
+		}
+	});
+});
+
+describe("Macros AdminTab, rows", () => {
 	it("shows the owner, the name, on or off, armed, the schedule and the last run", async () => {
 		const w = await mountWith([
 			row("a", {
@@ -275,7 +376,8 @@ describe("MacrosAdminPane, rows", () => {
 		expect(b.text()).toContain("Not scheduled");
 		expect(b.text()).toContain("Never ran");
 		// An owner with no full name is shown once, not twice.
-		expect(b.text().split("ben@example.test")).toHaveLength(2);
+		// In the owner's cell only: the row's action buttons name the owner too.
+		expect(b.findAll('[role="cell"]')[1].text().split("ben@example.test")).toHaveLength(2);
 	});
 
 	it("gives every cell that can be cut short its full value on hover", async () => {
@@ -334,7 +436,7 @@ describe("MacrosAdminPane, rows", () => {
 		expect(b.find(".text-ink-amber-3").exists()).toBe(false);
 	});
 
-	it("says Running beside Stop when the live run is an older one", async () => {
+	it("says Running under the last run when the live run is an older one", async () => {
 		// The last run failed; an earlier one is still going, and that is what Stop
 		// acts on. The row read "Failed" next to a Stop button with no explanation.
 		const w = await mountWith([
@@ -393,7 +495,7 @@ describe("MacrosAdminPane, rows", () => {
 		// stop) cut the list back to its first 100.
 		const all = many(130);
 		api.adminListMacros.mockImplementation(serve(all));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		for (let i = 0; i < 6; i++) {
 			await button(w, "Load more").trigger("click");
@@ -416,7 +518,7 @@ describe("MacrosAdminPane, rows", () => {
 	it("keeps Load more going after a Refresh of a long list", async () => {
 		const all = many(150);
 		api.adminListMacros.mockImplementation(serve(all));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		for (let i = 0; i < 5; i++) {
 			await button(w, "Load more").trigger("click");
@@ -442,7 +544,7 @@ describe("MacrosAdminPane, rows", () => {
 	});
 });
 
-describe("MacrosAdminPane, filters", () => {
+describe("Macros AdminTab, filters", () => {
 	it("labels every control", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.findAll(".stub-label").map((l) => l.text())).toEqual([
@@ -455,10 +557,10 @@ describe("MacrosAdminPane, filters", () => {
 		]);
 	});
 
-	it("explains Armed where the admin sees it: under the filters and on the badge", async () => {
+	it("explains Armed where the admin sees it: on the filter and on the badge", async () => {
 		const HELP = "Armed: this macro's runs write without asking for confirmation.";
 		const w = await mountWith([row("a", { skip_confirmation: 1 }), row("b")]);
-		expect(w.find(".jv-macro-admin-help").text()).toBe(HELP);
+		expect(control(w, "Armed").attributes("title")).toBe(HELP);
 		const [a, b] = rowsOf(w);
 		expect(a.find(".jv-macro-admin-armed").attributes("title")).toBe(HELP);
 		expect(a.find(".jv-macro-admin-armed .badge").text()).toBe("Armed");
@@ -612,7 +714,7 @@ describe("MacrosAdminPane, filters", () => {
 	});
 });
 
-describe("MacrosAdminPane, Stop run", () => {
+describe("Macros AdminTab, Stop run", () => {
 	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
 	const live = (extra = {}) =>
 		row("a", { live_run: "RUN-1", last_run: { status: "running" }, ...extra });
@@ -770,7 +872,7 @@ describe("MacrosAdminPane, Stop run", () => {
 	});
 });
 
-describe("MacrosAdminPane, hold, release and delete", () => {
+describe("Macros AdminTab, hold, release and delete", () => {
 	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
 	const holdButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-hold");
 	const releaseButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-release");
@@ -811,10 +913,12 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 			expect(releaseButton(w, i).exists()).toBe(false);
 			expect(rowsOf(w)[i].find(".jv-macro-admin-handover").exists()).toBe(false);
 			expect(deleteButton(w, i).exists()).toBe(true);
-			// Said, not just left out.
-			expect(rowsOf(w)[i].find(".jv-macro-admin-own").text()).toBe(
-				"You cannot hold, release or hand over your own macro."
-			);
+			// Marked and said, not just left out.
+			const own = rowsOf(w)[i].find(".jv-macro-admin-own");
+			expect(own.find(".badge").text()).toBe("Yours");
+			for (const said of [own.attributes("title"), own.find(".sr-only").text()]) {
+				expect(said).toBe("You cannot hold, release or hand over your own macro.");
+			}
 		}
 	});
 
@@ -950,7 +1054,7 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 	});
 });
 
-describe("MacrosAdminPane, hand over", () => {
+describe("Macros AdminTab, hand over", () => {
 	const handoverButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-handover");
 
 	it("offers Hand over on another user's macro, held or not", async () => {
@@ -960,6 +1064,7 @@ describe("MacrosAdminPane, hand over", () => {
 			expect(b.exists()).toBe(true);
 			expect(b.text()).toBe("Hand over");
 		}
+		// It is a button on the row, like every other action.
 		expect(handoverButton(w).attributes("aria-label")).toBe(
 			"Hand Macro a, owned by Asha Rao (asha@example.test), to another user"
 		);

@@ -180,16 +180,17 @@
 		</ListPage>
 
 		<!-- ============ Runs tab ============ -->
-		<RunsTab v-else class="min-h-0 flex-1" />
+		<RunsTab v-else-if="activeTab === 'runs'" class="min-h-0 flex-1" />
+		<AdminTab v-else class="min-h-0 flex-1" />
 	</div>
 </template>
 
 <script setup>
-// Macros list - DESIGN-V3 §5.9: TabBar (Macros | Runs) synced to /macros vs
-// /macros/runs, envelope list with enabled/schedule quick filters, summary +
+// Macros list - DESIGN-V3 §5.9: TabBar (Macros | Runs, and Admin for an admin)
+// synced to /macros, /macros/runs and /macros/admin, envelope list with enabled/schedule quick filters, summary +
 // schedule badge cells, inline ghost Run cell (gated while summarizing), bulk
 // delete (incl. run history) and macro:merged live refresh.
-import { ref, computed, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, inject, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Button, Badge, Tooltip, Dropdown, toast, confirmDialog } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
@@ -197,6 +198,7 @@ import TabBar from "@/components/list/TabBar.vue";
 import { useListPage } from "@/composables/useListPage";
 import { macrosListFetch } from "@/pages/list/listFetchers";
 import RunsTab from "./RunsTab.vue";
+import AdminTab from "./AdminTab.vue";
 import { timeAgo, exactDate, toLocalMs } from "@/utils/datetime";
 import { scheduleLabel } from "./scheduleLabel";
 import { ARMED_HELP, LAST_RUN_TONE, NEXT_RUN_TONE, enabledLabel } from "./runDisplay";
@@ -214,7 +216,7 @@ import { errHtml, escapeHtml } from "@/lib/errors";
 import { macroHold, holdMessage } from "@/lib/macroHold";
 
 const props = defineProps({
-	tab: { type: String, default: "macros" }, // 'runs' on /macros/runs (§9)
+	tab: { type: String, default: "macros" }, // 'runs' on /macros/runs (§9), 'admin' on /macros/admin
 });
 
 const router = useRouter();
@@ -225,11 +227,20 @@ const route = useRoute();
 const socket = inject("$socket");
 
 // ── tabs (synced to the route, D32-friendly: real URLs per tab) ──────────────
+// The third tab, every user's macros, is an admin's (Jarvis Admin / System
+// Manager: the page boot flag). The server checks the role on every call, so
+// this only decides whether the tab is offered.
+const isAdmin = !!window.is_jarvis_admin;
+const TAB_ROUTES = { macros: "MacrosList", runs: "MacroRuns", admin: "MacroAdmin" };
 const TABS = [
 	{ label: "Macros", value: "macros" },
 	{ label: "Runs", value: "runs" },
+	...(isAdmin ? [{ label: "Admin", value: "admin" }] : []),
 ];
-const activeTab = computed(() => (props.tab === "runs" ? "runs" : "macros"));
+const activeTab = computed(() => {
+	if (props.tab === "runs") return "runs";
+	return props.tab === "admin" && isAdmin ? "admin" : "macros";
+});
 
 function onTab(v) {
 	if (v === activeTab.value) return;
@@ -238,7 +249,7 @@ function onTab(v) {
 	// away the `fv2` filter payload — switch to Runs and back and every filter was
 	// gone. The tab is a different route over the same list state, not a reset.
 	router.push({
-		name: v === "runs" ? "MacroRuns" : "MacrosList",
+		name: TAB_ROUTES[v] || "MacrosList",
 		query: { ...route.query },
 	});
 }
@@ -454,6 +465,19 @@ function onEvent(p) {
 onMounted(() => {
 	socket && socket.on && socket.on("jarvis:event", onEvent);
 });
+// /macros/admin opened by someone who is not an admin: the Macros tab is what
+// they see, so make the address say so too, and keep the rest of it (an old
+// Settings link is sent here with whatever else it carried). Watched, not only on
+// mount: the three tab routes share this one component instance.
+watch(
+	() => props.tab,
+	(tab) => {
+		if (tab === "admin" && !isAdmin) {
+			router.replace({ name: "MacrosList", query: { ...route.query }, hash: route.hash });
+		}
+	},
+	{ immediate: true }
+);
 onBeforeUnmount(() => {
 	socket && socket.off && socket.off("jarvis:event", onEvent);
 });
@@ -463,7 +487,7 @@ onBeforeUnmount(() => {
 // passed is "Due now" / "Overdue", never the bare relative time ("5 minutes ago").
 // The wording and the states live in lib/macroSchedule's nextRunCell (unit-tested,
 // imported here as describeNextRun); this wrapper only feeds it the row and maps its
-// tone to a colour (./runDisplay, shared with the admin's pane).
+// tone to a colour (./runDisplay, shared with the admin's tab).
 
 // What the "Last run" cell says, or null for the "-" placeholder. It used to print
 // a bare time, and only for scheduled runs, so a macro whose last run failed looked
