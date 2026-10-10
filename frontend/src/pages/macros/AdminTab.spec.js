@@ -12,9 +12,16 @@ import { mount, flushPromises } from "@vue/test-utils";
 vi.mock("frappe-ui", () => ({
 	Button: {
 		name: "Button",
-		props: ["label", "variant", "iconLeft", "loading", "disabled", "size", "theme"],
+		props: ["label", "variant", "icon", "iconLeft", "loading", "disabled", "size", "theme"],
 		emits: ["click"],
 		template: `<button class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" @click="$emit('click')">{{ label }}</button>`,
+	},
+	// A row's menu, opened: each option is a button, named by the option's key
+	// (jv-macro-admin-handover, jv-macro-admin-delete).
+	Dropdown: {
+		name: "Dropdown",
+		props: ["options"],
+		template: `<span class="stub-dropdown"><slot /><button v-for="o in options" :key="o.key" class="stub-button" :class="'jv-macro-admin-' + o.key" :disabled="o.disabled" @click="o.onClick()">{{ o.label }}</button></span>`,
 	},
 	Badge: {
 		name: "Badge",
@@ -22,6 +29,11 @@ vi.mock("frappe-ui", () => ({
 		template: `<span class="badge">{{ label }}</span>`,
 	},
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: `<i class="stub-icon" />` },
+	Tooltip: {
+		name: "Tooltip",
+		props: ["text"],
+		template: `<span class="stub-tooltip" :data-text="text"><slot /></span>`,
+	},
 	Breadcrumbs: {
 		name: "Breadcrumbs",
 		props: ["items"],
@@ -36,9 +48,10 @@ vi.mock("frappe-ui", () => ({
 		name: "FormControl",
 		props: ["type", "options", "modelValue", "label", "placeholder"],
 		emits: ["update:modelValue"],
+		// The filters carry no visible label: their name is the aria-label.
 		template: `
 			<label class="stub-control">
-				<span class="stub-label">{{ label }}</span>
+				<span class="stub-label">{{ label || $attrs["aria-label"] }}</span>
 				<select v-if="type === 'select'" :value="modelValue"
 					@change="$emit('update:modelValue', $event.target.value)">
 					<option v-for="o in options" :key="o.value" :value="o.value" :disabled="o.disabled">{{ o.label }}</option>
@@ -154,7 +167,11 @@ async function mountWith(rows, extra, options) {
 	return w;
 }
 
-const button = (w, label) => w.findAll("button.stub-button").find((b) => b.text() === label);
+// By its words, or by its name when it is an icon alone (Refresh).
+const button = (w, label) =>
+	w
+		.findAll("button.stub-button")
+		.find((b) => b.text() === label || b.attributes("aria-label") === label);
 const rowsOf = (w) => w.findAll(".jv-macro-admin-row");
 const control = (w, label) =>
 	w.findAll(".stub-control").find((c) => c.find(".stub-label").text() === label);
@@ -272,6 +289,62 @@ describe("Macros AdminTab, frame", () => {
 	});
 });
 
+describe("Macros AdminTab, layout", () => {
+	it("names every filter for a screen reader, and says what each 'any' is of", async () => {
+		const w = await mountWith([row("a")]);
+		for (const [name, any] of [
+			["Owner", "All owners"],
+			["Armed", "Armed: any"],
+			["Schedule", "Schedule: any"],
+			["Runs", "Runs: any"],
+			["Hold", "Hold: any"],
+		]) {
+			expect(control(w, name).find("option").text()).toBe(any);
+		}
+		expect(control(w, "Search").exists()).toBe(true);
+	});
+
+	it("offers Clear in the toolbar only while something is filtered", async () => {
+		const w = await mountWith([row("a")]);
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		await control(w, "Armed").find("select").setValue("1");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(true);
+		await w.find(".jv-macro-admin-clear").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		expect(lastCall().filters || {}).not.toHaveProperty("armed");
+	});
+
+	it("keeps a row's actions to one line: the acts on show, the rest in its menu", async () => {
+		const w = await mountWith([row("a", { live_run: "RUN-1" })]);
+		const cell = rowsOf(w)[0].find(".jv-macro-admin-more").element.closest('[role="cell"]');
+		expect(cell.className).toContain("items-center");
+		expect(cell.className).not.toContain("flex-col");
+		const menu = rowsOf(w)[0].findComponent({ name: "Dropdown" });
+		expect(menu.props("options").map((o) => o.label)).toEqual(["Hand over", "Delete"]);
+		// On show, in order: stop, hold, then the menu.
+		const shown = [
+			...cell.querySelectorAll(":scope > button, :scope > .stub-dropdown > button"),
+		]
+			.filter((b) => !b.className.includes("jv-macro-admin-handover"))
+			.filter((b) => !b.className.includes("jv-macro-admin-delete"))
+			.map((b) => b.textContent.trim().split(" for ")[0]);
+		expect(shown).toEqual(["Stop run", "Hold", "More actions"]);
+	});
+
+	it("shows the menu busy while its Delete is in flight", async () => {
+		let done;
+		api.adminDelete.mockReturnValue(new Promise((r) => (done = r)));
+		const w = await mountWith([row("a")]);
+		await rowsOf(w)[0].find(".jv-macro-admin-delete").trigger("click");
+		await flushPromises();
+		expect(rowsOf(w)[0].find(".jv-macro-admin-more").attributes("data-loading")).toBe("1");
+		done({ ok: true, deleted: true, stopped_runs: 0 });
+		await flushPromises();
+	});
+});
+
 describe("Macros AdminTab, rows", () => {
 	it("shows the owner, the name, on or off, armed, the schedule and the last run", async () => {
 		const w = await mountWith([
@@ -299,7 +372,8 @@ describe("Macros AdminTab, rows", () => {
 		expect(b.text()).toContain("Not scheduled");
 		expect(b.text()).toContain("Never ran");
 		// An owner with no full name is shown once, not twice.
-		expect(b.text().split("ben@example.test")).toHaveLength(2);
+		// In the owner's cell: the row's menu button names the owner too (its label).
+		expect(b.findAll('[role="cell"]')[1].text().split("ben@example.test")).toHaveLength(2);
 	});
 
 	it("gives every cell that can be cut short its full value on hover", async () => {
@@ -358,7 +432,7 @@ describe("Macros AdminTab, rows", () => {
 		expect(b.find(".text-ink-amber-3").exists()).toBe(false);
 	});
 
-	it("says Running beside Stop when the live run is an older one", async () => {
+	it("says Running under the last run when the live run is an older one", async () => {
 		// The last run failed; an earlier one is still going, and that is what Stop
 		// acts on. The row read "Failed" next to a Stop button with no explanation.
 		const w = await mountWith([
@@ -479,10 +553,10 @@ describe("Macros AdminTab, filters", () => {
 		]);
 	});
 
-	it("explains Armed where the admin sees it: under the filters and on the badge", async () => {
+	it("explains Armed where the admin sees it: on the filter and on the badge", async () => {
 		const HELP = "Armed: this macro's runs write without asking for confirmation.";
 		const w = await mountWith([row("a", { skip_confirmation: 1 }), row("b")]);
-		expect(w.find(".jv-macro-admin-help").text()).toBe(HELP);
+		expect(control(w, "Armed").attributes("title")).toBe(HELP);
 		const [a, b] = rowsOf(w);
 		expect(a.find(".jv-macro-admin-armed").attributes("title")).toBe(HELP);
 		expect(a.find(".jv-macro-admin-armed .badge").text()).toBe("Armed");
@@ -835,10 +909,12 @@ describe("Macros AdminTab, hold, release and delete", () => {
 			expect(releaseButton(w, i).exists()).toBe(false);
 			expect(rowsOf(w)[i].find(".jv-macro-admin-handover").exists()).toBe(false);
 			expect(deleteButton(w, i).exists()).toBe(true);
-			// Said, not just left out.
-			expect(rowsOf(w)[i].find(".jv-macro-admin-own").text()).toBe(
-				"You cannot hold, release or hand over your own macro."
-			);
+			// Marked and said, not just left out.
+			const own = rowsOf(w)[i].find(".jv-macro-admin-own");
+			expect(own.find(".badge").text()).toBe("Yours");
+			for (const said of [own.attributes("title"), own.find(".sr-only").text()]) {
+				expect(said).toBe("You cannot hold, release or hand over your own macro.");
+			}
 		}
 	});
 
@@ -984,9 +1060,14 @@ describe("Macros AdminTab, hand over", () => {
 			expect(b.exists()).toBe(true);
 			expect(b.text()).toBe("Hand over");
 		}
-		expect(handoverButton(w).attributes("aria-label")).toBe(
-			"Hand Macro a, owned by Asha Rao (asha@example.test), to another user"
+		// It is in the row's menu, and the menu's button names the macro and its owner.
+		// Its name is its `label`: frappe-ui's Button takes aria-label from there, and
+		// drops an aria-label attribute when there is no label.
+		const more = rowsOf(w)[0].findComponent(".jv-macro-admin-more");
+		expect(more.props("label")).toBe(
+			"More actions for Macro a, owned by Asha Rao (asha@example.test)"
 		);
+		expect(more.props("icon")).toBe("more-horizontal");
 	});
 
 	it("opens the hand-over dialog for the row, and sends nothing itself", async () => {
@@ -1000,6 +1081,20 @@ describe("Macros AdminTab, hand over", () => {
 		expect(dialog.attributes("data-owner")).toBe("asha@example.test");
 		expect(dialog.attributes("data-owner-label")).toBe("Asha Rao (asha@example.test)");
 		expect(confirm).not.toHaveBeenCalled();
+	});
+
+	it("puts focus on the row when the hand-over dialog is closed without handing over", async () => {
+		// Hand over is a menu item: it is gone when the dialog closes, and the menu's
+		// button is disabled while the dialog is open. Nothing else would take focus.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await handoverButton(w, 1).trigger("click");
+		document.body.focus();
+		w.findComponent({ name: "MacroHandoverDialog" }).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		await vi.advanceTimersByTimeAsync(100);
+		expect(document.activeElement).toBe(rowsOf(w)[1].find(".jv-macro-admin-open").element);
+		w.unmount();
 	});
 
 	it("disables the other actions while the dialog is open", async () => {
