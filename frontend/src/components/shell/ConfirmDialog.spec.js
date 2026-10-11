@@ -24,12 +24,18 @@ const press = (key, extra = {}) =>
 
 let w;
 let opener;
+// What the app's own shortcut listeners would hear (they listen on window).
+let heard = [];
+const onAppKey = (e) => heard.push(e.key);
 async function setup() {
 	opener = document.createElement("button");
 	opener.textContent = "Delete";
 	document.body.appendChild(opener);
 	w = mount(ConfirmDialog, { attachTo: document.body });
 	opener.focus();
+	// After the dialog's own listener, as the app's are: they are added later.
+	heard = [];
+	window.addEventListener("keydown", onAppKey);
 }
 async function ask(opts = {}) {
 	const answer = confirm({
@@ -43,6 +49,7 @@ async function ask(opts = {}) {
 }
 
 afterEach(async () => {
+	window.removeEventListener("keydown", onAppKey);
 	settleConfirm(false);
 	await flushPromises();
 	if (w) w.unmount();
@@ -208,5 +215,60 @@ describe("ConfirmDialog, keyboard focus", () => {
 		await flushPromises();
 		expect(dialog()).toBeNull();
 		expect(document.activeElement).toBe(opener);
+	});
+
+	it("does not pass a key on to the app's shortcuts while it is open", async () => {
+		await setup();
+		ask();
+		await flushPromises();
+		press("k", { metaKey: true });
+		press("o", { ctrlKey: true, shiftKey: true });
+		press("n");
+		expect(heard).toEqual([]);
+		// A function key still gets through: one of them moves to the notifications.
+		press("F8");
+		expect(heard).toEqual(["F8"]);
+		settleConfirm(false);
+		await flushPromises();
+		press("k", { metaKey: true });
+		expect(heard).toEqual(["F8", "k"]);
+	});
+
+	it("leaves what a key does by itself alone", async () => {
+		// Only the journey to the app's listeners is stopped: Enter or Space on the
+		// focused button, and the browser's own shortcuts, are not cancelled.
+		await setup();
+		ask();
+		await flushPromises();
+		for (const [key, extra] of [["Enter"], [" "], ["r", { metaKey: true }], ["a"]])
+			expect(press(key, extra)).toBe(true);
+	});
+
+	it("passes the keys on as before under a modal dialog", async () => {
+		await setup();
+		document.body.style.pointerEvents = "none";
+		ask();
+		await flushPromises();
+		press("k", { metaKey: true });
+		expect(heard).toEqual(["k"]);
+	});
+
+	it("takes focus without scrolling a long question past its title", async () => {
+		await setup();
+		ask();
+		const cancel = () => buttons()[0];
+		let options;
+		const real = HTMLElement.prototype.focus;
+		HTMLElement.prototype.focus = function (o) {
+			if (this.textContent.trim() === "Cancel") options = o;
+			return real.call(this, o);
+		};
+		try {
+			await flushPromises();
+		} finally {
+			HTMLElement.prototype.focus = real;
+		}
+		expect(document.activeElement).toBe(cancel());
+		expect(options).toEqual({ preventScroll: true });
 	});
 });
