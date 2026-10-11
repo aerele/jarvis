@@ -563,7 +563,7 @@ class TestRequestAutorunOverCapMessage(FrappeTestCase):
 		conv = _make_conv(TEST_USER)
 		api._request_autorun_arm(conv, "")
 		docs = [{"doctype": "ToDo", "values": {"description": f"o{i}"}} for i in range(_MAX_BATCH + 1)]
-		r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+		r = api._run_tool("create_doc", {"docs": docs}, conversation=conv)
 		self.assertFalse(r["ok"])
 		self.assertIn("too many records", r["error"]["message"])
 		self.assertNotIn(

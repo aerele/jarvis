@@ -18,7 +18,11 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
+<<<<<<< HEAD
   "digest": "sha256:85099b6c782a178c1536ffd92fdb1d00c111a64c6d7cddb7fde5cd8a070f97b2",
+=======
+  "digest": "sha256:dd52d82b0e0c3edb46c435f610d6610c5eaabc94461b6a3cf562278a3afedeba",
+>>>>>>> bad03d7 (chore(tools): remove the deprecated create_docs shim)
   "tools": [
     "add_comment",
     "add_tag",
@@ -103,7 +107,5 @@
     "update_wiki",
     "validate_script"
   ],
-  "backend_only": {
-    "create_docs": "Deprecated compat shim for already-shipped plugin bundles that still advertise jarvis__create_docs; bulk create is create_doc(docs=[...]) now. Re-adding a descriptor would resurrect the retired surface. Delete the module (and this entry) once no deployed bundle references it."
-  }
+  "backend_only": {}
 }

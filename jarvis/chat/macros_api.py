@@ -520,7 +520,7 @@ def get_new_macro_arming() -> dict:
 # Changing a skill asks too, whatever tool does it (``api._writes_skill_config``): the asks
 # row says so, under the one tool that only ever writes a skill.
 _ARM_NOTICE_SKIPS = (
-	(_lt("create, change and submit records"), ("create_doc", "create_docs", "update_doc", "submit_doc")),
+	(_lt("create, change and submit records"), ("create_doc", "update_doc", "submit_doc")),
 	(
 		_lt("add and change comments, tags and attachments"),
 		("add_comment", "update_comment", "add_tag", "remove_tag", "attach_to_doc"),

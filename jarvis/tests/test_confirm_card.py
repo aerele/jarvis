@@ -566,15 +566,6 @@ class TestBatchCreateContent(FrappeTestCase):
 		card = build_card("create_doc", args, {"would": would})
 		self.assertNotIn("sk-live-1", str(card))
 
-	def test_create_docs_shim_gets_the_same_card(self):
-		# The deprecated shim delegates to create_doc's batch path; build_card
-		# dispatched on tool == "create_doc" only, so an old plugin still advertising
-		# jarvis__create_docs fell back to the raw rendering.
-		args = self._args([{"doctype": "ToDo", "values": {"description": "x"}}])
-		would = {"created": [{"doctype": "ToDo", "name": "T-1"}]}
-		card = build_card("create_docs", args, {"would": would})
-		self.assertEqual(card["kind"], "batch_create")
-
 	def test_old_bundle_keys_are_kept(self):
 		# `rows` ({doctype,name}) and `count`/`extra` are what a client running the
 		# previous bundle reads. Additive only.

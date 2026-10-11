@@ -20,7 +20,7 @@ class TestGatingBadge(FrappeTestCase):
 		self.assertEqual(api._gating_badge("update_doc"), "asks_to_approve")
 
 	def test_always_asks(self):
-		# destructive + gated-non-autoapply, incl. bulk create_docs (in _GATED_WRITES)
+		# destructive + gated-non-autoapply (in _GATED_WRITES)
 		# and the light collab writes now gated (design A1).
 		for t in (
 			"delete_doc",
@@ -29,7 +29,6 @@ class TestGatingBadge(FrappeTestCase):
 			"apply_workflow_action",
 			"submit_doc",
 			"run_method",
-			"create_docs",
 			"share_doc",
 			"add_comment",
 			"add_tag",

@@ -42,16 +42,16 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# user. Read-only; picks no values. See jarvis-persona AGENTS.md.
 	"get_creation_context",
 	# Link-resolution for the create flow: which referenced records exist,
-	# which have near-matches to reuse, which are missing (feed create_docs).
+	# which have near-matches to reuse, which are missing (feed create_doc(docs=[...])).
 	"resolve_links",
 	"run_report",
 	"get_report_filters",
 	"run_method",
 	"query",
 	"update_doc",
+	# One record, or ``docs=[...]``: a batch, atomic create for a doc's missing
+	# dependencies (one gated card).
 	"create_doc",
-	# Batch, atomic create for a doc's missing dependencies (one gated card).
-	"create_docs",
 	"preview_doc",
 	# Read-only: static-check a Server Script / Script Report body against the
 	# safe_exec sandbox (imports, get_all/db.sql, RestrictedPython compile) before
