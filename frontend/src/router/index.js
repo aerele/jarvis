@@ -111,6 +111,15 @@ const routes = [
 		component: () => import("@/pages/macros/MacrosList.vue"),
 		props: { tab: "runs" },
 	},
+	// The admin's tab (every user's macros). Registered BEFORE :id so it can't be
+	// shadowed; MacrosList shows it only to an admin and falls back to the Macros
+	// tab for anyone else.
+	{
+		path: "/macros/admin",
+		name: "MacroAdmin",
+		component: () => import("@/pages/macros/MacrosList.vue"),
+		props: { tab: "admin" },
+	},
 	{
 		path: "/macros/new",
 		name: "MacroNew",
