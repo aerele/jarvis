@@ -1,5 +1,10 @@
 <template>
-	<div class="flex h-full flex-col overflow-hidden">
+	<div
+		ref="rootEl"
+		class="flex h-full flex-col overflow-hidden"
+		@keydown.capture="usedKeyboard(true)"
+		@pointerdown.capture="usedKeyboard(false)"
+	>
 		<LayoutHeader>
 			<template #left-header>
 				<Breadcrumbs :items="[{ label: 'Macros', route: { name: 'MacrosList' } }]" />
@@ -23,7 +28,7 @@
 
 				<div class="jv-macro-admin-toolbar flex flex-col gap-2">
 					<div class="flex items-center gap-2">
-						<div class="min-w-0 max-w-md flex-1">
+						<div class="jv-macro-admin-search min-w-0 max-w-md flex-1">
 							<FormControl
 								type="text"
 								aria-label="Search"
@@ -133,7 +138,7 @@
 						label="Try again"
 						iconLeft="refresh-cw"
 						:loading="loading"
-						@click="load('reset')"
+						@click="loadKeepingFocus('reset')"
 					/>
 				</div>
 
@@ -166,7 +171,7 @@
 					<!-- A refresh that failed keeps the rows it had: they are still the last
 				     thing the server said, under the filters still selected. -->
 					<div
-						v-if="error"
+						v-if="error && !moreFailed"
 						class="flex items-center justify-between gap-3 rounded-md bg-surface-amber-2 px-3 py-2"
 						role="alert"
 					>
@@ -177,7 +182,7 @@
 							size="sm"
 							label="Try again"
 							:loading="loading"
-							@click="load('keep')"
+							@click="loadKeepingFocus('keep')"
 						/>
 					</div>
 
@@ -191,10 +196,12 @@
 				     column. -->
 					<div
 						ref="listEl"
-						class="jv-macro-admin-scroll relative overflow-x-auto rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
+						class="jv-macro-admin-scroll relative overflow-x-auto rounded transition-opacity focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
+						:class="reloading ? 'opacity-50' : ''"
 						tabindex="0"
 						role="region"
 						aria-label="Macros list"
+						:aria-busy="reloading ? 'true' : 'false'"
 					>
 						<div role="table" aria-label="Macros">
 							<div
@@ -248,15 +255,13 @@
 											</Tooltip>
 											<span class="sr-only">{{ ARMED_HELP }}</span>
 										</span>
-										<span
+										<Badge
 											v-if="row.admin_hold"
-											class="jv-macro-admin-held inline-flex"
-											:title="holdTitle(row)"
-										>
-											<Badge variant="subtle" theme="red" label="On hold" />
-											<!-- The title shows on hover only: the reason is in the text too. -->
-											<span class="sr-only">{{ holdTitle(row) }}</span>
-										</span>
+											class="jv-macro-admin-held"
+											variant="subtle"
+											theme="red"
+											label="On hold"
+										/>
 										<!-- An admin's own macro has no Hold and no Hand over: they
 										     switch it off on its form, and another admin hands it
 										     over. The server refuses both too. Marked and said, so
@@ -270,6 +275,15 @@
 											<span class="sr-only">{{ OWN_HELP }}</span>
 										</span>
 									</div>
+									<!-- Why it is on hold, in the row: a hover title cannot be
+									     read on a phone. Two lines at most; the whole of it is in
+									     the read-only view. -->
+									<p
+										v-if="row.admin_hold && holdReason(row)"
+										class="jv-macro-admin-hold-reason mt-1 line-clamp-2 break-words text-xs text-ink-gray-6"
+									>
+										Held: {{ holdReason(row) }}
+									</p>
 								</div>
 
 								<div role="cell" class="jv-macro-admin-cell-owner min-w-0">
@@ -344,7 +358,10 @@
 								     is going), Hold or Release, Hand over, Delete. None is in a
 								     menu: this app's menus do not take keyboard focus, and what
 								     an admin does to someone's macro has to be reachable by
-								     keyboard and stay beside the macro it acts on. -->
+								     keyboard and stay beside the macro it acts on. Each is named
+								     for its row ("Delete Weekly stock check, owned by ..."): the
+								     name goes in `label`, which is what the Button reads out, and
+								     the short word in the slot is what it shows. -->
 								<div role="cell" class="jv-macro-admin-cell-actions">
 									<Button
 										v-if="row.live_run"
@@ -352,80 +369,82 @@
 										size="sm"
 										variant="subtle"
 										theme="red"
-										label="Stop run"
+										:label="actionName('Stop run of', row)"
 										:loading="stopping === row.name"
 										:disabled="busy"
-										:aria-label="`Stop the run of ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}`"
 										@click="stop(row)"
-									/>
+										>Stop run</Button
+									>
 									<Button
 										v-if="!row.admin_hold && !isMine(row)"
 										class="jv-macro-admin-hold"
 										size="sm"
 										variant="subtle"
-										label="Hold"
+										:label="actionName('Hold', row)"
 										:disabled="busy"
-										:aria-label="`Put ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}, on hold`"
 										@click="askHold(row)"
-									/>
+										>Hold</Button
+									>
 									<Button
 										v-if="row.admin_hold && !isMine(row)"
 										class="jv-macro-admin-release"
 										size="sm"
 										variant="subtle"
-										label="Release"
+										:label="actionName('Release', row)"
 										:loading="acting === `release:${row.name}`"
 										:disabled="busy"
-										:aria-label="`Release the hold on ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}`"
 										@click="release(row)"
-									/>
+										>Release</Button
+									>
 									<Button
 										v-if="!isMine(row)"
 										class="jv-macro-admin-handover"
 										size="sm"
 										variant="subtle"
-										label="Hand over"
+										:label="actionName('Hand over', row)"
 										:disabled="busy"
-										:aria-label="`Hand ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}, to another user`"
 										@click="askHandover(row)"
-									/>
+										>Hand over</Button
+									>
 									<Button
 										class="jv-macro-admin-delete"
 										size="sm"
 										variant="ghost"
 										theme="red"
-										label="Delete"
+										:label="actionName('Delete', row)"
 										:loading="acting === `delete:${row.name}`"
 										:disabled="busy"
-										:aria-label="`Delete ${
-											row.macro_name || row.name
-										}, owned by ${ownerText(row)}`"
 										@click="remove(row)"
-									/>
+										>Delete</Button
+									>
 								</div>
 							</div>
 						</div>
 					</div>
 
-					<div class="flex items-center justify-between gap-3">
+					<div class="flex flex-wrap items-center justify-between gap-3">
 						<span class="text-xs text-ink-gray-5" aria-live="polite">
 							Showing {{ rows.length }} of {{ total }}
 						</span>
-						<Button
-							v-if="hasMore"
-							variant="subtle"
-							label="Load more"
-							:loading="loading"
-							@click="load('more')"
-						/>
+						<!-- A next page that failed is said here, where the admin is
+						     looking: the banner above the list is a screen away. -->
+						<div class="flex min-w-0 items-center gap-3">
+							<span
+								v-if="error && moreFailed"
+								class="jv-macro-admin-more-error min-w-0 break-words text-sm text-ink-red-4"
+								role="alert"
+							>
+								{{ error }}
+							</span>
+							<Button
+								v-if="hasMore"
+								class="jv-macro-admin-more shrink-0"
+								variant="subtle"
+								:label="error && moreFailed ? 'Try again' : 'Load more'"
+								:loading="loading"
+								@click="loadMore"
+							/>
+						</div>
 					</div>
 				</template>
 			</div>
@@ -467,7 +486,7 @@
 // when window.is_jarvis_admin. The server checks the Jarvis Admin role itself on
 // every call (jarvis.chat.macros_admin_api), so a stale client gate can only hide
 // the tab.
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Badge, Breadcrumbs, Button, FeatherIcon, FormControl, Tooltip, toast } from "frappe-ui";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import MacroAdminDialog from "./MacroAdminDialog.vue";
@@ -532,9 +551,13 @@ const hasMore = ref(false);
 const owners = ref([]);
 const moreOwners = ref(false);
 const loading = ref(false);
+const reloading = ref(false);
 const loaded = ref(false);
 const error = ref("");
+// The load that failed was a next page (Load more): its message goes beside that button.
+const moreFailed = ref(false);
 const listEl = ref(null);
+const rootEl = ref(null);
 
 const search = ref("");
 const filters = reactive({ owner: "", armed: "", scheduled: "", live_run: "", on_hold: "" });
@@ -571,6 +594,7 @@ const armedAndScheduled = computed(() => filters.armed === "1" && filters.schedu
 // page to the old filter's rows.
 let latest = 0;
 let loadedUnder = "";
+let searchTimer = null;
 
 function query() {
 	const active = {};
@@ -607,6 +631,9 @@ async function fetchLoadedPages(q, mine) {
 }
 
 async function load(mode = "reset") {
+	// Every load carries what is typed in the search box: one still waiting to run
+	// would only ask the same again (and take the focus a second time).
+	clearTimeout(searchTimer);
 	const q = query();
 	const under = JSON.stringify(q);
 	// The search box is typed in and the rows are still the old search's (the wait
@@ -614,6 +641,8 @@ async function load(mode = "reset") {
 	if (mode !== "reset" && under !== loadedUnder) mode = "reset";
 	const mine = ++latest;
 	loading.value = true;
+	// The rows on screen are another filter's until this answers: shown as such.
+	reloading.value = mode === "reset" && under !== loadedUnder && rows.value.length > 0;
 	try {
 		const res =
 			mode === "keep"
@@ -637,10 +666,12 @@ async function load(mode = "reset") {
 		hasMore.value = !!res.has_more;
 		loadedUnder = under;
 		error.value = "";
+		moreFailed.value = false;
 		loaded.value = true;
 	} catch (e) {
 		if (mine !== latest) return;
 		error.value = errMessage(e, "Could not load the macros.");
+		moreFailed.value = mode === "more";
 		loaded.value = true;
 		// A refresh that fails keeps the last-good rows. A FILTER CHANGE that fails
 		// does not: the rows on screen belong to the filter that was left.
@@ -650,7 +681,10 @@ async function load(mode = "reset") {
 			hasMore.value = false;
 		}
 	} finally {
-		if (mine === latest) loading.value = false;
+		if (mine === latest) {
+			loading.value = false;
+			reloading.value = false;
+		}
 	}
 }
 
@@ -667,9 +701,59 @@ async function loadOwners() {
 	}
 }
 
+// A button that is loading is disabled, and the browser takes focus off a disabled
+// button: a keyboard user would be dropped at the top of the page. So a load that a
+// control here starts goes through `loadKeepingFocus`, which puts focus back where
+// it was once the load has answered.
+//
+// Only for someone using the keyboard. A click focuses a button too, but putting
+// focus back after a click opens that button's tooltip with nothing to close it,
+// and in a text box it raises a phone's keyboard over the list. And never while a
+// dialog is open over the tab, or when the user has moved focus themselves.
+let keyboard = false;
+function usedKeyboard(yes) {
+	keyboard = yes;
+}
+function focusLost() {
+	const el = document.activeElement;
+	return !el || el === document.body;
+}
+function dialogOpen() {
+	return (
+		holdOpen.value ||
+		handoverOpen.value ||
+		detailOpen.value ||
+		!!document.querySelector('[role="alertdialog"]')
+	);
+}
+// `after(lost)` picks where focus goes, given the element that had it (which may
+// be gone or disabled by now); the default is that element, else the list.
+async function loadKeepingFocus(mode, after) {
+	const at = document.activeElement;
+	const mine = keyboard && !!rootEl.value && rootEl.value.contains(at);
+	await load(mode);
+	if (!mine) return;
+	await nextTick();
+	if (!focusLost() || dialogOpen() || !rootEl.value) return;
+	const usable = (el) => !!el && el.isConnected && !el.disabled;
+	const target = (after && after(at)) || (usable(at) ? at : null) || listEl.value || searchBox();
+	if (usable(target)) target.focus();
+}
+const searchBox = () => rootEl.value && rootEl.value.querySelector(".jv-macro-admin-search input");
+
 function refresh() {
 	loadOwners();
-	return load("keep");
+	return loadKeepingFocus("keep");
+}
+
+// The next page. Focus goes to the first row it brought, so the next Tab carries on
+// down the list; when it brought none, or failed, it stays on the button.
+function loadMore() {
+	const before = rows.value.length;
+	return loadKeepingFocus("more", () => {
+		const opens = listEl.value ? listEl.value.querySelectorAll(".jv-macro-admin-open") : [];
+		return opens.length > before ? opens[before] : null;
+	});
 }
 
 function setFilter(key, value) {
@@ -685,18 +769,19 @@ function toggleArmedAndScheduled() {
 	load();
 }
 
-let searchTimer = null;
 function onSearch(value) {
 	search.value = value == null ? "" : String(value);
 	clearTimeout(searchTimer);
-	searchTimer = setTimeout(load, SEARCH_WAIT_MS);
+	// Tab from the box lands on Refresh, which this load disables for a moment.
+	searchTimer = setTimeout(() => loadKeepingFocus("reset"), SEARCH_WAIT_MS);
 }
 
+// Clear takes itself away (nothing is filtered any more): for a keyboard user
+// focus goes to the search box, the first of the controls it cleared.
 function clearFilters() {
-	clearTimeout(searchTimer);
 	search.value = "";
 	for (const k of Object.keys(filters)) filters[k] = "";
-	load();
+	return loadKeepingFocus("reset", () => searchBox());
 }
 
 // ── cells (the same decisions the owner's Macros list makes) ─────────────────
@@ -741,6 +826,11 @@ function ownerText(row) {
 	return full && full !== row.owner ? `${full} (${row.owner})` : row.owner;
 }
 
+// A row button's spoken name: the word it shows, then the macro and whose it is.
+function actionName(verb, row) {
+	return `${verb} ${row.macro_name || row.name}, owned by ${ownerText(row)}`;
+}
+
 // ── open one, read-only ──────────────────────────────────────────────────────
 const opened = ref("");
 const detailOpen = ref(false);
@@ -773,6 +863,11 @@ async function focusRow(name) {
 	target.focus();
 }
 
+// A stop ends one run. A macro that is on and scheduled starts another at its next time.
+function willRunAgain(row) {
+	return !!row.enabled && !!row.schedule_enabled && !row.admin_hold;
+}
+
 async function stop(row) {
 	if (busy.value || !row.live_run) return;
 	const name = row.macro_name || row.name;
@@ -782,7 +877,10 @@ async function stop(row) {
 		message:
 			`Stop the run of “${name}”, owned by ${ownerText(row)}? ` +
 			"A step the assistant is already working on still finishes; no further step starts. " +
-			"The owner will see that an administrator stopped it.",
+			"The owner will see that an administrator stopped it." +
+			(willRunAgain(row)
+				? " This stops this run only: the macro stays on its schedule and will run again. To prevent that, put it on hold."
+				: ""),
 		confirmLabel: "Stop run",
 		danger: true,
 	});
@@ -828,9 +926,19 @@ const busy = computed(
 
 const isMine = (row) => !!session.user && row.owner === session.user;
 
-function holdTitle(row) {
-	const reason = (row.admin_hold_reason || "").trim();
-	return reason ? `On hold: ${reason}` : "On hold";
+// The hold dialog keeps a reason that was typed and not sent, for the macro it was
+// typed for. Once that macro is on hold (a hold can be made and still answer an
+// error) or is gone, the reason has served: the closed dialog is taken away, and
+// the next one starts empty.
+function dropHoldDraft() {
+	if (holdOpen.value || !holding.value) return;
+	const fresh = rows.value.find((r) => r.name === holding.value.name);
+	if (!fresh || fresh.admin_hold) holding.value = null;
+}
+watch(holdOpen, dropHoldDraft);
+
+function holdReason(row) {
+	return (row.admin_hold_reason || "").trim();
 }
 
 function askHold(row) {
@@ -860,6 +968,7 @@ async function onHeld({ name, message }) {
 			if (message) toast.error(escapeHtml(message));
 		}
 	}
+	dropHoldDraft();
 	await focusRow(name);
 }
 
@@ -966,7 +1075,7 @@ onBeforeUnmount(() => {
 .jv-macro-admin-head,
 .jv-macro-admin-row {
 	display: grid;
-	grid-template-columns: 2fr 1.4fr 1.6fr 1.1fr 19rem;
+	grid-template-columns: 2fr 1.4fr 1.6fr minmax(9.5rem, 1.1fr) 19rem;
 	align-items: center;
 	column-gap: 1rem;
 }

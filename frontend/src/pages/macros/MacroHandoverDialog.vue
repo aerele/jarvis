@@ -2,8 +2,14 @@
 	<!-- Picks who another user's macro goes to, then says what arrives and asks
 	     once. A dialog over the Macros page's Admin tab, as MacroHoldDialog is. -->
 	<Dialog v-model="show" :options="{ title }">
+		<!-- Wraps anywhere, as the hold dialog's title does (the rule is in its file). -->
+		<template #body-title>
+			<h3 class="jv-macro-dialog-title text-2xl font-semibold leading-7 text-ink-gray-9">
+				{{ title }}
+			</h3>
+		</template>
 		<template #body-content>
-			<div class="flex flex-col gap-3">
+			<div ref="bodyEl" class="flex flex-col gap-3">
 				<FormControl
 					type="text"
 					label="New owner"
@@ -125,7 +131,7 @@
 // this with the message when the macro is no longer listed). A refusal stays in
 // the dialog, next to the choice it is about. While the hand-over is in flight the
 // dialog stays open: its answer belongs here.
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Button, Dialog, ErrorMessage, FormControl, toast } from "frappe-ui";
 import { adminHandover, adminHandoverTargets } from "@/api/macrosAdmin";
 import { errMessage, escapeHtml } from "@/lib/errors";
@@ -159,6 +165,7 @@ const loadError = ref("");
 const picked = ref("");
 const saving = ref(false);
 const error = ref("");
+const bodyEl = ref(null);
 
 const macroLabel = computed(() => props.macroName || props.name);
 const title = computed(() => `Hand over “${macroLabel.value}”`);
@@ -248,6 +255,13 @@ watch(
 		error.value = "";
 		loaded.value = false;
 		load();
+		// The dialog puts focus on its close button: typing a name would press it.
+		nextTick(() =>
+			requestAnimationFrame(() => {
+				const field = bodyEl.value && bodyEl.value.querySelector("input[type=text]");
+				if (field) field.focus();
+			})
+		);
 	},
 	{ immediate: true }
 );
