@@ -23,16 +23,29 @@
 				@click.self="settleConfirm(false)"
 			>
 				<div
+					ref="dialogEl"
 					class="jv-cdialog"
 					role="alertdialog"
 					aria-modal="true"
 					aria-labelledby="jv-confirm-title"
+					:aria-describedby="
+						state.message || state.warning ? 'jv-confirm-desc' : undefined
+					"
 				>
 					<div id="jv-confirm-title" class="jv-cdialog-title">{{ state.title }}</div>
-					<div v-if="state.message" class="jv-cdialog-msg">{{ state.message }}</div>
-					<div v-if="state.warning" class="jv-cdialog-warn">{{ state.warning }}</div>
+					<!-- One wrapper for what the dialog says, so it is read out when focus
+					     lands on Cancel (aria-describedby); display: contents keeps the two
+					     lines laid out as before. -->
+					<div id="jv-confirm-desc" style="display: contents">
+						<div v-if="state.message" class="jv-cdialog-msg">{{ state.message }}</div>
+						<div v-if="state.warning" class="jv-cdialog-warn">{{ state.warning }}</div>
+					</div>
 					<div class="jv-cdialog-foot">
-						<button class="jv-btn jv-btn--ghost" @click="settleConfirm(false)">
+						<button
+							ref="cancelEl"
+							class="jv-btn jv-btn--ghost"
+							@click="settleConfirm(false)"
+						>
 							{{ state.cancelLabel }}
 						</button>
 						<button
@@ -50,7 +63,7 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount } from "vue";
+import { nextTick, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { confirmState as state, settleConfirm } from "@/composables/useConfirm";
 import { useJarvisTheme } from "@/theme";
 
@@ -60,15 +73,86 @@ import { useJarvisTheme } from "@/theme";
 // var(--…) styling and dark backdrop resolve to nothing.
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
+// Keyboard focus. The dialog asks a question nothing else may be done before, so
+// it takes focus when it opens (on Cancel: the safe answer to a destructive
+// question, so a stray Enter does not confirm), keeps Tab on its two buttons, and
+// gives focus back to whatever opened it when it closes. Without this, focus stayed
+// on the button behind the dialog: Tab walked the page underneath and Enter pressed
+// whatever was focused there.
+//
+// Not while a modal frappe-ui dialog is open underneath (Settings): that dialog
+// traps focus itself and pulls it back the moment it leaves, so taking it here
+// would only fight it. reka marks that state with `pointer-events: none` on <body>
+// (the same lock the overlay's own CSS opts out of, below). There the dialog
+// behaves as it always has.
+const dialogEl = ref(null);
+const cancelEl = ref(null);
+let opener = null;
+let managing = false;
+
+const underModal = () => document.body.style.pointerEvents === "none";
+
+watch(
+	() => !!state.value,
+	async (open) => {
+		if (open) {
+			managing = !underModal();
+			if (!managing) return;
+			opener = document.activeElement;
+			await nextTick();
+			if (state.value && cancelEl.value) cancelEl.value.focus();
+			return;
+		}
+		if (!managing) return;
+		managing = false;
+		const back = opener;
+		opener = null;
+		await nextTick();
+		// Only if nobody has moved focus since: the caller carries on before this runs
+		// and may have put it somewhere on purpose. Left alone, focus is on <body> (the
+		// dialog's button it was on is gone) or still inside the closing dialog.
+		// (Asked of the element, not of `dialogEl`: the ref is cleared as soon as the
+		// closing transition starts, while the dialog and its focused button are still
+		// in the page.)
+		const at = document.activeElement;
+		const untouched = !at || at === document.body || !!at.closest(".jv-cdialog");
+		// And only if what opened it is still there and usable: a deleted row's button
+		// is gone, and that is fine.
+		if (
+			untouched &&
+			back &&
+			back.isConnected &&
+			!back.disabled &&
+			typeof back.focus === "function"
+		) {
+			back.focus();
+		}
+	}
+);
+
 // Escape cancels. Capture phase + stopPropagation so a global Escape handler on
 // an underlying view (e.g. ChatView closing settings) does NOT also fire when the
-// user is only dismissing this dialog.
+// user is only dismissing this dialog. Tab stays inside the dialog.
 function onKey(e) {
-	if (e.key === "Escape" && state.value) {
+	if (!state.value) return;
+	if (e.key === "Escape") {
 		e.preventDefault();
 		e.stopPropagation();
 		settleConfirm(false);
+		return;
 	}
+	// Plain Tab and Shift+Tab only: with Ctrl, Alt or Meta it is the browser's.
+	if (e.key !== "Tab" || e.ctrlKey || e.altKey || e.metaKey) return;
+	if (!managing || !dialogEl.value) return;
+	const buttons = [...dialogEl.value.querySelectorAll("button")];
+	if (!buttons.length) return;
+	const at = buttons.indexOf(document.activeElement);
+	const next = e.shiftKey
+		? buttons[(at <= 0 ? buttons.length : at) - 1]
+		: buttons[(at + 1) % buttons.length];
+	e.preventDefault();
+	e.stopPropagation();
+	next.focus();
 }
 onMounted(() => window.addEventListener("keydown", onKey, true));
 onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
