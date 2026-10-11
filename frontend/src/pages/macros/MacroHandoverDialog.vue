@@ -1,10 +1,15 @@
 <template>
 	<!-- Picks who another user's macro goes to, then says what arrives and asks
-	     once. A second dialog over Settings, as MacroHoldDialog is, so Escape
-	     closes this one alone. -->
+	     once. A dialog over the Macros page's Admin tab, as MacroHoldDialog is. -->
 	<Dialog v-model="show" :options="{ title }">
+		<!-- Wraps anywhere, as the hold dialog's title does (the rule is in its file). -->
+		<template #body-title>
+			<h3 class="jv-macro-dialog-title text-2xl font-semibold leading-7 text-ink-gray-9">
+				{{ title }}
+			</h3>
+		</template>
 		<template #body-content>
-			<div class="flex flex-col gap-3">
+			<div ref="bodyEl" class="flex flex-col gap-3">
 				<FormControl
 					type="text"
 					label="New owner"
@@ -31,9 +36,11 @@
 				>
 					Searching…
 				</p>
+				<!-- min-w-0: a fieldset is as wide as its longest line by default, and a
+				     long name would push it past the dialog. -->
 				<fieldset
 					v-if="!loadError && loaded && users.length"
-					class="flex max-h-56 flex-col gap-1 overflow-y-auto"
+					class="flex max-h-56 min-w-0 flex-col gap-1 overflow-y-auto"
 					:disabled="saving"
 					:aria-busy="searching ? 'true' : 'false'"
 				>
@@ -73,14 +80,29 @@
 				>
 					Showing the first {{ users.length }}. Type a name to narrow the search.
 				</p>
-				<!-- The confirmation: what the admin is about to do, in words. -->
-				<p v-if="pickedUser" class="jv-macro-handover-summary text-p-sm text-ink-gray-7">
-					Hand “{{ macroLabel }}” from {{ ownerLabel || "its owner" }} to
-					{{ userLabel(pickedUser) }}? It arrives switched off, unscheduled and not
-					armed. Its summary, the skills on its steps, its shares and its assignments are
-					cleared, and a run that is going now is stopped. Both of them are told. Its
-					past runs stay with {{ ownerLabel || "its owner" }}.
-				</p>
+				<!-- The confirmation: what the admin is about to do, in words. Who to
+				     whom is said once, in full; what happens then is a short list that
+				     names nobody again, so it reads at a glance however long the names
+				     are. Set apart from the choice above by a rule. -->
+				<div
+					v-if="pickedUser"
+					class="jv-macro-handover-summary flex min-w-0 flex-col gap-2 border-t pt-3"
+				>
+					<p class="break-words text-p-sm font-medium text-ink-gray-8">
+						Hand “{{ macroLabel }}” from {{ ownerLabel || "its owner" }} to
+						{{ userLabel(pickedUser) }}?
+					</p>
+					<ul class="list-disc space-y-1 pl-5 text-p-sm text-ink-gray-7">
+						<li>It arrives switched off, unscheduled and not armed.</li>
+						<li>
+							Its summary, the skills on its steps, its shares and its assignments
+							are cleared.
+						</li>
+						<li>A run that is going now is stopped.</li>
+						<li>Both of them are told.</li>
+						<li>Its past runs stay with the current owner.</li>
+					</ul>
+				</div>
 				<ErrorMessage v-if="error" :message="error" />
 			</div>
 		</template>
@@ -109,7 +131,7 @@
 // this with the message when the macro is no longer listed). A refusal stays in
 // the dialog, next to the choice it is about. While the hand-over is in flight the
 // dialog stays open: its answer belongs here.
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Button, Dialog, ErrorMessage, FormControl, toast } from "frappe-ui";
 import { adminHandover, adminHandoverTargets } from "@/api/macrosAdmin";
 import { errMessage, escapeHtml } from "@/lib/errors";
@@ -143,6 +165,7 @@ const loadError = ref("");
 const picked = ref("");
 const saving = ref(false);
 const error = ref("");
+const bodyEl = ref(null);
 
 const macroLabel = computed(() => props.macroName || props.name);
 const title = computed(() => `Hand over “${macroLabel.value}”`);
@@ -232,6 +255,13 @@ watch(
 		error.value = "";
 		loaded.value = false;
 		load();
+		// The dialog puts focus on its close button: typing a name would press it.
+		nextTick(() =>
+			requestAnimationFrame(() => {
+				const field = bodyEl.value && bodyEl.value.querySelector("input[type=text]");
+				if (field) field.focus();
+			})
+		);
 	},
 	{ immediate: true }
 );

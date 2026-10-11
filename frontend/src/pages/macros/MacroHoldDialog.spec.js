@@ -19,7 +19,7 @@ vi.mock("frappe-ui", () => ({
 		name: "Dialog",
 		props: ["modelValue", "options"],
 		emits: ["update:modelValue"],
-		template: `<div v-if="modelValue" class="stub-dialog"><h4>{{ options && options.title }}</h4><slot name="body-content" /><slot name="actions" /></div>`,
+		template: `<div v-if="modelValue" class="stub-dialog"><button class="stub-close">x</button><slot name="body-title"><h4>{{ options && options.title }}</h4></slot><slot name="body-content" /><slot name="actions" /></div>`,
 	},
 	ErrorMessage: {
 		name: "ErrorMessage",
@@ -62,9 +62,18 @@ beforeEach(() => {
 describe("MacroHoldDialog", () => {
 	it("names the macro and its owner, and says what a hold does", () => {
 		const w = open();
-		expect(w.find("h4").text()).toBe("Put “Month end” on hold (Asha Rao (asha@example.test))");
+		expect(w.find("h3").text()).toBe("Put “Month end” on hold");
+		expect(w.find(".jv-macro-hold-owner").text()).toBe(
+			"Owned by Asha Rao (asha@example.test)"
+		);
+		// A long unbroken name wraps instead of pushing the close button out.
+		expect(w.find("h3").classes()).toContain("jv-macro-dialog-title");
 		expect(w.text()).toContain("The macro stops running until an admin releases it");
 		expect(w.text()).toContain("Its owner sees the reason on the macro.");
+		// Hold and Release are not pause and resume: said before the hold, not after.
+		expect(w.find(".jv-macro-hold-note").text()).toContain(
+			"Releasing the hold later does not undo these"
+		);
 	});
 
 	it("will not hold without a reason", async () => {
@@ -145,11 +154,57 @@ describe("MacroHoldDialog", () => {
 		expect(count.text()).toBe("0 / 500");
 	});
 
-	it("starts empty each time it opens", async () => {
+	it("keeps a typed reason when the same macro's dialog is closed and opened again", async () => {
+		// Escape or a click outside closes it: up to 500 typed characters are not lost.
 		const w = open();
 		await w.find(".stub-reason").setValue("first");
 		await w.setProps({ modelValue: false });
 		await w.setProps({ modelValue: true });
+		expect(w.find(".stub-reason").element.value).toBe("first");
+	});
+
+	it("starts empty for another macro, and after the hold is made", async () => {
+		const w = open();
+		await w.find(".stub-reason").setValue("first");
+		await w.setProps({ modelValue: false });
+		await w.setProps({ name: "m2", modelValue: true });
 		expect(w.find(".stub-reason").element.value).toBe("");
+		await w.find(".stub-reason").setValue("second");
+		await holdButton(w).trigger("click");
+		await flushPromises();
+		await w.setProps({ modelValue: false });
+		await w.setProps({ modelValue: true });
+		expect(w.find(".stub-reason").element.value).toBe("");
+	});
+
+	it("cannot be closed while the hold is in flight", async () => {
+		// Its answer, a refusal included, belongs in this dialog.
+		let fail;
+		api.adminHold.mockReturnValue(new Promise((_, r) => (fail = r)));
+		const w = open();
+		await w.find(".stub-reason").setValue("Paused");
+		await holdButton(w).trigger("click");
+		w.findComponent({ name: "Dialog" }).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(w.emitted("update:modelValue")).toBeUndefined();
+		fail(new Error("Could not stop its run."));
+		await flushPromises();
+		expect(w.find(".stub-error").text()).toContain("Could not stop its run.");
+		// Once it has answered, it closes as usual.
+		w.findComponent({ name: "Dialog" }).vm.$emit("update:modelValue", false);
+		expect(w.emitted("update:modelValue")).toEqual([[false]]);
+	});
+
+	it("opens with focus on the reason, not on the close button", async () => {
+		// Typing straight away would otherwise press Close.
+		const w = mount(MacroHoldDialog, {
+			props: { modelValue: true, name: "m1", macroName: "Month end" },
+			attachTo: document.body,
+		});
+		w.find(".stub-close").element.focus();
+		await flushPromises();
+		await new Promise((r) => requestAnimationFrame(r));
+		expect(document.activeElement).toBe(w.find(".stub-reason").element);
+		w.unmount();
 	});
 });
