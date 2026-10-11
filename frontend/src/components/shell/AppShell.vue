@@ -111,7 +111,7 @@ import SupportCopyPromptDialog from "@/components/support/SupportCopyPromptDialo
 import OnboardingGate from "./OnboardingGate.vue";
 import UpdateNoticeGate from "./UpdateNoticeGate.vue";
 import { showNotice } from "@/noticeGate";
-import { parseSettingsDeepLink } from "@/lib/settingsDeepLink";
+import { movedSettingsRoute, parseSettingsDeepLink } from "@/lib/settingsDeepLink";
 // Unscoped global stylesheet. ChatView and OnboardingView render .jv-btn /
 // .jv-iconbtn from it, so it is imported here at the shell rather than left as
 // a side effect of whichever component happens to mount first (it used to ride
@@ -194,7 +194,7 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 	"billing", // legacy alias, not a PANES key - SettingsDialog maps it to "usage"
 	"branding",
 	"usageadmin",
-	"macroadmin",
+	"macroadmin", // moved: no longer a pane, see openSettingsFromQuery
 ]);
 // Only ever OPENS a pane - an absent or unrecognised key is silently ignored
 // so a plain "/jarvis/" load is untouched. Strips the param either way it
@@ -203,6 +203,19 @@ const SETTINGS_DEEP_LINK_KEYS = new Set([
 function openSettingsFromQuery() {
 	const link = parseSettingsDeepLink(window.location.search, SETTINGS_DEEP_LINK_KEYS);
 	if (link.rest === null) return;
+	// Every user's macros moved from Settings to the Admin tab of the Macros page:
+	// a saved ?settings=macroadmin link lands there (the page shows the tab only to
+	// an admin).
+	const moved = movedSettingsRoute(link.section, link.rest, window.location.hash);
+	if (moved) {
+		// After the first navigation has settled: replacing while it is pending would
+		// reject it, and that is reported as a client error.
+		router
+			.isReady()
+			.then(() => router.replace(moved))
+			.catch(() => {});
+		return;
+	}
 	if (link.section) store.openSettings(link.section, link.intent);
 	const url =
 		window.location.pathname + (link.rest ? `?${link.rest}` : "") + window.location.hash;

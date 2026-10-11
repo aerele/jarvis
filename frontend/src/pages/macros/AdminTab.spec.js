@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
- * The Jarvis Admin's Macros pane (Settings, Administration): every user's macros,
+ * The Jarvis Admin's tab on the Macros page (/macros/admin): every user's macros,
  * the filters, the loading / empty / error states, and the row actions: Stop run,
  * Hold (the reason is asked by MacroHoldDialog, stubbed here), Release and Delete.
  * The decisions behind the cells (lib/macroRunOutcome, lib/macroSchedule) are the
@@ -10,11 +10,15 @@ import { mount, flushPromises } from "@vue/test-utils";
  */
 
 vi.mock("frappe-ui", () => ({
+	// As the real Button does: it shows its slot (or its label), is NAMED by its label
+	// alone, and that name replaces any aria-label attribute it was given. A stub
+	// that let the attribute through once hid row buttons that all read "Delete".
 	Button: {
 		name: "Button",
-		props: ["label", "variant", "iconLeft", "loading", "disabled", "size", "theme"],
+		inheritAttrs: false,
+		props: ["label", "variant", "icon", "iconLeft", "loading", "disabled", "size", "theme"],
 		emits: ["click"],
-		template: `<button class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" @click="$emit('click')">{{ label }}</button>`,
+		template: `<button v-bind="$attrs" class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" :aria-label="label" @click="$emit('click')"><slot>{{ label }}</slot></button>`,
 	},
 	Badge: {
 		name: "Badge",
@@ -22,6 +26,16 @@ vi.mock("frappe-ui", () => ({
 		template: `<span class="badge">{{ label }}</span>`,
 	},
 	FeatherIcon: { name: "FeatherIcon", props: ["name"], template: `<i class="stub-icon" />` },
+	Tooltip: {
+		name: "Tooltip",
+		props: ["text"],
+		template: `<span class="stub-tooltip" :data-text="text"><slot /></span>`,
+	},
+	Breadcrumbs: {
+		name: "Breadcrumbs",
+		props: ["items"],
+		template: `<nav class="stub-crumbs" />`,
+	},
 	ErrorMessage: {
 		name: "ErrorMessage",
 		props: ["message"],
@@ -31,9 +45,10 @@ vi.mock("frappe-ui", () => ({
 		name: "FormControl",
 		props: ["type", "options", "modelValue", "label", "placeholder"],
 		emits: ["update:modelValue"],
+		// The filters carry no visible label: their name is the aria-label.
 		template: `
 			<label class="stub-control">
-				<span class="stub-label">{{ label }}</span>
+				<span class="stub-label">{{ label || $attrs["aria-label"] }}</span>
 				<select v-if="type === 'select'" :value="modelValue"
 					@change="$emit('update:modelValue', $event.target.value)">
 					<option v-for="o in options" :key="o.value" :value="o.value" :disabled="o.disabled">{{ o.label }}</option>
@@ -60,10 +75,15 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("@/api/macrosAdmin", () => api);
 
+// The page header teleports in the app; here it renders in place.
+vi.mock("@/components/LayoutHeader.vue", () => ({
+	default: { name: "LayoutHeader", template: `<div><slot name="left-header" /></div>` },
+}));
+
 const confirm = vi.hoisted(() => vi.fn());
 vi.mock("@/composables/useConfirm", () => ({ useConfirm: () => ({ confirm }) }));
 
-vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
+vi.mock("./MacroAdminDialog.vue", () => ({
 	default: {
 		name: "MacroAdminDialog",
 		props: ["modelValue", "name"],
@@ -72,7 +92,7 @@ vi.mock("@/components/settings/MacroAdminDialog.vue", () => ({
 	},
 }));
 
-vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
+vi.mock("./MacroHoldDialog.vue", () => ({
 	default: {
 		name: "MacroHoldDialog",
 		props: ["modelValue", "name", "macroName", "ownerLabel"],
@@ -81,7 +101,7 @@ vi.mock("@/components/settings/MacroHoldDialog.vue", () => ({
 	},
 }));
 
-vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
+vi.mock("./MacroHandoverDialog.vue", () => ({
 	default: {
 		name: "MacroHandoverDialog",
 		props: ["modelValue", "name", "macroName", "owner", "ownerLabel"],
@@ -94,7 +114,7 @@ vi.mock("@/components/settings/MacroHandoverDialog.vue", () => ({
 vi.mock("@/data/session", () => ({ session: { user: "admin@example.test" } }));
 
 import { toast } from "frappe-ui";
-import MacrosAdminPane from "./MacrosAdminPane.vue";
+import AdminTab from "./AdminTab.vue";
 
 const row = (name, extra = {}) => ({
 	name,
@@ -139,12 +159,16 @@ const serve = (all) => (q) =>
 
 async function mountWith(rows, extra, options) {
 	api.adminListMacros.mockResolvedValue(page(rows, extra));
-	const w = mount(MacrosAdminPane, options);
+	const w = mount(AdminTab, options);
 	await flushPromises();
 	return w;
 }
 
-const button = (w, label) => w.findAll("button.stub-button").find((b) => b.text() === label);
+// By its words, or by its name when it is an icon alone (Refresh).
+const button = (w, label) =>
+	w
+		.findAll("button.stub-button")
+		.find((b) => b.text() === label || b.attributes("aria-label") === label);
 const rowsOf = (w) => w.findAll(".jv-macro-admin-row");
 const control = (w, label) =>
 	w.findAll(".stub-control").find((c) => c.find(".stub-label").text() === label);
@@ -169,11 +193,11 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe("MacrosAdminPane, states", () => {
+describe("Macros AdminTab, states", () => {
 	it("says Loading until the first answer, then lists the macros", async () => {
 		let answer;
 		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		expect(w.text()).toContain("Loading…");
 		expect(rowsOf(w)).toHaveLength(0);
@@ -205,7 +229,7 @@ describe("MacrosAdminPane, states", () => {
 
 	it("shows the error with Try again when the first load fails, and recovers", async () => {
 		api.adminListMacros.mockRejectedValue(new Error("You need the Jarvis Admin role"));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		expect(w.find("[role='alert']").text()).toContain("You need the Jarvis Admin role");
 		expect(w.text()).not.toContain("Nobody has made a macro yet.");
@@ -248,7 +272,119 @@ describe("MacrosAdminPane, states", () => {
 	});
 });
 
-describe("MacrosAdminPane, rows", () => {
+describe("Macros AdminTab, frame", () => {
+	it("gives the table's scroll box a position, so its hidden header cannot widen the page", async () => {
+		// The screen-reader-only "Actions" header is absolutely positioned. With no
+		// positioned ancestor it is laid out against the page: at phone width the
+		// page then scrolls sideways (measured in a real browser: 564 px in a 375 px
+		// window). jsdom has no layout, so this pins the class that prevents it.
+		const w = await mountWith([row("m1")]);
+		const box = w.find(".jv-macro-admin-scroll");
+		expect(box.classes()).toContain("relative");
+		expect(box.classes()).toContain("overflow-x-auto");
+		expect(box.find(".sr-only").exists()).toBe(true);
+	});
+});
+
+describe("Macros AdminTab, layout", () => {
+	it("names every filter for a screen reader, and says what each 'All' is all of", async () => {
+		const w = await mountWith([row("a")]);
+		for (const [name, any] of [
+			["Owner", "All owners"],
+			["Armed", "All arming states"],
+			["Schedule", "All schedules"],
+			["Runs", "All run states"],
+			["Hold", "All hold states"],
+		]) {
+			expect(control(w, name).find("option").text()).toBe(any);
+		}
+		expect(control(w, "Search").exists()).toBe(true);
+	});
+
+	it("offers Clear in the toolbar only while something is filtered", async () => {
+		const w = await mountWith([row("a")]);
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		await control(w, "Armed").find("select").setValue("1");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(true);
+		await w.find(".jv-macro-admin-clear").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		expect(lastCall().filters || {}).not.toHaveProperty("armed");
+	});
+
+	it("puts every action on the row as a button, in one fixed order", async () => {
+		// None is in a menu: each has to be reachable by keyboard, beside its macro.
+		const w = await mountWith([
+			row("a", { live_run: "RUN-1" }),
+			row("b", { enabled: 0, admin_hold: 1, admin_hold_reason: "Sends too many emails" }),
+			row("mine", { owner: "admin@example.test" }),
+		]);
+		const actions = (i) => {
+			const cell = rowsOf(w)[i].find(".jv-macro-admin-cell-actions");
+			return cell.findAll("button").map((b) => b.text());
+		};
+		expect(actions(0)).toEqual(["Stop run", "Hold", "Hand over", "Delete"]);
+		expect(actions(1)).toEqual(["Release", "Hand over", "Delete"]);
+		expect(actions(2)).toEqual(["Delete"]);
+		expect(w.findComponent({ name: "Dropdown" }).exists()).toBe(false);
+	});
+
+	it("names each row's buttons for that row, starting with the word they show", async () => {
+		// Read out of context ("Delete, button" six times) they could not be told apart.
+		const w = await mountWith([
+			row("a", { live_run: "RUN-1" }),
+			row("b", {
+				enabled: 0,
+				admin_hold: 1,
+				owner: "ben@example.test",
+				owner_full_name: "Ben",
+			}),
+		]);
+		const names = (i) => {
+			const cell = rowsOf(w)[i].find(".jv-macro-admin-cell-actions");
+			return cell.findAll("button").map((b) => b.attributes("aria-label"));
+		};
+		expect(names(0)).toEqual([
+			"Stop run of Macro a, owned by Asha Rao (asha@example.test)",
+			"Hold Macro a, owned by Asha Rao (asha@example.test)",
+			"Hand over Macro a, owned by Asha Rao (asha@example.test)",
+			"Delete Macro a, owned by Asha Rao (asha@example.test)",
+		]);
+		expect(names(1)).toEqual([
+			"Release Macro b, owned by Ben (ben@example.test)",
+			"Hand over Macro b, owned by Ben (ben@example.test)",
+			"Delete Macro b, owned by Ben (ben@example.test)",
+		]);
+		// The name contains the visible word, so speech input can press it by what it shows.
+		for (const b of w.findAll(".jv-macro-admin-cell-actions button"))
+			expect(b.attributes("aria-label").startsWith(b.text())).toBe(true);
+	});
+
+	it("gives each cell its lane, for the table and for the folded layouts", async () => {
+		// The lanes are CSS (by the list's own width); jsdom lays nothing out, so this
+		// pins the names the styles hang on.
+		const w = await mountWith([row("a")]);
+		const lanes = rowsOf(w)[0]
+			.findAll('[role="cell"]')
+			.map((c) => c.classes().find((k) => k.startsWith("jv-macro-admin-cell-")));
+		expect(lanes).toEqual([
+			"jv-macro-admin-cell-macro",
+			"jv-macro-admin-cell-owner",
+			"jv-macro-admin-cell-schedule",
+			"jv-macro-admin-cell-last",
+			"jv-macro-admin-cell-actions",
+		]);
+		expect(w.find(".jv-macro-admin-head").findAll('[role="columnheader"]')).toHaveLength(5);
+		// Every filter sits in a bounded slot: a long owner's name cannot stretch it.
+		expect(w.findAll(".jv-macro-admin-filter")).toHaveLength(5);
+		for (const slot of w.findAll(".jv-macro-admin-filter")) {
+			expect(slot.classes()).toContain("min-w-0");
+		}
+	});
+});
+
+describe("Macros AdminTab, rows", () => {
 	it("shows the owner, the name, on or off, armed, the schedule and the last run", async () => {
 		const w = await mountWith([
 			row("a", {
@@ -275,7 +411,8 @@ describe("MacrosAdminPane, rows", () => {
 		expect(b.text()).toContain("Not scheduled");
 		expect(b.text()).toContain("Never ran");
 		// An owner with no full name is shown once, not twice.
-		expect(b.text().split("ben@example.test")).toHaveLength(2);
+		// In the owner's cell only: the row's action buttons name the owner too.
+		expect(b.findAll('[role="cell"]')[1].text().split("ben@example.test")).toHaveLength(2);
 	});
 
 	it("gives every cell that can be cut short its full value on hover", async () => {
@@ -334,7 +471,7 @@ describe("MacrosAdminPane, rows", () => {
 		expect(b.find(".text-ink-amber-3").exists()).toBe(false);
 	});
 
-	it("says Running beside Stop when the live run is an older one", async () => {
+	it("says Running under the last run when the live run is an older one", async () => {
 		// The last run failed; an earlier one is still going, and that is what Stop
 		// acts on. The row read "Failed" next to a Stop button with no explanation.
 		const w = await mountWith([
@@ -388,12 +525,235 @@ describe("MacrosAdminPane, rows", () => {
 		expect(button(w, "Load more")).toBeUndefined();
 	});
 
+	it("says a failed Load more beside the button, not in the banner a screen above", async () => {
+		const w = await mountWith(many(20), { total: 45, has_more: true });
+		api.adminListMacros.mockRejectedValue(new Error("Server is busy."));
+		await button(w, "Load more").trigger("click");
+		await flushPromises();
+		expect(rowsOf(w)).toHaveLength(20);
+		expect(w.find(".jv-macro-admin-more-error").text()).toBe("Server is busy.");
+		expect(w.text()).not.toContain("Showing what was loaded before");
+		// The same button tries again, and the message goes when it works.
+		api.adminListMacros.mockResolvedValue(page(many(20, 20), { total: 45, has_more: true }));
+		await w.find(".jv-macro-admin-more").trigger("click");
+		await flushPromises();
+		expect(lastCall().start).toBe(20);
+		expect(rowsOf(w)).toHaveLength(40);
+		expect(w.find(".jv-macro-admin-more-error").exists()).toBe(false);
+		expect(w.find(".jv-macro-admin-more").text()).toBe("Load more");
+	});
+
+	// A loading button is disabled, and a browser takes focus off a disabled button.
+	// jsdom does neither (and will not blur a disabled one), so the stub stays enabled
+	// and these tests take the focus away themselves. `press` is a key press on a
+	// control (how the tab knows the keyboard is in use), then its click.
+	const pending = () => {
+		let answer;
+		let fail;
+		api.adminListMacros.mockReturnValue(
+			new Promise((r, j) => {
+				answer = r;
+				fail = j;
+			})
+		);
+		const settle = (v) => answer(v);
+		settle.fail = (e) => fail(e);
+		return settle;
+	};
+	const press = async (el) => {
+		el.element.focus();
+		await el.trigger("keydown", { key: "Enter" });
+		await el.trigger("click");
+	};
+	const click = async (el) => {
+		el.element.focus(); // a click focuses a button in Chrome
+		await el.trigger("pointerdown");
+		await el.trigger("click");
+	};
+	const at = () => document.activeElement;
+	const longList = () =>
+		mountWith(many(20), { total: 45, has_more: true }, { attachTo: document.body });
+
+	it("keeps keyboard focus through Load more, Refresh and Clear", async () => {
+		const w = await longList();
+
+		// Load more: focus goes to the first row it brought.
+		let answer = pending();
+		await press(w.find(".jv-macro-admin-more"));
+		at().blur();
+		answer(page(many(20, 20), { total: 45, has_more: true, start: 20 }));
+		await flushPromises();
+		expect(at()).toBe(rowsOf(w)[20].find(".jv-macro-admin-open").element);
+
+		// Refresh: back on Refresh.
+		answer = pending();
+		await press(w.find(".jv-macro-admin-refresh"));
+		at().blur();
+		answer(page(many(40), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(w.find(".jv-macro-admin-refresh").element);
+
+		// Clear removes itself: focus goes to the search box.
+		api.adminListMacros.mockResolvedValue(page(many(3)));
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		answer = pending();
+		await press(w.find(".jv-macro-admin-clear"));
+		at().blur();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		expect(at()).toBe(control(w, "Search").find("input").element);
+		w.unmount();
+	});
+
+	it("leaves focus alone after a click: a tooltip or a phone's keyboard would follow it", async () => {
+		const w = await longList();
+		let answer = pending();
+		await click(w.find(".jv-macro-admin-refresh"));
+		at().blur();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(document.body);
+
+		api.adminListMacros.mockResolvedValue(page(many(3)));
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		answer = pending();
+		await click(w.find(".jv-macro-admin-clear"));
+		at().blur();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
+		expect(at()).toBe(document.body);
+		w.unmount();
+	});
+
+	it("leaves focus where the user moved it, and out of an open dialog", async () => {
+		const w = await longList();
+		const search = control(w, "Search").find("input");
+		let answer = pending();
+		await press(w.find(".jv-macro-admin-refresh"));
+		search.element.focus();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(search.element);
+
+		// A dialog opened over the tab meanwhile: focus is its business.
+		answer = pending();
+		await press(w.find(".jv-macro-admin-refresh"));
+		const dialog = document.createElement("div");
+		dialog.setAttribute("role", "alertdialog");
+		document.body.appendChild(dialog);
+		at().blur();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(document.body);
+		dialog.remove();
+		w.unmount();
+	});
+
+	it("keeps focus on Load more when it brings nothing or fails, and on the list when the control is gone", async () => {
+		const w = await longList();
+		// No new row (they were deleted meanwhile): stays on the button.
+		let answer = pending();
+		await press(w.find(".jv-macro-admin-more"));
+		at().blur();
+		answer(page([], { total: 45, has_more: true, start: 20 }));
+		await flushPromises();
+		expect(at()).toBe(w.find(".jv-macro-admin-more").element);
+
+		// It failed: the same button, now Try again.
+		answer = pending();
+		await press(w.find(".jv-macro-admin-more"));
+		at().blur();
+		answer.fail(new Error("Server is busy."));
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-more").text()).toBe("Try again");
+		expect(at()).toBe(w.find(".jv-macro-admin-more").element);
+
+		// The control that had focus is gone after the load (the banner's Try again,
+		// once the re-read works): the list takes it.
+		api.adminListMacros.mockRejectedValue(new Error("Still busy."));
+		await press(w.find(".jv-macro-admin-refresh"));
+		await flushPromises();
+		const retry = w
+			.findAll("button.stub-button")
+			.find((b) => b.text() === "Try again" && !b.classes().includes("jv-macro-admin-more"));
+		answer = pending();
+		await press(retry);
+		at().blur();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(retry.element.isConnected).toBe(false);
+		expect(at()).toBe(w.find(".jv-macro-admin-scroll").element);
+		w.unmount();
+	});
+
+	it("says each failure in its own place as one follows another", async () => {
+		const w = await longList();
+		api.adminListMacros.mockRejectedValue(new Error("Page failed."));
+		await w.find(".jv-macro-admin-more").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-more-error").text()).toBe("Page failed.");
+		// A Refresh that fails next is a re-read: the banner, not the footer.
+		api.adminListMacros.mockRejectedValue(new Error("Re-read failed."));
+		await button(w, "Refresh").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-macro-admin-more-error").exists()).toBe(false);
+		expect(w.text()).toContain("Re-read failed. Showing what was loaded before.");
+		// A filter change that fails clears the rows: the error stands alone.
+		api.adminListMacros.mockRejectedValue(new Error("Filter failed."));
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		expect(rowsOf(w)).toHaveLength(0);
+		expect(w.text()).toContain("Filter failed.");
+		expect(w.text()).not.toContain("Showing what was loaded before");
+		w.unmount();
+	});
+
+	it("sends one request when Refresh or Load more is pressed with a search still waiting", async () => {
+		const w = await longList();
+		for (const cls of [".jv-macro-admin-refresh", ".jv-macro-admin-more"]) {
+			api.adminListMacros.mockClear();
+			api.adminListMacros.mockResolvedValue(page(many(20), { total: 45, has_more: true }));
+			vi.useFakeTimers();
+			await control(w, "Search").find("input").setValue(`inv${cls.length}`);
+			await w.find(cls).trigger("click");
+			vi.advanceTimersByTime(1000);
+			vi.useRealTimers();
+			await flushPromises();
+			expect(api.adminListMacros).toHaveBeenCalledTimes(1);
+		}
+		w.unmount();
+	});
+
+	it("puts focus back on Refresh when a typed search disabled it under the keyboard", async () => {
+		// Tab from the search box lands on Refresh; the search then runs.
+		const w = await longList();
+		vi.useFakeTimers();
+		const search = control(w, "Search").find("input");
+		search.element.focus();
+		await search.trigger("keydown", { key: "i" });
+		await search.setValue("inv");
+		const refresh = w.find(".jv-macro-admin-refresh");
+		refresh.element.focus();
+		const answer = pending();
+		vi.advanceTimersByTime(300);
+		vi.useRealTimers();
+		at().blur();
+		answer(page([row("inv")]));
+		await flushPromises();
+		expect(at()).toBe(refresh.element);
+		w.unmount();
+	});
+
 	it("re-reads every row on screen on Refresh, however many were loaded", async () => {
 		// It asked for one page of at most 100, so past 100 rows a Refresh (or a
 		// stop) cut the list back to its first 100.
 		const all = many(130);
 		api.adminListMacros.mockImplementation(serve(all));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		for (let i = 0; i < 6; i++) {
 			await button(w, "Load more").trigger("click");
@@ -416,7 +776,7 @@ describe("MacrosAdminPane, rows", () => {
 	it("keeps Load more going after a Refresh of a long list", async () => {
 		const all = many(150);
 		api.adminListMacros.mockImplementation(serve(all));
-		const w = mount(MacrosAdminPane);
+		const w = mount(AdminTab);
 		await flushPromises();
 		for (let i = 0; i < 5; i++) {
 			await button(w, "Load more").trigger("click");
@@ -442,7 +802,7 @@ describe("MacrosAdminPane, rows", () => {
 	});
 });
 
-describe("MacrosAdminPane, filters", () => {
+describe("Macros AdminTab, filters", () => {
 	it("labels every control", async () => {
 		const w = await mountWith([row("a")]);
 		expect(w.findAll(".stub-label").map((l) => l.text())).toEqual([
@@ -455,10 +815,10 @@ describe("MacrosAdminPane, filters", () => {
 		]);
 	});
 
-	it("explains Armed where the admin sees it: under the filters and on the badge", async () => {
+	it("explains Armed where the admin sees it: on the filter and on the badge", async () => {
 		const HELP = "Armed: this macro's runs write without asking for confirmation.";
 		const w = await mountWith([row("a", { skip_confirmation: 1 }), row("b")]);
-		expect(w.find(".jv-macro-admin-help").text()).toBe(HELP);
+		expect(control(w, "Armed").attributes("title")).toBe(HELP);
 		const [a, b] = rowsOf(w);
 		expect(a.find(".jv-macro-admin-armed").attributes("title")).toBe(HELP);
 		expect(a.find(".jv-macro-admin-armed .badge").text()).toBe("Armed");
@@ -596,6 +956,42 @@ describe("MacrosAdminPane, filters", () => {
 		expect(lastCall().search).toBe("invoices");
 	});
 
+	it("asks once when a filter changes while a typed search is still waiting", async () => {
+		const w = await mountWith([row("a")]);
+		api.adminListMacros.mockClear();
+		vi.useFakeTimers();
+		await control(w, "Search").find("input").setValue("stock");
+		await button(w, "Armed and scheduled").trigger("click");
+		vi.advanceTimersByTime(1000);
+		vi.useRealTimers();
+		await flushPromises();
+		expect(api.adminListMacros).toHaveBeenCalledTimes(1);
+		expect(lastCall()).toMatchObject({
+			search: "stock",
+			filters: { armed: "1", scheduled: "1" },
+		});
+	});
+
+	it("marks the list busy while another filter's rows are still on screen", async () => {
+		const w = await mountWith([row("a")]);
+		const box = () => w.find(".jv-macro-admin-scroll");
+		expect(box().attributes("aria-busy")).toBe("false");
+		let answer;
+		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
+		await control(w, "Hold").find("select").setValue("1");
+		expect(box().attributes("aria-busy")).toBe("true");
+		expect(box().classes()).toContain("opacity-50");
+		answer(page([row("b")]));
+		await flushPromises();
+		expect(box().attributes("aria-busy")).toBe("false");
+		// A Refresh shows the same rows again: nothing on screen is stale.
+		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
+		await button(w, "Refresh").trigger("click");
+		expect(box().attributes("aria-busy")).toBe("false");
+		answer(page([row("b")]));
+		await flushPromises();
+	});
+
 	it("does not ask for the owner choices again when a search runs", async () => {
 		const w = await mountWith([row("a")]);
 		expect(api.adminMacroOwners).toHaveBeenCalledTimes(1);
@@ -612,7 +1008,7 @@ describe("MacrosAdminPane, filters", () => {
 	});
 });
 
-describe("MacrosAdminPane, Stop run", () => {
+describe("Macros AdminTab, Stop run", () => {
 	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
 	const live = (extra = {}) =>
 		row("a", { live_run: "RUN-1", last_run: { status: "running" }, ...extra });
@@ -631,7 +1027,26 @@ describe("MacrosAdminPane, Stop run", () => {
 		expect(asked.confirmLabel).toBe("Stop run");
 		expect(asked.danger).toBe(true);
 		expect(stopButton(w).attributes("aria-label")).toBe(
-			"Stop the run of Macro a, owned by Asha Rao (asha@example.test)"
+			"Stop run of Macro a, owned by Asha Rao (asha@example.test)"
+		);
+	});
+
+	it("says a scheduled macro will run again, and only then", async () => {
+		// A stop ends one run: an admin who wants it not to start again needs Hold.
+		const asked = async (extra) => {
+			confirm.mockClear();
+			const w = await mountWith([live(extra)]);
+			await stopButton(w).trigger("click");
+			await flushPromises();
+			return confirm.mock.calls[0][0].message;
+		};
+		expect(await asked({ schedule_enabled: 1 })).toContain(
+			"the macro stays on its schedule and will run again. To prevent that, put it on hold."
+		);
+		expect(await asked({ schedule_enabled: 0 })).not.toContain("will run again");
+		expect(await asked({ schedule_enabled: 1, enabled: 0 })).not.toContain("will run again");
+		expect(await asked({ schedule_enabled: 1, admin_hold: 1 })).not.toContain(
+			"will run again"
 		);
 	});
 
@@ -770,7 +1185,7 @@ describe("MacrosAdminPane, Stop run", () => {
 	});
 });
 
-describe("MacrosAdminPane, hold, release and delete", () => {
+describe("Macros AdminTab, hold, release and delete", () => {
 	const HOSTILE = `<img src=x onerror=alert(1)> & "co"`;
 	const holdButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-hold");
 	const releaseButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-release");
@@ -786,13 +1201,13 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 	it("shows On hold, with its reason, and offers Release instead of Hold", async () => {
 		const w = await mountWith([held(), row("b")]);
 		const [a, b] = rowsOf(w);
-		expect(a.find(".jv-macro-admin-held .badge").text()).toBe("On hold");
-		expect(a.find(".jv-macro-admin-held").attributes("title")).toBe(
-			"On hold: Sends too many emails"
-		);
-		// The title shows on hover only: the reason is in the text too.
-		const said = a.find(".jv-macro-admin-held .sr-only");
-		expect(said.text()).toBe("On hold: Sends too many emails");
+		expect(a.find(".jv-macro-admin-held").text()).toBe("On hold");
+		// The reason is printed in the row: a hover title cannot be read on a phone.
+		const why = a.find(".jv-macro-admin-hold-reason");
+		expect(why.text()).toBe("Held: Sends too many emails");
+		// In the text only: a title as well would be read out twice.
+		expect(why.attributes("title")).toBeUndefined();
+		expect(b.find(".jv-macro-admin-hold-reason").exists()).toBe(false);
 		expect(b.find(".jv-macro-admin-own").exists()).toBe(false);
 		expect(holdButton(w).exists()).toBe(false);
 		expect(releaseButton(w).exists()).toBe(true);
@@ -811,10 +1226,12 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 			expect(releaseButton(w, i).exists()).toBe(false);
 			expect(rowsOf(w)[i].find(".jv-macro-admin-handover").exists()).toBe(false);
 			expect(deleteButton(w, i).exists()).toBe(true);
-			// Said, not just left out.
-			expect(rowsOf(w)[i].find(".jv-macro-admin-own").text()).toBe(
-				"You cannot hold, release or hand over your own macro."
-			);
+			// Marked and said, not just left out.
+			const own = rowsOf(w)[i].find(".jv-macro-admin-own");
+			expect(own.find(".badge").text()).toBe("Yours");
+			for (const said of [own.attributes("title"), own.find(".sr-only").text()]) {
+				expect(said).toBe("You cannot hold, release or hand over your own macro.");
+			}
 		}
 	});
 
@@ -854,6 +1271,28 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 		await flushPromises();
 		expect(api.adminListMacros.mock.calls.length).toBeGreaterThan(calls);
 		expect(releaseButton(w).exists()).toBe(true);
+	});
+
+	it("takes the closed hold dialog away once its macro is on hold, so the next one starts empty", async () => {
+		// The dialog keeps a typed reason for its macro. A hold can be made and still
+		// answer an error: the reason has served then too.
+		const w = await mountWith([row("a")]);
+		await holdButton(w).trigger("click");
+		const dialog = () => w.findComponent({ name: "MacroHoldDialog" });
+		// Closed without holding: it stays, with what was typed.
+		dialog().vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(dialog().exists()).toBe(true);
+		// Held, with an error answered: still open, so still there.
+		await holdButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([held()]));
+		dialog().vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		expect(dialog().exists()).toBe(true);
+		// Closed now: gone.
+		dialog().vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(dialog().exists()).toBe(false);
 	});
 
 	it("releases after asking, says nothing turns back on, and re-reads the rows", async () => {
@@ -950,7 +1389,7 @@ describe("MacrosAdminPane, hold, release and delete", () => {
 	});
 });
 
-describe("MacrosAdminPane, hand over", () => {
+describe("Macros AdminTab, hand over", () => {
 	const handoverButton = (w, i = 0) => rowsOf(w)[i].find(".jv-macro-admin-handover");
 
 	it("offers Hand over on another user's macro, held or not", async () => {
@@ -960,8 +1399,9 @@ describe("MacrosAdminPane, hand over", () => {
 			expect(b.exists()).toBe(true);
 			expect(b.text()).toBe("Hand over");
 		}
+		// It is a button on the row, like every other action.
 		expect(handoverButton(w).attributes("aria-label")).toBe(
-			"Hand Macro a, owned by Asha Rao (asha@example.test), to another user"
+			"Hand over Macro a, owned by Asha Rao (asha@example.test)"
 		);
 	});
 

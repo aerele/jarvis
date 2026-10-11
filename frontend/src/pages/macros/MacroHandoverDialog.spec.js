@@ -24,7 +24,7 @@ vi.mock("frappe-ui", () => ({
 		name: "Dialog",
 		props: ["modelValue", "options"],
 		emits: ["update:modelValue"],
-		template: `<div v-if="modelValue" class="stub-dialog"><h4>{{ options && options.title }}</h4><slot name="body-content" /><slot name="actions" /></div>`,
+		template: `<div v-if="modelValue" class="stub-dialog"><button class="stub-close">x</button><slot name="body-title"><h4>{{ options && options.title }}</h4></slot><slot name="body-content" /><slot name="actions" /></div>`,
 	},
 	ErrorMessage: {
 		name: "ErrorMessage",
@@ -35,7 +35,7 @@ vi.mock("frappe-ui", () => ({
 		name: "FormControl",
 		props: ["type", "modelValue", "label", "disabled"],
 		emits: ["update:modelValue"],
-		template: `<input class="stub-search" :value="modelValue" :disabled="disabled" @input="$emit('update:modelValue', $event.target.value)" />`,
+		template: `<input type="text" class="stub-search" :value="modelValue" :disabled="disabled" @input="$emit('update:modelValue', $event.target.value)" />`,
 	},
 	toast: { success: vi.fn(), error: vi.fn(), create: vi.fn() },
 }));
@@ -87,7 +87,7 @@ afterEach(() => vi.useRealTimers());
 describe("MacroHandoverDialog", () => {
 	it("names the macro and offers the server's users, the owner and a full user not pickable", async () => {
 		const w = await open();
-		expect(w.find("h4").text()).toBe("Hand over “Month end”");
+		expect(w.find("h3").text()).toBe("Hand over “Month end”");
 		expect(api.adminHandoverTargets).toHaveBeenCalledWith("");
 		const rows = w.findAll(".jv-macro-handover-user");
 		expect(rows.map((r) => r.attributes("data-user"))).toEqual(USERS.map((u) => u.user));
@@ -146,6 +146,26 @@ describe("MacroHandoverDialog", () => {
 		);
 		expect(said).not.toContain(String.fromCharCode(0x2014)); // no em-dash
 		expect(handButton(w).attributes("disabled")).toBeUndefined();
+	});
+
+	it("says who to whom once, then what happens as short points that name nobody", async () => {
+		const w = await open();
+		await pick(w, "ben@example.test");
+		const summary = w.find(".jv-macro-handover-summary");
+		const points = summary.findAll("li").map((li) => li.text().replace(/\s+/g, " "));
+		expect(points).toEqual([
+			"It arrives switched off, unscheduled and not armed.",
+			"Its summary, the skills on its steps, its shares and its assignments are cleared.",
+			"A run that is going now is stopped.",
+			"Both of them are told.",
+			"Its past runs stay with the current owner.",
+		]);
+		// The names and addresses are in the question, not repeated down the list.
+		expect(points.join(" ")).not.toContain("example.test");
+		expect(summary.find("p").text().split("asha@example.test")).toHaveLength(2);
+		// Long names wrap inside the dialog, and the list of people cannot widen it.
+		expect(summary.find("p").classes()).toContain("break-words");
+		expect(w.find("fieldset").classes()).toContain("min-w-0");
 	});
 
 	it("hands over, says so, tells the pane and closes", async () => {
@@ -347,5 +367,24 @@ describe("MacroHandoverDialog", () => {
 		await flushPromises();
 		expect(api.adminHandoverTargets).toHaveBeenCalledTimes(2);
 		expect(w.find(".jv-macro-handover-summary").exists()).toBe(false);
+	});
+
+	it("opens with focus on the search box, and a title that wraps", async () => {
+		// The dialog itself focuses its close button: typing a name would press it.
+		const w = mount(MacroHandoverDialog, {
+			props: {
+				modelValue: true,
+				name: "m1",
+				macroName: "Month end",
+				owner: "asha@example.test",
+			},
+			attachTo: document.body,
+		});
+		w.find(".stub-close").element.focus();
+		await flushPromises();
+		await new Promise((r) => requestAnimationFrame(r));
+		expect(document.activeElement).toBe(w.find(".stub-search").element);
+		expect(w.find("h3.jv-macro-dialog-title").text()).toBe("Hand over “Month end”");
+		w.unmount();
 	});
 });

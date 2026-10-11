@@ -427,11 +427,13 @@ _VIEWS: tuple[ListView, ...] = (
 	),
 	ListView(
 		view_key="settings_macros_admin",
-		label="Settings → Macros (admin, every user's macros)",
+		# The key keeps its first name: the view moved from Settings to a tab of the
+		# Macros page, and a key is an identity, not an address.
+		label="Macros → Admin tab (every user's macros)",
 		classification=DOCUMENT_LIST,
 		root_doctype="Jarvis Macro",
 		endpoints=("jarvis.chat.macros_admin_api.admin_list_macros",),
-		surface="frontend/src/components/settings/MacrosAdminPane.vue",
+		surface="frontend/src/pages/macros/AdminTab.vue",
 		wave=3,
 		curated_filters={
 			"owner": "owner",
