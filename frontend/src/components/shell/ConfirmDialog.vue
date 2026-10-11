@@ -80,6 +80,13 @@ const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 // on the button behind the dialog: Tab walked the page underneath and Enter pressed
 // whatever was focused there.
 //
+// While it has the focus, a key pressed here does not travel on to the app's
+// shortcuts, which would otherwise open a search or change the screen under an open
+// question. Function keys are left alone: one of them moves to the notifications,
+// which stay readable and reachable while a question is open (they are drawn inside
+// the app, which is why the app itself is not made inert here: the overlay already
+// keeps the pointer off it, and Tab stays on the dialog's buttons).
+//
 // Not while a modal frappe-ui dialog is open underneath (Settings): that dialog
 // traps focus itself and pulls it back the moment it leaves, so taking it here
 // would only fight it. reka marks that state with `pointer-events: none` on <body>
@@ -100,7 +107,9 @@ watch(
 			if (!managing) return;
 			opener = document.activeElement;
 			await nextTick();
-			if (state.value && cancelEl.value) cancelEl.value.focus();
+			// Without scrolling: Cancel is at the bottom, and a question taller than the
+			// window would otherwise open scrolled past its own title.
+			if (state.value && cancelEl.value) cancelEl.value.focus({ preventScroll: true });
 			return;
 		}
 		if (!managing) return;
@@ -141,6 +150,11 @@ function onKey(e) {
 		settleConfirm(false);
 		return;
 	}
+	// A key pressed while this dialog has the focus is not also one of the app's
+	// shortcuts. Only the journey to the app's own listeners is stopped: what the
+	// key does by itself (Enter or Space on the focused button, the browser's own
+	// shortcuts) is untouched.
+	if (managing && !/^F\d+$/.test(e.key)) e.stopPropagation();
 	// Plain Tab and Shift+Tab only: with Ctrl, Alt or Meta it is the browser's.
 	if (e.key !== "Tab" || e.ctrlKey || e.altKey || e.metaKey) return;
 	if (!managing || !dialogEl.value) return;
@@ -174,9 +188,11 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
 	   the buttons reachable. Teleport alone was not enough (jarvis#435). */
 	pointer-events: auto;
 	background: rgba(15, 15, 22, 0.34);
+	/* The dialog is centred by its own auto margins, not by alignment here: when it
+	   is taller than the window (a long message, a zoomed page) alignment would put
+	   its top above the scrollable area, out of reach. */
 	display: flex;
-	align-items: center;
-	justify-content: center;
+	overflow-y: auto;
 	padding: 24px;
 }
 /* jv-dark is applied to the overlay itself (not an ancestor), matching the way
@@ -188,6 +204,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey, true));
 .jv-cdialog {
 	width: 400px;
 	max-width: 100%;
+	margin: auto;
+	/* A name or an address with nowhere to break still stays inside the box. */
+	overflow-wrap: anywhere;
 	background: var(--surface);
 	border: 1px solid var(--border);
 	border-radius: 14px;
