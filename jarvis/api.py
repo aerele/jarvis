@@ -985,10 +985,9 @@ _BATCH_KEYS = ("docs", "names", "updates", "messages")
 # Tools whose signature carries a batch key ALONGSIDE the single-record form
 # (a ``doctype`` param), derived from the registry's own accepted-params map
 # so this can't drift from the tool signatures. This is also what naturally
-# excludes the two dual-form-shaped exceptions: ``create_docs`` (batch only -
-# no ``doctype`` param at all; keeps its own clear "docs must be non-empty"
-# error) and ``get_my_access`` (``docs`` is a query list of doctype/name
-# pairs to check access on, not a batch of writes - also no ``doctype`` param).
+# excludes the one dual-form-shaped exception: ``get_my_access`` (``docs`` is a
+# query list of doctype/name pairs to check access on, not a batch of writes,
+# and it has no ``doctype`` param).
 _DUAL_FORM_TOOLS = frozenset(
 	name
 	for name, params in _ACCEPTED_PARAMS.items()
@@ -1047,7 +1046,6 @@ def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 _WRITE_TOOLS = frozenset(
 	{
 		"create_doc",
-		"create_docs",
 		"update_doc",
 		"submit_doc",
 		"cancel_doc",
@@ -1132,7 +1130,7 @@ _WRITE_TOOLS = frozenset(
 # cannot be rolled back. They park a described card with a consequence line, and a
 # failure shows at Confirm. run_method is never trial-run (its target's inline side
 # effects would fire unconfirmed).
-_PREVIEWABLE = frozenset({"create_doc", "create_docs", "update_doc"})
+_PREVIEWABLE = frozenset({"create_doc", "update_doc"})
 # The verbs that park a described card (see above), and the note it carries.
 _DESCRIBED_VERBS = frozenset({"submit_doc", "cancel_doc", "amend_doc", "delete_doc"})
 _DESCRIBED_VERB_NOTE = (
@@ -1153,7 +1151,6 @@ _DESCRIBED_VERB_NOTE = (
 _GATED_WRITES = frozenset(
 	{
 		"create_doc",
-		"create_docs",
 		"update_doc",
 		"submit_doc",
 		"cancel_doc",
@@ -1312,11 +1309,13 @@ _REQUEST_AUTORUN_TTL_S = 900
 # never sandbox-run at park (its target's inline non-DB side effects would fire
 # unconfirmed).
 #
-# create_docs joins the build-from-args creates: its whole batch is dry-run in
-# the sandbox at park, so a bad link / missing mandatory in ANY item bounces to
-# the model instead of a doomed card. Deliberately NOT in _AUTO_APPLYABLE - the
-# batch card is the human checkpoint against duplicate masters.
-_DRY_RUN_ON_PARK = frozenset({"create_doc", "create_docs", "update_doc"})
+# A ``create_doc(docs=[...])`` batch is dry-run whole in the sandbox at park, so a
+# bad link / missing mandatory in ANY item bounces to the model instead of a
+# doomed card. A batch never takes the auto-apply fast path (``_is_bulk_call``):
+# in an ordinary chat its card is the human checkpoint against duplicate masters.
+# The uncarded modes (auto mode, "confirm all", an armed macro, an approved skill
+# run) run it like any other covered write.
+_DRY_RUN_ON_PARK = frozenset({"create_doc", "update_doc"})
 
 # Batch payload keys: a call carrying a non-empty list under any of these is a
 # BULK call (many targets in one gated card), not a single-doc write.
@@ -1431,7 +1430,7 @@ def _arms_a_skill(tool: str, args) -> bool:
 	out is never refused here."""
 	from jarvis.tools import _write_risk
 
-	if tool in ("create_doc", "create_docs", "update_doc"):
+	if tool in ("create_doc", "update_doc"):
 		return any(
 			target.doctype == "Jarvis Custom Skill" and _switched_on(target.values.get(_ARMING_FIELD))
 			for target in _write_risk._targets(tool, args)
@@ -2464,7 +2463,7 @@ def _never_fixable(result: dict) -> None:
 
 
 # Uncarded writes that run behind the no-commit fence: the build-from-args pair.
-_FENCED_TOOLS = frozenset({"create_doc", "create_docs", "update_doc"})
+_FENCED_TOOLS = frozenset({"create_doc", "update_doc"})
 
 
 def _refuse_risky_write(
@@ -3386,7 +3385,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 		# Batch cap at PARK (F16): a bulk call over the shared max bounces to the
 		# model now with a split-and-sequence instruction, instead of parking a
-		# card that only dies at execution. create/update/create_docs already
+		# card that only dies at execution. create/update batches already
 		# bounce via their park-time dry-run (run_atomic_batch), but the
 		# consequential bulk writes (submit/cancel/delete/amend/workflow) take a
 		# described-intent preview with NO dry-run, so without this an over-size

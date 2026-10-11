@@ -284,7 +284,7 @@ class TestPolicy(_Base):
 		with patch("jarvis.api.dispatch_confirmed", return_value={"ok": True, "data": {"name": "D-1"}}) as dc:
 			ok = self.call("create_doc", {"doctype": dt, "values": {"remark": "x"}}, conv)
 			batch = self.call("create_doc", _batch(_supplier(), {"doctype": dt, "values": {}}), conv)
-			docs = self.call("create_docs", _batch({"doctype": dt, "values": {}}), conv)
+			docs = self.call("create_doc", _batch({"doctype": dt, "values": {}}), conv)
 		self.assertTrue(ok["ok"])
 		self.assertEqual(dc.call_count, 1)
 		self.assertEqual(dc.call_args.kwargs["provenance"], "auto_apply")
