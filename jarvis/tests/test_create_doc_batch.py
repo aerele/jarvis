@@ -2,10 +2,15 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError
-from jarvis.tools.create_docs import create_docs
+from jarvis.tools.create_doc import create_doc
 
 
-class TestCreateDocs(FrappeTestCase):
+def create_docs(docs, notes=None):
+	"""The batch shape of create_doc (the retired create_docs tool passed through to it)."""
+	return create_doc(docs=docs, notes=notes)
+
+
+class TestCreateDocBatch(FrappeTestCase):
 	def test_creates_all_and_returns_lean_shape(self):
 		out = create_docs(
 			[
