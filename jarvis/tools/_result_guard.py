@@ -20,8 +20,8 @@ _SAFETY = 200  # pad for note-digit / separator variance below the hard cap
 # Routing help (model-facing): the full-data escapes are report_pdf for a saved
 # report (runs server-side, returns a file, bypasses this cap) and
 # export_document / export_excel for record exports on already-narrowed data.
-# There is deliberately no "request specific rows" advice - no get_list offset
-# exists - so the guidance is narrow / aggregate / report_pdf.
+# Generic/legacy results have no reliable continuation. Paged get_list below
+# updates its own next_start to the rows actually retained by this guard.
 _NOTE = (
 	"Result truncated to fit the context window: showing the first {shown} of "
 	"{total} rows. PARTIAL - do not treat as complete; any file, summary, or count "
@@ -34,6 +34,23 @@ _NOTE_NONE = (
 	"(avoid fields=['*']), narrow the filter, aggregate with query, or use "
 	"report_pdf for a saved report (server-side, returns the full data as a file, "
 	"no cap)."
+)
+# A paged get_list page: the guard keeps a prefix, so the walk simply resumes after
+# it. No "of N" here - N would be the page size, which reads as the match count.
+_PAGED_NOTE = (
+	"Page cut to {shown} rows to fit the context window; more rows follow. Continue "
+	"with start={next_start} and the same filters, fields and order_by. A limit near "
+	"{shown} avoids re-reading rows."
+)
+_PAGED_NOTE_CEILING = (
+	"Page cut to {shown} rows to fit the context window and the paging ceiling is "
+	"reached. Use a narrower filter, aggregate with query, or a report."
+)
+# Longest of the three: the size overhead is measured with this one.
+_PAGED_NOTE_NONE = (
+	"Page cut to zero rows: even one row exceeds the size budget, so this page cannot "
+	"be continued as asked. Request fewer fields (avoid fields=['*']) or narrow the "
+	"filter and ask again from the same start, or aggregate with query."
 )
 _NOTE_NONROW = (
 	"Result too large: the non-row content (e.g. the SQL text or columns) alone "
@@ -90,7 +107,31 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 		if k != key and k not in _META_KEYS:
 			out[k] = v
 	out[key] = kept
+	if data.get("list_contract") == "list-page-v1":
+		# Never leave a pre-truncation completeness claim or skip omitted rows.
+		original = data.get("coverage")
+		coverage = dict(original) if isinstance(original, dict) else {}
+		start = coverage.get("start")
+		valid_start = type(start) is int and 0 <= start <= 100_000
+		next_start = start + len(kept) if valid_start else None
+		coverage.update(
+			returned=len(kept),
+			has_more=True,
+			complete=False,
+			next_start=next_start if kept and next_start is not None and next_start <= 100_000 else None,
+		)
+		out["coverage"] = coverage
+		out["note"] = _paged_note(len(kept), coverage["next_start"])
+		del out["total"]
 	return out
+
+
+def _paged_note(shown: int, next_start: int | None) -> str:
+	if not shown:
+		return _PAGED_NOTE_NONE
+	if next_start is None:
+		return _PAGED_NOTE_CEILING.format(shown=shown)
+	return _PAGED_NOTE.format(shown=shown, next_start=next_start)
 
 
 def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
