@@ -58,7 +58,7 @@ from jarvis.tools import _write_risk
 HELD = "file_box_held"
 AR = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
-_WRITE_DOC_TOOLS = frozenset({"create_doc", "create_docs", "update_doc"})
+_WRITE_DOC_TOOLS = frozenset({"create_doc", "update_doc"})
 # Framework / Jarvis internals an unattended run must never write (F6).
 DENIED_MODULES = frozenset(
 	{
@@ -207,7 +207,7 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	sheets = bool(sheet) or held_sheets.enabled()
 	if tool == "update_wiki":
 		return "pass", None
-	bulk = api._is_bulk_call(args) or tool == "create_docs"
+	bulk = api._is_bulk_call(args)
 	if tool not in _WRITE_DOC_TOOLS:
 		if tool in api._GATED_WRITES or bulk:
 			return "refuse", _refuse(

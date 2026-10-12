@@ -270,7 +270,7 @@ def _patch_rows(meta, df, sealed, patch, locked: dict, fail) -> list:
 
 def call_args(tool: str, args: dict, items: list[dict]) -> dict:
 	"""The sealed call rebuilt with the merged values (every other key kept)."""
-	if tool == "create_docs" or isinstance(args.get("docs"), list):
+	if isinstance(args.get("docs"), list):
 		return {**args, "docs": [{"doctype": i["doctype"], "values": i["values"]} for i in items]}
 	return {**args, "doctype": items[0]["doctype"], "values": items[0]["values"]}
 

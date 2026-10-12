@@ -162,7 +162,7 @@ class TestAutoModeGate(FrappeTestCase):
 
 		conv = self._auto_conv()
 		docs = [{"doctype": "ToDo", "values": {"description": f"o{i}"}} for i in range(_MAX_BATCH + 1)]
-		r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+		r = api._run_tool("create_doc", {"docs": docs}, conversation=conv)
 		self.assertFalse(r["ok"])
 		self.assertIn("too many records", r["error"]["message"])
 		self.assertNotIn("confirm each one", r["error"]["message"])

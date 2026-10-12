@@ -4,7 +4,7 @@ permission-aware writes.
 Sibling of ``update_doc``. The agent uses this when the user asks for a
 new record ("create a customer Acme", "add a task for tomorrow").
 
-Two shapes (the bulk overload folds in the former ``create_docs`` tool for
+Two shapes (the batch overload replaced the retired ``create_docs`` tool, for
 uniformity with the other write tools):
 
 - **Single:** ``create_doc(doctype, values)`` -> the inserted doc as a dict.
@@ -132,8 +132,8 @@ def create_doc(
 
 
 def _create_batch(docs: list, notes: list | None = None) -> dict:
-	"""Insert every ``{"doctype","values"}`` atomically (the former create_docs
-	path). All inserts run in one savepoint (``run_atomic_batch``): if any
+	"""Insert every ``{"doctype","values"}`` atomically (the retired create_docs
+	tool's path). All inserts run in one savepoint (``run_atomic_batch``): if any
 	fails, the whole batch rolls back and nothing is committed. A doc may link
 	to one created earlier in the same batch (same transaction)."""
 	if not isinstance(docs, list) or not docs:
