@@ -1,7 +1,7 @@
 import json
 import time
 from collections import deque
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import frappe
 from frappe.utils import strip_html
@@ -177,6 +177,106 @@ def _dispatch_current_user(tool: str, args: dict | str | None) -> dict:
 	return _run_tool(tool, args)
 
 
+# #707 B3: the agent's reads run on a web worker, and the database's own limit is
+# none, so one slow query or inline report holds the worker until the web server
+# kills it (and the query keeps running). Per site: ``jarvis_agent_read_timeout_s``
+# in site_config.json, whole seconds, 0 switches the limit off. The default sits under
+# the plugin's own 30 s call_tool abort (frappe-client.ts), so a slow read comes back
+# as QueryTooSlowError with its "narrow the question" advice instead of a bare abort.
+_AGENT_READ_TIMEOUT_KEY = "jarvis_agent_read_timeout_s"
+_AGENT_READ_TIMEOUT_DEFAULT_S = 25
+
+
+def _agent_read_timeout_s() -> int:
+	"""The agent's per-statement read limit in seconds; 0 means no limit. Not
+	``cint``: it reads garbage as 0, which would switch the limit off. Whole
+	seconds only: ``int`` would read 0.5 as 0 (off) and ``true`` as a 1 s limit."""
+	raw = frappe.conf.get(_AGENT_READ_TIMEOUT_KEY)
+	if raw is None or isinstance(raw, bool):
+		return _AGENT_READ_TIMEOUT_DEFAULT_S
+	if isinstance(raw, float) and not raw.is_integer():
+		return _AGENT_READ_TIMEOUT_DEFAULT_S
+	try:
+		seconds = int(raw)
+	except (TypeError, ValueError):
+		return _AGENT_READ_TIMEOUT_DEFAULT_S
+	return seconds if seconds >= 0 else _AGENT_READ_TIMEOUT_DEFAULT_S
+
+
+# A server that rejects the variable rejects it on every read: say so once per
+# process, not with a traceback per tool call.
+_limit_unsettable_logged = False
+
+
+def _log_limit_unsettable() -> None:
+	global _limit_unsettable_logged
+	if _limit_unsettable_logged:
+		return
+	_limit_unsettable_logged = True
+	frappe.logger("jarvis").warning("could not set max_statement_time", exc_info=True)
+
+
+def _log_read_too_slow(result, tool: str, user: str, conversation: str | None, started: float) -> None:
+	"""One server-side line per agent read the database stopped at the limit, so how
+	often it fires, and for which tool, can be read from the log. Never raises. The
+	session key is left out on purpose: it is a bearer."""
+	try:
+		error = result.get("error") if isinstance(result, dict) else None
+		if not isinstance(error, dict) or error.get("code") != "QueryTooSlowError":
+			return
+		frappe.logger("jarvis").warning(
+			"agent read stopped at the statement time limit: tool=%s user=%s conversation=%s "
+			"limit_s=%s duration_ms=%s",
+			tool,
+			user,
+			conversation,
+			_agent_read_timeout_s(),
+			int((time.monotonic() - started) * 1000),
+		)
+	except Exception:
+		pass
+
+
+@contextmanager
+def _agent_read_time_limit(tool: str):
+	"""Cap each database statement of an agent READ tool at the site's limit, then
+	put the session's own value back, on success and on error alike.
+
+	Write tools are left alone (``_WRITE_TOOLS``, the heavy exports included), and
+	so are the other callers of ``_run_tool``: this wraps the agent path only. A
+	limit the session already has that is tighter than ours is kept. MariaDB only;
+	``max_statement_time`` is per STATEMENT, so a tool that runs several can take
+	longer in total. A breach aborts the statement, not the transaction, and comes
+	back as ``QueryTooSlowError`` (``_translate_write_error``)."""
+	limit = _agent_read_timeout_s() if tool not in _WRITE_TOOLS else 0
+	if not limit or frappe.db.db_type != "mariadb":
+		yield
+		return
+	try:
+		previous = frappe.db.sql("SELECT @@max_statement_time")[0][0]
+		if 0 < float(previous) <= limit:
+			previous = None
+		else:
+			frappe.db.set_execution_timeout(limit)
+	except Exception:
+		# A server without max_statement_time (MySQL reports itself as mariadb
+		# here): run the tool unlimited rather than fail every read.
+		_log_limit_unsettable()
+		previous = None
+	if previous is None:
+		yield
+		return
+	try:
+		yield
+	finally:
+		# The exact previous value (it can be fractional), and never at the cost of
+		# the tool's own result or error.
+		try:
+			frappe.db.sql("SET SESSION max_statement_time = %s", (previous,))
+		except Exception:
+			frappe.logger("jarvis").warning("could not restore max_statement_time", exc_info=True)
+
+
 def _dispatch_from_session(
 	user: str,
 	session_key: str,
@@ -287,7 +387,8 @@ def _dispatch_from_session(
 			step_run = agent_run_steps.step_target(cap)
 			started_ms = time.monotonic()
 			try:
-				result = _run_tool(tool, parsed_args, conversation=conv)
+				with _agent_read_time_limit(tool):
+					result = _run_tool(tool, parsed_args, conversation=conv)
 			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
 				# fault; try to leave an honest step saying the attempt happened and
@@ -307,6 +408,7 @@ def _dispatch_from_session(
 					error_message=str(exc),
 				)
 				raise
+			_log_read_too_slow(result, tool, user, conv, started_ms)
 			# Recorded BEFORE the result budget trims the payload, so a step's row
 			# count is the count the tool actually returned, not the truncated one.
 			_ok = bool(isinstance(result, dict) and result.get("ok"))
@@ -2003,6 +2105,9 @@ _ERROR_HINTS = {
 		"This feature is switched off for your workspace. Ask your administrator to "
 		"turn it back on in Jarvis Settings if you need it."
 	),
+	# #707 B3: a read stopped at the statement time limit. Asking again unchanged
+	# hits the same limit; a narrower question is what runs.
+	"QueryTooSlowError": "Ask a narrower question: add a filter or a date range, or ask for a total.",
 }
 # Frappe's User-Permission link denial reads "...not allowed to access this X
 # record because it is linked to Y '...' in field Z" - a more specific hint than
@@ -2083,6 +2188,13 @@ def _error_code(e: JarvisError) -> str:
 
 _BUSY_MESSAGE = "The system was busy (a lock or timeout) and nothing was saved."
 
+# The model reads only code + message, so the remedy rides in the message.
+_TOO_SLOW_MESSAGE = (
+	"The database stopped this query because it ran past the time limit. Retrying it "
+	"unchanged will hit the same limit. Narrow it: add filters or a date range, or "
+	"aggregate (count, sum, group by) instead of listing rows."
+)
+
 
 def _bad_date_message(found: dict) -> str:
 	"""A database refusal of a date / datetime / time value (error 1292), named by field."""
@@ -2098,7 +2210,9 @@ def _bad_date_message(found: dict) -> str:
 	return f"{where} has an invalid {found['type']} value '{found['value'][:80]}'; use {shape}."
 
 
-def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dict | None:
+def _translate_write_error(
+	e: Exception, mark: int, *, doctype: str = "", is_write: bool = False
+) -> dict | None:
 	"""Enriched ``{ok:false, error}`` envelope for a KNOWN write-path exception,
 	promoting Frappe's discarded reason into ``message``/``detail``/``hint``.
 	Returns ``None`` for an unexpected exception - the caller MUST re-raise it so
@@ -2146,6 +2260,9 @@ def _translate_write_error(e: Exception, mark: int, *, doctype: str = "") -> dic
 		code, message = "RetryLaterError", _BUSY_MESSAGE
 	elif _failure_kind.bad_date(e):
 		code, message = "InvalidArgumentError", _bad_date_message(_failure_kind.bad_date(e))
+	elif not is_write and _failure_kind.too_slow(e):
+		# Reads only: "narrow the question" is wrong advice for a write.
+		code, message = "QueryTooSlowError", _TOO_SLOW_MESSAGE
 	else:
 		return None
 	detail = _harvest_reason(mark)
@@ -2261,7 +2378,7 @@ def _dispatch_and_wrap(
 		if hidden is not None and not isinstance(e, WriteRefusedError):
 			e = hidden  # re-raised as something else: still the refusal
 		a = args if isinstance(args, dict) else {}
-		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "")
+		envelope = _translate_write_error(e, mark, doctype=a.get("doctype") or "", is_write=is_write)
 		if envelope is None:  # unexpected - audit then re-raise to Frappe (500)
 			if is_write:
 				audit.record(
