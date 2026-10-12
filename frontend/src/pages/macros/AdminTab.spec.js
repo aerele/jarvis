@@ -17,8 +17,9 @@ vi.mock("frappe-ui", () => ({
 		name: "Button",
 		inheritAttrs: false,
 		props: ["label", "variant", "icon", "iconLeft", "loading", "disabled", "size", "theme"],
-		emits: ["click"],
-		template: `<button v-bind="$attrs" class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" :aria-label="label" @click="$emit('click')"><slot>{{ label }}</slot></button>`,
+		// No click event of its own, as the real one: the listener falls through to
+		// the <button> and is handed the browser's click.
+		template: `<button v-bind="$attrs" class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" :aria-label="label"><slot>{{ label }}</slot></button>`,
 	},
 	Badge: {
 		name: "Badge",
@@ -560,15 +561,22 @@ describe("Macros AdminTab, rows", () => {
 		settle.fail = (e) => fail(e);
 		return settle;
 	};
+	// A browser's click says how many pointer clicks made it: none when it came
+	// from a key (or from assistive technology pressing the button), one for a mouse
+	// or a finger.
+	const fire = async (el, detail) => {
+		el.element.dispatchEvent(new MouseEvent("click", { bubbles: true, detail }));
+		await flushPromises();
+	};
 	const press = async (el) => {
 		el.element.focus();
 		await el.trigger("keydown", { key: "Enter" });
-		await el.trigger("click");
+		await fire(el, 0);
 	};
 	const click = async (el) => {
 		el.element.focus(); // a click focuses a button in Chrome
 		await el.trigger("pointerdown");
-		await el.trigger("click");
+		await fire(el, 1);
 	};
 	const at = () => document.activeElement;
 	const longList = () =>
@@ -626,6 +634,166 @@ describe("Macros AdminTab, rows", () => {
 		await flushPromises();
 		expect(w.find(".jv-macro-admin-clear").exists()).toBe(false);
 		expect(at()).toBe(document.body);
+		w.unmount();
+	});
+
+	it("goes by the click itself: a key press earlier does not make a mouse click a key press", async () => {
+		// The commonest path: type a search, then click Refresh.
+		const w = await longList();
+		const search = control(w, "Search").find("input");
+		await search.trigger("keydown", { key: "i" });
+		const answer = pending();
+		// No pointerdown is sent: the key flag still says "keyboard", and only the
+		// click's own count says otherwise.
+		const refresh = w.find(".jv-macro-admin-refresh");
+		refresh.element.focus();
+		await fire(refresh, 1);
+		at().blur();
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(document.body);
+		w.unmount();
+	});
+
+	it("restores focus for a press with no key and no pointer, as assistive technology makes, on every control", async () => {
+		// Nothing has been pressed in the tab: only the click says how it came. Each
+		// control has to hand its click on for that.
+		const assistive = async (w, el) => {
+			const answer = pending();
+			el.element.focus();
+			await fire(el, 0);
+			at().blur();
+			return answer;
+		};
+		// Refresh, Load more (to the first new row), Clear (to the search box).
+		let w = await longList();
+		let answer = await assistive(w, w.find(".jv-macro-admin-refresh"));
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(w.find(".jv-macro-admin-refresh").element);
+
+		answer = await assistive(w, w.find(".jv-macro-admin-more"));
+		answer(page(many(20, 20), { total: 45, has_more: true, start: 20 }));
+		await flushPromises();
+		expect(at()).toBe(rowsOf(w)[20].find(".jv-macro-admin-open").element);
+
+		api.adminListMacros.mockResolvedValue(page(many(3)));
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		answer = await assistive(w, w.find(".jv-macro-admin-clear"));
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(control(w, "Search").find("input").element);
+
+		// The banner's Try again, after a re-read that failed.
+		api.adminListMacros.mockRejectedValue(new Error("Busy."));
+		await w.find(".jv-macro-admin-refresh").trigger("click");
+		await flushPromises();
+		const bannerRetry = w
+			.findAll("button.stub-button")
+			.find((b) => b.text() === "Try again" && !b.classes().includes("jv-macro-admin-more"));
+		answer = await assistive(w, bannerRetry);
+		answer.fail(new Error("Still busy."));
+		await flushPromises();
+		expect(at()).toBe(bannerRetry.element);
+
+		// "Clear filters" in the empty state.
+		api.adminListMacros.mockResolvedValue(page([]));
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		answer = await assistive(w, button(w, "Clear filters"));
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(control(w, "Search").find("input").element);
+		w.unmount();
+
+		// Try again when nothing could be loaded.
+		api.adminListMacros.mockRejectedValue(new Error("Server is busy."));
+		w = mount(AdminTab, { attachTo: document.body });
+		await flushPromises();
+		const firstRetry = button(w, "Try again");
+		answer = await assistive(w, firstRetry);
+		answer.fail(new Error("Still busy."));
+		await flushPromises();
+		expect(at()).toBe(firstRetry.element);
+		w.unmount();
+	});
+
+	it("leaves focus alone when the pointer was used while it loaded", async () => {
+		const w = await longList();
+		const answer = pending();
+		await press(w.find(".jv-macro-admin-refresh"));
+		at().blur();
+		// A click on a part of the tab that takes no focus.
+		await w.find(".jv-macro-admin-toolbar").trigger("pointerdown");
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(document.body);
+
+		// And one outside the tab (the sidebar, the page header): the same.
+		const outside = document.createElement("div");
+		document.body.appendChild(outside);
+		const again = pending();
+		await press(w.find(".jv-macro-admin-refresh"));
+		at().blur();
+		outside.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		again(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(document.body);
+		outside.remove();
+
+		// The page's listener goes with the tab.
+		const removed = vi.spyOn(document, "removeEventListener");
+		w.unmount();
+		expect(removed.mock.calls.some(([type]) => type === "pointerdown")).toBe(true);
+		removed.mockRestore();
+	});
+
+	it("keeps focus in the tab after Try again when nothing could be loaded", async () => {
+		api.adminListMacros.mockRejectedValue(new Error("Server is busy."));
+		const w = mount(AdminTab, { attachTo: document.body });
+		await flushPromises();
+		const retry = button(w, "Try again");
+		const answer = pending();
+		await press(retry);
+		at().blur();
+		answer(page(many(3)));
+		await flushPromises();
+		// The button is gone with the error: the list has it.
+		expect(retry.element.isConnected).toBe(false);
+		expect(at()).toBe(w.find(".jv-macro-admin-scroll").element);
+		w.unmount();
+	});
+
+	it("does not take focus from one of the tab's own dialogs, or give it to a disabled button", async () => {
+		const w = await longList();
+		const refresh = w.find(".jv-macro-admin-refresh");
+		for (const open of [
+			() => rowsOf(w)[0].find(".jv-macro-admin-hold").trigger("click"),
+			() => rowsOf(w)[0].find(".jv-macro-admin-handover").trigger("click"),
+			() => rowsOf(w)[0].find(".jv-macro-admin-open").trigger("click"),
+		]) {
+			const answer = pending();
+			await press(refresh);
+			await open();
+			at().blur();
+			answer(page(many(20), { total: 45, has_more: true }));
+			await flushPromises();
+			expect(at()).toBe(document.body);
+			for (const name of ["MacroHoldDialog", "MacroHandoverDialog", "MacroAdminDialog"]) {
+				const d = w.findComponent({ name });
+				if (d.exists()) d.vm.$emit("update:modelValue", false);
+			}
+			await flushPromises();
+		}
+		// What had focus is disabled when the load answers: the list, not a dead button.
+		const answer = pending();
+		await press(refresh);
+		at().blur();
+		refresh.element.disabled = true;
+		answer(page(many(20), { total: 45, has_more: true }));
+		await flushPromises();
+		expect(at()).toBe(w.find(".jv-macro-admin-scroll").element);
 		w.unmount();
 	});
 
@@ -1293,6 +1461,127 @@ describe("Macros AdminTab, hold, release and delete", () => {
 		dialog().vm.$emit("update:modelValue", false);
 		await flushPromises();
 		expect(dialog().exists()).toBe(false);
+	});
+
+	it("takes it away when a later re-read first shows the hold, and leaves focus to that re-read", async () => {
+		// Held with an error answered, and the re-read failed as well: the rows still
+		// show it not on hold when the dialog closes. The next Refresh shows the hold.
+		const dialog = (w) => w.findComponent({ name: "MacroHoldDialog" });
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await holdButton(w, 1).trigger("click");
+		api.adminListMacros.mockRejectedValue(new Error("Busy."));
+		dialog(w).vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		dialog(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(dialog(w).exists()).toBe(true);
+
+		// Refresh by key: the draft goes, and focus is back on Refresh, not on the row.
+		const refresh = w.find(".jv-macro-admin-refresh");
+		let answer;
+		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
+		refresh.element.focus();
+		await refresh.trigger("keydown", { key: "Enter" });
+		refresh.element.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 }));
+		await flushPromises();
+		document.activeElement.blur();
+		answer(page([row("z"), held()]));
+		await flushPromises();
+		expect(dialog(w).exists()).toBe(false);
+		expect(document.activeElement).toBe(refresh.element);
+		w.unmount();
+	});
+
+	it("does not move focus when a pointer Refresh shows the hold", async () => {
+		const dialog = (w) => w.findComponent({ name: "MacroHoldDialog" });
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		await holdButton(w, 1).trigger("click");
+		dialog(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		let answer;
+		api.adminListMacros.mockReturnValue(new Promise((r) => (answer = r)));
+		const refresh = w.find(".jv-macro-admin-refresh");
+		refresh.element.focus();
+		await refresh.trigger("pointerdown");
+		refresh.element.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+		await flushPromises();
+		document.activeElement.blur();
+		answer(page([row("z"), held()]));
+		await flushPromises();
+		expect(dialog(w).exists()).toBe(false);
+		expect(document.activeElement).toBe(document.body);
+		w.unmount();
+	});
+
+	it("keeps the draft while its macro is not on hold: listed, hidden by a filter, or not on this page", async () => {
+		const dialog = (w) => w.findComponent({ name: "MacroHoldDialog" });
+		const w = await mountWith([row("a"), row("b")]);
+		await holdButton(w).trigger("click");
+		dialog(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		// Read again with the macro still listed and not held.
+		await button(w, "Refresh").trigger("click");
+		await flushPromises();
+		expect(dialog(w).exists()).toBe(true);
+		// A search that does not show it: not on screen is not gone.
+		api.adminListMacros.mockResolvedValue(page([row("b")]));
+		await control(w, "Hold").find("select").setValue("0");
+		await flushPromises();
+		expect(dialog(w).exists()).toBe(true);
+		// A filter change that fails clears the rows: still not gone.
+		api.adminListMacros.mockRejectedValue(new Error("Busy."));
+		await control(w, "Hold").find("select").setValue("1");
+		await flushPromises();
+		expect(rowsOf(w)).toHaveLength(0);
+		expect(dialog(w).exists()).toBe(true);
+	});
+
+	it("puts focus on the row when the dialog that is taken away had given it to a button that is gone", async () => {
+		// The dialog hands focus back to the Hold button, and the row now shows Release.
+		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		await holdButton(w).trigger("click");
+		api.adminListMacros.mockResolvedValue(page([held()]));
+		const dialog = w.findComponent({ name: "MacroHoldDialog" });
+		dialog.vm.$emit("failed", { name: "a" });
+		await flushPromises();
+		document.activeElement.blur();
+		dialog.vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(rowsOf(w)[0].find(".jv-macro-admin-open").element);
+		w.unmount();
+	});
+
+	it("leaves focus where it is when the dialog is taken away and the user is somewhere else", async () => {
+		const close = async (w) => {
+			await holdButton(w).trigger("click");
+			api.adminListMacros.mockResolvedValue(page([held()]));
+			const dialog = w.findComponent({ name: "MacroHoldDialog" });
+			dialog.vm.$emit("failed", { name: "a" });
+			await flushPromises();
+			return dialog;
+		};
+		// Focus was put somewhere on purpose: it stays.
+		let w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		let dialog = await close(w);
+		const search = control(w, "Search").find("input");
+		search.element.focus();
+		dialog.vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(search.element);
+		w.unmount();
+
+		// A confirmation is open over the tab: focus is its business.
+		w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		dialog = await close(w);
+		const question = document.createElement("div");
+		question.setAttribute("role", "alertdialog");
+		document.body.appendChild(question);
+		document.activeElement.blur();
+		dialog.vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(document.activeElement).toBe(document.body);
+		question.remove();
+		w.unmount();
 	});
 
 	it("releases after asking, says nothing turns back on, and re-reads the rows", async () => {
