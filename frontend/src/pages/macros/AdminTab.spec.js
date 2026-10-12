@@ -21,6 +21,14 @@ vi.mock("frappe-ui", () => ({
 		// the <button> and is handed the browser's click.
 		template: `<button v-bind="$attrs" class="stub-button" :disabled="disabled" :data-loading="loading ? '1' : ''" :data-variant="variant" :aria-label="label"><slot>{{ label }}</slot></button>`,
 	},
+	// The menu drawn open: its button (the slot), then one button per item, classed by
+	// the item's key so a test can press "Hold" on a row as an admin would pick it.
+	Dropdown: {
+		name: "Dropdown",
+		props: ["options", "placement"],
+		emits: ["update:open"],
+		template: `<span class="stub-dropdown"><slot /><span class="stub-menu"><template v-for="g in options" :key="g.group"><button v-for="o in g.items" :key="o.key" class="stub-menu-item" :class="'jv-macro-admin-' + o.key" :data-group="g.group" :data-theme="o.theme || ''" :disabled="o.disabled" @click="o.onClick($event)">{{ o.label }}</button></template></span></span>`,
+	},
 	Badge: {
 		name: "Badge",
 		props: ["label", "theme"],
@@ -314,25 +322,44 @@ describe("Macros AdminTab, layout", () => {
 		expect(lastCall().filters || {}).not.toHaveProperty("armed");
 	});
 
-	it("puts every action on the row as a button, in one fixed order", async () => {
-		// None is in a menu: each has to be reachable by keyboard, beside its macro.
+	it("shows Stop run on the row and everything else in one Actions menu, in one fixed order", async () => {
 		const w = await mountWith([
 			row("a", { live_run: "RUN-1" }),
 			row("b", { enabled: 0, admin_hold: 1, admin_hold_reason: "Sends too many emails" }),
 			row("mine", { owner: "admin@example.test" }),
 		]);
-		const actions = (i) => {
-			const cell = rowsOf(w)[i].find(".jv-macro-admin-cell-actions");
-			return cell.findAll("button").map((b) => b.text());
-		};
-		expect(actions(0)).toEqual(["Stop run", "Hold", "Hand over", "Delete"]);
-		expect(actions(1)).toEqual(["Release", "Hand over", "Delete"]);
-		expect(actions(2)).toEqual(["Delete"]);
-		expect(w.findComponent({ name: "Dropdown" }).exists()).toBe(false);
+		const cell = (i) => rowsOf(w)[i].find(".jv-macro-admin-cell-actions");
+		// On the row: Stop run only where a run is going, then the menu's button.
+		const onRow = (i) =>
+			cell(i)
+				.findAll("button.stub-button")
+				.map((b) => b.text());
+		expect(onRow(0)).toEqual(["Stop run", "Actions"]);
+		expect(onRow(1)).toEqual(["Actions"]);
+		expect(onRow(2)).toEqual(["Actions"]);
+		// In the menu.
+		const inMenu = (i) =>
+			cell(i)
+				.findAll(".stub-menu-item")
+				.map((b) => b.text());
+		expect(inMenu(0)).toEqual(["Hold", "Hand over", "Delete"]);
+		expect(inMenu(1)).toEqual(["Release", "Hand over", "Delete"]);
+		// An admin's own macro: Delete only.
+		expect(inMenu(2)).toEqual(["Delete"]);
+		// Delete is set apart, in a group of its own, and marked as the dangerous one.
+		for (const i of [0, 1, 2]) {
+			const del = cell(i).find(".jv-macro-admin-delete");
+			expect(del.attributes("data-theme")).toBe("red");
+			const others = cell(i)
+				.findAll(".stub-menu-item")
+				.filter((b) => b.text() !== "Delete");
+			for (const o of others)
+				expect(o.attributes("data-group")).not.toBe(del.attributes("data-group"));
+		}
 	});
 
-	it("names each row's buttons for that row, starting with the word they show", async () => {
-		// Read out of context ("Delete, button" six times) they could not be told apart.
+	it("names each row's Stop run and Actions for that row, starting with the word they show", async () => {
+		// Read out of context ("Actions, button" six times) they could not be told apart.
 		const w = await mountWith([
 			row("a", { live_run: "RUN-1" }),
 			row("b", {
@@ -344,22 +371,161 @@ describe("Macros AdminTab, layout", () => {
 		]);
 		const names = (i) => {
 			const cell = rowsOf(w)[i].find(".jv-macro-admin-cell-actions");
-			return cell.findAll("button").map((b) => b.attributes("aria-label"));
+			return cell.findAll("button.stub-button").map((b) => b.attributes("aria-label"));
 		};
 		expect(names(0)).toEqual([
 			"Stop run of Macro a, owned by Asha Rao (asha@example.test)",
-			"Hold Macro a, owned by Asha Rao (asha@example.test)",
-			"Hand over Macro a, owned by Asha Rao (asha@example.test)",
-			"Delete Macro a, owned by Asha Rao (asha@example.test)",
+			"Actions for Macro a, owned by Asha Rao (asha@example.test)",
 		]);
-		expect(names(1)).toEqual([
-			"Release Macro b, owned by Ben (ben@example.test)",
-			"Hand over Macro b, owned by Ben (ben@example.test)",
-			"Delete Macro b, owned by Ben (ben@example.test)",
-		]);
+		expect(names(1)).toEqual(["Actions for Macro b, owned by Ben (ben@example.test)"]);
 		// The name contains the visible word, so speech input can press it by what it shows.
-		for (const b of w.findAll(".jv-macro-admin-cell-actions button"))
+		for (const b of w.findAll(".jv-macro-admin-cell-actions button.stub-button"))
 			expect(b.attributes("aria-label").startsWith(b.text())).toBe(true);
+	});
+
+	it("puts focus on the row's Actions button before a chosen action runs", async () => {
+		// The menu item that had focus goes away with the menu: what the action opens
+		// (a dialog, a confirmation) gives focus back to this button when cancelled.
+		const w = await mountWith([row("z"), row("a")], undefined, { attachTo: document.body });
+		const seen = [];
+		confirm.mockImplementation(async () => {
+			seen.push(document.activeElement);
+			return false;
+		});
+		await rowsOf(w)[1].find(".jv-macro-admin-delete").trigger("click");
+		await flushPromises();
+		expect(seen).toEqual([rowsOf(w)[1].find(".jv-macro-admin-actions").element]);
+		// And the dialogs: the same button has focus when they open.
+		await rowsOf(w)[1].find(".jv-macro-admin-hold").trigger("click");
+		await flushPromises();
+		expect(w.find(".stub-hold").attributes("data-open")).toBe("1");
+		expect(document.activeElement).toBe(rowsOf(w)[1].find(".jv-macro-admin-actions").element);
+		w.unmount();
+	});
+
+	// A menu the library has open: what `fromMenu` waits on, and what it focuses.
+	// Always taken away again, pass or fail: a stray one would hold up every later pick.
+	const strays = [];
+	const openMenu = () => {
+		const el = document.createElement("div");
+		el.setAttribute("data-reka-menu-content", "");
+		el.tabIndex = -1;
+		document.body.appendChild(el);
+		strays.push(el);
+		return el;
+	};
+	afterEach(() => {
+		for (const el of strays.splice(0)) el.remove();
+		for (const el of document.querySelectorAll('[role="alertdialog"]')) el.remove();
+	});
+	const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+	it("waits for an open menu to close before the chosen action runs", async () => {
+		// A confirmation opened while the menu is still there would not take the keyboard.
+		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		const open = openMenu();
+		await rowsOf(w)[0].find(".jv-macro-admin-delete").trigger("click");
+		await wait(60);
+		expect(confirm).not.toHaveBeenCalled();
+		open.remove();
+		await wait(80);
+		expect(confirm).toHaveBeenCalledTimes(1);
+		w.unmount();
+	});
+
+	it("takes one pick at a time: a second press while the first settles does nothing", async () => {
+		// An item still takes a press while its menu fades out. A second pick would move
+		// focus out of the confirmation the first one opened.
+		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		let cancel;
+		// As the real confirmation: asked now, drawn a moment later.
+		confirm.mockImplementation(() => {
+			setTimeout(() => {
+				const asking = document.createElement("div");
+				asking.setAttribute("role", "alertdialog");
+				cancel = document.createElement("button");
+				asking.appendChild(cancel);
+				document.body.appendChild(asking);
+				cancel.focus();
+			}, 5);
+			return new Promise(() => {});
+		});
+		const del = rowsOf(w)[0].find(".jv-macro-admin-delete");
+		const open = openMenu();
+		del.element.click();
+		del.element.click();
+		await wait(40);
+		open.remove();
+		await wait(80);
+		expect(confirm).toHaveBeenCalledTimes(1);
+		expect(document.activeElement).toBe(cancel);
+		w.unmount();
+	});
+
+	it("drops a pick made while something is already asking", async () => {
+		// A question opened from elsewhere on the tab (Stop run): focus stays in it.
+		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		const asking = document.createElement("div");
+		asking.setAttribute("role", "alertdialog");
+		const cancel = document.createElement("button");
+		asking.appendChild(cancel);
+		document.body.appendChild(asking);
+		cancel.focus();
+		await rowsOf(w)[0].find(".jv-macro-admin-hold").trigger("click");
+		await rowsOf(w)[0].find(".jv-macro-admin-delete").trigger("click");
+		await wait(40);
+		expect(document.activeElement).toBe(cancel);
+		expect(w.find(".stub-hold").exists()).toBe(false);
+		expect(confirm).not.toHaveBeenCalled();
+		w.unmount();
+	});
+
+	it("drops the pick when a menu is still open after the wait, or the tab was left", async () => {
+		// Another row's menu was opened meanwhile: nothing may open over it.
+		let w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		openMenu();
+		await rowsOf(w)[0].find(".jv-macro-admin-delete").trigger("click");
+		await wait(900);
+		expect(confirm).not.toHaveBeenCalled();
+		w.unmount();
+		for (const el of strays.splice(0)) el.remove();
+
+		// The tab is gone before the menu has closed: no question about a list not on screen.
+		w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		const open = openMenu();
+		await rowsOf(w)[0].find(".jv-macro-admin-delete").trigger("click");
+		w.unmount();
+		open.remove();
+		await wait(80);
+		expect(confirm).not.toHaveBeenCalled();
+	});
+
+	it("moves focus into the menu when it opens, and only then", async () => {
+		// The library leaves focus on the button: the arrow keys would not reach the items.
+		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
+		const content = openMenu();
+		const menu = w.findComponent({ name: "Dropdown" });
+		menu.vm.$emit("update:open", false);
+		await new Promise((r) => requestAnimationFrame(r));
+		expect(document.activeElement).not.toBe(content);
+		menu.vm.$emit("update:open", true);
+		await new Promise((r) => requestAnimationFrame(r));
+		expect(document.activeElement).toBe(content);
+		w.unmount();
+	});
+
+	it("opens the menu from the side its button is on: the row's end, or a card's start", async () => {
+		// jsdom lays nothing out, so the list's width is given here.
+		const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get");
+		width.mockReturnValue(1100);
+		let w = await mountWith([row("a")]);
+		expect(w.findComponent({ name: "Dropdown" }).props("placement")).toBe("right");
+		w.unmount();
+		width.mockReturnValue(360);
+		w = await mountWith([row("a")]);
+		expect(w.findComponent({ name: "Dropdown" }).props("placement")).toBe("left");
+		w.unmount();
+		width.mockRestore();
 	});
 
 	it("gives each cell its lane, for the table and for the folded layouts", async () => {
@@ -776,7 +942,15 @@ describe("Macros AdminTab, rows", () => {
 			const answer = pending();
 			await press(refresh);
 			await open();
-			at().blur();
+			// A pick from the Actions menu settles a moment after the press, with focus
+			// on the row's Actions button, which the open dialog disables. A browser
+			// then drops the focus; jsdom will not blur a disabled button, so focus is
+			// taken by something that then goes away.
+			await flushPromises();
+			const gone = document.createElement("button");
+			document.body.appendChild(gone);
+			gone.focus();
+			gone.remove();
 			answer(page(many(20), { total: 45, has_more: true }));
 			await flushPromises();
 			expect(at()).toBe(document.body);
@@ -1655,8 +1829,17 @@ describe("Macros AdminTab, hold, release and delete", () => {
 		const w = await mountWith([held(), row("b", { live_run: "RUN-2" })]);
 		await releaseButton(w).trigger("click");
 		await flushPromises();
-		expect(releaseButton(w).attributes("data-loading")).toBe("1");
-		for (const b of [deleteButton(w), holdButton(w, 1), deleteButton(w, 1)]) {
+		// The row's Actions button shows it; every menu and every item is off meanwhile.
+		const actions = (i) => rowsOf(w)[i].find(".jv-macro-admin-actions");
+		expect(actions(0).attributes("data-loading")).toBe("1");
+		expect(actions(1).attributes("data-loading")).toBe("");
+		for (const b of [
+			actions(0),
+			actions(1),
+			deleteButton(w),
+			holdButton(w, 1),
+			deleteButton(w, 1),
+		]) {
 			expect(b.attributes("disabled")).toBe("");
 		}
 		expect(rowsOf(w)[1].find(".jv-macro-admin-stop").attributes("disabled")).toBe("");
@@ -1665,6 +1848,20 @@ describe("Macros AdminTab, hold, release and delete", () => {
 		answer({ ok: true, released: true });
 		await flushPromises();
 		expect(deleteButton(w).attributes("disabled")).toBeUndefined();
+	});
+
+	it("shows a delete in flight on its row's Actions button too", async () => {
+		let answer;
+		api.adminDelete.mockReturnValue(new Promise((r) => (answer = r)));
+		const w = await mountWith([row("a"), row("b")]);
+		await deleteButton(w).trigger("click");
+		await flushPromises();
+		const actions = (i) => rowsOf(w)[i].find(".jv-macro-admin-actions");
+		expect(actions(0).attributes("data-loading")).toBe("1");
+		expect(actions(1).attributes("data-loading")).toBe("");
+		expect(actions(1).attributes("disabled")).toBe("");
+		answer({ ok: true, deleted: true, stopped_runs: 0 });
+		await flushPromises();
 	});
 
 	it("puts a name in the confirmation as text and in the toast escaped", async () => {
@@ -1688,10 +1885,6 @@ describe("Macros AdminTab, hand over", () => {
 			expect(b.exists()).toBe(true);
 			expect(b.text()).toBe("Hand over");
 		}
-		// It is a button on the row, like every other action.
-		expect(handoverButton(w).attributes("aria-label")).toBe(
-			"Hand over Macro a, owned by Asha Rao (asha@example.test)"
-		);
 	});
 
 	it("opens the hand-over dialog for the row, and sends nothing itself", async () => {
