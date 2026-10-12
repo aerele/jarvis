@@ -6,7 +6,7 @@ that value already exists (``exact``), has near-matches worth reusing
 (``candidates``), is genuinely absent (``missing``), or cannot be checked
 because the user lacks read on the target (``unchecked``). It only searches; the
 agent decides whether a candidate is really the same entity and creates the
-``missing`` ones (batched via create_docs). See jarvis-persona AGENTS.md.
+``missing`` ones (batched via create_doc(docs=[...])). See jarvis-persona AGENTS.md.
 """
 
 import frappe

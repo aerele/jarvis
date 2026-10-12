@@ -80,7 +80,7 @@ class TestToolContract(FrappeTestCase):
 				tc.build_contract()
 
 	def test_generation_fails_closed_on_an_unreasoned_exception(self):
-		with patch.dict(tc.BACKEND_ONLY, {"create_docs": "  "}, clear=False):
+		with patch.dict(tc.BACKEND_ONLY, {"create_doc": "  "}, clear=False):
 			with self.assertRaises(ValueError):
 				tc.build_contract()
 

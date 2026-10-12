@@ -9,10 +9,8 @@ the empty list (the h400jb1fdk File Box incident: ``get_doc`` seq 16 and
 ``api._parse_args`` now drops a batch key whose value is ``[]``/``""``, but
 only for a "dual-form" tool - one whose registry-accepted params carry BOTH a
 batch key and ``doctype`` (the single-record form). That derivation is what
-naturally excludes ``create_docs`` (batch-only, no ``doctype`` param - keeps
-its own clear "docs must be a non-empty list" error) and ``get_my_access``
-(``docs`` is a query list of {doctype, name} pairs to check access on, not a
-batch of writes - also no ``doctype`` param).
+naturally excludes ``get_my_access`` (``docs`` is a query list of {doctype, name}
+pairs to check access on, not a batch of writes, and it has no ``doctype`` param).
 """
 
 from __future__ import annotations
@@ -25,10 +23,8 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import pending_confirm
 from jarvis.chat.actions_api import confirm_tool
-from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests._pending_action_helpers import draft_doctype
 from jarvis.tests._transport_helpers import provision_legacy_site
-from jarvis.tools.create_docs import create_docs
 
 CONV = "Jarvis Conversation"
 
@@ -60,7 +56,7 @@ class TestDualFormToolsContract(FrappeTestCase):
 			name for name, params in api._ACCEPTED_PARAMS.items() if params.intersection(api._BATCH_KEYS)
 		}
 		exempt = batch_key_tools - api._DUAL_FORM_TOOLS
-		self.assertEqual(exempt, {"create_docs", "get_my_access"})
+		self.assertEqual(exempt, {"get_my_access"})
 
 	def test_the_nineteen_known_dual_form_tools(self):
 		# Locks the derived set itself - a tool silently dropping out (e.g. a
@@ -133,10 +129,6 @@ class TestParseArgsNormalisation(FrappeTestCase):
 		out = api._parse_args({"method": "frappe.ping", "names": []}, "run_method")
 		self.assertIn("names", out)
 
-	def test_create_docs_docs_is_never_dropped_batch_only_exemption(self):
-		out = api._parse_args({"docs": []}, "create_docs")
-		self.assertIn("docs", out)
-
 	def test_get_my_access_docs_is_never_dropped_query_list_exemption(self):
 		out = api._parse_args({"docs": []}, "get_my_access")
 		self.assertIn("docs", out)
@@ -152,19 +144,13 @@ class TestParseArgsNormalisation(FrappeTestCase):
 
 
 class TestExemptToolsUnchanged(FrappeTestCase):
-	"""create_docs(docs=[]) and get_my_access(docs=[]) behave exactly as
-	before P0d - both are query/batch-only shapes with no single form to
-	normalise toward."""
+	"""get_my_access(docs=[]) behaves exactly as before P0d: a query-only shape
+	with no single form to normalise toward."""
 
-	def test_create_docs_with_empty_docs_keeps_create_docs_own_clear_error(self):
-		with self.assertRaises(InvalidArgumentError) as ctx:
-			create_docs(docs=[])
-		self.assertIn("docs must be a non-empty list", str(ctx.exception))
-
-	def test_create_docs_via_run_tool_bounces_at_park_with_the_same_clear_error(self):
+	def test_the_retired_batch_only_shim_is_not_a_tool(self):
 		r = api._run_tool("create_docs", {"docs": []})
 		self.assertFalse(r["ok"])
-		self.assertIn("docs must be a non-empty list", r["error"]["message"])
+		self.assertEqual(r["error"]["code"], "ToolNotFoundError")
 
 	def test_get_my_access_with_empty_docs_runs_normally_via_run_tool(self):
 		# docs=[] is a benign "nothing to check" query, not an error - and is

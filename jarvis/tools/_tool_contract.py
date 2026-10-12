@@ -53,14 +53,7 @@ CONTRACT_VERSION = 1
 # that is no longer in the registry is a hard error (see ``build_contract``), and
 # an entry that has been given a descriptor after all fails the PLUGIN's contract
 # test — so neither half of a resolved exception can be forgotten.
-BACKEND_ONLY: dict[str, str] = {
-	"create_docs": (
-		"Deprecated compat shim for already-shipped plugin bundles that still advertise "
-		"jarvis__create_docs; bulk create is create_doc(docs=[...]) now. Re-adding a descriptor "
-		"would resurrect the retired surface. Delete the module (and this entry) once no "
-		"deployed bundle references it."
-	),
-}
+BACKEND_ONLY: dict[str, str] = {}
 
 _COMMENT: tuple[str, ...] = (
 	"GENERATED FILE — do not hand-edit. Single source of truth for the Jarvis tool name set.",

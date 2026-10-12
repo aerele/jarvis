@@ -200,12 +200,12 @@ def _add_warning(card: dict, preview) -> None:
 def _card_of(tool: str, args: dict, preview) -> dict | None:
 	would = preview.get("would") if isinstance(preview, dict) else None
 	full = _is_sensitive(preview)
-	if tool in ("create_doc", "create_docs", "update_doc"):
+	if tool in ("create_doc", "update_doc"):
 		# Every value the card reads from the call is read as the write stores it.
 		args = _stored_args(tool, args)
 	bulk_key, bulk_items = _bulk(args)
-	if tool in ("create_doc", "create_docs"):
-		if bulk_key == "docs" or tool == "create_docs":
+	if tool == "create_doc":
+		if bulk_key == "docs":
 			return _batch_create_card(args, would, full)
 		return _create_card(args, would, full)
 	if tool == "update_doc" and not bulk_key:
@@ -400,7 +400,7 @@ def _stored_args(tool: str, args: dict) -> dict:
 			return values
 
 	out = dict(args)
-	if tool in ("create_doc", "create_docs"):
+	if tool == "create_doc":
 		if isinstance(out.get("values"), dict):
 			out["values"] = stored(out.get("doctype"), out["values"])
 		if isinstance(out.get("docs"), list):

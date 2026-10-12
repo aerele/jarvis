@@ -315,7 +315,7 @@ class TestArmedSkipGate(FrappeTestCase):
 		conv = self._armed_conv()
 		with patch("jarvis.api.dispatch", return_value={"ok": True}) as disp:
 			r = api._run_tool(
-				"create_docs",
+				"create_doc",
 				{"docs": [{"doctype": "ToDo", "values": {"description": "b1"}}]},
 				conversation=conv,
 			)
@@ -328,7 +328,7 @@ class TestArmedSkipGate(FrappeTestCase):
 		conv = self._armed_conv()
 		docs = [{"doctype": "ToDo", "values": {"description": f"b{i}"}} for i in range(_MAX_BATCH + 1)]
 		with patch("jarvis.api.dispatch") as disp:
-			r = api._run_tool("create_docs", {"docs": docs}, conversation=conv)
+			r = api._run_tool("create_doc", {"docs": docs}, conversation=conv)
 		self.assertFalse(r["ok"], "an over-size batch must bounce, even when armed")
 		self.assertEqual(r["error"]["code"], "InvalidArgumentError")
 		self.assertFalse(disp.called, "the F16 cap bounces before dispatch, armed or not")
