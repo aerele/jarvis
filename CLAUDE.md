@@ -5,10 +5,13 @@ This repository runs a strict team workflow. The order is fixed:
 PLAN → BUILD → CODE REVIEW → FLOW REVIEW → GREEN → COMMIT → PR
 
 1. **No code without an approved plan.** Every task starts with the `planner`
-   skill (team leader, Fable). Plans live in `.claude/workflow/plans/` and must
-   read `STATUS: APPROVED` before implementation begins.
-2. **Implementation follows the `developer` skill.** Tasks are delegated by the
-   plan's weight column: Heavy → lead, Medium → dev-sonnet, Light → dev-haiku.
+   skill. Planning is done by Opus 5.5 at high effort: the planner and every
+   agent it dispatches. Plans live in `.claude/workflow/plans/` and must read
+   `STATUS: APPROVED` before implementation begins.
+2. **Implementation follows the `developer` skill**, and starts only once the
+   plan is approved. Every task is built by the latest Sonnet at high effort,
+   whatever its weight. A task that cannot be got right that way goes back to
+   planning; it is not handed to a different model.
 3. **No `git commit` until the `/reviewer` skill (Opus, adversarial) has written
    `VERDICT: GREEN`** in BOTH `.claude/workflow/reviews/latest-code.md` and
    `.claude/workflow/reviews/latest-flow.md` for the current change set.
