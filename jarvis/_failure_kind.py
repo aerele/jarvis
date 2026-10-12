@@ -131,11 +131,15 @@ def bad_date(exc: BaseException) -> dict | None:
 def too_slow(exc: BaseException) -> bool:
 	"""Whether ``exc`` is the database stopping a statement at its time limit
 	(MariaDB error 1969), on the exception itself or the driver error it wraps."""
+	# Only the driver's own error counts: ``KeyError(1969)`` from a dict keyed by
+	# year carries the same args. pymysql and mysqlclient both raise 1969 as
+	# OperationalError (any server errno >= 1000 they do not map by name).
+	database_errors = (frappe.db.OperationalError, frappe.db.InternalError)
 	for candidate in (exc, exc.__cause__):
 		# Frappe 15's helper reads args[0] unguarded, and a bare ``raise
 		# frappe.PermissionError`` (has_permission, only_for) has no args.
 		if (
-			candidate is not None
+			isinstance(candidate, database_errors)
 			and getattr(candidate, "args", None)
 			and frappe.db.is_statement_timeout(candidate)
 		):

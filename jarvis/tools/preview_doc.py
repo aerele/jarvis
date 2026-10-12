@@ -8,6 +8,7 @@ supplier with no linked Address) BEFORE creating.
 
 import frappe
 
+from jarvis import _failure_kind
 from jarvis.exceptions import PreviewSandboxLost
 from jarvis.tools._preview_sandbox import preview_sandbox
 from jarvis.tools._write_risk import check
@@ -84,6 +85,10 @@ def preview_doc(doctype: str, values: dict) -> dict:
 		# cleanly. Propagates to the tool-layer refusal.
 		raise
 	except Exception as e:
+		if _failure_kind.too_slow(e):
+			# Not "this document is invalid" either: the dry run was cut at the
+			# statement time limit (#707 B3).
+			raise
 		frappe.clear_messages()
 		return {"valid": False, "error": _error_text(e)}
 	# Outside the try: a summarization bug must never mislabel a document
