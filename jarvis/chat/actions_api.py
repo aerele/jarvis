@@ -535,7 +535,8 @@ def apply_action(action: dict | str | None = None) -> dict:
 		hidden = _write_risk.take_refusal()
 		if hidden is not None and not isinstance(e, api.WriteRefusedError):
 			e = hidden
-		envelope = api._translate_write_error(e, mark, doctype=doctype)
+		# A human Apply is a write: a statement limit is not "narrow the question".
+		envelope = api._translate_write_error(e, mark, doctype=doctype, is_write=True)
 		if envelope is None:
 			# Unexpected - audit + re-raise so a real bug still surfaces as a 500
 			# (never enveloped, never leaks a traceback to the client).

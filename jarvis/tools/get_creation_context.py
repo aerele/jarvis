@@ -16,6 +16,7 @@ it. See jarvis-persona AGENTS.md for the create flow.
 
 import frappe
 
+from jarvis import _failure_kind
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 
 # Layout / no-value fieldtypes - never in the field map or record values.
@@ -355,7 +356,9 @@ def _resolve_link_field(meta, value):
 			try:
 				if frappe.db.exists(df.options, value):
 					return df.fieldname
-			except Exception:
+			except Exception as e:
+				if _failure_kind.too_slow(e):
+					raise  # cut at the time limit: not "no such record" (#707 B3)
 				continue
 	return None
 
@@ -411,6 +414,8 @@ def _facets(doctype, meta) -> dict:
 			vals = [r.get(f) for r in rows if r.get(f) not in (None, "")]
 			if vals:
 				out[f] = vals
-		except Exception:
+		except Exception as e:
+			if _failure_kind.too_slow(e):
+				raise  # cut at the time limit: not "no values" (#707 B3)
 			continue
 	return out
