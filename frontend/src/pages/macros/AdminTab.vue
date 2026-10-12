@@ -3,7 +3,6 @@
 		ref="rootEl"
 		class="flex h-full flex-col overflow-hidden"
 		@keydown.capture="usedKeyboard(true)"
-		@pointerdown.capture="usedKeyboard(false)"
 	>
 		<LayoutHeader>
 			<template #left-header>
@@ -138,7 +137,7 @@
 						label="Try again"
 						iconLeft="refresh-cw"
 						:loading="loading"
-						@click="loadKeepingFocus('reset')"
+						@click="loadKeepingFocus('reset', $event)"
 					/>
 				</div>
 
@@ -182,7 +181,7 @@
 							size="sm"
 							label="Try again"
 							:loading="loading"
-							@click="loadKeepingFocus('keep')"
+							@click="loadKeepingFocus('keep', $event)"
 						/>
 					</div>
 
@@ -706,14 +705,27 @@ async function loadOwners() {
 // control here starts goes through `loadKeepingFocus`, which puts focus back where
 // it was once the load has answered.
 //
-// Only for someone using the keyboard. A click focuses a button too, but putting
-// focus back after a click opens that button's tooltip with nothing to close it,
-// and in a text box it raises a phone's keyboard over the list. And never while a
-// dialog is open over the tab, or when the user has moved focus themselves.
+// Only for a press made without a pointer. A mouse click focuses a button too, but
+// putting focus back after one opens that button's tooltip with nothing to close
+// it, and in a text box it raises a phone's keyboard over the list. And never while
+// a dialog is open over the tab, or when the user has moved focus themselves.
+//
+// Which it was is read off the click: one that comes from a key, or from assistive
+// technology pressing the button, counts no pointer clicks (`detail` 0). The typed
+// search has no click, so it goes by the last thing used in the tab.
+//
+// A pointer pressed anywhere on the page counts, not only in the tab: the sidebar
+// and the page header are outside it, and a click there while a load runs means
+// the user has gone elsewhere just the same.
 let keyboard = false;
+let pointerUses = 0;
 function usedKeyboard(yes) {
 	keyboard = yes;
+	if (!yes) pointerUses += 1;
 }
+const onPagePointer = () => usedKeyboard(false);
+const withoutPointer = (event) =>
+	event && typeof event.detail === "number" ? event.detail === 0 : keyboard;
 function focusLost() {
 	const el = document.activeElement;
 	return !el || el === document.body;
@@ -726,13 +738,16 @@ function dialogOpen() {
 		!!document.querySelector('[role="alertdialog"]')
 	);
 }
+// `event` is the click that started the load (none for the typed search).
 // `after(lost)` picks where focus goes, given the element that had it (which may
 // be gone or disabled by now); the default is that element, else the list.
-async function loadKeepingFocus(mode, after) {
+async function loadKeepingFocus(mode, event, after) {
 	const at = document.activeElement;
-	const mine = keyboard && !!rootEl.value && rootEl.value.contains(at);
+	const mine = withoutPointer(event) && !!rootEl.value && rootEl.value.contains(at);
+	const pointerBefore = pointerUses;
 	await load(mode);
-	if (!mine) return;
+	// A pointer used while it loaded: the user is somewhere else now.
+	if (!mine || pointerUses !== pointerBefore) return;
 	await nextTick();
 	if (!focusLost() || dialogOpen() || !rootEl.value) return;
 	const usable = (el) => !!el && el.isConnected && !el.disabled;
@@ -741,16 +756,16 @@ async function loadKeepingFocus(mode, after) {
 }
 const searchBox = () => rootEl.value && rootEl.value.querySelector(".jv-macro-admin-search input");
 
-function refresh() {
+function refresh(event) {
 	loadOwners();
-	return loadKeepingFocus("keep");
+	return loadKeepingFocus("keep", event);
 }
 
 // The next page. Focus goes to the first row it brought, so the next Tab carries on
 // down the list; when it brought none, or failed, it stays on the button.
-function loadMore() {
+function loadMore(event) {
 	const before = rows.value.length;
-	return loadKeepingFocus("more", () => {
+	return loadKeepingFocus("more", event, () => {
 		const opens = listEl.value ? listEl.value.querySelectorAll(".jv-macro-admin-open") : [];
 		return opens.length > before ? opens[before] : null;
 	});
@@ -778,10 +793,10 @@ function onSearch(value) {
 
 // Clear takes itself away (nothing is filtered any more): for a keyboard user
 // focus goes to the search box, the first of the controls it cleared.
-function clearFilters() {
+function clearFilters(event) {
 	search.value = "";
 	for (const k of Object.keys(filters)) filters[k] = "";
-	return loadKeepingFocus("reset", () => searchBox());
+	return loadKeepingFocus("reset", event, () => searchBox());
 }
 
 // ── cells (the same decisions the owner's Macros list makes) ─────────────────
@@ -928,14 +943,33 @@ const isMine = (row) => !!session.user && row.owner === session.user;
 
 // The hold dialog keeps a reason that was typed and not sent, for the macro it was
 // typed for. Once that macro is on hold (a hold can be made and still answer an
-// error) or is gone, the reason has served: the closed dialog is taken away, and
+// error), the reason has served: the closed dialog is taken away, and
 // the next one starts empty.
-function dropHoldDraft() {
-	if (holdOpen.value || !holding.value) return;
-	const fresh = rows.value.find((r) => r.name === holding.value.name);
-	if (!fresh || fresh.admin_hold) holding.value = null;
+//
+// Looked at when the dialog closes and whenever the list is read again, so a hold
+// first seen by a later Refresh counts too. Only a row that is listed AND on hold
+// ends the draft: one that is merely not on screen (a search, a filter, a later
+// page) may be neither held nor gone.
+function holdServed() {
+	if (holdOpen.value || !holding.value) return "";
+	const name = holding.value.name;
+	const fresh = rows.value.find((r) => r.name === name);
+	if (!fresh || !fresh.admin_hold) return "";
+	holding.value = null;
+	return name;
 }
-watch(holdOpen, dropHoldDraft);
+// The list was read again: the draft goes quietly. Focus is the business of
+// whatever started that read.
+watch(rows, holdServed);
+// The dialog closed. It gave focus back to the Hold button that opened it, which is
+// not there any more when the macro is on hold (the row shows Release): focus goes
+// to the row instead of being left on the page.
+watch(holdOpen, async () => {
+	const name = holdServed();
+	if (!name) return;
+	await nextTick();
+	if (focusLost() && !dialogOpen()) await focusRow(name);
+});
 
 function holdReason(row) {
 	return (row.admin_hold_reason || "").trim();
@@ -968,7 +1002,6 @@ async function onHeld({ name, message }) {
 			if (message) toast.error(escapeHtml(message));
 		}
 	}
-	dropHoldDraft();
 	await focusRow(name);
 }
 
@@ -1035,10 +1068,12 @@ async function act(key, name, fn) {
 }
 
 onMounted(() => {
+	document.addEventListener("pointerdown", onPagePointer, true);
 	load();
 	loadOwners();
 });
 onBeforeUnmount(() => {
+	document.removeEventListener("pointerdown", onPagePointer, true);
 	clearTimeout(searchTimer);
 	latest++; // an answer still on its way is nobody's now
 });
