@@ -45,13 +45,13 @@ class TestTheSet(FrappeTestCase):
 			with self.subTest(doctype=dt):
 				self.assertEqual(wr.risk_class(dt), "instructions")
 				self.assertEqual(wr.risk_class(dt.lower()), "instructions")
-				calls = {
-					"create_doc": {"doctype": dt, "values": {"x": 1}},
-					"create_docs": {"docs": [{"doctype": dt, "values": {"x": 1}}]},
-					"update_doc": {"doctype": dt, "name": "n", "changes": {"x": 1}},
-					"delete_doc": {"doctype": dt, "name": "n"},
-				}
-				for tool, args in calls.items():
+				calls = (
+					("create_doc", {"doctype": dt, "values": {"x": 1}}),
+					("create_doc", {"docs": [{"doctype": dt, "values": {"x": 1}}]}),
+					("update_doc", {"doctype": dt, "name": "n", "changes": {"x": 1}}),
+					("delete_doc", {"doctype": dt, "name": "n"}),
+				)
+				for tool, args in calls:
 					self.assertEqual(wr.check(tool, args), "sensitive", tool)
 		self.assertEqual(
 			wr.risk_line("update_doc", {"doctype": SKILL, "name": "n", "changes": {"instructions": "x"}}),
@@ -69,7 +69,7 @@ class TestWhatCountsAsAWrite(FrappeTestCase):
 			("add_tag", {"dt": "Jarvis Learned Pattern", "dn": "n", "tag": "t"}),
 			("create_doc", {"doctype": "ToDo", "values": {"parenttype": "Jarvis Custom Skill Share"}}),
 			(
-				"create_docs",
+				"create_doc",
 				{
 					"docs": [
 						{"doctype": "ToDo", "values": {"description": "plain"}},
@@ -140,7 +140,7 @@ class TestWhatCountsAsAWrite(FrappeTestCase):
 				{"doctype": SKILL, "updates": [{"name": "n", "changes": {"allow_approve_run": "1"}}]},
 			),
 			("create_doc", {"doctype": SKILL, "values": {"skill_name": "x", "allow_approve_run": True}}),
-			("create_docs", {"docs": [{"doctype": SKILL, "values": {"allow_approve_run": "Yes"}}]}),
+			("create_doc", {"docs": [{"doctype": SKILL, "values": {"allow_approve_run": "Yes"}}]}),
 			(
 				"run_method",
 				{

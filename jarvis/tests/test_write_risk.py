@@ -122,9 +122,8 @@ class TestRiskOf(FrappeTestCase):
 			{"doctype": "Custom Field", "values": {"dt": "ToDo"}},
 		]
 		self.assertEqual(wr.risk_of("create_doc", {"docs": docs}), "structure")
-		self.assertEqual(wr.risk_of("create_docs", {"docs": docs}), "structure")
 		self.assertEqual(
-			wr.risk_of("create_docs", {"docs": docs[1:]}), "structure", "a batch of one is a batch"
+			wr.risk_of("create_doc", {"docs": docs[1:]}), "structure", "a batch of one is a batch"
 		)
 		self.assertEqual(
 			wr.risk_of("update_doc", {"doctype": "Custom Field", "updates": [{"name": "a", "changes": {}}]}),

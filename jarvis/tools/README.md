@@ -161,7 +161,7 @@ Returns the live schema, not a stored copy:
 
 ## `preview` - dry-run on writes
 
-The create / update tools (`create_doc`, `create_docs`, `update_doc`; `api._PREVIEWABLE`)
+The create / update tools (`create_doc`, `update_doc`; `api._PREVIEWABLE`)
 are trial-run when they park: the operation runs through all DocType validations
 with **every DB write rolled back** - commits are neutralized for the duration and
 the work is undone via a savepoint, so even a tool that calls `frappe.db.commit()`
