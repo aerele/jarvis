@@ -18,11 +18,7 @@
     "repo copies are compared by it, because no CI job can see both repos."
   ],
   "contract_version": 1,
-<<<<<<< HEAD
-  "digest": "sha256:85099b6c782a178c1536ffd92fdb1d00c111a64c6d7cddb7fde5cd8a070f97b2",
-=======
-  "digest": "sha256:dd52d82b0e0c3edb46c435f610d6610c5eaabc94461b6a3cf562278a3afedeba",
->>>>>>> bad03d7 (chore(tools): remove the deprecated create_docs shim)
+  "digest": "sha256:c738a8130419f039a7d4b583398ad2288cc096c172c589bde72f2d94596fa159",
   "tools": [
     "add_comment",
     "add_tag",
